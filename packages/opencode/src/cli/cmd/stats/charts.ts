@@ -92,21 +92,27 @@ type RenderContext = {
 }
 
 export const palette: Record<ChartColor, string> = {
-  // 基础 ANSI 色由终端主题决定实际 RGB，避免深色专用色在浅色终端失去对比度。
-  // axis/title/white 使用终端默认前景，确保正文对比度由用户主题负责。
+  // R6 前景色契约：采用终端语义 ANSI 槽位，明暗由终端主题决定。
+  // bright magenta/cyan 承载标题与辅助层级，避免历史固定 RGB 在浅色终端失去对比。
+  // axis/title/white 仍使用终端默认前景，确保正文对比度由用户主题负责。
   axis: "\x1b[39m",
   muted: "\x1b[2;39m",
-  title: "\x1b[39m",
-  // 其余语义色只选择 ANSI 色槽，不携带任何固定 RGB 或背景通道。
-  subtitle: "\x1b[36m",
-  blue: "\x1b[34m",
-  cyan: "\x1b[36m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  orange: "\x1b[93m",
-  purple: "\x1b[35m",
-  pink: "\x1b[95m",
-  red: "\x1b[31m",
+  // title 使用 bright magenta（95m），复用 OpenCode system theme accent 语义。
+  title: "\x1b[95m",
+  // subtitle 使用 bright cyan（96m），对应 primary/info。
+  subtitle: "\x1b[96m",
+  // 系列色使用 bright 槽位，避免普通 ANSI 在深色 profile 中过暗。
+  blue: "\x1b[94m",
+  cyan: "\x1b[96m",
+  green: "\x1b[92m",
+  yellow: "\x1b[93m",
+  // orange 用 normal yellow（33m）作为次级 amber，与 bright warning（93m）区分。
+  orange: "\x1b[33m",
+  // purple 用 bright magenta（95m）对应 accent/forecast；pink 用 normal magenta（35m）对照。
+  purple: "\x1b[95m",
+  pink: "\x1b[35m",
+  // red 用 bright red（91m）对应 error/danger。
+  red: "\x1b[91m",
   white: "\x1b[39m",
   // 网格只提供空间参照，不承载唯一数据，因此可以使用 dim 默认前景。
   grid: "\x1b[2;39m",
@@ -416,7 +422,11 @@ class ChartCanvas {
       for (const cell of row) {
         if (ctx.color && cell.style !== active) {
           active = cell.style
-          parts.push(active ? `${active.bold ? BOLD : ""}${ctx.palette[active.color]}` : TEXT_RESET)
+          // 先清除前一 style 的 dim/bold/foreground 状态，避免 grid 的 \x1b[2;39m
+          // 泄漏到数据线：foreground 色码（如 34m）不会自动清除 SGR dim（2）。
+          // TEXT_RESET（22m+39m）只恢复 intensity/foreground，不触碰 background；
+          // background 继续由 panel 的 49m 边界负责。
+          parts.push(active ? `${TEXT_RESET}${active.bold ? BOLD : ""}${ctx.palette[active.color]}` : TEXT_RESET)
         }
         parts.push(cell.char)
       }

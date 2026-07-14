@@ -3,7 +3,7 @@ import { SessionID } from "../../src/session/schema"
 import type { InputComponentTotals, StatsReport, TokenTotals, UsageTotals } from "../../src/cli/cmd/stats/data"
 import { buildForecast, renderInsights } from "../../src/cli/cmd/stats/insights"
 import { renderBreakdown, renderDashboard, renderModels, renderProviders, renderSessions, renderTimeline } from "../../src/cli/cmd/stats/render"
-import { fitVisible, stripAnsi, truncateVisible, visibleLength } from "../../src/cli/cmd/stats/charts"
+import { fitVisible, paint, renderContext, renderRoundedLineChart, stripAnsi, truncateVisible, useColor, visibleLength } from "../../src/cli/cmd/stats/charts"
 
 const day = 86_400_000
 const start = new Date(2026, 3, 27).getTime()
@@ -479,35 +479,36 @@ describe("stats render width", () => {
       const colored = renderBreakdown(report(), { color: "always", by: "provider" })
       const trend = colored.slice(colored.indexOf("Cost trend"), colored.indexOf("Provider economics"))
       // 图下实体名是折线的直接图例，必须复用画布中的稳定系列色。
-      expect(trend).toContain("\x1b[34mDaXiao Codex")
-      expect(trend).toContain("\x1b[32m本地提供商")
+      // R6 palette: blue=94m, green=92m（bright 槽位避免深色 profile 过暗）。
+      expect(trend).toContain("\x1b[94mDaXiao Codex")
+      expect(trend).toContain("\x1b[92m本地提供商")
 
       const economics = colored.slice(colored.indexOf("Provider economics"), colored.indexOf("Model portfolio by provider"))
       const firstEconomicsRow = economics.split("\n").find((line) => stripAnsi(line).trimStart().startsWith("DaXiao Codex")) ?? ""
-      expect(firstEconomicsRow).toContain("\x1b[34mDaXiao Codex")
+      expect(firstEconomicsRow).toContain("\x1b[94mDaXiao Codex")
 
       const capacity = colored.slice(colored.indexOf("Capacity & reliability"))
       const firstCapacityRow = capacity.split("\n").find((line) => stripAnsi(line).trimStart().startsWith("DaXiao Codex")) ?? ""
       // 同一行的实体名和 recent-cost sparkline 都应与对应主折线保持同色。
-      expect(firstCapacityRow.match(/\x1b\[34m/g)?.length).toBeGreaterThanOrEqual(2)
+      expect(firstCapacityRow.match(/\x1b\[94m/g)?.length).toBeGreaterThanOrEqual(2)
 
       const tools = renderBreakdown(report(), { color: "always", by: "tool" })
       const toolTrend = tools.slice(tools.indexOf("Estimated context trend"), tools.indexOf("Tool footprint"))
-      expect(toolTrend).toContain("\x1b[34mapply_patch")
-      expect(toolTrend).toContain("\x1b[32mbash")
+      expect(toolTrend).toContain("\x1b[94mapply_patch")
+      expect(toolTrend).toContain("\x1b[92mbash")
 
       const project = renderBreakdown(report(), { color: "always", by: "project" })
       const projectPortfolio = project.slice(project.indexOf("Project portfolio"), project.indexOf("Runtime mix"))
       // Project portfolio 是自定义卡片而非通用 table，也必须延续该项目在主趋势中的身份色。
-      expect(projectPortfolio).toContain("\x1b[34m本地项目")
+      expect(projectPortfolio).toContain("\x1b[94m本地项目")
 
       const timeline = renderTimeline(report(), { color: "always" })
       const timelineModels = timeline.slice(timeline.indexOf("Models"), timeline.indexOf("Providers"))
       const timelineProviders = timeline.slice(timeline.indexOf("Providers"))
       // Timeline 的短趋势与实体名构成同一直接图例，不能只给 sparkline 着色而保留白色名称。
-      expect(timelineModels).toContain("\x1b[34mclaude-opus-4-6")
-      expect(timelineModels).toContain("\x1b[32mgpt-5.5")
-      expect(timelineProviders).toContain("\x1b[34mDaXiao Codex")
+      expect(timelineModels).toContain("\x1b[94mclaude-opus-4-6")
+      expect(timelineModels).toContain("\x1b[92mgpt-5.5")
+      expect(timelineProviders).toContain("\x1b[94mDaXiao Codex")
       const topDays = timeline.slice(timeline.indexOf("Top active days"), timeline.indexOf("Entity trends"))
       // 日期排行没有跨 section 的系列身份，不能仅因复用 table primitive 就被循环染成分类色。
       expect(topDays).not.toMatch(/\x1b\[(?:34|32|33|35|95|36|93|31)m\d{2}-\d{2}/)
@@ -518,8 +519,8 @@ describe("stats render width", () => {
       // 缺失趋势只能隐藏该线，不能让后续实体在图例与表格之间重新编号换色。
       const partialProvider = renderBreakdown(partial, { color: "always", by: "provider" })
       const partialTool = renderBreakdown(partial, { color: "always", by: "tool" })
-      expect(partialProvider.slice(partialProvider.indexOf("Cost trend"), partialProvider.indexOf("Provider economics"))).toContain("\x1b[32m本地提供商")
-      expect(partialTool.slice(partialTool.indexOf("Estimated context trend"), partialTool.indexOf("Tool footprint"))).toContain("\x1b[32mbash")
+      expect(partialProvider.slice(partialProvider.indexOf("Cost trend"), partialProvider.indexOf("Provider economics"))).toContain("\x1b[92m本地提供商")
+      expect(partialTool.slice(partialTool.indexOf("Estimated context trend"), partialTool.indexOf("Tool footprint"))).toContain("\x1b[92mbash")
 
       // 颜色仅增加编码；去色后文本、间距和数值必须与 color=never 完全相同。
       expect(stripAnsi(colored)).toBe(renderBreakdown(report(), { color: "never", by: "provider" }))
@@ -560,12 +561,13 @@ describe("stats render width", () => {
       const colored = renderBreakdown(input, { color: "always", by: "provider", limit: 2 })
       const plain = renderBreakdown(input, { color: "never", by: "provider", limit: 2 })
       // 红/橙同时带文本记号，告警不能在 NO_COLOR 或低辨色终端中消失。
-      expect(colored).toContain("\x1b[31m$1000!")
-      expect(colored).toContain("\x1b[93m100.0%^")
+      // R6 palette: red=91m, orange=33m（次级 amber，与 bright warning 93m 区分）。
+      expect(colored).toContain("\x1b[91m$1000!")
+      expect(colored).toContain("\x1b[33m100.0%^")
       expect(plain).toContain("! >=3σ")
       expect(plain).toContain("^ >=2σ")
       // 高缓存是健康信号，数值较大不能被通用“高值异常”规则误判为风险。
-      expect(colored).toContain("\x1b[32m96.0%")
+      expect(colored).toContain("\x1b[92m96.0%")
       expect(stripAnsi(colored)).toBe(plain)
     })
   })
@@ -687,9 +689,11 @@ describe("stats render width", () => {
       expect(widths[0]).toBeGreaterThan(20)
 
       // 第二行的均分数据必须在 bar 中呈现全部五类；颜色来自终端基础前景而非背景块。
-      for (const ansi of [34, 32, 35, 33, 95]) expect(composition).toMatch(new RegExp(`\\x1b\\[${ansi}m█`))
-      // 1 / 1,000,000 的 reasoning 仍保留精确值，但不能为了“可见”伪造一个比例格。
-      expect(bars[0]).not.toContain("\x1b[35m█")
+      // R6 palette: blue=94, green=92, purple=95, yellow=93, pink=35。
+      for (const ansi of [94, 92, 95, 93, 35]) expect(composition).toMatch(new RegExp(`\\x1b\\[${ansi}m█`))
+      // 1 / 1,000,000 的 reasoning 仍保留精确值，但不能为了"可见"伪造一个比例格。
+      // R6 purple=95m；reasoning 用 purple，但 1 token 不应形成可见段。
+      expect(bars[0]).not.toContain("\x1b[95m█")
       expect(stripAnsi(composition)).toContain("reasoning 1 0.0%")
       expect(stripAnsi(composition)).toContain("cache write 200 20.0%")
       expect(stripAnsi(composition)).toMatch(/zero-model\s+░{20,} 0%/)
@@ -880,7 +884,8 @@ describe("stats render width", () => {
       for (const metric of ["req share", "tokens/req", "cost/req", "calls/req", "cache", "output", "sessions"]) expect(efficiency).toContain(metric)
       const coloredEfficiency = colored.slice(colored.indexOf("Status efficiency"), colored.indexOf("Failure leaders within each dimension"))
       // Status 第一列使用结果语义色，而不是普通实体的 blue/green 系列轮换。
-      for (const [ansi, status] of [[32, "completed"], [31, "error"], [33, "aborted"], [34, "running"]] as const) expect(coloredEfficiency).toContain(`\x1b[${ansi}m${status}`)
+      // R6 palette: green=92, red=91, yellow=93, blue=94（bright 槽位）。
+      for (const [ansi, status] of [[92, "completed"], [91, "error"], [93, "aborted"], [94, "running"]] as const) expect(coloredEfficiency).toContain(`\x1b[${ansi}m${status}`)
       expect(stripAnsi(colored)).toBe(output)
 
       const leaders = output.slice(output.indexOf("Failure leaders within each dimension"))
@@ -897,7 +902,7 @@ describe("stats render width", () => {
     withColumns(120, () => {
       const output = renderTimeline(report(), { color: "always" })
       const plain = stripAnsi(output)
-      expect(output).toContain("\x1b[34m")
+      expect(output).toContain("\x1b[94m")
       expect(plain).toContain("Entity trends")
       expect(plain).toContain("Models")
       expect(plain).toContain("Providers")
@@ -1375,5 +1380,178 @@ describe("stats render width", () => {
         expect(output).not.toContain("…")
       }
     })
+  })
+
+  test("does not let grid dim state leak into series glyphs", () => {
+    // 网格使用 \x1b[2;39m（dim + 默认前景）；数据线只设置 foreground 色码。
+    // 如果 ChartCanvas.render() 在 style 切换时不先清除 dim，折线 glyph 会继承
+    // 网格的 dim 状态，导致用户在 macOS 深色模式看到"虚线后折线变暗"。
+    // 该测试把公开输出当作 SGR 状态机解析，断言 canvas 行中 dim 只出现在 grid 字符上。
+    withColumns(120, () => {
+      const chart = renderRoundedLineChart({
+        title: "dim leak probe",
+        series: [{
+          id: "a", label: "a", color: "blue",
+          points: [
+            { x: 0, y: 0 }, { x: 1, y: 8 }, { x: 2, y: 2 }, { x: 3, y: 6 },
+          ],
+        }],
+        color: "always",
+        width: 30,
+        height: 6,
+        points: false,
+        legend: false,
+      })
+
+      // Y 轴标签通过 paint("muted") 输出，本身就该是 dim；只检查 canvas 行部分。
+      // 每行格式为 `${yAxisLabel} ${canvasLine}`，canvas 部分从 TEXT_RESET 后的空格之后开始。
+      const canvasLines = chart.slice(1, -1).map((line) => {
+        // Y 轴标签以 TEXT_RESET (\x1b[22m\x1b[39m) 结尾，后跟一个空格，然后是 canvas 内容。
+        const resetIdx = line.indexOf("\x1b[22m\x1b[39m")
+        if (resetIdx === -1) return ""
+        return line.slice(resetIdx + 8)
+      })
+
+      // 解析 SGR 序列，跟踪每个可见字符输出时的 dim 状态。
+      let dim = false
+      let inEscape = false
+      let escapeBuf = ""
+      // grid 字符 ┆ 和 ┄ 可以是 dim；其他 canvas glyph 不能是 dim。
+      const gridChars = "┆┄"
+      const dimNonGridGlyphs: string[] = []
+      for (const line of canvasLines) {
+        dim = false
+        inEscape = false
+        escapeBuf = ""
+        for (const char of line) {
+          if (char === "\x1b") { inEscape = true; escapeBuf = char; continue }
+          if (inEscape) {
+            escapeBuf += char
+            if (char === "m") {
+              const params = escapeBuf.slice(2, -1).split(";").map(Number)
+              for (const p of params) {
+                if (p === 0) dim = false
+                else if (p === 2) dim = true
+                else if (p === 22) dim = false
+              }
+              inEscape = false; escapeBuf = ""
+            }
+            continue
+          }
+          if (char !== " " && char !== "\n" && !gridChars.includes(char) && dim) {
+            dimNonGridGlyphs.push(char)
+          }
+        }
+      }
+
+      // canvas 行中除 grid 字符外的任何 glyph 都不能处于 dim 状态。
+      expect(dimNonGridGlyphs).toEqual([])
+    })
+  })
+
+  test("emits the exact R6 semantic ANSI role contract", () => {
+    // R6 把前景色收敛为终端语义 ANSI 槽位：标题/主题用 bright magenta，
+    // 辅助用 bright cyan，系列用 bright blue/green/yellow 等，状态用 bright red。
+    // 这些 escape code 是 public --color always 输出契约，不是实现者可自由选择的。
+    // 通过公开 paint() seam 验证每个 role 的实际 escape code。
+    const ctx = renderContext("always")
+    // title 使用 bright magenta（95m），复用 OpenCode system theme accent 语义。
+    expect(paint("x", "title", ctx)).toContain("\x1b[95m")
+    // subtitle 使用 bright cyan（96m），对应 primary/info 语义。
+    expect(paint("x", "subtitle", ctx)).toContain("\x1b[96m")
+    // blue 使用 bright blue（94m），避免普通蓝在深色 profile 中过暗。
+    expect(paint("x", "blue", ctx)).toContain("\x1b[94m")
+    // cyan 使用 bright cyan（96m），对应 primary/highlight。
+    expect(paint("x", "cyan", ctx)).toContain("\x1b[96m")
+    // green 使用 bright green（92m），对应 success 语义。
+    expect(paint("x", "green", ctx)).toContain("\x1b[92m")
+    // yellow 使用 bright yellow（93m），对应 warning 语义。
+    expect(paint("x", "yellow", ctx)).toContain("\x1b[93m")
+    // orange 使用 normal yellow（33m），作为次级 amber 和 bright warning 保持可区分。
+    expect(paint("x", "orange", ctx)).toContain("\x1b[33m")
+    // purple 使用 bright magenta（95m），对应 accent/forecast。
+    expect(paint("x", "purple", ctx)).toContain("\x1b[95m")
+    // pink 使用 normal magenta（35m），作为次级 magenta 与 bright accent 对照。
+    expect(paint("x", "pink", ctx)).toContain("\x1b[35m")
+    // red 使用 bright red（91m），对应 error/danger。
+    expect(paint("x", "red", ctx)).toContain("\x1b[91m")
+    // axis/white 使用终端默认前景（39m），正文和精确值不依赖彩色。
+    expect(paint("x", "axis", ctx)).toContain("\x1b[39m")
+    expect(paint("x", "white", ctx)).toContain("\x1b[39m")
+    // muted/grid 使用 dim 默认前景（2;39m），只能表达低优先级结构。
+    expect(paint("x", "muted", ctx)).toContain("\x1b[2;39m")
+    expect(paint("x", "grid", ctx)).toContain("\x1b[2;39m")
+    // 只有 muted/grid 可以携带 dim；其他 role 都不能设置 SGR dim（2）。
+    for (const role of ["title", "subtitle", "blue", "cyan", "green", "yellow", "orange", "purple", "pink", "red", "axis", "white"] as const) {
+      expect(paint("x", role, ctx)).not.toMatch(/\x1b\[2(?:;|m)/)
+    }
+  })
+
+  test("keeps colored empty reports safe under the R6 foreground and background contract", () => {
+    // 新安装或严格筛选返回全空 report 时，彩色输出仍须遵守 R6 前景契约和背景安全。
+    // 现有空态测试只覆盖 color=never，无法检测空报告路径中的前景/背景回归。
+    withColumns(120, () => {
+      const input = emptyReport()
+      const outputs = [
+        renderDashboard(input, { color: "always" }),
+        ...(["model", "provider", "agent", "source", "project", "tool", "status"] as const).map((by) => renderBreakdown(input, { color: "always", by })),
+        renderTimeline(input, { color: "always" }),
+        renderSessions(input, { color: "always" }),
+        renderInsights(input, { color: "always" }),
+      ]
+      for (const output of outputs) {
+        // 空报告彩色输出不得包含固定 24-bit RGB 前景。
+        expect(output).not.toContain("\x1b[38;2;")
+        // 不得包含具体背景色（40-47/100-107/48;2/48;5）。
+        expect(concreteBackgroundAnsi(output)).toEqual([])
+        // stripAnsi 后的可见正文必须与 color=never 完全一致。
+        const plain = output.replace(/\x1b\[[0-9;]*m/g, "")
+        expect(plain).not.toContain("\x1b[")
+      }
+      // Dashboard 和 Insights 空报告的 stripAnsi 等价性。
+      expect(stripAnsi(renderDashboard(input, { color: "always" }))).toBe(renderDashboard(input, { color: "never" }))
+      expect(stripAnsi(renderInsights(input, { color: "always" }))).toBe(renderInsights(input, { color: "never" }))
+    })
+  })
+
+  test("respects color mode precedence with NO_COLOR truthy contract", () => {
+    // R6 保留当前 truthy NO_COLOR 语义：只有非空字符串在 auto 模式禁用颜色。
+    // 空字符串和未设置都不禁用 TTY 颜色。explicit always 始终开启，never 始终关闭。
+    const originalTTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+    const originalNoColor = process.env.NO_COLOR
+    try {
+      // auto + non-TTY → 纯文本。
+      Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
+      delete process.env.NO_COLOR
+      expect(useColor("auto")).toBe(false)
+
+      // auto + TTY + NO_COLOR 未设置 → 彩色。
+      Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+      delete process.env.NO_COLOR
+      expect(useColor("auto")).toBe(true)
+
+      // auto + TTY + NO_COLOR="" → 彩色（空字符串按 truthiness 等同未设置）。
+      process.env.NO_COLOR = ""
+      expect(useColor("auto")).toBe(true)
+
+      // auto + TTY + NO_COLOR="1" → 纯文本（非空字符串禁用）。
+      process.env.NO_COLOR = "1"
+      expect(useColor("auto")).toBe(false)
+
+      // explicit always 即使 NO_COLOR 非空也输出彩色。
+      process.env.NO_COLOR = "1"
+      expect(useColor("always")).toBe(true)
+
+      // explicit never 始终纯文本，不受 TTY/NO_COLOR 影响。
+      Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+      process.env.NO_COLOR = "1"
+      expect(useColor("never")).toBe(false)
+      delete process.env.NO_COLOR
+      expect(useColor("never")).toBe(false)
+    } finally {
+      if (originalTTY) Object.defineProperty(process.stdout, "isTTY", originalTTY)
+      if (originalNoColor === undefined) delete process.env.NO_COLOR
+      else process.env.NO_COLOR = originalNoColor
+    }
   })
 })
