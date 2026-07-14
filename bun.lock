@@ -570,7 +570,7 @@
         "@typescript/native-preview": "catalog:",
       },
     },
-    // 版本与 packages/opencode/package.json 保持一致，frozen install 依赖 bun.lock 同步
+    // frozen install 要求与 packages/opencode/package.json 的实际版本同步；已对齐时保留目标值，不回退到源分支版本。
     "packages/opencode": {
       "name": "opencode",
       "version": "1.19.17-smark",
