@@ -33,6 +33,29 @@ export const SessionGoalTable = sqliteTable(
     // true=允许 GOAL continuation 在 eligible 错误后继续。
     // 默认 false 保证升级后旧 GOAL 行为不变。
     continue_on_error: integer({ mode: "boolean" }).notNull().default(false),
+    // objective 代际：从 1 开始，仅当 trimmed objective 值真正改变时递增。
+    // 用于检测旧模型 turn 的 stale 终态写入和隔离旧 provider 请求的 usage 归属。
+    // status/reason/budget/continueOnError 变更不递增 generation，
+    // 保证 terminal/pause 后的 final usage 不丢失。
+    generation: integer().notNull().default(1),
+    // 当前 terminal 状态的理由（complete/blocked 时非空）。
+    // active/paused 时为 null。公开字段，通过 API/SDK/TUI 传播。
+    reason: text(),
+    // 待确认的 blocked 理由：模型提出 blocked 但尚未达到三轮阈值时暂存。
+    // 与 blocked_streak/blocked_last_turn_id 一起构成 blocked 连续审计。
+    // 不公开为 API 字段。
+    blocked_reason: text(),
+    // 连续 eligible Goal turns 中相同 trimmed reason 的有效 blocked 次数。
+    // 达到 3 时 modelTransition 才真正写 blocked status。
+    blocked_streak: integer().notNull().default(0),
+    // 最近一次有效 blocked attempt 的 eligible user MessageID。
+    // 防止同一 turn 重复调用伪造多次；用于校验前一个 eligible turn 连续性。
+    blocked_last_turn_id: text(),
+    // 产生当前 terminal 状态的 eligible user MessageID。
+    // model active recovery 校验它非 null 且与当前 turn 不同，
+    // 区分 model-produced terminal 和 user-produced terminal。
+    // 用户直接写入 terminal 时为 null。
+    terminal_turn_id: text(),
     ...Timestamps,
   },
   (table) => [index("session_goal_status_idx").on(table.session_id, table.status)],

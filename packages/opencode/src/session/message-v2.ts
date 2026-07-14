@@ -463,6 +463,10 @@ export const User = Schema.Struct({
   }),
   system: Schema.optional(Schema.String),
   tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
+  // [local-smark] Goal turn lineage：compaction replay/continue 等 technical user
+  // 消息通过此字段继承原始 canonical user 的 Goal turn ID，不产生新 eligible turn。
+  // 省略时以自身 ID 开始新 turn。模型不可通过工具参数写入此字段。
+  goalTurnID: Schema.optional(MessageID),
 }).annotate({ identifier: "UserMessage" })
 export type User = Types.DeepMutable<Schema.Schema.Type<typeof User>>
 

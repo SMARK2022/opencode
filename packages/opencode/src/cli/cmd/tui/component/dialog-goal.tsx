@@ -151,6 +151,12 @@ export function DialogGoalMenu(props: DialogGoalProps) {
         <text fg={theme.textMuted} wrapMode="none" overflow="hidden">
           {"Status: " + g.status + "  ·  Tokens: " + g.tokensUsed}
         </text>
+        {/* [local-smark] terminal 状态显示 reason，让用户了解终态化依据 */}
+        {g.reason ? (
+          <text fg={theme.textMuted} wrapMode="none" overflow="hidden">
+            {"Reason: " + Locale.truncate(g.reason, 68)}
+          </text>
+        ) : undefined}
       </box>
     )
   })

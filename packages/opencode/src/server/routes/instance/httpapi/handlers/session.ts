@@ -460,7 +460,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
 
     // goal set handler：创建或更新 goal
     // objective 缺省时仅更新 status/budget，要求已有 goal
-    // GoalError（校验失败）映射为 400，其他错误正常传播
+    // terminal status（complete/blocked）需要 reason
+    // [local-smark] active mutation 后 fork prompt loop 使 idle session 恢复执行
     const goalSet = Effect.fn("SessionHttpApi.goalSet")(function* (ctx: {
       params: { sessionID: SessionID }
       payload: typeof GoalSetPayload.Type
@@ -472,13 +473,27 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         tokenBudget: ctx.payload.tokenBudget,
         // [local-smark] 透传错误续跑策略到 domain service
         continueOnError: ctx.payload.continueOnError,
+        // [local-smark] terminal reason 透传到 domain service
+        reason: ctx.payload.reason,
       }).pipe(
-        // GoalError 的具体原因（空/超长/budget/无goal）透传到 wire 体 data.message，
+        // GoalError 的具体原因（空/超长/budget/无goal/reason）透传到 wire 体 data.message，
         // 让 TUI 能展示真实拒绝原因，而非通用 "Failed to update goal"
         Effect.catchTag("GoalError", (error) =>
           Effect.fail(new GoalApiError({ name: "GoalError", data: { message: error.message } })),
         ),
       )
+      // [local-smark] 成功的 active mutation 后，如果 session 已有 user message，
+      // fork prompt loop 使 idle session 恢复执行。busy session 由 RunState 去重，
+      // empty session（无 user message）由 runLoop 自然失败，不影响已持久化的 active Goal。
+      if (goal.status === "active") {
+        // [local-smark] busy session 由 RunState ensureRunning 去重；
+        // empty session（无 user message）的 runLoop defect 被 catchDefect 静默，
+        // 不影响已持久化的 active Goal，首条 prompt 自然启动 loop
+        yield* promptSvc.loop({ sessionID: ctx.params.sessionID }).pipe(
+          Effect.catchDefect(() => Effect.void),
+          Effect.forkIn(scope),
+        )
+      }
       return { goal }
     })
 

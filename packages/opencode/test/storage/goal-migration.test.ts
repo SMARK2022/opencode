@@ -76,3 +76,73 @@ describe("goal continue_on_error migration", () => {
     expect(row.time_updated).toBe(1)
   })
 })
+
+// [local-smark] session-goal-integrity migration 兼容性测试
+// 验证旧 session_goal 行在添加 generation/reason/blocked_audit 列后：
+// 1. 迁移不抛错
+// 2. 新列默认值正确（generation=1, blocked_streak=0, reason=null for active）
+// 3. 旧 terminal 行（complete/blocked）获得 legacy reason 兼容标记
+// 4. 原有字段不变
+describe("session goal integrity migration", () => {
+  test("migrates existing rows with correct defaults and legacy terminal reason", () => {
+    const sqlite = new Database(":memory:")
+    const db = drizzle({ client: sqlite })
+    const entries = migrations()
+    const target = "20260714083829_session-goal-integrity"
+    const index = entries.findIndex((entry) => entry.name === target)
+
+    expect(index).toBeGreaterThan(0)
+
+    // 只应用到新 migration 之前
+    migrate(db, entries.slice(0, index))
+
+    // 插入满足 FK 约束的 project 和 session
+    sqlite.run(
+      "INSERT INTO project (id, worktree, vcs, name, time_created, time_updated, sandboxes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ["proj_test", "/tmp/project", "git", "test", 1, 1, "[]"],
+    )
+    sqlite.run(
+      "INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ["ses_test", "proj_test", "test", "/tmp", "Test", "1.0.0", 1, 1],
+    )
+
+    // 插入 active 旧行（无 generation/reason 等新列）
+    sqlite.run(
+      "INSERT INTO session_goal (session_id, id, objective, status, token_budget, tokens_used, time_used_seconds, continue_on_error, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ["ses_active", "goal_1", "active objective", "active", 50000, 1000, 30, 0, 1, 1],
+    )
+    // 插入 complete 旧行
+    sqlite.run(
+      "INSERT INTO session_goal (session_id, id, objective, status, token_budget, tokens_used, time_used_seconds, continue_on_error, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ["ses_complete", "goal_2", "done objective", "complete", null, 500, 10, 0, 1, 1],
+    )
+
+    // 应用新 migration
+    expect(() => migrate(db, entries.slice(index))).not.toThrow()
+
+    // 验证 active 行：新列默认值
+    const activeRow = sqlite
+      .query("SELECT * FROM session_goal WHERE session_id = ?")
+      .get("ses_active") as any
+    expect(activeRow.generation).toBe(1)
+    expect(activeRow.reason).toBeNull()
+    expect(activeRow.blocked_reason).toBeNull()
+    expect(activeRow.blocked_streak).toBe(0)
+    expect(activeRow.blocked_last_turn_id).toBeNull()
+    expect(activeRow.terminal_turn_id).toBeNull()
+    // 原有字段不变
+    expect(activeRow.id).toBe("goal_1")
+    expect(activeRow.objective).toBe("active objective")
+    expect(activeRow.status).toBe("active")
+
+    // 验证 complete 行：legacy terminal reason 兼容标记
+    const completeRow = sqlite
+      .query("SELECT * FROM session_goal WHERE session_id = ?")
+      .get("ses_complete") as any
+    expect(completeRow.generation).toBe(1)
+    // 旧 terminal 行获得诚实的兼容标记，不伪造历史理由
+    expect(completeRow.reason).toBe("Legacy terminal transition (reason unavailable)")
+    expect(completeRow.terminal_turn_id).toBeNull()
+    expect(completeRow.status).toBe("complete")
+  })
+})

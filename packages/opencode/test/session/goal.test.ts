@@ -162,9 +162,9 @@ it.instance(
       const sessions = yield* SessionNs.Service
       const session = yield* sessions.create({})
 
-      yield* goalSvc.set(session.id, { objective: "original", tokenBudget: 50000 })
-      // 累加一些 usage
-      yield* goalSvc.accountUsage(session.id, 1000, 30)
+      const goal = yield* goalSvc.set(session.id, { objective: "original", tokenBudget: 50000 })
+      // 累加一些 usage（需要 expected goalID + generation）
+      yield* goalSvc.accountUsage(session.id, 1000, 30, { goalID: goal.id, generation: goal.generation })
 
       // 编辑 objective 不应重置 usage / budget / goal_id
       const updated = yield* goalSvc.set(session.id, { objective: "revised objective" })
@@ -203,28 +203,29 @@ it.instance(
       const sessions = yield* SessionNs.Service
       const session = yield* sessions.create({})
 
-      yield* goalSvc.set(session.id, { objective: "finish project", tokenBudget: 10_000 })
+      const goal = yield* goalSvc.set(session.id, { objective: "finish project", tokenBudget: 10_000 })
       // 模拟 goal 运行中累计用量
-      yield* goalSvc.accountUsage(session.id, 3000, 120)
-      // 模型标记 complete
-      yield* goalSvc.set(session.id, { status: "complete" })
+      yield* goalSvc.accountUsage(session.id, 3000, 120, { goalID: goal.id, generation: goal.generation })
+      // 模型标记 complete（terminal 状态需要 reason）
+      yield* goalSvc.set(session.id, { status: "complete", reason: "all done" })
 
-      // complete 后 accountUsage 不应计费（status !== "active"）
-      yield* goalSvc.accountUsage(session.id, 999, 99)
+      // [local-smark] complete 后同 generation 的 final usage 仍计入（不丢失）
+      yield* goalSvc.accountUsage(session.id, 999, 99, { goalID: goal.id, generation: goal.generation })
 
       const completed = yield* goalSvc.get(session.id)
       expect(Option.isSome(completed)).toBe(true)
       if (Option.isSome(completed)) {
         expect(completed.value.status).toBe("complete")
-        expect(completed.value.tokensUsed).toBe(3000)
+        // 3000 + 999 = 3999（terminal 后同 generation usage 不丢失）
+        expect(completed.value.tokensUsed).toBe(3999)
       }
 
       // 用户 Resume：complete → active
       const resumed = yield* goalSvc.set(session.id, { status: "active" })
       expect(resumed.status).toBe("active")
-      // 累计用量保留，budget 跨 resume 边界持续追踪
-      expect(resumed.tokensUsed).toBe(3000)
-      expect(resumed.timeUsedSeconds).toBe(120)
+      // 累计用量保留（3000 + 999 = 3999），budget 跨 resume 边界持续追踪
+      expect(resumed.tokensUsed).toBe(3999)
+      expect(resumed.timeUsedSeconds).toBe(219)
       expect(resumed.tokenBudget).toBe(10_000)
     }),
   { git: true },
@@ -253,26 +254,53 @@ it.instance(
   { git: true },
 )
 
+// [local-smark] accountUsage 使用 expected {goalID, generation} 做原子归属校验。
+// 同 generation 的 usage 无论 status 都计入；generation 不匹配则 no-op。
 it.instance(
-  "accountUsage only accumulates for active goals",
+  "accountUsage accumulates for matching goalID and generation",
   () =>
     Effect.gen(function* () {
       const goalSvc = yield* SessionGoal.Service
       const sessions = yield* SessionNs.Service
       const session = yield* sessions.create({})
 
-      yield* goalSvc.set(session.id, { objective: "active goal" })
-      yield* goalSvc.accountUsage(session.id, 500, 10)
-      yield* goalSvc.accountUsage(session.id, 300, 5)
+      const goal = yield* goalSvc.set(session.id, { objective: "active goal" })
+      const expected = { goalID: goal.id, generation: goal.generation }
+      yield* goalSvc.accountUsage(session.id, 500, 10, expected)
+      yield* goalSvc.accountUsage(session.id, 300, 5, expected)
 
-      // 暂停后计费不应累积——防止 paused goal 在后台静默增长 usage
+      // 暂停后同 generation 的 usage 仍计入——final usage 不丢失
       yield* goalSvc.set(session.id, { status: "paused" })
-      yield* goalSvc.accountUsage(session.id, 999, 99)
+      yield* goalSvc.accountUsage(session.id, 999, 99, expected)
 
       const result = yield* goalSvc.get(session.id)
       if (Option.isSome(result)) {
-        expect(result.value.tokensUsed).toBe(800)
-        expect(result.value.timeUsedSeconds).toBe(15)
+        // 500 + 300 + 999 = 1799
+        expect(result.value.tokensUsed).toBe(1799)
+        expect(result.value.timeUsedSeconds).toBe(114)
+      }
+    }),
+  { git: true },
+)
+
+it.instance(
+  "accountUsage skips when generation does not match",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      const goal = yield* goalSvc.set(session.id, { objective: "original" })
+      // 用户编辑 objective → generation 递增
+      yield* goalSvc.set(session.id, { objective: "revised" })
+      // 旧 generation 的 usage 不应计入新 generation
+      yield* goalSvc.accountUsage(session.id, 999, 99, { goalID: goal.id, generation: goal.generation })
+
+      const result = yield* goalSvc.get(session.id)
+      if (Option.isSome(result)) {
+        // generation 不匹配 → no-op，tokensUsed 保持 0
+        expect(result.value.tokensUsed).toBe(0)
       }
     }),
   { git: true },
@@ -287,7 +315,7 @@ it.instance(
       const session = yield* sessions.create({})
 
       // 不存在 goal 时计费不应报错，静默跳过
-      const result = yield* goalSvc.accountUsage(session.id, 500, 10).pipe(Effect.exit)
+      const result = yield* goalSvc.accountUsage(session.id, 500, 10, { goalID: "nonexistent", generation: 1 }).pipe(Effect.exit)
       expect(Exit.isSuccess(result)).toBe(true)
     }),
   { git: true },
@@ -354,8 +382,8 @@ it.instance(
       const sessions = yield* SessionNs.Service
       const session = yield* sessions.create({})
 
-      yield* goalSvc.set(session.id, { objective: "build the feature", tokenBudget: 50000 })
-      yield* goalSvc.accountUsage(session.id, 1234, 56)
+      const goal = yield* goalSvc.set(session.id, { objective: "build the feature", tokenBudget: 50000 })
+      yield* goalSvc.accountUsage(session.id, 1234, 56, { goalID: goal.id, generation: goal.generation })
 
       const result = yield* goalSvc.get(session.id)
       if (Option.isSome(result)) {
@@ -525,6 +553,415 @@ it.instance(
       // Resume 也不传 continueOnError
       const resumed = yield* goalSvc.set(session.id, { status: "active" })
       expect(resumed.continueOnError).toBe(true)
+    }),
+  { git: true },
+)
+
+// [local-smark] terminal status 必须带非空 reason——用户明确要求 block/complete 需要理由
+it.instance(
+  "set complete without reason is rejected",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      yield* goalSvc.set(session.id, { objective: "test objective" })
+      // complete 不带 reason 必须失败，不能直接写入 terminal 状态
+      const result = yield* goalSvc.set(session.id, { status: "complete" }).pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "set complete with reason persists reason",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      yield* goalSvc.set(session.id, { objective: "test objective" })
+      const completed = yield* goalSvc.set(session.id, { status: "complete", reason: "all tests pass" })
+      expect(completed.status).toBe("complete")
+      // reason 必须持久化到 Goal 对象，供 API/SDK/TUI 传播
+      expect(completed.reason).toBe("all tests pass")
+    }),
+  { git: true },
+)
+
+it.instance(
+  "set blocked without reason is rejected",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      yield* goalSvc.set(session.id, { objective: "test objective" })
+      const result = yield* goalSvc.set(session.id, { status: "blocked" }).pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "set complete with blank reason is rejected",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      yield* goalSvc.set(session.id, { objective: "test objective" })
+      // trim 后空白的 reason 等同于无 reason
+      const result = yield* goalSvc.set(session.id, { status: "complete", reason: "   " }).pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+    }),
+  { git: true },
+)
+
+// [local-smark] objective 代际：仅 trimmed objective 真正改变时递增 generation
+it.instance(
+  "objective edit increments generation",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      const goal = yield* goalSvc.set(session.id, { objective: "original" })
+      expect(goal.generation).toBe(1)
+
+      // 真正改变 objective → generation 递增
+      const updated = yield* goalSvc.set(session.id, { objective: "revised objective" })
+      expect(updated.generation).toBe(2)
+      expect(updated.objective).toBe("revised objective")
+    }),
+  { git: true },
+)
+
+it.instance(
+  "status-only update does not increment generation",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      yield* goalSvc.set(session.id, { objective: "test" })
+      // 仅改 status 不递增 generation——terminal/pause 不改变 objective 代际
+      const paused = yield* goalSvc.set(session.id, { status: "paused" })
+      expect(paused.generation).toBe(1)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "objective edit on terminal goal auto-activates",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      yield* goalSvc.set(session.id, { objective: "test", status: "complete", reason: "done" })
+      // terminal Goal 的 objective-only edit 自动回到 active
+      const updated = yield* goalSvc.set(session.id, { objective: "new work" })
+      expect(updated.status).toBe("active")
+      expect(updated.generation).toBe(2)
+      // reason 被清除
+      expect(updated.reason).toBeNull()
+    }),
+  { git: true },
+)
+
+// [local-smark] paused Goal 的 objective-only edit 必须保持 paused，
+// 不能自动激活（§8.2 合同：paused edit 保持 paused）
+it.instance(
+  "objective edit on paused goal preserves paused",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      yield* goalSvc.set(session.id, { objective: "test" })
+      yield* goalSvc.set(session.id, { status: "paused" })
+      // paused Goal 编辑 objective，不传 status → 保持 paused
+      const updated = yield* goalSvc.set(session.id, { objective: "revised" })
+      expect(updated.status).toBe("paused")
+      expect(updated.objective).toBe("revised")
+      expect(updated.generation).toBe(2)
+    }),
+  { git: true },
+)
+
+// [local-smark] modelTransition 行为测试：read gate、CAS、blocked streak、recovery
+// 这些测试通过 SessionGoal.Service 的公开 modelTransition 方法验证，
+// 不依赖 GoalTool 或 prompt 内部实现
+
+it.instance(
+  "modelTransition complete without read snapshot is rejected",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      yield* goalSvc.set(session.id, { objective: "test" })
+      // 使用错误的 goalID 模拟无 read snapshot
+      const result = yield* goalSvc
+        .modelTransition(session.id, {
+          snapshot: { goalID: "wrong-id", generation: 1, status: "active" },
+          turnID: "turn1",
+          userInitiated: true,
+          status: "complete",
+          reason: "done",
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "modelTransition complete with valid snapshot succeeds",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      const goal = yield* goalSvc.set(session.id, { objective: "test" })
+      const result = yield* goalSvc.modelTransition(session.id, {
+        snapshot: { goalID: goal.id, generation: goal.generation, status: "active" },
+        turnID: "turn1",
+        userInitiated: true,
+        status: "complete",
+        reason: "all tests pass",
+      })
+      expect(result.type).toBe("updated")
+      if (result.type === "updated") {
+        expect(result.goal.status).toBe("complete")
+        expect(result.goal.reason).toBe("all tests pass")
+      }
+    }),
+  { git: true },
+)
+
+it.instance(
+  "modelTransition stale generation is rejected",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      const goal = yield* goalSvc.set(session.id, { objective: "original" })
+      // 用户编辑 objective → generation 递增
+      yield* goalSvc.set(session.id, { objective: "revised" })
+      // 模型用旧 generation 的 snapshot 写 terminal → 必须失败
+      const result = yield* goalSvc
+        .modelTransition(session.id, {
+          snapshot: { goalID: goal.id, generation: goal.generation, status: "active" },
+          turnID: "turn1",
+          userInitiated: true,
+          status: "complete",
+          reason: "done",
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "modelTransition blocked requires three consecutive turns",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      const goal = yield* goalSvc.set(session.id, { objective: "test" })
+      const snap = { goalID: goal.id, generation: goal.generation, status: "active" as const }
+
+      // Turn 1: pending, attempt 1
+      const r1 = yield* goalSvc.modelTransition(session.id, {
+        snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "stuck on X",
+      })
+      expect(r1.type).toBe("blocked-pending")
+      if (r1.type === "blocked-pending") expect(r1.attempt).toBe(1)
+
+      // Turn 2: pending, attempt 2（连续，相同 reason）
+      const r2 = yield* goalSvc.modelTransition(session.id, {
+        snapshot: snap, turnID: "turn2", previousTurnID: "turn1", userInitiated: true,
+        status: "blocked", reason: "stuck on X",
+      })
+      expect(r2.type).toBe("blocked-pending")
+      if (r2.type === "blocked-pending") expect(r2.attempt).toBe(2)
+
+      // Turn 3: success，status 变为 blocked
+      const r3 = yield* goalSvc.modelTransition(session.id, {
+        snapshot: snap, turnID: "turn3", previousTurnID: "turn2", userInitiated: true,
+        status: "blocked", reason: "stuck on X",
+      })
+      expect(r3.type).toBe("updated")
+      if (r3.type === "updated") expect(r3.goal.status).toBe("blocked")
+    }),
+  { git: true },
+)
+
+it.instance(
+  "modelTransition same turn duplicate blocked does not increment streak",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      const goal = yield* goalSvc.set(session.id, { objective: "test" })
+      const snap = { goalID: goal.id, generation: goal.generation, status: "active" as const }
+
+      // Turn 1: attempt 1
+      const r1 = yield* goalSvc.modelTransition(session.id, {
+        snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "stuck",
+      })
+      if (r1.type === "blocked-pending") expect(r1.attempt).toBe(1)
+
+      // Same turn 1 again: still attempt 1，不增加
+      const r2 = yield* goalSvc.modelTransition(session.id, {
+        snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "stuck",
+      })
+      if (r2.type === "blocked-pending") expect(r2.attempt).toBe(1)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "modelTransition skipped turn resets streak",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      const goal = yield* goalSvc.set(session.id, { objective: "test" })
+      const snap = { goalID: goal.id, generation: goal.generation, status: "active" as const }
+
+      // Turn 1: attempt 1
+      yield* goalSvc.modelTransition(session.id, {
+        snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "stuck",
+      })
+
+      // Turn 3 (跳过 turn 2): previousTurnID 不匹配 → streak 重置为 1
+      const r = yield* goalSvc.modelTransition(session.id, {
+        snapshot: snap, turnID: "turn3", previousTurnID: "turn2", userInitiated: true,
+        status: "blocked", reason: "stuck",
+      })
+      if (r.type === "blocked-pending") expect(r.attempt).toBe(1)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "modelTransition active recovery from model terminal in later user turn",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      const goal = yield* goalSvc.set(session.id, { objective: "test" })
+      // 模型标记 complete
+      yield* goalSvc.modelTransition(session.id, {
+        snapshot: { goalID: goal.id, generation: goal.generation, status: "active" },
+        turnID: "turn1", userInitiated: true, status: "complete", reason: "done",
+      })
+
+      // 后续新真实用户 turn 恢复 active
+      const r = yield* goalSvc.modelTransition(session.id, {
+        snapshot: { goalID: goal.id, generation: goal.generation, status: "complete" },
+        turnID: "turn2", userInitiated: true, status: "active",
+      })
+      expect(r.type).toBe("updated")
+      if (r.type === "updated") expect(r.goal.status).toBe("active")
+    }),
+  { git: true },
+)
+
+it.instance(
+  "modelTransition active recovery same turn is rejected",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      const goal = yield* goalSvc.set(session.id, { objective: "test" })
+      yield* goalSvc.modelTransition(session.id, {
+        snapshot: { goalID: goal.id, generation: goal.generation, status: "active" },
+        turnID: "turn1", userInitiated: true, status: "complete", reason: "done",
+      })
+
+      // 同一 turn 尝试恢复 → 拒绝
+      const result = yield* goalSvc
+        .modelTransition(session.id, {
+          snapshot: { goalID: goal.id, generation: goal.generation, status: "complete" },
+          turnID: "turn1", userInitiated: true, status: "active",
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "modelTransition active recovery from paused is rejected",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      const goal = yield* goalSvc.set(session.id, { objective: "test" })
+      // 用户暂停
+      yield* goalSvc.set(session.id, { status: "paused" })
+
+      // 模型尝试恢复 paused → 拒绝
+      const result = yield* goalSvc
+        .modelTransition(session.id, {
+          snapshot: { goalID: goal.id, generation: goal.generation, status: "paused" },
+          turnID: "turn1", userInitiated: true, status: "active",
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "modelTransition active recovery from user-produced terminal is rejected",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      const goal = yield* goalSvc.set(session.id, { objective: "test" })
+      // 用户直接写入 terminal（terminal_turn_id 为 null）
+      yield* goalSvc.set(session.id, { status: "complete", reason: "user says done" })
+
+      // 模型尝试恢复 → 拒绝（不是 model-produced terminal）
+      const result = yield* goalSvc
+        .modelTransition(session.id, {
+          snapshot: { goalID: goal.id, generation: goal.generation, status: "complete" },
+          turnID: "turn1", userInitiated: true, status: "active",
+        })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
     }),
   { git: true },
 )

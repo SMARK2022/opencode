@@ -143,11 +143,13 @@ export const PermissionResponsePayload = Schema.Struct({
 // goal set/update payload：objective 缺省时仅更新 status/budget
 // tokenBudget: null = 清除预算，正数 = 设置预算，缺省 = 不改
 // [local-smark] continueOnError: 缺省 = 不改，true/false = 设置错误后续跑策略
+// reason: terminal status（complete/blocked）必填，active/paused 时忽略
 export const GoalSetPayload = Schema.Struct({
   objective: Schema.optional(Schema.String),
   status: Schema.optional(SessionGoal.Status),
   tokenBudget: Schema.optional(Schema.NullOr(Schema.Number)),
   continueOnError: Schema.optional(Schema.Boolean),
+  reason: Schema.optional(Schema.String),
 })
 export const GoalResponse = Schema.Struct({
   goal: Schema.NullOr(SessionGoal.Goal),

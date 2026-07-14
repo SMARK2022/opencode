@@ -1079,16 +1079,19 @@ export const layer = Layer.effect(
         if (replay) {
           const original = replay.info
           const replayMsg = yield* session.updateMessage({
-            id: MessageID.ascending(),
-            role: "user",
-            sessionID: input.sessionID,
-            time: { created: Date.now() },
-            agent: original.agent,
-            model: original.model,
-            format: original.format,
-            tools: original.tools,
-            system: original.system,
-          })
+              id: MessageID.ascending(),
+              role: "user",
+              sessionID: input.sessionID,
+              time: { created: Date.now() },
+              agent: original.agent,
+              model: original.model,
+              format: original.format,
+              tools: original.tools,
+              system: original.system,
+              // [local-smark] 继承原始 canonical user 的 Goal turn ID，
+              // 使 compaction replay 不产生新 eligible Goal turn
+              goalTurnID: original.goalTurnID ?? original.id,
+            })
           for (const part of replay.parts) {
             if (part.type === "compaction") continue
             const replayPart =
@@ -1133,6 +1136,9 @@ export const layer = Layer.effect(
               time: { created: Date.now() },
               agent: userMessage.agent,
               model: userMessage.model,
+              // [local-smark] compaction continue 继承 compaction parent 的 Goal turn ID，
+              // 不产生新 eligible Goal turn
+              goalTurnID: userMessage.goalTurnID ?? userMessage.id,
             })
             const text =
               (input.overflow

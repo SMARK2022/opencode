@@ -3,43 +3,60 @@ import DESCRIPTION from "./goal.txt"
 import type { SessionGoal } from "@/session/goal"
 import { Effect, Option, Schema } from "effect"
 
-// goal 工具参数：status 可选。
-// 无 status → get 模式：返回当前 goal 的状态、objective、用量和预算
-// 有 status → update 模式：标记 goal complete 或 blocked
-// 镜像 Codex 的 get_goal + update_goal 合并为单工具设计
+// Goal turn 受信上下文：由 SessionPrompt 创建并在同一 eligible turn 的
+// provider steps 间复用。GoalTool get 写入 read snapshot，write 读取校验。
+// 模型不能通过工具参数伪造 snapshot 值。
+export interface GoalTurnContext {
+  // 当前 eligible Goal turn 的 user MessageID
+  id: string
+  // 前一个 eligible Goal turn 的 user MessageID
+  previousID?: string
+  // 当前 turn 是否由真实用户发起（Goal continuation 为 false）
+  userInitiated: boolean
+  // get 写入受信 read snapshot；write 必须发现此字段才允许 transition
+  read?: { goalID: string; generation: number; status: SessionGoal.Status }
+}
+
+// goal 工具参数：
+// 无 mark → get 模式：返回当前 goal 的状态、objective、用量、预算和代际
+// 有 mark → transition 模式：需要先 get 建立 read snapshot
+// complete/blocked 需要 reason；active 用于从 model-produced terminal 恢复
 const Parameters = Schema.Struct({
-  // 与其他工具一致：每个字段都带 .annotate({ description }) 供 JSON Schema 生成
-  status: Schema.optional(Schema.Literals(["complete", "blocked"] as const)).annotate({
+  mark: Schema.optional(Schema.Literals(["complete", "blocked", "active"] as const)).annotate({
     description:
-      "Set to `complete` when the objective is achieved, or `blocked` when genuinely stuck after at least three consecutive failed attempts. Omit to get the current goal status.",
+      "Mark the goal as `complete` when the objective is achieved, or `blocked` when genuinely stuck after at least three consecutive failed attempts. Mark as `active` to resume a model-produced terminal goal in a later user turn. Omit to get the current goal status.",
+  }),
+  reason: Schema.optional(Schema.String).annotate({
+    description:
+      "Required when marking `complete` or `blocked`. A concise explanation of why the goal is being marked. Ignored for `active`.",
   }),
 })
 
-// goal 工具的执行上下文需要 SessionGoal.Service，
+// goal 工具的执行上下文需要 SessionGoal.Service 和当前 Goal turn context，
 // 通过 ctx.extra 传入（与 TaskTool 的 promptOps 模式一致）
 export interface GoalToolExtra {
   goalSvc: SessionGoal.Interface
+  // SessionPrompt 在每次 eligible Goal turn 创建并注入的受信上下文
+  goalTurn?: GoalTurnContext
 }
 
-// goal 工具：支持 get（无参数）和 update（status 参数）两种模式。
+// goal 工具：支持 get（无参数）和 transition（status 参数）两种模式。
+// transition 必须先 get 建立 read snapshot——防止模型不看 GOAL 就直接终态化。
 // 不允许模型 pause/resume/clear/改预算——这些由用户或系统控制。
-// 防止模型通过滥用状态来逃避任务
 export const GoalTool = Tool.define(
   "goal",
   Effect.succeed({
     description: DESCRIPTION,
     parameters: Parameters,
-    // Effect.orDie 将 GoalError 转为 defect，使 error 类型为 never，
-    // 与 Def.execute 的签名 Effect.Effect<ExecuteResult<M>> 对齐
-    execute: (params: { status?: "complete" | "blocked" }, ctx: Tool.Context) =>
+    execute: (params: { mark?: "complete" | "blocked" | "active"; reason?: string }, ctx: Tool.Context) =>
       Effect.gen(function* () {
         const extra = ctx.extra as GoalToolExtra | undefined
         if (!extra?.goalSvc) {
           return yield* Effect.fail(new Error("goal tool requires goalSvc in ctx.extra"))
         }
 
-        // 无 status 参数 → get 模式：返回当前 goal 的完整信息
-        if (params.status === undefined) {
+        // 无 mark 参数 → get 模式：返回当前 goal 的完整信息
+        if (params.mark === undefined) {
           const goalOpt = yield* extra.goalSvc.get(ctx.sessionID)
           if (Option.isNone(goalOpt)) {
             return {
@@ -49,7 +66,15 @@ export const GoalTool = Tool.define(
             }
           }
           const goal = goalOpt.value
-          // 镜像 Codex get_goal 的响应结构：goal + remaining_tokens
+          // 将 trusted snapshot 写入 goalTurn context，供后续 transition 校验。
+          // 模型不能通过参数伪造这些值——它们来自 service 的权威读取。
+          if (extra.goalTurn) {
+            extra.goalTurn.read = {
+              goalID: goal.id,
+              generation: goal.generation,
+              status: goal.status,
+            }
+          }
           const remaining = goal.tokenBudget != null
             ? Math.max(0, goal.tokenBudget - goal.tokensUsed)
             : null
@@ -60,6 +85,8 @@ export const GoalTool = Tool.define(
               goal: {
                 objective: goal.objective,
                 status: goal.status,
+                generation: goal.generation,
+                reason: goal.reason ?? null,
               },
               tokensUsed: goal.tokensUsed,
               tokenBudget: goal.tokenBudget ?? "unbounded",
@@ -69,16 +96,53 @@ export const GoalTool = Tool.define(
           }
         }
 
-        // 有 status 参数 → update 模式：标记 goal complete 或 blocked
-        yield* extra.goalSvc.set(ctx.sessionID, { status: params.status })
-        // 返回明确消息让模型知道 loop 即将结束
+        // 有 mark 参数 → transition 模式
+        // read gate：必须先 get 建立 trusted snapshot，防止模型不看 GOAL 就终态化
+        if (!extra.goalTurn?.read) {
+          return yield* Effect.fail(
+            new Error("goal tool: must call get (no arguments) before marking a status. Read the current goal first."),
+          )
+        }
+
+        const result = yield* extra.goalSvc.modelTransition(ctx.sessionID, {
+          snapshot: extra.goalTurn.read,
+          turnID: extra.goalTurn.id,
+          previousTurnID: extra.goalTurn.previousID,
+          userInitiated: extra.goalTurn.userInitiated,
+          status: params.mark,
+          reason: params.reason,
+        })
+
+        // 根据 transition 结果返回明确的模型可读输出
+        if (result.type === "updated") {
+          const goal = result.goal
+          if (goal.status === "complete") {
+            return {
+              title: "Goal complete",
+              metadata: {},
+              output: `Goal marked as complete: ${goal.reason}. The session loop will end after this turn.`,
+            }
+          }
+          if (goal.status === "blocked") {
+            return {
+              title: "Goal blocked",
+              metadata: {},
+              output: `Goal marked as blocked: ${goal.reason}. The session loop will end after this turn. The user can resume the goal later.`,
+            }
+          }
+          // active recovery 成功
+          return {
+            title: "Goal resumed",
+            metadata: {},
+            output: `Goal resumed to active. Continue working toward the objective.`,
+          }
+        }
+
+        // blocked-pending：尚未达到三轮阈值，goal 仍 active
         return {
-          title: `Goal ${params.status}`,
+          title: "Goal blocked (pending)",
           metadata: {},
-            output:
-              params.status === "complete"
-                ? `Goal marked as complete. The session loop will end after this turn.`
-                : `Goal marked as blocked. The session loop will end after this turn. The user can resume the goal later.`,
+          output: `Blocked attempt ${result.attempt} of ${result.required}. The goal remains active. Continue working, or call blocked again in the next goal turn with the same reason if the blocker persists.`,
         }
       }).pipe(Effect.orDie),
   }),

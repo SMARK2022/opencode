@@ -1,11 +1,38 @@
 # Session GOAL Transition Integrity
 
-Status: audit-required
-Revision: R1
-Approved revision: none
-Implementation allowed: no
-Audit mode: full-scope
-Date: 2026-07-14
+> Status: verified
+>
+> Revision: R2
+>
+> Approved revision: R2
+>
+> Audit mode: full-scope
+>
+> Requirement source: user messages `msg_f5c449851001TXbe9qMsOj9Tyd`, `msg_f5ef2b88f001TdtPW3pxfHtlGe`, `msg_f5f2f4e8c001loArXqzEeWgOEz`
+>
+> Implementation allowed: no further material changes without revision or rework
+>
+> Last updated: 2026-07-14
+
+本文件是本任务唯一实现规范。聊天摘要、R1 的审计前假设和本文件外的 builder rationale 均无实现授权力。
+
+## 0. Verbatim Requirement
+
+> 请你请你详细完整检查一下我们的 GOAL相应的实现机制,因为我目前发现有很多bug,或者很多有缺陷的地方。譬如说当前模型可以不看相应的GOAL的具体内容,就直接把GOAL进行block或者complete了。模型并不知道这是什么含义,可能就直接工具进行了其block了。这在ChatGPT中非常常见且经常发生。与此同时,理论上来说,block和complete应该要相应的理由,也就是模型需要说它为什么这样选择或者有这样的抉择。再者,请你完整检查一下,当前貌似模型没有办法将block的GOAL改成相应的执行中,也就是它没有办法把这个block的或者说已经完成的长期目标进行相应的状态修改,让其返回正在进行中的状态。同时,譬如说用户可能进行了相应的GOAL的修改,那么模型可能不知道,它以为GOAL的相应内容还是原来那个,所以它在执行完之后,它就直接执行finish了,或者complete了。但是模型并不知道这个相应的目标其实已经进行更改了。所以理论上来说,请你完整详细地检查一下这些内容到底应该去怎么抉择,以及如何确定。你可以详细完整调研一下相应的codex的具体设计,以及在open code的其他有效的比较高级的PR分支,或者说一些commit里面到底都是怎么样进行执行的。请你详细完整全量检查。
+
+> 只调研，不改代码，输出完整方案。
+
+> 请注意codex在.temp中，不要使用chatgpt。
+
+完整规划、方案审计、未来 TDD/注释/implementation audit 和 commit 流程以 `msg_f5ef2b88f001TdtPW3pxfHtlGe` 的逐字消息为稳定 requirement source；当前阶段只允许修订本 canonical plan 和记录独立审计，不允许实施生产代码、测试、migration 或生成物。
+
+### Explicit non-goals
+
+- 不新增 evaluator、第二模型、动态 stop-condition、Goal history 表、通用工作流状态机或新配置项。
+- 不新增 `in_progress`；现有 `active` 继续表示可执行状态。
+- 不承诺 objective edit/clear 后立即取消已进入 provider 的请求；只保证旧请求不能写终态或把 usage 归到新 objective generation。
+- 不改变 permission、agent max steps、`goal_max_turns`、continue-on-error、abort、compaction 或 request-usage 的既有产品语义，除非为了本方案明确列出的 generation/turn 不变量。
+- 不为外部 user-user 并发新增 optimistic concurrency contract；HTTP/TUI 用户 mutation 保持当前 last-write-wins，generation 只保护模型 stale write 和 usage attribution。
 
 ## 1. Scope and Decision
 
@@ -21,7 +48,7 @@ Date: 2026-07-14
 
 推荐方案是把不变量收敛到三个现有 owning boundary：
 
-1. `SessionGoal` 负责持久化 revision、理由、CAS 和跨请求原子转换。
+1. `SessionGoal` 负责持久化 generation、理由、blocked audit 和跨请求原子转换。
 2. `GoalTool` 负责模型 turn 内的真实 read-before-write 和模型可写状态边界。
 3. `SessionPrompt` 负责每个 Goal turn 的权威上下文、stale continuation 保护、resume loop 和 usage 归属。
 
@@ -32,14 +59,15 @@ HTTP、TUI、OpenAPI/SDK 只传播用户控制和持久化结果，不复制 Goa
 | ID | 必须满足的行为 | 证据/验证 |
 |---|---|---|
 | REQ-01 | 模型只能在当前 Goal turn 已成功读取当前 Goal 后写入模型状态；无 Goal 或未读取时写入失败且不产生写入。 | `GoalTool` 行为测试；现有红色 harness |
-| REQ-02 | `complete`、`blocked` 必须带非空、受长度限制的 reason；reason 进入持久化结果和 API/SDK 响应。 | Tool、domain、HTTP 测试 |
-| REQ-03 | 模型可从 `blocked` 或 `complete` 恢复到 `active`，但只能在新的真实用户 Goal turn、先读取当前 Goal 后执行；模型不能把 `paused` 自行恢复。 | prompt/Tool 行为测试 |
-| REQ-04 | objective 或用户状态变更后，旧 turn 的终态写入必须因 Goal ID/revision 不匹配而失败，不能覆盖新目标。 | 并发/CAS 测试 |
-| REQ-05 | 每个 Goal turn 使用权威 objective/status/revision；continuation、compaction、错误和退出路径不能继续执行旧代际。 | prompt 集成测试 |
-| REQ-06 | provider 请求已开始后发生编辑/clear，不要求立即取消 provider；但旧请求的最终写入和 usage 不能污染新 Goal。 | 时序测试 |
-| REQ-07 | 用户通过 HTTP/TUI 将 terminal Goal 恢复为 `active` 后，idle session 能进入现有 prompt loop；busy session 不创建重复 loop。 | HTTP/TUI 测试 |
+| REQ-02 | 每个新产生的 `complete`、`blocked` 必须带非空、trim 后不超过 6400 字符的 reason；当前 terminal reason 进入持久化 Goal、event 和 API/SDK。 | Tool、domain、HTTP、migration 测试 |
+| REQ-03 | 模型可把自己产生的 `blocked` 或 `complete` 恢复到 `active`，但只能在后续新的真实用户 Goal turn、先读取当前 Goal 后执行；模型不能恢复 `paused` 或用户直接写入的 terminal 状态。 | prompt/Tool 行为测试 |
+| REQ-04 | objective 变更后，旧 turn 的终态写入必须因 Goal ID/generation 不匹配而失败；status 竞态通过 expected status/turn 校验失败，不能覆盖新目标或用户暂停。 | 并发/transaction 测试 |
+| REQ-05 | 每个 Goal turn 使用权威 objective/status/generation；continuation、compaction、错误和退出路径不能继续执行旧代际。 | prompt 集成测试 |
+| REQ-06 | provider 请求已开始后发生 edit/clear，不要求立即取消 provider；旧请求 usage 只有在 `{goalID, generation}` 仍一致时才能计入，terminal/status 变化不应丢失已开始请求的 usage。 | 时序/usage 测试 |
+| REQ-07 | HTTP/TUI create/edit/resume 成功后，只要返回 Goal 为 `active` 且 session 已有 user message，就进入现有 `SessionPrompt.loop`；busy session 由 `RunState` 去重，空 session 等首条 prompt。 | HTTP/TUI/run-state 测试 |
 | REQ-08 | 当前 continue-on-error、`goal_max_turns`、permission、abort、compaction 和旧 HTTP contract 的既有安全边界继续有效。 | 回归测试和边界矩阵 |
 | REQ-09 | 公开字段变更同步 OpenAPI、生成 SDK、TUI 类型和事件；不手改生成文件。 | SDK build/typecheck |
+| REQ-10 | 现有 HTTP/TUI user mutation 保持无 expected revision 的 last-write-wins；每个有效 objective edit 原子递增 generation，使旧模型快照失效，不宣称提供 user-user conflict。 | HTTP 兼容和并发模型测试 |
 
 ## 3. Repository and Process Constraints
 
@@ -69,6 +97,7 @@ HTTP、TUI、OpenAPI/SDK 只传播用户控制和持久化结果，不复制 Goa
 | `packages/opencode/src/session/request-usage.ts` | request/assistant usage 聚合和错误边界 |
 | `packages/opencode/src/session/compaction.ts` | compaction、summary、synthetic continuation |
 | `packages/opencode/src/session/message-v2.ts` | 消息类型、metadata、parts、latest/compacted 读取 |
+| `packages/opencode/src/session/request-usage.sql.ts` | request/root request 持久化；确认它不能替代 Goal turn identity |
 | `packages/opencode/src/session/schema.ts` | Session/Prompt 输入 schema |
 | `packages/opencode/src/session/session.sql.ts` | session 状态和消息关联 |
 | `packages/opencode/src/session/request-usage.sql.ts` | request usage 持久化结构 |
@@ -98,6 +127,7 @@ HTTP、TUI、OpenAPI/SDK 只传播用户控制和持久化结果，不复制 Goa
 |---|---|
 | `packages/sdk/openapi.json` | 当前生成输入 contract；现有 HTTP Goal 描述未完整同步到 SDK v2 |
 | `packages/sdk/js/script/build.ts` | SDK 生成链，未来不能手改 generated output |
+| `script/generate.ts` | 生成 committed `packages/sdk/openapi.json` 并调用 SDK build 的仓库入口 |
 | `packages/sdk/js/src/v2/gen/sdk.gen.ts` | 当前生成 client；无完整 Goal method |
 | `packages/sdk/js/src/v2/gen/types.gen.ts` | 当前生成 types；无完整 Goal schema |
 | `packages/sdk/js/src/v2/gen/client.gen.ts` | 生成 client 基础实现 |
@@ -110,6 +140,9 @@ HTTP、TUI、OpenAPI/SDK 只传播用户控制和持久化结果，不复制 Goa
 |---|---|
 | `CONTEXT.md` | 当前 v1/v2 边界和领域上下文 |
 | `AGENTS.md` | 测试、类型检查、SDK 生成和工作树约束 |
+| `packages/opencode/AGENTS.md` | Drizzle migration 命令和 `migration.sql` + `snapshot.json` 产物约束 |
+| `packages/opencode/src/server/routes/instance/httpapi/AGENTS.md` | HttpApi handler、公开错误和 stable service 注入约束 |
+| `package.json`, `packages/opencode/package.json` | root 禁止测试、package-local test/typecheck/db scripts |
 | `docs/adr/README.md` | ADR/领域文档布局约定 |
 | `docs/goal-error-continuation-control-plan.md` | 既有 continue-on-error、race、usage 和上限设计 |
 | `docs/prompts.md` | 本次 workflow 的调研、审计、TDD 和 commit 要求；文件有预存修改，未覆盖 |
@@ -134,9 +167,9 @@ HTTP、TUI、OpenAPI/SDK 只传播用户控制和持久化结果，不复制 Goa
 
 可借鉴但不直接移植的事实：
 
-- `GoalUpdate.expected_goal_id` 用于防止 Goal 被替换后旧 request 错误更新/计账；这是本方案采用 Goal ID + revision CAS 的依据。
+- `GoalUpdate.expected_goal_id` 用于防止 Goal 被替换后旧 request 错误更新/计账；本方案借鉴 expected identity，但增加 objective generation 和 status/turn guard，不能直接复制。
 - objective 外部修改会通过 steering/运行时事件告知正在运行的 turn；本方案只借鉴“下一次 provider dispatch 使用新 snapshot”，不承诺中途取消 provider。
-- usage accounting 与终态状态更新分离；本方案把 request 开始时的 expected Goal ID 传到最终计账，避免先 complete/blocked 后丢 usage。
+- usage accounting 与终态状态更新分离；本方案把 request 开始时的 expected `{goalID,generation}` 传到最终计账，避免先 complete/blocked 后丢 usage，也避免 edit 后污染新 objective。
 - idle gate 接受用户提交；本方案用同一原则补齐 HTTP/TUI active resume 的 idle loop 触发。
 - Codex 当前 model tool schema 仍主要是 status 更新，不能证明 read-before-write、reason 或 revision 约束已经存在，因此不能把它当作本需求的完整解决方案。
 
@@ -190,50 +223,124 @@ bun -e '... GoalTool ... def.execute({ status: "complete" }, ctx) ...'
 3. 当前 `accountUsage()` 主要要求当前 row status 为 `active`。模型先写终态后，当前已完成 request 可能不计账。
 4. clear/recreate 后若只按 session ID 计账，旧 request 可能污染新 Goal；当前没有 expected Goal ID 保护。
 
+## 6A. Supported Input Domain and Reachability
+
+| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Class |
+|---|---|---|---|---|---|
+| Goal Tool read with current Goal | model tool call | Tool registry/permission admits GoalTool；session ID trusted from context | `resolveTools -> GoalTool -> SessionGoal.get` | GoalTool | observed |
+| Goal Tool terminal write without prior read | model tool call | 当前 schema 允许直接 status | `GoalTool -> SessionGoal.set` | GoalTool/model transition seam | observed |
+| Goal Tool write after objective edit | provider 与 HTTP/TUI 并发 | Goal ID 保留，当前无 generation | old Tool context -> current row | SessionGoal transaction | reachable |
+| complete/blocked with blank or oversized reason | model or public Goal POST | 当前没有 reason 字段/校验 | Tool/HTTP -> domain | SessionGoal validation | reachable |
+| blocked attempts across provider steps in one user message | one model request and tool-result loops | assistant message ID 每 step 改变；latest user ID 保持 | `runLoop` while iterations | SessionPrompt GoalTurn derivation | observed |
+| blocked attempts across real user and Goal continuation messages | user prompt + `system_continue` | 每条 user message 有稳定 MessageID；Goal continuation 可加内部 part marker | raw persisted message history -> GoalTurn | SessionPrompt | reachable |
+| compaction replay/continue、task summary technical user | compaction/task pipeline | replay 可复制 non-synthetic parts；当前没有 durable Goal-turn lineage | runLoop latest user changes | MessageV2 lineage + SessionPrompt | observed |
+| model terminal -> later real user asks to resume | GoalTool then new public prompt | new real user message ID，不是 synthetic continuation | prompt loop -> GoalTool active | GoalTool + SessionGoal | reachable |
+| model attempts to resume same turn or paused Goal | model Tool | Tool context knows current/previous eligible turn and source kind | GoalTool -> modelTransition | SessionGoal | reachable |
+| user POST create/edit/pause/resume/terminal | public HTTP/TUI/SDK | payload schema validates types；无 user expected revision contract | handler -> SessionGoal.set | SessionGoal user mutation | observed |
+| active Goal POST on empty session | public HTTP | session 可存在但没有 user message | handler -> optional loop | HTTP integration seam | reachable |
+| provider starts active then Goal terminal/pause | model/user mutation during request | Goal ID/generation unchanged unless objective edit | dispatch snapshot -> accountUsage | SessionPrompt + SessionGoal | reachable |
+| provider starts active then objective edit | HTTP/TUI during request | Goal ID 保留，generation 将递增 | old request -> accountUsage | SessionGoal atomic usage update | reachable |
+| clear/recreate during provider request | HTTP/TUI during request | recreate 生成新 Goal ID | old request -> accountUsage/transition | SessionGoal | reachable |
+| legacy persisted terminal row | migration input | 旧 schema 无 reason/generation/audit | migration -> current Goal GET | migration/SessionGoal | contracted |
+| GoalTool denied by permission | session permission | `ToolSelection.enabled` 排除工具 | resolveTools filters GoalTool | ToolSelection | observed |
+| evaluator/第二模型 | 无当前 producer | 无 contract | 不可达于当前 primary path | none | speculative/rejected |
+
+## 6B. Required Invariants
+
+| ID | Behavioral invariant | Evidence | Existing test state |
+|---|---|---|---|
+| INV-01 | 模型状态写入必须基于同一 eligible Goal turn 内由 GoalTool 真实读取形成的 trusted snapshot。 | 当前 red harness `get=0,set=1`；用户明确要求 | 缺失，未来 Tool test 先红 |
+| INV-02 | 所有新 terminal transition 必须有 trim 后非空、最多 6400 字符的 reason；public Goal 在 terminal 时 reason 非空。 | 用户明确要求；公开 Tool/HTTP producer | 缺失 |
+| INV-03 | blocked 只在三个不同、连续 eligible Goal turns 以完全相同的 trimmed reason 提出时成功；同 turn 重复和中断 turn 不累计。 | 现有 goal.txt contract + 用户要求 block 有依据 | 仅 prompt 文案，无 runtime test |
+| INV-04 | model active recovery 只允许 model-produced terminal Goal 在后续新的真实 user turn、先 read 后执行；same turn、Goal continuation、user-produced terminal、paused 均拒绝。 | 用户要求恢复 + 用户暂停 ownership | 缺失 |
+| INV-05 | `{goalID, generation, expectedStatus, eligibleTurnID}` 是 model transition 的原子前置条件；objective edit、pause、clear/recreate 后旧 write 无副作用。 | 当前 ID 保留 edit 行为和并发链 | 缺失 |
+| INV-06 | eligible Goal turn 的稳定 ID 是 real user message ID 或带 `goal_continuation` metadata 的 synthetic user message ID；assistant/provider steps 不产生新 turn，compaction/task technical user 通过 optional `goalTurnID` 继承原 turn。 | `message-v2.ts`/`prompt.ts`/`compaction.ts` 消息拓扑 | 缺失 |
+| INV-07 | provider dispatch 时捕获 active `{goalID, generation}`；结束时只对同一 generation 原子计 usage，status terminal/paused 不丢 usage，edit/clear 不污染新 generation。 | 当前 usage status gate 缺口；审计 B-02 | 缺失 |
+| INV-08 | 成功 Goal mutation 返回 active 且已有 user message时复用唯一 `SessionPrompt.loop -> RunState.ensureRunning`；empty session 不启动，busy 不重复。 | 当前 handler 只写 DB；现有 RunState contract | 缺失 |
+| INV-09 | generation/reason 通过 Goal event、HTTP、committed OpenAPI、generated SDK 和 TUI 一致传播；内部 audit 字段不公开。 | 公开 GoalResponse 直接使用 domain Goal | 缺失 |
+| INV-10 | user HTTP mutation 保持 last-write-wins；有效 objective change 递增 generation，status/budget/policy-only change 不递增。 | 当前公开 contract 无 expected revision；兼容要求 | 现有 last-write-wins，缺 generation test |
+| INV-11 | transaction/validation 失败保持失败；不存在 evaluator、current-row fallback、catch-and-success 或第二数据源。 | first-principles policy | 无专门测试，靠路径审计和错误测试 |
+| INV-12 | legacy terminal row 获得诚实的“reason unavailable”迁移标记；不能伪造历史阻塞理由。 | persisted-data compatibility | migration test 缺失 |
+
 ## 7. First Divergence and Ownership
 
-第一分歧不是 UI、HTTP 或 evaluator，而是 `GoalTool -> SessionGoal.set()`：模型可写入动作没有可信 read snapshot、reason、revision 或 actor boundary。
+第一分歧不是 UI、HTTP 或 evaluator，而是 `GoalTool -> SessionGoal.set()`：模型可写动作没有 trusted read snapshot、reason、generation 或 actor boundary。
 
-责任边界固定如下：
+| Invariant | First divergence | Owning module/interface | Proof |
+|---|---|---|---|
+| INV-01/02/03/04 | `GoalTool.execute` 接受可选 status 并直接调用通用 `set` | `GoalTool` model seam + `SessionGoal.modelTransition` | `src/tool/goal.ts` 当前无 get gate/reason/actor |
+| INV-05/10 | `SessionGoal.set` 保留 Goal ID 更新 objective，未建立 generation | `SessionGoal` transaction | `src/session/goal.ts:128-150` |
+| INV-06 | runLoop 每个 assistant step 重建 Tool context，但 Goal turn 实际由 latest user message 组织 | `SessionPrompt` | `prompt.ts:2223-2231, 2344-2388` |
+| INV-07 | request 完成后 `accountUsage` 只看 session/current active row | `SessionPrompt` dispatch snapshot + `SessionGoal.accountUsage` | `prompt.ts:2674-2691`, `goal.ts:203-224` |
+| INV-08 | Goal POST 只写 DB 并返回 | HTTP integration seam | `handlers/session.ts:461-483` |
+| INV-09/12 | Goal schema/migration 无 generation/reason/audit | `SessionGoal` schema + generation chain | `goal.sql.ts:17-36`, Goal migrations |
 
-| 不变量 | 唯一 owner | 不能放在哪里 |
+职责固定如下：
+
+| Concern | Owner | Interface promise | Why here | Not owned by |
+|---|---|---|---|---|
+| row/generation/reason/audit 原子更新 | `SessionGoal` | 单 transaction 校验并写 current Goal | DB row 是唯一语义源 | prompt/TUI 不能复制 DB 状态机 |
+| 模型先 read 和可写状态集合 | `GoalTool` | 只从本 turn context 取 trusted snapshot | Tool 是 model actor seam | 模型参数不能自报 token/generation |
+| eligible turn identity、raw history 顺序、dispatch snapshot | `SessionPrompt` | 同 user steps 共享；新 eligible user 才重置 | prompt 拥有消息拓扑和 provider 生命周期 | SessionGoal 不解析 messages |
+| active mutation 启动唯一 loop | HTTP handler 调用 `SessionPrompt.loop` | active + 有 user message时 ensure running | handler 已拥有 prompt/run-state integration | Goal domain 不启动 fibers |
+| API/SDK/TUI shape | HttpApi schema + generator | generation/reason 一致传播 | 公开 contract owner | generated files 不手改 |
+
+## 8. Exact Persisted and Transition Model
+
+### 8.1 Exact columns and public fields
+
+保留稳定 Goal `id`，新增且只新增以下列：
+
+| DB column | Public Goal field | Lifecycle |
 |---|---|---|
-| row schema、revision、CAS、reason/audit streak | `SessionGoal` | 不能只放 prompt 或 TUI |
-| 模型必须先 read、模型可写状态集合 | `GoalTool` + 本 turn context | 不能相信模型自报的 id/revision |
-| 当前 turn 权威上下文、stale continuation、provider 起始 Goal snapshot | `SessionPrompt` | 不能让 HTTP handler 重复 loop 规则 |
-| 用户 active resume 是否启动 idle loop | HTTP/TUI integration seam，调用 `SessionPrompt.loop` | 不能把 loop 复制到 Goal service |
-| API schema、SDK 类型、TUI transport | OpenAPI/generated SDK | 不能手改 generated files |
+| `generation integer not null default 1` | `generation: number` | create=1；只有 trimmed objective 值真正改变时 +1；status/budget/continueOnError/reason/audit 不增加 |
+| `reason text null` | `reason: string | null` | 只表示当前 `complete`/`blocked` 的 terminal reason；active/paused 为 null |
+| `blocked_reason text null` | 不公开 | active 状态下待确认的 trimmed exact reason |
+| `blocked_streak integer not null default 0` | 不公开 | 连续 eligible turns 的 blocked attempt 数 |
+| `blocked_last_turn_id text null` | 不公开 | 最近一次有效 attempt 的 eligible user MessageID |
+| `terminal_turn_id text null` | 不公开 | model-produced terminal transition 的 eligible user MessageID；user-produced terminal 为 null |
 
-## 8. Required State Invariants
+不新增 `revision`、`blocked_last_turn_index`、Goal history 或 JSON audit blob。`generation` 专指 objective generation，使 model stale-write 和 usage attribution 使用同一语义，不会因 terminal status 变化而错误丢 usage。
 
-### Goal row
+### 8.2 Reason lifecycle
 
-保留现有稳定 `id`，新增最小字段：
+| Operation | `reason` | blocked audit | `terminal_turn_id` |
+|---|---|---|---|
+| create active/paused | null | reset | null |
+| create complete/blocked by user API | required trimmed reason | reset | null |
+| blocked attempt 1/2 | remains null | save exact trimmed reason/streak/current turn ID | unchanged null |
+| model blocked attempt 3 | required reason; status=blocked | reset pending fields | current eligible turn ID |
+| model complete | required reason; status=complete | reset pending fields | current eligible turn ID |
+| user changes objective, status omitted | null; generation++；active 保持 active，paused 保持 paused，旧 complete/blocked 自动回到 active | reset | null |
+| user changes objective with explicit status | terminal 时要求新 reason；active/paused reason=null；generation++ | reset | model terminal ID不继承 |
+| user/model resumes active | null | reset | null |
+| user pauses | null | reset | null |
+| budget/continueOnError-only update | preserve current reason/audit/status | preserve | preserve |
+| clear/recreate | row deleted/new row defaults | reset | reset |
 
-- `revision`：从 `1` 开始，每个 objective 或 status/reason/audit 状态有效变更递增。
-- `transition_reason`：当前 terminal 状态的最后有效理由；active/paused 可为 null。
-- `blocked_reason`：当前连续 blocked 依据，或把同一字段作为 audit reason 使用；具体字段名由实现阶段按 schema 风格确定，但不能把 streak 仅留在内存。
-- `blocked_streak`：同一连续 Goal turn 中相同 normalized reason 的有效 blocked 次数。
-- `blocked_last_turn_id`：防止同一 turn 重复调用伪造多次。
+`reason` 和 `blocked_reason` 都只做 `trim()`，不 lower-case、不折叠内部空白；连续 blocked 采用 trim 后完全相等，避免把语义不同的理由错误合并。空白拒绝；最大长度复用 `MAX_OBJECTIVE_CHARS=6400`，不新增配置项。
 
-如果审计认为 `transition_reason` 和 `blocked_reason` 可安全合并，必须证明不会丢失 terminal audit；否则保持两个字段，避免用隐式 JSON 扩展字段替代 schema。
+旧 migration 中已经是 `complete`/`blocked` 的 row 统一写入准确兼容标记 `Legacy terminal transition (reason unavailable)`；active/paused reason 为 null。该字符串说明历史理由不可恢复，不伪造判断依据。
 
-### Model transition
+### 8.3 Eligible Goal turn
 
-- `complete` 和 `blocked` 必须携带 reason；空白 trim 后拒绝，长度上限固定在 domain 常量，避免无限 prompt/DB/API payload。
-- 模型 transition 只能接受 `active`、`complete`、`blocked`；`paused` 仍是用户/system 控制状态。
-- `blocked` 只有在连续三个不同 Goal turn、相同 normalized reason 且每个 turn 都基于当前 Goal read 后才成功；不足三次返回可观察的业务错误，不改变 status。
-- 同一 turn 的第二次 blocked 不能增加 streak；reason 改变、Goal revision 改变、objective 编辑、clear/recreate 或 turn 中断都会清零并从 1 重新开始。
-- `complete` 不需要三次 streak，但必须 reason 和当前 Goal read；写入时必须通过 ID + revision CAS。
-- `blocked`/`complete -> active` 只允许新真实用户 Goal turn；必须先读取 terminal Goal；不能在同一模型 turn 中自解锁，不能从 `paused` 进入 active。
-- 用户 HTTP/TUI 可以直接把 `paused`、`blocked`、`complete` 恢复为 `active`，但必须通过同一 domain set/CAS，并由 integration seam 触发 idle loop。
+- `MessageV2.User` 增加 optional `goalTurnID: MessageID`，只表示 technical replay/summary 继承哪个既有 Goal turn，不是模型可写 token。普通 real user 和新 Goal continuation 省略它，以自身 ID 开始新 turn。
+- real user turn：canonical user message 至少一个 part 不是 synthetic；turn ID 是其 `MessageID`，`userInitiated=true`。
+- Goal continuation turn：canonical user 的 synthetic text part 具有内部 metadata `{ goal_continuation: true }`；turn ID 是其 `MessageID`，`userInitiated=false`。
+- compaction replay/continue、Task summary 等已确认 technical user producer 写入 `goalTurnID = original.goalTurnID ?? original.id`；它们不产生新 turn。runLoop 以 `lastUser.goalTurnID ?? lastUser.id` 解析 canonical message和 source kind。
+- assistant/provider/tool-result steps：latest eligible user ID 不变，复用同一个内存 `GoalTurnContext` 和 read snapshot。
+- 其他没有 lineage 的全 synthetic user messages不产生 eligible turn；向 raw history 后退到最近 canonical eligible user。同一 runLoop 沿用 context；进程重启后 raw history/`goalTurnID` 仍可重建 turn ID/previous ID，但内存 read snapshot 丢失，必须重新 read。
+- 当前/前一个 eligible turn 从未裁剪的 `MessageV2.stream(sessionID)` 中按持久化消息顺序取得；因此 compaction 不会把中间 turn 隐藏后误判为连续。
 
-### Revision and CAS
+### 8.4 Model transition rules
 
-- model tool 的 write 携带由本 turn `get` 产生的 trusted `{ goalID, revision }`，不是模型输入的自由字符串。
-- `SessionGoal` 在同一个 SQLite immediate transaction 中重新确认 row ID/revision/objective 状态，再更新并递增 revision。
-- mismatch 返回 typed stale transition error；不写 status、reason、streak，不吞错，不自动 fallback 到当前 Goal。
-- HTTP/TUI 用户写入也使用 revision；若 UI 未携带 revision，先读当前 row 后按用户动作提交，冲突则返回明确 conflict，而不是覆盖。
+- GoalTool `get` 把 current `{goalID, generation, status}` 写入当前内存 GoalTurnContext；这些值不出现在模型 write 参数中。
+- write 必须携带当前 context 的 read snapshot；domain 在 immediate transaction 中校验 current row 的 ID/generation/status 以及 supplied eligible turn ID。
+- blocked attempt：若 DB `blocked_last_turn_id === currentTurnID`，返回同一 pending attempt 且不增加；否则只有 `blocked_last_turn_id === previousEligibleTurnID` 且 reason 相等才 +1，其余从 1 开始。attempt 1/2 是 primary intermediate result，不改 status；attempt 3 原子写 blocked/reason。
+- complete：reason 合法且 expected row/status/turn 一致时原子写 complete/reason。
+- active recovery：snapshot/current status 必须 complete/blocked，`terminal_turn_id` 非 null，current turn 必须 real user 且 ID 与 terminal turn 不同；因此仅恢复 model-produced terminal。paused、same turn、Goal continuation 或 user-produced terminal 失败。用户仍可通过既有 HTTP/TUI 直接恢复任意 terminal/paused。
+- objective edit 重置 audit、generation++；旧 snapshot 失败。用户 pause/terminal 改变 expected status；旧 model write 失败。clear/recreate 由 Goal ID 失败。
+- domain 继续使用现有 `GoalError` 传递缺 read、缺 reason、stale、非法状态；不新增错误 hierarchy 或 catch-and-success fallback。blocked pending 是明确中间结果，不是错误或 terminal success。
  
 ## 9. Recommended Minimal Implementation
 
@@ -241,69 +348,60 @@ bun -e '... GoalTool ... def.execute({ status: "complete" }, ctx) ...'
 
 在现有 service 内扩展，不新建 Goal manager：
 
-1. 为 schema 增加 revision/reason/streak 所需字段和默认值；保留旧数据可读，旧 row 默认 `revision=1`、空 reason、`blocked_streak=0`。
-2. 将普通用户/system `set` 保持为公开入口，但让它在 transaction 内完成目标读取、校验、更新、revision++ 和事件发布。
-3. 新增一个只供模型 Tool 使用的 domain method，例如 `modelTransition`；方法接收 trusted read snapshot、turn ID、目标状态和 reason，内部重新读取并 CAS。
-4. model transition 明确拒绝：缺 snapshot、snapshot id/revision 过期、`paused -> active`、同 turn 自解锁、reason 不合法、blocked streak 未达到三次。
-5. `accountUsage` 增加 optional expected Goal ID；普通调用保持旧 active-only 兼容，prompt 对 provider 开始时捕获的 active Goal 使用 expected ID，row ID 不一致时跳过而不是计入新 Goal。
-6. 所有跨字段更新使用 `Database.transaction` 的 immediate 行为，避免“读到旧 revision 后两个 writer 都成功”。SQLite busy/error 继续向上返回，不改成静默重试。
-
-不增加 Goal history 表：本需求只需要当前 terminal reason 和 blocked 连续审计；完整历史不是当前真实缺口，增加它会扩大 migration、API 和清理面。
+1. `set` 保持 user/system mutation 的唯一入口和 last-write-wins contract；在 immediate transaction 内做 validation、effective-change detection、generation/audit lifecycle、row update。只有 objective 的 trimmed value 真正改变才 generation++；terminal Goal 的 objective-only edit 自动 active，paused edit 保持 paused，显式 status 始终优先且 terminal 要求新 reason。
+2. 新增唯一 model actor 方法 `modelTransition`，输入只来自 GoalTool 的 trusted snapshot/turn context；transaction 重读 row 并按 §8.4 校验，不调用通用 `set`，也不 fallback 到新 row。
+3. `modelTransition` 返回 `updated Goal` 或 `blockedPending { goal, attempt, required: 3 }`；所有拒绝继续使用 `GoalError`。
+4. `accountUsage` 改为接收 required expected `{ goalID, generation }`；prompt 仅在 provider dispatch 时 Goal 为 active 才调用。SQL update 的 where 同时包含 session/ID/generation，并使用列原子加法；不再要求结束时仍 active。
+5. `clear` 在 transaction 内删除并保持现有 event contract；clear/recreate 的 ID mismatch 自然拒绝旧 transition/usage。
+6. bus event 只在 transaction 成功并读回 current Goal 后发布一次；DB busy/defect 原样失败并记录现有日志，不转换为成功。
 
 ### 9.2 `GoalTool`
 
-在现有 `GoalToolExtra` 中增加当前 Goal turn 的受信上下文，最小形状为：
+在现有 `GoalToolExtra` 中增加当前 Goal turn 的受信上下文，精确形状为：
 
 ```ts
 goalTurn: {
   id: string
+  previousID?: string
   userInitiated: boolean
-  read?: { goalID: string; revision: number }
+  read?: { goalID: string; generation: number; status: GoalStatus }
 }
 ```
 
-具体字段名可在实现时按现有命名调整，但必须满足以下不变量：
+该 context 由 `SessionPrompt` 创建并在同一 eligible turn 的 provider steps 间复用；模型 schema 不暴露 id/generation。Tool schema 明确为“无 status 表示 read；有 status 表示 transition”，`complete|blocked` 时 reason 必填，`active` 时 reason 禁止/忽略规则固定为拒绝非空 reason。Tool 自己只负责 read gate 和 actor status allowlist；blocked continuity/CAS/reason persistence 全部由 domain owner 处理。
 
-- `get` 读取到 Goal 后，Tool 自己把 `{ goalID, revision }` 写入 turn context；模型不能通过参数伪造该值。
-- `status` 写入前必须发现该 turn context 已有 read；没有 read 直接返回业务错误，不能调用 `set`。
-- `complete`/`blocked` 需要 `reason`；`active` 只允许满足 recovery 条件的模型 turn，不能把普通模型 turn 的初始 active 写入当作有效操作。
-- Tool 只调用 domain `modelTransition`，不在 Tool 中实现 blocked 三轮、CAS 或 DB 更新，避免规则重复。
-- Tool 输出必须包含成功后的 status/revision/reason，失败输出必须明确是未读取、stale、非法 transition、缺 reason 或 blocked 尚未达标。
+Tool 成功输出固定包含 current status、generation、reason；blocked pending 明确输出 `attempt 1/3` 或 `2/3` 且 Goal 仍 active。no Goal、no read、stale、invalid reason/status 均为失败且断言零 terminal 写入。
 
 `goal.txt` 继续保留给模型的目标判断和证据提示，但不再承担安全约束；prompt 文案与 runtime 拒绝规则必须一致，不能把“请记住三轮”当作唯一防线。
 
 ### 9.3 `SessionPrompt`
 
-在 `runLoop` 已有每轮循环边界内建立 Goal turn，不抽出第二个 loop：
+在现有 `runLoop` 内保存一个 `GoalTurnContext | undefined`，不建立第二个 loop 或 ambient store：
 
-1. 在每次真实用户 Goal turn 或 continuation turn 开始时读取 Goal snapshot。
-2. 创建新的 `goalTurn.id`；只有 `lastUser` 来源于真实用户提交时才设置 `userInitiated=true`。
-3. 将当前 objective、status、revision、terminal reason 和剩余 budget 注入本轮 Goal continuation context；注入内容来自 service，不来自旧 assistant 文本。
-4. 将 `goalTurn` 放入现有 Tool extra；同一 turn 的 Tool 调用共享它，下一 turn 必须新建。
-5. provider dispatch 前再次确认当前 Goal revision；若 objective/status 已变更，放弃旧 continuation，重新读取并只继续新的 active Goal。
-6. 用户明确 edit/clear 时，不强杀已经在 provider 内的请求；provider 返回后，任何旧 terminal write 用 CAS 拒绝，旧 usage 用 expected Goal ID 隔离。
-7. 将 Goal usage accounting 放在所有 provider result 分支之前，包括 structured output、normal stop、terminal error 和 abort cleanup 能提供 message usage 的路径；只有 provider 开始时捕获 active Goal ID 的请求使用 expected ID 计入。
-8. 保持 `goal_max_turns=0`、continue-on-error、abort、compaction 和现有 permission 行为；新增的 revision check 只阻止 stale continuation，不改变正常 active continuation 的上限。
+1. 每次 while iteration 从 raw `MessageV2.stream(sessionID)` 按 `goalTurnID ?? id` lineage 找到最后两个 distinct eligible turns；marker/real-user 规则严格按 §8.3。
+2. 如果 eligible ID 改变，或 current Goal ID/generation 与 context read 不一致，建立新 context 并清空 read；assistant message ID 变化不重置。
+3. Goal continuation text 增加 `{ goal_continuation: true }` 并以自身 ID 成为下一 eligible turn；compaction/task technical user 设置 inherited `goalTurnID`，因此不会伪造 blocked 次数。
+4. Tool extra 引用同一个 context 对象；GoalTool get 原地记录 snapshot，后续 provider step 的 write 可使用，但新 eligible turn 必须重新 read。
+5. provider dispatch 前获取 Goal；若 active，捕获 `{goalID,generation}` 用于本次 usage，并向本轮 reminder/continuation 注入 current objective/status/generation/reason。旧 assistant 文本或 summary 不能替代 service snapshot。
+6. continuation 决策再次读取 Goal；只有 snapshot 仍 active 且 generation 与当前 continuation candidate 一致才注入。edit 后使用新 generation/objective，pause/terminal/clear 不注入。
+7. request 完成后在 structured output、normal stop、terminal error 和可计量 abort 分支统一调用 generation-aware `accountUsage`，然后再执行 break/continue；objective edit/clear mismatch 是显式 no-op diagnostic，不重归属。
+8. 保持 max-turn、error allowlist、permission、compaction、abort 和 processor control flow；没有 evaluator 或 catch-and-continue fallback。
 
 ### 9.4 HTTP/TUI Resume
 
-在现有 HTTP handler 与 `SessionPrompt` 注入之间增加一个小的 integration seam，不把 loop 代码复制到 Goal service：
+成功 `goalSvc.set` 后，如果返回 Goal 为 active：
 
-- 读取 mutation 前后的状态；只有 transition 造成 `non-active -> active` 且 session 当前 idle 时才 fork 一个 `SessionPrompt.loop`。
-- busy 时不 fork 第二个 loop；复用 `RunState` 现有互斥/加入行为。
-- `active -> active`、objective-only edit、clear、pause 或 stale conflict 不启动新的 loop。
-- fork 失败通过现有 session error/log path 暴露；不把 HTTP 200 当作 loop 已成功执行。
-- TUI 改为使用 generated SDK contract；在 SDK 生成前不手写新的 transport type，也不在 sync 层复制状态规则。
+- raw message history 有至少一个 user message时，将 `promptSvc.loop({sessionID})` fork 到 handler 已有 scope；`RunState.ensureRunning` 是唯一 idle/start 与 busy/join owner。
+- session 尚无 user message时不 fork，保留 active Goal；首条普通 prompt 自然启动 loop。
+- create、active objective edit、paused/terminal resume 都走同一路径；重复 active POST 也只调用幂等 ensure-running，不需要竞态不可靠的前后读。
+- mutation HTTP 响应只表示持久化成功，不声称后台 loop 已完成；fork defect 走现有 logging/session error observability，不回滚已提交 mutation，也不启动替代 loop。
+- clear/pause/terminal 不调用 loop。TUI 通过 generated SDK 调用同一 endpoint，不复制判断。
 
 ### 9.5 OpenAPI and SDK
 
-同步公开 Goal response/request：
+同步公开 contract：Goal 增加 read-only `generation` 和 nullable `reason`；`GoalSetPayload` 增加 optional `reason`，且 domain 要求它仅与显式 terminal status 一起使用。内部 blocked fields、terminal turn、GoalTurn/read snapshot 和 usage expected tuple不公开。
 
-- `revision`、`transition_reason`/当前 reason、必要的 blocked audit 信息只公开确实需要给客户端展示/冲突处理的字段。
-- model-only read token、内部 `goalTurn.id`、provider expected ID 不公开为用户 API 字段。
-- HTTP conflict、invalid transition、missing reason 使用现有错误 contract 体系，不添加未被现有客户端消费的自由错误格式。
-- 修改 OpenAPI source 后运行 `./packages/sdk/js/script/build.ts`；只接受 generator 产生的 `packages/sdk/js/src/v2/gen/sdk.gen.ts`、`types.gen.ts` 及实际受影响的 generated siblings。
-- TUI 删除 raw `fetch` 和重复 Goal response 类型，改用 SDK；生成链完成后运行 SDK typecheck。
+HTTP 继续用现有 `GoalApiError` 映射 `GoalError`，不新增 conflict error，因为 user mutation 明确保留 last-write-wins。运行 root `./script/generate.ts` 同时更新 committed `packages/sdk/openapi.json` 和 SDK；TUI 删除 raw Goal fetch/重复 response type，使用 generated method，并展示 terminal reason。任何 generator 额外文件以实际 deterministic diff 为准，不手改。
 
 ## 10. Existing Logic to Replace or Remove
 
@@ -313,54 +411,94 @@ goalTurn: {
 |---|---|
 | `GoalTool` 直接把可选 `status` 传给 `goalSvc.set` | 替换为 read-gated `modelTransition`，删除无 reason/无 snapshot 的写路径 |
 | `goal.txt` 单独要求模型记住三轮 blocked | 保留解释性文本，删除其作为唯一约束的含义；runtime/domain 成为唯一强制路径 |
-| `SessionGoal.set` 允许所有调用者无 revision 覆盖 | 收敛为 transaction/CAS；用户/system 与 model 使用明确不同入口 |
-| `accountUsage` 只看当前 row status | 保留旧调用兼容，同时让 prompt 使用 expected Goal ID；删除按 session ID 无条件归属的路径 |
-| HTTP/TUI Resume 只写 `active` | 写成功后调用统一 idle-loop integration seam；不在 TUI 增加另一套 loop |
+| `SessionGoal.set` 同时承载 model 与 user，无 generation | user `set` 保持 last-write-wins；model 移入唯一 `modelTransition`；objective edit 原子 generation++ |
+| `accountUsage` 只看 current active row | 替换为 required expected Goal ID + generation 和原子 SQL 增量；删除结束状态 gate |
+| HTTP/TUI active mutation 只写 DB | 成功返回 active 后调用唯一 `SessionPrompt.loop`；不在 TUI 增加另一套 loop |
 | TUI raw fetch/手写 Goal type | SDK 生成完成后删除重复 transport 代码 |
-| 旧 prompt continuation 只看 status/turn count | 增加 revision/snapshot guard；不增加 evaluator fallback |
+| 旧 prompt continuation 没有 durable marker/turn identity | 增加 part metadata marker、eligible message derivation 和 generation guard；不增加 evaluator fallback |
 
-不删除 `docs/goal-error-continuation-control-plan.md` 的历史设计；实现后只在必要处增加“revision/usage 规则已由本方案 supersede”的链接，避免读者把旧 best-effort 描述当成新不变量。
+不删除 `docs/goal-error-continuation-control-plan.md` 的历史设计；实现后只在必要处增加“generation/usage 规则已由本方案 supersede”的链接，避免读者把旧 best-effort 描述当成新不变量。
+
+## 10A. Secondary and Replacement Path Inventory
+
+| Path | Current/proposed | Classification | Produces success? | Decision-surface share | Disposition |
+|---|---|---|---|---:|---|
+| `GoalTurn -> GoalTool get -> modelTransition -> transaction` | proposed | primary-contract branch | yes | 42% | sole model semantic path |
+| blocked pending 1/2 through same modelTransition | proposed | primary-contract intermediate | no terminal success | 8% | preserve as audited progress |
+| HTTP/SDK user `set -> transaction -> event` | current, modified | primary-contract actor branch | yes | 18% | preserve last-write-wins |
+| active Goal mutation -> `SessionPrompt.loop -> RunState.ensureRunning` | proposed using current loop | primary-contract branch | yes | 8% | preserve as sole resume path |
+| Goal continuation marker -> next eligible Goal turn | current, modified | primary-contract branch | yes | 6% | preserve |
+| technical user messages inherit `goalTurnID` or backward-scan | current, modified | pass-through | no | 4% | preserve, never count blocked |
+| legacy terminal migration marker | proposed for persisted rows | existing compatibility | yes, readable current row | 3% | preserve while legacy rows exist |
+| no Goal/no read/invalid reason or transition | current/proposed | diagnostic | no | 4% | fail with GoalError, no write |
+| stale ID/generation/status/turn | proposed | diagnostic | no | 3% | fail, no current-row retry |
+| usage expected tuple mismatch | proposed | diagnostic | no | 2% | skip attribution with log/metric; never reassign |
+| empty-session active mutation | proposed | pass-through | persistence yes, loop no | 2% | wait for first real prompt |
+| evaluator/second model/current-row fallback | rejected | forbidden fallback | no | 0% | do not add |
+
+Decision-surface sum is 100%；diagnostic-only rows total 9%，below the 10% gate。没有 `try primary then alternate success`、catch-and-default、第二 parser/data source 或 feature-disable fallback。User `set` 与 model transition 是同一 domain row 的不同 actor contract，不是在失败后竞争的成功实现。
 
 ## 11. Traceability: Requirement to Code and Test
 
 | Req | Production owner | 行为测试 | 当前红色缺口 |
 |---|---|---|---|
-| REQ-01 | `tool/goal.ts`, `session/goal.ts` | GoalTool 无 read 不能 write；read 后可 write | 当前 `get=0,set=1` |
-| REQ-02 | `tool/goal.ts`, `session/goal.ts`, API schema | 空 reason、超长 reason、complete/blocked 持久化 | 当前无 reason 参数 |
-| REQ-03 | `tool/goal.ts`, `session/prompt.ts` | blocked/complete 新用户 turn 恢复；同 turn/paused 拒绝 | 当前不存在模型 active recovery contract |
-| REQ-04 | `session/goal.ts`, migration | objective edit/clear/recreate 后 stale write 被拒绝 | 当前无 revision/CAS |
-| REQ-05 | `session/prompt.ts`, `message-v2.ts` | continuation 使用最新 objective；compaction 不复活旧 snapshot | 当前没有 Goal revision 注入 |
-| REQ-06 | `session/prompt.ts`, `request-usage` | edit/clear 与 provider 完成竞态；旧 usage 不污染新 Goal | 当前按 session/current status 归属 |
-| REQ-07 | HTTP handler、run-state、TUI sync | idle resume 启动一次；busy resume 不重复启动 | 当前 handler 只写 DB |
-| REQ-08 | prompt/processor/selection | continue-on-error、max turns、abort、permission、terminal error 回归 | 既有测试未覆盖新 revision 边界 |
-| REQ-09 | OpenAPI、SDK、TUI | generated client 调用和 typecheck | 当前 SDK v2 缺 Goal schema/method |
+| REQ-01 / INV-01 | `SessionPrompt GoalTurnContext -> GoalTool read -> SessionGoal.modelTransition` | no-read zero-write；same eligible turn read then write | 当前 `get=0,set=1` |
+| REQ-02 / INV-02/12 | Goal schema/migration、Tool、HTTP/API | blank/6401 reject；terminal round-trip；legacy marker | 当前无 reason |
+| REQ-03 / INV-04 | GoalTurn source + terminal_turn_id + modelTransition | later real user recovers model terminal；same/continuation/user-terminal/paused reject | 当前无 active model action |
+| REQ-04 / INV-05 | generation/status/turn transaction guards | edit/pause/clear/recreate races zero stale write | 当前无 generation/CAS |
+| REQ-05 / INV-06 | raw message eligible derivation + continuation marker | multi assistant steps same turn；new continuation different；compaction/task not count | 当前 Tool context 每 assistant step 重建 |
+| REQ-06 / INV-07 | dispatch `{goalID,generation}` -> atomic accountUsage | terminal/pause still count；edit/clear skip；concurrent increments no lost update | 当前按 current active row |
+| REQ-07 / INV-08 | active HTTP result -> `SessionPrompt.loop -> RunState` | create/edit/resume idle；busy dedupe；empty session waits；pause/terminal no loop | 当前 handler 只写 DB |
+| REQ-08 / INV-11 | existing prompt/processor/selection branches | error allowlist、max turns、abort、compaction、permission 回归 | 现有测试需与新 context 联跑 |
+| REQ-09 / INV-09 | HttpApi Goal schema -> root generator -> SDK/TUI | committed OpenAPI diff、generated method/type、TUI reason | 当前 SDK v2 无完整 Goal contract |
+| REQ-10 / INV-10 | user `set` transaction | no expected revision remains last-write-wins；only objective edit generation++ | 当前无 generation |
 
 ### Reverse traceability
 
-- 每个新增 production branch 必须关联上表至少一个 REQ 和一个失败前置测试；没有需求映射的 helper、字段、API 或 migration 不加入 diff。
-- 每个新增字段必须有：schema/migration 默认值测试、service round-trip 测试、API/SDK 是否公开的明确结论。
-- 每个新增错误必须有调用方断言其“无写入/不启动 loop/不计 usage”的行为，不能只断言错误字符串。
+| Proposed production concept | Requirement/invariant | Evidence | Why existing logic cannot carry it |
+|---|---|---|---|
+| `generation` column/public field | REQ-04/06/09/10; INV-05/07/09/10 | objective edit preserves Goal ID | ID/status cannot distinguish objective A from B |
+| nullable public `reason` column | REQ-02; INV-02/12 | user requires auditable terminal reason | current Goal has no reason storage |
+| internal `blocked_reason` | REQ-02; INV-03 | exact same reason required across turns | terminal reason must stay null while active pending |
+| internal `blocked_streak` | INV-03 | three-turn contract | prompt text cannot enforce count |
+| internal `blocked_last_turn_id` | INV-03/06 | same-turn duplicate and skipped-turn detection | assistant message ID changes per step |
+| internal `terminal_turn_id` | REQ-03; INV-04 | same-turn self-unlock must fail | status alone cannot identify producing turn/actor |
+| in-runLoop `GoalTurnContext` | REQ-01/03/05; INV-01/04/06 | latest user spans multiple provider steps | current Tool extra is rebuilt per assistant step |
+| optional `MessageV2.User.goalTurnID` lineage | INV-03/06 | compaction replay copies non-synthetic user parts and otherwise looks real | adjacency/text heuristics misclassify replay；request usage is different owner |
+| `{goal_continuation:true}` TextPart metadata | INV-03/06 | Goal continuation itself is synthetic and starts a new eligible turn | lineage omission alone cannot distinguish it from other synthetic messages |
+| `SessionGoal.modelTransition` method | REQ-01~04; INV-01~05 | model/user actor contracts differ | generic set cannot require trusted read without breaking user set |
+| blocked-pending result union | INV-03 | attempts 1/2 are valid progress, not terminal/error | throwing would lose observable attempt semantics |
+| expected `{goalID,generation}` usage input | REQ-06; INV-07 | edit retains ID；terminal changes status | current session/status gate either contaminates B or drops final usage |
+| atomic SQL usage increment | INV-07 | concurrent provider/request completion reachable | read-add-write can lose increments |
+| active-set loop fork | REQ-07; INV-08 | current handler persists only | Goal domain cannot own Effect fiber/session history |
+| legacy terminal reason marker | INV-12 | persisted terminal rows lack recoverable reason | null would violate terminal response invariant；invented reason is false |
+| public generation/reason + generated SDK | REQ-09; INV-09 | GoalResponse directly exposes schema | manual TUI/raw types drift from contract |
+| existing `GoalError` reuse | INV-11 | domain already exposes typed message error | new error hierarchy has no additional consumer |
+| user last-write-wins branch | REQ-10; INV-10 | public payload has no expected revision and has external consumers | server read-then-CAS cannot detect stale user intent |
 
 ## 12. Concurrency and Failure Matrix
 
 | 场景 | 预期结果 | 防线 |
 |---|---|---|
-| 两个 model tool writes 同一 revision | 一个成功，一个 stale；只有一个 event/revision++ | immediate transaction + CAS |
-| 用户 edit 与 model complete 同时发生 | 以 transaction 先后为准；旧 snapshot 失败，不覆盖新 objective | Goal ID + revision |
-| clear 后 recreate 同 session | 旧 provider usage 不记入新 row；旧 terminal write 失败 | expected Goal ID + revision |
-| 用户 pause 在 provider 执行中 | 不取消 provider；返回后不自动继续，usage 仍计入 provider 起始 Goal | initial expected ID + current paused status |
-| 用户 resume blocked/complete，session idle | 一次 fork loop，进入 active continuation | handler integration seam + RunState |
-| 用户 resume 时 session busy | 不 fork 第二 loop；现有运行完成后由状态/事件收敛 | RunState mutex |
-| model 在同 turn `blocked` 后 `active` | active transition 拒绝；blocked audit 不被绕过 | `goalTurn.id` + userInitiated |
+| 两个 model writes 同 snapshot/turn | transaction 先成功者改变 status/audit；后者由 expected status/turn 或 same-turn rule 拒绝/幂等 pending；event 不重复 | immediate transaction + expected tuple |
+| 用户 edit 与 model complete 同时发生 | 以 transaction 先后为准；若 edit 先提交则 generation mismatch，若 complete 先提交则后续 edit 清 reason/audit 并 generation++ | Goal ID + generation transaction |
+| clear 后 recreate 同 session | 旧 provider usage 不记入新 row；旧 terminal write 失败 | expected Goal ID + generation |
+| 用户 pause/terminal 在 provider 执行中 | 不取消 provider；旧 model write expected status 失败；usage 仍计入同 generation | status guard + usage generation |
+| user active create/edit/resume，session idle | 有 user history时 fork existing loop；empty session 等首 prompt | handler + `SessionPrompt.loop` |
+| user active mutation时 session busy | 调用同一 loop 但 `ensureRunning` join，不创建第二 runner | RunState mutex |
+| model 在 terminal 同 turn写 active | active transition 拒绝；terminal_turn_id 相同 | eligible turn ID + actor source |
 | model 从 paused 写 active | 拒绝；必须用户/system resume | actor boundary |
-| blocked reason 改变 | streak 清零，从新 reason 第一次开始 | normalized reason + revision |
+| blocked reason 改变 | streak 从 1 开始，不继承旧 reason | exact trimmed reason + previous turn ID |
 | 同一 blocked reason 重复 tool call | streak 不增加 | last turn ID |
-| provider error/abort | 按现有 error/abort 结束；若有 usage 则按 expected ID 计入；不自动把失败伪装成 complete | prompt accounting ordering |
-| compaction 期间 objective 改变 | synthetic continuation 使用最新 revision；旧 summary 不能覆盖 | snapshot before dispatch |
+| 一个 eligible turn 没有 blocked attempt | 下一 turn 的 previous ID 与 DB last attempt 不同，streak 从 1 开始 | raw message ordering |
+| provider error/abort | 按现有 error/abort 结束；若已有可计 usage则按 expected generation 计入；不自动 complete | prompt accounting ordering |
+| compaction/task technical user message | 通过 `goalTurnID` 继承 canonical turn，不生成新 eligible turn | MessageV2 lineage + raw history |
+| compaction 后进程重启 | 内存 read snapshot 不恢复，模型必须重新调用 Goal get | fail-closed read gate |
 | GoalTool 被 permission 禁用 | 保持现有工具选择行为；不新增绕过 permission 的写入口 | `ToolSelection.enabled` |
 | DB busy/transaction failure | 向上返回错误，不静默 fallback、不重复写 | existing Effect error path |
-| 进程重启后 blocked streak | 从持久化字段恢复；不依赖内存 | schema fields |
-| 旧 row 无新增字段 | 默认值可读，第一次有效更新补齐 revision | migration default/backfill |
+| 进程重启后 blocked streak | reason/streak/last eligible turn 从 DB 恢复，前一 eligible turn从 raw message history重建 | schema + raw messages |
+| 旧 row 无新增字段 | migration generation=1；terminal 用 legacy reason marker；audit reset | generated migration + snapshot |
+| 两个 concurrent usage increments | where ID+generation 原子列加法，不丢更新 | one SQL update per completion |
 
 ## 13. TDD Implementation Slices (Future, Not Authorized Now)
 
@@ -368,38 +506,38 @@ goalTurn: {
 
 ### Slice A: Domain schema and model transition
 
-- 先补 `test/session/goal.test.ts`：无 snapshot、stale revision、reason validation、complete/blocked CAS、paused boundary。
-- 当前实现必须红：无 modelTransition、无 reason/revision。
+- 先补 `test/session/goal.test.ts`：generation lifecycle、reason lifecycle、blocked current/previous turn、model terminal/recovery、expected status/ID/generation、atomic usage。
+- 当前实现必须红：无 modelTransition、generation/reason/audit fields 和 expected generation usage。
 - 再改 `goal.sql.ts`、migration、`goal.ts`；运行 migration/round-trip tests。
 
 ### Slice B: GoalTool read gate and recovery
 
 - 新增 `test/tool/goal.test.ts`，通过真实 Tool public seam 断言 read count/write count、输出和持久化状态。
-- 覆盖 no Goal、read then complete、read then blocked streak 1/2/3、same turn duplicate、terminal recovery、paused rejection、invalid reason。
+- 覆盖 no Goal、no-read zero-write、read then complete、blank/6401 reason、blocked streak 1/2/3、same-turn duplicate、skipped eligible turn reset、later-real-user recovery、same/continuation/user-terminal/paused rejection。
 - 当前红色 harness 固定为回归测试，不能改成源码结构断言。
 
 ### Slice C: Prompt turn context and stale continuation
 
 - 扩展 `test/session/prompt.test.ts`，使用 readiness/poll，不用 fixed sleep。
-- 覆盖 objective edit/clear 与 continuation/provider completion 的时序、最新 revision 注入、旧 transition 拒绝、compaction 和 max turns。
+- 覆盖一个 real user 下多个 assistant steps 共享 read、Goal continuation marker 产生新 turn、compaction/task synthetic 不计 turn、objective edit/clear 与 provider completion 时序、最新 generation/objective 注入和 max turns。
 - 再改 `prompt.ts`，保持 processor/abort 现有语义。
 
 ### Slice D: Usage and terminal/error paths
 
 - 补 normal stop、structured output、tool error、provider error、abort、pause/clear race 的 Goal usage 行为测试。
-- 断言旧 Goal ID 归属、不污染新 Goal、terminal status 不丢失已开始 request 的 usage。
+- 断言 terminal/pause 后同 generation usage 仍计入、objective edit generation mismatch 跳过、clear/recreate ID mismatch 跳过、两个并发 increment 不丢失。
 
 ### Slice E: HTTP/TUI user resume
 
 - 扩展 `test/server/httpapi-goal.test.ts` 和必要的 run-state integration test。
-- 断言 idle 只启动一次、busy 不重复、stale conflict 不启动、user pause/resume 与 model recovery 分离。
+- 断言 active create/edit/resume 在有 user history时进入唯一 loop、busy join、empty session等待、pause/terminal/clear不启动；user last-write-wins 与 model generation guard 分离。
 - 再改 handler/TUI sync；不在测试中 mock 自己实现的 Goal rules。
 
 ### Slice F: Contract, generated SDK and compatibility
 
-- 先更新 OpenAPI source/schema tests，再运行 SDK generator。
-- 断言 generated SDK 能读写新字段，TUI 不再依赖重复 raw fetch type。
-- 运行 storage migration tests、opencode typecheck、SDK typecheck 和完整相关测试。
+- 先生成 Drizzle migration+snapshot 并补 legacy terminal/active defaults test；再更新 HttpApi schema。
+- 运行 root generator，断言 committed OpenAPI 和 generated SDK 都包含 generation/reason/Goal method，TUI 不再依赖重复 raw fetch type。
+- 运行 migration tests、opencode typecheck、SDK typecheck 和完整相关测试。
 
 ## 14. Expected File Scope and Diff Budget
 
@@ -407,82 +545,102 @@ goalTurn: {
 
 | 文件 | 预计动作 | 预计有效增量 | 原因 |
 |---|---|---:|---|
-| `packages/opencode/src/session/goal.sql.ts` | 修改 | +10~25 | revision/reason/streak schema |
-| `packages/opencode/src/session/goal.ts` | 修改 | +120~220/-30~60 | CAS、model transition、usage expected ID |
+| `packages/opencode/src/session/goal.sql.ts` | 修改 | +15~35 | exact generation/reason/internal audit columns |
+| `packages/opencode/src/session/goal.ts` | 修改 | +160~280/-35~80 | user transaction、modelTransition、reason/audit lifecycle、generation-aware atomic usage |
 | `packages/opencode/src/tool/goal.ts` | 修改 | +60~120/-15~35 | read gate、reason、recovery boundary |
 | `packages/opencode/src/tool/goal.txt` | 修改 | +15~30/-5~15 | 与 runtime 规则对齐的模型说明 |
-| `packages/opencode/src/session/prompt.ts` | 修改 | +100~180/-20~50 | GoalTurn、snapshot、usage ordering、resume guard |
-| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | 修改 | +25~70 | user resume idle-loop seam、conflict/error mapping |
-| `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts` | 修改 | +10~40 | request/response/OpenAPI fields |
-| `packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx` | 修改 | +10~40/-20~60 | generated SDK transport、reason/conflict display |
+| `packages/opencode/src/session/message-v2.ts` | 修改 | +2~8 | optional Goal turn lineage on technical user messages |
+| `packages/opencode/src/session/compaction.ts` | 修改 | +8~25 | replay/continue user messages继承 canonical Goal turn ID |
+| `packages/opencode/src/session/prompt.ts` | 修改 | +120~220/-20~60 | eligible GoalTurn、marker、snapshot、usage ordering/generation guard |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | 修改 | +20~60 | reason passthrough、active-result loop fork、empty-session guard |
+| `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts` | 修改 | +5~20 | reason payload；Goal response由domain schema传播 generation/reason |
+| `packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx` | 修改 | +10~45/-20~70 | generated SDK transport、terminal reason display/error |
 | `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | 修改 | +10~35/-15~45 | generated response/event reconcile |
-| `packages/opencode/migration/<generated-session-goal-revision>/migration.sql` | 新增 | +15~35 | schema default/backfill |
+| `packages/opencode/migration/<generated-session-goal-integrity>/migration.sql` | 新增 | generator-dependent | columns/defaults/legacy terminal reason backfill |
+| `packages/opencode/migration/<generated-session-goal-integrity>/snapshot.json` | 新增 | generator-dependent | required Drizzle snapshot |
 | `packages/opencode/test/session/goal.test.ts` | 修改 | +100~220 | domain behavior |
 | `packages/opencode/test/tool/goal.test.ts` | 新增 | +100~220 | public Tool behavior |
 | `packages/opencode/test/session/prompt.test.ts` | 修改 | +120~260 | turn/continuation/usage races |
 | `packages/opencode/test/server/httpapi-goal.test.ts` | 修改 | +70~160 | HTTP/resume behavior |
 | `packages/opencode/test/storage/goal-migration.test.ts` | 修改 | +20~60 | migration compatibility |
-| `packages/sdk/openapi.json` | 生成/必要源更新 | generator-dependent | public contract |
+| `packages/sdk/openapi.json` | 生成 | generator-dependent | committed public contract；由 root script 生成 |
 | `packages/sdk/js/src/v2/gen/sdk.gen.ts` | 生成 | generator-dependent | Goal methods |
 | `packages/sdk/js/src/v2/gen/types.gen.ts` | 生成 | generator-dependent | Goal types |
 
 ### Budget and scope guard
 
-- 预计生产/contract 文件约 10~12 个，测试约 5 个，migration 1 个，generated SDK 2 个主要文件；总有效新增约 700~1,400 行，删除约 150~350 行，最大不超过 18 个文件，除非 generator/审计证明必要。
+- 预计手写 production/contract 文件 11 个、测试 5 个、migration 目录 2 个产物、committed OpenAPI 1 个、generated SDK 2 个主要文件；总计预计 21 个文件。手写有效新增约 780~1,500 行、删除约 150~380 行；generator 若改变额外 deterministic siblings，可超过 21，但必须逐项核对且不能手改。
 - 预期没有新的 dependency、独立 Goal history 表、全仓库重命名或 unrelated formatting。
 - 如果实现中发现需要超过上述范围，必须先增加 canonical plan revision 并重新 full-scope audit，不能在 implementation 阶段自行扩张。
-- 中文解释性注释预算：生产新增/修改有效行预计 450~900，至少 70~150 行分布在 CAS、streak、usage attribution、resume race、migration default、错误边界附近；测试新增有效行预计 450~900，至少 70~150 行说明每个行为断言保护的回归边界。生成文件不手写注释，也不计入手工注释预算。
+- 中文解释性注释预算：手写 production/test/config 有效行 `E=900~1,800`；最低 `C=ceil(E*0.15)=135~270`。计划 `C=150~300`，分布在 eligible-turn 判定、trusted read、generation/status guard、blocked adjacency、reason lifecycle、usage attribution、resume/empty-session race、migration legacy marker和对应行为测试附近。imports、格式、生成文件、snapshot、纯移动不计 E/C。
+
+### Chinese comment budget
+
+| Metric | Estimate | Method |
+|---|---:|---|
+| Effective changed code lines `E` | 900~1,800 | exclude imports, blank/format-only, generated files, snapshots and pure moves |
+| Required Chinese explanatory comments `C` | 135~270 | `ceil(E * 0.15)` |
+| Planned qualifying `C` | 150~300 | nearby rationale/invariant/test-intent comments, not restatements |
 
 ## 15. Verification Commands
 
 实现获批后建议按窄到宽执行：
 
-```bash
-# from packages/opencode
-bun test test/session/goal.test.ts test/tool/goal.test.ts test/server/httpapi-goal.test.ts test/storage/goal-migration.test.ts --filter goal
-bun test test/session/prompt.test.ts --filter goal
-bun typecheck
-
-# after OpenAPI source changes, from repository root
-./packages/sdk/js/script/build.ts
-
-# from packages/sdk/js, using the package's existing scripts/typecheck
-bun typecheck
-
-# final focused and repository hygiene checks
-bun test test/session/goal.test.ts test/tool/goal.test.ts test/server/httpapi-goal.test.ts test/session/prompt.test.ts test/storage/goal-migration.test.ts
-git diff --check
-```
+| Command | Working directory | Evidence produced |
+|---|---|---|
+| `bun run db generate --name session-goal-integrity` | `packages/opencode` | 生成 `migration.sql` 和 `snapshot.json`，不手写 snapshot |
+| `bun test test/storage/goal-migration.test.ts` | `packages/opencode` | 旧 active/paused/complete/blocked rows 的 defaults/backfill |
+| `bun test test/session/goal.test.ts test/tool/goal.test.ts --filter goal` | `packages/opencode` | domain generation/reason/audit 和真实 Tool read gate |
+| `bun test test/session/prompt.test.ts --filter goal` | `packages/opencode` | eligible turns、continuation、usage、error/abort/compaction 时序 |
+| `bun test test/server/httpapi-goal.test.ts --filter goal` | `packages/opencode` | HTTP reason/last-write-wins/active loop/empty session contract |
+| `bun typecheck` | `packages/opencode` | production/test TypeScript |
+| `./script/generate.ts` | repository root | SDK build + committed `packages/sdk/openapi.json` + formatter；随后检查仅 Goal 相关 deterministic diff |
+| `bun typecheck` | `packages/sdk/js` | generated SDK contract typecheck |
+| `bun test test/session/goal.test.ts test/tool/goal.test.ts test/server/httpapi-goal.test.ts test/session/prompt.test.ts test/storage/goal-migration.test.ts` | `packages/opencode` | 完整相关行为回归，不依赖 `--filter` |
+| `git diff --check` | repository root | whitespace/patch hygiene |
 
 当前阶段只运行了既有相关测试和 `bun typecheck`，没有运行生成、migration 或任何写入性实现命令。
 
 ## 16. Risks and Open Questions
 
-### Resolved by this plan
+### Resolved decisions
 
-- 不新增 `in_progress`：现有 `active` 已表达可执行状态，避免状态集合膨胀。
-- 模型恢复 `complete/blocked` 只允许新真实用户 Goal turn；`paused` 保持用户/system-only。该选择直接保护“模型不能自己绕过用户暂停”的边界。
-- blocked streak 使用持久化的 normalized reason + Goal turn ID；不使用时间窗口或第二模型判断，减少不可重放因素。
-- provider 中途不强制取消；用 dispatch snapshot、CAS 和 expected Goal ID 保护后续写入/usage，避免引入新的 cancellation protocol。
+- 状态集合不变；`active` 即可执行，不新增 `in_progress`。
+- objective identity 使用稳定 Goal ID + objective-only `generation`；status/reason 改变不影响 generation，因此 final usage 不丢失。
+- user API 不增加 expected revision；明确保留 last-write-wins，避免虚假的 server-read CAS。
+- terminal public 字段固定为 nullable `reason`；pending blocked audit 固定为内部三字段，不再留给 implementation 选择。
+- eligible turn 固定为 real user/marked Goal continuation MessageID；provider steps/其他 synthetic 不计数。
+- model 只恢复 model-produced terminal；user-produced terminal/paused 仍由用户 API 恢复。
 
-### Must be addressed by implementation/audit
+### Real residual risks
 
-- `transition_reason` 与 `blocked_reason` 是否可以合并：必须由 schema/API/历史可读性证明，不能为了少一个字段丢失审计语义。
-- `GoalTurn.id` 使用哪个现有 message/request identifier：必须选当前 session loop 已有稳定 ID，不能用 Date.now 或随机值造成测试/重启不确定性。
-- HTTP 用户 mutation 是否要求 client 携带 revision：推荐兼容无 revision client，server 先读后 CAS；但 stale conflict 必须可观察，不能无条件覆盖。
-- SDK generator 是否会改动 `core/*.gen.ts`：以实际 generator diff 为准；若改动与 Goal 无关，必须回退并记录原因，不能扩大提交。
-- 现有旧 Goal rows 的 blocked 语义没有历史 streak：migration 默认从 0 开始；旧 terminal row 恢复 active 后再按新规则累计，不伪造历史三轮。
-- permission 禁用 GoalTool 时 continuation 的既有行为是否需要额外停止：本方案不新增绕过 permission 的路径；如果 audit 证明会造成 runaway cost，必须在 revision 中加入明确 guard 和回归测试。
-- provider 已开始后 objective 修改仍可能让一次请求基于旧 objective 消耗 token；这是本方案明确承认的残余风险，若产品要求“立即取消”，应另立需求而不是隐式扩大本方案。
+- edit 发生在 provider 已开始之后，旧请求仍可能消耗 token/执行外部读操作；本方案只阻止旧 terminal write 和 usage 归到新 generation。立即取消属于独立 cancellation requirement。
+- migration 无法恢复历史 terminal 理由，只能写诚实 legacy marker；完整历史审计需要未来独立 Goal history 需求。
+- internal synthetic message 后进程重启会丢 trusted read，模型必须重新 get；这是 fail-closed，不是兼容失败。
+- user-user concurrent HTTP mutation 继续 last-write-wins；这是现有公开 contract，非本需求承诺。
+- root generator 可能更新额外 deterministic generated siblings；implementation 必须逐项核对，任何非 Goal/formatter 必要 diff 不纳入提交。
 
-没有需要当前用户做产品选择的阻塞问题；上述选择均来自用户明确要求和当前仓库既有边界。任何 auditor 证明的行为级风险必须先回到本方案修订，不得在实施时临时决定。
+### Rejected speculation
+
+- 不要求 edit/clear 时立即取消 provider；原始需求只要求旧状态不能覆盖新 Goal。
+- 不引入 evaluator、第二模型或通用状态机；当前 read/reason/generation/recovery 不变量不需要。
+- 不因 GoalTool permission deny 自动终态化 Goal；没有该产品 contract，现有 max-turn/permission 保持。
+- 不新增完整 Goal history 表；当前消费者只需要 current reason 和 blocked audit。
+- clear/recreate 已由新 Goal ID 隔离；generation 主要修复保留 ID 的 objective edit。
+
+### Open decisions requiring the user
+
+None。R2 已固定所有会影响 schema、API、turn identity、usage 和 actor boundary 的决策；implementation 不得再自行选择替代语义。
 
 ## 17. Audit Record
 
-本方案由当前调研建立，尚未获得独立 auditor 放行：
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
+|---|---|---|---|---|---|---|
+| 1 | R1 | yes | `B-01` contracted；`B-02` reachable；`B-03` reachable；`B-04` contracted；`B-05` reachable；`B-06` contracted | 根因总体定位正确；R1 数值注释预算可满足；audit metadata 合格；plan audit 未执行实现命令 | **BLOCK** | `ses_0a078639fffeah1balTXVC5aXT` |
+| 2 | R2 | yes | `No blocking findings.` | `N-01` compaction-continue goalTurnID source；`N-02` migration backfill supplement；`N-03` "Task summary" producer not located | **APPROVE** | `ses_0a04a1ba5ffeuI7EyLSd05fToR` |
 
-| revision | auditor | result | blocking findings | disposition |
-|---|---|---|---|---|
-| R1 | pending | pending | pending | implementation forbidden |
+R1 release verdict 原文：`BLOCK`。R2 对应修复：B-01 由 §0/§6A/§6B/§10A/§11 完整契约处理；B-02 由 objective-only generation + expected tuple usage 处理；B-03 由 §8.3 eligible MessageID 和 raw history 处理；B-04 由 §8.1/8.2 exact fields/lifecycle 处理；B-05 通过明确保留 user last-write-wins 并删除虚假 conflict 承诺处理；B-06 由 migration SQL+snapshot 和 root generation commands 处理。
 
-审计要求：subagent 必须从仓库和本文件独立重建 full scope，检查行为、依赖、并发、错误、退出、清理、生成、兼容、安全和 15% 中文注释预算；不能只检查摘要或选定文件。若存在任意 blocking finding，新增 R2+ 并重新审计完整范围。
+R2 release verdict 原文：`APPROVE`。独立 auditor 确认：所有 material current-behavior claim 已对照源码验证；codex 证据准确且未过度依赖；根因（GoalTool→`set` 无 read/reason/generation）在 owner 处以唯一权威 primary path 修复；无禁止 fallback、responsibility leak 或未映射 concept；forward/reverse traceability 完整；secondary-path 预算低于 gate；TDD slices 可 red；prospective 中文注释预算满足 15% 公式。三项 non-blocking observations（N-01 compaction-continue `goalTurnID` source、N-02 migration backfill supplement、N-03 "Task summary" producer）是实现澄清项，有可用数据和 red-capable test，非 contract defect。
+
+Non-blocking disposition：N-01 在 implementation 时将 compaction-continue 路径的 `goalTurnID` source 显式固定为 `userMessage`；N-02 在 §13/§14 明确 generated `migration.sql` 补充 backfill UPDATE（不手写 `snapshot.json`）；N-03 若无独立 "Task summary" user-message producer 则删除该提及，backward-scan fallback 已覆盖。

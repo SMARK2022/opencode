@@ -1,13 +1,14 @@
-Get the current goal, or update its status.
+Get the current goal, or mark its status.
 
-Call with no arguments to get the current goal for this session, including status, objective, token and elapsed-time usage, and remaining token budget.
+Call with no arguments to get the current goal for this session, including status, objective, token and elapsed-time usage, remaining token budget, and objective generation. You MUST call get before marking any status — the tool will reject status changes without a prior get in the same goal turn.
 
-Call with `status` to mark the goal achieved or genuinely blocked:
-- Set status to `complete` only when the objective has actually been achieved and no required work remains.
-- Set status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change.
-- If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, set status to `blocked` again.
-- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; set status to `blocked`.
+Call with `mark` and `reason` to mark the goal as achieved, blocked, or resumed:
+- Mark as `complete` with a `reason` only when the objective has actually been achieved and no required work remains.
+- Mark as `blocked` with a `reason` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change. The tool tracks consecutive attempts automatically — call blocked once per goal turn, and the status will only change to blocked on the third consecutive attempt with the same reason.
+- Mark as `active` (no reason needed) to resume a goal that you previously marked complete or blocked, but only in a later user-initiated turn. You cannot resume a goal that was paused or terminated by the user.
+- If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, mark as `blocked` again.
+- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; mark as `blocked`.
 - Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.
 - Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.
-- You cannot use this tool to pause, resume, or clear a goal; those status changes are controlled by the user.
-- When marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.
+- You cannot use this tool to pause, resume (from paused), or clear a goal; those status changes are controlled by the user.
+- When marking a budgeted goal achieved with `complete`, report the final token usage from the tool result to the user.
