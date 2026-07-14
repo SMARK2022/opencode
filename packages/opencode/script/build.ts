@@ -9,6 +9,7 @@ import { PromptVoiceAssets } from "../../tui/src/prompt-voice-assets"
 import { fileURLToPath } from "url"
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
 import { resolveInstallTarget } from "./install-target"
+import { createSharpNativeFileMap, runSharpSmoke, sharpPlugin } from "./sharp-native"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -184,11 +185,12 @@ for (const item of targets) {
   const workerPath = "./src/cli/tui/worker.ts"
   const treeSitterWorkerPath = "opentui-tree-sitter-worker.js"
   const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
+  const sharpFiles = await createSharpNativeFileMap(item)
 
-  await Bun.build({
+  const result = await Bun.build({
     conditions: ["bun", "node"],
     tsconfig: "./tsconfig.json",
-    plugins: [plugin],
+    plugins: [plugin, sharpPlugin],
     external: ["node-gyp"],
     format: "esm",
     minify: true,
@@ -209,6 +211,7 @@ for (const item of targets) {
       ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
       // 生成模块只保存“目标平台可用的 native 资源表”，避免所有平台二进制都被塞进每个 release exe。
       "opencode-pvrecorder.gen.ts": PromptVoiceAssets.createPvRecorderNativeFileMap(item, dir),
+      "opencode-sharp.gen.ts": sharpFiles.source,
     },
     entrypoints: [
       "./src/index.ts",
@@ -217,6 +220,7 @@ for (const item of targets) {
       ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
       // 虚拟模块必须作为 entrypoint 交给 Bun.build，否则 dynamic import 在 compiled exe 内找不到资源映射。
       "opencode-pvrecorder.gen.ts",
+      "opencode-sharp.gen.ts",
     ],
     define: {
       FFF_LIBC: JSON.stringify(item.abi === "musl" ? "musl" : "gnu"),
@@ -231,6 +235,8 @@ for (const item of targets) {
       ...(item.os === "linux" ? { "process.env.OPENTUI_LIBC": JSON.stringify(item.abi ?? "glibc") } : {}),
     },
   })
+  if (!result.success) throw new AggregateError(result.logs, `Failed to build ${name}`)
+  if (sharpFiles.supported) await runSharpSmoke(item, name.replace(pkg.name, "bun"), sharpFiles.source, Script.version)
 
   // Embedding the bundle invalidates the linker's ad-hoc signature, and macOS 27+
   // SIGKILLs binaries with invalid pages. Re-sign ad-hoc; release CI re-signs with Developer ID.

@@ -729,8 +729,9 @@ describe("tool.read truncation", () => {
     }),
   )
 
-  // resizer 不可用时，附件必须保留原始 MIME 和逐字节相同的内容。
-  noResizer.live("falls back to original image bytes when the image resizer is unavailable", () =>
+  // #485：fail-closed 反转 #277 回退契约——处理器不可用时终止本次 Read，
+  // 不再把未经主处理链确认的原始字节继续交给模型
+  noResizer.live("fails closed when the image resizer is unavailable", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       const png = Buffer.from(
@@ -739,13 +740,9 @@ describe("tool.read truncation", () => {
       )
       yield* put(path.join(dir, "image.png"), png)
 
-      const result = yield* exec(dir, { filePath: path.join(dir, "image.png") })
-      expect(result.output).toStartWith("Image read successfully")
-      expect(result.attachments?.[0]).toMatchObject({
-        type: "file",
-        mime: "image/png",
-        url: `data:image/png;base64,${png.toString("base64")}`,
-      })
+      const error = yield* fail(dir, { filePath: path.join(dir, "image.png") })
+      // 错误必须指向resizer本身，而不是被上层包装成通用读取失败
+      expect(error.message).toBe("Image resizer is unavailable")
     }),
   )
 

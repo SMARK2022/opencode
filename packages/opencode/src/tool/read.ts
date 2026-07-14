@@ -530,13 +530,7 @@ export const ReadTool = Tool.define<
                 },
                 { tokenBudget: 1600 },
               )
-              .pipe(
-                // #277：只有 resizer 不可用才回退；DecodeError 与尺寸错误继续失败。
-                Effect.catchIf(
-                  (error) => error instanceof Image.ResizerUnavailableError,
-                  () => Effect.succeed(input),
-                ),
-              )
+              // 不可用与解码失败均不发送原图；下方PDF分支仍原样返回。
           : input
         const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
         return {

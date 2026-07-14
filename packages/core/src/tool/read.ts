@@ -128,12 +128,7 @@ const layer = Layer.effectDiscard(
                 return yield* image
                   // 1,600 的源估算只约束 Read 图片，不能扩散到用户上传。
                   .normalize(resource, { ...content, encoding: "base64" }, 1600 * 750)
-                  .pipe(
-                    Effect.catchTag("Image.ResizerUnavailableError", (error) =>
-                      SUPPORTED_IMAGE_MIMES.has(content.mime) ? Effect.succeed(content) : Effect.fail(error),
-                    ),
-                    Effect.map(attach),
-                  )
+                  .pipe(Effect.map(attach))
               }
               if ("encoding" in content && content.encoding === "base64")
                 return yield* Effect.fail(new ReadToolFileSystem.BinaryFileError({ resource }))
@@ -141,7 +136,9 @@ const layer = Layer.effectDiscard(
             }).pipe(
               Effect.mapError((error) => {
                 const message =
-                  error instanceof ReadToolFileSystem.BinaryFileError ||
+                  error instanceof Image.ResizerUnavailableError
+                    ? "Image resizer is unavailable"
+                    : error instanceof ReadToolFileSystem.BinaryFileError ||
                   error instanceof ReadToolFileSystem.MediaIngestLimitError ||
                   error instanceof Image.DecodeError ||
                   error instanceof Image.SizeError

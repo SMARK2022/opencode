@@ -1351,13 +1351,9 @@ const layer = Layer.effect(
       )
 
       const parts = yield* Effect.forEach(resolvedParts, (part) =>
+        // #485：fail-closed——resizer 不可用时 normalize 失败直接向上传播，Part 不入库
         part.type === "file" && part.mime.startsWith("image/")
-          ? image.normalize(part).pipe(
-              Effect.catchIf(
-                (error) => error instanceof Image.ResizerUnavailableError,
-                () => Effect.succeed(part),
-              ),
-            )
+          ? image.normalize(part)
           : Effect.succeed(part),
       )
 

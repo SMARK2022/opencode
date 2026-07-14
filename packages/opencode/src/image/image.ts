@@ -64,7 +64,8 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
 
-const layer = Layer.effect(
+// #485：导出 layer 供离线维护脚本（script/migrate-image-attachment.ts）复用生产 normalize 链
+export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service

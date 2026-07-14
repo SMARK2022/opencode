@@ -254,13 +254,19 @@ function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; proces
   return LayerNode.compile(promptRoot, replacements)
 }
 
-function makeHttp(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking" }) {
+function makeHttp(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking"; image?: "unavailable" }) {
   const root = LayerNode.group([promptRoot, testLLMServerNode])
+  // #485：resizer 不可用注入——normalize 必然失败，验证 prompt 在持久化前 fail-closed
+  const unavailableImage = Layer.succeed(
+    Image.Service,
+    Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }),
+  )
   const replacements = [
     [SessionSummary.node, summary],
     [LSP.node, lsp],
     [MCP.node, makeMcp(input?.mcpInstructions)],
     [RuntimeFlags.node, runtimeFlags],
+    ...(input?.image === "unavailable" ? [[Image.node, unavailableImage] as const] : []),
   ] as const
   if (input?.processor === "blocking") {
     return LayerNode.compile(root, [...replacements, [SessionProcessor.node, blockingProcessor]])
@@ -288,6 +294,30 @@ const withMcpInstructions = testEffect(
 )
 const unix = process.platform !== "win32" ? it.instance : it.instance.skip
 const unixNoLLMServer = process.platform !== "win32" ? noLLMServer.instance : noLLMServer.instance.skip
+// #485：resizer 不可用环境——验证 prompt 在持久化前 fail-closed
+const unavailable = testEffect(makeHttp({ image: "unavailable" }))
+unavailable.instance(
+  "fails before persisting an image when the resizer is unavailable",
+  () =>
+    Effect.gen(function* () {
+      yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      const result = yield* Effect.exit(
+        prompt.prompt({
+          sessionID: chat.id,
+          agent: "build",
+          noReply: true,
+          parts: [{ type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }],
+        }),
+      )
+      expect(Exit.isFailure(result)).toBe(true)
+      // normalize 失败发生在 updateMessage/updatePart 之前，数据库中不应留下半个用户请求
+      expect(yield* MessageV2.filterCompactedEffect(chat.id)).toHaveLength(0)
+    }),
+  { git: true },
+)
 
 // Config that registers a custom "test" provider with a "test-model" model
 // so provider model lookup succeeds inside the loop.

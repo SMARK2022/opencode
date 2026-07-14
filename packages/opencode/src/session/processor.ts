@@ -636,15 +636,10 @@ const layer = Layer.effect(
             }
             const rawOutput = toolResultOutput(value)
             const normalized = yield* Effect.forEach(rawOutput.attachments ?? [], (attachment) =>
+              // #485：fail-closed——resizer 不可用时该附件失败省略（omitted 计数），不再回退原图
               attachment.mime.startsWith("image/")
                 // 沿用唯一附件归一化分支，只有实际 Read 调用携带源预算。
-                ? image.normalize(attachment, toolCall?.part.tool === "read" ? { tokenBudget: 1600 } : undefined).pipe(
-                    Effect.catchIf(
-                      (error) => error instanceof Image.ResizerUnavailableError,
-                      () => Effect.succeed(attachment),
-                    ),
-                    Effect.exit,
-                  )
+                ? image.normalize(attachment, toolCall?.part.tool === "read" ? { tokenBudget: 1600 } : undefined).pipe(Effect.exit)
                 : Effect.succeed(Exit.succeed<SessionV1.FilePart>(attachment)),
             )
             const omitted = normalized.filter(Exit.isFailure).length

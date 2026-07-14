@@ -3,10 +3,19 @@ export * as CoreImageSharp from "./sharp"
 import { Effect } from "effect"
 import { FileSystem } from "../filesystem"
 import { Image } from "../image"
+import { Global } from "../global"
+import { createHash, randomUUID } from "node:crypto"
+import fs from "node:fs/promises"
+import path from "node:path"
+
+declare const OPENCODE_COMPILED: boolean | undefined
+type EmbeddedSharp = { target: string; version: string; addon: string | null; files: Record<string, string> }
 
 export const make = Effect.gen(function* () {
   const sharp = yield* Effect.tryPromise({
     try: async () => {
+      // V1和原生Image共用此adapter，compiled只改变装载位置，不改变规整/预算算法。
+      if (typeof OPENCODE_COMPILED !== "undefined" && OPENCODE_COMPILED) await prepareCompiledSharp()
       const module = await import("sharp")
       return module.default
     },
@@ -79,3 +88,38 @@ export const make = Effect.gen(function* () {
     return yield* sizeError
   })
 })
+
+async function prepareCompiledSharp() {
+  // 虚拟模块与构建入口成对；不猜测开发机node_modules路径或临时切换第二后端。
+  // @ts-expect-error generated at build time
+  const embedded = (await import("opencode-sharp.gen.ts")).default as EmbeddedSharp
+  if (!embedded.addon) throw new Error(`Sharp is unavailable for ${embedded.target}`)
+  const root = path.join(Global.Path.cache, "native", "sharp", embedded.version, embedded.target)
+  await Promise.all(Object.entries(embedded.files).map(async ([relative, source]) => {
+    const target = path.join(root, ...relative.split("/"))
+    if (await sameFileContent(source, target)) return
+    await fs.mkdir(path.dirname(target), { recursive: true })
+    const temp = `${target}.tmp-${process.pid}-${randomUUID()}`
+    try {
+      await Bun.write(temp, Bun.file(source))
+      try { await fs.rename(temp, target) } catch (error) {
+        // Windows的并发winner可能已加载DLL；只有内容完全一致才复用，否则保留原错误。
+        if (!(await sameFileContent(source, target))) throw error
+      }
+      if (!(await sameFileContent(source, target))) throw new Error(`Extracted Sharp resource failed verification: ${target}`)
+    } finally {
+      await fs.rm(temp, { force: true }).catch(() => {})
+    }
+  }))
+  // 所有shared library校验完成后才公开addon路径，不能让加载器观察到半释放状态。
+  ;(globalThis as typeof globalThis & { __OPENCODE_SHARP_NATIVE_PATH?: string }).__OPENCODE_SHARP_NATIVE_PATH = path.join(root, ...embedded.addon.split("/"))
+}
+
+async function sameFileContent(source: string, target: string) {
+  if (!(await Bun.file(target).exists()) || Bun.file(source).size !== Bun.file(target).size) return false
+  return (await fileDigest(source)) === (await fileDigest(target))
+}
+
+async function fileDigest(file: string) {
+  return createHash("sha256").update(Buffer.from(await Bun.file(file).arrayBuffer())).digest("hex")
+}
