@@ -23,10 +23,11 @@ const CSI = /\x1b\[[0-9;]*m/g
 const RESET = "\x1b[0m"
 // #174：BOLD 可选强调
 const BOLD = "\x1b[1m"
-// #174：COLORS 映射终端色
+// #174：COLORS 映射终端色。
+// R6 系列色使用终端 bright 槽位，正文使用默认前景，保留用户主题的对比度。
 const COLORS: Record<string, string> = {
-  red: "\x1b[31m", green: "\x1b[32m", blue: "\x1b[34m", yellow: "\x1b[33m",
-  magenta: "\x1b[35m", cyan: "\x1b[36m", white: "\x1b[37m", gray: "\x1b[90m",
+  red: "\x1b[91m", green: "\x1b[92m", blue: "\x1b[94m", yellow: "\x1b[93m",
+  magenta: "\x1b[95m", cyan: "\x1b[96m", white: "\x1b[39m", gray: "\x1b[90m",
 }
 // #174：DENSITY 供热力/矩阵相对强度
 // #174：密度字符只编码相对强度
@@ -114,10 +115,14 @@ export const truncateVisible = (text: string, width: number) => {
 export const fitVisible = (text: string, width: number) => padEndVisible(truncateVisible(text, width), width)
 // #174：paint 在 never/非 TTY 去颜色码
 // #174：非 TTY 或 never 时去 ANSI
-export const paint = (text: string, color?: ChartColor, _ctx?: unknown, bold?: boolean) => {
-  if (!process.stdout.isTTY) return stripAnsi(text)
+export const paint = (text: string, color?: ChartColor, ctx?: unknown, bold?: boolean) => {
+  // 输出端消费同一模式裁决；省略context的片段也遵守NO_COLOR，always仍可显式开启。
+  const mode = (ctx as { color?: string } | undefined)?.color ?? renderContext().color
+  if (mode === "never") return stripAnsi(text)
+  if (mode !== "always" && !process.stdout.isTTY) return stripAnsi(text)
   const pref = (bold ? BOLD : "") + (color ? COLORS[color] || "" : "")
-  return pref ? pref + text + RESET : text
+  // foreground不会自行清除dim/bold；片段起点先复位强度，防止继承上一个样式。
+  return pref ? "\x1b[22m\x1b[39m" + pref + text + RESET : text
 }
 
 // #181：序列 sparkline，窄宽时由调用方关闭
@@ -151,7 +156,9 @@ export const sparkline = (values: number[], width: number) => {
 
 // #174：renderContext 一次缓存宽度与颜色模式
 export const renderContext = (color?: string) => ({
-  color: color === "never" || (color !== "always" && !process.stdout.isTTY) ? "never" : color || "auto",
+  // R6 truthy NO_COLOR 契约：always 恒开；never 恒关；auto 在非 TTY 或非空
+  // NO_COLOR 下禁用（空字符串按 truthiness 等同未设置，与源 0174 语义一致）。
+  color: color === "never" || (color !== "always" && (!process.stdout.isTTY || !!process.env.NO_COLOR)) ? "never" : color || "auto",
   width: statsContentWidth(),
 })
 // #174：指标展示统一 formatNumber
@@ -231,7 +238,7 @@ export const renderHeatmap = (input: {
   width?: number
   formatter?: (n: number) => string
 }) => {
-  const lines = input.title ? [paint(input.title, "cyan", undefined, true)] : []
+  const lines = input.title ? [paint(input.title, "cyan", renderContext(input.color), true)] : []
   const points = input.points.toSorted((a, b) => a.day - b.day)
   const hi = Math.max(1, ...points.map((point) => point.value))
   const weeks = new Map<number, { label: string; values: Map<number, number> }>()

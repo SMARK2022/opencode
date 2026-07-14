@@ -14,6 +14,7 @@ import {
   modelProviderMatrix,
   paint,
   renderCallout,
+  renderContext,
   renderEmptyState,
   renderHeatmap,
   renderMatrix,
@@ -44,11 +45,8 @@ export type StatsRenderOptions = {
 // #174：auto 非 TTY=never
 // #174：color=auto 在非 TTY 视为 never，避免管道脏码
 // #174：auto 在非 TTY 降为 never 防管道脏码
-export const useColor = (mode?: ColorMode) => {
-  if (mode === "always") return true
-  if (mode === "never") return false
-  return Boolean(process.stdout.isTTY)
-}
+// 公开查询与实际发射点使用同一NO_COLOR裁决，避免字段正确但输出漏色。
+export const useColor = (mode?: ColorMode) => renderContext(mode).color !== "never"
 
 // #174：limit 只 slice
 // #174：limit 只 slice 展示行，不改 totals
@@ -59,8 +57,9 @@ export const limitRows = <T,>(rows: T[], limit?: number) => {
 }
 
 // #174：header 固定展示关键汇总
-const header = (report: StatsReport, title: string) => [
-  paint(title, "cyan", undefined, true),
+const header = (report: StatsReport, title: string, color?: ColorMode) => [
+  // R6标题采用magenta，辅助标题保留cyan；同一模式决定每个页面的ANSI输出。
+  paint(title, "magenta", renderContext(color), true),
   `sessions=${report.totalSessions} cost=${formatNumber(report.total.cost)} tokens=${formatNumber(report.total.tokens.total)} days=${report.days}`,
   "-".repeat(Math.min(60, statsContentWidth())),
 ]
@@ -420,7 +419,7 @@ const renderInsightsCallout = (report: StatsReport) => {
 
 export const renderDashboard = (report: StatsReport, options: StatsRenderOptions = {}) => {
   // #182：分区仪表盘：activity / tokens / cost / tops / sessions / insights
-  const lines: string[] = [...header(report, "stats dashboard")]
+  const lines: string[] = [...header(report, "stats dashboard", options.color)]
   lines.push(...renderSectionDivider("Daily activity"))
   // 宽屏复用现有多列布局；窄屏保留完整内容，避免固定分栏裁掉日期。
   const activity = [renderCalendarActivity(report), renderHourOfDayStrip(report), renderDayOfWeekShare(report)]
@@ -481,7 +480,7 @@ export const renderDashboard = (report: StatsReport, options: StatsRenderOptions
 
 export const renderOverview = (report: StatsReport, options: StatsRenderOptions = {}) =>
   [
-    ...header(report, "stats overview"),
+    ...header(report, "stats overview", options.color),
     `messages=${report.totalMessages} tools=${report.totalTools} medianTokens/session=${formatNumber(report.medianTokensPerSession)}`,
     "tools:",
     ...limitRows(report.toolUsage, options.limit).map((t) => `  ${fitVisible(t.id, 24)} ${t.count}`),
@@ -490,7 +489,7 @@ export const renderOverview = (report: StatsReport, options: StatsRenderOptions 
 // #174：models 页按 metric 选 cost 或 tokens
 export const renderModels = (report: StatsReport, options: StatsRenderOptions = {}) =>
   [
-    ...header(report, "stats models"),
+    ...header(report, "stats models", options.color),
     ...renderRankBars({
       rows: topGroups(report.models, options).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
     }),
@@ -501,7 +500,7 @@ export const renderModels = (report: StatsReport, options: StatsRenderOptions = 
 // #174：providers 页数据源独立
 export const renderProviders = (report: StatsReport, options: StatsRenderOptions = {}) =>
   [
-    ...header(report, "stats providers"),
+    ...header(report, "stats providers", options.color),
     ...renderRankBars({
       rows: topGroups(report.providers, options).map((p) => ({ label: p.label || p.id, value: (options.metric ?? "cost") === "cost" ? p.cost : p.tokens.total })),
     }),
@@ -515,7 +514,7 @@ export const renderProviders = (report: StatsReport, options: StatsRenderOptions
 // #174：renderTimeline 服务时间线折线，不承担 heatmap 命令
 export const renderTimeline = (report: StatsReport, options: StatsRenderOptions = {}) =>
   [
-    ...header(report, "stats timeline"),
+    ...header(report, "stats timeline", options.color),
     ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => ((options.metric ?? "tokens") === "cost" ? d.cost : d.tokens.total))] }),
     ...renderStackedAreaChart({ daily: report.daily, layers: layersFromTokenParts() }),
     // 每日结局与时长来自同一报告，保留错误/中止集中日期的诊断能力。
@@ -533,7 +532,7 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions 
     return b.cost - a.cost
   })
   return [
-    ...header(report, "stats sessions"),
+    ...header(report, "stats sessions", options.color),
     ...limitRows(rows, options.limit).map((s) => `${fitVisible(s.title || s.id, 28)} cost=${formatNumber(s.cost)} tokens=${formatNumber(s.tokens.total)} avg=${Math.round(s.durationMs / Math.max(1, s.requests))}ms`),
   ].join("\n")
 }
@@ -542,7 +541,7 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions 
 // #177：charts 页附加 tool context 时间序列
 export const renderCharts = (report: StatsReport, options: StatsRenderOptions = {}) =>
   [
-    ...header(report, "stats charts"),
+    ...header(report, "stats charts", options.color),
     // #177：charts 主路径组合 tool context 时间序列
     ...((report.toolSeries?.length ?? 0) > 0
       ? renderRoundedLineChart({
@@ -571,7 +570,7 @@ export const renderHeatmapPage = (report: StatsReport, options: StatsRenderOptio
 // #174：matrix 构造 provider×model 交叉表
   const matrix = modelProviderMatrix(report)
   return [
-    ...header(report, "stats heatmap"),
+    ...header(report, "stats heatmap", options.color),
     ...renderHeatmap({ title: "Daily tokens", points: dailyTokenPoints(report), color: options.color }),
     ...renderHeatmap({ title: "Daily cost", points: dailyCostPoints(report), color: options.color }),
     ...renderMatrix({ title: "provider x model", ...matrix }),
@@ -581,7 +580,7 @@ export const renderHeatmapPage = (report: StatsReport, options: StatsRenderOptio
 // #174：costs 强制 cost
 export const renderCosts = (report: StatsReport, options: StatsRenderOptions = {}) =>
   [
-    ...header(report, "stats costs"),
+    ...header(report, "stats costs", options.color),
     ...renderRankBars({
       // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
       rows: limitRows(
@@ -598,7 +597,7 @@ export const renderCosts = (report: StatsReport, options: StatsRenderOptions = {
 // #174：tokens 页先打印 cache 读写分列
 export const renderTokens = (report: StatsReport, options: StatsRenderOptions = {}) =>
   [
-    ...header(report, "stats tokens"),
+    ...header(report, "stats tokens", options.color),
     `input=${formatNumber(report.total.tokens.input)} output=${formatNumber(report.total.tokens.output + report.total.tokens.reasoning)} cacheRead=${formatNumber(report.total.tokens.cache.read)} cacheWrite=${formatNumber(report.total.tokens.cache.write)}`,
     ...renderRankBars({ rows: limitRows(report.models, options.limit).map((m) => ({ label: m.label || m.id, value: m.tokens.total })) }),
     ...renderStackedAreaChart({ title: "Input / output / cache over time", daily: report.daily, layers: layersFromTokenParts() }),
