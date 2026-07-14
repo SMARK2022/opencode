@@ -528,6 +528,8 @@ export type SessionsGoalOutput = {
     readonly tokensUsed: number | "Infinity" | "-Infinity" | "NaN"
     readonly timeUsedSeconds: number | "Infinity" | "-Infinity" | "NaN"
     readonly continueOnError: boolean
+    readonly generation: number | "Infinity" | "-Infinity" | "NaN"
+    readonly reason: string | null
     readonly time: {
       readonly created: number | "Infinity" | "-Infinity" | "NaN"
       readonly updated: number | "Infinity" | "-Infinity" | "NaN"
@@ -542,25 +544,36 @@ export type SessionsGoalSetInput = {
     readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
     readonly tokenBudget?: number | null | undefined
     readonly continueOnError?: boolean | undefined
+    readonly reason?: string | undefined
   }["objective"]
   readonly status?: {
     readonly objective?: string | undefined
     readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
     readonly tokenBudget?: number | null | undefined
     readonly continueOnError?: boolean | undefined
+    readonly reason?: string | undefined
   }["status"]
   readonly tokenBudget?: {
     readonly objective?: string | undefined
     readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
     readonly tokenBudget?: number | null | undefined
     readonly continueOnError?: boolean | undefined
+    readonly reason?: string | undefined
   }["tokenBudget"]
   readonly continueOnError?: {
     readonly objective?: string | undefined
     readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
     readonly tokenBudget?: number | null | undefined
     readonly continueOnError?: boolean | undefined
+    readonly reason?: string | undefined
   }["continueOnError"]
+  readonly reason?: {
+    readonly objective?: string | undefined
+    readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
+    readonly tokenBudget?: number | null | undefined
+    readonly continueOnError?: boolean | undefined
+    readonly reason?: string | undefined
+  }["reason"]
 }
 
 export type SessionsGoalSetOutput = {
@@ -573,6 +586,8 @@ export type SessionsGoalSetOutput = {
     readonly tokensUsed: number | "Infinity" | "-Infinity" | "NaN"
     readonly timeUsedSeconds: number | "Infinity" | "-Infinity" | "NaN"
     readonly continueOnError: boolean
+    readonly generation: number | "Infinity" | "-Infinity" | "NaN"
+    readonly reason: string | null
     readonly time: {
       readonly created: number | "Infinity" | "-Infinity" | "NaN"
       readonly updated: number | "Infinity" | "-Infinity" | "NaN"

@@ -707,7 +707,7 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     const goals = yield* SessionGoal.Service
     // 共享存储直接走内存DB和真实投影，不借Git初始化或产品生命周期证明CRUD。
     expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
-    yield* goals.accountUsage(sessionID, 500, 10)
+    yield* goals.accountUsage(sessionID, 500, 10, { goalID: "missing", generation: 1 })
     expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
     expect(yield* goals.set(sessionID, { status: "paused" }).pipe(Effect.exit)).toMatchObject({ _tag: "Failure" })
     for (const invalid of [{ objective: "   " }, { objective: "a".repeat(6401) }, { objective: "test", tokenBudget: 0 }, { objective: "test", tokenBudget: -100 }]) {
@@ -722,17 +722,17 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     const original = yield* goals.set(sessionID, { objective: "  original  ", tokenBudget: 50000 })
     expect(original).toMatchObject({ status: "active", objective: "original", tokensUsed: 0, timeUsedSeconds: 0 })
     expect(original.id).toBeTruthy()
-    yield* goals.accountUsage(sessionID, 1000, 30)
+    yield* goals.accountUsage(sessionID, 1000, 30, { goalID: original.id, generation: original.generation })
     const revised = yield* goals.set(sessionID, { objective: "revised" })
     expect(revised).toMatchObject({ id: original.id, objective: "revised", tokensUsed: 1000, timeUsedSeconds: 30, tokenBudget: 50000, time: { created: original.time.created } })
-    // 用户停止态均不计费，恢复后仍沿原目标ID和账目继续，而非另建目标。
+    // 改目标后的旧代请求不能污染新代账目；恢复后同代消耗仍沿原目标ID累计。
     for (const status of ["paused", "complete", "blocked"] as const) {
-      expect(yield* goals.set(sessionID, { status })).toMatchObject({ objective: "revised", status })
-      yield* goals.accountUsage(sessionID, 999, 99)
+      expect(yield* goals.set(sessionID, { status, reason: "User transition" })).toMatchObject({ objective: "revised", status })
+      yield* goals.accountUsage(sessionID, 999, 99, { goalID: original.id, generation: original.generation })
       expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({ tokensUsed: 1000, timeUsedSeconds: 30 })
     }
     yield* goals.set(sessionID, { status: "active" })
-    yield* goals.accountUsage(sessionID, 234, 26)
+    yield* goals.accountUsage(sessionID, 234, 26, { goalID: revised.id, generation: revised.generation })
     const prompt = SessionGoal.continuationPrompt(Option.getOrThrow(yield* goals.get(sessionID)))
     for (const text of ["<session-goal-continuation>", "revised", "Tokens used: 1234", "Token budget: 50000", "Tokens remaining: 48766", "call the goal tool with status", "The audit must prove completion, not merely fail to find obvious remaining work."]) expect(prompt).toContain(text)
     expect(yield* goals.set(sessionID, { tokenBudget: null })).toMatchObject({ tokenBudget: null })
@@ -781,7 +781,7 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     expect(read.output?.content).toEqual([{
       type: "text",
       text: JSON.stringify({
-        goal: { objective: "Finish the native task", status: "paused" },
+        goal: { objective: "Finish the native task", status: "paused", generation: 1, reason: null },
         tokensUsed: 12,
         tokenBudget: 1,
         remainingTokens: 0,
@@ -793,21 +793,29 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     yield* goals.set(sessionID, { status: "active" })
     responses = [[
       LLMEvent.stepStart({ index: 0 }),
-      LLMEvent.toolCall({ id: "goal-done", name: "goal", input: { status: "complete" } }),
+      // 读取和mark分属两个provider step，验证可信快照不随普通工具轮次丢失。
+      LLMEvent.toolCall({ id: "goal-read-before-done", name: "goal", input: {} }),
       LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+      LLMEvent.finish({ reason: "tool-calls" }),
+    ], [
+      LLMEvent.stepStart({ index: 0 }),
+      LLMEvent.toolCall({ id: "goal-done", name: "goal", input: { mark: "complete", reason: " Verified requested end state " } }),
+      LLMEvent.stepFinish({ index: 0, reason: "tool-calls", usage: { inputTokens: 2, nonCachedInputTokens: 2, outputTokens: 1 } }),
       LLMEvent.finish({ reason: "tool-calls" }),
     ], normal]
     requests.length = 0
     yield* session.resume(sessionID)
     // 走真实工具注册与执行；目标完成后仅结清工具结果，不再注入 Goal 消息。
-    expect(requests).toHaveLength(2)
-    expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("complete")
+    expect(requests).toHaveLength(3)
+    expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({
+      status: "complete", generation: 1, reason: "Verified requested end state", tokensUsed: 15,
+    })
 
-    // 用户恢复同一已完成目标，停用期间的用量不计入，既有预算和账目不能重置。
+    // 用户恢复仍保留同一目标和预算；同代请求的最终用量在终态后也不能丢失。
     const completed = Option.getOrThrow(yield* goals.get(sessionID))
-    yield* goals.accountUsage(sessionID, 999, 99)
+    yield* goals.accountUsage(sessionID, 999, 99, { goalID: completed.id, generation: completed.generation })
     expect(yield* goals.set(sessionID, { status: "active" })).toMatchObject({ id: completed.id,
-      tokensUsed: completed.tokensUsed, timeUsedSeconds: completed.timeUsedSeconds,
+      tokensUsed: completed.tokensUsed + 999, timeUsedSeconds: completed.timeUsedSeconds + 99,
       tokenBudget: completed.tokenBudget, time: { created: completed.time.created } })
     responses = undefined
     response = []
@@ -839,7 +847,7 @@ goalTests.effect("gates native terminal error continuation and preserves typed a
     const original = yield* goals.set(sessionID, { objective: "policy", tokenBudget: 50000 })
     expect(original.continueOnError).toBe(false)
     expect(yield* goals.set(sessionID, { continueOnError: true })).toMatchObject({ id: original.id, objective: "policy", tokenBudget: 50000, continueOnError: true })
-    yield* goals.accountUsage(sessionID, 10, 1)
+    yield* goals.accountUsage(sessionID, 10, 1, { goalID: original.id, generation: original.generation })
     for (const input of [{ objective: "updated" }, { status: "paused" as const }, { status: "active" as const }]) {
       expect((yield* goals.set(sessionID, input)).continueOnError).toBe(true)
     }
@@ -1077,6 +1085,8 @@ describe("SessionRunnerLLM", () => {
           sessionID,
           agent: AgentV2.ID.make("build"),
           assistantMessageID: expect.stringMatching(/^msg_/),
+          // 应用工具仍使用同一标准上下文；新增turn引用不替换既有身份字段。
+          goalTurn: { id: expect.stringMatching(/^msg_/), previousID: undefined, userInitiated: true },
           toolCallID: "call-application",
         },
       ])
@@ -4744,6 +4754,8 @@ describe("SessionRunnerLLM", () => {
     Effect.gen(function* () {
       yield* setup
       const session = yield* SessionV2.Service
+      const goals = yield* SessionGoal.Service
+      yield* goals.set(sessionID, { objective: "Settle confirmed usage before cancellation" })
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Interrupt tool settlement" }), resume: false })
       requests.length = 0
       executions.length = 0
@@ -4805,6 +4817,8 @@ describe("SessionRunnerLLM", () => {
       expect(yield* db.select().from(RequestUsageAssistantTable).all()).toMatchObject([{ status: "aborted", step_count: 1 }])
       expect(yield* db.select().from(SessionTable).get()).toMatchObject({ cost: 0, tokens_input: 8, tokens_output: 3, tokens_reasoning: 1, tokens_cache_read: 2 })
       expect(requests).toHaveLength(1)
+      // 确认Step的Goal口径不含cache，取消不退款，亦不能和请求账本总量14混淆。
+      expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({ status: "active", generation: 1, tokensUsed: 12 })
       // 从真实 durable events 重建消息，账本快照 upsert 必须继续保留 aborted，不能重复计费。
       // helper 删除所有消息，因此会话累计也从零重建；助手账本保留以验证快照覆盖。
       yield* db.update(SessionTable).set({ cost: 0, tokens_input: 0, tokens_output: 0, tokens_reasoning: 0,
@@ -4812,6 +4826,7 @@ describe("SessionRunnerLLM", () => {
       yield* replaySessionProjection(sessionID)
       expect(yield* SessionRequestUsage.make(db).list({ sessionID })).toMatchObject([{ status: "aborted", stepCount: 1, tokens: { total: 14 } }])
       expect(yield* db.select().from(SessionTable).get()).toMatchObject({ cost: 0, tokens_input: 8, tokens_output: 3 })
+      expect(Option.getOrThrow(yield* goals.get(sessionID)).tokensUsed).toBe(12)
     }),
   )
 

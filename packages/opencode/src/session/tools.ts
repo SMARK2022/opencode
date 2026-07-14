@@ -15,6 +15,7 @@ import { Truncate } from "@/tool/truncate"
 
 import { Plugin } from "@/plugin"
 import type { TaskPromptOps } from "@/tool/task"
+import type { GoalTurnContext } from "@/tool/goal"
 import { type Tool as AITool, tool, jsonSchema, type ToolExecutionOptions, asSchema } from "ai"
 import { Effect, Exit } from "effect"
 import { MessageV2 } from "./message-v2"
@@ -95,6 +96,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   goalSvc: SessionGoal.Interface
   // [local-smark] goalSvc 由 prompt 层注入而非 tools 层自取——
   // SessionGoal 依赖 Database，经 prompt 的 layer 传递可避免 tools 层重复接线
+  // [local-smark] goalTurn 由 prompt 层注入：GoalTool 依赖它校验 trusted read snapshot，
+  // 不能由工具参数伪造
+  goalTurn?: GoalTurnContext
 }) {
   const tools: Record<string, AITool> = {}
   const run = yield* EffectBridge.make()
@@ -110,8 +114,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     abort: options.abortSignal!,
     messageID: input.processor.message.id,
     callID: options.toolCallId,
-    // #364：goalSvc 传入 ctx.extra，使 goal tool 能调用 SessionGoal.Service
-    extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps: input.promptOps, goalSvc: input.goalSvc },
+    // #364：goalSvc 传入 ctx.extra，使 goal tool 能调用 SessionGoal.Service；
+    // goalTurn 同样经 ctx.extra 传递，GoalTool 用它校验 read snapshot 与 turn 连续性
+    extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps: input.promptOps, goalSvc: input.goalSvc, goalTurn: input.goalTurn },
     agent: input.agent.name,
     messages: input.messages,
     metadata: (val) =>

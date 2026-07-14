@@ -24,6 +24,27 @@ export default {
         );
       `)
       yield* tx.run(`
+        CREATE TABLE \`session_goal\` (
+          \`session_id\` text PRIMARY KEY,
+          \`id\` text NOT NULL,
+          \`objective\` text NOT NULL,
+          \`status\` text NOT NULL,
+          \`token_budget\` integer,
+          \`tokens_used\` integer DEFAULT 0 NOT NULL,
+          \`time_used_seconds\` integer DEFAULT 0 NOT NULL,
+          \`continue_on_error\` integer DEFAULT false NOT NULL,
+          \`generation\` integer DEFAULT 1 NOT NULL,
+          \`reason\` text,
+          \`blocked_reason\` text,
+          \`blocked_streak\` integer DEFAULT 0 NOT NULL,
+          \`blocked_last_turn_id\` text,
+          \`terminal_turn_id\` text,
+          \`time_created\` integer NOT NULL,
+          \`time_updated\` integer NOT NULL,
+          CONSTRAINT \`fk_session_goal_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
+        );
+      `)
+      yield* tx.run(`
         CREATE TABLE \`request_usage_assistant\` (
           \`session_id\` text NOT NULL,
           \`request_id\` text NOT NULL,
@@ -290,6 +311,7 @@ export default {
           CONSTRAINT \`fk_session_share_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
         );
       `)
+      yield* tx.run(`CREATE INDEX \`session_goal_status_idx\` ON \`session_goal\` (\`session_id\`,\`status\`);`)
       yield* tx.run(
         `CREATE INDEX \`request_usage_assistant_session_request_idx\` ON \`request_usage_assistant\` (\`session_id\`,\`request_id\`);`,
       )
@@ -341,10 +363,6 @@ export default {
       yield* tx.run(`CREATE INDEX \`session_workspace_idx\` ON \`session\` (\`workspace_id\`);`)
       yield* tx.run(`CREATE INDEX \`session_parent_idx\` ON \`session\` (\`parent_id\`);`)
       yield* tx.run(`CREATE INDEX \`todo_session_idx\` ON \`todo\` (\`session_id\`);`)
-      // #364：session goal 表——持久化会话目标、状态与用量。
-      // session_id 主键 → 一个 session 最多一个 current goal；FK cascade 随 session 删除清理。
-      yield* tx.run(`CREATE TABLE \`session_goal\` (\`session_id\` text NOT NULL, \`id\` text NOT NULL, \`objective\` text NOT NULL, \`status\` text NOT NULL, \`token_budget\` integer, \`tokens_used\` integer DEFAULT 0 NOT NULL, \`time_used_seconds\` integer DEFAULT 0 NOT NULL, \`continue_on_error\` integer DEFAULT false NOT NULL, \`time_created\` integer NOT NULL, \`time_updated\` integer NOT NULL, CONSTRAINT \`session_goal_pk\` PRIMARY KEY(\`session_id\`), CONSTRAINT \`fk_session_goal_session_id\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE);`)
-      yield* tx.run(`CREATE INDEX \`session_goal_status_idx\` ON \`session_goal\` (\`session_id\`,\`status\`);`)
     })
   },
 } satisfies Omit<DatabaseMigration.Migration, "id">

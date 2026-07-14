@@ -27,6 +27,7 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
     const clients = yield* EventClients.Service
     const goals = yield* SessionGoal.Service
     const database = yield* Database.Service
+    const scope = yield* Effect.scope
 
     return handlers
       .handle(
@@ -125,6 +126,11 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
           // 仅领域校验映射400；数据库defect及取消保持原有错误语义。
           const goal = yield* goals.set(ctx.params.sessionID, ctx.payload).pipe(
             Effect.mapError(error => new InvalidRequestError({ message: error.message })),
+          )
+          // 用户恢复沿现有全局Session所有权执行；失败留日志，不另建runner或伪造执行结果。
+          if (goal.status === "active") yield* session.resume(ctx.params.sessionID).pipe(
+            Effect.catchCause(cause => Effect.logError("goal resume failed", { cause })),
+            Effect.forkIn(scope),
           )
           return { goal }
         }),

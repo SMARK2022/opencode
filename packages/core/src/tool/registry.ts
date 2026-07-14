@@ -6,6 +6,7 @@ import { AgentV2 } from "../agent"
 import { PermissionV2 } from "../permission"
 import { SessionMessage } from "../session/message"
 import { SessionSchema } from "../session/schema"
+import type { SessionGoal } from "../session/goal"
 import { ToolOutputStore } from "../tool-output-store"
 import { Wildcard } from "../util/wildcard"
 import { ApplicationTools } from "./application-tools"
@@ -20,6 +21,7 @@ export type ExecuteInput = {
   readonly agent: AgentV2.ID
   readonly assistantMessageID: SessionMessage.ID
   readonly call: ToolCall
+  readonly goalTurn?: SessionGoal.GoalTurnContext
 }
 
 export interface Interface {
@@ -73,6 +75,8 @@ const registryLayer = Layer.effect(
         agent: input.agent,
         assistantMessageID: input.assistantMessageID,
         toolCallID: input.call.id,
+        // 保留对象身份，使get的快照可被同turn后续provider step中的mark消费。
+        goalTurn: input.goalTurn,
       }).pipe(
         Effect.map((output) => ({ output })),
         Effect.catchTag("LLM.ToolFailure", (failure) =>

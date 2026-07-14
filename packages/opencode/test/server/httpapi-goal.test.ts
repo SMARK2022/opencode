@@ -193,7 +193,23 @@ describe("session goal HttpApi", () => {
           objective: "ship the feature",
           status: "active",
           tokensUsed: 0,
+          generation: 1,
+          reason: null,
         })
+        // 通过真实HTTP解码/转发/响应检查reason，领域单测不能代替wire往返。
+        const url = pathFor(SessionPaths.goal, { sessionID: session.id })
+        const headers = { "x-opencode-directory": test.directory, "content-type": "application/json" }
+        const rejected = yield* request(url, { method: "POST", headers, body: JSON.stringify({ status: "complete" }) })
+        expect(rejected.status).toBe(400)
+        expect(yield* responseJson(rejected)).toEqual({ name: "GoalError", data: { message: "goal complete requires a non-empty reason" } })
+        const completed = yield* request(url, { method: "POST", headers, body: JSON.stringify({ status: "complete", reason: " Verified end state " }) })
+        expect(completed.status).toBe(200)
+        expect(yield* responseJson(completed)).toMatchObject({ goal: { status: "complete", generation: 1, reason: "Verified end state" } })
+        const fetched = yield* request(url, { headers })
+        expect(yield* responseJson(fetched)).toMatchObject({ goal: { status: "complete", reason: "Verified end state" } })
+        const resumed = yield* request(url, { method: "POST", headers, body: JSON.stringify({ status: "active" }) })
+        expect(resumed.status).toBe(200)
+        expect(yield* responseJson(resumed)).toMatchObject({ goal: { status: "active", generation: 1, reason: null } })
       }),
     { git: true, config: { formatter: false, lsp: false } },
     // 30s 超时：每个用例需 git-init + Server.Default() 首次 bootstrap，

@@ -30,6 +30,19 @@ export const SessionGoalTable = sqliteTable(
     // true=允许 GOAL continuation 在 eligible 错误后继续。
     // 默认 false 保证升级后旧 GOAL 行为不变
     continue_on_error: integer({ mode: "boolean" }).notNull().default(false),
+    // [local-smark] objective 代际：从 1 开始，仅当 trimmed objective 值真正改变时递增。
+    // 用于检测旧模型 turn 的 stale 终态写入和隔离旧 provider 请求的 usage 归属
+    generation: integer().notNull().default(1),
+    // 当前 terminal 状态的理由（complete/blocked 时非空）；active/paused 时为 null
+    reason: text(),
+    // 待确认的 blocked 理由：模型提出 blocked 但尚未达到三轮阈值时暂存（不公开为 API 字段）
+    blocked_reason: text(),
+    // 连续 eligible turns 中相同 trimmed reason 的有效 blocked 次数；达到 3 才写 blocked
+    blocked_streak: integer().notNull().default(0),
+    // 最近一次有效 blocked attempt 的 eligible user MessageID（防同 turn 伪造）
+    blocked_last_turn_id: text(),
+    // 产生当前 terminal 状态的 eligible user MessageID（model active recovery 校验用）
+    terminal_turn_id: text(),
     ...Timestamps,
   },
   (table) => [index("session_goal_status_idx").on(table.session_id, table.status)],

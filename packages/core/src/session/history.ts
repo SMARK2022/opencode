@@ -161,4 +161,20 @@ export const evidence = Effect.fn("SessionHistory.evidence")(function* (
 
 export const readReceipts = (db: DatabaseService, sessionID: SessionSchema.ID, throughSeq: number) =>
   evidence(db, sessionID, throughSeq).pipe(Effect.map(result => result.receipts))
+// eligible lineage读取未被compaction裁掉的原生投影；admission尚未提升时不会出现在这里。
+export const goalTurn = Effect.fn("SessionHistory.goalTurn")(function* (db: DatabaseService, sessionID: SessionSchema.ID) {
+  const rows = yield* db.select({ id: SessionMessageTable.id, type: SessionMessageTable.type })
+    .from(SessionMessageTable)
+    .where(and(eq(SessionMessageTable.session_id, sessionID),
+      or(eq(SessionMessageTable.type, "user"), eq(SessionMessageTable.type, "synthetic"))))
+    .orderBy(desc(SessionMessageTable.seq)).limit(2).all().pipe(Effect.orDie)
+  if (!rows[0]) return
+  // 原生Synthetic的实际producer是Goal continuation；Compaction和普通provider step不另开turn。
+  return {
+    id: rows[0].id,
+    previousID: rows[1]?.id,
+    userInitiated: rows[0].type === "user",
+  }
+})
+
 export * as SessionHistory from "./history"
