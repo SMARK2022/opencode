@@ -12,6 +12,7 @@ import { ToolJsonSchema } from "../../src/tool/json-schema"
 import { Parameters as ApplyPatch } from "../../src/tool/apply_patch"
 import { Parameters as Edit } from "../../src/tool/edit"
 import { Parameters as Glob } from "../../src/tool/glob"
+import { Parameters as Goal } from "../../src/tool/goal"
 import { Parameters as Grep } from "../../src/tool/grep"
 import { Parameters as Invalid } from "../../src/tool/invalid"
 import { Parameters as Lsp } from "../../src/tool/lsp"
@@ -40,6 +41,19 @@ describe("tool parameters", () => {
     test("bash", () => expect(toJsonSchema(Shell)).toMatchSnapshot())
     test("edit", () => expect(toJsonSchema(Edit)).toMatchSnapshot())
     test("glob", () => expect(toJsonSchema(Glob)).toMatchSnapshot())
+    test("goal exposes only the mutation verb", () => {
+      const schema = toJsonSchema(Goal)
+      // 模型只应看到动词 `mark`；重新暴露 `status` 会恢复“筛选条件还是写动作”的歧义。
+      expect(schema.properties).toHaveProperty("mark")
+      expect(schema.properties).toHaveProperty("reason")
+      expect(schema.properties).not.toHaveProperty("status")
+      // provider description 是模型在调用前看到的合同；必须直接固定 turn 身份和 reason 归一规则，
+      // 不能退化为容易在同一 turn 重试的泛化 “two attempts”。
+      const mark = schema.properties?.mark
+      if (!mark || typeof mark !== "object") throw new Error("expected Goal mark property schema")
+      expect(mark.description).toContain("two consecutive eligible Goal turns")
+      expect(mark.description).toContain("same trimmed reason")
+    })
     test("grep", () => expect(toJsonSchema(Grep)).toMatchSnapshot())
     test("invalid", () => expect(toJsonSchema(Invalid)).toMatchSnapshot())
     test("lsp", () => expect(toJsonSchema(Lsp)).toMatchSnapshot())

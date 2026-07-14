@@ -712,6 +712,48 @@ describe("session.compaction.create", () => {
       }),
     ),
   )
+
+  it.live(
+    "inherits the latest canonical Goal turn on the compaction marker",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const source = yield* createUserMessage(session.id, "continue this Goal")
+        // 先构造继承 source 的 technical wrapper，再让 create 读取“最新 user”；
+        // 这能区分正确的 lineage flattening 与错误地复制 wrapper 自身 ID。
+        const technical = yield* ssn.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: session.id,
+          agent: "build",
+          model: ref,
+          goalTurnID: source.id,
+          time: { created: Date.now() },
+        })
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: technical.id,
+          sessionID: session.id,
+          type: "text",
+          text: "technical continuation",
+          synthetic: true,
+        })
+
+        const marker = yield* compact.create({
+          sessionID: session.id,
+          agent: "build",
+          model: ref,
+          auto: true,
+        })
+
+        // 最新 user 本身也是 technical，但 lineage 必须继续指向原 canonical source；
+        // 若改用 wrapper ID，连续 Compaction 会不断伪造新的 Goal turn。
+        expect(marker.goalTurnID).toBe(source.id)
+      }),
+    ),
+  )
 })
 
 describe("session.compaction.prune", () => {

@@ -21,10 +21,10 @@ export interface GoalTurnContext {
 // 无 mark → get 模式：返回当前 goal 的状态、objective、用量、预算和代际
 // 有 mark → transition 模式：需要先 get 建立 read snapshot
 // complete/blocked 需要 reason；active 用于从 model-produced terminal 恢复
-const Parameters = Schema.Struct({
+export const Parameters = Schema.Struct({
   mark: Schema.optional(Schema.Literals(["complete", "blocked", "active"] as const)).annotate({
     description:
-      "Mark the goal as `complete` when the objective is achieved, or `blocked` when genuinely stuck after at least three consecutive failed attempts. Mark as `active` to resume a model-produced terminal goal in a later user turn. Omit to get the current goal status.",
+      "Mark the goal as `complete` when the objective is achieved. Mark it as `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. Mark as `active` to resume a model-produced terminal goal in a later user turn. Omit to get the current goal status.",
   }),
   reason: Schema.optional(Schema.String).annotate({
     description:
@@ -40,7 +40,7 @@ export interface GoalToolExtra {
   goalTurn?: GoalTurnContext
 }
 
-// goal 工具：支持 get（无参数）和 transition（status 参数）两种模式。
+// 省略 mark 被刻意保留为读取动作；若拆成第二个工具，trusted snapshot 无法留在同一 Tool context。
 // transition 必须先 get 建立 read snapshot——防止模型不看 GOAL 就直接终态化。
 // 不允许模型 pause/resume/clear/改预算——这些由用户或系统控制。
 export const GoalTool = Tool.define(
@@ -100,7 +100,9 @@ export const GoalTool = Tool.define(
         // read gate：必须先 get 建立 trusted snapshot，防止模型不看 GOAL 就终态化
         if (!extra.goalTurn?.read) {
           return yield* Effect.fail(
-            new Error("goal tool: must call get (no arguments) before marking a status. Read the current goal first."),
+            new Error(
+              "You must call the goal tool with no arguments to read the current goal before marking it. Read the current goal, then retry the transition with mark and reason.",
+            ),
           )
         }
 
@@ -138,11 +140,11 @@ export const GoalTool = Tool.define(
           }
         }
 
-        // blocked-pending：尚未达到三轮阈值，goal 仍 active
+        // blocked-pending：第一次 blocked 必须给出四类具体探索动作，并固定下一 turn 的 exact reason。
         return {
           title: "Goal blocked (pending)",
           metadata: {},
-          output: `Blocked attempt ${result.attempt} of ${result.required}. The goal remains active. Continue working, or call blocked again in the next goal turn with the same reason if the blocker persists.`,
+          output: `Blocked attempt ${result.attempt} of ${result.required}. Before marking as blocked, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call mark blocked again in the next eligible Goal turn with the same trimmed reason to confirm the blocker is persistent.`,
         }
       }).pipe(Effect.orDie),
   }),

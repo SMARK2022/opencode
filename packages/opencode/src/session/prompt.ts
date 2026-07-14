@@ -139,6 +139,38 @@ function isDecideAgent(agent: Agent.Info) {
   return agent.name === "decide"
 }
 
+function deriveGoalTurn(messages: Iterable<MessageV2.WithParts>): GoalTurnContext | undefined {
+  const turns = Array.from(messages)
+    .flatMap((message) => {
+      // technical wrapper 的 goalTurnID 只表达 lineage，不是新的 canonical source；
+      // 在这里排除它，才能让 late wrapper 不影响 current/previous chronology。
+      if (message.info.role !== "user" || message.info.goalTurnID) return []
+      const continuation = message.parts.some(
+        (part) => part.type === "text" && part.synthetic && part.metadata?.goal_continuation === true,
+      )
+      // 真实用户资格来自至少一个非 technical part，不能只依据 role=user；
+      // 否则 Compaction marker 和全 synthetic replay 会获得恢复授权或 blocked 次数。
+      const userInitiated = message.parts.some(
+        (part) => part.type !== "compaction" && !("synthetic" in part && part.synthetic === true),
+      )
+      // 无 lineage 的 technical Message 不得自创 Goal turn；Goal continuation 是唯一
+      // 允许以 synthetic content 建立 canonical source 的内部 producer。
+      if (!continuation && !userInitiated) return []
+      return [{ id: message.info.id, created: message.info.time.created, userInitiated }]
+    })
+    // caller 可以自选 MessageID，因此 chronology 必须先看持久化时间；ID 只处理同毫秒 tie。
+    .toSorted((a, b) => a.created - b.created || a.id.localeCompare(b.id))
+  const current = turns.at(-1)
+  if (!current) return
+  // turns 已经只含 canonical source，因此相邻两项就是 distinct eligible turns；
+  // 不需要再把 wrapper lineage 去重，也不会回退到 provider-compacted window。
+  return {
+    id: current.id,
+    previousID: turns.at(-2)?.id,
+    userInitiated: current.userInitiated,
+  }
+}
+
 function truncateThinking(text: string) {
   if (text.length <= 400) return text
   return `${text.slice(0, 200)}...${text.slice(-200)}`
@@ -2241,41 +2273,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
 
-          // [local-smark] 推导当前 eligible Goal turn ID：
-          // 有 goalTurnID 的 technical user 继承原始 turn；否则以自身 ID 为 turn ID。
-          // 同一 eligible turn 下的多个 assistant/provider steps 共享同一个 GoalTurnContext。
-          const eligibleTurnID = lastUser.goalTurnID ?? lastUser.id
-          if (!goalTurn || goalTurn.id !== eligibleTurnID) {
-            // 获取 lastUser 的 parts 以判断 turn 来源
-            const lastUserMsg = msgs.findLast((m) => m.info.id === lastUser.id)
-            const userParts = lastUserMsg?.parts ?? []
-            // 判断当前 turn 是否由真实用户发起（非全 synthetic parts）
-            const hasNonSyntheticPart = userParts.some((p) => !("synthetic" in p && p.synthetic))
-            // 判断是否为 Goal continuation turn（有 goal_continuation metadata 的 synthetic text）
-            const isGoalContinuation = userParts.some(
-              (p: any) => p.type === "text" && p.synthetic && p.metadata?.goal_continuation === true,
-            )
-            // [local-smark] 从 raw message history 向前扫描前一个不同的 eligible turn ID。
-            // blocked 连续性校验依赖 previousTurnID：只有前一 turn 有相同 reason 的 attempt
-            // 才递增 streak，否则从 1 重新开始。
-            let previousEligibleTurnID: string | undefined
-            for (let i = msgs.length - 1; i >= 0; i--) {
-              const m = msgs[i]
-              if (m.info.role !== "user") continue
-              const tid = (m.info as MessageV2.User).goalTurnID ?? m.info.id
-              if (tid !== eligibleTurnID) {
-                previousEligibleTurnID = tid
-                break
-              }
-            }
-            goalTurn = {
-              id: eligibleTurnID,
-              // 前一个不同的 eligible turn ID，用于 blocked streak 连续性校验
-              previousID: previousEligibleTurnID,
-              // 真实用户 turn → userInitiated=true；Goal continuation → false
-              userInitiated: hasNonSyntheticPart && !isGoalContinuation,
-            }
-          }
+          // Goal continuity 来自未裁剪的持久化 Message chronology；provider window 会因 Compaction
+          // 重排，late technical wrapper 也可能晚于新用户落盘，两者都不能改变 current/previous turn。
+          const nextGoalTurn = deriveGoalTurn(MessageV2.stream(sessionID))
+          if (!nextGoalTurn) goalTurn = undefined
+          if (nextGoalTurn && (!goalTurn || goalTurn.id !== nextGoalTurn.id)) goalTurn = nextGoalTurn
 
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,

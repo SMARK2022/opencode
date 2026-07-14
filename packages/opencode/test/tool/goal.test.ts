@@ -1,5 +1,5 @@
 import { expect } from "bun:test"
-import { Effect, Exit, Layer, Option } from "effect"
+import { Cause, Effect, Exit, Layer, Option } from "effect"
 import { Agent } from "@/agent/agent"
 import { Bus } from "@/bus"
 import { Config } from "@/config/config"
@@ -51,6 +51,14 @@ function makeCtx(sessionID: SessionID, goalSvc: SessionGoal.Interface, goalTurn?
   }
 }
 
+const setupGoalTool = Effect.fn("test.setupGoalTool")(function* (objective?: string) {
+  const goalSvc = yield* SessionGoal.Service
+  const session = yield* (yield* SessionNs.Service).create({})
+  const def = yield* (yield* GoalTool).init()
+  if (objective) yield* goalSvc.set(session.id, { objective })
+  return { goalSvc, session, def }
+})
+
 // [local-smark] GoalTool read gate 行为测试：
 // 验证模型必须先 get 才能写 terminal status，
 // 验证 reason 和 blocked streak 通过 Tool 正确传播，
@@ -60,11 +68,7 @@ it.instance(
   "get returns no goal message when no goal exists",
   () =>
     Effect.gen(function* () {
-      const goalSvc = yield* SessionGoal.Service
-      const sessions = yield* SessionNs.Service
-      const session = yield* sessions.create({})
-      const tool = yield* GoalTool
-      const def = yield* tool.init()
+      const { goalSvc, session, def } = yield* setupGoalTool()
 
       const result = yield* def.execute({}, makeCtx(session.id, goalSvc))
       expect(result.output).toContain("No goal")
@@ -76,13 +80,7 @@ it.instance(
   "get returns goal info and writes read snapshot to goalTurn",
   () =>
     Effect.gen(function* () {
-      const goalSvc = yield* SessionGoal.Service
-      const sessions = yield* SessionNs.Service
-      const tool = yield* GoalTool
-      const def = yield* tool.init()
-
-      const session = yield* sessions.create({})
-      yield* goalSvc.set(session.id, { objective: "test objective" })
+      const { goalSvc, session, def } = yield* setupGoalTool("test objective")
 
       // goalTurn 初始无 read snapshot
       const goalTurn: GoalTurnContext = {
@@ -103,16 +101,10 @@ it.instance(
 )
 
 it.instance(
-  "status without prior get is rejected — read gate",
+  "mark without prior get explains how to establish the read gate",
   () =>
     Effect.gen(function* () {
-      const goalSvc = yield* SessionGoal.Service
-      const sessions = yield* SessionNs.Service
-      const tool = yield* GoalTool
-      const def = yield* tool.init()
-
-      const session = yield* sessions.create({})
-      yield* goalSvc.set(session.id, { objective: "test" })
+      const { goalSvc, session, def } = yield* setupGoalTool("test")
 
       // goalTurn 无 read snapshot → transition 必须失败
       const goalTurn: GoalTurnContext = { id: "turn1", userInitiated: true }
@@ -122,6 +114,12 @@ it.instance(
       ).pipe(Effect.exit)
 
       expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) {
+        // Tool wrapper 把执行失败转为 defect；模型最终看到的正是 squash 后的消息。
+        const error = Cause.squash(result.cause) as Error
+        expect(error.message).toContain("call the goal tool with no arguments")
+        expect(error.message).toContain("retry the transition with mark")
+      }
     }),
   { git: true },
 )
@@ -130,13 +128,7 @@ it.instance(
   "complete after get succeeds and persists reason",
   () =>
     Effect.gen(function* () {
-      const goalSvc = yield* SessionGoal.Service
-      const sessions = yield* SessionNs.Service
-      const tool = yield* GoalTool
-      const def = yield* tool.init()
-
-      const session = yield* sessions.create({})
-      yield* goalSvc.set(session.id, { objective: "test" })
+      const { goalSvc, session, def } = yield* setupGoalTool("test")
 
       // 先 get 建立 read snapshot
       const goalTurn: GoalTurnContext = { id: "turn1", userInitiated: true }
@@ -161,16 +153,58 @@ it.instance(
 )
 
 it.instance(
-  "blocked streak through tool: three consecutive turns",
+  "missing terminal reason explains how to retry the mark",
   () =>
     Effect.gen(function* () {
-      const goalSvc = yield* SessionGoal.Service
-      const sessions = yield* SessionNs.Service
-      const tool = yield* GoalTool
-      const def = yield* tool.init()
+      const { goalSvc, session, def } = yield* setupGoalTool("test")
 
-      const session = yield* sessions.create({})
-      yield* goalSvc.set(session.id, { objective: "test" })
+      const turn: GoalTurnContext = { id: "turn1", userInitiated: true }
+      yield* def.execute({}, makeCtx(session.id, goalSvc, turn))
+      const result = yield* def.execute(
+        { mark: "complete" },
+        makeCtx(session.id, goalSvc, turn),
+      ).pipe(Effect.exit)
+
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) {
+        // 模型需要同时知道拒绝原因和下一次合法调用，不接受只有名词短语的错误。
+        const error = Cause.squash(result.cause) as Error
+        expect(error.message).toContain("non-empty reason")
+        expect(error.message).toContain("retry with mark complete")
+      }
+    }),
+  { git: true },
+)
+
+it.instance(
+  "stale objective rejection tells the model to read again",
+  () =>
+    Effect.gen(function* () {
+      const { goalSvc, session, def } = yield* setupGoalTool("original")
+      const turn: GoalTurnContext = { id: "turn1", userInitiated: true }
+      yield* def.execute({}, makeCtx(session.id, goalSvc, turn))
+      yield* goalSvc.set(session.id, { objective: "revised" })
+
+      const result = yield* def.execute(
+        { mark: "complete", reason: "finished original" },
+        makeCtx(session.id, goalSvc, turn),
+      ).pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) {
+        // stale rejection 不能只说 mismatch；模型必须知道重新读取 revised Goal 后再决策。
+        const error = Cause.squash(result.cause) as Error
+        expect(error.message).toContain("objective has been edited")
+        expect(error.message).toContain("Call get again")
+      }
+    }),
+  { git: true },
+)
+
+it.instance(
+  "blocked streak through tool: two consecutive turns",
+  () =>
+    Effect.gen(function* () {
+      const { goalSvc, session, def } = yield* setupGoalTool("test")
 
       // Turn 1: get then blocked → pending
       const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
@@ -180,25 +214,28 @@ it.instance(
         makeCtx(session.id, goalSvc, turn1),
       )
       expect(r1.output).toContain("attempt 1")
+      // 首轮不能只是计数；四项动作分别保护证据遗漏、搜索盲区、问题粒度和依赖约束。
+      expect(r1.output).toContain("re-read relevant files")
+      expect(r1.output).toContain("search with different patterns")
+      expect(r1.output).toContain("smaller verifiable steps")
+      expect(r1.output).toContain("overlooked dependencies or constraints")
+      expect(r1.output).toContain("next eligible Goal turn")
+      expect(r1.output).toContain("same trimmed reason")
+      // goal.txt 是模型调用工具前的另一可见面，不能与首次 Tool result 使用不同 contract。
+      expect(def.description).toContain("two consecutive eligible Goal turns")
+      expect(def.description).toContain("same trimmed reason")
+      expect(def.description).toContain("re-read relevant files")
+      expect(def.description).toContain("overlooked dependencies or constraints")
 
-      // Turn 2: get then blocked → pending
+      // 新 turn 必须重新 get；复用 t1 snapshot 会掩盖 read-per-turn gate 是否真实生效。
       const turn2: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: true }
       yield* def.execute({}, makeCtx(session.id, goalSvc, turn2))
       const r2 = yield* def.execute(
         { mark: "blocked", reason: "stuck on X" },
         makeCtx(session.id, goalSvc, turn2),
       )
-      expect(r2.output).toContain("attempt 2")
-
-      // Turn 3: get then blocked → success
-      const turn3: GoalTurnContext = { id: "t3", previousID: "t2", userInitiated: true }
-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn3))
-      const r3 = yield* def.execute(
-        { mark: "blocked", reason: "stuck on X" },
-        makeCtx(session.id, goalSvc, turn3),
-      )
-      expect(r3.output).toContain("blocked")
-      expect(r3.output).toContain("stuck on X")
+      expect(r2.output).toContain("blocked")
+      expect(r2.output).toContain("stuck on X")
 
       // 验证持久化
       const goal = yield* goalSvc.get(session.id)
@@ -208,20 +245,52 @@ it.instance(
 )
 
 it.instance(
+  "same-turn changed reason replaces the Tool blocked baseline",
+  () =>
+    Effect.gen(function* () {
+      const { goalSvc, session, def } = yield* setupGoalTool("test")
+
+      const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
+      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
+      yield* def.execute({ mark: "blocked", reason: "blocker A" }, makeCtx(session.id, goalSvc, turn1))
+      const changed = yield* def.execute(
+        { mark: "blocked", reason: "blocker B" },
+        makeCtx(session.id, goalSvc, turn1),
+      )
+      expect(changed.output).toContain("attempt 1 of 2")
+
+      // 新 baseline 是 B；下一 turn 再用已撤回的 A 只能重新开始，不能 terminal。
+      const turn2: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: true }
+      yield* def.execute({}, makeCtx(session.id, goalSvc, turn2))
+      const oldReason = yield* def.execute(
+        { mark: "blocked", reason: "blocker A" },
+        makeCtx(session.id, goalSvc, turn2),
+      )
+      expect(oldReason.output).toContain("attempt 1 of 2")
+      const goal = yield* goalSvc.get(session.id)
+      if (Option.isSome(goal)) expect(goal.value.status).toBe("active")
+    }),
+  { git: true },
+)
+
+it.instance(
   "active recovery through tool from model terminal",
   () =>
     Effect.gen(function* () {
-      const goalSvc = yield* SessionGoal.Service
-      const sessions = yield* SessionNs.Service
-      const tool = yield* GoalTool
-      const def = yield* tool.init()
-
-      const session = yield* sessions.create({})
-      yield* goalSvc.set(session.id, { objective: "test" })
+      const { goalSvc, session, def } = yield* setupGoalTool("test")
 
       // Turn 1: complete
       const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
       yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
+      // active 不是可幂等“恢复”的成功分支；拒绝必须把模型导回当前 objective，
+      // 否则模型只知道没有 terminal，却不知道合法动作是继续执行而非再次调用工具。
+      const already = yield* def.execute({ mark: "active" }, makeCtx(session.id, goalSvc, turn1)).pipe(Effect.exit)
+      expect(Exit.isFailure(already)).toBe(true)
+      if (Exit.isFailure(already)) {
+        const error = Cause.squash(already.cause) as Error
+        expect(error.message).toContain("already active")
+        expect(error.message).toContain("Continue working toward the current objective")
+      }
       yield* def.execute(
         { mark: "complete", reason: "done" },
         makeCtx(session.id, goalSvc, turn1),
@@ -243,13 +312,7 @@ it.instance(
   "active recovery same turn through tool is rejected",
   () =>
     Effect.gen(function* () {
-      const goalSvc = yield* SessionGoal.Service
-      const sessions = yield* SessionNs.Service
-      const tool = yield* GoalTool
-      const def = yield* tool.init()
-
-      const session = yield* sessions.create({})
-      yield* goalSvc.set(session.id, { objective: "test" })
+      const { goalSvc, session, def } = yield* setupGoalTool("test")
 
       // Same turn: complete then active → reject
       const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
@@ -259,38 +322,63 @@ it.instance(
         makeCtx(session.id, goalSvc, turn1),
       )
 
-      // 同一 turn 尝试恢复 → 失败
-      const result = yield* def.execute(
-        { mark: "active" },
-        makeCtx(session.id, goalSvc, turn1),
-      ).pipe(Effect.exit)
-      expect(Exit.isFailure(result)).toBe(true)
-    }),
-  { git: true },
-)
-
-it.instance(
-  "active recovery from user-produced terminal through tool is rejected",
-  () =>
-    Effect.gen(function* () {
-      const goalSvc = yield* SessionGoal.Service
-      const sessions = yield* SessionNs.Service
-      const tool = yield* GoalTool
-      const def = yield* tool.init()
-
-      const session = yield* sessions.create({})
-      yield* goalSvc.set(session.id, { objective: "test" })
-      // 用户直接写入 terminal
-      yield* goalSvc.set(session.id, { status: "complete", reason: "user done" })
-
-      // 模型尝试恢复 → 失败
-      const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
+      // terminal 写入后同一 turn 重新 get，确保本断言到达 recovery actor/turn guard，
+      // 而不是被旧 active snapshot 的 status-CAS 提前拒绝。
       yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
       const result = yield* def.execute(
         { mark: "active" },
         makeCtx(session.id, goalSvc, turn1),
       ).pipe(Effect.exit)
       expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) {
+        const error = Cause.squash(result.cause) as Error
+        expect(error.message).toContain("same turn")
+        expect(error.message).toContain("Wait for a new user message")
+      }
+    }),
+  { git: true },
+)
+
+it.instance(
+  "user-produced terminal cannot be re-marked or recovered through the tool",
+  () =>
+    Effect.gen(function* () {
+      yield* Effect.forEach(["complete", "blocked"] as const, (mark) =>
+        Effect.gen(function* () {
+          const { goalSvc, session, def } = yield* setupGoalTool("test")
+          yield* goalSvc.set(session.id, { status: "complete", reason: "user done" })
+
+          const turn1: GoalTurnContext = { id: `remark-${mark}`, userInitiated: true }
+          yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
+          // terminal re-mark 必须在写 reason/audit/provenance 前失败，否则模型能洗白 user ownership。
+          const remark = yield* def.execute(
+            { mark, reason: "model claim" },
+            makeCtx(session.id, goalSvc, turn1),
+          ).pipe(Effect.exit)
+          expect(Exit.isFailure(remark)).toBe(true)
+          if (Exit.isFailure(remark)) {
+            const error = Cause.squash(remark.cause) as Error
+            expect(error.message).toContain("only valid for an active goal")
+            expect(error.message).toContain("wait for the user to resume")
+          }
+
+          const persisted = yield* goalSvc.get(session.id)
+          expect(Option.getOrUndefined(persisted)?.reason).toBe("user done")
+          // 新真实用户 turn 仍不能 active，证明 re-mark 没有写入 model terminal_turn_id。
+          const turn2: GoalTurnContext = { id: `recover-${mark}`, userInitiated: true }
+          yield* def.execute({}, makeCtx(session.id, goalSvc, turn2))
+          const recovery = yield* def.execute(
+            { mark: "active" },
+            makeCtx(session.id, goalSvc, turn2),
+          ).pipe(Effect.exit)
+          expect(Exit.isFailure(recovery)).toBe(true)
+          if (Exit.isFailure(recovery)) {
+            const error = Cause.squash(recovery.cause) as Error
+            expect(error.message).toContain("marked as complete or blocked by the user")
+            expect(error.message).toContain("user must resume")
+          }
+        }),
+      )
     }),
   { git: true },
 )

@@ -1195,6 +1195,11 @@ export const layer = Layer.effect(
       auto: boolean
       overflow?: boolean
     }) {
+      // 在写入 marker 之前读取最新 user，避免 newest-first 查询命中 marker 自身；
+      // technical source 已有 lineage 时继续向原 canonical turn 透传，不能形成 lineage 链。
+      const source = Option.getOrUndefined(
+        yield* session.findMessage(input.sessionID, (message) => message.info.role === "user").pipe(Effect.orDie),
+      )
       // The user marker is written before the summary assistant so streaming and
       // legacy tests can observe the same persisted boundary shape. It remains
       // scratch state until processCompaction writes a successful summary; prompt
@@ -1206,6 +1211,9 @@ export const layer = Layer.effect(
         sessionID: input.sessionID,
         agent: input.agent,
         time: { created: Date.now() },
+        // [local-smark] Compaction marker 是 technical Message，只继承最近 canonical turn；
+        // 它自身不能成为新的 Goal turn。空 Session 没有 source 时保持字段缺省。
+        ...(source?.info.role === "user" ? { goalTurnID: source.info.goalTurnID ?? source.info.id } : {}),
       })
       yield* session.updatePart({
         id: PartID.ascending(),

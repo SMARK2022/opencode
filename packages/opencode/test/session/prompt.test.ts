@@ -419,22 +419,50 @@ const succeedVoid = (deferred: Deferred.Deferred<void>) => {
   Effect.runSync(Deferred.succeed(deferred, void 0).pipe(Effect.ignore))
 }
 
-const user = Effect.fn("test.user")(function* (sessionID: SessionID, text: string) {
+const user = Effect.fn("test.user")(function* (
+  sessionID: SessionID,
+  text: string,
+  options?: {
+    id?: MessageID
+    created?: number
+    goalTurnID?: MessageID
+    synthetic?: boolean
+    goalContinuation?: boolean
+    compaction?: boolean
+  },
+) {
+  // 可选 chronology/lineage 都通过公开 Session persistence 写入，测试不调用 private classifier；
+  // 同一 fixture 因而能表达 real、technical、Goal continuation 与 legacy marker 四种 producer。
   const session = yield* Session.Service
   const msg = yield* session.updateMessage({
-    id: MessageID.ascending(),
+    id: options?.id ?? MessageID.ascending(),
     role: "user",
     sessionID,
     agent: "build",
     model: ref,
-    time: { created: Date.now() },
+    ...(options?.goalTurnID ? { goalTurnID: options.goalTurnID } : {}),
+    time: { created: options?.created ?? Date.now() },
   })
+  if (options?.compaction) {
+    // legacy marker 故意只有 compaction part 且没有 goalTurnID，复现升级前持久化形状；
+    // 若同时写 text part，它会被 classifier 当成真实用户，无法验证 fail-closed 兼容。
+    yield* session.updatePart({
+      id: PartID.ascending(),
+      messageID: msg.id,
+      sessionID,
+      type: "compaction",
+      auto: true,
+    })
+    return msg
+  }
   yield* session.updatePart({
     id: PartID.ascending(),
     messageID: msg.id,
     sessionID,
     type: "text",
     text,
+    ...(options?.synthetic ? { synthetic: true } : {}),
+    ...(options?.goalContinuation ? { metadata: { goal_continuation: true } } : {}),
   })
   return msg
 })
@@ -3905,6 +3933,188 @@ it.instance(
     }),
   { git: true },
   15_000,
+)
+
+it.instance(
+  "late technical Message cannot rewind blocked continuity past a newer real user",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 0 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goalSvc = yield* SessionGoal.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const suffix = crypto.randomUUID().replaceAll("-", "")
+
+      // B 的 caller-selected ID 故意大于后到的 C；Goal turn 顺序必须来自 persisted chronology。
+      const b = yield* user(chat.id, "first Goal turn", {
+        id: MessageID.make(`msg_b${suffix}`),
+        created: 1_000,
+      })
+      yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
+      yield* llm.push(
+        reply().tool("goal", {}),
+        reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }),
+        reply().text("pending recorded").stop(),
+      )
+      yield* prompt.loop({ sessionID: chat.id })
+
+      // C 刻意不调用 blocked：它必须打断 B 的 pending adjacency；
+      // 后落盘的 S 虽指向 B，也只能传递 lineage，不能把 B 移回 current。
+      yield* user(chat.id, "newer real user turn without a blocked attempt", {
+        id: MessageID.make(`msg_a${suffix}`),
+        created: 2_000,
+      })
+
+      yield* user(chat.id, "late technical summary for B", {
+        goalTurnID: b.id,
+        created: 3_000,
+        synthetic: true,
+      })
+
+      yield* user(chat.id, "continue the Goal", {
+        created: 4_000,
+        synthetic: true,
+        goalContinuation: true,
+      })
+
+      // D 经真实 Prompt/GoalTool path 再次使用同 reason；若 chronology 被 S rewind，
+      // 这里会错误成为 attempt 2 并把 Goal 终态化，因此最终 active 是行为级信号。
+      yield* llm.push(
+        reply().tool("goal", {}),
+        reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }),
+        reply().text("second pending recorded").stop(),
+      )
+      yield* prompt.loop({ sessionID: chat.id })
+
+      // C 是 D 的 previous eligible turn；late S(B) 不能把 B 重新排到 C 之后。
+      const result = yield* goalSvc.get(chat.id)
+      expect(result._tag).toBe("Some")
+      if (result._tag === "Some") expect(result.value.status).toBe("active")
+    }),
+  { git: true },
+  20_000,
+)
+
+it.instance(
+  "legacy compaction marker without lineage does not create a Goal turn",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 0 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goalSvc = yield* SessionGoal.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const b = yield* user(chat.id, "first Goal turn")
+      const goal = yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
+      yield* goalSvc.modelTransition(chat.id, {
+        snapshot: { goalID: goal.id, generation: goal.generation, status: "active" },
+        turnID: b.id,
+        userInitiated: true,
+        status: "blocked",
+        reason: "persistent blocker",
+      })
+
+      // marker 没有 lineage 是历史兼容输入；compaction part 本身必须足以排除其 turn 资格，
+      // 同时后续明确标记的 Goal continuation 仍应作为新的 eligible turn。
+      yield* user(chat.id, "legacy compaction", { created: Date.now() + 1, compaction: true })
+      yield* user(chat.id, "continue the Goal", {
+        created: Date.now() + 2,
+        synthetic: true,
+        goalContinuation: true,
+      })
+      yield* llm.push(
+        reply().tool("goal", {}),
+        reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }),
+        reply().text("blocked recorded").stop(),
+      )
+      yield* prompt.loop({ sessionID: chat.id })
+
+      // 旧 marker 没有 lineage，但 compaction part 足以证明它是 technical；
+      // D 的 previous 仍是 B，所以相同 reason 的第二次确认应真正 terminal。
+      const result = yield* goalSvc.get(chat.id)
+      expect(result._tag).toBe("Some")
+      if (result._tag === "Some") expect(result.value.status).toBe("blocked")
+    }),
+  { git: true },
+  20_000,
+)
+
+it.instance(
+  "only a later real user Goal turn authorizes model terminal recovery",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 0 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goalSvc = yield* SessionGoal.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      const terminalTurn = yield* user(chat.id, "finish now", { created: 1_000 })
+      yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
+      yield* llm.push(
+        reply().tool("goal", {}),
+        reply().tool("goal", { mark: "complete", reason: "all work verified" }),
+        reply().text("complete recorded").stop(),
+      )
+      yield* prompt.loop({ sessionID: chat.id })
+
+      // 先通过真实 Tool 写入 model terminal，确保 terminal_turn_id 来自 production transition；
+      // 直接调用 user set 会产生不同 ownership，不能证明 recovery actor classifier。
+      yield* user(chat.id, "technical replay", {
+        goalTurnID: terminalTurn.id,
+        created: 2_000,
+        synthetic: true,
+      })
+      yield* llm.push(
+        reply().tool("goal", {}),
+        reply().tool("goal", { mark: "active" }),
+        reply().text("technical recovery rejected").stop(),
+      )
+      yield* prompt.loop({ sessionID: chat.id })
+      const afterTechnical = yield* goalSvc.get(chat.id)
+      if (afterTechnical._tag === "Some") expect(afterTechnical.value.status).toBe("complete")
+
+      // technical replay 与 Goal continuation 分别验证 lineage 和 userInitiated 两道拒绝；
+      // 只有最后的非 synthetic user Message 才能赋予 later-real-user recovery 授权。
+      yield* user(chat.id, "Goal continuation", {
+        created: 3_000,
+        synthetic: true,
+        goalContinuation: true,
+      })
+      yield* llm.push(
+        reply().tool("goal", {}),
+        reply().tool("goal", { mark: "active" }),
+        reply().text("continuation recovery rejected").stop(),
+      )
+      yield* prompt.loop({ sessionID: chat.id })
+      const afterContinuation = yield* goalSvc.get(chat.id)
+      if (afterContinuation._tag === "Some") expect(afterContinuation.value.status).toBe("complete")
+
+      yield* user(chat.id, "please continue", { created: 4_000 })
+      yield* llm.push(
+        reply().tool("goal", {}),
+        reply().tool("goal", { mark: "active" }),
+        reply().text("recovery accepted").stop(),
+      )
+      yield* prompt.loop({ sessionID: chat.id })
+
+      // technical/continuation 只验证拒绝；真正的新用户 Goal turn 才拥有恢复授权。
+      const result = yield* goalSvc.get(chat.id)
+      expect(result._tag).toBe("Some")
+      if (result._tag === "Some") expect(result.value.status).toBe("active")
+    }),
+  { git: true },
+  20_000,
 )
 
 // [local-smark] GOAL 错误后续跑测试：验证 continueOnError 策略控制

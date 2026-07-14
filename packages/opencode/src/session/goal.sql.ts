@@ -41,12 +41,12 @@ export const SessionGoalTable = sqliteTable(
     // 当前 terminal 状态的理由（complete/blocked 时非空）。
     // active/paused 时为 null。公开字段，通过 API/SDK/TUI 传播。
     reason: text(),
-    // 待确认的 blocked 理由：模型提出 blocked 但尚未达到三轮阈值时暂存。
+    // 待确认的 blocked 理由：模型第一次提出 blocked、尚未达到两轮阈值时暂存。
     // 与 blocked_streak/blocked_last_turn_id 一起构成 blocked 连续审计。
     // 不公开为 API 字段。
     blocked_reason: text(),
     // 连续 eligible Goal turns 中相同 trimmed reason 的有效 blocked 次数。
-    // 达到 3 时 modelTransition 才真正写 blocked status。
+    // streak=2 只在两个不同 eligible turns 确认同一 blocker 时成立，此时才提升为 terminal。
     blocked_streak: integer().notNull().default(0),
     // 最近一次有效 blocked attempt 的 eligible user MessageID。
     // 防止同一 turn 重复调用伪造多次；用于校验前一个 eligible turn 连续性。

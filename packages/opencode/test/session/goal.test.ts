@@ -8,9 +8,13 @@ import { Storage } from "@/storage/storage"
 import { SyncEvent } from "@/sync"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { BackgroundJob } from "@/background/job"
+import { Database } from "@/storage/db"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import * as Log from "@opencode-ai/core/util/log"
 import { testEffect } from "../lib/effect"
+import { TestInstance } from "../fixture/fixture"
+import path from "path"
 
 void Log.init({ print: false })
 
@@ -388,14 +392,23 @@ it.instance(
       const result = yield* goalSvc.get(session.id)
       if (Option.isSome(result)) {
         const prompt = SessionGoal.continuationPrompt(result.value)
-        // 验证续跑 prompt 包含目标、用量、预算等关键信息
-        // Codex 对齐：无 Time elapsed，有 Tokens remaining
+        // 续跑 prompt 是模型判断 terminal transition 的真实 contract；除目标和预算外，
+        // 必须使用实际参数名 `mark`，并与 runtime 的两轮同 reason 规则完全一致。
         expect(prompt).toContain("<session-goal-continuation>")
         expect(prompt).toContain("build the feature")
         expect(prompt).toContain("Tokens used: 1234")
         expect(prompt).toContain("Token budget: 50000")
         expect(prompt).toContain("Tokens remaining: 48766")
-        expect(prompt).toContain("call the goal tool with status")
+        expect(prompt).toContain('call the goal tool with mark "complete"')
+        expect(prompt).toContain("two consecutive eligible Goal turns")
+        expect(prompt).toContain("the same trimmed reason")
+        // continuation 是自动续跑前的完整合同，不能只让首次 Tool result 承担探索指导。
+        expect(prompt).toContain("re-read relevant files")
+        expect(prompt).toContain("search with different patterns")
+        expect(prompt).toContain("smaller verifiable steps")
+        expect(prompt).toContain("overlooked dependencies or constraints")
+        expect(prompt).not.toContain('status "blocked"')
+        expect(prompt).not.toContain("three consecutive goal turns")
       }
     }),
   { git: true },
@@ -777,8 +790,84 @@ it.instance(
   { git: true },
 )
 
+// [local-smark] 多 daemon 共享同一 SQLite 文件；第二个 writer 在生产 set 获锁前提交 C，
+// set 必须在 immediate transaction 内重新读取 C，不能基于锁外旧 A 复用 generation 2。
 it.instance(
-  "modelTransition blocked requires three consecutive turns",
+  "concurrent objective edits preserve a unique generation",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const previousPath = Flag.OPENCODE_DB
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() => {
+          Database.close()
+          Flag.OPENCODE_DB = path.join(test.directory, "goal-concurrency.db")
+          // Project bootstrap 已发生在 preload 的内存 DB；隔离文件只验证 Goal 跨连接锁，
+          // 因此关闭该 test-only connection 的外键，避免复制无关 Project projector setup。
+          Database.Client().$client.run("PRAGMA foreign_keys = OFF")
+        }),
+        () =>
+          Effect.gen(function* () {
+            const goalSvc = yield* SessionGoal.Service
+            const sessions = yield* SessionNs.Service
+            const session = yield* sessions.create({})
+            const initial = yield* goalSvc.set(session.id, { objective: "objective A" })
+            const script = `
+              import { Database } from "bun:sqlite"
+              const [path, sessionID] = process.argv.slice(-2)
+              const db = new Database(path)
+              db.exec("PRAGMA busy_timeout = 30000")
+              db.exec("BEGIN IMMEDIATE")
+              db.query("UPDATE session_goal SET objective = ?, generation = generation + 1 WHERE session_id = ?").run("objective C", sessionID)
+              console.log("lock-ready")
+              await Bun.sleep(1000)
+              db.exec("COMMIT")
+              db.close()
+            `
+            const dbPath = Database.Client().$client.filename
+            const worker = Bun.spawn([process.execPath, "-e", script, dbPath, session.id], {
+              stdout: "pipe",
+              stderr: "pipe",
+            })
+            const ready = yield* Effect.promise(async () => {
+              const chunk = await worker.stdout.getReader().read()
+              if (chunk.done) {
+                throw new Error(`lock worker exited before readiness for ${dbPath}: ${await new Response(worker.stderr).text()}`)
+              }
+              return new TextDecoder().decode(chunk.value)
+            })
+            expect(ready).toContain("lock-ready")
+
+            const updated = yield* goalSvc.set(session.id, { objective: "objective B" }).pipe(
+              Effect.ensuring(Effect.promise(() => worker.exited).pipe(Effect.ignore)),
+            )
+            expect(updated.objective).toBe("objective B")
+            expect(updated.generation).toBe(3)
+
+            // C 的 generation-2 snapshot 在 B 提交后必须 stale，不能终态化当前 Goal。
+            const stale = yield* goalSvc.modelTransition(session.id, {
+              snapshot: { goalID: initial.id, generation: 2, status: "active" },
+              turnID: "turn1",
+              userInitiated: true,
+              status: "complete",
+              reason: "finished C",
+            }).pipe(Effect.exit)
+            expect(Exit.isFailure(stale)).toBe(true)
+          }),
+        () =>
+          Effect.sync(() => {
+            Database.close()
+            Flag.OPENCODE_DB = previousPath
+          }),
+      )
+    }),
+  { git: true },
+  10_000,
+)
+
+// 两个不同 turn 才允许 terminal，防止单轮工具重试把自己的判断当成持续 blocker 证据。
+it.instance(
+  "modelTransition blocked requires two consecutive turns",
   () =>
     Effect.gen(function* () {
       const goalSvc = yield* SessionGoal.Service
@@ -788,28 +877,20 @@ it.instance(
       const goal = yield* goalSvc.set(session.id, { objective: "test" })
       const snap = { goalID: goal.id, generation: goal.generation, status: "active" as const }
 
-      // Turn 1: pending, attempt 1
+      // 首轮只建立可被下一 turn 验证的 baseline，不应改变 public status/reason。
       const r1 = yield* goalSvc.modelTransition(session.id, {
         snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "stuck on X",
       })
       expect(r1.type).toBe("blocked-pending")
       if (r1.type === "blocked-pending") expect(r1.attempt).toBe(1)
 
-      // Turn 2: pending, attempt 2（连续，相同 reason）
+      // previousID 显式证明 turn adjacency；文本相同本身不能替代连续性证据。
       const r2 = yield* goalSvc.modelTransition(session.id, {
         snapshot: snap, turnID: "turn2", previousTurnID: "turn1", userInitiated: true,
         status: "blocked", reason: "stuck on X",
       })
-      expect(r2.type).toBe("blocked-pending")
-      if (r2.type === "blocked-pending") expect(r2.attempt).toBe(2)
-
-      // Turn 3: success，status 变为 blocked
-      const r3 = yield* goalSvc.modelTransition(session.id, {
-        snapshot: snap, turnID: "turn3", previousTurnID: "turn2", userInitiated: true,
-        status: "blocked", reason: "stuck on X",
-      })
-      expect(r3.type).toBe("updated")
-      if (r3.type === "updated") expect(r3.goal.status).toBe("blocked")
+      expect(r2.type).toBe("updated")
+      if (r2.type === "updated") expect(r2.goal.status).toBe("blocked")
     }),
   { git: true },
 )
@@ -825,17 +906,50 @@ it.instance(
       const goal = yield* goalSvc.set(session.id, { objective: "test" })
       const snap = { goalID: goal.id, generation: goal.generation, status: "active" as const }
 
-      // Turn 1: attempt 1
+      // 首次调用写入唯一 pending baseline，后续同 turn 调用只能幂等读取它。
       const r1 = yield* goalSvc.modelTransition(session.id, {
         snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "stuck",
       })
       if (r1.type === "blocked-pending") expect(r1.attempt).toBe(1)
 
-      // Same turn 1 again: still attempt 1，不增加
+      // 若同一 turn 能增加 streak，模型一次 provider loop 内即可绕过跨 turn 门禁。
       const r2 = yield* goalSvc.modelTransition(session.id, {
         snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "stuck",
       })
       if (r2.type === "blocked-pending") expect(r2.attempt).toBe(1)
+    }),
+  { git: true },
+)
+
+// [local-smark] 同一 Goal turn 改 reason 表示模型修正了 blocker 判断，
+// 新 reason 必须替换 pending baseline；否则下一 turn 仍可用已撤回的旧理由错误终态化。
+it.instance(
+  "modelTransition same turn changed reason replaces blocked baseline",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      const goal = yield* goalSvc.set(session.id, { objective: "test" })
+      const snap = { goalID: goal.id, generation: goal.generation, status: "active" as const }
+
+      yield* goalSvc.modelTransition(session.id, {
+        snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "blocker A",
+      })
+      const changed = yield* goalSvc.modelTransition(session.id, {
+        snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "blocker B",
+      })
+      expect(changed.type).toBe("blocked-pending")
+      if (changed.type === "blocked-pending") expect(changed.attempt).toBe(1)
+
+      // 旧 reason A 已被 B 替换，因此下一 turn 使用 A 必须重新从 attempt 1 开始。
+      const oldReason = yield* goalSvc.modelTransition(session.id, {
+        snapshot: snap, turnID: "turn2", previousTurnID: "turn1", userInitiated: true,
+        status: "blocked", reason: "blocker A",
+      })
+      expect(oldReason.type).toBe("blocked-pending")
+      if (oldReason.type === "blocked-pending") expect(oldReason.attempt).toBe(1)
     }),
   { git: true },
 )
@@ -851,15 +965,42 @@ it.instance(
       const goal = yield* goalSvc.set(session.id, { objective: "test" })
       const snap = { goalID: goal.id, generation: goal.generation, status: "active" as const }
 
-      // Turn 1: attempt 1
+      // DB 保留 turn1 作为上次真实 attempt，供下一次调用比较 raw chronology。
       yield* goalSvc.modelTransition(session.id, {
         snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "stuck",
       })
 
-      // Turn 3 (跳过 turn 2): previousTurnID 不匹配 → streak 重置为 1
+      // previousTurnID 指向没有 attempt 的 turn2；即使 reason 相同也必须打断 streak。
       const r = yield* goalSvc.modelTransition(session.id, {
         snapshot: snap, turnID: "turn3", previousTurnID: "turn2", userInitiated: true,
         status: "blocked", reason: "stuck",
+      })
+      if (r.type === "blocked-pending") expect(r.attempt).toBe(1)
+    }),
+  { git: true },
+)
+
+// reason 是 blocker identity 的一部分；只靠 turn 连续不能把不同根因合并为同一审计。
+it.instance(
+  "modelTransition changed reason resets streak",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      const goal = yield* goalSvc.set(session.id, { objective: "test" })
+      const snap = { goalID: goal.id, generation: goal.generation, status: "active" as const }
+
+      // reason A 只为下一 turn 验证 A 保留证据，不能为另一个 blocker B 提供次数。
+      yield* goalSvc.modelTransition(session.id, {
+        snapshot: snap, turnID: "turn1", userInitiated: true, status: "blocked", reason: "blocker A",
+      })
+
+      // previous 虽连续但 reason 已变化，B 必须建立自己的首轮 baseline。
+      const r = yield* goalSvc.modelTransition(session.id, {
+        snapshot: snap, turnID: "turn2", previousTurnID: "turn1", userInitiated: true,
+        status: "blocked", reason: "blocker B",
       })
       if (r.type === "blocked-pending") expect(r.attempt).toBe(1)
     }),

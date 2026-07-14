@@ -3,7 +3,9 @@ import { Effect } from "effect"
 import { Server } from "../../src/server/server"
 import { Session } from "@/session/session"
 import { SessionPaths } from "../../src/server/routes/instance/httpapi/groups/session"
-import { SessionID } from "@/session/schema"
+import { EventPaths } from "../../src/server/routes/instance/httpapi/groups/event"
+import { MessageID, PartID, SessionID } from "@/session/schema"
+import { ModelID, ProviderID } from "@/provider/schema"
 import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -33,6 +35,55 @@ function responseJson(response: Response) {
 
 function createSession() {
   return Session.Service.use((svc) => svc.create({}))
+}
+
+function observeGoalEvents(input: {
+  directory: string
+  sessionID: SessionID
+  objective: string
+  timeout: number
+  stopOnFailure?: boolean
+}) {
+  return Effect.promise(async () => {
+    // 使用公开 SSE 而不是注入 handler 私有依赖，验证客户端真实可见的 busy/error 合同；
+    // 同一 directory header 确保订阅与 mutation 落在相同 Instance runtime。
+    const headers = { "x-opencode-directory": input.directory }
+    const stream = await Server.Default().app.request(EventPaths.event, { headers })
+    if (!stream.body) throw new Error("missing event stream body")
+    const reader = stream.body.getReader()
+    await reader.read() // server.connected 确认订阅先于 mutation 就绪，避免丢失瞬时 busy/error。
+    const response = await Server.Default().app.request(pathFor(SessionPaths.goal, { sessionID: input.sessionID }), {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ objective: input.objective }),
+    })
+    const statuses: string[] = []
+    let failed = false
+    // empty-session 用完整观察窗口证明 busy 缺席；non-empty 在 error 到达后即可结束，
+    // 两种等待都以 server.connected 为 readiness，不用任意 sleep 猜测订阅时序。
+    const deadline = Date.now() + input.timeout
+    try {
+      while (Date.now() < deadline && !(input.stopOnFailure && failed)) {
+        const chunk = await Promise.race([
+          reader.read(),
+          new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), deadline - Date.now())),
+        ])
+        if (!chunk?.value) break
+        for (const item of new TextDecoder().decode(chunk.value).split("\n\n")) {
+          if (!item.startsWith("data: ")) continue
+          const event = JSON.parse(item.slice(6))
+          // 全局 Event stream 可能混有其他 test/runtime session；只收集目标 Session，
+          // 避免并行测试的 busy/error 被误认成当前 Goal mutation 的结果。
+          if (event.properties?.sessionID !== input.sessionID) continue
+          if (event.type === "session.status") statuses.push(event.properties.status.type)
+          if (event.type === "session.error") failed = true
+        }
+      }
+    } finally {
+      await reader.cancel()
+    }
+    return { response, statuses, failed }
+  })
 }
 
 describe("session goal HttpApi", () => {
@@ -163,6 +214,67 @@ describe("session goal HttpApi", () => {
     { git: true, config: { formatter: false, lsp: false } },
     // 30s 超时：每个用例需 git-init + Server.Default() 首次 bootstrap，
     // 默认 5s 在冷启动（首个用例）时可能超时
+    30000,
+  )
+
+  it.instance(
+    "active goal on an empty Session does not start the prompt loop",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const session = yield* createSession()
+        const result = yield* observeGoalEvents({
+          directory: test.directory,
+          sessionID: session.id,
+          objective: "wait for the first prompt",
+          timeout: 500,
+        })
+        expect(result.response.status).toBe(200)
+
+        // 空 Session 没有可执行的 user Message，启动 loop 只会制造 busy/defect 噪声。
+        expect(result.statuses).not.toContain("busy")
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+    30000,
+  )
+
+  it.instance(
+    "active goal with user history starts the loop and exposes background failure",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({})
+        const user = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: session.id,
+          agent: "build",
+          model: { providerID: ProviderID.make("missing"), modelID: ModelID.make("missing") },
+          time: { created: Date.now() },
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: user.id,
+          sessionID: session.id,
+          type: "text",
+          text: "resume this Goal",
+        })
+
+        const result = yield* observeGoalEvents({
+          directory: test.directory,
+          sessionID: session.id,
+          objective: "resume with observability",
+          timeout: 1_000,
+          stopOnFailure: true,
+        })
+
+        expect(result.response.status).toBe(200)
+        expect(result.statuses).toContain("busy")
+        // mutation 已提交后 loop failure 走既有 Session error event，而不是 catch-and-ignore。
+        expect(result.failed).toBe(true)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
     30000,
   )
 
