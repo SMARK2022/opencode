@@ -45,7 +45,8 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
 
-const layer = Layer.effect(
+// 离线维护显式提供空配置复用同一生产策略，不装配Location或应用运行时。
+export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
