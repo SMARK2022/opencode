@@ -1,4 +1,3 @@
-import { closestMatch } from "./edit-excerpt"
 export * as ApplyPatchTool from "./apply-patch"
 
 import { ToolFailure } from "@opencode-ai/llm"
@@ -83,7 +82,7 @@ const layer = Layer.effectDiscard(
         [name]: Tool.withPermission(
           Tool.make({
             description:
-              "Apply one patch containing add, update, delete, and move file operations. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. All source and destination targets are resolved and approved before contents are read. Operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
+              "Apply one patch containing add, update, delete, and move file operations. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. Update matches complete exact lines first, then one unique literal substring of the complete old block, preserving surrounding text. Ambiguous or nonliteral matches fail; nearby candidates are diagnostic only. All source and destination targets are resolved and approved before contents are read. Operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
             input: Input,
             output: Output,
             toModelOutput: ({ output }) => [{ type: "text", text: toModelOutput(output) }],
@@ -170,10 +169,8 @@ const layer = Layer.effectDiscard(
                     }
                     const update = yield* Effect.try({
                       try: () => Patch.derive(hunk.path, hunk.chunks, original),
-                      catch: (error) => {
-                        const closest = closestMatch(before, hunk.chunks.flatMap(chunk => chunk.oldLines).join("\n"))
-                        return new ToolFailure({ message: `${error}${closest ? `\n\nActual content near expected location:\n${closest.excerpt}` : ""}` })
-                      },
+                      // owning Patch保留失败chunk身份；此处不再运行第二套猜测位置的matcher。
+                      catch: (error) => new ToolFailure({ message: String(error) }),
                     })
                     prepared.push({
                       ...hunk,

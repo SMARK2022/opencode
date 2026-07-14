@@ -1,23 +1,17 @@
 import { diffLines, diffChars, type Change } from "diff"
+import { closestWindow } from "../patch-match"
 
 export function closestMatch(content: string, expected: string) {
-  const first = expected.split("\n").find(line => line.trim().length >= 3)?.trim().toLowerCase()
-  if (!first) return undefined
-  const letters = new Set(first)
-  const lines = content.split("\n")
-  // 摘录只辅助重试，不能把相似位置当作授权后的真实匹配。
-  const best = lines.map((line, index) => {
-    const candidate = line.trim().toLowerCase()
-    const common = [...candidate].filter(letter => letters.has(letter)).length
-    return { index, score: common / Math.max(1, Math.min(first.length, candidate.length)) }
-  }).sort((a, b) => b.score - a.score)[0]
-  if (!best || best.score < 0.3) return undefined
-  const start = Math.max(0, best.index - 1)
-  const fileExcerpt = lines.slice(start, best.index + expected.split("\n").filter(line => line.trim()).length + 2).join("\n")
-  return { line: start + 1, excerpt: formatClosestMatchExcerpt(expected, fileExcerpt, start + 1) }
+  const closest = closestWindow(content, expected)
+  if (!closest) return undefined
+  const lines = content.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n")
+  const count = expected.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n").length
+  const fileExcerpt = lines.slice(closest.line - 1, closest.line - 1 + count).join("\n")
+  // 短窗口保留source的实际原文；长窗口复用字符差异，避免截断真正的行末错误。
+  return { line: closest.line, excerpt: fileExcerpt.length > 500 ? formatClosestMatchExcerpt(expected, fileExcerpt, closest.line) : closest.excerpt }
 }
 
-// 两代保留各自候选定位，只共享失败诊断；字符差异不参与真正替换或审批。
+// 两代共用唯一候选及字符差异；诊断不参与真正替换或审批。
 export function formatClosestMatchExcerpt(oldString: string, fileExcerpt: string, fileStartLine: number) {
   const diffExcerpt = formatClosestMatchDiff(oldString, fileExcerpt, fileStartLine, 500)
   return diffExcerpt || (fileExcerpt.length <= 500 ? fileExcerpt : fileExcerpt.slice(0, 200) + `\n...[${fileExcerpt.length - 400} chars omitted]...\n` + fileExcerpt.slice(-200))

@@ -20,56 +20,6 @@ import * as Bom from "@/util/bom"
 import { normalizeLineEndings } from "@/util/line-ending"
 // #131：diff 展示归一行尾，隐藏纯换行变更
 
-// [local-smark] 从 patch hunk chunks 中提取期望的旧行文本，
-// 在 oldContent 中找到最近似的位置并返回上下文摘录。
-// 仅在 patch context 匹配失败时调用，帮助模型看到 actual content 而无需 re-read。
-// 限制摘录 5 行避免 error 消息过长。
-function extractActualExcerpt(oldContent: string, chunks: unknown): string | undefined {
-  // chunks 是 UpdateFileChunk[]，每个 chunk 有 old_lines: string[]
-  // 从第一个 chunk 的 old_lines 中提取搜索目标
-  let searchLine: string | undefined
-  if (Array.isArray(chunks)) {
-    for (const chunk of chunks) {
-      if (typeof chunk === "object" && chunk !== null) {
-        const c = chunk as Record<string, unknown>
-        const oldLines = c.old_lines
-        if (Array.isArray(oldLines)) {
-          for (const l of oldLines) {
-            if (typeof l === "string" && l.trim().length >= 3) {
-              searchLine = l.trim()
-              break
-            }
-          }
-        }
-      }
-      if (searchLine) break
-    }
-  }
-  if (!searchLine) return undefined
-  // 在 oldContent 中找到与 searchLine 字符重叠最高的行
-  const lines = oldContent.split("\n")
-  let bestIdx = -1
-  let bestScore = 0
-  for (let i = 0; i < lines.length; i++) {
-    const candidate = lines[i]!.trim()
-    if (candidate.length === 0) continue
-    const setA = new Set(searchLine.toLowerCase())
-    let common = 0
-    for (const ch of candidate.toLowerCase()) {
-      if (setA.has(ch)) common++
-    }
-    const score = common / Math.max(1, Math.min(searchLine.length, candidate.length))
-    if (score > bestScore) {
-      bestScore = score
-      bestIdx = i
-    }
-  }
-  if (bestIdx < 0 || bestScore < 0.3) return undefined
-  const start = Math.max(0, bestIdx - 1)
-  const end = Math.min(lines.length, bestIdx + 4)
-  return lines.slice(start, end).join("\n").slice(0, 500)
-}
-
 // [local-smark] 处理单个 hunk 的独立函数，支持 per-file atomicity。
 // 调用方用 Effect.exit 捕获成功/失败，失败时收集错误继续处理其他 hunk。
 // 逻辑与重构前的 switch/case 完全一致，仅提取为函数边界；diff 统计前先归一行尾（#131）。
@@ -124,8 +74,8 @@ const processSingleHunk = Effect.fn("ApplyPatchTool.processSingleHunk")(function
         bom = fileUpdate.bom
       } catch (error) {
         // context 匹配失败时附带 actual content 摘录，帮助模型自纠正
-        const actualExcerpt = extractActualExcerpt(oldContent, hunk.chunks)
-        return yield* Effect.fail(new Error(`${error}` + (actualExcerpt ? `\n\nActual content near expected location:\n${actualExcerpt}` : "")))
+        // Patch owner 仍持有失败 chunk 身份与 persisted text；Tool 只聚合其错误，不能运行第二套 matcher。
+        return yield* Effect.fail(error instanceof Error ? error : new Error(String(error)))
       }
       const diffOld = normalizeLineEndings(oldContent)
       const diffNew = normalizeLineEndings(newContent)

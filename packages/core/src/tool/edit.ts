@@ -53,13 +53,14 @@ const decodeUtf8 = (content: Uint8Array) => {
   return { bom, content, text: new TextDecoder().decode(bom ? content.slice(3) : content) }
 }
 
-const countOccurrences = (content: string, search: string) => {
+const countOccurrences = (content: string, search: string, replaceAll: boolean) => {
   if (search === "") return content.length + 1
   let count = 0
   let offset = 0
   while ((offset = content.indexOf(search, offset)) !== -1) {
     count++
-    offset += search.length
+    // 单次替换也拒绝重叠的第二命中；replaceAll仍按实际非重叠替换数统计。
+    offset += replaceAll ? search.length : 1
   }
   return count
 }
@@ -78,7 +79,7 @@ export const toModelOutput = (output: Output) =>
   ].join("\n")
 
 /** Deferred V2 edit behavior and UX integrations remain visible at the model-facing seam. */
-// TODO: Port V1 fuzzy correction strategies only after exact-edit behavior is established: line-trimmed matching, block-anchor fallback, indentation correction, and similarity-threshold review.
+// 字面匹配现为两代共同合同，不再等待移植已明确弃用的fuzzy成功路径。
 // TODO: Publish watcher/file-edit events after V2 watcher integration exists.
 // TODO: Add snapshots / undo after design exists.
 // TODO: Add LSP notification and diagnostics after V2 LSP runtime exists.
@@ -185,13 +186,13 @@ const layer = Layer.effectDiscard(
                 // LF 目标也先归一请求，保留原有 CRLF 请求编辑 LF 文件的匹配能力。
                 const oldString = convertToLineEnding(normalizeLineEndings(input.oldString), ending)
                 const newString = convertToLineEnding(normalizeLineEndings(input.newString), ending)
-                const replacements = countOccurrences(source.text, oldString)
+                const replacements = countOccurrences(source.text, oldString, input.replaceAll === true)
                 if (replacements === 0) {
                   const closest = closestMatch(source.text, oldString)
                   return yield* new ToolFailure({
                     message:
-                      "Could not find oldString in the file. It must match exactly, including whitespace and indentation." +
-                      (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : ""),
+                      "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings." +
+                      (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
                   })
                 }
                 if (replacements > 1 && input.replaceAll !== true) {

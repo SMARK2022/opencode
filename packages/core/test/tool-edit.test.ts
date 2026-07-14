@@ -347,8 +347,7 @@ describe("EditTool", () => {
                   yield* executeTool(registry, call({ path: "matches.txt", oldString: "missing", newString: "after" })),
                 ).toEqual({
                   type: "error",
-                  value:
-                    "Could not find oldString in the file. It must match exactly, including whitespace and indentation.\n\nClosest match at line 1:\nsame same",
+                  value: "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.",
                 })
                 expect(
                   yield* executeTool(registry, call({ path: "matches.txt", oldString: "same", newString: "after" })),
@@ -357,6 +356,14 @@ describe("EditTool", () => {
                   value:
                     "Found multiple exact matches for oldString. Provide more surrounding context or set replaceAll to true.",
                 })
+                // 重叠literal也是第二候选，不能只按replaceAll的非重叠计数放行。
+                yield* Effect.promise(() => fs.writeFile(target, "aaaa"))
+                expect(yield* executeTool(registry, call({ path: "matches.txt", oldString: "aa", newString: "x" }))).toMatchObject({ type: "error", value: expect.stringContaining("multiple exact matches") })
+                // 候选行号是实际窗口起点，而非带上一行context的起点。
+                yield* Effect.promise(() => fs.writeFile(target, "header\nconst preferred = true\n"))
+                expect(yield* executeTool(registry, call({ path: "matches.txt", oldString: "const preferred = false", newString: "x" }))).toMatchObject({ type: "error", value: expect.stringContaining("Closest match at line 2:\nconst preferred = true") })
+                expect(writes).toEqual([])
+                expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("header\nconst preferred = true\n")
                 // 真实Native Edit失败必须显示900字符行末差异，不只证明孤立formatter可用。
                 const prefix = "p".repeat(900)
                 yield* Effect.promise(() => fs.writeFile(target, `return value;\n${prefix} private int x = 0;`))
@@ -482,8 +489,9 @@ test("keeps the locked edit schema, semantics docstring, and deferred TODOs visi
   expect(source).toContain(
     "absolute external paths retain mutation capability through a separate\n * external_directory approval before edit approval.",
   )
+  // exact-only合同已生效，移除旧fuzzy移植待办而非恢复已废弃的成功域。
+  expect(source).not.toContain("TODO: Port V1 fuzzy correction")
   for (const todo of [
-    "Port V1 fuzzy correction strategies only after exact-edit behavior is established: line-trimmed matching, block-anchor fallback, indentation correction, and similarity-threshold review.",
     "Publish watcher/file-edit events after V2 watcher integration exists.",
     "Add snapshots / undo after design exists.",
     "Add LSP notification and diagnostics after V2 LSP runtime exists.",

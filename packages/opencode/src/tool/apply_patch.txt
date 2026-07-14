@@ -31,3 +31,6 @@ It is important to remember:
 
 - You must include a header with your intended action (Add/Delete/Update)
 - You must prefix new lines with `+` even when creating a new file
+- Update old lines are matched exactly as complete lines first. If that fails, the complete old block may match one exact literal substring while preserving all surrounding text.
+- A substring update fails when the complete old block occurs zero or multiple times in the eligible range. Add more context instead of relying on whitespace, indentation, Unicode, or fuzzy matching.
+- A failed update reports a closest file candidate only when one location is reliably better than the alternatives; otherwise read the file again.
