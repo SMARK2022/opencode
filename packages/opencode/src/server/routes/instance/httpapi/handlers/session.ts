@@ -543,6 +543,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       tokenBudget: ctx.payload.tokenBudget,
       // [local-smark] 透传错误续跑策略到 domain service
       continueOnError: ctx.payload.continueOnError,
+      // [local-smark] terminal reason 透传到 domain service
+      reason: ctx.payload.reason,
     })).pipe(
       // GoalError 的具体原因（空/超长/budget/无goal）透传到 wire 体 data.message，
       // 让 TUI 能展示真实拒绝原因，而非通用 "Failed to update goal"；
@@ -551,6 +553,13 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         Effect.fail(new GoalApiError({ name: "GoalError", data: { message: error.message } })),
       ),
     )
+    // active写入后在持久Session目录内恢复执行；busy仍由原RunState去重。
+    if (goal.status === "active") {
+      yield* inSessionDirectory(ctx.params.sessionID, promptSvc.loop({ sessionID: ctx.params.sessionID })).pipe(
+        Effect.catchDefect(() => Effect.void),
+        Effect.forkIn(scope),
+      )
+    }
     return { goal }
   })
 

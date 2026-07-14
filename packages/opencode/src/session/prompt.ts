@@ -49,6 +49,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { type GoalTurnContext } from "@/tool/goal"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -677,6 +678,8 @@ const layer = Layer.effect(
         time: { created: Date.now() },
         agent: lastUser.agent,
         model: lastUser.model,
+        // [local-smark] Task summary 继承当前 Goal turn，不产生新 eligible turn
+        goalTurnID: lastUser.goalTurnID ?? lastUser.id,
       }
       yield* sessions.updateMessage(summaryUserMsg)
       yield* sessions.updatePart({
@@ -1468,6 +1471,10 @@ const layer = Layer.effect(
         // 提示是 ephemeral 的（仅存在于 messages 数组，不持久化到 DB），
         // 不会泄漏给 compaction 模型污染下一轮干净上下文。
         let nearOverflowNotified = false
+        // [local-smark] 当前 eligible Goal turn 的受信上下文。
+        // 同一 eligible user 下的 assistant/provider steps 共享同一个 context 和 read snapshot。
+        // 新 eligible user turn 时重建，确保 blocked streak 不被同一 user 的多个 step 伪造。
+        let goalTurn: GoalTurnContext | undefined
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
@@ -1481,6 +1488,42 @@ const layer = Layer.effect(
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+
+          // [local-smark] 推导当前 eligible Goal turn ID：
+          // 有 goalTurnID 的 technical user 继承原始 turn；否则以自身 ID 为 turn ID。
+          // 同一 eligible turn 下的多个 assistant/provider steps 共享同一个 GoalTurnContext。
+          const eligibleTurnID = lastUser.goalTurnID ?? lastUser.id
+          if (!goalTurn || goalTurn.id !== eligibleTurnID) {
+            // 获取 lastUser 的 parts 以判断 turn 来源
+            const lastUserMsg = msgs.findLast((m) => m.info.id === lastUser.id)
+            const userParts = lastUserMsg?.parts ?? []
+            // 判断当前 turn 是否由真实用户发起（非全 synthetic parts）
+            const hasNonSyntheticPart = userParts.some((p) => !("synthetic" in p && p.synthetic))
+            // 判断是否为 Goal continuation turn（有 goal_continuation metadata 的 synthetic text）
+            const isGoalContinuation = userParts.some(
+              (p: any) => p.type === "text" && p.synthetic && p.metadata?.goal_continuation === true,
+            )
+            // [local-smark] 从 raw message history 向前扫描前一个不同的 eligible turn ID。
+            // blocked 连续性校验依赖 previousTurnID：只有前一 turn 有相同 reason 的 attempt
+            // 才递增 streak，否则从 1 重新开始。
+            let previousEligibleTurnID: string | undefined
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              const m = msgs[i]
+              if (m.info.role !== "user") continue
+              const tid = (m.info as SessionV1.User).goalTurnID ?? m.info.id
+              if (tid !== eligibleTurnID) {
+                previousEligibleTurnID = tid
+                break
+              }
+            }
+            goalTurn = {
+              id: eligibleTurnID,
+              // 前一个不同的 eligible turn ID，用于 blocked streak 连续性校验
+              previousID: previousEligibleTurnID,
+              // 真实用户 turn → userInitiated=true；Goal continuation → false
+              userInitiated: hasNonSyntheticPart && !isGoalContinuation,
+            }
+          }
 
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
@@ -1571,6 +1614,10 @@ const layer = Layer.effect(
                     parts: [{
                       type: "text",
                       synthetic: true,
+                      // [local-smark] goal_continuation marker 标识此 synthetic user
+                      // 为新的 eligible Goal turn，与 compaction/task technical user 区分。
+                      // blocked streak 依赖此 marker 判断连续性。
+                      metadata: { goal_continuation: true },
                       text: SessionGoal.continuationPrompt(goal),
                     }],
                   }).pipe(Effect.orDie)
@@ -1691,6 +1738,8 @@ const layer = Layer.effect(
                   messages: msgs,
                   promptOps,
                   goalSvc,
+                  // [local-smark] 注入当前 Goal turn context，使 GoalTool 能校验 read snapshot
+                  goalTurn,
                 }).pipe(
                   Effect.provideService(Plugin.Service, plugin),
                   Effect.provideService(Permission.Service, permission),
@@ -1753,6 +1802,12 @@ const layer = Layer.effect(
                 nearOverflowNotified = false
               }
             }
+            // dispatch固定请求的Goal代际，后续终态仍结算，objective编辑或clear则不串账。
+            const preDispatchGoal = yield* goalSvc.get(sessionID).pipe(Effect.orDie)
+            const expectedUsage =
+              preDispatchGoal._tag === "Some" && preDispatchGoal.value.status === "active"
+                ? { goalID: preDispatchGoal.value.id, generation: preDispatchGoal.value.generation }
+                : undefined
             const result = yield* handle.process({
               user: lastUser,
               agent,
@@ -1774,6 +1829,19 @@ const layer = Layer.effect(
               model,
               toolChoice: !decide && format.type === "json_schema" ? "required" : undefined,
             })
+
+            // 在structured/stop/error/compact分支之前归账，保留已确认的最终消耗。
+            if (expectedUsage && handle.message.tokens && handle.message.time.completed) {
+              const tokenDelta =
+                handle.message.tokens.input +
+                handle.message.tokens.output +
+                handle.message.tokens.reasoning
+              const timeDelta = Math.max(0, Math.floor((handle.message.time.completed - handle.message.time.created) / 1000))
+              // 诊断数据库defect，不伪报计账成功，也不改写provider结果。
+              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta, expectedUsage).pipe(
+                Effect.catchDefect((defect) => Effect.logError("goal accountUsage defect", { defect: String(defect) })),
+              )
+            }
 
             if (structured !== undefined) {
               handle.message.structured = structured
@@ -1822,22 +1890,6 @@ const layer = Layer.effect(
                 return "terminal-error" as const
               }
               return "break" as const
-            }
-            // #364：goal token/time 计费：assistant message 完成后，
-            // 如果 goal active 则累加本轮 token 消耗和耗时到 goal DB 记录
-            if (handle.message.tokens && handle.message.time.completed) {
-              const tokenDelta =
-                handle.message.tokens.input +
-                handle.message.tokens.output +
-                handle.message.tokens.reasoning
-              const timeDelta = Math.max(
-                0,
-                Math.floor((handle.message.time.completed - handle.message.time.created) / 1000),
-              )
-              // 计费DB缺陷保留诊断但不截断provider轮次；ignore不能捕获defect。
-              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta).pipe(
-                Effect.catchDefect((defect) => Effect.logError("goal accountUsage defect", { defect: String(defect) })),
-              )
             }
             if (result === "compact") {
               nearOverflowNotified = false

@@ -25,8 +25,14 @@ export const Goal = Schema.Struct({
   tokensUsed: Schema.Number,
   timeUsedSeconds: Schema.Number,
   // [local-smark] 错误后续跑策略：用户通过 GUI/API 控制，模型不可修改。
-  // false=终止型错误后停止（默认），true=允许 GOAL continuation 继续
+  // false=终止型错误后停止（默认），true=允许 GOAL continuation 继续。
   continueOnError: Schema.Boolean,
+  // objective 代际：从 1 开始，仅当 trimmed objective 真正改变时递增。
+  // 模型 stale write 和 usage attribution 都依赖此值判断代际一致性
+  generation: Schema.Number,
+  // 当前 terminal 状态的理由；active/paused 为 null。
+  // complete/blocked 时非空，通过 API/SDK/TUI 传播给客户端
+  reason: Schema.NullOr(Schema.String),
   time: Schema.Struct({
     created: Schema.Number,
     updated: Schema.Number,

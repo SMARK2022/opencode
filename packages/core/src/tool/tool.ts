@@ -5,12 +5,15 @@ import { Effect, JsonSchema, Schema } from "effect"
 import type { AgentV2 } from "../agent"
 import type { SessionMessage } from "../session/message"
 import type { SessionSchema } from "../session/schema"
+import type { SessionGoal } from "../session/goal"
 
 export interface Context {
   readonly sessionID: SessionSchema.ID
   readonly agent: AgentV2.ID
   readonly assistantMessageID: SessionMessage.ID
   readonly toolCallID: string
+  // runner提供可信turn引用，模型输入无法伪造或替换读快照。
+  readonly goalTurn?: SessionGoal.GoalTurnContext
 }
 
 export type SchemaType<A> = Schema.Codec<A, any, never, never>

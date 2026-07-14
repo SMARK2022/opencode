@@ -41,10 +41,11 @@ export const migrations = (
     import("./migration/20260622170816_reset_v2_session_state"),
     import("./migration/20260622202450_simplify_session_input"),
     import("./migration/20260623000000_session_step_usage"),
-    import("./migration/20261009114905_session_request_usage"),
     import("./migration/20260723100000_normalize_global_session_path"),
     import("./migration/20260725100000_migrate_review_agent"),
     import("./migration/20260726100000_session_goal"),
     import("./migration/20260812100000_goal_continue_on_error"),
+    import("./migration/20260901100000_session_goal_integrity"),
+    import("./migration/20261009114905_session_request_usage"),
   ])
 ).map((module) => module.default) satisfies DatabaseMigration.Migration[]

@@ -50,6 +50,10 @@ type SessionGoalInfo = {
   timeUsedSeconds: number
   // [local-smark] 错误后续跑策略：用户通过 GUI 控制，跨重启持久化
   continueOnError: boolean
+  // objective 代际：仅 trimmed objective 真正改变时递增
+  generation: number
+  // terminal 状态理由；active/paused 为 null
+  reason: string | null
   time: { created: number; updated: number }
 }
 

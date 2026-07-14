@@ -373,6 +373,7 @@ export function make(options: ClientOptions) {
               status: input["status"],
               tokenBudget: input["tokenBudget"],
               continueOnError: input["continueOnError"],
+              reason: input["reason"],
             },
             successStatus: 200,
             declaredStatuses: [400, 404, 401],

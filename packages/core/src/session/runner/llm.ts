@@ -209,7 +209,11 @@ const layer = Layer.effect(
     })
 
     // 仅当前 drain 持有待注入目标；不新增调度器或崩溃后自动恢复。
-    type GoalContinuation = { goal?: SessionGoal.Goal; turns: number }
+    type GoalContinuation = {
+      goal?: SessionGoal.Goal; turns: number
+      // 同eligible turn跨provider steps与compaction重入共享读取快照。
+      goalTurn?: SessionGoal.GoalTurnContext
+    }
 
     const runTurnAttempt = Effect.fn("SessionRunner.runTurn")(function* (
       sessionID: SessionSchema.ID,
@@ -302,6 +306,9 @@ const layer = Layer.effect(
       const model = selection.model
       const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
       const context = entries.map((entry) => entry.message)
+      // 只有实际提升的User或已发布的Goal Synthetic换turn，pending inbox和技术重入不换。
+      const lineage = yield* SessionHistory.goalTurn(db, session.id)
+      if (lineage?.id !== continuation.goalTurn?.id) continuation.goalTurn = lineage
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
       const decide = agent.id === "decide"
       // 与最大步数共用原禁用路径，不构建第二套执行器或只依赖权限过滤。
@@ -421,6 +428,9 @@ const layer = Layer.effect(
       let overflowFailure: ProviderErrorEvent | undefined
       // 只有本轮显式provider错误携带续跑资格，不能从投影中的unknown推断中断或EOF。
       let terminalError = false
+      // 请求归属与工具读取门寿命不同：dispatch固定代际，终态后的同代最终消耗仍结算。
+      const dispatchedGoal = yield* goals.get(session.id)
+      const expectedUsage = Option.isSome(dispatchedGoal) && dispatchedGoal.value.status === "active" ? { goalID: dispatchedGoal.value.id, generation: dispatchedGoal.value.generation } : undefined
       const providerStream = llm.stream(request, (body) => Effect.gen(function* () {
         // 同一次 compile 已合并模型/路由默认值并完成协议 lowering，估算只读取该有效正文。
         inputEstimate = {
@@ -487,6 +497,7 @@ const layer = Layer.effect(
                   agent: agent.id,
                   assistantMessageID,
                   call: event,
+                  goalTurn: continuation.goalTurn,
                 // 与普通工具结果共用 publication 串行器；回调只交接已限幅的取消证据。
                 }, (bounded) => withPublication(publisher.interruptedOutput(event.id, bounded.output)))
                 }),
@@ -600,6 +611,14 @@ const layer = Layer.effect(
               // 失败退出仍结算同一确认 step，模式只影响通知，不改变 cost/tokens。
               }, { finalizer }),
             )
+            // 沿确认Step结算一次，先于错误/中断传播；不能因当前Goal已终态而退款。
+            if (expectedUsage) {
+              const tokens = stepSettlement.tokens
+              const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
+              yield* goals.accountUsage(session.id, tokens.input + tokens.output + tokens.reasoning, seconds, expectedUsage).pipe(
+                Effect.catchDefect((defect) => Effect.logError("goal accountUsage defect", { defect: String(defect) })),
+              )
+            }
           }
           if (publisher.hasProviderError())
             yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted", false, finalizer))
@@ -620,15 +639,6 @@ const layer = Layer.effect(
           }
           if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
             return yield* Effect.failCause(settled.cause)
-          if (stepSettlement && !publisher.hasProviderError()) {
-            // 仅确认的正常轮次累计用量，预算维持记录/提示语义而非硬停止。
-            const tokens = stepSettlement.tokens
-            const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
-            // 与V1相同：记录计费defect，不能静默丢失或让诊断变成第二个结算路径。
-            yield* goals.accountUsage(session.id, tokens.input + tokens.output + tokens.reasoning, seconds).pipe(
-              Effect.catchDefect((defect) => Effect.logError("goal accountUsage defect", { defect: String(defect) })),
-            )
-          }
           if (!continueAfterError && publisher.hasActiveAssistant() && !stepSettlement) {
             // 无内容 turn 的 Started 可迟于 step-finish；结算快照存在时不能按 active 误报 EOF。
             yield* withPublication(publisher.failAssistant("Provider stream ended before assistant step finish"))

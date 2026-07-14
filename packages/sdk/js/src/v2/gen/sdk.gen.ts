@@ -3546,6 +3546,7 @@ export class Goal extends HeyApiClient {
       status?: "active" | "paused" | "complete" | "blocked"
       tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
       continueOnError?: boolean
+      reason?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -3561,6 +3562,7 @@ export class Goal extends HeyApiClient {
             { in: "body", key: "status" },
             { in: "body", key: "tokenBudget" },
             { in: "body", key: "continueOnError" },
+            { in: "body", key: "reason" },
           ],
         },
       ],
@@ -5449,6 +5451,7 @@ export class Goal2 extends HeyApiClient {
       status?: "active" | "paused" | "complete" | "blocked"
       tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
       continueOnError?: boolean
+      reason?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -5462,6 +5465,7 @@ export class Goal2 extends HeyApiClient {
             { in: "body", key: "status" },
             { in: "body", key: "tokenBudget" },
             { in: "body", key: "continueOnError" },
+            { in: "body", key: "reason" },
           ],
         },
       ],

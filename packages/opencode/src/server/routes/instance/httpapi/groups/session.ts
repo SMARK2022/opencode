@@ -85,6 +85,8 @@ export const GoalSetPayload = Schema.Struct({
   tokenBudget: Schema.optional(Schema.NullOr(Schema.Number)),
   // [local-smark] 缺省 = 不改；true/false = 设置错误后续跑策略
   continueOnError: Schema.optional(Schema.Boolean),
+  // [local-smark] reason: terminal status（complete/blocked）必填，active/paused 时忽略
+  reason: Schema.optional(Schema.String),
 })
 export const GoalResponse = Schema.Struct({
   goal: Schema.NullOr(SessionGoal.Goal),

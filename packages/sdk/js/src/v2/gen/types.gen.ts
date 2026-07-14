@@ -275,6 +275,7 @@ export type UserMessage = {
   tools?: {
     [key: string]: boolean
   }
+  goalTurnID?: string
 }
 
 export type ProviderAuthError = {
@@ -758,6 +759,8 @@ export type SessionGoal = {
   tokensUsed: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
   timeUsedSeconds: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
   continueOnError: boolean
+  generation: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  reason: string
   time: {
     created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
     updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
@@ -3155,6 +3158,8 @@ export type SessionGoal1 = {
   tokensUsed: number | "NaN" | "Infinity" | "-Infinity"
   timeUsedSeconds: number | "NaN" | "Infinity" | "-Infinity"
   continueOnError: boolean
+  generation: number | "NaN" | "Infinity" | "-Infinity"
+  reason: string
   time: {
     created: number | "NaN" | "Infinity" | "-Infinity"
     updated: number | "NaN" | "Infinity" | "-Infinity"
@@ -3345,6 +3350,8 @@ export type SessionGoal2 = {
   tokensUsed: number | "NaN" | "Infinity" | "-Infinity"
   timeUsedSeconds: number | "NaN" | "Infinity" | "-Infinity"
   continueOnError: boolean
+  generation: number | "NaN" | "Infinity" | "-Infinity"
+  reason: string
   time: {
     created: number | "NaN" | "Infinity" | "-Infinity"
     updated: number | "NaN" | "Infinity" | "-Infinity"
@@ -11773,6 +11780,7 @@ export type SessionGoalSetData = {
     status?: "active" | "paused" | "complete" | "blocked"
     tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
     continueOnError?: boolean
+    reason?: string
   }
   path: {
     sessionID: string
@@ -12961,6 +12969,7 @@ export type V2SessionGoalSetData = {
     status?: "active" | "paused" | "complete" | "blocked"
     tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
     continueOnError?: boolean
+    reason?: string
   }
   path: {
     sessionID: string
