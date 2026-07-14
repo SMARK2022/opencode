@@ -4,6 +4,131 @@
 
 -------------
 
+## 新版：基于 Skills 与 Session GOAL 的第一性工作流
+
+本节是当前推荐工作流。它只负责组织现有 policy、skills、canonical template 和独立 auditor，不复制或弱化这些文件中的完整规则。每次执行都必须读取磁盘上的当前版本；本节与它们发生冲突时，以用户原始需求、仓库指令和当前 policy 为准。下一个分隔符之后的旧版 prompts 保持原样，仅作为历史存档。
+
+### 使用方式
+
+1. 在目标 Session 中运行 `/goal`，创建或编辑 GOAL。
+2. 复制下面的 GOAL objective，并替换所有 `<...>` 占位符。
+3. `目标终态` 必须明确选择 `approved-plan-only`、`verified-implementation` 或 `verified-implementation-and-commit`。
+4. 未明确选择 commit 终态时，不得 stage、commit 或 push。任何终态都不包含 push；push 需要另一条明确的用户指令。
+5. 下面的模板本体保持在 5500 字符以内，为具体目标原文预留空间；Session GOAL objective 的硬上限为 6400 字符。只复制代码块，不要复制本节说明。
+6. 如果替换原始需求后会超过上限，不得截断需求。先把完整原文保存到稳定的 issue 或 specification 文件，再在 objective 中填写该路径。
+
+### GOAL Objective
+
+```markdown
+# Session GOAL
+
+## 参数
+
+- **原始需求**：<逐字需求，或稳定 issue / specification 路径>
+- **目标终态**：<approved-plan-only | verified-implementation | verified-implementation-and-commit>
+- **Canonical plan**：<用户路径；否则按仓库约定，最终回退到 docs/plans/<task-slug>.md>
+
+## GOAL 合同
+
+- 跨 continuation 保持完整需求、范围和放行标准，不得缩小终态。
+- skills 和文档按阶段即时加载，禁止开局一次性读取全部内容。
+- 审计材料只由 `adversarial-auditor` subagent 加载；primary agent 不预读、不自审。
+- 阶段加载的 policy、skill、template、仓库指令和 canonical plan 是权威依据。
+- 仅在目标终态被当前证据逐项证明后标记 `complete`。同一真实阻塞连续至少 3 个 GOAL turns 且无法继续推进时才标记 `blocked`。
+
+## 第一性门禁
+
+- “完整”覆盖证据证明受影响的 interface、producer、consumer、调用链和行为映射，不等于扫描整个仓库。无法绕过的上游保证不得在下游重复实现，speculative 边界不得驱动代码或 blocking finding。
+- 默认修复 primary path 的 first divergence。禁止 A -> B -> B1/B2/B3、平行实现、catch-and-success 和临时 fallback。只有用户原文明确要求时才允许精确 rollback，且不得成为失败后的备用成功路径。
+- 必要增强可由 invariant、仓库规则、真实 compatibility、reachable safety risk 或 threat model 证明，无需逐字对应用户原句，但须归属正确 owner、保持必要范围并具备行为验证。speculative defense-in-depth 禁止。
+- 门禁只约束行为、证据、owner 和验证，不规定函数数、文件数或代码结构。采用仓库最自然、内聚且足以承载需求和必要安全性的设计。
+- 每个 production concept 必须映射到用户需求、既有 invariant、仓库规则或真实安全/兼容证据，并说明现有逻辑为何无法承载。diff 大小不能替代完整性判断。
+- 只维护一个 canonical plan；聊天摘要、旧审计和 builder 自述不构成实施授权。
+
+## 阶段 1：构建 Canonical Plan
+
+### 此时加载
+
+- `first-principles-planning`，并按其要求读取当前 policy、canonical template、`CONTEXT.md`、ADR 和适用的 `AGENTS.md`。
+- bug、失败或性能回归在建立反馈信号时加载 `diagnosing-bugs`。
+- 仅在设计 test seam 和 behavior slice 时加载 `tdd`。
+- 不得加载 `adversarial-audit` 或 `approved-plan-implementation`。
+
+### 产物和门禁
+
+- 从当前仓库重新调查，不把旧方案或旧审计当作已确认事实。只创建或修订 plan，不修改 production、tests、config、migration 或 generated files。
+- bug 类任务必须建立并实际运行能够捕获用户原始症状的 red-capable feedback loop。没有该信号时不得仅靠源码阅读猜根因，应继续构建信号或记录真实环境阻塞。
+- 完成 template 各字段：evidence/domain/reachability、invariant/divergence/owner、route/paths/workaround、file/TDD/verification/diff、risks/speculation/audit/comments。
+- forward mapping：requirement/invariant -> path/file/test。reverse mapping：concept -> requirement/invariant/safety evidence + 不可复用原因。缺失映射不得提交审计。
+- 完成后设置 `Status: audit-required`、`Approved revision: none`、`Implementation allowed: no`。
+
+## 阶段 2：独立方案审计
+
+### Primary Agent
+
+- 只调用 `adversarial-auditor`、发送 handoff、接收并原样记录 verdict。
+- 不加载 `adversarial-audit`，不发送自评、问题猜测、设计辩护、建议审计范围或“已经检查过”的声明。
+- handoff 仅含原始需求、plan 路径、repository root 和 `Audit mode: plan`。
+
+### Auditor Subagent
+
+- 本轮开始时自行加载 `adversarial-audit`、policy 和必要仓库证据。
+- 按自身 skill 独立审计；primary agent 不复述、筛选或预判审计标准。
+
+### 放行
+
+- 任一 blocking finding 都要求修订同一 plan、递增 revision、清空 approval，并按原始需求和完整 affected interface full-scope 重审，禁止 delta-only review。
+- 最多 6 轮。连续调用失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽后 blockers 仍保持 blocking，并作为开放决定交给用户。
+- exact revision 仅在获得 `No blocking findings` 和 `APPROVE` 后，才原样记录 verdict，设置 `Status: approved`、`Approved revision: <current>`、`Implementation allowed: yes`；不得夹带设计修改。
+- `approved-plan-only` 在完成逐项终态审计后标记 GOAL `complete`，不得实施代码。
+
+## 阶段 3：按批准 Revision 实施
+
+### 此时加载
+
+- 仅在目标包含 implementation 且 exact revision 已批准时加载 `approved-plan-implementation`，并加载或继续执行 `tdd`。
+- bug 类任务继续使用既有 `diagnosing-bugs` feedback loop。
+
+### TDD 和修改边界
+
+- 实施前重读批准范围。interface、producer、consumer、invariant、owner、tests 或 file plan 发生相关漂移时停止，修订 plan 并重新审计；不覆盖、不回退、不夹带无关 worktree 修改。
+- 在批准 seam 逐个执行 `red -> minimal approved behavior -> green -> regression`。expected value 必须独立；不得断言 private helper、源码、调用次数、复制 production algorithm 或 horizontal slicing。
+- 只执行 approved repair/rollback。任何 behavior/scope/interface/ownership/fallback/test seam/file/concept 偏离都必须停止，递增 revision、清空 approval 并 full-scope plan audit。禁止 auditor 事后批准未计划设计。
+- 必要安全增强若在实施中才被发现，必须作为新事实进入 plan 和审计，不能静默加入，也不能仅因未逐字出现在用户需求中而直接删除。
+- 保持仓库命名、分层、类型、错误处理、module shape 和测试组织。禁止无依据的 refactor/dependency/public API/config/migration、类型逃逸、dead/unused/test-only code、弱化测试或安全约束，并删除淘汰 workaround。
+
+### 注释和验证
+
+- `E` 排除空行、import-only、formatter-only、generated 和 pure-move 变化。必须满足 `if E = 0: C = 0` 与 `if E > 0: C >= max(1, ceil(E * 0.15))`。
+- `C` 只计算邻近修改点并解释 invariant、真实边界、常量、测试意图、compatibility 或 safety 的中文注释。复述代码、翻译 identifier、重复测试名、显然流程、集中堆放和拆行凑数均不计入。
+- 从最窄测试扩展到 regression、原始 loop、package-local typecheck/lint/build/generation/migration/integration。遵守工作目录，不跳过、隐藏或弱化失败，并记录命令、目录、结果和修正。
+
+## 阶段 4：独立实现审计
+
+- implementation evidence 记录 files/diff、red-green、verification、原始 loop、paths、E/C、排除行、未验证项。设置 `Status: implementation-audit-required`，未经 revision 不再 material change。
+- primary agent 只发送原始需求、plan/approved revision、repository root、`Audit mode: implementation`、changed files/diff，不发送实现辩护、自评、怀疑点或缩减范围。
+- auditor subagent 自行加载审计 skill、policy 和仓库证据，按原始需求和完整 affected interface 审计，禁止只看最近修正。
+- blocker 必须返工并 full-scope 重审，最多 3 轮。连续失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽仍有 blocker 时标记 `blocked`，不得 `complete`。
+- 只有实际 diff 获得 `No blocking findings` 和 `APPROVE`，且测试、验证、责任边界、workaround 删除和中文注释门禁全部通过，才能原样记录 verdict 并设置 `Status: verified`。
+
+## 可选 Commit
+
+仅当终态是 `verified-implementation-and-commit` 且状态已 verified：
+
+1. 检查 `git status`、`git diff`、`git diff --cached` 和 `git log --oneline -10`。
+2. 只 stage 本 GOAL 相关文件，排除 secret、credential 和无关修改。index 已有无关内容时不得夹带或擅自清除，应停止并报告。
+3. 不创建空 commit。提交信息使用中文多行格式：`type(scope): 简短中文说明`，type 只取 `fix|feat|refactor|test|chore`，scope 使用受影响模块，后续 1 至 2 段说明原因、行为边界和避免的回归。
+4. 不得 amend、不得 `--no-verify`、不得跳过 hook、不得 push。
+5. hook 拒绝时修复原因并创建新 commit，不得 amend 失败尝试。commit 成功后检查 `git status` 并报告 commit id。其他目标终态不得 commit。
+
+## 最终证据
+
+- 报告 plan/revision、核心文件、测试/验证结果、approved-route 证据、删除的 workaround、path verdict、E/C 与代表性注释、全部审计轮次、剩余风险/未验证项及每个改动的必要性。
+- token budget、turn 结束、部分成果或总结文本都不能证明完成。仍有 required work 时保持 GOAL active。
+```
+
+-------------
+
 请注意！！！你需要从头开始！！！从调研开始进行，在你接到一个新的任务或者需求的时候，你必须从第一项调研开始进行，不能直接认为你之前已经完整审计过了就直接进行跳步，这不被允许！！！
 
 ## 只调研，不改代码，输出完整方案
