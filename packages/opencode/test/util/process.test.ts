@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import fs from "fs/promises"
+import os from "node:os"
 import path from "path"
 import { Process } from "@/util/process"
 import { tmpdir } from "../fixture/fixture"
@@ -50,17 +51,33 @@ describe("util.process", () => {
   })
 
   test("aborts a running process", async () => {
+    // 用 marker 文件作为子进程就绪信号，避免 setTimeout(25) 假设进程在固定时间内启动。
+    // 仓库 test/AGENTS.md 明确把 setTimeout(N) 等待并发就绪列为反模式：CPU 争用时
+    // 事件循环延迟可达 140ms，spawn 本身需 400-600ms，二者叠加使绝对阈值不可靠。
+    const marker = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "process-abort-")), "ready")
     const abort = new AbortController()
-    const started = Date.now()
-    setTimeout(() => abort.abort(), 25)
-
-    const out = await Process.run(node("setInterval(() => {}, 1000)"), {
-      abort: abort.signal,
-      nothrow: true,
-    })
-
-    expect(out.code).not.toBe(0)
-    expect(Date.now() - started).toBeLessThan(1000)
+    try {
+      const running = Process.run(
+        node(`require("fs").writeFileSync(${JSON.stringify(marker)}, "1"); setInterval(() => {}, 1000)`),
+        { abort: abort.signal, nothrow: true },
+      )
+      // 轮询 marker 文件直到子进程确认已启动；3s 超时仅防死锁，不作为性能契约。
+      const deadline = Date.now() + 3_000
+      while (!(await Bun.file(marker).exists())) {
+        if (Date.now() > deadline) throw new Error("child process did not signal readiness")
+        await Bun.sleep(10)
+      }
+      // 从就绪点开始计时，只测量 abort 完成耗时，不包含 spawn 延迟。
+      const abortStart = Date.now()
+      abort.abort()
+      const out = await running
+      expect(out.code).not.toBe(0)
+      // 2000ms 仅保护 abort 语义正确性（进程树被杀），3000ms test timeout 是死锁保护。
+      expect(Date.now() - abortStart).toBeLessThan(2_000)
+    } finally {
+      abort.abort()
+      await fs.rm(path.dirname(marker), { recursive: true, force: true }).catch(() => {})
+    }
   }, 3000)
 
   test("aborts a Windows process tree before resolving", async () => {
