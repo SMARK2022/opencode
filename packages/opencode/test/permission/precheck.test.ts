@@ -934,6 +934,12 @@ describe("permission precheck bash classifier", () => {
     expect(bash("git fetch origin").level).toBe("general")
   })
 
+  test("marks git bundle creation cautious without widening read-only bundle modes", () => {
+    // 锁定真实备份命令，同时证明 verify 不会因同属 bundle 被扩大到 cautious。
+    expect(bash("git bundle create .temp/testing/backup/fix-backup-5commits.bundle fix-backup-5commits")).toMatchObject({ level: "cautious" })
+    expect(bash("git bundle verify backup.bundle")).toMatchObject({ level: "general" })
+  })
+
   test("marks git global flag prefixed commands cautious", () => {
     // 全局 flag(-C/-c 等)可重定向到其他仓库或注入配置,即使子命令只读也需审查
     expect(bash("git -C /other reset --hard")).toMatchObject({ level: "cautious" })

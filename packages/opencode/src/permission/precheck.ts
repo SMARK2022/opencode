@@ -1270,6 +1270,9 @@ function classifyGit(tokens: string[]): Decision | undefined {
     return { level: "cautious", reason: "destructive git clean requires explicit approval" }
   if (sub === "push" && tokens.some((item) => item === "--force" || item === "-f"))
     return { level: "cautious", reason: "force push requires explicit approval" }
+  // bundle create 会写出归档文件；仅提升 create，避免把 verify/list-heads 等读取模式扩大为 cautious。
+  if (sub === "bundle" && tokens[i + 1] === "create")
+    return { level: "cautious", reason: "git bundle creation requires explicit approval" }
 
   // 通用状态变更命令：修改索引、历史、引用、工作树或远端状态，需要审批。
   // checkout/switch/restore 可丢弃未提交修改;apply/am 修改工作树;
