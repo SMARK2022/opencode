@@ -37,8 +37,8 @@ export const make = Effect.gen(function* () {
       const height = decoded.get_height()
       const bytes = Buffer.byteLength(content.content, "utf-8")
       const withinLimits = width <= limits.maxWidth && height <= limits.maxHeight && bytes <= limits.maxBase64Bytes
-      // BMP 即使未超限也须转码；禁用缩放时只尝试原尺寸编码。
-      if (withinLimits && content.mime !== "image/bmp") return content
+      // 两代共用默认策略：仅原生支持的MIME保持原编码，BMP或未知声明仍须规整。
+      if (withinLimits && ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(content.mime)) return content
       if (!limits.autoResize && !withinLimits)
         return yield* new SizeError({
           resource,
