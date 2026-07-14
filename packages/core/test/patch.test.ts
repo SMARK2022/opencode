@@ -25,10 +25,12 @@ describe("Patch", () => {
     ])
   })
 
-  test("derives fuzzy line updates while preserving BOM", () => {
-    const update = Patch.derive("update.txt", [{ oldLines: ["  old   "], newLines: ["new"] }], "\uFEFFold\n")
+  test("derives exact line updates while preserving BOM", () => {
+    const update = Patch.derive("update.txt", [{ oldLines: ["old"], newLines: ["new"] }], "\uFEFFold\n")
     expect(update).toEqual({ content: "new\n", bom: true })
     expect(Patch.joinBom(update.content, update.bom)).toBe("\uFEFFnew\n")
+    // source明确移除规范化成功，BOM断言仍保留，不能靠fuzzy路径验证它。
+    expect(() => Patch.derive("update.txt", [{ oldLines: ["  old   "], newLines: ["new"] }], "old\n")).toThrow("Failed to find expected lines")
     // 同时验证补丁解析、上下文匹配、BOM 与精确行尾，不能只归一后比较正文。
     for (const ending of ["\n", "\r\n", "\r"]) {
       const hunk = Patch.parse(["*** Begin Patch", "*** Update File: update.txt", "@@", " one", "-two", "+changed", " three", "*** End Patch"].join(ending))[0]
@@ -42,6 +44,24 @@ describe("Patch", () => {
     expect(Patch.derive("no-eol.txt", [{ oldLines: ["one"], newLines: ["two"] }], "one").content).toBe("two\n")
     expect(Patch.parse("*** Begin Patch\r*** Add File: add.txt\r+one\r+two\r*** End Patch")).toEqual([{ type: "add", path: "add.txt", contents: "one\ntwo" }])
     expect(Patch.derive("empty.txt", [{ oldLines: [], newLines: ["one"] }], "").content).toBe("one\n")
+  })
+
+  test("preserves complete unique substring semantics and failed chunk diagnostics", () => {
+    const derive = (content: string, chunks: ReadonlyArray<Patch.UpdateFileChunk>) => Patch.derive("file.txt", chunks, content).content
+    // 原生owner沿相同字符cursor组合行内chunk，且所有原行尾均原样写回。
+    for (const ending of ["\n", "\r\n", "\r"]) {
+      expect(derive(`abcdef${ending}`, [{ oldLines: ["bc"], newLines: ["BC"] }, { oldLines: ["ef"], newLines: ["EF"] }])).toBe(`aBCdEF${ending}`)
+    }
+    expect(() => derive("prefix old old suffix\n", [{ oldLines: ["old"], newLines: ["new"] }])).toThrow("multiple matches")
+    expect(() => derive("aaaa\n", [{ oldLines: ["aa"], newLines: ["x"] }])).toThrow("multiple matches")
+    // 完整trailing-empty参与字面匹配，不能删除末空行来伪造命中。
+    expect(derive("prefix target\n", [{ oldLines: ["target", ""], newLines: ["changed"] }])).toBe("prefix changed\n")
+    expect(() => derive("prefix target", [{ oldLines: ["target", ""], newLines: ["changed"] }])).toThrow("Failed to find expected lines")
+    expect(() => derive("anchor\n", [{ oldLines: [], newLines: ["x"], changeContext: "missing" }])).toThrow("Failed to find context")
+    expect(derive("old\n", [{ oldLines: [], newLines: ["inserted"] }, { oldLines: ["old"], newLines: [] }])).toBe("inserted\n")
+    // 提示只取失败chunk的磁盘候选，不能显示第一chunk已丢弃的replacement。
+    expect(() => derive("alpha\nconst after = good()\n", [{ oldLines: ["alpha"], newLines: ["ALPHA"] }, { oldLines: ["const after = good(1)"], newLines: ["done"] }])).toThrow("Closest match at line 2:\nconst after = good()")
+    expect(() => derive("“old”\n", [{ oldLines: ['"old"'], newLines: ["new"] }])).toThrow("Failed to find expected lines")
   })
 
   test("matches EOF-anchored chunks from the end", () => {

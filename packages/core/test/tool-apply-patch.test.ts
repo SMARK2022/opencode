@@ -176,7 +176,7 @@ describe("ApplyPatchTool", () => {
         const update = path.join(tmp.path, "update.txt")
         const remove = path.join(tmp.path, "remove.txt")
         return Effect.promise(() =>
-          Promise.all([fs.writeFile(update, "before\n"), fs.writeFile(remove, "remove\n")]),
+          Promise.all([fs.writeFile(update, "prefix before suffix\n"), fs.writeFile(remove, "remove\n")]),
         ).pipe(
           Effect.andThen(
             withTool(tmp.path, (registry) =>
@@ -213,7 +213,7 @@ describe("ApplyPatchTool", () => {
                       status: "modified",
                       additions: 1,
                       deletions: 1,
-                      patch: expect.stringContaining("-before\n+after"),
+                      patch: expect.stringContaining("-prefix before suffix\n+prefix after suffix"),
                     },
                     {
                       file: "remove.txt",
@@ -237,9 +237,9 @@ describe("ApplyPatchTool", () => {
                 expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "nested/new.txt"), "utf8"))).toBe(
                   "created\n",
                 )
-                expect(yield* Effect.promise(() => fs.readFile(update, "utf8"))).toBe("after\n")
+                expect(yield* Effect.promise(() => fs.readFile(update, "utf8"))).toBe("prefix after suffix\n")
                 expect(shown).toContain("+created")
-                expect(shown).toContain("-before\n+after")
+                expect(shown).toContain("-prefix before suffix\n+prefix after suffix")
                 expect(shown).toContain("-remove")
                 expect(yield* exists(remove)).toBe(false)
               }),
@@ -392,6 +392,13 @@ describe("ApplyPatchTool", () => {
             ).toEqual({ type: "text", value: expect.stringMatching(/^Applied patch sequentially:\nA created\.txt\n\nChanged:\n```diff\n[\s\S]*\+created\n[\s\S]*LSP diagnostics unavailable[\s\S]*Failed to update 1 file\(s\):\nUnable to apply patch at missing\.txt$/) })
             expect(yield* exists(path.join(tmp.path, "created.txt"))).toBe(true)
             expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "created.txt"), "utf8"))).toBe("created\n")
+            // 真实leaf也必须交付第二chunk的诊断，失败文件不提交前一chunk。
+            const persisted = "alpha\nconst after = good()\n"
+            const target = path.join(tmp.path, "retry.txt")
+            yield* Effect.promise(() => fs.writeFile(target, persisted))
+            const failed = yield* executeTool(registry, call("*** Begin Patch\n*** Update File: retry.txt\n@@\n-alpha\n+ALPHA\n@@\n-const after = good(1)\n+done\n*** End Patch"))
+            expect(failed).toMatchObject({ type: "error", value: expect.stringContaining("Closest match at line 2:\nconst after = good()") })
+            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(persisted)
           }),
         )
       },

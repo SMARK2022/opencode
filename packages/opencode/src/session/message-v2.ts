@@ -4,7 +4,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 
 // [local-smark] 测试与 prompt.ts 通过 MessageV2 命名空间引用 WithParts/Part；
 // 显式 re-export 让命名空间自导出携带这两个类型（SessionV1 为唯一来源）
-export type { WithParts, Part, User, Assistant } from "@opencode-ai/core/v1/session"
+export type { WithParts, Part, User, Assistant, ToolPart } from "@opencode-ai/core/v1/session"
 import { SessionMemento } from "@opencode-ai/core/session/compaction-memento"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import {

@@ -1,6 +1,7 @@
 export * as Patch from "./patch"
 
 import { convertToLineEnding, detectLineEnding, splitLines } from "./util/line-ending"
+import { closestWindow, lineOffset, locateExact, nextLineOffset } from "./patch-match"
 
 export type Hunk =
   | { readonly type: "add"; readonly path: string; readonly contents: string }
@@ -72,14 +73,13 @@ export function parse(patchText: string): ReadonlyArray<Hunk> {
 
 export function derive(path: string, chunks: ReadonlyArray<UpdateFileChunk>, original: string): FileUpdate {
   const source = splitBom(original)
-  // 匹配使用逻辑行，BOM 独立保留；重建后恢复文件级行尾。
+  // 匹配使用逻辑LF，写回仍保留原CRLF/CR及BOM；字面恢复不引入纯行尾变更。
   const lines = splitLines(source.text)
+  const text = lines.join("\n")
   if (lines.at(-1) === "") lines.pop()
-  const replacements = computeReplacements(lines, path, chunks)
-  const updated = [...lines]
-  for (const [start, remove, insert] of replacements.toReversed()) updated.splice(start, remove, ...insert)
-  if (updated.at(-1) !== "") updated.push("")
-  const next = splitBom(convertToLineEnding(updated.join("\n"), detectLineEnding(source.text)))
+  const updated = applyChunks(lines, path, chunks, text)
+  const normalized = updated.length === 0 ? "" : `${updated.join("\n")}\n`
+  const next = splitBom(convertToLineEnding(normalized, detectLineEnding(source.text)))
   return { content: next.text, bom: source.bom || next.bom }
 }
 
@@ -132,68 +132,61 @@ function parseUpdate(lines: ReadonlyArray<string>, start: number) {
   return { chunks, next: index }
 }
 
-function computeReplacements(lines: ReadonlyArray<string>, path: string, chunks: ReadonlyArray<UpdateFileChunk>) {
-  const replacements: Array<readonly [start: number, remove: number, insert: ReadonlyArray<string>]> = []
-  let lineIndex = 0
+function applyChunks(originalLines: string[], path: string, chunks: ReadonlyArray<UpdateFileChunk>, persistedText: string) {
+  // 后续chunk失败只丢弃局部working copy，不能提交该文件已完成的半次修改。
+  let lines = [...originalLines]
+  let terminated = persistedText.endsWith("\n")
+  let cursorOffset = 0
+  const insertions: Array<ReadonlyArray<string>> = []
   for (const chunk of chunks) {
     if (chunk.changeContext) {
-      const context = seek(lines, [chunk.changeContext], lineIndex)
-      if (context === -1) throw new Error(`Failed to find context '${chunk.changeContext}' in ${path}`)
-      lineIndex = context + 1
+      const context = locateExact(lines, [chunk.changeContext], cursorOffset, false, terminated)
+      if (context.type !== "found") throw new Error(withCandidate(`Failed to find context '${chunk.changeContext}' in ${path}`, persistedText, chunk.changeContext))
+      const text = workingText(lines, terminated)
+      const offset = context.location.kind === "line" ? lineOffset(lines, context.location.startLine) : context.location.startOffset
+      cursorOffset = nextLineOffset(text, offset)
     }
     if (chunk.oldLines.length === 0) {
-      replacements.push([lines.length, 0, chunk.newLines])
+      // 延迟插入不能变成后续chunk的匹配输入，但仍先验证其公开context。
+      insertions.push(chunk.newLines)
       continue
     }
-    let oldLines = chunk.oldLines
-    let newLines = chunk.newLines
-    let found = seek(lines, oldLines, lineIndex, chunk.endOfFile)
-    if (found === -1 && oldLines.at(-1) === "") {
-      oldLines = oldLines.slice(0, -1)
-      if (newLines.at(-1) === "") newLines = newLines.slice(0, -1)
-      found = seek(lines, oldLines, lineIndex, chunk.endOfFile)
+    const result = locateExact(lines, chunk.oldLines, cursorOffset, chunk.endOfFile, terminated)
+    if (result.type === "ambiguous")
+      throw new Error(`Found multiple matches for expected lines in ${path}:\n${chunk.oldLines.join("\n")}\nProvide more context to make the match unique.`)
+    if (result.type === "not-found")
+      throw new Error(withCandidate(`Failed to find expected lines in ${path}:\n${chunk.oldLines.join("\n")}`, persistedText, chunk.oldLines.join("\n")))
+    if (result.location.kind === "line") {
+      const startLine = result.location.startLine
+      lines.splice(startLine, result.location.endLine - startLine, ...chunk.newLines)
+      if (lines.length === 0) terminated = false
+      // replacement生成的末行也已消费，不能让后续chunk回头重匹配空逻辑行。
+      const nextLine = startLine + chunk.newLines.length
+      cursorOffset = chunk.newLines.length === 0 ? lineOffset(lines, startLine) : nextLine < lines.length ? lineOffset(lines, nextLine) : workingText(lines, terminated).length + 1
+      continue
     }
-    if (found === -1) throw new Error(`Failed to find expected lines in ${path}:\n${chunk.oldLines.join("\n")}`)
-    replacements.push([found, oldLines.length, newLines])
-    lineIndex = found + oldLines.length
+    const text = workingText(lines, terminated)
+    const replacement = chunk.newLines.join("\n")
+    // 只拥有完整字面命中范围，其外的首行前缀与末行后缀原样保留。
+    const next = text.slice(0, result.location.startOffset) + replacement + text.slice(result.location.endOffset)
+    terminated = next.endsWith("\n")
+    lines = next === "" ? [] : next.split("\n")
+    if (terminated) lines.pop()
+    cursorOffset = result.location.startOffset + replacement.length
   }
-  return replacements.toSorted((left, right) => left[0] - right[0])
+  for (const insertion of insertions) lines.push(...insertion)
+  return lines
 }
 
-function seek(lines: ReadonlyArray<string>, pattern: ReadonlyArray<string>, start: number, eof = false) {
-  if (pattern.length === 0) return -1
-  for (const compare of [exact, rstrip, trim, normalized]) {
-    if (eof) {
-      const offset = lines.length - pattern.length
-      if (offset >= start && matches(lines, pattern, offset, compare)) return offset
-    }
-    for (let offset = start; offset <= lines.length - pattern.length; offset++) {
-      if (matches(lines, pattern, offset, compare)) return offset
-    }
-  }
-  return -1
+function workingText(lines: string[], terminated: boolean) {
+  return lines.join("\n") + (terminated && lines.length > 0 ? "\n" : "")
 }
 
-function matches(
-  lines: ReadonlyArray<string>,
-  pattern: ReadonlyArray<string>,
-  offset: number,
-  compare: (left: string, right: string) => boolean,
-) {
-  return pattern.every((line, index) => compare(lines[offset + index]!, line))
+function withCandidate(message: string, content: string, expected: string) {
+  // 用失败chunk和未提交的磁盘原文诊断，不混入其他chunk或working copy。
+  const closest = closestWindow(content, expected)
+  return closest ? `${message}\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : `${message}\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.`
 }
-
-const exact = (left: string, right: string) => left === right
-const rstrip = (left: string, right: string) => left.trimEnd() === right.trimEnd()
-const trim = (left: string, right: string) => left.trim() === right.trim()
-const normalized = (left: string, right: string) => normalize(left.trim()) === normalize(right.trim())
-const normalize = (value: string) =>
-  value
-    .replace(/[‘’‚‛]/g, "'")
-    .replace(/[“”„‟]/g, '"')
-    .replace(/[‐‑‒–—―]/g, "-")
-    .replace(/…/g, "...")
-    .replace(/ /g, " ")
 const splitBom = (text: string) =>
   text.startsWith("\uFEFF") ? { bom: true, text: text.slice(1) } : { bom: false, text }
 const stripHeredoc = (input: string) =>
