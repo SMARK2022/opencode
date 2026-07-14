@@ -10,7 +10,9 @@ import { Format } from "../../src/format"
 import { Agent } from "../../src/agent/agent"
 import { Bus } from "../../src/bus"
 import { Truncate } from "@/tool/truncate"
-import { SessionID, MessageID } from "../../src/session/schema"
+import { SessionID, MessageID, PartID } from "../../src/session/schema"
+import { MessageV2 } from "../../src/session/message-v2"
+import { ModelID, ProviderID } from "../../src/provider/schema"
 import * as Tool from "../../src/tool/tool"
 import { testEffect } from "../lib/effect"
 import { FileWatcher } from "../../src/file/watcher"
@@ -49,20 +51,48 @@ const init = Effect.fn("EditToolTest.init")(function* () {
 // [local-smark] 构造包含 prior read 的 context，模拟生产环境中 edit 前已 read 文件的正常流程。
 // blind edit 检查要求 ctx.messages 中有指向同一文件的已完成 read/write/edit tool part。
 function ctxWithPriorRead(filePath: string): Tool.Context {
+  // 使用 branded message/part/provider/model IDs，让 fixture 漂移能被真实 Tool.Context 类型立即发现。
+  const messageID = MessageID.make("msg_prior")
   return {
     ...ctx,
     messages: [
       {
-        info: { id: "msg_prior", role: "assistant" as const, sessionID: ctx.sessionID, agent: "build", mode: "build", path: { cwd: ".", root: "." }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, modelID: "test", providerID: "test", time: { created: 0 } },
+        // Assistant parentID 与模型品牌字段完整构造，避免 prior-read 测试只验证一个伪造的局部对象。
+        info: {
+          id: messageID,
+          role: "assistant",
+          sessionID: ctx.sessionID,
+          parentID: ctx.messageID,
+          agent: "build",
+          mode: "build",
+          path: { cwd: ".", root: "." },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ModelID.make("test"),
+          providerID: ProviderID.make("test"),
+          time: { created: 0 },
+        } satisfies MessageV2.Assistant,
         parts: [
+          // completed read state 必须含 title 和完整时间，才能与生产消息历史的 read gate 使用同一契约。
           {
-            id: "p_read", messageID: "msg_prior", sessionID: ctx.sessionID,
-            type: "tool" as const, tool: "read", callID: "call_prior",
-            state: { status: "completed" as const, input: { filePath }, output: "content", metadata: {}, time: { start: 0, end: 1 } },
-          },
+            id: PartID.make("prt_prior"),
+            messageID,
+            sessionID: ctx.sessionID,
+            type: "tool",
+            tool: "read",
+            callID: "call_prior",
+            state: {
+              status: "completed",
+              input: { filePath },
+              output: "content",
+              title: "Read",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          } satisfies MessageV2.ToolPart,
         ],
-      },
-    ] as any,
+      } satisfies MessageV2.WithParts,
+    ],
   }
 }
 
@@ -255,10 +285,31 @@ describe("tool.edit", () => {
       }),
     )
 
-    // [local-smark] 字符级 diff 测试：2 行 oldString，第 1 行精确匹配，
-    // 第 2 行单字符不同（0 vs 1）。BlockAnchorReplacer 需 ≥3 行才触发，故 edit 失败。
-    // 差异比例 50% < 60% → 走 diff 路径，error 应显示字符级差异。
-    it.instance("closest match shows character-level diff for single-char mismatch", () =>
+    // 旧 scorer 会因候选越长而得到大于 1 的分数，并把字符重排的长行误报为 closest。
+    // 有序 bigram window 必须选择第 4 行的真实近似文本，并报告候选本身的起始行。
+    it.instance("closest match rejects an unrelated long-line decoy", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "decoy.txt")
+        const decoy = "a".repeat(180) + "t".repeat(180) + "e".repeat(180)
+        const candidate = "prefix target sequence alpha beta gammo suffix"
+        yield* put(filepath, `${decoy}\nfiller one\nfiller two\n${candidate}\n`)
+
+        const error = yield* fail({
+          filePath: filepath,
+          oldString: "target sequence alpha beta gamma",
+          newString: "replacement",
+        })
+
+        expect(error.message).toContain("Closest match at line 4")
+        expect(error.message).toContain(candidate)
+        expect(error.message).not.toContain(decoy)
+      }),
+    )
+
+    // 两行窗口只有一个字符不同，bounded score 应可靠选择真实候选并报告其起始行。
+    // 错误正文展示文件实际文本，不再把 expected diff 混成候选内容。
+    it.instance("closest match shows actual candidate for a single-char mismatch", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "charmatch.txt")
@@ -272,15 +323,15 @@ describe("tool.edit", () => {
         })
 
         expect(error).toBeInstanceOf(Error)
-        // diff 格式应同时显示 old 和 new 的差异部分
+        expect(error.message).toContain("Closest match at line 1")
         expect(error.message).toContain("x = 0")
-        expect(error.message).toContain("x = 1")
+        expect(error.message).not.toContain("x = 1")
       }),
     )
 
-    // [local-smark] 回退策略测试：oldString 与文件结构严重错位（>60% 行不同）
-    // → 回退 head+tail excerpt 而非 diff（避免噪声）
-    it.instance("falls back to excerpt when oldString structure mismatches file", () =>
+    // oldString 与文件结构完全无关时没有可信位置，任何 excerpt 都会制造 false precision。
+    // 低于阈值的候选必须被抑制，并明确要求重新读取文件。
+    it.instance("suppresses candidates when oldString structure mismatches file", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "mismatch.txt")
@@ -293,8 +344,31 @@ describe("tool.edit", () => {
         })
 
         expect(error).toBeInstanceOf(Error)
-        // 回退路径：显示文件实际内容（head+tail excerpt），不显示 diff 标记
-        expect(error.message).toContain("public class Foo")
+        expect(error.message).toContain("No reliable nearby candidate was found")
+        expect(error.message).not.toContain("public class Foo")
+      }),
+    )
+
+    // 两个窗口与 expected 只有最后一个字符不同且得分完全相同，任何择一都会制造假精度。
+    // tie gate 必须省略两处文本并明确要求重新 read，而不是依赖文件顺序。
+    it.instance("suppresses tied closest candidates", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "tied.txt")
+        yield* put(
+          filepath,
+          "target sequence alpha beta gammo\nfiller\ntarget sequence alpha beta gammi\n",
+        )
+
+        const error = yield* fail({
+          filePath: filepath,
+          oldString: "target sequence alpha beta gamma",
+          newString: "replacement",
+        })
+
+        expect(error.message).toContain("No reliable nearby candidate was found")
+        expect(error.message).not.toContain("gammo")
+        expect(error.message).not.toContain("gammi")
       }),
     )
 
@@ -374,6 +448,45 @@ describe("tool.edit", () => {
         yield* run({ filePath: filepath, oldString: "foo", newString: "qux", replaceAll: true })
 
         expect(yield* load(filepath)).toBe("qux bar qux baz qux")
+      }),
+    )
+
+    // Edit 的唯一成功语义是 exact literal；历史 trim/whitespace/indent/escape/anchor 路径全部退出成功域。
+    // 每个失败后都读取原文件，防止某个兼容 replacer 在报错前已经写入非字面替换。
+    it.instance("rejects every nonliteral replacement class", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const cases = [
+          { actual: "\tvalue", old: "  value", name: "trim" },
+          { actual: "alpha\tbeta", old: "alpha beta", name: "whitespace" },
+          { actual: "  first\n  second", old: "first\nsecond", name: "indent" },
+          { actual: "line\nnext", old: "line\\nnext", name: "escape" },
+          { actual: "value", old: " value ", name: "boundary" },
+          { actual: "start\nactual middle\nend", old: "start\nwrong middle\nend", name: "anchor" },
+        ]
+
+        for (const [index, item] of cases.entries()) {
+          const filepath = path.join(test.directory, `${index}-${item.name}.txt`)
+          yield* put(filepath, item.actual)
+          const error = yield* fail({ filePath: filepath, oldString: item.old, newString: "changed" })
+          expect(error.message).toContain("Could not find oldString")
+          expect(yield* load(filepath)).toBe(item.actual)
+        }
+      }),
+    )
+
+    // 多处 exact occurrence 不能默认选择第一处；只有显式 replaceAll 才授权全部替换。
+    // 失败路径必须发生在 permission/write 之前，文件内容因此保持逐字不变。
+    it.instance("rejects duplicate exact matches without replaceAll", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "duplicates.txt")
+        yield* put(filepath, "foo bar foo")
+
+        const error = yield* fail({ filePath: filepath, oldString: "foo", newString: "qux" })
+
+        expect(error.message).toContain("Found multiple matches")
+        expect(yield* load(filepath)).toBe("foo bar foo")
       }),
     )
 

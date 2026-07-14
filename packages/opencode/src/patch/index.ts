@@ -4,6 +4,7 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import * as Log from "@opencode-ai/core/util/log"
 import * as Bom from "../util/bom"
 import { convertToLineEnding, detectLineEnding, splitLines } from "@/util/line-ending"
+import { closestWindow, lineOffset, locateExact, nextLineOffset } from "./match"
 
 const log = Log.create({ service: "patch" })
 
@@ -317,21 +318,17 @@ export function deriveNewContentsFromChunks(
 
   let originalLines = splitLines(originalContent.text)
 
-  // Drop trailing empty element for consistent line counting
+  // 这里只移除真实文件终止符；chunk 中显式的 trailing empty old line 仍属于完整字面模式。
   if (originalLines.length > 0 && originalLines[originalLines.length - 1] === "") {
     originalLines.pop()
   }
 
-  const replacements = computeReplacements(originalLines, filePath, chunks)
-  let newLines = applyReplacements(originalLines, replacements)
-
-  // Ensure trailing newline
-  if (newLines.length === 0 || newLines[newLines.length - 1] !== "") {
-    newLines.push("")
-  }
+  const newLines = applyChunks(originalLines, filePath, chunks, originalContent.text)
 
   // Patch matching works on logical lines; preserve the file's original line ending when writing back.
-  const next = Bom.split(convertToLineEnding(newLines.join("\n"), detectLineEnding(originalContent.text)))
+  // 既有 update contract 始终补一个终止换行；substring recovery 不能改变这个写回约定。
+  const normalized = newLines.length === 0 ? "" : newLines.join("\n") + "\n"
+  const next = Bom.split(convertToLineEnding(normalized, detectLineEnding(originalContent.text)))
   const newContent = next.text
 
   // Generate unified diff
@@ -344,148 +341,91 @@ export function deriveNewContentsFromChunks(
   }
 }
 
-function computeReplacements(
-  originalLines: string[],
-  filePath: string,
-  chunks: UpdateFileChunk[],
-): Array<[number, number, string[]]> {
-  const replacements: Array<[number, number, string[]]> = []
-  let lineIndex = 0
+function applyChunks(originalLines: string[], filePath: string, chunks: UpdateFileChunk[], persistedText: string) {
+  // 所有变换只发生在局部 working copy；任一后续失败都会丢弃它，保持单文件原子性。
+  let lines = [...originalLines]
+  // terminal flag 只记录真实文件终止符，不能与最后一个空逻辑行合并成同一数组元素。
+  let terminated = persistedText.endsWith("\n") || persistedText.endsWith("\r")
+  let cursorOffset = 0
+  const insertions: string[][] = []
 
   for (const chunk of chunks) {
-    // Handle context-based seeking
+    // 每个 chunk 都先验证 context；pure insertion 只跳过 old block，不能跳过公开的 @@ 约束。
     if (chunk.change_context) {
-      const contextIdx = seekSequence(originalLines, [chunk.change_context], lineIndex)
-      if (contextIdx === -1) {
-        throw new Error(`Failed to find context '${chunk.change_context}' in ${filePath}`)
+      const context = locateExact(lines, [chunk.change_context], cursorOffset, false, terminated)
+      if (context.type !== "found") {
+        // context 的零匹配与多匹配都不能继续，否则同一公开 @@ 字段会出现两套成功语义。
+        throw new Error(withCandidate(`Failed to find context '${chunk.change_context}' in ${filePath}`, persistedText, chunk.change_context))
       }
-      lineIndex = contextIdx + 1
+      const text = workingText(lines, terminated)
+      // 两种 location 都转换为包含行起点，再统一消费整行，避免 substring context 只前进到命中末尾。
+      const contextOffset = context.location.kind === "line"
+        ? lineOffset(lines, context.location.startLine)
+        : context.location.startOffset
+      cursorOffset = nextLineOffset(text, contextOffset)
     }
 
-    // Handle pure addition (no old lines)
+    // 插入文本延后到所有匹配成功后统一追加，既不暴露给后续搜索，也能与删除全部原文自然组合。
     if (chunk.old_lines.length === 0) {
-      const insertionIdx =
-        originalLines.length > 0 && originalLines[originalLines.length - 1] === ""
-          ? originalLines.length - 1
-          : originalLines.length
-      replacements.push([insertionIdx, 0, chunk.new_lines])
+      insertions.push(chunk.new_lines)
       continue
     }
 
-    // Try to match old lines in the file
-    let pattern = chunk.old_lines
-    let newSlice = chunk.new_lines
-    let found = seekSequence(originalLines, pattern, lineIndex, chunk.is_end_of_file)
-
-    // Retry without trailing empty line if not found
-    if (found === -1 && pattern.length > 0 && pattern[pattern.length - 1] === "") {
-      pattern = pattern.slice(0, -1)
-      if (newSlice.length > 0 && newSlice[newSlice.length - 1] === "") {
-        newSlice = newSlice.slice(0, -1)
-      }
-      found = seekSequence(originalLines, pattern, lineIndex, chunk.is_end_of_file)
+    const result = locateExact(lines, chunk.old_lines, cursorOffset, chunk.is_end_of_file, terminated)
+    if (result.type === "ambiguous") {
+      throw new Error(
+        `Found multiple matches for expected lines in ${filePath}:\n${chunk.old_lines.join("\n")}\nProvide more context to make the match unique.`,
+      )
+    }
+    if (result.type === "not-found") {
+      const expected = chunk.old_lines.join("\n")
+      throw new Error(withCandidate(`Failed to find expected lines in ${filePath}:\n${expected}`, persistedText, expected))
     }
 
-    if (found !== -1) {
-      replacements.push([found, pattern.length, newSlice])
-      lineIndex = found + pattern.length
-    } else {
-      throw new Error(`Failed to find expected lines in ${filePath}:\n${chunk.old_lines.join("\n")}`)
+    if (result.location.kind === "line") {
+      // exact-line 保留 line splice，避免 generic content span 把整行删除退化为空行。
+      const startLine = result.location.startLine
+      lines.splice(startLine, result.location.endLine - startLine, ...chunk.new_lines)
+      if (lines.length === 0) terminated = false
+      // 纯删除停在存活边界；有 replacement 时越过全部新逻辑行，连零长度行也不能被后续重匹配。
+      const nextLine = startLine + chunk.new_lines.length
+      // EOF replacement 没有后继行起点，使用 text.length + 1 明确表示所有生成行均已消费。
+      cursorOffset = chunk.new_lines.length === 0
+        ? lineOffset(lines, startLine)
+        : nextLine < lines.length
+          ? lineOffset(lines, nextLine)
+          : workingText(lines, terminated).length + 1
+      continue
     }
+
+    const text = workingText(lines, terminated)
+    const replacement = chunk.new_lines.join("\n")
+    // slice 只替换 exact literal range，首行前缀和末行后缀始终由原 working text 提供。
+    const next = text.slice(0, result.location.startOffset) + replacement + text.slice(result.location.endOffset)
+    // 字符替换只拥有命中的字面范围；重新分行时保留内部及边界空行，不把它们当作文件终止符丢弃。
+    terminated = next.endsWith("\n")
+    // substring splice 后重新分离 terminal 状态，后续完整 literal 才能继续区分 `foo` 与 `foo\n`。
+    lines = next === "" ? [] : next.split("\n")
+    if (terminated) lines.pop()
+    cursorOffset = result.location.startOffset + replacement.length
   }
 
-  // Sort replacements by index to apply in order
-  replacements.sort((a, b) => a[0] - b[0])
-
-  return replacements
+  // 按 patch 顺序追加数组，让空文件、delete-all 和多 insertion 共用同一分隔符语义。
+  // 最终文件尾换行仍由 deriveNewContentsFromChunks 的既有逻辑统一补齐，避免双重 owner。
+  for (const insertion of insertions) lines.push(...insertion)
+  return lines
 }
 
-function applyReplacements(lines: string[], replacements: Array<[number, number, string[]]>): string[] {
-  // Apply replacements in reverse order to avoid index shifting
-  const result = [...lines]
-
-  for (let i = replacements.length - 1; i >= 0; i--) {
-    const [startIdx, oldLen, newSegment] = replacements[i]
-
-    // Remove old lines
-    result.splice(startIdx, oldLen)
-
-    // Insert new lines
-    for (let j = 0; j < newSegment.length; j++) {
-      result.splice(startIdx + j, 0, newSegment[j])
-    }
-  }
-
-  return result
+function workingText(lines: string[], terminated: boolean) {
+  // canonical lines 与 terminal 状态分离，既能区分 `foo`/`foo\n`，也不会把终止符误当空逻辑行。
+  return lines.join("\n") + (terminated && lines.length > 0 ? "\n" : "")
 }
 
-// Normalize Unicode punctuation to ASCII equivalents (like Rust's normalize_unicode)
-function normalizeUnicode(str: string): string {
-  return str
-    .replace(/[‘’‚‛]/g, "'") // single quotes
-    .replace(/[“”„‟]/g, '"') // double quotes
-    .replace(/[‐‑‒–—―]/g, "-") // dashes
-    .replace(/…/g, "...") // ellipsis
-    .replace(/ /g, " ") // non-breaking space
-}
-
-type Comparator = (a: string, b: string) => boolean
-
-function tryMatch(lines: string[], pattern: string[], startIndex: number, compare: Comparator, eof: boolean): number {
-  // If EOF anchor, try matching from end of file first
-  if (eof) {
-    const fromEnd = lines.length - pattern.length
-    if (fromEnd >= startIndex) {
-      let matches = true
-      for (let j = 0; j < pattern.length; j++) {
-        if (!compare(lines[fromEnd + j], pattern[j])) {
-          matches = false
-          break
-        }
-      }
-      if (matches) return fromEnd
-    }
-  }
-
-  // Forward search from startIndex
-  for (let i = startIndex; i <= lines.length - pattern.length; i++) {
-    let matches = true
-    for (let j = 0; j < pattern.length; j++) {
-      if (!compare(lines[i + j], pattern[j])) {
-        matches = false
-        break
-      }
-    }
-    if (matches) return i
-  }
-
-  return -1
-}
-
-function seekSequence(lines: string[], pattern: string[], startIndex: number, eof = false): number {
-  if (pattern.length === 0) return -1
-
-  // Pass 1: exact match
-  const exact = tryMatch(lines, pattern, startIndex, (a, b) => a === b, eof)
-  if (exact !== -1) return exact
-
-  // Pass 2: rstrip (trim trailing whitespace)
-  const rstrip = tryMatch(lines, pattern, startIndex, (a, b) => a.trimEnd() === b.trimEnd(), eof)
-  if (rstrip !== -1) return rstrip
-
-  // Pass 3: trim (both ends)
-  const trim = tryMatch(lines, pattern, startIndex, (a, b) => a.trim() === b.trim(), eof)
-  if (trim !== -1) return trim
-
-  // Pass 4: normalized (Unicode punctuation to ASCII)
-  const normalized = tryMatch(
-    lines,
-    pattern,
-    startIndex,
-    (a, b) => normalizeUnicode(a.trim()) === normalizeUnicode(b.trim()),
-    eof,
-  )
-  return normalized
+function withCandidate(message: string, content: string, expected: string) {
+  // 候选必须来自失败后仍在磁盘上的 immutable 输入，不能展示已丢弃 working copy 中的生成文本。
+  const closest = closestWindow(content, expected)
+  if (!closest) return `${message}\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.`
+  return `${message}\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
 }
 
 function generateUnifiedDiff(oldContent: string, newContent: string): string {
