@@ -500,7 +500,8 @@ describe("ReadTool", () => {
     }),
   )
 
-  itWithoutResizer.effect("returns the original image when the resizer is unavailable", () =>
+  // #485：反转旧回退契约——resizer 不可用时 fail-closed，与 V1 read 工具行为一致
+  itWithoutResizer.effect("fails closed when the resizer is unavailable", () =>
     Effect.gen(function* () {
       const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
       readResult = {
@@ -518,10 +519,7 @@ describe("ReadTool", () => {
           ...toolIdentity,
           call: { type: "tool-call", id: "call-image-fallback", name: "read", input: { path: "pixel.png" } },
         }),
-      ).toMatchObject({
-        type: "content",
-        value: [{ type: "text" }, { type: "file", uri: `data:image/png;base64,${png}`, mime: "image/png" }],
-      })
+      ).toEqual({ type: "error", value: "Image resizer is unavailable" })
     }),
   )
 

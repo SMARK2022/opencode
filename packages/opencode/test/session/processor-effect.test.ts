@@ -12,6 +12,8 @@ import type { Agent } from "../../src/agent/agent"
 import { Provider } from "@/provider/provider"
 
 import { Session } from "@/session/session"
+// #485：Image.Service 供 resizer 不可用环境注入
+import { Image } from "@/image/image"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionProcessor } from "../../src/session/processor"
@@ -188,6 +190,18 @@ const env = LayerNode.compile(
 
 const it = testEffect(env)
 
+// #485：resizer 不可用环境——Image.Service 注入必然失败的 normalize，验证 fail-closed 省略语义
+const failingImageLayer = Layer.succeed(
+  Image.Service,
+  Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }),
+)
+const unavailableEnv = LayerNode.compile(
+  // TestLLMServer必须保留在环境中：工具循环仍需要一次完整的provider往返。
+  LayerNode.group([root, LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] })]),
+  [...replacements, [Image.node, failingImageLayer]],
+)
+const unavailable = testEffect(unavailableEnv)
+
 const providerErrorLLM = Layer.succeed(
   LLM.Service,
   LLM.Service.of({
@@ -251,6 +265,28 @@ const failingRead = tool({
     throw new Error("File not found")
   },
 })
+
+// #485：携带图片附件的 read 工具工厂——附件携带完整 FilePart 三 ID，
+// 与生产 session/tools.ts 注册适配器同形；否则会被 processor 的 Schema 过滤丢弃，
+// 使 omitted 分支不可达（回归测试空转）。
+const makeImageRead = (sessionID: SessionID, messageID: MessageID) =>
+  tool({
+    description: "image read",
+    inputSchema: z.object({ path: z.string() }),
+    execute: async (): Promise<{ output: string; attachments: Array<Record<string, string>> }> => ({
+      output: "tool output",
+      attachments: [
+        {
+          id: PartID.ascending(),
+          sessionID,
+          messageID,
+          type: "file",
+          mime: "image/png",
+          url: "data:image/png;base64,AA==",
+        },
+      ],
+    }),
+  })
 
 // [local-smark] 构造并行工具调用的 SSE chunks。
 // reply().tool() 硬编码 index=0（llm-server.ts toolStartLine），无法脚本并行调用——
@@ -1673,5 +1709,54 @@ itFragmentFailure.live("session.processor effect tests retain partial legacy par
         expect(seen.filter((type) => type.startsWith("session.next."))).toEqual([])
       }),
     { config: cfg },
+  ),
+)
+
+// #485：resizer 不可用时图片附件被省略（fail-closed），工具文本保留且不回退原图
+unavailable.live("omits an image attachment when normalization is unavailable", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        yield* llm.push(reply().tool("image_read", { path: "image.png" }))
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "read image")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const model = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model })
+        const result = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "read image" }],
+          tools: { image_read: makeImageRead(chat.id, msg.id) },
+        })
+        const part = (yield* MessageV2.parts(msg.id)).find((item): item is MessageV2.ToolPart => item.type === "tool")
+        expect(result).toBe("continue")
+        // fail-closed不能把工具执行也取消：循环仍继续，工具part按正常completed落库
+        expect(part?.state.status).toBe("completed")
+        if (part?.state.status === "completed") {
+          // 失败图片不能回到 provider，但工具文本仍需保留，且必须携带省略说明——
+          // 该断言钉住 omitted 分支真实可达（附件已过 FilePart Schema 过滤）
+          expect(part.state.attachments).toBeUndefined()
+          expect(part.state.output).toContain("tool output")
+          expect(part.state.output).toContain(
+            "[1 image omitted: could not be resized below the image size limit.]",
+          )
+        }
+        // 直接回读MessageV2而不是相信内存结果，确认附件确实未随part持久化
+        const stored = yield* MessageV2.parts(msg.id)
+        expect(stored.some((item) => item.type === "file")).toBe(false)
+      }),
+    { git: true, config: (url) => providerCfg(url) },
   ),
 )
