@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import { fitVisible, truncateVisible, visibleLength } from "../../src/cli/cmd/stats-charts"
-import { renderBreakdown, renderDashboard } from "../../src/cli/cmd/stats-render"
+import { fitVisible, paint, renderContext, renderHeatmap, stripAnsi, truncateVisible, visibleLength } from "../../src/cli/cmd/stats-charts"
+import { renderBreakdown, renderCharts, renderCosts, renderDashboard, renderHeatmapPage, renderModels, renderOverview, renderProviders, renderSessions, renderTimeline, renderTokens } from "../../src/cli/cmd/stats-render"
+import { renderForecast, renderInsights } from "../../src/cli/cmd/stats-insights"
 import type { StatsReport } from "../../src/cli/cmd/stats-data"
 
 // #176：CJK 显示列宽与 breakdown 冒烟
@@ -493,3 +494,133 @@ describe("stats humanized labels (#183)", () => {
     }
   })
 })
+
+  // 固定真实宽度owner，环境变量COLUMNS不会改变process.stdout.columns。
+  const withColumns = (cols: number, fn: () => void) => {
+    const prev = Object.getOwnPropertyDescriptor(process.stdout, "columns")
+    Object.defineProperty(process.stdout, "columns", { configurable: true, value: cols })
+    try {
+      fn()
+    } finally {
+      if (prev) Object.defineProperty(process.stdout, "columns", prev)
+      else Reflect.deleteProperty(process.stdout, "columns")
+    }
+  }
+  // 空报告构造：全空集合 + 零总量，R6 空态前景/背景安全契约的输入。
+  const emptyReport = () => ({
+    totalSessions: 0, sessionsWithUsage: 0, totalMessages: 0, totalTools: 0, days: 0,
+    dateRange: { earliest: 0, latest: 0 },
+    total: { tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 }, cost: 0, requests: 0, assistantCalls: 0 },
+    models: [], providers: [], agents: [], sources: [], statuses: [], projects: [],
+    daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [],
+    statusSeries: [], projectSeries: [], tokenPartSeries: [], sessions: [], toolUsage: [],
+    modelProviderTokens: [], tokensPerSession: 0, medianTokensPerSession: 0,
+  } as unknown as StatsReport)
+  // 具体背景色扫描：40-47/100-107 与 24-bit/256 色背景均视为违规。
+  const concreteBackgroundAnsi = (s: string) => s.match(/\x1b\[(?:4[0-7]|10[0-7])m|\x1b\[48;(?:2|5)[^\x1b]*/g) ?? []
+
+  test("emits the R6 bright ANSI palette contract", () => {
+    // 直接检查发射的槽位与强度复位；纯文本图元不恢复已不存在的Canvas状态机。
+    const desc = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+    try {
+      Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+      const ctx = renderContext("always")
+      expect(paint("x", "blue", ctx)).toContain("\x1b[94m")
+      expect(paint("x", "green", ctx)).toContain("\x1b[92m")
+      expect(paint("x", "yellow", ctx)).toContain("\x1b[93m")
+      expect(paint("x", "red", ctx)).toContain("\x1b[91m")
+      expect(paint("x", "magenta", ctx)).toContain("\x1b[95m")
+      expect(paint("x", "cyan", ctx)).toContain("\x1b[96m")
+      expect(paint("x", "white", ctx)).toBe("\x1b[22m\x1b[39m\x1b[39mx\x1b[0m")
+      // bright 前景不得携带 SGR dim（2）——dim 仅属于网格/低优先级结构。
+      for (const color of ["blue", "green", "yellow", "red", "magenta", "cyan"] as const) {
+        expect(paint("x", color, ctx)).toStartWith("\x1b[22m\x1b[39m")
+        expect(paint("x", color, ctx)).not.toMatch(/\x1b\[2(?:;|m)/)
+      }
+    } finally {
+      if (desc) Object.defineProperty(process.stdout, "isTTY", desc)
+      else Reflect.deleteProperty(process.stdout, "isTTY")
+    }
+  })
+
+  test("keeps colored empty reports safe under the R6 foreground and background contract", () => {
+    // 空报告彩色输出不得含 24-bit RGB 前景或具体背景色。
+    withColumns(120, () => {
+      const input = emptyReport()
+      const renders = [renderDashboard, renderOverview, renderModels, renderProviders, renderTimeline, renderSessions, renderCharts, renderHeatmapPage, renderCosts, renderTokens, renderInsights, renderForecast]
+      const outputs = [
+        ...renders.map((render) => ({ colored: render(input, { color: "always" }), plain: render(input, { color: "never" }) })),
+        ...(["model", "provider", "agent", "source", "project", "tool", "status"] as const).map((by) => ({ colored: renderBreakdown(input, { color: "always", by }), plain: renderBreakdown(input, { color: "never", by }) })),
+      ]
+      for (const output of outputs) {
+        expect(output.colored).not.toContain("\x1b[38;2;")
+        expect(concreteBackgroundAnsi(output.colored)).toEqual([])
+        // 不能两侧都剥色，否则never泄漏会被等价断言掩盖。
+        expect(output.plain).not.toContain("\x1b[")
+        expect(stripAnsi(output.colored)).toBe(output.plain)
+        for (const line of output.colored.split("\n")) expect(visibleLength(line)).toBeLessThanOrEqual(120)
+      }
+    })
+  })
+
+  test("respects color mode precedence with NO_COLOR truthy contract", () => {
+    // R6 truthy NO_COLOR 语义由 renderContext 生产实现承载：always 恒开、never 恒关、
+    // auto 在非 TTY 或非空 NO_COLOR 下禁用；空字符串按 truthiness 等同未设置。
+    // isTTY 桩为 true，使 auto 分支对 NO_COLOR 回归可失败（而非恒 never 空转）。
+    const originalNoColor = process.env.NO_COLOR
+    const ttyDesc = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+    try {
+      Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+      // auto + TTY + NO_COLOR 未设置 → 彩色。
+      delete process.env.NO_COLOR
+      expect(renderContext("auto").color).toBe("auto")
+      // auto + TTY + NO_COLOR="" → 彩色（空串按 truthiness 等同未设置）。
+      process.env.NO_COLOR = ""
+      expect(renderContext("auto").color).toBe("auto")
+      // auto + TTY + NO_COLOR="1" → 纯文本（非空字符串禁用）。
+      process.env.NO_COLOR = "1"
+      expect(renderContext("auto").color).toBe("never")
+      // always 无视 NO_COLOR；never 恒关。
+      expect(renderContext("always").color).toBe("always")
+      expect(renderContext("never").color).toBe("never")
+      // auto + 非 TTY → 纯文本。
+      Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
+      delete process.env.NO_COLOR
+      expect(renderContext("auto").color).toBe("never")
+      expect(paint("x", "red", renderContext("always"))).toContain("\x1b[91m")
+      expect(paint("\x1b[31mx\x1b[0m", "red", renderContext("never"))).toBe("x")
+      // 端到端：paint 必须消费 renderContext 的裁决——NO_COLOR=1 + isTTY=true 时
+      // paint 输出不得携带 ANSI（对回归可失败的输出面断言，非仅模式字段）。
+      Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+      process.env.NO_COLOR = "1"
+      expect(paint("x", "red", renderContext("auto"))).toBe("x")
+      expect(paint("x", "red", renderContext("always"))).toContain("\x1b[91m")
+      delete process.env.NO_COLOR
+      expect(paint("x", "red", renderContext("auto"))).toContain("\x1b[91m")
+      // 页面级端到端：dashboard/heatmap 标题发射点必须消费模式裁决。
+      const dashNever = renderDashboard(emptyReport(), { color: "never" })
+      expect(dashNever).not.toMatch(/\x1b\[/)
+      // auto + TTY + NO_COLOR="1" → 页面级纯文本（契约核心断言）。
+      process.env.NO_COLOR = "1"
+      const dashNoColor = renderDashboard(emptyReport(), { color: "auto" })
+      expect(dashNoColor).not.toMatch(/\x1b\[/)
+      const costsNever = renderCosts(emptyReport(), { color: "never" })
+      expect(costsNever).not.toMatch(/\x1b\[/)
+      const tokensNever = renderTokens(emptyReport(), { color: "never" })
+      expect(tokensNever).not.toMatch(/\x1b\[/)
+      const costsNoColor = renderCosts(emptyReport(), { color: "auto" })
+      expect(costsNoColor).not.toMatch(/\x1b\[/)
+      const tokensNoColor = renderTokens(emptyReport(), { color: "auto" })
+      expect(tokensNoColor).not.toMatch(/\x1b\[/)
+      delete process.env.NO_COLOR
+      const dashAlways = renderDashboard(emptyReport(), { color: "always" })
+      expect(dashAlways).toMatch(/\x1b\[95m/)
+      const heatNever = renderHeatmap({ title: "hm", points: [], color: "never" })
+      expect(heatNever.join("\n")).not.toMatch(/\x1b\[/)
+    } finally {
+      if (ttyDesc) Object.defineProperty(process.stdout, "isTTY", ttyDesc)
+      else Reflect.deleteProperty(process.stdout, "isTTY")
+      if (originalNoColor === undefined) delete process.env.NO_COLOR
+      else process.env.NO_COLOR = originalNoColor
+    }
+  })
