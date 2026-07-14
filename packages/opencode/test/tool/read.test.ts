@@ -1,4 +1,5 @@
-import { afterEach, describe, expect } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
+import { Database as SQLite } from "bun:sqlite"
 import { Cause, Effect, Exit, Layer } from "effect"
 import path from "path"
 import { Agent } from "../../src/agent/agent"
@@ -19,12 +20,28 @@ import { readOutline } from "../../src/tool/read-outline"
 import { Truncate } from "@/tool/truncate"
 import { Tool } from "@/tool/tool"
 import { Filesystem } from "@/util/filesystem"
-import { disposeAllInstances, provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
+import { disposeAllInstances, provideInstance, TestInstance, tmpdir, tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { Reference } from "@/reference/reference"
 import { Image } from "@/image/image"
 
 const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
+const MIGRATION_SCRIPT = path.join(import.meta.dir, "../../script/migrate-image-attachment.ts")
+
+async function migrateImageAttachment(args: string[]) {
+  // 子进程覆盖用户实际调用的CLI边界，避免测试绕过参数校验、只读模式或进程退出码。
+  const child = Bun.spawn([process.execPath, MIGRATION_SCRIPT, ...args], {
+    cwd: path.join(import.meta.dir, "../.."),
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  return { exitCode, stdout, stderr }
+}
 
 afterEach(async () => {
   await disposeAllInstances()
@@ -645,7 +662,7 @@ describe("tool.read truncation", () => {
     }),
   )
 
-  noResizer.live("falls back to original image bytes when the image resizer is unavailable", () =>
+  noResizer.live("fails closed when the image resizer is unavailable", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       const png = Buffer.from(
@@ -654,13 +671,9 @@ describe("tool.read truncation", () => {
       )
       yield* put(path.join(dir, "image.png"), png)
 
-      const result = yield* exec(dir, { filePath: path.join(dir, "image.png") })
-      expect(result.output).toStartWith("Image read successfully")
-      expect(result.attachments?.[0]).toMatchObject({
-        type: "file",
-        mime: "image/png",
-        url: `data:image/png;base64,${png.toString("base64")}`,
-      })
+      // 原图回退会把未经主处理链确认的数据继续交给模型；处理器不可用时必须终止本次 Read。
+      const error = yield* fail(dir, { filePath: path.join(dir, "image.png") })
+      expect(error.message).toBe("Image resizer is unavailable")
     }),
   )
 
@@ -1141,5 +1154,118 @@ describe("tool.read binary detection", () => {
       const wasmErr = yield* fail(dir, { filePath: path.join(dir, "module.wasm") })
       expect(wasmErr.message).toContain("strings")
     }),
+  )
+})
+
+describe("image attachment migration", () => {
+  test(
+    "dry-runs, migrates once, remains idempotent, and rejects non-images",
+    async () => {
+      await using tmp = await tmpdir()
+      const dbPath = path.join(tmp.path, "opencode.db")
+      const backupDir = path.join(tmp.path, "backups")
+      const source = path.join(FIXTURES_DIR, "large-image.png")
+      const sourceBytes = Buffer.from(await Bun.file(source).arrayBuffer())
+      const oldBytes = Buffer.from("known truncated image bytes")
+      // 旧bytes刻意不可解码：迁移不应读取或“修补”坏数据，只将其hash作为CAS前置条件。
+      const hash = (bytes: Uint8Array) => new Bun.CryptoHasher("sha256").update(bytes).digest("hex")
+      const original = JSON.stringify({
+        type: "tool",
+        state: {
+          status: "completed",
+          attachments: [{ type: "file", mime: "image/png", url: `data:image/png;base64,${oldBytes.toString("base64")}` }],
+        },
+      })
+      const db = new SQLite(dbPath)
+      db.run("PRAGMA journal_mode = WAL")
+      // 最小真实SQLite表保留脚本依赖的四列，让测试聚焦Part行为而非复制生产schema。
+      db.run("CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, data TEXT NOT NULL)")
+      db.query("INSERT INTO part VALUES (?, ?, ?, ?)").run("prt_migrate", "msg_migrate", "ses_migrate", original)
+      db.query("INSERT INTO part VALUES (?, ?, ?, ?)").run("prt_unrelated", "msg_unrelated", "ses_unrelated", original)
+      const args = [
+        // source和两份旧hash全部显式传入，测试同时锁住“不扫描、不猜测”的CLI契约。
+        "--db",
+        dbPath,
+        "--part",
+        "prt_migrate",
+        "--source",
+        source,
+        "--expected-old-sha",
+        hash(oldBytes),
+        "--expected-source-sha",
+        hash(sourceBytes),
+      ]
+
+      // Dry-run必须实际经过Sharp才能给出新hash，但不能创建备份或改写目标行。
+      const dryRun = await migrateImageAttachment(args)
+      expect(dryRun.exitCode).toBe(0)
+      const report = JSON.parse(dryRun.stdout.slice(dryRun.stdout.lastIndexOf('{\n  "status"')))
+      expect(report.status).toBe("dry-run")
+      const dryRunDb = new SQLite(dbPath, { readonly: true })
+      expect(dryRunDb.query("SELECT data FROM part").get()).toEqual({ data: original })
+      dryRunDb.close()
+
+      // 错误source hash必须在创建备份和写库前失败。
+      const rejectedHash = await migrateImageAttachment([
+        ...args.slice(0, -1),
+        "0".repeat(64),
+        "--expected-new-sha",
+        report.new_sha256,
+        "--backup-dir",
+        backupDir,
+        "--apply",
+      ])
+      expect(rejectedHash.exitCode).not.toBe(0)
+      expect(await Bun.file(backupDir).exists()).toBe(false)
+
+      // Apply将dry-run产出的hash变成第三个前置条件，防止Sharp版本或编码结果漂移后静默写库。
+      const applyArgs = [...args, "--expected-new-sha", report.new_sha256, "--backup-dir", backupDir, "--apply"]
+      db.run("CREATE TRIGGER reject_part_update BEFORE UPDATE OF data ON part BEGIN SELECT RAISE(IGNORE); END")
+      const casRejected = await migrateImageAttachment(applyArgs)
+      expect(casRejected.exitCode).not.toBe(0)
+      // changes=0必须保持事务零写入；之后删除触发器再验证同一命令仍可正常迁移。
+      expect(db.query("SELECT data FROM part WHERE id = 'prt_migrate'").get()).toEqual({ data: original })
+      db.run("DROP TRIGGER reject_part_update")
+      const applied = await migrateImageAttachment(applyArgs)
+      expect(applied.exitCode).toBe(0)
+      expect(applied.stdout).toContain('"status": "migrated"')
+      const appliedReport = JSON.parse(applied.stdout.slice(applied.stdout.lastIndexOf('{\n  "status"')))
+      // Apply成功必须留下可独立恢复的一致master及其manifest，而不是只证明目标行已改变。
+      expect(await Bun.file(path.join(appliedReport.backup, "master", "opencode.db")).exists()).toBe(true)
+      expect(await Bun.file(path.join(appliedReport.backup, "manifest.json")).exists()).toBe(true)
+      const master = new SQLite(path.join(appliedReport.backup, "master", "opencode.db"), { readonly: true })
+      // 保持另一个WAL连接存活，确认一致快照包含已提交WAL中的无关行且仍保留迁移前目标值。
+      expect(master.query("SELECT count(*) AS count FROM part").get()).toEqual({ count: 2 })
+      expect(master.query("SELECT data FROM part WHERE id = 'prt_migrate'").get()).toEqual({ data: original })
+      master.close()
+      const migratedDb = new SQLite(dbPath)
+      // 直接回读数据库而非相信stdout，确认实际存储的是Sharp生成且hash匹配的附件。
+      const migrated = JSON.parse((migratedDb.query<{ data: string }, []>("SELECT data FROM part").get() as { data: string }).data)
+      expect(migrated.state.attachments[0].mime).toBe("image/jpeg")
+      expect(hash(Buffer.from(migrated.state.attachments[0].url.split(",")[1], "base64"))).toBe(report.new_sha256)
+      expect(migratedDb.query("SELECT count(*) AS count FROM part").get()).toEqual({ count: 2 })
+
+      // 第二次运行应在读取source和创建大备份前幂等退出，避免恢复命令重试产生副作用。
+      const repeated = await migrateImageAttachment(applyArgs)
+      expect(repeated.exitCode).toBe(0)
+      expect(repeated.stdout).toContain('"status": "already migrated"')
+
+      // 相同bytes但错误MIME不能走幂等短路，避免provider按错误媒体类型解释正确payload。
+      migrated.state.attachments[0].mime = "image/png"
+      migratedDb.query("UPDATE part SET data = ? WHERE id = ?").run(JSON.stringify(migrated), "prt_migrate")
+      const mismatchedMime = await migrateImageAttachment(applyArgs)
+      expect(mismatchedMime.exitCode).not.toBe(0)
+      expect(mismatchedMime.stderr).toContain("MIME")
+
+      // 即使bytes与new hash一致，非图片MIME也不能借幂等分支绕过工具的图片专用边界。
+      migrated.state.attachments[0].mime = "application/pdf"
+      migratedDb.query("UPDATE part SET data = ? WHERE id = ?").run(JSON.stringify(migrated), "prt_migrate")
+      migratedDb.close()
+      db.close()
+      const rejected = await migrateImageAttachment(applyArgs)
+      expect(rejected.exitCode).not.toBe(0)
+      expect(rejected.stderr).toContain("is not an image")
+    },
+    120_000,
   )
 })

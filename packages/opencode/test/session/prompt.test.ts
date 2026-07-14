@@ -170,6 +170,10 @@ const registryImage = Layer.succeed(
     normalize: (input) => Effect.succeed(input),
   }),
 )
+const unavailableImage = Layer.succeed(
+  Image.Service,
+  Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }),
+)
 
 const processorCreateStarted: Array<() => void> = []
 const blockingProcessor = Layer.succeed(
@@ -179,7 +183,7 @@ const blockingProcessor = Layer.succeed(
   }),
 )
 
-function makeHttp(input?: { processor?: "blocking"; usage?: boolean }) {
+function makeHttp(input?: { processor?: "blocking"; usage?: boolean; image?: "unavailable" }) {
   const deps = Layer.mergeAll(
     Session.defaultLayer,
     Snapshot.defaultLayer,
@@ -225,7 +229,7 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean }) {
       ? blockingProcessor
       : SessionProcessor.layer.pipe(
           Layer.provide(summary),
-          Layer.provide(Image.defaultLayer),
+          Layer.provide(input?.image === "unavailable" ? unavailableImage : Image.defaultLayer),
           Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
           Layer.provideMerge(deps),
         )
@@ -238,7 +242,7 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean }) {
     TestLLMServer.layer,
     SessionPrompt.layer.pipe(
       Layer.provide(SessionRevert.defaultLayer),
-      Layer.provide(Image.defaultLayer),
+       Layer.provide(input?.image === "unavailable" ? unavailableImage : Image.defaultLayer),
       Layer.provide(Reference.defaultLayer),
       Layer.provide(summary),
       Layer.provideMerge(run),
@@ -257,7 +261,31 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean }) {
 const it = testEffect(makeHttp())
 const race = testEffect(makeHttp({ processor: "blocking" }))
 const accounting = testEffect(makeHttp({ usage: true }))
+const unavailable = testEffect(makeHttp({ image: "unavailable" }))
 const unix = process.platform !== "win32" ? it.instance : it.instance.skip
+
+unavailable.instance(
+  "fails before persisting an image when the resizer is unavailable",
+  () =>
+    Effect.gen(function* () {
+      yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      const result = yield* Effect.exit(
+        prompt.prompt({
+          sessionID: chat.id,
+          agent: "build",
+          noReply: true,
+          parts: [{ type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }],
+        }),
+      )
+      expect(Exit.isFailure(result)).toBe(true)
+      // normalize失败发生在updateMessage/updatePart之前，数据库中不应留下半个用户请求。
+      expect(yield* MessageV2.filterCompactedEffect(chat.id)).toHaveLength(0)
+    }),
+  { git: true },
+)
 
 // Config that registers a custom "test" provider with a "test-model" model
 // so provider model lookup succeeds inside the loop.

@@ -632,12 +632,6 @@ export const ReadTool = Tool.define(
             input,
             // `read` results enter the model immediately, so keep its payload near the existing image token cap.
             { tokenBudget: 1600 },
-          ).pipe(
-            // If the native resizer cannot load, preserve the old read behavior: attach the original bytes instead of failing.
-            Effect.catchIf(
-              (error) => error instanceof Image.ResizerUnavailableError,
-              () => Effect.succeed(input),
-            ),
           )
           const msg = `Image read successfully (${formatSize(bytes.length)} → compressed for model)`
           return {

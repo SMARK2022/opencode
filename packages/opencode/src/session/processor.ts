@@ -571,13 +571,7 @@ export const layer = Layer.effect(
             )
             const normalized = yield* Effect.forEach(toolAttachments, (attachment) =>
               attachment.mime.startsWith("image/")
-                ? image.normalize(attachment).pipe(
-                    Effect.catchIf(
-                      (error) => error instanceof Image.ResizerUnavailableError,
-                      () => Effect.succeed(attachment),
-                    ),
-                    Effect.exit,
-                  )
+                ? image.normalize(attachment).pipe(Effect.exit)
                 : Effect.succeed(Exit.succeed<MessageV2.FilePart>(attachment)),
             )
             const omitted = normalized.filter(Exit.isFailure).length

@@ -194,8 +194,18 @@ const env = Layer.mergeAll(
     Layer.provideMerge(deps),
   ),
 )
+const unavailableEnv = Layer.mergeAll(
+  TestLLMServer.layer,
+  SessionProcessor.layer.pipe(
+    Layer.provide(summary),
+    Layer.provide(Layer.succeed(Image.Service, Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }))),
+    Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
+    Layer.provideMerge(deps),
+  ),
+)
 
 const it = testEffect(env)
+const unavailable = testEffect(unavailableEnv)
 
 const boot = Effect.fn("test.boot")(function* () {
   const processors = yield* SessionProcessor.Service
@@ -203,6 +213,46 @@ const boot = Effect.fn("test.boot")(function* () {
   const provider = yield* Provider.Service
   return { processors, session, provider }
 })
+
+unavailable.live("omits an image attachment when normalization is unavailable", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        yield* llm.push(reply().tool("image_read", { path: "image.png" }))
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "read image")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const model = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model })
+        const result = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies MessageV2.User,
+          sessionID: chat.id,
+          model,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "read image" }],
+          tools: { image_read: imageRead },
+        })
+        const part = MessageV2.parts(msg.id).find((item): item is MessageV2.ToolPart => item.type === "tool")
+        expect(result).toBe("continue")
+        expect(part?.state.status).toBe("completed")
+        if (part?.state.status === "completed") {
+          // 失败图片不能回到provider，但工具文本仍需保留，避免丢失非图片结果。
+          expect(part.state.attachments).toBeUndefined()
+          expect(part.state.output).toContain("image omitted")
+        }
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
 
 // ---------------------------------------------------------------------------
 // consecutive-error breaker 测试工具
@@ -220,6 +270,14 @@ const failingRead = aiTool({
   execute: async (): Promise<{ output: string }> => {
     throw new Error("File not found")
   },
+})
+const imageRead = aiTool({
+  description: "image read",
+  inputSchema: z.object({ path: z.string() }),
+  execute: async (): Promise<{ output: string; attachments: Array<{ type: "file"; mime: string; url: string }> }> => ({
+    output: "tool output",
+    attachments: [{ type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }],
+  }),
 })
 
 // [local-smark] 构造并行工具调用的 SSE chunks。
