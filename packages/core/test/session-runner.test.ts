@@ -734,7 +734,7 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     yield* goals.set(sessionID, { status: "active" })
     yield* goals.accountUsage(sessionID, 234, 26, { goalID: revised.id, generation: revised.generation })
     const prompt = SessionGoal.continuationPrompt(Option.getOrThrow(yield* goals.get(sessionID)))
-    for (const text of ["<session-goal-continuation>", "revised", "Tokens used: 1234", "Token budget: 50000", "Tokens remaining: 48766", "call the goal tool with status", "The audit must prove completion, not merely fail to find obvious remaining work."]) expect(prompt).toContain(text)
+    for (const text of ["<session-goal-continuation>", "revised", "Tokens used: 1234", "Token budget: 50000", "Tokens remaining: 48766", "call the goal tool with mark", "two consecutive eligible Goal turns", "the same trimmed reason", "The audit must prove completion, not merely fail to find obvious remaining work."]) expect(prompt).toContain(text)
     expect(yield* goals.set(sessionID, { tokenBudget: null })).toMatchObject({ tokenBudget: null })
     expect(yield* goals.set(sessionID, { tokenBudget: 100000 })).toMatchObject({ tokenBudget: 100000 })
     const escaped = SessionGoal.continuationPrompt(yield* goals.set(sessionID, { objective: "fix <script> & <style> tags" }))
@@ -824,6 +824,35 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     // 无 step-finish 的 EOF 不能被当作正常完成后再自动续跑。
     expect(requests).toHaveLength(1)
     expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("active")
+
+    // 沿真实原生runner跨两个eligible turn确认blocker，工具read与mark仍各占provider step。
+    yield* goals.set(sessionID, { objective: "Verify two-turn blocking and later recovery", status: "active" })
+    // 技术提醒仍进入模型历史，但不得重置trusted read或伪造另一个eligible turn。
+    const goalDatabase = yield* Database.Service
+    const beforeReminder = yield* SessionHistory.goalTurn(goalDatabase.db, sessionID)
+    const goalEvents = yield* EventV2.Service
+    yield* goalEvents.publish(SessionEvent.Synthetic, { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text: "Technical plan reminder" })
+    expect(yield* SessionHistory.goalTurn(goalDatabase.db, sessionID)).toEqual(beforeReminder)
+    const callGoal = (id: string, input: Record<string, string>) => [
+      LLMEvent.stepStart({ index: 0 }),
+      LLMEvent.toolCall({ id, name: "goal", input }),
+      LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+      LLMEvent.finish({ reason: "tool-calls" }),
+    ]
+    const blocked = { mark: "blocked", reason: "persistent blocker" }
+    responses = [callGoal("read-1", {}), callGoal("block-1", blocked), normal, callGoal("read-2", {}), callGoal("block-2", blocked), normal]
+    requests.length = 0
+    yield* session.resume(sessionID)
+    expect(requests).toHaveLength(6)
+    expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({ status: "blocked", reason: "persistent blocker" })
+
+    // 后续真实用户才可恢复模型终态；以EOF停止本轮，避免额外自动续跑影响该边界断言。
+    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Resume this blocked goal" }), resume: false })
+    responses = [callGoal("read-recovery", {}), callGoal("recover", { mark: "active" }), []]
+    requests.length = 0
+    yield* session.resume(sessionID)
+    expect(requests).toHaveLength(3)
+    expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({ status: "active", reason: null })
     // 删除沿真实共享生命周期事件投影；Goal只能由外键级联清理，不能先clear伪造成功。
     const events = yield* EventV2.Service
     yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: SessionV1.SessionInfo.make({

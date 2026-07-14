@@ -127,11 +127,14 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
           const goal = yield* goals.set(ctx.params.sessionID, ctx.payload).pipe(
             Effect.mapError(error => new InvalidRequestError({ message: error.message })),
           )
-          // 用户恢复沿现有全局Session所有权执行；失败留日志，不另建runner或伪造执行结果。
-          if (goal.status === "active") yield* session.resume(ctx.params.sessionID).pipe(
-            Effect.catchCause(cause => Effect.logError("goal resume failed", { cause })),
-            Effect.forkIn(scope),
-          )
+          // 空Session只保存active Goal；已有user历史才沿原全局所有权恢复，不以技术提醒代替用户。
+          if (goal.status === "active") {
+            const messages = yield* session.messages({ sessionID: ctx.params.sessionID }).pipe(Effect.orDie)
+            if (messages.some(message => message.type === "user")) yield* session.resume(ctx.params.sessionID).pipe(
+              Effect.catchCause(cause => Effect.logError("goal resume failed", { sessionID: ctx.params.sessionID, cause })),
+              Effect.forkIn(scope, { startImmediately: true }),
+            )
+          }
           return { goal }
         }),
       )

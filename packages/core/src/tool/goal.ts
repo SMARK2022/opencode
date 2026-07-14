@@ -20,9 +20,9 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
         "",
         "Call with `mark` and `reason` to mark the goal as achieved, blocked, or resumed:",
         "- Mark as `complete` with a `reason` only when the objective has actually been achieved and no required work remains.",
-        "- Mark as `blocked` with a `reason` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change. The tool tracks consecutive attempts automatically — call blocked once per goal turn, and the status will only change to blocked on the third consecutive attempt with the same reason.",
+        "- Mark as `blocked` with a `reason` only when the same blocking condition remains across two consecutive eligible Goal turns using the same trimmed reason, counting the original/user-triggered turn and any automatic Goal continuation. The first call keeps the Goal active: re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call `mark: \"blocked\"` again in the next eligible Goal turn with the same trimmed reason. The second consecutive call marks the Goal as blocked.",
         "- Mark as `active` (no reason needed) to resume a goal that you previously marked complete or blocked, but only in a later user-initiated turn. You cannot resume a goal that was paused or terminated by the user.",
-        "- If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, mark as `blocked` again.",
+        "- If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least two consecutive resumed goal turns, mark as `blocked` again.",
         "- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; mark as `blocked`.",
         "- Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
         "- Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.",
@@ -31,7 +31,7 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
       ].join("\n"),
       input: Schema.Struct({
         mark: Schema.Literals(["complete", "blocked", "active"]).pipe(Schema.optional).annotate({
-          description: "Mark the goal as `complete` when the objective is achieved, or `blocked` when genuinely stuck after at least three consecutive failed attempts. Mark as `active` to resume a model-produced terminal goal in a later user turn. Omit to get the current goal status.",
+          description: "Mark the goal as `complete` when the objective is achieved. Mark it as `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. Mark as `active` to resume a model-produced terminal goal in a later user turn. Omit to get the current goal status.",
         }),
         reason: Schema.String.pipe(Schema.optional).annotate({
           description: "Required when marking `complete` or `blocked`. A concise explanation of why the goal is being marked. Ignored for `active`.",
@@ -50,7 +50,7 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
           return goal
         }
         if (!turn?.read) return yield* Effect.fail(new ToolFailure({
-          message: "goal tool: must call get (no arguments) before marking a status. Read the current goal first.",
+          message: "You must call the goal tool with no arguments to read the current goal before marking it. Read the current goal, then retry the transition with mark and reason.",
         }))
         const result = yield* goals.modelTransition(context.sessionID, {
           snapshot: turn.read, turnID: turn.id, previousTurnID: turn.previousID,
@@ -74,7 +74,7 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
                 timeUsedSeconds: output.timeUsedSeconds,
               }, null, 2)
             : output.blockedAttempt
-              ? `Blocked attempt ${output.blockedAttempt.attempt} of ${output.blockedAttempt.required}. The goal remains active. Continue working, or call blocked again in the next goal turn with the same reason if the blocker persists.`
+              ? `Blocked attempt ${output.blockedAttempt.attempt} of ${output.blockedAttempt.required}. Before marking as blocked, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call mark blocked again in the next eligible Goal turn with the same trimmed reason to confirm the blocker is persistent.`
               : output.status === "active"
                 ? "Goal resumed to active. Continue working toward the objective."
                 : output.status === "blocked"

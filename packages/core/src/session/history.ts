@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, gte, lte, ne, or } from "drizzle-orm"
+import { and, asc, desc, eq, gt, gte, lte, ne, or, sql } from "drizzle-orm"
 import { Effect, Schema } from "effect"
 import { Database } from "../database/database"
 import type { FileEvidence } from "./file-evidence"
@@ -166,10 +166,13 @@ export const goalTurn = Effect.fn("SessionHistory.goalTurn")(function* (db: Data
   const rows = yield* db.select({ id: SessionMessageTable.id, type: SessionMessageTable.type })
     .from(SessionMessageTable)
     .where(and(eq(SessionMessageTable.session_id, sessionID),
-      or(eq(SessionMessageTable.type, "user"), eq(SessionMessageTable.type, "synthetic"))))
+      or(eq(SessionMessageTable.type, "user"), and(
+        eq(SessionMessageTable.type, "synthetic"),
+        sql`json_extract(${SessionMessageTable.data}, '$.text') LIKE ${"<session-goal-continuation>%"}`,
+      ))))
     .orderBy(desc(SessionMessageTable.seq)).limit(2).all().pipe(Effect.orDie)
   if (!rows[0]) return
-  // 原生Synthetic的实际producer是Goal continuation；Compaction和普通provider step不另开turn。
+  // 只接受既有Goal continuation producer的标记；计划提醒等技术Synthetic不创建或重排turn。
   return {
     id: rows[0].id,
     previousID: rows[1]?.id,
