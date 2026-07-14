@@ -1,7 +1,13 @@
 import { Config } from "@/config/config"
 import type { MessageV2 } from "@/session/message-v2"
+import { Global } from "@opencode-ai/core/global"
 import * as Log from "@opencode-ai/core/util/log"
 import { Context, Effect, Layer, Schema } from "effect"
+import { createHash, randomUUID } from "node:crypto"
+import fs from "node:fs/promises"
+import path from "node:path"
+
+declare const OPENCODE_COMPILED: boolean | undefined
 
 const MAX_BASE64_BYTES = 5 * 1024 * 1024
 const MAX_WIDTH = 2000
@@ -15,6 +21,12 @@ const JPEG_QUALITIES = [85, 70, 55, 40]
 const log = Log.create({ service: "image" })
 type Sharp = typeof import("sharp")
 type SharpMetadata = import("sharp").Metadata
+type EmbeddedSharp = {
+  target: string
+  version: string
+  addon: string
+  files: Record<string, string>
+}
 
 export class ResizerUnavailableError extends Schema.TaggedErrorClass<ResizerUnavailableError>()(
   "ImageResizerUnavailableError",
@@ -72,10 +84,13 @@ export const layer = Layer.effect(
     const loadSharp = yield* Effect.cached(
       Effect.tryPromise({
         try: async () => {
+          // compiled和源码路径只区别Sharp的装载位置，后续metadata/resize/encode始终共用同一Sharp实现。
+          // compiled资源准备失败直接映射为ResizerUnavailable，不允许绕过Sharp返回输入附件。
+          if (typeof OPENCODE_COMPILED !== "undefined" && OPENCODE_COMPILED) await prepareCompiledSharp()
           const mod = await import("sharp")
           const value: unknown = Reflect.get(mod, "default")
+          // Sharp 0.34.5的动态import契约是default callable；其他形状不是可支持的第二后端。
           if (isSharp(value)) return value
-          if (isSharp(mod)) return mod
           throw new Error("sharp module did not expose a callable export")
         },
         catch: (error) => {
@@ -169,6 +184,62 @@ function targetMaxBase64Bytes(
 
 function isSharp(value: unknown): value is Sharp {
   return typeof value === "function"
+}
+
+async function prepareCompiledSharp() {
+  // build.ts 同时把虚拟模块放入files/entrypoints；compiled缺失时直接失败，不猜测开发机node_modules位置。
+  // @ts-expect-error generated at build time
+  const embedded = (await import("opencode-sharp.gen.ts")).default as EmbeddedSharp
+  // Sharp版本和target共同隔离cache，升级或切换libc时不能复用ABI不兼容的addon。
+  const root = path.join(Global.Path.cache, "native", "sharp", embedded.version, embedded.target)
+  // addon加载前必须等待所有DLL/dylib/so完成校验，避免并发看到“node存在但依赖库未就绪”的半状态。
+  // Promise并行只影响释放速度；全量完成前不会向官方loader公开addon绝对路径。
+  await Promise.all(
+    Object.entries(embedded.files).map(([relative, source]) =>
+      ensureExtractedNativeFile(source, path.join(root, ...relative.split("/"))),
+    ),
+  )
+  // Sharp 的动态 package require 无法从 bunfs 找到 addon；build plugin 只让官方 loader优先读取该绝对路径。
+  // 全局值只承载打包产物确定的路径，不暴露配置入口，也不接受外部覆盖。
+  ;(globalThis as typeof globalThis & { __OPENCODE_SHARP_NATIVE_PATH?: string }).__OPENCODE_SHARP_NATIVE_PATH = path.join(
+    root,
+    ...embedded.addon.split("/"),
+  )
+}
+
+async function ensureExtractedNativeFile(source: string, target: string) {
+  // 已验证文件直接复用；只看存在/大小不足以防止崩溃遗留或同名错误native资源。
+  // source来自Bun内嵌只读资源，因此与target内容hash相等即可作为完整提交标志。
+  if (await sameFileContent(source, target)) return
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  const temp = `${target}.tmp-${process.pid}-${randomUUID()}`
+  try {
+    // 临时文件和目标同目录，使rename保持同卷原子替换语义。
+    // PID和UUID避免同进程任务及不同进程之间复用未完成的临时文件。
+    await Bun.write(temp, Bun.file(source))
+    try {
+      await fs.rename(temp, target)
+    } catch (error) {
+      // Windows会锁住已加载的node/DLL；并发loser只在winner内容完全一致时复用，不能覆盖未知文件。
+      // 内容不同则保留原错误，防止用删除或覆盖绕过正在使用的ABI冲突文件。
+      if (await sameFileContent(source, target)) return
+      throw error
+    }
+    if (!(await sameFileContent(source, target))) throw new Error(`Extracted Sharp resource failed verification: ${target}`)
+  } finally {
+    await fs.rm(temp, { force: true }).catch(() => {})
+  }
+}
+
+async function sameFileContent(source: string, target: string) {
+  if (!(await Bun.file(target).exists())) return false
+  // 先比较大小避免每次图片请求都无条件hash较大的libvips文件。
+  if (Bun.file(source).size !== Bun.file(target).size) return false
+  return (await fileDigest(source)) === (await fileDigest(target))
+}
+
+async function fileDigest(file: string) {
+  return createHash("sha256").update(Buffer.from(await Bun.file(file).arrayBuffer())).digest("hex")
 }
 
 function readMetadata(sharp: Sharp, buffer: Buffer): Effect.Effect<SharpMetadata, DecodeError> {

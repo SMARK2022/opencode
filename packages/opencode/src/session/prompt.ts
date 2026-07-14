@@ -1925,12 +1925,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
       const parts = yield* Effect.forEach(resolvedParts, (part) =>
         part.type === "file" && part.mime.startsWith("image/")
-          ? image.normalize(part).pipe(
-              Effect.catchIf(
-                (error) => error instanceof Image.ResizerUnavailableError,
-                () => Effect.succeed(part),
-              ),
-            )
+          ? image.normalize(part)
           : Effect.succeed(part),
       )
 
