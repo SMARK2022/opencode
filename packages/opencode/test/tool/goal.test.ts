@@ -73,7 +73,7 @@ it.instance(
   () =>
     Effect.gen(function* () {
       const { goalSvc, session, def } = yield* setupGoalTool()
-      const result = yield* def.execute({}, makeCtx(session.id, goalSvc))
+      const result = yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc))
       expect(result.output).toContain("No goal")
     }),
   { git: true },
@@ -87,7 +87,7 @@ it.instance(
     Effect.gen(function* () {
       const { goalSvc, session, def } = yield* setupGoalTool("test objective")
       const goalTurn: GoalTurnContext = { id: "turn1", userInitiated: true }
-      const result = yield* def.execute({}, makeCtx(session.id, goalSvc, goalTurn))
+      const result = yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, goalTurn))
 
       expect(result.output).toContain("test objective")
       expect(result.output).toContain("active")
@@ -100,21 +100,21 @@ it.instance(
 
 // read gate：transition 必须先 get 建立快照，防止模型不看 GOAL 直接终态化
 it.instance(
-  "mark without prior get explains how to establish the read gate",
+  "transition without prior read explains how to establish the read gate",
   () =>
     Effect.gen(function* () {
       const { goalSvc, session, def } = yield* setupGoalTool("test")
       const goalTurn: GoalTurnContext = { id: "turn1", userInitiated: true }
       const result = yield* def
-        .execute({ mark: "complete", reason: "done" }, makeCtx(session.id, goalSvc, goalTurn))
+        .execute({ operate: "complete", reason: "done" }, makeCtx(session.id, goalSvc, goalTurn))
         .pipe(Effect.exit)
 
       expect(Exit.isFailure(result)).toBe(true)
       if (Exit.isFailure(result)) {
         // Tool wrapper 把执行失败转为 defect；模型最终看到的正是 squash 后的消息。
         const error = Cause.squash(result.cause) as Error
-        expect(error.message).toContain("call the goal tool with no arguments")
-        expect(error.message).toContain("retry the transition with mark")
+        expect(error.message).toContain("with operate \`read\` before changing the goal")
+        expect(error.message).toContain("retry with operate and reason")
       }
     }),
   { git: true },
@@ -127,14 +127,14 @@ it.instance(
     Effect.gen(function* () {
       const { goalSvc, session, def } = yield* setupGoalTool("test")
       const turn: GoalTurnContext = { id: "turn1", userInitiated: true }
-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn))
-      const result = yield* def.execute({ mark: "complete" }, makeCtx(session.id, goalSvc, turn)).pipe(Effect.exit)
+      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn))
+      const result = yield* def.execute({ operate: "complete" }, makeCtx(session.id, goalSvc, turn)).pipe(Effect.exit)
 
       expect(Exit.isFailure(result)).toBe(true)
       if (Exit.isFailure(result)) {
         const error = Cause.squash(result.cause) as Error
         expect(error.message).toContain("non-empty reason")
-        expect(error.message).toContain("retry with mark complete")
+        expect(error.message).toContain("retry with operate complete")
       }
     }),
   { git: true },
@@ -147,18 +147,18 @@ it.instance(
     Effect.gen(function* () {
       const { goalSvc, session, def } = yield* setupGoalTool("original")
       const turn: GoalTurnContext = { id: "turn1", userInitiated: true }
-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn))
+      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn))
       yield* goalSvc.set(session.id, { objective: "revised" })
 
       const result = yield* def.execute(
-        { mark: "complete", reason: "finished original" },
+        { operate: "complete", reason: "finished original" },
         makeCtx(session.id, goalSvc, turn),
       ).pipe(Effect.exit)
       expect(Exit.isFailure(result)).toBe(true)
       if (Exit.isFailure(result)) {
         const error = Cause.squash(result.cause) as Error
         expect(error.message).toContain("objective has been edited")
-        expect(error.message).toContain("Call get again")
+        expect(error.message).toContain("Call operate read again")
       }
     }),
   { git: true },
@@ -171,11 +171,11 @@ it.instance(
   () =>
     Effect.gen(function* () {
       const { goalSvc, session, def } = yield* setupGoalTool("test")
-      // Turn 1: get then blocked → pending
+      // Turn 1: read then blocked → pending
       const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
+      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
       const r1 = yield* def.execute(
-        { mark: "blocked", reason: "stuck on X" },
+        { operate: "blocked", reason: "stuck on X" },
         makeCtx(session.id, goalSvc, turn1),
       )
       expect(r1.output).toContain("attempt 1")
@@ -191,11 +191,11 @@ it.instance(
       expect(def.description).toContain("re-read relevant files")
       expect(def.description).toContain("overlooked dependencies or constraints")
 
-      // 新 turn 必须重新 get；复用 t1 snapshot 会掩盖 read-per-turn gate 是否真实生效。
+      // 新 turn 必须重新 read；复用 t1 snapshot 会掩盖 read-per-turn gate 是否真实生效。
       const turn2: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: true }
-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn2))
+      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn2))
       const r2 = yield* def.execute(
-        { mark: "blocked", reason: "stuck on X" },
+        { operate: "blocked", reason: "stuck on X" },
         makeCtx(session.id, goalSvc, turn2),
       )
       expect(r2.output).toContain("blocked")
@@ -215,18 +215,18 @@ it.instance(
     Effect.gen(function* () {
       const { goalSvc, session, def } = yield* setupGoalTool("test")
       const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
-      yield* def.execute({ mark: "blocked", reason: "blocker A" }, makeCtx(session.id, goalSvc, turn1))
+      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
+      yield* def.execute({ operate: "blocked", reason: "blocker A" }, makeCtx(session.id, goalSvc, turn1))
       const changed = yield* def.execute(
-        { mark: "blocked", reason: "blocker B" },
+        { operate: "blocked", reason: "blocker B" },
         makeCtx(session.id, goalSvc, turn1),
       )
       expect(changed.output).toContain("attempt 1 of 2")
 
       const turn2: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: true }
-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn2))
+      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn2))
       const oldReason = yield* def.execute(
-        { mark: "blocked", reason: "blocker A" },
+        { operate: "blocked", reason: "blocker A" },
         makeCtx(session.id, goalSvc, turn2),
       )
       expect(oldReason.output).toContain("attempt 1 of 2")
@@ -244,8 +244,8 @@ it.instance(
       const { goalSvc, session, def } = yield* setupGoalTool("test")
       // Turn 1: complete
       const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
-      const already = yield* def.execute({ mark: "active" }, makeCtx(session.id, goalSvc, turn1)).pipe(Effect.exit)
+      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
+      const already = yield* def.execute({ operate: "active" }, makeCtx(session.id, goalSvc, turn1)).pipe(Effect.exit)
       expect(Exit.isFailure(already)).toBe(true)
       if (Exit.isFailure(already)) {
         const error = Cause.squash(already.cause) as Error
@@ -253,13 +253,13 @@ it.instance(
         expect(error.message).toContain("Continue working toward the current objective")
       }
       yield* def.execute(
-        { mark: "complete", reason: "done" },
+        { operate: "complete", reason: "done" },
         makeCtx(session.id, goalSvc, turn1),
       )
       // Turn 2: active recovery
       const turn2: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: true }
-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn2))
-      const result = yield* def.execute({ mark: "active" }, makeCtx(session.id, goalSvc, turn2))
+      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn2))
+      const result = yield* def.execute({ operate: "active" }, makeCtx(session.id, goalSvc, turn2))
       expect(result.output).toContain("resumed")
       const goal = yield* goalSvc.get(session.id)
       if (Option.isSome(goal)) expect(goal.value.status).toBe("active")
@@ -275,12 +275,12 @@ it.instance(
     Effect.gen(function* () {
       const { goalSvc, session, def } = yield* setupGoalTool("test")
       const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
-      yield* def.execute({ mark: "complete", reason: "done" }, makeCtx(session.id, goalSvc, turn1))
+      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
+      yield* def.execute({ operate: "complete", reason: "done" }, makeCtx(session.id, goalSvc, turn1))
 
-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
+      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
       const result = yield* def
-        .execute({ mark: "active" }, makeCtx(session.id, goalSvc, turn1))
+        .execute({ operate: "active" }, makeCtx(session.id, goalSvc, turn1))
         .pipe(Effect.exit)
       expect(Exit.isFailure(result)).toBe(true)
       if (Exit.isFailure(result)) {
@@ -304,9 +304,9 @@ it.instance(
           yield* goalSvc.set(session.id, { status: "complete", reason: "user done" })
 
           const turn1: GoalTurnContext = { id: `remark-${mark}`, userInitiated: true }
-          yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
+          yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
           const remark = yield* def
-            .execute({ mark, reason: "model claim" }, makeCtx(session.id, goalSvc, turn1))
+            .execute({ operate: mark, reason: "model claim" }, makeCtx(session.id, goalSvc, turn1))
             .pipe(Effect.exit)
           expect(Exit.isFailure(remark)).toBe(true)
           if (Exit.isFailure(remark)) {
@@ -318,9 +318,9 @@ it.instance(
           const persisted = yield* goalSvc.get(session.id)
           expect(Option.getOrUndefined(persisted)?.reason).toBe("user done")
           const turn2: GoalTurnContext = { id: `recover-${mark}`, userInitiated: true }
-          yield* def.execute({}, makeCtx(session.id, goalSvc, turn2))
+          yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn2))
           const recovery = yield* def
-            .execute({ mark: "active" }, makeCtx(session.id, goalSvc, turn2))
+            .execute({ operate: "active" }, makeCtx(session.id, goalSvc, turn2))
             .pipe(Effect.exit)
           expect(Exit.isFailure(recovery)).toBe(true)
           if (Exit.isFailure(recovery)) {

@@ -734,7 +734,7 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     yield* goals.set(sessionID, { status: "active" })
     yield* goals.accountUsage(sessionID, 234, 26, { goalID: revised.id, generation: revised.generation })
     const prompt = SessionGoal.continuationPrompt(Option.getOrThrow(yield* goals.get(sessionID)))
-    for (const text of ["<session-goal-continuation>", "revised", "Tokens used: 1234", "Token budget: 50000", "Tokens remaining: 48766", "call the goal tool with mark", "two consecutive eligible Goal turns", "the same trimmed reason", "The audit must prove completion, not merely fail to find obvious remaining work."]) expect(prompt).toContain(text)
+    for (const text of ["<session-goal-continuation>", "revised", "Tokens used: 1234", "Token budget: 50000", "Tokens remaining: 48766", "call the goal tool with operate", "two consecutive eligible Goal turns", "the same trimmed reason", "The audit must prove completion, not merely fail to find obvious remaining work."]) expect(prompt).toContain(text)
     expect(yield* goals.set(sessionID, { tokenBudget: null })).toMatchObject({ tokenBudget: null })
     expect(yield* goals.set(sessionID, { tokenBudget: 100000 })).toMatchObject({ tokenBudget: 100000 })
     const escaped = SessionGoal.continuationPrompt(yield* goals.set(sessionID, { objective: "fix <script> & <style> tags" }))
@@ -763,6 +763,8 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     expect(userTexts(requests[1]!)).toEqual(["Start working", "Queued input"])
     expect(userTexts(requests[2]!).at(-1)).toContain("<session-goal-continuation>")
     expect(requests[0]!.tools.map(tool => tool.name)).toContain("goal")
+    // 检查真实模型签名，防止仅改 executor 却仍广告可选 mark 的旧合同。
+    expect(requests[0]!.tools.find(tool => tool.name === "goal")?.inputSchema).toMatchObject({ required: ["operate"] })
     expect(requests[0]!.tools.find(tool => tool.name === "goal")?.description).toBe(GOAL_DESCRIPTION.trimEnd())
     const paused = yield* goals.get(sessionID)
     expect(Option.getOrThrow(paused).status).toBe("paused")
@@ -774,7 +776,7 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
       sessionID,
       agent: AgentV2.ID.make("build"),
       assistantMessageID: SessionMessage.ID.make("msg_goal_read"),
-      call: LLMEvent.toolCall({ id: "goal-read", name: "goal", input: {} }),
+      call: LLMEvent.toolCall({ id: "goal-read", name: "goal", input: { operate: "read" } }),
     })
     // 读取走真实注册/解码/模型输出链，不能把暂停目标激活或清空用量。
     expect(read.output?.structured).toEqual(Option.getOrThrow(paused))
@@ -793,13 +795,13 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     yield* goals.set(sessionID, { status: "active" })
     responses = [[
       LLMEvent.stepStart({ index: 0 }),
-      // 读取和mark分属两个provider step，验证可信快照不随普通工具轮次丢失。
-      LLMEvent.toolCall({ id: "goal-read-before-done", name: "goal", input: {} }),
+      // 读取和操作分属两个 provider step，验证可信快照不随普通工具轮次丢失。
+      LLMEvent.toolCall({ id: "goal-read-before-done", name: "goal", input: { operate: "read" } }),
       LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
       LLMEvent.finish({ reason: "tool-calls" }),
     ], [
       LLMEvent.stepStart({ index: 0 }),
-      LLMEvent.toolCall({ id: "goal-done", name: "goal", input: { mark: "complete", reason: " Verified requested end state " } }),
+      LLMEvent.toolCall({ id: "goal-done", name: "goal", input: { operate: "complete", reason: " Verified requested end state " } }),
       LLMEvent.stepFinish({ index: 0, reason: "tool-calls", usage: { inputTokens: 2, nonCachedInputTokens: 2, outputTokens: 1 } }),
       LLMEvent.finish({ reason: "tool-calls" }),
     ], normal]
@@ -825,7 +827,7 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     expect(requests).toHaveLength(1)
     expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("active")
 
-    // 沿真实原生runner跨两个eligible turn确认blocker，工具read与mark仍各占provider step。
+    // 沿真实原生 runner 跨两个 eligible turn 确认 blocker，读取与操作仍各占 provider step。
     yield* goals.set(sessionID, { objective: "Verify two-turn blocking and later recovery", status: "active" })
     // 技术提醒仍进入模型历史，但不得重置trusted read或伪造另一个eligible turn。
     const goalDatabase = yield* Database.Service
@@ -839,8 +841,8 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
       LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
       LLMEvent.finish({ reason: "tool-calls" }),
     ]
-    const blocked = { mark: "blocked", reason: "persistent blocker" }
-    responses = [callGoal("read-1", {}), callGoal("block-1", blocked), normal, callGoal("read-2", {}), callGoal("block-2", blocked), normal]
+    const blocked = { operate: "blocked", reason: "persistent blocker" }
+    responses = [callGoal("read-1", { operate: "read" }), callGoal("block-1", blocked), normal, callGoal("read-2", { operate: "read" }), callGoal("block-2", blocked), normal]
     requests.length = 0
     yield* session.resume(sessionID)
     expect(requests).toHaveLength(6)
@@ -848,7 +850,7 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
 
     // 后续真实用户才可恢复模型终态；以EOF停止本轮，避免额外自动续跑影响该边界断言。
     yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Resume this blocked goal" }), resume: false })
-    responses = [callGoal("read-recovery", {}), callGoal("recover", { mark: "active" }), []]
+    responses = [callGoal("read-recovery", { operate: "read" }), callGoal("recover", { operate: "active" }), []]
     requests.length = 0
     yield* session.resume(sessionID)
     expect(requests).toHaveLength(3)

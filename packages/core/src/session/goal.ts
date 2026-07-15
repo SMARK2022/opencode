@@ -340,19 +340,19 @@ const layer = Layer.effect(
       // [local-smark] CAS 校验：snapshot 必须匹配当前 row，防止 stale write
       if (row.id !== input.snapshot.goalID)
         return { type: "error" as const, message:
-            "The goal ID in your read snapshot does not match the current goal. The goal may have been cleared and recreated since you last read it. Call get again to read the current goal.", }
+            "The goal ID in your read snapshot does not match the current goal. The goal may have been cleared and recreated since you last read it. Call operate read again to read the current goal.", }
       if (row.generation !== input.snapshot.generation)
         return { type: "error" as const, message:
-            "The objective has been edited since you last read the goal, so your read snapshot is stale. Call get again to read the updated goal before marking its status.", }
+            "The objective has been edited since you last read the goal, so your read snapshot is stale. Call operate read again before changing the goal.", }
       if (row.status !== input.snapshot.status)
         return { type: "error" as const, message:
-            "The goal status has changed since you last read it. Call get again to read the current goal before marking its status.", }
+            "The goal status has changed since you last read it. Call operate read again before changing the goal.", }
       // 模型 terminal transition 只允许 active source；在 reason/audit 写入前拒绝 terminal re-mark，
       // 防止 user-owned terminal 被改写 terminal_turn_id 后由模型自行恢复。
       if ((input.status === "complete" || input.status === "blocked") && row.status !== "active") {
         return {
           type: "error" as const,
-          message: `Marking a goal as ${input.status} is only valid for an active goal, but this goal is currently ${row.status}. Do not mark a paused or terminal goal again; wait for the user to resume it, or if you previously ended it, use mark active only in a later real user turn after reading it again.`,
+          message: `Marking a goal as ${input.status} is only valid for an active goal, but this goal is currently ${row.status}. Do not mark a paused or terminal goal again; wait for the user to resume it, or if you previously ended it, use operate active only in a later real user turn after reading it again.`,
         }
       }
 
@@ -363,10 +363,10 @@ const layer = Layer.effect(
         const trimmedReason = input.reason?.trim() ?? ""
         if (trimmedReason === "")
           return { type: "error" as const, message:
-            "Marking the goal as complete requires a non-empty reason explaining why the objective has been achieved. Provide that reason, then retry with mark complete.", }
+            "Marking the goal as complete requires a non-empty reason explaining why the objective has been achieved. Provide that reason, then retry with operate complete.", }
         if (trimmedReason.length > MAX_REASON_CHARS)
           return { type: "error" as const, message:
-            `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with mark complete.`, }
+            `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with operate complete.`, }
 
         yield* txdb
           .update(SessionGoalTable)
@@ -392,10 +392,10 @@ const layer = Layer.effect(
         const trimmedReason = input.reason?.trim() ?? ""
         if (trimmedReason === "")
           return { type: "error" as const, message:
-            "Marking the goal as blocked requires a non-empty reason explaining what is preventing progress. Provide that reason, then retry with mark blocked.", }
+            "Marking the goal as blocked requires a non-empty reason explaining what is preventing progress. Provide that reason, then retry with operate blocked.", }
         if (trimmedReason.length > MAX_REASON_CHARS)
           return { type: "error" as const, message:
-            `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with mark blocked.`, }
+            `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with operate blocked.`, }
 
         // [local-smark] 同一 turn 重复 blocked：幂等返回当前 pending，不增加 streak
         if (row.blocked_last_turn_id === input.turnID && row.blocked_reason === trimmedReason) {
@@ -461,7 +461,7 @@ const layer = Layer.effect(
         // 非终态不需要恢复
         if (row.status === "active")
           return { type: "error" as const, message:
-            "This goal is already active, so there is no terminal state to recover from. Continue working toward the current objective instead of calling mark active again.", }
+            "This goal is already active, so there is no terminal state to recover from. Continue working toward the current objective instead of calling operate active again.", }
         // 仅 model-produced terminal 可恢复（terminal_turn_id 非 null）
         if (!row.terminal_turn_id)
           return { type: "error" as const, message:
@@ -606,17 +606,17 @@ export function continuationPrompt(goal: Goal): string {
     "- Treat uncertain or indirect evidence as not achieved; gather stronger evidence or continue the work.",
     "- The audit must prove completion, not merely fail to find obvious remaining work.",
     "",
-    'Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Marking the goal complete is a claim that the full objective has been finished and can withstand requirement-by-requirement scrutiny. Only mark the goal achieved when current evidence proves every requirement has been satisfied and no required work remains. If the evidence is incomplete, weak, indirect, merely consistent with completion, or leaves any requirement missing, incomplete, or unverified, keep working instead of marking the goal complete. If the objective is achieved, call the goal tool with mark "complete" so usage accounting is preserved. If the achieved goal has a token budget, report the final consumed token budget to the user after the goal tool succeeds.',
+    'Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Marking the goal complete is a claim that the full objective has been finished and can withstand requirement-by-requirement scrutiny. Only mark the goal achieved when current evidence proves every requirement has been satisfied and no required work remains. If the evidence is incomplete, weak, indirect, merely consistent with completion, or leaves any requirement missing, incomplete, or unverified, keep working instead of marking the goal complete. If the objective is achieved, call the goal tool with operate "complete" so usage accounting is preserved. If the achieved goal has a token budget, report the final consumed token budget to the user after the goal tool succeeds.',
     "",
     // #364：受阻审计——同一阻塞条件连续三轮才允许标记 blocked
     "Blocked audit:",
-    '- Call the goal tool with mark "blocked" and a concise reason when a blocker prevents meaningful progress. The first call starts the audit and keeps the goal active.',
+    '- Call the goal tool with operate "blocked" and a concise reason when a blocker prevents meaningful progress. The first call starts the audit and keeps the goal active.',
     '- Before calling it again, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints.',
-    '- If the same condition still prevents progress after that exploration, call the goal tool with mark "blocked" in the next eligible Goal turn using the same trimmed reason. The blocked audit requires two consecutive eligible Goal turns; the second valid call marks the goal as blocked.',
+    '- If the same condition still prevents progress after that exploration, call the goal tool with operate "blocked" in the next eligible Goal turn using the same trimmed reason. The blocked audit requires two consecutive eligible Goal turns; the second valid call marks the goal as blocked.',
     '- If the user resumes a goal that was previously marked "blocked", treat the resumed run as a fresh audit with the same two-turn and exact-reason requirements.',
-    '- Use mark "blocked" only when you are truly at an impasse and cannot make meaningful progress without user input or an external-state change.',
-    '- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; call the goal tool with mark "blocked".',
-    '- Never use mark "blocked" merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.',
+    '- Use operate "blocked" only when you are truly at an impasse and cannot make meaningful progress without user input or an external-state change.',
+    '- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; call the goal tool with operate "blocked".',
+    '- Never use operate "blocked" merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.',
     "",
     "Do not call the goal tool unless the goal is complete or the strict blocked audit above is satisfied. Do not mark a goal complete merely because the budget is nearly exhausted or because you are stopping work.",
     "</session-goal-continuation>",

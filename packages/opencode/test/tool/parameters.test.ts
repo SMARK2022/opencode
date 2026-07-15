@@ -41,18 +41,23 @@ describe("tool parameters", () => {
     test("bash", () => expect(toJsonSchema(Shell)).toMatchSnapshot())
     test("edit", () => expect(toJsonSchema(Edit)).toMatchSnapshot())
     test("glob", () => expect(toJsonSchema(Glob)).toMatchSnapshot())
-    test("goal exposes only the mutation verb", () => {
+    test("goal requires an explicit operation including read", () => {
       const schema = toJsonSchema(Goal)
-      // 模型只应看到动词 `mark`；重新暴露 `status` 会恢复“筛选条件还是写动作”的歧义。
-      expect(schema.properties).toHaveProperty("mark")
+      // 显式 read 消除“文字要求空调用、签名却显示必填”的矛盾；只有 operate 必填，
+      // reason 仍由 complete/blocked 的 domain transition 按操作类型校验。
+      expect(schema.required).toEqual(["operate"])
+      expect(schema.properties).toHaveProperty("operate")
       expect(schema.properties).toHaveProperty("reason")
+      expect(schema.properties).not.toHaveProperty("mark")
       expect(schema.properties).not.toHaveProperty("status")
-      // provider description 是模型在调用前看到的合同；必须直接固定 turn 身份和 reason 归一规则，
-      // 不能退化为容易在同一 turn 重试的泛化 “two attempts”。
-      const mark = schema.properties?.mark
-      if (!mark || typeof mark !== "object") throw new Error("expected Goal mark property schema")
-      expect(mark.description).toContain("two consecutive eligible Goal turns")
-      expect(mark.description).toContain("same trimmed reason")
+      const operate = schema.properties?.operate
+      if (!operate || typeof operate !== "object") throw new Error("expected Goal operate property schema")
+      expect(operate.enum).toEqual(["read", "complete", "blocked", "active"])
+      expect(operate.description).toContain("two consecutive eligible Goal turns")
+      expect(operate.description).toContain("same trimmed reason")
+      expect(parse(Goal, { operate: "read" })).toEqual({ operate: "read" })
+      expect(accepts(Goal, {})).toBe(false)
+      expect(accepts(Goal, { mark: "complete", reason: "done" })).toBe(false)
     })
     test("grep", () => expect(toJsonSchema(Grep)).toMatchSnapshot())
     test("invalid", () => expect(toJsonSchema(Invalid)).toMatchSnapshot())
