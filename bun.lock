@@ -573,7 +573,7 @@
     // 版本与 packages/opencode/package.json 保持一致，frozen install 依赖 bun.lock 同步
     "packages/opencode": {
       "name": "opencode",
-      "version": "1.19.11-smark",
+      "version": "1.19.16-smark",
       "bin": {
         "opencode": "./bin/opencode",
       },
