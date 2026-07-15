@@ -134,7 +134,7 @@ const state = {
   server: null as ReturnType<typeof Bun.serve> | null,
   queue: [] as Array<{
     path: string
-    response: Response | ((req: Request, capture: Capture) => Response)
+    response: Response | ((req: Request, capture: Capture) => Response | Promise<Response>)
     resolve: (value: Capture) => void
   }>,
 }
@@ -147,7 +147,10 @@ function deferred<T>() {
   return result
 }
 
-function waitRequest(pathname: string, response: Response) {
+function waitRequest(
+  pathname: string,
+  response: Response | ((req: Request, capture: Capture) => Response | Promise<Response>),
+) {
   const pending = deferred<Capture>()
   state.queue.push({ path: pathname, response, resolve: pending.resolve })
   return pending.promise
@@ -191,7 +194,7 @@ function providerFetchEvents(content: string) {
     .map((line) => Object.fromEntries(Array.from(line.matchAll(/([A-Za-z.]+)=([^\s]+)/g), (match) => [match[1], match[2]])))
 }
 
-function waitStreamingRequest(pathname: string) {
+function waitStreamingRequest(pathname: string, firstChunkDelayMs = 0) {
   const request = deferred<Capture>()
   const requestAborted = deferred<void>()
   const responseCanceled = deferred<void>()
@@ -205,7 +208,8 @@ function waitStreamingRequest(pathname: string) {
 
       return new Response(
         new ReadableStream<Uint8Array>({
-          start(controller) {
+          async start(controller) {
+            if (firstChunkDelayMs > 0) await Bun.sleep(firstChunkDelayMs)
             controller.enqueue(
               encoder.encode(
                 [
@@ -269,7 +273,7 @@ afterAll(() => {
   void state.server?.stop()
 })
 
-function createChatStream(text: string) {
+function createChatStream(text: string, delayMs = 0) {
   const payload =
     [
       `data: ${JSON.stringify({
@@ -292,8 +296,20 @@ function createChatStream(text: string) {
 
   const encoder = new TextEncoder()
   return new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(encoder.encode(payload))
+    async start(controller) {
+      if (delayMs <= 0) {
+        controller.enqueue(encoder.encode(payload))
+        controller.close()
+        return
+      }
+
+      // 总流时长故意超过 timeout，但每个 raw chunk 间隔都小于 timeout，锁定“不累计、每块重置”。
+      // 若实现把 gap 累加成总时长，后续 chunk 会在最后一个 payload 到达前触发 abort。
+      // 每一块都经过同一 ReadableStream body，避免测试只模拟 semantic text delta。
+      for (const line of payload.split("\n\n").filter(Boolean)) {
+        controller.enqueue(encoder.encode(`${line}\n\n`))
+        await Bun.sleep(delayMs)
+      }
       controller.close()
     },
   })
@@ -377,7 +393,7 @@ describe("session.llm.stream", () => {
     const providerID = "timed-openai-compatible"
     const request = waitRequest(
       "/chat/completions",
-      new Response(createChatStream("Hello"), {
+      new Response(createChatStream("Hello", 20), {
         status: 200,
         headers: { "Content-Type": "text/event-stream" },
       }),
@@ -391,7 +407,7 @@ describe("session.llm.stream", () => {
             [providerID]: {
               npm: "@ai-sdk/openai-compatible",
               name: "Timed Provider",
-              options: { apiKey: "test-key", baseURL: `${server.url.origin}/v1`, chunkTimeout: 1_000 },
+              options: { apiKey: "test-key", baseURL: `${server.url.origin}/v1`, chunkTimeout: 50 },
               models: { "gpt-test": { name: "GPT Test", modalities: { input: ["text"], output: ["text"] } } },
             },
           },
@@ -444,6 +460,93 @@ describe("session.llm.stream", () => {
       expect(Number(events.find((event) => event.phase === "sse.first_chunk")?.bytes)).toBeGreaterThan(0)
       expect(Number(events.find((event) => event.phase === "sse.end")?.chunkCount)).toBeGreaterThan(0)
     })
+  })
+
+  test("times out before delayed provider headers at the configured chunk boundary", async () => {
+    const server = state.server
+    if (!server) throw new Error("Server not initialized")
+
+    const providerID = "delayed-header-openai-compatible"
+    const responseReady = deferred<void>()
+    const requestAborted = deferred<void>()
+    let events: ReturnType<typeof providerFetchEvents> = []
+    const request = waitRequest("/chat/completions", async (req) => {
+      // 请求已到达但 headers 延迟 100ms；这与“工具完成后首个 chunk 长时间静默”的边界一致。
+      // responseReady 用于等待 server handler 收束，避免测试在 client abort 后留下未完成 fixture。
+      // abort listener 必须挂在同一个 Request.signal 上，才能证明 Provider deadline 到达了真实 transport。
+      // handler 返回迟到 Response 后仍由 client 继续消费，正好覆盖 custom adapter 忽略 signal 的边界。
+      req.signal.addEventListener("abort", () => requestAborted.resolve(), { once: true })
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      responseReady.resolve()
+      return new Response(createChatStream("late"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      })
+    })
+
+    await withInfoLog(async (logFile) => {
+      await using tmp = await tmpdir({
+        config: {
+          enabled_providers: [providerID],
+          provider: {
+            [providerID]: {
+              npm: "@ai-sdk/openai-compatible",
+              name: "Delayed Header Provider",
+              options: { apiKey: "test-key", baseURL: `${server.url.origin}/v1`, chunkTimeout: 25 },
+              models: { "gpt-test": { name: "GPT Test", modalities: { input: ["text"], output: ["text"] } } },
+            },
+          },
+        },
+      })
+
+      await withTestInstance({
+        directory: tmp.path,
+        fn: async (ctx) => {
+          const model = await getModel(ProviderID.make(providerID), ModelID.make("gpt-test"), ctx)
+          const sessionID = SessionID.make("session-provider-delayed-header")
+          const agent = {
+            name: "test",
+            mode: "primary",
+            options: {},
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          } satisfies Agent.Info
+
+          await drain(
+            {
+              user: {
+                id: MessageID.make("msg_user-provider-delayed-header"),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: agent.name,
+                model: { providerID: ProviderID.make(providerID), modelID: model.id },
+              },
+              sessionID,
+              model,
+              agent,
+              system: ["You are a helpful assistant."],
+              messages: [{ role: "user", content: "Hello" }],
+              tools: {},
+            },
+            ctx,
+          )
+          await request
+          await responseReady.promise
+          await requestAborted.promise
+          events = providerFetchEvents(await readLogUntil(logFile, (content) => content.includes("phase=sse.timeout")))
+        },
+      })
+    })
+
+    // 首个 raw chunk 尚未到达时也必须记录同一个 no-progress 失败，不能退回 Bun 的五分钟 idle timeout。
+    expect(events.map((event) => event.phase)).toContain("sse.timeout")
+    // LLM 层可以收束 stream，但 transport abort 和稳定的 sse.timeout milestone 仍必须可观察。
+    // retryable classification 由下一层 Processor vertical test 验证，这里只锁定 Provider owner 的 raw 行为。
+    // chunkCount=0 区分 headers 前超时与首 chunk 后 stall，防止测试误通过已有 post-response 覆盖。
+    // chunkTimeoutMs 断言配置 provenance，确保超时不是 Bun 的固定 idle timeout。
+    // 未等待 semantic text 的原因是首个 raw progress contract 发生在 AI SDK 解析之前。
+    expect(events.find((event) => event.phase === "sse.timeout")?.chunkCount).toBe("0")
+    expect(events.find((event) => event.phase === "sse.timeout")?.chunkTimeoutMs).toBe("25")
   })
 
   test("logs SSE timeout when a streaming response stalls after the first raw chunk", async () => {
@@ -909,7 +1012,7 @@ describe("session.llm.stream", () => {
     })
   })
 
-  test("service stream cancellation cancels provider response body promptly", async () => {
+  test("service stream cancellation before first progress cancels the deadline promptly", async () => {
     const server = state.server
     if (!server) throw new Error("Server not initialized")
 
@@ -917,76 +1020,85 @@ describe("session.llm.stream", () => {
     const modelID = "qwen-plus"
     const fixture = await loadFixture(providerID, modelID)
     const model = fixture.model
-    const pending = waitStreamingRequest("/chat/completions")
+    // 延迟首个 raw chunk，确保 user abort 发生在 headers/first-progress deadline 仍在等待时。
+    const pending = waitStreamingRequest("/chat/completions", 100)
 
-    await using tmp = await tmpdir({
-      init: async (dir) => {
-        await Bun.write(
-          path.join(dir, "opencode.json"),
-          JSON.stringify({
-            $schema: "https://opencode.ai/config.json",
-            enabled_providers: [providerID],
-            provider: {
-              [providerID]: {
-                options: {
-                  apiKey: "test-key",
-                  baseURL: `${server.url.origin}/v1`,
+    await withInfoLog(async (logFile) => {
+      await using tmp = await tmpdir({
+        init: async (dir) => {
+          await Bun.write(
+            path.join(dir, "opencode.json"),
+            JSON.stringify({
+              $schema: "https://opencode.ai/config.json",
+              enabled_providers: [providerID],
+              provider: {
+                [providerID]: {
+                  options: {
+                    apiKey: "test-key",
+                    baseURL: `${server.url.origin}/v1`,
+                    chunkTimeout: 25,
+                  },
                 },
               },
-            },
-          }),
-        )
-      },
-    })
+            }),
+          )
+        },
+      })
 
-    await withTestInstance({
-      directory: tmp.path,
-      fn: async (ctx) => {
-        const resolved = await getModel(ProviderID.make(providerID), ModelID.make(model.id), ctx)
-        const sessionID = SessionID.make("session-test-service-abort")
-        const agent = {
-          name: "test",
-          mode: "primary",
-          options: {},
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-        } satisfies Agent.Info
-        const user = {
-          id: MessageID.make("msg_user-service-abort"),
-          sessionID,
-          role: "user",
-          time: { created: Date.now() },
-          agent: agent.name,
-          model: { providerID: ProviderID.make(providerID), modelID: resolved.id },
-        } satisfies MessageV2.User
+      await withTestInstance({
+        directory: tmp.path,
+        fn: async (ctx) => {
+          const resolved = await getModel(ProviderID.make(providerID), ModelID.make(model.id), ctx)
+          const sessionID = SessionID.make("session-test-service-abort")
+          const agent = {
+            name: "test",
+            mode: "primary",
+            options: {},
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          } satisfies Agent.Info
+          const user = {
+            id: MessageID.make("msg_user-service-abort"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderID.make(providerID), modelID: resolved.id },
+          } satisfies MessageV2.User
 
-        const ctrl = new AbortController()
-        const run = llm.runPromiseExit(
-          (svc) =>
-            svc
-              .stream({
-                user,
-                sessionID,
-                model: resolved,
-                agent,
-                system: ["You are a helpful assistant."],
-                messages: [{ role: "user", content: "Hello" }],
-                tools: {},
-              })
-              .pipe(Stream.runDrain, Effect.provideService(InstanceRef, ctx)),
-          { signal: ctrl.signal },
-        )
+          const ctrl = new AbortController()
+          const run = llm.runPromiseExit(
+            (svc) =>
+              svc
+                .stream({
+                  user,
+                  sessionID,
+                  model: resolved,
+                  agent,
+                  system: ["You are a helpful assistant."],
+                  messages: [{ role: "user", content: "Hello" }],
+                  tools: {},
+                })
+                .pipe(Stream.runDrain, Effect.provideService(InstanceRef, ctx)),
+            { signal: ctrl.signal },
+          )
 
-        await pending.request
-        ctrl.abort()
+          await pending.request
+          ctrl.abort()
 
-        await Promise.race([pending.responseCanceled, timeout(500)])
-        const exit = await run
-        expect(Exit.isFailure(exit)).toBe(true)
-        if (Exit.isFailure(exit)) {
-          expect(Cause.hasInterrupts(exit.cause)).toBe(true)
-        }
-        await Promise.race([pending.requestAborted, timeout(500)]).catch(() => undefined)
-      },
+          await Promise.race([pending.responseCanceled, timeout(500)])
+          const exit = await run
+          expect(Exit.isFailure(exit)).toBe(true)
+          if (Exit.isFailure(exit)) {
+            expect(Cause.hasInterrupts(exit.cause)).toBe(true)
+          }
+          await Promise.race([pending.requestAborted, timeout(500)]).catch(() => undefined)
+        },
+      })
+
+      // 用户 abort 已先于 25ms progress expiry，之后不能再出现 SSE_READ_TIMEOUT 诊断。
+      await Bun.sleep(100)
+      const events = providerFetchEvents(await Bun.file(logFile).text())
+      expect(events.some((event) => event.phase === "sse.timeout")).toBe(false)
     })
   })
 

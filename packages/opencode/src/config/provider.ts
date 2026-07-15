@@ -110,7 +110,7 @@ export const Info = Schema.Struct({
         }),
         chunkTimeout: Schema.optional(PositiveInt).annotate({
           description:
-            "Timeout in milliseconds between streamed SSE chunks for this provider. Default is 180000 (3 minutes). If no chunk arrives within this window, the request is aborted.",
+            "Timeout in milliseconds from request dispatch to the first streamed SSE chunk and between subsequent chunks for this provider. Default is 180000 (3 minutes). Each received chunk resets the window.",
         }),
       }),
       [Schema.Record(Schema.String, Schema.Any)],

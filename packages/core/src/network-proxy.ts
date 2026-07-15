@@ -27,7 +27,8 @@ type SystemProxy = {
   bypass: string[]
 }
 
-type RoutedInit = RequestInit & { purpose?: Purpose }
+// Bun 的 timeout 是调用方的 transport contract，不属于 NetworkProxy 选择的 route-owned 字段。
+type RoutedInit = RequestInit & { purpose?: Purpose; timeout?: false | number }
 type FetchInput = Request | string | URL
 type FetchFn = (input: FetchInput, init?: any) => Promise<Response>
 
@@ -248,9 +249,8 @@ export async function fetch(input: FetchInput, init?: RoutedInit): Promise<Respo
     signal,
     proxy: _incomingProxy,
     dispatcher: _incomingDispatcher,
-    timeout: _incomingTimeout,
     ...rest
-  } = (init ?? {}) as RoutedInit & { proxy?: string; dispatcher?: unknown; timeout?: unknown }
+  } = (init ?? {}) as RoutedInit & { proxy?: string; dispatcher?: unknown }
   const route = await resolveProxyRoute(url, purpose, false)
 
   if (route.type === "direct")
@@ -273,9 +273,8 @@ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?:
     signal,
     proxy: _incomingProxy,
     dispatcher: _incomingDispatcher,
-    timeout: _incomingTimeout,
     ...rest
-  } = (init ?? {}) as RoutedInit & { proxy?: string; dispatcher?: unknown; timeout?: unknown }
+  } = (init ?? {}) as RoutedInit & { proxy?: string; dispatcher?: unknown }
   return fetchFn(input, { ...rest, signal })
 }
 

@@ -1,4 +1,5 @@
 import { afterEach, test, expect } from "bun:test"
+import { generateText } from "ai"
 import { mkdir, unlink } from "fs/promises"
 import path from "path"
 
@@ -1888,6 +1889,82 @@ test("provider options are deeply merged", async () => {
     },
   })
 })
+
+test("custom Provider fetch receives the common timeout policy", async () => {
+  const capture = path.join(Global.Path.tmp, `provider-timeout-${crypto.randomUUID()}.txt`)
+  // local plugin 让测试从 Provider.getLanguage 开始，避免只在 NetworkProxy 层重复验证 timeout 传递。
+  // capture 跨越 plugin module 与测试 module，观察的是 public fetch init 而不是内部变量。
+  // plugin 使用 openai-compatible SDK，覆盖生产 custom loader 的 fetch 入口而不是测试专用 wrapper。
+  // capture path 放在全局临时目录，避免测试实例清理时先删除观察结果。
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await mkdir(path.join(dir, ".opencode", "plugin"), { recursive: true })
+      await markConfigDependenciesInstalled(path.join(dir, ".opencode"))
+      await Bun.write(
+        path.join(dir, ".opencode", "plugin", "provider-timeout-policy.ts"),
+        [
+          "export default {",
+          '  id: "test.provider-timeout-policy",',
+          "  server: async () => ({",
+          "    auth: {",
+          '      provider: "custom-timeout",',
+          "      loader: async () => ({",
+          '        apiKey: "test-key",',
+          `        fetch: async (_input, init) => { await Bun.write(${JSON.stringify(capture)}, String(init?.timeout ?? "missing")); return new Response(JSON.stringify({ id: "test", choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] }), { headers: { "content-type": "application/json" } }) },`,
+          "      }),",
+          "      methods: [{ type: 'api', label: 'API key' }],",
+          "    },",
+          "  }),",
+          "}",
+        ].join("\n"),
+      )
+      await Bun.write(
+        path.join(dir, "opencode.json"),
+        JSON.stringify({
+          enabled_providers: ["custom-timeout"],
+          provider: {
+            "custom-timeout": {
+              npm: "@ai-sdk/openai-compatible",
+              name: "Custom Timeout Provider",
+              options: { apiKey: "test-key", baseURL: "https://provider.invalid/v1" },
+              models: {
+                "gpt-test": {
+                  name: "GPT Test",
+                  modalities: { input: ["text"], output: ["text"] },
+                },
+              },
+            },
+          },
+        }),
+      )
+      // 配置只提供同一个模型和协议；分支差异只能来自 Provider 是否构造 common transport policy。
+      // baseURL 故意使用不可连接地址，测试必须由 custom fetch 捕获 init 后立即返回，避免外部网络依赖。
+      // provider 配置不写 timeout，验证的是 Provider 统一 transport policy 的显式 false，而非用户覆盖值。
+    },
+  })
+
+  await withTestInstance({
+    directory: tmp.path,
+    fn: async (ctx) => {
+      set(
+        ctx,
+        "OPENCODE_AUTH_CONTENT",
+        JSON.stringify({
+          "custom-timeout": { type: "oauth", refresh: "dummy", access: "dummy", expires: 9_999_999_999_999 },
+        }),
+      )
+      const model = await getModel(ProviderID.make("custom-timeout"), ModelID.make("gpt-test"), ctx)
+      const language = await getLanguage(model, ctx)
+      await generateText({ model: language, prompt: "Hello", maxRetries: 0 })
+      // 从真实 Provider SDK custom fetch 读取最终 init，避免只在 NetworkProxy 层重复验证传递逻辑。
+      // direct/custom 应共享同一个 false 值；custom 分支若继续丢失 policy，这个断言会收到 missing。
+      // maxRetries=0 只关闭 AI SDK 自己的额外重试，不能改变 SessionRetry 的生产策略。
+      // 只断言 timeout 字段，避免把这个 transport seam 绑定到 SDK 的无关请求格式。
+      expect(await Bun.file(capture).text()).toBe("false")
+    },
+  })
+  await unlink(capture).catch(() => undefined)
+}, 30_000)
 
 test("provider header-ua maps to request headers", () => {
   expect(Provider.requestHeaders({ "header-ua": "codex_cli_rs/0.2333" })).toEqual({

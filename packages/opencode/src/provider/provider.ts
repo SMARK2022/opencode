@@ -124,80 +124,155 @@ function bodyBytes(body: unknown) {
   return undefined
 }
 
-function wrapSSE(res: Response, ms: number, ctl: AbortController, timingInput: FetchTiming) {
-  if (typeof ms !== "number" || ms <= 0) return res
-  if (!res.body) return res
-  if (!res.headers.get("content-type")?.includes("text/event-stream")) return res
-
-  const reader = res.body.getReader()
+function progressDeadline(ms: number, ctl: AbortController, timingInput: FetchTiming) {
+  // 该对象覆盖同一个 Provider attempt 的 headers 前等待和 SSE body 读取，避免两个 deadline 之间出现空窗。
+  // `timeout` 负责整请求绝对上限；这里的 timer 只负责“没有 raw progress”的连续窗口。
+  // raw chunk 而不是 AI SDK semantic event 是重置依据，心跳/注释字节也属于真实 transport progress。
+  let timer: ReturnType<typeof setTimeout> | undefined
+  // reader 只在拿到 SSE Response 后存在，但 deadline 在 fetch dispatch 前就必须启动。
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+  let readerCanceled = false
+  // timeout 可能发生在 reader.read() 等待期间；保存 reject 才能把同一个错误传给 stream consumer。
+  let rejectRead: ((reason?: unknown) => void) | undefined
+  // 过期错误必须保留到迟到的 Response/reader 路径，防止 custom adapter 忽略 signal 后继续产出数据。
+  let expired: globalThis.Error | undefined
+  // 这些计数只用于 timing diagnostics，不参与 deadline 计算，也不改变模型输出。
   let chunkCount = 0
   let bytes = 0
   let maxGapMs = 0
   let lastChunkAt = Date.now()
-  const body = new ReadableStream<Uint8Array>({
-    async pull(ctrl) {
-      const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
-        // `chunkTimeout` measures raw SSE body progress, not AI SDK semantic
-        // parts. Logging the timeout with raw counts distinguishes a missing
-        // HTTP/SSE body from heartbeats that never become model output.
-        const id = setTimeout(() => {
-          const err = Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" })
-          timing(timingInput, "sse.timeout", {
-            chunkTimeoutMs: ms,
-            idleMs: Date.now() - lastChunkAt,
-            chunkCount,
-            bytes,
-            maxGapMs,
-          })
-          ctl.abort(err)
-          void reader.cancel(err)
-          reject(err)
-        }, ms)
 
-        reader.read().then(
-          (part) => {
-            clearTimeout(id)
-            resolve(part)
-          },
-          (err) => {
-            clearTimeout(id)
-            reject(err)
-          },
-        )
-      }).catch((error) => {
-        const fields = errorFields(error)
-        if (fields.errorCode !== "SSE_READ_TIMEOUT") {
-          timing(timingInput, "sse.error", { chunkCount, bytes, maxGapMs, ...fields })
+  const stop = () => {
+    // 所有终态都经过这里清理 timer；不在每次 read() 创建独立 timer，避免累积或双重窗口。
+    // stop() 设计为幂等操作，fetch failure、EOF、consumer cancel 可以按各自路径重复调用。
+    if (timer) clearTimeout(timer)
+    timer = undefined
+  }
+
+  const cancelReader = async (reason: unknown) => {
+    // AbortSignal、deadline callback 和 ReadableStream.cancel 可能同时触发，reader 只能取消一次。
+    // readerCanceled 是并发保护，不是新的生命周期状态；真正的状态仍由 AbortSignal 和 stream close 表达。
+    if (!reader || readerCanceled) return
+    const current = reader
+    reader = undefined
+    readerCanceled = true
+    await current.cancel(reason)
+  }
+
+  const expire = () => {
+    timer = undefined
+    // 首个 chunk 之前也必须复用 SSE_READ_TIMEOUT，否则 MessageV2 会把同一个无进度失败误判成用户取消。
+    // 这个错误进入现有 retryable transport 分类，不新增 Session prompt 或 retry policy。
+    // 先保存 expired 再 abort，确保迟到的 fetch fulfillment 仍会观察到同一个可分类错误。
+    // rejectRead 只唤醒当前 pull；cancelReader 负责通知底层 body，二者缺一都会留下悬挂请求。
+    const error = Object.assign(new globalThis.Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" })
+    expired = error
+    timing(timingInput, "sse.timeout", {
+      chunkTimeoutMs: ms,
+      idleMs: Date.now() - lastChunkAt,
+      chunkCount,
+      bytes,
+      maxGapMs,
+    })
+    ctl.abort(error)
+    const reject = rejectRead
+    rejectRead = undefined
+    reject?.(error)
+    void cancelReader(error)
+  }
+
+  const arm = () => {
+    // 每次 raw chunk 调用 arm() 都从零开始；elapsed gaps 不跨 chunk 累计。
+    // ms 来自用户现有 chunkTimeout 配置，不能在这里偷偷缩短或增加第二个默认值。
+    if (ms <= 0 || expired) return
+    // 不存在 timer 时是 dispatch/headers 初始 arm；存在时则明确替换旧窗口。
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(expire, ms)
+  }
+
+  const read = async () => {
+    // fetch/reader 的 AbortError 必须原样进入已有 error mapping；只有 expire() 产生 SSE_READ_TIMEOUT。
+    if (!reader) throw expired ?? new Error("SSE reader is unavailable")
+    if (expired) throw expired
+    // currentReader 固定本次 promise 的 owner，避免 cancelReader 清空共享 reader 后读到新状态。
+    const currentReader = reader
+    return new Promise<Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>>((resolve, reject) => {
+      rejectRead = reject
+      currentReader.read().then(
+        (part) => {
+          // done 会停止 timer，但普通 chunk 不在这里 arm；pull() 必须先计算 gap 再重置。
+          if (rejectRead === reject) rejectRead = undefined
+          if (part.done) stop()
+          resolve(part)
+        },
+        (error) => {
+          // reader 自身错误不伪装成 timeout；现有 errorFields/MessageV2 负责决定是否 retry。
+          if (rejectRead === reject) rejectRead = undefined
+          stop()
+          reject(error)
+        },
+      )
+    })
+  }
+
+  const wrap = (res: Response) => {
+    // 非 SSE response 不存在“chunk 间隔”，因此 response headers 到达即完成这条 progress contract。
+    // JSON/error response 继续沿原有 response 处理路径，只有 SSE body 才需要 raw chunk timer。
+    if (ms <= 0 || !res.body || !res.headers.get("content-type")?.includes("text/event-stream")) {
+      stop()
+      return res
+    }
+
+    reader = res.body.getReader()
+    readerCanceled = false
+    // SSE 复用 dispatch 时已经启动的 timer；这里不能重新给 headers 赠送一个完整窗口。
+    // 返回新的 Response 只替换 body，保留状态和 headers，避免改变 Provider adapter 的协议行为。
+    const body = new ReadableStream<Uint8Array>({
+      async pull(ctrl) {
+        const part = await read().catch((error) => {
+          const fields = errorFields(error)
+          if (fields.errorCode !== "SSE_READ_TIMEOUT") {
+            timing(timingInput, "sse.error", { chunkCount, bytes, maxGapMs, ...fields })
+          }
+          throw error
+        })
+
+        if (part.done) {
+          // 正常 EOF 是 progress lifecycle 的终点，不能再让 timer 在 stream close 后触发。
+          timing(timingInput, "sse.end", { chunkCount, bytes, maxGapMs })
+          ctrl.close()
+          return
         }
-        throw error
-      })
 
-      if (part.done) {
-        timing(timingInput, "sse.end", { chunkCount, bytes, maxGapMs })
-        ctrl.close()
-        return
-      }
+        const now = Date.now()
+        const gapMs = now - lastChunkAt
+        lastChunkAt = now
+        // 先用旧锚点计算当前 gap，再重置下一块的窗口，才能同时保留诊断准确性和不累计语义。
+        arm()
+        chunkCount++
+        bytes += part.value.byteLength
+        maxGapMs = Math.max(maxGapMs, gapMs)
+        if (chunkCount === 1) timing(timingInput, "sse.first_chunk", { gapMs, bytes: part.value.byteLength })
+        // enqueue 后才把 raw bytes 交给下游；deadline 的重置点仍是 transport read 完成时刻。
+        ctrl.enqueue(part.value)
+      },
+      async cancel(reason) {
+        // user abort、outer timeout 和 stream consumer cancel 都必须停止同一个 deadline。
+        // cancel 不创建新的错误；调用方传入的 reason 仍由既有 cancellation/error mapping 处理。
+        stop()
+        ctl.abort(reason)
+        await cancelReader(reason)
+      },
+    })
 
-      const now = Date.now()
-      const gapMs = now - lastChunkAt
-      lastChunkAt = now
-      chunkCount++
-      bytes += part.value.byteLength
-      maxGapMs = Math.max(maxGapMs, gapMs)
-      if (chunkCount === 1) timing(timingInput, "sse.first_chunk", { gapMs, bytes: part.value.byteLength })
-      ctrl.enqueue(part.value)
-    },
-    async cancel(reason) {
-      ctl.abort(reason)
-      await reader.cancel(reason)
-    },
-  })
+    return new Response(body, {
+      headers: new Headers(res.headers),
+      status: res.status,
+      statusText: res.statusText,
+    })
+  }
 
-  return new Response(body, {
-    headers: new Headers(res.headers),
-    status: res.status,
-    statusText: res.statusText,
-  })
+  return { start: arm, stop, wrap }
 }
 
 type BundledSDK = {
@@ -1846,7 +1921,7 @@ export const layer = Layer.effect(
         const chunkTimeout = options["chunkTimeout"]
         delete options["chunkTimeout"]
 
-        options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
+        options["fetch"] = async (input: any, init?: BunFetchRequestInit & { timeout?: false | number }) => {
           const opts = init ?? {}
           // chunkTimeout 未配置时回退到默认空闲超时;显式正值优先,保持用户可覆盖
           const chunkTimeoutMs =
@@ -1897,6 +1972,9 @@ export const layer = Layer.effect(
           }
           const timeoutMs =
             options["timeout"] === false ? undefined : typeof options["timeout"] === "number" ? options["timeout"] : DEFAULT_TIMEOUT_MS
+          const deadline = progressDeadline(chunkTimeoutMs, chunkAbortCtl, timingInput)
+          combined?.addEventListener("abort", deadline.stop, { once: true })
+          deadline.start()
 
           // This timing is deliberately provider-local and payload-free: it
           // captures request size and transport milestones without logging body
@@ -1909,15 +1987,15 @@ export const layer = Layer.effect(
             bodyBytes: bodyBytes(opts.body),
           })
 
-          const res = await (customFetch
-            ? NetworkProxy.fetchWithRoute(customFetch, input, { ...opts, purpose: "provider" })
-            : NetworkProxy.fetch(input, {
-                ...opts,
-                purpose: "provider",
-                // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
-                timeout: false,
-              })
+          // direct/custom 必须共享同一份 transport policy,否则 adapter 分支会丢失
+          // Bun idle timeout 的显式关闭意图,导致同一个 Provider 在不同 route 上出现不同等待上限。
+          const transport = { ...opts, purpose: "provider" as const, timeout: false as const }
+          const res = await (
+            customFetch
+              ? NetworkProxy.fetchWithRoute(customFetch, input, transport)
+              : NetworkProxy.fetch(input, transport)
           ).catch((error) => {
+            deadline.stop()
             timing(timingInput, "fetch.error", errorFields(error))
             throw error
           })
@@ -1929,8 +2007,8 @@ export const layer = Layer.effect(
             isSSE: contentType?.includes("text/event-stream") ?? false,
           })
 
-          // chunkAbortCtl 始终存在;wrapSSE 内部对非 event-stream / 空 body 响应会原样透传
-          return wrapSSE(res, chunkTimeoutMs, chunkAbortCtl, timingInput)
+          // 非 SSE / 空 body 会在 wrap 内停止 deadline; SSE 则继续复用 dispatch 时启动的同一个窗口。
+          return deadline.wrap(res)
         }
 
         const bundledLoader = BUNDLED_PROVIDERS[model.api.npm]
