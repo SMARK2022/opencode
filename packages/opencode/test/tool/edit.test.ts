@@ -308,7 +308,8 @@ describe("tool.edit", () => {
     )
 
     // 两行窗口只有一个字符不同，bounded score 应可靠选择真实候选并报告其起始行。
-    // 错误正文展示文件实际文本，不再把 expected diff 混成候选内容。
+    // requested 全文已存在于 Tool input；错误只展示 actual 局部和一基差异列，避免再次复制 oldString。
+    // 独立列号断言同时证明长公共前缀不会掩盖真正变化字符。
     it.instance("closest match shows actual candidate for a single-char mismatch", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -324,8 +325,9 @@ describe("tool.edit", () => {
 
         expect(error).toBeInstanceOf(Error)
         expect(error.message).toContain("Closest match at line 1")
-        expect(error.message).toContain("x = 0")
-        expect(error.message).not.toContain("x = 1")
+        expect(error.message).toContain('line 2 actual: "private int x = 0;"')
+        expect(error.message).toContain("difference: requested columns 17-17 differ from actual columns 17-17")
+        expect(error.message).not.toContain("private int x = 1;")
       }),
     )
 

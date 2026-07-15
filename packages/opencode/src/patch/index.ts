@@ -355,7 +355,8 @@ function applyChunks(originalLines: string[], filePath: string, chunks: UpdateFi
       const context = locateExact(lines, [chunk.change_context], cursorOffset, false, terminated)
       if (context.type !== "found") {
         // context 的零匹配与多匹配都不能继续，否则同一公开 @@ 字段会出现两套成功语义。
-        throw new Error(withCandidate(`Failed to find context '${chunk.change_context}' in ${filePath}`, persistedText, chunk.change_context))
+        // Tool input 保留完整 @@ context；owner 错误只报告失败与 actual 证据，避免再次回显请求文本。
+        throw new Error(withCandidate(`Failed to find context in ${filePath}.`, persistedText, chunk.change_context))
       }
       const text = workingText(lines, terminated)
       // 两种 location 都转换为包含行起点，再统一消费整行，避免 substring context 只前进到命中末尾。
@@ -373,13 +374,15 @@ function applyChunks(originalLines: string[], filePath: string, chunks: UpdateFi
 
     const result = locateExact(lines, chunk.old_lines, cursorOffset, chunk.is_end_of_file, terminated)
     if (result.type === "ambiguous") {
+      // ambiguity 的修正动作是补充 context；重复打印已在 Tool input 中的 old block 不增加决策信息。
       throw new Error(
-        `Found multiple matches for expected lines in ${filePath}:\n${chunk.old_lines.join("\n")}\nProvide more context to make the match unique.`,
+        `Found multiple matches for expected lines in ${filePath}. Provide more context to make the match unique.`,
       )
     }
     if (result.type === "not-found") {
       const expected = chunk.old_lines.join("\n")
-      throw new Error(withCandidate(`Failed to find expected lines in ${filePath}:\n${expected}`, persistedText, expected))
+      // Tool input 已携带完整 old block；错误正文只补充结果与 actual 证据，避免模型上下文出现第二份请求文本。
+      throw new Error(withCandidate(`Failed to find expected lines in ${filePath}.`, persistedText, expected))
     }
 
     if (result.location.kind === "line") {

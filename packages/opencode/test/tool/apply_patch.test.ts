@@ -222,6 +222,7 @@ describe("tool.apply_patch freeform", () => {
   )
 
   // 两个 eligible literal occurrences 必须在写入前形成 ambiguity，不能由 Tool 选择第一处。
+  // ambiguity 指令可以要求补上下文，但不能复制 Tool input 已携带的完整 old block。
   // 文件不变断言证明 owner failure 没被 wrapper 转换为 catch-and-success。
   it.instance("rejects ambiguous substring matches without modifying the file", () =>
     Effect.gen(function* () {
@@ -231,7 +232,16 @@ describe("tool.apply_patch freeform", () => {
       yield* writeText(target, "target one target\n")
 
       const patchText = "*** Begin Patch\n*** Update File: ambiguous.txt\n@@\n-target\n+fixed\n*** End Patch"
-      yield* expectFailure(execute({ patchText }, ctx), "Found multiple matches")
+      const exit = yield* execute({ patchText }, ctx).pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as Error
+        expect(error.message).toContain("Found multiple matches")
+        // input/result 合并后仍只能有一份 target；文件中的重复 occurrence 不属于模型上下文计数。
+        expect((patchText + error.message).split("target").length - 1).toBe(1)
+        expect(error.message).not.toContain("target")
+      }
 
       expect(yield* readText(target)).toBe("target one target\n")
     }),
@@ -289,6 +299,72 @@ describe("tool.apply_patch freeform", () => {
     }),
   )
 
+  // 第二个 chunk 的 exact 文本只存在于 forward cursor 之前；matcher 必须继续失败，诊断也不能回显该文本。
+  // 位置提示来自 immutable 原文件，但不能把它误当成当前 working copy 中仍可替换的 actual。
+  it.instance("does not repeat an exact candidate before the patch cursor", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const target = path.join(test.directory, "cursor_candidate.txt")
+      yield* writeText(target, "alpha\nmiddle\nomega\n")
+      const patchText = [
+        "*** Begin Patch",
+        "*** Update File: cursor_candidate.txt",
+        "@@",
+        "-middle",
+        "+MIDDLE",
+        "@@",
+        "-alpha",
+        "+ALPHA",
+        "*** End Patch",
+      ].join("\n")
+
+      const exit = yield* execute({ patchText }, ctx).pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as Error
+        expect(error.message).toContain("Closest match at line 1")
+        expect(error.message).toContain("exists at this location in the original file")
+        expect(error.message).not.toContain("alpha")
+        expect((patchText + error.message).split("alpha").length - 1).toBe(1)
+      }
+      expect(yield* readText(target)).toBe("alpha\nmiddle\nomega\n")
+    }),
+  )
+
+  // 前序 replacement 已从 working copy 消费 alpha；persisted candidate 只能解释原文件位置，不能猜测 cursor 原因。
+  // Tool input 有两个独立 `-alpha` 请求，result 不得制造第三份，且整个文件仍按单 hunk 原子失败。
+  it.instance("does not repeat an exact candidate consumed by a prior chunk", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const target = path.join(test.directory, "consumed_candidate.txt")
+      yield* writeText(target, "alpha\nomega\n")
+      const patchText = [
+        "*** Begin Patch",
+        "*** Update File: consumed_candidate.txt",
+        "@@",
+        "-alpha",
+        "+consumed",
+        "@@",
+        "-alpha",
+        "+wrong",
+        "*** End Patch",
+      ].join("\n")
+
+      const exit = yield* execute({ patchText }, ctx).pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as Error
+        expect(error.message).toContain("Closest match at line 1")
+        expect(error.message).toContain("unavailable to the current patch step")
+        expect(error.message).not.toContain("alpha")
+        expect((patchText + error.message).split("alpha").length - 1).toBe(2)
+      }
+      expect(yield* readText(target)).toBe("alpha\nomega\n")
+    }),
+  )
+
   // @@ suffix 是唯一字面 context 时只定位其包含行，随后从下一行解析 old block。
   // context 行保持逐字不变，防止定位信息被误用成 replacement target。
   it.instance("uses a unique substring change context", () =>
@@ -306,7 +382,8 @@ describe("tool.apply_patch freeform", () => {
   )
 
   // pure insertion 只跳过 old block；它的 substring context 仍先通过同一个 locator 校验。
-  // 缺失或多义 context 必须失败，成功 context 的新行则统一追加到 transformed EOF。
+  // 缺失或多义 context 必须失败，但错误不能复制 input 中已有的 `@@ marker` 请求文本。
+  // 成功 context 的新行仍统一追加到 transformed EOF，去重只改变失败信息而不改变匹配。
   it.instance("validates change context for pure insertions", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -321,12 +398,21 @@ describe("tool.apply_patch freeform", () => {
       yield* execute({
         patchText: "*** Begin Patch\n*** Update File: valid_insert.txt\n@@ marker\n+beta\n*** End Patch",
       }, ctx)
-      yield* expectFailure(execute({
-        patchText: "*** Begin Patch\n*** Update File: missing_insert.txt\n@@ marker\n+beta\n*** End Patch",
-      }, ctx), "Failed to find context")
-      yield* expectFailure(execute({
-        patchText: "*** Begin Patch\n*** Update File: ambiguous_insert.txt\n@@ marker\n+beta\n*** End Patch",
-      }, ctx), "Failed to find context")
+      const failures = [
+        "*** Begin Patch\n*** Update File: missing_insert.txt\n@@ marker\n+beta\n*** End Patch",
+        "*** Begin Patch\n*** Update File: ambiguous_insert.txt\n@@ marker\n+beta\n*** End Patch",
+      ]
+      for (const patchText of failures) {
+        const exit = yield* execute({ patchText }, ctx).pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          const error = Cause.squash(exit.cause) as Error
+          expect(error.message).toContain("Failed to find context")
+          // context 在 input/result 两个 model-visible 部分合计恰好一份，适用于零匹配和多匹配。
+          expect((patchText + error.message).split("marker").length - 1).toBe(1)
+          expect(error.message).not.toContain("marker")
+        }
+      }
 
       expect(yield* readText(valid)).toBe("prefix marker suffix\nbeta\n")
       expect(yield* readText(missing)).toBe("other\n")
@@ -389,8 +475,8 @@ describe("tool.apply_patch freeform", () => {
     }),
   )
 
-  // 可靠候选超过 500 字符时同时保留首尾，并显式标记被省略的中段。
-  // 静默 `.slice(0, 500)` 会再次隐藏位于长行尾部的真实差异。
+  // 可靠候选超过 500 字符时只展示变化点附近的 actual，并分别标明首尾省略字符数。
+  // 长公共前后缀不能再次吞掉单字符差异，也不能把完整 expected 复制进 Tool result。
   it.instance("marks omitted text when a reliable candidate is long", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -407,8 +493,12 @@ describe("tool.apply_patch freeform", () => {
       if (Exit.isFailure(exit)) {
         const error = Cause.squash(exit.cause) as Error
         expect(error.message).toContain("Closest match at line 1")
+        expect(error.message).toContain("line 1 actual")
         expect(error.message).toContain("chars omitted")
-        expect(error.message).toContain("b".repeat(100))
+        expect(error.message).toContain("difference: requested columns 301-301 differ from actual columns 301-301")
+        // 完整长 expected 只能留在原始 patchText；错误正文只提供实际差异窗口。
+        expect((patchText + error.message).split(expected).length - 1).toBe(1)
+        expect(error.message).not.toContain(expected)
       }
     }),
   )
@@ -747,6 +837,7 @@ EOF`
   )
 
   // 完全无关的 expected 与文件没有可靠 candidate，展示任意 actual excerpt 会制造 false precision。
+  // Tool 输入已向模型保留请求文本，失败正文不能再次复制它，否则同一上下文会出现两份 old block。
   // 低于阈值时应明确要求 read，而不是把 real content 错标为附近位置。
   it.instance("suppresses unrelated candidates when context mismatches", () =>
     Effect.gen(function* () {
@@ -765,12 +856,16 @@ EOF`
         const err = Cause.squash(exit.cause) as Error
         expect(err.message).toContain("No reliable nearby candidate was found")
         expect(err.message).not.toContain("real content")
+        // 组合真实 Tool input/result，而不是只检查 error，才能捕获用户看到的上下文级重复。
+        expect((patchText + err.message).split("missing context").length - 1).toBe(1)
+        expect(err.message).not.toContain("missing context")
       }
       }),
     )
 
   // Tool wrapper 不能在 owner 丢失身份后重扫第一个 chunk；提示必须绑定真正失败的第二个 chunk。
   // 长字符集 decoy 同时证明 bounded window 选择第 4 行候选，而不是重复旧的无界 scorer。
+  // 失败 chunk 的 requested 只留在 patchText，result 用 actual 与列区间提供增量证据。
   it.instance("reports the reliable candidate for the chunk that actually failed", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -796,9 +891,11 @@ EOF`
       expect(Exit.isFailure(exit)).toBe(true)
       if (Exit.isFailure(exit)) {
         const error = Cause.squash(exit.cause) as Error
-        expect(error.message).toContain("target sequence alpha beta gamma")
         expect(error.message).toContain("Closest match at line 4")
         expect(error.message).toContain(candidate)
+        expect(error.message).toContain("difference: requested columns")
+        expect((patchText + error.message).split("target sequence alpha beta gamma").length - 1).toBe(1)
+        expect(error.message).not.toContain("target sequence alpha beta gamma")
         expect(error.message).not.toContain(decoy)
       }
       expect(yield* readText(target)).toBe(`first\n${decoy}\nfiller\n${candidate}\n`)
@@ -807,6 +904,7 @@ EOF`
 
   // [local-smark] per-file atomicity：多文件 patch 中一个文件失败时，
   // 成功的文件应正常 apply，失败的文件在 output 中报告 error。
+  // 部分成功走 output-available，但同样不能复制 input 已携带的失败 old block。
   // 旧行为是整个 patch 失败（all-or-nothing），成功的 hunk 也被丢弃。
   it.instance("applies successful files and reports failed files in multi-file patch", () =>
     Effect.gen(function* () {
@@ -838,6 +936,10 @@ EOF`
       // output 应同时包含成功和失败信息
       expect(result.output).toContain("good.txt")
       expect(result.output).toContain("bad.txt")
+      expect(result.output).toContain("No reliable nearby candidate was found")
+      // 成功 result 与失败 error 共用 Patch owner 文案；两条 Provider 路径必须保持同一去重不变量。
+      expect((patchText + result.output).split("missing line").length - 1).toBe(1)
+      expect(result.output).not.toContain("missing line")
       // bad.txt 内容不应被修改
       expect(yield* readText(badFile)).toBe("world\n")
     }),
