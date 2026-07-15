@@ -360,7 +360,7 @@ implementation commit 后执行 `git show --stat --format='' HEAD` 和 `git diff
 
 ### Open Decisions Requiring the User
 
-- 设计上没有待决产品选择。改动后的 macOS/Linux/Windows workflow 必须运行在 implementation commit SHA 上，才能满足 `verified-implementation-and-commit` 的 full-suite gate；本会话规则禁止未经明确请求 push，因此若 commit 后没有可访问该 SHA 的 CI artifact，终态只能保持未验证，不能声称三平台已通过。
+- 设计上没有待决产品选择。按通常 gate，改动后的 macOS/Linux/Windows workflow 应运行在 implementation commit SHA 上；用户已明确豁免本任务的证据型 blocker，因此本次保留未运行事实，不声称三平台 workflow 已通过。
 
 ### Rejected Speculation
 
