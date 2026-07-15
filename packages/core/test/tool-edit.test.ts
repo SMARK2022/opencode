@@ -361,7 +361,10 @@ describe("EditTool", () => {
                 expect(yield* executeTool(registry, call({ path: "matches.txt", oldString: "aa", newString: "x" }))).toMatchObject({ type: "error", value: expect.stringContaining("multiple exact matches") })
                 // 候选行号是实际窗口起点，而非带上一行context的起点。
                 yield* Effect.promise(() => fs.writeFile(target, "header\nconst preferred = true\n"))
-                expect(yield* executeTool(registry, call({ path: "matches.txt", oldString: "const preferred = false", newString: "x" }))).toMatchObject({ type: "error", value: expect.stringContaining("Closest match at line 2:\nconst preferred = true") })
+                const missing = yield* executeTool(registry, call({ path: "matches.txt", oldString: "const preferred = false", newString: "x" }))
+                expect(missing).toMatchObject({ type: "error", value: expect.stringContaining('Closest match at line 2:\nline 2 actual: "const preferred = true"') })
+                // 请求仍由原始 Tool input 保存，模型结果只呈现 actual 差异和位置。
+                expect(JSON.stringify(missing)).not.toContain("const preferred = false")
                 expect(writes).toEqual([])
                 expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("header\nconst preferred = true\n")
                 // 真实Native Edit失败必须显示900字符行末差异，不只证明孤立formatter可用。

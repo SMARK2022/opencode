@@ -60,7 +60,7 @@ describe("Patch", () => {
     expect(() => derive("anchor\n", [{ oldLines: [], newLines: ["x"], changeContext: "missing" }])).toThrow("Failed to find context")
     expect(derive("old\n", [{ oldLines: [], newLines: ["inserted"] }, { oldLines: ["old"], newLines: [] }])).toBe("inserted\n")
     // 提示只取失败chunk的磁盘候选，不能显示第一chunk已丢弃的replacement。
-    expect(() => derive("alpha\nconst after = good()\n", [{ oldLines: ["alpha"], newLines: ["ALPHA"] }, { oldLines: ["const after = good(1)"], newLines: ["done"] }])).toThrow("Closest match at line 2:\nconst after = good()")
+    expect(() => derive("alpha\nconst after = good()\n", [{ oldLines: ["alpha"], newLines: ["ALPHA"] }, { oldLines: ["const after = good(1)"], newLines: ["done"] }])).toThrow('Closest match at line 2:\nline 2 actual: "const after = good()"')
     expect(() => derive("“old”\n", [{ oldLines: ['"old"'], newLines: ["new"] }])).toThrow("Failed to find expected lines")
   })
 
