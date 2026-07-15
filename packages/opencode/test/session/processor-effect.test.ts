@@ -5,7 +5,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { tool } from "ai"
-import { Cause, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Schema, Scope, Stream } from "effect"
 import path from "path"
 import z from "zod"
 import type { Agent } from "../../src/agent/agent"
@@ -21,7 +21,7 @@ import { SessionSummary } from "../../src/session/summary"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
-import { raw, reply, TestLLMServer } from "../lib/llm-server"
+import { httpError, raw, reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -71,7 +71,7 @@ const cfg = {
   },
 }
 
-function providerCfg(url: string) {
+function providerCfg(url: string, options: Record<string, unknown> = {}) {
   return {
     ...cfg,
     provider: {
@@ -80,6 +80,7 @@ function providerCfg(url: string) {
         ...cfg.provider.test,
         options: {
           ...cfg.provider.test.options,
+          ...options,
           baseURL: url,
         },
       },
@@ -265,7 +266,15 @@ function parallelToolCalls(calls: Array<{ id: string; name: string; args: string
       {
         id: "chatcmpl-test",
         object: "chat.completion.chunk",
-        choices: [{ delta: { tool_calls: [{ index: i, id: calls[i].id, type: "function", function: { name: calls[i].name, arguments: "" } }] } }],
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                { index: i, id: calls[i].id, type: "function", function: { name: calls[i].name, arguments: "" } },
+              ],
+            },
+          },
+        ],
       },
       {
         id: "chatcmpl-test",
@@ -276,7 +285,9 @@ function parallelToolCalls(calls: Array<{ id: string; name: string; args: string
   }
   return raw({
     head,
-    tail: [{ id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "tool_calls" }] }],
+    tail: [
+      { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+    ],
   })
 }
 
@@ -827,6 +838,83 @@ it.live("session.processor effect tests publish retry status updates", () =>
         expect(states).toStrictEqual([1])
       }),
     { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor retries a real first-progress timeout", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const gate = defer<void>()
+        const retry = defer<{ attempt: number; message: string }>()
+
+        // 闸门停在 HTTP headers 之前；若没有 dispatch deadline，503 只能在释放后触发重试。
+        // 第二项仍是同一 Provider 的成功响应，不改变既有 retry 分类和 backoff。
+        yield* llm.push(
+          httpError(503, { error: { message: "delayed" } }, gate.promise),
+          reply().text("after"),
+        )
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "first progress")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const bridge = yield* EventV2Bridge.Service
+        const off = yield* bridge.listen((evt) => {
+          if (evt.type !== SessionStatus.Event.Status.type) return Effect.void
+          const data = evt.data as typeof SessionStatus.Event.Status.data.Type
+          if (data.sessionID !== chat.id || data.status.type !== "retry") return Effect.void
+          retry.resolve({ attempt: data.status.attempt, message: data.status.message })
+          return Effect.void
+        })
+        // 监听真实 Status bus，而不是读取 processor 内部 retry counter，保护用户可见的行为契约。
+        // 订阅在 process fork 前建立，避免 retry event 已发布后测试才开始等待。
+        // retry Status 的 attempt/message 是 Session 用户可见合同，也是没有 retry cap 的可观测边界。
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const scope = yield* Scope.Scope
+        const fiber = yield* handle
+          .process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies MessageV2.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "first progress" }],
+            tools: {},
+          })
+          .pipe(Effect.forkIn(scope, { startImmediately: true }))
+
+        // 从真实 HTTP 到达再观察期限，排除冷启动和配置加载对百毫秒判别窗口的占用。
+        yield* llm.wait(1)
+        const observed = yield* Effect.promise(() =>
+          Promise.race([retry.promise, new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 100))]),
+        )
+        // 100ms 只是 red-capable readiness gate，不是产品 timeout；正常路径应在 25ms 附近先发布 retry。
+        // 释放延迟服务器，确保第二次真实 Provider 请求可以完成并验证现有 retry 路径。
+        gate.resolve(undefined)
+        const result = yield* Fiber.join(fiber)
+        // gate 只释放服务器 fixture；SessionRetry 的既有 backoff 和 retryable 分类保持真实执行。
+        // 第二次响应沿着同一 processor 成功完成，证明 timeout 没有把 Session 降级为终态失败。
+        // llm.calls=2 同时确认失败请求和重试请求都实际到达 fixture，而不是测试直接 resolve fiber。
+        yield* off
+
+        expect(observed?.attempt).toBe(1)
+        // message 必须来自真实 Provider progress producer，不能由测试手工构造 APIError 冒充。
+        expect(observed?.message).toBe("SSE read timed out")
+        // attempt=1 只证明现有 retry 状态可见，不规定总次数，也不引入新的 attempt cap。
+        // 该断言故意不检查“最多一次”，以防测试把已删除的 RP-04 重新固化成产品行为。
+        expect(result).toBe("continue")
+        expect(yield* llm.calls).toBe(2)
+      }),
+    { git: true, config: (url) => providerCfg(url, { chunkTimeout: 25 }) },
   ),
 )
 

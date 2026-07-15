@@ -32,6 +32,7 @@ export type RequestInput = {
   readonly maxOutputTokens?: number
   readonly providerOptions?: LLMRequest["providerOptions"]
   readonly headers?: Record<string, string>
+  readonly chunkTimeout?: number | false
 }
 
 const providerMetadata = (value: unknown): ProviderMetadata | undefined => {
@@ -190,6 +191,8 @@ export const request = (input: RequestInput) => {
     toolChoice: input.toolChoice,
     generation: generation(input),
     providerOptions: input.providerOptions,
+    // 与 AI SDK 路径共用配置含义，但运输窗口不混入 providerOptions 或正文 overlay。
+    http: { chunkTimeout: input.chunkTimeout },
   })
 }
 

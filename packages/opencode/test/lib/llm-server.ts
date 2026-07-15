@@ -46,6 +46,7 @@ type HttpError = {
   type: "http-error"
   status: number
   body: unknown
+  wait?: PromiseLike<unknown>
 }
 
 export type Item = Sse | HttpError
@@ -565,11 +566,12 @@ export function reply() {
   return new Reply()
 }
 
-export function httpError(status: number, body: unknown): Item {
+export function httpError(status: number, body: unknown, wait?: PromiseLike<unknown>): Item {
   return {
     type: "http-error",
     status,
     body,
+    wait,
   }
 }
 
@@ -690,7 +692,12 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
         }
         hits = [...hits, current]
         yield* notify()
-        if (next.type !== "sse") return fail(next)
+        if (next.type !== "sse") {
+          // 等待发生在返回响应之前，不能用 SSE body 的延迟冒充首个 headers 尚未到达。
+          const wait = next.wait
+          if (wait) yield* Effect.promise(() => wait)
+          return fail(next)
+        }
         if (mode === "responses") return send(responses(next, modelFrom(body)))
         if (next.reset) {
           yield* reset(next)

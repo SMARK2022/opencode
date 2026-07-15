@@ -1,5 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+import { generateText } from "ai"
 import { mkdir, unlink } from "fs/promises"
 import path from "path"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -1995,6 +1996,66 @@ it.instance(
   },
 )
 
+it.instance(
+  "custom Provider fetch receives the common timeout policy",
+  Effect.gen(function* () {
+    // 用目标 TestInstance + Plugin fixture 重建源 0434 的 plugin custom fetch 捕获：
+    // init.timeout 必须携带 Provider 统一 transport policy 的显式 false（INV-04/RP-02）。
+    const instance = yield* TestInstance
+    const configDir = path.join(instance.directory, ".opencode")
+    const pluginDir = path.join(configDir, "plugin")
+    yield* Effect.promise(() => mkdir(pluginDir, { recursive: true }))
+    yield* Effect.promise(() => markPluginDependenciesReady(configDir))
+    const capture = path.join(Global.Path.tmp, `provider-timeout-${crypto.randomUUID()}.txt`)
+    yield* Effect.promise(() =>
+      Bun.write(
+        path.join(pluginDir, "provider-timeout-policy.ts"),
+        [
+          "export default {",
+          '  id: "test.provider-timeout-policy",',
+          "  server: async () => ({",
+          "    auth: {",
+          '      provider: "custom-timeout",',
+          "      loader: async () => ({",
+          '        apiKey: "[redacted]",',
+          "        fetch: async (_input, init) => { await Bun.write(" + JSON.stringify(capture) + ', String(init?.timeout ?? "missing")); return new Response(JSON.stringify({ id: "test", choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] }), { headers: { "content-type": "application/json" } }) },',
+          "      }),",
+          "      methods: [{ type: 'api', label: 'API key' }],",
+          "    },",
+          "  }),",
+          "}",
+        ].join("\n"),
+      ),
+    )
+    yield* set("OPENCODE_AUTH_CONTENT", JSON.stringify({ "custom-timeout": { type: "oauth", refresh: "dummy", access: "dummy", expires: 9_999_999_999_999 } }))
+    const provider = yield* Provider.Service
+    const model = yield* provider.getModel(ProviderV2.ID.make("custom-timeout"), ModelV2.ID.make("gpt-test"))
+    const language = yield* provider.getLanguage(model)
+    // baseURL 故意不可连接；plugin fetch 会先捕获 init 并返回 canned response，测试不依赖外部网络。
+    // maxRetries=0 只关闭 AI SDK 自己的额外重试，不改变 SessionRetry 的生产策略。
+    yield* Effect.promise(() => generateText({ model: language, prompt: "Hello", maxRetries: 0 }))
+    // plugin 的 custom fetch 捕获的 init.timeout 必须是 Provider 统一 policy 的显式 false。
+    const capturedText = yield* Effect.promise(() => Bun.file(capture).text())
+    expect(capturedText).toBe("false")
+  }),
+  {
+    config: {
+      provider: {
+        "custom-timeout": {
+          npm: "@ai-sdk/openai-compatible",
+          name: "Custom Timeout Provider",
+          options: { apiKey: "[redacted]", baseURL: "https://provider.invalid/v1" },
+          models: {
+            "gpt-test": {
+              name: "GPT Test",
+              modalities: { input: ["text"], output: ["text"] },
+            },
+          },
+        },
+      },
+    },
+  },
+)
 it.instance("Google Vertex: uses REP endpoint for Claude continental multi-regions", () =>
   Effect.gen(function* () {
     yield* set("GOOGLE_CLOUD_PROJECT", "test-project")
