@@ -265,14 +265,12 @@ The 10 percent limit is a maximum, not an entitlement. A three-line fallback
 that creates alternate success is still forbidden. A diagnostic path within
 the budget is still blocked if it hides failure or belongs to another module.
 
-The canonical plan and implementation audit must state:
-
-- The primary path.
-- Every secondary or replacement path.
-- Whether each such path is a primary-contract branch, pass-through, diagnostic,
-  existing compatibility, explicit user-requested rollback, or forbidden
-  fallback.
-- The estimated and actual decision-surface ratio.
+The canonical plan must state the primary path, inventory and classify every
+secondary or replacement path, and estimate the ratio. Implementation audit
+uses the actual diff. A missing or stale estimate is non-blocking when every
+path is classified, no available calculation exceeds the limit, and no release
+claim is false. Block a forbidden fallback, an unclassifiable success path, or a
+demonstrated over-budget diagnostic surface.
 
 ## Responsibility Ownership
 
@@ -425,16 +423,13 @@ the recently edited section.
 
 ## Finding Standard
 
-A blocking finding must contain:
-
-- The violated invariant.
-- Evidence class: `observed`, `contracted`, or `reachable`.
-- The producer and execution path.
-- Source references with paths and lines.
-- Canonical-plan references.
-- Ownership reasoning.
-- The behavior-level consequence.
-- A minimal correction direction that does not introduce fallback.
+A blocking finding must establish an observed, contracted, or reachable
+violated invariant; producer and execution path; source and plan references;
+owner; concrete production, test, or contract consequence; and a minimal
+no-fallback correction. Inability to prove an estimate, line or word count,
+metadata field, or documentation location is not itself a behavior-level
+consequence. Such discrepancies are non-blocking when the artifact remains
+executable, no hard threshold demonstrably fails, and no release claim is false.
 
 Unsupported concerns must be marked `Rejected speculation`, not left as vague
 risk.
@@ -456,8 +451,9 @@ The following block plan approval or implementation completion:
 - A new alternate success path exists.
 - A responsibility is assigned outside its owning interface.
 - Speculative input drives production code.
-- A confirmed requirement lacks an implementation or test mapping.
-- A production concept lacks requirement and evidence mapping.
+- A confirmed requirement has no executable owner or path, or no behaviorally
+  sensitive verification or explicit unverifiable reason.
+- A production concept lacks observed, contracted, or reachable justification.
 - Current and approved plan revisions differ.
 - The plan, code, tests, and reported behavior have drifted.
 - Audit scope was narrowed after a revision.
@@ -544,9 +540,10 @@ break. Examples:
 Comments must be distributed near the changed decisions they explain. A change
 with insufficient qualifying comments is blocked even when all tests pass.
 
-The canonical plan must estimate `E` and the minimum `C`. The implementation
-report and auditor must state the actual values, calculation method, and any
-excluded lines.
+The canonical plan must commit to the minimum and provide a feasible `E`/`C`
+estimate. Estimate arithmetic or line-scope drift is non-blocking when it does
+not authorize a lower ratio. The implementation report and auditor must state
+actual values, calculation method, and excluded lines.
 
 ## Iteration Limits
 
