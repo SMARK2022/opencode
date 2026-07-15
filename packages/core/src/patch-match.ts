@@ -1,3 +1,5 @@
+import { diffChars } from "diff"
+
 export type ExactLocation =
   | { kind: "line"; startLine: number; endLine: number }
   | { kind: "substring"; startOffset: number; endOffset: number }
@@ -119,6 +121,60 @@ function truncateExcerpt(text: string, limit: number) {
   return text.slice(0, head) + marker + text.slice(text.length - tail)
 }
 
+// Edit 与 Patch 共用此 renderer，避免同一 candidate 在两个 Tool result 中重新形成相互漂移的 expected 副本。
+function formatClosestDifference(expected: string[], candidate: string[], startLine: number) {
+  const output: string[] = []
+  for (const [index, actual] of candidate.entries()) {
+    const requested = expected[index]
+    if (requested === actual) continue
+
+    const changes = diffChars(requested, actual)
+    let requestedColumn = 1
+    let actualColumn = 1
+    let requestedStart: number | undefined
+    let requestedEnd: number | undefined
+    let actualStart: number | undefined
+    let actualEnd: number | undefined
+
+    for (const change of changes) {
+      const length = Array.from(change.value).length
+      if (!change.added && !change.removed) {
+        requestedColumn += length
+        actualColumn += length
+        continue
+      }
+
+      // 差异区间只输出列号；完整 requested 已由 Tool input 携带，不能借 diff 再复制到错误正文。
+      requestedStart ??= requestedColumn
+      actualStart ??= actualColumn
+      if (change.removed) {
+        requestedEnd = requestedColumn + length - 1
+        requestedColumn += length
+        continue
+      }
+      actualEnd = actualColumn + length - 1
+      actualColumn += length
+    }
+
+    if (requestedStart === undefined || actualStart === undefined) continue
+    const requestedLast = requestedEnd ?? requestedStart - 1
+    const actualLast = actualEnd ?? actualStart - 1
+    // actual excerpt 围绕首尾变化点截取，长公共前缀不会挤掉真正差异；JSON 字符串同时显式保留空白。
+    const actualPoints = Array.from(actual)
+    const visibleStart = Math.max(0, actualStart - 1 - 30)
+    const visibleEnd = Math.min(actualPoints.length, Math.max(actualStart - 1, actualLast) + 20)
+    // 两端省略数量必须显式可见，避免模型把紧凑窗口误认为完整 actual 行。
+    const prefix = visibleStart > 0 ? `...[${visibleStart} chars omitted]...` : ""
+    const suffix = visibleEnd < actualPoints.length ? `...[${actualPoints.length - visibleEnd} chars omitted]...` : ""
+    const visible = `${prefix}${actualPoints.slice(visibleStart, visibleEnd).join("")}${suffix}`
+    output.push(
+      `line ${startLine + index} actual: ${JSON.stringify(visible)}`,
+      `difference: requested columns ${requestedStart}-${requestedLast} differ from actual columns ${actualStart}-${actualLast}`,
+    )
+  }
+  return output.join("\n")
+}
+
 // 诊断按完整 expected block 的行数比较窗口；有序 bigram multiset 同时惩罚无关长行和字符重排。
 // 分数低于 0.5 或最佳分并列时不声称存在 closest，宁可要求重新 read 也不提供错误位置。
 export function closestWindow(content: string, expected: string): ClosestWindow | undefined {
@@ -147,10 +203,16 @@ export function closestWindow(content: string, expected: string): ClosestWindow 
   }
 
   if (bestIndex === -1 || bestScore < 0.5 || tied) return undefined
+  const candidate = lines.slice(bestIndex, bestIndex + expectedLines.length)
+  const candidateText = candidate.join("\n")
+  // working copy 可能已消费或越过原文；persisted candidate 若含完整 expected，只能报告位置而不能回显第二份文本。
+  const excerpt = candidateText.includes(expected)
+    ? "Exact requested text exists at this location in the original file but is unavailable to the current patch step."
+    : formatClosestDifference(expectedLines, candidate, bestIndex + 1) || truncateExcerpt(candidateText, 500)
   // 行号绑定候选窗口起点而非 surrounding context 起点，修复旧 Edit 提示的 off-by-one。
   return {
     line: bestIndex + 1,
-    excerpt: truncateExcerpt(lines.slice(bestIndex, bestIndex + expectedLines.length).join("\n"), 500),
+    excerpt: truncateExcerpt(excerpt, 500),
     score: bestScore,
   }
 }

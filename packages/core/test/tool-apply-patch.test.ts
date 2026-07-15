@@ -397,7 +397,9 @@ describe("ApplyPatchTool", () => {
             const target = path.join(tmp.path, "retry.txt")
             yield* Effect.promise(() => fs.writeFile(target, persisted))
             const failed = yield* executeTool(registry, call("*** Begin Patch\n*** Update File: retry.txt\n@@\n-alpha\n+ALPHA\n@@\n-const after = good(1)\n+done\n*** End Patch"))
-            expect(failed).toMatchObject({ type: "error", value: expect.stringContaining("Closest match at line 2:\nconst after = good()") })
+            expect(failed).toMatchObject({ type: "error", value: expect.stringContaining('Closest match at line 2:\nline 2 actual: "const after = good()"') })
+            // 真实 leaf 的模型输出也必须去重，而非只在共享 helper 单测中修正文案。
+            expect(JSON.stringify(failed)).not.toContain("const after = good(1)")
             expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(persisted)
           }),
         )

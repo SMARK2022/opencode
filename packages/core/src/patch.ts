@@ -141,7 +141,8 @@ function applyChunks(originalLines: string[], path: string, chunks: ReadonlyArra
   for (const chunk of chunks) {
     if (chunk.changeContext) {
       const context = locateExact(lines, [chunk.changeContext], cursorOffset, false, terminated)
-      if (context.type !== "found") throw new Error(withCandidate(`Failed to find context '${chunk.changeContext}' in ${path}`, persistedText, chunk.changeContext))
+      // 原始 context 已在 Tool input 中；失败只补磁盘实际候选，不再回显请求。
+      if (context.type !== "found") throw new Error(withCandidate(`Failed to find context in ${path}.`, persistedText, chunk.changeContext))
       const text = workingText(lines, terminated)
       const offset = context.location.kind === "line" ? lineOffset(lines, context.location.startLine) : context.location.startOffset
       cursorOffset = nextLineOffset(text, offset)
@@ -152,10 +153,11 @@ function applyChunks(originalLines: string[], path: string, chunks: ReadonlyArra
       continue
     }
     const result = locateExact(lines, chunk.oldLines, cursorOffset, chunk.endOfFile, terminated)
+    // 匹配与文件原子性保持不变，三类失败都共享不复制 old block 的诊断合同。
     if (result.type === "ambiguous")
-      throw new Error(`Found multiple matches for expected lines in ${path}:\n${chunk.oldLines.join("\n")}\nProvide more context to make the match unique.`)
+      throw new Error(`Found multiple matches for expected lines in ${path}. Provide more context to make the match unique.`)
     if (result.type === "not-found")
-      throw new Error(withCandidate(`Failed to find expected lines in ${path}:\n${chunk.oldLines.join("\n")}`, persistedText, chunk.oldLines.join("\n")))
+      throw new Error(withCandidate(`Failed to find expected lines in ${path}.`, persistedText, chunk.oldLines.join("\n")))
     if (result.location.kind === "line") {
       const startLine = result.location.startLine
       lines.splice(startLine, result.location.endLine - startLine, ...chunk.newLines)
