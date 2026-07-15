@@ -12,7 +12,7 @@
 - skills 和文档按阶段即时加载，禁止开局一次性读取全部内容。
 - 审计材料只由 `adversarial-auditor` subagent 加载；primary agent 不预读、不自审。
 - 阶段加载的 policy、skill、template、仓库指令和 canonical plan 是权威依据。
-- 仅在目标终态被当前证据逐项证明后标记 `complete`。同一真实阻塞连续至少 3 个 GOAL turns 且无法继续推进时才标记 `blocked`。
+- 仅在目标终态被当前证据逐项证明后标记 `complete`。同一真实阻塞在两个连续 eligible GOAL turns 中保持不变且无法继续推进时，才在第二次标记 `blocked`。
 
 ## 第一性门禁
 
@@ -37,7 +37,7 @@
 - 从当前仓库重新调查，不把旧方案或旧审计当作已确认事实。只创建或修订 plan，不修改 production、tests、config、migration 或 generated files。
 - bug 类任务必须建立并实际运行能够捕获用户原始症状的 red-capable feedback loop。没有该信号时不得仅靠源码阅读猜根因，应继续构建信号或记录真实环境阻塞。
 - 完成 template 各字段：evidence/domain/reachability、invariant/divergence/owner、route/paths/workaround、file/TDD/verification/diff、risks/speculation/audit/comments。
-- forward mapping：requirement/invariant -> path/file/test。reverse mapping：concept -> requirement/invariant/safety evidence + 不可复用原因。缺失映射不得提交审计。
+- forward mapping：requirement/invariant -> owner/path/file/test。reverse mapping：concept -> requirement/invariant/safety evidence + 不可复用原因。确认行为没有 executable path、行为测试或明确 unverifiable reason 时不得提交；引用位置、估算和重复证据不构成映射缺失。
 - 完成后设置 `Status: audit-required`、`Approved revision: none`、`Implementation allowed: no`。
 
 ## 阶段 2：独立方案审计
@@ -55,8 +55,8 @@
 
 ### 放行
 
-- 任一 blocking finding 都要求修订同一 plan、递增 revision、清空 approval，并按原始需求和完整 affected interface full-scope 重审，禁止 delta-only review。
-- 最多 6 轮，当进入第 4 轮的时候注意提醒subagent避免过分的进行部分犄角旮旯的苛责审计，整体无重大问题可以放行。连续调用失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽后 blockers 仍保持 blocking，并作为开放决定交给用户。
+- 经 policy 证实的 blocking finding 要求修订同一 plan、递增 revision、清空 approval，并按原始需求和完整 affected interface full-scope 重审；non-blocking record correction 不清空 approval 或触发重审。
+- 最多 6 轮，每轮使用同一材料性标准，不得以轮次、边角问题或“整体无重大问题”诱导 auditor 升降判级。连续调用失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽后 blockers 仍保持 blocking，并作为开放决定交给用户。
 - exact revision 仅在获得 `No blocking findings` 和 `APPROVE` 后，才原样记录 verdict，设置 `Status: approved`、`Approved revision: <current>`、`Implementation allowed: yes`；不得夹带设计修改。
 - `approved-plan-only` 在完成逐项终态审计后标记 GOAL `complete`，不得实施代码。
 
@@ -86,7 +86,7 @@
 - implementation evidence 记录 files/diff、red-green、verification、原始 loop、paths、E/C、排除行、未验证项。设置 `Status: implementation-audit-required`，未经 revision 不再 material change。
 - primary agent 只发送原始需求、plan/approved revision、repository root、`Audit mode: implementation`、changed files/diff，不发送实现辩护、自评、怀疑点或缩减范围。
 - auditor subagent 自行加载审计 skill、policy 和仓库证据，按原始需求和完整 affected interface 审计，禁止只看最近修正。
-- blocker 必须返工并 full-scope 重审，最多 4 轮。连续失败 4 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽仍有 blocker 时标记 `blocked`，不得 `complete`。
+- blocker 必须返工并 full-scope 重审，最多 3 轮。连续失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽仍有 blocker 时标记 `blocked`，不得 `complete`。
 - 只有实际 diff 获得 `No blocking findings` 和 `APPROVE`，且测试、验证、责任边界、workaround 删除和中文注释门禁全部通过，才能原样记录 verdict 并设置 `Status: verified`。
 
 ## 可选 Commit
@@ -94,7 +94,7 @@
 仅当终态是 `verified-implementation-and-commit` 且状态已 verified：
 
 1. 检查 `git status`、`git diff`、`git diff --cached` 和 `git log --oneline -10`。
-2. 只 stage 本 GOAL 相关文件，排除 secret、credential 和无关修改。index 已有无关内容时不得夹带或擅自清除，应停止并报告。
+2. 确定本 GOAL 的完整路径清单并排除 secret、credential。工作区或 index 有无关内容时，使用 `git commit --only -- <本 GOAL 路径...>` 提交相关路径；相关 untracked files 先单独 `git add -- <paths>`，无关 staged/unstaged 内容保持原样。若同一路径混有无关修改，停止并报告。
 3. 不创建空 commit。提交信息使用中文多行格式：`type(scope): 简短中文说明`，type 只取 `fix|feat|refactor|test|chore`，scope 使用受影响模块，后续 1 至 2 段说明原因、行为边界和避免的回归。
 4. 不得 amend、不得 `--no-verify`、不得跳过 hook、不得 push。
 5. hook 拒绝时修复原因并创建新 commit，不得 amend 失败尝试。commit 成功后检查 `git status` 并报告 commit id。其他目标终态不得 commit。

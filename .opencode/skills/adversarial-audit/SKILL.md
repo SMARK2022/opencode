@@ -199,13 +199,11 @@ Use both directions.
 
 ### Prevent under-design
 
-Every confirmed requirement and invariant must map to:
-
-- A production path.
-- A planned or actual file change.
-- A behavioral test or explicit unverifiable reason.
-
-Missing mappings are blocking.
+Every confirmed requirement and invariant must map to an executable owner and
+path, a planned or actual file change, and a behaviorally sensitive test or
+explicit unverifiable reason. A missing mapping blocks only when confirmed
+behavior would otherwise be unimplemented or unverifiable; a misplaced or
+duplicated citation does not.
 
 ### Prevent over-design
 
@@ -241,9 +239,9 @@ In plan mode, verify:
 - File changes are exact and restrained.
 - TDD slices can fail on current behavior.
 - Verification commands are concrete and use correct working directories.
-- Effective changed lines `E` and Chinese comments `C` are estimated.
-- `C = 0` when `E = 0`; otherwise
-  `C >= max(1, ceil(E * 0.15))` is planned with meaningful comment locations.
+- The `E`/`C` estimate is feasible and commits implementation to the actual hard
+  minimum; arithmetic or line-scope drift that preserves that minimum is
+  non-blocking.
 - Real risks are separated from rejected speculation.
 - Revision metadata and status are internally consistent.
 
@@ -267,9 +265,10 @@ In implementation mode, verify:
 
 ## Chinese Comment Audit
 
-The 15 percent gate is blocking.
+An actual implementation failure of the 15 percent gate is blocking. Plan mode
+audits feasibility and commitment to the minimum, not estimate exactness.
 
-Recompute rather than trust the implementer's number:
+In implementation mode, recompute rather than trust the implementer's number:
 
 - `E`: substantively added or modified non-blank production, test, and
   configuration code lines, excluding import-only, formatter-only, generated,
@@ -312,7 +311,8 @@ Every blocking finding must use:
 - Source evidence: path:line
 - Canonical-plan evidence: section
 - Responsibility owner:
-- Behavior-level consequence:
+- Concrete production, test, or contract consequence, not estimate, wording,
+  metadata, or evidence-placement discrepancy:
 - Why this is not speculative:
 - Minimal correction direction:
 ```
@@ -342,7 +342,8 @@ Plan audit may release only the exact audited revision.
 
 Implementation audit may release only the actual diff against the exact
 approved revision. In either mode, the release verdict is `APPROVE` only when no
-blocking finding remains and every applicable gate passes. In every other case,
+blocking finding remains and every phase-applicable hard gate passes.
+Non-blocking record corrections do not prevent approval. In every other case,
 the verdict is `BLOCK`.
 
 Any blocking finding requires revision or rework followed by another full-scope
