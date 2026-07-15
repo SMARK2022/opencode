@@ -862,7 +862,9 @@ it.instance(
   Effect.gen(function* () {
     const tmp = yield* bootstrap()
     const snapshot = yield* Snapshot.Service
-    const ids = Array.from({ length: 140 }, (_, i) => i.toString().padStart(3, "0"))
+    // 101 是跨越 diffFull step=100 的最小 fixture；仍验证第二批顺序，
+    // 同时避免把 Windows runner 的额外负载误判为顺序行为失败。
+    const ids = Array.from({ length: 101 }, (_, i) => i.toString().padStart(3, "0"))
     yield* mkdirp(`${tmp.path}/order`)
     yield* Effect.all(
       ids.map((id) => write(`${tmp.path}/order/${id}.txt`, `before-${id}`)),

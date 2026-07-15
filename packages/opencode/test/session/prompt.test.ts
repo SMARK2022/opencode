@@ -3169,6 +3169,8 @@ unix(
   () =>
     Effect.gen(function* () {
       const { dir, llm } = yield* useServerConfig(providerCfg)
+      const afs = yield* AppFileSystem.Service
+      const ready = path.join(dir, ".bash-output-ready")
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const chat = yield* sessions.create({
@@ -3184,8 +3186,9 @@ unix(
       })
 
       yield* llm.tool("bash", {
-        command:
-          'i=0; while [ "$i" -lt 4000 ]; do printf "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx %05d\\n" "$i"; i=$((i + 1)); done; sleep 30',
+        // marker 位于完整输出循环之后，发布时已满足 truncation 的输入前提，
+        // 不再用 runner 调度速度推测 Tool 的 producer 进度。
+        command: `i=0; while [ "$i" -lt 4000 ]; do printf "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx %05d\\n" "$i"; i=$((i + 1)); done; touch "${ready}"; sleep 30`,
         description: "Print many lines",
         timeout: 30_000,
         workdir: path.resolve(dir),
@@ -3193,7 +3196,11 @@ unix(
 
       const run = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
       yield* llm.wait(1)
-      yield* Effect.sleep(150)
+      // 只观察命令公开的文件信号，避免把固定 wall-clock 当成输出完成保证。
+      yield* pollWithTimeout(
+        afs.existsSafe(ready).pipe(Effect.map((exists) => (exists ? true : undefined))),
+        "bash output loop did not publish its readiness marker",
+      )
       const cancel = yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
       yield* prompt.cancel(chat.id)
       yield* Fiber.await(cancel)

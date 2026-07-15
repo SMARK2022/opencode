@@ -60,6 +60,8 @@ export function file() {
 }
 let stream: ReturnType<typeof createWriteStream> | undefined
 let initID = 0
+let fileInit = Promise.resolve()
+let latestInit = Promise.resolve()
 const writeStderr = (msg: any) => {
   process.stderr.write(msg)
   return msg.length
@@ -71,44 +73,91 @@ export async function init(options: Options) {
   const dir = Global.Path.log
   if (options.level) level = options.level
   void cleanup(dir)
-  stream?.destroy()
-  stream = undefined
   if (options.print) {
-    // print=true 表示恢复到 stderr；不能继续持有上一次 dev log 的 writer，
-    // 否则测试或重初始化后仍可能写入已经被清理的临时日志文件。
+    // print 是即时控制分支：先使排队中的 file token 失效，不能等待文件 I/O。
+    latestInit = Promise.resolve()
+    const active = stream
+    stream = undefined
     write = writeStderr
+    active?.destroy()
     return
   }
-  // Global.Path.log 在测试中会临时切到 scoped tmpdir，生产环境下用户也可能
-  // 删除日志目录；init() 必须自愈目录，日志失败不能污染业务流程。
-  await fs.mkdir(dir, { recursive: true }).catch(() => {})
-  const nextLogpath = path.join(
-    dir,
-    options.dev ? "dev.log" : new Date().toISOString().split(".")[0].replace(/:/g, "") + ".log",
-  )
-  const runID = process.env.OPENCODE_RUN_ID
-  const shouldTruncate = !options.dev || !runID || process.env[initializedRunID] !== runID
-  if (shouldTruncate) await fs.truncate(nextLogpath).catch(() => {})
-  if (id !== initID) return
-  logpath = nextLogpath
-  if (options.dev && runID) process.env[initializedRunID] = runID
-  const current = createWriteStream(logpath, { flags: "a" })
-  stream = current
-  current.on("error", () => {
-    // 日志输出是诊断辅助通道，不能因为目录被删除或句柄被系统回收而让
-    // 调用方出现 unhandled error；下一次 init() 会重新创建可写目标。
-  })
-  write = async (msg: any) => {
-    if (current.destroyed || current.closed || !current.writable) return 0
-    return new Promise((resolve) => {
-      try {
-        current.write(msg, (err) => {
-          resolve(err ? 0 : msg.length)
-        })
-      } catch {
-        resolve(0)
+
+  // 文件变更和 candidate 发布共享同一个 FIFO owner，旧 truncate 不能越过新调用。
+  const predecessor = fileInit
+  const slot = Promise.withResolvers<void>()
+  fileInit = slot.promise
+  latestInit = slot.promise
+  const stale = await (async () => {
+    await predecessor
+    try {
+      if (id !== initID) return true
+      // Global.Path.log 可能指向刚被清理的目录；owner 必须先恢复目录再创建 stream。
+      await fs.mkdir(dir, { recursive: true }).catch(() => {})
+      if (id !== initID) return true
+      const nextLogpath = path.join(
+        dir,
+        options.dev ? "dev.log" : new Date().toISOString().split(".")[0].replace(/:/g, "") + ".log",
+      )
+      const runID = process.env.OPENCODE_RUN_ID
+      if (!options.dev || !runID || process.env[initializedRunID] !== runID) {
+        await fs.truncate(nextLogpath).catch(() => {})
+        if (id !== initID) return true
       }
-    })
+      const current = createWriteStream(nextLogpath, { flags: "a" })
+      current.on("error", () => {
+        // 日志是诊断通道，stream 失败不能产生未处理异常；下一次 init 会重新建目标。
+      })
+      const ready = await new Promise<"open" | "error" | "close">((resolve) => {
+        const finish = (state: "open" | "error" | "close") => {
+          // 三个终止事件只完成一次，并移除其余 listener，避免竞态留下悬挂回调。
+          current.off("open", onOpen)
+          current.off("error", onError)
+          current.off("close", onClose)
+          resolve(state)
+        }
+        const onOpen = () => finish("open")
+        const onError = () => finish("error")
+        const onClose = () => finish("close")
+        current.once("open", onOpen)
+        current.once("error", onError)
+        current.once("close", onClose)
+      })
+      if (id !== initID) {
+        current.destroy()
+        return true
+      }
+      const active = stream
+      logpath = nextLogpath
+      if (options.dev && runID) process.env[initializedRunID] = runID
+      stream = current
+      write = async (msg: any) => {
+        if (current.destroyed || current.closed || !current.writable) return 0
+        return new Promise((resolve) => {
+          try {
+            current.write(msg, (err) => resolve(err ? 0 : msg.length))
+          } catch {
+            resolve(0)
+          }
+        })
+      }
+      // failed candidate 仍成为当前 terminal writer，退休旧 active，避免回退到旧日志目标。
+      if (ready !== "open") current.destroy()
+      // candidate 状态发布后再销毁旧 active，重初始化期间始终保留可写路径。
+      active?.destroy()
+      return false
+    } finally {
+      slot.resolve()
+    }
+  })()
+  if (!stale) return
+
+  // stale 调用先释放自己的 slot，再等待稳定的最新 completion，避免死锁或过早返回。
+  let current = latestInit
+  await current
+  while (current !== latestInit) {
+    current = latestInit
+    await current
   }
 }
 
