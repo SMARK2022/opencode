@@ -424,6 +424,8 @@ for the exact audited revision. It must not be combined with a design change.
 
 没有修改 Snapshot 或 Session production path，没有新增文件、依赖、public API、mock seam、retry、fallback 或 benchmark。`Log.init()` steady-state `write` guard/callback 语义保持原样；candidate failure 现在退休旧 active 并进入当前 terminal writer，不继续旧目标。
 
+Implementation commit: `8afe99eb862cbba4187665b57798b6d09d2e32b1`，严格包含上述四个路径。
+
 ### Red-Green Test Evidence
 
 | Slice | Red-capable signal | Green result |
@@ -480,11 +482,11 @@ for the exact audited revision. It must not be combined with a design change.
 
 ### Remaining Unverified Items
 
-- 独立 full-scope implementation audit 尚未完成。
+- 独立 full-scope implementation audit 已完成；唯一 blocking 是用户明确豁免的 exact-SHA 证据缺失。
 - implementation commit SHA 的完整 GitHub Actions macOS/Linux/Windows matrix 尚未运行。
 - 本机 `CI=1` full suite 因磁盘 100% 满而未启动；清理无关 1.6G + 1.6G temporary directories 属于 destructive 操作，未擅自执行。
 - 本机非 CI full suite 唯一 native watcher timeout 在 CI 明确 skip；未扩展本计划去修改该独立测试。
-- commit 尚未创建；index 目前含用户或其它 agent 的 unrelated staged paths，commit-only gate 需在提交阶段重新检查。
+- implementation commit 已创建；index 仍含用户或其它 agent 的 unrelated staged paths，未清理且未夹带。
 
 用户在实现审计后明确决定：不要求收集当前 SHA 的三平台 workflow 证据，且 auditor 唯一 blocking finding 仅为该证据缺失，因此不将其作为本次修复放行条件；以上未验证项保留为事实，不宣称已运行。
 
@@ -495,6 +497,6 @@ for the exact audited revision. It must not be combined with a design change.
 | 1 | R12 implementation attempt | yes | B-01 candidate failure retains old writer as fallback; B-02 serious log races lack red-capable public-seam coverage; B-03 current three-platform full verification absent | NB-01 audit mode metadata; NB-02 unrelated staged index paths | `BLOCK` | `ses_09ae92c64ffeRHDKYunyO1HTTW` |
 | 2 | R14 implementation | yes | B-01 current implementation SHA lacks macOS/Linux/Windows full workflow evidence | NB-01 audit mode metadata; NB-02 unrelated staged index paths | `BLOCK` — user explicitly waived evidence-only blocker; implementation path accepted without SHA workflow claim | `ses_09ae92c64ffeRHDKYunyO1HTTW` |
 
-The task may be marked `verified` only after an independent full-scope result of
-`No blocking findings` for the current implementation and approved plan
-revision.
+The auditor result remains recorded verbatim. Per the user's explicit evidence
+waiver recorded above, this plan is marked `verified` despite the sole
+evidence-only release blocker; no unrun workflow is represented as passed.
