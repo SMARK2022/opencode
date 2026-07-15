@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import fs from "node:fs/promises"
 import path from "path"
 import { createRoot, createSignal } from "solid-js"
 import { tmpdir } from "../../fixture/fixture"
@@ -16,6 +17,37 @@ const nodeJson = (script: string): VoiceTranscriber => ({
   command: process.execPath,
   args: ["-e", script, "{file}"],
 })
+
+const voiceE2E = process.env.CHATGPT_VOICE_E2E === "1" ? test : test.skip
+
+async function writeLateMarkerWav(source: string, target: string, seconds: number) {
+  const input = Buffer.from(await Bun.file(source).arrayBuffer())
+  // RIFF允许fmt、LIST等可变长度chunk，data位置不能从常见的44字节PCM头反推。
+  // 每个chunk按偶数字节对齐；漏掉padding会把后续四字节标识读到错误边界。
+  // 只接受真实RIFF/WAVE和可达data chunk，损坏fixture必须在调用ChatGPT前本地失败。
+  let chunk = 12
+  while (chunk + 8 <= input.length && input.toString("ascii", chunk, chunk + 4) !== "data") {
+    const size = input.readUInt32LE(chunk + 4)
+    chunk += 8 + size + (size % 2)
+  }
+  if (input.toString("ascii", 0, 4) !== "RIFF" || input.toString("ascii", 8, 12) !== "WAVE" || chunk + 8 > input.length) {
+    throw new Error("voice E2E source is not a supported RIFF/WAVE file")
+  }
+  const blockAlign = input.readUInt16LE(32)
+  // WAV的fmt chunk不保证固定16字节；按真实data chunk扩展，避免44字节头假设破坏合法PCM容器。
+  // 使用header byteRate保持源采样格式，按blockAlign取整保证最后一个sample frame完整。
+  const dataBytes = Math.floor((seconds * input.readUInt32LE(28)) / blockAlign) * blockAlign
+  const dataStart = chunk + 8
+  const sourceBytes = Math.floor(Math.min(input.readUInt32LE(chunk + 4), input.length - dataStart) / blockAlign) * blockAlign
+  if (sourceBytes === 0 || sourceBytes > dataBytes) throw new Error("voice E2E marker has no usable PCM frames")
+  const output = Buffer.alloc(dataStart + dataBytes)
+  input.copy(output, 0, 0, dataStart)
+  // marker只放在容器末端；若传输或转写只处理开头，两个独立expected都会缺失并确定性报红。
+  input.copy(output, dataStart + dataBytes - sourceBytes, dataStart, dataStart + sourceBytes)
+  output.writeUInt32LE(output.length - 8, 4)
+  output.writeUInt32LE(dataBytes, chunk + 4)
+  await Bun.write(target, output)
+}
 
 describe("prompt voice input", () => {
   // 这个用例锁定 argv 传参边界：录音文件路径只能作为一个参数进入转写器。
@@ -660,4 +692,145 @@ describe("prompt voice input", () => {
     // controller 保证只在转写成功后调用一次 insertText，传入完整文本。
     expect(inserted).toEqual(["hello world"])
   })
+
+  voiceE2E(
+    "runs a five-minute WAV through the configured ChatGPT transcriber",
+    async () => {
+      // Bun测试preload会隔离XDG_DATA_HOME；E2E必须显式复用真实agent profile，不能拿临时空profile制造假未登录。
+      if (!process.env.CHATGPT_BROWSER_USER_DATA_DIR) {
+        throw new Error("voice E2E requires CHATGPT_BROWSER_USER_DATA_DIR for a logged-in agent profile")
+      }
+      if (process.platform !== "darwin") throw new Error("voice E2E late-marker fixture requires Darwin system audio tools")
+      const agent = path.resolve(import.meta.dir, "../../../../../thirdparty/chatgpt-browser-agent")
+      const script = path.join(agent, "chatgpt.js")
+      const source = path.join(agent, "test-voice-hello.wav")
+      const root = path.join(process.env.TMPDIR || "/private/tmp", "opencode", "voice")
+      const evidence = process.env.CHATGPT_VOICE_E2E_EVIDENCE
+      const state = path.join(root, `e2e-state-${process.pid}`)
+      const previousState = process.env.CHATGPT_STATE_DIR
+      // 固定本次daemon state，保证transcriber与finally命中同一个PID，不受test preload临时XDG清理时序影响。
+      // profile与state刻意分离：前者复用登录，后者隔离daemon token、日志和PID索引。
+      // 动态环境必须显式传给cleanup子进程，否则Bun可能回到preload的临时XDG并漏停owned Edge。
+      process.env.CHATGPT_STATE_DIR = state
+      const long = path.join(root, `tui-long-${process.pid}.wav`)
+      const short = path.join(root, `tui-short-${process.pid}.wav`)
+      const markerAiff = path.join(root, `tui-marker-${process.pid}.aiff`)
+      const marker = path.join(root, `tui-marker-${process.pid}.wav`)
+      await fs.mkdir(root, { recursive: true })
+      // 系统TTS只生成本地测试输入；argv调用避免shell解释，普通CI因voiceE2E门禁不会进入该分支。
+      const say = Bun.spawn(["/usr/bin/say", "-v", "Samantha", "-o", markerAiff, "purple checkpoint orange"], { stdout: "ignore", stderr: "ignore" })
+      if (await say.exited !== 0) throw new Error("voice E2E could not synthesize its late marker")
+      const convert = Bun.spawn(["/usr/bin/afconvert", markerAiff, "-o", marker, "-f", "WAVE", "-d", "LEI16@48000", "-c", "1"], { stdout: "ignore", stderr: "ignore" })
+      if (await convert.exited !== 0) throw new Error("voice E2E could not convert its late marker to PCM WAV")
+      await writeLateMarkerWav(marker, long, 300)
+      await fs.copyFile(source, short)
+      // long必须先于short消费；交换顺序会让独立expected失去检测迟到回放的能力。
+      const files = [long, short]
+      // 只记录本地断言所需事实；真实转录文本不得写入证据文件或daemon状态。
+      const inserted: string[] = []
+      const errors: string[] = []
+      const startedAt = Date.now()
+      let completed = false
+      let longRemoved = false
+      let shortRemoved = false
+      let longMarkersMatched = false
+      let shortMarkersMatched = false
+      let stopExitCode: number | null = null
+      let daemonObserved = false
+      let daemonExited = false
+      const transcriber = { command: "node", args: [script, "transcribe-file", "--file", "{file}", "--json"] }
+      const controller = createVoiceInputController({
+        transcriber: () => transcriber,
+        startRecorder: async () => {
+          const file = files.shift()
+          if (!file) throw new Error("voice E2E fixture queue is empty")
+          return {
+            file,
+            stop: async () => {},
+            // controller最终cleanup必须删除实际交给子进程的WAV，成功和timeout共用同一隐私边界。
+            abort: async () => fs.rm(file, { force: true }),
+          }
+        },
+        insertText: (text) => inserted.push(text),
+        onError: (message) => errors.push(message),
+      })
+      try {
+        await controller.toggle()
+        await controller.toggle()
+        expect(controller.status()).toEqual({ type: "idle" })
+        longRemoved = !(await Bun.file(long).exists())
+        expect(longRemoved).toBe(true)
+        // 长音频必须返回只存在于本fixture末端的两个marker；任意非空或short旧结果都不能证明末端被处理。
+        if (errors.length > 0) throw new Error(`five-minute voice failed: ${errors.join(" | ")}`)
+        const longText = inserted[0]?.toLowerCase() ?? ""
+        longMarkersMatched = longText.includes("purple") && longText.includes("orange")
+        expect(longText).toContain("purple")
+        expect(longText).toContain("orange")
+
+        const errorsBeforeShort = errors.length
+        await controller.toggle()
+        await controller.toggle()
+        expect(controller.status()).toEqual({ type: "idle" })
+        shortRemoved = !(await Bun.file(short).exists())
+        expect(shortRemoved).toBe(true)
+        if (errors.length !== errorsBeforeShort) throw new Error(`subsequent short voice failed: ${errors.slice(errorsBeforeShort).join(" | ")}`)
+        // short使用另一组独立expected，确保第二次结果不是long marker的迟到回放。
+        const shortText = inserted.at(-1)?.toLowerCase() ?? ""
+        shortMarkersMatched = shortText.includes("hello") && shortText.includes("world")
+        expect(shortText).toContain("hello")
+        expect(shortText).toContain("world")
+        completed = true
+      } finally {
+        // 任一marker断言失败也必须先删除音频，再处理daemon；敏感WAV不能依赖成功路径清理。
+        await fs.rm(long, { force: true })
+        await fs.rm(short, { force: true })
+        await fs.rm(markerAiff, { force: true })
+        await fs.rm(marker, { force: true })
+        try {
+          const daemon = await Bun.file(path.join(state, "daemon.json")).json().catch(() => null) as { pid?: number } | null
+          daemonObserved = typeof daemon?.pid === "number"
+          // stop走真实CLI ownership：shared CDP只disconnect，owned browser才关闭自身窗口。
+          // 退出码只证明stop请求被接受；必须继续观察精确PID，才能证明profile锁和浏览器进程已释放。
+          const stop = Bun.spawn(["node", script, "--stop"], { cwd: agent, env: process.env, stdout: "ignore", stderr: "ignore" })
+          stopExitCode = await stop.exited
+          if (stopExitCode !== 0) throw new Error("voice E2E could not stop its isolated daemon")
+          // 不能只相信stop退出码；精确旧PID仍存活时profile锁尚未安全释放。
+          const daemonAlive = () => {
+            if (!daemon?.pid) return false
+            try { process.kill(daemon.pid, 0); return true }
+            catch { return false }
+          }
+          const deadline = Date.now() + 10_000
+          while (daemonAlive() && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 100))
+          }
+          daemonExited = !daemonAlive()
+          if (!daemonExited) throw new Error(`voice E2E daemon ${daemon?.pid} did not exit after stop`)
+        } finally {
+          // state只能在daemon真实退出后删除，否则后续cleanup失去PID/token并留下无法管理的孤儿进程。
+          // 恢复调用方环境保证同一Bun进程中的其它测试不会误用已删除的隔离state。
+          await fs.rm(state, { recursive: true, force: true })
+          if (previousState === undefined) delete process.env.CHATGPT_STATE_DIR
+          else process.env.CHATGPT_STATE_DIR = previousState
+          // state删除是证据合同的一部分，防止本地bearer索引或测试PID残留在临时目录。
+          const stateRemoved = await fs.stat(state).then(() => false, () => true)
+          if (evidence) {
+            await fs.mkdir(path.dirname(evidence), { recursive: true })
+            // 可选本地证据只保留布尔结果和长度；普通CI不登录，也不依赖任何被忽略目录。
+            await Bun.write(evidence, JSON.stringify({
+              schemaVersion: 1,
+              generatedAt: new Date().toISOString(),
+              command: 'CHATGPT_VOICE_E2E=1 CHATGPT_BROWSER_USER_DATA_DIR=<agent-profile> bun test prompt-voice-input.test.ts --test-name-pattern "five-minute WAV"',
+              status: completed && stopExitCode === 0 && daemonObserved && daemonExited && stateRemoved ? "passed" : "failed",
+              elapsedMs: Date.now() - startedAt,
+              long: { durationSeconds: 300, markersMatched: longMarkersMatched, chars: inserted[0]?.trim().length ?? 0, wavRemoved: longRemoved },
+              short: { markersMatched: shortMarkersMatched, chars: inserted.at(-1)?.trim().length ?? 0, wavRemoved: shortRemoved },
+              cleanup: { stopExitCode, daemonObserved, daemonExited, stateRemoved },
+            }, null, 2) + "\n")
+          }
+        }
+      }
+    },
+    240_000,
+  )
 })
