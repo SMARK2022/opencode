@@ -3956,8 +3956,8 @@ it.instance(
       })
       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
       yield* llm.push(
-        reply().tool("goal", {}),
-        reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }),
+        reply().tool("goal", { operate: "read" }),
+        reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }),
         reply().text("pending recorded").stop(),
       )
       yield* prompt.loop({ sessionID: chat.id })
@@ -3984,8 +3984,8 @@ it.instance(
       // D 经真实 Prompt/GoalTool path 再次使用同 reason；若 chronology 被 S rewind，
       // 这里会错误成为 attempt 2 并把 Goal 终态化，因此最终 active 是行为级信号。
       yield* llm.push(
-        reply().tool("goal", {}),
-        reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }),
+        reply().tool("goal", { operate: "read" }),
+        reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }),
         reply().text("second pending recorded").stop(),
       )
       yield* prompt.loop({ sessionID: chat.id })
@@ -4030,8 +4030,8 @@ it.instance(
         goalContinuation: true,
       })
       yield* llm.push(
-        reply().tool("goal", {}),
-        reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }),
+        reply().tool("goal", { operate: "read" }),
+        reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }),
         reply().text("blocked recorded").stop(),
       )
       yield* prompt.loop({ sessionID: chat.id })
@@ -4062,8 +4062,8 @@ it.instance(
       const terminalTurn = yield* user(chat.id, "finish now", { created: 1_000 })
       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
       yield* llm.push(
-        reply().tool("goal", {}),
-        reply().tool("goal", { mark: "complete", reason: "all work verified" }),
+        reply().tool("goal", { operate: "read" }),
+        reply().tool("goal", { operate: "complete", reason: "all work verified" }),
         reply().text("complete recorded").stop(),
       )
       yield* prompt.loop({ sessionID: chat.id })
@@ -4076,8 +4076,8 @@ it.instance(
         synthetic: true,
       })
       yield* llm.push(
-        reply().tool("goal", {}),
-        reply().tool("goal", { mark: "active" }),
+        reply().tool("goal", { operate: "read" }),
+        reply().tool("goal", { operate: "active" }),
         reply().text("technical recovery rejected").stop(),
       )
       yield* prompt.loop({ sessionID: chat.id })
@@ -4092,8 +4092,8 @@ it.instance(
         goalContinuation: true,
       })
       yield* llm.push(
-        reply().tool("goal", {}),
-        reply().tool("goal", { mark: "active" }),
+        reply().tool("goal", { operate: "read" }),
+        reply().tool("goal", { operate: "active" }),
         reply().text("continuation recovery rejected").stop(),
       )
       yield* prompt.loop({ sessionID: chat.id })
@@ -4102,8 +4102,8 @@ it.instance(
 
       yield* user(chat.id, "please continue", { created: 4_000 })
       yield* llm.push(
-        reply().tool("goal", {}),
-        reply().tool("goal", { mark: "active" }),
+        reply().tool("goal", { operate: "read" }),
+        reply().tool("goal", { operate: "active" }),
         reply().text("recovery accepted").stop(),
       )
       yield* prompt.loop({ sessionID: chat.id })

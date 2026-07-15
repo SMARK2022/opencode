@@ -18,17 +18,17 @@ export interface GoalTurnContext {
 }
 
 // goal 工具参数：
-// 无 mark → get 模式：返回当前 goal 的状态、objective、用量、预算和代际
-// 有 mark → transition 模式：需要先 get 建立 read snapshot
+// operate=read → 返回当前 goal 的状态、objective、用量、预算和代际
+// 其他 operate → transition 模式：需要先 read 建立 snapshot
 // complete/blocked 需要 reason；active 用于从 model-produced terminal 恢复
 export const Parameters = Schema.Struct({
-  mark: Schema.optional(Schema.Literals(["complete", "blocked", "active"] as const)).annotate({
+  operate: Schema.Literals(["read", "complete", "blocked", "active"] as const).annotate({
     description:
-      "Mark the goal as `complete` when the objective is achieved. Mark it as `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. Mark as `active` to resume a model-produced terminal goal in a later user turn. Omit to get the current goal status.",
+      "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. Use `active` to resume a model-produced terminal goal in a later user turn.",
   }),
   reason: Schema.optional(Schema.String).annotate({
     description:
-      "Required when marking `complete` or `blocked`. A concise explanation of why the goal is being marked. Ignored for `active`.",
+      "Required when operate is `complete` or `blocked`. A concise explanation of why the goal is being marked. Ignored for `read` and `active`.",
   }),
 })
 
@@ -40,23 +40,23 @@ export interface GoalToolExtra {
   goalTurn?: GoalTurnContext
 }
 
-// 省略 mark 被刻意保留为读取动作；若拆成第二个工具，trusted snapshot 无法留在同一 Tool context。
-// transition 必须先 get 建立 read snapshot——防止模型不看 GOAL 就直接终态化。
+// 显式 read 避免 provider 把可选字段错误展示成必填后，模型无法表达读取动作。
+// transition 必须先 operate=read 建立 snapshot——防止模型不看 GOAL 就直接终态化。
 // 不允许模型 pause/resume/clear/改预算——这些由用户或系统控制。
 export const GoalTool = Tool.define(
   "goal",
   Effect.succeed({
     description: DESCRIPTION,
     parameters: Parameters,
-    execute: (params: { mark?: "complete" | "blocked" | "active"; reason?: string }, ctx: Tool.Context) =>
+    execute: (params: { operate: "read" | "complete" | "blocked" | "active"; reason?: string }, ctx: Tool.Context) =>
       Effect.gen(function* () {
         const extra = ctx.extra as GoalToolExtra | undefined
         if (!extra?.goalSvc) {
           return yield* Effect.fail(new Error("goal tool requires goalSvc in ctx.extra"))
         }
 
-        // 无 mark 参数 → get 模式：返回当前 goal 的完整信息
-        if (params.mark === undefined) {
+        // read 是唯一读取动作，不再依赖 provider 对空对象/可选字段的展示语义。
+        if (params.operate === "read") {
           const goalOpt = yield* extra.goalSvc.get(ctx.sessionID)
           if (Option.isNone(goalOpt)) {
             return {
@@ -96,12 +96,12 @@ export const GoalTool = Tool.define(
           }
         }
 
-        // 有 mark 参数 → transition 模式
-        // read gate：必须先 get 建立 trusted snapshot，防止模型不看 GOAL 就终态化
+        // 其他 operate → transition 模式
+        // read gate：必须先 operate=read 建立 trusted snapshot，防止模型不看 GOAL 就终态化
         if (!extra.goalTurn?.read) {
           return yield* Effect.fail(
             new Error(
-              "You must call the goal tool with no arguments to read the current goal before marking it. Read the current goal, then retry the transition with mark and reason.",
+              "You must call the goal tool with operate `read` before changing the goal. Read the current goal, then retry with operate and reason.",
             ),
           )
         }
@@ -111,7 +111,7 @@ export const GoalTool = Tool.define(
           turnID: extra.goalTurn.id,
           previousTurnID: extra.goalTurn.previousID,
           userInitiated: extra.goalTurn.userInitiated,
-          status: params.mark,
+          status: params.operate,
           reason: params.reason,
         })
 
@@ -144,7 +144,7 @@ export const GoalTool = Tool.define(
         return {
           title: "Goal blocked (pending)",
           metadata: {},
-          output: `Blocked attempt ${result.attempt} of ${result.required}. Before marking as blocked, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call mark blocked again in the next eligible Goal turn with the same trimmed reason to confirm the blocker is persistent.`,
+          output: `Blocked attempt ${result.attempt} of ${result.required}. Before marking as blocked, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call operate blocked again in the next eligible Goal turn with the same trimmed reason to confirm the blocker is persistent.`,
         }
       }).pipe(Effect.orDie),
   }),

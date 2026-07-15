@@ -393,13 +393,13 @@ it.instance(
       if (Option.isSome(result)) {
         const prompt = SessionGoal.continuationPrompt(result.value)
         // 续跑 prompt 是模型判断 terminal transition 的真实 contract；除目标和预算外，
-        // 必须使用实际参数名 `mark`，并与 runtime 的两轮同 reason 规则完全一致。
+        // 必须使用实际参数名 `operate`，并与 runtime 的两轮同 reason 规则完全一致。
         expect(prompt).toContain("<session-goal-continuation>")
         expect(prompt).toContain("build the feature")
         expect(prompt).toContain("Tokens used: 1234")
         expect(prompt).toContain("Token budget: 50000")
         expect(prompt).toContain("Tokens remaining: 48766")
-        expect(prompt).toContain('call the goal tool with mark "complete"')
+        expect(prompt).toContain('call the goal tool with operate "complete"')
         expect(prompt).toContain("two consecutive eligible Goal turns")
         expect(prompt).toContain("the same trimmed reason")
         // continuation 是自动续跑前的完整合同，不能只让首次 Tool result 承担探索指导。
