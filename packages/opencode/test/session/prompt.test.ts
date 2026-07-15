@@ -4403,8 +4403,8 @@ it.instance(
       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
       // 目标 llm API：每次 push 一个完整 provider turn（tool call + stop），
       // 随后 llm.text 提供下一 turn 的文本回复
-      yield* llm.push(reply().tool("goal", {}).stop())
-      yield* llm.push(reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }).stop())
+      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
+      yield* llm.push(reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }).stop())
       yield* llm.text("pending recorded")
       yield* prompt.loop({ sessionID: chat.id })
 
@@ -4429,8 +4429,8 @@ it.instance(
 
       // D 经真实 Prompt/GoalTool path 再次使用同 reason；若 chronology 被 S rewind，
       // 这里会错误成为 attempt 2 并把 Goal 终态化，因此最终 active 是行为级信号。
-      yield* llm.push(reply().tool("goal", {}).stop())
-      yield* llm.push(reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }).stop())
+      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
+      yield* llm.push(reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }).stop())
       yield* llm.text("second pending recorded")
       yield* prompt.loop({ sessionID: chat.id })
 
@@ -4473,9 +4473,11 @@ it.instance(
         synthetic: true,
         goalContinuation: true,
       })
-      yield* llm.push(reply().tool("goal", {}).stop())
-      yield* llm.push(reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }).stop())
+      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
+      yield* llm.push(reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }).stop())
       yield* llm.text("blocked recorded")
+      // [local-smark] 阻塞式 loop：断言依赖 loop 完成后的 Goal 终态（blocked-pending 两次确认），
+      // fork 竞态会在终态落盘前读取，确定性破坏验证
       yield* prompt.loop({ sessionID: chat.id })
 
       // 旧 marker 没有 lineage，但 compaction part 足以证明它是 technical；
@@ -4503,8 +4505,10 @@ it.instance(
 
       const terminalTurn = yield* user(chat.id, "finish now", { created: 1_000 })
       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
-      yield* llm.push(reply().tool("goal", {}).stop())
-      yield* llm.push(reply().tool("goal", { mark: "complete", reason: "all work verified" }).stop())
+      // [local-smark] E2E 先 read 建立快照再 operate 终态转换——必填 schema 下旧空调用会被 decode 拒绝，
+      // read→complete 配对同时锁定 trusted-read 前置条件
+      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
+      yield* llm.push(reply().tool("goal", { operate: "complete", reason: "all work verified" }).stop())
       yield* llm.text("complete recorded")
       yield* prompt.loop({ sessionID: chat.id })
 
@@ -4515,8 +4519,8 @@ it.instance(
         created: 2_000,
         synthetic: true,
       })
-      yield* llm.push(reply().tool("goal", {}).stop())
-      yield* llm.push(reply().tool("goal", { mark: "active" }).stop())
+      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
+      yield* llm.push(reply().tool("goal", { operate: "active" }).stop())
       yield* llm.text("technical recovery rejected")
       yield* prompt.loop({ sessionID: chat.id })
       const afterTechnical = yield* goalSvc.get(chat.id)
@@ -4529,16 +4533,16 @@ it.instance(
         synthetic: true,
         goalContinuation: true,
       })
-      yield* llm.push(reply().tool("goal", {}).stop())
-      yield* llm.push(reply().tool("goal", { mark: "active" }).stop())
+      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
+      yield* llm.push(reply().tool("goal", { operate: "active" }).stop())
       yield* llm.text("continuation recovery rejected")
       yield* prompt.loop({ sessionID: chat.id })
       const afterContinuation = yield* goalSvc.get(chat.id)
       if (afterContinuation._tag === "Some") expect(afterContinuation.value.status).toBe("complete")
 
       yield* user(chat.id, "please continue", { created: 4_000 })
-      yield* llm.push(reply().tool("goal", {}).stop())
-      yield* llm.push(reply().tool("goal", { mark: "active" }).stop())
+      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
+      yield* llm.push(reply().tool("goal", { operate: "active" }).stop())
       yield* llm.text("recovery accepted")
       yield* prompt.loop({ sessionID: chat.id })
 
