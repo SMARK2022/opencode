@@ -11,7 +11,7 @@ This document describes how to build, inspect, install, and publish the SMARK Op
 | Source repository | `https://github.com/SMARK2022/opencode` |
 | Source branch | `dev-smark` |
 | Repository extension version | `1.15.10` |
-| Recommended CLI | `opencode 1.15.10-smark` |
+| Recommended CLI | `opencode 1.15.11-smark` |
 | Default version source | `sdks/vscode/package.json` |
 | Local VSIX name | `dist/SMARK2022.opencode-ide-bridge-<version>.vsix` |
 | CI/GitHub Release VSIX name | `dist/opencode-vscode-<version>.vsix` |
@@ -158,7 +158,7 @@ Do not publish before the extension manifest, README, and recommended CLI statem
 
 ## Versioning
 
-Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.15.10`) so Marketplace tooling accepts it; the recommended CLI is `1.15.10-smark`, but the two packages remain independently versioned.
+Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.15.10`) so Marketplace tooling accepts it; the recommended CLI is `1.15.11-smark`, but the two packages remain independently versioned.
 
 Pushes to `dev-smark` that change `sdks/vscode/**` run `.github/workflows/build-vsix.yml`. By default it reads the manifest version, writes `dist/opencode-vscode-<version>.vsix`, and creates or updates the `vscode-v<version>` GitHub prerelease. A manual `workflow_dispatch.version` leaves the repository manifest and README unchanged but overrides the manifest version inside the packaged VSIX, so use it only for an intentional temporary rebuild and expect the packaged README version statement to remain unchanged. The workflow does not publish Marketplace or Open VSX.
 

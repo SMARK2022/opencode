@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.10-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.11-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **O ovoj grani**: Ovo je OpenCode `dev-smark` poboljšana grana (trenutna verzija `1.15.10`, CLI release tag `v1.15.10-smark`). Zasnovana je na upstream `dev` grani i fokusira se na TUI interakciju, upravljanje sesijama, statistiku tokena, Windows/PowerShell kompatibilnost, integraciju VS Code jezičkih servisa i Notebooka, podršku za mrežni proxy i iskustvo instalacije.
+> **O ovoj grani**: Ovo je OpenCode `dev-smark` poboljšana grana (trenutna verzija `1.15.11`, CLI release tag `v1.15.11-smark`). Zasnovana je na upstream `dev` grani i fokusira se na TUI interakciju, upravljanje sesijama, statistiku tokena, Windows/PowerShell kompatibilnost, integraciju VS Code jezičkih servisa i Notebooka, podršku za mrežni proxy i iskustvo instalacije.
 
 ---
 
@@ -93,10 +93,10 @@ To prosljeđuje `OPENCODE_INSTALL_DIR` samo komandi `curl`, ne `bash` procesu ko
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.10-smark
+  bash -s -- --version 1.15.11-smark
 ```
 
-Ovo je potpuni oblik: `bash -s --` kaže komandi `bash` da čita installer iz stdin i proslijedi `--version 1.15.10-smark` kao argumente installera. Verzija može biti `1.15.10-smark` ili oblik release taga `v1.15.10-smark`.
+Ovo je potpuni oblik: `bash -s --` kaže komandi `bash` da čita installer iz stdin i proslijedi `--version 1.15.11-smark` kao argumente installera. Verzija može biti `1.15.11-smark` ili oblik release taga `v1.15.11-smark`.
 
 ### Ponašanje Installera
 
@@ -240,7 +240,7 @@ Interna statistika preferira request usage podatke i vraća se na metapodatke po
 
 ### Integracija VS Code Jezičkih Servisa I Notebooka
 
-Za korištenje VS Code jezičkih servisa ili Notebook alata instalirajte [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Verzija ekstenzije u repozitoriju je `1.15.10`, a preporučeni SMARK CLI je `1.15.10-smark`; verzije su nezavisne. Ekstenzija kreira lokalni autentificirani bridge za jezičke servise i VS Code/Jupyter Notebook. Bez veze CLI zadržava ugrađeni LSP, ali VS Code operacije i Notebook alati nisu dostupni.
+Za korištenje VS Code jezičkih servisa ili Notebook alata instalirajte [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Verzija ekstenzije u repozitoriju je `1.15.10`, a preporučeni SMARK CLI je `1.15.11-smark`; verzije su nezavisne. Ekstenzija kreira lokalni autentificirani bridge za jezičke servise i VS Code/Jupyter Notebook. Bez veze CLI zadržava ugrađeni LSP, ali VS Code operacije i Notebook alati nisu dostupni.
 
 Ekstenzija ne sadrži language server; koristi providere koje registruju aktivne jezičke ekstenzije u trenutnom VS Code prozoru za touch, diagnostics, hover, definition, references i document/workspace symbols. Neuspješan bridge zahtjev vraća se na ugrađeni LSP, a diagnostics se vraća i kada struktura odgovora nije ispravna; drugi uspješni odgovori bez očekivanog polja trenutno se mogu tumačiti kao prazni. Implementation i call hierarchy uvijek ostaju na ugrađenom LSP-u, a ispravan prazan rezultat ne dokazuje potpuni project typecheck.
 

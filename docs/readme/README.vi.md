@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.10-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.11-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Ve nhanh nay**: Day la nhanh nang cao `dev-smark` cua OpenCode (phien ban hien tai `1.15.10`, CLI release tag `v1.15.10-smark`). Nhanh nay dua tren upstream `dev` va tap trung vao tuong tac TUI, quan ly phien, thong ke token, tuong thich Windows/PowerShell, dich vu ngon ngu va tich hop Notebook cua VS Code, ho tro network proxy va trai nghiem cai dat.
+> **Ve nhanh nay**: Day la nhanh nang cao `dev-smark` cua OpenCode (phien ban hien tai `1.15.11`, CLI release tag `v1.15.11-smark`). Nhanh nay dua tren upstream `dev` va tap trung vao tuong tac TUI, quan ly phien, thong ke token, tuong thich Windows/PowerShell, dich vu ngon ngu va tich hop Notebook cua VS Code, ho tro network proxy va trai nghiem cai dat.
 
 ---
 
@@ -93,10 +93,10 @@ Cach do chi truyen `OPENCODE_INSTALL_DIR` cho `curl`, khong truyen cho tien trin
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.10-smark
+  bash -s -- --version 1.15.11-smark
 ```
 
-Day la dang day du: `bash -s --` bao `bash` doc installer tu stdin va truyen `--version 1.15.10-smark` lam doi so installer. Phien ban co the la `1.15.10-smark` hoac dang release tag `v1.15.10-smark`.
+Day la dang day du: `bash -s --` bao `bash` doc installer tu stdin va truyen `--version 1.15.11-smark` lam doi so installer. Phien ban co the la `1.15.11-smark` hoac dang release tag `v1.15.11-smark`.
 
 ### Hanh Vi Installer
 
@@ -240,7 +240,7 @@ Thong ke noi bo uu tien du lieu request usage va fallback ve message metadata ch
 
 ### Tich Hop Language Services Va Notebook Cua VS Code
 
-De dung dich vu ngon ngu cua VS Code hoac Notebook tools, hay cai [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Phien ban extension trong repository la `1.15.10`, va khuyen dung SMARK CLI `1.15.10-smark`; hai phien ban doc lap. Extension tao local authenticated bridge cho dich vu ngon ngu va VS Code/Jupyter Notebook. Khi khong ket noi, CLI van dung LSP tich hop, nhung khong co VS Code-backed operations va Notebook tools.
+De dung dich vu ngon ngu cua VS Code hoac Notebook tools, hay cai [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Phien ban extension trong repository la `1.15.10`, va khuyen dung SMARK CLI `1.15.11-smark`; hai phien ban doc lap. Extension tao local authenticated bridge cho dich vu ngon ngu va VS Code/Jupyter Notebook. Khi khong ket noi, CLI van dung LSP tich hop, nhung khong co VS Code-backed operations va Notebook tools.
 
 Extension khong kem language server; no dung providers do language extensions dang bat trong cua so VS Code hien tai dang ky cho touch, diagnostics, hover, definition, references va document/workspace symbols. Khi bridge request that bai, CLI fallback ve LSP tich hop; diagnostics cung fallback khi response structure khong hop le, con successful responses khac thieu expected result field hien co the bi hieu la rong. Implementation va call hierarchy luon dung LSP tich hop, va ket qua rong hop le khong chung minh toan bo project typecheck da pass.
 
