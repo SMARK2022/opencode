@@ -151,11 +151,13 @@ export const Info = Schema.Struct({
           Schema.Union([PositiveInt, Schema.Literal(false)]).annotate({
             description:
               // [local-smark] chunk 空闲超时默认 3 分钟:挂起连接更早暴露;显式正值/false 仍可覆盖。
-              "Timeout in milliseconds between streamed SSE chunks for this provider. Default is 180000 (3 minutes). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout.",
+              // [local-smark] 文案与 progressDeadline 语义对齐：dispatch 起算、每块重置，
+              // 旧文案只描述块间隔窗口，会误导 provider 集成方对超时行为的预期；false 禁用语义保留
+              "Timeout in milliseconds from request dispatch to the first streamed SSE chunk and between subsequent chunks. Each received chunk resets the window. Default is 180000 (3 minutes). Set to false to disable timeout.",
           }),
         ).annotate({
           description:
-              "Timeout in milliseconds between streamed SSE chunks for this provider. Default is 180000 (3 minutes). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout.",
+              "Timeout in milliseconds from request dispatch to the first streamed SSE chunk and between subsequent chunks. Each received chunk resets the window. Default is 180000 (3 minutes). Set to false to disable timeout.",
         }),
       }),
       [Schema.Record(Schema.String, Schema.Any)],

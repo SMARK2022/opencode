@@ -567,7 +567,7 @@ const state = {
   server: null as ReturnType<typeof Bun.serve> | null,
   queue: [] as Array<{
     path: string
-    response: Response | ((req: Request, capture: Capture) => Response)
+    response: Response | ((req: Request, capture: Capture) => Response | Promise<Response>)
     resolve: (value: Capture) => void
   }>,
 }
@@ -580,7 +580,10 @@ function deferred<T>() {
   return result
 }
 
-function waitRequest(pathname: string, response: Response) {
+function waitRequest(
+  pathname: string,
+  response: Response | ((req: Request, capture: Capture) => Response | Promise<Response>),
+) {
   const pending = deferred<Capture>()
   state.queue.push({ path: pathname, response, resolve: pending.resolve })
   return pending.promise
@@ -592,7 +595,7 @@ function timeout(ms: number) {
   })
 }
 
-function waitStreamingRequest(pathname: string) {
+function waitStreamingRequest(pathname: string, firstChunkDelayMs = 0) {
   const request = deferred<Capture>()
   const requestAborted = deferred<void>()
   const responseCanceled = deferred<void>()
@@ -606,7 +609,8 @@ function waitStreamingRequest(pathname: string) {
 
       return new Response(
         new ReadableStream<Uint8Array>({
-          start(controller) {
+          async start(controller) {
+            if (firstChunkDelayMs > 0) await Bun.sleep(firstChunkDelayMs)
             controller.enqueue(
               encoder.encode(
                 [
@@ -670,7 +674,7 @@ afterAll(() => {
   void state.server?.stop()
 })
 
-function createChatStream(text: string) {
+function createChatStream(text: string, delayMs = 0) {
   const payload =
     [
       `data: ${JSON.stringify({
@@ -693,8 +697,20 @@ function createChatStream(text: string) {
 
   const encoder = new TextEncoder()
   return new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(encoder.encode(payload))
+    async start(controller) {
+      if (delayMs <= 0) {
+        controller.enqueue(encoder.encode(payload))
+        controller.close()
+        return
+      }
+
+      // 总流时长故意超过 timeout，但每个 raw chunk 间隔都小于 timeout，锁定“不累计、每块重置”。
+      // 若实现把 gap 累加成总时长，后续 chunk 会在最后一个 payload 到达前触发 abort。
+      // 每一块都经过同一 ReadableStream body，避免测试只模拟 semantic text delta。
+      for (const line of payload.split("\n\n").filter(Boolean)) {
+        controller.enqueue(encoder.encode(`${line}\n\n`))
+        await Bun.sleep(delayMs)
+      }
       controller.close()
     },
   })
@@ -875,6 +891,77 @@ describe("session.llm.stream", () => {
   // 快路径流式毫秒级完成不会真正触发死线，通过 fetch.start 日志字段断言默认值；
   // 同时断言 sse.end 出现，证明默认 chunk 超时已启用 wrapSSE（此前未配置时不启用）。
   it.instance(
+    "times out before delayed provider headers at the configured chunk boundary",
+    () =>
+      withProviderLogs((logs) => Effect.gen(function* () {
+        const providerID = "delayed-header-openai-compatible"
+        const responseReady = deferred<void>()
+        const requestAborted = deferred<void>()
+        let events: ReturnType<typeof providerFetchEvents> = []
+        const request = waitRequest("/chat/completions", async (req) => {
+          // 请求已到达但 headers 延迟 100ms；这与"工具完成后首个 chunk 长时间静默"的边界一致。
+          // abort listener 必须挂在同一个 Request.signal 上，才能证明 Provider deadline 到达了真实 transport。
+          req.signal.addEventListener("abort", () => requestAborted.resolve(), { once: true })
+          await new Promise((resolve) => setTimeout(resolve, 100))
+          responseReady.resolve()
+          return new Response(createChatStream("late"), {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          })
+        })
+        const resolved = yield* Provider.use.getModel(ProviderV2.ID.make(providerID), ModelV2.ID.make("gpt-test"))
+        const sessionID = SessionID.make("session-provider-delayed-header")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("msg_user-provider-delayed-header"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderV2.ID.make(providerID), modelID: resolved.id },
+        } satisfies SessionV1.User
+        // deadline 在 header 等待期到达时 drain 以 SSE_READ_TIMEOUT 失败——用 Exit 承接，不污染测试错误通道。
+        const exit = yield* drain({
+          user,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          messages: [{ role: "user", content: "Hello" }],
+          tools: {},
+        }).pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBe(true)
+        yield* Effect.promise(() => Promise.allSettled([request, responseReady.promise, requestAborted.promise]))
+        events = providerFetchEvents(logs)
+        // 首个 raw chunk 尚未到达时也必须记录同一个 no-progress 失败，不能退回 Bun 的五分钟 idle timeout。
+        expect(events.map((event) => event.phase)).toContain("sse.timeout")
+        // chunkCount=0 区分 headers 前超时与首 chunk 后 stall；chunkTimeoutMs 断言配置 provenance。
+        expect(events.find((event) => event.phase === "sse.timeout")?.chunkCount).toBe("0")
+        expect(events.find((event) => event.phase === "sse.timeout")?.chunkTimeoutMs).toBe("25")
+        // abort 必须传播到真实 transport（server handler 的 abort listener 已被触发）。
+        expect(requestAborted).toBeDefined()
+      })),
+    {
+      config: () => ({
+        enabled_providers: ["delayed-header-openai-compatible"],
+        provider: {
+          "delayed-header-openai-compatible": {
+            npm: "@ai-sdk/openai-compatible",
+            name: "Delayed Header Provider",
+            options: { apiKey: "[redacted]", baseURL: `${state.server!.url.origin}/v1`, chunkTimeout: 25 },
+            models: { "gpt-test": { name: "GPT Test", modalities: { input: ["text"], output: ["text"] } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
     "applies default overall and chunk timeouts when neither is configured",
     () =>
       withProviderLogs((logs) => Effect.gen(function* () {
@@ -948,7 +1035,8 @@ describe("session.llm.stream", () => {
       withProviderLogs((logs) => Effect.gen(function* () {
         const request = waitRequest(
           "/chat/completions",
-          new Response(createChatStream("Hello"), {
+          // 总流时长(20 块×20ms)超过 50ms 窗口而每块间隙小于窗口——锁定「不累计、每块重置」
+          new Response(createChatStream("Hello", 20), {
             status: 200,
             headers: { "Content-Type": "text/event-stream" },
           }),
@@ -997,7 +1085,7 @@ describe("session.llm.stream", () => {
           "timed-openai-compatible": {
             npm: "@ai-sdk/openai-compatible",
             name: "Timed Provider",
-            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1`, chunkTimeout: 1_000 },
+            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1`, chunkTimeout: 50 },
             models: {
               "gpt-test": {
                 name: "GPT Test",
@@ -1564,11 +1652,12 @@ describe("session.llm.stream", () => {
 
   const alibabaQwenFixture = { providerID: "alibaba", modelID: "qwen-plus" }
   it.instance(
-    "service stream cancellation cancels provider response body promptly",
+    "service stream cancellation before first progress cancels the deadline promptly",
     () =>
-      Effect.gen(function* () {
+      withProviderLogs((logs) => Effect.gen(function* () {
         const fixture = loadFixture(alibabaQwenFixture.providerID, alibabaQwenFixture.modelID)
-        const pending = waitStreamingRequest("/chat/completions")
+        // 延迟首个 raw chunk，确保 user abort 发生在 headers/first-progress deadline 仍在等待时。
+        const pending = waitStreamingRequest("/chat/completions", 100)
 
         const resolved = yield* Provider.use.getModel(
           ProviderV2.ID.make(alibabaQwenFixture.providerID),
@@ -1612,13 +1701,18 @@ describe("session.llm.stream", () => {
           expect(Cause.hasInterrupts(inner.cause)).toBe(true)
         }
         yield* Effect.promise(() => Promise.race([pending.requestAborted, timeout(500)]).catch(() => undefined))
-      }),
+        // 等待一个完整 chunkTimeout 周期：若 cancel 未停止 deadline，25ms 定时器此刻必已触发，负断言才有区分力
+        yield* Effect.sleep(100)
+        const events = providerFetchEvents(logs)
+        // 取消先于 chunkTimeout(25ms) 到达：deadline 不得发出 sse.timeout（否则取消不够 prompt）。
+        expect(events.map((event) => event.phase)).not.toContain("sse.timeout")
+      })),
     {
       config: () => ({
         enabled_providers: [alibabaQwenFixture.providerID],
         provider: {
           [alibabaQwenFixture.providerID]: {
-            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` },
+            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` , chunkTimeout: 25 },
           },
         },
       }),
@@ -1710,7 +1804,7 @@ describe("session.llm.stream", () => {
         enabled_providers: [alibabaQwenFixture.providerID],
         provider: {
           [alibabaQwenFixture.providerID]: {
-            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` },
+            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1`  },
           },
         },
       }),
@@ -2183,7 +2277,7 @@ describe("session.llm.stream", () => {
               npm: "@ai-sdk/openai",
               api: "https://api.openai.com/v1",
               models: { [model.id]: JSON.parse(JSON.stringify(model)) as ConfigModel },
-              options: { apiKey: "test-openai-key", baseURL: `${state.server!.url.origin}/v1` },
+              options: { apiKey: "test-openai-key", baseURL: `${state.server!.url.origin}/v1`  },
             },
           },
         }
@@ -2379,7 +2473,7 @@ describe("session.llm.stream", () => {
         enabled_providers: [minimaxFixture.providerID],
         provider: {
           [minimaxFixture.providerID]: {
-            options: { apiKey: "test-anthropic-key", baseURL: `${state.server!.url.origin}/v1` },
+            options: { apiKey: "test-anthropic-key", baseURL: `${state.server!.url.origin}/v1`  },
           },
         },
       }),
@@ -2604,7 +2698,7 @@ describe("session.llm.stream", () => {
               npm: "@ai-sdk/anthropic",
               api: "https://api.anthropic.com/v1",
               models: { [model.id]: configModel(model) as ConfigModel },
-              options: { apiKey: "test-anthropic-key", baseURL: `${state.server!.url.origin}/v1` },
+              options: { apiKey: "test-anthropic-key", baseURL: `${state.server!.url.origin}/v1`  },
             },
           },
         }
@@ -2681,7 +2775,7 @@ describe("session.llm.stream", () => {
         enabled_providers: [geminiFixture.providerID],
         provider: {
           [geminiFixture.providerID]: {
-            options: { apiKey: "test-google-key", baseURL: `${state.server!.url.origin}/v1beta` },
+            options: { apiKey: "test-google-key", baseURL: `${state.server!.url.origin}/v1beta`  },
           },
         },
       }),

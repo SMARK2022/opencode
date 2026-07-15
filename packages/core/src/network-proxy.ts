@@ -27,7 +27,8 @@ type SystemProxy = {
   bypass: string[]
 }
 
-type RoutedInit = RequestInit & { purpose?: Purpose }
+// timeout属于调用方运输合同；路由选择不应剥离显式false或数字上限。
+type RoutedInit = RequestInit & { purpose?: Purpose; timeout?: false | number }
 type FetchInput = Request | string | URL
 type FetchFn = (input: FetchInput, init?: any) => Promise<Response>
 
@@ -240,9 +241,8 @@ export async function fetch(input: FetchInput, init?: RoutedInit): Promise<Respo
     signal = input instanceof Request ? input.signal : undefined,
     proxy: _incomingProxy,
     dispatcher: _incomingDispatcher,
-    timeout: _incomingTimeout,
     ...rest
-  } = (init ?? {}) as RoutedInit & { proxy?: BunFetchRequestInit["proxy"]; dispatcher?: unknown; timeout?: unknown }
+  } = (init ?? {}) as RoutedInit & { proxy?: BunFetchRequestInit["proxy"]; dispatcher?: unknown }
   const route = await resolveProxyRoute(url, purpose, false)
   // 路由探测期间也可能取消；开始网络运输前须结算同一个信号。
   signal?.throwIfAborted()
@@ -256,9 +256,8 @@ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?:
     signal = input instanceof Request ? input.signal : undefined,
     proxy: _incomingProxy,
     dispatcher: _incomingDispatcher,
-    timeout: _incomingTimeout,
     ...rest
-  } = (init ?? {}) as RoutedInit & { proxy?: BunFetchRequestInit["proxy"]; dispatcher?: unknown; timeout?: unknown }
+  } = (init ?? {}) as RoutedInit & { proxy?: BunFetchRequestInit["proxy"]; dispatcher?: unknown }
   signal?.throwIfAborted()
   return fetchFn(input, { ...rest, signal })
 }

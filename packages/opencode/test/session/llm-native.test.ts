@@ -217,6 +217,7 @@ describe("session.llm-native.request", () => {
       topP: 0.9,
       topK: 40,
       maxOutputTokens: 1024,
+      chunkTimeout: false,
       providerOptions: { openai: { store: false } },
       headers: { "x-request": "request-header" },
     })
@@ -246,6 +247,8 @@ describe("session.llm-native.request", () => {
       maxTokens: 1024,
     })
     expect(request.providerOptions).toEqual({ openai: { store: false } })
+    // 只在 typed HTTP 选项保留禁用值，不改 provider options 的精确断言。
+    expect(request.http?.chunkTimeout).toBe(false)
     expect(request.toolChoice).toMatchObject({ type: "required" })
     expect(request.tools).toMatchObject([
       {

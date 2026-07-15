@@ -1,7 +1,7 @@
 import { describe, expect } from "bun:test"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Queue, Random, Ref, References, Stream } from "effect"
 import * as TestClock from "effect/testing/TestClock"
-import { Headers, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
+import { FetchHttpClient, Headers, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { LLM, LLMError } from "../src"
 import { LLMClient, RequestExecutor } from "../src/route"
 import * as OpenAIChat from "../src/protocols/openai-chat"
@@ -468,6 +468,84 @@ describe("RequestExecutor", () => {
       expectLLMError(error)
       expect(error.reason).toMatchObject({ _tag: "Transport" })
       expect(yield* Ref.get(attempts)).toBe(3)
+    }),
+  )
+
+  it.effect("enforces raw HTTP progress deadlines without changing cancellation or explicit false", () =>
+    Effect.gen(function* () {
+      const encoder = new TextEncoder()
+      const model = OpenAIChat.route
+        .with({ endpoint: { baseURL: "https://api.openai.test/v1" }, http: { chunkTimeout: 50 } })
+        .model({ id: "gpt-4o-mini" })
+      for (const phase of ["headers", "body", "headers-and-body", "heartbeat", "disabled", "cancel"] as const) {
+        const ready = yield* Deferred.make<void>()
+        const reading = Promise.withResolvers<void>()
+        const controller = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>()
+        let cancelled = false
+        const body = () => new ReadableStream<Uint8Array>({
+          start(value) { controller.resolve(value) },
+          pull() { reading.resolve() },
+          cancel() { cancelled = true },
+        }, { highWaterMark: 0 })
+        const fiber = yield* LLMClient.generate(LLM.request({
+          model, prompt: "Hello", http: phase === "disabled" ? { chunkTimeout: false } : undefined,
+        })).pipe(
+          Effect.provide(dynamicResponse((input) => Effect.gen(function* () {
+            const init = yield* Effect.serviceOption(FetchHttpClient.RequestInit)
+            expect(init).toMatchObject({ value: { cache: "no-store", timeout: false } })
+            yield* Deferred.succeed(ready, undefined)
+            if (phase === "headers") return yield* Effect.never.pipe(
+              Effect.ensuring(Effect.sync(() => { cancelled = true })),
+            )
+            if (phase === "disabled" || phase === "headers-and-body") yield* Effect.sleep(phase === "disabled" ? 200 : 30)
+            return input.respond(body(), { headers: { "content-type": "text/event-stream" } })
+          }))),
+          Effect.provideService(FetchHttpClient.RequestInit, { cache: "no-store" }),
+          Effect.match({ onFailure: (error) => ({ error }), onSuccess: (response) => ({ response }) }),
+          Effect.forkChild,
+        )
+        yield* Deferred.await(ready)
+        if (phase === "headers-and-body") yield* TestClock.adjust(30)
+        if (phase === "headers" || phase === "body" || phase === "headers-and-body") {
+          if (phase !== "headers") yield* Effect.promise(() => reading.promise)
+          // 首次拉取包含 headers，后续 body 停滞同样给出 typed transport error 并释放 reader。
+          yield* TestClock.adjust(phase === "headers-and-body" ? 21 : 51)
+          // 未交付frame前仍遵循原有两次有限重试；每次新响应使用独立reader，不能回读已取消body。
+          for (const delay of [500, 1000]) yield* TestClock.adjust(delay + 51)
+          expect(yield* Fiber.join(fiber)).toMatchObject({
+            error: { reason: { _tag: "Transport", kind: "timeout", message: "SSE read timed out" } },
+          })
+          expect(cancelled).toBe(true)
+          continue
+        }
+        if (phase === "disabled") yield* TestClock.adjust(200)
+        yield* Effect.promise(() => reading.promise)
+        if (phase === "cancel") {
+          yield* Fiber.interrupt(fiber)
+          // 取消后的完整窗口不应继续运行期限，也不能遗留一个等待中的原始读取。
+          yield* TestClock.adjust(100)
+          expect(cancelled).toBe(true)
+          continue
+        }
+        const output = yield* Effect.promise(() => controller.promise)
+        if (phase === "heartbeat") {
+          // 总等待八十毫秒超过五十毫秒窗口；只有 raw 心跳重置才能完成，semantic event 不足以证明。
+          for (let index = 0; index < 4; index++) {
+            yield* TestClock.adjust(20)
+            output.enqueue(encoder.encode(": heartbeat\n\n"))
+            yield* Effect.yieldNow
+          }
+        }
+        output.enqueue(encoder.encode(sseRaw(
+          `data: ${JSON.stringify(deltaChunk({ role: "assistant", content: "Hello" }, "stop"))}`,
+          "data: [DONE]",
+        )))
+        output.close()
+        expect(yield* Fiber.join(fiber)).toMatchObject({ response: { text: "Hello" } })
+        // 正常 EOF 同样收尾；继续推进时钟不会把已完成请求变成超时失败。
+        yield* TestClock.adjust(100)
+        expect(cancelled).toBe(false)
+      }
     }),
   )
 

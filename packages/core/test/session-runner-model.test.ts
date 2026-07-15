@@ -120,7 +120,7 @@ describe("SessionRunnerModel", () => {
             type: "aisdk",
             package: "@ai-sdk/openai-compatible",
             url: "https://compatible.example/v1",
-            settings: { apiKey: "settings-secret", compatibility: "strict" },
+            settings: { apiKey: "settings-secret", compatibility: "strict", chunkTimeout: false },
           }),
           request: { headers: {}, body: {} },
         }),
@@ -136,6 +136,14 @@ describe("SessionRunnerModel", () => {
 
       expect(headers.authorization).toBe("Bearer settings-secret")
       expect(resolved.route.defaults.http?.body).toEqual({})
+      // 显式关闭能覆盖默认窗口，运输字段不能进入提供者 JSON。
+      expect(resolved.route.defaults.http?.chunkTimeout).toBe(false)
+      const compiled = yield* LLMClient.prepare(request)
+      expect(compiled.body).not.toHaveProperty("chunkTimeout")
+      const timed = yield* SessionRunnerModel.fromCatalogModel(model({
+        type: "aisdk", package: "@ai-sdk/openai", settings: { chunkTimeout: 25 },
+      }))
+      expect(timed.route.defaults.http?.chunkTimeout).toBe(25)
       // 在唯一HTTP准备路径观察最终body，不把未合并HTTP扩展的protocol body当wire。
       const bodies: unknown[] = []
       for (const [provider, id, pkg, body] of [
