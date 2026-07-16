@@ -20,6 +20,7 @@ import { rootSession } from "@/utils/session-route"
 import { normalizeSessionInfo } from "@/utils/session"
 import { compareMessages, messageKey, normalizeSessionMessages, preserveMessageHidden, reviewerRequestID, sessionMessageHidden, syntheticTurn } from "@/utils/session-message"
 import type { NativeSessionEvent } from "./native-session-event"
+import { mergePartSnapshot, mergePartSnapshots } from "./global-sync/part-merge"
 import { dropSessionCaches, pickSessionCacheEvictions, SESSION_CACHE_LIMIT } from "./global-sync/session-cache"
 import { createV2SessionReducer, type V2SessionReduction } from "./server-session-v2-reducer"
 import type { ServerApi } from "@/utils/server"
@@ -630,9 +631,10 @@ export function createServerSession(
   ) => {
     for (const item of items) {
       if (!messageIDs.has(item.id)) continue
+      // HTTP page 写入前先与本地现值做单调合并，防止 page-load 把 running tool part 回退成旧快照
       const fetched = load?.clearedMessageParts.has(item.id)
         ? []
-        : item.part.filter((part) => !SKIP_PARTS.has(part.type))
+        : mergePartSnapshots(data.part[item.id], item.part.filter((part) => !SKIP_PARTS.has(part.type)))
       const fetchedIDs = new Set(fetched.map((part) => part.id))
       const pending = pendingParts.get(sessionID)?.get(item.id)
       const touched = new Set([...(load?.touchedParts.get(item.id) ?? []), ...(pending ?? [])])
@@ -1118,6 +1120,8 @@ export function createServerSession(
         )
         return
       }
+      // progress 与 updated 是同一 part 快照的两条通道（50ms live / durable），走同一合并写入。
+      case "message.part.progress":
       case "message.part.updated": {
         const part = (event.properties as { part: Part }).part
         if ((part as unknown as { hidden?: unknown }).hidden) {
@@ -1174,7 +1178,9 @@ export function createServerSession(
           return
         }
         const result = Binary.search(parts, part.id, (item) => item.id)
-        if (result.found) setData("part", part.messageID, result.index, reconcile(part))
+        // 后到 stale 快照不得回退 live running 进度：与 page 路径共用同一单调合同。
+        const merged = result.found ? mergePartSnapshot(parts[result.index], part) : part
+        if (result.found) setData("part", part.messageID, result.index, reconcile(merged))
         if (!result.found)
           setData("part", part.messageID, (value = []) => {
             const next = value.slice()

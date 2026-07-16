@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { retry } from "@opencode-ai/core/util/retry"
 import type { OpenCodeEvent, SessionApi } from "@opencode-ai/client/promise"
-import type { Message, OpencodeClient, Part, Session } from "@opencode-ai/sdk/v2/client"
+import type { Message, OpencodeClient, Part, Session, ToolPart } from "@opencode-ai/sdk/v2/client"
 import { createServerSession } from "./server-session"
 import type { ServerApi } from "@/utils/server"
 import { Schema } from "effect"
@@ -62,6 +62,21 @@ const textPart = (messageID: string, input: Partial<TextPart> = {}): TextPart =>
   type: "text",
   text: "text",
   ...input,
+})
+
+const toolPart = (messageID: string, id: string, progressVersion: number): ToolPart => ({
+  id,
+  sessionID: "child",
+  messageID,
+  type: "tool",
+  callID: `call-${id}`,
+  tool: "bash",
+  state: {
+    status: "running",
+    input: {},
+    metadata: { progressVersion },
+    time: { start: 1 },
+  },
 })
 
 const response = (data: MessageResponse["data"] = [], cursor?: string): MessageResponse => ({
@@ -709,6 +724,31 @@ describe("server session", () => {
 
     expect(store.data.message.child).toEqual([live])
     expect(store.data.part[live.id]).toEqual([livePart])
+  })
+
+  test("does not regress a running tool part when a stale refresh page arrives", async () => {
+    const fetched = userMessage("message")
+    const livePart = toolPart(fetched.id, "part", 3)
+    const stalePart = toolPart(fetched.id, "part", 1)
+    const client = messageClient(response([{ info: fetched, parts: [livePart] }]), response([{ info: fetched, parts: [stalePart] }]))
+    const store = createServerSession(client)
+    await store.sync("child")
+    await store.sync("child", { force: true })
+
+    // v3 在刷新前已存在，刷新期间没有 live 更新；不能靠 touchedParts 掩盖页面合并回退。
+    expect(client.requests).toHaveLength(2)
+    expect(store.data.part[fetched.id]).toEqual([livePart])
+  })
+
+  test("does not regress a running tool part from a stale part.updated event", async () => {
+    const store = createServerSession(messageClient(response([{ info: userMessage("message"), parts: [] }])))
+    await store.sync("child")
+    const livePart = toolPart("message", "part", 3)
+    const stalePart = toolPart("message", "part", 1)
+    store.apply({ type: "message.part.progress", properties: { sessionID: "child", part: livePart, time: 2 } })
+    store.apply({ type: "message.part.updated", properties: { sessionID: "child", part: stalePart, time: 3 } })
+    // progress 和 updated 的到达顺序不能回退展示；事件与 page 共用同一单调合同。
+    expect(store.data.part["message"]).toEqual([livePart])
   })
 
   test("preserves removals received during the initial load", async () => {
