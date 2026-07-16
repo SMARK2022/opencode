@@ -136,7 +136,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             time: match.state.status === "running" ? match.state.time : { start: Date.now() },
           },
         }
-      }),
+      // live 进度经 val.delivery 透传：ephemeral 只广播不落盘，durable 保持原路径。
+      }, val.delivery),
     ask: (req) =>
       permission
         .ask({

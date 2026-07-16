@@ -9,8 +9,8 @@ import { WorkspaceEvent } from "../src/workspace-event"
 
 describe("public event manifest", () => {
   test("owns the complete public event surface", () => {
-    expect(EventManifest.ServerDefinitions.length).toBe(67)
-    expect(EventManifest.Definitions.length).toBe(97)
+    expect(EventManifest.ServerDefinitions.length).toBe(69)
+    expect(EventManifest.Definitions.length).toBe(100)
     expect(SessionV1.Event.Definitions).toEqual([
       SessionV1.Event.Created,
       SessionV1.Event.Updated,
@@ -20,11 +20,15 @@ describe("public event manifest", () => {
       SessionV1.Event.PartUpdated,
       SessionV1.Event.PartRemoved,
       SessionV1.Event.PartDelta,
+      SessionV1.Event.PartProgress,
       SessionV1.Event.Diff,
       SessionV1.Event.Error,
     ])
-    expect(EventManifest.Latest.size).toBe(97)
+    expect(EventManifest.Latest.size).toBe(100)
     expect(EventManifest.Durable.size).toBe(40)
+    // V1 展示事件只扩展兼容通道，不能进入当前协议或变成逐 tick 的持久事件。
+    expect(EventManifest.ServerDefinitions.some((event) => event.type === "message.part.progress")).toBe(false)
+    expect(EventManifest.Durable.has("message.part.progress")).toBe(false)
   })
 
   test("uses canonical definitions for current public events", () => {
@@ -44,8 +48,9 @@ describe("public event manifest", () => {
     expect(Reference.Event.Definitions).toEqual([Reference.Event.Updated])
     expect(EventManifest.Latest.has("ide.installed")).toBe(false)
     expect(IdeEvent.Definitions).toEqual([IdeEvent.Installed])
-    expect(EventManifest.Definitions.slice(48, 51)).toEqual([
+    expect(EventManifest.Definitions.slice(48, 52)).toEqual([
       SessionV1.Event.PartDelta,
+      SessionV1.Event.PartProgress,
       SessionV1.Event.Diff,
       SessionV1.Event.Error,
     ])

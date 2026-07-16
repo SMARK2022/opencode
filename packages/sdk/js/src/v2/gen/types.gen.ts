@@ -54,6 +54,7 @@ export type Event =
   | EventSessionNextRevertCleared
   | EventSessionNextRevertCommitted
   | EventMessagePartDelta
+  | EventMessagePartProgress
   | EventSessionDiff
   | EventSessionError
   | EventInstallationUpdated
@@ -1393,6 +1394,15 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "message.part.progress"
+        properties: {
+          sessionID: string
+          part: ToolPart
+          time: number
+        }
+      }
+    | {
+        id: string
         type: "session.diff"
         properties: {
           sessionID: string
@@ -2049,7 +2059,7 @@ export type ProviderConfig = {
      */
     headerTimeout?: number | false
     /**
-     * Timeout in milliseconds between streamed SSE chunks for this provider. Default is 180000 (3 minutes). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout.
+     * Timeout in milliseconds from request dispatch to the first streamed SSE chunk and between subsequent chunks. Each received chunk resets the window. Default is 180000 (3 minutes). Set to false to disable timeout.
      */
     chunkTimeout?: number | false
     [key: string]:
@@ -3271,6 +3281,7 @@ export type V2Event =
   | SessionNextRevertCleared
   | SessionNextRevertCommitted
   | MessagePartDelta
+  | MessagePartProgress
   | SessionDiff
   | SessionError
   | InstallationUpdated
@@ -6060,6 +6071,25 @@ export type MessagePartDelta = {
   }
 }
 
+export type MessagePartProgress = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "message.part.progress"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sessionID: string
+    part: ToolPart
+    time: number
+  }
+}
+
 export type SessionDiff = {
   id: string
   metadata?: {
@@ -7615,6 +7645,16 @@ export type EventMessagePartDelta = {
     partID: string
     field: string
     delta: string
+  }
+}
+
+export type EventMessagePartProgress = {
+  id: string
+  type: "message.part.progress"
+  properties: {
+    sessionID: string
+    part: ToolPart
+    time: number
   }
 }
 

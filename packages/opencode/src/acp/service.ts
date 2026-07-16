@@ -348,6 +348,8 @@ export function make(input: {
     const removed = yield* session.remove(params.sessionId)
     registeredMcp.delete(params.sessionId)
     sessionSnapshots.delete(params.sessionId)
+    // 0443：同步清理 ACP 事件侧 lifecycle marker（订阅为连接级，不随 session 释放）
+    events?.clearSessionMarkers(params.sessionId)
     if (!removed) return {}
 
     yield* abortBackingSession(removed)
