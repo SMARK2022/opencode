@@ -150,8 +150,12 @@ describe("Session route integration points", () => {
       expect(sessionSource).toContain("onRightClick={contextOutputAvailable")
     })
 
-    test("Shell shows 'Model context output' label", () => {
-      expect(sessionSource).toContain("Model context output")
+    test("Shell does not show 'Model context output' inline label", () => {
+      expect(shellSource).not.toContain("Model context output")
+    })
+
+    test("Shell body has marginTop spacing between command and output", () => {
+      expect(shellSource).toContain("marginTop={1}")
     })
   })
 

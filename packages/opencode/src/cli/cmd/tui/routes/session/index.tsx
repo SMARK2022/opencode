@@ -2714,11 +2714,12 @@ function Shell(props: ToolProps<typeof ShellTool>) {
         >
           <box>
             <text fg={theme.text}>$ {props.input.command}</text>
-            <Show when={showContextOutput()}>
-              <text fg={theme.info}>Model context output</text>
-            </Show>
+            {/* 上下文输出模式的内联文字标签已移除：标题 · returned to model 和背景色
+                已足够区分上下文模式，命令与输出之间统一用空行分隔，与折叠预览保持一致。 */}
             <Show when={output()}>
-              <text fg={theme.text}>{output()}</text>
+              <box marginTop={1}>
+                <text fg={theme.text}>{output()}</text>
+              </box>
             </Show>
           </box>
         </BlockTool>
