@@ -2756,7 +2756,8 @@ function Shell(props: ToolProps) {
     <Switch>
       <Match when={stringValue(props.metadata.output) !== undefined}>
         <BlockTool
-          title={title()}
+          // 无 workdir 时也提供上下文标题，移除正文标签后仍保留 returned to model 标识。
+          title={title() ?? (showContextOutput() ? "# Shell" : undefined)}
           part={props.part}
           onClick={shellCanCollapse() ? () => setExpanded((prev) => !prev) : undefined}
           onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
@@ -2765,18 +2766,14 @@ function Shell(props: ToolProps) {
           // #144：命令前缀保留；输出预览复用含命令占位的现有 limited 预算。
           preview={
             shellCanCollapse() && !expanded() && !isRunning() && !showContextOutput() ? (
-              // #214：Shell 预览仅含命令和输出——审查状态行由 BlockTool 共享 slot 渲染，折叠时也可见
-              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, previewText(limited(), 10, maxChars())].filter(Boolean).join(String.fromCharCode(10))}</text>
+              // 保留现有预览预算；非空输出才加入分隔行，空输出不制造额外空白。
+              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, limited() ? "" : undefined, limited() ? previewText(limited(), 10, maxChars()) : undefined].filter((x): x is string => x !== undefined).join(String.fromCharCode(10))}</text>
             ) : undefined
           }
         >
           <box gap={1}>
             <Show when={isRunning()} fallback={<text fg={theme.text}>$ {stringValue(props.input.command)}</text>}>
               <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
-            </Show>
-            {/* 完成态没有 spinner，也可能没有 workdir 标题；标识必须独立可见。 */}
-            <Show when={showContextOutput() && contextOutputAvailable()}>
-              <text fg={theme.info}>Model context output</text>
             </Show>
             <Show when={output()}>
               <text fg={theme.text}>{limited()}</text>
