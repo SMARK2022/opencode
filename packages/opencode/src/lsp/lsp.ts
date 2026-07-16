@@ -288,6 +288,7 @@ const layer = Layer.effect(
     })
 
     const touchFile = Effect.fn("LSP.touchFile")(function* (input: string, diagnostics?: "document" | "full") {
+      // 产品固定停用，显式document也只消费空clients，不恢复bridge或第二次诊断读取。
       yield* Effect.logInfo("touching file", { file: input })
       const clients = yield* getClients(input)
       yield* Effect.promise(() =>
