@@ -2,8 +2,8 @@
   "name": "opencode-ide-bridge",
   "displayName": "OpenCode IDE Bridge",
   "description": "SMARK OpenCode IDE bridge for VS Code. Provides notebook and Jupyter kernel operations, workspace context sharing, and terminal integration over a local authenticated bridge.",
-  "version": "1.19.13",
-  "//": "#408：协同升号 1.19.12→1.19.13——source 谱系 1.15.5→1.15.10 映射，格式保持三段式",
+  "version": "1.19.14",
+  "//": "#450：独立扩展补丁版本 1.19.13→1.19.14，承接 source 的 +1 升号并保持三段式 semver",
   "homepage": "https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode",
   "publisher": "SMARK2022",
   "repository": {

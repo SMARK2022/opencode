@@ -10,7 +10,7 @@ This document describes how to build, inspect, install, and publish the SMARK Op
 | Package path | `sdks/vscode` |
 | Source repository | `https://github.com/SMARK2022/opencode` |
 | Source branch | `dev-smark` |
-| Repository extension version | `1.19.13` |
+| Repository extension version | `1.19.14` |
 | Recommended CLI | `opencode 1.19.15-smark` |
 | Default version source | `sdks/vscode/package.json` |
 | Local VSIX name | `dist/SMARK2022.opencode-ide-bridge-<version>.vsix` |
@@ -75,15 +75,15 @@ The expected payload is compact:
 
 ```text
 extension/
-|-- LICENSE.txt
-|-- package.json
-|-- readme.md
-|-- dist/
-|   `-- extension.js
-`-- images/
-    |-- icon.png
-    |-- button-dark.svg
-    `-- button-light.svg
+├── LICENSE.txt
+├── package.json
+├── readme.md
+├── dist/
+│   └── extension.js
+└── images/
+    ├── icon.png
+    ├── button-dark.svg
+    └── button-light.svg
 ```
 
 Excluded files are controlled by `sdks/vscode/.vscodeignore`. Source files, test output, local dependencies, build scripts, TypeScript config, lint config, source maps, logs, and nested VSIX files are not packaged.
@@ -156,7 +156,7 @@ Do not publish before the extension manifest, README, and recommended CLI statem
 
 ## Versioning
 
-Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.19.13`) so Marketplace tooling accepts it; the recommended CLI is `1.19.15-smark`, but the two packages remain independently versioned.
+Use `sdks/vscode/package.json` as the canonical version source for local packaging and push-triggered builds. The repository extension version is ordinary semver (`1.19.14`) so Marketplace tooling accepts it; the recommended CLI is `1.19.15-smark`, but the two packages remain independently versioned.
 
 Pushes to `dev-smark` that change `sdks/vscode/**` run `.github/workflows/build-vsix.yml`. By default it reads the manifest version, writes `dist/opencode-vscode-<version>.vsix`, and creates or updates the `vscode-v<version>` GitHub prerelease. A manual `workflow_dispatch.version` leaves the repository manifest and README unchanged but overrides the manifest version inside the packaged VSIX, so use it only for an intentional temporary rebuild and expect the packaged README version statement to remain unchanged. The workflow does not publish Marketplace or Open VSX.
 
@@ -176,18 +176,18 @@ Supported IDE commands are `code`, `code-insiders`, `windsurf`, `cursor`, and `c
 
 ```text
 sdks/vscode/src/
-|-- extension.ts           Entry point, lifecycle, terminal commands
-|-- bridge.ts              HTTP server, routing, auth, per-filePath mutex
-|-- bridge-registry.ts     Registry heartbeat and manifest writer
-|-- util.ts                Shared JSON, URI, and formatting helpers
-`-- notebook/
-    |-- commands.ts        Interactive bridge testing command
-    |-- edit.ts            Cell insert/edit/delete and language changes
-    |-- env.ts             Kernel info/configure/restart/stop and create/save
-    |-- format.ts          Summary text formatting
-    |-- output.ts          Artifact-first cell output export
-    |-- resolve.ts         File-path to notebook resolution
-    |-- run.ts             Cell execution through VS Code/Jupyter
-    |-- source.ts          Paginated virtual notebook source
-    `-- summary.ts         Notebook structure overview
+├── extension.ts           Entry point, lifecycle, terminal commands
+├── bridge.ts              HTTP server, routing, auth, per-filePath mutex
+├── bridge-registry.ts     Registry heartbeat and manifest writer
+├── util.ts                Shared JSON, URI, and formatting helpers
+└── notebook/
+    ├── commands.ts        Interactive bridge testing command
+    ├── edit.ts            Cell insert/edit/delete and language changes
+    ├── env.ts             Kernel info/configure/restart/stop and create/save
+    ├── format.ts          Summary text formatting
+    ├── output.ts          Artifact-first cell output export
+    ├── resolve.ts         File-path to notebook resolution
+    ├── run.ts             Cell execution through VS Code/Jupyter
+    ├── source.ts          Paginated virtual notebook source
+    └── summary.ts         Notebook structure overview
 ```

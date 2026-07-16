@@ -1,12 +1,12 @@
 # SMARK OpenCode IDE Bridge
 
-Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code workspace and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token. The CLI and extension are versioned independently. Marketplace may continue to show `1.19.12` until this repository build is published.
+Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code workspace and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token. The CLI and extension are versioned independently. Marketplace may continue to show an older extension release until this repository build is published.
 
 | Field | Value |
 | --- | --- |
 | Extension ID | `SMARK2022.opencode-ide-bridge` |
 | Publisher | `SMARK2022` |
-| Repository extension version | `1.19.13` |
+| Repository extension version | `1.19.14` |
 | Recommended CLI | `opencode 1.19.15-smark` |
 | Source | https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode |
 
@@ -213,20 +213,20 @@ For extension host debugging:
 
 ```text
 VS Code Extension Host
-|-- extension.ts           Activation, lifecycle, terminal commands
-|-- bridge.ts              HTTP server, routing, auth, per-filePath mutex
-|-- bridge-registry.ts     Registry heartbeat and manifest writer
-|-- util.ts                Shared JSON, URI, and formatting helpers
-`-- notebook/
-    |-- summary.ts         Notebook structure overview
-    |-- source.ts          Paginated virtual source text
-    |-- edit.ts            Cell insert/edit/delete and language changes
-    |-- run.ts             Cell execution through VS Code/Jupyter
-    |-- output.ts          Artifact-first output export
-    |-- env.ts             Kernel info/configure/restart/stop and create/save
-    |-- commands.ts        Interactive development test command
-    |-- format.ts          Summary text and cell ID formatting
-    `-- resolve.ts         Notebook and cell resolution
+├── extension.ts           Activation, lifecycle, terminal commands
+├── bridge.ts              HTTP server, routing, auth, per-filePath mutex
+├── bridge-registry.ts     Registry heartbeat and manifest writer
+├── util.ts                Shared JSON, URI, and formatting helpers
+└── notebook/
+    ├── summary.ts         Notebook structure overview
+    ├── source.ts          Paginated virtual source text
+    ├── edit.ts            Cell insert/edit/delete and language changes
+    ├── run.ts             Cell execution through VS Code/Jupyter
+    ├── output.ts          Artifact-first output export
+    ├── env.ts             Kernel info/configure/restart/stop and create/save
+    ├── commands.ts        Interactive development test command
+    ├── format.ts          Summary text and cell ID formatting
+    └── resolve.ts         Notebook and cell resolution
 ```
 
 ## Troubleshooting
