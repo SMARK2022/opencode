@@ -43,7 +43,7 @@ export type Context<M extends Metadata = Metadata> = {
   callID?: string
   extra?: { [key: string]: unknown }
   messages: SessionV1.WithParts[]
-  metadata(input: { title?: string; metadata?: M }): Effect.Effect<void>
+  metadata(input: { title?: string; metadata?: M; delivery?: "durable" | "ephemeral" }): Effect.Effect<void>
   ask(input: Omit<PermissionV1.Request, "id" | "sessionID" | "tool">): Effect.Effect<void>
 }
 

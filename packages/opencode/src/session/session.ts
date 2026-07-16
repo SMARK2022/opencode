@@ -404,6 +404,7 @@ export interface Interface {
     partID: PartID
   }) => Effect.Effect<SessionV1.Part | undefined>
   readonly updatePart: <T extends SessionV1.Part>(part: T) => Effect.Effect<T>
+  readonly publishPartProgress: (part: SessionV1.ToolPart) => Effect.Effect<void>
   readonly updatePartDelta: (input: {
     sessionID: SessionID
     messageID: MessageID
@@ -597,6 +598,17 @@ const layer: Layer.Layer<
         })
         return part
       }).pipe(Effect.withSpan("Session.updatePart"))
+
+    // 进度快照只广播不落盘：PartProgress 事件未注册 durable manifest，
+    // 发布端借此把工具输出推进的磁盘写入从每次 tick 降频到 1s 一写。
+    const publishPartProgress = (part: SessionV1.ToolPart): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        yield* events.publish(SessionV1.Event.PartProgress, {
+          sessionID: part.sessionID,
+          part: structuredClone(part),
+          time: Date.now(),
+        })
+      }).pipe(Effect.withSpan("Session.publishPartProgress"))
 
     const getPart: Interface["getPart"] = Effect.fn("Session.getPart")(function* (input) {
       const row = yield* db
@@ -877,6 +889,7 @@ const layer: Layer.Layer<
       removeMessage,
       removePart,
       updatePart,
+      publishPartProgress,
       getPart,
       updatePartDelta,
       findMessage,

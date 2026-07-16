@@ -6,7 +6,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Context, Effect, Layer } from "effect"
 import * as Stream from "effect/Stream"
-import { streamText, wrapLanguageModel, type ModelMessage, type Tool } from "ai"
+import { APICallError, streamText, wrapLanguageModel, type ModelMessage, type Tool } from "ai"
 import type { LLMEvent } from "@opencode-ai/llm"
 import { LLMClient } from "@opencode-ai/llm/route"
 import type { LLMClientService } from "@opencode-ai/llm/route"
@@ -86,13 +86,14 @@ const live: Layer.Layer<
     const flags = yield* RuntimeFlags.Service
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
+      // 这些合法标识没有 schema 长度上限；在 observability owner 限制 bytes，避免 prefix 绕过整行预算。
       yield* Effect.logInfo("stream", {
-        providerID: input.model.providerID,
-        modelID: input.model.id,
-        "session.id": input.sessionID,
+        providerID: utf8Prefix(input.model.providerID, 128),
+        modelID: utf8Prefix(input.model.id, 256),
+        "session.id": utf8Prefix(input.sessionID, 128),
         small: (input.small ?? false).toString(),
-        agent: input.agent.name,
-        mode: input.agent.mode,
+        agent: utf8Prefix(input.agent.name, 128),
+        mode: utf8Prefix(input.agent.mode, 32),
       })
 
       const [language, cfg, item, info] = yield* Effect.all(
@@ -278,8 +279,9 @@ const live: Layer.Layer<
         if (native.type === "supported") {
           yield* Effect.logInfo("llm runtime selected", {
             "llm.runtime": "native",
-            "llm.provider": input.model.providerID,
-            "llm.model": input.model.id,
+            // native 选路同样共用 byte 预算，实验开关路径不能成为绕过点。
+            "llm.provider": utf8Prefix(input.model.providerID, 128),
+            "llm.model": utf8Prefix(input.model.id, 256),
           })
           return {
             type: "native" as const,
@@ -288,41 +290,44 @@ const live: Layer.Layer<
         }
         yield* Effect.logInfo("llm runtime selected", {
           "llm.runtime": "ai-sdk",
-          "llm.provider": input.model.providerID,
-          "llm.model": input.model.id,
-          "llm.native_unsupported_reason": native.reason,
+          // 运行时选择诊断与 stream 站点共用同一组 byte 预算，避免选路日志成为绕过点。
+          "llm.provider": utf8Prefix(input.model.providerID, 128),
+          "llm.model": utf8Prefix(input.model.id, 256),
+          "llm.native_unsupported_reason": utf8Prefix(native.reason, 128),
         })
         yield* Effect.logInfo("native runtime unavailable; falling back to ai-sdk", {
-          providerID: input.model.providerID,
-          modelID: input.model.id,
-          "session.id": input.sessionID,
           small: (input.small ?? false).toString(),
-          agent: input.agent.name,
-          mode: input.agent.mode,
-          reason: native.reason,
+          providerID: utf8Prefix(input.model.providerID, 128),
+          modelID: utf8Prefix(input.model.id, 256),
+          "session.id": utf8Prefix(input.sessionID, 128),
+          agent: utf8Prefix(input.agent.name, 128),
+          mode: utf8Prefix(input.agent.mode, 32),
+          reason: utf8Prefix(native.reason, 128),
         })
       }
 
       yield* Effect.logInfo("llm runtime selected", {
         "llm.runtime": "ai-sdk",
-        "llm.provider": input.model.providerID,
-        "llm.model": input.model.id,
+        "llm.provider": utf8Prefix(input.model.providerID, 128),
+        "llm.model": utf8Prefix(input.model.id, 256),
       })
       // Default runtime path: AI SDK owns provider execution and tool dispatch;
       // LLMAISDK.toLLMEvents below normalizes fullStream parts for the processor.
       return {
         type: "ai-sdk" as const,
         result: streamText({
-          onError(error) {
+          onError(event) {
             bridge.fork(
+              // 错误路径标识同样没有 schema 上限；与 stream 站点共用同一组 byte 预算，
+              // 错误摘要只保留分类字段，不落盘 provider 控制的 message/URL/body。
               Effect.logError("stream error", {
-                providerID: input.model.providerID,
-                modelID: input.model.id,
-                "session.id": input.sessionID,
+                providerID: utf8Prefix(input.model.providerID, 128),
+                modelID: utf8Prefix(input.model.id, 256),
+                "session.id": utf8Prefix(input.sessionID, 128),
                 small: (input.small ?? false).toString(),
-                agent: input.agent.name,
-                mode: input.agent.mode,
-                error,
+                agent: utf8Prefix(input.agent.name, 128),
+                mode: utf8Prefix(input.agent.mode, 32),
+                error: streamErrorSummary(event.error),
               }),
             )
           },
@@ -432,6 +437,27 @@ const live: Layer.Layer<
 )
 
 export const hasToolCalls = LLMRequestPrep.hasToolCalls
+
+export function streamErrorSummary(error: unknown) {
+  // provider-controlled message/URL/body/cause 都不得落盘；原始 error 仍由 fullStream 交给 processor。
+  if (!APICallError.isInstance(error)) return { name: "UnknownError", message: "Provider stream failed" }
+  return {
+    name: "APICallError",
+    message: "Provider API call failed",
+    statusCode: error.statusCode,
+    isRetryable: error.isRetryable,
+    responseBytes: error.responseBody === undefined ? undefined : Buffer.byteLength(error.responseBody, "utf8"),
+  }
+}
+
+function utf8Prefix(value: string, bytes: number) {
+  const buffer = Buffer.from(value)
+  if (buffer.length <= bytes) return value
+  return buffer
+    .subarray(0, bytes)
+    .toString("utf8")
+    .replace(/\uFFFD+$/, "")
+}
 
 export const node = LayerNode.make({
   service: Service,

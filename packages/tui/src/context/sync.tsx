@@ -195,12 +195,10 @@ export const {
     let pendingPartDeltas: EventMessagePartDelta[] = []
     let pendingPartDeltaTimer: Timer | undefined
     const loggedPartDeltaApplications = new Set<string>()
-    // 缓冲因 part 尚未到达而被 drop 的 delta，按 partID 索引。
-    // daemon 的 message.part.updated 是 fire-and-forget（void Effect.runPromise），
-    // 而 message.part.delta 是 await（yield* bus.publish）。当 delta 先于
-    // part.updated 到达时，store 中没有对应 part，delta 会被 drop。
-    // delta 是 bus-only（不写 DB），被 drop 后永久丢失——子会话进入前
-    // 已生成的流式文本将无法恢复。缓冲后在 part.updated 创建 part 时 replay。
+    // 缓冲因本地 part 尚未加载而被 drop 的 delta，按 partID 索引。
+    // 进入已在 streaming 的 Session 或并发 HTTP sync 时，本地 store 可能尚无
+    // 对应 part；delta 是 bus-only，若直接 drop 就无法从 SQLite replay。
+    // 缓冲后在 part.updated 创建 part 时 replay。
     const orphanPartDeltas = new Map<string, EventMessagePartDelta[]>()
 
     function targetsSamePartDelta(previous: EventMessagePartDelta, next: EventMessagePartDelta) {
@@ -330,6 +328,10 @@ export const {
       }
     }
 
+    // 单调合并守卫：防止 pending 阶段或 HTTP sync 的短快照覆盖本地长流式文本。
+    // 当 Session 首次加载、切换或 reconnect 时，HTTP snapshot 与 live BusEvent
+    // 可以独立到达；不带 time.end 的短文本不能回退本地已拼接内容。
+    // 终态（time.end 存在）始终接受权威最终值，包括 plugin 修改后的文本。
     function mergeLivePart(existing: Part | undefined, next: Part) {
       if (!existing) return next
       if (next.type === "text") {
@@ -348,8 +350,27 @@ export const {
       }
       if (next.type === "tool") {
         if (existing.type !== "tool") return next
+        if (next.state.status === "completed" || next.state.status === "error") return next
+        // terminal 是权威终态；独立到达的 HTTP running snapshot 无论版本如何
+        // 都不能让同一 Tool Part 恢复为执行中。
+        if (existing.state.status === "completed" || existing.state.status === "error") return existing
+        if (
+          next.tool === "bash" &&
+          existing.tool === "bash" &&
+          next.state.status === "running" &&
+          existing.state.status === "running"
+        ) {
+          const version = (part: typeof next) => {
+            const value = part.state.status === "running" ? part.state.metadata?.progressVersion : undefined
+            // 旧 SQLite JSON、NaN、fraction 和负数都属于同一个 legacy v0；不回写
+            // 数据库，升级后的 client 只在 store merge boundary 做兼容归一化。
+            if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) return 0
+            return value
+          }
+          return version(next) > version(existing) ? next : existing
+        }
         // tool 只在 pending 阶段保护 raw（delta 累积的参数 JSON）；
-        // running/completed/error 状态的 part.updated 携带权威状态，直接采纳
+        // 非 shell running 状态仍保持既有 PartUpdated 语义。
         if (next.state.status !== "pending" || existing.state.status !== "pending") return next
         if (existing.state.raw.length <= next.state.raw.length) return next
         return { ...next, state: { ...next.state, raw: existing.state.raw } }
@@ -785,7 +806,10 @@ export const {
           }
           break
         }
-        case "message.part.updated": {
+        case "message.part.updated":
+        // progress 与 PartUpdated 共享同一 merge owner：终端支配与 bash version
+        // 排序在 mergeLivePart 内统一裁决，避免双通道各写各的。
+        case "message.part.progress": {
           // #98：隐藏部件先记入 hydration，再从 store 移除。
           const part = event.properties.part
           if ((part as Record<string, unknown>).hidden) {

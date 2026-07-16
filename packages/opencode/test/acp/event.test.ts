@@ -167,6 +167,24 @@ function toolUpdated(part: ToolPart): Event {
   }
 }
 
+// 只替换 event kind：progress 与 PartUpdated 共享完整 ToolPart wire shape。
+function progressEvent(part: ToolPart): Event {
+  return {
+    id: `evt_progress_${part.sessionID}_${part.messageID}_${part.id}`,
+    type: "message.part.progress",
+    properties: {
+      sessionID: part.sessionID,
+      time: Date.now(),
+      part,
+    },
+  } as unknown as Event
+}
+
+function versionedRunning(sessionID: string, callID: string, output: string, progressVersion: number): ToolPart {
+  const base = runningTool(sessionID, callID, output)
+  return { ...base, state: { ...base.state, metadata: { output, progressVersion } } } satisfies ToolPart
+}
+
 function assistantMessage(sessionID: string, messageID: string, partID: string, type: DeltaPartType) {
   return {
     info: {
@@ -610,7 +628,8 @@ describe("acp event routing", () => {
     await Effect.runPromise(harness.session.create({ id: "ses_replay", cwd: "/workspace" }))
 
     await harness.subscription.replayMessage(assistantToolMessage(runningTool("ses_replay", "call_replay", "first")))
-    await harness.subscription.handle(toolUpdated(runningTool("ses_replay", "call_replay", "second")))
+    // replay 的 legacy v0 之后，live 更新必须带更高 version 才能穿过 version 合同。
+    await harness.subscription.handle(toolUpdated(versionedRunning("ses_replay", "call_replay", "second", 1)))
 
     expect(toolUpdates(harness.updates).filter((item) => item.update.sessionUpdate === "tool_call")).toHaveLength(1)
     expect(toolUpdates(harness.updates).map((item) => item.update.sessionUpdate)).toEqual([
@@ -620,21 +639,91 @@ describe("acp event routing", () => {
     ])
   })
 
-  it("dedupes shell output snapshots while still sending status-only running updates", async () => {
+  it("rejects duplicate shell snapshots under the monotonic version contract", async () => {
     const harness = createHarness()
     await Effect.runPromise(harness.session.create({ id: "ses_shell", cwd: "/workspace" }))
 
+    // 无版本的旧持久化 running Part 归一化为 v0；相同 version 的重复 snapshot
+    // 即使内容相同也被拒绝，避免迟到的独立 transport 重发已有 checkpoint。
     await harness.subscription.handle(toolUpdated(runningTool("ses_shell", "call_shell", "same")))
     await harness.subscription.handle(toolUpdated(runningTool("ses_shell", "call_shell", "same")))
 
     const updates = toolUpdates(harness.updates)
-    expect(updates).toHaveLength(3)
+    expect(updates).toHaveLength(2)
     expect(updates[1]?.update).toMatchObject({
       sessionUpdate: "tool_call_update",
       content: [{ type: "content", content: { type: "text", text: "same" } }],
     })
-    expect(updates[2]?.update).toMatchObject({ sessionUpdate: "tool_call_update", status: "in_progress" })
-    expect("content" in updates[2]!.update).toBe(false)
+  })
+
+  it("streams live shell progress and rejects stale durable snapshots", async () => {
+    const harness = createHarness()
+    await Effect.runPromise(harness.session.create({ id: "ses_progress", cwd: "/workspace" }))
+
+    // live progress 通道：v1 内容 → v2 同 hash（展示去重）→ v3 新内容（最新 snapshot 穿过 live seam）。
+    for (const [output, version] of [
+      ["a", 1],
+      ["a", 2],
+      ["marker-7d1a", 3],
+    ] as const) {
+      await harness.subscription.handle(progressEvent(versionedRunning("ses_progress", "call_progress", output, version)))
+    }
+    // durable PartUpdated 在较新 live 后到达：stale version 即使 output 不同也不能让 ACP 展示回退。
+    await harness.subscription.handle(toolUpdated(versionedRunning("ses_progress", "call_progress", "stale", 2)))
+
+    // live 完成与 replay 失败都建立终态；迟到 v99 必须由终态标记拒绝，而不是仅靠版本比较。
+    for (const [callID, source] of [
+      ["call_progress", "live"],
+      ["call_replay_error", "replay"],
+    ] as const) {
+      const part = completedTool("ses_progress", callID)
+      await (source === "live"
+        ? harness.subscription.handle(toolUpdated(part))
+        : harness.subscription.replayMessage(assistantToolMessage({
+            ...part,
+            state: { status: "error", input: part.state.input, error: "failed", time: part.state.time },
+          })))
+      await harness.subscription.handle(progressEvent(versionedRunning("ses_progress", callID, `late-${callID}`, 99)))
+    }
+    expect(toolUpdates(harness.updates)
+      .filter((item) => item.update.status === "completed" || item.update.status === "failed")
+      .map((item) => [item.update.toolCallId, item.update.status]))
+      .toEqual([["call_progress", "completed"], ["call_replay_error", "failed"]])
+
+    // v1 内容一次；v2 同 hash 只发 status-only 帧（无 content）；v3 新内容；stale v2 整体拒绝。
+    const contents = toolUpdates(harness.updates)
+      .filter((item) => item.update.status === "in_progress")
+      .map((item) => ("content" in item.update ? item.update.content : undefined))
+      .filter((content) => content !== undefined)
+    expect(contents).toEqual([
+      [{ type: "content", content: { type: "text", text: "a" } }],
+      [{ type: "content", content: { type: "text", text: "marker-7d1a" } }],
+    ])
+  })
+
+  it("isolates shared provider callIDs across sessions", async () => {
+    const harness = createHarness()
+    await Effect.runPromise(harness.session.create({ id: "ses_a", cwd: "/workspace" }))
+    await Effect.runPromise(harness.session.create({ id: "ses_b", cwd: "/workspace" }))
+
+    // provider callID 只在 Session 内唯一：A 的 v2 不能压掉 B 的同 callID v1，
+    // synthetic pending 也必须在两个 Session 中各自出现一次。
+    await harness.subscription.handle(progressEvent(versionedRunning("ses_a", "call_shared", "session-a", 2)))
+    await harness.subscription.handle(progressEvent(versionedRunning("ses_b", "call_shared", "session-b", 1)))
+
+    // 投影到 [kind, content] 元组：避开完整 ToolCall 形状匹配，聚焦 Session 隔离语义。
+    const bySession = (sessionID: string) =>
+      toolUpdates(harness.updates)
+        .filter((item) => item.sessionId === sessionID)
+        .map((item) => [item.update.sessionUpdate, "content" in item.update ? item.update.content : undefined])
+    expect(bySession("ses_a")).toEqual([
+      ["tool_call", undefined],
+      ["tool_call_update", [{ type: "content", content: { type: "text", text: "session-a" } }]],
+    ])
+    expect(bySession("ses_b")).toEqual([
+      ["tool_call", undefined],
+      ["tool_call_update", [{ type: "content", content: { type: "text", text: "session-b" } }]],
+    ])
   })
 
   it("clears shell snapshot marker when a tool returns to pending", async () => {

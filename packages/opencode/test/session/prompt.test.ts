@@ -6,6 +6,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { GlobalBus } from "@/bus/global"
 import { expect } from "bun:test"
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
 import { NodeFileSystem } from "@effect/platform-node"
@@ -3258,6 +3259,55 @@ it.instance("shell rejects with BusyError when loop running", () =>
     yield* prompt.cancel(chat.id)
     yield* Fiber.await(fiber)
   }),
+)
+
+it.instance(
+  "coalesces direct shell progress without changing final output",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, run, chat } = yield* boot()
+      const durable: SessionV1.ToolPart[] = []
+      const live: SessionV1.ToolPart[] = []
+      // GlobalBus 是 bridge listen 的下游同步总线；用纯回调观察，避免把订阅
+      // fiber 的环境需求泛化成 unknown 而破坏测试体类型。
+      const onEvent = (evt: { payload?: { type: string; properties?: { part?: SessionV1.Part } } }) => {
+        const p = evt.payload
+        if (!p || (p.type !== "message.part.updated" && p.type !== "message.part.progress")) return
+        const part = p.properties?.part
+        if (part?.type !== "tool" || part.sessionID !== chat.id || part.tool !== "bash") return
+        if (p.type === "message.part.updated") durable.push(structuredClone(part))
+        else live.push(structuredClone(part))
+      }
+      GlobalBus.on("event", onEvent)
+      yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", onEvent)))
+
+      // 每次写入之间的真实 10ms 间隔让 child stream 产生持续 progress；测试只观察
+      // 公开 Session 事件，不依赖 chunk 数、timer 或 coordinator 私有状态。
+      const result = yield* prompt.shell({
+        sessionID: chat.id,
+        agent: "build",
+        command:
+          "bun -e \"for(let i=1;i<=40;i++){process.stdout.write('DIRECT_PROGRESS_'+i+'\\r');await Bun.sleep(10)}\"",
+      })
+      yield* pollWithTimeout(
+        Effect.sync(() => durable.some((part) => part.state.status === "completed") || undefined),
+        "timed out waiting for direct shell terminal event",
+      )
+
+      // 40 个 CR 帧短于 durable 窗口，能在不改变 raw output 的前提下覆盖 leading/trailing budget。
+      // 只有 running Part 属于重连 checkpoint 预算；completed 是权威终态，不能为了满足上限而删除。
+      const running = durable.filter((part) => part.state.status === "running")
+      const tool = completedTool(result.parts)
+      expect(running.length).toBeLessThanOrEqual(3)
+      expect(running[0]?.state.status === "running" ? running[0].state.metadata?.progressVersion : undefined).toBe(0)
+      expect(live.some((part) => part.state.status === "running")).toBe(true)
+      if (tool) {
+        expect(tool.state.output).toContain("DIRECT_PROGRESS_1")
+        expect(tool.state.output).toContain("DIRECT_PROGRESS_40")
+        yield* run.assertNotBusy(chat.id)
+      }
+    }),
+  30_000,
 )
 
 unixNoLLMServer(

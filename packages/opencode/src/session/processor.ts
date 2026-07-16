@@ -104,6 +104,7 @@ export interface Handle {
   readonly updateToolCall: (
     toolCallID: string,
     update: (part: SessionV1.ToolPart) => SessionV1.ToolPart,
+    delivery?: "durable" | "ephemeral",
   ) => Effect.Effect<SessionV1.ToolPart | undefined>
   readonly completeToolCall: (
     toolCallID: string,
@@ -259,9 +260,16 @@ const layer = Layer.effect(
       const updateToolCall = Effect.fn("SessionProcessor.updateToolCall")(function* (
         toolCallID: string,
         update: (part: SessionV1.ToolPart) => SessionV1.ToolPart,
+        delivery: "durable" | "ephemeral" = "durable",
       ) {
         const match = yield* readToolCall(toolCallID)
         if (!match) return undefined
+        // ephemeral 进度只广播不落盘，避免高频工具输出把 PartUpdated 逐 tick 刷进 SQLite。
+        if (delivery === "ephemeral") {
+          const part = update(match.part)
+          yield* session.publishPartProgress(part)
+          return part
+        }
         const part = yield* session.updatePart(update(match.part))
         ctx.toolcalls[toolCallID] = {
           ...match.call,

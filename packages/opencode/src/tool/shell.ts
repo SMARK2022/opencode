@@ -2,6 +2,7 @@ import { Effect, Fiber, Stream } from "effect"
 import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
+import { ToolProgress } from "./progress"
 import path from "path"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { InstanceState } from "@/effect/instance-state"
@@ -563,9 +564,11 @@ export const ShellTool = Tool.define(
       const hiddenDiag = new BashDiagnosticCollector({ enabled: input.compressOutput })
       const started = Date.now()
 
+      // version 0 是新 producer initial 与旧持久化 running Part 的共同基线。
       yield* ctx.metadata({
         metadata: {
           output: "",
+          progressVersion: 0,
         },
       })
 
@@ -578,6 +581,12 @@ export const ShellTool = Tool.define(
           // #126：按字节喂解码器，解决 PowerShell/重定向 UTF-16 输出
           // #128：按 input.encoding 锁定或自动探测
           const decoder = createAutoTextDecoder({ encoding: input.encoding })
+          // 沿现有进程 scope 收尾：输出消费完成后 flush，外层才提交 terminal Part。
+          const progress = yield* ToolProgress.make({
+            live: (metadata) => ctx.metadata({ metadata, delivery: "ephemeral" }),
+            durable: (metadata) => ctx.metadata({ metadata, delivery: "durable" }),
+          })
+          let lastVisible = ""
           // #126：字符串 chunk 写入环形缓冲与截断/落盘逻辑
           const onChunk = (chunk: string) => {
             if (!chunk) return Effect.void
@@ -596,37 +605,34 @@ export const ShellTool = Tool.define(
               used -= item.size
               cut = true
             }
-
-            if (file) {
-              sink?.write(chunk)
-            } else {
-              full += chunk
-              if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
-                return trunc.write(full).pipe(
-                  Effect.andThen((next) =>
-                    Effect.sync(() => {
-                      file = next
-                      cut = true
-                      sink = createWriteStream(next, { flags: "a" })
-                      full = ""
-                    }),
-                  ),
-                  Effect.andThen(
-                    ctx.metadata({
-                      metadata: {
-                        output: visible,
-                      },
-                    }),
+            const spill = file
+              ? Effect.sync(() => sink?.write(chunk))
+              : Effect.sync(() => {
+                  full += chunk
+                  return Buffer.byteLength(full, "utf-8") > limits.maxBytes
+                }).pipe(
+                  Effect.andThen((overflow) =>
+                    overflow
+                      ? trunc.write(full).pipe(
+                          Effect.andThen((next) =>
+                            Effect.sync(() => {
+                              file = next
+                              cut = true
+                              sink = createWriteStream(next, { flags: "a" })
+                              full = ""
+                            }),
+                          ),
+                        )
+                      : Effect.void,
                   ),
                 )
-              }
-            }
-
-            return ctx.metadata({
-              metadata: {
-                output: visible,
-              },
-            })
+            if (visible === lastVisible) return spill
+            lastVisible = visible
+            // metadata 是 replace 型终端快照；raw chunk 仍走原有内存/截断路径，
+            // 所以 latest-wins 只减少 UI/SQLite 更新，不会丢失模型可见字节。
+            return spill.pipe(
+              Effect.andThen(progress.update({ output: visible })),
+            )
           }
 
           // #291：将 forkScoped 赋值给 output 变量，以便后续 Fiber.join 等待流消费完成

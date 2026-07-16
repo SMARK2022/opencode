@@ -679,6 +679,18 @@ const events = {
   }),
 }
 
+// 进度快照走纯内存广播（不注册 durable manifest）：发布端按 1s 节流把
+// PartUpdated 的磁盘写入降频，UI 仍可通过 SSE 实时看到工具输出推进。
+// live contract 只承载 ToolPart 快照：与 SDK gen 手写类型一致，防止再生成悄悄放宽。
+export const PartProgress = define({
+  type: "message.part.progress",
+  schema: {
+    sessionID: SessionID,
+    part: ToolPart,
+    time: NonNegativeInt,
+  },
+})
+
 export const PartDelta = define({
   type: "message.part.delta",
   schema: {
@@ -709,6 +721,7 @@ export const Error = define({
 export const Event = {
   ...events,
   PartDelta,
+  PartProgress,
   Diff,
   Error,
   Definitions: inventory(
@@ -720,6 +733,7 @@ export const Event = {
     events.PartUpdated,
     events.PartRemoved,
     PartDelta,
+    PartProgress,
     Diff,
     Error,
   ),

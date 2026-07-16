@@ -4,12 +4,12 @@ import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import path from "path"
-import { tool, type ModelMessage } from "ai"
+import { APICallError, tool, type ModelMessage } from "ai"
 import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
 import { InstanceRef } from "../../src/effect/instance-ref"
 import { HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import z from "zod"
-import { LLM } from "../../src/session/llm"
+import { LLM, streamErrorSummary } from "../../src/session/llm"
 import { LLMClient, RequestExecutor } from "@opencode-ai/llm/route"
 import { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
@@ -955,6 +955,124 @@ describe("session.llm.stream", () => {
             name: "Delayed Header Provider",
             options: { apiKey: "[redacted]", baseURL: `${state.server!.url.origin}/v1`, chunkTimeout: 25 },
             models: { "gpt-test": { name: "GPT Test", modalities: { input: ["text"], output: ["text"] } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "bounds stream error logs without changing the failure cause",
+    () =>
+      withProviderLogs((logs) => Effect.gen(function* () {
+        const requestMarker = "REQUEST_BODY_SECRET_MARKER_7f5c"
+        const request = waitRequest(
+          "/chat/completions",
+          new Response(JSON.stringify({ error: { message: requestMarker + "R".repeat(12_000) } }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          }),
+        )
+
+        const resolved = yield* Provider.use.getModel(
+          ProviderV2.ID.make("bounded-error-compatible"),
+          ModelV2.ID.make("gpt-test"),
+        )
+        // 超长合法标识走截断路径：agent/sessionID 无 schema 上限，provider/model 由注册表绑定只能短值。
+        const sessionID = SessionID.make("ses" + "s".repeat(3_000))
+        const agent = {
+          name: "a".repeat(3_000),
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+
+        // 目标 HTTP 500 从 Effect failure 通道返回，不能为匹配旧事件断言改写生产语义。
+        // 诊断仅脱敏日志；交给 processor 的原始错误必须保持请求与响应信息。
+        const exit = yield* LLM.Service.use((svc) =>
+          svc
+            .stream({
+              user: {
+                id: MessageID.make("msg-bounded-stream-error"),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: agent.name,
+                model: {
+                  providerID: ProviderV2.ID.make("bounded-error-compatible"),
+                  modelID: resolved.id,
+                },
+              },
+              sessionID,
+              model: resolved,
+              agent,
+              system: ["You are a helpful assistant."],
+              messages: [{ role: "user", content: requestMarker + "X".repeat(64_000) }],
+              tools: {},
+            })
+            .pipe(Stream.runCollect, Effect.map((chunk) => [...chunk])),
+        ).pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isSuccess(exit)) throw new Error("Provider failure was not preserved")
+        const failure = Cause.squash(exit.cause)
+        expect(APICallError.isInstance(failure)).toBe(true)
+        expect(JSON.stringify(failure)).toContain("requestBodyValues")
+        expect(JSON.stringify(failure)).toContain(requestMarker)
+
+        yield* Effect.promise(() => request)
+        // 检查实际 onError 日志，而不只测试独立 summary 函数。
+        const logged = logs.find((entry) => "error" in entry)
+        expect(logged?.error).toEqual(expect.objectContaining({ name: "APICallError", statusCode: 500 }))
+        expect(JSON.stringify(logged)).not.toContain(requestMarker)
+        expect(JSON.stringify(logged)).not.toContain("requestBodyValues")
+
+        // 超长标识必须被 utf8Prefix 截断：任何日志条目内不允许出现 129+ 连续同字符 run，
+        // 移除 stream/onError 站点预算会让原始 3000 字符标识原样落盘而失败。
+        const streamEntry = logs.find((entry) => !("error" in entry))
+        expect(JSON.stringify(streamEntry)).not.toContain("a".repeat(129))
+        expect(JSON.stringify(streamEntry)).not.toContain("s".repeat(129))
+        expect(JSON.stringify(logged)).not.toContain("a".repeat(129))
+        expect(JSON.stringify(logged)).not.toContain("s".repeat(129))
+
+        // 日志侧净化合同：进入 Effect.logError 的唯一 error 形态是 streamErrorSummary；
+        // provider-controlled message/URL/body 都不得出现在返回结构里，
+        // responseBytes 只暴露长度不暴露内容。
+        const raw = new APICallError({
+          message: requestMarker,
+          url: "http://bounded.test/v1/chat",
+          requestBodyValues: { body: requestMarker },
+          responseBody: requestMarker + "R".repeat(12_000),
+          statusCode: 500,
+          isRetryable: false,
+          // 当前 ai 包版本的 APICallError 构造不含 isRetryableByUsageLimit，省略。
+        })
+        const summary = streamErrorSummary(raw)
+        expect(summary.name).toBe("APICallError")
+        expect(JSON.stringify(summary)).not.toContain(requestMarker)
+        expect(JSON.stringify(summary)).not.toContain("http://bounded.test")
+        expect(summary.statusCode).toBe(500)
+        expect(summary.isRetryable).toBe(false)
+        expect(summary.responseBytes).toBeGreaterThan(12_000)
+        expect(streamErrorSummary(new Error("plain")).name).toBe("UnknownError")
+      })),
+    {
+      config: () => ({
+        enabled_providers: ["bounded-error-compatible"],
+        provider: {
+          "bounded-error-compatible": {
+            npm: "@ai-sdk/openai-compatible",
+            name: "Bounded Error Provider",
+            options: {
+              apiKey: "test-key",
+              baseURL: `${state.server!.url.origin}/v1`,
+            },
+            models: {
+              "gpt-test": {
+                name: "GPT Test",
+                limit: { context: 400000, input: 272000, output: 128000 },
+                modalities: { input: ["text"], output: ["text"] },
+              },
+            },
           },
         },
       }),

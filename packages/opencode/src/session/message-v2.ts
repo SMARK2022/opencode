@@ -89,6 +89,8 @@ export const Event = {
   Removed: SessionV1.Event.MessageRemoved,
   PartUpdated: SessionV1.Event.PartUpdated,
   PartDelta: SessionV1.Event.PartDelta,
+  // 进度快照与 PartDelta 同为纯广播事件，不参与持久化。
+  PartProgress: SessionV1.Event.PartProgress,
   PartRemoved: SessionV1.Event.PartRemoved,
 }
 

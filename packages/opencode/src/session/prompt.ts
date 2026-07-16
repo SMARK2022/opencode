@@ -34,6 +34,7 @@ import { SessionSummary } from "./summary"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { SessionProcessor } from "./processor"
 import { Tool } from "@/tool/tool"
+import { ToolProgress } from "@/tool/progress"
 import { Permission } from "@/permission"
 import { SessionStatus } from "./status"
 import { LLM } from "./llm"
@@ -592,13 +593,25 @@ const layer = Layer.effect(
           callID: part.callID,
           extra: { bypassAgentCheck: true, promptOps },
           messages: msgs,
-          metadata: (val: { title?: string; metadata?: Record<string, any> }) =>
+          metadata: (val: {
+            title?: string
+            metadata?: Record<string, any>
+            delivery?: "durable" | "ephemeral"
+          }) =>
             Effect.gen(function* () {
-              part = yield* sessions.updatePart({
+              // delivery 是传输指令不是 ToolState 字段；混入会让进度快照污染持久化 metadata。
+              const { delivery, ...rest } = val
+              const next = {
                 ...part,
                 type: "tool",
-                state: { ...part.state, ...val },
-              } satisfies SessionV1.ToolPart)
+                state: { ...part.state, ...rest },
+              } satisfies SessionV1.ToolPart
+              // ephemeral 进度只广播不落盘；durable（含 title/终态）照旧走 updatePart。
+              if (delivery === "ephemeral") {
+                yield* sessions.publishPartProgress(next)
+                return
+              }
+              part = yield* sessions.updatePart(next)
             }),
           ask: (req: any) =>
             permission
@@ -794,6 +807,8 @@ const layer = Layer.effect(
                 status: "running",
                 time: { start: started },
                 input: { command: input.command },
+                // direct shell 与 AI ShellTool 使用同一 legacy-compatible version 基线。
+                metadata: { output: "", progressVersion: 0 },
               },
             }
             yield* sessions.updatePart(part)
@@ -856,13 +871,31 @@ const layer = Layer.effect(
                 forceKillAfter: "500 millis",
               })
               const handle = yield* spawner.spawn(cmd)
+              // coordinator 与 child stream 共用这个 scoped lifetime；scope close 会先
+              // flush trailing running snapshot，外层 finish 随后才提交 terminal Part。
+              const progress = yield* ToolProgress.make({
+                live: (metadata) => {
+                  if (part.state.status !== "running") return Effect.void
+                  return sessions.publishPartProgress({
+                    ...part,
+                    state: { ...part.state, metadata },
+                  })
+                },
+                durable: (metadata) => {
+                  if (part.state.status !== "running") return Effect.void
+                  return sessions.updatePart({
+                    ...part,
+                    state: { ...part.state, metadata },
+                  }).pipe(Effect.asVoid)
+                },
+              })
               yield* Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
                 Effect.gen(function* () {
                   output += chunk
-                  if (part.state.status === "running") {
-                    part.state.metadata = { output }
-                    yield* sessions.updatePart(part)
-                  }
+                  if (part.state.status !== "running") return
+                  // direct shell 的 snapshot 是完整 raw 累计输出；coordinator 只负责
+                  // cadence/version，不解释 TerminalDisplay 或改变最终 output。
+                  yield* progress.update({ output })
                 }),
               )
               yield* handle.exitCode
