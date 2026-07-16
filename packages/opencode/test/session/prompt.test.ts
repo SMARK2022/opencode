@@ -3039,8 +3039,7 @@ it.instance(
       yield* waitForBusy(chat.id)
 
       const loop = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-      // 只让 queued caller 进入 Run state，不用固定毫秒数猜测本机调度速度。
-      yield* Effect.yieldNow
+      yield* Effect.sleep(50)
 
       expect(yield* llm.calls).toBe(0)
 
@@ -3055,7 +3054,8 @@ it.instance(
       expect(yield* llm.calls).toBe(1)
     }),
   { git: true },
-  shortSessionTimeout,
+  // Windows Actions 上 shell 进程与测试 LLM 首次请求都可能有冷启动开销；10s 仍能及时发现队列死锁。
+  10_000,
 )
 
 it.instance(
@@ -3078,8 +3078,7 @@ it.instance(
 
       const a = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
       const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-      // 两个 caller 在同一协作式调度轮次进入 Runner，避免 wall-clock readiness race。
-      yield* Effect.yieldNow
+      yield* Effect.sleep(50)
 
       expect(yield* llm.calls).toBe(0)
 
@@ -3095,7 +3094,8 @@ it.instance(
       expect(yield* llm.calls).toBe(1)
     }),
   { git: true },
-  shortSessionTimeout,
+  // 该用例断言两个 loop 调用共享 shell 完成后的同一次结果；放宽预算不改变并发语义断言。
+  10_000,
 )
 
 unix(

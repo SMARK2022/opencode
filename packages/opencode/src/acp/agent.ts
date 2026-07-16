@@ -289,17 +289,16 @@ export class Agent implements ACPAgent {
         // PartUpdated 仍可能携带任意 Part，只有 ToolPart 才进入 ACP tool lifecycle；
         // shell marker 只合并两个 running channel，不能承担 terminal 顺序或持久化责任。
         if (part.type === "tool") {
+          const key = this.callKey(sessionId, part.callID)
           await this.toolStart(sessionId, part)
 
           switch (part.state.status) {
             case "pending":
-              this.shellSnapshots.delete(this.callKey(sessionId, part.callID))
+              if (!this.shellSnapshots.get(key)?.terminal) this.shellSnapshots.delete(key)
               return
-
             case "running":
               const output = this.shellOutput(part)
               const content: ToolCallContent[] = []
-              const key = this.callKey(sessionId, part.callID)
               const marker = this.shellSnapshots.get(key)
               // 旧持久化 Part 允许缺失或非法 version；归一化为 0 才能兼容首次恢复且拒绝后续回退。
               const progressVersion = this.shellProgressVersion(part)
@@ -362,7 +361,7 @@ export class Agent implements ACPAgent {
               return
 
             case "completed": {
-              this.toolStarts.delete(this.callKey(sessionId, part.callID))
+              this.toolStarts.delete(key)
               this.markShellTerminal(sessionId, part)
               const kind = toToolKind(part.tool)
               const content = completedToolContent(part, kind)
@@ -414,7 +413,7 @@ export class Agent implements ACPAgent {
               return
             }
             case "error":
-              this.toolStarts.delete(this.callKey(sessionId, part.callID))
+              this.toolStarts.delete(key)
               this.markShellTerminal(sessionId, part)
               await this.connection
                 .sessionUpdate({
@@ -830,15 +829,15 @@ export class Agent implements ACPAgent {
 
     for (const part of message.parts) {
       if (part.type === "tool") {
+        const key = this.callKey(sessionId, part.callID)
         await this.toolStart(sessionId, part)
         switch (part.state.status) {
           case "pending":
-            this.shellSnapshots.delete(this.callKey(sessionId, part.callID))
+            if (!this.shellSnapshots.get(key)?.terminal) this.shellSnapshots.delete(key)
             break
           case "running":
             const output = this.shellOutput(part)
             const runningContent: ToolCallContent[] = []
-            const key = this.callKey(sessionId, part.callID)
             const marker = this.shellSnapshots.get(key)
             const progressVersion = this.shellProgressVersion(part)
             if (part.tool === ShellID.ToolID && marker && (marker.terminal || progressVersion <= marker.version)) break
@@ -873,7 +872,7 @@ export class Agent implements ACPAgent {
               })
             break
           case "completed":
-            this.toolStarts.delete(this.callKey(sessionId, part.callID))
+            this.toolStarts.delete(key)
             this.markShellTerminal(sessionId, part)
             const kind = toToolKind(part.tool)
             const content = completedToolContent(part, kind)
@@ -924,7 +923,7 @@ export class Agent implements ACPAgent {
               })
             break
           case "error":
-            this.toolStarts.delete(this.callKey(sessionId, part.callID))
+            this.toolStarts.delete(key)
             this.markShellTerminal(sessionId, part)
             await this.connection
               .sessionUpdate({
@@ -1098,6 +1097,8 @@ export class Agent implements ACPAgent {
 
   private async toolStart(sessionId: string, part: ToolPart) {
     const key = this.callKey(sessionId, part.callID)
+    // terminal marker 必须在任何 synthetic pending 之前生效，否则拒绝 running 时已经重新打开 lifecycle。
+    if (part.tool === ShellID.ToolID && this.shellSnapshots.get(key)?.terminal) return
     if (this.toolStarts.has(key)) return
     this.toolStarts.add(key)
     await this.connection

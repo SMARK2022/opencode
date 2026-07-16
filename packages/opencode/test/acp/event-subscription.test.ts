@@ -801,6 +801,24 @@ describe("acp.agent event subscription", () => {
             .filter((u) => u.status === "in_progress")
             .map(inProgressText)
 
+          // terminal 后观察完整 lifecycle，而不是只筛 in_progress，避免迟到 running
+          // 先触发 synthetic pending 后再被 marker 拒绝，导致 ACP 状态机重新打开。
+          for (const { callID } of terminalCases) {
+            const updates = sessionUpdates.filter(
+              (item) =>
+                item.sessionId === sessionId &&
+                "toolCallId" in item.update &&
+                item.update.toolCallId === callID,
+            )
+            const terminalIndex = updates.findIndex(
+              (item) =>
+                isToolCallUpdate(item.update) &&
+                (item.update.status === "completed" || item.update.status === "failed"),
+            )
+            expect(terminalIndex).toBeGreaterThanOrEqual(0)
+            expect(updates.slice(terminalIndex + 1)).toHaveLength(0)
+          }
+
           // terminal 到达证明前面的 stale durable 已处理；断言只观察 ACP 用户可见更新序列。
           // 唯一 marker 模拟不断增长的 provider/tool output，能直接捕获完整 payload 落盘。
           // sentinel 在 progress 之后写入同一真实 file writer；读到它即证明前序日志已落盘，
