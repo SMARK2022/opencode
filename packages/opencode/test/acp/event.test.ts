@@ -683,7 +683,16 @@ describe("acp event routing", () => {
             ...part,
             state: { status: "error", input: part.state.input, error: "failed", time: part.state.time },
           })))
+      // 先回放 pending，再送更高版本 running，分别验证两处终态守卫不能被绕过。
+      await harness.subscription.replayMessage(assistantToolMessage({
+        ...part,
+        state: { status: "pending", input: part.state.input, raw: JSON.stringify(part.state.input) },
+      }))
       await harness.subscription.handle(progressEvent(versionedRunning("ses_progress", callID, `late-${callID}`, 99)))
+      const updates = toolUpdates(harness.updates).filter((item) => item.update.toolCallId === callID)
+      const terminalIndex = updates.findIndex((item) => item.update.status === "completed" || item.update.status === "failed")
+      expect(terminalIndex).toBeGreaterThanOrEqual(0)
+      expect(updates.slice(terminalIndex + 1)).toHaveLength(0)
     }
     expect(toolUpdates(harness.updates)
       .filter((item) => item.update.status === "completed" || item.update.status === "failed")

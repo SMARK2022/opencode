@@ -307,7 +307,10 @@ export class Subscription {
 
     switch (part.state.status) {
       case "pending":
-        this.shellSnapshots.delete(this.callKey(sessionId, part.callID))
+        // terminal marker 不被 synthetic pending 清除：迟到的独立 transport
+        // 重新握手时不能把已完成的 Tool 重新打开成执行中。
+        if (!this.shellSnapshots.get(this.callKey(sessionId, part.callID))?.terminal)
+          this.shellSnapshots.delete(this.callKey(sessionId, part.callID))
         return
 
       case "running":
@@ -397,6 +400,8 @@ export class Subscription {
 
   private async toolStart(sessionId: string, part: ToolPart, cwd: string) {
     const key = this.callKey(sessionId, part.callID)
+    // terminal marker 必须在任何 synthetic pending 之前生效，否则拒绝 running 时已经重新打开 lifecycle。
+    if (part.tool === "bash" && this.shellSnapshots.get(key)?.terminal) return
     if (this.toolStarts.has(key)) return
     this.toolStarts.add(key)
     await this.input.connection.sessionUpdate({
