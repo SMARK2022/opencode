@@ -1,37 +1,39 @@
 import * as vscode from "vscode"
 
-// [local-smark] showTextDocument 是触发 Pylance 等 LSP 扩展诊断计算的必需条件。
-// openTextDocument 只在 VSCode 内部打开文档，不触发诊断计算。
-// preview + preserveFocus 不抢占用户焦点。
-async function ensureOpen(filePath: string): Promise<vscode.Uri> {
-  const uri = vscode.Uri.file(filePath)
-  const doc = await vscode.workspace.openTextDocument(uri)
-  try {
-    await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: true })
-  } catch {
-    // showTextDocument 失败时 openTextDocument 仍提供基本文档访问
-  }
-  return uri
-}
+// [local-smark] 给 hidden open 和本地 HTTP 返回预留 200ms，保证 OpenCode 外层 1s 总截止时间。
+// 这是同一个总预算的内部切分，不是 800ms 之后再追加 1s。
+const DIAGNOSTIC_TIMEOUT_MS = 800
 
-// [local-smark] 等待 VSCode 为指定 uri 计算诊断。使用 onDidChangeDiagnostics 事件。
-// 新文件约 0.5s 触发事件；已打开文件（诊断无变化）等满超时。
-async function awaitDiagnosticsRefresh(uri: vscode.Uri, timeoutMs = 2000): Promise<void> {
+// [local-smark] 只使用 hidden document 和 VS Code 诊断事件，不抢占用户编辑器。
+// listener 必须先于 open 注册，否则快速 provider 可能在监听建立前完成首次发布。
+async function collectDiagnostics(filePath: string): Promise<ReturnType<typeof formatDiag>[]> {
+  const uri = vscode.Uri.file(filePath)
   return new Promise((resolve) => {
+    let latest: vscode.Diagnostic[] = []
     let resolved = false
+    let timer: ReturnType<typeof setTimeout> | undefined
     const finish = () => {
       if (resolved) return
       resolved = true
       disposable.dispose()
-      clearTimeout(timer)
-      resolve()
+      if (timer) clearTimeout(timer)
+      resolve(latest.map((diagnostic) => formatDiag(diagnostic, uri.fsPath)))
     }
-    const disposable = vscode.languages.onDidChangeDiagnostics((e) => {
-      if (e.uris.some((u) => u.toString() === uri.toString())) {
-        setTimeout(finish, 50)
-      }
+    const disposable = vscode.languages.onDidChangeDiagnostics((event) => {
+      if (!event.uris.some((item) => item.toString() === uri.toString())) return
+      latest = vscode.languages.getDiagnostics(uri)
+      // 错误/警告等非空诊断立即返回；空结果按产品约定等到本次观察窗口结束。
+      if (latest.length > 0) finish()
     })
-    const timer = setTimeout(finish, timeoutMs)
+    // deadline 只读取最新快照，不增加 quiet delay，也不会在响应后继续更新 Tool 输出。
+    timer = setTimeout(finish, DIAGNOSTIC_TIMEOUT_MS)
+    void vscode.workspace.openTextDocument(uri).then(
+      () => {
+        latest = vscode.languages.getDiagnostics(uri)
+        if (latest.length > 0) finish()
+      },
+      () => finish(),
+    )
   })
 }
 
@@ -88,11 +90,9 @@ function formatHover(hover: vscode.Hover) {
   }
 }
 
-// [local-smark] touch: showTextDocument + awaitDiagnosticsRefresh — 触发诊断计算
+// [local-smark] touch: hidden open + request-local diagnostics observation
 export async function lspTouch(args: { filePath: string }) {
-  const uri = await ensureOpen(args.filePath)
-  await awaitDiagnosticsRefresh(uri)
-  return { ok: true }
+  return { ok: true, diagnostics: await collectDiagnostics(args.filePath) }
 }
 
 // [local-smark] diagnostics: 只读取，不 ensureOpen，不等待（依赖之前 touch）

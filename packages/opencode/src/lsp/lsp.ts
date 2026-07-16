@@ -126,6 +126,8 @@ interface State {
   spawning: Map<string, Promise<LSPClient.Info | undefined>>
   // bridge 能连通不代表 diagnostics endpoint 成功；status 需要这条信号避免 clean 误报。
   bridgeDiagnostics?: "ok" | "failed"
+  // 保存最近一次 strong touch 的同请求快照，后续 diagnostics() 只读缓存，不再产生第二段等待。
+  bridgeSnapshot: Record<string, LSPClient.Diagnostic[]>
 }
 
 export interface Interface {
@@ -210,6 +212,7 @@ export const layer = Layer.effect(
           broken: new Set(),
           spawning: new Map(),
           bridgeDiagnostics: undefined,
+          bridgeSnapshot: {},
         }
 
         yield* Effect.addFinalizer(() =>
@@ -339,16 +342,18 @@ export const layer = Layer.effect(
       })
     })
 
-    // [local-smark] 通过 bridge 调用 LSP 端点。失败返回 undefined（触发回退）。
+    // [local-smark] 通过 bridge 调用 LSP 端点。失败返回 undefined，由诊断调用方保留真实失败状态。
+    // timeout 只由 strong diagnostic touch 传入；hover 等其他 bridge 能力保持各自原有上限。
     const callLspBridge = Effect.fnUntraced(function* (
       endpoint: string,
       body: Record<string, unknown>,
       filePath?: string,
+      timeoutMs?: number,
     ) {
       const ctx = yield* InstanceState.context
       return yield* Effect.promise(async () => {
         try {
-          return await VscodeBridge.callBridge({ cwd: ctx.directory, path: endpoint, body, filePath })
+          return await VscodeBridge.callBridge({ cwd: ctx.directory, path: endpoint, body, filePath, timeoutMs })
         } catch {
           return undefined
         }
@@ -438,8 +443,26 @@ export const layer = Layer.effect(
       const bridge = yield* resolveLspBridge(input)
       if (bridge) {
         if (!diagnostics) return
-        const touched = yield* callLspBridge("/lsp/touch", { filePath: input }, input)
-        if (touched) return
+        const touched = yield* callLspBridge("/lsp/touch", { filePath: input }, input, 1000)
+        const mapped = bridgeDiagnosticsToMap(touched)
+        const s = yield* InstanceState.get(state)
+        if (mapped) {
+          const normalized = AppFileSystem.normalizePath(input)
+          // 空数组也覆盖旧快照，保证“未发现错误”不会保留上一次错误。
+          // 非空数组同样固定在本次 Tool 结果中，后到事件不能修改已经返回的输出。
+          s.bridgeSnapshot[normalized] = mapped[normalized] ?? []
+          s.bridgeDiagnostics = "ok"
+          return
+        }
+        s.bridgeDiagnostics = "failed"
+        // bridge 已被选中后失败属于真实失败，不允许再切换内置 LSP 改变诊断语义。
+        return
+      }
+      if (diagnostics) {
+        const s = yield* InstanceState.get(state)
+        // strong touch 没有 bridge 时直接标记失败；仅 light warm 保留原有内置 LSP 兼容路径。
+        s.bridgeDiagnostics = "failed"
+        return
       }
       log.info("touching file", { file: input })
       const clients = yield* getClients(input)
@@ -463,30 +486,15 @@ export const layer = Layer.effect(
     })
 
     const diagnostics = Effect.fn("LSP.diagnostics")(function* () {
-      // [local-smark] 优先 bridge，回退内置
+      // [local-smark] touch 已返回同一请求的快照；这里不再发第二个 bridge 请求。
+      // 空对象与 bridge 失败由 status 区分，成功的空文件快照则保留规范化文件 key 和空数组。
       const s = yield* InstanceState.get(state)
       const bridge = yield* resolveLspBridge()
-      if (bridge) {
-        // 成功解析 `{ diagnostics: [] }` 也算可用；undefined/坏结构才标记失败。
-        const result = yield* callLspBridge("/lsp/diagnostics", {})
-        const mapped = bridgeDiagnosticsToMap(result)
-        if (mapped) {
-          s.bridgeDiagnostics = "ok"
-          return mapped
-        }
-        // bridge 可连接不等于 diagnostics 可用；失败后 status 不能再让工具输出 clean 误报。
+      if (!bridge) {
         s.bridgeDiagnostics = "failed"
+        return {}
       }
-      const results: Record<string, LSPClient.Diagnostic[]> = {}
-      const all = yield* Effect.promise(() => Promise.all(s.clients.map((client) => client.diagnostics)))
-      for (const result of all) {
-        for (const [p, diags] of result.entries()) {
-          const arr = results[p] || []
-          arr.push(...diags)
-          results[p] = arr
-        }
-      }
-      return results
+      return s.bridgeDiagnostics === "failed" ? {} : s.bridgeSnapshot
     })
 
     const hover = Effect.fn("LSP.hover")(function* (input: LocInput) {

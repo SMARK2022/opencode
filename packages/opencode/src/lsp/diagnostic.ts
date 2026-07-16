@@ -91,9 +91,9 @@ export function checkedMessage(summary: { newCount: number; existingCount: numbe
     const noun = summary.existingCount === 1 ? "error" : "errors"
     return `LSP checked: no new errors introduced; ${summary.existingCount} existing ${noun} remain.`
   }
-  // clean 文案只在调用方已确认 LSP 可用后使用；summary=0 不能单独证明 LSP 运行过。
-  if (scope === "changed-files") return "LSP checked: no errors in changed files."
-  return "LSP checked: no errors in this file."
+  // 只描述本次 VS Code 快照“未发现”，不承诺所有语言服务已经完成或以后不会更新。
+  if (scope === "changed-files") return "LSP checked: no errors found in changed files."
+  return "LSP checked: no errors found in this file."
 }
 
 export * as Diagnostic from "./diagnostic"

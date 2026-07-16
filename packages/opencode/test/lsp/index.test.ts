@@ -8,6 +8,7 @@ import { LSP } from "@/lsp/lsp"
 import * as LSPServer from "@/lsp/server"
 import * as VscodeBridge from "@/ide/vscode-bridge"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { awaitWithTimeout, testEffect } from "../lib/effect"
 
@@ -134,7 +135,7 @@ describe("lsp.spawn", () => {
             source: "registry",
             capabilities: { lsp: true },
           } satisfies VscodeBridge.BridgeRef)
-          const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue({ ok: true })
+          const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue({ ok: true, diagnostics: [] })
           const spawn = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
 
           try {
@@ -165,12 +166,49 @@ describe("lsp.spawn", () => {
             source: "registry",
             capabilities: { lsp: true },
           } satisfies VscodeBridge.BridgeRef)
-          const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue({ ok: true })
+          const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue({ ok: true, diagnostics: [] })
 
           try {
             yield* lsp.touchFile(file, "document")
             // edit/write/apply_patch 需要 strong touch 来触发 VSCode/Pylance 诊断计算。
-            expect(call).toHaveBeenCalledWith(expect.objectContaining({ path: "/lsp/touch", filePath: file }))
+            // 空数组是成功的“未发现错误”快照，必须保留文件 key，不能退化为 unavailable。
+            expect(call).toHaveBeenCalledWith(expect.objectContaining({ path: "/lsp/touch", filePath: file, timeoutMs: 1000 }))
+            expect(yield* lsp.diagnostics()).toEqual({ [AppFileSystem.normalizePath(file)]: [] })
+            expect(yield* lsp.status()).toEqual([{ id: "vscode", name: "VSCode", root: ".", status: "connected" }])
+          } finally {
+            resolve.mockRestore()
+            call.mockRestore()
+          }
+        }),
+      ),
+    ),
+  )
+
+  it.live("returns diagnostics from the VSCode bridge touch without a second request", () =>
+    provideTmpdirInstance((dir) =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const file = path.join(dir, "src", "inside.ts")
+          const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
+            id: "bridge",
+            port: 1,
+            token: "token",
+            host: "127.0.0.1",
+            source: "registry",
+            capabilities: { lsp: true },
+          } satisfies VscodeBridge.BridgeRef)
+          const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue({
+            ok: true,
+            diagnostics: [{ file, line: 2, column: 3, severity: "Error", message: "type mismatch", source: "test" }],
+          })
+
+          try {
+            yield* lsp.touchFile(file, "document")
+            // touch 响应已经携带诊断；再次读取必须命中同一缓存而不是发送第二个 HTTP 请求。
+            expect((yield* lsp.diagnostics())[AppFileSystem.normalizePath(file)]).toEqual([
+              expect.objectContaining({ message: "type mismatch", severity: 1, source: "test" }),
+            ])
+            expect(call).toHaveBeenCalledTimes(1)
           } finally {
             resolve.mockRestore()
             call.mockRestore()
@@ -184,6 +222,7 @@ describe("lsp.spawn", () => {
     provideTmpdirInstance((dir) =>
       LSP.Service.use((lsp) =>
         Effect.gen(function* () {
+          const file = path.join(dir, "src", "inside.ts")
           const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
             id: "bridge",
             port: 1,
@@ -195,13 +234,67 @@ describe("lsp.spawn", () => {
           const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue(undefined)
 
           try {
+            yield* lsp.touchFile(file, "document")
             yield* lsp.diagnostics()
-            // bridge 存活不等于 diagnostics 成功；失败后 status 不能让工具输出 clean。
+            // bridge 存活不等于诊断成功；失败后不能输出 clean，也不能再叠加第二次诊断请求。
+            // 此处同时锁定状态和调用次数，避免未来把失败重新包装成空成功。
             expect(yield* lsp.status()).toEqual([])
-            expect(call).toHaveBeenCalledWith(expect.objectContaining({ path: "/lsp/diagnostics" }))
+            expect(call).toHaveBeenCalledTimes(1)
+            expect(call).toHaveBeenCalledWith(expect.objectContaining({ path: "/lsp/touch", timeoutMs: 1000 }))
           } finally {
             resolve.mockRestore()
             call.mockRestore()
+          }
+        }),
+      ),
+    ),
+  )
+
+  it.live("does not fall back to builtin LSP when VSCode bridge diagnostics fail", () =>
+    provideTmpdirInstance((dir) =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const file = path.join(dir, "src", "inside.ts")
+          const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
+            id: "bridge",
+            port: 1,
+            token: "token",
+            host: "127.0.0.1",
+            source: "registry",
+            capabilities: { lsp: true },
+          } satisfies VscodeBridge.BridgeRef)
+          const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue(undefined)
+          const spawn = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+
+          try {
+            yield* lsp.touchFile(file, "document")
+            // 已选中的 VS Code 诊断失败后不得启动另一套 provider 来制造不同结果。
+            expect(spawn).toHaveBeenCalledTimes(0)
+          } finally {
+            resolve.mockRestore()
+            call.mockRestore()
+            spawn.mockRestore()
+          }
+        }),
+      ),
+    ),
+  )
+
+  it.live("does not spawn builtin LSP when VSCode bridge is unavailable for diagnostics", () =>
+    provideTmpdirInstance((dir) =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          const file = path.join(dir, "src", "inside.ts")
+          const resolve = spyOn(VscodeBridge, "resolveBridge").mockRejectedValue(new Error("bridge unavailable"))
+          const spawn = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+
+          try {
+            yield* lsp.touchFile(file, "document")
+            // bridge 缺失只影响诊断；本测试防止 strong touch 静默回到内置 TypeScript LSP。
+            expect(spawn).toHaveBeenCalledTimes(0)
+          } finally {
+            resolve.mockRestore()
+            spawn.mockRestore()
           }
         }),
       ),

@@ -306,7 +306,7 @@ describe("LSP.Diagnostic", () => {
   test("checkedMessage confirms clean LSP results for a single file", () => {
     const result = LSP.Diagnostic.checkedMessage({ newCount: 0, existingCount: 0 }, "file")
     // clean 确认必须只在 LSP 已经返回 summary 后使用，避免模型误以为 LSP 没工作。
-    expect(result).toBe("LSP checked: no errors in this file.")
+    expect(result).toBe("LSP checked: no errors found in this file.")
   })
 
   test("checkedMessage keeps existing errors as a count-only summary", () => {
@@ -317,7 +317,7 @@ describe("LSP.Diagnostic", () => {
 
   test("checkedMessage uses changed-files copy for patch clean results", () => {
     const result = LSP.Diagnostic.checkedMessage({ newCount: 0, existingCount: 0 }, "changed-files")
-    expect(result).toBe("LSP checked: no errors in changed files.")
+    expect(result).toBe("LSP checked: no errors found in changed files.")
   })
 
   // [local-smark] newErrors 返回新错误数组，供 metadata 存储给 TUI 渲染
