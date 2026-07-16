@@ -22,7 +22,7 @@ import { TestLLMServer } from "../lib/llm-server"
 import path from "path"
 import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, TestInstance, tmpdirScoped } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect } from "../lib/effect"
 
 const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
 const it = testEffect(
@@ -693,17 +693,35 @@ describe("HttpApi SDK", () => {
             parts: [{ type: "text", text: "async hello" }],
           }),
         )
-        const messages = yield* capture(() => sdk.session.messages({ sessionID }))
+        const messageTexts = (result: Captured) =>
+          array(result.data)
+            .flatMap((item) => array(record(item).parts))
+            .map((part) => record(part).text)
+            .filter((text): text is string => typeof text === "string")
+            .sort()
+        // promptAsync 的 204 只承诺后台任务已接受；通过公开 messages seam 等待
+        // 目标消息持久化，避免把不同平台的 fiber 调度顺序误当成 server-path 差异。
+        const messages = yield* pollWithTimeout(
+          Effect.gen(function* () {
+            const result = yield* capture(() => sdk.session.messages({ sessionID }))
+            return messageTexts(result).includes("async hello") ? result : undefined
+          }),
+          `${serverPath} promptAsync message was not persisted`,
+          "10 seconds",
+        )
+        expect(statuses({ session, prompt, asyncPrompt, messages })).toEqual({
+          session: 200,
+          prompt: 200,
+          asyncPrompt: 204,
+          messages: 200,
+        })
+        expect(messageTexts(messages)).toEqual(["async hello", "hello"])
 
         return {
           statuses: statuses({ session, prompt, asyncPrompt, messages }),
           promptRole: record(record(prompt.data).info).role,
           messageCount: array(messages.data).length,
-          messageTexts: array(messages.data)
-            .flatMap((item) => array(record(item).parts))
-            .map((part) => record(part).text)
-            .filter((text): text is string => typeof text === "string")
-            .sort(),
+          messageTexts: messageTexts(messages),
         }
       }),
     ),
