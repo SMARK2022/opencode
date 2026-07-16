@@ -755,17 +755,37 @@ describe("HttpApi SDK", () => {
             parts: [{ type: "text", text: "async hello" }],
           }),
         )
-        const messages = yield* capture(() => sdk.session.messages({ sessionID }))
+        const messageTexts = (result: Captured) =>
+          array(result.data)
+            .flatMap((item) => array(record(item).parts))
+            .map((part) => record(part).text)
+            .filter((text): text is string => typeof text === "string")
+            .sort()
+        // helper 只在断言中使用；messages 的真实结构由 server 返回契约决定，这里只提取 text 字段。
+        // promptAsync 的 204 只承诺后台任务已接受；通过公开 messages seam 等待
+        // 目标消息持久化，避免把不同平台的 fiber 调度顺序误当成 server-path 差异。
+        const messages = yield* pollWithTimeout(
+          Effect.gen(function* () {
+            const result = yield* capture(() => sdk.session.messages({ sessionID }))
+            return messageTexts(result).includes("async hello") ? result : undefined
+          }),
+          `${serverPath} promptAsync message was not persisted`,
+          "10 seconds",
+        )
+        expect(statuses({ session, prompt, asyncPrompt, messages })).toEqual({
+          session: 200,
+          prompt: 200,
+          asyncPrompt: 204,
+          messages: 200,
+        })
+        // 归序后的两条文本必须同时包含 prompt 与 asyncPrompt 的产出，任何缺失都说明后台任务丢失。
+        expect(messageTexts(messages)).toEqual(["async hello", "hello"])
 
         return {
           statuses: statuses({ session, prompt, asyncPrompt, messages }),
           promptRole: record(record(prompt.data).info).role,
           messageCount: array(messages.data).length,
-          messageTexts: array(messages.data)
-            .flatMap((item) => array(record(item).parts))
-            .map((part) => record(part).text)
-            .filter((text): text is string => typeof text === "string")
-            .sort(),
+          messageTexts: messageTexts(messages),
         }
       }),
     ),
