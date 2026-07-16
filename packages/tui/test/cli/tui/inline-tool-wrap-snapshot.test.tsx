@@ -523,6 +523,10 @@ describe("TUI inline tool wrapping", () => {
       const shell = testSetup!
       const diagnostic = findVisibleText(shell.captureCharFrame().split("\n"), visible)
       expect(diagnostic).toBeDefined()
+      // 实际生产组件在普通/上下文视图中都只留一行分隔，不靠源码中的 gap 字样判定。
+      const command = findVisibleText(shell.captureCharFrame().split("\n"), "$ failed command")
+      expect(command).toBeDefined()
+      expect((diagnostic?.y ?? -1) - (command?.y ?? -1)).toBe(2)
       expect(shell.captureCharFrame()).not.toContain('reason="exit"')
       expect(shell.captureCharFrame()).not.toContain("<bash_high_signal_excerpt>")
       shell.renderer.clearSelection()
@@ -532,7 +536,11 @@ describe("TUI inline tool wrapping", () => {
       await shell.renderOnce()
       await shell.renderOnce()
       const context = shell.captureCharFrame()
-      expect(context).toContain("Model context output")
+      expect(context).not.toContain("Model context output")
+      expect(context).toContain("returned to model")
+      const contextCommand = findVisibleText(context.split("\n"), "$ failed command")
+      const contextOutput = findVisibleText(context.split("\n"), visible)
+      expect((contextOutput?.y ?? -1) - (contextCommand?.y ?? -1)).toBe(2)
       expect(context.split(visible)).toHaveLength(2)
       expect(context).toContain(notice)
       expect(context).not.toContain("<bash_high_signal_excerpt>")
