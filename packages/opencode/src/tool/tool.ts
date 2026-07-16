@@ -51,7 +51,7 @@ export type Context<M extends Metadata = Metadata> = {
   callID?: string
   extra?: { [key: string]: unknown }
   messages: MessageV2.WithParts[]
-  metadata(input: { title?: string; metadata?: M }): Effect.Effect<void>
+  metadata(input: { title?: string; metadata?: M; delivery?: "durable" | "ephemeral" }): Effect.Effect<void>
   ask(input: Omit<Permission.Request, "id" | "sessionID" | "tool">): Effect.Effect<void>
 }
 
@@ -140,7 +140,9 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           )
           const safeCtx = {
             ...ctx,
-            metadata(input: { title?: string; metadata?: Metadata }) {
+            // sanitizer 只能清理 metadata 内容，必须原样透传 delivery；否则 ephemeral
+            // progress 会在 wrapper 边界退回缺省 durable 并重新触发 SQLite 写入。
+            metadata(input: { title?: string; metadata?: Metadata; delivery?: "durable" | "ephemeral" }) {
               const metadata = sanitizeMetadata(input.metadata)
               return ctx.metadata(metadata === input.metadata ? input : { ...input, metadata })
             },

@@ -545,6 +545,7 @@ export interface Interface {
     partID: PartID
   }) => Effect.Effect<MessageV2.Part | undefined>
   readonly updatePart: <T extends MessageV2.Part>(part: T) => Effect.Effect<T>
+  readonly publishPartProgress: <T extends MessageV2.ToolPart>(part: T) => Effect.Effect<T>
   readonly updatePartDelta: (input: {
     sessionID: SessionID
     messageID: MessageID
@@ -689,6 +690,20 @@ export const layer: Layer.Layer<
         })
         return part
       }).pipe(Effect.withSpan("Session.updatePart"))
+
+    const publishPartProgress = <T extends MessageV2.ToolPart>(part: T): Effect.Effect<T> =>
+      Effect.gen(function* () {
+        // structuredClone 隔离并发 consumer 对 snapshot 的修改；返回原 Part 则保持
+        // processor registry 与 durable updatePart 相同的调用合同。
+        // live snapshot 只进入现有 Project Bus/GlobalBus，不触碰 projector、
+        // EventSequence 或 SQLite；durable owner 仍然只有 updatePart。
+        yield* bus.publish(MessageV2.Event.PartProgress, {
+          sessionID: part.sessionID,
+          part: structuredClone(part),
+          time: Date.now(),
+        })
+        return part
+      }).pipe(Effect.withSpan("Session.publishPartProgress"))
 
     const getPart: Interface["getPart"] = Effect.fn("Session.getPart")(function* (input) {
       const row = Database.use((db) =>
@@ -915,6 +930,7 @@ export const layer: Layer.Layer<
       removeMessage,
       removePart,
       updatePart,
+      publishPartProgress,
       getPart,
       updatePartDelta,
       findMessage,

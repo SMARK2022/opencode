@@ -2,7 +2,7 @@ import { Provider } from "@/provider/provider"
 import * as Log from "@opencode-ai/core/util/log"
 import { Context, Effect, Layer, Record } from "effect"
 import * as Stream from "effect/Stream"
-import { streamText, wrapLanguageModel, type ModelMessage, type Tool, tool, jsonSchema } from "ai"
+import { APICallError, streamText, wrapLanguageModel, type ModelMessage, type Tool, tool, jsonSchema } from "ai"
 import { mergeDeep } from "remeda"
 import { GitLabWorkflowLanguageModel } from "gitlab-ai-provider"
 import { ProviderTransform } from "@/provider/transform"
@@ -79,16 +79,14 @@ const live: Layer.Layer<
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
       const l = log
         .clone()
-        .tag("providerID", input.model.providerID)
-        .tag("modelID", input.model.id)
-        .tag("session.id", input.sessionID)
+        // 这些合法标识没有 schema 长度上限；在 observability owner 限制 bytes，避免 prefix 绕过整行预算。
+        .tag("providerID", utf8Prefix(input.model.providerID, 128))
+        .tag("modelID", utf8Prefix(input.model.id, 256))
+        .tag("session.id", utf8Prefix(input.sessionID, 128))
         .tag("small", (input.small ?? false).toString())
-        .tag("agent", input.agent.name)
-        .tag("mode", input.agent.mode)
-      l.info("stream", {
-        modelID: input.model.id,
-        providerID: input.model.providerID,
-      })
+        .tag("agent", utf8Prefix(input.agent.name, 128))
+        .tag("mode", utf8Prefix(input.agent.mode, 32))
+      l.info("stream")
 
       const [language, cfg, item, info] = yield* Effect.all(
         [
@@ -357,18 +355,15 @@ const live: Layer.Layer<
         : undefined
 
       return streamText({
-        onError(error) {
+        onError(event) {
           l.error("stream error", {
-            error,
+            error: streamErrorSummary(event.error),
           })
         },
         async experimental_repairToolCall(failed) {
           const lower = failed.toolCall.toolName.toLowerCase()
           if (lower !== failed.toolCall.toolName && sortedTools[lower]) {
-            l.info("repairing tool call", {
-              tool: failed.toolCall.toolName,
-              repaired: lower,
-            })
+            l.info("repairing tool call")
             return {
               ...failed.toolCall,
               toolName: lower,
@@ -476,6 +471,27 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(RuntimeFlags.defaultLayer),
   ),
 )
+
+function streamErrorSummary(error: unknown) {
+  // provider-controlled message/URL/body/cause 都不得落盘；原始 error 仍由 fullStream 交给 processor。
+  if (!APICallError.isInstance(error)) return { name: "UnknownError", message: "Provider stream failed" }
+  return {
+    name: "APICallError",
+    message: "Provider API call failed",
+    statusCode: error.statusCode,
+    isRetryable: error.isRetryable,
+    responseBytes: error.responseBody === undefined ? undefined : Buffer.byteLength(error.responseBody, "utf8"),
+  }
+}
+
+function utf8Prefix(value: string, bytes: number) {
+  const buffer = Buffer.from(value)
+  if (buffer.length <= bytes) return value
+  return buffer
+    .subarray(0, bytes)
+    .toString("utf8")
+    .replace(/\uFFFD+$/, "")
+}
 
 function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "permission" | "user">) {
   const disabled = Permission.disabled(

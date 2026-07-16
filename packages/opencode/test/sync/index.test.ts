@@ -1,6 +1,6 @@
 import { describe, expect, beforeEach, afterAll } from "bun:test"
 import { provideTmpdirInstance } from "../fixture/fixture"
-import { Effect, Layer, Schema } from "effect"
+import { Effect, Fiber, Layer, Schema } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Bus } from "../../src/bus"
 import { SyncEvent } from "../../src/sync"
@@ -8,7 +8,7 @@ import { Database, eq } from "@/storage/db"
 import { EventSequenceTable, EventTable } from "../../src/sync/event.sql"
 import { MessageID } from "../../src/session/schema"
 import { initProjectors } from "../../src/server/projectors"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect } from "../lib/effect"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 
 const it = testEffect(
@@ -26,7 +26,7 @@ beforeEach(() => {
 })
 
 describe("SyncEvent", () => {
-  function setup() {
+  function setup(convertEvent?: Parameters<typeof SyncEvent.init>[0]["convertEvent"]) {
     SyncEvent.reset()
 
     const Created = SyncEvent.define({
@@ -44,6 +44,7 @@ describe("SyncEvent", () => {
 
     SyncEvent.init({
       projectors: [SyncEvent.project(Created, () => {}), SyncEvent.project(Sent, () => {})],
+      ...(convertEvent && { convertEvent }),
     })
 
     return { Created, Sent }
@@ -136,6 +137,54 @@ describe("SyncEvent", () => {
           } finally {
             dispose()
           }
+        }),
+      ),
+    )
+
+    it.live(
+      "awaits publication before allowing the next event",
+      provideTmpdirInstance(() =>
+        Effect.gen(function* () {
+          const published: string[] = []
+          let conversions = 0
+          let markStarted = () => {}
+          const firstConversionStarted = new Promise<void>((resolve) => {
+            markStarted = resolve
+          })
+          const { Created } = setup((_type, data) => {
+            conversions++
+            if (conversions !== 1) return data
+            markStarted()
+            return new Promise((resolve) => setTimeout(() => resolve(data), 100))
+          })
+          // 延迟发生在公开 convertEvent seam；它能区分 awaited publication 与丢弃 Promise。
+          // 第二次 run 复用同一 aggregate，验证顺序合同而不是单次事件是否可发布。
+          const bus = yield* Bus.Service
+          const dispose = yield* bus.subscribeAllCallback((event) => {
+            if (event.type !== Created.type) return
+            published.push((event.properties as { name: string }).name)
+          })
+          yield* Effect.addFinalizer(() => Effect.sync(dispose))
+
+          // 同一调用方的 terminal 必须排在 trailing running publication 之后；
+          // 第一条公开转换受控延迟时，第二个 run 尚不允许开始。
+          const sequence = yield* Effect.gen(function* () {
+            yield* SyncEvent.use.run(Created, { id: "evt_order", name: "running" })
+            yield* SyncEvent.use.run(Created, { id: "evt_order", name: "terminal" })
+          }).pipe(Effect.forkChild)
+
+          yield* Effect.promise(() => firstConversionStarted)
+          yield* Effect.yieldNow
+          // 这里只检查公开 Effect 是否完成，不检查 private publisher 调用次数。
+          // 旧 fire-and-forget 实现会提前完成并让 terminal 越过延迟的 running。
+          const pending = sequence.pollUnsafe() === undefined
+          yield* Fiber.join(sequence)
+          yield* pollWithTimeout(
+            Effect.sync(() => (published.length === 2 ? true : undefined)),
+            "timed out waiting for ordered SyncEvent publications",
+          )
+          expect(pending).toBe(true)
+          expect(published).toEqual(["running", "terminal"])
         }),
       ),
     )

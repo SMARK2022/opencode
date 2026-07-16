@@ -63,6 +63,7 @@ export interface Handle {
   readonly updateToolCall: (
     toolCallID: string,
     update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
+    delivery?: "durable" | "ephemeral",
   ) => Effect.Effect<MessageV2.ToolPart | undefined>
   readonly completeToolCall: (
     toolCallID: string,
@@ -232,10 +233,16 @@ export const layer = Layer.effect(
       const updateToolCall = Effect.fn("SessionProcessor.updateToolCall")(function* (
         toolCallID: string,
         update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
+        delivery: "durable" | "ephemeral" = "durable",
       ) {
         const match = yield* readToolCall(toolCallID)
         if (!match) return
-        const part = yield* session.updatePart(update(match.part))
+        const next = update(match.part)
+        // delivery 只选择同一 next snapshot 的传输合同，不能重新执行 updater；
+        // 否则有副作用的 metadata merge 会在 live/durable 分支产生不同 Part。
+        // 缺省 durable 保持所有既有 Tool 调用语义；只有显式 ephemeral 的
+        // shell progress 绕过 SQLite，并且仍复用同一个 Part updater。
+        const part = yield* delivery === "ephemeral" ? session.publishPartProgress(next) : session.updatePart(next)
         ctx.toolcalls[toolCallID] = {
           ...match.call,
           partID: part.id,

@@ -3,11 +3,15 @@ import { ACP } from "../../src/acp/agent"
 import type { AgentSideConnection } from "@agentclientprotocol/sdk"
 import type {
   Event,
+  EventMessagePartProgress,
   EventMessagePartUpdated,
   ToolStateCompleted,
+  ToolStateError,
   ToolStatePending,
   ToolStateRunning,
 } from "@opencode-ai/sdk/v2"
+import { Global } from "@opencode-ai/core/global"
+import * as Log from "@opencode-ai/core/util/log"
 import { provideTestInstance, tmpdir } from "../fixture/fixture"
 
 const pollUntil = async <T>(
@@ -71,9 +75,15 @@ function toolEvent(
     callID: string
     tool: string
     input: Record<string, unknown>
-  } & ({ status: "running"; metadata?: Record<string, unknown> } | { status: "pending"; raw: string }),
+  } & (
+    | { status: "running"; metadata?: Record<string, unknown> }
+    | { status: "pending"; raw: string }
+    | { status: "error"; error: string }
+  ),
 ): GlobalEventEnvelope {
-  const state: ToolStatePending | ToolStateRunning =
+  // error fixture 复用真实 PartUpdated wire shape，确保 failed terminal 走公开 ACP event seam。
+  // 它不复制 production 状态机，只提供独立的终态输入和可观察 update。
+  const state: ToolStatePending | ToolStateRunning | ToolStateError =
     opts.status === "running"
       ? {
           status: "running",
@@ -81,11 +91,18 @@ function toolEvent(
           ...(opts.metadata && { metadata: opts.metadata }),
           time: { start: Date.now() },
         }
-      : {
-          status: "pending",
-          input: opts.input,
-          raw: opts.raw,
-        }
+      : opts.status === "error"
+        ? {
+            status: "error",
+            input: opts.input,
+            error: opts.error,
+            time: { start: Date.now() - 1, end: Date.now() },
+          }
+        : {
+            status: "pending",
+            input: opts.input,
+            raw: opts.raw,
+          }
   const payload: EventMessagePartUpdated = {
     id: `evt_${opts.callID}`,
     type: "message.part.updated",
@@ -106,7 +123,7 @@ function toolEvent(
   return { directory: cwd, payload }
 }
 
-function completedToolEvent(
+function terminalToolEvent(
   sessionId: string,
   cwd: string,
   opts: {
@@ -144,6 +161,51 @@ function completedToolEvent(
     },
   }
   return { directory: cwd, payload }
+}
+
+function progressToolEvent(
+  sessionId: string,
+  cwd: string,
+  opts: {
+    callID: string
+    tool: string
+    input: Record<string, unknown>
+    metadata: Record<string, unknown>
+  },
+): GlobalEventEnvelope {
+  // 只替换 event kind，保留 production PartUpdated 的完整 ToolPart wire shape。
+  const payload = toolEvent(sessionId, cwd, { ...opts, status: "running" }).payload
+  if (!payload || payload.type !== "message.part.updated" || payload.properties.part.type !== "tool")
+    throw new Error("expected Tool Part event")
+  return {
+    directory: cwd,
+    payload: {
+      ...payload,
+      type: "message.part.progress",
+      properties: { ...payload.properties, part: payload.properties.part },
+    } satisfies EventMessagePartProgress,
+  }
+}
+
+function shellTerminalEvent(
+  sessionId: string,
+  cwd: string,
+  callID: string,
+  status: "completed" | "error",
+  input: Record<string, unknown>,
+) {
+  // 同一工厂让 live event 与 replay message 使用完全相同的 completed/error ToolPart。
+  // 测试矩阵因此只改变真实入口，不会让 fixture shape 成为额外变量。
+  if (status === "completed")
+    return terminalToolEvent(sessionId, cwd, { callID, tool: "bash", input, output: "terminal" })
+  return toolEvent(sessionId, cwd, { callID, tool: "bash", status, input, error: "terminal error" })
+}
+
+function toolPart(event: GlobalEventEnvelope) {
+  const payload = event.payload
+  if (!payload || payload.type !== "message.part.updated" || payload.properties.part.type !== "tool")
+    throw new Error("expected Tool Part event")
+  return payload.properties.part
 }
 
 function createEventStream() {
@@ -628,95 +690,191 @@ describe("acp.agent event subscription", () => {
     })
   })
 
-  test("streams running bash output snapshots and de-dupes identical snapshots", async () => {
-    await using tmp = await tmpdir()
-    await provideTestInstance({
-      directory: tmp.path,
-      fn: async () => {
-        const { agent, controller, sessionUpdates, stop } = createFakeAgent()
-        const cwd = "/tmp/opencode-acp-test"
-        const sessionId = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
-        const input = { command: "echo hello", description: "run command" }
+  test("streams live shell progress and rejects stale durable snapshots", async () => {
+    const previous = Global.Path.log
+    await using logs = await tmpdir()
+    Global.Path.log = logs.path
+    await Log.init({ print: false, dev: false, level: "INFO" })
+    try {
+      await using tmp = await tmpdir()
+      await provideTestInstance({
+        directory: tmp.path,
+        fn: async () => {
+          const { agent, controller, sessionUpdates, stop, sdk } = createFakeAgent()
+          const cwd = "/tmp/opencode-acp-test"
+          const sessionId = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
+          const input = { command: "echo hello", description: "run command" }
+          const marker = "ACP_PROGRESS_LOG_MARKER_7d1a"
 
-        for (const output of ["a", "a", "ab"]) {
+          for (const [output, progressVersion] of [
+            ["a", 1],
+            ["a", 2],
+            [marker, 3],
+          ] as const) {
+            // 重复 a 只验证展示去重；唯一 marker 同时证明最新 snapshot 可穿过 live seam。
+            controller.push(
+              progressToolEvent(sessionId, cwd, {
+                callID: "call_1",
+                tool: "bash",
+                input,
+                metadata: { output, progressVersion },
+              }),
+            )
+          }
+          await pollUntil(
+            () =>
+              sessionUpdates
+                .filter((u) => u.sessionId === sessionId)
+                .filter((u) => isToolCallUpdate(u.update))
+                .map((u) => inProgressText(u.update))
+                .filter((t) => t === marker).length > 0,
+            "final bash marker snapshot never arrived",
+          )
+
+          // durable channel 可在较新 live 后完成；旧 version 即使 output 不同也不能让 ACP 展示回退。
           controller.push(
             toolEvent(sessionId, cwd, {
               callID: "call_1",
               tool: "bash",
               status: "running",
               input,
-              metadata: { output },
+              metadata: { output: "stale", progressVersion: 2 },
             }),
           )
-        }
-        await pollUntil(
-          () =>
-            sessionUpdates
-              .filter((u) => u.sessionId === sessionId)
-              .filter((u) => isToolCallUpdate(u.update))
-              .map((u) => inProgressText(u.update))
-              .filter((t) => t === "ab").length > 0,
-          "final bash snapshot 'ab' never arrived",
-        )
+          // completed 走 live、error 走 replay，覆盖两个真实入口和两个 terminal shape；
+          // late progress 使用更高 version，证明拒绝依据是 terminal dominance 而非 stale version。
+          // 最后的 barrier 通过同一公开 event stream 确认所有 late events 已处理。
+          const terminalCases = [
+            { callID: "call_1", source: "live", status: "completed" },
+            { callID: "call_replay_error", source: "replay", status: "error" },
+          ] as const
+          for (const item of terminalCases.filter((item) => item.source === "live")) {
+            controller.push(shellTerminalEvent(sessionId, cwd, item.callID, item.status, input))
+          }
+          await pollUntil(
+            () =>
+              terminalCases
+                .filter((item) => item.source === "live")
+                .every((item) =>
+                  sessionUpdates.some(
+                    (u) =>
+                      u.sessionId === sessionId && isToolCallUpdate(u.update) && u.update.toolCallId === item.callID,
+                  ),
+                ),
+            "live terminal updates never arrived",
+          )
+          const replayParts = terminalCases
+            .filter((item) => item.source === "replay")
+            .map((item) => toolPart(shellTerminalEvent(sessionId, cwd, item.callID, item.status, input)))
+          sdk.session.messages = async () => ({
+            data: [{ info: { role: "assistant", sessionID: sessionId }, parts: replayParts }],
+          })
+          await agent.loadSession({ sessionId, cwd, mcpServers: [] } as any)
 
-        const snapshots = sessionUpdates
-          .filter((u) => u.sessionId === sessionId)
-          .filter((u) => isToolCallUpdate(u.update))
-          .map((u) => inProgressText(u.update))
+          // 终态来自 live 和 replay 两个真实入口；每个 late running 都必须被同一个 marker 合同拒绝。
+          for (const { callID } of terminalCases) {
+            controller.push(
+              progressToolEvent(sessionId, cwd, {
+                callID,
+                tool: "bash",
+                input,
+                metadata: { output: `late-${callID}`, progressVersion: 99 },
+              }),
+            )
+          }
+          controller.push(
+            terminalToolEvent(sessionId, cwd, {
+              callID: "call_barrier",
+              tool: "bash",
+              input,
+              output: "barrier",
+            }),
+          )
+          await pollUntil(
+            () => completedToolUpdate(sessionUpdates, sessionId, "call_barrier"),
+            "ACP barrier never arrived",
+          )
+          const snapshots = sessionUpdates
+            .filter((u) => u.sessionId === sessionId)
+            .map((u) => u.update)
+            .filter(isToolCallUpdate)
+            .filter((u) => u.status === "in_progress")
+            .map(inProgressText)
 
-        expect(snapshots).toEqual(["a", undefined, "ab"])
-        stop()
-      },
-    })
+          // terminal 到达证明前面的 stale durable 已处理；断言只观察 ACP 用户可见更新序列。
+          // 唯一 marker 模拟不断增长的 provider/tool output，能直接捕获完整 payload 落盘。
+          // sentinel 在 progress 之后写入同一真实 file writer；读到它即证明前序日志已落盘，
+          // 无需用固定 sleep 猜测异步 stream flush 时机。
+          const sentinel = "ACP_PROGRESS_LOG_SENTINEL_7d1a"
+          Log.create({ service: "acp-test" }).info(sentinel)
+          const content = await pollUntil(async () => {
+            const value = await Bun.file(Log.file())
+              .text()
+              .catch(() => "")
+            return value.includes(sentinel) ? value : false
+          }, "ACP log sentinel was never flushed")
+          stop()
+          expect(content).not.toContain(marker)
+          expect(snapshots).toEqual(["a", undefined, marker])
+        },
+      })
+    } finally {
+      Global.Path.log = previous
+      await Log.init({ print: false, dev: true, level: "DEBUG" })
+    }
   })
 
-  test("emits synthetic pending before first running update for any tool", async () => {
+  test("emits synthetic pending per session before first running update", async () => {
     await using tmp = await tmpdir()
     await provideTestInstance({
       directory: tmp.path,
       fn: async () => {
         const { agent, controller, sessionUpdates, stop } = createFakeAgent()
         const cwd = "/tmp/opencode-acp-test"
-        const sessionId = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
+        const sessionA = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
+        const sessionB = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
 
         controller.push(
-          toolEvent(sessionId, cwd, {
-            callID: "call_bash",
+          progressToolEvent(sessionA, cwd, {
+            callID: "call_shared",
             tool: "bash",
-            status: "running",
             input: { command: "echo hi", description: "run command" },
-            metadata: { output: "hi\n" },
+            metadata: { output: "session-a", progressVersion: 2 },
           }),
         )
         controller.push(
-          toolEvent(sessionId, cwd, {
+          toolEvent(sessionA, cwd, {
             callID: "call_read",
             tool: "read",
             status: "running",
             input: { filePath: "/tmp/example.txt" },
           }),
         )
+        // provider callID 只在 Session 内唯一；A 的较高版本不能压掉 B 的首帧，
+        // synthetic pending 也必须在两个 Session 中各自出现一次。
+        controller.push(
+          progressToolEvent(sessionB, cwd, {
+            callID: "call_shared",
+            tool: "bash",
+            input: { command: "echo hi", description: "run command" },
+            metadata: { output: "session-b", progressVersion: 1 },
+          }),
+        )
         await pollUntil(
           () =>
-            sessionUpdates
-              .filter((u) => u.sessionId === sessionId)
-              .map((u) => u.update.sessionUpdate)
-              .filter((u) => u === "tool_call" || u === "tool_call_update").length >= 4,
-          "expected 4 tool_call/tool_call_update events",
+            sessionUpdates.filter((u) => u.sessionId === sessionA).length >= 4 &&
+            sessionUpdates.filter((u) => u.sessionId === sessionB).length >= 2,
+          "per-session tool lifecycle updates never arrived",
         )
 
-        const types = sessionUpdates
-          .filter((u) => u.sessionId === sessionId)
-          .map((u) => u.update.sessionUpdate)
-          .filter((u) => u === "tool_call" || u === "tool_call_update")
-        expect(types).toEqual(["tool_call", "tool_call_update", "tool_call", "tool_call_update"])
-
-        const pendings = sessionUpdates.filter(
-          (u) => u.sessionId === sessionId && u.update.sessionUpdate === "tool_call",
-        )
-        expect(pendings.every((p) => p.update.sessionUpdate === "tool_call" && p.update.status === "pending")).toBe(
-          true,
-        )
+        const updates = (sessionId: string) =>
+          sessionUpdates
+            .filter((u) => u.sessionId === sessionId)
+            .map((u) => u.update)
+            .filter((u) => u.sessionUpdate === "tool_call" || isToolCallUpdate(u))
+            .map((u) => (isToolCallUpdate(u) ? inProgressText(u) : u.status))
+        expect(updates(sessionA)).toEqual(["pending", "session-a", "pending", undefined])
+        expect(updates(sessionB)).toEqual(["pending", "session-b"])
         stop()
       },
     })
@@ -733,7 +891,7 @@ describe("acp.agent event subscription", () => {
         const data = Buffer.from("image-data").toString("base64")
 
         controller.push(
-          completedToolEvent(sessionId, cwd, {
+          terminalToolEvent(sessionId, cwd, {
             callID: "call_image",
             tool: "read",
             input: { filePath: "/tmp/image.png" },
@@ -849,7 +1007,7 @@ describe("acp.agent event subscription", () => {
     })
   })
 
-  test("does not emit duplicate synthetic pending after replayed running tool", async () => {
+  test("records replayed running version without duplicate synthetic pending", async () => {
     await using tmp = await tmpdir()
     await provideTestInstance({
       directory: tmp.path,
@@ -874,7 +1032,7 @@ describe("acp.agent event subscription", () => {
                   state: {
                     status: "running",
                     input,
-                    metadata: { output: "hi\n" },
+                    metadata: { output: "hi\n", progressVersion: 2 },
                     time: { start: Date.now() },
                   },
                 },
@@ -884,13 +1042,21 @@ describe("acp.agent event subscription", () => {
         })
 
         await agent.loadSession({ sessionId, cwd, mcpServers: [] } as any)
+        // replay 必须先登记 version；同版 live 帧应被拒绝，只有更高版本能继续展示。
         controller.push(
-          toolEvent(sessionId, cwd, {
+          progressToolEvent(sessionId, cwd, {
             callID: "call_1",
             tool: "bash",
-            status: "running",
             input,
-            metadata: { output: "hi\nthere\n" },
+            metadata: { output: "stale\n", progressVersion: 2 },
+          }),
+        )
+        controller.push(
+          progressToolEvent(sessionId, cwd, {
+            callID: "call_1",
+            tool: "bash",
+            input,
+            metadata: { output: "hi\nthere\n", progressVersion: 3 },
           }),
         )
         await pollUntil(
@@ -912,6 +1078,13 @@ describe("acp.agent event subscription", () => {
           .filter((u) => u === "tool_call" || u === "tool_call_update")
 
         expect(types).toEqual(["tool_call", "tool_call_update", "tool_call_update"])
+        expect(
+          sessionUpdates
+            .filter((u) => u.sessionId === sessionId)
+            .map((u) => u.update)
+            .filter(isToolCallUpdate)
+            .map(inProgressText),
+        ).toEqual(["hi\n", "hi\nthere\n"])
         stop()
       },
     })

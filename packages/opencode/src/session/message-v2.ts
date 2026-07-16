@@ -639,6 +639,14 @@ const PartUpdatedEventSchema = Schema.Struct({
   time: NonNegativeInt,
 })
 
+// live contract 只允许 ToolPart replace snapshot；放宽为 Part 会暗示 text/delta
+// producer 也能绕过 SyncEvent，而这些 producer 没有版本或恢复语义。
+const PartProgressEventSchema = Schema.Struct({
+  sessionID: SessionID,
+  part: ToolPart,
+  time: NonNegativeInt,
+})
+
 const PartRemovedEventSchema = Schema.Struct({
   sessionID: SessionID,
   messageID: MessageID,
@@ -664,6 +672,9 @@ export const Event = {
     aggregate: "sessionID",
     schema: PartUpdatedEventSchema,
   }),
+  // progress 是 replace 型 running Tool snapshot；它刻意不是 SyncEvent，
+  // 只有 1 秒 durable checkpoint 才能进入 SQLite 和重连恢复路径。
+  PartProgress: BusEvent.define("message.part.progress", PartProgressEventSchema),
   PartDelta: BusEvent.define(
     "message.part.delta",
     Schema.Struct({

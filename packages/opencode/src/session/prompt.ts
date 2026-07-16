@@ -38,6 +38,7 @@ import { SessionRequestUsage } from "./request-usage"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { SessionProcessor } from "./processor"
 import { Tool } from "@/tool/tool"
+import { ToolProgress } from "@/tool/progress"
 import { Permission } from "@/permission"
 import { SessionStatus } from "./status"
 import { LLM } from "./llm"
@@ -930,7 +931,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 time: { start: match.state.status === "running" ? match.state.time.start : Date.now() },
               },
             }
-          }),
+          }, val.delivery),
         ask: (req) =>
           permission
             .ask({
@@ -1417,6 +1418,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 status: "running",
                 time: { start: started },
                 input: { command: input.command },
+                // direct shell 与 AI ShellTool 使用同一 legacy-compatible version 基线。
+                metadata: { output: "", description: "", progressVersion: 0 },
               },
             }
             yield* sessions.updatePart(part)
@@ -1495,13 +1498,31 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 forceKillAfter: "3 seconds",
               })
               const handle = yield* spawner.spawn(cmd)
+              // coordinator 与 child stream 共用这个 scoped lifetime；scope close 会先
+              // flush trailing running snapshot，外层 finish 随后才提交 terminal Part。
+              const progress = yield* ToolProgress.make({
+                live: (metadata) => {
+                  if (part.state.status !== "running") return Effect.void
+                  return sessions.publishPartProgress({
+                    ...part,
+                    state: { ...part.state, metadata },
+                  })
+                },
+                durable: (metadata) => {
+                  if (part.state.status !== "running") return Effect.void
+                  return sessions.updatePart({
+                    ...part,
+                    state: { ...part.state, metadata },
+                  }).pipe(Effect.asVoid)
+                },
+              })
               yield* Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
                 Effect.gen(function* () {
                   output += chunk
-                  if (part.state.status === "running") {
-                    part.state.metadata = { output, description: "" }
-                    yield* sessions.updatePart(part)
-                  }
+                  if (part.state.status !== "running") return
+                  // direct shell 的 snapshot 是完整 raw 累计输出；coordinator 只负责
+                  // cadence/version，不解释 TerminalDisplay 或改变最终 output。
+                  yield* progress.update({ output, description: "" })
                 }),
               )
               yield* handle.exitCode

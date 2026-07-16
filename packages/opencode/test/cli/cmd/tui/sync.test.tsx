@@ -138,6 +138,49 @@ function partEvent(part: Part): GlobalEvent {
   }
 }
 
+function progressEvent(part: ToolPart): GlobalEvent {
+  return {
+    directory,
+    project: "proj_test",
+    payload: {
+      id: `evt_progress_${part.id}`,
+      type: "message.part.progress",
+      properties: { sessionID: part.sessionID, part, time: Date.now() },
+    },
+  } as unknown as GlobalEvent
+}
+
+function runningShellPart(output: string, progressVersion?: number): ToolPart {
+  return {
+    id: "part_shell",
+    sessionID: "ses_1",
+    messageID: "msg_1",
+    type: "tool",
+    callID: "call_shell",
+    tool: "bash",
+    state: {
+      status: "running",
+      input: { command: "build" },
+      time: { start: 1 },
+      metadata: { output, description: "", ...(progressVersion === undefined ? {} : { progressVersion }) },
+    },
+  }
+}
+
+function completedShellPart(output: string): ToolPart {
+  return {
+    ...runningShellPart(output, 1),
+    state: {
+      status: "completed",
+      input: { command: "build" },
+      time: { start: 1, end: 2 },
+      title: "",
+      metadata: { output, description: "" },
+      output,
+    },
+  }
+}
+
 // 构造 text part 测试 fixture，模拟 text-start 阶段的初始状态（text 可为空或短文本）
 function textPart(id = "part_text", text = ""): Part {
   return {
@@ -665,6 +708,55 @@ describe("tui sync", () => {
       await sync.session.sync("ses_1", { force: true })
 
       expect(sync.data.part.msg_1?.[0]).toMatchObject({ type: "reasoning", text: "step two" })
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("keeps shell progress monotonic across legacy session sync snapshots", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const message = assistantMessage()
+    const legacy = runningShellPart("legacy")
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
+      if (url.pathname === "/session/ses_1/messages") return json([{ info: message, parts: [legacy] }])
+      if (url.pathname === "/session/ses_1/todo") return json([])
+      if (url.pathname === "/session/ses_1/diff") return json([])
+    })
+
+    try {
+      emit(messageEvent(message))
+      // 缺失版本的旧 SQLite running Part 归一化为 v0；本地无该 Part 时必须接受，
+      // 否则升级后的 client 无法恢复最近 durable display。
+      emit(partEvent(legacy))
+      await wait(() => sync.data.part.msg_1?.[0]?.type === "tool")
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { status: "running", metadata: { output: "legacy" } } })
+
+      emit(progressEvent(runningShellPart("live", 1)))
+      await wait(
+        () =>
+          sync.data.part.msg_1?.[0]?.type === "tool" &&
+          sync.data.part.msg_1[0].state.status === "running" &&
+          sync.data.part.msg_1[0].state.metadata?.output === "live",
+      )
+      // force sync 模拟 server.connected 后的真实 HTTP recovery，而不是只验证 SSE 顺序。
+      // 旧 v0 在 live v1 之后到达时必须保持最新显示，不能因 reconnect 重新闪回。
+      // 后到 HTTP legacy v0 不得覆盖 live v1；terminal 一旦到达，任何 running
+      // 快照都不得把界面恢复为执行中。
+      await sync.session.sync("ses_1", { force: true })
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { status: "running", metadata: { output: "live" } } })
+
+      emit(partEvent(completedShellPart("done")))
+      await wait(
+        () =>
+          sync.data.part.msg_1?.[0]?.type === "tool" && sync.data.part.msg_1[0].state.status === "completed",
+      )
+      await sync.session.sync("ses_1", { force: true })
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { status: "completed", output: "done" } })
     } finally {
       app.renderer.destroy()
       Global.Path.state = previous

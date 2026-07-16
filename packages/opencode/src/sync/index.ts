@@ -113,13 +113,17 @@ export const layer = Layer.effect(Service)(
             workspace: yield* InstanceState.workspaceID,
           }
         : undefined
-      process(def, event, {
+      const optionsNext = {
         bus,
         publish,
         context,
         ownerID: options?.ownerID,
         experimentalWorkspaces: flags.experimentalWorkspaces,
-      })
+      }
+      // 只有 projector 实际接受的 event 才能在 commit 后发布；否则 consumer 会看到
+      // 一个数据库中不存在的状态，replay 也无法恢复同一顺序。
+      const projected = Database.transaction((tx) => projectEvent(tx, def, event, optionsNext))
+      if (projected) yield* publishEvent(def, event, optionsNext)
     })
 
     const replayAll: Interface["replayAll"] = Effect.fn("SyncEvent.replayAll")(function* (events, options) {
@@ -164,7 +168,7 @@ export const layer = Layer.effect(Service)(
       // Note that this is an "immediate" transaction which is critical.
       // We need to make sure we can safely read and write with nothing
       // else changing the data from under us
-      Database.transaction(
+      const result = Database.transaction(
         (tx) => {
           const id = EventID.ascending()
           const row = tx
@@ -175,12 +179,14 @@ export const layer = Layer.effect(Service)(
           const seq = row?.seq != null ? row.seq + 1 : 0
 
           const event = { id, seq, aggregateID: agg, data }
-          process(def, event, { bus, publish, context, experimentalWorkspaces: flags.experimentalWorkspaces })
+          const optionsNext = { bus, publish, context, experimentalWorkspaces: flags.experimentalWorkspaces }
+          return { event, projected: projectEvent(tx, def, event, optionsNext), options: optionsNext }
         },
         {
           behavior: "immediate",
         },
       )
+      if (result.projected) yield* publishEvent(def, result.event, result.options)
     })
 
     const remove: Interface["remove"] = Effect.fn("SyncEvent.remove")(function* (aggregateID) {
@@ -303,7 +309,8 @@ function register(def: Definition) {
   registry.set(versionedType(def.type, def.version), def)
 }
 
-function process<Def extends Definition>(
+function projectEvent<Def extends Definition>(
+  tx: Database.TxOrDb,
   def: Def,
   event: Event<Def>,
   options: {
@@ -313,7 +320,7 @@ function process<Def extends Definition>(
     ownerID?: string
     experimentalWorkspaces: boolean
   },
-) {
+): boolean {
   if (projectors == null) {
     throw new Error("No projectors available. Call `SyncEvent.init` to install projectors")
   }
@@ -321,71 +328,71 @@ function process<Def extends Definition>(
   const projector = projectors.get(versionedType(def.type, def.version))
   if (!projector) {
     if (!def.type.includes("next")) throw new Error(`Projector not found for event: ${def.type}`)
-    return
+    return false
   }
 
-  Database.transaction((tx) => {
-    projector(tx, event.data, event)
+  projector(tx, event.data, event)
 
-    if (options.experimentalWorkspaces) {
-      tx.insert(EventSequenceTable)
-        .values({
-          aggregate_id: event.aggregateID,
-          seq: event.seq,
-          owner_id: options?.ownerID,
-        })
-        .onConflictDoUpdate({
-          target: EventSequenceTable.aggregate_id,
-          set: { seq: event.seq },
-        })
-        .run()
-      tx.insert(EventTable)
-        .values({
-          id: event.id,
-          seq: event.seq,
-          aggregate_id: event.aggregateID,
+  if (options.experimentalWorkspaces) {
+    tx.insert(EventSequenceTable)
+      .values({
+        aggregate_id: event.aggregateID,
+        seq: event.seq,
+        owner_id: options.ownerID,
+      })
+      .onConflictDoUpdate({
+        target: EventSequenceTable.aggregate_id,
+        set: { seq: event.seq },
+      })
+      .run()
+    tx.insert(EventTable)
+      .values({
+        id: event.id,
+        seq: event.seq,
+        aggregate_id: event.aggregateID,
+        type: versionedType(def.type, def.version),
+        data: event.data as Record<string, unknown>,
+      })
+      .run()
+  }
+  return true
+}
+
+function publishEvent<Def extends Definition>(
+  def: Def,
+  event: Event<Def>,
+  options: {
+    bus: ProjectBus.Interface
+    publish: boolean
+    context?: PublishContext
+  },
+) {
+  if (!options.publish) return Effect.void
+  return Effect.gen(function* () {
+    const context = options.context
+    if (!context?.instance) throw new Error("SyncEvent.publishEvent: publish requires instance context")
+
+    // transaction 已经提交；这里等待的是 convertEvent 与 Bus/GlobalBus 入队，
+    // 不是 subscriber 的网络或业务执行，因此不会把慢 consumer 放进 SQLite writer。
+    const data = yield* Effect.promise(() => Promise.resolve(convertEvent(def.type, event.data)))
+    yield* attachWith(options.bus.publish(def, data as Properties<Def>, { id: event.id }), {
+      instance: context.instance,
+      workspace: context.workspace,
+    })
+
+    // sync envelope 必须排在 typed Project Bus publication 之后；调用方只有在两种
+    // transport 都已同步入队后才可继续提交同一 Part 的 terminal event。
+    GlobalBus.emit("event", {
+      directory: context.instance.directory,
+      project: context.instance.project.id,
+      workspace: context.workspace,
+      payload: {
+        type: "sync",
+        syncEvent: {
           type: versionedType(def.type, def.version),
-          data: event.data as Record<string, unknown>,
-        })
-        .run()
-    }
-
-    Database.effect(() => {
-      if (options?.publish) {
-        const context = options.context
-        if (!context?.instance) {
-          throw new Error("SyncEvent.process: publish requires instance context")
-        }
-        const instance = context.instance
-
-        const result = convertEvent(def.type, event.data)
-        const publish = (data: unknown) =>
-          Effect.runPromise(
-            attachWith(options.bus.publish(def, data as Properties<Def>, { id: event.id }), {
-              // [local-smark] Fallback to local instance/workspace context for daemon multi-instance
-              instance: options.context?.instance ?? instance,
-              workspace: options.context?.workspace ?? context.workspace,
-            }),
-          )
-        if (result instanceof Promise) {
-          void result.then(publish)
-        } else {
-          void publish(result)
-        }
-
-        GlobalBus.emit("event", {
-          directory: instance.directory,
-          project: instance.project.id,
-          workspace: context.workspace,
-          payload: {
-            type: "sync",
-            syncEvent: {
-              type: versionedType(def.type, def.version),
-              ...event,
-            },
-          },
-        })
-      }
+          ...event,
+        },
+      },
     })
   })
 }

@@ -2826,6 +2826,52 @@ unix(
   { git: true, config: cfg },
 )
 
+it.instance(
+  "coalesces direct shell progress without changing final output",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, chat } = yield* boot()
+      const bus = yield* Bus.Service
+      const durable: MessageV2.ToolPart[] = []
+      const live: MessageV2.ToolPart[] = []
+      const dispose = yield* bus.subscribeAllCallback((event) => {
+        if (event.type !== MessageV2.Event.PartUpdated.type && event.type !== "message.part.progress") return
+        const part = (event.properties as { part?: MessageV2.Part }).part
+        if (part?.type !== "tool" || part.sessionID !== chat.id || part.tool !== "bash") return
+        if (event.type === MessageV2.Event.PartUpdated.type) durable.push(structuredClone(part))
+        else live.push(structuredClone(part))
+      })
+      yield* Effect.addFinalizer(() => Effect.sync(dispose))
+
+      // 每次写入之间的真实 10ms 间隔让 child stream 产生持续 progress；测试只观察
+      // 公开 Session 事件，不依赖 chunk 数、timer 或 coordinator 私有状态。
+      const result = yield* prompt.shell({
+        sessionID: chat.id,
+        agent: "build",
+        command:
+          "bun -e \"for(let i=1;i<=40;i++){process.stdout.write('DIRECT_PROGRESS_'+i+'\\r');await Bun.sleep(10)}\"",
+      })
+      yield* pollWithTimeout(
+        Effect.sync(() => durable.some((part) => part.state.status === "completed") || undefined),
+        "timed out waiting for direct shell terminal event",
+      )
+
+      // 40 个 CR 帧短于 durable 窗口，能在不改变 raw output 的前提下覆盖 leading/trailing budget。
+      // 最后的 literal 检查保证 cadence 优化没有把 direct shell 的累积输出换成 TerminalDisplay。
+      // 只有 running Part 属于重连 checkpoint 预算；completed 是权威终态，不能
+      // 为了满足上限而从统计或生产路径中删除。
+      const running = durable.filter((part) => part.state.status === "running")
+      const tool = completedTool(result.parts)
+      expect(running.length).toBeLessThanOrEqual(3)
+      expect(running[0]?.state.status === "running" ? running[0].state.metadata?.progressVersion : undefined).toBe(0)
+      expect(live.some((part) => part.state.status === "running")).toBe(true)
+      expect(tool?.state.output).toContain("DIRECT_PROGRESS_1")
+      expect(tool?.state.output).toContain("DIRECT_PROGRESS_40")
+    }),
+  { git: true, config: cfg },
+  30_000,
+)
+
 unix(
   "shell completes a fast command on the preferred shell",
   () =>
@@ -2993,7 +3039,8 @@ it.instance(
       yield* waitForBusy(chat.id)
 
       const loop = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-      yield* Effect.sleep(50)
+      // 只让 queued caller 进入 Run state，不用固定毫秒数猜测本机调度速度。
+      yield* Effect.yieldNow
 
       expect(yield* llm.calls).toBe(0)
 
@@ -3008,8 +3055,7 @@ it.instance(
       expect(yield* llm.calls).toBe(1)
     }),
   { git: true },
-  // Windows Actions 上 shell 进程与测试 LLM 首次请求都可能有冷启动开销；10s 仍能及时发现队列死锁。
-  10_000,
+  shortSessionTimeout,
 )
 
 it.instance(
@@ -3032,7 +3078,8 @@ it.instance(
 
       const a = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
       const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-      yield* Effect.sleep(50)
+      // 两个 caller 在同一协作式调度轮次进入 Runner，避免 wall-clock readiness race。
+      yield* Effect.yieldNow
 
       expect(yield* llm.calls).toBe(0)
 
@@ -3048,8 +3095,7 @@ it.instance(
       expect(yield* llm.calls).toBe(1)
     }),
   { git: true },
-  // 该用例断言两个 loop 调用共享 shell 完成后的同一次结果；放宽预算不改变并发语义断言。
-  10_000,
+  shortSessionTimeout,
 )
 
 unix(

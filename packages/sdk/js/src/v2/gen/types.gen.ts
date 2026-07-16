@@ -12,8 +12,11 @@ export type Event =
   | EventServerConnected
   | EventGlobalDisposed
   | EventServerInstanceDisposed
+  | EventFileEdited
+  | EventFileWatcherUpdated
   | EventLspClientDiagnostics
   | EventLspUpdated
+  | EventMessagePartProgress
   | EventMessagePartDelta
   | EventPermissionAsked
   | EventPermissionReplied
@@ -23,10 +26,31 @@ export type Event =
   | EventPermissionReviewCircuitBroken1
   | EventSessionDiff
   | EventSessionError
+  | EventQuestionAsked
+  | EventQuestionReplied
+  | EventQuestionRejected
+  | EventTodoUpdated
+  | EventSessionStatus
+  | EventSessionIdle
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
   | EventCommandExecuted
   | EventProjectUpdated
+  | EventSessionCompacted
+  | EventSessionGoalUpdated
+  | EventSessionGoalCleared
+  | EventVcsBranchUpdated
+  | EventWorkspaceReady
+  | EventWorkspaceFailed
+  | EventWorkspaceStatus
+  | EventWorktreeReady
+  | EventWorktreeFailed
+  | EventPtyCreated
+  | EventPtyUpdated
+  | EventPtyExited
+  | EventPtyDeleted
+  | EventInstallationUpdated
+  | EventInstallationUpdateAvailable
   | EventMessageUpdated
   | EventMessageRemoved
   | EventMessagePartUpdated
@@ -60,29 +84,6 @@ export type Event =
   | EventSessionNextCompactionStarted
   | EventSessionNextCompactionDelta
   | EventSessionNextCompactionEnded
-  | EventFileEdited
-  | EventFileWatcherUpdated
-  | EventInstallationUpdated
-  | EventInstallationUpdateAvailable
-  | EventPtyCreated
-  | EventPtyUpdated
-  | EventPtyExited
-  | EventPtyDeleted
-  | EventQuestionAsked
-  | EventQuestionReplied
-  | EventQuestionRejected
-  | EventSessionStatus
-  | EventSessionIdle
-  | EventTodoUpdated
-  | EventSessionCompacted
-  | EventSessionGoalUpdated
-  | EventSessionGoalCleared
-  | EventVcsBranchUpdated
-  | EventWorktreeReady
-  | EventWorktreeFailed
-  | EventWorkspaceReady
-  | EventWorkspaceFailed
-  | EventWorkspaceStatus
   | EventCatalogModelUpdated
 
 export type OAuth = {
@@ -162,6 +163,136 @@ export type EventTuiSessionSelect = {
      * Session ID to navigate to
      */
     sessionID: string
+  }
+}
+
+export type ToolStatePending = {
+  status: "pending"
+  input: {
+    [key: string]: unknown
+  }
+  raw: string
+}
+
+export type ToolStateRunning = {
+  status: "running"
+  input: {
+    [key: string]: unknown
+  }
+  title?: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  time: {
+    start: number
+  }
+}
+
+export type FilePartSourceText = {
+  value: string
+  start: number
+  end: number
+}
+
+export type FileSource = {
+  text: FilePartSourceText
+  type: "file"
+  path: string
+}
+
+export type Range = {
+  start: {
+    line: number
+    character: number
+  }
+  end: {
+    line: number
+    character: number
+  }
+}
+
+export type SymbolSource = {
+  text: FilePartSourceText
+  type: "symbol"
+  path: string
+  range: Range
+  name: string
+  kind: number
+}
+
+export type ResourceSource = {
+  text: FilePartSourceText
+  type: "resource"
+  clientName: string
+  uri: string
+}
+
+export type FilePartSource = FileSource | SymbolSource | ResourceSource
+
+export type FilePart = {
+  id: string
+  sessionID: string
+  messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
+  type: "file"
+  mime: string
+  filename?: string
+  url: string
+  source?: FilePartSource
+}
+
+export type ToolStateCompleted = {
+  status: "completed"
+  input: {
+    [key: string]: unknown
+  }
+  output: string
+  title: string
+  metadata: {
+    [key: string]: unknown
+  }
+  time: {
+    start: number
+    end: number
+    compacted?: number
+  }
+  attachments?: Array<FilePart>
+}
+
+export type ToolStateError = {
+  status: "error"
+  input: {
+    [key: string]: unknown
+  }
+  error: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  time: {
+    start: number
+    end: number
+  }
+}
+
+export type ToolState = ToolStatePending | ToolStateRunning | ToolStateCompleted | ToolStateError
+
+export type ToolPart = {
+  id: string
+  sessionID: string
+  messageID: string
+  hidden?: {
+    time: number
+    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
+  }
+  type: "tool"
+  callID: string
+  tool: string
+  state: ToolState
+  metadata?: {
+    [key: string]: unknown
   }
 }
 
@@ -249,6 +380,99 @@ export type ApiError = {
   }
 }
 
+export type QuestionOption = {
+  /**
+   * Display text (1-5 words, concise)
+   */
+  label: string
+  /**
+   * Explanation of choice
+   */
+  description: string
+}
+
+export type QuestionInfo = {
+  /**
+   * Complete question
+   */
+  question: string
+  /**
+   * Very short label (max 30 chars)
+   */
+  header: string
+  /**
+   * Available choices
+   */
+  options: Array<QuestionOption>
+  multiple?: boolean
+  custom?: boolean
+}
+
+export type QuestionTool = {
+  messageID: string
+  callID: string
+}
+
+export type QuestionRequest = {
+  id: string
+  sessionID: string
+  /**
+   * Questions to ask
+   */
+  questions: Array<QuestionInfo>
+  tool?: QuestionTool
+}
+
+export type QuestionAnswer = Array<string>
+
+export type QuestionReplied = {
+  sessionID: string
+  requestID: string
+  answers: Array<QuestionAnswer>
+}
+
+export type QuestionRejected = {
+  sessionID: string
+  requestID: string
+}
+
+export type Todo = {
+  /**
+   * Brief description of the task
+   */
+  content: string
+  /**
+   * Current status of the task: pending, in_progress, completed, cancelled
+   */
+  status: string
+  /**
+   * Priority level of the task: high, medium, low
+   */
+  priority: string
+}
+
+export type SessionStatus =
+  | {
+      type: "idle"
+    }
+  | {
+      type: "retry"
+      attempt: number
+      message: string
+      action?: {
+        reason: string
+        provider: string
+        title: string
+        message: string
+        label: string
+        link?: string
+      }
+      next: number
+    }
+  | {
+      type: "busy"
+    }
+
 export type Project = {
   id: string
   worktree: string
@@ -271,6 +495,33 @@ export type Project = {
     initialized?: number
   }
   sandboxes: Array<string>
+}
+
+export type SessionGoal = {
+  sessionID: string
+  id: string
+  objective: string
+  status: "active" | "paused" | "complete" | "blocked"
+  tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  tokensUsed: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  timeUsedSeconds: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  continueOnError: boolean
+  generation: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  reason?: string
+  time: {
+    created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  }
+}
+
+export type Pty = {
+  id: string
+  title: string
+  command: string
+  args: Array<string>
+  cwd: string
+  status: "running" | "exited"
+  pid: number
 }
 
 export type OutputFormatText = {
@@ -449,136 +700,6 @@ export type ReasoningPart = {
   time: {
     start: number
     end?: number
-  }
-}
-
-export type FilePartSourceText = {
-  value: string
-  start: number
-  end: number
-}
-
-export type FileSource = {
-  text: FilePartSourceText
-  type: "file"
-  path: string
-}
-
-export type Range = {
-  start: {
-    line: number
-    character: number
-  }
-  end: {
-    line: number
-    character: number
-  }
-}
-
-export type SymbolSource = {
-  text: FilePartSourceText
-  type: "symbol"
-  path: string
-  range: Range
-  name: string
-  kind: number
-}
-
-export type ResourceSource = {
-  text: FilePartSourceText
-  type: "resource"
-  clientName: string
-  uri: string
-}
-
-export type FilePartSource = FileSource | SymbolSource | ResourceSource
-
-export type FilePart = {
-  id: string
-  sessionID: string
-  messageID: string
-  hidden?: {
-    time: number
-    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
-  }
-  type: "file"
-  mime: string
-  filename?: string
-  url: string
-  source?: FilePartSource
-}
-
-export type ToolStatePending = {
-  status: "pending"
-  input: {
-    [key: string]: unknown
-  }
-  raw: string
-}
-
-export type ToolStateRunning = {
-  status: "running"
-  input: {
-    [key: string]: unknown
-  }
-  title?: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  time: {
-    start: number
-  }
-}
-
-export type ToolStateCompleted = {
-  status: "completed"
-  input: {
-    [key: string]: unknown
-  }
-  output: string
-  title: string
-  metadata: {
-    [key: string]: unknown
-  }
-  time: {
-    start: number
-    end: number
-    compacted?: number
-  }
-  attachments?: Array<FilePart>
-}
-
-export type ToolStateError = {
-  status: "error"
-  input: {
-    [key: string]: unknown
-  }
-  error: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  time: {
-    start: number
-    end: number
-  }
-}
-
-export type ToolState = ToolStatePending | ToolStateRunning | ToolStateCompleted | ToolStateError
-
-export type ToolPart = {
-  id: string
-  sessionID: string
-  messageID: string
-  hidden?: {
-    time: number
-    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
-  }
-  type: "tool"
-  callID: string
-  tool: string
-  state: ToolState
-  metadata?: {
-    [key: string]: unknown
   }
 }
 
@@ -828,126 +949,6 @@ export type Prompt = {
   references?: Array<PromptReferenceAttachment>
 }
 
-export type Pty = {
-  id: string
-  title: string
-  command: string
-  args: Array<string>
-  cwd: string
-  status: "running" | "exited"
-  pid: number
-}
-
-export type QuestionOption = {
-  /**
-   * Display text (1-5 words, concise)
-   */
-  label: string
-  /**
-   * Explanation of choice
-   */
-  description: string
-}
-
-export type QuestionInfo = {
-  /**
-   * Complete question
-   */
-  question: string
-  /**
-   * Very short label (max 30 chars)
-   */
-  header: string
-  /**
-   * Available choices
-   */
-  options: Array<QuestionOption>
-  multiple?: boolean
-  custom?: boolean
-}
-
-export type QuestionTool = {
-  messageID: string
-  callID: string
-}
-
-export type QuestionRequest = {
-  id: string
-  sessionID: string
-  /**
-   * Questions to ask
-   */
-  questions: Array<QuestionInfo>
-  tool?: QuestionTool
-}
-
-export type QuestionAnswer = Array<string>
-
-export type QuestionReplied = {
-  sessionID: string
-  requestID: string
-  answers: Array<QuestionAnswer>
-}
-
-export type QuestionRejected = {
-  sessionID: string
-  requestID: string
-}
-
-export type SessionStatus =
-  | {
-      type: "idle"
-    }
-  | {
-      type: "retry"
-      attempt: number
-      message: string
-      action?: {
-        reason: string
-        provider: string
-        title: string
-        message: string
-        label: string
-        link?: string
-      }
-      next: number
-    }
-  | {
-      type: "busy"
-    }
-
-export type Todo = {
-  /**
-   * Brief description of the task
-   */
-  content: string
-  /**
-   * Current status of the task: pending, in_progress, completed, cancelled
-   */
-  status: string
-  /**
-   * Priority level of the task: high, medium, low
-   */
-  priority: string
-}
-
-export type SessionGoal = {
-  sessionID: string
-  id: string
-  objective: string
-  status: "active" | "paused" | "complete" | "blocked"
-  tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-  tokensUsed: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-  timeUsedSeconds: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-  continueOnError: boolean
-  generation: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-  reason?: string
-  time: {
-    created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-    updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
-  }
-}
-
 export type GlobalEvent = {
   directory: string
   project?: string
@@ -960,8 +961,11 @@ export type GlobalEvent = {
     | EventServerConnected
     | EventGlobalDisposed
     | EventServerInstanceDisposed
+    | EventFileEdited
+    | EventFileWatcherUpdated
     | EventLspClientDiagnostics
     | EventLspUpdated
+    | EventMessagePartProgress
     | EventMessagePartDelta
     | EventPermissionAsked
     | EventPermissionReplied
@@ -971,10 +975,31 @@ export type GlobalEvent = {
     | EventPermissionReviewCircuitBroken
     | EventSessionDiff
     | EventSessionError
+    | EventQuestionAsked
+    | EventQuestionReplied
+    | EventQuestionRejected
+    | EventTodoUpdated
+    | EventSessionStatus
+    | EventSessionIdle
     | EventMcpToolsChanged
     | EventMcpBrowserOpenFailed
     | EventCommandExecuted
     | EventProjectUpdated
+    | EventSessionCompacted
+    | EventSessionGoalUpdated
+    | EventSessionGoalCleared
+    | EventVcsBranchUpdated
+    | EventWorkspaceReady
+    | EventWorkspaceFailed
+    | EventWorkspaceStatus
+    | EventWorktreeReady
+    | EventWorktreeFailed
+    | EventPtyCreated
+    | EventPtyUpdated
+    | EventPtyExited
+    | EventPtyDeleted
+    | EventInstallationUpdated
+    | EventInstallationUpdateAvailable
     | EventMessageUpdated
     | EventMessageRemoved
     | EventMessagePartUpdated
@@ -1008,29 +1033,6 @@ export type GlobalEvent = {
     | EventSessionNextCompactionStarted
     | EventSessionNextCompactionDelta
     | EventSessionNextCompactionEnded
-    | EventFileEdited
-    | EventFileWatcherUpdated
-    | EventInstallationUpdated
-    | EventInstallationUpdateAvailable
-    | EventPtyCreated
-    | EventPtyUpdated
-    | EventPtyExited
-    | EventPtyDeleted
-    | EventQuestionAsked
-    | EventQuestionReplied
-    | EventQuestionRejected
-    | EventSessionStatus
-    | EventSessionIdle
-    | EventTodoUpdated
-    | EventSessionCompacted
-    | EventSessionGoalUpdated
-    | EventSessionGoalCleared
-    | EventVcsBranchUpdated
-    | EventWorktreeReady
-    | EventWorktreeFailed
-    | EventWorkspaceReady
-    | EventWorkspaceFailed
-    | EventWorkspaceStatus
     | EventCatalogModelUpdated
     | SyncEventMessageUpdated
     | SyncEventMessageRemoved
@@ -2740,6 +2742,23 @@ export type EventServerInstanceDisposed = {
   }
 }
 
+export type EventFileEdited = {
+  id: string
+  type: "file.edited"
+  properties: {
+    file: string
+  }
+}
+
+export type EventFileWatcherUpdated = {
+  id: string
+  type: "file.watcher.updated"
+  properties: {
+    file: string
+    event: "add" | "change" | "unlink"
+  }
+}
+
 export type EventLspClientDiagnostics = {
   id: string
   type: "lsp.client.diagnostics"
@@ -2754,6 +2773,16 @@ export type EventLspUpdated = {
   type: "lsp.updated"
   properties: {
     [key: string]: unknown
+  }
+}
+
+export type EventMessagePartProgress = {
+  id: string
+  type: "message.part.progress"
+  properties: {
+    sessionID: string
+    part: ToolPart
+    time: number
   }
 }
 
@@ -2856,6 +2885,50 @@ export type EventSessionError = {
   }
 }
 
+export type EventQuestionAsked = {
+  id: string
+  type: "question.asked"
+  properties: QuestionRequest
+}
+
+export type EventQuestionReplied = {
+  id: string
+  type: "question.replied"
+  properties: QuestionReplied
+}
+
+export type EventQuestionRejected = {
+  id: string
+  type: "question.rejected"
+  properties: QuestionRejected
+}
+
+export type EventTodoUpdated = {
+  id: string
+  type: "todo.updated"
+  properties: {
+    sessionID: string
+    todos: Array<Todo>
+  }
+}
+
+export type EventSessionStatus = {
+  id: string
+  type: "session.status"
+  properties: {
+    sessionID: string
+    status: SessionStatus
+  }
+}
+
+export type EventSessionIdle = {
+  id: string
+  type: "session.idle"
+  properties: {
+    sessionID: string
+  }
+}
+
 export type EventMcpToolsChanged = {
   id: string
   type: "mcp.tools.changed"
@@ -2888,6 +2961,130 @@ export type EventProjectUpdated = {
   id: string
   type: "project.updated"
   properties: Project
+}
+
+export type EventSessionCompacted = {
+  id: string
+  type: "session.compacted"
+  properties: {
+    sessionID: string
+  }
+}
+
+export type EventSessionGoalUpdated = {
+  id: string
+  type: "session.goal.updated"
+  properties: {
+    sessionID: string
+    goal: SessionGoal
+  }
+}
+
+export type EventSessionGoalCleared = {
+  id: string
+  type: "session.goal.cleared"
+  properties: {
+    sessionID: string
+  }
+}
+
+export type EventVcsBranchUpdated = {
+  id: string
+  type: "vcs.branch.updated"
+  properties: {
+    branch?: string
+  }
+}
+
+export type EventWorkspaceReady = {
+  id: string
+  type: "workspace.ready"
+  properties: {
+    name: string
+  }
+}
+
+export type EventWorkspaceFailed = {
+  id: string
+  type: "workspace.failed"
+  properties: {
+    message: string
+  }
+}
+
+export type EventWorkspaceStatus = {
+  id: string
+  type: "workspace.status"
+  properties: {
+    workspaceID: string
+    status: "connected" | "connecting" | "disconnected" | "error"
+  }
+}
+
+export type EventWorktreeReady = {
+  id: string
+  type: "worktree.ready"
+  properties: {
+    name: string
+    branch?: string
+  }
+}
+
+export type EventWorktreeFailed = {
+  id: string
+  type: "worktree.failed"
+  properties: {
+    message: string
+  }
+}
+
+export type EventPtyCreated = {
+  id: string
+  type: "pty.created"
+  properties: {
+    info: Pty
+  }
+}
+
+export type EventPtyUpdated = {
+  id: string
+  type: "pty.updated"
+  properties: {
+    info: Pty
+  }
+}
+
+export type EventPtyExited = {
+  id: string
+  type: "pty.exited"
+  properties: {
+    id: string
+    exitCode: number
+  }
+}
+
+export type EventPtyDeleted = {
+  id: string
+  type: "pty.deleted"
+  properties: {
+    id: string
+  }
+}
+
+export type EventInstallationUpdated = {
+  id: string
+  type: "installation.updated"
+  properties: {
+    version: string
+  }
+}
+
+export type EventInstallationUpdateAvailable = {
+  id: string
+  type: "installation.update-available"
+  properties: {
+    version: string
+  }
 }
 
 export type EventMessageUpdated = {
@@ -3333,191 +3530,6 @@ export type EventSessionNextCompactionEnded = {
     sessionID: string
     text: string
     include?: string
-  }
-}
-
-export type EventFileEdited = {
-  id: string
-  type: "file.edited"
-  properties: {
-    file: string
-  }
-}
-
-export type EventFileWatcherUpdated = {
-  id: string
-  type: "file.watcher.updated"
-  properties: {
-    file: string
-    event: "add" | "change" | "unlink"
-  }
-}
-
-export type EventInstallationUpdated = {
-  id: string
-  type: "installation.updated"
-  properties: {
-    version: string
-  }
-}
-
-export type EventInstallationUpdateAvailable = {
-  id: string
-  type: "installation.update-available"
-  properties: {
-    version: string
-  }
-}
-
-export type EventPtyCreated = {
-  id: string
-  type: "pty.created"
-  properties: {
-    info: Pty
-  }
-}
-
-export type EventPtyUpdated = {
-  id: string
-  type: "pty.updated"
-  properties: {
-    info: Pty
-  }
-}
-
-export type EventPtyExited = {
-  id: string
-  type: "pty.exited"
-  properties: {
-    id: string
-    exitCode: number
-  }
-}
-
-export type EventPtyDeleted = {
-  id: string
-  type: "pty.deleted"
-  properties: {
-    id: string
-  }
-}
-
-export type EventQuestionAsked = {
-  id: string
-  type: "question.asked"
-  properties: QuestionRequest
-}
-
-export type EventQuestionReplied = {
-  id: string
-  type: "question.replied"
-  properties: QuestionReplied
-}
-
-export type EventQuestionRejected = {
-  id: string
-  type: "question.rejected"
-  properties: QuestionRejected
-}
-
-export type EventSessionStatus = {
-  id: string
-  type: "session.status"
-  properties: {
-    sessionID: string
-    status: SessionStatus
-  }
-}
-
-export type EventSessionIdle = {
-  id: string
-  type: "session.idle"
-  properties: {
-    sessionID: string
-  }
-}
-
-export type EventTodoUpdated = {
-  id: string
-  type: "todo.updated"
-  properties: {
-    sessionID: string
-    todos: Array<Todo>
-  }
-}
-
-export type EventSessionCompacted = {
-  id: string
-  type: "session.compacted"
-  properties: {
-    sessionID: string
-  }
-}
-
-export type EventSessionGoalUpdated = {
-  id: string
-  type: "session.goal.updated"
-  properties: {
-    sessionID: string
-    goal: SessionGoal
-  }
-}
-
-export type EventSessionGoalCleared = {
-  id: string
-  type: "session.goal.cleared"
-  properties: {
-    sessionID: string
-  }
-}
-
-export type EventVcsBranchUpdated = {
-  id: string
-  type: "vcs.branch.updated"
-  properties: {
-    branch?: string
-  }
-}
-
-export type EventWorktreeReady = {
-  id: string
-  type: "worktree.ready"
-  properties: {
-    name: string
-    branch?: string
-  }
-}
-
-export type EventWorktreeFailed = {
-  id: string
-  type: "worktree.failed"
-  properties: {
-    message: string
-  }
-}
-
-export type EventWorkspaceReady = {
-  id: string
-  type: "workspace.ready"
-  properties: {
-    name: string
-  }
-}
-
-export type EventWorkspaceFailed = {
-  id: string
-  type: "workspace.failed"
-  properties: {
-    message: string
-  }
-}
-
-export type EventWorkspaceStatus = {
-  id: string
-  type: "workspace.status"
-  properties: {
-    workspaceID: string
-    status: "connected" | "connecting" | "disconnected" | "error"
   }
 }
 

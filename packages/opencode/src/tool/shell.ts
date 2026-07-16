@@ -3,6 +3,7 @@ import { PositiveInt } from "@/util/schema"
 import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
+import { ToolProgress } from "./progress"
 import path from "path"
 import * as Log from "@opencode-ai/core/util/log"
 import { containsPath, type InstanceContext } from "../project/instance-context"
@@ -1098,72 +1099,70 @@ export const ShellTool = Tool.define(
         metadata: {
           output: "",
           description: input.description,
+          // version 0 是新 producer initial 与旧持久化 running Part 的共同基线。
+          progressVersion: 0,
         },
       })
 
       const decoder = createAutoTextDecoder({ encoding: input.encoding })
       const display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
       let displayed = false
-      const onChunk = (chunk: string) => {
-        if (!chunk) return Effect.void
-        const visible = preview(display.push(chunk))
-        displayed = true
-        const size = Buffer.byteLength(chunk, "utf-8")
-        list.push({ text: chunk, size })
-        used += size
-        while (used > keep && list.length > 1) {
-          const item = list.shift()
-          if (!item) break
-          // 这些 chunk 已经被内存窗口丢弃，最终不会进入模型可见输出。
-          // 诊断摘录只从隐藏输出生成，避免和 exit notice 或可见输出互相推断。
-          hiddenDiag.push(item.text)
-          used -= item.size
-          cut = true
-        }
-        if (file) {
-          sink?.write(chunk)
-        } else {
-          full += chunk
-          if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
-            return trunc.write(full).pipe(
-              Effect.andThen((next) =>
-                Effect.sync(() => {
-                  file = next
-                  cut = true
-                  sink = createWriteStream(next, { flags: "a" })
-                  full = ""
-                }),
-              ),
-              Effect.andThen(
-                ctx.metadata({
-                  metadata: {
-                    // `metadata.output` is the default live UI surface. Keep it
-                    // as a terminal display snapshot so CR progress and clear-line
-                    // redraws do not leak control bytes into TUI/OpenTUI, while the
-                    // raw chunks below still feed truncation and the model output.
-                    output: visible,
-                    description: input.description,
-                  },
-                }),
-              ),
-            )
-          }
-        }
-
-        return ctx.metadata({
-          metadata: {
-            // Same invariant as the truncated branch above: metadata is the
-            // default display channel, not the faithful model-return channel. An
-            // empty terminal screen after a clear-line/clear-screen sequence is a
-            // valid display state, so never fall back to the raw chunk preview here.
-            output: visible,
-            description: input.description,
-          },
-        })
-      }
+      let lastVisible = ""
 
       const code: number | null = yield* Effect.scoped(
         Effect.gen(function* () {
+          // initial v0 已在 scope 外 durable 提交；这里的 worker 只协调真实变化，
+          // scope 结束时必须完成 trailing flush 后才能返回 exit code 给 terminal owner。
+          const progress = yield* ToolProgress.make({
+            live: (metadata) => ctx.metadata({ metadata, delivery: "ephemeral" }),
+            durable: (metadata) => ctx.metadata({ metadata, delivery: "durable" }),
+          })
+          const onChunk = (chunk: string) => {
+            if (!chunk) return Effect.void
+            const visible = preview(display.push(chunk))
+            displayed = true
+            const size = Buffer.byteLength(chunk, "utf-8")
+            list.push({ text: chunk, size })
+            used += size
+            while (used > keep && list.length > 1) {
+              const item = list.shift()
+              if (!item) break
+              // 这些 chunk 已经被内存窗口丢弃，最终不会进入模型可见输出。
+              // 诊断摘录只从隐藏输出生成，避免和 exit notice 或可见输出互相推断。
+              hiddenDiag.push(item.text)
+              used -= item.size
+              cut = true
+            }
+            const spill = file
+              ? Effect.sync(() => sink?.write(chunk))
+              : Effect.sync(() => {
+                  full += chunk
+                  return Buffer.byteLength(full, "utf-8") > limits.maxBytes
+                }).pipe(
+                  Effect.andThen((overflow) =>
+                    overflow
+                      ? trunc.write(full).pipe(
+                          Effect.andThen((next) =>
+                            Effect.sync(() => {
+                              file = next
+                              cut = true
+                              sink = createWriteStream(next, { flags: "a" })
+                              full = ""
+                            }),
+                          ),
+                        )
+                      : Effect.void,
+                  ),
+                )
+            if (visible === lastVisible) return spill
+            lastVisible = visible
+            // metadata 是 replace 型终端快照；raw chunk 仍走原有内存/截断路径，
+            // 所以 latest-wins 只减少 UI/SQLite 更新，不会丢失模型可见字节。
+            return spill.pipe(
+              Effect.andThen(progress.update({ output: visible, description: input.description })),
+            )
+          }
+
           yield* Effect.addFinalizer(closeSink)
           const handle = yield* spawner.spawn(cmd(input.shell, input.executeCommand ?? input.command, input.cwd, input.env))
 

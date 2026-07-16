@@ -462,6 +462,91 @@ describe("session.llm.stream", () => {
     })
   })
 
+  test("bounds stream error logs without changing the error event", async () => {
+    const server = state.server
+    if (!server) throw new Error("Server not initialized")
+    const requestMarker = "REQUEST_BODY_SECRET_MARKER_7f5c"
+    const providerID = "bounded-error-" + "p".repeat(3_000)
+    const modelID = "gpt-" + "m".repeat(3_000)
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(JSON.stringify({ error: { message: requestMarker + "R".repeat(12_000) } }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+    )
+    await withInfoLog(async (logFile) => {
+      await using tmp = await tmpdir({
+        config: {
+          enabled_providers: [providerID],
+          provider: {
+            [providerID]: {
+              npm: "@ai-sdk/openai-compatible",
+              name: "Bounded Error Provider",
+              options: { apiKey: "test-key", baseURL: `${server.url.origin}/v1` },
+              models: { [modelID]: { name: "GPT Test", modalities: { input: ["text"], output: ["text"] } } },
+            },
+          },
+        },
+      })
+
+      await withTestInstance({
+        directory: tmp.path,
+        fn: async (ctx) => {
+          const model = await getModel(ProviderID.make(providerID), ModelID.make(modelID), ctx)
+          const sessionID = SessionID.make("session-bounded-stream-error")
+          const agent = {
+            name: "a".repeat(3_000),
+            mode: "primary",
+            options: {},
+            permission: [{ permission: "*", pattern: "*", action: "allow" }],
+          } satisfies Agent.Info
+          const events = await llm.runPromise((svc) =>
+            svc
+              .stream({
+                user: {
+                  id: MessageID.make("msg_user-bounded-stream-error"),
+                  sessionID,
+                  role: "user",
+                  time: { created: Date.now() },
+                  agent: agent.name,
+                  model: { providerID: ProviderID.make(providerID), modelID: model.id },
+                },
+                sessionID,
+                model,
+                agent,
+                system: ["You are a helpful assistant."],
+                messages: [{ role: "user", content: requestMarker + "X".repeat(64_000) }],
+                tools: {},
+              })
+              .pipe(
+                Stream.runCollect,
+                Effect.map((chunk) => [...chunk]),
+                Effect.provideService(InstanceRef, ctx),
+              ),
+          )
+          // runCollect 正常返回证明底层 Effect 没有被日志 callback 改成 failure；error event 仍单独可见。
+          const event = events.find((item) => item.type === "error")
+          if (!event || event.type !== "error") throw new Error("Provider error event was not preserved")
+          // 日志丢弃敏感请求，但 event 保留原始 error，避免越权改变 processor 的分类输入。
+          expect(JSON.stringify(event.error)).toContain("requestBodyValues")
+          expect(JSON.stringify(event.error)).toContain(requestMarker)
+        },
+      })
+
+      await request
+      const content = await readLogUntil(logFile, (text) => text.includes("stream error"))
+      const lines = content.split("\n").filter((item) => item.includes("service=llm"))
+      // 检查该隔离日志目录中的全部 LLM 行，防止 INFO extra 或 ERROR response echo 绕过边界。
+      expect(lines.length).toBeGreaterThan(0)
+      for (const line of lines) {
+        expect(line).not.toContain("requestBodyValues")
+        expect(line).not.toContain(requestMarker)
+        expect(Buffer.byteLength(line + "\n", "utf8")).toBeLessThanOrEqual(8_192)
+      }
+    })
+  })
+
   test("times out before delayed provider headers at the configured chunk boundary", async () => {
     const server = state.server
     if (!server) throw new Error("Server not initialized")

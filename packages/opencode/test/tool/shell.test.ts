@@ -1,6 +1,6 @@
 import { formatShellExecutionNotice, formatLongExecutionNotice } from "../../src/util/output-notice"
 import { describe, expect, test } from "bun:test"
-import { Cause, Effect, Exit, Layer } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import type * as Scope from "effect/Scope"
 import os from "os"
 import path from "path"
@@ -23,6 +23,7 @@ import { Tool } from "@/tool/tool"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { PermissionReviewer } from "@/permission/reviewer/service"
 import { Permission as PermissionService } from "@/permission"
+import { ToolProgress } from "@/tool/progress"
 
 const shellLayer = Layer.mergeAll(
   CrossSpawnSpawner.defaultLayer,
@@ -223,6 +224,109 @@ describe("tool.shell", () => {
       }),
     ),
     60_000,
+  )
+
+  it.live("coalesces shell progress without changing final output", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const code =
+          'for (let i = 1; i <= 40; i++) { process.stdout.write("\\rOPENCODE_DISK_WRITE_REPRO " + i + "/40"); await Bun.sleep(10) }'
+        const command = PS.has(sh()) ? `& ${bin} -e ${evalarg(code)}` : `${bin} -e ${evalarg(code)}`
+        // 该 literal 同时是 WAL feedback loop 的可识别输入和最终 output 的独立预期值。
+        // 生产实现不能通过截断或丢弃 CR 帧来伪造较低 durable 计数。
+        const updates: Array<{
+          delivery?: "durable" | "ephemeral"
+          metadata?: Record<string, unknown>
+        }> = []
+
+        // 这里观察真实 Tool Context delivery，而不是 coordinator 调用次数：缺省 delivery
+        // 本身就是 durable 合同，因此旧实现的每个 transport chunk 都会被准确计入。
+        const result = yield* run(
+          { command, description: "Render progress" },
+          {
+            ...ctx,
+            metadata: (input) =>
+              Effect.sync(() => {
+                updates.push(input)
+              }),
+          },
+        )
+        const durable = updates.filter((item) => item.delivery !== "ephemeral")
+
+        // 短命令允许 initial、leading 与必要 trailing 三个 running durable 快照；
+        // terminal result 不经过 metadata callback，不能混入该预算。
+        expect(durable.length).toBeLessThanOrEqual(3)
+        expect(updates.some((item) => item.delivery === "ephemeral")).toBe(true)
+        expect(durable[0]?.metadata?.progressVersion).toBe(0)
+        expect(result.metadata.output).toContain("OPENCODE_DISK_WRITE_REPRO 40/40")
+        expect(result.output).toContain("OPENCODE_DISK_WRITE_REPRO 40/40")
+      }),
+    ),
+  )
+
+  it.live("does not repeat a durable version when close overlaps publication", () =>
+    Effect.gen(function* () {
+      const first = yield* Deferred.make<void>()
+      const second = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const versions: number[] = []
+      const progress = yield* ToolProgress.make<{ output: string }>({
+        live: () => Effect.void,
+        durable: (metadata) =>
+          Effect.gen(function* () {
+            // 先记录版本再阻塞，模拟 SQLite 已提交但 publication 尚未返回的真实边界。
+            versions.push(metadata.progressVersion)
+            if (metadata.progressVersion === 1) yield* Deferred.succeed(first, undefined)
+            if (metadata.progressVersion !== 2) return
+            yield* Deferred.succeed(second, undefined)
+            yield* Deferred.await(release)
+          }),
+      })
+      yield* progress.update({ output: "a" })
+      yield* Deferred.await(first).pipe(Effect.timeout("2 seconds"))
+      yield* Effect.sleep("1100 millis")
+      yield* progress.update({ output: "ab" })
+      yield* Deferred.await(second).pipe(Effect.timeout("2 seconds"))
+      // close 必须与第二次 publication 重叠；短暂窗口只放大已证实的生命周期竞态。
+      const closing = yield* progress.close().pipe(Effect.forkScoped)
+      yield* Effect.sleep("20 millis")
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(closing)
+      // 每个 version 对应一次 durable Part transaction，重复值就是额外磁盘写入。
+      expect(versions).toEqual([1, 2])
+    }),
+  )
+
+  it.live("keeps live progress moving while durable publication is delayed", () =>
+    Effect.gen(function* () {
+      const durableStarted = yield* Deferred.make<void>()
+      const liveTwo = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const progress = yield* ToolProgress.make<{ output: string }>({
+        live: (metadata) =>
+          metadata.progressVersion === 2 ? Deferred.succeed(liveTwo, undefined).pipe(Effect.asVoid) : Effect.void,
+        durable: (metadata) =>
+          metadata.progressVersion === 1
+            ? Deferred.succeed(durableStarted, undefined).pipe(Effect.andThen(Deferred.await(release)))
+            : Effect.void,
+      })
+
+      yield* progress.update({ output: "a" })
+      yield* Deferred.await(durableStarted).pipe(Effect.timeout("2 seconds"))
+      // 这里只推进真实 50ms cadence；durableStarted 才是 worker 已到达阻塞 seam 的 readiness。
+      yield* Effect.sleep("60 millis")
+      yield* progress.update({ output: "ab" })
+      yield* Deferred.await(liveTwo).pipe(
+        Effect.timeoutOrElse({
+          duration: "500 millis",
+          orElse: () => Effect.fail(new Error("live v2 waited for delayed durable publication")),
+        }),
+        // red 或 green 都先释放 adapter，避免失败测试把 scope finalizer 留在 blocked close。
+        Effect.ensuring(Deferred.succeed(release, undefined)),
+      )
+      yield* progress.close()
+    }),
   )
 
   // 回归：cmd() 从 spawn 的 shell 选项改为显式 -c 参数后，
