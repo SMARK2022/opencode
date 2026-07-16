@@ -6,11 +6,11 @@ Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CL
 | --- | --- |
 | Extension ID | `SMARK2022.opencode-ide-bridge` |
 | Publisher | `SMARK2022` |
-| Repository extension version | `1.15.10` |
+| Repository extension version | `1.15.11` |
 | Recommended CLI | `opencode 1.15.11-smark` |
 | Source | https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode |
 
-The CLI and extension are versioned independently. Marketplace may continue to show `1.15.5` until this repository build is published.
+The CLI and extension are versioned independently. Marketplace may continue to show an older extension release until this repository build is published.
 
 ## What It Adds
 
@@ -121,7 +121,7 @@ The bridge does not bundle language servers. It calls providers registered by en
 
 | Operation | VS Code-backed behavior |
 | --- | --- |
-| Touch | Reveals a preserve-focus preview when a strong diagnostics refresh needs VS Code to activate the document. |
+| Touch | Opens the target hidden and observes diagnostics without adding a preview tab; the bridge keeps the request within the one-second budget. |
 | Diagnostics | Reads diagnostics currently published by VS Code, optionally scoped to one file; the CLI aggregate path requests all published diagnostics. |
 | Hover | Returns hover contents at a position. |
 | Definition | Returns definition locations for a symbol. |
@@ -129,9 +129,9 @@ The bridge does not bundle language servers. It calls providers registered by en
 | Document symbols | Returns symbols from one document. |
 | Workspace symbols | Searches symbols registered for the current workspace. |
 
-For supported operations, OpenCode falls back to its built-in LSP when the bridge request fails. Diagnostics also falls back when its response structure is invalid; for other successful responses, a missing result field may currently be interpreted as empty. A valid empty result does not trigger fallback and does not by itself prove that the entire project passes type checking. Implementation lookup and prepare/incoming/outgoing call hierarchy are not bridge endpoints and continue to use the built-in LSP.
+For supported operations, diagnostics use the VS Code bridge's latest snapshot and do not fall back to a second LSP implementation. A valid empty result means no diagnostics were found in the current snapshot; it does not by itself prove that the entire project passes type checking. Other language-intelligence operations retain their existing provider behavior.
 
-Opening a document with `vscode.workspace.openTextDocument` does not reveal it. A strong diagnostics refresh may call the touch endpoint, which uses a preview editor with `preserveFocus: true`; this preserves focus but can still add a preview tab.
+Opening a document with `vscode.workspace.openTextDocument` does not reveal it. The diagnostics touch endpoint keeps the target hidden, preserves the active editor, and does not add a preview tab.
 
 ## HTTP Endpoints
 
@@ -148,7 +148,7 @@ The OpenCode CLI uses these bridge endpoints internally. Normal users should pre
 | `POST` | `/notebook/output` | Bearer | Export outputs as artifacts. |
 | `POST` | `/notebook/cell-output` | Bearer | Alias for `/notebook/output`. |
 | `POST` | `/notebook/env` | Bearer | Kernel info/configure/restart/stop and notebook create/save operations. |
-| `POST` | `/lsp/touch` | Bearer | Activate a document and wait briefly for diagnostics. |
+| `POST` | `/lsp/touch` | Bearer | Observe diagnostics for a hidden document within the one-second budget. |
 | `POST` | `/lsp/diagnostics` | Bearer | Return diagnostics for one file when scoped, or all currently published diagnostics when omitted. |
 | `POST` | `/lsp/hover` | Bearer | Return hover results at a position. |
 | `POST` | `/lsp/definition` | Bearer | Return definition locations at a position. |
@@ -236,21 +236,21 @@ For extension host debugging:
 
 ```text
 VS Code Extension Host
-|-- extension.ts           Activation, lifecycle, terminal commands
-|-- bridge.ts              HTTP server, routing, auth, per-filePath mutex
-|-- bridge-registry.ts     Registry heartbeat and manifest writer
-|-- lsp.ts                 VS Code language-provider and diagnostics adapter
-|-- util.ts                Shared JSON, URI, and formatting helpers
-`-- notebook/
-    |-- summary.ts         Notebook structure overview
-    |-- source.ts          Paginated virtual source text
-    |-- edit.ts            Cell insert/edit/delete and language changes
-    |-- run.ts             Cell execution through VS Code/Jupyter
-    |-- output.ts          Artifact-first output export
-    |-- env.ts             Kernel info/configure/restart/stop and create/save
-    |-- commands.ts        Interactive development test command
-    |-- format.ts          Summary text and cell ID formatting
-    `-- resolve.ts         Notebook and cell resolution
+├── extension.ts           Activation, lifecycle, terminal commands
+├── bridge.ts              HTTP server, routing, auth, per-filePath mutex
+├── bridge-registry.ts     Registry heartbeat and manifest writer
+├── lsp.ts                 VS Code language-provider and diagnostics adapter
+├── util.ts                Shared JSON, URI, and formatting helpers
+└── notebook/
+    ├── summary.ts         Notebook structure overview
+    ├── source.ts          Paginated virtual source text
+    ├── edit.ts            Cell insert/edit/delete and language changes
+    ├── run.ts             Cell execution through VS Code/Jupyter
+    ├── output.ts          Artifact-first output export
+    ├── env.ts             Kernel info/configure/restart/stop and create/save
+    ├── commands.ts        Interactive development test command
+    ├── format.ts          Summary text and cell ID formatting
+    └── resolve.ts         Notebook and cell resolution
 ```
 
 ## Troubleshooting
