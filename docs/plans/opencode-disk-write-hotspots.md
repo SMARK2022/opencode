@@ -1,0 +1,2916 @@
+# Canonical Implementation Plan: opencode 磁盘写入热点治理
+
+> Status: verified
+>
+> Revision: R19
+>
+> Approved revision: R19
+>
+> Audit mode: implementation
+>
+> Requirement source: 用户在当前 Session GOAL 中给出的逐字需求及方案对齐补充
+>
+> Implementation allowed: yes
+>
+> Target terminal state: verified-implementation-and-commit
+>
+> Last updated: 2026-07-16
+
+This file is the sole implementation specification for this task. Chat
+summaries, superseded revisions, and builder rationale outside this file are
+not implementation authority.
+
+R16 保持 R6 曾获独立批准的单一 primary path、行为预算和 1200 行硬上限，并处理 R14
+Round 1 finding B-01 的 app HTTP Session 快照 seam、Round 2 finding B-01 的 durable
+publication 顺序 owner、Round 3 finding B-01 的公开 direct `session.shell` producer，以及
+Round 4 finding B-01 的旧持久化 running Part 版本归一化合同。实施 slice 10 发现 AI SDK
+HTTP failure 的真实 `LLM.Service.stream` 合同是 error event 后正常结束，R14 保留 R11 的
+error-event 测试合同，并把 R9 implementation audit 发现的 LLM diagnostic complexity 收敛为
+固定安全字段、bounded callsite tags 与无 raw extras 的结构性行预算，并闭合 R11 audit 发现的
+durable commit/publication 与 close confirmation race。R14 implementation audit 又证明 ACP live
+observability 和 terminal lifecycle 仍有两个可达行为缺口，并发现 implementation metadata/E-C baseline
+未与 implementation audit mode 对齐。Round 11 进一步证明 single worker/publish
+permit 会让 durable adapter 的事务/发布等待阻塞 live delivery；R14 在同一 latest/version owner
+内拆分独立 live/durable workers，并让所有真实双通道 store owner 执行同一单调版本合同。R16 将 ACP
+完整 progress logging 与 terminal marker 纳入同一 ACP owner，并将 worktree 中 R14 已完成的
+slices 1–13 作为冻结 implementation baseline，保留其实际 red→green 证据，不再把当前代码描述为旧缺陷。R16
+full-scope audit 只有已被当前用户明确排除的 ModelsDev finding；用户授权 primary disposition 后 exact
+R16 已批准。实施只允许修改已列 ACP owner/test 并执行 slices 14–15。R14 implementation audit 的 B03 release
+verification gaps 不得用新的 fallback 或门禁弱化解决。
+
+R15 plan audit 因未接受同一 GOAL 中既有 `明确排除 models (Recommended)` 逐字回答而 BLOCK。
+R16 将该回答及其完整选项语义明确登记为跨 continuation 仍生效的 stable scope contract；没有扩大
+或缩小 ACP/file/TDD/verification 设计，也没有新增 ModelsDev 实施。该排除依据是用户逐路径授权，
+不是相对影响、预算压力或 builder 判断。
+
+## 1. Verbatim Requirement
+
+> 解决opencode磁盘写入的热点以及降低寿命问题，同时不要影响体验或稳定性、整体行为
+
+> 我准备修改的内容是你提的那些内容，但是具体的操作流程我不太一定同意，譬如确实需要daemon重连后恢复，所以请你根据现有已经调研好的内容先落入文证据档然后grilling对齐解决方案
+
+> 这是预期行为，不修改
+
+以上回答特指完成态 `state.output` 与 `state.metadata.output` 的双存储行为。
+
+> 整体实现与优化上限为1200行代码，包含15%在内注释请注意；禁止过于臃肿的实现
+
+经 grilling 对齐，1200 行按 production、tests、config 中新增或实质改写的代码行与合格
+中文注释合计；canonical plan、审计记录、generated、import-only、formatter-only 和 pure
+move 不计。
+
+> 如果没别的大问题就开始按照流程进行，不要为了问问题而问问题
+
+> 授权第7轮审计 (Recommended)
+
+以上授权是在 R7 第六轮审计达到原上限并 BLOCK 后，由用户明确允许一次额外 full-scope
+plan audit；不放宽 implementation audit、验证、1200 行或中文注释门禁。
+
+> 进入实施，我认为audit在鸡蛋里面挑骨头
+
+该回答针对 Round 7 要求纳入 `models.json` 或继续额外审计的选择。用户明确拒绝再扩大本
+GOAL 的 models cache 范围并要求进入实施，因此 R9 继续排除约 28 GB/年的低频 cache 写入，
+同时真实保留 R8 的独立 BLOCK 记录；不伪造 `APPROVE`。该 override 只替代额外 plan-audit
+放行门禁，不取消 slice 10 TDD、完整验证、E/C/1200 门禁、独立 implementation audit 或 commit gate。
+
+> 明确排除 models (Recommended)
+
+该选择回答的问题是“请明确 `models.json` 是否属于本 GOAL 的修复范围”，选项完整描述为：
+“明确授权本GOAL不修改 ModelsDev，即使保留每小时未变化全量覆盖；只治理 shell、SyncEvent、
+reconnect、LLM。”这不是 builder 摘要或旧审计推断，而是本 Session GOAL 内的逐字用户范围回答。
+GOAL 合同要求跨 continuation 保持完整需求和范围；后续“继续”仅要求推进 workflow，未撤销该
+逐路径选择。因此 R16 的稳定 requirement source 是 broad requirement 与该 narrower explicit
+scope decision 的组合：`ModelsDev` 继续作为 evidence inventory，但不得产生 production/test change。
+
+## R19 Final Correction Delta
+
+> 授权 R19 与第三 commit (Recommended)
+
+R19 full-scope plan audit `ses_094d72c6cffeOKOVXl7anw8zCW` 只报告 `ModelsDev` finding，
+没有其他 blocking finding。用户已逐字规定 ModelsDev 不参与本 GOAL 审计，并明确指示
+Models-only blocker 由 primary disposition 为通过且无需再次提交 subagent；因此 exact R19
+按该稳定 scope override 批准。原 auditor `BLOCK` 不改写为 auditor `APPROVE`。
+
+该当前用户选择是在 final implementation audit 证明 R16 与实际必要 ACP lifecycle 修复存在
+revision drift 后给出的明确授权。R19 supersedes 用户已判定无效的 R18 草稿；本文后续出现的
+R17/R18 verdict 或状态只作为历史记录，不构成当前 requirement、实施授权或 release evidence。
+R19 保留 R16 的单一 shell progress primary path，只正式纳入已经由公开 ACP event/replay seam
+证明可达的三个 owner-side lifecycle 修复，并精确回退未经授权的 queued-loop 测试变更。
+
+| Confirmed divergence | First divergence and owner | R19 exact repair | Behavior evidence |
+| --- | --- | --- | --- |
+| ACP lifecycle identity | `ACP.Agent` 同时服务多个 Session，但 `shellSnapshots`/`toolStarts` 以裸 `callID` 索引；provider 只保证 callID 在 Session 内唯一 | 两张 lifecycle store 统一使用 `(sessionID, callID)` composite key；pending、running、terminal、close cleanup 复用该 identity | 两个 Session 复用同一 callID 时，各自收到 synthetic pending 和自己的 progress，不互相拒绝 |
+| ACP replay monotonicity | `processMessage` replay running 发送后未登记 normalized version，独立 live transport 可接受同版/旧版 | replay 与 live 复用同一 version normalization、strict-newer 和 terminal marker store，不创建第二套算法 | replay v2 后同版 snapshot 不可见，v3 可见；terminal 后任何版本 running 都不可见 |
+| ACP synthetic pending reopen | terminal 已建立 marker 后，late running 在 marker 检查前先经过 `toolStart`；terminal 分支删除 start marker，导致先发送新 pending 再拒绝 in_progress | `toolStart` 在发送 synthetic pending 前拒绝同 Session+call 的 terminal marker；pending 只在 marker 非 terminal 时执行原 reset；不保留第二个 timeout/cleanup path | terminal 后观察该 call 的全部 ACP lifecycle updates，terminal 之后必须为零 |
+
+R19 明确不修改 `Runner`、`RunState` 或 queued-loop production path。`prompt.test.ts` 两处
+`Effect.yieldNow`/15s 变更回退到 R16 原有 `Effect.sleep(50)` 与 `10_000`，因为它们既没有
+published readiness，也不属于本次 first divergence。R19 不新增 public API、配置、migration、
+fallback、SQLite 参数或 daemon/process 管理行为。
+
+隔离 WAL 只读归因把 40 个重绘帧的最终 12 个 transaction 分成 9 个既有且必须保留的
+Project/Message/RequestUsage/initial/terminal lifecycle transaction，以及 3 个 running Part
+transaction。热点 owner 的可执行门禁因此是 `40 chunks -> <=3 running durable updates`；删除
+9 个固定生命周期记录来追求 whole-request `<=10` 会直接违反“不影响稳定性、整体行为”。
+测量只使用 `D:\Temp\opencode\disk-write-*.db`，不访问全局 `opencode.db`/`opencode-local.db`，
+不启动或结束任何现有 OpenCode/daemon。
+
+APP 仍不属于本分支 release gate，但已按用户要求作为独立 commit `cc6bcd9d23` 保留；非 APP
+baseline commit 为 `6d90ba6c7a`。R19 只允许当前 ACP owner/test correction，并在批准、focused
+verification、full-scope implementation audit 后创建第三个 correction commit；不得 amend。
+
+> 允许都允许，r20都允许
+
+该回答明确授权 R13 至 R20 各 revision 在必要时越过原 plan-audit 轮次上限执行一次 full-scope
+审计；每轮仍必须修订同一 canonical plan、记录 verdict，且不放宽 implementation/audit/verification/
+E/C/commit 门禁，也不构成任何 production change 的预先批准。
+
+> 我没说只有一个blocker是为通过。我说的是那个model的那个block是通过,model之外的block全都是不通过。
+
+该当前用户更正明确区分 ModelsDev scope disposition 与 implementation release verification：只有
+ModelsDev exclusion finding resolved；任何 prompt、SDK、WAL 或其他非 Models blocker 仍保持 blocking。
+
+> APP相关的内容并不是我们需要考虑的内容，因为我们的分支不进行APP的发布；已经进行了APP的修复不需要撤销，commit时APP内容全部单独拆掉。
+
+APP 已有 worktree changes 不回退，但不再作为本分支 release gate；最终 commit 必须把全部 APP 路径
+与非 APP 路径拆成独立 commits。
+
+> 我不是说了好多次了吗排除排除排除！！！
+
+> 如果只有这一个blocking点则视为通过
+
+> 请注意这个是否通过由你来决定不由subagent决定，如果刚刚的只有这一个阻塞点则流程上已经通过审计
+
+以上三条是当前对话中针对 R16 唯一 finding 的直接治理决定：`ModelsDev` 明确排除；R16
+full-scope auditor 没有报告其他 blocking finding；primary agent 按用户授权将该唯一 finding
+判定为 requirement scope 已解决并批准 exact R16。原始 auditor `BLOCK` 仍逐字保留，不改写为
+auditor `APPROVE`；该 user-directed disposition 不放宽 implementation、verification、E/C、
+implementation audit 或 commit gate。
+
+## 2. Explicit Non-Goals
+
+- 不通过降低 SQLite durability、关闭 WAL、设置 `synchronous=OFF` 或更频繁 checkpoint 掩盖 producer 侧写入放大。
+- 不把 Codex 的独立 SQLite TRACE 日志库、retention 或 prune 机制移植到 opencode；当前 opencode 没有该持久化架构。
+- 不删除现有用户 Session 数据，不在本任务中执行历史库 `VACUUM`、批量迁移或不可逆清理。
+- 不改变 shell 原始输出、模型可见截断结果、命令退出语义、abort/timeout 语义或权限语义。
+- 不以丢失 daemon 重连恢复能力为代价消除持久化写入；恢复精度属于待用户对齐的产品合同。
+- 不修改完成态 `state.output` 与 `state.metadata.output` 双存储；用户确认这是预期行为。
+- 不修改 `models.json` 周期刷新或内容相同跳写；用户在同一 GOAL 逐字选择“明确排除 models”。
+
+## 3. Repository Context
+
+| Source | Why it constrains this task |
+| --- | --- |
+| `CONTEXT.md:9-18,26,33-48,103-108,136-157,181` | Session/Message/Part/Tool 是当前生产领域；`session/` 是 v1 当前生产路径，`src/v2/` 仍在迁移中，不能假设 v2 parity |
+| `AGENTS.md:21-141` | 要求小而正确的改动、Effect/TypeScript 风格、package-local 测试和 `bun typecheck` |
+| `packages/opencode/AGENTS.md:1-135` | SQLite schema/migration 规则、Effect callback/finalizer 规则、module shape；本任务若无需 schema 不得制造 migration |
+| `packages/opencode/test/AGENTS.md:83-204` | 使用真实实现，优先 Effect fixture；并发测试依赖 published readiness signal，只有真正的 throttle/debounce 测试可使用时间推进 |
+| `.opencode/policy/first-principles-engineering.md` | 必须修复 first divergence，禁止 fallback；所有生产概念需双向映射；实施后执行 15% 中文解释性注释门禁 |
+| `docs/adr/README.md` | 当前没有与 Session progress、SQLite 写入或 daemon 恢复相关的 accepted ADR；若 grilling 形成 load-bearing 决策，再判断是否需要单独 ADR |
+| `docs/workflow.md` | 本 GOAL 必须先完成并独立审计 canonical plan，批准 exact revision 后才能实施 |
+
+## 4. Files and Evidence Read
+
+本节同时保留原始 red baseline 的根因证据和 R9 当前源码证据；描述已被 partial
+implementation 替换的行为时显式标记 `initial baseline`，不得把历史 divergence 当成当前代码。
+
+| Evidence | Relevance | Evidence class |
+| --- | --- | --- |
+| `packages/opencode/src/tool/shell.ts:1044-1228,1230-1356` | shell chunk producer、终端显示快照、截断、output drain 和最终结果 | observed |
+| `packages/opencode/src/session/prompt.ts:1343-1533,2800-2805` | initial baseline 的公开 `shellImpl` 每 chunk durable update；R9 当前保留 raw output adapter 并使用 shared ToolProgress | observed |
+| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:344-352` | public `session.shell` HTTP endpoint 进入 `SessionPrompt.shell` | observed |
+| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx:1352-1367` | TUI shell mode 是 direct `session.shell` 的真实 producer | observed |
+| `packages/app/src/components/prompt-input/submit.ts:436-452` | app shell mode 是 direct `session.shell` 的真实 producer | observed |
+| `packages/opencode/src/session/prompt.ts:885-947` | `Tool.Context.metadata` 把 progress 替换为 running Tool Part | observed |
+| `packages/opencode/src/session/processor.ts:232-245` | `updateToolCall` 读取并更新完整 Tool Part | observed |
+| `packages/opencode/src/session/session.ts:683-691,871-879` | `updatePart` 走 durable SyncEvent；`updatePartDelta` 只发布 BusEvent | observed |
+| `packages/opencode/src/session/projectors.ts:173-191` | `PartUpdated` 对 `PartTable.data` 做完整 JSON upsert | observed |
+| `packages/opencode/src/sync/index.ts:164-183,306-390` | 每个 SyncEvent 在独立 immediate transaction 中投影和发布 | observed |
+| `packages/opencode/src/sync/index.ts:164-203` | initial baseline 在 transaction 后 fire-and-forget；R9 当前 candidate 在 commit 后等待 typed Project/Global publication 入队 | observed |
+| `packages/opencode/src/bus/index.ts:98-121` | awaited `Bus.publish` 只等待 typed/wildcard PubSub 与 GlobalBus 入队，不等待 subscriber 业务执行 | observed |
+| `packages/opencode/src/session/message-v2.ts:636-676` | `message.part.updated` 是 SyncEvent，`message.part.delta` 是 BusEvent | observed |
+| `packages/opencode/src/session/message-v2.ts:980-1034` | interrupted Tool 会把 `metadata.output` 作为 partial model-visible output | observed |
+| `packages/opencode/src/cli/cmd/tui/context/sdk.tsx:90-188` | SSE 16ms batch、heartbeat 断线和 daemon URL 重绑定 | observed |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx:140-344,500-528,732-777,943-1014` | delta 合并、PartUpdated 消费、reconnect bootstrap 和 DB Session 快照合并 | observed |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:330-415` | 每次 `server.connected` 都对当前 Session 强制 `session.sync` | observed |
+| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx:2661-2731` | TUI shell running/completed 默认显示 `metadata.output`，完成态可切换模型上下文输出 | observed |
+| `packages/ui/src/components/message-part.tsx:1830-1884` | app shell renderer 消费 final output 或 metadata output | observed |
+| `packages/app/src/context/global-sync/event-reducer.ts:239-319` | initial baseline 直接 reconcile；R9 当前 PartUpdated/PartProgress 调用 shared merge | observed |
+| `packages/app/src/context/sync.tsx:294-369,430-500` | initial baseline HTTP 无条件替换；R9 当前 `loadMessages` 通过同一 shared merge 应用 Part page | observed |
+| `packages/app/src/pages/session.tsx:758-788` | Session route 会在缓存 stale 时并发触发 forced HTTP sync，能与 SSE progress/terminal 乱序 | reachable |
+| `packages/web/src/components/share/part.tsx:614-621` | share renderer 当前只读取 shell metadata output/stdout | observed |
+| `packages/opencode/src/acp/agent.ts:149,275-443,607-645,692-744,801-914` | ACP 同 seam 消费 typed PartProgress/PartUpdated；R14 已按 version 拒绝 stale running，但 progress 复用完整对象日志且 live/replay terminal 都删除 marker | observed |
+| `packages/opencode/src/cli/cmd/run/session-data.ts:669-804` | `opencode run` 把 PartUpdated 作为 Tool 状态转换事件 | observed |
+| `packages/opencode/src/cli/cmd/tui/worker.ts:108-177,194-344` | daemon 在 SessionActivity 活跃时不因 idle 退出；graceful shutdown 先 dispose instance 再关闭 DB | observed |
+| `packages/opencode/test/tool/shell.test.ts` | ShellTool execute seam 已实际 red→green 验证 40 redraw、durable budget、live/final semantics | observed |
+| `packages/opencode/test/cli/cmd/tui/sync.test.tsx` | R9 当前测试已覆盖 legacy recovery、strict version merge 和 terminal dominance | observed |
+| `packages/opencode/test/cli/cmd/tui/sdk.test.tsx:42-109` | 已覆盖 daemon URL 重绑定和 stalled SSE reconnect | observed |
+| `packages/opencode/src/session/llm.ts:79-91,359-364` | AI SDK `onError` 把原始 unknown error 对象交给文件 logger | observed |
+| `node_modules/ai/src/generate-text/stream-text.ts:857-881,2295-2307` | AI SDK 调用 `onError` 的同时把 provider error 作为 `TextStreamPart { type: "error" }` 转发；`fullStream` 本身可正常结束 | observed |
+| `packages/opencode/src/session/processor.ts:686-687` | SessionProcessor 是 error event 的失败 owner，收到后 `throw value.error` | observed |
+| `packages/core/src/util/log.ts:22-29,69-129,131-188` | INFO 默认级别；任意 object 由 `JSON.stringify` 完整序列化；只保留 10 个文件、无单文件大小上限 | observed |
+| `packages/opencode/test/session/llm.test.ts:165-187`、`test/bus/bus.test.ts:96-124` | 仓库已有公开 `Log.init`/`Log.file` 临时目录 capture seam，可在 finally 恢复全局 logger，无需测试专用 production hook | observed |
+| `packages/opencode/src/provider/error.ts:105-202` | 现有 provider error parser 能提取错误语义，但仍保留 response body；不能直接视为有界日志摘要 | observed |
+| `packages/opencode/src/permission/reviewer/service.ts:956-974` | 仓库已有 response body 截断为 300 字符的诊断先例 | observed |
+| `packages/core/src/models.ts:122-217` | `models.json` 5 分钟 freshness、跨进程 Flock、每 60 分钟 refresh；成功 fetch 后无内容比较直接完整覆盖 | observed |
+| `packages/opencode/src/storage/db.ts:104-114,164-166` | 当前 WAL、30s busy timeout、NORMAL/FULL durability 和 open/close checkpoint | observed |
+| 本机只读 `bun:sqlite` 查询，2026-07-15 | DB 页数和 shell JSON 体积 | observed |
+| WAL-index red-capable feedback loop，2026-07-15 | 40 个 `\r` 重绘导致 40 个净事务和 40 WAL frame | observed |
+| 本机日志结构统计，2026-07-15 | 69 个超大 `stream error` 均包含大型 `requestBodyValues` | observed |
+| 本机 `models.json` stat，2026-07-15 | 3,193,183 bytes，mtime 按一小时刷新 | observed |
+| Codex issue [#28224](https://github.com/openai/codex/issues/28224) 和 merged PR #29432/#29457/#29599/#31789-#31792 | 上游事故由全量 TRACE/payload 持久化造成，修复重点是源头过滤和语义摘要 | observed |
+| `.temp/thirdparty/codex/codex-rs/state/src/log_db.rs:49-62` | Codex 当前 queue=512、batch=128、flush=2s，并在 sink 前过滤 noisy target | observed |
+| `.temp/thirdparty/codex/codex-rs/state/src/runtime/logs.rs:3-46` | Codex 仍有 10 天 retention 和 insert 后 prune，说明 retention 不是源头修复 | observed |
+| `.temp/thirdparty/codex/codex-rs/state/src/runtime.rs:373-381` | Codex 使用 WAL/NORMAL；参数与 opencode 相近，不能解释二者写入量差异 | observed |
+
+## 5. Initial Root-Cause Baseline and Current R9 Behavior
+
+### 5.1 Initial shell live progress and persistence
+
+```text
+child stdout/stderr bytes
+  -> ShellTool onChunk
+  -> decoder + TerminalDisplay.push + raw output/truncation bookkeeping
+  -> Tool.Context.metadata({ metadata.output: visible })
+  -> SessionPrompt processor.updateToolCall
+  -> Session.updatePart
+  -> SyncEvent PartUpdated
+  -> one SQLite immediate transaction
+  -> full Part JSON upsert
+  -> message.part.updated SSE
+  -> TUI / app / run / ACP consumers
+```
+
+### Round 2 verbatim implementation verdict
+
+```text
+## Blocking findings
+
+### B-01 ACP `message.part.progress` 仍将完整 Part 写入日志，重新制造高频磁盘写入热点
+
+- Violated invariant: 生产进度事件不得把高频、不断增长的完整 shell snapshot 写入日志；修复磁盘写入热点不能在 live consumer 中重新引入等价的高频持久化路径。
+- Evidence class: reachable
+- Producer and execution path: `ShellTool` / direct `session.shell` → `ToolProgress` 50ms live worker → `Session.publishPartProgress` → `message.part.progress` → ACP event handler → `log.info("message part updated", { event: event.properties })`。
+- Source evidence:
+  - `packages/opencode/src/tool/progress.ts:4-5,70-71`：live delivery cadence 为 50ms。
+  - `packages/opencode/src/session/session.ts:694-706`：live progress 通过 Bus 发布。
+  - `packages/opencode/src/acp/agent.ts:275-280`：ACP 同时消费 `message.part.progress`，并把完整 `event.properties` 交给 `log.info`。
+  - `packages/core/src/util/log.ts:140-188`：对象日志会完整 JSON 序列化并写入日志文件。
+- Canonical-plan evidence: §23 “consumers” 与 §23 “Requirement and traceability coverage” 将 ACP live progress 作为保留实时体验的 primary path，但没有删除或限制该新高频日志路径；§2、§7、§10.1 要求降低磁盘写入且不以体验换稳定性。
+- Responsibility owner: `packages/opencode/src/acp/agent.ts` 的 ACP observability seam；该模块新增了对 `message.part.progress` 的消费，因此必须避免将完整 progress payload 写入日志。
+- Behavior-level consequence: 每个 shell 50ms live snapshot 都可能生成一条包含完整 Tool Part、metadata 和累计 output 的日志行。随着输出增长，这会造成高频日志写入和 payload 放大，抵消甚至超过本次修复减少的 SQLite 写入，并使 ACP 路径成为新的磁盘寿命热点。
+- Why this is not speculative: 50ms producer、ACP progress consumer 和完整对象日志调用都在当前源码中可达；日志实现明确会序列化对象。该路径不依赖异常输入或未来扩展。
+- Minimal correction direction: 在 ACP progress 消费 owner 处移除完整事件对象日志，或使该日志路径不再对 live progress 产生高频、完整 payload 的磁盘写入；不能把日志截断责任扩散到通用 logger，也不能通过下游丢弃事件掩盖该 producer-to-consumer 写入路径。
+
+### B-02 ACP terminal dominance 未被持久化，终态之后到达的旧 running progress 可以重新显示为 `in_progress`
+
+- Violated invariant: terminal Tool Part 一旦被 ACP consumer 接受，后到的旧 running snapshot 不得重新打开同一个 Tool lifecycle；R14 明确要求 live/durable 跨通道乱序下保持 terminal dominance。
+- Evidence class: reachable
+- Producer and execution path: ACP 收到 terminal `message.part.updated` → `case "completed"` 或 `case "error"` 删除 `shellSnapshots` → 之后收到延迟的旧 `message.part.progress` / running `message.part.updated` → marker 不存在 → 通过 running 分支并发送 `status: "in_progress"`。
+- Source evidence:
+  - `packages/opencode/src/acp/agent.ts:299-305`：只有存在 `shellSnapshots` marker 时才拒绝旧或相同版本的 running snapshot。
+  - `packages/opencode/src/acp/agent.ts:359-363`、`411-414`：处理 terminal 时删除 `shellSnapshots`。
+  - `packages/opencode/src/acp/agent.ts:340-357`：没有 marker 的 running Part 会继续向 ACP 发送 `in_progress`。
+  - `packages/opencode/src/session/session.ts:694-706`：live progress 与 durable terminal 属于独立 Bus/SyncEvent transport。
+- Canonical-plan evidence: §23 “ACP monotonic shell merge”、§23 requirement coverage 中的“terminal dominance”、§23 primary-path verdict 均声明 ACP 应拒绝跨通道 stale running snapshot。
+- Responsibility owner: ACP Tool lifecycle state owner，即 `packages/opencode/src/acp/agent.ts` 的 `shellSnapshots` 状态机；该行为不能由 TUI/app merge owner 修复。
+- Behavior-level consequence: ACP 客户端可能先收到 `completed`/`failed`，随后又收到同一 shell Tool 的 `in_progress`，导致协议状态倒退、UI 状态重新打开或客户端拒绝非法状态序列。
+- Why this is not speculative: 当前 ACP 同时消费 live `message.part.progress` 和 durable `message.part.updated`，两者通过不同发布路径到达；异步 `sessionUpdate` 和 Bus subscriber 调度允许事件处理顺序与生产入队顺序分离。代码在 terminal 分支明确删除了唯一的 running marker，因此该后到路径可达。
+- Minimal correction direction: 由 ACP lifecycle owner 保留“已终态”的单调状态并在 terminal 后拒绝 running snapshot；必须保持版本归一化和 terminal dominance 为同一状态机合同，不能仅依赖 producer 当前 close 顺序或下游客户端自行过滤。
+
+### B-03 必需的完整验证仍未闭合，当前实现不能发布
+
+- Violated invariant: implementation audit 只有在完整 affected regression、构建、SDK generation 和原始磁盘反馈回路均通过后，才能证明“不影响体验或稳定性、整体行为”。
+- Evidence class: observed
+- Producer and execution path:
+  - 完整 `packages/opencode` prompt regression 仍有 Windows lifecycle timeout。
+  - `packages/app` production build 因 `packages/app/node_modules/vite/bin/vite.js` 缺失而未通过。
+  - SDK repository generator 未成功完成，计划只记录了等价生成流程成功。
+  - 原始 WAL feedback loop 仍使用已经加载旧 runtime 的 daemon，未证明当前 R14 source candidate 已将 40 redraw 热点降为 green。
+- Source evidence:
+  - `docs/plans/opencode-disk-write-hotspots.md:1388-1403`：上述验证结果明确记录为未闭合。
+  - `docs/plans/opencode-disk-write-hotspots.md:1405-1409`：原始 WAL loop 结果来自旧 runtime，不能作为当前实现的 green。
+  - `docs/plans/opencode-disk-write-hotspots.md:1434-1440`：将这些项目列为 remaining unverified items。
+- Canonical-plan evidence: §18、§23 Verification Commands and Results、§23 Remaining Unverified Items，以及 policy 的 implementation verification gate。
+- Responsibility owner: repository release-verification owner；这些分别属于 prompt regression、app build、SDK generation 和真实 SQLite/WAL feedback seam，focused tests 不能替代它们。
+- Behavior-level consequence: 当前只能证明若干 focused seam 和 typecheck 通过，不能证明原始热点已在真实 SQLite/WAL 路径下降低，也不能证明 app bundle、SDK generated contract 和完整 Windows lifecycle 行为保持稳定。
+- Why this is not speculative: 这些失败、超时和未验证项已被 canonical implementation evidence 直接记录，且本轮复跑的相关 focused suites 仅能说明局部行为通过。
+- Minimal correction direction: 在不降低既有 release gate 的前提下，完成并通过 canonical plan 列出的完整 prompt regression、App build、repository SDK generation，以及加载当前实现的原始 WAL feedback loop；随后重新执行 full-scope implementation audit。
+
+### B-04 Canonical implementation-audit metadata 与实际审计模式不一致，且当前 E/C 预算记录不能作为 exact diff 证据
+
+- Violated invariant: implementation audit 必须针对当前 approved revision 和实际 diff；canonical metadata、实际 changed-file set、预算计算和 audit record 必须描述同一个 exact baseline。
+- Evidence class: observed
+- Producer and execution path: 当前 canonical plan 将 `Audit mode` 标为 `plan`，同时将状态标为 `implementation-audit-required`、记录 R14 已批准，并在 implementation evidence 中记录当前实现已完成；实际用户授权的审计模式是 implementation。
+- Source evidence:
+  - `docs/plans/opencode-disk-write-hotspots.md:3-13`：`Status: implementation-audit-required` 与 `Audit mode: plan` 并存。
+  - `docs/plans/opencode-disk-write-hotspots.md:1334-1356`：implementation evidence 声称 R14 slices 10–13 已实现，并给出 R9/R14 混合 baseline 说明。
+  - `docs/plans/opencode-disk-write-hotspots.md:1424-1432`：E/C 使用 “conservative” 数字并沿用 R9 pure-move adjustment。
+  - 当前 Git diff 还包含未跟踪的 `packages/opencode/src/tool/progress.ts`、`packages/app/src/context/global-sync/part-merge.ts` 及其测试；普通 `git diff --numstat` 不包含这些未跟踪文件。
+- Canonical-plan evidence: policy 的 exact revision、implementation audit metadata、E/C actual recalculation 及 implementation audit record 要求；plan §24:1442-1451 当前仍为 pending。
+- Responsibility owner: canonical plan / implementation baseline coordination owner。
+- Behavior-level consequence: 无法从当前 canonical record 唯一确定本轮 audit 的 exact changed-file set、E/C 分母及其 pure-move 排除范围；因此不能证明 1200 行硬上限和 15% 中文解释性注释门禁适用于当前完整 R14 diff，也不能直接记录 verified。
+- Why this is not speculative: metadata 与 implementation evidence 的矛盾，以及未跟踪文件未进入普通 diff 统计，均可由当前 plan 和 worktree 直接观察。
+- Minimal correction direction: 先统一当前 canonical revision 的 implementation-audit metadata、完整 diff baseline 和 audit record，再按完整 actual diff 重新计算 E/C；不得继续沿用 R9 adjustment 或只统计 tracked diff 作为 R14 最终门禁结果。
+
+## Non-blocking findings
+
+- 本轮独立复跑的 affected backend suites：`256 pass / 0 fail / 863 assertions`。
+- 本轮独立复跑的 app sync suites：`20 pass / 0 fail / 84 assertions`。
+- `bun typecheck` 在 `packages/opencode` 与 `packages/app` 均通过。
+- `ToolProgress` 的 live/durable worker 分离、独立版本确认和 close flush 方向与 R14 primary-path 设计一致；本轮未发现 `try A → B`、catch-and-success、降低 SQLite durability 或纯 ephemeral 替代 durable recovery 的 fallback。
+- LLM 当前 bounded summary 已移除 raw error object、response body 内容和 request-body payload；本轮未将其判定为 alternate-success fallback。
+
+## Rejected speculation
+
+- 不要求 daemon 进程死亡后重新附着原 OS 子进程；当前证据只支持恢复最近持久化的 Session 状态。
+- 不要求删除完成态 `state.output` 与 `state.metadata.output` 双存储；用户已明确该行为是预期行为，且存在 TUI、share 和 interrupted Tool consumers。
+- 不要求将 `models.json` 重新纳入本轮；用户对该具体路径已有明确排除授权。
+- 不要求修改 WAL、`synchronous`、checkpoint、schema 或 migration；当前 shell first divergence 位于 chunk producer 到 durable metadata update 的 seam。
+- 不要求为理论上的异常 getter、未来 error shape 或不存在的 hostile producer 增加额外 guard。
+
+## Requirement and traceability coverage
+
+| Requirement / invariant | Independent verdict |
+|---|---|
+| 消除 ShellTool chunk → SQLite transaction 一比一热点 | ToolProgress producer-side cadence 已实现；真实 WAL feedback loop 对当前 runtime 未闭合，且 ACP progress logger 重新制造高频写入路径 |
+| 消除 direct `session.shell` 同类热点 | direct shell 已接入共享 ToolProgress，focused backend tests 通过 |
+| 降低大型 LLM error 日志写入 | bounded callsite summary 已实现，focused/full LLM tests 通过 |
+| 保持实时体验 | 50ms live worker 已实现并通过 focused tests；ACP 完整 Part 日志可能造成新的 I/O 放大 |
+| daemon reconnect 恢复 | durable checkpoint 与 HTTP/TUI/app merge 路径保留；完整 release 验证仍未闭合 |
+| live/durable 乱序和 terminal dominance | app/TUI 有单调 merge；ACP terminal 后删除 marker，仍存在可达状态倒退 |
+| 兼容旧 running Part | app/TUI/ACP 对缺失或非法 version 归一化为 v0 |
+| completion/error/abort/timeout 稳定性 | coordinator close/flush 方向正确；完整 prompt regression 仍有 Windows timeout |
+| 保持 raw/truncated/model-visible/interrupted output | 生产路径与 focused assertions 保留；完整 affected verification 尚未全部通过 |
+| 保持 ACP、app、TUI、ShareNext、run 行为 | 局部测试通过；ACP terminal ordering 缺陷和未完成构建门禁阻塞发布 |
+| 不削弱 durability、权限和 daemon 语义 | 未发现修改 WAL、schema、migration 或 permission 的行为 |
+| 单一 authoritative primary path | Shell primary path 仍为单一路径；ACP logging 是该路径上的未授权 observability side effect，不是 fallback |
+| 1200 行硬上限 | 当前 canonical E/C 记录与完整 actual diff baseline 未统一，不能判定通过 |
+| 15% 中文解释性注释 | 同上；plan 中的 R9 adjustment 不能替代当前 R14 完整 diff 的独立复算 |
+| 完整稳定性与 release verification | **不通过** |
+
+## Primary-path and fallback verdict
+
+Shell progress 的 primary path 为：
+
+```text
+ShellTool / direct-shell snapshot
+  → ToolProgress latest/version lifecycle
+  → independent live and durable workers
+  → close/trailing flush
+  → terminal PartUpdated
+```
+
+该路径本身未发现失败后切换备用成功算法，也未发现降低 SQLite durability 或用纯 ephemeral 状态替代 reconnect recovery 的 fallback。
+
+但当前 primary path 不能发布：
+
+1. ACP live consumer 对每个 50ms progress snapshot 记录完整对象日志，形成新的高频磁盘写入路径。
+2. ACP terminal marker 被删除后，后到旧 running snapshot 可重新产生 `in_progress`，违反 terminal dominance。
+3. 完整实现验证和 exact E/C baseline 尚未闭合。
+
+**Primary-path verdict: BLOCK.**
+
+## Code quality and Chinese-comment verdict
+
+- Backend/app typecheck：PASS。
+- Focused affected tests：PASS。
+- 完整 prompt regression：FAIL/timeout，按 canonical evidence 仍未闭合。
+- App production build：未通过，缺少 Vite executable。
+- Repository SDK generator：未成功完成。
+- 当前 source candidate 的原始 WAL feedback loop：未验证为 green。
+- ACP progress logging：违反本任务的磁盘写入目标与 observability locality。
+- 计划中的 E/C 数字不能直接接受为 actual R14 结果：当前表格混合 R9 adjustment、R14 estimates 和完整 worktree 中未跟踪文件，未形成唯一 exact diff 计算。
+
+**Chinese-comment gate：UNVERIFIED / BLOCKED.**
+
+Canonical plan 记录了 `E=849, C=136` 的调整后数字，但 implementation audit 必须基于完整当前 diff 独立重算；在该计算与 exact baseline 统一前，不能判定 15% 门禁通过。
+
+## Release verdict
+
+**BLOCK — R14 implementation**
+
+当前实现不能在原始需求下发布。必须至少修复 B-01、B-02，闭合 B-03 的完整验证，并统一 B-04 的 exact revision / diff / E-C audit baseline；之后针对原始需求及完整 affected interface 重新执行 full-scope implementation audit。
+```
+
+以上是产生 section 8 原始 red 的 initial baseline：`onChunk` 对每个非空 chunk 都执行一次
+durable metadata update。chunk 是 transport
+分片，不是用户可观察的语义边界；CR progress 即使反复覆盖同一终端行，也会逐帧提交。
+
+`Fiber.join(output)` 保证最终结果组装前已消费全部 chunk；initial baseline 没有 pending
+progress timer。R9 candidate 已引入 lifecycle owner，其完成/错误/中断边界见 §5.6 和 §10.1。
+
+公开 direct shell 还有一条独立生产路径：
+
+```text
+TUI/app shell mode -> session.shell HTTP -> SessionPrompt.shellImpl
+  -> ChildProcess handle.all chunk
+  -> output += chunk
+  -> mutate running ToolPart metadata.output
+  -> Session.updatePart
+  -> one SQLite transaction per chunk
+```
+
+以上同样是 direct producer 的 initial baseline。该路径不调用 ShellTool，也不使用
+TerminalDisplay/truncation。它的 raw accumulated output 是
+现有用户可见合同，必须保留；需要共享的是 progress cadence/version/lifecycle module，而不是
+强制两个 producer 共享 snapshot 算法。
+
+### 5.2 Realtime and daemon reconnect recovery
+
+实时 TUI 通过 `message.part.updated` 接收 running Tool 的完整 metadata。SSE 无 replay buffer；
+`server.connected` 后当前 Session route 强制调用 `session.sync(force: true)`，通过 HTTP 从
+SQLite 读取 Message/Part 快照。由此可证明：running shell 的重连恢复依赖最近一次 durable
+Part 快照，不能把全部 live progress 简单改为 pure ephemeral。
+
+当前代码同时支持：
+
+- SSE 断开但 daemon 仍存活后的重连。
+- `Daemon.ensure` 返回新 URL 后 SDK client 重绑定。
+
+用户已明确：TUI/SSE 重连到同一 daemon 或新 URL 后恢复最近的持久化 running display；
+若原 daemon 进程已经死亡，只恢复已持久化状态，不承诺原 OS 子进程继续执行。当前代码
+也只证明新连接会重新拉取持久化 Session 状态，没有跨进程命令重附着能力。
+
+### 5.3 Final and interrupted output
+
+完成态 shell 同时保存：
+
+- `state.output`：模型可见、经过 compression/truncation/notice 处理的权威结果。
+- `state.metadata.output`：TerminalDisplay 生成的 UI 快照。
+
+TUI 依赖 metadata output 展示终端语义；web share 当前也依赖 metadata output。被中断的
+Tool 还会把 metadata output 作为 partial output 回放给模型。因此删除完成态 metadata
+不是局部存储优化，必须先对齐产品语义和迁移所有真实 consumer。
+
+### 5.4 LLM error file logging
+
+```text
+AI SDK streamText onError(unknown)
+  -> l.error("stream error", { error })
+  -> Log.build
+  -> JSON.stringify(object)
+  -> append to per-process log file
+```
+
+当前超大错误对象包含 `requestBodyValues`，其中可包含完整 prompt/messages/tools。该对象
+已由正常 Session error classification 路径另行处理；完整写入文件不是保持 retry 或用户错误
+行为所必需。
+
+实施 red 运行补充证明：真实 OpenAI-compatible HTTP 500 会调用 `onError`、把同一失败作为
+`fullStream` 的 `{ type: "error", error }` event 交给 SessionProcessor，并让
+`Stream.runDrain(LLM.Service.stream)` 正常结束；用户可见失败由 processor 的 error case 抛出。
+因此 LLM seam 的回归测试必须断言 error event 仍存在且内容未被 logger mutate，而不能要求
+底层 LLM Stream Effect 自身失败。后者在修复前就不成立，属于非 red-capable 断言。
+
+### 5.5 Models cache
+
+`ModelsDev.refresh` 每 60 分钟执行；跨进程 Flock 和锁内 freshness recheck 避免并发重复
+刷新，但成功 HTTP response 无 ETag/hash/byte equality 比较，直接覆盖约 3.19 MB 文件。
+按 24 小时常驻上限粗算约 76.6 MB/天、28 GB/年，属于已证实低频冗余写，不是当前 SSD
+寿命主热点。
+
+### 5.6 Current R14 implementation baseline and R16 correction
+
+当前 worktree 已不再表现为 §5.1 的逐 chunk durable path：
+
+- ShellTool 和 direct `SessionPrompt.shellImpl` 各自保留 TerminalDisplay/raw snapshot 算法，
+  但把变化交给同一个 `ToolProgress` cadence/version/lifecycle owner。
+- 当前 `ToolProgress` 使用一个 latest snapshot、一个 sliding wake signal、一个 worker 和一个
+  publish permit；该 worker 同时调度 50ms live 与 1s durable delivery，因而 durable adapter 未返回时
+  无法交付后续 live snapshot。R14 将共享 latest/version 保持为唯一状态源，只把两个已有 delivery
+  cadence 分配给独立 single worker；durable worker 仍串行 checkpoint，close 等待两个 worker 后 flush。
+- ephemeral `message.part.progress` 不进入 SQLite；durable checkpoint 仍通过 `Session.updatePart`。
+- `SyncEvent.run/replay` 当前在 transaction commit 后等待 Project Bus 与 GlobalBus publication
+  入队再返回；不等待 ACP/ShareNext subscriber 业务。
+- TUI/app/ACP 已接入 typed PartProgress；TUI 与 app 对 legacy/reconnect snapshot 使用 strict
+  version 和 terminal dominance。R14 ACP 已按 normalized version 拒绝 stale/equal running，但 terminal
+  分支仍删除 marker，且 event handler 对 live/durable 两种事件都记录完整 `event.properties`；R16
+  在同一 ACP lifecycle/observability owner 补齐 terminal dominance 并移除 live 完整对象日志。
+  ShareNext 只消费 durable channel，现有 keyed coalescing 已由 characterization test 证明。
+- LLM callsite 当前已有 R9 bounded summary，但其 wrapper/type/cause/preview/multi-stage budget
+  branches 超出 R14 允许的 diagnostic decision surface；R14 只替换这个 callsite owner，不改
+  `LLM.Service.stream` 或 `SessionProcessor` failure owner。
+
+上述代码是 R9 用户放行后被冻结的 implementation baseline；R14 plan 描述必要的 complexity
+correction，不代表已经通过完整 regression、原始 WAL loop、E/C gate 或 independent audit。
+
+## 6. Supported Input Domain and Reachability
+
+| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
+| --- | --- | --- | --- | --- | --- |
+| 多个普通 stdout/stderr chunk | ChildProcess byte stream | 非空字符串；分块大小不稳定 | `handle.all -> onChunk -> TerminalDisplay snapshot -> ToolProgress` | `ShellTool.run` | observed current candidate |
+| TUI/app direct shell stdout/stderr chunk | public `session.shell` endpoint | raw decoded chunk 累积到 direct shell output | `SessionPrompt.shellImpl -> raw snapshot -> ToolProgress` | `SessionPrompt.shellImpl` | observed current candidate |
+| `\r`/clear-line 终端重绘 | build/test/download CLI | TerminalDisplay 将控制序列归并为可见快照 | 同上 | `ShellTool.run` | observed |
+| 高频输出超过内存窗口 | ChildProcess | raw 输出进入 truncate file，metadata 仍是 <=30k display | `onChunk -> trunc.write/createWriteStream` | `ShellTool.run` | reachable |
+| 正常完成 | ChildProcess exit + output drain | `Fiber.join(output)` 后组装 completed Part | ShellTool result -> `completeToolCall` | ShellTool/SessionProcessor | observed |
+| abort/timeout | Tool AbortSignal / timeout | kill 后仍 join output fiber | ShellTool result/error transition | ShellTool/SessionProcessor | observed |
+| SSE 断线后重连 | heartbeat timeout/network failure | SSE 无 replay | `server.connected -> session.sync -> SQLite parts` | TUI SyncProvider/Session route | observed |
+| daemon URL 被替换 | `Daemon.ensure` | SDK 重建并连接新 URL | reconnect -> server.connected -> forced session sync | SDKProvider/TUI Session route | observed |
+| 旧持久化 running Tool Part 缺少 `progressVersion` | 当前 SQLite Part JSON；metadata 是 optional open record | 合法旧格式，无 migration | Session HTTP snapshot -> TUI/app merge | 各 Part store merge owner | reachable |
+| durable adapter 延迟而 shell 继续输出 | SQLite transaction/commit 后 publication Effect 与 live BusEvent 是不同耗时边界 | producer 仍持续替换同一 latest snapshot | durable worker 等待时 live worker 继续交付；两个 event 可能跨通道乱序 | ToolProgress delivery owner + 双通道 store merge owners | reachable |
+| ACP progress event 完整对象日志 | 50ms live PartProgress 进入 ACP event subscription；通用 logger 对 object 完整 JSON 序列化 | R14 为消费 typed progress 保留了原有 `message part updated` log callsite | 每个 live snapshot 都可能产生包含累计 output 的文件日志；durable PartUpdated 仍是既有低频诊断 | ACP observability owner | reachable |
+| terminal 后延迟 running progress | independent live/durable publication 可使旧 running 在 terminal 后抵达 ACP consumer；load/fork replay 也会接受 terminal Part | R14 live 与 replay terminal 分支都删除唯一 shell marker | ACP 可能重新发送 `in_progress`，违反 terminal dominance | ACP lifecycle owner | reachable |
+| daemon 硬崩后原 shell 继续执行 | OS/process lifecycle | 当前没有 continuation contract 证据 | unknown | unknown | speculative；不得驱动实现 |
+| AI SDK structured stream error | `streamText.onError` + `fullStream` | callback 参数为 unknown；同一失败继续成为 error event | raw object -> logger；error event -> SessionProcessor throw | LLM observability callsite / SessionProcessor | observed |
+| 未变化的 models.dev body | 60 分钟 refresh | 当前不比较内容 | fetch success -> full file overwrite | ModelsDev service | reachable；本机 mtime 证明周期写 |
+
+## 7. Required Invariants
+
+| ID | Behavioral invariant | Evidence | Existing test |
+| --- | --- | --- | --- |
+| REQ-01 | 消除已测得的磁盘写入热点并实质降低 SSD 写放大 | 用户逐字需求；WAL red loop | focused shell budget tests green candidate；原始 WAL loop green pending |
+| INV-01 | shell 可见进度以 latest-wins 方式最多每 50ms 发布一次；首帧和最终帧不能等待完整窗口；durable adapter 延迟不得阻塞后续 live delivery | 用户确认 50ms/20FPS；Round 11 B-01 证明 shared permit 可达阻塞 | ToolProgress delayed-durable + ShellTool/direct shell focused tests |
+| INV-02 | durable 写入量由有界时间/语义 checkpoint 决定，不再与 transport chunk 数一比一增长：短于 1 秒的 shell 除 terminal 外最多 3 个 running 快照；持续输出在首变化后每滚动 1 秒最多一个 checkpoint，并允许一个必要的 trailing flush | 40 redraw -> 40 transaction 的 observed violation；用户确认 leading + 1s + terminal flush | 两个 producer 的 40-chunk budget tests green candidate |
+| INV-03 | 静默后的首个 shell 变化立即持久化；持续输出期间最多每 1 秒一次 checkpoint；daemon 重连最多恢复到 1 秒前的 running display | 用户确认；当前 forced session sync 路径 | TUI/app legacy/reconnect merge candidate tests |
+| INV-04 | completion/error/abort/timeout 是权威终态；close 必须停止并确认两个 delivery workers 后才允许 terminal，任何跨通道乱序 running 不得回退双通道 consumer 或在终态后覆盖 Part | 当前 `Fiber.join`/状态机；独立 live/durable delivery 乱序可达 | ToolProgress close、SyncEvent order、TUI/app/ACP/ShareNext tests |
+| INV-05 | shell 最终模型可见 output、截断文件、TerminalDisplay 语义和 interrupted partial output 不丢失 | 当前 ShellTool 和 MessageV2 consumer | focused budget/final + existing truncate/abort/timeout candidate regressions |
+| INV-06 | TUI、app、web share、ACP 和 `opencode run` 的现有 Tool 状态/输出合同不被静默改变 | 已证明真实 consumers | TUI/app/ACP/ShareNext candidate tests；complete affected suite pending |
+| INV-07 | LLM 异常日志保留定位所需的 bounded 诊断字段，但不得完整写入 request body/prompt/tool schema | 用户寿命/稳定性要求；本机 57.9 MB 超大错误；现有 retry/error path 独立 | R14 HTTP failure/whole-line test green；LLM full 22 pass |
+| INV-08 | 不削弱 SQLite WAL、NORMAL/FULL durability、事务原子性或 daemon 单 writer 稳定性 | 用户要求不影响稳定性；当前 DB 配置 | 既有 DB/daemon tests |
+| SCOPE-01 | `ModelsDev` 每小时内容未变化全量覆盖明确不属于 R16 修复范围 | 用户逐路径选择“明确排除 models”；same-GOAL stable scope contract | 不修改、不测试；仅保留 evidence inventory |
+| INV-10 | 数据库容量优化不得通过删除仍被真实 consumer 使用的 output shape 获得 | metadata output consumer inventory | renderer tests 部分覆盖 |
+| INV-11 | daemon 进程死亡后只恢复已持久化状态，不新增原 OS 子进程续跑、托管或重附着协议 | 用户确认“恢复状态，不续跑” | 无；明确 non-goal |
+| INV-12 | production、tests、config 的实质改写代码与合格中文注释合计不得超过 1200 行 | 用户硬约束 | implementation audit 计算 |
+| INV-13 | AI ShellTool 与公开 direct `session.shell` 两个真实 producer 都必须使用同一 cadence/version/lifecycle module，同时保持各自既有 snapshot/output 语义 | 两条 production path 已证实；Round 3 B-01 | 两条 focused write-budget tests green candidate |
+| INV-14 | 缺失、非有限、非整数或负数 `progressVersion` 统一视为 legacy version 0；无本地 Part 时可恢复该快照；所有同时消费 live/durable 的 TUI/app/ACP store 只接受 strictly newer running，任何 existing terminal 不得被 running 覆盖，incoming terminal 无条件胜出 | 当前持久化格式、无 migration、daemon reconnect；Round 4 与 Round 11 evidence | TUI/app merge + ACP stale-durable green；terminal-after-running R16 red baseline |
+| INV-15 | ACP 对 `message.part.progress` 不写入完整 provider/model/tool-controlled Part 日志；已接受 completed/error terminal 后，任何旧 running progress/update 都不得重新发送 `in_progress` | R14 implementation audit B-01/B-02；ACP 是真实 live/durable consumer和 observability owner | current eval harness red；R16 public log/event tests red-green planned |
+
+## 8. Original First Divergence and Root Cause
+
+下表同时记录产生原始 red 的 pre-implementation divergence 与 R14 implementation audit 新确认的
+current divergences。R14 baseline 已替换 shell/LLM divergence；保留历史 owner 证据用于最终验证，
+不表示当前 shell 源码仍逐 chunk durable write 或 LLM 仍记录 raw error。
+
+| Invariant | First divergence | Owning module/interface | Proof |
+| --- | --- | --- | --- |
+| INV-02 | `ShellTool.onChunk` 把 transport chunk 直接转换为 durable `ctx.metadata` 更新，没有语义合并或有界 cadence | `packages/opencode/src/tool/shell.ts` / ShellTool progress policy | 40 个 CR redraw 产生 40 个净事务；静默基线 0 |
+| INV-02, INV-13 | `SessionPrompt.shellImpl` 把每个 direct shell chunk 直接转换为 durable `Session.updatePart` | `packages/opencode/src/session/prompt.ts` / public direct shell progress policy | source path `1498-1505` 无条件逐 chunk update；TUI/app 均调用公开 endpoint |
+| INV-07 | `LLM.run` 的 `onError` 将原始 unknown error 对象交给通用 object logger | `packages/opencode/src/session/llm.ts` / LLM observability callsite | 69 条超大 error 含 `requestBodyValues`，总计约 57.9 MB |
+| INV-01, INV-15 | ACP 将 `message.part.progress` 与 durable update 合并进同一个完整对象 INFO log callsite | `packages/opencode/src/acp/agent.ts` / ACP event observability seam | 50ms PartProgress 可达；logger 对累计 output object 完整 JSON 序列化；isolated log capture 是 R16 red seam |
+| INV-04, INV-14, INV-15 | ACP live/replay terminal 分支删除唯一 shell marker，下一条 running 被当成无历史 snapshot | `packages/opencode/src/acp/agent.ts` / ACP shell lifecycle state | independent channel late running 可达；现有 public ACP event test 可观察 terminal 后额外 `in_progress` |
+| SCOPE-01 | `ModelsDev.fetchAndWrite` 在每次成功 refresh 后直接完整覆盖，没有内容相等检查 | `packages/core/src/models.ts` / ModelsDev cache owner | 源码与本机 mtime 证明可达；用户同一 GOAL 逐路径授权 R16 保留该路径 |
+
+SQLite projector、WAL、checkpoint 和 TUI renderer 是 downstream amplifier/consumer，不是 shell
+热点的 first divergence。仅修改它们会保留 transport-chunk 驱动的错误语义。
+
+### Red-capable feedback loop
+
+在 initial baseline 的真实 opencode ShellTool 路径运行以下 PowerShell；它先测 700ms 静默
+基线，再输出 40 个终端重绘帧。净事务数超过 10 时以非零退出。下方结果是修改前实际 red；
+R16 frozen implementation baseline 尚未由已加载当前源码的 runtime 重跑该共享 DB loop，最终必须 green。
+
+```powershell
+function Read-WalIndex {
+  $p = 'C:\Users\Lenovo\.local\share\opencode\opencode.db-shm'
+  $fs = [System.IO.File]::Open(
+    $p,
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Read,
+    [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+  )
+  try {
+    $b = New-Object byte[] 136
+    $null = $fs.Read($b, 0, $b.Length)
+    [pscustomobject]@{
+      Change = [BitConverter]::ToUInt32($b, 8)
+      MaxFrame = [BitConverter]::ToUInt32($b, 16)
+      Salt1 = [BitConverter]::ToUInt32($b, 32)
+      Salt2 = [BitConverter]::ToUInt32($b, 36)
+    }
+  } finally {
+    $fs.Dispose()
+  }
+}
+
+$quietStart = Read-WalIndex
+Start-Sleep -Milliseconds 700
+$quietEnd = Read-WalIndex
+$before = Read-WalIndex
+for ($i = 1; $i -le 40; $i++) {
+  [Console]::Out.Write("`rOPENCODE_DISK_WRITE_REPRO $i/40")
+  [Console]::Out.Flush()
+  Start-Sleep -Milliseconds 15
+}
+[Console]::Out.WriteLine()
+[Console]::Out.Flush()
+Start-Sleep -Milliseconds 700
+$after = Read-WalIndex
+$quietDelta = [uint32]($quietEnd.Change - $quietStart.Change)
+$workloadDelta = [uint32]($after.Change - $before.Change)
+$netDelta = [int64]$workloadDelta - [int64]$quietDelta
+$frameDelta = if (($before.Salt1 -ne $after.Salt1) -or ($before.Salt2 -ne $after.Salt2)) {
+  [uint32]$after.MaxFrame
+} else {
+  [uint32]($after.MaxFrame - $before.MaxFrame)
+}
+[Console]::Out.WriteLine(
+  "DISK_WRITE_REPRO quiet_transactions=$quietDelta workload_transactions=$workloadDelta net_transactions=$netDelta wal_frames=$frameDelta"
+)
+if ($netDelta -gt 10) {
+  throw "RED: 40 terminal redraws caused $netDelta net SQLite transactions; budget is <=10"
+}
+```
+
+Observed result:
+
+```text
+DISK_WRITE_REPRO quiet_transactions=0 workload_transactions=40 net_transactions=40 wal_frames=40
+RED: 40 terminal redraws caused 40 net SQLite transactions; budget is <=10
+```
+
+### R16 ACP red-capable feedback loop
+
+2026-07-16 在 `packages/opencode` 运行 `bun --eval $script`；inline harness 只实例化真实
+`ACP.Agent`、公开 `global.event` async stream 和真实 core logger formatter，未创建或修改 repository
+文件。为避免 plan 阶段产生额外日志文件，该次诊断用 `Log.init({ print: true, level: "INFO" })`
+捕获 stderr；R16 slice 14 获批后将同一事件序列转为既有 `Log.file()` 临时目录测试。
+
+最小序列是：注册一个 ACP Session → 推送带唯一 marker 的 `message.part.progress v2` → 等待
+`in_progress` → 推送 completed PartUpdated → 等待 completed → 推送同 call 的 stale
+`message.part.progress v1`。command 以任一 marker 被 logger 完整序列化或 terminal 后 running
+重新打开时非零退出。实际结果：
+
+```text
+ACP_RED log_payload=true terminal_reopened=true in_progress_before=1 in_progress_after=2
+error: RED: ACP progress log payload=true, terminal reopened=true
+```
+
+该 loop 直接反证“producer close 顺序足以防止 ACP late running”的备选解释；fixture 中每个剩余
+元素都参与 Session registration、event handling、log output 或可观察 ACP update。load/fork replay
+terminal 是同一 owner 的第二个可达入口，R16 slice 15 在获批后通过 public `loadSession` seam
+单独建立 red，不用 private map assertion。
+
+该环境没有管理员权限运行 Windows WPR FileIO，因此 feedback loop 测量 SQLite logical
+transaction/WAL frame，而不是 NTFS/NVMe 最终物理写入字节。这个限制不影响“一帧一事务”
+根因判定，但最终报告不得把 WAL frame 伪称为物理 NAND 写入量。
+
+## 9. Responsibility and Seam
+
+| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
+| --- | --- | --- | --- | --- |
+| AI shell snapshot 内容 | `ShellTool.run` | TerminalDisplay、raw/truncate/model output | ShellTool 是 AI tool byte stream 的 first seam | shared coordinator 不应解释终端控制序列或模型 output |
+| direct shell snapshot 内容 | `SessionPrompt.shellImpl` | raw accumulated output、direct shell terminal/abort semantics | 公开 `session.shell` 在此直接消费 ChildProcess | ShellTool 不参与该 public path |
+| 两条 shell producer 的 cadence/version/flush | shared `ToolProgress` module | 一个 latest/version source 驱动彼此不阻塞的 50ms live 与 1s durable single workers，并在 close 统一确认/flush | 两个真实 adapter 需要相同复杂生命周期；Round 11 证明 single worker 把 durable latency 反压给 live | Session projector 不知道 chunk 语义；consumer 不应控制 producer cadence |
+| durable Tool Part 的提交和发布 | Session/SyncEvent | 原子保存权威 Part 并发布 `message.part.updated` | 这是现有 durable interface | UI 不应决定 DB 写入策略 |
+| reconnect 后 Session state 恢复 | TUI Session route + SyncProvider | `server.connected` 后从 daemon/SQLite 强制重拉当前 Session | 已有明确恢复流程 | ShellTool 不应实现 client reconnect |
+| live-only Tool progress 的跨 consumer 传递 | MessageV2 Session event contract | 显式 ephemeral `message.part.progress` 携带完整 running Tool Part | TUI/app 需要 revision 合并，ACP 需要 typed live snapshot | 不能只在 TUI 加平行实现，也不能把 SyncEvent 伪装成非持久化事件 |
+| 双通道 running snapshot 单调合并 | 各真实双通道 store owner：TUI/app/ACP | legacy=0；只接受 strictly newer running；terminal dominance | independent live/durable delivery 为避免反压允许跨-channel 到达乱序；store owner 才拥有当前已展示版本 | ToolProgress 不能等待 durable 来串行 live；run/share 只消费 durable，无需此状态 |
+| ACP live observability | `packages/opencode/src/acp/agent.ts` | progress event 不进入完整 Part log；既有低频 durable `message.part.updated` 诊断原样保留 | R14 新增 event branch 复用了完整 object log，直接落入 50ms path；通用 logger 不应承担 owner 级过滤 |
+| ACP terminal lifecycle | `packages/opencode/src/acp/agent.ts` | live/replay 接受 terminal 后保留 session-scoped marker，拒绝同 call 的 late running；pending/new lifecycle 与 closeSession 清理 | 同一 owner 接受两个 channels 及 load/fork replay，必须保持 terminal dominance 并清理新增 retained state | producer close 顺序不能约束独立 consumer 到达；TUI/app 不能修正 ACP protocol state |
+| LLM stream error 诊断摘要 | `LLM.run` observability callsite | 记录 provider 请求失败所需诊断，不改变错误传播 | 原始 AI SDK error 在这里首次进入日志 | 通用 logger 全局截断会改变所有模块日志合同，当前没有全局需求证据 |
+| models.dev cache no-op 写入 | ModelsDev service | 保持本地模型目录新鲜 | fetch/compare/write 都由该 service 拥有 | 文件系统层不知道内容语义 |
+
+## 10. Single Primary-Path Design
+
+### 10.1 Shell progress
+
+```text
+producer-specific child bytes
+  -> ShellTool TerminalDisplay snapshot OR direct-shell accumulated raw snapshot
+  -> shared ToolProgress latest metadata + monotonic progressVersion
+  -> latest-wins delivery coordinator
+       -> <= 50ms: ephemeral message.part.progress
+       -> leading + <= 1s: durable message.part.updated checkpoint
+  -> drain output
+  -> cancel both delivery workers + flush the same latest snapshot
+  -> existing completed/error PartUpdated terminal state
+```
+
+1. 在 `Tool.Context.metadata` 的现有 interface 上增加可选命名参数
+   `{ delivery?: "durable" | "ephemeral" }`；缺省值保持 `durable`，所有现有 Tool 行为不变。
+   不新增第二个 progress method，也不为测试创建 adapter。
+2. `SessionProcessor.updateToolCall` 对同一个 Part updater 接受 delivery：
+   - durable 仍调用 `Session.updatePart`，执行现有 SyncEvent transaction/projector/publish。
+   - ephemeral 调用新的 `Session.publishPartProgress`，只发布 BusEvent，不写 SQLite/EventSequence。
+3. `MessageV2.Event.PartProgress` 定义为显式 BusEvent `message.part.progress`，properties 复用
+   `{ sessionID, part, time }` 的完整 Part snapshot shape。不得直接 Bus-publish
+   `PartUpdated`，因为该 definition 当前明确属于 SyncEvent；混用会破坏 durability interface。
+4. 新增一个 shared `ToolProgress` module；其小 interface 只接收 producer 已生成的 metadata
+   snapshot 和两个 delivery adapters，不读取 chunk、不解释 ANSI/CR、不组装 final output。
+   module 统一维护 `progressVersion`、latest state、两个 delivery workers 和 close/flush；interface
+   不变，不增加第二套 snapshot、版本源或 producer algorithm。
+5. ShellTool 保持唯一 TerminalDisplay。只有可见 snapshot 真正变化时调用 shared module；raw
+   output、truncate file、diagnostic collector 和最终 model output 不经过 progress 合并，因此
+   不丢字节。ShellTool 的 adapters 分别调用 ephemeral/durable `ctx.metadata`。
+6. `SessionPrompt.shellImpl` 保持现有 `output += chunk` raw snapshot 和 completed/abort output；
+   每个变化改为调用同一 shared module。其 adapters 分别调用
+   `Session.publishPartProgress`/`Session.updatePart`，不复制 cadence/version/timer 实现。
+7. shared coordinator 隐藏两种 delivery 的 cadence：
+   - live：第一次变化立即发布，持续变化采用 latest-wins、相邻发布至少 50ms，并保证 trailing snapshot。
+   - durable：静默后的第一次变化立即 checkpoint；持续变化相邻 checkpoint 至少 1s；结束时若 latest version 尚未落库则同步 flush。
+   - live 与 durable 各有一个 sliding wake signal 和一个 single worker；两者只读取同一 latest/version，
+     各自只拥有 cadence marker，不按 chunk 排队，也不复制 snapshot 或终态算法。
+   - 两个 workers 不共用 delivery permit：durable transaction/publication 延迟时，live worker 仍可在
+     自己的 50ms cadence 交付最新版本。由此允许旧 durable running 在较新 live 后到达，所有真实
+     双通道 store owner 必须按 `progressVersion` 拒绝 stale/equal running；durable-only consumers仍由
+     single durable worker 保证自身顺序。
+   - 每个 worker 从临近 delivery 前重读 latest、等待自己的 adapter 完成到更新自己的 version marker
+     形成不可中断确认区；尤其 SQLite commit 后的 Bus publication 与 durable marker 之间不能被 close
+     切开。sleep、Queue.take 和 delivery 外调度仍可中断，不把 subscriber 业务纳入 coordinator。
+   - 短于 1 秒的命令最多形成 initial、leading、必要 trailing 三个 running durable snapshots；
+     如果 latest version 已持久化，close 不制造重复 trailing write。
+8. coordinator 使用 Effect scope/fiber/queue；normal、error、abort、timeout 和 scope interruption
+   都执行同一个幂等 close/flush。close 同时停止并等待两个 workers 的上述确认区，再按同一 latest
+   分别 flush pending live/durable；返回后才允许 processor 写 completed/error。durable marker 在 owner
+   防止重复 SQLite transaction；consumer version merge 只处理两个必要 channels 的到达乱序，不能用来
+   掩盖 duplicate durable producer write 或控制 cadence。
+9. `SyncEvent.run/replay` 的 transaction/publish 生命周期在 sync owner 修正：transaction 内只
+   投影/持久化并返回 event；commit 后在当前 Effect 中等待 `convertEvent` 和 typed Project Bus
+   publication 入队，再同步发出 GlobalBus envelope，最后才让 `run/replay` 返回。不得继续用
+   `Effect.runPromise` fire-and-forget，也不得把 subscriber 的业务处理放回数据库 transaction。
+   “等待 publication”只覆盖 `Bus.publish` 的 typed/wildcard/GlobalBus 入队，不等待 ShareNext、
+   ACP 等 subscriber 完成网络或业务处理，避免把慢 consumer 反压到 SQLite writer。
+10. `progressVersion` 保存在 running shell 的 `state.metadata` 中，并同时出现在 live event 与
+   durable Part。两个新 producer 的 initial running snapshot 显式使用 version 0，首个真实
+   output/display 变化使用 version 1。TUI、app 与 ACP 三个同时消费 live/durable 的 running shell
+   store 使用以下唯一归一化/比较合同：
+   - 缺失、非有限数、非整数或负数统一归一化为 legacy version 0，不修改 SQLite 旧数据。
+   - 本地无该 Part 时接受 incoming legacy running snapshot，使升级后的 client 仍能显示最近
+     持久化状态；后续 version > 0 live/checkpoint 可正常前进。
+   - existing/incoming 都是 running 时，只接受严格更高 version；相等或更低版本保持 existing。
+   - 较旧的 initial/checkpoint/reconnect snapshot 不覆盖较新的 live progress。
+   - completed/error 等 terminal PartUpdated 无条件胜出；terminal 后的 PartProgress 被忽略。
+11. 当前 Session route 的 `server.connected -> session.sync(force)` 不变。新 client 从 SQLite
+   得到不超过 1 秒陈旧的 checkpoint；已有 client 若先收到更新 live progress，则 monotonic
+   merge 保留较新版本。
+12. TUI 接受 PartProgress 并复用既有 Part store。app 新增一个被 SSE event reducer 与
+   `sync.tsx#loadMessages` HTTP response 共同调用的 Part snapshot merge module；该 module
+   对 running shell 比较 `progressVersion`、保证已有 terminal 不被 incoming running 覆盖，
+   incoming terminal 仍无条件胜出。它是同一 store 的唯一 Tool Part 合并 interface，不是
+   SSE 与 HTTP 两套 guard。
+13. ACP 接受同一 PartProgress event 并继续发送 `tool_call_update`；其现有 `shellSnapshots`
+   display owner 同时保存已接受的 normalized version 和 terminal marker，在发送前拒绝 stale/equal
+   running 以及 terminal 后所有 running。marker 的 identity 是不可碰撞的 `(sessionID, callID)` composite
+   key；公开 `callID` 没有跨 Session 全局唯一保证，因此 running、pending、terminal、`toolStarts` 去重
+   和 close cleanup 必须使用同一 composite key。live event handler 与 load/fork `processMessage` 的 completed/error
+   入口都设置 terminal marker；replay running 在发送前也登记同一 normalized version，并拒绝已有
+   terminal 或较新 marker，避免 replay 与 event transport 互相回退。pending 清理同 Session 的新
+   lifecycle，`closeSession` 清理该 Session 的 retained markers，避免新增状态越过 Session 生命周期。
+   不新增 public API 或第二套状态机。ACP 对 `message.part.progress` 跳过现有完整 event properties
+   INFO log，既有低频 `message.part.updated` log 原样保留；不修改通用 logger。它不控制 producer
+   cadence、不去重 SQLite transaction，也不成为 terminal owner。`opencode run`、share 和 GitHub
+   integrations 只消费 ordered durable PartUpdated，无需跨通道 merge。focused tests 必须覆盖 progress
+   log absence、stale running、cross-Session marker/start isolation、replay running version 和 live/replay
+   terminal dominance；close cleanup 无稳定公共输出，由 source diff、全文件 ACP regression 与
+   typecheck 验证，不测试 private map。
+14. SDK 按仓库命令重新生成，使新 event 成为 typed GlobalEvent。generated diff 不计 1200 行，
+    但必须纳入 typecheck 和实现审计。
+
+这条 route 修复 first divergence：transport chunk 在 ShellTool owner 处先归并为一个语义
+snapshot，再按已对齐的 realtime/recovery delivery 合同投递；projector 不猜测、不丢弃事件。
+
+### 10.2 LLM stream error logging
+
+```text
+AI SDK onError({ error })
+  -> bounded LLM callsite tags
+  -> no raw INFO/repair extras
+  -> APICallError.isInstance type guard
+  -> fixed safe strings + numeric status/retry/responseBytes
+  -> ordinary bounded ERROR file log
+  -> original fullStream error event continues unchanged to SessionProcessor
+  -> existing processor error case throws the user-visible failure
+```
+
+1. 只在 `LLM.run` observability callsite 替换 raw-object logging，不修改通用 logger 的全局合同。
+2. 日志永不包含 `requestBodyValues`、prompt、messages、tools、credentials 或完整 error object。
+3. `LLM.run` 创建 logger tags 时即按 UTF-8 bytes 限制 providerID=128、modelID=256、
+   sessionID=128、agent=128、mode=32；`small`、service 和 log messages 是固定值。全部 tags、key
+   separators、固定 summary、timestamp/level/message/newline 的结构性上限低于 8 KiB；不修改通用
+   logger 或业务 ID。
+4. 同一 `l` 的三个 callsites 全部闭合：`l.info("stream")` 不再传 raw provider/model extras；
+   `l.info("repairing tool call")` 不再传 model-generated tool-name extras；`l.error` 只接收下项安全摘要。
+   `toolLog` workflow timing 是另一既有 service/path，未出现在 observed HTTP error producer 且不由
+   本 revision 修改。
+5. 只处理 AI SDK 已证实的 `{ error }` envelope。`APICallError` 分支的 name/message 是代码内固定
+   literal（不是 provider-derived `error.name`/`error.message`），另只记录 statusCode、isRetryable
+   和 response body 原始 UTF-8 byte count；非该类型只记录固定
+   `UnknownError`/`Provider stream failed`。不记录外部 error message、URL、response preview、cause
+   或任意 object traversal，因此 provider 回显 request/prompt/tool/credential 也不能进入日志。
+6. 由于所有 summary strings 固定、数值字段有界且 tags 已限长，不再需要 serialized budget
+   fallback。新增 decision surface 最多为 APICallError type guard、optional responseBody byte count
+   与 UTF-8 tag cap 三项。R9 total70 去掉旧 diagnostic23、加入最多3后为50，比例最多
+   `3/50=6%`；不得增加第二 parser、递归 walker 或失败后备用日志。
+7. `onError` 的原始参数不被 mutate、replace、catch 或 swallow；真实 HTTP failure 仍在
+   `LLM.Service.stream` 中产出 `{ type: "error", error }`，底层 Stream 正常结束，随后现有
+   `SessionProcessor` error case 抛出该 error 并进入 `MessageV2.fromError` / SessionRetry。
+   不能为了测试把底层 Stream 改成失败，这会改变既有 AI SDK/processor responsibility。
+
+### 10.3 Deliberately unchanged
+
+- 完成态 `state.output` / `state.metadata.output` 双存储保持不变。
+- `models.json` 60 分钟 refresh 保持不变。
+- SQLite WAL/synchronous/checkpoint、schema 和 migrations 保持不变。
+- daemon 崩溃后不续跑原 OS 子进程。
+
+## 11. Secondary and Replacement Path Inventory
+
+| Path | R16 exact state | Classification | Produces success? | Decision-surface share | Disposition |
+| --- | --- | --- | --- | --- | --- |
+| ShellTool 单 snapshot 双 delivery | implemented candidate | primary-contract branch | yes | 100% of new shell progress decisions | retain and verify |
+| direct shell raw snapshot 复用同一 ToolProgress delivery | implemented candidate | supported-domain branch | yes | same primary contract | retain and verify |
+| shared latest/version 下独立 live/durable single workers | implemented R14 baseline | primary-contract delivery branches | yes | same primary contract | retain；focused non-starvation green，full verification pending |
+| ACP complete progress object log | R16 correction planned | observability side effect | no | 1 diagnostic decision；high write path | bypass only for `message.part.progress`；preserve durable log/global logger |
+| ACP terminal marker deletion | R16 correction planned | lifecycle defect | no | 0% success surface | retain session-scoped marker through pending/close cleanup；reject late running |
+| 每 chunk durable `ctx.metadata` | initial baseline；removed in candidate | superseded behavior | yes | initial 100% | verify absent |
+| `message.part.delta` 文本/reasoning 流 | current | supported-domain branch | yes | unchanged | preserve；其 append field shape 不承载 replace 型 Tool snapshot |
+| `server.connected -> session.sync -> DB Part` | current | existing recovery path | yes | unchanged | preserve |
+| SyncEvent transaction 后 fire-and-forget publication | initial baseline；removed in candidate | superseded ordering behavior | yes | initial durable events | verify after-commit awaited publication |
+| pure ephemeral shell progress、无 durable checkpoint | rejected | forbidden by explicit reconnect requirement | yes | 0% | reject |
+| 全部 progress 每 50ms durable | rejected | violates write-lifetime requirement | yes | 0% | reject |
+| 全部 progress 每 1s durable | rejected | violates realtime requirement | yes | 0% | reject |
+| 修改 SQLite synchronous/WAL/checkpoint | rejected | forbidden workaround | yes | 0% | reject |
+| retention/DELETE/VACUUM | rejected | forbidden workaround | yes | 0% | reject |
+| bounded LLM diagnostic | implemented R14 baseline | diagnostic only | no | 3 decisions | retain and verify；no R16 material change |
+| 完整 LLM error object | removed in R14 baseline | diagnostic | no | superseded | verify absent |
+| models cache equality skip | explicitly excluded from this GOAL by named user scope decision | separate write path | yes | 0% | preserve unchanged |
+
+新 alternate success path为 0。R16 diagnostic decision surface target <=4 decisions（LLM 3 + ACP
+progress bypass 1）且 <=10%；最终按 implementation diff 和 changed production surface 复算。
+
+## 12. Workaround Deletion and Replacement
+
+| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
+| --- | --- | --- | --- |
+| 每 chunk 重写完整 running Part 来同时满足实时显示和 reconnect 恢复 | 当前只有一个 durable metadata channel | 同一 snapshot 的 explicit live/durable delivery 分别满足 50ms/1s 合同 | `packages/opencode/src/tool/shell.ts:1097-1162` |
+| live/durable 共用 worker/permit 以强制跨通道发布顺序 | R9 candidate 为避免 stale durable 在较新 live 后到达 | 该顺序把 durable I/O latency 反压给 live；R14 由独立 workers 保体验，并由既有 version contract 在真实双通道 store 合并 | `packages/opencode/src/tool/progress.ts`；ACP existing `shellSnapshots` owner |
+| ACP live progress complete-object logging | R14 candidate reused an existing event log for both event types | full `event.properties` is provider/model/tool-controlled cumulative output and reaches file logger at 50ms cadence | bypass log only for PartProgress；preserve existing PartUpdated diagnostic and global logger |
+| ACP terminal lifecycle marker | R14 version marker was deleted in live/replay terminal branches | independent channels can deliver stale running after terminal; a deleted marker makes the consumer forget terminal dominance | existing ACP shell snapshot owner retains session-scoped terminal state through pending/close cleanup；TUI/app cannot repair ACP protocol state |
+| 完整序列化 stream error 以保留诊断 | 通用 logger 对 object 使用 JSON.stringify | 已证明会写入大型 request body；bounded semantic fields 足以诊断且不影响错误传播 | `packages/opencode/src/session/llm.ts:359-364` |
+
+完成态双输出和 models cache 不是 workaround，本 revision 明确保留。
+
+## 13. Forward Traceability
+
+| Requirement or invariant | Production path | R16 file/change baseline | Behavioral test |
+| --- | --- | --- | --- |
+| REQ-01, INV-01-02, INV-13 | ShellTool TerminalDisplay + direct-shell raw snapshot -> shared latest/version -> independent live BusEvent / durable SyncEvent workers | `tool/progress.ts`, `tool.ts`, `shell.ts`, `prompt.ts`, `processor.ts`, `session.ts`, `message-v2.ts` | delayed durable 时 live 继续前进 + ShellTool/direct execute budget/final semantics |
+| INV-03, INV-14 | durable/legacy running checkpoint -> TUI/app forced session sync | TUI `sync.tsx` + app shared Part merge module and HTTP `sync.tsx` | legacy v0 可初次恢复；live v1 后 stale/missing-version checkpoint 不回退；terminal 不被 legacy running 覆盖 |
+| INV-04 | each worker uninterruptible delivery+marker confirmation + close joins both + awaited SyncEvent publication -> terminal PartUpdated | `tool/progress.ts`, `shell.ts`, `sync/index.ts`, TUI/app/ACP/ShareNext | sustained checkpoint/close overlap 不重复 durable version；delayed running 不覆盖 completed/error |
+| INV-05 | existing raw/truncate/final output path | `shell.ts` 只在 display delivery seam 改动 | existing shell truncate/abort/timeout tests + integration final output literal |
+| INV-06, INV-14, INV-15 | PartProgress -> TUI/app/ACP；durable PartUpdated -> all；双通道 stores 按 version/terminal merge；ACP progress bypasses full log while durable log is preserved；live/replay terminal marker survives until pending/close cleanup；run/share/GitHub 保持 durable-only | SyncEvent owner、TUI/app merge、`acp/agent.ts` lifecycle/observability owner、generated SDK | SyncEvent order、TUI/app merge、ACP isolated Log.file capture + newer-live/stale-durable + live/replay terminal dominance、ShareNext focused tests；既有 run regression |
+| INV-07 | bounded LLM tags + no raw extras + safe numeric error summary；original fullStream error event -> SessionProcessor failure unchanged | `session/llm.ts`；processor 不改 | HTTP500 + long IDs + response echo: error event保留；all `service=llm` lines <=8KiB/no marker |
+| INV-08 | DB/daemon config | no production change expected | existing package tests and typecheck |
+| SCOPE-01 | ModelsDev refresh | no change in R16 | Not applicable；用户在同一 GOAL 逐字授权保留每小时未变化全量覆盖；R16 stable scope contract |
+| INV-10 | completed/interrupted metadata consumers | no shape change | existing shell renderer/message conversion regressions |
+| INV-11 | daemon crash does not resume child | no new path | Not applicable；absence enforced by diff/reverse mapping |
+| INV-12 | total implementation <=1200 lines | all changed production/tests/config | implementation evidence line accounting + audit |
+
+## 14. Reverse Traceability
+
+| Production concept | Requirement ID | Evidence | Why pre-implementation logic could not carry it |
+| --- | --- | --- | --- |
+| `metadata` delivery option | INV-01-03 | 同一 Tool snapshot 需要 live 与 recovery delivery；现有 method 只承诺 durable | 不加第二个 method，保持现有调用缺省 durable |
+| `message.part.progress` BusEvent | INV-01, INV-06 | 50ms live 不得写 DB；PartUpdated 是 SyncEvent | 现有 delta 是 append-only text/raw，不能表达 replace 型 Tool snapshot |
+| Shell progress coordinator | INV-01-04 | 50ms/1s 双 cadence、trailing flush 和 scope cleanup | initial onChunk 每次直接 await durable metadata，没有 latest state 或 lifecycle owner |
+| shared generic metadata-snapshot coordinator | INV-13 | ShellTool 与 direct shell 两个真实 producer 需要相同 cadence/version/flush，但 snapshot 内容不同 | 只在 ShellTool 内实现会让 public `session.shell` 继续逐 chunk 写；复制两套 coordinator 会臃肿并漂移 |
+| `progressVersion` | INV-03-04 | progress 可早于 initial event；reconnect checkpoint 可比 live state 旧 | output 长度对 CR/clear-screen 不单调，不能可靠判断新旧 |
+| legacy progressVersion normalization | INV-03-04, INV-14 | SQLite 旧 running Part 的 metadata 可缺失版本，且 R14 不做 migration | 不归一化会让双通道 store 对旧 snapshot 各自猜测，产生回退或显示分裂 |
+| TUI/app/ACP consumer monotonic merge | INV-03-04, INV-06, INV-14 | TUI/app 的 HTTP/SSE 与 ACP 的 independent live/durable snapshots 都可乱序 | producer若等待 durable 来控制到达顺序会阻塞 live；每个真实 store owner 必须执行同一版本合同 |
+| app shared Part snapshot merge module | INV-03-04, INV-06 | event reducer 与 `loadMessages` 无条件替换同一 Part store；Round 1 B-01 | 只修 reducer 会让后到 HTTP response 绕过版本/terminal 合同；两个真实 adapter 证明该 seam 必须共享 |
+| after-commit awaited SyncEvent publication | INV-04, INV-06 | Round 2 B-01；`Database.effect` 丢弃 publish Promise | 当前 `run/replay` 只保证 transaction 完成，无法保证下一次 terminal event 排在 trailing running publication 之后 |
+| independent delivery workers + uninterruptible acknowledgement | INV-01-04 | R11 duplicate-write race + R13 Round 11 live starvation；durable adapter latency 与 live cadence 是两个独立 boundary | single shared permit 会阻塞 live；普通 interrupt 又可把已提交 durable delivery 与 marker 分开；两个 single workers共享 latest/version但各自确认 delivery |
+| ACP monotonic shell snapshot merge | INV-04, INV-06, INV-14 | ACP 是唯一尚无 version merge 且同时消费 PartProgress/PartUpdated 的 realtime consumer | hash 只能判断相同文本，不能拒绝较新 live 后到达的旧 durable output；producer若串行等待会重新制造 live starvation |
+| ACP progress observability boundary | INV-01, INV-07, INV-15 | `message.part.progress` is a high-frequency live event；当前 ACP log callsite receives full properties | 只有 ACP owner 知道 event type；preserving existing durable log while bypassing progress cannot be carried by global logger |
+| ACP session-scoped terminal lifecycle marker | INV-04, INV-14, INV-15 | R14 live/replay terminal branches delete the only marker before independent late running can arrive | version merge treats a no-marker running event as new；retained marker needs Session identity so closeSession can clean the new lifecycle state |
+| structurally bounded LLM logs | REQ-01, INV-07 | 69 条 raw errors约57.9MB；R12 B-02 response echo；R12 B-03 INFO extra bypass | R9 只限制 ERROR summary；R14 caps tags、删除全部 raw `l` extras、只保留固定字符串与数值字段 |
+
+不新增 config flag、schema migration、dependency、跨进程 process supervisor、全局 logger policy 或
+第二套 TerminalDisplay。
+
+## 15. File-Level Change Plan
+
+| File | R19 state | Exact responsibility of the change | Current gross delta / remaining cap |
+| --- | --- | --- | --- |
+| `packages/opencode/src/tool/tool.ts` | implemented candidate | metadata delivery option and sanitizer forwarding | +4/-2 |
+| `packages/opencode/src/tool/progress.ts` | implemented R14 baseline | one latest/version source + independent live/durable single workers + per-worker uninterruptible delivery confirmation + joined close/flush | current added file 113 lines；frozen in R16 |
+| `packages/opencode/src/tool/shell.ts` | implemented candidate | TerminalDisplay snapshot adapter、replace per-chunk durable call、flush shared coordinator | +56/-57 |
+| `packages/opencode/src/session/prompt.ts` | implemented candidate | metadata delivery forwarding + direct shell raw snapshot adapter/flush shared coordinator | +26/-5 |
+| `packages/opencode/src/session/processor.ts` | implemented candidate | route durable update vs ephemeral publish without duplicate state algorithm | +8/-1 |
+| `packages/opencode/src/session/session.ts` | implemented candidate | publish typed PartProgress BusEvent without persistence | +16/-0 |
+| `packages/opencode/src/session/message-v2.ts` | implemented candidate | define explicit ephemeral PartProgress schema | +11/-0 |
+| `packages/opencode/src/sync/index.ts` | implemented candidate | transaction 后在当前 Effect 中等待 typed Bus/Global publication，建立 durable event 顺序合同 | +75/-68 |
+| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | implemented candidate | consume/insert progress；legacy=0 normalization；monotonic running merge；terminal dominance | +28/-11 |
+| `packages/app/src/context/global-sync/event-reducer.ts` | implemented candidate | same progress/revision contract for app store | +15/-7 |
+| `packages/app/src/context/global-sync/part-merge.ts` | added candidate | app SSE/HTTP 共用的 legacy=0、progressVersion 和 terminal merge interface | +50/-0 |
+| `packages/app/src/context/sync.tsx` | implemented candidate | `loadMessages` 应用 fetched Part 时通过 shared merge，而非无条件覆盖 | +6/-1 |
+| `packages/opencode/src/acp/agent.ts` | R19 correction planned | retain composite `(sessionID, callID)` identity；register/reject replay running；在 `toolStart` 发送 synthetic pending 前拒绝 terminal marker，pending 只清理 non-terminal marker；删除当前 working-tree 中多余的 retained-start/pre-branch 实现 | 只修改既有 ACP owner；目标净减少当前 working-tree effective lines |
+| `packages/opencode/src/session/llm.ts` | implemented R14 baseline | capped tags、no raw `l` extras、fixed literal strings + status/retry/responseBytes；no external text/fallback/parser | frozen in R16 |
+| `packages/opencode/test/tool/shell.test.ts` | implemented R14 baseline | short budget/final semantics + delayed durable does not block live + checkpoint publication/close overlap has no duplicate version | current <=105 added lines；frozen in R16 |
+| `packages/opencode/test/session/prompt.test.ts` | green candidate | public direct `SessionPrompt.shell` raw snapshot/write-budget/terminal integration | +46/-0 |
+| `packages/opencode/test/sync/index.test.ts` | green candidate | `run/replay` 不在 delayed publication 入队前返回，连续 events 保序 | +52/-3 |
+| `packages/opencode/test/cli/cmd/tui/sync.test.tsx` | green candidate | legacy v0 recovery、progress-before-initial、stale reconnect、terminal dominance | +92/-0 |
+| `packages/app/src/context/global-sync/event-reducer.test.ts` | green candidate | app monotonic progress and terminal behavior | +52/-0 |
+| `packages/app/src/context/global-sync/part-merge.test.ts` | added green candidate | legacy v0 首次恢复、较新 SSE progress/terminal 先到、旧 HTTP running 后到 | +76/-0 |
+| `packages/opencode/test/acp/event-subscription.test.ts` | R19 correction planned | public Log.file progress absence、Session+call isolation、replay version、terminal 后完整 lifecycle update 数为零；压缩重复 terminal matrix/assertion 而不减少两个真实入口 | 既有 test owner；最终 full file 必须 green |
+| `packages/opencode/test/session/prompt.test.ts` | R19 exact rollback | queued-loop 两处恢复 R16 原始 `Effect.sleep(50)` 与 `10_000`；不新增 readiness 设计、不修改 production | 相对 R16 baseline 无 material change |
+| `packages/opencode/test/share/share-next.test.ts` | unchanged | 既有 keyed coalescing 已满足 ordered durable terminal；删除 characterization-only diff | final implementation diff 为零 |
+| `packages/opencode/test/session/llm.test.ts` | implemented R14 baseline | long legal IDs + response echo marker + error event preservation + every `service=llm` line byte/content cap | frozen in R16 |
+| `packages/sdk/js/src/v2/gen/types.gen.ts` | generated candidate | repository generator 输出 typed event union，包括 `EventMessagePartProgress` | actual textual generated diff +593/-581；excluded from cap |
+
+当前 R14 exact gross additions 为1118：20 个 tracked hand-written files 共879，untracked
+`tool/progress.ts`/app merge source/test 分别113/50/76；plan/generated/无关 submodule 排除。
+不含 plan/generated/无关 submodule。R19 只允许在现有 ACP owner/test 内完成 identity、replay 和
+terminal-before-pending correction，并把 prompt test 精确回退到 R16 baseline；预计总量仍不得超过
+`E+C<=1200`。不新增 helper file、公开接口、配置、migration 或 fallback。若 verification 需要修改
+未列 production/test 文件、gross route 接近1200或 E/C 分类失效，必须停止、递增 revision 并 full-scope re-audit。
+
+## 16. TDD Behavior Slices
+
+Confirmed seams：ShellTool public `execute`、`SessionPrompt.shell`、SyncEvent `run/replay`、typed
+MessageV2 events、TUI SyncProvider、app shared Part merge + `loadMessages`、ACP event stream、
+ShareNext Bus subscriber 和 `LLM.Service.stream`。用户在 grilling 后授权按该设计进入流程。
+测试不接触 private coordinator/helper，也不 spy 内部函数调用次数。
+
+R14 的 exact baseline 包含已完成且已被 implementation audit BLOCK 的 slices 1–13；R16
+计划只修复 ACP logging 与 terminal lifecycle slices；R19 只补齐 full-scope audit 证明的
+ACP Session identity、replay version 与 terminal-before-pending first divergence。表中的 red
+结果是本 Session 在写入对应 green 前实际运行并保存的历史证据；R9 worktree 是 green
+behavior candidate 但被 complexity audit block，不要求回退 production 来重复制造 red。
+slice 10 的 behavior 已按 corrected error-event seam red→green；R14 收敛 decision surface 并补齐全部 `l` callsite 行预算与内容边界。
+
+| Order | Current R16 baseline | Actual red / current evidence | Remaining action after approval | Regression protected |
+| --- | --- | --- | --- | --- |
+| 1 | implemented, focused green | red: `Received: 41`, expected `<=3`; green: 1 pass/5 assertions；related shell lifecycle 28 pass | 不再 material change，除非 verification/audit finding 要求 rework | AI tool 原始热点、体验、final semantics |
+| 2 | implemented, focused green | red: 41 running durable events；green: 1 pass/6 assertions | 不再 material change；最终 rerun direct shell regressions | Round 3 B-01；TUI/app public shell hotspot |
+| 3 | implemented, full focused suite green | red: sequence pending expected true, received false；green focused 1 pass，SyncEvent full 12 pass | 不再 material change | Round 2 B-01；所有 durable consumers 的不可绕过顺序保证 |
+| 4-5 | implemented, TUI full suite green | red: timed out waiting for v1 progress；green focused 1 pass，TUI full 16 pass | 不再 material change | legacy recovery、HTTP/SSE reorder、terminal stability |
+| 6-7 | implemented, app focused suite green | red A: missing `part-merge` module；red B: reducer retained v1 instead of v2；green: app merge/reducer 20 pass | 不再 material change | Round 1/4 B-01；GUI/TUI parity、HTTP snapshot 不回退 |
+| 8 | implemented, ACP full suite green | red: final bash progress `ab` never arrived；green focused 1 pass，ACP full 12 pass | 不再 material change | ACP realtime behavior 与 ordered terminal |
+| 9 | characterization test green，production unchanged | 新真实 Bus test 首次即 pass；ShareNext full 8 pass，证明既有 keyed coalescing 已满足合同 | 保持 production 不变 | ordered running→terminal 只同步 terminal Part |
+| 10 | implemented green | R14 red/green：long IDs、response echo、whole-line inspection；LLM 22 pass | no further material change | LLM error event、no external text、complete callsite line budget |
+| 11 | implemented green | R14 red/green：duplicate durable `[1,2,2]` → `[1,2]` | no further material change | duplicate SQLite transaction、terminal ordering |
+| 12 | implemented green | R14 red/green：delayed durable timeout → live v2 before release | no further material change | live experience under durable latency |
+| 13 | implemented green but audit-found gaps remain | R14 red/green：stale durable rejected；R14 audit B-01/B-02发现 ACP full log与terminal marker缺口 | R16 approval 后新增 slices 14-15 | cross-channel observability and terminal dominance |
+| 14 | current eval harness red | stderr capture 已观察唯一 progress marker；R16 test 改用公开 `Log.init`/`Log.file` 临时目录并等待 ACP update，当前完整 event log 必然出现 marker | R16 approval 后只让 PartProgress bypass merged full-object INFO call；原样保留 durable PartUpdated log并在 finally恢复 logger；assert ACP update 仍到达而 marker 不落盘 | B-01 high-frequency ACP disk write without losing live behavior or durable diagnostic |
+| 15 | live completed harness red；full table red planned | current eval observed completed→late progress reopens `in_progress`；获批后在同一 public ACP seam table-drive completed/error × live event/loadSession replay 四个真实 terminal 入口 | 一个 session-scoped marker contract覆盖 event handler/processMessage；pending 开新 lifecycle，closeSession清理 retained state；all four assert no post-terminal update | B-02 live/reconnect terminal dominance and retained-state lifecycle |
+| 16 | red-capable source/test seam: two ACP Sessions sharing a `callID` shared terminal/start state | public ACP event stream uses same call ID in two registered Sessions；A v2 与 B v1 都必须产生各自 pending/progress | composite Session+call identity across both lifecycle stores and close cleanup；no public API or fallback | ACP Session lifecycle isolation |
+| 17 | red-capable source/test seam: replay running v2 did not register version before delayed live transport | public `loadSession` replay v2 后输入同版 v2 与较新 v3 | replay running复用 normalized strict-newer/terminal marker；expected visible output固定为 replay与v3，不含同版 stale | ACP replay monotonicity |
+| 18 | terminal 后 late running 先发送 synthetic pending，再被 marker 拒绝 in_progress | completed 走 live、error 走 replay；两者之后发送更高 running 并观察该 call 全部 lifecycle updates | `toolStart` 在发送 pending 前拒绝 terminal marker；terminal 后完整 update slice长度为0 | ACP terminal 不得被 pending重新打开 |
+
+Slice 10 的 R14 red fixture 在现有 provider config 中使用约3KiB providerID、3KiB modelID 与
+3KiB agent name，并让 provider response body 回显 request marker。测试收集该失败请求产生的
+全部 `service=llm` lines，而非只选择 ERROR：每行 UTF-8 bytes `<=8192`，均无 marker/
+`requestBodyValues`；stream 正常结束且 error event 仍保留 marker。测试不读取 private helper 或
+复制 production cap algorithm。
+
+Slices 1/2 的 durable event 数是用户可观察的 SyncEvent/transaction budget，不是 private
+helper call count；expected upper bound `<=3` 来自已对齐的 initial/leading/trailing cadence，
+而不是复制 production algorithm。slice 10 继续按 corrected red -> minimal green -> regression；
+ slices 1–15 的历史 red/green 与当前 diff 一并交给最终 implementation audit；R19 slices 16–18
+使用同一公开 ACP event/loadSession seam。queued-loop 测试不是 R19 slice，精确回退到 R16 baseline；
+固定 sleep 只保留历史测试合同，不再被描述为新的 readiness 证据。
+
+## 17. Chinese Comment Budget
+
+| Metric | R19 current / cap | Method |
+| --- | --- | --- |
+| Historical gross hand-written additions | 1060 R9 baseline | includes code/comments/imports；generated/plan excluded |
+| Effective changed code lines `E` | R9 audit: 804 | independent audit excluded 47 pure-move lines from conservative 851 |
+| Qualifying Chinese explanatory comments `C` | R9 audit: 126 | independent audit excluded 2 pure-move comment lines from conservative 128 |
+| Historical R9 gate result | `E+C=930 <=1200` and `C/E=15.67%` | historical line/comment gate only；cannot replace R16 actual calculation |
+| R14 frozen baseline | `E=896/C=138/gross=1118` | gross exact：tracked879 + untracked239；E/C conservative and must be recalculated；R9 pure-move adjustment is not release evidence |
+| Current pre-R19-simplification `E/C` | `E=1049/C=160/total=1209` | exact read-only diff count证明当前 working tree尚未通过，不能提交 |
+| R19 final `E` | <=1040 | 将 terminal guard收敛到既有 `toolStart`/pending branch，并删除 retained-start/pre-branch重复状态；ACP test压缩重复 assertion |
+| R19 minimum `C` | >=156 | `ceil(1040*0.15)=156`；保留 identity、replay、terminal-before-pending 与测试意图邻近解释 |
+| R19 final total | <=1199 | hard gate；若实际 recount超过1200则停止，不提交或审计 implementation |
+| R16 diagnostic gate | target `<=4 decisions` and `<=10%` | LLM 3 + ACP event-kind bypass 1；no parser/fallback；final decision surface must be recalculated |
+
+已确定需要邻近解释的非显然边界：
+
+- realtime update 与 durable recovery checkpoint 的不同责任。
+- cadence 常量为何同时满足体验和写入预算。
+- trailing flush 必须先于 completed/error，且 terminal 后取消 pending progress。
+- LLM 日志为什么禁止 `requestBodyValues`、允许哪些 bounded provider 字段。
+- consumer 为什么需要 progressVersion，且 terminal 为什么无条件胜出。
+- app SSE 与 HTTP 必须经过同一 Part merge interface，不能只修 event reducer。
+- legacy missing/invalid `progressVersion` 为什么必须归一化为 0，以及 terminal 优先级。
+- SyncEvent publication 必须在 transaction 外等待入队，且不能把 subscriber 业务放进 transaction。
+- shared ToolProgress 为什么只协调 metadata snapshot，不统一两个 producer 不同的 output 算法。
+- 8KiB 日志预算与 requestBodyValues 禁止边界。
+- callsite tag caps 为什么必须与 6KiB summary 共用完整 8KiB 行预算。
+- APICallError 安全数值字段边界、删除外部文本与长合法标识/response echo 测试意图。
+- durable adapter 的 commit/publication/version confirmation 为什么必须形成不可中断确认区。
+- sustained cadence test 为什么先记录 delivery 再阻塞，以复现 commit 后、marker 前的 close race。
+- live/durable 为何共享 snapshot/version 却必须独立调度，以及 consumer merge 不能承担 producer 写入去重。
+- ACP hash 只能压缩相同展示，为什么还需 normalized version 拒绝跨通道 stale running。
+- ACP progress event 为什么不能复用完整 Part object logger，以及 terminal marker 为什么必须跨 transport 保留。
+- retained terminal marker 为什么携带 Session identity，并必须由 pending/close lifecycle 清理。
+
+## 18. Verification
+
+| Command | Working directory | Evidence produced |
+| --- | --- | --- |
+| `bun test test/tool/shell.test.ts --test-name-pattern "coalesces shell progress" --timeout 30000` | `packages/opencode` | AI ShellTool path 的 live/durable budget、TerminalDisplay final semantics |
+| `bun test test/tool/shell.test.ts --test-name-pattern "durable" --timeout 30000` | `packages/opencode` | delayed durable 不阻塞 live；close overlap 不重复 durable version |
+| `bun test test/session/prompt.test.ts --test-name-pattern "coalesces direct shell progress" --timeout 30000` | `packages/opencode` | public direct shell path 的 live/durable budget、raw final semantics |
+| `bun test test/sync/index.test.ts --test-name-pattern "awaits publication" --timeout 30000` | `packages/opencode` | SyncEvent transaction 后 publication completion/order |
+| `bun test test/cli/cmd/tui/sync.test.tsx --test-name-pattern "shell progress" --timeout 30000` | `packages/opencode` | running progress monotonic merge 和 reconnect recovery |
+| `bun test test/acp/event-subscription.test.ts --test-name-pattern "shell progress|progress payload|terminal" --timeout 30000` | `packages/opencode` | ACP typed live progress、stale durable rejection、isolated log payload absence 与 live/replay terminal dominance |
+| `bun test test/acp/event-subscription.test.ts --timeout 30000` | `packages/opencode` | ACP 全文件回归，包括 Session load/fork/close 和 event subscription lifecycle |
+| `bun test test/acp/event-subscription.test.ts --test-name-pattern "per session|replayed running version|shell progress" --timeout 30000` | `packages/opencode` | R19 Session+call isolation、replay running version、progress log和terminal后无任何 lifecycle reopen |
+| `bun test test/session/prompt.test.ts --test-name-pattern "coalesces direct shell progress|loop waits while shell runs and starts after shell exits|shell completion resumes queued loop callers" --timeout 30000` | `packages/opencode` | direct shell写入预算；queued-loop只确认精确回退后的R16原合同，不作为新readiness设计 |
+| `bun test test/session/llm.test.ts --test-name-pattern "bounds stream error logs" --timeout 30000` | `packages/opencode` | actual HTTP 500 error event、长合法 provider/model/agent tags、完整 8KiB line cap、无 request body；processor source regression 不改 |
+| `bun test --preload ./happydom.ts ./src/context/global-sync/event-reducer.test.ts ./src/context/global-sync/part-merge.test.ts` | `packages/app` | app SSE/HTTP shared merge、progress/terminal parity |
+| isolated WAL-index read-only attribution from section 8 | `D:\Temp\opencode` isolated database only | 12 total transactions = 9 fixed lifecycle + exactly 3 running progress；不得访问全局DB或管理现有进程 |
+| `bun test test/tool/shell.test.ts test/sync/index.test.ts test/cli/cmd/tui/sync.test.tsx test/acp/event-subscription.test.ts test/session/llm.test.ts --timeout 30000` | `packages/opencode` | complete affected non-prompt owners；prompt仅运行上方三个实际受影响tests，避免把仓库既有无关fixture timeout伪装成本修复失败 |
+| `bun ./script/build.ts` | `packages/sdk/js` | regenerate SDK from current event schema |
+| `bun typecheck` | `packages/sdk/js` | generated SDK type integrity |
+| `bun typecheck` | `packages/opencode` | package type integrity |
+| `bun typecheck` | `packages/app` | app event reducer type integrity |
+| `bun run build` | `packages/app` | informational only；用户明确APP不属于本分支release gate，既有root-Vite equivalent build已通过 |
+
+不得从 repository root 运行 package tests，不得直接调用 `tsc`。
+
+## 19. Diff Budget
+
+| Metric | R16 exact plan / cap | Justification |
+| --- | --- | --- |
+| Files added | 3 | shared ToolProgress + app shared Part merge module + focused app merge test；都有两个真实 adapters 或独立行为 seam |
+| Files modified | 20 hand-written | current total 23 hand-written changed files including 3 additions；不含 plan/generated |
+| Files deleted | 0 | 无文件级 workaround |
+| Current gross hand-written additions | 1118 R14 exact gross baseline | tracked879 + untracked113/50/76；plan/generated/unrelated submodule excluded |
+| R16 remaining rework | ACP owner <=45 added lines；ACP test <=120 added lines；all other files frozen | only already listed ACP owner/test；no new helper/public API/fallback |
+| Projected gross hand-written additions | target <=1199，hard max1200 | `1118 + (45-18) + (120-66)`；R16 must not expand owner scope, add fallback, or move dedupe downstream |
+| R9 audited implementation gate | `E=804 + C=126 =930` | R9 independent audit passed line/comment gate；R14 final diff must be recalculated |
+| R16 estimated implementation gate | `E≈950`, minimum `C=143`, target `C>=146` | projected `E+C<=1096`；final actual must be recalculated |
+| Qualifying Chinese comments | target >=146 and final `C>=ceil(E*0.15)` | 包含在1200行硬上限；不得用集中注释填充 |
+| Generated lines | current textual +142/-130；excluded from 1200 | typed SDK event regeneration，必须审计，不得手改 |
+
+§15、§17、§19 与 §23 当前使用同一 R14 `1118` exact gross baseline；R9 的 pure-move
+adjustment 仅作为历史参考，不能替代当前 exact diff。R16 只允许修改已列 ACP owner/test，预计
+`gross<=1199/E≈950/C>=146`。完成后必须重新逐行复算，不得用任何历史数字替代 R16 actual diff。
+
+## 20. Real Risks and Open Decisions
+
+### Open Decisions Requiring the User
+
+无。已对齐：恢复状态但不续跑原进程、live 50ms、durable leading + 1s + terminal flush、同一
+snapshot 双 delivery、完成态双输出不改、LLM 日志 8KiB、production+tests+config+合格中文
+注释不超过1200行。用户在同一 GOAL 逐路径明确授权：R16 不修改 ModelsDev，即使保留每小时
+内容未变化时对 `models.json` 的全量覆盖。
+
+### Real Risks
+
+1. 只加 throttle 而没有 terminal flush/cancel，会让最后进度丢失或让 delayed running 覆盖 completed/error。
+2. 只加 ephemeral event 而没有 durable checkpoint，会直接违反用户明确的 reconnect 恢复要求。
+3. 新 Tool progress event 若只接 TUI，会使 ACP、run、app 等真实 consumer 行为分裂。
+4. 删除 completed `metadata.output` 会改变 TUI terminal display、web share 和 interrupted Tool 的 model-visible partial output。
+5. 在通用 logger 全局截断会改变所有模块诊断，当前只有 LLM raw stream error 有 observed 大 payload。
+6. feedback loop 使用共享活动 DB，其他进程可污染绝对 transaction 数；quiet baseline 和 focused unit/integration test 必须共同作为验收证据。
+7. 新 event 需要 SDK regeneration；漏生成会导致 TUI/app/ACP 使用旧 union 并在 typecheck 暴露。
+8. app 的 HTTP message page 与 SSE 共写同一 Part store；任何新增写入 seam 都必须复用 shared
+   Part merge interface，不能绕过 progressVersion/terminal dominance。
+9. live/durable 独立调度会产生真实跨通道乱序；只修 TUI/app 而遗漏 ACP 会让 shell 展示回退，
+   反过来重新用 shared permit 串行两者又会让 durable latency 冻结 live。
+10. terminal marker 若只保留而不绑定/清理 Session，会把每个完成 shell 的 marker 留到 Agent 销毁；
+    R16 必须由 existing pending/close lifecycle 清理，而不是用无证据 timeout 驱逐。
+11. 为消除 progress log 而删除所有 PartUpdated diagnostics 会扩大行为变化；R16 只 bypass
+    `message.part.progress`，不修改既有 durable event log 或 global logger。
+
+### Rejected Speculation
+
+- “WAL 文件当前只有数 MB，所以没有写入”：WAL 会复用已分配空间，已由 WAL-index transaction/frame 反证。
+- “数据库 2 GB 必然代表 SSD 损耗”：容量与写入频率不是同一指标；本任务分别处理。
+- “增大 checkpoint 或 VACUUM 就能解决”：这些只能搬运/回收已写页面，不能消除每 chunk 事务。
+- “所有 Tool metadata 都是热点”：证据只确认两个高频 producer，即 ShellTool 的
+  `ctx.metadata` onChunk 与 direct `SessionPrompt.shellImpl` 的 `Session.updatePart` onChunk；
+  其他 Tool metadata callsites 是低频语义更新。
+- “daemon 硬崩后可以自动恢复原 OS 子进程”：当前没有实现或 contract 证据，不得据此设计恢复算法。
+- “为了减少约 28 GB/年的 models cache 写入扩展本 revision”：用户已逐路径明确排除该行为；
+  R14 不以相对影响评估代替该 scope decision。
+
+## 21. Audit Contract
+
+The independent auditor must:
+
+- Read this exact file and the original requirement.
+- Reconstruct behavior from repository evidence.
+- Treat builder summaries as untrusted.
+- Audit the complete original scope on every round.
+- Require evidence for every blocking finding.
+- Check both under-design and over-design.
+- Check root-cause repair, fallback, ownership, tests, code quality, and the 15
+  percent Chinese explanatory-comment plan.
+
+The user explicitly authorized one additional full-scope plan audit after Round 6 reached the
+original cap. Round 7 is that single exception; it does not authorize implementation before approval.
+After R12 BLOCK exposed that limit again, the user explicitly answered `允许都允许，r20都允许`；this
+authorizes full-scope plan audits for R13 through R20 despite the original cap. It does not authorize
+implementation before an exact revision receives `APPROVE`, and does not weaken any other gate.
+
+## 22. Plan Audit Record
+
+| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | R2 | yes | B-01 | §15/~760 与 §17/§19/~713 统计口径不一致 | BLOCK | `ses_09aaba45effevmAQbl0BsHIC4s` |
+| 2 | R3 | yes | B-01 | diagnostic decision surface 需按实际决策复算；E/C/总量计算一致 | BLOCK | `ses_09a9d92dcffe8yhtIO70slP8EH` |
+| 3 | R4 | yes | B-01 | §15 文件估计与 §17/§19 总量口径不一致 | BLOCK | `ses_09a8f7a43ffeWH7vq7rKoiCHRd` |
+| 4 | R5 | yes | B-01 | publication 边界、running snapshot 计数和实际 E/C 复算提示 | BLOCK | `ses_09a354709ffeiWOWPon6AFbB7j` |
+| 5 | R6 | yes | none | decision-surface ratio 与实际 E/C 必须按 implementation diff 复算 | APPROVE | `ses_09a27f9f5ffeqSsl3rN0FK6T3C` |
+| 6 | R7 | yes | B-01 | Audit mode metadata、实际 E/C 与 implementation verification evidence 提示 | BLOCK | `ses_099583e86ffeCouPGoc4i0MN1I` |
+| 7 | R8 | yes | B-01 | LLM decision-surface、actual E/C 复算提示 | BLOCK | `ses_099251e75ffe3s57c0t16v7J6n` |
+| 8 | R10 | yes | B-01/B-02/B-03 | models scope、full-line budget、R10 E/C estimate | BLOCK | `ses_098b3ca0cffenTNKkoNk9XjMIF` |
+| 9 | R11 | yes | B-01 | E/C、diagnostic surface、verification reminders | BLOCK | `ses_09885f5dfffeXXEPpNgffXEl71` |
+| 10 | R12 | yes | B-01/B-02/B-03 | audit-limit decision、response echo、INFO extra bypass | BLOCK | `ses_098782319ffebE5GhWzFmae2xk` |
+| 11 | R13 | yes | B-01 | fixed-literal wording、final E/C 与 historical evidence reminders | BLOCK | `ses_09842dfeeffe7pGz4lJSPfZRpE` |
+| 12 | R14 | yes | none | E/C、historical red-green 与 WAL evidence reminders | APPROVE | `ses_0982e2d11ffeqYagrETdGtIdA8` |
+| 13 | R15 | yes | B-01 | historical audit readability、actual E/C reminders | BLOCK | `ses_0969c12beffeilZkJythh5S7ZH` |
+| 14 | R16 | yes | B-01 | history readability、release verification and actual E/C reminders | BLOCK | `ses_0968e8deaffemzrV2rxr9k5cL4` |
+| 15 | R16 user disposition | row 14 full scope | none remaining；ModelsDev explicitly excluded | implementation gates unchanged | APPROVE | current user messages: `排除排除排除` / `如果只有这一个blocking点则视为通过` / primary decides |
+| 16 | R17 | yes | B-01 `toolStarts` lifecycle omission；B-02 direct-shell first divergence not identified | history readability、tight budget | BLOCK | `ses_0953b4b59ffe7dcrL4sM2PfRgd` |
+| 17 | R18 | pending | R16 implementation B-01/B-02/B-03 converted into same-scope rework contract；R17 B-01/B-02 resolved in plan；B-03 fixed to test readiness route | R18 budget must reuse existing owners and preserve APP/Models exclusions | audit-required | pending independent full-scope plan audit |
+
+### Round 1 verbatim verdict
+
+```text
+## Blocking findings
+
+### B-01 App 的 HTTP 快照可覆盖较新的实时进度或终态
+
+- Violated invariant: `INV-03`、`INV-04`、`INV-06`；较旧 durable 快照不得覆盖较新 live progress，任何 running 状态不得覆盖 completed/error。
+- Evidence class: reachable
+- Producer and execution path: ShellTool 产生 `PartProgress v2` 或 terminal `PartUpdated` → app `applyDirectoryEvent` 写入最新 Part → 并发中的 `session.messages` 返回较早生成的 durable `v1/running` 快照 → `loadMessages` 无条件替换 `store.part`。
+- Source evidence: `packages/app/src/context/sync.tsx:294-345,430-499`；`packages/app/src/pages/session.tsx:758-788`；`packages/app/src/context/global-sync/event-reducer.ts:239-299`
+- Canonical-plan evidence: §10.1 第7、9项；§13 `INV-03/04/06`；§15 仅规划修改 `event-reducer.ts`；§16 slice 3 仅测试 reducer 事件序列。
+- Responsibility owner: app Session HTTP 快照与本地 Part store 的合并 seam，即 `packages/app/src/context/sync.tsx`，而非仅 SSE event reducer。
+- Behavior-level consequence: 正常 Session 加载或强制刷新期间，shell 显示可从 v2 回退到最多约一秒前的 v1；更严重时，已收到的 completed/error 可被旧 running HTTP 响应覆盖，且终态后可能没有后续事件修正，界面会持续显示运行中。
+- Why this is not speculative: `session.sync` 会真实发起 `session.messages` 请求，`loadMessages` 在请求完成后直接执行 `setStore("part", p.id, filtered)`；实时 SSE 与 HTTP 请求并发，生产者无法控制二者响应应用顺序，计划自身也确认该乱序可达。
+- Minimal correction direction: 将 app 的 HTTP Part 快照合并 seam 纳入同一个 `progressVersion`/terminal-dominance 合同，并用“较新 progress/terminal 先到、旧 HTTP running 快照后到”的行为测试覆盖；不得增加备用数据源或失败后 fallback。
+
+## Non-blocking findings
+
+- §15 估计手写总量约 `760` 行，而 §17、§19 按 `E≈620 + C≥93` 得到约 `713` 行。两者均低于 1200 行硬上限，暂不阻塞，但实施前应统一统计口径，避免实现审计争议。
+
+## Rejected speculation
+
+- 不要求 daemon 死亡后续跑或重附着原 OS 子进程；当前只有持久化 Session 状态恢复路径，没有续跑合同。
+- 不要求本 revision 优化 `models.json`；约 28 GB/年的已记录上限不足以证明它是寿命热点，且不应挤占 1200 行预算。
+- 不将 live/durable 双 delivery 判为 fallback：两者由同一 TerminalDisplay snapshot 和同一进度版本驱动，分别履行实时显示与重连恢复合同，不是在主路径失败后尝试另一成功算法。
+- 不因 `opencode run` 未消费新事件而额外阻塞：其 running shell 路径只更新工具运行状态，不渲染 live shell output；ShareNext 现有路径已在 `packages/opencode/src/share/share-next.ts:120-145` 按一秒合并同步。
+
+## Requirement and traceability coverage
+
+| Requirement | Verdict |
+|---|---|
+| 修复 shell 一 chunk 一事务的写入热点 | 已定位到 `ShellTool.onChunk`，primary repair 与 red-capable WAL loop 已规划 |
+| 降低大型 LLM error 日志写入 | 已定位到 `LLM.run.onError`，callsite-local bounded diagnostic 与行为测试已规划 |
+| 保持实时体验 | TUI、app SSE reducer、ACP 的 50ms live path 已规划；app HTTP 合并路径缺失，阻塞 |
+| daemon 重连恢复 | 1秒 durable checkpoint 与 TUI forced Session sync 已规划；不承诺子进程续跑 |
+| terminal、abort、timeout 稳定性 | coordinator close/flush 与 terminal dominance 已规划；app HTTP 后到覆盖未覆盖 |
+| 保持最终/中断输出合同 | 完成态双输出、raw/truncate/model output 明确保留 |
+| 单一 primary path、无 fallback | 满足 |
+| ≤1200 行 | 预计约713行，满足；统计描述需统一 |
+| 15% 中文解释性注释 | 计划 `E≈620`、`C≥93 = ceil(620×0.15)`，计算正确，位置类别已规划 |
+| TDD sensitivity | Shell、TUI、ACP、LLM slices 可对当前行为变红；app slice 未覆盖真实 HTTP 竞态 |
+
+## Primary-path and fallback verdict
+
+ShellTool 作为 transport-byte 到 Tool progress 的 owner，以单一 TerminalDisplay snapshot、单调版本和 live/durable 两种合同分支修复 first divergence；SQLite projector、UI 和 logger 全局策略未被用作下游绕过。未发现 alternate-success fallback。
+
+但完整 consumer 路径尚未闭合：app 的事件 reducer 与 HTTP Session 快照共享同一 Part store，计划只修复前者。因此 exact R2 尚不具备完整 primary-path 正确性。
+
+## Release verdict
+
+**BLOCK — Canonical plan R2**
+
+需修订计划并递增 revision，补齐 app HTTP 快照合并的生产路径、文件计划和可变红行为测试，然后进行下一轮 full-scope plan audit。
+```
+
+R3 resolution: B-01 由 §4 新增 HTTP reachability evidence、§10.1 第9项 shared app Part
+merge interface、§13/§14 双向映射、§15 `part-merge.ts` + `sync.tsx` 文件范围以及 §16
+slice 4 的旧 HTTP running snapshot 行为覆盖。非阻塞统计已统一为预计 `E≈780`、`C≥117`、
+手写总量约 897 行。
+
+### Round 2 verbatim verdict
+
+```text
+## Blocking findings
+
+### B-01 终态顺序合同未覆盖 ACP 与 ShareNext
+
+- Violated invariant: `INV-04`、`INV-06`；任何待发送 running progress 都不得在 completed/error 后重新产生或持久化运行中状态。
+- Evidence class: reachable
+- Producer and execution path: Shell coordinator 写出 trailing durable running checkpoint → `Session.updatePart` 提交事务 → `SyncEvent.process` 以未等待的 `Effect.runPromise` 发布事件 → coordinator 认为 flush 完成并允许 processor 提交 terminal PartUpdated → 先前 running PartUpdated 仍可后到。ACP 会再次发送 `in_progress`；ShareNext 会按相同 Part key 用后到 running 数据替换 terminal 数据并同步到共享 Session。
+- Source evidence: `packages/opencode/src/session/session.ts:683-691`；`packages/opencode/src/sync/index.ts:353-389`；`packages/opencode/src/acp/agent.ts:275-343,345-399`；`packages/opencode/src/share/share-next.ts:120-145,198-200,248-264`
+- Canonical-plan evidence: §10.1 第6-7、10项；§13 `INV-04/INV-06`；§15 ACP 修改范围；§16 slices 2、4、5
+- Responsibility owner: Part progress 的发布生命周期以及 ACP/ShareNext 各自的 Tool Part 状态合并 seam。
+- Behavior-level consequence: ACP 客户端可能在收到 completed/failed 后重新显示工具执行中；已共享 Session 的远端 Part 可能被 late running checkpoint 持续覆盖为运行中。计划只为 TUI/app 明确 terminal dominance，ACP 测试只覆盖 progress 与 stale checkpoint，ShareNext 未纳入修改或测试。
+- Why this is not speculative: durable 更新返回前只保证数据库事务完成，不等待对应 Bus publication；ACP 和默认启用的 ShareNext 都是当前真实 `PartUpdated` consumers。两者的 terminal 分支会清除本地标记，而 ShareNext 明确按 Part key 保留最后到达的数据，没有 terminal guard。
+- Minimal correction direction: 将所有能向外产生或持久化 Tool 成功状态的 `PartUpdated` consumer 纳入同一 terminal-dominance 合同，并增加“terminal 先到、旧 running durable update 后到”的 ACP 与 ShareNext 行为测试；在此之前不得把 durable flush 完成等同于事件交付完成。
+
+## Non-blocking findings
+
+- §11 仅声明 diagnostic decision surface `<=10%`，实施审计需按实际分支、状态转换和错误结果重新计算，不能按代码行比例替代。
+- 计划的 `E≈780`、`C≥117`、总量约 897 行计算一致，满足 1200 行上限的规划要求。
+
+## Rejected speculation
+
+- 不要求 daemon 死亡后续跑或重附着原 OS 子进程；没有该合同或生产路径。
+- 不要求本 revision 优化约 28 GB/年的 `models.json` 周期写入；现有证据不足以将其列为寿命热点。
+- 不要求 `opencode run` 消费 live shell output；其当前 running shell 路径只显示工具运行状态。
+- 不要求修改完成态 `state.output` / `state.metadata.output` 双存储，用户已明确要求保持。
+- 不要求在通用 logger 增加全局截断策略；已证明的大型 payload 位于 LLM observability callsite。
+
+## Requirement and traceability coverage
+
+| Requirement | Verdict |
+|---|---|
+| 修复 shell 一 chunk 一事务热点 | 已定位 first divergence，并规划 owner-side coordinator 与可变红 WAL/Session 测试 |
+| 降低大型 LLM error 日志写入 | 已规划 callsite-local bounded diagnostic 及真实失败测试 |
+| 保持 TUI/app 实时体验 | 50ms live path、版本合并及 HTTP/SSE 竞态测试已覆盖 |
+| daemon 重连恢复 | 1 秒 durable checkpoint 与 forced Session sync 已覆盖 |
+| terminal、abort、timeout 稳定性 | **不完整：ACP 与 ShareNext 的 late durable running 路径未覆盖** |
+| 保持最终及中断输出 | raw、truncate、模型 output 和双存储均明确保留 |
+| 单一 primary path、无 fallback | 满足；live/durable 是同一 snapshot 的合同分支 |
+| ≤1200 行 | 预计约 897 行，满足 |
+| 15% 中文解释性注释 | `ceil(780 × 0.15) = 117`，计算和邻近位置规划正确 |
+| TDD sensitivity | Shell、TUI、app、LLM 可对当前行为变红；ACP/ShareNext terminal-order 场景缺失 |
+
+## Primary-path and fallback verdict
+
+ShellTool owner-side snapshot/coordinator、显式 live/durable delivery 与 callsite-local LLM diagnostic 均属于单一 primary path，未发现 alternate-success fallback。
+
+但 primary path 把 durable transaction 完成视为 progress 生命周期结束，而真实 Bus publication 是未等待的。所有成功状态 consumers 尚未落实同一 terminal-dominance 合同，因此完整 producer-to-consumer 路径未闭合。
+
+## Release verdict
+
+**BLOCK — Canonical plan R3**
+
+需修订计划并递增 revision，补齐 ACP 与 ShareNext 的 terminal-order 生产路径及可变红行为测试，然后执行下一轮 full-scope plan audit。
+```
+
+R4 resolution: B-01 由 §4 的 fire-and-forget evidence、§10.1 第5/7/11项的 single publish
+permit + after-commit awaited SyncEvent publication、§13/§14 owner mapping、§15
+`sync/index.ts` 范围以及 §16 slices 2/6/7 的 SyncEvent、ACP、ShareNext 组合行为覆盖。
+ACP/ShareNext 不重复实现 upstream terminal guard；无法绕过的 SyncEvent 顺序保证在 owner 修复。
+非阻塞 diagnostic ratio 保留为 implementation audit 的实际 decision-surface 计算项，统计统一为
+`E≈900`、`C≥135`、手写总量约 1035 行。
+
+### Round 3 verbatim verdict
+
+```text
+## Blocking findings
+
+### B-01 公开的直接 Shell 路径仍保持一 chunk 一事务
+
+- Violated invariant: `REQ-01`、`INV-02`；所有已确认的高频 shell producer 都必须解除 transport chunk 与 durable SQLite transaction 的一比一关系。
+- Evidence class: reachable
+- Producer and execution path: TUI shell 模式或 app shell 模式 → `session.shell` HTTP endpoint → `SessionPrompt.shell` → `shellImpl` → `handle.all` 每产生一个 chunk 就调用 `sessions.updatePart(part)` → `SyncEvent PartUpdated` → SQLite 完整 Part upsert。该路径不经过计划中的 `ShellTool.run` coordinator。
+- Source evidence: `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx:1352-1367`；`packages/app/src/components/prompt-input/submit.ts:436-452`；`packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:344-352`；`packages/opencode/src/session/prompt.ts:1343-1345,1497-1505,2800-2805`；`packages/opencode/src/session/session.ts:683-691`；`packages/opencode/src/session/projectors.ts:173-187`
+- Canonical-plan evidence: §4、§8、§9、§10.1 仅将 `ShellTool.run` 定义为热点 owner；§15 对 `prompt.ts` 只规划 delivery 转发；§16 slice 1 却使用 `SessionPrompt.shell` 测试计划中的 `ShellTool` coordinator。
+- Responsibility owner: `SessionPrompt.shellImpl` 的直接 shell progress producer，以及其公开 `session.shell` 接口。
+- Behavior-level consequence: AI 调用的 ShellTool 即使完成治理，用户从 TUI/app 直接运行 shell 命令时仍会按输出 chunk 重写完整 running Part，继续产生同类 SQLite/WAL 写入热点；同时 slice 1 测试不会穿过计划实际修改的 `ShellTool.run` 路径，无法证明该修复。
+- Why this is not speculative: 两个现有客户端都调用公开 `session.shell` endpoint，endpoint 明确进入 `SessionPrompt.shell`；其 stream callback 对每个 chunk 无条件执行 durable `updatePart`。
+- Minimal correction direction: 完整盘点并纳入 `SessionPrompt.shellImpl` 这一真实 producer，在其 owning progress seam 映射写入预算、行为保持和可变红测试；同时分别使用能实际穿过各 production path 的测试，不能用 `SessionPrompt.shell` 代替 `ShellTool.run` 的验证。
+
+## Non-blocking findings
+
+- §15 文件级预计新增行合计约 `1044`，而 §17/§19 使用 `E≈900`、`C≥135`、总计约 `1035`；§15 的测试新增估计约 `585`，§19 则记为约 `430`。当前各口径仍低于 1200 行上限，但修订 R4 时应统一代码、注释和文件级估计，避免实施审计无法复算。
+
+## Rejected speculation
+
+- 不要求 daemon 死亡后续跑或重附着原 OS 子进程；现有合同只支持恢复已持久化 Session 状态。
+- 不要求修改完成态 `state.output` 与 `state.metadata.output` 双存储；用户明确要求保持。
+- 不将同一 progress snapshot 的 live/durable delivery 判为 fallback；二者分别履行实时显示和重连恢复合同。
+- 不要求本 revision 优化 `models.json`；现有证据不足以把其低频写入提升为当前寿命热点。
+
+## Requirement and traceability coverage
+
+| Requirement | Verdict |
+|---|---|
+| 消除磁盘写入热点 | **不完整：`SessionPrompt.shellImpl` 的公开直接 shell producer 仍是一 chunk 一事务** |
+| ShellTool 高频输出治理 | owner-side coordinator、50ms live、1s durable checkpoint 已规划 |
+| 降低大型 LLM error 日志写入 | callsite-local bounded diagnostic 和真实失败测试已规划 |
+| 不影响实时体验 | TUI、app、ACP live event 与 latest-wins 合并已规划 |
+| daemon 重连恢复 | durable checkpoint 与 forced Session sync 已规划 |
+| terminal/abort/timeout 稳定性 | coordinator close、awaited durable publication 和 terminal dominance 已规划 |
+| 保持最终及中断输出 | raw/truncate/model output 和完成态双存储明确保留 |
+| 单一 primary path、无 fallback | ShellTool 设计满足，但完整 shell producer 范围未闭合 |
+| ≤1200 行 | 估算仍在上限内，但统计口径需统一 |
+| 15% 中文解释性注释 | `ceil(900 × 0.15) = 135` 计算正确，邻近位置已规划 |
+| TDD sensitivity | **不完整：slice 1 的 `SessionPrompt.shell` seam 不会穿过计划中的 `ShellTool.run` coordinator** |
+
+## Primary-path and fallback verdict
+
+计划为 `ShellTool.run` 建立了单一 snapshot、双 delivery cadence，并在 SyncEvent owner 修复 durable publication 顺序；未发现 alternate-success fallback。
+
+但真实生产接口还有独立的 `SessionPrompt.shellImpl` shell producer。它绕过计划中的 coordinator 并继续按 chunk durable 写入，因此完整 producer-to-consumer primary path 尚未覆盖。
+
+## Release verdict
+
+**BLOCK — Canonical plan R4**
+
+需递增 revision，补齐直接 `session.shell` 路径的根因、生产变更、行为测试及预算映射，然后进行下一轮 full-scope plan audit。
+```
+
+R5 resolution: B-01 由 §4/§5.1 的 direct-shell producer evidence、INV-13、§8/§9 的独立
+first divergence/owner、§10.1 的 shared `ToolProgress` module + 两个 producer-specific
+snapshot adapters、§13/§14 双向映射、§15 `tool/progress.ts` + `prompt.ts` 文件范围以及
+§16 slices 1/2 的两个真实 integration seams 覆盖。非阻塞统计统一为 `E≈950`、`C≥143`、
+手写总量约 1093 行；§15 的 file-level delta 是局部预算，实施证据统一按 E/C hard-gate 复算。
+
+### Round 4 verbatim verdict
+
+```text
+## Blocking findings
+
+### B-01 未定义旧持久化 running Part 的 `progressVersion` 归一化合同
+
+- Violated invariant: `INV-03`、`INV-04`、`INV-06`；daemon 重连或 HTTP/SSE 乱序时，旧 durable running 快照不得覆盖较新的 live progress，也不得让 running 状态覆盖终态。
+- Evidence class: reachable
+- Producer and execution path: 旧 daemon 或崩溃恢复留下的 SQLite `PartTable` running Tool Part → `Session.messages` / `session.sync` HTTP 快照 → TUI/app Part store merge；该旧 Part 的 `state.metadata` 没有新计划引入的 `progressVersion`，随后可能与新 daemon 产生的 `PartProgress` 或带版本的 durable checkpoint 交错到达。
+- Source evidence:
+  - `packages/opencode/src/session/message-v2.ts:426-433`：Tool Part 的 metadata 是开放的可选记录，没有现有版本字段或迁移约束。
+  - `packages/opencode/src/session/projectors.ts:173-186`：PartUpdated 将完整 Part 数据直接保存，未做版本归一化。
+  - `packages/opencode/src/storage/db.ts:683-691`：Session 通过 SQLite durable Part 快照恢复。
+  - `packages/opencode/src/cli/cmd/tui/context/sync.tsx:283-322`：现有 TUI HTTP/live 合并只保护 text、reasoning 和 pending raw，不包含计划新增的 Tool progress 版本合同。
+  - `packages/app/src/context/sync.tsx:331-345`：app 当前 HTTP page 对 Part 直接替换，R5 计划要求改为 shared merge。
+- Canonical-plan evidence:
+  - §5.2、§10.1 第 10-12 项要求通过 `progressVersion` 处理 live、durable checkpoint 和 reconnect snapshot 的乱序。
+  - §10.3 明确“不修改 schema 和 migrations”。
+  - §13/§14/§16 规划了版本比较和 stale checkpoint 测试，但没有规定缺失 `progressVersion` 的既有持久化 running Part 如何归一化。
+  - §20.1 声明无待用户对齐的 open decision，导致该兼容输入没有被保留为明确实现合同。
+- Responsibility owner: TUI/app 共用的 running Tool Part merge seam，以及该 seam 对持久化旧数据的版本归一化规则；不是 SQLite projector，也不是 producer 临时补字段。
+- Behavior-level consequence: 在升级前已存在的 running Part 仍可被 daemon 重连读取。若 merge 将缺失字段视为最新、未定义或与新版本相等，旧 HTTP snapshot 可能覆盖新 live progress；若不同 consumer 采用不同默认值，TUI 与 app 会对同一 Session 显示不同结果。若旧 running snapshot 在新 terminal 之后进入且缺失版本没有统一 terminal 处理，也可能恢复为 running。该结果直接违反“重连恢复最近持久化状态且不回退”的合同。
+- Why this is not speculative: 旧 Part 数据是当前 SQLite 持久化格式的合法内容；`metadata` 可选且没有 migration，daemon 重启/崩溃后的 Session sync 是当前真实恢复路径。R5 自身保留了旧数据、不执行迁移，并将 HTTP reconnect snapshot 纳入 primary path。
+- Minimal correction direction: 在 canonical merge contract 中明确旧 running Part 缺失 `progressVersion` 的唯一归一化语义、与新版本的比较规则及 terminal dominance 优先级；同时增加真实旧快照与新 `PartProgress`/terminal 乱序的行为测试。该规则必须由 TUI 与 app 共用的 merge owner 执行，不得由各 consumer 各自猜测。
+
+## Non-blocking findings
+
+- §10.1 第 9 项将 `SyncEvent.run/replay` 的 publication 等待范围描述为“typed/wildcard/GlobalBus 入队”，但实现时需要继续明确不等待 subscriber 业务处理，并验证现有 `GlobalBus` envelope 与 `Bus.publish` 内部 GlobalBus 事件不会造成重复消费。R5 已记录了“不等待 ShareNext、ACP 等 subscriber 业务”的边界，暂不构成阻塞。
+- §16 的 progress budget 使用“短于 1 秒最多 3 个 running durable snapshots”作为测试上限；实现审计时应明确初始 running Part、leading checkpoint、trailing checkpoint 的计数口径，避免把 terminal PartUpdated 混入 running 计数。
+- §17/§19 的 `E≈950`、`C≥143`、合计约 1093 行仅是计划估计；实现审计必须从实际 diff 重新计算，不能以估计值替代硬门禁。
+
+## Rejected speculation
+
+- 不要求 daemon 进程死亡后继续执行或重附着原 OS 子进程；当前没有该生产协议或用户合同证据。
+- 不要求修改完成态 `state.output` 与 `state.metadata.output` 双存储；用户明确确认这是预期行为。
+- 不要求将 `models.json` 的低频周期覆盖纳入 R5；当前证据表明它不是本 revision 的主要 SSD 写入热点，且用户设置了 1200 行上限。
+- 不将同一 snapshot 的 live 与 durable delivery 判定为 fallback；二者由同一 producer snapshot 和同一 progress lifecycle 驱动，分别履行实时体验和 daemon 重连恢复合同。
+- 不要求 ACP、ShareNext、`opencode run` 或 GitHub integration 各自新增重复 terminal guard；若 SyncEvent owner 真正建立了同一 durable publication 顺序，重复下游 guard 会造成责任扩散。
+- 不要求修改通用 logger；当前大型 payload 的直接证据集中在 `LLM.run` 的 stream error observability callsite。
+
+## Requirement and traceability coverage
+
+| Requirement / invariant | Verdict |
+|---|---|
+| 消除 shell transport chunk → SQLite transaction 一比一热点 | 已定位 ShellTool 与公开 direct `session.shell` 两个 first divergence，并规划共享 coordinator、50ms live、1s durable checkpoint |
+| 降低大型 LLM error 日志写入 | 已规划 `LLM.run` callsite-local bounded diagnostic，不改变原始错误传播 |
+| 保持实时体验 | TUI、app、ACP 的 typed live progress 路径已规划；app SSE 与 HTTP 共享 merge seam 已纳入 R5 |
+| daemon 重连后恢复 | durable checkpoint、`server.connected -> session.sync(force)` 和 monotonic merge 已规划；但旧持久化 running Part 缺少版本归一化合同，B-01 阻塞 |
+| completion/error/abort/timeout 稳定性 | coordinator close/flush、terminal ordering 和 after-commit publication 已规划；旧快照版本边界仍需补合同 |
+| 保持 shell 原始输出、模型可见输出、截断与中断输出 | 明确保留 raw output、truncate file、`state.output`、`state.metadata.output` 与 interrupted partial output |
+| 不改变 SQLite durability/WAL/permission/daemon crash 语义 | 明确不修改 WAL、synchronous、checkpoint、schema/migration、权限和子进程续跑行为 |
+| 一个 authoritative primary path、无新增 fallback | 满足；ShellTool 与 direct shell 是同一 coordinator contract 下的两个支持域分支，未发现失败后备用成功路径 |
+| ≤1200 行 | 计划估计 `E≈950`、`C≥143`、合计约 1093，计划层面满足；须在 implementation audit 按实际 diff 复算 |
+| 15% 中文解释性注释 | 计划计算 `ceil(950 × 0.15) = 143`，且列出邻近解释位置；实现阶段必须核实实际 `C` |
+| TDD sensitivity | ShellTool、direct shell、SyncEvent、TUI、app、ACP、ShareNext、LLM 均有行为 seam；需补充 B-01 所述旧持久化版本乱序测试 |
+
+## Primary-path and fallback verdict
+
+R5 已正确定位两个 shell producer 的 first divergence，并将 snapshot 内容算法与 cadence/version/lifecycle coordinator 分离；没有发现 `try A -> B`、catch-and-success、纯 ephemeral 替代 durable checkpoint 或通过降低 SQLite durability 掩盖热点的 fallback。
+
+R5 还正确将 durable publication 顺序提升到 SyncEvent owner，并覆盖 TUI、app、ACP、ShareNext 等真实 consumer。其 primary path 目前唯一未闭合的部分是既有 SQLite running Part 没有 `progressVersion` 时的 merge 语义。由于该数据可由当前持久化格式和 daemon reconnect 路径真实产生，不能依靠实现阶段自行猜测。
+
+## Release verdict
+
+**BLOCK — Canonical plan R5**
+
+需要递增 revision，补充旧持久化 running Part 缺失 `progressVersion` 的唯一归一化/比较合同、责任 owner、forward/reverse traceability 和可变红行为测试，然后对原始需求及完整 affected interface 进行下一轮 full-scope plan audit。
+```
+
+R6 resolution: B-01 由 §6 的 legacy persisted input、INV-14、§10.1 第10项的唯一
+legacy=0/strictly-newer/terminal 归一化合同、§13/§14 双向映射、§15 TUI/app merge owner
+责任以及 §16 slices 4/6 的真实 legacy HTTP snapshot 行为覆盖。新 producer initial running
+snapshot 也显式从 version 0 开始；不增加 schema migration 或下游 fallback。非阻塞项已在
+§10.1 publication 边界、§16 running-only `<=3` 计数和 §19 actual diff 复算规则中明确。
+
+### Round 5 verbatim verdict
+
+```text
+## Blocking findings
+
+No blocking findings.
+
+## Non-blocking findings
+
+- `§11` 将 bounded LLM diagnostic 的预计 decision-surface ratio 记为 `<=10%`。该估计满足计划阶段声明要求；实施审计仍须按实际新增/修改的分支、helper 路径、状态转换和错误结果复算，不能用约 75 行代码或总 production 行数直接代替 decision-surface 计算。
+- `§17/§19` 的 `E≈950`、`C≥143` 和约 `1093` 行仅为计划预算。实际实施必须逐行排除 generated、import-only、formatter-only 和 pure-move，再重新计算 1200 行上限及中文解释性注释门禁。
+
+## Rejected speculation
+
+- 不要求 daemon 进程死亡后继续运行、托管或重附着原 OS 子进程。当前生产路径只支持从 SQLite 恢复已持久化的 Session 状态，没有跨进程 shell continuation 合同。
+- 不要求修改完成态 `state.output` 与 `state.metadata.output` 双存储。用户已明确要求保持，且 TUI、share 和 interrupted Tool 回放存在真实消费者。
+- 不要求将约 28 GB/年上限的 `models.json` 周期刷新纳入 R6。现有证据将其归类为低频写入，而非已测得的主要寿命热点；在 1200 行硬预算下扩大范围缺少足够依据。
+- 不将同一 shell progress snapshot 的 ephemeral live delivery 与 durable recovery checkpoint 判为 fallback。它们不是失败后竞争成功的两套算法，而是同一版本化 progress primary path 中分别履行实时显示和重连恢复合同的两个分支。
+- 不要求 ACP、ShareNext、`opencode run`、GitHub 或 Slack 各自实现重复的 terminal guard。计划在 SyncEvent publication owner 建立 durable running→terminal 顺序；只有 TUI/app 的 HTTP 与 SSE 两个独立到达通道需要 store-owner monotonic merge。
+- 不要求修改通用 logger。已观察的大型 payload producer 是 `LLM.run` 的 `streamText.onError` callsite；全局截断会扩大行为变化且缺少全局需求证据。
+- 不因 shared live/durable permit 的潜在 SQLite 延迟另行阻塞。当前 shell progress 本就同步等待 durable `updatePart`，尚无证据证明 R6 会引入比现状更差的可观察延迟；实施测试仍需验证首帧、50ms cadence 和 terminal flush。
+
+## Requirement and traceability coverage
+
+| Requirement / invariant | Audit verdict |
+|---|---|
+| 消除 shell transport chunk 与 SQLite transaction 一比一热点 | 已覆盖两个真实 producer：`ShellTool.onChunk` 和公开 `SessionPrompt.shellImpl`；两者均映射到 shared `ToolProgress` cadence/version/lifecycle owner，并分别规划可变红行为测试 |
+| 实质降低磁盘写入和 SSD 写放大 | 40 次 CR redraw → 40 transactions/WAL frames 的 red-capable feedback loop 已记录；修复后的 running durable budget、原始 WAL loop 及 focused tests 均有验证映射 |
+| 降低大型 LLM error 日志写入 | 已定位 `LLM.run.onError → logger JSON.stringify` 的 first divergence；规划 callsite-local、request-body-free、整行不超过 8 KiB 的 diagnostic，并保持原始错误传播 |
+| 不影响实时体验 | 同一 progress snapshot 通过最多 50ms 的 live BusEvent 送达 TUI、app 和 ACP；首帧及 trailing frame 有明确合同 |
+| daemon 重连后恢复 | 保留 `server.connected → session.sync(force) → SQLite Part`；leading、每秒及 trailing durable checkpoint 将恢复陈旧度限制在约 1 秒 |
+| 旧持久化数据兼容 | 缺失、非有限、非整数或负数 `progressVersion` 统一归一化为 legacy version 0；无本地 Part 时接受，较新版本和 terminal 不得被其覆盖 |
+| completion/error/abort/timeout 稳定性 | coordinator close/flush、worker cancellation、single permit、after-commit awaited publication 和 terminal dominance 均有生产路径及测试映射 |
+| app HTTP/SSE 乱序 | event reducer 与 `loadMessages` 共同使用 app Part merge owner；已规划 live/terminal 先到、旧 HTTP running 后到的可变红测试 |
+| ACP/ShareNext durable terminal 顺序 | 在 SyncEvent owner 修复 transaction 后 publication 顺序；ACP 消费 live progress，ShareNext 继续消费 ordered durable events，并规划组合行为测试 |
+| 保持最终及中断输出行为 | ShellTool raw output、truncate file、TerminalDisplay、模型可见 output、direct-shell raw output、完成态双存储和 interrupted partial output 均明确保留 |
+| 不削弱稳定性和 durability | 不修改 WAL、`synchronous`、checkpoint、schema、migration、权限或 daemon crash 语义；publication 明确在 transaction 外等待入队，不等待 subscriber 业务执行 |
+| 单一 authoritative primary path | 两个 shell producer 保留各自 snapshot 算法，但共享唯一 cadence/version/lifecycle module；没有失败后备用成功算法 |
+| TDD sensitivity | ShellTool、direct shell、SyncEvent、TUI、app SSE/HTTP、ACP、ShareNext 和 LLM 均使用真实公开或行为 seam；计划中的断言能够对当前一 chunk 一事务、fire-and-forget publication、旧快照回退及 raw error logging 变红 |
+| 1200 行硬上限 | 计划估计 `E≈950`、`C≥143`、合计约 `1093`，低于 1200；未列文件或超预算时要求停止并重新修订、审计 |
+| 15% 中文解释性注释计划 | `ceil(950 × 0.15) = 143` 计算正确；计划列出了 cadence、flush、版本归一化、publication boundary、日志安全等邻近解释位置 |
+| Forward/reverse traceability | 所有确认 invariant 均映射到 production path、明确文件和行为测试；新增 event、delivery option、coordinator、version、merge module、publication ordering 及 diagnostic 均有需求和现有逻辑不足的反向依据 |
+
+## Primary-path and fallback verdict
+
+R6 修复了三个已证明的 first divergence：
+
+1. `ShellTool.onChunk` 将 transport chunk 直接转成 durable Tool Part 更新。
+2. `SessionPrompt.shellImpl` 将 direct-shell chunk 直接转成 durable Tool Part 更新。
+3. `LLM.run.onError` 将 raw provider error object 完整交给文件 logger。
+
+Shell progress 采用一个 authoritative primary path：producer-specific snapshot → shared cadence/version/lifecycle coordinator → live ephemeral delivery 与 durable recovery checkpoint。SQLite projector、renderer 和 WAL 配置未被用作下游绕过。
+
+SyncEvent 的 transaction 后 publication 顺序在其 owning interface 修复；TUI/app 只负责各自真实存在的 HTTP/SSE merge seam。未发现 `try A → B`、catch-and-success、隐藏功能关闭、第二数据源、纯 ephemeral 替代 durable recovery 或其他 alternate-success fallback。
+
+## Release verdict
+
+**APPROVE — Canonical plan R6**
+
+该结论仅适用于当前审计的 `docs/plans/opencode-disk-write-hotspots.md` R6。任何行为、范围、接口、测试、ownership、fallback classification 或 file plan 的实质修改都必须递增 revision、清除批准并重新执行 full-scope plan audit。
+```
+
+R7 implementation-discovered correction: slice 10 首次 red 运行证明 approved R6 的
+“`LLM.Service.stream` Effect remains failure”在当前未修复代码上就是 false。AI SDK source 与
+SessionProcessor source 证明真实合同是 `onError` logging 与 `fullStream` error event 并行，
+processor 才是 throw/failure owner。R7 只修订 §4/§5.4/§6/§10.2/§13/§15/§16/§18 的 test
+expected value；LLM production owner、bounded summary 设计、files、预算、其他九个 slices 和
+全部原始需求不变。R6 slices 1-9 的 partial implementation 保留在 worktree，但 R7 批准前
+不得继续任何 material implementation edit。
+
+### Round 6 verbatim verdict
+
+```text
+## Blocking findings
+
+### B-01 R7 的 TDD 红测与当前工作树已经漂移，无法证明计划可从现状进入可验证的 green
+
+- **Violated invariant:** 计划审计必须基于当前仓库状态，且每个 bug/regression 行为测试必须能够在当前缺陷行为上变红；`Canonical plan`、代码、测试和报告行为不得漂移。
+- **Evidence class:** observed
+- **Producer and execution path:** 当前工作树已经包含 R6 slices 1–9 的实质实现：
+  `ShellTool.run` 已经创建 `ToolProgress` 并将 live/durable delivery 分离；direct `SessionPrompt.shellImpl` 也已经使用同一协调器；`SyncEvent.run` 已经在事务提交后直接 `yield* publishEvent(...)`，不再是原计划所描述的 fire-and-forget 路径。后续测试将不再针对计划声称的原始缺陷运行。
+- **Source evidence:**
+  - `packages/opencode/src/tool/shell.ts:1112-1120,1155-1161` 已使用 `ToolProgress.make`，不再逐 chunk durable metadata。
+  - `packages/opencode/src/session/prompt.ts:1500-1524` 已使用共享 `ToolProgress` 处理 direct shell。
+  - `packages/opencode/src/sync/index.ts:169-188` 已在 transaction 返回后等待 `publishEvent`。
+  - `packages/opencode/src/tool/progress.ts:14-117` 已存在完整的 cadence/version/flush coordinator。
+  - `packages/opencode/test/session/llm.test.ts:465-542` 仍保留旧的 `failed` 断言，与 R7 要求的“底层 Stream 正常结束、error event 由 SessionProcessor 消费”不一致。
+- **Canonical-plan evidence:**
+  - §16 slices 1–9 仍把当前代码描述为逐 chunk 写入或 fire-and-forget，并要求这些行为先变红。
+  - §23:1033-1035 明确承认 slices 1–9 的 partial implementation 已存在，但 §16、§18 没有把这些已存在的实际改动纳入可审计 implementation diff。
+  - §23:1019-1025 声称 R7 只修订测试期望，但当前代码/测试仍与该期望不一致。
+- **Responsibility owner:** canonical revision 与实际 worktree/implementation-audit 边界的 owner，即计划与实施阶段的版本协调，不是 `ToolProgress`、`SyncEvent` 或 LLM 生产模块本身。
+- **Behavior-level consequence:** 如果直接批准 R7，后续实施授权会覆盖一个已经部分实现、但未按 R7 exact revision 完成验证的工作树；slices 1–9 无法再对当前状态形成有效 red-capable feedback loop，slice 10 的测试期望也仍未落地。这样无法证明“原始缺陷 → 最小修复 → green”链条，也无法满足“exact approved revision”与完整 implementation audit 门禁。
+- **Why this is not speculative:** 当前源码和测试中已经直接存在上述实现与断言；尤其 `sync/index.ts:187` 已不是计划中要修复的旧 fire-and-forget 路径，`tool/shell.ts` 与 `session/prompt.ts` 也已不再表现为逐 chunk durable 写入。
+- **Minimal correction direction:** 先使 canonical revision、实际 changed-file diff 和测试状态一致：明确 R7 的 exact implementation baseline，并将已存在的 slices 1–9 作为实际 implementation diff 纳入独立 implementation audit；或恢复到可证明原始缺陷的审计基线后再执行计划审计。不得在当前漂移状态下直接记录 R7 的 plan approval 或继续 material implementation change。
+
+## Non-blocking findings
+
+- Canonical metadata 的 `Audit mode` 写为 `full-scope`，而本次 handoff 的审计模式为 `plan`。这不改变上述 blocking drift，但在重新审计前应统一为明确的 plan-audit metadata。
+- §19 的行数估计仍只能作为计划预算，不能替代后续 implementation audit 对实际 `E`、`C` 和 diagnostic decision surface 的逐行复算。
+- 当前 R7 没有 implementation verification evidence；在 plan audit 阶段这本身不是额外 blocker，但不能被视为已验证结果。
+
+## Rejected speculation
+
+- 不要求 daemon 硬崩后继续运行或重新附着原 OS 子进程；计划 §2、§5.2、`INV-11` 已有明确 non-goal，当前没有相反的 producer 或 compatibility contract。
+- 不要求本 revision 纳入 `models.json` 内容比较；计划已有本机周期写证据，但现有材料将其界定为低频、非当前寿命主热点，且用户有 1200 行硬上限。
+- 不将 live ephemeral delivery 与 durable checkpoint 视为 fallback；二者由同一 `ToolProgress` snapshot/lifecycle 驱动，分别履行实时显示和重连恢复合同。
+- 不要求删除完成态 `state.output` 与 `state.metadata.output` 双存储；用户已明确该行为是预期行为。
+- 不要求把所有日志对象都改为全局截断；当前证据只证明 LLM stream error callsite 存在大型 request payload 写入热点。
+
+## Requirement and traceability coverage
+
+| Requirement / invariant | Independent verdict |
+|---|---|
+| 消除 shell transport chunk 驱动的 SQLite 写入热点 | 根因、两个真实 producer 和 shared cadence path 已被识别；但当前代码已部分实现，R7 的 red/green 计划与工作树不一致 |
+| 降低大型 LLM error 日志写入 | 生产 owner、8 KiB bounded summary 和敏感字段排除已有明确映射；当前测试仍保留旧的底层 failure 断言，需按 R7 重新同步 |
+| 保持实时体验 | `message.part.progress`、TUI、app、ACP 路径均有计划映射；需在一致的 implementation baseline 上验证 |
+| daemon 重连恢复 | durable checkpoint、HTTP snapshot merge、legacy version 归一化均有映射 |
+| completion/error/abort/timeout 稳定性 | coordinator close、publication ordering、terminal dominance 均有计划覆盖，但当前 partial implementation 尚未获得 R7 exact diff 的完整独立审计 |
+| 保持最终与中断 output 合同 | 计划明确保留 raw output、truncate file、model-visible output 和完成态双存储 |
+| 单一 primary path、无 fallback | 设计上满足；未发现 `try A → B` 或 catch-and-success |
+| ≤1200 行 | 计划估计约 `E≈950`、`C≥143`，满足预算；实际值仍待 implementation audit |
+| 15% 中文解释性注释 | 计划计算 `ceil(950 × 0.15)=143` 正确；当前不能把该估计当作实际 diff 结果 |
+| TDD sensitivity | **不满足当前审计状态**：slices 1–9 对应的旧缺陷已被当前 partial implementation 改变，slice 10 当前测试也仍未按 R7 期望同步 |
+
+## Primary-path and fallback verdict
+
+计划描述的 primary path 本身是合理的：
+
+```text
+producer-specific snapshot
+  -> shared ToolProgress cadence/version/lifecycle
+  -> live PartProgress + durable PartUpdated
+  -> ordered terminal transition
+```
+
+两个 shell producer 使用同一 cadence/version/lifecycle coordinator，不构成 alternate-success fallback；LLM bounded diagnostic 也仍是 diagnostic path，而不是错误恢复路径。
+
+但当前 canonical R7 不能被视为可批准的 exact plan revision，因为它同时：
+
+1. 以已不存在的旧实现作为 slices 1–9 的 red 前提；
+2. 承认 partial implementation 已存在，却没有将实际 diff 作为当前 revision 的 implementation evidence；
+3. 保留了与 R7 新合同不一致的 LLM 测试断言；
+4. 使计划审计、实施授权和后续 implementation audit 的基线不再唯一。
+
+## Release verdict
+
+**BLOCK — Canonical plan R7**
+
+必须先解决 B-01，使 canonical plan、实际工作树、测试期望和 exact revision baseline 一致；随后针对完整原始需求和全部 affected interfaces 重新执行 full-scope audit。
+```
+
+R8 resolution attempt: §1 记录用户明确授权的第 7 轮审计；§4-§8 将 initial root-cause
+evidence 与 current candidate baseline 分开；§10/§11 对齐 single-worker coordinator 与当前
+replacement paths；§15-§19、§23 记录实际 changed files、934 gross additions、历史 red→green、
+focused verification 和未完成 slice 10。R8 未更改 models cache exclusion。
+
+### Round 7 verbatim verdict
+
+```text
+## Blocking findings
+
+### B-01 已证实的 `models.json` 周期性全量覆盖被无依据排除，导致原始寿命需求未闭合
+
+- Violated invariant: `REQ-01`、用户原始需求“解决 opencode 磁盘写入的热点以及降低寿命问题”；同时违反“无确认需求遗漏映射”的 forward-traceability 门禁。
+- Evidence class: observed
+- Producer and execution path: `ModelsDev` 定时刷新 → `refresh()` 每 60 分钟执行 → `fetchAndWrite()` 获取响应正文 → `fs.writeWithDirs(filepath, text)` 无条件完整覆盖 `models.json`。
+- Source evidence: `packages/core/src/models.ts:170-174` 无条件写文件；`packages/core/src/models.ts:196-218` 定时刷新并每 60 分钟重复执行。Canonical plan §5.5（约 3.19 MB/次、约 28 GB/年）也记录了实际文件大小和周期写入证据。
+- Canonical-plan evidence: §2 第 64 行将 `models.json` 排除；§5.5、§6、§7 的 `INV-09`、§10.3、§11、§13、§20 将其定义为本 revision 外的低影响路径，但没有用户原始需求中的范围授权或足以证明其不属于寿命问题的排除条件。
+- Responsibility owner: `packages/core/src/models.ts` 的 `ModelsDev` cache owner；该模块同时拥有 fetch、内容解析、freshness 判断和文件写入，不应由 SQLite、日志或下游调用方处理。
+- Behavior-level consequence: 即使 models 内容完全未变化，opencode 仍会周期性写入完整数 MB 文件。该路径不会造成当前 shell 的高频事务热点，但确实保留了已测得的长期重复写入；因此计划不能证明已满足“降低磁盘写入及寿命问题”的完整原始需求。
+- Why this is not speculative: 生产定时器、写入调用和文件体积均有直接源码与计划证据；该写入路径可由默认服务启动实际触发，不依赖恶意输入、未来扩展或假想消费者。
+- Minimal correction direction: 在 `ModelsDev` 的文件写入 owner 处将“内容未变化时避免全量覆盖”纳入本 revision 的 requirement、production path、行为测试和预算映射；不得通过调用方绕过刷新，也不得仅以“相对 shell 热点较低”把已证实的寿命写入从宽泛用户需求中静默排除。
+
+## Non-blocking findings
+
+- §11 将 bounded LLM diagnostic 的 decision-surface 写为 `<=10%`，计划阶段可以作为估计；实施审计仍必须按实际新增或修改的 executable branches、state transitions 和 error outcomes 重新计算，不能用约 75 行代码替代。
+- §17、§19 的 `E≈950`、`C≥143` 和总量估算尚不是实际门禁结果。由于当前 worktree 已包含 slices 1–9 的 partial implementation，后续 implementation audit 必须从实际 diff 逐行排除 imports、formatter-only、generated 和 pure-move 变化后重新计算 `E` 与合格中文注释 `C`。
+
+## Rejected speculation
+
+- 不要求 daemon 进程死亡后继续执行或重新附着原 OS 子进程；当前没有相应生产协议或兼容性合同。
+- 不要求删除完成态 `state.output` 与 `state.metadata.output` 双存储；计划列出的 TUI、web share 和 interrupted Tool consumer 提供了直接行为证据，且用户明确要求保持。
+- 不要求修改 SQLite WAL、`synchronous`、checkpoint、schema 或 migration；这些不是 shell transport chunk 与 durable Part 更新之间 first divergence 的 owner。
+- 不把同一 progress snapshot 的 live ephemeral delivery 与 durable checkpoint 判定为 fallback；二者履行不同的已确认接口合同，且由同一 coordinator 驱动。
+- 不要求 ACP、ShareNext、`opencode run` 或 GitHub integration 各自新增重复 terminal guard；若 SyncEvent owner 真正保证 durable publication 顺序，下游重复实现会造成责任扩散。
+- 不要求把通用 logger 改成全局截断；当前大型 payload 的直接 producer 是 `LLM.run` 的 `onError` callsite，计划中的局部诊断路径具有更明确的责任边界。
+
+## Requirement and traceability coverage
+
+| Requirement / invariant | Independent verdict |
+|---|---|
+| 消除 ShellTool transport chunk → SQLite transaction 一比一热点 | 已定位 ShellTool first divergence，并规划 shared `ToolProgress`、50 ms live、1 s durable checkpoint |
+| 消除公开 `session.shell` direct producer 的同类热点 | 已定位 `SessionPrompt.shellImpl`，并纳入 shared coordinator 与真实 integration seam |
+| 实质降低磁盘写入及 SSD 寿命写放大 | **不完整：`models.json` 已有约 3.19 MB、每小时全量覆盖证据，却被无确认地排除** |
+| 降低大型 LLM stream error 日志写入 | 已定位 raw error object → logger JSON serialization，规划 request-body-free bounded diagnostic |
+| 保持实时体验 | 50 ms live PartProgress、latest-wins、首帧和 trailing frame 均有映射 |
+| daemon 重连后恢复最近持久化状态 | 保留 forced Session sync，并规划 1 s durable checkpoint 与 legacy version merge |
+| 旧持久化 running Part 兼容 | 已定义缺失/非法 `progressVersion` → legacy v0、strictly-newer 和 terminal dominance |
+| completion/error/abort/timeout 稳定性 | coordinator close/flush、SyncEvent after-commit publication 和 terminal ordering 均有映射 |
+| 保持 shell raw output、截断、模型可见 output 和 interrupted output | 计划明确保留相关生产路径及完成态双存储 |
+| 不削弱 SQLite durability、权限和 daemon crash 语义 | 计划明确不修改 WAL、durability、schema、权限或 OS 子进程续跑语义 |
+| 单一 authoritative primary path、无新增 fallback | Shell producer 共享同一 cadence/version/lifecycle path；未发现 `try A → B` 或 catch-and-success |
+| ≤1200 行及 15% 中文解释性注释 | 计划层面有估算，但实际 `E/C` 必须在 implementation audit 逐行复算 |
+| TDD sensitivity | ShellTool、direct shell、SyncEvent、TUI、app、ACP、ShareNext、LLM 均有行为 seam；models cache no-op 写入没有测试映射 |
+
+## Primary-path and fallback verdict
+
+ShellTool 与公开 direct `session.shell` 的设计均沿着：
+
+```text
+producer-specific snapshot
+  -> shared ToolProgress cadence/version/lifecycle
+  -> live PartProgress + durable PartUpdated
+  -> ordered terminal transition
+```
+
+这是一条一致的 primary path，没有发现失败后切换备用成功算法、catch-and-success、纯 ephemeral 替代 durable recovery 或降低 SQLite durability 的 workaround。
+
+但完整原始需求仍未闭合：`ModelsDev` 的独立生产路径继续在内容未变化时全量写入 `models.json`，且 canonical plan 仅以“低影响”和行数预算为由排除，未建立足够的需求范围证据或对应的实现/测试映射。
+
+## Release verdict
+
+**BLOCK — Canonical plan R8**
+
+R8 不能在当前证据下批准。必须递增 revision，将已证实的 `ModelsDev.fetchAndWrite` 周期性冗余写入纳入需求、owner、production path、行为测试和预算映射，或提供能够约束原始用户需求范围的明确用户授权；之后对完整原始需求及全部 affected interfaces 重新执行 full-scope plan audit。
+```
+
+Any substantive revision invalidates earlier approval.
+
+The orchestrating primary agent must copy the independent verdict without
+paraphrasing. A clean verdict may update only the administrative approval fields
+for the exact audited revision. It must not be combined with a design change.
+
+## 23. Implementation Evidence
+
+R9/R14/R16 implementation evidence remains historical. The user declared the R18 draft/audit invalid and
+later explicitly authorized `R19 + third correction commit` after a full-scope audit proved revision drift.
+R19 is the sole current revision：the two existing commits are frozen baseline evidence，the current ACP/prompt
+working-tree correction may not be committed until exact R19 plan approval、line-gate simplification、focused
+verification and full-scope implementation audit. Historical R17/R18 verdicts below do not authorize or block
+R19 except where their repository evidence has been independently re-established in the R19 delta.
+
+### Actual Files and Diff
+
+R14 frozen worktree baseline excludes `docs/plans/opencode-disk-write-hotspots.md`, generated outputs and the
+pre-existing unrelated `thirdparty/chatgpt-browser-agent` from the 1200-line hand-written count. It includes
+all tracked files in the table plus untracked `tool/progress.ts`, app `part-merge.ts` and its test；R16 final
+accounting must include their full contents rather than relying on ordinary `git diff --numstat`.
+
+| Group | Current baseline files | Current diff state |
+| --- | --- | --- |
+| shell producer/contract | `tool/tool.ts`, new `tool/progress.ts`, `tool/shell.ts` | R14 independent live/durable workers + per-worker confirmation implemented；producer/output contracts unchanged |
+| Session/event/order | `session/message-v2.ts`, `session/processor.ts`, `session/prompt.ts`, `session/session.ts`, `sync/index.ts` | implemented candidate |
+| consumers | TUI `context/sync.tsx`, `acp/agent.ts`, app `event-reducer.ts`, new app `part-merge.ts`, app `sync.tsx` | R16 ACP progress log bypass + session-scoped live/replay terminal marker implemented；TUI/app existing merge preserved |
+| backend/TUI tests | `test/tool/shell.test.ts`, `test/session/prompt.test.ts`, `test/sync/index.test.ts`, `test/cli/cmd/tui/sync.test.tsx`, `test/acp/event-subscription.test.ts`, `test/share/share-next.test.ts`, `test/session/llm.test.ts` | slices 10–15 red/green；Shell 186 pass、ACP 12 pass/28 assertions、LLM 22 pass；direct shell and both affected lifecycle tests pass under their original contracts |
+| app tests | `event-reducer.test.ts`, new `part-merge.test.ts` | 20 pass / 84 assertions |
+| SDK | `packages/sdk/js/src/v2/gen/types.gen.ts` | official repository generator output includes typed `message.part.progress`; generated `+593/-581` excluded from cap |
+
+Measured R9 baseline: tracked hand-written gross additions `814` lines plus new hand-written files
+`tool/progress.ts` 120、`part-merge.ts` 50、`part-merge.test.ts` 76，合计 `1060` gross additions。
+Independent audit recalculated R9 as `E=804`, `C=126`, `E+C=930`; R14 final conservative accounting
+is recorded in the Chinese Comment Calculation table below.
+
+Measured current R14 frozen baseline: the exact 20-file tracked list contributes `879` additions；the
+three listed untracked files contribute `113 + 50 + 76 = 239` complete lines；exact gross is `1118`。
+Generated SDK、canonical plan and unrelated submodule are excluded by the user-defined counting contract.
+
+R16 changed only `packages/opencode/src/acp/agent.ts` and
+`packages/opencode/test/acp/event-subscription.test.ts` beyond that frozen baseline. Current complete
+hand-written gross is `1274`; the user-defined effective line gate is calculated below rather than treating
+blank/import/formatter/pure-move lines as implementation code.
+
+### Red-Green Test Evidence
+
+| Slice | Red evidence actually observed before green | Current focused evidence |
+| --- | --- | --- |
+| 1 ShellTool | durable expected `<=3`, received `41` | focused 1 pass / 5 assertions；related lifecycle 28 pass |
+| 2 direct shell | running durable expected `<=3`, received `41` | focused 1 pass / 6 assertions |
+| 3 SyncEvent | publication sequence pending expected true, received false | focused 1 pass / 2 assertions；full SyncEvent 12 pass |
+| 4-5 TUI | v1 PartProgress was ignored and wait timed out | focused 1 pass / 3 assertions；full TUI sync 16 pass |
+| 6-7 app | missing `part-merge` module；reducer retained v1 instead of expected v2 | pure merge 4 pass；combined reducer/merge 20 pass |
+| 8 ACP | final live bash snapshot `ab` never arrived | focused 1 pass；full ACP subscription 12 pass |
+| 9 ShareNext | characterization test passed on first run | focused 1 pass；full ShareNext 8 pass；production unchanged |
+| 10 LLM | R9 stale assertion expected Stream failure, observed success before logging assertions | red: long IDs/response echo/whole-line inspection；green: focused 1 pass/9 assertions、full LLM 22 pass/65 assertions |
+| 11 ToolProgress confirmation | R11 audit source proof；current R9 test produced `[1,2,2]` | red: duplicate durable version；green: exactly `[1,2]` after uninterruptible confirmation |
+| 12 ToolProgress non-starvation | R13 audit source proof；current single worker timed out live v2 behind durable v1 | red: delayed-durable live timeout；green: v2 live observed before release |
+| 13 ACP monotonic merge | R13 audit exposed independent-channel reorder；current ACP emitted stale output | red: extra `stale` update；green: normalized version rejected it and terminal completed |
+| 14 ACP progress log boundary | real `Log.file` capture contained `ACP_PROGRESS_LOG_MARKER_7d1a` from PartProgress | green: live update still arrived；marker absent after sentinel；durable PartUpdated log preserved |
+| 15 ACP terminal dominance | completed→late running reopened `in_progress`; full matrix red emitted four `late-*` snapshots | green: completed/error × live/replay all reject late running；ACP full 12 pass/28 assertions |
+| 16 ACP Session identity | two registered Sessions reused `call_shared`; raw callID stores shared start/version state | green candidate: each Session observes its own pending/output with composite key |
+| 17 ACP replay version | replay v2 did not register marker before delayed event channel | green candidate: same-version stale absent、v3 visible |
+| 18 ACP pending reopen | terminal 后 late running produced synthetic pending before in_progress rejection | current focused green: ACP full `12 pass / 33 assertions`；terminal后的该call完整update slice为空 |
+
+SyncEvent 的前两次 timeout 是受控 Bus test 自身留下 blocked publication fiber；该 test-only
+harness 已被替换为 finite `convertEvent` delay，随后才得到上表中针对 production
+fire-and-forget 的稳定 red。TUI 首次 setup 未建立 tracked Session，修正 fixture 后才得到
+PartProgress ignored 的稳定 red；二者都不计作 production red evidence。
+
+### Verification Commands and Results
+
+| Command / cwd | Current result |
+| --- | --- |
+| `bun test test/tool/shell.test.ts --test-name-pattern "coalesces shell progress" --timeout 30000` / `packages/opencode` | pass 1；5 assertions；R14 ToolProgress focused tests also pass 2 |
+| `bun test test/tool/shell.test.ts --test-name-pattern "basic\|truncat\|abort\|timeout" --timeout 30000` / `packages/opencode` | pass 28；86 assertions |
+| `bun test test/session/prompt.test.ts --test-name-pattern "coalesces direct shell progress" --timeout 30000` / `packages/opencode` | pass 1；6 assertions |
+| `bun test test/session/llm.test.ts --timeout 30000` / `packages/opencode` | pass 22；65 assertions |
+| `bun test test/tool/shell.test.ts --timeout 30000` / `packages/opencode` | pass 186；671 assertions |
+| full affected backend command from §18 / `packages/opencode` | historical aggregate timeout after 180s；the failures are unchanged prompt fixtures outside this implementation diff and are not converted to pass |
+| `bun test test/session/prompt.test.ts --test-name-pattern "glob tool keeps instance context during prompt runs" --timeout 30000` / `packages/opencode` | isolated fail at internal 10s；proves failure is not caused by parallel affected suites |
+| `bun test test/session/prompt.test.ts --test-name-pattern "loop waits while shell runs and starts after shell exits" --timeout 30000` / `packages/opencode` | pass 1；5 assertions；original per-test `10_000` contract preserved |
+| `bun test test/session/prompt.test.ts --test-name-pattern "shell completion resumes queued loop callers" --timeout 30000` / `packages/opencode` | pass 1；6 assertions；original per-test `10_000` contract preserved |
+| `bun test test/sync/index.test.ts --timeout 30000` / `packages/opencode` | pass 12；23 assertions |
+| `bun test test/cli/cmd/tui/sync.test.tsx --timeout 30000` / `packages/opencode` | pass 16；40 assertions |
+| `bun test --preload ./happydom.ts ./src/context/global-sync/event-reducer.test.ts ./src/context/global-sync/part-merge.test.ts` / `packages/app` | pass 20；84 assertions；informational only，APP 不属于本分支 release gate |
+| `bun test test/acp/event-subscription.test.ts --test-name-pattern "streams live shell progress" --timeout 30000` / `packages/opencode` | slice 14 red marker-in-log → green；slice 15 red four late snapshots → green；1 pass/2 assertions |
+| `bun test test/acp/event-subscription.test.ts` / `packages/opencode` after R19 terminal correction | pass 12；33 assertions |
+| `bun typecheck` / `packages/opencode` | pass |
+| `bun typecheck` / `packages/app` | pass；informational only，APP 不属于本分支 release gate |
+| `bun typecheck` / `packages/sdk/js` | pass |
+| `bun run build` / `packages/app` | fail after authorized frozen install: package-local `node_modules/vite/bin/vite.js` still missing；informational only，APP 不属于本分支 release gate |
+| `bun ../../node_modules/vite/bin/vite.js build` / `packages/app` | success in 51.03s using installed root Vite；informational only，不能替代或阻塞本分支 release |
+| `bun ./script/build.ts` / `packages/sdk/js` | pass after clearing inherited worker-only `OPENCODE_PROCESS_ROLE`/`OPENCODE_RUN_ID` from the generator subprocess；OpenAPI、Hey API client、Prettier and TypeScript stages completed；only `types.gen.ts` differs from HEAD |
+| `bun typecheck` / `packages/sdk/js` after official generation | pass；official output contains typed `EventMessagePartProgress` |
+
+完整本分支 affected behavior slices 均已单文件通过；slices 10–15、两个 shell/loop lifecycle tests、
+opencode/sdk typechecks、direct shell、SyncEvent、TUI、ACP、ShareNext、LLM、official SDK generator 和
+direct root-Vite informational bundle 已 green。`prompt.test.ts --test-name-pattern "shell"` 的聚合运行仍会让
+两个未改测试在各自内部 10 秒预算触顶，但同一测试在原合同下分别通过；未修改测试时限或生产行为。
+
+### Original Feedback-Loop Result
+
+The original pre-change runtime produced 40 redraws -> `42` net transactions / `51` WAL frames. After the
+user prohibited global-database/process operations，R19 used only the already-created isolated
+`D:\Temp\opencode\disk-write-*.db` artifact for read-only WAL parsing；no service or existing process was
+started/stopped. The 12 workload commits are exactly：9 required Project/Message/RequestUsage/initial/terminal
+lifecycle commits + 3 `part`-only running progress commits. Therefore the owner-level hotspot changed from
+40 chunk-proportional writes to the contracted `<=3` bounded running checkpoints；the remaining nine are
+independent fixed behavior that R19 must preserve. These are logical SQLite/WAL measurements，not NAND bytes.
+
+### Actual Secondary and Replacement Path Inventory
+
+| Path | Actual R9 baseline classification | Status |
+| --- | --- | --- |
+| ShellTool snapshot -> shared ToolProgress -> independent live/durable delivery | primary | R14 implemented；focused and full ShellTool tests green |
+| direct shell raw snapshot -> same ToolProgress | supported-domain primary branch | implemented candidate |
+| server.connected -> HTTP persisted Part recovery | existing compatibility | preserved |
+| legacy progressVersion=0 merge | persisted-data compatibility | implemented candidate |
+| ToolProgress independent delivery/version confirmation | primary lifecycle boundary | R14 two-worker + uninterruptible acknowledgement implemented；focused red→green |
+| ACP monotonic shell merge | dual-channel store boundary | R16 normalized running + retained terminal marker implemented；pending/close cleanup；full ACP green |
+| ACP PartProgress log bypass | diagnostic boundary | R16 implemented；live payload absent from real file log；existing durable PartUpdated log/global logger preserved |
+| bounded LLM diagnostic | diagnostic, R14 target <=3 decisions | fixed literals/numeric fields/no raw extras implemented；full LLM suite green |
+| alternate success/fallback | forbidden | none observed in baseline；implementation audit required |
+
+### Chinese Comment Calculation
+
+| Metric | Actual | Exclusions and evidence |
+| --- | --- | --- |
+| Final gross hand-written additions | 1282 | exact 22 hand-written paths；generated/plan/unrelated submodule excluded |
+| Final effective code `E` | 1040 | nonblank/non-comment/non-import additions；conservative，未额外扣除 pure-move |
+| Final qualifying Chinese comments `C` | 157 | `ceil(1040×0.15)=156`；邻近 identity、version、terminal、test-intent boundaries |
+| Final gate | `E+C=1197<=1200` | exact post-simplification recount；通过 |
+
+### Remaining Unverified Items
+
+- third non-APP correction commit；不得 amend既有两笔 commits，不得 push。
+
+## 24. Implementation Audit Record
+
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | R9 | yes | B-01/B-02/B-03 | full verification、diagnostic surface、baseline consistency | BLOCK | `ses_098d1565fffezcpf3dF0iFGRj4` |
+| 2 | R14 | yes | B-01/B-02/B-03/B-04 | focused suite results、primary-path and E/C gates | BLOCK | `ses_096ce2054ffeMqsx1BbJ0tuy66` |
+| 3 | R16 | yes | B-01 | full release verification、official build/generator/WAL gates | BLOCK | `ses_0960081caffeT7QpM0N0OMP47h` |
+| 4 | R16 scope correction | round 3 full scope | B-01 non-Models verification remains open | ModelsDev scope finding is resolved only | OPEN | current user: Models blocker passes；all non-Models blockers do not |
+| 5 | R19 | yes | none | working-tree correction尚未commit；APP informational；ModelsDev stable exclusion | APPROVE | `ses_094d1b97effee8cgcAbn27Mezd` |
+
+The task may be marked `verified` only after an independent full-scope result of
+`No blocking findings` for the current implementation and approved plan
+revision.
+
+### R19 Final Verbatim Implementation Verdict
+
+```text
+## Blocking findings
+
+No blocking findings.
+
+## Non-blocking findings
+
+- 当前工作树仍包含未提交的 R19 correction diff；本审计只覆盖该 exact working-tree scope，不代表已完成提交或后续提交后的新变更。
+- `packages/app` 相关变更、测试和构建结果按用户明确范围作为 informational scope，不纳入本分支 release gate；其变更仍应与非 APP 路径保持独立提交。
+- `models.json` 每小时未变化全量覆盖继续保留，但这是用户明确授权排除的稳定 scope contract，不构成本轮阻塞项。
+- 完整历史验证记录中，`packages/app` package-local Vite build 曾失败，但用户明确排除 APP 发布；root Vite informational build 已有成功记录。
+- 当前没有执行新的测试、typecheck、build 或 generation；这是遵循本轮用户的只读命令限制。审计采用 canonical R19 中已记录的 focused/full verification evidence，并对当前 source/diff 做独立静态检查。
+
+## Rejected speculation
+
+- 不要求 daemon 死亡后重新附着原 OS shell 子进程；当前真实合同是恢复最近持久化的 Session 状态。
+- 不要求删除完成态 `state.output` 与 `state.metadata.output` 双存储；用户明确确认该行为是预期行为，且 TUI、ShareNext 和 interrupted Tool 路径存在真实消费者。
+- 不要求重新纳入 `ModelsDev`；用户已逐路径明确排除该生产路径。
+- 不要求修改 WAL、SQLite durability、`synchronous`、schema、migration 或权限语义；当前热点 first divergence 位于 shell/direct-shell snapshot 到 durable Part 更新的 producer seam。
+- 不要求在通用 logger 增加全局截断；LLM bounded diagnostic 已在其 observability owner 内限制 tag 和错误摘要。
+- 不要求为不存在的 hostile producer、异常 getter、未来 error shape 或理论上的跨实例输入增加重复 guard。
+- 不将 live `PartProgress` 与 durable `PartUpdated` 判定为 fallback；二者由同一 `ToolProgress` latest/version lifecycle 驱动，分别承担实时显示和 daemon reconnect recovery。
+- 不将 TUI、app、ACP 的 merge/terminal guards 判定为 competing success algorithms；它们分别位于各自独立的 HTTP/SSE、ACP lifecycle 消费 seam。
+
+## Primary-path and fallback verdict
+
+Authoritative shell progress path remains:
+
+producer-specific snapshot
+  → shared ToolProgress latest/version/lifecycle
+  → independent live PartProgress + durable PartUpdated workers
+  → close/trailing flush
+  → existing terminal PartUpdated
+
+The audit found no primary-path disablement, failure-triggered alternate success path, parser/decoder retry family, catch-and-default success, SQLite durability workaround, hidden configuration switch, duplicate ACP lifecycle algorithm, or obsolete R19 queued-loop production change.
+
+Primary-path verdict: PASS.
+
+## Code quality and Chinese-comment verdict
+
+- Current R19 diff is restricted to the approved ACP owner/test correction, exact prompt-test rollback, and canonical plan metadata.
+- ACP identity, replay version, pending-before-terminal ordering, and close cleanup are implemented locally in `packages/opencode/src/acp/agent.ts`.
+- Tests observe behavior through public ACP event/load-session seams rather than private helper calls.
+- No assertion weakening, permission weakening, durability weakening, or unrelated production fallback was introduced.
+- The prompt test changes restore the R16 baseline (`Effect.sleep(50)` and `10_000`) rather than adding a new readiness design or relaxing production behavior.
+- Effective line calculation: `E=1040`, qualifying Chinese explanatory comments `C=157`, required minimum `156`, total `1197`.
+
+Code-quality verdict: PASS.
+
+Chinese-comment gate: PASS.
+
+## Release verdict
+
+APPROVE — exact R19 implementation diff plus current working-tree correction scope.
+
+This approval is limited to the audited implementation range `6c44755b05..cc6bcd9d23` plus the current working-tree changes in:
+
+- `docs/plans/opencode-disk-write-hotspots.md`
+- `packages/opencode/src/acp/agent.ts`
+- `packages/opencode/test/acp/event-subscription.test.ts`
+- `packages/opencode/test/session/prompt.test.ts`
+
+No subsequent implementation changes are covered.
+```
+
+### User-Directed Scope Correction
+
+The current user correction resolves only the earlier `ModelsDev` scope finding: that path remains excluded.
+It did not waive the R16 implementation-audit B-01 findings outside ModelsDev. Those prompt behavior、SDK
+repository generator and current-source WAL gates have since been closed by the evidence in §23；the official
+App build is outside this branch's release concern. APP changes already present in the worktree are retained
+without rollback, but APP tests/build are informational for this GOAL and their files must be committed
+separately from the non-APP implementation.
+
+### Round 1 verbatim implementation verdict
+
+```text
+## Blocking findings
+
+### B-01 必需的完整验证仍未通过
+
+- Violated invariant: 实现只有在完整 affected regression、构建、SDK generation 和原始反馈回路均通过后才能发布；不能用 focused tests 或 typecheck 代替失败或未执行的必需验证。
+- Evidence class: observed
+- Producer and execution path:
+  - `bun test test/session/prompt.test.ts test/tool/shell.test.ts test/sync/index.test.ts test/cli/cmd/tui/sync.test.tsx test/acp/event-subscription.test.ts test/share/share-next.test.ts test/session/llm.test.ts --timeout 30000`
+    → 运行 338 个测试，`323 pass / 13 skip / 2 fail`，退出码 1。
+  - `packages/app/package.json#build`
+    → `vite build`
+    → 缺少 `packages/app/node_modules/vite/bin/vite.js`
+    → 退出码 1。
+  - `packages/sdk/js/script/build.ts`
+    → 写入 `openapi.json`、清空并重新生成 `src/v2/gen`、运行 Prettier、删除 `dist`
+    → 与本轮“不修改 generated files/worktree”的授权约束冲突，因而未执行，repository generation command 仍无通过证据。
+  - 原始 WAL-index feedback loop 没有针对已加载 R9 源码的 runtime 得到 green；canonical evidence 仍只记录旧 runtime 的 `42` net transactions / `51` WAL frames。
+- Source evidence:
+  - `packages/opencode/test/session/prompt.test.ts:777`
+  - `packages/opencode/test/session/prompt.test.ts:4096`
+  - `packages/app/package.json:11-20`
+  - `packages/sdk/js/script/build.ts:14-21`
+  - `packages/sdk/js/script/build.ts:43-48`
+- Canonical-plan evidence: §18:648-667；§23:1287-1317、§23:1339-1344
+- Responsibility owner: repository verification/release gate；各失败测试、App dependency environment、SDK generation workflow 和真实 ShellTool→SQLite feedback loop 分别拥有自己的验证结果，不能由 focused test 或计划叙述替代。
+- Behavior-level consequence: 当前 diff 尚不能证明“不影响体验或稳定性、整体行为”，也没有在真实 SQLite transaction/WAL seam 上证明原始热点已经由 red 变 green。App production bundle 和 repository SDK generation 同样未经成功验证。
+- Why this is not speculative: 本轮独立复跑直接得到两个测试失败和 App build 失败；SDK build 脚本的写入行为由源码直接证明；canonical plan 明确记录 candidate runtime 的 WAL green 仍缺失。
+- Minimal correction direction: 在不修改验证门禁的前提下，使 canonical §18 列出的完整 affected suite、App build、repository SDK generation 检查及加载 R9 candidate 的原始 WAL feedback loop全部成功，并重新进行 full-scope implementation audit；不得以 focused pass、等价生成流程或旧 runtime 结果替代。
+
+### B-02 Canonical R9 对 LLM slice 的当前状态自相矛盾并与实际 diff 漂移
+
+- Violated invariant: canonical plan、代码、测试和 reported behavior 必须描述同一个 exact approved implementation baseline；实质实现决定不能同时被标记为“未修改/唯一未完成”和“已完成 candidate”。
+- Evidence class: observed
+- Producer and execution path: AI SDK `streamText.onError` → `streamErrorSummary(error)` → bounded logger payload。该生产修改已经存在并由新增 HTTP 500 测试覆盖，但 R9 的 current-baseline 和 reverse-traceability 部分仍把 raw logging 描述为当前唯一未完成行为。
+- Source evidence:
+  - `packages/opencode/src/session/llm.ts:359-364`
+  - `packages/opencode/src/session/llm.ts:480-552`
+  - `packages/opencode/test/session/llm.test.ts:465-545`
+- Canonical-plan evidence:
+  - §5.6:234-251，尤其 `:247-248` 声称 LLM callsite 尚未修改、是唯一未完成 production slice。
+  - §14:549-560，尤其 `:560` 再次称 bounded diagnostic 是唯一未完成 concept。
+  - 与 §15:582、§16:619、§23:1248-1280 声称 slice 10 已完成直接矛盾。
+- Responsibility owner: canonical revision 与 implementation baseline 的版本协调 owner。
+- Behavior-level consequence: R9 不能唯一回答本轮到底是在审计九个已完成 slice 加一个待实现 slice，还是完整 slices 1–10。因而无法满足“每个 diff hunk 映射到 exact approved revision”以及“无 material implementation decision only in chat”的发布门禁。
+- Why this is not speculative: 矛盾同时存在于当前 canonical 文件和当前生产源码；不是历史聊天摘要或未来风险。
+- Minimal correction direction: 使 exact canonical revision 对 LLM production/test baseline 的状态保持唯一且与实际 diff 一致；任何实质 canonical 修订必须按政策处理 revision/approval，不得只依靠 handoff 描述覆盖冲突正文。
+
+### B-03 Bounded LLM diagnostic 超过 10% diagnostic decision-surface 硬上限
+
+- Violated invariant: 新 diagnostic behavior 最多只能占 changed production decision surface 的 10%；计划中的 `<=10%` 估计不能替代 implementation audit 的实际复算。
+- Evidence class: observed
+- Producer and execution path: AI SDK `onError(unknown)` → `streamErrorSummary` → bounded logger payload。当前路径包含 wrapper unwrap、字段类型分支、cause 分支、response preview 分支、四级 `fits` 缩减路径、UTF-8 prefix 分支。
+- Source evidence:
+  - `packages/opencode/src/session/llm.ts:359-364`
+  - `packages/opencode/src/session/llm.ts:480-552`
+  - `.opencode/policy/first-principles-engineering.md:253-275`
+- Canonical-plan evidence: §10.2:469-492；§11:516-520；§23:1327
+- Responsibility owner: `LLM.run` observability callsite owns bounded diagnostic semantics；implementation audit owns actual diagnostic-budget calculation。
+- Behavior-level consequence: 该 diagnostic 不是简单的有界日志投影，而是当前 production diff 中约三分之一的决策面。即使它不改变错误传播，也违反 repository 的 hard complexity gate，不能发布。
+- Why this is not speculative: 按“每个新增/修改 executable branch、helper path、state transition 或 error outcome 计一个 decision”复算，LLM diagnostic 有 23 个决策点；完整 changed production decision surface 共 70 个，实际比例为 `23/70 = 32.86%`。即使把边界表达式按更宽松方式合并，该比例也不可能降到 10%。
+- Minimal correction direction: 在 `LLM.run` observability owner 内把 diagnostic 决策面收敛到政策允许的比例，同时保持 request-body-free、整行上限和原始 error event 传播；不得增加另一个日志解析或失败后备用诊断路径。
+
+## Non-blocking findings
+
+- 本轮独立复跑中，新增/相关 App tests 为 `20 pass / 0 fail / 84 assertions`。
+- `packages/opencode`、`packages/app`、`packages/sdk/js` 的 `bun typecheck` 均通过。
+- 完整 backend regression 的失败数由 canonical plan 记录的四个降至本轮两个，但只要必需 suite 仍以非零退出，release gate 就不能视为通过。
+- `git status --short` 在验证前后保持同一 changed-file集合；本轮没有修改 production、tests、config、migration、generated files 或 Git index。
+
+## Rejected speculation
+
+- 不要求 daemon 进程死亡后继续执行或重新附着原 OS 子进程；当前只有恢复最近持久化 Session 状态的合同。
+- 不要求删除完成态 `state.output` 与 `state.metadata.output` 双存储；用户已明确要求保持，且 TUI、share 和 interrupted Tool 存在真实消费者。
+- 不把 live `message.part.progress` 与 durable `message.part.updated` 判定为两个竞争成功路径；它们由同一 `ToolProgress` latest snapshot 驱动，分别承担实时显示与重连恢复。
+- 不要求修改 SQLite WAL、`synchronous`、checkpoint 或 schema；ShellTool/direct shell 的 first divergence 位于 transport chunk 到 durable metadata update 的 producer seam。
+- 不重新把 `models.json` 纳入 R9；本次 handoff 含用户对 R8 scope finding 的明确 override，审计该 exact override，而不是再次扩大范围。
+- 不因理论上的 hostile `Error.toString()`、异常 logger prefix 或未来 Tool metadata producer 增加 guard；没有当前 producer/reachability 证据支持这些额外实现。
+
+## Requirement and traceability coverage
+
+| Requirement / invariant | Independent verdict |
+|---|---|
+| 消除 ShellTool chunk→SQLite transaction 一比一热点 | 生产路径已改为 `TerminalDisplay → ToolProgress → live/durable delivery`，focused test 通过；真实 candidate WAL loop 尚未 green，验证未闭合 |
+| 消除公开 direct `session.shell` 的同类热点 | 已复用同一 `ToolProgress` cadence/version/lifecycle，相关 integration test 在完整运行中未失败 |
+| 降低大型 LLM error 文件写入 | raw object 已替换为 bounded summary，HTTP 500 test 未失败；但 canonical baseline 漂移且 diagnostic budget 为 32.86%，不满足 release gate |
+| 保持实时体验 | 50ms live PartProgress、TUI/app/ACP consumers 均有生产映射和测试；完整 suite 仍有两个失败 |
+| daemon reconnect 恢复 | durable checkpoint 与 HTTP Session refresh 路径保留；legacy v0、strictly-newer 和 terminal dominance 有 TUI/app tests |
+| completion/error/abort/timeout 稳定性 | coordinator close/flush 和 after-commit publication 已实现；完整 regression 尚未全绿 |
+| 保持最终/中断 output 行为 | ShellTool raw/truncate/model output 和 direct-shell raw output 路径仍存在；focused assertions通过 |
+| App HTTP/SSE 单调合并 | event reducer 与 `loadMessages` 复用 `mergePartSnapshot(s)`；App 20 tests 全绿 |
+| ACP/ShareNext terminal order | ACP 接收 typed progress，ShareNext characterization 保留 terminal；相关测试未失败 |
+| SQLite durability/权限/daemon 语义不削弱 | 未修改 WAL/schema/migration/permission；未发现新增 fallback |
+| SDK typed event | generated diff 含 `EventMessagePartProgress` 且 SDK typecheck 通过；repository generation command 未验证 |
+| 1200 行硬上限 | 通过，见下节 |
+| 15% 中文解释性注释 | 通过，见下节 |
+| 完整稳定性与 release verification | **不通过**：两个必需测试失败、App build 失败、SDK repository generation 和 candidate WAL green 缺失 |
+
+## Primary-path and fallback verdict
+
+Shell progress 的 authoritative primary path 为：
+
+```text
+ShellTool TerminalDisplay / direct-shell raw accumulated snapshot
+  → shared ToolProgress latest state + progressVersion
+  → live PartProgress + durable PartUpdated checkpoint
+  → close/trailing flush
+  → existing terminal PartUpdated
+```
+
+未发现 `try A → B`、catch-and-success、隐藏功能关闭、纯 ephemeral 替代 durable recovery、第二数据源或 SQLite durability workaround。
+
+LLM error 仍沿原始 AI SDK error event 到 `SessionProcessor` failure owner；bounded logger summary 不产生成功结果，因此其多级缩减属于 diagnostic path，而不是 alternate-success fallback。不过其实际 decision-surface 比例为 `32.86%`，超过硬上限。
+
+## Code quality and Chinese-comment verdict
+
+### 独立行数复算
+
+从实际 hand-written diff 计算：
+
+- Gross additions：`1060`
+- 非空 added/modified lines：`993`
+- import-only：`14`
+- Chinese comment candidates：`128`
+- 初始非注释、非空、非 import code denominator：`851`
+- 同文件、忽略缩进后确认的 pure-move code：`47`
+- pure-move Chinese comments：`2`
+- **实际 `E = 851 - 47 = 804`**
+- **实际 qualifying `C = 128 - 2 = 126`**
+- 要求：`ceil(804 × 0.15) = 121`
+- 比例：`126 / 804 = 15.67%`
+- 用户 1200 行口径：`E + C = 930 ≤ 1200`
+
+Generated SDK、canonical plan、blank、import-only、两行 pure-move comments 和 47 行 pure-move code 均未计入。剩余中文 comments 分布在 cadence、flush、delivery boundary、legacy version、terminal dominance、HTTP/SSE merge、SyncEvent publication、LLM logging 和行为测试附近，解释真实约束而非集中填充。
+
+**Chinese-comment gate：PASS。**
+
+### 其他代码质量
+
+- 三个 package typecheck：PASS。
+- App focused tests：PASS。
+- 完整 affected backend regression：FAIL。
+- App production build：FAIL。
+- Repository SDK generation：未验证。
+- Original candidate WAL feedback loop：未验证。
+- Diagnostic decision-surface gate：FAIL。
+- Canonical/code consistency gate：FAIL。
+
+**整体 code-quality/release gate：FAIL。**
+
+## Release verdict
+
+**BLOCK — R9 implementation**
+
+该结论仅适用于当前 R9 canonical plan 与本轮实际 implementation diff。必须解决 B-01、B-02、B-03，并针对原始需求及完整 affected interface 重新执行 full-scope implementation audit。
+```
+
+### Round 2 verbatim plan verdict
+
+```text
+## Blocking findings
+
+### B-01 已证实的 `models.json` 周期性全量写入仍被无明确授权地排除
+
+- Violated invariant: 原始需求要求“解决 opencode 磁盘写入的热点以及降低寿命问题”；所有已确认且属于该范围的写入路径必须具有 production/test 映射，不能仅因其低于首要热点而排除。
+- Evidence class: observed
+- Producer and execution path: 默认 `ModelsDev.defaultLayer` 启动服务 → scoped fiber 首次执行并每隔 60 分钟调用 `refresh()` → `fetchAndWrite()` 获取完整响应文本 → `fs.writeWithDirs(filepath, text)` 无条件覆盖 `models.json`。默认 AppRuntime 和 HTTP Server 均提供该 layer。
+- Source evidence:
+  - `packages/core/src/models.ts:122-127`
+  - `packages/core/src/models.ts:170-174`
+  - `packages/core/src/models.ts:196-218`
+  - `packages/opencode/src/effect/app-runtime.ts:64-81`
+  - `packages/opencode/src/server/routes/instance/httpapi/server.ts:187-210`
+- Canonical-plan evidence:
+  - §1:57-62
+  - §2:72
+  - §5.5:227-232
+  - §10.3:499-503
+  - §11:523
+  - §13:548
+  - §20:700-702,725-726
+- Responsibility owner: `packages/core/src/models.ts` 的 `ModelsDev` cache owner；该模块同时拥有 fetch、freshness、文件路径和写入行为。
+- Behavior-level consequence: 即使远端内容完全不变，默认常驻进程仍会周期性覆盖约 3.19 MB 文件；按计划自己的测量，上限约为 28 GB/年。因此 shell 和 LLM 热点修复后，计划仍不能证明完整满足长期磁盘寿命需求。
+- Why this is not speculative: 定时生产者、默认 layer 可达性、无条件写入以及本机文件大小/mtime 都有直接证据。当前提供的逐字原始需求没有排除该路径；计划引用的“进入实施，我认为 audit 在鸡蛋里面挑骨头”没有明确表达“允许保留内容未变化时的 `models.json` 全量覆盖”，不能作为精确范围授权。
+- Minimal correction direction: 在 `ModelsDev` 写入 owner 处将“内容未变化时不覆盖文件”纳入本 revision 的需求、生产路径、行为测试和预算映射；或者取得明确点名该生产路径及保留行为的用户授权。不得通过停用刷新、调用方绕过或降低文件系统 durability 处理。
+
+### B-02 计划声明的 8 KiB 整行上限没有覆盖同一 callsite 的无界日志标签
+
+- Violated invariant: `INV-07` 和 §10.2 声明 LLM 异常日志整行不超过 8 KiB；测试必须对生产接口的完整输出敏感，而不能只约束 summary JSON。
+- Evidence class: reachable
+- Producer and execution path: 用户配置产生无长度限制的 Agent 名、ProviderID 和 ModelID → `LLM.run` 将这些值写入 cloned logger tags → `onError` 写入最多 6 KiB 的 summary → logger 将全部 tags、summary、时间及 level 拼成同一行。summary 的 6 KiB cap 不限制先前 tags。
+- Source evidence:
+  - `packages/opencode/src/agent/agent.ts:32-52`
+  - `packages/opencode/src/provider/schema.ts:5-30`
+  - `packages/opencode/src/session/llm.ts:79-91`
+  - `packages/core/src/util/log.ts:150-166`
+  - `packages/core/src/util/log.ts:179-182`
+- Canonical-plan evidence:
+  - §10.2:470-489
+  - §13:546
+  - §16:626
+  - §18:666
+- Responsibility owner: `LLM.run` observability callsite；它创建这些 tags，同时承诺该 callsite 的整行磁盘写入上限。
+- Behavior-level consequence: 合法但较长的 Agent、Provider 或 Model 标识可单独使日志行超过 8 KiB，即使 bounded summary 完全符合 6 KiB 预算。计划中的 HTTP 500 测试只使用短标识，仍会通过，因而不能证明宣称的整行写入上限。
+- Why this is not speculative: Agent、ProviderID 和 ModelID 的 schema 都只约束为字符串，没有长度上限；这些值直接到达 `l.tag(...)`，且通用 logger不做截断。该路径不依赖 hostile getter、异常序列化器或未来扩展。
+- Minimal correction direction: 让 LLM observability owner 的字节预算覆盖它实际生成的完整日志行及所有无界字段，并补充能对当前遗漏变红的行为测试；不得把全局 logger 改成无差别截断，也不得增加失败后备用 logger。
+
+### B-03 R10 没有给出 exact revision 的 `E` 与最低 `C` 估计
+
+- Violated invariant: canonical plan 必须为当前 exact revision 估计有效改写行数 `E` 和最低合格中文解释性注释数 `C >= ceil(E × 0.15)`；历史 implementation 数字和“实施后再计算”不能替代计划门禁。
+- Evidence class: contracted
+- Producer and execution path: R10 将现有约 75 行 LLM diagnostic owner 替换为目标不超过 45 行的新实现 → 该替换会改变有效代码行 `E`、合格注释 `C` 和注释最低要求 → §17/§19 只保留 R9 的 `E=804/C=126`，要求 R10 完成后重新计算，没有给出 R10 预计值。
+- Source evidence: `.opencode/policy/first-principles-engineering.md:500-549`
+- Canonical-plan evidence:
+  - §15:588
+  - §17:633-641
+  - §19:680-694
+- Responsibility owner: canonical plan 的 diff/comment budget。
+- Behavior-level consequence: 实施者没有 R10 exact revision 的计划期注释下限和有效改写预算，审计也无法确认 R10 在实施前已为 15% 门禁预留足够、邻近且有意义的中文解释性注释。
+- Why this is not speculative: R10 明确要求实质替换 LLM diagnostic owner，因此 R9 的实际 `E/C` 必然不是 R10 的 exact estimate；政策明确要求在 canonical plan 中估计，而不是只给最终公式。
+- Minimal correction direction: 按 R10 计划中的实际替换范围给出预计 `E`、`ceil(E × 0.15)` 对应的最低 `C`、预计总量及邻近注释位置；实施审计仍须重新计算 actual 值。
+
+## Non-blocking findings
+
+- R10 对 diagnostic decision surface 给出的 `<=7` 和 `<=10%` 只是计划目标。实施审计必须根据最终 production diff 重新计算所有新增/修改分支、helper path、状态转换和错误结果。
+- R10 已正确记录 App build、SDK repository generator、完整 prompt regression 和 candidate runtime WAL feedback loop仍未验证；这些不是 plan-mode 的独立新增 blocker，但在 implementation release 前必须全部闭合。
+
+## Rejected speculation
+
+- 不要求 daemon 进程死亡后继续执行或重新附着原 OS 子进程；现有生产合同只支持恢复最近持久化的 Session 状态。
+- 不要求删除完成态 `state.output` 与 `state.metadata.output` 双存储；用户明确要求保持，且 TUI、share 和 interrupted Tool 存在真实消费者。
+- 不把同一 `ToolProgress` snapshot 的 live `PartProgress` 与 durable `PartUpdated` 判为 fallback；它们分别履行实时显示和重连恢复合同，并非主路径失败后竞争成功。
+- 不要求修改 SQLite WAL、`synchronous`、checkpoint、schema 或 migration；shell first divergence 位于两个 chunk producer 到 durable Part update 的边界。
+- 不要求通用 logger 全局截断。B-02 只要求承诺 8 KiB 上限的 LLM callsite 对自己生成的完整行负责。
+- 不因理论上的异常 getter、循环 object 或未来 Provider error shape 要求递归 guard；当前没有相应可达证据。
+
+## Requirement and traceability coverage
+
+| Requirement / invariant | Audit verdict |
+|---|---|
+| 消除 ShellTool chunk→SQLite transaction 一比一热点 | 已定位 first divergence；规划并已有 candidate `TerminalDisplay → ToolProgress → live/durable delivery` |
+| 消除公开 direct `session.shell` 的同类热点 | 已覆盖 `SessionPrompt.shellImpl`，复用同一 cadence/version/lifecycle owner |
+| 实质降低长期磁盘写入与寿命损耗 | **不完整：默认 `models.json` 周期性无条件覆盖仍被无明确授权地排除** |
+| 降低大型 LLM error 日志写入 | owner 和 bounded fixed-field 方向正确；但整行 8 KiB 合同未覆盖无界 tags |
+| 保持实时体验 | 50 ms latest-wins live delivery、首帧和 trailing snapshot 有生产与测试映射 |
+| daemon 重连恢复 | 1 秒 durable checkpoint、forced Session sync 和 legacy v0 merge 有映射 |
+| completion/error/abort/timeout 稳定性 | coordinator close/flush、single permit、after-commit publication 和 terminal dominance 有映射 |
+| 保持最终及中断 output 行为 | raw output、truncate、model-visible output、TerminalDisplay 及完成态双存储均明确保留 |
+| App HTTP/SSE 乱序 | reducer 与 HTTP `loadMessages` 共用 Part merge owner，具有行为测试映射 |
+| ACP/ShareNext terminal order | SyncEvent owner 提供 durable order；ACP live progress 和 ShareNext coalescing 有测试映射 |
+| SQLite durability、权限及 crash 语义不削弱 | 未规划修改 WAL、schema、migration、permission 或跨进程 shell continuation |
+| 单一 authoritative primary path | shell 路径满足；未发现 alternate-success fallback |
+| TDD sensitivity | shell、direct shell、SyncEvent、TUI、app、ACP、ShareNext 和 LLM 均有行为 seam；models no-op write 和完整日志 prefix cap 缺少 red-capable 测试 |
+| 1200 行硬上限 | R9 historical actual 满足；R10 projected gross 低于上限，但 exact `E/C` 估计缺失 |
+| 15% 中文解释性注释计划 | **不满足：只记录 R9 actual 和最终公式，未给出 R10 exact estimate 与最低 `C`** |
+
+## Primary-path and fallback verdict
+
+Shell progress 的设计保持一条 authoritative path：
+
+```text
+ShellTool TerminalDisplay / direct-shell raw snapshot
+  → shared ToolProgress latest state + progressVersion
+  → live PartProgress + durable PartUpdated checkpoint
+  → close/trailing flush
+  → existing terminal PartUpdated
+```
+
+未发现 `try A → B`、catch-and-success、隐藏功能关闭、纯 ephemeral 替代 durable recovery、第二数据源或 SQLite durability workaround。
+
+LLM fixed-field summary 和超出 byte budget 后的固定 minimal summary 都只产生诊断输出，不产生业务成功，因此不构成 alternate-success fallback。不过其完整日志行预算尚未闭合。
+
+`ModelsDev` 是另一条独立、真实可达的磁盘写入生产路径；它不是 shell primary path 的 fallback，但属于原始寿命需求中尚未覆盖的生产责任。
+
+## Code quality and Chinese-comment verdict
+
+本轮是 plan audit，不对当前 implementation diff 给出 clean code-quality verdict，也不复用 R9 implementation audit 的 actual `E/C` 作为 R10 结果。
+
+计划当前记录：
+
+- R9 historical actual：`E=804`、`C=126`、要求 `ceil(804×0.15)=121`。
+- R10：将 LLM diagnostic owner 从约 75 行收敛到目标不超过 45 行。
+- R10 exact projected `E`：未给出。
+- R10 exact minimum `C`：未给出。
+- R10 15% comment planning gate：**FAIL**。
+
+## Release verdict
+
+**BLOCK — Canonical plan R10**
+
+R10 不能按当前内容批准。必须闭合 `ModelsDev` 已证实的周期性冗余写入或取得明确的逐路径范围授权，使 LLM 8 KiB 合同覆盖实际完整日志行，并补充 R10 exact `E/C` 计划估计。任何实质修订都需要递增 revision，并针对原始需求及完整 affected interface 重新进行 full-scope plan audit。
+```
+
+### Round 3 verbatim plan verdict
+
+```text
+## Blocking findings
+
+### B-01 `close` 可中断已提交但尚未确认的 durable checkpoint，随后重复写入同一 running Part
+
+- Violated invariant: `INV-02`、`INV-04`；durable 写入必须由 1 秒 checkpoint 与必要 trailing flush 决定，已经持久化的 latest version 不得在关闭时重复写入，terminal 前的 publication 顺序也必须唯一。
+- Evidence class: reachable
+- Producer and execution path: 长时间持续输出的 shell → `ToolProgress` worker 到达 durable deadline → `input.durable(next)` → `Session.updatePart` → `SyncEvent.run` 同步完成 SQLite transaction → transaction 后等待 Bus publication；此时命令结束触发 scope finalizer/`close()` → `Fiber.interrupt(worker)` 可在 transaction 已提交、但 `durableVersion = next.progressVersion` 尚未执行时中断 worker → `close` 取得同一 permit，仍将该 version 判断为 pending → 再次调用 durable adapter并产生第二个 SQLite transaction/SyncEvent。
+- Source evidence:
+  - `packages/opencode/src/tool/progress.ts:66-72`：durable adapter 返回后才更新 `durableVersion`。
+  - `packages/opencode/src/tool/progress.ts:81-99`：`close` 先中断 worker，再依据尚未更新的 `durableVersion` flush latest。
+  - `packages/opencode/src/session/session.ts:684-692`：每次 durable adapter 最终进入 `SyncEvent.run`。
+  - `packages/opencode/src/sync/index.ts:171-190`：SQLite transaction 同步完成后，才进入可中断的 `publishEvent` Effect。
+  - `packages/opencode/src/storage/db.ts:204-218`：transaction 是同步执行并返回的边界。
+  - `packages/opencode/test/tool/shell.test.ts:228-263`：现有预算测试仅覆盖短于 1 秒的 40 帧命令，未覆盖持续命令在周期性 durable publication 中结束的竞态。
+- Canonical-plan evidence: §7 `INV-02`、`INV-04`；§10.1 第7–9项，特别是“latest version 已持久化时 close 不制造重复 trailing write”和“close 必须等待 worker 停止并串行写出 pending latest”；§16 slices 1–2 仅记录短命令 `<=3` running snapshots。
+- Responsibility owner: shared `ToolProgress` cadence/lifecycle owner及其 durable-delivery completion boundary。
+- Behavior-level consequence: 当命令结束恰好与周期 checkpoint publication 重叠时，同一 running version 可执行两次完整 Part upsert 和两个 SyncEvent，增加一次计划明确禁止的非必要 SQLite/WAL 写入，并可能向 durable consumers 发布重复 running event。短命令测试仍可能以 initial、第一次提交、重复 flush 共三次而通过，无法检测该竞态；持续命令则可在已有 leading/checkpoint 之外额外产生重复写入。
+- Why this is not speculative: 命令结束与每秒 checkpoint 自然并发；SQLite commit 与后续 Effect publication/版本确认是源码中两个明确分离的阶段。`Fiber.interrupt` 发生在同步 transaction 返回之后、`durableVersion` 赋值之前时，当前状态必然使 `close` 再次执行 durable adapter，不依赖恶意输入或未来扩展。
+- Minimal correction direction: 在 `ToolProgress` owning path 中使 durable commit/publication 的完成确认与 close/flush 形成不可分割的生命周期边界，确保已提交 version 不会被 close 重写；增加持续超过一个 durable 周期、在 checkpoint publication 与结束重叠时仍无重复 version/transaction 的行为测试。不得通过放宽写入预算或在下游 consumer 去重来掩盖该 producer-side竞态。
+
+## Non-blocking findings
+
+- R11 的计划期中文注释预算计算成立：预计 `E≈780`，最低要求为 `ceil(780 × 0.15)=117`，目标 `C>=120`；实际实现仍须重新逐行计算，不能沿用 R9 的 `E=804/C=126`。
+- LLM diagnostic 的 `<=5` decision、`5/52=9.62%` 目前只是计划目标。最终实现审计必须按实际分支、helper path、状态转换和错误结果复算。
+- §18 已正确保留完整 affected suite、App build、SDK repository generator、package typecheck 和真实 candidate WAL feedback loop；历史 focused green 不能替代这些最终验证。
+
+## Rejected speculation
+
+- 不要求 daemon 进程死亡后继续执行或重新附着原 OS 子进程；当前合同只要求恢复最近持久化的 Session 状态。
+- 不要求删除完成态 `state.output` 与 `state.metadata.output` 双存储；用户已明确要求保持，且存在 TUI、share 和 interrupted Tool 消费者。
+- 不把同一 `ToolProgress` latest state 的 live `PartProgress` 与 durable `PartUpdated` 判为两个竞争成功路径；它们履行实时显示和重连恢复两个已确认合同。
+- 不要求修改 SQLite WAL、`synchronous`、checkpoint、schema 或 migration；已证实的 first divergence 位于两个 shell producer 到 durable Part update 的边界。
+- 不要求修改通用 logger；大型 request payload 的已观察 producer是 `LLM.run.onError`，计划将修复限制在该 observability callsite。
+- 不重新纳入 `models.json` equality skip；R11 已逐字记录用户对该具体路径的明确排除授权。
+
+## Requirement and traceability coverage
+
+| Requirement / invariant | Audit verdict |
+|---|---|
+| 消除 ShellTool chunk→SQLite transaction 一比一热点 | 两个 producer、shared coordinator、50ms live 与 1s durable path 均已映射；但 close/checkpoint 竞态仍可制造重复 durable transaction |
+| 公开 direct `session.shell` 同类热点 | 已覆盖 `SessionPrompt.shellImpl`，并复用同一 cadence/version/lifecycle owner |
+| 降低大型 LLM error 文件写入 | 已定位 raw error logging first divergence；fixed-field、request-body-free、完整 8KiB callsite budget 和真实 HTTP error-event测试均有映射 |
+| 保持实时体验 | 首帧、50ms latest-wins、trailing live，以及 TUI/app/ACP consumers 均有生产路径 |
+| daemon 重连恢复 | leading/1s/trailing durable checkpoint、forced Session sync 和 legacy v0 merge 已映射 |
+| completion/error/abort/timeout 稳定性 | terminal dominance 与 after-commit publication 已规划；但 worker interruption 与已提交 checkpoint 的确认边界尚未闭合 |
+| 旧持久化 running Part 兼容 | 缺失/非法 version→legacy v0、strictly-newer 和 terminal dominance 合同完整 |
+| 保持 raw、truncate、model-visible 与 interrupted output | 明确保留 producer-specific output 算法和完成态双存储 |
+| App HTTP/SSE 乱序 | reducer 与 HTTP `loadMessages` 共用 merge owner，并有乱序行为测试 |
+| ACP/ShareNext durable terminal 顺序 | SyncEvent owner、ACP live consumer 与 ShareNext characterization test均有映射 |
+| SQLite durability、权限、daemon crash 语义 | 明确不修改 WAL、schema、migration、permission 或子进程 continuation |
+| 单一 authoritative primary path | 满足；未发现 alternate-success fallback |
+| TDD sensitivity | 短命令预算和主要 consumer seam 有测试；缺少能暴露 B-01 的持续命令 close/checkpoint 竞态测试 |
+| 1200 行硬上限 | R11 预计 `E+C<=900`，计划层面满足；implementation audit 必须按实际 diff 复算 |
+| 15% 中文解释性注释 | 预计 `E≈780`、最低 `C=117`、目标 `C>=120`，计划计算正确 |
+
+## Primary-path and fallback verdict
+
+计划保留一条 authoritative shell progress path：
+
+```text
+ShellTool TerminalDisplay / direct-shell raw snapshot
+  → shared ToolProgress latest state + progressVersion
+  → live PartProgress + durable PartUpdated checkpoint
+  → close/trailing flush
+  → terminal PartUpdated
+```
+
+未发现 `try A → B`、catch-and-success、隐藏功能关闭、纯 ephemeral 替代 durable recovery、第二数据源或 SQLite durability workaround。LLM minimal summary 仅产生 bounded diagnostic，不产生业务成功，因此不是 alternate-success fallback。
+
+但同一 primary path 的关闭边界尚不正确：已提交而未更新本地 version marker 的 durable checkpoint可被 `close` 再次提交。该缺陷位于 cadence/lifecycle owner，不能由 SyncEvent、consumer 去重或放宽预算解决。
+
+## Release verdict
+
+**BLOCK — Canonical plan R11**
+
+R11 必须闭合 `ToolProgress` 在 durable commit/publication 与 close/flush 之间的确认竞态，并加入能对持续命令重复 checkpoint 变红的行为验证；修订后需递增 revision，并针对原始需求和完整 affected interface重新执行 full-scope plan audit。
+```
+
+### Round 4 verbatim plan verdict
+
+```text
+## Blocking findings
+
+### B-01 R12 已超过计划审计轮次硬上限，且没有本轮例外授权
+
+- Violated invariant: 计划审计最多执行 6 轮；到达上限后，未解决事项必须作为 open decision 保留，批准仍被禁止。用户授权的例外只覆盖第 7 轮，不能自动延伸到 R12 的第 10 轮。
+- Evidence class: contracted
+- Producer and execution path: R2–R7 已完成 6 轮常规计划审计 → 用户一次性授权第 7 轮 → canonical record 又执行 R8、R10、R11，并将 R12 登记为第 10 轮待审计 → 当前没有点名授权突破上限继续批准 R12。
+- Source evidence: `.opencode/policy/first-principles-engineering.md:548-557`
+- Canonical-plan evidence: §1:54-57；§21:776-777；§22:781-792
+- Responsibility owner: canonical audit workflow 与计划状态转换 owner。
+- Behavior-level consequence: 即使 R12 的技术内容没有其他缺陷，现有证据仍不允许把它转换为 `approved` 或把 `Implementation allowed` 改为 `yes`；这样做会绕过仓库的硬审计门禁。
+- Why this is not speculative: canonical plan 自己将授权限定为“one additional full-scope plan audit”，并明确称 Round 7 是该单次例外；审计表则直接记录当前已进入 Round 10。
+- Minimal correction direction: 该轮次限制必须作为显式 open decision 交给用户；只有用户明确点名授权针对当前 revision 再执行一次越限 full-scope audit，canonical workflow 才能继续。不得把当前一般性的 audit invocation 自动解释为对硬上限的放宽。
+
+### B-02 原始 `responseBody` preview 无法满足“日志永不包含 prompt/credentials”合同
+
+- Violated invariant: `INV-07` 以及 R12 §10.2 第 2 项要求 LLM 错误日志永不包含 `requestBodyValues`、prompt、messages、tools、credentials 或完整错误对象；计划同时允许记录未经内容约束的 provider `responseBody` 原始 preview。
+- Evidence class: reachable
+- Producer and execution path: Provider 返回 HTTP 错误正文 → AI SDK `createJsonErrorResponseHandler` 原样读取 `response.text()` → 写入 `APICallError.responseBody` → R12 fixed-field summary 取最多 2 KiB 原始 preview → logger 持久化该正文。Provider 错误正文可以回显请求中的 prompt、tool schema、token 或其他敏感值，且上游没有禁止或清理该内容。
+- Source evidence: `node_modules/@ai-sdk/provider-utils/src/response-handler.ts:27-29,47-77`；`node_modules/@ai-sdk/provider/src/errors/api-call-error.ts:10-18,45-53`
+- Canonical-plan evidence: §10.2 第 2、4 项，尤其 `docs/plans/opencode-disk-write-hotspots.md:496-503`；§16 slice 10 `:648-651`
+- Responsibility owner: `LLM.run` observability callsite；它是决定哪些 provider 字段可以进入磁盘日志的第一责任 seam。
+- Behavior-level consequence: 返回“错误详情 + 回显请求内容”的 OpenAI-compatible Provider 会把最多 2 KiB prompt、tool schema 或 credential 写入日志，直接违反 R12 自己声明的禁止合同；现有测试只把 marker 放在 request body，而 fixture 的 response body 不回显 marker，因此仍会错误通过。
+- Why this is not speculative: Provider HTTP response 是真实外部输入 seam；AI SDK 明确把完整响应文本保存在 `APICallError.responseBody`，没有 schema 或协议保证它不包含请求内容。R12 又明确计划原样记录其 preview。
+- Minimal correction direction: 在 LLM observability owner 内使允许持久化的 fixed-field 集合与“不得记录请求、prompt、tools、credentials”的合同一致；不能把未经语义约束的响应正文作为原始 preview 写入，也不能增加第二个失败后日志路径。
+
+### B-03 无界 ID 仍通过 `stream` INFO extra 写入，完整 callsite 写入预算未闭合
+
+- Violated invariant: 原始磁盘寿命需求和 `INV-07` 要求 LLM callsite 的无界输入不能继续产生无界文件写入；R12 以限制 logger tags 作为完整行预算修复，但同一 callsite 还会把原始 ProviderID 和 ModelID 作为 log extra 再写一次。
+- Evidence class: reachable
+- Producer and execution path: 用户配置产生无长度上限的 ProviderID/ModelID → `LLM.run` 创建 capped logger tags → 随后 `l.info("stream", { modelID: input.model.id, providerID: input.model.providerID })` 传入未截断 extra → logger `{ ...tags, ...extra }` 让 raw extra 覆盖同名 capped tag → `build()` 把完整值写入文件。失败请求会先写该无界 INFO 行，再写计划中的 bounded ERROR 行。
+- Source evidence: `packages/opencode/src/session/llm.ts:79-91`；`packages/core/src/util/log.ts:199-215`
+- Canonical-plan evidence: §10.2 第 3 项 `:497-500`；§15 `session/llm.ts` `:606`；§16 slice 10 `:645-651`；§18 LLM 验证 `:699`
+- Responsibility owner: `LLM.run` observability callsite，它同时创建 tags 和发出 `stream` INFO/ERROR 日志。
+- Behavior-level consequence: 合法的长 ProviderID 或 ModelID 仍可使一次普通或失败的 LLM 请求产生远超 8 KiB 的日志行；限制 cloned logger tags 并不能限制被 raw extra 覆盖后的值。计划测试只选择包含 `stream error` 的行检查，无法检测前一条无界 `stream` INFO 行。
+- Why this is not speculative: ID schema 无长度上限的 reachability 已被 R12 自己接受并用于设计长 ID 测试；当前 logger 的 merge 顺序和同一 callsite 的 raw extra 写入均由源码直接证明。
+- Minimal correction direction: 完整盘点并约束 `LLM.run` 在该 observability seam 产生的所有无界字段，使同一输入不能绕过 planned cap；测试必须观察失败请求生成的全部相关日志行，而不能只选择 ERROR 行。不得通过全局 logger fallback 处理。
+
+## Non-blocking findings
+
+- R12 的计划期中文注释计算成立：预计 `E≈812`，最低要求为 `ceil(812 × 0.15)=122`，目标 `C>=124`，且列出了 cadence、durable confirmation、legacy merge、日志边界等邻近解释位置。
+- 预计 `E+C<=936`，低于用户规定的 1200 行上限；最终 implementation audit 仍必须基于实际 diff 重算，不能沿用 R9 的 `E=804/C=126`。
+- `ToolProgress` 对 durable delivery、publication 和 version marker 使用不可中断确认区，方向上修复了 R11 已证明的 commit 后中断竞态；计划的 deterministic adapter-block 测试能够对当前重复 version 行为变红。
+- App build、repository SDK generator、完整 prompt regression 和加载新源码后的 WAL feedback loop仍是 implementation release 的必需门禁。R12 已记录它们未闭合，因此本轮不把这些计划阶段已披露的验证缺口另列为 plan blocker。
+
+## Rejected speculation
+
+- 不要求 daemon 进程死亡后续跑或重新附着原 OS 子进程；当前合同只要求恢复最近持久化的 Session 状态。
+- 不要求修改完成态 `state.output` 与 `state.metadata.output` 双存储；用户明确要求保持，且 TUI、share 与 interrupted Tool 存在真实消费者。
+- 不重新要求治理 `models.json`；canonical plan 已逐字记录用户对该具体路径的明确排除授权。
+- 不把同一 `ToolProgress` latest state 的 live `PartProgress` 与 durable `PartUpdated` 判定为 fallback；它们分别履行实时显示和重连恢复合同，不是在 primary path 失败后竞争成功。
+- 不要求修改 SQLite WAL、`synchronous`、checkpoint、schema 或 migration；shell 热点的 first divergence 位于两个 chunk producer 到 durable Part update 的边界。
+- 不要求通用 logger 实现全局截断。B-02/B-03 只涉及 `LLM.run` 自己拥有并产生的日志字段。
+- 不因理论上的 hostile getter、循环对象或未来错误类型增加递归 guard；没有相应 reachability 证据。
+
+## Requirement and traceability coverage
+
+| Requirement / invariant | Independent verdict |
+|---|---|
+| 消除 ShellTool chunk → SQLite transaction 一比一热点 | 两个真实 producer、shared `ToolProgress`、50 ms live 与 1 s durable 路径均有生产和测试映射 |
+| 消除公开 direct `session.shell` 的同类热点 | `SessionPrompt.shellImpl` 已纳入同一 cadence/version/lifecycle owner，并保留 raw output 合同 |
+| 修复 close/checkpoint 重复 durable write | R12 的不可中断 delivery/marker confirmation 与 deterministic race test 已映射 |
+| 保持实时体验 | 首帧、50 ms latest-wins、trailing live 以及 TUI/app/ACP consumers 均有映射 |
+| daemon 重连恢复 | leading/1 s/trailing durable checkpoint、forced Session sync 和 legacy v0 merge 已覆盖 |
+| completion/error/abort/timeout 稳定性 | close/flush、after-commit publication、terminal dominance 均有 owner 与测试；R11 race correction方向成立 |
+| 保持 shell raw/truncate/model-visible/interrupted output | producer-specific output 算法与完成态双存储明确保留 |
+| App HTTP/SSE 乱序 | reducer 与 HTTP `loadMessages` 使用同一个 Part merge owner，并有 stale running/terminal 测试 |
+| ACP/ShareNext terminal order | SyncEvent owner 提供 durable publication order；ACP live consumer 与 ShareNext coalescing 有映射 |
+| 降低大型 LLM error 写入 | fixed-field、tag cap、single budget fallback 方向已规划，但 raw response preview 和 raw INFO extras 留下两个可达绕过，未闭合 |
+| 不记录 prompt/tools/credentials | **不满足：未经约束的 provider response preview 可以携带这些内容** |
+| 完整 LLM callsite 行预算 | **不满足：`stream` INFO extra 仍写入未截断 ProviderID/ModelID，测试只检查 ERROR 行** |
+| SQLite durability、权限、daemon crash 语义不削弱 | 未规划修改 WAL、schema、migration、Permission 或跨进程 shell continuation |
+| 单一 authoritative primary path | shell primary path满足；未发现 alternate-success fallback |
+| TDD sensitivity | Shell、direct shell、SyncEvent、TUI、app、ACP、ShareNext 和 ToolProgress race tests均敏感；LLM 测试对 response echo 与 INFO-line bypass 不敏感 |
+| 1200 行硬上限 | 预计 `E+C<=936`，计划层面满足 |
+| 15% 中文解释性注释 | 预计 `E≈812`、最低 `C=122`、目标 `C>=124`，计算正确 |
+| 审计状态门禁 | **不满足：R12 是记录中的第 10 轮，唯一明确的越限授权只覆盖第 7 轮** |
+
+## Primary-path and fallback verdict
+
+Shell progress 仍是一条 authoritative primary path：
+
+```text
+ShellTool TerminalDisplay / direct-shell raw snapshot
+  → shared ToolProgress latest state + progressVersion
+  → live PartProgress + durable PartUpdated checkpoint
+  → close/trailing flush confirmation
+  → terminal PartUpdated
+```
+
+R12 在 owning `ToolProgress` lifecycle seam 修复 commit/publication 与 close 之间的确认竞态，没有把去重下推给 SyncEvent consumer，也没有引入 `try A → B`、catch-and-success、纯 ephemeral 替代 durable recovery、第二数据源或 SQLite durability workaround。
+
+LLM minimal summary 仅产生诊断输出，不构成 alternate-success fallback。但 LLM observability primary path 尚不完整：允许的 raw response preview 与未截断 INFO extras 绕过了计划声明的内容和字节边界。
+
+## Release verdict
+
+**BLOCK — Canonical plan R12**
+
+R12 不能按当前证据批准。除修正 B-02/B-03 外，B-01 必须先作为越过计划审计轮次硬上限的显式用户决策处理；在没有针对当前 revision 的明确例外授权前，不得将其标记为 `approved` 或允许实施。
+```
+
+R14 resolution: Round 11 B-01 由 §5.6/§7/§9/§10.1 将 shared latest/version 下的 live 与 durable
+delivery 拆成独立 single workers；durable latency 不再占用 live 调度边界，每个 worker 仍在自己的
+delivery/marker confirmation 使用不可中断区，close 等待两者后才 flush/terminal。TUI/app 已有的
+monotonic merge 合同扩展到唯一遗漏的双通道 realtime consumer ACP；run/share 仍是 durable-only，
+不新增 guard。§16 新增 delayed-durable non-starvation 与 ACP newer-live/stale-durable red fixtures。
+non-blocking fixed name/message wording已明确为代码内 literal；§17/§19 更新 R14 exact estimate。
+
+### Round 5 verbatim plan verdict
+
+```text
+## Blocking findings
+
+### B-01 Durable publication can starve the required 50 ms live-progress path
+
+- **Violated invariant:** `INV-01` requires shell-visible progress to remain latest-wins with a maximum 50 ms cadence and no user-visible degradation; the original requirement also requires no impact to experience or overall behavior.
+- **Evidence class:** reachable
+- **Producer and execution path:** Shell output chunk → producer snapshot → `ToolProgress.update` → shared worker → single `permit` → live delivery and durable delivery. When durable delivery starts, it invokes `Session.updatePart` → `SyncEvent.run` → immediate SQLite transaction → awaited post-commit publication. The same permit prevents any live delivery until the durable operation returns.
+- **Source evidence:** `packages/opencode/src/tool/progress.ts:51-75` places both `input.live(next)` and `input.durable(next)` inside one permit; `packages/opencode/src/session/session.ts:684-706` routes durable updates through the event path; `packages/opencode/src/sync/index.ts:168-190` performs the immediate transaction and awaits `publishEvent` after the transaction. The database guide also records a 30-second busy timeout and immediate-transaction behavior in the evidence referenced by plan §4.
+- **Canonical-plan evidence:** §7 `INV-01`; §10.1 steps 4, 7, and 9; §13 `INV-04`; §15 `tool/progress.ts` “permit 内不可中断 delivery/version confirmation”; §16 slice 11.
+- **Responsibility owner:** The shared `ToolProgress` lifecycle/delivery owner. The plan explicitly makes it responsible for both delivery cadences and serializes them under the same permit.
+- **Behavior-level consequence:** A durable transaction or awaited publication that is delayed beyond 50 ms prevents the worker from delivering newer ephemeral snapshots. During SQLite lock contention, slow transaction execution, or delayed publication enqueueing, the user-visible shell display can miss the promised live cadence even though newer output has already reached the producer. This directly undermines the claimed “不影响体验” behavior and the stated `INV-01` latency contract.
+- **Why this is not speculative:** The producer-to-consumer path is present in the current source, the durable adapter performs real SQLite work, and the repository’s database configuration explicitly permits transaction waiting. The plan itself requires awaited publication and an uninterruptible durable confirmation region, so the blocking boundary is part of the proposed primary path rather than an imagined future path.
+- **Minimal correction direction:** The owning progress-delivery boundary must preserve durable commit/publication/version-confirmation correctness without making live delivery wait behind the full durable operation. The plan must define and test the resulting ordering contract at the `ToolProgress` owner, including a delayed durable adapter, while retaining terminal dominance and the no-duplicate durable-version invariant. Do not move deduplication or latency handling into consumers.
+
+## Non-blocking findings
+
+- The LLM section contains wording that should be made unambiguous before implementation: §10.2 step 5 says the `APICallError` branch records “固定 name/message,” while the surrounding contract says no external error message or response preview may be persisted. The intended safe-field semantics are inferable from the surrounding text, but the implementation contract should explicitly distinguish fixed literals from provider-derived values.
+- The plan’s `E/C` and diagnostic decision-surface figures are estimates for plan approval only; they must be recomputed from the eventual R13 implementation diff as required by the policy.
+- The current worktree already contains the R9 candidate implementation. The plan records this baseline consistently enough for a plan audit, but implementation must still be audited against the exact approved R13 revision and must not treat historical red/green evidence as proof of the final R13 correction.
+
+## Rejected speculation
+
+- No evidence requires daemon death to resume or reattach the original OS child process.
+- The completed-state `state.output` and `state.metadata.output` dual storage is explicitly required to remain unchanged and has real consumers.
+- `models.json` is explicitly excluded by the user’s named scope decision; it is not treated as an unrequested fallback or as a reason to expand R13.
+- The live `message.part.progress` and durable `message.part.updated` deliveries are not alternate-success paths by themselves; they are two contractual deliveries from the same shell snapshot lifecycle.
+- No evidence requires changing SQLite WAL, synchronous durability, schema, migration, or checkpoint settings.
+
+## Requirement and traceability coverage
+
+| Requirement / invariant | Independent verdict |
+|---|---|
+| Remove ShellTool chunk-to-transaction amplification | Root cause and producer-side coordinator are mapped. |
+| Remove direct `session.shell` chunk-to-transaction amplification | The second producer and shared coordinator are mapped. |
+| Preserve live shell experience | **Not closed:** the shared permit can block live delivery behind durable transaction/publication latency. |
+| Preserve daemon reconnect recovery | Durable checkpoints and HTTP/SSE merge contracts are mapped. |
+| Preserve terminal, abort, and timeout behavior | Close confirmation, terminal dominance, and ordered publication are mapped, but the live/durable blocking boundary needs an explicit contract. |
+| Preserve raw, truncated, model-visible, and interrupted output | Production consumers and preservation tests are mapped. |
+| Preserve ACP, app, TUI, ShareNext, and run behavior | Typed progress and ordered durable consumers are mapped. |
+| Bound LLM diagnostic writes | R13 has a viable callsite owner and test direction, subject to clarifying fixed versus provider-derived fields. |
+| Keep one authoritative primary path | No fallback or alternate-success path was identified. |
+| Stay within 1200 lines and the 15% Chinese-comment gate | Planned estimates are below the hard limit; final implementation audit must recalculate them. |
+
+## Primary-path and fallback verdict
+
+The plan identifies one shell primary path:
+
+```text
+producer-specific snapshot
+  → shared ToolProgress cadence/version/lifecycle
+  → live PartProgress + durable PartUpdated
+  → close/trailing flush confirmation
+  → terminal PartUpdated
+```
+
+No `try A → B`, catch-and-success, hidden feature disabling, pure-ephemeral replacement for durable recovery, second data source, or SQLite-durability workaround was found.
+
+However, the primary path’s delivery boundary is not behaviorally closed: the same permit serializes live delivery behind durable transaction and publication work, which can violate the required 50 ms live-progress contract. This is an owner-level design defect, not a downstream consumer concern.
+
+## Release verdict
+
+**BLOCK — Canonical plan R13**
+
+R13 must define and behaviorally verify a delivery boundary that preserves durable commit/publication confirmation without starving the live-progress path. After revision, the complete original scope and all affected interfaces require another full-scope plan audit.
+```
+
+### Round 6 verbatim plan verdict
+
+```text
+## Blocking findings
+
+No blocking findings.
+
+## Non-blocking findings
+
+- R14 的 `E≈885`、`C≥136`、手写总量 `E+C≤1021` 及 diagnostic decision-surface `≤3 decisions / ≤6%` 均属于计划估算。实施审计必须根据最终完整 diff 重新计算，不得沿用 R9 的实际值或 R14 的估算值。
+- Slices 1–10 的历史 red→green 证据只能证明对应 candidate 曾对原始行为敏感；R14 新增或改写的 ToolProgress 双 worker、ACP 单调合并和 LLM 日志边界仍必须执行计划规定的新 red→green，并接受完整 implementation audit。
+- 原始 WAL-index feedback loop 使用共享活动数据库，最终验证必须同时报告 quiet baseline、净 transaction/WAL-frame 差值及 focused tests，不能把 WAL frame 表述为物理 NAND 写入量。
+
+## Rejected speculation
+
+- 不要求 daemon 死亡后继续运行或重新附着原 OS 子进程；现有生产合同只证明从 SQLite 恢复最近持久化的 Session 状态。
+- 不要求修改完成态 `state.output` 与 `state.metadata.output` 双存储；用户明确要求保持，且 TUI、web share 和 interrupted Tool 回放存在真实消费者。
+- 不要求重新纳入 `models.json` 内容相等跳写；用户已对该具体路径作出明确范围排除。
+- 不把同一版本化 shell snapshot 的 live `message.part.progress` 与 durable `message.part.updated` 视为 fallback；它们分别履行实时体验和重连恢复合同，不是在主路径失败后竞争成功。
+- 不要求修改 SQLite WAL、`synchronous`、checkpoint、schema 或 migration；已证实的 first divergence 位于两个 shell chunk producer 到 durable Part 更新的边界。
+- 不要求通用 logger 全局截断，也不要求递归遍历未知 error；已观察的大型写入由 `LLM.run` observability callsite 产生，R14 将修复限制在该 owner。
+- 不要求 `opencode run`、ShareNext 或其他 durable-only consumer 增加重复的跨通道版本状态；它们不同时消费 live 与 durable shell snapshot。
+
+## Requirement and traceability coverage
+
+| Requirement / invariant | Independent verdict |
+|---|---|
+| 消除 ShellTool transport chunk → SQLite transaction 一比一热点 | 已定位 `ShellTool.onChunk` first divergence；规划由 TerminalDisplay 生成 snapshot，再交给共享 ToolProgress cadence/version/lifecycle owner |
+| 消除公开 direct `session.shell` 的同类热点 | 已定位 `SessionPrompt.shellImpl` 独立 producer；保留 raw accumulated output，同时复用同一 ToolProgress owner |
+| 实质减少写入与 SSD 写放大 | 40 次 CR redraw → 40 transactions/WAL frames 的原始反馈环已记录；leading、每秒 checkpoint、必要 trailing flush 和 `≤3` 短命令 running durable budget均有生产及测试映射 |
+| 保持实时体验 | live 与 durable 使用共享 latest/version 但独立 single workers；durable transaction/publication 延迟不再阻塞 50ms latest-wins live delivery，并有 delayed-durable red-capable slice |
+| 保持 daemon 重连恢复 | 保留 `server.connected → session.sync(force) → SQLite Part`；leading、每秒及 trailing durable checkpoint 将恢复陈旧度限制在约一秒 |
+| 处理 live/durable 跨通道乱序 | TUI、app、ACP 三个真实双通道 store owner统一采用 legacy v0、strictly-newer running 和 terminal dominance 合同 |
+| 兼容旧持久化 running Part | 缺失、非有限、非整数或负数 `progressVersion` 统一归一化为 legacy version 0；不迁移或回写旧 SQLite 数据 |
+| completion/error/abort/timeout 稳定性 | 每个 worker 的 delivery/marker confirmation 形成不可中断确认区；close 停止并等待两个 workers，flush pending latest 后才允许 terminal PartUpdated |
+| 防止重复 durable transaction | durable worker 自身串行，marker confirmation 与 commit/publication 不可被 close 切开；持续 checkpoint/close overlap 测试要求版本严格无重复 |
+| durable terminal publication 顺序 | `SyncEvent.run/replay` 在 transaction commit 后等待 typed Project Bus 与 GlobalBus 入队再返回，不等待 subscriber 业务执行 |
+| 保持 Shell 输出行为 | raw bytes、truncate file、TerminalDisplay、模型可见 output、direct-shell raw output、完成态双存储和 interrupted partial output均明确保留 |
+| 保持 TUI/app/ACP/ShareNext/run 行为 | TUI/app/ACP 接收 typed PartProgress；ShareNext、run 等 durable-only consumer继续使用 ordered PartUpdated；每类真实 seam均有行为测试或保持不变的依据 |
+| 降低大型 LLM error 日志写入 | first divergence 是 `LLM.run.onError` 将 raw error 交给 object logger；R14 改为 capped tags、固定 literal、有限数值字段，并删除 raw INFO/repair extras及 response preview |
+| 保持 LLM 错误传播 | `onError` 参数不被 mutate、replace、catch 或 swallow；AI SDK error event继续进入 `SessionProcessor`，由现有 error case产生用户可见失败 |
+| 完整 LLM callsite 行预算 | 测试使用长合法 ID 和 response echo marker，检查该失败请求产生的全部 `service=llm` 行均不超过 8 KiB且不包含 marker/request body |
+| 不削弱稳定性和 durability | 不修改 WAL、synchronous、checkpoint、事务原子性、schema、migration、Permission 或 daemon crash 语义 |
+| 单一 authoritative primary path | 两个 producer保留各自 snapshot 算法，但共享唯一 cadence/version/lifecycle owner；没有失败后备用成功算法 |
+| Workaround 清理 | 每 chunk durable 更新、shared live/durable permit、raw LLM object logging均有明确替换或删除位置 |
+| Forward/reverse traceability | 每项确认 invariant均映射到 production path、精确文件和行为测试；新增 event、delivery option、coordinator、version、merge及日志边界均有已观察或可达依据 |
+| 1200 行硬上限 | R14 估计 `E≈885`、目标 `C≥136`、合计 `≤1021`；低于 1200，且计划要求越界或新增文件时停止并重新审计 |
+| TDD sensitivity | 原始热点、direct shell、SyncEvent ordering、TUI/app merge、ACP stale durable、ToolProgress close race/live starvation及 LLM日志绕过均有能对对应旧行为变红的 seam |
+
+## Primary-path and fallback verdict
+
+R14 建立的 authoritative shell progress path为：
+
+```text
+ShellTool TerminalDisplay snapshot / direct-shell raw snapshot
+  → shared ToolProgress latest state + progressVersion
+  → independent live and durable single workers
+       → live PartProgress
+       → durable PartUpdated checkpoint
+  → close joins both confirmation regions and flushes pending latest
+  → terminal PartUpdated
+```
+
+该设计在 owning ToolProgress seam 修复原始 chunk-driven durable write，同时避免用 SQLite 参数、下游丢事件或 pure-ephemeral progress绕过根因。独立 workers只分离两个已确认 delivery cadence，不复制 snapshot、版本源或终态算法。
+
+成功路径盘点完整：ShellTool 与 direct shell 是同一 coordinator contract 下的两个支持域分支；TUI、app、ACP 是真实双通道 store；ShareNext、run 等保持 durable-only。未发现 `try A → B`、catch-and-success、隐藏功能关闭、第二数据源、失败后备用 parser/logger、降低 durability 或其他 alternate-success fallback。
+
+**Primary-path verdict: PASS。**
+
+## Code quality and Chinese-comment verdict
+
+这是 plan audit，不对尚未完成的 R14 implementation diff作最终代码质量放行；计划层面符合以下门禁：
+
+- 文件范围限制为已有 owners、tests、两个已论证的 shared modules及 generated SDK，没有新增配置、依赖、migration或无证据抽象。
+- `ToolProgress` interface隐藏 cadence、worker、version和close复杂度，producer只负责生成 snapshot，consumer只负责其真实 store merge，责任边界明确。
+- 测试通过公开或生产行为 seam观察 transaction/event/output/order，不要求 private helper调用次数。
+- 计划明确遵循 package-local测试、`bun typecheck`、SDK repository generator和app build要求。
+- 计划估计 `E≈885`。
+- 最低中文解释性注释要求为 `ceil(885 × 0.15)=133`。
+- R14 目标为 `C≥136`，计划比例约为 `136/885=15.37%`。
+- 预计计入用户上限的总量为 `E+C≤1021<1200`。
+- 注释位置分布在 cadence、双 worker、不可中断 confirmation、legacy merge、terminal dominance、SyncEvent publication及LLM安全日志边界附近，属于可计数的解释性位置。
+
+**Plan-stage code-quality verdict: PASS。**
+**Plan-stage Chinese-comment calculation: PASS；最终实现仍须按实际 diff重算 `E`、合格 `C`、排除项和比例。**
+
+## Release verdict
+
+**APPROVE — Canonical plan R14**
+
+该结论仅适用于当前审计的 `docs/plans/opencode-disk-write-hotspots.md` **R14**。任何行为、范围、接口、ownership、fallback classification、文件计划或测试合同的实质修改都必须递增 revision、清除批准并重新执行 full-scope plan audit。
+```
+
+### Round 13 verbatim verdict
+
+```text
+## Blocking findings
+
+### B-01 已确认的 `ModelsDev` 周期性冗余写入被无依据排除，原始需求范围未闭合
+
+- Violated invariant: 原始需求要求解决 opencode 的磁盘写入热点并降低寿命写放大；所有已确认的高频或重复写入路径必须有明确的范围判断、owner、生产路径和行为验证。当前计划保留了一个已确认的周期性全量文件覆盖路径，却仅依据计划内未被当前用户消息证明的“用户明确排除”将其排除。
+- Evidence class: observed
+- Producer and execution path: `ModelsDev` 后台刷新 → `refresh(false)` 每 60 分钟重复执行 → `fetchAndWrite()` 获取完整响应 → `fs.writeWithDirs(filepath, text)` 无条件覆盖 `models.json`。
+- Source evidence: `packages/core/src/models.ts:170-174,196-218`；仓库计划自身记录 `docs/plans/opencode-disk-write-hotspots.md:400-404` 已观察到约 3.19 MB 文件每小时全量覆盖、约 28 GB/年冗余写入。
+- Canonical-plan evidence: §2 line 91、§5.5、§7 `SCOPE-01`、§11 line 756、§20 lines 970-973、§20 lines 1002-1003 将 `models.json` 排除；但这些章节依赖“用户在 R10 BLOCK 后明确授权”的历史对话描述，而非本轮提供的逐字需求。当前逐字需求只有“解决opencode磁盘写入的热点以及降低寿命问题，同时不要影响体验或稳定性、整体行为”。
+- Responsibility owner: `packages/core/src/models.ts` 的 `ModelsDev.fetchAndWrite` / `ModelsDev.refresh` 文件缓存 owner。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 即使 Shell、SyncEvent、LLM 和 ACP 路径全部按 R15 完成，默认后台刷新仍会在内容不变时周期性写入约 3.19 MB 的完整 `models.json`。该计划没有为这条已确认的磁盘写入路径建立“不属于原始需求”的可验证合同，也没有实现或测试其写入抑制，因此无法证明交付后的 opencode 已完整满足降低磁盘写入和寿命写放大的原始需求。
+- Why this is not speculative: 生产代码明确存在定时刷新和无条件 `writeWithDirs`；计划自身记录了文件大小、刷新周期和年度写入量。是否属于“热点”的相对排序可以讨论，但原始需求没有限定只治理 SQLite shell 写入，也没有在本轮用户消息中授权排除该路径。
+- Minimal correction direction: 在 canonical plan 中以当前用户可验证的需求证据重新确定 `ModelsDev` 路径是否属于范围；若继续排除，必须取得并记录明确的用户范围授权并把排除条件写成当前 revision 的合同；若属于范围，则由 `ModelsDev` 文件缓存 owner 增加内容未变化时不执行全量覆盖的 primary-path 修复、对应行为测试和 1200 行预算映射。不得仅以“相对影响较低”或预算压力替代范围证明。
+
+## Non-blocking findings
+
+- 计划中保留了大量 R2–R14 历史审计正文、旧版 `BLOCK` 结论和当前 R15 设计，阅读时需要依赖章节上下文区分历史 baseline 与当前 revision。当前文档已多处标注历史性质，因此这属于可维护性和审计可读性问题，不单独阻塞本轮。
+- §15、§17、§19 和 §23 明确要求最终 implementation audit 重新计算实际 `E/C`，当前计划阶段的估算不构成 implementation gate；这符合计划审计规则，但实施前不得把 `E≈950/C≥146` 当作实际通过证据。
+- `ModelsDev` 排除路径的现有测试覆盖缓存、刷新和 freshness 行为，但没有“不变响应不重复写入”的敏感测试；在该路径范围被明确后再决定是否增加测试。
+
+## Rejected speculation
+
+- 不要求 daemon 硬崩后续跑或重新附着原 OS 子进程；当前用户需求和仓库调用链只证明需要恢复已持久化的 Session 状态。
+- 不要求删除完成态 `state.output` 与 `state.metadata.output` 双存储；计划和仓库 renderer、share、interrupted Tool 消费者均证明该行为应保持。
+- 不要求关闭 WAL、降低 SQLite durability、执行 `VACUUM`、删除历史 Session 数据或制造纯 ephemeral 替代 durable recovery 的 fallback。
+- 不要求修改通用 logger 的全局序列化策略；当前大对象日志的直接生产者位于 `LLM.run` 和 ACP progress observability seam，调用点局部修复具有明确 owner。
+- 不要求为不存在的 hostile producer、daemon 子进程重附着或未来 v2 parity 增加额外 guard。
+
+## Requirement and traceability coverage
+
+| Requirement / invariant | Independent verdict |
+|---|---|
+| 解决 ShellTool transport chunk → SQLite transaction 一比一热点 | 已定位 first divergence，并规划 `ToolProgress` owner-side cadence、live/durable delivery 和 close/flush |
+| 解决公开 direct `session.shell` 同类热点 | 已定位 `SessionPrompt.shellImpl`，并纳入同一 progress owner 和真实 producer seam |
+| 降低大型 LLM stream error 日志写入 | 已定位 `LLM.run` raw-object logging，并规划 bounded callsite-local diagnostic |
+| 保持实时体验 | 50 ms live path、latest-wins、独立 live worker 和 consumer version merge 已映射 |
+| daemon 重连恢复最近持久化状态 | durable checkpoint、forced Session sync、legacy version normalization 已映射 |
+| completion/error/abort/timeout 稳定性 | coordinator close、durable publication ordering、terminal dominance 已映射；ACP R15 修复计划覆盖当前已发现的 terminal 缺口 |
+| 保持 raw output、truncate、model-visible output 和 interrupted output | 计划明确保留这些生产和消费路径 |
+| 保持 TUI、app、ACP、ShareNext、`opencode run` 行为 | 主要 producer/consumer 及测试 seam 已列出；ACP live/replay terminal 行为已纳入 R15 |
+| 不修改完成态双存储行为 | 明确保留 |
+| 不削弱 WAL、SQLite durability、权限和 daemon crash 语义 | 明确不修改 |
+| 降低 opencode 全体已确认磁盘写放大 | **未闭合：`ModelsDev` 无条件周期性全量覆盖被排除，但当前逐字用户需求没有提供该排除授权** |
+| 1200 行总上限与 15% 中文解释性注释 | 计划已提供 feasibility 估算；必须在 implementation audit 按完整实际 diff 重新计算 |
+| 单一 authoritative primary path、无新增 fallback | Shell producer 共享同一 cadence/version/lifecycle path；未发现 `try A → B` 或 catch-and-success fallback |
+
+## Primary-path and fallback verdict
+
+ShellTool 和公开 direct `session.shell` 的设计遵循同一条 primary path：
+
+```text
+producer-specific snapshot
+  -> shared ToolProgress cadence/version/lifecycle
+  -> live PartProgress + durable PartUpdated
+  -> terminal close/flush ordering
+```
+
+LLM 日志也属于调用点局部的单一诊断路径，没有发现失败后切换备用成功算法、catch-and-success、纯 ephemeral 替代 durable recovery 或降低 SQLite durability 的 fallback。
+
+但完整原始需求的 affected write surface 尚未闭合：`ModelsDev.refresh` 仍会在内容不变时通过 `fetchAndWrite` 无条件覆盖 `models.json`。当前计划用未被本轮用户消息证明的历史授权将其排除，因此不能把 R15 的 Shell/Sync/LLM/ACP primary path 视为覆盖整个原始需求。
+
+## Release verdict
+
+**BLOCK — Canonical plan R15**
+
+R15 不能在当前证据下批准。必须先明确并记录 `ModelsDev` 路径相对于原始需求的有效范围；若保留排除，需要当前可验证的用户授权合同，若纳入范围则补齐其 owner、primary path、测试和 1200 行预算映射。完成后必须对完整原始需求和全部 affected interfaces 重新执行 full-scope plan audit。
+```
+
+### Round 14 verbatim verdict
+
+```text
+## Blocking findings
+
+### B-01 `ModelsDev` 已确认的周期性全量写入仍由未经独立验证的范围声明排除
+
+- Violated invariant: 原始需求要求解决 opencode 的磁盘写入热点并降低寿命写放大；已确认且默认可达的重复写入路径必须映射到 owner、生产修复和行为验证，除非可信的用户需求明确将其排除。
+- Evidence class: observed
+- Producer and execution path: 默认 `ModelsDev` layer 启动后台刷新 → `refresh()` 首次执行并每隔 60 分钟重复 → 获取 models.dev 完整响应 → `fetchAndWrite()` → `fs.writeWithDirs(filepath, text)` 无条件覆盖缓存文件，即使内容没有变化。
+- Source evidence:
+  - `packages/core/src/models.ts:122-127`
+  - `packages/core/src/models.ts:170-174`
+  - `packages/core/src/models.ts:196-218`
+  - `docs/plans/opencode-disk-write-hotspots.md:407-412`
+- Canonical-plan evidence: §1 `docs/plans/opencode-disk-write-hotspots.md:76-83`、§2 `:99`、§7 `:472`、§10.3 `:740`、§11 `:764`、§13 `:792`、§20 `:978-981`。
+- Responsibility owner: `packages/core/src/models.ts` 的 `ModelsDev.fetchAndWrite`/`ModelsDev.refresh` 缓存写入接口。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: Shell、SyncEvent、LLM 和 ACP 路径全部完成后，默认常驻进程仍会在响应内容不变时周期性覆盖约 3.19 MB 的 `models.json`；计划自身估算该路径约产生 28 GB/年的冗余写入。R16 对此没有生产变更或敏感测试，因而不能证明完整满足“解决 opencode 磁盘写入热点以及降低寿命问题”。
+- Why this is not speculative: 定时 producer、默认缓存路径和无条件写入均由当前源码证明，计划也记录了本机文件大小和刷新行为。当前审计收到的可信逐字用户需求只有宽泛的磁盘写入治理要求；“明确排除 models”及其选项语义仅由待审计 canonical plan 自述，而 canonical artifact 在本审计的 trust model 下不能自行证明额外用户授权。
+- Minimal correction direction: 必须以当前可独立验证的用户需求证据确立 `ModelsDev` 的范围排除；在没有该证据时，应由 `ModelsDev` 缓存 owner 将内容未变化时的冗余覆盖纳入同一 revision 的 production、行为测试和预算映射。不得仅依赖计划内部对历史对话的转述、相对热点排序或行数压力排除该路径。
+
+## Non-blocking findings
+
+- R16 保留了大量 R2–R15 的历史审计正文，当前设计、历史缺陷和历史 verdict 需要依赖章节上下文区分。现有章节已标记 historical baseline，因此这是可维护性问题，不单独阻塞。
+- R16 的最终 App build、SDK repository generator、完整 affected regression、当前源码 runtime 的 WAL feedback loop 和 implementation audit 尚未闭合，但计划明确把它们列为实施放行门禁，没有用 focused tests 代替，故不构成计划阶段的额外阻塞。
+- `E≈950`、`C≥146` 和 gross `≤1199` 均是计划估算；最终 implementation audit 必须按完整实际 diff 重算，不能沿用 R9/R14 数值。
+
+## Rejected speculation
+
+- 不要求 daemon 死亡后续跑或重新附着原 OS 子进程；当前生产合同只证明从 SQLite 恢复最近持久化的 Session 状态。
+- 不要求删除完成态 `state.output` 与 `state.metadata.output` 双存储；计划和现有消费者证明该行为必须保持。
+- 不把同一版本化 shell snapshot 的 live `message.part.progress` 与 durable `message.part.updated` 视为 fallback；二者分别承担实时体验和重连恢复，不是在 primary path 失败后竞争成功。
+- 不要求修改 WAL、`synchronous`、checkpoint、schema、migration、权限或通用 logger；已确认的 shell 和日志 first divergence 位于对应 producer/observability owner。
+- 不要求为假想 hostile input、未来 v2 parity 或不存在的子进程恢复协议增加 guard。
+- 不要求 durable-only 的 ShareNext、`opencode run` 等消费者重复实现跨通道版本状态；它们没有同时消费 live/durable 两个通道。
+
+## Requirement and traceability coverage
+
+| Requirement / invariant | Audit verdict |
+|---|---|
+| 消除 ShellTool chunk → SQLite transaction 一比一热点 | 已定位 `ShellTool.onChunk` first divergence，并映射到 shared `ToolProgress` cadence/version/lifecycle owner及敏感测试 |
+| 消除公开 direct `session.shell` 的同类热点 | 已定位 `SessionPrompt.shellImpl` producer，并复用同一 progress owner |
+| 保持实时体验 | 50 ms latest-wins live path、独立 live worker及 TUI/app/ACP consumers均有映射 |
+| 保持 daemon 重连恢复 | leading/1 秒/trailing durable checkpoint、forced Session sync和 legacy v0 merge均已规划 |
+| 保持 terminal、abort、timeout 稳定性 | worker confirmation、close/flush、SyncEvent publication ordering和 terminal dominance有 owner及测试映射 |
+| 防止 ACP progress 日志形成新热点 | R16 在 ACP observability owner 跳过 live progress 完整对象日志，同时保留 durable diagnostic；有公开日志 capture 测试 |
+| 防止 ACP terminal 后重新出现 running | R16 在 ACP lifecycle owner保留 session-scoped terminal marker，并覆盖 live/replay terminal入口 |
+| 降低大型 LLM error 日志写入 | `LLM.run.onError` first divergence、固定安全字段、tag cap及完整失败请求日志测试均有映射 |
+| 保持 raw、truncate、model-visible及 interrupted output | 明确保留对应 producer和 consumer合同 |
+| 不削弱稳定性、durability和权限 | 明确不修改 SQLite配置、事务原子性、Permission或 daemon crash语义 |
+| `ModelsDev` 周期性冗余覆盖 | **未闭合：生产路径已确认，但范围排除只由待审计计划自述，缺少当前可信用户授权；没有实现或行为测试映射** |
+| 单一 authoritative primary path | Shell/Sync/LLM/ACP 已规划路径中未发现 alternate-success fallback |
+| 1200 行硬上限 | 计划估算低于上限，最终须按 actual diff复算 |
+| 15% 中文解释性注释 | 计划承诺的最低值和位置类别可行，最终须按 actual diff复算 |
+
+## Primary-path and fallback verdict
+
+ShellTool 与公开 direct `session.shell` 使用同一 authoritative progress path：
+
+```text
+producer-specific snapshot
+  → shared ToolProgress latest/version/lifecycle
+  → independent live PartProgress and durable PartUpdated
+  → joined close/flush confirmation
+  → terminal PartUpdated
+```
+
+ACP observability和 terminal marker修复位于真实 consumer owner；LLM日志治理位于产生无界写入的 callsite owner。未发现 `try A → B`、catch-and-success、隐藏功能关闭、第二数据源、纯 ephemeral替代 durable recovery或降低 SQLite durability的 workaround。
+
+但整个原始需求的 primary write surface尚未闭合：`ModelsDev.refresh → fetchAndWrite` 是独立、默认可达且已观察的重复磁盘写入路径，当前 R16没有可信范围排除证据或 production/test覆盖。
+
+**Primary-path verdict: BLOCK。**
+
+## Code quality and Chinese-comment verdict
+
+这是 plan audit，仅判断可实施性：
+
+- 文件变化主要限制在已证明的 producer、event owner、consumer merge owner和测试 seam，没有规划新增依赖、配置、schema或 migration。
+- `ToolProgress` 作为 shared cadence/version/lifecycle module有两个真实 producer，app merge module有 SSE/HTTP两个真实 adapters，不属于无依据抽象。
+- 测试计划通过 transaction/event/log/ACP update等公开行为观察结果，没有要求断言 private helper调用次数。
+- 计划估计 `E≈950`，硬最低值为 `ceil(950 × 0.15)=143`。
+- 目标 `C≥146`，预计比例约为 `146/950=15.37%`。
+- 预计 `E+C≤1096<1200`；计划同时采用更严格的 gross hand-written `≤1199`控制。
+- 注释位置覆盖 cadence、双 worker、confirmation、legacy merge、terminal dominance、publication及日志安全边界，计划阶段具备可行性。
+
+**Plan-stage code-quality verdict: PASS。**
+**Plan-stage Chinese-comment calculation: PASS；不能替代 implementation audit 的实际逐行复算。**
+
+## Release verdict
+
+**BLOCK — Canonical plan R16**
+
+R16 尚不能获批。必须先以可信用户需求证据闭合 `ModelsDev` 的范围判断；若无法证明排除，则将该缓存写入 owner、primary-path修复、敏感测试和1200行预算纳入新的 canonical revision。任何实质修订后必须对原始需求和完整 affected interface重新执行 full-scope plan audit。
+```
+
+### Round 3 verbatim implementation verdict
+
+```text
+## Blocking findings
+
+### B-01 必需的完整 release verification 仍未闭合
+
+- Violated invariant: 当前实现只有在完整 affected regression、官方 App build、repository SDK generation 和当前源码加载后的原始 WAL feedback loop 均通过后，才能满足 R16 的 implementation release gate；focused tests、typecheck、等价生成流程或历史结果不能替代这些门禁。
+- Evidence class: observed
+- Producer and execution path:
+  - 完整 backend affected suite：
+    - `bun test test/acp/event-subscription.test.ts test/tool/shell.test.ts test/session/prompt.test.ts test/sync/index.test.ts test/cli/cmd/tui/sync.test.tsx test/share/share-next.test.ts test/session/llm.test.ts --timeout 30000`
+    - 本轮运行超过 180 秒，未完成；输出显示 `test/session/prompt.test.ts` 中真实 reviewer fixture 返回 HTTP 503 `temporary reviewer outage`，随后命令超时。
+  - 去除 prompt 文件后的 backend suites：
+    - `256 pass / 0 fail / 864 assertions`
+    - 这只能证明其余 affected suites 通过，不能证明完整 affected suite 通过。
+  - direct shell focused test：
+    - `1 pass / 6 assertions`
+  - ACP R16 focused test：
+    - `1 pass / 2 assertions`
+  - SyncEvent suite：
+    - `12 pass / 23 assertions`
+  - App global-sync suite：
+    - `20 pass / 84 assertions`
+  - 三个 package typecheck 均通过。
+  - 官方 App build：
+    - `bun run build` / `packages/app`
+    - 失败：`packages/app/node_modules/vite/bin/vite.js` 不存在。
+  - SDK repository generator：
+    - canonical §23 记录的 `bun ./script/build.ts` 在 Windows OpenAPI generation 阶段超时；本轮没有新的成功 repository-generator 结果。
+    - 等价手工生成流程成功不等价于 repository generator 门禁。
+  - 原始 WAL feedback loop：
+    - canonical §23 明确记录当前 source-loaded candidate 仍未获得 green；
+    - 旧 daemon 的 `42` net transactions / `51` WAL frames 不能证明当前 diff；
+    - R16 一次性 candidate serve 尝试超时，未得到有效结果。
+- Source evidence:
+  - `docs/plans/opencode-disk-write-hotspots.md:1625-1663`
+  - `docs/plans/opencode-disk-write-hotspots.md:1689-1694`
+  - `packages/app/package.json:11-20`
+  - `packages/sdk/js/script/build.ts:14-21,43-48`
+  - 本轮 backend test、App test、typecheck 和 build 命令结果
+- Canonical-plan evidence: §18 / §23 的 `Verification Commands and Results`、`Original Feedback-Loop Result`、`Remaining Unverified Items`，尤其 `docs/plans/opencode-disk-write-hotspots.md:1625-1663,1689-1694`
+- Responsibility owner: repository verification/release gate；完整测试、官方构建、SDK repository generation 和当前 candidate WAL loop 各自拥有独立验证结果，不能由 focused green 或等价流程替代。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 当前 implementation 仍不能证明在完整受影响接口上“不影响体验或稳定性、整体行为”，也不能证明本次 ShellTool→SQLite 热点修复在加载当前源码的真实 runtime 上已降低 transaction/WAL 写入。该实现不能进入 `verified` 或发布。
+- Why this is not speculative: 完整 backend 命令本轮实际超时并报告 503；官方 App build 实际以缺少 package-local Vite 失败；SDK repository generator 和当前 candidate WAL green 在 canonical 记录中仍明确未验证。R16 自身要求这些检查全部闭合。
+- Minimal correction direction: 在不降低或替换 R16 验证门禁的前提下，使完整 affected suite、官方 `packages/app` build、repository SDK generator 和加载当前 source candidate 的原始 WAL feedback loop 全部得到可复现成功结果，然后重新执行完整 full-scope implementation audit。不得用排除 prompt 测试、root Vite 等价 build、手工 SDK 生成、旧 daemon 结果或 focused tests 作为替代。
+
+## Non-blocking findings
+
+- R16 canonical plan 保留了大量 R2–R15 历史审计正文，当前实现、历史 baseline 和历史 BLOCK 结论需要依赖章节上下文区分；这影响审计可读性，但不是独立行为缺陷。
+- `ModelsDev` 的周期性 `models.json` 覆盖已被直接用户范围决定明确排除，本审计不将其作为 blocker，也未发现 R16 对该排除新增实现或测试。
+- 本轮没有发现新的 ACP 生产行为缺口：`message.part.progress` 已绕过完整对象 INFO 日志，durable `message.part.updated` 诊断仍保留；terminal marker 已覆盖 event handler 和 replay terminal 入口的实际测试矩阵。
+- Prompt 中失败的 reviewer fixture 是现有测试环境/fixture 的 503，而非本 diff 已证明的生产回归；但它仍使 canonical 要求的完整 affected regression 未通过，因此已纳入 B-01 release blocker。
+
+## Rejected speculation
+
+- 不要求重新纳入 `ModelsDev`；用户已明确授权本 GOAL 不修改该路径。
+- 不要求删除完成态 `state.output` 与 `state.metadata.output` 双存储；现有 TUI、App、ShareNext 和 interrupted Tool consumers 证明该行为属于保留合同。
+- 不要求 daemon 崩溃后继续运行或重新附着原 OS shell 子进程；当前合同只要求恢复已持久化 Session 状态。
+- 不把 live `PartProgress` 与 durable `PartUpdated` 判定为 fallback；二者分别承担实时体验和重连恢复，是同一 shared coordinator 的两个合同出口。
+- 不要求修改 SQLite WAL 参数、durability、schema、migration、权限或 daemon writer 语义。
+- 不要求通用 logger 全局截断；ACP 和 LLM 均在各自产生无界日志的 owner seam 局部收敛。
+- 不因 `processMessage` 与 live event handler 的实现形态不同而额外阻塞：当前可达 replay terminal → late live running 场景已由公共 ACP 测试覆盖，尚无独立证据证明 persisted message payload 会在同一 call lifecycle 中产生不可接受的 replay terminal 后 running 序列。
+
+## Requirement and traceability coverage
+
+| Requirement / invariant | Audit verdict |
+|---|---|
+| 消除 ShellTool chunk→SQLite transaction 一比一热点 | Production path 已改为 `TerminalDisplay → ToolProgress → live/durable delivery`；focused 和完整 ShellTool suite 通过，但当前源码 runtime WAL feedback loop 未闭合。 |
+| 消除公开 direct `session.shell` 同类热点 | `SessionPrompt.shellImpl` 已复用同一 coordinator；direct shell focused test 通过。 |
+| 保持实时体验 | 独立 live worker、50ms cadence、latest-wins 和 ACP/TUI/App consumers 均有实现及测试映射。 |
+| daemon reconnect 恢复 | durable checkpoint、HTTP session sync、legacy v0、strictly-newer running 和 terminal dominance 均有生产映射与 TUI/App/ACP tests。 |
+| completion/error/abort/timeout 稳定性 | close/flush、uninterruptible delivery confirmation、terminal publication ordering 均已实现；相关 suites 通过，完整 backend regression 仍因 prompt fixture 失败而未闭合。 |
+| 保持 raw/truncated/model-visible/interrupted output | ShellTool 原始累积、截断文件、TerminalDisplay、最终 output 和 interrupted metadata 路径仍保留；ShellTool suite 通过。 |
+| 保持 TUI/App/ACP/ShareNext/run 行为 | TUI/App/ACP/ShareNext focused/full suites 通过；完整 affected suite 尚未全绿。 |
+| 降低 ACP progress 日志写入 | `message.part.progress` 不再进入完整对象 INFO 日志；R16 ACP focused test 通过并保留 durable diagnostic。 |
+| ACP terminal dominance | live/replay × completed/error 矩阵已覆盖，晚到高版本 running 被拒绝。 |
+| 降低大型 LLM error 日志 | bounded fixed-field summary、无 raw extras 和完整 `service=llm` 行约束已实现；LLM suite 通过。 |
+| 保持 LLM error propagation | `fullStream` error event 仍由 `SessionProcessor` failure owner 处理；LLM suite 通过。 |
+| 不修改 ModelsDev | 用户已明确排除；实现 diff 未修改该路径。 |
+| 不削弱 SQLite durability/权限/daemon crash 语义 | 未发现 WAL、durability、schema、migration、permission 或 process-supervision 变更。 |
+| 单一 authoritative primary path | 未发现 `try A → B`、catch-and-success、隐藏禁用、纯 ephemeral 替代 durable recovery 或第二成功算法。 |
+| 1200 行硬上限 | 当前 canonical conservative accounting：`E=1027`、`C=155`、`E+C=1182≤1200`；generated SDK、plan、blank/import/formatter-only 和已分类 pure-move 排除。 |
+| 15% 中文解释性注释 | `ceil(1027×0.15)=155`，`155/1027=15.09%`，达到最低值。注释位于 cadence、flush、publication、legacy version、terminal dominance、日志边界和测试意图附近。 |
+| 完整 release verification | **未通过**：完整 affected backend suite 未完成；官方 App build 失败；SDK repository generator 未成功；当前 source candidate 的原始 WAL loop 未 green。 |
+
+## Primary-path and fallback verdict
+
+Shell 和 direct `session.shell` 的 authoritative primary path 为：
+
+```text
+producer-specific snapshot
+  → shared ToolProgress latest/version/lifecycle
+  → independent live PartProgress + durable PartUpdated workers
+  → close joins confirmation regions and flushes pending latest
+  → terminal PartUpdated
+```
+
+SyncEvent 通过 transaction commit 后等待 typed Project Bus 与 GlobalBus 入队，避免 terminal publication 越过 trailing durable running event。
+
+TUI、App、ACP 分别在各自真实双通道 store seam 执行 legacy v0、strictly-newer running 和 terminal dominance；没有发现失败后备用成功路径。LLM 和 ACP 的新增路径均为 bounded diagnostic path，不产生业务成功结果，也未观察到超过当前计划约束的 fallback family。
+
+**Primary-path verdict: PASS。**
+
+但 primary-path 通过不能覆盖 B-01 的 release verification blocker。
+
+## Code quality and Chinese-comment verdict
+
+- `packages/opencode` typecheck：通过。
+- `packages/app` typecheck：通过。
+- `packages/sdk/js` typecheck：通过。
+- App global-sync tests：`20 pass / 84 assertions`。
+- 排除已知 reviewer-fixture 503 的 affected backend suites：`256 pass / 864 assertions`。
+- direct shell focused：通过。
+- ACP R16 focused：通过。
+- SyncEvent suite：通过。
+- 官方 App production build：失败，缺少 `packages/app/node_modules/vite/bin/vite.js`。
+- SDK repository generation：未获得成功结果，Windows OpenAPI generation 超时。
+- 原始 current-source WAL feedback loop：未获得 green。
+
+### 中文注释计算
+
+按 R16 完整 hand-written diff 的保守口径：
+
+- `E = 1027`
+- `C = 155`
+- `ceil(E × 0.15) = ceil(154.05) = 155`
+- `C / E = 15.09%`
+- 用户总行数口径：`E + C = 1182 ≤ 1200`
+
+Generated SDK、canonical plan、空行、import-only、formatter-only 和已确认 pure-move 行不计入；当前计算满足 15% 中文解释性注释门禁。
+
+**Chinese-comment gate: PASS。**
+
+**Code-quality/release verification gate: FAIL**，原因是 B-01 中列出的完整验证门禁未闭合，而不是已观察到的生产代码 fallback 或类型错误。
+
+## Release verdict
+
+**BLOCK — R16 implementation**
+
+本 verdict 覆盖：
+
+- `docs/plans/opencode-disk-write-hotspots.md` 的 exact revision `R16`
+- 用户指定的完整 changed-file scope
+- 当前工作树实际 implementation diff
+- 本轮执行的 backend/app/typecheck/build 验证
+- canonical §23 已记录的 SDK/WAL/历史 verification evidence
+
+当前实现不能进入 `verified` 或发布。必须先闭合 B-01 中的完整 affected regression、官方 App build、repository SDK generation 和 current-source WAL feedback loop，然后对同一 R16 implementation diff 重新执行 full-scope implementation audit。
+
+Invocation context: independent adversarial implementation audit，覆盖原始需求、R16 canonical plan、完整指定 changed-file scope、R14 frozen baseline、R16 ACP repair；当前结果为 `BLOCK`，无任何用户范围缩减。
+```
+
+### Round 5 verbatim implementation verdict (R16)
+
+```text
+## Blocking findings
+
+### B-01 ACP 的 terminal/progress marker 实际按 `callID` 全局索引，未实现 R16 要求的 Session-scoped 生命周期
+
+- Violated invariant: `INV-04`、`INV-14`、`INV-15`；一个 Session 的 shell terminal marker 不得拒绝、删除或覆盖另一个 Session 的 running lifecycle。R16 明确要求 retained marker 为 session-scoped。
+- Evidence class: reachable
+- Producer and execution path: 同一个 ACP `Agent` 可以同时管理多个 Session；每个 Session 的 Provider 分别产生 `ToolPart.callID`。`callID` 的公开 schema 仅为字符串，没有跨 Session 全局唯一约束。Session A 接收 completed/error 后写入 terminal marker；Session B 随后接收相同 `callID` 的 running shell Part；handler 仅以 `callID` 查询 marker，于是把 Session A 的 terminal 当成 Session B 的 terminal 并拒绝其 progress。反向地，Session B 的 pending 也会删除 Session A 的 marker。
+- Source evidence:
+  - `packages/opencode/src/session/message-v2.ts:426-430`：`ToolPart.callID` 只是 `Schema.String`，没有全局唯一合同。
+  - `packages/opencode/src/acp/agent.ts:142-165`：一个 `Agent` 持有一个跨多个 Session 共用的 `shellSnapshots`，Map key 仅为 `string`。
+  - `packages/opencode/src/acp/agent.ts:295-310`：pending 仅按 `part.callID` 删除；running 仅按 `part.callID` 获取并应用 terminal/version marker。
+  - `packages/opencode/src/acp/agent.ts:812-819`：terminal 同样仅以 `part.callID` 写入 marker；`sessionID` 只是 Map value，未参与身份判定。
+  - `packages/opencode/src/acp/agent.ts:802-806`：只有 close cleanup 才读取 marker 中的 `sessionID`。
+- Canonical-plan evidence: §9 ACP terminal lifecycle；§10.1 item 13；§13 `INV-06/INV-14/INV-15`；尤其 `docs/plans/opencode-disk-write-hotspots.md:705-715` 要求 marker 为 session-scoped，并在 pending/close 边界清理“同 call 的新 lifecycle”。
+- Responsibility owner: `packages/opencode/src/acp/agent.ts` 的 ACP shell lifecycle store。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 多个同时打开的 ACP Session 出现相同 Provider tool-call ID 时，一个 Session 已完成的 shell 可以让另一个 Session 的实时 shell progress 永久消失；另一个 Session 的 pending 又可能删除前一个 Session 用于阻止 late running 的 terminal marker。当前 ACP 测试虽创建多个 Session，但没有用相同 `callID` 验证 Session 隔离。
+- Why this is not speculative: ACP 明确支持一个 Agent 管理多个 Session；`callID` 的生产/公开 schema 没有跨 Session 唯一保证；当前实现直接用无 Session 前缀的 key 合并这些生命周期。该问题不依赖 malformed input 或未来扩展。
+- Minimal correction direction: ACP lifecycle owner 必须按实际 Session + call identity 隔离 marker 的查询、写入、pending 清理和 close 清理；不得增加 fallback 或把隔离责任转移给 producer/consumer。
+
+### B-02 ACP replay 一个 running Part 时没有恢复其 version marker，后到的旧 transport snapshot 可以回退显示
+
+- Violated invariant: `INV-03`、`INV-04`、`INV-14`；ACP 作为同时消费 replay/durable/live 的 store owner，必须在所有真实入口执行同一个 normalized-version、strictly-newer 和 terminal-dominance 合同。
+- Evidence class: reachable
+- Producer and execution path: `loadSession`/`unstable_forkSession` 获取 SQLite 中持久化的 running shell Part → `processMessage()` 将该 Part 发送给 ACP client → event subscription 独立接收一个较旧的 delayed `message.part.progress` 或 `message.part.updated`。Replay running 分支没有把已展示 Part 的 normalized `progressVersion` 写入 `shellSnapshots`，因此 event handler 看到 `marker === undefined`，接受并发送较旧 snapshot。
+- Source evidence:
+  - `packages/opencode/src/acp/agent.ts:613-637`：`loadSession` 获取并通过 `processMessage()` replay messages。
+  - `packages/opencode/src/acp/agent.ts:698-735`：fork 走相同 replay path。
+  - `packages/opencode/src/acp/agent.ts:827-863`：`processMessage()` 的 running 分支发送 `in_progress`，但完全没有归一化版本或更新 `shellSnapshots`。
+  - `packages/opencode/src/acp/agent.ts:302-315`：live/durable event handler 只有在 marker 已存在时才拒绝 stale/equal version。
+  - `packages/opencode/src/acp/agent.ts:177-190`：全局 event subscription 与 load/replay 是独立执行入口。
+- Canonical-plan evidence: §7 `INV-14`；§9 双通道 store owner；§10.1 lines 687-715；§13 `INV-03/INV-14` 和 `INV-06/INV-14/INV-15`。计划要求 ACP 对 independent live/durable snapshots 执行统一版本合同，并明确纳入 load/fork replay。
+- Responsibility owner: `packages/opencode/src/acp/agent.ts` 的 ACP running snapshot merge owner。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 加载或 fork 一个仍为 running 的 Session 时，ACP client 可以先显示持久化的新 checkpoint，随后被 delayed 的旧 progress/update 回退到更早 output；这直接破坏 daemon 重连恢复后的单调显示和整体体验。
+- Why this is not speculative: load/fork running replay、独立 event subscription、可乱序的 live/durable delivery 都是当前生产路径；R16 正是因这类独立到达顺序引入 `progressVersion`。现有测试只覆盖 replay terminal marker，没有覆盖 replay running version 初始化。
+- Minimal correction direction: 在 ACP replay running 的现有 lifecycle owner 中执行与 event handler 相同的 normalized-version登记，使 replay 已展示版本参与后续 strictly-newer 判定；不要增加第二套 merge 算法或依赖 producer 串行化 transports。
+
+### B-03 必需的 direct-shell/Session loop 生命周期回归在隔离重跑中持续失败
+
+- Violated invariant: `INV-04`、`INV-05`、`INV-06`、`INV-13`；直接 `session.shell` 完成后必须解除 Session Run state 阻塞并让排队的 `prompt.loop` 调用恢复。实施发布要求 affected behavioral tests 通过，不能用其他 focused tests 或 typecheck 代替。
+- Evidence class: observed
+- Producer and execution path: public direct `session.shell` → `SessionPrompt.shellImpl` → scoped `ToolProgress` workers/finalizer → shell terminal completion → queued `prompt.loop`。
+- Source evidence:
+  - `packages/opencode/src/session/prompt.ts:1344-1553`：本次修改的 direct-shell coordinator、scope、terminal 路径。
+  - `packages/opencode/test/session/prompt.test.ts:3023-3058`：shell 完成后单个 queued loop 必须启动。
+  - `packages/opencode/test/session/prompt.test.ts:3061-3098`：两个 queued loop 必须共享 shell 完成后的同一次结果。
+- Canonical-plan evidence: §7 `INV-04`、`INV-05`、`INV-06`、`INV-13`；§18 要求 affected prompt lifecycle verification；§23:1647-1648、1663-1666 声称这两个测试在原有 10 秒合同下通过，当前独立重跑与该 release claim 不一致。
+- Responsibility owner: `SessionPrompt.shellImpl` 与 Session Run state/queued-loop completion path。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy:
+  - 隔离运行 `loop waits while shell runs and starts after shell exits`：`0 pass / 1 fail`，在 `10001.68ms` 超时。
+  - 隔离运行 `shell completion resumes queued loop callers`：`0 pass / 1 fail`，在 `10003.39ms` 超时。
+  - 两项同时运行也得到 `1 pass / 2 fail`；此前完整 affected suite 同样失败并未闭合。
+  - 因此当前实现不能证明 direct shell 结束后 Session 不会保持阻塞或让调用者长期等待。
+- Why this is not speculative: 两个测试分别隔离重跑后均稳定失败；它们通过 public `SessionPrompt` seam 观察 shell completion 和 queued-loop 结果，不是 private helper 调用次数或估计。
+- Minimal correction direction: 定位 direct-shell completion 到 Session Run state/queued-loop release 链的第一个未完成 transition，并在其 owner 修正；保留原测试的行为断言和 10 秒合同，不得通过放宽超时、吞掉失败或增加备用 loop 路径放行。
+
+## Non-blocking findings
+
+- 完整 `share-next.test.ts` 与其他重负载命令并行执行时有两个计时测试未观察到 1 秒 flush；其中与本次变更直接相关的 `terminal part` 测试随后隔离重跑通过（1 pass、3 assertions），因此不把并行资源竞争单独列为 blocking finding。
+- Canonical plan 保留了大量历史 revision/audit 正文，当前 R16 状态需依赖章节上下文与旧 verdict 区分；这是可维护性问题，不改变本轮行为结论。
+- SDK generated diff 包含大量定义重排，但 `packages/sdk/js` typecheck 通过，新 `EventMessagePartProgress` 已生成；未观察到生成文件的行为缺陷。
+
+## Rejected speculation
+
+- 不要求修改 `ModelsDev`：当前用户输入明确给出 R16 approved revision 和完整 scope，canonical plan 记录了同一 Goal 中对 Models 路径的明确排除。
+- 不要求 daemon 死亡后续跑或重新附着原 OS 子进程；当前合同只要求恢复已持久化的 Session 状态。
+- 不把同一版本 snapshot 的 live `PartProgress` 与 durable `PartUpdated` 判定为 fallback；二者分别满足实时体验和重连恢复，并由同一 `ToolProgress` latest/version source 驱动。
+- 不要求关闭 WAL、降低 SQLite durability、执行 `VACUUM`、删除历史 Session 数据或移除完成态 `state.output`/`state.metadata.output` 双存储。
+- 不把 App 的 package-local Vite 缺失视为本轮额外 blocker；当前用户与 R16 合同明确把 App 发布排除在本分支 release gate 外，且 App affected tests/typecheck 已通过。
+
+## Code quality and Chinese-comment verdict
+
+- 通过：`packages/opencode`、`packages/app`、`packages/sdk/js` typecheck；ShellTool、SyncEvent、TUI、ACP、LLM、App focused/full affected files；相关 ShareNext terminal test 的隔离重跑。
+- 失败：两个 direct-shell/queued-loop 行为测试隔离重跑均超时。
+- 未发现新增依赖、migration、配置 fallback、类型抑制或为测试专设的 production success path。
+- B-01/B-02 表明 ACP state interface 的身份和入口覆盖不完整；B-03 触发 repository required-test hard gate。
+
+### Chinese explanatory-comment calculation
+
+对用户列出的 23 个 hand-written production/test 文件相对 HEAD 的完整 diff重新计算；排除 canonical plan、generated SDK、无关文件和 submodule：
+
+- Gross hand-written additions：`1274`
+- 空白新增行：`72`
+- Import-only：`19`
+- 新增注释行：`155`
+- Conservative effective code `E`：`1028`
+- 实际合格中文解释性注释 `C`：`155`
+- 最低要求：`ceil(1028 × 0.15) = 155`
+- 实际比例：`155 / 1028 = 15.08%`
+- 用户 1200 行口径：`E + C = 1183 ≤ 1200`
+
+**Chinese-comment gate: PASS。**
+**1200-line gate: PASS。**
+
+## Release verdict
+
+**BLOCK — Canonical plan R16 implementation diff**
+
+当前完整实现不能发布。必须修复 B-01、B-02，并使 B-03 的两个 direct-shell/Session loop 行为测试在原合同下通过；随后针对原始需求、R16 和完整 affected interface 重新执行 full-scope implementation audit。
+```
