@@ -34,6 +34,31 @@ const textPart = (id: string, sessionID: string, messageID: string) =>
     text: id,
   }) as Part
 
+const shellPart = (output: string, progressVersion?: number, terminal = false) =>
+  ({
+    id: "prt_shell",
+    sessionID: "ses_1",
+    messageID: "msg_1",
+    type: "tool",
+    callID: "call_shell",
+    tool: "bash",
+    state: terminal
+      ? {
+          status: "completed",
+          input: { command: "build" },
+          output,
+          title: "",
+          metadata: { output, description: "" },
+          time: { start: 1, end: 2 },
+        }
+      : {
+          status: "running",
+          input: { command: "build" },
+          metadata: { output, description: "", ...(progressVersion === undefined ? {} : { progressVersion }) },
+          time: { start: 1 },
+        },
+  }) as Part
+
 const permissionRequest = (id: string, sessionID: string, title = id) =>
   ({
     id,
@@ -422,6 +447,33 @@ describe("applyDirectoryEvent", () => {
     })
 
     expect(store.part[messageID]).toBeUndefined()
+  })
+
+  test("applies monotonic shell progress through the directory event reducer", () => {
+    const [store, setStore] = createStore(baseState({ part: { msg_1: [shellPart("v1", 1)] } }))
+    const apply = (type: "message.part.progress" | "message.part.updated", part: Part) =>
+      applyDirectoryEvent({
+        event: { type, properties: { part } },
+        store,
+        setStore,
+        push() {},
+        directory: "/tmp",
+        loadLsp() {},
+      })
+
+    // 同一 Part ID 的两种 transport 到达顺序必须得到相同的 store 结果，测试不依赖事件调用次数。
+    // v2 之后的 durable stale snapshot 专门覆盖 HTTP reconnect 绕过 SSE adapter 的风险。
+    // SSE live 与 durable PartUpdated 必须进入同一个 merge owner；否则后到的
+    // legacy HTTP/event copy 会绕过版本合同并把 app UI 回退。
+    apply("message.part.progress", shellPart("v2", 2))
+    expect(store.part.msg_1?.[0]).toMatchObject({ state: { status: "running", metadata: { output: "v2" } } })
+    apply("message.part.updated", shellPart("legacy"))
+    expect(store.part.msg_1?.[0]).toMatchObject({ state: { status: "running", metadata: { output: "v2" } } })
+
+    // terminal 是权威结果；更高 running version 也不能恢复执行中。
+    apply("message.part.updated", shellPart("done", undefined, true))
+    apply("message.part.progress", shellPart("late", 3))
+    expect(store.part.msg_1?.[0]).toMatchObject({ state: { status: "completed", output: "done" } })
   })
 
   // 复现核心竞态：delta 已将 part.text 和 accum_delta 累积为长文本，

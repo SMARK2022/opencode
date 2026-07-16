@@ -15,6 +15,7 @@ import type { State, VcsCache } from "./types"
 import { trimSessions } from "./session-trim"
 import { dropSessionCaches } from "./session-cache"
 import { diffs as list, message as clean } from "@/utils/diffs"
+import { mergePartSnapshot } from "./part-merge"
 
 const SKIP_PARTS = new Set(["patch", "step-start", "step-finish"])
 
@@ -236,7 +237,8 @@ export function applyDirectoryEvent(input: {
       )
       break
     }
-    case "message.part.updated": {
+    case "message.part.updated":
+    case "message.part.progress": {
       const part = (event.properties as { part: Part }).part
       if ((part as unknown as { hidden?: unknown }).hidden) {
         const parts = input.store.part[part.messageID]
@@ -256,11 +258,8 @@ export function applyDirectoryEvent(input: {
         break
       }
       if (SKIP_PARTS.has(part.type)) break
-      // 单调守卫：防止 pending 阶段的短快照覆盖已通过 delta 累积的长文本。
-      // daemon 的 message.part.updated 通过 fire-and-forget 发送
-      // （void Effect.runPromise），而 message.part.delta 通过 yield* await
-      // 发送。当 text-start 的 part.updated（text=""）因 fiber 调度延迟到
-      // delta 之后才到达时，不带 time.end 的短文本不应回退本地长文本，
+      // 单调守卫：防止 pending 阶段或 HTTP sync 的短快照覆盖已通过 delta
+      // 累积的长文本。不带 time.end 的短文本不应回退本地长文本，
       // 也不应清除 accum_delta（UI 优先读 accum_delta 显示流式内容）。
       // 终态（time.end 存在）不进入此守卫，正常执行覆盖和 accum_delta 清除。
       if ((part.type === "text" || part.type === "reasoning") && !part.time?.end) {
@@ -286,7 +285,16 @@ export function applyDirectoryEvent(input: {
       }
       const result = Binary.search(parts, part.id, (p) => p.id)
       if (result.found) {
-        input.setStore("part", part.messageID, result.index, reconcile(part))
+        // monotonic rule 只属于 Tool snapshot；text/reasoning 等 Part 继续走原有
+        // reconcile 语义，避免把 shell 版本概念扩散到 append 型内容。
+        // live progress 与 durable/HTTP PartUpdated 必须经过同一个 Tool merge
+        // owner；否则任一 adapter 都能绕过 version 或 terminal dominance。
+        input.setStore(
+          "part",
+          part.messageID,
+          result.index,
+          reconcile(part.type === "tool" ? mergePartSnapshot(parts[result.index], part) : part),
+        )
         break
       }
       input.setStore(

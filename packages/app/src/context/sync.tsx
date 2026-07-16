@@ -13,6 +13,7 @@ import { useGlobalSync } from "./global-sync"
 import { useSDK } from "./sdk"
 import type { Message, Part } from "@opencode-ai/sdk/v2/client"
 import { SESSION_CACHE_LIMIT, dropSessionCaches, pickSessionCacheEvictions } from "./global-sync/session-cache"
+import { mergePartSnapshots } from "./global-sync/part-merge"
 import { diffs as list, message as clean } from "@/utils/diffs"
 
 const SKIP_PARTS = new Set(["patch", "step-start", "step-finish"])
@@ -341,7 +342,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             input.setStore("message", input.sessionID, reconcile(message, { key: "id" }))
             for (const p of next.part) {
               const filtered = p.part.filter((x) => !SKIP_PARTS.has(x.type))
-              if (filtered.length) input.setStore("part", p.id, filtered)
+              // shared merge 只决定同 ID snapshot 的胜者；HTTP page 的过滤、顺序和
+              // 首次无本地值时的恢复行为仍由既有 loadMessages owner 保持。
+              // fetched HTTP page 与 SSE reducer 共写同一 Part store；这里必须复用
+              // shared merge，不能让后完成的旧 running snapshot 绕过版本/终态合同。
+              if (filtered.length) input.setStore("part", p.id, mergePartSnapshots(store.part[p.id], filtered))
             }
             setMeta("limit", key, message.length)
             setMeta("cursor", key, next.cursor)
