@@ -1,0 +1,1533 @@
+From 1b8b8b9dae13973fba192e5f463d2fc96e051295 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 25 May 2026 14:44:49 +0800
+Subject: [PATCH] feat: add notebook editing capabilities and metadata handling
+
+- Introduced new `vscode_notebook_edit` tool to handle notebook edits, including tracking cell IDs and operations.
+- Enhanced `createPendingToolInputParser` to support notebook edit inputs and statistics.
+- Implemented detailed metadata handling for notebook edits, including before and after source tracking.
+- Added functionality to render notebook edit diffs and summaries in the TUI without exposing raw source.
+- Updated VS Code bridge to manage notebook edit calls and responses, ensuring compact metadata without full artifact text.
+- Enhanced tests to cover new notebook edit features, including diff rendering and metadata validation.
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index e14517a6f44d8be0899d050e91bbae07db98ed5e..b0101a5c9d51f62b9600695ab681db78230649b0 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -115,6 +115,7 @@ import {
+   PENDING_TOOL_INPUT_PROGRESS_INTERVAL,
+   type PendingToolInputStats,
+ } from "./pending-tool-input"
++import { useVscodeNotebookToolView } from "./notebook-tool"
+ 
+ addDefaultParsers(parsers.parsers)
+ 
+@@ -1934,6 +1935,10 @@ type ToolProps<T> = {
+ }
+ 
+ const DEFAULT_BLOCK_CHAR_THRESHOLD = 800
++// 工具标题只承担单行摘要职责，不能承载多行源码。这个阈值只影响
++// generic/plugin tool 的标题参数展示；真实内容仍由完成态的 notebook diff/source
++// card 或 generic output card 展示，避免 pending 阶段刷屏但不丢失结果可见性。
++const TOOL_INPUT_VALUE_MAX_LENGTH = 120
+ 
+ function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD) {
+   const lines = input.split("\n")
+@@ -2008,28 +2013,69 @@ function GenericTool(props: ToolProps<any>) {
+   const { theme } = useTheme()
+   const ctx = use()
+   const output = createMemo(() => props.output?.trim() ?? "")
++  const pendingStats = createPendingToolInputStats(() => props.part)
++  const notebook = useVscodeNotebookToolView({
++    tool: () => props.tool,
++    input: () => props.input as Record<string, unknown>,
++    metadata: () => props.metadata as Record<string, unknown>,
++    output,
++    status: () => props.part.state.status,
++    pendingStats,
++    width: () => ctx.width,
++    diffWrapMode: ctx.diffWrapMode,
++  })
++  const notebookInline = createMemo(() => {
++    const view = notebook()
++    return view?.mode === "inline" ? view : undefined
++  })
++  const notebookBlock = createMemo(() => {
++    const view = notebook()
++    return view?.mode === "block" ? view : undefined
++  })
+ 
+   return (
+-    <Show
+-      when={props.output && ctx.showGenericToolOutput()}
+-      fallback={
++    <Switch>
++      <Match when={notebookInline()}>
++        {(view) => (
++          <InlineTool icon={view().icon} pending={view().pending} complete={view().complete} part={props.part}>
++            {view().children}
++          </InlineTool>
++        )}
++      </Match>
++      <Match when={notebookBlock()}>
++        {(view) => (
++          <BlockTool
++            title={view().title}
++            part={props.part}
++            maxLines={view().maxLines ?? 10}
++            threshold={view().threshold ?? 20}
++            totalLines={view().totalLines}
++            totalChars={view().totalChars}
++            preview={view().preview}
++          >
++            {view().body}
++          </BlockTool>
++        )}
++      </Match>
++      <Match when={props.output && ctx.showGenericToolOutput()}>
++        <BlockTool
++          title={`# ${props.tool} ${input(props.input)}`}
++          part={props.part}
++          maxLines={10}
++          threshold={20}
++          totalLines={output().split("\n").length}
++          totalChars={output().length}
++          preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
++        >
++          <text fg={theme.text}>{output()}</text>
++        </BlockTool>
++      </Match>
++      <Match when={true}>
+         <InlineTool icon="⚙" pending="Writing command..." complete={true} part={props.part}>
+           {props.tool} {input(props.input)}
+         </InlineTool>
+-      }
+-    >
+-      <BlockTool
+-        title={`# ${props.tool} ${input(props.input)}`}
+-        part={props.part}
+-        maxLines={10}
+-        threshold={20}
+-        totalLines={output().split("\n").length}
+-        totalChars={output().length}
+-        preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
+-      >
+-        <text fg={theme.text}>{output()}</text>
+-      </BlockTool>
+-    </Show>
++      </Match>
++    </Switch>
+   )
+ }
+ 
+@@ -3005,7 +3051,15 @@ function input(input: Record<string, any>, omit?: string[]): string {
+     return typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+   })
+   if (primitives.length === 0) return ""
+-  return `[${primitives.map(([key, value]) => `${key}=${value}`).join(", ")}]`
++  return `[${primitives.map(([key, value]) => `${key}=${inputValue(value)}`).join(", ")}]`
++}
++
++function inputValue(value: string | number | boolean) {
++  if (typeof value !== "string") return String(value)
++  const lines = value.split("\n")
++  if (lines.length > 1) return `<${lines.length} lines, ${value.length} chars>`
++  if (value.length <= TOOL_INPUT_VALUE_MAX_LENGTH) return value
++  return value.slice(0, TOOL_INPUT_VALUE_MAX_LENGTH).trimEnd() + "..."
+ }
+ 
+ function filetype(input?: string) {
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16dab55463bb
+--- /dev/null
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx
+@@ -0,0 +1,387 @@
++import { createMemo, For, Show, type Accessor } from "solid-js"
++import type { JSX } from "@opentui/solid"
++import type { PendingToolInputStats } from "./pending-tool-input"
++import { useTheme } from "../../context/theme"
++import { usePathFormatter } from "../../context/path-format"
++import { previewDiff } from "@tui/util/preview-diff"
++import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
++
++// 这个文件只负责把 metadata.vscodeNotebook 翻译成 GenericTool 可消费的
++// inline/block 描述，不拥有 BlockTool/InlineTool 本身。这样 notebook 的差异化
++// 展示集中在一个小 seam，同时保持上游 session/index.tsx 的工具 card 框架不被复制。
++export type VscodeNotebookToolView =
++  | {
++      mode: "inline"
++      icon: string
++      complete: unknown
++      pending: JSX.Element
++      children: JSX.Element
++    }
++  | {
++      mode: "block"
++      title: string
++      body: JSX.Element
++      preview?: JSX.Element
++      totalLines?: number
++      totalChars?: number
++      maxLines?: number
++      threshold?: number
++    }
++
++export function useVscodeNotebookToolView(props: {
++  tool: Accessor<string>
++  input: Accessor<Record<string, unknown>>
++  metadata: Accessor<Record<string, unknown>>
++  output: Accessor<string>
++  status: Accessor<string>
++  pendingStats: Accessor<PendingToolInputStats | undefined>
++  width: Accessor<number>
++  diffWrapMode: Accessor<"word" | "none">
++}) {
++  const { theme, syntax } = useTheme()
++  const pathFormatter = usePathFormatter()
++  return createMemo<VscodeNotebookToolView | undefined>(() => {
++    // 完成态优先使用 plugin 写入的 compact metadata；pending/running 阶段 metadata
++    // 尚不存在，只能用 streaming raw parser 提供的 file/cell/+/- 摘要，避免读 VS Code。
++    const metadata = notebookMetadata(props.metadata())
++    if (metadata) return blockView(metadata, props.output())
++    if (!props.tool().startsWith("vscode_notebook_")) return undefined
++    return inlineView(props.tool(), props.input(), props.status(), props.pendingStats())
++  })
++
++  function blockView(metadata: Record<string, unknown>, output: string): VscodeNotebookToolView | undefined {
++    const view = stringValue(metadata.view)
++    if (view === "edit") return editView(metadata)
++    if (view === "summary") return summaryView(metadata)
++    if (view === "source") return textView(metadata, output, "Notebook source")
++    if (view === "run") return runView(metadata)
++    if (view === "output") return outputView(metadata)
++    if (view === "env") return envView(metadata)
++  }
++
++  function inlineView(tool: string, input: Record<string, unknown>, status: string, stats?: PendingToolInputStats): VscodeNotebookToolView {
++    const op = stats?.operation ?? stringValue(input.editType) ?? stringValue(input.operation) ?? tool.replace("vscode_notebook_", "")
++    const target = notebookTarget(stringValue(input.filePath) ?? stats?.filePath)
++    const cell = stats?.cellId ?? stringValue(input.cellId)
++    const label = tool === "vscode_notebook_edit" ? notebookEditLabel(op) : notebookToolLabel(tool)
++    const lineStats = <NotebookPendingStats stats={stats} />
++    const content = (
++      <>
++        {label} <Show when={target}>{target}</Show> <Show when={cell}>{cell}</Show>{lineStats}
++      </>
++    )
++    return {
++      mode: "inline",
++      icon: tool === "vscode_notebook_edit" ? "←" : "⚙",
++      complete: status !== "pending",
++      pending: (
++        <Show when={stats || target !== "notebook" || cell} fallback={<>Preparing {label.toLowerCase()}...</>}>
++          {content}
++        </Show>
++      ),
++      children: content,
++    }
++  }
++
++  function editView(metadata: Record<string, unknown>): VscodeNotebookToolView {
++    const diff = stringValue(metadata.diff) ?? ""
++    const stats = { added: numberValue(metadata.added) ?? 0, removed: numberValue(metadata.removed) ?? 0 }
++    const title = [
++      "←",
++      notebookEditLabel(stringValue(metadata.editType)),
++      notebookTarget(stringValue(metadata.path)),
++      stringValue(metadata.cellLabel) ?? stringValue(metadata.cellId),
++      stats.added > 0 || stats.removed > 0 ? `+${stats.added} -${stats.removed}` : undefined,
++    ].filter(Boolean).join(" ")
++    const filePath = notebookDiffPath(metadata)
++    return {
++      mode: "block",
++      title,
++      maxLines: 10,
++      threshold: 20,
++      totalLines: diff.split("\n").length,
++      totalChars: diff.length,
++      preview: diff ? <NotebookDiff diff={previewDiff(diff, 10)} filePath={filePath} maxLines={10} /> : undefined,
++      body: (
++        <box gap={1} flexDirection="column">
++          <Show when={diff} fallback={<text fg={theme.text}>{summaryLine(metadata)}</text>}>
++            <NotebookDiff diff={diff} filePath={filePath} />
++          </Show>
++          <Show when={stringValue(metadata.diffOmitted)}>
++            <text fg={theme.textMuted}>Diff omitted from metadata because it exceeds the notebook inline display budget.</text>
++          </Show>
++          <text fg={theme.textMuted}>{summaryLine(metadata)}</text>
++        </box>
++      ),
++    }
++  }
++
++  function summaryView(metadata: Record<string, unknown>): VscodeNotebookToolView {
++    const cells = arrayRecords(metadata.cells)
++    const title = `# Notebook summary ${notebookTarget(stringValue(metadata.path))}${cells.length ? ` · ${cells.length} cells` : ""}`
++    const lines = cells.length + 2
++    return {
++      mode: "block",
++      title,
++      maxLines: 10,
++      threshold: 20,
++      totalLines: lines,
++      totalChars: JSON.stringify(metadata).length,
++      preview: <NotebookCells cells={cells.slice(0, 8)} runtime={stringValue(metadata.runtime)} dirty={booleanValue(metadata.dirty)} />,
++      body: <NotebookCells cells={cells} runtime={stringValue(metadata.runtime)} dirty={booleanValue(metadata.dirty)} />,
++    }
++  }
++
++  function textView(metadata: Record<string, unknown>, output: string, label: string): VscodeNotebookToolView {
++    const title = `→ ${label} ${notebookTarget(stringValue(metadata.path))}`
++    return {
++      mode: "block",
++      title,
++      maxLines: 10,
++      threshold: 20,
++      totalLines: output.split("\n").length,
++      totalChars: output.length,
++      preview: <text fg={theme.text}>{previewText(output, 10)}</text>,
++      body: <text fg={theme.text}>{output}</text>,
++    }
++  }
++
++  function runView(metadata: Record<string, unknown>): VscodeNotebookToolView {
++    const cells = arrayRecords(metadata.cells)
++    const completed = booleanValue(metadata.completed)
++    return {
++      mode: "block",
++      title: `▶ Notebook run ${notebookTarget(stringValue(metadata.path))} ${stringValue(metadata.target) ?? ""} · ${completed === false ? "failed" : "completed"}`,
++      maxLines: 10,
++      threshold: 20,
++      totalLines: cells.length + artifactRows(cells).length + 2,
++      totalChars: JSON.stringify(metadata).length,
++      preview: <NotebookRun cells={cells.slice(0, 6)} />,
++      body: <NotebookRun cells={cells} />,
++    }
++  }
++
++  function outputView(metadata: Record<string, unknown>): VscodeNotebookToolView {
++    const artifacts = arrayRecords(metadata.artifacts)
++    const cell = recordValue(metadata.cell)
++    return {
++      mode: "block",
++      title: `→ Notebook output ${notebookTarget(stringValue(metadata.path))} ${cellLabel(cell)} · ${artifacts.length ? `${artifacts.length} artifacts` : "no outputs"}`,
++      maxLines: 10,
++      threshold: 20,
++      totalLines: artifacts.length + 2,
++      totalChars: JSON.stringify(metadata).length,
++      preview: <NotebookArtifacts artifacts={artifacts.slice(0, 6)} />,
++      body: (
++        <box flexDirection="column">
++          <text fg={theme.textMuted}>Cell: {cellLabel(cell)} {stringValue(cell.kind)}/{stringValue(cell.lang)}</text>
++          <NotebookArtifacts artifacts={artifacts} />
++        </box>
++      ),
++    }
++  }
++
++  function envView(metadata: Record<string, unknown>): VscodeNotebookToolView {
++    const status = stringValue(metadata.status) ?? envStatus(metadata)
++    return {
++      mode: "block",
++      title: `# Notebook env ${notebookTarget(stringValue(metadata.path))} · ${status ?? stringValue(metadata.operation) ?? "info"}`,
++      maxLines: 10,
++      threshold: 20,
++      totalLines: 4,
++      totalChars: JSON.stringify(metadata).length,
++      body: (
++        <box flexDirection="column">
++          <Show when={stringValue(metadata.operation)}>{(operation) => <text fg={theme.textMuted}>Operation: {operation()}</text>}</Show>
++          <Show when={status}>{(item) => <text fg={statusColor(item())}>Status: {item()}</text>}</Show>
++          <Show when={stringValue(metadata.guidance)}>{(guidance) => <text fg={theme.text}>{guidance()}</text>}</Show>
++          <Show when={metadata.beforeDirty !== undefined || metadata.afterDirty !== undefined}>
++            <text fg={theme.textMuted}>Dirty: {String(booleanValue(metadata.beforeDirty))} -&gt; {String(booleanValue(metadata.afterDirty))}</text>
++          </Show>
++        </box>
++      ),
++    }
++  }
++
++  function NotebookDiff(diffProps: { diff: string; filePath?: string; maxLines?: number }) {
++    return (
++      <box paddingLeft={1} maxHeight={diffProps.maxLines} overflow={diffProps.maxLines ? "hidden" : undefined}>
++        <diff
++          diff={diffProps.diff}
++          view={props.width() > 120 ? "split" : "unified"}
++          filetype={filetype(diffProps.filePath)}
++          syntaxStyle={syntax()}
++          showLineNumbers={true}
++          width="100%"
++          wrapMode={props.diffWrapMode()}
++          fg={theme.text}
++          addedBg={theme.diffAddedBg}
++          removedBg={theme.diffRemovedBg}
++          contextBg={theme.diffContextBg}
++          addedSignColor={theme.diffHighlightAdded}
++          removedSignColor={theme.diffHighlightRemoved}
++          lineNumberFg={theme.diffLineNumber}
++          lineNumberBg={theme.diffContextBg}
++          addedLineNumberBg={theme.diffAddedLineNumberBg}
++          removedLineNumberBg={theme.diffRemovedLineNumberBg}
++        />
++      </box>
++    )
++  }
++
++  function NotebookPendingStats(statProps: { stats?: PendingToolInputStats }) {
++    return (
++      <>
++        <Show when={statProps.stats?.added}><span style={{ fg: theme.diffAdded }}> +{statProps.stats!.added}</span></Show>
++        <Show when={statProps.stats?.removed}><span style={{ fg: theme.diffRemoved }}> -{statProps.stats!.removed}</span></Show>
++      </>
++    )
++  }
++
++  function NotebookCells(cellProps: { cells: Record<string, unknown>[]; runtime?: string; dirty?: boolean }) {
++    return (
++      <box flexDirection="column">
++        <text fg={theme.textMuted}>runtime={cellProps.runtime ?? "unknown"} dirty={String(cellProps.dirty ?? "unknown")}</text>
++        <For each={cellProps.cells}>{(cell) => <text fg={execColor(stringValue(cell.exec))}>{cellLine(cell)}</text>}</For>
++      </box>
++    )
++  }
++
++  function NotebookRun(runProps: { cells: Record<string, unknown>[] }) {
++    const artifacts = artifactRows(runProps.cells)
++    return (
++      <box flexDirection="column">
++        <For each={runProps.cells}>{(cell) => <text fg={execColor(stringValue(cell.exec))}>{cellLine(cell)}</text>}</For>
++        <Show when={artifacts.length}>
++          <text fg={theme.textMuted}>Artifacts:</text>
++          <NotebookArtifacts artifacts={artifacts} />
++        </Show>
++      </box>
++    )
++  }
++
++  function NotebookArtifacts(artifactProps: { artifacts: Record<string, unknown>[] }) {
++    return (
++      <box flexDirection="column">
++        <For each={artifactProps.artifacts}>{(artifact) => <text fg={theme.text}>{artifactLine(artifact)}</text>}</For>
++      </box>
++    )
++  }
++
++  function notebookTarget(value?: string) {
++    return value ? pathFormatter.format(value) : "notebook"
++  }
++
++  function statusColor(status: string) {
++    if (["configured", "selected", "completed", "saved"].includes(status)) return theme.success
++    if (["failed", "needs-selection"].includes(status)) return theme.error
++    return theme.text
++  }
++
++  function execColor(exec?: string) {
++    if (exec?.includes("failed") || exec?.includes("error")) return theme.error
++    if (exec?.includes("skipped") || exec?.includes("not-run")) return theme.textMuted
++    return theme.text
++  }
++}
++
++function notebookMetadata(metadata: Record<string, unknown>) {
++  const value = metadata.vscodeNotebook
++  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
++  return value as Record<string, unknown>
++}
++
++function notebookEditLabel(operation?: string) {
++  if (operation === "insert") return "Notebook insert"
++  if (operation === "delete") return "Notebook delete"
++  return "Notebook edit"
++}
++
++function notebookToolLabel(tool: string) {
++  return tool.replace(/^vscode_notebook_/, "Notebook ").replaceAll("_", " ")
++}
++
++function notebookDiffPath(metadata: Record<string, unknown>) {
++  return [stringValue(metadata.path), stringValue(metadata.cellLabel), stringValue(metadata.language) ? `.${stringValue(metadata.language)}` : undefined]
++    .filter((item): item is string => Boolean(item))
++    .join("")
++}
++
++function summaryLine(metadata: Record<string, unknown>) {
++  const before = numberValue(metadata.cellCountBefore)
++  const after = numberValue(metadata.cellCountAfter)
++  const count = before === undefined || after === undefined ? undefined : `${before} -> ${after} cells`
++  return [count, `dirty=${String(booleanValue(metadata.dirty) ?? "unknown")}`, stringValue(metadata.editType)].filter(Boolean).join(" · ")
++}
++
++function cellLine(cell: Record<string, unknown>) {
++  return [
++    cellLabel(cell),
++    stringValue(cell.id),
++    [stringValue(cell.kind), stringValue(cell.lang)].filter(Boolean).join("/"),
++    numberValue(cell.lines) === undefined ? undefined : `${numberValue(cell.lines)} lines`,
++    stringValue(cell.exec),
++    arrayStrings(cell.existing_outs).length ? `outs=${arrayStrings(cell.existing_outs).join(",")}` : undefined,
++    stringValue(cell.first) ? `first=${JSON.stringify(stringValue(cell.first))}` : undefined,
++  ].filter(Boolean).join("  ")
++}
++
++function cellLabel(cell: Record<string, unknown>) {
++  const index = numberValue(cell.i)
++  return index === undefined ? stringValue(cell.id) ?? "cell" : `c${index}`
++}
++
++function artifactRows(cells: Record<string, unknown>[]) {
++  return cells.flatMap((cell) => arrayRecords(cell.artifacts))
++}
++
++function artifactLine(artifact: Record<string, unknown>) {
++  return [stringValue(artifact.mime), bytesText(numberValue(artifact.bytes)), stringValue(artifact.artifactPath), stringValue(artifact.preview)].filter(Boolean).join("  ")
++}
++
++function envStatus(metadata: Record<string, unknown>) {
++  if (booleanValue(metadata.saved) !== undefined) return booleanValue(metadata.saved) ? "saved" : "save not confirmed"
++}
++
++function previewText(input: string, maxLines: number) {
++  const lines = input.split("\n")
++  return lines.length > maxLines ? [...lines.slice(0, maxLines), "…"].join("\n") : input
++}
++
++function filetype(input?: string) {
++  const ext = input?.match(/\.[^.]+$/)?.[0]
++  const language = ext ? LANGUAGE_EXTENSIONS[ext] : undefined
++  if (language && ["typescriptreact", "javascriptreact", "javascript"].includes(language)) return "typescript"
++  return language
++}
++
++function bytesText(value?: number) {
++  if (value === undefined) return undefined
++  if (value < 1024) return `${value} B`
++  return `${(value / 1024).toFixed(1)} KB`
++}
++
++function recordValue(value: unknown): Record<string, unknown> {
++  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
++  return value as Record<string, unknown>
++}
++
++function arrayRecords(value: unknown) {
++  return Array.isArray(value) ? value.flatMap((item) => (item && typeof item === "object" && !Array.isArray(item) ? [item as Record<string, unknown>] : [])) : []
++}
++
++function arrayStrings(value: unknown) {
++  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
++}
++
++function stringValue(value: unknown) {
++  return typeof value === "string" ? value : undefined
++}
++
++function numberValue(value: unknown) {
++  return typeof value === "number" && Number.isFinite(value) ? value : undefined
++}
++
++function booleanValue(value: unknown) {
++  return typeof value === "boolean" ? value : undefined
++}
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/pending-tool-input.ts b/packages/opencode/src/cli/cmd/tui/routes/session/pending-tool-input.ts
+index 347b026c5b88b56d7ffa73702b8d52fddaf5eace..ec16a0dd8e000ef9431f30ec4a7adf41135a1c3f 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/pending-tool-input.ts
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/pending-tool-input.ts
+@@ -1,5 +1,7 @@
+ export type PendingToolInputStats = {
+   filePath?: string
++  cellId?: string
++  operation?: string
+   fileCount: number
+   added: number
+   removed: number
+@@ -11,12 +13,42 @@ export function createPendingToolInputParser(tool: string) {
+   if (tool === "apply_patch") return createApplyPatchInputParser()
+   if (tool === "edit") return createEditInputParser()
+   if (tool === "write") return createWriteInputParser()
++  if (tool === "vscode_notebook_edit") return createNotebookEditInputParser()
+   return {
+     push(_input: string) {},
+     stats: () => undefined,
+   }
+ }
+ 
++function createNotebookEditInputParser() {
++  let filePath = ""
++  let cellId = ""
++  let operation = ""
++  const oldCode = createLineCounter()
++  const newCode = createLineCounter()
++  const scanner = createJsonStringFieldScanner(["filePath", "cellId", "editType", "oldCode", "newCode"], (field, value) => {
++    if (field === "filePath") filePath += value
++    if (field === "cellId") cellId += value
++    if (field === "editType") operation += value
++    if (field === "oldCode") oldCode.push(value)
++    if (field === "newCode") newCode.push(value)
++  })
++  return {
++    push: scanner.push,
++    stats: () => {
++      // notebook edit 的 pending 统计只能来自模型正在流式生成的参数，不能在渲染线程
++      // 读取 VS Code 或 notebook 文件；full-cell replace/delete 的真实删除行数要等完成后的 diff。
++      const stats = pendingStats(filePath, filePath ? 1 : 0, newCode.count(), oldCode.count())
++      if (!stats && !cellId && !operation) return undefined
++      return {
++        ...(stats ?? { fileCount: filePath ? 1 : 0, added: 0, removed: 0, filePath: filePath || undefined }),
++        cellId: cellId || undefined,
++        operation: operation || undefined,
++      }
++    },
++  }
++}
++
+ function createEditInputParser() {
+   let filePath = ""
+   const oldString = createLineCounter()
+@@ -90,6 +122,8 @@ function createJsonStringFieldScanner(fields: readonly string[], onValue: (field
+   let pendingKey = ""
+   let expectingValueFor = ""
+   let activeField = ""
++  let arrayField = ""
++  let arrayFieldHasValue = false
+   let key = ""
+   let inString = false
+   let escaping = false
+@@ -152,7 +186,12 @@ function createJsonStringFieldScanner(fields: readonly string[], onValue: (field
+ 
+         if (char === '"') {
+           inString = true
+-          activeField = wanted.has(expectingValueFor) ? expectingValueFor : ""
++          activeField = wanted.has(expectingValueFor) ? expectingValueFor : arrayField
++          // notebook oldCode/newCode 支持 string[]；bridge 的 sourceProp 会用 "\n"
++          // 拼接数组项，所以 streaming 统计也必须补上这个隐式换行，否则
++          // pending 阶段的 +N/-N 会低估数组形式源码的行数。
++          if (activeField && arrayField && arrayFieldHasValue) onValue(activeField, "\n")
++          if (activeField && arrayField) arrayFieldHasValue = true
+           expectingValueFor = ""
+           key = ""
+           continue
+@@ -162,8 +201,19 @@ function createJsonStringFieldScanner(fields: readonly string[], onValue: (field
+           pendingKey = ""
+           continue
+         }
++        if (expectingValueFor && char === "[" && wanted.has(expectingValueFor)) {
++          arrayField = expectingValueFor
++          arrayFieldHasValue = false
++          expectingValueFor = ""
++          continue
++        }
++        if (arrayField && char === "]") {
++          arrayField = ""
++          arrayFieldHasValue = false
++          continue
++        }
+         if (expectingValueFor && !/\s/.test(char)) expectingValueFor = ""
+-        if (char === "," || char === "{" || char === "}") pendingKey = ""
++        if (!arrayField && (char === "," || char === "{" || char === "}")) pendingKey = ""
+       }
+     },
+   }
+diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
+index 5fd3a25ed64d89cf68f4953f5d65727fdc0af48b..866368879890b73264da85417fdb5dd89a115bda 100644
+--- a/packages/opencode/src/plugin/vscode-bridge.ts
++++ b/packages/opencode/src/plugin/vscode-bridge.ts
+@@ -1,9 +1,20 @@
+ import { Effect } from "effect"
+ import { tool, type ToolContext } from "@opencode-ai/plugin"
++import { createTwoFilesPatch } from "diff"
+ import { z } from "zod"
+ import * as VscodeBridge from "@/ide/vscode-bridge"
+ import { VscodeNotebookDescriptions } from "./vscode-bridge-descriptions"
+ 
++// Notebook 工具是 plugin tool，不能直接复用内置 edit/write 的专用 renderer。
++// 这个 fork-local metadata key 是 TUI 和 VS Code bridge 之间的内部展示契约：
++// 只让 generic renderer 选择性升级展示，不扩大 public plugin API，也不为每个
++// vscode_notebook_* 工具在 session/index.tsx 增加分支。
++const NOTEBOOK_METADATA_KEY = "vscodeNotebook"
++// notebook edit diff 会持久化到 session part metadata；16KB 与现有工具输出
++// 默认内联上限保持同一量级，超过后只保留统计和摘要，避免大 cell/full replace
++// 把 notebook 源码整段复制进会话状态。
++const NOTEBOOK_DIFF_METADATA_MAX_CHARS = 16 * 1024
++
+ const requiredFilePath = {
+   filePath: z
+     .string()
+@@ -99,13 +110,13 @@ const envArgs = {
+     .describe("Brief description of why this operation is being performed, shown to the user."),
+ }
+ 
+-async function call(
++async function callRaw(
+   endpoint: string,
+   args: Record<string, unknown>,
+   context: Pick<ToolContext, "directory" | "abort">,
+   timeoutMs?: number,
+ ) {
+-  const value = await VscodeBridge.callBridge({
++  return await VscodeBridge.callBridge({
+     cwd: context.directory,
+     path: endpoint,
+     body: args,
+@@ -113,7 +124,192 @@ async function call(
+     signal: context.abort,
+     timeoutMs,
+   })
+-  return VscodeBridge.summaryOnly(value)
++}
++
++function notebookResult(endpoint: string, args: Record<string, unknown>, value: unknown) {
++  const view = notebookView(endpoint, args, value)
++  return {
++    output: VscodeBridge.summaryOnly(value),
++    metadata: {
++      endpoint,
++      ...(view && { [NOTEBOOK_METADATA_KEY]: view }),
++    },
++  }
++}
++
++function notebookView(endpoint: string, args: Record<string, unknown>, value: unknown) {
++  const data = recordValue(recordValue(value).data)
++  const path = stringValue(data.path) ?? stringValue(args.filePath)
++  if (endpoint === "/notebook/summary") {
++    return { view: "summary", path, dirty: booleanValue(data.dirty), runtime: stringValue(data.runtime), cells: compactCells(data.cells) }
++  }
++  if (endpoint === "/notebook/source") {
++    return {
++      view: "source",
++      path,
++      target: stringValue(data.target),
++      cellId: stringValue(data.cellId) ?? stringValue(args.cellId),
++      returned: numberValue(data.returned),
++      totalLines: numberValue(data.totalLines),
++      truncated: booleanValue(data.truncated),
++    }
++  }
++  if (endpoint === "/notebook/run") {
++    return {
++      view: "run",
++      path,
++      dirty: booleanValue(data.dirty),
++      runtime: stringValue(data.runtime),
++      target: stringValue(data.target),
++      completed: booleanValue(data.completed),
++      stoppedAt: numberValue(data.stoppedAt),
++      cells: compactRunCells(data.cells),
++    }
++  }
++  if (endpoint === "/notebook/output") {
++    return {
++      view: "output",
++      path,
++      dirty: booleanValue(data.dirty),
++      runtime: stringValue(data.runtime),
++      cell: compactCell(data.cell),
++      artifacts: compactArtifacts(data.artifacts),
++    }
++  }
++  if (endpoint === "/notebook/env") {
++    return notebookEnvView(path, data)
++  }
++  if (endpoint === "/notebook/edit") {
++    return notebookEditView(path, args, data)
++  }
++}
++
++function notebookEditView(path: string | undefined, args: Record<string, unknown>, data: Record<string, unknown>) {
++  const before = stringValue(data.beforeSource)
++  const after = stringValue(data.afterSource)
++  const fullDiff = before !== undefined && after !== undefined && before !== after
++    ? createTwoFilesPatch(notebookDiffPath(path, data, "old"), notebookDiffPath(path, data, "new"), before, after)
++    : undefined
++  const stats = diffStats(fullDiff ?? "")
++  const diff = fullDiff && fullDiff.length <= NOTEBOOK_DIFF_METADATA_MAX_CHARS ? fullDiff : undefined
++  const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
++  return {
++    view: "edit",
++    path,
++    cellLabel: cellIndex === undefined ? undefined : `c${cellIndex + 1}`,
++    cellId: stringValue(args.cellId),
++    editType: stringValue(data.editType) ?? stringValue(args.editType),
++    cellCountBefore: numberValue(data.cellCountBefore),
++    cellCountAfter: numberValue(data.cellCountAfter),
++    dirty: booleanValue(data.dirty),
++    kind: stringValue(data.kind),
++    language: stringValue(data.language),
++    diff,
++    diffOmitted: fullDiff !== undefined && diff === undefined ? "too-large" : undefined,
++    added: stats.added,
++    removed: stats.removed,
++  }
++}
++
++function notebookEnvView(path: string | undefined, data: Record<string, unknown>) {
++  const operation = stringValue(data.operation)
++  const status = stringValue(data.status)
++  const guidance = status === "configured"
++    ? "Notebook is ready for cell execution."
++    : status === "selected"
++      ? "Proceed to run cells — the kernel will start on first execution."
++      : status === "needs-selection"
++        ? "Select a kernel manually from the notebook toolbar, then call configure to verify."
++        : status === "selection-requested"
++          ? "Retry configure or select a kernel manually."
++          : status === "failed"
++            ? "Check Jupyter/Python extensions and workspace trust."
++            : undefined
++  return {
++    view: "env",
++    path,
++    operation,
++    status,
++    guidance,
++    runtime: recordValue(data.runtime),
++    saved: booleanValue(data.saved),
++    beforeDirty: booleanValue(data.beforeDirty),
++    afterDirty: booleanValue(data.afterDirty),
++  }
++}
++
++function notebookDiffPath(path: string | undefined, data: Record<string, unknown>, fallback: string) {
++  const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
++  const language = stringValue(data.language)
++  return [path ?? "notebook", cellIndex === undefined ? undefined : `#c${cellIndex + 1}`, language ? `.${language}` : undefined]
++    .filter((item): item is string => Boolean(item))
++    .join("") || fallback
++}
++
++function compactRunCells(value: unknown) {
++  return arrayValue(value).map((item) => ({ ...compactCell(item), artifacts: compactArtifacts(recordValue(item).artifacts) }))
++}
++
++function compactCells(value: unknown) {
++  return arrayValue(value).map(compactCell)
++}
++
++function compactCell(value: unknown) {
++  const item = recordValue(value)
++  return {
++    i: numberValue(item.i),
++    id: stringValue(item.id),
++    kind: stringValue(item.kind),
++    lang: stringValue(item.lang),
++    lines: numberValue(item.lines),
++    exec: stringValue(item.exec),
++    existing_outs: arrayValue(item.existing_outs).filter((entry): entry is string => typeof entry === "string"),
++    first: stringValue(item.first),
++  }
++}
++
++function compactArtifacts(value: unknown) {
++  return arrayValue(value).map((entry) => {
++    const item = recordValue(entry)
++    // artifact.text 可能是大 stdout/json/blob；metadata 只保留 preview/path，
++    // 保证 session part 持久化体积稳定。完整内容仍在 bridge 返回的 artifact 文件中，
++    // TUI 只展示路径，不把大输出复制进会话状态。
++    return {
++      mime: stringValue(item.mime),
++      bytes: numberValue(item.bytes),
++      preview: stringValue(item.preview),
++      artifactPath: stringValue(item.artifactPath),
++    }
++  })
++}
++
++function diffStats(diff: string) {
++  const lines = diff.split("\n")
++  return {
++    added: lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length,
++    removed: lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length,
++  }
++}
++
++function recordValue(value: unknown): Record<string, unknown> {
++  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
++  return value as Record<string, unknown>
++}
++
++function arrayValue(value: unknown): unknown[] {
++  return Array.isArray(value) ? value : []
++}
++
++function stringValue(value: unknown) {
++  return typeof value === "string" ? value : undefined
++}
++
++function numberValue(value: unknown) {
++  return typeof value === "number" && Number.isFinite(value) ? value : undefined
++}
++
++function booleanValue(value: unknown) {
++  return typeof value === "boolean" ? value : undefined
+ }
+ 
+ async function ask(context: ToolContext, permission: string, args: Record<string, unknown>) {
+@@ -133,18 +329,12 @@ export const VscodeBridgePlugin = async () => ({
+     vscode_notebook_summary: tool({
+       description: VscodeNotebookDescriptions.summary,
+       args: requiredFilePath,
+-      execute: async (args, context) => ({
+-        output: await call("/notebook/summary", args, context, 10_000),
+-        metadata: { endpoint: "/notebook/summary" },
+-      }),
++      execute: async (args, context) => notebookResult("/notebook/summary", args, await callRaw("/notebook/summary", args, context, 10_000)),
+     }),
+     vscode_notebook_source: tool({
+       description: VscodeNotebookDescriptions.source,
+       args: sourceArgs,
+-      execute: async (args, context) => ({
+-        output: await call("/notebook/source", args, context, 10_000),
+-        metadata: { endpoint: "/notebook/source" },
+-      }),
++      execute: async (args, context) => notebookResult("/notebook/source", args, await callRaw("/notebook/source", args, context, 10_000)),
+     }),
+     vscode_notebook_run: tool({
+       description: VscodeNotebookDescriptions.run,
+@@ -152,19 +342,14 @@ export const VscodeBridgePlugin = async () => ({
+       execute: async (args, context) => {
+         await ask(context, "vscode_notebook_run", args)
+         const timeoutMs = args.timeoutMs ?? 300_000
+-        return {
+-          output: await call("/notebook/run", { ...args, timeoutMs }, context, timeoutMs + 5_000),
+-          metadata: { endpoint: "/notebook/run" },
+-        }
++        const body = { ...args, timeoutMs }
++        return notebookResult("/notebook/run", body, await callRaw("/notebook/run", body, context, timeoutMs + 5_000))
+       },
+     }),
+     vscode_notebook_output: tool({
+       description: VscodeNotebookDescriptions.output,
+       args: outputArgs,
+-      execute: async (args, context) => ({
+-        output: await call("/notebook/output", args, context, 30_000),
+-        metadata: { endpoint: "/notebook/output" },
+-      }),
++      execute: async (args, context) => notebookResult("/notebook/output", args, await callRaw("/notebook/output", args, context, 30_000)),
+     }),
+     vscode_notebook_edit: tool({
+       description: VscodeNotebookDescriptions.edit,
+@@ -178,10 +363,7 @@ export const VscodeBridgePlugin = async () => ({
+         // notebook cell 修改也不能绕过。顺序先专属后通用，确保更精确的
+         // vscode_notebook_edit deny/ask 先表达，再由 edit 维持历史兼容边界。
+         await ask(context, "edit", args)
+-        return {
+-          output: await call("/notebook/edit", args, context, 30_000),
+-          metadata: { endpoint: "/notebook/edit" },
+-        }
++        return notebookResult("/notebook/edit", args, await callRaw("/notebook/edit", args, context, 30_000))
+       },
+     }),
+     vscode_notebook_env: tool({
+@@ -192,10 +374,7 @@ export const VscodeBridgePlugin = async () => ({
+         // 即使 info 偏只读，也保持工具级权限和 agent 配置中的
+         // vscode_notebook_env 完全一致，避免新增 operation 级配置面。
+         await ask(context, "vscode_notebook_env", args)
+-        return {
+-          output: await call("/notebook/env", args, context, 120_000),
+-          metadata: { endpoint: "/notebook/env" },
+-        }
++        return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
+       },
+     }),
+   },
+diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+index e1ea633b0b5591c683f5195553c881d131d2ed78..3c09f17dd5cc38ca975be6429f22dea0c1049e3b 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -387,6 +387,266 @@ test("pending tool line counts update from streamed raw deltas", async () => {
+   )
+ })
+ 
++test("pending notebook edit shows throttled line counts without rendering raw source", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_notebook_live_delta", 1)],
++    {
++      msg_notebook_live_delta: [pendingToolPart("part_notebook_live_delta", "msg_notebook_live_delta", "vscode_notebook_edit", "")],
++    },
++    async (app, emit) => {
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Preparing notebook edit")))
++
++      emit(
++        partDeltaEvent(
++          "evt_notebook_live_delta",
++          "msg_notebook_live_delta",
++          "part_notebook_live_delta",
++          JSON.stringify({
++            filePath: "notebooks/analysis notebook.ipynb",
++            cellId: "#VSC-12345678",
++            editType: "edit",
++            oldCode: "old one\nold two",
++            newCode: ["new one", "new two", "new three"],
++          }),
++        ),
++      )
++
++      await Bun.sleep(50)
++      await app.renderOnce()
++      expect(rows(app.captureCharFrame()).some((line) => line.includes("Notebook edit") && line.includes("+3 -2"))).toBe(false)
++
++      const frame = await waitForFrame(app, (lines) =>
++        lines.some((line) => line.includes("Notebook edit") && line.includes("analysis notebook.ipynb") && line.includes("+3 -2")),
++      )
++      expect(frame.some((line) => line.includes("new two"))).toBe(false)
++    },
++  )
++})
++
++test("completed notebook edit renders a diff card instead of raw generic input", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_notebook_edit", 1)],
++    {
++      msg_notebook_edit: [
++        completedToolPart(
++          "part_notebook_edit",
++          "msg_notebook_edit",
++          "vscode_notebook_edit",
++          {
++            filePath: "notebooks/analysis.ipynb",
++            cellId: "#VSC-12345678",
++            editType: "edit",
++            newCode: "RAW_ONLY_SHOULD_NOT_RENDER",
++          },
++          {
++            vscodeNotebook: {
++              view: "edit",
++              path: "notebooks/analysis.ipynb",
++              cellLabel: "c3",
++              editType: "edit",
++              language: "python",
++              dirty: true,
++              cellCountBefore: 4,
++              cellCountAfter: 4,
++              diff: ["--- notebooks/analysis.ipynb#c3.py", "+++ notebooks/analysis.ipynb#c3.py", "@@ -1 +1,2 @@", "-old value", "+new value", "+rendered diff line"].join("\n"),
++              added: 2,
++              removed: 1,
++            },
++          },
++        ),
++      ],
++    },
++    async (app) => {
++      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Notebook edit") && line.includes("+2 -1")))
++      expect(frame.some((line) => line.includes("rendered diff line"))).toBe(true)
++      expect(frame.some((line) => line.includes("RAW_ONLY_SHOULD_NOT_RENDER"))).toBe(false)
++    },
++  )
++})
++
++test("notebook tool switches from pending inline summary to completed rich card", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_notebook_transition", 1)],
++    {
++      msg_notebook_transition: [pendingToolPart("part_notebook_transition", "msg_notebook_transition", "vscode_notebook_edit", "")],
++    },
++    async (app, emit) => {
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Preparing notebook edit")))
++
++      emit(
++        partUpdatedEvent(
++          "evt_notebook_transition_done",
++          completedToolPart(
++            "part_notebook_transition",
++            "msg_notebook_transition",
++            "vscode_notebook_edit",
++            { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-12345678", editType: "edit" },
++            {
++              vscodeNotebook: {
++                view: "edit",
++                path: "notebooks/analysis.ipynb",
++                cellLabel: "c3",
++                editType: "edit",
++                diff: ["--- notebooks/analysis.ipynb#c3.py", "+++ notebooks/analysis.ipynb#c3.py", "@@ -1 +1 @@", "-before transition", "+after transition"].join("\n"),
++                added: 1,
++                removed: 1,
++              },
++            },
++          ),
++        ),
++      )
++
++      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("after transition")))
++      expect(frame.some((line) => line.includes("Preparing notebook edit"))).toBe(false)
++    },
++  )
++})
++
++test("notebook summary renders cells from notebook metadata without enabling generic output", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_notebook_summary", 1)],
++    {
++      msg_notebook_summary: [
++        completedToolPart(
++          "part_notebook_summary",
++          "msg_notebook_summary",
++          "vscode_notebook_summary",
++          { filePath: "notebooks/analysis.ipynb" },
++          {
++            vscodeNotebook: {
++              view: "summary",
++              path: "notebooks/analysis.ipynb",
++              dirty: false,
++              runtime: "Python 3.11",
++              cells: [
++                { i: 1, id: "#VSC-11111111", kind: "markdown", lang: "markdown", lines: 3, exec: "not-run", existing_outs: [], first: "# Analysis" },
++                { i: 2, id: "#VSC-22222222", kind: "code", lang: "python", lines: 5, exec: "current-run #1 failed 12ms ended=2026-05-25T00:00:00.000Z", existing_outs: ["error"], first: "raise Error" },
++              ],
++            },
++          },
++        ),
++      ],
++    },
++    async (app) => {
++      const frame = await waitForFrame(app, (lines) =>
++        lines.some((line) => line.includes("Notebook summary") && line.includes("2 cells")) && lines.some((line) => line.includes("#VSC-22222222") && line.includes("failed")),
++      )
++      expect(frame.some((line) => line.includes("Notebook:"))).toBe(false)
++    },
++  )
++})
++
++test("notebook env renders operation status from notebook metadata", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_notebook_env", 1)],
++    {
++      msg_notebook_env: [
++        completedToolPart(
++          "part_notebook_env",
++          "msg_notebook_env",
++          "vscode_notebook_env",
++          { filePath: "notebooks/analysis.ipynb", operation: "configure", reason: "path with spaces | no shell" },
++          {
++            vscodeNotebook: {
++              view: "env",
++              path: "notebooks/analysis.ipynb",
++              operation: "configure",
++              status: "needs-selection",
++              guidance: "Select a kernel manually from the notebook toolbar, then call configure to verify.",
++            },
++          },
++        ),
++      ],
++    },
++    async (app) => {
++      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Notebook env") && line.includes("needs-selection")))
++      expect(frame.some((line) => line.includes("Select a kernel manually"))).toBe(true)
++      expect(frame.some((line) => line.includes("path with spaces | no shell"))).toBe(false)
++    },
++  )
++})
++
++test("notebook source, run, and output tools render rich notebook cards", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_notebook_readbacks", 1)],
++    {
++      msg_notebook_readbacks: [
++        completedToolPart(
++          "part_notebook_source",
++          "msg_notebook_readbacks",
++          "vscode_notebook_source",
++          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-source" },
++          {
++            vscodeNotebook: {
++              view: "source",
++              path: "notebooks/analysis.ipynb",
++              target: "cell 3",
++              cellId: "#VSC-source",
++              returned: 2,
++              totalLines: 12,
++              truncated: false,
++            },
++          },
++        ),
++        completedToolPart(
++          "part_notebook_run",
++          "msg_notebook_readbacks",
++          "vscode_notebook_run",
++          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-run" },
++          {
++            vscodeNotebook: {
++              view: "run",
++              path: "notebooks/analysis.ipynb",
++              target: "cell 4",
++              completed: true,
++              cells: [
++                {
++                  i: 4,
++                  id: "#VSC-run",
++                  kind: "code",
++                  lang: "python",
++                  lines: 3,
++                  exec: "current-run #4 succeeded 12ms ended=2026-05-25T00:00:00.000Z",
++                  existing_outs: ["text"],
++                  artifacts: [{ mime: "text/plain", bytes: 32, preview: "ok", artifactPath: ".opencode/cache/notebook-outputs/run.txt" }],
++                },
++              ],
++            },
++          },
++        ),
++        completedToolPart(
++          "part_notebook_output",
++          "msg_notebook_readbacks",
++          "vscode_notebook_output",
++          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-output" },
++          {
++            vscodeNotebook: {
++              view: "output",
++              path: "notebooks/analysis.ipynb",
++              cell: { i: 5, id: "#VSC-output", kind: "code", lang: "python", lines: 2, existing_outs: ["png"] },
++              artifacts: [{ mime: "image/png", bytes: 4096, preview: "<image/png 4096 bytes>", artifactPath: ".opencode/cache/notebook-outputs/plot.png" }],
++            },
++          },
++        ),
++      ],
++    },
++    async (app) => {
++      const frame = await waitForFrame(
++        app,
++        (lines) =>
++          lines.some((line) => line.includes("Notebook source")) &&
++          lines.some((line) => line.includes("Notebook run") && line.includes("completed")) &&
++          lines.some((line) => line.includes(".opencode/cache/notebook-outputs/run.txt")) &&
++          lines.some((line) => line.includes("Notebook output") && line.includes("1 artifacts")) &&
++          lines.some((line) => line.includes(".opencode/cache/notebook-outputs/plot.png")),
++      )
++      expect(frame.some((line) => line.includes("vscode_notebook_source ["))).toBe(false)
++    },
++    {},
++    { height: 24 },
++  )
++})
++
+ test("shell tool renders auto review as a second status line", async () => {
+   await withRenderedSession(
+     [assistantMessage("msg_auto_review", 1)],
+@@ -1420,3 +1680,15 @@ function partDeltaEvent(id: string, messageID: string, partID: string, delta: st
+     },
+   }
+ }
++
++function partUpdatedEvent(id: string, part: Extract<Part, { type: "tool" }>): GlobalEvent {
++  return {
++    directory,
++    project: "proj_test",
++    payload: {
++      id,
++      type: "message.part.updated",
++      properties: { sessionID, part, time: 2 },
++    },
++  }
++}
+diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
+index 72adfa3c302ca3a301c8ef65c468a50a76526b06..ba23cf5cdae959ca5a2e0afbf6fa89faea0347b0 100644
+--- a/packages/opencode/test/plugin/vscode-bridge.test.ts
++++ b/packages/opencode/test/plugin/vscode-bridge.test.ts
+@@ -1,7 +1,12 @@
+-import { describe, expect, test } from "bun:test"
++import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
+ import { Effect } from "effect"
+ import type { ToolContext } from "@opencode-ai/plugin"
+ import { VscodeBridgePlugin } from "@/plugin/vscode-bridge"
++import * as VscodeBridge from "@/ide/vscode-bridge"
++
++afterEach(() => {
++  mock.restore()
++})
+ 
+ describe("vscode bridge plugin", () => {
+   test("checks notebook mutation permissions before calling the VS Code bridge", async () => {
+@@ -111,4 +116,198 @@ describe("vscode bridge plugin", () => {
+ 
+     expect(calls).toEqual(["vscode_notebook_edit", "edit"])
+   })
++
++  test("returns notebook edit diff metadata from bridge before and after source", async () => {
++    const plugin = await VscodeBridgePlugin()
++    const filePath = "F:\\project with spaces\\analysis notebook.ipynb"
++    const bridge = spyOn(VscodeBridge, "callBridge").mockResolvedValue({
++      ran: false,
++      summary: "Notebook edit: applied=true op=edit at=3 num_cells=4->4 dirty=true.",
++      data: {
++        path: filePath,
++        editType: "edit",
++        cellCountBefore: 4,
++        cellCountAfter: 4,
++        anchorCellIndex: 2,
++        dirty: true,
++        kind: "code",
++        language: "python",
++        beforeSource: "old value\n",
++        afterSource: "new value\nrendered diff line\n",
++      },
++    })
++
++    const result = await plugin.tool.vscode_notebook_edit.execute(
++      {
++        filePath,
++        cellId: "#VSC-12345678",
++        editType: "edit",
++        newCode: "RAW_ONLY_SHOULD_NOT_RENDER",
++      },
++      allowContext(filePath),
++    )
++
++    expect(bridge).toHaveBeenCalledWith(expect.objectContaining({ path: "/notebook/edit", filePath }))
++    expect(result).toMatchObject({
++      output: "Notebook edit: applied=true op=edit at=3 num_cells=4->4 dirty=true.",
++      metadata: {
++        endpoint: "/notebook/edit",
++        vscodeNotebook: {
++          view: "edit",
++          path: filePath,
++          cellLabel: "c3",
++          editType: "edit",
++          cellCountBefore: 4,
++          cellCountAfter: 4,
++          dirty: true,
++          language: "python",
++          added: 2,
++          removed: 1,
++        },
++      },
++    })
++    if (typeof result === "string") throw new Error("expected structured notebook edit result")
++    const metadata = result.metadata ?? (() => { throw new Error("expected notebook edit metadata") })()
++    expect((metadata.vscodeNotebook as Record<string, string>).diff).toContain("-old value")
++    expect((metadata.vscodeNotebook as Record<string, string>).diff).toContain("+rendered diff line")
++  })
++
++  test("keeps notebook output metadata compact by excluding full artifact text", async () => {
++    const plugin = await VscodeBridgePlugin()
++    const filePath = "F:\\project with spaces\\analysis notebook.ipynb"
++    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
++      ran: false,
++      summary: "Cell c3 id=#VSC-12345678 existing outputs: text.",
++      data: {
++        path: filePath,
++        dirty: false,
++        runtime: "Python 3.11",
++        cell: { i: 3, id: "#VSC-12345678", kind: "code", lang: "python", lines: 7, exec: "succeeded", existing_outs: ["text"], first: "df.head()" },
++        artifacts: [
++          {
++            mime: "text/plain",
++            bytes: 2048,
++            preview: "short preview",
++            text: "full text should not be persisted into metadata",
++            artifactPath: ".opencode/cache/notebook-outputs/analysis-cell-2-output-0-item-0.txt",
++          },
++        ],
++      },
++    })
++
++    const result = await plugin.tool.vscode_notebook_output.execute(
++      { filePath, cellId: "#VSC-12345678" },
++      allowContext(filePath),
++    )
++
++    expect(result).toMatchObject({
++      metadata: {
++        vscodeNotebook: {
++          view: "output",
++          path: filePath,
++          artifacts: [
++            {
++              mime: "text/plain",
++              bytes: 2048,
++              preview: "short preview",
++              artifactPath: ".opencode/cache/notebook-outputs/analysis-cell-2-output-0-item-0.txt",
++            },
++          ],
++        },
++      },
++    })
++    expect(JSON.stringify(typeof result === "string" ? result : result.metadata)).not.toContain("full text should not be persisted")
++  })
++
++  test("labels notebook insert diff with the inserted cell index", async () => {
++    const plugin = await VscodeBridgePlugin()
++    const filePath = "F:\\project with spaces\\analysis notebook.ipynb"
++    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
++      ran: false,
++      summary: "Notebook edit: applied=true op=insert at=4 num_cells=3->4 dirty=true.",
++      data: {
++        path: filePath,
++        editType: "insert",
++        cellCountBefore: 3,
++        cellCountAfter: 4,
++        anchorCellIndex: 2,
++        affectedCellIndex: 3,
++        dirty: true,
++        language: "python",
++        beforeSource: "",
++        afterSource: "print('new cell')\n",
++      },
++    })
++
++    const result = await plugin.tool.vscode_notebook_edit.execute(
++      { filePath, cellId: "#VSC-anchor", editType: "insert", newCode: "print('new cell')" },
++      allowContext(filePath),
++    )
++
++    expect(result).toMatchObject({
++      metadata: {
++        vscodeNotebook: {
++          view: "edit",
++          cellLabel: "c4",
++          added: 1,
++          removed: 0,
++        },
++      },
++    })
++    if (typeof result === "string") throw new Error("expected structured notebook insert result")
++    expect((result.metadata?.vscodeNotebook as Record<string, string>).diff).toContain("#c4")
++  })
++
++  test("omits oversized notebook edit diffs from persisted metadata", async () => {
++    const plugin = await VscodeBridgePlugin()
++    const filePath = "F:\\project with spaces\\large notebook.ipynb"
++    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
++      ran: false,
++      summary: "Notebook edit: applied=true op=edit at=1 num_cells=1->1 dirty=true.",
++      data: {
++        path: filePath,
++        editType: "edit",
++        cellCountBefore: 1,
++        cellCountAfter: 1,
++        anchorCellIndex: 0,
++        dirty: true,
++        beforeSource: "old\n",
++        afterSource: `${"new line\n".repeat(3000)}`,
++      },
++    })
++
++    const result = await plugin.tool.vscode_notebook_edit.execute(
++      { filePath, cellId: "#VSC-large", editType: "edit", newCode: "ignored in mock" },
++      allowContext(filePath),
++    )
++
++    expect(result).toMatchObject({
++      metadata: {
++        vscodeNotebook: {
++          view: "edit",
++          cellLabel: "c1",
++          diffOmitted: "too-large",
++        },
++      },
++    })
++    if (typeof result === "string") throw new Error("expected structured oversized notebook edit result")
++    expect((result.metadata?.vscodeNotebook as Record<string, unknown>).diff).toBeUndefined()
++    expect(JSON.stringify(result.metadata)).not.toContain("new line\nnew line\nnew line")
++  })
+ })
++
++function allowContext(filePath: string): ToolContext {
++  return {
++    sessionID: "ses_test",
++    messageID: "msg_test",
++    agent: "build",
++    directory: "F:\\project with spaces",
++    worktree: "F:\\project with spaces",
++    abort: new AbortController().signal,
++    metadata: () => undefined,
++    ask(input) {
++      expect(input.patterns).toEqual([filePath])
++      return Effect.void
++    },
++  }
++}
+diff --git a/sdks/vscode/src/notebook/edit.ts b/sdks/vscode/src/notebook/edit.ts
+index 88161cb234144ede8e658ef64161e84465b2b18e..b70cf4c7b18546192bb7381dd20f36a9e952cb60 100644
+--- a/sdks/vscode/src/notebook/edit.ts
++++ b/sdks/vscode/src/notebook/edit.ts
+@@ -85,7 +85,7 @@ async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, b
+     applied, editType: "delete", opIndex: `~~${deletedIndex + 1}~~`, beforeCount, afterCount: notebook.cellCount,
+     anchorCell: targetCell, deletedCellIndex: deletedIndex,
+     deletedKind, deletedLang, deletedId, deletedLineCount, deletedFirst,
+-    shiftedCell, shiftedOldIdx, sourcePreview: deletedPreview,
++    shiftedCell, shiftedOldIdx, sourcePreview: deletedPreview, beforeSource: deletedPreview, afterSource: "",
+   })
+ }
+ 
+@@ -121,7 +121,7 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
+   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(insertIndex, insertIndex), [newCell])])
+   const applied = await applyNotebookEditAndWait(notebook, edit)
+   const shiftedCell = shiftedOldIdx !== undefined ? notebook.cellAt(shiftedOldIdx + 1) : undefined
+-  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source })
++  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, affectedCellIndex: insertIndex, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source, beforeSource: "", afterSource: source })
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -171,11 +171,12 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
+   const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
+   if (sourceRaw === undefined) throw new Error("newCode is required for edit")
+   const source = targetCell.kind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
++  const beforeSource = targetCell.document.getText()
+ 
+   const edit = new vscode.WorkspaceEdit()
+   edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), source)
+   const applied = await applyTextEditAndWait(targetCell.document, edit, source !== targetCell.document.getText())
+-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source })
++  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source, beforeSource, afterSource: source })
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -197,6 +198,7 @@ async function handleTypeChange(
+   let contextSummary: string | undefined
+ 
+   const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
++  const beforeSource = targetCell.document.getText()
+ 
+   if (oldCode) {
+     // string-match on old source, then create new cell with changed type
+@@ -217,7 +219,7 @@ async function handleTypeChange(
+   const targetIndex = targetCell.index
+   const applied = await applyNotebookEditAndWait(notebook, edit)
+   const updatedCell = notebook.cellAt(targetIndex)
+-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(updatedCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: updatedCell, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary })
++  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(updatedCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: updatedCell, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary, beforeSource, afterSource: newSource })
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -225,13 +227,14 @@ async function handleTypeChange(
+ // ---------------------------------------------------------------------------
+ 
+ async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, oldCode: string, newCode: string, beforeCount: number) {
++  const beforeSource = targetCell.document.getText()
+   const result = matchAndReplace(targetCell, oldCode, newCode)
+   const contextSummary = buildContext(notebook, targetCell, result, newCode)
+ 
+   const edit = new vscode.WorkspaceEdit()
+   edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), result.source)
+   const applied = await applyTextEditAndWait(targetCell.document, edit, result.source !== targetCell.document.getText())
+-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary })
++  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary, beforeSource, afterSource: result.source })
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -494,6 +497,8 @@ function compactEditResult(
+     shiftedOldIdx?: number
+     sourcePreview?: string
+     contextSummary?: string
++    beforeSource?: string
++    afterSource?: string
+   },
+ ) {
+   const lines: Array<string | undefined> = [
+@@ -540,10 +545,16 @@ function compactEditResult(
+       cellCountBefore: info.beforeCount,
+       cellCountAfter: info.afterCount,
+       anchorCellIndex: info.anchorCell?.index,
++      deletedCellIndex: info.deletedCellIndex,
+       affectedCellIndex: info.affectedCellIndex,
+       dirty: notebook.isDirty,
+       kind: info.kind,
+       language: info.language,
++      // opencode TUI 只从 data 派生展示 metadata，不改变 bridge 给模型的 summary。
++      // before/after 保持 cell 级源文本，确保 notebook edit 完成态能渲染真实 diff，
++      // pending 态仍只能显示参数行数估算，不能在 UI 线程重新读 VS Code 文档。
++      beforeSource: info.beforeSource,
++      afterSource: info.afterSource,
+     },
+   }
+ }

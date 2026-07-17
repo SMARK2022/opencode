@@ -1,0 +1,295 @@
+From 6283df82e6f66a40a5a54048be9d15427a6f1556 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Tue, 19 May 2026 22:05:35 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E5=AE=88=E6=8A=A4?=
+ =?UTF-8?q?=E8=BF=9B=E7=A8=8B=E5=90=AF=E5=8A=A8=E9=80=BB=E8=BE=91=EF=BC=8C?=
+ =?UTF-8?q?=E5=A4=84=E7=90=86=E9=80=80=E5=87=BA=E7=8A=B6=E6=80=81=E5=B9=B6?=
+ =?UTF-8?q?=E6=9B=B4=E6=96=B0=E9=94=99=E8=AF=AF=E6=B6=88=E6=81=AF=EF=BC=9B?=
+ =?UTF-8?q?=E6=94=B9=E8=BF=9B=E6=B5=8B=E8=AF=95=E7=94=A8=E4=BE=8B=E4=BB=A5?=
+ =?UTF-8?q?=E9=AA=8C=E8=AF=81=E5=AE=88=E6=8A=A4=E8=BF=9B=E7=A8=8B=E8=A1=8C?=
+ =?UTF-8?q?=E4=B8=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/daemon.ts b/packages/opencode/src/cli/cmd/tui/daemon.ts
+index c3f26b1a86a27932ce605c9b49cef36885838f3e..7fbd46b6f3c3bac98ca6ea9f891c2bac2adaa97b 100644
+--- a/packages/opencode/src/cli/cmd/tui/daemon.ts
++++ b/packages/opencode/src/cli/cmd/tui/daemon.ts
+@@ -25,6 +25,7 @@ const SERVER_ELECTION_STALE_MS = 5_000
+ const SERVER_POLL_INTERVAL_MS = 200
+ 
+ type Args = NetworkOptions
++type DaemonExit = { exitCode: number } | { error: unknown }
+ 
+ // Exposed for tests only.  Keep the daemon spawn path injectable without
+ // forcing production code through a heavier process abstraction.
+@@ -204,10 +205,15 @@ export async function ensure(args: Args) {
+     })
+     proc.unref()
+     forwardReload(proc)
++    const exited = proc.exited.then(
++      (exitCode): DaemonExit => ({ exitCode }),
++      (error): DaemonExit => ({ error }),
++    )
+ 
+     // The daemon cannot be ready immediately: worker startup has to load the
+     // server, bind a port, and write the lock atomically before health can pass.
+-    await Bun.sleep(1000)
++    const initialExit = await Promise.race([exited, Bun.sleep(1000).then(() => undefined)])
++    if (initialExit) throw new Error(daemonExitMessage(initialExit))
+ 
+     const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
+     while (Date.now() < deadline) {
+@@ -219,12 +225,24 @@ export async function ensure(args: Args) {
+           return internalUrl(lock.port)
+         }
+       }
+-      await Bun.sleep(SERVER_POLL_INTERVAL_MS)
++      const exit = await Promise.race([
++        exited,
++        Bun.sleep(Math.min(SERVER_POLL_INTERVAL_MS, Math.max(0, deadline - Date.now()))).then(() => undefined),
++      ])
++      if (exit) throw new Error(daemonExitMessage(exit))
+     }
+ 
+     proc.kill()
+-    throw new Error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
++    throw new Error(
++      `opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`,
++    )
+   } finally {
+     await electionLease?.release().catch(() => undefined)
+   }
+ }
++
++function daemonExitMessage(exit: DaemonExit) {
++  if ("exitCode" in exit)
++    return `opencode daemon exited before startup with exit code ${exit.exitCode}. Re-run with --print-logs to show daemon startup logs.`
++  return `opencode daemon exited before startup. Re-run with --print-logs to show daemon startup logs.`
++}
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+index e26bf15b46f34871591231b3ae250a6fef6c8944..c1411d08ee73c10f831418b1f5857d8aac5ee595 100644
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -490,6 +490,9 @@ function localCommands(root: Node) {
+   return commands(root).filter((node) => {
+     let parent = node.parent
+     while (parent && parent.id !== root.id) {
++      // tree-sitter-powershell can recover POSIX fragments inside quoted WSL/ssh
++      // arguments as commands under ERROR nodes; those are not local shell commands.
++      if (parent.type === "ERROR") return false
+       if (parent.type.includes("string")) return false
+       parent = parent.parent
+     }
+diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/test/cli/tui/thread.test.ts
+index 0fa9d686bdde5b805b8251f5ed35b83ba3fa72d0..eaf438f7b3ff9e415578d3956d1b04736e3f92aa 100644
+--- a/packages/opencode/test/cli/tui/thread.test.ts
++++ b/packages/opencode/test/cli/tui/thread.test.ts
+@@ -102,6 +102,16 @@ describe("tui thread", () => {
+       startedAt: new Date().toISOString(),
+     }
+ 
++    function spawnedDaemon(pid = FAKE_DAEMON_PID, overrides: Partial<ReturnType<typeof Bun.spawn>> = {}) {
++      return {
++        pid,
++        exited: new Promise<number>(() => {}),
++        unref() {},
++        kill() {},
++        ...overrides,
++      } as ReturnType<typeof Bun.spawn>
++    }
++
+     async function callWithDaemonSpy(existingUrl: string | null, overrides?: Partial<ThreadArgs>) {
+       setup()
+       await using tmp = await tmpdir()
+@@ -115,7 +125,7 @@ describe("tui thread", () => {
+       let daemonSpawnCount = 0
+       ThreadModule._setSpawn(() => {
+         daemonSpawnCount++
+-        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++        return spawnedDaemon()
+       })
+ 
+       if (existingUrl) {
+@@ -224,7 +234,7 @@ describe("tui thread", () => {
+       let spawnOptions: Parameters<typeof Bun.spawn>[1] | undefined
+       ThreadModule._setSpawn((_cmd, opts) => {
+         spawnOptions = opts
+-        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++        return spawnedDaemon()
+       })
+ 
+       let readCount = 0
+@@ -248,6 +258,35 @@ describe("tui thread", () => {
+       }
+     })
+ 
++    test("reports daemon worker exit before startup instead of waiting for timeout", async () => {
++      await using tmp = await tmpdir()
++      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
++
++      let killed = false
++      DaemonModule._setSpawn(() =>
++        spawnedDaemon(FAKE_DAEMON_PID, {
++          exited: Promise.resolve(132),
++          kill() {
++            killed = true
++          },
++        }),
++      )
++      spyOn(ServerLockModule, "read").mockResolvedValue(undefined)
++
++      const started = Date.now()
++      await expect(
++        DaemonModule.ensure({
++          port: 0,
++          hostname: "127.0.0.1",
++          mdns: false,
++          "mdns-domain": "opencode.local",
++          cors: [],
++        }),
++      ).rejects.toThrow("opencode daemon exited before startup with exit code 132")
++      expect(Date.now() - started).toBeLessThan(5_000)
++      expect(killed).toBe(false)
++    })
++
+     test("thread installs and releases the Windows Ctrl+C guard around TUI lifetime", async () => {
+       let released = false
+       const order: string[] = []
+@@ -280,7 +319,7 @@ describe("tui thread", () => {
+       spyOn(ServerLockModule, "ping").mockResolvedValue(true)
+       ThreadModule._setSpawn(() => {
+         order.push("spawn")
+-        return { pid: 99999, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++        return spawnedDaemon(99999)
+       })
+ 
+       const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
+@@ -328,7 +367,7 @@ describe("tui thread", () => {
+       spyOn(ServerLockModule, "clear").mockResolvedValue(undefined)
+       ThreadModule._setSpawn(() => {
+         order.push("spawn")
+-        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++        return spawnedDaemon()
+       })
+ 
+       const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
+@@ -362,7 +401,7 @@ describe("tui thread", () => {
+       DaemonModule._setSpawn(() => {
+         spawnCount++
+         spawned = true
+-        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++        return spawnedDaemon()
+       })
+       spyOn(ServerLockModule, "read").mockImplementation(async () => (spawned ? fakeLock : undefined))
+       spyOn(ServerLockModule, "alive").mockReturnValue(true)
+@@ -408,7 +447,7 @@ describe("tui thread", () => {
+       let daemonSpawnCount = 0
+       ThreadModule._setSpawn(() => {
+         daemonSpawnCount++
+-        return { pid: launcherPid, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++        return spawnedDaemon(launcherPid)
+       })
+ 
+       let readCount = 0
+@@ -473,7 +512,7 @@ describe("tui thread", () => {
+       let daemonSpawnCount = 0
+       ThreadModule._setSpawn(() => {
+         daemonSpawnCount++
+-        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++        return spawnedDaemon()
+       })
+ 
+       let clearCalled = false
+@@ -520,7 +559,7 @@ describe("tui thread", () => {
+       let daemonSpawnCount = 0
+       ThreadModule._setSpawn(() => {
+         daemonSpawnCount++
+-        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++        return spawnedDaemon()
+       })
+ 
+       let clearCalled = false
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index fe4f5a483468e2fd1f37d1484c981b244056f7a8..7f2233bc3390c40f2bd8702d0c12cb00a527cc83 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -719,6 +719,76 @@ describe("tool.shell permissions", () => {
+         ),
+       )
+     }
++
++    for (const item of ps) {
++      it.live(`rejects local Unix text utilities in PowerShell pipelines [${item.label}]`, () =>
++        withShell(
++          item,
++          runIn(
++            projectRoot,
++            Effect.gen(function* () {
++              expect(
++                yield* fail({
++                  command: "Write-Output ok | grep ok",
++                  description: "Search local pipeline output",
++                }),
++              ).toMatchObject({
++                message: expect.stringContaining(`The current shell is ${item.label}`),
++              })
++            }),
++          ),
++        ),
++      )
++    }
++
++    for (const item of ps) {
++      it.live(`allows Unix text utilities inside WSL bash scripts [${item.label}]`, () =>
++        withShell(
++          item,
++          runIn(
++            projectRoot,
++            Effect.gen(function* () {
++              const err = new Error("stop after permission")
++              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              expect(
++                yield* fail(
++                  {
++                    command:
++                      "Write-Host before; wsl.exe -d Ubuntu-22.04 -- bash -lc 'set -euo pipefail; echo \"WSL $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2-)\"'",
++                    description: "Run WSL shell script",
++                  },
++                  capture(requests, err),
++                ),
++              ).toMatchObject({ message: err.message })
++            }),
++          ),
++        ),
++      )
++    }
++
++    for (const item of ps) {
++      it.live(`allows Unix text utilities inside SSH remote commands [${item.label}]`, () =>
++        withShell(
++          item,
++          runIn(
++            projectRoot,
++            Effect.gen(function* () {
++              const err = new Error("stop after permission")
++              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              expect(
++                yield* fail(
++                  {
++                    command: "ssh example.com 'cat /etc/os-release | grep PRETTY_NAME'",
++                    description: "Run SSH remote shell command",
++                  },
++                  capture(requests, err),
++                ),
++              ).toMatchObject({ message: err.message })
++            }),
++          ),
++        ),
++      )
++    }
+   }
+ 
+   if (process.platform === "win32" && cmdShell) {

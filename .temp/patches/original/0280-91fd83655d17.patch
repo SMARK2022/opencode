@@ -1,0 +1,776 @@
+From 91fd83655d17f6418774c95176a065c9d5ab2bb5 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 7 Jun 2026 10:23:44 +0800
+Subject: [PATCH] =?UTF-8?q?feat(permission):=20=E5=A2=9E=E5=BC=BA=E5=AD=90?=
+ =?UTF-8?q?=E4=BB=A3=E7=90=86=E4=BC=9A=E8=AF=9D=E6=9D=83=E9=99=90=E6=8E=A8?=
+ =?UTF-8?q?=E5=AF=BC=EF=BC=8C=E6=94=AF=E6=8C=81=E6=9B=B4=E4=B8=A5=E6=A0=BC?=
+ =?UTF-8?q?=E7=9A=84=E6=9D=83=E9=99=90=E6=8E=A7=E5=88=B6=E5=92=8C=E5=AE=A1?=
+ =?UTF-8?q?=E8=AE=A1?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/agent/subagent-permissions.ts b/packages/opencode/src/agent/subagent-permissions.ts
+index 051f42e37bb34fe2b868048b296722a51bcab344..b0da2e25c4abc90b61c9308419e07f7b55545f5e 100644
+--- a/packages/opencode/src/agent/subagent-permissions.ts
++++ b/packages/opencode/src/agent/subagent-permissions.ts
+@@ -1,5 +1,6 @@
+ import type { Permission } from "../permission"
+ import type { Agent } from "./agent"
++import { Wildcard } from "@/util/wildcard"
+ 
+ /**
+  * Build the `permission` ruleset for a subagent's session when it's spawned
+@@ -9,9 +10,13 @@ import type { Agent } from "./agent"
+  *    restriction lives on the agent ruleset, not on the session, so a
+  *    subagent that only inherited the parent SESSION's permission would
+  *    silently bypass it. (#26514)
+- * 2. The parent **session's** deny rules and external_directory rules —
+- *    same forwarding the original code already did.
+- * 3. Default `todowrite` and `task` denies if the subagent's own ruleset
++ * 2. The parent **agent's** explicit admission ceilings — `ask` and `auto`
++ *    make subagent execution no less strict than the delegating agent without
++ *    coupling the behavior to a specific agent name.
++ * 3. The parent **session's** runtime ceilings — nested subagents inherit
++ *    already-derived `ask`/`auto`/`deny` overlays, while `allow` exceptions are
++ *    preserved only when the child agent already allows the same boundary.
++ * 4. Default `todowrite` and `task` denies if the subagent's own ruleset
+  *    doesn't already permit them.
+  */
+ export function deriveSubagentSessionPermission(input: {
+@@ -21,14 +26,90 @@ export function deriveSubagentSessionPermission(input: {
+ }): Permission.Ruleset {
+   const canTask = input.subagent.permission.some((rule) => rule.permission === "task")
+   const canTodo = input.subagent.permission.some((rule) => rule.permission === "todowrite")
+-  const parentAgentDenies =
+-    input.parentAgent?.permission.filter((rule) => rule.action === "deny" && rule.permission === "edit") ?? []
++  const parentHasCatchAllDeny = input.parentAgent?.permission.some(
++    (rule) => rule.permission === "*" && rule.action === "deny",
++  )
++  const ceilings = [
++    ...(input.parentAgent?.permission.flatMap((rule) => parentAgentCeiling(rule, input.subagent.permission, parentHasCatchAllDeny)) ?? []),
++    ...input.parentSessionPermission.flatMap((rule) => forwardParentSessionRule(rule, input.subagent.permission)),
++  ]
++
+   return [
+-    ...parentAgentDenies,
+-    ...input.parentSessionPermission.filter(
+-      (rule) => rule.permission === "external_directory" || rule.action === "deny",
+-    ),
++    ...ceilings,
++    ...subagentDenyOverrides(input.subagent.permission, ceilings),
+     ...(canTodo ? [] : [{ permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const }]),
+     ...(canTask ? [] : [{ permission: "task" as const, pattern: "*" as const, action: "deny" as const }]),
+   ]
+ }
++
++function parentAgentCeiling(rule: Permission.Rule, subagent: Permission.Ruleset, parentHasCatchAllDeny: boolean | undefined) {
++  // Catch-all parent rules are self-execution defaults. Forwarding `*: deny`
++  // would erase controller/executor style agents that intentionally delegate
++  // work to a narrower subagent despite being personally tool-restricted.
++  if (rule.permission === "*") return []
++  // When a parent is primarily self-restricted by `*: deny`, its extra explicit
++  // denies are usually UI/tool-selection detail. Preserve the existing Plan Mode
++  // edit ceiling, but do not turn controller bash/read self-denies into executor
++  // denials. Parents without a catch-all still pass explicit denies as ceilings.
++  if (rule.action === "deny" && parentHasCatchAllDeny && rule.permission !== "edit") return []
++
++  const childAction = evaluateSubagentRule(subagent, rule.permission, rule.pattern)?.action ?? "ask"
++  if (rule.action === "allow") {
++    // Parent allow may preserve a shared internal exception, but it must never
++    // broaden a child ask/auto/deny into allow.
++    return childAction === "allow" ? [rule] : []
++  }
++  if (childAction === "deny") return childSpecificCeilings(rule, subagent)
++
++  const action = rule.action
++  if (action === childAction) return []
++  return [{ ...rule, action }]
++}
++
++function forwardParentSessionRule(rule: Permission.Rule, subagent: Permission.Ruleset) {
++  // Session allow rules are forwarded only as shared exceptions. They cannot
++  // relax a child agent that would otherwise ask, auto-review, or deny.
++  if (rule.action === "allow")
++    return evaluateSubagentRule(subagent, rule.permission, rule.pattern)?.action === "allow" ? [rule] : []
++
++  const childAction = evaluateSubagentRule(subagent, rule.permission, rule.pattern)?.action ?? "ask"
++  if (childAction === "deny") return childSpecificCeilings(rule, subagent)
++  const action = rule.action
++  if (action === childAction) return []
++  return [{ ...rule, action }]
++}
++
++function childSpecificCeilings(parent: Permission.Rule, subagent: Permission.Ruleset) {
++  // A child may expose narrow capabilities behind a `*: deny` fallback. When a
++  // broad parent ceiling meets that fallback, derive ceilings for the narrow
++  // child patterns instead of widening everything or dropping the parent ceiling.
++  return subagent.flatMap((rule) => {
++    if (rule.action === "deny") return []
++    if (rule.permission === "*") return []
++    if (!Wildcard.match(rule.permission, parent.permission)) return []
++    if (!Wildcard.match(rule.pattern, parent.pattern)) return []
++    const action = parent.action
++    if (action === rule.action) return []
++    return [{ permission: rule.permission, pattern: rule.pattern, action }]
++  })
++}
++
++function subagentDenyOverrides(subagent: Permission.Ruleset, ceilings: Permission.Ruleset) {
++  if (ceilings.length === 0) return []
++  // A child-specific deny must stay terminal when a broader parent auto/ask
++  // ceiling was appended after the child agent rules. Do not repeat wildcard
++  // fallback denies; read-only subagents use those fallbacks together with
++  // explicit allow rules, and replaying the fallback here would erase the narrow
++  // ceilings derived from their own allows.
++  return subagent.filter(
++    (rule) =>
++      rule.action === "deny" &&
++      rule.permission !== "*" &&
++      rule.pattern !== "*" &&
++      ceilings.some((ceiling) => Wildcard.match(rule.permission, ceiling.permission)),
++  )
++}
++
++function evaluateSubagentRule(ruleset: Permission.Ruleset, permission: string, pattern: string) {
++  return ruleset.findLast((rule) => Wildcard.match(permission, rule.permission) && Wildcard.match(pattern, rule.pattern))
++}
+diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
+index afdfd9f558bee8703a8c5b50573d028bdadd6821..c6f49bfb18f87c985120655dd0afa881e1e4d233 100644
+--- a/packages/opencode/src/permission/reviewer/service.ts
++++ b/packages/opencode/src/permission/reviewer/service.ts
+@@ -761,13 +761,11 @@ function isReviewerDecisionProtocolError(error: unknown) {
+   return error instanceof ReviewerRunError && error.reason === REVIEWER_DECISION_PROTOCOL_ERROR
+ }
+ 
+-function reviewerEnabled(permission: Config.Info["permission"], metadata: Readonly<Record<string, unknown>>) {
+-  // 显式配置优先：`user` 保留人工审批，`auto_review` 对所有 auto 规则启用 reviewer。
+-  // 没有全局配置时，原生 auto agent 仍应隐式启用 reviewer；否则选择 auto
+-  // 只会把 cautious 命令降级成普通 ask，用户点允许后敏感 shell 仍会执行。
++function reviewerEnabled(permission: Config.Info["permission"], _metadata: Readonly<Record<string, unknown>>) {
++  // reviewer 只会在 Permission.ask 已经命中 auto action 后被调用；是否进入
++  // auto review 由权限计算决定，而不是由 agent 名称或工具 metadata 决定。
+   if (permission?.approvals_reviewer === "user") return false
+-  if (permission?.approvals_reviewer === "auto_review") return true
+-  return metadata.agent === "auto"
++  return true
+ }
+ 
+ function errorMessage(error: unknown) {
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 423361b4531fb8ffd96f462581776a1ee01be389..9f9d63e1e36ee544856667542da8d2cd8d33a7a0 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -773,10 +773,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+           permission
+             .ask({
+               ...req,
+-              // Permission reviewers use metadata.agent as the stable signal that
+-              // a request came from the native auto agent. Centralizing it here
+-              // keeps every tool, including apply_patch/write/edit and plugins,
+-              // on the same security path instead of relying on per-tool metadata.
++              // metadata.agent is audit evidence for the actual executing agent;
++              // reviewer routing is decided by the evaluated permission action,
++              // so tools and plugins should not each invent their own agent marker.
+               metadata: { ...req.metadata, agent: input.agent.name },
+               sessionID: input.session.id,
+               tool: { messageID: input.processor.message.id, callID: options.toolCallId },
+@@ -1030,10 +1029,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+               .ask({
+                 ...req,
+                 // Internally materialized task execution bypasses the main tool
+-                // adapter above, so it must attach the same agent evidence here.
+-                // Keep this aligned with the primary ctx.ask wrapper: reviewer
+-                // enablement must depend on the executing agent, not on each tool
+-                // remembering to pass metadata.agent itself.
++                // adapter above, so it must attach the same audit evidence here.
++                // Keep this aligned with the primary ctx.ask wrapper: tools should
++                // not decide reviewer routing by mutating metadata.agent.
+                 metadata: { ...req.metadata, agent: task.agent },
+                 sessionID,
+                 ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
+diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
+index 7dc91afbd85aab8d40f1ca883e7456185f972595..e9b20023505d9c21f49eb8d1095b574daf69941c 100644
+--- a/packages/opencode/src/tool/task.ts
++++ b/packages/opencode/src/tool/task.ts
+@@ -15,6 +15,7 @@ import { TuiEvent } from "@/cli/cmd/tui/event"
+ import { Cause, Effect, Exit, Option, Schema, Scope } from "effect"
+ import { EffectBridge } from "@/effect/bridge"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
++import { Permission } from "@/permission"
+ 
+ export interface TaskPromptOps {
+   cancel(sessionID: SessionID): Effect.Effect<void>
+@@ -158,27 +159,45 @@ export const TaskTool = Tool.define(
+         ? yield* sessions.get(SessionID.make(taskID)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+         : undefined
+       const parent = yield* sessions.get(ctx.sessionID)
+-      const parentAgent = parent.agent
+-        ? yield* agent.get(parent.agent).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
++      // The current tool context is the actual delegation source. Persisted
++      // session.agent can be absent or stale on resumed sessions, so it is only a
++      // fallback and must not override this turn's parent permission ceilings.
++      const parentAgentName = ctx.agent || parent.agent
++      const parentAgent = parentAgentName
++        ? yield* agent.get(parentAgentName).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+         : undefined
+-      const nextSession =
+-        session ??
+-        (yield* sessions.create({
+-          parentID: ctx.sessionID,
+-          title: params.description + ` (@${next.name} subagent)`,
+-          permission: [
+-            ...deriveSubagentSessionPermission({
+-              parentSessionPermission: parent.permission ?? [],
+-              parentAgent,
+-              subagent: next,
+-            }),
+-            ...(cfg.experimental?.primary_tools?.map((item) => ({
+-              pattern: "*",
+-              action: "allow" as const,
+-              permission: item,
+-            })) ?? []),
+-          ],
+-        }))
++      const primaryToolPermission = cfg.experimental?.primary_tools?.map((item) => ({
++        pattern: "*",
++        action: "allow" as const,
++        permission: item,
++      })) ?? []
++      const nextPermission = Permission.compact([
++        // primary_tools may grant a subagent additional tool capability, but any
++        // parent/session ceiling derived below must remain last-match-wins.
++        ...primaryToolPermission,
++        ...deriveSubagentSessionPermission({
++          parentSessionPermission: parent.permission ?? [],
++          parentAgent,
++          subagent: next,
++        }),
++      ])
++      const nextSession = session
++        ? { ...session, agent: next.name, permission: nextPermission }
++        : yield* sessions.create({
++            parentID: ctx.sessionID,
++            title: params.description + ` (@${next.name} subagent)`,
++            // Store the real executing subagent for audit and later prompt
++            // defaults; permission derivation still uses ctx.agent for the
++            // current delegation source.
++            agent: next.name,
++            permission: nextPermission,
++          })
++      if (session) {
++        // Resuming a task_id is a fresh delegation from the current parent. Do
++        // not keep stale child permission rules; recompute the overlay from the
++        // current parent agent/session and the requested subagent.
++        yield* sessions.setPermission({ sessionID: session.id, permission: nextPermission })
++      }
+ 
+       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(Effect.orDie)
+       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
+diff --git a/packages/opencode/test/agent/plan-mode-subagent-bypass.test.ts b/packages/opencode/test/agent/plan-mode-subagent-bypass.test.ts
+index 641a929aeb2c4c03293188b0f54a28d7f9bac51b..797a490202db48ba9a30ce33c1bf38b7d0a9aa4d 100644
+--- a/packages/opencode/test/agent/plan-mode-subagent-bypass.test.ts
++++ b/packages/opencode/test/agent/plan-mode-subagent-bypass.test.ts
+@@ -23,6 +23,7 @@ import { Effect } from "effect"
+ import { Agent } from "../../src/agent/agent"
+ import { deriveSubagentSessionPermission } from "../../src/agent/subagent-permissions"
+ import { Permission } from "../../src/permission"
++import { Truncate } from "../../src/tool/truncate"
+ import { testEffect } from "../lib/effect"
+ 
+ const it = testEffect(Agent.defaultLayer)
+@@ -137,6 +138,260 @@ it.instance(
+   },
+ )
+ 
++it.instance("subagent inherits explicit parent auto ceilings without depending on agent name", () =>
++  Effect.gen(function* () {
++    const generalAgent = yield* Agent.Service.use((svc) => svc.get("general"))
++    expect(generalAgent).toBeDefined()
++    const reviewerParent = testAgent({
++      name: "reviewer_parent",
++      mode: "primary",
++      permission: {
++        bash: "auto",
++        edit: "auto",
++        external_directory: {
++          "*": "auto",
++          [Truncate.GLOB]: "allow",
++        },
++      },
++    })
++
++    const effective = Permission.merge(
++      generalAgent!.permission,
++      deriveSubagentSessionPermission({
++        parentSessionPermission: [],
++        parentAgent: reviewerParent,
++        subagent: generalAgent!,
++      }),
++    )
++
++    // auto 是权限 action 的 admission ceiling，不是名为 auto 的 agent 的特例。
++    // 任意 parent agent 只要显式配置 auto，就应把 child 的 allow/ask 收紧到 auto。
++    expect(Permission.evaluate("bash", "git add .", effective).action).toBe("auto")
++    expect(Permission.evaluate("edit", "src/a.ts", effective).action).toBe("auto")
++    expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
++    expect(Permission.evaluate("external_directory", Truncate.GLOB, effective).action).toBe("allow")
++  }),
++)
++
++it.effect("permission meet preserves child denies and shared external-directory allow exceptions", () =>
++  Effect.sync(() => {
++    const reviewerParent = testAgent({
++      name: "reviewer_parent",
++      mode: "primary",
++      permission: {
++        bash: "auto",
++        edit: "auto",
++        external_directory: {
++          "*": "auto",
++          [Truncate.GLOB]: "allow",
++        },
++      },
++    })
++    const executor = testAgent({
++      name: "executor",
++      mode: "subagent",
++      permission: {
++        bash: {
++          "*": "allow",
++          "git push *": "deny",
++        },
++        edit: "deny",
++        external_directory: {
++          "*": "ask",
++          [Truncate.GLOB]: "allow",
++        },
++      },
++    })
++
++    const effective = Permission.merge(
++      executor.permission,
++      deriveSubagentSessionPermission({
++        parentSessionPermission: [],
++        parentAgent: reviewerParent,
++        subagent: executor,
++      }),
++    )
++
++    // parent auto 与 child allow/ask 的交集是 auto；child deny 仍是终止边界；
++    // 双方共同 allow 的内部外部目录例外继续 allow。
++    expect(Permission.evaluate("bash", "git status", effective).action).toBe("auto")
++    expect(Permission.evaluate("bash", "git push origin dev", effective).action).toBe("deny")
++    expect(Permission.evaluate("edit", "src/a.ts", effective).action).toBe("deny")
++    expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
++    expect(Permission.evaluate("external_directory", Truncate.GLOB, effective).action).toBe("allow")
++  }),
++)
++
++it.effect("permission meet tightens child-specific allows behind wildcard deny fallbacks", () =>
++  Effect.sync(() => {
++    const reviewerParent = testAgent({
++      name: "reviewer_parent",
++      mode: "primary",
++      permission: {
++        bash: "auto",
++        external_directory: "auto",
++      },
++    })
++    const restricted = testAgent({
++      name: "restricted",
++      mode: "subagent",
++      permission: {
++        "*": "deny",
++        bash: {
++          "git status": "allow",
++        },
++        external_directory: {
++          [Truncate.GLOB]: "allow",
++        },
++      },
++    })
++
++    const effective = Permission.merge(
++      restricted.permission,
++      deriveSubagentSessionPermission({
++        parentSessionPermission: [],
++        parentAgent: reviewerParent,
++        subagent: restricted,
++      }),
++    )
++
++    // 子 agent 常用 `*: deny` fallback 加少量 allow 暴露能力。parent 的 broad
++    // auto ceiling 必须只收紧这些 child 已允许的具体 pattern，不能因为 child
++    // 在 `*` 上是 deny 就完全丢失 ceiling，也不能把其他 denied pattern 放宽。
++    expect(Permission.evaluate("bash", "git status", effective).action).toBe("auto")
++    expect(Permission.evaluate("bash", "git push origin dev", effective).action).toBe("deny")
++    expect(Permission.evaluate("external_directory", Truncate.GLOB, effective).action).toBe("auto")
++    expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("deny")
++  }),
++)
++
++it.effect("permission meet does not replay tool wildcard deny over child-specific tightened allows", () =>
++  Effect.sync(() => {
++    const reviewerParent = testAgent({
++      name: "reviewer_parent",
++      mode: "primary",
++      permission: {
++        bash: "auto",
++      },
++    })
++    const restricted = testAgent({
++      name: "restricted",
++      mode: "subagent",
++      permission: {
++        bash: {
++          "*": "deny",
++          "git status": "allow",
++        },
++      },
++    })
++
++    const effective = Permission.merge(
++      restricted.permission,
++      deriveSubagentSessionPermission({
++        parentSessionPermission: [],
++        parentAgent: reviewerParent,
++        subagent: restricted,
++      }),
++    )
++
++    // tool-specific `*: deny` fallback 与全局 `*: deny` 一样，只是 child 的默认
++    // 关闭边界。parent auto 应收紧 child 明确允许的 git status，但不能把 fallback
++    // deny 重放到 overlay 末尾后再次盖掉这个 narrow allow。
++    expect(Permission.evaluate("bash", "git status", effective).action).toBe("auto")
++    expect(Permission.evaluate("bash", "git push origin dev", effective).action).toBe("deny")
++  }),
++)
++
++it.instance("nested subagents keep auto ceilings inherited from the parent session", () =>
++  Effect.gen(function* () {
++    const generalAgent = yield* Agent.Service.use((svc) => svc.get("general"))
++    expect(generalAgent).toBeDefined()
++    const reviewerParent = testAgent({
++      name: "reviewer_parent",
++      mode: "primary",
++      permission: {
++        bash: "auto",
++        edit: "auto",
++        external_directory: "auto",
++      },
++    })
++
++    const childPermission = deriveSubagentSessionPermission({
++      parentSessionPermission: [],
++      parentAgent: reviewerParent,
++      subagent: generalAgent!,
++    })
++    const grandchildPermission = deriveSubagentSessionPermission({
++      parentSessionPermission: childPermission,
++      parentAgent: generalAgent,
++      subagent: generalAgent!,
++    })
++    const effective = Permission.merge(generalAgent!.permission, grandchildPermission)
++
++    // 第二跳的 direct parent agent 已经是 general；因此第一跳写入 parent session
++    // 的 auto ceilings 必须继续作为 runtime ceiling 传递。
++    expect(Permission.evaluate("bash", "git add .", effective).action).toBe("auto")
++    expect(Permission.evaluate("edit", "src/a.ts", effective).action).toBe("auto")
++    expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
++  }),
++)
++
++it.effect("parent session allow cannot relax child ask or auto decisions", () =>
++  Effect.sync(() => {
++    const executor = testAgent({
++      name: "executor",
++      mode: "subagent",
++      permission: {
++        bash: "ask",
++        external_directory: "auto",
++      },
++    })
++    const effective = Permission.merge(
++      executor.permission,
++      deriveSubagentSessionPermission({
++        parentSessionPermission: Permission.fromConfig({
++          bash: "allow",
++          external_directory: "allow",
++        }),
++        parentAgent: undefined,
++        subagent: executor,
++      }),
++    )
++
++    expect(Permission.evaluate("bash", "git status", effective).action).toBe("ask")
++    expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
++  }),
++)
++
++it.effect("parent ask remains a user-approval ceiling over child auto", () =>
++  Effect.sync(() => {
++    const executor = testAgent({
++      name: "executor",
++      mode: "subagent",
++      permission: {
++        bash: "auto",
++        external_directory: "auto",
++      },
++    })
++    const effective = Permission.merge(
++      executor.permission,
++      deriveSubagentSessionPermission({
++        parentSessionPermission: Permission.fromConfig({
++          bash: "ask",
++          external_directory: "ask",
++        }),
++        parentAgent: undefined,
++        subagent: executor,
++      }),
++    )
++
++    // parent session 的 ask 是人工审批 ceiling；child 自己愿意 auto-review
++    // 不能把用户审批要求降级成自动 reviewer 路径。
++    expect(Permission.evaluate("bash", "git add .", effective).action).toBe("ask")
++    expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("ask")
++  }),
++)
++
+ it.effect("[#26700] controller self-restrictions do not erase executor permissions", () =>
+   Effect.sync(() => {
+     const controller = testAgent({
+diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packages/opencode/test/permission/reviewer-service.test.ts
+index c5bb3f42868109a3cd4e44d75f2b47dd720fa61e..76ad98c3c3a43998e7fe50c315a0b37b9a795a62 100644
+--- a/packages/opencode/test/permission/reviewer-service.test.ts
++++ b/packages/opencode/test/permission/reviewer-service.test.ts
+@@ -57,10 +57,23 @@ describe("permission reviewer service", () => {
+     rejectMaxOutputTokens: true,
+     plugin: pluginLayer({ clearMaxOutputTokens: true, header: REVIEWER_HOOK_HEADER }),
+   })
++  const implicitAutoFixture = reviewerFixture(
++    { type: "api", key: "test-key" },
++    {
++      requireInstructions: false,
++      permission: {
++        auto_review: {
++          model: `${OPENAI_PROVIDER_ID}/gpt-5`,
++          policy: "Reviewer service test policy: allow only bounded auto requests.",
++        },
++      },
++    },
++  )
+   const oauth = testEffect(oauthFixture.layer)
+   const apiKey = testEffect(apiKeyFixture.layer)
+   const customOauth = testEffect(customOauthFixture.layer)
+   const oauthHook = testEffect(oauthHookFixture.layer)
++  const implicitAuto = testEffect(implicitAutoFixture.layer)
+ 
+   oauth.effect("sends reviewer policy as OpenAI OAuth instructions while keeping action evidence in user input", () =>
+     Effect.gen(function* () {
+@@ -122,6 +135,22 @@ describe("permission reviewer service", () => {
+       expectPreservedShellEvidence(inputText(request.body))
+     }),
+   )
++
++  implicitAuto.effect("enables reviewer for auto requests without depending on the executing agent name", () =>
++    Effect.gen(function* () {
++      const reviewer = yield* PermissionReviewer.Service
++      const decision = yield* reviewer.review(
++        reviewInput("review_general_agent_auto", {
++          agent: "general",
++        }),
++      )
++      const body = implicitAutoFixture.bodies[0]
++
++      expect(decision.action).toBe("allow")
++      expect(inputText(body)).toContain("general")
++      expectPreservedShellEvidence(inputText(body))
++    }),
++  )
+ })
+ 
+ function reviewerFixture(
+@@ -131,6 +160,7 @@ function reviewerFixture(
+     providerID?: ProviderID
+     rejectMaxOutputTokens?: boolean
+     plugin?: Layer.Layer<Plugin.Service>
++    permission?: Config.Info["permission"]
+   } = { requireInstructions: false },
+ ) {
+   const bodies: ReviewerRequestBody[] = []
+@@ -182,7 +212,7 @@ function reviewerFixture(
+     bodies,
+     requests,
+     layer: PermissionReviewer.layer.pipe(
+-      Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
++      Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID, options.permission)) })),
+       Layer.provide(provider.layer),
+       Layer.provide(authLayer(authInfo)),
+       Layer.provide(options.plugin ?? pluginLayer()),
+@@ -251,19 +281,19 @@ function expectPreservedShellEvidence(text: string) {
+   expect(text).toContain("$(pwd)/danger")
+ }
+ 
+-function reviewInput(reviewID: string) {
++function reviewInput(reviewID: string, metadata?: Readonly<Record<string, unknown>>) {
+   return {
+     reviewID,
+     permission: "bash",
+     patterns: [COMMAND_EVIDENCE],
+-    metadata: { command: COMMAND_EVIDENCE, cwd: "/tmp/path with spaces", shell: "bash" },
++    metadata: { command: COMMAND_EVIDENCE, cwd: "/tmp/path with spaces", shell: "bash", ...metadata },
+     precheck: { level: "cautious" as const, reason: "shell command combines redirection and deletion-like behavior" },
+   }
+ }
+ 
+-function config(providerID: ProviderID): Config.Info {
++function config(providerID: ProviderID, permission?: Config.Info["permission"]): Config.Info {
+   return {
+-    permission: {
++    permission: permission ?? {
+       approvals_reviewer: "auto_review",
+       auto_review: {
+         model: `${providerID}/gpt-5`,
+diff --git a/packages/opencode/test/tool/task.test.ts b/packages/opencode/test/tool/task.test.ts
+index beb16475550386670c84bf0c0492c78b3e30ffcd..d43b3e24709eba7902090ef4fb633017c1ec6a2c 100644
+--- a/packages/opencode/test/tool/task.test.ts
++++ b/packages/opencode/test/tool/task.test.ts
+@@ -456,6 +456,136 @@ describe("tool.task", () => {
+     }),
+   )
+ 
++  it.instance("execute records the subagent and tightens permissions from the executing parent agent", () =>
++    Effect.gen(function* () {
++      const sessions = yield* Session.Service
++      const agent = yield* Agent.Service
++      const general = yield* agent.get("general")
++      const { chat, assistant } = yield* seed()
++      const tool = yield* TaskTool
++      const def = yield* tool.init()
++      let seen: SessionPrompt.PromptInput | undefined
++
++      const result = yield* def.execute(
++        {
++          description: "inspect bug",
++          prompt: "look into the cache key path",
++          subagent_type: "general",
++        },
++        {
++          sessionID: chat.id,
++          messageID: assistant.id,
++          agent: "auto",
++          abort: new AbortController().signal,
++          extra: { promptOps: stubOps({ onPrompt: (input) => (seen = input) }) },
++          messages: [],
++          metadata: () => Effect.void,
++          ask: () => Effect.void,
++        },
++      )
++
++      const child = yield* sessions.get(result.metadata.sessionId)
++      const effective = Permission.merge(general.permission, child.permission ?? [])
++
++      // ctx.agent 是本轮真实委派来源；child session 记录真实执行 subagent。
++      expect(child.agent).toBe("general")
++      expect(Permission.evaluate("bash", "git add .", effective).action).toBe("auto")
++      expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
++      expect(seen?.agent).toBe("general")
++    }),
++  )
++
++  it.instance("execute recomputes an existing task session permission when resumed", () =>
++    Effect.gen(function* () {
++      const sessions = yield* Session.Service
++      const agent = yield* Agent.Service
++      const general = yield* agent.get("general")
++      const { chat, assistant } = yield* seed()
++      const child = yield* sessions.create({
++        parentID: chat.id,
++        title: "Existing child",
++        permission: [{ permission: "external_directory", pattern: "/outside/project/*", action: "allow" }],
++      })
++      const tool = yield* TaskTool
++      const def = yield* tool.init()
++
++      const result = yield* def.execute(
++        {
++          description: "inspect bug",
++          prompt: "look into the cache key path",
++          subagent_type: "general",
++          task_id: child.id,
++        },
++        {
++          sessionID: chat.id,
++          messageID: assistant.id,
++          agent: "auto",
++          abort: new AbortController().signal,
++          extra: { promptOps: stubOps() },
++          messages: [],
++          metadata: () => Effect.void,
++          ask: () => Effect.void,
++        },
++      )
++
++      const resumed = yield* sessions.get(result.metadata.sessionId)
++      const effective = Permission.merge(general.permission, resumed.permission ?? [])
++
++      expect(Permission.evaluate("bash", "git add .", effective).action).toBe("auto")
++      expect(Permission.evaluate("external_directory", "/outside/project/*", effective).action).toBe("auto")
++    }),
++  )
++
++  it.instance(
++    "execute keeps primary tool allowances below parent permission ceilings",
++    () =>
++      Effect.gen(function* () {
++        const sessions = yield* Session.Service
++        const { chat, assistant } = yield* seed()
++        const tool = yield* TaskTool
++        const def = yield* tool.init()
++
++        const result = yield* def.execute(
++          {
++            description: "inspect bug",
++            prompt: "look into the cache key path",
++            subagent_type: "reviewer",
++          },
++          {
++            sessionID: chat.id,
++            messageID: assistant.id,
++            agent: "auto",
++            abort: new AbortController().signal,
++            extra: { promptOps: stubOps() },
++            messages: [],
++            metadata: () => Effect.void,
++            ask: () => Effect.void,
++          },
++        )
++
++        const child = yield* sessions.get(result.metadata.sessionId)
++
++        // primary_tools 给 subagent 临时补工具能力，但它不能排在 parent auto ceiling
++        // 后面把 reviewer 边界改回 allow。
++        expect(Permission.evaluate("bash", "git add .", child.permission ?? []).action).toBe("auto")
++      }),
++    {
++      config: {
++        agent: {
++          reviewer: {
++            mode: "subagent",
++            permission: {
++              task: "allow",
++            },
++          },
++        },
++        experimental: {
++          primary_tools: ["bash"],
++        },
++      },
++    },
++  )
++
+   it.instance(
+     "execute shapes child permissions for task, todowrite, and primary tools",
+     () =>

@@ -1,0 +1,20 @@
+From 16bb317b8b63198faaee5ce4d0b2959691794c21 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Thu, 25 Jun 2026 00:51:48 +0800
+Subject: [PATCH] =?UTF-8?q?fix(thirdparty):=20=E6=9B=B4=E6=96=B0=20chatgpt?=
+ =?UTF-8?q?-browser-agent=20=E4=BF=AE=E5=A4=8D=20daemon=20=E7=99=BB?=
+ =?UTF-8?q?=E5=BD=95=E6=80=81=E5=8F=8A=20voice=20=E8=B7=AF=E5=BE=84?=
+ =?UTF-8?q?=E6=A0=A1=E9=AA=8C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+子模块更新：spawn 代替 puppeteer.launch 避免自动化检测；disconnect 代替 close 防止 cookie 丢失；realpath 修复 macOS 符号链接路径校验；BROWSER_DEBUG_PORT 默认 9222。
+
+diff --git a/thirdparty/chatgpt-browser-agent b/thirdparty/chatgpt-browser-agent
+index f4de5136bf122ba450a26887b27e1f3fbfa51f6d..d78e57cba18e59d351c698b735cc61bb0a342046 160000
+--- a/thirdparty/chatgpt-browser-agent
++++ b/thirdparty/chatgpt-browser-agent
+@@ -1 +1 @@
+-Subproject commit f4de5136bf122ba450a26887b27e1f3fbfa51f6d
++Subproject commit d78e57cba18e59d351c698b735cc61bb0a342046

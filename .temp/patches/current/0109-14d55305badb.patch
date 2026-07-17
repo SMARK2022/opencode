@@ -1,0 +1,468 @@
+From 14d55305badba1494f2efa5be893ea0d1d7b9c44 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 8 May 2026 05:41:53 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=9B=B4=E6=96=B0=E7=89=88=E6=9C=AC?=
+ =?UTF-8?q?=E5=8F=B7=E8=87=B3=201.14.32-smark=EF=BC=8C=E5=B9=B6=E4=BC=98?=
+ =?UTF-8?q?=E5=8C=96=E6=BB=9A=E5=8A=A8=E6=9D=A1=E6=B8=B2=E6=9F=93=E9=80=BB?=
+ =?UTF-8?q?=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/bun.lock b/bun.lock
+index 72ff8c7da572751920b90cabe437769ab418db40..ec6a77d081361209ef3a89b09b81511fa059342f 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -354,7 +354,7 @@
+     },
+     "packages/opencode": {
+       "name": "opencode",
+-      "version": "1.14.31-smark",
++      "version": "1.14.32-smark",
+       "bin": {
+         "opencode": "./bin/opencode",
+       },
+diff --git a/packages/opencode/package.json b/packages/opencode/package.json
+index 7ad2c725975a33e6cdb5b72130624f9283804250..d47627b621c402de844a94ab4521393f4341244e 100644
+--- a/packages/opencode/package.json
++++ b/packages/opencode/package.json
+@@ -1,6 +1,6 @@
+ {
+   "$schema": "https://json.schemastore.org/package.json",
+-  "version": "1.14.31-smark",
++  "version": "1.14.32-smark",
+   "name": "opencode",
+   "type": "module",
+   "license": "MIT",
+diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+index 979317f47687a07f17fa6432a5cd11ae62d61413..f909e3fbe1dd4e6aa000198592b0c31ae87eff23 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+@@ -1,4 +1,4 @@
+-import { BoxRenderable, OptimizedBuffer, RGBA, TextareaRenderable, MouseEvent, PasteEvent, decodePasteBytes } from "@opentui/core"
++import { BoxRenderable, RGBA, TextareaRenderable, MouseEvent, PasteEvent, decodePasteBytes } from "@opentui/core"
+ import { createEffect, createMemo, onMount, createSignal, onCleanup, on, untrack, Show, Switch, Match } from "solid-js"
+ import "opentui-spinner/solid"
+ import path from "path"
+@@ -139,6 +139,7 @@ export function Prompt(props: PromptProps) {
+   const command = useCommandDialog()
+   const renderer = useRenderer()
+   const dimensions = useTerminalDimensions()
++  const showCumulative = createMemo(() => dimensions().width > 120)
+   const { theme, syntax } = useTheme()
+   const kv = useKV()
+   const animationsEnabled = createMemo(() => kv.get("animations_enabled", true))
+@@ -1189,15 +1190,7 @@ export function Prompt(props: PromptProps) {
+         agentStyleId={agentStyleId}
+         promptPartTypeId={() => promptPartTypeId}
+       />
+-      <box
+-        ref={(r) => (anchor = r)}
+-        visible={props.visible !== false}
+-        renderBefore={function (this: BoxRenderable, buffer: OptimizedBuffer) {
+-          if (this.screenY && buffer.height > this.screenY) {
+-            buffer.fillRect(this.screenX, this.screenY, 1, buffer.height - this.screenY, RGBA.fromInts(0, 0, 0, 0))
+-          }
+-        }}
+-      >
++      <box ref={(r) => (anchor = r)} visible={props.visible !== false}>
+         <box
+           border={["left"]}
+           borderColor={borderHighlight()}
+@@ -1585,8 +1578,8 @@ export function Prompt(props: PromptProps) {
+                     <Match when={usage()}>
+                       {(item) => (
+                         <text fg={theme.textMuted} wrapMode="none">
+-                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
+-                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
++                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{showCumulative() ? `(${Locale.number(item().totalInput)})` : ""} ·{" "}
++                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}{showCumulative() ? `(${Locale.number(item().totalOutput)})` : ""}
+                           {item().context ? ` · ${item().context}` : ""}
+                           {item().cost ? ` · ${item().cost}` : ""}
+                         </text>
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 890dee3ccb2046a514a278bc2a28d788c6be95fa..ba5c3acf01cd8f422eb5c02c41b76002c0565028 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -29,7 +29,9 @@ import {
+   RGBA,
+   MouseButton,
+   type MouseEvent as TuiMouseEvent,
++  type OptimizedBuffer,
+ } from "@opentui/core"
++import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "@tui/util/smooth-scrollbar"
+ import { Prompt, type PromptRef } from "@tui/component/prompt"
+ import type {
+   AssistantMessage,
+@@ -193,6 +195,31 @@ export function Session() {
+   const providers = createMemo(() => Model.index(sync.data.provider))
+ 
+   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
++  const userMessageAgentColors = createMemo(() => {
++    return new Map(
++      messages()
++        .filter((m) => m.role === "user")
++        .map((m) => [m.id, local.agent.color(m.agent)]),
++    )
++  })
++  function drawSessionScrollbar(this: unknown, buffer: OptimizedBuffer) {
++    const s = scroll
++    if (!s) return
++
++    const colors = userMessageAgentColors()
++    drawSmoothScrollbar({
++      buffer,
++      scrollBox: s,
++      markers: s.content.getChildrenSortedByPrimaryAxis().flatMap((child): SmoothScrollbarMarker[] => {
++        const color = colors.get(child.id)
++        if (!color) return []
++
++        // screenY includes scroll translation; subtract content screenY to get
++        // the stable content-space offset for this user message.
++        return [{ offset: Math.max(0, child.screenY - s.content.screenY), color }]
++      }),
++    })
++  }
+   const toast = useToast()
+   const sdk = useSDK()
+   const editor = useEditorContext()
+@@ -1111,6 +1138,7 @@ export function Session() {
+                 trackOptions: {
+                   backgroundColor: theme.backgroundElement,
+                   foregroundColor: theme.textMuted,
++                  renderAfter: drawSessionScrollbar,
+                 },
+               }}
+               stickyScroll={true}
+@@ -1215,7 +1243,18 @@ export function Session() {
+                 )}
+               </For>
+             </scrollbox>
+-            <box flexShrink={0}>
++            <box
++              flexShrink={0}
++              renderBefore={function (this: BoxRenderable, buffer: OptimizedBuffer) {
++                const x = Math.max(0, this.screenX)
++                const y = Math.max(0, this.screenY)
++                const width = Math.min(this.width, buffer.width - x)
++                const height = buffer.height - y
++                if (width > 0 && height > 0) {
++                  buffer.fillRect(x, y, width, height, theme.background)
++                }
++              }}
++            >
+               <Show when={permissions().length > 0}>
+                 <PermissionPrompt request={permissions()[0]} />
+               </Show>
+@@ -1347,7 +1386,7 @@ function UserMessage(props: {
+             <Show when={files().length}>
+               <box flexDirection="row" paddingBottom={metadataVisible() ? 1 : 0} paddingTop={1} gap={1} flexWrap="wrap">
+                 <For each={files()}>
+-                  {(file) => {
++          {(file, index) => {
+                     const bg = createMemo(() => {
+                       if (file.mime.startsWith("image/")) return theme.accent
+                       if (file.mime === "application/pdf") return theme.primary
+@@ -1815,7 +1854,9 @@ function InlineTool(props: {
+         </Match>
+       </Switch>
+       <Show when={error() && !denied()}>
+-        <text fg={theme.error}>{error()}</text>
++        <box marginTop={1}>
++          <text fg={theme.error}>{error()}</text>
++        </box>
+       </Show>
+     </box>
+   )
+@@ -1855,7 +1896,6 @@ function BlockTool(props: {
+       paddingBottom={1}
+       paddingLeft={2}
+       marginTop={1}
+-      gap={1}
+       backgroundColor={background()}
+       customBorderChars={SplitBorder.customBorderChars}
+       borderColor={props.contextView ? theme.info : theme.background}
+@@ -1886,16 +1926,21 @@ function BlockTool(props: {
+         <Spinner color={theme.textMuted}>{props.title.replace(/^# /, "")}</Spinner>
+       </Show>
+       <box
++        marginTop={1}
+         maxHeight={canCollapse && !expanded() ? previewLines : undefined}
+         overflow={canCollapse && !expanded() ? "hidden" : undefined}
+       >
+         {props.children}
+       </box>
+       <Show when={canCollapse}>
+-        <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
++        <box marginTop={1}>
++          <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
++        </box>
+       </Show>
+       <Show when={error()}>
+-        <text fg={theme.error}>{error()}</text>
++        <box marginTop={1}>
++          <text fg={theme.error}>{error()}</text>
++        </box>
+       </Show>
+     </box>
+   )
+@@ -2006,7 +2051,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
+   return (
+     <Switch>
+       <Match when={isOverwrite()}>
+-        <BlockTool 
++        <BlockTool
+           title={"← Write " + normalizePath(props.input.filePath!) + (diffStats().added > 0 || diffStats().removed > 0 ? ` +${diffStats().added} -${diffStats().removed}` : "")}
+           part={props.part}
+           maxLines={10}
+@@ -2041,7 +2086,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
+         </BlockTool>
+       </Match>
+       <Match when={props.metadata.diagnostics !== undefined}>
+-        <BlockTool 
++        <BlockTool
+           title={"# Wrote " + normalizePath(props.input.filePath!)} 
+           part={props.part}
+           maxLines={10}
+@@ -2240,7 +2285,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
+   return (
+     <Switch>
+       <Match when={props.metadata.diff !== undefined}>
+-        <BlockTool 
++        <BlockTool
+           title={"← Edit " + normalizePath(props.input.filePath!) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
+           part={props.part}
+           maxLines={10}
+@@ -2322,7 +2367,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
+         <For each={files()}>
+           {(file) => {
+             return (
+-              <BlockTool 
++              <BlockTool
+                 title={title(file)} 
+                 part={props.part}
+                 maxLines={10}
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
+index 38f66cb18f8070bf8e6daa4603916ad1de923484..6643f201642dc4e8fcdaf4495da2bb91048cf5d5 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
+@@ -113,7 +113,8 @@ export function SubagentFooter() {
+   const keybind = useKeybind()
+   const command = useCommandDialog()
+   const [hover, setHover] = createSignal<"parent" | "prev" | "next" | null>(null)
+-  useTerminalDimensions()
++  const dimensions = useTerminalDimensions()
++  const showCumulative = createMemo(() => dimensions().width > 120)
+ 
+   return (
+     <box flexShrink={0}>
+@@ -141,8 +142,8 @@ export function SubagentFooter() {
+             <Show when={usage()}>
+               {(item) => (
+                 <text fg={theme.textMuted} wrapMode="none">
+-                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
+-                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
++                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{showCumulative() ? `(${Locale.number(item().totalInput)})` : ""} ·{" "}
++                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}{showCumulative() ? `(${Locale.number(item().totalOutput)})` : ""}
+                   {item().context ? ` · ${item().context}` : ""}
+                   {item().cost ? ` · ${item().cost}` : ""}
+                 </text>
+diff --git a/packages/opencode/src/cli/cmd/tui/util/smooth-scrollbar.ts b/packages/opencode/src/cli/cmd/tui/util/smooth-scrollbar.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..83566fe86ab696ff63dff4b865aae356c3fb7015
+--- /dev/null
++++ b/packages/opencode/src/cli/cmd/tui/util/smooth-scrollbar.ts
+@@ -0,0 +1,192 @@
++import { RGBA, type OptimizedBuffer, type ScrollBoxRenderable, type SliderRenderable } from "@opentui/core"
++
++const THUMB_PRECISION = 8
++const MARKER_PRECISION = 2
++const MARKER_BLEND = 0.22
++const LOWER_BLOCKS = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const
++
++export interface SmoothScrollbarMarker {
++  // Content-relative vertical offset for the place this marker represents.
++  offset: number
++  // Marker source color. The helper mutes it against the track background.
++  color: RGBA
++}
++
++interface SmoothThumbRange {
++  start: number
++  end: number
++  scrollRange: number
++  virtualTrackSize: number
++}
++
++export function drawSmoothScrollbar(options: {
++  buffer: OptimizedBuffer
++  scrollBox: ScrollBoxRenderable
++  markers?: readonly SmoothScrollbarMarker[]
++}) {
++  const slider = options.scrollBox.verticalScrollBar.slider
++  if (slider.height <= 0 || slider.width <= 0) return
++
++  // OpenTUI already rendered its coarse half-cell thumb before renderAfter runs.
++  // Reset the track so this helper is the single source of scrollbar visuals.
++  options.buffer.fillRect(slider.screenX, slider.screenY, slider.width, slider.height, slider.backgroundColor)
++
++  const thumb = getSmoothThumbRange(options.scrollBox, slider)
++  drawSmoothThumb(options.buffer, slider, thumb)
++  drawSmoothMarkers(options.buffer, slider, thumb, options.markers ?? [])
++}
++
++function getSmoothThumbRange(scrollBox: ScrollBoxRenderable, slider: SliderRenderable): SmoothThumbRange {
++  const viewportSize = Math.max(1, scrollBox.viewport.height)
++  const contentSize = Math.max(viewportSize, scrollBox.scrollHeight)
++  const scrollRange = Math.max(0, contentSize - viewportSize)
++  const virtualTrackSize = slider.height * THUMB_PRECISION
++
++  if (scrollRange <= 0) {
++    return { start: 0, end: virtualTrackSize, scrollRange, virtualTrackSize }
++  }
++
++  // Keep the thumb at least one terminal row high; sub-row thumbs are too easy
++  // to lose visually and make mouse hit-testing feel worse than the core thumb.
++  const thumbSize = Math.max(
++    THUMB_PRECISION,
++    Math.min(Math.round((viewportSize / contentSize) * virtualTrackSize), virtualTrackSize),
++  )
++  const thumbStart = Math.round((scrollBox.scrollTop / scrollRange) * (virtualTrackSize - thumbSize))
++
++  return {
++    start: Math.max(0, Math.min(thumbStart, virtualTrackSize - thumbSize)),
++    end: Math.max(0, Math.min(thumbStart, virtualTrackSize - thumbSize)) + thumbSize,
++    scrollRange,
++    virtualTrackSize,
++  }
++}
++
++function drawSmoothThumb(buffer: OptimizedBuffer, slider: SliderRenderable, thumb: SmoothThumbRange) {
++  const startRow = Math.floor(thumb.start / THUMB_PRECISION)
++  const endRow = Math.ceil(thumb.end / THUMB_PRECISION) - 1
++
++  for (let row = Math.max(0, startRow); row <= Math.min(slider.height - 1, endRow); row++) {
++    const cellStart = row * THUMB_PRECISION
++    const cellEnd = cellStart + THUMB_PRECISION
++    const segmentStart = Math.max(thumb.start, cellStart)
++    const segmentEnd = Math.min(thumb.end, cellEnd)
++    const coverage = segmentEnd - segmentStart
++
++    if (coverage <= 0) continue
++
++    for (let x = 0; x < slider.width; x++) {
++      drawVerticalSegment(
++        buffer,
++        slider.screenX + x,
++        slider.screenY + row,
++        segmentStart - cellStart,
++        coverage,
++        slider.foregroundColor,
++        slider.backgroundColor,
++      )
++    }
++  }
++}
++
++function drawSmoothMarkers(
++  buffer: OptimizedBuffer,
++  slider: SliderRenderable,
++  thumb: SmoothThumbRange,
++  markers: readonly SmoothScrollbarMarker[],
++) {
++  if (thumb.scrollRange <= 0) return
++
++  const rows = new Map<number, { color: RGBA; char: string }>()
++
++  for (const marker of markers) {
++    // Markers represent where the user would scroll to see a message, so map
++    // content offset to the same scroll range that drives the thumb.
++    const tick = Math.max(0, Math.min(
++      slider.height * MARKER_PRECISION - 1,
++      Math.round((Math.min(marker.offset, thumb.scrollRange) / thumb.scrollRange) * (slider.height * MARKER_PRECISION - 1)),
++    ))
++    const row = Math.floor(tick / MARKER_PRECISION)
++
++    // Avoid drawing markers on any row touched by the smoother thumb, including
++    // its sub-cell top/bottom edges.
++    if (rowIntersectsThumb(row, thumb)) continue
++    if (rows.has(row)) continue
++
++    const color = mutedMarkerColor(marker.color, slider.backgroundColor)
++    rows.set(row, { color, char: tick % MARKER_PRECISION === 0 ? "▀" : "▄" })
++  }
++
++  for (const [row, marker] of rows) {
++    buffer.setCellWithAlphaBlending(
++      slider.screenX + slider.width - 1,
++      slider.screenY + row,
++      marker.char,
++      marker.color,
++      slider.backgroundColor,
++    )
++  }
++}
++
++function mutedMarkerColor(color: RGBA, background: RGBA) {
++  const [r, g, b] = color.toInts()
++  const [bgR, bgG, bgB] = background.toInts()
++
++  // Pre-blend into the track background instead of relying on RGBA alpha.
++  // Some block glyph paths still look saturated after alpha blending because
++  // the bright agent color remains the glyph foreground. A muted opaque color
++  // gives predictable contrast across terminals and OpenTUI backends.
++  return RGBA.fromInts(
++    mixChannel(bgR, r, MARKER_BLEND),
++    mixChannel(bgG, g, MARKER_BLEND),
++    mixChannel(bgB, b, MARKER_BLEND),
++  )
++}
++
++function mixChannel(from: number, to: number, amount: number) {
++  return Math.round(from + (to - from) * amount)
++}
++
++function drawVerticalSegment(
++  buffer: OptimizedBuffer,
++  x: number,
++  y: number,
++  start: number,
++  coverage: number,
++  fg: RGBA,
++  bg: RGBA,
++) {
++  if (coverage >= THUMB_PRECISION) {
++    buffer.setCellWithAlphaBlending(x, y, "█", fg, bg)
++    return
++  }
++
++  if (start === 0) {
++    // The segment touches the top of this cell. Render an upper block by using
++    // thumb color as the cell background and painting the lower remainder as track.
++    buffer.setCellWithAlphaBlending(x, y, LOWER_BLOCKS[THUMB_PRECISION - coverage], bg, fg)
++    return
++  }
++
++  if (start + coverage === THUMB_PRECISION) {
++    // The segment touches the bottom of this cell, which maps directly to the
++    // lower block family.
++    buffer.setCellWithAlphaBlending(x, y, LOWER_BLOCKS[coverage], fg, bg)
++    return
++  }
++
++  // A very small thumb can land fully inside one cell. Block glyphs cannot draw
++  // an arbitrary middle slice, so choose the nearest anchored edge instead.
++  const anchoredCoverage = Math.max(1, Math.min(THUMB_PRECISION - 1, coverage))
++  if (start < THUMB_PRECISION / 2) {
++    buffer.setCellWithAlphaBlending(x, y, LOWER_BLOCKS[THUMB_PRECISION - anchoredCoverage], bg, fg)
++    return
++  }
++  buffer.setCellWithAlphaBlending(x, y, LOWER_BLOCKS[anchoredCoverage], fg, bg)
++}
++
++function rowIntersectsThumb(row: number, thumb: SmoothThumbRange) {
++  const rowStart = row * THUMB_PRECISION
++  const rowEnd = rowStart + THUMB_PRECISION
++  return rowStart < thumb.end && rowEnd > thumb.start
++}

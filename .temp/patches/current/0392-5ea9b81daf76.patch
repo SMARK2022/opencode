@@ -1,0 +1,286 @@
+From 5ea9b81daf76f25970d0f21b3ff0c44fc69c8e7a Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 6 Jul 2026 19:18:28 +0800
+Subject: [PATCH] =?UTF-8?q?fix(processor):=20consecutive-error=20breaker?=
+ =?UTF-8?q?=20=E5=BC=95=E5=85=A5=E6=B6=88=E6=81=AF=E8=BE=B9=E7=95=8C?=
+ =?UTF-8?q?=E6=84=9F=E7=9F=A5=EF=BC=8C=E9=98=B2=E6=AD=A2=E5=B9=B6=E8=A1=8C?=
+ =?UTF-8?q?=E8=AF=AF=E8=A7=A6=E5=8F=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+同一 assistant message 内的并行 tool-error（如 3 个 read 读不同路径全部
+失败）此前会被计数器累计到 3，误触发 doom_loop permission ask 阻断流。
+根因是计数器仅按 toolName 聚合，不区分同一批次并行 error 与跨 turn 连续
+error——模型尚未看到错误结果即被判定为「repeated failures」。
+
+将 consecutiveErrorMap value 从 number 改为 { count, lastMessageID }：
+同一 ctx.assistantMessage.id 的 error 只计 1 次失败事件，不同 message ID
+（即不同 turn）的 error 才递增 count。跨 turn 3 次连续 error 仍触发
+doom_loop（既有正确行为不变），成功调用仍重置计数器（delete entry 语义
+不变）。新增 2 个行为级测试覆盖同批次不触发与跨 turn 触发两条路径。
+
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index 26e9f554f9a11add97a80954d0ed00fe1fd7760f..415cb0ef101b4e67fec920f875b8091f57fb432b 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -119,7 +119,10 @@ export const layer = Layer.effect(
+     // [local-smark] consecutive-error breaker 的跨 step 计数器。
+     // ProcessorContext 每步重建，无法跨 step 累加；此处 Map 在 layer 闭包中持久化，
+     // 按 sessionID 隔离，跨 create()/process() 调用存活。
+-    const consecutiveErrorMap = new Map<SessionID, Record<string, number>>()
++    // value 为 { count, lastMessageID }：同一 assistant message 内的并行 error
++    // 只计 1 次失败事件（lastMessageID 相同不递增），跨 turn 才递增 count。
++    // 防止模型一次并行调用多个同工具（如 3 个 read 不同路径）全部失败时误触发。
++    const consecutiveErrorMap = new Map<SessionID, Record<string, { count: number; lastMessageID: string }>>()
+     const events = yield* EventV2Bridge.Service
+     const flags = yield* RuntimeFlags.Service
+ 
+@@ -573,7 +576,9 @@ export const layer = Layer.effect(
+               })
+             }
+             yield* completeToolCall(value.toolCallId, output)
+-            // [local-smark] 工具成功时重置 consecutive-error 计数器
++            // [local-smark] 工具成功时重置 consecutive-error 计数器。
++            // delete 整个 entry：下次 error 会创建新 entry { count: 1, lastMessageID: currentMsgID }，
++            // 正确表示"成功打断连续失败，重新开始计数"。
+             const successToolName = toolCall?.part.tool
+             if (successToolName) {
+               const errMap = consecutiveErrorMap.get(ctx.sessionID)
+@@ -603,25 +608,35 @@ export const layer = Layer.effect(
+               })
+             }
+             yield* failToolCall(value.toolCallId, value.error)
+-            // [local-smark] consecutive-error breaker：同一工具连续 3 次 error 后
++            // [local-smark] consecutive-error breaker：同一工具跨 turn 连续 error 后
+             // 注入 doom_loop permission ask，让模型意识到需要改变策略。
++            // 消息边界感知：同一 assistant message 内的并行 error 只计 1 次——
++            // 模型尚未看到错误结果，无法"改变策略"，此时触发是误报。
+             // 计数器存在 layer 闭包的 Map 中，跨 step 持久化（ProcessorContext 每步重建）。
+             const toolName = toolCall?.part.tool ?? "unknown"
+             const errMap = consecutiveErrorMap.get(ctx.sessionID) ?? {}
+-            errMap[toolName] = (errMap[toolName] ?? 0) + 1
++            const entry = errMap[toolName] ?? { count: 0, lastMessageID: "" }
++            // lastMessageID 不同 = 跨 turn 的新的失败 → 递增计数
++            // lastMessageID 相同 = 同一 assistant message 的并行 error → 不递增
++            if (entry.lastMessageID !== ctx.assistantMessage.id) {
++              entry.count += 1
++              entry.lastMessageID = ctx.assistantMessage.id
++            }
++            errMap[toolName] = entry
+             consecutiveErrorMap.set(ctx.sessionID, errMap)
+-            if (errMap[toolName] >= 3) {
++            if (entry.count >= 3) {
+               const agent = yield* agents.get(ctx.assistantMessage.agent)
+               yield* permission.ask({
+                 permission: "doom_loop",
+                 patterns: [toolName],
+                 sessionID: ctx.assistantMessage.sessionID,
+-                metadata: { tool: toolName, input: toolCall?.part.state.input, consecutiveErrors: errMap[toolName] },
++                metadata: { tool: toolName, input: toolCall?.part.state.input, consecutiveErrors: entry.count },
+                 always: [toolName],
+                 ruleset: agent.permission,
+               })
+-              // 重置计数器，避免每次 error 都触发
+-              errMap[toolName] = 0
++              // 重置计数，避免同 message 后续 error 重复触发；
++              // lastMessageID 保留：同批次后续 error 不递增，下一 turn 才从 1 开始
++              entry.count = 0
+               consecutiveErrorMap.set(ctx.sessionID, errMap)
+             }
+             return
+diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
+index 78c7e4c6422839190ef7a2ded8766104bf5aee09..02417793594e8bd97c8bee8fd4f4ac9653a7eead 100644
+--- a/packages/opencode/test/session/processor-effect.test.ts
++++ b/packages/opencode/test/session/processor-effect.test.ts
+@@ -27,6 +27,8 @@ import { raw, reply, TestLLMServer } from "../lib/llm-server"
+ import { SyncEvent } from "@/sync"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { EventV2Bridge } from "@/event-v2-bridge"
++import { tool as aiTool } from "ai"
++import z from "zod"
+ 
+ void Log.init({ print: false })
+ 
+@@ -202,6 +204,61 @@ const boot = Effect.fn("test.boot")(function* () {
+   return { processors, session, provider }
+ })
+ 
++// ---------------------------------------------------------------------------
++// consecutive-error breaker 测试工具
++// ---------------------------------------------------------------------------
++
++// [local-smark] 测试用 failing tool：execute 抛出错误后 AI SDK v6 会捕获
++// 并发出 tool-error 事件（executeToolCall catch block → { type: "tool-error" }）。
++// streamText 默认 stopWhen=stepCountIs(1)，单步执行工具——一个 process() 调用
++// 内的所有并行 tool-error 共享同一 ctx.assistantMessage.id。
++// 返回类型标注 Promise<{ output: string }> 满足 AI SDK v6 tool() 的类型推断：
++// execute 总是 throw 时 OUTPUT 会被推断为 never，导致 inputSchema 类型不匹配。
++const failingRead = aiTool({
++  description: "read",
++  inputSchema: z.object({ path: z.string() }),
++  execute: async (): Promise<{ output: string }> => {
++    throw new Error("File not found")
++  },
++})
++
++// [local-smark] 构造并行工具调用的 SSE chunks。
++// reply().tool() 硬编码 index=0（llm-server.ts toolStartLine），无法脚本并行调用——
++// OpenAI Chat protocol 用 tool.index 作为 stream key（openai-chat.ts:334），
++// 相同 index 会被 ToolStream.appendOrStart 合并为单个 tool call。
++// 必须用 raw() 手工构造不同 index 的 chunks。
++function parallelToolCalls(calls: Array<{ id: string; name: string; args: string }>) {
++  const head: unknown[] = [
++    { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
++  ]
++  for (let i = 0; i < calls.length; i++) {
++    head.push(
++      {
++        id: "chatcmpl-test",
++        object: "chat.completion.chunk",
++        choices: [{ delta: { tool_calls: [{ index: i, id: calls[i].id, type: "function", function: { name: calls[i].name, arguments: "" } }] } }],
++      },
++      {
++        id: "chatcmpl-test",
++        object: "chat.completion.chunk",
++        choices: [{ delta: { tool_calls: [{ index: i, function: { arguments: calls[i].args } }] } }],
++      },
++    )
++  }
++  return raw({
++    head,
++    tail: [{ id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "tool_calls" }] }],
++  })
++}
++
++// [local-smark] doom_loop=deny 的测试配置：触发时 permission.ask 抛 DeniedError，
++// halt 设置 ctx.assistantMessage.error，process() 返回 "stop"。
++// 未触发时 process() 返回 "continue"且 error 为 undefined。
++// 通过 config.permission.doom_loop 覆盖 agent 默认的 "ask"（agent.ts:118）。
++function denyDoomLoopConfig(url: string) {
++  return { ...providerCfg(url), permission: { doom_loop: "deny" as const } }
++}
++
+ // ---------------------------------------------------------------------------
+ // Tests
+ // ---------------------------------------------------------------------------
+@@ -853,3 +910,119 @@ it.live("session.processor effect tests mark interruptions aborted without manua
+     { git: true, config: (url) => providerCfg(url) },
+   ),
+ )
++
++// [local-smark] consecutive-error breaker：同一 assistant message 内的并行 error
++// 只应计 1 次失败事件。3 个并行 read 全部 fail 时不应触发 doom_loop permission ask。
++// 当前实现（无消息边界感知）会在 count 达到 3 时误触发——本测试暴露此缺口。
++it.live("consecutive-error breaker: same-batch parallel errors do not trigger doom_loop", () =>
++  provideTmpdirServer(
++    ({ dir, llm }) =>
++      Effect.gen(function* () {
++        const { processors, session, provider } = yield* boot()
++        const chat = yield* session.create({})
++        const parent = yield* user(chat.id, "read 3 files")
++        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
++        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
++
++        // 脚本 3 个并行 read 调用（index 0/1/2），全部 fail
++        yield* llm.push(
++          parallelToolCalls([
++            { id: "call_1", name: "read", args: JSON.stringify({ path: "A" }) },
++            { id: "call_2", name: "read", args: JSON.stringify({ path: "B" }) },
++            { id: "call_3", name: "read", args: JSON.stringify({ path: "C" }) },
++          ]),
++        )
++
++        const handle = yield* processors.create({
++          assistantMessage: msg,
++          sessionID: chat.id,
++          model: mdl,
++        })
++
++        const result = yield* handle.process({
++          user: {
++            id: parent.id,
++            sessionID: chat.id,
++            role: "user",
++            time: parent.time,
++            agent: parent.agent,
++            model: { providerID: ref.providerID, modelID: ref.modelID },
++          } satisfies MessageV2.User,
++          sessionID: chat.id,
++          model: mdl,
++          agent: agent(),
++          system: [],
++          messages: [{ role: "user", content: "read 3 files" }],
++          tools: { read: failingRead },
++        })
++
++        // doom_loop 未触发：3 个并行 error 来自同一 assistant message，
++        // 消息边界感知后只计 1 次失败事件，count 不足 3
++        expect(result).toBe("continue")
++        expect(handle.message.error).toBeUndefined()
++      }),
++    { git: true, config: (url) => denyDoomLoopConfig(url) },
++  ),
++)
++
++// [local-smark] consecutive-error breaker：跨 turn 连续 error 应触发 doom_loop。
++// 3 个独立 turn 各 1 个 read fail → 每个 turn 不同 ctx.assistantMessage.id →
++// count 递增到 3 → 触发 permission.ask → DeniedError → halt → process 返回 "stop"。
++// 此测试在修复前后均应通过（跨 turn 触发是既有正确行为），用作回归守卫。
++it.live("consecutive-error breaker: cross-turn errors trigger doom_loop", () =>
++  provideTmpdirServer(
++    ({ dir, llm }) =>
++      Effect.gen(function* () {
++        const { processors, session, provider } = yield* boot()
++        const chat = yield* session.create({})
++        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
++
++        // 脚本 3 个 LLM 响应，每个含 1 个 read 调用（全部 fail）
++        yield* llm.push(
++          reply().tool("read", { path: "A" }),
++          reply().tool("read", { path: "B" }),
++          reply().tool("read", { path: "C" }),
++        )
++
++        // 3 个 turn，每个新建 assistant message（不同 MessageID.ascending()）
++        for (let turn = 0; turn < 3; turn++) {
++          const parent = yield* user(chat.id, `turn ${turn}`)
++          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
++          const handle = yield* processors.create({
++            assistantMessage: msg,
++            sessionID: chat.id,
++            model: mdl,
++          })
++
++          const result = yield* handle.process({
++            user: {
++              id: parent.id,
++              sessionID: chat.id,
++              role: "user",
++              time: parent.time,
++              agent: parent.agent,
++              model: { providerID: ref.providerID, modelID: ref.modelID },
++            } satisfies MessageV2.User,
++            sessionID: chat.id,
++            model: mdl,
++            agent: agent(),
++            system: [],
++            messages: [{ role: "user", content: `turn ${turn}` }],
++            tools: { read: failingRead },
++          })
++
++          if (turn < 2) {
++            // 前 2 个 turn：count 不足 3，doom_loop 未触发
++            expect(result).toBe("continue")
++            expect(handle.message.error).toBeUndefined()
++          } else {
++            // 第 3 个 turn：count=3，doom_loop 触发
++            // permission.ask 抛 DeniedError → halt → error 设置 → process 返回 "stop"
++            expect(result).toBe("stop")
++            expect(handle.message.error).toBeDefined()
++          }
++        }
++      }),
++    { git: true, config: (url) => denyDoomLoopConfig(url) },
++  ),
++)

@@ -1,0 +1,163 @@
+From d4bba50a58615694959a10ba6a14b5a00e678e57 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 5 Jul 2026 19:20:50 +0800
+Subject: [PATCH] =?UTF-8?q?feat(ci):=20=E6=96=B0=E5=A2=9E=20VSCode=20?=
+ =?UTF-8?q?=E6=89=A9=E5=B1=95=20VSIX=20=E6=89=93=E5=8C=85=20CI=20=E5=B7=A5?=
+ =?UTF-8?q?=E4=BD=9C=E6=B5=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+VSIX 打包代码已存在于 sdks/vscode/script/vsix.ts，但 CI 未集成，
+每次发布需手动执行。新建独立 build-vsix.yml 工作流，在 push 到
+dev-smark 且 sdks/vscode/** 有变更时自动构建 VSIX 并上传到 GitHub Release。
+
+不依赖 tag push 触发——workflow 内部主动用 gh release create --target
+创建 vscode-v$VERSION tag 和 Release，对齐 build-opencode.yml 的模式。
+tag 前缀 vscode-v* 与 CLI 的 v* 隔离，不影响 CLI Release 的消息体和历史。
+
+diff --git a/.github/workflows/build-vsix.yml b/.github/workflows/build-vsix.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..8c13299e89f38285f38cd5bc8ac7a5fad7f17660
+--- /dev/null
++++ b/.github/workflows/build-vsix.yml
+@@ -0,0 +1,125 @@
++name: Build VSCode Extension VSIX
++run-name: ${{ github.event.head_commit.message || github.workflow }}
++
++on:
++  workflow_dispatch:
++    inputs:
++      version:
++        description: "Override VSCode extension version, e.g. 1.15.6"
++        required: false
++        type: string
++  push:
++    branches:
++      - dev-smark
++    paths:
++      - "sdks/vscode/**"
++      - ".github/workflows/build-vsix.yml"
++
++permissions:
++  contents: write
++
++# 与 build-opencode.yml 一致：同一 ref 的并发构建不取消，避免中途取消导致产物不完整
++concurrency:
++  group: build-vsix-${{ github.ref }}
++  cancel-in-progress: false
++
++jobs:
++  build-vsix:
++    runs-on: ubuntu-latest
++    timeout-minutes: 10
++    steps:
++      - uses: actions/checkout@v4
++
++      # esbuild.js 是 CJS（require("esbuild")），需要 Node.js 运行；
++      # 不依赖 runner 默认版本，显式固定保证确定性
++      - name: Setup Node
++        uses: actions/setup-node@v4
++        with:
++          node-version: "24"
++
++      - name: Setup Bun
++        uses: oven-sh/setup-bun@v2
++        with:
++          bun-version-file: package.json
++
++      # 版本解析优先级：workflow_dispatch 输入 > sdks/vscode/package.json
++      # 不从 tag 捕获版本——本 workflow 不依赖 tag push 触发（B6 修复），
++      # 而是在 workflow 内部主动创建 Release，对齐 build-opencode.yml 的模式
++      - name: Resolve version
++        id: version
++        shell: bash
++        env:
++          # 用 env 传递而非直接注入 ${{ }}，避免 shell 注入风险
++          INPUT_VERSION: ${{ github.event.inputs.version || '' }}
++        run: |
++          set -euo pipefail
++          VERSION="$INPUT_VERSION"
++          if [ -z "$VERSION" ]; then
++            VERSION="$(node -p "require('./sdks/vscode/package.json').version")"
++          fi
++          # node -p 在 version 字段缺失时输出字面量 "undefined"（退出码 0），
++          # 必须显式拦截，否则会创建 tag vscode-vundefined 并打包版本号为 undefined 的 VSIX
++          if [ -z "$VERSION" ] || [ "$VERSION" = "undefined" ]; then
++            echo "Failed to resolve sdks/vscode/package.json version" >&2
++            exit 1
++          fi
++          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
++          echo "Resolved version: $VERSION"
++
++      # sdks/vscode 有独立 bun.lock，不在根 workspace 中，需单独安装
++      - name: Install VSCode SDK dependencies
++        working-directory: sdks/vscode
++        run: bun install
++
++      - name: Build extension bundle
++        working-directory: sdks/vscode
++        run: bun run package
++
++      - name: Package VSIX
++        working-directory: sdks/vscode
++        shell: bash
++        env:
++          VERSION: ${{ steps.version.outputs.version }}
++        run: |
++          # 位置参数传版本给 vsce，对齐 script/publish 的语义：
++          # vsce package [version] 会用该版本覆盖 manifest 中的 version 字段
++          # --no-git-tag-version --no-update-package-json 避免 vsce 修改源码
++          # --no-dependencies 跳过 devDependencies 打包（VSIX 不含 node_modules）
++          # --skip-license 跳过 LICENSE 检查（已在 .vscodeignore 中处理）
++          bun x @vscode/vsce@^3 package "$VERSION" \
++            --no-git-tag-version --no-update-package-json \
++            --no-dependencies --skip-license \
++            -o "dist/opencode-vscode-$VERSION.vsix"
++
++      - name: Upload workflow artifact
++        uses: actions/upload-artifact@v4
++        with:
++          name: vsix
++          path: sdks/vscode/dist/*.vsix
++          # VSIX 构建失败时应立即终止，不应静默成功
++          if-no-files-found: error
++          retention-days: 7
++
++      # 始终执行 Release 上传——不依赖 tag push 触发（B6 修复）。
++      # 对齐 build-opencode.yml:428-445 的模式：workflow 内部主动创建 Release，
++      # 用解析出的版本号推导 tag 名 vscode-v$VERSION，通过 --target $GITHUB_SHA
++      # 在当前 commit 上创建 tag。同版本重跑时走 upload --clobber 覆盖旧资产。
++      - name: Upload to GitHub Release
++        env:
++          GH_TOKEN: ${{ github.token }}
++          VERSION: ${{ steps.version.outputs.version }}
++        shell: bash
++        run: |
++          set -euo pipefail
++          TAG="vscode-v$VERSION"
++          # Release 可能已存在（同版本重跑），用 --clobber 覆盖旧资产
++          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
++            gh release upload "$TAG" sdks/vscode/dist/*.vsix --clobber --repo "$GITHUB_REPOSITORY"
++          else
++            gh release create "$TAG" \
++              --repo "$GITHUB_REPOSITORY" \
++              --target "$GITHUB_SHA" \
++              --title "VSCode Extension $VERSION" \
++              --generate-notes \
++              sdks/vscode/dist/*.vsix
++          fi
+diff --git a/package.json b/package.json
+index aedfbc0bb6325899f8d8721139324515a08d43b1..cbfd4db2adc0c4ed8f5842fafd2bb50d98fcc8b2 100644
+--- a/package.json
++++ b/package.json
+@@ -18,7 +18,8 @@
+     "prepare": "husky",
+     "random": "echo 'Random script'",
+     "hello": "echo 'Hello World!'",
+-    "test": "echo 'do not run tests from root' && exit 1"
++    "test": "echo 'do not run tests from root' && exit 1",
++    "vsix": "bun run --cwd sdks/vscode vsix"
+   },
+   "workspaces": {
+     "packages": [

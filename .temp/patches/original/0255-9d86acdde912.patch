@@ -1,0 +1,52 @@
+From 9d86acdde912d19ae9bc82deb3d77ea44624a381 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 29 May 2026 14:04:46 +0800
+Subject: [PATCH] =?UTF-8?q?feat(compaction):=20=E8=B0=83=E6=95=B4=E4=BF=9D?=
+ =?UTF-8?q?=E7=95=99=E6=9C=80=E8=BF=91=E6=B6=88=E6=81=AF=E7=9A=84=E5=8F=82?=
+ =?UTF-8?q?=E6=95=B0=EF=BC=8C=E5=A2=9E=E5=8A=A0=E9=BB=98=E8=AE=A4=E5=B0=BE?=
+ =?UTF-8?q?=E9=83=A8=E8=BD=AE=E8=BD=AC=E5=92=8C=E4=BF=9D=E7=95=99=E4=BB=A4?=
+ =?UTF-8?q?=E7=89=8C=E7=9A=84=E6=95=B0=E9=87=8F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
+index 8330d23bec149ada110fd6fb565632fb3b0b71db..a4d8d02d7e8419f92d041f881015e91ce436068f 100644
+--- a/packages/opencode/src/session/compaction.ts
++++ b/packages/opencode/src/session/compaction.ts
+@@ -41,9 +41,9 @@ export const PRUNE_MINIMUM = 20_000
+ export const PRUNE_PROTECT = 40_000
+ const TOOL_OUTPUT_MAX_CHARS = 2_000
+ const PRUNE_PROTECTED_TOOLS = ["skill"]
+-const DEFAULT_TAIL_TURNS = 2
+-const MIN_PRESERVE_RECENT_TOKENS = 2_000
+-const MAX_PRESERVE_RECENT_TOKENS = 8_000
++const DEFAULT_TAIL_TURNS = 4
++const MIN_PRESERVE_RECENT_TOKENS = 4_000
++const MAX_PRESERVE_RECENT_TOKENS = 16_000
+ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
+ <template>
+ ## Goal
+diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
+index 60c0b539673d4a3ff6fa2bc27b316a8077ccf0ae..640ed1bd2ba3f914206d893bb1598cd4a9b2f035 100644
+--- a/packages/opencode/test/session/compaction.test.ts
++++ b/packages/opencode/test/session/compaction.test.ts
+@@ -1527,6 +1527,8 @@ describe("session.compaction.process", () => {
+         yield* createUserMessage(session.id, "older context")
+         yield* createUserMessage(session.id, "keep this turn")
+         yield* createUserMessage(session.id, "and this one too")
++        yield* createUserMessage(session.id, "third retained turn")
++        yield* createUserMessage(session.id, "fourth retained turn")
+         yield* createCompactionMarker(session.id)
+ 
+         const msgs = yield* ssn.messages({ sessionID: session.id })
+@@ -1542,6 +1544,8 @@ describe("session.compaction.process", () => {
+         expect(captured).toContain("older context")
+         expect(captured).not.toContain("keep this turn")
+         expect(captured).not.toContain("and this one too")
++        expect(captured).not.toContain("third retained turn")
++        expect(captured).not.toContain("fourth retained turn")
+         expect(captured).not.toContain("What did we do so far?")
+       }).pipe(withCompaction({ llm: stub.layer }))
+     },

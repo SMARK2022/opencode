@@ -1,0 +1,444 @@
+From d3f25aad5ba7e37c458c353527c836d5c18dcf84 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 23 May 2026 20:52:35 +0800
+Subject: [PATCH] =?UTF-8?q?feat(shell):=20=E5=A2=9E=E5=BC=BAWSL=E5=92=8CSS?=
+ =?UTF-8?q?H=E5=91=BD=E4=BB=A4=E7=9A=84=E6=9D=83=E9=99=90=E5=A4=84?=
+ =?UTF-8?q?=E7=90=86=EF=BC=8C=E7=A1=AE=E4=BF=9D=E6=AD=A3=E7=A1=AE=E5=8C=BA?=
+ =?UTF-8?q?=E5=88=86=E4=B8=BB=E6=9C=BA=E5=92=8C=E8=BF=9C=E7=A8=8B=E5=91=BD?=
+ =?UTF-8?q?=E4=BB=A4=E7=9A=84=E6=9D=83=E9=99=90=E8=AF=B7=E6=B1=82?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+index d60bc3f651bf316f21402b8f6abeb36bdbcd79f1..86a6fc3fc3db28e14a6005d41bcbf46bbeac949b 100644
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -94,6 +94,19 @@ const GIT_WRITES = new Set([
+ ])
+ const GIT_STASH_WRITES = new Set(["push", "pop", "apply", "drop", "clear", "branch"])
+ const UNIX_TEXT_COMMANDS = new Set(["tail", "head", "sed", "awk", "grep"])
++// These commands carry an inner shell for another filesystem namespace. The
++// local PowerShell/cmd compatibility checks and external_directory scanner must
++// inspect the wrapper invocation itself, but must not reinterpret the payload's
++// POSIX commands or guest paths as host Windows commands/paths.
++const REMOTE_SHELL_COMMANDS = new Set(["ssh", "wsl"])
++// WSL option names that consume the following token before the guest command
++// starts. Keeping this list explicit prevents distro/user/cd values such as
++// `Ubuntu-22.04` or `/tmp` from being mistaken for guest executable text.
++const WSL_OPTIONS_WITH_VALUE = new Set(["-d", "--distribution", "-u", "--user", "--cd"])
++// SSH option names that consume the following token before the remote host. The
++// scanner only needs common option/value boundaries so it can keep local SSH
++// options local while marking text after the host as remote shell payload.
++const SSH_OPTIONS_WITH_VALUE = new Set(["-b", "-c", "-e", "-F", "-i", "-J", "-l", "-m", "-o", "-p", "-S", "-W"])
+ 
+ function bashCompressionEnabled(config?: Config.Info) {
+   return config?.tool_output?.bash_compression ?? true
+@@ -119,6 +132,25 @@ type Chunk = {
+   size: number
+ }
+ 
++// Raw text tokens preserve source offsets from the original command line. Those
++// offsets let `localCommands` filter parser-recovered payload commands without
++// depending on a particular tree-sitter recovery shape for malformed WSL/SSH
++// strings.
++type Token = {
++  text: string
++  start: number
++  end: number
++}
++
++type Range = {
++  start: number
++  end: number
++}
++
++type Segment = Range & {
++  text: string
++}
++
+ export const log = Log.create({ service: "shell-tool" })
+ 
+ const resolveWasm = (asset: string) => {
+@@ -513,7 +545,9 @@ function shellCompatibilityError(root: Node, shellName: string): string | undefi
+ }
+ 
+ function localCommands(root: Node) {
++  const remoteRanges = remotePayloadRanges(root.text)
+   return commands(root).filter((node) => {
++    if (remoteRanges.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return false
+     let parent = node.parent
+     while (parent && parent.id !== root.id) {
+       // tree-sitter-powershell can recover POSIX fragments inside quoted WSL/ssh
+@@ -526,6 +560,116 @@ function localCommands(root: Node) {
+   })
+ }
+ 
++function remotePayloadRanges(command: string) {
++  // Compute source ranges for remote/alternate-OS payloads before relying on the
++  // parse tree. PowerShell recovery can surface commands from quoted payloads as
++  // root-level commands, so parent-node checks alone cannot protect host scans.
++  return commandSegments(command).flatMap((segment) => {
++    const tokens = tokenizeLocalSegment(segment.text, segment.start)
++    const cmd = (tokens[0]?.text ?? "").toLowerCase().replace(/\.exe$/, "")
++    if (!REMOTE_SHELL_COMMANDS.has(cmd)) return []
++    if (cmd === "wsl") return wslPayloadRange(tokens, segment.end)
++    if (cmd === "ssh") return sshPayloadRange(tokens, segment.end)
++    return []
++  })
++}
++
++function commandSegments(command: string) {
++  // Segmenting stops remote ranges at host shell separators while respecting
++  // quotes. This keeps `wsl ... 'guest | grep'` inside the guest, but treats
++  // `wsl ... 'guest' | grep` as a local pipeline after the WSL process exits.
++  const result: Segment[] = []
++  let start = 0
++  let quote = ""
++  for (let i = 0; i < command.length; i++) {
++    const char = command[i]
++    if (quote) {
++      if (char === "`") i++
++      else if (char === quote) quote = ""
++      continue
++    }
++    if (char === "'" || char === '"') {
++      quote = char
++      continue
++    }
++    const paired = (char === "&" || char === "|") && command[i + 1] === char
++    // These separators terminate the current host command segment. Single `|`
++    // and `&` matter because `wsl ... 'guest' | grep x` in PowerShell and
++    // `wsl ... "guest" & grep x` in cmd both have a guest command before the
++    // separator and a local host command after it; the remote payload range must
++    // stop before those local commands continue.
++    if (char === "|" || char === "&" || char === ";" || char === "\n" || paired) {
++      result.push({ start, end: i, text: command.slice(start, i) })
++      start = i + (paired ? 2 : 1)
++      if (paired) i++
++    }
++  }
++  result.push({ start, end: command.length, text: command.slice(start) })
++  return result
++}
++
++function tokenizeLocalSegment(command: string, offset: number) {
++  // This is intentionally a tiny offset-preserving lexer, not a shell parser. It
++  // only understands whitespace, simple quotes, and PowerShell backtick escapes
++  // because the caller only needs wrapper names/options and payload boundaries.
++  const result: Token[] = []
++  for (let i = 0; i < command.length; i++) {
++    if (/\s/.test(command[i])) continue
++    const start = i
++    if (command[i] === "'" || command[i] === '"') {
++      const quote = command[i]
++      let text = ""
++      for (i++; i < command.length; i++) {
++        if (command[i] === "`") {
++          text += command[i + 1] ?? ""
++          i++
++          continue
++        }
++        if (command[i] === quote) break
++        text += command[i]
++      }
++      result.push({ text, start: offset + start, end: offset + Math.min(i + 1, command.length) })
++      continue
++    }
++    while (i + 1 < command.length && !/\s/.test(command[i + 1])) i++
++    result.push({ text: command.slice(start, i + 1), start: offset + start, end: offset + i + 1 })
++  }
++  return result
++}
++
++function wslPayloadRange(tokens: Token[], end: number) {
++  // WSL options are parsed here only to locate the guest command boundary. The
++  // payload is not approved or interpreted by this scanner; once the boundary is
++  // found, every recovered command inside it is excluded from host path and local
++  // shell-compatibility checks so `/mnt/rescue` remains a guest path.
++  for (let i = 1; i < tokens.length; i++) {
++    const token = tokens[i].text.toLowerCase()
++    if (token === "--" || token === "-e" || token === "--exec") return tokens[i + 1] ? [{ start: tokens[i + 1].start, end }] : []
++    if (WSL_OPTIONS_WITH_VALUE.has(token)) {
++      i++
++      continue
++    }
++    if (token.startsWith("-")) continue
++    return [{ start: tokens[i].start, end }]
++  }
++  return []
++}
++
++function sshPayloadRange(tokens: Token[], end: number) {
++  // SSH has a local executable and local options followed by a remote host. Only
++  // tokens after that host are remote shell text; keeping the host/options local
++  // preserves existing permission prompts while preventing remote grep/cat paths
++  // from being treated as Windows PowerShell commands or host external paths.
++  const host = tokens.slice(1).findIndex((item, index, items) => {
++    if (items[index - 1] && SSH_OPTIONS_WITH_VALUE.has(items[index - 1].text)) return false
++    if (item.text === "--") return false
++    return !item.text.startsWith("-")
++  })
++  if (host < 0) return []
++  const start = host + 2
++  return tokens[start] ? [{ start: tokens[start].start, end }] : []
++}
++
+ function powershellUnixAlternative(name: string) {
+   if (name === "head") return `For pipeline output, use \`Select-Object -First N\`; for files, prefer the read tool.`
+   if (name === "tail") return `For pipeline output, use \`Select-Object -Last N\`; for files, prefer the read tool or \`Get-Content -Tail N\`.`
+@@ -588,7 +732,7 @@ export const ShellTool = Tool.define(
+       }
+       const shellKind = ShellID.toKind(Shell.name(shell))
+ 
+-      for (const node of commands(root)) {
++      for (const node of localCommands(root)) {
+         const command = parts(node)
+         const tokens = command.map((item) => item.text)
+         const cmd = ps || shellKind === "cmd" ? tokens[0]?.toLowerCase() : tokens[0]
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index 5a7dd4342d08fe645bef3d52e4af3bdb6a89ad49..9cf7dd21204edd3337adfa32200205b72dd63716 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -1019,6 +1019,203 @@ describe("tool.shell permissions", () => {
+       )
+     }
+ 
++    for (const item of ps) {
++      it.live(`allows Unix text utilities inside WSL sh payloads [${item.label}]`, () =>
++        withShell(
++          item,
++          runIn(
++            projectRoot,
++            Effect.gen(function* () {
++              const err = new Error("stop after permission")
++              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              expect(
++                yield* fail(
++                  {
++                    // This is a WSL guest pipeline, not a local PowerShell
++                    // pipeline. The compatibility guard must preserve that
++                    // namespace boundary so POSIX utilities remain valid inside
++                    // the alternate OS shell while still rejecting local grep.
++                    command: `wsl -d Ubuntu-22.04 -- sh -lc 'ps -ef | grep "[d]drescue"'`,
++                    description: "Inspect ddrescue process in WSL",
++                  },
++                  capture(requests, err),
++                ),
++              ).toMatchObject({ message: err.message })
++              expect(requests.find((r) => r.permission === "bash")).toBeDefined()
++            }),
++          ),
++        ),
++      )
++    }
++
++    for (const item of ps) {
++      it.live(`does not ask for host external_directory for WSL mount paths [${item.label}]`, () =>
++        withShell(
++          item,
++          runIn(
++            projectRoot,
++            Effect.gen(function* () {
++              const err = new Error("stop after permission")
++              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              expect(
++                yield* fail(
++                  {
++                    // `/mnt/rescue` lives in the WSL guest filesystem for this
++                    // command. Mapping it through Windows path resolution would
++                    // fabricate a host path such as `F:\mnt\rescue`, so the
++                    // shell scanner must leave guest paths to the WSL command's
++                    // normal bash permission instead of raising external_directory.
++                    command:
++                      "wsl -d Ubuntu-22.04 -- sh -lc \"sudo mkdir -p /mnt/rescue && sudo mount -t exfat /dev/sde3 /mnt/rescue && mkdir -p /mnt/rescue/LexarE300_rescue && df -h /mnt/rescue && lsblk -o NAME,SIZE,FSTYPE,LABEL,RO,TYPE,MOUNTPOINTS /dev/sdc /dev/sde\"",
++                    description: "Inspect WSL rescue mount",
++                  },
++                  capture(requests, err),
++                ),
++              ).toMatchObject({ message: err.message })
++              expect(requests.find((r) => r.permission === "external_directory")).toBeUndefined()
++              expect(requests.find((r) => r.permission === "bash")).toBeDefined()
++            }),
++          ),
++        ),
++      )
++    }
++
++    for (const item of ps) {
++      it.live(`rejects Unix text utilities after WSL payloads in local pipelines [${item.label}]`, () =>
++        withShell(
++          item,
++          runIn(
++            projectRoot,
++            Effect.gen(function* () {
++              expect(
++                yield* fail({
++                  // The pipe after the WSL invocation is a host PowerShell
++                  // pipeline boundary. Only the quoted `echo ok` belongs to the
++                  // guest; the trailing `grep` must remain a local command so
++                  // the existing PowerShell compatibility protection cannot be
++                  // bypassed by prefixing a pipeline with WSL.
++                  command: "wsl -d Ubuntu-22.04 -- sh -lc 'echo ok' | grep ok",
++                  description: "Search WSL output locally",
++                }),
++              ).toMatchObject({
++                message: expect.stringContaining(`The current shell is ${item.label}`),
++              })
++            }),
++          ),
++        ),
++      )
++    }
++
++    for (const item of ps) {
++      it.live(`asks for host external_directory after WSL payloads in local pipelines [${item.label}]`, () =>
++        withShell(
++          item,
++          runIn(
++            projectRoot,
++            Effect.gen(function* () {
++              const err = new Error("stop after permission")
++              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              expect(
++                yield* fail(
++                  {
++                    // The WSL guest payload ends before the host pipeline. A
++                    // following local file read is still a host filesystem access
++                    // and must keep the external_directory gate that protects
++                    // paths outside the current project.
++                    command: `wsl -d Ubuntu-22.04 -- sh -lc 'echo ok' | Get-Content ${process.env.WINDIR!.replaceAll("\\", "/")}/win.ini`,
++                    description: "Read host file after WSL output",
++                  },
++                  capture(requests, err),
++                ),
++              ).toMatchObject({ message: err.message })
++              const extDirReq = requests.find((r) => r.permission === "external_directory")
++              expect(extDirReq).toBeDefined()
++              expect(extDirReq!.patterns).toContain(Filesystem.normalizePathPattern(path.join(process.env.WINDIR!, "*")))
++            }),
++          ),
++        ),
++      )
++    }
++
++    for (const item of ps) {
++      it.live(`rejects Unix text utilities after SSH payloads in local pipelines [${item.label}]`, () =>
++        withShell(
++          item,
++          runIn(
++            projectRoot,
++            Effect.gen(function* () {
++              expect(
++                yield* fail({
++                  // SSH has the same host/remote boundary as WSL for this
++                  // scanner: quoted remote commands may use POSIX utilities, but
++                  // a PowerShell pipeline after the SSH call is local and remains
++                  // subject to the existing Unix-utility rejection.
++                  command: "ssh example.com 'echo ok' | grep ok",
++                  description: "Search SSH output locally",
++                }),
++              ).toMatchObject({
++                message: expect.stringContaining(`The current shell is ${item.label}`),
++              })
++            }),
++          ),
++        ),
++      )
++    }
++
++    if (cmdShell) {
++      it.live("rejects Unix text utilities after WSL payloads in cmd command chains [cmd]", () =>
++        withShell(
++          cmdShell,
++          runIn(
++            projectRoot,
++            Effect.gen(function* () {
++              expect(
++                yield* fail({
++                  // In cmd.exe, a single `&` starts another local command. The
++                  // WSL guest range must stop before that separator so a trailing
++                  // local `grep` remains covered by the existing cmd Unix-utility
++                  // rejection instead of being hidden inside the WSL payload.
++                  command: 'wsl -d Ubuntu-22.04 -- sh -lc "echo ok" & grep ok',
++                  description: "Search WSL output locally with cmd",
++                }),
++              ).toMatchObject({
++                message: expect.stringContaining("The current shell is cmd"),
++              })
++            }),
++          ),
++        ),
++      )
++
++      it.live("asks for host external_directory after WSL payloads in cmd command chains [cmd]", () =>
++        withShell(
++          cmdShell,
++          runIn(
++            projectRoot,
++            Effect.gen(function* () {
++              const err = new Error("stop after permission")
++              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              expect(
++                yield* fail(
++                  {
++                    // The WSL command ends before cmd's `&` separator. A `TYPE`
++                    // command after that point reads the Windows host filesystem,
++                    // so it must still request external_directory for the Windows
++                    // directory rather than being swallowed by the guest range.
++                    command: `wsl -d Ubuntu-22.04 -- sh -lc "echo ok" & TYPE "${path.join(process.env.WINDIR!, "win.ini")}"`,
++                    description: "Read host file after WSL output with cmd",
++                  },
++                  capture(requests, err),
++                ),
++              ).toMatchObject({ message: err.message })
++              const extDirReq = requests.find((r) => r.permission === "external_directory")
++              expect(extDirReq).toBeDefined()
++              expect(extDirReq!.patterns).toContain(Filesystem.normalizePathPattern(path.join(process.env.WINDIR!, "*")))
++            }),
++          ),
++        ),
++      )
++    }
++
+     for (const item of ps) {
+       it.live(`allows Unix text utilities inside SSH remote commands [${item.label}]`, () =>
+         withShell(
+@@ -1042,6 +1239,36 @@ describe("tool.shell permissions", () => {
+         ),
+       )
+     }
++
++    for (const item of ps) {
++      it.live(`does not ask for host external_directory for SSH remote paths [${item.label}]`, () =>
++        withShell(
++          item,
++          runIn(
++            projectRoot,
++            Effect.gen(function* () {
++              const err = new Error("stop after permission")
++              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              expect(
++                yield* fail(
++                  {
++                    // `/etc/os-release` is read on the SSH target, not on the
++                    // Windows host. SSH shares the same remote-payload invariant
++                    // as WSL: remote POSIX paths must not become fabricated host
++                    // external_directory prompts.
++                    command: "ssh example.com 'cat /etc/os-release | grep PRETTY_NAME'",
++                    description: "Inspect SSH remote OS release",
++                  },
++                  capture(requests, err),
++                ),
++              ).toMatchObject({ message: err.message })
++              expect(requests.find((r) => r.permission === "external_directory")).toBeUndefined()
++              expect(requests.find((r) => r.permission === "bash")).toBeDefined()
++            }),
++          ),
++        ),
++      )
++    }
+   }
+ 
+   if (process.platform === "win32" && cmdShell) {

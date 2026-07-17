@@ -1,0 +1,70 @@
+From a6a79e01fb18c6a8d662d3445bc511c620a3f01d Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 8 May 2026 14:54:54 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E4=BC=98=E5=8C=96=20BlockTool=20?=
+ =?UTF-8?q?=E7=BB=84=E4=BB=B6=E7=9A=84=E5=8F=AF=E6=8A=98=E5=8F=A0=E9=80=BB?=
+ =?UTF-8?q?=E8=BE=91=EF=BC=8C=E4=BD=BF=E7=94=A8=20createMemo=20=E5=92=8C?=
+ =?UTF-8?q?=20createSignal=20=E6=8F=90=E5=8D=87=E6=80=A7=E8=83=BD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index ba5c3acf01cd8f422eb5c02c41b76002c0565028..429b8fdd427f33d4363e9e4a913fef4b05597bc3 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -1884,10 +1884,15 @@ function BlockTool(props: {
+     if (hover()) return theme.backgroundMenu
+     return theme.backgroundPanel
+   })
+-  const previewLines = props.maxLines ?? 10
+-  const threshold = props.threshold ?? 20
+-  const contentLines = props.totalLines ?? 0
+-  const canCollapse = previewLines > 0 && contentLines > threshold
++  const previewLines = createMemo(() => props.maxLines ?? 10)
++  const threshold = createMemo(() => props.threshold ?? 20)
++  const [canCollapse, setCanCollapse] = createSignal(false)
++  createEffect(() => {
++    if (canCollapse()) return
++    if (previewLines() > 0 && (props.totalLines ?? 0) > threshold()) {
++      setCanCollapse(true)
++    }
++  })
+   const [expanded, setExpanded] = createSignal(false)
+   return (
+     <box
+@@ -1899,7 +1904,7 @@ function BlockTool(props: {
+       backgroundColor={background()}
+       customBorderChars={SplitBorder.customBorderChars}
+       borderColor={props.contextView ? theme.info : theme.background}
+-      onMouseOver={() => (props.onClick || props.onRightClick || canCollapse) && setHover(true)}
++      onMouseOver={() => (props.onClick || props.onRightClick || canCollapse()) && setHover(true)}
+       onMouseOut={() => setHover(false)}
+       onMouseUp={(evt?: TuiMouseEvent) => {
+         if (renderer.getSelection()?.getSelectedText()) return
+@@ -1910,7 +1915,7 @@ function BlockTool(props: {
+           props.onRightClick()
+           return
+         }
+-        if (canCollapse) setExpanded((prev) => !prev)
++        if (canCollapse()) setExpanded((prev) => !prev)
+         props.onClick?.()
+       }}
+     >
+@@ -1927,12 +1932,12 @@ function BlockTool(props: {
+       </Show>
+       <box
+         marginTop={1}
+-        maxHeight={canCollapse && !expanded() ? previewLines : undefined}
+-        overflow={canCollapse && !expanded() ? "hidden" : undefined}
++        maxHeight={canCollapse() && !expanded() ? previewLines() : undefined}
++        overflow={canCollapse() && !expanded() ? "hidden" : undefined}
+       >
+         {props.children}
+       </box>
+-      <Show when={canCollapse}>
++      <Show when={canCollapse()}>
+         <box marginTop={1}>
+           <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+         </box>

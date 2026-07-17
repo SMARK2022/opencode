@@ -1,0 +1,64 @@
+From ed792909b777eabd724aa2f401ac6367bc3deb33 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 8 May 2026 01:09:08 +0800
+Subject: [PATCH] =?UTF-8?q?feat(session):=20=E6=B7=BB=E5=8A=A0=20includeHi?=
+ =?UTF-8?q?dden=20=E5=8F=82=E6=95=B0=E4=BB=A5=E6=94=AF=E6=8C=81=E9=9A=90?=
+ =?UTF-8?q?=E8=97=8F=E6=B6=88=E6=81=AF=E7=9A=84=E8=BF=87=E6=BB=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index 6683b67d6dda8b9a6335fd70c77074dec8b1c8cc..9b4199e62bae16c8a5a2bccf804af47acb6f6c17 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -1026,7 +1026,7 @@ export function toModelMessages(
+   return Effect.runPromise(toModelMessagesEffect(input, model, options).pipe(Effect.provide(EffectLogger.layer)))
+ }
+ 
+-export function page(input: { sessionID: SessionID; limit: number; before?: string }) {
++export function page(input: { sessionID: SessionID; limit: number; before?: string; includeHidden?: boolean }) {
+   const before = input.before ? cursor.decode(input.before) : undefined
+   const where = before
+     ? and(eq(MessageTable.session_id, input.sessionID), older(before))
+@@ -1055,6 +1055,15 @@ export function page(input: { sessionID: SessionID; limit: number; before?: stri
+   const slice = more ? rows.slice(0, input.limit) : rows
+   const items = hydrate(slice)
+   items.reverse()
++  if (!input.includeHidden) {
++    for (let i = items.length - 1; i >= 0; i--) {
++      if (items[i].info.hidden) {
++        items.splice(i, 1)
++        continue
++      }
++      items[i].parts = items[i].parts.filter((p) => !p.hidden)
++    }
++  }
+   const tail = slice.at(-1)
+   return {
+     items,
+@@ -1067,7 +1076,7 @@ export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean }
+   const size = 50
+   let before: string | undefined
+   while (true) {
+-    const next = page({ sessionID, limit: size, before })
++    const next = page({ sessionID, limit: size, before, includeHidden: true })
+     if (next.items.length === 0) break
+     for (let i = next.items.length - 1; i >= 0; i--) {
+       const msg = next.items[i]
+diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
+index 1278089b909591f03331b002c037f05981d704aa..5593efc9714b7280debedee9abc704f4e3549048 100644
+--- a/packages/opencode/src/session/session.ts
++++ b/packages/opencode/src/session/session.ts
+@@ -696,9 +696,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service |
+ 
+     const messages = Effect.fn("Session.messages")(function* (input: { sessionID: SessionID; limit?: number }) {
+       if (input.limit) {
+-        return MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).items.filter(
+-          (m) => !m.info.hidden,
+-        )
++        return MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).items
+       }
+       return Array.from(MessageV2.stream(input.sessionID)).reverse()
+     })

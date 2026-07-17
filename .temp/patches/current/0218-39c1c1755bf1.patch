@@ -1,0 +1,33 @@
+From 39c1c1755bf14695a402692da8748cbaaad749a9 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 25 May 2026 02:03:31 +0800
+Subject: [PATCH] =?UTF-8?q?fix(package):=20=E4=BF=AE=E6=AD=A3=E7=89=88?=
+ =?UTF-8?q?=E6=9C=AC=E5=8F=B7=E6=A0=BC=E5=BC=8F=EF=BC=8C=E7=A1=AE=E4=BF=9D?=
+ =?UTF-8?q?=E4=B8=8E=E5=8F=91=E5=B8=83=E4=B8=80=E8=87=B4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/sdks/vscode/package.json b/sdks/vscode/package.json
+index 730aa1a285ab8450734429347387698a2e028aa6..1a9af414c1567291563442c6fb5b2634fcd56369 100644
+--- a/sdks/vscode/package.json
++++ b/sdks/vscode/package.json
+@@ -2,7 +2,7 @@
+   "name": "opencode-ide-bridge",
+   "displayName": "OpenCode IDE Bridge",
+   "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, workspace context sharing, and terminal integration — all on 127.0.0.1 with Bearer-token authentication.",
+-  "version": "1.15.3.0",
++  "version": "1.15.3",
+   "publisher": "SMARK2022",
+   "homepage": "https://github.com/anomalyco/opencode",
+   "repository": {
+@@ -100,7 +100,7 @@
+     ]
+   },
+   "scripts": {
+-    "vsix": "bun run package && bun x @vscode/vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.15.3.0.vsix",
++    "vsix": "bun run package && bun x @vscode/vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.15.3.vsix",
+     "compile": "bun run check-types && bun run lint && node esbuild.js",
+     "watch:esbuild": "node esbuild.js --watch",
+     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",

@@ -1,0 +1,180 @@
+From 3c72d78b8cb1eba5f14d13918671c96f8b59ca80 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Tue, 5 May 2026 21:54:06 +0800
+Subject: [PATCH] =?UTF-8?q?feat(write):=20=E6=B7=BB=E5=8A=A0=E6=96=87?=
+ =?UTF-8?q?=E4=BB=B6=E8=A6=86=E7=9B=96=E6=97=B6=E7=94=9F=E6=88=90diff?=
+ =?UTF-8?q?=E5=8A=9F=E8=83=BD=EF=BC=8C=E6=94=AF=E6=8C=81TUI=E4=BB=A5git=20?=
+ =?UTF-8?q?diff=E5=BD=A2=E5=BC=8F=E5=B1=95=E7=A4=BA=E5=8F=98=E6=9B=B4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 4d6a236ae0cdf3d93f2fd6633b2753bbb944035d..2452343c4327627d6eaced54b47caa94f63d23f7 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -1548,7 +1548,8 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
+           setExpanded((prev) => !prev)
+         }}
+       >
+-        <text fg={theme.textMuted}>Thinking ({renderedContent().length.toLocaleString()} chars):</text>
++        {/* 使用 markdownEmph 还原旧版斜体黄字主题键，配合 ITALIC 属性重现斜体语义 */}
++        <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>Thinking ({renderedContent().length.toLocaleString()} chars):</text>
+         <code
+           filetype="markdown"
+           drawUnstyledText={false}
+@@ -1972,6 +1973,7 @@ function Bash(props: ToolProps<typeof BashTool>) {
+ }
+ 
+ function Write(props: ToolProps<typeof WriteTool>) {
++  const ctx = use()
+   const { theme, syntax } = useTheme()
+   const [expanded, setExpanded] = createSignal(false)
+   const code = createMemo(() => {
+@@ -1979,20 +1981,78 @@ function Write(props: ToolProps<typeof WriteTool>) {
+     return props.input.content
+   })
+ 
++  const diff = createMemo(() => props.metadata.diff as string | undefined)
++  const isOverwrite = createMemo(() => props.metadata.exists === true && !!diff())
++  const view = createMemo(() => {
++    const diffStyle = ctx.tui.diff_style
++    if (diffStyle === "stacked") return "unified"
++    return ctx.width > 120 ? "split" : "unified"
++  })
++  const ft = createMemo(() => filetype(props.input.filePath))
++  const diffStats = createMemo(() => {
++    const d = diff()
++    if (!d) return { added: 0, removed: 0, total: 0 }
++    let added = 0, removed = 0
++    for (const line of d.split("\n")) {
++      if (line.startsWith("+") && !line.startsWith("+++")) added++
++      if (line.startsWith("-") && !line.startsWith("---")) removed++
++    }
++    return { added, removed, total: d.split("\n").length }
++  })
++  const diffOverflow = createMemo(() => diffStats().total > 20)
++
+   const lines = createMemo(() => code().split("\n"))
+-  const overflow = createMemo(() => lines().length > 20)
++  const codeOverflow = createMemo(() => lines().length > 20)
+   const limitedCode = createMemo(() => {
+-    if (expanded() || !overflow()) return code()
++    if (expanded() || !codeOverflow()) return code()
+     return [...lines().slice(0, 10), "…"].join("\n")
+   })
+ 
+   return (
+     <Switch>
++      {/* 覆写已有文件：以 git diff 形式展示变更，与 Edit/ApplyPatch 一致 */}
++      <Match when={isOverwrite()}>
++        <BlockTool 
++          title={"← Write " + normalizePath(props.input.filePath!) + (diffStats().added > 0 || diffStats().removed > 0 ? ` +${diffStats().added} -${diffStats().removed}` : "")}
++          part={props.part}
++          onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
++        >
++          <box gap={1} flexDirection="column">
++            <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
++              <diff
++                diff={diff()!}
++                view={view()}
++                syncScroll={true}
++                filetype={ft()}
++                syntaxStyle={syntax()}
++                showLineNumbers={true}
++                width="100%"
++                wrapMode={ctx.diffWrapMode()}
++                fg={theme.text}
++                addedBg={theme.diffAddedBg}
++                removedBg={theme.diffRemovedBg}
++                contextBg={theme.diffContextBg}
++                addedSignColor={theme.diffHighlightAdded}
++                removedSignColor={theme.diffHighlightRemoved}
++                lineNumberFg={theme.diffLineNumber}
++                lineNumberBg={theme.diffContextBg}
++                addedLineNumberBg={theme.diffAddedLineNumberBg}
++                removedLineNumberBg={theme.diffRemovedLineNumberBg}
++              />
++            </box>
++            <Show when={diffOverflow()}>
++              <text fg={theme.textMuted} paddingLeft={1}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
++            </Show>
++            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
++          </box>
++        </BlockTool>
++      </Match>
++      {/* 新建文件：保持原有代码块展示 */}
+       <Match when={props.metadata.diagnostics !== undefined}>
+         <BlockTool 
+           title={"# Wrote " + normalizePath(props.input.filePath!)} 
+           part={props.part}
+-          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
++          onClick={codeOverflow() ? () => setExpanded((prev) => !prev) : undefined}
+         >
+           <box gap={1} flexDirection="column">
+             <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
+@@ -2004,7 +2064,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
+                 content={limitedCode()}
+               />
+             </line_number>
+-            <Show when={overflow()}>
++            <Show when={codeOverflow()}>
+               <text fg={theme.textMuted} paddingLeft={1}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+             </Show>
+             <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
+@@ -2202,6 +2262,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
+               <diff
+                 diff={diffContent()}
+                 view={view()}
++                syncScroll={true}
+                 filetype={ft()}
+                 syntaxStyle={syntax()}
+                 showLineNumbers={true}
+@@ -2297,6 +2358,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
+                       <diff
+                         diff={file.patch || ""}
+                         view={view()}
++                        syncScroll={true}
+                         filetype={filetype(file.filePath)}
+                         syntaxStyle={syntax()}
+                         showLineNumbers={true}
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/permission.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/permission.tsx
+index 720a05ff7e16f5b83a6367e4f8cbab5950d02d51..aac7c388e45c67d7693236171a37e7869a0fce8e 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/permission.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/permission.tsx
+@@ -82,6 +82,7 @@ function EditBody(props: { request: PermissionRequest }) {
+           <diff
+             diff={diff()}
+             view={view()}
++            syncScroll={true}
+             filetype={ft()}
+             syntaxStyle={syntax()}
+             showLineNumbers={true}
+diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
+index c2be73ab1cdbb737b78d9b2b3003dc5bfd79a2e5..697daa20ca05d03c592b0e76c41d7a55655ffd85 100644
+--- a/packages/opencode/src/tool/write.ts
++++ b/packages/opencode/src/tool/write.ts
+@@ -65,6 +65,12 @@ export const WriteTool = Tool.define(
+           if (yield* format.file(filepath)) {
+             yield* Bom.syncFile(fs, filepath, desiredBom)
+           }
++          // 覆写已有文件时，基于格式化后的最终落盘内容生成 diff，供 TUI 以 git diff 形式展示
++          let metadataDiff: string | undefined
++          if (exists) {
++            const finalSource = yield* Bom.readFile(fs, filepath)
++            metadataDiff = trimDiff(createTwoFilesPatch(filepath, filepath, contentOld, finalSource.text))
++          }
+           yield* bus.publish(File.Event.Edited, { file: filepath })
+           yield* bus.publish(FileWatcher.Event.Updated, {
+             file: filepath,
+@@ -94,7 +100,8 @@ export const WriteTool = Tool.define(
+             metadata: {
+               diagnostics,
+               filepath,
+-              exists: exists,
++              exists,
++              ...(metadataDiff !== undefined ? { diff: metadataDiff } : {}),
+             },
+             output,
+           }

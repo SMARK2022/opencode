@@ -1,0 +1,65 @@
+From 0e50e973aad35d6a25961ff091a4761cb2f831b6 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 27 Apr 2026 00:47:41 +0800
+Subject: [PATCH] fix: add node-gyp dep, setup-node/python/msbuild for Windows
+ build, fix DEB control indent
+
+
+diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
+index afd9b66fae2ee6d55578e1a1e1dedf89eadd7d5d..4445f57deecf231e4f6cfe25d05526ede9982c82 100644
+--- a/.github/workflows/build-opencode.yml
++++ b/.github/workflows/build-opencode.yml
+@@ -51,15 +51,15 @@ jobs:
+           chmod 755 "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
+           
+           cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
+-          Package: opencode
+-          Version: ${VERSION}
+-          Section: utils
+-          Priority: optional
+-          Architecture: amd64
+-          Maintainer: smark <smark@local>
+-          Description: opencode AI-powered development tool (smark build)
+-           A standalone AI coding assistant with TUI, version ${VERSION}.
+-          EOF
++Package: opencode
++Version: ${VERSION}
++Section: utils
++Priority: optional
++Architecture: amd64
++Maintainer: smark <smark@local>
++Description: opencode AI-powered development tool (smark build)
++ A standalone AI coding assistant with TUI, version ${VERSION}.
++EOF
+           
+           dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
+ 
+@@ -102,6 +102,16 @@ jobs:
+     steps:
+       - uses: actions/checkout@v4
+ 
++      - uses: actions/setup-node@v4
++        with:
++          node-version: "22"
++
++      - uses: actions/setup-python@v5
++        with:
++          python-version: "3.12"
++
++      - uses: microsoft/setup-msbuild@v2
++
+       - uses: ./.github/actions/setup-bun
+ 
+       - name: Build Windows
+diff --git a/package.json b/package.json
+index b2c8a2d7a8ae78a2cffb20c4763d81ab76bed005..bcd12a02ccd2d4199d9ab27fecff9ce702e001a7 100644
+--- a/package.json
++++ b/package.json
+@@ -89,6 +89,7 @@
+     "@typescript/native-preview": "catalog:",
+     "glob": "13.0.5",
+     "husky": "9.1.7",
++    "node-gyp": "11.2.0",
+     "oxlint": "1.60.0",
+     "oxlint-tsgolint": "0.21.0",
+     "prettier": "3.6.2",

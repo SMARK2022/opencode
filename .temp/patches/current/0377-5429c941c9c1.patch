@@ -1,0 +1,28 @@
+From 5429c941c9c14ebd31284e3cb4936dfce2ba150d Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sun, 5 Jul 2026 03:15:09 +0800
+Subject: [PATCH] =?UTF-8?q?feat(tui):=20=E5=B0=86=20generic=20=E5=B7=A5?=
+ =?UTF-8?q?=E5=85=B7=E8=BE=93=E5=87=BA=E7=9A=84=E9=BB=98=E8=AE=A4=E5=8F=AF?=
+ =?UTF-8?q?=E8=A7=81=E6=80=A7=E8=AE=BE=E7=BD=AE=E4=B8=BA=20true=EF=BC=8C?=
+ =?UTF-8?q?=E4=BB=A5=E4=BF=9D=E6=8C=81=E4=B8=8E=E5=86=85=E7=BD=AE=E5=B7=A5?=
+ =?UTF-8?q?=E5=85=B7=E4=B8=80=E8=87=B4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 34d7ccb0da38e7c6794be8cfd928507538003ac7..8c0259ebf852f4c60dbf2982d0ba6e2229325f3f 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -265,7 +265,9 @@ export function Session() {
+   const [showScrollbar, setShowScrollbar] = kv.signal("scrollbar_enabled", true)
+   const [diffWrapMode] = kv.signal<"word" | "none">("diff_wrap_mode", "word")
+   const [_animationsEnabled, _setAnimationsEnabled] = kv.signal("animations_enabled", true)
+-  const [showGenericToolOutput, setShowGenericToolOutput] = kv.signal("generic_tool_output_visibility", false)
++  // 默认 true：goal、MCP、ChatGPT 等 generic 工具的返回结果默认以块状显示，
++  // 与 bash 等内置工具一致。旧用户的 kv.json 中若已持久化 false 则不受影响。
++  const [showGenericToolOutput, setShowGenericToolOutput] = kv.signal("generic_tool_output_visibility", true)
+ 
+   const wide = createMemo(() => dimensions().width > 120)
+   const sidebarVisible = createMemo(() => {

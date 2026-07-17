@@ -1,0 +1,384 @@
+From f325360dd9944436a119d791c00a847c3aac7413 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 14 Jun 2026 11:28:55 +0800
+Subject: [PATCH] =?UTF-8?q?feat(log):=20=E5=A2=9E=E5=BC=BA=E6=97=A5?=
+ =?UTF-8?q?=E5=BF=97=E7=B3=BB=E7=BB=9F=EF=BC=8C=E6=94=AF=E6=8C=81=E7=BC=BA?=
+ =?UTF-8?q?=E5=A4=B1=E7=9B=AE=E5=BD=95=E7=9A=84=E8=87=AA=E5=8A=A8=E6=81=A2?=
+ =?UTF-8?q?=E5=A4=8D=E5=B9=B6=E6=B7=BB=E5=8A=A0=E7=9B=B8=E5=85=B3=E6=B5=8B?=
+ =?UTF-8?q?=E8=AF=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/core/src/util/log.ts b/packages/core/src/util/log.ts
+index 3b5249cdc3e84a1f24279d7cc4bf09b2fe69f4d5..21467aa8bd63ef35ce1244fc93e784e524223e7c 100644
+--- a/packages/core/src/util/log.ts
++++ b/packages/core/src/util/log.ts
+@@ -58,15 +58,27 @@ let logpath = ""
+ export function file() {
+   return logpath
+ }
+-let write = (msg: any) => {
++let stream: ReturnType<typeof createWriteStream> | undefined
++const writeStderr = (msg: any) => {
+   process.stderr.write(msg)
+   return msg.length
+ }
++let write = writeStderr
+ 
+ export async function init(options: Options) {
+   if (options.level) level = options.level
+   void cleanup(Global.Path.log)
+-  if (options.print) return
++  stream?.destroy()
++  stream = undefined
++  if (options.print) {
++    // print=true 表示恢复到 stderr；不能继续持有上一次 dev log 的 writer，
++    // 否则测试或重初始化后仍可能写入已经被清理的临时日志文件。
++    write = writeStderr
++    return
++  }
++  // Global.Path.log 在测试中会临时切到 scoped tmpdir，生产环境下用户也可能
++  // 删除日志目录；init() 必须自愈目录，日志失败不能污染业务流程。
++  await fs.mkdir(Global.Path.log, { recursive: true }).catch(() => {})
+   logpath = path.join(
+     Global.Path.log,
+     options.dev ? "dev.log" : new Date().toISOString().split(".")[0].replace(/:/g, "") + ".log",
+@@ -75,13 +87,22 @@ export async function init(options: Options) {
+   const shouldTruncate = !options.dev || !runID || process.env[initializedRunID] !== runID
+   if (shouldTruncate) await fs.truncate(logpath).catch(() => {})
+   if (options.dev && runID) process.env[initializedRunID] = runID
+-  const stream = createWriteStream(logpath, { flags: "a" })
++  const current = createWriteStream(logpath, { flags: "a" })
++  stream = current
++  current.on("error", () => {
++    // 日志输出是诊断辅助通道，不能因为目录被删除或句柄被系统回收而让
++    // 调用方出现 unhandled error；下一次 init() 会重新创建可写目标。
++  })
+   write = async (msg: any) => {
+-    return new Promise((resolve, reject) => {
+-      stream.write(msg, (err) => {
+-        if (err) reject(err)
+-        else resolve(msg.length)
+-      })
++    if (current.destroyed || current.closed || !current.writable) return 0
++    return new Promise((resolve) => {
++      try {
++        current.write(msg, (err) => {
++          resolve(err ? 0 : msg.length)
++        })
++      } catch {
++        resolve(0)
++      }
+     })
+   }
+ }
+diff --git a/packages/opencode/test/ci/upstream-e2e-workflow.test.ts b/packages/opencode/test/ci/upstream-e2e-workflow.test.ts
+index bafcc7a8d3e71fa198d364702446dbc26cdde1e7..83677a61d06727ad6834d815d2e25cf783458fac 100644
+--- a/packages/opencode/test/ci/upstream-e2e-workflow.test.ts
++++ b/packages/opencode/test/ci/upstream-e2e-workflow.test.ts
+@@ -81,7 +81,7 @@ function playwrightCommand(source: string) {
+ function atLeast(actual: string, minimum: string) {
+   const actualParts = actual.split(".").map(Number)
+   const minimumParts = minimum.split(".").map(Number)
+-  // 只比较主版本号段即可覆盖 Playwright 的固定版本约束，同时避免引入新的 semver 依赖。
++  // 逐段比较固定版本号即可覆盖 Playwright 下限约束，同时避免引入新的 semver 依赖。
+   const comparison = Array.from({ length: Math.max(actualParts.length, minimumParts.length) }, (_, index) =>
+     Math.sign((actualParts[index] ?? 0) - (minimumParts[index] ?? 0)),
+   ).find((value) => value !== 0)
+diff --git a/packages/opencode/test/fixture/fixture.ts b/packages/opencode/test/fixture/fixture.ts
+index 28b74a9189a5e40889ab91ac0fb94ed73b99ee64..8e4d92bfb46c24d2022fad0af85afa688d4f00b8 100644
+--- a/packages/opencode/test/fixture/fixture.ts
++++ b/packages/opencode/test/fixture/fixture.ts
+@@ -86,6 +86,9 @@ export async function tmpdir<T>(options?: TmpDirOptions<T>) {
+   await fs.mkdir(dirpath, { recursive: true })
+   if (options?.git) {
+     await $`git init`.cwd(dirpath).quiet()
++    // 测试仓库必须复现 opencode Git 服务的 LF 行为；Windows runner 的
++    // 系统 core.autocrlf=true 会把 fixture 文件标记为脏并破坏 clone/commit 断言。
++    await $`git config core.autocrlf false`.cwd(dirpath).quiet()
+     await $`git config core.fsmonitor false`.cwd(dirpath).quiet()
+     await $`git config commit.gpgsign false`.cwd(dirpath).quiet()
+     await $`git config user.email "test@opencode.test"`.cwd(dirpath).quiet()
+@@ -138,6 +141,9 @@ export function tmpdirScoped(options?: { git?: boolean; config?: Partial<Config.
+ 
+     if (options?.git) {
+       yield* git("init")
++      // 与 promise 版 tmpdir 保持一致，屏蔽 Windows 系统级 autocrlf，确保
++      // Effect 测试中的 git add/commit 不受 runner 全局配置影响。
++      yield* git("config", "core.autocrlf", "false")
+       yield* git("config", "core.fsmonitor", "false")
+       yield* git("config", "commit.gpgsign", "false")
+       yield* git("config", "user.email", "test@opencode.test")
+diff --git a/packages/opencode/test/installation/install-script.test.ts b/packages/opencode/test/installation/install-script.test.ts
+index c6f68e858a0e8704a29607c8fba2ee522097e295..e2d97394eb4ff73af588ff25deb74db671b6cfa1 100644
+--- a/packages/opencode/test/installation/install-script.test.ts
++++ b/packages/opencode/test/installation/install-script.test.ts
+@@ -1,4 +1,5 @@
+ import { describe, expect, test } from "bun:test"
++import { existsSync } from "fs"
+ import fs from "fs/promises"
+ import path from "path"
+ import { fileURLToPath } from "url"
+@@ -6,7 +7,7 @@ import { tmpdir } from "../fixture/fixture"
+ 
+ const INSTALL_SCRIPT = fileURLToPath(new URL("../../../../install", import.meta.url))
+ const VERSION = "1.2.3-smark"
+-const BASH = Bun.which("bash") ?? "bash"
++const BASH = preferredWindowsGitBash() ?? Bun.which("bash") ?? "bash"
+ 
+ describe("install script", () => {
+   test("installs to the requested directory even when PATH has the same version elsewhere", async () => {
+@@ -127,7 +128,7 @@ async function writeFakeReleaseCommands(dir: string, asset: string) {
+   await writeIdCommand(dir, 501)
+   await writeExecutable(
+     path.join(dir, "uname"),
+-    `#!/usr/bin/env bash\ncase "${"$1"}" in\n  -s) echo Linux ;;\n  -m) echo x86_64 ;;\nesac\n`,
++    `#!/usr/bin/env bash\ncase "$1" in\n  -s) echo Linux ;;\n  -m) echo x86_64 ;;\nesac\n`,
+   )
+   await writeExecutable(
+     path.join(dir, "curl"),
+@@ -136,7 +137,7 @@ async function writeFakeReleaseCommands(dir: string, asset: string) {
+ }
+ 
+ async function writeIdCommand(dir: string, uid: number) {
+-  await writeExecutable(path.join(dir, "id"), `#!/usr/bin/env bash\n[ "${"$1"}" = "-u" ] && echo ${uid}\n`)
++  await writeExecutable(path.join(dir, "id"), `#!/usr/bin/env bash\n[ "$1" = "-u" ] && echo ${uid}\n`)
+ }
+ 
+ async function writeExecutable(file: string, content: string) {
+@@ -218,9 +219,8 @@ function bashEnv(env: Record<string, string | undefined>) {
+ 
+ function bashCommand(script: string, args: string[], env: Record<string, string | undefined>) {
+   if (process.platform !== "win32") return [BASH, script, ...args]
+-  // Windows 的 bash.exe 是 WSL 启动器，直接传脚本时可能落到发行版默认 sh；
+-  // install 脚本依赖 bash 的 `set -o pipefail`，因此在 WSL 内显式 exec /bin/bash。
+-  // 不能使用 login shell：它会重置 PATH，导致测试桩 curl/id/uname 被真实命令替代。
++  // Windows CI 使用 Git Bash，本地机器可能把 bash.exe 解析到 WSL；统一通过
++  // env + /bin/bash 执行，既保留 bash-only 的 pipefail，也避免 login shell 重置 PATH。
+   const assignments = Object.entries(env)
+     .filter((entry): entry is [string, string] => entry[1] !== undefined)
+     .map(([key, value]) => quoteForSh(`${key}=${value}`))
+@@ -233,8 +233,8 @@ function bashCommand(script: string, args: string[], env: Record<string, string
+ 
+ function bashPath(...entries: string[]) {
+   if (process.platform !== "win32") return [...entries, process.env.PATH].filter((item): item is string => Boolean(item)).join(":")
+-  // WSL 不会可靠解析 Windows PATH 中的 `C:\...` drive colon；测试只需要
+-  // fake-bin 中的桩命令和标准 POSIX 工具链，所以使用固定基础 PATH 保持隔离。
++  // Windows POSIX 层不会可靠解析原生 PATH 里的 `C:\...` drive colon；测试只需要
++  // fake-bin 中的桩命令和基础工具链，所以固定基础 PATH 来隔离用户环境。
+   return [...entries.map(bashPathForFile), "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"].join(":")
+ }
+ 
+@@ -243,9 +243,10 @@ function bashPathForFile(file: string) {
+   const normalized = file.replaceAll("\\", "/")
+   const match = normalized.match(/^([A-Za-z]):\/(.*)$/)
+   if (!match) return normalized
+-  // WSL exposes Windows drives under /mnt/<lower-drive>; keeping this conversion
+-  // local to tests lets the production install script remain POSIX-only.
+-  return `/mnt/${match[1].toLowerCase()}/${match[2]}`
++  const drive = match[1].toLowerCase()
++  // Git Bash 使用 /c/...，WSL 使用 /mnt/c/...；根据实际 bash.exe 风味转换，
++  // 让同一组 install 行为测试能覆盖本地 WSL 和 GitHub Actions Git Bash。
++  return windowsBashFlavor() === "wsl" ? `/mnt/${drive}/${match[2]}` : `/${drive}/${match[2]}`
+ }
+ 
+ function quoteForSh(value: string) {
+@@ -253,3 +254,17 @@ function quoteForSh(value: string) {
+   // 这里只用于测试启动命令，不进入生产 install 参数解析逻辑。
+   return `'${value.replaceAll("'", "'\\''")}'`
+ }
++
++function preferredWindowsGitBash() {
++  if (process.platform !== "win32") return undefined
++  // GitHub Actions 固定提供 Git Bash；本地 Windows 常见 PATH 会先命中 WSL
++  // C:\Windows\System32\bash.exe，优先选择 Git Bash 才能复现 CI shell 语义。
++  return ["C:\\Program Files\\Git\\bin\\bash.exe", "D:\\Program Files\\Git\\bin\\bash.exe"].find((candidate) =>
++    existsSync(candidate),
++  )
++}
++
++function windowsBashFlavor() {
++  if (process.platform !== "win32") return "posix"
++  return BASH.replaceAll("\\", "/").toLowerCase().endsWith("/windows/system32/bash.exe") ? "wsl" : "git"
++}
+diff --git a/packages/opencode/test/tool/external-directory.test.ts b/packages/opencode/test/tool/external-directory.test.ts
+index 7d4cc7f9ca205bae9c425e6d33cf3fc45026d109..5effaf225bf7e59b09678c1c63b9ca10f165392e 100644
+--- a/packages/opencode/test/tool/external-directory.test.ts
++++ b/packages/opencode/test/tool/external-directory.test.ts
+@@ -5,7 +5,7 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+ import type { Tool } from "@/tool/tool"
+ import { assertExternalDirectoryEffect } from "../../src/tool/external-directory"
+ import { Filesystem } from "@/util/filesystem"
+-import { provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
++import { provideInstance, TestInstance } from "../fixture/fixture"
+ import type { Permission } from "../../src/permission"
+ import { SessionID, MessageID } from "../../src/session/schema"
+ import { testEffect } from "../lib/effect"
+@@ -106,12 +106,15 @@ describe("tool.assertExternalDirectory", () => {
+ 
+       const req = requests.find((r) => r.permission === "external_directory")
+       expect(req).toBeDefined()
++      const filepath = process.platform === "win32" ? Filesystem.normalizePath("/tmp/outside/file.txt") : "/tmp/outside/file.txt"
+       expect(req!.metadata).toMatchObject({
+         action_kind: "tool",
+         tool: "read",
+         operation: "read",
+-        filepath: process.platform === "win32" ? "F:\\tmp\\outside\\file.txt" : "/tmp/outside/file.txt",
+-        parentDir: process.platform === "win32" ? "F:\\tmp\\outside" : "/tmp/outside",
++        // Windows 的 /tmp 会按当前进程所在盘符解析；CI 在 D:，本地可能在 F:。
++        // 断言归一化后的行为，而不是把某台机器的盘符写死进测试。
++        filepath,
++        parentDir: path.dirname(filepath),
+       })
+     }),
+   )
+diff --git a/packages/opencode/test/tool/repo_clone.test.ts b/packages/opencode/test/tool/repo_clone.test.ts
+index 1ac913328db945c0f80ae9f52d3f8f73c6e5422b..550c8c385b1d26c3ba6adcae50701abd240588a0 100644
+--- a/packages/opencode/test/tool/repo_clone.test.ts
++++ b/packages/opencode/test/tool/repo_clone.test.ts
+@@ -84,7 +84,11 @@ describe("tool.repo_clone", () => {
+         const fs = yield* AppFileSystem.Service
+         const source = yield* tmpdirScoped({ git: true })
+         const remoteRoot = yield* tmpdirScoped()
+-        const remoteDir = path.join(remoteRoot, "owner")
++        const owner = "repo-clone-reuse"
++        const repo = "repo"
++        // 每个用例使用独立的 GitHub shorthand，避免全量 CI 并发时共享
++        // Global.Path.repos 下同一个 owner/repo 缓存而互相读到对方的工作区。
++        const remoteDir = path.join(remoteRoot, owner)
+         const remoteRepo = path.join(remoteDir, "repo.git")
+ 
+         yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "v1\n"))
+@@ -94,14 +98,14 @@ describe("tool.repo_clone", () => {
+         yield* git(remoteRoot, ["clone", "--bare", source, remoteRepo])
+ 
+         const tool = yield* init()
+-        const cloned = yield* githubBase(`file://${remoteRoot}/`, tool.execute({ repository: "owner/repo" }, ctx))
++        const cloned = yield* githubBase(`file://${remoteRoot}/`, tool.execute({ repository: `${owner}/${repo}` }, ctx))
+         const cached = yield* githubBase(
+           `file://${remoteRoot}/`,
+-          tool.execute({ repository: "https://github.com/owner/repo.git" }, ctx),
++          tool.execute({ repository: `https://github.com/${owner}/${repo}.git` }, ctx),
+         )
+ 
+         expect(cloned.metadata.status).toBe("cloned")
+-        expect(cloned.metadata.localPath).toBe(path.join(Global.Path.repos, "github.com", "owner", "repo"))
++        expect(cloned.metadata.localPath).toBe(path.join(Global.Path.repos, "github.com", owner, repo))
+         expect(cached.metadata.status).toBe("cached")
+         expect(yield* fs.readFileString(path.join(cloned.metadata.localPath, "README.md"))).toBe("v1\n")
+       }),
+@@ -114,7 +118,11 @@ describe("tool.repo_clone", () => {
+         const fs = yield* AppFileSystem.Service
+         const source = yield* tmpdirScoped({ git: true })
+         const remoteRoot = yield* tmpdirScoped()
+-        const remoteDir = path.join(remoteRoot, "owner")
++        const owner = "repo-clone-refresh"
++        const repo = "repo"
++        // refresh 会复用同一个 cache path；用例级 owner 防止别的 repo_clone
++        // 场景在全量 CI 中提前写入同名缓存，导致本测试刷新错误来源。
++        const remoteDir = path.join(remoteRoot, owner)
+         const remoteRepo = path.join(remoteDir, "repo.git")
+ 
+         yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "v1\n"))
+@@ -128,7 +136,7 @@ describe("tool.repo_clone", () => {
+         yield* git(source, ["push", "-u", "origin", `${branch}:${branch}`])
+ 
+         const tool = yield* init()
+-        const first = yield* githubBase(`file://${remoteRoot}/`, tool.execute({ repository: "owner/repo" }, ctx))
++        const first = yield* githubBase(`file://${remoteRoot}/`, tool.execute({ repository: `${owner}/${repo}` }, ctx))
+ 
+         yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "v2\n"))
+         yield* git(source, ["add", "."])
+@@ -137,7 +145,7 @@ describe("tool.repo_clone", () => {
+ 
+         const refreshed = yield* githubBase(
+           `file://${remoteRoot}/`,
+-          tool.execute({ repository: "owner/repo", refresh: true }, ctx),
++          tool.execute({ repository: `${owner}/${repo}`, refresh: true }, ctx),
+         )
+ 
+         expect(first.metadata.status).toBe("cloned")
+@@ -153,7 +161,11 @@ describe("tool.repo_clone", () => {
+         const fs = yield* AppFileSystem.Service
+         const source = yield* tmpdirScoped({ git: true })
+         const remoteRoot = yield* tmpdirScoped()
+-        const remoteDir = path.join(remoteRoot, "owner")
++        const owner = "repo-clone-branch"
++        const repo = "repo"
++        // branch 用例也必须独立 cache；否则同名 owner/repo 会让 checkout
++        // 结果依赖其他测试先后顺序，而不是依赖本用例创建的远端仓库。
++        const remoteDir = path.join(remoteRoot, owner)
+         const remoteRepo = path.join(remoteDir, "repo.git")
+ 
+         yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "main\n"))
+@@ -169,7 +181,7 @@ describe("tool.repo_clone", () => {
+         const tool = yield* init()
+         const result = yield* githubBase(
+           `file://${remoteRoot}/`,
+-          tool.execute({ repository: "owner/repo", branch: "docs" }, ctx),
++          tool.execute({ repository: `${owner}/${repo}`, branch: "docs" }, ctx),
+         )
+ 
+         expect(result.metadata.status).toBe("cloned")
+diff --git a/packages/opencode/test/util/log.test.ts b/packages/opencode/test/util/log.test.ts
+index 62dc1d61c2ab3b6a35f143778d692e30a21ec399..f33bf65c124cb284f18cac3ab7cc841ea56f721f 100644
+--- a/packages/opencode/test/util/log.test.ts
++++ b/packages/opencode/test/util/log.test.ts
+@@ -28,6 +28,18 @@ function files(dir: string) {
+   })
+ }
+ 
++function readEventually(file: string, expected: string) {
++  return Effect.gen(function* () {
++    for (let i = 0; i < 50; i++) {
++      const content = yield* Effect.promise(() => fs.readFile(file, "utf8").catch(() => undefined))
++      if (content?.includes(expected)) return content
++      yield* Effect.sleep("10 millis")
++    }
++
++    return yield* Effect.promise(() => fs.readFile(file, "utf8"))
++  })
++}
++
+ it.live("init cleanup keeps the newest timestamped logs", () =>
+   Effect.gen(function* () {
+     const log = Global.Path.log
+@@ -43,7 +55,7 @@ it.live("init cleanup keeps the newest timestamped logs", () =>
+ 
+     const next = yield* files(dir)
+ 
+-    expect(next).not.toContain(list[0]!)
++    expect(next).not.toContain(list[0])
+     expect(next).toContain(list.at(-1)!)
+   }),
+ )
+@@ -75,3 +87,27 @@ it.live("local dev log is not truncated twice for the same run", () =>
+     expect(yield* Effect.promise(() => fs.readFile(path.join(dir, "dev.log"), "utf8"))).toContain("main startup")
+   }),
+ )
++
++it.live("dev logging recreates a missing log directory", () =>
++  Effect.gen(function* () {
++    const log = Global.Path.log
++    yield* Effect.addFinalizer(() =>
++      Effect.promise(async () => {
++        Global.Path.log = log
++        await Log.init({ print: false, dev: true, level: "DEBUG" })
++      }),
++    )
++
++    const dir = yield* tmpdirScoped()
++    const missing = path.join(dir, "missing-log")
++    Global.Path.log = missing
++
++    // 测试模拟 CI 中临时日志目录被清理或尚未创建的边界；日志系统
++    // 应该自己恢复目录并写入 dev.log，而不是把 ENOENT 泄漏到业务测试。
++    yield* Effect.promise(() => Log.init({ print: false, dev: true, level: "DEBUG" }))
++    Log.Default.info("log directory was recreated")
++
++    const content = yield* readEventually(path.join(missing, "dev.log"), "log directory was recreated")
++    expect(content).toContain("log directory was recreated")
++  }),
++)

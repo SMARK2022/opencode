@@ -1,0 +1,131 @@
+From 17b46ab162f5c6c6f31a99addc2c8e66dbe59b70 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 23 Apr 2026 21:55:27 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=20compact=20?=
+ =?UTF-8?q?=E6=A0=BC=E5=BC=8F=E5=8C=96=E6=8C=81=E7=BB=AD=E6=97=B6=E9=97=B4?=
+ =?UTF-8?q?=E7=9A=84=E5=8A=9F=E8=83=BD=EF=BC=8C=E4=BC=98=E5=8C=96=E6=97=B6?=
+ =?UTF-8?q?=E9=97=B4=E6=98=BE=E7=A4=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+index feb2c2fae38239c1bf61aeab754932f030c375b4..593fcb7235ec51e52ab5c4cb90a3b50bb4e39f24 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+@@ -30,7 +30,7 @@ import { TuiEvent } from "../../event"
+ import { iife } from "@/util/iife"
+ import { Locale } from "@/util"
+ import { estimateUserInputTokens, estimateRequestOverhead, sumConfirmed as sharedSumConfirmed, getContextSize as sharedGetContextSize, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
+-import { formatDuration } from "@/util/format"
++import { formatDuration, formatDurationCompact } from "@/util/format"
+ import { createColors, createFrames } from "../../ui/spinner.ts"
+ import { useDialog } from "@tui/ui/dialog"
+ import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
+@@ -251,6 +251,7 @@ export function Prompt(props: PromptProps) {
+     extmarkToPartIndex: Map<number, number>
+     interrupt: number
+     placeholder: number
++    agentLoopStartTime: number | undefined
+   }>({
+     placeholder: randomIndex(list().length),
+     prompt: {
+@@ -260,6 +261,7 @@ export function Prompt(props: PromptProps) {
+     mode: "normal",
+     extmarkToPartIndex: new Map(),
+     interrupt: 0,
++    agentLoopStartTime: undefined,
+   })
+ 
+   createEffect(
+@@ -272,6 +274,35 @@ export function Prompt(props: PromptProps) {
+     ),
+   )
+ 
++  // Track agent loop start time
++  createEffect(
++    on(
++      () => status().type,
++      (currentType, prevType) => {
++        if (currentType === "busy" && prevType !== "busy") {
++          setStore("agentLoopStartTime", Date.now())
++        } else if (currentType === "idle" && prevType !== "idle") {
++          setStore("agentLoopStartTime", undefined)
++        }
++      },
++    ),
++  )
++
++  // Timer signal for agent loop elapsed time
++  const [elapsedSeconds, setElapsedSeconds] = createSignal(0)
++
++  createEffect(() => {
++    if (store.agentLoopStartTime) {
++      const interval = setInterval(() => {
++        const elapsed = Math.floor((Date.now() - store.agentLoopStartTime!) / 1000)
++        setElapsedSeconds(elapsed)
++      }, 1000)
++      onCleanup(() => clearInterval(interval))
++    } else {
++      setElapsedSeconds(0)
++    }
++  })
++
+   // Initialize agent/model/variant from last user message when session changes
+   let syncedSessionID: string | undefined
+   createEffect(() => {
+@@ -1392,12 +1423,20 @@ export function Prompt(props: PromptProps) {
+                   })()}
+                 </box>
+               </box>
+-              <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
+-                esc{" "}
+-                <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
+-                  {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
+-                </span>
+-              </text>
++              <box gap={2} flexDirection="row" alignItems="center">
++                <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
++                  esc{" "}
++                  <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
++                    {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
++                  </span>
++                </text>
++                <Show when={store.agentLoopStartTime && elapsedSeconds() > 0}>
++                  <text fg={theme.textMuted}>
++                    {"· "}
++                    <span style={{ fg: theme.text }}>{formatDurationCompact(elapsedSeconds())}</span>
++                  </text>
++                </Show>
++              </box>
+             </box>
+           </Show>
+           <Show when={status().type !== "retry"}>
+diff --git a/packages/opencode/src/util/format.ts b/packages/opencode/src/util/format.ts
+index 4ae62eac450acb9cd4af28e9ecb886666e1fb776..a09b64ee818ef678d66c9fe39e51584c4983e84a 100644
+--- a/packages/opencode/src/util/format.ts
++++ b/packages/opencode/src/util/format.ts
+@@ -18,3 +18,22 @@ export function formatDuration(secs: number) {
+   const weeks = Math.floor(secs / 604800)
+   return weeks === 1 ? "~1 week" : `~${weeks} weeks`
+ }
++
++export function formatDurationCompact(secs: number) {
++  if (secs <= 0) return "0s"
++  if (secs < 60) return `${secs}s`
++  if (secs < 3600) {
++    const mins = Math.floor(secs / 60)
++    const remaining = secs % 60
++    return `${mins}m${remaining}s`
++  }
++  const hours = Math.floor(secs / 3600)
++  const mins = Math.floor((secs % 3600) / 60)
++  const remaining = secs % 60
++  if (hours < 24) {
++    return remaining > 0 ? `${hours}h${mins}m${remaining}s` : `${hours}h${mins}m`
++  }
++  const days = Math.floor(secs / 86400)
++  const remainingHours = Math.floor((secs % 86400) / 3600)
++  return `${days}d${remainingHours}h`
++}

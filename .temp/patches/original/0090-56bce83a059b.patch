@@ -1,0 +1,97 @@
+From 56bce83a059b9cf93c13a048d41a256ed24f0362 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 6 May 2026 03:29:50 +0800
+Subject: [PATCH] =?UTF-8?q?feat(read):=20=E6=9B=B4=E6=96=B0=E9=BB=98?=
+ =?UTF-8?q?=E8=AE=A4=E8=AF=BB=E5=8F=96=E8=A1=8C=E6=95=B0=E4=B8=BA400?=
+ =?UTF-8?q?=EF=BC=8C=E8=B0=83=E6=95=B4=E8=BE=93=E5=87=BA=E5=AD=97=E8=8A=82?=
+ =?UTF-8?q?=E9=99=90=E5=88=B6=E8=87=B324KB=EF=BC=8C=E7=A7=BB=E9=99=A4?=
+ =?UTF-8?q?=E8=A1=8C=E9=95=BF=E5=BA=A6=E6=88=AA=E6=96=AD=E9=80=BB=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
+index 9d40d5b984276330771b5e8937aa7f2151d27c99..247a035c50991b7f5b58ffe6d68baf778399b4f9 100644
+--- a/packages/opencode/src/tool/read.ts
++++ b/packages/opencode/src/tool/read.ts
+@@ -14,8 +14,6 @@ import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, processImageWi
+ import type { MessageV2 } from "../session/message-v2"
+ 
+ const DEFAULT_READ_LIMIT = 400
+-const MAX_LINE_LENGTH = 2000
+-const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
+ const MAX_BYTES = 24 * 1024
+ const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
+ const SAMPLE_BYTES = 4096
+@@ -543,7 +541,7 @@ async function lines(filepath: string, opts: { limit: number; offset: number })
+         continue
+       }
+ 
+-      const line = text.length > MAX_LINE_LENGTH ? text.substring(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : text
++      const line = text
+       const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
+       if (bytes + size > MAX_BYTES) {
+         cut = true
+diff --git a/packages/opencode/src/tool/read.txt b/packages/opencode/src/tool/read.txt
+index 368174cc8d1412c8aff4cba92efaaada5d4b0b2e..f0842253cffdc5211236e5108c8ae65184201826 100644
+--- a/packages/opencode/src/tool/read.txt
++++ b/packages/opencode/src/tool/read.txt
+@@ -2,13 +2,12 @@ Read a file or directory from the local filesystem. If the path does not exist,
+ 
+ Usage:
+ - The filePath parameter should be an absolute path.
+-- By default, this tool returns up to 2000 lines from the start of the file.
++- By default, this tool returns up to 400 lines from the start of the file.
+ - The offset parameter is the line number to start from (1-indexed).
+ - To read later sections, call this tool again with a larger offset.
+ - Use the grep tool to find specific content in large files or files with long lines.
+ - If you are unsure of the correct file path, use the glob tool to look up filenames by glob pattern.
+ - Contents are returned with each line prefixed by its line number as `<line>: <content>`. For example, if a file has contents "foo\n", you will receive "1: foo\n". For directories, entries are returned one per line (without line numbers) with a trailing `/` for subdirectories.
+-- Any line longer than 2000 characters is truncated.
+ - Call this tool in parallel when you know there are multiple files you want to read.
+ - Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.
+ - This tool can read image files and PDFs and return them as file attachments.
+diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/source.ts
+index b9d0cfb16c33346d96525678ca4a7a2b16510f27..57543ccfe1da14e00858dc4b1047b535d0eacbf5 100644
+--- a/sdks/vscode/src/notebook/source.ts
++++ b/sdks/vscode/src/notebook/source.ts
+@@ -23,7 +23,7 @@ import { resolveNotebook } from "./resolve"
+ 
+ /**
+  * Bridge endpoint handler: returns notebook source code with global line numbering.
+- * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 12 KB.
++ * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 24 KB.
+  */
+ export async function notebookSource(input: Record<string, unknown>) {
+   const filePath = stringProp(input, "filePath")
+@@ -66,7 +66,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+   globalStart = Math.max(1, Math.min(globalStart, totalLines > 0 ? totalLines : 1))
+ 
+   // Render cells one by one, emitting headers + in-range source lines
+-  const maxBytes = 12 * 1024
++  const maxBytes = 24 * 1024
+   let bytes = 0
+   let rendered = 0
+   let cut = false
+@@ -112,10 +112,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+         break
+       }
+       const sourceLine = cell.document.lineAt(i).text
+-      const src = sourceLine.length > 2000
+-        ? sourceLine.substring(0, 2000) + "... (line truncated to 2000 chars)"
+-        : sourceLine
+-      const outLine = `${globalLineNum}: ${src}`
++      const outLine = `${globalLineNum}: ${sourceLine}`
+       const outBytes = Buffer.byteLength(outLine, "utf8")
+       if (bytes + outBytes > maxBytes && outputCells.length > 0) {
+         cut = true
+@@ -141,7 +138,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+   output += outputCells.join("\n")
+ 
+   if (cut) {
+-    output += `\n\n(Output capped at 12 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
++    output += `\n\n(Output capped at 24 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
+   } else if (more) {
+     output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
+   }

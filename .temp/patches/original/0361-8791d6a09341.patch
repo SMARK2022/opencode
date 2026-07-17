@@ -1,0 +1,316 @@
+From 8791d6a0934199ebf87fae601cf3c506bfd449ae Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sat, 4 Jul 2026 13:33:58 +0800
+Subject: [PATCH] =?UTF-8?q?fix(reviewer):=20=E6=8C=81=E4=B9=85=E5=8C=96=20?=
+ =?UTF-8?q?reviewer=20session=20=E7=9A=84=20provider=20usage=20=E5=92=8C?=
+ =?UTF-8?q?=20input=20breakdown?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+reviewer 的 runReviewerStream 直接消费 streamText().fullStream 但无 finish-step
+handler，导致 assistant message 的 tokens 恒为初始 0 且从不写 step-finish part。
+tokenAccounting 因此对 reviewer session 算出 input=0、breakdown=null，使 subagent
+footer 和 sidebar /context 面板显示错误。
+
+新增 finish-step handler 镜像 processor.ts:666-735：调用 Session.getUsage 更新
+message.tokens/cost、写携带 inputChars+inputBreakdown 的 step-finish part、立即
+updateMessage 闭合 stepSF && !msgCompleted 时序窗口。inputBreakdown 按 prompt.ts
+公式计算 per-component 字符数，OAuth 路径下 system 正确路由到 instructions 分区。
+
+diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
+index 3dad5912e157d8729ff987ef4ff3caf6a4d8307c..d8fe0108eb88a221826d2aad7cfb9a069e758c1c 100644
+--- a/packages/opencode/src/permission/reviewer/service.ts
++++ b/packages/opencode/src/permission/reviewer/service.ts
+@@ -395,6 +395,8 @@ export const layer = Layer.effect(
+           sessionID: session.id,
+           messageID: message.id,
+           reviewID: input.reviewID,
++          // 传入可变 message 引用，使 finish-step handler 能就地更新 tokens/cost
++          message,
+         }).pipe(
+           Effect.tapError((error) =>
+             Effect.gen(function* () {
+@@ -414,7 +416,7 @@ export const layer = Layer.effect(
+     function runReviewerStream(
+       messages: readonly ModelMessage[],
+       model: Provider.Model,
+-      persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string },
++      persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string; message: MessageV2.Assistant },
+     ) {
+       return Effect.acquireUseRelease(
+         Effect.sync(() => new AbortController()),
+@@ -444,6 +446,45 @@ export const layer = Layer.effect(
+               ? messages.flatMap((message) => (message.role === "system" ? [message.content] : [])).join("\n")
+               : undefined
+             const reviewerMessages = isOpenaiOauth ? messages.filter((message) => message.role !== "system") : messages
++            // 提取 tool 定义常量，使 tool() 和 toolsText 共用同一 schema 序列化，
++            // 避免 toJsonSchema(Assessment) 被调用两次产生不一致的序列化结果
++            const assessmentSchema = toJsonSchema(Assessment)
++            const toolDescription = "Submit the structured allow/deny decision for this permission review."
++            // 计算 /context 面板所需的 per-component 字符 breakdown。reviewer 不走
++            // session.prompt 的 pre-stream estimate 路径，所以在此直接按字符占比
++            // 计算并附到 step-finish part，使 tokenAccounting 的 breakdown 非 null。
++            // 公式与 prompt.ts:2283 一致：inputChars = [system, rawMessages, tools].join("\n").length
++            const toolsText = `Tool: permission_review_decision\n${toolDescription}\n${JSON.stringify(assessmentSchema)}`
++            // conversationMessages 排除 system message：非 OAuth 时 system 在 messages 中，
++            // OAuth 时 reviewerMessages 已过滤。system 单独计入 system/instructions 分区，
++            // 避免 messages.total 与 system 重复累加。
++            const conversationMessages = reviewerMessages.filter((m) => m.role !== "system")
++            const rawMessagesText = JSON.stringify(conversationMessages)
++            let userTextChars = 0
++            for (const m of conversationMessages) {
++              if (m.role !== "user") continue
++              userTextChars += typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length
++            }
++            const systemMessage = messages.find((m) => m.role === "system")
++            const systemText = typeof systemMessage?.content === "string" ? systemMessage.content : ""
++            const inputChars = [systemText, rawMessagesText, toolsText].join("\n").length
++            // OAuth 路径下 system 被提取为顶层 instructions：system 分区=0，instructions=systemText。
++            // 非 OAuth 路径下 system 保留为 system message：system=systemText，instructions=0。
++            const inputBreakdown = {
++              system: isOpenaiOauth ? 0 : systemText.length,
++              instructions: isOpenaiOauth ? systemText.length : 0,
++              skills: 0,
++              tools: toolsText.length,
++              messages: {
++                userText: userTextChars,
++                assistantText: 0,
++                reasoning: 0,
++                toolInput: 0,
++                toolOutput: 0,
++                attachments: 0,
++                total: rawMessagesText.length,
++              },
++            }
+             const options = reviewerInstructions ? { ...baseOptions, instructions: reviewerInstructions } : baseOptions
+             // Reviewer requests intentionally stay outside the main SessionProcessor
+             // pipeline, but provider compatibility still lives in the existing chat
+@@ -504,8 +545,8 @@ export const layer = Layer.effect(
+               messages: [...reviewerMessages],
+               tools: {
+                 permission_review_decision: tool({
+-                  description: "Submit the structured allow/deny decision for this permission review.",
+-                  inputSchema: jsonSchema(toJsonSchema(Assessment) as Parameters<typeof jsonSchema>[0]),
++                  description: toolDescription,
++                  inputSchema: jsonSchema(assessmentSchema as Parameters<typeof jsonSchema>[0]),
+                   execute: async (assessment) => ({
+                     title: assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
+                     metadata: assessment,
+@@ -656,6 +697,35 @@ export const layer = Layer.effect(
+                   // instead of treating it as an unrelated provider failure.
+                   return yield* new ReviewerRunError({ reason: REVIEWER_DECISION_PROTOCOL_ERROR })
+                 }
++                // 镜像 processor.ts finish-step：持久化 provider 真实 usage 和 input breakdown。
++                // reviewer 不走 SessionProcessor 管道（安全边界：不暴露 prompt 给 chat plugin），
++                // 所以必须在此手动处理 finish-step 事件，否则 message.tokens 恒为初始 0 且
++                // 无 step-finish part → tokenAccounting 对 reviewer session 算出 input=0、breakdown=null。
++                if (event.type === "finish-step") {
++                  // persist 在此已被 !persist 早退分支（service.ts 上方）收窄为非 undefined，
++                  // 与其他 persist 路径 handler 一致，无需重复 guard
++                  const usage = Session.getUsage({ model, usage: event.usage, metadata: event.providerMetadata })
++                  // 就地更新可变 message 引用，使 runReviewerAgent 的最终 updateMessage 持久化真实 tokens/cost
++                  persist.message.tokens = usage.tokens
++                  persist.message.cost += usage.cost
++                  yield* sessions.updatePart({
++                    id: PartID.ascending(),
++                    sessionID: persist.sessionID,
++                    messageID: persist.messageID,
++                    type: "step-finish",
++                    reason: event.finishReason,
++                    tokens: usage.tokens,
++                    cost: usage.cost,
++                    inputChars,
++                    inputBreakdown,
++                  } satisfies MessageV2.StepFinishPart)
++                  // 立即落库 message 行：finish-step 是流终止事件，但 runReviewerAgent 的
++                  // 最终 updateMessage 在 stream drain 之后才执行。若不在此立即写入，
++                  // DB 的 message.tokens 仍为 0，tokenAccounting 的 stepSF && !msgCompleted
++                  // 分支会取到 stale 0 而非 stepSF.tokens.input。
++                  yield* sessions.updateMessage(persist.message)
++                  return
++                }
+                 if (event.type === "error") {
+                   // Provider stream errors must keep their original shape until
+                   // SessionRetry classifies them. Wrapping here would erase
+diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packages/opencode/test/permission/reviewer-service.test.ts
+index 9444c224cf8eaefa143281854314dcad5a75df86..a2a490600900386e1d73145dac47e15e95171328 100644
+--- a/packages/opencode/test/permission/reviewer-service.test.ts
++++ b/packages/opencode/test/permission/reviewer-service.test.ts
+@@ -8,6 +8,7 @@ import { Plugin } from "../../src/plugin"
+ import { Provider } from "../../src/provider/provider"
+ import { ModelID, ProviderID } from "../../src/provider/schema"
+ import { Session } from "../../src/session/session"
++import { MessageV2 } from "../../src/session/message-v2"
+ import { SessionID } from "../../src/session/schema"
+ import { ProjectID } from "../../src/project/schema"
+ import { testEffect } from "../lib/effect"
+@@ -214,6 +215,79 @@ describe("permission reviewer service", () => {
+     }),
+   )
+   // [local-smark] reviewer 默认模型来源回归结束
++
++  // [local-smark] reviewer token/breakdown 持久化测试开始
++  // 验证 finish-step handler 将 provider 真实 usage 和 inputBreakdown 持久化到
++  // step-finish part，修复 reviewer session 的 input=0 和 /context breakdown 为空。
++  const tokenFixture = reviewerTokenCaptureFixture({ type: "api", key: "test-key" })
++  const tokenTest = testEffect(tokenFixture.layer)
++
++  tokenTest.effect("persists reviewer token usage and input breakdown in step-finish part", () =>
++    Effect.gen(function* () {
++      const reviewer = yield* PermissionReviewer.Service
++      yield* reviewer.review(reviewInput("review_token", undefined, SessionID.make("session_parent")))
++
++      // fake SSE 的 response.completed 携带 usage: { input_tokens: 1, output_tokens: 1 }。
++      // AI SDK 将其解析为 finish-step 事件；handler 调用 Session.getUsage 后
++      // adjustedInputTokens = 1 - 0 - 0 = 1（无 cache）。
++      const stepFinish = tokenFixture.parts.find((p) => p.type === "step-finish") as
++        | MessageV2.StepFinishPart
++        | undefined
++      expect(stepFinish).toBeDefined()
++      expect(stepFinish!.tokens.input).toBe(1)
++      expect(stepFinish!.tokens.output).toBe(1)
++
++      // inputBreakdown + inputChars 使 tokenAccounting 的 breakdown 分配非 null
++      expect(stepFinish!.inputChars).toBeGreaterThan(0)
++      expect(stepFinish!.inputBreakdown).toBeDefined()
++      // 非 OAuth：system 保留为 system message，instructions 为 0
++      expect(stepFinish!.inputBreakdown!.system).toBeGreaterThan(0)
++      expect(stepFinish!.inputBreakdown!.instructions).toBe(0)
++      // permission_review_decision 工具定义计入 tools
++      expect(stepFinish!.inputBreakdown!.tools).toBeGreaterThan(0)
++      // transcript + planned action 计入 userText
++      expect(stepFinish!.inputBreakdown!.messages.userText).toBeGreaterThan(0)
++      // reviewer 上下文无历史 assistant 消息
++      expect(stepFinish!.inputBreakdown!.messages.assistantText).toBe(0)
++    }),
++  )
++
++  // OAuth 路径：system message 被提取为顶层 instructions，breakdown 的
++  // system/instructions 分区必须反映这一路由差异
++  const oauthTokenFixture = reviewerTokenCaptureFixture(oauthAuth())
++  const oauthTokenTest = testEffect(oauthTokenFixture.layer)
++
++  oauthTokenTest.effect("routes system chars to instructions breakdown for OAuth reviewer", () =>
++    Effect.gen(function* () {
++      const reviewer = yield* PermissionReviewer.Service
++      yield* reviewer.review(reviewInput("review_token_oauth", undefined, SessionID.make("session_parent")))
++
++      const stepFinish = oauthTokenFixture.parts.find((p) => p.type === "step-finish") as
++        | MessageV2.StepFinishPart
++        | undefined
++      expect(stepFinish).toBeDefined()
++      expect(stepFinish!.inputBreakdown).toBeDefined()
++      // OAuth：system 内容被提取为 instructions，system 分区为 0
++      expect(stepFinish!.inputBreakdown!.system).toBe(0)
++      expect(stepFinish!.inputBreakdown!.instructions).toBeGreaterThan(0)
++      expect(stepFinish!.inputBreakdown!.messages.userText).toBeGreaterThan(0)
++    }),
++  )
++
++  // non-persist 路径（无 sessionID）：不写任何 part，验证 finish-step handler
++  // 的 persist guard 不会在无 session 场景产生副作用
++  const noSessionTokenFixture = reviewerTokenCaptureFixture({ type: "api", key: "test-key" })
++  const noSessionTokenTest = testEffect(noSessionTokenFixture.layer)
++
++  noSessionTokenTest.effect("writes no step-finish part when reviewer has no session", () =>
++    Effect.gen(function* () {
++      const reviewer = yield* PermissionReviewer.Service
++      // 不传 sessionID → reviewerSession=undefined → non-persist 路径
++      yield* reviewer.review(reviewInput("review_token_nosession"))
++      expect(noSessionTokenFixture.parts.find((p) => p.type === "step-finish")).toBeUndefined()
++    }),
++  )
++  // [local-smark] reviewer token/breakdown 持久化测试结束
+ })
+ 
+ function reviewerFixture(
+@@ -559,6 +633,88 @@ function staleParentModelFixture() {
+ }
+ // [local-smark] staleParentModelFixture 结束
+ 
++// [local-smark] reviewer token/breakdown 持久化验证 fixture
++// 复用 parentSessionModelFixture 的 sessionID + Session.Service mock 结构，
++// 但 updatePart 捕获所有写入的 part，用于断言 step-finish part 是否携带
++// provider 真实 usage（tokens/cost）和 per-component inputBreakdown。
++// 支持 API key 和 OAuth 两种 auth，以验证 system/instructions 路由差异。
++function reviewerTokenCaptureFixture(authInfo: Auth.Info) {
++  const parts: MessageV2.Part[] = []
++  const model = reviewerModel(OPENAI_PROVIDER_ID)
++  const fetch = Object.assign(
++    async (_input: RequestInfo | URL, _init?: RequestInit) =>
++      // fake SSE 始终返回携带 usage 的 response.completed，使 AI SDK 发出
++      // finish-step 事件——这是 handler 持久化真实 usage 的触发点
++      new Response(openAIReviewDecisionStream(), {
++        status: 200,
++        headers: { "content-type": "text/event-stream" },
++      }),
++    { preconnect: () => {} },
++  )
++  const provider = ProviderTest.fake({
++    model,
++    info: ProviderTest.info({ id: model.providerID, options: {} }, model),
++    getLanguage: Effect.fn("ReviewerTokenTest.getLanguage")(() =>
++      Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5")),
++    ),
++  })
++  const parentSession: Session.Info = {
++    id: SessionID.make("session_parent"),
++    slug: "test",
++    projectID: ProjectID.make("project_test"),
++    directory: "/tmp",
++    title: "Test",
++    agent: "auto",
++    model: { id: model.id, providerID: model.providerID },
++    version: "test",
++    cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++    time: { created: Date.now(), updated: Date.now() },
++  }
++  // reviewer child session mock：getReviewerSession 会复用它
++  const childSession: Session.Info = {
++    ...parentSession,
++    id: SessionID.make("session_reviewer"),
++    parentID: parentSession.id,
++    agent: "permission-reviewer",
++    title: "Auto permission review",
++  }
++  const sessionLayer = Layer.mock(Session.Service)({
++    get: () => Effect.succeed(parentSession),
++    children: () => Effect.succeed([]),
++    create: (input) => Effect.succeed({ ...childSession, ...input }),
++    updateMessage: (msg) => Effect.succeed(msg),
++    // 捕获所有 updatePart 调用，用于断言 step-finish part 的 tokens 和 inputBreakdown
++    updatePart: (part) => {
++      parts.push(part)
++      return Effect.succeed(part)
++    },
++  })
++  return {
++    parts,
++    layer: PermissionReviewer.layer.pipe(
++      Layer.provide(
++        TestConfig.layer({
++          get: () =>
++            Effect.succeed({
++              permission: {
++                approvals_reviewer: "auto_review",
++                auto_review: {
++                  model: `${OPENAI_PROVIDER_ID}/gpt-5`,
++                  policy: "Reviewer token test policy.",
++                },
++              },
++            }),
++        }),
++      ),
++      Layer.provide(provider.layer),
++      Layer.provide(authLayer(authInfo)),
++      Layer.provide(pluginLayer()),
++      Layer.provide(sessionLayer),
++    ),
++  }
++}
++
+ function pluginLayer(options: { clearMaxOutputTokens?: boolean; header?: string } = {}) {
+   return Layer.succeed(
+     Plugin.Service,

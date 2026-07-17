@@ -1,0 +1,144 @@
+From f9dec59534d41bc7f56a189ca3e46f6062157e9b Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 29 May 2026 21:59:58 +0800
+Subject: [PATCH] =?UTF-8?q?feat(slots):=20=E6=B7=BB=E5=8A=A0=20useRenderer?=
+ =?UTF-8?q?=20=E6=94=AF=E6=8C=81=EF=BC=8C=E7=A1=AE=E4=BF=9D=20Slot=20?=
+ =?UTF-8?q?=E6=B8=B2=E6=9F=93=E5=99=A8=E7=9A=84=E5=94=AF=E4=B8=80=E6=80=A7?=
+ =?UTF-8?q?=EF=BC=8C=E9=81=BF=E5=85=8D=E6=B8=B2=E6=9F=93=E6=A0=91=E6=B3=84?=
+ =?UTF-8?q?=E6=BC=8F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/plugin/slots.tsx b/packages/opencode/src/cli/cmd/tui/plugin/slots.tsx
+index d597c8345a0b0ccb9e5cdf76f37ee092003d2981..d321d8a5f9af897ae3ce768744f86c8bb9ddb908 100644
+--- a/packages/opencode/src/cli/cmd/tui/plugin/slots.tsx
++++ b/packages/opencode/src/cli/cmd/tui/plugin/slots.tsx
+@@ -1,5 +1,5 @@
+ import type { TuiPluginApi, TuiSlotContext, TuiSlotMap, TuiSlotProps } from "@opencode-ai/plugin/tui"
+-import { createSlot, createSolidSlotRegistry, type JSX, type SolidPlugin } from "@opentui/solid"
++import { createSlot, createSolidSlotRegistry, useRenderer, type JSX, type SolidPlugin } from "@opentui/solid"
+ import { isRecord } from "@/util/record"
+ 
+ type RuntimeSlotMap = TuiSlotMap<Record<string, object>>
+@@ -21,8 +21,16 @@ function empty<Name extends string>(_props: TuiSlotProps<Name>) {
+ }
+ 
+ let view: Slot = empty
++let renderer: HostPluginApi["renderer"] | undefined
+ 
+-export const Slot: Slot = (props) => view(props)
++export const Slot: Slot = (props) => {
++  const current = useRenderer()
++  // Slot 是 runtime 单例入口，但测试和嵌入式调用可能在同一进程内并发创建多个
++  // renderer。只允许创建该 slot registry 的 renderer 使用它，避免一个 TUI 实例
++  // 的插件 fallback/鼠标区域泄漏到另一个未初始化插件 runtime 的渲染树。
++  if (renderer && current !== renderer) return empty(props)
++  return view(props)
++}
+ 
+ function isHostSlotPlugin(value: unknown): value is HostSlotPlugin<Record<string, object>> {
+   if (!isRecord(value)) return false
+@@ -52,7 +60,9 @@ export function setupSlots(api: HostPluginApi): HostSlots {
+ 
+   const slot = createSlot<RuntimeSlotMap, TuiSlotContext>(reg)
+   view = (props) => slot(props)
++  renderer = api.renderer
+   const current = view
++  const currentRenderer = renderer
+   return {
+     register(plugin: HostSlotPlugin) {
+       if (!isHostSlotPlugin(plugin)) return () => {}
+@@ -62,7 +72,9 @@ export function setupSlots(api: HostPluginApi): HostSlots {
+       // TUI 插件 runtime 是单例，Slot 视图同样是模块级全局入口。
+       // dispose 后必须恢复 no-op，否则后续未初始化 runtime 的测试/实例会继续渲染上一轮
+       // slot registry 的 fallback children，改变会话布局并泄漏上一轮 renderer 上下文。
+-      if (view === current) view = empty
++      if (view !== current || renderer !== currentRenderer) return
++      view = empty
++      renderer = undefined
+     },
+   }
+ }
+diff --git a/packages/opencode/test/session/instruction.test.ts b/packages/opencode/test/session/instruction.test.ts
+index 0f9c340dd4c1df1a017df5ebb2fd158672161cfb..7e8fcf467c3c53c1242b21d6a3b95d46edc8186f 100644
+--- a/packages/opencode/test/session/instruction.test.ts
++++ b/packages/opencode/test/session/instruction.test.ts
+@@ -1,4 +1,4 @@
+-import { describe, expect, test } from "bun:test"
++import { describe, expect } from "bun:test"
+ import path from "path"
+ import { Effect, FileSystem, Layer } from "effect"
+ import { FetchHttpClient } from "effect/unstable/http"
+@@ -17,11 +17,9 @@ import { TestConfig } from "../fixture/config"
+ 
+ const it = testEffect(Layer.mergeAll(CrossSpawnSpawner.defaultLayer, NodeFileSystem.layer))
+ 
+-const configLayer = TestConfig.layer()
+-
+-const instructionLayer = (global: Partial<Global.Interface>, flags: Partial<RuntimeFlags.Info> = {}) =>
++const instructionLayer = (global: Partial<Global.Interface>, flags: Partial<RuntimeFlags.Info> = {}, config = {}) =>
+   Instruction.layer.pipe(
+-    Layer.provide(configLayer),
++    Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config) })),
+     Layer.provide(AppFileSystem.defaultLayer),
+     Layer.provide(FetchHttpClient.layer),
+     Layer.provide(Global.layerWith(global)),
+@@ -29,9 +27,9 @@ const instructionLayer = (global: Partial<Global.Interface>, flags: Partial<Runt
+   )
+ 
+ const provideInstruction =
+-  (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>) =>
++  (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>, config = {}) =>
+   <A, E, R>(self: Effect.Effect<A, E, R>) =>
+-    self.pipe(Effect.provide(instructionLayer(global, flags)))
++    self.pipe(Effect.provide(instructionLayer(global, flags, config)))
+ 
+ const write = (filepath: string, content: string) =>
+   Effect.gen(function* () {
+@@ -195,7 +193,43 @@ describe("Instruction.resolve", () => {
+     ),
+   )
+ 
+-  test.todo("fetches remote instructions from config URLs via HttpClient", () => {})
++  it.live("fetches remote instructions from config URLs via HttpClient", () =>
++    Effect.acquireUseRelease(
++      Effect.sync(() => {
++        const requests: string[] = []
++        const server = Bun.serve({
++          port: 0,
++          fetch(request) {
++            requests.push(new URL(request.url).pathname)
++            return new Response("# Remote Instructions\nUse the remote rule.")
++          },
++        })
++        return { requests, server }
++      }),
++      ({ requests, server }) =>
++        Effect.gen(function* () {
++          const globalTmp = yield* tmpWithFiles({})
++          const projectTmp = yield* tmpdirScoped()
++          const url = new URL("/instructions.md", server.url).toString()
++
++          yield* Effect.gen(function* () {
++            const svc = yield* Instruction.Service
++            const paths = yield* svc.systemPaths()
++            const rules = yield* svc.system()
++
++            // Remote config entries are not filesystem paths, but they must still
++            // enter the system prompt through the HttpClient seam used by production.
++            expect(paths.size).toBe(0)
++            expect(requests).toEqual(["/instructions.md"])
++            expect(rules).toEqual([`Instructions from: ${url}\n# Remote Instructions\nUse the remote rule.`])
++          }).pipe(
++            provideInstance(projectTmp),
++            provideInstruction({ home: globalTmp, config: globalTmp }, undefined, { instructions: [url] }),
++          )
++        }),
++      ({ server }) => Effect.sync(() => server.stop(true)),
++    ),
++  )
+ })
+ 
+ describe("Instruction.system", () => {

@@ -1,0 +1,547 @@
+From b2cf8c8369d12a33cbc6aae0b4c027ef5a22dec1 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 25 May 2026 20:12:34 +0800
+Subject: [PATCH] =?UTF-8?q?feat(permission-reviewer):=20=E5=A2=9E=E5=BC=BA?=
+ =?UTF-8?q?=E8=87=AA=E5=8A=A8=E6=9D=83=E9=99=90=E5=AE=A1=E6=9F=A5=E9=80=BB?=
+ =?UTF-8?q?=E8=BE=91=EF=BC=8C=E6=94=AF=E6=8C=81=20JSON=20=E6=96=87?=
+ =?UTF-8?q?=E6=9C=AC=E5=86=B3=E7=AD=96=E5=92=8C=E5=8D=8F=E8=AE=AE=E9=87=8D?=
+ =?UTF-8?q?=E8=AF=95=E6=9C=BA=E5=88=B6?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/permission/reviewer/prompt.ts b/packages/opencode/src/permission/reviewer/prompt.ts
+index 326cb90c12f5e71ef42bd483dfbe84473a95caf9..5dd08f8224b1516cf345267b99edbbc7e17ac481 100644
+--- a/packages/opencode/src/permission/reviewer/prompt.ts
++++ b/packages/opencode/src/permission/reviewer/prompt.ts
+@@ -24,13 +24,14 @@ export interface UserPromptItem {
+ 
+ export const DEFAULT_TENANT_POLICY = DEFAULT_POLICY
+ 
+-// The text contract intentionally describes the exact JSON literals even though
+-// generateObject also receives a schema. Some providers degrade to prompt-only
+-// validation, so the prompt and schema both carry the same allow/deny contract.
++// The text contract names the decision tool and repeats its JSON-shaped input
++// because provider tool forcing is intentionally not required for every backend.
++// Runtime may accept strict JSON as a compatibility fallback, but the prompt must
++// keep steering models toward the auditable permission_review_decision protocol.
+ const OUTPUT_CONTRACT_PROMPT = `\
+-Decide from the supplied transcript, planned action, and policy. Use transcript only to establish user intent, scope, authorization, and local evidence. Your final message must be strict JSON.
++Decide from the supplied transcript, planned action, and policy. Use transcript only to establish user intent, scope, authorization, and local evidence. Submit the decision by calling permission_review_decision exactly once. Do not answer in prose, markdown, or a plain final JSON message.
+ 
+-Use this JSON schema for every decision, including low-risk allows:
++Use this tool input schema for every decision, including low-risk allows:
+ {
+   "risk_level": "low" | "medium" | "high" | "critical",
+   "user_authorization": "unknown" | "low" | "medium" | "high",
+diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
+index 21555cf1094182e72cc5cb6e49d00cda90a76d32..b06690cfe08b34a77c8b6e807a4a30248c927f58 100644
+--- a/packages/opencode/src/permission/reviewer/service.ts
++++ b/packages/opencode/src/permission/reviewer/service.ts
+@@ -51,6 +51,29 @@ export interface Interface extends PermissionAuto.Reviewer {}
+ export class Service extends Context.Service<Service, Interface>()("@opencode/PermissionReviewer") {}
+ 
+ const REVIEWER_MESSAGE_FETCH_LIMIT = 120
++// JSON fallback is a runtime compatibility boundary, not a prompt contract: the
++// reviewer prompt still asks providers to submit `permission_review_decision`,
++// but some tool-capable providers occasionally return the same Assessment as a
++// plain JSON final answer. Accept only a complete schema-valid JSON object and
++// mark the persisted audit part with this source so later UI/export code can
++// distinguish fallback acceptance from an actual function/tool call.
++const JSON_FALLBACK_SOURCE = "json_fallback"
++// This exact reason is the retry discriminator. Provider errors and policy
++// denials must not be retried through this path; only a completed reviewer turn
++// that produced neither a decision tool call nor valid JSON fallback is hidden
++// and retried with a protocol nudge.
++const REVIEWER_DECISION_PROTOCOL_ERROR = "reviewer did not call permission_review_decision"
++// Keep this string aligned with MessageV2.Hidden. It names the audit workflow
++// that owns these hidden child-session turns and prevents future hidden-message
++// consumers from confusing protocol retry cleanup with undo or session repair.
++const PROTOCOL_RETRY_HIDDEN_REASON = "permission-reviewer-protocol-retry"
++const PROTOCOL_RETRY_USER_ITEM = {
++  type: "text" as const,
++  // The retry prompt deliberately asks only for the tool/function-call protocol.
++  // JSON text fallback is a runtime compatibility layer, not behavior we should
++  // advertise to the model after it already missed the preferred contract.
++  text: "Protocol retry: the previous response did not submit the required permission_review_decision tool/function call. Reassess the same evidence and call permission_review_decision exactly once. Do not answer in prose or markdown.",
++}
+ 
+ const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
+   mergeDeep(target, source ?? {}) as Record<string, any>
+@@ -112,25 +135,42 @@ export const layer = Layer.effect(
+                 Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
+               )
+             : { entries: [], truncated: false, entryTruncated: false }
+-          const messages = buildMessages({
+-            system: PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy),
+-            userItems: PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason),
+-          })
+-          const reviewerUser = reviewerSession
+-            ? yield* recordReviewerRequest({
++          const system = PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy)
++          const userItems = PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason)
++          const messages = buildMessages({ system, userItems })
++          function runReviewerAttempt(messages: readonly ModelMessage[], hideProtocolFailure: boolean) {
++            return Effect.gen(function* () {
++              const reviewerUser = reviewerSession
++                ? yield* recordReviewerRequest({
++                    session: reviewerSession,
++                    model,
++                    reviewID: input.reviewID,
++                    text: renderReviewerPrompt(messages),
++                  })
++                : undefined
++              return yield* runReviewerAgent({
+                 session: reviewerSession,
+                 model,
+                 reviewID: input.reviewID,
+-                text: renderReviewerPrompt(messages),
+-              })
+-            : undefined
+-          const assessment = yield* runReviewerAgent({
+-            session: reviewerSession,
+-            model,
+-            reviewID: input.reviewID,
+-            parentID: reviewerUser?.id,
+-            messages,
+-          }).pipe(
++                parentID: reviewerUser?.id,
++                messages,
++              }).pipe(
++                Effect.tapError((error) => {
++                  if (!hideProtocolFailure || !reviewerSession || !reviewerUser || !isReviewerDecisionProtocolError(error)) {
++                    return Effect.void
++                  }
++                  return hideReviewerProtocolAttempt(sessions, reviewerSession.id, reviewerUser.id)
++                }),
++              )
++            })
++          }
++          const assessment = yield* runReviewerAttempt(messages, true).pipe(
++            Effect.catchIf(isReviewerDecisionProtocolError, () =>
++              // Keep the evidence and requested action unchanged; only append a
++              // protocol nudge so the second attempt repairs submission format
++              // instead of broadening the authorization or policy context.
++              runReviewerAttempt(buildMessages({ system, userItems: [...userItems, PROTOCOL_RETRY_USER_ITEM] }), false),
++            ),
+             Effect.timeoutOrElse({
+               // Timeout is a security boundary: if the reviewer cannot complete in
+               // time, the tool call must not execute unless explicit user fallback
+@@ -344,6 +384,7 @@ export const layer = Layer.effect(
+             })
+             let assessment: Schema.Schema.Type<typeof Assessment> | undefined
+             let textPart: MessageV2.TextPart | undefined
++            let textOutput = ""
+             let reasoningPart: MessageV2.ReasoningPart | undefined
+             const toolParts = new Map<string, MessageV2.ToolPart>()
+             const toolInput = new Map<string, string>()
+@@ -352,8 +393,11 @@ export const layer = Layer.effect(
+               Stream.fromAsyncIterable(result.fullStream, (error) => error),
+               Effect.fnUntraced(function* (event) {
+                 if (!persist) {
++                  if (event.type === "text-delta") {
++                    textOutput += event.text
++                  }
+                   if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
+-                    assessment = Schema.decodeUnknownSync(Assessment)(event.input)
++                    assessment = assessmentFromUnknown(event.input)
+                   }
+                   return
+                 }
+@@ -396,6 +440,7 @@ export const layer = Layer.effect(
+                 }
+                 if (event.type === "text-delta" && textPart) {
+                   textPart.text += event.text
++                  textOutput += event.text
+                   if (event.providerMetadata) textPart.metadata = event.providerMetadata
+                   yield* sessions.updatePart(textPart)
+                   return
+@@ -435,7 +480,8 @@ export const layer = Layer.effect(
+                   return
+                 }
+                 if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
+-                  assessment = Schema.decodeUnknownSync(Assessment)(event.input)
++                  assessment = assessmentFromUnknown(event.input)
++                  if (!assessment) return
+                   const existing = toolParts.get(event.toolCallId)
+                   const part = yield* sessions.updatePart({
+                     ...(existing ?? {
+@@ -454,7 +500,7 @@ export const layer = Layer.effect(
+                       // transcript can be searched or exported by logical review,
+                       // even though one hidden reviewer session accumulates many
+                       // request/decision turns over the parent session lifetime.
+-                      metadata: { ...assessment, reviewID: persist.reviewID },
++                      metadata: { ...assessment, reviewID: persist.reviewID, source: "tool_call" },
+                       output: JSON.stringify(assessment),
+                       time: { start: Date.now(), end: Date.now() },
+                     },
+@@ -463,7 +509,12 @@ export const layer = Layer.effect(
+                   return
+                 }
+                 if (event.type === "tool-error") {
+-                  return yield* new ReviewerRunError({ reason: errorMessage(event.error) })
++                  // The reviewer has exactly one no-side-effect protocol tool.
++                  // A tool-error here means the provider/model attempted a tool
++                  // submission that did not become a valid Assessment, so route it
++                  // through the same hidden retry as missing or malformed input
++                  // instead of treating it as an unrelated provider failure.
++                  return yield* new ReviewerRunError({ reason: REVIEWER_DECISION_PROTOCOL_ERROR })
+                 }
+                 if (event.type === "error") {
+                   // Provider stream errors must keep their original shape until
+@@ -485,8 +536,18 @@ export const layer = Layer.effect(
+                 ...reasoningPart,
+                 time: { start: reasoningPart.time.start, end: Date.now() },
+               })
+-            if (!assessment)
+-              return yield* new ReviewerRunError({ reason: "reviewer did not call permission_review_decision" })
++            if (!assessment) {
++              const fallback = assessmentFromJsonText(textOutput)
++              if (fallback) {
++                // The text part remains as provider output, while this synthetic
++                // no-side-effect tool part preserves the same audit shape as the
++                // function-call path. Consumers should read `source` before
++                // treating the part as a provider-emitted tool call.
++                if (persist) yield* recordJsonFallbackDecision(sessions, persist, fallback)
++                return fallback
++              }
++              return yield* new ReviewerRunError({ reason: REVIEWER_DECISION_PROTOCOL_ERROR })
++            }
+             return assessment
+           }),
+         (abort) => Effect.sync(() => abort.abort()),
+@@ -615,6 +676,13 @@ function isReviewerError(error: unknown): error is Error {
+   return error instanceof ReviewerTimedOut || error instanceof ReviewerRunError
+ }
+ 
++function isReviewerDecisionProtocolError(error: unknown) {
++  // Only this protocol miss gets one hidden retry. Other ReviewerRunError values
++  // include provider tool errors, schema failures, and policy-path loading errors;
++  // retrying those would blur operational failures with model formatting repair.
++  return error instanceof ReviewerRunError && error.reason === REVIEWER_DECISION_PROTOCOL_ERROR
++}
++
+ function reviewerEnabled(permission: Config.Info["permission"], metadata: Readonly<Record<string, unknown>>) {
+   // 显式配置优先：`user` 保留人工审批，`auto_review` 对所有 auto 规则启用 reviewer。
+   // 没有全局配置时，原生 auto agent 仍应隐式启用 reviewer；否则选择 auto
+@@ -657,4 +725,74 @@ export const defaultLayer = layer.pipe(Layer.provide(Config.defaultLayer), Layer
+ // dereferenced while this module is initializing.
+ export const defaultLayerWithSession = Layer.suspend(() => defaultLayer.pipe(Layer.provide(Session.defaultLayer)))
+ 
++function assessmentFromJsonText(text: string) {
++  const trimmed = text.trim()
++  if (!trimmed) return
++  try {
++    // Deliberately parse only the whole final text. Extracting JSON from prose,
++    // markdown fences, or mixed reasoning would let untrusted explanation text
++    // influence the permission boundary and belongs in the protocol retry path.
++    return Schema.decodeUnknownSync(Assessment)(JSON.parse(trimmed))
++  } catch {
++    return
++  }
++}
++
++function assessmentFromUnknown(input: unknown) {
++  try {
++    // Treat malformed tool/function arguments the same as missing protocol
++    // output: they are not a valid permission decision, but they also should not
++    // bypass the one retry that repairs reviewer submission format.
++    return Schema.decodeUnknownSync(Assessment)(input)
++  } catch {
++    return
++  }
++}
++
++function hideReviewerProtocolAttempt(sessions: Session.Interface, sessionID: SessionID, requestID: MessageID) {
++  return Effect.gen(function* () {
++    const hidden = { time: Date.now(), reason: PROTOCOL_RETRY_HIDDEN_REASON as typeof PROTOCOL_RETRY_HIDDEN_REASON }
++    const request = yield* MessageV2.get({ sessionID, messageID: requestID })
++    // Hide the synthetic reviewer request together with its malformed assistant
++    // reply. The prompt is regenerated for the retry, and keeping only the final
++    // visible attempt prevents users from reading a malformed JSON/prose answer
++    // as an approved decision before the protocol repair completes.
++    yield* sessions.updateMessage({ ...request.info, hidden })
++    const assistant = Array.from(MessageV2.stream(sessionID, { includeHidden: true })).find(
++      (msg) => msg.info.role === "assistant" && msg.info.parentID === requestID,
++    )
++    if (assistant?.info.role === "assistant") {
++      yield* sessions.updateMessage({ ...assistant.info, hidden })
++    }
++  })
++}
++
++function recordJsonFallbackDecision(
++  sessions: Session.Interface,
++  persist: { sessionID: SessionID; messageID: MessageID; reviewID: string },
++  assessment: Schema.Schema.Type<typeof Assessment>,
++) {
++  return Effect.gen(function* () {
++    yield* sessions.updatePart({
++      id: PartID.ascending(),
++      sessionID: persist.sessionID,
++      messageID: persist.messageID,
++      type: "tool",
++      // This synthetic call id cannot collide with provider tool-call ids because
++      // it is namespaced by the stable review id and is only created after the
++      // stream ended without any `permission_review_decision` function call.
++      callID: `json_fallback_${persist.reviewID}`,
++      tool: "permission_review_decision",
++      state: {
++        status: "completed",
++        input: assessment,
++        title: assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
++        metadata: { ...assessment, reviewID: persist.reviewID, source: JSON_FALLBACK_SOURCE },
++        output: JSON.stringify(assessment),
++        time: { start: Date.now(), end: Date.now() },
++      },
++    } satisfies MessageV2.ToolPart)
++  })
++}
++
+ export * as PermissionReviewer from "./service"
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index e4953928b697755b70efaaa62b9cdf7d57c46c11..a58643aa9609ff93c397cab95315a677dd6cc379 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -66,10 +66,14 @@ const TRANSIENT_TRANSPORT_CODES = new Set([
+ export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
+ export { isMedia }
+ 
+-// [local-smark] Hidden message support for undo/repair
++// Hidden messages remain persisted for audit/recovery, but are removed from
++// normal prompt replay and visible history. Each reason names the workflow that
++// owns the invisibility boundary: undo hides reverted turns, repair hides empty
++// dangling assistants, and permission-reviewer protocol retry hides malformed
++// reviewer attempts before the same permission request is retried once.
+ const Hidden = Schema.Struct({
+   time: NonNegativeInt,
+-  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant"]),
++  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant", "permission-reviewer-protocol-retry"]),
+ })
+ 
+ // OutputLengthError is re-exported from ./message-error above
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 616fd6987b7189b721a3d18d8107013e1ffc61ef..2db056de637d42579d7f6dfab577e01c605918fa 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -839,6 +839,219 @@ it.instance(
+   { git: true },
+ )
+ 
++it.instance(
++  "auto permission reviewer accepts structured JSON text decisions",
++  () =>
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig(providerCfg)
++      const permissions = yield* Permission.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({ title: "Reviewer JSON fallback" })
++      const command = String.raw`rsync -av "/Volumes/My Passport/Calibration/" Sensetimex4:~/project/Calibration/`
++      yield* llm.push(
++        reply()
++          .text(
++            JSON.stringify({
++              outcome: "allow",
++              risk_level: "high",
++              user_authorization: "high",
++              rationale: "user explicitly authorized the bounded remote transfer",
++            }),
++          )
++          .stop()
++          .item(),
++      )
++
++      yield* permissions.ask({
++        sessionID: chat.id,
++        permission: "bash",
++        patterns: [command],
++        metadata: { command, agent: "auto" },
++        always: ["*"],
++        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
++      })
++
++      expect(yield* llm.calls).toBe(1)
++      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
++      expect(reviewer).toBeDefined()
++      if (!reviewer) return
++
++      const reviewerParts = (yield* MessageV2.filterCompactedEffect(reviewer.id)).flatMap((msg) => msg.parts)
++      expect(
++        reviewerParts.some(
++          (part) =>
++            part.type === "tool" &&
++            part.tool === "permission_review_decision" &&
++            part.state.status === "completed" &&
++            part.state.metadata?.source === "json_fallback" &&
++            part.state.metadata?.rationale === "user explicitly authorized the bounded remote transfer",
++        ),
++      ).toBe(true)
++    }),
++  { git: true },
++)
++
++it.instance(
++  "auto permission reviewer hides malformed protocol attempts before retrying",
++  () =>
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig(providerCfg)
++      const permissions = yield* Permission.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({ title: "Reviewer protocol retry" })
++      const command = String.raw`rm "/tmp/file with spaces.txt"`
++      const malformed = "I can allow this request, but I forgot to submit the decision tool."
++      yield* llm.push(
++        reply().text(malformed).stop().item(),
++        reply()
++          .tool("permission_review_decision", {
++            outcome: "allow",
++            risk_level: "high",
++            user_authorization: "high",
++            rationale: "user explicitly authorized the bounded deletion",
++          })
++          .item(),
++      )
++
++      yield* permissions.ask({
++        sessionID: chat.id,
++        permission: "bash",
++        patterns: [command],
++        metadata: { command, agent: "auto" },
++        always: ["*"],
++        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
++      })
++
++      expect(yield* llm.calls).toBe(2)
++      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
++      expect(reviewer).toBeDefined()
++      if (!reviewer) return
++
++      const visible = yield* MessageV2.filterCompactedEffect(reviewer.id)
++      expect(
++        visible.flatMap((msg) => msg.parts).filter((part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true),
++      ).toHaveLength(1)
++      expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes(malformed)))).toBe(false)
++      expect(
++        visible.some((msg) =>
++          msg.parts.some(
++            (part) =>
++              part.type === "tool" &&
++              part.tool === "permission_review_decision" &&
++              part.state.status === "completed" &&
++              part.state.metadata?.source === "tool_call" &&
++              part.state.metadata?.rationale === "user explicitly authorized the bounded deletion",
++          ),
++        ),
++      ).toBe(true)
++
++      const allMessages = (yield* MessageV2.page({ sessionID: reviewer.id, limit: 20, includeHidden: true })).items
++      expect(
++        allMessages.filter(
++          (msg) => msg.info.hidden && msg.parts.some((part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true),
++        ),
++      ).toHaveLength(1)
++      expect(
++        allMessages.filter(
++          (msg) => msg.info.hidden && msg.parts.some((part) => part.type === "text" && part.text.includes(malformed)),
++        ),
++      ).toHaveLength(1)
++    }),
++  { git: true },
++)
++
++it.instance(
++  "auto permission reviewer fails closed after one malformed protocol retry",
++  () =>
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig(providerCfg)
++      const permissions = yield* Permission.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({ title: "Reviewer protocol retry failure" })
++      const command = String.raw`rm "/tmp/file with spaces.txt"`
++      yield* llm.push(
++        reply().text("first malformed reviewer response").stop().item(),
++        reply().text("second malformed reviewer response").stop().item(),
++      )
++
++      const exit = yield* permissions
++        .ask({
++          sessionID: chat.id,
++          permission: "bash",
++          patterns: [command],
++          metadata: { command, agent: "auto" },
++          always: ["*"],
++          ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
++        })
++        .pipe(Effect.exit)
++
++      expect(Exit.isFailure(exit)).toBe(true)
++      if (!Exit.isFailure(exit)) return
++      expect(Cause.squash(exit.cause)).toBeInstanceOf(Permission.AutoDeniedError)
++      expect(yield* llm.calls).toBe(2)
++      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
++      expect(reviewer).toBeDefined()
++      if (!reviewer) return
++
++      const visible = yield* MessageV2.filterCompactedEffect(reviewer.id)
++      expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes("first malformed")))).toBe(false)
++      expect(visible.some((msg) => msg.parts.some((part) => part.type === "text" && part.text.includes("second malformed")))).toBe(true)
++    }),
++  { git: true },
++)
++
++it.instance(
++  "auto permission reviewer retries malformed decision tool input",
++  () =>
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig(providerCfg)
++      const permissions = yield* Permission.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({ title: "Reviewer malformed tool retry" })
++      const command = String.raw`rm "/tmp/file with spaces.txt"`
++      yield* llm.push(
++        reply().tool("permission_review_decision", { outcome: "allow" }).item(),
++        reply()
++          .tool("permission_review_decision", {
++            outcome: "allow",
++            risk_level: "high",
++            user_authorization: "high",
++            rationale: "user explicitly authorized the bounded deletion after malformed tool input",
++          })
++          .item(),
++      )
++
++      yield* permissions.ask({
++        sessionID: chat.id,
++        permission: "bash",
++        patterns: [command],
++        metadata: { command, agent: "auto" },
++        always: ["*"],
++        ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
++      })
++
++      expect(yield* llm.calls).toBe(2)
++      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
++      expect(reviewer).toBeDefined()
++      if (!reviewer) return
++
++      const visible = yield* MessageV2.filterCompactedEffect(reviewer.id)
++      expect(
++        visible.some((msg) =>
++          msg.parts.some(
++            (part) =>
++              part.type === "tool" &&
++              part.tool === "permission_review_decision" &&
++              part.state.status === "completed" &&
++              part.state.metadata?.source === "tool_call" &&
++              part.state.metadata?.rationale === "user explicitly authorized the bounded deletion after malformed tool input",
++          ),
++        ),
++      ).toBe(true)
++    }),
++  { git: true },
++)
++
+ it.instance(
+   "auto permission reviewer retries transient provider failures before recording the decision",
+   () =>

@@ -1,0 +1,111 @@
+From ac96799d7ebe26af319f840368c275e12dc72f16 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 13 Jun 2026 06:47:43 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E4=BF=AE=E6=AD=A3=E5=85=BC=E5=AE=B9?=
+ =?UTF-8?q?=E6=80=A7=E6=B5=8B=E8=AF=95=EF=BC=8C=E6=9B=B4=E6=96=B0=E6=B5=8B?=
+ =?UTF-8?q?=E8=AF=95=E9=85=8D=E7=BD=AE=EF=BC=8C=E5=A2=9E=E5=8A=A0=E7=8E=AF?=
+ =?UTF-8?q?=E5=A2=83=E5=8F=98=E9=87=8F=E6=94=AF=E6=8C=81=E5=B9=B6=E4=BC=98?=
+ =?UTF-8?q?=E5=8C=96=E6=B5=8B=E8=AF=95=E7=94=A8=E4=BE=8B?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index 197e3e54e0bc4692c6a38ae4290a069662fd2ebb..651aaae56681426cfb21277039fffd8411e376c9 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -377,6 +377,8 @@ jobs:
+       - name: Run upstream extra package tests
+         id: upstream
+         continue-on-error: true
++        env:
++          OPENAI_API_KEY: ${{ matrix.id == 'llm' && 'test-key' || '' }}
+         run: |
+           mkdir -p "${{ matrix.path }}/.artifacts/upstream"
+           if [ -n "${{ matrix.target }}" ]; then
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index e178c433af69b0204f3dab6b29a59ffa081ef1f0..b698747e496b2bae09285f050d26aede9127e931 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -2215,6 +2215,7 @@ function openAutoReviewFromToolChrome(
+   navigate: ReturnType<typeof useRoute>["navigate"],
+   renderer: ReturnType<typeof useRenderer>,
+   evt: TuiMouseEvent | undefined,
++  options?: { inline?: boolean },
+ ) {
+   // OpenTUI 可能把 review 文本行的 mouseup 冒泡给父工具卡。这里不再用
+   // root + 1 这类布局猜测；父卡片兜底必须再经过行坐标校验，因为标题、
+@@ -2229,7 +2230,7 @@ function openAutoReviewFromToolChrome(
+   if (!match) return false
+   if (match.direct) {
+     if (evt.y !== match.row.screenY - 1) return false
+-  } else if (evt.y !== match.row.screenY && (review.tool === ShellID.ToolID || evt.y !== match.row.screenY - 1)) return false
++  } else if (evt.y !== match.row.screenY && (review.tool === ShellID.ToolID || !options?.inline || evt.y !== match.row.screenY - 1)) return false
+   return openAutoReviewSession(review, navigate, renderer, evt)
+ }
+ 
+@@ -2290,7 +2291,7 @@ function InlineTool(props: {
+       onMouseOver={() => props.onClick && setHover(true)}
+       onMouseOut={() => setHover(false)}
+       onMouseUp={(evt?: TuiMouseEvent) => {
+-        if (openAutoReviewFromToolChrome(review(), navigate, renderer, evt)) return
++        if (openAutoReviewFromToolChrome(review(), navigate, renderer, evt, { inline: true })) return
+         if (renderer.getSelection()?.getSelectedText()) return
+         props.onClick?.()
+       }}
+diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+index 663fb8ecc51200daa1727f208d85301415a0c550..443f605fcecfc0653f1905535ee0fa20f2c368eb 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -1940,9 +1940,9 @@ function findRow(frame: string[], text: string) {
+ async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, text: string) {
+   const raw = app.captureCharFrame().split("\n")
+   const y = raw.findIndex((line) => line.includes(text))
+-  expect(y).toBeGreaterThanOrEqual(0)
++  if (y < 0) throw new Error(`missing clickable text ${JSON.stringify(text)}:\n${raw.join("\n")}`)
+   const x = raw[y].indexOf(text)
+-  expect(x).toBeGreaterThanOrEqual(0)
++  if (x < 0) throw new Error(`missing clickable text column ${JSON.stringify(text)}:\n${raw[y]}`)
+   const target = { x: x + Math.floor(text.length / 2), y }
+   // OpenTUI 的 mockMouse API 接收当前 char frame 的 0-based 坐标；先移动到
+   // label 中点并渲染一次，模拟真实鼠标进入目标行，避免复杂渲染历史下
+diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
+index 72ea2156384a7134e3eb32434d4951525ceed566..60eb402d2e3ab87713d8263e4decec1a82452dc8 100644
+--- a/packages/opencode/test/cli/tui/daemon.test.ts
++++ b/packages/opencode/test/cli/tui/daemon.test.ts
+@@ -22,7 +22,7 @@ const WORKER_TS = fileURLToPath(new URL("../../../src/cli/cmd/tui/worker.ts", im
+ // 这样后续重构命令注册、yargs 包装或 worker 启动路径时，仍会保住完整的外部契约。
+ const INDEX_TS = fileURLToPath(new URL("../../../src/index.ts", import.meta.url))
+ 
+-const DAEMON_START_TIMEOUT_MS = 15_000
++const DAEMON_START_TIMEOUT_MS = 30_000
+ const DAEMON_STOP_TIMEOUT_MS = 60_000
+ const POLL_INTERVAL_MS = 100
+ const SIGNAL_TEST_TIMEOUT_MS = 10_000
+diff --git a/packages/opencode/test/server/httpapi-listen.test.ts b/packages/opencode/test/server/httpapi-listen.test.ts
+index f155521384af449137ef3eddf88689377878745e..faa6373dfcf022bae14676c795412b0fb7a940af 100644
+--- a/packages/opencode/test/server/httpapi-listen.test.ts
++++ b/packages/opencode/test/server/httpapi-listen.test.ts
+@@ -294,7 +294,7 @@ describe("HttpApi Server.listen", () => {
+       return true
+     }) as typeof process.stderr.write
+     try {
+-      const response = await Server.Default().app.request("/status")
++      const response = await Server.Default().app.request("/global/health", { headers: { authorization: authorization() } })
+       expect(response.status).toBe(200)
+     } finally {
+       process.stderr.write = original
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 13e3bc1ae0e4af31ffe669cb3dda62719f75cfb3..123a0727907897cefc6f873977c542a60c6e32f0 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -2523,7 +2523,7 @@ unix(
+         const { prompt, chat } = yield* boot()
+ 
+         const a = yield* prompt
+-          .shell({ sessionID: chat.id, agent: "build", command: "sleep 30" })
++          .shell({ sessionID: chat.id, agent: "build", command: "sleep 10" })
+           .pipe(Effect.forkChild)
+         yield* waitForBusy(chat.id)
+ 

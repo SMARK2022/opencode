@@ -1,0 +1,149 @@
+From 69f32338dd55bf3748eb7e133e31cc0697079b46 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 17 May 2026 00:07:52 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=E6=96=87=E6=9C=AC?=
+ =?UTF-8?q?=E6=B8=85=E7=90=86=E5=8A=9F=E8=83=BD=EF=BC=8C=E7=A1=AE=E4=BF=9D?=
+ =?UTF-8?q?=E7=BB=88=E7=AB=AF=E8=BE=93=E5=87=BA=E4=B8=AD=E7=9A=84=E6=8E=A7?=
+ =?UTF-8?q?=E5=88=B6=E5=AD=97=E7=AC=A6=E8=A2=AB=E6=AD=A3=E7=A1=AE=E8=BD=AC?=
+ =?UTF-8?q?=E4=B9=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/tool/shell/prompt.ts b/packages/opencode/src/tool/shell/prompt.ts
+index d6481958d33dc492e0db8eb6c69b63684aa43058..0e8e0e206b6cd5ef971b1f9d437bf3c9591e9487 100644
+--- a/packages/opencode/src/tool/shell/prompt.ts
++++ b/packages/opencode/src/tool/shell/prompt.ts
+@@ -60,6 +60,7 @@ function powershellNotes(name: string) {
+ - Prefer full cmdlet names like \`Get-ChildItem\`, \`Set-Content\`, \`Remove-Item\`, and \`New-Item\` over aliases.
+ - Use \`$(...)\` for subexpressions. Use \`@(...)\` for array expressions.
+ - To call a native executable whose path contains spaces, use the call operator: \`& "path/to/exe" args\`.
++- Do not append \`2>&1\` to PowerShell commands; the shell tool already captures stderr.
+ - Escape special characters with the PowerShell backtick character.`
+   }
+   if (name === "powershell") {
+@@ -69,6 +70,7 @@ function powershellNotes(name: string) {
+ - Prefer full cmdlet names like \`Get-ChildItem\`, \`Set-Content\`, \`Remove-Item\`, and \`New-Item\` over aliases.
+ - Use \`$(...)\` for subexpressions. Use \`@(...)\` for array expressions.
+ - To call a native executable whose path contains spaces, use the call operator: \`& "path/to/exe" args\`.
++- Do not append \`2>&1\` to PowerShell commands; the shell tool already captures stderr.
+ - Escape special characters with the PowerShell backtick character.`
+   }
+   return ""
+diff --git a/packages/opencode/src/tool/tool.ts b/packages/opencode/src/tool/tool.ts
+index 4b9ea8774a4024b780452e9f06f392bc98d6db5b..5701ce697b3f968535ee25c9b228a0951bd627b7 100644
+--- a/packages/opencode/src/tool/tool.ts
++++ b/packages/opencode/src/tool/tool.ts
+@@ -4,11 +4,41 @@ import type { Permission } from "../permission"
+ import type { SessionID, MessageID } from "../session/schema"
+ import * as Truncate from "./truncate"
+ import { Agent } from "@/agent/agent"
++import stripAnsi from "strip-ansi"
+ 
+ interface Metadata {
+   [key: string]: any
+ }
+ 
++function sanitizeVisibleText(text: string) {
++  return stripAnsi(text.replace(/\r\n/g, "\n")).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (char) => {
++    return `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`
++  })
++}
++
++function sanitizeMetadata<M extends Metadata>(metadata: M | undefined) {
++  if (!metadata) return metadata
++  let changed = false
++  const entries = Object.entries(metadata).map(([key, value]) => {
++    if (typeof value !== "string") return [key, value] as const
++    const safe = sanitizeVisibleText(value)
++    if (safe !== value) changed = true
++    return [key, safe] as const
++  })
++  return changed ? ({ ...metadata, ...Object.fromEntries(entries) } as M) : metadata
++}
++
++function sanitizeRequiredMetadata<M extends Metadata>(metadata: M) {
++  return sanitizeMetadata(metadata) ?? metadata
++}
++
++function sanitizeResult<M extends Metadata>(result: ExecuteResult<M>) {
++  const output = sanitizeVisibleText(result.output)
++  const metadata = sanitizeRequiredMetadata(result.metadata)
++  if (output === result.output && metadata === result.metadata) return result
++  return { ...result, output, metadata }
++}
++
+ // TODO: remove this hack
+ export type DynamicDescription = (agent: Agent.Info) => Effect.Effect<string>
+ 
+@@ -106,7 +136,14 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
+                   ),
+             ),
+           )
+-          const result = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx)
++          const safeCtx = {
++            ...ctx,
++            metadata(input: { title?: string; metadata?: Metadata }) {
++              const metadata = sanitizeMetadata(input.metadata)
++              return ctx.metadata(metadata === input.metadata ? input : { ...input, metadata })
++            },
++          }
++          const result = sanitizeResult(yield* execute(decoded as Schema.Schema.Type<Parameters>, safeCtx))
+           if (result.metadata.truncated !== undefined) {
+             return result
+           }
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index 49ed6df110df458808bda5adc7227acf08e1eea4..3ccaee9f392ccb90207d2cbf4f7470a763c3d4bb 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -85,6 +85,11 @@ const fill = (mode: "lines" | "bytes", n: number) => {
+   if (PS.has(sh())) return `& ${text}`
+   return text
+ }
++const bunEval = (code: string) => {
++  const text = `${bin} -e ${evalarg(code)}`
++  if (PS.has(sh())) return `& ${text}`
++  return text
++}
+ const glob = (p: string) =>
+   process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p.replaceAll("\\", "/")
+ 
+@@ -186,6 +191,37 @@ describe("tool.shell", () => {
+       },
+     })
+   })
++
++  test("escapes terminal control characters in visible output", async () => {
++    await WithInstance.provide({
++      directory: projectRoot,
++      fn: async () => {
++        const bash = await initShell()
++        const updates: string[] = []
++        const result = await Effect.runPromise(
++          bash.execute(
++            {
++              command: bunEval("process.stdout.write(String.fromCharCode(115,97,102,101,7,101,110,100,10))"),
++              description: "Emit terminal control byte",
++            },
++            {
++              ...ctx,
++              metadata: (input) =>
++                Effect.sync(() => {
++                  if (typeof input.metadata?.output === "string") updates.push(input.metadata.output)
++                }),
++            },
++          ),
++        )
++
++        expect(result.output).toContain("safe\\x07end")
++        expect(result.output).not.toContain("\x07")
++        expect(result.metadata.output).not.toContain("\x07")
++        expect(updates.some((output) => output.includes("safe\\x07end"))).toBe(true)
++        expect(updates.every((output) => !output.includes("\x07"))).toBe(true)
++      },
++    })
++  }, 15_000)
+ })
+ 
+ describe("tool.shell permissions", () => {

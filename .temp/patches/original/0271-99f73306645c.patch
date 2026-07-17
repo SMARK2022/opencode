@@ -1,0 +1,36 @@
+From 99f73306645c9bd763c6f316afa77946edb28a97 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 29 May 2026 23:43:13 +0800
+Subject: [PATCH] =?UTF-8?q?fix(test):=20exitcode=20=E4=BF=AE=E5=A4=8D?=
+ =?UTF-8?q?=EF=BC=8C=E5=A2=9E=E5=8A=A0=E6=AF=8F=E6=AC=A1=E8=BF=90=E8=A1=8C?=
+ =?UTF-8?q?test=E5=90=8E=E7=9A=84=E9=87=8D=E7=BD=AE=E9=80=80=E5=87=BA?=
+ =?UTF-8?q?=E7=A0=81=E5=8A=9F=E8=83=BD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/test/cli/tui/thread.test.ts
+index c3b4dfd683e9969de45b56b403977461b81a41a0..43d02519545cd5a2ed39eed309ab68d1ac50918b 100644
+--- a/packages/opencode/test/cli/tui/thread.test.ts
++++ b/packages/opencode/test/cli/tui/thread.test.ts
+@@ -12,6 +12,7 @@ import { Flock } from "@opencode-ai/core/util/flock"
+ import { Flag } from "@opencode-ai/core/flag/flag"
+ 
+ const stop = new Error("stop")
++const originalExitCode = process.exitCode
+ const seen = {
+   tui: [] as string[],
+   tuiUrls: [] as string[],
+@@ -50,6 +51,11 @@ describe("tui thread", () => {
+     ThreadModule._setSpawn(undefined)
+     mock.restore()
+     ServerLockModule._setLockPath(undefined)
++    // TuiThreadCommand intentionally sets process.exitCode for user-facing CLI
++    // validation errors. Tests assert those branches directly, so reset the
++    // process-global value after each case; otherwise Bun can report 0 failed
++    // tests but still exit 1 on Linux when the final process exitCode leaks.
++    process.exitCode = originalExitCode
+   })
+ 
+   async function call(project?: string, overrides?: Partial<ThreadArgs>) {

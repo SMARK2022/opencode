@@ -1,0 +1,1316 @@
+From ff8d4e531dfa5990c42f9d372e58eaf9e7b51791 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 19 Jun 2026 02:04:40 +0800
+Subject: [PATCH] =?UTF-8?q?refactor(docs):=20=E5=B0=86=E6=A0=B9=E7=9B=AE?=
+ =?UTF-8?q?=E5=BD=95=E5=A4=9A=E8=AF=AD=E8=A8=80=20README=20=E8=BF=81?=
+ =?UTF-8?q?=E7=A7=BB=E5=88=B0=20docs/readme/?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+根目录除 README.md 外的 21 个翻译 README 迁移到 docs/readme/，降低根目录噪音并集中管理翻译文档。通过 git mv 保留文件历史，并同步修正所有移动文件的相对链接：语言切换栏简中指向 ../../README.md，logo/screenshot 资源和 CONTRIBUTING.md 改为上两级路径，避免 GitHub 渲染断链。
+
+同步更新根 README.md 语言栏为 docs/readme/README.<lang>.md；更新 packages/opencode/test/docs/readme.test.ts 与 packages/app/src/context/file/path.test.ts 中对旧根级翻译 README 的引用路径，确保 README 行为测试与 Windows 路径编码测试继续通过，不引入回归。
+
+diff --git a/README.md b/README.md
+index 8fa8f4b5d8f9cd2055cfb69a8503ed1041c54cc3..1c3cfd1ee8f2623e3c174a0e944205a6b6ccf7d3 100644
+--- a/README.md
++++ b/README.md
+@@ -17,27 +17,27 @@
+ 
+ <p align="center">
+   <a href="README.md">简体中文</a> |
+-  <a href="README.en.md">English</a> |
+-  <a href="README.zht.md">繁體中文</a> |
+-  <a href="README.ko.md">한국어</a> |
+-  <a href="README.de.md">Deutsch</a> |
+-  <a href="README.es.md">Español</a> |
+-  <a href="README.fr.md">Français</a> |
+-  <a href="README.it.md">Italiano</a> |
+-  <a href="README.da.md">Dansk</a> |
+-  <a href="README.ja.md">日本語</a> |
+-  <a href="README.pl.md">Polski</a> |
+-  <a href="README.ru.md">Русский</a> |
+-  <a href="README.bs.md">Bosanski</a> |
+-  <a href="README.ar.md">العربية</a> |
+-  <a href="README.no.md">Norsk</a> |
+-  <a href="README.br.md">Português (Brasil)</a> |
+-  <a href="README.th.md">ไทย</a> |
+-  <a href="README.tr.md">Türkçe</a> |
+-  <a href="README.uk.md">Українська</a> |
+-  <a href="README.bn.md">বাংলা</a> |
+-  <a href="README.gr.md">Ελληνικά</a> |
+-  <a href="README.vi.md">Tiếng Việt</a>
++  <a href="docs/readme/README.en.md">English</a> |
++  <a href="docs/readme/README.zht.md">繁體中文</a> |
++  <a href="docs/readme/README.ko.md">한국어</a> |
++  <a href="docs/readme/README.de.md">Deutsch</a> |
++  <a href="docs/readme/README.es.md">Español</a> |
++  <a href="docs/readme/README.fr.md">Français</a> |
++  <a href="docs/readme/README.it.md">Italiano</a> |
++  <a href="docs/readme/README.da.md">Dansk</a> |
++  <a href="docs/readme/README.ja.md">日本語</a> |
++  <a href="docs/readme/README.pl.md">Polski</a> |
++  <a href="docs/readme/README.ru.md">Русский</a> |
++  <a href="docs/readme/README.bs.md">Bosanski</a> |
++  <a href="docs/readme/README.ar.md">العربية</a> |
++  <a href="docs/readme/README.no.md">Norsk</a> |
++  <a href="docs/readme/README.br.md">Português (Brasil)</a> |
++  <a href="docs/readme/README.th.md">ไทย</a> |
++  <a href="docs/readme/README.tr.md">Türkçe</a> |
++  <a href="docs/readme/README.uk.md">Українська</a> |
++  <a href="docs/readme/README.bn.md">বাংলা</a> |
++  <a href="docs/readme/README.gr.md">Ελληνικά</a> |
++  <a href="docs/readme/README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+ [![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+diff --git a/README.ar.md b/docs/readme/README.ar.md
+similarity index 96%
+rename from README.ar.md
+rename to docs/readme/README.ar.md
+index f78330aa32d543297875895f5d71006e29b11c02..02f1c93a84bb734375f45ece087ec86b3b56dbe5 100644
+--- a/README.ar.md
++++ b/docs/readme/README.ar.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="شعار OpenCode">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="شعار OpenCode">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ opencode
+ | --- | --- |
+ | الوثائق الرسمية | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| دليل المساهمة | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| دليل المساهمة | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ opencode
+ 
+ ## المساهمة
+ 
+-اقرأ [دليل المساهمة](./CONTRIBUTING.md) قبل إرسال PR. إذا استخدمت `opencode` في اسم مشروعك، فأوضح في README أن المشروع ليس مشروعا رسميا من فريق OpenCode ولا يرتبط بفريق OpenCode.
++اقرأ [دليل المساهمة](../../CONTRIBUTING.md) قبل إرسال PR. إذا استخدمت `opencode` في اسم مشروعك، فأوضح في README أن المشروع ليس مشروعا رسميا من فريق OpenCode ولا يرتبط بفريق OpenCode.
+ 
+ ---
+ 
+diff --git a/README.bn.md b/docs/readme/README.bn.md
+similarity index 96%
+rename from README.bn.md
+rename to docs/readme/README.bn.md
+index 81034fa6af415f3c6c13591f37f27833b28af498..fbd7120455bf65ca32fa42ebf8368abe69ed0d46 100644
+--- a/README.bn.md
++++ b/docs/readme/README.bn.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode-এ একাধিক built-in primary agents আছে যেগু
+ | --- | --- |
+ | Official docs | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Contributing guide | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Contributing guide | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ installer শুধু target install path-কে trust করে। `/usr/local
+ 
+ ## Contributing
+ 
+-PR submit করার আগে [contributing guide](./CONTRIBUTING.md) পড়ুন। আপনার নিজের project name-এ `opencode` ব্যবহার করলে তার README-তে লিখুন যে এটি official OpenCode team project নয় এবং OpenCode team-এর সাথে affiliated নয়।
++PR submit করার আগে [contributing guide](../../CONTRIBUTING.md) পড়ুন। আপনার নিজের project name-এ `opencode` ব্যবহার করলে তার README-তে লিখুন যে এটি official OpenCode team project নয় এবং OpenCode team-এর সাথে affiliated নয়।
+ 
+ ---
+ 
+diff --git a/README.br.md b/docs/readme/README.br.md
+similarity index 96%
+rename from README.br.md
+rename to docs/readme/README.br.md
+index 83b7718c3696ed11a6c464316506285e64c93ccf..163ebd009010a8f1835d607b38dbec78d6e5d7f4 100644
+--- a/README.br.md
++++ b/docs/readme/README.br.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="Logo do OpenCode">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="Logo do OpenCode">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ O OpenCode inclui varios primary agents integrados que podem ser alternados com
+ | --- | --- |
+ | Docs oficiais | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Guia de contribuicao | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Guia de contribuicao | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ O instalador confia apenas no caminho de instalacao de destino. Mesmo se `/usr/l
+ 
+ ## Contribuindo
+ 
+-Leia o [guia de contribuicao](./CONTRIBUTING.md) antes de enviar um PR. Se o nome do seu proprio projeto usar `opencode`, declare no README dele que nao e um projeto oficial da equipe OpenCode e nao e afiliado a equipe OpenCode.
++Leia o [guia de contribuicao](../../CONTRIBUTING.md) antes de enviar um PR. Se o nome do seu proprio projeto usar `opencode`, declare no README dele que nao e um projeto oficial da equipe OpenCode e nao e afiliado a equipe OpenCode.
+ 
+ ---
+ 
+diff --git a/README.bs.md b/docs/readme/README.bs.md
+similarity index 96%
+rename from README.bs.md
+rename to docs/readme/README.bs.md
+index 8f16d0a309cf943ab8e6217c624a48688938969b..6e49e8fbb6ce7706a8bbd999a91508fd4d2ea36b 100644
+--- a/README.bs.md
++++ b/docs/readme/README.bs.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode uključuje više ugrađenih primary agenata koji se mogu prebacivati po
+ | --- | --- |
+ | Zvanična dokumentacija | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Vodič za doprinos | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Vodič za doprinos | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ Installer vjeruje samo ciljnoj instalacijskoj putanji. Čak i ako `/usr/local/bi
+ 
+ ## Doprinosi
+ 
+-Pročitajte [vodič za doprinos](./CONTRIBUTING.md) prije slanja PR-a. Ako naziv vašeg projekta koristi `opencode`, navedite u njegovom README-u da to nije zvanični projekat OpenCode tima i da nije povezan s OpenCode timom.
++Pročitajte [vodič za doprinos](../../CONTRIBUTING.md) prije slanja PR-a. Ako naziv vašeg projekta koristi `opencode`, navedite u njegovom README-u da to nije zvanični projekat OpenCode tima i da nije povezan s OpenCode timom.
+ 
+ ---
+ 
+diff --git a/README.da.md b/docs/readme/README.da.md
+similarity index 96%
+rename from README.da.md
+rename to docs/readme/README.da.md
+index 2ae2060cb79aef24daba8d7e87a5015936b4d05c..e786b6fd0f461718d8d097605a316d23966730c6 100644
+--- a/README.da.md
++++ b/docs/readme/README.da.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode har flere indbyggede primary agent, som hurtigt kan vælges med `Tab`.
+ | --- | --- |
+ | Officiel dokumentation | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Bidragsguide | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Bidragsguide | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ Installationsscriptet bruger kun target install path som autoritet. Selv hvis `/
+ 
+ ## Bidrag
+ 
+-Læs [bidragsguiden](./CONTRIBUTING.md), før du sender en PR. Hvis du bruger `opencode` i dit eget projektnavn, skal README tydeligt angive, at projektet ikke er et officielt OpenCode-teamprojekt og ikke er tilknyttet OpenCode-teamet.
++Læs [bidragsguiden](../../CONTRIBUTING.md), før du sender en PR. Hvis du bruger `opencode` i dit eget projektnavn, skal README tydeligt angive, at projektet ikke er et officielt OpenCode-teamprojekt og ikke er tilknyttet OpenCode-teamet.
+ 
+ ---
+ 
+diff --git a/README.de.md b/docs/readme/README.de.md
+similarity index 96%
+rename from README.de.md
+rename to docs/readme/README.de.md
+index 38f620045d8a9c9d8e2f3f10c70331bd056dfd79..fb4be2bb51d3673e14ba08397249f6f4492f1be3 100644
+--- a/README.de.md
++++ b/docs/readme/README.de.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode enthält mehrere eingebaute primary agents, zwischen denen mit `Tab` ge
+ | --- | --- |
+ | Offizielle Docs | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Beitragsleitfaden | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Beitragsleitfaden | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ Der Installer vertraut nur dem Ziel-Installationspfad. Selbst wenn `/usr/local/b
+ 
+ ## Beitragen
+ 
+-Lies den [Beitragsleitfaden](./CONTRIBUTING.md), bevor du einen PR einreichst. Wenn dein eigenes Projekt `opencode` im Namen verwendet, vermerke in seiner README, dass es kein offizielles Projekt des OpenCode-Teams ist und nicht mit dem OpenCode-Team verbunden ist.
++Lies den [Beitragsleitfaden](../../CONTRIBUTING.md), bevor du einen PR einreichst. Wenn dein eigenes Projekt `opencode` im Namen verwendet, vermerke in seiner README, dass es kein offizielles Projekt des OpenCode-Teams ist und nicht mit dem OpenCode-Team verbunden ist.
+ 
+ ---
+ 
+diff --git a/README.en.md b/docs/readme/README.en.md
+similarity index 96%
+rename from README.en.md
+rename to docs/readme/README.en.md
+index 9c29225f0a6a85be666a93421dc9e65877b5f39a..2076a5a029d5158a02af9b79af16517f7658b3ef 100644
+--- a/README.en.md
++++ b/docs/readme/README.en.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -299,7 +299,7 @@ OpenCode includes multiple built-in primary agents that can be switched with `Ta
+ | --- | --- |
+ | Official docs | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Contributing guide | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Contributing guide | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -325,7 +325,7 @@ The installer only trusts the target install path. Even if `/usr/local/bin/openc
+ 
+ ## Contributing
+ 
+-Read the [contributing guide](./CONTRIBUTING.md) before submitting a PR. If your own project name uses `opencode`, state in its README that it is not an official OpenCode team project and is not affiliated with the OpenCode team.
++Read the [contributing guide](../../CONTRIBUTING.md) before submitting a PR. If your own project name uses `opencode`, state in its README that it is not an official OpenCode team project and is not affiliated with the OpenCode team.
+ 
+ ---
+ 
+diff --git a/README.es.md b/docs/readme/README.es.md
+similarity index 96%
+rename from README.es.md
+rename to docs/readme/README.es.md
+index 70d3363be6180734f77f066659f0b815ad90bb5d..58bdb3001f9702a16a3ad43da0bc266016069fbd 100644
+--- a/README.es.md
++++ b/docs/readme/README.es.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode incluye varios primary agents integrados que se pueden cambiar con `Tab
+ | --- | --- |
+ | Documentación oficial | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Guía de contribución | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Guía de contribución | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ El installer solo confía en la ruta de instalación objetivo. Aunque `/usr/loca
+ 
+ ## Contribuir
+ 
+-Lee la [guía de contribución](./CONTRIBUTING.md) antes de enviar un PR. Si el nombre de tu propio proyecto usa `opencode`, indica en su README que no es un proyecto oficial del equipo de OpenCode y que no está afiliado al equipo de OpenCode.
++Lee la [guía de contribución](../../CONTRIBUTING.md) antes de enviar un PR. Si el nombre de tu propio proyecto usa `opencode`, indica en su README que no es un proyecto oficial del equipo de OpenCode y que no está afiliado al equipo de OpenCode.
+ 
+ ---
+ 
+diff --git a/README.fr.md b/docs/readme/README.fr.md
+similarity index 96%
+rename from README.fr.md
+rename to docs/readme/README.fr.md
+index a5b5245b5eb5f8477ea5bb8acf3458b53fa1998c..1a57af2f60d7e04af7ea962b162fb642fd65d189 100644
+--- a/README.fr.md
++++ b/docs/readme/README.fr.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="Logo OpenCode">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="Logo OpenCode">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode inclut plusieurs agents primary intégrés que vous pouvez changer avec
+ | --- | --- |
+ | Docs officielles | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Guide de contribution | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Guide de contribution | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ L'installateur ne fait confiance qu'au chemin d'installation cible. Même si `/u
+ 
+ ## Contribuer
+ 
+-Lisez le [guide de contribution](./CONTRIBUTING.md) avant de soumettre une PR. Si le nom de votre propre projet utilise `opencode`, indiquez dans son README qu'il ne s'agit pas d'un projet officiel de l'équipe OpenCode et qu'il n'est pas affilié à l'équipe OpenCode.
++Lisez le [guide de contribution](../../CONTRIBUTING.md) avant de soumettre une PR. Si le nom de votre propre projet utilise `opencode`, indiquez dans son README qu'il ne s'agit pas d'un projet officiel de l'équipe OpenCode et qu'il n'est pas affilié à l'équipe OpenCode.
+ 
+ ---
+ 
+diff --git a/README.gr.md b/docs/readme/README.gr.md
+similarity index 96%
+rename from README.gr.md
+rename to docs/readme/README.gr.md
+index dbd7b30d19cd95c6f9613c2e82d5e380549653a4..f8cf5ca788b17a09e544aceac078875b88d321e8 100644
+--- a/README.gr.md
++++ b/docs/readme/README.gr.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ opencode
+ | --- | --- |
+ | Official docs | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Contributing guide | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Contributing guide | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ opencode
+ 
+ ## Συνεισφορά
+ 
+-Διαβάστε τον [contributing guide](./CONTRIBUTING.md) πριν υποβάλετε PR. Αν το όνομα του δικού σας project χρησιμοποιεί `opencode`, δηλώστε στο README του ότι δεν είναι επίσημο project της ομάδας OpenCode και δεν συνδέεται με την ομάδα OpenCode.
++Διαβάστε τον [contributing guide](../../CONTRIBUTING.md) πριν υποβάλετε PR. Αν το όνομα του δικού σας project χρησιμοποιεί `opencode`, δηλώστε στο README του ότι δεν είναι επίσημο project της ομάδας OpenCode και δεν συνδέεται με την ομάδα OpenCode.
+ 
+ ---
+ 
+diff --git a/README.it.md b/docs/readme/README.it.md
+similarity index 96%
+rename from README.it.md
+rename to docs/readme/README.it.md
+index d878f482d9d4855eec98f6e6c3e45ac10d81d352..a5385c6b5e0387ed8e1df6ce9876ad5640131f29 100644
+--- a/README.it.md
++++ b/docs/readme/README.it.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode include più agenti primari integrati che possono essere cambiati con `
+ | --- | --- |
+ | Documentazione ufficiale | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Guida alla contribuzione | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Guida alla contribuzione | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ L'installer considera affidabile solo il percorso di installazione target. Anche
+ 
+ ## Contribuire
+ 
+-Leggi la [guida alla contribuzione](./CONTRIBUTING.md) prima di inviare una PR. Se il nome del tuo progetto usa `opencode`, dichiara nel suo README che non è un progetto ufficiale del team OpenCode e non è affiliato al team OpenCode.
++Leggi la [guida alla contribuzione](../../CONTRIBUTING.md) prima di inviare una PR. Se il nome del tuo progetto usa `opencode`, dichiara nel suo README che non è un progetto ufficiale del team OpenCode e non è affiliato al team OpenCode.
+ 
+ ---
+ 
+diff --git a/README.ja.md b/docs/readme/README.ja.md
+similarity index 96%
+rename from README.ja.md
+rename to docs/readme/README.ja.md
+index 9c2b02bc1bd06ad85f1ea3a67f1ae7ac7914e3ed..d4078b46a8ffb3f9af38f1e39c84c2d190b4e1a7 100644
+--- a/README.ja.md
++++ b/docs/readme/README.ja.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode には複数の built-in primary agents が含まれており、`Tab` 
+ | --- | --- |
+ | Official docs | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Contributing guide | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Contributing guide | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ Installer は target install path だけを信頼します。`/usr/local/bin/ope
+ 
+ ## Contributing
+ 
+-PR を送信する前に [contributing guide](./CONTRIBUTING.md) を読んでください。自分の project name に `opencode` を使用する場合は、その README に、その project が official OpenCode team project ではなく、OpenCode team と affiliated していないことを明記してください。
++PR を送信する前に [contributing guide](../../CONTRIBUTING.md) を読んでください。自分の project name に `opencode` を使用する場合は、その README に、その project が official OpenCode team project ではなく、OpenCode team と affiliated していないことを明記してください。
+ 
+ ---
+ 
+diff --git a/README.ko.md b/docs/readme/README.ko.md
+similarity index 96%
+rename from README.ko.md
+rename to docs/readme/README.ko.md
+index cac9a4b145bacb351b58e67d376d4402ac1a4a46..ff5f685a6dc4e81c577ab00098c2cace243cfde3 100644
+--- a/README.ko.md
++++ b/docs/readme/README.ko.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode에는 `Tab`으로 전환할 수 있는 여러 built-in primary agents
+ | --- | --- |
+ | Official docs | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Contributing guide | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Contributing guide | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ Installer는 target install path만 신뢰합니다. `/usr/local/bin/opencode`
+ 
+ ## 기여하기
+ 
+-PR을 제출하기 전에 [contributing guide](./CONTRIBUTING.md)를 읽어주세요. 자신의 project name에 `opencode`를 사용하는 경우, README에 해당 project가 공식 OpenCode team project가 아니며 OpenCode team과 제휴되어 있지 않다고 명시하세요.
++PR을 제출하기 전에 [contributing guide](../../CONTRIBUTING.md)를 읽어주세요. 자신의 project name에 `opencode`를 사용하는 경우, README에 해당 project가 공식 OpenCode team project가 아니며 OpenCode team과 제휴되어 있지 않다고 명시하세요.
+ 
+ ---
+ 
+diff --git a/README.no.md b/docs/readme/README.no.md
+similarity index 96%
+rename from README.no.md
+rename to docs/readme/README.no.md
+index f7d1a44a038a9f12a5e2ee5ff45865dc27afae98..5819db509ce461134a4d2765ac274b7a80003508 100644
+--- a/README.no.md
++++ b/docs/readme/README.no.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode inkluderer flere innebygde primary agents som kan byttes med `Tab`. Sta
+ | --- | --- |
+ | Offisiell dokumentasjon | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Bidragsveiledning | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Bidragsveiledning | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ Installasjonsprogrammet stoler bare på målinstallasjonsstien. Selv om `/usr/lo
+ 
+ ## Bidra
+ 
+-Les [bidragsveiledningen](./CONTRIBUTING.md) før du sender en PR. Hvis ditt eget prosjektnavn bruker `opencode`, oppgi i README-en at det ikke er et offisielt OpenCode-teamprosjekt og ikke er tilknyttet OpenCode-teamet.
++Les [bidragsveiledningen](../../CONTRIBUTING.md) før du sender en PR. Hvis ditt eget prosjektnavn bruker `opencode`, oppgi i README-en at det ikke er et offisielt OpenCode-teamprosjekt og ikke er tilknyttet OpenCode-teamet.
+ 
+ ---
+ 
+diff --git a/README.pl.md b/docs/readme/README.pl.md
+similarity index 96%
+rename from README.pl.md
+rename to docs/readme/README.pl.md
+index 547d464e7b123c92af696914f73a592a09586e4c..4cac1c2bb45384d1e593b6832ef9f767ad1f0ad6 100644
+--- a/README.pl.md
++++ b/docs/readme/README.pl.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode zawiera wiele wbudowanych agentów primary, między którymi można prz
+ | --- | --- |
+ | Oficjalna dokumentacja | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Przewodnik współtworzenia | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Przewodnik współtworzenia | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ Instalator ufa tylko docelowej ścieżce instalacji. Nawet jeśli `/usr/local/bi
+ 
+ ## Współtworzenie
+ 
+-Przeczytaj [przewodnik współtworzenia](./CONTRIBUTING.md) przed wysłaniem PR. Jeśli nazwa twojego projektu używa `opencode`, napisz w jego README, że nie jest to oficjalny projekt zespołu OpenCode i nie jest powiązany z zespołem OpenCode.
++Przeczytaj [przewodnik współtworzenia](../../CONTRIBUTING.md) przed wysłaniem PR. Jeśli nazwa twojego projektu używa `opencode`, napisz w jego README, że nie jest to oficjalny projekt zespołu OpenCode i nie jest powiązany z zespołem OpenCode.
+ 
+ ---
+ 
+diff --git a/README.ru.md b/docs/readme/README.ru.md
+similarity index 96%
+rename from README.ru.md
+rename to docs/readme/README.ru.md
+index dfa7e4c30ec62536f814363f06798c8f8802f885..e52247cd60b6e5e34e922d89b34c441baff57307 100644
+--- a/README.ru.md
++++ b/docs/readme/README.ru.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode включает несколько встроенных primary agents
+ | --- | --- |
+ | Official docs | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Contributing guide | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Contributing guide | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ Installer доверяет только target install path. Даже если `
+ 
+ ## Contributing
+ 
+-Прочитайте [contributing guide](./CONTRIBUTING.md) перед отправкой PR. Если имя вашего собственного проекта использует `opencode`, укажите в его README, что это не официальный проект OpenCode team и он не аффилирован с OpenCode team.
++Прочитайте [contributing guide](../../CONTRIBUTING.md) перед отправкой PR. Если имя вашего собственного проекта использует `opencode`, укажите в его README, что это не официальный проект OpenCode team и он не аффилирован с OpenCode team.
+ 
+ ---
+ 
+diff --git a/README.th.md b/docs/readme/README.th.md
+similarity index 96%
+rename from README.th.md
+rename to docs/readme/README.th.md
+index 001a6760a8148d57e5f83bfbdb78536d510ad329..72c310987053866b65625cd75c1bed361570773c 100644
+--- a/README.th.md
++++ b/docs/readme/README.th.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode มี built-in primary agents หลายตัวที่สลั
+ | --- | --- |
+ | Official docs | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Contributing guide | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Contributing guide | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ Installer เชื่อถือเฉพาะ target install path เท่
+ 
+ ## การมีส่วนร่วม
+ 
+-อ่าน [contributing guide](./CONTRIBUTING.md) ก่อนส่ง PR หากชื่อโปรเจกต์ของคุณใช้ `opencode` ให้ระบุใน README ว่าไม่ใช่โปรเจกต์อย่างเป็นทางการของทีม OpenCode และไม่มีความเกี่ยวข้องกับทีม OpenCode
++อ่าน [contributing guide](../../CONTRIBUTING.md) ก่อนส่ง PR หากชื่อโปรเจกต์ของคุณใช้ `opencode` ให้ระบุใน README ว่าไม่ใช่โปรเจกต์อย่างเป็นทางการของทีม OpenCode และไม่มีความเกี่ยวข้องกับทีม OpenCode
+ 
+ ---
+ 
+diff --git a/README.tr.md b/docs/readme/README.tr.md
+similarity index 96%
+rename from README.tr.md
+rename to docs/readme/README.tr.md
+index 3a0ef4cec1bfe4ed12a346a1b85acc47604891e4..354bc15f4f7d9c479ec717ecfcec07c2094f90e8 100644
+--- a/README.tr.md
++++ b/docs/readme/README.tr.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode, `Tab` ile geçiş yapılabilen birden çok yerleşik primary agent iç
+ | --- | --- |
+ | Resmi dokümanlar | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Katkı rehberi | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Katkı rehberi | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ Installer yalnızca hedef kurulum yoluna güvenir. `/usr/local/bin/opencode` ayn
+ 
+ ## Katkıda Bulunma
+ 
+-PR göndermeden önce [katkı rehberini](./CONTRIBUTING.md) okuyun. Kendi proje adınız `opencode` kullanıyorsa README dosyasında bunun resmi bir OpenCode team projesi olmadığını ve OpenCode team ile bağlantılı olmadığını belirtin.
++PR göndermeden önce [katkı rehberini](../../CONTRIBUTING.md) okuyun. Kendi proje adınız `opencode` kullanıyorsa README dosyasında bunun resmi bir OpenCode team projesi olmadığını ve OpenCode team ile bağlantılı olmadığını belirtin.
+ 
+ ---
+ 
+diff --git a/README.uk.md b/docs/readme/README.uk.md
+similarity index 96%
+rename from README.uk.md
+rename to docs/readme/README.uk.md
+index 275fba6fb9e4f7ec9e29bc631c6d9c3b290d150a..24c21a3f519cbbade0493e24809e0b866fd29c14 100644
+--- a/README.uk.md
++++ b/docs/readme/README.uk.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode містить кілька built-in primary agents, між якими
+ | --- | --- |
+ | Official docs | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Contributing guide | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Contributing guide | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ Installer довіряє лише target install path. Навіть якщо `/u
+ 
+ ## Внесок
+ 
+-Перед надсиланням PR прочитайте [contributing guide](./CONTRIBUTING.md). Якщо назва вашого власного project використовує `opencode`, зазначте в його README, що це не official OpenCode team project і він не affiliated з OpenCode team.
++Перед надсиланням PR прочитайте [contributing guide](../../CONTRIBUTING.md). Якщо назва вашого власного project використовує `opencode`, зазначте в його README, що це не official OpenCode team project і він не affiliated з OpenCode team.
+ 
+ ---
+ 
+diff --git a/README.vi.md b/docs/readme/README.vi.md
+similarity index 95%
+rename from README.vi.md
+rename to docs/readme/README.vi.md
+index aa0b2c54596ab6d0779a7120442a9d0c0a18a28b..7b29187afdf41451015c5b859fd205a1f2fe27ef 100644
+--- a/README.vi.md
++++ b/docs/readme/README.vi.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -292,7 +292,7 @@ OpenCode bao gom nhieu built-in primary agents co the chuyen bang `Tab`. Agent m
+ | --- | --- |
+ | Tai lieu chinh thuc | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| Huong dan dong gop | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| Huong dan dong gop | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -318,7 +318,7 @@ Installer chi tin vao duong dan cai dat dich. Ngay ca khi `/usr/local/bin/openco
+ 
+ ## Dong Gop
+ 
+-Doc [huong dan dong gop](./CONTRIBUTING.md) truoc khi gui PR. Neu ten du an rieng cua ban dung `opencode`, hay neu trong README cua du an do rang no khong phai du an chinh thuc cua doi ngu OpenCode va khong lien ket voi doi ngu OpenCode.
++Doc [huong dan dong gop](../../CONTRIBUTING.md) truoc khi gui PR. Neu ten du an rieng cua ban dung `opencode`, hay neu trong README cua du an do rang no khong phai du an chinh thuc cua doi ngu OpenCode va khong lien ket voi doi ngu OpenCode.
+ 
+ ---
+ 
+diff --git a/README.zht.md b/docs/readme/README.zht.md
+similarity index 96%
+rename from README.zht.md
+rename to docs/readme/README.zht.md
+index 7759561e257811f7cc3000e4113bcf2abefc50b1..3d631540f650dd1572ec26f3805bf51be1eea524 100644
+--- a/README.zht.md
++++ b/docs/readme/README.zht.md
+@@ -1,9 +1,9 @@
+ <p align="center">
+   <a href="https://opencode.ai">
+     <picture>
+-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
+-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
+-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
++      <source srcset="../../packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
++      <img src="../../packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
+     </picture>
+   </a>
+ </p>
+@@ -16,7 +16,7 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="README.md">简体中文</a> |
++  <a href="../../README.md">简体中文</a> |
+   <a href="README.en.md">English</a> |
+   <a href="README.zht.md">繁體中文</a> |
+   <a href="README.ko.md">한국어</a> |
+@@ -40,7 +40,7 @@
+   <a href="README.vi.md">Tiếng Việt</a>
+ </p>
+ 
+-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
++[![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+ 
+ ---
+ 
+@@ -299,7 +299,7 @@ OpenCode 內建多種 primary agent，可用 `Tab` 快速切換。預設 agent 
+ | --- | --- |
+ | 官方文件 | https://opencode.ai/docs |
+ | Release | https://github.com/SMARK2022/opencode/releases |
+-| 貢獻指南 | [CONTRIBUTING.md](./CONTRIBUTING.md) |
++| 貢獻指南 | [CONTRIBUTING.md](../../CONTRIBUTING.md) |
+ 
+ ---
+ 
+@@ -325,7 +325,7 @@ OpenCode 內建多種 primary agent，可用 `Tab` 快速切換。預設 agent 
+ 
+ ## 參與貢獻
+ 
+-提交 PR 前請閱讀 [貢獻指南](./CONTRIBUTING.md)。如果你在自己的專案名中使用 `opencode`，請在 README 中說明該專案並非 OpenCode 團隊官方專案，也不與 OpenCode 團隊存在關聯。
++提交 PR 前請閱讀 [貢獻指南](../../CONTRIBUTING.md)。如果你在自己的專案名中使用 `opencode`，請在 README 中說明該專案並非 OpenCode 團隊官方專案，也不與 OpenCode 團隊存在關聯。
+ 
+ ---
+ 
+diff --git a/packages/app/src/context/file/path.test.ts b/packages/app/src/context/file/path.test.ts
+index feef6d466ef4a0aa2c206289ab2da8e09512197f..d2b26121c412b471b307e3f5db0e1e58a7170416 100644
+--- a/packages/app/src/context/file/path.test.ts
++++ b/packages/app/src/context/file/path.test.ts
+@@ -106,7 +106,7 @@ describe("encodeFilePath", () => {
+ 
+   describe("Windows paths", () => {
+     test("should handle Windows absolute path with backslashes", () => {
+-      const windowsPath = "D:\\dev\\projects\\opencode\\README.bs.md"
++      const windowsPath = "D:\\dev\\projects\\opencode\\docs\\readme\\README.bs.md"
+       const result = encodeFilePath(windowsPath)
+       const fileUrl = `file://${result}`
+ 
+@@ -116,17 +116,17 @@ describe("encodeFilePath", () => {
+       const url = new URL(fileUrl)
+       expect(url.protocol).toBe("file:")
+       expect(url.pathname).toContain("README.bs.md")
+-      expect(result).toBe("/D:/dev/projects/opencode/README.bs.md")
++      expect(result).toBe("/D:/dev/projects/opencode/docs/readme/README.bs.md")
+     })
+ 
+     test("should handle mixed separator path (Windows + Unix)", () => {
+       // This is what happens in build-request-parts.ts when concatenating paths
+-      const mixedPath = "D:\\dev\\projects\\opencode/README.bs.md"
++      const mixedPath = "D:\\dev\\projects\\opencode/docs/readme/README.bs.md"
+       const result = encodeFilePath(mixedPath)
+       const fileUrl = `file://${result}`
+ 
+       expect(() => new URL(fileUrl)).not.toThrow()
+-      expect(result).toBe("/D:/dev/projects/opencode/README.bs.md")
++      expect(result).toBe("/D:/dev/projects/opencode/docs/readme/README.bs.md")
+     })
+ 
+     test("should handle Windows path with spaces", () => {
+@@ -167,13 +167,13 @@ describe("encodeFilePath", () => {
+ 
+     test("should NOT create invalid URL like the bug report", () => {
+       // This is the exact scenario from bug report by @alexyaroshuk
+-      const windowsPath = "D:\\dev\\projects\\opencode\\README.bs.md"
++      const windowsPath = "D:\\dev\\projects\\opencode\\docs\\readme\\README.bs.md"
+       const result = encodeFilePath(windowsPath)
+       const fileUrl = `file://${result}`
+ 
+-      // The bug was creating: file://D%3A%5Cdev%5Cprojects%5Copencode/README.bs.md
++      // The bug was creating: file://D%3A%5Cdev%5Cprojects%5Copencode/docs/readme/README.bs.md
+       expect(result).not.toContain("%5C") // Should not have encoded backslashes
+-      expect(result).not.toBe("D%3A%5Cdev%5Cprojects%5Copencode/README.bs.md")
++      expect(result).not.toBe("D%3A%5Cdev%5Cprojects%5Copencode/docs/readme/README.bs.md")
+ 
+       // Should be valid
+       expect(() => new URL(fileUrl)).not.toThrow()
+diff --git a/packages/opencode/test/docs/readme.test.ts b/packages/opencode/test/docs/readme.test.ts
+index 8cd15a0e674bed2a0f5d099e89008091fd756b4f..997b35c831ad83c5b5951ea36863afeb7f6ec22a 100644
+--- a/packages/opencode/test/docs/readme.test.ts
++++ b/packages/opencode/test/docs/readme.test.ts
+@@ -20,7 +20,7 @@ const readmes = [
+     },
+   },
+   {
+-    file: "README.en.md",
++    file: "docs/readme/README.en.md",
+     // 三语种 README 结构保持一致，所以每份文档都用本地化安装标题切分“安装前”区域。
+     installHeading: "## Quick Install",
+     concepts: {
+@@ -35,7 +35,7 @@ const readmes = [
+     },
+   },
+   {
+-    file: "README.zht.md",
++    file: "docs/readme/README.zht.md",
+     // 繁中 README 是用户入口之一，不能只让简中/英文满足风险提示和可选 MCP 说明。
+     installHeading: "## 快速安裝",
+     concepts: {

@@ -1,0 +1,544 @@
+From 6b7ac3cdcb6b92622ca6a40e55a824b805d8a85c Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 29 May 2026 16:21:03 +0800
+Subject: [PATCH] =?UTF-8?q?feat(endpoint-status):=20=E6=B7=BB=E5=8A=A0deam?=
+ =?UTF-8?q?on=E4=BE=A7=20provider=20endpoint=20=E7=8A=B6=E6=80=81=E6=9F=A5?=
+ =?UTF-8?q?=E8=AF=A2=E5=8A=9F=E8=83=BD=EF=BC=8C=E6=94=AF=E6=8C=81=20TUI=20?=
+ =?UTF-8?q?=E8=AF=BB=E5=8F=96=20daemon=20=E7=BB=9F=E4=B8=80=E7=BD=91?=
+ =?UTF-8?q?=E7=BB=9C=E7=8A=B6=E6=80=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sdk.tsx b/packages/opencode/src/cli/cmd/tui/context/sdk.tsx
+index 6182307365b0a442fb2ec168d54efac31923073f..f21fc6b5aea11d5d383fafd1a84c75974b1d35a8 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sdk.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sdk.tsx
+@@ -40,6 +40,15 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+       })
+     }
+ 
++    function fetchWithHeaders(input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) {
++      const headers = new Headers(props.headers)
++      new Headers(init?.headers).forEach((value, key) => headers.set(key, value))
++      // Raw daemon fetches must carry the same attach/auth headers as the
++      // generated SDK client. Otherwise protected TUI connections can read normal
++      // SDK routes but sidebar/helper fetches would be rejected by Authorization.
++      return (props.testTransport?.fetch ?? fetch)(input, { ...init, headers })
++    }
++
+     let sdk = createSDK()
+ 
+     const emitter = createGlobalEmitter<{
+@@ -207,7 +216,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+       },
+       directory: props.directory,
+       event: emitter,
+-      fetch: props.testTransport?.fetch ?? fetch,
++      fetch: fetchWithHeaders,
+       get url() {
+         return url
+       },
+diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
+index 778c24c35be90e4d5e0807d29ea069fa4478992d..f4509368b74c6c2d1b2a242f56e05ebfc81aade3 100644
+--- a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
++++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
+@@ -6,8 +6,8 @@ import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
+ import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
+ import { createTokenFlowPulse } from "../../util/signal"
+ import { tokenAccounting } from "@/token/accounting"
+-import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { useLocal } from "@tui/context/local"
++import { useSDK } from "@tui/context/sdk"
+ 
+ const id = "internal:sidebar-context"
+ 
+@@ -20,6 +20,7 @@ const PING_INTERVAL = 1_000
+ function View(props: { api: TuiPluginApi; session_id: string }) {
+   const theme = () => props.api.theme.current
+   const local = useLocal()
++  const sdk = useSDK()
+   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
+   // [local-smark] Detailed token accounting state
+   const isRunning = createMemo(() => (props.api.state.session.status(props.session_id)?.type ?? "idle") !== "idle")
+@@ -109,28 +110,34 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
+     const ping = async () => {
+       if (!active) return
+ 
+-      const t0 = Date.now()
+       try {
+-        const route = await NetworkProxy.resolveProxyRoute(url, "provider")
+-        if (!active) return
+-        setIsProxy(route.type === "proxy")
+-
+-        const res = await NetworkProxy.routedFetch(url, {
+-          method: "HEAD",
++        const target = new URL("/tui/provider-endpoint-status", sdk.url)
++        target.searchParams.set("url", url)
++        if (sdk.directory) target.searchParams.set("directory", sdk.directory)
++        // proxy/latency 必须由 daemon 统一计算：多个 TUI 可以复用同一个
++        // daemon，而真实 provider 请求也从 daemon 发出。这里仅订阅 daemon 的
++        // 缓存结果，避免每个 TUI 用自己的 env/system proxy 重复探测。
++        const res = await sdk.fetch(target, {
++          method: "GET",
+           signal: AbortSignal.timeout(3000),
+-          purpose: "provider",
+-        } as RequestInit)
+-        const elapsed = Date.now() - t0
++        })
++        if (!res.ok) throw new Error(`endpoint status failed: ${res.status}`)
++        const status = await res.json() as {
++          status: "ok" | "down"
++          latency: number | null
++          route: { type: "direct" | "proxy" }
++        }
+         if (!active) return
+ 
+-        if (res.status === 502 || res.status === 503 || res.status === 504) {
++        setIsProxy(status.route.type === "proxy")
++        if (status.status === "down") {
+           setPingStatus("down")
+           setLatency(null)
+         } else {
+-          setPingStatus("ok")
+-          setLatency(elapsed)
++          setPingStatus(status.status)
++          setLatency(status.latency)
+         }
+-      } catch (err: any) {
++      } catch {
+         if (active) {
+           setPingStatus("down")
+           setLatency(null)
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/tui.ts b/packages/opencode/src/server/routes/instance/httpapi/groups/tui.ts
+index 3cf3de5b8eb628360005bb77258d5644c12e8fb2..a4294785435ce6f99b6ebb465e91fa609d12c019 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/groups/tui.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/groups/tui.ts
+@@ -4,7 +4,11 @@ import { Schema } from "effect"
+ import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
+ import { Authorization } from "../middleware/authorization"
+ import { InstanceContextMiddleware } from "../middleware/instance-context"
+-import { WorkspaceRoutingMiddleware, WorkspaceRoutingQuery } from "../middleware/workspace-routing"
++import {
++  WorkspaceRoutingMiddleware,
++  WorkspaceRoutingQuery,
++  WorkspaceRoutingQueryFields,
++} from "../middleware/workspace-routing"
+ import { ApiNotFoundError } from "../errors"
+ import { described } from "./metadata"
+ 
+@@ -32,6 +36,28 @@ export const TuiPublishPayload = Schema.Union([
+   EventTuiToastShow,
+   EventTuiSessionSelect,
+ ])
++export const ProviderEndpointStatusQuery = Schema.Struct({
++  ...WorkspaceRoutingQueryFields,
++  // TUI 传入 provider baseURL 的 origin。使用 query 而不是 body 是为了保持
++  // sidebar 轮询为幂等 GET；WorkspaceRoutingQueryFields 继续允许远端 workspace
++  // 中间件识别 directory/workspace 参数，不破坏既有 TUI 路由行为。
++  url: Schema.String,
++})
++export const ProviderEndpointStatus = Schema.Struct({
++  url: Schema.String,
++  // HTTP 响应只暴露 ok/down：首次探测由 handler 等待完成，TUI 自己保留本地
++  // init 显示态。wire schema 不包含 init，避免外部调用方误以为 daemon 会返回
++  // 一个需要再次轮询解释的未完成状态。
++  status: Schema.Literals(["ok", "down"]),
++  latency: Schema.NullOr(Schema.Number),
++  route: Schema.Struct({
++    // 只暴露 direct/proxy，不返回具体 proxy URL，避免把可能包含凭据的代理
++    // 地址通过 TUI/plugin API 泄漏出去。
++    type: Schema.Literals(["direct", "proxy"]),
++    reason: Schema.String,
++  }),
++  checkedAt: Schema.Number,
++})
+ 
+ export const TuiPaths = {
+   appendPrompt: `${root}/append-prompt`,
+@@ -45,6 +71,7 @@ export const TuiPaths = {
+   showToast: `${root}/show-toast`,
+   publish: `${root}/publish`,
+   selectSession: `${root}/select-session`,
++  providerEndpointStatus: `${root}/provider-endpoint-status`,
+   controlNext: `${root}/control/next`,
+   controlResponse: `${root}/control/response`,
+ } as const
+@@ -172,6 +199,20 @@ export const TuiApi = HttpApi.make("tui")
+             description: "Navigate the TUI to display the specified session.",
+           }),
+         ),
++        HttpApiEndpoint.get("providerEndpointStatus", TuiPaths.providerEndpointStatus, {
++          query: ProviderEndpointStatusQuery,
++          success: described(ProviderEndpointStatus, "Provider endpoint route and latency"),
++          error: HttpApiError.BadRequest,
++        }).annotateMerge(
++          OpenApi.annotations({
++            identifier: "tui.providerEndpointStatus",
++            summary: "Get provider endpoint status",
++            // TUI 只上报当前 provider origin；daemon 在自己的进程环境里解析
++            // proxy 并执行 HEAD 探测，保证多 TUI 复用同一 daemon 时显示和真实
++            // provider 请求使用同一个网络来源。
++            description: "Return daemon-owned proxy route and latency for a provider endpoint origin.",
++          }),
++        ),
+         HttpApiEndpoint.get("controlNext", TuiPaths.controlNext, {
+           query: WorkspaceRoutingQuery,
+           success: described(TuiRequestPayload, "Next TUI request"),
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/tui.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/tui.ts
+index 0ecebf451fe29c9e2103e822f68de8aecccf1fec..593f6e896bc96c70c03efdb09424ff59f0c8703c 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/tui.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/tui.ts
+@@ -1,11 +1,12 @@
+ import { Bus } from "@/bus"
+ import { TuiEvent } from "@/cli/cmd/tui/event"
+ import { Session } from "@/session/session"
++import { getEndpointStatus } from "@/server/shared/tui-endpoint-status"
+ import { Effect } from "effect"
+ import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
+ import { nextTuiRequest, submitTuiResponse } from "@/server/shared/tui-control"
+ import { InstanceHttpApi } from "../api"
+-import { CommandPayload, TuiPublishPayload } from "../groups/tui"
++import { CommandPayload, ProviderEndpointStatusQuery, TuiPublishPayload } from "../groups/tui"
+ import * as SessionError from "./session-errors"
+ 
+ const commandAliases = {
+@@ -103,6 +104,17 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
+       return true
+     })
+ 
++    const providerEndpointStatus = Effect.fn("TuiHttpApi.providerEndpointStatus")(function* (ctx: {
++      query: typeof ProviderEndpointStatusQuery.Type
++    }) {
++      // 这里刻意只接受可规范化的 HTTP(S) origin。TUI 传入的是当前模型的
++      // provider endpoint；daemon 返回自身网络环境下的 route/latency，避免
++      // 多 TUI 进程各自读取 env proxy 后出现显示和真实请求不一致。
++      const status = yield* Effect.promise(() => getEndpointStatus(ctx.query.url))
++      if (!status) return yield* new HttpApiError.BadRequest({})
++      return status
++    })
++
+     const controlNext = Effect.fn("TuiHttpApi.controlNext")(function* () {
+       return yield* Effect.promise(() => nextTuiRequest())
+     })
+@@ -124,6 +136,7 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
+       .handle("showToast", showToast)
+       .handle("publish", publish)
+       .handle("selectSession", selectSession)
++      .handle("providerEndpointStatus", providerEndpointStatus)
+       .handle("controlNext", controlNext)
+       .handle("controlResponse", controlResponse)
+   }),
+diff --git a/packages/opencode/src/server/shared/tui-endpoint-status.ts b/packages/opencode/src/server/shared/tui-endpoint-status.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..de66dc494bddb2864575fa4c9a4a74288d745f94
+--- /dev/null
++++ b/packages/opencode/src/server/shared/tui-endpoint-status.ts
+@@ -0,0 +1,138 @@
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
++
++// TUI 每次查询只声明“这个 provider origin 仍在被看见”。daemon 在最近
++// 10s 内持续维护这些 origin，超窗后丢弃，避免无人使用的 sidebar 状态长期
++// 发起后台 HEAD 请求。
++const ACTIVE_WINDOW = 10_000
++// 保持与原 sidebar 每秒刷新一次的显示语义一致；多个 TUI 共享同一个 daemon
++// cache，所以这里是一秒最多一次 daemon 侧探测，而不是每个 TUI 各探测一次。
++const REFRESH_INTERVAL = 1_000
++// sidebar 延迟只是辅助信号，不能因为 provider 或 proxy 卡住而拖垮 TUI；3s
++// 沿用原 TUI 侧探测超时，保证失败路径显示 offline 而不是无限等待。
++const PROBE_TIMEOUT = 3_000
++
++type EndpointState = "ok" | "down"
++
++export type EndpointStatus = {
++  url: string
++  status: EndpointState
++  latency: number | null
++  route: { type: "direct" | "proxy"; reason: string }
++  checkedAt: number
++}
++
++type Entry = {
++  status?: EndpointStatus
++  lastSeen: number
++  // 同一 origin 的并发 TUI 请求必须共享一个 HEAD probe。这个 Promise 是
++  // transient 的，不进入 wire schema，完成后立即清空，避免把实现状态泄漏给
++  // TUI 或插件侧。
++  inFlight?: Promise<EndpointStatus>
++}
++
++const entries = new Map<string, Entry>()
++let timer: ReturnType<typeof setTimeout> | undefined
++
++export function normalizeEndpoint(input: string) {
++  try {
++    const url = new URL(input)
++    // provider endpoint 只允许 HTTP(S)。file:、data: 等 scheme 不代表真实
++    // provider 网络 origin，提前拒绝可避免 daemon 把本地资源或无意义 URL 当作
++    // 可探测端点。
++    if (url.protocol !== "http:" && url.protocol !== "https:") return
++    return url.origin
++  } catch {
++    return
++  }
++}
++
++export async function getEndpointStatus(input: string) {
++  const url = normalizeEndpoint(input)
++  if (!url) return
++
++  const entry = entries.get(url) ?? createEntry(url)
++  entry.lastSeen = Date.now()
++  entries.set(url, entry)
++  ensureTimer()
++
++  if (shouldRefresh(entry)) return refresh(url, entry)
++  return entry.status
++}
++
++function createEntry(url: string): Entry {
++  // 首次创建时不写 wire status：handler 会等待首个 probe 完成后再响应，
++  // 因此外部永远只看到 ok/down，TUI 本地的 init 仍表示“请求尚未返回”。
++  return {
++    lastSeen: Date.now(),
++  }
++}
++
++function shouldRefresh(entry: Entry) {
++  if (entry.inFlight) return true
++  if (!entry.status) return true
++  return Date.now() - entry.status.checkedAt >= REFRESH_INTERVAL
++}
++
++function ensureTimer() {
++  if (timer) return
++  // daemon 是所有 TUI 的统一观测源。这个 unref timer 只服务最近 10s 被
++  // TUI 查询过的 provider origin，既保持显示新鲜，又不会为了 UI 辅助信息
++  // 阻止 daemon 在空闲时退出。
++  timer = setTimeout(tick, REFRESH_INTERVAL)
++  timer.unref?.()
++}
++
++function tick() {
++  timer = undefined
++  const now = Date.now()
++  for (const [url, entry] of entries) {
++    if (now - entry.lastSeen > ACTIVE_WINDOW) {
++      entries.delete(url)
++      continue
++    }
++    if (shouldRefresh(entry)) void refresh(url, entry)
++  }
++  if (entries.size > 0) ensureTimer()
++}
++
++function refresh(url: string, entry: Entry) {
++  if (entry.inFlight) return entry.inFlight
++
++  entry.inFlight = probe(url)
++    .then((status) => {
++      entry.status = status
++      return status
++    })
++    .finally(() => {
++      entry.inFlight = undefined
++    })
++  return entry.inFlight
++}
++
++async function probe(url: string): Promise<EndpointStatus> {
++  const started = Date.now()
++  const route = await NetworkProxy.resolveProxyRoute(url, "provider")
++  try {
++    const response = await NetworkProxy.routedFetch(url, {
++      method: "HEAD",
++      signal: AbortSignal.timeout(PROBE_TIMEOUT),
++      purpose: "provider",
++    } as RequestInit)
++    const latency = Date.now() - started
++    return {
++      url,
++      status: response.status === 502 || response.status === 503 || response.status === 504 ? "down" : "ok",
++      latency,
++      route: route.type === "proxy" ? { type: "proxy", reason: route.reason } : { type: "direct", reason: route.reason },
++      checkedAt: Date.now(),
++    }
++  } catch {
++    return {
++      url,
++      status: "down",
++      latency: null,
++      route: route.type === "proxy" ? { type: "proxy", reason: route.reason } : { type: "direct", reason: route.reason },
++      checkedAt: Date.now(),
++    }
++  }
++}
+diff --git a/packages/opencode/test/server/httpapi-exercise/index.ts b/packages/opencode/test/server/httpapi-exercise/index.ts
+index 293e2a3449dc5ef450b4796a084b0b052952e5af..9b62201d43aed2a17ff50e1b48f239e0807624e5 100644
+--- a/packages/opencode/test/server/httpapi-exercise/index.ts
++++ b/packages/opencode/test/server/httpapi-exercise/index.ts
+@@ -1341,6 +1341,23 @@ const scenarios: Scenario[] = [
+     .seeded((ctx) => ctx.session({ title: "TUI select" }))
+     .at((ctx) => ({ path: "/tui/select-session", headers: ctx.headers(), body: { sessionID: ctx.state.id } }))
+     .json(200, boolean, "status"),
++  http.protected
++    .get("/tui/provider-endpoint-status", "tui.providerEndpointStatus")
++    // 覆盖 daemon 侧统一探测入口即可；这里使用 loopback 未监听端口，避免
++    // exerciser 依赖外部网络，同时仍能验证路由解码、BadRequest 之外的正常
++    // JSON 响应，以及 TUI 读取失败 endpoint 时不应让 HTTP 请求失败的不变量。
++    .at((ctx) => ({ path: "/tui/provider-endpoint-status?url=http://127.0.0.1:1", headers: ctx.headers() }))
++    .json(
++      200,
++      (body) => {
++        object(body)
++        check(body.url === "http://127.0.0.1:1", "endpoint status should preserve the normalized origin")
++        check(body.status === "down", "unreachable loopback endpoint should be reported as down")
++        object(body.route)
++        check(body.route.type === "direct", "loopback endpoint should never be routed through a proxy")
++      },
++      "status",
++    ),
+   http.protected
+     .post("/tui/control/response", "tui.control.response")
+     .at((ctx) => ({ path: "/tui/control/response", headers: ctx.headers(), body: { ok: true } }))
+diff --git a/packages/opencode/test/server/tui-provider-endpoint-status.test.ts b/packages/opencode/test/server/tui-provider-endpoint-status.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f8a923c2a7384dae04d8e500d4b32d34f2687a19
+--- /dev/null
++++ b/packages/opencode/test/server/tui-provider-endpoint-status.test.ts
+@@ -0,0 +1,134 @@
++import { describe, expect } from "bun:test"
++import { Effect } from "effect"
++import Http, { type IncomingMessage, type ServerResponse } from "node:http"
++import * as Log from "@opencode-ai/core/util/log"
++import { Session } from "@/session/session"
++import { Server } from "../../src/server/server"
++import { TestInstance } from "../fixture/fixture"
++import { testEffect } from "../lib/effect"
++
++void Log.init({ print: false })
++
++const it = testEffect(Session.defaultLayer)
++// 这是 TUI sidebar 读取 daemon 统一网络状态的公开 HTTP 入口。测试使用字面
++// path 覆盖真实 wire contract，避免只验证内部导出的常量名称。
++const path = "/tui/provider-endpoint-status"
++
++type ProbeServer = {
++  origin: string
++  hits: () => number
++}
++
++function probeServer(handler?: (req: IncomingMessage, res: ServerResponse) => void) {
++  return Effect.acquireRelease(
++    Effect.promise(
++      () =>
++        new Promise<ProbeServer & { close: () => Promise<void> }>((resolve) => {
++          let hits = 0
++          const server = Http.createServer((req, res) => {
++            // fake provider 只统计真实出站 HEAD probe。测试从 TUI HTTP API 入口
++            // 进入，如果 daemon cache/并发去重失效，这里的 hit 数会直接暴露。
++            hits += 1
++            if (handler) {
++              handler(req, res)
++              return
++            }
++            res.writeHead(req.method === "HEAD" ? 204 : 405)
++            res.end()
++          })
++          server.listen(0, "127.0.0.1", () => {
++            const address = server.address()
++            if (!address || typeof address === "string") throw new Error("probe server did not bind to TCP")
++            resolve({
++              origin: `http://127.0.0.1:${address.port}`,
++              hits: () => hits,
++              close: () => new Promise<void>((done) => server.close(() => done())),
++            })
++          })
++        }),
++    ),
++    (server) => Effect.promise(() => server.close()),
++  )
++}
++
++function request(dir: string, endpoint: string) {
++  return Effect.promise(async () => {
++    const response = await Server.Default().app.request(`${path}?url=${encodeURIComponent(endpoint)}`, {
++      headers: { "x-opencode-directory": dir },
++    })
++    return {
++      status: response.status,
++      body: await response.json().catch(() => undefined),
++    }
++  })
++}
++
++describe("tui.providerEndpointStatus endpoint", () => {
++  it.instance("returns daemon-owned provider route and latency for a reachable endpoint", () =>
++    Effect.gen(function* () {
++      const tmp = yield* TestInstance
++      const provider = yield* probeServer()
++
++      const response = yield* request(tmp.directory, provider.origin)
++
++      expect(response.status).toBe(200)
++      expect(provider.hits()).toBe(1)
++      expect(response.body).toMatchObject({
++        url: provider.origin,
++        status: "ok",
++        route: { type: "direct" },
++      })
++      expect(response.body.latency).toEqual(expect.any(Number))
++      expect(response.body.checkedAt).toEqual(expect.any(Number))
++    }),
++  )
++
++  it.instance("coalesces concurrent TUI reads for the same provider endpoint", () =>
++    Effect.gen(function* () {
++      const tmp = yield* TestInstance
++      const provider = yield* probeServer((req, res) => {
++        setTimeout(() => {
++          res.writeHead(req.method === "HEAD" ? 204 : 405)
++          res.end()
++        }, 25)
++      })
++
++      const [first, second] = yield* Effect.all([request(tmp.directory, provider.origin), request(tmp.directory, provider.origin)], {
++        concurrency: "unbounded",
++      })
++
++      expect(first.status).toBe(200)
++      expect(second.status).toBe(200)
++      expect(provider.hits()).toBe(1)
++      expect(first.body).toMatchObject(second.body)
++    }),
++  )
++
++  it.instance("reports a down endpoint without failing the TUI request", () =>
++    Effect.gen(function* () {
++      const tmp = yield* TestInstance
++      const provider = yield* probeServer()
++      yield* Effect.promise(() => provider.close())
++
++      const response = yield* request(tmp.directory, provider.origin)
++
++      expect(response.status).toBe(200)
++      expect(response.body).toMatchObject({
++        url: provider.origin,
++        status: "down",
++        latency: null,
++        route: { type: "direct" },
++      })
++      expect(response.body.checkedAt).toEqual(expect.any(Number))
++    }),
++  )
++
++  it.instance("rejects malformed endpoint URLs before probing", () =>
++    Effect.gen(function* () {
++      const tmp = yield* TestInstance
++      const response = yield* request(tmp.directory, "not a provider URL")
++
++      expect(response.status).toBe(400)
++    }),
++  )
++})

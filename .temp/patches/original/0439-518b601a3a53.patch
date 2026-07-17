@@ -1,0 +1,25 @@
+From 518b601a3a53473d8fa1206fbab07c534fac4ae7 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Wed, 15 Jul 2026 17:55:03 +0800
+Subject: [PATCH] =?UTF-8?q?chore(plan):=20=E6=98=8E=E7=A1=AE=E5=B7=A5?=
+ =?UTF-8?q?=E4=BD=9C=E6=B5=81=E8=AF=81=E6=8D=AE=E8=B1=81=E5=85=8D=E8=BE=B9?=
+ =?UTF-8?q?=E7=95=8C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+保留未运行的三平台 workflow 事实，记录用户明确的证据型 blocker 豁免，不把未运行结果表述为通过。
+
+diff --git a/docs/plans/windows-macos-ci-test-failures.md b/docs/plans/windows-macos-ci-test-failures.md
+index ac32d3933e3841389634f21c9ab549d34a9dd240..9488e2c2d652a14b5c58cf35218fcfc7a5126a81 100644
+--- a/docs/plans/windows-macos-ci-test-failures.md
++++ b/docs/plans/windows-macos-ci-test-failures.md
+@@ -360,7 +360,7 @@ implementation commit 后执行 `git show --stat --format='' HEAD` 和 `git diff
+ 
+ ### Open Decisions Requiring the User
+ 
+-- 设计上没有待决产品选择。改动后的 macOS/Linux/Windows workflow 必须运行在 implementation commit SHA 上，才能满足 `verified-implementation-and-commit` 的 full-suite gate；本会话规则禁止未经明确请求 push，因此若 commit 后没有可访问该 SHA 的 CI artifact，终态只能保持未验证，不能声称三平台已通过。
++- 设计上没有待决产品选择。按通常 gate，改动后的 macOS/Linux/Windows workflow 应运行在 implementation commit SHA 上；用户已明确豁免本任务的证据型 blocker，因此本次保留未运行事实，不声称三平台 workflow 已通过。
+ 
+ ### Rejected Speculation
+ 

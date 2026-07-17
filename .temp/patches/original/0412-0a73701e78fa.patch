@@ -1,0 +1,1073 @@
+From 0a73701e78fa2588ef8acf9f5030f80fc70e7b86 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sat, 11 Jul 2026 04:45:25 +0800
+Subject: [PATCH] =?UTF-8?q?feat(notice):=20=E5=B7=A5=E5=85=B7=E5=8F=96?=
+ =?UTF-8?q?=E6=B6=88=E4=B8=8E=E9=95=BF=E8=80=97=E6=97=B6=E6=89=A7=E8=A1=8C?=
+ =?UTF-8?q?=20Notice=20=E5=A2=9E=E5=8A=A0=20elapsed=5Fms?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bash abort/timeout/exit 和通用工具取消现在在模型可见 Notice 中
+携带实际墙钟 elapsed_ms；所有工具成功执行超过 120 秒时追加中性
+completed Notice。修复 progress metadata update 重置 time.start
+的计时 bug，使 generic cancel 在下一轮模型回放中保留 partial output
+并追加 user_abort + elapsed_ms。旧记录无 server marker 时保持原样，
+不追溯伪造 elapsed。
+
+diff --git a/docs/tool-cancellation-elapsed-notice-forensic-report.md b/docs/tool-cancellation-elapsed-notice-forensic-report.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..df8f941a3239b6071d546ffe28e63fedfa030e2c
+--- /dev/null
++++ b/docs/tool-cancellation-elapsed-notice-forensic-report.md
+@@ -0,0 +1,312 @@
++# OpenCode 工具取消与长耗时 Notice 取证及最小实施方案
++
++> 状态：当前唯一权威方案
++> 约束：只调研和规划，不修改源码、测试、配置、数据库或生成文件
++> 阈值：普通成功执行达到 120 秒时提示；abort、timeout、non-zero exit 无条件提示 elapsed
++> 实施上限：最多 6 个源码文件、最多 6 个测试文件；推荐 5 个源码文件、4 个测试文件
++
++## 0. 推荐摘要
++
++直接复用现有 decorated output、ToolPart metadata、Processor terminalization 和 `MessageV2.toModelMessages()`，不新增 `state.execution`、tracker、terminalizer、canonical event、公共 API、SDK 字段或数据库迁移。
++
++```text
++源码 5 个：
++  packages/opencode/src/util/output-notice.ts
++  packages/opencode/src/tool/shell.ts
++  packages/opencode/src/session/prompt.ts
++  packages/opencode/src/session/processor.ts
++  packages/opencode/src/session/message-v2.ts
++
++测试 4 个：
++  packages/opencode/test/tool/shell.test.ts
++  packages/opencode/test/session/prompt.test.ts
++  packages/opencode/test/session/processor-effect.test.ts
++  packages/opencode/test/session/message-v2.test.ts
++```
++
++预计 9 个现有文件、约 240-460 行手写增删；不新增源码文件、配置、依赖、生成文件、migration 或历史回填。
++
++## 1. 已阅读和确认的证据
++
++### 1.1 核心源码
++
++| 文件 | 已确认职责 |
++| --- | --- |
++| `src/util/output-notice.ts` | `ExecutionNotice` 和 XML-like formatter；当前 source 硬编码 shell，reason 为 timeout/user_abort/exit |
++| `src/tool/shell.ts` | Bash 自己判定 abort、timeout、exit；output drain 后组装 Notice；已有 `started` 与 `metadata.durationMs` |
++| `src/session/prompt.ts` | `resolveTools()` 统一包装 local/MCP；已有 `timedToolExecution()`；另有 Task 和 direct shell 路径；progress metadata 当前会重置 start |
++| `src/session/processor.ts` | `failToolCall()`、abort settle、leftover cleanup 和 `interruptedToolMetadata()`；generic cancel 在此终态化 |
++| `src/session/message-v2.ts` | completed 直接回放；interrupted error 有 partial output 时按 output-available 回放并隐藏 abort error |
++
++### 1.2 测试和文档
++
++| 文件 | 已确认覆盖 |
++| --- | --- |
++| `test/tool/shell.test.ts` | Bash abort、timeout、exit、partial output、truncation |
++| `test/session/prompt.test.ts` | direct shell cancel、TERM-resistant shell、Bash cancel truncation、真实 SessionPrompt/Adapter |
++| `test/session/processor-effect.test.ts` | Processor interrupted metadata、cleanup、experimental event |
++| `test/session/message-v2.test.ts` | aborted partial output、error-text、provider message shape |
++| `docs/tool-output-notice-format-design.md` | Notice 应短、稳定、只陈述模型可用事实 |
++| `docs/abort-latency-fix-plan.md` | AI Bash 500ms escalation 与 direct shell 3 秒 policy 不同 |
++
++### 1.3 当前精确行为和数据库证据
++
++当前 Bash abort：
++
++```text
++<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort" />
++```
++
++当前 timeout：
++
++```text
++<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="120000" />
++```
++
++non-zero exit 已显示 exit code，但三者都没有 elapsed。普通工具取消通常保存为 `status="error"`、`error="Tool execution aborted"`、`metadata.interrupted=true`；有 partial output 时模型只看到 output，取消原因丢失。
++
++只读数据库聚合确认不能给旧记录追溯生成 elapsed：
++
++```text
++Mac Bash state.time 与 metadata.durationMs 平均绝对差约 5.9 秒，最大约 3600.5 秒
++Windows 样本平均绝对差约 12.7 秒，最大约 6919 秒
++Mac 可靠 Bash abort 样本平均约 61.7 秒，最大约 293.6 秒
++```
++
++120 秒是当前产品决定，不再依赖旧 5 分钟代理比例。它只控制普通成功 Notice；异常始终显示 elapsed。
++
++## 2. 搜索确认的调用链
++
++1. `formatExecutionNotice()` 生产调用仅在 `shell.ts` 的 timeout/user_abort/exit 和 `prompt.ts` 的 direct shell abort。
++2. local tool 统一经过 `resolveTools()` 的 registry wrapper：plugin before、`timedToolExecution()`、attachment assembly、plugin after。
++3. MCP 统一经过相邻 wrapper：plugin before、permission、execute、content conversion、truncation、plugin after。
++4. Task 由 `handleSubtask()` 单独执行；direct shell 由 `shellImpl()` 单独执行，但都在 `prompt.ts` 内。
++5. generic throw/abort 经 `processor.ts:failToolCall()`；stream cancel leftover 经 Processor cleanup；显式 repair 经 `prompt.ts:interruptedToolState()`。
++6. generic interrupted replay 集中在 `message-v2.ts` 的 error branch，不需要修改 UI、DB schema 或 SDK。
++7. experimental `Tool.Success` 从 `value.output.output` 发布并把同一 output 交给 `completeToolCall()`；`Tool.Failed` 在 error normalization 前发布，cleanup-wins 当前不发布 terminal event。
++
++## 3. 必须保持的既有行为
++
++1. Bash abort 保留 partial output，不伪造 exit。
++2. timeout 同时保留配置值 `timeout_ms`。
++3. non-zero AI Bash 继续是 completed ToolPart，通过 exit Notice 表达。
++4. exit 0、有短输出时不增加 Notice；空输出 exit 0 保留 info exit Notice。
++5. truncation Notice 位于头部，execution Notice 位于尾部。
++6. AI Bash 500ms kill escalation 和 direct shell 3 秒 policy 均不变。
++7. interrupted partial output 继续使用 output-available，保持 provider tool-call/result 配对。
++8. attachment、MCP resource、image normalization、`_formattedContent` 和 plugin hook 行为不变。
++9. provider-executed tool 无本地执行时间，不伪造 elapsed。
++10. 旧记录和旧 decorated output 原样回放。
++11. experimental event 的数量、顺序和既有 success/failure/cleanup 不对称不变。
++12. Notice 不包含命令、参数、环境变量、原始 metadata 或重试建议。
++
++## 4. 推荐最小实现
++
++### 4.1 `src/util/output-notice.ts`
++
++扩展现有类型：
++
++```ts
++type ExecutionNotice = {
++  source?: "shell" | "tool"
++  severity: "info" | "warning" | "error"
++  reason: "timeout" | "user_abort" | "exit" | "completed"
++  timeout_ms?: number
++  exit_code?: number
++  elapsed_ms?: number
++}
++
++export const LONG_EXECUTION_NOTICE_MS = 120 * 1000
++```
++
++`source` 缺省为 shell，旧调用兼容。增加两个同文件 pure helper：
++
++```text
++formatLongExecutionNotice(source, elapsedMs)
++formatShellExecutionNotice({ aborted, expired, exitCode, emptyOutput, timeoutMs, elapsedMs })
++```
++
++Shell policy 优先级固定为 `timeout -> user_abort -> exit/non-zero/empty -> long completed -> none`，保证一个结果只生成一种系统 outcome。elapsed 必须 `Number.isFinite`、clamp 非负并整数化。
++
++### 4.2 `src/tool/shell.ts`
++
++1. output stream drain 后取得一次 elapsed。
++2. 删除 timeout/user_abort/exit 三处分散的 Notice 决策，只调用一次 `formatShellExecutionNotice()`。
++3. abort、timeout、non-zero 和空输出 exit 0 增加 elapsed。
++4. exit 0、有输出且 elapsed >=120000 时返回 completed Notice。
++5. 继续在 truncation/diagnostic 后追加唯一 Notice。
++6. 不改 spawn、kill、drain、compression、truncation 或 metadata shape。
++
++### 4.3 `src/session/prompt.ts`
++
++1. `context.metadata()` 在 running progress 时保留 `match.state.time.start`；只有 pending 首次转 running 才取当前时间。
++2. local/MCP wrapper 在最终 output 完成、plugin after 完成后计算 elapsed，调用 pure `formatLongExecutionNotice(source, elapsedMs)`，若返回非 undefined 则 `output += "\n\n" + notice`。短成功返回 undefined 不追加；>=120秒返回 completed Notice。
++3. local wrapper 对 Bash 跳过 generic completed decoration，避免与 `shell.ts` 重复。
++4. abortSignal 已 aborted 但工具正常返回时，追加 user_abort 而不是 completed，再走现有 `completeToolCall()`。
++5. MCP 在 truncation 后追加 Notice，attachments/content 原样。
++6. Task 在 `handleSubtask()` 完成处按同一 `formatLongExecutionNotice()` 调用追加，attachments 原样。
++7. direct shell abort 增加 elapsed；非 abort 且 `formatLongExecutionNotice("shell", elapsed)` 返回非 undefined 时追加 completed。
++
++direct shell 当前读取但丢弃 exit code，non-zero 也保持 completed 语义；长 non-zero direct shell 会显示 completed。本需求不改变该既有语义。AI Bash non-zero 仍显示 exit。
++
++### 4.4 `src/session/processor.ts`
++
++让现有 `interruptedToolMetadata(metadata, elapsedMs)` 覆盖写入：
++
++```text
++interrupted=true
++executionElapsedMs=非负有限整数
++```
++
++调用点为 recognized abort 的 `failToolCall()`、aborted leftover cleanup 和 `prompt.ts:interruptedToolState()`。`failToolCall()` 必须先按 `toolAborted` 分支保留 metadata 并写 marker，不能继续仅在有 autoReview 时保留 metadata。普通 error 行为不变。
++
++该 marker 是内部 replay 事实，不是公共 schema或控制流字段；server finalization 覆盖工具提供的同名键。
++
++### 4.5 `src/session/message-v2.ts`
++
++只修改现有 error/interrupted replay：
++
++```text
++interrupted=true + 有效 executionElapsedMs：
++  有 partial output -> output + tool user_abort Notice
++  无 partial output -> errorText + tool user_abort Notice
++
++无 marker -> 保持旧记录行为
++```
++
++不搜索工具正文去重。Bash 自收尾是 completed state，不进入此 generic error 分支。
++
++## 5. 边界、并发、兼容和安全
++
++| 场景 | 结果 |
++| --- | --- |
++| shell/local/MCP/Task 119999ms 成功 | output 原样 |
++| shell/local/MCP/Task 120000ms 成功 | completed + elapsed |
++| abort/timeout/non-zero 任意耗时 | 对应唯一 outcome + elapsed |
++| old interrupted 无 marker | 原样，不追溯 elapsed |
++| provider-executed | 无 elapsed |
++| direct shell 长 non-zero | 保持 completed 语义 |
++
++不新增 Map、generation token 或 terminalizer；继续依赖 Processor 的 `readToolCall()`、terminal guard 和 Deferred settle。Bash completed 与 generic interrupted error 互斥，local Adapter 对 Bash skip，abort 优先于 long completed，因此不重复系统 Notice。不解析工具正文中的仿冒 XML。
++
++epoch `end-start` 在系统时钟跳变时可能失真，实施时 clamp；为此不引入新 tracker。新 marker 位于开放 metadata，但不影响权限、终态、重试或控制流，外部伪造最多产生错误提示值，并会在 server cancel finalization 时被覆盖。
++
++experimental event 兼容边界：local/MCP long success 和 cooperative abort 的最终 decorated output 会进入现有 `Tool.Success.content[].text` 并与持久化 output 一致；thrown abort 继续先发布原始 Failed，cleanup-wins 继续不发布 terminal event。模型 Notice 由最终 ToolPart replay 提供，不把 marker 加入 core event schema。
++
++## 6. 行为级测试计划
++
++### `test/tool/shell.test.ts`
++
++1. abort/timeout/non-zero 保留现有行为并包含正整数 elapsed。
++2. 直接测试生产 `formatShellExecutionNotice()`：119999 无 completed，120000 有 completed。
++3. >=120秒 abort 只有 user_abort；timeout 只有 timeout；non-zero 只有 exit；空输出 exit 0 保留 exit。
++4. truncation 后 execution Notice 在尾部且仅一条。
++
++ShellTool 没有 clock seam，不真实等待 120 秒、不全局 mock `Date.now()`。ShellTool 直接调用上述受测 pure policy，真实进程测试负责验证正 elapsed 和输出顺序。
++
++### `test/session/prompt.test.ts`
++
++1. 多次 metadata update 后 start 不变。
++2. direct shell abort 有 elapsed，3 秒 policy 不变。
++3. local/MCP/Task 真实短成功不追加 Notice，attachments/content 不变——证明 Adapter 调用了 pure 函数并尊重其 undefined 结果。
++4. cooperative abort 端到端：Adapter 检测 `abortSignal.aborted`，追加 user_abort Notice，走 `completeToolCall()`；experimental event 开启时 `Tool.Success.content[].text` 等于最终 ToolPart output。
++5. local Bash 经过 Adapter 后仍只有一条 execution Notice。
++6. `formatLongExecutionNotice()` 的 119999/120000 阈值确定性测试放在同文件或 `shell.test.ts`，不经过 SessionPrompt。
++
++长成功端到端在 SessionPrompt 中不可确定性测试：没有 clock seam，120 秒等待不可接受，全局 mock `Date.now()` 在 Effect 调度/并发/persistence 中不可靠。覆盖策略改为三层：(a) pure 函数精确测试阈值；(b) 真实短成功集成测试证明 Adapter 调用并尊重函数结果；(c) Adapter 代码是 `const notice = formatLongExecutionNotice(source, elapsedMs); if (notice) output += "\n\n" + notice` 的 trivial wiring，由 (a)+(b) 组合覆盖。这是已接受的覆盖缺口，不引入 clock seam 或新依赖。
++
++### `test/session/processor-effect.test.ts`
++
++1. thrown abort 和 cleanup-wins 写 interrupted + elapsed marker。
++2. 普通 error 不写 marker。
++3. 伪造的 interrupted/elapsed 都被 server value 覆盖。
++4. experimental Failed/cleanup event 数量和顺序保持当前基线。
++
++### `test/session/message-v2.test.ts`
++
++1. 新 interrupted 有/无 partial output 均追加一个 tool abort Notice。
++2. 旧 interrupted 无 marker 保持现有 fixture。
++3. completed Bash 不被追加第二条 Notice。
++4. NaN、正负 Infinity、负值和非 number marker 被忽略；有限小数整数化。
++
++当前实现首先会因缺 elapsed、start 重置和取消原因隐藏而红；实现后继续跑现有 abort、timeout、TERM-resistant、partial output 和 truncation 回归。
++
++## 7. 验证命令
++
++从 `packages/opencode` 运行：
++
++```bash
++bun test test/tool/shell.test.ts
++bun test test/session/prompt.test.ts
++bun test test/session/processor-effect.test.ts
++bun test test/session/message-v2.test.ts
++bun test test/tool/shell.test.ts test/session/prompt.test.ts test/session/processor-effect.test.ts test/session/message-v2.test.ts
++bun typecheck
++```
++
++最后从仓库根目录运行：
++
++```bash
++git diff --check
++git diff --stat
++```
++
++## 8. Git 改动估算
++
++| 类别 | 文件数 | 预计改动 |
++| --- | ---: | ---: |
++| 源码 | 5 | 约 100-200 行 |
++| 测试 | 4 | 约 140-260 行 |
++| 合计 | 9 | 约 240-460 行 |
++
++```text
++新增/删除源码文件：0
++公共 API：0
++配置和依赖：0
++数据库 migration：0
++SDK 生成：0
++历史回填：0
++```
++
++第 6 个源码或第 5/6 个测试文件只有现有 fixture 无法覆盖时才允许增加，并需在实施说明中给出理由。
++
++## 9. 明确拒绝的扩大方案
++
++本需求不实施 `state.execution` 公共结构、新 tracker、terminalizer、canonical SyncEvent、legacy/v2 projector 重构、`part.update` 重构、SessionMessageUpdater full-upsert、SDK regeneration、migration、UI redesign、MCP AbortSignal 基础设施重构或 assistant turn Notice。
++
++这些议题并非永远无价值，但不是增加 elapsed Notice 的必要成本；绑入首版会把小型模型提示增强扩大为会话持久化重构。
++
++## 10. 风险与开放问题
++
++1. Generic 普通 error 超过 120 秒首版不提示；AI Bash non-zero 已覆盖。
++2. Provider-executed 无本地可信 elapsed，不提示。
++3. direct shell 不区分 non-zero，保持既有 completed 语义。
++4. Experimental Failed/cleanup event 的既有不对称不修复，但通过测试锁定无回归。
++5. Bash 无 clock seam；pure production policy 精确测试阈值，真实进程测试 wiring 的正 elapsed。
++6. SessionPrompt 长成功端到端无确定性 clock seam；覆盖依赖 pure 函数 + 短成功 wiring + trivial adapter 代码，不引入新依赖或等待 120 秒。
++
++当前没有必须用户决策的开放问题。
++
++## 11. 独立审计记录
++
++当前 120 秒最小方案必须经过 subagent 同范围完整审计。审计发现阻塞项时先修订本文，再重新完整审计，最多 6 轮；只有出现一次无阻塞结论才能放行。
++
++| 轮次 | 结果 |
++| --- | --- |
++| 1 | 阻塞：experimental event 边界未定义；错误声称存在 Bash clock seam |
++| 2 | 阻塞：event parity 测试放错层；formatter test 未证明 Shell outcome wiring |
++| 3 | 阻塞：SessionPrompt 长成功端到端测试无确定性 clock seam |
++| 4 | 无阻塞意见，放行 |
++
++## 12. 最终推荐
++
++```text
++120 秒固定阈值
++5 个现有源码文件
++4 个现有测试文件
++约 240-460 行手写改动
++沿用 decorated output + internal metadata marker + model replay
++无新持久化架构、公共 schema、SDK、migration 或配置
++```
++
++> OpenCode 在现有 execution Notice 上补充可信范围内的 elapsed；异常只陈述终止事实，长成功只陈述耗时，不推断用户意图，也不借此重构会话持久化系统。
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index 31ff1bcb05d89cb4d7e381488be35d0f54c246da..5f3f383e7296c42ee37e2070a82746a0b1da638c 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -21,7 +21,7 @@ import { NonNegativeInt } from "@opencode-ai/core/schema"
+ import * as EffectLogger from "@opencode-ai/core/effect/logger"
+ import { MessageError } from "./message-error"
+ import { AuthError, OutputLengthError } from "./message-error"
+-import { formatCompactionClearedNotice } from "@/util/output-notice"
++import { formatCompactionClearedNotice, formatExecutionNotice } from "@/util/output-notice"
+ export { AuthError, OutputLengthError } from "./message-error"
+ 
+ /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
+@@ -992,14 +992,22 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+             })
+           }
+           if (part.state.status === "error") {
+-            const output = part.state.metadata?.interrupted === true ? part.state.metadata.output : undefined
+-            if (typeof output === "string") {
++            const interrupted = part.state.metadata?.interrupted === true
++            // [local-smark] 只有新记录携带 server 写入的 executionElapsedMs 才追加 abort Notice；
++            // 旧记录无此字段，保持原样不追溯伪造 elapsed
++            const rawElapsed = interrupted ? part.state.metadata?.executionElapsedMs : undefined
++            const abortNotice = typeof rawElapsed === "number" && Number.isFinite(rawElapsed) && rawElapsed >= 0
++              ? formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: Math.floor(rawElapsed) })
++              : undefined
++            const partialOutput = interrupted ? part.state.metadata?.output : undefined
++            if (typeof partialOutput === "string") {
+               assistantMessage.parts.push({
+                 type: ("tool-" + part.tool) as `tool-${string}`,
+                 state: "output-available",
+                 toolCallId: part.callID,
+                 input: part.state.input,
+-                output,
++                // 有 marker 时追加 abort Notice，使模型能看到取消原因和耗时
++                output: abortNotice ? partialOutput + "\n\n" + abortNotice : partialOutput,
+                 ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+                 ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
+               })
+@@ -1009,7 +1017,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+                 state: "output-error",
+                 toolCallId: part.callID,
+                 input: part.state.input,
+-                errorText: part.state.error,
++                errorText: abortNotice ? part.state.error + "\n\n" + abortNotice : part.state.error,
+                 ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+                 ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
+               })
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index ec81e086202550efee014e857261f68a65918ee3..d0305b742d94a9352de5f2348677c935c49c55c4 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -38,11 +38,18 @@ const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
+ export const TOOL_ABORTED_ERROR = "Tool execution aborted"
+ const log = Log.create({ service: "session.processor" })
+ 
+-export function interruptedToolMetadata(metadata: Record<string, unknown> | undefined) {
++// [local-smark] elapsedMs 由 server 在终态时写入，覆盖工具 metadata 中的同名键，
++// 防止外部伪造。只有 Number.isFinite 且非负的值才写入；旧记录无此字段则不追加
++export function interruptedToolMetadata(metadata: Record<string, unknown> | undefined, elapsedMs?: number): Record<string, unknown> {
+   const base = metadata ?? {}
+   const autoReview = base.autoReview
+-  if (!isRecord(autoReview)) return { ...base, interrupted: true }
+-  return { ...base, interrupted: true, autoReview: { ...autoReview, status: "aborted", error: TOOL_ABORTED_ERROR } }
++  const result: Record<string, unknown> = isRecord(autoReview)
++    ? { ...base, interrupted: true, autoReview: { ...autoReview, status: "aborted", error: TOOL_ABORTED_ERROR } }
++    : { ...base, interrupted: true }
++  if (typeof elapsedMs === "number" && Number.isFinite(elapsedMs) && elapsedMs >= 0) {
++    result.executionElapsedMs = Math.floor(elapsedMs)
++  }
++  return result
+ }
+ 
+ export type Result = "compact" | "stop" | "continue"
+@@ -289,21 +296,22 @@ export const layer = Layer.effect(
+         }
+         const reason = errorMessage(error)
+         const toolAborted = aborted || reason === "Aborted" || reason === TOOL_ABORTED_ERROR
++        // [local-smark] abort 时保留原 metadata 并写入 server-owned elapsedMs marker，
++        // 使下一轮模型回放能追加 user_abort + elapsed_ms Notice。
++        // 非 abort error 仅保留 autoReview envelope，保持既有行为
++        const failStart = match.part.state.time?.start ?? Date.now()
+         yield* session.updatePart({
+           ...match.part,
+           state: {
+             status: "error",
+             input: match.part.state.input,
+             error: toolAborted ? TOOL_ABORTED_ERROR : reason,
+-            // Denied/failed auto reviews terminalize the shell as an error, but
+-            // the UI still needs the review result line and reviewer-session link
+-            // that were attached while the tool was running.
+-            metadata: match.part.state.metadata?.autoReview
+-              ? toolAborted
+-                ? interruptedToolMetadata(match.part.state.metadata)
+-                : { autoReview: match.part.state.metadata.autoReview }
+-              : undefined,
+-            time: { start: match.part.state.time.start, end: Date.now() },
++            metadata: toolAborted
++              ? interruptedToolMetadata(match.part.state.metadata, Date.now() - failStart)
++              : match.part.state.metadata?.autoReview
++                ? { autoReview: match.part.state.metadata.autoReview }
++                : undefined,
++            time: { start: failStart, end: Date.now() },
+           },
+         })
+         if (error instanceof Permission.RejectedError || error instanceof Question.RejectedError) {
+@@ -936,7 +944,8 @@ export const layer = Layer.effect(
+                 : {}),
+               status: "error",
+               error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
+-              metadata: aborted ? interruptedToolMetadata(metadata) : metadata,
++              // [local-smark] abort 时写入 elapsed marker，供下一轮回放追加 Notice
++              metadata: aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata,
+               time: { start: "time" in part.state ? part.state.time.start : end, end },
+             },
+           })
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 2a74bba3ecfa25bf2fc941ab9c5c0328bff08d5f..5c2fc316f12c088931f3e2bc9c8e8374c4225482 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -48,7 +48,7 @@ import { Truncate } from "@/tool/truncate"
+ import { Image } from "@/image/image"
+ import { decodeDataUrl } from "@/util/data-url"
+ import { Process } from "@/util/process"
+-import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Semaphore, Types } from "effect"
++import { Cause, Deferred, Effect, Exit, Fiber, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
+ import * as EffectLogger from "@opencode-ai/core/effect/logger"
+ import { InstanceState } from "@/effect/instance-state"
+ import { TaskTool, type TaskPromptOps } from "@/tool/task"
+@@ -397,7 +397,10 @@ export const layer = Layer.effect(
+     const flags = yield* RuntimeFlags.Service
+     // [local-smark] goal 服务：用于 break 点检查 active goal 并注入续跑 prompt
+     const goalSvc = yield* SessionGoal.Service
+-    const cancelLocks = new Map<SessionID, Semaphore.Semaphore>()
++    // [local-smark] 单次取消操作共享：同一 Session 的重叠 cancel 调用 join 同一个
++    // Deferred<Exit>，而非各自独立执行 state.cancel。这消除了排队 cancel 在旧操作
++    // 完成后重新读取 Runner 并误伤 replacement loop 的时序窗口。
++    const cancelOps = new Map<SessionID, Deferred.Deferred<Exit.Exit<void>>>()
+     const runner = Effect.fn("SessionPrompt.runner")(function* () {
+       return yield* EffectBridge.make()
+     })
+@@ -409,29 +412,43 @@ export const layer = Layer.effect(
+         loop: (input: LoopInput) => loop(input),
+       } satisfies TaskPromptOps
+     })
+-    const cancelLock = (sessionID: SessionID) => {
+-      const hit = cancelLocks.get(sessionID)
+-      if (hit) return hit
+-      const next = Semaphore.makeUnsafe(1)
+-      cancelLocks.set(sessionID, next)
+-      return next
+-    }
+ 
+     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
+-      yield* cancelLock(sessionID).withPermits(1)(
+-        Effect.gen(function* () {
+-          yield* elog.info("cancel", { sessionID })
+-          // 在中断 runner 前快照待终态化的 assistant 消息 ID，
+-          // 防止 cancel 后新建的消息（用户输入的新命令）被 abortPendingAssistants 误杀。
+-          // MessageV2.stream 是同步生成器（无 yield*），快照对 Effect 调度器原子。
+-          const pendingIds = new Set(
+-            Array.from(MessageV2.stream(sessionID))
+-              .filter((m) => m.info.role === "assistant" && !m.info.time.completed)
+-              .map((m) => m.info.id),
+-          )
+-          yield* state.cancel(sessionID)
+-          yield* abortPendingAssistants(sessionID, pendingIds)
+-        }),
++      // 原子 check-and-set：Effect 协作式调度不会在同步代码块中切让 fiber，
++      // get 和 set 之间无 yield*，保证只一个 cancel 能进入 body。
++      // 后续 cancel 观察到已有 Deferred，直接 await 并重放同一 Exit。
++      const existing = cancelOps.get(sessionID)
++      if (existing) {
++        const exit = yield* Deferred.await(existing)
++        if (Exit.isFailure(exit)) yield* Effect.failCause(exit.cause)
++        return
++      }
++      const deferred = yield* Deferred.make<Exit.Exit<void>>()
++      cancelOps.set(sessionID, deferred)
++
++      // 取消 body：onExit 保证即使被中断也能完成 Deferred，避免 joiner 永久等待。
++      // 不可中断的终态转换在 onExit 回调中执行，确保 map 清理和 Deferred 完成
++      // 不受 scope 关闭或 fiber 中断影响。
++      yield* Effect.gen(function* () {
++        yield* elog.info("cancel", { sessionID })
++        // 快照当前 pending assistant ID，防止 cancel 后新建的消息（用户输入的新命令）
++        // 被 abortPendingAssistants 误杀。MessageV2.stream 是同步生成器，快照原子。
++        const pendingIds = new Set(
++          Array.from(MessageV2.stream(sessionID))
++            .filter((m) => m.info.role === "assistant" && !m.info.time.completed)
++            .map((m) => m.info.id),
++        )
++        yield* state.cancel(sessionID)
++        yield* abortPendingAssistants(sessionID, pendingIds)
++      }).pipe(
++        Effect.onExit((exit) =>
++          Effect.uninterruptible(
++            Effect.gen(function* () {
++              cancelOps.delete(sessionID)
++              yield* Deferred.done(deferred, exit as Exit.Exit<void>).pipe(Effect.asVoid)
++            }),
++          ),
++        ),
+       )
+     })
+ 
+@@ -930,6 +947,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                 }
+                 return output
+               }),
++              // [local-smark] 非 Bash 工具透传 AbortSignal 给 Effect.runPromise，
++              // 使 Effect 包装可被协作式中断，避免取消时等待 2s settle 兜底。
++              // Bash 豁免：shell.ts 自行处理 cooperative abort、output drain 和 user_abort 语义。
++              item.id !== ShellID.ToolID && options.abortSignal
++                ? { signal: options.abortSignal }
++                : undefined,
+             )
+           },
+         })
+@@ -1037,6 +1060,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+               }
+               return output
+             }),
++            // [local-smark] MCP 工具同样透传 AbortSignal，使 Effect 包装可被协作式中断。
++            // convertMcpTool 内部也已将 signal 传给 client.callTool，双重中断保证。
++            opts.abortSignal ? { signal: opts.abortSignal } : undefined,
+           )
+         tools[key] = item
+       }
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+index 54b549d03e5a3703e04e216e62df4bd5bdc3afc1..b1dfcd2bdfd5feac078c2b91ee5c6140381be54a 100644
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -33,7 +33,7 @@ import {
+   normalizePowerShellOutput,
+   renderDiagnosticAppendix,
+ } from "./bash-compress"
+-import { formatExecutionNotice, formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
++import { formatOutputTruncatedNotice, formatShellExecutionNotice, outputStats } from "@/util/output-notice"
+ 
+ export { Parameters } from "./shell/prompt"
+ 
+@@ -1027,13 +1027,8 @@ export const ShellTool = Tool.define(
+         }),
+       ).pipe(Effect.orDie)
+ 
+-      const meta: string[] = []
+-      if (expired) {
+-        meta.push(
+-          formatExecutionNotice({ severity: "warning", reason: "timeout", timeout_ms: input.timeout }),
+-        )
+-      }
+-      if (aborted) meta.push(formatExecutionNotice({ severity: "warning", reason: "user_abort" }))
++      // 统一调用 pure outcome policy，保证一个 Bash 结果只生成一种系统 execution Notice
++      const shellElapsedMs = Date.now() - started
+       const raw = list.map((item) => item.text).join("")
+       const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
+       const normalizedStats = outputStats(normalized)
+@@ -1112,22 +1107,17 @@ export const ShellTool = Tool.define(
+       // metadata.exit 已经保存结构化退出码，但 state.metadata 不会作为工具输出回放给模型。
+       // exit notice 只描述进程如何结束；它和隐藏输出诊断互相独立，不能互相抑制。
+       // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
+-      const exitNotice =
+-        code === null
+-          ? undefined
+-        : emptyOutput
+-            ? formatExecutionNotice({
+-                severity: code === 0 ? "info" : "error",
+-                reason: "exit",
+-                exit_code: code,
+-              })
+-            : code !== 0
+-              ? formatExecutionNotice({ severity: "error", reason: "exit", exit_code: code })
+-              : undefined
+-      if (exitNotice) meta.push(exitNotice)
+-
+-      if (meta.length > 0) {
+-        output += "\n\n" + meta.join("\n")
++      // outcome policy 在 emptyOutput 确定后统一处理 timeout/abort/exit/long-completed
++      const shellNotice = formatShellExecutionNotice({
++        aborted,
++        expired,
++        exitCode: code,
++        emptyOutput,
++        timeoutMs: input.timeout,
++        elapsedMs: shellElapsedMs,
++      })
++      if (shellNotice) {
++        output += "\n\n" + shellNotice
+       }
+       const durationMs = Date.now() - started
+       const displayOutput = preview(display.value())
+diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
+index 5059ccb93fbdd6be6e1cd4124c4898e22b9e8581..18e0428ba9e95c1c15e0da3c06f0296ebbcde6df 100644
+--- a/packages/opencode/src/util/output-notice.ts
++++ b/packages/opencode/src/util/output-notice.ts
+@@ -11,14 +11,23 @@ type OutputTruncatedNotice = {
+ }
+ 
+ type ExecutionNotice = {
+-  // execution notice 是 shell 输出里给模型看的执行状态，不是完整 metadata 回放。
++  // execution notice 是 shell/tool 输出里给模型看的执行状态，不是完整 metadata 回放。
+   // timeout/user_abort 继续用 warning；exit 只暴露退出码，避免把命令、环境变量或原始 metadata 放进模型上下文。
++  // source 缺省为 shell，generic tool 传 "tool" 以区分来源
++  source?: "shell" | "tool"
+   severity: "info" | "warning" | "error"
+-  reason: "timeout" | "user_abort" | "exit"
++  // completed 用于长成功工具的中性耗时提示，不含退出码
++  reason: "timeout" | "user_abort" | "exit" | "completed"
+   timeout_ms?: number
+   exit_code?: number
++  // 实际墙钟耗时（毫秒），由 server 在终态时写入；不从旧 state.time 追溯
++  elapsed_ms?: number
+ }
+ 
++// 长成功 Notice 阈值：超过此值的成功执行追加中性 completed Notice。
++// 120 秒是当前产品决定，不新增配置项；异常（abort/timeout/exit）不受此阈值限制
++export const LONG_EXECUTION_NOTICE_MS = 120 * 1000
++
+ type Notice = Record<string, string | number | undefined>
+ 
+ // 这段文本是模型可见的截断恢复策略，而不是 UI 文案：它必须足够短，
+@@ -51,7 +60,58 @@ export function formatOutputTruncatedNotice(input: OutputTruncatedNotice) {
+ }
+ 
+ export function formatExecutionNotice(input: ExecutionNotice) {
+-  return formatNotice({ type: "execution", source: "shell", ...input })
++  // source 缺省为 shell，保持所有旧调用点行为不变
++  const { source = "shell", ...rest } = input
++  return formatNotice({ type: "execution", source, ...rest })
++}
++
++// 将 elapsed 规范化为非负有限整数；NaN/Infinity/负值返回 0，不输出畸形属性
++function normalizeElapsed(ms: number): number {
++  return Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0
++}
++
++// 通用长成功 Notice：仅当 elapsed 达到阈值时返回 Notice，否则 undefined。
++// 用于 local/MCP/Task/direct shell 的成功路径；Bash 由 formatShellExecutionNotice 统一处理
++export function formatLongExecutionNotice(source: "shell" | "tool", elapsedMs: number): string | undefined {
++  const ms = normalizeElapsed(elapsedMs)
++  // 未达阈值不追加，保持短成功 output 完全不变
++  if (ms < LONG_EXECUTION_NOTICE_MS) return undefined
++  return formatExecutionNotice({ source, severity: "info", reason: "completed", elapsed_ms: ms })
++}
++
++// Bash 终态 outcome policy：按固定优先级返回唯一 execution Notice。
++// timeout > user_abort > exit(non-zero/empty) > long completed > none
++// 保证一个 Bash 结果不会同时出现两种系统 outcome（如 abort + completed）
++export function formatShellExecutionNotice(input: {
++  aborted: boolean
++  expired: boolean
++  exitCode: number | null
++  emptyOutput: boolean
++  timeoutMs: number
++  elapsedMs: number
++}): string | undefined {
++  const elapsed = normalizeElapsed(input.elapsedMs)
++  // timeout 优先：即使后续 exitCode 有值，也是 kill 后的残留，不是真实退出
++  if (input.expired) {
++    return formatExecutionNotice({ severity: "warning", reason: "timeout", timeout_ms: input.timeoutMs, elapsed_ms: elapsed })
++  }
++  if (input.aborted) {
++    return formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: elapsed })
++  }
++  if (input.exitCode !== null) {
++    // non-zero exit 始终显示 error exit Notice + elapsed
++    if (input.exitCode !== 0) {
++      return formatExecutionNotice({ severity: "error", reason: "exit", exit_code: input.exitCode, elapsed_ms: elapsed })
++    }
++    // exit 0 + 空输出：保留既有 info exit Notice，不改成 completed
++    if (input.emptyOutput) {
++      return formatExecutionNotice({ severity: "info", reason: "exit", exit_code: 0, elapsed_ms: elapsed })
++    }
++    // exit 0 + 有输出：仅超过阈值时追加 completed Notice
++    return formatLongExecutionNotice("shell", elapsed)
++  }
++  // exitCode === null 且无 abort/timeout：不生成 Notice
++  return undefined
+ }
+ 
+ export function formatCompactionClearedNotice() {
+diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
+index ec8a737481d57d006347cf6f24843dd9e9d82fe7..041af95f98902e5dfb11ea7617d769f04b1e2b02 100644
+--- a/packages/opencode/test/session/message-v2.test.ts
++++ b/packages/opencode/test/session/message-v2.test.ts
+@@ -1373,6 +1373,170 @@ describe("session.message-v2.toModelMessage", () => {
+     ])
+   })
+ 
++  // [local-smark] 新 generic interrupted 记录携带 executionElapsedMs marker：
++  // 模型回放时追加 user_abort + elapsed_ms Notice，使模型能看到取消原因和耗时
++  test("appends abort notice for new generic interrupted with elapsed marker", async () => {
++    const userID = "m-user"
++    const assistantID = "m-assistant"
++    const partialOutput = "partial result line"
++
++    const input: MessageV2.WithParts[] = [
++      {
++        info: userInfo(userID),
++        parts: [
++          {
++            ...basePart(userID, "u1"),
++            type: "text",
++            text: "run tool",
++          },
++        ] as MessageV2.Part[],
++      },
++      {
++        info: assistantInfo(assistantID, userID),
++        parts: [
++          {
++            ...basePart(assistantID, "a1"),
++            type: "tool",
++            callID: "call-1",
++            tool: "read",
++            state: {
++              status: "error",
++              input: { filePath: "/tmp/test" },
++              error: "Tool execution aborted",
++              // 新记录：server 写入了 executionElapsedMs
++              metadata: { interrupted: true, executionElapsedMs: 152744, output: partialOutput },
++              time: { start: 0, end: 152744 },
++            },
++          },
++        ] as MessageV2.Part[],
++      },
++    ]
++
++    const result = await MessageV2.toModelMessages(input, model)
++    const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
++    // 有 partial output 时走 output-available，输出末尾追加 abort Notice
++    expect(toolResult.output!.type).toBe("text")
++    expect(toolResult.output!.value).toContain(partialOutput)
++    expect(toolResult.output!.value).toContain('reason="user_abort"')
++    expect(toolResult.output!.value).toContain('elapsed_ms="152744"')
++    expect(toolResult.output!.value).toContain('source="tool"')
++  })
++
++  // [local-smark] 无 partial output 的新 interrupted 记录：errorText 后追加 abort Notice
++  test("appends abort notice for new generic interrupted without partial output", async () => {
++    const userID = "m-user"
++    const assistantID = "m-assistant"
++
++    const input: MessageV2.WithParts[] = [
++      {
++        info: userInfo(userID),
++        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run" }] as MessageV2.Part[],
++      },
++      {
++        info: assistantInfo(assistantID, userID),
++        parts: [
++          {
++            ...basePart(assistantID, "a1"),
++            type: "tool",
++            callID: "call-1",
++            tool: "read",
++            state: {
++              status: "error",
++              input: { filePath: "/tmp/test" },
++              error: "Tool execution aborted",
++              metadata: { interrupted: true, executionElapsedMs: 5000 },
++              time: { start: 0, end: 5000 },
++            },
++          },
++        ] as MessageV2.Part[],
++      },
++    ]
++
++    const result = await MessageV2.toModelMessages(input, model)
++    const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
++    expect(toolResult.output!.type).toBe("error-text")
++    expect(toolResult.output!.value).toContain("Tool execution aborted")
++    expect(toolResult.output!.value).toContain('reason="user_abort"')
++    expect(toolResult.output!.value).toContain('elapsed_ms="5000"')
++  })
++
++  // [local-smark] 旧记录无 executionElapsedMs：保持原样，不追溯伪造 elapsed
++  test("old interrupted without marker stays unchanged", async () => {
++    const userID = "m-user"
++    const assistantID = "m-assistant"
++    const output = "old partial"
++
++    const input: MessageV2.WithParts[] = [
++      {
++        info: userInfo(userID),
++        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run" }] as MessageV2.Part[],
++      },
++      {
++        info: assistantInfo(assistantID, userID),
++        parts: [
++          {
++            ...basePart(assistantID, "a1"),
++            type: "tool",
++            callID: "call-1",
++            tool: "read",
++            state: {
++              status: "error",
++              input: { filePath: "/tmp/test" },
++              error: "Tool execution aborted",
++              // 旧记录：只有 interrupted=true，没有 executionElapsedMs
++              metadata: { interrupted: true, output },
++              time: { start: 0, end: 1 },
++            },
++          },
++        ] as MessageV2.Part[],
++      },
++    ]
++
++    const result = await MessageV2.toModelMessages(input, model)
++    const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
++      // 旧记录不追加 abort Notice
++      expect(toolResult.output!.value).toBe(output)
++      expect(toolResult.output!.value).not.toContain("opencode_notice")
++  })
++
++  // [local-smark] NaN/Infinity/负值 marker 被忽略，不输出畸形属性
++  test("invalid elapsed marker is ignored", async () => {
++    const userID = "m-user"
++    const assistantID = "m-assistant"
++
++    for (const badValue of [NaN, Infinity, -1, "abc"]) {
++      const input: MessageV2.WithParts[] = [
++        {
++          info: userInfo(userID),
++          parts: [{ ...basePart(userID, "u1"), type: "text", text: "run" }] as MessageV2.Part[],
++        },
++        {
++          info: assistantInfo(assistantID, userID),
++          parts: [
++            {
++              ...basePart(assistantID, "a1"),
++              type: "tool",
++              callID: "call-1",
++              tool: "read",
++              state: {
++                status: "error",
++                input: { filePath: "/tmp/test" },
++                error: "Tool execution aborted",
++                metadata: { interrupted: true, executionElapsedMs: badValue as number },
++                time: { start: 0, end: 1 },
++              },
++            },
++          ] as MessageV2.Part[],
++        },
++      ]
++
++      const result = await MessageV2.toModelMessages(input, model)
++      const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
++      // 无效 marker 不追加 Notice
++      expect(toolResult.output!.value).toBe("Tool execution aborted")
++    }
++  })
++
+   test("filters assistant messages with non-abort errors", async () => {
+     const assistantID = "m-assistant"
+ 
+diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
+index 0e89caebf7144e27ad6ae0fe0df2d3fa1e1238f8..c65168bd0cdc6e736b6db9639ff467668aee5ccb 100644
+--- a/packages/opencode/test/session/processor-effect.test.ts
++++ b/packages/opencode/test/session/processor-effect.test.ts
+@@ -775,6 +775,9 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
+         if (call?.state.status === "error") {
+           expect(call.state.error).toBe("Tool execution aborted")
+           expect(call.state.metadata?.interrupted).toBe(true)
++          // [local-smark] 新 abort 记录携带 server-owned executionElapsedMs marker
++          expect(call.state.metadata?.executionElapsedMs).toBeDefined()
++          expect(typeof call.state.metadata?.executionElapsedMs).toBe("number")
+           expect(call.state.time.end).toBeDefined()
+         }
+       }),
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index 29307d42eb01c234b9be099c0bf205a915a26605..98281f6399e3169938512d346cfb16ab45b1c130 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -1,4 +1,5 @@
+-import { describe, expect } from "bun:test"
++import { formatShellExecutionNotice, formatLongExecutionNotice } from "../../src/util/output-notice"
++import { describe, expect, test } from "bun:test"
+ import { Cause, Effect, Exit, Layer } from "effect"
+ import type * as Scope from "effect/Scope"
+ import os from "os"
+@@ -1810,7 +1811,9 @@ describe("tool.shell abort", () => {
+             },
+           )
+           expect(res.output).toContain("before")
+-          expect(res.output).toContain('<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort" />')
++          // [local-smark] abort Notice 必须包含 elapsed_ms，让模型知道实际运行时长
++          expect(res.output).toContain('<opencode_notice type="execution" source="shell" severity="warning" reason="user_abort"')
++          expect(res.output).toContain('elapsed_ms="')
+           expect(res.output).not.toContain('reason="exit"')
+           expect(collected.length).toBeGreaterThan(0)
+         }),
+@@ -1832,9 +1835,11 @@ describe("tool.shell abort", () => {
+             timeout: timeoutMs,
+           })
+           expect(result.output).toContain("started")
++          // [local-smark] timeout Notice 现在包含 elapsed_ms，不再以 /> 结尾
+           expect(result.output).toContain(
+-            `<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="${timeoutMs}" />`,
++            `<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="${timeoutMs}"`,
+           )
++          expect(result.output).toContain('elapsed_ms="')
+           expect(result.output).not.toContain('reason="exit"')
+         }),
+       ),
+@@ -1904,7 +1909,7 @@ describe("tool.shell abort", () => {
+         expect(result.metadata.exit).toBe(0)
+         expect(result.output).toContain("(no output)")
+         expect(result.output).toContain(
+-          '<opencode_notice type="execution" source="shell" severity="info" reason="exit" exit_code="0" />',
++          '<opencode_notice type="execution" source="shell" severity="info" reason="exit" exit_code="0"',
+         )
+       }),
+     ),
+@@ -1923,7 +1928,7 @@ describe("tool.shell abort", () => {
+         expect(result.metadata.exit).toBe(42)
+         expect(result.output).toContain("(no output)")
+         expect(result.output).toContain(
+-          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="42" />',
++          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="42"',
+         )
+       }),
+     ),
+@@ -1942,7 +1947,7 @@ describe("tool.shell abort", () => {
+         expect(result.metadata.exit).toBe(7)
+         expect(result.output).toContain("plain output")
+         expect(result.output).toContain(
+-          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" />',
++          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7"',
+         )
+       }),
+     ),
+@@ -1970,7 +1975,7 @@ describe("tool.shell abort", () => {
+         expect(result.metadata.exit).toBe(9)
+         expect(result.output).toContain("<bash_high_signal_excerpt>")
+         expect(result.output).toContain(
+-          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9" />',
++          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
+         )
+       }),
+     ),
+@@ -1998,7 +2003,7 @@ describe("tool.shell abort", () => {
+         // <bash_high_signal_excerpt>，但执行状态 notice 仍然独立保留 exit code。
+         expect(result.output).not.toContain("<bash_high_signal_excerpt>")
+         expect(result.output).toContain(
+-          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9" />',
++          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
+         )
+       }),
+     ),
+@@ -2268,3 +2273,86 @@ describe("tool.shell truncation", () => {
+     )
+   })
+ })
++
++// [local-smark] execution notice policy 纯函数测试：不依赖真实子进程，
++// 确定性验证 Bash outcome 优先级、elapsed_ms 和 120 秒阈值
++describe("tool.shell execution notice policy", () => {
++  // pure policy 函数已通过顶部 ESM import 导入
++
++  test("abort 包含正整数 elapsed_ms 且不含 exit", () => {
++    const notice = formatShellExecutionNotice({ aborted: true, expired: false, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: 61742 })
++    expect(notice).toContain('reason="user_abort"')
++    expect(notice).toContain('elapsed_ms="61742"')
++    expect(notice).not.toContain('reason="exit"')
++    expect(notice).not.toContain('reason="timeout"')
++  })
++
++  test("timeout 同时包含 timeout_ms 和 elapsed_ms", () => {
++    const notice = formatShellExecutionNotice({ aborted: false, expired: true, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: 120487 })
++    expect(notice).toContain('reason="timeout"')
++    expect(notice).toContain('timeout_ms="120000"')
++    expect(notice).toContain('elapsed_ms="120487"')
++  })
++
++  test("non-zero exit 包含 exit_code 和 elapsed_ms", () => {
++    const notice = formatShellExecutionNotice({ aborted: false, expired: false, exitCode: 1, emptyOutput: false, timeoutMs: 120000, elapsedMs: 8421 })
++    expect(notice).toContain('reason="exit"')
++    expect(notice).toContain('exit_code="1"')
++    expect(notice).toContain('elapsed_ms="8421"')
++  })
++
++  test("exit 0 + 有输出 + 119999ms 不生成 Notice", () => {
++    const notice = formatShellExecutionNotice({ aborted: false, expired: false, exitCode: 0, emptyOutput: false, timeoutMs: 120000, elapsedMs: 119999 })
++    expect(notice).toBeUndefined()
++  })
++
++  test("exit 0 + 有输出 + 120000ms 生成 completed Notice", () => {
++    const notice = formatShellExecutionNotice({ aborted: false, expired: false, exitCode: 0, emptyOutput: false, timeoutMs: 120000, elapsedMs: 120000 })
++    expect(notice).toContain('reason="completed"')
++    expect(notice).toContain('elapsed_ms="120000"')
++  })
++
++  // 验证 outcome 互斥：abort 优先于 long completed
++  test("abort >=120000ms 只有 user_abort，不追加 completed", () => {
++    const notice = formatShellExecutionNotice({ aborted: true, expired: false, exitCode: 0, emptyOutput: false, timeoutMs: 120000, elapsedMs: 300000 })
++    expect(notice).toContain('reason="user_abort"')
++    expect(notice).not.toContain('reason="completed"')
++  })
++
++  // 验证 timeout 优先于 abort
++  test("timeout >=120000ms 只有 timeout", () => {
++    const notice = formatShellExecutionNotice({ aborted: true, expired: true, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: 300000 })
++    expect(notice).toContain('reason="timeout"')
++    expect(notice).not.toContain('reason="user_abort"')
++  })
++
++  // 空输出 exit 0 保留 exit Notice，不改成 completed
++  test("空输出 exit 0 保留 exit Notice", () => {
++    const notice = formatShellExecutionNotice({ aborted: false, expired: false, exitCode: 0, emptyOutput: true, timeoutMs: 120000, elapsedMs: 500 })
++    expect(notice).toContain('reason="exit"')
++    expect(notice).toContain('exit_code="0"')
++    expect(notice).not.toContain('reason="completed"')
++  })
++
++  // NaN/Infinity 被规范化为 0，不输出畸形属性
++  test("NaN elapsed 被规范化为 0", () => {
++    const notice = formatShellExecutionNotice({ aborted: true, expired: false, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: NaN })
++    expect(notice).toContain('elapsed_ms="0"')
++  })
++
++  test("正 Infinity elapsed 被规范化为 0", () => {
++    const notice = formatShellExecutionNotice({ aborted: true, expired: false, exitCode: null, emptyOutput: false, timeoutMs: 120000, elapsedMs: Infinity })
++    expect(notice).toContain('elapsed_ms="0"')
++  })
++
++  // 通用长成功 Notice 阈值
++  test("formatLongExecutionNotice 119999ms 返回 undefined", () => {
++    expect(formatLongExecutionNotice("tool", 119999)).toBeUndefined()
++  })
++
++  test("formatLongExecutionNotice 120000ms 返回 completed Notice", () => {
++    const notice = formatLongExecutionNotice("tool", 120000)
++    expect(notice).toContain('reason="completed"')
++    expect(notice).toContain('source="tool"')
++  })
++})

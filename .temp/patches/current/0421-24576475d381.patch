@@ -1,0 +1,84 @@
+From 24576475d381c24a9a8c843c12a176de2369dc8e Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 13 Jul 2026 21:55:58 +0800
+Subject: [PATCH] =?UTF-8?q?chore(tui):=20attention=20=E9=BB=98=E8=AE=A4?=
+ =?UTF-8?q?=E9=9F=B3=E9=87=8F=E4=BB=8E=200.4=20=E8=B0=83=E6=95=B4=E4=B8=BA?=
+ =?UTF-8?q?=200.5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+经 BS.1770 响度分析，0.4 时 stereo 综合响度约 -29.7 LUFS，
+偏轻于多数 macOS 系统提示音。0.5 时约 -27.8 LUFS / -13.9 dBTP，
+与 Pop(-29)、Ping(-28.8) 同区间，提醒力更充分且不刺耳。
+
+diff --git a/packages/opencode/specs/tui-plugins.md b/packages/opencode/specs/tui-plugins.md
+index c02e1a495c5292a74d3494ac4f4a3d3b59187167..9e32f26b2f827eee7fcd70c0e3279b83299a24ed 100644
+--- a/packages/opencode/specs/tui-plugins.md
++++ b/packages/opencode/specs/tui-plugins.md
+@@ -34,7 +34,7 @@ Example:
+     "enabled": true,
+     "notifications": true,
+     "sound": true,
+-    "volume": 0.4,
++    "volume": 0.5,
+     "sound_pack": "opencode.default",
+     "sounds": {
+       "error": "/Users/me/sounds/error.mp3"
+diff --git a/packages/opencode/src/cli/cmd/tui/config/tui.ts b/packages/opencode/src/cli/cmd/tui/config/tui.ts
+index e1baa5ca76b49619ef316258c61319a8cac01e92..cdd17f9b57bff18ce620a9be98abc34b4c68157e 100644
+--- a/packages/opencode/src/cli/cmd/tui/config/tui.ts
++++ b/packages/opencode/src/cli/cmd/tui/config/tui.ts
+@@ -331,7 +331,12 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
+       enabled: acc.result.attention?.enabled ?? true,
+       notifications: acc.result.attention?.notifications ?? true,
+       sound: acc.result.attention?.sound ?? true,
+-      volume: acc.result.attention?.volume ?? 0.4,
++      // 默认音量 0.5：经 BS.1770 响度分析，内嵌 done 音效在此增益下
++      // stereo 综合响度约 -27.8 LUFS、true peak 约 -13.9 dBTP，
++      // 与 macOS 系统提示音（Pop -29 LUFS、Ping -28.8 LUFS）同区间偏轻，
++      // 既有足够提醒力又不至于在频繁触发时形成听觉疲劳。
++      // 0.4 偏轻（约 -29.7 LUFS），0.6+ 会比多数系统提示音更突出。
++      volume: acc.result.attention?.volume ?? 0.5,
+       sound_pack: acc.result.attention?.sound_pack ?? "opencode.default",
+       sounds: acc.result.attention?.sounds ?? {},
+     },
+diff --git a/packages/opencode/test/cli/cmd/tui/attention.test.ts b/packages/opencode/test/cli/cmd/tui/attention.test.ts
+index 24df9fc515fa469bd26a5a927bf48022b02d8e31..a2184efdb034744a9a1f71f89e201fa445e066c4 100644
+--- a/packages/opencode/test/cli/cmd/tui/attention.test.ts
++++ b/packages/opencode/test/cli/cmd/tui/attention.test.ts
+@@ -100,7 +100,7 @@ function config(attention: Partial<AttentionConfig["attention"]> = {}): Attentio
+       enabled: true,
+       notifications: true,
+       sound: true,
+-      volume: 0.4,
++      volume: 0.5,
+       sound_pack: "opencode.default",
+       sounds: {},
+       ...attention,
+diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/config/tui.test.ts
+index cad0c582bc6a494c9845e39f10decd81bdc21318..f53fa0cc1006348c6abfd3ba0eebdd8a2330a397 100644
+--- a/packages/opencode/test/config/tui.test.ts
++++ b/packages/opencode/test/config/tui.test.ts
+@@ -141,7 +141,7 @@ it.instance("resolves attention config defaults and overrides", () =>
+         enabled: true,
+         notifications: true,
+         sound: true,
+-        volume: 0.4,
++        volume: 0.5,
+         sound_pack: "opencode.default",
+         sounds: {},
+       })
+diff --git a/packages/opencode/test/fixture/tui-runtime.ts b/packages/opencode/test/fixture/tui-runtime.ts
+index 75fc2fdc44b2d45611f386a0f3ace1d130ea7b56..65aeff5c9bf858c5375be1a5f149e18bcbaf41e6 100644
+--- a/packages/opencode/test/fixture/tui-runtime.ts
++++ b/packages/opencode/test/fixture/tui-runtime.ts
+@@ -27,7 +27,7 @@ export function createTuiResolvedConfig(input: ResolvedInput = {}): TuiConfig.Re
+       enabled: false,
+       notifications: true,
+       sound: true,
+-      volume: 0.4,
++      volume: 0.5,
+       sound_pack: "opencode.default",
+       sounds: {},
+       ...input.attention,

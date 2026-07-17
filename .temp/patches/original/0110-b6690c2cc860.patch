@@ -1,0 +1,135 @@
+From b6690c2cc8606192469f1a497a196f363c3633b1 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 8 May 2026 14:54:28 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=9B=B4=E6=96=B0=E7=89=88=E6=9C=AC?=
+ =?UTF-8?q?=E5=8F=B7=E8=87=B3=201.14.32=EF=BC=8C=E5=B9=B6=E4=BC=98?=
+ =?UTF-8?q?=E5=8C=96=20VSIX=20=E6=89=93=E5=8C=85=E9=80=BB=E8=BE=91?=
+ =?UTF-8?q?=E4=BB=A5=E9=81=BF=E5=85=8D=20Windows=20=E7=8E=AF=E5=A2=83?=
+ =?UTF-8?q?=E4=B8=AD=E7=9A=84=20npm=20=E8=B7=AF=E5=BE=84=E9=97=AE=E9=A2=98?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/docs/VSIX-Packaging.md b/docs/VSIX-Packaging.md
+index 7cd8bd958af095a0443739f3c138c191fc6a216f..0c12198530d09c1b706bb243f95fc4bcd85736e1 100644
+--- a/docs/VSIX-Packaging.md
++++ b/docs/VSIX-Packaging.md
+@@ -20,7 +20,7 @@ This VS Code extension provides an HTTP bridge server that connects the OpenCode
+ | `name` | `opencode-ide-bridge` |
+ | `displayName` | `OpenCode IDE Bridge` |
+ | `publisher` | `SMARK2022` |
+-| `version` | `1.14.31` |
++| `version` | `1.14.32` |
+ | `engines.vscode` | `^1.94.0` |
+ | `main` | `./dist/extension.js` |
+ | `license` | `MIT` |
+@@ -51,6 +51,17 @@ bun run package
+ 
+ This runs `check-types && lint && node esbuild.js --production`.
+ 
++This project intentionally does not define `vscode:prepublish`. `vsce package` runs that hook through an internal `npm run vscode:prepublish` child process. In some Windows/Bun terminal environments that nested child process can lose `npm` from `PATH`, producing:
++
++```text
++Executing prepublish script 'npm run vscode:prepublish'...
++'npm' is not recognized as an internal or external command,
++operable program or batch file.
++ERROR  npm failed with exit code 1
++```
++
++Instead, run the build explicitly first (`bun run package`), then call `vsce package` with `--no-dependencies`.
++
+ ### 4. List VSIX Contents (preview)
+ 
+ ```powershell
+@@ -61,10 +72,10 @@ npx @vscode/vsce ls
+ 
+ ```powershell
+ $env:PATH="C:\Users\Lenovo\.bun\bin;$env:PATH"
+-npx --yes --package @vscode/vsce -- vsce package -o "SMARK2022.opencode-ide-bridge-1.14.31.vsix"
++npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.14.32.vsix"
+ ```
+ 
+-The `vscode:prepublish` script runs `bun run package` automatically before `vsce package`.
++The output file is written under `sdks/vscode/dist/` together with the compiled extension bundle.
+ 
+ ### One-Command Shortcut
+ 
+@@ -75,7 +86,7 @@ bun run vsix
+ ## VSIX Artifact Structure
+ 
+ ```
+-SMARK2022.opencode-ide-bridge-1.14.31.vsix
++dist/SMARK2022.opencode-ide-bridge-1.14.32.vsix
+ ├─ [Content_Types].xml
+ ├─ extension.vsixmanifest
+ └─ extension/
+@@ -101,7 +112,7 @@ SMARK2022.opencode-ide-bridge-1.14.31.vsix
+ ### Local VSIX Install
+ 
+ ```powershell
+-code --install-extension .\SMARK2022.opencode-ide-bridge-1.14.31.vsix --force
++code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.32.vsix --force
+ ```
+ 
+ ### From VS Code UI
+@@ -143,7 +154,7 @@ npx @vscode/vsce publish
+ 
+ ```powershell
+ npx ovsx create-namespace SMARK2022 -p <OPENVSX_TOKEN>
+-npx ovsx publish .\SMARK2022.opencode-ide-bridge-1.14.31.vsix -p <OPENVSX_TOKEN>
++npx ovsx publish .\dist\SMARK2022.opencode-ide-bridge-1.14.32.vsix -p <OPENVSX_TOKEN>
+ ```
+ 
+ ## CLI Integration
+diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
+index e95fbec5bbbbf3bc88fd40f2afa5483a10cefe01..df609f7c2d7dac472f769a5100e35e81fc8b01e6 100644
+--- a/sdks/vscode/README.md
++++ b/sdks/vscode/README.md
+@@ -68,13 +68,21 @@ Build and package from the `sdks/vscode` directory:
+ bun run check-types
+ bun run lint
+ bun run package
+-npx @vscode/vsce package -o "dist/SMARK2022.opencode-ide-bridge-1.14.31.vsix"
++npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.14.32.vsix"
+ ```
+ 
++Or use the bundled shortcut:
++
++```powershell
++bun run vsix
++```
++
++The shortcut builds first, then packages directly into `dist/`. It intentionally does not use `vscode:prepublish`, because `vsce` runs that hook through an internal `npm run vscode:prepublish` child process, which can lose `npm` from `PATH` in some Windows/Bun terminal environments.
++
+ Install:
+ 
+ ```powershell
+-code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.31.vsix --force
++code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.32.vsix --force
+ ```
+ 
+ ## Architecture
+diff --git a/sdks/vscode/package.json b/sdks/vscode/package.json
+index b0d0ca7ada310c2adc1b0d01d2b4265f634584c1..1960a206b2e05f3abb7c887d8f50b9606bbace03 100644
+--- a/sdks/vscode/package.json
++++ b/sdks/vscode/package.json
+@@ -2,7 +2,7 @@
+   "name": "opencode-ide-bridge",
+   "displayName": "OpenCode IDE Bridge",
+   "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, workspace context sharing, and terminal integration — all on 127.0.0.1 with Bearer-token authentication.",
+-  "version": "1.14.31",
++  "version": "1.14.32",
+   "publisher": "SMARK2022",
+   "homepage": "https://github.com/anomalyco/opencode",
+   "repository": {
+@@ -100,8 +100,7 @@
+     ]
+   },
+   "scripts": {
+-    "vscode:prepublish": "bun run package",
+-    "vsix": "bun run package && npx @vscode/vsce package -o dist/SMARK2022.opencode-ide-bridge-1.14.31.vsix",
++    "vsix": "bun run package && npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.14.32.vsix",
+     "compile": "bun run check-types && bun run lint && node esbuild.js",
+     "watch:esbuild": "node esbuild.js --watch",
+     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",

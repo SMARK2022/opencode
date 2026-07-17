@@ -1,0 +1,111 @@
+From d86901da7cb1ac4390fb84c10bee395ec708c68a Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 15 Jun 2026 10:21:40 +0800
+Subject: [PATCH] =?UTF-8?q?fix(ci):=20=E4=BF=AE=E5=A4=8D=20Windows=20?=
+ =?UTF-8?q?=E5=8D=95=E6=B5=8B=E7=AB=9E=E6=80=81=E4=B8=8E=E6=A1=8C=E9=9D=A2?=
+ =?UTF-8?q?=E6=B5=8B=E8=AF=95=E5=AF=BC=E5=85=A5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+避免桌面纯单元测试在导入 shell-env 时加载 electron-log，从而依赖未安装的 Electron binary；生产路径仍显式传入 desktop logger。
+
+释放 flock 时先原子改名再删除锁目录，避免 Windows 并发等待者刚建好的新锁被误删；同时放宽 daemon startup-idle 测试的启动窗口，保留无 SSE 自动退出行为边界。
+
+diff --git a/packages/core/src/util/flock.ts b/packages/core/src/util/flock.ts
+index 958bd9fd1da6dfd472e3a0ab7aec8038dca7a6f0..c25c55e8289ac7b024debb609730bfdcdf747f5b 100644
+--- a/packages/core/src/util/flock.ts
++++ b/packages/core/src/util/flock.ts
+@@ -1,7 +1,7 @@
+ import path from "path"
+ import os from "os"
+ import { randomBytes, randomUUID } from "crypto"
+-import { mkdir, readFile, rm, stat, utimes, writeFile } from "fs/promises"
++import { mkdir, readFile, rename, rm, stat, utimes, writeFile } from "fs/promises"
+ import { Hash } from "./hash"
+ import { Effect } from "effect"
+ 
+@@ -261,7 +261,17 @@ export namespace Flock {
+         throw new Error("Refusing to release: lock token mismatch (not the owner).")
+       }
+ 
+-      await rm(lockDir, { recursive: true, force: true })
++      const releasePath = `${lockDir}.release-${token}`
++      // 先原子改名再异步删除，避免 Windows 并发下 rm(lockDir) 删除到
++      // 另一个等待者刚刚 mkdir 成功的新锁目录，从而破坏互斥保证。
++      await rename(lockDir, releasePath).catch((err) => {
++        const errCode = code(err)
++        if (errCode === "ENOENT" || errCode === "ENOTDIR") {
++          throw new Error("Refusing to release: lock is compromised (directory missing).")
++        }
++        throw err
++      })
++      await rm(releasePath, { recursive: true, force: true })
+     }
+ 
+     return {
+diff --git a/packages/desktop/src/main/server.ts b/packages/desktop/src/main/server.ts
+index cfdafdc67bea21e02a76d64535b8e1891a240f1a..c14bded5723abfd3afbaf5c2ac2dc0cdd78a1380 100644
+--- a/packages/desktop/src/main/server.ts
++++ b/packages/desktop/src/main/server.ts
+@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url"
+ import { app, utilityProcess } from "electron"
+ import type { Details } from "electron"
+ import { DEFAULT_SERVER_URL_KEY, WSL_ENABLED_KEY } from "./constants"
++import { getLogger } from "./logging"
+ import { getUserShell, loadShellEnv } from "./shell-env"
+ import { getStore } from "./store"
+ import type { SqliteMigrationProgress } from "../preload/types"
+@@ -58,7 +59,7 @@ export function setWslConfig(config: WslConfig) {
+ export function preferAppEnv(userDataPath: string) {
+   const shell = process.platform === "win32" ? null : getUserShell()
+   Object.assign(process.env, {
+-    ...(shell ? loadShellEnv(shell) : null),
++    ...(shell ? loadShellEnv(shell, getLogger()) : null),
+     OPENCODE_EXPERIMENTAL_ICON_DISCOVERY: "true",
+     OPENCODE_EXPERIMENTAL_FILEWATCHER: "true",
+     OPENCODE_CLIENT: "desktop",
+diff --git a/packages/desktop/src/main/shell-env.ts b/packages/desktop/src/main/shell-env.ts
+index deb43033aefc6effc24892836e0706b276e6ecce..3dcd0c8a8216e1232ed4c969161965153e68cf2c 100644
+--- a/packages/desktop/src/main/shell-env.ts
++++ b/packages/desktop/src/main/shell-env.ts
+@@ -1,11 +1,11 @@
+ import { spawnSync } from "node:child_process"
+ import { userInfo } from "node:os"
+ import { basename } from "node:path"
+-import { getLogger } from "./logging"
+ 
+ const TIMEOUT = 5_000
+ 
+ type Probe = { type: "Loaded"; value: Record<string, string> } | { type: "Timeout" } | { type: "Unavailable" }
++type Logger = { log: (...args: unknown[]) => void }
+ 
+ export function resolveUserShell(envShell: string | undefined, loginShell: string | null | undefined) {
+   const resolvedLoginShell = loginShell && loginShell !== "unknown" ? loginShell : undefined
+@@ -65,8 +65,9 @@ export function isNushell(shell: string) {
+   return name === "nu" || name === "nu.exe" || raw.endsWith("\\nu.exe")
+ }
+ 
+-export function loadShellEnv(shell: string) {
+-  const logger = getLogger()
++export function loadShellEnv(shell: string, logger: Logger = console) {
++  // shell-env 的解析 helper 会被 Bun 单元测试直接导入；不要在模块顶层加载
++  // electron-log，否则没有安装 Electron binary 的 CI 测试环境会在 import 阶段失败。
+   if (isNushell(shell)) {
+     logger.log(`[server] Skipping shell env probe for nushell: ${shell}`)
+     return null
+diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
+index 60eb402d2e3ab87713d8263e4decec1a82452dc8..e3bfa3634f354bc24844fb89827d12a34750c32f 100644
+--- a/packages/opencode/test/cli/tui/daemon.test.ts
++++ b/packages/opencode/test/cli/tui/daemon.test.ts
+@@ -509,7 +509,9 @@ describe("daemon lifecycle", () => {
+       const lockPath = path.join(tmp.path, "tui-server.json")
+       const { proc } = await spawnDaemon(lockPath, {
+         OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
+-        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
++        // Windows CI 冷启动时 worker 写 lock 和 HTTP ready 可能超过 250ms；
++        // 这里仍验证“无首个 SSE 会在启动 idle 后退出”，但给 daemon 留出可观测的启动窗口。
++        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "2000",
+       })
+ 
+       try {

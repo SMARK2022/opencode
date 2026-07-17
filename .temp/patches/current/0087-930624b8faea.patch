@@ -1,0 +1,316 @@
+From 930624b8faea84baafd21f2a7bd15c8a99c82b2e Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 6 May 2026 00:24:09 +0800
+Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E6=9B=B4=E6=96=B0=E6=A1=A5?=
+ =?UTF-8?q?=E6=8E=A5=E5=8A=9F=E8=83=BD=EF=BC=8C=E7=A7=BB=E9=99=A4=E7=8E=AF?=
+ =?UTF-8?q?=E5=A2=83=E5=8F=98=E9=87=8F=E6=94=AF=E6=8C=81=EF=BC=8C=E5=A2=9E?=
+ =?UTF-8?q?=E5=BC=BA=E6=B3=A8=E5=86=8C=E8=A1=A8=E6=A1=A5=E6=8E=A5=E9=80=89?=
+ =?UTF-8?q?=E6=8B=A9=E9=80=BB=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/context/editor.ts b/packages/opencode/src/cli/cmd/tui/context/editor.ts
+index 06dd6fd0421e15834eb1a19325cd31ce0f04830a..e802838e1f078da8c915f404f969ddcbc57d35b1 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/editor.ts
++++ b/packages/opencode/src/cli/cmd/tui/context/editor.ts
+@@ -40,13 +40,13 @@ const EditorSelectionSchema = z
+   .union([
+     z.object({
+       filePath: z.string(),
+-      source: z.enum(["websocket", "zed"]).optional(),
++      source: z.enum(["websocket", "zed", "bridge"]).optional(),
+       ranges: z.array(EditorSelectionRangeSchema).min(1),
+     }),
+     z.object({
+       text: z.string(),
+       filePath: z.string(),
+-      source: z.enum(["websocket", "zed"]).optional(),
++      source: z.enum(["websocket", "zed", "bridge"]).optional(),
+       selection: z.object({
+         start: PositionSchema,
+         end: PositionSchema,
+@@ -121,6 +121,7 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
+     let socket: WebSocket | undefined
+     let closed = false
+     let reconnect: ReturnType<typeof setTimeout> | undefined
++    let bridgePoll: ReturnType<typeof setTimeout> | undefined
+     let attempt = 0
+     let requestID = 0
+     let zedSelection: Promise<void> | undefined
+@@ -142,39 +143,22 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
+     const connect = () => {
+       if (closed) return
+ 
+-      const connection = resolveEditorConnection(directory)
+-      if (!connection) {
+-        const dbPath = resolveZedDbPath()
+-        if (!dbPath) {
+-          setStore("status", "disabled")
+-          scheduleReconnect()
+-          return
+-        }
+-        zedSelection ??= resolveZedSelection(dbPath, directory)
+-          .then((result) => {
+-            if (closed || socket) return
+-            if (result.type === "unavailable") return
+-            const selection = result.type === "selection" ? result.selection : undefined
+-            const key = editorSelectionKey(selection)
+-            if (key !== lastZedSelectionKey) {
+-              lastZedSelectionKey = key
+-              setStore("selection", selection)
+-              setStore("status", selection ? "connected" : "disabled")
+-            }
+-          })
+-          .catch(() => {
+-            // Keep the last known Zed selection for transient polling failures.
+-          })
+-          .finally(() => {
+-            zedSelection = undefined
+-          })
+-        scheduleZedPoll()
++      // ① Primary: Bridge Registry (opencode VS Code extension)
++      const bridge = resolveBridgeRegistryActiveFile(directory)
++      if (bridge) {
++        if (socket) { socket.close(); socket = undefined }
++        setStore("selection", { ...bridge, source: "bridge" })
++        setStore("status", "connected")
++        scheduleBridgePoll()
+         return
+       }
+ 
+-      setStore("status", "connecting")
+-      const current = openEditorSocket(connection, WebSocketImpl)
+-      socket = current
++      // ② Fallback: Claude Code lock file / WebSocket
++      const connection = resolveEditorConnection(directory)
++      if (connection) {
++        setStore("status", "connecting")
++        const current = openEditorSocket(connection, WebSocketImpl)
++        socket = current
+ 
+       current.addEventListener("open", () => {
+         if (socket !== current) {
+@@ -234,7 +218,34 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
+         setStore("status", "connecting")
+         scheduleReconnect()
+       })
++      return
++    }
++
++    // ③ Fallback: Zed editor
++    const dbPath = resolveZedDbPath()
++    if (!dbPath) {
++      setStore("status", "disabled")
++      scheduleReconnect()
++      return
+     }
++    zedSelection ??= resolveZedSelection(dbPath, directory)
++      .then((result) => {
++        if (closed || socket) return
++        if (result.type === "unavailable") return
++        const selection = result.type === "selection" ? result.selection : undefined
++        const key = editorSelectionKey(selection)
++        if (key !== lastZedSelectionKey) {
++          lastZedSelectionKey = key
++          setStore("selection", selection)
++          setStore("status", selection ? "connected" : "disabled")
++        }
++      })
++      .catch(() => {})
++      .finally(() => {
++        zedSelection = undefined
++      })
++    scheduleZedPoll()
++  }
+ 
+     const scheduleReconnect = () => {
+       if (closed) return
+@@ -250,6 +261,12 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
+       reconnect = setTimeout(connect, 1000)
+     }
+ 
++    const scheduleBridgePoll = () => {
++      if (closed) return
++      if (bridgePoll) clearTimeout(bridgePoll)
++      bridgePoll = setTimeout(connect, 5000)
++    }
++
+     const reconnectWithDirectory = (nextDirectory?: string) => {
+       const resolved = nextDirectory || process.cwd()
+       if (directory === resolved) return
+@@ -260,6 +277,8 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
+       lastZedSelectionKey = undefined
+       if (reconnect) clearTimeout(reconnect)
+       reconnect = undefined
++      if (bridgePoll) clearTimeout(bridgePoll)
++      bridgePoll = undefined
+       if (socket) {
+         const current = socket
+         socket = undefined
+@@ -277,13 +296,14 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
+       onCleanup(() => {
+         closed = true
+         if (reconnect) clearTimeout(reconnect)
++        if (bridgePoll) clearTimeout(bridgePoll)
+         socket?.close()
+       })
+     })
+ 
+     return {
+       enabled() {
+-        return Boolean(resolveEditorConnection(directory) || resolveZedDbPath())
++        return Boolean(resolveBridgeRegistryActiveFile(directory) || resolveEditorConnection(directory) || resolveZedDbPath())
+       },
+       connected() {
+         return store.status === "connected"
+@@ -403,6 +423,54 @@ function pathContainsLength(parent: string, child: string) {
+   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)) ? resolved.length : 0
+ }
+ 
++function resolveBridgeRegistryActiveFile(activeDirectory: string): EditorSelection | undefined {
++  const dir = path.join(os.homedir(), ".local", "state", "opencode", "ide")
++  let entries: string[]
++  try { entries = readdirSync(dir) } catch { return }
++
++  const now = Date.now()
++  const parsed = entries
++    .filter((f) => f.endsWith(".json"))
++    .flatMap((f) => {
++      try {
++        const data = JSON.parse(readFileSync(path.join(dir, f), "utf8")) as unknown
++        if (!isRecord(data) || data.schema !== 1) return []
++        return [data]
++      } catch { return [] }
++    })
++    .filter((e) => now - (e.updatedAt as number) < 60_000)
++
++  const scored = parsed
++    .map((entry) => ({ entry, score: bridgeRegistryWorkspaceScore(entry, activeDirectory) }))
++    .filter((e) => e.score > 0)
++    .sort((a, b) => b.score - a.score)
++  const best = scored[0]
++  if (!best) return
++
++  const active = best.entry.active as Record<string, string> | undefined
++  const filePath = active?.notebook || active?.textEditor
++  if (!filePath) return
++
++  return { filePath, source: "bridge", ranges: [] }
++}
++
++function bridgeRegistryWorkspaceScore(entry: Record<string, unknown>, activeDirectory: string) {
++  const folders = Array.isArray(entry.workspaceFolders)
++    ? (entry.workspaceFolders as Array<Record<string, unknown>>)
++    : []
++  return Math.max(
++    0,
++    ...folders.map((folder) => {
++      const fsPath = typeof folder.fsPath === "string" ? folder.fsPath : ""
++      const uri = typeof folder.uri === "string" ? folder.uri : ""
++      return Math.max(
++        fsPath ? pathContainsLength(fsPath, activeDirectory) : 0,
++        uri ? pathContainsLength(uri, activeDirectory) : 0,
++      )
++    }),
++  )
++}
++
+ function openEditorSocket(connection: EditorConnection, WebSocketImpl: typeof WebSocket) {
+   if (!connection.authToken) return new WebSocketImpl(connection.url)
+ 
+diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/ide/vscode-bridge.ts
+index 1d9dd1e2ca49846016b50463c5a122fadb9c2281..a1932d6415ba7f01e3c3325d10708ed005332e39 100644
+--- a/packages/opencode/src/ide/vscode-bridge.ts
++++ b/packages/opencode/src/ide/vscode-bridge.ts
+@@ -108,9 +108,6 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
+ }
+ 
+ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
+-  const env = envBridge()
+-  if (env && (await healthCheck(env, input.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT))) return env
+-
+   const now = Date.now()
+   if (
+     cachedRegistryBridge &&
+@@ -257,21 +254,6 @@ function bridgeMatchesFilePath(entry: BridgeEntry, filePath: string) {
+     .some((active) => active !== undefined && samePath(active, target))
+ }
+ 
+-function envBridge(): BridgeRef | undefined {
+-  const rawPort = process.env.OPENCODE_VSCODE_BRIDGE_PORT
+-  const token = process.env.OPENCODE_VSCODE_BRIDGE_TOKEN
+-  if (!rawPort || !token) return
+-  const port = Number(rawPort)
+-  if (!Number.isInteger(port) || port <= 0 || port > 65535) return
+-  return {
+-    id: "env",
+-    host: process.env.OPENCODE_VSCODE_BRIDGE_HOST ?? "127.0.0.1",
+-    port,
+-    token,
+-    source: "env",
+-  }
+-}
+-
+ async function readEntry(filepath: string) {
+   const value = JSON.parse(await fs.readFile(filepath, "utf8")) as unknown
+   if (!isRecord(value)) return
+diff --git a/packages/opencode/test/ide/vscode-bridge.test.ts b/packages/opencode/test/ide/vscode-bridge.test.ts
+index 99f196fee6948feb13bfd98ddb72a78f069cd670..661a17787fd49dd79ba0a4b84baad1837ea93ea9 100644
+--- a/packages/opencode/test/ide/vscode-bridge.test.ts
++++ b/packages/opencode/test/ide/vscode-bridge.test.ts
+@@ -6,31 +6,14 @@ import path from "path"
+ import * as VscodeBridge from "../../src/ide/vscode-bridge"
+ 
+ const originalRegistryDir = process.env.OPENCODE_IDE_REGISTRY_DIR
+-const originalPort = process.env.OPENCODE_VSCODE_BRIDGE_PORT
+-const originalToken = process.env.OPENCODE_VSCODE_BRIDGE_TOKEN
+ const tempDirs: string[] = []
+ 
+ afterEach(async () => {
+   restoreEnv("OPENCODE_IDE_REGISTRY_DIR", originalRegistryDir)
+-  restoreEnv("OPENCODE_VSCODE_BRIDGE_PORT", originalPort)
+-  restoreEnv("OPENCODE_VSCODE_BRIDGE_TOKEN", originalToken)
+   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })))
+ })
+ 
+ describe("vscode bridge discovery", () => {
+-  test("env bridge is preferred when healthy", async () => {
+-    using server = await bridgeServer()
+-    const dir = await tempRegistry()
+-    await writeEntry(dir, "registry", server.port, "/tmp/project")
+-    process.env.OPENCODE_VSCODE_BRIDGE_PORT = String(server.port)
+-    process.env.OPENCODE_VSCODE_BRIDGE_TOKEN = "env-token"
+-
+-    const bridge = await VscodeBridge.resolveBridge({ cwd: "/tmp/project" })
+-
+-    expect(bridge.source).toBe("env")
+-    expect(bridge.token).toBe("env-token")
+-  })
+-
+   test("selects registry bridge matching the requested file path", async () => {
+     using first = await bridgeServer()
+     using second = await bridgeServer()
+@@ -74,8 +57,6 @@ async function tempRegistry() {
+   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-vscode-bridge-"))
+   tempDirs.push(dir)
+   process.env.OPENCODE_IDE_REGISTRY_DIR = dir
+-  delete process.env.OPENCODE_VSCODE_BRIDGE_PORT
+-  delete process.env.OPENCODE_VSCODE_BRIDGE_TOKEN
+   return dir
+ }
+ 
+diff --git a/sdks/vscode/src/extension.ts b/sdks/vscode/src/extension.ts
+index 9b77492ba1832d6a6016e93603b588786792264e..f29aca8a0ea3d93c6280a4f37ffb64ed116e49d2 100644
+--- a/sdks/vscode/src/extension.ts
++++ b/sdks/vscode/src/extension.ts
+@@ -73,8 +73,6 @@ async function openTerminal(context: vscode.ExtensionContext, bridge: Promise<Br
+     location: { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
+     env: {
+       _EXTENSION_OPENCODE_PORT: port.toString(),
+-      OPENCODE_VSCODE_BRIDGE_PORT: bridgeInfo.port.toString(),
+-      OPENCODE_VSCODE_BRIDGE_TOKEN: bridgeInfo.token,
+       OPENCODE_CALLER: "vscode",
+     },
+   })

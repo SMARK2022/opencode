@@ -1,0 +1,675 @@
+From 00ec4b85ca4f73b58c607fd95c17955899e4c232 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 31 May 2026 16:11:14 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E9=99=8D=E4=BD=8E=E4=B8=8A?=
+ =?UTF-8?q?=E4=B8=8B=E6=96=87=E9=9D=A2=E6=9D=BF=E4=B8=8E=E9=80=89=E6=8B=A9?=
+ =?UTF-8?q?=E6=A1=86=E6=B8=B2=E6=9F=93=E5=BC=80=E9=94=80?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+为 /context 面板拆出轻量 refresh key，只在节流后构建完整快照，避免流式 tool/text 增量触发大对象 JSON roundtrip 并绕过 throttle。
+
+DialogSelect 增加稳定业务 key 路径，减少 active/current 判断中的深比较和 JSON 序列化；补充回归测试覆盖流式刷新与对象选项定位边界。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-model.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-model.tsx
+index 09c2d64b00dca9b6147fa892f02867bb6bbee900..6751b700f6d0fd4b0949e0c985c48edac25f4897 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/dialog-model.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/dialog-model.tsx
+@@ -19,6 +19,14 @@ export function DialogModel(props: { providerID?: string }) {
+   const providers = createDialogProviderOptions()
+ 
+   const showExtra = createMemo(() => connected() && !props.providerID)
++  // 模型选项仍保留对象 value 供选择回调使用；current 高亮只需要稳定的
++  // provider/model identity。这里传入与 option.key 相同的 key 形状，避免
++  // DialogSelect 在大模型列表中为了高亮当前模型反复做对象深比较。
++  const currentModelKey = createMemo(() => {
++    const current = local.model.current()
++    if (!current) return
++    return `${current.providerID}/${current.modelID}`
++  })
+ 
+   const options = createMemo(() => {
+     const needle = query().trim()
+@@ -35,7 +43,7 @@ export function DialogModel(props: { providerID?: string }) {
+         if (!model) return []
+         return [
+           {
+-            key: item,
++            key: `${provider.id}/${model.id}`,
+             value: { providerID: provider.id, modelID: model.id },
+             title: model.name ?? item.modelID,
+             description: provider.name,
+@@ -71,6 +79,7 @@ export function DialogModel(props: { providerID?: string }) {
+           filter(([_, info]) => info.status !== "deprecated"),
+           filter(([_, info]) => (props.providerID ? info.providerID === props.providerID : true)),
+           map(([model, info]) => ({
++            key: `${provider.id}/${model}`,
+             value: { providerID: provider.id, modelID: model },
+             title: info.name ?? model,
+             description: favorites.some((item) => item.providerID === provider.id && item.modelID === model)
+@@ -170,6 +179,7 @@ export function DialogModel(props: { providerID?: string }) {
+       skipFilter={true}
+       title={title()}
+       current={local.model.current()}
++      currentKey={currentModelKey()}
+     />
+   )
+ }
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
+index 04bee69392e572cfb4175803dc199b174bda188a..9d41209e88185db6cafee3ca79c1f2845c951e68 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
+@@ -1,4 +1,4 @@
+-import { createEffect, createMemo, createResource, For, Show } from "solid-js"
++import { createEffect, createMemo, createResource, For, Show, untrack } from "solid-js"
+ import { useRenderer, useTerminalDimensions } from "@opentui/solid"
+ import { useDialog } from "@tui/ui/dialog"
+ import { useBindings } from "../../keymap"
+@@ -8,13 +8,14 @@ import { useSync } from "@tui/context/sync"
+ import { useTheme } from "@tui/context/theme"
+ import { useTuiConfig } from "@tui/context/tui-config"
+ import { TextAttributes } from "@opentui/core"
+-import type { Message, Part } from "@opencode-ai/sdk/v2"
++import type { Agent, Config, Message, Part, Provider, VcsInfo } from "@opencode-ai/sdk/v2"
+ import { Locale } from "@/util"
+ import { createThrottledSignal } from "../../util/signal"
+ import {
+   computeContextData,
+   type ContextCategoryColor,
+   type ContextUsageData,
++  type ComputeContextDataInput,
+   type GridSquare,
+ } from "../../util/context-usage"
+ 
+@@ -30,6 +31,126 @@ export function contextUsageSnapshot<T extends Message[] | Part[]>(value: T): T
+   return JSON.parse(JSON.stringify(value)) as T
+ }
+ 
++export function contextUsageRefreshKey(input: {
++  messages: readonly Message[]
++  getParts: (id: string) => readonly Part[]
++  providers: readonly Provider[]
++  config?: Config
++  agents?: readonly Agent[]
++  lastUserModel?: { providerID: string; modelID: string }
++  vcs?: VcsInfo
++  paths: { cwd: string; worktree?: string }
++  columns?: number
++}) {
++  // 这个 key 是 `/context` 面板的低成本刷新信号：它必须读取 streaming
++  // part 的 nested 字段来保持响应式依赖，但不能像真正输入快照那样深拷贝
++  // message/part 全量内容。否则高频 tool raw/text delta 会在 throttle 之前
++  // 先触发 JSON roundtrip，正是本次修复要移除的热路径。
++  return [
++    input.columns ?? "",
++    input.paths.cwd,
++    input.paths.worktree ?? "",
++    input.lastUserModel ? `${input.lastUserModel.providerID}/${input.lastUserModel.modelID}` : "",
++    configRefreshKey(input.config),
++    input.vcs ? refreshJson(input.vcs) : "",
++    input.providers.map(providerRefreshKey).join("|"),
++    (input.agents ?? []).map((agent) => `${agent.name}:${agent.mode}:${agent.hidden ? 1 : 0}:${agent.description ?? ""}:${refreshJson(agent.permission)}`).join("|"),
++    input.messages.map((message) => [messageRefreshKey(message), input.getParts(message.id).map(partRefreshKey).join(",")].join("=")).join("\n"),
++  ].join("\n")
++}
++
++function refreshJsonLength(value: unknown) {
++  try {
++    return JSON.stringify(value)?.length ?? 0
++  } catch {
++    return 0
++  }
++}
++
++function refreshJson(value: unknown) {
++  try {
++    return JSON.stringify(value) ?? ""
++  } catch {
++    return String(value)
++  }
++}
++
++function providerRefreshKey(provider: Provider) {
++  return [
++    provider.id,
++    Object.values(provider.models)
++      .map((model) => `${model.id}:${model.status}:${model.limit.context}:${model.limit.input}:${model.limit.output}`)
++      .join(","),
++  ].join(":")
++}
++
++function configRefreshKey(config: Config | undefined) {
++  if (!config) return ""
++  // computeContextData 只读取 compaction reserve、额外 instruction 路径和
++  // skill 路径；这里刻意不序列化完整 config，避免把无关配置变更接入
++  // `/context` 面板的 streaming 热路径。
++  return [
++    config.compaction?.reserved ?? "",
++    Array.isArray(config.instructions) ? config.instructions.join("\0") : "",
++    Array.isArray(config.skills?.paths) ? config.skills.paths.join("\0") : "",
++  ].join("|")
++}
++
++function messageRefreshKey(message: Message) {
++  return [
++    message.id,
++    message.role,
++    "parentID" in message ? message.parentID : "",
++    "providerID" in message ? message.providerID : "",
++    "modelID" in message ? message.modelID : "",
++    message.time && "completed" in message.time ? message.time.completed : "",
++    "tokens" in message && message.tokens ? tokenRefreshKey(message.tokens) : "",
++    "inputChars" in message ? message.inputChars : "",
++    "inputTokens" in message ? message.inputTokens : "",
++    "inputBreakdown" in message && message.inputBreakdown ? inputBreakdownRefreshKey(message.inputBreakdown) : "",
++  ].join(":")
++}
++
++function partRefreshKey(part: Part) {
++  const base = `${part.id ?? ""}:${part.type}`
++  if (part.type === "text") return `${base}:${part.text?.length ?? 0}:${part.ignored ? 1 : 0}`
++  if (part.type === "reasoning") return `${base}:${part.text?.length ?? 0}`
++  if (part.type === "tool") {
++    const state = part.state
++    if (state.status === "pending") return `${base}:${part.tool}:${state.status}:${state.raw?.length ?? 0}`
++    if (state.status === "completed") return `${base}:${part.tool}:${state.status}:${refreshJsonLength(state.input)}:${state.output?.length ?? 0}:${refreshJson(state.attachments)}`
++    if (state.status === "error") return `${base}:${part.tool}:${state.status}:${refreshJsonLength(state.input)}:${state.error?.length ?? 0}`
++    return `${base}:${part.tool}:${state.status}`
++  }
++  if (part.type === "step-start") return `${base}:${part.inputTokens ?? ""}:${part.inputChars ?? ""}:${part.inputBreakdown ? inputBreakdownRefreshKey(part.inputBreakdown) : ""}`
++  if (part.type === "step-finish") return `${base}:${part.cost ?? 0}:${tokenRefreshKey(part.tokens)}:${part.inputChars ?? ""}:${part.inputBreakdown ? inputBreakdownRefreshKey(part.inputBreakdown) : ""}`
++  if (part.type === "file") return `${base}:${part.filename}:${part.mime}:${part.url?.length ?? 0}`
++  return base
++}
++
++function tokenRefreshKey(tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }) {
++  return `${tokens.input}/${tokens.output}/${tokens.reasoning}/${tokens.cache.read}/${tokens.cache.write}`
++}
++
++type InputBreakdown = NonNullable<Extract<Message, { inputBreakdown?: unknown }>["inputBreakdown"]>
++
++function inputBreakdownRefreshKey(input: InputBreakdown) {
++  return [
++    input.system,
++    input.instructions,
++    input.skills,
++    input.tools,
++    input.messages.userText,
++    input.messages.assistantText,
++    input.messages.reasoning,
++    input.messages.toolInput,
++    input.messages.toolOutput,
++    input.messages.attachments,
++    input.messages.total,
++    input.media ? `${input.media.rawChars}/${input.media.textChars}/${input.media.tokens}/${input.media.count}` : "",
++  ].join("/")
++}
++
+ function percent(tokens: number, max: number) {
+   if (!max) return "0.0%"
+   return `${((tokens / max) * 100).toFixed(1)}%`
+@@ -233,7 +354,7 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
+   const { theme } = useTheme()
+   useRenderer()
+ 
+-  const inputRaw = createMemo(() => {
++  function buildInput(): ComputeContextDataInput {
+     const messages = contextUsageSnapshot([...(sync.data.message[props.sessionID] ?? [])])
+     const parts = Object.fromEntries(
+       messages.map((msg) => [msg.id, contextUsageSnapshot([...(sync.data.part[msg.id] ?? [])])]),
+@@ -250,12 +371,33 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
+       paths: { cwd: paths.directory, worktree: paths.worktree },
+       columns: dimensions().width,
+     }
++  }
++
++  const inputSource = createMemo(() => {
++    const paths = project.instance.path()
++    return contextUsageRefreshKey({
++      messages: sync.data.message[props.sessionID] ?? [],
++      getParts: (id) => sync.data.part[id] ?? [],
++      providers: sync.data.provider,
++      config: sync.data.config,
++      agents: sync.data.agent,
++      lastUserModel: local.model.current(),
++      vcs: sync.data.vcs,
++      paths: { cwd: paths.directory, worktree: paths.worktree },
++      columns: dimensions().width,
++    })
+   })
+ 
+-  // Throttle the resource source so streaming deltas don't starve computeContextData.
+-  // leadingAndTrailing ensures the first update is immediate and the last one always flushes.
+-  const [input, setInput] = createThrottledSignal(inputRaw(), 500)
+-  createEffect(() => setInput(inputRaw()))
++  // 这里只 throttle 轻量 refresh key；真正的 message/part snapshot 放在
++  // untrack(buildInput) 内执行，保证 JSON roundtrip 不会重新订阅 nested
++  // streaming 字段并绕过 throttle。leading/trailing 语义仍保持首次立即刷新、
++  // 流式更新结束后补最后一次刷新，这是面板读数必须保持的不变量。
++  const [inputKey, setInputKey] = createThrottledSignal(inputSource(), 500)
++  createEffect(() => setInputKey(inputSource()))
++  const input = createMemo(() => {
++    inputKey()
++    return untrack(buildInput)
++  })
+ 
+   const [data] = createResource(input, computeContextData)
+ 
+diff --git a/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx b/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
+index d35963f9d8eea8d54a640a4d40a04f4ea71cd982..0c80a0f6310ebab8c5f228fa149a234978c3c1f4 100644
+--- a/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
++++ b/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
+@@ -45,9 +45,16 @@ export interface DialogSelectProps<T> {
+   }[]
+   bindings?: readonly Binding<Renderable, KeyEvent>[]
+   current?: T
++  currentKey?: string
+ }
+ 
+ export interface DialogSelectOption<T = any> {
++  /**
++   * 对象 value 的稳定业务 identity。DialogSelect 会承载模型、会话、工作区
++   * 等较大列表；调用方已知业务 key 时，active/current 热路径不应再依赖
++   * 深比较或 JSON 序列化。
++   */
++  key?: string
+   title: string
+   value: T
+   description?: string
+@@ -67,6 +74,29 @@ export type DialogSelectRef<T> = {
+   filtered: DialogSelectOption<T>[]
+ }
+ 
++type DialogSelectRow<T> = {
++  option: DialogSelectOption<T>
++  index: number
++  identityKey: string | undefined
++  renderID: string
++}
++
++function primitiveKey(value: unknown) {
++  if (value === undefined) return
++  if (value === null) return "null:null"
++  const type = typeof value
++  if (type === "string" || type === "number" || type === "boolean") return `${type}:${String(value)}`
++  return
++}
++
++function optionIdentityKey<T>(option: DialogSelectOption<T>) {
++  return option.key ?? primitiveKey(option.value)
++}
++
++function currentIdentityKey(value: unknown, key: string | undefined) {
++  return key ?? primitiveKey(value)
++}
++
+ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+   const dialog = useDialog()
+   const { theme } = useTheme()
+@@ -79,20 +109,6 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+     input: "keyboard" as "keyboard" | "mouse",
+   })
+ 
+-  createEffect(
+-    on(
+-      () => props.current,
+-      (current) => {
+-        if (current) {
+-          const currentIndex = flat().findIndex((opt) => isDeepEqual(opt.value, current))
+-          if (currentIndex >= 0) {
+-            setStore("selected", currentIndex)
+-          }
+-        }
+-      },
+-    ),
+-  )
+-
+   let input: InputRenderable
+ 
+   const actions = createMemo(() => props.actions ?? [])
+@@ -176,17 +192,56 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+   const height = createMemo(() => Math.min(rows(), Math.floor(dimensions().height / 2) - 6))
+ 
+   const selected = createMemo(() => flat()[store.selected])
++  const flatRows = createMemo<DialogSelectRow<T>[]>(() =>
++    flat().map((option, index) => {
++      const identityKey = optionIdentityKey(option)
++      return {
++        option,
++        index,
++        identityKey,
++        // renderID 必须在当前渲染列表内唯一；identityKey 可能由业务 key 或
++        // primitive value 得到，存在重复值，所以附加 index。renderID 只用于
++        // scrollbox child lookup，不能作为 current 判断的业务 identity。
++        renderID: `${identityKey ?? "object"}:${index}`,
++      }
++    }),
++  )
++  const rowsByOption = createMemo(() => {
++    const result = new WeakMap<DialogSelectOption<T>, DialogSelectRow<T>>()
++    for (const row of flatRows()) result.set(row.option, row)
++    return result
++  })
++  const selectedRow = createMemo(() => flatRows()[store.selected])
++  const currentIndex = createMemo(() => {
++    const key = currentIdentityKey(props.current, props.currentKey)
++    if (key !== undefined) return flatRows().findIndex((row) => row.identityKey === key)
++    if (props.current === undefined) return -1
++    return flatRows().findIndex((row) => isDeepEqual(row.option.value, props.current))
++  })
++
++  createEffect(
++    on(
++      () => currentIndex(),
++      (index) => {
++        if (index >= 0) setStore("selected", index)
++      },
++    ),
++  )
+ 
+   createEffect(
+-    on([() => store.filter, () => props.current], ([filter, current]) => {
++    on([() => store.filter, () => currentIndex()], () => {
+       setTimeout(() => {
+-        if (filter.length > 0) {
++        // TUI 布局更新会延后一 tick，滚动目标也必须在 callback 执行时
++        // 重新解析。这里不能捕获旧 index，否则 filter/options/current 在
++        // timeout 前变化时会滚到错误行。
++        if (store.filter.length > 0) {
+           moveTo(0, true)
+-        } else if (current) {
+-          const currentIndex = flat().findIndex((opt) => isDeepEqual(opt.value, current))
+-          if (currentIndex >= 0) {
+-            moveTo(currentIndex, true)
+-          }
++          return
++        }
++
++        const index = currentIndex()
++        if (index >= 0) {
++          moveTo(index, true)
+         }
+       }, 0)
+     }),
+@@ -206,7 +261,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+     if (option) props.onMove?.(option)
+     if (!scroll) return
+     const target = scroll.getChildren().find((child: { id?: string }) => {
+-      return child.id === JSON.stringify(selected()?.value)
++      return child.id === selectedRow()?.renderID
+     })
+     if (!target) return
+     const y = target.y - scroll.y
+@@ -219,7 +274,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+       }
+       if (y < 0) {
+         scroll.scrollBy(y)
+-        if (isDeepEqual(flat()[0].value, selected()?.value)) {
++        if (store.selected === 0) {
+           scroll.scrollTo(0)
+         }
+       }
+@@ -423,11 +478,19 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+                 </Show>
+                 <For each={options}>
+                   {(option) => {
+-                    const active = createMemo(() => isDeepEqual(option.value, selected()?.value))
+-                    const current = createMemo(() => isDeepEqual(option.value, props.current))
++                    const row = createMemo(() => rowsByOption().get(option))
++                    const active = createMemo(() => row()?.index === store.selected)
++                    const current = createMemo(() => {
++                      const value = row()
++                      if (!value) return false
++                      const key = currentIdentityKey(props.current, props.currentKey)
++                      if (key !== undefined) return value.identityKey === key
++                      if (props.current === undefined) return false
++                      return isDeepEqual(option.value, props.current)
++                    })
+                     return (
+                       <box
+-                        id={JSON.stringify(option.value)}
++                        id={row()?.renderID}
+                         flexDirection="row"
+                         position="relative"
+                         onMouseMove={() => {
+@@ -439,13 +502,13 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+                         }}
+                         onMouseOver={() => {
+                           if (store.input !== "mouse") return
+-                          const index = flat().findIndex((x) => isDeepEqual(x.value, option.value))
+-                          if (index === -1) return
++                          const index = row()?.index
++                          if (index === undefined) return
+                           moveTo(index)
+                         }}
+                         onMouseDown={() => {
+-                          const index = flat().findIndex((x) => isDeepEqual(x.value, option.value))
+-                          if (index === -1) return
++                          const index = row()?.index
++                          if (index === undefined) return
+                           moveTo(index)
+                         }}
+                         backgroundColor={active() ? (option.bg ?? theme.primary) : RGBA.fromInts(0, 0, 0, 0)}
+diff --git a/packages/opencode/test/cli/tui/context-usage.test.ts b/packages/opencode/test/cli/tui/context-usage.test.ts
+index 82d21812bd90d0a949f1e58625aca639dd4009c5..abb577b3085dbd3bf970c0d4eeb3c560f5e4a3c3 100644
+--- a/packages/opencode/test/cli/tui/context-usage.test.ts
++++ b/packages/opencode/test/cli/tui/context-usage.test.ts
+@@ -3,7 +3,7 @@ import { createMemo, createRoot } from "solid-js"
+ import { createStore, produce } from "solid-js/store"
+ import type { Message, Part, Provider } from "@opencode-ai/sdk/v2"
+ import { computeContextData, filterCompactedMessages } from "@/cli/cmd/tui/util/context-usage"
+-import { contextUsageDetailLines, contextUsageFooter, contextUsageSnapshot } from "@/cli/cmd/tui/routes/session/context-usage"
++import { contextUsageDetailLines, contextUsageFooter, contextUsageRefreshKey, contextUsageSnapshot } from "@/cli/cmd/tui/routes/session/context-usage"
+ 
+ const provider: Provider = {
+   id: "test",
+@@ -79,6 +79,53 @@ function text(messageID: string, value: string): Part {
+ }
+ 
+ describe("context usage", () => {
++  test("refresh key follows streaming tool deltas without serializing raw payloads", () => {
++    const raw = new String('{"filePath"')
++    Object.defineProperty(raw, "toJSON", {
++      value() {
++        throw new Error("raw payload should not be JSON-serialized while building the refresh key")
++      },
++    })
++    const messages = [user("1"), assistant("2", "1")]
++    const common = {
++      messages,
++      providers: [provider],
++      config: {},
++      agents: [],
++      lastUserModel: undefined,
++      vcs: undefined,
++      paths: { cwd: process.cwd(), worktree: process.cwd() },
++      columns: 100,
++    }
++
++    const first = contextUsageRefreshKey({
++      ...common,
++      getParts: (id) => id === "2" ? [{
++        id: "tool",
++        sessionID: "s",
++        messageID: "2",
++        type: "tool",
++        tool: "bash",
++        callID: "call",
++        state: { status: "pending", input: {}, raw: raw as unknown as string },
++      } as Part] : [],
++    })
++    const second = contextUsageRefreshKey({
++      ...common,
++      getParts: (id) => id === "2" ? [{
++        id: "tool",
++        sessionID: "s",
++        messageID: "2",
++        type: "tool",
++        tool: "bash",
++        callID: "call",
++        state: { status: "pending", input: {}, raw: '{"filePath":"src/index.ts"' },
++      } as Part] : [],
++    })
++
++    expect(first).not.toBe(second)
++  })
++
+   test("snapshot tracks streaming tool input deltas", () => {
+     createRoot((dispose) => {
+       const [store, setStore] = createStore<{ parts: Record<string, Part[]> }>({
+diff --git a/packages/opencode/test/cli/tui/dialog-select.test.tsx b/packages/opencode/test/cli/tui/dialog-select.test.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..4988ff7e7432cfebaaa79545a7e9046ea768fe5f
+--- /dev/null
++++ b/packages/opencode/test/cli/tui/dialog-select.test.tsx
+@@ -0,0 +1,149 @@
++/** @jsxImportSource @opentui/solid */
++import { expect, test } from "bun:test"
++import { testRender, useRenderer } from "@opentui/solid"
++import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
++import { createSignal, onCleanup, onMount } from "solid-js"
++import { DialogSelect, type DialogSelectOption } from "@/cli/cmd/tui/ui/dialog-select"
++import { TuiConfigProvider } from "@/cli/cmd/tui/context/tui-config"
++import { ThemeProvider } from "@/cli/cmd/tui/context/theme"
++import { KVProvider } from "@/cli/cmd/tui/context/kv"
++import { ToastProvider } from "@/cli/cmd/tui/ui/toast"
++import { DialogProvider } from "@/cli/cmd/tui/ui/dialog"
++import { OpencodeKeymapProvider, registerOpencodeKeymap } from "@/cli/cmd/tui/keymap"
++import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
++
++async function waitForFrame(app: Awaited<ReturnType<typeof testRender>>, text: string) {
++  const timeout = Date.now() + 1000
++  while (Date.now() < timeout) {
++    await app.renderOnce()
++    const frame = app.captureCharFrame()
++    if (frame.includes(text)) return frame
++    await Bun.sleep(10)
++  }
++  return app.captureCharFrame()
++}
++
++function DialogSelectHarness(props: {
++  options: DialogSelectOption<any>[]
++  current?: any
++  currentKey?: string
++  onMove?: (option: DialogSelectOption<any>) => void
++}) {
++  const renderer = useRenderer()
++  const config = createTuiResolvedConfig()
++  const keymap = createDefaultOpenTuiKeymap(renderer)
++  onCleanup(registerOpencodeKeymap(keymap, renderer, config))
++
++  return (
++    <OpencodeKeymapProvider keymap={keymap}>
++      <TuiConfigProvider config={config}>
++        <KVProvider>
++          <ThemeProvider mode="dark">
++            <ToastProvider>
++              <DialogProvider>
++                <DialogSelect
++                  title="Models"
++                  options={props.options}
++                  current={props.current}
++                  currentKey={props.currentKey}
++                  onMove={props.onMove}
++                  renderFilter={false}
++                />
++              </DialogProvider>
++            </ToastProvider>
++          </ThemeProvider>
++        </KVProvider>
++      </TuiConfigProvider>
++    </OpencodeKeymapProvider>
++  )
++}
++
++test("dialog select can mark the current object by stable key", async () => {
++  const app = await testRender(() => (
++    <box width={80} height={30}>
++      <DialogSelectHarness
++        current={{ providerID: "test", modelID: "two" }}
++        currentKey="test/two"
++        options={[
++          {
++            key: "test/one",
++            title: "Model One",
++            value: { providerID: "test", modelID: "one", metadata: { created: 1 } },
++          },
++          {
++            key: "test/two",
++            title: "Model Two",
++            value: { providerID: "test", modelID: "two", metadata: { created: 2 } },
++          },
++        ]}
++      />
++    </box>
++  ), { width: 80, height: 30 })
++
++  try {
++    const frame = (await waitForFrame(app, "Model Two")).split("\n")
++    const current = frame.find((line) => line.includes("Model Two")) ?? ""
++    const other = frame.find((line) => line.includes("Model One")) ?? ""
++
++    expect(current).toContain("●")
++    expect(other).not.toContain("●")
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
++test("dialog select resolves deferred current movement against the latest options", async () => {
++  const moves: string[] = []
++  const App = () => {
++    const [currentKey, setCurrentKey] = createSignal("test/one")
++    onMount(() => setCurrentKey("test/two"))
++
++    return (
++      <box width={80} height={30}>
++        <DialogSelectHarness
++          current={{ providerID: "test", modelID: "two" }}
++          currentKey={currentKey()}
++          onMove={(option) => moves.push(option.title)}
++          options={[
++            { key: "test/one", title: "Model One", value: { providerID: "test", modelID: "one" } },
++            { key: "test/two", title: "Model Two", value: { providerID: "test", modelID: "two" } },
++          ]}
++        />
++      </box>
++    )
++  }
++  const app = await testRender(() => <App />, { width: 80, height: 30 })
++
++  try {
++    await waitForFrame(app, "Model Two")
++    await Bun.sleep(10)
++    await app.renderOnce()
++
++    expect(moves).toContain("Model Two")
++    expect(moves).not.toContain("Model One")
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
++test("dialog select keeps current fallback for unkeyed object values", async () => {
++  const app = await testRender(() => (
++    <box width={80} height={30}>
++      <DialogSelectHarness
++        current={{ id: "two", label: "Model Two" }}
++        options={[
++          { title: "Model One", value: { id: "one", label: "Model One" } },
++          { title: "Model Two", value: { id: "two", label: "Model Two" } },
++        ]}
++      />
++    </box>
++  ), { width: 80, height: 30 })
++
++  try {
++    const line = (await waitForFrame(app, "Model Two")).split("\n").find((item) => item.includes("Model Two")) ?? ""
++
++    expect(line).toContain("●")
++  } finally {
++    app.renderer.destroy()
++  }
++})

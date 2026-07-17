@@ -1,0 +1,328 @@
+From 983ddb33b57bdbde2133a1fbfc0631ee5c4334fe Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 5 Jul 2026 05:09:28 +0800
+Subject: [PATCH] =?UTF-8?q?fix(goal):=20=E9=80=8F=E4=BC=A0=20goal=20?=
+ =?UTF-8?q?=E6=A0=A1=E9=AA=8C=E5=A4=B1=E8=B4=A5=E5=8E=9F=E5=9B=A0=E5=88=B0?=
+ =?UTF-8?q?=20TUI=EF=BC=8C=E9=81=BF=E5=85=8D=E9=80=9A=E7=94=A8=20"Failed?=
+ =?UTF-8?q?=20to=20update=20goal"?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+handler 原先把 GoalError 映射为空 BadRequest({})，丢弃了具体拒绝原因（超长/空/budget/无goal），TUI 只能显示通用文案，用户无法定位问题。新增 GoalApiError（镜像 WorktreeApiError，httpApiStatus:400 + data.message）透传 GoalError.message；TUI setGoal 读取 body.data.message 展示。
+
+client 侧加 4000 字符预检（跳过 status-only 更新，避免误拦 Pause/Resume），导出 MAX_OBJECTIVE_CHARS 供客户端复用唯一真值。保留 BadRequest 声明供框架 payload 校验，not-found 仍走 ApiNotFoundError(404)，二者语义分离。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+index da92fd216ccec0669c76b22ad2bffaa9bba0be10..6f4da61e8670acb2e115856fe226fbc06b257c9c 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+@@ -5,6 +5,7 @@ import { useSync } from "@tui/context/sync"
+ import { useSDK } from "@tui/context/sdk"
+ import { useToast } from "@tui/ui/toast"
+ import { createMemo } from "solid-js"
++import { MAX_OBJECTIVE_CHARS } from "@/session/goal"
+ 
+ // [local-smark] goal 管理 dialog
+ // SDK 未重新生成 goalSet/goalClear 方法，直接用 sdk.fetch 调用 HTTP 端点
+@@ -32,6 +33,16 @@ function useGoalApi(sessionID: string) {
+ 
+   // POST /session/:id/goal — 设置或更新 goal
+   const setGoal = async (input: { objective?: string; status?: string }) => {
++    // 仅对 objective 更新做长度预检；status-only 更新（Pause/Resume）objective 为 undefined，
++    // 必须跳过预检，否则会误拦状态切换。上限与 SessionGoal.MAX_OBJECTIVE_CHARS 保持一致，
++    // 提前拦截避免无效往返
++    if (input.objective !== undefined && input.objective.trim().length > MAX_OBJECTIVE_CHARS) {
++      toast.show({
++        message: `Goal objective must be at most ${MAX_OBJECTIVE_CHARS} characters`,
++        variant: "error",
++      })
++      return
++    }
+     try {
+       const resp = await sdk.fetch(goalUrl(), {
+         method: "POST",
+@@ -39,7 +50,11 @@ function useGoalApi(sessionID: string) {
+         body: JSON.stringify(input),
+       })
+       if (!resp.ok) {
+-        toast.show({ message: "Failed to update goal", variant: "error" })
++        // 服务器返回 NamedError 形态 {name, data:{message}}；提取 data.message
++        // 让用户看到具体原因（如 budget/无goal 等 client 未预判的拒绝）。
++        // 解析失败或无 message 时回退通用文案，兼容中间件非 JSON 响应
++        const body = await resp.json().catch(() => null)
++        toast.show({ message: body?.data?.message ?? "Failed to update goal", variant: "error" })
+         return
+       }
+       dialog.clear()
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
+index 4192bc2af098cbd0d9765404abed2a7bd5967e4a..f0991a15a9a772a43627dec7ef071c6dec51a456 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
+@@ -153,6 +153,17 @@ export const GoalResponse = Schema.Struct({
+ export const GoalClearResponse = Schema.Struct({
+   cleared: Schema.Boolean,
+ })
++// goal 校验失败的 wire 错误：携带具体原因（空/超长/budget/无goal）到 data.message，
++// 镜像 WorktreeApiError / ApiNotFoundError 的 Schema.ErrorClass + httpApiStatus 模式。
++// _tag 用 "GoalApiError" 避免与 domain GoalError(_tag="GoalError") 的 catchTag 冲突；
++// wire name 用 "GoalError" 对客户端可读
++export class GoalApiError extends Schema.ErrorClass<GoalApiError>("GoalApiError")(
++  {
++    name: Schema.Literal("GoalError"),
++    data: Schema.Struct({ message: Schema.String }),
++  },
++  { httpApiStatus: 400 },
++) {}
+ // [local-smark] session preview: 批量获取多个 session 的最近 N 条用户消息文本
+ // PreviewPayload 接收 session ID 列表和期望的预览行数；PreviewResponse 是
+ // sessionID → 预览文本数组的映射，无用户消息的 session 不包含在响应中。
+@@ -589,7 +600,7 @@ export const SessionApi = HttpApi.make("session")
+           query: WorkspaceRoutingQuery,
+           payload: GoalSetPayload,
+           success: described(GoalResponse, "Updated session goal"),
+-          error: [HttpApiError.BadRequest, ApiNotFoundError],
++          error: [HttpApiError.BadRequest, GoalApiError, ApiNotFoundError],
+         }).annotateMerge(
+           OpenApi.annotations({
+             identifier: "session.goal.set",
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
+index fa73eac89595bc13e83f477a22e8e3939e4e7087..22b33e572a521e16660c442f63de5cf3ecec11ac 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
+@@ -29,6 +29,7 @@ import {
+   CommandPayload,
+   DiffQuery,
+   ForkPayload,
++  GoalApiError,
+   GoalSetPayload,
+   InitPayload,
+   ListQuery,
+@@ -467,7 +468,13 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+         objective: ctx.payload.objective,
+         status: ctx.payload.status,
+         tokenBudget: ctx.payload.tokenBudget,
+-      }).pipe(Effect.catchTag("GoalError", () => Effect.fail(new HttpApiError.BadRequest({}))))
++      }).pipe(
++        // GoalError 的具体原因（空/超长/budget/无goal）透传到 wire 体 data.message，
++        // 让 TUI 能展示真实拒绝原因，而非通用 "Failed to update goal"
++        Effect.catchTag("GoalError", (error) =>
++          Effect.fail(new GoalApiError({ name: "GoalError", data: { message: error.message } })),
++        ),
++      )
+       return { goal }
+     })
+ 
+diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
+index 54ad180ffa2144814fd57a692bbb480c35b71aef..a8a6426ea31a256d54427d74dd8ff1475bc731f2 100644
+--- a/packages/opencode/src/session/goal.ts
++++ b/packages/opencode/src/session/goal.ts
+@@ -10,7 +10,7 @@ import { optionalOmitUndefined } from "@opencode-ai/core/schema"
+ 
+ // goal objective 最大字符数，与 Codex 的 4000 字符限制对齐，
+ // 防止超长 objective 污染上下文或触发 provider 请求体过大
+-const MAX_OBJECTIVE_CHARS = 4000
++export const MAX_OBJECTIVE_CHARS = 4000
+ 
+ // goal 状态：只有 active 会触发自动续跑；
+ // paused/blocked/complete 均为停止态，loop 正常退出不续跑
+diff --git a/packages/opencode/test/server/httpapi-goal.test.ts b/packages/opencode/test/server/httpapi-goal.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1294f652649d0d13fe24285debb70eb146deea4f
+--- /dev/null
++++ b/packages/opencode/test/server/httpapi-goal.test.ts
+@@ -0,0 +1,194 @@
++import { afterEach, describe, expect } from "bun:test"
++import { Effect } from "effect"
++import { Server } from "../../src/server/server"
++import { Session } from "@/session/session"
++import { SessionPaths } from "../../src/server/routes/instance/httpapi/groups/session"
++import { SessionID } from "@/session/schema"
++import { resetDatabase } from "../fixture/db"
++import { disposeAllInstances, TestInstance } from "../fixture/fixture"
++import { testEffect } from "../lib/effect"
++
++// 复用 httpapi-session.test.ts / httpapi-schema-error-body.test.ts 的最小 harness：
++// testEffect(Session.defaultLayer) 提供测试侧 Session.Service 用于建会话，
++// Server.Default() 内部组装全部 HTTP handler 层（含 SessionGoal.Service）。
++const it = testEffect(Session.defaultLayer)
++
++afterEach(async () => {
++  await disposeAllInstances()
++  await resetDatabase()
++})
++
++// pathFor：把 :sessionID 占位符替换为真实 id，与 httpapi-session.test.ts 一致
++function pathFor(path: string, params: Record<string, string>) {
++  return Object.entries(params).reduce((result, [key, value]) => result.replace(`:${key}`, value), path)
++}
++
++function request(path: string, init?: RequestInit) {
++  return Effect.promise(async () => Server.Default().app.request(path, init))
++}
++
++function responseJson(response: Response) {
++  return Effect.promise(() => response.json())
++}
++
++function createSession() {
++  return Session.Service.use((svc) => svc.create({}))
++}
++
++describe("session goal HttpApi", () => {
++  // 以下四个用例验证核心修复：goal 校验失败时服务器必须把具体原因
++  // 写入 wire 体 {name:"GoalError", data:{message}}，而不是空 BadRequest 体。
++  // 修复前 body 为 {name:"BadRequest", data:{}}（data.message 为 undefined），用例失败。
++
++  it.instance(
++    "over-long objective returns 400 GoalError with the length reason",
++    () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const session = yield* createSession()
++        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
++          method: "POST",
++          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
++          // 超过 MAX_OBJECTIVE_CHARS(4000) 的 objective 必须被拒
++          body: JSON.stringify({ objective: "a".repeat(4001) }),
++        })
++        expect(res.status).toBe(400)
++        const parsed = yield* responseJson(res)
++        expect(parsed).toEqual({
++          name: "GoalError",
++          data: { message: "goal objective must be at most 4000 characters" },
++        })
++      }),
++    { git: true, config: { formatter: false, lsp: false } },
++    // 30s 超时：每个用例需 git-init + Server.Default() 首次 bootstrap，
++    // 默认 5s 在冷启动（首个用例）时可能超时
++    30000,
++  )
++
++  it.instance(
++    "whitespace-only objective returns 400 GoalError with the empty reason",
++    () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const session = yield* createSession()
++        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
++          method: "POST",
++          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
++          // 纯空白 objective trim 后为空，必须被拒
++          body: JSON.stringify({ objective: "   " }),
++        })
++        expect(res.status).toBe(400)
++        const parsed = yield* responseJson(res)
++        expect(parsed).toEqual({
++          name: "GoalError",
++          data: { message: "goal objective must not be empty" },
++        })
++      }),
++    { git: true, config: { formatter: false, lsp: false } },
++    // 30s 超时：每个用例需 git-init + Server.Default() 首次 bootstrap，
++    // 默认 5s 在冷启动（首个用例）时可能超时
++    30000,
++  )
++
++  it.instance(
++    "non-positive tokenBudget returns 400 GoalError with the budget reason",
++    () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const session = yield* createSession()
++        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
++          method: "POST",
++          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
++          // 0 budget 非法：只有正数或 null（清除）合法
++          body: JSON.stringify({ objective: "ok", tokenBudget: 0 }),
++        })
++        expect(res.status).toBe(400)
++        const parsed = yield* responseJson(res)
++        expect(parsed).toEqual({
++          name: "GoalError",
++          data: { message: "goal token budget must be positive when provided" },
++        })
++      }),
++    { git: true, config: { formatter: false, lsp: false } },
++    // 30s 超时：每个用例需 git-init + Server.Default() 首次 bootstrap，
++    // 默认 5s 在冷启动（首个用例）时可能超时
++    30000,
++  )
++
++  it.instance(
++    "status-only update with no existing goal returns 400 GoalError with the no-goal reason",
++    () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const session = yield* createSession()
++        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
++          method: "POST",
++          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
++          // 没有 goal 时仅传 status 不能创建，必须报错
++          body: JSON.stringify({ status: "paused" }),
++        })
++        expect(res.status).toBe(400)
++        const parsed = yield* responseJson(res)
++        expect(parsed).toEqual({
++          name: "GoalError",
++          data: { message: "cannot update goal for session: no goal exists" },
++        })
++      }),
++    { git: true, config: { formatter: false, lsp: false } },
++    // 30s 超时：每个用例需 git-init + Server.Default() 首次 bootstrap，
++    // 默认 5s 在冷启动（首个用例）时可能超时
++    30000,
++  )
++
++  it.instance(
++    "valid objective creates an active goal (happy path regression guard)",
++    () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const session = yield* createSession()
++        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
++          method: "POST",
++          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
++          body: JSON.stringify({ objective: "ship the feature" }),
++        })
++        expect(res.status).toBe(200)
++        const parsed = yield* responseJson(res)
++        // 正常创建：默认 active，usage 归零
++        expect(parsed.goal).toMatchObject({
++          objective: "ship the feature",
++          status: "active",
++          tokensUsed: 0,
++        })
++      }),
++    { git: true, config: { formatter: false, lsp: false } },
++    // 30s 超时：每个用例需 git-init + Server.Default() 首次 bootstrap，
++    // 默认 5s 在冷启动（首个用例）时可能超时
++    30000,
++  )
++
++  it.instance(
++    "goal set on missing session returns 404 NotFoundError (regression guard)",
++    () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        // 不存在的 session：requireSession 走 ApiNotFoundError(404) 路径，
++        // 必须保证 GoalError 改动不影响 not-found 分支
++        const missing = SessionID.descending()
++        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: missing }), {
++          method: "POST",
++          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
++          body: JSON.stringify({ objective: "x" }),
++        })
++        expect(res.status).toBe(404)
++        const parsed = yield* responseJson(res)
++        expect(parsed).toEqual({
++          name: "NotFoundError",
++          data: { message: `Session not found: ${missing}` },
++        })
++      }),
++    { git: true, config: { formatter: false, lsp: false } },
++    // 30s 超时：每个用例需 git-init + Server.Default() 首次 bootstrap，
++    // 默认 5s 在冷启动（首个用例）时可能超时
++    30000,
++  )
++})

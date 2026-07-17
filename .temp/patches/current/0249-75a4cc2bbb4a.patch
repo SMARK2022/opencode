@@ -1,0 +1,161 @@
+From 75a4cc2bbb4ae8dc10899a34449440ff00438764 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Thu, 28 May 2026 17:55:24 +0800
+Subject: [PATCH] =?UTF-8?q?feat(render):=20=E7=A7=BB=E9=99=A4=E9=9D=A2?=
+ =?UTF-8?q?=E6=9D=BF=E8=83=8C=E6=99=AF=E8=89=B2=20ANSI=20=E4=BB=A3?=
+ =?UTF-8?q?=E7=A0=81=EF=BC=8C=E7=A1=AE=E4=BF=9D=E5=9C=A8=E7=BB=88=E7=AB=AF?=
+ =?UTF-8?q?=E4=B8=AD=E8=BE=93=E5=87=BA=E6=9B=B4=E5=8D=8F=E8=B0=83=E7=9A=84?=
+ =?UTF-8?q?=E9=A2=9C=E8=89=B2=20test(stats-render-width):=20=E6=B7=BB?=
+ =?UTF-8?q?=E5=8A=A0=E5=9B=9E=E5=BD=92=E6=B5=8B=E8=AF=95=EF=BC=8C=E7=A1=AE?=
+ =?UTF-8?q?=E4=BF=9D=E8=BE=93=E5=87=BA=E4=B8=8D=E5=8C=85=E5=90=AB=E7=BB=88?=
+ =?UTF-8?q?=E7=AB=AF=E8=83=8C=E6=99=AF=20ANSI?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/stats/charts.ts b/packages/opencode/src/cli/cmd/stats/charts.ts
+index 6369e5d69ad622a0d3aac77b29d90881b8a6f4cd..a82a269a13ad9e03a09d4a1a1e57f0b8426a739c 100644
+--- a/packages/opencode/src/cli/cmd/stats/charts.ts
++++ b/packages/opencode/src/cli/cmd/stats/charts.ts
+@@ -2,9 +2,10 @@ import { formatNumber } from "../../format"
+ import type { TokenPartSeries, UsageSeries } from "./data"
+ import type { ColorMode } from "./render"
+ 
+-const RESET = "\x1b[0m"
+ const BOLD = "\x1b[1m"
+ const TEXT_RESET = "\x1b[22m\x1b[39m"
++// 49m 只恢复终端默认背景，不指定具体颜色；独立 panel 同样需要清掉上游背景状态。
++const BACKGROUND_RESET = "\x1b[49m"
+ const ANSI_RE = /\x1b\[[0-9;]*m/g
+ const ANSI_PREFIX_RE = /^\x1b\[[0-9;]*m/
+ const DEFAULT_PANEL_WIDTH = 104
+@@ -12,7 +13,6 @@ const MIN_PANEL_WIDTH = 58
+ const PANEL_PADDING = 2
+ 
+ const fg = (r: number, g: number, b: number) => `\x1b[38;2;${r};${g};${b}m`
+-const bg = (r: number, g: number, b: number) => `\x1b[48;2;${r};${g};${b}m`
+ 
+ export type ChartColor =
+   | "axis"
+@@ -28,7 +28,6 @@ export type ChartColor =
+   | "pink"
+   | "red"
+   | "white"
+-  | "panel"
+   | "grid"
+ 
+ export type ChartStyle = {
+@@ -105,7 +104,6 @@ const palette: Record<ChartColor, string> = {
+   pink: fg(239, 119, 178),
+   red: fg(246, 111, 125),
+   white: fg(248, 244, 250),
+-  panel: bg(19, 6, 24),
+   grid: fg(74, 45, 82),
+ }
+ 
+@@ -795,7 +793,7 @@ export function renderPanel(input: { title?: string; lines: string[]; color?: Co
+   const innerWidth = statsContentWidth(width)
+   const lines = content.map((line) => `${" ".repeat(PANEL_PADDING)}${fitVisible(line, innerWidth)}${" ".repeat(PANEL_PADDING)}`)
+   if (!ctx.color) return lines.join("\n")
+-  return lines.map((line) => `${palette.panel}${line}${RESET}`).join("\n")
++  return lines.map((line) => `${BACKGROUND_RESET}${line}${BACKGROUND_RESET}`).join("\n")
+ }
+ 
+ export function renderTwoColumn(left: string[], right: string[], gap = 4, width = statsContentWidth(), leftFraction = 0.5) {
+diff --git a/packages/opencode/src/cli/cmd/stats/render.ts b/packages/opencode/src/cli/cmd/stats/render.ts
+index ec3ae391cff3d0db297b8e9c34e57151a3316656..37f6cde1dbe0d3b3842b5d822ca460275666bb2d 100644
+--- a/packages/opencode/src/cli/cmd/stats/render.ts
++++ b/packages/opencode/src/cli/cmd/stats/render.ts
+@@ -31,15 +31,14 @@ import {
+ 
+ export { formatNumber } from "../../format"
+ 
+-const RESET = "\x1b[0m"
+ const BOLD = "\x1b[1m"
+ const TEXT_RESET = "\x1b[22m\x1b[39m"
++// 49m 只恢复终端默认背景，不指定具体颜色；stats 的行填充必须避免继承上游残留背景。
++const BACKGROUND_RESET = "\x1b[49m"
+ 
+ const fg = (r: number, g: number, b: number) => `\x1b[38;2;${r};${g};${b}m`
+-const bg = (r: number, g: number, b: number) => `\x1b[48;2;${r};${g};${b}m`
+ 
+ const theme = {
+-  bg: bg(19, 6, 24),
+   title: fg(246, 241, 248),
+   subtitle: fg(198, 171, 207),
+   muted: fg(158, 130, 170),
+@@ -88,7 +87,7 @@ const color = (text: string, name: keyof typeof theme, enabled: boolean, bold =
+ const panel = (lines: string[], enabled: boolean) => {
+   const rows = lines.map((line) => `  ${fitVisible(line, statsContentWidth())}  `)
+   if (!enabled) return rows.join("\n")
+-  return rows.map((line) => `${theme.bg}${line}${RESET}`).join("\n")
++  return rows.map((line) => `${BACKGROUND_RESET}${line}${BACKGROUND_RESET}`).join("\n")
+ }
+ 
+ const dateRange = (report: StatsReport) => {
+diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/opencode/test/cli/stats-render-width.test.ts
+index e4a734032c04e54b551515613d795d9801c98fea..f9c56acda5a7fedbee1eb0789932db8d4b80fcf2 100644
+--- a/packages/opencode/test/cli/stats-render-width.test.ts
++++ b/packages/opencode/test/cli/stats-render-width.test.ts
+@@ -1,7 +1,8 @@
+ import { describe, expect, test } from "bun:test"
+ import type { SessionID } from "../../src/session/schema"
+ import type { InputComponentTotals, StatsReport, TokenTotals, UsageTotals } from "../../src/cli/cmd/stats/data"
+-import { renderBreakdown, renderDashboard, renderSessions } from "../../src/cli/cmd/stats/render"
++import { renderInsights } from "../../src/cli/cmd/stats/insights"
++import { renderBreakdown, renderDashboard, renderSessions, renderTimeline } from "../../src/cli/cmd/stats/render"
+ import { fitVisible, stripAnsi, truncateVisible, visibleLength } from "../../src/cli/cmd/stats/charts"
+ 
+ const day = 86_400_000
+@@ -202,6 +203,21 @@ const calendarRows = (output: string) =>
+     .map(stripAnsi)
+     .filter((line) => /^\s+\d{1,2}\s+[·░▒▓█]/.test(line))
+ 
++const concreteBackgroundAnsi = (output: string) =>
++  // SGR 可以把多个属性合在同一个 escape 里，例如 0;44m 或 39;48;5;12m；
++  // 这里解析完整参数列表，确保只允许 49m 默认背景重置，不漏掉组合背景色。
++  (output.match(/\x1b\[[0-9;]*m/g) ?? []).filter((code) => {
++    const values = code.slice(2, -1).split(";").map(Number)
++    for (let index = 0; index < values.length; index++) {
++      const value = values[index]
++      if ((value >= 40 && value <= 47) || (value >= 100 && value <= 107)) return true
++      if (value === 48 && (values[index + 1] === 2 || values[index + 1] === 5)) return true
++      if (value === 38 && values[index + 1] === 2) index += 4
++      if (value === 38 && values[index + 1] === 5) index += 2
++    }
++    return false
++  })
++
+ describe("stats render width", () => {
+   test("counts CJK text by terminal display columns", () => {
+     expect(visibleLength("中文abc")).toBe(7)
+@@ -324,6 +340,28 @@ describe("stats render width", () => {
+     })
+   })
+ 
++  test("never emits terminal background ANSI in color output", () => {
++    // 回归测试：stats 只能把背景重置为终端默认值，不能选择任何具体背景色。
++    // 49m 是“恢复默认背景”；40-47/100-107/48;2/48;5 才会绘制实际背景色。
++    // 覆盖主渲染路径，避免后续重构让整行空格再次继承上游残留背景状态。
++    withColumns(140, () => {
++      for (const output of [
++        renderDashboard(report(), { color: "always" }),
++        renderBreakdown(report(), { color: "always", by: "tool" }),
++        renderSessions(report(), { color: "always" }),
++        renderTimeline(report(), { color: "always" }),
++        renderInsights(report(), { color: "always" }),
++      ]) {
++        expect(concreteBackgroundAnsi(output)).toEqual([])
++        expect(output.split("\n").every((line) => line.startsWith("\x1b[49m") && line.endsWith("\x1b[49m"))).toBe(true)
++      }
++
++      for (const output of [renderDashboard(report(), { color: "never" }), renderInsights(report(), { color: "never" })]) {
++        expect(output).not.toContain("\x1b[49m")
++      }
++    })
++  })
++
+   test("keeps breakdown rank bars from being double-truncated", () => {
+     withColumns(140, () => {
+       const toolOutput = renderBreakdown(report(), { color: "never", by: "tool" })

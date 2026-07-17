@@ -1,0 +1,604 @@
+From d95dc89b856dd480e6a74c5445d22d75a3a009f4 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 4 May 2026 02:15:12 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=BC=95=E5=85=A5=E7=BD=91=E7=BB=9C?=
+ =?UTF-8?q?=E4=BB=A3=E7=90=86=E5=8A=9F=E8=83=BD=EF=BC=8C=E4=BC=98=E5=8C=96?=
+ =?UTF-8?q?npm=E9=85=8D=E7=BD=AE=E5=92=8C=E8=AF=B7=E6=B1=82=E5=A4=84?=
+ =?UTF-8?q?=E7=90=86?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-proxy.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a17227f075f58
+--- /dev/null
++++ b/packages/core/src/network-proxy.ts
+@@ -0,0 +1,181 @@
++export * as NetworkProxy from "./network-proxy"
++
++export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin" | "unknown"
++
++export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
++
++const TTL = 120_000
++const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"])
++
++let cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined
++
++type SystemProxy = {
++  http?: string
++  https?: string
++  socks?: string
++  bypass: string[]
++}
++
++type RoutedInit = RequestInit & { purpose?: Purpose }
++type FetchInput = Request | string | URL
++type FetchFn = (input: FetchInput, init?: any) => Promise<Response>
++
++export function noProxyString(extra: string[] = []) {
++  return Array.from(new Set([...LOCAL, ...extra])).join(",")
++}
++
++function normalizeHost(hostname: string) {
++  return hostname.replace(/^\[|\]$/g, "").toLowerCase()
++}
++
++function isLocal(url: URL) {
++  return LOCAL.has(normalizeHost(url.hostname))
++}
++
++function normalizeProxy(value: string | undefined) {
++  if (!value) return
++  const next = value.trim()
++  if (!next) return
++  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(next)) return next
++  return `http://${next}`
++}
++
++function bypass(url: URL, list: string[]) {
++  const host = normalizeHost(url.hostname)
++  for (const raw of list) {
++    const item = raw.trim().toLowerCase()
++    if (!item) continue
++    if (item === "<local>" && !host.includes(".")) return true
++    if (item === host) return true
++    if (item.startsWith("*.") && host.endsWith(item.slice(1))) return true
++    if (item.includes("*")) {
++      const escaped = item.replace(/[.+^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*")
++      if (new RegExp(`^${escaped}$`).test(host)) return true
++    }
++  }
++  return false
++}
++
++function envProxy(url: URL): SystemProxy | undefined {
++  const proxy =
++    url.protocol === "https:"
++      ? process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy
++      : process.env.HTTP_PROXY || process.env.http_proxy
++  const all = process.env.ALL_PROXY || process.env.all_proxy
++  const picked = normalizeProxy(proxy || all)
++  if (!picked) return
++  return { http: picked, https: picked, bypass: (process.env.NO_PROXY || process.env.no_proxy || "").split(",") }
++}
++
++async function execText(command: string, args: string[], timeout = 1500) {
++  const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore" })
++  const timer = setTimeout(() => proc.kill(), timeout)
++  try {
++    const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()])
++    if (code !== 0) return ""
++    return stdout
++  } catch {
++    return ""
++  } finally {
++    clearTimeout(timer)
++  }
++}
++
++function parseWindowsProxyServer(value: string, protocol: string) {
++  if (!value.includes("=")) return normalizeProxy(value)
++  const entries = Object.fromEntries(
++    value
++      .split(";")
++      .map((part) => part.trim().split("="))
++      .filter((part): part is [string, string] => part.length === 2 && !!part[0] && !!part[1])
++      .map(([key, val]) => [key.toLowerCase(), val]),
++  )
++  return normalizeProxy(entries[protocol.replace(":", "")] || entries.http || entries.https || entries.socks)
++}
++
++async function windowsProxy(): Promise<SystemProxy | undefined> {
++  const text = await execText("reg", ["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"])
++  if (!text) return
++  const values = new Map<string, string>()
++  for (const line of text.split(/\r?\n/)) {
++    const match = line.trim().match(/^(\S+)\s+REG_\S+\s+(.+)$/)
++    if (match) values.set(match[1], match[2].trim())
++  }
++  const enabled = values.get("ProxyEnable") === "0x1"
++  const server = values.get("ProxyServer")
++  const bypassList = (values.get("ProxyOverride") || "").split(";")
++  const proxy = enabled && server ? parseWindowsProxyServer(server, "https:") : undefined
++  return { http: proxy, https: proxy, bypass: bypassList }
++}
++
++async function macProxy(): Promise<SystemProxy | undefined> {
++  const text = await execText("scutil", ["--proxy"])
++  if (!text) return
++  const values = new Map<string, string>()
++  for (const line of text.split(/\r?\n/)) {
++    const match = line.match(/^\s*([^:]+)\s*:\s*(.+)$/)
++    if (match) values.set(match[1].trim(), match[2].trim())
++  }
++  const https = values.get("HTTPSEnable") === "1" ? normalizeProxy(`${values.get("HTTPSProxy")}:${values.get("HTTPSPort")}`) : undefined
++  const http = values.get("HTTPEnable") === "1" ? normalizeProxy(`${values.get("HTTPProxy")}:${values.get("HTTPPort")}`) : undefined
++  const socks = values.get("SOCKSEnable") === "1" ? normalizeProxy(`socks5://${values.get("SOCKSProxy")}:${values.get("SOCKSPort")}`) : undefined
++  return { http, https, socks, bypass: [] }
++}
++
++async function currentSystemProxy() {
++  if (process.platform !== "win32" && process.platform !== "darwin") return undefined
++  if (!cache || cache.expires < Date.now()) {
++    cache = {
++      expires: Date.now() + TTL,
++      value: (process.platform === "win32" ? windowsProxy() : macProxy()).catch(() => undefined),
++    }
++  }
++  return cache.value
++}
++
++async function configuredProxy(url: URL) {
++  if (process.platform === "win32" || process.platform === "darwin") {
++    const sys = await currentSystemProxy()
++    if (!sys || bypass(url, sys.bypass)) return
++    return url.protocol === "https:" ? sys.https || sys.http || sys.socks : sys.http || sys.https || sys.socks
++  }
++  const env = envProxy(url)
++  if (!env || bypass(url, env.bypass)) return
++  return url.protocol === "https:" ? env.https || env.http || env.socks : env.http || env.https || env.socks
++}
++
++export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown"): Promise<Route> {
++  const url = input instanceof URL ? input : new URL(input)
++  if (purpose === "local" || isLocal(url)) return { type: "direct", reason: "local" }
++  const proxy = await configuredProxy(url)
++  if (proxy) return { type: "proxy", proxy, reason: "system" }
++  return { type: "direct", reason: "no-proxy" }
++}
++
++export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
++  return fetchWithRoute(fetch, input, init)
++}
++
++export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
++  const url = new URL(input instanceof Request ? input.url : input.toString())
++  const { purpose = "unknown", ...rest } = (init ?? {}) as RoutedInit
++  const route = await resolveProxyRoute(url, purpose)
++  if (route.type === "direct") return fetchFn(input, rest)
++  try {
++    return await fetchFn(input, { ...rest, proxy: route.proxy })
++  } catch (error) {
++    return fetchFn(input, rest).catch(() => {
++      throw error
++    })
++  }
++}
++
++export async function npmProxyOptions(registry: string) {
++  const route = await resolveProxyRoute(registry, "npm")
++  if (route.type === "direct") return {}
++  return {
++    proxy: route.proxy,
++    httpsProxy: route.proxy,
++    "https-proxy": route.proxy,
++  }
++}
+diff --git a/packages/core/src/npm-config.ts b/packages/core/src/npm-config.ts
+index 896bb84872c1ffce95a81d6562214468769dcab3..56418a000e72ff62210e7d039aa3ee4c6c9a645c 100644
+--- a/packages/core/src/npm-config.ts
++++ b/packages/core/src/npm-config.ts
+@@ -6,8 +6,48 @@ import Config from "@npmcli/config"
+ // @ts-expect-error npm does not publish types for this internal config API.
+ import { definitions, flatten, nerfDarts, shorthands } from "@npmcli/config/lib/definitions/index.js"
+ import { Effect } from "effect"
++import { NetworkProxy } from "./network-proxy"
+ 
+ const npmPath = fileURLToPath(new URL("..", import.meta.url))
++const defaultRegistry = "https://registry.npmjs.org"
++const mirrorRegistry = "https://registry.npmmirror.com"
++let selectedRegistry: { expires: number; value: Promise<string> } | undefined
++
++function normalizeRegistry(value: string) {
++  return value.endsWith("/") ? value.slice(0, -1) : value
++}
++
++function envRegistry() {
++  return process.env.OPENCODE_NPM_REGISTRY || process.env.npm_config_registry || process.env.NPM_CONFIG_REGISTRY
++}
++
++async function pingRegistry(registry: string) {
++  try {
++    const response = await NetworkProxy.routedFetch(`${normalizeRegistry(registry)}/-/ping?write=false`, {
++      purpose: "npm",
++      method: "GET",
++      signal: AbortSignal.timeout(1500),
++    })
++    return response.ok
++  } catch {
++    return false
++  }
++}
++
++async function selectRegistry() {
++  const candidates = [defaultRegistry, mirrorRegistry]
++  for (const candidate of candidates) {
++    if (await pingRegistry(candidate)) return candidate
++  }
++  return defaultRegistry
++}
++
++function defaultRegistryForNetwork() {
++  if (!selectedRegistry || selectedRegistry.expires < Date.now()) {
++    selectedRegistry = { expires: Date.now() + 60_000, value: selectRegistry() }
++  }
++  return selectedRegistry.value
++}
+ 
+ export const load = (dir: string) =>
+   Effect.tryPromise({
+@@ -26,7 +66,13 @@ export const load = (dir: string) =>
+         warn: false,
+       })
+       await config.load()
+-      return config.flat as Record<string, unknown>
++      const flat = config.flat as Record<string, unknown>
++      const registry = envRegistry()
++      if (registry) return { ...flat, registry }
++      if (typeof flat.registry !== "string" || normalizeRegistry(flat.registry) === defaultRegistry) {
++        return { ...flat, registry: await defaultRegistryForNetwork() }
++      }
++      return flat
+     },
+     catch: (cause) => cause,
+   }).pipe(Effect.orElseSucceed(() => ({}) as Record<string, unknown>))
+@@ -34,7 +80,7 @@ export const load = (dir: string) =>
+ export const registry = (dir: string) =>
+   load(dir).pipe(
+     Effect.map((config) => {
+-      const registry = typeof config.registry === "string" ? config.registry : "https://registry.npmjs.org"
+-      return registry.endsWith("/") ? registry.slice(0, -1) : registry
++      const registry = typeof config.registry === "string" ? config.registry : defaultRegistry
++      return normalizeRegistry(registry)
+     }),
+   )
+diff --git a/packages/core/src/npm.ts b/packages/core/src/npm.ts
+index 92e40427681b3090ca1b0cb5e8937b4337c15249..00e0a7062d2d39c7c1b8dfea92e879f1345c05ea 100644
+--- a/packages/core/src/npm.ts
++++ b/packages/core/src/npm.ts
+@@ -9,6 +9,7 @@ import { Global } from "./global"
+ import { EffectFlock } from "./util/effect-flock"
+ import { makeRuntime } from "./effect/runtime"
+ import { NpmConfig } from "./npm-config"
++import { NetworkProxy } from "./network-proxy"
+ 
+ export class InstallFailedError extends Schema.TaggedErrorClass<InstallFailedError>()("NpmInstallFailedError", {
+   add: Schema.Array(Schema.String).pipe(Schema.optional),
+@@ -80,7 +81,13 @@ export const layer = Layer.effect(
+         yield* flock.acquire(`npm-install:${input.dir}`)
+         const { Arborist } = yield* Effect.promise(() => import("@npmcli/arborist"))
+         const add = input.add ?? []
+-        const npmOptions = yield* NpmConfig.load(input.dir)
++        const loadedOptions = yield* NpmConfig.load(input.dir)
++        const npmOptions = {
++          ...loadedOptions,
++          ...(yield* Effect.promise(() => NetworkProxy.npmProxyOptions(String(loadedOptions.registry ?? "https://registry.npmjs.org")))),
++          fetchRetries: 0,
++          fetchTimeout: 10_000,
++        }
+         const arborist = new Arborist({
+           ...npmOptions,
+           path: input.dir,
+diff --git a/packages/core/test/npm-config.test.ts b/packages/core/test/npm-config.test.ts
+index 895b35db5409a1dbc10fb0068356e42a79a4a31f..3651a578de5224d680d93eb1a93b5f0defd40943 100644
+--- a/packages/core/test/npm-config.test.ts
++++ b/packages/core/test/npm-config.test.ts
+@@ -48,4 +48,16 @@ describe("NpmConfig.registry", () => {
+ 
+     await expect(Effect.runPromise(NpmConfig.registry(tmp.path))).resolves.toBe("https://registry.example.test")
+   })
++
++  test("uses OPENCODE_NPM_REGISTRY override", async () => {
++    await using tmp = await tmpdir()
++    const prev = process.env.OPENCODE_NPM_REGISTRY
++    process.env.OPENCODE_NPM_REGISTRY = "https://registry.override.test/"
++    try {
++      await expect(Effect.runPromise(NpmConfig.registry(tmp.path))).resolves.toBe("https://registry.override.test")
++    } finally {
++      if (prev === undefined) delete process.env.OPENCODE_NPM_REGISTRY
++      else process.env.OPENCODE_NPM_REGISTRY = prev
++    }
++  })
+ })
+diff --git a/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts b/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts
+index 2ef5333245454713cc8b5df50f91fd5cca3fbab3..5768bbccb5621443b25407df9f1c1f6f80b169c7 100644
+--- a/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts
++++ b/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts
+@@ -1008,9 +1008,6 @@ async function load(input: { api: Api; config: TuiConfig.Info }) {
+           })
+         }
+ 
+-        const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
+-        await addExternalPluginEntries(next, ready)
+-
+         applyInitialPluginEnabledState(next, config)
+         for (const plugin of next.plugins) {
+           if (!plugin.enabled) continue
+@@ -1020,6 +1017,18 @@ async function load(input: { api: Api; config: TuiConfig.Info }) {
+           // and hook chains rely on stable plugin ordering.
+           await activatePluginEntry(next, plugin, false)
+         }
++
++        void (async () => {
++          const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
++          const added = await addExternalPluginEntries(next, ready)
++          applyInitialPluginEnabledState(next, config)
++          for (const plugin of added.plugins) {
++            if (!plugin.enabled) continue
++            await activatePluginEntry(next, plugin, false)
++          }
++        })().catch((error) => {
++          fail("failed to load external tui plugins", { directory: cwd, error })
++        })
+       },
+     })
+   } catch (error) {
+diff --git a/packages/opencode/src/cli/cmd/tui/thread.ts b/packages/opencode/src/cli/cmd/tui/thread.ts
+index 41f78cebb37fb0a56c20e4cafb32f92944a632e8..c180b3c10643cee7eb41ab166a7078670a7332a6 100644
+--- a/packages/opencode/src/cli/cmd/tui/thread.ts
++++ b/packages/opencode/src/cli/cmd/tui/thread.ts
+@@ -23,6 +23,7 @@ import { validateSession } from "./validate-session"
+ import { ServerLock } from "@/cli/cmd/tui/server-lock"
+ import { Flock } from "@opencode-ai/core/util/flock"
+ import { Global } from "@opencode-ai/core/global"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ 
+ declare global {
+   const OPENCODE_WORKER_PATH: string
+@@ -51,21 +52,28 @@ async function input(value?: string) {
+   return piped + "\n" + value
+ }
+ 
+-function proxyEnv() {
+-  const http = process.env.HTTP_PROXY ?? process.env.http_proxy
+-  const https = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? http
+-  const all = process.env.ALL_PROXY ?? process.env.all_proxy
+-  const no = process.env.NO_PROXY ?? process.env.no_proxy
++function applyProxyEnv(env: Record<string, string>) {
++  // Merge loopback addresses into NO_PROXY so the daemon never proxies its own server.
++  const parts = (env.NO_PROXY ?? env.no_proxy ?? "").split(",").map((s) => s.trim()).filter(Boolean)
++  const no = NetworkProxy.noProxyString(parts)
++  env.NO_PROXY = no
++  env.no_proxy = no
+ 
+-  return {
+-    ...(http ? { HTTP_PROXY: http, http_proxy: http } : {}),
+-    ...(https ? { HTTPS_PROXY: https, https_proxy: https } : {}),
+-    ...(all ? { ALL_PROXY: all, all_proxy: all } : {}),
+-    ...(no ? { NO_PROXY: no, no_proxy: no } : {}),
+-    ...(process.env.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS } : {}),
+-    ...(process.env.SSL_CERT_FILE ? { SSL_CERT_FILE: process.env.SSL_CERT_FILE } : {}),
+-    ...(process.env.SSL_CERT_DIR ? { SSL_CERT_DIR: process.env.SSL_CERT_DIR } : {}),
++  if (process.platform === "win32" || process.platform === "darwin") {
++    // NetworkProxy reads system proxy per-request; strip inherited shell
++    // proxy env so Bun never routes fetch through a stale/dead proxy.
++    for (const key of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])
++      delete env[key]
++    return
+   }
++
++  // Linux: normalize proxy env — ensure both casings, HTTPS falls back to HTTP.
++  const http = env.HTTP_PROXY ?? env.http_proxy
++  const https = env.HTTPS_PROXY ?? env.https_proxy ?? http
++  const all = env.ALL_PROXY ?? env.all_proxy
++  if (http) { env.HTTP_PROXY = http; env.http_proxy = http }
++  if (https) { env.HTTPS_PROXY = https; env.https_proxy = https }
++  if (all) { env.ALL_PROXY = all; env.all_proxy = all }
+ }
+ 
+ export function resolveThreadDirectory(project?: string, envPWD = process.env.PWD, cwd = process.cwd()) {
+@@ -137,13 +145,13 @@ export const TuiThreadCommand = cmd({
+         return
+       }
+       const cwd = Filesystem.resolve(process.cwd())
+-      const env = {
+-        ...sanitizedProcessEnv({
+-          [OPENCODE_PROCESS_ROLE]: "worker",
+-          [OPENCODE_RUN_ID]: ensureRunID(),
+-        }),
+-        ...proxyEnv(),
+-      }
++      const env = sanitizedProcessEnv({
++        [OPENCODE_PROCESS_ROLE]: "worker",
++        [OPENCODE_RUN_ID]: ensureRunID(),
++      })
++      applyProxyEnv(env)
++      process.env.NO_PROXY = env.NO_PROXY
++      process.env.no_proxy = env.no_proxy
+ 
+       const prompt = await input(args.prompt)
+       const config = await TuiConfig.get()
+diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
+index 4fd02f1f29f77e7ea126e113b44f0b8893905d13..e3d540a1bcc9a9ab3f85a648d56e27be9ca191ef 100644
+--- a/packages/opencode/src/cli/cmd/tui/worker.ts
++++ b/packages/opencode/src/cli/cmd/tui/worker.ts
+@@ -44,16 +44,9 @@ process.on("uncaughtException", (e) => {
+   })
+ })
+ 
+-// Pre-warm external plugin imports BEFORE the HTTP server goes live.
+-//
+-// Bun synchronously transpiles the entire dependency graph on the first
+-// `import()` of an unbundled TypeScript plugin (e.g. opencode-gemini-auth)
+-// which can stall the event loop for 20-30 seconds.  Doing this here means
+-// the stall is over before the lock file is written, so by the time the
+-// launching TUI starts polling the server is already fully responsive.
+-//
+-// This is a best-effort warm-up: every error is swallowed so a missing or
+-// incompatible plugin cannot prevent the server from starting.
++// Pre-warm external plugin imports without making daemon health depend on
++// package installation or network access.  This is purely a latency
++// optimization: the real plugin loader still owns correctness and errors.
+ async function warmupExternalPlugins() {
+   if (Flag.OPENCODE_PURE) return
+   try {
+@@ -78,8 +71,6 @@ async function warmupExternalPlugins() {
+   } catch {}
+ }
+ 
+-await warmupExternalPlugins()
+-
+ // Always start the internal loopback HTTP server first.
+ const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })
+ 
+@@ -100,6 +91,10 @@ if (externalPort !== undefined) {
+ // Write the lock file atomically (internal port + optional external URL).
+ const lockToken = await ServerLock.write(internalServer.port, externalUrl)
+ 
++// Start the best-effort warm-up only after the lock is visible so a slow npm
++// registry or proxy cannot keep the launcher stuck waiting for daemon health.
++setTimeout(() => void warmupExternalPlugins(), 0).unref?.()
++
+ // ── Graceful shutdown ──────────────────────────────────────────────────────
+ let shutdownInProgress = false
+ 
+diff --git a/packages/opencode/src/effect/runner.ts b/packages/opencode/src/effect/runner.ts
+index 1e7d4c2966c7d7d71f08f62875f87c574c5da285..cf922d1e43b93118e20600d8d7c87f25034389cb 100644
+--- a/packages/opencode/src/effect/runner.ts
++++ b/packages/opencode/src/effect/runner.ts
+@@ -109,7 +109,7 @@ export const make = <A, E = never>(
+     Effect.gen(function* () {
+       if (shell.ready) yield* shell.ready.await.pipe(Effect.exit, Effect.asVoid)
+       yield* Deferred.succeed(shell.cancelled, undefined).pipe(Effect.asVoid)
+-      yield* Fiber.interrupt(shell.fiber)
++      yield* Fiber.interrupt(shell.fiber).pipe(Effect.exit, Effect.forkIn(scope), Effect.asVoid)
+     })
+ 
+   const ensureRunning = (work: Effect.Effect<A, E>) =>
+@@ -180,8 +180,8 @@ export const make = <A, E = never>(
+       case "Running":
+         return [
+           Effect.gen(function* () {
+-            yield* Fiber.interrupt(st.run.fiber)
+-            yield* Deferred.await(st.run.done).pipe(Effect.exit, Effect.asVoid)
++            yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.exit, Effect.asVoid)
++            yield* Fiber.interrupt(st.run.fiber).pipe(Effect.exit, Effect.forkIn(scope), Effect.asVoid)
+             yield* idleIfCurrent()
+           }),
+           { _tag: "Idle" } as const,
+diff --git a/packages/opencode/src/provider/models.ts b/packages/opencode/src/provider/models.ts
+index 170fe516c97c64ac8b5f8bbf64f1ce96f3dbc4ca..279aae51645948bd319242ff45e321ba1ed32d8b 100644
+--- a/packages/opencode/src/provider/models.ts
++++ b/packages/opencode/src/provider/models.ts
+@@ -8,6 +8,7 @@ import { lazy } from "@/util/lazy"
+ import { Filesystem } from "@/util/filesystem"
+ import { Flock } from "@opencode-ai/core/util/flock"
+ import { Hash } from "@opencode-ai/core/util/hash"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ 
+ // Try to import bundled snapshot (generated at build time)
+ // Falls back to undefined in dev mode when snapshot doesn't exist
+@@ -114,7 +115,8 @@ function skip(force: boolean) {
+ }
+ 
+ const fetchApi = async () => {
+-  const result = await fetch(`${url()}/api.json`, {
++  const result = await NetworkProxy.routedFetch(`${url()}/api.json`, {
++    purpose: "infrastructure",
+     headers: { "User-Agent": Installation.USER_AGENT },
+     signal: AbortSignal.timeout(10000),
+   })
+@@ -164,7 +166,7 @@ export async function refresh(force = false) {
+ }
+ 
+ if (!Flag.OPENCODE_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-completions")) {
+-  void refresh()
++  setTimeout(() => void refresh(), ttl).unref?.()
+   setInterval(
+     async () => {
+       await refresh()
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index ab6c83796d316e5cc24080567cfc906a270c49b8..e103c019c8bf7506066c6c3f67a46cd9bdcfd23d 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -23,6 +23,7 @@ import { Effect, Layer, Context, Schema, Types } from "effect"
+ import { EffectBridge } from "@/effect/bridge"
+ import { InstanceState } from "@/effect/instance-state"
+ import { AppFileSystem } from "@opencode-ai/core/filesystem"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { isRecord } from "@/util/record"
+ import { optionalOmitUndefined, withStatics } from "@/util/schema"
+ 
+@@ -1548,8 +1549,9 @@ const layer: Layer.Layer<
+             }
+           }
+ 
+-          const res = await fetchFn(input, {
++          const res = await NetworkProxy.fetchWithRoute(fetchFn, input, {
+             ...opts,
++            purpose: "provider",
+             // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+             timeout: false,
+           })
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index a7de59c0b62133c671e7a5d59759ea9c88351f17..d3f113fc8be16460f35adca20a6d12708c9f6b34 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -123,6 +123,44 @@ export const layer = Layer.effect(
+     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
+       yield* elog.info("cancel", { sessionID })
+       yield* state.cancel(sessionID)
++      yield* abortPendingAssistant(sessionID)
++    })
++
++    const abortPendingAssistant = Effect.fn("SessionPrompt.abortPendingAssistant")(function* (sessionID: SessionID) {
++      const match = yield* sessions.findMessage(
++        sessionID,
++        (msg) => msg.info.role === "assistant" && !msg.info.time.completed,
++      )
++      if (Option.isNone(match)) return
++
++      const now = Date.now()
++      const assistant = match.value.info
++      if (assistant.role !== "assistant" || assistant.time.completed) return
++      assistant.time.completed = now
++      assistant.error ??= new MessageV2.AbortedError({ message: "Aborted" }).toObject()
++      yield* sessions.updateMessage(assistant)
++
++      yield* Effect.forEach(
++        match.value.parts,
++        (part) => {
++          if (part.type !== "tool") return Effect.void
++          if (part.state.status !== "pending" && part.state.status !== "running") return Effect.void
++          return sessions.updatePart({
++            ...part,
++            state: {
++              status: "error",
++              input: part.state.input,
++              error: "Tool execution aborted",
++              metadata: part.state.status === "running" ? { ...part.state.metadata, interrupted: true } : { interrupted: true },
++              time: {
++                start: part.state.status === "running" ? part.state.time.start : now,
++                end: now,
++              },
++            },
++          } satisfies MessageV2.ToolPart).pipe(Effect.asVoid)
++        },
++        { discard: true },
++      )
+     })
+ 
+     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {

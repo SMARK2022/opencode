@@ -1,0 +1,239 @@
+From 9711fd18599aff8424ecea57bbbd88d66762edf1 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Thu, 28 May 2026 12:42:08 +0800
+Subject: [PATCH] =?UTF-8?q?feat(grep):=20=E4=BC=98=E5=8C=96=20grep=20?=
+ =?UTF-8?q?=E8=BF=87=E6=BB=A4=E5=99=A8=E7=9A=84=E8=BE=93=E5=87=BA=E6=A0=BC?=
+ =?UTF-8?q?=E5=BC=8F=EF=BC=8C=E7=A1=AE=E4=BF=9D=E5=9C=A8=20TUI=20=E5=92=8C?=
+ =?UTF-8?q?=E6=BB=9A=E5=8A=A8=E5=9B=9E=E6=98=BE=E4=B8=AD=E7=B4=A7=E5=87=91?=
+ =?UTF-8?q?=E6=98=BE=E7=A4=BA=EF=BC=8C=E9=81=BF=E5=85=8D=E6=9A=B4=E9=9C=B2?=
+ =?UTF-8?q?=E5=8F=82=E6=95=B0=E5=90=8D=E7=A7=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/run/tool.ts b/packages/opencode/src/cli/cmd/run/tool.ts
+index 3dab7aa8df1040500f909a3a3fd7772f2f81dceb..7297d19da3b6ce9a9bf6a4c7d7d86fd49bc0f363 100644
+--- a/packages/opencode/src/cli/cmd/run/tool.ts
++++ b/packages/opencode/src/cli/cmd/run/tool.ts
+@@ -285,6 +285,42 @@ function count(n: number, label: string): string {
+   return `${n} ${label}${n === 1 ? "" : "es"}`
+ }
+ 
++function grepPatterns(value: unknown, exclude = false): string[] {
++  const items = typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
++  // grep 的 inline 行是给人扫一眼的摘要，不展示 include=/exclude= 字段名；
++  // exclude 直接沿用 ripgrep 的 !glob 语义，既短又能和普通 include 区分。
++  return items.filter(Boolean).map((item) => (exclude && !item.startsWith("!") ? `!${item}` : item))
++}
++
++function grepFilter(value: unknown, exclude = false): string {
++  const items = grepPatterns(value, exclude)
++  if (items.length === 0) return ""
++  // include 通常只有一两个扩展名，最多展示两个；exclude 往往更长，
++  // 只展示第一个并用 +N 表示其余项，避免把 inline tool 行变成参数列表。
++  const shown = items.slice(0, exclude ? 1 : 2)
++  const hidden = items.length - shown.length
++  return hidden > 0 ? `${shown.join(",")} +${hidden}` : shown.join(",")
++}
++
++function grepResult(metadata: ToolDict): string {
++  const matches = num(metadata.matches)
++  const timedOut = metadata.timedOut === true
++  if (matches === undefined) return timedOut ? "timed out" : ""
++  if (matches === 0 && timedOut) return "timed out"
++  const label = `${matches}${metadata.truncated === true ? "+" : ""} ${matches === 1 && metadata.truncated !== true ? "match" : "matches"}`
++  return timedOut ? `${label}, timed out` : label
++}
++
++function grepDetails(input: ToolDict, metadata?: ToolDict): string {
++  const parts = [
++    text(input.path) ? `in ${toolPath(text(input.path))}` : "",
++    grepFilter(input.include),
++    grepFilter(input.exclude, true),
++    metadata ? grepResult(metadata) : "",
++  ].filter(Boolean)
++  return parts.join(" · ")
++}
++
+ function runGlob(p: ToolProps<typeof GlobTool>): ToolInline {
+   const root = p.input.path ?? ""
+   const title = `Glob "${p.input.pattern ?? ""}"`
+@@ -299,11 +335,8 @@ function runGlob(p: ToolProps<typeof GlobTool>): ToolInline {
+ }
+ 
+ function runGrep(p: ToolProps<typeof GrepTool>): ToolInline {
+-  const root = p.input.path ?? ""
+   const title = `Grep "${p.input.pattern ?? ""}"`
+-  const suffix = root ? `in ${toolPath(root)}` : ""
+-  const matches = p.metadata.matches
+-  const description = matches === undefined ? suffix : `${suffix}${suffix ? " · " : ""}${count(matches, "match")}`
++  const description = grepDetails(p.input, p.metadata)
+   return {
+     icon: "✱",
+     title,
+@@ -879,12 +912,12 @@ function scrollGlobFinal(p: ToolProps<typeof GlobTool>): string {
+ function scrollGrepStart(p: ToolProps<typeof GrepTool>): string {
+   const pattern = p.input.pattern ?? ""
+   const head = pattern ? `✱ Grep "${pattern}"` : "✱ Grep"
+-  const dir = p.input.path ?? ""
+-  if (!dir) {
++  const details = grepDetails(p.input)
++  if (!details) {
+     return head
+   }
+ 
+-  return `${head} in ${toolPath(dir)}`
++  return `${head} ${details}`
+ }
+ 
+ function scrollListStart(p: ToolProps): string {
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index f85cb7ef402025bcef6383918ae19cc4edd5f312..66ba9baf3e66ffa34d7c065f7b92dfc122d9b0cb 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -2669,14 +2669,41 @@ function Read(props: ToolProps<typeof ReadTool>) {
+   )
+ }
+ 
++function grepPatterns(value: unknown, exclude = false) {
++  const items = typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === "string") : []
++  // TUI 的 grep 行必须保持短促；不显示 include=/exclude= 字段名，
++  // exclude 用 !glob 表达真实过滤语义，和 rg/glob 习惯保持一致。
++  return items.filter(Boolean).map((item) => (exclude && !item.startsWith("!") ? `!${item}` : item))
++}
++
++function grepFilter(value: unknown, exclude = false) {
++  const items = grepPatterns(value, exclude)
++  if (items.length === 0) return ""
++  // exclude 往往比 include 更长，显示第一个并压缩其余项，避免 inline 行横向溢出；
++  // include 最多显示两个常见扩展名，保留足够上下文但不降级成参数 dump。
++  const shown = items.slice(0, exclude ? 1 : 2)
++  const hidden = items.length - shown.length
++  return hidden > 0 ? `${shown.join(",")} +${hidden}` : shown.join(",")
++}
++
++function grepResult(metadata: { matches?: unknown; truncated?: unknown; timedOut?: unknown }) {
++  const matches = typeof metadata.matches === "number" ? metadata.matches : undefined
++  const timedOut = metadata.timedOut === true
++  if (matches === undefined) return timedOut ? "timed out" : ""
++  if (matches === 0 && timedOut) return "timed out"
++  const label = `${matches}${metadata.truncated === true ? "+" : ""} ${matches === 1 && metadata.truncated !== true ? "match" : "matches"}`
++  return timedOut ? `${label}, timed out` : label
++}
++
+ function Grep(props: ToolProps<typeof GrepTool>) {
+   const pathFormatter = usePathFormatter()
++  const filters = createMemo(() => [grepFilter(props.input.include), grepFilter(props.input.exclude, true)].filter(Boolean).join(" · "))
++  const result = createMemo(() => grepResult(props.metadata))
+   return (
+     <InlineTool icon="✱" pending="Searching content..." complete={props.input.pattern} part={props.part}>
+       Grep "{props.input.pattern}" <Show when={props.input.path}>in {pathFormatter.format(props.input.path)} </Show>
+-      <Show when={props.metadata.matches}>
+-        ({props.metadata.matches} {props.metadata.matches === 1 ? "match" : "matches"})
+-      </Show>
++      <Show when={filters()}>· {filters()} </Show>
++      <Show when={result()}>({result()})</Show>
+     </InlineTool>
+   )
+ }
+diff --git a/packages/opencode/test/cli/run/entry.body.test.ts b/packages/opencode/test/cli/run/entry.body.test.ts
+index b55549573c077b66f489821b0e2c1aa8851b90fc..176d5147507d884521a41f42be5be924444d5090 100644
+--- a/packages/opencode/test/cli/run/entry.body.test.ts
++++ b/packages/opencode/test/cli/run/entry.body.test.ts
+@@ -1,6 +1,7 @@
+ import { describe, expect, test } from "bun:test"
+ import type { ToolPart } from "@opencode-ai/sdk/v2"
+ import { entryBody, entryCanStream, entryDone } from "@/cli/cmd/run/entry.body"
++import { toolInlineInfo } from "@/cli/cmd/run/tool"
+ import type { StreamCommit, ToolSnapshot } from "@/cli/cmd/run/types"
+ 
+ function commit(input: Partial<StreamCommit> & Pick<StreamCommit, "kind" | "text" | "phase" | "source">): StreamCommit {
+@@ -453,6 +454,38 @@ describe("run entry body", () => {
+     })
+   })
+ 
++  test("summarizes grep filters and incomplete results without exposing parameter names", () => {
++    const inline = toolInlineInfo(
++      toolPart("grep", {
++        status: "completed",
++        input: {
++          pattern: "function",
++          path: "node_modules",
++          include: "*.js",
++          exclude: ["**/.cache/**", "**/.bin/**", "**/micromark-core-commonmark/**"],
++          timeout: 1000,
++        },
++        output: "",
++        title: "function",
++        metadata: {
++          matches: 64,
++          truncated: true,
++          timedOut: true,
++        },
++        time: { start: 1, end: 2 },
++      }),
++    )
++
++    expect(inline).toEqual({
++      icon: "✱",
++      title: 'Grep "function"',
++      description: "in node_modules · *.js · !**/.cache/** +2 · 64+ matches, timed out",
++    })
++    expect(inline.description).not.toContain("include=")
++    expect(inline.description).not.toContain("exclude=")
++    expect(inline.description).not.toContain("timeout")
++  })
++
+   test("renders interrupted assistant finals as text", () => {
+     expect(
+       entryBody(
+diff --git a/packages/opencode/test/cli/run/scrollback.surface.test.ts b/packages/opencode/test/cli/run/scrollback.surface.test.ts
+index 5b2966a5e1ec56e1013e11acea61a7221c16fb33..f5094e24821059a463eabdbb8a02736ea2a3c5ad 100644
+--- a/packages/opencode/test/cli/run/scrollback.surface.test.ts
++++ b/packages/opencode/test/cli/run/scrollback.surface.test.ts
+@@ -649,6 +649,44 @@ test("does not double-space before completed bash output when inline tool header
+   }
+ })
+ 
++test("renders grep filters compactly in scrollback headers", async () => {
++  const out = await setup()
++
++  try {
++    await out.scrollback.append(
++      toolCommit({
++        tool: "grep",
++        phase: "start",
++        toolState: "running",
++        state: {
++          status: "running",
++          input: {
++            pattern: "function",
++            path: "node_modules",
++            include: "*.js",
++            exclude: ["**/.cache/**", "**/.bin/**", "**/micromark-core-commonmark/**"],
++            timeout: 1000,
++          },
++          time: { start: 1 },
++        },
++      }),
++    )
++
++    const commits = claim(out.renderer)
++    try {
++      const output = render(commits)
++      expect(output).toContain('✱ Grep "function" in node_modules · *.js · !**/.cache/** +2')
++      expect(output).not.toContain("include=")
++      expect(output).not.toContain("exclude=")
++      expect(output).not.toContain("timeout")
++    } finally {
++      destroy(commits)
++    }
++  } finally {
++    out.scrollback.destroy()
++  }
++})
++
+ test("does not emit blank patch snapshots between edit and task", async () => {
+   const out = await setup()
+ 

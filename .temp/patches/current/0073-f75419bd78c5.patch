@@ -1,0 +1,232 @@
+From f75419bd78c55ac3984fec6d762c929391d0ba02 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 4 May 2026 05:03:38 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E7=BD=91=E7=BB=9C?=
+ =?UTF-8?q?=E4=BB=A3=E7=90=86=E5=8A=9F=E8=83=BD=EF=BC=8C=E5=AE=89=E8=A3=85?=
+ =?UTF-8?q?=E5=85=A8=E5=B1=80fetch=E5=B9=B6=E4=BC=98=E5=8C=96npm=E9=85=8D?=
+ =?UTF-8?q?=E7=BD=AE=E4=B8=AD=E7=9A=84=E8=B6=85=E6=97=B6=E8=AE=BE=E7=BD=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-proxy.ts
+index 08090553e50bb54bd6c94a1e0e1a17227f075f58..c3296d5dd01c4e536b299ad62526fafe6415db3a 100644
+--- a/packages/core/src/network-proxy.ts
++++ b/packages/core/src/network-proxy.ts
+@@ -4,10 +4,11 @@ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin"
+ 
+ export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
+ 
+-const TTL = 120_000
++const TTL = 15_000
+ const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"])
+ 
+ let cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined
++let globalFetchInstalled = false
+ 
+ type SystemProxy = {
+   http?: string
+@@ -122,8 +123,9 @@ async function macProxy(): Promise<SystemProxy | undefined> {
+   return { http, https, socks, bypass: [] }
+ }
+ 
+-async function currentSystemProxy() {
++async function currentSystemProxy(refresh = false) {
+   if (process.platform !== "win32" && process.platform !== "darwin") return undefined
++  if (refresh) cache = undefined
+   if (!cache || cache.expires < Date.now()) {
+     cache = {
+       expires: Date.now() + TTL,
+@@ -133,9 +135,9 @@ async function currentSystemProxy() {
+   return cache.value
+ }
+ 
+-async function configuredProxy(url: URL) {
++async function configuredProxy(url: URL, refresh = false) {
+   if (process.platform === "win32" || process.platform === "darwin") {
+-    const sys = await currentSystemProxy()
++    const sys = await currentSystemProxy(refresh)
+     if (!sys || bypass(url, sys.bypass)) return
+     return url.protocol === "https:" ? sys.https || sys.http || sys.socks : sys.http || sys.https || sys.socks
+   }
+@@ -144,12 +146,12 @@ async function configuredProxy(url: URL) {
+   return url.protocol === "https:" ? env.https || env.http || env.socks : env.http || env.https || env.socks
+ }
+ 
+-export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown"): Promise<Route> {
++export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown", refresh = false): Promise<Route> {
+   const url = input instanceof URL ? input : new URL(input)
+   if (purpose === "local" || isLocal(url)) return { type: "direct", reason: "local" }
+-  const proxy = await configuredProxy(url)
+-  if (proxy) return { type: "proxy", proxy, reason: "system" }
+-  return { type: "direct", reason: "no-proxy" }
++  const proxy = await configuredProxy(url, refresh)
++  if (proxy) return { type: "proxy", proxy, reason: refresh ? "system-refresh" : "system" }
++  return { type: "direct", reason: refresh ? "refresh-no-proxy" : "no-proxy" }
+ }
+ 
+ export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
+@@ -158,20 +160,46 @@ export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise
+ 
+ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
+   const url = new URL(input instanceof Request ? input.url : input.toString())
+-  const { purpose = "unknown", ...rest } = (init ?? {}) as RoutedInit
+-  const route = await resolveProxyRoute(url, purpose)
+-  if (route.type === "direct") return fetchFn(input, rest)
++  const { purpose = "unknown", signal, ...rest } = (init ?? {}) as RoutedInit
++  const route = await resolveProxyRoute(url, purpose, purpose === "provider" || purpose === "npm")
++  const direct = () => fetchFn(input, signal ? { ...rest, signal } : rest)
++  const proxy = (value: string) => fetchFn(input, { ...rest, signal, proxy: value })
++
++  if (route.type === "direct") {
++    try {
++      return await direct()
++    } catch (error) {
++      if (signal?.aborted) throw error
++      const refreshed = await resolveProxyRoute(url, purpose, true)
++      if (refreshed.type === "proxy") return proxy(refreshed.proxy).catch(() => { throw error })
++      throw error
++    }
++  }
++
+   try {
+-    return await fetchFn(input, { ...rest, proxy: route.proxy })
++    return await proxy(route.proxy)
+   } catch (error) {
+-    return fetchFn(input, rest).catch(() => {
+-      throw error
+-    })
++    const refreshed = signal?.aborted ? undefined : await resolveProxyRoute(url, purpose, true)
++    if (refreshed?.type === "proxy" && refreshed.proxy !== route.proxy) {
++      return proxy(refreshed.proxy).catch(() => { throw error })
++    }
++    // When the proxy attempt consumed the abort signal, retry direct without it
++    // so the fallback has a chance to succeed.
++    if (signal?.aborted) return fetchFn(input, rest).catch(() => { throw error })
++    return direct().catch(() => { throw error })
+   }
+ }
+ 
++export function installGlobalFetch(defaultPurpose: Purpose = "unknown") {
++  if (globalFetchInstalled) return
++  const original = globalThis.fetch.bind(globalThis) as FetchFn
++  globalThis.fetch = ((input: FetchInput, init?: RoutedInit) =>
++    fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as typeof fetch
++  globalFetchInstalled = true
++}
++
+ export async function npmProxyOptions(registry: string) {
+-  const route = await resolveProxyRoute(registry, "npm")
++  const route = await resolveProxyRoute(registry, "npm", true)
+   if (route.type === "direct") return {}
+   return {
+     proxy: route.proxy,
+diff --git a/packages/core/src/npm-config.ts b/packages/core/src/npm-config.ts
+index 56418a000e72ff62210e7d039aa3ee4c6c9a645c..849219bfebaf32928163425196a0e4bc58c25332 100644
+--- a/packages/core/src/npm-config.ts
++++ b/packages/core/src/npm-config.ts
+@@ -26,7 +26,7 @@ async function pingRegistry(registry: string) {
+     const response = await NetworkProxy.routedFetch(`${normalizeRegistry(registry)}/-/ping?write=false`, {
+       purpose: "npm",
+       method: "GET",
+-      signal: AbortSignal.timeout(1500),
++      signal: AbortSignal.timeout(3000),
+     })
+     return response.ok
+   } catch {
+@@ -36,10 +36,13 @@ async function pingRegistry(registry: string) {
+ 
+ async function selectRegistry() {
+   const candidates = [defaultRegistry, mirrorRegistry]
+-  for (const candidate of candidates) {
+-    if (await pingRegistry(candidate)) return candidate
+-  }
+-  return defaultRegistry
++  const results = await Promise.all(
++    candidates.map(async (candidate) => {
++      const ok = await pingRegistry(candidate)
++      return ok ? candidate : undefined
++    }),
++  )
++  return results.find((r): r is string => r !== undefined) ?? defaultRegistry
+ }
+ 
+ function defaultRegistryForNetwork() {
+diff --git a/packages/opencode/src/cli/cmd/tui/thread.ts b/packages/opencode/src/cli/cmd/tui/thread.ts
+index c180b3c10643cee7eb41ab166a7078670a7332a6..ab1232172a92efcdf201048c1965388250809087 100644
+--- a/packages/opencode/src/cli/cmd/tui/thread.ts
++++ b/packages/opencode/src/cli/cmd/tui/thread.ts
+@@ -60,8 +60,9 @@ function applyProxyEnv(env: Record<string, string>) {
+   env.no_proxy = no
+ 
+   if (process.platform === "win32" || process.platform === "darwin") {
+-    // NetworkProxy reads system proxy per-request; strip inherited shell
+-    // proxy env so Bun never routes fetch through a stale/dead proxy.
++    // The daemon installs a global fetch wrapper that resolves system proxy
++    // dynamically per request. Strip inherited shell proxy env so Bun doesn't
++    // freeze routing to stale variables captured before the proxy app started.
+     for (const key of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])
+       delete env[key]
+     return
+diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
+index e3d540a1bcc9a9ab3f85a648d56e27be9ca191ef..a4eb09130be3e0c44ec4f758dda2b4ace90f3551 100644
+--- a/packages/opencode/src/cli/cmd/tui/worker.ts
++++ b/packages/opencode/src/cli/cmd/tui/worker.ts
+@@ -18,8 +18,10 @@ import { onSseClientCountChange } from "@/server/routes/global"
+ import path from "path"
+ import { Global } from "@opencode-ai/core/global"
+ import { resolvePluginTarget, createPluginEntry } from "@/plugin/shared"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ 
+ ensureProcessMetadata("worker")
++NetworkProxy.installGlobalFetch()
+ 
+ await Log.init({
+   print: process.argv.includes("--print-logs") || process.env.OPENCODE_PRINT_LOGS === "1",
+diff --git a/packages/opencode/src/config/config.ts b/packages/opencode/src/config/config.ts
+index 9938a848470400e92177da981eec47c45a15e6ab..f089eea2dbfac8ae91f59f7ad12869f97b1362b1 100644
+--- a/packages/opencode/src/config/config.ts
++++ b/packages/opencode/src/config/config.ts
+@@ -5,6 +5,7 @@ import os from "os"
+ import z from "zod"
+ import { mergeDeep } from "remeda"
+ import { Global } from "@opencode-ai/core/global"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import fsNode from "fs/promises"
+ import { NamedError } from "@opencode-ai/core/util/error"
+ import { Flag } from "@opencode-ai/core/flag/flag"
+@@ -498,7 +499,9 @@ export const layer = Layer.effect(
+             const url = key.replace(/\/+$/, "")
+             process.env[value.key] = value.token
+             log.debug("fetching remote config", { url: `${url}/.well-known/opencode` })
+-            const response = yield* Effect.promise(() => fetch(`${url}/.well-known/opencode`))
++            const response = yield* Effect.promise(() =>
++              NetworkProxy.routedFetch(`${url}/.well-known/opencode`, { purpose: "infrastructure" }),
++            )
+             if (!response.ok) {
+               throw new Error(`failed to fetch remote config from ${url}: ${response.status}`)
+             }
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index e103c019c8bf7506066c6c3f67a46cd9bdcfd23d..f3d40a1346fefc1f0f949d2061ea7221e29d067f 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -31,6 +31,7 @@ import * as ProviderTransform from "./transform"
+ import { ModelID, ProviderID } from "./schema"
+ 
+ const log = Log.create({ service: "provider" })
++const DEFAULT_TIMEOUT_MS = 300_000
+ 
+ function shouldUseCopilotResponsesApi(modelID: string): boolean {
+   const match = /^gpt-(\d+)/.exec(modelID)
+@@ -1525,8 +1526,8 @@ const layer: Layer.Layer<
+ 
+           if (opts.signal) signals.push(opts.signal)
+           if (chunkAbortCtl) signals.push(chunkAbortCtl.signal)
+-          if (options["timeout"] !== undefined && options["timeout"] !== null && options["timeout"] !== false)
+-            signals.push(AbortSignal.timeout(options["timeout"]))
++          if (options["timeout"] !== false)
++            signals.push(AbortSignal.timeout(typeof options["timeout"] === "number" ? options["timeout"] : DEFAULT_TIMEOUT_MS))
+ 
+           const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
+           if (combined) opts.signal = combined

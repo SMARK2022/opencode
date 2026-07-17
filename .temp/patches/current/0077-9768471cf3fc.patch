@@ -1,0 +1,265 @@
+From 9768471cf3fc2b91537f5c4c5188be2227dcd12d Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 4 May 2026 22:47:55 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BAclaudecode=E9=85=8D?=
+ =?UTF-8?q?=E7=BD=AE=EF=BC=8C=E6=94=AF=E6=8C=81=E6=8E=A8=E6=96=ADAnthropic?=
+ =?UTF-8?q?=E6=80=9D=E7=BB=B4=E5=8F=98=E4=BD=93=E5=B9=B6=E6=89=A9=E5=B1=95?=
+ =?UTF-8?q?=E6=8F=90=E4=BE=9B=E8=80=85=E5=8A=9F=E8=83=BD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index cbf3ca1178077dee48343cdbce93337bab23907c..4d6a236ae0cdf3d93f2fd6633b2753bbb944035d 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -94,6 +94,7 @@ import { formatTranscript } from "../../util/transcript"
+ import { UI } from "@/cli/ui.ts"
+ import { useTuiConfig } from "../../context/tui-config"
+ import { getScrollAcceleration } from "../../util/scroll"
++import { createThrottledSignal } from "../../util/signal"
+ import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
+ import { DialogGoUpsell } from "../../component/dialog-go-upsell"
+ import { SessionRetry } from "@/session/retry"
+@@ -1405,6 +1406,21 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
+   const final = createMemo(() => {
+     return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
+   })
++  const visibleParts = createMemo(() => {
++    return props.parts.some((part) => {
++      if (part.type === "text") return part.text.trim().length > 0
++      if (part.type === "reasoning") {
++        if (!ctx.showThinking()) return false
++        return part.text.replace("[REDACTED]", "").trim().length > 0
++      }
++      if (part.type === "tool") return true
++      return false
++    })
++  })
++  const footerVisible = createMemo(() => {
++    if (!visibleParts() && !props.message.error) return false
++    return final() || props.message.error?.name === "MessageAbortedError"
++  })
+ 
+   const duration = createMemo(() => {
+     if (!final()) return 0
+@@ -1462,7 +1478,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
+         </box>
+       </Show>
+       <Switch>
+-        <Match when={props.last || final() || props.message.error?.name === "MessageAbortedError"}>
++        <Match when={footerVisible()}>
+           <box paddingLeft={3}>
+             <text marginTop={1}>
+               <span
+@@ -1507,11 +1523,14 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
+     // OpenRouter sends encrypted reasoning data that appears as [REDACTED]
+     return props.part.text.replace("[REDACTED]", "").trim()
+   })
+-  const lines = createMemo(() => content().split("\n"))
++  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
++  createEffect(() => setDisplayContent(content()))
++  const renderedContent = createMemo(() => displayContent() || content())
++  const lines = createMemo(() => renderedContent().split("\n"))
+   const PREVIEW = 5
+   const overflow = createMemo(() => lines().length > PREVIEW)
+   const preview = createMemo(() => {
+-    if (expanded() || !overflow()) return content()
++    if (expanded() || !overflow()) return renderedContent()
+     return [...lines().slice(0, PREVIEW), "…"].join("\n")
+   })
+   return (
+@@ -1529,15 +1548,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
+           setExpanded((prev) => !prev)
+         }}
+       >
+-        <code
+-          filetype="markdown"
+-          drawUnstyledText={false}
+-          streaming={false}
+-          syntaxStyle={subtleSyntax()}
+-          content={"_Thinking (" + content().length.toLocaleString() + " chars):_"}
+-          conceal={ctx.conceal()}
+-          fg={theme.textMuted}
+-        />
++        <text fg={theme.textMuted}>Thinking ({renderedContent().length.toLocaleString()} chars):</text>
+         <code
+           filetype="markdown"
+           drawUnstyledText={false}
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index fa2195586fe88a25e46bbbe93e8ec69ee0c3547a..7e4907030061e0f781c8bb6f079290b5900b606a 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -149,13 +149,28 @@ function useLanguageModel(sdk: any) {
+   return sdk.responses === undefined && sdk.chat === undefined
+ }
+ 
++function isAnthropicThinkingModel(modelID: string) {
++  const id = modelID.toLowerCase()
++  return id.includes("claude-3-7") || id.includes("claude-3.7") || /claude-(haiku|sonnet|opus)-4/.test(id)
++}
++
++function defaultConfigProviderNpm(providerID: string, baseType?: string) {
++  if ((baseType ?? providerID) === "claudecode") return "@ai-sdk/anthropic"
++  return "@ai-sdk/openai-compatible"
++}
++
+ function custom(dep: CustomDep): Record<string, CustomLoader> {
+   return {
+     claudecode: Effect.fnUntraced(function* (provider: Info) {
+       const auth = yield* dep.auth(provider.id)
+       const env = yield* dep.env()
+-      const apiKey = env["ANTHROPIC_AUTH_TOKEN"] || provider.options?.apiKey || env["CLAUDECODE_API_KEY"] || (auth?.type === "api" ? auth.key : undefined)
+-      const baseURL = env["ANTHROPIC_BASE_URL"] || provider.options?.baseURL || env["CLAUDECODE_BASE_URL"] || "https://api.cubence.com"
++      const authKey = auth?.type === "api" ? auth.key : undefined
++      const apiKey = env["ANTHROPIC_AUTH_TOKEN"] || env["CLAUDECODE_API_KEY"] || authKey || provider.options?.apiKey
++      const baseURL =
++        env["ANTHROPIC_BASE_URL"] ||
++        provider.options?.baseURL ||
++        env["CLAUDECODE_BASE_URL"] ||
++        "https://api.cubence.com"
+ 
+       const autoload = Boolean(apiKey)
+       if (!autoload) return { autoload: false }
+@@ -1246,7 +1261,7 @@ const layer: Layer.Layer<
+               provider.npm ??
+               existingModel?.api.npm ??
+               modelsDev[baseType ?? providerID]?.npm ??
+-              (providerID === "claudecode" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible")
++              defaultConfigProviderNpm(providerID, baseType)
+             const name = iife(() => {
+               if (model.name) return model.name
+               if (model.id && model.id !== modelID) return modelID
+@@ -1269,7 +1284,10 @@ const layer: Layer.Layer<
+               providerID: ProviderID.make(providerID),  // ⭐ Ensure correct providerID
+               capabilities: {
+                 temperature: model.temperature ?? existingModel?.capabilities.temperature ?? false,
+-                reasoning: model.reasoning ?? existingModel?.capabilities.reasoning ?? false,
++                reasoning:
++                  model.reasoning ??
++                  existingModel?.capabilities.reasoning ??
++                  (apiNpm === "@ai-sdk/anthropic" && isAnthropicThinkingModel(apiID)),
+                 attachment: model.attachment ?? existingModel?.capabilities.attachment ?? false,
+                 toolcall: model.tool_call ?? existingModel?.capabilities.toolcall ?? true,
+                 input: {
+@@ -1372,13 +1390,14 @@ const layer: Layer.Layer<
+           mergeProvider(providerID, patch)
+         }
+ 
+-        for (const [id, fn] of Object.entries(custom(dep))) {
++        const customLoaders = custom(dep)
++        const loadCustom = Effect.fn("Provider.loadCustom")(function* (id: string, fn: CustomLoader) {
+           const providerID = ProviderID.make(id)
+-          if (disabled.has(providerID)) continue
++          if (disabled.has(providerID)) return
+           const data = database[providerID]
+           if (!data) {
+             log.error("Provider does not exist in model list " + providerID)
+-            continue
++            return
+           }
+           const result = yield* fn(data)
+           if (result && (result.autoload || providers[providerID])) {
+@@ -1389,6 +1408,17 @@ const layer: Layer.Layer<
+             const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
+             mergeProvider(providerID, patch)
+           }
++        })
++
++        for (const [id, fn] of Object.entries(customLoaders)) {
++          yield* loadCustom(id, fn)
++        }
++
++        for (const [id, provider] of configProviders) {
++          if (!provider.extends) continue
++          const fn = customLoaders[provider.extends]
++          if (!fn) continue
++          yield* loadCustom(id, fn)
+         }
+ 
+         // load config - re-apply with updated data
+diff --git a/packages/opencode/test/provider/provider.test.ts b/packages/opencode/test/provider/provider.test.ts
+index d0aa299e70ee2e9ab99016b5d3182b37cae200dc..25040fe9f7646dcaf17792738806c0e64a763206 100644
+--- a/packages/opencode/test/provider/provider.test.ts
++++ b/packages/opencode/test/provider/provider.test.ts
+@@ -575,6 +575,79 @@ test("provider with baseURL from config", async () => {
+   })
+ })
+ 
++test("claudecode config models infer Anthropic thinking variants", async () => {
++  await using tmp = await tmpdir({
++    init: async (dir) => {
++      await Bun.write(
++        path.join(dir, "opencode.json"),
++        JSON.stringify({
++          $schema: "https://opencode.ai/config.json",
++          provider: {
++            claudecode: {
++              options: {
++                apiKey: "test-key",
++              },
++              models: {
++                "claude-opus-4-6": {
++                  name: "Claude Opus 4.6",
++                },
++              },
++            },
++          },
++        }),
++      )
++    },
++  })
++  await Instance.provide({
++    directory: tmp.path,
++    fn: async () => {
++      const providers = await list()
++      const model = providers[ProviderID.make("claudecode")].models["claude-opus-4-6"]
++      expect(model.capabilities.reasoning).toBe(true)
++      expect(model.variants?.low?.thinking?.type).toBe("adaptive")
++      expect(model.variants?.max?.effort).toBe("max")
++    },
++  })
++})
++
++test("provider extending claudecode uses Anthropic SDK and ClaudeCode loader", async () => {
++  await using tmp = await tmpdir({
++    init: async (dir) => {
++      await Bun.write(
++        path.join(dir, "opencode.json"),
++        JSON.stringify({
++          $schema: "https://opencode.ai/config.json",
++          provider: {
++            Cubence: {
++              extends: "claudecode",
++              options: {
++                baseURL: "https://api-dmit.cubence.com/v1",
++                apiKey: "test-key",
++              },
++              models: {
++                "claude-opus-4-6": {
++                  name: "Claude Opus 4.6",
++                },
++              },
++            },
++          },
++        }),
++      )
++    },
++  })
++  await Instance.provide({
++    directory: tmp.path,
++    fn: async () => {
++      const providers = await list()
++      const provider = providers[ProviderID.make("Cubence")]
++      const model = provider.models["claude-opus-4-6"]
++      expect(model.api.npm).toBe("@ai-sdk/anthropic")
++      expect(provider.options.baseURL).toBe("https://api-dmit.cubence.com/v1")
++      expect(typeof provider.options.fetch).toBe("function")
++    },
++  })
++})
++
+ test("model cost defaults to zero when not specified", async () => {
+   await using tmp = await tmpdir({
+     init: async (dir) => {

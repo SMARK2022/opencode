@@ -1,0 +1,172 @@
+From a1a2952e2c03a82c5cc8105ed2a787647c9404bc Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 26 Jun 2026 04:24:55 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E4=BF=AE=E5=A4=8D=20BlockTool=20?=
+ =?UTF-8?q?=E6=8A=98=E5=8F=A0/=E5=B1=95=E5=BC=80=E5=90=8E=E5=86=85?=
+ =?UTF-8?q?=E5=AE=B9=E5=8C=BA=E6=B8=B2=E6=9F=93=E7=A9=BA=E7=99=BD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+OpenTUI renderable 被销毁后无法可靠重新挂载同一 JSX 对象，原 <Show> 互斥
+切换 preview/body 会导致折叠→展开→再折叠后内容区变为空白。
+
+改为 preview 和 body 各自常驻挂载，折叠态通过 maxHeight=0 + overflow=hidden
+隐藏而非卸载节点。body 仍延迟到首次展开才挂载以保留首屏 diff/tree-sitter 渲染
+性能优化。无 preview 的块（TodoWrite 等）行为与修改前完全等价。
+
+新增 notebook source 卡片折叠→展开→再折叠→再展开的行为级回归测试，
+completedToolPart helper 增加可选 output 参数以支持真实工具输出透传。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 82cec25c2cf774e1226549c5fc1808fb2475b758..b7891f168fe24d6cf28211243532cf18f7aa9f50 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -2407,6 +2407,16 @@ function BlockTool(props: {
+   })
+   const [expanded, setExpanded] = createSignal(false)
+   const collapsed = createMemo(() => collapsible() && !expanded())
++  const hasPreview = createMemo(() => props.preview !== undefined)
++  // OpenTUI 的 renderable 在被 <Show> 销毁后无法可靠重新挂载同一个 JSX 对象，
++  // 会导致折叠→展开→再折叠后内容区变为空白。因此 preview 和 body 一旦挂载就
++  // 常驻，折叠态通过 maxHeight=0 + overflow=hidden 隐藏，而非卸载 DOM 节点。
++  const [bodyMounted, setBodyMounted] = createSignal(!hasPreview() || !collapsed())
++  // body 延迟到首次展开时才挂载，避免在首屏就付出 diff/tree-sitter 渲染开销；
++  // 一旦挂载就不再卸载，后续折叠仅靠布局裁剪隐藏。
++  createEffect(() => {
++    if (!hasPreview() || !collapsed()) setBodyMounted(true)
++  })
+   // BlockTool spacing is intentionally owned by the section wrappers below.
+   // The body, expand affordance, and error rows each use marginTop={1}; adding
+   // a root gap would stack with those margins and render two blank rows around
+@@ -2452,15 +2462,27 @@ function BlockTool(props: {
+       <Show when={props.autoReview !== false}>
+         <ToolAutoReviewLine />
+       </Show>
+-      <box
+-        marginTop={1}
+-        maxHeight={collapsed() && !props.preview ? previewLines() : undefined}
+-        overflow={collapsed() && !props.preview ? "hidden" : undefined}
+-      >
+-        <Show when={!collapsed() || !props.preview} fallback={props.preview}>
++      {/* preview 区：折叠态可见（marginTop=1 撑出间距），展开态用 maxHeight=0 隐藏 */}
++      <Show when={hasPreview()}>
++        <box
++          marginTop={collapsed() ? 1 : 0}
++          maxHeight={collapsed() ? undefined : 0}
++          overflow={collapsed() ? undefined : "hidden"}
++        >
++          {props.preview}
++        </box>
++      </Show>
++      {/* body 区：有 preview 时延迟挂载；折叠态若有 preview 则 maxHeight=0 隐藏，
++          无 preview 时退回 previewLines 裁剪（兼容 TodoWrite 等无 preview 的块） */}
++      <Show when={bodyMounted()}>
++        <box
++          marginTop={hasPreview() && collapsed() ? 0 : 1}
++          maxHeight={collapsed() ? (hasPreview() ? 0 : previewLines()) : undefined}
++          overflow={collapsed() ? "hidden" : undefined}
++        >
+           {props.children}
+-        </Show>
+-      </box>
++        </box>
++      </Show>
+       <Show when={collapsible()}>
+         <box marginTop={1}>
+           <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+index d981e86304695b3f4548387b59e167e28bf3dfd7..a99b549f4fed934e085a25ab6909f88acf631630 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -1074,6 +1074,71 @@ test("notebook source, run, and output tools render rich notebook cards", async
+   )
+ })
+ 
++// 回归测试：BlockTool 折叠→展开→再折叠→再展开后内容不能变为空白。
++// 该 bug 由 OpenTUI renderable 销毁后无法重新挂载同一 JSX 对象引起，
++// 修复方式为 preview/body 常驻 + 布局裁剪隐藏，而非 <Show> 分支卸载。
++test("notebook source card keeps content after collapse and re-expand", async () => {
++  // 24 行输出超过 threshold=20，确保 BlockTool 进入可折叠状态
++  const sourceOutput = Array.from({ length: 24 }, (_, index) => `source line ${index + 1}`).join("\n")
++  await withRenderedSession(
++    [assistantMessage("msg_notebook_source_toggle", 1)],
++    {
++      msg_notebook_source_toggle: [
++        completedToolPart(
++          "part_notebook_source_toggle",
++          "msg_notebook_source_toggle",
++          "vscode_notebook_source",
++          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-source" },
++          {
++            vscodeNotebook: {
++              view: "source",
++              path: "notebooks/analysis.ipynb",
++              target: "cell 3",
++              cellId: "#VSC-source",
++              returned: 24,
++              totalLines: 24,
++              truncated: false,
++            },
++          },
++          sourceOutput,
++        ),
++      ],
++    },
++    async (app) => {
++      // 初始折叠态：预览可见（前 10 行），完整内容不可见
++      let frame = await waitForFrame(app, (lines) =>
++        lines.some((line) => line.includes("Notebook source")) &&
++        lines.some((line) => line.includes("source line 10")) &&
++        lines.some((line) => line.includes("Click to expand")),
++      )
++      expect(frame.some((line) => line.includes("source line 24"))).toBe(false)
++
++      // 第一次展开：完整内容可见
++      await clickVisibleText(app, "Click to expand")
++      frame = await waitForFrame(app, (lines) =>
++        lines.some((line) => line.includes("source line 24")) && lines.some((line) => line.includes("Click to collapse")),
++      )
++      expect(frame.some((line) => line.includes("source line 1"))).toBe(true)
++
++      // 折叠回去：预览恢复可见，完整内容再次隐藏——这是原 bug 的复现点
++      await clickVisibleText(app, "Click to collapse")
++      frame = await waitForFrame(app, (lines) =>
++        lines.some((line) => line.includes("source line 10")) && lines.some((line) => line.includes("Click to expand")),
++      )
++      expect(frame.some((line) => line.includes("source line 24"))).toBe(false)
++
++      // 再次展开：完整内容仍然可见——验证 body 常驻后不会被销毁成空白
++      await clickVisibleText(app, "Click to expand")
++      frame = await waitForFrame(app, (lines) =>
++        lines.some((line) => line.includes("source line 24")) && lines.some((line) => line.includes("Click to collapse")),
++      )
++      expect(frame.some((line) => line.includes("source line 1"))).toBe(true)
++    },
++    {},
++    { height: 40 },
++  )
++})
++
+ test("collapsed notebook run preview surfaces late failed cells", async () => {
+   await withRenderedSession(
+     [assistantMessage("msg_notebook_run_late_failure", 1)],
+@@ -2060,6 +2125,9 @@ function completedToolPart(
+   tool: string,
+   input: Record<string, unknown>,
+   metadata: Record<string, unknown> = {},
++  // 新增可选 output 参数：notebook source 等工具的真实输出需要透传到 tool.state.output，
++  // 之前硬编码空字符串导致 GenericTool 的 output memo 取不到值。
++  output = "",
+ ) {
+   return {
+     id,
+@@ -2071,7 +2139,7 @@ function completedToolPart(
+     state: {
+       status: "completed",
+       input,
+-      output: "",
++      output,
+       title: tool,
+       metadata,
+       time: { start: 1, end: 2 },

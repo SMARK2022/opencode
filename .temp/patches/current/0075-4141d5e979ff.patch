@@ -1,0 +1,213 @@
+From 4141d5e979ff532f2a6eff956a689a9a71b3d6f5 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 4 May 2026 19:58:19 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=BB=B6=E8=BF=9F=E6=B5=8B=E8=AF=95?=
+ =?UTF-8?q?=EF=BC=8C=E5=A2=9E=E5=8A=A0API=20URL=E7=9A=84=E9=BB=98=E8=AE=A4?=
+ =?UTF-8?q?=E9=85=8D=E7=BD=AE=EF=BC=8C=E4=BC=98=E5=8C=96=E6=A8=A1=E5=9E=8B?=
+ =?UTF-8?q?API=E7=9A=84=E8=8E=B7=E5=8F=96=E9=80=BB=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
+index e22ffbb79886297efe8a07397b59810d421fa29d..8e1a7543668141044df9cfc3a2c52bd2973863af 100644
+--- a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
++++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
+@@ -1,9 +1,11 @@
+ import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
+ import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
+-import { createEffect, createMemo, createSignal } from "solid-js"
++import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
+ import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
+ import { createTokenFlowPulse } from "../../util/signal"
+ import { sumConfirmed as sharedSumConfirmed, computeFinalTokens, charsPerTokenFromHistory } from "../../util/token-estimate"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
++import { useLocal } from "@tui/context/local"
+ 
+ const id = "internal:sidebar-context"
+ 
+@@ -11,9 +13,11 @@ const money = new Intl.NumberFormat("en-US", {
+   style: "currency",
+   currency: "USD",
+ })
++const PING_INTERVAL = 1_000
+ 
+ function View(props: { api: TuiPluginApi; session_id: string }) {
+   const theme = () => props.api.theme.current
++  const local = useLocal()
+   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
+   const isRunning = createMemo(() => (props.api.state.session.status(props.session_id)?.type ?? "idle") !== "idle")
+ 
+@@ -86,6 +90,88 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
+   createEffect(() => triggerStateUpdate(stateRaw()))
+   const flow = createTokenFlowPulse(state)
+ 
++  const targetApiUrl = createMemo(() => {
++    const selected = local.model.current()
++    if (!selected) return null
++
++    const provider = props.api.state.provider.find((item) => item.id === selected.providerID)
++    const model = provider?.models[selected.modelID]
++    const configuredBaseUrl = provider?.options?.baseURL
++    const baseUrl =
++      typeof configuredBaseUrl === "string" && configuredBaseUrl !== ""
++        ? configuredBaseUrl
++        : model?.api.url
++    if (typeof baseUrl !== "string" || baseUrl === "") return null
++
++    // Ping the origin only — avoids 404 from appended paths and minimizes
++    // server-side processing so the measurement reflects pure network RTT.
++    return new URL(baseUrl).origin
++  })
++
++  const [latency, setLatency] = createSignal<number | null>(null)
++  const [pingStatus, setPingStatus] = createSignal<"ok" | "down" | "init">("init")
++  const [isProxy, setIsProxy] = createSignal<boolean>(false)
++
++  createEffect(on(targetApiUrl, (url) => {
++    if (!url) {
++      setLatency(null)
++      setPingStatus("init")
++      setIsProxy(false)
++      return
++    }
++
++    let active = true
++    let timer: ReturnType<typeof setTimeout> | undefined
++    const ping = async () => {
++      if (!active) return
++
++      const t0 = Date.now()
++      try {
++        const route = await NetworkProxy.resolveProxyRoute(url, "provider")
++        if (!active) return
++        setIsProxy(route.type === "proxy")
++
++        const res = await NetworkProxy.routedFetch(url, {
++          method: "HEAD",
++          signal: AbortSignal.timeout(3000),
++          purpose: "provider",
++        } as RequestInit)
++        const elapsed = Date.now() - t0
++        if (!active) return
++
++        if (res.status === 502 || res.status === 503 || res.status === 504) {
++          setPingStatus("down")
++          setLatency(null)
++        } else {
++          setPingStatus("ok")
++          setLatency(elapsed)
++        }
++      } catch (err: any) {
++        if (active) {
++          setPingStatus("down")
++          setLatency(null)
++        }
++      }
++      if (active) timer = setTimeout(ping, PING_INTERVAL)
++    }
++
++    ping()
++
++    onCleanup(() => {
++      active = false
++      if (timer) clearTimeout(timer)
++    })
++  }))
++
++  const latencyDisplay = createMemo(() => {
++    const icon = isProxy() ? "🌐" : "⚡"
++    if (pingStatus() === "init") return { text: `${icon} ...`, fg: theme().textMuted }
++    if (pingStatus() === "down") return { text: `${icon} offline`, fg: theme().error }
++    const l = latency()!
++    const fg = l < 300 ? theme().success : l < 800 ? theme().warning : theme().error
++    return { text: `${icon} ${l}ms`, fg }
++  })
++
+   return (
+     <box>
+       <text fg={theme().text}>
+@@ -97,11 +183,17 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
+       </text>
+       <text fg={theme().textMuted}>
+         {state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens
++        {state().percent != null ? ` · ${state().percent}%` : ""}
+       </text>
+       <text fg={theme().textMuted}>
+-        {state().percent != null ? `${state().percent}% of ctx limit` : "—"}
++        {money.format(state().cost)} spent
++        {targetApiUrl() && (
++          <>
++            {" · "}
++            <span style={{ fg: latencyDisplay().fg }}>{latencyDisplay().text}</span>
++          </>
++        )}
+       </text>
+-      <text fg={theme().textMuted}>{money.format(state().cost)} spent</text>
+     </box>
+   )
+ }
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index f3d40a1346fefc1f0f949d2061ea7221e29d067f..fa2195586fe88a25e46bbbe93e8ec69ee0c3547a 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -32,6 +32,15 @@ import { ModelID, ProviderID } from "./schema"
+ 
+ const log = Log.create({ service: "provider" })
+ const DEFAULT_TIMEOUT_MS = 300_000
++const SDK_DEFAULT_API_URL: Record<string, string> = {
++  "@ai-sdk/anthropic": "https://api.anthropic.com/v1",
++  "@ai-sdk/google": "https://generativelanguage.googleapis.com/v1beta",
++  "@ai-sdk/openai": "https://api.openai.com/v1",
++}
++
++function apiUrl(input: { npm?: string; api?: string }) {
++  return input.api ?? (input.npm ? SDK_DEFAULT_API_URL[input.npm] : undefined) ?? ""
++}
+ 
+ function shouldUseCopilotResponsesApi(modelID: string): boolean {
+   const match = /^gpt-(\d+)/.exec(modelID)
+@@ -1014,6 +1023,7 @@ function cost(c: ModelsDev.Model["cost"]): Model["cost"] {
+ }
+ 
+ function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model): Model {
++  const npm = model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible"
+   const base: Model = {
+     id: ModelID.make(model.id),
+     providerID: ProviderID.make(provider.id),
+@@ -1021,8 +1031,8 @@ function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model
+     family: model.family,
+     api: {
+       id: model.id,
+-      url: model.provider?.api ?? provider.api ?? "",
+-      npm: model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible",
++      url: apiUrl({ npm, api: model.provider?.api ?? provider.api }),
++      npm,
+     },
+     status: model.status ?? "active",
+     headers: {},
+@@ -1210,7 +1220,10 @@ const layer: Layer.Layer<
+                 ...model.api,
+                 // If new provider specifies npm/api, use them
+                 npm: provider.npm ?? model.api.npm,
+-                url: provider.api ?? model.api.url,
++                url: apiUrl({
++                  npm: provider.npm ?? model.api.npm,
++                  api: provider.api ?? model.api.url,
++                }),
+               },
+             }
+           }
+@@ -1246,7 +1259,10 @@ const layer: Layer.Layer<
+               api: {
+                 id: apiID,
+                 npm: apiNpm,
+-                url: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[lookupProviderID]?.api ?? "",
++                url: apiUrl({
++                  npm: apiNpm,
++                  api: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[lookupProviderID]?.api,
++                }),
+               },
+               status: model.status ?? existingModel?.status ?? "active",
+               name,

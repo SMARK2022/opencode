@@ -1,0 +1,651 @@
+From ad4e0d983c19c5dd226ac045233c497039116d04 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Thu, 28 May 2026 00:50:15 +0800
+Subject: [PATCH] =?UTF-8?q?feat(compaction):=20=E9=87=8D=E6=9E=84=E4=BC=9A?=
+ =?UTF-8?q?=E8=AF=9D=E5=8E=8B=E7=BC=A9=E9=80=BB=E8=BE=91=EF=BC=8C=E4=BC=98?=
+ =?UTF-8?q?=E5=8C=96=E7=8A=B6=E6=80=81=E7=AE=A1=E7=90=86=E5=92=8C=E9=94=99?=
+ =?UTF-8?q?=E8=AF=AF=E5=A4=84=E7=90=86=EF=BC=8C=E6=B7=BB=E5=8A=A0=E6=96=B0?=
+ =?UTF-8?q?=E7=9A=84=E5=8E=8B=E7=BC=A9=E6=8E=A5=E5=8F=A3?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
+index 21edccdba674e9d21bb262de30e1974ee25de99c..00ccf4b8a8f8c6d4758649eaeb00ca69d2d76a29 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
+@@ -7,7 +7,6 @@ import { PermissionID } from "@/permission/schema"
+ import { SessionRequestUsage } from "@/session/request-usage"
+ import { SessionShare } from "@/share/session"
+ import { Session } from "@/session/session"
+-import { SessionCompaction } from "@/session/compaction"
+ import { MessageV2 } from "@/session/message-v2"
+ import { SessionPrompt } from "@/session/prompt"
+ import { SessionRevert } from "@/session/revert"
+@@ -50,7 +49,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+     const shareSvc = yield* SessionShare.Service
+     const promptSvc = yield* SessionPrompt.Service
+     const revertSvc = yield* SessionRevert.Service
+-    const compactSvc = yield* SessionCompaction.Service
+     const runState = yield* SessionRunState.Service
+     const agentSvc = yield* Agent.Service
+     const permissionSvc = yield* Permission.Service
+@@ -260,21 +258,29 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       params: { sessionID: SessionID }
+       payload: typeof SummarizePayload.Type
+     }) {
++      // Reject busy sessions before revert cleanup or model selection so a
++      // manual compact cannot mutate session state and then no-op behind an
++      // already-running prompt.
++      yield* SessionError.mapBusy(runState.assertNotBusy(ctx.params.sessionID))
+       yield* revertSvc.cleanup(yield* requireSession(ctx.params.sessionID))
+       const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
+       const defaultAgent = yield* agentSvc.defaultAgent()
+       const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
+ 
+-      yield* compactSvc.create({
+-        sessionID: ctx.params.sessionID,
+-        agent: currentAgent,
+-        model: {
+-          providerID: ctx.payload.providerID,
+-          modelID: ctx.payload.modelID,
+-        },
+-        auto: ctx.payload.auto ?? false,
+-      })
+-      yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
++      // Summarize executes compaction directly through SessionPrompt so the
++      // runner owns cancellation and no pending compact command is left in
++      // history for a later request to replay.
++      yield* SessionError.mapBusy(
++        promptSvc.compact({
++          sessionID: ctx.params.sessionID,
++          agent: currentAgent,
++          model: {
++            providerID: ctx.payload.providerID,
++            modelID: ctx.payload.modelID,
++          },
++          auto: ctx.payload.auto ?? false,
++        }),
++      )
+       return true
+     })
+ 
+diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
+index 0f83abae4b1d88f71cbd4b43a5e25cc05fb817fb..b34bd38e7186bf1a245a3adcc3e3a2e07edfb595 100644
+--- a/packages/opencode/src/session/compaction.ts
++++ b/packages/opencode/src/session/compaction.ts
+@@ -12,7 +12,7 @@ import { Plugin } from "@/plugin"
+ import { Config } from "@/config/config"
+ import { NotFoundError } from "@/storage/storage"
+ import { ModelID, ProviderID } from "@/provider/schema"
+-import { Effect, Layer, Context, Option, Schema } from "effect"
++import { Effect, Layer, Context, Option, Schema, Exit } from "effect"
+ import * as DateTime from "effect/DateTime"
+ import { InstanceState } from "@/effect/instance-state"
+ import { isOverflow as overflow, usable } from "./overflow"
+@@ -208,6 +208,13 @@ export interface Interface {
+     model: Provider.Model
+   }) => Effect.Effect<boolean>
+   readonly prune: (input: { sessionID: SessionID }) => Effect.Effect<void>
++  readonly run: (input: {
++    sessionID: SessionID
++    agent: string
++    model: { providerID: ProviderID; modelID: ModelID }
++    auto: boolean
++    overflow?: boolean
++  }) => Effect.Effect<"continue" | "stop">
+   readonly process: (input: {
+     parentID: MessageID
+     messages: MessageV2.WithParts[]
+@@ -221,7 +228,7 @@ export interface Interface {
+     model: { providerID: ProviderID; modelID: ModelID }
+     auto: boolean
+     overflow?: boolean
+-  }) => Effect.Effect<void>
++  }) => Effect.Effect<MessageV2.User>
+ }
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/SessionCompaction") {}
+@@ -671,6 +678,10 @@ export const layer = Layer.effect(
+       auto: boolean
+       overflow?: boolean
+     }) {
++      // The user marker is written before the summary assistant so streaming and
++      // legacy tests can observe the same persisted boundary shape. It remains
++      // scratch state until processCompaction writes a successful summary; prompt
++      // consumers deliberately ignore incomplete markers.
+       const msg = yield* session.updateMessage({
+         id: MessageID.ascending(),
+         role: "user",
+@@ -694,11 +705,79 @@ export const layer = Layer.effect(
+           reason: input.auto ? "auto" : "manual",
+         })
+       }
++      return msg
++    })
++
++    const hideIncomplete = Effect.fn("SessionCompaction.hideIncomplete")(function* (input: {
++      sessionID: SessionID
++      parentID: MessageID
++    }) {
++      // Interrupts can happen after the scratch marker is visible but before the
++      // summary request starts. Hide only this compaction pair, and only if no
++      // successful summary exists, so completed boundaries keep anchoring history.
++      const messages = yield* session
++        .messages({ sessionID: input.sessionID })
++        .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([] as MessageV2.WithParts[])))
++      const completed = messages.some(
++        (msg) =>
++          msg.info.role === "assistant" &&
++          msg.info.parentID === input.parentID &&
++          msg.info.summary &&
++          msg.info.finish &&
++          !msg.info.error,
++      )
++      if (completed) return
++      const now = Date.now()
++      for (const msg of messages) {
++        const marker = msg.info.id === input.parentID && msg.parts.some((part) => part.type === "compaction")
++        const summary = msg.info.role === "assistant" && msg.info.parentID === input.parentID && msg.info.summary
++        if (!marker && !summary) continue
++        const next = {
++          ...msg.info,
++          hidden: { time: now, reason: "compaction-cancelled" as const },
++        }
++        if (next.role === "assistant" && !next.time.completed) {
++          next.time.completed = now
++          next.error ??= new MessageV2.AbortedError({ message: "Aborted by compact cancellation" }).toObject()
++        }
++        yield* session.updateMessage(next)
++      }
++    })
++
++    const run = Effect.fn("SessionCompaction.run")(function* (input: {
++      sessionID: SessionID
++      agent: string
++      model: { providerID: ProviderID; modelID: ModelID }
++      auto: boolean
++      overflow?: boolean
++    }) {
++      let parentID: MessageID | undefined
++      return yield* Effect.gen(function* () {
++        const msg = yield* create(input)
++        parentID = msg.id
++        return yield* processCompaction({
++          parentID: msg.id,
++          messages: yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie),
++          sessionID: input.sessionID,
++          auto: input.auto,
++          overflow: input.overflow,
++        })
++      }).pipe(
++        Effect.onExit((exit) => {
++          // Compact markers are scratch state until a successful summary assistant
++          // exists. Interrupt cleanup keeps visible history tidy for Ctrl-C/abort,
++          // while MessageV2.filterCompacted remains the correctness guard for hard
++          // process exits where finalizers cannot run.
++          if (Exit.isSuccess(exit) || !parentID) return Effect.void
++          return hideIncomplete({ sessionID: input.sessionID, parentID })
++        }),
++      )
+     })
+ 
+     return Service.of({
+       isOverflow,
+       prune,
++      run,
+       process: processCompaction,
+       create,
+     })
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index a58643aa9609ff93c397cab95315a677dd6cc379..05ab443a37dc4715a55fcdefb797afb6a21c51b4 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -69,11 +69,19 @@ export { isMedia }
+ // Hidden messages remain persisted for audit/recovery, but are removed from
+ // normal prompt replay and visible history. Each reason names the workflow that
+ // owns the invisibility boundary: undo hides reverted turns, repair hides empty
+-// dangling assistants, and permission-reviewer protocol retry hides malformed
+-// reviewer attempts before the same permission request is retried once.
++// dangling assistants, permission-reviewer protocol retry hides malformed
++// reviewer attempts before the same permission request is retried once, and
++// compaction-cancelled hides scratch compact markers that never became a
++// completed summary boundary. The last case must stay distinct from undo so a
++// cancelled maintenance operation cannot be mistaken for user-request rollback.
+ const Hidden = Schema.Struct({
+   time: NonNegativeInt,
+-  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant", "permission-reviewer-protocol-retry"]),
++  reason: Schema.Literals([
++    "undo",
++    "repair-empty-dangling-assistant",
++    "permission-reviewer-protocol-retry",
++    "compaction-cancelled",
++  ]),
+ })
+ 
+ // OutputLengthError is re-exported from ./message-error above
+@@ -1136,10 +1144,13 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
+   const completed = new Set<string>()
+   let retain: MessageID | undefined
+   // Hidden messages can still be structural compaction anchors, but they must
+-  // never be replayed to providers after undo/repair.  Keep them during the
+-  // boundary walk and strip them only from the returned prompt window.
++  // never be replayed to providers after undo/repair. Keep them during the
++  // boundary walk and strip them only from the returned prompt window. A
++  // compaction marker is replayable only after a successful summary exists;
++  // dangling markers are maintenance scratch state and would otherwise revive a
++  // stale compact or inject "What did we do so far?" into later user prompts.
+   const visible = (items: WithParts[]) =>
+-    items
++    visibleCompactions(items)
+       .filter((msg) => !msg.info.hidden)
+       .map((msg) => ({
+         ...msg,
+@@ -1159,8 +1170,6 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
+       if (msg.info.id === retain) break
+       continue
+     }
+-    if (msg.info.role === "user" && completed.has(msg.info.id) && msg.parts.some((part) => part.type === "compaction"))
+-      break
+     if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error) {
+       completed.add(msg.info.parentID)
+     }
+@@ -1195,6 +1204,35 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
+   return visible(result)
+ }
+ 
++function visibleCompactions(items: WithParts[]) {
++  // Only a user(compaction) paired with a finished, non-errored summary assistant
++  // is a durable boundary. Failed or abandoned markers are local maintenance
++  // debris: keep unrelated messages, but remove the marker/summary pair before
++  // prompt replay and latest-task detection see it.
++  const compactions = new Set(
++    items
++      .filter((msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction"))
++      .map((msg) => msg.info.id),
++  )
++  const completed = new Set(
++    items.flatMap((msg): MessageID[] => {
++      if (msg.info.role !== "assistant") return []
++      if (!msg.info.summary || !msg.info.finish || msg.info.error) return []
++      if (!compactions.has(msg.info.parentID)) return []
++      return [msg.info.parentID]
++    }),
++  )
++  return items.filter((msg) => {
++    if (msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction")) {
++      return completed.has(msg.info.id)
++    }
++    if (msg.info.role === "assistant" && msg.info.summary && compactions.has(msg.info.parentID)) {
++      return completed.has(msg.info.parentID)
++    }
++    return true
++  })
++}
++
+ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
+   return filterCompacted(stream(sessionID))
+ })
+@@ -1203,9 +1241,9 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
+ // ([compaction-user, summary, ...retained tail..., continue-user]), so array
+ // position is not chronological. Derive each binding by max id (MessageID
+ // is monotonic via MessageID.ascending) so a pre-compaction overflowing tail
+-// assistant doesn't get mistaken for the most recent turn. tasks are
+-// compaction/subtask parts attached to user messages newer than the latest
+-// finished assistant — i.e. unprocessed work.
++// assistant doesn't get mistaken for the most recent turn. Compaction is not a
++// replayable task anymore: producers run it directly, and consumers only keep
++// completed boundaries, which prevents stale compact markers from restarting.
+ export function latest(msgs: WithParts[]) {
+   let user: User | undefined
+   let assistant: Assistant | undefined
+@@ -1219,7 +1257,7 @@ export function latest(msgs: WithParts[]) {
+   const tasks = msgs.flatMap((m) =>
+     finished && m.info.id <= finished.id
+       ? []
+-      : m.parts.filter((p): p is CompactionPart | SubtaskPart => p.type === "compaction" || p.type === "subtask"),
++      : m.parts.filter((p): p is SubtaskPart => p.type === "subtask"),
+   )
+   return { user, assistant, finished, tasks }
+ }
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 5c5d133a8ce51ba59095a1fd891bed06e3be6257..423361b4531fb8ffd96f462581776a1ee01be389 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -297,6 +297,13 @@ export interface Interface {
+   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+   readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts, Image.Error>
+   readonly loop: (input: LoopInput) => Effect.Effect<MessageV2.WithParts>
++  readonly compact: (input: {
++    sessionID: SessionID
++    agent: string
++    model: { providerID: ProviderID; modelID: ModelID }
++    auto?: boolean
++    overflow?: boolean
++  }) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
+   readonly shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts, Session.BusyError>
+   readonly command: (input: CommandInput) => Effect.Effect<MessageV2.WithParts, Image.Error>
+   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
+@@ -1928,6 +1935,34 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+       throw new Error("Impossible")
+     })
+ 
++    const compact: Interface["compact"] = Effect.fn("SessionPrompt.compact")(function* (input) {
++      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
++      // Runner.ensureRunning joins an existing prompt instead of queueing new
++      // work. Compact must reject busy sessions explicitly so the caller sees a
++      // real busy response rather than a successful no-op, while still avoiding
++      // the old persisted pending-marker queue.
++      yield* state.assertNotBusy(input.sessionID)
++      yield* revert.cleanup(session)
++      return yield* state.ensureRunning(
++        input.sessionID,
++        lastAssistant(input.sessionID),
++        Effect.gen(function* () {
++          // Manual compact uses the same runner/cancel boundary as normal prompts,
++          // but it invokes the producer directly. The persisted compaction marker
++          // is therefore a completed boundary only, never a queued command that a
++          // future loop can pick up from stale history.
++          yield* compaction.run({
++            sessionID: input.sessionID,
++            agent: input.agent,
++            model: input.model,
++            auto: input.auto ?? false,
++            overflow: input.overflow,
++          })
++          return yield* lastAssistant(input.sessionID)
++        }),
++      )
++    })
++
+     const selectDecideMessages = Effect.fn("SessionPrompt.selectDecideMessages")(function* (input: {
+       messages: MessageV2.WithParts[]
+       model: Provider.Model
+@@ -2025,27 +2060,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             continue
+           }
+ 
+-          if (task?.type === "compaction") {
+-            const result = yield* compaction.process({
+-              messages: msgs,
+-              parentID: lastUser.id,
+-              sessionID,
+-              auto: task.auto,
+-              overflow: task.overflow,
+-            })
+-            if (result === "stop") break
+-            // Manual compaction is a terminal maintenance action: the user asked only
+-            // to rewrite history into a summary.  After compaction, filterCompacted()
+-            // intentionally appends the retained tail after the summary so the next
+-            // model request can still see recent context.  If we immediately loop
+-            // again for a manual compaction, that retained tail can look like the
+-            // newest build turn and resume old tool-call work without a user prompt.
+-            // Auto-compaction keeps looping because it may have created an explicit
+-            // synthetic follow-up message to continue the interrupted request.
+-            if (!task.auto) break
+-            continue
+-          }
+-
+           const agent = yield* agents.get(lastUser.agent)
+           if (!agent) {
+             const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
+@@ -2257,12 +2271,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                 model,
+               })
+             ) {
+-              yield* compaction.create({
++              // Auto-compaction is executed directly instead of queued as a
++              // history task. This keeps the producer side from persisting a
++              // stale compact command that a later prompt or undo could replay.
++              const compacted = yield* compaction.run({
+                 sessionID,
+                 agent: lastUser.agent,
+                 model: lastUser.model,
+                 auto: true,
+               })
++              if (compacted === "stop") return "break" as const
+               return "continue" as const
+             }
+             handle.message.tokens.input = estimatedInput
+@@ -2310,13 +2328,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+ 
+             if (result === "stop") return "break" as const
+             if (result === "compact") {
+-              yield* compaction.create({
++              // Provider overflow happens after a real assistant attempt, so run
++              // compaction immediately against the current session snapshot rather
++              // than leaving a replayable marker behind for the next loop pass.
++              const compacted = yield* compaction.run({
+                 sessionID,
+                 agent: lastUser.agent,
+                 model: lastUser.model,
+                 auto: true,
+                 overflow: !handle.message.finish,
+               })
++              if (compacted === "stop") return "break" as const
+             }
+             return "continue" as const
+           }).pipe(
+@@ -2467,6 +2489,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+       cancel,
+       prompt,
+       loop,
++      compact,
+       shell,
+       command,
+       resolvePromptParts,
+diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
+index bb9fe1d76868a388ed5f27d53cdde4107c31672f..3157038806a9de3968dce2f15b4679926124a488 100644
+--- a/packages/opencode/test/session/compaction.test.ts
++++ b/packages/opencode/test/session/compaction.test.ts
+@@ -830,6 +830,69 @@ describe("session.compaction.prune", () => {
+ })
+ 
+ describe("session.compaction.process", () => {
++  itCompaction.instance(
++    "runs compaction as a completed boundary without a runnable task",
++    () => {
++      const stub = llm()
++      stub.push(reply("summary"))
++      return Effect.gen(function* () {
++        const ssn = yield* SessionNs.Service
++        const session = yield* ssn.create({})
++        yield* createUserMessage(session.id, "hello")
++
++        const result = yield* SessionCompaction.use.run({
++          sessionID: session.id,
++          agent: "build",
++          model: ref,
++          auto: false,
++        })
++
++        const filtered = MessageV2.filterCompacted(MessageV2.stream(session.id))
++        const latest = MessageV2.latest(filtered)
++
++        expect(result).toBe("continue")
++        expect(filtered.some((msg) => msg.info.role === "assistant" && msg.info.summary)).toBe(true)
++        expect(
++          filtered.some((msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction")),
++        ).toBe(true)
++        expect(latest.tasks).toEqual([])
++      }).pipe(withCompaction({ llm: stub.layer }))
++    },
++    { git: true },
++  )
++
++  itCompaction.instance(
++    "hides visible compaction state when interrupted before summary request starts",
++    () =>
++      Effect.gen(function* () {
++        const ready = yield* Deferred.make<void>()
++        return yield* Effect.gen(function* () {
++          const ssn = yield* SessionNs.Service
++          const session = yield* ssn.create({})
++          yield* createUserMessage(session.id, "hello")
++          const fiber = yield* SessionCompaction.use
++            .run({
++              sessionID: session.id,
++              agent: "build",
++              model: ref,
++              auto: false,
++            })
++            .pipe(Effect.forkChild)
++
++          yield* Deferred.await(ready).pipe(Effect.timeout("1 second"))
++          yield* Fiber.interrupt(fiber)
++          const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("250 millis"))
++          const all = yield* ssn.messages({ sessionID: session.id })
++
++          expect(Exit.isFailure(exit)).toBe(true)
++          if (Exit.isFailure(exit)) expect(Cause.hasInterrupts(exit.cause)).toBe(true)
++          expect(all.some((msg) => msg.parts.some((part) => part.type === "compaction"))).toBe(false)
++          expect(all.some((msg) => msg.info.role === "assistant" && msg.info.summary)).toBe(false)
++        }).pipe(withCompaction({ plugin: plugin(ready) }))
++      }),
++    { git: true },
++  )
++
+   it.instance(
+     "throws when parent is not a user message",
+     Effect.gen(function* () {
+@@ -1512,7 +1575,7 @@ describe("session.compaction.process", () => {
+         yield* createUserMessage(session.id, "latest turn")
+         yield* createCompactionMarker(session.id)
+ 
+-        msgs = MessageV2.filterCompacted(MessageV2.stream(session.id))
++        msgs = yield* ssn.messages({ sessionID: session.id })
+         parent = msgs.at(-1)?.info.id
+         expect(parent).toBeTruthy()
+         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+@@ -1548,7 +1611,7 @@ describe("session.compaction.process", () => {
+       const u4 = yield* createUserMessage(session.id, "four")
+       yield* createCompactionMarker(session.id)
+ 
+-      msgs = MessageV2.filterCompacted(MessageV2.stream(session.id))
++      msgs = yield* ssn.messages({ sessionID: session.id })
+       parent = msgs.at(-1)?.info.id
+       expect(parent).toBeTruthy()
+       yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packages/opencode/test/session/messages-pagination.test.ts
+index c538f8ce6a62e18b9cff71600e22e62fbfefb496..14494e0ae2b4dc255685a354b3e81caa5155c5b5 100644
+--- a/packages/opencode/test/session/messages-pagination.test.ts
++++ b/packages/opencode/test/session/messages-pagination.test.ts
+@@ -653,20 +653,20 @@ describe("MessageV2.filterCompacted", () => {
+     }),
+   )
+ 
+-  it.instance("does not break on compaction part without matching summary", () =>
++  it.instance("drops compaction marker without matching summary", () =>
+     withSession(({ sessionID }) =>
+       Effect.gen(function* () {
+         const u1 = yield* addUser(sessionID, "hello")
+         yield* addCompactionPart(sessionID, u1)
+-        yield* addUser(sessionID, "world")
++        const u2 = yield* addUser(sessionID, "world")
+ 
+         const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
+-        expect(result).toHaveLength(2)
++        expect(result.map((item) => item.info.id)).toEqual([u2])
+       }),
+     ),
+   )
+ 
+-  it.instance("skips assistant with error even if marked as summary", () =>
++  it.instance("drops compaction marker with errored summary", () =>
+     withSession(({ sessionID }) =>
+       Effect.gen(function* () {
+         const u1 = yield* addUser(sessionID, "hello")
+@@ -677,16 +677,15 @@ describe("MessageV2.filterCompacted", () => {
+           isRetryable: true,
+         }).toObject() as MessageV2.Assistant["error"]
+         yield* addAssistant(sessionID, u1, { summary: true, finish: "end_turn", error })
+-        yield* addUser(sessionID, "retry")
++        const retry = yield* addUser(sessionID, "retry")
+ 
+         const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
+-        // Error assistant doesn't add to completed, so compaction boundary never triggers
+-        expect(result).toHaveLength(3)
++        expect(result.map((item) => item.info.id)).toEqual([retry])
+       }),
+     ),
+   )
+ 
+-  it.instance("skips assistant without finish even if marked as summary", () =>
++  it.instance("drops compaction marker with unfinished summary", () =>
+     withSession(({ sessionID }) =>
+       Effect.gen(function* () {
+         const u1 = yield* addUser(sessionID, "hello")
+@@ -694,10 +693,25 @@ describe("MessageV2.filterCompacted", () => {
+ 
+         // summary=true but no finish
+         yield* addAssistant(sessionID, u1, { summary: true })
+-        yield* addUser(sessionID, "next")
++        const next = yield* addUser(sessionID, "next")
+ 
+         const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
+-        expect(result).toHaveLength(3)
++        expect(result.map((item) => item.info.id)).toEqual([next])
++      }),
++    ),
++  )
++
++  it.instance("does not expose incomplete compaction as a runnable task", () =>
++    withSession(({ sessionID }) =>
++      Effect.gen(function* () {
++        const u1 = yield* addUser(sessionID, "hello")
++        yield* addCompactionPart(sessionID, u1)
++        const u2 = yield* addUser(sessionID, "world")
++
++        const result = MessageV2.latest(MessageV2.filterCompacted(MessageV2.stream(sessionID)))
++
++        expect(result.user?.id).toBe(u2)
++        expect(result.tasks).toEqual([])
+       }),
+     ),
+   )
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index cee22baa9493fdad3ed7ad796f9b1a8565b19c0d..a3de60b7ef96819a0b12dc6cf24253936671601c 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -2002,6 +2002,40 @@ it.instance(
+   { git: true },
+ )
+ 
++it.instance(
++  "compact rejects with BusyError when loop running",
++  () =>
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig(providerCfg)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      yield* llm.hang
++
++      const chat = yield* sessions.create({})
++      yield* user(chat.id, "hi")
++
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
++      yield* llm.wait(1)
++
++      const exit = yield* prompt
++        .compact({ sessionID: chat.id, agent: "build", model: ref })
++        .pipe(Effect.timeout("250 millis"), Effect.exit)
++      const messages = yield* sessions.messages({ sessionID: chat.id })
++
++      expect(Exit.isFailure(exit)).toBe(true)
++      if (Exit.isFailure(exit)) {
++        expect(Cause.squash(exit.cause)).toBeInstanceOf(Session.BusyError)
++        expect(Cause.squash(exit.cause)).toMatchObject({ _tag: "SessionBusyError", sessionID: chat.id })
++      }
++      expect(messages.some((msg) => msg.parts.some((part) => part.type === "compaction"))).toBe(false)
++
++      yield* prompt.cancel(chat.id)
++      yield* Fiber.await(fiber)
++    }),
++  { git: true },
++  3_000,
++)
++
+ // Shell semantics
+ 
+ it.instance(

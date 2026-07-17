@@ -1,0 +1,234 @@
+From 2c720138d3397839f61349a04ba4d9b5d0a43372 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 18 May 2026 22:14:06 +0800
+Subject: [PATCH] feat(provider): add support for custom HTTP headers and
+ User-Agent handling
+
+
+diff --git a/packages/opencode/src/config/provider.ts b/packages/opencode/src/config/provider.ts
+index 70688ed56aac2ac0b3df612749c5f67aafe30a17..cab587d08f75d7c7da54c5d28a1da3352482ab0f 100644
+--- a/packages/opencode/src/config/provider.ts
++++ b/packages/opencode/src/config/provider.ts
+@@ -84,6 +84,12 @@ export const Info = Schema.Struct({
+       Schema.Struct({
+         apiKey: Schema.optional(Schema.String),
+         baseURL: Schema.optional(Schema.String),
++        headers: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({
++          description: "Additional HTTP headers to send to this provider.",
++        }),
++        "header-ua": Schema.optional(Schema.String).annotate({
++          description: "Shortcut for setting the provider request User-Agent header.",
++        }),
+         version: Schema.optional(Schema.String).annotate({
+           description: "Provider-specific client version override, used by custom providers like claudecode",
+         }),
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index 39fc994022f37d82c868fc8cb478b08abfd89820..b32e5a8ff2e1fcfa2f5972a37f6b4400fac67a83 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -43,6 +43,32 @@ function apiUrl(input: { npm?: string; api?: string }) {
+   return input.api ?? (input.npm ? SDK_DEFAULT_API_URL[input.npm] : undefined) ?? ""
+ }
+ 
++export function requestHeaders(options: Readonly<Record<string, unknown>>) {
++  const userAgent = requestUserAgent(options)
++  const headers = options.headers
++  const base =
++    headers && typeof headers === "object" && !Array.isArray(headers)
++      ? Object.fromEntries(
++          Object.entries(headers).filter(
++            (entry): entry is [string, string] => entry[0].toLowerCase() !== "user-agent" && typeof entry[1] === "string",
++          ),
++        )
++      : {}
++  if (!userAgent) return base
++  return { ...base, "User-Agent": userAgent }
++}
++
++export function requestUserAgent(options: Readonly<Record<string, unknown>>) {
++  const headers = options.headers
++  const headerUserAgent =
++    headers && typeof headers === "object" && !Array.isArray(headers)
++      ? Object.entries(headers).find(
++          (entry): entry is [string, string] => entry[0].toLowerCase() === "user-agent" && typeof entry[1] === "string",
++        )?.[1]
++      : undefined
++  return headerUserAgent ?? (typeof options["header-ua"] === "string" ? options["header-ua"] : undefined)
++}
++
+ function shouldUseCopilotResponsesApi(modelID: string): boolean {
+   const match = /^gpt-(\d+)/.exec(modelID)
+   if (!match) return false
+@@ -1715,6 +1741,10 @@ export const layer = Layer.effect(
+             ...options["headers"],
+             ...model.headers,
+           }
++        const configuredHeaders = requestHeaders(options)
++        if (Object.keys(configuredHeaders).length > 0) options["headers"] = configuredHeaders
++        const configuredUserAgent = requestUserAgent(options)
++        delete options["header-ua"]
+ 
+         const key = Hash.fast(
+           JSON.stringify({
+@@ -1743,6 +1773,13 @@ export const layer = Layer.effect(
+           const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
+           if (combined) opts.signal = combined
+ 
++          if (configuredUserAgent) {
++            const headers = new Headers(opts.headers)
++            const currentUserAgent = headers.get("user-agent") ?? ""
++            if (!currentUserAgent || currentUserAgent.startsWith(configuredUserAgent)) headers.set("User-Agent", configuredUserAgent)
++            opts.headers = headers
++          }
++
+           // Strip openai itemId metadata following what codex does
+           if (
+             (model.api.npm === "@ai-sdk/openai" || model.api.npm === "@ai-sdk/azure") &&
+diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
+index 9e9e1d835b14de8a6996c22d20e95d1233b59ac6..2c9693c525b56dc45a4920cd699c2dda468c20ca 100644
+--- a/packages/opencode/src/session/llm.ts
++++ b/packages/opencode/src/session/llm.ts
+@@ -375,6 +375,7 @@ const live: Layer.Layer<
+                 ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+                 "User-Agent": `opencode/${InstallationVersion}`,
+               }),
++          ...Provider.requestHeaders(item.options),
+           ...input.model.headers,
+           ...headers,
+         },
+diff --git a/packages/opencode/test/provider/provider.test.ts b/packages/opencode/test/provider/provider.test.ts
+index 7fd2dd657fec6147f3287c1838a330aa8f27f20b..ede52b838cb97046f6e4355a8b3e89b5f333c02b 100644
+--- a/packages/opencode/test/provider/provider.test.ts
++++ b/packages/opencode/test/provider/provider.test.ts
+@@ -1891,6 +1891,27 @@ test("provider options are deeply merged", async () => {
+   })
+ })
+ 
++test("provider header-ua maps to request headers", () => {
++  expect(Provider.requestHeaders({ "header-ua": "codex_cli_rs/0.2333" })).toEqual({
++    "User-Agent": "codex_cli_rs/0.2333",
++  })
++})
++
++test("provider headers User-Agent overrides header-ua shortcut", () => {
++  expect(
++    Provider.requestHeaders({
++      "header-ua": "shortcut",
++      headers: {
++        "User-Agent": "codex_cli_rs/0.2333",
++        "X-Custom": "custom-value",
++      },
++    }),
++  ).toEqual({
++    "X-Custom": "custom-value",
++    "User-Agent": "codex_cli_rs/0.2333",
++  })
++})
++
+ test("hosted nvidia provider adds billing origin header", async () => {
+   await using tmp = await tmpdir({
+     init: async (dir) => {
+diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
+index a0227c55b80206796821def4d89a606904a6fb75..130d31ae8c066945c93d743142122d52b3c109ef 100644
+--- a/packages/opencode/test/session/llm.test.ts
++++ b/packages/opencode/test/session/llm.test.ts
+@@ -321,6 +321,99 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
+ }
+ 
+ describe("session.llm.stream", () => {
++  for (const item of [
++    { name: "options.headers.User-Agent", options: { headers: { "User-Agent": "codex_cli_rs/0.2333" } } },
++    { name: "options.header-ua", options: { "header-ua": "codex_cli_rs/0.2333" } },
++  ]) {
++    test(`uses configured provider ${item.name} for request user agent`, async () => {
++      const server = state.server
++      if (!server) throw new Error("Server not initialized")
++
++      const providerID = `daxiao-codex-${item.name.includes("headers") ? "headers" : "shortcut"}`
++      const request = waitRequest(
++        "/chat/completions",
++        new Response(createChatStream("Hello"), {
++          status: 200,
++          headers: { "Content-Type": "text/event-stream" },
++        }),
++      )
++
++      await using tmp = await tmpdir({
++        init: async (dir) => {
++          await Bun.write(
++            path.join(dir, "opencode.json"),
++            JSON.stringify({
++              $schema: "https://opencode.ai/config.json",
++              enabled_providers: [providerID],
++              provider: {
++                [providerID]: {
++                  npm: "@ai-sdk/openai-compatible",
++                  name: "DaXiao Codex",
++                  options: {
++                    apiKey: "test-key",
++                    baseURL: `${server.url.origin}/v1`,
++                    ...item.options,
++                  },
++                  models: {
++                    "gpt-5.5": {
++                      name: "GPT-5.5",
++                      limit: {
++                        context: 400000,
++                        input: 272000,
++                        output: 128000,
++                      },
++                      modalities: {
++                        input: ["text", "image"],
++                        output: ["text"],
++                      },
++                    },
++                  },
++                },
++              },
++            }),
++          )
++        },
++      })
++
++      await withTestInstance({
++        directory: tmp.path,
++        fn: async (ctx) => {
++          const resolved = await getModel(ProviderID.make(providerID), ModelID.make("gpt-5.5"), ctx)
++          const sessionID = SessionID.make(`session-test-${providerID}`)
++          const agent = {
++            name: "test",
++            mode: "primary",
++            options: {},
++            permission: [{ permission: "*", pattern: "*", action: "allow" }],
++          } satisfies Agent.Info
++          const user = {
++            id: MessageID.make(`msg_user-${providerID}`),
++            sessionID,
++            role: "user",
++            time: { created: Date.now() },
++            agent: agent.name,
++            model: { providerID: ProviderID.make(providerID), modelID: resolved.id },
++          } satisfies MessageV2.User
++
++          await drain(
++            {
++              user,
++              sessionID,
++              model: resolved,
++              agent,
++              system: ["You are a helpful assistant."],
++              messages: [{ role: "user", content: "Hello" }],
++              tools: {},
++            },
++            ctx,
++          )
++
++          expect((await request).headers.get("user-agent")).toBe("codex_cli_rs/0.2333")
++        },
++      })
++    })
++  }
++
+   test("sends temperature, tokens, and reasoning options for openai-compatible models", async () => {
+     const server = state.server
+     if (!server) {

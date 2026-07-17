@@ -1,0 +1,382 @@
+From 92f6a2f56ae055340d9190dacfd2f2b631ce1b67 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Tue, 7 Jul 2026 20:08:06 +0800
+Subject: [PATCH] =?UTF-8?q?fix(session):=20=E6=A3=80=E6=B5=8B=20provider?=
+ =?UTF-8?q?=20=E7=A9=BA=E5=AE=8C=E6=88=90=E9=98=B2=E6=AD=A2=20agent=20loop?=
+ =?UTF-8?q?=20=E6=97=A0=E6=84=8F=E4=B9=89=E5=BE=AA=E7=8E=AF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+GLM-5.2 在大上下文下返回 finish_reason=network_error（AI SDK 映射为 other），
+HTTP 200 + SSE 正常关闭但无 content/reasoning/tool delta。processor 把这种空
+完成当成正常结束写入 DB，active goal 继续注入 system_continue 形成循环。
+
+processor.ts finish-step 在设置 assistantMessage.finish 之前检测：finishReason
+为 other 且本轮无 text/reasoning/tool 输出时抛出 retryable APIError。retry 成功
+则正常完成，耗尽则 halt 设 error → process 返回 stop → loop break。
+
+message-v2.ts fromError 添加 APIError 透传 case，避免已分类的 APIError 被降级
+为不可重试的 UnknownError。prompt.ts goal continuation 增加 !lastAssistant.error
+防御性检查。
+
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index 38ca2381fbe01e0ff8f1d1f7e69fec8b4b336a1c..31ff1bcb05d89cb4d7e381488be35d0f54c246da 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -1449,6 +1449,11 @@ export function fromError(
+         },
+         { cause: e },
+       ).toObject()
++    case APIError.isInstance(e):
++      // [local-smark] 已分类的 APIError 直接透传，避免被降级为 UnknownError。
++      // 触发场景：processor.ts finish-step 检测到 provider 空完成时抛出 APIError，
++      // fromError 必须保持其 isRetryable 分类，否则 SessionRetry 不会重试。
++      return e.toObject()
+     case e instanceof Error:
+       return new NamedError.Unknown({ message: errorMessage(e) }, { cause: e }).toObject()
+     default:
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index 7bd87a7a6381381d17aa9cda01f0245860854f7d..ec81e086202550efee014e857261f68a65918ee3 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -97,6 +97,14 @@ interface ProcessorContext extends Input {
+   reasoningMap: Record<string, MessageV2.ReasoningPart>
+   inputChars: number | undefined
+   inputBreakdown: MessageV2.StepFinishPart["inputBreakdown"]
++  // [local-smark] 追踪当前 step 是否产生了语义输出（text/reasoning/tool）。
++  // 在 finish-step 时用于检测 provider 空完成：
++  // finishReason="other"（AI SDK 对 network_error 等未知值的归一化）+ 三个标志全 false
++  // = provider 返回了空终止流，必须抛出 retryable APIError 而非静默写成 completed。
++  // 每个 process() 调用开头重置，retry 时也重置（与 currentText/reasoningMap 同处）。
++  hasText: boolean
++  hasReasoning: boolean
++  hasToolCall: boolean
+ }
+ 
+ type StreamEvent = Event
+@@ -148,6 +156,9 @@ export const layer = Layer.effect(
+         reasoningMap: {},
+         inputChars: undefined,
+         inputBreakdown: undefined,
++        hasText: false,
++        hasReasoning: false,
++        hasToolCall: false,
+       }
+       let aborted = false
+       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
+@@ -318,6 +329,8 @@ export const layer = Layer.effect(
+                 timestamp: DateTime.makeUnsafe(Date.now()),
+               })
+             }
++            // [local-smark] 标记本轮已产生 reasoning 输出，用于 finish-step 空完成检测
++            ctx.hasReasoning = true
+             ctx.reasoningMap[value.id] = {
+               id: PartID.ascending(),
+               messageID: ctx.assistantMessage.id,
+@@ -377,6 +390,8 @@ export const layer = Layer.effect(
+                 timestamp: DateTime.makeUnsafe(Date.now()),
+               })
+             }
++            // [local-smark] 标记本轮已产生 tool 调用，用于 finish-step 空完成检测
++            ctx.hasToolCall = true
+             const part = yield* session.updatePart({
+               id: ctx.toolcalls[value.id]?.partID ?? PartID.ascending(),
+               messageID: ctx.assistantMessage.id,
+@@ -701,6 +716,25 @@ export const layer = Layer.effect(
+                 })
+               }
+             }
++            // [local-smark] 空完成检测：provider 返回了 finish-step 但本轮没有产生
++            // 任何 text/reasoning/tool 输出，且 finishReason="other"（AI SDK 对
++            // network_error 等未知 finish_reason 的归一化值）。这通常表示服务端
++            // 推理阶段异常终止（如 GLM-5.2 大上下文下的 network_error）。
++            // 必须在设置 assistantMessage.finish 之前抛出，否则空消息会被
++            // cleanup 写成 time.completed，被 prompt.ts 误判为正常结束。
++            // 抛出 APIError(isRetryable=true) → SessionRetry.retry 重试 →
++            // 耗尽后 halt 设置 error → process 返回 "stop" → loop break。
++            if (
++              value.finishReason === "other" &&
++              !ctx.hasText &&
++              !ctx.hasReasoning &&
++              !ctx.hasToolCall
++            ) {
++              throw new MessageV2.APIError({
++                message: `Provider returned empty completion (finish_reason: ${value.finishReason}), no content/reasoning/tool produced`,
++                isRetryable: true,
++              })
++            }
+             ctx.assistantMessage.finish = value.finishReason
+             ctx.assistantMessage.cost += usage.cost
+             ctx.assistantMessage.tokens = usage.tokens
+@@ -763,6 +797,8 @@ export const layer = Layer.effect(
+                 })
+               }
+             }
++            // [local-smark] 标记本轮已产生 text 输出，用于 finish-step 空完成检测
++            ctx.hasText = true
+             ctx.currentText = {
+               id: PartID.ascending(),
+               messageID: ctx.assistantMessage.id,
+@@ -960,6 +996,11 @@ export const layer = Layer.effect(
+           yield* Effect.gen(function* () {
+             ctx.currentText = undefined
+             ctx.reasoningMap = {}
++            // [local-smark] 重置语义输出追踪标志：retry 时上一轮的 hasText 等标志
++            // 必须清零，否则空完成检测会因残留标志而跳过。
++            ctx.hasText = false
++            ctx.hasReasoning = false
++            ctx.hasToolCall = false
+             const stream = llm.stream(streamInput)
+ 
+             yield* stream.pipe(
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 9958a78e46d0328a5d733f4b8068aa9ce738ab01..7825c95ce6d5357eb3362a4c6ceec4b2456f3835 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -2136,6 +2136,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+ 
+           if (
+             lastAssistant?.finish &&
++            // [local-smark] 防御性检查：有 error 的 assistant 不应触发 goal continuation。
++            // 正常控制流中 error → process 返回 "stop" → loop break，不会到达此处。
++            // 此检查防止未来控制流变更导致 errored assistant 被误判为可续跑。
++            !lastAssistant.error &&
+             !["tool-calls"].includes(lastAssistant.finish) &&
+             !hasToolCalls &&
+             lastUser.id < lastAssistant.id
+diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
+index 74ed65d3d13a088da7feb2d2db1a17fd856f8461..ec8a737481d57d006347cf6f24843dd9e9d82fe7 100644
+--- a/packages/opencode/test/session/message-v2.test.ts
++++ b/packages/opencode/test/session/message-v2.test.ts
+@@ -2162,3 +2162,36 @@ describe("session.message-v2.filterCompacted", () => {
+     ).toStrictEqual(expected)
+   })
+ })
++
++// [local-smark] fromError 透传测试：已分类的 APIError 实例不应被降级为 UnknownError。
++// 触发场景：processor.ts finish-step 检测到 provider 空完成时直接抛出 APIError，
++// fromError 必须保持其分类（name=APIError, isRetryable=true），否则 retry 机制无法识别。
++describe("session.message-v2.fromError APIError passthrough", () => {
++  test("passes through already-classified APIError without degrading to Unknown", () => {
++    const apiError = new MessageV2.APIError({
++      message: "Provider returned empty completion",
++      isRetryable: true,
++    })
++    const result = MessageV2.fromError(apiError, { providerID })
++
++    // 必须保持 APIError 分类，不能被降级为 UnknownError
++    expect(result.name).toBe("APIError")
++    // isRetryable 必须保留，否则 retry 机制不会重试
++    expect((result.data as { isRetryable: boolean }).isRetryable).toBe(true)
++  })
++
++  test("passes through APIError with metadata intact", () => {
++    const apiError = new MessageV2.APIError({
++      message: "Provider returned empty completion (finish_reason: other)",
++      isRetryable: true,
++      metadata: { finishReason: "other" },
++    })
++    const result = MessageV2.fromError(apiError, { providerID })
++
++    expect(result.name).toBe("APIError")
++    expect((result.data as { message: string }).message).toBe(
++      "Provider returned empty completion (finish_reason: other)",
++    )
++    expect((result.data as { metadata: Record<string, string> }).metadata.finishReason).toBe("other")
++  })
++})
+diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
+index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa1e1238f8 100644
+--- a/packages/opencode/test/session/processor-effect.test.ts
++++ b/packages/opencode/test/session/processor-effect.test.ts
+@@ -1026,3 +1026,189 @@ it.live("consecutive-error breaker: cross-turn errors trigger doom_loop", () =>
+     { git: true, config: (url) => denyDoomLoopConfig(url) },
+   ),
+ )
++
++// ---------------------------------------------------------------------------
++// [local-smark] provider 空完成检测测试
++// ---------------------------------------------------------------------------
++// GLM-5.2 等 provider 在大上下文 + thinking + tool_stream 组合下可能返回
++// HTTP 200 + SSE 正常关闭，但 finish_reason="network_error"（AI SDK 映射为 "other"），
++// 无 content/reasoning/tool delta，无 usage。processor 必须检测这种空完成并抛出
++// retryable APIError，而不是静默写成 completed 后被 goal continuation 无限循环。
++
++// 空完成 SSE：只有 role chunk + finish_reason="network_error"（→ AI SDK "other"），无内容 delta
++function emptyCompletionSse() {
++  return raw({
++    head: [
++      { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
++    ],
++    tail: [
++      { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "network_error" }] },
++    ],
++  })
++}
++
++it.live("session.processor empty completion with finish_reason=other throws retryable error then recovers", () =>
++  provideTmpdirServer(
++    ({ dir, llm }) =>
++      Effect.gen(function* () {
++        const { processors, session, provider } = yield* boot()
++
++        // 第一次请求：空完成（finish_reason=network_error → AI SDK "other"），应抛 retryable APIError
++        // 第二次请求：正常文本响应，retry 后应成功
++        yield* llm.push(emptyCompletionSse(), reply().text("recovered").stop())
++
++        const chat = yield* session.create({})
++        const parent = yield* user(chat.id, "empty then recover")
++        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
++        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
++        const handle = yield* processors.create({
++          assistantMessage: msg,
++          sessionID: chat.id,
++          model: mdl,
++        })
++
++        const value = yield* handle.process({
++          user: {
++            id: parent.id,
++            sessionID: chat.id,
++            role: "user",
++            time: parent.time,
++            agent: parent.agent,
++            model: { providerID: ref.providerID, modelID: ref.modelID },
++          } satisfies MessageV2.User,
++          sessionID: chat.id,
++          model: mdl,
++          agent: agent(),
++          system: [],
++          messages: [{ role: "user", content: "empty then recover" }],
++          tools: {},
++        })
++
++        const parts = MessageV2.parts(msg.id)
++
++        // retry 成功后 process 返回 "continue"
++        expect(value).toBe("continue")
++        // 第一次空完成触发 retry，第二次正常响应 → 2 次 HTTP 调用
++        expect(yield* llm.calls).toBe(2)
++        // retry 成功后 error 被清除
++        expect(handle.message.error).toBeUndefined()
++        // 正常文本被持久化
++        expect(parts.some((part) => part.type === "text" && part.text === "recovered")).toBe(true)
++      }),
++    { git: true, config: (url) => providerCfg(url) },
++  ),
++)
++
++it.live("session.processor partial output with finish_reason=other does not throw", () =>
++  provideTmpdirServer(
++    ({ dir, llm }) =>
++      Effect.gen(function* () {
++        const { processors, session, provider } = yield* boot()
++
++        // 有 text delta 但 finish_reason=network_error（→ "other"）
++        // hasText=true → 不应触发空完成检测
++        yield* llm.push(
++          raw({
++            head: [
++              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
++              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { content: "partial" } }] },
++            ],
++            tail: [
++              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "network_error" }] },
++            ],
++          }),
++        )
++
++        const chat = yield* session.create({})
++        const parent = yield* user(chat.id, "partial output")
++        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
++        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
++        const handle = yield* processors.create({
++          assistantMessage: msg,
++          sessionID: chat.id,
++          model: mdl,
++        })
++
++        const value = yield* handle.process({
++          user: {
++            id: parent.id,
++            sessionID: chat.id,
++            role: "user",
++            time: parent.time,
++            agent: parent.agent,
++            model: { providerID: ref.providerID, modelID: ref.modelID },
++          } satisfies MessageV2.User,
++          sessionID: chat.id,
++          model: mdl,
++          agent: agent(),
++          system: [],
++          messages: [{ role: "user", content: "partial output" }],
++          tools: {},
++        })
++
++        const parts = MessageV2.parts(msg.id)
++
++        // 有输出（hasText=true），不触发空完成检测 → 正常完成
++        expect(value).toBe("continue")
++        expect(yield* llm.calls).toBe(1)
++        expect(handle.message.error).toBeUndefined()
++        expect(parts.some((part) => part.type === "text" && part.text === "partial")).toBe(true)
++      }),
++    { git: true, config: (url) => providerCfg(url) },
++  ),
++)
++
++it.live("session.processor empty stop (no content, finish=stop) does not throw", () =>
++  provideTmpdirServer(
++    ({ dir, llm }) =>
++      Effect.gen(function* () {
++        const { processors, session, provider } = yield* boot()
++
++        // finish_reason=stop 但无 content delta
++        // finishReason !== "other" → 不触发空完成检测
++        yield* llm.push(
++          raw({
++            head: [
++              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
++            ],
++            tail: [
++              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "stop" }] },
++            ],
++          }),
++        )
++
++        const chat = yield* session.create({})
++        const parent = yield* user(chat.id, "empty stop")
++        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
++        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
++        const handle = yield* processors.create({
++          assistantMessage: msg,
++          sessionID: chat.id,
++          model: mdl,
++        })
++
++        const value = yield* handle.process({
++          user: {
++            id: parent.id,
++            sessionID: chat.id,
++            role: "user",
++            time: parent.time,
++            agent: parent.agent,
++            model: { providerID: ref.providerID, modelID: ref.modelID },
++          } satisfies MessageV2.User,
++          sessionID: chat.id,
++          model: mdl,
++          agent: agent(),
++          system: [],
++          messages: [{ role: "user", content: "empty stop" }],
++          tools: {},
++        })
++
++        // finish_reason=stop 不触发空完成检测 → 正常完成（即使无内容）
++        expect(value).toBe("continue")
++        expect(yield* llm.calls).toBe(1)
++        expect(handle.message.error).toBeUndefined()
++      }),
++    { git: true, config: (url) => providerCfg(url) },
++  ),
++)

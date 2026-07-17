@@ -1,0 +1,107 @@
+From 74a9ca56ea81059540506a0783cbc4fa8261e96c Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 7 May 2026 14:11:16 +0800
+Subject: [PATCH] =?UTF-8?q?feat(build):=20=E6=B7=BB=E5=8A=A0=E5=AF=B9=20Wi?=
+ =?UTF-8?q?ndows=20=E6=9E=84=E5=BB=BA=E7=9A=84=E6=9E=B6=E6=9E=84=E6=94=AF?=
+ =?UTF-8?q?=E6=8C=81=EF=BC=8C=E4=BC=98=E5=8C=96=E6=89=93=E5=8C=85=E9=80=BB?=
+ =?UTF-8?q?=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
+index 7cec5a8a2b2f914d2688ac86dd731c1b02b0dfb9..cd368bd04abf9640104097de06cafc08f1e1e889 100644
+--- a/.github/workflows/build-opencode.yml
++++ b/.github/workflows/build-opencode.yml
+@@ -35,7 +35,7 @@ jobs:
+       - name: Package Linux tar.gz
+         run: |
+           cd packages/opencode/dist/opencode-linux-x64/bin
+-          tar -czf ../../../opencode-linux-x64-${{ inputs.version || env.DEFAULT_VERSION }}.tar.gz opencode
++          tar -czf ../../opencode-linux-x64-${{ inputs.version || env.DEFAULT_VERSION }}.tar.gz opencode
+ 
+       - name: Package Linux .deb
+         run: |
+@@ -58,7 +58,7 @@ jobs:
+           Architecture: amd64
+           Maintainer: smark <smark@local>
+           Description: opencode AI-powered development tool (smark build)
+-          A standalone AI coding assistant with TUI, version ${VERSION}.
++           A standalone AI coding assistant with TUI, version ${VERSION}.
+           EOF
+ 
+           dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
+@@ -69,6 +69,7 @@ jobs:
+           path: |
+             packages/opencode/dist/opencode-linux-x64-*.tar.gz
+             packages/opencode/dist/opencode_*_amd64.deb
++          if-no-files-found: error
+ 
+   build-macos:
+     runs-on: macos-latest
+@@ -86,9 +87,9 @@ jobs:
+         run: |
+           VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
+           cd packages/opencode/dist/opencode-darwin-arm64/bin
+-          tar -czf ../../../opencode-darwin-arm64-${VERSION}.tar.gz opencode
++          tar -czf ../../opencode-darwin-arm64-${VERSION}.tar.gz opencode
+           cd ../../opencode-darwin-x64/bin
+-          tar -czf ../../../opencode-darwin-x64-${VERSION}.tar.gz opencode
++          tar -czf ../../opencode-darwin-x64-${VERSION}.tar.gz opencode
+ 
+       - uses: actions/upload-artifact@v4
+         with:
+@@ -96,6 +97,7 @@ jobs:
+           path: |
+             packages/opencode/dist/opencode-darwin-arm64-*.tar.gz
+             packages/opencode/dist/opencode-darwin-x64-*.tar.gz
++          if-no-files-found: error
+ 
+   build-windows:
+     runs-on: windows-latest
+@@ -118,20 +120,18 @@ jobs:
+         shell: pwsh
+         run: |
+           cd packages/opencode
+-          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=win32 --skip-embed-web-ui
++          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=win32 --arch=x64 --skip-embed-web-ui
+ 
+       - name: Package Windows zip
+         shell: pwsh
+         run: |
+           $VERSION = "${{ inputs.version || env.DEFAULT_VERSION }}"
+           cd packages/opencode/dist/opencode-windows-x64/bin
+-          Compress-Archive -Path "opencode.exe" -DestinationPath "../../../opencode-windows-x64-$VERSION.zip"
+-          cd ../../opencode-windows-arm64/bin
+-          Compress-Archive -Path "opencode.exe" -DestinationPath "../../../opencode-windows-arm64-$VERSION.zip"
++          Compress-Archive -Path "opencode.exe" -DestinationPath "../../opencode-windows-x64-$VERSION.zip"
+ 
+       - uses: actions/upload-artifact@v4
+         with:
+           name: opencode-windows
+           path: |
+             packages/opencode/dist/opencode-windows-x64-*.zip
+-            packages/opencode/dist/opencode-windows-arm64-*.zip
++          if-no-files-found: error
+diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
+index 5bb756f1f601e2b94409e1f771c8140b30cac929..4f6a4229392a5400451c682ec6ad99f87812264f 100755
+--- a/packages/opencode/script/build.ts
++++ b/packages/opencode/script/build.ts
+@@ -62,6 +62,7 @@ const sourcemapsFlag = process.argv.includes("--sourcemaps")
+ const plugin = createSolidTransformPlugin()
+ const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
+ const osFilter = process.argv.find((a) => a.startsWith("--os="))?.replace("--os=", "")
++const archFilter = process.argv.find((a) => a.startsWith("--arch="))?.replace("--arch=", "")
+ 
+ const createEmbeddedWebUIBundle = async () => {
+   console.log(`Building Web UI to embed in the binary`)
+@@ -171,7 +172,7 @@ const targets = singleFlag
+       return true
+     })
+   : osFilter
+-  ? allTargets.filter((item) => item.os === osFilter && item.abi === undefined && item.avx2 !== false)
++  ? allTargets.filter((item) => item.os === osFilter && item.abi === undefined && item.avx2 !== false && (!archFilter || item.arch === archFilter))
+   : allTargets
+ 
+ await $`rm -rf dist`

@@ -1,0 +1,228 @@
+From 8acb3fecbfe717a09801cbac24f1e5dd4518bb29 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 14 May 2026 01:06:24 +0800
+Subject: [PATCH] =?UTF-8?q?feat(session):=20=E6=B7=BB=E5=8A=A0=E8=BE=93?=
+ =?UTF-8?q?=E5=85=A5=E5=AD=97=E7=AC=A6=E5=92=8C=E4=BB=A4=E7=89=8C=E4=BC=B0?=
+ =?UTF-8?q?=E7=AE=97=E5=8A=9F=E8=83=BD=EF=BC=8C=E4=BC=98=E5=8C=96=E4=BC=9A?=
+ =?UTF-8?q?=E8=AF=9D=E5=8E=8B=E7=BC=A9=E9=80=BB=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 4980d577ac19e3f9e2c00fb0147491d6a021e9e0..12b3e0458a29c0323732eac3f1e0f18fddb59407 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -63,6 +63,7 @@ import * as DateTime from "effect/DateTime"
+ import { eq } from "@/storage/db"
+ import * as Database from "@/storage/db"
+ import { SessionTable } from "./session.sql"
++import { Token } from "@/util/token"
+ 
+ 
+ // @ts-ignore
+@@ -80,6 +81,46 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
+ 
+ const log = Log.create({ service: "session.prompt" })
+ const elog = EffectLogger.create({ service: "session.prompt" })
++const INPUT_CHARS_HISTORY_LIMIT = 100_000
++const MIN_CHARS_PER_TOKEN = 3
++const MAX_CHARS_PER_TOKEN = 4
++
++function clampCharsPerToken(value: number) {
++  return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value))
++}
++
++function charsPerToken(messages: MessageV2.WithParts[]) {
++  // Estimate against the current session's real provider accounting instead of a
++  // fixed global ratio.  The samples come from prior daemon-built request bodies
++  // (inputChars) paired with provider-confirmed input/cache tokens.  Clamp the
++  // ratio to a conservative natural-language/code range so one provider anomaly
++  // or cache-reporting quirk cannot make future preflight checks wildly optimistic
++  // or pessimistic.
++  let historyInputTokens = 0
++  let historyInputChars = 0
++  for (let i = messages.length - 1; i >= 0 && historyInputChars < INPUT_CHARS_HISTORY_LIMIT; i--) {
++    const msg = messages[i]
++    if (msg.info.role !== "assistant") continue
++    for (let j = msg.parts.length - 1; j >= 0; j--) {
++      const part = msg.parts[j]
++      if (part.type !== "step-finish") continue
++      const chars = part.inputChars
++      if (!chars || chars < 100) continue
++      const tokens = part.tokens.input + part.tokens.cache.read + part.tokens.cache.write
++      if (tokens <= 0) continue
++      historyInputChars += Math.max(0, chars - (part.inputBreakdown?.messages.attachments ?? 0))
++      historyInputTokens += tokens
++    }
++  }
++
++  if (historyInputTokens <= 0 || historyInputChars <= 500) return undefined
++  return clampCharsPerToken(historyInputChars / historyInputTokens)
++}
++
++function estimateInputTokens(text: string, messages: MessageV2.WithParts[]) {
++  const ratio = charsPerToken(messages)
++  return ratio ? Math.round(text.length / ratio) : Token.estimate(text)
++}
+ 
+ export interface Interface {
+   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+@@ -1576,20 +1617,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             continue
+           }
+ 
+-          if (
+-            lastFinished &&
+-            lastFinished.summary !== true &&
+-            (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
+-          ) {
+-            yield* compaction.create({
+-              sessionID,
+-              agent: lastUser.agent,
+-              model: lastUser.model,
+-              auto: true,
+-            })
+-            continue
+-          }
+-
+           const agent = yield* agents.get(lastUser.agent)
+           if (!agent) {
+             const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
+@@ -1703,7 +1730,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                 return `Tool: ${name}\n${item.description ?? ""}\n${JSON.stringify(item.inputSchema)}`
+               })
+               .join("\n")
+-            const inputChars = [systemText, messagesText, toolsText].join("\n").length
++            const inputText = [systemText, messagesText, toolsText].join("\n")
++            const inputChars = inputText.length
+             // 从原始 parts 计算 messages 子组件字符数，供 TUI /context 面板直接使用
+             let msgUserChars = 0
+             let msgAssistantChars = 0
+@@ -1758,29 +1786,26 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                 total: messagesText.length,
+               },
+             }
+-            // 从本 session 历史 step-finish 的 inputChars / inputTokens 推算真实 chars-per-token 比值，
+-            // 使用 *输入* 侧数据（而非输出侧），因为输入含 JSON/schema/code，密度与自然语言输出截然不同。
+-            let historyInputTokens = 0
+-            let historyInputChars = 0
+-            for (let i = msgs.length - 1; i >= 0 && historyInputChars < 100000; i--) {
+-              const m = msgs[i]
+-              if (m.info.role !== "assistant") continue
+-              for (let j = m.parts.length - 1; j >= 0; j--) {
+-                const p = m.parts[j]
+-                if (p.type !== "step-finish") continue
+-                const chars = (p as any).inputChars as number | undefined
+-                if (!chars || chars < 100) continue
+-                const tokens = p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
+-                if (tokens <= 0) continue
+-                const bd = (p as any).inputBreakdown
+-                historyInputChars += Math.max(0, chars - (bd?.messages?.attachments ?? 0))
+-                historyInputTokens += tokens
+-              }
++            const estimatedInput = estimateInputTokens(inputText, msgs)
++            // Preflight compaction must judge the request we are about to send,
++            // not the last finished assistant's historical usage.  After compaction,
++            // retained tail messages can carry huge pre-compaction token counts even
++            // though the freshly assembled prompt is small; checking estimatedInput
++            // here prevents that stale usage from creating back-to-back auto compacts.
++            if (
++              yield* compaction.isOverflow({
++                tokens: { input: estimatedInput, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++                model,
++              })
++            ) {
++              yield* compaction.create({
++                sessionID,
++                agent: lastUser.agent,
++                model: lastUser.model,
++                auto: true,
++              })
++              return "continue" as const
+             }
+-            const charsPerToken = historyInputTokens > 0 && historyInputChars > 500
+-              ? historyInputChars / historyInputTokens
+-              : 4
+-            const estimatedInput = Math.round(inputChars / charsPerToken)
+             handle.message.tokens.input = estimatedInput
+             // Persist the pending input snapshot on the assistant message so the TUI can
+             // render context usage immediately, before the provider emits the first chunk
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 9c1fc82ac010972024082519b66ba07d1aa9662a..0dd420f275165aad4c3d9b5eb1b9ce28a270b033 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -303,6 +303,21 @@ const seed = Effect.fn("test.seed")(function* (sessionID: SessionID, opts?: { fi
+   return { user: msg, assistant }
+ })
+ 
++const addStepFinish = (sessionID: SessionID, messageID: MessageID, inputChars: number, inputTokens: number) =>
++  Effect.gen(function* () {
++    const session = yield* Session.Service
++    yield* session.updatePart({
++      id: PartID.ascending(),
++      messageID,
++      sessionID,
++      type: "step-finish",
++      reason: "stop",
++      cost: 0,
++      tokens: { input: inputTokens, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++      inputChars,
++    })
++  })
++
+ const addSubtask = (sessionID: SessionID, messageID: MessageID, model = ref) =>
+   Effect.gen(function* () {
+     const session = yield* Session.Service
+@@ -650,6 +665,50 @@ it.live("manual compaction stops after summarizing retained tool tail", () =>
+   30_000,
+ )
+ 
++it.live("auto compaction resumes without compacting retained old tail usage again", () =>
++  provideTmpdirServer(
++    Effect.fnUntraced(function* ({ llm }) {
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({
++        title: "Auto compact",
++        permission: [{ permission: "*", pattern: "*", action: "allow" }],
++      })
++
++      yield* seed(chat.id, { finish: "stop" })
++      const old = yield* seed(chat.id, { finish: "tool-calls" })
++      old.assistant.tokens = { input: 300_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
++      yield* sessions.updateMessage(old.assistant)
++      yield* addCompletedTool(chat.id, old.assistant.id)
++      yield* addStepFinish(chat.id, old.assistant.id, 12_000, 3_000)
++      yield* SessionCompaction.Service.use((compact) =>
++        compact.create({
++          sessionID: chat.id,
++          agent: "build",
++          model: ref,
++          auto: true,
++        }),
++      )
++      yield* llm.text("summary")
++      yield* llm.text("resumed")
++
++      const result = yield* prompt.loop({ sessionID: chat.id })
++      const all = yield* sessions.messages({ sessionID: chat.id })
++      const compactions = all.flatMap((msg) => msg.parts).filter((part) => part.type === "compaction")
++
++      expect(yield* llm.calls).toBe(2)
++      expect(compactions).toHaveLength(1)
++      expect(result.info.role).toBe("assistant")
++      if (result.info.role === "assistant") {
++        expect(result.info.agent).toBe("build")
++        expect(result.parts.some((part) => part.type === "text" && part.text === "resumed")).toBe(true)
++      }
++    }),
++    { git: true, config: (url) => ({ ...providerCfg(url), compaction: { tail_turns: 1 } }) },
++  ),
++  30_000,
++)
++
+ it.live("failed subtask preserves metadata on error tool state", () =>
+   provideTmpdirServer(
+     Effect.fnUntraced(function* ({ llm }) {

@@ -1,0 +1,68 @@
+From 045e44c231238bfd3e5425529074cae1bec630aa Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 17 Jul 2026 01:40:14 +0800
+Subject: [PATCH] =?UTF-8?q?fix(test):=20=E7=A8=B3=E5=AE=9A=E5=BC=82?=
+ =?UTF-8?q?=E6=AD=A5=E6=8F=90=E7=A4=BA=20SDK=20parity?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+等待 promptAsync 返回 204 后通过公开 messages 接口确认后台消息已持久化，避免 Windows 与 macOS fiber 调度差异造成跨 server path 的假失败。
+
+补充 prompt、promptAsync、messages 状态和 no-reply 文本断言，不修改生产异步语义或降低测试覆盖。
+
+diff --git a/packages/opencode/test/server/httpapi-sdk.test.ts b/packages/opencode/test/server/httpapi-sdk.test.ts
+index d6b2410197439face69925062c7ff54606c84c94..5b43722e2d582966e2726b489e5be3b26a121a97 100644
+--- a/packages/opencode/test/server/httpapi-sdk.test.ts
++++ b/packages/opencode/test/server/httpapi-sdk.test.ts
+@@ -22,7 +22,7 @@ import { TestLLMServer } from "../lib/llm-server"
+ import path from "path"
+ import { resetDatabase } from "../fixture/db"
+ import { disposeAllInstances, TestInstance, tmpdirScoped } from "../fixture/fixture"
+-import { testEffect } from "../lib/effect"
++import { pollWithTimeout, testEffect } from "../lib/effect"
+ 
+ const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
+ const it = testEffect(
+@@ -693,17 +693,35 @@ describe("HttpApi SDK", () => {
+             parts: [{ type: "text", text: "async hello" }],
+           }),
+         )
+-        const messages = yield* capture(() => sdk.session.messages({ sessionID }))
++        const messageTexts = (result: Captured) =>
++          array(result.data)
++            .flatMap((item) => array(record(item).parts))
++            .map((part) => record(part).text)
++            .filter((text): text is string => typeof text === "string")
++            .sort()
++        // promptAsync 的 204 只承诺后台任务已接受；通过公开 messages seam 等待
++        // 目标消息持久化，避免把不同平台的 fiber 调度顺序误当成 server-path 差异。
++        const messages = yield* pollWithTimeout(
++          Effect.gen(function* () {
++            const result = yield* capture(() => sdk.session.messages({ sessionID }))
++            return messageTexts(result).includes("async hello") ? result : undefined
++          }),
++          `${serverPath} promptAsync message was not persisted`,
++          "10 seconds",
++        )
++        expect(statuses({ session, prompt, asyncPrompt, messages })).toEqual({
++          session: 200,
++          prompt: 200,
++          asyncPrompt: 204,
++          messages: 200,
++        })
++        expect(messageTexts(messages)).toEqual(["async hello", "hello"])
+ 
+         return {
+           statuses: statuses({ session, prompt, asyncPrompt, messages }),
+           promptRole: record(record(prompt.data).info).role,
+           messageCount: array(messages.data).length,
+-          messageTexts: array(messages.data)
+-            .flatMap((item) => array(record(item).parts))
+-            .map((part) => record(part).text)
+-            .filter((text): text is string => typeof text === "string")
+-            .sort(),
++          messageTexts: messageTexts(messages),
+         }
+       }),
+     ),

@@ -1,0 +1,372 @@
+From 563ee64fea946ae9212f87899521f643904a4fb9 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 25 May 2026 15:49:17 +0800
+Subject: [PATCH] =?UTF-8?q?fix:=20=E7=BB=9F=E4=B8=80=E4=BD=BF=E7=94=A8?=
+ =?UTF-8?q?=E5=B0=8F=E5=86=99=E7=9A=84=20"auto"=20=E6=9B=BF=E4=BB=A3=20"Au?=
+ =?UTF-8?q?to"=20=E4=BB=A5=E4=BF=9D=E6=8C=81=E4=B8=80=E8=87=B4=E6=80=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
+index 9c7bfd854c2e90bb9e3f29a05cd5d198dc335411..33de6d8cfa62307af993195131f969ed38e6c867 100644
+--- a/packages/opencode/src/agent/agent.ts
++++ b/packages/opencode/src/agent/agent.ts
+@@ -80,11 +80,11 @@ type State = Omit<Interface, "generate">
+ 
+ const RESERVED_AGENT_NAMES = new Set(["permission-reviewer"])
+ // [local-smark] 显式选择的主 Agent 列表开始
+-// `Auto` 是可见且可通过 default_agent 选择的原生主 Agent，但它会把 shell
++// `auto` 是可见且可通过 default_agent 选择的原生主 Agent，但它会把 shell
+ // 权限切到 auto 分支。为保持“只有显式选择才启用 auto”的不变量，未配置
+ // default_agent 时的隐式回退逻辑会跳过这里列出的名称，避免用户只禁用其他
+ // 主 Agent 后意外进入 auto 路由。
+-const EXPLICIT_ONLY_PRIMARY_AGENT_NAMES = new Set(["Auto"])
++const EXPLICIT_ONLY_PRIMARY_AGENT_NAMES = new Set(["auto"])
+ // [local-smark] 显式选择的主 Agent 列表结束
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
+@@ -170,12 +170,12 @@ export const layer = Layer.effect(
+             mode: "primary",
+             native: true,
+           },
+-          // [local-smark] Auto 原生 Agent 开始
+-          // `Auto` 复用 build 的权限形状，但只把 shell 命令接入 auto。edit
++          // [local-smark] auto 原生 Agent 开始
++          // `auto` 复用 build 的权限形状，但只把 shell 命令接入 auto。edit
+           // 等非 shell 写入仍沿用 build 的 allow，避免本轮 shell sandbox 修复
+           // 扩大到新的工具审批面。
+-          Auto: {
+-            name: "Auto",
++          auto: {
++            name: "auto",
+             description: "Build-like agent that routes shell commands through auto permission review.",
+             options: {},
+             permission: Permission.merge(
+@@ -194,7 +194,7 @@ export const layer = Layer.effect(
+             mode: "primary",
+             native: true,
+           },
+-          // [local-smark] Auto 原生 Agent 结束
++          // [local-smark] auto 原生 Agent 结束
+           decide: {
+             name: "decide",
+             description: "Decide mode. Produces a decisive plan with bounded recent context and no tools.",
+@@ -417,7 +417,7 @@ export const layer = Layer.effect(
+         const list = Effect.fnUntraced(function* () {
+           const cfg = yield* config.get()
+           // [local-smark] Agent 列表 localeCompare 排序开始
+-          // Auto 是用户要求的大写可见 Agent。这里显式使用既有测试声明的
++          // auto 的展示大小写由前端控件决定。这里显式使用既有测试声明的
+           // localeCompare 语义，而不是大小写折叠或码点排序，避免影响 mixed-case
+           // 自定义 Agent 的展示顺序；默认 Agent 仍保持列表第一。
+           const defaultName = cfg.default_agent ?? "build"
+@@ -438,15 +438,15 @@ export const layer = Layer.effect(
+             if (agent.hidden === true) throw new Error(`default agent "${c.default_agent}" is hidden`)
+             return agent
+           }
+-          // [local-smark] Auto 隐式默认排除开始
++          // [local-smark] auto 隐式默认排除开始
+           // 这里保持历史默认 Agent 的回退语义：没有显式配置 default_agent 时，
+-          // 不因为新增了可见的 Auto 主 Agent 就自动启用 auto shell 路由。Auto
++          // 不因为新增了可见的 auto 主 Agent 就自动启用 auto shell 路由。auto
+           // 仍然可以通过 default_agent 精确选择，只是不参与无配置 fallback。
+           const visible = Object.entries(agents).find(
+             ([name, agent]) =>
+               agent.mode !== "subagent" && agent.hidden !== true && !EXPLICIT_ONLY_PRIMARY_AGENT_NAMES.has(name),
+           )?.[1]
+-          // [local-smark] Auto 隐式默认排除结束
++          // [local-smark] auto 隐式默认排除结束
+           if (!visible) throw new Error("no primary visible agent found")
+           return visible
+         })
+diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
+index b68c7ed3192e11307e5c114d306dba91f103c4c9..eaaedb21a952aef9a3bea4e491612a7f42aee6bb 100644
+--- a/packages/opencode/src/permission/auto.ts
++++ b/packages/opencode/src/permission/auto.ts
+@@ -66,7 +66,7 @@ export function evaluate(
+     const isToolExternalDirectory = input.permission === "external_directory" && hasToolExternalDirectoryEvidence(input.metadata)
+     // [local-smark] auto 四级预审路由开始
+     // safe/general/cautious/dangerous 是 LLM 负载边界：safe 直接允许；开发期
+-    // shell general 也直接允许，避免 Auto shell 回到人工确认；非 shell general
++    // shell general 也直接允许，避免 auto shell 回到人工确认；非 shell general
+     // 和 cautious 进入 reviewer/user fallback；dangerous 直接拒绝。strict 是用户
+     // 显式配置的例外，用来保留原本“低风险也审”的能力。
+     if (precheck.level === "dangerous") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
+@@ -86,7 +86,7 @@ export function evaluate(
+       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
+     }
+     if (precheck.level === "general" && isShell && !input.strict) {
+-      // 当前开发测试期要求 Auto shell 不弹人工确认：无法精确判定但未命中
++      // 当前开发测试期要求 auto shell 不弹人工确认：无法精确判定但未命中
+       // dangerous/cautious 的命令先放行；非 shell general 继续走 reviewer。
+       return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
+     }
+@@ -94,16 +94,16 @@ export function evaluate(
+ 
+     // Cautious is the default auto review boundary: deterministic precheck found
+     // a visible risk that is neither harmless nor immediately forbidden, so a
+-    // reviewer must explicitly return allow/deny. Native Auto must not degrade
++    // reviewer must explicitly return allow/deny. Native auto must not degrade
+     // back to a clickable user ask if reviewer wiring is missing; fail closed so
+     // sensitive shell output cannot be exposed by pressing Allow.
+     if (!reviewer) {
+-      // Explicit user-review configuration is stronger than the native Auto
++      // Explicit user-review configuration is stronger than the native auto
+       // fail-closed default. This preserves small/custom runtimes that construct
+       // Permission.layer without a reviewer service but intentionally keep user
+       // approval as the review boundary.
+       if (input.reviewerDisabled) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
+-      if (input.metadata.agent === "Auto") {
++      if (input.metadata.agent === "auto") {
+         return { action: "deny", reason: `auto reviewer unavailable: ${precheck.reason}`, source: "reviewer" } satisfies Decision
+       }
+       return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
+diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
+index 323ca42d8cb26b48ffb92171e477d658af80850b..21555cf1094182e72cc5cb6e49d00cda90a76d32 100644
+--- a/packages/opencode/src/permission/reviewer/service.ts
++++ b/packages/opencode/src/permission/reviewer/service.ts
+@@ -617,11 +617,11 @@ function isReviewerError(error: unknown): error is Error {
+ 
+ function reviewerEnabled(permission: Config.Info["permission"], metadata: Readonly<Record<string, unknown>>) {
+   // 显式配置优先：`user` 保留人工审批，`auto_review` 对所有 auto 规则启用 reviewer。
+-  // 没有全局配置时，原生 Auto agent 仍应隐式启用 reviewer；否则选择 Auto
++  // 没有全局配置时，原生 auto agent 仍应隐式启用 reviewer；否则选择 auto
+   // 只会把 cautious 命令降级成普通 ask，用户点允许后敏感 shell 仍会执行。
+   if (permission?.approvals_reviewer === "user") return false
+   if (permission?.approvals_reviewer === "auto_review") return true
+-  return metadata.agent === "Auto"
++  return metadata.agent === "auto"
+ }
+ 
+ function errorMessage(error: unknown) {
+diff --git a/packages/opencode/test/agent/agent.test.ts b/packages/opencode/test/agent/agent.test.ts
+index 6fb14d020f4fb081243c14de10724e0116d77b36..741113dad03aab748bd007c8b3458e7e5948bafa 100644
+--- a/packages/opencode/test/agent/agent.test.ts
++++ b/packages/opencode/test/agent/agent.test.ts
+@@ -52,11 +52,11 @@ it.instance("returns default native agents when no config", () =>
+     const agents = yield* load((svc) => svc.list())
+     const names = agents.map((a) => a.name)
+     expect(names).toContain("build")
+-    // [local-smark] Auto Agent 列表断言开始
+-    // Auto 必须像其他原生主 Agent 一样可见，用户才能通过 default_agent 显式
++    // [local-smark] auto Agent 列表断言开始
++    // auto 必须像其他原生主 Agent 一样可见，用户才能通过 default_agent 显式
+     // 进入 auto shell 路由；默认 build/interactive 行为不能因此改变。
+-    expect(names).toContain("Auto")
+-    // [local-smark] Auto Agent 列表断言结束
++    expect(names).toContain("auto")
++    // [local-smark] auto Agent 列表断言结束
+     expect(names).toContain("plan")
+     expect(names).toContain("general")
+     expect(names).toContain("explore")
+@@ -81,7 +81,7 @@ it.instance("build agent has correct default properties", () =>
+ )
+ 
+ // [local-smark] interactive 审批回归测试开始
+-// 新增 Auto Agent 不能改变 interactive 的既有用户审批门禁。这里覆盖 shell
++// 新增 auto Agent 不能改变 interactive 的既有用户审批门禁。这里覆盖 shell
+ // 与 notebook 执行权限，防止新增 agent 时误把 ask 分支改成 auto 或 allow。
+ it.instance("interactive agent keeps existing ask gates for command execution", () =>
+   Effect.gen(function* () {
+@@ -94,17 +94,17 @@ it.instance("interactive agent keeps existing ask gates for command execution",
+ )
+ // [local-smark] interactive 审批回归测试结束
+ 
+-// [local-smark] Auto Agent 行为测试开始
+-// 这个行为级测试只固定 Auto 的公开权限结果，不检查内部规则顺序或 helper 名。
++// [local-smark] auto Agent 行为测试开始
++// 这个行为级测试只固定 auto 的公开权限结果，不检查内部规则顺序或 helper 名。
+ // 后续可以重构 auto 分支实现，但必须维持“build-like + shell:auto”的用户契约。
+-it.instance("Auto agent routes shell through auto while preserving build-like permissions", () =>
++it.instance("auto agent routes shell through auto while preserving build-like permissions", () =>
+   Effect.gen(function* () {
+-    const auto = yield* load((svc) => svc.get("Auto"))
++    const auto = yield* load((svc) => svc.get("auto"))
+     expect(auto).toBeDefined()
+     expect(auto?.mode).toBe("primary")
+     expect(auto?.native).toBe(true)
+ 
+-    // Auto 开发期只接管 shell；edit 仍继承 build 的 allow，避免把 task、edit
++    // auto 开发期只接管 shell；edit 仍继承 build 的 allow，避免把 task、edit
+     // 或 notebook 执行也引入 auto 分支从而扩大本次切入面。
+     expect(evalPerm(auto, "bash")).toBe("auto")
+     expect(evalPerm(auto, "external_directory")).toBe("auto")
+@@ -114,7 +114,7 @@ it.instance("Auto agent routes shell through auto while preserving build-like pe
+     expect(evalPerm(auto, "vscode_notebook_env")).toBe("allow")
+     expect(evalPerm(auto, "vscode_notebook_edit")).toBe("allow")
+ 
+-    // 这些边界继承自 build 的默认安全策略，不因 Auto 的 shell auto 路由而放宽。
++    // 这些边界继承自 build 的默认安全策略，不因 auto 的 shell auto 路由而放宽。
+     expect(evalPerm(auto, "question")).toBe("allow")
+     expect(evalPerm(auto, "plan_enter")).toBe("allow")
+     expect(evalPerm(auto, "repo_clone")).toBe("deny")
+@@ -123,7 +123,7 @@ it.instance("Auto agent routes shell through auto while preserving build-like pe
+     expect(Permission.evaluate("external_directory", Truncate.GLOB, auto!.permission).action).toBe("allow")
+   }),
+ )
+-// [local-smark] Auto Agent 行为测试结束
++// [local-smark] auto Agent 行为测试结束
+ 
+ it.instance("plan agent denies edits except .opencode/plans/*", () =>
+   Effect.gen(function* () {
+@@ -702,23 +702,23 @@ it.instance(
+   },
+ )
+ 
+-// [local-smark] Auto default_agent 选择测试开始
+-// Auto 是显式可选的主 Agent；这里验证用户可以通过 default_agent 选择它，而
++// [local-smark] auto default_agent 选择测试开始
++// auto 是显式可选的主 Agent；这里验证用户可以通过 default_agent 选择它，而
+ // 上面的无配置默认值仍保持 build。
+ it.instance(
+-  "defaultAgent can select the Auto shell-auto agent",
++  "defaultAgent can select the auto shell-auto agent",
+   () =>
+     Effect.gen(function* () {
+       const agent = yield* load((svc) => svc.defaultAgent())
+-      expect(agent).toBe("Auto")
++      expect(agent).toBe("auto")
+     }),
+   {
+     config: {
+-      default_agent: "Auto",
++      default_agent: "auto",
+     },
+   },
+ )
+-// [local-smark] Auto default_agent 选择测试结束
++// [local-smark] auto default_agent 选择测试结束
+ 
+ it.instance(
+   "defaultAgent respects default_agent config set to custom agent with mode all",
+@@ -787,7 +787,7 @@ it.instance(
+ )
+ 
+ it.instance(
+-  "defaultAgent throws when only explicit Auto primary agent remains",
++  "defaultAgent throws when only explicit auto primary agent remains",
+   () => expectDefaultAgentError("no primary visible agent found"),
+   {
+     config: {
+@@ -796,10 +796,10 @@ it.instance(
+         plan: { disable: true },
+         interactive: { disable: true },
+         decide: { disable: true },
+-        // [local-smark] Auto 隐式默认回归测试开始
+-        // Auto 在这里故意保持启用。它可见且可通过 default_agent 选择，但不能
++        // [local-smark] auto 隐式默认回归测试开始
++        // auto 在这里故意保持启用。它可见且可通过 default_agent 选择，但不能
+         // 仅因为标准主 Agent 被禁用就成为无配置 fallback。
+-        // [local-smark] Auto 隐式默认回归测试结束
++        // [local-smark] auto 隐式默认回归测试结束
+       },
+     },
+   },
+diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
+index a69bed99e463677566ad429d8e909794ca7754ac..d955260e8a4fea6129adb9f5ff1c2217f72e8bb8 100644
+--- a/packages/opencode/test/permission/auto.test.ts
++++ b/packages/opencode/test/permission/auto.test.ts
+@@ -343,25 +343,25 @@ describe("permission auto routing", () => {
+     await expect(bash("git add .")).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
+   })
+ 
+-  test("fails closed for native Auto when reviewer is not wired", async () => {
++  test("fails closed for native auto when reviewer is not wired", async () => {
+     await expect(
+       Effect.runPromise(
+         PermissionAuto.evaluate({
+           permission: "bash",
+           patterns: ["git add ."],
+-          metadata: { action_kind: "shell", command: "git add .", agent: "Auto" },
++          metadata: { action_kind: "shell", command: "git add .", agent: "auto" },
+         }),
+       ),
+     ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+   })
+ 
+-  test("honors explicit user reviewer configuration for native Auto", async () => {
++  test("honors explicit user reviewer configuration for native auto", async () => {
+     await expect(
+       Effect.runPromise(
+         PermissionAuto.evaluate({
+           permission: "bash",
+           patterns: ["git add ."],
+-          metadata: { action_kind: "shell", command: "git add .", agent: "Auto" },
++          metadata: { action_kind: "shell", command: "git add .", agent: "auto" },
+           reviewerDisabled: true,
+         }),
+       ),
+diff --git a/packages/opencode/test/permission/reviewer-prompt.test.ts b/packages/opencode/test/permission/reviewer-prompt.test.ts
+index 4f0e00535226eaafcbc644448bed37af3e844322..a94d29c24c2de8f10bac701fdac13a98e3fbaa84 100644
+--- a/packages/opencode/test/permission/reviewer-prompt.test.ts
++++ b/packages/opencode/test/permission/reviewer-prompt.test.ts
+@@ -12,7 +12,7 @@ const userInfo = (id: string): MessageV2.User => ({
+   sessionID,
+   role: "user",
+   time: { created: 0 },
+-  agent: "Auto",
++  agent: "auto",
+   model: { providerID: ProviderID.make("test"), modelID: ModelID.make("model") },
+ })
+ const assistantInfo = (id: string, parentID = "msg_user_0"): MessageV2.Assistant => ({
+@@ -24,7 +24,7 @@ const assistantInfo = (id: string, parentID = "msg_user_0"): MessageV2.Assistant
+   modelID: ModelID.make("model"),
+   providerID: ProviderID.make("test"),
+   mode: "build",
+-  agent: "Auto",
++  agent: "auto",
+   path: { cwd: "/repo", root: "/repo" },
+   cost: 0,
+   tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index b3cd2286bbd41f27b82494e8806c0a09b65d361a..616fd6987b7189b721a3d18d8107013e1ffc61ef 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -780,7 +780,7 @@ it.instance(
+           sessionID: chat.id,
+           permission: "bash",
+           patterns: [command],
+-          metadata: { command, agent: "Auto" },
++          metadata: { command, agent: "auto" },
+           always: ["*"],
+           ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+         })
+@@ -864,7 +864,7 @@ it.instance(
+         sessionID: chat.id,
+         permission: "bash",
+         patterns: [command],
+-        metadata: { command, agent: "Auto" },
++        metadata: { command, agent: "auto" },
+         always: ["*"],
+         ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
+       })
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index ea6b873173162ff0bf131c29d60999a17245bacf..ce992a83f7da251deae67117ce559107413a9485 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -674,7 +674,7 @@ describe("tool.shell permissions", () => {
+     }
+ 
+     for (const item of ps) {
+-      reviewed.live(`routes Auto PowerShell SSH private key access through reviewer [${item.label}]`, () =>
++      reviewed.live(`routes auto PowerShell SSH private key access through reviewer [${item.label}]`, () =>
+         withShell(
+           item,
+           Effect.gen(function* () {
+@@ -705,12 +705,12 @@ describe("tool.shell permissions", () => {
+                       },
+                       {
+                         ...ctx,
+-                        agent: "Auto",
++                        agent: "auto",
+                         ask: (req) =>
+                           permission.ask({
+                             ...req,
+                             sessionID: ctx.sessionID,
+-                            metadata: { ...req.metadata, agent: "Auto" },
++                            metadata: { ...req.metadata, agent: "auto" },
+                             ruleset,
+                           }).pipe(Effect.orDie),
+                       },

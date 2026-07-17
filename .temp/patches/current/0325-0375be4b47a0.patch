@@ -1,0 +1,79 @@
+From 0375be4b47a0447570b61a4ae29904f6e5a032bb Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 22 Jun 2026 23:52:48 +0800
+Subject: [PATCH] =?UTF-8?q?fix(proxy):=20=E9=9A=90=E8=97=8F=20Windows=20?=
+ =?UTF-8?q?=E7=B3=BB=E7=BB=9F=E4=BB=A3=E7=90=86=E8=BE=85=E5=8A=A9=E8=BF=9B?=
+ =?UTF-8?q?=E7=A8=8B=EF=BC=8C=E9=81=BF=E5=85=8D=E5=BC=B9=E7=AA=97=E5=B9=B2?=
+ =?UTF-8?q?=E6=89=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-proxy.ts
+index b62531cc73b7a52e1e09554f2dccc2f387bd1ec0..dd1a378e19efc25fd2e6ae661af6ddccb872b218 100644
+--- a/packages/core/src/network-proxy.ts
++++ b/packages/core/src/network-proxy.ts
+@@ -99,7 +99,8 @@ function envProxy(url: URL): SystemProxy | undefined {
+ 
+ /** Execute a shell command and return its stdout text */
+ async function execText(command: string, args: string[], timeout = 1500) {
+-  const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore" })
++  // Windows 系统代理读取会定期调用 reg.exe；必须隐藏 helper 控制台，否则 daemon 每次刷新代理都会弹出 conhost。
++  const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore", windowsHide: process.platform === "win32" })
+   const timer = setTimeout(() => proc.kill(), timeout)
+   try {
+     const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()])
+diff --git a/packages/core/test/network-proxy.test.ts b/packages/core/test/network-proxy.test.ts
+index 55e365762bdceaa4ac0aa800039b9b30c396881e..d22c2d471da196b0f3ed5dd97665121bc3a2a9e5 100644
+--- a/packages/core/test/network-proxy.test.ts
++++ b/packages/core/test/network-proxy.test.ts
+@@ -4,9 +4,12 @@ import { HttpClient } from "effect/unstable/http"
+ import { NetworkProxy } from "../src/network-proxy"
+ 
+ const originalFetch = globalThis.fetch
++const originalSpawn = Bun.spawn
+ 
+ afterEach(() => {
+   globalThis.fetch = originalFetch
++  // Bun.spawn 是全局进程边界；测试替换后必须恢复，避免污染后续真实网络/进程测试。
++  Bun.spawn = originalSpawn
+ })
+ 
+ describe("NetworkProxy", () => {
+@@ -54,4 +57,35 @@ describe("NetworkProxy", () => {
+       server.stop(true)
+     }
+   })
++
++  test("hides Windows system proxy helper processes", async () => {
++    // reg.exe/conhost 弹窗只存在于 Windows；macOS scutil 与 Linux env proxy 保持原平台行为即可。
++    if (process.platform !== "win32") return
++
++    let calls = 0
++    let hidden = false
++    Bun.spawn = ((command: string[], options?: { windowsHide?: boolean }) => {
++      // 该测试保护的是外部可见行为：系统代理刷新不能创建前台 reg.exe/conhost 弹窗。
++      if (command[0] === "reg") {
++        calls++
++        hidden = options?.windowsHide === true
++      }
++      return {
++        exited: Promise.resolve(1),
++        stdout: new ReadableStream<Uint8Array>({
++          start(controller) {
++            // 空 stdout + 非零退出模拟 reg query 失败；代理读取失败仍必须回退 direct，不能影响请求路径。
++            controller.close()
++          },
++        }),
++      } as unknown as ReturnType<typeof Bun.spawn>
++    }) as typeof Bun.spawn
++
++    // refresh=true 绕过 10s 系统代理缓存，确保测试覆盖真实 helper 启动边界而不是命中旧 Promise。
++    const route = await NetworkProxy.resolveProxyRoute("https://example.com", "provider", true)
++
++    expect(calls).toBe(1)
++    expect(hidden).toBe(true)
++    expect(route).toEqual({ type: "direct", reason: "refresh-no-proxy" })
++  })
+ })

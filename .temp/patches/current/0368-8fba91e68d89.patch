@@ -1,0 +1,332 @@
+From 8fba91e68d89a53ea9fd7c0ed9452e435791b288 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sat, 4 Jul 2026 18:27:21 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E4=BF=AE=E5=A4=8D=20/goal=20dialog?=
+ =?UTF-8?q?=20=E6=8F=90=E4=BA=A4=E6=97=A0=E5=93=8D=E5=BA=94=EF=BC=8C?=
+ =?UTF-8?q?=E6=94=B9=E7=94=A8=20fetch=20=E7=9B=B4=E8=B0=83=20HTTP=20?=
+ =?UTF-8?q?=E7=AB=AF=E7=82=B9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+SDK 未重新生成 goalSet/goalClear 方法，as any 调用运行时为 undefined
+导致 TypeError 静默失败，Enter 按键无反应。改为用 sdk.fetch 直接调用
+POST/DELETE /session/:id/goal，并手动设置 directory query param（与
+dialog-session-list.tsx 一致），确保多实例 daemon 模式下路由正确。
+
+补充 httpapi-exercise scenario（GET/POST/DELETE /session/:id/goal）
+解决 CI coverage missing=3。新增回归测试验证 SDK 不含 goal 方法和
+dialog-goal.tsx 使用 fetch 而非 SDK 方法。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+index b6505e64ebc1f035913c1be600e39669fabe88b3..f310e02ce27cf90be4244fbd7e27b8cbfdf1c709 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+@@ -4,22 +4,73 @@ import { useDialog } from "@tui/ui/dialog"
+ import { useSync } from "@tui/context/sync"
+ import { useSDK } from "@tui/context/sdk"
+ import { useToast } from "@tui/ui/toast"
+-import { createMemo, Show } from "solid-js"
++import { createMemo } from "solid-js"
+ 
+ // [local-smark] goal 管理 dialog
+-// 无 goal 时 → DialogPrompt 输入 objective 直接创建
+-// 有 goal 时 → DialogSelect 选择 Edit/Pause/Resume/Clear
+-// Edit 选中后用 dialog.replace 切换到 DialogPrompt（无返回导航，可接受）
++// SDK 未重新生成 goalSet/goalClear 方法，直接用 sdk.fetch 调用 HTTP 端点
++// POST/DELETE 需手动设置 directory query param（sdk.fetch 的 rewrite 仅处理 GET/HEAD）
+ 
+ interface DialogGoalProps {
+   sessionID: string
+ }
+ 
++// 封装 goal HTTP 调用：统一错误处理和 dialog 关闭
++function useGoalApi(sessionID: string) {
++  const sdk = useSDK()
++  const sync = useSync()
++  const toast = useToast()
++  const dialog = useDialog()
++
++  // 构建带 directory query param 的 URL
++  // workspace routing 中间件通过 directory 定位实例
++  const goalUrl = () => {
++    const url = new URL(`/session/${sessionID}/goal`, sdk.url)
++    const dir = sync.path.directory || sdk.directory
++    if (dir) url.searchParams.set("directory", dir)
++    return url
++  }
++
++  // POST /session/:id/goal — 设置或更新 goal
++  const setGoal = async (input: { objective?: string; status?: string }) => {
++    try {
++      const resp = await sdk.fetch(goalUrl(), {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify(input),
++      })
++      if (!resp.ok) {
++        toast.show({ message: "Failed to update goal", variant: "error" })
++        return
++      }
++      dialog.clear()
++    } catch {
++      toast.show({ message: "Failed to update goal", variant: "error" })
++    }
++  }
++
++  // DELETE /session/:id/goal — 清除 goal
++  const clearGoal = async () => {
++    try {
++      const resp = await sdk.fetch(goalUrl(), {
++        method: "DELETE",
++      })
++      if (!resp.ok) {
++        toast.show({ message: "Failed to clear goal", variant: "error" })
++        return
++      }
++      dialog.clear()
++    } catch {
++      toast.show({ message: "Failed to clear goal", variant: "error" })
++    }
++  }
++
++  return { setGoal, clearGoal }
++}
++
+ // 无 goal 时显示：输入 objective 创建新 goal
+ export function DialogGoal(props: DialogGoalProps) {
+   const dialog = useDialog()
+-  const sdk = useSDK()
+-  const toast = useToast()
++  const { setGoal } = useGoalApi(props.sessionID)
+ 
+   return (
+     <DialogPrompt
+@@ -27,15 +78,8 @@ export function DialogGoal(props: DialogGoalProps) {
+       placeholder="Enter your objective..."
+       onConfirm={(value) => {
+         // 空 objective 不允许创建
+-        if (!value.trim()) {
+-          toast.show({ message: "Objective must not be empty", variant: "error" })
+-          return
+-        }
+-        // SDK 未重新生成，用 as any 绕过方法不存在检查
+-        void (sdk.client.session as any)
+-          .goalSet({ sessionID: props.sessionID, objective: value })
+-          .then(() => dialog.clear())
+-          .catch(() => toast.show({ message: "Failed to set goal", variant: "error" }))
++        if (!value.trim()) return
++        void setGoal({ objective: value })
+       }}
+       onCancel={() => dialog.clear()}
+     />
+@@ -46,37 +90,18 @@ export function DialogGoal(props: DialogGoalProps) {
+ export function DialogGoalMenu(props: DialogGoalProps) {
+   const dialog = useDialog()
+   const sync = useSync()
+-  const sdk = useSDK()
+-  const toast = useToast()
++  const { setGoal, clearGoal } = useGoalApi(props.sessionID)
+ 
+   const goal = createMemo(() => sync.data.session_goal[props.sessionID])
+ 
+-  // 调用 goalSet API 更新 status，出错时 toast 提示
+-  const callSet = (input: { status?: string }) => {
+-    void (sdk.client.session as any)
+-      .goalSet({ sessionID: props.sessionID, ...input })
+-      .then(() => dialog.clear())
+-      .catch(() => toast.show({ message: "Failed to update goal", variant: "error" }))
+-  }
+-
+-  // 调用 goalClear API 删除 goal
+-  const callClear = () => {
+-    void (sdk.client.session as any)
+-      .goalClear({ sessionID: props.sessionID })
+-      .then(() => dialog.clear())
+-      .catch(() => toast.show({ message: "Failed to clear goal", variant: "error" }))
+-  }
+-
+   return (
+     <DialogSelect
+       title="Manage Goal"
+       options={[
+         {
+           title: "Edit objective",
+-          // 显示当前 objective 作为描述
+           description: goal()?.objective,
+           value: "edit",
+-          // 选中后替换 dialog 为 DialogPrompt 编辑模式
+           onSelect: () => {
+             dialog.replace(() => <DialogGoalEdit sessionID={props.sessionID} />)
+           },
+@@ -87,7 +112,7 @@ export function DialogGoalMenu(props: DialogGoalProps) {
+               title: "Pause",
+               description: "Pause the active goal",
+               value: "pause",
+-              onSelect: () => callSet({ status: "paused" }),
++              onSelect: () => void setGoal({ status: "paused" }),
+             }]
+           : []),
+         // paused/blocked 状态下显示 Resume 选项
+@@ -96,14 +121,14 @@ export function DialogGoalMenu(props: DialogGoalProps) {
+               title: "Resume",
+               description: "Resume the goal to active",
+               value: "resume",
+-              onSelect: () => callSet({ status: "active" }),
++              onSelect: () => void setGoal({ status: "active" }),
+             }]
+           : []),
+         {
+           title: "Clear",
+           description: "Remove the goal",
+           value: "clear",
+-          onSelect: () => callClear(),
++          onSelect: () => void clearGoal(),
+         },
+       ]}
+     />
+@@ -114,25 +139,17 @@ export function DialogGoalMenu(props: DialogGoalProps) {
+ function DialogGoalEdit(props: DialogGoalProps) {
+   const dialog = useDialog()
+   const sync = useSync()
+-  const sdk = useSDK()
+-  const toast = useToast()
++  const { setGoal } = useGoalApi(props.sessionID)
+ 
+   const goal = createMemo(() => sync.data.session_goal[props.sessionID])
+ 
+   return (
+     <DialogPrompt
+       title="Edit Goal Objective"
+-      // 预填充当前 objective
+       value={goal()?.objective}
+       onConfirm={(value) => {
+-        if (!value.trim()) {
+-          toast.show({ message: "Objective must not be empty", variant: "error" })
+-          return
+-        }
+-        void (sdk.client.session as any)
+-          .goalSet({ sessionID: props.sessionID, objective: value })
+-          .then(() => dialog.clear())
+-          .catch(() => toast.show({ message: "Failed to update goal", variant: "error" }))
++        if (!value.trim()) return
++        void setGoal({ objective: value })
+       }}
+       onCancel={() => dialog.clear()}
+     />
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+index 3f3b4f1574fc519bef1ecc1e7cb0e4f966d89bd3..a9e283d6d0ba68bf444b5a8dc560e60a4606be1c 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+@@ -967,13 +967,14 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+             sdk.client.session.status({ workspace: project.workspace.current() }),
+           ])
+           // [local-smark] goal fetch：非致命，失败不影响 session sync
+-          // SDK 未重新生成，使用 as any 绕过方法不存在检查
++          // SDK 未重新生成 goal 方法，直接用 fetch 调用 HTTP 端点
++          // GET 请求由 sdk.fetch 的 rewrite 拦截器自动添加 directory query param
+           try {
+-            const goalResp = await (sdk.client.session as any).goal(
+-              { sessionID, workspace: project.workspace.current() },
+-              { throwOnError: true },
+-            )
+-            setStore("session_goal", sessionID, goalResp?.data?.goal ?? undefined)
++            const resp = await sdk.fetch(`${sdk.url}/session/${sessionID}/goal`)
++            if (resp.ok) {
++              const data = await resp.json()
++              setStore("session_goal", sessionID, data?.goal ?? undefined)
++            }
+           } catch {
+             // goal 端点不可用时不阻塞 session sync
+           }
+diff --git a/packages/opencode/test/server/httpapi-exercise/index.ts b/packages/opencode/test/server/httpapi-exercise/index.ts
+index c05a44f9c6a6045c88aaf4dfac86d7875b60ddbd..096d137f059e44cedd1cca44d0583ec16c2fb2f5 100644
+--- a/packages/opencode/test/server/httpapi-exercise/index.ts
++++ b/packages/opencode/test/server/httpapi-exercise/index.ts
+@@ -1335,6 +1335,39 @@ const scenarios: Scenario[] = [
+       },
+       "status",
+     ),
++  // [local-smark] goal 端点 scenario
++  http.protected
++    .get("/session/{sessionID}/goal", "session.goal.get")
++    .seeded((ctx) => ctx.session({ title: "Goal get session" }))
++    .at((ctx) => ({ path: route("/session/{sessionID}/goal", { sessionID: ctx.state.id }), headers: ctx.headers() }))
++    .json(200, (body) => {
++      object(body)
++      check(body.goal === null, "new session should have no goal")
++    }),
++  http.protected
++    .post("/session/{sessionID}/goal", "session.goal.set")
++    .mutating()
++    .seeded((ctx) => ctx.session({ title: "Goal set session" }))
++    .at((ctx) => ({
++      path: route("/session/{sessionID}/goal", { sessionID: ctx.state.id }),
++      headers: ctx.headers(),
++      body: { objective: "test objective" },
++    }))
++    .json(200, (body) => {
++      object(body)
++      const goal = (body as any).goal
++      check(goal?.objective === "test objective", "goal objective should match")
++      check(goal?.status === "active", "new goal should be active")
++    }),
++  http.protected
++    .delete("/session/{sessionID}/goal", "session.goal.clear")
++    .mutating()
++    .seeded((ctx) => ctx.session({ title: "Goal clear session" }))
++    .at((ctx) => ({ path: route("/session/{sessionID}/goal", { sessionID: ctx.state.id }), headers: ctx.headers() }))
++    .json(200, (body) => {
++      object(body)
++      check((body as any).cleared === false, "clearing non-existent goal should return false")
++    }),
+   http.protected
+     .post("/tui/append-prompt", "tui.appendPrompt")
+     .at((ctx) => ({ path: "/tui/append-prompt", headers: ctx.headers(), body: { text: "hello" } }))
+diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
+index 5e460236d71d987c8154dc24aa33212dc98191db..4038a37921295e0210c987565188799b3d04e276 100644
+--- a/packages/opencode/test/session/goal.test.ts
++++ b/packages/opencode/test/session/goal.test.ts
+@@ -394,3 +394,42 @@ it.instance(
+     }),
+   { git: true },
+ )
++
++// [local-smark] 验证 goal HTTP API 端到端行为
++// SDK 未重新生成 goalSet/goalClear 方法，这些方法在运行时为 undefined
++// 确认 SDK Session2 类上不存在 goalSet/goalClear/goal 方法
++it.live(
++  "SDK Session2 class does not have goal methods (regression guard)",
++  () =>
++    Effect.gen(function* () {
++      const { createOpencodeClient } = yield* Effect.promise(() => import("@opencode-ai/sdk/v2"))
++      const client = createOpencodeClient({ baseUrl: "http://localhost:0" })
++      // SDK 未重新生成，goalSet/goalClear/goal 应为 undefined
++      // 如果 SDK 重新生成后这些方法存在，测试会失败，提醒移除 fetch 直接调用
++      expect((client.session as any).goalSet).toBeUndefined()
++      expect((client.session as any).goalClear).toBeUndefined()
++      expect((client.session as any).goal).toBeUndefined()
++    }),
++)
++
++// [local-smark] 验证 dialog-goal.tsx 不依赖 SDK 方法
++// dialog-goal.tsx 应使用 fetch 直接调用 HTTP 端点，而非 sdk.client.session.goalSet
++it.live(
++  "dialog-goal.tsx uses fetch not SDK method for goal API calls",
++  () =>
++    Effect.gen(function* () {
++      const fs = yield* Effect.promise(() => import("fs/promises"))
++      const path = yield* Effect.promise(() => import("path"))
++      const content = yield* Effect.promise(() =>
++        fs.readFile(
++          path.join(process.cwd(), "src/cli/cmd/tui/component/dialog-goal.tsx"),
++          "utf-8",
++        ),
++      )
++      // 不应包含 as any 调用 SDK goal 方法的模式
++      expect(content).not.toContain("(sdk.client.session as any).goalSet")
++      expect(content).not.toContain("(sdk.client.session as any).goalClear")
++      // 应包含 fetch 直接调用
++      expect(content).toContain("sdk.fetch")
++    }),
++)

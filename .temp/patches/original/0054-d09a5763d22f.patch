@@ -1,0 +1,134 @@
+From d09a5763d22f2d1b88ef44f79758fa4991855c80 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 30 Apr 2026 03:14:38 +0800
+Subject: [PATCH] fix: post-merge test and code fixes
+
+- filesystem.ts (core + util): add isAbsolute() guard in contains() to fix
+  Windows cross-drive path false-positives (path.relative returns absolute
+  path when src/dest are on different drives)
+- agent.test.ts: adapt expected agent order to our branch (interactive before
+  plan); add interactive+review disabling to trigger 'no primary agent' error
+- installation.test.ts: registry-agnostic URL assertion using .endsWith()
+  instead of exact match, supporting npmmirror.com and any configured registry
+
+diff --git a/packages/core/src/filesystem.ts b/packages/core/src/filesystem.ts
+index 44346be8f9424c1e7d27116b7e537f673a01e805..ccb49d26aa118bf6eb6c0fd6e5c09935c0f67ccf 100644
+--- a/packages/core/src/filesystem.ts
++++ b/packages/core/src/filesystem.ts
+@@ -1,5 +1,5 @@
+ import { NodeFileSystem } from "@effect/platform-node"
+-import { dirname, join, relative, resolve as pathResolve } from "path"
++import { dirname, join, relative, resolve as pathResolve, isAbsolute } from "path"
+ import { realpathSync } from "fs"
+ import * as NFS from "fs/promises"
+ import { lookup } from "mime-types"
+@@ -231,6 +231,10 @@ export namespace AppFileSystem {
+   }
+ 
+   export function contains(parent: string, child: string) {
+-    return !relative(parent, child).startsWith("..")
++    const rel = relative(parent, child)
++    // On Windows, cross-drive path.relative returns the absolute child path.
++    // isAbsolute(rel) catches this case and correctly returns false.
++    if (isAbsolute(rel)) return false
++    return !rel.startsWith("..")
+   }
+ }
+diff --git a/packages/opencode/src/util/filesystem.ts b/packages/opencode/src/util/filesystem.ts
+index ded2b4517817158fe4570d1a6817c43b88ae5da8..580b6a3d6e836bc5b8711553edc28eacb2c3d19e 100644
+--- a/packages/opencode/src/util/filesystem.ts
++++ b/packages/opencode/src/util/filesystem.ts
+@@ -1,7 +1,7 @@
+ import { chmod, mkdir, readFile, stat as statFile, writeFile } from "fs/promises"
+ import { createWriteStream, existsSync, statSync } from "fs"
+ import { realpathSync } from "fs"
+-import { dirname, join, relative, resolve as pathResolve, win32 } from "path"
++import { dirname, join, relative, resolve as pathResolve, win32, isAbsolute } from "path"
+ import { Readable } from "stream"
+ import { pipeline } from "stream/promises"
+ import { Glob } from "@opencode-ai/core/util/glob"
+@@ -162,7 +162,11 @@ export function overlaps(a: string, b: string) {
+ }
+ 
+ export function contains(parent: string, child: string) {
+-  return !relative(parent, child).startsWith("..")
++  const rel = relative(parent, child)
++  // On Windows, cross-drive path.relative returns the absolute child path.
++  // isAbsolute(rel) catches this case and correctly returns false.
++  if (isAbsolute(rel)) return false
++  return !rel.startsWith("..")
+ }
+ 
+ export async function findUp(
+diff --git a/packages/opencode/test/agent/agent.test.ts b/packages/opencode/test/agent/agent.test.ts
+index ec384709da1094508736c8dc5209d58bee94d978..411766bfc6bb91571a58e333353b94209e5924f9 100644
+--- a/packages/opencode/test/agent/agent.test.ts
++++ b/packages/opencode/test/agent/agent.test.ts
+@@ -687,7 +687,7 @@ test("defaultAgent throws when default_agent points to non-existent agent", asyn
+   })
+ })
+ 
+-test("defaultAgent returns plan when build is disabled and default_agent not set", async () => {
++test("defaultAgent returns interactive when build is disabled and default_agent not set", async () => {
+   await using tmp = await tmpdir({
+     config: {
+       agent: {
+@@ -699,8 +699,8 @@ test("defaultAgent returns plan when build is disabled and default_agent not set
+     directory: tmp.path,
+     fn: async () => {
+       const agent = await load(tmp.path, (svc) => svc.defaultAgent())
+-      // build is disabled, so it should return plan (next primary agent)
+-      expect(agent).toBe("plan")
++      // build is disabled; in our branch interactive comes next in insertion order
++      expect(agent).toBe("interactive")
+     },
+   })
+ })
+@@ -711,13 +711,15 @@ test("defaultAgent throws when all primary agents are disabled", async () => {
+       agent: {
+         build: { disable: true },
+         plan: { disable: true },
++        interactive: { disable: true },
++        review: { disable: true },
+       },
+     },
+   })
+   await Instance.provide({
+     directory: tmp.path,
+     fn: async () => {
+-      // build and plan are disabled, no primary-capable agents remain
++      // all non-hidden primary agents disabled; no primary visible agent remains
+       await expect(load(tmp.path, (svc) => svc.defaultAgent())).rejects.toThrow("no primary visible agent found")
+     },
+   })
+diff --git a/packages/opencode/test/installation/installation.test.ts b/packages/opencode/test/installation/installation.test.ts
+index 5b26b0565521f82d91c575f22839c682f5482abd..b457003f1d026abaf768ef99eaead481c870b870 100644
+--- a/packages/opencode/test/installation/installation.test.ts
++++ b/packages/opencode/test/installation/installation.test.ts
+@@ -80,7 +80,7 @@ describe("installation", () => {
+         Installation.Service.use((svc) => svc.latest("npm")).pipe(Effect.provide(layer)),
+       )
+       expect(result).toBe("1.5.0")
+-      expect(calls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
++      expect(calls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
+     })
+ 
+     test("reads bun versions via registry", async () => {
+@@ -94,7 +94,7 @@ describe("installation", () => {
+         Installation.Service.use((svc) => svc.latest("bun")).pipe(Effect.provide(layer)),
+       )
+       expect(result).toBe("1.6.0")
+-      expect(calls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
++      expect(calls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
+     })
+ 
+     test("reads pnpm versions via registry", async () => {
+@@ -108,7 +108,7 @@ describe("installation", () => {
+         Installation.Service.use((svc) => svc.latest("pnpm")).pipe(Effect.provide(layer)),
+       )
+       expect(result).toBe("1.7.0")
+-      expect(calls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
++      expect(calls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
+     })
+ 
+     test("reads scoop manifest versions", async () => {

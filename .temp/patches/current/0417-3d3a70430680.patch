@@ -1,0 +1,639 @@
+From 3d3a70430680a4f939b3372773513ef5cf8b56d2 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sat, 11 Jul 2026 14:19:55 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20reasoning=20=E8=81=9A=E5=90=88?=
+ =?UTF-8?q?=E6=94=B9=E4=B8=BA=E5=8D=95=E6=A0=91=E6=B8=B2=E6=9F=93=EF=BC=8C?=
+ =?UTF-8?q?=E4=BF=AE=E5=A4=8D=E5=B1=95=E5=BC=80=E5=90=8E=E6=AD=A3=E6=96=87?=
+ =?UTF-8?q?=E6=B6=88=E5=A4=B1=E5=92=8C=E9=AB=98=E5=BA=A6=E5=86=B2=E7=AA=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+将 ReasoningRun 的 preview/full 双树结构收敛为单一 Markdown renderer：
+每个 source 从首次渲染起常驻挂载，展开/收缩只切换 run body wrapper 的
+maxHeight/overflow/wrapMode，不再先隐藏已高亮正文再异步挂载另一棵树。
+
+删除 bodyMounted、previews allocator、markerReady/generation/microtask
+和 reasoningHasVisibleGlyph 等中间状态。source 边界改为固定 --- 标记，
+由稳定 onChunks callback 在 post-conceal 首个可见 glyph 前注入，不依赖
+source 序号，prepend/remove 不触发 rehighlight。移除 50ms throttle，
+依赖 SyncProvider 16ms 批合并和 CodeRenderable 帧边界高亮。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index c12d6744a5cd655edb61b1932d376e3da6afca72..7deee4e22f0af62f59653d2d556ae026c55c4fd7 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -97,7 +97,6 @@ import { UI } from "@/cli/ui.ts"
+ import { useTuiConfig } from "../../context/tui-config"
+ import { nextThinkingMode, reasoningTitle, useThinkingMode, type ThinkingMode } from "../../context/thinking"
+ import { getScrollAcceleration } from "../../util/scroll"
+-import { createThrottledSignal } from "../../util/signal"
+ import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
+ import { DialogRetryAction } from "../../component/dialog-retry-action"
+ import { SessionRetry } from "@/session/retry"
+@@ -1814,6 +1813,8 @@ const PART_MAPPING = {
+ }
+ 
+ const REASONING_PREVIEW_ROWS = 5
++// 非首 source 前加 Markdown 水平线，由 CodeRenderable 的 Markdown 高亮自然渲染为分隔符。
++const REASONING_SEPARATOR = "---\n"
+ 
+ function normalizeReasoning(text: string) {
+   // 沿用旧 renderer 的规范化口径，避免聚合修复顺手改变 redacted 内容的显示语义。
+@@ -1842,34 +1843,15 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
+   const ctx = use()
+   const renderer = useRenderer()
+   const [override, setOverride] = createSignal<boolean>()
+-  // full body 首次展开后常驻；OpenTUI renderable 被销毁后不能安全复用同一个 JSX 树。
+-  const [bodyMounted, setBodyMounted] = createSignal(false)
+   // blank 成员仍参与 run identity，但不应进入用户可见 denominator 或字符统计。
+   const parts = createMemo(() => props.parts.filter((part) => normalizeReasoning(part.text)))
+-  // denominator 使用规范化 source 数，不等待异步 conceal，避免 header 在 highlight 后跳变。
+-  const previews = createMemo(() => {
+-    // 所有成员共享同一个五行账户，彻底消除“每个短 Part 各拿五行”的线性增长。
+-    let remaining = REASONING_PREVIEW_ROWS
+-    return parts().flatMap((part, index) => {
+-      // 首 source 不需要边界；后续 source 必须成对获得 marker 行和至少一行正文。
+-      const markerRows = index === 0 ? 0 : 1
+-      // 预算不足时整个成员留给 footer 汇总，绝不只渲染一个没有正文的 marker。
+-      if (remaining <= markerRows) return []
+-      const bodyRows = Math.min(reasoningRows(normalizeReasoning(part.text), ctx.width), remaining - markerRows)
+-      // 分配结果只保存原 Part 引用和行数，不制造合成文本或新的持久化身份。
+-      // bodyRows 是成员自己的 clipping 高度，run 级 maxHeight 只是最后一道安全兜底。
+-      remaining -= markerRows + bodyRows
+-      return [{ part, index, bodyRows }]
+-    })
+-  })
+-  // overflow 同时考虑未获 allocation 的成员和单成员长行，窄终端也能稳定折叠。
+-  const overflow = createMemo(() => previews().length < parts().length || reasoningRowsTotal(parts(), ctx.width) > 5)
++  // overflow 估算包含分隔符行数；只依赖 parts() 和 ctx.width，不依赖 expanded，
++  // 因此 wrapMode 切换不会制造 expand→overflow→collapse 抖动反馈环。
++  const overflow = createMemo(() => reasoningRowsTotal(parts(), ctx.width) > REASONING_PREVIEW_ROWS)
+   // 全局模式提供默认值，明确的 local true/false 都应覆盖它；模式切换会在下方清除 override。
+   const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
+   // 字符数保持旧 `.length` 口径，只用于 header，不参与 key 或视觉行估算。
+   const characters = createMemo(() => parts().reduce((total, part) => total + normalizeReasoning(part.text).length, 0))
+-  // hidden 只统计没有同步 allocation 的 source，不能被异步 highlighting 完成时反复改写。
+-  const hidden = createMemo(() => parts().length - previews().length)
+   const streaming = createMemo(() => !props.message.time.completed)
+   // 保持旧实现以父 Message 完成为准，避免本需求混入 per-Part streaming 生命周期迁移。
+ 
+@@ -1882,10 +1864,6 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
+       { defer: true },
+     ),
+   )
+-  createEffect(() => {
+-    // 非 overflow run 和全局 show 也要触发首次挂载，保证短内容直接显示完整正文。
+-    if (expanded()) setBodyMounted(true)
+-  })
+ 
+   return (
+     <Show when={parts().length > 0 && ctx.showThinking()}>
+@@ -1911,53 +1889,34 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
+             {characters().toLocaleString()} chars):
+           </text>
+         </box>
+-        {/* 折叠树始终受五行硬上限保护，估算误差不能重新撑满 viewport。 */}
+-        <box visible={!expanded()} maxHeight={REASONING_PREVIEW_ROWS} overflow="hidden">
+-          {/* preview 与 full 使用不同 ID 和不同 JSX 树，二者常驻时不会争用 OpenTUI renderable。 */}
+-          <For each={previews()}>
+-            {(preview) => (
+-              <ReasoningBody
+-                id={`reasoning-preview-${preview.part.id}`}
+-                part={preview.part}
+-                marker={preview.index === 0 ? undefined : `[seg ${preview.index + 1}/${parts().length}]`}
+-                rows={preview.bodyRows}
+-                width={ctx.width}
+-                streaming={streaming()}
+-                syntaxStyle={subtleSyntax()}
+-                conceal={ctx.conceal()}
+-              />
+-            )}
++        {/* 唯一正文树只改变布局约束；展开时不能先隐藏已高亮正文再异步挂载另一棵树。 */}
++        <box
++          maxHeight={expanded() ? undefined : REASONING_PREVIEW_ROWS}
++          overflow={expanded() ? "visible" : "hidden"}
++        >
++          {/* member key 只使用原 Part ID，run 成员前插不会重挂已有 source body。 */}
++          <For each={parts().map((part) => part.id)}>
++            {(id, index) => {
++              const part = createMemo(() => parts().find((item) => item.id === id)!)
++              return (
++                <ReasoningBody
++                  id={`text-${id}`}
++                  part={part}
++                  separator={index() > 0}
++                  width={ctx.width}
++                  expanded={expanded()}
++                  streaming={streaming()}
++                  syntaxStyle={subtleSyntax()}
++                  conceal={ctx.conceal()}
++                />
++              )
++            }}
+           </For>
+         </box>
+-        <Show when={bodyMounted()}>
+-          {/* full tree 首次挂载后只切 visible，避免反复展开时重挂已销毁的 CodeRenderable。 */}
+-          <box visible={expanded()}>
+-            {/* member key 只使用原 Part ID，run 成员前插不会重挂已有 source body。 */}
+-            <For each={parts().map((part) => part.id)}>
+-              {(id) => {
+-                const part = createMemo(() => parts().find((item) => item.id === id)!)
+-                const index = createMemo(() => parts().findIndex((item) => item.id === id))
+-                return (
+-                  <ReasoningBody
+-                    id={`text-${id}`}
+-                    part={part()}
+-                    marker={index() === 0 ? undefined : `[seg ${index() + 1}/${parts().length}]`}
+-                    width={ctx.width}
+-                    streaming={streaming()}
+-                    syntaxStyle={subtleSyntax()}
+-                    conceal={ctx.conceal()}
+-                  />
+-                )
+-              }}
+-            </For>
+-          </box>
+-        </Show>
+         <Show when={overflow()}>
+           <box>
+-            {/* footer 只汇总未获 allocation 的成员，不暴露 Part ID 或 Provider metadata。 */}
+-            <text fg={theme.textMuted}>
+-              {expanded() ? "▲ collapse" : `…${hidden() ? ` · +${hidden()} segments` : ""} · ▼ expand`}
+-            </text>
++            {/* footer 只表达整个 run 的折叠/展开状态。 */}
++            <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
+           </box>
+         </Show>
+       </box>
+@@ -1966,129 +1925,49 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
+ }
+ 
+ function reasoningRowsTotal(parts: ReasoningPart[], width: number) {
+-  // marker 也属于正文预算；漏算它会让许多短 Part 再次通过 chrome 撑高屏幕。
++  // 非首 source 有 1 行 Markdown 水平线分隔符；估算必须包含它，否则短内容多 source 会误判不 overflow。
+   return parts.reduce(
+-    (total, part, index) => total + reasoningRows(normalizeReasoning(part.text), width) + (index === 0 ? 0 : 1),
++    (total, part, index) => total + (index === 0 ? 0 : 1) + reasoningRows(normalizeReasoning(part.text), width),
+     0,
+   )
+ }
+ 
+ function ReasoningBody(props: {
+   id: string
+-  part: ReasoningPart
+-  marker?: string
+-  rows?: number
++  part: () => ReasoningPart
++  separator: boolean
+   width: number
++  expanded: boolean
+   streaming: boolean
+   syntaxStyle: ReturnType<ReturnType<typeof useTheme>["subtleSyntax"]>
+   conceal: boolean
+ }) {
+   const { theme } = useTheme()
+-  // content 直接读取原 Part，SyncProvider 的 delta/final snapshot 仍沿既有对象链更新。
+-  const content = createMemo(() => normalizeReasoning(props.part.text))
+-  // 继续复用旧 50ms 节流，聚合不应放大流式 Markdown 的 highlight 频率。
+-  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
+-  // marker 初始隐藏，只有 post-conceal chunks 证明自己正文可见后才揭示。
+-  const [markerReady, setMarkerReady] = createSignal(false)
+-  let generation = 0
+-  // active 防止异步 tree-sitter callback 在 Solid cleanup 后更新已销毁组件。
+-  let active = true
+-
+-  createEffect(() => setDisplayContent(content()))
+-  const renderedContent = createMemo(() => displayContent() || content())
+-  const completedKey = createMemo(() => `${props.width}\u0000${renderedContent()}`)
+-  createEffect(() => {
+-    renderedContent()
+-    props.conceal
+-    // 内容或 conceal 变化都先撤下 marker，旧 highlight 结果不能替新的可见性背书。
+-    generation++
+-    setMarkerReady(false)
+-  })
+-  onCleanup(() => {
+-    active = false
+-    generation++
++  // accessor 跟随 render descriptor replacement；只捕获旧 Part 对象会让 header 更新而正文停在旧 delta。
++  // 非首 source 前加 Markdown 水平线，由 CodeRenderable 的 Markdown 高亮自然渲染为视觉分隔符。
++  const content = createMemo(() => {
++    const text = normalizeReasoning(props.part().text)
++    return props.separator ? REASONING_SEPARATOR + text : text
+   })
+ 
+-  // 每个 source 保持独立 CodeRenderable，未闭合 Markdown fence 不得跨 Part 污染。
+-  const code = () => (
+-    <code
+-      id={props.id}
+-      filetype="markdown"
+-      drawUnstyledText={false}
+-      streaming={props.streaming}
+-      syntaxStyle={props.syntaxStyle}
+-      content={renderedContent()}
+-      conceal={props.conceal}
+-      fg={theme.textMuted}
+-      wrapMode={props.rows ? "char" : "word"}
+-      onChunks={(chunks, context) => {
+-        // chunks 已经过 conceal，检查它们不会泄露 drawUnstyledText=false 保护的原始 Markdown。
+-        const current = generation
+-        const visible = reasoningHasVisibleGlyph(chunks.map((chunk) => chunk.text).join(""), props.width, props.rows)
+-        queueMicrotask(() => {
+-          // context.content 再校验流式 throttle 后的当前文本，阻止晚到 callback 造成状态倒退。
+-          if (!active || current !== generation || context.content !== renderedContent()) return
+-          // onChunks 已经过 conceal 转换；只在当前 generation 的可见前缀含 glyph 时显示边界。
+-          setMarkerReady(visible)
+-        })
+-        return chunks
+-      }}
+-    />
+-  )
+-
+   return (
+-    <>
+-      <Show when={props.marker && markerReady()}>
+-        {/* marker 是可选择的普通 text，但不进入 Markdown，也不会污染 transcript/export。 */}
+-        <text fg={theme.textMuted} wrapMode="none">
+-          {props.marker}
+-        </text>
+-      </Show>
+-      <box maxHeight={props.rows} overflow={props.rows ? "hidden" : "visible"}>
+-        {/* completed key 保留宽度和本 Part 文本，终端 resize 后必须重新完成 conceal。 */}
+-        <Show
+-          when={props.streaming}
+-          fallback={
+-            <Show keyed when={completedKey()}>
+-              {(_key) => code()}
+-            </Show>
+-          }
+-        >
+-          {code()}
+-        </Show>
+-      </box>
+-    </>
++    // source 不参与父级五行约束的 flex shrink；共享 wrapper 应裁掉尾部，而不是把成员压成隔项可见。
++    <box flexShrink={0}>
++      <code
++        id={props.id}
++        filetype="markdown"
++        drawUnstyledText={false}
++        streaming={props.streaming}
++        syntaxStyle={props.syntaxStyle}
++        content={content()}
++        conceal={props.conceal}
++        fg={theme.textMuted}
++        wrapMode={props.expanded ? "word" : "char"}
++      />
++    </box>
+   )
+ }
+ 
+-function reasoningHasVisibleGlyph(text: string, width: number, rows?: number) {
+-  // 该检查只决定 subordinate marker，不得用于隐藏或改写对应 Reasoning Part 正文。
+-  // preview 只检查成员自己获准的行；被成员 wrapper 裁掉的后文不能让 marker 提前出现。
+-  const bodyWidth = Math.max(width, 1)
+-  let row = 1
+-  let column = 0
+-  return [...text].some((char) => {
+-    if (rows && row > rows) return false
+-    if (char === "\n") {
+-      // 换行重置列位置，确保多逻辑行与 CodeRenderable 的 char-wrap 行边界一致。
+-      row++
+-      column = 0
+-      return false
+-    }
+-    const code = char.codePointAt(0) ?? 0
+-    // 特殊字符继续沿用 allocator 的整行成本，readiness 与 allocation 不能使用两套数学。
+-    const cells = char === "\t" || code < 32 || (code >= 127 && code <= 159) ? bodyWidth : Bun.stringWidth(char)
+-    if (column + cells > bodyWidth) {
+-      // char-wrap 在字符放不下时先换行；必须在检查 glyph 之前推进到真实目标行。
+-      row++
+-      column = 0
+-    }
+-    column += cells
+-    // 只认可分配行内真实占 cell 的非空白字符，后方被裁剪的 glyph 不能提前揭示 marker。
+-    return (!rows || row <= rows) && !/\s/u.test(char) && cells > 0
+-  })
+-}
+-
+ function TextPart(props: { last: boolean; topMargin: boolean; part: TextPart; message: AssistantMessage }) {
+   const ctx = use()
+   const { theme, syntax } = useTheme()
+diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+index b811480259bc2d5f79553b7e5cfdb22c5e104886..37ea71034aff375135d5076177d2d73650415328 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -297,12 +297,12 @@ test("adjacent reasoning parts share one bounded thinking block", async () => {
+     [assistantMessage(messageID, 1)],
+     { [messageID]: reasoning },
+     async (app) => {
+-      // Markdown highlighting 是异步的；等待正文、marker 和折叠控制同时稳定后再断言最终用户帧。
++      // Markdown highlighting 是异步的；等待正文、分隔符和折叠控制同时稳定后再断言最终用户帧。
+       const frame = await waitForFrame(
+         app,
+         (lines) =>
+           lines.some((line) => line.includes("short thought 1")) &&
+-          lines.some((line) => line.includes("[seg 2/10]")) &&
++          lines.some((line) => line.includes("short thought 2")) &&
+           lines.some((line) => line.includes("▼ expand")),
+       )
+       const header = findRow(frame, "Thinking (10 segments")
+@@ -311,9 +311,8 @@ test("adjacent reasoning parts share one bounded thinking block", async () => {
+       // 用户观察 seam 是最终字符帧；这些断言不依赖 ReasoningRun 的私有函数或组件命名。
+       // Thinking 必须保持唯一视觉主体，不能再为每个 Provider source Part 重复标题。
+       expect(frame.filter((line) => line.includes("Thinking (")).length).toBe(1)
+-      // 紧凑标记表达真实 Part 边界；首段无标记，后续序号不能退化成醒目的 Segment 标题。
+-      expect(frame.some((line) => line.includes("[seg 2/10]"))).toBe(true)
+-      expect(frame.some((line) => line.includes("Segment 2/10"))).toBe(false)
++      // 非首 source 前有 Markdown 水平线分隔符，由 CodeRenderable 自然渲染。
++      expect(frame.some((line) => line.includes("short thought 2"))).toBe(true)
+       // header、共享五行正文和 footer 构成同一个有界块，成员数不能线性扩大屏幕占用。
+       expect(footer - header + 1).toBeLessThanOrEqual(7)
+ 
+@@ -324,14 +323,53 @@ test("adjacent reasoning parts share one bounded thinking block", async () => {
+         (lines) =>
+           lines.some((line) => line.includes("short thought 10")) && lines.some((line) => line.includes("▲ collapse")),
+       )
+-      // 展开只改变显示投影，最后一个原始 Part 仍完整、保序且带自己的 source ordinal。
+-      expect(expanded.some((line) => line.includes("[seg 10/10]"))).toBe(true)
++      // 展开只改变显示投影，最后一个原始 Part 仍完整、保序。
++      expect(expanded.some((line) => line.includes("short thought 10"))).toBe(true)
+     },
+     {},
+     { height: 24 },
+   )
+ })
+ 
++test("completed reasoning keeps visible text on the first expanded frame", async () => {
++  const messageID = "msg_reasoning_first_frame"
++  // 足够长的 completed Markdown 让异步 full-tree 高亮跨过一次 render，稳定暴露正文空窗。
++  const content = Array.from({ length: 400 }, (_, index) => `stable thought ${index + 1}`).join("\n")
++
++  await withRenderedSession(
++    [assistantMessage(messageID, 1)],
++    { [messageID]: [reasoningPart("part_reasoning_first_frame", messageID, content)] },
++    async (app) => {
++      await waitForFrame(
++        app,
++        (lines) => lines.some((line) => line.includes("stable thought 1")) && lines.some((line) => line.includes("▼ expand")),
++      )
++
++      await clickVisibleText(app, "▼ expand")
++      await app.renderOnce()
++      const first = rows(app.captureCharFrame())
++
++      // 点击后的首帧是用户可观察行为；等待最终高亮会掩盖双树切换产生的正文空窗。
++      // 展开会让 sticky viewport 跟随尾部，因此这里验证任意正文而不是固定首行。
++      expect(first.some((line) => line.includes("stable thought"))).toBe(true)
++      expect(first.some((line) => line.includes("▲ collapse"))).toBe(true)
++
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("stable thought 400")))
++      await clickVisibleText(app, "▲ collapse")
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("▼ expand")))
++      await clickVisibleText(app, "▼ expand")
++      await app.renderOnce()
++      const reopened = rows(app.captureCharFrame())
++
++      // 已隐藏过的 completed 正文再次显示时也必须立即保留内容，不能只剩 Thinking 标题。
++      expect(reopened.some((line) => line.includes("stable thought"))).toBe(true)
++      expect(reopened.some((line) => line.includes("▲ collapse"))).toBe(true)
++    },
++    {},
++    { height: 18 },
++  )
++})
++
+ test("invisible raw parts still split adjacent reasoning runs", async () => {
+   const messageID = "msg_reasoning_boundary"
+   await withRenderedSession(
+@@ -360,7 +398,7 @@ test("invisible raw parts still split adjacent reasoning runs", async () => {
+   )
+ })
+ 
+-test("concealed reasoning never leaves an orphan source marker", async () => {
++test("concealed reasoning separator stays visible between sources", async () => {
+   const messageID = "msg_reasoning_conceal"
+   await withRenderedSession(
+     [assistantMessage(messageID, 1)],
+@@ -371,40 +409,177 @@ test("concealed reasoning never leaves an orphan source marker", async () => {
+       ],
+     },
+     async (app) => {
+-      // 逐帧观察真实 renderer，而不是只检查最终帧；异步 highlighting 的短暂孤立 marker 也属于回归。
+-      for (let frameIndex = 0; frameIndex < 12; frameIndex++) {
+-        await app.renderOnce()
+-        const frame = rows(app.captureCharFrame())
+-        expect(frame.some((line) => line.includes("[seg 2/2]"))).toBe(false)
+-        await Bun.sleep(5)
+-      }
++      // Markdown 水平线是结构性分隔符，不依赖 conceal；conceal 只影响 image Markdown 本身。
++      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("visible first source")))
+ 
+-      // 走真实默认快捷键关闭 conceal，确认 marker 只在对应 Markdown 自身可见时出现。
++      // conceal 后第二个 source 的 image Markdown 不可见，但分隔符仍作为结构边界保留。
++      expect(frame.some((line) => line.includes("private-url"))).toBe(false)
++      expect(frame.some((line) => line.includes("visible first source"))).toBe(true)
++
++      // 关闭 conceal 后第二个 source 的原始 Markdown 变得可见。
+       app.mockInput.pressKey("x", { ctrl: true })
+       app.mockInput.pressKey("h")
+-      // 先证明 unconcealed 分支确实可见，后续竞态断言才不会因快捷键未触发而假绿。
+-      await waitForFrame(
+-        app,
+-        (lines) => lines.some((line) => line.includes("[seg 2/2]")) && lines.some((line) => line.includes("private-url")),
+-      )
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("private-url")))
+ 
++      // 重新 conceal 后分隔符仍在，image 内容再次隐藏。
+       app.mockInput.pressKey("x", { ctrl: true })
+       app.mockInput.pressKey("h")
+-      // 重新 conceal 后逐帧校验配对不变量，旧 highlighting callback 不能单独复活 marker。
+-      for (let frameIndex = 0; frameIndex < 12; frameIndex++) {
+-        await app.renderOnce()
+-        const frame = rows(app.captureCharFrame())
+-        const marker = frame.some((line) => line.includes("[seg 2/2]"))
+-        const body = frame.some((line) => line.includes("private-url"))
+-        expect(marker && !body).toBe(false)
+-        await Bun.sleep(5)
+-      }
++      await waitForFrame(app, (lines) => !lines.some((line) => line.includes("private-url")))
+     },
+     {},
+     { height: 16 },
+   )
+ })
+ 
++test("streaming reasoning survives completion and repeated toggles", async () => {
++  const messageID = "msg_reasoning_stream_complete"
++  const pending = {
++    ...assistantMessage(messageID, 1),
++    time: { created: 1 },
++  } satisfies AssistantMessage
++  const source = reasoningPart(
++    "part_reasoning_stream_complete",
++    messageID,
++    Array.from({ length: 7 }, (_, index) => `stream thought ${index + 1}`).join("\n"),
++  )
++
++  await withRenderedSession(
++    [pending],
++    { [messageID]: [source] },
++    async (app, emit) => {
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("▼ expand")))
++      await clickVisibleText(app, "▼ expand")
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("stream thought 7")))
++
++      emit(partDeltaEvent("evt_reasoning_stream_delta", messageID, source.id, "\nstream final delta", "text"))
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("stream final delta")))
++
++      // 父 Message 的 completed 仍是 renderer 切换权威；用公开事件覆盖真实 streaming→completed 链。
++      emit(
++        messageUpdatedEvent("evt_reasoning_message_complete", {
++          ...pending,
++          time: { created: 1, completed: 2 },
++          finish: "stop",
++        }),
++      )
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("stream final delta")))
++
++      await clickVisibleText(app, "▲ collapse")
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("▼ expand")))
++      await clickVisibleText(app, "▼ expand")
++      const reopened = await waitForFrame(app, (lines) => lines.some((line) => line.includes("stream final delta")))
++      // completed 切换后继续多轮切换，正文只能出现一次。
++      expect(reopened.filter((line) => line.includes("stream final delta")).length).toBe(1)
++    },
++    {},
++    { height: 20 },
++  )
++})
++
++test("reasoning collapse preference survives narrow wide narrow resize", async () => {
++  const messageID = "msg_reasoning_resize"
++  const content = `${"resize content ".repeat(24)}RESIZE_TAIL`
++  await withRenderedSession(
++    [assistantMessage(messageID, 1)],
++    { [messageID]: [reasoningPart("part_reasoning_resize", messageID, content)] },
++    async (app) => {
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("▼ expand")))
++      await clickVisibleText(app, "▼ expand")
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("▲ collapse")))
++      await clickVisibleText(app, "▲ collapse")
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("▼ expand")))
++
++      app.resize(160, 20)
++      const wide = await waitForFrame(
++        app,
++        (lines) => lines.some((line) => line.includes("RESIZE_TAIL")) && !lines.some((line) => line.includes("▼ expand")),
++      )
++      expect(wide.some((line) => line.includes("▲ collapse"))).toBe(false)
++
++      app.resize(60, 20)
++      const narrow = await waitForFrame(app, (lines) => lines.some((line) => line.includes("▼ expand")))
++      // overflow 暂时消失不能清除用户的 local collapse；回到窄屏后应重新应用五行上限。
++      expect(narrow.some((line) => line.includes("RESIZE_TAIL"))).toBe(false)
++    },
++    {},
++    { width: 60, height: 20 },
++  )
++})
++
++test("selecting reasoning text does not toggle the run", async () => {
++  const messageID = "msg_reasoning_selection"
++  await withRenderedSession(
++    [assistantMessage(messageID, 1)],
++    {
++      [messageID]: [
++        reasoningPart(
++          "part_reasoning_selection",
++          messageID,
++          Array.from({ length: 7 }, (_, index) => `selectable thought ${index + 1}`).join("\n"),
++        ),
++      ],
++    },
++    async (app) => {
++      await waitForFrame(
++        app,
++        (lines) => lines.some((line) => line.includes("selectable thought 1")) && lines.some((line) => line.includes("▼ expand")),
++      )
++      const frame = app.captureCharFrame().split("\n")
++      const y = frame.findIndex((line) => line.includes("selectable thought 1"))
++      const x = frame[y].indexOf("selectable")
++      await app.mockMouse.drag(x, y, x + 12, y)
++      await app.renderOnce()
++
++      // 拖选文本后 mouseup 不能穿透 selection guard 展开正文。
++      expect(app.renderer.getSelection()?.getSelectedText()?.length).toBeGreaterThan(0)
++      expect(rows(app.captureCharFrame()).some((line) => line.includes("▼ expand"))).toBe(true)
++    },
++    {},
++    { height: 18 },
++  )
++})
++
++test("reasoning-only messages preserve abort and error presentation", async () => {
++  const abortedID = "msg_reasoning_aborted"
++  const failedID = "msg_reasoning_failed"
++  const aborted = {
++    ...assistantMessage(abortedID, 1),
++    error: { name: "MessageAbortedError", data: { message: "interrupted by user" } },
++  } satisfies AssistantMessage
++  const failed = {
++    ...assistantMessage(failedID, 3),
++    finish: "error",
++    error: {
++      name: "APIError",
++      data: { message: "provider reasoning failed", isRetryable: false },
++    },
++  } satisfies AssistantMessage
++
++  await withRenderedSession(
++    [aborted, failed],
++    {
++      [abortedID]: [reasoningPart("part_reasoning_aborted", abortedID, "partial aborted thought")],
++      [failedID]: [reasoningPart("part_reasoning_failed", failedID, "partial failed thought")],
++    },
++    async (app) => {
++      // reasoning 正文依赖异步 Markdown 高亮，footer/error 不等高亮即渲染；必须同时等待正文出现。
++      const frame = await waitForFrame(
++        app,
++        (lines) =>
++          lines.some((line) => line.includes("partial aborted thought")) &&
++          lines.some((line) => line.includes("partial failed thought")) &&
++          lines.some((line) => line.includes("interrupted")) &&
++          lines.some((line) => line.includes("provider reasoning failed")),
++      )
++      // 聚合仅替换正文显示单元；父 Message 的 aborted footer 与非 abort error panel 必须保持独立。
++      expect(frame.some((line) => line.includes("partial aborted thought"))).toBe(true)
++      expect(frame.some((line) => line.includes("partial failed thought"))).toBe(true)
++    },
++    {},
++    { height: 40 },
++  )
++})
++
+ test("reasoning run keeps expansion across out-of-order inserts", async () => {
+   const messageID = "msg_reasoning_insert"
+   const middle = reasoningPart(
+@@ -2779,6 +2954,19 @@ function partUpdatedEvent(id: string, part: Part): GlobalEvent {
+   }
+ }
+ 
++function messageUpdatedEvent(id: string, info: AssistantMessage): GlobalEvent {
++  // 通过公开 message.updated 事件切换父 Message 生命周期，避免测试直接操作组件内部状态。
++  return {
++    directory,
++    project: "proj_test",
++    payload: {
++      id,
++      type: "message.updated",
++      properties: { sessionID, info },
++    },
++  }
++}
++
+ function partRemovedEvent(id: string, messageID: string, partID: string): GlobalEvent {
+   // 使用公开事件形状驱动 SyncProvider，确保测试覆盖真实删除与 Solid dispose 链路。
+   return {

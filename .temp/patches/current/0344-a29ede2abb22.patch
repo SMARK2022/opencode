@@ -1,0 +1,140 @@
+From a29ede2abb221c8bbfebba203e48f1bb5e656863 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 28 Jun 2026 14:06:12 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E4=BF=AE=E5=A4=8D=20BlockTool=20pr?=
+ =?UTF-8?q?eview/body=20=E9=9A=90=E8=97=8F=E5=8C=BA=E5=9F=9F=E6=B3=84?=
+ =?UTF-8?q?=E6=BC=8F=E9=A6=96=E8=A1=8C=E5=AF=BC=E8=87=B4=E5=91=BD=E4=BB=A4?=
+ =?UTF-8?q?=E9=87=8D=E5=A4=8D=E6=98=BE=E7=A4=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+a1a2952e2c 将 preview/body 隐藏策略从 <Show> 互斥改为 maxHeight=0 + overflow=hidden
+常驻隐藏，但 OpenTUI updateFromLayout 中 Math.max(layout.height, 1) 会将高度 0
+强制为 1 行，导致隐藏区域泄漏首行内容。Shell 工具块的 preview 和 body 都含
+\$ command，泄漏后命令在界面上出现两次。
+
+将 maxHeight=0 + overflow=hidden 替换为 visible={false}（display:none），节点
+常驻不销毁（保持 a1a2952e2c 对折叠/展开空白的修复），同时彻底从布局树移除
+避免泄漏。无 preview 的块（TodoWrite/Question）仍保留 maxHeight=previewLines
+裁剪路径。新增 2 个行为级回归测试验证非折叠态和展开态命令只出现一次。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index b7891f168fe24d6cf28211243532cf18f7aa9f50..109452362d1607bd5fd55b5283f0eafd58ef8b8f 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -2410,10 +2410,12 @@ function BlockTool(props: {
+   const hasPreview = createMemo(() => props.preview !== undefined)
+   // OpenTUI 的 renderable 在被 <Show> 销毁后无法可靠重新挂载同一个 JSX 对象，
+   // 会导致折叠→展开→再折叠后内容区变为空白。因此 preview 和 body 一旦挂载就
+-  // 常驻，折叠态通过 maxHeight=0 + overflow=hidden 隐藏，而非卸载 DOM 节点。
++  // 常驻，通过 visible 切换显示（display:none/flex），而非卸载 DOM 节点。
++  // 不使用 maxHeight=0 + overflow=hidden：OpenTUI updateFromLayout 中
++  // Math.max(layout.height, 1) 会将高度 0 强制为 1 行，导致隐藏区域泄漏首行。
+   const [bodyMounted, setBodyMounted] = createSignal(!hasPreview() || !collapsed())
+   // body 延迟到首次展开时才挂载，避免在首屏就付出 diff/tree-sitter 渲染开销；
+-  // 一旦挂载就不再卸载，后续折叠仅靠布局裁剪隐藏。
++  // 一旦挂载就不再卸载，后续折叠仅靠 visible=false 隐藏。
+   createEffect(() => {
+     if (!hasPreview() || !collapsed()) setBodyMounted(true)
+   })
+@@ -2462,23 +2464,23 @@ function BlockTool(props: {
+       <Show when={props.autoReview !== false}>
+         <ToolAutoReviewLine />
+       </Show>
+-      {/* preview 区：折叠态可见（marginTop=1 撑出间距），展开态用 maxHeight=0 隐藏 */}
++      {/* preview 区：折叠态 visible=true 可见，展开态 visible=false 隐藏（display:none） */}
+       <Show when={hasPreview()}>
+         <box
+           marginTop={collapsed() ? 1 : 0}
+-          maxHeight={collapsed() ? undefined : 0}
+-          overflow={collapsed() ? undefined : "hidden"}
++          visible={collapsed()}
+         >
+           {props.preview}
+         </box>
+       </Show>
+-      {/* body 区：有 preview 时延迟挂载；折叠态若有 preview 则 maxHeight=0 隐藏，
++      {/* body 区：有 preview 时延迟挂载；折叠态若有 preview 则 visible=false 隐藏，
+           无 preview 时退回 previewLines 裁剪（兼容 TodoWrite 等无 preview 的块） */}
+       <Show when={bodyMounted()}>
+         <box
+           marginTop={hasPreview() && collapsed() ? 0 : 1}
+-          maxHeight={collapsed() ? (hasPreview() ? 0 : previewLines()) : undefined}
+-          overflow={collapsed() ? "hidden" : undefined}
++          visible={!collapsed() || !hasPreview()}
++          maxHeight={!hasPreview() && collapsed() ? previewLines() : undefined}
++          overflow={!hasPreview() && collapsed() ? "hidden" : undefined}
+         >
+           {props.children}
+         </box>
+diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+index a99b549f4fed934e085a25ab6909f88acf631630..5fc1c5612379033ebab06551a5e151055c9b9aec 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -1338,6 +1338,65 @@ test("collapsed completed shell preview keeps the auto review result line", asyn
+   )
+ })
+ 
++// BlockTool 的 preview/body 互斥回归：非折叠态下 preview 的 maxHeight=0 会因
++// OpenTUI updateFromLayout 中 Math.max(layout.height, 1) 泄漏 1 行，导致 shell
++// 命令行同时出现在 preview 泄漏行和 body 中。该测试在 maxHeight=0 实现下会失败。
++test("non-collapsed shell block shows command once", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_shell_nocollapse", 1)],
++    {
++      msg_shell_nocollapse: [
++        completedToolPart(
++          "part_shell_nocollapse",
++          "msg_shell_nocollapse",
++          "bash",
++          { command: "echo hello" },
++          { output: "hello\n" },
++          "hello\n",
++        ),
++      ],
++    },
++    async (app) => {
++      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("echo hello")))
++      // preview 和 body 都含 "$ echo hello"；互斥正确时只应出现 1 次
++      const commandRows = frame.filter((line) => line.includes("$ echo hello"))
++      expect(commandRows.length).toBe(1)
++    },
++  )
++})
++
++// 展开态 preview 的 maxHeight=0 泄漏首行，与 body 的 $ echo test 重复。
++test("expanded shell block does not leak preview first row", async () => {
++  const longOutput = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n")
++  await withRenderedSession(
++    [assistantMessage("msg_shell_expand_leak", 1)],
++    {
++      msg_shell_expand_leak: [
++        completedToolPart(
++          "part_shell_expand_leak",
++          "msg_shell_expand_leak",
++          "bash",
++          { command: "echo test" },
++          { output: longOutput },
++          longOutput,
++        ),
++      ],
++    },
++    async (app) => {
++      // 先等折叠态出现，再点击展开
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
++      await clickVisibleText(app, "Click to expand")
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to collapse")))
++      // 展开态只有 body 可见（含 $ echo test）；preview 应被彻底隐藏
++      const frame = rows(app.captureCharFrame())
++      const commandRows = frame.filter((line) => line.includes("$ echo test"))
++      expect(commandRows.length).toBe(1)
++    },
++    {},
++    { height: 40 },
++  )
++})
++
+ test("errored shell tool keeps the denied auto review result line", async () => {
+   await withRenderedSession(
+     [assistantMessage("msg_auto_review_error", 1)],

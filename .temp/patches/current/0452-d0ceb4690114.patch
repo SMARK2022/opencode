@@ -1,0 +1,18 @@
+From d0ceb469011412b4ac5058a12d5fe4f247bdac79 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 17 Jul 2026 16:16:03 +0800
+Subject: [PATCH] =?UTF-8?q?chore(submodule):=20=E5=9B=BA=E5=AE=9A=20OpenTU?=
+ =?UTF-8?q?I=20=E6=B8=85=E7=90=86=E7=89=88=E6=9C=AC?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+将OpenCode的thirdparty submodule指向SMARK分支已推送的Windows verifier清理版本，保持源码发现路径与远端默认分支一致。
+
+diff --git a/thirdparty/opentui b/thirdparty/opentui
+index 15cecf50fe68f39ad03699a346b90f490983fb73..cbe492a538137842961d561c33f55fdb7587b40e 160000
+--- a/thirdparty/opentui
++++ b/thirdparty/opentui
+@@ -1 +1 @@
+-Subproject commit 15cecf50fe68f39ad03699a346b90f490983fb73
++Subproject commit cbe492a538137842961d561c33f55fdb7587b40e

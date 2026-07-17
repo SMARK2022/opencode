@@ -1,0 +1,24 @@
+From 6e38594c33fcd0692277fa1042d4f34b17188b7a Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 8 May 2026 17:54:02 +0800
+Subject: [PATCH] =?UTF-8?q?feat(dialog-session-list):=20=E5=A2=9E=E5=8A=A0?=
+ =?UTF-8?q?=E4=BC=9A=E8=AF=9D=E5=88=97=E8=A1=A8=E9=A2=84=E8=A7=88=E8=A1=8C?=
+ =?UTF-8?q?=E6=95=B0=E8=87=B3=202?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
+index c9d29c9149ad5d2e2fc60047a99aa3b1479b466a..d651d84f37a8e5bb3195ec6e303a833093f3beb4 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
+@@ -21,7 +21,7 @@ import type { TextPart } from "@opencode-ai/sdk/v2"
+ 
+ type WorkspaceStatus = "connected" | "connecting" | "disconnected" | "error"
+ 
+-const SESSION_LIST_PREVIEW_LINES = 1
++const SESSION_LIST_PREVIEW_LINES = 2
+ const SESSION_LIST_PREVIEW_MESSAGE_LIMIT = 20
+ const SESSION_LIST_PREVIEW_SESSION_LIMIT = 50
+ 

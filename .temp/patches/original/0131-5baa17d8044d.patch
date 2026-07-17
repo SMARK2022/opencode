@@ -1,0 +1,456 @@
+From 5baa17d8044d0c05ea4d3a67285f16b2c2f0305a Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Tue, 12 May 2026 23:50:36 +0800
+Subject: [PATCH] =?UTF-8?q?feat(line-ending):=20=E6=B7=BB=E5=8A=A0?=
+ =?UTF-8?q?=E8=A1=8C=E7=BB=93=E6=9D=9F=E7=AC=A6=E5=A4=84=E7=90=86=E5=8A=9F?=
+ =?UTF-8?q?=E8=83=BD=EF=BC=8C=E7=A1=AE=E4=BF=9D=E8=A1=A5=E4=B8=81=E5=BA=94?=
+ =?UTF-8?q?=E7=94=A8=E6=97=B6=E4=BF=9D=E7=95=99=E5=8E=9F=E5=A7=8B=E8=A1=8C?=
+ =?UTF-8?q?=E7=BB=93=E6=9D=9F=E7=AC=A6?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/patch/index.ts b/packages/opencode/src/patch/index.ts
+index fd5fff5625bd35454cb272455bc7c6024c85e2f9..4a4ecb4aef9a83fac8e5b9c4776a0d430cd3e37a 100644
+--- a/packages/opencode/src/patch/index.ts
++++ b/packages/opencode/src/patch/index.ts
+@@ -4,6 +4,7 @@ import * as fs from "fs/promises"
+ import { readFileSync } from "fs"
+ import * as Log from "@opencode-ai/core/util/log"
+ import * as Bom from "../util/bom"
++import { convertToLineEnding, detectLineEnding, splitLines } from "@/util/line-ending"
+ 
+ const log = Log.create({ service: "patch" })
+ 
+@@ -189,7 +190,7 @@ function stripHeredoc(input: string): string {
+ 
+ export function parsePatch(patchText: string): { hunks: Hunk[] } {
+   const cleaned = stripHeredoc(patchText.trim())
+-  const lines = cleaned.split("\n")
++  const lines = splitLines(cleaned)
+   const hunks: Hunk[] = []
+   let i = 0
+ 
+@@ -318,7 +319,7 @@ export function deriveNewContentsFromChunks(filePath: string, chunks: UpdateFile
+     throw new Error(`Failed to read file ${filePath}: ${error}`, { cause: error })
+   }
+ 
+-  let originalLines = originalContent.text.split("\n")
++  let originalLines = splitLines(originalContent.text)
+ 
+   // Drop trailing empty element for consistent line counting
+   if (originalLines.length > 0 && originalLines[originalLines.length - 1] === "") {
+@@ -333,7 +334,8 @@ export function deriveNewContentsFromChunks(filePath: string, chunks: UpdateFile
+     newLines.push("")
+   }
+ 
+-  const next = Bom.split(newLines.join("\n"))
++  // Patch matching works on logical lines; preserve the file's original line ending when writing back.
++  const next = Bom.split(convertToLineEnding(newLines.join("\n"), detectLineEnding(originalContent.text)))
+   const newContent = next.text
+ 
+   // Generate unified diff
+@@ -491,8 +493,8 @@ function seekSequence(lines: string[], pattern: string[], startIndex: number, eo
+ }
+ 
+ function generateUnifiedDiff(oldContent: string, newContent: string): string {
+-  const oldLines = oldContent.split("\n")
+-  const newLines = newContent.split("\n")
++  const oldLines = splitLines(oldContent)
++  const newLines = splitLines(newContent)
+ 
+   // Simple diff generation - in a real implementation you'd use a proper diff algorithm
+   let diff = "@@ -1 +1 @@\n"
+diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
+index 916e11f1e3e51b0a519684e187152b6749fa5f93..78697a305b0cb3df9bcadfd51e26e1194486d19c 100644
+--- a/packages/opencode/src/tool/apply_patch.ts
++++ b/packages/opencode/src/tool/apply_patch.ts
+@@ -14,6 +14,7 @@ import DESCRIPTION from "./apply_patch.txt"
+ import { File } from "../file"
+ import { Format } from "../format"
+ import * as Bom from "@/util/bom"
++import { normalizeLineEndings } from "@/util/line-ending"
+ 
+ export const Parameters = Schema.Struct({
+   patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
+@@ -79,11 +80,13 @@ export const ApplyPatchTool = Tool.define(
+             const newContent =
+               hunk.contents.length === 0 || hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`
+             const next = Bom.split(newContent)
+-            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, oldContent, next.text))
++            const diffOld = normalizeLineEndings(oldContent)
++            const diffNew = normalizeLineEndings(next.text)
++            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
+ 
+             let additions = 0
+             let deletions = 0
+-            for (const change of diffLines(oldContent, next.text)) {
++            for (const change of diffLines(diffOld, diffNew)) {
+               if (change.added) additions += change.count || 0
+               if (change.removed) deletions += change.count || 0
+             }
+@@ -126,11 +129,13 @@ export const ApplyPatchTool = Tool.define(
+               return yield* Effect.fail(new Error(`apply_patch verification failed: ${error}`))
+             }
+ 
+-            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, oldContent, newContent))
++            const diffOld = normalizeLineEndings(oldContent)
++            const diffNew = normalizeLineEndings(newContent)
++            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
+ 
+             let additions = 0
+             let deletions = 0
+-            for (const change of diffLines(oldContent, newContent)) {
++            for (const change of diffLines(diffOld, diffNew)) {
+               if (change.added) additions += change.count || 0
+               if (change.removed) deletions += change.count || 0
+             }
+@@ -165,9 +170,13 @@ export const ApplyPatchTool = Tool.define(
+               ),
+             )
+             const contentToDelete = source.text
+-            const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, contentToDelete, ""))
++            const diffOld = normalizeLineEndings(contentToDelete)
++            const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, ""))
+ 
+-            const deletions = contentToDelete.split("\n").length
++            let deletions = 0
++            for (const change of diffLines(diffOld, "")) {
++              if (change.removed) deletions += change.count || 0
++            }
+ 
+             fileChanges.push({
+               filePath,
+diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
+index ea3aac34807d743c4dcef801e7a1394c552e9371..59dd896b9ef83bee839fa4203c0395d3d6176dac 100644
+--- a/packages/opencode/src/tool/edit.ts
++++ b/packages/opencode/src/tool/edit.ts
+@@ -18,19 +18,7 @@ import { Snapshot } from "@/snapshot"
+ import { assertExternalDirectoryEffect } from "./external-directory"
+ import { AppFileSystem } from "@opencode-ai/core/filesystem"
+ import * as Bom from "@/util/bom"
+-
+-function normalizeLineEndings(text: string): string {
+-  return text.replaceAll("\r\n", "\n")
+-}
+-
+-function detectLineEnding(text: string): "\n" | "\r\n" {
+-  return text.includes("\r\n") ? "\r\n" : "\n"
+-}
+-
+-function convertToLineEnding(text: string, ending: "\n" | "\r\n"): string {
+-  if (ending === "\n") return text
+-  return text.replaceAll("\n", "\r\n")
+-}
++import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
+ 
+ const locks = new Map<string, Semaphore.Semaphore>()
+ 
+@@ -94,7 +82,9 @@ export const EditTool = Tool.define(
+                 const desiredBom = source.bom || next.bom
+                 contentOld = source.text
+                 contentNew = next.text
+-                diff = trimDiff(createTwoFilesPatch(filePath, filePath, contentOld, contentNew))
++                diff = trimDiff(
++                  createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
++                )
+                 yield* ctx.ask({
+                   permission: "edit",
+                   patterns: [path.relative(instance.worktree, filePath)],
+@@ -168,9 +158,11 @@ export const EditTool = Tool.define(
+             }).pipe(Effect.orDie),
+           )
+ 
++          const diffOld = normalizeLineEndings(contentOld)
++          const diffNew = normalizeLineEndings(contentNew)
+           let additions = 0
+           let deletions = 0
+-          for (const change of diffLines(contentOld, contentNew)) {
++          for (const change of diffLines(diffOld, diffNew)) {
+             if (change.added) additions += change.count || 0
+             if (change.removed) deletions += change.count || 0
+           }
+diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
+index 697daa20ca05d03c592b0e76c41d7a55655ffd85..b5678ecee0b15ba60d97cecea9dada47f704f3b1 100644
+--- a/packages/opencode/src/tool/write.ts
++++ b/packages/opencode/src/tool/write.ts
+@@ -14,6 +14,7 @@ import { InstanceState } from "@/effect/instance-state"
+ import { trimDiff } from "./edit"
+ import { assertExternalDirectoryEffect } from "./external-directory"
+ import * as Bom from "@/util/bom"
++import { normalizeLineEndings } from "@/util/line-ending"
+ 
+ const MAX_PROJECT_DIAGNOSTICS_FILES = 5
+ 
+@@ -50,7 +51,9 @@ export const WriteTool = Tool.define(
+           const contentOld = source.text
+           const contentNew = next.text
+ 
+-          const diff = trimDiff(createTwoFilesPatch(filepath, filepath, contentOld, contentNew))
++          const diff = trimDiff(
++            createTwoFilesPatch(filepath, filepath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
++          )
+           yield* ctx.ask({
+             permission: "edit",
+             patterns: [path.relative(instance.worktree, filepath)],
+@@ -69,7 +72,14 @@ export const WriteTool = Tool.define(
+           let metadataDiff: string | undefined
+           if (exists) {
+             const finalSource = yield* Bom.readFile(fs, filepath)
+-            metadataDiff = trimDiff(createTwoFilesPatch(filepath, filepath, contentOld, finalSource.text))
++            metadataDiff = trimDiff(
++              createTwoFilesPatch(
++                filepath,
++                filepath,
++                normalizeLineEndings(contentOld),
++                normalizeLineEndings(finalSource.text),
++              ),
++            )
+           }
+           yield* bus.publish(File.Event.Edited, { file: filepath })
+           yield* bus.publish(FileWatcher.Event.Updated, {
+diff --git a/packages/opencode/src/util/line-ending.ts b/packages/opencode/src/util/line-ending.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..09da7120daf3479062b9e4ee8d7721902a11bcdb
+--- /dev/null
++++ b/packages/opencode/src/util/line-ending.ts
+@@ -0,0 +1,24 @@
++export type LineEnding = "\n" | "\r\n" | "\r"
++
++// Use LF for comparisons so CRLF/CR-only rewrites do not become full-file diffs.
++export function normalizeLineEndings(text: string): string {
++  return text.replace(/\r\n?/g, "\n")
++}
++
++// Pick one file-level style for write-back paths that rebuild logical lines.
++export function detectLineEnding(text: string): LineEnding {
++  if (text.includes("\r\n")) return "\r\n"
++  if (text.includes("\r")) return "\r"
++  return "\n"
++}
++
++// Split on logical lines; legacy CR-only files must not collapse into one line.
++export function splitLines(text: string): string[] {
++  return normalizeLineEndings(text).split("\n")
++}
++
++// Convert normalized logical lines back to the target file-level line ending.
++export function convertToLineEnding(text: string, ending: LineEnding): string {
++  if (ending === "\n") return text
++  return splitLines(text).join(ending)
++}
+diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
+index fd24b557b3cae4120faea65fb0f4b2487e6edb64..175f38ee3e785f7a15e17ce7f2499cd21f1e302a 100644
+--- a/packages/opencode/test/tool/apply_patch.test.ts
++++ b/packages/opencode/test/tool/apply_patch.test.ts
+@@ -225,6 +225,89 @@ describe("tool.apply_patch freeform", () => {
+     })
+   })
+ 
++  test("does not show CRLF-only update fallout as content changes", async () => {
++    await using fixture = await tmpdir()
++    const { ctx, calls } = makeCtx()
++
++    await WithInstance.provide({
++      directory: fixture.path,
++      fn: async () => {
++        const target = path.join(fixture.path, "crlf.txt")
++        await fs.writeFile(target, "one\r\ntwo\r\nthree\r\n", "utf-8")
++
++        const patchText = "*** Begin Patch\n*** Update File: crlf.txt\n@@\n-two\n+deux\n*** End Patch"
++
++        await execute({ patchText }, ctx)
++
++        expect(calls.length).toBe(1)
++        const shown = calls[0].metadata.files[0]?.patch ?? ""
++        const file = calls[0].metadata.files[0]
++        expect(shown).toContain("-two")
++        expect(shown).toContain("+deux")
++        expect(shown).not.toContain("-one")
++        expect(shown).not.toContain("+one")
++        expect(shown).not.toContain("-three")
++        expect(shown).not.toContain("+three")
++        expect(file?.additions).toBe(1)
++        expect(file?.deletions).toBe(1)
++        expect(await fs.readFile(target, "utf-8")).toBe("one\r\ndeux\r\nthree\r\n")
++      },
++    })
++  })
++
++  test("applies patches to CR-only files without showing line-ending fallout", async () => {
++    await using fixture = await tmpdir()
++    const { ctx, calls } = makeCtx()
++
++    await WithInstance.provide({
++      directory: fixture.path,
++      fn: async () => {
++        const target = path.join(fixture.path, "cr.txt")
++        await fs.writeFile(target, "one\rtwo\rthree\r", "utf-8")
++
++        const patchText = "*** Begin Patch\n*** Update File: cr.txt\n@@\n-two\n+deux\n*** End Patch"
++
++        await execute({ patchText }, ctx)
++
++        const shown = calls[0].metadata.files[0]?.patch ?? ""
++        expect(shown).toContain("-two")
++        expect(shown).toContain("+deux")
++        expect(shown).not.toContain("-one")
++        expect(shown).not.toContain("+one")
++        expect(shown).not.toContain("-three")
++        expect(shown).not.toContain("+three")
++        expect(calls[0].metadata.files[0]?.additions).toBe(1)
++        expect(calls[0].metadata.files[0]?.deletions).toBe(1)
++        expect(await fs.readFile(target, "utf-8")).toBe("one\rdeux\rthree\r")
++      },
++    })
++  })
++
++  test("preserves BOM and CRLF endings when applying patches", async () => {
++    await using fixture = await tmpdir()
++    const { ctx, calls } = makeCtx()
++
++    await WithInstance.provide({
++      directory: fixture.path,
++      fn: async () => {
++        const bom = String.fromCharCode(0xfeff)
++        const target = path.join(fixture.path, "bom-crlf.cs")
++        await fs.writeFile(target, `${bom}using System;\r\nclass Test {}\r\n`, "utf-8")
++
++        const patchText = "*** Begin Patch\n*** Update File: bom-crlf.cs\n@@\n-using System;\n+using Up;\n*** End Patch"
++
++        await execute({ patchText }, ctx)
++
++        const content = await fs.readFile(target, "utf-8")
++        expect(content.charCodeAt(0)).toBe(0xfeff)
++        expect(content.slice(1)).toBe("using Up;\r\nclass Test {}\r\n")
++        expect(calls[0].metadata.files[0]?.patch).toContain("-using System;")
++        expect(calls[0].metadata.files[0]?.patch).toContain("+using Up;")
++        expect(calls[0].metadata.files[0]?.patch).not.toContain(bom)
++      },
++    })
++  })
++
+   test("inserts lines with insert-only hunk", async () => {
+     await using fixture = await tmpdir()
+     const { ctx } = makeCtx()
+diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
+index 23ae0e9090f5186fba2fd63f5fe5006cec22964d..359ab754ecdf240474f1e6da752f6256d76afc80 100644
+--- a/packages/opencode/test/tool/edit.test.ts
++++ b/packages/opencode/test/tool/edit.test.ts
+@@ -128,6 +128,67 @@ describe("tool.edit", () => {
+       })
+     })
+ 
++    test("does not show CRLF-only oldString-empty overwrites as content changes", async () => {
++      await using tmp = await tmpdir()
++      const filepath = path.join(tmp.path, "existing-crlf.txt")
++      const content = "Line 1\nLine 2\n"
++      await fs.writeFile(filepath, content.replaceAll("\n", "\r\n"), "utf-8")
++
++      await WithInstance.provide({
++        directory: tmp.path,
++        fn: async () => {
++          const edit = await resolve()
++          const result = await Effect.runPromise(
++            edit.execute(
++              {
++                filePath: filepath,
++                oldString: "",
++                newString: content,
++              },
++              ctx,
++            ),
++          )
++
++          expect(result.metadata.diff).toContain("Index:")
++          expect(result.metadata.diff).not.toContain("-Line 1")
++          expect(result.metadata.diff).not.toContain("+Line 1")
++          expect(result.metadata.filediff.additions).toBe(0)
++          expect(result.metadata.filediff.deletions).toBe(0)
++          expect(await fs.readFile(filepath, "utf-8")).toBe(content)
++        },
++      })
++    })
++
++    test("does not show CR-only oldString-empty overwrites as content changes", async () => {
++      await using tmp = await tmpdir()
++      const filepath = path.join(tmp.path, "existing-cr.txt")
++      const content = "Line 1\nLine 2\n"
++      await fs.writeFile(filepath, content.replaceAll("\n", "\r"), "utf-8")
++
++      await WithInstance.provide({
++        directory: tmp.path,
++        fn: async () => {
++          const edit = await resolve()
++          const result = await Effect.runPromise(
++            edit.execute(
++              {
++                filePath: filepath,
++                oldString: "",
++                newString: content,
++              },
++              ctx,
++            ),
++          )
++
++          expect(result.metadata.diff).toContain("Index:")
++          expect(result.metadata.diff).not.toContain("-Line 1")
++          expect(result.metadata.diff).not.toContain("+Line 1")
++          expect(result.metadata.filediff.additions).toBe(0)
++          expect(result.metadata.filediff.deletions).toBe(0)
++        },
++      })
++    })
++
+     test("creates new file with nested directories", async () => {
+       await using tmp = await tmpdir()
+       const filepath = path.join(tmp.path, "nested", "dir", "file.txt")
+diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
+index 8bba52a4b2c8a11e2904eb0910bd08ac8134a91c..ef69b5a012ea3b5d8c81d2b23367ff7dac1b1f28 100644
+--- a/packages/opencode/test/tool/write.test.ts
++++ b/packages/opencode/test/tool/write.test.ts
+@@ -168,6 +168,43 @@ describe("tool.write", () => {
+         expect(result.metadata).toHaveProperty("exists", true)
+       }),
+     )
++
++    it.instance("does not show CRLF-only overwrites as content changes", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "crlf-existing.txt")
++        const content = "Line 1\nLine 2\n"
++        yield* Effect.promise(() => fs.writeFile(filepath, content.replaceAll("\n", "\r\n"), "utf-8"))
++
++        const result = yield* run({ filePath: filepath, content })
++        const diff = result.metadata.diff ?? ""
++
++        expect(diff).toContain("Index:")
++        expect(diff).not.toContain("-Line 1")
++        expect(diff).not.toContain("+Line 1")
++        expect(diff).not.toContain("-Line 2")
++        expect(diff).not.toContain("+Line 2")
++        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(content)
++      }),
++    )
++
++    it.instance("does not show CR-only overwrites as content changes", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "cr-existing.txt")
++        const content = "Line 1\nLine 2\n"
++        yield* Effect.promise(() => fs.writeFile(filepath, content.replaceAll("\n", "\r"), "utf-8"))
++
++        const result = yield* run({ filePath: filepath, content })
++        const diff = result.metadata.diff ?? ""
++
++        expect(diff).toContain("Index:")
++        expect(diff).not.toContain("-Line 1")
++        expect(diff).not.toContain("+Line 1")
++        expect(diff).not.toContain("-Line 2")
++        expect(diff).not.toContain("+Line 2")
++      }),
++    )
+   })
+ 
+   describe("file permissions", () => {

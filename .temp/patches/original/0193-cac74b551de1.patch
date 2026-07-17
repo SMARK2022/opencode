@@ -1,0 +1,18 @@
+From cac74b551de13e4b06203c3ec0de03914bae35aa Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 22 May 2026 18:09:37 +0800
+Subject: [PATCH] refactor: move token helpers into token domain
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/util/token-accounting.ts b/packages/opencode/src/token/accounting.ts
+similarity index 100%
+rename from packages/opencode/src/cli/cmd/tui/util/token-accounting.ts
+rename to packages/opencode/src/token/accounting.ts
+diff --git a/packages/opencode/src/util/attachment-token.ts b/packages/opencode/src/token/estimate.ts
+similarity index 100%
+rename from packages/opencode/src/util/attachment-token.ts
+rename to packages/opencode/src/token/estimate.ts
+diff --git a/packages/opencode/test/util/attachment-token.test.ts b/packages/opencode/test/token/estimate.test.ts
+similarity index 100%
+rename from packages/opencode/test/util/attachment-token.test.ts
+rename to packages/opencode/test/token/estimate.test.ts

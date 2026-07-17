@@ -1,0 +1,350 @@
+From 5aff2e10e3e92b52b48691d02fa98fd12f5bdc5c Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 25 May 2026 01:13:41 +0800
+Subject: [PATCH] =?UTF-8?q?feat(precheck):=20=E5=A2=9E=E5=BC=BA=E5=91=BD?=
+ =?UTF-8?q?=E4=BB=A4=E8=AF=84=E4=BC=B0=E9=80=BB=E8=BE=91=EF=BC=8C=E6=B7=BB?=
+ =?UTF-8?q?=E5=8A=A0=E5=AF=B9=E6=96=87=E4=BB=B6=E5=88=A0=E9=99=A4=E5=92=8C?=
+ =?UTF-8?q?=E7=A7=BB=E5=8A=A8=E6=93=8D=E4=BD=9C=E7=9A=84=E5=AE=A1=E6=9F=A5?=
+ =?UTF-8?q?=EF=BC=8C=E7=A1=AE=E4=BF=9D=E5=AE=89=E5=85=A8=E6=80=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
+index 3ec2c26a96d3598df02ee59061d263c9fdd63eb5..1b591beabe4373a3c3f24b20cc3f094cd73a1731 100644
+--- a/packages/opencode/src/permission/precheck.ts
++++ b/packages/opencode/src/permission/precheck.ts
+@@ -59,6 +59,20 @@ const INTERPRETER_FLAGS = new Map([
+ const SSH_PRIVATE_KEY_NAME_PATTERN = String.raw`id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?`
+ const WINDOWS_HOME_SENSITIVE_PATH_PATTERN = String.raw`(?:~|\$HOME|\$env:USERPROFILE|%USERPROFILE%)[\\/](?:\.ssh(?:[\\/][^\s|;]+)?|\.aws(?:[\\/]credentials)?|\.config[\\/]gcloud(?:[\\/][^\s|;]+)?|\.kube[\\/]config|\.npmrc|\.netrc|\.git-credentials)`
+ const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|${WINDOWS_HOME_SENSITIVE_PATH_PATTERN}|(?:~|[^\s|;]+)\/\.ssh(?:\/[^\s|;]+)?|(?:~|[^\s|;]+)\/\.aws(?:\/credentials)?|(?:~|[^\s|;]+)\/\.config\/gcloud(?:\/[^\s|;]+)?|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|${SSH_PRIVATE_KEY_NAME_PATTERN}|[^\s|;]+\.pem|[^\s|;]+\.key)`
++// These raw destructive patterns deliberately sit below dangerousRaw checks and
++// above tokenization. They catch visible file mutations in opaque shells such as
++// PowerShell env paths, redirection, command substitution, SSH/WSL payloads, and
++// unsupported separators without upgrading protected-root recursive deletes from
++// dangerous to merely cautious.
++const RAW_COMMAND_START = "(?:^|[;&|{(]\\s*|[\\r\\n]\\s*|\\$\\(\\s*|`\\s*)"
++const RAW_COMMAND_PATH = String.raw`(?:[^\s|;&(){}'"]+[\\/])*`
++const RAW_FILE_DELETE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:rm|unlink|rmdir|del|erase|rd|Remove-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
++const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:mv|move|ren|rename|Move-Item|Rename-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
++// Token-level sets mirror the raw destructive patterns after command-name
++// normalization, so path-qualified binaries like `/bin/rm` cannot bypass review
++// once tokenization succeeds.
++const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item"])
++const FILE_MOVE_COMMANDS = new Set(["mv", "move", "ren", "rename", "move-item", "rename-item"])
+ // [local-smark] 敏感路径参数匹配开始
+ // raw 扫描发生在 shell quote 被移除之前；允许敏感路径外侧有一层引号，避免
+ // `cat ".env" | curl ...` 这类明显外传被降级成 cautious reviewer 判断。
+@@ -208,6 +222,11 @@ function evaluateShell(command: string, depth: number): Decision {
+   const caution = cautiousRaw(command)
+   if (caution) return { level: "cautious", reason: caution }
+ 
++  for (const wrapped of rawWrapperScripts(command)) {
++    const decision = evaluateShell(wrapped, depth + 1)
++    if (decision.level === "dangerous" || decision.level === "cautious") return decision
++  }
++
+   const commands = splitCommands(command)
+   if (!commands) return { level: "general", reason: "opaque shell command requires explicit approval" }
+ 
+@@ -400,7 +419,7 @@ function unwrap(tokens: string[]): UnwrapResult {
+     if (index >= 0 && tokens[index + 1]) {
+       return {
+         action: "script",
+-        script: joinShellTokens(tokens.slice(index + 1)),
++        script: tokens[index + 1].includes(" ") ? tokens[index + 1] : joinShellTokens(tokens.slice(index + 1)),
+         reason: "cmd wrapper requires explicit approval",
+       }
+     }
+@@ -423,6 +442,59 @@ function unwrap(tokens: string[]): UnwrapResult {
+   return { action: "none" }
+ }
+ 
++function rawWrapperScripts(command: string) {
++  // Top-level redirection or unsupported separators can make the full command
++  // opaque before normal per-command unwrapping runs. Scan unquoted command
++  // segments for visible wrapper payloads so destructive script bodies still keep
++  // their cautious/dangerous layer; harmless payloads fall through to general.
++  return rawCommandSegments(command).flatMap((segment) => {
++    const script = rawWrapperScript(segment)
++    return script ? [script] : []
++  })
++}
++
++function rawWrapperScript(command: string) {
++  const tokens = tokenize(command)
++  if (!tokens) return
++  const unwrapped = unwrap(tokens)
++  if (unwrapped.action === "script") return unwrapped.script
++  const remote = remoteWrapper(tokens)
++  return remote.action === "remote" ? remote.script : undefined
++}
++
++function rawCommandSegments(command: string) {
++  const out: string[] = []
++  let start = 0
++  let quote = ""
++  let escaped = false
++  for (let i = 0; i < command.length; i++) {
++    const char = command[i]
++    if (escaped) {
++      escaped = false
++      continue
++    }
++    if (char === "\\" && quote !== "'") {
++      escaped = true
++      continue
++    }
++    if (quote) {
++      if (char === quote) quote = ""
++      continue
++    }
++    if (char === "'" || char === '"') {
++      quote = char
++      continue
++    }
++    if (char !== ";" && char !== "&" && char !== "|" && char !== "\n" && char !== "\r") continue
++    const segment = command.slice(start, i).trim()
++    if (segment) out.push(segment)
++    if ((char === "&" || char === "|") && command[i + 1] === char) i++
++    start = i + 1
++  }
++  const tail = command.slice(start).trim()
++  return tail ? [...out, tail] : out
++}
++
+ function remoteWrapper(tokens: string[]): RemoteResult {
+   // Remote wrappers are separated from local unwraps so their reason remains a
+   // trust-boundary prompt even when no script payload is available to inspect.
+@@ -479,7 +551,7 @@ function dangerousRaw(command: string) {
+   // `$HOME`, `~/`, `/*`, and wrapper-quoted forms cannot bypass the deny path.
+   if (
+     new RegExp(
+-      String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))(?=[^|;]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?(?=[\s)'"]|$)|~\/?(?=[\s)'"]|$)|\$HOME\/?(?=[\s)'"]|$)|\/etc(?:\/|(?=[\s)'"]|$)))`,
++      String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))(?=[^|;]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?(?=[\s)'"\x60]|$)|~\/?(?=[\s)'"\x60]|$)|\$HOME\/?(?=[\s)'"\x60]|$)|\/etc(?:\/|(?=[\s)'"\x60]|$)))`,
+     ).test(normalized)
+   ) {
+     return "critical recursive delete"
+@@ -504,7 +576,7 @@ function dangerousRaw(command: string) {
+   // 删除降级成 general 或 cautious。
+   if (/\bformat\b\s+[A-Za-z]:/i.test(normalized)) return "Windows drive format"
+   if (
+-    /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"]|$)|[A-Za-z]:[\\/](?:Users|Documents and Settings)(?:[\\/][^\s)'"]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"]|$))/i.test(
++    /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"\x60]|$)|[A-Za-z]:[\\/](?:Users|Documents and Settings)(?:[\\/][^\s)'"\x60]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"\x60]|$))/i.test(
+       normalized,
+     )
+   ) {
+@@ -541,7 +613,7 @@ function dangerousRaw(command: string) {
+   // Common interpreter APIs and reverse shell idioms are scanned as raw text
+   // because their dangerous target may be inside strings rather than tokens.
+   if (
+-    /\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|[A-Za-z]:[\\/]?)(?=[\s)'"]|$))/i.test(
++    /\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"\x60]|$))/i.test(
+       normalized,
+     )
+   ) {
+@@ -576,6 +648,8 @@ function dangerousRaw(command: string) {
+ 
+ function cautiousRaw(command: string) {
+   const normalized = command.replace(/\s+/g, " ").trim()
++  if (rawExecutableMatch(command, RAW_FILE_DELETE_PATTERN)) return "file deletion requires explicit approval"
++  if (rawExecutableMatch(command, RAW_FILE_MOVE_PATTERN)) return "file move or rename requires explicit approval"
+   // [local-smark] raw 敏感读取谨慎扫描开始
+   // `$HOME/.aws/credentials` 这类 env-expanded 路径会让 splitter 降级为 opaque，
+   // 导致 token 级敏感读取看不到真实路径。dangerousRaw 已先处理外传；这里仅把
+@@ -591,6 +665,45 @@ function cautiousRaw(command: string) {
+   // [local-smark] raw 敏感读取谨慎扫描结束
+ }
+ 
++function rawExecutableMatch(command: string, pattern: string) {
++  // Raw delete/move scans need shell-syntax context: separators inside quoted
++  // read-only search text are data. `$()` and backticks execute in unquoted or
++  // double-quoted shell text, but remain literal inside POSIX single quotes.
++  const quotes = quoteOffsets(command)
++  for (const match of command.matchAll(new RegExp(pattern, "gi"))) {
++    const index = match.index ?? 0
++    if (!quotes[index] || (quotes[index] === '"' && (command.startsWith("$(", index) || command[index] === "`"))) return true
++  }
++  return false
++}
++
++function quoteOffsets(command: string) {
++  const quotes = Array.from({ length: command.length }, () => "")
++  let quote = ""
++  let escaped = false
++  for (let i = 0; i < command.length; i++) {
++    quotes[i] = quote
++    if (escaped) {
++      escaped = false
++      continue
++    }
++    if (command[i] === "\\") {
++      // POSIX single quotes treat backslash as literal text; marking it as an
++      // escape would incorrectly keep a following separator quoted and hide a
++      // visible delete after malformed single-quoted data.
++      if (quote === "'") continue
++      escaped = true
++      continue
++    }
++    if (quote) {
++      if (command[i] === quote) quote = ""
++      continue
++    }
++    if (command[i] === "'" || command[i] === '"') quote = command[i]
++  }
++  return quotes
++}
++
+ function riskyTokens(tokens: string[]): Decision | undefined {
+   // Token-level risks are visible commands with known side effects. Critical
+   // protected targets are dangerous; destructive-but-bounded operations are
+@@ -636,6 +749,10 @@ function riskyTokens(tokens: string[]): Decision | undefined {
+     }
+     return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
+   }
++  if (FILE_DELETE_COMMANDS.has(cmd) && tokens.length > 1)
++    return { level: "cautious", reason: "file deletion requires explicit approval" }
++  if (FILE_MOVE_COMMANDS.has(cmd) && tokens.length > 1)
++    return { level: "cautious", reason: "file move or rename requires explicit approval" }
+   if (["scp", "sftp", "rsync"].includes(cmd))
+     return { level: "cautious", reason: "remote file transfer requires explicit approval" }
+ }
+@@ -648,7 +765,7 @@ function cautiousGitSubcommand(tokens: string[]) {
+   const subcommand = tokens[1]
+   if (!subcommand) return false
+   if (
+-    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean"].includes(subcommand)
++    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean", "mv"].includes(subcommand)
+   )
+     return true
+   return subcommand === "branch" && !gitBranchSafe(tokens.slice(2))
+@@ -735,6 +852,8 @@ function protectedDeleteTarget(input: string) {
+     normalized === "$HOME/" ||
+     normalized === "$env:USERPROFILE" ||
+     normalized === "$env:USERPROFILE/" ||
++    normalized === "$env:SystemDrive" ||
++    normalized === "$env:SystemDrive/" ||
+     /^\w:\/?$/.test(normalized) ||
+     normalized === "/etc" ||
+     normalized.startsWith("/etc/")
+diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
+index 575d0c93ef1c833eb15d97cb64717bdfe37c0464..a69bed99e463677566ad429d8e909794ca7754ac 100644
+--- a/packages/opencode/test/permission/auto.test.ts
++++ b/packages/opencode/test/permission/auto.test.ts
+@@ -68,6 +68,26 @@ describe("permission auto routing", () => {
+     ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+   })
+ 
++  test("routes bounded file deletion to reviewer instead of shell general allow", async () => {
++    let called = false
++    await expect(
++      bash(String.raw`Remove-Item -LiteralPath "H:\DumpStack.log.tmp" -Force -ErrorAction SilentlyContinue`, {
++        review: () =>
++          Effect.sync(() => {
++            called = true
++            return {
++              action: "deny" as const,
++              reason: "reviewer rejected unrequested file deletion",
++              reviewID: "review_delete_file",
++              risk_level: "high" as const,
++              user_authorization: "unknown" as const,
++            }
++          }),
++      }),
++    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
++    expect(called).toBe(true)
++  })
++
+   test("reports the deterministic precheck boundary before reviewer completion", async () => {
+     const starts: { reviewID: string; precheck: { level: string; reason: string } }[] = []
+ 
+diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
+index 55969d232203fb652d728c7842f22dc3f8b30fe3..1f43d0821603a86c1ee4d62005924e72642d748d 100644
+--- a/packages/opencode/test/permission/precheck.test.ts
++++ b/packages/opencode/test/permission/precheck.test.ts
+@@ -13,6 +13,10 @@ describe("permission precheck bash classifier", () => {
+     expect(bash("git status --porcelain").level).toBe("safe")
+     expect(bash("git branch --show-current").level).toBe("safe")
+     expect(bash("rg \"path with spaces\" src").level).toBe("safe")
++    expect(bash("rg \"; rm stale.tmp\" src").level).toBe("safe")
++    expect(bash("rg \"(rm stale.tmp)\" src").level).toBe("safe")
++    expect(bash("rg '$(rm stale.tmp)' src").level).toBe("safe")
++    expect(bash("rg '`rm stale.tmp`' src").level).toBe("safe")
+   })
+ 
+   test("does not mark read commands safe when they can invoke external programs", () => {
+@@ -58,12 +62,27 @@ describe("permission precheck bash classifier", () => {
+   })
+ 
+   test("marks unsupported shell separators general instead of safe", () => {
+-    expect(bash("git status & rm -rf node_modules")).toMatchObject({ level: "general" })
+-    expect(bash("git status\nrm -rf node_modules")).toMatchObject({ level: "general" })
++    expect(bash("git status & rg TODO src")).toMatchObject({ level: "general" })
++    expect(bash("git status\nrg TODO src")).toMatchObject({ level: "general" })
+   })
+ 
+   test("marks destructive but bounded commands cautious for reviewer/user approval", () => {
+     expect(bash("rm -rf node_modules")).toMatchObject({ level: "cautious" })
++    expect(bash("rm file.txt")).toMatchObject({ level: "cautious" })
++    expect(bash("/bin/rm file.txt")).toMatchObject({ level: "cautious" })
++    expect(bash("rm -f 'path with spaces/file.txt'")).toMatchObject({ level: "cautious" })
++    expect(bash("unlink stale.sock")).toMatchObject({ level: "cautious" })
++    expect(bash("/usr/bin/unlink stale.sock")).toMatchObject({ level: "cautious" })
++    expect(bash("rmdir empty-dir")).toMatchObject({ level: "cautious" })
++    expect(bash("del /q C:\\Temp\\old.log")).toMatchObject({ level: "cautious" })
++    expect(bash("erase \"path with spaces\\old.log\"")).toMatchObject({ level: "cautious" })
++    expect(bash("Remove-Item -LiteralPath \"H:\\DumpStack.log.tmp\" -Force -ErrorAction SilentlyContinue")).toMatchObject({ level: "cautious" })
++    expect(bash(String.raw`Remove-Item -Path "$env:TEMP\old.log" -Force`)).toMatchObject({ level: "cautious" })
++    expect(bash("Remove-Item \"path with spaces\\old.log\" > deleted.log")).toMatchObject({ level: "cautious" })
++    expect(bash("git status & rm -f stale.tmp")).toMatchObject({ level: "cautious" })
++    expect(bash("git status & /bin/rm stale.tmp")).toMatchObject({ level: "cautious" })
++    expect(bash("git status\nrm -f stale.tmp")).toMatchObject({ level: "cautious" })
++    expect(bash("echo 'x\\' ; rm stale.tmp")).toMatchObject({ level: "cautious" })
+     expect(bash("git add src/index.ts")).toMatchObject({ level: "cautious" })
+     expect(bash("git commit -m 'safe message with spaces'")).toMatchObject({ level: "cautious" })
+     expect(bash("git merge feature/review")).toMatchObject({ level: "cautious" })
+@@ -75,6 +94,31 @@ describe("permission precheck bash classifier", () => {
+     expect(bash("git branch -m old-name new-name")).toMatchObject({ level: "cautious" })
+   })
+ 
++  test("marks move and rename file mutations cautious because they can bypass delete review", () => {
++    expect(bash("mv old.txt archive/old.txt")).toMatchObject({ level: "cautious" })
++    expect(bash("/bin/mv old.txt archive/old.txt")).toMatchObject({ level: "cautious" })
++    expect(bash("git status & /bin/mv old.txt archive/old.txt")).toMatchObject({ level: "cautious" })
++    expect(bash("move C:\\Temp\\old.log C:\\Temp\\archive\\old.log")).toMatchObject({ level: "cautious" })
++    expect(bash("ren old.log older.log")).toMatchObject({ level: "cautious" })
++    expect(bash("Rename-Item \"path with spaces\\old.log\" \"older.log\"")).toMatchObject({ level: "cautious" })
++    expect(bash(String.raw`Move-Item -LiteralPath "H:\DumpStack.log.tmp" -Destination "$env:TEMP\DumpStack.to_delete" -Force -ErrorAction Stop`)).toMatchObject({ level: "cautious" })
++    expect(bash("git mv old.txt new.txt")).toMatchObject({ level: "cautious" })
++  })
++
++  test("propagates bounded delete risks through shell, remote, and alternate OS wrappers", () => {
++    expect(bash("ssh example.com 'rm stale.tmp'")).toMatchObject({ level: "cautious" })
++    expect(bash("ssh -p 22 example.com rm -f 'path with spaces/stale.tmp'")).toMatchObject({ level: "cautious" })
++    expect(bash("wsl.exe -- rm stale.tmp")).toMatchObject({ level: "cautious" })
++    expect(bash("cmd /c del /q stale.tmp")).toMatchObject({ level: "cautious" })
++    expect(bash("cmd /c \"del /f /q H:\\DumpStack.log.tmp\" 2>&1")).toMatchObject({ level: "cautious" })
++    expect(bash("git status; cmd /c \"del /f /q H:\\DumpStack.log.tmp\" 2>&1")).toMatchObject({ level: "cautious" })
++    expect(bash("echo ok & cmd /c \"del /q stale.tmp\" 2>&1")).toMatchObject({ level: "cautious" })
++    expect(bash("pwsh -Command 'Remove-Item -LiteralPath \"H:\\DumpStack.log.tmp\" -Force'")).toMatchObject({ level: "cautious" })
++    expect(bash("pwsh -Command \"Remove-Item stale.tmp\" 2>&1")).toMatchObject({ level: "cautious" })
++    expect(bash("echo $(rm stale.tmp)")).toMatchObject({ level: "cautious" })
++    expect(bash("echo `rm stale.tmp`")).toMatchObject({ level: "cautious" })
++  })
++
+   test("marks protected-root deletes dangerous instead of treating them as opaque", () => {
+     expect(bash("rm -rf /*")).toMatchObject({ level: "dangerous" })
+     expect(bash("rm -r -f /")).toMatchObject({ level: "dangerous" })
+@@ -85,6 +129,11 @@ describe("permission precheck bash classifier", () => {
+     expect(bash("format C:")).toMatchObject({ level: "dangerous" })
+     expect(bash("rmdir /s /q C:\\Users\\Alice")).toMatchObject({ level: "dangerous" })
+     expect(bash("del /s /q %USERPROFILE%")).toMatchObject({ level: "dangerous" })
++    expect(bash(String.raw`Remove-Item -Recurse -Force $env:USERPROFILE`)).toMatchObject({ level: "dangerous" })
++    expect(bash("Remove-Item -Recurse -Force $env:SystemDrive\\")).toMatchObject({ level: "dangerous" })
++    expect(bash("powershell -Command \"Remove-Item -Recurse -Force $env:USERPROFILE\" 2>&1")).toMatchObject({ level: "dangerous" })
++    expect(bash("git status; powershell -Command \"Remove-Item -Recurse -Force $env:USERPROFILE\" 2>&1")).toMatchObject({ level: "dangerous" })
++    expect(bash("echo `rm -rf /`")).toMatchObject({ level: "dangerous" })
+   })
+ 
+   test("marks dangerous command substitutions dangerous instead of treating wrappers as safe", () => {

@@ -1,0 +1,232 @@
+From 124adc90ec7c1966cdb533ec7496c46889424d8f Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 6 May 2026 11:31:41 +0800
+Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E6=B7=BB=E5=8A=A0=E9=87=8D?=
+ =?UTF-8?q?=E5=90=AFJupyter=E5=86=85=E6=A0=B8=E5=8A=9F=E8=83=BD=EF=BC=8C?=
+ =?UTF-8?q?=E6=94=AF=E6=8C=81=E6=B8=85=E9=99=A4=E8=BF=90=E8=A1=8C=E7=8A=B6?=
+ =?UTF-8?q?=E6=80=81=E5=B9=B6=E8=AE=B0=E5=BD=95=E9=87=8D=E5=90=AF=E5=8E=9F?=
+ =?UTF-8?q?=E5=9B=A0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+index 539b8793ede2b47268ebfe1ac278d3be0a1b327b..9470d5a33e6228a82019f1b62ccbf69b58db2cd8 100644
+--- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
++++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+@@ -44,4 +44,10 @@ export const VscodeNotebookDescriptions = {
+     "filePath is required. Use this when debugging kernel, interpreter, package, working-directory, or environment issues.",
+     "The active runtime is probed from VS Code/Jupyter when available. Saved .ipynb kernelspec and language_info metadata is reported separately and is not treated as the active runtime.",
+   ].join("\n"),
++
++  kernel: [
++    "Restart the Jupyter kernel for a VS Code notebook.",
++    "filePath is required. Use this when the kernel is unresponsive, packages have been installed, or a clean runtime state is needed.",
++    "Clears all variables and execution state from previous cell runs. Rerun setup or import cells before running dependent cells.",
++  ].join("\n"),
+ }
+diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
+index f46fb2f04aa4dde4ca6d0dec2bd7cd9807c90fbf..efcd20122f3057c0c5d51b6f947a99b98ebe67c6 100644
+--- a/packages/opencode/src/plugin/vscode-bridge.ts
++++ b/packages/opencode/src/plugin/vscode-bridge.ts
+@@ -174,5 +174,16 @@ export const VscodeBridgePlugin = async () => ({
+         metadata: { endpoint: "/notebook/env" },
+       }),
+     }),
++    vscode_notebook_restart_kernel: tool({
++      description: VscodeNotebookDescriptions.kernel,
++      args: {
++        ...requiredFilePath,
++        reason: z.string().optional().describe("Why the kernel is being restarted, for logging and user context."),
++      },
++      execute: async (args, context) => ({
++        output: await call("/notebook/kernel", args, context, 30_000),
++        metadata: { endpoint: "/notebook/kernel" },
++      }),
++    }),
+   },
+ })
+diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
+index a6bc30fe792f134f524b02e85dff030005561467..e282ca859ecb19e1decce41636d9025cd2d15939 100644
+--- a/sdks/vscode/src/bridge.ts
++++ b/sdks/vscode/src/bridge.ts
+@@ -14,7 +14,8 @@
+  *   POST /notebook/edit         – insert/edit/delete cells
+  *   POST /notebook/output       – artifact-first output export
+  *   POST /notebook/cell-output  – alias for /notebook/output
+- *   POST /notebook/env          – kernel/environment snapshot
++ *   POST /notebook/env           – kernel/environment snapshot
++ *   POST /notebook/kernel        – restart Jupyter kernel
+  */
+ import * as http from "node:http"
+ import { isRecord, stringProp } from "./util"
+@@ -24,6 +25,7 @@ import { runNotebook } from "./notebook/run"
+ import { editNotebook } from "./notebook/edit"
+ import { readNotebookCellOutput } from "./notebook/output"
+ import { notebookEnv } from "./notebook/env"
++import { restartNotebookKernel } from "./notebook/kernel"
+ import { manifest, registerBridge, type RegistryHandle } from "./bridge-registry"
+ 
+ const BRIDGE_HOST = "127.0.0.1"
+@@ -123,7 +125,7 @@ export async function startBridge(output: { appendLine(value: string): void }):
+       const base = `http://${BRIDGE_HOST}:${address.port}`
+       output.appendLine(`[bridge] listening on ${base}`)
+       output.appendLine("[bridge] token <redacted>")
+-      for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env"]) {
++      for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env", "notebook/kernel"]) {
+         output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}`)
+       }
+       registerBridge({ id, port: address.port, token })
+@@ -177,6 +179,9 @@ async function routeRequest(
+       if (!filePath) throw new Error("filePath is required")
+       return await notebookEnv(filePath)
+     }
++
++    case "/notebook/kernel":
++      return await restartNotebookKernel(body)
+   }
+ 
+   return undefined
+diff --git a/sdks/vscode/src/notebook/commands.ts b/sdks/vscode/src/notebook/commands.ts
+index b6fb0d48a853dddaa7f54fb94fc110fd5bf469da..285ab5516b384ede6459ab5e8810f867bb9a273c 100644
+--- a/sdks/vscode/src/notebook/commands.ts
++++ b/sdks/vscode/src/notebook/commands.ts
+@@ -14,6 +14,7 @@ import { runNotebook } from "./run"
+ import { editNotebook } from "./edit"
+ import { readNotebookCellOutput } from "./output"
+ import { notebookEnv } from "./env"
++import { restartNotebookKernel } from "./kernel"
+ 
+ // ---------------------------------------------------------------------------
+ // Main command
+@@ -68,6 +69,19 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
+           return notebook ? await notebookEnv(notebook.uri.toString()) : undefined
+         },
+       },
++      {
++        label: "vscode_notebook_restart_kernel",
++        description: "restart Jupyter kernel, clear all runtime state",
++        run: async () => {
++          const notebook = await selectNotebook()
++          if (!notebook) return undefined
++          const reason = await vscode.window.showInputBox({
++            prompt: "Restart reason (optional)",
++            ignoreFocusOut: true,
++          })
++          return restartNotebookKernel({ filePath: notebook.uri.toString(), reason: reason ?? undefined })
++        },
++      },
+     ],
+     {
+       title: "opencode Notebook Bridge Tools",
+diff --git a/sdks/vscode/src/notebook/kernel.ts b/sdks/vscode/src/notebook/kernel.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9dc7880d75073a6804aaf41342d3dbca4a094cba
+--- /dev/null
++++ b/sdks/vscode/src/notebook/kernel.ts
+@@ -0,0 +1,104 @@
++/**
++ * `vscode_notebook_restart_kernel` — restarts the Jupyter kernel for a notebook.
++ *
++ * Uses the public `jupyter.restartkernel` command. Before invocation it temporarily
++ * sets `jupyter.askForKernelRestart=false` to suppress the Jupyter restart
++ * confirmation modal, then restores the original value afterward.
++ *
++ * Does not call `vscode.lm.invokeTool`, so VS Code LM Tool confirmation is
++ * never triggered. Kernel restart errors are swallowed by Jupyter's public command
++ * path (`.catch(noop)`), so this handler reports `requested` rather than `confirmed`.
++ */
++import * as vscode from "vscode"
++import { resolveNotebook } from "./resolve"
++import { stringProp } from "../util"
++
++const JUPYTER_ID = "ms-toolsai.jupyter"
++const RESTART_CMD = "jupyter.restartkernel"
++const CONFIG_SECTION = "jupyter"
++const CONFIG_KEY = "askForKernelRestart"
++
++export async function restartNotebookKernel(input: Record<string, unknown>) {
++  const filePath = stringProp(input, "filePath")
++  if (!filePath) throw new Error("filePath is required")
++
++  const notebook = await resolveNotebook(filePath)
++  const reason = stringProp(input, "reason")
++  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
++
++  // Ensure the Jupyter extension is present and active
++  const jupyter = vscode.extensions.getExtension(JUPYTER_ID)
++  if (!jupyter) {
++    return {
++      ran: true,
++      summary: "Jupyter extension (ms-toolsai.jupyter) is not installed. Install it and select a kernel first.",
++      data: { path: primaryPath, reason, jupyterFound: false },
++    }
++  }
++  if (!jupyter.isActive) await jupyter.activate()
++
++  // Ensure the public restart command is registered
++  const allCommands = await vscode.commands.getCommands(true)
++  if (!allCommands.includes(RESTART_CMD)) {
++    return {
++      ran: true,
++      summary: "The jupyter.restartkernel command is not registered. Check that the Jupyter extension is correctly installed.",
++      data: { path: primaryPath, reason, jupyterFound: true, jupyterActive: jupyter.isActive },
++    }
++  }
++
++  // Temporarily suppress Jupyter's built-in restart confirmation modal.
++  // The public command internally calls `shouldAskForRestart()` which reads
++  // `jupyter.askForKernelRestart`; setting it to false skips the modal.
++  const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
++  const original = config.get<boolean>(CONFIG_KEY)
++  const needsRestore = original === true
++
++  if (needsRestore) {
++    await config.update(CONFIG_KEY, false, vscode.ConfigurationTarget.Global)
++  }
++
++  const startedAt = Date.now()
++  try {
++    // The public command swallows errors internally (`.catch(noop)`), so
++    // this invocation will not reject on kernel-level failures.
++    await vscode.commands.executeCommand(RESTART_CMD, {
++      notebookEditor: { notebookUri: notebook.uri },
++    })
++
++    return {
++      ran: true,
++      summary: [
++        "Kernel restart requested.",
++        "All runtime state from previous cell executions should be cleared.",
++        "Rerun setup or import cells before running dependent cells.",
++        reason ? `Reason: ${reason}` : "",
++      ].filter(Boolean).join("\n"),
++      data: {
++        path: primaryPath,
++        reason,
++        requested: true,
++        askForKernelRestartOriginal: original,
++        askForKernelRestartSuppressed: needsRestore,
++        durationMs: Date.now() - startedAt,
++      },
++    }
++  } catch (error) {
++    const message = error instanceof Error ? error.message : String(error)
++    return {
++      ran: true,
++      summary: `Kernel restart invocation failed: ${message}.`,
++      data: {
++        path: primaryPath,
++        reason,
++        error: message,
++        durationMs: Date.now() - startedAt,
++      },
++    }
++  } finally {
++    // Restore the user's original setting so no permanent change is left behind
++    if (needsRestore) {
++      await config.update(CONFIG_KEY, original, vscode.ConfigurationTarget.Global)
++    }
++  }
++}

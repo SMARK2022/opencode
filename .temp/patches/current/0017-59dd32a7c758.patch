@@ -1,0 +1,3724 @@
+From 59dd32a7c758c2e444681a4e53b5173db1e67543 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 23 Apr 2026 13:37:07 +0800
+Subject: [PATCH] feat: add session request usage tracking and management
+
+- Introduced SessionRequestUsage module for tracking per-request token usage and cost.
+- Added SQL tables for request usage and assistant usage.
+- Implemented API endpoints to list and retrieve request usage details.
+- Integrated request usage tracking into session processing and compaction workflows.
+- Updated session prompt handling to record request usage metrics.
+- Enhanced error handling and status management for request usage records.
+
+diff --git a/packages/opencode/migration/20260422130633_request_usage_tracking/migration.sql b/packages/opencode/migration/20260422130633_request_usage_tracking/migration.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..a8bbd9f5283e637d2faae4e983feee229135b058
+--- /dev/null
++++ b/packages/opencode/migration/20260422130633_request_usage_tracking/migration.sql
+@@ -0,0 +1,58 @@
++CREATE TABLE `request_usage_assistant` (
++	`session_id` text NOT NULL,
++	`request_id` text NOT NULL,
++	`assistant_message_id` text NOT NULL,
++	`root_request_id` text NOT NULL,
++	`status` text NOT NULL,
++	`provider_id` text NOT NULL,
++	`model_id` text NOT NULL,
++	`variant` text,
++	`step_count` integer DEFAULT 0 NOT NULL,
++	`tokens_input` integer DEFAULT 0 NOT NULL,
++	`tokens_output` integer DEFAULT 0 NOT NULL,
++	`tokens_reasoning` integer DEFAULT 0 NOT NULL,
++	`tokens_cache_read` integer DEFAULT 0 NOT NULL,
++	`tokens_cache_write` integer DEFAULT 0 NOT NULL,
++	`tokens_total` integer DEFAULT 0 NOT NULL,
++	`cost_micros` integer DEFAULT 0 NOT NULL,
++	`time_completed` integer,
++	`error_message` text,
++	`time_created` integer NOT NULL,
++	`time_updated` integer NOT NULL,
++	CONSTRAINT `request_usage_assistant_pk` PRIMARY KEY(`session_id`, `assistant_message_id`),
++	CONSTRAINT `fk_request_usage_assistant_session_id_session_id_fk` FOREIGN KEY (`session_id`) REFERENCES `session`(`id`) ON DELETE CASCADE
++);
++--> statement-breakpoint
++CREATE TABLE `request_usage` (
++	`session_id` text NOT NULL,
++	`request_id` text NOT NULL,
++	`root_request_id` text NOT NULL,
++	`source` text NOT NULL,
++	`status` text NOT NULL,
++	`agent` text NOT NULL,
++	`provider_id` text NOT NULL,
++	`model_id` text NOT NULL,
++	`variant` text,
++	`assistant_count` integer DEFAULT 0 NOT NULL,
++	`step_count` integer DEFAULT 0 NOT NULL,
++	`tokens_input` integer DEFAULT 0 NOT NULL,
++	`tokens_output` integer DEFAULT 0 NOT NULL,
++	`tokens_reasoning` integer DEFAULT 0 NOT NULL,
++	`tokens_cache_read` integer DEFAULT 0 NOT NULL,
++	`tokens_cache_write` integer DEFAULT 0 NOT NULL,
++	`tokens_total` integer DEFAULT 0 NOT NULL,
++	`cost_micros` integer DEFAULT 0 NOT NULL,
++	`time_completed` integer,
++	`error_message` text,
++	`time_created` integer NOT NULL,
++	`time_updated` integer NOT NULL,
++	CONSTRAINT `request_usage_pk` PRIMARY KEY(`session_id`, `request_id`),
++	CONSTRAINT `fk_request_usage_session_id_session_id_fk` FOREIGN KEY (`session_id`) REFERENCES `session`(`id`) ON DELETE CASCADE
++);
++--> statement-breakpoint
++CREATE INDEX `request_usage_assistant_session_request_idx` ON `request_usage_assistant` (`session_id`,`request_id`);--> statement-breakpoint
++CREATE INDEX `request_usage_assistant_session_root_idx` ON `request_usage_assistant` (`session_id`,`root_request_id`);--> statement-breakpoint
++CREATE INDEX `request_usage_assistant_session_status_updated_idx` ON `request_usage_assistant` (`session_id`,`status`,`time_updated`);--> statement-breakpoint
++CREATE INDEX `request_usage_session_time_created_idx` ON `request_usage` (`session_id`,`time_created`);--> statement-breakpoint
++CREATE INDEX `request_usage_session_root_idx` ON `request_usage` (`session_id`,`root_request_id`);--> statement-breakpoint
++CREATE INDEX `request_usage_session_status_updated_idx` ON `request_usage` (`session_id`,`status`,`time_updated`);
+\ No newline at end of file
+diff --git a/packages/opencode/migration/20260422130633_request_usage_tracking/snapshot.json b/packages/opencode/migration/20260422130633_request_usage_tracking/snapshot.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..03a6db081f217ab389ebf127d5625d41602c505f
+--- /dev/null
++++ b/packages/opencode/migration/20260422130633_request_usage_tracking/snapshot.json
+@@ -0,0 +1,2065 @@
++{
++  "version": "7",
++  "dialect": "sqlite",
++  "id": "fb02d709-80d1-4a4a-82da-9ed86684e2a3",
++  "prevIds": [
++    "30b928c5-deef-472c-856d-b5b5064bf6d4"
++  ],
++  "ddl": [
++    {
++      "name": "account_state",
++      "entityType": "tables"
++    },
++    {
++      "name": "account",
++      "entityType": "tables"
++    },
++    {
++      "name": "control_account",
++      "entityType": "tables"
++    },
++    {
++      "name": "workspace",
++      "entityType": "tables"
++    },
++    {
++      "name": "project",
++      "entityType": "tables"
++    },
++    {
++      "name": "request_usage_assistant",
++      "entityType": "tables"
++    },
++    {
++      "name": "request_usage",
++      "entityType": "tables"
++    },
++    {
++      "name": "message",
++      "entityType": "tables"
++    },
++    {
++      "name": "part",
++      "entityType": "tables"
++    },
++    {
++      "name": "permission",
++      "entityType": "tables"
++    },
++    {
++      "name": "session_entry",
++      "entityType": "tables"
++    },
++    {
++      "name": "session",
++      "entityType": "tables"
++    },
++    {
++      "name": "todo",
++      "entityType": "tables"
++    },
++    {
++      "name": "session_share",
++      "entityType": "tables"
++    },
++    {
++      "name": "event_sequence",
++      "entityType": "tables"
++    },
++    {
++      "name": "event",
++      "entityType": "tables"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "account_state"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "active_account_id",
++      "entityType": "columns",
++      "table": "account_state"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "active_org_id",
++      "entityType": "columns",
++      "table": "account_state"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "email",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "url",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "access_token",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "refresh_token",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "token_expiry",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "email",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "url",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "access_token",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "refresh_token",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "token_expiry",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "active",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "type",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "''",
++      "generated": null,
++      "name": "name",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "branch",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "directory",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "extra",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "project_id",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "worktree",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "vcs",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "name",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "icon_url",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "icon_color",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_initialized",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "sandboxes",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "commands",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "request_id",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "assistant_message_id",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "root_request_id",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "status",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "provider_id",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "model_id",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "variant",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "step_count",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_input",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_output",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_reasoning",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_cache_read",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_cache_write",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_total",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "cost_micros",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_completed",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "error_message",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "request_id",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "root_request_id",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "source",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "status",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "agent",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "provider_id",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "model_id",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "variant",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "assistant_count",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "step_count",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_input",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_output",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_reasoning",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_cache_read",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_cache_write",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_total",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "cost_micros",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_completed",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "error_message",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "message"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "message"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "message"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "message"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "data",
++      "entityType": "columns",
++      "table": "message"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "part"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "message_id",
++      "entityType": "columns",
++      "table": "part"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "part"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "part"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "part"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "data",
++      "entityType": "columns",
++      "table": "part"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "project_id",
++      "entityType": "columns",
++      "table": "permission"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "permission"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "permission"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "data",
++      "entityType": "columns",
++      "table": "permission"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "session_entry"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "session_entry"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "type",
++      "entityType": "columns",
++      "table": "session_entry"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "session_entry"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "session_entry"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "data",
++      "entityType": "columns",
++      "table": "session_entry"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "project_id",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "workspace_id",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "parent_id",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "slug",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "directory",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "title",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "version",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "share_url",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "summary_additions",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "summary_deletions",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "summary_files",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "summary_diffs",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "revert",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "permission",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_compacting",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_archived",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "todo"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "content",
++      "entityType": "columns",
++      "table": "todo"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "status",
++      "entityType": "columns",
++      "table": "todo"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "priority",
++      "entityType": "columns",
++      "table": "todo"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "position",
++      "entityType": "columns",
++      "table": "todo"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "todo"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "todo"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "session_share"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "session_share"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "secret",
++      "entityType": "columns",
++      "table": "session_share"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "url",
++      "entityType": "columns",
++      "table": "session_share"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "session_share"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "session_share"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "aggregate_id",
++      "entityType": "columns",
++      "table": "event_sequence"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "seq",
++      "entityType": "columns",
++      "table": "event_sequence"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "event"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "aggregate_id",
++      "entityType": "columns",
++      "table": "event"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "seq",
++      "entityType": "columns",
++      "table": "event"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "type",
++      "entityType": "columns",
++      "table": "event"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "data",
++      "entityType": "columns",
++      "table": "event"
++    },
++    {
++      "columns": [
++        "active_account_id"
++      ],
++      "tableTo": "account",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "SET NULL",
++      "nameExplicit": false,
++      "name": "fk_account_state_active_account_id_account_id_fk",
++      "entityType": "fks",
++      "table": "account_state"
++    },
++    {
++      "columns": [
++        "project_id"
++      ],
++      "tableTo": "project",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_workspace_project_id_project_id_fk",
++      "entityType": "fks",
++      "table": "workspace"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "tableTo": "session",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_request_usage_assistant_session_id_session_id_fk",
++      "entityType": "fks",
++      "table": "request_usage_assistant"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "tableTo": "session",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_request_usage_session_id_session_id_fk",
++      "entityType": "fks",
++      "table": "request_usage"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "tableTo": "session",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_message_session_id_session_id_fk",
++      "entityType": "fks",
++      "table": "message"
++    },
++    {
++      "columns": [
++        "message_id"
++      ],
++      "tableTo": "message",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_part_message_id_message_id_fk",
++      "entityType": "fks",
++      "table": "part"
++    },
++    {
++      "columns": [
++        "project_id"
++      ],
++      "tableTo": "project",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_permission_project_id_project_id_fk",
++      "entityType": "fks",
++      "table": "permission"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "tableTo": "session",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_session_entry_session_id_session_id_fk",
++      "entityType": "fks",
++      "table": "session_entry"
++    },
++    {
++      "columns": [
++        "project_id"
++      ],
++      "tableTo": "project",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_session_project_id_project_id_fk",
++      "entityType": "fks",
++      "table": "session"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "tableTo": "session",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_todo_session_id_session_id_fk",
++      "entityType": "fks",
++      "table": "todo"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "tableTo": "session",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_session_share_session_id_session_id_fk",
++      "entityType": "fks",
++      "table": "session_share"
++    },
++    {
++      "columns": [
++        "aggregate_id"
++      ],
++      "tableTo": "event_sequence",
++      "columnsTo": [
++        "aggregate_id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_event_aggregate_id_event_sequence_aggregate_id_fk",
++      "entityType": "fks",
++      "table": "event"
++    },
++    {
++      "columns": [
++        "email",
++        "url"
++      ],
++      "nameExplicit": false,
++      "name": "control_account_pk",
++      "entityType": "pks",
++      "table": "control_account"
++    },
++    {
++      "columns": [
++        "session_id",
++        "assistant_message_id"
++      ],
++      "nameExplicit": false,
++      "name": "request_usage_assistant_pk",
++      "entityType": "pks",
++      "table": "request_usage_assistant"
++    },
++    {
++      "columns": [
++        "session_id",
++        "request_id"
++      ],
++      "nameExplicit": false,
++      "name": "request_usage_pk",
++      "entityType": "pks",
++      "table": "request_usage"
++    },
++    {
++      "columns": [
++        "session_id",
++        "position"
++      ],
++      "nameExplicit": false,
++      "name": "todo_pk",
++      "entityType": "pks",
++      "table": "todo"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "account_state_pk",
++      "table": "account_state",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "account_pk",
++      "table": "account",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "workspace_pk",
++      "table": "workspace",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "project_pk",
++      "table": "project",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "message_pk",
++      "table": "message",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "part_pk",
++      "table": "part",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "project_id"
++      ],
++      "nameExplicit": false,
++      "name": "permission_pk",
++      "table": "permission",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "session_entry_pk",
++      "table": "session_entry",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "session_pk",
++      "table": "session",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "nameExplicit": false,
++      "name": "session_share_pk",
++      "table": "session_share",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "aggregate_id"
++      ],
++      "nameExplicit": false,
++      "name": "event_sequence_pk",
++      "table": "event_sequence",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "event_pk",
++      "table": "event",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "request_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "request_usage_assistant_session_request_idx",
++      "entityType": "indexes",
++      "table": "request_usage_assistant"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "root_request_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "request_usage_assistant_session_root_idx",
++      "entityType": "indexes",
++      "table": "request_usage_assistant"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "status",
++          "isExpression": false
++        },
++        {
++          "value": "time_updated",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "request_usage_assistant_session_status_updated_idx",
++      "entityType": "indexes",
++      "table": "request_usage_assistant"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "time_created",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "request_usage_session_time_created_idx",
++      "entityType": "indexes",
++      "table": "request_usage"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "root_request_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "request_usage_session_root_idx",
++      "entityType": "indexes",
++      "table": "request_usage"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "status",
++          "isExpression": false
++        },
++        {
++          "value": "time_updated",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "request_usage_session_status_updated_idx",
++      "entityType": "indexes",
++      "table": "request_usage"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "time_created",
++          "isExpression": false
++        },
++        {
++          "value": "id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "message_session_time_created_id_idx",
++      "entityType": "indexes",
++      "table": "message"
++    },
++    {
++      "columns": [
++        {
++          "value": "message_id",
++          "isExpression": false
++        },
++        {
++          "value": "id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "part_message_id_id_idx",
++      "entityType": "indexes",
++      "table": "part"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "part_session_idx",
++      "entityType": "indexes",
++      "table": "part"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_entry_session_idx",
++      "entityType": "indexes",
++      "table": "session_entry"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "type",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_entry_session_type_idx",
++      "entityType": "indexes",
++      "table": "session_entry"
++    },
++    {
++      "columns": [
++        {
++          "value": "time_created",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_entry_time_created_idx",
++      "entityType": "indexes",
++      "table": "session_entry"
++    },
++    {
++      "columns": [
++        {
++          "value": "project_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_project_idx",
++      "entityType": "indexes",
++      "table": "session"
++    },
++    {
++      "columns": [
++        {
++          "value": "workspace_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_workspace_idx",
++      "entityType": "indexes",
++      "table": "session"
++    },
++    {
++      "columns": [
++        {
++          "value": "parent_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_parent_idx",
++      "entityType": "indexes",
++      "table": "session"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "todo_session_idx",
++      "entityType": "indexes",
++      "table": "todo"
++    }
++  ],
++  "renames": []
++}
+\ No newline at end of file
+diff --git a/packages/opencode/src/cli/cmd/session.ts b/packages/opencode/src/cli/cmd/session.ts
+index 8537a74d4510838fec993f41fa6c42a6490366b5..7fe4141d434c4210ed47fc977eca78f5295f0386 100644
+--- a/packages/opencode/src/cli/cmd/session.ts
++++ b/packages/opencode/src/cli/cmd/session.ts
+@@ -12,6 +12,11 @@ import { EOL } from "os"
+ import path from "path"
+ import { which } from "../../util/which"
+ import { AppRuntime } from "@/effect/app-runtime"
++import { Database, eq, sql } from "@/storage"
++import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
++import { formatNumber } from "./stats"
++
++const MICROS = 1_000_000
+ 
+ function pagerCmd(): string[] {
+   const lessOptions = ["-R", "-S"]
+@@ -19,7 +24,6 @@ function pagerCmd(): string[] {
+     return ["less", ...lessOptions]
+   }
+ 
+-  // user could have less installed via other options
+   const lessOnPath = which("less")
+   if (lessOnPath) {
+     if (Filesystem.stat(lessOnPath)?.size) return [lessOnPath, ...lessOptions]
+@@ -36,14 +40,14 @@ function pagerCmd(): string[] {
+     if (Filesystem.stat(less)?.size) return [less, ...lessOptions]
+   }
+ 
+-  // Fall back to Windows built-in more (via cmd.exe)
+   return ["cmd", "/c", "more"]
+ }
+ 
+ export const SessionCommand = cmd({
+   command: "session",
+   describe: "manage sessions",
+-  builder: (yargs: Argv) => yargs.command(SessionListCommand).command(SessionDeleteCommand).demandCommand(),
++  builder: (yargs: Argv) =>
++    yargs.command(SessionListCommand).command(SessionInfoCommand).command(SessionDeleteCommand).demandCommand(),
+   async handler() {},
+ })
+ 
+@@ -88,20 +92,41 @@ export const SessionListCommand = cmd({
+         choices: ["table", "json"],
+         default: "table",
+       })
++      .option("cost", {
++        alias: "c",
++        describe: "show token and cost summary per session",
++        type: "boolean",
++        default: false,
++      })
+   },
+   handler: async (args) => {
+     await bootstrap(process.cwd(), async () => {
+       const sessions = [...Session.list({ roots: true, limit: args.maxCount })]
+ 
+-      if (sessions.length === 0) {
+-        return
++      if (sessions.length === 0) return
++
++      // Batch-load cost/token totals if requested.
++      let costBySession: Map<string, { costMicros: number; tokensTotal: number }> | undefined
++      if (args.cost && args.format !== "json") {
++        const rows = Database.use((db) =>
++          db
++            .select({
++              sessionId: RequestUsageTable.session_id,
++              costMicros: sql<number>`sum(${RequestUsageTable.cost_micros})`,
++              tokensTotal: sql<number>`sum(${RequestUsageTable.tokens_total})`,
++            })
++            .from(RequestUsageTable)
++            .groupBy(RequestUsageTable.session_id)
++            .all(),
++        )
++        costBySession = new Map(rows.map((r) => [r.sessionId, { costMicros: r.costMicros, tokensTotal: r.tokensTotal }]))
+       }
+ 
+       let output: string
+       if (args.format === "json") {
+         output = formatSessionJSON(sessions)
+       } else {
+-        output = formatSessionTable(sessions)
++        output = formatSessionTable(sessions, costBySession)
+       }
+ 
+       const shouldPaginate = process.stdout.isTTY && !args.maxCount && args.format === "table"
+@@ -128,20 +153,87 @@ export const SessionListCommand = cmd({
+   },
+ })
+ 
+-function formatSessionTable(sessions: Session.Info[]): string {
++export const SessionInfoCommand = cmd({
++  command: "info",
++  describe: "show detailed session info with token usage by model",
++  builder: (yargs: Argv) => {
++    return yargs.option("session", {
++      alias: "s",
++      describe: "session ID",
++      type: "string",
++      demandOption: true,
++    })
++  },
++  handler: async (args) => {
++    await bootstrap(process.cwd(), async () => {
++      const sessionID = SessionID.make(args.session)
++
++      let session: Session.Info
++      try {
++        session = await AppRuntime.runPromise(Session.Service.use((svc) => svc.get(sessionID)))
++      } catch {
++        UI.error(`Session not found: ${args.session}`)
++        process.exit(1)
++        return
++      }
++
++      // Per-model breakdown from request_usage_assistant.
++      const rows = Database.use((db) =>
++        db
++          .select({
++            providerId: RequestUsageAssistantTable.provider_id,
++            modelId: RequestUsageAssistantTable.model_id,
++            calls: sql<number>`count(*)`,
++            tokensInput: sql<number>`sum(${RequestUsageAssistantTable.tokens_input})`,
++            tokensOutput: sql<number>`sum(${RequestUsageAssistantTable.tokens_output})`,
++            tokensReasoning: sql<number>`sum(${RequestUsageAssistantTable.tokens_reasoning})`,
++            tokensCacheRead: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_read})`,
++            tokensCacheWrite: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_write})`,
++            costMicros: sql<number>`sum(${RequestUsageAssistantTable.cost_micros})`,
++          })
++          .from(RequestUsageAssistantTable)
++          .where(eq(RequestUsageAssistantTable.session_id, sessionID))
++          .groupBy(RequestUsageAssistantTable.provider_id, RequestUsageAssistantTable.model_id)
++          .all(),
++      )
++
++      displaySessionInfo(session, rows)
++    })
++  },
++})
++
++function formatSessionTable(
++  sessions: Session.Info[],
++  costBySession?: Map<string, { costMicros: number; tokensTotal: number }>,
++): string {
+   const lines: string[] = []
+ 
+   const maxIdWidth = Math.max(20, ...sessions.map((s) => s.id.length))
+   const maxTitleWidth = Math.max(25, ...sessions.map((s) => s.title.length))
+ 
+-  const header = `Session ID${" ".repeat(maxIdWidth - 10)}  Title${" ".repeat(maxTitleWidth - 5)}  Updated`
+-  lines.push(header)
+-  lines.push("─".repeat(header.length))
+-  for (const session of sessions) {
+-    const truncatedTitle = Locale.truncate(session.title, maxTitleWidth)
+-    const timeStr = Locale.todayTimeOrDateTime(session.time.updated)
+-    const line = `${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${timeStr}`
+-    lines.push(line)
++  if (costBySession) {
++    const header = `Session ID${" ".repeat(maxIdWidth - 10)}  Title${" ".repeat(maxTitleWidth - 5)}  Updated              Cost      Tokens`
++    lines.push(header)
++    lines.push("─".repeat(header.length))
++    for (const session of sessions) {
++      const truncatedTitle = Locale.truncate(session.title, maxTitleWidth)
++      const timeStr = Locale.todayTimeOrDateTime(session.time.updated)
++      const usage = costBySession.get(session.id)
++      const costStr = usage ? `$${(usage.costMicros / MICROS).toFixed(3)}` : "—"
++      const tokensStr = usage ? formatNumber(usage.tokensTotal) : "—"
++      lines.push(
++        `${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${timeStr.padEnd(20)} ${costStr.padStart(8)}  ${tokensStr.padStart(7)}`,
++      )
++    }
++  } else {
++    const header = `Session ID${" ".repeat(maxIdWidth - 10)}  Title${" ".repeat(maxTitleWidth - 5)}  Updated`
++    lines.push(header)
++    lines.push("─".repeat(header.length))
++    for (const session of sessions) {
++      const truncatedTitle = Locale.truncate(session.title, maxTitleWidth)
++      const timeStr = Locale.todayTimeOrDateTime(session.time.updated)
++      lines.push(`${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${timeStr}`)
++    }
+   }
+ 
+   return lines.join(EOL)
+@@ -158,3 +250,80 @@ function formatSessionJSON(sessions: Session.Info[]): string {
+   }))
+   return JSON.stringify(jsonData, null, 2)
+ }
++
++type ModelRow = {
++  providerId: string
++  modelId: string
++  calls: number
++  tokensInput: number
++  tokensOutput: number
++  tokensReasoning: number
++  tokensCacheRead: number
++  tokensCacheWrite: number
++  costMicros: number
++}
++
++function displaySessionInfo(session: Session.Info, rows: ModelRow[]) {
++  const width = 56
++
++  function renderRow(label: string, value: string): string {
++    const paddingNeeded = width - 1 - label.length - value.length
++    return `│${label}${" ".repeat(Math.max(0, paddingNeeded))}${value} │`
++  }
++
++  console.log(`Session: ${session.id}`)
++  console.log(`Title:   ${session.title}`)
++  console.log(`Created: ${new Date(session.time.created).toLocaleString()}`)
++  console.log(`Updated: ${new Date(session.time.updated).toLocaleString()}`)
++  console.log()
++
++  if (rows.length === 0) {
++    console.log("No token usage data (session predates tracking or has no completions).")
++    return
++  }
++
++  let totalCalls = 0
++  let totalInput = 0
++  let totalOutput = 0
++  let totalCacheRead = 0
++  let totalCacheWrite = 0
++  let totalCost = 0
++
++  console.log("┌────────────────────────────────────────────────────────┐")
++  console.log("│                   TOKEN USAGE BY MODEL                 │")
++  console.log("├────────────────────────────────────────────────────────┤")
++
++  for (const row of rows) {
++    const output = row.tokensOutput + row.tokensReasoning
++    const cost = row.costMicros / MICROS
++    const modelKey = `${row.providerId}/${row.modelId}`
++    console.log(`│ ${modelKey.slice(0, 54).padEnd(54)} │`)
++    console.log(renderRow("  Calls", String(row.calls)))
++    console.log(renderRow("  Input", formatNumber(row.tokensInput)))
++    console.log(renderRow("  Cache Write", formatNumber(row.tokensCacheWrite)))
++    console.log(renderRow("  Cache Read", formatNumber(row.tokensCacheRead)))
++    console.log(renderRow("  Output", formatNumber(output)))
++    console.log(renderRow("  Cost", `$${cost.toFixed(4)}`))
++    console.log("├────────────────────────────────────────────────────────┤")
++
++    totalCalls += row.calls
++    totalInput += row.tokensInput
++    totalOutput += output
++    totalCacheRead += row.tokensCacheRead
++    totalCacheWrite += row.tokensCacheWrite
++    totalCost += cost
++  }
++
++  if (rows.length > 1) {
++    console.log(renderRow("Total Calls", String(totalCalls)))
++    console.log(renderRow("Total Input", formatNumber(totalInput)))
++    console.log(renderRow("Total Cache Write", formatNumber(totalCacheWrite)))
++    console.log(renderRow("Total Cache Read", formatNumber(totalCacheRead)))
++    console.log(renderRow("Total Output", formatNumber(totalOutput)))
++    console.log(renderRow("Total Cost", `$${totalCost.toFixed(4)}`))
++    console.log("├────────────────────────────────────────────────────────┤")
++  }
++
++  process.stdout.write("\x1B[1A")
++  console.log("└────────────────────────────────────────────────────────┘")
++}
+diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/cmd/stats.ts
+index 34af56ad7a90493af536c43817768738903baf7a..d64fee2d249d46576a9e859da637a8c8bba378d7 100644
+--- a/packages/opencode/src/cli/cmd/stats.ts
++++ b/packages/opencode/src/cli/cmd/stats.ts
+@@ -2,11 +2,38 @@ import type { Argv } from "yargs"
+ import { cmd } from "./cmd"
+ import { Session } from "../../session"
+ import { bootstrap } from "../bootstrap"
+-import { Database } from "../../storage"
++import { Database, eq } from "../../storage"
+ import { SessionTable } from "../../session/session.sql"
+ import { Project } from "../../project"
+ import { Instance } from "../../project/instance"
+ import { AppRuntime } from "@/effect/app-runtime"
++import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
++
++const MICROS = 1_000_000
++
++export type ModelUsageEntry = {
++  messages: number
++  tokens: { input: number; output: number; cache: { read: number; write: number } }
++  cost: number
++}
++
++function upsertModelUsage(
++  acc: Record<string, ModelUsageEntry>,
++  key: string,
++  input: number,
++  output: number,
++  cacheRead: number,
++  cacheWrite: number,
++  cost: number,
++): void {
++  if (!acc[key]) acc[key] = { messages: 0, tokens: { input: 0, output: 0, cache: { read: 0, write: 0 } }, cost: 0 }
++  acc[key].messages++
++  acc[key].tokens.input += input
++  acc[key].tokens.output += output
++  acc[key].tokens.cache.read += cacheRead
++  acc[key].tokens.cache.write += cacheWrite
++  acc[key].cost += cost
++}
+ 
+ interface SessionStats {
+   totalSessions: number
+@@ -16,31 +43,11 @@ interface SessionStats {
+     input: number
+     output: number
+     reasoning: number
+-    cache: {
+-      read: number
+-      write: number
+-    }
++    cache: { read: number; write: number }
+   }
+   toolUsage: Record<string, number>
+-  modelUsage: Record<
+-    string,
+-    {
+-      messages: number
+-      tokens: {
+-        input: number
+-        output: number
+-        cache: {
+-          read: number
+-          write: number
+-        }
+-      }
+-      cost: number
+-    }
+-  >
+-  dateRange: {
+-    earliest: number
+-    latest: number
+-  }
++  modelUsage: Record<string, ModelUsageEntry>
++  dateRange: { earliest: number; latest: number }
+   days: number
+   costPerDay: number
+   tokensPerSession: number
+@@ -128,21 +135,10 @@ export async function aggregateSessionStats(days?: number, projectFilter?: strin
+     totalSessions: filteredSessions.length,
+     totalMessages: 0,
+     totalCost: 0,
+-    totalTokens: {
+-      input: 0,
+-      output: 0,
+-      reasoning: 0,
+-      cache: {
+-        read: 0,
+-        write: 0,
+-      },
+-    },
++    totalTokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+     toolUsage: {},
+     modelUsage: {},
+-    dateRange: {
+-      earliest: Date.now(),
+-      latest: Date.now(),
+-    },
++    dateRange: { earliest: Date.now(), latest: Date.now() },
+     days: 0,
+     costPerDay: 0,
+     tokensPerSession: 0,
+@@ -168,59 +164,73 @@ export async function aggregateSessionStats(days?: number, projectFilter?: strin
+     const batch = filteredSessions.slice(i, i + BATCH_SIZE)
+ 
+     const batchPromises = batch.map(async (session) => {
+-      const messages = await AppRuntime.runPromise(
+-        Session.Service.use((svc) => svc.messages({ sessionID: session.id })),
+-      )
++      const [messages, requestUsageRows, assistantUsageRows] = await Promise.all([
++        AppRuntime.runPromise(Session.Service.use((svc) => svc.messages({ sessionID: session.id }))),
++        Database.use((db) =>
++          db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, session.id)).all(),
++        ),
++        Database.use((db) =>
++          db
++            .select()
++            .from(RequestUsageAssistantTable)
++            .where(eq(RequestUsageAssistantTable.session_id, session.id))
++            .all(),
++        ),
++      ])
+ 
+       let sessionCost = 0
+       let sessionTokens = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+-      let sessionToolUsage: Record<string, number> = {}
+-      let sessionModelUsage: Record<
+-        string,
+-        {
+-          messages: number
+-          tokens: {
+-            input: number
+-            output: number
+-            cache: {
+-              read: number
+-              write: number
+-            }
+-          }
+-          cost: number
++      const sessionToolUsage: Record<string, number> = {}
++      const sessionModelUsage: Record<string, ModelUsageEntry> = {}
++
++      if (requestUsageRows.length > 0) {
++        // Sessions with DB tracking: use request_usage for cost/tokens, assistant table for per-model breakdown.
++        for (const row of requestUsageRows) {
++          sessionCost += row.cost_micros / MICROS
++          sessionTokens.input += row.tokens_input
++          sessionTokens.output += row.tokens_output
++          sessionTokens.reasoning += row.tokens_reasoning
++          sessionTokens.cache.read += row.tokens_cache_read
++          sessionTokens.cache.write += row.tokens_cache_write
+         }
+-      > = {}
+-
+-      for (const message of messages) {
+-        if (message.info.role === "assistant") {
++        for (const row of assistantUsageRows) {
++          upsertModelUsage(
++            sessionModelUsage,
++            `${row.provider_id}/${row.model_id}`,
++            row.tokens_input,
++            row.tokens_output + row.tokens_reasoning,
++            row.tokens_cache_read,
++            row.tokens_cache_write,
++            row.cost_micros / MICROS,
++          )
++        }
++      } else {
++        // Legacy sessions (pre-migration): derive cost/tokens from message metadata.
++        for (const message of messages) {
++          if (message.info.role !== "assistant") continue
+           sessionCost += message.info.cost || 0
+-
+-          const modelKey = `${message.info.providerID}/${message.info.modelID}`
+-          if (!sessionModelUsage[modelKey]) {
+-            sessionModelUsage[modelKey] = {
+-              messages: 0,
+-              tokens: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+-              cost: 0,
+-            }
+-          }
+-          sessionModelUsage[modelKey].messages++
+-          sessionModelUsage[modelKey].cost += message.info.cost || 0
+-
+-          if (message.info.tokens) {
+-            sessionTokens.input += message.info.tokens.input || 0
+-            sessionTokens.output += message.info.tokens.output || 0
+-            sessionTokens.reasoning += message.info.tokens.reasoning || 0
+-            sessionTokens.cache.read += message.info.tokens.cache?.read || 0
+-            sessionTokens.cache.write += message.info.tokens.cache?.write || 0
+-
+-            sessionModelUsage[modelKey].tokens.input += message.info.tokens.input || 0
+-            sessionModelUsage[modelKey].tokens.output +=
+-              (message.info.tokens.output || 0) + (message.info.tokens.reasoning || 0)
+-            sessionModelUsage[modelKey].tokens.cache.read += message.info.tokens.cache?.read || 0
+-            sessionModelUsage[modelKey].tokens.cache.write += message.info.tokens.cache?.write || 0
++          const t = message.info.tokens
++          if (t) {
++            sessionTokens.input += t.input || 0
++            sessionTokens.output += t.output || 0
++            sessionTokens.reasoning += t.reasoning || 0
++            sessionTokens.cache.read += t.cache?.read || 0
++            sessionTokens.cache.write += t.cache?.write || 0
++            upsertModelUsage(
++              sessionModelUsage,
++              `${message.info.providerID}/${message.info.modelID}`,
++              t.input || 0,
++              (t.output || 0) + (t.reasoning || 0),
++              t.cache?.read || 0,
++              t.cache?.write || 0,
++              message.info.cost || 0,
++            )
+           }
+         }
++      }
+ 
++      // Tool usage always comes from message parts.
++      for (const message of messages) {
+         for (const part of message.parts) {
+           if (part.type === "tool" && part.tool) {
+             sessionToolUsage[part.tool] = (sessionToolUsage[part.tool] || 0) + 1
+@@ -265,13 +275,8 @@ export async function aggregateSessionStats(days?: number, projectFilter?: strin
+       }
+ 
+       for (const [model, usage] of Object.entries(result.sessionModelUsage)) {
+-        if (!stats.modelUsage[model]) {
+-          stats.modelUsage[model] = {
+-            messages: 0,
+-            tokens: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+-            cost: 0,
+-          }
+-        }
++        if (!stats.modelUsage[model])
++          stats.modelUsage[model] = { messages: 0, tokens: { input: 0, output: 0, cache: { read: 0, write: 0 } }, cost: 0 }
+         stats.modelUsage[model].messages += usage.messages
+         stats.modelUsage[model].tokens.input += usage.tokens.input
+         stats.modelUsage[model].tokens.output += usage.tokens.output
+@@ -284,10 +289,7 @@ export async function aggregateSessionStats(days?: number, projectFilter?: strin
+ 
+   const rangeDays = Math.max(1, Math.ceil((latestTime - earliestTime) / MS_IN_DAY))
+   const effectiveDays = windowDays ?? rangeDays
+-  stats.dateRange = {
+-    earliest: earliestTime,
+-    latest: latestTime,
+-  }
++  stats.dateRange = { earliest: earliestTime, latest: latestTime }
+   stats.days = effectiveDays
+   stats.costPerDay = stats.totalCost / effectiveDays
+   const totalTokens =
+@@ -309,7 +311,7 @@ export async function aggregateSessionStats(days?: number, projectFilter?: strin
+   return stats
+ }
+ 
+-export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit?: number) {
++export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit?: number): void {
+   const width = 56
+ 
+   function renderRow(label: string, value: string): string {
+@@ -319,7 +321,6 @@ export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit
+     return `│${label}${" ".repeat(padding)}${value} │`
+   }
+ 
+-  // Overview section
+   console.log("┌────────────────────────────────────────────────────────┐")
+   console.log("│                       OVERVIEW                         │")
+   console.log("├────────────────────────────────────────────────────────┤")
+@@ -329,7 +330,6 @@ export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit
+   console.log("└────────────────────────────────────────────────────────┘")
+   console.log()
+ 
+-  // Cost & Tokens section
+   console.log("┌────────────────────────────────────────────────────────┐")
+   console.log("│                    COST & TOKENS                       │")
+   console.log("├────────────────────────────────────────────────────────┤")
+@@ -348,7 +348,6 @@ export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit
+   console.log("└────────────────────────────────────────────────────────┘")
+   console.log()
+ 
+-  // Model Usage section
+   if (modelLimit !== undefined && Object.keys(stats.modelUsage).length > 0) {
+     const sortedModels = Object.entries(stats.modelUsage).sort(([, a], [, b]) => b.messages - a.messages)
+     const modelsToDisplay = modelLimit === Infinity ? sortedModels : sortedModels.slice(0, modelLimit)
+@@ -367,13 +366,11 @@ export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit
+       console.log(renderRow("  Cost", `$${usage.cost.toFixed(4)}`))
+       console.log("├────────────────────────────────────────────────────────┤")
+     }
+-    // Remove last separator and add bottom border
+-    process.stdout.write("\x1B[1A") // Move up one line
++    process.stdout.write("\x1B[1A")
+     console.log("└────────────────────────────────────────────────────────┘")
+   }
+   console.log()
+ 
+-  // Tool Usage section
+   if (Object.keys(stats.toolUsage).length > 0) {
+     const sortedTools = Object.entries(stats.toolUsage).sort(([, a], [, b]) => b - a)
+     const toolsToDisplay = toolLimit ? sortedTools.slice(0, toolLimit) : sortedTools
+@@ -403,7 +400,7 @@ export function displayStats(stats: SessionStats, toolLimit?: number, modelLimit
+   console.log()
+ }
+ 
+-function formatNumber(num: number): string {
++export function formatNumber(num: number): string {
+   if (num >= 1000000) {
+     return (num / 1000000).toFixed(1) + "M"
+   } else if (num >= 1000) {
+diff --git a/packages/opencode/src/effect/app-runtime.ts b/packages/opencode/src/effect/app-runtime.ts
+index d68e00a323b0915dd57a2e31a7300236066053e8..1ef1ebcdc08d74819450fb4dd4e3471ea189c760 100644
+--- a/packages/opencode/src/effect/app-runtime.ts
++++ b/packages/opencode/src/effect/app-runtime.ts
+@@ -29,6 +29,7 @@ import { SessionProcessor } from "@/session/processor"
+ import { SessionCompaction } from "@/session/compaction"
+ import { SessionRevert } from "@/session/revert"
+ import { SessionSummary } from "@/session/summary"
++import { SessionRequestUsage } from "@/session/request-usage"
+ import { SessionPrompt } from "@/session/prompt"
+ import { Instruction } from "@/session/instruction"
+ import { LLM } from "@/session/llm"
+@@ -78,6 +79,7 @@ export const AppLayer = Layer.mergeAll(
+   SessionCompaction.defaultLayer,
+   SessionRevert.defaultLayer,
+   SessionSummary.defaultLayer,
++  SessionRequestUsage.defaultLayer,
+   SessionPrompt.defaultLayer,
+   Instruction.defaultLayer,
+   LLM.defaultLayer,
+diff --git a/packages/opencode/src/server/routes/instance/session.ts b/packages/opencode/src/server/routes/instance/session.ts
+index bf713935b0f6609148814e46f9d1449c27e92e59..e593d3fab8abefd1acbdf09404f1ba0c69f51d94 100644
+--- a/packages/opencode/src/server/routes/instance/session.ts
++++ b/packages/opencode/src/server/routes/instance/session.ts
+@@ -13,6 +13,7 @@ import { SessionShare } from "@/share"
+ import { SessionStatus } from "@/session/status"
+ import { SessionSummary } from "@/session/summary"
+ import { Todo } from "@/session/todo"
++import { SessionRequestUsage } from "@/session/request-usage"
+ import { Effect } from "effect"
+ import { Agent } from "@/agent/agent"
+ import { Snapshot } from "@/snapshot"
+@@ -25,6 +26,7 @@ import { errors } from "../../error"
+ import { lazy } from "@/util/lazy"
+ import { Bus } from "@/bus"
+ import { NamedError } from "@opencode-ai/shared/util/error"
++import { NotFoundError } from "@/storage"
+ import { jsonRequest, runRequest } from "./trace"
+ 
+ const log = Log.create({ service: "server" })
+@@ -198,6 +200,122 @@ export const SessionRoutes = lazy(() =>
+         })
+       },
+     )
++    .get(
++      "/:sessionID/request_usage",
++      describeRoute({
++        summary: "List request usage",
++        description: "List per-request token usage and cost for a session.",
++        operationId: "session.request_usage.list",
++        responses: {
++          200: {
++            description: "Request usage list",
++            content: {
++              "application/json": {
++                schema: resolver(SessionRequestUsage.Request.array()),
++              },
++            },
++          },
++          ...errors(400, 404),
++        },
++      }),
++      validator(
++        "param",
++        z.object({
++          sessionID: SessionID.zod,
++        }),
++      ),
++      validator(
++        "query",
++        z.object({
++          limit: z.coerce.number().optional(),
++          before: z.coerce.number().optional(),
++          rootRequestID: MessageID.zod.optional(),
++          source: SessionRequestUsage.Source.optional(),
++        }),
++      ),
++      async (c) => {
++        const { sessionID } = c.req.valid("param")
++        const query = c.req.valid("query")
++        return jsonRequest("SessionRoutes.request_usage.list", c, function* () {
++          const usage = yield* SessionRequestUsage.Service
++          return yield* usage.list({
++            sessionID,
++            limit: query.limit,
++            before: query.before,
++            rootRequestID: query.rootRequestID,
++            source: query.source,
++          })
++        })
++      },
++    )
++    .get(
++      "/:sessionID/request_usage/:requestID",
++      describeRoute({
++        summary: "Get request usage",
++        description: "Get token usage and cost for a specific request.",
++        operationId: "session.request_usage.get",
++        responses: {
++          200: {
++            description: "Request usage detail",
++            content: {
++              "application/json": {
++                schema: resolver(SessionRequestUsage.Request),
++              },
++            },
++          },
++          ...errors(400, 404),
++        },
++      }),
++      validator(
++        "param",
++        z.object({
++          sessionID: SessionID.zod,
++          requestID: MessageID.zod,
++        }),
++      ),
++      async (c) => {
++        const { sessionID, requestID } = c.req.valid("param")
++        return jsonRequest("SessionRoutes.request_usage.get", c, function* () {
++          const usage = yield* SessionRequestUsage.Service
++          const result = yield* usage.get({ sessionID, requestID })
++          if (result) return result
++          throw new NotFoundError({ message: `Request usage not found: ${requestID}` })
++        })
++      },
++    )
++    .get(
++      "/:sessionID/request_usage/:requestID/assistant",
++      describeRoute({
++        summary: "List request assistant usage",
++        description: "List assistant-round usage for a specific request.",
++        operationId: "session.request_usage.assistants",
++        responses: {
++          200: {
++            description: "Assistant usage list",
++            content: {
++              "application/json": {
++                schema: resolver(SessionRequestUsage.Assistant.array()),
++              },
++            },
++          },
++          ...errors(400, 404),
++        },
++      }),
++      validator(
++        "param",
++        z.object({
++          sessionID: SessionID.zod,
++          requestID: MessageID.zod,
++        }),
++      ),
++      async (c) => {
++        const { sessionID, requestID } = c.req.valid("param")
++        return jsonRequest("SessionRoutes.request_usage.assistants", c, function* () {
++          const usage = yield* SessionRequestUsage.Service
++          return yield* usage.assistants({ sessionID, requestID })
++        })
++      },
++    )
+     .post(
+       "/",
+       describeRoute({
+@@ -872,7 +990,7 @@ export const SessionRoutes = lazy(() =>
+           sessionID: SessionID.zod,
+         }),
+       ),
+-      validator("json", SessionPrompt.PromptInput.omit({ sessionID: true })),
++      validator("json", SessionPrompt.PromptInput.omit({ sessionID: true, source: true, rootRequestID: true })),
+       async (c) => {
+         c.status(200)
+         c.header("Content-Type", "application/json")
+@@ -908,7 +1026,7 @@ export const SessionRoutes = lazy(() =>
+           sessionID: SessionID.zod,
+         }),
+       ),
+-      validator("json", SessionPrompt.PromptInput.omit({ sessionID: true })),
++      validator("json", SessionPrompt.PromptInput.omit({ sessionID: true, source: true, rootRequestID: true })),
+       async (c) => {
+         const sessionID = c.req.valid("param").sessionID
+         const body = c.req.valid("json")
+diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
+index 037543064e23b4eafcac6ad68961e6e041825e39..074e1895e1d4b4fe9760d055b63044678e5fd10d 100644
+--- a/packages/opencode/src/session/compaction.ts
++++ b/packages/opencode/src/session/compaction.ts
+@@ -13,11 +13,12 @@ import { Plugin } from "@/plugin"
+ import { Config } from "@/config"
+ import { NotFoundError } from "@/storage"
+ import { ModelID, ProviderID } from "@/provider/schema"
+-import { Effect, Layer, Context } from "effect"
++import { Effect, Layer, Context, Option } from "effect"
+ import { InstanceState } from "@/effect"
+ import { isOverflow as overflow, usable } from "./overflow"
+ import { makeRuntime } from "@/effect/run-service"
+ import { fn } from "@/util/fn"
++import { SessionRequestUsage } from "./request-usage"
+ 
+ const log = Log.create({ service: "session.compaction" })
+ 
+@@ -261,6 +262,18 @@ export const layer: Layer.Layer<
+       const model = agent.model
+         ? yield* provider.getModel(agent.model.providerID, agent.model.modelID)
+         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
++      const requestUsage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
++      if (requestUsage)
++        yield* requestUsage.begin({
++          sessionID: input.sessionID,
++          requestID: input.parentID,
++          rootRequestID: input.parentID,
++          source: "system_compaction",
++          agent: "compaction",
++          providerID: model.providerID,
++          modelID: model.id,
++          variant: userMessage.model.variant,
++        })
+       const cfg = yield* config.get()
+       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
+       const selected = yield* select({
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index 0d89c9a65044a716f27a88e3764b731a44268f55..c8ff4aa39f69f2e767bd5abd2d3c26ed0bd830f9 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -1,4 +1,4 @@
+-import { Cause, Deferred, Effect, Layer, Context, Scope } from "effect"
++import { Cause, Deferred, Effect, Layer, Context, Scope, Option } from "effect"
+ import * as Stream from "effect/Stream"
+ import { Agent } from "@/agent/agent"
+ import { Bus } from "@/bus"
+@@ -15,6 +15,7 @@ import type { SessionID } from "./schema"
+ import { SessionRetry } from "./retry"
+ import { SessionStatus } from "./status"
+ import { SessionSummary } from "./summary"
++import { SessionRequestUsage } from "./request-usage"
+ import type { Provider } from "@/provider"
+ import { Question } from "@/question"
+ import { errorMessage } from "@/util/error"
+@@ -384,6 +385,13 @@ export const layer: Layer.Layer<
+               cost: usage.cost,
+             })
+             yield* session.updateMessage(ctx.assistantMessage)
++            const reqUsage1 = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
++            if (reqUsage1)
++              yield* reqUsage1.recordAssistant({
++                sessionID: ctx.sessionID,
++                requestID: ctx.assistantMessage.parentID,
++                assistant: ctx.assistantMessage,
++              })
+             if (ctx.snapshot) {
+               const patch = yield* snapshot.patch(ctx.snapshot)
+               if (patch.files.length) {
+@@ -528,6 +536,13 @@ export const layer: Layer.Layer<
+         ctx.toolcalls = {}
+         ctx.assistantMessage.time.completed = Date.now()
+         yield* session.updateMessage(ctx.assistantMessage)
++        const reqUsage2 = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
++        if (reqUsage2)
++          yield* reqUsage2.recordAssistant({
++            sessionID: ctx.sessionID,
++            requestID: ctx.assistantMessage.parentID,
++            assistant: ctx.assistantMessage,
++          })
+       })
+ 
+       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 0f25c9575b4899a7219f43d170dfe40134892c56..f98b649142b5f4979f9778242737f913293ea556 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -32,6 +32,7 @@ import { Command } from "../command"
+ import { pathToFileURL, fileURLToPath } from "url"
+ import { ConfigMarkdown } from "../config"
+ import { SessionSummary } from "./summary"
++import { SessionRequestUsage } from "./request-usage"
+ import { NamedError } from "@opencode-ai/shared/util/error"
+ import { SessionProcessor } from "./processor"
+ import { Tool } from "@/tool"
+@@ -740,6 +741,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+         model: { providerID: model.providerID, modelID: model.modelID },
+       }
+       yield* sessions.updateMessage(userMsg)
++      const requestUsageShellBegin = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
++      if (requestUsageShellBegin)
++        yield* requestUsageShellBegin.begin({
++          sessionID: input.sessionID,
++          requestID: userMsg.id,
++          rootRequestID: userMsg.id,
++          source: "shell",
++          agent: userMsg.agent,
++          providerID: userMsg.model.providerID,
++          modelID: userMsg.model.modelID,
++          timeCreated: userMsg.time.created,
++        })
+       const userPart: MessageV2.Part = {
+         type: "text",
+         id: PartID.ascending(),
+@@ -858,6 +871,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             }
+             yield* sessions.updatePart(part)
+           }
++          const requestUsageShellComplete = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
++          if (requestUsageShellComplete)
++            yield* requestUsageShellComplete.complete({
++              sessionID: input.sessionID,
++              requestID: userMsg.id,
++              status: aborted ? "aborted" : "completed",
++              timeCompleted: Date.now(),
++            })
+         }),
+       )
+ 
+@@ -1269,6 +1290,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+ 
+       yield* sessions.updateMessage(info)
+       for (const part of parts) yield* sessions.updatePart(part)
++      // 每次用户回车生成一个 request 记录，后续 assistant 多轮（tool-calls）按 parentID 聚合到该 request。
++      const requestUsagePromptBegin = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
++      if (requestUsagePromptBegin)
++        yield* requestUsagePromptBegin.begin({
++          sessionID: info.sessionID,
++          requestID: info.id,
++          rootRequestID: input.rootRequestID ?? info.id,
++          source: input.source ?? "prompt",
++          agent: info.agent,
++          providerID: info.model.providerID,
++          modelID: info.model.modelID,
++          variant: info.model.variant,
++          timeCreated: info.time.created,
++        })
+ 
+       return { info, parts }
+     }, Effect.scoped)
+@@ -1289,7 +1324,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+           yield* sessions.setPermission({ sessionID: session.id, permission: permissions })
+         }
+ 
+-        if (input.noReply === true) return message
++        if (input.noReply === true) {
++          const requestUsageNoReply = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
++          if (requestUsageNoReply)
++            yield* requestUsageNoReply.complete({
++              sessionID: input.sessionID,
++              requestID: message.info.id,
++              status: "completed",
++              timeCompleted: Date.now(),
++            })
++          return message
++        }
+         return yield* loop({ sessionID: input.sessionID })
+       },
+     )
+@@ -1386,7 +1431,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             lastFinished.summary !== true &&
+             (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
+           ) {
+-            yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
++            yield* compaction.create({
++              sessionID,
++              agent: lastUser.agent,
++              model: lastUser.model,
++              auto: true,
++            })
+             continue
+           }
+ 
+@@ -1647,6 +1697,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+       const result = yield* prompt({
+         sessionID: input.sessionID,
+         messageID: input.messageID,
++        source: "command",
+         model: userModel,
+         agent: userAgent,
+         parts,
+@@ -1705,6 +1756,8 @@ export const defaultLayer = Layer.suspend(() =>
+ export const PromptInput = z.object({
+   sessionID: SessionID.zod,
+   messageID: MessageID.zod.optional(),
++  rootRequestID: MessageID.zod.optional(),
++  source: SessionRequestUsage.Source.optional(),
+   model: z
+     .object({
+       providerID: ProviderID.zod,
+diff --git a/packages/opencode/src/session/request-usage.sql.ts b/packages/opencode/src/session/request-usage.sql.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8db1eb482e3b7035e686b74c773fbec5f568fb96
+--- /dev/null
++++ b/packages/opencode/src/session/request-usage.sql.ts
+@@ -0,0 +1,74 @@
++import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core"
++import { SessionTable } from "./session.sql"
++import type { MessageID, SessionID } from "./schema"
++import { Timestamps } from "../storage/schema.sql"
++
++export const RequestUsageTable = sqliteTable(
++  "request_usage",
++  {
++    session_id: text()
++      .$type<SessionID>()
++      .notNull()
++      .references(() => SessionTable.id, { onDelete: "cascade" }),
++    request_id: text().$type<MessageID>().notNull(),
++    root_request_id: text().$type<MessageID>().notNull(),
++    source: text().notNull(),
++    status: text().notNull(),
++    agent: text().notNull(),
++    provider_id: text().notNull(),
++    model_id: text().notNull(),
++    variant: text(),
++    assistant_count: integer().notNull().default(0),
++    step_count: integer().notNull().default(0),
++    tokens_input: integer().notNull().default(0),
++    tokens_output: integer().notNull().default(0),
++    tokens_reasoning: integer().notNull().default(0),
++    tokens_cache_read: integer().notNull().default(0),
++    tokens_cache_write: integer().notNull().default(0),
++    tokens_total: integer().notNull().default(0),
++    cost_micros: integer().notNull().default(0),
++    time_completed: integer(),
++    error_message: text(),
++    ...Timestamps,
++  },
++  (table) => [
++    primaryKey({ columns: [table.session_id, table.request_id] }),
++    index("request_usage_session_time_created_idx").on(table.session_id, table.time_created),
++    index("request_usage_session_root_idx").on(table.session_id, table.root_request_id),
++    index("request_usage_session_status_updated_idx").on(table.session_id, table.status, table.time_updated),
++  ],
++)
++
++export const RequestUsageAssistantTable = sqliteTable(
++  "request_usage_assistant",
++  {
++    session_id: text()
++      .$type<SessionID>()
++      .notNull()
++      .references(() => SessionTable.id, { onDelete: "cascade" }),
++    request_id: text().$type<MessageID>().notNull(),
++    assistant_message_id: text().$type<MessageID>().notNull(),
++    root_request_id: text().$type<MessageID>().notNull(),
++    status: text().notNull(),
++    provider_id: text().notNull(),
++    model_id: text().notNull(),
++    variant: text(),
++    step_count: integer().notNull().default(0),
++    tokens_input: integer().notNull().default(0),
++    tokens_output: integer().notNull().default(0),
++    tokens_reasoning: integer().notNull().default(0),
++    tokens_cache_read: integer().notNull().default(0),
++    tokens_cache_write: integer().notNull().default(0),
++    tokens_total: integer().notNull().default(0),
++    cost_micros: integer().notNull().default(0),
++    time_completed: integer(),
++    error_message: text(),
++    ...Timestamps,
++  },
++  (table) => [
++    primaryKey({ columns: [table.session_id, table.assistant_message_id] }),
++    index("request_usage_assistant_session_request_idx").on(table.session_id, table.request_id),
++    index("request_usage_assistant_session_root_idx").on(table.session_id, table.root_request_id),
++    index("request_usage_assistant_session_status_updated_idx").on(table.session_id, table.status, table.time_updated),
++  ],
++)
+diff --git a/packages/opencode/src/session/request-usage.ts b/packages/opencode/src/session/request-usage.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..977c735b1f8d425fc870a5cb5c5fb3243a239ced
+--- /dev/null
++++ b/packages/opencode/src/session/request-usage.ts
+@@ -0,0 +1,537 @@
++import z from "zod"
++import { Context, Effect, Layer } from "effect"
++import { and, Database, desc, eq, lt } from "../storage"
++import { MessageV2 } from "./message-v2"
++import { SessionID, MessageID } from "./schema"
++import { RequestUsageAssistantTable, RequestUsageTable } from "./request-usage.sql"
++
++// 中文说明：数据库使用微美元（micros）存储成本，避免浮点累计误差。
++const MICROS = 1_000_000
++
++const toMicros = (cost: number) => Math.round(cost * MICROS)
++const toCost = (micros: number) => micros / MICROS
++
++export const Source = z
++  .enum(["prompt", "command", "shell", "system_compaction", "system_continue", "unknown"])
++  .meta({ ref: "RequestUsageSource" })
++export type Source = z.infer<typeof Source>
++
++export const Status = z.enum(["running", "completed", "error", "aborted"]).meta({ ref: "RequestUsageStatus" })
++export type Status = z.infer<typeof Status>
++
++export const Tokens = z
++  .object({
++    input: z.number(),
++    output: z.number(),
++    reasoning: z.number(),
++    cache: z.object({
++      read: z.number(),
++      write: z.number(),
++    }),
++    total: z.number(),
++  })
++  .meta({ ref: "RequestUsageTokens" })
++export type Tokens = z.infer<typeof Tokens>
++
++export const Request = z
++  .object({
++    sessionID: SessionID.zod,
++    requestID: MessageID.zod,
++    rootRequestID: MessageID.zod,
++    source: Source,
++    status: Status,
++    agent: z.string(),
++    model: z.object({
++      providerID: z.string(),
++      modelID: z.string(),
++      variant: z.string().optional(),
++    }),
++    assistantCount: z.number(),
++    stepCount: z.number(),
++    tokens: Tokens,
++    cost: z.number(),
++    error: z.string().optional(),
++    time: z.object({
++      created: z.number(),
++      updated: z.number(),
++      completed: z.number().optional(),
++    }),
++  })
++  .meta({ ref: "SessionRequestUsage" })
++export type Request = z.infer<typeof Request>
++
++export const Assistant = z
++  .object({
++    sessionID: SessionID.zod,
++    requestID: MessageID.zod,
++    assistantMessageID: MessageID.zod,
++    rootRequestID: MessageID.zod,
++    status: Status,
++    model: z.object({
++      providerID: z.string(),
++      modelID: z.string(),
++      variant: z.string().optional(),
++    }),
++    stepCount: z.number(),
++    tokens: Tokens,
++    cost: z.number(),
++    error: z.string().optional(),
++    time: z.object({
++      created: z.number(),
++      updated: z.number(),
++      completed: z.number().optional(),
++    }),
++  })
++  .meta({ ref: "SessionRequestUsageAssistant" })
++export type Assistant = z.infer<typeof Assistant>
++
++export interface Interface {
++  readonly begin: (input: {
++    sessionID: SessionID
++    requestID: MessageID
++    rootRequestID?: MessageID
++    source: Source
++    agent: string
++    providerID: string
++    modelID: string
++    variant?: string
++    timeCreated?: number
++  }) => Effect.Effect<void>
++  readonly recordAssistant: (input: {
++    sessionID: SessionID
++    requestID: MessageID
++    assistant: MessageV2.Assistant
++  }) => Effect.Effect<void>
++  readonly complete: (input: {
++    sessionID: SessionID
++    requestID: MessageID
++    status?: Status
++    error?: string
++    timeCompleted?: number
++  }) => Effect.Effect<void>
++  readonly get: (input: { sessionID: SessionID; requestID: MessageID }) => Effect.Effect<Request | undefined>
++  readonly list: (input: {
++    sessionID: SessionID
++    limit?: number
++    before?: number
++    rootRequestID?: MessageID
++    source?: Source
++  }) => Effect.Effect<Request[]>
++  readonly assistants: (input: { sessionID: SessionID; requestID: MessageID }) => Effect.Effect<Assistant[]>
++}
++
++const emptyTotals = () => ({
++  input: 0,
++  output: 0,
++  reasoning: 0,
++  cache: { read: 0, write: 0 },
++  total: 0,
++})
++
++const rowToRequest = (row: typeof RequestUsageTable.$inferSelect): Request => ({
++  sessionID: row.session_id,
++  requestID: row.request_id,
++  rootRequestID: row.root_request_id,
++  source: row.source as Source,
++  status: row.status as Status,
++  agent: row.agent,
++  model: {
++    providerID: row.provider_id,
++    modelID: row.model_id,
++    variant: row.variant ?? undefined,
++  },
++  assistantCount: row.assistant_count,
++  stepCount: row.step_count,
++  tokens: {
++    input: row.tokens_input,
++    output: row.tokens_output,
++    reasoning: row.tokens_reasoning,
++    cache: {
++      read: row.tokens_cache_read,
++      write: row.tokens_cache_write,
++    },
++    total: row.tokens_total,
++  },
++  cost: toCost(row.cost_micros),
++  error: row.error_message ?? undefined,
++  time: {
++    created: row.time_created,
++    updated: row.time_updated,
++    completed: row.time_completed ?? undefined,
++  },
++})
++
++const rowToAssistant = (row: typeof RequestUsageAssistantTable.$inferSelect): Assistant => ({
++  sessionID: row.session_id,
++  requestID: row.request_id,
++  assistantMessageID: row.assistant_message_id,
++  rootRequestID: row.root_request_id,
++  status: row.status as Status,
++  model: {
++    providerID: row.provider_id,
++    modelID: row.model_id,
++    variant: row.variant ?? undefined,
++  },
++  stepCount: row.step_count,
++  tokens: {
++    input: row.tokens_input,
++    output: row.tokens_output,
++    reasoning: row.tokens_reasoning,
++    cache: {
++      read: row.tokens_cache_read,
++      write: row.tokens_cache_write,
++    },
++    total: row.tokens_total,
++  },
++  cost: toCost(row.cost_micros),
++  error: row.error_message ?? undefined,
++  time: {
++    created: row.time_created,
++    updated: row.time_updated,
++    completed: row.time_completed ?? undefined,
++  },
++})
++
++const errorMessage = (error: MessageV2.Assistant["error"]) => {
++  if (!error) return undefined
++  if ("message" in error.data && typeof error.data.message === "string") return error.data.message
++  return error.name
++}
++
++const assistantStatus = (assistant: MessageV2.Assistant): Status => {
++  if (!assistant.time.completed) return "running"
++  if (assistant.error?.name === "MessageAbortedError") return "aborted"
++  if (assistant.error) return "error"
++  return "completed"
++}
++
++export class Service extends Context.Service<Service, Interface>()("@opencode/SessionRequestUsage") {}
++
++export const layer = Layer.effect(
++  Service,
++  Effect.gen(function* () {
++    const begin: Interface["begin"] = Effect.fn("RequestUsage.begin")(function* (input) {
++      const now = Date.now()
++      const created = input.timeCreated ?? now
++      const root = input.rootRequestID ?? input.requestID
++      yield* Effect.sync(() => {
++        Database.transaction((db) => {
++          const where = and(
++            eq(RequestUsageTable.session_id, input.sessionID),
++            eq(RequestUsageTable.request_id, input.requestID),
++          )
++          const row = db.select().from(RequestUsageTable).where(where).get()
++          if (!row) {
++            db.insert(RequestUsageTable)
++              .values({
++                session_id: input.sessionID,
++                request_id: input.requestID,
++                root_request_id: root,
++                source: input.source,
++                status: "running",
++                agent: input.agent,
++                provider_id: input.providerID,
++                model_id: input.modelID,
++                variant: input.variant,
++                time_created: created,
++                time_updated: now,
++              })
++              .run()
++            return
++          }
++          db.update(RequestUsageTable)
++            .set({
++              root_request_id: row.root_request_id || root,
++              source: input.source,
++              agent: input.agent,
++              provider_id: input.providerID,
++              model_id: input.modelID,
++              variant: input.variant,
++              status: "running",
++              time_updated: now,
++              time_completed: null,
++              error_message: null,
++            })
++            .where(where)
++            .run()
++        })
++      })
++    })
++
++    const complete: Interface["complete"] = Effect.fn("RequestUsage.complete")(function* (input) {
++      const now = Date.now()
++      yield* Effect.sync(() => {
++        Database.use((db) => {
++          db.update(RequestUsageTable)
++            .set({
++              status: input.status ?? "completed",
++              error_message: input.error ?? null,
++              time_updated: now,
++              time_completed: input.timeCompleted ?? now,
++            })
++            .where(
++              and(eq(RequestUsageTable.session_id, input.sessionID), eq(RequestUsageTable.request_id, input.requestID)),
++            )
++            .run()
++        })
++      })
++    })
++
++    const recordAssistant: Interface["recordAssistant"] = Effect.fn("RequestUsage.recordAssistant")(function* (input) {
++      // 中文说明：assistant 粒度单独落表，便于同一 request 下多模型/多回合统计。
++      const stepTotals = MessageV2.parts(input.assistant.id).reduce(
++        (acc, part) => {
++          if (part.type !== "step-finish") return acc
++          return {
++            count: acc.count + 1,
++            tokens: {
++              input: acc.tokens.input + part.tokens.input,
++              output: acc.tokens.output + part.tokens.output,
++              reasoning: acc.tokens.reasoning + part.tokens.reasoning,
++              cache: {
++                read: acc.tokens.cache.read + part.tokens.cache.read,
++                write: acc.tokens.cache.write + part.tokens.cache.write,
++              },
++              total:
++                acc.tokens.total +
++                (part.tokens.total ??
++                  part.tokens.input +
++                    part.tokens.output +
++                    part.tokens.reasoning +
++                    part.tokens.cache.read +
++                    part.tokens.cache.write),
++            },
++            costMicros: acc.costMicros + toMicros(part.cost),
++          }
++        },
++        { count: 0, tokens: emptyTotals(), costMicros: 0 },
++      )
++
++      const status = assistantStatus(input.assistant)
++      const now = Date.now()
++
++      yield* Effect.sync(() => {
++        Database.transaction((db) => {
++          const requestWhere = and(
++            eq(RequestUsageTable.session_id, input.sessionID),
++            eq(RequestUsageTable.request_id, input.requestID),
++          )
++          const request = db.select().from(RequestUsageTable).where(requestWhere).get()
++
++          // 中文说明：优先使用 begin 已创建的请求；若异常缺失，则兜底创建 unknown 请求，保证计费数据不丢。
++          if (!request) {
++            db.insert(RequestUsageTable)
++              .values({
++                session_id: input.sessionID,
++                request_id: input.requestID,
++                root_request_id: input.requestID,
++                source: "unknown",
++                status: "running",
++                agent: input.assistant.agent,
++                provider_id: input.assistant.providerID,
++                model_id: input.assistant.modelID,
++                variant: input.assistant.variant,
++                time_created: input.assistant.time.created,
++                time_updated: now,
++              })
++              .run()
++          }
++
++          const requestRow = db.select().from(RequestUsageTable).where(requestWhere).get()!
++          const assistantWhere = and(
++            eq(RequestUsageAssistantTable.session_id, input.sessionID),
++            eq(RequestUsageAssistantTable.assistant_message_id, input.assistant.id),
++          )
++          const assistantRow = db.select().from(RequestUsageAssistantTable).where(assistantWhere).get()
++          if (!assistantRow) {
++            db.insert(RequestUsageAssistantTable)
++              .values({
++                session_id: input.sessionID,
++                request_id: input.requestID,
++                assistant_message_id: input.assistant.id,
++                root_request_id: requestRow.root_request_id,
++                status,
++                provider_id: input.assistant.providerID,
++                model_id: input.assistant.modelID,
++                variant: input.assistant.variant,
++                step_count: stepTotals.count,
++                tokens_input: stepTotals.tokens.input,
++                tokens_output: stepTotals.tokens.output,
++                tokens_reasoning: stepTotals.tokens.reasoning,
++                tokens_cache_read: stepTotals.tokens.cache.read,
++                tokens_cache_write: stepTotals.tokens.cache.write,
++                tokens_total: stepTotals.tokens.total,
++                cost_micros: stepTotals.costMicros,
++                time_created: input.assistant.time.created,
++                time_updated: now,
++                time_completed: input.assistant.time.completed ?? null,
++                error_message: errorMessage(input.assistant.error) ?? null,
++              })
++              .run()
++          }
++          if (assistantRow) {
++            db.update(RequestUsageAssistantTable)
++              .set({
++                request_id: input.requestID,
++                root_request_id: requestRow.root_request_id,
++                status,
++                provider_id: input.assistant.providerID,
++                model_id: input.assistant.modelID,
++                variant: input.assistant.variant,
++                step_count: stepTotals.count,
++                tokens_input: stepTotals.tokens.input,
++                tokens_output: stepTotals.tokens.output,
++                tokens_reasoning: stepTotals.tokens.reasoning,
++                tokens_cache_read: stepTotals.tokens.cache.read,
++                tokens_cache_write: stepTotals.tokens.cache.write,
++                tokens_total: stepTotals.tokens.total,
++                cost_micros: stepTotals.costMicros,
++                time_updated: now,
++                time_completed: input.assistant.time.completed ?? null,
++                error_message: errorMessage(input.assistant.error) ?? null,
++              })
++              .where(assistantWhere)
++              .run()
++          }
++
++          const assistantRows = db
++            .select()
++            .from(RequestUsageAssistantTable)
++            .where(
++              and(
++                eq(RequestUsageAssistantTable.session_id, input.sessionID),
++                eq(RequestUsageAssistantTable.request_id, input.requestID),
++              ),
++            )
++            .all()
++
++          const aggregate = assistantRows.reduce(
++            (acc, row) => ({
++              assistantCount: acc.assistantCount + 1,
++              stepCount: acc.stepCount + row.step_count,
++              tokens: {
++                input: acc.tokens.input + row.tokens_input,
++                output: acc.tokens.output + row.tokens_output,
++                reasoning: acc.tokens.reasoning + row.tokens_reasoning,
++                cache: {
++                  read: acc.tokens.cache.read + row.tokens_cache_read,
++                  write: acc.tokens.cache.write + row.tokens_cache_write,
++                },
++                total: acc.tokens.total + row.tokens_total,
++              },
++              costMicros: acc.costMicros + row.cost_micros,
++              hasRunning: acc.hasRunning || row.status === "running",
++              hasError: acc.hasError || row.status === "error",
++              hasAborted: acc.hasAborted || row.status === "aborted",
++              completed: Math.max(acc.completed, row.time_completed ?? 0),
++              errorMessage: acc.errorMessage || row.error_message,
++            }),
++            {
++              assistantCount: 0,
++              stepCount: 0,
++              tokens: emptyTotals(),
++              costMicros: 0,
++              hasRunning: false,
++              hasError: false,
++              hasAborted: false,
++              completed: 0,
++              errorMessage: null as string | null,
++            },
++          )
++
++          const requestStatus: Status = aggregate.hasRunning
++            ? "running"
++            : aggregate.hasError
++              ? "error"
++              : aggregate.hasAborted
++                ? "aborted"
++                : "completed"
++
++          db.update(RequestUsageTable)
++            .set({
++              assistant_count: aggregate.assistantCount,
++              step_count: aggregate.stepCount,
++              tokens_input: aggregate.tokens.input,
++              tokens_output: aggregate.tokens.output,
++              tokens_reasoning: aggregate.tokens.reasoning,
++              tokens_cache_read: aggregate.tokens.cache.read,
++              tokens_cache_write: aggregate.tokens.cache.write,
++              tokens_total: aggregate.tokens.total,
++              cost_micros: aggregate.costMicros,
++              status: requestStatus,
++              time_updated: now,
++              time_completed: requestStatus === "running" ? null : aggregate.completed || now,
++              error_message: requestStatus === "error" || requestStatus === "aborted" ? aggregate.errorMessage : null,
++            })
++            .where(requestWhere)
++            .run()
++        })
++      })
++    })
++
++    const get: Interface["get"] = Effect.fn("RequestUsage.get")(function* (input) {
++      const row = yield* Effect.sync(() =>
++        Database.use((db) =>
++          db
++            .select()
++            .from(RequestUsageTable)
++            .where(and(eq(RequestUsageTable.session_id, input.sessionID), eq(RequestUsageTable.request_id, input.requestID)))
++            .get(),
++        ),
++      )
++      if (!row) return
++      return rowToRequest(row)
++    })
++
++    const list: Interface["list"] = Effect.fn("RequestUsage.list")(function* (input) {
++      const rows = yield* Effect.sync(() => {
++        const conditions = [eq(RequestUsageTable.session_id, input.sessionID)]
++        if (input.before) conditions.push(lt(RequestUsageTable.time_created, input.before))
++        if (input.rootRequestID) conditions.push(eq(RequestUsageTable.root_request_id, input.rootRequestID))
++        if (input.source) conditions.push(eq(RequestUsageTable.source, input.source))
++        return Database.use((db) =>
++          db
++            .select()
++            .from(RequestUsageTable)
++            .where(and(...conditions))
++            .orderBy(desc(RequestUsageTable.time_created), desc(RequestUsageTable.request_id))
++            .limit(input.limit ?? 100)
++            .all(),
++        )
++      })
++      return rows.map(rowToRequest)
++    })
++
++    const assistants: Interface["assistants"] = Effect.fn("RequestUsage.assistants")(function* (input) {
++      const rows = yield* Effect.sync(() =>
++        Database.use((db) =>
++          db
++            .select()
++            .from(RequestUsageAssistantTable)
++            .where(
++              and(
++                eq(RequestUsageAssistantTable.session_id, input.sessionID),
++                eq(RequestUsageAssistantTable.request_id, input.requestID),
++              ),
++            )
++            .orderBy(desc(RequestUsageAssistantTable.time_created), desc(RequestUsageAssistantTable.assistant_message_id))
++            .all(),
++        ),
++      )
++      return rows.map(rowToAssistant)
++    })
++
++    return Service.of({
++      begin,
++      recordAssistant,
++      complete,
++      get,
++      list,
++      assistants,
++    })
++  }),
++)
++
++export const defaultLayer = layer
++
++export * as SessionRequestUsage from "./request-usage"

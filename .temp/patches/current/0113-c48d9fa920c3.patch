@@ -1,0 +1,130 @@
+From c48d9fa920c3d17c4d6e22c2d254a2b2b8843504 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 8 May 2026 16:33:34 +0800
+Subject: [PATCH] =?UTF-8?q?feat(session):=20=E9=87=8D=E6=9E=84=E4=BC=9A?=
+ =?UTF-8?q?=E8=AF=9D=E6=A0=87=E9=A2=98=E9=80=BB=E8=BE=91=EF=BC=8C=E6=B7=BB?=
+ =?UTF-8?q?=E5=8A=A0=E9=BB=98=E8=AE=A4=E6=A0=87=E9=A2=98=E5=88=9B=E5=BB=BA?=
+ =?UTF-8?q?=E5=92=8C=E9=AA=8C=E8=AF=81=E5=8A=9F=E8=83=BD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/app.tsx b/packages/opencode/src/cli/cmd/tui/app.tsx
+index e126f85bc3e80764c7904685347f213a3cb1b84e..d22e1fc0e5efd9b29dba3f35b4950806e2254543 100644
+--- a/packages/opencode/src/cli/cmd/tui/app.tsx
++++ b/packages/opencode/src/cli/cmd/tui/app.tsx
+@@ -51,7 +51,7 @@ import { DialogAlert } from "./ui/dialog-alert"
+ import { DialogConfirm } from "./ui/dialog-confirm"
+ import { ToastProvider, useToast } from "./ui/toast"
+ import { ExitProvider, useExit } from "./context/exit"
+-import { Session as SessionApi } from "@/session/session"
++import { isDefaultTitle } from "@/session/title"
+ import { TuiEvent } from "./event"
+ import { KVProvider, useKV } from "./context/kv"
+ import { Provider } from "@/provider/provider"
+@@ -351,7 +351,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
+ 
+     if (route.data.type === "session") {
+       const session = sync.session.get(route.data.sessionID)
+-      if (!session || SessionApi.isDefaultTitle(session.title)) {
++      if (!session || isDefaultTitle(session.title)) {
+         renderer.setTerminalTitle("OpenCode")
+         return
+       }
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 429b8fdd427f33d4363e9e4a913fef4b05597bc3..62068d8a8d2ec1e21e745f8e92cee539566b3f25 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -99,7 +99,7 @@ import { getScrollAcceleration } from "../../util/scroll"
+ import { createThrottledSignal } from "../../util/signal"
+ import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
+ import { DialogGoUpsell } from "../../component/dialog-go-upsell"
+-import { SessionRetry } from "@/session/retry"
++import { GO_UPSELL_MESSAGE } from "@/session/retry-constants"
+ import { getRevertDiffFiles } from "../../util/revert-diff"
+ 
+ addDefaultParsers(parsers.parsers)
+@@ -298,7 +298,7 @@ export function Session() {
+   event.on("session.status", (evt) => {
+     if (evt.properties.sessionID !== route.sessionID) return
+     if (evt.properties.status.type !== "retry") return
+-    if (evt.properties.status.message !== SessionRetry.GO_UPSELL_MESSAGE) return
++    if (evt.properties.status.message !== GO_UPSELL_MESSAGE) return
+     if (dialog.stack.length > 0) return
+ 
+     const seen = kv.get(GO_UPSELL_LAST_SEEN_AT)
+diff --git a/packages/opencode/src/session/retry-constants.ts b/packages/opencode/src/session/retry-constants.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b9e3668c121f519e4879383f7a61de573a79576d
+--- /dev/null
++++ b/packages/opencode/src/session/retry-constants.ts
+@@ -0,0 +1 @@
++export const GO_UPSELL_MESSAGE = "Free usage exceeded, subscribe to Go https://opencode.ai/go"
+diff --git a/packages/opencode/src/session/retry.ts b/packages/opencode/src/session/retry.ts
+index f0229b7989d88ceecc91be45189208552a3ac544..0dc3a8abc120c24f36694cb7ff0a8f3e2f542457 100644
+--- a/packages/opencode/src/session/retry.ts
++++ b/packages/opencode/src/session/retry.ts
+@@ -1,13 +1,12 @@
+ import type { NamedError } from "@opencode-ai/core/util/error"
+ import { Cause, Clock, Duration, Effect, Schedule } from "effect"
+ import { MessageV2 } from "./message-v2"
++import { GO_UPSELL_MESSAGE } from "./retry-constants"
+ import { iife } from "@/util/iife"
+ 
+-export type Err = ReturnType<NamedError["toObject"]>
++export { GO_UPSELL_MESSAGE }
+ 
+-// This exported message is shared with the TUI upsell detector. Matching on a
+-// literal error string kind of sucks, but it is the simplest for now.
+-export const GO_UPSELL_MESSAGE = "Free usage exceeded, subscribe to Go https://opencode.ai/go"
++export type Err = ReturnType<NamedError["toObject"]>
+ 
+ export const RETRY_INITIAL_DELAY = 2000
+ export const RETRY_BACKOFF_FACTOR = 2
+diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
+index 5593efc9714b7280debedee9abc704f4e3549048..cfe85b5578a081845b6f343212135ec3d4fcded6 100644
+--- a/packages/opencode/src/session/session.ts
++++ b/packages/opencode/src/session/session.ts
+@@ -40,20 +40,11 @@ import { Effect, Layer, Option, Context, Schema, Types } from "effect"
+ import { zod } from "@/util/effect-zod"
+ import { NonNegativeInt, optionalOmitUndefined, withStatics } from "@/util/schema"
+ 
+-const log = Log.create({ service: "session" })
+-
+-const parentTitlePrefix = "New session - "
+-const childTitlePrefix = "Child session - "
++import { createDefaultTitle, isDefaultTitle } from "./title"
+ 
+-function createDefaultTitle(isChild = false) {
+-  return (isChild ? childTitlePrefix : parentTitlePrefix) + new Date().toISOString()
+-}
++const log = Log.create({ service: "session" })
+ 
+-export function isDefaultTitle(title: string) {
+-  return new RegExp(
+-    `^(${parentTitlePrefix}|${childTitlePrefix})\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$`,
+-  ).test(title)
+-}
++export { isDefaultTitle }
+ 
+ type SessionRow = typeof SessionTable.$inferSelect
+ 
+diff --git a/packages/opencode/src/session/title.ts b/packages/opencode/src/session/title.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2893e401230c1cea142e3e2cb7e93ba9de52a6d8
+--- /dev/null
++++ b/packages/opencode/src/session/title.ts
+@@ -0,0 +1,12 @@
++const parentTitlePrefix = "New session - "
++const childTitlePrefix = "Child session - "
++
++export function createDefaultTitle(isChild = false) {
++  return (isChild ? childTitlePrefix : parentTitlePrefix) + new Date().toISOString()
++}
++
++export function isDefaultTitle(title: string) {
++  return new RegExp(
++    `^(${parentTitlePrefix}|${childTitlePrefix})\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$`,
++  ).test(title)
++}

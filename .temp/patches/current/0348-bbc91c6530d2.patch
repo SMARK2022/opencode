@@ -1,0 +1,786 @@
+From bbc91c6530d2943288dd9d4c5ab3eb61b9725c00 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 29 Jun 2026 10:05:41 +0800
+Subject: [PATCH] =?UTF-8?q?fix(harness):=20P0-2/5/6=20=E6=94=B9=E9=80=A0?=
+ =?UTF-8?q?=E2=80=94=E2=80=94=E9=94=99=E8=AF=AF=E8=AF=8A=E6=96=AD=E5=A2=9E?=
+ =?UTF-8?q?=E5=BC=BA=E3=80=81per-file=20atomicity=E3=80=81blind=20edit=20?=
+ =?UTF-8?q?=E6=A3=80=E6=9F=A5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+P0-2: edit oldString 未匹配时 error 包含 closest match；apply_patch context 失败时 error 包含 actual content；read binary file error 包含 type-specific 替代建议。
+P0-5: apply_patch 多文件 patch 改为 per-file atomicity，用 Effect.exit 捕获每个 hunk 成功/失败。
+P0-6: edit oldString 非空时检查文件是否被 read/write/edit 接触过，未接触则拒绝。
+
+diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
+index a391added4a4f37fc8700ce3d07127cb065bc62b..e1863a53f50930b1424769d80fb7fee526c07748 100644
+--- a/packages/opencode/src/tool/apply_patch.ts
++++ b/packages/opencode/src/tool/apply_patch.ts
+@@ -1,5 +1,6 @@
+ import * as path from "path"
+-import { Effect, Schema } from "effect"
++import { Cause, Effect, Exit, Schema } from "effect"
++import type { InstanceContext } from "../project/instance-context"
+ import * as Tool from "./tool"
+ import { Bus } from "../bus"
+ import { FileWatcher } from "../file/watcher"
+@@ -16,6 +17,145 @@ import { Format } from "../format"
+ import * as Bom from "@/util/bom"
+ import { normalizeLineEndings } from "@/util/line-ending"
+ 
++// [local-smark] 从 patch hunk chunks 中提取期望的旧行文本，
++// 在 oldContent 中找到最近似的位置并返回上下文摘录。
++// 仅在 patch context 匹配失败时调用，帮助模型看到 actual content 而无需 re-read。
++// 限制摘录 5 行避免 error 消息过长。
++function extractActualExcerpt(oldContent: string, chunks: unknown): string | undefined {
++  // chunks 是 UpdateFileChunk[]，每个 chunk 有 old_lines: string[]
++  // 从第一个 chunk 的 old_lines 中提取搜索目标
++  let searchLine: string | undefined
++  if (Array.isArray(chunks)) {
++    for (const chunk of chunks) {
++      if (typeof chunk === "object" && chunk !== null) {
++        const c = chunk as Record<string, unknown>
++        const oldLines = c.old_lines
++        if (Array.isArray(oldLines)) {
++          for (const l of oldLines) {
++            if (typeof l === "string" && l.trim().length >= 3) {
++              searchLine = l.trim()
++              break
++            }
++          }
++        }
++      }
++      if (searchLine) break
++    }
++  }
++  if (!searchLine) return undefined
++  // 在 oldContent 中找到与 searchLine 字符重叠最高的行
++  const lines = oldContent.split("\n")
++  let bestIdx = -1
++  let bestScore = 0
++  for (let i = 0; i < lines.length; i++) {
++    const candidate = lines[i]!.trim()
++    if (candidate.length === 0) continue
++    const setA = new Set(searchLine.toLowerCase())
++    let common = 0
++    for (const ch of candidate.toLowerCase()) {
++      if (setA.has(ch)) common++
++    }
++    const score = common / Math.max(1, Math.min(searchLine.length, candidate.length))
++    if (score > bestScore) {
++      bestScore = score
++      bestIdx = i
++    }
++  }
++  if (bestIdx < 0 || bestScore < 0.3) return undefined
++  const start = Math.max(0, bestIdx - 1)
++  const end = Math.min(lines.length, bestIdx + 4)
++  return lines.slice(start, end).join("\n").slice(0, 500)
++}
++
++// [local-smark] 处理单个 hunk 的独立函数，支持 per-file atomicity。
++// 调用方用 Effect.exit 捕获成功/失败，失败时收集错误继续处理其他 hunk。
++// 逻辑与重构前的 switch/case 完全一致，仅提取为函数边界。
++type FileChange = {
++  filePath: string
++  oldContent: string
++  newContent: string
++  type: "add" | "update" | "delete" | "move"
++  movePath?: string
++  diff: string
++  additions: number
++  deletions: number
++  bom: boolean
++}
++
++const processSingleHunk = Effect.fn("ApplyPatchTool.processSingleHunk")(function* (
++  hunk: Patch.Hunk,
++  filePath: string,
++  instance: InstanceContext,
++  afs: AppFileSystem.Interface,
++  ctx: Tool.Context,
++  patchText: string,
++) {
++  switch (hunk.type) {
++    case "add": {
++      const oldContent = ""
++      const newContent = hunk.contents.length === 0 || hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`
++      const next = Bom.split(newContent)
++      const diffOld = normalizeLineEndings(oldContent)
++      const diffNew = normalizeLineEndings(next.text)
++      const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
++      let additions = 0
++      let deletions = 0
++      for (const change of diffLines(diffOld, diffNew)) {
++        if (change.added) additions += change.count || 0
++        if (change.removed) deletions += change.count || 0
++      }
++      return { filePath, oldContent, newContent: next.text, type: "add" as const, diff, additions, deletions, bom: next.bom }
++    }
++    case "update": {
++      const stats = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
++      if (!stats || stats.type === "Directory") {
++        return yield* Effect.fail(new Error(`Failed to read file to update: ${filePath}`))
++      }
++      const source = yield* Bom.readFile(afs, filePath)
++      const oldContent = source.text
++      let newContent = oldContent
++      let bom = source.bom
++      try {
++        const fileUpdate = Patch.deriveNewContentsFromChunks(filePath, hunk.chunks, Bom.join(source.text, source.bom))
++        newContent = fileUpdate.content
++        bom = fileUpdate.bom
++      } catch (error) {
++        const actualExcerpt = extractActualExcerpt(oldContent, hunk.chunks)
++        return yield* Effect.fail(new Error(`${error}` + (actualExcerpt ? `\n\nActual content near expected location:\n${actualExcerpt}` : "")))
++      }
++      const diffOld = normalizeLineEndings(oldContent)
++      const diffNew = normalizeLineEndings(newContent)
++      const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
++      let additions = 0
++      let deletions = 0
++      for (const change of diffLines(diffOld, diffNew)) {
++        if (change.added) additions += change.count || 0
++        if (change.removed) deletions += change.count || 0
++      }
++      const movePath = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
++      if (movePath) {
++        yield* assertExternalDirectoryEffect(ctx, movePath, {
++          metadata: { action_kind: "tool", tool: "apply_patch", operation: "move", patchText },
++        })
++      }
++      return { filePath, oldContent, newContent, type: hunk.move_path ? "move" as const : "update" as const, movePath, diff, additions, deletions, bom }
++    }
++    case "delete": {
++      const source = yield* Bom.readFile(afs, filePath)
++      const contentToDelete = source.text
++      const diffOld = normalizeLineEndings(contentToDelete)
++      const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, ""))
++      let deletions = 0
++      for (const change of diffLines(diffOld, "")) {
++        if (change.removed) deletions += change.count || 0
++      }
++      return { filePath, oldContent: contentToDelete, newContent: "", type: "delete" as const, diff: deleteDiff, additions: 0, deletions, bom: source.bom }
++    }
++    default:
++      return yield* Effect.fail(new Error(`Unknown hunk type: ${(hunk as { type: string }).type}`))
++  }
++})
++
+ export const Parameters = Schema.Struct({
+   patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
+ })
+@@ -70,141 +210,35 @@ export const ApplyPatchTool = Tool.define(
+ 
+       let totalDiff = ""
+ 
++      // [local-smark] per-file atomicity：收集每个 hunk 的错误而非在第一个失败时立即返回。
++      // 成功的 hunk 进入 fileChanges 正常 apply；失败的 hunk 记录 error 在 output 中报告。
++      // 仅当全部 hunk 都失败时才返回 Effect.fail（不让空 patch 静默成功）。
++      // 用 Effect.exit 捕获每个 hunk 的成功/失败，不中断循环。
++      const hunkErrors: string[] = []
++
+       for (const hunk of hunks) {
+         const filePath = path.resolve(instance.directory, hunk.path)
+         yield* assertExternalDirectoryEffect(ctx, filePath, {
+-          // The external_directory gate runs before the final edit permission;
+-          // carry patch intent so Auto review can judge more than the file path.
+           metadata: { action_kind: "tool", tool: "apply_patch", operation: hunk.type, patchText: params.patchText },
+         })
+ 
+-        switch (hunk.type) {
+-          case "add": {
+-            const oldContent = ""
+-            const newContent =
+-              hunk.contents.length === 0 || hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`
+-            const next = Bom.split(newContent)
+-            const diffOld = normalizeLineEndings(oldContent)
+-            const diffNew = normalizeLineEndings(next.text)
+-            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
+-
+-            let additions = 0
+-            let deletions = 0
+-            for (const change of diffLines(diffOld, diffNew)) {
+-              if (change.added) additions += change.count || 0
+-              if (change.removed) deletions += change.count || 0
+-            }
+-
+-            fileChanges.push({
+-              filePath,
+-              oldContent,
+-              newContent: next.text,
+-              type: "add",
+-              diff,
+-              additions,
+-              deletions,
+-              bom: next.bom,
+-            })
+-
+-            totalDiff += diff + "\n"
+-            break
+-          }
+-
+-          case "update": {
+-            // Check if file exists for update
+-            const stats = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
+-            if (!stats || stats.type === "Directory") {
+-              return yield* Effect.fail(
+-                new Error(`apply_patch verification failed: Failed to read file to update: ${filePath}`),
+-              )
+-            }
+-
+-            const source = yield* Bom.readFile(afs, filePath)
+-            const oldContent = source.text
+-            let newContent = oldContent
+-            let bom = source.bom
+-
+-            // Apply the update chunks to get new content
+-            try {
+-              const fileUpdate = Patch.deriveNewContentsFromChunks(
+-                filePath,
+-                hunk.chunks,
+-                Bom.join(source.text, source.bom),
+-              )
+-              newContent = fileUpdate.content
+-              bom = fileUpdate.bom
+-            } catch (error) {
+-              return yield* Effect.fail(new Error(`apply_patch verification failed: ${error}`))
+-            }
+-
+-            const diffOld = normalizeLineEndings(oldContent)
+-            const diffNew = normalizeLineEndings(newContent)
+-            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
+-
+-            let additions = 0
+-            let deletions = 0
+-            for (const change of diffLines(diffOld, diffNew)) {
+-              if (change.added) additions += change.count || 0
+-              if (change.removed) deletions += change.count || 0
+-            }
+-
+-            const movePath = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
+-            yield* assertExternalDirectoryEffect(ctx, movePath, {
+-              // Moving to an external directory is a separate target gate; keep
+-              // the same patch evidence but name the operation as the move leg.
+-              metadata: { action_kind: "tool", tool: "apply_patch", operation: "move", patchText: params.patchText },
+-            })
+-
+-            fileChanges.push({
+-              filePath,
+-              oldContent,
+-              newContent,
+-              type: hunk.move_path ? "move" : "update",
+-              movePath,
+-              diff,
+-              additions,
+-              deletions,
+-              bom,
+-            })
+-
+-            totalDiff += diff + "\n"
+-            break
+-          }
+-
+-          case "delete": {
+-            const source = yield* Bom.readFile(afs, filePath).pipe(
+-              Effect.catch((error) =>
+-                Effect.fail(
+-                  new Error(
+-                    `apply_patch verification failed: ${error instanceof Error ? error.message : String(error)}`,
+-                  ),
+-                ),
+-              ),
+-            )
+-            const contentToDelete = source.text
+-            const diffOld = normalizeLineEndings(contentToDelete)
+-            const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, ""))
+-
+-            let deletions = 0
+-            for (const change of diffLines(diffOld, "")) {
+-              if (change.removed) deletions += change.count || 0
+-            }
+-
+-            fileChanges.push({
+-              filePath,
+-              oldContent: contentToDelete,
+-              newContent: "",
+-              type: "delete",
+-              diff: deleteDiff,
+-              additions: 0,
+-              deletions,
+-              bom: source.bom,
+-            })
+-
+-            totalDiff += deleteDiff + "\n"
+-            break
+-          }
++        // 用 Effect.exit 捕获 hunk 处理的成功/失败
++        const exit = yield* Effect.exit(processSingleHunk(hunk, filePath, instance, afs, ctx, params.patchText))
++        if (Exit.isFailure(exit)) {
++          const err = Cause.squash(exit.cause)
++          hunkErrors.push(`${hunk.path}: ${err instanceof Error ? err.message : String(err)}`)
++          continue
+         }
++        const change = exit.value
++        fileChanges.push(change)
++        totalDiff += change.diff + "\n"
++      }
++
++      // 全部 hunk 都失败时返回 error
++      if (fileChanges.length === 0) {
++        return yield* Effect.fail(new Error(
++          `apply_patch verification failed: all hunks failed.\n${hunkErrors.join("\n")}`,
++        ))
+       }
+ 
+       // Build per-file metadata for UI rendering (used for both permission and result)
+@@ -300,6 +334,11 @@ export const ApplyPatchTool = Tool.define(
+       })
+       let output = `Success. Updated the following files:\n${summaryLines.join("\n")}`
+ 
++      // [local-smark] per-file atomicity：部分 hunk 失败时在 output 中报告失败文件
++      if (hunkErrors.length > 0) {
++        output += `\n\nFailed to update ${hunkErrors.length} file(s):\n${hunkErrors.join("\n")}`
++      }
++
+       let lspFoundErrors = false
+       for (const change of fileChanges) {
+         if (change.type === "delete") continue
+diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
+index f2b2678bdab70353526e284a898af7a6f9152272..705b2a2c34cafefa54a584fcb78ef4c096a8e69b 100644
+--- a/packages/opencode/src/tool/edit.ts
++++ b/packages/opencode/src/tool/edit.ts
+@@ -68,6 +68,38 @@ export const EditTool = Tool.define(
+           const filePath = path.isAbsolute(params.filePath)
+             ? params.filePath
+             : path.join(instance.directory, params.filePath)
++
++          // [local-smark] blind edit 检查：当 oldString 非空（非创建文件模式）时，
++          // 检查文件是否在当前 session 的消息历史中被 read/write/edit 接触过。
++          // 未接触过的文件可能有过期内容（auto-format、外部修改），
++          // oldString 基于假设会导致匹配失败。
++          // 用 path.resolve 规范化路径比较，避免正斜杠/反斜杠差异导致误拦截。
++          // Windows 下 NTFS 大小写不敏感，需 toLowerCase；Linux/macOS 大小写敏感，不应 lower。
++          // 遵循 read.ts canonicalReadPath 的同一平台分支范式。
++          // apply_patch 的 input 是 patchText 而非 filePath，无法简单匹配，不纳入检查。
++          if (params.oldString !== "") {
++            const resolveForCompare = (p: string) => {
++              const r = path.resolve(p)
++              return process.platform === "win32" ? r.toLowerCase() : r
++            }
++            const resolvedFilePath = resolveForCompare(filePath)
++            const hasTouched = ctx.messages.some((msg) =>
++              msg.info.role === "assistant" &&
++              msg.parts.some((part) => {
++                if (part.type !== "tool" || part.state.status !== "completed") return false
++                if (part.tool !== "read" && part.tool !== "write" && part.tool !== "edit") return false
++                const input = part.state.input as Record<string, unknown> | undefined
++                if (!input || typeof input.filePath !== "string") return false
++                return resolveForCompare(input.filePath) === resolvedFilePath
++              }),
++            )
++            if (!hasTouched) {
++              throw new Error(
++                `File has not been read in this session: ${filePath}. Read it first to verify current content, then retry the edit.`,
++              )
++            }
++          }
++
+           yield* assertExternalDirectoryEffect(ctx, filePath, {
+             // Include the intended edit operation so Auto reviewer decisions are
+             // based on tool evidence, not just the external path glob.
+@@ -686,6 +718,45 @@ export function trimDiff(diff: string): string {
+   return trimmedLines.join("\n")
+ }
+ 
++// [local-smark] 滑动窗口查找 content 中与 oldString 最相似的区域。
++// 用 oldString 首行与 content 各行做简单字符重叠比较，返回最佳匹配位置和摘录。
++// 仅在 replace() 抛出 notFound 错误时调用，不影响正常路径性能。
++// 限制摘录 5 行 / 500 字符，避免 error 消息过长导致上下文膨胀。
++function findClosestMatch(content: string, oldString: string): { line: number; excerpt: string } | undefined {
++  const contentLines = content.split("\n")
++  const oldLines = oldString.split("\n").filter((l) => l.trim().length > 0)
++  if (oldLines.length === 0) return undefined
++  const firstOld = oldLines[0]!.trim()
++  if (firstOld.length < 3) return undefined
++  let bestLine = -1
++  let bestScore = 0
++  for (let i = 0; i < contentLines.length; i++) {
++    const candidate = contentLines[i]!.trim()
++    if (candidate.length === 0) continue
++    // 简单字符重叠率：共同字符数 / 较短串长度
++    const score = charOverlap(firstOld, candidate)
++    if (score > bestScore) {
++      bestScore = score
++      bestLine = i
++    }
++  }
++  if (bestLine < 0 || bestScore < 0.3) return undefined
++  const start = Math.max(0, bestLine - 1)
++  const end = Math.min(contentLines.length, bestLine + 4)
++  const excerpt = contentLines.slice(start, end).join("\n").slice(0, 500)
++  return { line: start + 1, excerpt }
++}
++
++// 计算两个字符串的字符重叠率（0~1），用于 closest match 相似度评估
++function charOverlap(a: string, b: string): number {
++  const setA = new Set(a.toLowerCase())
++  let common = 0
++  for (const ch of b.toLowerCase()) {
++    if (setA.has(ch)) common++
++  }
++  return common / Math.max(1, Math.min(a.length, b.length))
++}
++
+ export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
+   if (oldString === newString) {
+     throw new Error("No changes to apply: oldString and newString are identical.")
+@@ -718,8 +789,14 @@ export function replace(content: string, oldString: string, newString: string, r
+   }
+ 
+   if (notFound) {
++    // [local-smark] 在 oldString 未匹配时，提供 actual content 的最近似区域，
++    // 帮助模型自纠正而无需单独 re-read 文件。
++    // 用滑动窗口逐行比较 oldString 首行与 content 各行的相似度，
++    // 返回相似度最高的区域摘要（限制 5 行避免上下文膨胀）。
++    const closest = findClosestMatch(content, oldString)
+     throw new Error(
+-      "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.",
++      `Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.` +
++        (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : ""),
+     )
+   }
+   throw new Error("Found multiple matches for oldString. Provide more surrounding context to make the match unique.")
+diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
+index 756185987a2cb159f99eb62b9f503738f2955d73..aee26ef75eb205d38f42070d03ed358e619a45c2 100644
+--- a/packages/opencode/src/tool/read.ts
++++ b/packages/opencode/src/tool/read.ts
+@@ -472,6 +472,31 @@ export const ReadTool = Tool.define(
+       return nonPrintableCount / bytes.length > 0.3
+     }
+ 
++    // [local-smark] 根据二进制文件扩展名返回 type-specific 替代建议。
++    // 帮助模型知道用什么工具读取，避免盲目重试 read 工具。
++    // 数据库文件建议 bun:sqlite，压缩文件建议先解压，其他建议 strings/hexdump。
++    function getBinaryFileSuggestion(ext: string): string | undefined {
++      const map: Record<string, string> = {
++        ".gz": "Decompress with gunzip or bun -e with zlib first, then read.",
++        ".tar": "Extract with tar -xf first, then read individual files.",
++        ".zip": "Extract with unzip first, then read individual files.",
++        ".7z": "Extract with 7z first, then read individual files.",
++        ".db": "Use bun -e with bun:sqlite to query this database.",
++        ".vscdb": "Use bun -e with bun:sqlite to query this database.",
++        ".sqlite": "Use bun -e with bun:sqlite to query this database.",
++        ".exe": "Use strings or hexdump via bash to inspect binary content.",
++        ".dll": "Use strings or hexdump via bash to inspect binary content.",
++        ".so": "Use strings or hexdump via bash to inspect binary content.",
++        ".wasm": "Use strings or hexdump via bash to inspect binary content.",
++        ".class": "Use javap -c via bash to disassemble Java bytecode.",
++        ".jar": "Extract with jar -xf or unzip first, then read individual files.",
++        ".doc": "Use python-docx or convert to text via libreoffice --headless.",
++        ".docx": "Use python-docx or unzip to read XML content.",
++        ".pyc": "Use python -m dis or uncompyle6 to decompile.",
++      }
++      return map[ext]
++    }
++
+     const run = Effect.fn("ReadTool.execute")(function* (
+       params: Schema.Schema.Type<typeof Parameters>,
+       ctx: Tool.Context,
+@@ -615,7 +640,14 @@ export const ReadTool = Tool.define(
+       }
+ 
+       if (isBinaryFile(filepath, sample)) {
+-        return yield* Effect.fail(new Error(`Cannot read binary file: ${filepath}`))
++        // [local-smark] 根据文件扩展名提供 type-specific 替代建议，
++        // 帮助模型知道用什么工具读取而非盲目重试。
++        const ext = path.extname(filepath).toLowerCase()
++        const suggestion = getBinaryFileSuggestion(ext)
++        return yield* Effect.fail(new Error(
++          `Cannot read binary file: ${filepath}` +
++          (suggestion ? `\n${suggestion}` : ""),
++        ))
+       }
+ 
+       const file = yield* Effect.promise(() =>
+diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
+index be5754f3b40db9aa917576b99afb8d03f5bf0725..096b8d0295867079e352aa717cb39e78686a41fc 100644
+--- a/packages/opencode/test/tool/apply_patch.test.ts
++++ b/packages/opencode/test/tool/apply_patch.test.ts
+@@ -323,7 +323,8 @@ describe("tool.apply_patch freeform", () => {
+ 
+       yield* expectFailure(
+         execute({ patchText }, ctx),
+-        "apply_patch verification failed: Failed to read file to update",
++        // [local-smark] per-file atomicity 后，单 hunk 失败走 "all hunks failed" 路径
++        "all hunks failed",
+       )
+     }),
+   )
+@@ -373,15 +374,21 @@ describe("tool.apply_patch freeform", () => {
+     }),
+   )
+ 
+-  it.instance("verification failure leaves no side effects", () =>
++  // [local-smark] per-file atomicity 后，多文件 patch 中成功的文件会被 apply。
++  // 此测试验证 add 成功但 update 失败时，add 的文件存在，update 的文件未变。
++  it.instance("partial success applies successful files when some fail", () =>
+     Effect.gen(function* () {
+       const test = yield* TestInstance
+       const { ctx } = makeCtx()
+       const patchText =
+         "*** Begin Patch\n*** Add File: created.txt\n+hello\n*** Update File: missing.txt\n@@\n-old\n+new\n*** End Patch"
+ 
+-      yield* expectFailure(execute({ patchText }, ctx))
+-      yield* expectReadFailure(path.join(test.directory, "created.txt"))
++      const result = yield* execute({ patchText }, ctx)
++      // add 成功：created.txt 应存在
++      expect(yield* readText(path.join(test.directory, "created.txt"))).toBe("hello\n")
++      // output 应同时包含成功和失败信息
++      expect(result.output).toContain("created.txt")
++      expect(result.output).toContain("missing.txt")
+     }),
+   )
+ 
+@@ -530,4 +537,65 @@ EOF`
+       expect(yield* readText(target)).toBe(`He said "hi"\nsome${emDash}dash\nend\n`)
+     }),
+   )
++
++  // [local-smark] 当 patch context 匹配失败时，error 应包含 actual content，
++  // 帮助模型看到文件中实际有什么而无需单独 re-read。
++  it.instance("error includes actual content when context mismatch", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const { ctx } = makeCtx()
++      const target = path.join(test.directory, "mismatch.txt")
++      // 文件含 "real content"，patch 搜索 "missing context"
++      yield* writeText(target, "line1\nreal content here\nline3\n")
++
++      const patchText =
++        "*** Begin Patch\n*** Update File: mismatch.txt\n@@\n-missing context\n+changed\n*** End Patch"
++
++      const exit = yield* execute({ patchText }, ctx).pipe(Effect.exit)
++      expect(Exit.isFailure(exit)).toBe(true)
++      if (Exit.isFailure(exit)) {
++        const err = Cause.squash(exit.cause) as Error
++        // error 消息应包含文件中的实际内容
++        expect(err.message).toContain("real content")
++      }
++    }),
++  )
++
++  // [local-smark] per-file atomicity：多文件 patch 中一个文件失败时，
++  // 成功的文件应正常 apply，失败的文件在 output 中报告 error。
++  // 旧行为是整个 patch 失败（all-or-nothing），成功的 hunk 也被丢弃。
++  it.instance("applies successful files and reports failed files in multi-file patch", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const { ctx } = makeCtx()
++      const goodFile = path.join(test.directory, "good.txt")
++      const badFile = path.join(test.directory, "bad.txt")
++      yield* writeText(goodFile, "hello\n")
++      yield* writeText(badFile, "world\n")
++
++      // good.txt 的 context 正确，bad.txt 的 context 错误
++      const patchText = [
++        "*** Begin Patch",
++        "*** Update File: good.txt",
++        "@@",
++        "-hello",
++        "+hi",
++        "*** Update File: bad.txt",
++        "@@",
++        "-missing line",
++        "+changed",
++        "*** End Patch",
++      ].join("\n")
++
++      const result = yield* execute({ patchText }, ctx)
++
++      // good.txt 应被成功修改
++      expect(yield* readText(goodFile)).toBe("hi\n")
++      // output 应同时包含成功和失败信息
++      expect(result.output).toContain("good.txt")
++      expect(result.output).toContain("bad.txt")
++      // bad.txt 内容不应被修改
++      expect(yield* readText(badFile)).toBe("world\n")
++    }),
++  )
+ })
+diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
+index d095f35b6cd38142190e752cf2432be06784b39b..d694cb24e8d156562e6d33d3ab8f1c6d8b5844f3 100644
+--- a/packages/opencode/test/tool/edit.test.ts
++++ b/packages/opencode/test/tool/edit.test.ts
+@@ -46,12 +46,36 @@ const init = Effect.fn("EditToolTest.init")(function* () {
+   return yield* info.init()
+ })
+ 
++// [local-smark] 构造包含 prior read 的 context，模拟生产环境中 edit 前已 read 文件的正常流程。
++// blind edit 检查要求 ctx.messages 中有指向同一文件的已完成 read/write/edit tool part。
++function ctxWithPriorRead(filePath: string): Tool.Context {
++  return {
++    ...ctx,
++    messages: [
++      {
++        info: { id: "msg_prior", role: "assistant" as const, sessionID: ctx.sessionID, agent: "build", mode: "build", path: { cwd: ".", root: "." }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, modelID: "test", providerID: "test", time: { created: 0 } },
++        parts: [
++          {
++            id: "p_read", messageID: "msg_prior", sessionID: ctx.sessionID,
++            type: "tool" as const, tool: "read", callID: "call_prior",
++            state: { status: "completed" as const, input: { filePath }, output: "content", metadata: {}, time: { start: 0, end: 1 } },
++          },
++        ],
++      },
++    ] as any,
++  }
++}
++
+ const run = Effect.fn("EditToolTest.run")(function* (
+   args: Tool.InferParameters<typeof EditTool>,
+-  next: Tool.Context = ctx,
++  next?: Tool.Context,
+ ) {
+   const tool = yield* init()
+-  return yield* tool.execute(args, next)
++  // [local-smark] 当未指定 next 且 oldString 非空时，自动注入 prior read context，
++  // 模拟生产环境中 edit 前已 read 文件的正常流程。
++  // 显式传入 next 的测试（如 blind edit 检查测试）使用传入的 context。
++  const context = next ?? (args.oldString !== "" ? ctxWithPriorRead(args.filePath) : ctx)
++  return yield* tool.execute(args, context)
+ })
+ 
+ const fail = Effect.fn("EditToolTest.fail")(function* (args: Tool.InferParameters<typeof EditTool>) {
+@@ -210,6 +234,94 @@ describe("tool.edit", () => {
+       }),
+     )
+ 
++    // [local-smark] 当 oldString 未匹配时，error 应包含 actual content 的最近似区域，
++    // 帮助模型自纠正而无需单独 re-read 文件。
++    it.instance("error includes closest match when oldString not found", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "file.txt")
++        // 文件内容含 "actual content"，模型搜索 "actual contnet"（拼写错误）
++        yield* put(filepath, "line1\nactual content here\nline3")
++
++        const error = yield* fail({
++          filePath: filepath,
++          oldString: "actual contnet",
++          newString: "replacement",
++        })
++
++        expect(error).toBeInstanceOf(Error)
++        // error 消息应包含文件中的实际内容片段，帮助模型发现拼写差异
++        expect(error.message).toContain("actual content")
++      }),
++    )
++
++    // [local-smark] 当文件在当前 session 中从未被 read 或 write 过时，
++    // edit 应拒绝执行并提示先 read，避免 oldString 基于过期/假设内容匹配失败。
++    // 显式使用 ctx（messages 为空）模拟"从未读过"的场景。
++    it.instance("rejects edit on file not previously read or written", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "unread.txt")
++        yield* put(filepath, "content")
++
++        // 显式传入 ctx（无 prior read）使 blind edit 检查生效
++        const tool = yield* init()
++        const exit = yield* tool.execute({ filePath: filepath, oldString: "content", newString: "modified" }, ctx).pipe(Effect.exit)
++        expect(Exit.isFailure(exit)).toBe(true)
++        if (Exit.isFailure(exit)) {
++          const err = Cause.squash(exit.cause) as Error
++          expect(err.message).toContain("not been read")
++        }
++      }),
++    )
++
++    // 已经 read 过的文件可以正常 edit
++    // [local-smark] 通过 ctx.messages 模拟"已读过"的场景：
++    // 构造一个包含 read tool part 的 assistant message，使 edit 能检测到文件已被读过
++    it.instance("allows edit when messages contain prior read of same file", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "read-then-edit.txt")
++        yield* put(filepath, "original")
++
++        // 构造 ctx，messages 中包含一个已完成的 read tool part 指向同一文件
++        const ctxWithRead = {
++          ...ctx,
++          messages: [
++            {
++              info: { id: "msg_prior", role: "assistant" as const, sessionID: ctx.sessionID, agent: "build", mode: "build", path: { cwd: test.directory, root: test.directory }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, modelID: "test", providerID: "test", time: { created: 0 } },
++              parts: [
++                {
++                  id: "p_read",
++                  messageID: "msg_prior",
++                  sessionID: ctx.sessionID,
++                  type: "tool" as const,
++                  tool: "read",
++                  callID: "call_read",
++                  state: { status: "completed" as const, input: { filePath: filepath }, output: "content", metadata: {}, time: { start: 0, end: 1 } },
++                },
++              ],
++            },
++          ] as any,
++        }
++
++        // edit 应该成功，因为 messages 中有 prior read
++        const result = yield* run({ filePath: filepath, oldString: "original", newString: "modified" }, ctxWithRead)
++        expect(result.output).toContain("Edit applied successfully")
++      }),
++    )
++
++    // oldString 为空（创建文件）时不检查是否读过
++    it.instance("allows edit with empty oldString without prior read", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "new-file.txt")
++
++        const result = yield* run({ filePath: filepath, oldString: "", newString: "new content" })
++        expect(result.output).toContain("Edit applied successfully")
++      }),
++    )
++
+     it.instance("replaces all occurrences with replaceAll option", () =>
+       Effect.gen(function* () {
+         const test = yield* TestInstance
+@@ -493,8 +605,9 @@ describe("tool.edit", () => {
+ 
+         const firstAsk = yield* Deferred.make<void>()
+         let asks = 0
++        // [local-smark] delayedCtx 需要包含 prior read 才能通过 blind edit 检查
+         const delayedCtx = {
+-          ...ctx,
++          ...ctxWithPriorRead(filepath),
+           ask: () =>
+             Effect.gen(function* () {
+               asks++
+diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
+index 66c43ca06e3fff5fe62e061a75acd21e59e65270..06f4f89dc4cd5cfb96c1301fb06ab745e9c1acb2 100644
+--- a/packages/opencode/test/tool/read.test.ts
++++ b/packages/opencode/test/tool/read.test.ts
+@@ -1005,4 +1005,21 @@ describe("tool.read binary detection", () => {
+       expect(err.message).toContain("Cannot read binary file")
+     }),
+   )
++
++  // [local-smark] 二进制文件 error 应包含 type-specific 替代建议，
++  // 帮助模型知道用什么工具读取而非盲目重试。
++  it.live("suggests alternatives for binary file types", () =>
++    Effect.gen(function* () {
++      const dir = yield* tmpdirScoped()
++      // .gz 文件应建议 gunzip
++      yield* put(path.join(dir, "archive.gz"), Buffer.from([0x1f, 0x8b, 0x08, 0x00]))
++      const gzErr = yield* fail(dir, { filePath: path.join(dir, "archive.gz") })
++      expect(gzErr.message).toContain("gunzip")
++
++      // .wasm 文件应建议 strings 或 hexdump
++      yield* put(path.join(dir, "module.wasm"), "not really wasm")
++      const wasmErr = yield* fail(dir, { filePath: path.join(dir, "module.wasm") })
++      expect(wasmErr.message).toContain("strings")
++    }),
++  )
+ })

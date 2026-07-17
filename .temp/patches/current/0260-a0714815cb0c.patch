@@ -1,0 +1,111 @@
+From a0714815cb0c8c727e60ce09b6f6a1bd0af62e49 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 29 May 2026 17:43:34 +0800
+Subject: [PATCH] =?UTF-8?q?chore(actions):=20=E5=BD=92=E6=A1=A3=E9=9D=9E?=
+ =?UTF-8?q?=E6=A0=B8=E5=BF=83=20GitHub=20Actions=EF=BC=8C=E8=81=9A?=
+ =?UTF-8?q?=E7=84=A6=20TUI=20=E7=BB=B4=E6=8A=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/.github/workflows/beta.yml b/archived/github-workflows/beta.yml
+similarity index 100%
+rename from .github/workflows/beta.yml
+rename to archived/github-workflows/beta.yml
+diff --git a/.github/workflows/close-issues.yml b/archived/github-workflows/close-issues.yml
+similarity index 100%
+rename from .github/workflows/close-issues.yml
+rename to archived/github-workflows/close-issues.yml
+diff --git a/.github/workflows/close-prs.yml b/archived/github-workflows/close-prs.yml
+similarity index 100%
+rename from .github/workflows/close-prs.yml
+rename to archived/github-workflows/close-prs.yml
+diff --git a/.github/workflows/compliance-close.yml b/archived/github-workflows/compliance-close.yml
+similarity index 100%
+rename from .github/workflows/compliance-close.yml
+rename to archived/github-workflows/compliance-close.yml
+diff --git a/.github/workflows/containers.yml b/archived/github-workflows/containers.yml
+similarity index 100%
+rename from .github/workflows/containers.yml
+rename to archived/github-workflows/containers.yml
+diff --git a/.github/workflows/deploy.yml b/archived/github-workflows/deploy.yml
+similarity index 100%
+rename from .github/workflows/deploy.yml
+rename to archived/github-workflows/deploy.yml
+diff --git a/.github/workflows/docs-locale-sync.yml b/archived/github-workflows/docs-locale-sync.yml
+similarity index 100%
+rename from .github/workflows/docs-locale-sync.yml
+rename to archived/github-workflows/docs-locale-sync.yml
+diff --git a/.github/workflows/docs-update.yml b/archived/github-workflows/docs-update.yml
+similarity index 100%
+rename from .github/workflows/docs-update.yml
+rename to archived/github-workflows/docs-update.yml
+diff --git a/.github/workflows/duplicate-issues.yml b/archived/github-workflows/duplicate-issues.yml
+similarity index 100%
+rename from .github/workflows/duplicate-issues.yml
+rename to archived/github-workflows/duplicate-issues.yml
+diff --git a/.github/workflows/generate.yml b/archived/github-workflows/generate.yml
+similarity index 100%
+rename from .github/workflows/generate.yml
+rename to archived/github-workflows/generate.yml
+diff --git a/.github/workflows/nix-eval.yml b/archived/github-workflows/nix-eval.yml
+similarity index 100%
+rename from .github/workflows/nix-eval.yml
+rename to archived/github-workflows/nix-eval.yml
+diff --git a/.github/workflows/nix-hashes.yml b/archived/github-workflows/nix-hashes.yml
+similarity index 100%
+rename from .github/workflows/nix-hashes.yml
+rename to archived/github-workflows/nix-hashes.yml
+diff --git a/.github/workflows/notify-discord.yml b/archived/github-workflows/notify-discord.yml
+similarity index 100%
+rename from .github/workflows/notify-discord.yml
+rename to archived/github-workflows/notify-discord.yml
+diff --git a/.github/workflows/opencode.yml b/archived/github-workflows/opencode.yml
+similarity index 100%
+rename from .github/workflows/opencode.yml
+rename to archived/github-workflows/opencode.yml
+diff --git a/.github/workflows/pr-management.yml b/archived/github-workflows/pr-management.yml
+similarity index 100%
+rename from .github/workflows/pr-management.yml
+rename to archived/github-workflows/pr-management.yml
+diff --git a/.github/workflows/pr-standards.yml b/archived/github-workflows/pr-standards.yml
+similarity index 100%
+rename from .github/workflows/pr-standards.yml
+rename to archived/github-workflows/pr-standards.yml
+diff --git a/.github/workflows/publish-github-action.yml b/archived/github-workflows/publish-github-action.yml
+similarity index 100%
+rename from .github/workflows/publish-github-action.yml
+rename to archived/github-workflows/publish-github-action.yml
+diff --git a/.github/workflows/publish-vscode.yml b/archived/github-workflows/publish-vscode.yml
+similarity index 100%
+rename from .github/workflows/publish-vscode.yml
+rename to archived/github-workflows/publish-vscode.yml
+diff --git a/.github/workflows/publish.yml b/archived/github-workflows/publish.yml
+similarity index 100%
+rename from .github/workflows/publish.yml
+rename to archived/github-workflows/publish.yml
+diff --git a/.github/workflows/release-github-action.yml b/archived/github-workflows/release-github-action.yml
+similarity index 100%
+rename from .github/workflows/release-github-action.yml
+rename to archived/github-workflows/release-github-action.yml
+diff --git a/.github/workflows/review.yml b/archived/github-workflows/review.yml
+similarity index 100%
+rename from .github/workflows/review.yml
+rename to archived/github-workflows/review.yml
+diff --git a/.github/workflows/stats.yml b/archived/github-workflows/stats.yml
+similarity index 100%
+rename from .github/workflows/stats.yml
+rename to archived/github-workflows/stats.yml
+diff --git a/.github/workflows/storybook.yml b/archived/github-workflows/storybook.yml
+similarity index 100%
+rename from .github/workflows/storybook.yml
+rename to archived/github-workflows/storybook.yml
+diff --git a/.github/workflows/sync-zed-extension.yml b/archived/github-workflows/sync-zed-extension.yml
+similarity index 100%
+rename from .github/workflows/sync-zed-extension.yml
+rename to archived/github-workflows/sync-zed-extension.yml
+diff --git a/.github/workflows/triage.yml b/archived/github-workflows/triage.yml
+similarity index 100%
+rename from .github/workflows/triage.yml
+rename to archived/github-workflows/triage.yml

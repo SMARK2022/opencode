@@ -1,0 +1,451 @@
+From 9bdaffcb2a1a3186b3f0ad4347f9cffc8d13a925 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 2 Jul 2026 14:41:11 +0800
+Subject: [PATCH] =?UTF-8?q?fix(permission):=20=E4=BF=AE=E5=A4=8D=20splitCo?=
+ =?UTF-8?q?mmands=20bail=20=E7=BB=95=E8=BF=87=20cautious=20=E5=AE=A1?=
+ =?UTF-8?q?=E6=9F=A5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+splitCommands 遇未建模字符（>/$/glob/&/换行）原整条 return undefined 降级 general，使同条命令里仅在 token 层定义的 cautious 命令（scp 等）被绕过：scp 2>&1、scp; echo $HOME 等本应审查却直接 allow。
+
+改为按段 bail：bail 字符仅让当前段 opaque(general) 不毒化兄弟干净段；fd-merge 重定向（2>&1 等，不写文件）原子跳过不 bail，让 token 层可达；bail 后残余段（tainted）不分类，避免变量名残骸误判（echo $mkfs 误判 dangerous）。保持既有不变量：单&/换行/$/glob/文件重定向仍 general，dangerous 仍由 raw 层短路。设计依据见 docs/precheck-parser-fix-plan.md。
+
+diff --git a/docs/precheck-parser-fix-plan.md b/docs/precheck-parser-fix-plan.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa5d71af297f5bc63825049ce0f954d52a30dd33
+--- /dev/null
++++ b/docs/precheck-parser-fix-plan.md
+@@ -0,0 +1,189 @@
++# precheck 解析器 fail-open 修复方案
++
++## 0. 问题
++
++`splitCommands`（precheck.ts:703）遇到 `>`/`$`/`*`/`&`/换行等"未建模字符"时 `return undefined`，
++`evaluateShell`（:428）据此返回 `general` → auto.ts 直接 allow。
++导致**整条命令**的 token 分类层（classifyTokens，scp/npm/git 等 cautious 规则所在）被跳过：
++`scp X 2>&1`、`scp; echo $HOME` 等本应 cautious 的命令被放行。
++
++## 1. 已阅读的文件/测试/文档（及相关性）
++
++- `src/permission/precheck.ts`：核心。evaluate/evaluateShell/splitCommands/tokenize/evaluateCommand/
++  classifyTokens/cautiousRaw/dangerousRaw/rawCommandSegments。是修改对象。
++- `src/permission/auto.ts`：precheck.level 路由——dangerous=deny, safe/general=allow, cautious=reviewer。
++  确认 general=allow 是 fail-open 的落点。
++- `src/permission/index.ts`：Permission.ask → 只对 action=auto 的 pattern 跑 precheck；allow 规则跳过。
++  确认 precheck 只在 auto 路径触发。
++- `src/tool/shell.ts`：permissionPattern(:194) 把重定向追加进 pattern(:208)；parse(:371) 用 tree-sitter。
++  确认 patterns 视图也带 `2>&1`，故 bashEffect 的 maxRisk 两视图都会 bail。
++- `test/permission/precheck.test.ts`：**不变量圣经**。逐条确认哪些 general/cautious/dangerous 被锁死。
++
++## 2. 调用点/引用点/旧逻辑确认
++
++- `splitCommands` 仅 `evaluateShell` 调用（本地函数，不导出）。
++- `tokenize` 被 `evaluateCommand` 与 `rawWrapperScript` 调用；**tokenize 不在 `>` 上 bail**（只在引号未闭合 bail，:805）。
++  → bail 只在 splitCommands。
++- `rawCommandSegments`(:890) 是另一个分割器（仅用于包装器载荷提取），按 `;&|\n` 切，不 bail——不改动。
++- raw 层（dangerousRaw/cautiousRaw）在 splitCommands **之前**短路；dangerous 命令（rm -rf /、reverse shell、
++  凭据外传）无论 split 是否失败都被 raw 捕获。→ 修改 splitCommands 不影响 dangerous 捕获。
++- 头部注释(:5)声称 fail-closed，但 :13"解析失败→general" + auto.ts general=allow 实为 fail-open。
++  raw 层是对 dangerous 的补偿；cautious-only 命令（scp 等）未被补偿 → 漏。
++
++## 3. 必须保持的既有行为（测试锁定）
++
++| 输入 | 期望 | 依据 |
++|---|---|---|
++| `echo $HOME` | general | :205（`$` 动态展开）|
++| `ls *.ts` | general | :209（glob）|
++| `echo hello > out.txt` | general | :227（文件重定向改 FS）|
++| `git status & rg TODO src` | general | :69（单 `&`）|
++| `git status\nrg TODO src` | general | :70（换行；若 split 会变 safe，破坏）|
++| `chmod\n-u+s ...` / `cat\n.env` / `iptables\n-F` / `kill -9\n-1` | general | :746-752（换行分隔使命令与 flag 解耦）|
++| `git status '` / `git status &&` / `| git status` / `git status |` / `   ` | general | :231-235（畸形）|
++| `rm -rf /tmp/.web_api_cache\n/Users/...` | cautious | :744（raw 层捕 rm）|
++| `Remove-Item ... > deleted.log` | cautious | :85（raw 层捕删除）|
++| `cmd /c "del ..." 2>&1` / `pwsh -Command "Remove-Item..." 2>&1` | cautious/dangerous | :126-130,:147（raw 层；`2>&1` 未锁 general）|
++| `git status && rg TODO src; pwd` | safe | :34（正常 split）|
++| `scp ...`（无特殊字符）| cautious | classifyTokens :1136 |
++
++**核心约束**：`$`/glob/文件重定向/单`&`/换行 → general 是**测试锁定且语义合理**（动态/写文件/解耦），
++**不能改**。换行**必须 bail 不能 split**（否则 `git status\nrg`→safe 破坏 :70）。
++
++## 4. 推荐方案（手术刀式，仅改 precheck.ts）
++
++### 改动 A：splitCommands 由"整条 bail"改为"按段 bail"
++
++当前：遇 bail 字符 → `return undefined`（整条丢弃，包括已切出的前段）。
++改为：遇 bail 字符 → 当前段标记 opaque 并结束，**继续扫描后续段**；返回 `{ segments: string[]; opaque: boolean }`
++（segments=干净段，opaque=是否存在被丢弃段）。
++
++- 分隔符（切分）：`;` `|` `&&` `||`（**不变**；换行/单`&`仍是 bail 字符，**不切分**——保 :70/:69）。
++- bail 字符（让**当前段** opaque，不毒化整条）：`$` `` ` `` `(` `)` `{` `}` `*` `?` `[` `>` `<` 单`&` 换行。
++- **段语义（统一）**：bail 字符结束当前段（标记 opaque、不入 `segments`），紧随其后的字符起开始新段，
++  直到下一个分隔符或 bail 字符。空段（前导/尾部/连续分隔符）→ opaque。
++- **未闭合引号/悬挂转义**：splitCommands 遇此（:760 `if (quote||escaped) return`）→ 当前段 opaque
++  （`git status '` → 末段 opaque、无干净段 → general，保 :231）。
++
++`evaluateShell` 改：`const { segments, opaque } = splitCommands(command)`；干净段跑 `evaluateCommand`；
++若 opaque，并入一个 `{level:"general",reason:"opaque shell segment requires explicit approval"}`；
++取 max。segments 为空且 opaque → general（等价旧行为）。
++
++**效果**（bail 段不入 segments，余文至下一分隔符为新干净段；post-bail 片段若无可识别命令则归类 general）：
++- `scp; echo $HOME` → bail 段="echo "(到`$`止)；干净段=["scp"](cautious) + ["HOME"](general) → max(cautious,general,general)=**cautious**（修）。
++- `git status & rg TODO src` → bail 段="git status"(单`&`)；干净段=["rg TODO src"](safe) → max(safe,general)=general ✓。
++- `git status\nrg TODO src` → bail 段="git status"(换行)；干净段=["rg TODO src"](safe) → general ✓。
++- `echo $HOME` → bail 段="echo "(到`$`止)；干净段=["HOME"](general) → max(general,general)=general ✓。
++
++### 改动 B：fd-merge 重定向跳过（不 bail）
++
++在 splitCommands 扫描到 `>` 或 `<` 时，先看是否 fd-merge（`>&\d` / `>&-` / `<&\d` / `<&-`，即 `2>&1`/`1>&2`/`>&2`/`2>&-`）：
++- 是 → **原子消费**该 fd-merge token（连同 `&` 与 fd 数字一起跳过并前进索引），**继续当前段**（不 bail）。
++- 否（`>file`/`>>file`/`<file`/`2>file`/`2>/dev/null` 等文件重定向）→ 当前段 opaque（保 :227）。
++
++**实施关键（成败点）**：`2>&1` 中的 `&` **必须在 `>`/`<` 分支内原子消费**，绝不能让循环继续到 `&` 字符触发
++单 `&` bail（:751）。`>` 检查（:740）与 `&` 检查（:751）是独立分支，必须在 `>`/`<` 分支内匹配 fd-merge 后 `continue`
++并跳过 `&1`，否则 `scp 2>&1` 会因 `&` bail 变 opaque→general，改动 B 失效。
++
++**边界**：
++- `>&2`（无前导数字）→ `>&\d` 匹配 → 跳过 → 段干净（fd-merge 语义）。
++- `>& /dev/tcp`（`>&` 后非数字/`-`）→ 不匹配 fd-merge → opaque（reverse-shell 由 raw 层 RE_D_REVERSE_SHELL 捕获，双保险）。
++- `2>/dev/null` 形如 `2>file` → opaque → general（不做 `/dev/null` 特例，避免过度假设）。
++- `&>`/`&>>`（bash 合并重定向到文件）→ 单 `&` 先 bail → general（与文件重定向一致，非回归）。
++
++**效果**：`scp X 2>&1` → 段内 `2>&1` 原子跳过（前导 fd 数字 `2` 保留于段内，无害——classifyTokens 按 tokens[0] dispatch）→ 段="scp X 2" → cautious（修）。
++`scp 2>&1; & 7z ...; Get-Content ...` → 段1="scp"(cautious) + 段2(`&` opaque) + 段3(Get-Content general) → cautious（修，真实用例）。
++**保持**：`echo hello > out.txt` → `> out.txt` 非 fd-merge → opaque → general ✓。
++
++### 不做的事（明确排除）
++
++- **不**把 scp 等规则复制到 cautiousRaw（用户明确否决；且 raw 层只该放语义正则）。
++- **不**改 opaque fallback 为 cautious（会破坏 :69/:70/:205/:209/:227 等 general 断言，且 PowerShell `$` 噪声大）。
++- **不**让换行/单`&` split（破坏 :70/:69）。
++- **不**处理 `$`/glob/`()`/`{}`（测试锁定 general + 语义动态，不可改）。
++- **不**引入 tree-sitter 到 precheck（precheck 同步、零依赖；改契约超出手术刀范围）。
++
++## 5. 正常/错误/并发/安全边界
++
++- **正常路径**：无 bail 字符 → split 正常 → 行为完全不变（segments=旧 string[], opaque=false）。
++- **fd-merge 路径**：`2>&1` 跳过 → 段干净 → token 层可达。
++- **opaque 段路径**：bail 字符 → 该段 general，其他段仍分类取 max。
++- **dangerous 不受影响**：dangerousRaw 在 split 前 short-circuit；rm -rf /、reverse shell 等仍 deterministic deny。
++- **错误路径**：畸形引号 → tokenize 返回 null（evaluateCommand :442 general）；splitCommands 未闭合引号/悬挂转义 → 当前段 opaque（见改动 A）；空命令（:410）general——不变。
++- **并发/退出/清理**：precheck 是纯同步函数，无状态、无 IO、无副作用。无并发/清理问题。
++- **安全边界**：fail-open 缩窄（fd-merge + 按段不再毒化），但 `$`/glob/文件重定向 仍 general（既有边界，不回退）。
++  dangerous 仍 fail-closed（raw 层）。
++
++## 6. 行为级测试计划
++
++先写测试（当前实现下暴露缺口），再实现：
++
++新增 test("marks scp cautious through fd-merge redirect"):
++- `scp host:a b 2>&1` → cautious（当前 general，暴露缺口）
++- `scp host:a b 1>&2` → cautious
++- `scp host:a b 2>&1; echo done` → cautious
++- `scp host:a b 2>&1 | grep x` → cautious（`|` 切分 + fd-merge）
++- `echo hello > out.txt` → general（回归守卫，:227 不退化）
++- `echo hello >> out.txt` → general（回归守卫）
++
++新增 test("does not let opaque segment poison cautious sibling"):
++- `scp host:a b; echo $HOME` → cautious（当前 general，暴露缺口）
++- `scp host:a b; ls *.ts` → cautious
++- `git status; scp host:a b` → cautious
++- `git status & rg TODO src` → general（回归守卫，:69 不退化）
++- `git status\nrg TODO src` → general（回归守卫，:70 不退化）
++- `echo $HOME` → general（回归守卫，:205 不退化）
++
++实现后验证：`bun test test/permission/precheck.test.ts` 全绿（含既有 820 行不变量）。
++
++## 7. 验证命令
++
++```
++cd packages/opencode
++bun test test/permission/precheck.test.ts
++bun test test/permission/            # auto/arity/next/reviewer 不受影响
++bun typecheck
++```
++
++## 8. git 预估
++
++- 修改文件：`src/permission/precheck.ts`（splitCommands + evaluateShell，~30-45 行净增）。
++- 新增测试：`test/permission/precheck.test.ts`（~15-20 行断言）。
++- **1 个生产文件 + 1 个测试文件**。无迁移、无生成文件、无文档生成。
++- 增删行：净增 ~50-65 行。
++
++## 9. 风险与开放问题
++
++- **风险 R1**：fd-merge 的 lookahead 误判。`2>&1` 必须精确匹配 `>&\d`/`>&-`，不能把 `2>&1` 之后的 `1` 当成新段。
++  缓解：消费到 fd 数字结束；测试覆盖 `2>&1`/`1>&2`/`>&2`/`2>&-`。
++- **风险 R2**：按段 bail 改变 splitCommands 返回类型（string[]|undefined → {segments,opaque}）。
++  仅 evaluateShell 一处消费，适配即可。rawCommandSegments 是独立函数，不受影响。
++- **风险 R3**：`scp $F dest` / `scp *.gz dest` 仍 general（`$`/glob 在 scp 自身段，bail）。
++  这是测试锁定 + 语义动态的既定边界，**不回退**但也不扩展。属已知残留，文档注明。
++- **开放问题**：`2>/dev/null` 是否值得特例（discard 语义 benign）？方案默认**不处理**（避免过度假设）；
++  若后续有需求再单独加 `/dev/null` 识别。
++- **确认无依赖问题**：classifyTokens/unwrap/remoteWrapper 不看跨段内容；按段不影响它们。
++  tree-sitter（shell.ts）与 precheck 解耦，不受影响。
++
++## 推荐方案摘要
++
++仅改 `precheck.ts` 两处：(A) `splitCommands` 整条 bail → 按段 bail（bail 字符只让当前段 opaque，
++不再毒化兄弟段，修 `scp; echo $HOME`）；(B) fd-merge 重定向 `2>&1` 跳过不 bail（修 `scp 2>&1`）。
++`evaluateShell` 适配新返回类型，opaque 段并入 general 取 max。不复制规则到 raw、不改 fallback 为 cautious、
++不让换行/`&` split、不引 tree-sitter。全部既有 general/cautious/dangerous 断言保持。约 1 生产文件 + 1 测试文件。
++
++## 10. Subagent 独立复核结论（已完成，硬性步骤）
++
++**结论：可执行**。逐条核验全部既有断言（:34/:69/:70/:85/:126-130/:147/:205/:209/:227/:231-235/:744/:746-752）保持，
++A/B 两改动不可互替，冗余最小。复核提出的 3 项澄清（段语义统一、未闭合引号处理、fd-merge `&` 原子消费）
++及边界 case 已**并入正文改动 A/B/section 5**，本节仅留复核专属证明。
++
++### 不可互替性证明
++
++- 仅改动 B（无 A）：`scp 2>&1; & 7z; Get-Content` 中单 `&` 仍触发**整条** bail→general，不修复。
++- 仅改动 A（无 B）：`scp X 2>&1` 中 `>` 仍 bail → scp 段 opaque→general，不修复。
++- 故 A、B 缺一不可。
++
++### 复核确认的非回归边界（详见改动 B / section 9 R3）
++
++`&>`/`&>>`、`>&2`、`>& /dev/tcp`、`2>/dev/null`（改动 B）、`scp $F`/`scp *.gz`（section 9 R3）均维持 general 或由 raw 层捕获，无回归。
+diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
+index 996e4a9603972779143238c5b28d3895052a34c8..c07de61d982c8662e4ed072595afb59572f8ea29 100644
+--- a/packages/opencode/src/permission/precheck.ts
++++ b/packages/opencode/src/permission/precheck.ts
+@@ -423,11 +423,15 @@ function evaluateShell(command: string, depth: number): Decision {
+     if (decision.level === "dangerous" || decision.level === "cautious") return decision
+   }
+ 
+-  // 结构解析：将命令分割为独立子命令并逐个分析
+-  const commands = splitCommands(command)
+-  if (!commands) return { level: "general", reason: "opaque shell command requires explicit approval" }
+-
+-  const decisions = commands.map((item) => evaluateCommand(item, depth))
++  // 结构解析：将命令分割为独立子命令并逐个分析。splitCommands 对未建模语法按段
++  // 降级为 opaque(general) 而非整条丢弃，故一个 bail 字符不会藏掉同条命令里
++  // 其它干净段的 cautious/dangerous（修 `scp; echo $HOME` / `scp 2>&1` 类绕过）。
++  const { segments, opaque } = splitCommands(command)
++  const decisions = segments.map((item) => evaluateCommand(item, depth))
++  // opaque 段以 general 参与 max 聚合：既不允许整条降为 safe，也保留干净 cautious
++  // 段的审查信号。无任何可分析段（整条 opaque）时回退 general，等价旧行为。
++  if (opaque) decisions.push({ level: "general", reason: "opaque shell segment requires explicit approval" })
++  if (decisions.length === 0) return { level: "general", reason: "opaque shell command requires explicit approval" }
+   const dangerous = decisions.find((item) => item.level === "dangerous")
+   if (dangerous) return dangerous
+   const cautious = decisions.find((item) => item.level === "cautious")
+@@ -577,8 +581,8 @@ function cautiousRaw(command: string): string | undefined {
+   const normalized = normalizeForRawScan(command)
+ 
+   // ---- 持久化写入（重定向目标）----
+-  // splitCommands 遇到重定向会返回 undefined（降级为 general），因此这些
+-  // 持久化写入必须在 raw 层捕获，否则 >> ~/.bashrc 等会被当作普通未知命令。
++  // splitCommands 遇到重定向会把该段降级为 opaque(general)，因此这些持久化
++  // 写入必须在 raw 层捕获，否则 >> ~/.bashrc 等会被当作普通未知命令。
+   if (RE_C_SHELL_RC_WRITE.test(normalized)) return "shell RC file modification enables persistent code execution"
+   if (RE_C_GIT_HOOKS_WRITE.test(normalized)) return "git hook modification runs code on git operations"
+   if (RE_C_CRON_WRITE.test(normalized)) return "cron directory write enables persistent scheduled execution"
+@@ -700,15 +704,34 @@ function quoteOffsets(command: string) {
+ // 第十二部分：结构解析
+ // ============================================================
+ 
+-function splitCommands(command: string) {
+-  // 此分割器有意只识别可以组合已安全命令的简单分隔符。任何动态展开、重定向、
+-  // glob 或格式错误的空段都返回 undefined，让调用者提示用户。这避免在过滤掉
+-  // 分隔符的空侧后批准 `git status &&` 或 `| git status`。
+-  const out: string[] = []
++function splitCommands(command: string): { segments: string[]; opaque: boolean } {
++  // 此分割器只识别可组合已安全命令的简单分隔符（; | && ||）。遇到未建模语法
++  // （动态展开 $/反引号、子 shell ()、大括号 {}、glob *?[、文件重定向 ><、
++  // 后台单 &、换行）时，仅让**当前段**降级为 opaque(general) 并从下一字符起重开
++  // 新段，不毒化同条命令的其它干净段——故 `scp; echo $HOME` 中后段 `$` 不会
++  // 藏掉前段 scp 的 cautious。整条都 opaque 时等价旧的"整条→general"。
++  const segments: string[] = []
++  let opaque = false
++  // tainted 标记当前段是否由 bail 字符重开（即 bail 之后的残余片段）。残余片段
++  // 是被未建模语法切碎的 token 残骸（如 `echo $mkfs` 中 `$` 之后的 "mkfs"），
++  // 并非真实命令——分类它会把变量名误判为危险命令（mkfs→dangerous 误拒）。
++  // 故 tainted 段只记 opaque(general)，不入 segments 参与分类；分隔符会重置它，
++  // 因为分隔符之后是真实的新命令。与 :480 剥头启发式"不越权升 token 层
++  // dangerous"的设计保持一致。
++  let tainted = false
+   let start = 0
+   let quote = ""
+   let escaped = false
+ 
++  // 分隔符处收尾当前段：非空且未 tainted→干净段入列；空段或 tainted 段→记 opaque
++  // （前导/尾部/连续分隔符的空侧、bail 残骸，保既有 general 而非 safe/误判）
++  const pushSegment = (end: number) => {
++    const segment = command.slice(start, end).trim()
++    if (segment && !tainted) segments.push(segment)
++    else opaque = true
++    tainted = false
++  }
++
+   for (let i = 0; i < command.length; i++) {
+     const char = command[i]
+     if (escaped) {
+@@ -722,46 +745,66 @@ function splitCommands(command: string) {
+     }
+     if (quote) {
+       if (char === quote) quote = ""
+-      // 双引号 shell 片段仍可能展开变量或执行替换，视为不透明
+-      else if (quote !== "'" && (char === "$" || char === "`")) return
++      // 双引号内 $/` 仍可能展开/替换——当前段 opaque 且 tainted，从下一字符起重开
++      else if (quote !== "'" && (char === "$" || char === "`")) {
++        opaque = true
++        tainted = true
++        start = i + 1
++      }
+       continue
+     }
+     if (char === "'" || char === '"') {
+       quote = char
+       continue
+     }
+-    // 未建模的 shell 语法：$ 展开、反引号替换、子 shell 括号、大括号展开
+-    if (char === "$" || char === "`" || char === "(" || char === ")" || char === "{" || char === "}") return
+-    // 单个 & 和换行也是 shell 命令分隔/后台执行语法。当前 splitter 只支持
+-    // 明确的 &&、||、;、| 组合；遇到这些未建模分隔符时必须整体降级为
+-    // general，不能让 `git status & rm -rf ...` 被当成 safe 的 git 参数。
+-    if (char === "\n" || char === "\r") return
+-    // 重定向、glob、通配符
+-    if (char === ">" || char === "<" || char === "*" || char === "?" || char === "[") return
++
++    // fd-merge 重定向（2>&1 / 1>&2 / >&2 / 2>&- 等）：仅合并或关闭 fd，不写文件，
++    // 属良性。原子消费 >/< + & + fd 数字串/- 并继续当前段，避免误 bail 让
++    // `scp 2>&1` 因 `>` 或 `&` 落入 opaque 而绕过 scp 的 cautious 审查。
++    // 必须在下方 `>`/`<` 与单 `&` 的 bail 判断之前命中并 continue——否则 `2>&1`
++    // 里的 `&` 会触发单 `&` bail 使本改动失效。
++    if ((char === ">" || char === "<") && command[i + 1] === "&" && (/\d/.test(command[i + 2]) || command[i + 2] === "-")) {
++      let j = i + 2
++      if (command[j] === "-") j++
++      else while (/\d/.test(command[j])) j++
++      i = j - 1
++      continue
++    }
+ 
+     const two = command.slice(i, i + 2)
+     if (two === "&&" || two === "||") {
+-      const segment = command.slice(start, i).trim()
+-      if (!segment) return
+-      out.push(segment)
++      pushSegment(i)
+       i++
+       start = i + 1
+       continue
+     }
+-    if (char === "&") return
+     if (char === ";" || char === "|") {
+-      const segment = command.slice(start, i).trim()
+-      if (!segment) return
+-      out.push(segment)
++      pushSegment(i)
++      start = i + 1
++      continue
++    }
++
++    // 未建模 shell 语法：当前段 opaque（不入 segments），紧随其后字符起开始新段。
++    // 不再 return 整条，避免一个 bail 字符毒化已切出的干净 cautious 段。
++    // 单 `&`（后台）与换行在此 opaque 而非切分——保 `git status & rg`/`git status\nrg`
++    // 为 general（:69/:70），不能 split 否则会变 safe。
++    if (
++      char === "$" || char === "`" || char === "(" || char === ")" ||
++      char === "{" || char === "}" || char === "*" || char === "?" || char === "[" ||
++      char === ">" || char === "<" || char === "&" || char === "\n" || char === "\r"
++    ) {
++      opaque = true
++      tainted = true
+       start = i + 1
++      continue
+     }
+   }
+ 
+-  if (quote || escaped) return
+-  const segment = command.slice(start).trim()
+-  if (!segment) return
+-  out.push(segment)
+-  return out
++  // 未闭合引号/悬挂转义：末段 opaque（`git status '` → general，保既有 :231 行为）
++  if (quote || escaped) opaque = true
++  else pushSegment(command.length)
++
++  return { segments, opaque }
+ }
+ 
+ function tokenize(command: string) {
+diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
+index 6efb787948396f0d5fa97de2bb5f226a50c9c8d4..2f41dcceb79f83f37a1a0f3b2af1ccb3b2497b36 100644
+--- a/packages/opencode/test/permission/precheck.test.ts
++++ b/packages/opencode/test/permission/precheck.test.ts
+@@ -817,4 +817,72 @@ describe("permission precheck bash classifier", () => {
+     //（既知残隙，非本次新增回归）。guard 防止有人误改启发式越权升 dangerous
+     expect(bash("somecmd mkfs /dev/sda").level).not.toBe("dangerous")
+   })
++
++  // ============================================================
++  // 解析器 fail-open 修复：splitCommands 遇未建模字符（>/$/glob/&/换行）
++  // 原本 return undefined 整条降级 general，使同条命令里的 cautious 命令
++  //（scp 等，仅存在于 token 层）被绕过。修复后：(1) fd-merge 重定向
++  //（2>&1 等，不写文件）跳过不 bail，token 层可达；(2) bail 字符仅让当前段
++  // opaque，不毒化兄弟干净段。文件重定向/$/glob/单&/换行 仍 general（既有边界）。
++  // ============================================================
++
++  test("marks scp cautious through fd-merge redirect because fd merge does not write files", () => {
++    // 2>&1 仅合并 stderr→stdout，不写文件；scp 仍应进 reviewer。当前实现下为 general（缺口）
++    expect(bash("scp btsun@a100:/a/b H:/c/d 2>&1")).toMatchObject({ level: "cautious" })
++    // 1>&2 合并 stdout→stderr，同样良性
++    expect(bash("scp btsun@a100:/a/b H:/c/d 1>&2")).toMatchObject({ level: "cautious" })
++    // 2>&- 关闭 fd，不写文件
++    expect(bash("scp btsun@a100:/a/b H:/c/d 2>&-")).toMatchObject({ level: "cautious" })
++    // 复合：fd-merge 段 + 后续普通段，scp 仍被切出
++    expect(bash("scp btsun@a100:/a/b H:/c/d 2>&1; echo done")).toMatchObject({ level: "cautious" })
++    // 管道 + fd-merge：| 切分 + 2>&1 跳过，scp 段 cautious、grep 段 safe → max cautious
++    expect(bash("scp btsun@a100:/a/b H:/c/d 2>&1 | grep x")).toMatchObject({ level: "cautious" })
++    // >&2 无前导 fd 数字（shell 等价 1>&2），同样良性 fd-merge → scp 仍 cautious
++    expect(bash("scp btsun@a100:/a/b H:/c/d >&2")).toMatchObject({ level: "cautious" })
++    // 只读命令 + fd-merge：git status 本身 safe，2>&1 不改 FS 效果 → 仍 safe（守卫：fd-merge 不降级只读命令）
++    expect(bash("git status 2>&1").level).toBe("safe")
++  })
++
++  test("does not misclassify bail-remnant fragments as commands", () => {
++    // `$` 切碎后的残余 "mkfs" 是变量名残骸，非真实命令——不能误判 dangerous 误拒。
++    // mkfs 仅存在于 token 层（SYSTEM_DESTRUCTIVE_COMMANDS），raw 层不捕，故走
++    // splitCommands 残余路径；与 :480 剥头启发式一致：token 层独有的 dangerous
++    // 不在碎片路径越权升级。
++    expect(bash("echo $mkfs")).toMatchObject({ level: "general" })
++    // 残余 "rm" 同理是变量名片段，不能误判 cautious（真实 rm 删除由 raw 层捕获）
++    expect(bash("echo $rm file")).toMatchObject({ level: "general" })
++    // setcap 也仅 token 层 dangerous，残余片段不越权升 dangerous
++    expect(bash("echo $setcap").level).not.toBe("dangerous")
++  })
++
++  test("keeps file redirection general because it changes filesystem effects", () => {
++    // >file 写文件，改 FS 效果——必须保持 general（回归守卫，:227 不退化）
++    expect(bash("echo hello > out.txt")).toMatchObject({ level: "general" })
++    // >>file 追加写文件，同样 general
++    expect(bash("echo hello >> out.txt")).toMatchObject({ level: "general" })
++    // 2>file 把 stderr 写入文件，仍是文件重定向 → general（非 fd-merge）
++    expect(bash("scp btsun@a100:/a/b H:/c/d 2>file")).toMatchObject({ level: "general" })
++  })
++
++  test("does not let opaque segment poison a cautious sibling", () => {
++    // 后段 $HOME 的 $ 让其段 opaque，但前段 scp 经 ; 切分为干净段仍 cautious（缺口：当前 general）
++    expect(bash("scp btsun@a100:/a/b H:/c/d; echo $HOME")).toMatchObject({ level: "cautious" })
++    // 后段 glob *.ts 让其段 opaque，前段 scp 仍 cautious
++    expect(bash("scp btsun@a100:/a/b H:/c/d; ls *.ts")).toMatchObject({ level: "cautious" })
++    // scp 在后段，前段 git status 干净 safe，max(safe, cautious)=cautious
++    expect(bash("git status; scp btsun@a100:/a/b H:/c/d")).toMatchObject({ level: "cautious" })
++    // 真实用例：fd-merge + PowerShell & 调用 + Get-Content，scp 段仍被切出（缺口：当前 general）
++    expect(bash('scp btsun@a100:/a/b H:/c/d 2>&1; & "D:/z.exe" e f; Get-Content g')).toMatchObject({
++      level: "cautious",
++    })
++  })
++
++  test("keeps unsupported separators and dynamic expansion general", () => {
++    // 单 & 仍 opaque → general（回归守卫，:69 不退化）
++    expect(bash("git status & rg TODO src")).toMatchObject({ level: "general" })
++    // 换行仍 opaque → general（回归守卫，:70 不退化；不能 split 否则变 safe）
++    expect(bash("git status\nrg TODO src")).toMatchObject({ level: "general" })
++    // $ 展开整段 opaque → general（回归守卫，:205 不退化）
++    expect(bash("echo $HOME")).toMatchObject({ level: "general" })
++  })
+ })

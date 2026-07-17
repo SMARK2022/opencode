@@ -1,0 +1,500 @@
+From 2e8c148edf3056a5716585ab3b9b74df74126e4a Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Tue, 5 May 2026 16:37:25 +0800
+Subject: [PATCH] =?UTF-8?q?feat(network-proxy):=20=E5=BC=95=E5=85=A5Networ?=
+ =?UTF-8?q?kProxy=E4=BB=A5=E6=94=AF=E6=8C=81=E6=8F=92=E4=BB=B6=E5=92=8C?=
+ =?UTF-8?q?=E6=8F=90=E4=BE=9B=E8=80=85=E7=9A=84fetch=E8=AF=B7=E6=B1=82?=
+ =?UTF-8?q?=EF=BC=8C=E5=A2=9E=E5=BC=BA=E4=BB=A3=E7=90=86=E5=A4=84=E7=90=86?=
+ =?UTF-8?q?=E8=83=BD=E5=8A=9B?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-proxy.ts
+index 478498fcd412f8b801619bce75e6d1a67af29137..8788444bf872ff04b185c2045962c56221c8adc6 100644
+--- a/packages/core/src/network-proxy.ts
++++ b/packages/core/src/network-proxy.ts
+@@ -4,12 +4,18 @@ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin"
+ 
+ export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
+ 
++/** Proxy resolution TTL: re-check system proxy settings every 10s */
+ const PROXY_TTL = 10_000
++/** Hostnames that should never be routed through a proxy */
+ const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"])
+ 
+ let cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined
+ let globalFetchInstalled = false
+-let savedOriginal: FetchFn | undefined
++/**
++ * Pre-bound native fetch reference.
++ * Captured once at module load before global fetch may be overridden by installGlobalFetch().
++ */
++const nativeFetch = globalThis.fetch.bind(globalThis) as FetchFn
+ 
+ type SystemProxy = {
+   http?: string
+@@ -34,14 +40,29 @@ function isLocal(url: URL) {
+   return LOCAL.has(normalizeHost(url.hostname))
+ }
+ 
++/**
++ * Normalize a proxy string into a valid URL.
++ * Converts "localhost" hostnames to 127.0.0.1 for consistent resolution.
++ * Falls back to the raw value if URL parsing fails.
++ */
+ function normalizeProxy(value: string | undefined) {
+   if (!value) return
+   const next = value.trim()
+   if (!next) return
+-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(next)) return next
+-  return `http://${next}`
++  const normalized = /^[a-z][a-z0-9+.-]*:\/\//i.test(next) ? next : `http://${next}`
++  try {
++    const url = new URL(normalized)
++    if (normalizeHost(url.hostname) === "localhost") url.hostname = "127.0.0.1"
++    return url.toString()
++  } catch {
++    return normalized
++  }
+ }
+ 
++/**
++ * Check whether the given hostname matches any entry in the bypass list.
++ * Supports exact match, wildcard prefix (*.example.com), and glob patterns.
++ */
+ function bypass(url: URL, list: string[]) {
+   const host = normalizeHost(url.hostname)
+   for (const raw of list) {
+@@ -58,6 +79,10 @@ function bypass(url: URL, list: string[]) {
+   return false
+ }
+ 
++/**
++ * Read proxy configuration from environment variables.
++ * Respects HTTPS_PROXY/HTTP_PROXY/ALL_PROXY and NO_PROXY bypass rules.
++ */
+ function envProxy(url: URL): SystemProxy | undefined {
+   const proxy =
+     url.protocol === "https:"
+@@ -69,6 +94,7 @@ function envProxy(url: URL): SystemProxy | undefined {
+   return { http: picked, https: picked, bypass: (process.env.NO_PROXY || process.env.no_proxy || "").split(",") }
+ }
+ 
++/** Execute a shell command and return its stdout text */
+ async function execText(command: string, args: string[], timeout = 1500) {
+   const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore" })
+   const timer = setTimeout(() => proc.kill(), timeout)
+@@ -83,6 +109,10 @@ async function execText(command: string, args: string[], timeout = 1500) {
+   }
+ }
+ 
++/**
++ * Parse a Windows proxy server string which may use protocol=host;port format.
++ * Falls back to normalizing the raw value if no = delimiters are present.
++ */
+ function parseWindowsProxyServer(value: string, protocol: string) {
+   if (!value.includes("=")) return normalizeProxy(value)
+   const entries = Object.fromEntries(
+@@ -124,6 +154,7 @@ async function macProxy(): Promise<SystemProxy | undefined> {
+   return { http, https, socks, bypass: [] }
+ }
+ 
++/** Retrieve system proxy settings with caching (TTL = 10s) */
+ async function currentSystemProxy(refresh = false) {
+   if (process.platform !== "win32" && process.platform !== "darwin") return undefined
+   if (refresh) cache = undefined
+@@ -136,6 +167,11 @@ async function currentSystemProxy(refresh = false) {
+   return cache.value
+ }
+ 
++/**
++ * Determine the effective proxy for a URL.
++ * On Windows/macOS reads system proxy settings; on Linux falls back to env vars.
++ * Respects the bypass/no-proxy list from the same source.
++ */
+ async function configuredProxy(url: URL, refresh = false) {
+   if (process.platform === "win32" || process.platform === "darwin") {
+     const sys = await currentSystemProxy(refresh)
+@@ -147,6 +183,11 @@ async function configuredProxy(url: URL, refresh = false) {
+   return url.protocol === "https:" ? env.https || env.http || env.socks : env.http || env.https || env.socks
+ }
+ 
++/**
++ * Resolve the proxy route for a given URL.
++ * Returns either a `proxy` route (with the proxy URL) or a `direct` route.
++ * Local addresses and `local`-purpose calls always return `direct`.
++ */
+ export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown", refresh = false): Promise<Route> {
+   const url = input instanceof URL ? input : new URL(input)
+   if (purpose === "local" || isLocal(url)) return { type: "direct", reason: "local" }
+@@ -155,67 +196,88 @@ export async function resolveProxyRoute(input: string | URL, purpose: Purpose =
+   return { type: "direct", reason: refresh ? "refresh-no-proxy" : "no-proxy" }
+ }
+ 
++/** Compatibility alias — delegates to the unified fetch() entry point */
+ export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
+-  return fetchWithRoute(fetch, input, init)
++  return fetch(input, init)
+ }
+ 
+-export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
++/**
++ * Primary network fetch entry point.
++ *
++ * Resolves the proxy route for the given URL, then dispatches to either
++ * a direct connection or a proxy-backed connection via Bun's native `proxy:`.
++ * The explicit `proxy` parameter ensures Bun routes through the correct proxy
++ * regardless of cached environment variables at process startup.
++ */
++export async function fetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
+   const url = new URL(input instanceof Request ? input.url : input.toString())
+-  const { purpose = "unknown", signal, proxy: _incomingProxy, ...rest } = (init ?? {}) as RoutedInit & { proxy?: string }
++  const {
++    purpose = "unknown",
++    signal,
++    proxy: _incomingProxy,
++    dispatcher: _incomingDispatcher,
++    timeout: _incomingTimeout,
++    ...rest
++  } = (init ?? {}) as RoutedInit & { proxy?: string; dispatcher?: unknown; timeout?: unknown }
+   const route = await resolveProxyRoute(url, purpose, false)
+-  
+-  // Bun caches proxy env at startup — explicit `proxy` param overrides it,
+-  // but plain fetch still honours the cached env.  Setting NO_PROXY=* once
+-  // disables that cached env so plain fetch goes direct.  The proxy() helper
+-  // passes an explicit `proxy` param which Bun always respects regardless of
+-  // NO_PROXY, so this is safe.
+-  if (!process.env.__OPENCODE_NO_PROXY_SET) {
+-    process.env.NO_PROXY = "*"
+-    process.env.__OPENCODE_NO_PROXY_SET = "1"
+-  }
+-  
+-  const fetchDirect = (overrideSignal?: AbortSignal) => 
+-    fetchFn(input, { ...rest, signal: overrideSignal ?? signal })
+-  
+-  const proxy = (value: string) => fetchFn(input, { ...rest, signal, proxy: value })
+-
+-  if (route.type === "direct") {
+-    try {
+-      return await fetchDirect()
+-    } catch (error) {
+-      if (signal?.aborted) throw error
+-      const refreshed = await resolveProxyRoute(url, purpose, true)
+-      if (refreshed.type === "proxy") return proxy(refreshed.proxy).catch(() => { throw error })
+-      throw error
+-    }
+-  }
+ 
+-  try {
+-    return await proxy(route.proxy)
+-  } catch (error) {
+-    const refreshed = signal?.aborted ? undefined : await resolveProxyRoute(url, purpose, true)
+-    if (refreshed?.type === "proxy" && refreshed.proxy !== route.proxy) {
+-      return proxy(refreshed.proxy).catch(() => { throw error })
+-    }
+-    if (signal?.aborted)
+-      return fetchDirect(AbortSignal.timeout(10_000)).catch(() => { throw error })
+-    return fetchDirect().catch(() => { throw error })
+-  }
++  if (route.type === "direct")
++    return directFetch(input, { ...rest, signal })
++
++  return proxyFetch(input, { ...rest, signal }, route.proxy)
++}
++
++/**
++ * Dispatch a custom fetch function (auth adapter / URL-rewriting wrapper).
++ *
++ * Provider SDKs may supply their own `fetch` implementation that injects
++ * auth headers, rewrites URLs, or transforms request bodies before the
++ * actual network request.  The custom fetcher is responsible for calling
++ * `NetworkProxy.fetch()` internally for the real outbound hop.
++ */
++export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
++  const {
++    purpose = "unknown",
++    signal,
++    proxy: _incomingProxy,
++    dispatcher: _incomingDispatcher,
++    timeout: _incomingTimeout,
++    ...rest
++  } = (init ?? {}) as RoutedInit & { proxy?: string; dispatcher?: unknown; timeout?: unknown }
++  return fetchFn(input, { ...rest, signal })
++}
++
++/**
++ * Send a fetch request through an explicit HTTP/SOCKS proxy.
++ * Uses Bun's built-in proxy support via the `proxy` option.
++ */
++async function proxyFetch(input: FetchInput, init: RequestInit, proxy: string) {
++  return nativeFetch(input, { ...init, proxy } as RequestInit & { proxy: string })
++}
++
++/**
++ * Direct network request without proxy interception.
++ * Uses the pre-bound native fetch to avoid recursion when global fetch is overridden.
++ */
++async function directFetch(input: FetchInput, init: RequestInit) {
++  return nativeFetch(input, init)
+ }
+ 
++/**
++ * Install a routed fetch as the global `fetch` implementation.
++ * All subsequent `fetch()` calls in the process will be routed through
++ * proxy resolution automatically.
++ *
++ * Idempotent — subsequent calls are no-ops.
++ */
+ export function installGlobalFetch(defaultPurpose: Purpose = "unknown") {
+   if (globalFetchInstalled) return
+-  const original = globalThis.fetch.bind(globalThis) as FetchFn
+-  savedOriginal = original
+   globalThis.fetch = ((input: FetchInput, init?: RoutedInit) =>
+-    fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as typeof fetch
++    fetch(input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as typeof globalThis.fetch
+   globalFetchInstalled = true
+ }
+ 
+-export function originalFetch() {
+-  return savedOriginal ?? globalThis.fetch.bind(globalThis) as FetchFn
+-}
+-
++/** Return npm-compatible proxy options for the given registry URL */
+ export async function npmProxyOptions(registry: string) {
+   const route = await resolveProxyRoute(registry, "npm", true)
+   if (route.type === "direct") return {}
+diff --git a/packages/opencode/src/plugin/codex.ts b/packages/opencode/src/plugin/codex.ts
+index a97f3e9e8d4097f0471c51472bc6bf71a0c34b1d..f4e508fe52c596dbb7f75947ace5d72f63246f60 100644
+--- a/packages/opencode/src/plugin/codex.ts
++++ b/packages/opencode/src/plugin/codex.ts
+@@ -1,5 +1,6 @@
+ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
+ import * as Log from "@opencode-ai/core/util/log"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { Installation } from "../installation"
+ import { InstallationVersion } from "@opencode-ai/core/installation/version"
+ import { OAUTH_DUMMY_KEY } from "../auth"
+@@ -112,8 +113,9 @@ interface TokenResponse {
+ }
+ 
+ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: PkceCodes): Promise<TokenResponse> {
+-  const response = await fetch(`${ISSUER}/oauth/token`, {
++  const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
+     method: "POST",
++    purpose: "plugin",
+     headers: { "Content-Type": "application/x-www-form-urlencoded" },
+     body: new URLSearchParams({
+       grant_type: "authorization_code",
+@@ -130,8 +132,9 @@ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: Pk
+ }
+ 
+ async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> {
+-  const response = await fetch(`${ISSUER}/oauth/token`, {
++  const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
+     method: "POST",
++    purpose: "plugin",
+     headers: { "Content-Type": "application/x-www-form-urlencoded" },
+     body: new URLSearchParams({
+       grant_type: "refresh_token",
+@@ -415,7 +418,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
+             }
+ 
+             const currentAuth = await getAuth()
+-            if (currentAuth.type !== "oauth") return fetch(requestInput, init)
++            if (currentAuth.type !== "oauth") return NetworkProxy.fetch(requestInput, { ...init, purpose: "provider" })
+ 
+             // Cast to include accountId field
+             const authWithAccount = currentAuth as typeof currentAuth & { accountId?: string }
+@@ -473,8 +476,9 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
+                 ? new URL(CODEX_API_ENDPOINT)
+                 : parsed
+ 
+-            return fetch(url, {
++            return NetworkProxy.fetch(url, {
+               ...init,
++              purpose: "provider",
+               headers,
+             })
+           },
+@@ -515,8 +519,9 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
+           label: "ChatGPT Pro/Plus (headless)",
+           type: "oauth",
+           authorize: async () => {
+-            const deviceResponse = await fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
++            const deviceResponse = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
+               method: "POST",
++              purpose: "plugin",
+               headers: {
+                 "Content-Type": "application/json",
+                 "User-Agent": `opencode/${InstallationVersion}`,
+@@ -539,8 +544,9 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
+               method: "auto" as const,
+               async callback() {
+                 while (true) {
+-                  const response = await fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
++                  const response = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
+                     method: "POST",
++                    purpose: "plugin",
+                     headers: {
+                       "Content-Type": "application/json",
+                       "User-Agent": `opencode/${InstallationVersion}`,
+@@ -557,8 +563,9 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
+                       code_verifier: string
+                     }
+ 
+-                    const tokenResponse = await fetch(`${ISSUER}/oauth/token`, {
++                    const tokenResponse = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
+                       method: "POST",
++                      purpose: "plugin",
+                       headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                       body: new URLSearchParams({
+                         grant_type: "authorization_code",
+diff --git a/packages/opencode/src/plugin/github-copilot/copilot.ts b/packages/opencode/src/plugin/github-copilot/copilot.ts
+index d24d9b9daed63cee7eef3d2ee2c4d3f3626468e2..f5a8da5eea0bdc4f4acfaa3573ffb2c6d4ed3208 100644
+--- a/packages/opencode/src/plugin/github-copilot/copilot.ts
++++ b/packages/opencode/src/plugin/github-copilot/copilot.ts
+@@ -1,6 +1,7 @@
+ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
+ import type { Model } from "@opencode-ai/sdk/v2"
+ import { InstallationVersion } from "@opencode-ai/core/installation/version"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { iife } from "@/util/iife"
+ import * as Log from "@opencode-ai/core/util/log"
+ import { setTimeout as sleep } from "node:timers/promises"
+@@ -91,7 +92,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+           apiKey: "",
+           async fetch(request: RequestInfo | URL, init?: RequestInit) {
+             const info = await getAuth()
+-            if (info.type !== "oauth") return fetch(request, init)
++            if (info.type !== "oauth") return NetworkProxy.fetch(request, { ...init, purpose: "provider" })
+ 
+             const url = request instanceof URL ? request.href : typeof request === "string" ? request : request.url
+             const { isVision, isAgent } = iife(() => {
+@@ -162,8 +163,9 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+             delete headers["x-api-key"]
+             delete headers["authorization"]
+ 
+-            return fetch(request, {
++            return NetworkProxy.fetch(request, {
+               ...init,
++              purpose: "provider",
+               headers,
+             })
+           },
+@@ -221,8 +223,9 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+ 
+             const urls = getUrls(domain)
+ 
+-            const deviceResponse = await fetch(urls.DEVICE_CODE_URL, {
++            const deviceResponse = await NetworkProxy.fetch(urls.DEVICE_CODE_URL, {
+               method: "POST",
++              purpose: "plugin",
+               headers: {
+                 Accept: "application/json",
+                 "Content-Type": "application/json",
+@@ -251,8 +254,9 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+               method: "auto" as const,
+               async callback() {
+                 while (true) {
+-                  const response = await fetch(urls.ACCESS_TOKEN_URL, {
++                  const response = await NetworkProxy.fetch(urls.ACCESS_TOKEN_URL, {
+                     method: "POST",
++                    purpose: "plugin",
+                     headers: {
+                       Accept: "application/json",
+                       "Content-Type": "application/json",
+diff --git a/packages/opencode/src/plugin/github-copilot/models.ts b/packages/opencode/src/plugin/github-copilot/models.ts
+index 8fa8dee763af032d2f7e434cb093ec6f211e50fc..a6b47bf0a33dd3c3219c5fb5c9440e27cbdcc833 100644
+--- a/packages/opencode/src/plugin/github-copilot/models.ts
++++ b/packages/opencode/src/plugin/github-copilot/models.ts
+@@ -1,5 +1,6 @@
+ import { z } from "zod"
+ import type { Model } from "@opencode-ai/sdk/v2"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ 
+ export const schema = z.object({
+   data: z.array(
+@@ -158,7 +159,8 @@ export async function get(
+   headers: HeadersInit = {},
+   existing: Record<string, Model> = {},
+ ): Promise<Record<string, Model>> {
+-  const data = await fetch(`${baseURL}/models`, {
++  const data = await NetworkProxy.fetch(`${baseURL}/models`, {
++    purpose: "plugin",
+     headers,
+     signal: AbortSignal.timeout(5_000),
+   }).then(async (res) => {
+diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
+index 87c08e288f9da9721242bdb169e0ceb1d74ad019..179d065439813fb645cd2129d239c723718c72f6 100644
+--- a/packages/opencode/src/provider/claudecode.ts
++++ b/packages/opencode/src/provider/claudecode.ts
+@@ -1,4 +1,5 @@
+ import { createHash, randomUUID } from "crypto"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ 
+ // ============================================================================
+ // 常量与基础配置
+@@ -269,7 +270,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
+ 
+     // 只拦截向 /v1/messages 发送的请求
+     if (!url.includes("/v1/messages")) {
+-      return fetch(input, init)
++      return NetworkProxy.fetch(input, { ...init, purpose: "provider" })
+     }
+ 
+     const originalBody = init?.body
+@@ -383,8 +384,9 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
+     }
+ 
+     // 8. 透传所有 init 参数，只覆盖 body 和 headers，避免丢弃 signal / keepalive 等控制参数
+-    return fetch(input, {
++    return NetworkProxy.fetch(input, {
+       ...init,
++      purpose: "provider",
+       headers: requestHeaders,
+       body: finalBodyStr,
+     })
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index 7e4907030061e0f781c8bb6f079290b5900b606a..f6d75bd1677421d9d0850ebb8c3ea7bd67fb5e8c 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -537,7 +537,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
+             const headers = new Headers(init?.headers)
+             headers.set("Authorization", `Bearer ${token.token}`)
+ 
+-            return fetch(input, { ...init, headers })
++            return NetworkProxy.fetch(input, { ...init, headers, purpose: "provider" })
+           },
+         },
+         async getModel(sdk: any, modelID: string) {
+@@ -1565,7 +1565,6 @@ const layer: Layer.Layer<
+         delete options["chunkTimeout"]
+ 
+         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
+-          const fetchFn = customFetch ?? fetch
+           const opts = init ?? {}
+           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
+           const signals: AbortSignal[] = []
+@@ -1596,12 +1595,14 @@ const layer: Layer.Layer<
+             }
+           }
+ 
+-          const res = await NetworkProxy.fetchWithRoute(fetchFn, input, {
+-            ...opts,
+-            purpose: "provider",
+-            // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+-            timeout: false,
+-          })
++          const res = customFetch
++            ? await NetworkProxy.fetchWithRoute(customFetch, input, { ...opts, purpose: "provider" })
++            : await NetworkProxy.fetch(input, {
++                ...opts,
++                purpose: "provider",
++                // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
++                timeout: false,
++              })
+ 
+           if (!chunkAbortCtl) return res
+           return wrapSSE(res, chunkTimeout, chunkAbortCtl)

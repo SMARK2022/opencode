@@ -1,0 +1,388 @@
+From cebacb4b1518733323a57bb858fd8b4a9c82f0a7 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Tue, 21 Apr 2026 23:59:34 +0800
+Subject: [PATCH] =?UTF-8?q?feat(read):=20=E5=A2=9E=E5=BC=BA=E6=96=87?=
+ =?UTF-8?q?=E4=BB=B6=E8=AF=BB=E5=8F=96=E5=8A=9F=E8=83=BD=EF=BC=8C=E6=B7=BB?=
+ =?UTF-8?q?=E5=8A=A0=E8=AE=BE=E5=A4=87=E6=96=87=E4=BB=B6=E4=BF=9D=E6=8A=A4?=
+ =?UTF-8?q?=E5=92=8C=E6=81=B6=E6=84=8F=E4=BB=A3=E7=A0=81=E6=8F=90=E9=86=92?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
+index c9b304862652537e5d57b62b6c4b37aed13057b9..aa0b1c41503b3a89ff53e3d42684d107720e0f29 100644
+--- a/packages/opencode/src/tool/read.ts
++++ b/packages/opencode/src/tool/read.ts
+@@ -10,7 +10,8 @@ import DESCRIPTION from "./read.txt"
+ import { Instance } from "../project/instance"
+ import { assertExternalDirectoryEffect } from "./external-directory"
+ import { Instruction } from "../session/instruction"
+-import { isImageAttachment, isPdfAttachment, sniffAttachmentMime } from "@/util/media"
++import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from "@/util/media"
++import type { MessageV2 } from "../session/message-v2"
+ 
+ const DEFAULT_READ_LIMIT = 2000
+ const MAX_LINE_LENGTH = 2000
+@@ -18,6 +19,109 @@ const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
+ const MAX_BYTES = 50 * 1024
+ const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
+ const SAMPLE_BYTES = 4096
++const MAX_CONTENT_TOKENS = 16000
++
++// 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
++const BLOCKED_DEVICE_PATHS = new Set([
++  "/dev/zero",
++  "/dev/random",
++  "/dev/urandom",
++  "/dev/full",
++  "/dev/stdin",
++  "/dev/tty",
++  "/dev/console",
++  "/dev/stdout",
++  "/dev/stderr",
++  "/dev/fd/0",
++  "/dev/fd/1",
++  "/dev/fd/2",
++])
++
++// 高风险扩展名 - 用于恶意代码安全提醒
++const HIGH_RISK_EXTENSIONS = new Set(["sh", "py", "js", "ts", "exe", "bat", "ps1", "rb", "psm1", "cmd"])
++
++// 不同文件类型的 token/byte 估算比率
++const TOKEN_BYTE_RATIOS: Record<string, number> = {
++  ts: 0.28,
++  js: 0.28,
++  py: 0.26,
++  rs: 0.27,
++  go: 0.27,
++  java: 0.26,
++  c: 0.27,
++  cpp: 0.27,
++  h: 0.27,
++  hpp: 0.27,
++  md: 0.24,
++  txt: 0.22,
++  json: 0.22,
++  xml: 0.2,
++  html: 0.2,
++  css: 0.22,
++  default: 0.25,
++}
++
++// 文件去重缓存 - per-session
++type ReadCacheEntry = {
++  content: string
++  timestamp: number
++  offset: number
++  limit: number | undefined
++  isPartialView: boolean
++}
++const readFileState = new Map<string, ReadCacheEntry>()
++
++// Stub 文案
++export const FILE_UNCHANGED_STUB =
++  "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading."
++
++// 恶意代码提醒
++const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You CAN analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
++
++// 判断是否为设备文件路径
++function isBlockedDevicePath(filePath: string): boolean {
++  if (BLOCKED_DEVICE_PATHS.has(filePath)) return true
++  // Linux /proc/self/fd/0-2 别名
++  if (
++    filePath.startsWith("/proc/") &&
++    (filePath.endsWith("/fd/0") || filePath.endsWith("/fd/1") || filePath.endsWith("/fd/2"))
++  )
++    return true
++  return false
++}
++
++// 判断是否应该注入恶意代码提醒
++function shouldInjectCyberReminder(ext: string): boolean {
++  return HIGH_RISK_EXTENSIONS.has(ext)
++}
++
++// 估算内容 token 数量
++function estimateTokensForContent(content: string, ext: string): number {
++  const ratio = TOKEN_BYTE_RATIOS[ext] ?? TOKEN_BYTE_RATIOS.default
++  return Math.ceil(Buffer.byteLength(content, "utf-8") * ratio)
++}
++
++// 检查当前上下文中是否有该文件的未被压缩的读取结果
++function findUnexpandedFileInContext(
++  messages: MessageV2.WithParts[],
++  filepath: string,
++): boolean {
++  for (let i = messages.length - 1; i >= 0; i--) {
++    const msg = messages[i]
++    if (msg.info.role !== "assistant") continue
++    for (const part of msg.parts) {
++      if (part.type !== "tool") continue
++      if (part.tool !== "read") continue
++      if (part.state.status !== "completed") continue
++      const input = part.state.input as { filePath?: string }
++      if (input.filePath !== filepath) continue
++      // 检查是否被压缩（compacted）
++      if (part.state.time.compacted) continue
++      return true
++    }
++  }
++  return false
++}
+ 
+ const parameters = z.object({
+   filePath: z.string().describe("The absolute path to the file or directory to read"),
+@@ -152,6 +256,14 @@ export const ReadTool = Tool.define(
+       if (process.platform === "win32") {
+         filepath = AppFileSystem.normalizePath(filepath)
+       }
++
++      // 设备文件保护 - 阻止可能导致进程挂起的设备文件
++      if (isBlockedDevicePath(filepath)) {
++        return yield* Effect.fail(
++          new Error(`Cannot read '${filepath}': this device file would block or produce infinite output.`),
++        )
++      }
++
+       const title = path.relative(Instance.worktree, filepath)
+ 
+       const stat = yield* fs.stat(filepath).pipe(
+@@ -175,6 +287,25 @@ export const ReadTool = Tool.define(
+ 
+       if (!stat) return yield* miss(filepath)
+ 
++      // 文件去重检查 - 如果文件未修改且范围相同，返回 stub
++      const existingState = readFileState.get(filepath)
++      if (existingState && !existingState.isPartialView) {
++        if (existingState.offset === (params.offset ?? 1) && existingState.limit === params.limit) {
++          const mtimeMs = Math.floor(Number(stat.mtime))
++          if (mtimeMs === existingState.timestamp) {
++            // 额外检查：当前上下文中是否有该文件的未被压缩的读取结果
++            const hasUnexpandedContent = findUnexpandedFileInContext(ctx.messages, filepath)
++            if (hasUnexpandedContent) {
++              return {
++                title,
++                output: FILE_UNCHANGED_STUB,
++                metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] },
++              }
++            }
++          }
++        }
++      }
++
+       if (stat.type === "Directory") {
+         const items = yield* list(filepath)
+         const limit = params.limit ?? DEFAULT_READ_LIMIT
+@@ -209,6 +340,30 @@ export const ReadTool = Tool.define(
+       const mime = sniffAttachmentMime(sample, AppFileSystem.mimeType(filepath))
+       if (isImageAttachment(mime) || isPdfAttachment(mime)) {
+         const bytes = yield* fs.readFile(filepath)
++
++        // 图片使用三级压缩策略
++        if (isImageAttachment(mime)) {
++          const processed = yield* Effect.promise(() => processImageWithTokenBudget(bytes, mime))
++          const msg = `Image read successfully (${formatSize(processed.originalSize)} → compressed for model)`
++          return {
++            title,
++            output: msg,
++            metadata: {
++              preview: msg,
++              truncated: false,
++              loaded: loaded.map((item) => item.filepath),
++            },
++            attachments: [
++              {
++                type: "file" as const,
++                mime: processed.mime,
++                url: `data:${processed.mime};base64,${processed.data}`,
++              },
++            ],
++          }
++        }
++
++        // PDF 保持原样
+         const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
+         return {
+           title,
+@@ -241,6 +396,30 @@ export const ReadTool = Tool.define(
+         )
+       }
+ 
++      // Token 预算验证 - 根据文件类型估算 token 数
++      const content = file.raw.join("\n")
++      const ext = path.extname(filepath).toLowerCase().slice(1)
++      const estimatedTokens = estimateTokensForContent(content, ext)
++      if (estimatedTokens > MAX_CONTENT_TOKENS) {
++        const lineCount = file.count
++        const suggestedLimit = Math.floor(lineCount * (MAX_CONTENT_TOKENS / estimatedTokens))
++        return yield* Effect.fail(
++          new Error(
++            `File content (~${estimatedTokens} tokens) exceeds maximum (${MAX_CONTENT_TOKENS} tokens). ` +
++              `Use offset and limit parameters. Suggested: limit=${suggestedLimit}`,
++          ),
++        )
++      }
++
++      // 写入去重缓存
++      readFileState.set(filepath, {
++        content,
++        timestamp: Math.floor(Number(stat.mtime)),
++        offset: params.offset ?? 1,
++        limit: params.limit,
++        isPartialView: file.more || file.cut,
++      })
++
+       let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
+       output += file.raw.map((line, i) => `${i + file.offset}: ${line}`).join("\n")
+ 
+@@ -262,6 +441,11 @@ export const ReadTool = Tool.define(
+         output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
+       }
+ 
++      // 恶意代码安全提醒 - 仅对高风险扩展名注入
++      if (shouldInjectCyberReminder(ext)) {
++        output += CYBER_REMINDER
++      }
++
+       return {
+         title,
+         output,
+diff --git a/packages/opencode/src/util/media.ts b/packages/opencode/src/util/media.ts
+index 566ac843a6342925e3e3d53f9b7dedf90c2d4a8e..6133b7586ff70bcb00c828a2ac69d5d5e85b1349 100644
+--- a/packages/opencode/src/util/media.ts
++++ b/packages/opencode/src/util/media.ts
+@@ -24,3 +24,132 @@ export function sniffAttachmentMime(bytes: Uint8Array, fallback: string) {
+ 
+   return fallback
+ }
++
++// 图片 token 预算 - 约等于 1024x768 图片的 token 数
++const IMAGE_TOKEN_BUDGET = 1600
++
++// 图片处理结果
++export interface ProcessedImage {
++  data: string
++  mime: string
++  originalSize: number
++}
++
++// 动态导入 sharp（可选依赖） - 哨兵值模式避免无限重试
++const SHARP_UNAVAILABLE = Symbol("SHARP_UNAVAILABLE")
++let sharpCached: typeof import("sharp") | typeof SHARP_UNAVAILABLE | null = null
++
++async function getSharp(): Promise<typeof import("sharp") | null> {
++  if (sharpCached === SHARP_UNAVAILABLE) return null  // 失败后不重试
++  if (sharpCached !== null) return sharpCached as typeof import("sharp")
++  try {
++    const mod = await import("sharp")
++    // 处理 ESM/CJS 互操作
++    sharpCached = (mod as any).default ?? mod
++    return sharpCached as typeof import("sharp")
++  } catch {
++    sharpCached = SHARP_UNAVAILABLE  // 标记为不可用
++    return null
++  }
++}
++
++// 估算图片 token：byteLength * 4/3 / 750
++function estimateImageTokens(byteLength: number): number {
++  return Math.ceil((byteLength * 4) / 3 / 750)
++}
++
++// 格式化文件大小
++function formatSize(bytes: number): string {
++  if (bytes < 1024) return `${bytes} B`
++  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
++  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
++}
++
++// 三级图片压缩策略
++export async function processImageWithTokenBudget(
++  bytes: Uint8Array,
++  mime: string,
++  maxTokens: number = IMAGE_TOKEN_BUDGET,
++): Promise<ProcessedImage> {
++  const originalSize = bytes.length
++  const buffer = Buffer.from(bytes)
++
++  // Level 0: 估算无需压缩的情况
++  const estimatedTokens = estimateImageTokens(buffer.length)
++  if (estimatedTokens <= maxTokens) {
++    return {
++      data: buffer.toString("base64"),
++      mime,
++      originalSize,
++    }
++  }
++
++  // 尝试使用 sharp 进行压缩
++  const sharp = await getSharp()
++  if (!sharp) {
++    // 无 sharp 时直接返回原始数据
++    return {
++      data: buffer.toString("base64"),
++      mime,
++      originalSize,
++    }
++  }
++
++  try {
++    const meta = await sharp(buffer).metadata()
++    const maxDim = 1568
++    const scale = Math.min(
++      maxDim / (meta.width ?? maxDim),
++      maxDim / (meta.height ?? maxDim),
++      1,
++    )
++
++    // Level 1: 标准尺寸缩放（最长边 1568px，符合 Claude vision 最优分辨率）
++    if (scale < 1) {
++      const resized = await sharp(buffer)
++        .resize(Math.floor((meta.width ?? maxDim) * scale), Math.floor((meta.height ?? maxDim) * scale), {
++          fit: "inside",
++          withoutEnlargement: true,
++        })
++        .jpeg({ quality: 85 })
++        .toBuffer()
++
++      const l1Tokens = estimateImageTokens(resized.length)
++      if (l1Tokens <= maxTokens) {
++        return { data: resized.toString("base64"), mime: "image/jpeg", originalSize }
++      }
++    }
++
++    // Level 2: 质量递减压缩（无论是否缩放过都尝试）
++    for (const [width, quality] of [
++      [800, 60],
++      [800, 40],
++      [600, 20],
++    ] as [number, number][]) {
++      const compressed = await sharp(buffer)
++        .resize(width, width, { fit: "inside", withoutEnlargement: true })
++        .jpeg({ quality })
++        .toBuffer()
++      if (estimateImageTokens(compressed.length) <= maxTokens) {
++        return { data: compressed.toString("base64"), mime: "image/jpeg", originalSize }
++      }
++    }
++
++    // Level 3: 极限兜底压缩（只有前两级都超出预算才到这里）
++    const fallback = await sharp(buffer)
++      .resize(400, 400, { fit: "inside", withoutEnlargement: true })
++      .jpeg({ quality: 20 })
++      .toBuffer()
++
++    return { data: fallback.toString("base64"), mime: "image/jpeg", originalSize }
++  } catch {
++    // 压缩失败时返回原始数据
++    return {
++      data: buffer.toString("base64"),
++      mime,
++      originalSize,
++    }
++  }
++}
++
++export { formatSize }

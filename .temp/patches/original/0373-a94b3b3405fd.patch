@@ -1,0 +1,83 @@
+From a94b3b3405fd82bf1685d5bb570a98a655d4b699 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sat, 4 Jul 2026 23:21:02 +0800
+Subject: [PATCH] =?UTF-8?q?feat(tui):=20=E5=85=81=E8=AE=B8=E7=94=A8?=
+ =?UTF-8?q?=E6=88=B7=20Resume=20=E5=B7=B2=E5=AE=8C=E6=88=90=E7=9A=84=20goa?=
+ =?UTF-8?q?l?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+dialog-goal.tsx 的 Resume 选项仅对 paused/blocked 显示，complete 状态
+无法恢复。数据层 set 函数无状态转换限制，HTTP API 和 prompt loop 已
+支持 complete → active 转换，唯一缺失的是 UI 未暴露 Resume 选项。
+
+将 complete 加入 Resume 条件，用户可在 goal 完成后重新激活继续工作。
+累计用量（tokens_used/time_used_seconds）跨 resume 边界保留，budget
+持续追踪不重置。补充 complete → active 转换的回归测试。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+index f310e02ce27cf90be4244fbd7e27b8cbfdf1c709..da92fd216ccec0669c76b22ad2bffaa9bba0be10 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+@@ -115,8 +115,9 @@ export function DialogGoalMenu(props: DialogGoalProps) {
+               onSelect: () => void setGoal({ status: "paused" }),
+             }]
+           : []),
+-        // paused/blocked 状态下显示 Resume 选项
+-        ...(goal()?.status === "paused" || goal()?.status === "blocked"
++        // paused/blocked/complete 状态下显示 Resume 选项
++        // complete 也允许 Resume：用户可能需要让模型重新验证或继续完善已完成的目标
++        ...(goal()?.status === "paused" || goal()?.status === "blocked" || goal()?.status === "complete"
+           ? [{
+               title: "Resume",
+               description: "Resume the goal to active",
+diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
+index 332a8327467fb9aa5fb3b27ccd94ff6ca22b8791..30bc2a359e213409cd43403064d525cd58f5bbf6 100644
+--- a/packages/opencode/test/session/goal.test.ts
++++ b/packages/opencode/test/session/goal.test.ts
+@@ -192,6 +192,44 @@ it.instance(
+   { git: true },
+ )
+ 
++// [local-smark] 验证 complete → active 转换：用户 Resume 已完成的 goal
++// 数据层 set 函数无状态转换限制，complete → active 应直接生效。
++// 累计用量必须保留——budget 跨 resume 边界持续追踪，不能重置。
++it.instance(
++  "resume complete goal back to active preserves usage",
++  () =>
++    Effect.gen(function* () {
++      const goalSvc = yield* SessionGoal.Service
++      const sessions = yield* SessionNs.Service
++      const session = yield* sessions.create({})
++
++      yield* goalSvc.set(session.id, { objective: "finish project", tokenBudget: 10_000 })
++      // 模拟 goal 运行中累计用量
++      yield* goalSvc.accountUsage(session.id, 3000, 120)
++      // 模型标记 complete
++      yield* goalSvc.set(session.id, { status: "complete" })
++
++      // complete 后 accountUsage 不应计费（status !== "active"）
++      yield* goalSvc.accountUsage(session.id, 999, 99)
++
++      const completed = yield* goalSvc.get(session.id)
++      expect(Option.isSome(completed)).toBe(true)
++      if (Option.isSome(completed)) {
++        expect(completed.value.status).toBe("complete")
++        expect(completed.value.tokensUsed).toBe(3000)
++      }
++
++      // 用户 Resume：complete → active
++      const resumed = yield* goalSvc.set(session.id, { status: "active" })
++      expect(resumed.status).toBe("active")
++      // 累计用量保留，budget 跨 resume 边界持续追踪
++      expect(resumed.tokensUsed).toBe(3000)
++      expect(resumed.timeUsedSeconds).toBe(120)
++      expect(resumed.tokenBudget).toBe(10_000)
++    }),
++  { git: true },
++)
++
+ it.instance(
+   "clear removes the goal",
+   () =>

@@ -1,0 +1,1543 @@
+From 37843053f4c81e8880d854a004e3fc3770fd0b73 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 14 Jun 2026 00:38:25 +0800
+Subject: [PATCH] =?UTF-8?q?feat(voice):=20=E9=87=8D=E5=A4=A7=E6=9B=B4?=
+ =?UTF-8?q?=E6=96=B0=EF=BC=9A=E6=B7=BB=E5=8A=A0WAV=E6=96=87=E4=BB=B6?=
+ =?UTF-8?q?=E8=BE=93=E5=87=BA=E7=9A=84=E5=BD=95=E9=9F=B3=E4=BB=A5=E5=8F=8A?=
+ =?UTF-8?q?=E5=AE=8C=E6=95=B4=E7=9A=84=E8=BD=AC=E5=BD=95=E5=8A=9F=E8=83=BD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Implemented a new voice recorder module in `prompt-voice-recorder.ts` that captures audio input and saves it as a WAV file.
+- Introduced a `startPromptVoiceRecorder` function to handle the recording process, including error handling and file management.
+- Added tests for the voice recorder to ensure proper functionality and error handling in various scenarios.
+- Created a new test suite for `prompt-voice-input` to validate the integration of voice input and transcription features.
+- Updated TUI configuration tests to include voice transcriber settings and ensure proper command and argument handling.
+
+diff --git a/bun.lock b/bun.lock
+index d5c4f0d8e57588418005e16375add0d677c56298..a3e8239e7951684d382955d5be463499baea9167 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -518,6 +518,7 @@
+         "why-is-node-running": "3.2.2",
+       },
+       "optionalDependencies": {
++        "@picovoice/pvrecorder-node": "1.2.9",
+         "sharp": "0.34.5",
+       },
+     },
+@@ -1787,6 +1788,8 @@
+ 
+     "@parcel/watcher-win32-x64": ["@parcel/watcher-win32-x64@2.5.1", "https://registry.npmmirror.com/@parcel/watcher-win32-x64/-/watcher-win32-x64-2.5.1.tgz", { "os": "win32", "cpu": "x64" }, "sha512-9lHBdJITeNR++EvSQVUcaZoWupyHfXe1jZvGZ06O/5MflPcuPLtEphScIBL+AiCWBO46tDSHzWyD0uDmmZqsgA=="],
+ 
++    "@picovoice/pvrecorder-node": ["@picovoice/pvrecorder-node@1.2.9", "https://registry.npmmirror.com/@picovoice/pvrecorder-node/-/pvrecorder-node-1.2.9.tgz", {}, "sha512-e398ue4G8YihrnnyTpnVePvOiBEM5+R4D+ChoyyeC8J8KFBMuhGrZwrdmpIPqDqCjCA+YqO2mFaicHstVhEpcg=="],
++
+     "@pierre/diffs": ["@pierre/diffs@1.1.0-beta.18", "https://registry.npmmirror.com/@pierre/diffs/-/diffs-1.1.0-beta.18.tgz", { "dependencies": { "@pierre/theme": "0.0.22", "@shikijs/transformers": "^3.0.0", "diff": "8.0.3", "hast-util-to-html": "9.0.5", "lru_map": "0.4.1", "shiki": "^3.0.0" }, "peerDependencies": { "react": "^18.3.1 || ^19.0.0", "react-dom": "^18.3.1 || ^19.0.0" } }, "sha512-7ZF3YD9fxdbYsPnltz5cUqHacN7ztp8RX/fJLxwv8wIEORpP4+7dHz1h/qx3o4EW2xUrIhmbM8ImywLasB787Q=="],
+ 
+     "@pierre/theme": ["@pierre/theme@0.0.22", "https://registry.npmmirror.com/@pierre/theme/-/theme-0.0.22.tgz", {}, "sha512-ePUIdQRNGjrveELTU7fY89Xa7YGHHEy5Po5jQy/18lm32eRn96+tnYJEtFooGdffrx55KBUtOXfvVy/7LDFFhA=="],
+diff --git a/docs/prompts.md b/docs/prompts.md
+index 014be23077e8876bf01cbc59688116ea254458fc..06ac14c46060bd803f9e85538baeb4793103105b 100644
+--- a/docs/prompts.md
++++ b/docs/prompts.md
+@@ -60,7 +60,7 @@
+ 9. 真实风险与开放问题；没有必须用户决策的问题就不要阻塞。
+ 只输出方案，不要改代码。
+ 请你进行完整的调研而不是只进行简单的脱离底层实现以及边界情况的顶层规划。
+-最终请给出推荐方案摘要。注意所有不确定的内容你要完整确认直到你已经把所有潜在的问题都考虑在内了，且方案已经足够完善且自然。
++最终请给出推荐方案摘要。注意所有不确定的内容你要完整确认直到你已经把所有潜在的问题都考虑在内了，且方案已经足够完善且自然，最终执行将会按照方案进行。
+ 
+ 
+ -------------
+diff --git a/packages/opencode/package.json b/packages/opencode/package.json
+index 6709ef1491cfc871876fde6159c482ea9af58180..8f49c4e5585d395679cab06c45f343d52e3c7604 100644
+--- a/packages/opencode/package.json
++++ b/packages/opencode/package.json
+@@ -167,6 +167,7 @@
+     "drizzle-orm": "catalog:"
+   },
+   "optionalDependencies": {
++    "@picovoice/pvrecorder-node": "1.2.9",
+     "sharp": "0.34.5"
+   }
+ }
+diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+index 389a799e0bff796612eb4adab168977a059e1367..9d0e2c75a8f2ecca79e548e6a64eadd09a1ce77c 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+@@ -67,6 +67,8 @@ import { useCommandPalette } from "../../context/command-palette"
+ import { useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
+ import { useTuiConfig } from "../../context/tui-config"
+ import { promptOffsetWidth } from "@/cli/cmd/prompt-display"
++import { PromptVoiceInput } from "../../prompt-voice-input"
++import { PromptVoiceRecorder } from "../../prompt-voice-recorder"
+ 
+ export type PromptProps = {
+   sessionID?: string
+@@ -166,6 +168,7 @@ export function Prompt(props: PromptProps) {
+   const keymap = useOpencodeKeymap()
+   const agentShortcut = useCommandShortcut("agent.cycle")
+   const paletteShortcut = useCommandShortcut("command.palette.show")
++  const voiceShortcut = useCommandShortcut("prompt.voice.toggle")
+   const renderer = useRenderer()
+   const dimensions = useTerminalDimensions()
+   // The bottom-right token meter shares space with prompt chrome and can be
+@@ -220,6 +223,7 @@ export function Prompt(props: PromptProps) {
+   const currentProviderLabel = createMemo(() => local.model.parsed().provider)
+   const hasRightContent = createMemo(() => Boolean(props.right))
+   const defaultWorkspaceID = createMemo(() => props.workspaceID ?? project.workspace.current())
++  const [voiceInputStatus, setVoiceInputStatus] = createSignal<PromptVoiceInput.VoiceInputStatus>({ type: "idle" })
+ 
+   function selectWorkspace(selection: WorkspaceSelection | undefined) {
+     setWorkspaceSelection(selection)
+@@ -426,7 +430,32 @@ export function Prompt(props: PromptProps) {
+   })
+ 
+   const running = createMemo(() => status().type !== "idle")
+-  const now = createRefreshClock(running)
++  // voice recording 也需要刷新时钟，否则 footer 的录音时长会停在开始时刻。
++  const now = createRefreshClock(() => running() || voiceInputStatus().type === "recording")
++  // busy 覆盖 starting/stopping/transcribing，避免用户在语音文本尚未落入 prompt 前提交旧草稿。
++  const voiceInputBusy = createMemo(() => voiceInputStatus().type !== "idle")
++  const voiceInputStatusText = createMemo(() =>
++    // shortcut 来自 keymap；缺省 alt+v 只用于展示兜底，实际绑定仍由 TuiKeybind 解析。
++    PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || "alt+v", now()),
++  )
++  const voiceInput = PromptVoiceInput.createVoiceInputController({
++    // controller 每次启动前读取当前配置，但录音开始后会固定 activeTranscriber，避免停止时后端漂移。
++    transcriber: () => tuiConfig.voice?.transcriber,
++    // recorder 单独放在 native 边界文件，Prompt 组件不直接加载 optional addon。
++    startRecorder: PromptVoiceRecorder.startPromptVoiceRecorder,
++    insertText: insertVoiceText,
++    onStatus: setVoiceInputStatus,
++    onError: (message) =>
++      toast.show({
++        message,
++        variant: "error",
++      }),
++  })
++  onCleanup(() => {
++    // [语音退出清理] Prompt 卸载时不能留下仍占用麦克风的 Node 子进程；这里只 abort
++    // 已开始的录音，不触发转写，也不改动用户当前草稿。
++    void voiceInput.abort()
++  })
+   const activeDuration = createMemo(() => {
+     if (!props.sessionID) return 0
+     // 左下角耗时只复用 transcript 时间戳口径；now 只是刷新中的临时 end。
+@@ -982,6 +1011,31 @@ export function Prompt(props: PromptProps) {
+     }
+   })
+ 
++  useBindings(() => {
++    return {
++      target: inputTarget,
++      enabled:
++        inputTarget() !== undefined &&
++        !props.disabled &&
++        !auto()?.visible &&
++        dialog.stack.length === 0 &&
++        // 会话运行中只允许 stop 当前录音，不允许开启新录音和 assistant 输出竞争 prompt。
++        (!running() || voiceInputStatus().type === "recording"),
++      commands: [
++        {
++          name: "prompt.voice.toggle",
++          title: "Toggle voice input",
++          category: "Prompt",
++          run() {
++            void voiceInput.toggle()
++            return true
++          },
++        },
++      ],
++      bindings: tuiConfig.keybinds.get("prompt.voice.toggle"),
++    }
++  })
++
+   useBindings(() => {
+     return {
+       target: inputTarget,
+@@ -1132,6 +1186,8 @@ export function Prompt(props: PromptProps) {
+       syncExtmarksWithPromptParts()
+     }
+     if (props.disabled) return false
++    // [语音提交边界] 正在录音、保存或转写时禁止发送 prompt；否则 Enter 会把尚未插入的旧草稿提交出去。
++    if (voiceInputBusy()) return false
+     if (workspaceCreating()) return false
+     if (auto()?.visible) return false
+     if (!store.prompt.input) return false
+@@ -1488,6 +1544,24 @@ export function Prompt(props: PromptProps) {
+     }, 0)
+   }
+ 
++  function insertVoiceText(text: string) {
++    if (!input || input.isDestroyed) return
++    // insertText 保持当前光标位置语义：语音转写结果像用户手动输入一样进入 textarea。
++    input.insertText(text)
++    // 写入 renderable 后立即同步 store/extmarks，否则后续 submit 会读到插入前的旧 prompt。
++    setStore("prompt", "input", input.plainText)
++    syncExtmarksWithPromptParts()
++    // cursorVersion 触发现有光标同步链路，不为语音输入新增独立光标状态。
++    setCursorVersion((value) => value + 1)
++
++    setTimeout(() => {
++      if (!input || input.isDestroyed) return
++      // OpenTUI textarea 的布局在插入后需要下一 tick 标脏，避免转写文本显示滞后一帧。
++      input.getLayoutNode().markDirty()
++      renderer.requestRender()
++    }, 0)
++  }
++
+   async function pasteAttachment(file: { filename?: string; filepath?: string; content: string; mime: string }) {
+     const currentOffset = input.visualCursor.offset
+     const extmarkStart = currentOffset
+@@ -1819,6 +1893,15 @@ export function Prompt(props: PromptProps) {
+         </box>
+         <box width="100%" flexDirection="row" justifyContent="space-between">
+           <Switch>
++            <Match when={voiceInputBusy()}>
++              <box paddingLeft={3} flexDirection="row" gap={1}>
++                {/* 录音中显示红点，保存/转写阶段显示 spinner，让用户区分“仍在收音”和“正在处理”。 */}
++                <Show when={voiceInputStatus().type === "recording"} fallback={<Spinner color={theme.accent} />}>
++                  <text fg={theme.error}>●</text>
++                </Show>
++                <text fg={theme.accent}>{voiceInputStatusText()}</text>
++              </box>
++            </Match>
+             <Match when={running()}>
+               <box
+                 flexDirection="row"
+@@ -1980,6 +2063,11 @@ export function Prompt(props: PromptProps) {
+                   <text fg={theme.text}>
+                     {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
+                   </text>
++                  <Show when={tuiConfig.voice?.transcriber}>
++                    <text fg={theme.text}>
++                      {voiceShortcut() || "alt+v"} <span style={{ fg: theme.textMuted }}>voice</span>
++                    </text>
++                  </Show>
+                 </Match>
+                 <Match when={store.mode === "shell"}>
+                   <text fg={theme.text}>
+diff --git a/packages/opencode/src/cli/cmd/tui/config/keybind.ts b/packages/opencode/src/cli/cmd/tui/config/keybind.ts
+index 9635906b76ae081adbd47914e7609ff32ae6240f..193d8761f188735b5d137653cecf145332c9935e 100644
+--- a/packages/opencode/src/cli/cmd/tui/config/keybind.ts
++++ b/packages/opencode/src/cli/cmd/tui/config/keybind.ts
+@@ -138,6 +138,9 @@ export const Definitions = {
+   prompt_stash: keybind("none", "Stash prompt"),
+   prompt_stash_pop: keybind("none", "Pop stashed prompt"),
+   prompt_stash_list: keybind("none", "List stashed prompts"),
++  // 语音输入的默认键必须能在终端 textarea 内可靠收到，同时不能抢用户常用于 undo/redo 的 Ctrl+Y。
++  // Alt+V 当前未被 TUI 默认绑定占用，且 V 与 voice 语义相连；不依赖终端通常收不到的系统级 Win+H 听写快捷键。
++  prompt_voice_toggle: keybind("alt+v", "Toggle voice input recording"),
+   workspace_set: keybind("none", "Set workspace"),
+ 
+   input_clear: keybind("ctrl+c", "Clear input field"),
+@@ -322,6 +325,7 @@ export const CommandMap = {
+   prompt_stash: "prompt.stash",
+   prompt_stash_pop: "prompt.stash.pop",
+   prompt_stash_list: "prompt.stash.list",
++  prompt_voice_toggle: "prompt.voice.toggle",
+   workspace_set: "workspace.set",
+   input_clear: "prompt.clear",
+   input_paste: "prompt.paste",
+diff --git a/packages/opencode/src/cli/cmd/tui/config/tui-schema.ts b/packages/opencode/src/cli/cmd/tui/config/tui-schema.ts
+index 2c99f2a5ef6151203cfd587763eef10d47499aae..0d5ba37a2ea3c8398122df53ee1083d239ecc3e4 100644
+--- a/packages/opencode/src/cli/cmd/tui/config/tui-schema.ts
++++ b/packages/opencode/src/cli/cmd/tui/config/tui-schema.ts
+@@ -61,6 +61,17 @@ export const Attention = Schema.Struct({
+   sounds: Schema.optional(TuiAttentionSounds),
+ }).annotate({ description: "Attention notification and sound settings" })
+ 
++const VoiceTranscriber = Schema.Struct({
++  command: Schema.String.annotate({ description: "Executable used to transcribe a recorded WAV file" }),
++  // args 是 argv 数组，不是 shell 字符串；其中一项必须包含 `{file}`，确保录音路径按字面量传递。
++  // 这样即使路径包含空格、重定向符、管道或环境变量字符，也不会被解释成 shell 语法。
++  args: Schema.optional(Schema.Array(Schema.String)).annotate({ description: "Arguments for the transcriber command; include {file} for the WAV path" }),
++})
++
++export const Voice = Schema.Struct({
++  transcriber: Schema.optional(VoiceTranscriber),
++}).annotate({ description: "Prompt voice input settings" })
++
+ export const TuiInfo = Schema.Struct({
+   $schema: Schema.optional(Schema.String),
+   theme: Schema.optional(Schema.String),
+@@ -69,6 +80,7 @@ export const TuiInfo = Schema.Struct({
+   plugin_enabled: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
+   leader_timeout: Schema.optional(KeymapLeaderTimeout),
+   attention: Schema.optional(Attention),
++  voice: Schema.optional(Voice),
+   scroll_speed: Schema.optional(ScrollSpeed).annotate({
+     description: "TUI scroll speed",
+   }),
+diff --git a/packages/opencode/src/cli/cmd/tui/config/tui.ts b/packages/opencode/src/cli/cmd/tui/config/tui.ts
+index 0d4be41dfc0dc329c79fba8628d67db9a7c9aeea..42a6daf9bf65261de377863a4071fd6778dcc669 100644
+--- a/packages/opencode/src/cli/cmd/tui/config/tui.ts
++++ b/packages/opencode/src/cli/cmd/tui/config/tui.ts
+@@ -27,6 +27,15 @@ import { FormatError, FormatUnknownError } from "@/cli/error"
+ 
+ const log = Log.create({ service: "tui.config" })
+ 
++const DefaultVoiceTranscriber = {
++  // 默认值只假设用户通过安装脚本能找到 browser-agent CLI；显式 MCP 路径会在后面覆盖它。
++  command: "chatgpt-browser-agent",
++  // `{file}` 保留给 prompt-voice-input 做 argv 字面量替换，不在配置层拼接 shell 字符串。
++  args: ["transcribe-file", "--file", "{file}", "--json"],
++}
++
++type VoiceTranscriber = NonNullable<Info["voice"]>["transcriber"]
++
+ export const Info = TuiInfo
+ export type Info = DeepMutable<Schema.Schema.Type<typeof Info>>
+ 
+@@ -96,6 +105,30 @@ function dropUnknownKeybinds(input: Record<string, unknown>, configFilepath: str
+   }
+ }
+ 
++function voiceTranscriberFromMcpConfig(input: unknown, cwd: string): VoiceTranscriber | undefined {
++  if (!isRecord(input) || !isRecord(input.mcp)) return
++  for (const [key, server] of Object.entries(input.mcp)) {
++    // 只复用名称明确包含 chatgpt 的 MCP 配置，避免把其它本地 MCP server 误当成语音后端。
++    if (!key.toLowerCase().includes("chatgpt")) continue
++    if (!isRecord(server)) continue
++    // disabled 或非 local server 不代表本机存在 chatgpt.js，不能作为默认转写器来源。
++    if (server.enabled === false) continue
++    if (server.type !== undefined && server.type !== "local") continue
++    if (!Array.isArray(server.command)) continue
++    // command 是 MCP 启动 argv；这里只读取字面量数组，不解析 shell，也不执行任何命令。
++    const command = server.command.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
++    const mcpServer = command.find((item) => path.basename(item).toLowerCase() === "mcp-server.js")
++    if (!mcpServer || !command[0]) continue
++    // 相对路径按当前项目目录解析，保持和本地 MCP 配置文件里的路径语义一致。
++    const resolved = path.isAbsolute(mcpServer) ? mcpServer : path.resolve(cwd, mcpServer)
++    return {
++      command: command[0],
++      // voice 默认只复用 ChatGPT MCP 同目录的 CLI 入口；不注册 MCP tool，也不要求 chatgpt-browser-agent 在 PATH。
++      args: [path.join(path.dirname(resolved), "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"],
++    }
++  }
++}
++
+ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: string }) {
+   const afs = yield* AppFileSystem.Service
+   let appliedOrder = 0
+@@ -170,6 +203,44 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
+       return yield* load(text, filepath)
+     })
+ 
++  const loadMcpVoiceTranscriberFile = (filepath: string): Effect.Effect<VoiceTranscriber | undefined> =>
++    Effect.gen(function* () {
++      // MCP 配置缺失是正常情况；这里只是寻找更精确的 ChatGPT agent 安装位置。
++      const text = yield* afs.readFileStringSafe(filepath).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
++      if (!text) return
++      const expanded = yield* Effect.promise(() =>
++        ConfigVariable.substitute({ text, type: "path", path: filepath, missing: "empty" }),
++      )
++      const transcriber = voiceTranscriberFromMcpConfig(ConfigParse.jsonc(expanded, filepath), ctx.directory)
++      if (!transcriber) return
++      const script = transcriber.args?.[0]
++      // 推导出的 chatgpt.js 必须存在，否则保留默认 CLI，让 controller 在录音前给出更清晰的配置错误。
++      if (!script || !(yield* afs.existsSafe(script))) return
++      return transcriber
++    }).pipe(
++      Effect.catchCause((cause) =>
++        Effect.sync(() => {
++          const error = Cause.squash(cause)
++          const reason = FormatError(error) ?? FormatUnknownError(error)
++          log.warn("skipping invalid mcp config while resolving voice transcriber", { path: filepath, reason })
++          return undefined
++        }),
++      ),
++    )
++
++  const loadMcpVoiceTranscriber = (files: string[]): Effect.Effect<VoiceTranscriber | undefined> =>
++    Effect.gen(function* () {
++      let result: VoiceTranscriber | undefined
++      for (const file of files) result = (yield* loadMcpVoiceTranscriberFile(file)) ?? result
++      if (process.env.OPENCODE_CONFIG_CONTENT) {
++        result = voiceTranscriberFromMcpConfig(
++          ConfigParse.jsonc(process.env.OPENCODE_CONFIG_CONTENT, "OPENCODE_CONFIG_CONTENT"),
++          ctx.directory,
++        ) ?? result
++      }
++      return result
++    })
++
+   const mergeFile = (acc: Acc, file: string) =>
+     Effect.gen(function* () {
+       const data = yield* loadFile(file)
+@@ -195,6 +266,7 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
+   yield* Effect.promise(() => migrateTuiConfig({ directories, cwd: ctx.directory }))
+ 
+   const projectFiles = Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? [] : yield* ConfigPaths.files("tui", ctx.directory)
++  const projectOpencodeFiles = Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? [] : yield* ConfigPaths.files("opencode", ctx.directory)
+ 
+   const acc: Acc = {
+     result: {},
+@@ -230,6 +302,15 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
+     }
+   }
+ 
++  const defaultVoiceTranscriber =
++    // 这里读取 opencode MCP 配置而不是 tui.json，复用用户已经安装好的 ChatGPT browser-agent 载体。
++    (yield* loadMcpVoiceTranscriber([
++      ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"),
++      ...(Flag.OPENCODE_CONFIG ? [Flag.OPENCODE_CONFIG] : []),
++      ...projectOpencodeFiles,
++      ...dirs.flatMap((dir) => ConfigPaths.fileInDirectory(dir, "opencode")),
++    ])) ?? DefaultVoiceTranscriber
++
+   const keybinds = { ...acc.result.keybinds }
+   if (process.platform === "win32") {
+     // Native Windows terminals do not support POSIX suspend, so prefer prompt undo.
+@@ -248,6 +329,13 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
+       sound_pack: acc.result.attention?.sound_pack ?? "opencode.default",
+       sounds: acc.result.attention?.sounds ?? {},
+     },
++    // 默认只绑定到 browser-agent 的稳定 CLI 子命令，不把 ChatGPT DOM/HTTP 细节放进 TUI。
++    // 用户仍可用 tui.json 覆盖为任意 argv 转写器；`{file}` 占位由 prompt-voice-input 做安全校验。
++    voice: {
++      ...acc.result.voice,
++      // 显式 tui.voice.transcriber 优先；MCP 推导和固定默认值只填补未配置场景。
++      transcriber: acc.result.voice?.transcriber ?? defaultVoiceTranscriber,
++    },
+     keybinds: createBindingLookup(TuiKeybind.toBindingConfig(parsedKeybinds), {
+       commandMap: TuiKeybind.CommandMap,
+       bindingDefaults: TuiKeybind.bindingDefaults(),
+diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9dbd2e0ee05ed9941053426fbd6760ccd91022ad
+--- /dev/null
++++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
+@@ -0,0 +1,230 @@
++import { Process } from "@/util/process"
++import { which } from "@/util/which"
++import path from "path"
++
++export const VOICE_FILE_PLACEHOLDER = "{file}"
++// 90 秒覆盖网页端冷启动、录音上传和 ChatGPT 私有转写接口波动；超时后必须把控制权还给 TUI。
++export const VOICE_TRANSCRIBE_TIMEOUT_MS = 90_000
++
++export type VoiceTranscriber = {
++  command: string
++  args?: string[]
++}
++
++export type VoiceInputStatus =
++  | { type: "idle" }
++  | { type: "starting" }
++  | { type: "recording"; startedAt: number }
++  | { type: "stopping" }
++  | { type: "transcribing" }
++
++export type VoiceRecorderHandle = {
++  file: string
++  stop: () => Promise<void>
++  abort: () => Promise<void>
++}
++
++export function createVoiceInputController(input: {
++  transcriber: () => VoiceTranscriber | undefined
++  startRecorder: () => Promise<VoiceRecorderHandle>
++  transcribe?: (file: string, transcriber: VoiceTranscriber) => Promise<string>
++  insertText: (text: string) => void
++  onStatus?: (status: VoiceInputStatus) => void
++  onError?: (message: string) => void
++  now?: () => number
++}) {
++  let status: VoiceInputStatus = { type: "idle" }
++  let recorder: VoiceRecorderHandle | undefined
++  let activeTranscriber: VoiceTranscriber | undefined
++  let generation = 0
++  const transcribe = input.transcribe ?? ((file, transcriber) => transcribeVoiceFile({ file, transcriber }))
++  const validateTranscriber = input.transcribe ? async () => {} : validateVoiceTranscriber
++
++  const setStatus = (next: VoiceInputStatus) => {
++    status = next
++    // 状态只通过 onStatus 向 Prompt 暴露，controller 内部不直接操作 TUI renderable。
++    input.onStatus?.(next)
++  }
++
++  const fail = async (error: unknown) => {
++    // 只有 recording 状态才拥有已启动的 native recorder；starting 的迟到 handle 会在启动分支自行清理。
++    if (status.type === "recording") await recorder?.abort()
++    recorder = undefined
++    activeTranscriber = undefined
++    setStatus({ type: "idle" })
++    // 错误统一在 controller 边界转成 message，避免 TUI toast 需要理解 unknown/Error 差异。
++    input.onError?.(error instanceof Error ? error.message : String(error))
++  }
++
++  return {
++    status: () => status,
++    abort: async () => {
++      // generation 让启动、停止、转写中的异步结果失效；cleanup 后迟到的结果只能自清理，不能再改状态或插入文本。
++      generation++
++      // abort 是取消语义，不调用 stop/transcribe，避免把用户明确取消的录音上传给外部服务。
++      if (status.type !== "idle") await recorder?.abort().catch(() => {})
++      recorder = undefined
++      activeTranscriber = undefined
++      setStatus({ type: "idle" })
++    },
++    toggle: async () => {
++      if (status.type === "recording") {
++        // stop 使用当前 recorder 快照；finally 通过 identity 判断，避免旧 stop 清掉新录音。
++        const active = recorder
++        const stopGeneration = generation
++        try {
++          if (!active) throw new Error("Voice recorder is not active")
++          setStatus({ type: "stopping" })
++          // active.stop() 负责把 WAV 写完整；成功后才允许进入外部转写阶段。
++          await active.stop()
++          if (stopGeneration !== generation) return
++          setStatus({ type: "transcribing" })
++          // transcriber 在开始录音时固定，停止时不重新读配置，防止录音期间配置变更导致错用后端。
++          const text = await transcribe(active.file, requireTranscriber(activeTranscriber))
++          if (stopGeneration !== generation) return
++          // 空白文本由 transcribeVoiceFile 当错误处理；这里仍 trim 一次，保护自定义测试转写器和未来调用者。
++          if (text.trim()) input.insertText(text)
++        } catch (error) {
++          if (stopGeneration !== generation) return
++          input.onError?.(error instanceof Error ? error.message : String(error))
++        } finally {
++          // stop 后也通过 abort 做最终清理：录音实现可能已停止，但临时 WAV 必须删除，避免转写后残留音频。
++          await active?.abort().catch(() => {})
++          if (stopGeneration === generation || recorder === active) {
++            recorder = undefined
++            activeTranscriber = undefined
++            setStatus({ type: "idle" })
++          }
++        }
++        return
++      }
++      if (status.type !== "idle") return
++
++      const transcriber = input.transcriber()
++      if (!transcriber) {
++        // 未配置时不启动麦克风，避免用户说完后才发现没有任何转写后端可用。
++        input.onError?.("Voice input is not configured")
++        return
++      }
++
++      const startGeneration = ++generation
++      try {
++        // 录音期间固定 transcriber，确保 stop 阶段使用的是启动时用户确认过的后端。
++        activeTranscriber = transcriber
++        setStatus({ type: "starting" })
++        // 校验放在 startRecorder 前，避免 PATH/script 错误消耗一次用户录音。
++        await validateTranscriber(transcriber)
++        if (startGeneration !== generation || (status as VoiceInputStatus).type !== "starting") return
++        const started = await input.startRecorder()
++        const stillStarting = (status as VoiceInputStatus).type === "starting"
++        if (startGeneration !== generation || !stillStarting) {
++          // 启动期间用户可能已 abort 或切换上下文；迟到的 recorder 不能接管 UI，只能释放自己的 native/临时文件资源。
++          await started.abort().catch(() => {})
++          return
++        }
++        recorder = started
++        setStatus({ type: "recording", startedAt: input.now?.() ?? Date.now() })
++      } catch (error) {
++        if (startGeneration !== generation) return
++        await fail(error)
++      }
++    },
++  }
++}
++
++export async function transcribeVoiceFile(input: {
++  file: string
++  transcriber: VoiceTranscriber
++  timeout?: number
++}) {
++  const command = input.transcriber.command.trim()
++  // command 允许用户配置时带空格，但进入 spawn 前必须归一成真正 argv[0]。
++  if (!command) throw new Error("Voice transcriber command is empty")
++  const args = input.transcriber.args ?? []
++  if (!args.some((arg) => arg.includes(VOICE_FILE_PLACEHOLDER))) {
++      // 没有占位符时转写器无法拿到本次录音文件，继续执行只会制造假成功。
++      throw new Error(`Voice transcriber args must include ${VOICE_FILE_PLACEHOLDER}`)
++  }
++  await validateVoiceTranscriber({ ...input.transcriber, command })
++
++  // 录音路径只替换 argv 项，绝不拼进 shell 字符串；空格、重定向符、管道、变量和分号都保持字面量。
++  // 这个边界保证临时录音文件名不能变成命令语法，也不会触发 shell expansion。
++  const result = await Process.run([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, input.file))], {
++    // AbortSignal 是整体转写上限，Process timeout 只限制单次 wait 粒度，保持既有进程工具的轮询语义。
++    abort: AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS),
++    nothrow: true,
++    timeout: 1_000,
++  })
++  // stderr 优先展示外部转写器自己的诊断；没有 stderr 时才落回退出码。
++  if (result.code !== 0) throw new Error(result.stderr.toString().trim() || `Voice transcriber exited with code ${result.code}`)
++
++  const parsed = parseTranscriberOutput(result.stdout.toString())
++  // 返回值保持原始转写文本，不在这里 trim，避免破坏模型返回的标点或用户口述的前后空白意图。
++  if (!parsed.text.trim()) throw new Error("Voice transcriber returned empty text")
++  return parsed.text
++}
++
++async function validateVoiceTranscriber(transcriber: VoiceTranscriber) {
++  const command = transcriber.command.trim()
++  if (!command) throw new Error("Voice transcriber command is empty")
++  // 这里只验证 argv[0] 是否存在，不解析 args，确保不会提前触发 shell 语义或环境变量展开。
++  const commandExists =
++    Boolean(which(command)) ||
++    ((path.isAbsolute(command) || command.includes("/") || command.includes("\\")) && (await Bun.file(command).exists()))
++  if (!commandExists) {
++    // 这里仅检查 argv[0] 是否可执行，不解释 args、不走 shell；缺失时在录音前失败，避免用户说完后才看到 spawn ENOENT。
++    throw new Error(
++      `Voice transcriber command not found: ${command}. Configure tui.voice.transcriber or enable a local ChatGPT MCP server.`,
++    )
++  }
++  const script = transcriber.args?.[0]
++  // ChatGPT 默认后端是 `runner chatgpt.js ...` 形态，脚本缺失需要在录音前给出明确错误。
++  if (
++    script &&
++    path.basename(script).toLowerCase() === "chatgpt.js" &&
++    (path.isAbsolute(script) || script.includes("/") || script.includes("\\")) &&
++    !(await Bun.file(script).exists())
++  ) {
++    // MCP 推导出的默认转写器形如 `node <agent-dir>/chatgpt.js ...`；脚本缺失时也要在录音前失败。
++    throw new Error(`Voice transcriber script not found: ${script}`)
++  }
++}
++
++export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string, now = Date.now()) {
++  // 这些文案直接显示在 prompt footer；保持短文本，避免小终端下挤掉输入区。
++  if (status.type === "starting") return "Starting voice..."
++  // recording 必须显示停止快捷键，用户不需要记住开始录音时按了哪个绑定。
++  if (status.type === "recording") return `Recording ${formatClock(now - status.startedAt)} · ${shortcut} stop`
++  if (status.type === "stopping") return "Saving voice..."
++  if (status.type === "transcribing") return "Transcribing voice..."
++  return ""
++}
++
++function parseTranscriberOutput(text: string): { text: string } {
++  let parsed: unknown
++  try {
++    parsed = JSON.parse(text)
++  } catch {
++    // 转写器协议必须是 JSON；直接插入原始 stdout 可能把诊断日志写进用户 prompt。
++    throw new Error("Voice transcriber did not return JSON")
++  }
++  if (!parsed || typeof parsed !== "object" || typeof (parsed as { text?: unknown }).text !== "string") {
++    // text 字段是唯一业务输出，额外字段留给后端诊断但不进入 TUI prompt。
++    throw new Error("Voice transcriber JSON must contain text")
++  }
++  return parsed as { text: string }
++}
++
++function formatClock(ms: number) {
++  // 计时只向下取整，避免录音开始后的首秒在 footer 中抖动。
++  const seconds = Math.max(0, Math.floor(ms / 1000))
++  return `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`
++}
++
++function requireTranscriber(transcriber: VoiceTranscriber | undefined) {
++  // 这个错误只应在内部状态不一致时出现；正常未配置路径会在启动前被拦截。
++  if (!transcriber) throw new Error("Voice input is not configured")
++  return transcriber
++}
++
++export * as PromptVoiceInput from "./prompt-voice-input"
+diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..90f89acd9b0a4c7f4d57ee0a25d36aa72bcc7211
+--- /dev/null
++++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts
+@@ -0,0 +1,167 @@
++import fs from "fs/promises"
++import path from "path"
++import { randomUUID } from "crypto"
++import { Global } from "@opencode-ai/core/global"
++import type { VoiceRecorderHandle } from "./prompt-voice-input"
++
++type NativePvRecorder = {
++  read(handle: bigint, pcm: Int16Array): number
++}
++
++type PvRecorderConstructor = {
++  new (frameLength: number, deviceIndex?: number, bufferedFramesCount?: number): PvRecorderInstance
++  _pvRecorder: NativePvRecorder
++}
++
++type PvRecorderInstance = {
++  _handle: bigint
++  readonly frameLength: number
++  start(): void
++  stop(): void
++  release(): void
++}
++
++// PvRecorder 固定输出 16kHz 单声道 16-bit PCM；WAV 头必须保持这个常量，否则 browser-agent 侧的转写入口会拒绝文件。
++const VOICE_RECORDER_SAMPLE_RATE = 16_000
++const VOICE_RECORDER_CHANNELS = 1
++// 512 是 Picovoice Node 示例和当前录音 helper 使用的帧长；继续沿用它以避免改变延迟和缓冲行为。
++const VOICE_RECORDER_FRAME_LENGTH = 512
++// -1 表示系统默认输入设备；这是跨平台录音库的约定，不额外暴露 TUI 配置，避免扩大配置面。
++const VOICE_RECORDER_DEVICE_INDEX = -1
++// 50 是 PvRecorder 默认推荐的内部缓冲帧数；保留缓冲可减少 TUI 停顿时丢帧和 overflow 的概率。
++const VOICE_RECORDER_BUFFERED_FRAMES = 50
++
++export async function startPromptVoiceRecorder(): Promise<VoiceRecorderHandle> {
++  const dir = path.join(Global.Path.tmp, "voice")
++  await fs.mkdir(dir, { recursive: true })
++  // 文件名包含时间戳和 UUID，避免连续录音或并发 Prompt 实例写到同一个临时 WAV。
++  const file = path.join(dir, `prompt-${Date.now()}-${randomUUID()}.wav`)
++  // native addon 延迟到真正录音时加载，未使用语音的 TUI 启动路径不受 optional 依赖影响。
++  const PvRecorder = await loadPvRecorder()
++  const recorder = new PvRecorder(VOICE_RECORDER_FRAME_LENGTH, VOICE_RECORDER_DEVICE_INDEX, VOICE_RECORDER_BUFFERED_FRAMES)
++  const frames: Int16Array[] = []
++  const state = { active: true, closed: false }
++  let closePromise: Promise<void> | undefined
++
++  try {
++    recorder.start()
++  } catch (error) {
++    // start 失败时 controller 还拿不到 handle；这里必须释放 native 资源并删除目标文件，避免麦克风句柄残留。
++    try {
++      recorder.release()
++    } catch {}
++    await fs.rm(file, { force: true })
++    throw error
++  }
++  // 后台录音循环的错误不能成为未处理 rejection；统一延迟到 stop() 边界抛出，TUI 才能按既有错误路径展示失败信息。
++  const recording = recordFrames(PvRecorder, recorder, frames, state).then(
++    () => undefined,
++    (error: unknown) => error,
++  )
++
++  const close = async (writeFile: boolean) => {
++    closePromise ??= (async () => {
++      // active=false 只阻止下一轮读取；正在进行的 native read 会先返回，确保最后一帧不被中断。
++      state.active = false
++      const recordingError = await recording
++      try {
++        // stop 需要把录音错误反馈给用户；abort 是 cleanup 边界，必须尽力释放资源和删临时文件，不能因旧错误阻塞清理。
++        if (writeFile && recordingError) throw recordingError
++      } finally {
++        state.closed = true
++        // stop/release 必须在同一个 close 边界内执行一次；重复释放 native handle 会触发底层库错误。
++        try {
++          recorder.stop()
++        } catch {}
++        try {
++          recorder.release()
++        } catch {}
++      }
++      if (!writeFile) return
++      // 只有 stop 路径写 WAV；abort 路径绝不把取消中的隐私语音落盘。
++      await writeWav(file, flattenFrames(frames))
++    })()
++    await closePromise
++  }
++
++  return {
++    file,
++    stop: async () => {
++      await close(true)
++      // 写入后再检查文件存在，能把磁盘权限或临时目录删除这类 IO 问题反馈给用户。
++      if (!(await Bun.file(file).exists())) throw new Error("Voice recorder did not write a WAV file")
++    },
++    abort: async () => {
++      if (!state.closed) await close(false)
++      await fs.rm(file, { force: true })
++    },
++  }
++}
++
++async function recordFrames(
++  PvRecorder: PvRecorderConstructor,
++  recorder: PvRecorderInstance,
++  frames: Int16Array[],
++  state: { active: boolean },
++) {
++  while (state.active) {
++    // native read 本身会等到下一帧可用；这里不能再额外按帧 sleep，否则 TUI 卡顿后会永久落后于 PvRecorder 内部缓冲并在 stop 时丢尾。
++    // 读取结果立即追加到内存 frames，stop 写文件时不会再碰 native handle，降低释放顺序风险。
++    frames.push(readFrame(PvRecorder, recorder))
++    // 读完一帧后只让出一次事件循环，保证快捷键和渲染能被处理，同时允许有 backlog 时尽快追平缓冲。
++    // setTimeout(0) 是调度让步，不是录音节流；帧节奏由 PvRecorder.read 自己控制。
++    await new Promise((resolve) => setTimeout(resolve, 0))
++  }
++}
++
++async function loadPvRecorder() {
++  // recorder 是 optional native 依赖；只有用户实际启动语音录制时才加载，避免未使用语音的 TUI 启动路径被 native 安装问题拖垮。
++  const mod = (await import("@picovoice/pvrecorder-node")) as unknown as { PvRecorder: PvRecorderConstructor }
++  return mod.PvRecorder
++}
++
++function readFrame(PvRecorder: PvRecorderConstructor, recorder: PvRecorderInstance) {
++  // 不能调用 PvRecorder.read()/readSync()：Bun 1.3.x 与该 native addon 的 N-API TypedArray 写回存在兼容差异。
++  // 显式创建 ArrayBuffer backing store 后再传入 native read，是当前已验证的 Bun 源码态和 compile exe 态共同可用路径。
++  const pcm = new Int16Array(new ArrayBuffer(recorder.frameLength * Int16Array.BYTES_PER_ELEMENT))
++  const status = PvRecorder._pvRecorder.read(recorder._handle, pcm)
++  if (status !== 0) throw new Error(`PvRecorder read failed with status ${status}`)
++  return pcm
++}
++
++function flattenFrames(frames: Int16Array[]) {
++  // WAV 需要连续 PCM；这里一次性分配目标数组，避免写文件时逐帧拼 Buffer 产生额外复制边界。
++  const samples = frames.reduce((total, frame) => total + frame.length, 0)
++  const pcm = new Int16Array(samples)
++  let offset = 0
++  for (const frame of frames) {
++    pcm.set(frame, offset)
++    offset += frame.length
++  }
++  return pcm
++}
++
++async function writeWav(filePath: string, pcm: Int16Array) {
++  // dataSize 是字节数不是 sample 数；16-bit PCM 每个 sample 固定 2 字节。
++  const dataSize = pcm.length * 2
++  const buffer = Buffer.alloc(44 + dataSize)
++  // 44 字节 RIFF/WAVE header 是 browser-agent 和 ChatGPT 上传路径都能直接识别的最小 PCM WAV 格式。
++  buffer.write("RIFF", 0)
++  buffer.writeUInt32LE(36 + dataSize, 4)
++  buffer.write("WAVE", 8)
++  buffer.write("fmt ", 12)
++  buffer.writeUInt32LE(16, 16)
++  buffer.writeUInt16LE(1, 20)
++  buffer.writeUInt16LE(VOICE_RECORDER_CHANNELS, 22)
++  buffer.writeUInt32LE(VOICE_RECORDER_SAMPLE_RATE, 24)
++  buffer.writeUInt32LE(VOICE_RECORDER_SAMPLE_RATE * VOICE_RECORDER_CHANNELS * 2, 28)
++  buffer.writeUInt16LE(VOICE_RECORDER_CHANNELS * 2, 32)
++  buffer.writeUInt16LE(16, 34)
++  buffer.write("data", 36)
++  buffer.writeUInt32LE(dataSize, 40)
++  // writeInt16LE 保持 little-endian PCM；PvRecorder 输出已经是 16-bit 单声道样本，不做重采样。
++  for (let index = 0; index < pcm.length; index++) buffer.writeInt16LE(pcm[index] || 0, 44 + index * 2)
++  await Bun.write(filePath, buffer)
++}
++
++export * as PromptVoiceRecorder from "./prompt-voice-recorder"
+diff --git a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9ae040eeca53aecc02f94c07c9ce4f9ff3f3aa13
+--- /dev/null
++++ b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
+@@ -0,0 +1,428 @@
++import { describe, expect, test } from "bun:test"
++import path from "path"
++import { tmpdir } from "../../fixture/fixture"
++import {
++  createVoiceInputController,
++  transcribeVoiceFile,
++  voiceInputStatusText,
++  type VoiceRecorderHandle,
++  type VoiceTranscriber,
++} from "../../../src/cli/cmd/tui/prompt-voice-input"
++
++const nodeJson = (script: string): VoiceTranscriber => ({
++  command: process.execPath,
++  args: ["-e", script, "{file}"],
++})
++
++describe("prompt voice input", () => {
++  // 这个用例锁定 argv 传参边界：录音文件路径只能作为一个参数进入转写器。
++  // 路径里的空格、分号和变量字符都必须保持字面量，不能被 shell 展开。
++  // 这里不检查实现函数名，只观察转写器实际收到的参数值，避免测试和实现耦合。
++  // out.wav 不存在用于证明命令字符串没有被拼接执行，也没有触发额外重定向或副作用。
++  // 该边界直接保护用户临时录音文件名，不能因为平台差异退回 shell 字符串。
++  test("passes the audio file as one argv argument without shell expansion", async () => {
++    await using tmp = await tmpdir()
++    const file = path.join(tmp.path, "voice $HOME ; echo nope.wav")
++    await Bun.write(file, "RIFF....WAVE")
++
++    const text = await transcribeVoiceFile({
++      file,
++      transcriber: nodeJson("process.stdout.write(JSON.stringify({ text: process.argv[1] }))"),
++    })
++
++    expect(text).toBe(file)
++    expect(await Bun.file(path.join(tmp.path, "out.wav")).exists()).toBe(false)
++  })
++
++  // `{file}` 是唯一允许把录音文件传给外部转写器的占位符。
++  // 缺少它时即使命令能运行，也不能证明实际录音被提交给后端。
++  // 提前拒绝可以避免用户录完才发现配置吞掉了音频文件。
++  // 这个错误路径也防止未来把默认转写命令简化成固定 stdin 或隐式路径。
++  // 测试只断言用户可见行为，不依赖参数解析内部结构。
++  test("requires a file placeholder so the transcriber cannot ignore the recording", async () => {
++    await expect(
++      transcribeVoiceFile({
++        file: "voice.wav",
++        transcriber: { command: process.execPath, args: ["-e", "process.stdout.write('{}')"] },
++      }),
++    ).rejects.toThrow(/\{file\}/)
++  })
++
++  // 外部转写器是独立进程，成功退出也可能返回非 JSON 或空文本。
++  // TUI 不能把这些输出直接插入 prompt，否则用户会看到不可诊断的脏文本。
++  // 非 JSON 和空白 text 是两个不同失败面：前者是协议错误，后者是转写失败。
++  // 这里分别覆盖它们，保证错误提示来自 controller 边界而不是后续 UI 崩溃。
++  // 该测试保持真实子进程路径，覆盖 stdout 解析而不是 mock 解析器。
++  test("rejects invalid and empty transcriber output", async () => {
++    await using tmp = await tmpdir()
++    const file = path.join(tmp.path, "voice.wav")
++    await Bun.write(file, "RIFF....WAVE")
++
++    await expect(
++      transcribeVoiceFile({
++        file,
++        transcriber: nodeJson("process.stdout.write('not json')"),
++      }),
++    ).rejects.toThrow(/JSON/)
++
++    await expect(
++      transcribeVoiceFile({
++        file,
++        transcriber: nodeJson("process.stdout.write(JSON.stringify({ text: '   ' }))"),
++      }),
++    ).rejects.toThrow(/empty/)
++  })
++
++  // footer 文案是用户判断当前语音状态的唯一 TUI 反馈。
++  // starting/stopping/transcribing 需要短词提示，recording 必须保留停止快捷键。
++  // 这里固定 alt+v 展示，防止未来改文案时隐藏“如何结束录音”。
++  // 使用传入 now 可以稳定测试计时显示，不依赖真实时间。
++  test("formats active footer status without hiding the stop shortcut", () => {
++    expect(voiceInputStatusText({ type: "starting" }, "alt+v", 4_400)).toBe("Starting voice...")
++    expect(voiceInputStatusText({ type: "recording", startedAt: 1_000 }, "alt+v", 4_400)).toBe(
++      "Recording 00:03 · alt+v stop",
++    )
++    expect(voiceInputStatusText({ type: "stopping" }, "alt+v", 4_400)).toBe("Saving voice...")
++    expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400)).toBe("Transcribing voice...")
++  })
++
++  // 这是完整的正常路径：第一次 toggle 开始录音，第二次 toggle 停止并转写。
++  // 断言文本插入的是停止后的 WAV 文件结果，而不是录音中途的旧状态。
++  // stop 后仍调用 abort，是为了删除临时文件；这个 cleanup 不应影响已插入文本。
++  // 状态序列锁定 TUI 用户能看到的阶段，避免后续重构跳过保存或转写提示。
++  test("toggles recording, transcribes the stopped file, and inserts returned text", async () => {
++    const inserted: string[] = []
++    const errors: string[] = []
++    const states: string[] = []
++    let aborted = false
++    const recorder: VoiceRecorderHandle = {
++      file: "voice.wav",
++      stop: async () => {},
++      abort: async () => {
++        aborted = true
++      },
++    }
++    const controller = createVoiceInputController({
++      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
++      startRecorder: async () => recorder,
++      transcribe: async (file) => `text from ${file}`,
++      insertText: (text) => inserted.push(text),
++      onError: (message) => errors.push(message),
++      onStatus: (status) => states.push(status.type),
++      now: () => 1_000,
++    })
++
++    await controller.toggle()
++    await controller.toggle()
++
++    expect(inserted).toEqual(["text from voice.wav"])
++    expect(errors).toEqual([])
++    expect(states).toEqual(["starting", "recording", "stopping", "transcribing", "idle"])
++    expect(aborted).toBe(true)
++  })
++
++  // 没有转写器时必须在录音前失败，不能占用麦克风后再报错。
++  // 这个边界保护未配置用户的体验，也避免产生无人消费的临时 WAV。
++  // startRecorder 被设成会抛错，用来证明 controller 没有进入录音层。
++  // 错误文本保持明确，方便用户知道需要配置 voice.transcriber。
++  test("does not start recording when no transcriber is configured", async () => {
++    let started = false
++    const errors: string[] = []
++    const controller = createVoiceInputController({
++      transcriber: () => undefined,
++      startRecorder: async () => {
++        started = true
++        throw new Error("should not start")
++      },
++      transcribe: async () => "text",
++      insertText: () => {},
++      onError: (message) => errors.push(message),
++    })
++
++    await controller.toggle()
++
++    expect(started).toBe(false)
++    expect(errors).toEqual(["Voice input is not configured"])
++  })
++
++  // command 缺失属于录音前校验：用户说话前就应知道转写器不可执行。
++  // 这里不 mock which，而是使用明显不存在的命令走真实校验分支。
++  // startRecorder 不能被调用，否则会出现“录完才 ENOENT”的坏体验。
++  // 错误消息包含命令名，便于用户定位是哪一个配置项写错。
++  test("does not start recording when the transcriber command is missing", async () => {
++    let started = false
++    const errors: string[] = []
++    const controller = createVoiceInputController({
++      transcriber: () => ({ command: "__opencode_missing_voice_transcriber__", args: ["{file}"] }),
++      startRecorder: async () => {
++        started = true
++        throw new Error("should not start")
++      },
++      insertText: () => {},
++      onError: (message) => errors.push(message),
++    })
++
++    await controller.toggle()
++
++    expect(started).toBe(false)
++    expect(errors[0]).toContain("Voice transcriber command not found")
++    expect(errors[0]).toContain("__opencode_missing_voice_transcriber__")
++  })
++
++  // 默认 ChatGPT 转写器由 MCP 目录推导，因此脚本文件缺失也要提前失败。
++  // 只检查 argv[0] 不够，chatgpt.js 本体丢失时 spawn 能启动但业务必然失败。
++  // 该测试覆盖带空格的相对路径形态，避免路径判断只适配简单文件名。
++  // 失败同样必须发生在录音前，不能消耗用户麦克风输入。
++  test("does not start recording when the inferred ChatGPT script is missing", async () => {
++    let started = false
++    const errors: string[] = []
++    const controller = createVoiceInputController({
++      transcriber: () => ({
++        command: process.execPath,
++        args: [path.join("missing chatgpt agent", "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"],
++      }),
++      startRecorder: async () => {
++        started = true
++        throw new Error("should not start")
++      },
++      insertText: () => {},
++      onError: (message) => errors.push(message),
++    })
++
++    await controller.toggle()
++
++    expect(started).toBe(false)
++    expect(errors[0]).toContain("Voice transcriber script not found")
++    expect(errors[0]).toContain("chatgpt.js")
++  })
++
++  // 转写失败时 prompt 必须保持原样，不能插入部分文本或空字符串。
++  // 即使转写器失败，临时录音文件仍需要通过 abort 清理。
++  // stopped 证明 controller 先完成录音保存，再进入外部转写错误路径。
++  // 这个用例保护网络失败、ChatGPT 掉线和 JSON 协议漂移等实际场景。
++  test("cleans up recorder and leaves the prompt unchanged when transcription fails", async () => {
++    const inserted: string[] = []
++    let stopped = false
++    let aborted = false
++    const errors: string[] = []
++    const controller = createVoiceInputController({
++      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
++      startRecorder: async () => ({
++        file: "voice.wav",
++        stop: async () => {
++          stopped = true
++        },
++        abort: async () => {
++          aborted = true
++        },
++      }),
++      transcribe: async () => {
++        throw new Error("network down")
++      },
++      insertText: (text) => inserted.push(text),
++      onError: (message) => errors.push(message),
++    })
++
++    await controller.toggle()
++    await controller.toggle()
++
++    expect(stopped).toBe(true)
++    expect(aborted).toBe(true)
++    expect(inserted).toEqual([])
++    expect(errors).toEqual(["network down"])
++  })
++
++  // cleanup abort 是无转写路径：它只负责释放麦克风和删除临时文件。
++  // 用户切换会话、Prompt 卸载或退出 TUI 时会走这个边界。
++  // 这里断言 transcribe 没有被调用，防止后台 cleanup 意外上传用户录音。
++  // 最终状态必须回到 idle，让下一次 alt+v 可以重新开始。
++  test("aborts an active recorder without transcribing during cleanup", async () => {
++    let aborted = false
++    let transcribed = false
++    const controller = createVoiceInputController({
++      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
++      startRecorder: async () => ({
++        file: "voice.wav",
++        stop: async () => {},
++        abort: async () => {
++          aborted = true
++        },
++      }),
++      transcribe: async () => {
++        transcribed = true
++        return "text"
++      },
++      insertText: () => {},
++    })
++
++    await controller.toggle()
++    await controller.abort()
++
++    expect(aborted).toBe(true)
++    expect(transcribed).toBe(false)
++    expect(controller.status()).toEqual({ type: "idle" })
++  })
++
++  // starting 是异步阶段，连续按快捷键不能创建两个 native recorder。
++  // resolveStarts 模拟录音设备启动较慢，复现用户快速连按 alt+v 的竞争。
++  // 第二次 toggle 应该被忽略，而不是取消或启动第二条录音链路。
++  // 该边界保护麦克风句柄，避免两个 recorder 同时抢默认输入设备。
++  test("does not start a second recorder while the first recorder is starting", async () => {
++    let starts = 0
++    const resolveStarts: Array<(recorder: VoiceRecorderHandle) => void> = []
++    let startPending: (() => void) | undefined
++    const pending = new Promise<void>((resolve) => {
++      startPending = resolve
++    })
++    const controller = createVoiceInputController({
++      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
++      startRecorder: async () => {
++        starts++
++        return await new Promise<VoiceRecorderHandle>((resolve) => {
++          resolveStarts.push(resolve)
++          startPending?.()
++        })
++      },
++      transcribe: async () => "text",
++      insertText: () => {},
++      now: () => 1_000,
++    })
++
++    const first = controller.toggle()
++    await pending
++    const second = controller.toggle()
++    resolveStarts.forEach((resolve) => resolve({ file: "voice.wav", stop: async () => {}, abort: async () => {} }))
++    await Promise.all([first, second])
++
++    expect(starts).toBe(1)
++    expect(controller.status()).toEqual({ type: "recording", startedAt: 1_000 })
++  })
++
++  // recorder 启动完成可能晚于用户 abort，这时迟到 handle 不能接管 UI 状态。
++  // 它只能自清理 native 资源和临时文件，避免麦克风后台悬挂。
++  // 这个测试覆盖 startRecorder Promise 与 cleanup Promise 的真实竞态。
++  // 最终状态保持 idle，证明迟到结果没有重新点亮录音状态。
++  test("cleans up a recorder that becomes ready after startup was aborted", async () => {
++    let aborted = false
++    let resolveStart: ((recorder: VoiceRecorderHandle) => void) | undefined
++    let startPending: (() => void) | undefined
++    const pending = new Promise<void>((resolve) => {
++      startPending = resolve
++    })
++    const controller = createVoiceInputController({
++      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
++      startRecorder: async () =>
++        await new Promise<VoiceRecorderHandle>((resolve) => {
++          resolveStart = resolve
++          startPending?.()
++        }),
++      transcribe: async () => "text",
++      insertText: () => {},
++      now: () => 1_000,
++    })
++
++    const start = controller.toggle()
++    await pending
++    await controller.abort()
++    resolveStart?.({
++      file: "voice.wav",
++      stop: async () => {},
++      abort: async () => {
++        aborted = true
++      },
++    })
++    await start
++
++    expect(aborted).toBe(true)
++    expect(controller.status()).toEqual({ type: "idle" })
++  })
++
++  // 转写是外部进程/浏览器链路，可能在用户已经 abort 后才返回。
++  // generation guard 必须让迟到文本失效，避免把旧录音插入新的 prompt。
++  // abort 仍要清理旧 recorder，不能因为转写 Promise 挂起而泄漏文件。
++  // 该测试只观察插入结果和状态，保证实现可继续调整内部 guard 形态。
++  test("does not insert transcribed text after cleanup aborts an in-flight transcription", async () => {
++    const inserted: string[] = []
++    let aborted = false
++    let resolveTranscribe: ((text: string) => void) | undefined
++    let transcribeStarted: (() => void) | undefined
++    const transcribing = new Promise<void>((resolve) => {
++      transcribeStarted = resolve
++    })
++    const controller = createVoiceInputController({
++      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
++      startRecorder: async () => ({
++        file: "voice.wav",
++        stop: async () => {},
++        abort: async () => {
++          aborted = true
++        },
++      }),
++      transcribe: async () => {
++        transcribeStarted?.()
++        return await new Promise<string>((resolve) => {
++          resolveTranscribe = resolve
++        })
++      },
++      insertText: (text) => inserted.push(text),
++    })
++
++    await controller.toggle()
++    const stopping = controller.toggle()
++    await transcribing
++    await controller.abort()
++    resolveTranscribe?.("late text")
++    await stopping
++
++    expect(aborted).toBe(true)
++    expect(inserted).toEqual([])
++    expect(controller.status()).toEqual({ type: "idle" })
++  })
++
++  // 旧转写完成时，用户可能已经开始了新的录音。
++  // 旧 finally 不能把新 recorder 清掉，否则会出现新录音突然回 idle 的回归。
++  // startCount 区分两代 recorder，firstAborted 证明旧资源仍被清理。
++  // 这个用例锁定 generation 与 recorder identity 的组合边界。
++  test("stale transcription cleanup does not clear a newer recording", async () => {
++    let startCount = 0
++    let firstAborted = false
++    let resolveTranscribe: ((text: string) => void) | undefined
++    let transcribeStarted: (() => void) | undefined
++    const transcribing = new Promise<void>((resolve) => {
++      transcribeStarted = resolve
++    })
++    const controller = createVoiceInputController({
++      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
++      startRecorder: async () => {
++        startCount++
++        return {
++          file: startCount === 1 ? "first.wav" : "second.wav",
++          stop: async () => {},
++          abort: async () => {
++            if (startCount === 1) firstAborted = true
++          },
++        }
++      },
++      transcribe: async () => {
++        transcribeStarted?.()
++        return await new Promise<string>((resolve) => {
++          resolveTranscribe = resolve
++        })
++      },
++      insertText: () => {},
++      now: () => 1_000,
++    })
++
++    await controller.toggle()
++    const oldStop = controller.toggle()
++    await transcribing
++    await controller.abort()
++    await controller.toggle()
++    resolveTranscribe?.("stale text")
++    await oldStop
++
++    expect(firstAborted).toBe(true)
++    expect(startCount).toBe(2)
++    expect(controller.status()).toEqual({ type: "recording", startedAt: 1_000 })
++  })
++})
+diff --git a/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0570ea45e6d891684b781a3db5368e09d0a7d1dd
+--- /dev/null
++++ b/packages/opencode/test/cli/tui/prompt-voice-recorder.test.ts
+@@ -0,0 +1,163 @@
++import { beforeEach, describe, expect, mock, test } from "bun:test"
++
++class FakePvRecorder {
++  static last: FakePvRecorder | undefined
++  static readStatus = 0
++  static releaseCount = 0
++  static readCount = 0
++  static readWaiters: Array<() => void> = []
++  static _pvRecorder = {
++    read: (_handle: bigint, pcm: Int16Array) => {
++      FakePvRecorder.readCount++
++      FakePvRecorder.readWaiters.splice(0).forEach((resolve) => resolve())
++      if (FakePvRecorder.readStatus !== 0) return FakePvRecorder.readStatus
++      pcm.fill(321)
++      return 0
++    },
++  }
++  _handle = 1n
++  frameLength = 4
++  started = false
++
++  constructor(_frameLength: number, _deviceIndex = -1, _bufferedFramesCount = 50) {
++    FakePvRecorder.last = this
++  }
++
++  start() {
++    this.started = true
++  }
++
++  stop() {
++    this.started = false
++  }
++
++  release() {
++    FakePvRecorder.releaseCount++
++  }
++}
++
++void mock.module("@picovoice/pvrecorder-node", () => ({
++  PvRecorder: FakePvRecorder,
++}))
++
++describe("prompt voice recorder", () => {
++  beforeEach(() => {
++    FakePvRecorder.last = undefined
++    FakePvRecorder.readStatus = 0
++    FakePvRecorder.releaseCount = 0
++    FakePvRecorder.readCount = 0
++    FakePvRecorder.readWaiters = []
++  })
++
++  // 这个正常路径证明录音实现完全在 Bun 进程内完成，不依赖系统 node 可执行文件。
++  // FakePvRecorder 写入固定 PCM 值，测试只观察最终 WAV 头和首个 sample。
++  // 临时文件随后通过 abort 删除，覆盖 stop 后 cleanup 仍然幂等的行为。
++  // OPENCODE_NODE_PATH 被故意设成不存在，用来防止未来退回 node -e 子进程实现。
++  // 该用例保护 compile 后单文件 exe 的核心约束：录音不能依赖项目 checkout。
++  test("records a WAV file without requiring a system node executable", async () => {
++    const previous = process.env.OPENCODE_NODE_PATH
++    process.env.OPENCODE_NODE_PATH = "__opencode_missing_node_for_voice_test__"
++    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
++
++    try {
++      const recorder = await startPromptVoiceRecorder()
++      await waitForFakeRead()
++      await recorder.stop()
++
++      const wav = Buffer.from(await Bun.file(recorder.file).arrayBuffer())
++
++      expect(wav.subarray(0, 4).toString()).toBe("RIFF")
++      expect(wav.subarray(8, 12).toString()).toBe("WAVE")
++      expect(wav.readInt16LE(44)).toBe(321)
++
++      await recorder.abort()
++      expect(await Bun.file(recorder.file).exists()).toBe(false)
++    } finally {
++      if (previous === undefined) delete process.env.OPENCODE_NODE_PATH
++      else process.env.OPENCODE_NODE_PATH = previous
++    }
++  })
++
++  // 这个回归用例锁定“按 stop 前读取循环必须追上 native 缓冲”的行为。
++  // 旧实现每 32ms sleep 后只读一帧，事件循环一旦落后就会把尾部帧留在 PvRecorder 缓冲里。
++  // 70ms 内至少读到三帧用于证明 JS 侧没有再人为按帧节流。
++  // WAV data size 断言最终写入的是真实读到的多帧 PCM，而不是只看 readCount。
++  // finally 中 abort 是测试安全边界，红灯失败也不能留下后台录音循环。
++  // 这个缺口对应用户观察到的最后约 1.6 到 2 秒音频未被转写。
++  test("keeps native audio reads caught up before the stop key writes the WAV", async () => {
++    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
++
++    const recorder = await startPromptVoiceRecorder()
++    try {
++      await waitForFakeReadCount(3, 70)
++      await recorder.stop()
++
++      const wav = Buffer.from(await Bun.file(recorder.file).arrayBuffer())
++
++      expect(wav.readUInt32LE(40)).toBeGreaterThanOrEqual(3 * FakePvRecorder.last!.frameLength * 2)
++    } finally {
++      await recorder.abort()
++    }
++  })
++
++  // native read 失败必须反馈给 stop 调用者，TUI 才能展示明确错误。
++  // 失败后 recorder 要停止并释放一次，避免麦克风句柄被坏状态占住。
++  // 不写 WAV 是重要不变量：损坏或不完整的音频不能继续交给转写器。
++  // abort 在 stop 失败后仍可调用，覆盖 controller finally 中的二次清理路径。
++  // 该测试用 status=8 模拟底层库错误，不依赖真实硬件故障。
++  test("releases the recorder and leaves no WAV file when native reading fails", async () => {
++    FakePvRecorder.readStatus = 8
++    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
++
++    const recorder = await startPromptVoiceRecorder()
++    await waitForFakeRead()
++
++    await expect(recorder.stop()).rejects.toThrow(/PvRecorder read failed/)
++    expect(FakePvRecorder.last?.started).toBe(false)
++    expect(FakePvRecorder.releaseCount).toBe(1)
++    expect(await Bun.file(recorder.file).exists()).toBe(false)
++
++    await recorder.abort()
++  })
++
++  // abort 是卸载/取消边界，语义上必须 best-effort，而不是把旧 read 错误再抛给 UI。
++  // 即使后台 recording Promise 已经失败，abort 仍要释放 native recorder。
++  // 这里验证没有 WAV 残留，防止用户取消后留下包含隐私语音的临时文件。
++  // releaseCount 保持一次，避免重复释放 native handle 引发 addon 错误。
++  // 该用例保护 Prompt 卸载和用户中断时的清理可靠性。
++  test("abort is best-effort after native reading fails", async () => {
++    FakePvRecorder.readStatus = 8
++    const { startPromptVoiceRecorder } = await import("../../../src/cli/cmd/tui/prompt-voice-recorder")
++
++    const recorder = await startPromptVoiceRecorder()
++    await waitForFakeRead()
++
++    await expect(recorder.abort()).resolves.toBeUndefined()
++    expect(FakePvRecorder.last?.started).toBe(false)
++    expect(FakePvRecorder.releaseCount).toBe(1)
++    expect(await Bun.file(recorder.file).exists()).toBe(false)
++  })
++})
++
++function waitForFakeRead() {
++  if (FakePvRecorder.readCount > 0) return Promise.resolve()
++  return waitForFakeReadCount(1, 1_000)
++}
++
++function waitForFakeReadCount(count: number, timeout: number) {
++  if (FakePvRecorder.readCount >= count) return Promise.resolve()
++  return new Promise<void>((resolve, reject) => {
++    // timeout 是测试防挂保护：如果读取循环再次被节流或卡死，失败后 finally 会负责释放 recorder。
++    const timer = setTimeout(() => reject(new Error(`fake recorder read ${FakePvRecorder.readCount} frame(s)`)), timeout)
++    const wait = () => {
++      if (FakePvRecorder.readCount >= count) {
++        clearTimeout(timer)
++        resolve()
++        return
++      }
++      // 每次 fake native read 都会唤醒 wait；未达到目标时重新注册，避免用固定 sleep 猜测调度。
++      FakePvRecorder.readWaiters.push(wait)
++    }
++    wait()
++  })
++}
+diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/config/tui.test.ts
+index 4eb96b95761def3858fa003f9dc647f906cd7189..1ceb02cefb3fcc0cf261a289896c77811ea96b60 100644
+--- a/packages/opencode/test/config/tui.test.ts
++++ b/packages/opencode/test/config/tui.test.ts
+@@ -494,6 +494,12 @@ it.instance("resolves keybind lookup from canonical keybinds", () =>
+       expect(config.keybinds.get("dialog.mcp.toggle")?.[0]?.key).toBe("ctrl+t")
+       expect(config.keybinds.get("model.dialog.favorite")?.[0]?.key).toBe("ctrl+f")
+       expect(config.keybinds.get("dialog.plugins.install")?.[0]?.key).toBe("shift+i")
++      // voice 默认值属于 TUI 配置解析结果，必须和其它 canonical keybind 一起进入 lookup。
++      expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+v")
++      // 默认转写器保持轻量 CLI 形态，避免把 browser-agent 能力注册成普通 agent 可见的 MCP tool。
++      expect(config.voice?.transcriber?.command).toBe("chatgpt-browser-agent")
++      // `{file}` 必须保留在 argv 数组里，确保临时 WAV 路径后续按字面量替换而不是拼 shell。
++      expect(config.voice?.transcriber?.args).toEqual(["transcribe-file", "--file", "{file}", "--json"])
+       expect(
+         config.keybinds.gather("plugins.dialog", ["dialog.plugins.install"]).map((binding) => binding.cmd),
+       ).toEqual(["dialog.plugins.install"])
+@@ -530,6 +536,98 @@ it.instance("keybinds accept OpenTUI binding specs", () =>
+   ),
+ )
+ 
++// 这个用例覆盖用户显式写 tui.voice.transcriber 的正常路径。
++// 配置层只负责保留 command/args，不解释 shell，也不验证外部程序是否存在。
++// 这样用户可以把转写器替换成其它本地工具，同时保持 controller 侧统一安全校验。
++// 测试落在 TuiConfig 服务层，保证 JSON 解析、schema 和默认合并一起生效。
++it.instance("loads voice transcriber command from tui config", () =>
++  withCleanState(
++    Effect.gen(function* () {
++      const fs = yield* AppFileSystem.Service
++      const test = yield* TestInstance
++      yield* fs.writeJson(path.join(test.directory, "tui.json"), {
++        voice: {
++          transcriber: {
++            command: "chatgpt-browser-agent",
++            args: ["transcribe-file", "--file", "{file}", "--json"],
++          },
++        },
++      })
++
++      const config = yield* getTuiConfig(test.directory)
++      expect(config.voice?.transcriber?.command).toBe("chatgpt-browser-agent")
++      expect(config.voice?.transcriber?.args).toEqual(["transcribe-file", "--file", "{file}", "--json"])
++    }),
++  ),
++)
++
++// 这个用例覆盖推荐路径：从本地 ChatGPT MCP 配置推导同目录 chatgpt.js。
++// 复用 MCP 的安装位置，但返回的是普通 CLI transcriber，不新增 MCP tool 或 HTTP surface。
++// agentDir 带空格，用来锁定路径 join/resolve 不会因为 shell 拆分而失效。
++// chatgpt.js 必须存在才启用默认转写器，避免用户录音后才遇到脚本缺失错误。
++it.instance("infers the default voice transcriber from the local ChatGPT MCP command", () =>
++  withCleanState(
++    Effect.gen(function* () {
++      const fs = yield* AppFileSystem.Service
++      const test = yield* TestInstance
++      const agentDir = path.join(test.directory, "tools", "chatgpt browser agent")
++      const mcpServer = path.join(agentDir, "mcp-server.js")
++      yield* fs.writeWithDirs(path.join(agentDir, "chatgpt.js"), "")
++      yield* fs.writeJson(path.join(test.directory, "opencode.json"), {
++        mcp: {
++          chatgpt: {
++            type: "local",
++            command: [process.execPath, mcpServer],
++            enabled: true,
++          },
++        },
++      })
++
++      const config = yield* getTuiConfig(test.directory)
++      expect(config.voice?.transcriber?.command).toBe(process.execPath)
++      expect(config.voice?.transcriber?.args).toEqual([
++        path.join(agentDir, "chatgpt.js"),
++        "transcribe-file",
++        "--file",
++        "{file}",
++        "--json",
++      ])
++    }),
++  ),
++)
++
++// 这个用例保护 MCP 扫描边界：只有 key/name 明确指向 ChatGPT 的本地 server 才能作为语音后端。
++// unrelated server 即使目录里有 chatgpt.js，也不能被误当作语音转写器来源。
++// 同时保留多个 server 时的选择行为，防止未来遍历顺序改动导致错用其它工具目录。
++// 断言最终脚本路径来自 chatgpt server，说明过滤条件和路径解析都生效。
++it.instance("does not infer the voice transcriber from unrelated local MCP servers", () =>
++  withCleanState(
++    Effect.gen(function* () {
++      const fs = yield* AppFileSystem.Service
++      const test = yield* TestInstance
++      const otherDir = path.join(test.directory, "tools", "other-agent")
++      const chatgptDir = path.join(test.directory, "tools", "chatgpt-agent")
++      yield* fs.writeWithDirs(path.join(otherDir, "chatgpt.js"), "")
++      yield* fs.writeWithDirs(path.join(chatgptDir, "chatgpt.js"), "")
++      yield* fs.writeJson(path.join(test.directory, "opencode.json"), {
++        mcp: {
++          other: {
++            type: "local",
++            command: [process.execPath, path.join(otherDir, "mcp-server.js")],
++          },
++          chatgpt: {
++            type: "local",
++            command: [process.execPath, path.join(chatgptDir, "mcp-server.js")],
++          },
++        },
++      })
++
++      const config = yield* getTuiConfig(test.directory)
++      expect(config.voice?.transcriber?.args?.[0]).toBe(path.join(chatgptDir, "chatgpt.js"))
++    }),
++  ),
++)
++
+ winIt("defaults Ctrl+Z to input undo on Windows", () =>
+   withCleanState(
+     Effect.gen(function* () {
+@@ -618,6 +716,8 @@ it.instance("keeps explicit configured keybind input undo on Windows", () =>
+ 
+         const config = yield* getTuiConfig(test.directory)
+         expect(config.keybinds.get("input.undo")?.[0]?.key).toBe("ctrl+y")
++        // Windows 用户显式保留 Ctrl+Y 给 undo 时，语音仍应使用不冲突的 Alt+V 默认键。
++        expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+v")
+       }),
+     ),
+   ),

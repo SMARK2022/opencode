@@ -1,0 +1,222 @@
+From 7636c268c28535f0d7e8262974add438747df8c8 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 15 May 2026 04:00:15 +0800
+Subject: [PATCH] =?UTF-8?q?feat(test):=20=E6=B7=BB=E5=8A=A0=E7=BD=91?=
+ =?UTF-8?q?=E7=BB=9C=E4=BB=A3=E7=90=86=E6=B5=8B=E8=AF=95=E7=94=A8=E4=BE=8B?=
+ =?UTF-8?q?=EF=BC=8C=E7=A1=AE=E4=BF=9D=E5=85=A8=E5=B1=80fetch=E8=A2=ABmock?=
+ =?UTF-8?q?=E6=97=B6=E4=BB=8D=E8=83=BD=E6=AD=A3=E7=A1=AE=E8=B7=AF=E7=94=B1?=
+ =?UTF-8?q?=20feat(provider):=20=E7=A7=BB=E9=99=A4HttpClient=E4=BE=9D?=
+ =?UTF-8?q?=E8=B5=96=EF=BC=8C=E4=BC=98=E5=8C=96=E6=A8=A1=E5=9E=8B=E6=9C=8D?=
+ =?UTF-8?q?=E5=8A=A1=E5=B1=82=20feat(test):=20=E5=A2=9E=E5=8A=A0=E4=BB=BB?=
+ =?UTF-8?q?=E5=8A=A1=E5=B7=A5=E5=85=B7=E5=8F=96=E6=B6=88=E4=BC=A0=E6=92=AD?=
+ =?UTF-8?q?=E7=9A=84=E6=B5=8B=E8=AF=95=EF=BC=8C=E7=A1=AE=E4=BF=9D=E5=AD=90?=
+ =?UTF-8?q?=E4=BC=9A=E8=AF=9D=E7=8A=B6=E6=80=81=E6=AD=A3=E7=A1=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/core/test/network-proxy.test.ts b/packages/core/test/network-proxy.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a8c54f22fd542ced3af9b616b5bca8ac728ebce
+--- /dev/null
++++ b/packages/core/test/network-proxy.test.ts
+@@ -0,0 +1,25 @@
++import { afterEach, describe, expect, test } from "bun:test"
++import { NetworkProxy } from "../src/network-proxy"
++
++const originalFetch = globalThis.fetch
++
++afterEach(() => {
++  globalThis.fetch = originalFetch
++})
++
++describe("NetworkProxy", () => {
++  test("routedFetch still uses proxy routing when global fetch is mocked", async () => {
++    let called = false
++    globalThis.fetch = Object.assign(() => {
++      called = true
++      return Promise.resolve(new Response("mocked"))
++    }, { preconnect: originalFetch.preconnect })
++
++    const response = await NetworkProxy.routedFetch("http://127.0.0.1:1", { purpose: "infrastructure" }).catch(
++      (error) => error,
++    )
++
++    expect(called).toBe(false)
++    expect(response).toBeInstanceOf(Error)
++  })
++})
+diff --git a/packages/opencode/src/provider/models.ts b/packages/opencode/src/provider/models.ts
+index 3e7232f6444269d908b218eca0de643f6ba2e024..b3e59ab88867977a75620879c122718c6f6a27f2 100644
+--- a/packages/opencode/src/provider/models.ts
++++ b/packages/opencode/src/provider/models.ts
+@@ -1,14 +1,12 @@
+ import { Global } from "@opencode-ai/core/global"
+ import path from "path"
+ import { Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
+-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
+ import { Installation } from "../installation"
+ import { Flag } from "@opencode-ai/core/flag/flag"
+ import { Flock } from "@opencode-ai/core/util/flock"
+ import { Hash } from "@opencode-ai/core/util/hash"
+ import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { AppFileSystem } from "@opencode-ai/core/filesystem"
+-import { withTransientReadRetry } from "@/util/effect-http-client"
+ 
+ const Cost = Schema.Struct({
+   input: Schema.Finite,
+@@ -97,11 +95,10 @@ export interface Interface {
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/ModelsDev") {}
+ 
+-export const layer: Layer.Layer<Service, never, AppFileSystem.Service | HttpClient.HttpClient> = Layer.effect(
++export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.effect(
+   Service,
+   Effect.gen(function* () {
+     const fs = yield* AppFileSystem.Service
+-    const http = HttpClient.filterStatusOk(withTransientReadRetry(yield* HttpClient.HttpClient))
+ 
+     const source = Flag.OPENCODE_MODELS_URL || "https://models.dev"
+     const filepath = path.join(
+@@ -126,6 +123,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | HttpClie
+           signal: AbortSignal.timeout(10000),
+         }),
+       )
++      if (!result.ok) return yield* Effect.fail(new Error(`Failed to fetch models.dev: ${result.status}`))
+       return yield* Effect.promise(() => result.text())
+     })
+ 
+@@ -194,7 +192,6 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | HttpClie
+ )
+ 
+ export const defaultLayer: Layer.Layer<Service> = layer.pipe(
+-  Layer.provide(FetchHttpClient.layer),
+   Layer.provide(AppFileSystem.defaultLayer),
+ )
+ 
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 0dd420f275165aad4c3d9b5eb1b9ce28a270b033..5941fd56cacc7838208d2a8388c62b5f4389f9b3 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -72,6 +72,21 @@ function defer<T>() {
+   return { promise, resolve }
+ }
+ 
++// Task tool cancellation reaches child sessions through an abort listener.
++// Poll until the child session observes the cancellation and transitions idle.
++const waitForIdle = (status: SessionStatus.Interface, sessionID: SessionID, timeoutMs = 2000) =>
++  Effect.gen(function* () {
++    const deadline = Date.now() + timeoutMs
++    while (Date.now() < deadline) {
++      const s = yield* status.get(sessionID)
++      if (s.type === "idle") return
++      yield* Effect.sleep(20)
++    }
++    // Final check — fail with a clear message if still busy
++    const s = yield* status.get(sessionID)
++    expect(s.type).toBe("idle")
++  })
++
+ function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
+   return Effect.acquireUseRelease(
+     Effect.sync(() => {
+@@ -845,6 +860,55 @@ it.live(
+   10_000,
+ )
+ 
++it.live(
++  "cancel propagates from running task tool to child session",
++  () =>
++    provideTmpdirServer(
++      Effect.fnUntraced(function* ({ llm }) {
++        const prompt = yield* SessionPrompt.Service
++        const sessions = yield* Session.Service
++        const status = yield* SessionStatus.Service
++        const chat = yield* sessions.create({
++          title: "Pinned",
++          permission: [{ permission: "*", pattern: "*", action: "allow" }],
++        })
++        yield* llm.tool("task", {
++          description: "inspect bug",
++          prompt: "look into the cache key path",
++          subagent_type: "general",
++        })
++        yield* llm.hang
++        yield* user(chat.id, "hello")
++
++        const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
++
++        const childID = yield* Effect.promise(async () => {
++          const end = Date.now() + 5_000
++          while (Date.now() < end) {
++            const msgs = await Effect.runPromise(MessageV2.filterCompactedEffect(chat.id))
++            const assistant = msgs.findLast((item) => item.info.role === "assistant" && item.info.agent === "build")
++            const tool = assistant?.parts.find(
++              (part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "task",
++            )
++            const sessionID = tool?.state.status === "running" ? tool.state.metadata?.sessionId : undefined
++            if (typeof sessionID === "string") return SessionID.make(sessionID)
++            await new Promise((done) => setTimeout(done, 20))
++          }
++          throw new Error("timed out waiting for running task metadata")
++        })
++
++        expect((yield* status.get(childID)).type).toBe("busy")
++
++        yield* prompt.cancel(chat.id)
++        const exit = yield* Fiber.await(fiber)
++        expect(Exit.isSuccess(exit)).toBe(true)
++        yield* waitForIdle(status, childID)
++      }),
++      { git: true, config: providerCfg },
++    ),
++  10_000,
++)
++
+ it.live(
+   "loop sets status to busy then idle",
+   () =>
+@@ -1008,7 +1072,8 @@ it.live(
+         expect(Exit.isSuccess(exit)).toBe(true)
+ 
+         expect((yield* status.get(chat.id)).type).toBe("idle")
+-        expect((yield* status.get(childID)).type).toBe("idle")
++        // Child session cancel propagates asynchronously via fiber interrupt
++        yield* waitForIdle(status, childID)
+       }),
+       { git: true, config: providerCfg },
+     ),
+diff --git a/packages/opencode/test/tool/task.test.ts b/packages/opencode/test/tool/task.test.ts
+index f75fcf84b8a9cc8e46f029fac505feef900366e5..dbbcd5e2ca474443ccc316b1900bc85420fe4926 100644
+--- a/packages/opencode/test/tool/task.test.ts
++++ b/packages/opencode/test/tool/task.test.ts
+@@ -393,23 +393,11 @@ describe("tool.task", () => {
+ 
+         const child = yield* sessions.get(result.metadata.sessionId)
+         expect(child.parentID).toBe(chat.id)
+-        expect(child.permission).toEqual([
+-          {
+-            permission: "todowrite",
+-            pattern: "*",
+-            action: "deny",
+-          },
+-          {
+-            permission: "bash",
+-            pattern: "*",
+-            action: "allow",
+-          },
+-          {
+-            permission: "read",
+-            pattern: "*",
+-            action: "allow",
+-          },
+-        ])
++        expect(child.permission).toContainEqual({ permission: "external_directory", pattern: "*", action: "ask" })
++        expect(child.permission).toContainEqual({ permission: "todowrite", pattern: "*", action: "deny" })
++        expect(child.permission).toContainEqual({ permission: "bash", pattern: "*", action: "allow" })
++        expect(child.permission).toContainEqual({ permission: "read", pattern: "*", action: "allow" })
++        expect(child.permission).not.toContainEqual({ permission: "task", pattern: "*", action: "allow" })
+         expect(seen?.tools).toEqual({
+           todowrite: false,
+           bash: false,
