@@ -217,13 +217,16 @@ export function voiceHintVisible(transcriber: VoiceTranscriber | undefined, prom
   return transcriber !== undefined && promptWidth > VOICE_HINT_MIN_PROMPT_WIDTH
 }
 
-export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string, now = Date.now()) {
+export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string, now = Date.now(), options: { compact?: boolean } = {}) {
   // 这些文案直接显示在 prompt footer；保持短文本，避免小终端下挤掉输入区。
-  if (status.type === "starting") return "Starting voice..."
+  // #491：compact 只服务主 Prompt 的单行宽度预算；默认值继续保护 dialog/question 的既有文案。
+  if (status.type === "starting") return options.compact ? "Starting..." : "Starting voice..."
   // recording 必须显示停止快捷键，用户不需要记住开始录音时按了哪个绑定。
-  if (status.type === "recording") return `Recording ${formatClock(now - status.startedAt)} · ${shortcut} stop`
-  if (status.type === "stopping") return "Saving voice..."
-  if (status.type === "transcribing") return "Transcribing voice..."
+  if (status.type === "recording") return `${options.compact ? "Rec" : "Recording"} ${formatClock(now - status.startedAt)} · ${shortcut} stop`
+  // #491：compact 的 Rec 前缀省出 6 列给录音时钟，兜底快捷键提示仍不可省略。
+  if (status.type === "stopping") return options.compact ? "Saving..." : "Saving voice..."
+  // #491：transcribing 压缩文案预示即将注入，完整文案保留在 dialog/question 等宽裕场景。
+  if (status.type === "transcribing") return options.compact ? "Transcribing..." : "Transcribing voice..."
   return ""
 }
 
