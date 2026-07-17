@@ -1127,6 +1127,10 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
     expect(result).toHaveLength(1)
     expect(result[0].content).toEqual([
       {
+        type: "text",
+        text: " ",
+      },
+      {
         type: "tool-call",
         toolCallId: "test",
         toolName: "bash",
@@ -1715,6 +1719,212 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
         { type: "tool-call", toolCallId: "toolu_2", toolName: "glob", input: { pattern: "**/*.pdf" } },
       ],
     })
+  })
+})
+
+describe("ProviderTransform.message - openai-compatible non-empty assistant content", () => {
+  const oaiCompatibleModel = {
+    id: "moonshotai-cn/kimi-k3",
+    providerID: "moonshotai-cn",
+    api: {
+      id: "kimi-k3",
+      url: "https://api.moonshot.cn/v1",
+      npm: "@ai-sdk/openai-compatible",
+    },
+    name: "Kimi K3",
+    capabilities: {
+      temperature: true,
+      reasoning: false,
+      attachment: true,
+      toolcall: true,
+      input: { text: true, audio: false, image: true, video: false, pdf: false },
+      output: { text: true, audio: false, image: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    cost: { input: 0.003, output: 0.015, cache: { read: 0.0003, write: 0.00375 } },
+    limit: { context: 200000, output: 8192 },
+    status: "active",
+    options: {},
+    headers: {},
+  } as any
+
+  test("prepends a space text part to tool-call-only assistant messages", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [
+          { type: "tool-call", toolCallId: "tc1", toolName: "bash", input: { command: "ls" } },
+        ],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, oaiCompatibleModel, {}) as any[]
+
+    expect(result).toHaveLength(1)
+    expect(result[0].content[0]).toEqual({ type: "text", text: " " })
+    expect(result[0].content[1].type).toBe("tool-call")
+  })
+
+  test("filters empty text parts and prepends space to tool-call-only assistant", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "" },
+          { type: "tool-call", toolCallId: "tc1", toolName: "bash", input: { command: "ls" } },
+        ],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, oaiCompatibleModel, {}) as any[]
+
+    expect(result).toHaveLength(1)
+    // 空 text part 被过滤后仅剩 tool-call，补充空格 text 使 content 非空
+    expect(result[0].content).toHaveLength(2)
+    expect(result[0].content[0]).toEqual({ type: "text", text: " " })
+    expect(result[0].content[1].type).toBe("tool-call")
+  })
+
+  test("does not add space when assistant message already has non-empty text", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Let me check" },
+          { type: "tool-call", toolCallId: "tc1", toolName: "bash", input: { command: "ls" } },
+        ],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, oaiCompatibleModel, {}) as any[]
+
+    expect(result).toHaveLength(1)
+    expect(result[0].content).toHaveLength(2)
+    expect(result[0].content[0].text).toBe("Let me check")
+  })
+
+  test("does not apply to anthropic provider", () => {
+    const anthropicModel = { ...oaiCompatibleModel, api: { id: "claude-3-5-sonnet", url: "", npm: "@ai-sdk/anthropic" } } as any
+    const msgs = [
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "tc1", toolName: "bash", input: { command: "ls" } }],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, anthropicModel, {}) as any[]
+
+    expect(result).toHaveLength(1)
+    expect(result[0].content).toHaveLength(1)
+    expect(result[0].content[0].type).toBe("tool-call")
+  })
+})
+
+describe("ProviderTransform.message - openai reasoning filter when store!=true", () => {
+  const openaiModel = {
+    id: "openai/gpt-5.6-sol",
+    providerID: "openai",
+    api: {
+      id: "gpt-5.6-sol",
+      url: "https://api.openai.com",
+      npm: "@ai-sdk/openai",
+    },
+    name: "GPT-5.6 Sol",
+    capabilities: {
+      temperature: true,
+      reasoning: true,
+      attachment: true,
+      toolcall: true,
+      input: { text: true, audio: false, image: true, video: false, pdf: false },
+      output: { text: true, audio: false, image: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    cost: { input: 0.03, output: 0.06, cache: { read: 0.001, write: 0.002 } },
+    limit: { context: 128000, output: 4096 },
+    status: "active",
+    options: {},
+    headers: {},
+  } as any
+
+  test("filters reasoning parts with itemId but no reasoningEncryptedContent when store=false", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "reasoning",
+            text: "thinking...",
+            providerOptions: {
+              openai: { itemId: "rs_broken" },
+            },
+          },
+          {
+            type: "reasoning",
+            text: "more thinking...",
+            providerOptions: {
+              openai: { itemId: "rs_ok", reasoningEncryptedContent: "encrypted" },
+            },
+          },
+          { type: "text", text: "Answer" },
+        ],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, openaiModel, { store: false }) as any[]
+
+    const reasoningParts = result[0].content.filter((p: any) => p.type === "reasoning")
+    // 无 encrypted_content 的 reasoning 被过滤（store=false 时 API 无法通过 id 查找，也无法本地重放）
+    expect(reasoningParts).toHaveLength(1)
+    expect(reasoningParts[0].providerOptions.openai.itemId).toBe("rs_ok")
+  })
+
+  test("preserves reasoning with encryptedContent when store=false", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "reasoning",
+            text: "thinking...",
+            providerOptions: {
+              openai: { itemId: "rs_ok", reasoningEncryptedContent: "encrypted" },
+            },
+          },
+          { type: "text", text: "Answer" },
+        ],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, openaiModel, { store: false }) as any[]
+
+    const reasoningParts = result[0].content.filter((p: any) => p.type === "reasoning")
+    expect(reasoningParts).toHaveLength(1)
+    expect(reasoningParts[0].providerOptions.openai.itemId).toBe("rs_ok")
+  })
+
+  test("preserves reasoning without encryptedContent when store=true", () => {
+    const msgs = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "reasoning",
+            text: "thinking...",
+            providerOptions: {
+              openai: { itemId: "rs_broken" },
+            },
+          },
+          { type: "text", text: "Answer" },
+        ],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, openaiModel, { store: true }) as any[]
+
+    const reasoningParts = result[0].content.filter((p: any) => p.type === "reasoning")
+    // store=true 时 API 通过 itemId 服务端查找，不需要 encrypted_content
+    expect(reasoningParts).toHaveLength(1)
+    expect(reasoningParts[0].providerOptions.openai.itemId).toBe("rs_broken")
   })
 })
 

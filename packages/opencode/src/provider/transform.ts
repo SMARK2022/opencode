@@ -179,6 +179,60 @@ function normalizeMessages(
       .filter((msg): msg is ModelMessage => msg !== undefined && msg.content !== "")
   }
 
+  // OpenAI-compatible proxies（Moonshot/Kimi/GLM 等）对 assistant 消息的空 content 返回 400。
+  // AI SDK 将仅含 tool-call 的 assistant 序列化为 content: ""，需要过滤空 text parts
+  // 并为 tool-call-only 消息补充非空 text part 以满足协议要求。
+  if (model.api.npm === "@ai-sdk/openai-compatible") {
+    msgs = msgs
+      .map((msg) => {
+        if (typeof msg.content === "string") {
+          if (msg.content === "") return undefined
+          return msg
+        }
+        if (!Array.isArray(msg.content)) return msg
+        const filtered = msg.content.filter((part) => {
+          if (part.type === "text") return part.text !== ""
+          return true
+        })
+        if (filtered.length === 0) return undefined
+        return { ...msg, content: filtered }
+      })
+      .filter((msg): msg is ModelMessage => msg !== undefined && msg.content !== "")
+    // 仅有 tool-call 无非空 text 的 assistant 会被 AI SDK 序列化为 content: ""，
+    // OpenAI-compatible API 拒绝空 content；补充空格 text part 使 wire content 非空。
+    msgs = msgs.map((msg) => {
+      if (msg.role !== "assistant" || typeof msg.content === "string" || !Array.isArray(msg.content)) return msg
+      const hasText = msg.content.some((part) => part.type === "text" && part.text !== "")
+      const hasToolCall = msg.content.some((part) => part.type === "tool-call")
+      if (hasText || !hasToolCall) return msg
+      return { ...msg, content: [{ type: "text" as const, text: " " }, ...msg.content] }
+    })
+  }
+
+  // OpenAI Responses API 在 store≠true（stateless）模式下不持久化 reasoning，
+  // 无法通过 itemId 服务端查找。AI SDK 为含 itemId 的 reasoning 创建带 id 的 item，
+  // provider.ts 剥离 id 后，无 encrypted_content 的 reasoning 变为既无 id 又无加密内容的无效 item，
+  // API 返回 "reasoning part rs_...:0 not found"。在消息构建层过滤这些不完整的 reasoning parts。
+  if (model.api.npm === "@ai-sdk/openai" && _options.store !== true) {
+    msgs = msgs
+      .map((msg) => {
+        if (msg.role !== "assistant" || !Array.isArray(msg.content)) return msg
+        const filtered = msg.content.filter((part) => {
+          if (part.type !== "reasoning") return true
+          const openaiOpts = part.providerOptions?.openai as
+            | { itemId?: string; reasoningEncryptedContent?: string }
+            | undefined
+          // 有 itemId 但无 encrypted_content 的 reasoning 来自中断/取消的响应，
+          // stateless 模式下无法重放，过滤以避免 API 400
+          if (openaiOpts?.itemId && !openaiOpts?.reasoningEncryptedContent) return false
+          return true
+        })
+        if (filtered.length === 0) return undefined
+        return { ...msg, content: filtered }
+      })
+      .filter((msg): msg is ModelMessage => msg !== undefined)
+  }
+
   if (model.api.id.includes("claude")) {
     const scrub = (id: string) => id.replace(/[^a-zA-Z0-9_-]/g, "_")
     msgs = msgs.map((msg) => {
