@@ -7,7 +7,7 @@
   "firstSmarkCommit": "9f117055c5a8a09f5cc7080786accf853bdb25fe",
   "forkBase": "224548d87d9aa9b8fdbcba2a8c1f96d5f2679ffa",
   "targetRepo": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark",
-  "targetBaseline": "b1fc8113948b518835c2a39ece49553cffe9b30c",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
   "selection": "first-parent non-merge commits from the first SMARK/SMARK2022 commit through the pinned source tip",
   "commits": [
     {
