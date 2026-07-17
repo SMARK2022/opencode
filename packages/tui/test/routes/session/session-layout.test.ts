@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { sessionMessageContentWidth, SESSION_SIDEBAR_WIDTH } from "../../../src/routes/session/layout"
 // CJK 全角换行渲染测试依赖：TextRenderable/TextareaRenderable 为被测渲染链底层
-import { TextRenderable, TextareaRenderable } from "@opentui/core"
+import { BoxRenderable, TextRenderable, TextareaRenderable } from "@opentui/core"
 import { createTestRenderer } from "@opentui/core/testing"
 import { SpinnerRenderable } from "opentui-spinner"
 
@@ -148,3 +148,45 @@ async function renderTextareaFrame(opts: { width: number; height: number; conten
     setup.renderer.destroy()
   }
 }
+
+describe("Goal sidebar CJK boundary", () => {
+  test("Goal sidebar does not duplicate a CJK glyph across the 35-cell wrap boundary", async () => {
+    // #489：Goal 文案沿用生产 green literal；两个"查"必须恰出现两次，
+    // 边界 virtual chunk 回退到旧 byte offset 时会渲染出第三个重复字形。
+    const objective = "检查log，请你自行独立完整完成相应的调研与检查，并进行多轮的负载并发、高压"
+    // 42-cell 外框故意比 35-cell 文本盒更宽，让越界双宽 cell 留下可观察证据。
+    const setup = await createTestRenderer({
+      width: 42,
+      height: 6,
+      footerHeight: 0,
+      useThread: false,
+      consoleMode: "disabled",
+    })
+    try {
+      // 两层 padding 后 Goal 文本真实可用宽度 35 格；外层 framebuffer 更宽，越界 cell 直接暴露。
+      const sidebar = new BoxRenderable(setup.renderer, {
+        width: 42,
+        height: 6,
+        paddingLeft: 2,
+        paddingRight: 2,
+      })
+      const content = new BoxRenderable(setup.renderer, { flexShrink: 0, gap: 1, paddingRight: 1 })
+      const goal = new BoxRenderable(setup.renderer, { paddingLeft: 2 })
+      goal.add(new TextRenderable(setup.renderer, { content: objective, wrapMode: "word" }))
+      content.add(goal)
+      sidebar.add(content)
+      setup.renderer.root.add(sidebar)
+      // 多次 renderOnce 模拟稳定后的静态 frame，排除首帧未提交的偶然差异。
+      for (let i = 0; i < 3; i++) await setup.renderOnce()
+
+      // capture 后同时断言计数与 replacement：两类损坏的信号彼此独立。
+      const frame = setup.captureCharFrame()
+      // 期望来源是产品文案而非被测 frame，避免测试与实现共享错误算法。
+      expect(frame.split("查")).toHaveLength(3)
+      // replacement character 是 UTF-8 切片损坏的独立信号，不能被数量断言替代。
+      expect(frame).not.toContain("\uFFFD")
+    } finally {
+      setup.renderer.destroy()
+    }
+  })
+})

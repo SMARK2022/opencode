@@ -4,6 +4,8 @@
 import "./version-env"
 
 import { $ } from "bun"
+// #489：evidence 链需要 realpath 与 stat；Bun API 覆盖不了的 fs 语义在此显式引入。
+import fs from "node:fs"
 import path from "path"
 import { PromptVoiceAssets } from "../../tui/src/prompt-voice-assets"
 import { fileURLToPath } from "url"
@@ -148,6 +150,70 @@ const targets = singleFlag
 
 await $`rm -rf dist`
 
+// #489：OpenTUI 构建证据链——package/native/executable 三层同证据落盘，
+// release archive 的 smoke 结果可以借此回溯到确定的 native 输入。
+async function packageRoot(name: string) {
+  // Bun.resolveSync 可能命中 hoisted 或 target reinstall 的不同 entry；向上找 manifest 才能锁定真实包 owner。
+  let directory = path.dirname(fs.realpathSync(Bun.resolveSync(name, dir)))
+  while (directory !== path.dirname(directory)) {
+    if (await Bun.file(path.join(directory, "package.json")).exists()) return directory
+    directory = path.dirname(directory)
+  }
+  throw new Error(`Cannot locate package root for ${name}`)
+}
+
+async function sha256(file: string) {
+  // 对完整文件计算 hash，不用 mtime 或文件名作为 native identity，避免缓存重用伪造一致性。
+  return new Bun.CryptoHasher("sha256").update(await Bun.file(file).arrayBuffer()).digest("hex")
+}
+
+async function writeOpenTuiBuildEvidence(item: (typeof allTargets)[number], name: string) {
+// musl 变体的包名后缀与 optionalDependencies 的命名契约一致，拼错会导致 resolve 到 glibc 包。
+  const suffix = item.os === "linux" && item.abi === "musl" ? "-musl" : ""
+  const nativeName = `@opentui/core-${item.os}-${item.arch}${suffix}`
+  const nativeRoot = await packageRoot(nativeName)
+  const nativeManifest = await Bun.file(path.join(nativeRoot, "package.json")).json()
+  const coreManifest = await Bun.file(path.join(await packageRoot("@opentui/core"), "package.json")).json()
+  // target 名、manifest 约束和 native 文件必须同时一致；只记录解析到的包名会掩盖 Bun 选错 ABI 的情况。
+  if (
+    nativeManifest.name !== nativeName ||
+    nativeManifest.version !== coreManifest.version ||
+    !nativeManifest.os?.includes(item.os) ||
+    !nativeManifest.cpu?.includes(item.arch)
+  ) {
+    throw new Error(`OpenTUI native manifest does not match ${name}: ${JSON.stringify(nativeManifest)}`)
+  }
+// FFI 库扫描覆盖包内全部层级：vendor 把 .so 放在子目录时同样要被证据捕捉。
+  const nativeFiles = (await Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: nativeRoot, onlyFiles: true }))).filter(
+    (file) => /\.(?:dll|dylib|so)$/.test(file),
+  )
+  // 每个 target 只允许一个 OpenTUI FFI library；多个候选会让 bundle 选择依赖遍历顺序而失去可复现性。
+  if (nativeFiles.length !== 1) throw new Error(`${nativeName} contains ${nativeFiles.length} native libraries`)
+
+  const nativeFile = path.join(nativeRoot, nativeFiles[0])
+  const binary = path.resolve(`dist/${name}/bin/opencode${item.os === "win32" ? ".exe" : ""}`)
+  const stat = await fs.promises.stat(binary)
+  const evidence = {
+    target: name,
+    opentui: {
+      version: coreManifest.version,
+      package: nativeName,
+      file: nativeFiles[0].replaceAll("\\", "/"),
+      sha256: await sha256(nativeFile),
+    },
+    executable: {
+      file: path.basename(binary),
+      bytes: stat.size,
+      sha256: await sha256(binary),
+    },
+  }
+  // bytes 和 hash 共同保留：hash 证明内容，size 还能发现意外空壳或截断产物。
+  await Bun.write(`dist/${name}/opentui-build.json`, JSON.stringify(evidence, null, 2) + "\n")
+// stdout 同时供 CI 日志抓取：workflow 失败时可直接从 build step 输出读到 hash 而无需翻 artifact。
+  console.log(JSON.stringify(evidence))
+}
+
+
 const binaries: Record<string, string> = {}
 if (!skipInstall) {
   // Bun 1.4.4 skips native packages for the other libc by default, but the musl targets need them.
@@ -249,13 +315,37 @@ for (const item of targets) {
     const binaryPath = `dist/${name}/bin/opencode`
     console.log(`Running smoke test: ${binaryPath} --version`)
     try {
-      const versionOutput = await $`${binaryPath} --version`.text()
-      console.log(`Smoke test passed: ${versionOutput.trim()}`)
+      const smokeEnv = Object.fromEntries(
+        Object.entries(process.env).filter(
+          (entry): entry is [string, string] =>
+            entry[1] !== undefined && !["OPENCODE_PROCESS_ROLE", "OPENCODE_RUN_ID", "OPENCODE_PID"].includes(entry[0]),
+        ),
+      )
+      // 编译脚本可能继承 worker 角色；必须让 CLI 按 main 角色执行，并拒绝空版本输出。
+      const smoke = Bun.spawn([binaryPath, "--version"], {
+        env: smokeEnv,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [exitCode, stdout, stderr] = await Promise.all([
+        smoke.exited,
+        new Response(smoke.stdout).text(),
+        new Response(smoke.stderr).text(),
+      ])
+      const versionOutput = stdout.trim()
+      // stdout 必须来自真实 compiled CLI；stderr 或空字符串不能被当作成功版本输出。
+      if (exitCode !== 0 || !versionOutput) {
+        throw new Error(stderr.trim() || `version smoke exited ${exitCode} without output`)
+      }
+      console.log(`Smoke test passed: ${versionOutput}`)
     } catch (e) {
       console.error(`Smoke test failed for ${name}:`, e)
       process.exit(1)
     }
   }
+
+  // 单 target 构建结束时立即写证据；archive 打包与 workflow smoke 都消费该文件。
+  await writeOpenTuiBuildEvidence(item, name)
 
   await $`rm -rf ./dist/${name}/bin/tui`
   await Bun.file(`dist/${name}/package.json`).write(

@@ -55,6 +55,7 @@
     "@types/turndown": "5.0.5",
     "@types/yargs": "17.0.33",
     "@typescript/native-preview": "catalog:",
+    "@xterm/headless": "6.0.0",
     "drizzle-orm": "catalog:",
     "prettier": "3.6.2",
     "sharp": "0.33.5",

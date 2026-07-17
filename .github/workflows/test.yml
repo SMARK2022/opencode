@@ -169,6 +169,40 @@ jobs:
             echo "| ${{ matrix.label }} | ${{ matrix.os_label }} | ${result} | ${{ steps.junit.outputs.exists == 'true' && '已生成' || '未生成' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+
+  opentui-required:
+    # #489：consumer 回归与 typecheck 必须同一 job 执行，避免不同安装图互相掩盖 peer 漂移。
+    # 目标谱系以 registry 0.4.5 承载 OpenTUI，无 smark.1 closure 校验面，测试直接钉住用户可见 seam。
+    # 版本名不写死：gate 钉住的是 user-visible seam 行为，OpenTUI 版本由 catalog 决策单独管理。
+    name: 必过 OpenTUI consumer gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+        # 两个文件分别覆盖 DialogPrompt factory 渲染与 CJK 边界/布局宽度管线。
+      - name: Run OpenTUI consumer regressions
+        # Goal CJK 与 DialogPrompt factory 是用户可见 seam，回归必须随依赖升级一起跑。
+        working-directory: packages/tui
+        # tui 包内自有 bun test 配置（30s timeout），不在 workflow 层重复传参。
+        run: bun test test/cli/tui/dialog-prompt.test.tsx test/routes/session/session-layout.test.ts
+
+      - name: Typecheck Solid ecosystem consumers
+        # 同一 Solid runtime 被多个 workspace 直接或间接消费，不能只验证 TUI 包本身。
+        run: |
+          # 任一 consumer typecheck 失败即整体失败：Solid peer 漂移会同时影响全部列表项。
+          set -euo pipefail
+          for package in packages/opencode packages/plugin packages/app packages/ui packages/enterprise packages/desktop packages/console/app packages/console/core packages/sdk/js packages/slack packages/tui; do
+            bun run --cwd "$package" typecheck
+          done
+
   httpapi-required:
 # #263：HttpApi gate 是 wire 契约的机器可校验入口——缺场景/跳过场景一律视为失败，
     name: 必过 HttpApi gate / ${{ matrix.mode }}
