@@ -527,17 +527,16 @@ export const layer = Layer.effect(
             // 因为 compaction 本身打破了循环。
             let checkParts = recentParts
             if (recentParts.length < DOOM_LOOP_THRESHOLD) {
-              // 从 DB 加载当前 session 的消息历史，取前一个 assistant message 的末尾 tool parts
-              const allMessages = yield* session.messages({ sessionID: ctx.sessionID })
-              const prevAssistant = allMessages
-                .filter((m: MessageV2.WithParts) => m.info.role === "assistant" && m.info.id !== ctx.assistantMessage.id)
-                .at(-1)
-              if (prevAssistant) {
-                const prevToolParts = prevAssistant.parts
-                  .filter((p: MessageV2.Part) => p.type === "tool" && p.state.status !== "pending")
-                  .slice(-DOOM_LOOP_THRESHOLD)
-                checkParts = [...prevToolParts, ...recentParts].slice(-DOOM_LOOP_THRESHOLD)
-              }
+              // 只取前一个 assistant 的 tool tail，避免 doom-loop 判断 thaw 整个 session。
+              // helper 先热定位唯一前序 assistant，再按 limit 查询其末尾 tool rows；范围外 cold owner 不变。
+              // 当前 message parts 已由 processor 需要而读取，只有缺口数量才决定额外 thaw 的最大上限。
+              // 返回恢复为正序后再与 current tail 合并，连续重复判定与旧全 transcript slice 语义一致。
+              const prevToolParts = MessageV2.previousAssistantToolTail({
+                sessionID: ctx.sessionID,
+                before: { id: ctx.assistantMessage.id, time: ctx.assistantMessage.time.created },
+                limit: DOOM_LOOP_THRESHOLD,
+              })
+              checkParts = [...prevToolParts, ...recentParts].slice(-DOOM_LOOP_THRESHOLD)
             }
 
             if (

@@ -80,8 +80,10 @@ export const TaskStatusTool = Tool.define(
         }
       }
 
+      // status 只按 assistant role 找最新结果；已归档 task 的其他历史 tool output 不应随每次轮询预热。
+      // inspectMessage 需要最终 Message 的 Parts，所以定位后仍经过统一 hydrate，而不是消费 HotInfo skeleton。
       const latestAssistant = yield* sessions
-        .findMessage(taskID, (item) => item.info.role === "assistant")
+        .findMessage(taskID, (info) => info.role === "assistant")
         .pipe(Effect.orDie)
       if (Option.isSome(latestAssistant)) {
         const latest = inspectMessage(latestAssistant.value)

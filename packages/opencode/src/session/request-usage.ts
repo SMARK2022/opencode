@@ -279,7 +279,10 @@ export const layer = Layer.effect(
 
     const recordAssistant: Interface["recordAssistant"] = Effect.fn("RequestUsage.recordAssistant")(function* (input) {
       // 中文说明：assistant 粒度单独落表，便于同一 request 下多模型/多回合统计。
-      const stepTotals = MessageV2.parts(input.assistant.id).reduce(
+      // 统计只消费 step-finish 的 token/cost 热字段，不应为同一 assistant 的 tool output 或 reasoning 预热。
+      // 专用查询以 JSON discriminator 在 SQL 侧过滤；cold_ref 不改变 step-finish，因为该类型不在冷字段白名单。
+      // reduce 保持原有多 step 汇总口径，优化只收窄读取集合，不改变 total fallback 公式。
+      const stepTotals = MessageV2.stepFinishParts(input.assistant.id).reduce(
         (acc, part) => {
           if (part.type !== "step-finish") return acc
           return {

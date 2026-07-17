@@ -1584,8 +1584,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           ...(current.model.variant && current.model.variant !== "default" ? { variant: current.model.variant } : {}),
         }
       }
+      // model fallback 的 predicate 只依赖 role/model 热字段；扫描旧 session 不应为 summary.diffs 或 Parts 预热。
+      // findMessage 仍只对最终 user hydrate，后续返回完整 model contract 与原有 newest-first 语义不变。
       const match = yield* sessions
-        .findMessage(sessionID, (m) => m.info.role === "user" && !!m.info.model)
+        .findMessage(sessionID, (info) => info.role === "user" && !!info.model)
         .pipe(Effect.orDie)
       if (Option.isSome(match) && match.value.info.role === "user") return match.value.info.model
       return yield* provider.defaultModel()
@@ -2190,7 +2192,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     })
 
     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
-      const match = yield* sessions.findMessage(sessionID, (m) => m.info.role !== "user").pipe(Effect.orDie)
+      // compact 只需定位最新 assistant；热 predicate 避免为每个历史候选读取 tool/reasoning output。
+      // 找到后必须返回完整 WithParts，因为 compact caller 会继续消费真实 message；不可直接返回 HotInfo。
+      const match = yield* sessions.findMessage(sessionID, (info) => info.role !== "user").pipe(Effect.orDie)
       if (Option.isSome(match)) return match.value
       const msgs = yield* sessions.messages({ sessionID, limit: 1 }).pipe(Effect.orDie)
       if (msgs.length > 0) return msgs[0]

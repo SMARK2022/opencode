@@ -5,6 +5,9 @@ import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { NotFoundError } from "@/storage/storage"
+import { ColdStorage } from "@/storage/cold"
+import { Database } from "@/storage/db"
+import { SessionTable } from "@/session/session.sql"
 import * as Log from "@opencode-ai/core/util/log"
 import { testEffect } from "../lib/effect"
 
@@ -555,6 +558,16 @@ describe("MessageV2.get", () => {
 })
 
 describe("Session.messages", () => {
+  it.instance("returns an empty bounded range for limit zero", () =>
+    withSession(({ session, sessionID }) =>
+      Effect.gen(function* () {
+        yield* fill(sessionID, 3)
+        // 0 是显式范围而不是“未提供”；退化为全量会在 cold session 上触发无意义持久预热。
+        expect(yield* session.messages({ sessionID, limit: 0 })).toEqual([])
+      }),
+    ),
+  )
+
   it.instance("returns all messages in chronological order across pages", () =>
     withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
@@ -581,7 +594,11 @@ describe("Session.findMessage", () => {
     withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
         const ids = yield* fill(sessionID, 3)
+        const hiddenID = yield* addUser(sessionID)
+        const hidden = yield* MessageV2.get({ sessionID, messageID: hiddenID })
+        yield* session.updateMessage({ ...hidden.info, hidden: { time: Date.now(), reason: "undo" } })
         const result = yield* session.findMessage(sessionID, () => true)
+        // 旧 findMessage 经 visible Session.messages 搜索；HotInfo 优化不能让更新但 hidden 的 Message 抢占结果。
         expect(Option.isSome(result) ? result.value.info.id : undefined).toBe(ids.at(-1))
       }),
     ),
@@ -595,6 +612,154 @@ describe("Session.findMessage", () => {
       expect(error).toBeInstanceOf(NotFoundError)
       expect(error.message).toBe(`Session not found: ${fake}`)
     }),
+  )
+
+  it.instance("scans HotInfo without thawing Parts until a Message matches", () =>
+    withSession(({ session, sessionID }) =>
+      Effect.gen(function* () {
+        const userID = yield* addUser(sessionID)
+        const output = "find-hot-output-".repeat(512)
+        const partID = PartID.ascending()
+        yield* session.updatePart({
+          id: partID,
+          sessionID,
+          messageID: userID,
+          type: "tool",
+          callID: "find-hot-call",
+          tool: "read",
+          state: {
+            status: "completed",
+            input: {},
+            output,
+            title: "read",
+            metadata: {},
+            time: { start: 1, end: 2 },
+          },
+        })
+        const hiddenPartID = PartID.ascending()
+        yield* session.updatePart({
+          id: hiddenPartID,
+          sessionID,
+          messageID: userID,
+          type: "text",
+          text: "hidden-find-part",
+          hidden: { time: Date.now(), reason: "undo" },
+        })
+        Database.use((db) =>
+          db
+            .update(SessionTable)
+            .set({ time_updated: Date.now() - 31 * 24 * 60 * 60 * 1000 })
+            .where(Database.eq(SessionTable.id, sessionID))
+            .run(),
+        )
+        expect(ColdStorage.freezeOwner({ type: "part", id: partID, now: Date.now() }).type).toBe("frozen")
+
+        const none = yield* session.findMessage(sessionID, () => false)
+        expect(Option.isNone(none)).toBe(true)
+        expect(ColdStorage.status().coldOwners).toBe(1)
+
+        const match = yield* session.findMessage(sessionID, (info) => info.role === "user")
+        expect(Option.isSome(match)).toBe(true)
+        const matchedPart = Option.isSome(match) ? match.value.parts.find((part) => part.id === partID) : undefined
+        expect(
+          matchedPart?.type === "tool" && matchedPart.state.status === "completed" ? matchedPart.state.output : undefined,
+        ).toBe(output)
+        expect(Option.isSome(match) ? match.value.parts.some((part) => part.id === hiddenPartID) : true).toBe(false)
+        expect(ColdStorage.status().coldOwners).toBe(0)
+      }),
+    ),
+  )
+
+  it.instance("bounds doom-loop history to the previous assistant tool tail", () =>
+    withSession(({ session, sessionID }) =>
+      Effect.gen(function* () {
+        const userID = yield* addUser(sessionID)
+        const previousAssistantID = yield* addAssistant(sessionID, userID)
+        const partIDs: PartID[] = []
+        for (let i = 0; i < 5; i++) {
+          const id = PartID.ascending()
+          partIDs.push(id)
+          yield* session.updatePart({
+            id,
+            sessionID,
+            messageID: previousAssistantID,
+            type: "tool",
+            callID: `bounded-${i}`,
+            tool: "read",
+            state: {
+              status: "completed",
+              input: { i },
+              output: `bounded-output-${i}`.repeat(256),
+              title: "read",
+              metadata: {},
+              time: { start: i + 1, end: i + 2 },
+            },
+          })
+        }
+        const hiddenPartID = PartID.ascending()
+        yield* session.updatePart({
+          id: hiddenPartID,
+          sessionID,
+          messageID: previousAssistantID,
+          type: "tool",
+          callID: "bounded-hidden-part",
+          tool: "read",
+          hidden: { time: Date.now(), reason: "undo" },
+          state: {
+            status: "completed",
+            input: { hidden: true },
+            output: "hidden-part",
+            title: "read",
+            metadata: {},
+            time: { start: 10, end: 11 },
+          },
+        })
+        const hiddenAssistantID = yield* addAssistant(sessionID, userID)
+        const hiddenAssistant = yield* MessageV2.get({ sessionID, messageID: hiddenAssistantID })
+        yield* session.updateMessage({
+          ...hiddenAssistant.info,
+          hidden: { time: Date.now(), reason: "undo" },
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID,
+          messageID: hiddenAssistantID,
+          type: "tool",
+          callID: "bounded-hidden-assistant",
+          tool: "read",
+          state: {
+            status: "completed",
+            input: { hidden: true },
+            output: "hidden-assistant",
+            title: "read",
+            metadata: {},
+            time: { start: 12, end: 13 },
+          },
+        })
+        const currentAssistantID = yield* addAssistant(sessionID, userID)
+        Database.use((db) =>
+          db
+            .update(SessionTable)
+            .set({ time_updated: Date.now() - 31 * 24 * 60 * 60 * 1000 })
+            .where(Database.eq(SessionTable.id, sessionID))
+            .run(),
+        )
+        for (const id of partIDs) {
+          expect(ColdStorage.freezeOwner({ type: "part", id, now: Date.now() }).type).toBe("frozen")
+        }
+
+        // 旧全量 Session.messages 默认排除 hidden Message/Part；bounded seam 必须保持同一可见性语义。
+        // hidden assistant 更靠近 current、hidden part 位于 visible tail 之后，任一过滤缺失都会改变 expected IDs。
+        const tail = MessageV2.previousAssistantToolTail({
+          sessionID,
+          before: { id: currentAssistantID, time: Date.now() },
+          limit: 3,
+        })
+        expect(tail.map((part) => part.id)).toEqual(partIDs.slice(-3))
+        expect(tail.every((part) => part.type === "tool" && part.state.status === "completed")).toBe(true)
+        expect(ColdStorage.status().coldOwners).toBe(2)
+      }),
+    ),
   )
 })
 

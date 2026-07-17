@@ -8,6 +8,7 @@ import * as Session from "./session"
 import { MessageV2 } from "./message-v2"
 import { SessionTable, MessageTable, PartTable } from "./session.sql"
 import { WorkspaceTable } from "@/control-plane/workspace.sql"
+import { ColdStorage } from "@/storage/cold"
 import { Log } from "@opencode-ai/core/util/log"
 import nextProjectors from "./projectors-next"
 
@@ -119,7 +120,21 @@ export default [
   }),
 
   SyncEvent.project(Session.Event.Deleted, (db, data) => {
+    ColdStorage.releaseSession(db, data.sessionID)
     db.delete(SessionTable).where(eq(SessionTable.id, data.sessionID)).run()
+  }),
+
+  SyncEvent.project(Session.Event.Forked, (db, data) => {
+    // fork 只复制 raw rows；cold owner 共享同一 hash，避免业务 hydrate 把父前缀先 thaw 成热副本。
+    // clonePrefix 与 EventSequence 投影共享 immediate transaction，owner/ref 任一步失败都会整体回滚。
+    // projector 不发布逐 Message/Part update event，避免 fork 前缀产生大量中间可观察状态。
+    const parts = ColdStorage.clonePrefix(db, data)
+    // 旧 fork 逐 PartUpdated 时会累加 step-finish usage；raw clone 必须在同一 projector transaction 保留该行为。
+    // storage 只返回已复制的 raw data，usage owner 仍在 projector，不能把 Session totals 计算下沉到 cold module。
+    for (const part of parts) {
+      const value = usage(part)
+      if (value) applyUsage(db, data.sessionID, value)
+    }
   }),
 
   SyncEvent.project(MessageV2.Event.Updated, (db, data) => {
@@ -127,15 +142,13 @@ export default [
     const { id, sessionID, ...rest } = data.info
 
     try {
-      db.insert(MessageTable)
-        .values({
-          id,
-          session_id: sessionID,
-          time_created,
-          data: rest,
-        })
-        .onConflictDoUpdate({ target: MessageTable.id, set: { data: rest } })
-        .run()
+      // durable event 携带完整业务 Info；replaceMessage 统一清旧 ref，projector 不猜测冷字段 touched mask。
+      ColdStorage.replaceMessage(db, {
+        id,
+        session_id: sessionID,
+        time_created,
+        data: rest,
+      })
     } catch (err) {
       if (!foreign(err)) throw err
       log.warn("ignored late message update", { messageID: id, sessionID })
@@ -151,6 +164,7 @@ export default [
       const previous = usage(row.data)
       if (previous) applyUsage(db, data.sessionID, previous, -1)
     }
+    ColdStorage.releaseMessage(db, data.messageID, data.sessionID)
     db.delete(MessageTable)
       .where(and(eq(MessageTable.id, data.messageID), eq(MessageTable.session_id, data.sessionID)))
       .run()
@@ -165,6 +179,7 @@ export default [
     const previous = row && usage(row.data)
     if (previous) applyUsage(db, data.sessionID, previous, -1)
 
+    ColdStorage.releasePart(db, data.partID, data.sessionID)
     db.delete(PartTable)
       .where(and(eq(PartTable.id, data.partID), eq(PartTable.session_id, data.sessionID)))
       .run()
@@ -175,16 +190,14 @@ export default [
     const row = db.select().from(PartTable).where(eq(PartTable.id, id)).get()
 
     try {
-      db.insert(PartTable)
-        .values({
-          id,
-          message_id: messageID,
-          session_id: sessionID,
-          time_created: data.time,
-          data: rest,
-        })
-        .onConflictDoUpdate({ target: PartTable.id, set: { data: rest } })
-        .run()
+      // usage 差量与完整 Part replacement 位于同一 transaction，cold update 失败不能只提交统计变化。
+      ColdStorage.replacePart(db, {
+        id,
+        message_id: messageID,
+        session_id: sessionID,
+        time_created: data.time,
+        data: rest,
+      })
       const previous = row && usage(row.data)
       const next = usage(data.part)
       if (previous) applyUsage(db, row.session_id, previous, -1)

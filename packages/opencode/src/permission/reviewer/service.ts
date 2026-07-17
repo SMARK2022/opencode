@@ -296,8 +296,10 @@ export const layer = Layer.effect(
           }
         }
         // 旧 session 或 projector 未写入 model 时，用最近 user message 的 model
+        // role/model 都属于 HotInfo；reviewer fallback 扫描不能因为一条权限请求展开整段历史工具输出。
+        // 仅最终匹配 Message 被 hydrate，现有 best-effort error fallback 仍只处理真实读取失败。
         const match = yield* sessions
-          .findMessage(sessionID, (m) => m.info.role === "user" && !!m.info.model)
+          .findMessage(sessionID, (info) => info.role === "user" && !!info.model)
           .pipe(Effect.catch(() => Effect.succeed(Option.none())))
         if (Option.isSome(match) && match.value.info.role === "user" && match.value.info.model) {
           return {

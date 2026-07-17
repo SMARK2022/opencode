@@ -352,6 +352,23 @@ const CreatedEventSchema = Schema.Struct({
   info: Info,
 })
 
+const MessageForkMapSchema = Schema.Struct({
+  sourceID: MessageID,
+  targetID: MessageID,
+})
+
+const PartForkMapSchema = Schema.Struct({
+  sourceID: PartID,
+  targetID: PartID,
+})
+
+const ForkedEventSchema = Schema.Struct({
+  sessionID: SessionID,
+  sourceSessionID: SessionID,
+  messageMap: Schema.Array(MessageForkMapSchema),
+  partMap: Schema.Array(PartForkMapSchema),
+})
+
 const UpdatedShare = Schema.Struct({
   url: Schema.optional(Schema.NullOr(Schema.String)),
 })
@@ -408,6 +425,12 @@ export const Event = {
     version: 1,
     aggregate: "sessionID",
     schema: CreatedEventSchema,
+  }),
+  Forked: SyncEvent.define({
+    type: "session.forked",
+    version: 1,
+    aggregate: "sessionID",
+    schema: ForkedEventSchema,
   }),
   Diff: BusEvent.define(
     "session.diff",
@@ -556,7 +579,7 @@ export interface Interface {
   /** Finds the first message matching the predicate, searching newest-first. */
   readonly findMessage: (
     sessionID: SessionID,
-    predicate: (msg: MessageV2.WithParts) => boolean,
+    predicate: (info: MessageV2.HotInfo) => boolean,
   ) => Effect.Effect<Option.Option<MessageV2.WithParts>, NotFound>
 }
 
@@ -654,25 +677,21 @@ export const layer: Layer.Layer<
 
     const remove: Interface["remove"] = Effect.fnUntraced(function* (sessionID: SessionID) {
       const session = yield* get(sessionID)
-      try {
-        // `remove` needs to work in all cases, such as broken sessions that
-        // run cleanup without instance state.
-        const hasInstance = yield* InstanceState.directory.pipe(
-          Effect.as(true),
-          Effect.catchCause(() => Effect.succeed(false)),
-        )
+      // 删除前允许缺少 instance context，但 projector/cold corruption 仍必须向调用方传播。
+      // 吞掉 releaseSession 的错误会把未删除 session 报告成成功，并隐藏 refcount/数据损坏。
+      const hasInstance = yield* InstanceState.directory.pipe(
+        Effect.as(true),
+        Effect.catchCause(() => Effect.succeed(false)),
+      )
 
-        if (hasInstance) yield* cancelBackgroundJobs(background, sessionID)
-        const kids = yield* children(sessionID)
-        for (const child of kids) {
-          yield* remove(child.id)
-        }
-
-        yield* sync.run(Event.Deleted, { sessionID, info: session }, { publish: hasInstance })
-        yield* sync.remove(sessionID)
-      } catch (e) {
-        log.error(e)
+      if (hasInstance) yield* cancelBackgroundJobs(background, sessionID)
+      const kids = yield* children(sessionID)
+      for (const child of kids) {
+        yield* remove(child.id)
       }
+
+      yield* sync.run(Event.Deleted, { sessionID, info: session }, { publish: hasInstance })
+      yield* sync.remove(sessionID)
     })
 
     const updateMessage = <T extends MessageV2.Info>(msg: T): Effect.Effect<T> =>
@@ -720,12 +739,7 @@ export const layer: Layer.Layer<
           .get(),
       )
       if (!row) return
-      return {
-        ...row.data,
-        id: row.id,
-        sessionID: row.session_id,
-        messageID: row.message_id,
-      } as MessageV2.Part
+      return MessageV2.decodePartRow(row)
     })
 
     const create = Effect.fn("Session.create")(function* (input?: {
@@ -760,35 +774,24 @@ export const layer: Layer.Layer<
         workspaceID: original.workspaceID,
         title,
       })
-      const msgs = yield* messages({ sessionID: input.sessionID })
-      const idMap = new Map<string, MessageID>()
-
-      for (const msg of msgs) {
-        if (input.messageID && msg.info.id >= input.messageID) break
-        const newID = MessageID.ascending()
-        idMap.set(msg.info.id, newID)
-
-        const parentID = msg.info.role === "assistant" && msg.info.parentID ? idMap.get(msg.info.parentID) : undefined
-        const cloned = yield* updateMessage({
-          ...msg.info,
+      const raw = MessageV2.rawForkRows({ sessionID: input.sessionID, messageID: input.messageID })
+      // source-to-target map 在业务 owner 生成，projector 只消费确定映射；父子 ID 永不共享。
+      // raw rows 不经过 Message decoder，cold prefix 不会因 fork 被预热后重新压缩。
+      // 一个 Forked event 把 owner inserts 与 refcount 增量放进同一 SyncEvent transaction。
+      const messageMap = raw.messages.map((row) => ({ sourceID: row.id, targetID: MessageID.ascending() }))
+      const partMap = raw.parts.map((row) => ({ sourceID: row.id, targetID: PartID.ascending() }))
+      yield* sync
+        .run(Event.Forked, {
           sessionID: session.id,
-          id: newID,
-          ...(parentID && { parentID }),
+          sourceSessionID: input.sessionID,
+          messageMap,
+          partMap,
         })
-
-        for (const part of msg.parts) {
-          const p: MessageV2.Part = {
-            ...part,
-            id: PartID.ascending(),
-            messageID: cloned.id,
-            sessionID: session.id,
-          }
-          if (p.type === "compaction" && p.tail_start_id) {
-            p.tail_start_id = idMap.get(p.tail_start_id)
-          }
-          yield* updatePart(p)
-        }
-      }
+        .pipe(
+          // target session 先创建；clone transaction 拒绝时删除空 target，不能留下用户可见 orphan。
+          // 该清理只处理本次新 session，不回退到 hydrate-and-copy 的第二条成功路径。
+          Effect.tapError(() => remove(session.id)),
+        )
       return session
     })
 
@@ -839,12 +842,16 @@ export const layer: Layer.Layer<
     })
 
     const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
-      if (input.limit) {
+      // 显式 limit 是 TUI/HTTP 的 bounded path，只 hydrate 单页；不能先调用全量 stream 再在内存截断。
+      // 无 limit 保留既有“完整 transcript”合同，但仍以 50 条 page 顺序读取，避免一次 SQL 搬运全部 rows。
+      // 每页 cursor 在 storage thaw 提交后推进，读取中断不会把尚未请求的后续历史意外预热。
+      // reverse 组合保持旧 oldest-first 返回顺序，而 MessageV2.page 自身继续提供 newest-first 页面。
+      if (input.limit !== undefined) {
         return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit, fromMessageID: input.fromMessageID })).items
       }
 
       const size = 50
-      const result = [] as MessageV2.WithParts[]
+      const result: MessageV2.WithParts[] = []
       let before: string | undefined
       while (true) {
         const page = yield* MessageV2.page({ sessionID: input.sessionID, limit: size, before, fromMessageID: input.fromMessageID })
@@ -893,21 +900,9 @@ export const layer: Layer.Layer<
       yield* bus.publish(MessageV2.Event.PartDelta, input)
     })
 
-    /** Finds the first message matching the predicate, searching newest-first. */
+    /** 只用热 Message info 定位，并仅 hydrate 最新匹配 Message，避免扫描页触发 cold Part thaw。 */
     const findMessage: Interface["findMessage"] = Effect.fn("Session.findMessage")(function* (sessionID, predicate) {
-      const size = 50
-      let before: string | undefined
-      while (true) {
-        const page = yield* MessageV2.page({ sessionID, limit: size, before })
-        if (page.items.length === 0) break
-        for (let i = page.items.length - 1; i >= 0; i--) {
-          const item = page.items[i]
-          if (item && predicate(item)) return Option.some(item)
-        }
-        if (!page.more || !page.cursor) break
-        before = page.cursor
-      }
-      return Option.none<MessageV2.WithParts>()
+      return yield* MessageV2.findHot({ sessionID, predicate })
     })
 
     return Service.of({

@@ -17,6 +17,7 @@ import { fileURLToPath } from "url"
 import { tmpdir } from "../../fixture/fixture"
 import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
 import * as Win32Module from "../../../src/cli/cmd/tui/win32"
+import type { MaintenanceTask } from "../../../src/storage/cold"
 
 const WORKER_TS = fileURLToPath(new URL("../../../src/cli/cmd/tui/worker.ts", import.meta.url))
 // `daemon stop` 是用户可见的 CLI 行为，测试必须从真实入口验证，而不是直接调用内部 helper；
@@ -419,6 +420,176 @@ describe("daemon lifecycle", () => {
       }
     },
     DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
+  test(
+    "maintenance lease rejects a live owner and reclaims a dead owner",
+    async () => {
+      await using tmp = await tmpdir()
+      const dbPath = path.join(tmp.path, "lease.db")
+      // 第一段锁定 live owner 不能被第二任务抢占；release 后手工构造 dead owner 覆盖 crash reclaim。
+      // dead reclaim 必须让新 lease assertOwned 成功，而不是仅删除旧目录后留下未发布窗口。
+      // 该测试使用显式 dbPath，不触碰开发者 daemon lock/DB，也不依赖平台 advisory lock 实现。
+      const first = await ServerLockModule.acquireMaintenanceLease({ taskID: "dbm_live", dbPath })
+      await expect(ServerLockModule.acquireMaintenanceLease({ taskID: "dbm_competing", dbPath })).rejects.toBeInstanceOf(
+        ServerLockModule.MaintenanceBusyError,
+      )
+      await first.release()
+
+      const lockDir = path.join(`${dbPath}.maintenance`, "lock")
+      await mkdir(lockDir, { recursive: true })
+      await Bun.write(
+        path.join(lockDir, "owner.json"),
+        JSON.stringify({
+          pid: 2_147_483_647,
+          token: "dead-owner",
+          taskID: "dbm_dead",
+          dbPath: path.resolve(dbPath),
+          startedAt: 1,
+        }),
+      )
+      const recovered = await ServerLockModule.acquireMaintenanceLease({ taskID: "dbm_recovered", dbPath })
+      recovered.assertOwned()
+      await recovered.release()
+
+      // record 放在当前 DB root 却声明另一个 dbPath 时必须拒绝，防止 resume 锁错数据库后执行当前连接。
+      const now = Date.now()
+      const taskDir = path.join(`${dbPath}.maintenance`, "tasks")
+      await mkdir(taskDir, { recursive: true })
+      await Bun.write(
+        path.join(taskDir, "dbm_wrong-path.json"),
+        JSON.stringify({
+          version: 1,
+          taskID: "dbm_wrong-path",
+          dbPath: path.join(tmp.path, "other.db"),
+          operation: "compress",
+          args: { operation: "compress", olderThanMs: 0, batchSize: 1 },
+          status: "interrupted",
+          cursor: { owner: "message", lastID: "" },
+          processed: 0,
+          skipped: 0,
+          failed: 0,
+          rawBytes: 0,
+          compressedBytes: 0,
+          createdAt: now,
+          updatedAt: now,
+        }),
+      )
+      await expect(ServerLockModule.readMaintenanceTask("dbm_wrong-path", dbPath)).rejects.toBeInstanceOf(
+        ServerLockModule.MaintenanceLeaseError,
+      )
+    },
+    10_000,
+  )
+
+  test(
+    "daemon maintenance control persists and completes a task",
+    async () => {
+      // 真实 worker 子进程覆盖 token-protected start/status 协议，不能用直接调用 helper 代替 daemon lifecycle。
+      // 空数据库仍创建持久 task，证明 task contract 不依赖存在可压缩 owner 才可查询。
+      // 轮询 terminal record 而非固定 sleep，避免 CI 启动速度影响行为断言。
+      // 测试结束走 SIGTERM graceful shutdown，确保 maintenance 完成后 daemon lock 可正常释放。
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000" })
+
+      try {
+        if (!lock.controlPort) throw new Error("missing control port")
+        const start = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLockModule.CONTROL_MAINTENANCE_PATH}`, {
+          method: "POST",
+          headers: { [ServerLockModule.CONTROL_TOKEN_HEADER]: lock.token, "content-type": "application/json" },
+          body: JSON.stringify({ operation: "compress", olderThanMs: 0, batchSize: 1 }),
+        })
+        expect(start.status).toBe(202)
+        const started: unknown = await start.json()
+        if (
+          typeof started !== "object" ||
+          started === null ||
+          !("taskID" in started) ||
+          typeof started.taskID !== "string" ||
+          !("status" in started) ||
+          typeof started.status !== "string" ||
+          !("createdAt" in started) ||
+          typeof started.createdAt !== "number"
+        ) {
+          throw new Error("invalid maintenance start response")
+        }
+        expect(started.taskID).toStartWith("dbm_")
+        expect(started.status).toBe("queued")
+        expect(started.createdAt).toBeGreaterThan(0)
+
+        let terminal: { status: string } | undefined
+        const deadline = Date.now() + 10_000
+        while (Date.now() < deadline) {
+          const response = await fetch(
+            `http://127.0.0.1:${lock.controlPort}${ServerLockModule.CONTROL_MAINTENANCE_STATUS_PATH}?task=${started.taskID}`,
+            { headers: { [ServerLockModule.CONTROL_TOKEN_HEADER]: lock.token } },
+          )
+          const body: unknown = await response.json()
+          if (typeof body !== "object" || body === null || !("status" in body) || typeof body.status !== "string") {
+            throw new Error("invalid maintenance status response")
+          }
+          terminal = { status: body.status }
+          if (terminal.status === "completed" || terminal.status === "failed") break
+          await Bun.sleep(50)
+        }
+        expect(terminal?.status).toBe("completed")
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 20_000,
+  )
+
+  test(
+    "daemon startup resumes an interrupted maintenance task from its persisted record",
+    async () => {
+      // interrupted record 在 worker 启动前落盘，覆盖 startup timer 尚未登记 activeMaintenance 的竞争窗口。
+      // startup idle 小于常规任务窗口，completed 断言证明 recoveryPending 阻止 daemon 提前退出。
+      // operation/args/cursor 全部来自 record，测试不通过 control resume 人工触发恢复。
+      // 独立 dbPath/lock/XDG 目录保证不会读取开发者实际 daemon 或 maintenance tasks。
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const dbPath = path.join(tmp.path, "opencode.db")
+      const task: MaintenanceTask = {
+        version: 1,
+        taskID: "dbm_startup-recovery",
+        dbPath,
+        operation: "compress",
+        args: { operation: "compress", olderThanMs: 0, batchSize: 1 },
+        status: "interrupted",
+        cursor: { owner: "message", lastID: "" },
+        processed: 0,
+        skipped: 0,
+        failed: 0,
+        rawBytes: 0,
+        compressedBytes: 0,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }
+      await ServerLockModule.writeMaintenanceTask(task)
+      const { proc } = await spawnDaemon(lockPath, {
+        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
+        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
+      })
+
+      try {
+        const deadline = Date.now() + 10_000
+        let recovered: MaintenanceTask | undefined
+        while (Date.now() < deadline) {
+          recovered = await ServerLockModule.readMaintenanceTask(task.taskID, dbPath)
+          if (recovered?.status === "completed" || recovered?.status === "failed") break
+          await Bun.sleep(50)
+        }
+        if (recovered?.status === "failed") throw new Error(`startup recovery failed: ${recovered.error ?? "unknown"}`)
+        expect(recovered?.status).toBe("completed")
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 20_000,
   )
 
   test(

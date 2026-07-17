@@ -362,8 +362,10 @@ export const TaskTool = Tool.define(
 
       const resumeWhenIdle: (input: { userID: MessageID; state: "completed" | "error" }) => Effect.Effect<void> =
         Effect.fn("TaskTool.resumeWhenIdle")(function* (input: { userID: MessageID; state: "completed" | "error" }) {
+          // background completion 只比较最新 user ID；轮询期间不能反复 thaw 整个父会话 transcript。
+          // findMessage 最终 hydrate 一条保持删除/并发检查的完整对象语义，无匹配则零 Part query。
           const latest = yield* sessions
-            .findMessage(ctx.sessionID, (item) => item.info.role === "user")
+            .findMessage(ctx.sessionID, (info) => info.role === "user")
             .pipe(Effect.orDie)
           if (Option.isNone(latest)) return
           if (latest.value.info.id !== input.userID) return
