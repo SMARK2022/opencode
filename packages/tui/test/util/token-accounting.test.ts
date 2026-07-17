@@ -294,12 +294,12 @@ describe("tokenAccounting", () => {
     const request = { messageID: "u", input: 4000, output: 30, stepInput: 1000, stepOutput: 10, cost: 2 }
     // 窗口没有旧消息也不能截断持久累计，未记录会话费用时沿用零值。
     const confirmed = snapshot(request)
-    expect(confirmed.request).toEqual({ input: 1000, output: 10, totalInput: 4000, totalOutput: 30, cost: 2 })
+    expect(confirmed.request).toEqual({ input: 1000, output: 10, totalInput: 4000, totalInputPure: 0, totalOutput: 30, cost: 2 })
     expect(confirmed.session).toEqual({ input: 9000, output: 700, reasoning: 30, cacheRead: 100, cacheWrite: 20, cost: 0 })
     // 首包前由服务端发布估算；零估算同样权威，不能借上一个请求的窗口补值。
     const prepared = { ...request, stepInput: 0, stepOutput: 0, estimatedInput: 777,
       model: { providerID: "p", modelID: "m", contextLimit: 2000 } }
-    expect(snapshot(prepared).request).toEqual({ input: 777, output: 0, totalInput: 4777, totalOutput: 30, cost: 2 })
+    expect(snapshot(prepared).request).toEqual({ input: 777, output: 0, totalInput: 4777, totalInputPure: 0, totalOutput: 30, cost: 2 })
     expect(snapshot(prepared).contextPercent).toBe(39)
     expect(snapshot({ ...prepared, estimatedInput: 0 }).request.totalInput).toBe(4000)
     expect(snapshot(prepared).breakdown).toBeNull()
@@ -336,10 +336,10 @@ describe("tokenAccounting", () => {
     const acc = tokenAccounting([history, last], (id) => parts[id] ?? [], undefined, {
       session: { tokens, cost: 3, request }, last, parts: parts.a,
     })
-    // 历史输出密度为 8，输入密度为 2；游标覆盖的工具结果不能再加入 prepared input。
+    // 密度仍分别为 8/2，游标覆盖结果不重复计入；窗口缺少 parent user 时，不从含 cache 的投影反推 pure input。
     expect(acc.ratio.output).toBe(8)
     expect(acc.step).toMatchObject({ input: 777, output: 20 })
-    expect(acc.request).toEqual({ input: 777, output: 20, totalInput: 4777, totalOutput: 320, cost: 2 })
+    expect(acc.request).toEqual({ input: 777, output: 20, totalInput: 4777, totalInputPure: 0, totalOutput: 320, cost: 2 })
     expect(acc.session).toEqual({ input: 9000, output: 700, reasoning: 30, cacheRead: 100, cacheWrite: 20, cost: 3 })
     const native = { ...history, tokens: { input: 400, output: 80, reasoning: 20, cache: { read: 0, write: 0 } } }
     const calibrated = tokenAccounting([native, last], (id) => id === "old" ? parts.old.slice(0, 1) : parts.a,

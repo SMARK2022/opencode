@@ -3,6 +3,7 @@ import {
   createContext,
   createEffect,
   createMemo,
+  createResource,
   createSignal,
   For,
   Match,
@@ -126,7 +127,8 @@ import { ContextUsagePanel } from "./context-usage"
 import { DialogExportOptions } from "../../ui/dialog-export-options"
 import * as Model from "../../util/model"
 import { formatTranscript } from "../../util/transcript"
-import { sessionEpilogue } from "../../util/presentation"
+import { formatUsageStats, sessionEpilogue } from "../../util/presentation"
+import { tokenAccounting } from "../../util/token-accounting"
 import { layoutGroups, setPreLayoutSiblingMargin } from "../../util/layout"
 import { useTuiConfig } from "../../config"
 import { useClipboard } from "../../context/clipboard"
@@ -255,11 +257,7 @@ export function Session() {
     return current ? { directory: current.directory, workspaceID: current.workspaceID } : undefined
   })
 
-  createEffect(() => {
-    const title = Locale.truncate(session()?.title ?? "", 50)
-    setEpilogue(sessionEpilogue({ title, sessionID: session()?.id }))
-  })
-  onCleanup(() => setEpilogue())
+
   const children = createMemo(() => {
     const parentID = session()?.parentID ?? session()?.id
     return sync.data.session
@@ -267,12 +265,29 @@ export function Session() {
       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   })
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
+  // Session 账本独立于分页；退出摘要复用已有 projection，不能仅累计窗口内的消息。
+  // 此处只消费 session 汇总，不为退出文本另建 request 或 Message/Part owner。
+  const sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? [], undefined, { session: session(), last: undefined, parts: [] }))
   // #458：culling 改由 stuck-to-bottom 状态驱动——粘底流式仍裁剪，滚入历史时不裁
   const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
   // 粘底时流式裁剪保持渲染热路径；离底浏览历史时暂停裁剪保留测量。
   const viewportCulling = createMemo(() =>
     shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
   )
+  // #490：epilogue effect 依赖 messages/parts 的 accounting memo，确保退出前已反映最新统计快照。
+  createEffect(() => {
+    const title = Locale.truncate(session()?.title ?? "", 50)
+    const usage = sessionUsage().session
+    setEpilogue(
+      sessionEpilogue({
+        title,
+        sessionID: session()?.id,
+        usage: { input: usage.input, output: usage.output + usage.reasoning, cost: usage.cost },
+      }),
+    )
+  })
+  onCleanup(() => setEpilogue())
+
   const messagesBeforeRevert = () => {
     const messageID = session()?.revert?.messageID
     if (!messageID) return messages()
@@ -1723,6 +1738,24 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
     // final() 已保证 completed 存在；此处仅做口径统一，不重算起点
     return assistantTurnDuration(messages(), props.message)
   })
+  // 完成记录读精确parent账本；分页窗口不能冒充完整turn，也不借用活跃请求投影。
+  const usageSDK = useSDK()
+  const [turnRequest] = createResource(
+    () => footerVisible()
+      ? `${props.message.sessionID}:${props.message.parentID}:${messages().flatMap(message => message.role === "assistant" && message.parentID === props.message.parentID ? [`${message.id}@${message.time.completed ?? "running"}`] : []).join(",")}`
+      : undefined,
+    async () => (await usageSDK.client.session.requestUsage.get({ sessionID: props.message.sessionID, requestID: props.message.parentID })).data,
+  )
+  const turnUsage = createMemo(() => {
+    if (!footerVisible()) return ""
+    // 失败不退回不完整窗口；状态文本保留可见性，避免把缺证据伪装成零费用。
+    if (turnRequest.error) return "usage unavailable"
+    const usage = turnRequest()
+    if (!usage) return turnRequest.loading ? "usage pending" : "usage unavailable"
+    // SDK允许特殊数值的wire字符串，不能把它们当成已确认的数字相加。
+    if (typeof usage.tokens.input !== "number" || typeof usage.tokens.output !== "number" || typeof usage.tokens.reasoning !== "number" || typeof usage.cost !== "number") return "usage unavailable"
+    return formatUsageStats({ input: usage.tokens.input, output: usage.tokens.output + usage.tokens.reasoning, cost: usage.cost })
+  })
 
   const childShortcut = useCommandShortcut("session.child.first")
   const backgroundShortcut = useCommandShortcut("session.background")
@@ -1809,6 +1842,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
                 <span style={{ fg: theme.textMuted }}> · {Locale.durationClock(duration())}</span>
                 {/* #243：durationClock 入参毫秒，与运行中 footer 同一口径 */}
               </Show>
+              <Show when={turnUsage()}>{(usage) => <span style={{ fg: theme.textMuted }}> · {usage()}</span>}</Show>
               <Show when={props.message.error?.name === "MessageAbortedError"}>
                 <span style={{ fg: theme.textMuted }}> · interrupted</span>
               </Show>

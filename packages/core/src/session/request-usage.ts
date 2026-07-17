@@ -3,9 +3,9 @@ import { Database } from "../database/database"
 import { Context, Effect, Layer, Schema } from "effect"
 import { optional } from "../schema"
 import { SessionV1, MessageID } from "../v1/session"
-import { and, desc, eq, lt } from "drizzle-orm"
+import { and, desc, eq, lt, sql } from "drizzle-orm"
 import { RequestUsageTable, RequestUsageAssistantTable } from "./request-usage.sql"
-import { PartTable } from "./sql"
+import { MessageTable, PartTable } from "./sql"
 import type { SessionSchema } from "./schema"
 type SessionID = SessionSchema.ID
 
@@ -119,7 +119,28 @@ const emptyTotals = (): Tokens => ({
   total: 0,
 })
 
-// 读取请求只映射存储字段，不在查询时偷偷重算账本或改变请求状态。
+// 已有账本只映射存储字段；旧历史只读归约，不补写账本或改变请求状态。
+function stepUsage(parts: ReadonlyArray<Schema.Schema.Type<typeof SessionV1.Part>>, fallback?: SessionV1.Assistant) {
+  const steps = parts.filter(part => part.type === "step-finish")
+  // 没有finish的已完成旧消息仍保留原tokens/cost；不能覆盖真实多step确认值。
+  if (steps.length === 0 && fallback?.time.completed !== undefined) {
+    const tokens = fallback.tokens
+    return { count: 1, costMicros: toMicros(fallback.cost), tokens: { ...tokens, total: tokens.total ?? (tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write) } }
+  }
+  return steps.reduce((acc, part) => ({
+    count: acc.count + 1,
+    tokens: {
+      input: acc.tokens.input + part.tokens.input,
+      output: acc.tokens.output + part.tokens.output,
+      reasoning: acc.tokens.reasoning + part.tokens.reasoning,
+      cache: { read: acc.tokens.cache.read + part.tokens.cache.read, write: acc.tokens.cache.write + part.tokens.cache.write },
+      total: acc.tokens.total + (part.tokens.total ?? (part.tokens.input + part.tokens.output + part.tokens.reasoning + part.tokens.cache.read + part.tokens.cache.write)),
+    },
+    // 每个step分别舍入为微美元，不能按当前模型重新定价历史费用。
+    costMicros: acc.costMicros + toMicros(part.cost ?? 0),
+  }), { count: 0, tokens: emptyTotals(), costMicros: 0 })
+}
+
 const rowToRequest = (row: typeof RequestUsageTable.$inferSelect): Request => ({
   sessionID: row.session_id,
   requestID: row.request_id,
@@ -257,27 +278,7 @@ export function make(db: Database.Interface["db"]): Interface {
         }))
       // V1 多个 step-finish 属于同一助手，不能只取末尾一条结算。
       // 不读取 text/reasoning 字符估算，账本只接受 provider 已确认用量。
-      const stepTotals = input.usage ?? parts.reduce(
-        (acc, part) => {
-          if (part.type !== "step-finish") return acc
-          return {
-            count: acc.count + 1,
-            tokens: {
-              input: acc.tokens.input + part.tokens.input,
-              output: acc.tokens.output + part.tokens.output,
-              reasoning: acc.tokens.reasoning + part.tokens.reasoning,
-              cache: {
-                read: acc.tokens.cache.read + part.tokens.cache.read,
-                write: acc.tokens.cache.write + part.tokens.cache.write,
-              },
-              total: acc.tokens.total + (part.tokens.total ?? (part.tokens.input + part.tokens.output + part.tokens.reasoning + part.tokens.cache.read + part.tokens.cache.write)),
-            },
-            // 舍入作用于单个已确认 step，不能先叠加浮点美元再统一舍入而改变 source 成本。
-            costMicros: acc.costMicros + toMicros(part.cost ?? 0),
-          }
-        },
-        { count: 0, tokens: emptyTotals(), costMicros: 0 },
-      )
+      const stepTotals = input.usage ?? stepUsage(parts)
       // 请求归属由调用者持久化身份给定，不能在此猜测最新用户消息。
       // 根身份必须先读请求行，压缩与普通请求即使共用模型也不能混合汇总。
       const requestRow = yield* db.select().from(RequestUsageTable)
@@ -367,6 +368,48 @@ export function make(db: Database.Interface["db"]): Interface {
       })).pipe(Effect.orDie)
     })
 
+    // source允许无账本旧历史；只在该具体存量边界读取完整parent桶，不写新请求行。
+    const historical = Effect.fn("RequestUsage.historical")(function* (input: { sessionID: SessionID; requestID: MessageID }) {
+      const rows = yield* db.select().from(MessageTable).where(and(eq(MessageTable.session_id, input.sessionID),
+        sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
+        sql`json_extract(${MessageTable.data}, '$.parentID') = ${input.requestID}`,
+      )).orderBy(desc(MessageTable.time_created), desc(MessageTable.id)).all().pipe(Effect.orDie)
+      const assistants: Assistant[] = []
+      for (const row of rows) {
+        const info = Schema.decodeUnknownSync(SessionV1.Info)({ ...row.data, id: row.id, sessionID: row.session_id })
+        if (info.role !== "assistant") continue
+        const parts = (yield* db.select().from(PartTable).where(and(eq(PartTable.session_id, input.sessionID), eq(PartTable.message_id, info.id), sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`))
+          .all().pipe(Effect.orDie)).map(part => Schema.decodeUnknownSync(SessionV1.Part)({ ...part.data, id: part.id, messageID: part.message_id, sessionID: part.session_id }))
+        const totals = stepUsage(parts, info)
+        assistants.push({ sessionID: input.sessionID, requestID: input.requestID, rootRequestID: input.requestID,
+          assistantMessageID: info.id, model: { providerID: info.providerID, modelID: info.modelID, variant: info.variant },
+          status: assistantStatus(info), stepCount: totals.count, tokens: totals.tokens, cost: toCost(totals.costMicros),
+          time: { created: info.time.created, updated: row.time_updated, completed: info.time.completed }, error: errorMessage(info.error) })
+      }
+      const latest = rows[0]
+      if (!latest) return { request: undefined, assistants }
+      const info = Schema.decodeUnknownSync(SessionV1.Info)({ ...latest.data, id: latest.id, sessionID: latest.session_id })
+      if (info.role !== "assistant") return { request: undefined, assistants }
+      const parent = yield* db.select().from(MessageTable).where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, input.requestID))).get().pipe(Effect.orDie)
+      // 聚合各助手完整确认值，费用仍以整数微美元相加；不从窗口或当前price推导。
+      const totals = assistants.reduce((acc, value) => ({ count: acc.count + value.stepCount,
+        tokens: { input: acc.tokens.input + value.tokens.input, output: acc.tokens.output + value.tokens.output,
+          reasoning: acc.tokens.reasoning + value.tokens.reasoning,
+          cache: { read: acc.tokens.cache.read + value.tokens.cache.read, write: acc.tokens.cache.write + value.tokens.cache.write },
+          total: acc.tokens.total + value.tokens.total }, costMicros: acc.costMicros + toMicros(value.cost),
+      }), { count: 0, tokens: emptyTotals(), costMicros: 0 })
+      const status: Status = assistants.some(value => value.status === "running") ? "running"
+        : assistants.some(value => value.status === "error") ? "error" : assistants.some(value => value.status === "aborted") ? "aborted" : "completed"
+      const request: Request = { sessionID: input.sessionID, requestID: input.requestID, rootRequestID: input.requestID,
+        source: "unknown", status, agent: info.agent, model: { providerID: info.providerID, modelID: info.modelID, variant: info.variant },
+        assistantCount: assistants.length, stepCount: totals.count, tokens: totals.tokens, cost: toCost(totals.costMicros),
+        time: { created: parent?.time_created ?? Math.min(...rows.map(row => row.time_created)),
+          updated: Math.max(...rows.map(row => row.time_updated)),
+          completed: status === "running" ? undefined : Math.max(...assistants.map(value => value.time.completed ?? 0)) },
+        error: assistants.find(value => value.error !== undefined)?.error }
+      return { request, assistants }
+    })
+
     const get: Interface["get"] = Effect.fn("RequestUsage.get")(function* (input) {
       const row = yield* db
         .select()
@@ -374,7 +417,8 @@ export function make(db: Database.Interface["db"]): Interface {
         .where(and(eq(RequestUsageTable.session_id, input.sessionID), eq(RequestUsageTable.request_id, input.requestID)))
         .get()
         .pipe(Effect.orDie)
-      return row ? rowToRequest(row) : undefined
+      if (row) return rowToRequest(row)
+      return (yield* historical(input)).request
     })
 
     const list: Interface["list"] = Effect.fn("RequestUsage.list")(function* (input) {
@@ -405,6 +449,10 @@ export function make(db: Database.Interface["db"]): Interface {
         .orderBy(desc(RequestUsageAssistantTable.time_created), desc(RequestUsageAssistantTable.assistant_message_id))
         .all()
         .pipe(Effect.orDie)
+      // 已存在的零账本仍是权威，不能用旧消息把它反填成另一组用量。
+      const stored = rows.length > 0 ? undefined : yield* db.select().from(RequestUsageTable).where(and(
+        eq(RequestUsageTable.session_id, input.sessionID), eq(RequestUsageTable.request_id, input.requestID))).get().pipe(Effect.orDie)
+      if (rows.length === 0 && !stored) return (yield* historical(input)).assistants
       return rows.map(rowToAssistant)
     })
 

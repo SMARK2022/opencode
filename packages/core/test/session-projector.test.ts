@@ -56,6 +56,55 @@ const assistantRow = (
 }
 
 describe("SessionProjector", () => {
+  previewIt.effect("reads complete legacy turns without populating the request ledger", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const events = yield* EventV2.Service
+      yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
+      yield* db.insert(SessionTable).values({ id: sessionID, project_id: Project.ID.global, slug: "legacy-usage", directory: "/project", title: "legacy", version: "test" }).run()
+      const requestID = SessionV1.MessageID.make("msg_legacy_request")
+      const other = SessionV1.MessageID.make("msg_legacy_stream")
+      for (const id of [requestID, other]) yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: {
+        id, sessionID, role: "user", time: { created: 0 }, agent: "build", model: { providerID: model.providerID, modelID: model.id },
+      } })
+      const first = SessionV1.MessageID.make("msg_legacy_first")
+      const last = SessionV1.MessageID.make("msg_legacy_last")
+      const streamed = SessionV1.MessageID.make("msg_legacy_streaming")
+      // 多助手、多step及另一个流式parent是真实持久化输入，不用分页窗口构造总量。
+      const assistant = (id: SessionV1.MessageID, parentID: SessionV1.MessageID, completed: number | undefined) => ({
+        id, sessionID, role: "assistant" as const, parentID, agent: "build", mode: "build", modelID: model.id, providerID: model.providerID,
+        path: { cwd: "/project", root: "/project" }, time: { created: id === first ? 1 : 2, completed }, cost: 0.03,
+        tokens: { input: 77, output: 11, reasoning: 3, cache: { read: 8, write: 2 } },
+      })
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: assistant(first, requestID, 3) })
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: assistant(last, requestID, 4) })
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: assistant(streamed, other, undefined) })
+      for (const factor of [1, 2]) yield* events.publish(SessionV1.Event.PartUpdated, { sessionID, time: 3, part: {
+        id: SessionV1.PartID.make(`prt_legacy_${factor}`), sessionID, messageID: first, type: "step-finish", reason: "stop", cost: factor / 10,
+        tokens: { input: 100 * factor, output: 20 * factor, reasoning: 5 * factor, cache: { read: 30 * factor, write: 40 * factor } },
+      } })
+      const usage = SessionRequestUsage.make(db)
+      expect(yield* db.select().from(RequestUsageTable).all()).toEqual([])
+      const full = yield* usage.get({ sessionID, requestID })
+      expect(full).toMatchObject({ source: "unknown", status: "completed", assistantCount: 2, stepCount: 3, cost: 0.33,
+        tokens: { input: 377, output: 71, reasoning: 18, cache: { read: 98, write: 122 }, total: 686 }, time: { completed: 4 } })
+      const details = yield* usage.assistants({ sessionID, requestID })
+      expect(details.map(item => item.assistantMessageID).sort()).toEqual([first, last].sort())
+      expect(details.find(item => item.assistantMessageID === first)).toMatchObject({ stepCount: 2, cost: 0.3, tokens: { input: 300 } })
+      expect(details.find(item => item.assistantMessageID === last)).toMatchObject({ stepCount: 1, cost: 0.03, tokens: { input: 77 } })
+      // 查询不补写账本，重复调用不会修改Session费用或消息；真正缺失仍返回undefined。
+      expect(yield* usage.get({ sessionID, requestID })).toEqual(full)
+      expect(yield* db.select().from(RequestUsageTable).all()).toEqual([])
+      expect(yield* db.select().from(RequestUsageAssistantTable).all()).toEqual([])
+      expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make("msg_legacy_missing") })).toBeUndefined()
+      expect(yield* usage.get({ sessionID: SessionV2.ID.make("ses_other"), requestID })).toBeUndefined()
+      // 一旦有真实账本，零确认也是权威；不能被存量消息反填或另一个parent污染。
+      yield* usage.begin({ sessionID, requestID, source: "prompt", agent: "build", providerID: model.providerID, modelID: model.id })
+      expect(yield* usage.get({ sessionID, requestID })).toMatchObject({ source: "prompt", assistantCount: 0, stepCount: 0, cost: 0, tokens: { total: 0 } })
+      expect(yield* usage.assistants({ sessionID, requestID })).toEqual([])
+      yield* db.delete(SessionTable).where(eq(SessionTable.id, sessionID)).run()
+    }),
+  )
   previewIt.effect("batches previews from each real message store without compaction or inbox leakage", () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db
