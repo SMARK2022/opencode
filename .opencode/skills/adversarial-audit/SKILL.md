@@ -451,6 +451,12 @@ source-generated original identity.
 Do not require adjacent non-merge entries to be direct parents when excluded
 merge commits occur.
 
+Read `states/.source-proof.json` and verify its manifest and TSV hashes, source
+tip, entry count, and original patch hashes. The proof accelerates the replay
+hot path; it does not replace independent reading of the supplied source
+commits. Read `reusedPrefix`, `baseState`, and `appliedThisRun` from each report
+and reject any prefix whose cumulative patch provenance is not current.
+
 For every commit in a valid batch, read the complete source commit, original
 patch, current patch, materialized target state, target owner, upstream owner,
 callers, consumers, tests, schema, migration, generation path, and dry-run
@@ -482,6 +488,13 @@ adaptation preserved behavior, and which evidence supports the result. Any
 material mismatch is `BLOCK`. The
 current item cannot pass until cumulative application reaches its exact index;
 a later patch or repair cannot complete it retroactively.
+
+Require the current item or exact batch end to have a successful
+`--typecheck <index>` report. Independently verify the install-input SHA-256,
+Bun version, frozen install result or same-fingerprint reuse, affected workspace
+selection, and each actual `bun typecheck` result. Missing install evidence,
+stale dependency reuse, lockfile mutation, failed typecheck, an omitted affected
+workspace, or a test workspace that differs from the materialized state is `G`.
 
 For patch migration, recompute `E` and qualifying `C` independently for each
 current patch. Never aggregate comments across a batch or count comments inherited
