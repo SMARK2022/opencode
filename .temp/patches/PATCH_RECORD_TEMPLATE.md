@@ -12,6 +12,10 @@
 - Pinned source tip:
 - Previous materialized state:
 - Current materialized state:
+- Record path: `.temp/patches/records/NNNN-<sha12>.md`
+- Record created before first current edit:
+- Record updated after every current edit, materialization, test, and audit result:
+- Record is independent for this commit and is not merged with another index:
 
 ## 2. Source Diff Evidence
 
@@ -57,11 +61,18 @@
 - Why each edit is required:
 - Source behavior preserved:
 - Upstream behavior preserved:
+- Minimal semantic adaptation:
+- Owner/path/location preserved or justified:
+- Initialization/static/call order preserved or justified:
+- No semantic, location, or sequence conflict:
 - No hunk/test/schema/migration removed without evidence:
 - Target implementation has no discovered bug:
 - Target error, concurrency, cleanup, permission and schema behavior:
 - Patch and target behavior match this record:
 - Materialized state remains clean and provenance-valid:
+- What changed in this current patch:
+- What was inconsistent between source, upstream, and target:
+- Why the recorded adaptation is the smallest complete semantic change:
 
 ## 7. Verification
 
@@ -77,6 +88,11 @@
 - Generation/migration checks:
 - Complete stdout/stderr report:
 - Cumulative apply reached this exact index before audit:
+- Effective changed lines `E` for this patch only:
+- Qualifying distributed Chinese comments `C` for this patch only:
+- Required minimum `max(1, ceil(E * 0.15))`:
+- Representative comment locations and explained invariants:
+- No cross-patch or pre-existing comment aggregation:
 
 ## 8. Contract Check
 
@@ -92,6 +108,8 @@
 - No unrequested alternate success path or fallback:
 - Every reachable safety or compatibility path has an owner and evidence:
 - No behavior bug remains in the target implementation:
+- No semantic loss or owner/path/order/static conflict:
+- Per-patch Chinese comment gate passed:
 - Patch, record, tests and target result are materially consistent:
 
 ## 9. Independent Audit
@@ -112,6 +130,8 @@
 - `N` record-only findings:
 - Rejected speculation:
 - Repairs:
+- Record completeness verdict:
+- Record-to-patch/target/report consistency verdict:
 - Full-scope re-audit result:
 
 ## 10. Final Verdict

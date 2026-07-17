@@ -362,7 +362,11 @@ For each current commit, independently perform all of the following checks:
    migration, generated files, configuration, documentation, and deletion or
    rename semantics.
 2. Read the complete `original` and `current` patch and verify that every current
-   hunk has a source-to-target explanation in the record.
+   hunk has a source-to-target explanation in the independent
+   `.temp/patches/records/NNNN-<sha12>.md` record. The record must be created
+   before the first current edit and updated after every edit, materialization,
+   test, and audit result; missing, delayed, merged, empty, or incomplete
+   records are `BLOCK`.
 3. Reconstruct the v1.17.18 owner through the actual producer, consumer, callers,
    error paths, concurrency, exit, cleanup, permission, and persistence chains.
 4. Compare the SMARK behavior with the upstream behavior one responsibility at a
@@ -460,20 +464,35 @@ overwrite upstream with the SMARK implementation or select only convenient
 pieces. When upstream has no corresponding capability, build the complete SMARK
 behavior at the correct owner. In both cases, verify that no SMARK semantics are
 lost and that the result contains upstream strengths plus the full valid SMARK
-content. Audit the
+content. Preserve the upstream design language as well: when it uses Effect,
+Schema, Layer, or an established state/error model, apply SMARK behavior within
+that model. Require the smallest semantic adaptation that fully carries both
+sides. Reject unnecessary owner or path relocation, initialization or
+static-evaluation reordering, call-order changes, interface expansion, semantic
+loss, and location or sequence conflicts. Audit the
 result for real bugs, wrong state transitions, hidden success, swallowed errors,
 second parsers or data sources, fallback, wrong ownership, races, cleanup leaks,
 schema or permission regressions, compatibility regressions, and tests that pass
 while user-visible behavior is wrong. A clean apply is not a behavior pass.
 
-Compare source diff, current patch, target result, record, tests, materialized
-metadata, dry-run output, and verdict. Any material mismatch is `BLOCK`. The
+Compare source diff, current patch, target result, independent record, tests,
+materialized metadata, dry-run output, and verdict. The record must explain what
+changed, what was inconsistent between source, upstream, and target, how the
+adaptation preserved behavior, and which evidence supports the result. Any
+material mismatch is `BLOCK`. The
 current item cannot pass until cumulative application reaches its exact index;
 a later patch or repair cannot complete it retroactively.
 
+For patch migration, recompute `E` and qualifying `C` independently for each
+current patch. Never aggregate comments across a batch or count comments inherited
+from another patch. Qualifying comments must be distributed beside the current
+patch's important changed decisions. An actual per-patch result below
+`C >= max(1, ceil(E * 0.15))` is `G`.
+
 Use `B` for observed, contracted, or reachable behavior, compatibility,
-security, concurrency, cleanup, ownership, or test-sensitivity defects. Use `G`
-only for an actual applicable hard-gate failure, such as implemented E/C below
+security, concurrency, cleanup, ownership, semantic-loss, location/order conflict,
+or test-sensitivity defects. Use `G` only for an actual applicable hard-gate
+failure, such as the current patch's independently calculated E/C below
 15 percent, demonstrated diagnostic decision surface above 10 percent, approved
 revision drift, invalid materialized provenance, or explicitly required
 verification that did not run. Estimates, word counts, metadata, table
