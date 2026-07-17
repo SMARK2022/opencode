@@ -2,3 +2,7 @@
 	path = thirdparty/chatgpt-browser-agent
 	url = https://github.com/SMARK2022/chatgpt-browser-agent-smark.git
 	branch = smark/main
+[submodule "thirdparty/opentui"]
+	path = thirdparty/opentui
+	url = https://github.com/SMARK2022/opentui.git
+	branch = smark/main
