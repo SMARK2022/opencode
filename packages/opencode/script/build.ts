@@ -374,6 +374,68 @@ async function runSharpSmoke(item: (typeof allTargets)[number], name: string, sh
 
 await $`rm -rf dist`
 
+async function packageRoot(name: string) {
+  // Bun.resolveSync可能返回hoisted或target reinstall后的不同entry；向上找manifest才能锁定真实包owner。
+  // 不能从workspace路径猜native目录，否则target build会把host依赖误写进证据。
+  let directory = path.dirname(fs.realpathSync(Bun.resolveSync(name, dir)))
+  while (directory !== path.dirname(directory)) {
+    if (await Bun.file(path.join(directory, "package.json")).exists()) return directory
+    directory = path.dirname(directory)
+  }
+  throw new Error(`Cannot locate package root for ${name}`)
+}
+
+async function sha256(file: string) {
+  // 对完整文件计算hash，不使用mtime或文件名作为native identity，避免缓存重用伪造一致性。
+  return new Bun.CryptoHasher("sha256").update(await Bun.file(file).arrayBuffer()).digest("hex")
+}
+
+async function writeOpenTuiBuildEvidence(item: (typeof allTargets)[number], name: string) {
+  // evidence同时保存package、native和最终executable三层信息，后续archive smoke可以逐层追溯。
+  // 目标目录内生成report而不是全局单例，避免all-target循环互相覆盖证据。
+  const suffix = item.os === "linux" && item.abi === "musl" ? "-musl" : ""
+  const nativeName = `@opentui/core-${item.os}-${item.arch}${suffix}`
+  const nativeRoot = await packageRoot(nativeName)
+  const nativeManifest = await Bun.file(path.join(nativeRoot, "package.json")).json()
+  const coreManifest = await Bun.file(path.join(await packageRoot("@opentui/core"), "package.json")).json()
+  // target名、manifest约束和native文件必须同时一致；只记录解析到的包名会掩盖Bun选错ABI的情况。
+  if (
+    nativeManifest.name !== nativeName ||
+    nativeManifest.version !== coreManifest.version ||
+    !nativeManifest.os?.includes(item.os) ||
+    !nativeManifest.cpu?.includes(item.arch)
+  ) {
+    throw new Error(`OpenTUI native manifest does not match ${name}: ${JSON.stringify(nativeManifest)}`)
+  }
+  const nativeFiles = (await Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: nativeRoot, onlyFiles: true }))).filter(
+    (file) => /\.(?:dll|dylib|so)$/.test(file),
+  )
+  // 每个target只能有一个OpenTUI FFI library；多个候选会让bundle选择依赖遍历顺序而失去可复现性。
+  if (nativeFiles.length !== 1) throw new Error(`${nativeName} contains ${nativeFiles.length} native libraries`)
+
+  const nativeFile = path.join(nativeRoot, nativeFiles[0])
+  const binary = path.resolve(`dist/${name}/bin/opencode${item.os === "win32" ? ".exe" : ""}`)
+  const stat = await fs.promises.stat(binary)
+  const evidence = {
+    target: name,
+    opentui: {
+      version: coreManifest.version,
+      package: nativeName,
+      file: nativeFiles[0].replaceAll("\\", "/"),
+      sha256: await sha256(nativeFile),
+    },
+    executable: {
+      file: path.basename(binary),
+      bytes: stat.size,
+      sha256: await sha256(binary),
+    },
+  }
+  // bytes和hash共同保留：相同hash已足够证明内容，相同size还能发现意外空壳或截断产物。
+  // report与目标目录同生共死，workflow打包后可把source package hash和最终archive smoke关联起来。
+  await Bun.write(`dist/${name}/opentui-build.json`, JSON.stringify(evidence, null, 2) + "\n")
+  console.log(JSON.stringify(evidence))
+}
+
 const binaries: Record<string, string> = {}
 if (!skipInstall) {
   // 只安装目标 OS/arch 的原生变体，避免在 macOS 上下载 win32 包触发 bun 的 IntegrityCheckFailed
@@ -474,13 +536,36 @@ for (const item of targets) {
     const binaryPath = `dist/${name}/bin/opencode`
     console.log(`Running smoke test: ${binaryPath} --version`)
     try {
-      const versionOutput = await $`${binaryPath} --version`.text()
-      console.log(`Smoke test passed: ${versionOutput.trim()}`)
+      const smokeEnv = Object.fromEntries(
+        Object.entries(process.env).filter(
+          (entry): entry is [string, string] =>
+            entry[1] !== undefined && !["OPENCODE_PROCESS_ROLE", "OPENCODE_RUN_ID", "OPENCODE_PID"].includes(entry[0]),
+        ),
+      )
+      // 编译脚本可能继承worker角色；必须让CLI按main角色执行，并拒绝空版本输出，避免把绕过CLI的空结果报告为通过。
+      const smoke = Bun.spawn([binaryPath, "--version"], {
+        env: smokeEnv,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [exitCode, stdout, stderr] = await Promise.all([
+        smoke.exited,
+        new Response(smoke.stdout).text(),
+        new Response(smoke.stderr).text(),
+      ])
+      const versionOutput = stdout.trim()
+      // stdout必须来自真实compiled CLI；stderr或空字符串不能被当作成功版本输出。
+      if (exitCode !== 0 || !versionOutput) {
+        throw new Error(stderr.trim() || `version smoke exited ${exitCode} without output`)
+      }
+      console.log(`Smoke test passed: ${versionOutput}`)
     } catch (e) {
       console.error(`Smoke test failed for ${name}:`, e)
       process.exit(1)
     }
   }
+
+  await writeOpenTuiBuildEvidence(item, name)
 
   await $`rm -rf ./dist/${name}/bin/tui`
   await Bun.file(`dist/${name}/package.json`).write(

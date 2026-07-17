@@ -49,6 +49,7 @@
     "@parcel/watcher-win32-x64": "2.5.1",
     "@standard-schema/spec": "1.0.0",
     "@tsconfig/bun": "catalog:",
+    "@xterm/headless": "6.0.0",
     "@types/babel__core": "7.20.5",
     "@types/bun": "catalog:",
     "@types/cross-spawn": "catalog:",

@@ -115,6 +115,47 @@ const CJK_ROW_3 = "辰巳午未申酉戌亥乾坤艮巽"
 const CJK_FULLWIDTH_TEXT = CJK_ROW_1 + CJK_ROW_2 + CJK_ROW_3
 
 describe("CJK fullwidth wrapping", () => {
+  test("Goal sidebar does not duplicate a CJK glyph across the 35-cell wrap boundary", async () => {
+    const objective = "检查log，请你自行独立完整完成相应的调研与检查，并进行多轮的负载并发、高压"
+    // expected literal来自Goal产品路径，不从被测frame反向生成，避免测试与实现共享错误算法。
+    // 42-cell外框故意比35-cell文本盒更宽，才能让越界双宽cell留下可观察证据。
+    // 断言source中两个“查”恰好在frame中出现两次，覆盖跨virtual-line重复而非只覆盖乱码。
+    const setup = await createTestRenderer({
+      width: 42,
+      height: 6,
+      footerHeight: 0,
+      useThread: false,
+      consoleMode: "disabled",
+    })
+    try {
+      // 42-cell sidebar经过两层左右padding和content右padding后，Goal文本真实可用宽度是35格。
+      // 外层framebuffer仍比文本盒宽，能直接暴露越界cell，而不是被renderer根边界裁掉。
+      const sidebar = new BoxRenderable(setup.renderer, {
+        width: 42,
+        height: 6,
+        paddingLeft: 2,
+        paddingRight: 2,
+      })
+      const content = new BoxRenderable(setup.renderer, { flexShrink: 0, gap: 1, paddingRight: 1 })
+      const goal = new BoxRenderable(setup.renderer, { paddingLeft: 2 })
+      goal.add(new TextRenderable(setup.renderer, { content: objective, wrapMode: "word" }))
+      content.add(goal)
+      sidebar.add(content)
+      setup.renderer.root.add(sidebar)
+      // 多次renderOnce模拟稳定后的静态frame，排除首帧尚未提交造成的偶然差异。
+      for (let i = 0; i < 3; i++) await setup.renderOnce()
+
+      const frame = setup.captureCharFrame()
+      // frame必须同时保留Goal文本和真实缩进；trim掉行尾空格不能掩盖x偏移。
+      // 输入中的两个“查”是独立期望；边界virtual chunk回退到旧byte offset时会渲染出第三个。
+      expect(frame.split("查")).toHaveLength(3)
+      expect(frame).not.toContain("\uFFFD")
+      // replacement character是UTF-8切片损坏的独立信号，不能由数量相等的重复断言替代。
+    } finally {
+      setup.renderer.destroy()
+    }
+  })
+
   test("TextRenderable distributes fullwidth chars across visual rows at exact boundary", async () => {
     const frame = await renderTextFrame({ width: 24, height: 6, content: CJK_FULLWIDTH_TEXT })
     const rows = frame.split("\n")

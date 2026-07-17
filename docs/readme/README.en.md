@@ -236,6 +236,12 @@ Internal stats prefer request usage data and fall back to message metadata for o
 
 If you need ChatGPT Web assistance, consider connecting [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark). It reuses a logged-in ChatGPT browser session through a local MCP bridge, making it suitable for ChatGPT ask, image generation, and voice transcription from OpenCode. This branch records that project as the `thirdparty/chatgpt-browser-agent` submodule; after a fresh checkout, run `git submodule update --init --recursive thirdparty/chatgpt-browser-agent`, then run `npm ci` inside that directory. Login, authorization, and browser-state handling remain governed by that project's README.
 
+### OpenTUI Source And Release Artifacts
+
+This branch records the public [SMARK2022/opentui](https://github.com/SMARK2022/opentui) fork as the `thirdparty/opentui` submodule. After a fresh checkout, run `git submodule update --init thirdparty/opentui`. The gitlink pins the source commit for `v0.4.3-smark.1`, while the fork's default branch is `smark/main`, so the `0.4.3 + CJK` repair remains inspectable and maintainable.
+
+The submodule provides source discovery and provenance only; normal OpenCode installs and builds do not compile it. OpenCode obtains OpenTUI from the eleven immutable GitHub Release tarballs pinned by the root `package.json` and `bun.lock`, with no source fallback when a release URL fails. After changing the fork, publish a new complete package family first, then update the OpenCode URLs, lock, and gitlink together.
+
 ### Provider And Models
 
 | Capability | Description |

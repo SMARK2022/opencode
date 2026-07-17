@@ -323,12 +323,146 @@ jobs:
             release-assets/opencode-windows-x64.zip
             release-assets/opencode-windows-x64.exe
 
+  smoke-macos:
+    # smoke必须下载刚刚打包的archive，而不是直接运行build目录，才能覆盖release层解压和权限行为。
+    needs:
+      - version
+      - build-macos
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          # arm64和x64分别保留target identity；不能把arm runner的结果冒充Intel runtime。
+          - opencode-darwin-arm64
+          - opencode-darwin-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Download macOS archive
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets-macos
+          path: release-assets
+
+      - name: Extract and smoke compiled artifact
+        shell: bash
+        run: |
+          # 每个matrix项使用独立runner temp，避免两个architecture覆盖同名opencode文件。
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/opentui-smoke"
+          unzip -q "release-assets/${{ matrix.target }}.zip" -d "$RUNNER_TEMP/opentui-smoke"
+          bun run --cwd packages/opencode script/smoke-opentui-artifact.ts \
+            --binary "$RUNNER_TEMP/opentui-smoke/opencode"
+
+  smoke-linux-x64:
+    # Linux x64在现有host执行，证明glibc archive能加载对应OpenTUI native闭包。
+    needs:
+      - version
+      - build-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Download Linux archives
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets-linux
+          path: release-assets
+
+      - name: Extract and smoke compiled artifact
+        shell: bash
+        run: |
+          # tarball内只允许最终opencode入口，harness的source依赖来自当前checkout而非archive旁路。
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/opentui-smoke"
+          tar -xzf release-assets/opencode-linux-x64.tar.gz -C "$RUNNER_TEMP/opentui-smoke"
+          bun run --cwd packages/opencode script/smoke-opentui-artifact.ts \
+            --binary "$RUNNER_TEMP/opentui-smoke/opencode"
+
+  smoke-linux-arm64:
+    # arm runner是真实执行而非cross-compile；缺少runner或smoke失败都必须阻断checksums。
+    needs:
+      - version
+      - build-linux
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Download Linux archives
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets-linux
+          path: release-assets
+
+      - name: Extract and smoke compiled artifact
+        shell: bash
+        run: |
+          # aarch64 archive在原生arm host执行，不能使用qemu或metadata检查替代native加载。
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/opentui-smoke"
+          tar -xzf release-assets/opencode-linux-arm64.tar.gz -C "$RUNNER_TEMP/opentui-smoke"
+          bun run --cwd packages/opencode script/smoke-opentui-artifact.ts \
+            --binary "$RUNNER_TEMP/opentui-smoke/opencode"
+
+  smoke-windows:
+    # Windows使用ConPTY入口，不能用macOS PTY结果替代DLL加载和控制台退出证据。
+    needs:
+      - version
+      - build-windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        shell: pwsh
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+          ELECTRON_SKIP_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PUPPETEER_SKIP_DOWNLOAD: "1"
+          CYPRESS_INSTALL_BINARY: "0"
+          HUSKY: "0"
+        run: bun install --linker hoisted
+
+      - name: Download Windows archive
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets-windows
+          path: release-assets
+
+      - name: Extract and smoke compiled artifact
+        shell: pwsh
+        run: |
+          # Expand-Archive后直接运行解压exe，确保zip中的最终文件而非构建目录接受ConPTY验证。
+          $ErrorActionPreference = "Stop"
+          $SmokeRoot = Join-Path $env:RUNNER_TEMP "opentui-smoke"
+          New-Item -ItemType Directory -Force -Path $SmokeRoot | Out-Null
+          Expand-Archive -Path "release-assets/opencode-windows-x64.zip" -DestinationPath $SmokeRoot -Force
+          bun run --cwd packages/opencode script/smoke-opentui-artifact.ts --binary (Join-Path $SmokeRoot "opencode.exe")
+
   checksums:
+    # checksums和release只能在closure及所有host smoke成功后生成，避免发布半验证产物。
     needs:
       - version
       - build-macos
       - build-linux
       - build-windows
+      - opentui-closure
+      - smoke-macos
+      - smoke-linux-x64
+      - smoke-linux-arm64
+      - smoke-windows
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -491,3 +625,23 @@ jobs:
           for file in "${files[@]}"; do
             upload_with_retry "$file"
           done
+
+  opentui-closure:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository with OpenTUI provenance
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Verify immutable OpenTUI closure
+        working-directory: packages/opencode
+        run: bun run script/verify-opentui-closure.ts

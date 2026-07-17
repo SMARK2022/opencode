@@ -510,6 +510,7 @@
         "@types/which": "3.0.4",
         "@types/yargs": "17.0.33",
         "@typescript/native-preview": "catalog:",
+        "@xterm/headless": "6.0.0",
         "drizzle-kit": "catalog:",
         "drizzle-orm": "catalog:",
         "prettier": "3.6.2",
@@ -540,9 +541,9 @@
         "typescript": "catalog:",
       },
       "peerDependencies": {
-        "@opentui/core": ">=0.3.4",
-        "@opentui/keymap": ">=0.3.4",
-        "@opentui/solid": ">=0.3.4",
+        "@opentui/core": ">=0.4.3-smark.1",
+        "@opentui/keymap": ">=0.4.3-smark.1",
+        "@opentui/solid": ">=0.4.3-smark.1",
       },
       "optionalPeers": [
         "@opentui/core",
@@ -702,19 +703,27 @@
     "tree-sitter-bash",
   ],
   "patchedDependencies": {
-    "solid-js@1.9.10": "patches/solid-js@1.9.10.patch",
     "@standard-community/standard-openapi@0.2.9": "patches/@standard-community%2Fstandard-openapi@0.2.9.patch",
     "@modelcontextprotocol/sdk@1.27.1": "patches/@modelcontextprotocol%2Fsdk@1.27.1.patch",
     "@npmcli/agent@4.0.0": "patches/@npmcli%2Fagent@4.0.0.patch",
     "@silvia-odwyer/photon-node@0.3.4": "patches/@silvia-odwyer%2Fphoton-node@0.3.4.patch",
   },
   "overrides": {
-    "@opentui/core": "catalog:",
-    "@opentui/keymap": "catalog:",
-    "@opentui/solid": "catalog:",
+    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-0.4.3-smark.1.tgz",
+    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-darwin-arm64-0.4.3-smark.1.tgz",
+    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-darwin-x64-0.4.3-smark.1.tgz",
+    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-arm64-0.4.3-smark.1.tgz",
+    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-arm64-musl-0.4.3-smark.1.tgz",
+    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-x64-0.4.3-smark.1.tgz",
+    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-x64-musl-0.4.3-smark.1.tgz",
+    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-win32-arm64-0.4.3-smark.1.tgz",
+    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-win32-x64-0.4.3-smark.1.tgz",
+    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-keymap-0.4.3-smark.1.tgz",
+    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-solid-0.4.3-smark.1.tgz",
     "@types/bun": "catalog:",
     "@types/node": "catalog:",
     "poe-oauth": "0.0.6",
+    "solid-js": "catalog:",
   },
   "catalog": {
     "@cloudflare/workers-types": "4.20251008.0",
@@ -726,9 +735,9 @@
     "@npmcli/arborist": "9.4.0",
     "@octokit/rest": "22.0.0",
     "@openauthjs/openauth": "0.0.0-20250322224806",
-    "@opentui/core": "0.3.4",
-    "@opentui/keymap": "0.3.4",
-    "@opentui/solid": "0.3.4",
+    "@opentui/core": "0.4.3-smark.1",
+    "@opentui/keymap": "0.4.3-smark.1",
+    "@opentui/solid": "0.4.3-smark.1",
     "@pierre/diffs": "1.1.0-beta.18",
     "@playwright/test": "1.60.0",
     "@sentry/solid": "10.36.0",
@@ -764,7 +773,7 @@
     "remend": "1.3.0",
     "semver": "7.7.4",
     "shiki": "3.20.0",
-    "solid-js": "1.9.10",
+    "solid-js": "1.9.12",
     "solid-list": "0.3.0",
     "tailwindcss": "4.1.11",
     "typescript": "5.8.2",
@@ -1607,27 +1616,27 @@
 
     "@opentelemetry/semantic-conventions": ["@opentelemetry/semantic-conventions@1.40.0", "https://registry.npmmirror.com/@opentelemetry/semantic-conventions/-/semantic-conventions-1.40.0.tgz", {}, "sha512-cifvXDhcqMwwTlTK04GBNeIe7yyo28Mfby85QXFe1Yk8nmi36Ab/5UQwptOx84SsoGNRg+EVSjwzfSZMy6pmlw=="],
 
-    "@opentui/core": ["@opentui/core@0.3.4", "https://registry.npmmirror.com/@opentui/core/-/core-0.3.4.tgz", { "dependencies": { "bun-ffi-structs": "0.2.2", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2", "yoga-layout": "3.2.1" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.3.4", "@opentui/core-darwin-x64": "0.3.4", "@opentui/core-linux-arm64": "0.3.4", "@opentui/core-linux-arm64-musl": "0.3.4", "@opentui/core-linux-x64": "0.3.4", "@opentui/core-linux-x64-musl": "0.3.4", "@opentui/core-win32-arm64": "0.3.4", "@opentui/core-win32-x64": "0.3.4" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-y0DlrChP9lcJ4jC5z/1wMS34+ygfSTW7gD5OJHwJaAScfmlFvuJOZbwmCGrJURZ+5wFBxuOi9LatZsmeAUIKAA=="],
+    "@opentui/core": ["@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-0.4.3-smark.1.tgz", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.3-smark.1", "@opentui/core-darwin-x64": "0.4.3-smark.1", "@opentui/core-linux-arm64": "0.4.3-smark.1", "@opentui/core-linux-arm64-musl": "0.4.3-smark.1", "@opentui/core-linux-x64": "0.4.3-smark.1", "@opentui/core-linux-x64-musl": "0.4.3-smark.1", "@opentui/core-win32-arm64": "0.4.3-smark.1", "@opentui/core-win32-x64": "0.4.3-smark.1" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-YHeIqCyVue4WBYyPDmkwLjlnlEZ+mXTVuuw2kNHVsw7xI1rrtS9TV6BDj0sU6k7o6gR13gkGqzMSg89M3NtQEA=="],
 
-    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@0.3.4", "https://registry.npmmirror.com/@opentui/core-darwin-arm64/-/core-darwin-arm64-0.3.4.tgz", { "os": "darwin", "cpu": "arm64" }, "sha512-4A7JYXUsZqhu9PPCe07E30ourSJYkitkwMujUyNKjM5e/dHNDVnz+5r5cO3M5snofLafc1DN7+9jEPn4UQzchQ=="],
+    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-darwin-arm64-0.4.3-smark.1.tgz", {}, "sha512-my+I90bvPBXhitJArO4JxR/TahmdD/Vf5XgOz86eOLmS6+XvZgCzG/5y5AJH+17qrvdtNf96hjxfLGSYYjHG4g=="],
 
-    "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@0.3.4", "https://registry.npmmirror.com/@opentui/core-darwin-x64/-/core-darwin-x64-0.3.4.tgz", { "os": "darwin", "cpu": "x64" }, "sha512-Jvm9E8n2sPhKEyKSXn9GlmJcj8WoJXJTooXb3djwjVaiimjihIj0XxHzCWhdqbDtQp+VxDFyCKoQagOOz20qhA=="],
+    "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-darwin-x64-0.4.3-smark.1.tgz", {}, "sha512-OGWB0+GZeoP0g8XHEzFayXoak3dPoLUxonswes0UoipSELS+4fupEzLZVF5K46XeEV535lgqSjL0nBg1fTeJwA=="],
 
-    "@opentui/core-linux-arm64": ["@opentui/core-linux-arm64@0.3.4", "https://registry.npmmirror.com/@opentui/core-linux-arm64/-/core-linux-arm64-0.3.4.tgz", { "os": "linux", "cpu": "arm64" }, "sha512-0uPuHCeZxm/O7+L+iNQl8zRAfehiwYstKkT9J0uTZO64/byBCLvy5lvn1DiE/72s/nTJ5nwpLN+pQs2/WYVKLQ=="],
+    "@opentui/core-linux-arm64": ["@opentui/core-linux-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-arm64-0.4.3-smark.1.tgz", {}, "sha512-Ag6rZPcXJzqWWiDkfoM2ZyKOr7JE51FkWSCFRspq3l9o37JV6Eri9EiVAHKxSB+mNe0H9aN0RJunflrAhzf8FQ=="],
 
-    "@opentui/core-linux-arm64-musl": ["@opentui/core-linux-arm64-musl@0.3.4", "https://registry.npmmirror.com/@opentui/core-linux-arm64-musl/-/core-linux-arm64-musl-0.3.4.tgz", { "os": "linux", "cpu": "arm64" }, "sha512-sJYUzYcSOb5PCXRlhwsse/fdsMiVomNvIwq/2TDhAANef+YPO3Br+OH9kQRbuj0bjVDmUS36SGYWSTFu2lUO+A=="],
+    "@opentui/core-linux-arm64-musl": ["@opentui/core-linux-arm64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-arm64-musl-0.4.3-smark.1.tgz", {}, "sha512-VOFKE8FyycfkxYib1tT4WqfGT3yGh1yqAJ4KVdIXUFfVn9blcRhcz0UHGNlRV0gaZ4+Vh+5UAWAD5AU+5F0Frg=="],
 
-    "@opentui/core-linux-x64": ["@opentui/core-linux-x64@0.3.4", "https://registry.npmmirror.com/@opentui/core-linux-x64/-/core-linux-x64-0.3.4.tgz", { "os": "linux", "cpu": "x64" }, "sha512-btYIQeNdPbN4JCrCjVB/RwMGrnRY7qWB2piNEfALSByuULKNjPKQ33PYIj38Yd01zCvCV7FotIeXEGSHx3tgCA=="],
+    "@opentui/core-linux-x64": ["@opentui/core-linux-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-x64-0.4.3-smark.1.tgz", {}, "sha512-5otc+5eyBXWrSaITt2huJHk+DKCrnXBERvw022biUcDknjXJBzY4BJBnC0LjKxEYncFRgH1FF1stNdJ71qp8Rg=="],
 
-    "@opentui/core-linux-x64-musl": ["@opentui/core-linux-x64-musl@0.3.4", "https://registry.npmmirror.com/@opentui/core-linux-x64-musl/-/core-linux-x64-musl-0.3.4.tgz", { "os": "linux", "cpu": "x64" }, "sha512-fhmUey4oJJ2+N62xlIgAPxAl36Fa7wYffqDOT4QLpm0jfyD5xzo+wL/hr2zUqaEI439R8Iq6jHNxf/Nsx1WuuQ=="],
+    "@opentui/core-linux-x64-musl": ["@opentui/core-linux-x64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-x64-musl-0.4.3-smark.1.tgz", {}, "sha512-EQ186xFOwtLiy0r+QxOQQ7fiGsS3Pki+0MY1cfvlG+E3CsOKPtdzH+ZLX3U6+hxhRxnMAri8jKbALzmn5xjs/w=="],
 
-    "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@0.3.4", "https://registry.npmmirror.com/@opentui/core-win32-arm64/-/core-win32-arm64-0.3.4.tgz", { "os": "win32", "cpu": "arm64" }, "sha512-sh432vPU+eLp8eA4I0KWKKn7D0VHbk01YTg6mA9/ihCNYHntc6LZ8/sLvsPv8CvKscMotfIkh3M5YhdS36BuXw=="],
+    "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-win32-arm64-0.4.3-smark.1.tgz", {}, "sha512-2/qmJ6htJomHLzwERdT9235LK/wuwvGP4VlpybA7uTWGflyuAUDGDRh22osC0/i7Yn5XFk6MkjHeOG4k4g5FLA=="],
 
-    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@0.3.4", "https://registry.npmmirror.com/@opentui/core-win32-x64/-/core-win32-x64-0.3.4.tgz", { "os": "win32", "cpu": "x64" }, "sha512-dw8FcjUZaLAjw25P3/7BarobCh/QOHn3srYaWYQdysoqyvSlPkQumpI8kV/KgpJtdITU1GW02MQC4EeLIFFalA=="],
+    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-win32-x64-0.4.3-smark.1.tgz", {}, "sha512-BSSIzIOR0LRki9JpAF/ol3Tf+lHOuBvgj6+pPQhC1U3kbZ7WGikm1lD4y9UEoe9qxkS/4PSZvwAyhf6J10d5gA=="],
 
-    "@opentui/keymap": ["@opentui/keymap@0.3.4", "https://registry.npmmirror.com/@opentui/keymap/-/keymap-0.3.4.tgz", { "dependencies": { "@opentui/core": "0.3.4" }, "peerDependencies": { "@opentui/react": "0.3.4", "@opentui/solid": "0.3.4", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-8fo6BZWQgCjANfbKkzPo0ghAzS1E7TlHjDDS+SUhrX01qEUO1clFTRssKluHbXd2UJY1Ehle01TV5bFmY78f8w=="],
+    "@opentui/keymap": ["@opentui/keymap@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-keymap-0.4.3-smark.1.tgz", { "dependencies": { "@opentui/core": "0.4.3-smark.1" }, "peerDependencies": { "@opentui/react": "0.4.3-smark.1", "@opentui/solid": "0.4.3-smark.1", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-CAbaqWF+nIStVPv83TL+iSk+bDFKTVSMeO+G4NWZT47g5oWbGc6VtlXkGSbSkBRoZTaFELjYIK3j0eVmKxhWVA=="],
 
-    "@opentui/solid": ["@opentui/solid@0.3.4", "https://registry.npmmirror.com/@opentui/solid/-/solid-0.3.4.tgz", { "dependencies": { "@babel/core": "7.28.0", "@babel/preset-typescript": "7.27.1", "@opentui/core": "0.3.4", "babel-plugin-module-resolver": "5.0.2", "babel-preset-solid": "1.9.12", "entities": "7.0.1", "s-js": "^0.4.9" }, "peerDependencies": { "solid-js": "1.9.12" } }, "sha512-gin1VnsVBahX0nrU3mpgh5U1qvyJBIZu4NE5mc0YnObWOEf9HVNxKY4/BpUvQPh91kT6zeOzTBvAvYK4R7g9MQ=="],
+    "@opentui/solid": ["@opentui/solid@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-solid-0.4.3-smark.1.tgz", { "dependencies": { "@babel/core": "7.28.0", "@babel/preset-typescript": "7.27.1", "@opentui/core": "0.4.3-smark.1", "babel-plugin-module-resolver": "5.0.2", "babel-preset-solid": "1.9.12", "entities": "7.0.1", "s-js": "^0.4.9" }, "peerDependencies": { "solid-js": "1.9.12" } }, "sha512-i90xdvrwaS0HORGEiLrvl2lzaUKUu/C0CWXJIs6wJpfsvCHznZlRIDfLKCZc5xwq2HsiT8rJ0QCRqMd9K7TQ4w=="],
 
     "@oslojs/asn1": ["@oslojs/asn1@1.0.0", "https://registry.npmmirror.com/@oslojs/asn1/-/asn1-1.0.0.tgz", { "dependencies": { "@oslojs/binary": "1.0.0" } }, "sha512-zw/wn0sj0j0QKbIXfIlnEcTviaCzYOY3V5rAyjR6YtOByFtJiT574+8p9Wlach0lZH9fddD4yb9laEAIl4vXQA=="],
 
@@ -2503,6 +2512,8 @@
 
     "@xmldom/xmldom": ["@xmldom/xmldom@0.8.12", "https://registry.npmmirror.com/@xmldom/xmldom/-/xmldom-0.8.12.tgz", {}, "sha512-9k/gHF6n/pAi/9tqr3m3aqkuiNosYTurLLUtc7xQ9sxB/wm7WPygCv8GYa6mS0fLJEHhqMC1ATYhz++U/lRHqg=="],
 
+    "@xterm/headless": ["@xterm/headless@6.0.0", "", {}, "sha512-5Yj1QINYCyzrZtf8OFIHi47iQtI+0qYFPHmouEfG8dHNxbZ9Tb9YGSuLcsEwj9Z+OL75GJqPyJbyoFer80a2Hw=="],
+
     "@zip.js/zip.js": ["@zip.js/zip.js@2.7.62", "https://registry.npmmirror.com/@zip.js/zip.js/-/zip.js-2.7.62.tgz", {}, "sha512-OaLvZ8j4gCkLn048ypkZu29KX30r8/OfFF2w4Jo5WXFr+J04J+lzJ5TKZBVgFXhlvSkqNFQdfnY1Q8TMTCyBVA=="],
 
     "abbrev": ["abbrev@4.0.0", "https://registry.npmmirror.com/abbrev/-/abbrev-4.0.0.tgz", {}, "sha512-a1wflyaL0tHtJSmLSOVybYhy22vRih4eduhhrkcjgrWGnRfrZtovJ2FRjxuTtkkj47O/baf0R86QU5OuYpz8fA=="],
@@ -2713,7 +2724,7 @@
 
     "builder-util-runtime": ["builder-util-runtime@9.5.1", "https://registry.npmmirror.com/builder-util-runtime/-/builder-util-runtime-9.5.1.tgz", { "dependencies": { "debug": "^4.3.4", "sax": "^1.2.4" } }, "sha512-qt41tMfgHTllhResqM5DcnHyDIWNgzHvuY2jDcYP9iaGpkWxTUzV6GQjDeLnlR1/DtdlcsWQbA7sByMpmJFTLQ=="],
 
-    "bun-ffi-structs": ["bun-ffi-structs@0.2.2", "https://registry.npmmirror.com/bun-ffi-structs/-/bun-ffi-structs-0.2.2.tgz", { "peerDependencies": { "typescript": "^5" } }, "sha512-N/ZWtyN0piZlrXQT7TO0V+q952orYqkfhXRXM1Hcbb+R3QSiBH4vLnib187Mrs1H7pWIYECAmPeapGYDOMCl+w=="],
+    "bun-ffi-structs": ["bun-ffi-structs@0.2.4", "", { "peerDependencies": { "typescript": "^5" } }, "sha512-AJzsqoVFs1KBbJbWHIYrVZLDC3NhTqqh25awRXqzoLzmBAKr5oqk6+CwuYHAekKx+VBCYVohBoKuRq40dV+TYg=="],
 
     "bun-pty": ["bun-pty@0.4.8", "https://registry.npmmirror.com/bun-pty/-/bun-pty-0.4.8.tgz", {}, "sha512-rO70Mrbr13+jxHHHu2YBkk2pNqrJE5cJn29WE++PUr+GFA0hq/VgtQPZANJ8dJo6d7XImvBk37Innt8GM7O28w=="],
 
@@ -4489,9 +4500,9 @@
 
     "serialize-error": ["serialize-error@7.0.1", "https://registry.npmmirror.com/serialize-error/-/serialize-error-7.0.1.tgz", { "dependencies": { "type-fest": "^0.13.1" } }, "sha512-8I8TjW5KMOKsZQTvoxjuSIa7foAwPWGOts+6o7sgjz41/qMD9VQHEDxi6PBvK2l0MXUmqZyNpUK+T2tQaaElvw=="],
 
-    "seroval": ["seroval@1.3.2", "https://registry.npmmirror.com/seroval/-/seroval-1.3.2.tgz", {}, "sha512-RbcPH1n5cfwKrru7v7+zrZvjLurgHhGyso3HTyGtRivGWgYjbOmGuivCQaORNELjNONoK35nj28EoWul9sb1zQ=="],
+    "seroval": ["seroval@1.5.5", "", {}, "sha512-bSjOuPcwPKLSJNhr9+bZxA20nQxVle5J5MNsYRVE6cIg7KpRLXGupymePavu0jrxlPiPsr4xGZSB8yUY2sH2sw=="],
 
-    "seroval-plugins": ["seroval-plugins@1.3.3", "https://registry.npmmirror.com/seroval-plugins/-/seroval-plugins-1.3.3.tgz", { "peerDependencies": { "seroval": "^1.0" } }, "sha512-16OL3NnUBw8JG1jBLUoZJsLnQq0n5Ua6aHalhJK4fMQkz1lqR7Osz1sA30trBtd9VUDc2NgkuRCn8+/pBwqZ+w=="],
+    "seroval-plugins": ["seroval-plugins@1.5.5", "", { "peerDependencies": { "seroval": "^1.0" } }, "sha512-+BDhqYM6CEn3x09v44dpa9p6974FuUB2dxk+Ctn04k0cO1Zt6QODTXfmEZK0eBaTe/fJBvP4NMGuNJ+R8T+QMg=="],
 
     "serve-static": ["serve-static@1.16.3", "https://registry.npmmirror.com/serve-static/-/serve-static-1.16.3.tgz", { "dependencies": { "encodeurl": "~2.0.0", "escape-html": "~1.0.3", "parseurl": "~1.3.3", "send": "~0.19.1" } }, "sha512-x0RTqQel6g5SY7Lg6ZreMmsOzncHFU7nhnRWkKgWuMTu5NN0DR5oruckMqRvacAN9d5w6ARnRBXl9xhDCgfMeA=="],
 
@@ -4553,7 +4564,7 @@
 
     "socks-proxy-agent": ["socks-proxy-agent@8.0.5", "https://registry.npmmirror.com/socks-proxy-agent/-/socks-proxy-agent-8.0.5.tgz", { "dependencies": { "agent-base": "^7.1.2", "debug": "^4.3.4", "socks": "^2.8.3" } }, "sha512-HehCEsotFqbPW9sJ8WVYB6UbmIMv7kUUORIF2Nncq4VQvBfNBLibW9YZR5dlYCSUhwcD628pRllm7n+E+YTzJw=="],
 
-    "solid-js": ["solid-js@1.9.10", "https://registry.npmmirror.com/solid-js/-/solid-js-1.9.10.tgz", { "dependencies": { "csstype": "^3.1.0", "seroval": "~1.3.0", "seroval-plugins": "~1.3.0" } }, "sha512-Coz956cos/EPDlhs6+jsdTxKuJDPT7B5SVIWgABwROyxjY7Xbr8wkzD68Et+NxnV7DLJ3nJdAC2r9InuV/4Jew=="],
+    "solid-js": ["solid-js@1.9.12", "", { "dependencies": { "csstype": "^3.1.0", "seroval": "~1.5.0", "seroval-plugins": "~1.5.0" } }, "sha512-QzKaSJq2/iDrWR1As6MHZQ8fQkdOBf8GReYb7L5iKwMGceg7HxDcaOHk0at66tNgn9U2U7dXo8ZZpLIAmGMzgw=="],
 
     "solid-list": ["solid-list@0.3.0", "https://registry.npmmirror.com/solid-list/-/solid-list-0.3.0.tgz", { "dependencies": { "@corvu/utils": "~0.4.0" }, "peerDependencies": { "solid-js": "^1.8" } }, "sha512-t4hx/F/l8Vmq+ib9HtZYl7Z9F1eKxq3eKJTXlvcm7P7yI4Z8O7QSOOEVHb/K6DD7M0RxzVRobK/BS5aSfLRwKg=="],
 
@@ -5059,8 +5070,6 @@
 
     "yoctocolors": ["yoctocolors@2.1.2", "https://registry.npmmirror.com/yoctocolors/-/yoctocolors-2.1.2.tgz", {}, "sha512-CzhO+pFNo8ajLM2d2IW/R93ipy99LWjtwblvC1RsoSUMZgyLbYFr221TnSNT7GjGdYui6P459mw9JH/g/zW2ug=="],
 
-    "yoga-layout": ["yoga-layout@3.2.1", "https://registry.npmmirror.com/yoga-layout/-/yoga-layout-3.2.1.tgz", {}, "sha512-0LPOt3AxKqMdFBZA3HBAt/t/8vIKq7VaQYbuA8WxCgung+p9TVyKRYdpvCb80HcdTN2NkbIKbhNwKUfm3tQywQ=="],
-
     "youch": ["youch@4.1.0-beta.10", "https://registry.npmmirror.com/youch/-/youch-4.1.0-beta.10.tgz", { "dependencies": { "@poppinss/colors": "^4.1.5", "@poppinss/dumper": "^0.6.4", "@speed-highlight/core": "^1.2.7", "cookie": "^1.0.2", "youch-core": "^0.3.3" } }, "sha512-rLfVLB4FgQneDr0dv1oddCVZmKjcJ6yX6mS4pU82Mq/Dt9a3cLZQ62pDBL4AUO+uVrCvtWz3ZFUL2HFAFJ/BXQ=="],
 
     "youch-core": ["youch-core@0.3.3", "https://registry.npmmirror.com/youch-core/-/youch-core-0.3.3.tgz", { "dependencies": { "@poppinss/exception": "^1.2.2", "error-stack-parser-es": "^1.0.5" } }, "sha512-ho7XuGjLaJ2hWHoK8yFnsUGy2Y5uDpqSTq1FkHLK4/oqKtyUU1AFbOOxY4IpC9f0fTLjwYbslUz0Po5BpD1wrA=="],
@@ -5564,6 +5573,10 @@
     "@smithy/util-stream/@smithy/util-utf8": ["@smithy/util-utf8@4.2.2", "https://registry.npmmirror.com/@smithy/util-utf8/-/util-utf8-4.2.2.tgz", { "dependencies": { "@smithy/util-buffer-from": "^4.2.2", "tslib": "^2.6.2" } }, "sha512-75MeYpjdWRe8M5E3AW0O4Cx3UadweS+cwdXjwYGBW5h/gxxnbeZ877sLPX/ZJA9GVTlL/qG0dXP29JWFCD1Ayw=="],
 
     "@solidjs/start/path-to-regexp": ["path-to-regexp@8.4.2", "https://registry.npmmirror.com/path-to-regexp/-/path-to-regexp-8.4.2.tgz", {}, "sha512-qRcuIdP69NPm4qbACK+aDogI5CBDMi1jKe0ry5rSQJz8JVLsC7jV8XpiJjGRLLol3N+R5ihGYcrPLTno6pAdBA=="],
+
+    "@solidjs/start/seroval": ["seroval@1.3.2", "https://registry.npmmirror.com/seroval/-/seroval-1.3.2.tgz", {}, "sha512-RbcPH1n5cfwKrru7v7+zrZvjLurgHhGyso3HTyGtRivGWgYjbOmGuivCQaORNELjNONoK35nj28EoWul9sb1zQ=="],
+
+    "@solidjs/start/seroval-plugins": ["seroval-plugins@1.3.3", "https://registry.npmmirror.com/seroval-plugins/-/seroval-plugins-1.3.3.tgz", { "peerDependencies": { "seroval": "^1.0" } }, "sha512-16OL3NnUBw8JG1jBLUoZJsLnQq0n5Ua6aHalhJK4fMQkz1lqR7Osz1sA30trBtd9VUDc2NgkuRCn8+/pBwqZ+w=="],
 
     "@solidjs/start/shiki": ["shiki@1.29.2", "https://registry.npmmirror.com/shiki/-/shiki-1.29.2.tgz", { "dependencies": { "@shikijs/core": "1.29.2", "@shikijs/engine-javascript": "1.29.2", "@shikijs/engine-oniguruma": "1.29.2", "@shikijs/langs": "1.29.2", "@shikijs/themes": "1.29.2", "@shikijs/types": "1.29.2", "@shikijs/vscode-textmate": "^10.0.1", "@types/hast": "^3.0.4" } }, "sha512-njXuliz/cP+67jU2hukkxCNuH1yUi4QfdZZY+sMr5PPrIyXSu5iTb/qYC4BiWWB0vZ+7TbdvYUCeL23zpwCfbg=="],
 

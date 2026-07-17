@@ -1769,7 +1769,8 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
           customBorderChars={SplitBorder.customBorderChars}
           borderColor={theme.error}
         >
-          <text fg={theme.textMuted}>{props.message.error?.data.message}</text>
+          {/* legacy error通过统一formatter转成string，保持旧SDK错误和v2错误各自的owner边界。 */}
+          <text fg={theme.textMuted}>{errorMessage(props.message.error)}</text>
         </box>
       </Show>
       <Switch>
@@ -2739,7 +2740,11 @@ function PermissionReviewDecision(props: ToolProps<any>) {
   const outcome = createMemo(() => (decision().outcome === "allow" ? "allowed" : "denied"))
   const risk = createMemo(() => String(decision().risk_level ?? "unknown"))
   const auth = createMemo(() => String(decision().user_authorization ?? "unknown"))
-  const rationale = createMemo(() => (typeof decision().rationale === "string" ? decision().rationale : ""))
+  const rationale = createMemo<string>(() => {
+    const value = decision().rationale
+    // permission payload来自外部SDK，只有string rationale才允许进入Text child。
+    return typeof value === "string" ? value : ""
+  })
   return (
     <BlockTool title={`Permission review decision`} part={props.part} maxLines={0}>
       <box flexDirection="column" gap={1}>

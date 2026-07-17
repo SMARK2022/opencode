@@ -124,7 +124,8 @@ export function DialogPrompt(props: DialogPromptProps) {
         </text>
       </box>
       <box gap={1}>
-        {props.description}
+        {/* factory必须由owner求值，避免把JSX factory函数本身交给OpenTUI child reconciler。 */}
+        {props.description?.()}
         <textarea
           onSubmit={() => {
             if (props.busy) return

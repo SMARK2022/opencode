@@ -370,7 +370,8 @@ function AssistantMessage(props: {
           borderColor={theme.error}
           flexShrink={0}
         >
-          <text fg={theme.textMuted}>{props.message.error}</text>
+          {/* structured error的公开message是可渲染边界；对象本身会触发TextNode类型错误。 */}
+          <text fg={theme.textMuted}>{props.message.error?.message}</text>
         </box>
       </Show>
       <Show when={props.last || final() || props.message.error}>

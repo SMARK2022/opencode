@@ -163,6 +163,47 @@ jobs:
             echo "| ${{ matrix.label }} | ${{ matrix.os_label }} | ${result} | ${{ steps.junit.outputs.exists == 'true' && '已生成' || '未生成' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  opentui-required:
+    # closure、behavior test和consumer typecheck必须同一job执行，避免不同安装图互相掩盖peer漂移。
+    name: 必过 OpenTUI 0.4.3 consumer gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository with OpenTUI provenance
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Verify immutable OpenTUI closure
+        # 先锁定source/release/runtime身份，再运行任何可通过缓存误导的应用测试。
+        working-directory: packages/opencode
+        run: bun run script/verify-opentui-closure.ts
+
+      - name: Run OpenTUI consumer regressions
+        # 这些测试覆盖Goal CJK、DialogPrompt factory和v2 error的用户可见seam。
+        working-directory: packages/opencode
+        run: bun test test/script/upgrade-opentui.test.ts test/cli/cmd/tui/session-layout.test.ts test/cli/cmd/tui/dialog-prompt.test.tsx test/cli/cmd/tui/session-v2-error.test.tsx
+
+      - name: Typecheck Solid ecosystem consumers
+        # 同一Solid realpath会被九个workspace直接或间接消费，不能只验证OpenCode包本身。
+        run: |
+          # 这些consumer共享root Solid runtime，必须在同一安装图中验证，不能只检查TUI包。
+          set -euo pipefail
+          for package in packages/opencode packages/plugin packages/app packages/ui packages/enterprise packages/desktop packages/console/app packages/console/core packages/sdk/js packages/slack; do
+            bun run --cwd "$package" typecheck
+          done
+
   httpapi-required:
     name: 必过 HttpApi gate / ${{ matrix.mode }}
     runs-on: ubuntu-latest

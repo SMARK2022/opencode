@@ -236,6 +236,12 @@ SMARK `dev-smark` 分支目前只發布 CLI，不發布桌面應用安裝包。�
 
 如果需要 ChatGPT Web 輔助能力，可考慮接入 [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark)。它透過本地 MCP bridge 復用已登入的 ChatGPT 瀏覽器會話，適合在 OpenCode 中呼叫 ChatGPT ask、圖片生成和 voice/語音轉錄等能力。本分支已將該專案記錄為 `thirdparty/chatgpt-browser-agent` submodule；首次 checkout 後請執行 `git submodule update --init --recursive thirdparty/chatgpt-browser-agent`，再進入該目錄執行 `npm ci` 安裝依賴。登入、授權與瀏覽器狀態管理仍以該專案 README 為準。
 
+### OpenTUI 原始碼與發佈產物
+
+本分支將公開的 [SMARK2022/opentui](https://github.com/SMARK2022/opentui) fork 記錄為 `thirdparty/opentui` submodule。首次 checkout 後請執行 `git submodule update --init thirdparty/opentui`；gitlink 固定到 `v0.4.3-smark.1` 的原始碼 commit，fork 預設分支為 `smark/main`，方便檢查與繼續維護 `0.4.3 + CJK` 修復。
+
+submodule 只承載原始碼發現與 provenance，不參與 OpenCode 正常安裝或編譯。OpenCode 透過根 `package.json` 和 `bun.lock` 固定的 11 個 immutable GitHub Release tarball 取得 OpenTUI；release URL 失敗時不會回退到 `thirdparty/opentui` 原始碼。修改 fork 後必須先獨立發佈新的完整 package family，再一起更新 OpenCode URLs、lock 與 gitlink。
+
 ### Provider 與模型
 
 | 能力 | 說明 |
