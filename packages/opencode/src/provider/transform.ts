@@ -222,6 +222,59 @@ function normalizeMessages(
       .filter((msg): msg is ModelMessage => msg !== undefined && msg.content !== "")
   }
 
+  // OpenAI-compatible 代理可能拒绝空 content；先去掉空 text，再为 tool-call-only 保留非空 wire 内容。
+  // 约束来自实际 SDK 协议，不按模型名称豁免；后续 Mistral ID 映射仍独立保留。
+  if (model.api.npm === "@ai-sdk/openai-compatible") {
+    msgs = msgs
+      .map((msg) => {
+        if (typeof msg.content === "string") {
+          if (msg.content === "") return undefined
+          return msg
+        }
+        if (!Array.isArray(msg.content)) return msg
+        const filtered = msg.content.filter((part) => {
+          if (part.type === "text") return part.text !== ""
+          return true
+        })
+        // #492：全空 content 的 assistant 直接删除消息，而不是保留空壳触发 400。
+        if (filtered.length === 0) return undefined
+        return { ...msg, content: filtered }
+      })
+      .filter((msg): msg is ModelMessage => msg !== undefined && msg.content !== "")
+    // 仅有 tool-call 的 assistant 会被 SDK 序列化为空字符串，单个空格避免代理拒绝合法工具调用。
+    // 已有非空文本保持原值，包括有意义的空白，不改 tool-call 或 tool-result 的身份。
+    msgs = msgs.map((msg) => {
+      if (msg.role !== "assistant" || typeof msg.content === "string" || !Array.isArray(msg.content)) return msg
+      const hasText = msg.content.some((part) => part.type === "text" && part.text !== "")
+      const hasToolCall = msg.content.some((part) => part.type === "tool-call")
+      if (hasText || !hasToolCall) return msg
+      return { ...msg, content: [{ type: "text" as const, text: " " }, ...msg.content] }
+    })
+  }
+
+  // Stateless reasoning 不能凭服务端 itemId 查找；末端剥 ID 后，只能用完整 encrypted_content 重放。
+  // 在消息构建处丢弃中断留下的不完整 part，不改持久原件或后续已有的 ID 剥离。
+  if (model.api.npm === "@ai-sdk/openai" && _options.store !== true) {
+    msgs = msgs
+      .map((msg) => {
+        if (msg.role !== "assistant" || !Array.isArray(msg.content)) return msg
+        const filtered = msg.content.filter((part) => {
+          if (part.type !== "reasoning") return true
+          const openaiOpts = part.providerOptions?.openai as
+            | { itemId?: string; reasoningEncryptedContent?: string }
+            | undefined
+          // 有 itemId 但无 encrypted_content 的 reasoning 来自中断/取消的响应，
+          // stateless 模式下无法重放，过滤以避免 API 400
+          if (openaiOpts?.itemId && !openaiOpts?.reasoningEncryptedContent) return false
+          return true
+        })
+        // #492：assistant 只剩无效 reasoning 时删除整条消息，等价于放弃该轮不可重放输出。
+        if (filtered.length === 0) return undefined
+        return { ...msg, content: filtered }
+      })
+      .filter((msg): msg is ModelMessage => msg !== undefined)
+  }
+
   if (model.api.id.includes("claude")) {
     const scrub = (id: string) => id.replace(/[^a-zA-Z0-9_-]/g, "_")
     msgs = msgs.map((msg) => {
