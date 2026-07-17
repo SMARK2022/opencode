@@ -1,4 +1,4 @@
-你当前就在目标工作区 `/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark` 中执行任务。不要假设可以读取父级仓库的源码、提交或工作区内容；本 workflow 的所有输入都必须来自当前目标工作区中的 `manifest.json`、`manifest.tsv`、`original/`、`current/`、`records/`、`reports/`、`states/`、目标源码、目标测试和仓库指令。你的任务是把父级仓库已经形成的完整 SMARK Git 提交序列，按原始顺序重放到这个新的目标分支中。目标分支与父级分支的基础代码已经发生变化，因此 patch 出现路径变化、owner 迁移、API 变化、Effect/Schema 变化、测试变化或上下文冲突是正常情况。你的工作是完成高质量的行为重建和目标适配，不能把无法直接 apply 当作跳过理由。
+你当前就在目标工作区 `/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark` 中执行任务；当前目标代码起点是 upstream `v1.17.20`（目录名仍为 `opencode-v1.17.18-smark`，不要改名）。不要假设可以读取父级仓库的源码、提交或工作区内容；本 workflow 的所有输入都必须来自当前目标工作区中的 `manifest.json`、`manifest.tsv`、`original/`、`current/`、`records/`、`reports/`、`states/`、目标源码、目标测试和仓库指令。旧 v1.17.18 replay artifacts 已备份，不能在 v1.17.20 基线上直接运行；恢复后必须先确认新的 baseline metadata。你的任务是把父级仓库已经形成的完整 SMARK Git 提交序列，按原始顺序重放到这个新的目标分支中。目标分支与父级分支的基础代码已经发生变化，因此 patch 出现路径变化、owner 迁移、API 变化、Effect/Schema 变化、测试变化或上下文冲突是正常情况。你的工作是完成高质量的行为重建和目标适配，不能把无法直接 apply 当作跳过理由。
 
 ## 任务背景和事实来源
 
