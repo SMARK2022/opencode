@@ -18,13 +18,13 @@ function assistantMsg(id: string, parentID: string, input: number, output = 0) {
   }
 }
 
-function stepFinishPart(messageID: string, input: number, output = 0) {
+function stepFinishPart(messageID: string, input: number, output = 0, cacheRead = 0, cacheWrite = 0) {
   return {
     id: `${messageID}-sf`,
     type: "step-finish" as const,
     reason: "stop",
     cost: 0,
-    tokens: { input, output, reasoning: 0, cache: { read: 0, write: 0 } },
+    tokens: { input, output, reasoning: 0, cache: { read: cacheRead, write: cacheWrite } },
   }
 }
 
@@ -56,5 +56,73 @@ describe("tokenAccounting", () => {
     expect(acc.request.totalInput).toBe(3_000)
     // session 级累计遍历所有 assistant，不受 lastUser 选择影响（回归保护）
     expect(acc.session.input).toBe(3_000)
+  })
+
+  // #490：pure 口径与 cache-inclusive 口径并行；两条断言能同时发现字段缺失与误合并 cache。
+  test("keeps pure request input separate from cache-inclusive input", () => {
+    const messages = [userMsg("pure-input-user"), assistantMsg("pure-input-assistant", "pure-input-user", 100)]
+    const parts = {
+      "pure-input-assistant": [stepFinishPart("pure-input-assistant", 100, 0, 20, 5)],
+    }
+
+    const acc = tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000)
+
+    // 100 是独立的 provider input literal；20/5 只作为 cache 干扰项，不从生产结果反推期望。
+    expect(acc.request.totalInputPure).toBe(100)
+    expect(acc.request.totalInput).toBe(125)
+  })
+
+  // #490：显式历史 request 与当前流式 parent 隔离——永久记录不能读取 latest parent 的 output。
+  test("scopes an explicit historical request away from the current streaming parent", () => {
+    const messages = [
+      userMsg("old-user"),
+      assistantMsg("old-assistant", "old-user", 100, 200),
+      userMsg("new-user"),
+      { ...assistantMsg("new-assistant", "new-user", 300, 900), time: { created: 10 } },
+    ]
+    const parts = {
+      "old-assistant": [stepFinishPart("old-assistant", 100, 200)],
+      "new-assistant": [stepFinishPart("new-assistant", 300, 900), { type: "text", text: "streaming output ".repeat(64) }],
+    }
+
+    const acc = tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, undefined, "old-user")
+
+    // 200 与 900 的差异直接对应两个可达 assistant parent 的归属边界。
+    expect(acc.request.totalOutput).toBe(200)
+    // 实际增长的未完成 tail 比两个静态 finish 更能暴露全局 latest 泄漏。
+    parts["new-assistant"].push({ type: "text", text: "more streaming output ".repeat(64) })
+    expect(tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, undefined, "old-user").request.totalOutput).toBe(200)
+  })
+
+  // #490：无 step-finish 的历史持久化 message 经 fallback 也必须保留纯 input。
+  test("uses pure input from an explicit historical message-token fallback", () => {
+    const messages = [
+      userMsg("legacy-user"),
+      {
+        ...assistantMsg("legacy-assistant", "legacy-user", 77, 11),
+        tokens: { input: 77, output: 11, reasoning: 3, cache: { read: 8, write: 2 } },
+      },
+      userMsg("current-user"),
+      assistantMsg("current-assistant", "current-user", 300, 900),
+    ]
+    const parts = {
+      "legacy-assistant": [],
+      "current-assistant": [stepFinishPart("current-assistant", 300, 900)],
+    }
+
+    const acc = tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, undefined, "legacy-user")
+
+    // cache read/write 留在 fixture 里，证明 fallback 不能通过 totalInput 间接冒充 pure input。
+    expect(acc.request.totalInputPure).toBe(77)
+    expect(acc.request.totalOutput).toBe(14)
+  })
+
+  test("retains durable session totals outside the visible message window", () => {
+    const acc = tokenAccounting([], () => [], undefined, {
+      session: { tokens: { input: 12_300, output: 1_000, reasoning: 40, cache: { read: 20, write: 5 } }, cost: 0.01, request: undefined },
+      last: undefined, parts: [],
+    })
+    // 空分页不能把持久账本抹成零；退出记录仍需要完整 input、output、reasoning 与 cost。
+    expect(acc.session).toMatchObject({ input: 12_300, output: 1_000, reasoning: 40, cost: 0.01 })
   })
 })
