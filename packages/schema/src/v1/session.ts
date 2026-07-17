@@ -629,6 +629,22 @@ const events = {
       info: SessionInfo,
     },
   }),
+  // #493：fork 走 raw storage clone——messageMap/partMap 携带 source→target ID 映射，
+  // 投影在同一事件事务内完成 clonePrefix 与 refcount 增量，不发布逐条 update 事件。
+  // 聚合锚定 target 会话：clone 结果落在新建 session 的事件序列上，与 projector 写入目标一致。
+  Forked: define({
+    type: "session.forked",
+    durable: {
+      aggregate: "targetSessionID",
+      version: 1,
+    },
+    schema: {
+      sourceSessionID: SessionID,
+      targetSessionID: SessionID,
+      messageMap: Schema.Array(Schema.Struct({ sourceID: MessageID, targetID: MessageID })),
+      partMap: Schema.Array(Schema.Struct({ sourceID: PartID, targetID: PartID })),
+    },
+  }),
   Updated: define({
     type: "session.updated",
     ...options,
@@ -728,6 +744,7 @@ export const Event = {
   Error,
   Definitions: inventory(
     events.Created,
+    events.Forked,
     events.Updated,
     events.Deleted,
     events.MessageUpdated,

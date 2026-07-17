@@ -325,7 +325,8 @@ export const layer = Layer.effect(
         }
         // 旧 session 或 projector 未写入 model 时，用最近 user message 的 model
         const match = yield* session
-          .findMessage(sessionID, (m) => m.info.role === "user" && !!m.info.model)
+          // #493：role/model 均为 Info 热字段——reviewer fallback 扫描不得因一次权限请求展开整段历史工具输出。
+          .findMessage(sessionID, (info) => info.role === "user" && !!info.model)
           .pipe(Effect.catch(() => Effect.succeed(Option.none())))
         if (Option.isSome(match) && match.value.info.role === "user" && match.value.info.model) {
           return {

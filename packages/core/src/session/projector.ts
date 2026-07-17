@@ -17,6 +17,7 @@ import { SessionMessageUpdater } from "./message-updater"
 import { SessionInput } from "./input"
 import { WorkspaceV2 } from "../workspace"
 import { MessageTable, PartTable, SessionInputTable, SessionMessageTable, SessionTable } from "./sql"
+import { ColdStorage } from "../storage/cold-storage"
 import type { DeepMutable } from "../schema"
 
 type DatabaseService = Database.Interface["db"]
@@ -80,12 +81,12 @@ function sessionRow(info: SessionV1.SessionInfo): typeof SessionTable.$inferInse
 
 function messageData(
   info: (typeof SessionV1.Event.MessageUpdated.Type)["data"]["info"],
-): typeof MessageTable.$inferInsert.data {
+) {
   const { id: _, sessionID: __, ...rest } = info
   return rest as DeepMutable<typeof rest>
 }
 
-function partData(part: (typeof SessionV1.Event.PartUpdated.Type)["data"]["part"]): typeof PartTable.$inferInsert.data {
+function partData(part: (typeof SessionV1.Event.PartUpdated.Type)["data"]["part"]) {
   const { id: _, messageID: __, sessionID: ___, ...rest } = part
   return rest as DeepMutable<typeof rest>
 }
@@ -157,23 +158,20 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
         variant: event.data.model.variant, timeCreated: DateTime.toEpochMillis(event.data.timestamp),
       })
     }
-    const decodeRow = (row: typeof SessionMessageTable.$inferSelect) =>
-      decodeMessage({ ...row.data, id: row.id, type: row.type })
+    const decodeRow = (row: typeof SessionMessageTable.$inferSelect) => {
+      const restored = ColdStorage.thawSessionMessageRowsInTransaction(db.sync, [row])[0]
+      if (!restored) throw new ColdStorage.CorruptionError({ message: `Native message disappeared: ${row.id}` })
+      return decodeMessage({ ...restored.data, id: restored.id, type: restored.type })
+    }
     const updateMessage = (message: SessionMessage.Message) => {
       if (event.durable === undefined) return Effect.die("Durable Session event is missing aggregate sequence")
       const encoded = encodeMessage(message)
       const { id, type, ...data } = encoded
-      return db
-        .update(SessionMessageTable)
-        .set({ type, time_created: DateTime.toEpochMillis(message.time.created), data })
-        .where(
-          and(
-            eq(SessionMessageTable.id, SessionMessage.ID.make(id)),
-            eq(SessionMessageTable.session_id, event.data.sessionID),
-          ),
-        )
-        .run()
-        .pipe(Effect.orDie)
+      // 与事件及账本共用已持有的事务；完整替换后再释放旧payload。
+      return Effect.sync(() => ColdStorage.replaceSessionMessage(db.sync, {
+        id: SessionMessage.ID.make(id), session_id: event.data.sessionID,
+        type, time_created: DateTime.toEpochMillis(message.time.created), data,
+      }))
     }
     const appendMessage = (message: SessionMessage.Message) => insertMessage(db, event, message)
     const adapter: SessionMessageUpdater.Adapter = {
@@ -370,7 +368,8 @@ function insertMessage(db: DatabaseService, event: SessionEvent.Event, message: 
 const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const events = yield* EventV2.Service
-    const { db } = yield* Database.Service
+    // #493：sync 与 db 是同一原生连接的两个 facade；投影回调内直接闭包引用，不重复解析服务。
+    const { db, sync } = yield* Database.Service
     yield* events.project(SessionV1.Event.Created, (event) =>
       Effect.gen(function* () {
         const stored = yield* db
@@ -415,7 +414,27 @@ const layer = Layer.effectDiscard(
       }),
     )
     yield* events.project(SessionV1.Event.Deleted, (event) =>
-      db.delete(SessionTable).where(eq(SessionTable.id, event.data.sessionID)).run().pipe(Effect.orDie),
+      Effect.gen(function* () {
+        // #493：删除 session 前释放其全部 cold owner 引用；release 失败阻止删除（引用计数 invariant）。
+        ColdStorage.releaseSession(sync, event.data.sessionID)
+        yield* db.delete(SessionTable).where(eq(SessionTable.id, event.data.sessionID)).run().pipe(Effect.orDie)
+      }),
+    )
+    yield* events.project(SessionV1.Event.Forked, (event) =>
+      Effect.gen(function* () {
+        // #493：fork 只复制 raw rows；cold owner 共享同一 hash，父前缀不会先 thaw 成热副本。
+        // 旧 fork 逐 PartUpdated 累加 step-finish usage；raw clone 必须在同一投影保留该行为。
+        const cloned = ColdStorage.clonePrefix(sync, {
+          sourceSessionID: event.data.sourceSessionID,
+          sessionID: event.data.targetSessionID,
+          messageMap: event.data.messageMap,
+          partMap: event.data.partMap,
+        })
+        for (const part of cloned) {
+          const value = usage(part)
+          if (value) yield* applyUsage(db, event.data.targetSessionID, value)
+        }
+      }),
     )
     yield* events.project(SessionV1.Event.MessageUpdated, (event) =>
       Effect.gen(function* () {
@@ -423,12 +442,13 @@ const layer = Layer.effectDiscard(
         const id = event.data.info.id
         const sessionID = event.data.info.sessionID
         const data = messageData(event.data.info)
-        yield* db
-          .insert(MessageTable)
-          .values({ id, session_id: sessionID, time_created, data })
-          .onConflictDoUpdate({ target: MessageTable.id, set: { data } })
-          .run()
-          .pipe(Effect.orDie)
+        // #493：durable event 携带完整业务 Info；replaceMessage 统一清旧 ref 并落库。
+        ColdStorage.replaceMessage(sync, {
+          id,
+          session_id: sessionID,
+          time_created,
+          data,
+        })
       }),
     )
     yield* events.project(SessionV1.Event.MessageRemoved, (event) =>
@@ -443,6 +463,8 @@ const layer = Layer.effectDiscard(
           const previous = usage(row.data)
           if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
         }
+        // #493：删除 Message 前释放其自身与级联 Parts 的 cold 引用（RESTRICT FK 要求先清 ref）。
+        ColdStorage.releaseMessage(sync, event.data.messageID, event.data.sessionID)
         yield* db
           .delete(MessageTable)
           .where(and(eq(MessageTable.id, event.data.messageID), eq(MessageTable.session_id, event.data.sessionID)))
@@ -460,6 +482,8 @@ const layer = Layer.effectDiscard(
           .pipe(Effect.orDie)
         const previous = row && usage(row.data)
         if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
+        // #493：删除 Part 前释放其 cold 引用。
+        ColdStorage.releasePart(sync, event.data.partID, event.data.sessionID)
         yield* db
           .delete(PartTable)
           .where(and(eq(PartTable.id, event.data.partID), eq(PartTable.session_id, event.data.sessionID)))
@@ -474,12 +498,14 @@ const layer = Layer.effectDiscard(
         const sessionID = event.data.part.sessionID
         const data = partData(event.data.part)
         const row = yield* db.select().from(PartTable).where(eq(PartTable.id, id)).get().pipe(Effect.orDie)
-        yield* db
-          .insert(PartTable)
-          .values({ id, message_id: messageID, session_id: sessionID, time_created: event.data.time, data })
-          .onConflictDoUpdate({ target: PartTable.id, set: { data } })
-          .run()
-          .pipe(Effect.orDie)
+        // #493：usage 差量与完整 Part replacement 位于同一投影；cold update 失败不能只提交统计变化。
+        ColdStorage.replacePart(sync, {
+          id,
+          message_id: messageID,
+          session_id: sessionID,
+          time_created: event.data.time,
+          data,
+        })
         const previous = row && usage(row.data)
         const next = usage(event.data.part)
         if (previous) yield* applyUsage(db, row.session_id, previous, -1)
@@ -601,7 +627,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.RevertEvent.Committed, (event) =>
       Effect.gen(function* () {
         const boundary = yield* db
-          .select({ seq: SessionMessageTable.seq })
+          .select()
           .from(SessionMessageTable)
           .where(
             and(
@@ -612,6 +638,12 @@ const layer = Layer.effectDiscard(
           .get()
           .pipe(Effect.orDie)
         if (!boundary) return yield* Effect.die(`Revert boundary message not found: ${event.data.messageID}`)
+        // 只释放即将删除的seq后缀；保留边界用户的附件后再清理其失效摘要。
+        ColdStorage.releaseSessionMessageRows(sync, sync.select().from(SessionMessageTable).where(and(
+          eq(SessionMessageTable.session_id, event.data.sessionID), gt(SessionMessageTable.seq, boundary.seq),
+        )).all())
+        if (boundary.type === "user") ColdStorage.thawSessionMessageRowsInTransaction(sync, [boundary])
+
         const removed = yield* db
           .delete(SessionMessageTable)
           .where(

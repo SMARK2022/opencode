@@ -5,6 +5,7 @@ import { and, asc, eq } from "drizzle-orm"
 import { Effect, Schema } from "effect"
 import { FileDiff } from "@opencode-ai/schema/file-diff"
 import { Database } from "../database/database"
+import { ColdStorage } from "../storage/cold-storage"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
 import { SessionMessageTable } from "./sql"
@@ -84,13 +85,15 @@ export const summarize = Effect.fn("ToolDiffs.summarize")(function* (db: Databas
   )).get().pipe(Effect.orDie)
   // 归属使用已冻结的当前request，不把审查synthetic或同根压缩请求伪装成用户prompt。
   if (user?.type !== "user") return
-  const rows = yield* db.select({ id: SessionMessageTable.id, type: SessionMessageTable.type, data: SessionMessageTable.data })
+  const rows = yield* db.select({ message: SessionMessageTable })
     .from(SessionMessageTable).innerJoin(RequestUsageAssistantTable, and(
       eq(RequestUsageAssistantTable.session_id, SessionMessageTable.session_id),
       eq(RequestUsageAssistantTable.assistant_message_id, SessionMessageTable.id),
     )).where(and(eq(SessionMessageTable.session_id, input.sessionID), eq(RequestUsageAssistantTable.request_id, owner.requestID)))
     .orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
-  const messages = rows.map(row => decode({ ...row.data, id: row.id, type: row.type }))
+  // 真实请求归属先筛选，工具结果在既有聚合器消费前完整恢复。
+  const restored = yield* ColdStorage.readSessionMessageRows(db, rows.map(row => row.message).filter(row => !hidden(row.data.metadata?.hidden)))
+  const messages = restored.map(row => decode({ ...row.data, id: row.id, type: row.type }))
     .filter((message): message is SessionMessage.Assistant => message.type === "assistant" && !hidden(message.metadata?.hidden))
   // Native与V1同样只消费当前请求的完成工具；整树快照既不参与归因，也不再吞错补成功。
   const byTool = collect(messages.flatMap(message => message.content.flatMap(part =>

@@ -56,7 +56,8 @@ const featureDefinitions = Event.inventory(
 )
 
 export const ServerDefinitions = Event.inventory(
-  ...foundationDefinitions,
+  // raw clone 是 V1 持久投影的内部事件，不扩张当前 Protocol/SDK Next 的公开事件面。
+  ...foundationDefinitions.filter((definition) => definition !== SessionV1.Event.Forked),
   ...featureDefinitions,
   ...SessionTodo.Event.Definitions,
   ...SessionGoal.Event.Definitions,

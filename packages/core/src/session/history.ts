@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, gt, gte, lte, ne, or, sql } from "drizzle-orm"
 import { Effect, Schema } from "effect"
 import { Database } from "../database/database"
+import { ColdStorage } from "../storage/cold-storage"
 import type { FileEvidence } from "./file-evidence"
 import { MessageDecodeError } from "./error"
 import { SessionMessage } from "./message"
@@ -51,7 +52,8 @@ const messageRows = Effect.fnUntraced(function* (
     .orderBy(asc(SessionMessageTable.seq))
     .all()
     .pipe(Effect.orDie)
-  return rows
+  // 已选定compaction/epoch范围；合法隐藏行不为普通模型上下文预热。
+  return yield* ColdStorage.readSessionMessageRows(db, rows.filter(row => !hidden(row.data.metadata?.hidden)))
 })
 
 const decodeMessageRow = (row: typeof SessionMessageTable.$inferSelect) =>
@@ -110,7 +112,8 @@ export const rawUserMessages = Effect.fn("SessionHistory.rawUserMessages")(funct
   const rows = yield* db.select().from(SessionMessageTable).where(and(
     eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "user"), lte(SessionMessageTable.seq, throughSeq),
   )).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
-  const messages = yield* Effect.forEach(rows, decodeMessageRow)
+  const restored = yield* ColdStorage.readSessionMessageRows(db, rows.filter(row => !hidden(row.data.metadata?.hidden)))
+  const messages = yield* Effect.forEach(restored, decodeMessageRow)
   // 使用同一合法hidden合同；synthetic、助手和未promote的inbox本来就不属于user行。
   return messages.flatMap(message => message.type === "user" && !hidden(message.metadata?.hidden) ? [message] : [])
 })
@@ -122,7 +125,8 @@ export const evidence = Effect.fn("SessionHistory.evidence")(function* (
   const rows = yield* db.select().from(SessionMessageTable).where(and(
     eq(SessionMessageTable.session_id, sessionID), or(eq(SessionMessageTable.type, "assistant"), eq(SessionMessageTable.type, "compaction")), lte(SessionMessageTable.seq, throughSeq),
   )).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
-  const messages = (yield* Effect.forEach(rows, decodeMessageRow)).filter(message => !hidden(message.metadata?.hidden))
+  const restored = yield* ColdStorage.readSessionMessageRows(db, rows.filter(row => !hidden(row.data.metadata?.hidden)))
+  const messages = (yield* Effect.forEach(restored, decodeMessageRow)).filter(message => !hidden(message.metadata?.hidden))
   const receipts = messages.flatMap((message) => message.type === "assistant"
     ? message.content.flatMap((part) =>
         part.type === "tool" && part.name === "read" && part.provider?.executed !== true && part.state.status === "completed"

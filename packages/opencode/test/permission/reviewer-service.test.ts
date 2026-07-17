@@ -64,7 +64,8 @@ const emptyReviewerDb = (() => {
     orderBy: () => ({ limit: () => ({ all: () => Effect.succeed([]) }) }),
     get: () => Effect.succeed({ id: SessionID.make("session_parent") }),
   }
-  return { db: { select: () => ({ from: () => ({ where: () => chain }) }) } as never }
+  // #493：Interface 增加 sync（同一原生连接的同步 client）——空链 mock 同步补齐，测试不触真实库。
+  return { db: { select: () => ({ from: () => ({ where: () => chain }) }) } as never, sync: undefined as never }
 })()
 
 describe("permission reviewer service", () => {
@@ -777,7 +778,8 @@ function reviewerFixture(
       Layer.provide(options.plugin ?? pluginLayer()),
       Layer.provide(sessionLayer),
       // #250：Database 仅类型层需要——review 无 sessionID 时不触 transcript 查询
-      Layer.provide(Layer.mock(Database.Service)({ db: undefined as never })),
+      // #493：sync 字段随 Interface 一同 mock——review 路径不触冷存储同步 client。
+      Layer.provide(Layer.mock(Database.Service)({ db: undefined as never, sync: undefined as never })),
     ),
   }
 }

@@ -332,7 +332,12 @@ describe("DatabaseMigration", () => {
         yield* db.run(sql`DELETE FROM migration WHERE id = ${simplifySessionInputMigration.id}`)
         yield* DatabaseMigration.applyOnly(db, [simplifySessionInputMigration])
 
-        const database = Layer.succeed(Database.Service, { db })
+        const database = Layer.succeed(Database.Service, {
+          db: Object.assign(db, { sync: undefined as never }),
+          // #493：本测试只发布 Event.Updated（不触发 cold 挂钩投影）；sync 以 fail-fast 占位，
+          // 若未来断言走到 cold 路径会立即暴露而不是静默通过。
+          sync: undefined as never,
+        })
         yield* EventV2.Service.use((service) =>
           service.publish(SessionV1.Event.Updated, {
             sessionID: SessionSchema.ID.make("session"),

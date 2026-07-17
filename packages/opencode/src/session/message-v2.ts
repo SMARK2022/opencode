@@ -27,6 +27,8 @@ import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { NotFoundError } from "@/storage/storage"
 import { and, desc, eq, gt, gte, inArray, lt, or, sql } from "drizzle-orm"
+import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+import { Option } from "effect"
 import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { ProviderError } from "@/provider/error"
 import { iife } from "@/util/iife"
@@ -110,28 +112,117 @@ export const cursor = {
   },
 }
 
-const info = (row: typeof MessageTable.$inferSelect) =>
-  ({
+// #493：Message storage type 只放宽 summary.diffs；Array 检查足以跨越该静态差异，cold payload 项已在 restore 中逐项解码。
+// 这里不能重跑完整 Info Schema：既有数据库允许 fractional time，新增冷存储不得收紧无关历史读取合同。
+type StoredInfo = (typeof MessageTable.$inferSelect)["data"] & Pick<Info, "id" | "sessionID">
+
+function isInfo(value: StoredInfo): value is Info {
+  return value.role === "assistant" || value.summary === undefined || Array.isArray(value.summary.diffs)
+}
+
+// #493：HotInfo 只用于 predicate 定位：assistant info 全热，user summary 明确排除唯一冷字段 diffs。
+// 返回完整 Message 的 consumer 仍必须在匹配后经过 hydrate，不能把该类型扩展成业务读取捷径。
+export type HotInfo =
+  | Assistant
+  | (Omit<User, "summary"> & { summary?: Omit<NonNullable<User["summary"]>, "diffs"> })
+
+// #493：StoredPartData 只把四类冷字符串放宽为 unknown；decoder 只验证差异字段即可恢复业务类型。
+// 不重跑整个 Part Schema，既保留历史宽容性，也避免普通热分页重复校验大对象。
+type StoredPart = (typeof PartTable.$inferSelect)["data"] & Pick<Part, "id" | "sessionID" | "messageID">
+
+function isPart(value: StoredPart): value is Part {
+  if (value.type === "tool" && value.state.status === "completed") {
+    return (
+      typeof value.state.output === "string" &&
+      (value.state.attachments?.every((attachment) => typeof attachment.url === "string") ?? true)
+    )
+  }
+  if (value.type === "reasoning") return typeof value.text === "string"
+  if (value.type === "file") return typeof value.url === "string"
+  return true
+}
+
+const info = (db: ColdStorage.TxOrDb, row: typeof MessageTable.$inferSelect) => {
+  // #493：thaw 在同步事务内完成；任何 corruption 都终止读取而不是返回 storage skeleton。
+  const restored = ColdStorage.thawMessageRows(db, [row])[0]
+  if (!restored) throw new Error(`Message row disappeared during thaw: ${row.id}`)
+  const value = {
+    ...restored.data,
+    id: restored.id,
+    sessionID: restored.session_id,
+  }
+  if (!isInfo(value)) throw new Error(`Message row failed schema validation after thaw: ${row.id}`)
+  return value
+}
+
+const infoFromRestored = (row: typeof MessageTable.$inferSelect) => {
+  const value = {
     ...row.data,
     id: row.id,
     sessionID: row.session_id,
-  }) as Info
+  }
+  if (!isInfo(value)) throw new Error(`Message row failed schema validation after thaw: ${row.id}`)
+  return value
+}
 
-const part = (row: typeof PartTable.$inferSelect) =>
-  ({
+// #493：单 Part decoder 是所有 direct read 的共同 cold-aware seam；调用方不能直接 spread raw projection row。
+const part = (db: ColdStorage.TxOrDb, row: typeof PartTable.$inferSelect) => {
+  const restored = ColdStorage.thawPartRows(db, [row])[0]
+  if (!restored) throw new Error(`Part row disappeared during thaw: ${row.id}`)
+  const value = {
+    ...restored.data,
+    id: restored.id,
+    sessionID: restored.session_id,
+    messageID: restored.message_id,
+  }
+  if (!isPart(value)) throw new Error(`Part row failed schema validation after thaw: ${row.id}`)
+  return value
+}
+
+const partFromRestored = (row: typeof PartTable.$inferSelect) => {
+  const value = {
     ...row.data,
     id: row.id,
     sessionID: row.session_id,
     messageID: row.message_id,
-  }) as Part
+  }
+  if (!isPart(value)) throw new Error(`Part row failed schema validation after thaw: ${row.id}`)
+  return value
+}
+
+function hotInfo(row: typeof MessageTable.$inferSelect): HotInfo {
+  // #493：user summary 只保留热字段（title/body），diffs 不进入定位扫描类型面。
+  if (row.data.role === "assistant") {
+    return { ...row.data, id: row.id, sessionID: row.session_id }
+  }
+  const summary = row.data.summary
+    ? {
+        ...(row.data.summary.title !== undefined ? { title: row.data.summary.title } : {}),
+        ...(row.data.summary.body !== undefined ? { body: row.data.summary.body } : {}),
+      }
+    : undefined
+  return {
+    ...row.data,
+    id: row.id,
+    sessionID: row.session_id,
+    summary,
+  }
+}
+
+// #493：Session.getPart 与批量 hydrate 共享同一 row decoder，避免 direct read 绕过 cold projection。
+export const decodeMessageRow = info
+export const decodePartRow = part
 
 const older = (row: Cursor) =>
   or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
 
-function hydrate(db: Database.Interface["db"], rows: (typeof MessageTable.$inferSelect)[]) {
-  const ids = rows.map((row) => row.id)
-  const partByMessage = new Map<string, Part[]>()
+function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"], rows: (typeof MessageTable.$inferSelect)[]) {
+  // #493：page 先批量 thaw Message，再只查询该 page 的 Parts；范围外历史不因一个 UI 请求被预热。
+  // 任一 payload corruption 使整个 hydrate 抛错，禁止同一 page 混合完整对象与占位对象。
   return Effect.gen(function* () {
+    const restoredRows = yield* Database.withSync({ db, sync }, () => ColdStorage.thawMessageRows(sync, rows))
+    const ids = restoredRows.map((row) => row.id)
+    const partByMessage = new Map<string, Part[]>()
     if (ids.length > 0) {
       const partRows = yield* db
         .select()
@@ -140,16 +231,17 @@ function hydrate(db: Database.Interface["db"], rows: (typeof MessageTable.$infer
         .orderBy(PartTable.message_id, PartTable.id)
         .all()
         .pipe(Effect.orDie)
-      for (const row of partRows) {
-        const next = part(row)
+      const restoredParts = yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, partRows))
+      for (const row of restoredParts) {
+        const next = partFromRestored(row)
         const list = partByMessage.get(row.message_id)
         if (list) list.push(next)
         else partByMessage.set(row.message_id, [next])
       }
     }
 
-    return rows.map((row) => ({
-      info: info(row),
+    return restoredRows.map((row) => ({
+      info: infoFromRestored(row),
       parts: partByMessage.get(row.id) ?? [],
     }))
   })
@@ -504,7 +596,14 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   includeHidden?: boolean
   fromMessageID?: MessageID
 }) {
-  const { db } = yield* Database.Service
+  const { db, sync } = yield* Database.Service
+  if (input.limit === 0) {
+    // #493：零范围只验证 Session existence，不读取 Message 探针，更不触发任何 thaw。
+    const exists = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get().pipe(Effect.orDie)
+    if (!exists) return yield* Effect.fail(new NotFoundError({ message: `Session not found: ${input.sessionID}` }))
+    const items: WithParts[] = []
+    return { items, more: false }
+  }
   const before = input.before ? cursor.decode(input.before) : undefined
   const anchor = input.fromMessageID
     ? yield* db.select({ id: MessageTable.id, time: MessageTable.time_created })
@@ -546,7 +645,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   const slice = more ? rows.slice(0, input.limit) : rows
   // #98：普通列表过滤隐藏部件，审计读取保留完整内容。
   // 协议重试隐藏畸形审查轮次，和撤回、空助手修复一样保留审计记录但不进入普通历史。
-  const items = (yield* hydrate(db, slice)).map((item) =>
+  const items = (yield* hydrate(db, sync, slice)).map((item) =>
     input.includeHidden ? item : { ...item, parts: item.parts.filter((part) => !part.hidden) },
   )
   items.reverse()
@@ -557,6 +656,73 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
     cursor: more && tail ? cursor.encode({ id: tail.id, time: tail.time_created }) : undefined,
   }
 })
+
+// #493：findHot 的 page 扫描只构造 HotInfo，不查 Parts、不调用 thaw；首个匹配 row 才 hydrate。
+// hidden Message 在 SQL 阶段排除；hidden Part 只在最终一条 hydrate 后过滤。
+export const findHot = Effect.fn("MessageV2.findHot")(function* (input: {
+  sessionID: SessionID
+  predicate: (info: HotInfo) => boolean
+}) {
+  const { db, sync } = yield* Database.Service
+  const exists = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get().pipe(Effect.orDie)
+  if (!exists) return yield* Effect.fail(new NotFoundError({ message: `Session not found: ${input.sessionID}` }))
+
+  const size = 50
+  let before: Cursor | undefined
+  while (true) {
+    const base = and(eq(MessageTable.session_id, input.sessionID), sql`json_type(${MessageTable.data}, '$.hidden') is null`)
+    const where = before ? and(base, older(before)) : base
+    const rows = yield* db
+      .select()
+      .from(MessageTable)
+      .where(where)
+      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+      .limit(size + 1)
+      .all()
+      .pipe(Effect.orDie)
+    if (rows.length === 0) return Option.none<WithParts>()
+    const more = rows.length > size
+    const slice = more ? rows.slice(0, size) : rows
+
+    // predicate 只接收 HotInfo：扫描阶段不能意外读取 summary.diffs 或 Parts。
+    for (const row of slice) {
+      if (!input.predicate(hotInfo(row))) continue
+      const found = (yield* hydrate(db, sync, [row]))[0]
+      if (!found) throw new Error(`Message row disappeared during find: ${row.id}`)
+      found.parts = found.parts.filter((part) => !part.hidden)
+      return Option.some(found)
+    }
+    if (!more) return Option.none<WithParts>()
+    const tail = slice.at(-1)
+    if (!tail) return Option.none<WithParts>()
+    before = { id: tail.id, time: tail.time_created }
+  }
+})
+
+// #493：fork 只读取 raw storage rows，不经 decoder，不会把 source prefix 持久 thaw。
+// messageID按同会话的(time_created,id)定位exclusive前缀；不存在的锚点沿用全量可见复制。
+export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
+  const conditions = [eq(MessageTable.session_id, input.sessionID), sql`json_type(${MessageTable.data}, '$.hidden') is null`]
+  const anchor = input.messageID ? db.select({ id: MessageTable.id, time: MessageTable.time_created }).from(MessageTable)
+    .where(and(...conditions, eq(MessageTable.id, input.messageID))).get() : undefined
+  if (anchor) conditions.push(sql`(${MessageTable.time_created}, ${MessageTable.id}) < (${anchor.time}, ${anchor.id})`)
+  const messages = db
+    .select({ id: MessageTable.id })
+    .from(MessageTable)
+    .where(and(...conditions))
+    .orderBy(MessageTable.time_created, MessageTable.id)
+    .all()
+  const parts = messages.length
+    ? db
+        .select({ id: PartTable.id, message_id: PartTable.message_id })
+        .from(PartTable)
+        .innerJoin(MessageTable, and(eq(MessageTable.id, PartTable.message_id), eq(MessageTable.session_id, PartTable.session_id)))
+        .where(and(...conditions, eq(PartTable.session_id, input.sessionID), sql`json_type(${PartTable.data}, '$.hidden') is null`))
+        .orderBy(MessageTable.time_created, MessageTable.id, PartTable.id)
+        .all()
+    : []
+  return { messages, parts }
+}
 
 // #98：stream 默认过滤 hidden；includeHidden 供审计/恢复读取
 export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean; fromMessageID?: MessageID }) {
@@ -586,7 +752,7 @@ export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean; f
 
 export function parts(messageID: MessageID) {
   return Effect.gen(function* () {
-    const { db } = yield* Database.Service
+    const { db, sync } = yield* Database.Service
     const rows = yield* db
       .select()
       .from(PartTable)
@@ -594,12 +760,83 @@ export function parts(messageID: MessageID) {
       .orderBy(PartTable.id)
       .all()
       .pipe(Effect.orDie)
-    return rows.map(part)
+    // #493：直接读也走 cold-aware decoder——thaw 后按业务 Schema 复核差异字段。
+    return yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, rows).map(partFromRestored))
+  })
+}
+
+// #493：usage 只需要 step-finish 热字段；专用 SQL 防止统计同 message 时 thaw tool/reasoning/file payload。
+// discriminator 在 SQL 与 TS 双重确认，外部损坏 JSON 不会被静默当成 StepFinishPart。
+export function stepFinishParts(messageID: MessageID) {
+  return Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    const rows = yield* db
+      .select({ data: PartTable.data })
+      .from(PartTable)
+      .where(and(eq(PartTable.message_id, messageID), sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`))
+      .orderBy(PartTable.id)
+      .all()
+      .pipe(Effect.orDie)
+    return rows.flatMap((row) => (row.data.type === "step-finish" ? [row.data] : []))
+  })
+}
+
+// #493：doom-loop 只需要前一个 assistant 的非 pending tool tail，不能为此加载整个 session transcript。
+// 只对最终选中的少量 tool rows 执行 thaw；hidden row 在 SQL limit 前过滤，不占 tail 配额。
+export function previousAssistantToolTail(input: {
+  sessionID: SessionID
+  before: { id: MessageID; time: number }
+  limit: number
+}) {
+  return Effect.gen(function* () {
+    if (input.limit <= 0) return []
+    const { db, sync } = yield* Database.Service
+    // cursor 以当前 persisted time/id 为准，调用方时间只作为 row 暂缺时的兼容边界。
+    const current = yield* db
+      .select({ time: MessageTable.time_created })
+      .from(MessageTable)
+      .where(eq(MessageTable.id, input.before.id))
+      .get()
+      .pipe(Effect.orDie)
+    const cursorBound = { id: input.before.id, time: current?.time ?? input.before.time }
+    const assistant = yield* db
+      .select({ id: MessageTable.id })
+      .from(MessageTable)
+      .where(
+        and(
+          eq(MessageTable.session_id, input.sessionID),
+          sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
+          sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+          older(cursorBound),
+        ),
+      )
+      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+      .limit(1)
+      .get()
+      .pipe(Effect.orDie)
+    if (!assistant) return []
+    // Part 查询按 ID 倒序 limit 后再恢复正序，返回语义与旧 slice(-N) 保持一致。
+    const rows = yield* db
+      .select()
+      .from(PartTable)
+      .where(
+        and(
+          eq(PartTable.message_id, assistant.id),
+          sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
+          sql`json_extract(${PartTable.data}, '$.state.status') != 'pending'`,
+          sql`json_type(${PartTable.data}, '$.hidden') is null`,
+        ),
+      )
+      .orderBy(desc(PartTable.id))
+      .limit(input.limit)
+      .all()
+      .pipe(Effect.orDie)
+    return yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, rows).map(partFromRestored).reverse())
   })
 }
 
 export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: SessionID; messageID: MessageID }) {
-  const { db } = yield* Database.Service
+  const { db, sync } = yield* Database.Service
   const row = yield* db
     .select()
     .from(MessageTable)
@@ -608,8 +845,9 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
     .pipe(Effect.orDie)
   // #106：message 缺失同样 Effect.fail
   if (!row) return yield* Effect.fail(new NotFoundError({ message: `Message not found: ${input.messageID}` }))
+  // #493：单条读取也走 cold-aware decoder（decodeMessageRow seam）
   return {
-    info: info(row),
+    info: yield* Database.withSync({ db, sync }, () => info(sync, row)),
     parts: yield* parts(input.messageID),
   }
 })

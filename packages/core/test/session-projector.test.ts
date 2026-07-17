@@ -21,7 +21,8 @@ import { SessionMessageUpdater } from "@opencode-ai/core/session/message-updater
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionInput } from "@opencode-ai/core/session/input"
-import { SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { ColdStorageTable, SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { RequestUsageTable, RequestUsageAssistantTable } from "@opencode-ai/core/session/request-usage.sql"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -56,6 +57,74 @@ const assistantRow = (
 }
 
 describe("SessionProjector", () => {
+  previewIt.effect("maintains Native cold owners by seq and rolls back corrupted reads", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const outside = SessionV2.ID.make("ses_cold_outside")
+      yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
+      yield* db.insert(SessionTable).values([sessionID, outside].map(id => ({ id, project_id: Project.ID.global,
+        slug: id, directory: "/project", title: id, version: "test" }))).run()
+      const body = [{ type: "reasoning" as const, id: "reason", text: "native cold reason ".repeat(500) }]
+      const oldID = SessionMessage.ID.make("msg_z_old")
+      const hiddenID = SessionMessage.ID.make("msg_y_hidden")
+      const tailID = SessionMessage.ID.make("msg_a_tail")
+      const otherID = SessionMessage.ID.make("msg_outside")
+      // 时间和ID不决定Native边界；seq=1可冻，compaction后的两个助手暂不可冻。
+      const messages = [
+        { ...assistantRow(oldID, 1), data: { ...assistantRow(oldID, 1).data, content: body } },
+        { ...assistantRow(hiddenID, 4), data: { ...assistantRow(hiddenID, 4).data, content: body,
+          metadata: { hidden: { time: 0, reason: "permission-reviewer-protocol-retry" } } } },
+        { ...assistantRow(tailID, 5), data: { ...assistantRow(tailID, 5).data, content: body } },
+        { ...assistantRow(otherID, 1), session_id: outside, data: { ...assistantRow(otherID, 1).data, content: body } },
+      ]
+      yield* db.insert(SessionMessageTable).values(messages).run()
+      const { id, type, ...data } = encodeMessage(SessionMessage.Compaction.make({ id: SessionMessage.ID.make("msg_compaction"),
+        type: "compaction", reason: "manual", summary: "summary", recent: "recent", time: { created } }))
+      yield* db.insert(SessionMessageTable).values({ id: SessionMessage.ID.make(id), type, data, session_id: sessionID, seq: 3, time_created: 0 }).run()
+      const runtime = { lease: { assertOwned() {} }, checkpoint: async (_task: ColdStorage.MaintenanceTask) => {},
+        run: <A>(body: () => A) => Effect.runPromise(Database.withSync({ db, sync: db.sync }, body)) }
+      const compressed = yield* Effect.promise(() => ColdStorage.maintain(db.sync, ColdStorage.prepareMaintenance({
+        operation: "compress", sessionID, olderThanMs: 30 * 24 * 60 * 60 * 1000, batchSize: 1,
+      }), runtime))
+      expect(compressed).toMatchObject({ type: "task", task: { status: "completed", processed: 3, skipped: 2,
+        cursor: { owner: "session_message" } } })
+      if (compressed.type !== "task") return yield* Effect.die("Missing maintenance task")
+      expect(ColdStorage.parseMaintenanceTask(compressed.task)).toEqual(compressed.task)
+      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, oldID)).get())?.cold_ref).toBeTruthy()
+      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, tailID)).get())?.cold_ref).toBeNull()
+      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, otherID)).get())?.cold_ref).toBeNull()
+      // 强制老化只用于此精确owner；隐藏消息即使已冷也不能因普通history读取被预热。
+      yield* Database.withSync({ db, sync: db.sync }, sync => {
+        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: hiddenID, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
+        expect(ColdStorage.status(sync).coldOwners).toBe(2)
+        expect(ColdStorage.verify(sync, { repair: false })).toMatchObject({ checkedOwners: 2, missingPayloads: 0, corruptPayloads: 0, refCountMismatches: 0 })
+      })
+      const history = yield* SessionHistory.load(db, sessionID)
+      expect(history.map(message => message.id)).toEqual([SessionMessage.ID.make(id), tailID])
+      const cold = (yield* db.select().from(SessionMessageTable).all()).filter(row => row.cold_ref !== null)
+      expect(cold.map(row => row.id).sort()).toEqual([oldID, hiddenID].sort())
+      const payload = yield* db.select().from(ColdStorageTable).get()
+      if (!payload) return yield* Effect.die("Missing shared Native payload")
+      expect(payload.ref_count).toBe(2)
+      // 破坏真实payload后整段读取必须回滚，不能交回空reasoning或消耗引用。
+      yield* db.update(ColdStorageTable).set({ payload: Buffer.from([0]) }).where(eq(ColdStorageTable.hash, payload.hash)).run()
+      const failed = yield* ColdStorage.readSessionMessageRows(db, cold).pipe(Effect.exit)
+      expect(failed._tag).toBe("Failure")
+      expect((yield* db.select().from(SessionMessageTable).all()).filter(row => row.cold_ref !== null)).toEqual(cold)
+      expect((yield* db.select().from(ColdStorageTable).get())?.ref_count).toBe(2)
+      yield* db.update(ColdStorageTable).set({ payload: payload.payload }).where(eq(ColdStorageTable.hash, payload.hash)).run()
+      const expanded = yield* Effect.promise(() => ColdStorage.maintain(db.sync, ColdStorage.prepareMaintenance({
+        operation: "expand", sessionID, all: false, batchSize: 1,
+      }), runtime))
+      expect(expanded).toMatchObject({ type: "task", task: { status: "completed", processed: 2 } })
+      const restored = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, oldID)).get()
+      expect(restored?.data).toMatchObject({ content: body })
+      expect(restored?.seq).toBe(1)
+      expect(restored?.time_created).toBe(0)
+      expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
+      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, otherID)).get())?.data).toMatchObject({ content: body })
+    }),
+  )
   previewIt.effect("reads complete legacy turns without populating the request ledger", () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db
@@ -182,22 +251,23 @@ describe("SessionProjector", () => {
     }),
   )
 
-  it.effect("persists request-owned tool diffs through the native completion event", () =>
+  previewIt.effect("persists request-owned tool diffs through the native completion event", () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db
       const events = yield* EventV2.Service
       yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
       yield* db.insert(SessionTable).values({ id: sessionID, project_id: Project.ID.global, slug: "diff",
         directory: "/project/app", title: "diff", version: "test" }).run()
+      const files = [{ uri: "data:text/plain;base64," + "YQ==".repeat(2000), mime: "text/plain", name: "evidence.txt" }]
       const first = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_diff_first"), sessionID,
-        prompt: Prompt.make({ text: "edit first" }), delivery: "steer" })
+        prompt: Prompt.make({ text: "edit first", files }), delivery: "steer" })
       yield* SessionInput.promoteSteers(db, events, sessionID, first.admittedSeq)
       const assistantMessageID = SessionMessage.ID.make("msg_diff_assistant")
       yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID, timestamp: created, agent: "build", model, snapshot: "tree_before" })
       const complete = (id: SessionMessage.ID, callID: string, name: string, structured: Record<string, unknown>) => Effect.gen(function* () {
         yield* events.publish(SessionEvent.Tool.Input.Started, { sessionID, assistantMessageID: id, callID, name, timestamp: created })
         yield* events.publish(SessionEvent.Tool.Called, { sessionID, assistantMessageID: id, callID, tool: name, input: {}, provider: { executed: false }, timestamp: created })
-        yield* events.publish(SessionEvent.Tool.Success, { sessionID, assistantMessageID: id, callID, structured, content: [], provider: { executed: false }, timestamp: created })
+        yield* events.publish(SessionEvent.Tool.Success, { sessionID, assistantMessageID: id, callID, structured, content: [{ type: "text", text: "native output ".repeat(600) }], provider: { executed: false }, timestamp: created })
       })
       // 真实完成投影同时覆盖三种工具形状、嵌套Location和最终格式化diff，不使用展示正文反推。
       yield* complete(assistantMessageID, "edit", "edit", { files: [{ file: "a.ts", patch: "+edit\n", additions: 1, deletions: 0, status: "modified" }] })
@@ -207,6 +277,25 @@ describe("SessionProjector", () => {
       ] })
       yield* complete(assistantMessageID, "write", "write", { target: "/project/app/new.ts", resource: "new.ts", existed: false,
         diff: "--- before\n+++ after\n+formatted\n", formattedContent: "formatted\n" })
+      const expected = (yield* SessionHistory.load(db, sessionID)).find(message => message.id === assistantMessageID)
+      if (!expected || expected.type !== "assistant") return yield* Effect.die("Missing native tool fixture")
+      const before = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get()
+      // 两次独立冻结分别检验普通history和runner入口，不能把第二次热读冒充恢复。
+      for (const runner of [false, true]) {
+        yield* db.update(SessionTable).set({ time_updated: 0 }).where(eq(SessionTable.id, sessionID)).run()
+        const frozen = yield* Database.withSync({ db, sync: db.sync }, sync => ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID }))
+        expect(frozen.type).toBe("frozen")
+        expect((yield* db.select().from(ColdStorageTable).get())?.ref_count).toBe(1)
+        const history = yield* (runner ? SessionHistory.loadForRunner(db, sessionID, 0) : SessionHistory.load(db, sessionID))
+        expect(history.find(message => message.id === assistantMessageID)).toEqual(expected)
+        const restored = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get()
+        expect(restored?.cold_ref).toBeNull()
+        expect(restored?.data).toEqual(before?.data)
+        expect(restored?.seq).toBe(before?.seq)
+        expect(restored?.time_created).toBe(before?.time_created)
+        expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
+        expect((yield* SessionHistory.load(db, sessionID)).find(message => message.id === assistantMessageID)).toEqual(expected)
+      }
       // 新提升的输入和助手不能认领旧轮结果；无快照请求仍然保留工具流归因。
       const later = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_diff_later"), sessionID,
         prompt: Prompt.make({ text: "edit later" }), delivery: "steer" })
@@ -215,7 +304,13 @@ describe("SessionProjector", () => {
       yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID: other, timestamp: created, agent: "build", model })
       yield* complete(other, "other", "edit", { files: [{ file: "other.ts", patch: "+other\n", additions: 1, deletions: 0 }] })
       const input = { sessionID, assistantMessageID, directory: "/project/app", worktree: "/project" }
+      yield* db.update(SessionTable).set({ time_updated: 0 }).where(eq(SessionTable.id, sessionID)).run()
+      yield* Database.withSync({ db, sync: db.sync }, sync => {
+        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID }).type).toBe("frozen")
+        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: other }).type).toBe("frozen")
+      })
       const withoutSnapshots = yield* ToolDiffs.summarize(db, input)
+      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, other)).get())?.cold_ref).toBeTruthy()
       expect(withoutSnapshots?.messageID).toBe(first.id)
       expect(withoutSnapshots?.diffs.map(item => item.file)).toEqual(["app/a.ts", "app/gone.ts", "app/new.ts"])
       const withSnapshots = { ...input, snapshot: Snapshot.ID.make("tree_after"),
@@ -229,7 +324,13 @@ describe("SessionProjector", () => {
       expect(summary?.diffs[2]).toMatchObject({ status: "added", additions: 1, patch: "--- before\n+++ after\n+formatted\n" })
       const settlement = { sessionID, assistantMessageID, timestamp: created, finish: "stop", cost: 0,
         tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, summary }
+      // late completion先恢复完整tool内容，再在同一事件事务中覆盖结算。
+      yield* db.update(SessionTable).set({ time_updated: 0 }).where(eq(SessionTable.id, sessionID)).run()
+      yield* Database.withSync({ db, sync: db.sync }, sync => {
+        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID }).type).toBe("frozen")
+      })
       yield* events.publish(SessionEvent.Step.Ended, settlement)
+      expect((yield* SessionHistory.load(db, sessionID)).find(message => message.id === assistantMessageID)).toMatchObject({ content: expected.content })
       yield* events.publish(SessionEvent.Step.Ended, settlement)
       const row = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, first.id)).get()
       expect(row?.data).toMatchObject({ summary: { diffs: summary?.diffs } })
@@ -243,9 +344,17 @@ describe("SessionProjector", () => {
       expect(memory.messages[0]).toMatchObject({ summary: { diffs: summary?.diffs } })
       expect(memory.messages[1]).not.toHaveProperty("summary")
       expect(encodeMessage(SessionMessage.User.make({ id: later.id, type: "user", text: "old", time: { created } }))).not.toHaveProperty("summary")
+      // 保留边界user的冷附件，撤回仅清其摘要并释放真实seq后缀。
+      yield* db.update(SessionTable).set({ time_updated: 0 }).where(eq(SessionTable.id, sessionID)).run()
+      yield* Database.withSync({ db, sync: db.sync }, sync => {
+        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: first.id }).type).toBe("frozen")
+        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID }).type).toBe("frozen")
+      })
       yield* events.publish(SessionEvent.RevertEvent.Committed, { sessionID, messageID: first.id, timestamp: created })
       const reverted = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, first.id)).get()
       expect(reverted?.data).not.toHaveProperty("summary")
+      expect(reverted?.data).toMatchObject({ files })
+      expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
       yield* db.delete(SessionTable).where(eq(SessionTable.id, sessionID)).run()
     }),
   )

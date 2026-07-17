@@ -2,6 +2,7 @@ export * as Database from "./database"
 
 import { EffectDrizzleSqlite } from "@opencode-ai/effect-drizzle-sqlite"
 import { layer as sqliteLayer } from "#sqlite"
+import { Sqlite } from "./sqlite"
 import { Cause, Context, Effect, Layer } from "effect"
 import { Global } from "../global"
 import { Flag } from "../flag/flag"
@@ -15,7 +16,9 @@ const makeDatabase = EffectDrizzleSqlite.makeWithDefaults()
 type DatabaseShape = Effect.Success<typeof makeDatabase>
 
 export interface Interface {
-  db: DatabaseShape
+  db: DatabaseShape & { readonly sync: Sqlite.DrizzleClient }
+  // 同一 Layer 原生连接的同步 facade，不注册模块级最后连接或另建数据库。
+  sync: Sqlite.DrizzleClient
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/storage/Database") {}
@@ -23,7 +26,9 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/v2
 const layer = (filename: string) => Layer.effect(
   Service,
   Effect.gen(function* () {
-    const db = yield* makeDatabase
+    const sync = yield* Sqlite.Drizzle
+    // 原查询能力显式携带同连接facade，参数式历史读取无需另取全局服务。
+    const db = Object.assign(yield* makeDatabase, { sync })
 
     // busy_timeout 必须最先设置，确保后续 PRAGMA 在锁争用时能等待
     yield* db.run("PRAGMA busy_timeout = 30000")
@@ -59,7 +64,7 @@ const layer = (filename: string) => Layer.effect(
     // 上层 finalizer 先于依赖连接释放执行，保留 checkpoint-before-close 顺序。
     // 条件恢复仍保留 query error 类型；仅在 finalizer 边界转为 defect，剩余失败不能伪装成功。
     yield* Effect.addFinalizer(() => checkpoint(db).pipe(Effect.orDie))
-    return { db }
+    return { db, sync }
   }).pipe(Effect.orDie),
 )
 
@@ -72,6 +77,13 @@ export function checkpoint(db: DatabaseShape) {
       (cause) => !Cause.hasInterrupts(cause),
       (cause) => Effect.sync(() => console.warn("wal_checkpoint on close failed", { error: Cause.pretty(cause) })),
     ),
+  )
+}
+
+// 同步事务复用 Effect 驱动的连接预约；不跨 await 持有连接，也不重复开启 Effect SQL 事务。
+export function withSync<A>(database: Interface, body: (sync: Sqlite.DrizzleClient) => A) {
+  return Effect.scoped(Effect.andThen(database.db.$client.reserve, Effect.sync(() => body(database.sync)))).pipe(
+    Effect.orDie,
   )
 }
 
