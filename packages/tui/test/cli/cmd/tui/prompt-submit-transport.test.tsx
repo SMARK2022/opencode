@@ -1,6 +1,9 @@
 /** @jsxImportSource @opentui/solid */
 // #192：prompt 提交传输层行为测试——失败保留 draft / 成功清除 / shell 后台 / slash / 新会话
 import { expect, test } from "bun:test"
+import fs from "fs/promises"
+import path from "path"
+import { pathToFileURL } from "url"
 import { testRender, useRenderer } from "@opentui/solid"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { onCleanup } from "solid-js"
@@ -31,7 +34,7 @@ import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/
 import { EditorContextProvider } from "../../../../src/context/editor"
 import { DialogProvider } from "../../../../src/ui/dialog"
 import { ToastProvider } from "../../../../src/ui/toast"
-import { createEventSource, createFetch, directory, json, wait } from "./sync-fixture"
+import { createEventSource, createFetch, directory, json, wait, worktree } from "./sync-fixture"
 
 const sessionID = "ses_prompt_transport"
 
@@ -313,7 +316,151 @@ test("accepted TUI slash-command submission clears without waiting for completio
   )
 })
 
+// #491：三态单行矩阵——160 列终端内限制真实 Prompt 为 75 列，锁定“终端宽但 Prompt 窄”的偏差。
+// IDE registry 腿经 env 播种确定化（不依赖宿主 IDE 会话）；voice 交互腿依赖宿主转写子进程，
+// 由 prompt-voice-input 单测覆盖 compact 文案矩阵。
+test("keeps the constrained Prompt extension bar on one row across active states", async () => {
+  // #491：宽度选项经 withPrompt 注入，验证的是分栏布局下的真实 Yoga 宽度而非终端总宽。
+  await using tmp = await tmpdir()
+  const stateDir = path.join(tmp.path, "state")
+  await fs.mkdir(stateDir, { recursive: true })
+  await Bun.write(path.join(stateDir, "kv.json"), "{}")
+  // #491：OPENCODE_IDE_REGISTRY_DIR 指向用例私有目录，宿主 IDE 注册表不会渗入断言。
+  const registryDir = path.join(stateDir, "ide")
+  await fs.mkdir(registryDir, { recursive: true })
+  const previousRegistry = process.env.OPENCODE_IDE_REGISTRY_DIR
+  process.env.OPENCODE_IDE_REGISTRY_DIR = registryDir
+  // 重复片段刻意让标签超过 75/3 的预算：断言的是可见 suffix，而非 JavaScript 字符数阈值。
+  await Bun.write(
+    path.join(registryDir, "vscode.json"),
+    JSON.stringify({
+      schema: 1,
+      updatedAt: Date.now(),
+      workspaceFolders: [{ fsPath: worktree, uri: pathToFileURL(worktree).toString() }],
+      active: {
+        textEditor: pathToFileURL(path.join(directory, `${"very-long-".repeat(8)}hotspots.md`)).toString(),
+      },
+    }),
+  )
+
+  try {
+    await withPrompt(
+      () => undefined,
+      async (_prompt, _route, app, context) => {
+        // 断言最终字符帧而非复制 Yoga 算法，确保 flex 收缩和 renderer 换行都走生产路径。
+        const waitForFrame = async (predicate: (frame: string) => boolean) => {
+          for (let index = 0; index < 200; index++) {
+            await app.renderOnce()
+            const frame = app.captureCharFrame()
+            if (predicate(frame)) return frame
+            await Bun.sleep(10)
+          }
+          throw new Error("Prompt footer frame did not settle")
+        }
+        // #491：行数统计基于 trim 后非空行——纯空白行是 renderer 留白，不构成“扩展栏”证据。
+        const extensionRows = (frame: string) => {
+          const lines = frame.split("\n")
+          // 输入框底边是稳定的用户可见边界，避免用组件节点或私有 renderer 尺寸定义“扩展栏”。
+          const separator = lines.findIndex((line) => line.includes("╹"))
+          return lines.slice(separator + 1).filter((line) => line.trim()).length
+        }
+
+        // idle 帧必须等到 bridge registry 文件标签渲染，证明该腿走生产消费链而非仅探针验证。
+        const idle = await waitForFrame((frame) => frame.includes("hotspots.md"))
+        emitSessionStatus(context, "evt-prompt-footer-busy", { type: "busy" })
+        await wait(() => context.sync.data.session_status?.[sessionID]?.type === "busy")
+        const busy = await settlePromptFrame(app)
+
+        // 超长 retry 同时施压摘要、固定元数据和 interrupt，防止仅修普通文件行却漏掉错误态。
+        emitSessionStatus(context, "evt-prompt-footer-retry", {
+          type: "retry",
+          attempt: 7,
+          next: Date.now() + 9_000,
+          message:
+            "Cannot connect to API: The socket connection was closed unexpectedly. Inspect the full provider transport failure for a complete diagnostic trace of this retry cycle.",
+        })
+        await wait(() => context.sync.data.session_status?.[sessionID]?.type === "retry")
+        const retry = await settlePromptFrame(app)
+
+        // idle 基线进入矩阵，防止修 active 状态时破坏原始长文件场景。
+        expect([idle, busy, retry].map(extensionRows)).toEqual([1, 1, 1])
+        expect(idle).toContain("hotspots.md")
+        expect(busy).toContain("hotspots.md")
+        expect(busy).toContain("interrupt")
+        expect(retry).toContain("details")
+        expect(retry).toContain("retry in 9s · #7")
+      },
+      stateDir,
+      { width: 160, promptWidth: 75 },
+    )
+  } finally {
+    // env 恢复保证同进程后续用例不会读到本用例的私有注册表。
+    if (previousRegistry === undefined) delete process.env.OPENCODE_IDE_REGISTRY_DIR
+    else process.env.OPENCODE_IDE_REGISTRY_DIR = previousRegistry
+  }
+})
+
+  // #491：长度落在旧 80/120 门槛夹缝内，并携带换行与重复空格以区分摘要和原始详情。
+  // 点击路径同时覆盖 DialogAlert 的原始文本保真：压平只发生在 footer 展示层。
+test("opens the original retry error from the compact details affordance", async () => {
+  await using tmp = await tmpdir()
+  const stateDir = path.join(tmp.path, "state")
+  await fs.mkdir(stateDir, { recursive: true })
+  await Bun.write(path.join(stateDir, "kv.json"), "{}")
+  const message = "Retry provider request failed:\nThe socket   closed before the response completed. diagnostic-tail-81-to-120"
+
+  await withPrompt(
+    () => undefined,
+    async (prompt, _route, app, context) => {
+      // 模块级 draft stash 会跨同文件用例保留，先清空以免前一条草稿污染对话框帧。
+      prompt.reset()
+      emitSessionStatus(context, "evt-prompt-footer-details", { type: "retry", attempt: 2, next: Date.now() + 9_000, message })
+      await wait(() => context.sync.data.session_status?.[sessionID]?.type === "retry")
+      let frame = await settlePromptFrame(app)
+
+      // footer 只展示压平后的单行摘要；换行和重复空格不能重新占用状态栏宽度。
+      const lines = frame.split("\n")
+      const detailsY = lines.findIndex((line) => line.includes("details"))
+      const footerLine = lines[detailsY] ?? ""
+      expect(footerLine).toContain("Retry provider request f")
+      expect(footerLine).toContain("tail-81-to-120")
+      expect(footerLine).not.toContain("socket   closed")
+      expect(footerLine).not.toContain("click to expand")
+      const detailsX = lines[detailsY]?.indexOf("details") ?? -1
+      expect(detailsX).toBeGreaterThanOrEqual(0)
+      // 坐标来自最终字符帧中的可见令牌，确保测试覆盖用户实际能点击的命中区域。
+      const targetX = detailsX + Math.floor("details".length / 2)
+      app.renderer.clearSelection()
+      await app.mockMouse.moveTo(targetX, detailsY)
+      await app.renderOnce()
+      await app.mockMouse.click(targetX, detailsY)
+
+      // 点击行为通过真实 dialog frame 验证，避免断言私有 handler 或 DialogAlert 调用次数。
+      frame = await settlePromptFrame(app)
+      expect(frame).toContain("Retry Error")
+      // 对话框保留三连空格，证明压平只属于 footer 展示层，没有污染诊断原文。
+      expect(frame).toContain("The socket   closed before the response completed")
+      expect(frame).toContain("diagnostic-tail-81-to-120")
+    },
+    stateDir,
+    { width: 160, promptWidth: 100 },
+  )
+})
+
 type FetchHandler = Parameters<typeof createFetch>[0]
+// #491：状态必须经过 SDK event source 进入 SyncProvider，测试不能直接写 store 绕过生产消费链。
+type PromptContext = { emit: ReturnType<typeof createEventSource>["emit"]; sync: ReturnType<typeof useSync> }
+type PromptStatus = NonNullable<PromptContext["sync"]["data"]["session_status"]>[string]
+
+function emitSessionStatus(context: PromptContext, id: string, status: PromptStatus) {
+  context.emit({ directory, project: "proj_test", payload: { id, type: "session.status", properties: { sessionID, status } } })
+}
+
+async function settlePromptFrame(app: Awaited<ReturnType<typeof testRender>>) {
+  // promptWidth 在首帧由 Yoga 回填；等待固定数量的真实渲染帧后再读取最终布局。
+  for (let index = 0; index < 5; index++) await app.renderOnce()
+  return app.captureCharFrame()
+}
 
 // #192：withPrompt——挂载完整 TUI Provider 树并暴露 PromptRef
 // #192：override 控制 fetch 行为——模拟 transport 成功/失败
@@ -324,9 +471,19 @@ type FetchHandler = Parameters<typeof createFetch>[0]
 // #192：mounted promise 是测试同步屏障，避免在 ref 未挂载时操作导致空指针
 async function withPrompt(
   override: FetchHandler,
-  run: (prompt: PromptRef, route: ReturnType<typeof useRoute>) => Promise<void>,
+  run: (
+    prompt: PromptRef,
+    route: ReturnType<typeof useRoute>,
+    app: Awaited<ReturnType<typeof testRender>>,
+    context: PromptContext,
+  ) => Promise<void>,
   state: string,
-  options: { initialRoute?: Route; promptSessionID?: string } = {},
+  options: {
+    initialRoute?: Route
+    promptSessionID?: string
+    width?: number
+    promptWidth?: number
+  } = {},
 ) {
   const calls = createFetch(override)
   const events = createEventSource()
@@ -358,10 +515,12 @@ async function withPrompt(
           prompt = ref
           ready()
         }}
+        promptWidth={options.promptWidth}
       />
     ),
     {
-      width: 100,
+      // #491：默认 100 列保持旧 transport 用例不变，只有布局回归显式模拟首页的 75 列 Prompt。
+      width: options.width ?? 100,
       height: 20,
       footerHeight: 0,
     },
@@ -370,7 +529,8 @@ async function withPrompt(
   try {
     await mounted
     await wait(() => sync.status === "complete" && local.model.ready)
-    await run(prompt, route)
+    // #491：只把 renderer 传给需要断言用户可见帧的测试；既有 transport 测试会自然忽略后两个参数。
+    await run(prompt, route, app, { emit: events.emit, sync })
   } finally {
     app.renderer.destroy()
   }
@@ -382,6 +542,7 @@ function PromptHarness(props: {
   events: ReturnType<typeof createEventSource>["source"]
   initialRoute: Route
   promptSessionID: string | undefined
+  promptWidth: number | undefined
   onContext: (sync: ReturnType<typeof useSync>, local: ReturnType<typeof useLocal>) => void
   onRoute: (route: ReturnType<typeof useRoute>) => void
   onPrompt: (prompt: PromptRef) => void
@@ -416,6 +577,7 @@ function PromptHarness(props: {
                                         <EditorContextProvider>
                                           <PromptProbe
                                             sessionID={props.promptSessionID}
+                                            width={props.promptWidth}
                                             onContext={props.onContext}
                                             onRoute={props.onRoute}
                                             onPrompt={props.onPrompt}
@@ -447,13 +609,15 @@ function PromptHarness(props: {
 
 function PromptProbe(props: {
   sessionID: string | undefined
+  width: number | undefined
   onContext: (sync: ReturnType<typeof useSync>, local: ReturnType<typeof useLocal>) => void
   onRoute: (route: ReturnType<typeof useRoute>) => void
   onPrompt: (prompt: PromptRef) => void
 }) {
   props.onContext(useSync(), useLocal())
   props.onRoute(useRoute())
-  return (
+  // #491：width 包裹模拟首页分栏下的真实 Prompt Yoga 宽度，而不是终端总宽。
+  const prompt = (
     <Prompt
       sessionID={props.sessionID}
       placeholders={{ normal: [], shell: [] }}
@@ -463,4 +627,6 @@ function PromptProbe(props: {
       }}
     />
   )
+  if (!props.width) return prompt
+  return <box width={props.width}>{prompt}</box>
 }

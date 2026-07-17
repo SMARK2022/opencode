@@ -920,3 +920,24 @@ describe("prompt voice input", () => {
     240_000,
   )
 })
+
+describe("voiceInputStatusText compact", () => {
+  // #491：compact 矩阵锁住主 Prompt 单行预算的四个阶段文案与兜底快捷键提示。
+  // #491：compact 只缩短主 Prompt 展示；recording 仍保留 stop 快捷键提示。
+  test("provides compact variants while keeping the stop shortcut visible", () => {
+    const idle = { type: "idle" as const }
+    expect(voiceInputStatusText(idle, "alt+v")).toBe("")
+    const startedAt = 1_000
+    expect(voiceInputStatusText({ type: "starting" }, "alt+v", 4_400)).toBe("Starting voice...")
+    expect(
+      voiceInputStatusText({ type: "starting" }, "alt+v", 4_400, { compact: true }),
+    ).toBe("Starting...")
+    const recording = { type: "recording" as const, startedAt }
+    expect(voiceInputStatusText(recording, "alt+v", 4_400, { compact: true })).toBe("Rec 00:03 · alt+v stop")
+    expect(voiceInputStatusText(recording, "alt+v", 4_400, { compact: true })).toContain("alt+v stop")
+    expect(voiceInputStatusText({ type: "stopping" }, "alt+v", 4_400, { compact: true })).toBe("Saving...")
+    expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400, { compact: true })).toBe(
+      "Transcribing...",
+    )
+  })
+})
