@@ -117,6 +117,8 @@ import {
 } from "@tui/util/session-pending"
 import { ConnectionError } from "../../util/connection-error"
 import { ContextUsagePanel } from "./context-usage"
+import { tokenAccounting } from "@/token/accounting"
+import { formatSessionExitMessage, formatUsageStats } from "./exit-summary"
 import {
   createPendingToolInputParser,
   PENDING_TOOL_INPUT_PROGRESS_INTERVAL,
@@ -225,6 +227,9 @@ export function Session() {
       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   })
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
+  // Session aggregate 只在 route owner 计算一次，退出文本读取它而不让 ExitProvider 接触 Message/Part。
+  // getParts 直接使用 Sync store，保证新增 Stats 与当前 TUI 已展示的数据源一致。
+  const sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? []))
   const permissions = createMemo(() => {
     if (session()?.parentID) return []
     return children().flatMap((x) => sync.data.permission[x.id] ?? [])
@@ -471,21 +476,17 @@ export function Session() {
   const exit = useExit()
 
   createEffect(() => {
-    const title = Locale.truncate(session()?.title ?? "", 50)
-    const pad = (text: string) => text.padEnd(10, " ")
-    const weak = (text: string) => UI.Style.TEXT_DIM + pad(text) + UI.Style.TEXT_NORMAL
-    const logo = UI.logo("  ").split(/\r?\n/)
+    const usage = sessionUsage().session
+    // ExitProvider 只负责销毁 renderer 和发射已存文本；Session route 在这里保留最终统计快照。
+    // effect 依赖 messages/parts 的 accounting memo，确保用户退出前 stored message 已反映最新快照。
+    // output 与 reasoning 合并为一个 restrained ↓ 字段，避免把内部 step 分类暴露到永久文本。
+    // cache 不进入这里的 input，但仍由 accounting.session 的独立字段保存给 /context 使用。
     return exit.message.set(
-      [
-        `${logo[0] ?? ""}`,
-        `${logo[1] ?? ""}`,
-        `${logo[2] ?? ""}`,
-        `${logo[3] ?? ""}`,
-        ``,
-        `  ${weak("Session")}${UI.Style.TEXT_NORMAL_BOLD}${title}${UI.Style.TEXT_NORMAL}`,
-        `  ${weak("Continue")}${UI.Style.TEXT_NORMAL_BOLD}opencode -s ${session()?.id}${UI.Style.TEXT_NORMAL}`,
-        ``,
-      ].join("\n"),
+      formatSessionExitMessage({
+        title: session()?.title ?? "",
+        sessionID: session()?.id,
+        usage: { input: usage.input, output: usage.output + usage.reasoning, cost: usage.cost },
+      }),
     )
   })
 
@@ -1684,6 +1685,20 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
     // parent user -> assistant completed 的 transcript 口径，避免两套算法漂移。
     return assistantTurnDuration(messages(), props.message)
   })
+  const turnUsage = createMemo(() => {
+    if (!footerVisible()) return ""
+    const usage = tokenAccounting(
+      messages(),
+      (id) => sync.data.part[id] ?? [],
+      undefined,
+      props.message.parentID,
+    ).request
+    // 完成 footer 只记录当前 parent 的永久口径，不读取 prompt/sidebar 的 cache-inclusive total。
+    // 只在 footerVisible 后计算，避免未完成或不可见的 assistant 为视口中的每条消息重算统计。
+    // parentID 是 queued/coalesced turn 的归属边界，不能改用全局 latest assistant。
+    // formatter 返回空字符串时，Show 不会人为添加 Stats 0 或 cost 0。
+    return formatUsageStats({ input: usage.totalInputPure, output: usage.totalOutput, cost: usage.cost })
+  })
 
   const childShortcut = useCommandShortcut("session.child.first")
 
@@ -1792,6 +1807,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
               <Show when={duration()}>
                 <span style={{ fg: theme.textMuted }}> · {Locale.durationClock(duration())}</span>
               </Show>
+              <Show when={turnUsage()}>{(usage) => <span style={{ fg: theme.textMuted }}> · {usage()}</span>}</Show>
               <Show when={props.message.error?.name === "MessageAbortedError"}>
                 <span style={{ fg: theme.textMuted }}> · interrupted</span>
               </Show>

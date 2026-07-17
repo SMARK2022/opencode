@@ -43,6 +43,132 @@ const sessionID = "ses_render"
 // parser worker 状态，导致点击/高亮行为互相污染；本文件按渲染行为串行。
 const test = baseTest.serial
 
+test("completed assistant footer renders pure input, output, and cost", async () => {
+  const user = userMessage("msg_usage_user", 1)
+  const assistant = {
+    ...assistantMessage("msg_usage_assistant", 2, user.id),
+    finish: "stop",
+    cost: 0.01,
+  } satisfies AssistantMessage
+
+  // 两个真实 Part 共同构成已完成 assistant；footer 必须从 Sync 的 Part 数据读取，而不是 message.tokens 预估。
+  await withRenderedSession(
+    [user, assistant],
+    {
+      [assistant.id]: [
+        textPart("part_usage_text", assistant.id, "usage answer"),
+        stepFinishPart("part_usage_finish", assistant.id, 12_300, 970, 30, 0.01),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(
+        app,
+        (lines) => lines.some((line) => line.includes("usage answer")) && lines.some((line) => line.includes("↑12.3K")),
+      )
+      // 真实 renderer 的 footer 锁定用户可观察格式，而不是内部 accounting 字段。
+      // cache read/write fixture 保持非零，若误读 totalInput，期望的 12.3K 就会变成 cache-inclusive 数值。
+      // output 与 cost 的 literal 同时证明 formatter 没有只显示 input 而遗漏其他永久字段。
+      expect(frame.some((line) => line.includes("↑12.3K ↓1.0K · $0.01"))).toBe(true)
+    },
+  )
+})
+
+test("completed assistant footer omits zero output and cost", async () => {
+  const user = userMessage("msg_input_only_user", 1)
+  const assistant = {
+    ...assistantMessage("msg_input_only_assistant", 2, user.id),
+    finish: "stop",
+  } satisfies AssistantMessage
+
+  // 该 fixture 模拟中断或 provider 只确认 input 的场景，专门锁定部分 usage 的显示边界。
+  await withRenderedSession(
+    [user, assistant],
+    {
+      [assistant.id]: [
+        textPart("part_input_only_text", assistant.id, "input-only answer"),
+        stepFinishPart("part_input_only_finish", assistant.id, 1_200, 0, 0, 0),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(
+        app,
+        (lines) => lines.some((line) => line.includes("input-only answer")) && lines.some((line) => line.includes("↑1.2K")),
+      )
+      const footer = frame.find((line) => line.includes("↑1.2K")) ?? ""
+      // input-only 是有效统计，不应因格式化便利带出另外两个零字段。
+      // 断言针对捕获到的最终 footer 行，而不是 formatUsageStats 的返回值或内部 signal。
+      // 这样可以发现 JSX 在 formatter 之后重新拼接零值的回归。
+      expect(footer).not.toContain("↓0")
+      expect(footer).not.toContain("$0.00")
+    },
+  )
+})
+
+test("completed assistant footer accumulates a multi-step request", async () => {
+  const user = userMessage("msg_multi_step_user", 1)
+  const first = {
+    ...assistantMessage("msg_multi_step_first", 2, user.id),
+    finish: "tool-calls",
+    cost: 0.005,
+  } satisfies AssistantMessage
+  const last = {
+    ...assistantMessage("msg_multi_step_last", 3, user.id),
+    finish: "stop",
+    cost: 0.005,
+  } satisfies AssistantMessage
+
+  // 两个 assistant 共用同一 parent，分别提供 6K/6.3K pure input 和独立 reasoning/cost。
+  // 只有最终 assistant 是完成 footer，断言因此能区分 request 累计与最后一步快照。
+  await withRenderedSession(
+    [user, first, last],
+    {
+      [first.id]: [
+        textPart("part_multi_step_first", first.id, "tool step"),
+        stepFinishPart("part_multi_step_first_finish", first.id, 6_000, 100, 30, 0.005),
+      ],
+      [last.id]: [
+        textPart("part_multi_step_last", last.id, "multi-step answer"),
+        stepFinishPart("part_multi_step_last_finish", last.id, 6_300, 900, 70, 0.005),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(
+        app,
+        (lines) => lines.some((line) => line.includes("multi-step answer")) && lines.some((line) => line.includes("↑12.3K")),
+      )
+      // 最终 assistant 的 footer 必须读取同一 parent 下两个 assistant 的累计，而不是只取最后一步。
+      expect(frame.some((line) => line.includes("↑12.3K ↓1.1K · $0.01"))).toBe(true)
+    },
+  )
+})
+
+test("completed assistant footer omits a zero usage group", async () => {
+  const user = userMessage("msg_zero_usage_user", 1)
+  const assistant = {
+    ...assistantMessage("msg_zero_usage_assistant", 2, user.id),
+    finish: "stop",
+    cost: 0,
+  } satisfies AssistantMessage
+
+  await withRenderedSession(
+    [user, assistant],
+    {
+      [assistant.id]: [
+        textPart("part_zero_usage_text", assistant.id, "zero usage answer"),
+        stepFinishPart("part_zero_usage_finish", assistant.id, 0, 0, 0, 0),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("zero usage answer")))
+      const footer = frame.find((line) => line.includes("Build") && line.includes("model")) ?? ""
+      // 完成 footer 本身仍保留 mode/model/duration，但全零 usage group 必须完全省略。
+      expect(footer).not.toContain("↑")
+      expect(footer).not.toContain("↓")
+      expect(footer).not.toContain("$")
+    },
+  )
+})
+
 test("non-shell auto review status opens the reviewer child session", async () => {
   const childID = "ses_reviewer_child"
   await withRenderedSession(
@@ -2886,6 +3012,20 @@ function assistantMessage(id: string, created: number, parentID = "msg_user") {
     cost: 0,
     tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
   } satisfies AssistantMessage
+}
+
+function stepFinishPart(id: string, messageID: string, input: number, output: number, reasoning: number, cost: number) {
+  // cache 保持固定非零以区分 completed footer 的 pure input 与实时 sidebar 的 totalInput。
+  // reasoning 参数保留独立入口，确保未来合并 output projection 时不会丢失该组成部分。
+  return {
+    id,
+    sessionID,
+    messageID,
+    type: "step-finish",
+    reason: "stop",
+    cost,
+    tokens: { input, output, reasoning, cache: { read: 100, write: 50 } },
+  } satisfies Extract<Part, { type: "step-finish" }>
 }
 
 function textPart(id: string, messageID: string, text: string, extra: Partial<Extract<Part, { type: "text" }>> = {}) {
