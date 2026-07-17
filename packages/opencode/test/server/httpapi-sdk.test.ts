@@ -1,4 +1,6 @@
 import { afterEach, describe, expect } from "bun:test"
+import crypto from "node:crypto"
+import os from "node:os"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Deferred, Effect, Layer } from "effect"
@@ -220,6 +222,33 @@ function httpapiInstance<A, E>(
 
 function serverPathParity<A, E>(name: string, scenario: (serverPath: ServerPath) => Effect.Effect<A, E, TestScope>) {
   it.live(name, scenario("raw"))
+}
+
+// #494：promptAsync 生命周期隔离到子进程 worker——parent 的 process-global teardown
+// （afterEach dispose+resetDatabase）不再与仍在运行的 promptAsync fiber 竞态。
+const promptAsyncWorkerPath = path.join(import.meta.dir, "httpapi-promptasync-worker.ts")
+
+async function runPromptAsyncWorker(serverPath: ServerPath) {
+  const dbPath = path.join(os.tmpdir(), `opencode-promptasync-${crypto.randomUUID()}`, "opencode.db")
+  // 每个 route realization 都拥有独立 DB 根目录，parent cleanup 不会再触碰 child 的活跃 fiber。
+  const worker = Bun.spawn([process.execPath, promptAsyncWorkerPath, serverPath, dbPath], {
+    cwd: path.join(import.meta.dir, "../.."),
+    env: process.env,
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [code, stdout, stderr] = await Promise.all([
+    worker.exited,
+    new Response(worker.stdout).text(),
+    new Response(worker.stderr).text(),
+  ])
+  if (code !== 0) throw new Error(stderr || `promptAsync worker exited ${code}`)
+  // child 只允许输出一个完整 JSON 对象，空输出或日志污染必须直接让行为测试失败。
+  const result: unknown = JSON.parse(stdout)
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("promptAsync worker returned an invalid result")
+  }
+  return result
 }
 
 function withProject<A, E, E2 = never>(
@@ -734,61 +763,10 @@ describe("HttpApi SDK", () => {
     ),
   )
 
+  // #494：场景体改为子进程 worker 断言——204 acceptance、公开可观察性与 usage 终态
+  // 都在隔离 DB/环境中验证；parent 仅保留 parity 注册与 afterEach，不再持有活跃 fiber。
   serverPathParity("matches generated SDK prompt no-reply routes", (serverPath) =>
-    withStandardProject(serverPath, ({ sdk }) =>
-      Effect.gen(function* () {
-        const session = yield* capture(() => sdk.session.create({ title: "prompt" }))
-        const sessionID = String(record(session.data).id)
-        const prompt = yield* capture(() =>
-          sdk.session.prompt({
-            sessionID,
-            agent: "build",
-            noReply: true,
-            parts: [{ type: "text", text: "hello" }],
-          }),
-        )
-        const asyncPrompt = yield* capture(() =>
-          sdk.session.promptAsync({
-            sessionID,
-            agent: "build",
-            noReply: true,
-            parts: [{ type: "text", text: "async hello" }],
-          }),
-        )
-        const messageTexts = (result: Captured) =>
-          array(result.data)
-            .flatMap((item) => array(record(item).parts))
-            .map((part) => record(part).text)
-            .filter((text): text is string => typeof text === "string")
-            .sort()
-        // helper 只在断言中使用；messages 的真实结构由 server 返回契约决定，这里只提取 text 字段。
-        // promptAsync 的 204 只承诺后台任务已接受；通过公开 messages seam 等待
-        // 目标消息持久化，避免把不同平台的 fiber 调度顺序误当成 server-path 差异。
-        const messages = yield* pollWithTimeout(
-          Effect.gen(function* () {
-            const result = yield* capture(() => sdk.session.messages({ sessionID }))
-            return messageTexts(result).includes("async hello") ? result : undefined
-          }),
-          `${serverPath} promptAsync message was not persisted`,
-          "10 seconds",
-        )
-        expect(statuses({ session, prompt, asyncPrompt, messages })).toEqual({
-          session: 200,
-          prompt: 200,
-          asyncPrompt: 204,
-          messages: 200,
-        })
-        // 归序后的两条文本必须同时包含 prompt 与 asyncPrompt 的产出，任何缺失都说明后台任务丢失。
-        expect(messageTexts(messages)).toEqual(["async hello", "hello"])
-
-        return {
-          statuses: statuses({ session, prompt, asyncPrompt, messages }),
-          promptRole: record(record(prompt.data).info).role,
-          messageCount: array(messages.data).length,
-          messageTexts: messageTexts(messages),
-        }
-      }),
-    ),
+    Effect.promise(() => runPromptAsyncWorker(serverPath))
   )
 
   serverPathParity("matches generated SDK prompt streaming through fake LLM", (serverPath) =>
