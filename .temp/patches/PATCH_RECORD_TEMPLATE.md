@@ -79,9 +79,17 @@
 - `git apply --check` command and result:
 - Cumulative apply command and result:
 - Materialize command and result:
+- Source proof path and validation result:
+- Reused prefix/base state/applied-this-run:
 - Materialized state directory:
 - State metadata and cumulative patch fingerprint:
 - Rollback result if apply failed:
+- Automatic typecheck command and report:
+- Test workspace:
+- Install input SHA-256:
+- Bun install executed or reused:
+- Frozen install stdout/stderr:
+- Affected workspaces and each `bun typecheck` result:
 - Behavior tests:
 - Regression tests:
 - Typecheck/lint/build:
@@ -124,6 +132,9 @@
 - All preceding five-item audit gates passed:
 - Previous cumulative apply reached the preceding index:
 - Current batch cumulative apply reached its final index:
+- Source proof matches manifest, TSV and original patches:
+- Install fingerprint matches current state inputs:
+- Automatic frozen install/typecheck report passed:
 - Auditor verdict:
 - `B` behavior findings:
 - `G` hard-gate findings:
