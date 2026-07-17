@@ -35,8 +35,24 @@ if (snapshotArg === "--snapshot=") {
 const ver = raw.replace(/^v/, "")
 const root = path.resolve(import.meta.dir, "..")
 const lockfile = path.join(root, "bun.lock")
-const skip = new Set([".git", ".opencode", ".turbo", "dist", "node_modules"])
+// thirdparty/opentui 是独立 Git 仓库；root 依赖维护命令只能读取其 release 身份，不能改写源码 manifest。
+const skip = new Set([".git", ".opencode", ".turbo", "dist", "node_modules", "thirdparty"])
 const keys = ["@opentui/core", "@opentui/keymap", "@opentui/solid"] as const
+const release = !snapshot && ver === "0.4.3-smark.1" ? `https://github.com/SMARK2022/opentui/releases/download/v${ver}` : undefined
+// 仅映射 source 已发布的完整 family；普通 registry/snapshot 继续沿目标既有入口维护。
+const assets = {
+  "@opentui/core": "opentui-core",
+  "@opentui/keymap": "opentui-keymap",
+  "@opentui/solid": "opentui-solid",
+  "@opentui/core-darwin-arm64": "opentui-core-darwin-arm64",
+  "@opentui/core-darwin-x64": "opentui-core-darwin-x64",
+  "@opentui/core-linux-arm64": "opentui-core-linux-arm64",
+  "@opentui/core-linux-arm64-musl": "opentui-core-linux-arm64-musl",
+  "@opentui/core-linux-x64": "opentui-core-linux-x64",
+  "@opentui/core-linux-x64-musl": "opentui-core-linux-x64-musl",
+  "@opentui/core-win32-arm64": "opentui-core-win32-arm64",
+  "@opentui/core-win32-x64": "opentui-core-win32-x64",
+} as const
 
 // Windows 上 Bun.Glob 返回的路径可能使用 \ 分隔符，必须同时处理 / 和 \
 const files = (await Array.fromAsync(new Bun.Glob("**/package.json").scan({ cwd: root }))).filter(
@@ -84,11 +100,17 @@ const editCatalog = (obj: unknown) => {
 const editOverrides = (obj: unknown) => {
   if (!obj || typeof obj !== "object") return false
   const map = obj as Record<string, unknown>
-  return keys
-    .map((key) => {
+  // 离开 fork 时同步移除它的 native overrides，不能把 registry JS 配到旧 fork ABI。
+  return Object.entries(assets)
+    .map(([key, asset]) => {
+      if (!release && !keys.some((name) => name === key)) {
+        if (!(key in map)) return false
+        delete map[key]
+        return true
+      }
       const cur = map[key]
-      if (typeof cur !== "string") return false
-      const next = snapshot ? ver : "catalog:"
+      if (!release && typeof cur !== "string") return false
+      const next = release ? `${release}/${asset}-${ver}.tgz` : snapshot ? ver : "catalog:"
       if (next === cur) return false
       map[key] = next
       return true
@@ -189,5 +211,8 @@ function findStaleLockfileEntriesInText(txt: string) {
       pkg: match[2]!,
       version: match[3]!,
     }))
-    .filter((item) => item.version !== ver)
+    // URL 是此 family 的锁定身份，不把 canonical release 当作陈旧 semver 再删除。
+    .filter(
+      (item) => item.version !== ver && item.version !== (release ? `${release}/${item.pkg.slice(1).replace("/", "-")}-${ver}.tgz` : ver),
+    )
 }

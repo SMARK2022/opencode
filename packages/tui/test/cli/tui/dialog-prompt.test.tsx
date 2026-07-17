@@ -5,7 +5,7 @@ import { testRender, useRenderer } from "@opentui/solid"
 import { expect, test } from "bun:test"
 import { mkdir } from "node:fs/promises"
 import path from "node:path"
-import { onCleanup } from "solid-js"
+import { onCleanup, onMount } from "solid-js"
 import { tmpdir } from "../../fixture/fixture"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
 import type { TuiKeybind } from "../../../src/config/keybind"
@@ -153,5 +153,94 @@ test("dialog prompt submit can be rebound separately from input submit", async (
     expect(confirmed).toEqual(["draft"])
   } finally {
     await prompt.cleanup()
+  }
+})
+
+test("DialogPrompt renders the JSX returned by its description factory", async () => {
+  // #489：public prop 承诺的是 factory；只有 owner 求值后其返回的 JSX 才应进入最终 frame。
+  // 若回退为把函数当 child，frame 会缺少文字或出现 object coercion，本断言即失败。
+  await using tmp = await tmpdir()
+  const state = path.join(tmp.path, "state")
+  await mkdir(state, { recursive: true })
+  await Bun.write(path.join(state, "kv.json"), "{}")
+
+  const [
+    { DialogProvider },
+    { DialogPrompt },
+    { KVProvider },
+    { ThemeProvider },
+    { TuiConfigProvider },
+    { ToastProvider },
+    { OpencodeKeymapProvider, registerOpencodeKeymap },
+    { useDialog },
+  ] = await Promise.all([
+    import("../../../src/ui/dialog"),
+    import("../../../src/ui/dialog-prompt"),
+    import("../../../src/context/kv"),
+    import("../../../src/context/theme"),
+    import("../../../src/config"),
+    import("../../../src/ui/toast"),
+    import("../../../src/keymap"),
+    import("../../../src/ui/dialog"),
+  ])
+
+    // 独立 OpenPrompt 组件保证 dialog.replace 发生在 provider 树挂载完成后（onMount 时机）。
+  function OpenPrompt() {
+    // factory 在 dialog replace 边界传入，测试不会直接求值 description 绕过组件 owner。
+    const dialog = useDialog()
+    onMount(() =>
+      dialog.replace(<DialogPrompt title="Prompt" description={() => <text>Factory description</text>} />),
+    )
+    return null
+  }
+
+  function Harness() {
+    const renderer = useRenderer()
+    const keymap = createDefaultOpenTuiKeymap(renderer)
+    const resolvedConfig = createTuiResolvedConfig()
+    const off = registerOpencodeKeymap(keymap, renderer, resolvedConfig)
+    onCleanup(off)
+
+    return (
+      <TestTuiContexts
+        directory={tmp.path}
+        paths={{
+          home: tmp.path,
+          state,
+          worktree: tmp.path,
+        }}
+      >
+        <OpencodeKeymapProvider keymap={keymap}>
+          <TuiConfigProvider config={resolvedConfig}>
+            <KVProvider>
+              <ThemeProvider mode="dark">
+                <ToastProvider>
+                  <DialogProvider>
+                    <OpenPrompt />
+                  </DialogProvider>
+                </ToastProvider>
+              </ThemeProvider>
+            </KVProvider>
+          </TuiConfigProvider>
+        </OpencodeKeymapProvider>
+      </TestTuiContexts>
+    )
+  }
+
+  // 固定 80x24 与轮询窗口：factory 渲染是异步 reconcile，不能假设首帧即包含文字。
+  const app = await testRender(() => <Harness />, { width: 80, height: 24 })
+  try {
+    // 轮询最终 frame 而非断言 JSX 对象，证明 Solid reconciler 确实完成了 factory 返回值的渲染。
+    const timeout = performance.now() + 2000
+    let frame = ""
+    while (performance.now() < timeout) {
+      await app.renderOnce()
+      frame = app.captureCharFrame()
+      if (frame.includes("Factory description")) break
+      await Bun.sleep(10)
+    }
+    expect(frame).toContain("Factory description")
+  } finally {
+    app.renderer.destroy()
   }
 })
