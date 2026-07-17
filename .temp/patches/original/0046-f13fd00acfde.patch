@@ -1,0 +1,68 @@
+From f13fd00acfde5be5f76eadee36f16bd053f81397 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Tue, 28 Apr 2026 16:23:33 +0800
+Subject: [PATCH] =?UTF-8?q?fix:=20=E4=BF=AE=E6=AD=A3=E4=B8=8A=E4=B8=8B?=
+ =?UTF-8?q?=E6=96=87=E4=BD=BF=E7=94=A8=E7=BB=9F=E8=AE=A1=E4=B8=AD=E7=9A=84?=
+ =?UTF-8?q?=E8=BE=93=E5=87=BA=E8=AE=A1=E7=AE=97=E9=80=BB=E8=BE=91=EF=BC=8C?=
+ =?UTF-8?q?=E6=9B=B4=E6=96=B0=E6=B5=8B=E8=AF=95=E7=94=A8=E4=BE=8B=E4=BB=A5?=
+ =?UTF-8?q?=E5=8F=8D=E6=98=A0=E6=9B=B4=E6=94=B9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
+index a6d051000bc9863418c51dffe81b99393adc8dc2..14a588762a047ed6e508775caf48cece32737f9f 100644
+--- a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
++++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
+@@ -235,7 +235,7 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
+       if (part.type !== "step-finish") continue
+       confirmed = true
+       usage.input += part.tokens.input
+-      usage.output += part.tokens.output + part.tokens.reasoning
++      usage.output += part.tokens.output
+       usage.reasoning += part.tokens.reasoning
+       usage.cacheRead += part.tokens.cache.read
+       usage.cacheWrite += part.tokens.cache.write
+@@ -247,14 +247,14 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
+     for (const msg of messages) {
+       if (msg.info.role !== "assistant") continue
+       usage.input += msg.info.tokens.input
+-      usage.output += msg.info.tokens.output + msg.info.tokens.reasoning
++      usage.output += msg.info.tokens.output
+       usage.reasoning += msg.info.tokens.reasoning
+       usage.cacheRead += msg.info.tokens.cache.read
+       usage.cacheWrite += msg.info.tokens.cache.write
+       usage.cost += msg.info.cost
+     }
+   }
+-  usage.total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite
++  usage.total = usage.input + usage.output + usage.reasoning + usage.cacheRead + usage.cacheWrite
+   return usage
+ }
+ 
+@@ -666,7 +666,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+   const maxTokens = modelInfo.model?.limit.context ?? 0
+ 
+   const msg = messageTokens(compacted)
+-  const usage = usageTotals(compacted)
++  const usage = usageTotals(raw)
+   const instructions = await gatherInstructionFiles(input)
+   const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content) }))
+   const messageText = msg.text.join("\n")
+diff --git a/packages/opencode/test/cli/tui/context-usage.test.ts b/packages/opencode/test/cli/tui/context-usage.test.ts
+index 29ba3d8559e338bc0a7729fa6086ea1fb6f61204..6d0ad5ef410cdbef7e9a9e859f8d1cb72bda287b 100644
+--- a/packages/opencode/test/cli/tui/context-usage.test.ts
++++ b/packages/opencode/test/cli/tui/context-usage.test.ts
+@@ -257,9 +257,9 @@ describe("context usage", () => {
+       toolDefinitions: [],
+     })
+ 
+-    expect(data.details.usage).toMatchObject({ input: 100, output: 50, reasoning: 10, cacheRead: 20, cacheWrite: 5 })
++    expect(data.details.usage).toMatchObject({ input: 100, output: 40, reasoning: 10, cacheRead: 20, cacheWrite: 5 })
+     expect(contextUsageFooter(data, 100)).toContain("Session Totals")
+-    expect(contextUsageFooter(data, 100)).toContain("Output 50")
++    expect(contextUsageFooter(data, 100)).toContain("Output 40")
+     expect(contextUsageFooter(data, 100)).toContain("Cache W/R 5/20")
+     expect(contextUsageFooter(data, 100).length).toBe(82)
+   })

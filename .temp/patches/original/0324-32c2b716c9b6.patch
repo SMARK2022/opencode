@@ -1,0 +1,144 @@
+From 32c2b716c9b6c0ecedbd7b185c17830e70b12763 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 20 Jun 2026 18:26:51 +0800
+Subject: [PATCH] =?UTF-8?q?fix(process):=20=E4=BF=AE=E5=A4=8D=20Windows=20?=
+ =?UTF-8?q?abort=20=E8=BF=9B=E7=A8=8B=E6=A0=91=E6=B8=85=E7=90=86?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Windows 上仅 taskkill /T 或异步 taskkill 会让控制台进程超时，或在父进程先退出后留下 detached 浏览器/daemon 子进程。改为同步 taskkill /T /F 后再调用 proc.kill，兼顾进程树清理与 Node pipe 生命周期。
+
+新增 Windows 行为级回归测试，覆盖 abort 返回前 detached 子进程必须被清理，避免 test:ci 中 util.process 超时和后台进程残留风险。
+
+diff --git a/packages/opencode/src/util/process.ts b/packages/opencode/src/util/process.ts
+index 97d321a160a9b7d494ef8e3a9bfd05443a7c5661..2d4437c311033fcab06f04caf85838193bffd031 100644
+--- a/packages/opencode/src/util/process.ts
++++ b/packages/opencode/src/util/process.ts
+@@ -75,22 +75,20 @@ export function spawn(cmd: string[], opts: Options = {}): Child {
+     if (proc.exitCode !== null || proc.signalCode !== null) return
+     closed = true
+ 
+-    // 这是全局 abort 行为变更：所有通过 Process.run/spawn 启动的子进程在 Windows 上被 abort 时，
+-    // 都会走 taskkill 杀整棵进程树。非 Windows 保持原有 proc.kill(SIGTERM) 不变。
+-    // Windows 上 proc.kill 只杀父进程；子进程（如 chatgpt daemon spawn 的浏览器）仍持有 stdout pipe，
+-    // 导致 buffer(proc.stdout) 永不 resolve。
+-    // 两阶段：先 taskkill /T（发 WM_CLOSE，等价 SIGTERM 的优雅退出机会），超时后再 taskkill /T /F 强杀。
+-    // 对控制台进程（node.exe 等）WM_CLOSE 常被忽略，实际效果接近直接强杀，但语义上保留优雅期。
+-    const ms = opts.timeout ?? 5_000
++    // Windows 上 proc.kill 只杀父进程；子进程仍持有 stdout pipe，导致 buffer(proc.stdout) 永不 resolve。
++    // 必须先同步完成 taskkill /T /F：如果异步启动 taskkill 后立刻 proc.kill()，
++    // 父进程可能先退出，taskkill 来不及沿父子关系清理 detached 浏览器/daemon 子进程。
++    // 控制台进程忽略 WM_CLOSE，必须带 /F 强杀；与下方 Process.stop 的既有模式对齐。
+     if (process.platform === "win32" && proc.pid) {
+-      launch("taskkill", ["/pid", String(proc.pid), "/T"], { windowsHide: true, stdio: "ignore" })
+-      // 超时后强杀整棵树，与原 SIGKILL 升级语义对齐。
+-      if (ms > 0) timer = setTimeout(() => launch("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }), ms)
+-    } else {
+-      proc.kill(opts.kill ?? "SIGTERM")
+-      if (ms <= 0) return
+-      timer = setTimeout(() => proc.kill("SIGKILL"), ms)
++      launch.sync("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" })
+     }
++    // proc.kill 在所有平台上都必须调用：触发 Node.js 的 exit 事件并关闭 pipe，
++    // 让 buffer(proc.stdout) 和 proc.exited 正常 resolve。
++    proc.kill(opts.kill ?? "SIGTERM")
++
++    const ms = opts.timeout ?? 5_000
++    if (ms <= 0) return
++    timer = setTimeout(() => proc.kill("SIGKILL"), ms)
+   }
+ 
+   const exited = new Promise<number>((resolve, reject) => {
+diff --git a/packages/opencode/test/util/process.test.ts b/packages/opencode/test/util/process.test.ts
+index 934833d1d060367667a814169413f9301e596edb..2ce1188dc264425fd53ce5f6361d2c60d3052ddc 100644
+--- a/packages/opencode/test/util/process.test.ts
++++ b/packages/opencode/test/util/process.test.ts
+@@ -8,6 +8,26 @@ function node(script: string) {
+   return [process.execPath, "-e", script]
+ }
+ 
++function isProcessRunning(pid: number) {
++  if (pid <= 0) return false
++  try {
++    process.kill(pid, 0)
++    return true
++  } catch {
++    return false
++  }
++}
++
++async function remainsRunningAfter(pid: number, timeout: number) {
++  const start = Date.now()
++  while (Date.now() - start < timeout) {
++    if (!isProcessRunning(pid)) return false
++    // Windows 的进程表可见性有短暂延迟；短轮询比固定 sleep 更能避免 CI 抖动。
++    await new Promise((resolve) => setTimeout(resolve, 25))
++  }
++  return isProcessRunning(pid)
++}
++
+ describe("util.process", () => {
+   test("captures stdout and stderr", async () => {
+     const out = await Process.run(node('process.stdout.write("out");process.stderr.write("err")'))
+@@ -43,6 +63,60 @@ describe("util.process", () => {
+     expect(Date.now() - started).toBeLessThan(1000)
+   }, 3000)
+ 
++  test("aborts a Windows process tree before resolving", async () => {
++    if (process.platform !== "win32") return
++
++    const nodePath = Bun.which("node")
++    if (!nodePath) return
++
++    const abort = new AbortController()
++    const proc = Process.spawn(
++      [
++        nodePath,
++        "-e",
++        [
++          'const { spawn } = require("child_process")',
++          // detached 子进程模拟浏览器/daemon：父进程退出后仍可能留在前台或继续占用资源。
++          'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" })',
++          "child.unref()",
++          // 输出 pid 不是实现细节断言，而是为了在 abort 返回后观察真实 OS 子进程是否已被清理。
++          "console.log(child.pid)",
++          "setInterval(() => {}, 1000)",
++        ].join(";"),
++      ],
++      { abort: abort.signal, stdout: "pipe", stderr: "pipe" },
++    )
++
++    if (!proc.stdout || !proc.stderr) throw new Error("Process output not available")
++    proc.stderr.resume()
++
++    let childPid = 0
++    try {
++      childPid = await new Promise<number>((resolve, reject) => {
++        let stdout = ""
++        const timer = setTimeout(() => reject(new Error("child pid was not printed")), 1_000)
++        proc.stdout!.on("data", (chunk) => {
++          stdout += chunk.toString()
++          const pid = Number(stdout.trim().split(/\s+/)[0])
++          if (!Number.isFinite(pid) || pid <= 0) return
++          clearTimeout(timer)
++          resolve(pid)
++        })
++      })
++
++      abort.abort()
++      expect(await proc.exited).not.toBe(0)
++
++      // 这里验证的是 abort 返回后的系统状态：不能只让父进程结束，还必须清掉 detached 子进程。
++      expect(await remainsRunningAfter(childPid, 1_000)).toBe(false)
++    } finally {
++      abort.abort()
++      // 失败路径也必须清理，避免测试自身制造本需求要消除的后台 node.exe 垃圾。
++      if (proc.pid && isProcessRunning(proc.pid)) await Process.run(["taskkill", "/pid", String(proc.pid), "/T", "/F"], { nothrow: true })
++      if (childPid && isProcessRunning(childPid)) await Process.run(["taskkill", "/pid", String(childPid), "/T", "/F"], { nothrow: true })
++    }
++  }, 5000)
++
+   test("kills after timeout when process ignores terminate signal", async () => {
+     if (process.platform === "win32") return
+ 

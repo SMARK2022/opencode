@@ -1,0 +1,145 @@
+From e21353edbf2348855c01fdefcdfecafffc6e0014 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Wed, 24 Jun 2026 19:52:57 +0800
+Subject: [PATCH] =?UTF-8?q?fix(session/prompt):=20=E4=BF=AE=E5=A4=8D?=
+ =?UTF-8?q?=E5=AD=90=E4=BC=9A=E8=AF=9D=20permission=20=E8=A2=AB=20tool=20o?=
+ =?UTF-8?q?verride=20=E6=9B=BF=E6=8D=A2=E5=AF=BC=E8=87=B4=20auto=20ceiling?=
+ =?UTF-8?q?=20=E4=B8=A2=E5=A4=B1?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+handleSubtask 传 agent: task.agent（子 agent 名）而非父 agent 名，
+导致 task.ts 用子 agent 的 permission 解析 parentAgent ceiling，auto 父
+会话的 external_directory/bash/edit auto 规则不出现在派生结果中。
+改为 lastUser.agent，与 Path A（resolveTools）的 input.agent.name 一致。
+
+prompt 函数的 session.permission = permissions 整体替换会擦除 TaskTool
+刚通过 deriveSubagentSessionPermission 派生并持久化的 auto ceiling，
+导致子会话 external_directory 落到 ask 弹窗、bash/edit 落到 allow 绕过
+auto 审查。改为 Permission.compact 合并，保留 ceiling 同时追加 tool override。
+
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index a7a0ed58caf8e18f91b2b82b77d671462d65bd3e..0f55a2d32f0f0c67ecb4e60cfd6d6b6ca4434af8 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -1010,7 +1010,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+           { args: taskArgs },
+         )
+         return yield* taskTool.execute(taskArgs, {
+-          agent: task.agent,
++          // handleSubtask 必须把父会话当前 agent 名传给 TaskTool，而不是
++          // SubtaskPart.agent（子 agent 名）。task.ts 用 ctx.agent 解析
++          // parentAgentName 来派生子会话的 permission ceiling：如果传子 agent
++          // 名，parentAgent 会被解析为子 agent 自己的 permission，auto 父会话
++          // 的 external_directory/bash/edit auto 规则不会出现在 ceilings 中。
++          // lastUser.agent 与 Path A（resolveTools 的 input.agent.name）一致，
++          // 都来自 createUserMessage 写入的 user message agent 字段。
++          agent: lastUser.agent,
+           messageID: assistantMessage.id,
+           sessionID,
+           abort: taskAbort.signal,
+@@ -1029,11 +1036,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             permission
+               .ask({
+                 ...req,
+-                // Internally materialized task execution bypasses the main tool
+-                // adapter above, so it must attach the same audit evidence here.
+-                // Keep this aligned with the primary ctx.ask wrapper: tools should
+-                // not decide reviewer routing by mutating metadata.agent.
+-                metadata: { ...req.metadata, agent: task.agent },
++                // 审计元数据也必须用父 agent 名，与 Path A 的
++                // metadata.agent: input.agent.name 保持一致
++                metadata: { ...req.metadata, agent: lastUser.agent },
+                 sessionID,
+                 ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
+               })
+@@ -1909,8 +1914,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+         permissions.push({ permission: t, action: enabled ? "allow" : "deny", pattern: "*" })
+       }
+       if (permissions.length > 0) {
+-        session.permission = permissions
+-        yield* sessions.setPermission({ sessionID: session.id, permission: permissions })
++        // 子会话的 permission 由 TaskTool 通过 deriveSubagentSessionPermission
++        // 派生（含父 agent 的 auto/ask/deny ceiling 和默认 task/todowrite deny）。
++        // 这里的 tool override（如 task: false、todowrite: false）必须追加到
++        // 已有 permission 之后（last-match-wins），而不是替换整个 ruleset。
++        // 替换会擦除 TaskTool 派生的 auto ceiling，导致子会话的
++        // external_directory/bash 等权限从 auto 降级到子 agent 自己的默认 ask。
++        const merged = Permission.compact([...(session.permission ?? []), ...permissions])
++        session.permission = merged
++        yield* sessions.setPermission({ sessionID: session.id, permission: merged })
+       }
+ 
+       if (input.noReply === true) {
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 7d63c7c8574f9c9289df07b79f941693d49633a6..b12df9bf991991589641d51071faa68e39ed5a79 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -3155,3 +3155,66 @@ it.instance(
+   { git: true },
+   30_000,
+ )
++
++// handleSubtask 路径必须把父会话当前 agent 名传给 TaskTool.execute，
++// 而不是 SubtaskPart.agent（子 agent 名）。否则 task.ts 会用子 agent
++// 的 permission 作为 parentAgent 解析 ceiling，导致 auto 父会话的
++// external_directory/bash/edit auto 规则丢失，子会话访问外部目录时
++// 落到 ask 弹窗而非 auto reviewer。
++it.instance(
++  "subtask from auto parent inherits auto ceilings in child session permission",
++  () =>
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig(providerCfg)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({ title: "auto subtask" })
++      // 创建 agent 为 auto 的 user message，模拟 auto 主会话场景
++      const msg = yield* sessions.updateMessage({
++        id: MessageID.ascending(),
++        role: "user",
++        sessionID: chat.id,
++        agent: "auto",
++        model: ref,
++        time: { created: Date.now() },
++      })
++      yield* sessions.updatePart({
++        id: PartID.ascending(),
++        messageID: msg.id,
++        sessionID: chat.id,
++        type: "text",
++        text: "review the implementation",
++      })
++      // 注入 SubtaskPart 走 handleSubtask 路径
++      yield* addSubtask(chat.id, msg.id)
++      // 子会话只需要返回文本即可完成
++      yield* llm.push(reply().text("review done").stop().item())
++
++      yield* prompt.loop({ sessionID: chat.id })
++
++      // 找到 task 工具 part 拿到子会话 ID
++      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
++      const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
++      const taskTool = taskMsg?.parts.find((part): part is MessageV2.ToolPart => part.type === "tool")
++      // task 工具完成后 state 为 completed，metadata 含子会话 ID
++      const childSessionID =
++        taskTool?.state.status === "completed" ? taskTool.state.metadata?.sessionId : undefined
++      expect(typeof childSessionID).toBe("string")
++      if (typeof childSessionID !== "string") return
++
++      // 子会话 stored permission 必须含父 auto agent 的 external_directory auto ceiling
++      const child = yield* sessions.get(SessionID.make(childSessionID))
++      const hasExtAuto = child.permission?.some(
++        (r) => r.permission === "external_directory" && r.action === "auto",
++      )
++      const hasBashAuto = child.permission?.some(
++        (r) => r.permission === "bash" && r.action === "auto",
++      )
++      // 修复前：parentAgent 被解析为 general（子 agent 名），ceilings 为空，
++      // child.permission 只有 [task deny]，两个断言都会失败
++      expect(hasExtAuto).toBe(true)
++      expect(hasBashAuto).toBe(true)
++    }),
++  { git: true },
++  15_000,
++)

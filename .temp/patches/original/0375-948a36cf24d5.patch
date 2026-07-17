@@ -1,0 +1,539 @@
+From 948a36cf24d503c3bfb41c5d218ee46f729223cd Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sun, 5 Jul 2026 02:44:45 +0800
+Subject: [PATCH] =?UTF-8?q?feat(docs):=20=E6=B7=BB=E5=8A=A0=E5=A4=9A?=
+ =?UTF-8?q?=E4=B8=AA=E6=96=87=E6=A1=A3=E4=BB=A5=E5=A2=9E=E5=BC=BA=E9=A1=B9?=
+ =?UTF-8?q?=E7=9B=AE=E7=9A=84=E7=BB=93=E6=9E=84=E5=92=8C=E6=B8=85=E6=99=B0?=
+ =?UTF-8?q?=E5=BA=A6=EF=BC=8C=E5=8C=85=E6=8B=AC=E4=BB=A3=E7=90=86=E6=8A=80?=
+ =?UTF-8?q?=E8=83=BD=E3=80=81=E9=97=AE=E9=A2=98=E8=B7=9F=E8=B8=AA=E5=92=8C?=
+ =?UTF-8?q?=E5=86=B3=E7=AD=96=E8=AE=B0=E5=BD=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 0b1998ec5012decc4298269f65c2dc90826f3fc8..95a3ab3e1842541b191a197356d5b6c56b34dad7 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -4,6 +4,20 @@
+ - Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
+ - Prefer automation: execute requested actions without confirmation unless blocked by missing info or safety/irreversibility.
+ 
++## Agent skills
++
++### Issue tracker
++
++Issues for the SMARK fork live on GitHub at `SMARK2022/opencode` (the `origin` remote); use the `gh` CLI. See `docs/agents/issue-tracker.md`.
++
++### Triage labels
++
++The 5 canonical lifecycle labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) coexist with the team-assignment triage agent in `.opencode/agent/triage.md`. See `docs/agents/triage-labels.md`.
++
++### Domain docs
++
++Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
++
+ ## Style Guide
+ 
+ ### General Principles
+diff --git a/CONTEXT.md b/CONTEXT.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c3204f0fa90253453d5a57e3d8595931d08de5ec
+--- /dev/null
++++ b/CONTEXT.md
+@@ -0,0 +1,181 @@
++# opencode (SMARK fork)
++
++The domain language of opencode — an open-source AI coding agent. This is the SMARK enhanced fork (`dev-smark`, v1.15.9-smark), based on upstream `anomalyco/opencode`; core logic lives in `packages/opencode`. Use these terms verbatim in any output (issue titles, refactor proposals, hypotheses, test names) and do not drift to the synonyms in _Avoid_.
++
++## Language
++
++### Core run loop
++
++**Session**:
++A conversation unit scoped to a Project and a working directory, persisted in SQLite; the container an Agent runs against.
++_Avoid_: conversation, chat, thread
++
++**Agent**:
++A config-driven persona that drives a Session — a name, mode (`primary` | `subagent` | `all`), a Permission ruleset, an optional model, a prompt, and options.
++_Avoid_: assistant, persona, bot
++
++**Tool**:
++A capability an Agent invokes during a Session, defined by an id, a parameter schema, and an execute function; executes against a tool Context and returns an ExecuteResult.
++_Avoid_: function, action, capability
++
++**Provider**:
++An LLM backend (Anthropic, OpenAI, Google, Bedrock, …) unified behind branded ProviderID/ModelID via `@ai-sdk`, with alias, auth, transform, and model-status.
++_Avoid_: backend, vendor, model-source
++
++**Message**:
++The current part-based conversation record (MessageV2), composed of typed Parts (text, reasoning, file, patch, snapshot); `message.ts` holds the tool-call state schemas (ToolCall/ToolPartialCall/ToolResult), not a legacy shape.
++_Avoid_: entry, turn, chat-message
++
++**Permission**:
++The ruleset governing what an Agent/Tool may do without asking; tools escalate via an `ask(Permission.Request)` call.
++_Avoid_: access-control, authz
++
++### Session lifecycle
++
++**Status**:
++A Session's high-level busyness — `idle` | `retry` | `busy` — emitted as `session.status` bus events.
++_Avoid_: state, run-state
++
++**Run state**:
++The in-flight LLM/shell run lifecycle within a Session — `assertNotBusy`, `cancel`, `ensureRunning`, `startShell` — backed by a per-Session Runner map.
++_Avoid_: status, execution-state
++
++**Compaction**:
++Summarizing/truncating a Session's context to keep it within the model window.
++_Avoid_: summarization, truncation, context-window-management
++
++**Snapshot**:
++A git-patch checkpoint of the working tree — `track()` records a patch hash; `restore`/`revert`/`diff` operate on file state (7-day prune, 2MB cap); not a Session-state checkpoint.
++_Avoid_: checkpoint, savepoint, session-snapshot
++
++**Revert**:
++Returning the working tree to a prior Snapshot via its git patches.
++_Avoid_: undo, rollback
++
++**Goal**:
++A structured objective tracked within a Session (own SQL table).
++_Avoid_: objective, target
++
++**Todo**:
++A checklist tracked within a Session.
++_Avoid_: checklist, task-list
++
++**Session path**:
++Path-based grouping/filtering of Sessions (SMARK-local).
++_Avoid_: session-folder, session-group
++
++**Session search**:
++Title+message search over Sessions (SMARK-local).
++_Avoid_: session-filter
++
++### Runtime
++
++**Project**:
++A working directory opened with opencode; has a branded ProjectID (with a `global` sentinel) and bootstraps every service `init()` fire-and-forget.
++_Avoid_: workspace, repo, directory
++
++**Workspace**:
++A control-plane grouping (`wrk`-prefixed WorkspaceID) that can scope Sessions across Projects.
++_Avoid_: org, tenant
++
++**InstanceState**:
++Per-Project/directory state backed by `ScopedCache` keyed by directory, so each open Project gets its own service copy; use this, not a singleton, when two directories must not share state.
++_Avoid_: per-dir-state, singleton, instance
++
++**AppRuntime**:
++The shared app-layer Effect runtime — the preferred boundary for crossing non-Effect code into the wired app layer (FileSystem, Bus, Provider, Agent, Session, …).
++_Avoid_: app-layer, main-runtime
++
++**makeRuntime**:
++An Effect runtime factory (`{ runPromise, runFork, runCallback }` + shared memoMap) for intentional service-local boundaries and legacy facades; discouraged for new code in favor of AppRuntime.
++_Avoid_: service-runtime
++
++**EffectBridge**:
++The boundary for native/external callbacks (`@parcel/watcher`, `node-pty`, native `fs.watch`, plugin callbacks) that must re-enter Effect services with instance/workspace context.
++_Avoid_: callback-shim, adapter
++
++**NetworkProxy**:
++Unified handling of `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` for providers, plugins, and fetch (SMARK-local).
++_Avoid_: proxy-config, http-proxy
++
++## Relationships
++
++- A **Project** contains many **Sessions**. A **Session** belongs to exactly one **Project** + one working directory.
++- A **Session** is driven by one **Agent**. An **Agent** references one **Provider**/Model.
++- A **Session** has many **Messages**. A **Message** has many Parts.
++- An **Agent** invokes **Tools**. A **Tool** executes against its **Session**'s context.
++- **Compaction** manages the context window; **Snapshot** checkpoints the working tree for **Revert**. They keep a long **Session** viable on different axes (tokens vs files).
++- **Status** (`idle` | `retry` | `busy`) and **Run state** (in-flight run lifecycle) are distinct: a Session is `busy` while a run is in flight, but **Status** is the emitted label and **Run state** is the control surface (`cancel` / `ensureRunning` / `startShell`).
++- **InstanceState** is per-**Project**/directory; **AppRuntime** is process-wide.
++- A **Workspace** (control-plane) may scope **Sessions** across **Projects**.
++
++## Example dialogue
++
++> **Dev:** "When an Agent invokes the `write` Tool, does that create a Snapshot automatically?"
++> **Domain expert:** "No — Snapshot tracks working-tree patches on demand via `track()`. The `write` Tool shows a diff preview, but a Snapshot is only taken when the Session explicitly checkpoints, so Revert can restore files to that patch hash."
++>
++> **Dev:** "If a Session is `busy`, is that the same as its Run state?"
++> **Domain expert:** "Related but not the same. Status is the label we emit on the bus (`idle` | `retry` | `busy`); Run state is the control surface — `cancel`, `ensureRunning`, `startShell` — over the in-flight Runner."
++
++## Flagged ambiguities
++
++- "status" was used loosely to mean both the Session's busyness and the in-flight run — resolved: **Status** = `idle` | `retry` | `busy` (emitted label); **Run state** = the in-flight run control surface. Different modules (`status.ts` vs `run-state.ts`).
++- "message" was used to mean both the part-based shape and a putative legacy shape — resolved: **Message** = the MessageV2 part-based shape; `message.ts` holds tool-call state schemas that are part of the current shape, not a separate v1.
++- "instance" was used to mean both per-directory state and a server process — resolved: **Instance** = the per-**Project** **InstanceState**; a server process is the Server (see Module map below).
++- "snapshot" was used to mean a Session-state checkpoint — resolved: **Snapshot** = a git-patch working-tree checkpoint, the basis for file **Revert**, not Session state.
++
++## Module map
++
++A descriptive index of current structure and each area's responsibility — **not** a design spec and **not** a statement of future direction. It indexes what exists now so skills (e.g. `zoom-out`) can navigate; the glossary above is the canonical vocabulary.
++
++### `packages/opencode/src/`
++
++| Directory          | Role                                                  |
++| ------------------ | ----------------------------------------------------- |
++| `agent/`           | Agent definition, generation, subagent permissions    |
++| `session/`         | Session, Message (v2 + tool-call states), run loop, lifecycle, search, path |
++| `tool/`            | Tool definitions + registry (incl. `shell/`, `bash-compress.ts`) |
++| `provider/`        | LLM providers, alias, auth, transform, model status   |
++| `permission/`      | Permission rulesets + requests                        |
++| `server/`          | Headless HTTP API server (`opencode serve`, port 4096)|
++| `cli/`             | yargs CLI + `cmd/tui/` terminal UI + `cmd/daemon.ts`   |
++| `config/`          | Configuration system (self-export modules)            |
++| `storage/`         | SQLite/Drizzle persistence (`#db` import map)         |
++| `effect/`          | AppRuntime, makeRuntime, InstanceState, EffectBridge, runtime flags |
++| `project/`         | Project bootstrap + instance context                  |
++| `control-plane/`   | Workspaces (`wrk`-prefixed WorkspaceID)               |
++| `bus/`             | Event bus                                             |
++| `snapshot/`        | git-patch working-tree snapshots (`index.ts`)         |
++| `mcp/`             | Model Context Protocol                                |
++| `acp/`             | Agent Client Protocol                                 |
++| `lsp/`             | Language server protocol                              |
++| `pty/`             | Pseudo-terminal (`#pty` import map)                   |
++| `plugin/`          | External plugins (`--pure` disables)                  |
++| `skill/`           | Skill system                                          |
++| `token/`           | Token accounting + estimate                           |
++| `auth/`, `account/`| Authentication + identity                             |
++| `share/`, `sync/`  | Session sharing + synchronization                     |
++| `worktree/`, `git/`| Git worktree + git operations                         |
++| `image/`, `file/`  | Image processing + file handling                      |
++| `v2/`              | In-flight v2 migration (see below)                    |
++
++Other packages (`app`, `desktop`, `desktop-electron`, `web`, `console`, `sdk`, `plugin`, `core`, `ui`, `shared`) are consumers/facades of the core domain; canonical definitions live in `packages/opencode`.
++
++## SMARK fork delta (`[local-smark]`)
++
++Fork-specific enhancements are marked in source with `[local-smark]` comments. The load-bearing ones (see the glossary above for the corresponding domain terms):
++
++- **Provider alias** — provider aliases + explicit OpenAI-OAuth provider handling; client version override. (`src/provider/alias.ts`)
++- **Explicit primary agent list** — `auto` is a primary Agent enabled only when explicitly chosen as `default_agent`, to avoid accidentally routing shell permissions through `auto`. (`src/agent/agent.ts`)
++- **Session path + search** — path-based grouping and title+message search over Sessions. (`src/session/path.ts`, `src/session/search.ts`)
++- **NetworkProxy** — unified `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` handling.
++- **Windows/PowerShell** — CLIXML decode, UTF-8 fixes, path normalization, CRLF preservation.
++- **VSCode Notebook** — cell overview/read/edit/run/output/kernel tools.
++- **Daemon** — Server Lock, health checks, HttpApi, PTY WebSocket tickets (`src/cli/cmd/daemon.ts`).
++- **Token statistics** — granular input/output/tool/attachment/request-overhead breakdown (`src/token/`).
++
++When merging from upstream, `[local-smark]` markers identify conflicts to preserve. See `docs/merge-upstream-log.md`.
++
++## v2 transition (in-flight)
++
++A v2 refactor is in progress under `src/v2/` and the shared `@opencode-ai/core` package, moving Session/Message/Event/Model/Provider toward a shared schema (`@opencode-ai/core/session-message`, `-session-prompt`, `-session-event`, `-v2-schema`, `event`, `model`, `provider`) with an `EventV2`/`EventV2Bridge` and a `Delivery` concept (`immediate` | `deferred`). `src/v2/session.ts` is the v2 Session; `src/v2/provider-parity-checklist.md` tracks provider parity. v1 (`session/`) is current production and v2 is the in-progress migration target — do not assume parity. (Descriptive of current migration state, not a future design plan.)
+diff --git a/docs/adr/0001-triage-labels-and-team-assignment-coexist.md b/docs/adr/0001-triage-labels-and-team-assignment-coexist.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..6dcb2f00db5c7878e244c37c236835f2eb3100e7
+--- /dev/null
++++ b/docs/adr/0001-triage-labels-and-team-assignment-coexist.md
+@@ -0,0 +1,41 @@
++# ADR-0001: Triage lifecycle labels and team-assignment coexist
++
++Date: 2026-07-05
++Status: accepted
++
++## Context
++
++This repo has two triage concerns that look superficially similar but operate on different axes:
++
++1. A pre-existing automation agent at `.opencode/agent/triage.md` runs on incoming GitHub issues and **assigns an owner** by team (`tui`, `desktop_web`, `core`, `inference`, `windows`). It explicitly does **not** add labels — it only assigns.
++2. The mattpocock `triage` skill uses a **5-label lifecycle state machine** (`needs-triage` → `needs-info` → `ready-for-agent` → `ready-for-human` → `wontfix`) to track issue state.
++
++A future explorer could reasonably assume one system replaces the other — e.g. that adding lifecycle labels makes the team-assignment agent redundant, or that the team-assignment agent's "do not add labels" rule forbids the mattpocock skill entirely.
++
++## Decision
++
++The two systems **coexist** and operate on orthogonal axes:
++
++| System                    | Axis            | Mechanism            | Owner                              |
++| ------------------------- | --------------- | -------------------- | ---------------------------------- |
++| Team-assignment agent     | Who works on it | Issue **assignee**   | `.opencode/agent/triage.md` (auto) |
++| mattpocock `triage` skill | Lifecycle state | Issue **labels**     | Invoked on demand by a skill       |
++
++- The team-assignment agent owns **assignment**. The mattpocock `triage` skill owns **lifecycle labels**.
++- When the mattpocock `triage` skill runs, it adds/removes the five lifecycle labels and **leaves assignment untouched**.
++- The team-assignment agent continues to not add labels; it is not modified to set lifecycle state.
++
++The lifecycle labels use their default strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`), mapped in `docs/agents/triage-labels.md`.
++
++## Consequences
++
++- **Positive**: each system stays focused; no re-engineering of the existing agent is required to adopt lifecycle tracking.
++- **Positive**: a human (or the mattpocock skill) can see lifecycle state independently of who is assigned.
++- **Negative**: two triage concepts to keep straight. Mitigated by documenting the split in `docs/agents/issue-tracker.md` and `docs/agents/triage-labels.md`, and by this ADR.
++- **Neutral**: if the labels do not yet exist on `SMARK2022/opencode`, they must be created (`gh label create ...`) before first use.
++
++## Conflates / relates
++
++- `docs/agents/issue-tracker.md` — issue tracker is GitHub on the SMARK fork (`origin`).
++- `docs/agents/triage-labels.md` — the label mapping table.
++- `.opencode/agent/triage.md` — the team-assignment agent definition.
+diff --git a/docs/adr/README.md b/docs/adr/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..61443e48a245d07305de3a9a14abfc4665125254
+--- /dev/null
++++ b/docs/adr/README.md
+@@ -0,0 +1,50 @@
++# Architectural Decision Records
++
++ADRs record decisions that future architecture reviews should not re-litigate — load-bearing choices where the *why* matters and the reasoning is non-obvious. They are not a changelog and not a place for ephemeral "not worth it right now" notes.
++
++## When to write an ADR
++
++Write one when a decision is:
++
++- **Load-bearing** — it shapes how future work is done, not just one file.
++- **Non-obvious** — a future explorer would reasonably re-suggest the alternative.
++- **Rejectable** — there was a real alternative that someone might want to reopen.
++
++Do not write one for self-evident conventions (those go in `AGENTS.md`) or single-file choices (those go in code comments).
++
++## Format
++
++```
++# ADR-NNNN: <imperative title>
++
++Date: YYYY-MM-DD
++Status: proposed | accepted | deprecated | superseded by ADR-MMMM
++
++## Context
++Why this decision came up. What alternatives were considered.
++
++## Decision
++What we decided.
++
++## Consequences
++What follows from this — positive, negative, neutral.
++
++## Conflates / relates
++Links to related ADRs, issues, or PRs.
++```
++
++## Numbering
++
++- Zero-padded four digits: `0001`, `0002`, …
++- One decision per file. Atomic.
++- Never renumber; supersede instead (`Status: superseded by ADR-MMMM`).
++
++## How to create
++
++Skills (`improve-codebase-architecture`, `/grill-with-docs`) offer to create an ADR when a user rejects a candidate with a load-bearing reason. You can also create one manually by copying the format above into `docs/adr/NNNN-<slug>.md` and adding it to the index below.
++
++## Index
++
++| ADR      | Title                                                         | Status   |
++| -------- | ------------------------------------------------------------- | -------- |
++| [0001](./0001-triage-labels-and-team-assignment-coexist.md) | Triage lifecycle labels and team-assignment coexist | accepted |
+diff --git a/docs/agents/domain.md b/docs/agents/domain.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..2cb5bcf49e49eb5d8bf567550ee598da89f2466a
+--- /dev/null
++++ b/docs/agents/domain.md
+@@ -0,0 +1,44 @@
++# Domain Docs
++
++How the engineering skills should consume this repo's domain documentation when exploring the codebase.
++
++## Layout: single-context
++
++This repo uses a **single-context** layout. One `CONTEXT.md` and one `docs/adr/` live at the repo root and cover the whole opencode domain. Although this is a Bun monorepo (`packages/*`), the domain language (session, provider, tool, agent, message, snapshot, …) is shared across the product, and `packages/opencode` is the core that holds it. There is no `CONTEXT-MAP.md`.
++
++```
++/
++├── CONTEXT.md            ← domain glossary (the canonical vocabulary)
++├── AGENTS.md             ← repo-wide style + agent-skills index
++├── docs/
++│   ├── agents/           ← this file + issue-tracker + triage-labels
++│   └── adr/              ← architectural decision records
++└── packages/
++    └── opencode/
++        ├── AGENTS.md     ← package-local rules (DB, module shape, Effect)
++        ├── specs/effect/ ← Effect migration patterns (guide.md, migration.md, …)
++        └── src/          ← core implementation
++```
++
++## Before exploring, read these
++
++1. **`CONTEXT.md`** at the repo root — the domain glossary. Use its vocabulary verbatim in any output (issue titles, refactor proposals, hypotheses, test names). Do not drift to synonyms the glossary avoids.
++2. **`docs/adr/`** — read ADRs that touch the area you're about to work in. Start with `docs/adr/README.md` for the index.
++3. **`packages/opencode/AGENTS.md`** — package-local conventions (database schema, module shape, Effect rules) that constrain any change to `packages/opencode`.
++4. **`packages/opencode/specs/effect/`** — when touching Effect code, read `migration.md` and `guide.md` first; they are the compact pattern reference cited by the project-local `effect` skill.
++
++If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The producer skill (`/grill-with-docs`) and `improve-codebase-architecture` create them lazily when terms or decisions actually get resolved.
++
++## Use the glossary's vocabulary
++
++When your output names a domain concept, use the term as defined in `CONTEXT.md`. For example, say "the Session compaction module" — not "the chat shortener," and not "the SessionService." If the concept you need isn't in the glossary yet, that's a signal: either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/grill-with-docs`).
++
++## Flag ADR conflicts
++
++If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
++
++> _Contradicts ADR-0001 (triage labels and team-assignment coexist) — but worth reopening because…_
++
++## Monorepo orientation
++
++When a skill (e.g. `zoom-out`) asks for a map of modules and callers, use the **Module map** in `CONTEXT.md` and its glossary vocabulary. The map is a descriptive index of current structure and responsibilities, not a design spec. Other packages (`app`, `desktop`, `desktop-electron`, `web`, `console`, `sdk`, `plugin`, `core`, `ui`, `shared`) are consumers/facades of the core domain; canonical definitions live in `packages/opencode`.
+diff --git a/docs/agents/issue-tracker.md b/docs/agents/issue-tracker.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..ed11c0e6272ab2e70df457995dd15ac2feab0452
+--- /dev/null
++++ b/docs/agents/issue-tracker.md
+@@ -0,0 +1,60 @@
++# Issue tracker: GitHub (SMARK fork)
++
++Issues and PRDs for this repo live as GitHub issues on the **SMARK fork**, `SMARK2022/opencode` — the `origin` remote. Use the `gh` CLI for all operations.
++
++## Repo selection
++
++This repo has two remotes:
++
++| Remote  | Repo                       | Role                                           |
++| ------- | -------------------------- | ---------------------------------------------- |
++| `origin`    | `SMARK2022/opencode`   | **SMARK fork — track issues here**             |
++| `upstream`  | `anomalyco/opencode`   | Upstream; do NOT open SMARK-specific issues here |
++
++`gh` infers the repo from `git remote -v`. Because `origin` is the SMARK fork, plain `gh issue ...` commands target `SMARK2022/opencode` by default. If a command ever resolves to the wrong repo, be explicit: `gh issue create --repo SMARK2022/opencode ...`.
++
++Open SMARK-specific issues (TUI, session management, token stats, Windows/PowerShell, VSCode Notebook, network proxy, daemon) on the fork. Upstream-shared issues may be cross-referenced, but the canonical tracker for this branch is the fork.
++
++## Conventions
++
++- **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.
++- **Read an issue**: `gh issue view <number> --comments`, filtering comments by `jq` and also fetching labels.
++- **List issues**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
++- **Comment on an issue**: `gh issue comment <number> --body "..."`
++- **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
++- **Close**: `gh issue close <number> --comment "..."`
++
++## Pull requests as a triage surface
++
++**PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
++
++When set to `yes`, PRs run through the same labels and states as issues, using the `gh pr` equivalents:
++
++- **Read a PR**: `gh pr view <number> --comments` and `gh pr diff <number>` for the diff.
++- **List external PRs for triage**: `gh pr list --state open --json number,title,body,labels,author,authorAssociation,comments` then keep only `authorAssociation` of `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, or `NONE` (drop `OWNER`/`MEMBER`/`COLLABORATOR`).
++- **Comment / label / close**: `gh pr comment`, `gh pr edit --add-label`/`--remove-label`, `gh pr close`.
++
++GitHub shares one number space across issues and PRs, so a bare `#42` may be either — resolve with `gh pr view 42` and fall back to `gh issue view 42`. All `gh pr ...` commands target `SMARK2022/opencode` by default (see Repo selection above); be explicit with `--repo` if needed.
++
++## When a skill says "publish to the issue tracker"
++
++Create a GitHub issue on `SMARK2022/opencode`.
++
++## When a skill says "fetch the relevant ticket"
++
++Run `gh issue view <number> --comments`.
++
++## Wayfinding operations
++
++Used by `/wayfinder`. The **map** is a single issue with **child** issues as tickets.
++
++- **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --repo SMARK2022/opencode --label wayfinder:map`.
++- **Child ticket**: an issue linked to the map as a GitHub sub-issue (`gh api` on the sub-issues endpoint). Where sub-issues aren't enabled, add the child to a task list in the map body and put `Part of #<map>` at the top of the child body. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`). Once claimed, the ticket is assigned to the driving dev.
++- **Blocking**: GitHub's **native issue dependencies** — the canonical, UI-visible representation. Add an edge with `gh api --method POST repos/SMARK2022/opencode/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`, where `<blocker-db-id>` is the blocker's numeric **database id** (`gh api repos/SMARK2022/opencode/issues/<n> --jq .id`, _not_ the `#number` or `node_id`). GitHub reports `issue_dependencies_summary.blocked_by` (open blockers only — the live gate). Where dependencies aren't available, fall back to a `Blocked by: #<n>, #<n>` line at the top of the child body. A ticket is unblocked when every blocker is closed.
++- **Frontier query**: list the map's open children (`gh issue list --state open`, scoped to the map's sub-issues / task list), drop any with an open blocker (`issue_dependencies_summary.blocked_by > 0`, or an open issue in the `Blocked by` line) or an assignee; first in map order wins.
++- **Claim**: `gh issue edit <n> --add-assignee @me` — the session's first write.
++- **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
++
++## Coexistence with the team-assignment triage agent
++
++A separate automation agent (`.opencode/agent/triage.md`) runs on incoming issues and **assigns an owner** by team (`tui`, `desktop_web`, `core`, `inference`, `windows`). It explicitly does not add labels. The mattpocock `triage` skill operates on a **different axis** — lifecycle labels (see `docs/agents/triage-labels.md`). The two are orthogonal and must not be confused: one routes ownership, the other tracks issue state.
+diff --git a/docs/agents/triage-labels.md b/docs/agents/triage-labels.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c08a380526f3da5c0a058daf7284d17f3d72b8fc
+--- /dev/null
++++ b/docs/agents/triage-labels.md
+@@ -0,0 +1,26 @@
++# Triage Labels
++
++The mattpocock skills speak in terms of five canonical triage **lifecycle** roles. This file maps those roles to the actual label strings used in this repo's issue tracker (GitHub, `SMARK2022/opencode`).
++
++| Label in mattpocock/skills | Label in our tracker | Meaning                                  |
++| -------------------------- | -------------------- | ---------------------------------------- |
++| `needs-triage`             | `needs-triage`       | Maintainer needs to evaluate this issue  |
++| `needs-info`               | `needs-info`         | Waiting on reporter for more information |
++| `ready-for-agent`          | `ready-for-agent`    | Fully specified, ready for an AFK agent  |
++| `ready-for-human`          | `ready-for-human`    | Requires human implementation            |
++| `wontfix`                  | `wontfix`            | Will not be actioned                     |
++
++When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table. If these labels do not yet exist on `SMARK2022/opencode`, create them via `gh label create <name> --description "..." --color "..."` before first use.
++
++## Coexistence with the team-assignment triage agent
++
++This repo already has a separate automation agent at `.opencode/agent/triage.md` that triages incoming issues by **assigning an owner** from one of five teams (`tui`, `desktop_web`, `core`, `inference`, `windows`). That agent explicitly **does not add labels** — it only assigns.
++
++The two triage systems operate on orthogonal axes and must not be conflated:
++
++| System                         | Axis            | Mechanism                  | Owner                              |
++| ------------------------------ | --------------- | -------------------------- | ---------------------------------- |
++| Team-assignment agent          | Who works on it | Issue assignee             | `.opencode/agent/triage.md` (auto) |
++| mattpocock `triage` skill      | Lifecycle state | Labels (the 5 above)       | Invoked on demand by a skill       |
++
++When the mattpocock `triage` skill runs, it should add/remove the lifecycle labels above and **leave assignment untouched** (the team-assignment agent owns that). See ADR-0001 in `docs/adr/` for the rationale.
+diff --git a/docs/prompts.md b/docs/prompts.md
+index f2e296b1690b5b2d0503c3d685c5403ea379a82f..6594f73deb8df8a8a5060aed8b951ef76b90768d 100644
+--- a/docs/prompts.md
++++ b/docs/prompts.md
+@@ -1,6 +1,6 @@
+ # Prompt 存档
+ 
+-本文件是 prompt 片段存档，不是一次性全文使用。每次按任务场景复制对应片段。
++本文件是 prompt 片段存档。各片段按顺序构成一条工作流链：① 只调研，输出完整方案 → ② 方案审计与放行 → ③ TDD 手术级实现 → ④ 创建 commit。可整链顺序运行，也可按任务场景单独复制对应片段。
+ 
+ -------------
+ 
+@@ -40,15 +40,21 @@
+ 请你进行完整的调研而不是只进行简单的脱离底层实现以及边界情况的顶层规划。
+ 最终请给出推荐方案摘要。请注意所有不确定的内容你要完整确认直到你已经把所有潜在的问题都考虑在内了，且方案已经足够完善且自然，我不希望存在未经确认或者仍需探索的任何相关代码部分，最终执行将会按照方案进行。
+ 
++-------------
++
++## 方案审计与放行
++
+ 在完整设计方案之后，必须给 subagent 进行完整检查，看看方案设计是否合理、冗余是否足够小、依赖与兼容是否已经完整考虑。
+ 
+ subagent 检查是硬性步骤，不允许省略，不允许降级为自检。如果 task / subagent 调用失败，必须继续重试；在成功完成独立复核前，不得输出最终方案结论。
+ 
++完整进行相应的审计与检查，subagent 均无任何的阻塞性意见之后再进行修改；如果 subagent 运行之后有任何的意见，均需要再次进行完整方案的构建然后再进行相应的 subagent 的原标准以及原范围的完整方案审计，不能进行任何的审计范围收缩与下降。
+ 
+--------------
++阻塞性意见指会导致回归、安全降级、兼容降级、边界漏洞、bug、时序问题或逻辑错误等行为级缺陷；纯代码风格、命名偏好、格式类意见不属阻塞项。
++
++最多迭代 3 轮：3 轮后若仍有阻塞意见，强制收敛为「开放问题」交用户决策，不再无限重建。subagent 连续调用失败超过 N 次时，标注「未完成独立复核」并交用户决策，不静默降级为自检。
+ 
+-完整进行相应的审计与检查，subagent均无任何的阻塞性意见之后再进行修改；如果subagent运行之后有任何的意见，均需要再次进行完整方案的构建然后再进行相应的subagent的原标准以及原范围的完整方案审计，不能进行任何的审计范围收缩与下降
+-在完整
++subagent 无阻塞性意见后放行，进入 TDD 手术级实现。
+ 
+ -------------
+ 
+@@ -78,7 +84,7 @@ subagent 检查是硬性步骤，不允许省略，不允许降级为自检。
+ - 不允许通过削弱测试、跳过校验、删除既有断言、吞掉错误或放宽安全约束来让测试通过。
+ - 如果涉及命令、权限、路径、解析器或 shell 字符串处理，必须额外覆盖引号、转义、空格路径、环境变量、管道、重定向、子命令、危险操作、空输入、非法输入和 approval / deny / auto 边界。
+ 
+-完成实现后，必须调用 task / subagent 做一次独立复核。该步骤是硬性门槛，不允许省略，不允许降级为自检，不允许因为一次调用失败就跳过。
++完成实现后，必须调用 task / subagent 做独立复核。该步骤是硬性门槛，不允许省略，不允许降级为自检，不允许因为一次调用失败就跳过。
+ 
+ 如果 task / subagent 调用失败，必须继续重试；在成功完成独立复核前，不得输出最终完成结论。复核时不要告诉 subagent 你的实现方案、修改设计理由或自我判断，只告诉它本次需求、当前修改位置的文件路径、git 可以看到的你涉及的修改文件列表和必要上下文，让它从外部审查：
+ 
+@@ -89,6 +95,8 @@ subagent 检查是硬性步骤，不允许省略，不允许降级为自检。
+ 5. 是否相较修改前造成任何功能降级、安全降级或兼容性降级；
+ 6. 每个修改是否必要，且实现链路是否完整准确。
+ 
++复核采用与方案审计相同的循环规则：subagent 提出任何阻塞性意见（回归、安全降级、兼容降级、边界漏洞、bug、时序问题、逻辑错误等行为级缺陷；不含纯代码风格意见）都必须返工重修，再按原标准原范围重新审计，不能收缩审计范围。最多迭代 3 轮，3 轮后仍有阻塞意见则强制收敛为「开放问题」交用户决策。subagent 连续调用失败超过 N 次时，标注「未完成独立复核」并交用户，不静默降级为自检。
++
+ 根据复核结果继续修正。最终输出不能只给三四行摘要，必须逐项给出可审计证据：
+ 
+ - 修改了哪些核心文件；
+diff --git a/thirdparty/chatgpt-browser-agent b/thirdparty/chatgpt-browser-agent
+index f4de5136bf122ba450a26887b27e1f3fbfa51f6d..8144b3de709d7cf3c6194036f4f65ab8c774b5d1 160000
+--- a/thirdparty/chatgpt-browser-agent
++++ b/thirdparty/chatgpt-browser-agent
+@@ -1 +1 @@
+-Subproject commit f4de5136bf122ba450a26887b27e1f3fbfa51f6d
++Subproject commit 8144b3de709d7cf3c6194036f4f65ab8c774b5d1

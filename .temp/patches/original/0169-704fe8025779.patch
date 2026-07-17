@@ -1,0 +1,321 @@
+From 704fe80257797401210454dfded5f3f161a6ca6b Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 18 May 2026 23:20:35 +0800
+Subject: [PATCH] =?UTF-8?q?feat(codex):=20=E6=B7=BB=E5=8A=A0=E6=94=AF?=
+ =?UTF-8?q?=E6=8C=81=E8=87=AA=E5=AE=9A=E4=B9=89=20HTTP=20=E5=A4=B4?=
+ =?UTF-8?q?=E5=92=8C=20User-Agent=20=E5=A4=84=E7=90=86=EF=BC=8C=E6=9B=B4?=
+ =?UTF-8?q?=E6=96=B0=E7=9B=B8=E5=85=B3=E6=B5=8B=E8=AF=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/plugin/codex.ts b/packages/opencode/src/plugin/codex.ts
+index 1b03067972d1e95d44689c67099a03cd9d0121be..6629ca6f474ec9f3f70dd7818fa0273c9d3f8b21 100644
+--- a/packages/opencode/src/plugin/codex.ts
++++ b/packages/opencode/src/plugin/codex.ts
+@@ -2,9 +2,7 @@ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
+ import * as Log from "@opencode-ai/core/util/log"
+ import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { Installation } from "../installation"
+-import { InstallationVersion } from "@opencode-ai/core/installation/version"
+ import { OAUTH_DUMMY_KEY } from "../auth"
+-import os from "os"
+ import { setTimeout as sleep } from "node:timers/promises"
+ import { createServer } from "http"
+ 
+@@ -15,6 +13,17 @@ const ISSUER = "https://auth.openai.com"
+ const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
+ const OAUTH_PORT = 1455
+ const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
++export const CODEX_USER_AGENT = "codex-tui/0.130.0 (Mac OS 15.7.2; arm64) Apple_Terminal/455.1 (codex-tui; 0.130.0)"
++export const CODEX_HEADERS = {
++  "Content-Type": "application/json",
++  originator: "codex-tui",
++  "User-Agent": CODEX_USER_AGENT,
++}
++const CODEX_FORM_HEADERS = {
++  "Content-Type": "application/x-www-form-urlencoded",
++  originator: CODEX_HEADERS.originator,
++  "User-Agent": CODEX_USER_AGENT,
++}
+ const ALLOWED_MODELS = new Set([
+   "gpt-5.5",
+   "gpt-5.2",
+@@ -123,7 +132,7 @@ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: Pk
+   const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
+     method: "POST",
+     purpose: "plugin",
+-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
++    headers: CODEX_FORM_HEADERS,
+     body: new URLSearchParams({
+       grant_type: "authorization_code",
+       code,
+@@ -142,7 +151,7 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResponse>
+   const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
+     method: "POST",
+     purpose: "plugin",
+-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
++    headers: CODEX_FORM_HEADERS,
+     body: new URLSearchParams({
+       grant_type: "refresh_token",
+       refresh_token: refreshToken,
+@@ -410,6 +419,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
+ 
+         return {
+           apiKey: OAUTH_DUMMY_KEY,
++          headers: CODEX_HEADERS,
+           async fetch(requestInput: RequestInfo | URL, init?: RequestInit) {
+             // Remove dummy API key authorization header
+             if (init?.headers) {
+@@ -483,6 +493,10 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
+                 ? new URL(CODEX_API_ENDPOINT)
+                 : parsed
+ 
++            if (url.href === CODEX_API_ENDPOINT) {
++              Object.entries(CODEX_HEADERS).forEach(([key, value]) => headers.set(key, value))
++            }
++
+             return NetworkProxy.fetch(url, {
+               ...init,
+               purpose: "provider",
+@@ -529,10 +543,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
+             const deviceResponse = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
+               method: "POST",
+               purpose: "plugin",
+-              headers: {
+-                "Content-Type": "application/json",
+-                "User-Agent": `opencode/${InstallationVersion}`,
+-              },
++              headers: CODEX_HEADERS,
+               body: JSON.stringify({ client_id: CLIENT_ID }),
+             })
+ 
+@@ -554,10 +565,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
+                   const response = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
+                     method: "POST",
+                     purpose: "plugin",
+-                    headers: {
+-                      "Content-Type": "application/json",
+-                      "User-Agent": `opencode/${InstallationVersion}`,
+-                    },
++                    headers: CODEX_HEADERS,
+                     body: JSON.stringify({
+                       device_auth_id: deviceData.device_auth_id,
+                       user_code: deviceData.user_code,
+@@ -573,7 +581,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
+                     const tokenResponse = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
+                       method: "POST",
+                       purpose: "plugin",
+-                      headers: { "Content-Type": "application/x-www-form-urlencoded" },
++                      headers: CODEX_FORM_HEADERS,
+                       body: new URLSearchParams({
+                         grant_type: "authorization_code",
+                         code: data.authorization_code,
+@@ -616,8 +624,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
+     },
+     "chat.headers": async (input, output) => {
+       if (input.model.providerID !== "openai") return
+-      output.headers.originator = "opencode"
+-      output.headers["User-Agent"] = `opencode/${InstallationVersion} (${os.platform()} ${os.release()}; ${os.arch()})`
++      Object.assign(output.headers, CODEX_HEADERS)
+       output.headers.session_id = input.sessionID
+     },
+     "chat.params": async (input, output) => {
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index b32e5a8ff2e1fcfa2f5972a37f6b4400fac67a83..fafeb9c572a642209e6f70aefa81caeec07bb9fa 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -1775,8 +1775,7 @@ export const layer = Layer.effect(
+ 
+           if (configuredUserAgent) {
+             const headers = new Headers(opts.headers)
+-            const currentUserAgent = headers.get("user-agent") ?? ""
+-            if (!currentUserAgent || currentUserAgent.startsWith(configuredUserAgent)) headers.set("User-Agent", configuredUserAgent)
++            headers.set("User-Agent", configuredUserAgent)
+             opts.headers = headers
+           }
+ 
+diff --git a/packages/opencode/test/plugin/codex.test.ts b/packages/opencode/test/plugin/codex.test.ts
+index 74d28ac9dcc3140be07523ef2b4ec62111e37560..9d763deeb241637991ce2cc8dfc7f535f085defc 100644
+--- a/packages/opencode/test/plugin/codex.test.ts
++++ b/packages/opencode/test/plugin/codex.test.ts
+@@ -1,5 +1,8 @@
+ import { describe, expect, test } from "bun:test"
+ import {
++  CODEX_HEADERS,
++  CODEX_USER_AGENT,
++  CodexAuthPlugin,
+   parseJwtClaims,
+   extractAccountIdFromClaims,
+   extractAccountId,
+@@ -13,6 +16,38 @@ function createTestJwt(payload: object): string {
+ }
+ 
+ describe("plugin.codex", () => {
++  test("uses Codex TUI User-Agent for OAuth model requests", async () => {
++    const hooks = await CodexAuthPlugin({} as never)
++    const options = await hooks.auth!.loader!(() =>
++      Promise.resolve({
++        type: "oauth" as const,
++        refresh: "refresh-token",
++        access: "access-token",
++        expires: Date.now() + 60_000,
++      }),
++      {} as never,
++    )
++    expect(options.headers).toEqual(CODEX_HEADERS)
++  })
++
++  test("sets Codex TUI User-Agent in chat headers", async () => {
++    const hooks = await CodexAuthPlugin({} as never)
++    const output = { headers: {} as Record<string, string> }
++    await hooks["chat.headers"]!(
++      {
++        sessionID: "session-id",
++        agent: "build",
++        model: { providerID: "openai" },
++        provider: {},
++        message: {},
++      } as never,
++      output,
++    )
++    expect(output.headers["Content-Type"]).toBe("application/json")
++    expect(output.headers.originator).toBe("codex-tui")
++    expect(output.headers["User-Agent"]).toBe(CODEX_USER_AGENT)
++  })
++
+   describe("parseJwtClaims", () => {
+     test("parses valid JWT with claims", () => {
+       const payload = { email: "test@example.com", chatgpt_account_id: "acc-123" }
+diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
+index 130d31ae8c066945c93d743142122d52b3c109ef..aac12e9adc3430e2fe88eb398398ec3e754f51db 100644
+--- a/packages/opencode/test/session/llm.test.ts
++++ b/packages/opencode/test/session/llm.test.ts
+@@ -414,6 +414,126 @@ describe("session.llm.stream", () => {
+     })
+   }
+ 
++  test("uses configured provider User-Agent for OpenAI alias providers", async () => {
++    const server = state.server
++    if (!server) throw new Error("Server not initialized")
++
++    const providerID = "daxiao-codex-openai"
++    const request = waitRequest(
++      "/responses",
++      createEventResponse(
++        [
++          {
++            type: "response.created",
++            response: {
++              id: "resp-1",
++              created_at: Math.floor(Date.now() / 1000),
++              model: "gpt-5.5",
++              service_tier: null,
++            },
++          },
++          {
++            type: "response.output_text.delta",
++            item_id: "item-1",
++            delta: "Hello",
++            logprobs: null,
++          },
++          {
++            type: "response.completed",
++            response: {
++              incomplete_details: null,
++              usage: {
++                input_tokens: 1,
++                input_tokens_details: null,
++                output_tokens: 1,
++                output_tokens_details: null,
++              },
++              service_tier: null,
++            },
++          },
++        ],
++        true,
++      ),
++    )
++
++    await using tmp = await tmpdir({
++      init: async (dir) => {
++        await Bun.write(
++          path.join(dir, "opencode.json"),
++          JSON.stringify({
++            $schema: "https://opencode.ai/config.json",
++            enabled_providers: [providerID],
++            provider: {
++              [providerID]: {
++                extends: "openai",
++                npm: "@ai-sdk/openai",
++                name: "DaXiao Codex",
++                options: {
++                  apiKey: "test-key",
++                  baseURL: `${server.url.origin}/v1`,
++                  headers: {
++                    "User-Agent": "codex_cli_rs/0.2333",
++                  },
++                },
++                models: {
++                  "gpt-5.5": {
++                    name: "GPT-5.5",
++                    limit: {
++                      context: 400000,
++                      input: 272000,
++                      output: 128000,
++                    },
++                    modalities: {
++                      input: ["text", "image"],
++                      output: ["text"],
++                    },
++                  },
++                },
++              },
++            },
++          }),
++        )
++      },
++    })
++
++    await withTestInstance({
++      directory: tmp.path,
++      fn: async (ctx) => {
++        const resolved = await getModel(ProviderID.make(providerID), ModelID.make("gpt-5.5"), ctx)
++        const sessionID = SessionID.make("session-test-daxiao-codex-openai")
++        const agent = {
++          name: "test",
++          mode: "primary",
++          options: {},
++          permission: [{ permission: "*", pattern: "*", action: "allow" }],
++        } satisfies Agent.Info
++        const user = {
++          id: MessageID.make("msg_user-daxiao-codex-openai"),
++          sessionID,
++          role: "user",
++          time: { created: Date.now() },
++          agent: agent.name,
++          model: { providerID: ProviderID.make(providerID), modelID: resolved.id },
++        } satisfies MessageV2.User
++
++        await drain(
++          {
++            user,
++            sessionID,
++            model: resolved,
++            agent,
++            system: ["You are a helpful assistant."],
++            messages: [{ role: "user", content: "Hello" }],
++            tools: {},
++          },
++          ctx,
++        )
++
++        expect((await request).headers.get("user-agent")).toBe("codex_cli_rs/0.2333")
++      },
++    })
++  })
++
+   test("sends temperature, tokens, and reasoning options for openai-compatible models", async () => {
+     const server = state.server
+     if (!server) {

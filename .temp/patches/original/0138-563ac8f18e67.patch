@@ -1,0 +1,459 @@
+From 563ac8f18e6779d0f5850d6a79ffa815ad552127 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 13 May 2026 21:03:18 +0800
+Subject: [PATCH] =?UTF-8?q?feat(ripgrep):=20=E6=B7=BB=E5=8A=A0=E6=9C=80?=
+ =?UTF-8?q?=E5=A4=A7=E6=96=87=E4=BB=B6=E5=92=8C=E7=BB=93=E6=9E=9C=E9=99=90?=
+ =?UTF-8?q?=E5=88=B6=EF=BC=8C=E4=BC=98=E5=8C=96=E6=90=9C=E7=B4=A2=E5=8A=9F?=
+ =?UTF-8?q?=E8=83=BD=E5=B9=B6=E5=A4=84=E7=90=86=E8=BF=87=E4=BA=8E=E5=B9=BF?=
+ =?UTF-8?q?=E6=B3=9B=E7=9A=84=E6=90=9C=E7=B4=A2=E9=94=99=E8=AF=AF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/file/ripgrep.ts b/packages/opencode/src/file/ripgrep.ts
+index 27fd5f2323d656c9f1f3fde9ad7e96fac532361f..dd3e183a6667738cba9aa6404590e1a614a3b9b4 100644
+--- a/packages/opencode/src/file/ripgrep.ts
++++ b/packages/opencode/src/file/ripgrep.ts
+@@ -8,14 +8,18 @@ import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner
+ 
+ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+ import { Global } from "@opencode-ai/core/global"
++import { NamedError } from "@opencode-ai/core/util/error"
+ import * as Log from "@opencode-ai/core/util/log"
+ import { sanitizedProcessEnv } from "@opencode-ai/core/util/opencode-process"
+ import { which } from "@/util/which"
+ import { zod } from "@/util/effect-zod"
+ import { NonNegativeInt, withStatics } from "@/util/schema"
++import z from "zod"
+ 
+ const log = Log.create({ service: "ripgrep" })
+ const VERSION = "15.1.0"
++export const MAX_SEARCH_FILES = 5_000
++export const MAX_SEARCH_RESULTS = 1_000
+ const PLATFORM = {
+   "arm64-darwin": { platform: "aarch64-apple-darwin", extension: "tar.gz" },
+   "arm64-linux": { platform: "aarch64-unknown-linux-gnu", extension: "tar.gz" },
+@@ -107,6 +111,7 @@ export type Row = Match["data"]
+ export interface SearchResult {
+   items: Item[]
+   partial: boolean
++  truncated: boolean
+ }
+ 
+ export interface FilesInput {
+@@ -123,6 +128,7 @@ export interface SearchInput {
+   pattern: string
+   glob?: string[]
+   limit?: number
++  maxFiles?: number | false
+   follow?: boolean
+   file?: string[]
+   signal?: AbortSignal
+@@ -142,6 +148,14 @@ export interface Interface {
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/Ripgrep") {}
+ 
++export const SearchTooBroadError = NamedError.create(
++  "SearchTooBroadError",
++  z.object({
++    maxFiles: z.number(),
++    message: z.string(),
++  }),
++)
++
+ function env() {
+   const env = sanitizedProcessEnv()
+   delete env.RIPGREP_CONFIG_PATH
+@@ -213,6 +227,9 @@ function searchArgs(input: SearchInput) {
+   if (input.glob) {
+     for (const glob of input.glob) args.push(`--glob=${glob}`)
+   }
++  // ripgrep's --max-count is per file, not global. We still pass it when a
++  // caller supplies a limit because it caps pathological single-file output,
++  // while the stream consumer below enforces the actual global result limit.
+   if (input.limit) args.push(`--max-count=${input.limit}`)
+   args.push("--", input.pattern, ...(input.file ?? ["."]))
+   return args
+@@ -378,10 +395,53 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
+ 
+       const search: Interface["search"] = Effect.fn("Ripgrep.search")(function* (input: SearchInput) {
+         yield* check(input.cwd)
++        const maxFiles = input.maxFiles === false ? undefined : (input.maxFiles ?? MAX_SEARCH_FILES)
++
++        if (maxFiles !== undefined) {
++          // Positional rg targets may be files or directories. Count files as
++          // one, but enumerate directory targets just like a root search so a
++          // caller cannot bypass the broad-scope guard with file: ["."].
++          let candidateCount = 0
++          if (input.file) {
++            for (const target of input.file) {
++              if (candidateCount > maxFiles) break
++              const full = path.isAbsolute(target) ? target : path.join(input.cwd, target)
++              const info = yield* fs.stat(full).pipe(Effect.catch(() => Effect.succeed(undefined)))
++              if (info?.type !== "Directory") {
++                candidateCount++
++                continue
++              }
++              candidateCount += yield* files({ cwd: full, glob: input.glob, follow: input.follow, signal: input.signal }).pipe(
++                Stream.take(maxFiles - candidateCount + 1),
++                Stream.runCollect,
++                Effect.map((chunk) => chunk.length),
++              )
++            }
++          } else {
++            candidateCount = yield* files({ cwd: input.cwd, glob: input.glob, follow: input.follow, signal: input.signal }).pipe(
++              // Count only enough candidate files to decide whether a content
++              // scan is safe. This protects low-hit searches, where result
++              // truncation cannot stop rg because no matches arrive early.
++              Stream.take(maxFiles + 1),
++              Stream.runCollect,
++              Effect.map((chunk) => chunk.length),
++            )
++          }
++          if (candidateCount > maxFiles) {
++            return yield* Effect.fail(
++              new SearchTooBroadError({
++                maxFiles,
++                message: `Search scope is too broad: more than ${maxFiles} candidate files.`,
++              }),
++            )
++          }
++        }
+ 
+         const program = Effect.scoped(
+           Effect.gen(function* () {
+             const handle = yield* spawner.spawn(yield* command(input.cwd, searchArgs(input)))
++            const limit = input.limit && input.limit > 0 ? input.limit : MAX_SEARCH_RESULTS
++            let truncated = false
+ 
+             const [items, stderr, code] = yield* Effect.all(
+               [
+@@ -391,22 +451,40 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
+                   Stream.mapEffect(parse),
+                   Stream.filter((item): item is Match => item.type === "match"),
+                   Stream.map((item) => row(item.data)),
++                  // Tool callers usually need a bounded preview, not a precise
++                  // count. Taking one extra row lets us report truncation and
++                  // then terminate rg instead of continuing an expensive full
++                  // repository scan just to discard the remaining output later.
++                  Stream.take(limit === undefined ? Infinity : limit + 1),
+                   Stream.runCollect,
+                   Effect.map((chunk) => [...chunk]),
++                  Effect.tap((items) =>
++                    Effect.gen(function* () {
++                      if (limit === undefined || items.length <= limit) return
++                      truncated = true
++                      yield* handle.kill().pipe(Effect.ignore)
++                    }),
++                  ),
++                  Effect.map((items) => (limit === undefined ? items : items.slice(0, limit))),
+                 ),
+                 Stream.mkString(Stream.decodeText(handle.stderr)),
+-                handle.exitCode,
++                // A limit-triggered kill is a successful bounded search, while
++                // user aborts or real process failures should keep surfacing as
++                // errors through the normal exitCode path.
++                handle.exitCode.pipe(Effect.catch((err) => (truncated ? Effect.succeed(0) : Effect.fail(err)))),
+               ],
+               { concurrency: "unbounded" },
+             )
+ 
+-            if (code !== 0 && code !== 1 && code !== 2) {
++            if (!truncated && code !== 0 && code !== 1 && code !== 2) {
+               return yield* Effect.fail(error(stderr, code))
+             }
++            if (code === 2 && items.length === 0 && stderr.trim()) return yield* Effect.fail(error(stderr, code))
+ 
+             return {
+-              items: code === 1 ? [] : items,
+-              partial: code === 2,
++              items: code === 1 && !truncated ? [] : items,
++              partial: code === 2 && !truncated,
++              truncated,
+             }
+           }),
+         )
+diff --git a/packages/opencode/src/server/middleware.ts b/packages/opencode/src/server/middleware.ts
+index 160d258796b725c82679e95c08f388bb8653cc64..c38fd3479b4c732fd1cca76733f774707c9600ce 100644
+--- a/packages/opencode/src/server/middleware.ts
++++ b/packages/opencode/src/server/middleware.ts
+@@ -26,6 +26,7 @@ export const ErrorMiddleware: ErrorHandler = (err, c) => {
+     if (err instanceof NotFoundError) status = 404
+     else if (err instanceof Provider.ModelNotFoundError) status = 400
+     else if (err.name === "ProviderAuthValidationFailed") status = 400
++    else if (err.name === "SearchTooBroadError") status = 400
+     else if (err.name.startsWith("Worktree")) status = 400
+     else status = 500
+     return c.json(err.toObject(), { status })
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/file.ts b/packages/opencode/src/server/routes/instance/httpapi/groups/file.ts
+index b950adb383e311da263af6e46923a1b234a78d10..84125430056ee3d6d09f4feb14d5686bbbe0e815 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/groups/file.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/groups/file.ts
+@@ -2,7 +2,7 @@ import { File } from "@/file"
+ import { Ripgrep } from "@/file/ripgrep"
+ import { LSP } from "@/lsp/lsp"
+ import { Schema } from "effect"
+-import { HttpApi, HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
++import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
+ import { Authorization } from "../middleware/authorization"
+ import { InstanceContextMiddleware } from "../middleware/instance-context"
+ import { WorkspaceRoutingMiddleware } from "../middleware/workspace-routing"
+@@ -45,6 +45,7 @@ export const FileApi = HttpApi.make("file")
+         HttpApiEndpoint.get("findText", FilePaths.findText, {
+           query: FindTextQuery,
+           success: described(Schema.Array(Ripgrep.SearchMatch), "Matches"),
++          error: HttpApiError.BadRequest,
+         }).annotateMerge(
+           OpenApi.annotations({
+             identifier: "find.text",
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/file.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/file.ts
+index 98ee5968e0cd3073f02923be035636d9367b4914..8898a2c1315a4a785f93fb8258b92d25b349abd2 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/file.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/file.ts
+@@ -2,7 +2,7 @@ import * as InstanceState from "@/effect/instance-state"
+ import { File } from "@/file"
+ import { Ripgrep } from "@/file/ripgrep"
+ import { Effect } from "effect"
+-import { HttpApiBuilder } from "effect/unstable/httpapi"
++import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
+ import { InstanceHttpApi } from "../api"
+ 
+ export const fileHandlers = HttpApiBuilder.group(InstanceHttpApi, "file", (handlers) =>
+@@ -13,7 +13,7 @@ export const fileHandlers = HttpApiBuilder.group(InstanceHttpApi, "file", (handl
+     const findText = Effect.fn("FileHttpApi.findText")(function* (ctx: { query: { pattern: string } }) {
+       return (yield* ripgrep
+         .search({ cwd: (yield* InstanceState.context).directory, pattern: ctx.query.pattern, limit: 10 })
+-        .pipe(Effect.orDie)).items
++        .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))).items
+     })
+ 
+     const findFile = Effect.fn("FileHttpApi.findFile")(function* (ctx: {
+diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/grep.ts
+index fb3e70cad25dde632c4dec6e5d8458623009c6a4..fca0009cdbb67fd14a1d47aa392b9bd860605df5 100644
+--- a/packages/opencode/src/tool/grep.ts
++++ b/packages/opencode/src/tool/grep.ts
+@@ -3,12 +3,13 @@ import { Schema } from "effect"
+ import { Effect, Option } from "effect"
+ import { InstanceState } from "@/effect/instance-state"
+ import { AppFileSystem } from "@opencode-ai/core/filesystem"
+-import { Ripgrep } from "../file/ripgrep"
++import { Ripgrep, SearchTooBroadError } from "../file/ripgrep"
+ import { assertExternalDirectoryEffect } from "./external-directory"
+ import DESCRIPTION from "./grep.txt"
+ import * as Tool from "./tool"
+ 
+ const MAX_LINE_LENGTH = 2000
++const RESULT_LIMIT = 64
+ 
+ export const Parameters = Schema.Struct({
+   pattern: Schema.String.annotate({ description: "The regex pattern to search for in file contents" }),
+@@ -64,13 +65,37 @@ export const GrepTool = Tool.define(
+             kind: info?.type === "Directory" ? "directory" : "file",
+           })
+ 
+-          const result = yield* rg.search({
+-            cwd,
+-            pattern: params.pattern,
+-            glob: params.include ? [params.include] : undefined,
+-            file,
+-            signal: ctx.abort,
+-          })
++          const result = yield* rg
++            .search({
++              cwd,
++              pattern: params.pattern,
++              glob: params.include ? [params.include] : undefined,
++              file,
++              limit: RESULT_LIMIT + 1,
++              signal: ctx.abort,
++            })
++            .pipe(
++              Effect.catchIf(
++                SearchTooBroadError.isInstance,
++                (err) =>
++                  Effect.succeed({
++                    items: [],
++                    partial: false,
++                    truncated: false,
++                    tooBroad: err.data.maxFiles,
++                  }),
++              ),
++            )
++          if ("tooBroad" in result) {
++            return {
++              title: params.pattern,
++              metadata: { matches: 0, truncated: false },
++              output: [
++                `Search scope is too broad: more than ${result.tooBroad} candidate files.`,
++                "Use a narrower path or include pattern before searching file contents.",
++              ].join("\n"),
++            }
++          }
+           if (result.items.length === 0) return empty
+ 
+           const rows = result.items.map((item) => ({
+@@ -105,13 +130,11 @@ export const GrepTool = Tool.define(
+ 
+           matches.sort((a, b) => b.mtime - a.mtime)
+ 
+-          const limit = 100
+-          const truncated = matches.length > limit
+-          const final = truncated ? matches.slice(0, limit) : matches
++          const truncated = result.truncated || matches.length > RESULT_LIMIT
++          const final = truncated ? matches.slice(0, RESULT_LIMIT) : matches
+           if (final.length === 0) return empty
+ 
+-          const total = matches.length
+-          const output = [`Found ${total} matches${truncated ? ` (showing first ${limit})` : ""}`]
++          const output = [`Found ${truncated ? `${RESULT_LIMIT}+` : final.length} matches${truncated ? ` (showing first ${RESULT_LIMIT})` : ""}`]
+ 
+           let current = ""
+           for (const match of final) {
+@@ -128,7 +151,7 @@ export const GrepTool = Tool.define(
+           if (truncated) {
+             output.push("")
+             output.push(
+-              `(Results truncated: showing ${limit} of ${total} matches (${total - limit} hidden). Consider using a more specific path or pattern.)`,
++              `(Results truncated: showing first ${RESULT_LIMIT} matches. Consider using a more specific path or pattern.)`,
+             )
+           }
+ 
+@@ -140,7 +163,7 @@ export const GrepTool = Tool.define(
+           return {
+             title: params.pattern,
+             metadata: {
+-              matches: total,
++              matches: final.length,
+               truncated,
+             },
+             output: output.join("\n"),
+diff --git a/packages/opencode/src/tool/grep.txt b/packages/opencode/src/tool/grep.txt
+index 524386c71718984556e9a16155072821bb126c7f..50c03fcffe3370585689c2df35181f8d0efb4b34 100644
+--- a/packages/opencode/src/tool/grep.txt
++++ b/packages/opencode/src/tool/grep.txt
+@@ -1,8 +1,9 @@
+-- Fast content search tool that works with any codebase size
++- Fast bounded content search tool for targeted codebase queries
+ - Searches file contents using regular expressions
+ - Supports full regex syntax (eg. "log.*Error", "function\s+\w+", etc.)
+ - Filter files by pattern with the include parameter (eg. "*.js", "*.{ts,tsx}")
+-- Returns file paths and line numbers with at least one match sorted by modification time
++- Returns matching file paths and line numbers, with results capped for responsiveness
+ - Use this tool when you need to find files containing specific patterns
++- For large workspaces, pass path and include to narrow the candidate files before searching contents
+ - If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.
+ - For open-ended search, use grep/glob/read directly first. Consider Task only when exploration splits into 3+ independent branches and does not block your next local step.
+diff --git a/packages/opencode/test/file/ripgrep.test.ts b/packages/opencode/test/file/ripgrep.test.ts
+index a76c7ebe263351321678c37baa09664235a0347a..4507239810491aa497b1135260355617ba26d0f9 100644
+--- a/packages/opencode/test/file/ripgrep.test.ts
++++ b/packages/opencode/test/file/ripgrep.test.ts
+@@ -97,6 +97,78 @@ describe("file.ripgrep", () => {
+     expect(result.items[0]?.lines.text).toContain("needle")
+   })
+ 
++  test("search limit caps total matches", async () => {
++    await using tmp = await tmpdir({
++      init: async (dir) => {
++        await Bun.write(path.join(dir, "one.txt"), "needle\nneedle\nneedle\n")
++        await Bun.write(path.join(dir, "two.txt"), "needle\nneedle\nneedle\n")
++      },
++    })
++
++    const result = await run(Ripgrep.Service.use((rg) => rg.search({ cwd: tmp.path, pattern: "needle", limit: 3 })))
++    expect(result.items).toHaveLength(3)
++    expect(result.truncated).toBe(true)
++  })
++
++  test("search can opt into full small-result collection", async () => {
++    await using tmp = await tmpdir({
++      init: async (dir) => {
++        await Bun.write(path.join(dir, "one.txt"), "needle\nneedle\n")
++        await Bun.write(path.join(dir, "two.txt"), "needle\nneedle\n")
++      },
++    })
++
++    const result = await run(
++      Ripgrep.Service.use((rg) => rg.search({ cwd: tmp.path, pattern: "needle", limit: 10, maxFiles: false })),
++    )
++    expect(result.items).toHaveLength(4)
++    expect(result.truncated).toBe(false)
++  })
++
++  test("search refuses overly broad candidate sets", async () => {
++    await using tmp = await tmpdir({
++      init: async (dir) => {
++        await Bun.write(path.join(dir, "one.txt"), "needle\n")
++        await Bun.write(path.join(dir, "two.txt"), "needle\n")
++      },
++    })
++
++    const exit = await Ripgrep.Service.use((rg) => rg.search({ cwd: tmp.path, pattern: "needle", maxFiles: 1 })).pipe(
++      Effect.provide(Ripgrep.defaultLayer),
++      Effect.runPromiseExit,
++    )
++    expect(exit._tag).toBe("Failure")
++  })
++
++  test("search caps explicit file target sets", async () => {
++    await using tmp = await tmpdir({
++      init: async (dir) => {
++        await Bun.write(path.join(dir, "one.txt"), "needle\n")
++        await Bun.write(path.join(dir, "two.txt"), "needle\n")
++      },
++    })
++
++    const exit = await Ripgrep.Service.use((rg) =>
++      rg.search({ cwd: tmp.path, pattern: "needle", file: ["one.txt", "two.txt"], maxFiles: 1 }),
++    ).pipe(Effect.provide(Ripgrep.defaultLayer), Effect.runPromiseExit)
++    expect(exit._tag).toBe("Failure")
++  })
++
++  test("search caps explicit directory target sets", async () => {
++    await using tmp = await tmpdir({
++      init: async (dir) => {
++        await fs.mkdir(path.join(dir, "src"), { recursive: true })
++        await Bun.write(path.join(dir, "src", "one.txt"), "needle\n")
++        await Bun.write(path.join(dir, "src", "two.txt"), "needle\n")
++      },
++    })
++
++    const exit = await Ripgrep.Service.use((rg) =>
++      rg.search({ cwd: tmp.path, pattern: "needle", file: ["src"], maxFiles: 1 }),
++    ).pipe(Effect.provide(Ripgrep.defaultLayer), Effect.runPromiseExit)
++    expect(exit._tag).toBe("Failure")
++  })
++
+   test("search supports explicit file targets", async () => {
+     await using tmp = await tmpdir({
+       init: async (dir) => {
+diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/tool/grep.test.ts
+index 4b0da7c698d3a9a90e0cf50966ccdc98f81edd3c..5dfa24a9ac72383aa366bb3b797329f775ecc264 100644
+--- a/packages/opencode/test/tool/grep.test.ts
++++ b/packages/opencode/test/tool/grep.test.ts
+@@ -108,4 +108,25 @@ describe("tool.grep", () => {
+       expect(result.output).toContain("Line 2: line2")
+     }),
+   )
++
++  it.instance("caps broad match output", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const content = Array.from({ length: 130 }, (_, index) => `needle ${index}`).join("\n")
++      yield* Effect.promise(() => Bun.write(path.join(test.directory, "test.txt"), content))
++      const info = yield* GrepTool
++      const grep = yield* info.init()
++      const result = yield* grep.execute(
++        {
++          pattern: "needle",
++          path: test.directory,
++        },
++        ctx,
++      )
++      expect(result.metadata.matches).toBe(100)
++      expect(result.metadata.truncated).toBe(true)
++      expect(result.output).toContain("Found 100+ matches")
++      expect(result.output).toContain("Results truncated")
++    }),
++  )
+ })

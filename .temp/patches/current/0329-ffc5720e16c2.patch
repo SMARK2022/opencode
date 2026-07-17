@@ -1,0 +1,104 @@
+From ffc5720e16c21bf37654c3e339069e8ffd5198c3 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Wed, 24 Jun 2026 00:19:53 +0800
+Subject: [PATCH] =?UTF-8?q?fix(install):=20=E4=BD=BF=E7=94=A8=E5=8E=9F?=
+ =?UTF-8?q?=E5=AD=90=E6=9B=BF=E6=8D=A2=E6=96=B9=E5=BC=8F=E6=9B=B4=E6=96=B0?=
+ =?UTF-8?q?=E4=BA=8C=E8=BF=9B=E5=88=B6=EF=BC=8C=E9=81=BF=E5=85=8D=20macOS?=
+ =?UTF-8?q?=20=E4=B8=8A=E7=9A=84=20SIGKILL=20=E9=97=AE=E9=A2=98?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/install b/install
+index 3bb1ea6f20010029d6ad5cb848baafa7da6ff7c4..2d819a6e2d6a45be0226554670fe548cdd82e24a 100755
+--- a/install
++++ b/install
+@@ -486,8 +486,25 @@ install_executable() {
+     local dst_name="$2"
+     local dst="${INSTALL_DIR}/${dst_name}"
+ 
+-    cp "$src" "$dst"
+-    chmod 755 "$dst"
++    # 原子替换：先把新二进制写进同目录临时文件，再 rename 覆盖目标。
++    # 运行中的 daemon 仍映射旧 inode，避免 macOS 内核对被覆盖 Mach-O 做
++    # cs_invalid_page 校验失败而 SIGKILL 进程；升级后紧接的 --version 验证
++    # 也因此能映射到完整有效的新二进制，不再卡在 _dyld_start。Windows 独占
++    # 锁定运行中的 .exe，rename 会失败——退回原地覆盖（仅在该 .exe 未被持有时
++    # 可行；被持有时 cp 同样失败，属既有行为，Windows 无代码签名页失效问题）。
++    # 临时文件与目标同目录保证 mv 是同文件系统纯 rename。
++    local tmp
++    tmp=$(mktemp "${dst}.install.XXXXXX") || { cp "$src" "$dst" && chmod 755 "$dst"; return; }
++    # 清理上一轮崩溃可能残留的同前缀临时文件，避免目录堆积。
++    rm -f "${dst}.install."* 2>/dev/null || true
++    cp "$src" "$tmp"
++    chmod 755 "$tmp"
++    if ! mv -f "$tmp" "$dst" 2>/dev/null; then
++        # rename 失败（Windows 运行中 .exe 被独占锁，或跨文件系统）退回原地覆盖。
++        rm -f "$tmp"
++        cp "$src" "$dst"
++        chmod 755 "$dst"
++    fi
+ 
+     if [ "${os:-}" = "darwin" ] && command -v xattr >/dev/null 2>&1; then
+         xattr -d com.apple.quarantine "$dst" 2>/dev/null || true
+diff --git a/packages/opencode/test/installation/install-script.test.ts b/packages/opencode/test/installation/install-script.test.ts
+index ca1c91a97bf31d287381790f63a8fe8f7c156e41..7e4c5a34c305c6375f471305d669339706b0e564 100644
+--- a/packages/opencode/test/installation/install-script.test.ts
++++ b/packages/opencode/test/installation/install-script.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, test } from "bun:test"
+-import { existsSync } from "fs"
++import { existsSync, readdirSync, statSync } from "fs"
+ import fs from "fs/promises"
+ import path from "path"
+ import { fileURLToPath } from "url"
+@@ -58,6 +58,48 @@ describe("install script", () => {
+     expect(await Bun.file(target).text()).toContain("new-target")
+   })
+ 
++  // 回归：升级时覆盖运行中二进制曾用 `cp` 原地截断，在 macOS 上触发内核
++  // cs_invalid_page → SIGKILL，令运行中 daemon 与升级后的 --version 验证进程
++  // 双双卡死。install_executable 必须改用同目录临时文件 + rename 原子替换，
++  // 使运行中进程仍持有旧 inode 而不受影响。Linux/macOS 上 `cp` 截断保留目标
++  // inode、`mv` rename 切换 inode，因此 inode 是否变化是区分两种实现的可复现
++  // 判别；Windows 独占锁定运行中 .exe，rename 退回 cp，inode 语义不可靠，跳过。
++  test.skipIf(process.platform === "win32")(
++    "replaces the target via atomic rename rather than in-place overwrite",
++    async () => {
++      await using tmp = await tmpdir()
++      const home = path.join(tmp.path, "home")
++      const installDir = path.join(home, ".local", "bin")
++      const fakeBin = path.join(tmp.path, "fake-bin")
++      const asset = await createReleaseAsset(tmp.path, "atomic-target")
++      const target = path.join(installDir, "opencode")
++
++      await writeFakeReleaseCommands(fakeBin, asset)
++      // 预置旧目标二进制并记录其 inode；原地 cp 会保留它，原子 rename 会替换它。
++      await writeExecutable(target, `#!/usr/bin/env bash\necho "${VERSION}"\n# old-target\n`)
++      const beforeIno = statSync(target).ino
++
++      const result = await runInstall(["--version", VERSION, "--no-modify-path"], {
++        HOME: home,
++        OPENCODE_INSTALL_DIR: installDir,
++        OPENCODE_TEST_ASSET: asset,
++        // installDir 必须进 PATH：脚本 check_version 会 `command -v opencode`，
++        // 让其先命中预置的 target，而不是用户 PATH 上可能存在的真实（可能损坏
++        // 或卡死在 --version）的 opencode，避免测试被环境拖入死等。
++        PATH: bashPath(fakeBin, installDir),
++      })
++
++      expectSuccess(result)
++      // cp 截断 → inode 不变（旧实现下此处相等，测试红）；mv rename → inode 变化。
++      const afterIno = statSync(target).ino
++      expect(afterIno).not.toBe(beforeIno)
++      // 新二进制可用且为新版本内容。
++      expect(await runBinary(target)).toBe(VERSION)
++      // 原子路径成功后不得在安装目录残留 .install.* 临时文件（mktemp 随机后缀）。
++      expect(readdirSync(installDir).filter((name) => name.includes(".install."))).toEqual([])
++    },
++  )
++
+   test("updates all existing supported profiles by default without duplicate PATH entries", async () => {
+     await using tmp = await tmpdir()
+     const home = path.join(tmp.path, "home")

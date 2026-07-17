@@ -1,0 +1,22 @@
+From 83ef58f2bdf013d8fc8daceb12624d6141684380 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 29 Jun 2026 00:55:55 +0800
+Subject: [PATCH] =?UTF-8?q?chore(package):=20=E6=9B=B4=E6=96=B0=E7=89=88?=
+ =?UTF-8?q?=E6=9C=AC=E5=8F=B7=E8=87=B3=201.15.8-smark?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/package.json b/packages/opencode/package.json
+index c46951d661d0a734f4f0723371fdeaccd27c16c5..ebf8fb2a1cdab3a33a5662f91f41d25d038b4e65 100644
+--- a/packages/opencode/package.json
++++ b/packages/opencode/package.json
+@@ -1,6 +1,6 @@
+ {
+   "$schema": "https://json.schemastore.org/package.json",
+-  "version": "1.15.7-smark",
++  "version": "1.15.8-smark",
+   "name": "opencode",
+   "type": "module",
+   "license": "MIT",

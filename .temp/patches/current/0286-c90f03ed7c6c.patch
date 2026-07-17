@@ -1,0 +1,87 @@
+From c90f03ed7c6c7bb96e3d54fc604db8dffe1fede3 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 8 Jun 2026 16:32:13 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=BD=92=E6=A1=A3=20archive=20GitHub?=
+ =?UTF-8?q?=20action=20integration=20with=20opencode?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Implemented core functionality in `index.ts` to handle GitHub issue and pull request comments.
+- Created `package.json` to manage dependencies and project metadata.
+- Added scripts for version release and tag management in `publish` and `release`.
+- Introduced TypeScript configuration in `tsconfig.json` for improved type safety and modern JavaScript features.
+- Generated environment type definitions in `sst-env.d.ts` for SST compatibility.
+
+diff --git a/packages/containers/README.md b/archived/containers/README.md
+similarity index 100%
+rename from packages/containers/README.md
+rename to archived/containers/README.md
+diff --git a/packages/containers/base/Dockerfile b/archived/containers/base/Dockerfile
+similarity index 100%
+rename from packages/containers/base/Dockerfile
+rename to archived/containers/base/Dockerfile
+diff --git a/packages/containers/bun-node/Dockerfile b/archived/containers/bun-node/Dockerfile
+similarity index 100%
+rename from packages/containers/bun-node/Dockerfile
+rename to archived/containers/bun-node/Dockerfile
+diff --git a/packages/containers/publish/Dockerfile b/archived/containers/publish/Dockerfile
+similarity index 100%
+rename from packages/containers/publish/Dockerfile
+rename to archived/containers/publish/Dockerfile
+diff --git a/packages/containers/rust/Dockerfile b/archived/containers/rust/Dockerfile
+similarity index 100%
+rename from packages/containers/rust/Dockerfile
+rename to archived/containers/rust/Dockerfile
+diff --git a/packages/containers/script/build.ts b/archived/containers/script/build.ts
+similarity index 100%
+rename from packages/containers/script/build.ts
+rename to archived/containers/script/build.ts
+diff --git a/packages/containers/tauri-linux/Dockerfile b/archived/containers/tauri-linux/Dockerfile
+similarity index 100%
+rename from packages/containers/tauri-linux/Dockerfile
+rename to archived/containers/tauri-linux/Dockerfile
+diff --git a/packages/containers/tsconfig.json b/archived/containers/tsconfig.json
+similarity index 100%
+rename from packages/containers/tsconfig.json
+rename to archived/containers/tsconfig.json
+diff --git a/github/.gitignore b/archived/github/.gitignore
+similarity index 100%
+rename from github/.gitignore
+rename to archived/github/.gitignore
+diff --git a/github/README.md b/archived/github/README.md
+similarity index 100%
+rename from github/README.md
+rename to archived/github/README.md
+diff --git a/github/action.yml b/archived/github/action.yml
+similarity index 100%
+rename from github/action.yml
+rename to archived/github/action.yml
+diff --git a/github/bun.lock b/archived/github/bun.lock
+similarity index 100%
+rename from github/bun.lock
+rename to archived/github/bun.lock
+diff --git a/github/index.ts b/archived/github/index.ts
+similarity index 100%
+rename from github/index.ts
+rename to archived/github/index.ts
+diff --git a/github/package.json b/archived/github/package.json
+similarity index 100%
+rename from github/package.json
+rename to archived/github/package.json
+diff --git a/github/script/publish b/archived/github/script/publish
+similarity index 100%
+rename from github/script/publish
+rename to archived/github/script/publish
+diff --git a/github/script/release b/archived/github/script/release
+similarity index 100%
+rename from github/script/release
+rename to archived/github/script/release
+diff --git a/github/sst-env.d.ts b/archived/github/sst-env.d.ts
+similarity index 100%
+rename from github/sst-env.d.ts
+rename to archived/github/sst-env.d.ts
+diff --git a/github/tsconfig.json b/archived/github/tsconfig.json
+similarity index 100%
+rename from github/tsconfig.json
+rename to archived/github/tsconfig.json

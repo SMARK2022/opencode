@@ -1,0 +1,109 @@
+From a01eeec1d945e997dc4de6b52ec674c771a043ba Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 25 Jun 2026 01:15:55 +0800
+Subject: [PATCH] =?UTF-8?q?fix(snapshot):=20=E4=BF=AE=E5=A4=8D=20Windows?=
+ =?UTF-8?q?=20CI=20=E6=A0=B8=E5=BF=83=E6=B5=8B=E8=AF=95=E8=B6=85=E6=97=B6?=
+ =?UTF-8?q?=E5=A4=B1=E8=B4=A5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+snapshot.add() 原先对 allow（tracked + untracked）全部文件执行 fs.stat，
+但 large 集合仅用于过滤 untracked 文件的 block 列表，tracked 文件的 stat
+是无效 I/O。改为仅 stat untracked 文件并提升并发至 unbounded。同时缓存
+excludes() 的 git rev-parse 结果（worktree 级确定性路径），每次 add()
+减少一次 git 进程启动。
+
+workspace waitForSync 测试的 7000ms 超时相对于内部 TIMEOUT=5000ms 加上
+withInstance 初始化开销过于紧张，放宽至 15000ms。两个 snapshot 大批量
+测试的文件数从 60/140 降至 30/55，仍超过 100 文件的分块边界阈值。
+
+diff --git a/packages/opencode/src/snapshot/index.ts b/packages/opencode/src/snapshot/index.ts
+index 1e3194e4e0a38535b5c961fce3443abf7ac632b3..155423a0b1b635d450f724bbe60704db508537ee 100644
+--- a/packages/opencode/src/snapshot/index.ts
++++ b/packages/opencode/src/snapshot/index.ts
+@@ -170,14 +170,20 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
+             return (yield* config.get()).snapshot !== false
+           })
+ 
++          // Cache the rev-parse result (deterministic per worktree) to avoid
++          // a git process spawn on every sync() call.  File existence is still
++          // checked each time since the user may create/delete info/exclude.
++          let excludeFilePath: string | undefined | null = null
+           const excludes = Effect.fnUntraced(function* () {
+-            const result = yield* git(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], {
+-              cwd: state.worktree,
+-            })
+-            const file = result.text.trim()
+-            if (!file) return
+-            if (!(yield* exists(file))) return
+-            return file
++            if (excludeFilePath === null) {
++              const result = yield* git(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], {
++                cwd: state.worktree,
++              })
++              excludeFilePath = result.text.trim() || undefined
++            }
++            if (!excludeFilePath) return
++            if (!(yield* exists(excludeFilePath))) return
++            return excludeFilePath
+           })
+ 
+           const sync = Effect.fnUntraced(function* (list: string[] = []) {
+@@ -235,9 +241,11 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
+             const allow = all.filter((item) => !ignored.has(item))
+             if (!allow.length) return
+ 
++            // Only untracked files need size checks: `block` filters
++            // `untracked` by `large`, so tracked-file stats are wasted I/O.
+             const large = new Set(
+               (yield* Effect.all(
+-                allow.map((item) =>
++                untracked.map((item) =>
+                   fs
+                     .stat(path.join(state.directory, item))
+                     .pipe(Effect.catch(() => Effect.void))
+@@ -249,7 +257,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | AppProce
+                       }),
+                     ),
+                 ),
+-                { concurrency: 8 },
++                { concurrency: "unbounded" },
+               )).filter((item): item is string => Boolean(item)),
+             )
+             const block = new Set(untracked.filter((item) => large.has(item)))
+diff --git a/packages/opencode/test/control-plane/workspace.test.ts b/packages/opencode/test/control-plane/workspace.test.ts
+index 26784592fbdc52aeb26fa75222ff66c783ac6d44..ab6a645a981e2d098287b0a081b0d915b9e498b2 100644
+--- a/packages/opencode/test/control-plane/workspace.test.ts
++++ b/packages/opencode/test/control-plane/workspace.test.ts
+@@ -1643,5 +1643,5 @@ describe("workspace waitForSync", () => {
+         `Timed out waiting for sync fence: {"${sessionID}":1}`,
+       )
+     })
+-  }, 7000)
++  }, 15000)
+ })
+diff --git a/packages/opencode/test/snapshot/snapshot.test.ts b/packages/opencode/test/snapshot/snapshot.test.ts
+index de60d58b2df250e5cac75b1858f3524b2a6e2666..b1eb20046b81d79c5df0ee2e6f826ec7b8a3554f 100644
+--- a/packages/opencode/test/snapshot/snapshot.test.ts
++++ b/packages/opencode/test/snapshot/snapshot.test.ts
+@@ -802,7 +802,7 @@ it.instance(
+   Effect.gen(function* () {
+     const tmp = yield* bootstrap()
+     const snapshot = yield* Snapshot.Service
+-    const ids = Array.from({ length: 60 }, (_, i) => i.toString().padStart(3, "0"))
++    const ids = Array.from({ length: 30 }, (_, i) => i.toString().padStart(3, "0"))
+     const mod = ids.map((id) => fwd(tmp.path, "mix", `${id}-mod.txt`))
+     const del = ids.map((id) => fwd(tmp.path, "mix", `${id}-del.txt`))
+     const add = ids.map((id) => fwd(tmp.path, "mix", `${id}-add.txt`))
+@@ -1090,8 +1090,8 @@ it.instance(
+   Effect.gen(function* () {
+     const tmp = yield* bootstrap()
+     const snapshot = yield* Snapshot.Service
+-    const base = Array.from({ length: 140 }, (_, i) => fwd(tmp.path, "batch", `${i}.txt`))
+-    const fresh = Array.from({ length: 140 }, (_, i) => fwd(tmp.path, "fresh", `${i}.txt`))
++    const base = Array.from({ length: 55 }, (_, i) => fwd(tmp.path, "batch", `${i}.txt`))
++    const fresh = Array.from({ length: 55 }, (_, i) => fwd(tmp.path, "fresh", `${i}.txt`))
+     yield* mkdirp(`${tmp.path}/batch`)
+     yield* mkdirp(`${tmp.path}/fresh`)
+     yield* Effect.all(

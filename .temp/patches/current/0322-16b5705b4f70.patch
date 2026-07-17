@@ -1,0 +1,297 @@
+From 16b5705b4f701d269908f7ff1779e250f11f23d2 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 19 Jun 2026 22:40:21 +0800
+Subject: [PATCH] =?UTF-8?q?fix(voice):=20=E4=BF=AE=E5=A4=8D=20MCP=20?=
+ =?UTF-8?q?=E7=AA=97=E5=8F=A3=E5=BC=B9=E5=87=BA=E5=92=8C=E7=A9=BA=E9=9F=B3?=
+ =?UTF-8?q?=E9=A2=91=E8=BD=AC=E5=86=99=E5=8D=A1=E6=AD=BB?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+patch MCP SDK 的 windowsHide，在 Windows 非 Electron 环境下也隐藏
+local MCP server spawn 的 node 控制台窗口。之前 SDK 硬编码
+windowsHide: isElectron() 导致每次 spawn 都弹窗。
+
+转写模块修复空音频根因：direct API 返回 HTTP 200 但空文本时不再
+fallback 到慢速听写 UI（会播放空音频并等满 dictation 超时造成卡死），
+voice 转写超时从 620s 缩短到 120s。
+
+opencode 端新增安全网：toggle 在 transcribing 状态时可被再次按下来
+中断卡死的转写，AbortController signal 串通到 Process.run 真正杀进程，
+Windows 上 abort 用两阶段 taskkill /T → /T /F 杀整棵进程树避免
+子进程持有 stdout pipe 导致 buffer 永不 resolve。
+
+diff --git a/bun.lock b/bun.lock
+index df99889bfe7309499c28e11526781d5ceebbb135..199ff0339fa34d9e75ca67fc43f641107beba10c 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -704,6 +704,7 @@
+   "patchedDependencies": {
+     "solid-js@1.9.10": "patches/solid-js@1.9.10.patch",
+     "@standard-community/standard-openapi@0.2.9": "patches/@standard-community%2Fstandard-openapi@0.2.9.patch",
++    "@modelcontextprotocol/sdk@1.27.1": "patches/@modelcontextprotocol%2Fsdk@1.27.1.patch",
+     "@npmcli/agent@4.0.0": "patches/@npmcli%2Fagent@4.0.0.patch",
+     "@silvia-odwyer/photon-node@0.3.4": "patches/@silvia-odwyer%2Fphoton-node@0.3.4.patch",
+   },
+diff --git a/package.json b/package.json
+index 74d126ace0451e1a1beffec7794ea89a8c540422..234534948c0f25a564b301c32eea1ed2614aca7b 100644
+--- a/package.json
++++ b/package.json
+@@ -135,6 +135,7 @@
+     "poe-oauth": "0.0.6"
+   },
+   "patchedDependencies": {
++    "@modelcontextprotocol/sdk@1.27.1": "patches/@modelcontextprotocol%2Fsdk@1.27.1.patch",
+     "@npmcli/agent@4.0.0": "patches/@npmcli%2Fagent@4.0.0.patch",
+     "@silvia-odwyer/photon-node@0.3.4": "patches/@silvia-odwyer%2Fphoton-node@0.3.4.patch",
+     "@standard-community/standard-openapi@0.2.9": "patches/@standard-community%2Fstandard-openapi@0.2.9.patch",
+diff --git a/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
+index 9dbd2e0ee05ed9941053426fbd6760ccd91022ad..a83a1c8db5d30499031a62c29fc7e9ed73266717 100644
+--- a/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
++++ b/packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts
+@@ -27,7 +27,8 @@ export type VoiceRecorderHandle = {
+ export function createVoiceInputController(input: {
+   transcriber: () => VoiceTranscriber | undefined
+   startRecorder: () => Promise<VoiceRecorderHandle>
+-  transcribe?: (file: string, transcriber: VoiceTranscriber) => Promise<string>
++  // signal 让外部 controller 可以中断长时间挂起的转写（如空音频导致浏览器 hang）。
++  transcribe?: (file: string, transcriber: VoiceTranscriber, signal: AbortSignal) => Promise<string>
+   insertText: (text: string) => void
+   onStatus?: (status: VoiceInputStatus) => void
+   onError?: (message: string) => void
+@@ -37,7 +38,9 @@ export function createVoiceInputController(input: {
+   let recorder: VoiceRecorderHandle | undefined
+   let activeTranscriber: VoiceTranscriber | undefined
+   let generation = 0
+-  const transcribe = input.transcribe ?? ((file, transcriber) => transcribeVoiceFile({ file, transcriber }))
++  // 持有当前转写的 AbortController，让 toggle/abort 能中断卡死的外部转写器进程。
++  let transcribeAbort: AbortController | undefined
++  const transcribe = input.transcribe ?? ((file, transcriber, signal) => transcribeVoiceFile({ file, transcriber, signal }))
+   const validateTranscriber = input.transcribe ? async () => {} : validateVoiceTranscriber
+ 
+   const setStatus = (next: VoiceInputStatus) => {
+@@ -56,16 +59,22 @@ export function createVoiceInputController(input: {
+     input.onError?.(error instanceof Error ? error.message : String(error))
+   }
+ 
++  // cancel 是 abort 和 toggle(transcribing) 共享的取消逻辑：bump generation 让迟到结果失效，
++  // abort signal 中断 in-flight transcribe 进程，清理 recorder 并回 idle。
++  const cancel = async () => {
++    generation++
++    transcribeAbort?.abort()
++    if (status.type !== "idle") await recorder?.abort().catch(() => {})
++    recorder = undefined
++    activeTranscriber = undefined
++    setStatus({ type: "idle" })
++  }
++
+   return {
+     status: () => status,
+     abort: async () => {
+-      // generation 让启动、停止、转写中的异步结果失效；cleanup 后迟到的结果只能自清理，不能再改状态或插入文本。
+-      generation++
+       // abort 是取消语义，不调用 stop/transcribe，避免把用户明确取消的录音上传给外部服务。
+-      if (status.type !== "idle") await recorder?.abort().catch(() => {})
+-      recorder = undefined
+-      activeTranscriber = undefined
+-      setStatus({ type: "idle" })
++      await cancel()
+     },
+     toggle: async () => {
+       if (status.type === "recording") {
+@@ -79,8 +88,10 @@ export function createVoiceInputController(input: {
+           await active.stop()
+           if (stopGeneration !== generation) return
+           setStatus({ type: "transcribing" })
++          // 为本轮转写创建独立 AbortController，让 cancel/abort 能真正中断外部进程。
++          transcribeAbort = new AbortController()
+           // transcriber 在开始录音时固定，停止时不重新读配置，防止录音期间配置变更导致错用后端。
+-          const text = await transcribe(active.file, requireTranscriber(activeTranscriber))
++          const text = await transcribe(active.file, requireTranscriber(activeTranscriber), transcribeAbort.signal)
+           if (stopGeneration !== generation) return
+           // 空白文本由 transcribeVoiceFile 当错误处理；这里仍 trim 一次，保护自定义测试转写器和未来调用者。
+           if (text.trim()) input.insertText(text)
+@@ -98,6 +109,12 @@ export function createVoiceInputController(input: {
+         }
+         return
+       }
++      // transcribing 表示转写正在运行（可能 hang）；用户再次按快捷键时直接取消，让 TUI 恢复可操作。
++      // 不调 onError：用户主动取消不是错误，不应弹出 error toast。
++      if (status.type === "transcribing") {
++        await cancel()
++        return
++      }
+       if (status.type !== "idle") return
+ 
+       const transcriber = input.transcriber()
+@@ -136,6 +153,8 @@ export async function transcribeVoiceFile(input: {
+   file: string
+   transcriber: VoiceTranscriber
+   timeout?: number
++  // 外部 signal 让 controller 的 cancel/abort 能真正中断 Process.run。
++  signal?: AbortSignal
+ }) {
+   const command = input.transcriber.command.trim()
+   // command 允许用户配置时带空格，但进入 spawn 前必须归一成真正 argv[0]。
+@@ -149,9 +168,10 @@ export async function transcribeVoiceFile(input: {
+ 
+   // 录音路径只替换 argv 项，绝不拼进 shell 字符串；空格、重定向符、管道、变量和分号都保持字面量。
+   // 这个边界保证临时录音文件名不能变成命令语法，也不会触发 shell expansion。
++  // AbortSignal.any 合并外部取消信号和兜底超时：用户主动取消 或 90s 超时，任一触发都杀进程。
++  const timeoutSignal = AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS)
+   const result = await Process.run([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, input.file))], {
+-    // AbortSignal 是整体转写上限，Process timeout 只限制单次 wait 粒度，保持既有进程工具的轮询语义。
+-    abort: AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS),
++    abort: input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal,
+     nothrow: true,
+     timeout: 1_000,
+   })
+diff --git a/packages/opencode/src/util/process.ts b/packages/opencode/src/util/process.ts
+index 1fa1a1463beb38f6ee7f03b646c8a081aae8cdc0..e9233c9f69a8650a980775cd026e62e83ea30f61 100644
+--- a/packages/opencode/src/util/process.ts
++++ b/packages/opencode/src/util/process.ts
+@@ -75,11 +75,20 @@ export function spawn(cmd: string[], opts: Options = {}): Child {
+     if (proc.exitCode !== null || proc.signalCode !== null) return
+     closed = true
+ 
+-    proc.kill(opts.kill ?? "SIGTERM")
+-
+-    const ms = opts.timeout ?? 5_000
+-    if (ms <= 0) return
+-    timer = setTimeout(() => proc.kill("SIGKILL"), ms)
++    // 这是全局 abort 行为变更：所有通过 Process.run/spawn 启动的子进程在 Windows 上被 abort 时，
++    // 都会走 taskkill 杀整棵进程树。非 Windows 保持原有 proc.kill(SIGTERM) 不变。
++    // Windows 上 proc.kill 只杀父进程；子进程（如 chatgpt daemon spawn 的浏览器）仍持有 stdout pipe，
++    // 导致 buffer(proc.stdout) 永不 resolve。
++    // 控制台进程（node.exe 等）忽略 WM_CLOSE，不能用 taskkill /T 的优雅阶段，必须直接 /T /F 强杀。
++    // 与 Process.stop(line 155) 的既有模式对齐。
++    if (process.platform === "win32" && proc.pid) {
++      launch("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" })
++    } else {
++      proc.kill(opts.kill ?? "SIGTERM")
++      const ms = opts.timeout ?? 5_000
++      if (ms <= 0) return
++      timer = setTimeout(() => proc.kill("SIGKILL"), ms)
++    }
+   }
+ 
+   const exited = new Promise<number>((resolve, reject) => {
+diff --git a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
+index 9ae040eeca53aecc02f94c07c9ce4f9ff3f3aa13..8fb494712ce3467b73e4ff3a2b8beecc8386290c 100644
+--- a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
++++ b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
+@@ -425,4 +425,77 @@ describe("prompt voice input", () => {
+     expect(startCount).toBe(2)
+     expect(controller.status()).toEqual({ type: "recording", startedAt: 1_000 })
+   })
++
++  // 转写中用户按快捷键应能中断卡死的转写，而不是被 `status.type !== "idle"` 跳过。
++  // 这覆盖最严重场景：空音频、噪音无语音或网络 hang 时，用户必须能自救。
++  // mock transcribe 返回永不 resolve 的 promise 但监听 signal abort 来模拟被 kill 的 Process.run。
++  test("interrupts a stuck transcription when toggled again", async () => {
++    let transcribeSignal: AbortSignal | undefined
++    let resolveTranscribe: (() => void) | undefined
++    const transcribeStarted = new Promise<void>((resolve) => {
++      resolveTranscribe = resolve
++    })
++    const inserted: string[] = []
++    const controller = createVoiceInputController({
++      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
++      startRecorder: async () => ({ file: "voice.wav", stop: async () => {}, abort: async () => {} }),
++      transcribe: (_file, _transcriber, signal) => {
++        transcribeSignal = signal
++        resolveTranscribe?.()
++        // 模拟 Process.run 被 signal kill 后 promise reject 的真实行为。
++        // 用 polling 而非 addEventListener 避免 bun:test 的 pending promise tracker 误判测试未结束。
++        return new Promise<string>((_, reject) => {
++          const timer = setInterval(() => {
++            if (signal.aborted) { clearInterval(timer); reject(new Error("aborted")) }
++          }, 5)
++        })
++      },
++      insertText: (text) => inserted.push(text),
++    })
++
++    // toggle#1 开始录音, toggle#2 停止进入转写, toggle#3 取消转写。
++    await controller.toggle()
++    const stopping = controller.toggle()
++    await transcribeStarted
++    await controller.toggle()
++    await stopping
++
++    // 取消后 signal 必须被 abort，状态回 idle，迟到文本不会插入。
++    expect(transcribeSignal?.aborted).toBe(true)
++    expect(controller.status()).toEqual({ type: "idle" })
++    expect(inserted).toEqual([])
++  })
++
++  // 用户主动取消转写时不应弹出 error toast，否则用户会以为出错了。
++  test("does not show an error when the user cancels a stuck transcription", async () => {
++    const errors: string[] = []
++    let resolveTranscribe: (() => void) | undefined
++    const transcribeStarted = new Promise<void>((resolve) => {
++      resolveTranscribe = resolve
++    })
++    const controller = createVoiceInputController({
++      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
++      startRecorder: async () => ({ file: "voice.wav", stop: async () => {}, abort: async () => {} }),
++      transcribe: (_file, _transcriber, signal) => {
++        resolveTranscribe?.()
++        return new Promise<string>((_, reject) => {
++          const timer = setInterval(() => {
++            if (signal.aborted) { clearInterval(timer); reject(new Error("aborted")) }
++          }, 5)
++        })
++      },
++      insertText: () => {},
++      onError: (message) => errors.push(message),
++    })
++
++    await controller.toggle()
++    const stopping = controller.toggle()
++    await transcribeStarted
++    await controller.toggle()
++    await stopping
++
++    // 用户主动取消不是错误，不应弹出 error toast。
++    expect(errors).toEqual([])
++    expect(controller.status()).toEqual({ type: "idle" })
++  })
+ })
+diff --git a/patches/@modelcontextprotocol%2Fsdk@1.27.1.patch b/patches/@modelcontextprotocol%2Fsdk@1.27.1.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..d6be01798c25ce60cb27843281fa25f3b6ca3d15
+--- /dev/null
++++ b/patches/@modelcontextprotocol%2Fsdk@1.27.1.patch
+@@ -0,0 +1,24 @@
++diff --git a/dist/cjs/client/stdio.js b/dist/cjs/client/stdio.js
++--- a/dist/cjs/client/stdio.js
+++++ b/dist/cjs/client/stdio.js
++@@ -77,7 +77,7 @@
++                 },
++                 stdio: ['pipe', 'pipe', this._serverParams.stderr ?? 'inherit'],
++                 shell: false,
++-                windowsHide: node_process_1.default.platform === 'win32' && isElectron(),
+++                windowsHide: node_process_1.default.platform === 'win32',
++                 cwd: this._serverParams.cwd
++             });
++             this._process.on('error', error => {
++diff --git a/dist/esm/client/stdio.js b/dist/esm/client/stdio.js
++--- a/dist/esm/client/stdio.js
+++++ b/dist/esm/client/stdio.js
++@@ -70,7 +70,7 @@
++                 },
++                 stdio: ['pipe', 'pipe', this._serverParams.stderr ?? 'inherit'],
++                 shell: false,
++-                windowsHide: process.platform === 'win32' && isElectron(),
+++                windowsHide: process.platform === 'win32',
++                 cwd: this._serverParams.cwd
++            });
++            this._process.on('error', error => {
+diff --git a/thirdparty/chatgpt-browser-agent b/thirdparty/chatgpt-browser-agent
+index eb86999257fe0725315b08979e645c5cdcee1903..f4de5136bf122ba450a26887b27e1f3fbfa51f6d 160000
+--- a/thirdparty/chatgpt-browser-agent
++++ b/thirdparty/chatgpt-browser-agent
+@@ -1 +1 @@
+-Subproject commit eb86999257fe0725315b08979e645c5cdcee1903
++Subproject commit f4de5136bf122ba450a26887b27e1f3fbfa51f6d

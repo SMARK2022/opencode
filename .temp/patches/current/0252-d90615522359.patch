@@ -1,0 +1,572 @@
+From d90615522359203384f2dd8929ba2e5b725d803d Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 29 May 2026 00:54:38 +0800
+Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E6=9B=B4=E6=96=B0=E7=AC=94?=
+ =?UTF-8?q?=E8=AE=B0=E6=9C=AC=E7=BC=96=E8=BE=91=E9=80=BB=E8=BE=91=EF=BC=8C?=
+ =?UTF-8?q?=E7=A1=AE=E4=BF=9D=E8=AF=AD=E8=A8=80=E4=BB=85=E7=BC=96=E8=BE=91?=
+ =?UTF-8?q?=E6=97=B6=E6=BA=90=E4=BF=9D=E6=8C=81=E4=B8=8D=E5=8F=98=EF=BC=8C?=
+ =?UTF-8?q?=E6=8B=92=E7=BB=9D=E7=A9=BA=E6=95=B0=E7=BB=84=E4=BD=9C=E4=B8=BA?=
+ =?UTF-8?q?=E6=BA=90=E5=8F=82=E6=95=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+index 28b317741d80fa6a0d11b57db530e2419abc8b97..4611a162b7d5673ee5434bb6e3e4ed7f930f7f14 100644
+--- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
++++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+@@ -35,7 +35,7 @@ export const VscodeNotebookDescriptions = {
+   edit: [
+     "Edit VS Code notebook cells with editType=insert, edit, or delete.",
+     "For insert, cellId=TOP inserts at the top, cellId=BOTTOM appends, and cellId=#VSC-xxx inserts after that anchor cell. newCode is required.",
+-    "For edit, pass cellId=#VSC-xxx. Use oldCode/newCode for precise string-match replacement, or newCode without oldCode for full-cell replacement. A language-only edit changes the cell kind/language while preserving source.",
++    "For edit, pass cellId=#VSC-xxx. Use oldCode/newCode for precise string-match replacement, or newCode without oldCode for full-cell replacement. A language-only edit changes the cell kind/language while preserving source only when oldCode and newCode are omitted entirely; empty strings mean explicit empty source.",
+     "For delete, pass cellId=#VSC-xxx. Use language='markdown' for Markdown cells; other languages create or keep code cells, usually 'python'. Do not use this tool for ordinary text files.",
+     "The edit response includes the updated cell ID and shifted neighbor info.",
+   ].join("\n"),
+diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
+index 4518e2eba2d7982e83d4427e130c641fb84b717d..5b4baffad280e65f58b216f54ed6bfc8ce01758a 100644
+--- a/packages/opencode/src/plugin/vscode-bridge.ts
++++ b/packages/opencode/src/plugin/vscode-bridge.ts
+@@ -99,10 +99,14 @@ const editArgs = {
+     .union([z.string(), z.array(z.string())])
+     .optional()
+     .describe("New source for insert or edit. Required for insert, full-cell replacement, and oldCode replacement. Do not wrap in Markdown fences unless the fences are literal content."),
++  // Language-only edit is represented by an omitted source field, not an empty
++  // value. The description says this explicitly because model/tool callers can
++  // otherwise serialize "no source" as "" or [] and accidentally request a real
++  // full-cell replacement.
+   language: z
+     .string()
+     .optional()
+-    .describe("Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source."),
++    .describe("Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source; omit oldCode and newCode entirely for this mode."),
+ }
+ 
+ const envArgs = {
+@@ -200,6 +204,13 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
+   const diff = fullDiff && fullDiff.length <= NOTEBOOK_DIFF_METADATA_MAX_CHARS ? fullDiff : undefined
+   const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
+   const editType = stringValue(data.editType) ?? stringValue(args.editType)
++  const requestedCellId = stringValue(args.cellId)
++  // Notebook insert and type-change edits can invalidate the requested handle:
++  // insert creates a new cell, and type-change replaceCells gives the target a
++  // new VS Code document URI. Keep `cellId` as the next usable handle while also
++  // preserving `requestedCellId` when it differs, so existing renderers can show
++  // the safe continuation point without losing the original anchor/debug value.
++  const cellId = stringValue(data.insertedCellId) ?? stringValue(data.updatedCellId) ?? requestedCellId
+   const insertedSourcePreview = editType === "insert" && after !== undefined
+     ? previewNotebookInsertSource(after)
+     : undefined
+@@ -207,7 +218,8 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
+     view: "edit",
+     path,
+     cellLabel: cellIndex === undefined ? undefined : `c${cellIndex + 1}`,
+-    cellId: stringValue(args.cellId),
++    cellId,
++    requestedCellId: requestedCellId && requestedCellId !== cellId ? requestedCellId : undefined,
+     editType,
+     cellCountBefore: numberValue(data.cellCountBefore),
+     cellCountAfter: numberValue(data.cellCountAfter),
+@@ -414,6 +426,10 @@ export const VscodeBridgePlugin = async () => ({
+         // 即使 info 偏只读，也保持工具级权限和 agent 配置中的
+         // vscode_notebook_env 完全一致，避免新增 operation 级配置面。
+         await ask(context, "vscode_notebook_env", args)
++        // save 是 env 工具中的持久化分支，会把 notebook 文档写回磁盘。
++        // 因此它必须继续服从通用 edit 门禁；否则用户只禁止 edit 时，仍可
++        // 通过 vscode_notebook_env.save 绕过普通文件写入边界。
++        if (args.operation === "save") await ask(context, "edit", args)
+         return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
+       },
+     }),
+diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
+index e3dd6c8470632ae6fd80ea2aed8f8ddb2fae4bf7..1e6ddde6c83a17a2d1c1b1880c71a2551c0299aa 100644
+--- a/packages/opencode/test/plugin/vscode-bridge.test.ts
++++ b/packages/opencode/test/plugin/vscode-bridge.test.ts
+@@ -117,6 +117,51 @@ describe("vscode bridge plugin", () => {
+     expect(calls).toEqual(["vscode_notebook_edit", "edit"])
+   })
+ 
++  test("keeps notebook save covered by the generic edit permission gate", async () => {
++    const plugin = await VscodeBridgePlugin()
++    // Use shell-looking characters as literal path data. Permission matching must
++    // receive the exact notebook path string and must not normalize, split, or
++    // interpret quotes, environment-variable text, pipes, redirection, or
++    // subcommand-looking fragments before the approval/deny boundary runs.
++    const filePath = String.raw`F:\project with spaces\$(noop) '$HOME' | redirect > demo.ipynb`
++    const stop = "generic edit denied for notebook save"
++    const calls: string[] = []
++    const bridge = spyOn(VscodeBridge, "callBridge").mockResolvedValue({
++      ran: true,
++      summary: "save should not be reached when generic edit is denied",
++      data: { path: filePath, operation: "save", saved: true },
++    })
++
++    await expect(
++      plugin.tool.vscode_notebook_env.execute(
++        {
++          filePath,
++          operation: "save",
++          reason: "permission boundary regression test",
++        },
++        {
++          sessionID: "ses_test",
++          messageID: "msg_test",
++          agent: "build",
++          directory: "F:\\project with spaces",
++          worktree: "F:\\project with spaces",
++          abort: new AbortController().signal,
++          metadata: () => undefined,
++          ask(input) {
++            calls.push(input.permission)
++            expect(input.patterns).toEqual([filePath])
++            expect(input.always).toEqual([filePath])
++            expect(input.metadata.args).toMatchObject({ filePath, operation: "save" })
++            return input.permission === "edit" ? Effect.die(new Error(stop)) : Effect.void
++          },
++        },
++      ),
++    ).rejects.toThrow(stop)
++
++    expect(calls).toEqual(["vscode_notebook_env", "edit"])
++    expect(bridge).not.toHaveBeenCalled()
++  })
++
+   test("returns notebook edit diff metadata from bridge before and after source", async () => {
+     const plugin = await VscodeBridgePlugin()
+     const filePath = "F:\\project with spaces\\analysis notebook.ipynb"
+@@ -260,6 +305,48 @@ describe("vscode bridge plugin", () => {
+     expect((result.metadata?.vscodeNotebook as Record<string, string>).insertedSourcePreview).toContain("++ legal source prefix")
+   })
+ 
++  test("returns the next usable cell ID after notebook insert and type-change edits", async () => {
++    const plugin = await VscodeBridgePlugin()
++    const filePath = "F:\\project with spaces\\analysis notebook.ipynb"
++    const requestedCellId = "#VSC-oldcell"
++    const updatedCellId = "#VSC-newcell"
++    // The bridge data shape mirrors a VS Code replaceCells type-change result:
++    // the originally requested #VSC handle is stale, and the renderer metadata
++    // must surface the new handle as the next safe value for follow-up tools.
++    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
++      ran: false,
++      summary: "Notebook edit: applied=true op=edit at=2 num_cells=3->3 dirty=true.",
++      data: {
++        path: filePath,
++        editType: "edit",
++        cellCountBefore: 3,
++        cellCountAfter: 3,
++        anchorCellIndex: 1,
++        dirty: true,
++        kind: "markdown",
++        language: "markdown",
++        updatedCellId,
++        beforeSource: "print('converted')\n",
++        afterSource: "print('converted')\n",
++      },
++    })
++
++    const result = await plugin.tool.vscode_notebook_edit.execute(
++      { filePath, cellId: requestedCellId, editType: "edit", language: "markdown" },
++      allowContext(filePath),
++    )
++
++    expect(result).toMatchObject({
++      metadata: {
++        vscodeNotebook: {
++          view: "edit",
++          cellId: updatedCellId,
++          requestedCellId,
++        },
++      },
++    })
++  })
++
+   test("omits oversized notebook edit diffs from persisted metadata", async () => {
+     const plugin = await VscodeBridgePlugin()
+     const filePath = "F:\\project with spaces\\large notebook.ipynb"
+diff --git a/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts b/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts
+index 69cb319b23f81371fd3123b70c53980e20cf6512..d0193fdf733a3dc3b7426c375766f2ed4254c6d8 100644
+--- a/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts
++++ b/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts
+@@ -7,6 +7,21 @@ const notebookPath = "/tmp/notebook tool demo.ipynb"
+ let activeNotebook: ReturnType<typeof createNotebook>
+ let cellSequence = 0
+ let executionOrder = 0
++// The fake VS Code command registry intentionally separates public commands
++// (`getCommands(true)`) from the full extension-host surface (`getCommands(false)`).
++// Jupyter contributes some commands as hidden/internal commands, so this fixture
++// must preserve that distinction to catch restart regressions without depending
++// on a real VS Code extension host.
++let commandLists = {
++  public: ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
++  all: ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
++}
++let executedCommands: string[] = []
++// Keep extension activation injectable per test. Most notebook tests should see
++// no Jupyter/Python extension, while restart/configure tests can provide only the
++// public shape they need; this avoids a broad mock that would hide missing-env
++// behavior exercised elsewhere in the file.
++let extensionLookup = new Map<string, { isActive: boolean; packageJSON?: Record<string, unknown>; exports?: unknown; activate(): Promise<unknown> }>()
+ const notebookListeners = new Set<(event: { notebook: typeof activeNotebook; cellChanges: Array<{ cell: NotebookCell; executionSummary?: NotebookCell["executionSummary"] }> }) => void>()
+ const textListeners = new Set<(event: { document: NotebookCell["document"] }) => void>()
+ 
+@@ -88,15 +103,16 @@ mock.module("vscode", () => ({
+     },
+   },
+   commands: {
+-    getCommands: async () => ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
++    getCommands: async (filterInternal = false) => filterInternal ? commandLists.public : commandLists.all,
+     executeCommand: async (command: string) => {
++      executedCommands.push(command)
+       if (command === "notebook.cell.execute") executeSelectedCell()
+       if (command === "notebook.selectKernel") return true
+       return undefined
+     },
+   },
+   extensions: {
+-    getExtension: () => undefined,
++    getExtension: (id: string) => extensionLookup.get(id),
+   },
+   CancellationTokenSource: class {
+     readonly token = {}
+@@ -126,6 +142,12 @@ beforeEach(() => {
+   vscodeMock.workspace.notebookDocuments = [activeNotebook]
+   vscodeMock.window.activeNotebookEditor = undefined
+   vscodeMock.window.visibleNotebookEditors = []
++  commandLists = {
++    public: ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
++    all: ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
++  }
++  executedCommands = []
++  extensionLookup = new Map()
+   notebookListeners.clear()
+   textListeners.clear()
+ })
+@@ -160,6 +182,104 @@ test("source rejects stale cell IDs instead of reading a different notebook rang
+   await expect(notebookSource({ filePath: notebookPath, cellId: "#VSC-deadbeef", offset: 1, limit: 5 })).rejects.toThrow("Notebook cell not found")
+ })
+ 
++test("edit rejects empty source arrays before they can clear a notebook cell", async () => {
++  // Empty arrays are valid JSON but ambiguous notebook-edit intent. The public
++  // behavior should reject them before any document mutation, preserving the
++  // existing explicit-empty-string path for callers that really want to clear a
++  // cell.
++  await expect(editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", newCode: [] })).rejects.toThrow("newCode cannot be an empty array")
++})
++
++test("language-only edit preserves source and returns the replacement cell ID", async () => {
++  const beforeSource = activeNotebook.cellAt(1).document.getText()
++  const oldCellId = cellFragment(2)
++  const result = await editNotebook({ filePath: notebookPath, cellId: oldCellId, editType: "edit", language: "markdown" })
++  const updatedCellId = (result.data as Record<string, unknown>).updatedCellId
++
++  expect(typeof updatedCellId).toBe("string")
++  expect(updatedCellId).not.toBe(oldCellId)
++  await expect(notebookSource({ filePath: notebookPath, cellId: oldCellId })).rejects.toThrow("Notebook cell not found")
++  const source = await notebookSource({ filePath: notebookPath, cellId: updatedCellId })
++  expect(source.summary).toContain(beforeSource)
++  expect(activeNotebook.cellAt(1).kind).toBe(NotebookCellKind.Markup)
++  expect(activeNotebook.cellAt(1).document.languageId).toBe("markdown")
++})
++
++test("language-only edit changes kind even when the language ID already matches", async () => {
++  // A code cell can report languageId="markdown" while still being a code cell.
++  // The language-only edit contract is about the notebook cell kind as well as
++  // languageId, so this regression test keeps that mixed-state boundary covered.
++  activeNotebook.cells.push(createCell(activeNotebook, NotebookCellKind.Code, "markdown", "# markdown stored as code"))
++  updateIndexes(activeNotebook)
++
++  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(3), editType: "edit", language: "markdown" })
++  const updatedCellId = (result.data as Record<string, unknown>).updatedCellId
++  const source = await notebookSource({ filePath: notebookPath, cellId: updatedCellId })
++
++  expect(activeNotebook.cellAt(2).kind).toBe(NotebookCellKind.Markup)
++  expect(source.summary).toContain("# markdown stored as code")
++})
++
++test("string edit preserves CRLF notebook cell content around the replacement", async () => {
++  const cell = activeNotebook.cellAt(1)
++  cell.document.eol = EndOfLine.CRLF
++  cell.document.setText("alpha\r\nbeta\r\ngamma")
++
++  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", oldCode: "beta", newCode: "BETA" })
++
++  expect((result.data as Record<string, unknown>).afterSource).toBe("alpha\r\nBETA\r\ngamma")
++  expect(cell.document.getText()).toBe("alpha\r\nBETA\r\ngamma")
++})
++
++test("source includes a bounded preview for a single oversized source line", async () => {
++  activeNotebook.cellAt(1).document.setText(`visible-prefix-${"x".repeat(20_000)}-hidden-suffix`)
++
++  const result = await notebookSource({ filePath: notebookPath, cellId: cellFragment(2), limit: 5 })
++
++  expect((result.data as Record<string, unknown>).returned).toBe(1)
++  expect(result.summary).toContain("visible-prefix")
++  expect(result.summary).not.toContain("hidden-suffix")
++  expect(result.summary).not.toContain("Use offset=0")
++})
++
++test("source does not consume a normal line that only overflows the current page", async () => {
++  const secondLine = `second-line-fits-next-page-${"y".repeat(600)}`
++  activeNotebook.cellAt(1).document.setText(`${"x".repeat(15_900)}\n${secondLine}`)
++
++  const firstPage = await notebookSource({ filePath: notebookPath, cellId: cellFragment(2), limit: 10 })
++  const secondPage = await notebookSource({ filePath: notebookPath, cellId: cellFragment(2), offset: 5, limit: 10 })
++
++  expect((firstPage.data as Record<string, unknown>).returned).toBe(1)
++  expect(firstPage.summary).not.toContain(secondLine)
++  expect(firstPage.summary).toContain("Use offset=5")
++  expect(secondPage.summary).toContain(secondLine)
++})
++
++test("restart can invoke a Jupyter command that is hidden from the public command list", async () => {
++  // VS Code exposes hidden commands to extensions through getCommands(false).
++  // The restart tool should use that full surface because executeCommand can
++  // still invoke Jupyter's restart command even when it is absent from the
++  // public command-palette list.
++  commandLists = {
++    public: ["notebook.cell.execute", "notebook.selectKernel"],
++    all: ["notebook.cell.execute", "notebook.selectKernel", "jupyter.restartkernel"],
++  }
++  extensionLookup.set("ms-toolsai.jupyter", {
++    isActive: true,
++    packageJSON: { version: "test" },
++    exports: {},
++    async activate() {
++      this.isActive = true
++      return this.exports
++    },
++  })
++
++  const result = await notebookEnv({ filePath: notebookPath, operation: "restart" })
++
++  expect((result.data as Record<string, unknown>).requested).toBe(true)
++  expect(executedCommands).toContain("jupyter.restartkernel")
++})
++
+ test("insert result identifies the inserted cell ID before reporting shifted cells", async () => {
+   const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(1), editType: "insert", newCode: "value = 1", language: "python" })
+   const data = result.data as Record<string, unknown>
+@@ -239,7 +359,7 @@ function createDocument(value: string, fragment: string, languageId: string, tex
+   return {
+     uri: createUri(value, fragment),
+     languageId,
+-    eol: EndOfLine.LF,
++    eol: EndOfLine.LF as number,
+     version: 1,
+     get lineCount() {
+       return this.getText().split("\n").length
+@@ -259,6 +379,7 @@ function createUri(value: string, fragment = ""): UriLike {
+   return {
+     fsPath: value.split("#")[0],
+     fragment,
++    scheme: "file",
+     toString: () => `file://${value}`,
+   }
+ }
+@@ -296,7 +417,7 @@ function executeSelectedCell() {
+   for (const listener of notebookListeners) listener({ notebook: activeNotebook, cellChanges: [{ cell, executionSummary: cell.executionSummary }] })
+ }
+ 
+-type UriLike = { fsPath: string; fragment: string; toString(): string }
++type UriLike = { fsPath: string; fragment: string; scheme: string; toString(): string }
+ type ToolResult = { summary: string; data?: unknown }
+ type NotebookEditor = { notebook: typeof activeNotebook; selection: { start: number; end: number }; revealRange(range: { start: number; end: number }): void }
+ type NotebookCell = {
+diff --git a/sdks/vscode/src/notebook/commands.ts b/sdks/vscode/src/notebook/commands.ts
+index cb863344cc4687f8d97a1bbf78a6333e2d2839c9..ad9aee6454fa6202d7d8338bd5953b877097faa1 100644
+--- a/sdks/vscode/src/notebook/commands.ts
++++ b/sdks/vscode/src/notebook/commands.ts
+@@ -231,11 +231,15 @@ async function editNotebookCommand() {
+     ? undefined
+     : await vscode.window.showInputBox({
+         title: "vscode_notebook_edit newCode",
+-        prompt: "newCode. Use \\n for newlines. Empty = type-only (edit) / no-source.",
++        prompt: "newCode. Use \\n for newlines. Empty sends an explicit empty source; language-only edits require omitting oldCode/newCode through the bridge API.",
+         value: editType === "edit" && cell ? cell.document.getText().replace(/\n/g, "\\n") : "",
+         ignoreFocusOut: true,
+       })
+ 
++  // Keep the command-palette tester backward compatible: an empty input box
++  // still sends the explicit empty string that clears a cell. The prompt points
++  // language-only callers to the bridge API because that mode depends on true
++  // field omission, which this simple input box cannot distinguish safely.
+   return await editNotebook({
+     filePath: notebook.uri.toString(),
+     editType,
+diff --git a/sdks/vscode/src/notebook/edit.ts b/sdks/vscode/src/notebook/edit.ts
+index bd8a9a1280289962c24b1ed1d036770b26919c34..f46b8f9ef9c2a5f298e93d5467e52ca905963d80 100644
+--- a/sdks/vscode/src/notebook/edit.ts
++++ b/sdks/vscode/src/notebook/edit.ts
+@@ -49,6 +49,16 @@ export async function editNotebook(input: Record<string, unknown>) {
+   const cellId = stringProp(input, "cellId")
+   if (!cellId) throw new Error("cellId is required")
+ 
++  // Empty arrays are almost always produced by a caller trying to express
++  // "no source argument" through a JSON shape that still contains the field.
++  // The edit contract treats omitted fields as language-only preservation and
++  // present fields as source replacement, so accepting [] would silently become
++  // an empty string via sourceProp(...). Reject it before any notebook mutation
++  // can clear a cell by accident; callers that intentionally want an empty cell
++  // must pass the explicit string "" so the destructive intent is unambiguous.
++  rejectEmptySourceArray(input, "oldCode")
++  rejectEmptySourceArray(input, "newCode")
++
+   const beforeCount = notebook.cellCount
+ 
+   if (editType === "delete") return await handleDelete(notebook, cellId, beforeCount)
+@@ -151,13 +161,17 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
+   }
+   const language = stringProp(input, "language")
+   const oldCodeRaw = sourceProp(input, "oldCode")
+-  const typeChange = language !== undefined && language !== targetCell.document.languageId
++  // `language` maps to both the TextDocument languageId and the notebook cell
++  // kind. Comparing only languageId misses mixed states such as a code cell whose
++  // language is already "markdown"; language-only edits must still replace the
++  // cell so Markup/Code kind matches the requested language contract.
++  const newKind = language === undefined ? undefined : kindFromLang(language)
++  const typeChange = language !== undefined && (language !== targetCell.document.languageId || newKind !== targetCell.kind)
+ 
+   if (typeChange) {
+-    const newKind = kindFromLang(language!)
+     const oldKind = cellTypeLabel(targetCell.kind)
+     const oldLang = targetCell.document.languageId
+-    return await handleTypeChange(notebook, targetCell, input, newKind, language!, oldKind, oldLang, oldCodeRaw, beforeCount)
++    return await handleTypeChange(notebook, targetCell, input, newKind!, language!, oldKind, oldLang, oldCodeRaw, beforeCount)
+   }
+ 
+   // --- TextEdit (no type change) ---
+@@ -306,10 +320,17 @@ function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCo
+     }
+   }
+ 
+-  const source = content.substring(0, matchIdx) + replacement + content.substring(matchIdx + matchLen)
++  // All matching is performed against LF-normalized text so model-provided
++  // snippets work the same for LF and CRLF notebooks. The replacement must be
++  // assembled from the same normalized coordinate space; slicing the original
++  // CRLF string with LF offsets shifts by one character for every preceding
++  // CRLF pair and corrupts the cell. Convert back to the document EOL only after
++  // the replacement is complete so existing CRLF notebooks keep their line
++  // separator invariant.
++  const source = (src.substring(0, matchIdx) + replacement + src.substring(matchIdx + matchLen)).replace(/\n/g, documentEol(targetCell.document))
+ 
+   // Compute 1-based (local) line range of the match for context
+-  const preMatch = content.substring(0, matchIdx)
++  const preMatch = src.substring(0, matchIdx)
+   const preLines = preMatch.split(/\r?\n/)
+   const matchStartLine = preLines.length
+   const matchLines = oldCode.split(/\r?\n/)
+@@ -419,6 +440,12 @@ function stripCodeFence(source: string) {
+   return match ? match[1] : source
+ }
+ 
++function rejectEmptySourceArray(input: Record<string, unknown>, key: "oldCode" | "newCode") {
++  if (Array.isArray(input[key]) && input[key].length === 0) {
++    throw new Error(`${key} cannot be an empty array. Omit ${key} for language-only edits, or pass an explicit empty string to clear source.`)
++  }
++}
++
+ async function applyNotebookEditAndWait(notebook: vscode.NotebookDocument, edit: vscode.WorkspaceEdit) {
+   const beforeVersion = notebook.version
+   const applied = await vscode.workspace.applyEdit(edit)
+@@ -572,6 +599,11 @@ function compactEditResult(
+       anchorCellIndex: info.anchorCell?.index,
+       insertedCellIndex: info.insertedCell?.index,
+       insertedCellId: info.insertedCell ? copilotLikeCellId(info.insertedCell) : undefined,
++      // Type changes replace a notebook cell and therefore invalidate the old
++      // Copilot-style #VSC handle. Surface the replacement id in data so plugin
++      // renderers and subsequent tool calls can continue with the durable handle
++      // that VS Code assigned after replaceCells completed.
++      updatedCellId: info.editType === "edit" && info.anchorCell ? copilotLikeCellId(info.anchorCell) : undefined,
+       deletedCellIndex: info.deletedCellIndex,
+       affectedCellIndex: info.affectedCellIndex,
+       dirty: notebook.isDirty,
+diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
+index 31feaeece7537b7e23c4c0121a6ef4a5399c7475..aa6b6176dd55ea0b85cbfb7fa389ee95b4233ec8 100644
+--- a/sdks/vscode/src/notebook/env.ts
++++ b/sdks/vscode/src/notebook/env.ts
+@@ -595,8 +595,12 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
+   }
+   if (!jupyter.isActive) await jupyter.activate()
+ 
+-  // Ensure the public restart command is registered
+-  const allCommands = await vscode.commands.getCommands(true)
++  // Restart is contributed by the Jupyter extension as a command that may be
++  // hidden from VS Code's public command list. Use getCommands(false) so the
++  // bridge checks the same full command surface that executeCommand can invoke;
++  // otherwise restart incorrectly reports "not registered" even though the
++  // command is available to the extension host.
++  const allCommands = await vscode.commands.getCommands(false)
+   if (!allCommands.includes(RESTART_CMD)) {
+     return {
+       ran: true,
+diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/source.ts
+index 39fbb7f37cb41833e6cb910bd2f111ad26dd98d1..2253069a5abd023d4e47a56eae611fbb9e148f94 100644
+--- a/sdks/vscode/src/notebook/source.ts
++++ b/sdks/vscode/src/notebook/source.ts
+@@ -109,7 +109,29 @@ export async function notebookSource(input: Record<string, unknown>) {
+       const sourceLine = cell.document.lineAt(i).text
+       const outLine = `${globalLineNum}: ${sourceLine}`
+       const outBytes = Buffer.byteLength(outLine, "utf8")
+-      if (bytes + outBytes > maxBytes && outputCells.length > 0) {
++      if (bytes + outBytes > maxBytes) {
++        if (renderedLines > 0) {
++          // The current line can be rendered intact on the next page. Do not
++          // consume it here with a partial preview, because pagination is by
++          // virtual source line rather than byte column and the skipped suffix
++          // would otherwise be unrecoverable.
++          bytesCut = true
++          break
++        }
++        // A single notebook source line can be wider than the entire 16 KB tool
++        // response budget. Returning only the cell header gives the agent no
++        // source anchor and can produce invalid pagination such as offset=0.
++        // Keep the line-number prefix and a UTF-8 bounded prefix of the source,
++        // then mark the response truncated; the tool remains line-paginated, so
++        // the next offset still advances to the following virtual source line.
++        const prefix = `${globalLineNum}: `
++        const prefixBytes = Buffer.byteLength(prefix, "utf8")
++        const available = maxBytes - bytes - prefixBytes
++        if (available > 0) {
++          outputCells.push(prefix + takeUtf8Prefix(sourceLine, available))
++          renderedLines++
++          lastRenderedLine = globalLineNum
++        }
+         bytesCut = true
+         break
+       }
+@@ -189,3 +211,18 @@ function lastRangeEnd(ranges: Map<number, { start: number; end: number }>) {
+   }
+   return max > 0 ? max : undefined
+ }
++
++function takeUtf8Prefix(text: string, maxBytes: number) {
++  // Iterate by Unicode code point instead of slicing bytes directly. This keeps
++  // the preview valid UTF-8 while still honoring the byte budget enforced by the
++  // notebook source tool output cap.
++  let bytes = 0
++  let out = ""
++  for (const char of text) {
++    const next = Buffer.byteLength(char, "utf8")
++    if (bytes + next > maxBytes) return out
++    bytes += next
++    out += char
++  }
++  return out
++}
+diff --git a/sdks/vscode/src/notebook/summary.ts b/sdks/vscode/src/notebook/summary.ts
+index 2767bebee883475a0dc2d6de5f34140f23d14c3c..94516644fb4d654217bda75be44a92a70afe5d89 100644
+--- a/sdks/vscode/src/notebook/summary.ts
++++ b/sdks/vscode/src/notebook/summary.ts
+@@ -73,6 +73,9 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
+       return `c${cell.i} id=${cell.id} ${cell.kind}/${cell.lang} lines=${cell.lines} ${rangeText} exec=${quoteForSummary(cell.exec)} existing_outs=${quoteForSummary(cell.existing_outs.join(",") || "none")} first=${JSON.stringify(cell.first)}`
+     }),
+     "",
+-    "Next: use vscode_notebook_source with cellId=#VSC-xxx, offset=1, limit=120 for source; use vscode_notebook_run to execute; use vscode_notebook_output for outputs; use vscode_notebook_edit to modify.",
++    // With a cellId, offset is still a global virtual line number. Keep the
++    // default next-step hint offset-free so agents do not pass offset=1 for a
++    // later cell and trigger an avoidable out-of-range warning.
++    "Next: use vscode_notebook_source with cellId=#VSC-xxx and omit offset for one cell; use offset/limit only for global paging. Use vscode_notebook_run to execute; use vscode_notebook_output for outputs; use vscode_notebook_edit to modify.",
+   ].join("\n")
+ }

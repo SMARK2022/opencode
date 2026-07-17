@@ -1,0 +1,85 @@
+From 913eba22b2796074167866c424035326c20fce0b Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 6 Jul 2026 14:38:49 +0800
+Subject: [PATCH] =?UTF-8?q?fix(test):=20=E4=BF=AE=E5=A4=8D=20Windows=20CI?=
+ =?UTF-8?q?=20=E4=B8=8A=20shell=20timeout=20=E6=B5=8B=E8=AF=95=E9=97=B4?=
+ =?UTF-8?q?=E6=AD=87=E6=80=A7=E5=A4=B1=E8=B4=A5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Windows 默认 shell 为 pwsh（PowerShell 7），其 .NET 运行时冷启动 +
+首条 echo 输出在 CI 上可达 600ms+，而测试 timeout 为 500ms（实现层
++100ms 缓冲 = 600ms），导致 timeout 在 echo 输出到达管道前触发，
+result.output 不含 "started" 而断言失败。
+
+将三个使用 echo+sleep+短 timeout 的测试改为平台感知常量 timeoutMs
+（Windows 3000ms / 其他平台 500ms），给 pwsh 冷启动足够余量先产出
+输出再触发 timeout。不修改实现代码，不影响 timeout 竞态逻辑和 kill
+流程，仅调整测试输入值使时序不变量在 Windows CI 上稳定成立。
+
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index acde64deb85ab60f3aa43293a3e5cced1ddd526f..dc3432e64ceaa5f4fcebf5c6e7cf4ce91bfb1354 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -130,6 +130,13 @@ const cmdShell = shells.find((item) => item.label === "cmd")
+ const sh = () => Shell.name(Shell.acceptable())
+ const evalarg = (text: string) => (sh() === "cmd" ? quote(text) : squote(text))
+ 
++// Windows 上默认 shell 是 pwsh（PowerShell 7），其 .NET 运行时冷启动 +
++// 首条 echo 输出在 CI 上可达 600ms+。500ms timeout 会在 echo 输出到达管道前
++// 触发，导致 result.output 不含 "started" 而间歇性失败。
++// Windows 放宽到 3000ms 保证 echo 先输出再 timeout；其他平台保持 500ms
++// 以维持快速反馈。此常量仅用于 timeout + 预期有输出的测试场景。
++const timeoutMs = process.platform === "win32" ? 3000 : 500
++
+ const fill = (mode: "lines" | "bytes", n: number) => {
+   const code =
+     mode === "lines"
+@@ -1815,14 +1822,16 @@ describe("tool.shell abort", () => {
+       runIn(
+         projectRoot,
+         Effect.gen(function* () {
++          // timeoutMs 在 Windows 上为 3000ms，给 pwsh 冷启动足够时间先输出 "started"；
++          // 在 Linux/macOS 上为 500ms，保持快速反馈。timeout_ms 断言须与平台值一致。
+           const result = yield* run({
+             command: `echo started && sleep 60`,
+             description: "Timeout test",
+-            timeout: 500,
++            timeout: timeoutMs,
+           })
+           expect(result.output).toContain("started")
+           expect(result.output).toContain(
+-            '<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="500" />',
++            `<opencode_notice type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="${timeoutMs}" />`,
+           )
+           expect(result.output).not.toContain('reason="exit"')
+         }),
+@@ -1841,9 +1850,11 @@ describe("tool.shell abort", () => {
+             description: "Default timeout test",
+           })
+           expect(result.output).toContain("started")
+-          expect(result.output).toContain('reason="timeout" timeout_ms="500"')
++          // bashDefaultTimeoutMs 与 timeoutMs 保持同值，确保 notice 中 timeout_ms
++          // 在所有平台都与实际使用的默认超时一致
++          expect(result.output).toContain(`reason="timeout" timeout_ms="${timeoutMs}"`)
+         }),
+-      ).pipe(Effect.provide(RuntimeFlags.layer({ bashDefaultTimeoutMs: 500 }))),
++      ).pipe(Effect.provide(RuntimeFlags.layer({ bashDefaultTimeoutMs: timeoutMs }))),
+     15_000,
+   )
+ 
+@@ -2216,10 +2227,12 @@ describe("tool.shell truncation", () => {
+           Effect.gen(function* () {
+             // [local-smark] echo 先输出再 sleep，timeout 时已有 output → emptyOutput=false
+             // 验证有输出时不触发 block-buffering 诊断（仅 timeout+空输出触发）
++            // timeoutMs 在 Windows 上放宽到 3000ms，确保 pwsh 冷启动后
++            // "started" 先到达管道再触发 timeout，否则 emptyOutput=true 会误触诊断
+             const result = yield* run({
+               command: `echo started && sleep 60`,
+               description: "Timeout with output test",
+-              timeout: 500,
++              timeout: timeoutMs,
+             })
+ 
+             expect(result.output).toContain("started")

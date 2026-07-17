@@ -1,0 +1,93 @@
+From f16126f7eed9ea35847b4e7e10912895071dd9c9 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 11 Jun 2026 12:20:02 +0800
+Subject: [PATCH] =?UTF-8?q?feat(test):=20=E4=BF=AE=E6=AD=A3linux=E7=9A=84?=
+ =?UTF-8?q?=E6=8A=A5=E9=94=99=E9=97=AE=E9=A2=98=20feat(read):=20=E6=B3=A8?=
+ =?UTF-8?q?=E9=87=8A=E6=81=B6=E6=84=8F=E4=BB=A3=E7=A0=81=E6=8F=90=E9=86=92?=
+ =?UTF-8?q?=E7=9B=B8=E5=85=B3=E9=80=BB=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 移除恶意代码提醒的相关代码，注释掉相关函数和常量，避免误用。
+
+diff --git a/docs/prompts.md b/docs/prompts.md
+index b2c271a9d7c3f42ca67d6db68e2a4e2441312c64..61256e57c135881abd965551c476313ac5bf00b5 100644
+--- a/docs/prompts.md
++++ b/docs/prompts.md
+@@ -59,7 +59,7 @@
+ 8. 预估 git 文件数、增删行数和是否涉及生成文件/迁移/文档。
+ 9. 真实风险与开放问题；没有必须用户决策的问题就不要阻塞。
+ 只输出方案，不要改代码。
+-最终请给出推荐方案摘要。
++最终请给出推荐方案摘要。注意所有不确定的内容你要完整确认直到你已经把所有潜在的问题都考虑在内了，且方案已经足够完善且自然。
+ 
+ 
+ -------------
+diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
+index 6c0fb5ee3eae84d6ad006a38ec573011c91bb3de..a3790551148cf799f1bf3c45ff5b9608acd81305 100644
+--- a/packages/opencode/src/tool/read.ts
++++ b/packages/opencode/src/tool/read.ts
+@@ -92,8 +92,8 @@ type ReadToolMetadata = {
+   read?: ReadMetadata
+ }
+ 
+-// 恶意代码提醒
+-const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You CAN analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
++// // 恶意代码提醒
++// const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You CAN analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
+ 
+ // 判断是否为设备文件路径
+ function isBlockedDevicePath(filePath: string): boolean {
+@@ -107,10 +107,10 @@ function isBlockedDevicePath(filePath: string): boolean {
+   return false
+ }
+ 
+-// 判断是否应该注入恶意代码提醒
+-function shouldInjectCyberReminder(ext: string): boolean {
+-  return HIGH_RISK_EXTENSIONS.has(ext)
+-}
++// // 判断是否应该注入恶意代码提醒
++// function shouldInjectCyberReminder(ext: string): boolean {
++//   return HIGH_RISK_EXTENSIONS.has(ext)
++// }
+ 
+ // 估算内容 token 数量
+ function estimateTokensForContent(content: string, ext: string): number {
+@@ -684,10 +684,10 @@ export const ReadTool = Tool.define(
+         finalOutput += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
+       }
+ 
+-      // 恶意代码安全提醒 - 仅对高风险扩展名注入
+-      if (shouldInjectCyberReminder(ext)) {
+-        finalOutput += CYBER_REMINDER
+-      }
++      // // 恶意代码安全提醒 - 仅对高风险扩展名注入
++      // if (shouldInjectCyberReminder(ext)) {
++      //   finalOutput += CYBER_REMINDER
++      // }
+ 
+       return {
+         title,
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index 9480a96c0743f9b0e675f7fa27ca528aabceee98..e62272fb25983e6639b39a41cdc846b21f0549e7 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -1914,13 +1914,16 @@ describe("tool.shell abort", () => {
+         const script = [
+           'console.error("fatal: hidden root cause")',
+           "await new Promise((resolve) => setTimeout(resolve, 2100))",
+-          `for (let i = 0; i < ${Truncate.MAX_LINES + 20}; i++) console.log("tail line " + i)`,
++          `for (let i = 0; i < ${Truncate.MAX_LINES + 500}; i++) console.log("tail line " + i + " " + "x".repeat(80))`,
+           "process.exit(9)",
+         ].join(";")
+         const command = `${bin} -e ${evalarg(script)}`
+         const result = yield* run({
+           command: PS.has(sh()) ? `& ${command}` : command,
+           description: "Diagnostic failed command",
++          // 这个用例只验证 tail 截断隐藏区会生成诊断附录；关闭压缩，并让尾部
++          // 文本同时超过默认行数/字节阈值，避免平台输出差异让 root cause 仍可见。
++          compress_output: false,
+         })
+ 
+         expect(result.metadata.exit).toBe(9)

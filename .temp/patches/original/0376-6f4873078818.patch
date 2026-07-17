@@ -1,0 +1,30 @@
+From 6f4873078818ce3d2c5f545c322319927fe5a03e Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sun, 5 Jul 2026 03:14:57 +0800
+Subject: [PATCH] =?UTF-8?q?feat(tui):=20=E8=B0=83=E6=95=B4=20DialogPrompt?=
+ =?UTF-8?q?=20=E7=9A=84=E6=96=87=E6=9C=AC=E5=8C=BA=E5=9F=9F=E9=AB=98?=
+ =?UTF-8?q?=E5=BA=A6=EF=BC=8C=E7=A1=AE=E4=BF=9D=E8=A7=86=E8=A7=89=E7=A9=BA?=
+ =?UTF-8?q?=E9=97=B4=E5=92=8C=E9=95=BF=E6=96=87=E6=9C=AC=E6=98=BE=E7=A4=BA?=
+ =?UTF-8?q?=E4=B8=80=E8=87=B4=E6=80=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx b/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
+index 47c857cf4203b2d3f190cdc8c01e343a7c9429b6..f6529ca373f887f854ad21af3d95230ed7706dad 100644
+--- a/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
++++ b/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
+@@ -129,7 +129,11 @@ export function DialogPrompt(props: DialogPromptProps) {
+             if (voiceInputBusy()) return
+             props.onConfirm?.(textarea.plainText)
+           }}
+-          height={3}
++          // minHeight=3 保证空态有足够视觉空间；maxHeight=9 让长文本（如 4000 字符的 goal objective）
++          // 能随内容增长显示更多行，避免固定 3 行只能看到一小段。与主 Prompt 的 minHeight+maxHeight 模式一致。
++          // 对话框 medium 宽度 60 chars，减去 padding 各 2 chars 后 textarea 可用 56 chars 宽。
++          minHeight={3}
++          maxHeight={9}
+           ref={(val: TextareaRenderable) => {
+             textarea = val
+           }}

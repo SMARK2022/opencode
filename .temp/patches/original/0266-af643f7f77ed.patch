@@ -1,0 +1,48 @@
+From af643f7f77edccba091557c03cc7fe32dbfffe42 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 29 May 2026 18:53:05 +0800
+Subject: [PATCH] =?UTF-8?q?fix(actions):=20=E4=BF=AE=E5=A4=8D=E6=B5=8B?=
+ =?UTF-8?q?=E8=AF=95=20workflow=20=E8=A7=A3=E6=9E=90=E4=B8=8E=E4=B8=8A?=
+ =?UTF-8?q?=E6=B8=B8=E5=8C=85=E6=B5=8B=E8=AF=95=E5=91=BD=E4=BB=A4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+将 job 级环境变量改为基于 matrix.runner 判断 Windows，避免 runner context 在 workflow 解析阶段不可用导致 Actions 直接拒绝运行。
+
+将 warning-only 上游额外包测试切换为 bun test --cwd，避免没有 package test 脚本的包报 Script not found，同时保留 JUnit 报告生成路径。
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index 955123dce3b540b7fb102f3007ee83163d4a0dd8..197e3e54e0bc4692c6a38ae4290a069662fd2ebb 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -69,7 +69,7 @@ jobs:
+       run:
+         shell: bash
+     env:
+-      OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
++      OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ matrix.runner == 'windows-latest' && 'true' || 'false' }}
+     steps:
+       - name: Checkout repository
+         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+@@ -266,7 +266,7 @@ jobs:
+       run:
+         shell: bash
+     env:
+-      OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
++      OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ matrix.runner == 'windows-latest' && 'true' || 'false' }}
+     steps:
+       - name: Checkout repository
+         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+@@ -380,9 +380,9 @@ jobs:
+         run: |
+           mkdir -p "${{ matrix.path }}/.artifacts/upstream"
+           if [ -n "${{ matrix.target }}" ]; then
+-            bun --cwd "${{ matrix.path }}" test "${{ matrix.target }}" --timeout 30000 --reporter=junit --reporter-outfile=.artifacts/upstream/junit.xml
++            bun test --cwd "${{ matrix.path }}" "${{ matrix.target }}" --timeout 30000 --reporter=junit --reporter-outfile=.artifacts/upstream/junit.xml
+           else
+-            bun --cwd "${{ matrix.path }}" test --timeout 30000 --reporter=junit --reporter-outfile=.artifacts/upstream/junit.xml
++            bun test --cwd "${{ matrix.path }}" --timeout 30000 --reporter=junit --reporter-outfile=.artifacts/upstream/junit.xml
+           fi
+ 
+       - name: Warn on upstream extra failures

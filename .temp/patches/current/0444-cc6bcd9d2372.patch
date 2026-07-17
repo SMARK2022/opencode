@@ -1,0 +1,300 @@
+From cc6bcd9d23728e4e74ea5e61c66336c0faf1b1bc Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 16 Jul 2026 21:03:18 +0800
+Subject: [PATCH] =?UTF-8?q?fix(app):=20=E5=90=88=E5=B9=B6=E5=8D=95?=
+ =?UTF-8?q?=E8=B0=83=E8=BF=9B=E5=BA=A6=E5=BF=AB=E7=85=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+让 SSE 临时进度、持久化事件和重连 HTTP 页面复用同一合并规则，严格接受更高 running 版本并保持终态支配。
+
+该提交仅包含 APP 消费端及其行为测试，与后端磁盘写入修复独立。
+
+diff --git a/packages/app/src/context/global-sync/event-reducer.test.ts b/packages/app/src/context/global-sync/event-reducer.test.ts
+index 1790401dbec0193eeae1bed96c8a31744107ee91..1e9aa55e7ebbc96ea232c8d4aece092e0f04a4c4 100644
+--- a/packages/app/src/context/global-sync/event-reducer.test.ts
++++ b/packages/app/src/context/global-sync/event-reducer.test.ts
+@@ -34,6 +34,31 @@ const textPart = (id: string, sessionID: string, messageID: string) =>
+     text: id,
+   }) as Part
+ 
++const shellPart = (output: string, progressVersion?: number, terminal = false) =>
++  ({
++    id: "prt_shell",
++    sessionID: "ses_1",
++    messageID: "msg_1",
++    type: "tool",
++    callID: "call_shell",
++    tool: "bash",
++    state: terminal
++      ? {
++          status: "completed",
++          input: { command: "build" },
++          output,
++          title: "",
++          metadata: { output, description: "" },
++          time: { start: 1, end: 2 },
++        }
++      : {
++          status: "running",
++          input: { command: "build" },
++          metadata: { output, description: "", ...(progressVersion === undefined ? {} : { progressVersion }) },
++          time: { start: 1 },
++        },
++  }) as Part
++
+ const permissionRequest = (id: string, sessionID: string, title = id) =>
+   ({
+     id,
+@@ -424,6 +449,33 @@ describe("applyDirectoryEvent", () => {
+     expect(store.part[messageID]).toBeUndefined()
+   })
+ 
++  test("applies monotonic shell progress through the directory event reducer", () => {
++    const [store, setStore] = createStore(baseState({ part: { msg_1: [shellPart("v1", 1)] } }))
++    const apply = (type: "message.part.progress" | "message.part.updated", part: Part) =>
++      applyDirectoryEvent({
++        event: { type, properties: { part } },
++        store,
++        setStore,
++        push() {},
++        directory: "/tmp",
++        loadLsp() {},
++      })
++
++    // 同一 Part ID 的两种 transport 到达顺序必须得到相同的 store 结果，测试不依赖事件调用次数。
++    // v2 之后的 durable stale snapshot 专门覆盖 HTTP reconnect 绕过 SSE adapter 的风险。
++    // SSE live 与 durable PartUpdated 必须进入同一个 merge owner；否则后到的
++    // legacy HTTP/event copy 会绕过版本合同并把 app UI 回退。
++    apply("message.part.progress", shellPart("v2", 2))
++    expect(store.part.msg_1?.[0]).toMatchObject({ state: { status: "running", metadata: { output: "v2" } } })
++    apply("message.part.updated", shellPart("legacy"))
++    expect(store.part.msg_1?.[0]).toMatchObject({ state: { status: "running", metadata: { output: "v2" } } })
++
++    // terminal 是权威结果；更高 running version 也不能恢复执行中。
++    apply("message.part.updated", shellPart("done", undefined, true))
++    apply("message.part.progress", shellPart("late", 3))
++    expect(store.part.msg_1?.[0]).toMatchObject({ state: { status: "completed", output: "done" } })
++  })
++
+   // 复现核心竞态：delta 已将 part.text 和 accum_delta 累积为长文本，
+   // 随后收到不带 time.end 的短快照 part.updated（模拟 daemon fire-and-forget
+   // 延迟到达的 text-start 事件），守卫必须阻止短文本回退已累积的长文本。
+diff --git a/packages/app/src/context/global-sync/event-reducer.ts b/packages/app/src/context/global-sync/event-reducer.ts
+index 5d60fad858a9496e9e16f44cf1d74f9e2168b429..32a5419935937986f1d16b8c1ab187a231394454 100644
+--- a/packages/app/src/context/global-sync/event-reducer.ts
++++ b/packages/app/src/context/global-sync/event-reducer.ts
+@@ -15,6 +15,7 @@ import type { State, VcsCache } from "./types"
+ import { trimSessions } from "./session-trim"
+ import { dropSessionCaches } from "./session-cache"
+ import { diffs as list, message as clean } from "@/utils/diffs"
++import { mergePartSnapshot } from "./part-merge"
+ 
+ const SKIP_PARTS = new Set(["patch", "step-start", "step-finish"])
+ 
+@@ -236,7 +237,8 @@ export function applyDirectoryEvent(input: {
+       )
+       break
+     }
+-    case "message.part.updated": {
++    case "message.part.updated":
++    case "message.part.progress": {
+       const part = (event.properties as { part: Part }).part
+       if ((part as unknown as { hidden?: unknown }).hidden) {
+         const parts = input.store.part[part.messageID]
+@@ -256,11 +258,8 @@ export function applyDirectoryEvent(input: {
+         break
+       }
+       if (SKIP_PARTS.has(part.type)) break
+-      // 单调守卫：防止 pending 阶段的短快照覆盖已通过 delta 累积的长文本。
+-      // daemon 的 message.part.updated 通过 fire-and-forget 发送
+-      // （void Effect.runPromise），而 message.part.delta 通过 yield* await
+-      // 发送。当 text-start 的 part.updated（text=""）因 fiber 调度延迟到
+-      // delta 之后才到达时，不带 time.end 的短文本不应回退本地长文本，
++      // 单调守卫：防止 pending 阶段或 HTTP sync 的短快照覆盖已通过 delta
++      // 累积的长文本。不带 time.end 的短文本不应回退本地长文本，
+       // 也不应清除 accum_delta（UI 优先读 accum_delta 显示流式内容）。
+       // 终态（time.end 存在）不进入此守卫，正常执行覆盖和 accum_delta 清除。
+       if ((part.type === "text" || part.type === "reasoning") && !part.time?.end) {
+@@ -286,7 +285,16 @@ export function applyDirectoryEvent(input: {
+       }
+       const result = Binary.search(parts, part.id, (p) => p.id)
+       if (result.found) {
+-        input.setStore("part", part.messageID, result.index, reconcile(part))
++        // monotonic rule 只属于 Tool snapshot；text/reasoning 等 Part 继续走原有
++        // reconcile 语义，避免把 shell 版本概念扩散到 append 型内容。
++        // live progress 与 durable/HTTP PartUpdated 必须经过同一个 Tool merge
++        // owner；否则任一 adapter 都能绕过 version 或 terminal dominance。
++        input.setStore(
++          "part",
++          part.messageID,
++          result.index,
++          reconcile(part.type === "tool" ? mergePartSnapshot(parts[result.index], part) : part),
++        )
+         break
+       }
+       input.setStore(
+diff --git a/packages/app/src/context/global-sync/part-merge.test.ts b/packages/app/src/context/global-sync/part-merge.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..03bc669b9237598bfbc5af05881b8302b2442951
+--- /dev/null
++++ b/packages/app/src/context/global-sync/part-merge.test.ts
+@@ -0,0 +1,76 @@
++import { describe, expect, test } from "bun:test"
++import type { Part, ToolPart } from "@opencode-ai/sdk/v2/client"
++import { mergePartSnapshot, mergePartSnapshots } from "./part-merge"
++
++function running(output: string, progressVersion?: unknown): ToolPart {
++  return {
++    id: "part_shell",
++    sessionID: "ses_1",
++    messageID: "msg_1",
++    type: "tool",
++    callID: "call_shell",
++    tool: "bash",
++    state: {
++      status: "running",
++      input: { command: "build" },
++      time: { start: 1 },
++      metadata: { output, description: "", ...(progressVersion === undefined ? {} : { progressVersion }) },
++    },
++  }
++}
++
++function completed(output: string): ToolPart {
++  return {
++    ...running(output, 2),
++    state: {
++      status: "completed",
++      input: { command: "build" },
++      time: { start: 1, end: 2 },
++      title: "",
++      metadata: { output, description: "" },
++      output,
++    },
++  }
++}
++
++describe("part snapshot merge", () => {
++  test("accepts a legacy running shell snapshot when no local Part exists", () => {
++    const legacy = running("legacy")
++    // 首次恢复没有本地版本可比较；拒绝 legacy 会让新 client 永久缺少最近 checkpoint。
++    expect(mergePartSnapshot(undefined, legacy)).toBe(legacy)
++  })
++
++  test("normalizes invalid running shell versions to legacy v0", () => {
++    const current = running("live", 1)
++    // 这些值都可能来自 optional/open metadata 或非 JSON live input；它们必须共享
++    // 一个 v0 兼容语义，不能让 app SSE 与 HTTP adapter 各自猜默认值。
++    for (const version of [undefined, Number.NaN, Number.POSITIVE_INFINITY, -1, 0.5]) {
++      expect(mergePartSnapshot(current, running("stale", version))).toBe(current)
++    }
++    expect(mergePartSnapshot(current, running("new", 2))).toMatchObject({
++      state: { status: "running", metadata: { output: "new", progressVersion: 2 } },
++    })
++  })
++
++  test("keeps terminal dominance in both arrival orders", () => {
++    const terminal = completed("done")
++    // terminal 后到时无条件胜出；terminal 已存在时，任何 running HTTP/SSE
++    // snapshot 都不得把同一 Tool Part 恢复为执行中。
++    expect(mergePartSnapshot(running("live", 3), terminal)).toBe(terminal)
++    expect(mergePartSnapshot(terminal, running("late", 4))).toBe(terminal)
++  })
++
++  test("merges an HTTP Part page through the same per-Part contract", () => {
++    const current = running("live", 1)
++    // mixed page 同时验证 Tool 走版本合同、text Part 仍按既有 page merge 保留。
++    const text = {
++      id: "part_text",
++      sessionID: "ses_1",
++      messageID: "msg_1",
++      type: "text",
++      text: "server",
++    } satisfies Part
++    const merged = mergePartSnapshots([current], [running("legacy"), text])
++    expect(merged).toEqual([current, text])
++  })
++})
+diff --git a/packages/app/src/context/global-sync/part-merge.ts b/packages/app/src/context/global-sync/part-merge.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2110bad9e861850eb29cb234b6b52d723ffb7749
+--- /dev/null
++++ b/packages/app/src/context/global-sync/part-merge.ts
+@@ -0,0 +1,50 @@
++import type { Part, ToolPart } from "@opencode-ai/sdk/v2/client"
++
++type RunningToolState = Extract<ToolPart["state"], { status: "running" }>
++
++function progressVersion(state: RunningToolState) {
++  const value = state.metadata?.progressVersion
++  // metadata 是旧 SQLite JSON 的开放记录；缺失、非有限、fraction 和负数统一为
++  // legacy v0。归一化只发生在 client store boundary，不迁移或回写历史数据。
++  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) return 0
++  return value
++}
++
++export function mergePartSnapshot(existing: Part | undefined, incoming: Part): Part {
++  // 无本地候选时直接接受 incoming，legacy v0 才能完成首次重连恢复。
++  if (!existing) return incoming
++  if (existing.type !== "tool" || incoming.type !== "tool") return incoming
++  // 不同 ID 不属于同一状态机，不能用版本或 terminal 规则互相比较。
++  if (existing.id !== incoming.id) return incoming
++  // incoming terminal 没有 progressVersion，也必须先于所有 running 比较直接胜出。
++  if (incoming.state.status === "completed" || incoming.state.status === "error") return incoming
++
++  // HTTP page 与 SSE 独立到达；一旦本地已有 terminal，任何 running snapshot
++  // 都不能恢复执行中。非 shell Tool 保持原有后到覆盖语义。
++  if (
++    (existing.state.status === "completed" || existing.state.status === "error") &&
++    incoming.state.status === "running"
++  ) {
++    return existing
++  }
++  if (
++    // 非 bash Tool 没有本任务定义的 cadence/version，保持原有后到覆盖行为。
++    existing.tool !== "bash" ||
++    incoming.tool !== "bash" ||
++    existing.state.status !== "running" ||
++    incoming.state.status !== "running"
++  ) {
++    return incoming
++  }
++
++  // running shell 只有严格更高版本才能前进；相等版本也保留 existing，避免同一
++  // checkpoint 的 stale HTTP copy 覆盖更早到达、内容相同版本的 live store 对象。
++  // 两个 state 已在上方收窄为 running，helper 不需要为不可达 terminal 再造默认值。
++  return progressVersion(incoming.state) > progressVersion(existing.state) ? incoming : existing
++}
++
++export function mergePartSnapshots(existing: readonly Part[] | undefined, incoming: readonly Part[]): Part[] {
++  if (!existing) return incoming.slice()
++  // HTTP page 保持 server 顺序，只按 ID 查找本地候选并复用单 Part 合同。
++  return incoming.map((part) => mergePartSnapshot(existing.find((item) => item.id === part.id), part))
++}
+diff --git a/packages/app/src/context/sync.tsx b/packages/app/src/context/sync.tsx
+index 34b597b6bb5206137d53d9c53abaf36aec1204f3..77ab14b843b1f54b6d5c4e508a0955bbf896a9e2 100644
+--- a/packages/app/src/context/sync.tsx
++++ b/packages/app/src/context/sync.tsx
+@@ -13,6 +13,7 @@ import { useGlobalSync } from "./global-sync"
+ import { useSDK } from "./sdk"
+ import type { Message, Part } from "@opencode-ai/sdk/v2/client"
+ import { SESSION_CACHE_LIMIT, dropSessionCaches, pickSessionCacheEvictions } from "./global-sync/session-cache"
++import { mergePartSnapshots } from "./global-sync/part-merge"
+ import { diffs as list, message as clean } from "@/utils/diffs"
+ 
+ const SKIP_PARTS = new Set(["patch", "step-start", "step-finish"])
+@@ -341,7 +342,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+             input.setStore("message", input.sessionID, reconcile(message, { key: "id" }))
+             for (const p of next.part) {
+               const filtered = p.part.filter((x) => !SKIP_PARTS.has(x.type))
+-              if (filtered.length) input.setStore("part", p.id, filtered)
++              // shared merge 只决定同 ID snapshot 的胜者；HTTP page 的过滤、顺序和
++              // 首次无本地值时的恢复行为仍由既有 loadMessages owner 保持。
++              // fetched HTTP page 与 SSE reducer 共写同一 Part store；这里必须复用
++              // shared merge，不能让后完成的旧 running snapshot 绕过版本/终态合同。
++              if (filtered.length) input.setStore("part", p.id, mergePartSnapshots(store.part[p.id], filtered))
+             }
+             setMeta("limit", key, message.length)
+             setMeta("cursor", key, next.cursor)

@@ -1,0 +1,360 @@
+From 3ff2620ec1608e0ae5460a69e059724bc0cc3922 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Tue, 12 May 2026 18:23:16 +0800
+Subject: [PATCH] =?UTF-8?q?feat(powerShell):=20=E6=B7=BB=E5=8A=A0=E5=AF=B9?=
+ =?UTF-8?q?PowerShell=20CLIXML=E8=BE=93=E5=87=BA=E7=9A=84=E8=A7=A3?=
+ =?UTF-8?q?=E7=A0=81=E5=92=8C=E8=A7=84=E8=8C=83=E5=8C=96=E5=8A=9F=E8=83=BD?=
+ =?UTF-8?q?=EF=BC=8C=E7=A1=AE=E4=BF=9D=E8=BE=93=E5=87=BA=E4=B8=BA=E7=BA=AF?=
+ =?UTF-8?q?=E6=96=87=E6=9C=AC?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
+index 89349561596fc39638a7b60a3db4450901d3f883..d23ce54a082e624e9dbaf7f0f660e95a3efd469f 100644
+--- a/packages/opencode/src/tool/bash-compress.ts
++++ b/packages/opencode/src/tool/bash-compress.ts
+@@ -1359,30 +1359,59 @@ export function shouldCompressOutput(text: string) {
+   return text.length >= DEFAULT_COMPRESSION_CONFIG.minInlineRunBytes
+ }
+ 
++const POWER_SHELL_CLIXML_HEADER_RE = /^\s*#<\s*CLIXML(?:\r?\n|$)/i
++const POWER_SHELL_CLIXML_BLOCK_RE = /(?:#<\s*CLIXML(?:\r?\n)?)?<Objs\b[\s\S]*?<\/Objs>/gi
++const POWER_SHELL_CLIXML_TEXT_NODE_RE = /<(S|ToString)\b([^>]*)>([\s\S]*?)<\/\1>/gi
++const POWER_SHELL_CLIXML_MEANINGFUL_NAMES = new Set([
++  "message",
++  "tostring",
++  "exception",
++  "errordetails",
++  "positionmessage",
++  "fullyqualifiederrorid",
++  "scriptstacktrace",
++  "stacktrace",
++  "line",
++  "statement",
++  "command",
++  "value",
++  "path",
++  "targetobject",
++  "categoryinfo",
++])
++
+ /**
+  * Detects and decodes PowerShell CLIXML output back to plain text.
+- * CLIXML is PowerShell's XML-based error serialization format that wraps
+- * terminal-colored text into `<Objs><S S="...">_xHHHH_</S></Objs>`.
++ * CLIXML is PowerShell's XML-based error/info serialization format that usually
++ * starts with `#< CLIXML` and wraps visible text inside `<Objs>...<S ...>...`.
+  *
+  * Returns decoded multi-line text wrapped in `<high-entropy powershell-clixml>`
+  * if the input is recognized CLIXML, or null otherwise.
+  */
+ function transformPowerShellClixml(text: string): string | null {
+-  const trimmed = text.trimStart()
+-  if (!trimmed.startsWith("<Objs") && !/^[\s\S]*<Objs\b/.test(trimmed)) return null
++  let changed = false
++  const next = text.replace(POWER_SHELL_CLIXML_BLOCK_RE, (block) => {
++    const decoded = decodePowerShellClixmlBlock(block)
++    if (!decoded) return block
++    changed = true
++    return decoded
++  })
+ 
+-  const decoded = /<S\s+S="[^"]*">([^<]*)<\/S>/gi
+-  const parts: string[] = []
+-  let match: RegExpExecArray | null
+-  while ((match = decoded.exec(text)) !== null) {
+-    parts.push(clixmlDecodeHexEscapes(match[1]))
+-  }
++  return changed ? next : null
++}
++
++function decodePowerShellClixmlBlock(block: string): string | null {
++  if (!isPurePowerShellClixmlBlock(block)) return null
++
++  const body = block.replace(POWER_SHELL_CLIXML_HEADER_RE, "")
++
++  const parts = extractPowerShellClixmlText(body)
+   if (parts.length === 0) return null
+ 
+-  let plain = parts.join("")
++  let plain = parts.join("\n")
+   plain = plain.replace(ANSI_GLOBAL_RE, "")
+   // Collapse any \r\n → \n left over from the decode
+-  plain = plain.replace(/\r\n/g, "\n")
++  plain = plain.replace(/\r\n?/g, "\n")
+   plain = plain.trimEnd()
+ 
+   if (!plain) return null
+@@ -1390,6 +1419,66 @@ function transformPowerShellClixml(text: string): string | null {
+   return `<high-entropy powershell-clixml>${plain}</high-entropy>`
+ }
+ 
++// Only decode CLIXML blocks that are structurally pure XML-ish payloads.
++// Mixed blocks with plain stdout inside them are left untouched so we never swallow real command output.
++function isPurePowerShellClixmlBlock(block: string) {
++  const body = block.replace(POWER_SHELL_CLIXML_HEADER_RE, "")
++  const lines = body.split(/\r?\n/)
++  let sawXml = false
++
++  for (const line of lines) {
++    const trimmed = line.trim()
++    if (!trimmed) continue
++    if (trimmed.startsWith("<Objs") || trimmed.startsWith("</Objs>")) {
++      sawXml = true
++      continue
++    }
++    if (trimmed.startsWith("<")) {
++      sawXml = true
++      continue
++    }
++    return false
++  }
++
++  return sawXml
++}
++
++function extractPowerShellClixmlText(text: string) {
++  const collect = (fallback: boolean) => {
++    POWER_SHELL_CLIXML_TEXT_NODE_RE.lastIndex = 0
++    const parts: string[] = []
++    let match: RegExpExecArray | null
++
++    while ((match = POWER_SHELL_CLIXML_TEXT_NODE_RE.exec(text)) !== null) {
++      const nodeType = match[1]
++      const attrs = match[2]
++      const raw = match[3]
++      const name = /(?:^|\s)(?:N|S)="([^"]+)"/i.exec(attrs)?.[1]?.toLowerCase()
++      if (nodeType === "S" && !fallback && (!name || !POWER_SHELL_CLIXML_MEANINGFUL_NAMES.has(name))) continue
++
++      const decoded = clixmlDecodeHexEscapes(decodeXmlEntities(raw)).trimEnd()
++      if (decoded.trim().length === 0 || parts.at(-1) === decoded) continue
++      parts.push(decoded)
++    }
++
++    return parts
++  }
++
++  const parts = collect(false)
++  if (parts.length > 0) return parts
++  return collect(true)
++}
++
++function decodeXmlEntities(value: string) {
++  return value.replace(/&(lt|gt|amp|quot|apos);/g, (_, entity) => {
++    if (entity === "lt") return "<"
++    if (entity === "gt") return ">"
++    if (entity === "amp") return "&"
++    if (entity === "quot") return '"'
++    return "'"
++  })
++}
++
+ /** Decodes PowerShell _xHHHH_ hex escape sequences in CLIXML text nodes. */
+ function clixmlDecodeHexEscapes(value: string): string {
+   return value.replace(/_x([0-9A-Fa-f]{4,})_/g, (_, hex) => {
+@@ -1903,6 +1992,22 @@ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options:
+   return parts.join("\n\n")
+ }
+ 
++/**
++ * Normalize PowerShell CLIXML back to plain text while preserving surrounding stdout.
++ * Pure CLIXML blocks are decoded; mixed blocks are left untouched to avoid losing real output.
++ */
++export function normalizePowerShellOutput(text: string) {
++  let changed = false
++  const next = text.replace(POWER_SHELL_CLIXML_BLOCK_RE, (block) => {
++    const decoded = decodePowerShellClixmlBlock(block)
++    if (!decoded) return block
++    changed = true
++    return decoded
++  })
++
++  return changed ? next : text
++}
++
+ /**
+  * 组装压缩相关的数据统计用于返回在最终命令的工具元数据内
+  */
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+index 1ca7bf5012719c329b62cc173054f8456b965b65..9ca50b05c17346c5871e3268ff295e6b1a97ab49 100644
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -322,12 +322,24 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan)
+ 
+ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
+   if (process.platform === "win32" && Shell.ps(shell)) {
+-    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", psEncoded(command)], {
+-      cwd,
+-      env,
+-      stdin: "ignore",
+-      detached: false,
+-    })
++    return ChildProcess.make(
++      shell,
++      [
++        "-NoLogo",
++        "-NoProfile",
++        "-NonInteractive",
++        "-OutputFormat",
++        "Text",
++        "-EncodedCommand",
++        psEncoded(command),
++      ],
++      {
++        cwd,
++        env,
++        stdin: "ignore",
++        detached: false,
++      },
++    )
+   }
+ 
+   return ChildProcess.make(command, [], {
+@@ -339,14 +351,22 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
+   })
+ }
+ 
+-// PowerShell expects -EncodedCommand input as UTF-16LE and this wrapper normalizes its pipe encoding to UTF-8.
++// PowerShell expects -EncodedCommand input as UTF-16LE.
++// The wrapper also forces UTF-8 console encoding and collapses the information stream into stdout so shell output stays plain text.
+ function psEncoded(command: string) {
+   return Buffer.from(
+     [
+       "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
+       "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+       "$OutputEncoding = [Console]::OutputEncoding",
++      "$ProgressPreference = 'SilentlyContinue'",
++      "$InformationPreference = 'Continue'",
++      "$WarningPreference = 'Continue'",
++      "$VerbosePreference = 'Continue'",
++      "$DebugPreference = 'Continue'",
++      "& {",
+       command,
++      "} *>&1",
+       "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
+     ].join("\n"),
+     "utf16le",
+diff --git a/packages/opencode/test/tool/bash-compress.test.ts b/packages/opencode/test/tool/bash-compress.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9bfcab5412043852f23d3e42b1dbaf0d881f5764
+--- /dev/null
++++ b/packages/opencode/test/tool/bash-compress.test.ts
+@@ -0,0 +1,78 @@
++import { describe, expect, test } from "bun:test"
++import { compressVisibleOutput, normalizePowerShellOutput } from "../../src/tool/bash-compress"
++
++describe("tool.bash-compress", () => {
++  test("decodes PowerShell CLIXML with the standard header", () => {
++    const clixml = [
++      "#< CLIXML",
++      '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">',
++      "  <Obj RefId=\"0\">",
++      "    <MS>",
++      '      <S N="Message">Saved b64_raw.txt (2664 chars)</S>',
++      '      <S N="Source">Write-Host</S>',
++      '      <S N="ForegroundColor">Gray</S>',
++      '      <S N="BackgroundColor">Black</S>',
++      "    </MS>",
++      "  </Obj>",
++      "</Objs>",
++    ].join("\n")
++
++    const result = compressVisibleOutput(clixml)
++
++    expect(result.text).toContain("Saved b64_raw.txt (2664 chars)")
++    expect(result.text).toContain("powershell-clixml")
++    expect(result.text).not.toContain("omitted")
++  })
++
++  test("decodes inline PowerShell information records", () => {
++    const clixml = [
++      "============================================================",
++      "============================================================",
++      '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="information" RefId="0"><ToString>============================================================</ToString><Props><Obj N="MessageData" RefId="1"><ToString>============================================================</ToString><Props><S N="Message">============================================================</S><B N="NoNewLine">false</B><S N="ForegroundColor">Gray</S><S N="BackgroundColor">Black</S></Props></Obj><S N="Source">H:\\FRCheck\\scripts\\deploy.ps1</S></Props></Obj><Obj S="information" RefId="3"><ToString>  1/4  BUILD</ToString><Props><Obj N="MessageData" RefId="4"><ToString>  1/4  BUILD</ToString><Props><S N="Message">  1/4  BUILD</S><B N="NoNewLine">false</B><S N="ForegroundColor">Gray</S><S N="BackgroundColor">Black</S></Props></Obj><S N="Source">H:\\FRCheck\\scripts\\deploy.ps1</S></Props></Obj><Obj S="information" RefId="6"><ToString>============================================================</ToString><Props><Obj N="MessageData" RefId="7"><ToString>============================================================</ToString><Props><S N="Message">============================================================</S><B N="NoNewLine">false</B><S N="ForegroundColor">Gray</S><S N="BackgroundColor">Black</S></Props></Obj><S N="Source">H:\\FRCheck\\scripts\\deploy.ps1</S></Props></Obj></Objs>',
++    ].join("\n")
++
++    const result = compressVisibleOutput(clixml)
++
++    expect(result.text).toContain("  1/4  BUILD")
++    expect(result.text).toContain("powershell-clixml")
++    expect(result.text).not.toContain("ForegroundColor")
++    expect(result.text).not.toContain("H:\\FRCheck\\scripts\\deploy.ps1")
++    expect(result.text.match(/============================================================/g)?.length).toBeGreaterThanOrEqual(2)
++  })
++
++  test("preserves raw stdout interleaved inside an incomplete CLIXML block", () => {
++    const mixed = [
++      '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="information" RefId="0"><ToString>  3/4  TRANSFER</ToString><Props><S N="Message">  3/4  TRANSFER</S>',
++      "============================================================",
++      "  4/4  RUN",
++      "============================================================",
++      "  /opt/incons/cs-tomcat8-28083/webapps/webroot/WEB-INF/embed/finedb",
++      "  /opt/incons/cs-tomcat8-28083/webapps/webroot/WEB-INF/embed/finedb/db.script",
++      "  DONE",
++      '</Props></Obj></Objs>',
++    ].join("\n")
++
++    const result = compressVisibleOutput(mixed)
++
++    expect(result.text).toContain("  /opt/incons/cs-tomcat8-28083/webapps/webroot/WEB-INF/embed/finedb")
++    expect(result.text).toContain("  DONE")
++    expect(result.text).not.toBe("<high-entropy powershell-clixml>  3/4  TRANSFER</high-entropy>")
++  })
++
++  test("normalizes plain PowerShell CLIXML to visible text", () => {
++    const raw = `#< CLIXML
++<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">
++<Obj S="information" RefId="1"><TNRef RefId="0" />
++<ToString>VISIBLE_INFO</ToString>
++<Props><S N="Message">VISIBLE_MESSAGE</S></Props></Obj>
++</Objs>`
++
++    const clean = normalizePowerShellOutput(raw)
++
++    expect(clean).toContain("VISIBLE_INFO")
++    expect(clean).toContain("VISIBLE_MESSAGE")
++    expect(clean).not.toContain("<Obj")
++    expect(clean).not.toContain("<Objs")
++    expect(clean).not.toContain("CLIXML")
++  })
++})
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index e64fd36c390a9455f2684ebff674a80ed0df80f3..4fad26920207c1ef006d20edbf5975d2cc9baa62 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -1269,6 +1269,33 @@ describe("tool.shell abort", () => {
+       }),
+     )
+   }
++
++  for (const item of ps) {
++    test(
++      `keeps PowerShell output as plain text [${item.label}]`,
++      withShell(item, async () => {
++        await WithInstance.provide({
++          directory: projectRoot,
++          fn: async () => {
++            const bash = await initShell()
++            const result = await Effect.runPromise(
++              bash.execute(
++                {
++                  command: "Write-Host '1/4 BUILD'; Write-Information '2/4 EXPORT'; Write-Host '3/4 TRANSFER'; Write-Host '4/4 RUN'",
++                  description: "Write staged plain text",
++                },
++                ctx,
++              ),
++            )
++            expect(result.output).toContain("1/4 BUILD")
++            expect(result.output).toContain("2/4 EXPORT")
++            expect(result.output).toContain("3/4 TRANSFER")
++            expect(result.output).toContain("4/4 RUN")
++          },
++        })
++      }),
++    )
++  }
+ })
+ 
+ describe("tool.shell truncation", () => {

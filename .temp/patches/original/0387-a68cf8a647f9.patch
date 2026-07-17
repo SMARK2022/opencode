@@ -1,0 +1,242 @@
+From a68cf8a647f931a3e48de1141907ff66376362e9 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 6 Jul 2026 17:57:17 +0800
+Subject: [PATCH] =?UTF-8?q?feat(goal):=20=E5=B7=A5=E5=85=B7=E6=94=AF?=
+ =?UTF-8?q?=E6=8C=81=20get=20=E6=A8=A1=E5=BC=8F=20+=20MAX=5FOBJECTIVE=5FCH?=
+ =?UTF-8?q?ARS=20=E6=8F=90=E5=8D=87=E8=87=B3=206400=20+=20=E8=AE=A1?=
+ =?UTF-8?q?=E8=B4=B9=E9=94=99=E8=AF=AF=E6=97=A5=E5=BF=97?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+goal 工具 status 参数改为 optional，无参数时返回当前 goal 的完整信息
+（objective/status/tokensUsed/tokenBudget/remainingTokens/timeUsedSeconds），
+有参数时保持原有 update 行为。合并 Codex get_goal + update_goal 描述为
+单工具 goal.txt。status 字段增加 .annotate({ description }) 与其他工具
+schema 模式一致。
+
+MAX_OBJECTIVE_CHARS 从 4000 提升至 6400，支持更复杂的 goal 描述。
+goal.ts:112 错误消息使用模板字面量自动传播新值。
+
+prompt.ts accountUsage 从 Effect.ignore 改为 Effect.catchDefect +
+slog.error：accountUsage 返回 Effect<void>（error=never），Effect.ignore
+不捕获 defect，DB 运行时错误会被静默丢失。catchDefect 记录日志便于
+诊断 token 计费丢失。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+index d09217af65cca60df8f3b415885a896ce48eda6b..e0f37ba3525739fe8c1dffd06d967218cb879d73 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+@@ -144,7 +144,7 @@ export function DialogGoalMenu(props: DialogGoalProps) {
+       options={[
+         {
+           title: "Edit objective",
+-          // 截断 description 避免 4000 字符 objective 在选项行中换行导致 rows() 计算不准
++          // 截断 description 避免 6400 字符 objective 在选项行中换行导致 rows() 计算不准
+           description: goal()?.objective ? Locale.truncate(goal()!.objective, 60) : undefined,
+           value: "edit",
+           onSelect: () => {
+diff --git a/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx b/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
+index 7e01d221aa6b261a7c4ee32ba3c145735ad161e8..9eb57f7cccb47c5aa1a963f01cc4e2a29d2d7530 100644
+--- a/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
++++ b/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
+@@ -133,7 +133,7 @@ export function DialogPrompt(props: DialogPromptProps) {
+             if (voiceInputBusy()) return
+             props.onConfirm?.(textarea.plainText)
+           }}
+-          // minHeight=3 保证空态有足够视觉空间；maxHeight=15 让长文本（如 4000 字符的 goal objective）
++          // minHeight=3 保证空态有足够视觉空间；maxHeight=15 让长文本（如 6400 字符的 goal objective）
+           // 能随内容增长显示更多行，避免固定 3 行只能看到一小段。与主 Prompt 的 minHeight+maxHeight 模式一致。
+           // 对话框 medium 宽度 60 chars，减去 padding 各 2 chars 后 textarea 可用 56 chars 宽。
+           // maxHeight=15 在 24 行终端中 title(1)+gap(1)+textarea(15)+footer(2)+padding(2)=21 行仍 fits。
+diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
+index a8a6426ea31a256d54427d74dd8ff1475bc731f2..9bfccb0f29d312b8ffd839514fb3a4eb57088d55 100644
+--- a/packages/opencode/src/session/goal.ts
++++ b/packages/opencode/src/session/goal.ts
+@@ -8,9 +8,9 @@ import { eq } from "drizzle-orm"
+ import { Effect, Layer, Context, Schema, Option } from "effect"
+ import { optionalOmitUndefined } from "@opencode-ai/core/schema"
+ 
+-// goal objective 最大字符数，与 Codex 的 4000 字符限制对齐，
+-// 防止超长 objective 污染上下文或触发 provider 请求体过大
+-export const MAX_OBJECTIVE_CHARS = 4000
++// goal objective 最大字符数，比 Codex 的 4000 字符更宽松，
++// 支持更复杂的 goal 描述（如完整设计文档摘要）
++export const MAX_OBJECTIVE_CHARS = 6400
+ 
+ // goal 状态：只有 active 会触发自动续跑；
+ // paused/blocked/complete 均为停止态，loop 正常退出不续跑
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 1de916f1366829ba65f67867f671f3714d834b02..4ce986cee55d7e4b94cdc62fbc6b163365316423 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -2524,7 +2524,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                 0,
+                 Math.floor((handle.message.time.completed - handle.message.time.created) / 1000),
+               )
+-              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta).pipe(Effect.ignore)
++              // catchDefect 而非 ignore：accountUsage 返回 Effect<void>（error=never），
++              // 但 DB 操作会抛 defect（运行时错误）。记录日志而非静默吞掉，便于诊断 token 计费丢失
++              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta).pipe(
++                Effect.catchDefect((defect: unknown) =>
++                  slog.error("goal accountUsage defect", { defect: String(defect) }),
++                ),
++              )
+             }
+             if (result === "compact") {
+               // Provider overflow happens after a real assistant attempt, so run
+diff --git a/packages/opencode/src/tool/goal.ts b/packages/opencode/src/tool/goal.ts
+index 8c27a2c6fae558773610f2335856a85310e7d0bd..431dff78c07143e660aaed3b3c20fba14beb8075 100644
+--- a/packages/opencode/src/tool/goal.ts
++++ b/packages/opencode/src/tool/goal.ts
+@@ -1,11 +1,18 @@
+ import * as Tool from "./tool"
+ import DESCRIPTION from "./goal.txt"
+ import type { SessionGoal } from "@/session/goal"
+-import { Effect, Schema } from "effect"
++import { Effect, Option, Schema } from "effect"
+ 
+-// goal 工具参数：status 只接受 complete 或 blocked
++// goal 工具参数：status 可选。
++// 无 status → get 模式：返回当前 goal 的状态、objective、用量和预算
++// 有 status → update 模式：标记 goal complete 或 blocked
++// 镜像 Codex 的 get_goal + update_goal 合并为单工具设计
+ const Parameters = Schema.Struct({
+-  status: Schema.Literals(["complete", "blocked"] as const),
++  // 与其他工具一致：每个字段都带 .annotate({ description }) 供 JSON Schema 生成
++  status: Schema.optional(Schema.Literals(["complete", "blocked"] as const)).annotate({
++    description:
++      "Set to `complete` when the objective is achieved, or `blocked` when genuinely stuck after at least three consecutive failed attempts. Omit to get the current goal status.",
++  }),
+ })
+ 
+ // goal 工具的执行上下文需要 SessionGoal.Service，
+@@ -14,7 +21,7 @@ export interface GoalToolExtra {
+   goalSvc: SessionGoal.Interface
+ }
+ 
+-// goal 工具：仅允许模型标记 complete 或 blocked。
++// goal 工具：支持 get（无参数）和 update（status 参数）两种模式。
+ // 不允许模型 pause/resume/clear/改预算——这些由用户或系统控制。
+ // 防止模型通过滥用状态来逃避任务
+ export const GoalTool = Tool.define(
+@@ -24,13 +31,45 @@ export const GoalTool = Tool.define(
+     parameters: Parameters,
+     // Effect.orDie 将 GoalError 转为 defect，使 error 类型为 never，
+     // 与 Def.execute 的签名 Effect.Effect<ExecuteResult<M>> 对齐
+-    execute: (params: { status: "complete" | "blocked" }, ctx: Tool.Context) =>
++    execute: (params: { status?: "complete" | "blocked" }, ctx: Tool.Context) =>
+       Effect.gen(function* () {
+         const extra = ctx.extra as GoalToolExtra | undefined
+         if (!extra?.goalSvc) {
+           return yield* Effect.fail(new Error("goal tool requires goalSvc in ctx.extra"))
+         }
+-        // 更新 goal 状态；如果 session 没有 goal 则报错
++
++        // 无 status 参数 → get 模式：返回当前 goal 的完整信息
++        if (params.status === undefined) {
++          const goalOpt = yield* extra.goalSvc.get(ctx.sessionID)
++          if (Option.isNone(goalOpt)) {
++            return {
++              title: "Goal",
++              metadata: {},
++              output: "No goal is currently set for this session.",
++            }
++          }
++          const goal = goalOpt.value
++          // 镜像 Codex get_goal 的响应结构：goal + remaining_tokens
++          const remaining = goal.tokenBudget != null
++            ? Math.max(0, goal.tokenBudget - goal.tokensUsed)
++            : null
++          return {
++            title: "Goal",
++            metadata: {},
++            output: JSON.stringify({
++              goal: {
++                objective: goal.objective,
++                status: goal.status,
++              },
++              tokensUsed: goal.tokensUsed,
++              tokenBudget: goal.tokenBudget ?? "unbounded",
++              remainingTokens: remaining ?? "unbounded",
++              timeUsedSeconds: goal.timeUsedSeconds,
++            }, null, 2),
++          }
++        }
++
++        // 有 status 参数 → update 模式：标记 goal complete 或 blocked
+         yield* extra.goalSvc.set(ctx.sessionID, { status: params.status })
+         // 返回明确消息让模型知道 loop 即将结束
+         return {
+diff --git a/packages/opencode/src/tool/goal.txt b/packages/opencode/src/tool/goal.txt
+index d40b652fe54697e253adfbe174126dd7252016ea..dcf373462fe333b7aac4c5bcf847e6a6c3d1aa07 100644
+--- a/packages/opencode/src/tool/goal.txt
++++ b/packages/opencode/src/tool/goal.txt
+@@ -1,9 +1,13 @@
+-Update the existing goal.
+-Use this tool only to mark the goal achieved or genuinely blocked.
+-Set status to `complete` only when the objective has actually been achieved and no required work remains.
+-Set status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change.
+-If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, set status to `blocked` again.
+-Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; set status to `blocked`.
+-Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.
+-Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.
+-You cannot use this tool to pause, resume, or clear a goal; those status changes are controlled by the user.
++Get the current goal, or update its status.
++
++Call with no arguments to get the current goal for this session, including status, objective, token and elapsed-time usage, and remaining token budget.
++
++Call with `status` to mark the goal achieved or genuinely blocked:
++- Set status to `complete` only when the objective has actually been achieved and no required work remains.
++- Set status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change.
++- If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, set status to `blocked` again.
++- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; set status to `blocked`.
++- Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.
++- Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.
++- You cannot use this tool to pause, resume, or clear a goal; those status changes are controlled by the user.
++- When marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.
+diff --git a/packages/opencode/test/server/httpapi-goal.test.ts b/packages/opencode/test/server/httpapi-goal.test.ts
+index 1294f652649d0d13fe24285debb70eb146deea4f..33b1ca5880754bc0aa8a1818e825b7d6340b35c4 100644
+--- a/packages/opencode/test/server/httpapi-goal.test.ts
++++ b/packages/opencode/test/server/httpapi-goal.test.ts
+@@ -49,14 +49,14 @@ describe("session goal HttpApi", () => {
+         const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
+           method: "POST",
+           headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
+-          // 超过 MAX_OBJECTIVE_CHARS(4000) 的 objective 必须被拒
+-          body: JSON.stringify({ objective: "a".repeat(4001) }),
++          // 超过 MAX_OBJECTIVE_CHARS(6400) 的 objective 必须被拒
++          body: JSON.stringify({ objective: "a".repeat(6401) }),
+         })
+         expect(res.status).toBe(400)
+         const parsed = yield* responseJson(res)
+         expect(parsed).toEqual({
+           name: "GoalError",
+-          data: { message: "goal objective must be at most 4000 characters" },
++          data: { message: "goal objective must be at most 6400 characters" },
+         })
+       }),
+     { git: true, config: { formatter: false, lsp: false } },
+diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
+index 5f0a906d81293efe78dba98561a4ff91094963e7..1e109490fdbdd4f39ab7f768584099ced668f69c 100644
+--- a/packages/opencode/test/session/goal.test.ts
++++ b/packages/opencode/test/session/goal.test.ts
+@@ -102,15 +102,15 @@ it.instance(
+ )
+ 
+ it.instance(
+-  "set with objective over 4000 chars is rejected",
++  "set with objective over 6400 chars is rejected",
+   () =>
+     Effect.gen(function* () {
+       const goalSvc = yield* SessionGoal.Service
+       const sessions = yield* SessionNs.Service
+       const session = yield* sessions.create({})
+ 
+-      // 超过 MAX_OBJECTIVE_CHARS(4000) 的 objective 必须被拒绝
+-      const longObjective = "a".repeat(4001)
++      // 超过 MAX_OBJECTIVE_CHARS(6400) 的 objective 必须被拒绝
++      const longObjective = "a".repeat(6401)
+       const result = yield* goalSvc.set(session.id, { objective: longObjective }).pipe(Effect.exit)
+       expect(Exit.isFailure(result)).toBe(true)
+     }),

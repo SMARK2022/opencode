@@ -1,0 +1,556 @@
+From 97c0f4aa4d1db629465f11129a3978e58f832d48 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Tue, 14 Jul 2026 02:33:17 +0800
+Subject: [PATCH] =?UTF-8?q?doc(tui):=20=E4=BF=AE=E5=A4=8D=20VS=20Code=20?=
+ =?UTF-8?q?=E5=8F=8C=E6=A8=AA=E5=B9=85=E9=97=AE=E9=A2=98=E5=B9=B6=E5=AE=9E?=
+ =?UTF-8?q?=E7=8E=B0=20abort=20=E5=AE=8C=E5=85=A8=E9=9D=99=E9=9F=B3?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/docs/Proposal/tui-agent-loop-sound-surgical-plan.md b/docs/Proposal/tui-agent-loop-sound-surgical-plan.md
+index 4539a17ccd569a92829d604d87de7d0b843c936d..62b7e9b49b7fbfe2857e2c708e0835b6da9ce086 100644
+--- a/docs/Proposal/tui-agent-loop-sound-surgical-plan.md
++++ b/docs/Proposal/tui-agent-loop-sound-surgical-plan.md
+@@ -1,389 +1,211 @@
+-# TUI Agent Loop 提示音甜点级实现方案
++# TUI 提示音与通知行为修复方案
+ 
+-> 状态：第 4 轮方案审计候选，只用于后续 TDD 实施。本文件不代表生产代码已修改。
+-> 第 1-3 轮因过度设计（Session settlement 状态机、KV provider 并发重构、compat 通知矩阵、exit flush barrier 等）已全部否决。
++> 状态：方案审计候选，只用于后续 TDD 实施。本文件不代表生产代码已修改。
+ >
+-> 日期：2026-07-13
++> 日期：2026-07-14
+ >
+-> 硬约束：本阶段只调研和设计；不实施、不 commit、不 push。未来实现不超过 7 个文件、净增约 100 行，不新增依赖、数据库迁移、SDK 生成或公开 plugin interface。
+->
+-> 指定声源：优先使用 `.temp/testing/sfx/bun_tui_chatgpt_error_sfx.zip` 内的 `chatgpt_error_tui_pcm16_mono_48k.wav`；单 Bun executable 使用已提供的 `chatgpt_error_sfx_embedded.ts` 字节模块，不把 WAV 作为运行时外部文件。
+-
+-## 1. 推荐方案摘要
+-
+-需求只有三件事：agent loop 结束响一声、abort 不响、Ctrl+P 可开关且默认开。
+-
+-当前主 TUI 已有完整链路，不需要改 Session、Runner、KV provider 或 exit 生命周期：
+-
+-```text
+-session.status busy/retry -> idle
+-  -> internal:notifications
+-  -> api.attention.notify({ sound: { name: "done" } })
+-  -> createTuiAttention
+-  -> TuiAudio
+-  -> @opentui/core Audio
+-  -> 系统默认输出设备
+-```
+-
+-做三件事：
+-
+-1. 把 built-in `done` 从 `bip-bop-01.mp3` 换成内嵌 WAV bytes；其余槽位不变。
+-2. 给 `TuiAudio` 加一个 keyed bytes loader，复用现有 cache 和 engine。
+-3. Ctrl+P 加 `app.toggle.sound_effects`，模式与现有 `app.toggle.animations` 完全一致：`kv.get/set("attention_sound_enabled", boolean)`，默认 true。attention host 在播放前读同一 KV key 做 gate。
+-
+-不改 KV provider、不改 exit、不搞 compat 矩阵。`attention.enabled` 默认从 false 改为 true（落实 `specs/v2/notifications.md` 已有目标）。
++> 硬约束：本阶段只调研和设计；不实施、不 commit、不 push。未来实现不超过 5 个文件、净增约 50 行，不新增依赖、数据库迁移、SDK 生成或公开 plugin interface。
+ 
+-abort 不响：现有 `notifications.ts` 已在 error 后抑制 done，abort 走 error attention。保持不变。
++## 1. 需求
+ 
+-预计 7 个文件：
++两个问题：
+ 
+-1. `packages/opencode/src/cli/cmd/tui/util/audio.ts`
+-2. `packages/opencode/src/cli/cmd/tui/attention.ts`
+-3. `packages/opencode/src/cli/cmd/tui/app.tsx`
+-4. `packages/opencode/src/cli/cmd/tui/config/tui.ts`
+-5. `packages/opencode/test/cli/cmd/tui/attention.test.ts`
+-6. `packages/opencode/test/config/tui.test.ts`
+-7. `packages/opencode/specs/tui-plugins.md`
++1. **VS Code 双横幅从源头修复** — `attention.ts` 当前总是传默认 title `"opencode"` 给 `triggerNotification`。OpenTUI OSC 99 在 title 非空时发送 title + body 两个 payload，VS Code 某些适配器将它们渲染成两个横幅。修复方式：不传默认 title，让 OpenTUI 只发一个 body payload。不关闭 `notifications` 默认值。
++2. **abort 完全静音** — 用户手动 abort 时不播放任何声音（既不是 done 也不是 error），只保留视觉通知。
+ 
+ ## 2. 已阅读并确认的现有文件
+ 
+-### 2.1 核心链路
+-
+-| 文件 | 已确认事实 |
+-| --- | --- |
+-| `src/cli/cmd/tui/feature-plugins/system/notifications.ts` | busy/retry→idle 触发 done；error 后抑制紧邻 idle 的 done；subagent 用 `subagent_done`；abort 走 error attention 不发 done |
+-| `src/cli/cmd/tui/attention.ts` | `createTuiAttention({ renderer, config, kv })`；built-in pack 的 `done` 当前是 `bip-bop-01.mp3`；`playSound` 遍历 candidates 调 `audio.loadSoundFile`；`soundVolume` 检查 `config.attention.sound` |
+-| `src/cli/cmd/tui/util/audio.ts` | lazy engine、按 path Promise cache、`play()` 时 `start()` 默认设备、`dispose()` |
+-| `src/cli/cmd/tui/app.tsx` | `appCommands` 是 `createMemo`，直接内联 `kv.get/set` 做 toggle；`app.toggle.animations`、`app.toggle.paste_summary` 等都是同一模式 |
+-| `src/cli/cmd/tui/context/kv.tsx` | Solid `createStore`，`get` 读 store，`set` 写 store + 排队 Flock + atomic rename；现有 `animations_enabled` 等 boolean preference 都直接用 |
+-| `src/cli/cmd/tui/config/tui.ts` | resolved defaults 在 `:331` 行：`enabled: acc.result.attention?.enabled ?? false` |
+-| `src/cli/cmd/tui/config/keybind.ts` | `command_list` 默认 `ctrl+p` → `command.palette.show` |
+-| `src/cli/cmd/tui/context/command-palette.tsx` | 读取 reachable `namespace:"palette"` commands |
+-
+-### 2.2 测试
+-
+-| 文件 | 已有保障 |
++| 文件 | 相关性 |
+ | --- | --- |
+-| `test/cli/cmd/tui/attention.test.ts` | focus、sound/notification 独立开关、volume clamp、lazy load、fallback、sound pack、KV pack、failure containment、dispose；`FakeKV` 和 `FakeAudioEngine` 可直接扩展 |
+-| `test/config/tui.test.ts` | attention defaults；当前断言 `enabled: false` |
+-
+-### 2.3 资产与构建
++| `src/cli/cmd/tui/attention.ts:55,210-213` | `DEFAULT_TITLE = "opencode"`；`triggerNotification` 总是收到非空 title，导致 OSC 99 双 payload |
++| `src/cli/cmd/tui/feature-plugins/system/notifications.ts` | 通知触发入口；error handler 对 `MessageAbortedError` 仍播放 error 音效 |
++| `src/effect/runner.ts:188-192` | `cancel` 先 `idleIfCurrent()` 后 `Fiber.interrupt()`，是通用并发契约不能交换 |
++| `src/session/processor.ts:991-1017` | `halt` 先发 `session.error` 后发 `session.status idle`；`MessageAbortedError` 在此产生 |
++| `src/cli/cmd/tui/config/tui.ts:332` | 当前 `notifications` 默认值 |
++| `test/cli/cmd/tui/attention.test.ts:176,191,253` | 3 处无显式 title 的断言 `title: "opencode"` 需改为 `title: undefined`；line 204 显式传了 `title: "opencode"` 不改 |
++| `test/cli/cmd/tui/notifications.test.ts` | abort 测试需更新为 `sound: false` |
++| OpenTUI `terminal.zig:writeNotification` | 确认 OSC 99 在 title 非空时发两个 payload，title 为 null/空时只发 body |
+ 
+-| 已确认事实 |
+-| --- |
+-| ZIP 内 WAV：PCM16、mono、48kHz、56,140 bytes、SHA-256 `02fbf5d8...`、duration 0.586s |
+-| `chatgpt_error_sfx_embedded.ts` 的 `errorSoundBytes()` 产出相同 hash |
+-| `bun build --compile` 单文件编译成功 |
+-| OpenTUI 0.3.4 `Audio.loadSound(Uint8Array)` 可用；无 device 选择时 `start()` 用系统默认设备 |
+-| 默认 volume 0.4，peak 约 0.16，不 clip |
++## 3. 推荐最小实现方案
+ 
+-## 3. 推荐最小实现
++### 3.1 `attention.ts`：不传默认 title
+ 
+-### 3.1 `util/audio.ts`：keyed bytes loader
+-
+-复用现有 `sounds` Map cache：
++当前（`attention.ts:210-213`）：
+ 
+ ```ts
+-// 直接从 bytes 加载并缓存，避免落临时文件；key 必须稳定且唯一
+-export function loadSound(key: string, bytes: () => Uint8Array | Promise<Uint8Array>) {
+-  const current = getAudio()
+-  if (!current) return Promise.resolve(null)
+-  const cached = sounds.get(key)
+-  if (cached) return cached
+-  const task = Promise.resolve(bytes())
+-    .then((value) => current.loadSound(value))
+-    .catch((error) => {
+-      log.debug("failed to load tui sound bytes", { key, error })
+-      return null
+-    })
+-  sounds.set(key, task)
+-  return task
+-}
++return input.renderer.triggerNotification(
++  message,
++  normalizeText(request.title, DEFAULT_TITLE, TITLE_LIMIT),
++)
+ ```
+ 
+-让 `loadSoundFile` 复用它：
++`normalizeText` 在 `request.title` 为空时回退到 `DEFAULT_TITLE`（`"opencode"`），导致 `triggerNotification` 总是收到非空 title。
+ 
+-```ts
+-export function loadSoundFile(file: string) {
+-  return loadSound(file, () => Bun.file(file).bytes())
+-}
+-```
+-
+-### 3.2 `attention.ts`：内嵌 bytes + KV sound gate
+-
+-在文件内放置 verified private payload（来自 `.temp/testing/sfx/chatgpt_error_sfx_embedded.ts`）：
++改为：
+ 
+ ```ts
+-// 内嵌完成提示音的 WAV 字节；单消费者私有数据，不新增浅模块
+-// 直接 bytes 避免 temp file 覆盖/残留/Windows lock，保证 single Bun executable 无外部依赖
+-const ERROR_SFX_WAV_BASE64 = "..." // 56,140 bytes 的 Base64
+-
+-function errorSoundBytes() {
+-  return new Uint8Array(Buffer.from(ERROR_SFX_WAV_BASE64, "base64"))
+-}
++// 不传默认 title：OpenTUI OSC 99 在 title 非空时发送 title + body 两个 payload，
++// 某些终端（如 VS Code）将它们渲染成两个通知横幅。
++// 传 undefined 让 OpenTUI 只发送一个 body payload。
++const title = normalizeText(request.title, "", TITLE_LIMIT)
++return input.renderer.triggerNotification(message, title || undefined)
+ ```
+ 
+-built-in `done` 从 path 改为 embedded source：
++`normalizeText` 在 `request.title` 为空时返回 `""`，`"" || undefined` 求值为 `undefined`。OpenTUI 收到 `undefined` 后只发送 body payload。
+ 
+-```ts
+-// done 槽位使用内嵌 bytes 而非 mp3 path；其余槽位不变
+-type SoundSource = string | { key: string; bytes: () => Uint8Array }
+-
+-const BUILTIN_PACK: RegisteredSoundPack = {
+-  ...
+-  sounds: {
+-    default: defaultSoundPath,
+-    question: questionSoundPath,
+-    permission: permissionSoundPath,
+-    error: errorSoundPath,
+-    done: { key: "opencode.default:done:chatgpt-error", bytes: errorSoundBytes },
+-    subagent_done: subagentDoneSoundPath,
+-  },
+-}
+-```
+-
+-`playSound` 对 string 调 `loadSoundFile`，对 embedded 调 `loadSound`：
++`DEFAULT_TITLE` 常量保留（其他地方可能引用），但不再用于 `triggerNotification` 的回退。
+ 
+-```ts
+-async function playSound(name: TuiAttentionSoundName, volume: number) {
+-  // KV 持久化总音效开关；默认 true，Ctrl+P command 直接读写此 key
+-  const soundEnabled = input.kv?.get<boolean>("attention_sound_enabled", true) ?? true
+-  if (!soundEnabled) return false
+-  try {
+-    for (const source of soundCandidates(name)) {
+-      const current = typeof source === "string"
+-        ? await audio.loadSoundFile(source).catch(...)
+-        : await audio.loadSound(source.key, source.bytes).catch(...)
+-      if (disposed) return false
+-      if (current == null) continue
+-      if (audio.play(current, { volume }) != null) return true
+-    }
+-    return false
+-  } catch (error) {
+-    log.debug("failed to play attention sound", { error })
+-    return false
+-  }
+-}
+-```
++### 3.2 `notifications.ts`：abort 静音
+ 
+-`soundCandidates` 返回 `SoundSource[]` 而非 `string[]`，filter 逻辑不变。
+-
+-不需要 `soundEnabled()` / `toggleSound()` 方法 — app.tsx 直接读写 KV，跟 animations 完全一样。
+-
+-### 3.3 `app.tsx`：Ctrl+P command
+-
+-在现有 `appCommands` 数组加一项，模式与 `app.toggle.animations` 完全一致：
++当前 error handler（行 100-105）：
+ 
+ ```ts
+-// 总音效开关，持久化到 KV；默认启用，与 animations toggle 同一模式
+-{
+-  name: "app.toggle.sound_effects",
+-  title: kv.get("attention_sound_enabled", true) ? "Disable sound effects" : "Enable sound effects",
+-  category: "System",
+-  run: () => {
+-    kv.set("attention_sound_enabled", !kv.get("attention_sound_enabled", true))
+-    dialog.clear()
+-  },
+-},
++api.event.on("session.error", (event) => {
++  const sessionID = event.properties.sessionID
++  if (!sessionID) return
++  if (!active.delete(sessionID)) return
++  notify(api, sessionID, sessionErrorMessage(event.properties.error), "error")
++})
+ ```
+ 
+-`appCommands` 是 `createMemo`，`kv.get` 读 Solid store，title 随 toggle 自动更新。不需要额外 reactive wiring。
+-
+-### 3.4 `config/tui.ts`：默认启用
++改为：
+ 
+ ```ts
+-enabled: acc.result.attention?.enabled ?? true
+-```
+-
+-其余 defaults 不变（`notifications=true`、`sound=true`、`volume=0.4`）。
+-
+-显式 `attention.enabled=false` 继续 hard disable 整个 attention host。
+-
+-## 4. 必须保持的既有行为
+-
+-1. no-op idle 不通知。
+-2. busy/retry 后 idle 才算一次 done。
+-3. error 后紧邻 idle 不发 done（abort 走 error attention，不发 done）。
+-4. subagent 用 `subagent_done`，root 用 `done`。
+-5. config override → active pack → builtin pack 的 fallback 顺序。
+-6. public `TuiAttentionSoundPack` 继续只接受 path string。
+-7. text sanitize、focus skip、volume clamp、renderer dispose 不变。
+-8. `attention.enabled=false` 仍是 hard opt-out。
+-
+-## 5. 行为级 TDD 计划
+-
+-### 5.1 先写红测
+-
+-#### A. 默认启用
+-
+-`test/config/tui.test.ts`：
+-
+-```text
+-完全无 attention 配置 -> enabled === true
+-显式 enabled:false -> false
++api.event.on("session.error", (event) => {
++  const sessionID = event.properties.sessionID
++  if (!sessionID) return
++  if (!active.delete(sessionID)) return
++  const isAbort = event.properties.error?.name === "MessageAbortedError"
++  // abort 完全静音：用户主动取消，不需要声音提示
++  notify(api, sessionID, sessionErrorMessage(event.properties.error), isAbort ? false : "error")
++})
+ ```
+ 
+-当前实现第一条失败，因为默认是 false。
+-
+-#### B. embedded done source + exact asset identity
+-
+-扩展 `FakeAudioEngine` 支持 bytes loader：
++`notify` 的 `sound` 参数为 `false` 时，`attention.ts` 的 `soundVolume` 返回 `undefined`，不播放声音，视觉通知不受影响。
+ 
+-```text
+-notify(sound.name="done")
+--> FakeAudioEngine 收到 bytes
+--> bytes.length === 56_140
+--> sha256(bytes) === 02fbf5d8967068622673c475ed367dabfc2eeae4e4b1991c3c443e3881b42e01
+--> 只 play 一次
+-```
+-
+-当前失败，因为 `done` 仍是 mp3 path，且 audio wrapper 没有 bytes loader。
++### 3.3 `config/tui.ts`：保持 `notifications: true`
+ 
+-#### C. KV sound toggle
++不修改。VS Code 双横幅已从 `attention.ts` 源头修复，不需要关闭通知。
+ 
+-```text
+-kv.get("attention_sound_enabled") === undefined -> 默认播放
+-kv.set("attention_sound_enabled", false) -> 后续 sound 不 load/play
+-kv.set("attention_sound_enabled", true) -> 恢复播放
+-notification 不随 sound toggle 关闭
+-```
++### 3.4 工作区已有改动的处理
+ 
+-当前失败，因为 host 不读 `attention_sound_enabled`。
++当前工作区有之前未授权的 staged 改动。需要：
+ 
+-#### D. cache
++| 文件 | 当前 staged 状态 | 目标状态 |
++| --- | --- | --- |
++| `notifications.ts` | 有 completedTurn/errored 删除/question 静音/subagent 静音 | 保留 + 增加 abort 静音 |
++| `notifications.test.ts` | 有更新测试 | 保留 + 更新 abort 断言为 `sound: false` |
++| `config/tui.ts` | `notifications: false`（错误） | 恢复为 HEAD（`notifications: true`） |
++| `tui.test.ts` | `notifications: false`（错误） | 恢复为 HEAD（`notifications: true`） |
++| `specs/tui-plugins.md` | 有描述改动 | 恢复为 HEAD |
++| `attention.ts` | 无改动 | 新增 title 修复 |
++| `attention.test.ts` | 无改动 | 新增 title 断言更新 |
+ 
+-```text
+-同一 embedded done 连续两次 -> bytes factory 只调用一次，play 两次
+-```
+-
+-保证 Base64 不重复 decode。
+-
+-### 5.2 保持既有绿测
+-
+-所有现有 attention/notifications/config 测试不得删除或放宽。
+-
+-## 6. 正常路径
+-
+-```text
+-TUI 启动
+-  -> TuiConfig attention.enabled=true
+-  -> KV attention_sound_enabled 缺失 -> 默认 true
+-
+-Agent loop busy/retry -> idle
+-  -> notifications 请求 sound name=done
+-  -> attention 检查 master enabled + KV sound enabled
+-  -> embedded ChatGPT WAV bytes
+-  -> TuiAudio 按 key 首次 Base64 decode + native decode
+-  -> Audio.start 系统默认设备
+-  -> volume=0.4 播放约 0.584s
+-
+-第二次 completion 命中 Promise cache
+-```
+-
+-## 7. 错误路径
+-
+-| 失败 | 处理 |
+-| --- | --- |
+-| Base64 decode throw | attention catch，debug log，sound=false |
+-| native WAV decode 返回 null | 无 fallback candidate，sound=false |
+-| output device 不存在 | `Audio.start()` false，sound=false |
+-| KV 未 ready | `kv?.get(..., true) ?? true`，默认播放 |
+-
+-不阻塞 toast，不重试，不影响 Agent outcome。
+-
+-## 8. 并发、退出与清理
+-
+-- 同一 embedded key 的并发 load 共享 Promise cache。
+-- 多 TUI 进程各有独立 Audio engine；KV 文件写入受现有 Flock 保护。一个进程的 toggle 不实时广播给另一个进程；下次启动读取新值。这是现有 KV 语义，不在本次扩展。
+-- 现有 `onBeforeExit` 顺序不变：dispose plugins → dispose attention → `TuiAudio.dispose()`。
+-- 不创建 temp WAV，没有 unlink。
+-
+-## 9. 安全边界
+-
+-1. Base64 是 build-time trusted static bytes，不接受用户输入。
+-2. 不执行 shell，不拼命令。
+-3. 不写共享 `/tmp`。
+-4. sound failure 不进入 Session error bus。
+-5. `attention.enabled=false` 优先于 KV sound toggle。
+-
+-## 10. 中文注释计划
+-
+-预计手写有效改动约 60-80 行，至少新增 12-16 行分布式中文注释：
+-
+-1. `attention.ts`：解释内嵌 bytes 而非 temp materialization 的安全/单文件原因。
+-2. `attention.ts`：解释 KV sound gate 默认 true 的语义。
+-3. `util/audio.ts`：解释 cache check 必须早于 bytes factory。
+-4. `app.tsx`：解释 command 与 animations 同模式。
+-5. `config/tui.ts`：解释默认 true 落实 v2 目标。
+-6. tests：在 asset hash、KV toggle、cache 断言附近解释回归边界。
++## 4. 必须保持的既有行为
+ 
+-## 11. 建议验证命令
++1. `Runner.cancel` 的 `idleIfCurrent()` → `Fiber.interrupt()` 顺序不变。
++2. `attention.ts` 的 `notify` 接口不变，`sound: false` 已有支持。
++3. `TuiAttentionSoundNames` 的 6 个槽位不删除。
++4. `DEFAULT_TITLE` 常量保留（不删除，只是不再用于 triggerNotification 回退）。
++5. `attention.enabled=false` 仍是 hard opt-out。
++6. `attention.notifications=true` 默认不变。
++7. 正常完成播放 `done`，模型错误播放 `error`，timeout 播放 `error`。
++8. question/permission 保留视觉通知（只静音）。
++9. subagent 完成静默。
++10. `completedTurn` 检查保留（防止 abort 误播 done）。
++
++## 5. 预计修改文件
++
++| # | 文件 | 具体改动 |
++| ---: | --- | --- |
++| 1 | `src/cli/cmd/tui/attention.ts` | `triggerNotification` 传 `undefined` 而非 `DEFAULT_TITLE` |
++| 2 | `src/cli/cmd/tui/feature-plugins/system/notifications.ts` | error handler 对 `MessageAbortedError` 传 `sound: false` |
++| 3 | `test/cli/cmd/tui/attention.test.ts` | 3 处无显式 title 的 `title: "opencode"` 改为 `title: undefined`（line 204 显式传 title 不改） |
++| 4 | `test/cli/cmd/tui/notifications.test.ts` | abort 测试断言 `sound: false` |
++| 5 | `src/cli/cmd/tui/config/tui.ts` | 恢复为 HEAD（`notifications: true`） |
++| 6 | `test/config/tui.test.ts` | 恢复为 HEAD（`notifications: true`） |
++| 7 | `specs/tui-plugins.md` | 恢复为 HEAD |
++
++实际 vs HEAD 有改动的文件：4 个（attention.ts、notifications.ts、attention.test.ts、notifications.test.ts）。其余 3 个恢复为 HEAD。
++
++## 6. 正常路径、错误路径、边界处理
++
++| 场景 | 事件顺序 | 声音 | 视觉通知 |
++| --- | --- | --- | --- |
++| 正常完成 | `busy → idle`（assistant 已 completed） | done | 有（title 为 session 标题或 undefined） |
++| 用户 abort | `busy → idle`（未 completed）→ `session.error` → `idle` | **无声** | 有 "Session aborted" |
++| 模型错误 | `busy → session.error` → `idle` | error | 有 "Session error" |
++| 模型超时 | `busy → session.error` → `idle` | error | 有 "Model stopped responding" |
++| question | `question.asked` | 无声 | 有 |
++| permission | `permission.asked` | 无声 | 有 |
++| subagent 完成 | `busy → idle`（有 parentID） | 无声 | 无 |
++
++## 7. 行为级测试计划
++
++### 先写红测
++
++1. **abort 静音**：`busy → idle（未 completed）→ session.error（MessageAbortedError）→ idle` → `sound: false`，不出现 `done` 也不出现 `error`
++2. **VS Code 单横幅**：`notify({ message: "hello" })`（无 title）→ `triggerNotification` 收到 `title: undefined`
++3. **显式 title 仍传**：`notify({ title: "My Title", message: "hello" })` → `triggerNotification` 收到 `title: "My Title"`
++4. 正常完成 → done
++5. 模型错误 → error
++6. question/permission → `sound: false`
++7. subagent → 零通知
++
++### 当前实现下暴露的缺口
++
++- 测试 1：当前 error handler 对 `MessageAbortedError` 传 `"error"`，不传 `false`
++- 测试 2：当前 `triggerNotification` 总是收到 `"opencode"`，不收到 `undefined`
++- 测试 3：当前 `normalizeText` 回退到 `DEFAULT_TITLE`，显式 title 测试不受影响
++
++## 8. 验证命令
+ 
+ ```bash
+ cd packages/opencode
++bun test test/cli/cmd/tui/notifications.test.ts
+ bun test test/cli/cmd/tui/attention.test.ts
+ bun test test/config/tui.test.ts
+ bun typecheck
+-bun run script/build.ts --single --skip-embed-web-ui
+ ```
+ 
+-人工验证：
++## 9. 预估
+ 
+-1. 默认首次启动有 completion sound。
+-2. Ctrl+P → Disable sound effects 后静音。
+-3. Ctrl+P → Enable sound effects 后恢复。
+-4. restart 后保持选择。
+-5. abort 不响。
++| 项目 | 数值 |
++| --- | --- |
++| 实际改动文件（vs HEAD） | 4 |
++| 恢复 HEAD 文件 | 3 |
++| 净增 | 约 20-30 行 |
++| 删除 | 约 10 行 |
++| 生成文件 | 无 |
++| 迁移 | 无 |
+ 
+-## 12. 文件级实施清单
++## 10. 真实风险与开放问题
+ 
+-| # | 文件 | 具体改动 | 预估增删 |
+-| ---: | --- | --- | ---: |
+-| 1 | `src/cli/cmd/tui/util/audio.ts` | keyed bytes loader；file loader 复用 | +10~-4 |
+-| 2 | `src/cli/cmd/tui/attention.ts` | private embedded payload、done 改 bytes source、KV sound gate | +28~-6 |
+-| 3 | `src/cli/cmd/tui/app.tsx` | `app.toggle.sound_effects` command | +8 |
+-| 4 | `src/cli/cmd/tui/config/tui.ts` | enabled 默认 true | +1~-1 |
+-| 5 | `test/cli/cmd/tui/attention.test.ts` | embedded hash、KV toggle、cache 行为测试 | +45~60 |
+-| 6 | `test/config/tui.test.ts` | 默认 true | +2~-1 |
+-| 7 | `specs/tui-plugins.md` | 默认 true 说明 | +1~-1 |
++### 10.1 OSC 99 title 聚合
+ 
+-```text
+-文件数：7
+-净增：约 95-117 行（含 1 行超长 Base64 数据行）
+-```
++OpenTUI OSC 99 在 title 非空时发送 title + body 两个 payload，它们共享同一个 notification ID。标准实现应该聚合成一个通知。不传 title 后只发 body，不存在聚合问题。
++
++### 10.2 `normalizeText` 回退行为
+ 
+-不涉及：KV provider 改动、exit 改动、依赖、DB migration、SDK generation、public plugin type、Session/Runner、新配置 schema、新 keybind。
++改为 `normalizeText(request.title, "", TITLE_LIMIT)` 后，当 `request.title` 为空时返回 `""`，`"" || undefined` 求值为 `undefined`。`triggerNotification` 的类型签名是 `(message: string, title?: string) => boolean`，`undefined` 是合法值。
+ 
+-## 13. 不采用的方案
++### 10.3 `DEFAULT_TITLE` 常量
+ 
+-1. 不新增 Session settlement / generation event / lifecycle state machine。
+-2. 不改 KV provider 的写入方式（全量 snapshot 对存一个 boolean 完全够用）。
+-3. 不加 exit flush barrier。
+-4. 不搞 notification default compat 矩阵。
+-5. 不导出 `createSoundEffectsCommand` internal helper — command 直接内联在 `appCommands`。
+-6. 不使用 `afplay`/`paplay`/PowerShell/外部进程。
+-7. 不 materialize temp WAV。
+-8. 不改 Web/Desktop 音效。
++`DEFAULT_TITLE` 仍被 `attention.test.ts` 中显式传 `title: "opencode"` 的测试用例引用。这些测试不受影响，因为 `normalizeText("opencode", "", TITLE_LIMIT)` 返回 `"opencode"`，`"opencode" || undefined` 求值为 `"opencode"`。
+ 
+-## 14. 实施顺序（TDD）
++## 11. 推荐方案摘要
+ 
+ ```text
+-1. 修改 config test：默认 true，确认红
+-2. 扩展 attention fake + 写 embedded hash/KV toggle/cache tests，确认红
+-3. 加 TuiAudio keyed bytes loader
+-4. 修改 attention private embedded done + KV sound gate
+-5. 加 app Ctrl+P palette command
+-6. 更新 TUI spec
+-7. 跑 targeted tests + typecheck
+-8. 跑 single compile/build smoke
+-9. 人工验证
+-10. 统计 15% 中文注释
+-11. 独立 implementation review
+-```
++attention.ts:
++  triggerNotification 不传默认 title → OSC 99 只发一个 body payload → VS Code 单横幅
+ 
+-## 15. 方案审计记录
++notifications.ts:
++  abort (MessageAbortedError) → sound: false → 完全静音
++  正常完成 → done
++  模型错误/超时 → error
++  question/permission → sound: false
++  subagent → silent
+ 
+-1. 第 1 轮：因新增 Session settlement/generation seam 过大而否决。
+-2. 第 2 轮：阻塞项为默认连带开启 OS notifications、KV override 越过显式配置、command/persistence 未自动化。
+-3. 第 3 轮：阻塞项为 KV flush 不可行、corrupt JSON 未覆盖、test keymap 缺 enabled-fields addon、覆盖面不足。
+-4. 第 4 轮：回退到甜点级。不改 KV provider、不加 flush、不搞 compat 矩阵、不导出 command helper。KV toggle 与 animations 完全同模式。只有本轮完整独立复核无阻塞意见后才可放行。
++config/tui.ts:
++  notifications 保持 true（不退化）
++```

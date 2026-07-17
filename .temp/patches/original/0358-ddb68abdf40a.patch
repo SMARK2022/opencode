@@ -1,0 +1,208 @@
+From ddb68abdf40a2a4bb08f0eba453edd7d48fb3595 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 3 Jul 2026 17:40:02 +0800
+Subject: [PATCH] =?UTF-8?q?fix(provider):=20=E6=95=B4=E8=AF=B7=E6=B1=82?=
+ =?UTF-8?q?=E8=B6=85=E6=97=B6=E9=BB=98=E8=AE=A4=205=E2=86=9210=20=E5=88=86?=
+ =?UTF-8?q?=E9=92=9F=20+=20chunk=20=E7=A9=BA=E9=97=B2=E8=B6=85=E6=97=B6?=
+ =?UTF-8?q?=E9=BB=98=E8=AE=A4=203=20=E5=88=86=E9=92=9F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+整请求绝对超时 DEFAULT_TIMEOUT_MS 从 300_000 放宽到 600_000,避免长输出被
+5 分钟硬死线截断。该超时经 message-v2 transportError 归类为可重试,此前会触发
+5 分钟超时→重试→再超时的循环;放宽后需要 ≤10 分钟的生成可单次完成。
+
+chunkTimeout 未配置时由"不启用"改为回退 DEFAULT_CHUNK_TIMEOUT_MS=180_000,对所有
+SSE 响应统一施加空闲保护。wrapSSE 仅对真正挂起(3 分钟无任何字节)的连接生效,
+心跳/注释字节会重置计时器,活跃流式不受影响;显式配置值仍优先于默认。chunkAbortCtl
+改为无条件创建并删除原跳过分支,wrapSSE 内部守卫对非 SSE/空 body 响应原样透传。
+
+diff --git a/packages/opencode/src/config/provider.ts b/packages/opencode/src/config/provider.ts
+index cab587d08f75d7c7da54c5d28a1da3352482ab0f..1a55f21160cfe98567e2b87bc6d34e91c8f57884 100644
+--- a/packages/opencode/src/config/provider.ts
++++ b/packages/opencode/src/config/provider.ts
+@@ -102,15 +102,15 @@ export const Info = Schema.Struct({
+         timeout: Schema.optional(
+           Schema.Union([PositiveInt, Schema.Literal(false)]).annotate({
+             description:
+-              "Timeout in milliseconds for requests to this provider. Default is 300000 (5 minutes). Set to false to disable timeout.",
++              "Timeout in milliseconds for requests to this provider. Default is 600000 (10 minutes). Set to false to disable timeout.",
+           }),
+         ).annotate({
+           description:
+-            "Timeout in milliseconds for requests to this provider. Default is 300000 (5 minutes). Set to false to disable timeout.",
++            "Timeout in milliseconds for requests to this provider. Default is 600000 (10 minutes). Set to false to disable timeout.",
+         }),
+         chunkTimeout: Schema.optional(PositiveInt).annotate({
+           description:
+-            "Timeout in milliseconds between streamed SSE chunks for this provider. If no chunk arrives within this window, the request is aborted.",
++            "Timeout in milliseconds between streamed SSE chunks for this provider. Default is 180000 (3 minutes). If no chunk arrives within this window, the request is aborted.",
+         }),
+       }),
+       [Schema.Record(Schema.String, Schema.Any)],
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index fcaae8e9ff135cd671d0465806286af2212781c6..ec9a0e43cc27d0f67f18f69da24ab99d1b38a045 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -35,7 +35,12 @@ const log = Log.create({ service: "provider" })
+ // Keep transport diagnostics under a separate service so provider catalogue
+ // loading remains readable and callers can filter only fetch/SSE milestones.
+ const fetchLog = Log.create({ service: "provider.fetch" })
+-const DEFAULT_TIMEOUT_MS = 300_000
++// 整请求绝对超时:从 fetch 发起计时的硬死线,到点即中断(即使仍在持续来 chunk)。
++// 默认 10 分钟;其触发的 AbortSignal.timeout 错误在 message-v2 transportError 中归类为可重试。
++const DEFAULT_TIMEOUT_MS = 600_000
++// chunk 空闲超时:两个 SSE body 字节之间无数据达此时长才中止(心跳/注释字节会重置计时器)。
++// 默认 3 分钟,仅对真正挂起的连接生效;触发的 SSE_READ_TIMEOUT 同样可重试。
++const DEFAULT_CHUNK_TIMEOUT_MS = 180_000
+ // Process-local correlation is enough here: the id only ties fetch.start,
+ // fetch.response and SSE milestones inside one daemon log, never across runs.
+ let providerFetchRequestID = 0
+@@ -1834,11 +1839,15 @@ export const layer = Layer.effect(
+ 
+         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
+           const opts = init ?? {}
+-          const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
++          // chunkTimeout 未配置时回退到默认空闲超时;显式正值优先,保持用户可覆盖
++          const chunkTimeoutMs =
++            typeof chunkTimeout === "number" && chunkTimeout > 0 ? chunkTimeout : DEFAULT_CHUNK_TIMEOUT_MS
++          // 始终创建控制器:默认 chunk 超时启用 wrapSSE,对所有 SSE 响应统一施加空闲保护
++          const chunkAbortCtl = new AbortController()
+           const signals: AbortSignal[] = []
+ 
+           if (opts.signal) signals.push(opts.signal)
+-          if (chunkAbortCtl) signals.push(chunkAbortCtl.signal)
++          signals.push(chunkAbortCtl.signal)
+           if (options["timeout"] !== false)
+             signals.push(AbortSignal.timeout(typeof options["timeout"] === "number" ? options["timeout"] : DEFAULT_TIMEOUT_MS))
+ 
+@@ -1886,7 +1895,8 @@ export const layer = Layer.effect(
+           timing(timingInput, "fetch.start", {
+             method: opts.method,
+             timeoutMs,
+-            chunkTimeoutMs: typeof chunkTimeout === "number" && chunkTimeout > 0 ? chunkTimeout : undefined,
++            // 复用已解析的回退值,使诊断日志反映真实生效的空闲超时(显式值或默认 3 分钟)
++            chunkTimeoutMs,
+             bodyBytes: bodyBytes(opts.body),
+           })
+ 
+@@ -1910,8 +1920,8 @@ export const layer = Layer.effect(
+             isSSE: contentType?.includes("text/event-stream") ?? false,
+           })
+ 
+-          if (!chunkAbortCtl) return res
+-          return wrapSSE(res, chunkTimeout, chunkAbortCtl, timingInput)
++          // chunkAbortCtl 始终存在;wrapSSE 内部对非 event-stream / 空 body 响应会原样透传
++          return wrapSSE(res, chunkTimeoutMs, chunkAbortCtl, timingInput)
+         }
+ 
+         const bundledLoader = BUNDLED_PROVIDERS[model.api.npm]
+diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
+index e330e35ea22920601d6a48f040e2c02226a96dd5..e512636298a07aa978cb7340483e50bb650c626e 100644
+--- a/packages/opencode/test/session/llm.test.ts
++++ b/packages/opencode/test/session/llm.test.ts
+@@ -513,6 +513,90 @@ describe("session.llm.stream", () => {
+     })
+   })
+ 
++  test("applies default overall and chunk timeouts when neither is configured", async () => {
++    // 行为级验证:用户未配置 timeout / chunkTimeout 时,provider 必须回退到默认值——
++    // 整请求绝对超时 600000ms(10 分钟)、chunk 空闲超时 180000ms(3 分钟)。
++    // 通过 fetch.start 诊断事件里的 timeoutMs / chunkTimeoutMs 字段断言默认值,无需真正等待超时;
++    // 同时断言 sse.end 出现,证明默认 chunk 超时已启用 wrapSSE(此前未配置时不启用)。
++    const server = state.server
++    if (!server) throw new Error("Server not initialized")
++
++    const providerID = "default-timeout-openai-compatible"
++    const request = waitRequest(
++      "/chat/completions",
++      new Response(createChatStream("Hello"), {
++        status: 200,
++        headers: { "Content-Type": "text/event-stream" },
++      }),
++    )
++
++    await withInfoLog(async (logFile) => {
++      await using tmp = await tmpdir({
++        config: {
++          enabled_providers: [providerID],
++          provider: {
++            [providerID]: {
++              npm: "@ai-sdk/openai-compatible",
++              name: "Default Timeout Provider",
++              // 故意不设置 timeout / chunkTimeout,触发默认回退路径
++              options: { apiKey: "test-key", baseURL: `${server.url.origin}/v1` },
++              models: { "gpt-test": { name: "GPT Test", modalities: { input: ["text"], output: ["text"] } } },
++            },
++          },
++        },
++      })
++
++      await withTestInstance({
++        directory: tmp.path,
++        fn: async (ctx) => {
++          const model = await getModel(ProviderID.make(providerID), ModelID.make("gpt-test"), ctx)
++          const sessionID = SessionID.make("session-provider-default-timeout")
++          const agent = {
++            name: "test",
++            mode: "primary",
++            options: {},
++            permission: [{ permission: "*", pattern: "*", action: "allow" }],
++          } satisfies Agent.Info
++          // drain 走真实 provider→custom fetch→wrapSSE 链路(非 mock),故 SSE 里程碑能反映默认配置是否生效
++          await drain(
++            {
++              user: {
++                id: MessageID.make("msg_user-provider-default-timeout"),
++                sessionID,
++                role: "user",
++                time: { created: Date.now() },
++                agent: agent.name,
++                model: { providerID: ProviderID.make(providerID), modelID: model.id },
++              },
++              sessionID,
++              model,
++              agent,
++              system: ["You are a helpful assistant."],
++              messages: [{ role: "user", content: "Hello" }],
++              tools: {},
++            },
++            ctx,
++          )
++        },
++      })
++
++      // 默认超时仅作安全上限:快路径流式毫秒级完成,不会真正触发 10 分钟/3 分钟死线
++      await request
++      const events = providerFetchEvents(await readLogUntil(logFile, (content) => content.includes("phase=sse.end")))
++      // 默认 chunk 超时启用 wrapSSE,故完整 SSE 里程碑都会出现
++      expect(events.map((event) => event.phase)).toEqual([
++        "fetch.start",
++        "fetch.response",
++        "sse.first_chunk",
++        "sse.end",
++      ])
++      // 默认整请求绝对超时 10 分钟(从请求发起计时的硬死线)
++      expect(events.find((event) => event.phase === "fetch.start")?.timeoutMs).toBe("600000")
++      // 默认 chunk 空闲超时 3 分钟(两个 SSE 字节之间无数据才触发)
++      expect(events.find((event) => event.phase === "fetch.start")?.chunkTimeoutMs).toBe("180000")
++    })
++  })
++
+   for (const item of [
+     { name: "options.headers.User-Agent", options: { headers: { "User-Agent": "codex_cli_rs/0.2333" } } },
+     { name: "options.header-ua", options: { "header-ua": "codex_cli_rs/0.2333" } },
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+index 8b7a8c8f8e1e16400150c3fc65b9f8ba93ac160a..10d0a7bc2a15d97afc6a9bc29023ad83b7de4e2b 100644
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -1217,7 +1217,7 @@ export type ProviderConfig = {
+     enterpriseUrl?: string
+     setCacheKey?: boolean
+     /**
+-     * Timeout in milliseconds for requests to this provider. Default is 300000 (5 minutes). Set to false to disable timeout.
++     * Timeout in milliseconds for requests to this provider. Default is 600000 (10 minutes). Set to false to disable timeout.
+      */
+     timeout?: number | false
+     chunkTimeout?: number

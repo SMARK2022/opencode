@@ -1,0 +1,239 @@
+From cb7fb80142be4d6a2ed8f5e1cb2ab44a20e3dfd1 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 24 May 2026 05:44:48 +0800
+Subject: [PATCH] =?UTF-8?q?feat(session):=20=E7=82=B9=E5=87=BB=E4=BB=BB?=
+ =?UTF-8?q?=E5=8A=A1=E5=B7=A5=E5=85=B7=E6=97=B6=E6=89=93=E5=BC=80=E5=AD=90?=
+ =?UTF-8?q?=E4=BB=A3=E7=90=86=E4=BC=9A=E8=AF=9D=E5=B9=B6=E5=BC=BA=E5=88=B6?=
+ =?UTF-8?q?=E5=88=B7=E6=96=B0=E8=BF=87=E6=9C=9F=E4=BC=9A=E8=AF=9D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index eb0e339c2ef9d4b4f0a3fd146a3aa0f1b30155ed..71997fed5a22b5b4dfbc34300afa52d77669f5a2 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -2693,14 +2693,19 @@ function Task(props: ToolProps<typeof TaskTool>) {
+     <InlineTool
+       icon="│"
+       spinner={isRunning()}
+-      complete={props.input.description}
+-      pending="Delegating..."
+-      part={props.part}
+-      onClick={() => {
+-        if (props.metadata.sessionId) {
+-          navigate({ type: "session", sessionID: props.metadata.sessionId })
+-        }
+-      }}
++        complete={props.input.description}
++        pending="Delegating..."
++        part={props.part}
++        onClick={() => {
++          if (props.metadata.sessionId) {
++            // Task metadata is written as soon as the child session exists, before
++            // its messages necessarily arrive. A previous prefetch can therefore
++            // mark the child as synced while it is still empty; force-refresh on
++            // explicit navigation so clicking a task always opens the live agent view.
++            void sync.session.sync(props.metadata.sessionId, { force: true })
++            navigate({ type: "session", sessionID: props.metadata.sessionId })
++          }
++        }}
+     >
+       {content()}
+     </InlineTool>
+diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+index c5d1079f5876fc66fbafbd5566319126696a2535..49e4832e5409482e611cdb987a4e26daee8ce7c9 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -33,7 +33,7 @@ import { Session } from "../../../../src/cli/cmd/tui/routes/session"
+ import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/cli/cmd/tui/keymap"
+ import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
+ import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
+-import { createEventSource, createFetch, directory, json } from "./sync-fixture"
++import { createEventSource, createFetch, directory, json, wait } from "./sync-fixture"
+ 
+ const sessionID = "ses_render"
+ 
+@@ -249,6 +249,116 @@ test("pending write tool shows streamed addition counts", async () => {
+   )
+ })
+ 
++test("task tool click opens its subagent session", async () => {
++  const childID = "ses_child"
++  await withRenderedSession(
++    [assistantMessage("msg_task", 1)],
++    {
++      msg_task: [
++        completedToolPart(
++          "part_task",
++          "msg_task",
++          "task",
++          { description: "inspect files", subagent_type: "general" },
++          { sessionId: childID },
++        ),
++      ],
++    },
++    async (app) => {
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("General Task") && line.includes("inspect files")))
++      const raw = app.captureCharFrame().split("\n")
++      const y = raw.findIndex((line) => line.includes("General Task") && line.includes("inspect files"))
++      expect(y).toBeGreaterThanOrEqual(0)
++
++      await app.mockMouse.click(11, y + 1)
++
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("child session visible")))
++    },
++    {},
++    {},
++    {
++      [childID]: {
++        info: sessionInfo({ id: childID, parentID: sessionID, title: "inspect files (@general subagent)" }),
++        messages: [
++          {
++            id: "msg_child",
++            sessionID: childID,
++            role: "assistant",
++            time: { created: 2, completed: 3 },
++            parentID: "msg_child_user",
++            modelID: "model",
++            providerID: "provider",
++            mode: "build",
++            agent: "general",
++            path: { cwd: directory, root: directory },
++            cost: 0,
++            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++          } satisfies AssistantMessage,
++        ],
++        parts: { msg_child: [textPart("part_child", "msg_child", "child session visible", { sessionID: childID })] },
++      },
++    },
++  )
++})
++
++test("task tool click refreshes a stale prefetched subagent session", async () => {
++  const childID = "ses_child_stale"
++  let childMessageRequests = 0
++  const childMessage = {
++    id: "msg_child_stale",
++    sessionID: childID,
++    role: "assistant",
++    time: { created: 2, completed: 3 },
++    parentID: "msg_child_user",
++    modelID: "model",
++    providerID: "provider",
++    mode: "build",
++    agent: "general",
++    path: { cwd: directory, root: directory },
++    cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  } satisfies AssistantMessage
++
++  await withRenderedSession(
++    [assistantMessage("msg_task_stale", 1)],
++    {
++      msg_task_stale: [
++        completedToolPart(
++          "part_task_stale",
++          "msg_task_stale",
++          "task",
++          { description: "inspect stale child", subagent_type: "general" },
++          { sessionId: childID },
++        ),
++      ],
++    },
++    async (app) => {
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("inspect stale child")))
++      await wait(() => childMessageRequests >= 1)
++      const raw = app.captureCharFrame().split("\n")
++      const y = raw.findIndex((line) => line.includes("inspect stale child"))
++      expect(y).toBeGreaterThanOrEqual(0)
++
++      await app.mockMouse.click(11, y + 1)
++
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("child session refreshed")))
++      expect(childMessageRequests).toBeGreaterThan(1)
++    },
++    {},
++    {},
++    {
++      [childID]: {
++        info: sessionInfo({ id: childID, parentID: sessionID, title: "inspect stale child (@general subagent)" }),
++        messages: () => {
++          childMessageRequests++
++          return childMessageRequests === 1 ? [] : [childMessage]
++        },
++        parts: { msg_child_stale: [textPart("part_child_stale", "msg_child_stale", "child session refreshed", { sessionID: childID })] },
++      },
++    },
++  )
++})
++
+ test("pending tool line counts update from streamed raw deltas", async () => {
+   await withRenderedSession(
+     [assistantMessage("msg_live_delta", 1)],
+@@ -511,6 +621,14 @@ async function withRenderedSession(
+   run: (app: Awaited<ReturnType<typeof testRender>>, emit: (event: GlobalEvent) => void) => Promise<void>,
+   kv: Record<string, unknown> = {},
+   dimensions: { width?: number; height?: number } = {},
++  extraSessions: Record<
++    string,
++    {
++      info: SessionInfo
++      messages: Array<AssistantMessage | SDKUserMessage> | (() => Array<AssistantMessage | SDKUserMessage>)
++      parts: Record<string, Part[]>
++    }
++  > = {},
+ ) {
+   const previous = Global.Path.state
+   await using tmp = await tmpdir()
+@@ -519,13 +637,26 @@ async function withRenderedSession(
+ 
+   const info = sessionInfo()
+   const calls = createFetch((url) => {
+-    if (url.pathname === "/session") return json([info])
+-    if (url.pathname === `/session/${sessionID}`) return json(info)
+-    if (url.pathname === `/session/${sessionID}/message`) {
+-      return json(messages.map((message) => ({ info: message, parts: parts[message.id] ?? [] })))
++    const sessions: Record<
++      string,
++      {
++        info: SessionInfo
++        messages: Array<AssistantMessage | SDKUserMessage> | (() => Array<AssistantMessage | SDKUserMessage>)
++        parts: Record<string, Part[]>
++      }
++    > = { [sessionID]: { info, messages, parts }, ...extraSessions }
++    const match = url.pathname.match(/^\/session\/([^/]+)(?:\/(message|todo|diff))?$/)
++    if (url.pathname === "/session") return json(Object.values(sessions).map((session) => session.info))
++    if (match) {
++      const session = sessions[match[1]]
++      if (!session) return undefined
++      if (!match[2]) return json(session.info)
++      if (match[2] === "message") {
++        const sessionMessages = typeof session.messages === "function" ? session.messages() : session.messages
++        return json(sessionMessages.map((message) => ({ info: message, parts: session.parts[message.id] ?? [] })))
++      }
++      return json([])
+     }
+-    if (url.pathname === `/session/${sessionID}/todo`) return json([])
+-    if (url.pathname === `/session/${sessionID}/diff`) return json([])
+     return undefined
+   })
+ 
+@@ -622,7 +753,7 @@ function findRow(frame: string[], text: string) {
+   return index
+ }
+ 
+-function sessionInfo() {
++function sessionInfo(extra: Partial<SessionInfo> = {}) {
+   return {
+     id: sessionID,
+     slug: "render",
+@@ -631,6 +762,7 @@ function sessionInfo() {
+     title: "render",
+     version: "1.0.0",
+     time: { created: 1, updated: 1 },
++    ...extra,
+   } satisfies SessionInfo
+ }
+ 

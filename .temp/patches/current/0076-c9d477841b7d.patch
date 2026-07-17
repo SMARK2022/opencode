@@ -1,0 +1,140 @@
+From c9d477841b7d9de4e202808138553d83c363e8dc Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 4 May 2026 20:52:52 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E4=BC=98=E5=8C=96=E4=BB=A3=E7=90=86?=
+ =?UTF-8?q?=E8=B7=AF=E7=94=B1=E9=80=BB=E8=BE=91=EF=BC=8C=E8=B0=83=E6=95=B4?=
+ =?UTF-8?q?TTL=E5=B8=B8=E9=87=8F=EF=BC=8C=E5=A2=9E=E5=BC=BA=E6=8F=92?=
+ =?UTF-8?q?=E4=BB=B6=E6=A8=A1=E5=9D=97=E7=9A=84=E6=8F=92=E4=BB=B6=E5=AF=BC?=
+ =?UTF-8?q?=E5=87=BA=E5=A4=84=E7=90=86?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-proxy.ts
+index c3296d5dd01c4e536b299ad62526fafe6415db3a..478498fcd412f8b801619bce75e6d1a67af29137 100644
+--- a/packages/core/src/network-proxy.ts
++++ b/packages/core/src/network-proxy.ts
+@@ -4,11 +4,12 @@ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin"
+ 
+ export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
+ 
+-const TTL = 15_000
++const PROXY_TTL = 10_000
+ const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"])
+ 
+ let cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined
+ let globalFetchInstalled = false
++let savedOriginal: FetchFn | undefined
+ 
+ type SystemProxy = {
+   http?: string
+@@ -128,7 +129,7 @@ async function currentSystemProxy(refresh = false) {
+   if (refresh) cache = undefined
+   if (!cache || cache.expires < Date.now()) {
+     cache = {
+-      expires: Date.now() + TTL,
++      expires: Date.now() + PROXY_TTL,
+       value: (process.platform === "win32" ? windowsProxy() : macProxy()).catch(() => undefined),
+     }
+   }
+@@ -160,14 +161,27 @@ export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise
+ 
+ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
+   const url = new URL(input instanceof Request ? input.url : input.toString())
+-  const { purpose = "unknown", signal, ...rest } = (init ?? {}) as RoutedInit
+-  const route = await resolveProxyRoute(url, purpose, purpose === "provider" || purpose === "npm")
+-  const direct = () => fetchFn(input, signal ? { ...rest, signal } : rest)
++  const { purpose = "unknown", signal, proxy: _incomingProxy, ...rest } = (init ?? {}) as RoutedInit & { proxy?: string }
++  const route = await resolveProxyRoute(url, purpose, false)
++  
++  // Bun caches proxy env at startup — explicit `proxy` param overrides it,
++  // but plain fetch still honours the cached env.  Setting NO_PROXY=* once
++  // disables that cached env so plain fetch goes direct.  The proxy() helper
++  // passes an explicit `proxy` param which Bun always respects regardless of
++  // NO_PROXY, so this is safe.
++  if (!process.env.__OPENCODE_NO_PROXY_SET) {
++    process.env.NO_PROXY = "*"
++    process.env.__OPENCODE_NO_PROXY_SET = "1"
++  }
++  
++  const fetchDirect = (overrideSignal?: AbortSignal) => 
++    fetchFn(input, { ...rest, signal: overrideSignal ?? signal })
++  
+   const proxy = (value: string) => fetchFn(input, { ...rest, signal, proxy: value })
+ 
+   if (route.type === "direct") {
+     try {
+-      return await direct()
++      return await fetchDirect()
+     } catch (error) {
+       if (signal?.aborted) throw error
+       const refreshed = await resolveProxyRoute(url, purpose, true)
+@@ -183,21 +197,25 @@ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?:
+     if (refreshed?.type === "proxy" && refreshed.proxy !== route.proxy) {
+       return proxy(refreshed.proxy).catch(() => { throw error })
+     }
+-    // When the proxy attempt consumed the abort signal, retry direct without it
+-    // so the fallback has a chance to succeed.
+-    if (signal?.aborted) return fetchFn(input, rest).catch(() => { throw error })
+-    return direct().catch(() => { throw error })
++    if (signal?.aborted)
++      return fetchDirect(AbortSignal.timeout(10_000)).catch(() => { throw error })
++    return fetchDirect().catch(() => { throw error })
+   }
+ }
+ 
+ export function installGlobalFetch(defaultPurpose: Purpose = "unknown") {
+   if (globalFetchInstalled) return
+   const original = globalThis.fetch.bind(globalThis) as FetchFn
++  savedOriginal = original
+   globalThis.fetch = ((input: FetchInput, init?: RoutedInit) =>
+     fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as typeof fetch
+   globalFetchInstalled = true
+ }
+ 
++export function originalFetch() {
++  return savedOriginal ?? globalThis.fetch.bind(globalThis) as FetchFn
++}
++
+ export async function npmProxyOptions(registry: string) {
+   const route = await resolveProxyRoute(registry, "npm", true)
+   if (route.type === "direct") return {}
+diff --git a/packages/opencode/src/plugin/index.ts b/packages/opencode/src/plugin/index.ts
+index ac37823c34e1a7fc84bef923c7e9975f665e043d..69cd4d8d3c863e881395e1b5d51143435892aee6 100644
+--- a/packages/opencode/src/plugin/index.ts
++++ b/packages/opencode/src/plugin/index.ts
+@@ -77,14 +77,30 @@ function getServerPlugin(value: unknown) {
+ }
+ 
+ function getLegacyPlugins(mod: Record<string, unknown>) {
++  if (isServerPlugin(mod.default)) return [mod.default]
++
+   const seen = new Set<unknown>()
+   const result: PluginInstance[] = []
+ 
+-  for (const entry of Object.values(mod)) {
+-    if (seen.has(entry)) continue
+-    seen.add(entry)
++  const named = Object.entries(mod).filter(
++    ([name, entry]) => name !== "default" && name.endsWith("Plugin") && isServerPlugin(entry),
++  )
++  const candidates =
++    named.length > 0
++      ? named.map(([, entry]) => entry)
++      : Object.entries(mod)
++          .filter(([name, entry]) => name !== "default" && isServerPlugin(entry))
++          .map(([, entry]) => entry)
++
++  if (named.length === 0 && candidates.length > 1) {
++    throw new TypeError("Plugin module has multiple function exports; export a default plugin or name plugin exports with a Plugin suffix")
++  }
++
++  for (const entry of candidates) {
+     const plugin = getServerPlugin(entry)
+     if (!plugin) throw new TypeError("Plugin export is not a function")
++    if (seen.has(plugin)) continue
++    seen.add(plugin)
+     result.push(plugin)
+   }
+ 

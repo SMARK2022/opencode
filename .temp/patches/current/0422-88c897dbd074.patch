@@ -1,0 +1,529 @@
+From 88c897dbd07407d38a87a4c69606bfc0da33478d Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 13 Jul 2026 23:38:01 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E6=8B=A6=E6=88=AA=E7=95=B8?=
+ =?UTF-8?q?=E5=BD=A2=20SGR=20mouse=20=E6=8A=A5=E5=91=8A=E7=A2=8E=E7=89=87?=
+ =?UTF-8?q?=E6=B3=A8=E5=85=A5=20prompt=20textarea?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+某些终端/IDE/触摸屏在鼠标坐标不可用时发送畸形 SGR mouse 报告
+（如 ESC[<64;NaN;NaNM）。OpenTUI 0.3.4 StdinParser 的 csi_sgr_mouse
+状态机在遇到大写 N（CSI final byte 范围）时错误结束 CSI，剩余字节
+aN;NaNM 逐字符变成普通 key event，被 TextareaRenderable.insertText()
+插入 prompt buffer，产生用户可见的 aN;NaNmaN;NaNm... 字符串。
+
+通过 rendererConfig 的 prependInputHandlers 注册实例级 guard：
+- 检测 ESC[<…N 前缀进入 recovery
+- 逐字符消费 SGR mouse 合法字符（a/N/;/数字/M/m）
+- 遇到终止符 M/m 或非法字符即退出 recovery
+- 不影响合法 mouse event、paste、focus、capability reply
+- 不扫描或过滤用户文本内容
+
+diff --git a/docs/Proposal/tui-malformed-sgr-mouse-fix.md b/docs/Proposal/tui-malformed-sgr-mouse-fix.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c17a141f943741ff2da2f125adb30e974201ae1
+--- /dev/null
++++ b/docs/Proposal/tui-malformed-sgr-mouse-fix.md
+@@ -0,0 +1,283 @@
++# TUI prompt 畸形 SGR mouse 报告注入修复方案
++
++## 根因
++
++某些终端 / IDE / 触摸屏在坐标不可用时向 stdin 发送畸形 SGR mouse 报告，例如：
++
++```
++ESC[<64;NaN;NaNM
++```
++
++标准 SGR mouse 格式为 `ESC[<button;x;yM`（或小写 `m` 表示释放），三个字段均为十进制整数。当字段值变成 `NaN`（JavaScript 数值字符串化结果），OpenTUI 0.3.4 `StdinParser` 的 `csi_sgr_mouse` 状态机在遇到第一个大写 `N`（ASCII 0x4E，落在 CSI final byte 范围 0x40–0x7E）时，将其当作 CSI final byte 结束当前序列，发出 `emitKeyOrResponse("csi", "\x1b[<64;N")`。剩余字节 `aN;NaNM` 进入 ground 状态，逐字符变成普通 key event。`TextareaRenderable.handleKeyPress()` 对无修饰键直接 `insertText(key.sequence)`，残片因此真实进入 prompt EditBuffer。
++
++连续三条畸形报告 `ESC[<64;NaN;NaNM` × 2 + `ESC[<64;NaN;NaNm` × 1 正好产生用户看到的 `aN;NaNMaN;NaNMaN;NaNm`。
++
++### 复现证据
++
++直接调用 OpenTUI `StdinParser`（`bun -e`）：
++
++```
++输入: "\x1b[<64;NaN;NaNM"
++输出: 8 个 key event，可打印部分 = "aN;NaNM"
++```
++
++通过真实 PTY 启动完整 alternate-screen TUI，向 stdin 注入上述三条报告，renderer 输出中包含：
++
++```
++ESC[38;2;238;238;238m ESC[48;2;30;30;30m aN;NaNMaN;NaNMaN;NaNm ESC[0m
++```
++
++异常文本被正常 fg/bg 样式包裹，证明它进入了 Textarea EditBuffer 并被正常渲染。
++
++### 已排除的路径
++
++- **颜色 SGR**：OpenTUI Zig `RGBA` 对非有限值归零，`u8` 通道无法输出字符串 `"NaN"`。
++- **动画 / spinner**：`createFadeIn` 和 `createColors` 数学均有限。
++- **token footer**：无法解释分号和 `M/m` 终止符。
++- **resize / SIGWINCH**：可暴露异常但不能生成 `NaN`。
++- **`opencode run` split-footer**：用户明确使用完整 TUI。
++- **raw stdout 覆盖**：PTY 复现中异常文本被 Textarea 样式包裹，证明进入 EditBuffer。
++- **OpenTUI 0.4.3**：parser 逻辑相同，未修复此问题。
++
++## 已阅读文件
++
++### 源码
++
++| 文件 | 为什么相关 |
++|------|-----------|
++| `packages/opencode/src/cli/cmd/tui/app.tsx:122-143` | `rendererConfig()` 是 OpenCode 配置 OpenTUI renderer 的唯一入口，`prependInputHandlers` 在此注入 |
++| `packages/opencode/src/cli/cmd/tui/app.tsx:215-292` | `createCliRenderer()` 调用和 renderer 生命周期 |
++| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx:1766-1834` | Textarea props 和 `onContentChange` |
++| `packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx:110-112` | `fadeColor()` 颜色辅助函数 |
++| `packages/opencode/src/cli/cmd/tui/util/signal.ts:38-69` | `createFadeIn()` 动画 |
++| `packages/opencode/src/cli/cmd/tui/ui/spinner.ts:199-244` | spinner 颜色派生 |
++| `packages/opencode/src/cli/cmd/tui/context/theme.tsx:198-301` | 主题颜色解析 |
++| `packages/opencode/src/cli/cmd/tui/context/local.tsx:46-103` | Agent 颜色解析 |
++| `packages/opencode/src/cli/cmd/tui/keymap.tsx:123-152` | keymap 注册 |
++| `packages/opencode/src/util/color.ts` | raw ANSI 颜色构造（有 hex 校验） |
++| `packages/opencode/src/token/accounting.ts` | token 统计（无 NaN 进入 ANSI 路径） |
++
++### OpenTUI 0.3.4 实现
++
++| 文件 | 为什么相关 |
++|------|-----------|
++| `node_modules/@opentui/core/index-54s7pk0d.js:7698-7842` | `csi_sgr_mouse` 状态机——bug 所在 |
++| `node_modules/@opentui/core/index-54s7pk0d.js:24260-24310` | `dispatchSequenceHandlers` 和 `handleStdinEvent`——handler 注入点 |
++| `node_modules/@opentui/core/index-54s7pk0d.js:24324-24348` | `setupInput()`——`prependedInputHandlers` 注册顺序 |
++| `node_modules/@opentui/core/index-0nvgrgam.js:5437-5465` | `TextareaRenderable.handleKeyPress()`——`insertText(key.sequence)` |
++| `node_modules/@opentui/core/renderer.d.ts:45` | `prependInputHandlers?: ((sequence: string) => boolean)[]` 类型声明 |
++| `node_modules/@opentui/core/lib/stdin-parser.d.ts` | `StdinParser` 公共接口 |
++| `node_modules/@opentui/core/testing.d.ts` | `testRender` 测试接口 |
++
++### 测试
++
++| 文件 | 为什么相关 |
++|------|-----------|
++| `packages/opencode/test/cli/cmd/tui/spinner.test.tsx` | 现有 `testRender` + intrinsic 注册测试模式 |
++| `packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx` | 现有 Prompt + provider 测试模式 |
++| `packages/opencode/test/cli/cmd/tui/prompt-interrupt.test.ts` | Prompt 行为测试模式 |
++| `packages/opencode/test/fixture/tui-runtime.ts` | TUI 测试 fixture |
++
++### 配置
++
++| 文件 | 为什么相关 |
++|------|-----------|
++| `packages/opencode/src/cli/cmd/tui/config/tui-schema.ts:89` | `mouse` 配置字段 |
++| `packages/opencode/src/cli/cmd/tui/app.tsx:123` | `OPENCODE_DISABLE_MOUSE` flag |
++| `.opencode/tui.json` | 项目 TUI 配置（smoke plugin disabled） |
++
++## 已确认的调用链
++
++```
++terminal / IDE 发送畸形 SGR mouse 报告
++  → process.stdin "data" 事件
++  → CliRenderer.stdinListener
++  → StdinParser.push(data)
++  → csi_sgr_mouse 状态遇到 N（0x4E）
++  → isMouseSgrSequence 失败（final byte 不是 M/m）
++  → emitKeyOrResponse("csi", "\x1b[<64;N")
++  → 剩余字节 aN;NaNM 进入 ground 状态
++  → 逐字符 emitKeyOrResponse
++  → CliRenderer.handleStdinEvent(key)
++  → dispatchSequenceHandlers(event.raw)   ← prependInputHandlers 在此调用
++  → (当前无 handler 拦截)
++  → KeyHandler.processParsedKey(event.key)
++  → TextareaRenderable.handleKeyPress(key)
++  → insertText(key.sequence)
++  → Prompt onContentChange
++  → store.prompt.input 被污染
++```
++
++## 必须保持的既有行为
++
++1. 合法 SGR mouse 报告（全数字字段）继续作为 mouse event 处理。
++2. 正常键盘输入、Kitty keyboard、bracketed paste 不受影响。
++3. 用户直接键入或粘贴 `aN;NaNm`、`Number.isNaN` 等文本完整保留。
++4. `mouse` 配置和 `OPENCODE_DISABLE_MOUSE` 行为不变。
++5. 主题、Agent 颜色、spinner、动画不变。
++6. Prompt textarea、extmark、autocomplete、history、stash、undo/redo、submit 不变。
++7. renderer 创建、退出清理、keymap 注册顺序不变。
++
++## 推荐方案
++
++### 位置
++
++`packages/opencode/src/cli/cmd/tui/app.tsx` 的 `rendererConfig()` 函数。
++
++### 机制
++
++在 `rendererConfig()` 返回的配置对象中增加 `prependInputHandlers`，注册一个实例级闭包 handler。handler 使用 `CliRendererConfig.prependInputHandlers` 接口（OpenTUI 已有），在 `dispatchSequenceHandlers` 中被调用，位于 KeyHandler 和 Textarea 之前。
++
++### handler 状态机
++
++handler 维护一个简单的恢复状态：
++
++```
++idle → 检测到畸形 SGR mouse 前缀 → recovery
++recovery → 逐字符消费合法 mouse report 字符 → 遇到 M/m → idle (完成)
++recovery → 遇到非法字符 → idle (放行当前字符)
++```
++
++#### 进入条件
++
++仅当 `sequence` 匹配以下模式时进入 recovery：
++
++```
++/\x1b\[<[;\d]*N$/
++```
++
++即：以真实 ESC 开头，紧跟 `[<`，后跟零或多个数字和分号，以大写 `N` 结尾。这精确匹配 OpenTUI parser 从畸形 SGR mouse 报告拆出的第一个 key event。
++
++#### Recovery 中接受的字符
++
++仅接受 SGR mouse report 中合法的字符：
++
++- `a` — "NaN" 的第二个字符
++- `N` — "NaN" 的第三个字符
++- `;` — 字段分隔符
++- `0-9` — 数字（合法字段值）
++- `M` 或 `m` — 终止符（完成 recovery）
++
++#### 退出条件
++
++- 遇到 `M` 或 `m`：recovery 完成，复位到 idle，返回 `true`（消费）。
++- 遇到不在上述集合中的字符（包括 ESC）：退出 recovery，返回 `false`（放行当前字符）。
++- 消费字符超过 50 个（安全上限）：退出 recovery，返回 `false`。
++
++#### 安全保证
++
++- 不扫描 Prompt 文本内容。
++- 不以 `/NaN/` 或 `/aN;NaNm/` 过滤用户输入。
++- 只有真实 ESC 开头的 SGR mouse introducer 才能触发 recovery。
++- 普通键入 `aN;NaNm` 不带 ESC 前缀，完全不触发。
++- bracketed paste 中的同形文本不触发（paste 走不同路径）。
++- 不使用 timer、不保存全局状态、不修改 stdin stream。
++
++### 为什么比其他方案更符合现有设计
++
++| 方案 | 文件数 | 问题 |
++|------|--------|------|
++| **prependInputHandlers（推荐）** | 2 | 复用现有接口，最小修改面 |
++| patch node_modules | 3+ | 引入 patch 文件和 lockfile 变更 |
++| 包装 process.stdin | 2 | blast radius 过大，影响所有输入 |
++| 升级 OpenTUI | 2+ | 0.4.3 未修复此问题 |
++| Prompt 文本过滤 | 2 | 误删合法输入，且太晚 |
++| 关闭 mouse | 1 | 破坏现有交互 |
++
++## 预计修改
++
++### 1. `packages/opencode/src/cli/cmd/tui/app.tsx`（修改）
++
++- 在 `rendererConfig()` 附近新增内部函数 `createMalformedSgrMouseGuard()`。
++- 函数返回 `(sequence: string) => boolean` 闭包。
++- 闭包状态：`recovery: boolean` 和 `consumed: number`。
++- 在 `rendererConfig()` 返回对象中增加 `prependInputHandlers: [createMalformedSgrMouseGuard()]`。
++- 中文注释解释：某些终端输出 NaN 坐标、OpenTUI 在首个 N 处分裂 CSI、handler 消费已确认的 mouse packet 尾部。
++
++### 2. `packages/opencode/test/cli/cmd/tui/malformed-sgr-mouse.test.tsx`（新增）
++
++使用 `testRender` + `prependInputHandlers` + textarea，通过 `renderer.stdin.emit("data", ...)` 注入：
++
++- `ESC[<64;NaN;NaNM` 不进入 textarea。
++- `ESC[<64;NaN;NaNm` 不进入 textarea。
++- 三条连续报告不产生 `aN;NaNMaN;NaNMaN;NaNm`。
++- 合法 `ESC[<64;12;8M` 继续作为 mouse event。
++- 直接键入 `aN;NaNm` 原样进入 textarea。
++- 恢复中遇到非法字符立即放行。
++
++## 正常路径
++
++```
++合法 mouse: ESC[<64;12;8M
++→ StdinParser mouse event
++→ handler 不参与（mouse event 不经过 sequenceHandlers）
++→ renderer mouse dispatch
++```
++
++```
++普通文本: aN;NaNm
++→ key events
++→ handler 未进入 recovery（无 ESC 前缀）
++→ Textarea 正常插入
++```
++
++## 错误路径
++
++```
++畸形 mouse: ESC[<64;NaN;NaNM
++→ parser 拆为 ESC[<64;N + aN;NaNM
++→ handler 识别 ESC[<64;N 前缀 → recovery
++→ 逐字符消费 aN;NaNM
++→ M 终止 → recovery 完成
++→ 不进入 Textarea
++```
++
++```
++恢复中遇到非法字符:
++→ 退出 recovery
++→ 当前字符正常分发
++```
++
++## 并发 / 退出 / 清理 / 安全
++
++- handler 状态仅存在于闭包，每个 renderer 实例独立。
++- 不创建 interval、timeout、listener 或 subprocess。
++- renderer destroy 后闭包自然释放。
++- 不改变 `onBeforeExit`、`TuiPluginRuntime.dispose()`、`TuiAudio.dispose()` 顺序。
++- 不检查用户业务文本内容。
++- 不扩大 plugin 权限或终端控制能力。
++
++## 测试计划
++
++### 红测（先写）
++
++注入 `ESC[<64;NaN;NaNM` + `ESC[<64;NaN;NaNM` + `ESC[<64;NaN;NaNm`，断言 `textarea.plainText === ""`。当前实现下会得到 `"aN;NaNMaN;NaNMaN;NaNm"`。
++
++### 兼容测试
++
++- 合法 mouse report 不进入文本。
++- 直接输入同形普通文本保留。
++- 恢复中遇到非法字符放行。
++- `M` 和 `m` 两种终止符。
++
++## 验证命令
++
++```bash
++cd packages/opencode
++bun test test/cli/cmd/tui/malformed-sgr-mouse.test.tsx
++bun test test/cli/cmd/tui/
++bun typecheck
++```
++
++## 变更规模
++
++- 修改文件：1（`app.tsx`）
++- 新增测试文件：1
++- 生产代码增加：约 30-40 行
++- 测试增加：约 70-90 行
++- 无迁移、无生成文件、无文档、无依赖变更
++
++## 风险与开放问题
++
++- 具体哪个终端版本生成 `NaN` 坐标尚未被公开 issue 确认。不影响修复：应用不能假设终端永远输出合法 SGR mouse。
++- 建议后续向 OpenTUI 上游提交修复，让 `csi_sgr_mouse` 在遇到非法字符时丢弃整个协议单元。上游修复后可删除本地 handler。
+diff --git a/packages/opencode/src/cli/cmd/tui/app.tsx b/packages/opencode/src/cli/cmd/tui/app.tsx
+index 8f16d0a651e6faeb4df53740a589b92120df79f8..cc386799fdbf74a6b8a6571884ff592d8f1eebc1 100644
+--- a/packages/opencode/src/cli/cmd/tui/app.tsx
++++ b/packages/opencode/src/cli/cmd/tui/app.tsx
+@@ -119,10 +119,67 @@ const appBindingCommands = [
+   "app.toggle.session_directory_filter",
+ ] as const
+ 
++// 某些终端/IDE/触摸屏在鼠标坐标不可用时发送畸形 SGR mouse 报告，例如
++// ESC[<64;NaN;NaNM。OpenTUI StdinParser 的 csi_sgr_mouse 状态机在遇到大写 N
++// （ASCII 0x4E，落在 CSI final byte 范围 0x40–0x7E）时错误结束 CSI，剩余字节
++// aN;NaNM 逐字符变成普通 key event，被 TextareaRenderable.insertText() 插入
++// prompt buffer。此 handler 在 dispatchSequenceHandlers 中拦截这些碎片。
++//
++// 不变量：仅消费已被 ESC[<…N 前缀确认属于畸形 mouse 报告的后续字符；
++// 不扫描用户文本内容、不以 /NaN/ 过滤输入、不影响 paste/focus/capability reply。
++const MALFORMED_SGR_MOUSE_PREFIX = /\x1b\[<[;\d]*N$/
++// recovery 中仅接受 SGR mouse report 合法字符 + "NaN" 的组成字符
++const MALFORMED_SGR_MOUSE_TAIL = /^[aN;0-9Mm]$/
++// 安全上限：单个 SGR mouse 报告最多 3 字段 × ~10 位 + 2 分号 + 1 终止符 ≈ 40 字符
++const MALFORMED_SGR_MOUSE_MAX_CONSUME = 50
++
++export function createMalformedSgrMouseGuard(): (sequence: string) => boolean {
++  let recovering = false
++  let consumed = 0
++
++  return (sequence: string) => {
++    if (!recovering) {
++      // 检测 OpenTUI parser 从畸形 SGR mouse 报告拆出的第一个 key event
++      // 特征：ESC[< 开头、后跟零或多个数字和分号、以大写 N 结尾
++      if (MALFORMED_SGR_MOUSE_PREFIX.test(sequence)) {
++        recovering = true
++        consumed = 0
++        return true
++      }
++      return false
++    }
++
++    // recovery 中：逐字符消费畸形报告的剩余碎片
++    // 多字符序列（如方向键 ESC[A）出现在 recovery 中时立即退出并放行
++    if (sequence.length !== 1 || !MALFORMED_SGR_MOUSE_TAIL.test(sequence)) {
++      recovering = false
++      return false
++    }
++
++    consumed++
++
++    // 遇到终止符 M/m：recovery 完成，消费此字符
++    if (sequence === "M" || sequence === "m") {
++      recovering = false
++      return true
++    }
++
++    // 超过安全上限：退出 recovery，放行当前字符
++    if (consumed >= MALFORMED_SGR_MOUSE_MAX_CONSUME) {
++      recovering = false
++      return false
++    }
++
++    return true
++  }
++}
++
+ function rendererConfig(_config: TuiConfig.Resolved): CliRendererConfig {
+   const mouseEnabled = !Flag.OPENCODE_DISABLE_MOUSE && (_config.mouse ?? true)
+ 
+   return {
++    // 拦截畸形 SGR mouse 报告碎片，防止它们被当作普通键盘输入插入 prompt
++    prependInputHandlers: [createMalformedSgrMouseGuard()],
+     externalOutputMode: "passthrough",
+     targetFps: 60,
+     gatherStats: false,
+diff --git a/packages/opencode/test/cli/cmd/tui/malformed-sgr-mouse.test.tsx b/packages/opencode/test/cli/cmd/tui/malformed-sgr-mouse.test.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..a0bfc6cad4ec53eeafff80be63c01cf39751f988
+--- /dev/null
++++ b/packages/opencode/test/cli/cmd/tui/malformed-sgr-mouse.test.tsx
+@@ -0,0 +1,139 @@
++/** @jsxImportSource @opentui/solid */
++import { expect, test } from "bun:test"
++import { testRender } from "@opentui/solid"
++import { createMalformedSgrMouseGuard } from "../../../../src/cli/cmd/tui/app"
++
++// 畸形 SGR mouse 报告修复测试
++//
++// 某些终端/IDE/触摸屏在坐标不可用时发送畸形 SGR mouse 报告（如 ESC[<64;NaN;NaNM）。
++// OpenTUI StdinParser 在遇到大写 N（CSI final byte 范围）时错误结束 CSI，
++// 剩余字节 aN;NaNM 逐字符变成普通 key event，被 TextareaRenderable.insertText() 插入。
++// 本测试验证 createMalformedSgrMouseGuard handler 能拦截这些碎片，阻止它们进入 textarea。
++
++// 辅助：创建带 guard 的 testRender 并返回 textarea 引用
++async function setupTextareaWithGuard(width = 20, height = 3) {
++  let textarea: any
++  const app = await testRender(
++    () => <textarea ref={(r: any) => (textarea = r)} width={width} height={1} />,
++    { width, height, prependInputHandlers: [createMalformedSgrMouseGuard()] },
++  )
++  await app.renderOnce()
++  textarea.focus()
++  await app.renderOnce()
++  return { app, textarea }
++}
++
++// 辅助：向 test renderer 的 stdin 推入原始字节
++function feedStdin(app: any, data: string) {
++  app.renderer.stdin.push(Buffer.from(data))
++}
++
++// 辅助：排空 parser 并渲染一帧
++async function flushAndRender(app: any) {
++  await app.renderOnce()
++  await app.renderOnce()
++}
++
++// ─── 根因复现：畸形 SGR mouse 报告不得进入 textarea ───────────────────
++
++test("畸形 SGR mouse 报告 ESC[<64;NaN;NaNM 不进入 textarea", async () => {
++  const { app, textarea } = await setupTextareaWithGuard()
++  try {
++    // 注入畸形 SGR mouse press 报告
++    feedStdin(app, "\x1b[<64;NaN;NaNM")
++    await flushAndRender(app)
++
++    // textarea 不应包含畸形碎片的任何部分
++    expect(textarea.plainText).toBe("")
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
++test("畸形 SGR mouse 报告 ESC[<64;NaN;NaNm（释放）不进入 textarea", async () => {
++  const { app, textarea } = await setupTextareaWithGuard()
++  try {
++    feedStdin(app, "\x1b[<64;NaN;NaNm")
++    await flushAndRender(app)
++
++    expect(textarea.plainText).toBe("")
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
++test("三条连续畸形报告不产生 aN;NaNMaN;NaNMaN;NaNm", async () => {
++  const { app, textarea } = await setupTextareaWithGuard()
++  try {
++    // 模拟用户报告的完整场景：两条 press + 一条 release
++    feedStdin(app, "\x1b[<64;NaN;NaNM\x1b[<64;NaN;NaNM\x1b[<64;NaN;NaNm")
++    await flushAndRender(app)
++
++    expect(textarea.plainText).toBe("")
++    // 确保不是空字符串碰巧通过——显式检查不包含已知碎片
++    expect(textarea.plainText).not.toContain("aN")
++    expect(textarea.plainText).not.toContain("NaN")
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
++// ─── 正常路径：合法输入不受影响 ─────────────────────────────────
++
++test("合法 SGR mouse 报告不触发 guard、不进入 textarea", async () => {
++  const { app, textarea } = await setupTextareaWithGuard()
++  try {
++    // 合法 SGR mouse press：ESC[<button;x;yM —— parser 应识别为 mouse event
++    feedStdin(app, "\x1b[<64;12;8M")
++    await flushAndRender(app)
++
++    // 合法 mouse event 不经过 sequenceHandlers，textarea 不受影响
++    expect(textarea.plainText).toBe("")
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
++test("普通文本输入正常进入 textarea", async () => {
++  const { app, textarea } = await setupTextareaWithGuard()
++  try {
++    feedStdin(app, "hello")
++    await flushAndRender(app)
++
++    expect(textarea.plainText).toBe("hello")
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
++test("直接键入 aN;NaNm 文本正常进入 textarea（guard 不误拦）", async () => {
++  const { app, textarea } = await setupTextareaWithGuard()
++  try {
++    // 用户合法输入 aN;NaNm —— 不带 ESC mouse 前缀，guard 不应触发
++    feedStdin(app, "aN;NaNm")
++    await flushAndRender(app)
++
++    expect(textarea.plainText).toBe("aN;NaNm")
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
++// ─── 边界：recovery 中遇到非法字符立即放行 ─────────────────────────
++
++test("recovery 中遇到非 mouse 字符集字符立即放行后续输入", async () => {
++  const { app, textarea } = await setupTextareaWithGuard()
++  try {
++    // 先注入畸形报告触发 recovery，但报告中间混入了非法字符 x
++    // ESC[<64;N 是 parser 拆出的第一个 key event
++    // 后续 aN;NaN; 被 recovery 消费，但 x 不在 mouse 字符集中
++    feedStdin(app, "\x1b[<64;NaN;xM")
++    await flushAndRender(app)
++
++    // x 不在 mouse 字符集中，recovery 退出并放行 x
++    // recovery 已退出后，M 也是普通字符，正常进入 textarea
++    expect(textarea.plainText).toBe("xM")
++  } finally {
++    app.renderer.destroy()
++  }
++})

@@ -1,0 +1,206 @@
+From d7bc8462e4fefb58ff198984c09f4e6a5d978375 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 18 Jun 2026 18:39:18 +0800
+Subject: [PATCH] =?UTF-8?q?feat(tui):=20=E5=AE=9E=E7=8E=B0=20Windows=20?=
+ =?UTF-8?q?=E4=B8=8A=E7=9A=84=E8=BF=9B=E7=A8=8B=E6=8E=A7=E5=88=B6=E5=8F=B0?=
+ =?UTF-8?q?=E8=84=B1=E7=A6=BB=EF=BC=8C=E5=A2=9E=E5=BC=BA=E5=AE=88=E6=8A=A4?=
+ =?UTF-8?q?=E8=BF=9B=E7=A8=8B=E7=9A=84=E7=A8=B3=E5=AE=9A=E6=80=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/daemon.ts b/packages/opencode/src/cli/cmd/tui/daemon.ts
+index 7b6594e04c51d67f7ca7a13f7feb341819cf2a1a..fe1c4ded573a75fdd4b8a6b4cd970f1e9e750a4a 100644
+--- a/packages/opencode/src/cli/cmd/tui/daemon.ts
++++ b/packages/opencode/src/cli/cmd/tui/daemon.ts
+@@ -201,9 +201,13 @@ export async function ensure(args: Args) {
+       stdin: "ignore",
+       stdout: printLogs ? "inherit" : "ignore",
+       stderr: printLogs ? "inherit" : "ignore",
+-      // Unix Ctrl+C is delivered to the foreground process group.  Detaching the
++      // Unix Ctrl+C is delivered to the foreground process group. Detaching the
+       // worker gives it its own group so TUI exits do not accidentally take down
+-      // the shared daemon.  Windows keeps the existing console-mode guard path.
++      // the shared daemon.
++      // Windows 不能用 detached:true（Bun #31603：子进程被 job object 绑定，
++      // parent 退出即杀）。Windows 的 daemon Ctrl+C 免疫改由 worker 进程内
++      // 调用 FreeConsole 实现（见 worker.ts win32DetachConsole）：worker 脱离
++      // 共享 console 后，CTRL_C_EVENT 不再送达，等价 Unix detached 进程组。
+       detached: process.platform !== "win32",
+     })
+     proc.unref()
+diff --git a/packages/opencode/src/cli/cmd/tui/win32.ts b/packages/opencode/src/cli/cmd/tui/win32.ts
+index 1aaa80aecd69447d454f52ac0d23c64765d0461e..5eac3013bbb82938b3d9a0362309d5856ac38538 100644
+--- a/packages/opencode/src/cli/cmd/tui/win32.ts
++++ b/packages/opencode/src/cli/cmd/tui/win32.ts
+@@ -10,6 +10,11 @@ const kernel = () =>
+     GetConsoleMode: { args: ["ptr", "ptr"], returns: "i32" },
+     SetConsoleMode: { args: ["ptr", "u32"], returns: "i32" },
+     FlushConsoleInputBuffer: { args: ["ptr"], returns: "i32" },
++    // FreeConsole：使调用进程脱离当前控制台。daemon worker 用它从源头阻断
++    // CTRL_C_EVENT 送达（等价 Unix detached 进程组），是 Windows 上唯一可靠的
++    // 进程级隔离手段——SetConsoleCtrlHandler(NULL, TRUE) 在 Bun 上无效，因为
++    // Bun 自行接管 Ctrl+C 且绕过 console control handler 链（已实证）。
++    FreeConsole: { args: [], returns: "i32" },
+   })
+ 
+ let k32: ReturnType<typeof kernel> | undefined
+@@ -53,6 +58,40 @@ export function win32FlushInputBuffer() {
+   k32!.symbols.FlushConsoleInputBuffer(handle)
+ }
+ 
++/**
++ * Detach the calling process from the current console (process-level, not console-global).
++ *
++ * The daemon worker shares the same Windows console as the TUI. When the user
++ * presses Ctrl+C, the console broadcasts CTRL_C_EVENT to every attached process;
++ * the worker has no (reliable) signal handler to intercept it, and Bun's default
++ * behaviour terminates the process immediately — killing the daemon even when it
++ * is serving an active session, violating the "daemon exits by idle / activity"
++ * design.
++ *
++ * Unlike the TUI-side win32InstallCtrlCGuard (which toggles ENABLE_PROCESSED_INPUT,
++ * a console-global flag), this function calls FreeConsole so the worker process
++ * detaches from the console entirely, cutting off event delivery at the source.
++ * Unix achieves the same effect via detached:true (separate process group);
++ * Windows cannot use detached:true (Bun #31603: detached child is bound to a
++ * kill-on-close job object and dies when the parent exits), so FreeConsole is
++ * the equivalent path.
++ *
++ * Does not check process.stdin.isTTY: the worker's stdin is "ignore" (not a TTY)
++ * but it is still attached to the console inherited from the launcher — which is
++ * exactly why Ctrl+C reaches it. SetConsoleMode depends on a stdin handle hence
++ * checks isTTY; FreeConsole operates on the process attachment and does not.
++ *
++ * Side effect: console stdio handles become invalid for the calling process.
++ * In the default mode worker logs go to a file (log.ts init print=false uses
++ * createWriteStream), so they are unaffected; only --print-logs debug mode writes
++ * to stderr, which is why worker.ts gates this call behind !printLogs.
++ */
++export function win32DetachConsole() {
++  if (process.platform !== "win32") return
++  if (!load()) return
++  k32!.symbols.FreeConsole()
++}
++
+ let unhook: (() => void) | undefined
+ 
+ /**
+diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
+index 4c5063ec0793279b423f0ed815433b3b7962fa82..4d588b939cb6d5ef893b3aaf69aa7182fe6d819b 100644
+--- a/packages/opencode/src/cli/cmd/tui/worker.ts
++++ b/packages/opencode/src/cli/cmd/tui/worker.ts
+@@ -17,14 +17,23 @@ import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { SessionActivity } from "@/session/activity"
+ import { GlobalBus } from "@/bus/global"
+ import { DisposedReason, Event as ServerEvent } from "@/server/event"
++import { win32DetachConsole } from "./win32"
+ 
+ ensureProcessMetadata("worker")
+ NetworkProxy.installGlobalFetch()
+ 
+ const log = Log.create({ service: "daemon" })
+ 
++// printLogs 判定须与 daemon.ts launcher 端的 printLogs（argv 决定 stdio + env 透传）
++// 保持语义一致：launcher 只看 argv 设置 stdio（daemon.ts:187），同时把
++// OPENCODE_PRINT_LOGS="1" 透传到 worker env（daemon.ts:191），worker 端再看
++// argv||env（此处）。注意：若仅经 env 注入 OPENCODE_PRINT_LOGS=1 而不带 --print-logs
++// argv，launcher 的 stdio 仍为 ignore——此时 worker 不调 FreeConsole（保留 console）
++// 但日志无法输出到 stderr，是 pre-existing 死区，非本次引入。
++const printLogs = process.argv.includes("--print-logs") || process.env.OPENCODE_PRINT_LOGS === "1"
++
+ await Log.init({
+-  print: process.argv.includes("--print-logs") || process.env.OPENCODE_PRINT_LOGS === "1",
++  print: printLogs,
+   dev: Installation.isLocal(),
+   level: (() => {
+     if (Installation.isLocal()) return "DEBUG"
+@@ -32,6 +41,12 @@ await Log.init({
+   })(),
+ })
+ 
++// Windows: 让 daemon worker 脱离共享 console，使 Ctrl+C 的 CTRL_C_EVENT 不再
++// 送达 worker（等价 Unix detached 进程组）。必须在 HTTP server 启动前、日志
++// 系统初始化后调用：默认模式日志写文件不受影响。--print-logs 调试模式保留
++// console 以便 stderr 日志输出，该模式下 daemon 不保证 Ctrl+C 免疫（有意降级）。
++if (!printLogs) win32DetachConsole()
++
+ Heap.start()
+ 
+ process.on("unhandledRejection", (e) => {
+diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
+index e3bfa3634f354bc24844fb89827d12a34750c32f..8a6ec64408b88354c9401b1ebcfb28d6ce427df4 100644
+--- a/packages/opencode/test/cli/tui/daemon.test.ts
++++ b/packages/opencode/test/cli/tui/daemon.test.ts
+@@ -16,6 +16,7 @@ import path from "path"
+ import { fileURLToPath } from "url"
+ import { tmpdir } from "../../fixture/fixture"
+ import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
++import * as Win32Module from "../../../src/cli/cmd/tui/win32"
+ 
+ const WORKER_TS = fileURLToPath(new URL("../../../src/cli/cmd/tui/worker.ts", import.meta.url))
+ // `daemon stop` 是用户可见的 CLI 行为，测试必须从真实入口验证，而不是直接调用内部 helper；
+@@ -619,6 +620,62 @@ describe("daemon lifecycle", () => {
+     DAEMON_START_TIMEOUT_MS + 5_000,
+   )
+ 
++  test("win32DetachConsole is a no-op on non-Windows platforms", () => {
++    // win32DetachConsole 在非 win32 平台必须静默返回，不抛错、不依赖 kernel32。
++    // 这是跨平台安全边界：worker.ts 无条件 import win32 模块，函数内自检平台。
++    expect(() => Win32Module.win32DetachConsole()).not.toThrow()
++  })
++
++  test(
++    "Windows daemon detaches from the shared console yet keeps serving HTTP, SSE and control port",
++    async () => {
++      if (process.platform !== "win32") return
++
++      await using tmp = await tmpdir()
++      const lockPath = path.join(tmp.path, "tui-server.json")
++      // 给 daemon 较长 idle 超时，避免测试期间因 SSE 断开而退出；
++      // 这里验证 worker 调用 FreeConsole 脱离 console 后，所有服务通道仍功能正常。
++      //
++      // 注意：无法在 bun:test 内安全发送真实 CTRL_C_EVENT 来断言「daemon 存活」——
++      // GenerateConsoleCtrlEvent(0,0) 会广播给当前 console 全部进程并杀掉测试 runner
++      // 自身，且 SetConsoleCtrlHandler(NULL,TRUE) 在 Bun 上无法保护发送进程。
++      // Ctrl+C 免疫行为已通过独立进程拓扑实测确认（daemon 心跳在事件广播后持续）。
++      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "30000" })
++
++      try {
++        // 1. 公共 HTTP 健康检查
++        const health = await fetch(`http://127.0.0.1:${lock.port}/global/health`)
++        expect(health.ok).toBe(true)
++
++        // 2. SSE 事件流：FreeConsole 不影响 HTTP 长连接和 server.connected 推送
++        const ctrl = new AbortController()
++        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, { signal: ctrl.signal })
++        expect(res.ok).toBe(true)
++        if (!res.body) throw new Error("missing SSE body")
++        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
++        try {
++          expect((await reader.read()).value).toContain("server.connected")
++        } finally {
++          ctrl.abort()
++          await reader.cancel().catch(() => undefined)
++          reader.releaseLock()
++        }
++
++        // 3. 私有控制端口：opencode daemon stop 的安全通道仍可用
++        if (!lock.controlPort) throw new Error("missing control port")
++        const status = await fetch(
++          `http://127.0.0.1:${lock.controlPort}${ServerLockModule.CONTROL_STATUS_PATH}`,
++          { headers: { [ServerLockModule.CONTROL_TOKEN_HEADER]: lock.token } },
++        )
++        expect(status.ok).toBe(true)
++      } finally {
++        if (ServerLockModule.alive(proc.pid)) proc.kill()
++        await proc.exited.catch(() => undefined)
++      }
++    },
++    DAEMON_START_TIMEOUT_MS + 10_000,
++  )
++
+   test(
+     "Unix detached child survives SIGINT sent to the launcher process group",
+     async () => {

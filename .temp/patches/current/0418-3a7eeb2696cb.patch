@@ -1,0 +1,116 @@
+From 3a7eeb2696cbdca7da5ed86488cd174d3394ba0d Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sat, 11 Jul 2026 16:25:46 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E6=B5=81=E5=BC=8F=20reasoning=20?=
+ =?UTF-8?q?=E9=BB=98=E8=AE=A4=E6=94=B6=E7=BC=A9=EF=BC=8C=E9=81=BF=E5=85=8D?=
+ =?UTF-8?q?=E5=86=85=E5=AE=B9=E5=A2=9E=E9=95=BF=E6=97=B6=E5=85=88=E6=92=91?=
+ =?UTF-8?q?=E5=BC=80=E5=86=8D=E6=94=B6=E7=BC=A9=E7=9A=84=E6=8A=96=E5=8A=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+overflow memo 增加流式 guard：streaming + hide 模式 + 无 override 时
+强制 true，使流式期间从第一帧就显示 ▼ expand 而非先全文展开。
+
+streaming memo 移到 overflow 之前声明，避免 Solid createMemo 立即
+求值时触发 TDZ。完成后 guard 失效，短内容恢复正常展开、长内容收缩。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 7deee4e22f0af62f59653d2d556ae026c55c4fd7..03eb05c6d16bdb58bccc16b30202b52d70af01d7 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -1845,15 +1845,20 @@ function ReasoningRun(props: { key: string; topMargin: boolean; parts: Reasoning
+   const [override, setOverride] = createSignal<boolean>()
+   // blank 成员仍参与 run identity，但不应进入用户可见 denominator 或字符统计。
+   const parts = createMemo(() => props.parts.filter((part) => normalizeReasoning(part.text)))
+-  // overflow 估算包含分隔符行数；只依赖 parts() 和 ctx.width，不依赖 expanded，
+-  // 因此 wrapMode 切换不会制造 expand→overflow→collapse 抖动反馈环。
+-  const overflow = createMemo(() => reasoningRowsTotal(parts(), ctx.width) > REASONING_PREVIEW_ROWS)
++  // 保持旧实现以父 Message 完成为准，避免本需求混入 per-Part streaming 生命周期迁移。
++  const streaming = createMemo(() => !props.message.time.completed)
++  // 流式 + hide 模式 + 无 override 时强制 overflow，避免内容从短到长时先撑开再收缩的视觉抖动。
++  // overflow 同时驱动 expanded、footer 可见性和 wrapMode，改这一处三者自动一致。
++  const overflow = createMemo(() =>
++    streaming() && override() === undefined && ctx.thinkingMode() === "hide"
++      ? true
++      : reasoningRowsTotal(parts(), ctx.width) > REASONING_PREVIEW_ROWS,
++  )
+   // 全局模式提供默认值，明确的 local true/false 都应覆盖它；模式切换会在下方清除 override。
+   const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
+   // 字符数保持旧 `.length` 口径，只用于 header，不参与 key 或视觉行估算。
+   const characters = createMemo(() => parts().reduce((total, part) => total + normalizeReasoning(part.text).length, 0))
+-  const streaming = createMemo(() => !props.message.time.completed)
+-  // 保持旧实现以父 Message 完成为准，避免本需求混入 per-Part streaming 生命周期迁移。
++
+ 
+   // 全局命令必须覆盖局部点击，否则 “Collapse thinking” 无法得到确定结果。
+   createEffect(
+diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+index 37ea71034aff375135d5076177d2d73650415328..6be0698686575d9f00a6d9a9bde69354cf8ddf5a 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -398,6 +398,64 @@ test("invisible raw parts still split adjacent reasoning runs", async () => {
+   )
+ })
+ 
++test("streaming reasoning collapses by default to avoid expand-collapse jitter", async () => {
++  const messageID = "msg_reasoning_stream_collapse"
++  // 未完成 Message：streaming=true，短内容（1 行，不超 5 行阈值）。
++  const pending = {
++    ...assistantMessage(messageID, 1),
++    time: { created: 1 },
++  } satisfies AssistantMessage
++
++  await withRenderedSession(
++    [pending],
++    { [messageID]: [reasoningPart("part_reasoning_stream_collapse", messageID, "short stream thought")] },
++    async (app, emit) => {
++      // 流式 + hide 模式默认收缩：即使内容只有 1 行也应显示 ▼ expand，不能先全文展开再收缩。
++      // reasoning 正文依赖异步 Markdown 高亮，必须同时等待 toggle 和正文出现。
++      const frame = await waitForFrame(
++        app,
++        (lines) =>
++          lines.some((line) => line.includes("▼ expand")) && lines.some((line) => line.includes("short stream thought")),
++      )
++      expect(frame.some((line) => line.includes("short stream thought"))).toBe(true)
++
++      // delta 增长内容；toggle 必须始终存在，不能出现先展开再收缩的抖动。
++      emit(
++        partDeltaEvent(
++          "evt_reasoning_stream_grow",
++          messageID,
++          "part_reasoning_stream_collapse",
++          "\nsecond stream line",
++          "text",
++        ),
++      )
++      const grown = await waitForFrame(app, (lines) => lines.some((line) => line.includes("second stream line")))
++      expect(grown.some((line) => line.includes("▼ expand"))).toBe(true)
++
++      // 完成 Message 后短内容恢复正常展开（无 toggle）。
++      emit(
++        messageUpdatedEvent("evt_reasoning_stream_done", {
++          ...pending,
++          time: { created: 1, completed: 2 },
++          finish: "stop",
++        }),
++      )
++      // 完成 Message 后短内容恢复正常展开（无 toggle）；必须同时等待正文重新高亮出现。
++      // streaming→completed 切换会令 CodeRenderable 重新高亮，footer 消失不等于正文已可见。
++      const completed = await waitForFrame(
++        app,
++        (lines) =>
++          !lines.some((line) => line.includes("▼ expand")) &&
++          lines.some((line) => line.includes("short stream thought")),
++      )
++      expect(completed.some((line) => line.includes("short stream thought"))).toBe(true)
++      expect(completed.some((line) => line.includes("second stream line"))).toBe(true)
++    },
++    {},
++    { height: 18 },
++  )
++})
++
+ test("concealed reasoning separator stays visible between sources", async () => {
+   const messageID = "msg_reasoning_conceal"
+   await withRenderedSession(

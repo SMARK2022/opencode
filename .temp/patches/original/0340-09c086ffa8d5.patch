@@ -1,0 +1,134 @@
+From 09c086ffa8d5e567ff8742bdc80f05a7412ef9db Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 25 Jun 2026 03:27:47 +0800
+Subject: [PATCH] =?UTF-8?q?fix(test/fixture):=20=E4=B8=BA=20disposeAllInst?=
+ =?UTF-8?q?ances=20=E6=B7=BB=E5=8A=A0=E8=B6=85=E6=97=B6=E4=BF=9D=E6=8A=A4?=
+ =?UTF-8?q?=E9=98=B2=E6=AD=A2=20afterEach=20hook=20=E6=8C=82=E6=AD=BB?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Windows CI 上某些 service finalizer（如 SessionRunState.runner.cancel）
+偶发挂死会导致 disposeAllInstances 永不返回，afterEach hook 超时 30 秒
+并拖垮整个测试文件。为两个 runtime 的 disposal 各设 5 秒上限，用
+Promise.race + setTimeout 实现，p 先 settle 时 clearTimeout 避免虚假警告。
+
+Promise.all 改为 allSettled：teardown 中 rejection 不应传播给调用方，
+但通过 console.warn 输出 rejected 结果保持可观测性。新增行为级测试覆盖
+挂死场景（注入永不 resolve 的 disposer）和 rejection 场景。
+
+diff --git a/packages/opencode/test/fixture/fixture.test.ts b/packages/opencode/test/fixture/fixture.test.ts
+index 153276a2838bbc192a6898b513d02e3e6ede9f9c..d51dfbd431822e4310d4b4fc1fd3f164cdd598dc 100644
+--- a/packages/opencode/test/fixture/fixture.test.ts
++++ b/packages/opencode/test/fixture/fixture.test.ts
+@@ -1,7 +1,8 @@
+ import { $ } from "bun"
+ import { describe, expect, test } from "bun:test"
+ import fs from "fs/promises"
+-import { tmpdir } from "./fixture"
++import { disposeAllInstances, tmpdir, withTestInstance } from "./fixture"
++import { registerDisposer } from "../../src/effect/instance-registry"
+ 
+ describe("tmpdir", () => {
+   test("disables fsmonitor for git fixtures", async () => {
+@@ -24,3 +25,50 @@ describe("tmpdir", () => {
+     expect(exists).toBe(false)
+   })
+ })
++
++describe("disposeAllInstances", () => {
++  test("does not throw when disposal rejects", async () => {
++    // teardown 不应将 disposal rejection 传播给调用方——
++    // 这与 db.ts 中 resetDatabase 已有的 .catch(() => undefined) 意图一致。
++    //
++    // 放在 hang 测试之前执行：hang 测试会向 testInstanceRuntime 的
++    // cachedDisposeAll 注入永不 settle 的 fiber，后续 disposeAll 调用
++    // 可能 join 同一个卡死 fiber。先执行 rejection 测试可确保它
++    // 在干净的缓存状态下验证 rejection-swallowing 行为。
++    await using tmp = await tmpdir()
++    await withTestInstance({ directory: tmp.path, fn: () => undefined })
++
++    const off = registerDisposer(() => Promise.reject(new Error("simulated disposal failure")))
++    try {
++      await expect(disposeAllInstances()).resolves.toBeUndefined()
++    } finally {
++      off()
++    }
++  })
++
++  test("completes within a bounded time even when an internal disposal hangs", async () => {
++    // 行为复现：模拟 Windows CI 上某个 service finalizer 挂死。
++    // withTestInstance 加载 instance 但不 dispose（与 provideTestInstance 不同），
++    // 让 disposeAllInstances 有 cache entry 可遍历。
++    // 注入永不 resolve 的 disposer 模拟 SessionRunState.runner.cancel 等
++    // finalizer 在特定时序下不返回的场景。
++    // 修复前 disposeAllInstances 会永远挂起，修复后应在远低于 30 秒
++    // hook 超时的时间内返回。
++    await using tmp = await tmpdir()
++    // withTestInstance 不 dispose，instance 留在 testInstanceRuntime 缓存中
++    await withTestInstance({ directory: tmp.path, fn: () => undefined })
++
++    const off = registerDisposer(() => new Promise(() => {}))
++    try {
++      const start = Date.now()
++      await disposeAllInstances()
++      const elapsed = Date.now() - start
++
++      // fixture.ts 中 DISPOSAL_TIMEOUT = 5_000，此处加 2 秒调度开销余量。
++      // 关键是远低于 bun 30 秒 hook 超时，避免 afterEach 拖垮整个测试文件。
++      expect(elapsed).toBeLessThan(5_000 + 2_000)
++    } finally {
++      off()
++    }
++  })
++})
+diff --git a/packages/opencode/test/fixture/fixture.ts b/packages/opencode/test/fixture/fixture.ts
+index 8e4d92bfb46c24d2022fad0af85afa688d4f00b8..934abede2fefb78f0f3936cb7a7e5c8675818001 100644
+--- a/packages/opencode/test/fixture/fixture.ts
++++ b/packages/opencode/test/fixture/fixture.ts
+@@ -45,8 +45,44 @@ export async function reloadTestInstance(input: { directory: string }) {
+   return runTestInstanceStore((store) => store.reload(input))
+ }
+ 
++// Windows CI 上某些 service finalizer（如 SessionRunState.runner.cancel）
++// 偶发挂死会导致 disposeAllInstances 永不返回，进而让 afterEach hook
++// 超时（30 秒）并拖垮整个测试文件。为两个 runtime 的 disposal 各设上限：
++// 正常 disposal 在毫秒级完成，5 秒提供 50x 余量同时远低于 hook 超时。
++//
++// 注意：超时只是放弃等待，不会取消后台仍在运行的 disposal fiber——
++// 挂死的 disposer 会继续占用资源直到进程退出。这是 teardown 场景下
++// 可接受的折衷：优先保证后续测试不被 hook 超时阻断。
++const DISPOSAL_TIMEOUT = 5_000
++const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
++  // 用 setTimeout 而非 Bun.sleep，以便在 p 先 settle 时 clearTimeout
++  // 避免向后续测试输出虚假的 "timed out" 警告
++  let timer: ReturnType<typeof setTimeout> | undefined
++  const timeout = new Promise<void>((resolve) => {
++    timer = setTimeout(() => {
++      console.warn(`[fixture] ${label} disposal timed out after ${DISPOSAL_TIMEOUT}ms`)
++      resolve()
++    }, DISPOSAL_TIMEOUT)
++  })
++  return Promise.race([
++    p.finally(() => { if (timer) clearTimeout(timer) }),
++    timeout,
++  ]) as Promise<T>
++}
++
+ export async function disposeAllInstances() {
+-  await Promise.all([InstanceRuntime.disposeAllInstances(), runTestInstanceStore((store) => store.disposeAll())])
++  // allSettled 而非 all：teardown 中某个 runtime 的 rejection 不应
++  // 阻止另一个 runtime 的清理，也不应传播给 afterEach 调用方——
++  // 这与 db.ts 中 resetDatabase 已有的 .catch(() => undefined) 意图一致。
++  // 但 rejection 也不应完全静默：下方检查 allSettled 结果并输出警告，
++  // 让 finalizer bug 在 CI 日志中可追踪。
++  const results = await Promise.allSettled([
++    withDisposalTimeout(InstanceRuntime.disposeAllInstances(), "InstanceRuntime"),
++    withDisposalTimeout(runTestInstanceStore((store) => store.disposeAll()), "InstanceStore"),
++  ])
++  for (const r of results) {
++    if (r.status === "rejected") console.warn(`[fixture] disposal rejected:`, r.reason)
++  }
+ }
+ 
+ // Strip null bytes from paths (defensive fix for CI environment issues)

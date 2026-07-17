@@ -1,0 +1,586 @@
+From 5b34dda2ff1e98074540015d5aa0092b0deabf84 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Wed, 27 May 2026 02:26:42 +0800
+Subject: [PATCH] =?UTF-8?q?feat(logging):=20=E5=A2=9E=E5=BC=BA=E5=B7=A5?=
+ =?UTF-8?q?=E5=85=B7=E6=89=A7=E8=A1=8C=E5=92=8C=E6=B5=81=E5=A4=84=E7=90=86?=
+ =?UTF-8?q?=E7=9A=84=E6=97=A5=E5=BF=97=E8=AE=B0=E5=BD=95=EF=BC=8C=E6=B7=BB?=
+ =?UTF-8?q?=E5=8A=A0=E5=B7=A5=E5=85=B7=E6=97=B6=E5=BA=8F=E8=B7=9F=E8=B8=AA?=
+ =?UTF-8?q?=E5=92=8C=E8=AF=8A=E6=96=AD=E4=BF=A1=E6=81=AF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sdk.tsx b/packages/opencode/src/cli/cmd/tui/context/sdk.tsx
+index 430b849da4558770eb3b8252561bc0a3716a658e..6182307365b0a442fb2ec168d54efac31923073f 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sdk.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sdk.tsx
+@@ -5,6 +5,7 @@ import { createGlobalEmitter } from "@solid-primitives/event-bus"
+ import { Flag } from "@opencode-ai/core/flag/flag"
+ import { batch, onCleanup, onMount } from "solid-js"
+ import { ConnectionError } from "../util/connection-error"
++import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
+ 
+ export type SDKTestTransport = {
+   fetch?: typeof fetch
+@@ -54,6 +55,20 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+     // cleanup work can delay them even when the HTTP stream is still healthy,
+     // so keep the disconnect threshold above short-lived event-loop stalls.
+     const heartbeatTimeout = props.heartbeatTimeout ?? 90_000
++    const loggedPartDeltaReceives = new Set<string>()
++
++    function logPartDeltaReceive(event: GlobalEvent) {
++      if (event.payload.type === "server.connected") loggedPartDeltaReceives.clear()
++      if (event.payload.type !== "message.part.delta") return
++      const key = partDeltaTimingKey(event.payload.properties)
++      if (loggedPartDeltaReceives.has(key)) return
++      // receive 阶段表示 “SDK SSE 已收到 delta，尚未进入 SyncProvider”。
++      // 只记录每个 message/part/field 的首条 delta，避免 token 级日志膨胀；
++      // 达到上限后清空只会降低诊断精度，不会影响事件投递。
++      if (loggedPartDeltaReceives.size >= PART_DELTA_TIMING_LIMIT) loggedPartDeltaReceives.clear()
++      loggedPartDeltaReceives.add(key)
++      logPartDeltaTiming({ client: sdk, phase: "delta.receive", ...event.payload.properties })
++    }
+ 
+     const flush = () => {
+       if (queue.length === 0) return
+@@ -70,6 +85,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+     }
+ 
+     const handleEvent = (event: GlobalEvent) => {
++      logPartDeltaReceive(event)
+       queue.push(event)
+       const elapsed = Date.now() - last
+ 
+@@ -182,6 +198,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+       abort.abort()
+       sse?.abort()
+       if (timer) clearTimeout(timer)
++      loggedPartDeltaReceives.clear()
+     })
+ 
+     return {
+diff --git a/packages/opencode/src/cli/cmd/tui/context/stream-timing.ts b/packages/opencode/src/cli/cmd/tui/context/stream-timing.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c86655b8cd50bbc98b8c6cde8999a32dfa33b3e
+--- /dev/null
++++ b/packages/opencode/src/cli/cmd/tui/context/stream-timing.ts
+@@ -0,0 +1,49 @@
++// 每个 TUI 进程最多记住 512 个 message/part/field 诊断 key；超过后清空，
++// 防止长会话常驻内存增长。清空只会让后续首 delta 再打一行日志，不影响 UI。
++export const PART_DELTA_TIMING_LIMIT = 512
++
++type AppLogClient = {
++  app: {
++    log(input: {
++      service: string
++      level: "info"
++      message: string
++      extra: Record<string, unknown>
++    }): Promise<unknown>
++  }
++}
++
++export function partDeltaTimingKey(input: { messageID: string; partID: string; field: string }) {
++  // 使用 NUL 作为内存去重分隔符，避免 message/part/field 内部的常规字符
++  // 影响 key 边界；这个 key 不写入日志、不持久化，只用于限制诊断行数。
++  return `${input.messageID}\0${input.partID}\0${input.field}`
++}
++
++export function logPartDeltaTiming(input: {
++  client: AppLogClient
++  phase: "delta.receive" | "delta.apply" | "delta.drop"
++  sessionID: string
++  messageID: string
++  partID: string
++  field: string
++  reason?: string
++}) {
++  // TUI 自身有本地日志，但这组埋点必须进入 daemon 的 opencode log，
++  // 才能和 processor/tool 端时间戳放在同一条链路里排查。这里保持
++  // fire-and-forget：/log 失败不能阻塞 SSE 分发、store reducer 或渲染。
++  void input.client.app
++    .log({
++      service: "tui.stream",
++      level: "info",
++      message: "stream timing",
++      extra: {
++        phase: input.phase,
++        sessionID: input.sessionID,
++        messageID: input.messageID,
++        partID: input.partID,
++        field: input.field,
++        reason: input.reason,
++      },
++    })
++    .catch(() => undefined)
++}
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+index c26bb236b0013b67320e3d6a6b0e3fda7a066421..89c9e0b83f02a2751c879f185a1b800592f90276 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+@@ -35,6 +35,7 @@ import { useKV } from "./kv"
+ // [local-smark] SessionPath for daemon multi-instance path management
+ import { SessionPath } from "@/session/path"
+ import { aggregateFailures } from "./aggregate-failures"
++import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
+ 
+ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+   name: "Sync",
+@@ -130,6 +131,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+     const questionChanges = new Map<string, { sessionID: string; requestID: string; version: number }>()
+     let pendingPartDeltas: EventMessagePartDelta[] = []
+     let pendingPartDeltaTimer: Timer | undefined
++    const loggedPartDeltaApplications = new Set<string>()
+ 
+     function targetsSamePartDelta(previous: EventMessagePartDelta, next: EventMessagePartDelta) {
+       // Only adjacent deltas for the same Solid store cell are safe to merge.
+@@ -167,11 +169,29 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+       return result
+     }
+ 
++    function logPartDeltaApplication(event: EventMessagePartDelta, phase: "delta.apply" | "delta.drop", reason?: string) {
++      const key = `${phase}\0${partDeltaTimingKey(event.properties)}`
++      if (loggedPartDeltaApplications.has(key)) return
++      // apply/drop 阶段表示 “SyncProvider reducer 已处理 delta”。drop 只说明
++      // 当时本地 store 缺 message/part，不代表 daemon 没发；这些 reason 字符串
++      // 必须保持短且稳定，方便和 receive 阶段在 daemon log 中对齐。
++      // key 前缀包含 phase，保证同一 part 先 drop 后恢复 apply 时两段都会出现。
++      if (loggedPartDeltaApplications.size >= PART_DELTA_TIMING_LIMIT) loggedPartDeltaApplications.clear()
++      loggedPartDeltaApplications.add(key)
++      logPartDeltaTiming({ client: sdk.client, phase, reason, ...event.properties })
++    }
++
+     function applyPartDelta(event: EventMessagePartDelta) {
+       const parts = store.part[event.properties.messageID]
+-      if (!parts) return
++      if (!parts) {
++        logPartDeltaApplication(event, "delta.drop", "missing-message")
++        return
++      }
+       const result = Binary.search(parts, event.properties.partID, (p) => p.id)
+-      if (!result.found) return
++      if (!result.found) {
++        logPartDeltaApplication(event, "delta.drop", "missing-part")
++        return
++      }
+       setStore(
+         "part",
+         event.properties.messageID,
+@@ -186,6 +206,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+           ;(part[field] as string) = (existing ?? "") + event.properties.delta
+         }),
+       )
++      logPartDeltaApplication(event, "delta.apply")
+     }
+ 
+     function flushPartDeltas() {
+@@ -369,6 +390,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+       if (event.type !== "message.part.delta") flushPartDeltas()
+       switch (event.type) {
+         case "server.connected":
++          loggedPartDeltaApplications.clear()
+           if (!connectedOnce) {
+             connectedOnce = true
+             break
+@@ -642,6 +664,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+     onCleanup(() => {
+       if (pendingPartDeltaTimer) clearTimeout(pendingPartDeltaTimer)
+       pendingPartDeltas = []
++      loggedPartDeltaApplications.clear()
+     })
+ 
+     const exit = useExit()
+diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
+index bad1f650969d38cf473454e84e47663064c4291a..52c44cbd6412772ae21a580278c3a7be7dc6343b 100644
+--- a/packages/opencode/src/session/llm.ts
++++ b/packages/opencode/src/session/llm.ts
+@@ -27,6 +27,7 @@ import * as Option from "effect/Option"
+ import * as OtelTracer from "@effect/opentelemetry/Tracer"
+ 
+ const log = Log.create({ service: "llm" })
++const toolLog = Log.create({ service: "session.prompt" })
+ export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
+ type Result = Awaited<ReturnType<typeof streamText>>
+ 
+@@ -231,7 +232,25 @@ const live: Layer.Layer<
+         workflowModel.systemPrompt = system.join("\n")
+         workflowModel.toolExecutor = async (toolName, argsJson, _requestID) => {
+           const t = sortedTools[toolName]
++          const startedAt = Date.now()
++          const timing = {
++            source: "workflow",
++            tool: toolName,
++            sessionID: input.sessionID,
++            callID: _requestID,
++          }
++          // GitLab workflow 模型会绕过 session.prompt 的 local/MCP tool adapter，
++          // 所以这里补同一组 daemon-log milestone。只记录 phase/source、
++          // sessionID、工具名、callID、status 和耗时；不记录 argsJson、结果、
++          // metadata，避免 workflow 参数或输出进入日志。
++          toolLog.info("tool timing", { phase: "tool.start", ...timing })
+           if (!t || !t.execute) {
++            toolLog.info("tool timing", {
++              phase: "tool.end",
++              ...timing,
++              status: "error",
++              durationMs: Date.now() - startedAt,
++            })
+             return { result: "", error: `Unknown tool: ${toolName}` }
+           }
+           try {
+@@ -241,12 +260,24 @@ const live: Layer.Layer<
+               abortSignal: input.abort,
+             })
+             const output = typeof result === "string" ? result : (result?.output ?? JSON.stringify(result))
++            toolLog.info("tool timing", {
++              phase: "tool.end",
++              ...timing,
++              status: "completed",
++              durationMs: Date.now() - startedAt,
++            })
+             return {
+               result: output,
+               metadata: typeof result === "object" ? result?.metadata : undefined,
+               title: typeof result === "object" ? result?.title : undefined,
+             }
+           } catch (e: any) {
++            toolLog.info("tool timing", {
++              phase: "tool.end",
++              ...timing,
++              status: "error",
++              durationMs: Date.now() - startedAt,
++            })
+             return { result: "", error: e.message ?? String(e) }
+           }
+         }
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index 6d18048a468e6c0ca23866fcd983792bcffdc268..ae00cec498d7f4c22c2a330d274f672396e8ecb4 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -140,6 +140,34 @@ export const layer = Layer.effect(
+       }
+       let aborted = false
+       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
++      let timing:
++        | { startedAt: number; firstStreamEvent: boolean; firstDelta: Set<string> }
++        | undefined
++
++      // 这些 milestone 只写 daemon log，不记录 prompt、token 内容、工具参数
++      // 或 provider metadata。phase 字符串是后续排查的稳定连接点：
++      // processor.start/ai.first_event 区分 provider 首事件延迟，part.start /
++      // part.first_delta 区分 processor 内部处理延迟，processor.end 标记回合收束。
++      const streamTiming = (phase: string, extra?: Record<string, unknown>) => {
++        if (!timing) return
++        slog.info("stream timing", {
++          phase,
++          sessionID: ctx.sessionID,
++          messageID: ctx.assistantMessage.id,
++          elapsedMs: Date.now() - timing.startedAt,
++          ...extra,
++        })
++      }
++      const logPartStart = (partType: string, extra: Record<string, unknown>) => {
++        streamTiming("part.start", { partType, ...extra })
++      }
++      const logFirstDelta = (partType: string, partID: string, field: string, deltaChars: number) => {
++        if (!timing) return
++        const key = `${partID}\0${field}`
++        if (timing.firstDelta.has(key)) return
++        timing.firstDelta.add(key)
++        streamTiming("part.first_delta", { partType, partID, field, deltaChars })
++      }
+ 
+       const parse = (e: unknown) =>
+         MessageV2.fromError(e, {
+@@ -282,12 +310,14 @@ export const layer = Layer.effect(
+               metadata: value.providerMetadata,
+             }
+             yield* session.updatePart(ctx.reasoningMap[value.id])
++            logPartStart("reasoning", { partID: ctx.reasoningMap[value.id].id })
+             return
+ 
+           case "reasoning-delta":
+             if (!(value.id in ctx.reasoningMap)) return
+             ctx.reasoningMap[value.id].text += value.text
+             if (value.providerMetadata) ctx.reasoningMap[value.id].metadata = value.providerMetadata
++            logFirstDelta("reasoning", ctx.reasoningMap[value.id].id, "text", value.text.length)
+             yield* session.updatePartDelta({
+               sessionID: ctx.reasoningMap[value.id].sessionID,
+               messageID: ctx.reasoningMap[value.id].messageID,
+@@ -345,6 +375,7 @@ export const layer = Layer.effect(
+               messageID: part.messageID,
+               sessionID: part.sessionID,
+             }
++            logPartStart("tool", { partID: part.id, callID: value.id })
+             return
+ 
+           case "tool-input-delta":
+@@ -352,7 +383,8 @@ export const layer = Layer.effect(
+             ctx.toolInputBuffer[value.id] = (ctx.toolInputBuffer[value.id] ?? "") + value.delta
+             // Publish a bus-only delta so the UI stays real-time.
+             const tcall = ctx.toolcalls[value.id]
+-            if (tcall)
++            if (tcall) {
++              logFirstDelta("tool", tcall.partID, "raw", value.delta.length)
+               yield* session.updatePartDelta({
+                 sessionID: tcall.sessionID,
+                 messageID: tcall.messageID,
+@@ -360,6 +392,7 @@ export const layer = Layer.effect(
+                 field: "raw",
+                 delta: value.delta,
+               })
++            }
+             return
+ 
+           case "tool-input-end": {
+@@ -657,12 +690,14 @@ export const layer = Layer.effect(
+               metadata: value.providerMetadata,
+             }
+             yield* session.updatePart(ctx.currentText)
++            logPartStart("text", { partID: ctx.currentText.id })
+             return
+ 
+           case "text-delta":
+             if (!ctx.currentText) return
+             ctx.currentText.text += value.text
+             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
++            logFirstDelta("text", ctx.currentText.id, "text", value.text.length)
+             yield* session.updatePartDelta({
+               sessionID: ctx.currentText.sessionID,
+               messageID: ctx.currentText.messageID,
+@@ -830,17 +865,30 @@ export const layer = Layer.effect(
+       })
+ 
+       const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
+-        slog.info("process")
++        timing = { startedAt: Date.now(), firstStreamEvent: false, firstDelta: new Set() }
++        streamTiming("processor.start", {
++          providerID: ctx.model.providerID,
++          modelID: ctx.model.id,
++          agent: streamInput.agent.name,
++        })
+         ctx.needsCompaction = false
+         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
+-        return yield* Effect.gen(function* () {
++        const result = yield* Effect.gen(function* () {
+           yield* Effect.gen(function* () {
+             ctx.currentText = undefined
+             ctx.reasoningMap = {}
+             const stream = llm.stream(streamInput)
+ 
+             yield* stream.pipe(
+-              Stream.tap((event) => handleEvent(event)),
++              Stream.tap((event) =>
++                Effect.gen(function* () {
++                  if (timing && !timing.firstStreamEvent) {
++                    timing.firstStreamEvent = true
++                    streamTiming("ai.first_event", { event: event.type })
++                  }
++                  yield* handleEvent(event)
++                }),
++              ),
+               Stream.takeUntil(() => ctx.needsCompaction),
+               Stream.runDrain,
+             )
+@@ -894,6 +942,12 @@ export const layer = Layer.effect(
+           if (ctx.blocked || ctx.assistantMessage.error) return "stop"
+           return "continue"
+         })
++        streamTiming("processor.end", {
++          result,
++          durationMs: timing ? Date.now() - timing.startedAt : 0,
++        })
++        timing = undefined
++        return result
+       })
+ 
+       return {
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 3aafaf3bd857d1eda2f91681be1a4161bea304c2..5c5d133a8ce51ba59095a1fd891bed06e3be6257 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -97,6 +97,41 @@ const DECIDE_CONTINUE_BELOW = 0.5
+ const DECIDE_TARGET = 0.7
+ const DECIDE_MAX = 1
+ 
++type ToolTimingInput = {
++  source: "local" | "mcp"
++  tool: string
++  sessionID: SessionID
++  messageID: MessageID
++  callID: string | undefined
++}
++
++function toolTiming(
++  input: ToolTimingInput,
++  extra: { phase: "tool.start" } | { phase: "tool.end"; status: "completed" | "error"; durationMs: number },
++) {
++  // 工具 timing 只记录 daemon log 中的短 milestone，禁止携带 args、output、
++  // metadata。tool.start/tool.end 是低基数字段，用来把“工具静默等待”
++  // 和 provider 首 token 慢、TUI 接收/应用慢区分开。
++  log.info("tool timing", { ...extra, ...input })
++}
++
++function timedToolExecution<A, E, R>(input: ToolTimingInput, effect: Effect.Effect<A, E, R>) {
++  // 只在前置 plugin hook 通过后写 tool.start，避免 hook 自身失败被误判
++  // 为工具静默。MCP 传入的 effect 沿用既有 Tool.execute span 边界，包含
++  // permission gate；执行失败仍通过 Exit 原样恢复，保持既有错误传播语义。
++  const startedAt = Date.now()
++  toolTiming(input, { phase: "tool.start" })
++  return Effect.gen(function* () {
++    const exit = yield* effect.pipe(Effect.exit)
++    toolTiming(input, {
++      phase: "tool.end",
++      status: Exit.isSuccess(exit) ? "completed" : "error",
++      durationMs: Date.now() - startedAt,
++    })
++    return yield* exit
++  })
++}
++
+ function isDecideAgent(agent: Agent.Info) {
+   return agent.name === "decide"
+ }
+@@ -758,12 +793,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             return run.promise(
+               Effect.gen(function* () {
+                 const ctx = context(args, options)
++                const timing = {
++                  source: "local" as const,
++                  tool: item.id,
++                  sessionID: ctx.sessionID,
++                  messageID: ctx.messageID,
++                  callID: ctx.callID,
++                }
+                 yield* plugin.trigger(
+                   "tool.execute.before",
+                   { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
+                   { args },
+                 )
+-                const result = yield* item.execute(args, ctx)
++                const result = yield* timedToolExecution(timing, item.execute(args, ctx))
+                 const output = {
+                   ...result,
+                   attachments: result.attachments?.map((attachment) => ({
+@@ -800,23 +842,33 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+           run.promise(
+             Effect.gen(function* () {
+               const ctx = context(args, opts)
++              const timing = {
++                source: "mcp" as const,
++                tool: key,
++                sessionID: ctx.sessionID,
++                messageID: ctx.messageID,
++                callID: opts.toolCallId,
++              }
+               yield* plugin.trigger(
+                 "tool.execute.before",
+                 { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
+                 { args },
+               )
+-              const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.gen(function* () {
+-                yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
+-                return yield* Effect.promise(() => execute(args, opts))
+-              }).pipe(
+-                Effect.withSpan("Tool.execute", {
+-                  attributes: {
+-                    "tool.name": key,
+-                    "tool.call_id": opts.toolCallId,
+-                    "session.id": ctx.sessionID,
+-                    "message.id": input.processor.message.id,
+-                  },
+-                }),
++              const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* timedToolExecution(
++                timing,
++                Effect.gen(function* () {
++                  yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
++                  return yield* Effect.promise(() => execute(args, opts))
++                }).pipe(
++                  Effect.withSpan("Tool.execute", {
++                    attributes: {
++                      "tool.name": key,
++                      "tool.call_id": opts.toolCallId,
++                      "session.id": ctx.sessionID,
++                      "message.id": input.processor.message.id,
++                    },
++                  }),
++                ),
+               )
+               yield* plugin.trigger(
+                 "tool.execute.after",
+diff --git a/packages/opencode/test/cli/cmd/tui/sync.test.tsx b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
+index 0cedd4b1470deb71ca1ef546f2e16dd1370a2120..c498b9c1927d638a4e4f8ac5846af5f325605b33 100644
+--- a/packages/opencode/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
+@@ -483,9 +483,21 @@ describe("tui sync", () => {
+     await using tmp = await tmpdir()
+     Global.Path.state = tmp.path
+     await Bun.write(`${tmp.path}/kv.json`, "{}")
+-    const { app, emit, sync } = await mount()
++    const logs: Array<{ extra?: Record<string, unknown> }> = []
++    const { app, emit, sync } = await mount((url, request, init) => {
++      if (url.pathname !== "/log") return
++      // /log 失败模拟 daemon log 写入不可用；同步 reducer 仍必须应用 delta，
++      // 且日志 payload 不能携带 delta 正文或其他流式内容。
++      return (request ?? new Request(url, init)).text().then((body) => {
++        logs.push(JSON.parse(body))
++        throw new Error("log endpoint unavailable")
++      })
++    })
+ 
+     try {
++      emit(deltaEvent("delta_missing", "secret"))
++      await wait(() => logs.some((entry) => entry.extra?.phase === "delta.drop"))
++
+       emit(messageEvent(assistantMessage()))
+       emit(partEvent(pendingToolPart()))
+       await wait(() => sync.data.part.msg_1?.[0]?.id === "part_1")
+@@ -500,7 +512,14 @@ describe("tui sync", () => {
+           sync.data.part.msg_1[0].state.status === "pending" &&
+           sync.data.part.msg_1[0].state.raw === "hello world",
+       )
++      await wait(() => logs.some((entry) => entry.extra?.phase === "delta.apply"))
+       expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { raw: "hello world" } })
++      const phases = logs.map((entry) => entry.extra?.phase)
++      expect(phases.filter((phase) => phase === "delta.receive")).toHaveLength(1)
++      expect(phases).toContain("delta.drop")
++      expect(phases).toContain("delta.apply")
++      expect(JSON.stringify(logs)).not.toContain("hello world")
++      expect(JSON.stringify(logs)).not.toContain("secret")
+     } finally {
+       app.renderer.destroy()
+       Global.Path.state = previous
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 62c38b586925ca7f38b08e12eecbce9272fa0dff..cee22baa9493fdad3ed7ad796f9b1a8565b19c0d 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -733,8 +733,28 @@ it.instance(
+       expect(tool.state.output).toContain(file)
+       expect(tool.state.output).not.toContain("No context found for instance")
+       expect(result.parts.some((part) => part.type === "text" && part.text === "done")).toBe(true)
++
++      // 行为断言读取真实 daemon log：必须能串起 processor/tool timing，
++      // 同时确认诊断日志没有泄漏工具输入 pattern 或工具输出路径。
++      const timing = yield* pollWithTimeout(
++        Effect.promise(() => Bun.file(Log.file()).text().catch(() => "")).pipe(
++          Effect.map((content) => {
++            const lines = content.split("\n").filter((line) => line.includes(`sessionID=${session.id}`) && line.includes(" timing"))
++            return lines.some((line) => line.includes("phase=processor.end")) &&
++            lines.some((line) => line.includes("phase=tool.end") && line.includes("status=completed"))
++              ? lines.join("\n")
++              : undefined
++          }),
++        ),
++        "timing logs never reached the daemon log",
++      )
++      expect(timing).toContain("phase=ai.first_event")
++      expect(timing).toContain("phase=part.first_delta")
++      expect(timing).not.toContain("**/*.txt")
++      expect(timing).not.toContain(file)
+     }),
+   { git: true },
++  10_000,
+ )
+ 
+ it.instance(

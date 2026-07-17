@@ -1,0 +1,99 @@
+From f40e2d36955293ae69ffe25f5bd7e447a089c9cf Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 29 Apr 2026 23:01:27 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=9B=B4=E6=96=B0=E6=91=98=E8=A6=81?=
+ =?UTF-8?q?=E6=A8=A1=E6=9D=BF=EF=BC=8C=E5=A2=9E=E5=BC=BA=E7=94=A8=E6=88=B7?=
+ =?UTF-8?q?=E7=9B=AE=E6=A0=87=E5=92=8C=E7=BA=A6=E6=9D=9F=E7=9A=84=E6=8F=8F?=
+ =?UTF-8?q?=E8=BF=B0=EF=BC=8C=E4=BC=98=E5=8C=96=E8=BE=93=E5=87=BA=E7=BB=93?=
+ =?UTF-8?q?=E6=9E=84=E5=92=8C=E5=86=85=E5=AE=B9=E8=A6=81=E6=B1=82?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/agent/prompt/compaction.txt b/packages/opencode/src/agent/prompt/compaction.txt
+index c7cb838bbaa0e38cbef58be5e72d537b7aab6a19..c9b16945e067ab67c01a5acbae4d6f262273912f 100644
+--- a/packages/opencode/src/agent/prompt/compaction.txt
++++ b/packages/opencode/src/agent/prompt/compaction.txt
+@@ -1,9 +1,15 @@
+ You are an anchored context summarization assistant for coding sessions.
+ 
+-Summarize only the conversation history you are given. The newest turns may be kept verbatim outside your summary, so focus on the older context that still matters for continuing the work.
++CRITICAL: Respond with TEXT ONLY. Do NOT call tools. You already have the conversation history needed for this compaction step.
+ 
+-If the prompt includes a <previous-summary> block, treat it as the current anchored summary. Update it with the new history by preserving still-true details, removing stale details, and merging in new facts.
++Summarize only the conversation history you are given. The newest turns may be kept verbatim outside your summary, so focus on older context that still matters for continuing the work.
+ 
+-Always follow the exact output structure requested by the user prompt. Keep every section, preserve exact file paths and identifiers when known, and prefer terse bullets over paragraphs.
++If the prompt includes a <previous-summary> block, treat it as the current anchored summary. Preserve still-true details, remove stale or resolved details, and merge in new facts.
++
++Your output is a recovery snapshot, not a transcript. Capture the current unfinished work, user constraints and feedback, key decisions, relevant files/code, exact errors and fixes, and the next actionable steps needed to resume accurately.
++
++Always follow the exact output structure requested by the user prompt. Keep every section, preserve exact file paths, commands, error strings, symbols, API names, identifiers, and line numbers when known, and prefer terse bullets over paragraphs.
++
++Avoid noise: do not include raw long file contents, long command output, routine tool chatter, redundant observations, or generic advice. Include only the exact snippets, signatures, paths, errors, or results needed to continue without re-reading everything.
+ 
+ Do not answer the conversation itself. Do not mention that you are summarizing, compacting, or merging context. Respond in the same language as the conversation.
+diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
+index 306899684297d414d66600770fdae9e7a60935b3..27d53773ad3307406be2b7e5083a063b931da1eb 100644
+--- a/packages/opencode/src/session/compaction.ts
++++ b/packages/opencode/src/session/compaction.ts
+@@ -41,38 +41,45 @@ const MAX_PRESERVE_RECENT_TOKENS = 8_000
+ const SUMMARY_TEMPLATE = `Output exactly this Markdown structure and keep the section order unchanged:
+ ---
+ ## Goal
+-- [single-sentence task summary]
++- [single-sentence current user goal]
+ 
+-## Constraints & Preferences
+-- [user constraints, preferences, specs, or "(none)"]
++## User Constraints & Preferences
++- [durable user instructions, preferences, specs, or "(none)"]
+ 
+ ## Progress
+ ### Done
+-- [completed work or "(none)"]
++- [completed work, verified findings, or "(none)"]
+ 
+ ### In Progress
+-- [current work or "(none)"]
++- [current unfinished work and where it stopped, or "(none)"]
+ 
+ ### Blocked
+-- [blockers or "(none)"]
++- [blockers, missing info, failed commands, or "(none)"]
++
++## Files & Code
++- [path: relevant symbols/sections and why they matter, or "(none)"]
++
++## Errors & Fixes
++- [exact error/output and fix/status, or "(none)"]
+ 
+ ## Key Decisions
+-- [decision and why, or "(none)"]
++- [decision and reason, or "(none)"]
+ 
+ ## Next Steps
+-- [ordered next actions or "(none)"]
++- [ordered next actions directly tied to the latest user request, or "(none)"]
+ 
+ ## Critical Context
+-- [important technical facts, errors, open questions, or "(none)"]
+-
+-## Relevant Files
+-- [file or directory path: why it matters, or "(none)"]
++- [non-obvious technical facts, tool results, command outputs, open questions, or "(none)"]
+ ---
+ 
+ Rules:
+ - Keep every section, even when empty.
+ - Use terse bullets, not prose paragraphs.
+-- Preserve exact file paths, commands, error strings, and identifiers when known.
++- Preserve exact file paths, commands, error strings, identifiers, symbols, and line numbers when known.
++- Prefer facts needed to continue work; remove stale or resolved details.
++- For files, include why they matter and the relevant symbol/section when known.
++- For errors, include the fix/status so the next model does not repeat dead ends.
++- Do not include long file contents or large command outputs; summarize them by path, symbol, and result.
+ - Do not mention the summary process or that context was compacted.`
+ type Turn = {
+   start: number

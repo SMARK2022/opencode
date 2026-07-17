@@ -1,0 +1,131 @@
+From bd6728445b330a82c56d15b8ab7f34820b4f3f2c Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 14 Jun 2026 01:06:15 +0800
+Subject: [PATCH] =?UTF-8?q?feat(compaction):=20=E6=B7=BB=E5=8A=A0=E8=87=AA?=
+ =?UTF-8?q?=E5=8A=A8=E5=8E=8B=E7=BC=A9=E8=BE=B9=E7=95=8C=E6=A0=87=E8=AE=B0?=
+ =?UTF-8?q?=E5=92=8C=E7=9B=B8=E5=85=B3=E6=B5=8B=E8=AF=95=E7=94=A8=E4=BE=8B?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index b698747e496b2bae09285f050d26aede9127e931..82cec25c2cf774e1226549c5fc1808fb2475b758 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -294,18 +294,34 @@ export function Session() {
+         .map((m) => [m.id, local.agent.color(m.agent)]),
+     )
+   })
++  const compactionMessageIDs = createMemo(() => {
++    return new Set(
++      messages().flatMap((m) => {
++        if (m.role !== "user") return []
++        const parts = sync.data.part[m.id] ?? []
++        if (!parts.some((part) => part.type === "compaction")) return []
++        if (parts.some((part) => part.type === "text" && !part.synthetic && !part.ignored)) return []
++        return [m.id]
++      }),
++    )
++  })
+   function drawSessionScrollbar(this: unknown, buffer: OptimizedBuffer) {
+     const s = scroll
+     if (!s) return
+ 
+     const colors = userMessageAgentColors()
++    const compactions = compactionMessageIDs()
+     drawSmoothScrollbar({
+       buffer,
+       scrollBox: s,
+       markers: s.content.getChildrenSortedByPrimaryAxis().flatMap((child): SmoothScrollbarMarker[] => {
++        const offset = Math.max(0, child.screenY - s.content.screenY)
++        // compaction 正文节点使用 theme.borderActive；滚动条 marker 复用同一 source color，
++        // 再交给 smooth-scrollbar 做和普通 prompt marker 一致的低干扰 muted 处理。
++        if (compactions.has(child.id)) return [{ offset, color: theme.borderActive }]
+         const color = colors.get(child.id)
+         if (!color) return []
+-        return [{ offset: Math.max(0, child.screenY - s.content.screenY), color }]
++        return [{ offset, color }]
+       }),
+     })
+   }
+@@ -1541,9 +1557,11 @@ function UserMessage(props: {
+       </Show>
+       <Show when={compaction()}>
+         <box
++          id={text() ? undefined : props.message.id}
+           marginTop={1}
+           border={["top"]}
+-          title=" Compaction "
++          // compaction.auto 是持久化边界上区分自动/手动压缩的来源；主视图文案需要和 v2 调试视图保持一致。
++          title={compaction()?.auto ? " Auto Compaction " : " Compaction "}
+           titleAlignment="center"
+           borderColor={theme.borderActive}
+         />
+diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+index 443f605fcecfc0653f1905535ee0fa20f2c368eb..d981e86304695b3f4548387b59e167e28bf3dfd7 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -284,6 +284,45 @@ test("narrow viewport keeps the user message cell from collapsing", async () =>
+   )
+ })
+ 
++test("auto compaction boundary is labeled in the session message stream", async () => {
++  await withRenderedSession(
++    [userMessage("msg_compaction_auto", 1), assistantMessage("msg_compaction_summary", 2, "msg_compaction_auto")],
++    {
++      msg_compaction_auto: [compactionPart("part_compaction_auto", "msg_compaction_auto", true)],
++      msg_compaction_summary: [textPart("part_compaction_summary", "msg_compaction_summary", "Compacted summary")],
++    },
++    async (app) => {
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Auto Compaction")))
++    },
++  )
++})
++
++test("session scrollbar marks compaction boundaries without user prompt text", async () => {
++  await withRenderedSession(
++    [userMessage("msg_compaction_marker", 1), assistantMessage("msg_after_compaction_marker", 2, "msg_compaction_marker")],
++    {
++      msg_compaction_marker: [compactionPart("part_compaction_marker", "msg_compaction_marker", true)],
++      msg_after_compaction_marker: [
++        textPart(
++          "part_after_compaction_marker",
++          "msg_after_compaction_marker",
++          `${"content after compaction ".repeat(500)}SCROLL_BOTTOM`,
++        ),
++      ],
++    },
++    async (app) => {
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("SCROLL_BOTTOM")))
++
++      const raw = app.captureCharFrame().split("\n")
++      // smooth scrollbar 会按半格量化选择上/下半格 marker；这个场景没有普通 user prompt text，
++      // 因此右侧 gutter 出现半格 marker 只能来自 compaction 边界，而不是已有 prompt marker。
++      expect(raw.some((line) => /[▀▄]/.test(line.slice(-4)))).toBe(true)
++    },
++    {},
++    { width: 100, height: 14 },
++  )
++})
++
+ test("pending edit tool shows streamed deletion and addition counts", async () => {
+   await withRenderedSession(
+     [assistantMessage("msg_pending_edit", 1)],
+@@ -2005,6 +2044,16 @@ function textPart(id: string, messageID: string, text: string, extra: Partial<Ex
+   } satisfies Extract<Part, { type: "text" }>
+ }
+ 
++function compactionPart(id: string, messageID: string, auto: boolean) {
++  return {
++    id,
++    sessionID,
++    messageID,
++    type: "compaction",
++    auto,
++  } satisfies Extract<Part, { type: "compaction" }>
++}
++
+ function completedToolPart(
+   id: string,
+   messageID: string,

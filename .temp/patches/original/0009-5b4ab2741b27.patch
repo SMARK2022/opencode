@@ -1,0 +1,381 @@
+From 5b4ab2741b2708533c0c128dfbf875ecf4257408 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 22 Apr 2026 19:48:21 +0800
+Subject: [PATCH] =?UTF-8?q?feat(prompt):=20=E4=BC=98=E5=8C=96=E5=8A=A9?=
+ =?UTF-8?q?=E6=89=8B=E6=B6=88=E6=81=AF=E5=A4=84=E7=90=86=EF=BC=8C=E5=8C=85?=
+ =?UTF-8?q?=E5=90=ABtool=5Fdelta=E7=9A=84token=E8=AE=A1=E7=AE=97=EF=BC=8C?=
+ =?UTF-8?q?=E7=A1=AE=E4=BF=9D=E5=9C=A8=E6=97=A0=E5=8A=A9=E6=89=8B=E6=B6=88?=
+ =?UTF-8?q?=E6=81=AF=E6=97=B6=E6=98=BE=E7=A4=BA=E9=9B=B6=E5=80=BC=E5=B9=B6?=
+ =?UTF-8?q?=E8=AE=A1=E7=AE=97=E6=80=BB=E8=BE=93=E5=85=A5=E8=BE=93=E5=87=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+index 691b8a1ca743b2d09d6f53753938af32263a8ab2..7e114073921ddb5741c67f505746f8541e1224a3 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+@@ -162,62 +162,69 @@ export function Prompt(props: PromptProps) {
+     if (!props.sessionID) return
+     const isRunning = status().type !== "idle"
+     const msg = sync.data.message[props.sessionID] ?? []
+-    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
++    const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
+ 
+-    if (!last) {
++    // If no assistant messages yet, show zeros when running
++    if (assistants.length === 0) {
+       if (!isRunning) return
+-      // Show zeroed display immediately when the prompt was sent but no reply yet
+       return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+     }
+ 
+-    const parts = sync.data.part[last.id] ?? []
+-    const chars = parts.reduce((sum, part) => {
+-      if (part.type === "text" && !part.ignored) return sum + part.text.length
+-      if (part.type === "reasoning") return sum + part.text.length
+-      return sum
+-    }, 0)
++    // Sum confirmed tokens across all assistant messages (each tool-call round creates a new message)
++    const last = assistants.at(-1)!
++    const agg = assistants.reduce(
++      (acc, a) => {
++        const parts = sync.data.part[a.id] ?? []
++        const { input, output } = parts.reduce(
++          (t, p) => {
++            if (p.type !== "step-finish") return t
++            return {
++              input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
++              output: t.output + p.tokens.output + p.tokens.reasoning,
++            }
++          },
++          { input: 0, output: 0 },
++        )
++        return { input: acc.input + input, output: acc.output + output, providerID: a.providerID, modelID: a.modelID }
++      },
++      { input: 0, output: 0, providerID: "", modelID: "" },
++    )
+ 
+-    // Estimate tokens from tool outputs that arrived after the last step-finish
+-    // (i.e. results gathered but not yet sent to the API in a new step).
+-    // Once the message is complete the API's input_tokens already includes them,
+-    // so we only do this during streaming to give live feedback on large writes.
+-    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
+-    const toolOutputChars = !last.time.completed
+-      ? parts.reduce((sum, part, i) => {
+-          if (i <= lastStepFinishIdx) return sum
+-          if (part.type === "tool" && part.state.status === "completed") return sum + part.state.output.length
++    // Add streaming estimates from the last (potentially in-flight) message
++    const lastParts = sync.data.part[last.id] ?? []
++    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
++    const streamingOut = last.time.completed
++      ? 0
++      : lastParts.reduce((sum, p, i) => {
++          if (i <= lastSFIdx) return sum
++          if (p.type === "text" && !p.ignored) return sum + p.text.length
++          if (p.type === "reasoning") return sum + p.text.length
++          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
++          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
+           return sum
+         }, 0)
+-      : 0
+-
+-    // Sum tokens across all completed steps; last.tokens is per-last-step only (processor.ts overwrites it)
+-    const cumTokens = parts.reduce(
+-      (acc, part) => {
+-        if (part.type !== "step-finish") return acc
+-        return {
+-          input: acc.input + part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
+-          output: acc.output + part.tokens.output + part.tokens.reasoning,
+-        }
+-      },
+-      { input: 0, output: 0 },
+-    )
+-    const inputBase = cumTokens.input
+-    const input = inputBase + Math.round(toolOutputChars / 4)
+-    const outputActual = cumTokens.output
+-    const outputEstimated = Math.round(chars / 4)
+-    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
+-    const tokens = input + output
+-
+-    if (tokens <= 0 && input <= 0 && output <= 0) {
++    const pendingIn = last.time.completed
++      ? 0
++      : lastParts.reduce((sum, p, i) => {
++          if (i <= lastSFIdx) return sum
++          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
++          return sum
++        }, 0)
++
++    const totalInput = agg.input + Math.round(pendingIn / 4)
++    const totalOutput = agg.output + Math.round(streamingOut / 4)
++    const tokens = totalInput + totalOutput
++
++    if (tokens <= 0) {
+       if (!isRunning) return
+       return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+     }
+ 
+-    const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
++    const model = sync.data.provider.find((item) => item.id === agg.providerID)?.models[agg.modelID]
+     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
+     const cost = msg.reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
+     return {
+-      flow: `↑ ${Locale.number(input)} · ↓ ${Locale.number(output)}`,
++      flow: `↑ ${Locale.number(totalInput)} · ↓ ${Locale.number(totalOutput)}`,
+       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
+       cost: cost > 0 ? money.format(cost) : undefined,
+     }
+diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
+index 522b6b660aa10f82bad33e33f8cafc32fab42bb0..1c22f5300d6fc975d604ffb57b652057c1d2b96c 100644
+--- a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
++++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
+@@ -18,52 +18,63 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
+   type StateValue = { tokens: number; input: number; output: number; percent: number | null }
+ 
+   const stateRaw = createMemo((): StateValue => {
+-    const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant")
+-    if (!last) {
+-      // Always show zeros so the display is visible from the moment a prompt is sent.
+-      // The sidebar always renders something; there is no hidden/fallback state.
++    const messages = msg()
++    const assistants = messages.filter((item): item is AssistantMessage => item.role === "assistant")
++
++    // If no assistant messages yet, show zeros
++    if (assistants.length === 0) {
+       return { tokens: 0, input: 0, output: 0, percent: null }
+     }
+ 
+-    const parts = props.api.state.part(last.id)
+-    const chars = parts.reduce((sum, part) => {
+-      if (part.type === "text" && !part.ignored) return sum + part.text.length
+-      if (part.type === "reasoning") return sum + part.text.length
+-      return sum
+-    }, 0)
++    // Sum confirmed tokens across all assistant messages (each tool-call round creates a new message)
++    const last = assistants.at(-1)!
++    const agg = assistants.reduce(
++      (acc, a) => {
++        const parts = props.api.state.part(a.id)
++        const { input, output } = parts.reduce(
++          (t, p) => {
++            if (p.type !== "step-finish") return t
++            return {
++              input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
++              output: t.output + p.tokens.output + p.tokens.reasoning,
++            }
++          },
++          { input: 0, output: 0 },
++        )
++        return { input: acc.input + input, output: acc.output + output, providerID: a.providerID, modelID: a.modelID }
++      },
++      { input: 0, output: 0, providerID: "", modelID: "" },
++    )
+ 
+-    // Estimate tokens from tool outputs that arrived after the last step-finish.
+-    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
+-    const toolOutputChars = !last.time.completed
+-      ? parts.reduce((sum, part, i) => {
+-          if (i <= lastStepFinishIdx) return sum
+-          if (part.type === "tool" && part.state.status === "completed") return sum + part.state.output.length
++    // Add streaming estimates from the last (potentially in-flight) message
++    const lastParts = props.api.state.part(last.id)
++    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
++    const streamingOut = last.time.completed
++      ? 0
++      : lastParts.reduce((sum, p, i) => {
++          if (i <= lastSFIdx) return sum
++          if (p.type === "text" && !p.ignored) return sum + p.text.length
++          if (p.type === "reasoning") return sum + p.text.length
++          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
++          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
++          return sum
++        }, 0)
++    const pendingIn = last.time.completed
++      ? 0
++      : lastParts.reduce((sum, p, i) => {
++          if (i <= lastSFIdx) return sum
++          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
+           return sum
+         }, 0)
+-      : 0
+ 
+-    // Sum tokens across all completed steps; last.tokens is per-last-step only (processor.ts overwrites it)
+-    const cumTokens = parts.reduce(
+-      (acc, part) => {
+-        if (part.type !== "step-finish") return acc
+-        return {
+-          input: acc.input + part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
+-          output: acc.output + part.tokens.output + part.tokens.reasoning,
+-        }
+-      },
+-      { input: 0, output: 0 },
+-    )
+-    const inputBase = cumTokens.input
+-    const input = inputBase + Math.round(toolOutputChars / 4)
+-    const outputActual = cumTokens.output
+-    const outputEstimated = Math.round(chars / 4)
+-    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
+-    const tokens = input + output
+-    const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
++    const totalInput = agg.input + Math.round(pendingIn / 4)
++    const totalOutput = agg.output + Math.round(streamingOut / 4)
++    const tokens = totalInput + totalOutput
++    const model = props.api.state.provider.find((item) => item.id === agg.providerID)?.models[agg.modelID]
+     return {
+       tokens,
+-      input,
+-      output,
++      input: totalInput,
++      output: totalOutput,
+       percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
+     }
+   })
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
+index a949fded1ff234d3d19edd71c741979cd6e64313..3ba98c88bfe629d222534e48336a9329b6bb516b 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
+@@ -34,70 +34,76 @@ export function SubagentFooter() {
+ 
+   const status = createMemo(() => sync.data.session_status?.[route.sessionID])
+ 
++  const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
++
+   type UsageInfo = { flow: string; context: string | undefined; cost: string | undefined }
+ 
+   const usageRaw = createMemo((): UsageInfo | undefined => {
+     const isRunning = (status()?.type ?? "idle") !== "idle"
+     const msg = messages()
+-    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
++    const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
+ 
+-    if (!last) {
++    // If no assistant messages yet, show zeros when running
++    if (assistants.length === 0) {
+       if (!isRunning) return
+-      // Show zeroed display immediately when the prompt was sent but no reply yet
+       return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+     }
+ 
+-    const parts = sync.data.part[last.id] ?? []
+-    const chars = parts.reduce((sum, part) => {
+-      if (part.type === "text" && !part.ignored) return sum + part.text.length
+-      if (part.type === "reasoning") return sum + part.text.length
+-      return sum
+-    }, 0)
+-
+-    // Estimate tokens from tool outputs that arrived after the last step-finish.
+-    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
+-    const toolOutputChars = !last.time.completed
+-      ? parts.reduce((sum, part, i) => {
+-          if (i <= lastStepFinishIdx) return sum
+-          if (part.type === "tool" && part.state.status === "completed") return sum + part.state.output.length
+-          return sum
+-        }, 0)
+-      : 0
+-
+-    // Sum tokens across all completed steps; last.tokens is per-last-step only (processor.ts overwrites it)
+-    const cumTokens = parts.reduce(
+-      (acc, part) => {
+-        if (part.type !== "step-finish") return acc
+-        return {
+-          input: acc.input + part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
+-          output: acc.output + part.tokens.output + part.tokens.reasoning,
+-        }
++    // Sum confirmed tokens across all assistant messages (each tool-call round creates a new message)
++    const last = assistants.at(-1)!
++    const agg = assistants.reduce(
++      (acc, a) => {
++        const parts = sync.data.part[a.id] ?? []
++        const { input, output } = parts.reduce(
++          (t, p) => {
++            if (p.type !== "step-finish") return t
++            return {
++              input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
++              output: t.output + p.tokens.output + p.tokens.reasoning,
++            }
++          },
++          { input: 0, output: 0 },
++        )
++        return { input: acc.input + input, output: acc.output + output, providerID: a.providerID, modelID: a.modelID }
+       },
+-      { input: 0, output: 0 },
++      { input: 0, output: 0, providerID: "", modelID: "" },
+     )
+-    const inputBase = cumTokens.input
+-    const input = inputBase + Math.round(toolOutputChars / 4)
+-    const outputActual = cumTokens.output
+-    const outputEstimated = Math.round(chars / 4)
+-    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
+-    const tokens = input + output
+-
+-    if (tokens <= 0 && input <= 0 && output <= 0) {
++
++    // Add streaming estimates from the last (potentially in-flight) message
++    const lastParts = sync.data.part[last.id] ?? []
++    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
++    const streamingOut = last.time.completed
++      ? 0
++      : lastParts.reduce((sum, p, i) => {
++          if (i <= lastSFIdx) return sum
++          if (p.type === "text" && !p.ignored) return sum + p.text.length
++          if (p.type === "reasoning") return sum + p.text.length
++          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
++          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
++          return sum
++        }, 0)
++    const pendingIn = last.time.completed
++      ? 0
++      : lastParts.reduce((sum, p, i) => {
++          if (i <= lastSFIdx) return sum
++          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
++          return sum
++        }, 0)
++
++    const totalInput = agg.input + Math.round(pendingIn / 4)
++    const totalOutput = agg.output + Math.round(streamingOut / 4)
++    const tokens = totalInput + totalOutput
++
++    if (tokens <= 0) {
+       if (!isRunning) return
+       return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
+     }
+ 
+-    const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
++    const model = sync.data.provider.find((item) => item.id === agg.providerID)?.models[agg.modelID]
+     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
+     const cost = msg.reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
+-
+-    const money = new Intl.NumberFormat("en-US", {
+-      style: "currency",
+-      currency: "USD",
+-    })
+-
+     return {
+-      flow: `↑ ${Locale.number(input)} · ↓ ${Locale.number(output)}`,
++      flow: `↑ ${Locale.number(totalInput)} · ↓ ${Locale.number(totalOutput)}`,
+       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
+       cost: cost > 0 ? money.format(cost) : undefined,
+     }
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index 21f9329c6fce42ae20af7d9904edb9583a9d80e1..0d89c9a65044a716f27a88e3764b731a44268f55 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -279,6 +279,16 @@ export const layer: Layer.Layer<
+             return
+ 
+           case "tool-input-delta":
++            yield* updateToolCall(value.id, (match) => {
++              if (match.state.status !== "pending") return match
++              return {
++                ...match,
++                state: {
++                  ...match.state,
++                  raw: match.state.raw + value.delta,
++                },
++              }
++            })
+             return
+ 
+           case "tool-input-end":

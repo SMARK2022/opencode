@@ -1,0 +1,86 @@
+From 59b83d40cd60dbd69c1c15bab5cc3456a5c629b9 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 2 May 2026 21:04:10 +0800
+Subject: [PATCH] =?UTF-8?q?fix:=20=E5=B0=86=E6=9C=80=E5=A4=A7=E8=A1=8C?=
+ =?UTF-8?q?=E6=95=B0=E9=99=90=E5=88=B6=E4=BB=8E=202000=20=E8=B0=83?=
+ =?UTF-8?q?=E6=95=B4=E4=B8=BA=201000=EF=BC=8C=E4=BB=A5=E4=BC=98=E5=8C=96?=
+ =?UTF-8?q?=E5=B7=A5=E5=85=B7=E8=BE=93=E5=87=BA=E7=9A=84=E5=A4=84=E7=90=86?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/config/config.ts b/packages/opencode/src/config/config.ts
+index 927c66e3c834f2708beb64e251dc371ea6525beb..9938a848470400e92177da981eec47c45a15e6ab 100644
+--- a/packages/opencode/src/config/config.ts
++++ b/packages/opencode/src/config/config.ts
+@@ -210,7 +210,7 @@ export const Info = Schema.Struct({
+   tool_output: Schema.optional(
+     Schema.Struct({
+       max_lines: Schema.optional(PositiveInt).annotate({
+-        description: "Maximum lines of tool output before it is truncated and saved to disk (default: 2000)",
++        description: "Maximum lines of tool output before it is truncated and saved to disk (default: 1000)",
+       }),
+       max_bytes: Schema.optional(PositiveInt).annotate({
+         description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)",
+diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
+index ffef183c562de260710b84ed6006456b8ec35e05..96bbd965b92bd69474b704f4b167cfc2f2ba0748 100644
+--- a/packages/opencode/src/tool/read.ts
++++ b/packages/opencode/src/tool/read.ts
+@@ -13,7 +13,7 @@ import { Instruction } from "../session/instruction"
+ import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from "@/util/media"
+ import type { MessageV2 } from "../session/message-v2"
+ 
+-const DEFAULT_READ_LIMIT = 2000
++const DEFAULT_READ_LIMIT = 1000
+ const MAX_LINE_LENGTH = 2000
+ const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
+ const MAX_BYTES = 24 * 1024
+@@ -141,7 +141,7 @@ export const Parameters = Schema.Struct({
+     description: "The line number to start reading from (1-indexed)",
+   }),
+   limit: Schema.optional(NonNegativeInt).annotate({
+-    description: "The maximum number of lines to read (defaults to 2000)",
++    description: "The maximum number of lines to read (defaults to 1000)",
+   }),
+ })
+ 
+diff --git a/packages/opencode/src/tool/truncate.ts b/packages/opencode/src/tool/truncate.ts
+index 98b867259141dae262ae3aa2d8104e1109d24bf9..aa2842392f4a4404c7445ec036252f58451443fe 100644
+--- a/packages/opencode/src/tool/truncate.ts
++++ b/packages/opencode/src/tool/truncate.ts
+@@ -13,7 +13,7 @@ import { TRUNCATION_DIR } from "./truncation-dir"
+ const log = Log.create({ service: "truncation" })
+ const RETENTION = Duration.days(7)
+ 
+-export const MAX_LINES = 2000
++export const MAX_LINES = 1000
+ export const MAX_BYTES = 24 * 1024
+ export const DIR = TRUNCATION_DIR
+ export const GLOB = path.join(TRUNCATION_DIR, "*")
+diff --git a/packages/opencode/test/tool/truncation.test.ts b/packages/opencode/test/tool/truncation.test.ts
+index b7b6a10490186df6f958b786bbee2c62c7bb8df6..7f887e688e809cd6231ae642bf6d7e1486db2eda 100644
+--- a/packages/opencode/test/tool/truncation.test.ts
++++ b/packages/opencode/test/tool/truncation.test.ts
+@@ -99,7 +99,7 @@ describe("Truncate", () => {
+     )
+ 
+     test("uses default MAX_LINES and MAX_BYTES", () => {
+-      expect(Truncate.MAX_LINES).toBe(2000)
++      expect(Truncate.MAX_LINES).toBe(1000)
+       expect(Truncate.MAX_BYTES).toBe(24 * 1024)
+     })
+ 
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+index 4d0246af954e64bdf2c077c7ecbb90eb417d9e26..3ee2d125f4e436a62fc316147e3a77f1dfb9ece8 100644
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -1643,7 +1643,7 @@ export type Config = {
+    */
+   tool_output?: {
+     /**
+-     * Maximum lines of tool output before it is truncated and saved to disk (default: 2000)
++     * Maximum lines of tool output before it is truncated and saved to disk (default: 1000)
+      */
+     max_lines?: number
+     /**

@@ -1,0 +1,58 @@
+From 6dd9afdea412124b2d89300fc17f7f72d6fa1728 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 26 Apr 2026 17:25:07 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=E4=BA=A4=E4=BA=92?=
+ =?UTF-8?q?=E5=BC=8F=E5=92=8C=E5=AE=A1=E6=9F=A5=E4=BB=A3=E7=90=86=EF=BC=8C?=
+ =?UTF-8?q?=E5=A2=9E=E5=BC=BA=E6=9D=83=E9=99=90=E7=AE=A1=E7=90=86=E5=92=8C?=
+ =?UTF-8?q?=E6=8F=8F=E8=BF=B0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
+index 231e17467156deba5a60d1ef8cc2b0577f9ca88f..d725635cec3c5b1a22efd898ead3adf70a5f5e20 100644
+--- a/packages/opencode/src/agent/agent.ts
++++ b/packages/opencode/src/agent/agent.ts
+@@ -120,6 +120,41 @@ export const layer = Layer.effect(
+             mode: "primary",
+             native: true,
+           },
++          interactive: {
++            name: "interactive",
++            description: "The default agent. Executes tools based on configured permissions.",
++            options: {},
++            permission: Permission.merge(
++              defaults,
++              Permission.fromConfig({
++                question: "allow",
++                plan_enter: "allow",
++                bash: "ask",
++              }),
++              user,
++            ),
++            mode: "primary",
++            native: true,
++          },
++          review: {
++            name: "review",
++            description: "The default agent. Executes tools based on configured permissions.",
++            options: {},
++            permission: Permission.merge(
++              defaults,
++              Permission.fromConfig({
++                question: "allow",
++                plan_enter: "allow",
++                bash: "ask",
++                edit: "ask",
++                write: "ask",
++                apply_patch: "ask",
++              }),
++              user,
++            ),
++            mode: "primary",
++            native: true,
++          },
+           plan: {
+             name: "plan",
+             description: "Plan mode. Disallows all edit tools.",

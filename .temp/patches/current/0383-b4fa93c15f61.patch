@@ -1,0 +1,32 @@
+From b4fa93c15f6110824b8c15875555b34e95284daf Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 5 Jul 2026 23:54:23 +0800
+Subject: [PATCH] =?UTF-8?q?fix(ci):=20=E6=B7=BB=E5=8A=A0=20--prerelease=20?=
+ =?UTF-8?q?=E9=80=89=E9=A1=B9=E4=BB=A5=E9=98=B2=E6=AD=A2=20VSIX=20release?=
+ =?UTF-8?q?=20=E6=8A=A2=E5=8D=A0=20GitHub=20"latest"=20release=20=E4=BD=8D?=
+ =?UTF-8?q?=E7=BD=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/.github/workflows/build-vsix.yml b/.github/workflows/build-vsix.yml
+index 8c13299e89f38285f38cd5bc8ac7a5fad7f17660..0138620f2b35068cac39e7c4e6d6186b57458c67 100644
+--- a/.github/workflows/build-vsix.yml
++++ b/.github/workflows/build-vsix.yml
+@@ -116,10 +116,15 @@ jobs:
+           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+             gh release upload "$TAG" sdks/vscode/dist/*.vsix --clobber --repo "$GITHUB_REPOSITORY"
+           else
++            # --prerelease 防止 VSIX release 抢占 GitHub "latest" release 位置。
++            # install 脚本用 releases/latest/download/install 下载安装脚本，
++            # 若 VSIX release 成为 latest，install 资产不存在 → 404，
++            # 且 tag_name 的版本号会被误解析为 VSCode 扩展版本而非 CLI 版本。
+             gh release create "$TAG" \
+               --repo "$GITHUB_REPOSITORY" \
+               --target "$GITHUB_SHA" \
+               --title "VSCode Extension $VERSION" \
+               --generate-notes \
++              --prerelease \
+               sdks/vscode/dist/*.vsix
+           fi

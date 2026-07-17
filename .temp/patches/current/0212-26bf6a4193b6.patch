@@ -1,0 +1,110 @@
+From 26bf6a4193b6cf8f58009e58fed7935eb09612bc Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 24 May 2026 05:04:23 +0800
+Subject: [PATCH] =?UTF-8?q?feat(session):=20=E5=A2=9E=E5=BC=BA=E4=BC=9A?=
+ =?UTF-8?q?=E8=AF=9D=E8=A7=86=E5=8F=A3=E5=A4=84=E7=90=86=EF=BC=8C=E7=A1=AE?=
+ =?UTF-8?q?=E4=BF=9D=E6=B5=81=E5=BC=8F=E5=A2=9E=E9=95=BF=E6=97=B6=E5=BA=95?=
+ =?UTF-8?q?=E9=83=A8=E5=86=85=E5=AE=B9=E5=8F=AF=E8=A7=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index eec38cbac533d321396f316fac681eea2c80b4b9..eb0e339c2ef9d4b4f0a3fd146a3aa0f1b30155ed 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -392,6 +392,7 @@ export function Session() {
+ 
+   let seeded = false
+   let scroll: ScrollBoxRenderable
++  let lastMaxScrollTop = 0
+   let prompt: PromptRef | undefined
+   const bind = (r: PromptRef | undefined) => {
+     prompt = r
+@@ -406,9 +407,21 @@ export function Session() {
+ 
+   function syncSessionViewportStuckToBottom() {
+     if (!scroll || scroll.isDestroyed) return
+-    const stuckToBottom = scroll.scrollTop >= Math.max(0, scroll.scrollHeight - scroll.viewport.height) - 1
+-    if (stuckToBottom === untrack(viewportStuckToBottom)) return
+-    queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
++    const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.viewport.height)
++    const wasStuckToBottom = scroll.scrollTop >= lastMaxScrollTop - 1
++    const maxScrollTopIncreased = maxScrollTop > lastMaxScrollTop
++    lastMaxScrollTop = maxScrollTop
++    const stuckToBottom = () => scroll.scrollTop >= maxScrollTop - 1
++    // The session viewport intentionally treats a one-row gap as visually
++    // bottom-aligned so terminal rounding and scrollbar half-cell drawing do not
++    // make the latest assistant line look detached. OpenTUI's sticky scroll only
++    // follows content growth from the exact max, so when that tolerated bottom
++    // band was already active and new rows appear, advance to the new max. Do
++    // not normalize on an ordinary render after a manual one-line scroll-up; the
++    // user should still be able to inspect the previous row until content grows.
++    if (wasStuckToBottom && maxScrollTopIncreased && scroll.scrollTop < maxScrollTop) scroll.scrollTo(maxScrollTop)
++    if (stuckToBottom() === untrack(viewportStuckToBottom)) return
++    queueMicrotask(() => setViewportStuckToBottom(stuckToBottom()))
+   }
+ 
+   event.on("session.status", (evt) => {
+diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+index 44dba32b3dbe1440504ee21a9884c25a8853ef10..c5d1079f5876fc66fbafbd5566319126696a2535 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -119,6 +119,35 @@ test("assistant first visible part ignores hidden completed tool parts", async (
+   )
+ })
+ 
++test("session follows streaming growth when the viewport is visually at the bottom", async () => {
++  await withRenderedSession(
++    [userMessage("msg_user", 1), assistantMessage("msg_bottom", 2, "msg_user")],
++    {
++      msg_user: [textPart("part_user", "msg_user", "show the bottom")],
++      msg_bottom: [textPart("part_bottom", "msg_bottom", `${"wrapped content ".repeat(180)}OLD_BOTTOM`)],
++    },
++    async (app, emit) => {
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("OLD_BOTTOM")))
++
++      // Ctrl+Alt+Y scrolls up by exactly one line. The live TUI intentionally
++      // treats that one-row gap as still visually bottom-aligned, so a streaming
++      // text delta must remain reachable instead of leaving the new tail hidden
++      // below the prompt until another terminal/sidebar reflow recalculates it.
++      app.mockInput.pressKey("y", { ctrl: true, meta: true })
++      await app.renderOnce()
++      expect(rows(app.captureCharFrame()).some((line) => line.includes("OLD_BOTTOM"))).toBe(false)
++
++      emit(
++        partDeltaEvent("evt_bottom_growth", "msg_bottom", "part_bottom", `${" new content".repeat(80)} NEW_BOTTOM`, "text"),
++      )
++
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("NEW_BOTTOM")))
++    },
++    {},
++    { width: 100, height: 18 },
++  )
++})
++
+ test("pending edit tool shows streamed deletion and addition counts", async () => {
+   await withRenderedSession(
+     [assistantMessage("msg_pending_edit", 1)],
+@@ -734,14 +763,18 @@ function pendingToolPart(id: string, messageID: string, tool: string, raw: strin
+   } satisfies Extract<Part, { type: "tool" }>
+ }
+ 
+-function partDeltaEvent(id: string, messageID: string, partID: string, delta: string): GlobalEvent {
++function partDeltaEvent(id: string, messageID: string, partID: string, delta: string, field = "raw"): GlobalEvent {
++  // Most existing streaming-tool tests append to the pending tool `raw` buffer,
++  // which mirrors the daemon event shape for incremental tool input. The session
++  // bottom-stickiness regression streams a normal text part instead, so keep the
++  // historical default and only override `field` at that call site.
+   return {
+     directory,
+     project: "proj_test",
+     payload: {
+       id,
+       type: "message.part.delta",
+-      properties: { sessionID, messageID, partID, field: "raw", delta },
++      properties: { sessionID, messageID, partID, field, delta },
+     },
+   }
+ }

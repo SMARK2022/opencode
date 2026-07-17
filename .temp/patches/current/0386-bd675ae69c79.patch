@@ -1,0 +1,170 @@
+From bd675ae69c79b6fba7050d6c57115b798de02714 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 6 Jul 2026 15:22:04 +0800
+Subject: [PATCH] =?UTF-8?q?feat(tui,goal):=20=E5=A2=9E=E5=8A=A0=20DialogGo?=
+ =?UTF-8?q?alMenu=20header=20=E6=91=98=E8=A6=81=20+=20max=5Fturns=20?=
+ =?UTF-8?q?=E5=88=B0=E8=BE=BE=E6=97=B6=E8=87=AA=E5=8A=A8=20pause?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DialogGoalMenu 使用 DialogSelect 只有 3-4 个选项，对话框仅占屏幕 ~20%。
+新增 header prop 显示 goal objective 截断摘要 + status/usage（每行
+wrapMode=none + Locale.truncate 保证可预测行数），对话框增至 ~31%。
+同时截断选项 description 避免 4000 字符 objective 换行导致 rows() 计算
+不准。
+
+max_turns 到达上限后 goal 状态保持 active 但 loop 不再续跑，UI 误导
+用户。新增 pause 逻辑：goalTurns >= maxGoalTurns 且 goal.status ===
+active 时自动 set({ status: "paused" })。守卫：maxGoalTurns=0 不
+pause，complete/blocked 不 pause。Resume 后新 loop goalTurns 归零。
+
+默认 max_turns 从 10 提升至 32，复杂任务需要更多续跑轮次。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+index be86dad119ac7980f256bc2476f03976bbdc214d..d09217af65cca60df8f3b415885a896ce48eda6b 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+@@ -4,8 +4,10 @@ import { useDialog } from "@tui/ui/dialog"
+ import { useSync } from "@tui/context/sync"
+ import { useSDK } from "@tui/context/sdk"
+ import { useToast } from "@tui/ui/toast"
++import { useTheme } from "@tui/context/theme"
+ import { createMemo, onMount } from "solid-js"
+ import { MAX_OBJECTIVE_CHARS } from "@/session/goal"
++import { Locale } from "@/util/locale"
+ 
+ // [local-smark] goal 管理 dialog
+ // SDK 未重新生成 goalSet/goalClear 方法，直接用 sdk.fetch 调用 HTTP 端点
+@@ -105,6 +107,7 @@ export function DialogGoal(props: DialogGoalProps) {
+ export function DialogGoalMenu(props: DialogGoalProps) {
+   const dialog = useDialog()
+   const sync = useSync()
++  const { theme } = useTheme()
+   const { setGoal, clearGoal } = useGoalApi(props.sessionID)
+ 
+   const goal = createMemo(() => sync.data.session_goal[props.sessionID])
+@@ -113,16 +116,36 @@ export function DialogGoalMenu(props: DialogGoalProps) {
+   // 避免 medium（60 chars）下选项被截断或显得拥挤。与 dialog-session-list / dialog-skill 一致。
+   onMount(() => dialog.setSize("large"))
+ 
++  // header 显示 goal 摘要：每行用 wrapMode=none + overflow=hidden + Locale.truncate
++  // 保证可预测的行数，不依赖渲染器自动撑开容器
++  const goalHeader = createMemo(() => {
++    const g = goal()
++    if (!g) return undefined
++    return (
++      <box flexDirection="column" gap={0}>
++        {/* objective 截断到 68 chars（88 宽度 - 8 padding - 12 "Objective: " 前缀） */}
++        <text fg={theme.textMuted} wrapMode="none" overflow="hidden">
++          {"Objective: " + (g.objective ? Locale.truncate(g.objective, 68) : "—")}
++        </text>
++        <text fg={theme.textMuted} wrapMode="none" overflow="hidden">
++          {"Status: " + g.status + "  ·  Tokens: " + g.tokensUsed}
++        </text>
++      </box>
++    )
++  })
++
+   return (
+     <DialogSelect
+       title="Manage Goal"
+       // 只有 3-4 个选项，不需要搜索 filter；隐藏 filter 节省 2 行垂直空间，
+       // 让小终端（≤18 行）也能完整显示所有选项无需滚动
+       renderFilter={false}
++      header={goalHeader()}
+       options={[
+         {
+           title: "Edit objective",
+-          description: goal()?.objective,
++          // 截断 description 避免 4000 字符 objective 在选项行中换行导致 rows() 计算不准
++          description: goal()?.objective ? Locale.truncate(goal()!.objective, 60) : undefined,
+           value: "edit",
+           onSelect: () => {
+             dialog.replace(() => <DialogGoalEdit sessionID={props.sessionID} />)
+diff --git a/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx b/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
+index 0c80a0f6310ebab8c5f228fa149a234978c3c1f4..6c49b1364d25873e33780ee7854ba50999c208e0 100644
+--- a/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
++++ b/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
+@@ -46,6 +46,8 @@ export interface DialogSelectProps<T> {
+   bindings?: readonly Binding<Renderable, KeyEvent>[]
+   current?: T
+   currentKey?: string
++  // 可选头部：渲染在 title/filter 和 scrollbox 之间，增加对话框有效高度
++  header?: JSX.Element
+ }
+ 
+ export interface DialogSelectOption<T = any> {
+@@ -443,6 +445,12 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+           </box>
+         </Show>
+       </box>
++      {/* 可选头部：渲染在 title/filter 和 scrollbox 之间，增加对话框有效高度 */}
++      <Show when={props.header}>
++        <box paddingLeft={4} paddingRight={4} paddingBottom={1}>
++          {props.header}
++        </box>
++      </Show>
+       <Show
+         when={grouped().length > 0}
+         fallback={
+diff --git a/packages/opencode/src/config/config.ts b/packages/opencode/src/config/config.ts
+index d2bcde8cbbc31b860e1d4f5936f5e29ddd48dc15..6eefcc6e0951ffd078d4d3b6f542de01d0399cc5 100644
+--- a/packages/opencode/src/config/config.ts
++++ b/packages/opencode/src/config/config.ts
+@@ -286,9 +286,9 @@ export const Info = Schema.Struct({
+       }),
+     }),
+   ),
+-  // [local-smark] goal 续跑上限：0 = 禁用续跑，默认 10
++  // [local-smark] goal 续跑上限：0 = 禁用续跑，默认 32
+   goal_max_turns: Schema.optional(NonNegativeInt).annotate({
+-    description: "Maximum auto-continue turns per goal (default: 10, 0 to disable)",
++    description: "Maximum auto-continue turns per goal (default: 32, 0 to disable)",
+   }),
+   experimental: Schema.optional(
+     Schema.Struct({
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 425f1a1bbfc00790281cfdf7dd96fd2ff83c6341..1de916f1366829ba65f67867f671f3714d834b02 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -2138,7 +2138,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             // 仅对主 session（无 parentID）和非 decide agent 生效。
+             const cfg = yield* config.get()
+             // [local-smark] goal 续跑不再需要 experimental 开关，始终可用
+-            const maxGoalTurns = cfg.goal_max_turns ?? 10
++            const maxGoalTurns = cfg.goal_max_turns ?? 32
+             if (
+               maxGoalTurns > 0 &&
+               !session.parentID &&
+@@ -2184,6 +2184,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                 }
+               }
+             }
++            // max_turns 到达时将 active goal 暂停，避免 UI 误导用户以为 goal 仍在运行。
++            // maxGoalTurns=0 表示禁用续跑，不 pause；complete/blocked goal 不 pause。
++            // Resume 后 goal 回到 active，用户发送新消息时新 loop 以 goalTurns=0 开始。
++            if (maxGoalTurns > 0 && !session.parentID && goalTurns >= maxGoalTurns) {
++              const goalOpt = yield* goalSvc.get(sessionID).pipe(Effect.orDie)
++              if (goalOpt._tag === "Some" && goalOpt.value.status === "active") {
++                yield* goalSvc.set(sessionID, { status: "paused" }).pipe(Effect.orDie)
++              }
++            }
+             yield* slog.info("exiting loop")
+             break
+           }
+diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
+index 30bc2a359e213409cd43403064d525cd58f5bbf6..5f0a906d81293efe78dba98561a4ff91094963e7 100644
+--- a/packages/opencode/test/session/goal.test.ts
++++ b/packages/opencode/test/session/goal.test.ts
+@@ -425,8 +425,8 @@ it.instance(
+     Effect.gen(function* () {
+       const config = yield* Config.Service
+       const cfg = yield* config.get()
+-      // goal_max_turns 在顶层可读，默认 10
+-      expect((cfg as any).goal_max_turns ?? 10).toBe(10)
++      // goal_max_turns 在顶层可读，默认 32（0 = 禁用续跑）
++      expect((cfg as any).goal_max_turns ?? 32).toBe(32)
+       // experimental.goals 不再存在，goal 功能始终可用
+       expect((cfg as any).experimental?.goals).toBeUndefined()
+     }),

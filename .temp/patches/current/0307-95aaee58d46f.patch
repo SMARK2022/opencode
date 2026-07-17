@@ -1,0 +1,246 @@
+From 95aaee58d46fa24d1ae51e76e46a6993c475e104 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 14 Jun 2026 16:43:20 +0800
+Subject: [PATCH] =?UTF-8?q?feat(docs):=20=E6=B7=BB=E5=8A=A0=E6=95=B0?=
+ =?UTF-8?q?=E6=8D=AE=E5=BA=93=E8=BF=81=E7=A7=BB=E6=8F=90=E7=A4=BA=E5=92=8C?=
+ =?UTF-8?q?=E5=8F=AF=E9=80=89=20MCP=20=E9=9B=86=E6=88=90=E8=AF=B4=E6=98=8E?=
+ =?UTF-8?q?=EF=BC=8C=E5=A2=9E=E5=BC=BA=E7=94=A8=E6=88=B7=E5=AE=89=E8=A3=85?=
+ =?UTF-8?q?=E5=89=8D=E7=9A=84=E9=A3=8E=E9=99=A9=E8=AD=A6=E7=A4=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/README.en.md b/README.en.md
+index 0650995ad929f95464d572d46d982335abf4952f..8c952de90e065a61042f08c9959ad6720927d10d 100644
+--- a/README.en.md
++++ b/README.en.md
+@@ -46,6 +46,8 @@
+ 
+ > **About this branch**: This is OpenCode's `dev-smark` enhanced branch (current version `1.15.6`, CLI release tag `v1.15.6-smark`). It is based on upstream `dev` and focuses on TUI interaction, session management, token statistics, Windows/PowerShell compatibility, VS Code Notebook integration, network proxy support, and installation experience.
+ 
++> **Database migration notice**: The SMARK branch includes custom database schema changes and migrations. Before switching from upstream `dev`, the main branch, or another original branch, create a manual backup of your local `opencode.db`; after migration, the database may not migrate or roll back cleanly to upstream or original branches. This project is not responsible for schema-format compatibility issues in your local database context data.
++
+ ---
+ 
+ ## Quick Install
+@@ -180,6 +182,7 @@ This branch is not just a pile of features; it turns common development pain poi
+ | Session management | Long sessions lose context and are costly to recover | Session search, path filters, manual compaction, interrupt recovery, Session Warping |
+ | Token statistics | Hard to know what consumes context | Input/output tokens, tool results, attachments, request overhead breakdowns |
+ | Tool system | File and shell output can pollute context | Structured Read output, Shell output compression, Write auto diff |
++| Voice transcription | Audio or voice notes need a clear text-entry path | Optional MCP can transcribe voice audio and feed the transcript back into context |
+ | Provider | Multi-account, endpoint, and model setup is complex | Provider aliases, client version override, ClaudeCode provider |
+ | VSCode | Notebook scenarios cannot be operated reliably by CLI agents | Cell summary, read, edit, run, output read, kernel management |
+ | Windows | PowerShell, encoding, paths, and CRLF are error-prone | CLIXML decoding, UTF-8 fixes, path normalization, CRLF preservation |
+@@ -204,7 +207,7 @@ This branch is not just a pile of features; it turns common development pain poi
+ | Session recovery | Hidden messages, undo operations, pending-message checks, and error recovery are more robust |
+ | Interrupt control | Records interrupt counts and confirmation time; parent session interrupts propagate to subtasks |
+ | Path compatibility | Windows global session paths are normalized; session storage uses relative paths |
+-| Manual compaction | Users can trigger compaction; compaction selection is asynchronous and reports errors |
++| Manual compaction | Users can trigger optimized compaction; compaction selection is asynchronous and reports errors |
+ | Git context | Automatically injects current branch, status, recent commits, and related data with a config switch |
+ 
+ ### Token And Cost Visibility
+@@ -229,6 +232,10 @@ Internal stats prefer request usage data and fall back to message metadata for o
+ | Write | Automatically generates a diff when overwriting files so users can confirm the actual change |
+ | Permission | Parent-agent permissions are filtered before passing to subtasks; tool availability checks are stricter |
+ 
++### Optional MCP Integration
++
++If you need ChatGPT Web assistance, consider connecting [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark). It reuses a logged-in ChatGPT browser session through a local MCP bridge, making it suitable for ChatGPT ask, image generation, and voice transcription from OpenCode; installation, authorization, and browser-state handling remain governed by that project's README.
++
+ ### Provider And Models
+ 
+ | Capability | Description |
+diff --git a/README.md b/README.md
+index 73f52a9f930a24080f5e5c3ff613a6eec0353d0e..70871e1ed18fa44eda5f2487f6121aa266edb29e 100644
+--- a/README.md
++++ b/README.md
+@@ -46,6 +46,8 @@
+ 
+ > **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.15.6`，CLI release tag 为 `v1.15.6-smark`）。它基于上游 `dev` 分支，重点增强 TUI 交互、会话管理、Token 统计、Windows/PowerShell 兼容、VSCode Notebook 集成、网络代理与安装体验。
+ 
++> **数据库迁移提示**：SMARK 分支包含数据库 schema 自定义与迁移。若你从上游 `dev`、主分支或原分支切换到本分支，请先手动备份本地 `opencode.db`；迁移后的数据库可能无法无损迁移回上游或原分支。本项目不负责您本地数据库上下文信息的 schema 格式兼容性问题。
++
+ ---
+ 
+ ## 快速安装
+@@ -180,6 +182,7 @@ SMARK `dev-smark` 分支当前只发布 CLI，不发布桌面应用安装包。
+ | 会话管理 | 长会话易丢上下文，恢复成本高 | 会话搜索、路径过滤、手动压缩、中断恢复、Session Warping |
+ | Token 统计 | 不知道上下文被什么消耗 | 输入/输出 token、工具结果、附件、请求开销分项展示 |
+ | 工具系统 | 文件读写和 shell 输出容易污染上下文 | Read 输出结构化、Shell 输出压缩、Write 自动 diff |
++| 语音转录 | 录音或语音内容缺少清晰的文本入口 | 可配合可选 MCP 进行 voice 转录，将音频转写结果纳入上下文 |
+ | Provider | 多账号、多端点、多模型配置复杂 | Provider 别名、客户端版本覆盖、ClaudeCode provider |
+ | VSCode | Notebook 场景无法被 CLI Agent 可靠操作 | 单元格概览、读取、编辑、执行、输出读取、内核管理 |
+ | Windows | PowerShell、编码、路径、CRLF 容易出错 | CLIXML 解码、UTF-8 修复、路径规范化、CRLF 保留 |
+@@ -204,7 +207,7 @@ SMARK `dev-smark` 分支当前只发布 CLI，不发布桌面应用安装包。
+ | 会话恢复 | 隐藏消息、撤销操作、待处理消息检查和错误恢复逻辑更稳 |
+ | 中断控制 | 记录中断次数和确认时间，父会话中断会传播到子任务 |
+ | 路径兼容 | Windows 全局会话路径规范化，会话存储使用相对路径 |
+-| 手动压缩 | 用户可以主动触发压缩，压缩选择异步处理并带错误提示 |
++| 手动压缩 | 用户可以主动触发优化后的 compaction，压缩选择异步处理并带错误提示 |
+ | Git 上下文 | 自动注入当前分支、状态、最近提交等信息，可配置开关 |
+ 
+ ### Token 与成本可见性
+@@ -229,6 +232,10 @@ SMARK `dev-smark` 分支当前只发布 CLI，不发布桌面应用安装包。
+ | Write | 覆盖文件时自动生成 diff，帮助用户确认实际修改 |
+ | 权限 | 父代理权限会过滤传递给子任务，工具可用性检查更严格 |
+ 
++### 可选 MCP 集成
++
++如果需要 ChatGPT Web 辅助能力，可考虑接入 [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark)。它通过本地 MCP bridge 复用已登录的 ChatGPT 浏览器会话，适合在 OpenCode 中调用 ChatGPT ask、图片生成和 voice/语音转录等能力；安装、授权与浏览器状态管理以该项目 README 为准。
++
+ ### Provider 与模型
+ 
+ | 能力 | 说明 |
+diff --git a/README.zht.md b/README.zht.md
+index 83762627da16d2132c4e2be04d47282cf6a8eee0..b38ffe0c10e4dda08dfd0c15880406d1882546eb 100644
+--- a/README.zht.md
++++ b/README.zht.md
+@@ -46,6 +46,8 @@
+ 
+ > **關於本分支**：這是 OpenCode 的 `dev-smark` 增強分支（目前版本 `1.15.6`，CLI release tag 為 `v1.15.6-smark`）。它基於上游 `dev` 分支，重點增強 TUI 互動、會話管理、Token 統計、Windows/PowerShell 相容性、VSCode Notebook 整合、網路代理與安裝體驗。
+ 
++> **資料庫遷移提示**：SMARK 分支包含資料庫 schema 自訂與遷移。若你從上游 `dev`、主分支或原分支切換到本分支，請先手動備份本地 `opencode.db`；遷移後的資料庫可能無法無損遷移回上游或原分支。本專案不負責你本地資料庫上下文資訊的 schema 格式相容性問題。
++
+ ---
+ 
+ ## 快速安裝
+@@ -180,6 +182,7 @@ SMARK `dev-smark` 分支目前只發布 CLI，不發布桌面應用安裝包。
+ | 會話管理 | 長會話易丟上下文，復原成本高 | 會話搜尋、路徑過濾、手動壓縮、中斷復原、Session Warping |
+ | Token 統計 | 不知道上下文被什麼消耗 | 輸入/輸出 token、工具結果、附件、請求開銷分項展示 |
+ | 工具系統 | 檔案讀寫和 shell 輸出容易污染上下文 | Read 輸出結構化、Shell 輸出壓縮、Write 自動 diff |
++| 語音轉錄 | 錄音或語音內容缺少清晰的文字入口 | 可配合可選 MCP 進行 voice 轉錄，將音訊轉寫結果納入上下文 |
+ | Provider | 多帳號、多端點、多模型設定複雜 | Provider 別名、客戶端版本覆蓋、ClaudeCode provider |
+ | VSCode | Notebook 場景無法被 CLI Agent 可靠操作 | 單元格概覽、讀取、編輯、執行、輸出讀取、kernel 管理 |
+ | Windows | PowerShell、編碼、路徑、CRLF 容易出錯 | CLIXML 解碼、UTF-8 修復、路徑正規化、CRLF 保留 |
+@@ -204,7 +207,7 @@ SMARK `dev-smark` 分支目前只發布 CLI，不發布桌面應用安裝包。
+ | 會話復原 | 隱藏訊息、撤銷操作、待處理訊息檢查和錯誤復原邏輯更穩 |
+ | 中斷控制 | 記錄中斷次數和確認時間，父會話中斷會傳播到子任務 |
+ | 路徑相容 | Windows 全域會話路徑正規化，會話儲存使用相對路徑 |
+-| 手動壓縮 | 使用者可以主動觸發壓縮，壓縮選擇非同步處理並帶錯誤提示 |
++| 手動壓縮 | 使用者可以主動觸發優化後的 compaction，壓縮選擇非同步處理並帶錯誤提示 |
+ | Git 上下文 | 自動注入目前分支、狀態、最近提交等資訊，可設定開關 |
+ 
+ ### Token 與成本可見性
+@@ -229,6 +232,10 @@ SMARK `dev-smark` 分支目前只發布 CLI，不發布桌面應用安裝包。
+ | Write | 覆蓋檔案時自動生成 diff，幫助使用者確認實際修改 |
+ | 權限 | 父代理權限會過濾傳遞給子任務，工具可用性檢查更嚴格 |
+ 
++### 可選 MCP 整合
++
++如果需要 ChatGPT Web 輔助能力，可考慮接入 [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark)。它透過本地 MCP bridge 復用已登入的 ChatGPT 瀏覽器會話，適合在 OpenCode 中呼叫 ChatGPT ask、圖片生成和 voice/語音轉錄等能力；安裝、授權與瀏覽器狀態管理以該專案 README 為準。
++
+ ### Provider 與模型
+ 
+ | 能力 | 說明 |
+diff --git a/packages/opencode/test/docs/readme.test.ts b/packages/opencode/test/docs/readme.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8cd15a0e674bed2a0f5d099e89008091fd756b4f
+--- /dev/null
++++ b/packages/opencode/test/docs/readme.test.ts
+@@ -0,0 +1,104 @@
++import { describe, expect, test } from "bun:test"
++
++const readmes = [
++  {
++    file: "README.md",
++    // 安装标题是用户执行命令前的边界；数据库风险必须落在这个边界之前，才算真正的安装前提示。
++    installHeading: "## 快速安装",
++    concepts: {
++      // 数据库风险提示同时锁定 `opencode.db` 文件名和 schema 语义，避免只写泛泛的“注意数据”而遗漏迁移核心。
++      database: [/opencode\.db/i, /数据库[^\n]{0,40}schema|schema[^\n]{0,40}数据库/i],
++      // 备份、回退和免责是三个独立承诺；拆开断言能防止后续删掉其中一个风险边界仍然误判通过。
++      backup: [/备份/],
++      rollback: [/迁移回|回退/, /上游|原分支|主分支/],
++      disclaimer: [/不[^\n]{0,20}负责|自行[^\n]{0,20}承担/],
++      // compaction 与 voice 都是用户可依赖的能力说明，不要求固定章节，只要求 README 中能被用户发现。
++      compaction: [/compaction|上下文[^\n]{0,20}压缩|压缩[^\n]{0,20}上下文/i, /优化|改进|更稳|非同步|异步/],
++      voice: [/voice|语音|录音/i, /转录|transcri/i],
++      // MCP 入口需要同时说明外部项目和核心能力，避免只贴链接却没有解释为什么要安装它。
++      mcp: [/chatgpt-browser-agent-smark/i, /ChatGPT[^\n]{0,20}ask|ask[^\n]{0,20}ChatGPT/i, /图片生成|image generation/i],
++    },
++  },
++  {
++    file: "README.en.md",
++    // 三语种 README 结构保持一致，所以每份文档都用本地化安装标题切分“安装前”区域。
++    installHeading: "## Quick Install",
++    concepts: {
++      // 英文版允许自然表达 `database schema` 或 `schema ... database`，避免把翻译锁死成单一句子。
++      database: [/opencode\.db/i, /database[^\n]{0,40}schema|schema[^\n]{0,40}database/i],
++      backup: [/backup/i],
++      rollback: [/migrate[^\n]{0,40}back|roll[^\n]{0,20}back/i, /upstream|original branch|main branch/i],
++      disclaimer: [/not[^\n]{0,40}responsible|own risk/i],
++      compaction: [/compaction|compact[^\n]{0,20}context/i, /optimized|improved|more robust|asynchronous/i],
++      voice: [/voice|speech|audio/i, /transcription|transcribe/i],
++      mcp: [/chatgpt-browser-agent-smark/i, /ChatGPT[^\n]{0,20}ask|ask[^\n]{0,20}ChatGPT/i, /image generation/i],
++    },
++  },
++  {
++    file: "README.zht.md",
++    // 繁中 README 是用户入口之一，不能只让简中/英文满足风险提示和可选 MCP 说明。
++    installHeading: "## 快速安裝",
++    concepts: {
++      // 繁中断言覆盖“資料庫”与英文 `schema` 混排，这是当前 README 的既有术语风格。
++      database: [/opencode\.db/i, /資料庫[^\n]{0,40}schema|schema[^\n]{0,40}資料庫/i],
++      backup: [/備份/],
++      rollback: [/遷移回|回退/, /上游|原分支|主分支/],
++      disclaimer: [/不[^\n]{0,20}負責|自行[^\n]{0,20}承擔/],
++      compaction: [/compaction|上下文[^\n]{0,20}壓縮|壓縮[^\n]{0,20}上下文/i, /優化|改進|更穩|非同步/],
++      voice: [/voice|語音|錄音/i, /轉錄|transcri/i],
++      mcp: [/chatgpt-browser-agent-smark/i, /ChatGPT[^\n]{0,20}ask|ask[^\n]{0,20}ChatGPT/i, /圖片生成|image generation/i],
++    },
++  },
++]
++
++describe("README branch onboarding", () => {
++  for (const readme of readmes) {
++    test(`${readme.file} warns before installation about database migration risk`, async () => {
++      const content = await readReadme(readme.file)
++      const installHeading = content.indexOf(readme.installHeading)
++
++      // README 是用户安装前唯一会先看到的界面；风险提示必须在安装命令之前，避免用户先迁移数据库后才看到回退限制。
++      expect(installHeading).toBeGreaterThan(0)
++      const beforeInstall = content.slice(0, installHeading)
++      expectConcept(beforeInstall, readme.concepts.database)
++      expectConcept(beforeInstall, readme.concepts.backup)
++      expectConcept(beforeInstall, readme.concepts.rollback)
++      expectConcept(beforeInstall, readme.concepts.disclaimer)
++    })
++
++    test(`${readme.file} describes the session features users can rely on`, async () => {
++      const content = await readReadme(readme.file)
++
++      // 这里验证的是用户可发现的能力，而不是 README 的章节名或表格形状；后续重排文档时这些能力承诺仍应保留。
++      expectConcept(content, readme.concepts.compaction)
++      expectConcept(content, readme.concepts.voice)
++    })
++
++    test(`${readme.file} points optional MCP users to ChatGPT browser capabilities`, async () => {
++      const content = await readReadme(readme.file)
++      const mcpParagraph = paragraphContaining(content, "https://github.com/SMARK2022/chatgpt-browser-agent-smark")
++
++      // MCP 是可选增强入口，测试只约束用户能从 README 找到桥接项目和核心能力，不限制具体小节位置。
++      expect(mcpParagraph).toBeTruthy()
++      expectConcept(mcpParagraph, readme.concepts.mcp)
++      expectConcept(mcpParagraph, readme.concepts.voice)
++    })
++  }
++})
++
++async function readReadme(file: string) {
++  // 测试文件位于 packages/opencode/test/docs；相对 repo root 读取可避免依赖当前 shell 的启动目录。
++  return Bun.file(new URL(`../../../../${file}`, import.meta.url)).text()
++}
++
++function expectConcept(content: string, patterns: RegExp[]) {
++  for (const pattern of patterns) {
++    // 每个正则代表一个用户语义概念，而不是固定句子；这样翻译措辞可调整，但关键承诺不能消失。
++    expect(content).toMatch(pattern)
++  }
++}
++
++function paragraphContaining(content: string, text: string) {
++  // README 可能使用 LF 或 CRLF；按空行切段能约束同一用户可读段落，同时不绑定标题层级或表格位置。
++  return content.split(/\r?\n\r?\n/).find((paragraph) => paragraph.includes(text)) ?? ""
++}

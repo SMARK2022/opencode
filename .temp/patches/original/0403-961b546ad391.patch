@@ -1,0 +1,70 @@
+From 961b546ad391061f0cdcb833877dbd6f67096e7e Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 10 Jul 2026 03:16:19 +0800
+Subject: [PATCH] =?UTF-8?q?fix(ci):=20=E7=A6=81=E6=AD=A2=20CI=20=E8=87=AA?=
+ =?UTF-8?q?=E5=8A=A8=E4=B8=8B=E8=BD=BD=20LSP=20server=20+=20=E4=BF=AE?=
+ =?UTF-8?q?=E5=A4=8D=20shell=20echo=20=E6=B5=8B=E8=AF=95=20stdout=20?=
+ =?UTF-8?q?=E7=AB=9E=E6=80=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+CI 环境设置 OPENCODE_DISABLE_LSP_DOWNLOAD=true，防止 macOS/Windows runner
+上 CSharp LSP server 触发 dotnet tool install 下载 roslyn-language-server
+导致 BOM 测试 30s 超时。所有有 auto-download 的 LSP server 均检查此 flag。
+
+同时为 3 个检查 echo 输出内容的 shell 测试补充 sleep 0.01，与 basic 测试
+同款模式，防止 detached:true + Bun 调度抖动导致 stdout 管道竞态丢数据。
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index 2c753cbf5c3bedf64afec3f0316e04ff3274ed7e..037a5bc78ef0fe0f6014964acbf46387b129afee 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -21,6 +21,11 @@ permissions:
+ 
+ env:
+   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
++  # CI 环境禁止 LSP server 自动下载：macOS/Windows runner 预装 .NET SDK，
++  # CSharp/FSharp server 会触发 dotnet tool install 下载 roslyn-language-server，
++  # 耗时 >30s 导致 BOM 测试（.cs 文件触发 CSharp server spawn）超时。
++  # 所有有 auto-download 的 LSP server 均在 spawn 中检查此 flag。
++  OPENCODE_DISABLE_LSP_DOWNLOAD: "true"
+ 
+ jobs:
+   core-required:
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index dc3432e64ceaa5f4fcebf5c6e7cf4ce91bfb1354..29307d42eb01c234b9be099c0bf205a915a26605 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -233,8 +233,10 @@ describe("tool.shell", () => {
+         projectRoot,
+         Effect.gen(function* () {
+           // 单引号内的内容不应被 shell 二次展开；管道要求 shell 进程而非直接 exec
++          // sleep 0.01 防止 macOS CI 上 echo|tr 管道退出过快导致 stdout 竞态
++          //（detached:true + Bun 调度抖动，与 "basic" 测试同款问题，见 line 217 注释）
+           const result = yield* run({
+-            command: "echo 'hello world' | tr a-z A-Z",
++            command: "echo 'hello world' | tr a-z A-Z; sleep 0.01",
+             description: "Echo with quotes and pipe",
+           })
+           expect(result.metadata.exit).toBe(0)
+@@ -1864,7 +1866,8 @@ describe("tool.shell abort", () => {
+         projectRoot,
+         Effect.gen(function* () {
+           const result = yield* run({
+-            command: `echo stdout_msg && echo stderr_msg >&2`,
++            // sleep 0.01 防止 macOS CI 上 echo 退出过快导致 stdout 管道竞态
++            command: `echo stdout_msg && echo stderr_msg >&2; sleep 0.01`,
+             description: "Stderr test",
+           })
+           expect(result.output).toContain("stdout_msg")
+@@ -2007,7 +2010,8 @@ describe("tool.shell abort", () => {
+       projectRoot,
+       Effect.gen(function* () {
+         const result = yield* run({
+-          command: `echo ok`,
++          // sleep 0.01 防止 macOS CI 上 echo 退出过快导致 stdout 管道竞态
++          command: `echo ok; sleep 0.01`,
+           description: "Non-empty successful command",
+         })
+ 

@@ -1,0 +1,303 @@
+From a8478caff8aa41f77a13206ba1c0a730e02777e2 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 22 May 2026 12:48:12 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E9=94=99=E8=AF=AF?=
+ =?UTF-8?q?=E5=A4=84=E7=90=86=EF=BC=8C=E6=B7=BB=E5=8A=A0=E5=AF=B9=E7=89=B9?=
+ =?UTF-8?q?=E5=AE=9A=E8=B6=85=E6=97=B6=E5=92=8C=E8=BF=9E=E6=8E=A5=E9=94=99?=
+ =?UTF-8?q?=E8=AF=AF=E7=9A=84=E9=87=8D=E8=AF=95=E9=80=BB=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index fafeb9c572a642209e6f70aefa81caeec07bb9fa..a2c69604cf2b961a7661abd36b9f19cc5c3b9a93 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -85,7 +85,7 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
+     async pull(ctrl) {
+       const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
+         const id = setTimeout(() => {
+-          const err = new Error("SSE read timed out")
++          const err = Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" })
+           ctl.abort(err)
+           void reader.cancel(err)
+           reject(err)
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index ecd387375adea32a84beeac8b7dbe371697790c2..54d15fcc9707a3e901976c075b788aefed9187fc 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -35,6 +35,34 @@ interface FetchDecompressionError extends Error {
+   path: string
+ }
+ 
++// Keep this transport-only: provider/status errors and invalid payloads must
++// continue through their existing non-retryable branches to avoid replaying
++// requests that are deterministic failures or may already have consumed quota.
++const TRANSIENT_TRANSPORT_CODES = new Set([
++  "ECONNREFUSED",
++  "ETIMEDOUT",
++  "ENOTFOUND",
++  "EAI_AGAIN",
++  "EPIPE",
++  "ConnectionClosed",
++  "ConnectionRefused",
++  "FailedToOpenSocket",
++  "UND_ERR_SOCKET",
++  "UND_ERR_CONNECT_TIMEOUT",
++  "UND_ERR_HEADERS_TIMEOUT",
++  "UND_ERR_BODY_TIMEOUT",
++  "UND_ERR_ABORTED",
++  "CERT_HAS_EXPIRED",
++  "DEPTH_ZERO_SELF_SIGNED_CERT",
++  "SELF_SIGNED_CERT_IN_CHAIN",
++  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
++  "UNABLE_TO_GET_ISSUER_CERT",
++  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
++  "ERR_TLS_CERT_ALTNAME_INVALID",
++  "ERR_TLS_HANDSHAKE_TIMEOUT",
++  "SSE_READ_TIMEOUT",
++])
++
+ export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
+ export { isMedia }
+ 
+@@ -1176,6 +1204,23 @@ export function fromError(
+   e: unknown,
+   ctx: { providerID: ProviderID; aborted?: boolean },
+ ): NonNullable<Assistant["error"]> {
++  if (!ctx.aborted) {
++    const retried = retryErrorCause(e)
++    if (retried) return fromError(retried, ctx)
++
++    const transport = APICallError.isInstance(e) ? undefined : transportError(e)
++    if (transport) {
++      return new APIError(
++        {
++          message: transport.message,
++          isRetryable: true,
++          metadata: transport.metadata,
++        },
++        { cause: e },
++      ).toObject()
++    }
++  }
++
+   switch (true) {
+     case e instanceof DOMException && e.name === "AbortError":
+       return new AbortedError(
+@@ -1279,4 +1324,75 @@ export function fromError(
+   }
+ }
+ 
++type ErrorLike = {
++  name?: unknown
++  message?: unknown
++  code?: unknown
++  syscall?: unknown
++  cause?: unknown
++  lastError?: unknown
++  errors?: unknown
++}
++
++function errorLike(value: unknown): ErrorLike | undefined {
++  if (value instanceof Error) return value as ErrorLike
++  if (typeof value === "object" && value !== null) return value as ErrorLike
++  return undefined
++}
++
++function stringValue(value: unknown) {
++  return typeof value === "string" ? value : undefined
++}
++
++function retryErrorCause(value: unknown) {
++  const error = errorLike(value)
++  if (!error) return undefined
++  if (stringValue(error.name) !== "AI_RetryError") return undefined
++  if (error.lastError !== undefined && error.lastError !== value) return error.lastError
++  if (!Array.isArray(error.errors)) return undefined
++  const last = error.errors.at(-1)
++  return last === value ? undefined : last
++}
++
++function transportError(value: unknown, depth = 0): { message: string; metadata: Record<string, string> } | undefined {
++  const error = errorLike(value)
++  if (!error) return undefined
++
++  const code = stringValue(error.code)
++  const name = stringValue(error.name)
++  const message = errorMessage(value)
++  const syscall = stringValue(error.syscall)
++  const retryCode = code
++    ? code === "ECONNRESET" && depth > 0
++      ? code
++      : TRANSIENT_TRANSPORT_CODES.has(code)
++        ? code
++        : undefined
++    : name === "TimeoutError"
++      ? "TimeoutError"
++      : message === "SSE read timed out"
++        ? "SSE_READ_TIMEOUT"
++        : undefined
++  const retryable =
++    retryCode !== undefined ||
++    message === "fetch failed" ||
++    message === "failed to fetch" ||
++    message.startsWith("Cannot connect to API:")
++
++  if (retryable) {
++    return {
++      message,
++      metadata: {
++        message,
++        ...(retryCode ? { code: retryCode } : {}),
++        ...(name ? { name } : {}),
++        ...(syscall ? { syscall } : {}),
++      },
++    }
++  }
++
++  if (depth >= 2 || error.cause === undefined || error.cause === value) return undefined
++  return transportError(error.cause, depth + 1)
++}
++
+ export * as MessageV2 from "./message-v2"
+diff --git a/packages/opencode/src/session/retry.ts b/packages/opencode/src/session/retry.ts
+index 0365b9d9fda364344d8818edf320a635f4d45bdb..463bc27a95db7f313a470026597a12f693863d4d 100644
+--- a/packages/opencode/src/session/retry.ts
++++ b/packages/opencode/src/session/retry.ts
+@@ -71,8 +71,7 @@ export function retryable(error: Err, provider: string) {
+     const status = error.data.statusCode
+     // 5xx errors are transient server failures and should always be retried,
+     // even when the provider SDK doesn't explicitly mark them as retryable.
+-    // [local-smark] Underlying network exceptions (where statusCode is undefined) should also be retried.
+-    if (!error.data.isRetryable && !(status !== undefined && status >= 500) && status !== undefined) return undefined
++    if (!error.data.isRetryable && !(status !== undefined && status >= 500)) return undefined
+     if (error.data.responseBody?.includes("FreeUsageLimitError")) {
+       return {
+         message: GO_UPSELL_MESSAGE,
+diff --git a/packages/opencode/test/session/retry.test.ts b/packages/opencode/test/session/retry.test.ts
+index 22ff6cde811d9724175a03a563fc90d7915373a5..5d9ee2f364d23ebdbc0b120fb288a782dd250974 100644
+--- a/packages/opencode/test/session/retry.test.ts
++++ b/packages/opencode/test/session/retry.test.ts
+@@ -221,6 +221,17 @@ describe("session.retry.retryable", () => {
+     expect(SessionRetry.retryable(error, retryProvider)).toBeUndefined()
+   })
+ 
++  test("does not retry statusless API errors when isRetryable is false", () => {
++    const error = Schema.decodeUnknownSync(MessageV2.APIError.Schema)(
++      new MessageV2.APIError({
++        message: "Invalid provider output",
++        isRetryable: false,
++      }).toObject(),
++    )
++
++    expect(SessionRetry.retryable(error, retryProvider)).toBeUndefined()
++  })
++
+   test("retries ZlibError decompression failures", () => {
+     const error = Schema.decodeUnknownSync(MessageV2.APIError.Schema)(
+       new MessageV2.APIError({
+@@ -418,4 +429,102 @@ describe("session.message-v2.fromError", () => {
+       message: "An error occurred while processing your request.",
+     })
+   })
++
++  test("converts SSE read timeouts to retryable APIError", () => {
++    const result = MessageV2.fromError(
++      Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" }),
++      { providerID },
++    )
++
++    expect(MessageV2.APIError.isInstance(result)).toBe(true)
++    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
++    expect(result.data.isRetryable).toBe(true)
++    expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "SSE read timed out" })
++  })
++
++  test("converts transient socket and DNS failures to retryable APIError", () => {
++    for (const code of ["ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "EPIPE"]) {
++      const result = MessageV2.fromError(Object.assign(new Error(`${code} while connecting`), { code }), {
++        providerID,
++      })
++
++      expect(MessageV2.APIError.isInstance(result)).toBe(true)
++      if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
++      expect(result.data.isRetryable).toBe(true)
++      expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: `${code} while connecting` })
++    }
++  })
++
++  test("converts wrapped connection resets to retryable APIError", () => {
++    const result = MessageV2.fromError(
++      Object.assign(new TypeError("terminated"), {
++        cause: Object.assign(new Error("socket closed"), { code: "ECONNRESET" }),
++      }),
++      { providerID },
++    )
++
++    expect(MessageV2.APIError.isInstance(result)).toBe(true)
++    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
++    expect(result.data.isRetryable).toBe(true)
++    expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "socket closed" })
++  })
++
++  test("converts provider timeout aborts to retryable APIError", () => {
++    const result = MessageV2.fromError(new DOMException("The operation timed out.", "TimeoutError"), {
++      providerID,
++    })
++
++    expect(MessageV2.APIError.isInstance(result)).toBe(true)
++    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
++    expect(result.data.isRetryable).toBe(true)
++    expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "The operation timed out." })
++  })
++
++  test("converts TLS certificate failures to retryable APIError", () => {
++    for (const error of [
++      Object.assign(new Error("certificate has expired"), { code: "CERT_HAS_EXPIRED" }),
++      Object.assign(new TypeError("fetch failed"), {
++        cause: Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }),
++      }),
++    ]) {
++      const result = MessageV2.fromError(error, { providerID })
++
++      expect(MessageV2.APIError.isInstance(result)).toBe(true)
++      if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
++      expect(result.data.isRetryable).toBe(true)
++      expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: error.message })
++    }
++  })
++
++  test("keeps user aborts non-retryable", () => {
++    const result = MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
++      providerID,
++      aborted: true,
++    })
++
++    expect(MessageV2.AbortedError.isInstance(result)).toBe(true)
++    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
++  })
++
++  test("does not convert ordinary errors to retryable APIError", () => {
++    const result = MessageV2.fromError(new Error("Invalid request body"), { providerID })
++
++    expect(MessageV2.APIError.isInstance(result)).toBe(false)
++    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
++  })
++
++  test("unwraps AI SDK retry errors before deciding retryability", () => {
++    const result = MessageV2.fromError(
++      Object.assign(new Error("Failed after retries"), {
++        name: "AI_RetryError",
++        lastError: Object.assign(new Error("fetch failed"), { code: "ETIMEDOUT" }),
++      }),
++      { providerID },
++    )
++
++    expect(MessageV2.APIError.isInstance(result)).toBe(true)
++    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
++    expect(result.data.isRetryable).toBe(true)
++    expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "fetch failed" })
++  })
+ })

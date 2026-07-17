@@ -1,0 +1,152 @@
+From f0cc012dbc264dd89529abd629d6c2dcc5544a17 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 14 May 2026 22:36:30 +0800
+Subject: [PATCH] =?UTF-8?q?feat(provider):=20=E6=B7=BB=E5=8A=A0=E7=89=88?=
+ =?UTF-8?q?=E6=9C=AC=E8=A6=86=E7=9B=96=E9=80=89=E9=A1=B9=EF=BC=8C=E6=94=AF?=
+ =?UTF-8?q?=E6=8C=81=E8=87=AA=E5=AE=9A=E4=B9=89=E6=8F=90=E4=BE=9B=E8=80=85?=
+ =?UTF-8?q?=E7=9A=84=E5=AE=A2=E6=88=B7=E7=AB=AF=E7=89=88=E6=9C=AC?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/config/provider.ts b/packages/opencode/src/config/provider.ts
+index 9fbbf9a5d90768a9d01f165e0c2292c99688a40c..b05003ac8c908e26a7b39928ba5c8da2e560e3cc 100644
+--- a/packages/opencode/src/config/provider.ts
++++ b/packages/opencode/src/config/provider.ts
+@@ -84,6 +84,9 @@ export const Info = Schema.Struct({
+       Schema.Struct({
+         apiKey: Schema.optional(Schema.String),
+         baseURL: Schema.optional(Schema.String),
++        version: Schema.optional(Schema.String).annotate({
++          description: "Provider-specific client version override, used by custom providers like claudecode",
++        }),
+         enterpriseUrl: Schema.optional(Schema.String).annotate({
+           description: "GitHub Enterprise URL for copilot authentication",
+         }),
+diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
+index 179d065439813fb645cd2129d239c723718c72f6..70c226f170e110861b6ae050fc628406f179a53c 100644
+--- a/packages/opencode/src/provider/claudecode.ts
++++ b/packages/opencode/src/provider/claudecode.ts
+@@ -4,7 +4,7 @@ import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ // ============================================================================
+ // 常量与基础配置
+ // ============================================================================
+-export const VERSION = "2.1.117" // 当前最新的 Claude Code 版本号
++export const VERSION = "2.1.117" // 默认 Claude Code 版本号，可通过 provider options.version 覆盖
+ const SALT = "59cf53e54c78"
+ 
+ // // CLI 身份声明 Block
+@@ -73,12 +73,12 @@ export function computeFingerprint(messageText: string, version: string): string
+  * cch 保持 00000，避免完整 body hash 污染最早 system 前缀
+  */
+ //  * 发包前需要依赖这里的 cch=00000 作为标记，用于后续 xxHash 替换
+-export function buildBillingHeaderBlock(fp: string) {
++export function buildBillingHeaderBlock(fp: string, version = VERSION) {
+   return {
+     type: "text" as const,
+     text: [
+       `x-anthropic-billing-header:`,
+-      ` cc_version=${VERSION}.${fp};`,
++      ` cc_version=${version}.${fp};`,
+       ` cc_entrypoint=cli;`,
+       ` cch=00000;`,
+     ].join(""),
+@@ -106,7 +106,8 @@ export function buildMetadataUserId(opts: { deviceId: string; sessionId: string;
+ /**
+  * 构建请求头
+  */
+-export function buildRequestHeaders(opts: { sessionId: string; modelId: string }): Record<string, string> {
++export function buildRequestHeaders(opts: { sessionId: string; modelId: string; version?: string }): Record<string, string> {
++  const version = opts.version ?? VERSION
+   const betas = [
+     "claude-code-20250219",
+     "prompt-caching-scope-2026-01-05",
+@@ -128,7 +129,7 @@ export function buildRequestHeaders(opts: { sessionId: string; modelId: string }
+     "anthropic-version": "2023-06-01",
+     "anthropic-beta": betas.join(","),
+     "x-app": "cli",
+-    "user-agent": `claude-cli/${VERSION} (external, cli)`,
++    "user-agent": `claude-cli/${version} (external, cli)`,
+     "x-claude-code-session-id": opts.sessionId,
+   }
+ }
+@@ -262,8 +263,9 @@ export function patchCch(bodyStr: string): string {
+ // Fetch 拦截与重写包装器
+ // ============================================================================
+ 
+-export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; authMode: "bearer" | "x-api-key" }) {
++export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; authMode: "bearer" | "x-api-key"; version?: string }) {
+   const { session, token, authMode } = opts
++  const version = opts.version ?? VERSION
+ 
+   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+     const url = typeof input === "string" ? input : input.toString()
+@@ -290,10 +292,10 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
+       return ""
+     })()
+ 
+-    const fp = computeFingerprint(firstUserText, VERSION)
++    const fp = computeFingerprint(firstUserText, version)
+ 
+     // 2. 合并 System Blocks (将我们的 Block 插入到最前面，而不是直接覆盖)
+-    let newSystem: any[] = [buildBillingHeaderBlock(fp)]
++    let newSystem: any[] = [buildBillingHeaderBlock(fp, version)]
+     if (originalBody.system) {
+       if (Array.isArray(originalBody.system)) {
+         newSystem = newSystem.concat(originalBody.system)
+@@ -366,7 +368,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
+     const finalBodyStr = JSON.stringify(patchedBody)
+ 
+     // 7. 处理请求头与鉴权
+-    const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId })
++    const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId, version })
+     const requestHeaders = new Headers(init?.headers)
+ 
+     // 合并自定义 Headers
+@@ -397,7 +399,12 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
+ // Provider 暴露点
+ // ============================================================================
+ 
+-export function createClaudeCodeProvider(token: string, baseUrl: string, authMode: "bearer" | "x-api-key") {
++export function createClaudeCodeProvider(
++  token: string,
++  baseUrl: string,
++  authMode: "bearer" | "x-api-key",
++  opts?: { version?: string },
++) {
+   const session = getSession()
+ 
+   return {
+@@ -406,6 +413,7 @@ export function createClaudeCodeProvider(token: string, baseUrl: string, authMod
+       session,
+       token,
+       authMode,
++      version: opts?.version,
+     }),
+     headers: {}, // 交给内部 fetch wrapper 控制，这里不污染
+   }
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index e59db2f62a8d4b55ede6f925c07e9a11be7c76b5..aa4570ec68ec41cb87d89f9b9b37debf116fc9be 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -193,7 +193,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
+       return {
+         autoload: true,
+         options: {
+-          ...createClaudeCodeProvider(apiKey, baseURL, authMode),
++          ...createClaudeCodeProvider(apiKey, baseURL, authMode, { version: provider.options?.version }),
+         },
+         async getModel(sdk: any, modelID: string) {
+           return sdk.languageModel(modelID)
+@@ -1223,7 +1223,9 @@ const layer: Layer.Layer<
+         for (const [providerID, provider] of configProviders) {
+           // Support extends field: inherit from another provider
+           const baseType = provider.extends
+-          const existing = baseType ? database[baseType] : database[providerID]
++          const existing = baseType
++            ? database[baseType] ?? (baseType === "claudecode" ? database["anthropic"] : undefined)
++            : database[providerID]
+           
+           // ⭐ Critical fix: Clone and update inherited models' providerID
+           const inheritedModels: Record<string, Model> = {}

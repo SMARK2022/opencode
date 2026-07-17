@@ -1,0 +1,165 @@
+From fbb5f1443be6d27b3c492962b7982f2f31822a65 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sun, 5 Jul 2026 04:27:08 +0800
+Subject: [PATCH] =?UTF-8?q?fix(permission):=20=E4=BF=AE=E5=A4=8D=20reviewe?=
+ =?UTF-8?q?r=20transcript=20=E6=88=AA=E6=96=AD=E4=B8=A2=E5=A4=B1=E5=B0=BE?=
+ =?UTF-8?q?=E9=83=A8=E7=94=A8=E6=88=B7=E6=8E=88=E6=9D=83=E8=AF=81=E6=8D=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+用户授权指令常出现在长消息末尾（如 TDD 指令 + "## 创建 commit"），
+但 transcript 截断只保留头部 1000 字符，导致 reviewer 看不到授权证据
+而 fail-closed 拒绝合法操作。
+
+1. truncateWithFlag 新增 preserveTail 参数：用户消息截断时保留头部 60%
+   + 尾部 40%，避免末尾授权被丢弃；非用户消息和 tool 输出保持原有
+   头部截断，不扩大作用域
+2. 用户消息截断预算从 1000 提升到 2000 字符，覆盖常见的长指令 + 授权
+   场景；worst case 80k 字符对 ≥128k context 的 reviewer 模型安全
+
+diff --git a/packages/opencode/src/permission/reviewer/transcript.ts b/packages/opencode/src/permission/reviewer/transcript.ts
+index 599016108b39880d47205ba40a0caf50b717afd9..b5ec82d3824857192e34bda1ec2775712389630d 100644
+--- a/packages/opencode/src/permission/reviewer/transcript.ts
++++ b/packages/opencode/src/permission/reviewer/transcript.ts
+@@ -4,6 +4,11 @@ import type { PermissionReviewerPrompt } from "./prompt"
+ const ENTRY_LIMIT = 40
+ const PART_CHAR_LIMIT = 4000
+ const ENTRY_CHAR_LIMIT = 1000
++// 用户消息是授权证据的主要来源；长指令 + 末尾授权（如 "## 创建 commit"）
++// 可能超过 1000 字符。给用户消息更大预算，减少末尾授权被截断的概率。
++// worst case 40 × 2000 = 80k 字符，是旧 40 × 1000 = 40k 的 2 倍，
++// 对任何 ≥128k context 的 reviewer 模型是安全的。
++const ENTRY_CHAR_LIMIT_USER = 2000
+ type RenderedEntry = PermissionReviewerPrompt.TranscriptEntry & { truncated: boolean }
+ 
+ export function fromMessages(messages: readonly MessageV2.WithParts[]): PermissionReviewerPrompt.TranscriptDelta {
+@@ -15,7 +20,11 @@ export function fromMessages(messages: readonly MessageV2.WithParts[]): Permissi
+   const visibleMessages = messages.filter((message) => !message.info.hidden)
+   const rendered = visibleMessages.map((message) => {
+       const text = message.parts.map(renderPart).filter((part): part is string => Boolean(part?.trim())).join("\n")
+-      const entry = truncateWithFlag(text, ENTRY_CHAR_LIMIT)
++      // 用户消息使用更大预算并保留尾部：授权指令常出现在长消息末尾，
++      // 只保留头部会丢失尾部授权证据导致 reviewer fail-closed 误拒。
++      // 非用户消息保持原有 1000 字符头部截断，避免作用域蔓延到 tool 输出。
++      const isUser = message.info.role === "user"
++      const entry = truncateWithFlag(text, isUser ? ENTRY_CHAR_LIMIT_USER : ENTRY_CHAR_LIMIT, isUser)
+       return {
+         role: message.info.role,
+         text: entry.text,
+@@ -87,13 +96,25 @@ function renderTool(part: MessageV2.ToolPart) {
+ }
+ 
+ function truncate(text: string, limit = PART_CHAR_LIMIT) {
+-  return truncateWithFlag(text, limit).text
++  // truncate 用于 part/tool 输出截断，不保留尾部：tool 输出的尾部截断
++  // 不是授权证据丢失问题，保持原有行为避免作用域蔓延
++  return truncateWithFlag(text, limit, false).text
+ }
+ 
+-function truncateWithFlag(text: string, limit = PART_CHAR_LIMIT) {
++function truncateWithFlag(text: string, limit = PART_CHAR_LIMIT, preserveTail = false) {
+   // The marker records exactly how much was omitted so policy can treat missing
+   // evidence conservatively instead of assuming the hidden tail was benign.
+   if (text.length <= limit) return { text, truncated: false }
++  if (preserveTail) {
++    // 头尾保留：头部 60% 提供上下文，尾部 40% 保留末尾授权证据。
++    // 截断标记位于中间，chars 仍精确等于被省略的字符数。
++    const head = Math.floor(limit * 0.6)
++    const tail = limit - head
++    return {
++      text: text.slice(0, head) + `\n<truncated chars="${text.length - limit}" />\n` + text.slice(text.length - tail),
++      truncated: true,
++    }
++  }
+   return { text: text.slice(0, limit) + `\n<truncated chars="${text.length - limit}" />`, truncated: true }
+ }
+ 
+diff --git a/packages/opencode/test/permission/reviewer-prompt.test.ts b/packages/opencode/test/permission/reviewer-prompt.test.ts
+index 715d0292cf61aa98c6bda5fc3c82ae6f28e39a39..15d73cb104898b8ff9568718266ef31dc9ee34bf 100644
+--- a/packages/opencode/test/permission/reviewer-prompt.test.ts
++++ b/packages/opencode/test/permission/reviewer-prompt.test.ts
+@@ -211,10 +211,11 @@ describe("permission reviewer prompt", () => {
+   })
+ 
+   test("transcript reports shortening for retained entries even when marker adds length", () => {
++    // 用户消息的截断阈值已从 1000 提升到 2000，fixture 需超过新阈值才会触发截断
+     const transcript = PermissionReviewerTranscript.fromMessages([
+       {
+         info: userInfo("msg_user_slightly_long"),
+-        parts: [textPart("msg_user_slightly_long", "prt_slightly_long", "x".repeat(1001))],
++        parts: [textPart("msg_user_slightly_long", "prt_slightly_long", "x".repeat(2001))],
+       },
+     ])
+ 
+@@ -280,4 +281,70 @@ describe("permission reviewer prompt", () => {
+       "Some retained conversation entries had no visible authorization evidence after hidden, synthetic, and reasoning content was excluded.",
+     ])
+   })
++
++  // ---------------------------------------------------------------------------
++  // 头尾保留截断：用户授权常出现在长消息末尾（如 "## 创建 commit"），
++  // 只保留头部会丢失尾部授权证据，导致 reviewer 误判为 unknown 而 fail-closed。
++  // ---------------------------------------------------------------------------
++
++  test("user message truncation preserves both head and tail content", () => {
++    // 模拟真实场景：长指令前缀 + 末尾授权指令，总长超过 2000 字符阈值
++    const head = "TDD_INSTRUCTIONS_" + "x".repeat(2500)
++    const tail = "## 创建 commit"
++    const transcript = PermissionReviewerTranscript.fromMessages([
++      {
++        info: userInfo("msg_user_long_with_auth"),
++        parts: [textPart("msg_user_long_with_auth", "prt_long", head + "\n" + tail)],
++      },
++    ])
++
++    expect(transcript.entryTruncated).toBe(true)
++    // 头部内容必须保留（提供上下文）
++    expect(transcript.entries[0].text).toContain("TDD_INSTRUCTIONS_")
++    // 尾部授权必须保留（这是修复的核心目标）
++    expect(transcript.entries[0].text).toContain("## 创建 commit")
++  })
++
++  test("user message under 2000 chars is not truncated", () => {
++    // 用户消息预算提升到 2000：1500 字符的用户消息不应被截断
++    const transcript = PermissionReviewerTranscript.fromMessages([
++      {
++        info: userInfo("msg_user_medium"),
++        parts: [textPart("msg_user_medium", "prt_medium", "x".repeat(1500))],
++      },
++    ])
++
++    expect(transcript.entryTruncated).toBe(false)
++    expect(transcript.entries[0].text).toBe("x".repeat(1500))
++  })
++
++  test("assistant message still uses 1000 char entry limit", () => {
++    // 非用户消息的截断阈值不变：1001 字符的 assistant 消息仍被截断
++    const transcript = PermissionReviewerTranscript.fromMessages([
++      {
++        info: assistantInfo("msg_assistant_1001"),
++        parts: [textPart("msg_assistant_1001", "prt_1001", "y".repeat(1001))],
++      },
++    ])
++
++    expect(transcript.entryTruncated).toBe(true)
++  })
++
++  test("assistant message truncation does not preserve tail", () => {
++    // 非用户消息仍使用头部截断（preserveTail=false），不保留尾部
++    const head = "HEAD_CONTENT"
++    const tail = "TAIL_CONTENT_SHOULD_NOT_APPEAR"
++    const padding = "z".repeat(1000)
++    const transcript = PermissionReviewerTranscript.fromMessages([
++      {
++        info: assistantInfo("msg_assistant_head_only"),
++        parts: [textPart("msg_assistant_head_only", "prt_head", head + padding + tail)],
++      },
++    ])
++
++    expect(transcript.entryTruncated).toBe(true)
++    expect(transcript.entries[0].text).toContain("HEAD_CONTENT")
++    // assistant 消息不保留尾部 — 与既有行为一致
++    expect(transcript.entries[0].text).not.toContain("TAIL_CONTENT_SHOULD_NOT_APPEAR")
++  })
+ })

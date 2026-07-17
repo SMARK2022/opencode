@@ -1,0 +1,38 @@
+From f3dd3027163e9297df6bdd55efad9854b4e0db1f Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 10 May 2026 02:46:44 +0800
+Subject: [PATCH] =?UTF-8?q?fix(session):=20=E7=A1=AE=E4=BF=9D=E5=9C=A8?=
+ =?UTF-8?q?=E9=A6=96=E6=AC=A1=E6=B8=B2=E6=9F=93=E5=89=8D=E4=BF=9D=E6=8C=81?=
+ =?UTF-8?q?=20local=20=E5=8F=AF=E7=94=A8=EF=BC=8C=E9=81=BF=E5=85=8D=20Bun?=
+ =?UTF-8?q?=20=E7=9A=84=20TDZ=20=E6=A3=80=E6=9F=A5=E6=8A=9B=E5=87=BA?=
+ =?UTF-8?q?=E9=94=99=E8=AF=AF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 7f85844468514070be22cbe48aae172ea7ed8657..a1a4b7a71ed8f94d06c3ee94f86587e06e9ea13d 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -196,6 +196,11 @@ export function Session() {
+   const providers = createMemo(() => Model.index(sync.data.provider))
+ 
+   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
++
++  // Keep `local` available before any memo or handler reads it.
++  // Bun's bundled TDZ checks can otherwise throw at first render.
++  const local = useLocal()
++
+   const userMessageAgentColors = createMemo(() => {
+     return new Map(
+       messages()
+@@ -395,8 +400,6 @@ export function Session() {
+     }, 50)
+   }
+ 
+-  const local = useLocal()
+-
+   function moveFirstChild() {
+     if (children().length === 1) return
+     const next = children().find((x) => !!x.parentID)

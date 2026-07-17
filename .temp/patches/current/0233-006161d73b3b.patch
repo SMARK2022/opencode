@@ -1,0 +1,912 @@
+From 006161d73b3ba896dbbb21c9bd88e71d2ff92495 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Tue, 26 May 2026 17:15:19 +0800
+Subject: [PATCH] =?UTF-8?q?feat(notebook):=20=E5=A2=9E=E5=BC=BA=E7=AC=94?=
+ =?UTF-8?q?=E8=AE=B0=E6=9C=AC=E7=BC=96=E8=BE=91=E5=92=8C=E6=8F=92=E5=85=A5?=
+ =?UTF-8?q?=E6=BA=90=E9=A2=84=E8=A7=88=E9=80=BB=E8=BE=91=EF=BC=8C=E6=94=AF?=
+ =?UTF-8?q?=E6=8C=81=E5=A4=A7=E8=A7=84=E6=A8=A1=E6=8F=92=E5=85=A5=E7=9A=84?=
+ =?UTF-8?q?=E5=85=83=E6=95=B0=E6=8D=AE=E5=A4=84=E7=90=86=E5=92=8C=E8=AF=AD?=
+ =?UTF-8?q?=E6=B3=95=E9=AB=98=E4=BA=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx
+index 9fd7c3e00d3c5c86c6afb36131ba16dab55463bb..6fa2147e89cc5dca04d89d1205633aaeaacf90c5 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx
+@@ -85,10 +85,22 @@ export function useVscodeNotebookToolView(props: {
+ 
+   function editView(metadata: Record<string, unknown>): VscodeNotebookToolView {
+     const diff = stringValue(metadata.diff) ?? ""
++    const editType = stringValue(metadata.editType)
++    const insertSourceFromDiff = editType === "insert" ? notebookInsertSourceFromDiff(diff) : undefined
++    const insertSource = insertSourceFromDiff ?? (editType === "insert" ? stringValue(metadata.insertedSourcePreview) : undefined)
+     const stats = { added: numberValue(metadata.added) ?? 0, removed: numberValue(metadata.removed) ?? 0 }
++    const visibleText = insertSource ?? diff
++    const visibleLines = visibleText.split("\n").length
++    // Notebook diff paths carry language IDs like `.python`, not real file
++    // extensions like `.py`, so use bridge metadata for syntax highlighting.
++    const language = stringValue(metadata.language)
++    // When the real diff is omitted, collapse sizing must still use the real
++    // change magnitude; otherwise a 3000-line insert preview mounts expanded and
++    // defeats BlockTool's 10-line first-screen budget.
++    const totalLines = stringValue(metadata.diffOmitted) ? Math.max(visibleLines, stats.added + stats.removed + 3) : visibleLines
+     const title = [
+       "←",
+-      notebookEditLabel(stringValue(metadata.editType)),
++      notebookEditLabel(editType),
+       notebookTarget(stringValue(metadata.path)),
+       stringValue(metadata.cellLabel) ?? stringValue(metadata.cellId),
+       stats.added > 0 || stats.removed > 0 ? `+${stats.added} -${stats.removed}` : undefined,
+@@ -99,15 +111,24 @@ export function useVscodeNotebookToolView(props: {
+       title,
+       maxLines: 10,
+       threshold: 20,
+-      totalLines: diff.split("\n").length,
+-      totalChars: diff.length,
+-      preview: diff ? <NotebookDiff diff={previewDiff(diff, 10)} filePath={filePath} maxLines={10} /> : undefined,
++      totalLines,
++      totalChars: visibleText.length,
++      preview: insertSource !== undefined
++        ? <NotebookSourceCode source={insertSource} filePath={filePath} language={language} maxLines={10} />
++        : diff ? <NotebookDiff diff={previewDiff(diff, 10)} filePath={filePath} language={language} maxLines={10} /> : undefined,
+       body: (
+         <box gap={1} flexDirection="column">
+-          <Show when={diff} fallback={<text fg={theme.text}>{summaryLine(metadata)}</text>}>
+-            <NotebookDiff diff={diff} filePath={filePath} />
++          <Show when={insertSource !== undefined} fallback={
++            <Show when={diff} fallback={<text fg={theme.text}>{summaryLine(metadata)}</text>}>
++              <NotebookDiff diff={diff} filePath={filePath} language={language} />
++            </Show>
++          }>
++            <NotebookSourceCode source={insertSource ?? ""} filePath={filePath} language={language} />
++            <Show when={booleanValue(metadata.insertedSourcePreviewTruncated) && insertSourceFromDiff === undefined}>
++              <text fg={theme.textMuted}>Inserted source preview is truncated; use vscode_notebook_source for the full cell.</text>
++            </Show>
+           </Show>
+-          <Show when={stringValue(metadata.diffOmitted)}>
++          <Show when={stringValue(metadata.diffOmitted) && insertSource === undefined}>
+             <text fg={theme.textMuted}>Diff omitted from metadata because it exceeds the notebook inline display budget.</text>
+           </Show>
+           <text fg={theme.textMuted}>{summaryLine(metadata)}</text>
+@@ -127,7 +148,12 @@ export function useVscodeNotebookToolView(props: {
+       threshold: 20,
+       totalLines: lines,
+       totalChars: JSON.stringify(metadata).length,
+-      preview: <NotebookCells cells={cells.slice(0, 8)} runtime={stringValue(metadata.runtime)} dirty={booleanValue(metadata.dirty)} />,
++      preview: (
++        <box flexDirection="column">
++          <text fg={theme.textMuted}>runtime={stringValue(metadata.runtime) ?? "unknown"} dirty={String(booleanValue(metadata.dirty) ?? "unknown")}</text>
++          <For each={previewCells(cells)}>{(cell) => <text fg={execColor(stringValue(cell.exec))}>{previewCellLine(cell)}</text>}</For>
++        </box>
++      ),
+       body: <NotebookCells cells={cells} runtime={stringValue(metadata.runtime)} dirty={booleanValue(metadata.dirty)} />,
+     }
+   }
+@@ -149,14 +175,22 @@ export function useVscodeNotebookToolView(props: {
+   function runView(metadata: Record<string, unknown>): VscodeNotebookToolView {
+     const cells = arrayRecords(metadata.cells)
+     const completed = booleanValue(metadata.completed)
++    const artifacts = artifactRows(cells)
+     return {
+       mode: "block",
+       title: `▶ Notebook run ${notebookTarget(stringValue(metadata.path))} ${stringValue(metadata.target) ?? ""} · ${completed === false ? "failed" : "completed"}`,
+       maxLines: 10,
+       threshold: 20,
+-      totalLines: cells.length + artifactRows(cells).length + 2,
++      totalLines: cells.length + artifacts.length + 2,
+       totalChars: JSON.stringify(metadata).length,
+-      preview: <NotebookRun cells={cells.slice(0, 6)} />,
++      preview: (
++        <box flexDirection="column">
++          <For each={previewCells(cells)}>{(cell) => <text fg={execColor(stringValue(cell.exec))}>{previewCellLine(cell)}</text>}</For>
++          <Show when={artifacts.length}>
++            <text fg={theme.textMuted}>Artifacts: {artifacts.length} available after expand</text>
++          </Show>
++        </box>
++      ),
+       body: <NotebookRun cells={cells} />,
+     }
+   }
+@@ -203,13 +237,13 @@ export function useVscodeNotebookToolView(props: {
+     }
+   }
+ 
+-  function NotebookDiff(diffProps: { diff: string; filePath?: string; maxLines?: number }) {
++  function NotebookDiff(diffProps: { diff: string; filePath?: string; language?: string; maxLines?: number }) {
+     return (
+       <box paddingLeft={1} maxHeight={diffProps.maxLines} overflow={diffProps.maxLines ? "hidden" : undefined}>
+         <diff
+           diff={diffProps.diff}
+           view={props.width() > 120 ? "split" : "unified"}
+-          filetype={filetype(diffProps.filePath)}
++          filetype={filetype(diffProps.filePath, diffProps.language)}
+           syntaxStyle={syntax()}
+           showLineNumbers={true}
+           width="100%"
+@@ -229,6 +263,20 @@ export function useVscodeNotebookToolView(props: {
+     )
+   }
+ 
++  function NotebookSourceCode(codeProps: { source: string; filePath?: string; language?: string; maxLines?: number }) {
++    return (
++      <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
++        <code
++          conceal={false}
++          fg={theme.text}
++          filetype={filetype(codeProps.filePath, codeProps.language)}
++          syntaxStyle={syntax()}
++          content={codeProps.maxLines ? previewText(codeProps.source, codeProps.maxLines) : codeProps.source}
++        />
++      </line_number>
++    )
++  }
++
+   function NotebookPendingStats(statProps: { stats?: PendingToolInputStats }) {
+     return (
+       <>
+@@ -307,6 +355,24 @@ function notebookDiffPath(metadata: Record<string, unknown>) {
+     .join("")
+ }
+ 
++function notebookInsertSourceFromDiff(diff: string) {
++  if (!diff) return undefined
++  const lines = diff.split("\n")
++  const source: string[] = []
++  let hunk = false
++  for (const line of lines) {
++    if (line.startsWith("@@ ")) {
++      hunk = true
++      continue
++    }
++    // Small insert diffs are still available in metadata. Once inside a hunk,
++    // every plus-prefixed row is real inserted source; patch headers only appear
++    // before the first hunk, so source lines beginning with "++" must survive.
++    if (hunk && line.startsWith("+")) source.push(line.slice(1))
++  }
++  return source.length ? source.join("\n") : undefined
++}
++
+ function summaryLine(metadata: Record<string, unknown>) {
+   const before = numberValue(metadata.cellCountBefore)
+   const after = numberValue(metadata.cellCountAfter)
+@@ -326,6 +392,26 @@ function cellLine(cell: Record<string, unknown>) {
+   ].filter(Boolean).join("  ")
+ }
+ 
++function previewCellLine(cell: Record<string, unknown>) {
++  const exec = stringValue(cell.exec)
++  return [
++    cellLabel(cell),
++    [stringValue(cell.kind), stringValue(cell.lang)].filter(Boolean).join("/"),
++    exec?.match(/\b(failed|error|skipped|succeeded|not-run)\b/)?.[1] ?? exec,
++    stringValue(cell.first) ? `first=${JSON.stringify(stringValue(cell.first))}` : undefined,
++  ].filter(Boolean).join("  ")
++}
++
++function previewCells(cells: Record<string, unknown>[]) {
++  const failed = cells.filter(failedCell).slice(-6)
++  return failed.length ? failed : cells.slice(0, 6)
++}
++
++function failedCell(cell: Record<string, unknown>) {
++  const exec = stringValue(cell.exec)
++  return Boolean(exec?.includes("failed") || exec?.includes("error"))
++}
++
+ function cellLabel(cell: Record<string, unknown>) {
+   const index = numberValue(cell.i)
+   return index === undefined ? stringValue(cell.id) ?? "cell" : `c${index}`
+@@ -348,11 +434,11 @@ function previewText(input: string, maxLines: number) {
+   return lines.length > maxLines ? [...lines.slice(0, maxLines), "…"].join("\n") : input
+ }
+ 
+-function filetype(input?: string) {
++function filetype(input?: string, language?: string) {
+   const ext = input?.match(/\.[^.]+$/)?.[0]
+-  const language = ext ? LANGUAGE_EXTENSIONS[ext] : undefined
+-  if (language && ["typescriptreact", "javascriptreact", "javascript"].includes(language)) return "typescript"
+-  return language
++  const resolved = language ?? (ext ? LANGUAGE_EXTENSIONS[ext] : undefined)
++  if (resolved && ["typescriptreact", "javascriptreact", "javascript"].includes(resolved)) return "typescript"
++  return resolved
+ }
+ 
+ function bytesText(value?: number) {
+diff --git a/packages/opencode/src/cli/cmd/tui/util/preview-diff.ts b/packages/opencode/src/cli/cmd/tui/util/preview-diff.ts
+index 6ddc5ae2a74121e2fc3423733814059981b624c7..d62e50c16747bddccfa9512ba975b7f042a1d072 100644
+--- a/packages/opencode/src/cli/cmd/tui/util/preview-diff.ts
++++ b/packages/opencode/src/cli/cmd/tui/util/preview-diff.ts
+@@ -7,6 +7,8 @@ export function previewDiff(input: string, maxLines: number) {
+   let expectedOld = 0,
+     expectedNew = 0,
+     changed = false
++  const oldVisible = () => body.filter((line) => line[0] === " " || line[0] === "-").length
++  const newVisible = () => body.filter((line) => line[0] === " " || line[0] === "+").length
+ 
+   // Flush each preview hunk as a fresh, parser-valid hunk. The preview may drop
+   // trailing body lines, so the original @@ counts must be rewritten to the
+@@ -14,17 +16,15 @@ export function previewDiff(input: string, maxLines: number) {
+   const flush = () => {
+     if (!oldStart) return
+ 
+-    const oldVisible = body.filter((line) => line[0] === " " || line[0] === "-").length
+-    const newVisible = body.filter((line) => line[0] === " " || line[0] === "+").length
+-    const countMismatch = oldVisible !== expectedOld || newVisible !== expectedNew
+-    const incomplete = oldVisible < expectedOld || newVisible < expectedNew
++    const countMismatch = oldVisible() !== expectedOld || newVisible() !== expectedNew
++    const incomplete = oldVisible() < expectedOld || newVisible() < expectedNew
+     // Match previewText's "N visible rows plus one ellipsis row" contract, but
+     // keep the ellipsis as a legal context line so parsePatch accepts it. The
+     // incomplete branch covers metadata that was already clipped mid-hunk.
+     if (cut || incomplete) body.push(" …")
+     changed ||= cut || countMismatch
+     out.push(
+-      `@@ -${oldStart},${body.filter((line) => line[0] === " " || line[0] === "-").length} +${newStart},${body.filter((line) => line[0] === " " || line[0] === "+").length} @@${suffix}`,
++      `@@ -${oldStart},${oldVisible()} +${newStart},${newVisible()} @@${suffix}`,
+       ...body,
+     )
+     oldStart = newStart = suffix = ""
+@@ -52,6 +52,15 @@ export function previewDiff(input: string, maxLines: number) {
+       continue
+     }
+ 
++    if (oldVisible() >= expectedOld && newVisible() >= expectedNew) {
++      // A new file header or other patch metadata can follow a completed hunk.
++      // Flush before handling it so header-like source rows remain valid only
++      // while the expected hunk body is still being consumed.
++      flush()
++      out.push(line)
++      continue
++    }
++
+     if (line[0] === " ") {
+       if (left >= limit || right >= limit) {
+         cut = true
+@@ -63,18 +72,38 @@ export function previewDiff(input: string, maxLines: number) {
+       continue
+     }
+ 
+-    if ((line[0] === "-" && !line.startsWith("---")) || (line[0] === "+" && !line.startsWith("+++"))) {
++    if (line[0] === "-" || line[0] === "+") {
+       const del: string[] = []
+       const add: string[] = []
+       let j = i
+-      while (src[j] && /^[+-]/.test(src[j]) && !/^(---|\+\+\+)/.test(src[j])) {
+-        ;(src[j][0] === "-" ? del : add).push(src[j])
++      // We are already inside a hunk; `+++`/`---` here can be legitimate source
++      // rows, so stop only when this hunk's expected old/new rows are consumed.
++      let seenOld = oldVisible()
++      let seenNew = newVisible()
++      while (src[j] && /^[+-]/.test(src[j])) {
++        if (seenOld >= expectedOld && seenNew >= expectedNew) break
++        if (src[j][0] === "-") {
++          if (seenOld >= expectedOld) break
++          del.push(src[j])
++          seenOld++
++          j++
++          continue
++        }
++        if (seenNew >= expectedNew) break
++        add.push(src[j])
++        seenNew++
+         j++
+       }
+-      const paired = del.length > 0 && add.length > 0
+-      const take = paired ? Math.min(del.length, add.length, limit - left, limit - right) : 0
+-      const dl = paired ? take : Math.min(del.length, limit - left)
+-      const al = paired ? take : Math.min(add.length, limit - right)
++      if (j === i) {
++        // Malformed or already-clipped hunks can present a row for the side whose
++        // expected count is already satisfied. Flush with an ellipsis instead of
++        // reprocessing the same row forever in the outer loop.
++        flush()
++        out.push(line)
++        continue
++      }
++      const dl = Math.min(del.length, limit - left)
++      const al = Math.min(add.length, limit - right)
+       body.push(...del.slice(0, dl), ...add.slice(0, al))
+       left += dl
+       right += al
+diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
+index 866368879890b73264da85417fdb5dd89a115bda..4518e2eba2d7982e83d4427e130c641fb84b717d 100644
+--- a/packages/opencode/src/plugin/vscode-bridge.ts
++++ b/packages/opencode/src/plugin/vscode-bridge.ts
+@@ -14,6 +14,12 @@ const NOTEBOOK_METADATA_KEY = "vscodeNotebook"
+ // 默认内联上限保持同一量级，超过后只保留统计和摘要，避免大 cell/full replace
+ // 把 notebook 源码整段复制进会话状态。
+ const NOTEBOOK_DIFF_METADATA_MAX_CHARS = 16 * 1024
++// Inserted cells behave like write-new-file in the TUI, so they need bounded
++// source metadata for the code renderer instead of relying on an empty-file
++// diff. Keep this aligned with the 10-line collapsed card budget: the metadata
++// remains bounded, and large notebook sources still require vscode_notebook_source.
++const NOTEBOOK_INSERT_PREVIEW_LINES = 10
++const NOTEBOOK_INSERT_PREVIEW_MAX_CHARS = 4 * 1024
+ 
+ const requiredFilePath = {
+   filePath: z
+@@ -193,12 +199,16 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
+   const stats = diffStats(fullDiff ?? "")
+   const diff = fullDiff && fullDiff.length <= NOTEBOOK_DIFF_METADATA_MAX_CHARS ? fullDiff : undefined
+   const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
++  const editType = stringValue(data.editType) ?? stringValue(args.editType)
++  const insertedSourcePreview = editType === "insert" && after !== undefined
++    ? previewNotebookInsertSource(after)
++    : undefined
+   return {
+     view: "edit",
+     path,
+     cellLabel: cellIndex === undefined ? undefined : `c${cellIndex + 1}`,
+     cellId: stringValue(args.cellId),
+-    editType: stringValue(data.editType) ?? stringValue(args.editType),
++    editType,
+     cellCountBefore: numberValue(data.cellCountBefore),
+     cellCountAfter: numberValue(data.cellCountAfter),
+     dirty: booleanValue(data.dirty),
+@@ -206,11 +216,28 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
+     language: stringValue(data.language),
+     diff,
+     diffOmitted: fullDiff !== undefined && diff === undefined ? "too-large" : undefined,
++    ...(insertedSourcePreview && {
++      insertedSourcePreview: insertedSourcePreview.text,
++      insertedSourcePreviewTruncated: insertedSourcePreview.truncated,
++    }),
+     added: stats.added,
+     removed: stats.removed,
+   }
+ }
+ 
++function previewNotebookInsertSource(source: string) {
++  const rawLines = source.split(/\r?\n/)
++  const lines = rawLines.at(-1) === "" ? rawLines.slice(0, -1) : rawLines
++  const linePreview = lines.slice(0, NOTEBOOK_INSERT_PREVIEW_LINES).join("\n")
++  const text = linePreview.length > NOTEBOOK_INSERT_PREVIEW_MAX_CHARS
++    ? linePreview.slice(0, NOTEBOOK_INSERT_PREVIEW_MAX_CHARS)
++    : linePreview
++  return {
++    text,
++    truncated: lines.length > NOTEBOOK_INSERT_PREVIEW_LINES || text.length < linePreview.length,
++  }
++}
++
+ function notebookEnvView(path: string | undefined, data: Record<string, unknown>) {
+   const operation = stringValue(data.operation)
+   const status = stringValue(data.status)
+@@ -284,10 +311,23 @@ function compactArtifacts(value: unknown) {
+ }
+ 
+ function diffStats(diff: string) {
+-  const lines = diff.split("\n")
++  let added = 0
++  let removed = 0
++  let hunk = false
++  for (const line of diff.split("\n")) {
++    if (line.startsWith("@@ ")) {
++      hunk = true
++      continue
++    }
++    // Count only hunk body rows. Patch file headers are before the first hunk;
++    // inside a hunk, `+++`/`---` can be legitimate notebook source lines.
++    if (!hunk) continue
++    if (line.startsWith("+")) added++
++    if (line.startsWith("-")) removed++
++  }
+   return {
+-    added: lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length,
+-    removed: lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length,
++    added,
++    removed,
+   }
+ }
+ 
+diff --git a/packages/opencode/test/cli/cmd/tui/preview-diff.test.ts b/packages/opencode/test/cli/cmd/tui/preview-diff.test.ts
+index 156b90f2031c56eabf4ee83b212895ec86802dcf..301d2b9880aca0065c42c87d20cacb2cc495a219 100644
+--- a/packages/opencode/test/cli/cmd/tui/preview-diff.test.ts
++++ b/packages/opencode/test/cli/cmd/tui/preview-diff.test.ts
+@@ -69,6 +69,99 @@ describe("previewDiff", () => {
+     expect(previewDiff(completeSmall, 20)).toBe(completeSmall)
+   })
+ 
++  test("keeps hunk body lines that look like diff headers", () => {
++    const input = `Index: /tmp/notebook.py
++===================================================================
++--- /tmp/notebook.py
+++++ /tmp/notebook.py
++@@ -1,2 +1,2 @@
++-old line
++--- legal removed source
+++new line
+++++ legal added source`
++    const hunk = parsePatch(previewDiff(input, 10))[0]?.hunks[0]
++
++    expect(hunk?.lines).toContain("--- legal removed source")
++    expect(hunk?.lines).toContain("+++ legal added source")
++    expect(hunk?.oldLines).toBe(2)
++    expect(hunk?.newLines).toBe(2)
++  })
++
++  test("keeps unbalanced hunk body lines when preview budget allows them", () => {
++    const input = `Index: /tmp/notebook.py
++===================================================================
++--- /tmp/notebook.py
+++++ /tmp/notebook.py
++@@ -1,1 +1,2 @@
++-old line
+++new line
+++++ legal added source`
++    const hunk = parsePatch(previewDiff(input, 10))[0]?.hunks[0]
++
++    expect(hunk?.lines).toEqual(["-old line", "+new line", "+++ legal added source"])
++    expect(hunk?.oldLines).toBe(1)
++    expect(hunk?.newLines).toBe(2)
++  })
++
++  test("does not treat later file headers as previous hunk source", () => {
++    const input = `Index: /tmp/one.py
++===================================================================
++--- /tmp/one.py
+++++ /tmp/one.py
++@@ -1,1 +1,1 @@
++--- legal removed source
+++++ legal added source
++Index: /tmp/two.py
++===================================================================
++--- /tmp/two.py
+++++ /tmp/two.py
++@@ -1,1 +1,1 @@
++-old two
+++new two`
++    const patches = parsePatch(previewDiff(input, 10))
++
++    expect(patches).toHaveLength(2)
++    expect(patches[0]?.hunks[0]?.lines).toContain("--- legal removed source")
++    expect(patches[0]?.hunks[0]?.lines).toContain("+++ legal added source")
++    expect(patches[1]?.oldFileName).toBe("/tmp/two.py")
++    expect(patches[1]?.hunks[0]?.lines).toContain("+new two")
++  })
++
++  test("does not consume adjacent file headers after a complete hunk", () => {
++    const input = `--- /tmp/one.py
+++++ /tmp/one.py
++@@ -1,1 +1,1 @@
++-old one
+++new one
++--- /tmp/two.py
+++++ /tmp/two.py
++@@ -1,1 +1,1 @@
++-old two
+++new two`
++    const patches = parsePatch(previewDiff(input, 10))
++
++    expect(patches).toHaveLength(2)
++    expect(patches[0]?.oldFileName).toBe("/tmp/one.py")
++    expect(patches[0]?.hunks[0]?.lines).toEqual(["-old one", "+new one"])
++    expect(patches[1]?.oldFileName).toBe("/tmp/two.py")
++    expect(patches[1]?.hunks[0]?.lines).toEqual(["-old two", "+new two"])
++  })
++
++  test("does not loop when an incomplete hunk is followed by an already-satisfied side", () => {
++    const input = `Index: /tmp/incomplete.py
++===================================================================
++--- /tmp/incomplete.py
+++++ /tmp/incomplete.py
++@@ -1,2 +1,1 @@
++-old
+++new
+++++ already satisfied side`
++    const preview = previewDiff(input, 10)
++
++    expect(preview).toContain(" …")
++    expect(preview).toContain("+++ already satisfied side")
++  })
++
+   test("repairs an already-clipped hunk before diff rendering", () => {
+     const hunk = parsePatch(previewDiff(partialHunk, 10))[0]?.hunks[0]
+ 
+diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+index 3c09f17dd5cc38ca975be6429f22dea0c1049e3b..e5057dd88c1ec3bb06c20b17c33da1857c78afe5 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -464,6 +464,150 @@ test("completed notebook edit renders a diff card instead of raw generic input",
+   )
+ })
+ 
++test("completed notebook edit uses notebook language for supported diff syntax highlighting", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_notebook_edit_highlight", 1)],
++    {
++      msg_notebook_edit_highlight: [
++        completedToolPart(
++          "part_notebook_edit_highlight",
++          "msg_notebook_edit_highlight",
++          "vscode_notebook_edit",
++          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-12345678", editType: "edit" },
++          {
++            vscodeNotebook: {
++              view: "edit",
++              path: "notebooks/analysis.ipynb",
++              cellLabel: "c3",
++              editType: "edit",
++              language: "typescript",
++              dirty: true,
++              cellCountBefore: 4,
++              cellCountAfter: 4,
++              diff: [
++                "--- notebooks/analysis.ipynb#c3.typescript",
++                "+++ notebooks/analysis.ipynb#c3.typescript",
++                "@@ -1 +1 @@",
++                "-const verified = false",
++                "+const verified = true",
++              ].join("\n"),
++              added: 1,
++              removed: 1,
++            },
++          },
++        ),
++      ],
++    },
++    async (app) => {
++      await waitForFrame(app, (lines) => lines.some((line) => line.includes("const verified = true")))
++      const start = Date.now()
++      for (;;) {
++        await app.renderOnce()
++        const line = app.captureSpans().lines.find((item) => item.spans.map((span) => span.text).join("").includes("const verified = true"))
++        const identifierSpan = line?.spans.find((span) => span.text.includes("verified"))
++        const keywordSpan = line?.spans.find((span) => span.text.includes("const"))
++        if (identifierSpan && keywordSpan && JSON.stringify(keywordSpan.fg) !== JSON.stringify(identifierSpan.fg)) break
++        if (Date.now() - start > 2_000) {
++          expect(keywordSpan?.fg).not.toEqual(identifierSpan?.fg)
++          break
++        }
++        await Bun.sleep(10)
++      }
++    },
++  )
++})
++
++test("completed oversized notebook insert renders inserted source preview when the full diff is omitted", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_notebook_insert_preview", 1)],
++    {
++      msg_notebook_insert_preview: [
++        completedToolPart(
++          "part_notebook_insert_preview",
++          "msg_notebook_insert_preview",
++          "vscode_notebook_edit",
++          {
++            filePath: "notebooks/large analysis.ipynb",
++            cellId: "#VSC-anchor",
++            editType: "insert",
++            newCode: "RAW_INSERT_INPUT_SHOULD_NOT_RENDER",
++          },
++          {
++            vscodeNotebook: {
++              view: "edit",
++              path: "notebooks/large analysis.ipynb",
++              cellLabel: "c4",
++              editType: "insert",
++              language: "python",
++              dirty: true,
++              cellCountBefore: 3,
++              cellCountAfter: 4,
++              diffOmitted: "too-large",
++              added: 3003,
++              removed: 0,
++              insertedSourcePreview: ["import pandas as pd", "df = pd.read_csv('large file.csv')", "df.head()"].join("\n"),
++              insertedSourcePreviewTruncated: true,
++            },
++          },
++        ),
++      ],
++    },
++    async (app) => {
++      const frame = await waitForFrame(app, (lines) =>
++        lines.some((line) => line.includes("Notebook insert") && line.includes("+3003 -0")) &&
++        lines.some((line) => line.includes("import pandas as pd")) &&
++        lines.some((line) => line.includes("df.head()")),
++      )
++      expect(frame.some((line) => line.includes("RAW_INSERT_INPUT_SHOULD_NOT_RENDER"))).toBe(false)
++      expect(frame.some((line) => line.includes("Click to expand"))).toBe(true)
++      expect(frame.some((line) => line.includes("Diff omitted"))).toBe(false)
++    },
++    {},
++    { height: 24 },
++  )
++})
++
++test("completed notebook insert renders inserted source as code instead of a diff", async () => {
++  const inserted = Array.from({ length: 12 }, (_, index) => `print('inserted line ${index + 1}')`)
++  inserted[5] = "++ legal source prefix"
++  await withRenderedSession(
++    [assistantMessage("msg_notebook_insert_code", 1)],
++    {
++      msg_notebook_insert_code: [
++        completedToolPart(
++          "part_notebook_insert_code",
++          "msg_notebook_insert_code",
++          "vscode_notebook_edit",
++          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-anchor", editType: "insert" },
++          {
++            vscodeNotebook: {
++              view: "edit",
++              path: "notebooks/analysis.ipynb",
++              cellLabel: "c4",
++              editType: "insert",
++              language: "python",
++              dirty: true,
++              cellCountBefore: 3,
++              cellCountAfter: 4,
++              diff: ["--- DIFF_HEADER_SHOULD_NOT_RENDER", "+++ notebooks/analysis.ipynb#c4.py", "@@ -0,0 +1,12 @@", ...inserted.map((line) => `+${line}`)].join("\n"),
++              added: 12,
++              removed: 0,
++              insertedSourcePreview: inserted.slice(0, 10).join("\n"),
++              insertedSourcePreviewTruncated: true,
++            },
++          },
++        ),
++      ],
++    },
++    async (app) => {
++      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("print('inserted line 12')")))
++      expect(frame.some((line) => line.includes("++ legal source prefix"))).toBe(true)
++      expect(frame.some((line) => line.includes("DIFF_HEADER_SHOULD_NOT_RENDER"))).toBe(false)
++      expect(frame.some((line) => line.includes("Inserted source preview is truncated"))).toBe(false)
++    },
++  )
++})
++
+ test("notebook tool switches from pending inline summary to completed rich card", async () => {
+   await withRenderedSession(
+     [assistantMessage("msg_notebook_transition", 1)],
+@@ -536,6 +680,50 @@ test("notebook summary renders cells from notebook metadata without enabling gen
+   )
+ })
+ 
++test("collapsed notebook summary preview surfaces late failed cells", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_notebook_summary_late_failure", 1)],
++    {
++      msg_notebook_summary_late_failure: [
++        completedToolPart(
++          "part_notebook_summary_late_failure",
++          "msg_notebook_summary_late_failure",
++          "vscode_notebook_summary",
++          { filePath: "notebooks/long.ipynb" },
++          {
++            vscodeNotebook: {
++              view: "summary",
++              path: "notebooks/long.ipynb",
++              dirty: false,
++              runtime: "Python 3.11",
++              cells: Array.from({ length: 19 }, (_, index) => ({
++                i: index + 1,
++                id: `#VSC-${String(index + 1).padStart(8, "0")}`,
++                kind: index === 18 || index % 3 !== 0 ? "code" : "markdown",
++                lang: index === 18 || index % 3 !== 0 ? "python" : "markdown",
++                lines: 3,
++                exec: index === 18 || index < 6 ? `current-run #${index + 1} failed 12ms ended=2026-05-25T00:00:00.000Z` : "not-run",
++                existing_outs: index === 18 || index < 6 ? ["error"] : [],
++                first: index === 18 ? "raise Error" : `cell ${index + 1}`,
++              })),
++            },
++          },
++        ),
++      ],
++    },
++    async (app) => {
++      const frame = await waitForFrame(app, (lines) =>
++        lines.some((line) => line.includes("Notebook summary") && line.includes("19 cells")) &&
++        lines.some((line) => line.includes("c19")) &&
++        lines.some((line) => line.includes("failed")),
++      )
++      expect(frame.some((line) => line.includes("Click to expand"))).toBe(true)
++    },
++    {},
++    { height: 18 },
++  )
++})
++
+ test("notebook env renders operation status from notebook metadata", async () => {
+   await withRenderedSession(
+     [assistantMessage("msg_notebook_env", 1)],
+@@ -647,6 +835,61 @@ test("notebook source, run, and output tools render rich notebook cards", async
+   )
+ })
+ 
++test("collapsed notebook run preview surfaces late failed cells", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_notebook_run_late_failure", 1)],
++    {
++      msg_notebook_run_late_failure: [
++        completedToolPart(
++          "part_notebook_run_late_failure",
++          "msg_notebook_run_late_failure",
++          "vscode_notebook_run",
++          { filePath: "notebooks/long.ipynb", cellId: "#VSC-start", endCellId: "#VSC-end" },
++          {
++            vscodeNotebook: {
++              view: "run",
++              path: "notebooks/long.ipynb",
++              target: "range 1-19",
++              completed: false,
++              cells: Array.from({ length: 19 }, (_, index) => ({
++                i: index + 1,
++                id: `#VSC-${String(index + 1).padStart(8, "0")}`,
++                kind: "code",
++                lang: "python",
++                lines: 3,
++                exec: index === 18 ? "current-run #19 failed 12ms ended=2026-05-25T00:00:00.000Z" : "current-run #1 succeeded 4ms ended=2026-05-25T00:00:00.000Z",
++                existing_outs: index === 18 ? ["error"] : index < 6 ? ["text"] : [],
++                artifacts: index === 18
++                  ? Array.from({ length: 8 }, (_, artifact) => ({
++                      mime: "text/plain",
++                      bytes: 32,
++                      preview: `artifact ${artifact}`,
++                      artifactPath: `.opencode/cache/notebook-outputs/artifact-${artifact}.txt`,
++                    }))
++                  : index === 17
++                    ? [{ mime: "text/plain", bytes: 32, preview: "extra artifact", artifactPath: ".opencode/cache/notebook-outputs/artifact-extra.txt" }]
++                    : [],
++              })),
++            },
++          },
++        ),
++      ],
++    },
++    async (app) => {
++      const frame = await waitForFrame(app, (lines) =>
++        lines.some((line) => line.includes("Notebook run") && line.includes("failed")) &&
++        lines.some((line) => line.includes("c19")) &&
++        lines.some((line) => line.includes("failed")),
++      )
++      expect(frame.some((line) => line.includes("Click to expand"))).toBe(true)
++      expect(frame.some((line) => line.includes("Artifacts: 9 available after expand"))).toBe(true)
++      expect(frame.some((line) => line.includes("artifact-7.txt"))).toBe(false)
++    },
++    {},
++    { height: 18 },
++  )
++})
++
+ test("shell tool renders auto review as a second status line", async () => {
+   await withRenderedSession(
+     [assistantMessage("msg_auto_review", 1)],
+diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
+index ba23cf5cdae959ca5a2e0afbf6fa89faea0347b0..e3dd6c8470632ae6fd80ea2aed8f8ddb2fae4bf7 100644
+--- a/packages/opencode/test/plugin/vscode-bridge.test.ts
++++ b/packages/opencode/test/plugin/vscode-bridge.test.ts
+@@ -235,7 +235,7 @@ describe("vscode bridge plugin", () => {
+         dirty: true,
+         language: "python",
+         beforeSource: "",
+-        afterSource: "print('new cell')\n",
++        afterSource: "print('new cell')\n++ legal source prefix\n",
+       },
+     })
+ 
+@@ -249,13 +249,15 @@ describe("vscode bridge plugin", () => {
+         vscodeNotebook: {
+           view: "edit",
+           cellLabel: "c4",
+-          added: 1,
++          added: 2,
+           removed: 0,
+         },
+       },
+     })
+     if (typeof result === "string") throw new Error("expected structured notebook insert result")
+     expect((result.metadata?.vscodeNotebook as Record<string, string>).diff).toContain("#c4")
++    expect((result.metadata?.vscodeNotebook as Record<string, string>).insertedSourcePreview).toContain("print('new cell')")
++    expect((result.metadata?.vscodeNotebook as Record<string, string>).insertedSourcePreview).toContain("++ legal source prefix")
+   })
+ 
+   test("omits oversized notebook edit diffs from persisted metadata", async () => {
+@@ -294,6 +296,105 @@ describe("vscode bridge plugin", () => {
+     expect((result.metadata?.vscodeNotebook as Record<string, unknown>).diff).toBeUndefined()
+     expect(JSON.stringify(result.metadata)).not.toContain("new line\nnew line\nnew line")
+   })
++
++  test("keeps oversized notebook insert previews visible without persisting the full cell source", async () => {
++    const plugin = await VscodeBridgePlugin()
++    const filePath = "F:\\project with spaces\\large notebook.ipynb"
++    const inserted = ["import pandas as pd", "df = pd.read_csv('large file.csv')", "df.head()", ...Array.from({ length: 3000 }, (_, i) => `row_${i}`)].join("\n")
++    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
++      ran: false,
++      summary: "Notebook edit: applied=true op=insert at=4 num_cells=3->4 dirty=true.",
++      data: {
++        path: filePath,
++        editType: "insert",
++        cellCountBefore: 3,
++        cellCountAfter: 4,
++        affectedCellIndex: 3,
++        dirty: true,
++        language: "python",
++        beforeSource: "",
++        afterSource: inserted,
++      },
++    })
++
++    const result = await plugin.tool.vscode_notebook_edit.execute(
++      { filePath, cellId: "#VSC-anchor", editType: "insert", newCode: "ignored in mock" },
++      allowContext(filePath),
++    )
++
++    if (typeof result === "string") throw new Error("expected structured oversized notebook insert result")
++    const metadata = result.metadata?.vscodeNotebook as Record<string, unknown>
++    expect(metadata).toMatchObject({ view: "edit", editType: "insert", cellLabel: "c4", diffOmitted: "too-large" })
++    expect(metadata.insertedSourcePreview).toContain("import pandas as pd")
++    expect(metadata.insertedSourcePreview).toContain("df.head()")
++    expect(metadata.insertedSourcePreview).not.toContain("row_2999")
++    expect(metadata.insertedSourcePreviewTruncated).toBe(true)
++    expect(JSON.stringify(result.metadata)).not.toContain("row_2999")
++  })
++
++  test("keeps oversized single-line notebook insert previews bounded and non-empty", async () => {
++    const plugin = await VscodeBridgePlugin()
++    const filePath = "F:\\project with spaces\\wide notebook.ipynb"
++    const inserted = `visible-prefix-${"x".repeat(20_000)}-hidden-suffix`
++    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
++      ran: false,
++      summary: "Notebook edit: applied=true op=insert at=1 num_cells=0->1 dirty=true.",
++      data: {
++        path: filePath,
++        editType: "insert",
++        cellCountBefore: 0,
++        cellCountAfter: 1,
++        affectedCellIndex: 0,
++        dirty: true,
++        language: "python",
++        beforeSource: "",
++        afterSource: inserted,
++      },
++    })
++
++    const result = await plugin.tool.vscode_notebook_edit.execute(
++      { filePath, cellId: "BOTTOM", editType: "insert", newCode: "ignored in mock" },
++      allowContext(filePath),
++    )
++
++    if (typeof result === "string") throw new Error("expected structured wide notebook insert result")
++    const preview = (result.metadata?.vscodeNotebook as Record<string, unknown>).insertedSourcePreview
++    expect(preview).toBeString()
++    expect(preview).toContain("visible-prefix")
++    expect(preview).not.toContain("hidden-suffix")
++    expect((result.metadata?.vscodeNotebook as Record<string, unknown>).insertedSourcePreviewTruncated).toBe(true)
++  })
++
++  test("does not mark exact ten-line notebook insert previews truncated because of the final newline", async () => {
++    const plugin = await VscodeBridgePlugin()
++    const filePath = "F:\\project with spaces\\ten-line notebook.ipynb"
++    const inserted = `${Array.from({ length: 10 }, (_, i) => `line_${i + 1}`).join("\n")}\n`
++    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
++      ran: false,
++      summary: "Notebook edit: applied=true op=insert at=1 num_cells=0->1 dirty=true.",
++      data: {
++        path: filePath,
++        editType: "insert",
++        cellCountBefore: 0,
++        cellCountAfter: 1,
++        affectedCellIndex: 0,
++        dirty: true,
++        language: "python",
++        beforeSource: "",
++        afterSource: inserted,
++      },
++    })
++
++    const result = await plugin.tool.vscode_notebook_edit.execute(
++      { filePath, cellId: "BOTTOM", editType: "insert", newCode: "ignored in mock" },
++      allowContext(filePath),
++    )
++
++    if (typeof result === "string") throw new Error("expected structured ten-line notebook insert result")
++    const metadata = result.metadata?.vscodeNotebook as Record<string, unknown>
++    expect(metadata.insertedSourcePreview).toContain("line_10")
++    expect(metadata.insertedSourcePreviewTruncated).toBe(false)
++  })
+ })
+ 
+ function allowContext(filePath: string): ToolContext {

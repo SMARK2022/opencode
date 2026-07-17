@@ -1,0 +1,125 @@
+From 27a7a17c5972ad41483161cc453c4e66110d35b3 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 21 May 2026 02:09:56 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=E5=93=8D=E5=BA=94?=
+ =?UTF-8?q?=E5=BC=8F=E4=BB=AA=E8=A1=A8=E6=9D=BF=E6=B4=BB=E5=8A=A8=E7=9A=84?=
+ =?UTF-8?q?=E6=B5=8B=E8=AF=95=EF=BC=8C=E7=A1=AE=E4=BF=9D=E6=8A=98=E5=8F=A0?=
+ =?UTF-8?q?=E7=9A=84=E9=A1=B6=E9=83=A8=E8=A1=A8=E6=A0=BC=E6=AD=A3=E7=A1=AE?=
+ =?UTF-8?q?=E6=98=BE=E7=A4=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/stats/render.ts b/packages/opencode/src/cli/cmd/stats/render.ts
+index cbffd54ffbc3181a7191a482c1e52dfae3b94a3c..6c91e273f36ae5cc8f79e31fecb8ea5023f7b563 100644
+--- a/packages/opencode/src/cli/cmd/stats/render.ts
++++ b/packages/opencode/src/cli/cmd/stats/render.ts
+@@ -22,6 +22,7 @@ import {
+   padStartVisible,
+   statsContentWidth,
+   truncateVisible,
++  visibleLength,
+   type ChartColor,
+   type ChartLayer,
+   type ChartSeries,
+@@ -407,6 +408,30 @@ export function renderDashboard(report: StatsReport, options: StatsRenderOptions
+   const cacheReadPct = percent(report.total.tokens.cache.read, report.total.tokens.total)
+   const inputPct = percent(report.total.tokens.input, report.total.tokens.total)
+   const outputPct = percent(report.total.tokens.output + report.total.tokens.reasoning, report.total.tokens.total)
++  const dashboardTopTable = (titleText: string, labelHeader: string, groups: UsageGroup[], series: UsageSeries[], labelCap: number) => {
++    const rows = topGroups(groups, { ...options, limit: options.limit ?? 6, sort: "tokens" })
++    const seriesByID = new Map(series.map((item) => [item.id, item]))
++    const metricRows = rows.map((group) => [money(group.cost), formatNumber(group.tokens.total), formatNumber(group.assistantCalls), percent(group.tokens.total, report.total.tokens.total)])
++    const metricWidths = ["cost", "tokens", "calls", "share"].map((header, index) => Math.max(visibleLength(header), ...metricRows.map((row) => visibleLength(row[index] ?? ""))))
++    const metricWidth = metricWidths.reduce((sum, width) => sum + width, 0)
++    const labelNatural = Math.max(visibleLength(labelHeader), ...rows.map((group) => visibleLength(group.label)))
++    // Keep the old ledger + sparkline data in one row. Trend is the elastic column:
++    // fixed metrics stay readable, labels keep a floor, and very narrow terminals drop trend.
++    const labelFloor = Math.max(visibleLength(labelHeader), Math.min(labelNatural, labelHeader === "model" ? 18 : 16))
++    const trendRoom = statsContentWidth() - metricWidth - 15 - labelFloor
++    const trendWidth = trendRoom < 6 ? 0 : Math.min(24, trendRoom)
++    const labelWidth = Math.max(visibleLength(labelHeader), Math.min(labelCap, labelNatural, statsContentWidth() - metricWidth - (trendWidth ? 15 + trendWidth : 12)))
++    return renderComparisonTable({
++      title: titleText,
++      headers: trendWidth ? [labelHeader, "cost", "tokens", "calls", "share", "trend"] : [labelHeader, "cost", "tokens", "calls", "share"],
++      rows: rows.map((group, index) => [
++        truncateVisible(group.label, labelWidth),
++        ...(metricRows[index] ?? []),
++        ...(trendWidth ? [sparkline(seriesByID.get(group.id)?.points.map((point) => point.tokens.total) ?? [], trendWidth, enabled, activityColors[index % activityColors.length])] : []),
++      ]),
++      color: options.color,
++    })
++  }
+   const lines = [
+     ...renderRichHeader(report, options, "dashboard"),
+     ...renderTwoColumn(
+@@ -429,40 +454,9 @@ export function renderDashboard(report: StatsReport, options: StatsRenderOptions
+       5,
+     ),
+     "",
+-    // Two-column: top models + top providers with richer data
+-    ...renderTwoColumn(
+-      renderComparisonTable({
+-        title: "Top models",
+-        headers: ["model", "cost", "tokens", "calls", "share"],
+-        rows: topGroups(report.models, { ...options, limit: options.limit ?? 6, sort: "tokens" }).map((model) => [
+-          truncateVisible(model.label, 20),
+-          money(model.cost),
+-          formatNumber(model.tokens.total),
+-          formatNumber(model.assistantCalls),
+-          percent(model.tokens.total, report.total.tokens.total),
+-        ]),
+-        color: options.color,
+-      }),
+-      renderComparisonTable({
+-        title: "Top providers",
+-        headers: ["provider", "cost", "tokens", "calls", "share"],
+-        rows: topGroups(report.providers, { ...options, limit: options.limit ?? 6, sort: "tokens" }).map((provider) => [
+-          truncateVisible(provider.label, 18),
+-          money(provider.cost),
+-          formatNumber(provider.tokens.total),
+-          formatNumber(provider.assistantCalls),
+-          percent(provider.tokens.total, report.total.tokens.total),
+-        ]),
+-        color: options.color,
+-      }),
+-      5,
+-    ),
++    ...dashboardTopTable("Top models", "model", report.models, report.modelSeries, 28),
+     "",
+-    ...renderTwoColumn(
+-      activityRows("Model activity rows", report.modelSeries, "tokens", 6, enabled),
+-      activityRows("Provider trend rows", report.providerSeries, "tokens", 6, enabled),
+-      5,
+-    ),
++    ...dashboardTopTable("Top providers", "provider", report.providers, report.providerSeries, 26),
+     "",
+     // Three-column: token composition + snapshot + top session
+     ...renderTwoColumn(
+diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/opencode/test/cli/stats-render-width.test.ts
+index eb4af547abd54ce52e211da90310e0817b20e41f..2c649394496f127f765913e88918234b790986cb 100644
+--- a/packages/opencode/test/cli/stats-render-width.test.ts
++++ b/packages/opencode/test/cli/stats-render-width.test.ts
+@@ -214,6 +214,21 @@ describe("stats render width", () => {
+     }
+   })
+ 
++  test("folds dashboard activity sparklines into responsive top tables", () => {
++    withColumns(120, () => {
++      const output = renderDashboard(report(), { color: "never" })
++      expect(output).toContain("share │ trend")
++      expect(output).not.toContain("Model activity rows")
++      expect(output).not.toContain("Provider trend rows")
++    })
++
++    withColumns(58, () => {
++      const output = renderDashboard(report(), { color: "never" })
++      expect(output).not.toContain("share │ trend")
++      expect(new Set(output.split("\n").map(visibleLength))).toEqual(new Set([56]))
++    })
++  })
++
+   test("keeps breakdown rank bars from being double-truncated", () => {
+     withColumns(140, () => {
+       const toolOutput = renderBreakdown(report(), { color: "never", by: "tool" })

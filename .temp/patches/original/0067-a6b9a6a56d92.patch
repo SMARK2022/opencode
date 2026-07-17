@@ -1,0 +1,32 @@
+From a6b9a6a56d923b157ef8ffdcd034db20c8e92f51 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 3 May 2026 05:18:54 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=E7=88=B6=E4=BB=A3?=
+ =?UTF-8?q?=E7=90=86=E6=9D=83=E9=99=90=E8=BF=87=E6=BB=A4=E9=80=BB=E8=BE=91?=
+ =?UTF-8?q?=EF=BC=8C=E4=BB=A5=E5=A2=9E=E5=BC=BA=E4=BB=BB=E5=8A=A1=E4=BC=9A?=
+ =?UTF-8?q?=E8=AF=9D=E7=9A=84=E6=9D=83=E9=99=90=E7=AE=A1=E7=90=86?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
+index e58ea9b122cfae984e389188bce9800c6ca4082c..b3a850a863658f5a7f96e856533c504ba5206669 100644
+--- a/packages/opencode/src/tool/task.ts
++++ b/packages/opencode/src/tool/task.ts
+@@ -65,6 +65,7 @@ export const TaskTool = Tool.define(
+         ? yield* sessions.get(SessionID.make(taskID)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+         : undefined
+       const parent = yield* sessions.get(ctx.sessionID)
++      const parentAgent = yield* agent.get(ctx.agent)
+       const nextSession =
+         session ??
+         (yield* sessions.create({
+@@ -74,6 +75,7 @@ export const TaskTool = Tool.define(
+             ...(parent.permission ?? []).filter(
+               (rule) => rule.permission === "external_directory" || rule.action === "deny",
+             ),
++            ...parentAgent.permission.filter((rule) => rule.action !== "allow"),
+             ...(canTodo
+               ? []
+               : [

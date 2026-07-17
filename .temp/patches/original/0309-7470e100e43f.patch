@@ -1,0 +1,31 @@
+From 7470e100e43f49a863f28a1f2804f64b1c709e0b Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 14 Jun 2026 21:34:37 +0800
+Subject: [PATCH] =?UTF-8?q?test(repo=5Fclone):=20=E4=BF=AE=E5=A4=8D=20Wind?=
+ =?UTF-8?q?ows=20=E5=85=8B=E9=9A=86=E6=B5=8B=E8=AF=95=E6=8F=90=E4=BA=A4?=
+ =?UTF-8?q?=E6=A0=A1=E9=AA=8C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+将 fixture 提交后的 HEAD:file stdout 精确比较收敛为 Git diff 干净性校验，避免 Windows runner 上换行形态导致测试在业务断言前失败。
+
+保留 staged 文件检查以及 clone、refresh、branch 的内容级断言，覆盖真实回归风险但不提交无关生成文件。
+
+diff --git a/packages/opencode/test/tool/repo_clone.test.ts b/packages/opencode/test/tool/repo_clone.test.ts
+index b5efad1217e73eb0f61cac181fd517815a71aadb..9a8d6ab527f72120fbefa4cdc839f9e7a1041b91 100644
+--- a/packages/opencode/test/tool/repo_clone.test.ts
++++ b/packages/opencode/test/tool/repo_clone.test.ts
+@@ -69,9 +69,9 @@ const commitFile = Effect.fn("RepoCloneToolTest.commitFile")(function* (
+   // CI 上曾出现工作区已写入但 commit 没有纳入文件的情况；先验证 staged 内容，失败时直接指向 fixture 根因。
+   if (!staged.split(/\r?\n/).includes(file)) throw new Error(`git did not stage ${file}`)
+   yield* git(cwd, ["commit", "-m", message])
+-  const committed = yield* git(cwd, ["show", `HEAD:${file}`])
+-  // refresh 用例依赖远端提交真实变化；确认 HEAD 内容可避免把空提交或旧内容推到 bare repo。
+-  if (committed !== content.trim()) throw new Error(`git did not commit expected ${file}`)
++  const clean = yield* gitResult(cwd, ["diff", "--quiet", "--exit-code", "HEAD", "--", file])
++  // refresh 用例依赖远端提交真实变化；用 Git 自身 diff 判断，避免 Windows runner 上 stdout 换行形态影响 fixture 校验。
++  if (clean.exitCode !== 0) throw new Error(`git did not commit ${file}`)
+ })
+ 
+ function githubFileBase(dir: string) {

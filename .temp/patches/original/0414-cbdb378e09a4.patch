@@ -1,0 +1,106 @@
+From cbdb378e09a4bee7793c0857948d4e9564c9b875 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sat, 11 Jul 2026 05:03:01 +0800
+Subject: [PATCH] =?UTF-8?q?test(tui):=20=E8=A1=A5=E5=BC=BA=20reasoning=20?=
+ =?UTF-8?q?=E8=81=9A=E5=90=88=E5=B8=83=E5=B1=80=E5=9B=9E=E5=BD=92?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+用真实 OpenTUI 布局锁定 reasoning 与普通正文的同宽约束，避免共享五行预算因水平 chrome 漂移而失真。
+
+移除已被字符帧、事件和交互测试替代的源码字符串断言，防止后续重构在行为不变时产生脆弱失败。
+
+diff --git a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
+index 6fa7a965b319d4363d690f718d0c2b231317ea9a..2995cb72879d57c271c22bd8612f9b129f993bd9 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
++++ b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
+@@ -172,29 +172,6 @@ describe("Session route integration points", () => {
+     })
+   })
+ 
+-  describe("reasoning part", () => {
+-    test("ReasoningPart uses throttled display content", () => {
+-      expect(sessionSource).toContain("createThrottledSignal")
+-      expect(sessionSource).toContain("displayContent")
+-    })
+-
+-    test("ReasoningPart shows char count header", () => {
+-      expect(sessionSource).toContain("Thinking (")
+-      expect(sessionSource).toContain(".toLocaleString()")
+-    })
+-
+-    test("ReasoningPart has expand/collapse toggle", () => {
+-      expect(sessionSource).toContain("▲ collapse")
+-      expect(sessionSource).toContain("▼ expand")
+-    })
+-
+-    test("streaming reasoning keeps dev-smark CodeRenderable streaming semantics", () => {
+-      expect(sessionSource).toMatch(
+-        /<Match when={streaming\(\)}>\s*<code\s+filetype="markdown"\s+drawUnstyledText={false}\s+streaming={true}\s+syntaxStyle={subtleSyntax\(\)}\s+content={preview\(\)}/,
+-      )
+-    })
+-  })
+-
+   describe("event dispatch", () => {
+     test("global and explicit project event matches return before workspace fallback", () => {
+       const eventSource = readFileSync(path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/context/event.ts"), "utf-8")
+diff --git a/packages/opencode/test/cli/cmd/tui/session-layout.test.ts b/packages/opencode/test/cli/cmd/tui/session-layout.test.ts
+index 770e64b51fb530f361277517a6b318e75ded046a..11605e441b0c571d8c6e97995eae4b5785774719 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-layout.test.ts
++++ b/packages/opencode/test/cli/cmd/tui/session-layout.test.ts
+@@ -15,23 +15,27 @@ describe("session layout width", () => {
+       { terminalWidth: 160, sidebarVisible: true, scrollbarEnabled: true },
+       { terminalWidth: 160, sidebarVisible: true, scrollbarEnabled: false },
+     ]) {
+-      const measured = await measureAssistantTextWidth(item)
+-      expect(measured).toBe(
+-        sessionMessageContentWidth({
+-          terminalWidth: item.terminalWidth,
+-          sidebarInLayout: item.sidebarVisible,
+-          scrollbarEnabled: item.scrollbarEnabled,
+-        }),
+-      )
++      const expected = sessionMessageContentWidth({
++        terminalWidth: item.terminalWidth,
++        sidebarInLayout: item.sidebarVisible,
++        scrollbarEnabled: item.scrollbarEnabled,
++      })
++      // 同一 expected 同时约束普通正文和 reasoning preview，防止两套宽度公式日后漂移。
++      expect(await measureAssistantTextWidth(item, "text")).toBe(expected)
++      // reasoning 多一层左边框、少一格 padding，总 chrome 仍为四格；preview 预算依赖这一不变量。
++      expect(await measureAssistantTextWidth(item, "reasoning")).toBe(expected)
+     }
+   })
+ })
+ 
+-async function measureAssistantTextWidth(input: {
+-  terminalWidth: number
+-  sidebarVisible: boolean
+-  scrollbarEnabled: boolean
+-}) {
++async function measureAssistantTextWidth(
++  input: {
++    terminalWidth: number
++    sidebarVisible: boolean
++    scrollbarEnabled: boolean
++  },
++  kind: "text" | "reasoning",
++) {
+   const setup = await createTestRenderer({
+     width: input.terminalWidth,
+     height: 20,
+@@ -75,7 +79,12 @@ async function measureAssistantTextWidth(input: {
+     main.add(scroll)
+ 
+     const assistant = new BoxRenderable(setup.renderer, { border: ["left"], flexShrink: 0 })
+-    const textPart = new BoxRenderable(setup.renderer, { paddingLeft: 3, flexShrink: 0 })
++    // 两条路径复刻生产树的实际水平 chrome，不能用手工减常量替代 Yoga 实测。
++    const textPart = new BoxRenderable(setup.renderer, {
++      paddingLeft: kind === "text" ? 3 : 2,
++      border: kind === "reasoning" ? ["left"] : false,
++      flexShrink: 0,
++    })
+     const text = new TextRenderable(setup.renderer, { content: "x ".repeat(2_000), wrapMode: "word" })
+     textPart.add(text)
+     assistant.add(textPart)

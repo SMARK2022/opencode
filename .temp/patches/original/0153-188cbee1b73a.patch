@@ -1,0 +1,1070 @@
+From 188cbee1b73a6df418b2f00251e7f68e83085c8c Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 16 May 2026 16:52:33 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E4=B8=80=E5=A0=86Bug=E4=BF=AE=E6=94=B9?=
+ =?UTF-8?q?=20Enhance=20session=20handling=20and=20event=20publishing?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Introduced context-aware publishing in the bus module to include instance and workspace information.
+- Refactored event handling in the TUI context to streamline event processing.
+- Added session status refresh functionality in the sync context.
+- Improved session management by ensuring commands and prompts are executed within the correct session directory.
+- Enhanced error handling for assistant messages, including new reasons for hidden messages.
+- Updated tests to cover new functionality, including session status updates and event emissions.
+
+diff --git a/packages/opencode/src/bus/index.ts b/packages/opencode/src/bus/index.ts
+index 449694a53a3a820bf2455193690f39cf4325d038..282b3c7af0230f54a23bbd6bf46c44e77bf68900 100644
+--- a/packages/opencode/src/bus/index.ts
++++ b/packages/opencode/src/bus/index.ts
+@@ -4,8 +4,11 @@ import * as Log from "@opencode-ai/core/util/log"
+ import { BusEvent } from "./bus-event"
+ import { GlobalBus } from "./global"
+ import { InstanceState } from "@/effect/instance-state"
++import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
+ import { makeRuntime } from "@/effect/run-service"
+ import { Identifier } from "@/id/id"
++import type { InstanceContext } from "@/project/instance"
++import type { WorkspaceID } from "@/control-plane/schema"
+ 
+ const log = Log.create({ service: "bus" })
+ 
+@@ -29,6 +32,14 @@ type State = {
+   typed: Map<string, PubSub.PubSub<Payload>>
+ }
+ 
++type PublishOptions = {
++  id?: string
++  context?: {
++    instance: InstanceContext
++    workspace?: WorkspaceID
++  }
++}
++
+ export interface Interface {
+   readonly publish: <D extends BusEvent.Definition>(
+     def: D,
+@@ -187,9 +198,16 @@ export function createID() {
+ export async function publish<D extends BusEvent.Definition>(
+   def: D,
+   properties: BusProperties<D>,
+-  options?: { id?: string },
++  options?: PublishOptions,
+ ) {
+-  return runPromise((svc) => svc.publish(def, properties, options))
++  return runPromise((svc) => {
++    const effect = svc.publish(def, properties, { id: options?.id })
++    if (!options?.context) return effect
++    return effect.pipe(
++      Effect.provideService(InstanceRef, options.context.instance),
++      Effect.provideService(WorkspaceRef, options.context.workspace),
++    )
++  })
+ }
+ 
+ export function subscribe<D extends BusEvent.Definition>(def: D, callback: (event: Payload<D>) => unknown) {
+diff --git a/packages/opencode/src/cli/cmd/tui/context/event.ts b/packages/opencode/src/cli/cmd/tui/context/event.ts
+index bd098443fa96ec52526ca501e534f9429ec9af0c..4ee0e5c2b77f5d662e95c2682695d6c2a7660065 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/event.ts
++++ b/packages/opencode/src/cli/cmd/tui/context/event.ts
+@@ -52,19 +52,15 @@ export function useEvent() {
+       // Special hack for truly global events
+       if (event.directory === "global") {
+         handler(event.payload)
++        return
+       }
+ 
+       if (project.workspace.current()) {
+-        if (event.workspace === project.workspace.current()) {
+-          handler(event.payload)
+-        }
+-
++        if (event.workspace === project.workspace.current()) handler(event.payload)
+         return
+       }
+ 
+-      if (sameDirectory(event.directory, project.instance.directory())) {
+-        handler(event.payload)
+-      }
++      if (sameDirectory(event.directory, project.instance.directory())) handler(event.payload)
+     })
+   }
+ 
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+index 25000bb13ed82153c21696a069cce84c969adec7..4017e87874c368d1ceed27ee181618f29617dbf3 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+@@ -130,6 +130,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
+     }
+ 
++    async function refreshStatus() {
++      const x = await sdk.client.session.status({ workspace: project.workspace.current() })
++      setStore("session_status", reconcile(x.data ?? {}))
++    }
++
+     event.subscribe((event) => {
+       switch (event.type) {
+         case "server.connected":
+@@ -488,9 +493,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+               .list({ workspace })
+               .then((x) => setStore("mcp_resource", reconcile(x.data ?? {}))),
+             sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
+-            sdk.client.session.status({ workspace }).then((x) => {
+-              setStore("session_status", reconcile(x.data ?? {}))
+-            }),
++            refreshStatus(),
+             sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
+             sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
+             project.workspace.sync(),
+@@ -554,11 +557,12 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+         },
+         async sync(sessionID: string, options?: { force?: boolean }) {
+           if (!options?.force && fullSyncedSessions.has(sessionID)) return
+-          const [session, messages, todo, diff] = await Promise.all([
++          const [session, messages, todo, diff, status] = await Promise.all([
+             sdk.client.session.get({ sessionID }, { throwOnError: true }),
+             sdk.client.session.messages({ sessionID, limit: 100 }),
+             sdk.client.session.todo({ sessionID }),
+             sdk.client.session.diff({ sessionID }),
++            sdk.client.session.status({ workspace: project.workspace.current() }),
+           ])
+           setStore(
+             produce((draft) => {
+@@ -573,9 +577,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+               draft.session_diff[sessionID] = diff.data ?? []
+             }),
+           )
++          setStore("session_status", reconcile(status.data ?? {}))
+           fullSyncedSessions.add(sessionID)
+         },
+       },
++      sessionStatus: {
++        refresh: refreshStatus,
++      },
+       bootstrap,
+     }
+     return result
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 2f64e9e893483ccc5b2736ef52c6c09d6da9deda..1e5ff50842ca7c198b5c8283e41f01d109b93f81 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -636,6 +636,8 @@ export function Session() {
+       },
+       onSelect: async (dialog) => {
+         const status = sync.data.session_status?.[route.sessionID]
++        // Undo rewrites the active message tail.  If the model is still running,
++        // abort first so late stream events cannot recreate hidden messages.
+         if (status?.type !== "idle") await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
+         const revert = session()?.revert?.messageID
+         const message = messages().findLast((x) => (!revert || x.id < revert) && x.role === "user")
+diff --git a/packages/opencode/src/effect/runner.ts b/packages/opencode/src/effect/runner.ts
+index b66d6c8f127f182790787368850b1874d7c45280..2525e46940ab6ac749515e3c1a4109bac02f49a5 100644
+--- a/packages/opencode/src/effect/runner.ts
++++ b/packages/opencode/src/effect/runner.ts
+@@ -180,26 +180,26 @@ export const make = <A, E = never>(
+       case "Running":
+         return [
+           Effect.gen(function* () {
++            yield* idleIfCurrent()
+             yield* Fiber.interrupt(st.run.fiber)
+             yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.asVoid)
+-            yield* idleIfCurrent()
+           }),
+           { _tag: "Idle" } as const,
+         ] as const
+       case "Shell":
+         return [
+           Effect.gen(function* () {
+-            yield* stopShell(st.shell)
+             yield* idleIfCurrent()
++            yield* stopShell(st.shell)
+           }),
+           { _tag: "Idle" } as const,
+         ] as const
+       case "ShellThenRun":
+         return [
+           Effect.gen(function* () {
++            yield* idleIfCurrent()
+             yield* stopShell(st.shell)
+             yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.asVoid)
+-            yield* idleIfCurrent()
+           }),
+           { _tag: "Idle" } as const,
+         ] as const
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
+index ac16874d2936a0f8c5b7a214964bbc4836ba8ffe..7d5f8fc4980f60459bf62615f75e70fdcd435c3e 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
+@@ -60,6 +60,23 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+     const store = yield* InstanceStore.Service
+     const scope = yield* Scope.Scope
+ 
++    const sessionExecutionContext = Effect.fn("SessionHttpApi.sessionExecutionContext")(function* (sessionID: SessionID) {
++      const info = yield* session.get(sessionID).pipe(Effect.mapError(() => new HttpApiError.NotFound({})))
++      return {
++        instance: yield* store.load({ directory: info.directory }),
++        workspace: yield* InstanceState.workspaceID,
++      }
++    })
++
++    const inSessionDirectory = <A, E, R>(sessionID: SessionID, effect: Effect.Effect<A, E, R>) =>
++      Effect.gen(function* () {
++        const execution = yield* sessionExecutionContext(sessionID)
++        return yield* effect.pipe(
++          Effect.provideService(InstanceRef, execution.instance),
++          Effect.provideService(WorkspaceRef, execution.workspace),
++        )
++      })
++
+     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
+       return yield* session.list({
+         directory: ctx.query.scope === "project" ? undefined : ctx.query.directory,
+@@ -239,13 +256,16 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       params: { sessionID: SessionID }
+       payload: typeof InitPayload.Type
+     }) {
+-      yield* promptSvc.command({
+-        sessionID: ctx.params.sessionID,
+-        messageID: ctx.payload.messageID,
+-        model: `${ctx.payload.providerID}/${ctx.payload.modelID}`,
+-        command: Command.Default.INIT,
+-        arguments: "",
+-      })
++      yield* inSessionDirectory(
++        ctx.params.sessionID,
++        promptSvc.command({
++          sessionID: ctx.params.sessionID,
++          messageID: ctx.payload.messageID,
++          model: `${ctx.payload.providerID}/${ctx.payload.modelID}`,
++          command: Command.Default.INIT,
++          arguments: "",
++        }),
++      )
+       return true
+     })
+ 
+@@ -263,21 +283,31 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       params: { sessionID: SessionID }
+       payload: typeof SummarizePayload.Type
+     }) {
+-      yield* revertSvc.cleanup(yield* SessionError.mapStorageNotFound(session.get(ctx.params.sessionID)))
+-      const messages = yield* session.messages({ sessionID: ctx.params.sessionID })
+-      const defaultAgent = yield* agentSvc.defaultAgent()
+-      const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
++      const info = yield* SessionError.mapStorageNotFound(session.get(ctx.params.sessionID))
++      const execution = {
++        instance: yield* store.load({ directory: info.directory }),
++        workspace: yield* InstanceState.workspaceID,
++      }
++      yield* Effect.gen(function* () {
++        yield* revertSvc.cleanup(info)
++        const messages = yield* session.messages({ sessionID: ctx.params.sessionID })
++        const defaultAgent = yield* agentSvc.defaultAgent()
++        const currentAgent = messages.findLast((message) => message.info.role === "user")?.info.agent ?? defaultAgent
+ 
+-      yield* compactSvc.create({
+-        sessionID: ctx.params.sessionID,
+-        agent: currentAgent,
+-        model: {
+-          providerID: ctx.payload.providerID,
+-          modelID: ctx.payload.modelID,
+-        },
+-        auto: ctx.payload.auto ?? false,
+-      })
+-      yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
++        yield* compactSvc.create({
++          sessionID: ctx.params.sessionID,
++          agent: currentAgent,
++          model: {
++            providerID: ctx.payload.providerID,
++            modelID: ctx.payload.modelID,
++          },
++          auto: ctx.payload.auto ?? false,
++        })
++        yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
++      }).pipe(
++        Effect.provideService(InstanceRef, execution.instance),
++        Effect.provideService(WorkspaceRef, execution.workspace),
++      )
+       return true
+     })
+ 
+@@ -285,8 +315,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       params: { sessionID: SessionID }
+       payload: typeof PromptPayload.Type
+     }) {
+-      const instance = yield* InstanceState.context
+-      const workspace = yield* InstanceState.workspaceID
++      const execution = yield* sessionExecutionContext(ctx.params.sessionID)
+       return HttpServerResponse.stream(
+         Stream.fromEffect(
+           promptSvc
+@@ -294,7 +323,10 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+               ...ctx.payload,
+               sessionID: ctx.params.sessionID,
+             })
+-            .pipe(Effect.provideService(InstanceRef, instance), Effect.provideService(WorkspaceRef, workspace)),
++            .pipe(
++              Effect.provideService(InstanceRef, execution.instance),
++              Effect.provideService(WorkspaceRef, execution.workspace),
++            ),
+         ).pipe(
+           Stream.map((message) => JSON.stringify(message)),
+           Stream.encodeText,
+@@ -307,16 +339,20 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       params: { sessionID: SessionID }
+       payload: typeof PromptPayload.Type
+     }) {
+-      yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
+-        Effect.catchCause((cause) =>
+-          Effect.gen(function* () {
+-            yield* Effect.logError("prompt_async failed", { sessionID: ctx.params.sessionID, cause })
+-            yield* bus.publish(Session.Event.Error, {
+-              sessionID: ctx.params.sessionID,
+-              error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
+-            })
+-          }),
++      yield* inSessionDirectory(
++        ctx.params.sessionID,
++        promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
++          Effect.catchCause((cause) =>
++            Effect.gen(function* () {
++              yield* Effect.logError("prompt_async failed", { sessionID: ctx.params.sessionID, cause })
++              yield* bus.publish(Session.Event.Error, {
++                sessionID: ctx.params.sessionID,
++                error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
++              })
++            }),
++          ),
+         ),
++      ).pipe(
+         Effect.forkIn(scope, { startImmediately: true }),
+       )
+       return HttpApiSchema.NoContent.make()
+@@ -326,14 +362,20 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+       params: { sessionID: SessionID }
+       payload: typeof CommandPayload.Type
+     }) {
+-      return yield* promptSvc.command({ ...ctx.payload, sessionID: ctx.params.sessionID })
++      return yield* inSessionDirectory(
++        ctx.params.sessionID,
++        promptSvc.command({ ...ctx.payload, sessionID: ctx.params.sessionID }),
++      )
+     })
+ 
+     const shell = Effect.fn("SessionHttpApi.shell")(function* (ctx: {
+       params: { sessionID: SessionID }
+       payload: typeof ShellPayload.Type
+     }) {
+-      return yield* promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID })
++      return yield* inSessionDirectory(
++        ctx.params.sessionID,
++        promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }),
++      )
+     })
+ 
+     const revert = Effect.fn("SessionHttpApi.revert")(function* (ctx: {
+diff --git a/packages/opencode/src/server/routes/instance/session.ts b/packages/opencode/src/server/routes/instance/session.ts
+index 631188caa4b528162a2c81d8f334b08a9c655a43..3c26351e80e30528ef6dcdba3e99be0519bc6597 100644
+--- a/packages/opencode/src/server/routes/instance/session.ts
++++ b/packages/opencode/src/server/routes/instance/session.ts
+@@ -43,6 +43,15 @@ function queryBoolean(value: z.infer<typeof QueryBoolean> | undefined) {
+   return value === true || value === "true"
+ }
+ 
++function inSessionDirectory<A, E, R>(sessionID: SessionID, effect: Effect.Effect<A, E, R>) {
++  return Effect.gen(function* () {
++    const sessions = yield* Session.Service
++    const store = yield* InstanceStore.Service
++    const info = yield* sessions.get(sessionID)
++    return yield* store.provide({ directory: info.directory }, effect)
++  })
++}
++
+ export const SessionRoutes = lazy(() =>
+   new Hono()
+     .get(
+@@ -492,14 +501,18 @@ export const SessionRoutes = lazy(() =>
+         jsonRequest("SessionRoutes.init", c, function* () {
+           const sessionID = c.req.valid("param").sessionID
+           const body = c.req.valid("json")
+-          const svc = yield* SessionPrompt.Service
+-          yield* svc.command({
++          yield* inSessionDirectory(
+             sessionID,
+-            messageID: body.messageID,
+-            model: body.providerID + "/" + body.modelID,
+-            command: Command.Default.INIT,
+-            arguments: "",
+-          })
++            SessionPrompt.Service.use((svc) =>
++              svc.command({
++                sessionID,
++                messageID: body.messageID,
++                model: body.providerID + "/" + body.modelID,
++                command: Command.Default.INIT,
++                arguments: "",
++              }),
++            ),
++          )
+           return true
+         }),
+     )
+@@ -709,34 +722,39 @@ export const SessionRoutes = lazy(() =>
+         jsonRequest("SessionRoutes.summarize", c, function* () {
+           const sessionID = c.req.valid("param").sessionID
+           const body = c.req.valid("json")
+-          const session = yield* Session.Service
+-          const revert = yield* SessionRevert.Service
+-          const compact = yield* SessionCompaction.Service
+-          const prompt = yield* SessionPrompt.Service
+-          const agent = yield* Agent.Service
++          yield* inSessionDirectory(
++            sessionID,
++            Effect.gen(function* () {
++              const session = yield* Session.Service
++              const revert = yield* SessionRevert.Service
++              const compact = yield* SessionCompaction.Service
++              const prompt = yield* SessionPrompt.Service
++              const agent = yield* Agent.Service
+ 
+-          yield* revert.cleanup(yield* session.get(sessionID))
+-          const msgs = yield* session.messages({ sessionID })
+-          const defaultAgent = yield* agent.defaultAgent()
+-          let currentAgent = defaultAgent
+-          for (let i = msgs.length - 1; i >= 0; i--) {
+-            const info = msgs[i].info
+-            if (info.role === "user") {
+-              currentAgent = info.agent || defaultAgent
+-              break
+-            }
+-          }
++              yield* revert.cleanup(yield* session.get(sessionID))
++              const msgs = yield* session.messages({ sessionID })
++              const defaultAgent = yield* agent.defaultAgent()
++              let currentAgent = defaultAgent
++              for (let i = msgs.length - 1; i >= 0; i--) {
++                const info = msgs[i].info
++                if (info.role === "user") {
++                  currentAgent = info.agent || defaultAgent
++                  break
++                }
++              }
+ 
+-          yield* compact.create({
+-            sessionID,
+-            agent: currentAgent,
+-            model: {
+-              providerID: body.providerID,
+-              modelID: body.modelID,
+-            },
+-            auto: body.auto,
+-          })
+-          yield* prompt.loop({ sessionID })
++              yield* compact.create({
++                sessionID,
++                agent: currentAgent,
++                model: {
++                  providerID: body.providerID,
++                  modelID: body.modelID,
++                },
++                auto: body.auto,
++              })
++              yield* prompt.loop({ sessionID })
++            }),
++          )
+           return true
+         }),
+     )
+@@ -1022,8 +1040,11 @@ export const SessionRoutes = lazy(() =>
+           const msg = await runRequest(
+             "SessionRoutes.prompt",
+             c,
+-            SessionPrompt.Service.use((svc) =>
+-              svc.prompt({ ...body, sessionID } as unknown as SessionPrompt.PromptInput),
++            inSessionDirectory(
++              sessionID,
++              SessionPrompt.Service.use((svc) =>
++                svc.prompt({ ...body, sessionID } as unknown as SessionPrompt.PromptInput),
++              ),
+             ),
+           )
+           void stream.write(JSON.stringify(msg))
+@@ -1057,8 +1078,11 @@ export const SessionRoutes = lazy(() =>
+         void runRequest(
+           "SessionRoutes.prompt_async",
+           c,
+-          SessionPrompt.Service.use((svc) =>
+-            svc.prompt({ ...body, sessionID } as unknown as SessionPrompt.PromptInput),
++          inSessionDirectory(
++            sessionID,
++            SessionPrompt.Service.use((svc) =>
++              svc.prompt({ ...body, sessionID } as unknown as SessionPrompt.PromptInput),
++            ),
+           ),
+         ).catch((err) => {
+           log.error("prompt_async failed", { sessionID, error: err })
+@@ -1105,8 +1129,10 @@ export const SessionRoutes = lazy(() =>
+         jsonRequest("SessionRoutes.command", c, function* () {
+           const sessionID = c.req.valid("param").sessionID
+           const body = c.req.valid("json") as Omit<SessionPrompt.CommandInput, "sessionID">
+-          const svc = yield* SessionPrompt.Service
+-          return yield* svc.command({ ...body, sessionID })
++          return yield* inSessionDirectory(
++            sessionID,
++            SessionPrompt.Service.use((svc) => svc.command({ ...body, sessionID })),
++          )
+         }),
+     )
+     .post(
+@@ -1138,8 +1164,10 @@ export const SessionRoutes = lazy(() =>
+         jsonRequest("SessionRoutes.shell", c, function* () {
+           const sessionID = c.req.valid("param").sessionID
+           const body = c.req.valid("json") as Omit<SessionPrompt.ShellInput, "sessionID">
+-          const svc = yield* SessionPrompt.Service
+-          return yield* svc.shell({ ...body, sessionID })
++          return yield* inSessionDirectory(
++            sessionID,
++            SessionPrompt.Service.use((svc) => svc.shell({ ...body, sessionID })),
++          )
+         }),
+     )
+     .post(
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index d3d995ba24769d8e3fc2a56824b5690ea925d2a8..ce35fa6cef9f58cd98187af4f8304ceaf406c0f4 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -40,7 +40,7 @@ export { isMedia }
+ 
+ const Hidden = Schema.Struct({
+   time: NonNegativeInt,
+-  reason: Schema.Literal("undo"),
++  reason: Schema.Literals(["undo", "repair-empty-dangling-assistant"]),
+ })
+ 
+ export const OutputLengthError = namedSchemaError("MessageOutputLengthError", {})
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index 8331bf9db2298e50ef93934378fa9dbd557eefad..e84bf32d6a707f83b158c9298733df4f4345494e 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -711,8 +711,8 @@ export const layer: Layer.Layer<
+                 ? { raw: part.state.raw + pendingRaw }
+                 : {}),
+               status: "error",
+-              error: "Tool execution aborted",
+-              metadata: { ...metadata, interrupted: true },
++              error: aborted ? "Tool execution aborted" : "Tool execution did not complete before stream ended",
++              metadata: aborted ? { ...metadata, interrupted: true } : metadata,
+               time: { start: "time" in part.state ? part.state.time.start : end, end },
+             },
+           })
+@@ -761,7 +761,6 @@ export const layer: Layer.Layer<
+         slog.info("process")
+         ctx.needsCompaction = false
+         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
+-
+         return yield* Effect.gen(function* () {
+           yield* Effect.gen(function* () {
+             ctx.currentText = undefined
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index adc9c9625a2aa5b1e831119ada119af40c80fbed..9bf0ede88fc2490374e8dcc88c21c862ed6cdc72 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -174,22 +174,34 @@ export const layer = Layer.effect(
+     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
+       yield* elog.info("cancel", { sessionID })
+       yield* state.cancel(sessionID)
+-      yield* abortPendingAssistant(sessionID)
++      yield* abortPendingAssistants(sessionID)
+     })
+ 
+-    const abortPendingAssistant = Effect.fn("SessionPrompt.abortPendingAssistant")(function* (sessionID: SessionID) {
+-      const match = yield* sessions.findMessage(
+-        sessionID,
+-        (msg) => msg.info.role === "assistant" && !msg.info.time.completed,
+-      )
+-      if (Option.isNone(match)) return
++    const abortPendingAssistants = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
++      const pending = [] as (MessageV2.WithParts & { info: MessageV2.Assistant })[]
++      for (const msg of MessageV2.stream(sessionID)) {
++        if (msg.info.role !== "assistant") continue
++        if (msg.info.time.completed) continue
++        pending.push(msg as MessageV2.WithParts & { info: MessageV2.Assistant })
++      }
++      if (pending.length === 0) return
+ 
+       const now = Date.now()
+-      const assistant = match.value.info
+-      if (assistant.role !== "assistant" || assistant.time.completed) return
+-      assistant.time.completed = now
+-      assistant.error ??= new MessageV2.AbortedError({ message: "Aborted" }).toObject()
+-      yield* sessions.updateMessage(assistant)
++      const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
++      yield* Effect.forEach(
++        pending,
++        Effect.fnUntraced(function* (msg) {
++          const assistant = msg.info
++          assistant.time.completed = now
++          assistant.error ??= new MessageV2.AbortedError({ message: "Aborted" }).toObject()
++          if (msg.parts.length === 0) assistant.hidden = { time: now, reason: "repair-empty-dangling-assistant" as const }
++          yield* sessions.updateMessage(assistant)
++          if (usage && assistant.parentID) {
++            yield* usage.recordAssistant({ sessionID, requestID: assistant.parentID, assistant })
++          }
++        }),
++        { discard: true },
++      )
+       // NOTE: Tool part states are NOT modified here. Each tool has its own
+       // interrupt/cancel handler that finalizes its state (e.g. bash truncates
+       // output and completes, task tool cancels child session). Forcing all
+diff --git a/packages/opencode/src/session/revert.ts b/packages/opencode/src/session/revert.ts
+index 85619d4b6ac0d7a4938c194ad2b8aef96bcf782f..f65234931c78cfc7b7cba05f06e8c271439e7ef1 100644
+--- a/packages/opencode/src/session/revert.ts
++++ b/packages/opencode/src/session/revert.ts
+@@ -1,4 +1,4 @@
+-import { Effect, Layer, Context, Schema } from "effect"
++import { Effect, Layer, Context, Schema, Option } from "effect"
+ import { Bus } from "../bus"
+ import { Snapshot } from "../snapshot"
+ import { Storage } from "@/storage/storage"
+@@ -11,6 +11,7 @@ import { MessageV2 } from "./message-v2"
+ import { SessionID, MessageID, PartID } from "./schema"
+ import { SessionRunState } from "./run-state"
+ import { SessionSummary } from "./summary"
++import { SessionRequestUsage } from "./request-usage"
+ 
+ const log = Log.create({ service: "session.revert" })
+ 
+@@ -122,10 +123,19 @@ export const layer = Layer.effect(
+         remove.push(msg)
+       }
+       for (const msg of remove) {
+-        yield* sessions.updateMessage({
++        const next = {
+           ...msg.info,
+-          hidden: { time: Date.now(), reason: "undo" },
+-        })
++          hidden: { time: Date.now(), reason: "undo" as const },
++        }
++        if (next.role === "assistant" && !next.time.completed) {
++          next.time.completed = next.hidden.time
++          next.error ??= new MessageV2.AbortedError({ message: "Aborted by undo" }).toObject()
++        }
++        yield* sessions.updateMessage(next)
++        if (next.role === "assistant" && next.parentID) {
++          const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
++          if (usage) yield* usage.recordAssistant({ sessionID, requestID: next.parentID, assistant: next })
++        }
+       }
+       if (session.revert.partID && target) {
+         const partID = session.revert.partID
+diff --git a/packages/opencode/src/sync/index.ts b/packages/opencode/src/sync/index.ts
+index 62b30ccf9ab11da00fe63874de9357c7b36add15..1619c68d8ea34de931df6aec489019d91048a918 100644
+--- a/packages/opencode/src/sync/index.ts
++++ b/packages/opencode/src/sync/index.ts
+@@ -309,12 +309,18 @@ function process<Def extends Definition>(
+ 
+     Database.effect(() => {
+       if (options?.publish) {
+-        if (!options.context?.instance) {
++        const context = options.context
++        if (!context?.instance) {
+           throw new Error("SyncEvent.process: publish requires instance context")
+         }
++        const instance = context.instance
+ 
+         const result = convertEvent(def.type, event.data)
+-        const publish = (data: unknown) => ProjectBus.publish(def, data as Properties<Def>, { id: event.id })
++        const publish = (data: unknown) =>
++          ProjectBus.publish(def, data as Properties<Def>, {
++            id: event.id,
++            context: { instance, workspace: context.workspace },
++          })
+         if (result instanceof Promise) {
+           void result.then(publish)
+         } else {
+@@ -322,9 +328,9 @@ function process<Def extends Definition>(
+         }
+ 
+         GlobalBus.emit("event", {
+-          directory: options.context.instance.directory,
+-          project: options.context.instance.project.id,
+-          workspace: options.context.workspace,
++          directory: instance.directory,
++          project: instance.project.id,
++          workspace: context.workspace,
+           payload: {
+             type: "sync",
+             syncEvent: {
+diff --git a/packages/opencode/test/cli/cmd/tui/sync.test.tsx b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
+index 993484d3cac076f2d14da8e82ef14d32613a2071..df417077db4e053c3123bc3ddd62d29dda0ddca6 100644
+--- a/packages/opencode/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
+@@ -36,9 +36,11 @@ function eventSource(): EventSource {
+ 
+ function createFetch() {
+   const session = [] as URL[]
++  const status = [] as URL[]
+   const fetch = (async (input: RequestInfo | URL) => {
+     const url = new URL(input instanceof Request ? input.url : String(input))
+     if (url.pathname === "/session") session.push(url)
++    if (url.pathname === "/session/status") status.push(url)
+ 
+     switch (url.pathname) {
+       case "/agent":
+@@ -66,6 +68,20 @@ function createFetch() {
+         return json({ all: [], default: {}, connected: [] })
+       case "/session":
+         return json([])
++      case "/session/ses_test":
++        return json({
++          id: "ses_test",
++          slug: "test",
++          projectID: "proj_test",
++          directory,
++          title: "Test",
++          version: "0.0.0",
++          time: { created: 1, updated: 1 },
++        })
++      case "/session/ses_test/message":
++      case "/session/ses_test/todo":
++      case "/session/ses_test/diff":
++        return json([])
+       case "/vcs":
+         return json({ branch: "main" })
+     }
+@@ -73,7 +89,7 @@ function createFetch() {
+     throw new Error(`unexpected request: ${url.pathname}`)
+   }) as typeof globalThis.fetch
+ 
+-  return { fetch, session }
++  return { fetch, session, status }
+ }
+ 
+ async function mount() {
+@@ -109,7 +125,7 @@ async function mount() {
+ 
+   await ready
+   await wait(() => sync.status === "complete")
+-  return { app, kv, sync, session: calls.session }
++  return { app, kv, sync, session: calls.session, status: calls.status }
+ }
+ 
+ function Probe(props: { onReady: (ctx: { kv: ReturnType<typeof useKV>; sync: ReturnType<typeof useSync> }) => void }) {
+@@ -146,4 +162,21 @@ describe("tui sync", () => {
+       Global.Path.state = previous
+     }
+   })
++
++  test("force syncing a session refreshes session status", async () => {
++    const previous = Global.Path.state
++    await using tmp = await tmpdir()
++    Global.Path.state = tmp.path
++    await Bun.write(`${tmp.path}/kv.json`, "{}")
++    const { app, sync, status } = await mount()
++
++    try {
++      const before = status.length
++      await sync.session.sync("ses_test", { force: true })
++      expect(status.length).toBe(before + 1)
++    } finally {
++      app.renderer.destroy()
++      Global.Path.state = previous
++    }
++  })
+ })
+diff --git a/packages/opencode/test/effect/runner.test.ts b/packages/opencode/test/effect/runner.test.ts
+index 0f5783bfc4a6897e6028dcf45cdfa89b72821c56..28f5756960c3714e193688f658a1a4c9b344917a 100644
+--- a/packages/opencode/test/effect/runner.test.ts
++++ b/packages/opencode/test/effect/runner.test.ts
+@@ -472,6 +472,32 @@ describe("Runner", () => {
+     }),
+   )
+ 
++  it.live(
++    "onIdle fires before interrupted run finalizers finish",
++    Effect.gen(function* () {
++      const s = yield* Scope.Scope
++      const idle = yield* Deferred.make<void>()
++      const release = yield* Deferred.make<void>()
++      const runner = Runner.make<string>(s, {
++        onIdle: Deferred.succeed(idle, undefined).pipe(Effect.asVoid),
++      })
++
++      const run = yield* runner
++        .ensureRunning(Effect.never.pipe(Effect.ensuring(Deferred.await(release)), Effect.as("x")))
++        .pipe(Effect.forkChild)
++      yield* Effect.sleep("10 millis")
++
++      const cancel = yield* runner.cancel.pipe(Effect.forkChild)
++      const idleExit = yield* Deferred.await(idle).pipe(Effect.timeout("250 millis"), Effect.exit)
++      expect(Exit.isSuccess(idleExit)).toBe(true)
++      expect(runner.busy).toBe(false)
++
++      yield* Deferred.succeed(release, undefined)
++      yield* Fiber.await(cancel)
++      yield* Fiber.await(run)
++    }),
++  )
++
+   it.live(
+     "onBusy fires when shell starts",
+     Effect.gen(function* () {
+diff --git a/packages/opencode/test/server/httpapi-sdk.test.ts b/packages/opencode/test/server/httpapi-sdk.test.ts
+index 6d2df45078b5d24576d9eaade55578a6f2162d45..08d34c3d72ebe1d0b4eac89b4e6e0de8e4ac0d28 100644
+--- a/packages/opencode/test/server/httpapi-sdk.test.ts
++++ b/packages/opencode/test/server/httpapi-sdk.test.ts
+@@ -1,5 +1,5 @@
+ import { afterEach, describe, expect } from "bun:test"
+-import { ConfigProvider, Effect, Layer } from "effect"
++import { ConfigProvider, Effect, Fiber, Layer } from "effect"
+ import type * as Scope from "effect/Scope"
+ import { HttpRouter } from "effect/unstable/http"
+ import { Flag } from "@opencode-ai/core/flag/flag"
+@@ -16,6 +16,7 @@ import type { Config } from "@/config/config"
+ import { Session as SessionNs } from "@/session/session"
+ import { errorMessage } from "../../src/util/error"
+ import { TestLLMServer } from "../lib/llm-server"
++import { waitGlobalBusEvent } from "./global-bus"
+ import path from "path"
+ import { resetDatabase } from "../fixture/db"
+ import { disposeAllInstances, tmpdir } from "../fixture/fixture"
+@@ -613,6 +614,49 @@ describe("HttpApi SDK", () => {
+     ),
+   )
+ 
++  parity("prompt routes publish session events from the persisted session directory", (backend) =>
++    Effect.gen(function* () {
++      const sessionTmp = yield* Effect.acquireRelease(
++        call(() => tmpdir({ git: true, config: { formatter: false, lsp: false } })),
++        (tmp) => call(() => tmp[Symbol.asyncDispose]()).pipe(Effect.ignore),
++      )
++      const requestTmp = yield* Effect.acquireRelease(
++        call(() => tmpdir({ git: true, config: { formatter: false, lsp: false } })),
++        (tmp) => call(() => tmp[Symbol.asyncDispose]()).pipe(Effect.ignore),
++      )
++      const session = yield* call(async () =>
++        await WithInstance.provide({
++          directory: sessionTmp.path,
++          fn: () =>
++            Effect.runPromise(
++              SessionNs.Service.use((svc) => svc.create({ title: "prompt dir" })).pipe(
++                Effect.provide(SessionNs.defaultLayer),
++              ),
++            ),
++        }),
++      )
++      const messageID = MessageID.ascending()
++      const event = yield* waitGlobalBusEvent({
++        predicate: (event) =>
++          event.payload.type === "message.updated" && event.payload.properties.info.id === messageID,
++      }).pipe(Effect.forkScoped)
++      const prompt = yield* capture(() =>
++        client(backend, requestTmp.path).session.prompt({
++          sessionID: session.id,
++          messageID,
++          agent: "build",
++          noReply: true,
++          parts: [{ type: "text", text: "hello from persisted directory" }],
++        }),
++      )
++      const published = yield* Fiber.join(event)
++
++      expect(prompt.status).toBe(200)
++      expect(published.directory).toBe(sessionTmp.path)
++      return { directory: published.directory === sessionTmp.path }
++    }),
++  )
++
+   parity("matches generated SDK prompt streaming through fake LLM across backends", (backend) =>
+     withFakeLlm(backend, ({ sdk, llm }) =>
+       Effect.gen(function* () {
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 5941fd56cacc7838208d2a8388c62b5f4389f9b3..8e0cf20a361e9b34cadf5465b33813ab4d9548b0 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -935,6 +935,59 @@ it.live(
+   3_000,
+ )
+ 
++it.instance("cancel aborts all visible unfinished assistants", () =>
++  Effect.gen(function* () {
++    const prompt = yield* SessionPrompt.Service
++    const sessions = yield* Session.Service
++    const chat = yield* sessions.create({ title: "Pinned" })
++    const first = yield* user(chat.id, "first")
++    const firstAssistant: MessageV2.Assistant = {
++      id: MessageID.ascending(),
++      role: "assistant",
++      parentID: first.id,
++      sessionID: chat.id,
++      mode: "build",
++      agent: "build",
++      cost: 0,
++      path: { cwd: "/tmp", root: "/tmp" },
++      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++      modelID: ref.modelID,
++      providerID: ref.providerID,
++      time: { created: Date.now() },
++    }
++    yield* sessions.updateMessage(firstAssistant)
++    yield* sessions.updatePart({
++      id: PartID.ascending(),
++      messageID: firstAssistant.id,
++      sessionID: chat.id,
++      type: "text",
++      text: "partial",
++    })
++
++    const second = yield* user(chat.id, "second")
++    const secondAssistant: MessageV2.Assistant = {
++      ...firstAssistant,
++      id: MessageID.ascending(),
++      parentID: second.id,
++      time: { created: Date.now() },
++    }
++    yield* sessions.updateMessage(secondAssistant)
++
++    yield* prompt.cancel(chat.id)
++
++    const msgs = Array.from(MessageV2.stream(chat.id, { includeHidden: true })).reverse()
++    const aborted = msgs.filter(
++      (msg): msg is MessageV2.WithParts & { info: MessageV2.Assistant } => msg.info.role === "assistant",
++    )
++    expect(aborted).toHaveLength(2)
++    expect(aborted[0]?.info.time.completed).toBeDefined()
++    expect(aborted[0]?.info.error?.name).toBe("MessageAbortedError")
++    expect(aborted[1]?.info.time.completed).toBeDefined()
++    expect(aborted[1]?.info.error?.name).toBe("MessageAbortedError")
++    expect(aborted[1]?.info.hidden?.reason).toBe("repair-empty-dangling-assistant")
++  }),
++)
++
+ // Cancel semantics
+ 
+ it.live(
+diff --git a/packages/opencode/test/session/revert-compact.test.ts b/packages/opencode/test/session/revert-compact.test.ts
+index 44109f0e31556329c24d4c614f1e55e275390dac..db36499cc2d470cab41dbfe206d50979f68fe8af 100644
+--- a/packages/opencode/test/session/revert-compact.test.ts
++++ b/packages/opencode/test/session/revert-compact.test.ts
+@@ -6,6 +6,7 @@ import { Session } from "@/session/session"
+ import { ModelID, ProviderID } from "../../src/provider/schema"
+ import { SessionRevert } from "../../src/session/revert"
+ import { MessageV2 } from "../../src/session/message-v2"
++import { SessionRequestUsage } from "../../src/session/request-usage"
+ import { Snapshot } from "../../src/snapshot"
+ import * as Log from "@opencode-ai/core/util/log"
+ import { MessageID, PartID, SessionID } from "../../src/session/schema"
+@@ -18,6 +19,7 @@ void Log.init({ print: false })
+ const env = Layer.mergeAll(
+   Session.defaultLayer,
+   SessionRevert.defaultLayer,
++  SessionRequestUsage.defaultLayer,
+   Snapshot.defaultLayer,
+   CrossSpawnSpawner.defaultLayer,
+ )
+@@ -427,6 +429,56 @@ describe("revert + compact workflow", () => {
+     ),
+   )
+ 
++  it.live(
++    "cleanup terminalizes unfinished assistant messages hidden by undo",
++    provideTmpdirInstance(
++      (dir) =>
++        Effect.gen(function* () {
++          const session = yield* Session.Service
++          const revert = yield* SessionRevert.Service
++          const usage = yield* SessionRequestUsage.Service
++
++          const info = yield* session.create({})
++          const sid = info.id
++          const u1 = yield* user(sid)
++          const a1 = yield* assistant(sid, u1.id, dir)
++
++          yield* usage.begin({
++            sessionID: sid,
++            requestID: u1.id,
++            source: "prompt",
++            agent: a1.agent,
++            providerID: a1.providerID,
++            modelID: a1.modelID,
++            timeCreated: u1.time.created,
++          })
++          yield* usage.recordAssistant({ sessionID: sid, requestID: u1.id, assistant: a1 })
++          expect((yield* usage.get({ sessionID: sid, requestID: u1.id }))?.status).toBe("running")
++
++          yield* session.setRevert({
++            sessionID: sid,
++            revert: { messageID: u1.id },
++            summary: { additions: 0, deletions: 0, files: 0 },
++          })
++          yield* revert.cleanup(yield* session.get(sid))
++
++          const stored = MessageV2.get({ sessionID: sid, messageID: a1.id })
++          const request = yield* usage.get({ sessionID: sid, requestID: u1.id })
++          const assistants = yield* usage.assistants({ sessionID: sid, requestID: u1.id })
++
++          expect(stored.info.role).toBe("assistant")
++          if (stored.info.role === "assistant") {
++            expect(stored.info.hidden?.reason).toBe("undo")
++            expect(stored.info.time.completed).toBeDefined()
++            expect(stored.info.error?.name).toBe("MessageAbortedError")
++          }
++          expect(request?.status).toBe("aborted")
++          expect(assistants.find((item) => item.assistantMessageID === a1.id)?.status).toBe("aborted")
++        }),
++      { git: true },
++    ),
++  )
++
+   it.live(
+     "cleanup is a no-op when session has no revert state",
+     provideTmpdirInstance(
+diff --git a/packages/opencode/test/sync/index.test.ts b/packages/opencode/test/sync/index.test.ts
+index 0986b39044094c74d9a082ace2b3d006f354cb8c..149b80975fa20d0761c0651f65852a03f9484776 100644
+--- a/packages/opencode/test/sync/index.test.ts
++++ b/packages/opencode/test/sync/index.test.ts
+@@ -1,8 +1,9 @@
+ import { describe, expect, beforeEach, afterEach, afterAll } from "bun:test"
+-import { provideTmpdirInstance } from "../fixture/fixture"
+-import { Effect, Layer, Schema } from "effect"
++import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
++import { Deferred, Effect, Layer, Schema } from "effect"
+ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+ import { Bus } from "../../src/bus"
++import { GlobalBus, type GlobalEvent } from "../../src/bus/global"
+ import { SyncEvent } from "../../src/sync"
+ import { Database } from "@/storage/db"
+ import { EventSequenceTable, EventTable } from "../../src/sync/event.sql"
+@@ -137,6 +138,29 @@ describe("SyncEvent", () => {
+         }),
+       ),
+     )
++
++    it.instance("emits bus-shaped global events from Effect-only instance context", () =>
++      Effect.gen(function* () {
++        const { Created } = setup()
++        const test = yield* TestInstance
++        const done = yield* Deferred.make<void>()
++        const events: GlobalEvent[] = []
++        const handler = (event: GlobalEvent) => {
++          events.push(event)
++          if (event.payload.type === Created.type) Deferred.doneUnsafe(done, Effect.void)
++        }
++
++        yield* Effect.acquireRelease(
++          Effect.sync(() => GlobalBus.on("event", handler)),
++          () => Effect.sync(() => GlobalBus.off("event", handler)),
++        )
++
++        yield* SyncEvent.use.run(Created, { id: "evt_1", name: "test" })
++        yield* Deferred.await(done).pipe(Effect.timeout("1 second"))
++
++        expect(events.some((event) => event.directory === test.directory && event.payload.type === Created.type)).toBe(true)
++      }),
++    )
+   })
+ 
+   describe("replay", () => {

@@ -1,0 +1,77 @@
+From 16c8dd6cf7ba2a7c8bf7a1c3dd5e22fea898be7a Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 13 Jul 2026 23:44:29 +0800
+Subject: [PATCH] =?UTF-8?q?fix(session):=20=E9=A2=84=E8=A7=88=E7=AB=AF?=
+ =?UTF-8?q?=E7=82=B9=E8=BF=94=E5=9B=9E=E6=AD=A3=E5=BA=8F=EF=BC=88=E6=97=A7?=
+ =?UTF-8?q?=E2=86=92=E6=96=B0=EF=BC=89=E6=95=B0=E7=BB=84?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+session preview SQL 的最终 ORDER BY 从 msg_rn ASC 改为 DESC。
+窗口函数中 msg_rn=1 代表最新消息，原 ASC 使最新先返回、JS push 产出
+倒序数组；改为 DESC 后次新先返回，数组变为正序（旧→新），TUI
+session list 中 ├─/└─ 树形预览按对话时间从上到下排列。
+
+同步修改 3 处多元素断言期望值，单元素用例不受影响。
+
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
+index d606511af23c4ca71f5ad8bcc28bdb5291ef35d3..2df400ac59e3f47cc8d513556f85ffe7e13886bc 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
+@@ -546,7 +546,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+           -- SQLite group_concat 不保证 GROUP BY 内顺序，需子查询喂入有序行
+           FROM (SELECT * FROM preview_parts ORDER BY part_id)
+           GROUP BY session_id, msg_rn
+-          ORDER BY session_id, msg_rn
++          -- msg_rn 由窗口函数 ORDER BY time_created DESC 赋值：1=最新，2=次新。
++          -- 此处 DESC 使次新先返回、最新后返回，JS push 随之产出正序（旧→新）数组
++          ORDER BY session_id, msg_rn DESC
+         `),
+       ) as { session_id: string; msg_rn: number; joined_text: string | null }[]
+ 
+diff --git a/packages/opencode/test/server/session-preview.test.ts b/packages/opencode/test/server/session-preview.test.ts
+index 2ec2ea1eee548ad5b8b85512ad0d280d65b878b3..578f54b3a068853b69b50ebcd0339980bd9f805d 100644
+--- a/packages/opencode/test/server/session-preview.test.ts
++++ b/packages/opencode/test/server/session-preview.test.ts
+@@ -139,10 +139,10 @@ describe("session preview endpoint", () => {
+         })
+ 
+         expect(status).toBe(200)
+-        // sessionA 应返回 2 条预览，最新在前
++        // sessionA 应返回 2 条预览，正序（旧→新）：hello world(time=1000) 在前
+         expect(json[sessionA.id]).toHaveLength(2)
+-        expect(json[sessionA.id][0]).toBe("second message")
+-        expect(json[sessionA.id][1]).toBe("hello world")
++        expect(json[sessionA.id][0]).toBe("hello world")
++        expect(json[sessionA.id][1]).toBe("second message")
+         // sessionB 应返回 1 条预览
+         expect(json[sessionB.id]).toHaveLength(1)
+         expect(json[sessionB.id][0]).toBe("b message")
+@@ -313,10 +313,10 @@ describe("session preview endpoint", () => {
+         })
+ 
+         expect(status).toBe(200)
+-        // 无 text part 的消息被跳过，返回最近 2 条有文本的消息
++        // 无 text part 的消息被跳过，返回最近 2 条有文本的消息，正序（旧→新）
+         expect(json[session.id]).toHaveLength(2)
+-        expect(json[session.id][0]).toBe("also has text")
+-        expect(json[session.id][1]).toBe("has text")
++        expect(json[session.id][0]).toBe("has text")
++        expect(json[session.id][1]).toBe("also has text")
+       }),
+     ),
+     { git: true },
+@@ -403,9 +403,10 @@ describe("session preview endpoint", () => {
+         })
+ 
+         expect(status).toBe(200)
++        // 正序（旧→新）：second(time=2000) 在前，third(time=3000) 在后
+         expect(json[session.id]).toHaveLength(2)
+-        expect(json[session.id][0]).toBe("third")
+-        expect(json[session.id][1]).toBe("second")
++        expect(json[session.id][0]).toBe("second")
++        expect(json[session.id][1]).toBe("third")
+       }),
+     ),
+     { git: true },

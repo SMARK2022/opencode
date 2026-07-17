@@ -1,0 +1,1056 @@
+From afccfe84a5554f48d1035a4e4617af759fb04081 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Tue, 5 May 2026 16:04:10 +0800
+Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E6=B7=BB=E5=8A=A0VS=20Code?=
+ =?UTF-8?q?=E6=A1=A5=E6=8E=A5=E5=8A=9F=E8=83=BD=EF=BC=8C=E6=94=AF=E6=8C=81?=
+ =?UTF-8?q?=E7=AC=94=E8=AE=B0=E6=9C=AC=E6=91=98=E8=A6=81=E3=80=81=E6=BA=90?=
+ =?UTF-8?q?=E4=BB=A3=E7=A0=81=E8=AF=BB=E5=8F=96=E3=80=81=E6=89=A7=E8=A1=8C?=
+ =?UTF-8?q?=E5=92=8C=E7=BC=96=E8=BE=91=E6=93=8D=E4=BD=9C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/ide/vscode-bridge.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd2162d4877f
+--- /dev/null
++++ b/packages/opencode/src/ide/vscode-bridge.ts
+@@ -0,0 +1,383 @@
++import fs from "fs/promises"
++import os from "os"
++import path from "path"
++import { fileURLToPath } from "url"
++import { Global } from "@opencode-ai/core/global"
++
++const DEFAULT_HEALTH_TIMEOUT = 500
++const DEFAULT_STALE_MS = 15_000
++const RESOLVE_CACHE_MS = 5_000
++
++export type BridgeEntry = {
++  schema: 1
++  id: string
++  pid: number
++  port: number
++  token: string
++  host?: string
++  transport: "http"
++  ideName: string
++  ideKind: "vscode"
++  remoteName?: string | null
++  createdAt: number
++  updatedAt: number
++  workspaceFolders: Array<{
++    name: string
++    uri: string
++    fsPath?: string
++  }>
++  active?: {
++    textEditor?: string
++    notebook?: string
++  }
++  capabilities?: Record<string, boolean>
++}
++
++export type BridgeRef = Pick<BridgeEntry, "id" | "port" | "token"> & {
++  host: string
++  score?: number
++  source: "env" | "registry"
++}
++
++type ResolveInput = {
++  cwd: string
++  filePath?: string
++  staleMs?: number
++  healthTimeoutMs?: number
++}
++
++type CallInput = {
++  cwd: string
++  path: string
++  body: Record<string, unknown>
++  filePath?: string
++  signal?: AbortSignal
++  timeoutMs?: number
++}
++
++let cachedRegistryBridge:
++  | {
++      cwd: string
++      filePath?: string
++      expiresAt: number
++      bridge: BridgeRef
++    }
++  | undefined
++
++export function registryDir() {
++  return process.env.OPENCODE_IDE_REGISTRY_DIR ?? path.join(Global.Path.state, "ide")
++}
++
++export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[]> {
++  const dir = registryDir()
++  const now = Date.now()
++  const staleMs = input.staleMs ?? DEFAULT_STALE_MS
++  const files = await fs.readdir(dir).catch((error) => {
++    if (isMissing(error)) return [] as string[]
++    throw error
++  })
++
++  const live: BridgeEntry[] = []
++  await Promise.all(
++    files
++      .filter((file) => file.endsWith(".json"))
++      .map(async (file) => {
++        const filepath = path.join(dir, file)
++        const entry = await readEntry(filepath)
++        if (!entry) return
++        if (now - entry.updatedAt > staleMs) {
++          await removeStale(filepath)
++          return
++        }
++        if (pidDead(entry.pid)) {
++          await removeStale(filepath)
++          return
++        }
++        if (!(await healthCheck(entry, input.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT))) return
++        live.push(entry)
++      }),
++  )
++  return live
++}
++
++export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
++  const env = envBridge()
++  if (env && (await healthCheck(env, input.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT))) return env
++
++  const now = Date.now()
++  if (
++    cachedRegistryBridge &&
++    cachedRegistryBridge.expiresAt > now &&
++    cachedRegistryBridge.cwd === input.cwd &&
++    cachedRegistryBridge.filePath === input.filePath
++  ) {
++    return cachedRegistryBridge.bridge
++  }
++
++  const entries = await discoverBridges(input)
++  const candidates = input.filePath ? entries.filter((entry) => bridgeMatchesFilePath(entry, input.filePath!)) : entries
++  if (entries.length > 0 && candidates.length === 0) {
++    throw new Error(`No live VS Code bridge workspace matches filePath: ${input.filePath}. Check the exact notebook path from vscode_notebook_summary.`)
++  }
++
++  const scored = candidates
++    .map((entry) => ({ entry, score: scoreBridge(entry, input.cwd, input.filePath) }))
++    .sort((a, b) => b.score - a.score || b.entry.updatedAt - a.entry.updatedAt)
++
++  const best = scored[0]
++  if (!best) {
++    throw new Error("No live VS Code bridge found. Open this workspace in VS Code or launch opencode from the VS Code extension.")
++  }
++
++  const second = scored[1]
++  if (second && best.score === second.score && best.entry.updatedAt === second.entry.updatedAt) {
++    throw new Error("Multiple matching VS Code bridges found. Specify filePath or focus the desired VS Code workspace.")
++  }
++
++  const bridge = {
++    id: best.entry.id,
++    host: best.entry.host ?? "127.0.0.1",
++    port: best.entry.port,
++    token: best.entry.token,
++    score: best.score,
++    source: "registry",
++  } satisfies BridgeRef
++  cachedRegistryBridge = {
++    cwd: input.cwd,
++    filePath: input.filePath,
++    expiresAt: Date.now() + RESOLVE_CACHE_MS,
++    bridge,
++  }
++  return bridge
++}
++
++export async function callBridge(input: CallInput): Promise<unknown> {
++  await assertExistingLocalFilePath(input.filePath)
++  const bridge = await resolveBridge({ cwd: input.cwd, filePath: input.filePath })
++  let response: Response
++  try {
++    response = await fetchWithTimeout(
++      `http://${bridge.host}:${bridge.port}${input.path}`,
++      {
++        method: "POST",
++        headers: {
++          "Content-Type": "application/json",
++          Authorization: `Bearer ${bridge.token}`,
++        },
++        body: JSON.stringify(input.body),
++      },
++      input.timeoutMs,
++      input.signal,
++    )
++  } catch (error) {
++    invalidateCachedBridge(bridge)
++    throw error
++  }
++
++  const text = await response.text()
++  let value: unknown
++  try {
++    value = text ? JSON.parse(text) : {}
++  } catch {
++    value = text
++  }
++
++  if (!response.ok) {
++    const message = errorFromResponse(value) ?? `VS Code bridge request failed with HTTP ${response.status}`
++    throw new Error(message)
++  }
++  const error = errorFromResponse(value)
++  if (error) throw new Error(error)
++  return value
++}
++
++export function summaryOnly(value: unknown) {
++  if (value && typeof value === "object" && "summary" in value && typeof value.summary === "string") {
++    return value.summary
++  }
++  return JSON.stringify(value, null, 2)
++}
++
++export function scoreBridge(entry: BridgeEntry, cwd: string, filePath?: string) {
++  let score = 0
++  const target = filePath ? normalizeInputPath(filePath) : undefined
++  const current = normalizeInputPath(cwd)
++  const workspaces = entry.workspaceFolders.flatMap((folder) => {
++    const values = [folder.fsPath, folder.uri].filter((item): item is string => Boolean(item))
++    return values.map(normalizeInputPath).filter((item): item is string => Boolean(item))
++  })
++
++  if (target && workspaces.some((folder) => containsPath(folder, target))) score += 3000
++  if (current && workspaces.some((folder) => containsPath(folder, current))) score += 2000
++
++  const active = [entry.active?.notebook, entry.active?.textEditor].map(normalizeInputPath)
++  if (target && active.some((item) => item && samePath(item, target))) score += 1000
++  if (entry.active?.notebook && current && workspaces.some((folder) => containsPath(folder, current))) score += 500
++
++  const age = Math.max(0, Date.now() - entry.updatedAt)
++  score += Math.max(0, 100 - Math.floor(age / 1000))
++  return score
++}
++
++function bridgeMatchesFilePath(entry: BridgeEntry, filePath: string) {
++  const target = normalizeInputPath(filePath)
++  if (!target) return false
++  const workspaces = entry.workspaceFolders.flatMap((folder) => {
++    const values = [folder.fsPath, folder.uri].filter((item): item is string => Boolean(item))
++    return values.map(normalizeInputPath).filter((item): item is string => Boolean(item))
++  })
++  if (workspaces.some((folder) => containsPath(folder, target))) return true
++  return [entry.active?.notebook, entry.active?.textEditor]
++    .map(normalizeInputPath)
++    .some((active) => active !== undefined && samePath(active, target))
++}
++
++function envBridge(): BridgeRef | undefined {
++  const rawPort = process.env.OPENCODE_VSCODE_BRIDGE_PORT
++  const token = process.env.OPENCODE_VSCODE_BRIDGE_TOKEN
++  if (!rawPort || !token) return
++  const port = Number(rawPort)
++  if (!Number.isInteger(port) || port <= 0 || port > 65535) return
++  return {
++    id: "env",
++    host: process.env.OPENCODE_VSCODE_BRIDGE_HOST ?? "127.0.0.1",
++    port,
++    token,
++    source: "env",
++  }
++}
++
++async function readEntry(filepath: string) {
++  const value = JSON.parse(await fs.readFile(filepath, "utf8")) as unknown
++  if (!isRecord(value)) return
++  if (value.schema !== 1) return
++  if (value.transport !== "http" || value.ideKind !== "vscode") return
++  if (typeof value.id !== "string") return
++  if (typeof value.pid !== "number") return
++  if (typeof value.port !== "number") return
++  if (typeof value.token !== "string") return
++  if (typeof value.updatedAt !== "number") return
++  if (!Array.isArray(value.workspaceFolders)) return
++  return value as BridgeEntry
++}
++
++async function healthCheck(entry: Pick<BridgeEntry, "host" | "port">, timeoutMs: number) {
++  const response = await fetchWithTimeout(
++    `http://${entry.host ?? "127.0.0.1"}:${entry.port}/health`,
++    { method: "GET" },
++    timeoutMs,
++  ).catch(() => undefined)
++  return response?.ok === true
++}
++
++async function fetchWithTimeout(
++  url: string,
++  init: RequestInit,
++  timeoutMs = DEFAULT_HEALTH_TIMEOUT,
++  signal?: AbortSignal,
++) {
++  const controller = new AbortController()
++  const timer = setTimeout(() => controller.abort(), timeoutMs)
++  const abort = () => controller.abort()
++  signal?.addEventListener("abort", abort, { once: true })
++  try {
++    return await fetch(url, { ...init, signal: controller.signal })
++  } finally {
++    clearTimeout(timer)
++    signal?.removeEventListener("abort", abort)
++  }
++}
++
++function pidDead(pid: number) {
++  if (!Number.isInteger(pid) || pid <= 0) return false
++  try {
++    process.kill(pid, 0)
++    return false
++  } catch (error) {
++    const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined
++    return code === "ESRCH"
++  }
++}
++
++function normalizeInputPath(value?: string) {
++  if (!value) return
++  let result = value
++  if (result.startsWith("file://")) {
++    try {
++      result = fileURLToPath(result)
++    } catch {
++      result = decodeURIComponent(new URL(result).pathname)
++    }
++  }
++  result = result.replace(/\\/g, "/").replace(/\/+$/g, "")
++  if (/^[a-z]:/i.test(result)) result = result.toLowerCase()
++  return result
++}
++
++function samePath(left: string, right: string) {
++  return normalizeInputPath(left) === normalizeInputPath(right)
++}
++
++function containsPath(parent: string, child: string) {
++  const folder = normalizeInputPath(parent)
++  const target = normalizeInputPath(child)
++  if (!folder || !target) return false
++  return target === folder || target.startsWith(folder + "/")
++}
++
++function errorFromResponse(value: unknown) {
++  if (!isRecord(value)) return
++  if (typeof value.error === "string") return value.error
++  if (value.ok === false) return "VS Code bridge returned ok=false"
++}
++
++async function assertExistingLocalFilePath(filePath?: string) {
++  const localPath = localPathFromInput(filePath)
++  if (!localPath) return
++  const stat = await fs.stat(localPath).catch((error) => {
++    if (isMissing(error)) {
++      throw new Error(`Notebook filePath does not exist exactly: ${filePath}. Reuse the exact path returned by vscode_notebook_summary.`)
++    }
++    throw error
++  })
++  if (!stat.isFile()) {
++    throw new Error(`Notebook filePath is not a file: ${filePath}`)
++  }
++}
++
++function localPathFromInput(value?: string) {
++  if (!value) return
++  if (value.startsWith("file://")) {
++    try {
++      return fileURLToPath(value)
++    } catch {
++      return
++    }
++  }
++  if (/^[a-zA-Z]:[\\/]/.test(value)) return value
++  if (path.isAbsolute(value)) return value
++  return
++}
++
++function invalidateCachedBridge(bridge: BridgeRef) {
++  if (cachedRegistryBridge?.bridge.id === bridge.id) cachedRegistryBridge = undefined
++}
++
++function isRecord(value: unknown): value is Record<string, unknown> {
++  return typeof value === "object" && value !== null && !Array.isArray(value)
++}
++
++function isMissing(error: unknown) {
++  return isRecord(error) && error.code === "ENOENT"
++}
++
++function removeStale(filepath: string) {
++  return fs.unlink(filepath).catch((error) => {
++    if (isMissing(error)) return
++    throw error
++  })
++}
++
++export function defaultRegistryDirForTests(home = os.homedir()) {
++  return path.join(process.env.XDG_STATE_HOME ?? path.join(home, ".local", "state"), "opencode", "ide")
++}
+diff --git a/packages/opencode/src/plugin/index.ts b/packages/opencode/src/plugin/index.ts
+index 69cd4d8d3c863e881395e1b5d51143435892aee6..98164717bddeb2685622ded3616e7c884f133ae8 100644
+--- a/packages/opencode/src/plugin/index.ts
++++ b/packages/opencode/src/plugin/index.ts
+@@ -18,6 +18,7 @@ import { gitlabAuthPlugin as GitlabAuthPlugin } from "opencode-gitlab-auth"
+ import { PoeAuthPlugin } from "opencode-poe-auth"
+ import { CloudflareAIGatewayAuthPlugin, CloudflareWorkersAuthPlugin } from "./cloudflare"
+ import { AzureAuthPlugin } from "./azure"
++import { VscodeBridgePlugin } from "./vscode-bridge"
+ import { Effect, Layer, Context, Stream } from "effect"
+ import { EffectBridge } from "@/effect/bridge"
+ import { InstanceState } from "@/effect/instance-state"
+@@ -63,6 +64,7 @@ const INTERNAL_PLUGINS: PluginInstance[] = [
+   CloudflareWorkersAuthPlugin,
+   CloudflareAIGatewayAuthPlugin,
+   AzureAuthPlugin,
++  VscodeBridgePlugin,
+ ]
+ 
+ function isServerPlugin(value: unknown): value is PluginInstance {
+diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..539b8793ede2b47268ebfe1ac278d3be0a1b327b
+--- /dev/null
++++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+@@ -0,0 +1,47 @@
++export const VscodeNotebookDescriptions = {
++  summary: [
++    "Inspect a VS Code notebook and return a compact cell map.",
++    "Use this first for notebook work unless a fresh summary is already visible. filePath is required; the bridge never infers a notebook from VS Code focus or open documents.",
++    "It returns stable #VSC cell IDs, display indexes, 1-based virtual source ranges, execution state, output MIME summaries, dirty state, and runtime metadata.",
++    "Cell indexes cN are 1-based display indexes and can shift after insert/delete. Use #VSC cell IDs for source, edit, run, and output calls.",
++    "After editing a notebook, call this again before relying on cell indexes, virtual ranges, or output locations.",
++  ].join("\n"),
++
++  source: [
++    "Read notebook source as a paginated virtual text document with 1-based global line numbers.",
++    "Use this instead of reading raw .ipynb JSON when source content is needed. filePath is required. Pass cellId=#VSC-xxx to focus one cell; use offset/limit to page through large notebooks.",
++    "Line numbers are global virtual source lines across notebook cell sources. Headers and visual separators are unnumbered; line ranges are not per-cell local line numbers.",
++    "Use the source text copied from this tool as oldCode when making precise string-match edits.",
++  ].join("\n"),
++
++  run: [
++    "Execute notebook code cells in VS Code and return execution status plus artifact paths.",
++    "Required fields: filePath and cellId. If endCellId is provided, the bridge runs from cellId through endCellId; otherwise it runs only cellId.",
++    "type is an optional hint only. endCellId is the actual range signal. cellId and endCellId are stable #VSC cell IDs from vscode_notebook_summary.",
++    "Range execution includes both endpoint cells and does not use numeric cell indexes.",
++    "Execution uses VS Code's native notebook.cell.execute path for each code cell, so VS Code/Jupyter handles kernel selection on the real run path; the bridge awaits the cell execution summary or per-cell timeout.",
++    "Range targets run code cells sequentially and stop on the first failed or timed-out code cell.",
++    "Use this after editing code cells when execution validation matters. Default timeout is 300000 ms per cell; maximum is 600000 ms.",
++  ].join("\n"),
++
++  output: [
++    "Read outputs for a notebook cell through VS Code and return artifact-first summaries.",
++    "filePath is required. Use this after summary or run when a target cell has outputs. Prefer cellId=#VSC-xxx so inserts/deletes do not shift the target.",
++    "Small text output may be inlined. Images, HTML, JSON, and large text are written under .opencode/cache/notebook-outputs/ and summarized by artifact path.",
++    "Do not use this to inspect source code; use vscode_notebook_source for notebook source.",
++  ].join("\n"),
++
++  edit: [
++    "Edit VS Code notebook cells with editType=insert, edit, or delete.",
++    "For insert, cellId=TOP inserts at the top, cellId=BOTTOM appends, and cellId=#VSC-xxx inserts after that anchor cell. newCode is required.",
++    "For edit, pass cellId=#VSC-xxx. Use oldCode/newCode for precise string-match replacement, or newCode without oldCode for full-cell replacement. A language-only edit changes the cell kind/language while preserving source.",
++    "For delete, pass cellId=#VSC-xxx. Use language='markdown' for Markdown cells; other languages create or keep code cells, usually 'python'. Do not use this tool for ordinary text files.",
++    "After any successful edit, call vscode_notebook_summary again before further cell-index-sensitive operations.",
++  ].join("\n"),
++
++  env: [
++    "Report VS Code notebook runtime state and saved notebook metadata.",
++    "filePath is required. Use this when debugging kernel, interpreter, package, working-directory, or environment issues.",
++    "The active runtime is probed from VS Code/Jupyter when available. Saved .ipynb kernelspec and language_info metadata is reported separately and is not treated as the active runtime.",
++  ].join("\n"),
++}
+diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f46fb2f04aa4dde4ca6d0dec2bd7cd9807c90fbf
+--- /dev/null
++++ b/packages/opencode/src/plugin/vscode-bridge.ts
+@@ -0,0 +1,178 @@
++import { Effect } from "effect"
++import { tool, type ToolContext } from "@opencode-ai/plugin"
++import { z } from "zod"
++import * as VscodeBridge from "@/ide/vscode-bridge"
++import { VscodeNotebookDescriptions } from "./vscode-bridge-descriptions"
++
++const requiredFilePath = {
++  filePath: z
++    .string()
++    .describe("Absolute notebook path or file URI. Required; the bridge never infers a notebook from VS Code focus or open documents."),
++}
++
++const optionalCellId = {
++  cellId: z
++    .string()
++    .optional()
++    .describe("Stable notebook cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx. Prefer this over display indexes."),
++}
++
++const requiredEditCellId = {
++  cellId: z
++    .string()
++    .describe(
++      "Target cell ID. Use #VSC-xxxxxxxx from vscode_notebook_summary. For editType=insert, use TOP, BOTTOM, or a #VSC cell ID to insert after that cell.",
++    ),
++}
++
++const sourceArgs = {
++  ...requiredFilePath,
++  ...optionalCellId,
++  offset: z
++    .number()
++    .int()
++    .positive()
++    .optional()
++    .describe("1-based global virtual source line offset. With cellId, omit this to start at that cell's first global line."),
++  limit: z
++    .number()
++    .int()
++    .positive()
++    .max(1000)
++    .optional()
++    .describe("Maximum rendered source lines to return, capped at 1000."),
++}
++
++const runArgs = {
++  ...requiredFilePath,
++  type: z
++    .enum(["cell", "range"])
++    .optional()
++    .describe("Optional run kind hint. The bridge runs a range whenever endCellId is provided; otherwise it runs one cell."),
++  cellId: z.string().describe("Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx."),
++  endCellId: z
++    .string()
++    .optional()
++    .describe("Stable ending cell ID, formatted like #VSC-xxxxxxxx. When provided, the bridge runs from cellId through this cell, inclusive."),
++  timeoutMs: z
++    .number()
++    .int()
++    .positive()
++    .max(600_000)
++    .optional()
++    .describe("Per-cell execution timeout in milliseconds. Defaults to 300000, maximum 600000."),
++}
++
++const outputArgs = {
++  ...requiredFilePath,
++  ...optionalCellId,
++}
++
++const editArgs = {
++  ...requiredFilePath,
++  ...requiredEditCellId,
++  editType: z
++    .enum(["insert", "edit", "delete"])
++    .describe("Notebook edit kind: insert a new cell, edit an existing cell, or delete the target cell."),
++  oldCode: z
++    .union([z.string(), z.array(z.string())])
++    .optional()
++    .describe("Existing source fragment to replace inside the target cell. It must identify one unique match; include enough surrounding lines from vscode_notebook_source."),
++  newCode: z
++    .union([z.string(), z.array(z.string())])
++    .optional()
++    .describe("New source for insert or edit. Required for insert, full-cell replacement, and oldCode replacement. Do not wrap in Markdown fences unless the fences are literal content."),
++  language: z
++    .string()
++    .optional()
++    .describe("Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source."),
++}
++
++async function call(
++  endpoint: string,
++  args: Record<string, unknown>,
++  context: Pick<ToolContext, "directory" | "abort">,
++  timeoutMs?: number,
++) {
++  const value = await VscodeBridge.callBridge({
++    cwd: context.directory,
++    path: endpoint,
++    body: args,
++    filePath: typeof args.filePath === "string" ? args.filePath : undefined,
++    signal: context.abort,
++    timeoutMs,
++  })
++  return VscodeBridge.summaryOnly(value)
++}
++
++async function ask(context: ToolContext, permission: string, args: Record<string, unknown>) {
++  const pattern = typeof args.filePath === "string" ? args.filePath : "*"
++  await Effect.runPromise(
++    context.ask({
++      permission,
++      patterns: [pattern],
++      always: [pattern],
++      metadata: { args },
++    }),
++  )
++}
++
++export const VscodeBridgePlugin = async () => ({
++  tool: {
++    vscode_notebook_summary: tool({
++      description: VscodeNotebookDescriptions.summary,
++      args: requiredFilePath,
++      execute: async (args, context) => ({
++        output: await call("/notebook/summary", args, context, 10_000),
++        metadata: { endpoint: "/notebook/summary" },
++      }),
++    }),
++    vscode_notebook_source: tool({
++      description: VscodeNotebookDescriptions.source,
++      args: sourceArgs,
++      execute: async (args, context) => ({
++        output: await call("/notebook/source", args, context, 10_000),
++        metadata: { endpoint: "/notebook/source" },
++      }),
++    }),
++    vscode_notebook_run: tool({
++      description: VscodeNotebookDescriptions.run,
++      args: runArgs,
++      execute: async (args, context) => {
++        await ask(context, "vscode_notebook_run", args)
++        const timeoutMs = args.timeoutMs ?? 300_000
++        return {
++          output: await call("/notebook/run", { ...args, timeoutMs }, context, timeoutMs + 5_000),
++          metadata: { endpoint: "/notebook/run" },
++        }
++      },
++    }),
++    vscode_notebook_output: tool({
++      description: VscodeNotebookDescriptions.output,
++      args: outputArgs,
++      execute: async (args, context) => ({
++        output: await call("/notebook/output", args, context, 30_000),
++        metadata: { endpoint: "/notebook/output" },
++      }),
++    }),
++    vscode_notebook_edit: tool({
++      description: VscodeNotebookDescriptions.edit,
++      args: editArgs,
++      execute: async (args, context) => {
++        await ask(context, "edit", args)
++        return {
++          output: await call("/notebook/edit", args, context, 30_000),
++          metadata: { endpoint: "/notebook/edit" },
++        }
++      },
++    }),
++    vscode_notebook_env: tool({
++      description: VscodeNotebookDescriptions.env,
++      args: requiredFilePath,
++      execute: async (args, context) => ({
++        output: await call("/notebook/env", args, context, 10_000),
++        metadata: { endpoint: "/notebook/env" },
++      }),
++    }),
++  },
++})
+diff --git a/packages/opencode/test/ide/vscode-bridge.test.ts b/packages/opencode/test/ide/vscode-bridge.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..99f196fee6948feb13bfd98ddb72a78f069cd670
+--- /dev/null
++++ b/packages/opencode/test/ide/vscode-bridge.test.ts
+@@ -0,0 +1,132 @@
++import { afterEach, describe, expect, test } from "bun:test"
++import fs from "fs/promises"
++import http from "http"
++import os from "os"
++import path from "path"
++import * as VscodeBridge from "../../src/ide/vscode-bridge"
++
++const originalRegistryDir = process.env.OPENCODE_IDE_REGISTRY_DIR
++const originalPort = process.env.OPENCODE_VSCODE_BRIDGE_PORT
++const originalToken = process.env.OPENCODE_VSCODE_BRIDGE_TOKEN
++const tempDirs: string[] = []
++
++afterEach(async () => {
++  restoreEnv("OPENCODE_IDE_REGISTRY_DIR", originalRegistryDir)
++  restoreEnv("OPENCODE_VSCODE_BRIDGE_PORT", originalPort)
++  restoreEnv("OPENCODE_VSCODE_BRIDGE_TOKEN", originalToken)
++  await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })))
++})
++
++describe("vscode bridge discovery", () => {
++  test("env bridge is preferred when healthy", async () => {
++    using server = await bridgeServer()
++    const dir = await tempRegistry()
++    await writeEntry(dir, "registry", server.port, "/tmp/project")
++    process.env.OPENCODE_VSCODE_BRIDGE_PORT = String(server.port)
++    process.env.OPENCODE_VSCODE_BRIDGE_TOKEN = "env-token"
++
++    const bridge = await VscodeBridge.resolveBridge({ cwd: "/tmp/project" })
++
++    expect(bridge.source).toBe("env")
++    expect(bridge.token).toBe("env-token")
++  })
++
++  test("selects registry bridge matching the requested file path", async () => {
++    using first = await bridgeServer()
++    using second = await bridgeServer()
++    const dir = await tempRegistry()
++    await writeEntry(dir, "first", first.port, "/tmp/project-a")
++    await writeEntry(dir, "second", second.port, "/tmp/project-b")
++
++    const bridge = await VscodeBridge.resolveBridge({
++      cwd: "/tmp/project-a",
++      filePath: "/tmp/project-b/demo.ipynb",
++    })
++
++    expect(bridge.id).toBe("second")
++  })
++
++  test("rejects file paths that do not match any live VS Code workspace", async () => {
++    using server = await bridgeServer()
++    const dir = await tempRegistry()
++    await writeEntry(dir, "registry", server.port, "/tmp/project")
++
++    await expect(
++      VscodeBridge.resolveBridge({
++        cwd: "/tmp/project",
++        filePath: "/tmp/pro ject/demo.ipynb",
++      }),
++    ).rejects.toThrow("No live VS Code bridge workspace matches filePath")
++  })
++
++  test("ignores and removes stale registry entries", async () => {
++    const dir = await tempRegistry()
++    await writeEntry(dir, "stale", 9, "/tmp/project", Date.now() - 60_000)
++
++    await expect(VscodeBridge.resolveBridge({ cwd: "/tmp/project", staleMs: 100 })).rejects.toThrow(
++      "No live VS Code bridge",
++    )
++    await expect(fs.stat(path.join(dir, "stale.json"))).rejects.toThrow()
++  })
++})
++
++async function tempRegistry() {
++  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-vscode-bridge-"))
++  tempDirs.push(dir)
++  process.env.OPENCODE_IDE_REGISTRY_DIR = dir
++  delete process.env.OPENCODE_VSCODE_BRIDGE_PORT
++  delete process.env.OPENCODE_VSCODE_BRIDGE_TOKEN
++  return dir
++}
++
++async function writeEntry(dir: string, id: string, port: number, workspace: string, updatedAt = Date.now()) {
++  await fs.writeFile(
++    path.join(dir, `${id}.json`),
++    JSON.stringify({
++      schema: 1,
++      id,
++      pid: process.pid,
++      port,
++      token: `${id}-token`,
++      host: "127.0.0.1",
++      transport: "http",
++      ideName: "Visual Studio Code",
++      ideKind: "vscode",
++      remoteName: null,
++      createdAt: updatedAt,
++      updatedAt,
++      workspaceFolders: [{ name: path.basename(workspace), uri: `file://${workspace}`, fsPath: workspace }],
++      active: {},
++      capabilities: { notebook: true },
++    }),
++  )
++}
++
++async function bridgeServer() {
++  const server = http.createServer((request, response) => {
++    if (request.url === "/health") {
++      response.writeHead(200, { "Content-Type": "application/json" })
++      response.end(JSON.stringify({ ok: true }))
++      return
++    }
++    response.writeHead(404)
++    response.end()
++  })
++  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
++  const address = server.address()
++  if (!address || typeof address === "string") throw new Error("missing test server port")
++  return {
++    port: address.port,
++    [Symbol.dispose]() {
++      server.close()
++    },
++  }
++}
++
++function restoreEnv(key: string, value: string | undefined) {
++  if (value === undefined) {
++    delete process.env[key]
++    return
++  }
++  process.env[key] = value
++}
+diff --git a/sdks/vscode/src/bridge-registry.ts b/sdks/vscode/src/bridge-registry.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d6efc45865867f7a4515539ac55c24568dc6d161
+--- /dev/null
++++ b/sdks/vscode/src/bridge-registry.ts
+@@ -0,0 +1,94 @@
++import * as fs from "node:fs/promises"
++import * as os from "node:os"
++import * as path from "node:path"
++import * as vscode from "vscode"
++
++const HOST = "127.0.0.1"
++const HEARTBEAT_MS = 5_000
++
++export type RegistryHandle = {
++  id: string
++  dispose(): Promise<void>
++}
++
++type RegistryInput = {
++  id: string
++  port: number
++  token: string
++  createdAt?: number
++}
++
++export async function registerBridge(input: RegistryInput): Promise<RegistryHandle> {
++  const dir = registryDir()
++  await fs.mkdir(dir, { recursive: true, mode: 0o700 })
++  await chmod(dir, 0o700)
++
++  const file = path.join(dir, `${input.id}.json`)
++  const createdAt = Date.now()
++  const write = () => writeRegistryFile(file, manifest({ ...input, createdAt }))
++  await write()
++  const timer = setInterval(() => void write(), HEARTBEAT_MS)
++
++  return {
++    id: input.id,
++    async dispose() {
++      clearInterval(timer)
++      await fs.unlink(file).catch((error) => {
++        if (error?.code !== "ENOENT") throw error
++      })
++    },
++  }
++}
++
++export function registryDir() {
++  return process.env.OPENCODE_IDE_REGISTRY_DIR ?? path.join(xdgStateHome(), "opencode", "ide")
++}
++
++export function manifest(input: RegistryInput) {
++  const now = Date.now()
++  return {
++    schema: 1,
++    id: input.id,
++    pid: process.pid,
++    port: input.port,
++    token: input.token,
++    host: HOST,
++    transport: "http",
++    ideName: vscode.env.appName,
++    ideKind: "vscode",
++    remoteName: vscode.env.remoteName ?? null,
++    createdAt: input.createdAt ?? now,
++    updatedAt: now,
++    workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((folder) => ({
++      name: folder.name,
++      uri: folder.uri.toString(),
++      fsPath: folder.uri.fsPath,
++    })),
++    active: {
++      textEditor: vscode.window.activeTextEditor?.document.uri.toString(),
++      notebook: vscode.window.activeNotebookEditor?.notebook.uri.toString(),
++    },
++    capabilities: {
++      notebook: true,
++      notebookRun: true,
++      notebookEdit: true,
++      notebookOutputArtifacts: true,
++      notebookSource: true,
++      lmToolsProxy: false,
++    },
++  }
++}
++
++async function writeRegistryFile(file: string, value: unknown) {
++  await fs.writeFile(file, JSON.stringify(value, null, 2), { mode: 0o600 })
++  await chmod(file, 0o600)
++}
++
++async function chmod(file: string, mode: number) {
++  if (process.platform === "win32") return
++  await fs.chmod(file, mode)
++}
++
++function xdgStateHome() {
++  return process.env.XDG_STATE_HOME ?? path.join(os.homedir(), ".local", "state")
++}
+diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
+index 6acf910e11f28104f2e65eabbca802b857c0294e..b716e104c47e5212ae4fa71458130294c2a1bc8a 100644
+--- a/sdks/vscode/src/bridge.ts
++++ b/sdks/vscode/src/bridge.ts
+@@ -10,8 +10,8 @@
+  *   GET  /health                – liveness check
+  *   POST /notebook/summary      – notebook structure overview
+  *   POST /notebook/source       – paginated virtual source text
+- *   POST /notebook/run          – execute cells
+- *   POST /notebook/edit         – insert/delete/replace cells
++ *   POST /notebook/run          – execute one cell or a cell-id range
++ *   POST /notebook/edit         – insert/edit/delete cells
+  *   POST /notebook/output       – artifact-first output export
+  *   POST /notebook/cell-output  – alias for /notebook/output
+  *   POST /notebook/env          – kernel/environment snapshot
+@@ -24,6 +24,7 @@ import { runNotebook } from "./notebook/run"
+ import { editNotebook } from "./notebook/edit"
+ import { readNotebookCellOutput } from "./notebook/output"
+ import { notebookEnv } from "./notebook/env"
++import { manifest, registerBridge, type RegistryHandle } from "./bridge-registry"
+ 
+ const BRIDGE_HOST = "127.0.0.1"
+ 
+@@ -31,8 +32,11 @@ export type BridgeInfo = { port: number; token: string }
+ 
+ /** The active server instance — closed on extension deactivation. */
+ let server: http.Server | undefined
++let registry: RegistryHandle | undefined
+ 
+-export function closeBridge() {
++export async function closeBridge() {
++  await registry?.dispose()
++  registry = undefined
+   server?.close()
+   server = undefined
+ }
+@@ -47,6 +51,7 @@ export function closeBridge() {
+  */
+ export async function startBridge(output: { appendLine(value: string): void }): Promise<BridgeInfo> {
+   const { randomUUID } = await import("node:crypto")
++  const id = randomUUID()
+   const token = randomUUID()
+ 
+   const httpServer = http.createServer(async (request, response) => {
+@@ -54,6 +59,10 @@ export async function startBridge(output: { appendLine(value: string): void }):
+     output.appendLine(`[bridge] ${request.method} ${url.pathname}`)
+ 
+     try {
++      if (!safeLocalRequest(request)) {
++        return writeJson(response, 403, { ok: false, error: "Forbidden" })
++      }
++
+       // Health check — no auth required
+       if (request.method === "GET" && url.pathname === "/health") {
+         return writeJson(response, 200, { ok: true, service: "opencode-vscode-bridge" })
+@@ -64,6 +73,10 @@ export async function startBridge(output: { appendLine(value: string): void }):
+         return writeJson(response, 401, { ok: false, error: "Unauthorized" })
+       }
+ 
++      if (request.method === "GET" && url.pathname === "/manifest") {
++        return writeJson(response, 200, manifest({ id, port: addressPort(httpServer), token: "<redacted>" }))
++      }
++
+       // Route to notebook handlers
+       const result = await routeRequest(request.method ?? "", url.pathname, request, output)
+       if (result !== undefined) {
+@@ -90,11 +103,17 @@ export async function startBridge(output: { appendLine(value: string): void }):
+ 
+       const base = `http://${BRIDGE_HOST}:${address.port}`
+       output.appendLine(`[bridge] listening on ${base}`)
+-      output.appendLine(`[bridge] token ${token}`)
++      output.appendLine("[bridge] token <redacted>")
+       for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env"]) {
+-        output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}${ep === "health" ? "" : `?token=${token}`}`)
++        output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}`)
+       }
+-      resolve({ port: address.port, token })
++      registerBridge({ id, port: address.port, token })
++        .then((handle) => {
++          registry = handle
++          output.appendLine(`[bridge] registry ${handle.id}`)
++          resolve({ port: address.port, token })
++        })
++        .catch(reject)
+     })
+   })
+ }
+@@ -117,8 +136,11 @@ async function routeRequest(
+   }
+ 
+   switch (pathname) {
+-    case "/notebook/summary":
+-      return await notebookSummary(stringProp(body, "filePath"))
++    case "/notebook/summary": {
++      const filePath = stringProp(body, "filePath")
++      if (!filePath) throw new Error("filePath is required")
++      return await notebookSummary(filePath)
++    }
+ 
+     case "/notebook/source":
+       return await notebookSource(body)
+@@ -131,14 +153,18 @@ async function routeRequest(
+ 
+     case "/notebook/output":
+     case "/notebook/cell-output": {
+-      const filePath = typeof body.filePath === "string" ? body.filePath : undefined
++      const filePath = stringProp(body, "filePath")
++      if (!filePath) throw new Error("filePath is required")
+       const cellId = typeof body.cellId === "string" ? body.cellId : undefined
+-      output.appendLine(`[bridge] reading raw notebook output ${filePath ?? "<active>"} cellId=${cellId ?? "<auto>"}`)
++      output.appendLine(`[bridge] reading raw notebook output ${filePath} cellId=${cellId ?? "<auto>"}`)
+       return await readNotebookCellOutput(filePath, undefined, cellId)
+     }
+ 
+-    case "/notebook/env":
+-      return await notebookEnv(isRecord(body) ? stringProp(body, "filePath") : undefined)
++    case "/notebook/env": {
++      const filePath = stringProp(body, "filePath")
++      if (!filePath) throw new Error("filePath is required")
++      return await notebookEnv(filePath)
++    }
+   }
+ 
+   return undefined
+@@ -149,7 +175,20 @@ async function routeRequest(
+ // ---------------------------------------------------------------------------
+ 
+ function authorized(request: http.IncomingMessage, url: URL, token: string) {
+-  return request.headers.authorization === `Bearer ${token}` || url.searchParams.get("token") === token
++  void url
++  return request.headers.authorization === `Bearer ${token}`
++}
++
++function safeLocalRequest(request: http.IncomingMessage) {
++  if (request.headers.origin) return false
++  const host = request.headers.host
++  return !host || host.startsWith("127.0.0.1:") || host.startsWith("localhost:")
++}
++
++function addressPort(httpServer: http.Server) {
++  const address = httpServer.address()
++  if (!address || typeof address === "string") throw new Error("Bridge server port is not available")
++  return address.port
+ }
+ 
+ function writeJson(response: http.ServerResponse, status: number, value: unknown) {
+diff --git a/sdks/vscode/src/extension.ts b/sdks/vscode/src/extension.ts
+index 2a36de9b092ac2d96b8bb6714a63b75ec82ebe80..9b77492ba1832d6a6016e93603b588786792264e 100644
+--- a/sdks/vscode/src/extension.ts
++++ b/sdks/vscode/src/extension.ts
+@@ -20,7 +20,7 @@ const TERMINAL_NAME = "opencode"
+ // ---------------------------------------------------------------------------
+ 
+ export function deactivate() {
+-  closeBridge()
++  return closeBridge()
+ }
+ 
+ export function activate(context: vscode.ExtensionContext) {

@@ -1,0 +1,116 @@
+From f29622f1047b75c6ac97ef35ea44c0207b33f7db Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 29 May 2026 01:03:48 +0800
+Subject: [PATCH] =?UTF-8?q?feat(version):=20=E6=9B=B4=E6=96=B0=E7=89=88?=
+ =?UTF-8?q?=E6=9C=AC=E5=8F=B7=E8=87=B3=201.15.5-smark=EF=BC=8C=E7=A1=AE?=
+ =?UTF-8?q?=E4=BF=9D=E6=96=87=E6=A1=A3=E5=92=8C=E9=85=8D=E7=BD=AE=E4=B8=80?=
+ =?UTF-8?q?=E8=87=B4=E6=80=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
+index 8073df792da6e1b54c75a2efd40edc8b70f19d89..d609fbc3752049b2a5a8562451e99cbf14c935dc 100644
+--- a/.github/workflows/build-opencode.yml
++++ b/.github/workflows/build-opencode.yml
+@@ -4,7 +4,7 @@ on:
+   workflow_dispatch:
+     inputs:
+       version:
+-        description: "Override version, for example 1.15.4-smark. Empty means packages/opencode/package.json version."
++        description: "Override version, for example 1.15.5-smark. Empty means packages/opencode/package.json version."
+         required: false
+         type: string
+   push:
+diff --git a/README.md b/README.md
+index 84906357fd4d1a71ca5cbae9890181d24b6ec761..14fbdb960e0d8ab7d5743ec3308e3fa32772a306 100644
+--- a/README.md
++++ b/README.md
+@@ -12,7 +12,7 @@
+   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
+   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
+   <a href="https://github.com/SMARK2022/opencode/tree/dev"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev-0969da?style=flat-square" /></a>
+-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.4--smark-f97316?style=flat-square" /></a>
++  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.5--smark-f97316?style=flat-square" /></a>
+ </p>
+ 
+ <p align="center">
+@@ -44,7 +44,7 @@
+ 
+ ---
+ 
+-> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.15.4-smark`）。它基于上游 `dev` 分支，重点增强 TUI 交互、会话管理、Token 统计、Windows/PowerShell 兼容、VSCode Notebook 集成、网络代理与安装体验。
++> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.15.5-smark`）。它基于上游 `dev` 分支，重点增强 TUI 交互、会话管理、Token 统计、Windows/PowerShell 兼容、VSCode Notebook 集成、网络代理与安装体验。
+ 
+ ---
+ 
+@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
+ 
+ ```bash
+ curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
+-  bash -s -- --version 1.15.4-smark
++  bash -s -- --version 1.15.5-smark
+ ```
+ 
+-这条命令是完整写法：`bash -s --` 表示让 `bash` 从 stdin 读取 installer，并把后面的 `--version 1.15.4-smark` 作为 installer 参数传入。版本参数可以写 `1.15.4-smark`，也可以写 release tag 形式的 `v1.15.4-smark`。
++这条命令是完整写法：`bash -s --` 表示让 `bash` 从 stdin 读取 installer，并把后面的 `--version 1.15.5-smark` 作为 installer 参数传入。版本参数可以写 `1.15.5-smark`，也可以写 release tag 形式的 `v1.15.5-smark`。
+ 
+ ### 安装脚本行为
+ 
+diff --git a/packages/opencode/package.json b/packages/opencode/package.json
+index 972fd113db8ec51f2d0c4360110e2e200aef0d27..d8fb65546bd79123f091ca609aca93d59ba4e549 100644
+--- a/packages/opencode/package.json
++++ b/packages/opencode/package.json
+@@ -1,6 +1,6 @@
+ {
+   "$schema": "https://json.schemastore.org/package.json",
+-  "version": "1.15.4-smark",
++  "version": "1.15.5-smark",
+   "name": "opencode",
+   "type": "module",
+   "license": "MIT",
+diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
+index 9922ba1a605a4b15b75a13c63b17f7717ba6a162..3bb9b83fbb5439e0820bd561dd511862e18cac80 100644
+--- a/sdks/vscode/README.md
++++ b/sdks/vscode/README.md
+@@ -68,7 +68,7 @@ Build and package from the `sdks/vscode` directory:
+ bun run check-types
+ bun run lint
+ bun run package
+-npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.15.3.vsix"
++npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.15.4.vsix"
+ ```
+ 
+ Or use the bundled shortcut:
+@@ -82,7 +82,7 @@ The shortcut builds first, then packages directly into `dist/`. It intentionally
+ Install:
+ 
+ ```powershell
+-code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.15.3.vsix --force
++code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.15.4.vsix --force
+ ```
+ 
+ ## Architecture
+diff --git a/sdks/vscode/package.json b/sdks/vscode/package.json
+index 1a9af414c1567291563442c6fb5b2634fcd56369..9e9d34834c307b20e1431811a85c6e4d6e73fa98 100644
+--- a/sdks/vscode/package.json
++++ b/sdks/vscode/package.json
+@@ -2,7 +2,7 @@
+   "name": "opencode-ide-bridge",
+   "displayName": "OpenCode IDE Bridge",
+   "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, workspace context sharing, and terminal integration — all on 127.0.0.1 with Bearer-token authentication.",
+-  "version": "1.15.3",
++  "version": "1.15.4",
+   "publisher": "SMARK2022",
+   "homepage": "https://github.com/anomalyco/opencode",
+   "repository": {
+@@ -100,7 +100,7 @@
+     ]
+   },
+   "scripts": {
+-    "vsix": "bun run package && bun x @vscode/vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.15.3.vsix",
++    "vsix": "bun run package && bun x @vscode/vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.15.4.vsix",
+     "compile": "bun run check-types && bun run lint && node esbuild.js",
+     "watch:esbuild": "node esbuild.js --watch",
+     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",

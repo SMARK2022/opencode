@@ -1,0 +1,87 @@
+From 19508edaac3c21a1f6e7f1bd41e950f243f8750b Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 19 Jun 2026 02:26:36 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=20chatgpt-browser-ag?=
+ =?UTF-8?q?ent=20=E5=AD=90=E6=A8=A1=E5=9D=97=E5=B9=B6=E6=9B=B4=E6=96=B0?=
+ =?UTF-8?q?=E7=9B=B8=E5=85=B3=E6=96=87=E6=A1=A3=E8=AF=B4=E6=98=8E?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/.gitignore b/.gitignore
+index 4e4a9c8bae9e5885db0f53d10c50a9939a84e35a..7ad709c81a31c11d1dcd22dbf5bbd5d12164153b 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -33,5 +33,3 @@ logs/
+ **/.artifacts/
+ tsconfig.tsbuildinfo
+ .temp/*
+-!.temp/chatgpt-browser-agent/
+-!.temp/chatgpt-browser-agent/**
+diff --git a/.gitmodules b/.gitmodules
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d55dbd5b65819b170121911e0ff139b8da7bb2c
+--- /dev/null
++++ b/.gitmodules
+@@ -0,0 +1,4 @@
++[submodule "thirdparty/chatgpt-browser-agent"]
++	path = thirdparty/chatgpt-browser-agent
++	url = https://github.com/SMARK2022/chatgpt-browser-agent-smark.git
++	branch = smark/main
+diff --git a/.opencode/opencode.jsonc b/.opencode/opencode.jsonc
+index dfcd2bd137fdc4889d13deed6460cd292599eb71..e5a77a6a25ad9a2d1c5b1eb32864c4010cf4fb6b 100644
+--- a/.opencode/opencode.jsonc
++++ b/.opencode/opencode.jsonc
+@@ -7,7 +7,7 @@
+       "type": "local",
+       "command": [
+         "D:\\Program Files\\nodejs\\node.exe",
+-        "F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\.temp\\chatgpt-browser-agent\\mcp-server.js"
++        "F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\thirdparty\\chatgpt-browser-agent\\mcp-server.js"
+       ],
+       "enabled": true,
+       // opencode 当前同一个 timeout 同时约束连接与工具调用；这里优先保证长回答不会被宿主提前切断。
+diff --git a/README.md b/README.md
+index 1c3cfd1ee8f2623e3c174a0e944205a6b6ccf7d3..6ecda3d0a8ae375a983a7816f32b0e0ebf1d5499 100644
+--- a/README.md
++++ b/README.md
+@@ -234,7 +234,7 @@ SMARK `dev-smark` 分支当前只发布 CLI，不发布桌面应用安装包。
+ 
+ ### 可选 MCP 集成
+ 
+-如果需要 ChatGPT Web 辅助能力，可考虑接入 [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark)。它通过本地 MCP bridge 复用已登录的 ChatGPT 浏览器会话，适合在 OpenCode 中调用 ChatGPT ask、图片生成和 voice/语音转录等能力；安装、授权与浏览器状态管理以该项目 README 为准。
++如果需要 ChatGPT Web 辅助能力，可考虑接入 [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark)。它通过本地 MCP bridge 复用已登录的 ChatGPT 浏览器会话，适合在 OpenCode 中调用 ChatGPT ask、图片生成和 voice/语音转录等能力。本分支已把该项目作为 `thirdparty/chatgpt-browser-agent` submodule 记录；首次检出后运行 `git submodule update --init --recursive thirdparty/chatgpt-browser-agent`，再进入该目录运行 `npm ci` 安装依赖。登录、授权与浏览器状态管理仍以该项目 README 为准。
+ 
+ ### Provider 与模型
+ 
+diff --git a/docs/readme/README.en.md b/docs/readme/README.en.md
+index 2076a5a029d5158a02af9b79af16517f7658b3ef..93a5077b72dcb31d0e34095cfc22ea0438ba0058 100644
+--- a/docs/readme/README.en.md
++++ b/docs/readme/README.en.md
+@@ -234,7 +234,7 @@ Internal stats prefer request usage data and fall back to message metadata for o
+ 
+ ### Optional MCP Integration
+ 
+-If you need ChatGPT Web assistance, consider connecting [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark). It reuses a logged-in ChatGPT browser session through a local MCP bridge, making it suitable for ChatGPT ask, image generation, and voice transcription from OpenCode; installation, authorization, and browser-state handling remain governed by that project's README.
++If you need ChatGPT Web assistance, consider connecting [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark). It reuses a logged-in ChatGPT browser session through a local MCP bridge, making it suitable for ChatGPT ask, image generation, and voice transcription from OpenCode. This branch records that project as the `thirdparty/chatgpt-browser-agent` submodule; after a fresh checkout, run `git submodule update --init --recursive thirdparty/chatgpt-browser-agent`, then run `npm ci` inside that directory. Login, authorization, and browser-state handling remain governed by that project's README.
+ 
+ ### Provider And Models
+ 
+diff --git a/docs/readme/README.zht.md b/docs/readme/README.zht.md
+index 3d631540f650dd1572ec26f3805bf51be1eea524..d5cef28cd1ce3112bcbbeb4948c2d0876a7cd625 100644
+--- a/docs/readme/README.zht.md
++++ b/docs/readme/README.zht.md
+@@ -234,7 +234,7 @@ SMARK `dev-smark` 分支目前只發布 CLI，不發布桌面應用安裝包。
+ 
+ ### 可選 MCP 整合
+ 
+-如果需要 ChatGPT Web 輔助能力，可考慮接入 [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark)。它透過本地 MCP bridge 復用已登入的 ChatGPT 瀏覽器會話，適合在 OpenCode 中呼叫 ChatGPT ask、圖片生成和 voice/語音轉錄等能力；安裝、授權與瀏覽器狀態管理以該專案 README 為準。
++如果需要 ChatGPT Web 輔助能力，可考慮接入 [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark)。它透過本地 MCP bridge 復用已登入的 ChatGPT 瀏覽器會話，適合在 OpenCode 中呼叫 ChatGPT ask、圖片生成和 voice/語音轉錄等能力。本分支已將該專案記錄為 `thirdparty/chatgpt-browser-agent` submodule；首次 checkout 後請執行 `git submodule update --init --recursive thirdparty/chatgpt-browser-agent`，再進入該目錄執行 `npm ci` 安裝依賴。登入、授權與瀏覽器狀態管理仍以該專案 README 為準。
+ 
+ ### Provider 與模型
+ 
+diff --git a/.temp/chatgpt-browser-agent b/thirdparty/chatgpt-browser-agent
+similarity index 100%
+rename from .temp/chatgpt-browser-agent
+rename to thirdparty/chatgpt-browser-agent

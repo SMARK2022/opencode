@@ -1,0 +1,90 @@
+From 8304c6752cef943e70fe3a7b091489bd09a8448f Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 2 May 2026 19:25:40 +0800
+Subject: [PATCH] =?UTF-8?q?fix:=20=E6=9B=B4=E6=96=B0=E6=9C=80=E5=A4=A7?=
+ =?UTF-8?q?=E5=AD=97=E8=8A=82=E6=95=B0=E9=99=90=E5=88=B6=EF=BC=8C=E4=BB=8E?=
+ =?UTF-8?q?=2051200=20=E8=B0=83=E6=95=B4=E4=B8=BA=2024576=EF=BC=8C?=
+ =?UTF-8?q?=E4=BB=A5=E4=BC=98=E5=8C=96=E5=86=85=E5=AD=98=E4=BD=BF=E7=94=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
+index 767857a2d4c2be199a0f198e05a4ec65e0d1dd88..4f0bb18152c348c7379c21d205a9842b40cb63f3 100644
+--- a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
++++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
+@@ -574,7 +574,7 @@ function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
+     .replaceAll("${shellGuidance}", shellGuidance)
+     .replaceAll("${listCommand}", listCommand)
+     .replaceAll("${maxLines}", "2000")
+-    .replaceAll("${maxBytes}", "51200")
++    .replaceAll("${maxBytes}", "24576")
+     .replaceAll("${compressionGuidance}", "")
+ }
+ 
+diff --git a/packages/opencode/src/config/config.ts b/packages/opencode/src/config/config.ts
+index 48d4d94ccc4c4f82387757fefc8bebaaf5a498e6..927c66e3c834f2708beb64e251dc371ea6525beb 100644
+--- a/packages/opencode/src/config/config.ts
++++ b/packages/opencode/src/config/config.ts
+@@ -213,7 +213,7 @@ export const Info = Schema.Struct({
+         description: "Maximum lines of tool output before it is truncated and saved to disk (default: 2000)",
+       }),
+       max_bytes: Schema.optional(PositiveInt).annotate({
+-        description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 51200)",
++        description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)",
+       }),
+       bash_compression: Schema.optional(Schema.Boolean).annotate({
+         description:
+diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
+index 86f014d07d40260d65eaf1f5ace8d2161b2a8891..ffef183c562de260710b84ed6006456b8ec35e05 100644
+--- a/packages/opencode/src/tool/read.ts
++++ b/packages/opencode/src/tool/read.ts
+@@ -16,7 +16,7 @@ import type { MessageV2 } from "../session/message-v2"
+ const DEFAULT_READ_LIMIT = 2000
+ const MAX_LINE_LENGTH = 2000
+ const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
+-const MAX_BYTES = 50 * 1024
++const MAX_BYTES = 24 * 1024
+ const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
+ const SAMPLE_BYTES = 4096
+ const MAX_CONTENT_TOKENS = 16000
+diff --git a/packages/opencode/src/tool/truncate.ts b/packages/opencode/src/tool/truncate.ts
+index ffc16c0b9f999d545780478d3c33f70dd7501e43..98b867259141dae262ae3aa2d8104e1109d24bf9 100644
+--- a/packages/opencode/src/tool/truncate.ts
++++ b/packages/opencode/src/tool/truncate.ts
+@@ -14,7 +14,7 @@ const log = Log.create({ service: "truncation" })
+ const RETENTION = Duration.days(7)
+ 
+ export const MAX_LINES = 2000
+-export const MAX_BYTES = 50 * 1024
++export const MAX_BYTES = 24 * 1024
+ export const DIR = TRUNCATION_DIR
+ export const GLOB = path.join(TRUNCATION_DIR, "*")
+ 
+diff --git a/packages/opencode/test/tool/truncation.test.ts b/packages/opencode/test/tool/truncation.test.ts
+index 9a01f95cd1c72d16153ea117c12c7c4b1de03e90..b7b6a10490186df6f958b786bbee2c62c7bb8df6 100644
+--- a/packages/opencode/test/tool/truncation.test.ts
++++ b/packages/opencode/test/tool/truncation.test.ts
+@@ -100,7 +100,7 @@ describe("Truncate", () => {
+ 
+     test("uses default MAX_LINES and MAX_BYTES", () => {
+       expect(Truncate.MAX_LINES).toBe(2000)
+-      expect(Truncate.MAX_BYTES).toBe(50 * 1024)
++      expect(Truncate.MAX_BYTES).toBe(24 * 1024)
+     })
+ 
+     it.live("limits() falls back to MAX_LINES/MAX_BYTES when Config is not provided", () =>
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+index adac98aab37ff2547ec5932b34b7552ddad1211f..4d0246af954e64bdf2c077c7ecbb90eb417d9e26 100644
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -1647,7 +1647,7 @@ export type Config = {
+      */
+     max_lines?: number
+     /**
+-     * Maximum bytes of tool output before it is truncated and saved to disk (default: 51200)
++     * Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)
+      */
+     max_bytes?: number
+     /**

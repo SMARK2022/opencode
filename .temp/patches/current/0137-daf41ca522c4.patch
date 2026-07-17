@@ -1,0 +1,439 @@
+From daf41ca522c47782efee51eb2a05fafcfce6dc89 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 13 May 2026 19:20:58 +0800
+Subject: [PATCH] =?UTF-8?q?feat(session):=20=E6=B7=BB=E5=8A=A0=E5=B7=A5?=
+ =?UTF-8?q?=E5=85=B7=E5=AE=8C=E6=88=90=E7=8A=B6=E6=80=81=E6=9B=B4=E6=96=B0?=
+ =?UTF-8?q?=E5=92=8C=E6=89=8B=E5=8A=A8=E5=8E=8B=E7=BC=A9=E5=8A=9F=E8=83=BD?=
+ =?UTF-8?q?=EF=BC=8C=E4=BC=98=E5=8C=96=E4=BC=9A=E8=AF=9D=E7=AE=A1=E7=90=86?=
+ =?UTF-8?q?=20feat(text-part):=20=E4=BC=98=E5=8C=96=E6=96=87=E6=9C=AC?=
+ =?UTF-8?q?=E9=83=A8=E5=88=86=E7=9A=84=E6=B8=B2=E6=9F=93=E9=80=BB=E8=BE=91?=
+ =?UTF-8?q?=EF=BC=8C=E6=94=AF=E6=8C=81=E5=8A=A8=E6=80=81=E5=86=85=E5=AE=B9?=
+ =?UTF-8?q?=E6=9B=B4=E6=96=B0=E5=92=8C=E6=B5=81=E5=BC=8F=E5=A4=84=E7=90=86?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
+index 39d751f5886f0281906ee9f79324f76227ee94b2..0a6bf41211859dd33e1f7b43dd76b5e5d844a18b 100644
+--- a/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
++++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx
+@@ -6,6 +6,7 @@ import { useTheme } from "@tui/context/theme"
+ import { useLocal } from "@tui/context/local"
+ import { useKeyboard, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
+ import { TextAttributes, type BoxRenderable, type SyntaxStyle } from "@opentui/core"
++import { Flag } from "@opencode-ai/core/flag/flag"
+ import { Locale } from "@/util/locale"
+ import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
+ import path from "path"
+@@ -91,6 +92,7 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
+                       last={lastAssistant()?.id === message.id}
+                       syntax={syntax()}
+                       subtleSyntax={subtleSyntax()}
++                      width={dimensions().width}
+                       start={lastUserCreated(index())}
+                     />
+                   </Match>
+@@ -288,6 +290,7 @@ function AssistantMessage(props: {
+   last: boolean
+   syntax: SyntaxStyle
+   subtleSyntax: SyntaxStyle
++  width: number
+   start?: number
+ }) {
+   const { theme } = useTheme()
+@@ -311,6 +314,7 @@ function AssistantMessage(props: {
+                 part={part as SessionMessageAssistantText}
+                 syntax={props.syntax}
+                 streaming={!props.message.time.completed}
++                width={props.width}
+               />
+             </Match>
+             <Match when={part.type === "reasoning"}>
+@@ -318,6 +322,7 @@ function AssistantMessage(props: {
+                 part={part as SessionMessageAssistantReasoning}
+                 subtleSyntax={props.subtleSyntax}
+                 streaming={!props.message.time.completed}
++                width={props.width}
+               />
+             </Match>
+             <Match when={part.type === "tool"}>
+@@ -360,20 +365,60 @@ function AssistantMessage(props: {
+   )
+ }
+ 
+-function AssistantText(props: { part: SessionMessageAssistantText; syntax: SyntaxStyle; streaming: boolean }) {
++function AssistantText(props: {
++  part: SessionMessageAssistantText
++  syntax: SyntaxStyle
++  streaming: boolean
++  width: number
++}) {
+   const { theme } = useTheme()
++  const content = createMemo(() => props.part.text.trim())
++  const completedKey = createMemo(() => `${props.width}\u0000${content()}`)
+   return (
+-    <Show when={props.part.text.trim()}>
++    <Show when={content()}>
+       <box paddingLeft={3} marginTop={1} flexShrink={0} id="text">
+-        <code
+-          filetype="markdown"
+-          drawUnstyledText={props.streaming}
+-          streaming={props.streaming}
+-          syntaxStyle={props.syntax}
+-          content={props.part.text.trim()}
+-          conceal={true}
+-          fg={theme.text}
+-        />
++        <Switch>
++          <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !props.streaming}>
++            <Show keyed when={completedKey()}>
++              {(_key) => (
++                <markdown
++                  syntaxStyle={props.syntax}
++                  streaming={false}
++                  content={content()}
++                  conceal={true}
++                  fg={theme.markdownText}
++                  bg={theme.background}
++                />
++              )}
++            </Show>
++          </Match>
++          <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !props.streaming}>
++            <Show keyed when={completedKey()}>
++              {(_key) => (
++                <code
++                  filetype="markdown"
++                  drawUnstyledText={false}
++                  streaming={false}
++                  syntaxStyle={props.syntax}
++                  content={content()}
++                  conceal={true}
++                  fg={theme.text}
++                />
++              )}
++            </Show>
++          </Match>
++          <Match when={props.streaming}>
++            <code
++              filetype="markdown"
++              drawUnstyledText={false}
++              streaming={true}
++              syntaxStyle={props.syntax}
++              content={content()}
++              conceal={true}
++              fg={theme.text}
++            />
++          </Match>
++        </Switch>
+       </box>
+     </Show>
+   )
+@@ -383,9 +428,20 @@ function AssistantReasoning(props: {
+   part: SessionMessageAssistantReasoning
+   subtleSyntax: SyntaxStyle
+   streaming: boolean
++  width: number
+ }) {
+   const { theme } = useTheme()
++  const renderer = useRenderer()
++  const [expanded, setExpanded] = createSignal(false)
+   const content = createMemo(() => props.part.text.replace("[REDACTED]", "").trim())
++  const lines = createMemo(() => content().split("\n"))
++  const PREVIEW = 5
++  const overflow = createMemo(() => lines().length > PREVIEW)
++  const preview = createMemo(() => {
++    if (expanded() || !overflow()) return content()
++    return [...lines().slice(0, PREVIEW), "…"].join("\n")
++  })
++  const completedKey = createMemo(() => `${props.width}\u0000${preview()}`)
+   return (
+     <Show when={content()}>
+       <box
+@@ -396,16 +452,49 @@ function AssistantReasoning(props: {
+         customBorderChars={SplitBorder.customBorderChars}
+         borderColor={theme.backgroundElement}
+         flexShrink={0}
++        onMouseUp={() => {
++          if (renderer.getSelection()?.getSelectedText()) return
++          setExpanded((prev) => !prev)
++        }}
+       >
+-        <code
+-          filetype="markdown"
+-          drawUnstyledText={props.streaming}
+-          streaming={props.streaming}
+-          syntaxStyle={props.subtleSyntax}
+-          content={"_Thinking:_ " + content()}
+-          conceal={true}
+-          fg={theme.textMuted}
+-        />
++        <box>
++          <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>
++            Thinking ({content().length.toLocaleString()} chars):
++          </text>
++        </box>
++        <Switch>
++          <Match when={props.streaming}>
++            <code
++              filetype="markdown"
++              drawUnstyledText={false}
++              streaming={true}
++              syntaxStyle={props.subtleSyntax}
++              content={preview()}
++              conceal={true}
++              fg={theme.textMuted}
++            />
++          </Match>
++          <Match when={!props.streaming}>
++            <Show keyed when={completedKey()}>
++              {(_key) => (
++                <code
++                  filetype="markdown"
++                  drawUnstyledText={false}
++                  streaming={false}
++                  syntaxStyle={props.subtleSyntax}
++                  content={preview()}
++                  conceal={true}
++                  fg={theme.textMuted}
++                />
++              )}
++            </Show>
++          </Match>
++        </Switch>
++        <Show when={overflow()}>
++          <box>
++            <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
++          </box>
++        </Show>
+       </box>
+     </Show>
+   )
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 91bdc57269cd605ddc6f13273ccb6248789057a8..140bb61a50289f99ae3894efffda4cdec61e78cf 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -1588,6 +1588,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
+     if (expanded() || !overflow()) return renderedContent()
+     return [...lines().slice(0, PREVIEW), "…"].join("\n")
+   })
++  const completedKey = createMemo(() => `${ctx.width}\u0000${preview()}`)
+   return (
+     <Show when={content() && ctx.showThinking()}>
+       <box
+@@ -1612,15 +1613,34 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
+           </text>
+         </box>
+         <box>
+-          <code
+-            filetype="markdown"
+-            drawUnstyledText={streaming()}
+-            streaming={streaming()}
+-            syntaxStyle={subtleSyntax()}
+-            content={preview()}
+-            conceal={ctx.conceal()}
+-            fg={theme.textMuted}
+-          />
++          <Switch>
++            <Match when={streaming()}>
++              <code
++                filetype="markdown"
++                drawUnstyledText={false}
++                streaming={true}
++                syntaxStyle={subtleSyntax()}
++                content={preview()}
++                conceal={ctx.conceal()}
++                fg={theme.textMuted}
++              />
++            </Match>
++            <Match when={!streaming()}>
++              <Show keyed when={completedKey()}>
++                {(_key) => (
++                  <code
++                    filetype="markdown"
++                    drawUnstyledText={false}
++                    streaming={false}
++                    syntaxStyle={subtleSyntax()}
++                    content={preview()}
++                    conceal={ctx.conceal()}
++                    fg={theme.textMuted}
++                  />
++                )}
++              </Show>
++            </Match>
++          </Switch>
+         </box>
+         <Show when={overflow()}>
+           <box>
+@@ -1636,27 +1656,58 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
+   const ctx = use()
+   const { theme, syntax } = useTheme()
+   const streaming = createMemo(() => !props.message.time.completed)
++  const content = createMemo(() => props.part.text.trim())
++  const completedKey = createMemo(() => `${ctx.width}\u0000${content()}`)
+   return (
+-    <Show when={props.part.text.trim()}>
++    <Show when={content()}>
+       <box id={"text-" + props.part.id} paddingLeft={3} marginTop={1} flexShrink={0}>
+         <Switch>
+           <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !streaming()}>
+-            <markdown
+-              syntaxStyle={syntax()}
+-              streaming={streaming()}
+-              content={props.part.text.trim()}
+-              conceal={ctx.conceal()}
+-              fg={theme.markdownText}
+-              bg={theme.background}
+-            />
++            <Show keyed when={completedKey()}>
++              {(_key) => (
++                // MarkdownRenderable keeps ordinary paragraphs in an internal CodeRenderable.
++                // That child is configured as streaming + styled-only so incremental content
++                // changes can leave its text buffer height stuck on an older, shorter value.
++                // Remounting completed markdown per content+width makes Yoga measure from the
++                // current text after reconnect refreshes and sidebar/fullscreen reflows.
++                <markdown
++                  syntaxStyle={syntax()}
++                  streaming={false}
++                  content={content()}
++                  conceal={ctx.conceal()}
++                  fg={theme.markdownText}
++                  bg={theme.background}
++                />
++              )}
++            </Show>
++          </Match>
++          <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !streaming()}>
++            <Show keyed when={completedKey()}>
++              {(_key) => (
++                // Keep the non-experimental completed path on CodeRenderable, but remount it
++                // under the same content+width key so resize/sidebar reflow cannot reuse stale
++                // text-buffer measurements from a shorter DB-refresh snapshot.
++                <code
++                  filetype="markdown"
++                  drawUnstyledText={false}
++                  streaming={false}
++                  syntaxStyle={syntax()}
++                  content={content()}
++                  conceal={ctx.conceal()}
++                  fg={theme.text}
++                />
++              )}
++            </Show>
+           </Match>
+-          <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN || streaming()}>
++          <Match when={streaming()}>
+             <code
+               filetype="markdown"
+-              drawUnstyledText={streaming()}
+-              streaming={streaming()}
++              // Keep streaming output styled-only. With unstyled fallback enabled,
++              // each delta flashes raw markdown before async highlighting conceals it.
++              drawUnstyledText={false}
++              streaming={true}
+               syntaxStyle={syntax()}
+-              content={props.part.text.trim()}
++              content={content()}
+               conceal={ctx.conceal()}
+               fg={theme.text}
+             />
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index a043d63a9a06f0a0d711436e4a0b859eba19950e..db6d2d68c09eeebfac6dfad6deb69693432f702e 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -1560,6 +1560,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+               overflow: task.overflow,
+             })
+             if (result === "stop") break
++            // Manual compaction is a terminal maintenance action: the user asked only
++            // to rewrite history into a summary.  After compaction, filterCompacted()
++            // intentionally appends the retained tail after the summary so the next
++            // model request can still see recent context.  If we immediately loop
++            // again for a manual compaction, that retained tail can look like the
++            // newest build turn and resume old tool-call work without a user prompt.
++            // Auto-compaction keeps looping because it may have created an explicit
++            // synthetic follow-up message to continue the interrupted request.
++            if (!task.auto) break
+             continue
+           }
+ 
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index c5170f3464921904e1988880526a2b4ec61f3e8f..9c1fc82ac010972024082519b66ba07d1aa9662a 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -318,6 +318,27 @@ const addSubtask = (sessionID: SessionID, messageID: MessageID, model = ref) =>
+     })
+   })
+ 
++const addCompletedTool = (sessionID: SessionID, messageID: MessageID) =>
++  Effect.gen(function* () {
++    const session = yield* Session.Service
++    yield* session.updatePart({
++      id: PartID.ascending(),
++      messageID,
++      sessionID,
++      type: "tool",
++      callID: crypto.randomUUID(),
++      tool: "bash",
++      state: {
++        status: "completed",
++        input: { command: "printf tail" },
++        output: "tail output",
++        title: "done",
++        metadata: {},
++        time: { start: Date.now(), end: Date.now() },
++      },
++    })
++  })
++
+ const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
+   const config = yield* Config.Service
+   const prompt = yield* SessionPrompt.Service
+@@ -589,6 +610,46 @@ it.live("loop continues when finish is stop but assistant has tool parts", () =>
+   ),
+ )
+ 
++it.live("manual compaction stops after summarizing retained tool tail", () =>
++  provideTmpdirServer(
++    Effect.fnUntraced(function* ({ llm }) {
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({
++        title: "Manual compact",
++        permission: [{ permission: "*", pattern: "*", action: "allow" }],
++      })
++
++      yield* seed(chat.id, { finish: "stop" })
++      const keep = yield* seed(chat.id, { finish: "stop" })
++      yield* addCompletedTool(chat.id, keep.assistant.id)
++      yield* SessionCompaction.Service.use((compact) =>
++        compact.create({
++          sessionID: chat.id,
++          agent: "build",
++          model: ref,
++          auto: false,
++        }),
++      )
++      yield* llm.text("summary")
++
++      const result = yield* prompt.loop({ sessionID: chat.id })
++      const filtered = yield* MessageV2.filterCompactedEffect(chat.id)
++
++      expect(yield* llm.calls).toBe(1)
++      expect(result.info.role).toBe("assistant")
++      if (result.info.role === "assistant") expect(result.info.summary).toBe(true)
++      // The retained tail is still visible after the summary for future prompts,
++      // but this manual compaction loop must not treat that old build turn as a
++      // fresh request and make a second provider call for a build continuation.
++      expect(filtered.map((msg) => msg.info.id)).toContain(keep.user.id)
++      expect(filtered.map((msg) => msg.info.id)).toContain(keep.assistant.id)
++    }),
++    { git: true, config: (url) => ({ ...providerCfg(url), compaction: { tail_turns: 1 } }) },
++  ),
++  30_000,
++)
++
+ it.live("failed subtask preserves metadata on error tool state", () =>
+   provideTmpdirServer(
+     Effect.fnUntraced(function* ({ llm }) {

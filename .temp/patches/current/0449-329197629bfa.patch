@@ -1,0 +1,589 @@
+From 329197629bfa03061181ccee99cf237128bcb5f7 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 17 Jul 2026 02:53:18 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E7=BB=9F=E4=B8=80=20Shell=20?=
+ =?UTF-8?q?=E5=91=BD=E4=BB=A4=E4=B8=8E=E8=BE=93=E5=87=BA=E7=9A=84=E9=9A=94?=
+ =?UTF-8?q?=E8=A1=8C=E9=97=B4=E8=B7=9D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+展开态 body 缺少命令与输出之间的空行分隔，与折叠预览不一致。移除内联文字标签，改用无条件 marginTop 空行，上下文模式靠标题标签和背景色区分。
+
+避免展开/折叠切换时间距消失的回归。
+
+diff --git a/docs/plans/tui-bash-command-output-spacing.md b/docs/plans/tui-bash-command-output-spacing.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..817381463e34dbd25b49a5ee5693fce8af82eca6
+--- /dev/null
++++ b/docs/plans/tui-bash-command-output-spacing.md
+@@ -0,0 +1,529 @@
++# Canonical Implementation Plan: TUI Bash Command-Output Spacing Consistency
++
++> Status: verified
++>
++> Revision: R2
++>
++> Approved revision: R2
++>
++> Audit mode: full-scope
++>
++> Requirement source: verbatim user request (see §1)
++>
++> Implementation allowed: no further material changes without revision or rework
++>
++> Last updated: 2026-07-17
++
++This file is the sole implementation specification for this task. Chat
++summaries, superseded revisions, and builder rationale outside this file are
++not implementation authority.
++
++## 1. Verbatim Requirement
++
++> 当前请你详细完整给我检查一下。我发现当前OpenCode的TUI里面,bash在运行之后,它命令和结果之间,在展开和不展开的时候,它中间那一行换行会有问题。就是在展开的时候,它的换行,中间的中间的空格,隔行会消失。而不展开的时候,它的隔行是存在的。这就导致其显示的风格很乱。请你完整检查一下,我想让它的相应的隔行内容是始终存在的。与此同时就是点击Shell的那个工具的展开和不展开,以及右键它,查看相应模型,返回给模型的输出的那个时候,它中间都是有一行。返回给模型输出的那个内容查看的时候,它中间那一行是文字,所以不会是空行。所以理论来说,命令和结果之间肯定是都隔了一行,这一行要么是文字,要么是相应的内容。所以请你检查一下,看看现在是什么样的,然后分析一下问题。
++
++**R2 follow-up requirement** (user chat, 2026-07-17): 用户认为展开态右键
++"returned to model" 视图中，body 内的 "Model context output" 文字行既不是空行也
++不是有意义的标签，显示风格奇怪。要求移除该文字行，命令与输出之间统一用空行分隔
++（与折叠预览和普通展开态完全一致）。上下文模式通过标题标签 `· returned to model`
+++ 背景色/边框色区分即可，标题标签措辞保持 `returned to model` 不变。
++
++## 2. Explicit Non-Goals
++
++- Does not change the bash-compress logic that produces the output content (`src/tool/bash-compress.ts`).
++- Does not change the BlockTool collapse/preview mount lifecycle or the `visible` toggle mechanism.
++- Does not change the v2 debug-only `Bash` component in `session-v2.tsx` (it is not production).
++- Does not change the `shellPreviewText` collapsed preview string format (it already has the empty line).
++- Does not add a new gap-based spacing strategy to BlockTool (the codebase convention is `marginTop`).
++- Does not change the title label `contextLabel="returned to model"` (user confirmed keep as-is).
++- Does not change the `showContextOutput` toggle mechanism or the `output()` content switching logic.
++
++## 3. Repository Context
++
++| Source | Why it constrains this task |
++| --- | --- |
++| `CONTEXT.md` | Defines Tool, Message, Part vocabulary; TUI lives in `cli/cmd/tui/`. |
++| `packages/opencode/AGENTS.md` | Tests run from package dirs; module shape conventions; Effect rules. |
++| `packages/opencode/test/AGENTS.md` | Test fixture and Effect testing patterns. |
++| `docs/workflow.md` | GOAL contract and phase gates for `approved-plan-only` terminal state. |
++| `.opencode/policy/first-principles-engineering.md` | Root-cause repair, no fallback, one primary path, Chinese comment gate. |
++
++## 4. Files and Evidence Read
++
++| Evidence | Relevance | Evidence class |
++| --- | --- | --- |
++| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` — `Shell` function (lines 2661–2733) | Production bash/shell tool renderer; contains both collapsed preview and expanded body | observed |
++| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` — `shellPreviewText` memo (lines 2671–2678) | Collapsed preview text: `[header, "", output()].join("\n")` includes empty line `""` between command and output | observed |
++| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` — `BlockTool` function (lines 2527–2658) | Container for tool output; manages preview/body toggle via `visible` and `marginTop`; renders title with `contextLabel` suffix | observed |
++| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` — Shell body children (lines 2715–2723) | Expanded body: `<box>` with command `<text>`, optional "Model context output" `<text>`, and output `<text>` as consecutive elements | observed |
++| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` — `output()` memo (lines 2667–2670) | Switches between `props.metadata.output` (compressed) and `props.output` (full model output) based on `showContextOutput()` | observed |
++| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` — BlockTool title rendering (lines 2618–2621) | Title shows `props.title` + optional ` · {props.contextLabel}` when `contextView` is true | observed |
++| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` — BlockTool `contextView` styling (lines 2552, 2598) | `contextView` changes background to `theme.diffContextBg` and border to `theme.info` | observed |
++| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` — `previewText` function (lines 2128–2136) | Truncates preview to maxLines/maxChars; does not remove the empty line from `shellPreviewText` | observed |
++| `packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx` — `Bash` function (lines 769–806) | v2 debug-only renderer; uses `<box gap={1}>` between command and output — not production | observed |
++| `packages/opencode/test/cli/cmd/tui/session-integration.test.ts` (lines 1–237) | Existing source-level assertion test pattern for TUI integration points | observed |
++| `packages/opencode/src/tool/bash-compress.ts` (lines 1–60) | Compresses bash output for model context; affects output content, not spacing | observed |
++| `D:\Temp\opencode\shell-spacing-feedback.ts` | Throwaway feedback-loop script; confirms the bug is red | observed |
++
++## 5. Current Behavior
++
++The `Shell` component in `session/index.tsx` renders the bash/shell tool output
++inside a `BlockTool` wrapper. `BlockTool` supports a collapsed preview mode and
++an expanded body mode, toggled by clicking when `collapsible()` is true.
++
++### Collapsed (preview) path
++
++```
++shellPreviewText() -> [header, "", output()].join("\n")
++                     = "$ command\n\noutput"
++```
++
++The `""` element inserts an empty line between the command header and the
++output. This string is passed to `previewText()` for truncation, then rendered
++as a single `<text>` element inside the preview area of `BlockTool`.
++
++**Result**: `$ command` → *(empty line)* → `output` — spacing is present.
++
++### Expanded (body) path — no context output
++
++```tsx
++<box>
++  <text fg={theme.text}>$ {props.input.command}</text>
++  <Show when={output()}>
++    <text fg={theme.text}>{output()}</text>
++  </Show>
++</box>
++```
++
++The `<box>` has no `gap` prop and no spacer element between the command
++`<text>` and the output `<text>`. The two `<text>` elements render as
++consecutive lines.
++
++**Result**: `$ command` → `output` — **no spacing** (BUG).
++
++### Expanded (body) path — with context output (right-click "returned to model")
++
++```tsx
++<box>
++  <text fg={theme.text}>$ {props.input.command}</text>
++  <Show when={showContextOutput()}>
++    <text fg={theme.info}>Model context output</text>
++  </Show>
++  <Show when={output()}>
++    <text fg={theme.text}>{output()}</text>
++  </Show>
++</box>
++```
++
++When `showContextOutput()` is true, the "Model context output" `<text>` element
++renders between the command and output, acting as the separator line.
++
++**Result**: `$ command` → `Model context output` → `output` — spacing is
++present as text, but the user finds this awkward: the text line is neither a
++clean empty line nor a meaningful label, and it is redundant with the title
++suffix `· returned to model`.
++
++### Summary of the divergence
++
++| View | Separator between command and output | Correct? |
++| --- | --- | --- |
++| Collapsed (preview) | Empty line (`""` in joined string) | yes |
++| Expanded, no context | **None** (consecutive `<text>` elements) | **no — BUG** |
++| Expanded, with context | "Model context output" text (awkward, redundant with title) | **no — user requests removal** |
++
++## 6. Supported Input Domain and Reachability
++
++| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
++| --- | --- | --- | --- | --- | --- |
++| Shell tool with non-empty output, collapsed | BlockTool `collapsible()` | `shellPreviewText` provides preview string | `BlockTool` preview area renders `previewText(shellPreviewText(), 10)` | `Shell` | observed |
++| Shell tool with non-empty output, expanded, no context | BlockTool `expanded()` | Shell body children rendered as consecutive `<text>` | `BlockTool` body area renders `{props.children}` | `Shell` | observed |
++| Shell tool with non-empty output, expanded, context mode | `showContextOutput()` toggle via right-click | "Model context output" `<text>` between command and output (to be removed) | `BlockTool` body area renders `{props.children}` | `Shell` | observed |
++| Shell tool with empty output | `output()` returns `""` | `shellPreviewText` returns header only; body `<Show when={output()}>` hides output | Both preview and body show only `$ command` | `Shell` | observed |
++
++## 7. Required Invariants
++
++| ID | Behavioral invariant | Evidence | Existing test |
++| --- | --- | --- | --- |
++| INV-01 | Between the bash command and its output, an empty-line separator is always present in the TUI expanded body. | User requirement: "命令和结果之间肯定是都隔了一行" + R2 follow-up: unify to empty line | none |
++| INV-02 | The separator is consistent between collapsed and expanded views — always an empty line. | User requirement: "我想让它的相应的隔行内容是始终存在的" + R2 follow-up: "统一用空行分隔" | none |
++| INV-03 | Context-output mode is distinguished by the title label `· returned to model` and background/border color change — not by a body-internal text line. | R2 follow-up: "移除该文字行，标题标签 + 背景色区分即可" | `session-integration.test.ts` line 143: asserts `showContextOutput` toggle exists; line 149: asserts `onRightClick` |
++| INV-04 | When output is empty, no separator is needed (only the command line is shown). | `shellPreviewText` returns header only when `!output()`; body `<Show when={output()}>` hides output | none |
++
++### R1 → R2 invariant change
++
++INV-03 changed from "context mode uses 'Model context output' text as separator"
++to "context mode uses title label + visual styling, no body-internal text
++separator". This reflects the user's R2 follow-up requirement to remove the
++"Model context output" text line and unify all modes to empty-line separation.
++
++## 8. First Divergence and Root Cause
++
++| Invariant | First divergence | Owning module/interface | Proof |
++| --- | --- | --- | --- |
++| INV-01 | `Shell` expanded body (line 2715): the `<box>` wrapping command and output children has no spacing mechanism. The collapsed preview `shellPreviewText` (line 2677) inserts `""` (empty line) via `[header, "", output()].join("\n")`, but the expanded body renders `<text>$ {command}</text>` and `<text>{output()}</text>` as consecutive elements with no separator. | `Shell` component in `session/index.tsx` | Feedback loop `D:\Temp\opencode\shell-spacing-feedback.ts` — red on current code |
++
++### Red-capable feedback loop
++
++**Command**: `bun run D:\Temp\opencode\shell-spacing-feedback.ts`
++
++**Observed output** (red):
++```
++PASS: collapsed preview has empty line between command and output
++FAIL: expanded body has NO spacing between command and output
++  The <box> wrapping $ command and output lacks gap or spacer.
++  Collapsed preview has empty line but expanded body does not — inconsistent.
++```
++
++**User-visible symptom caught**: In expanded view, the spacing line between
++command and output disappears; in collapsed view, it is present.
++
++**Minimized reproduction**: The bug is fully reproducible by source inspection
++of the `Shell` function's body JSX. The feedback loop extracts the body section
++and asserts the presence of a spacing mechanism (`gap` or spacer element)
++between the command `<text>` and the output `<text>`.
++
++## 9. Responsibility and Seam
++
++| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
++| --- | --- | --- | --- | --- |
++| Spacing between command and output in expanded body | `Shell` component | `Shell` renders the body children passed to `BlockTool` | `Shell` owns the composition of command text and output text within the body | `BlockTool` provides the container and collapse mechanism but does not own the internal layout of each tool's body children; `shellPreviewText` owns the collapsed preview string but not the expanded body JSX |
++| Context-output mode visual distinction | `BlockTool` via `contextView`/`contextLabel` props + `Shell` via `showContextOutput()` | `BlockTool` changes background/border color and title suffix; `Shell` switches output content | `BlockTool` owns the container styling; `Shell` owns the content switching | Already correctly assigned — no change needed |
++
++## 10. Single Approved Primary-Path Design
++
++Repair the first divergence by (1) removing the "Model context output" text
++line from the `Shell` expanded body, and (2) wrapping the output `<text>` in a
++`<box marginTop={1}>` to provide an unconditional empty-line separator between
++command and output.
++
++```
++$ command
++  ↓
++[empty line via marginTop={1} — always, regardless of context mode]
++  ↓
++output
++```
++
++### Design details
++
++In the `Shell` body JSX (lines 2715–2723), make two changes:
++
++1. **Remove** the `<Show when={showContextOutput()}><text>Model context output</text></Show>` block.
++2. **Wrap** the output `<text>` in `<box marginTop={1}>` to provide consistent
++   empty-line spacing.
++
++Before:
++```tsx
++<box>
++    <text fg={theme.text}>$ {props.input.command}</text>
++    <Show when={showContextOutput()}>
++        <text fg={theme.info}>Model context output</text>
++    </Show>
++    <Show when={output()}>
++        <text fg={theme.text}>{output()}</text>
++    </Show>
++</box>
++```
++
++After:
++```tsx
++<box>
++    <text fg={theme.text}>$ {props.input.command}</text>
++    {/* "Model context output" 文字行已移除：标题标签 · returned to model 和
++        背景色已足够区分上下文模式，命令与输出之间统一用空行分隔，与折叠预览保持一致。 */}
++    <Show when={output()}>
++        <box marginTop={1}>
++            <text fg={theme.text}>{output()}</text>
++        </box>
++    </Show>
++</box>
++```
++
++### Why this repairs the first divergence
++
++The first divergence is that the expanded body lacks a separator that the
++collapsed preview has. R2 repairs this by adding an unconditional `marginTop={1}`
++on the output wrapper, which produces the same empty-line effect as the `""` in
++`shellPreviewText`. Removing the "Model context output" text eliminates the
++awkward half-separator and makes all three rendering modes use the same
++empty-line convention.
++
++### Context-mode distinction after R2
++
++When `showContextOutput()` is true, the user still sees a clearly different
++view through three signals that remain unchanged:
++
++1. **Title suffix**: `# Shell · returned to model` (via `contextLabel` prop)
++2. **Background color**: `theme.diffContextBg` (via `contextView` prop)
++3. **Border color**: `theme.info` (via `contextView` prop)
++4. **Output content**: `props.output` (full model output) instead of `props.metadata.output` (compressed)
++
++No body-internal label is needed.
++
++### Spacing convention
++
++The codebase convention (per BlockTool comment at line 2584–2588 and existing
++test at line 106–109) uses `marginTop` on `<box>` wrappers for vertical
++spacing, not `gap` on containers. The fix follows this convention.
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
++| --- | --- | --- | --- | --- | --- |
++| Collapsed preview (`shellPreviewText` with `""` empty line) | current | primary-contract branch | yes (preview rendering) | 0% of changed decision surface | preserve |
++| Expanded body (proposed: unconditional `marginTop={1}` on output wrapper) | proposed | primary-contract branch | yes (body rendering) | 100% of changed decision surface | add |
++| "Model context output" body text line (current context-mode separator) | current | existing compatibility (to be removed) | yes (was acting as separator) | 0% of changed decision surface | remove — superseded by unconditional empty line |
++| v2 debug `Bash` component (`<box gap={1}>`) | current | existing compatibility (debug-only) | yes (debug rendering) | 0% of changed decision surface | preserve (not production) |
++
++No new alternate success path, fallback, or diagnostic path is introduced. The
++"Model context output" text removal is a workaround deletion (§12), not a new
++path.
++
++## 12. Workaround Deletion and Replacement
++
++| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
++| --- | --- | --- | --- |
++| "Model context output" `<text>` line in Shell body | Acted as a visual separator between command and output in context-output mode, compensating for the missing empty-line spacing | The unconditional `marginTop={1}` on the output wrapper provides consistent empty-line spacing in all modes, making the text line redundant; the title label and background color already distinguish context mode | `session/index.tsx` lines 2717–2719: remove the `<Show when={showContextOutput()}>` block |
++
++## 13. Forward Traceability
++
++| Requirement or invariant | Production path | Planned file/change | Behavioral test |
++| --- | --- | --- | --- |
++| INV-01: empty-line separator always present between command and output in expanded body | `Shell` body JSX: `<box marginTop={1}>` wrapper on output | `session/index.tsx` lines 2715–2723: add `marginTop={1}` wrapper, remove "Model context output" text | Source assertion: `shellSource` contains `marginTop={1}` |
++| INV-02: separator consistent between collapsed and expanded (always empty line) | `Shell` body matches `shellPreviewText` empty line | `session/index.tsx` lines 2715–2723 | Source assertion: `shellSource` does NOT contain `Model context output` |
++| INV-03: context mode distinguished by title + visual styling, not body text | `BlockTool` `contextView`/`contextLabel` props (unchanged) | No change needed (already correct) | Existing tests lines 143, 149 still pass; updated test line 153 asserts `Model context output` is absent |
++| INV-04: no separator when output empty | `Shell` body `<Show when={output()}>` | No change needed (already correct) | Source assertion: `marginTop` is inside `<Show when={output()}>` |
++
++## 14. Reverse Traceability
++
++| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
++| --- | --- | --- | --- |
++| `<box marginTop={1}>` wrapper on output `<text>` | INV-01, INV-02 | Collapsed preview has `""` empty line; expanded body lacks it | Existing body `<box>` has no spacing mechanism; `BlockTool` container does not own tool-specific body layout |
++| Removal of "Model context output" `<text>` line | INV-03 | User R2 follow-up: text line is awkward and redundant with title label | The text line was a workaround for missing spacing; unconditional `marginTop` supersedes it |
++| Chinese comment explaining spacing invariant | INV-01, INV-03 | Policy requires `C >= max(1, ceil(E * 0.15))` for `E > 0` | Comment explains why the separator exists and why "Model context output" was removed |
++
++## 15. File-Level Change Plan
++
++| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
++| --- | --- | --- | --- |
++| `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` | modify | In `Shell` body: remove `<Show when={showContextOutput()}>` block for "Model context output"; wrap output `<text>` in `<box marginTop={1}>`; add Chinese comment | +2 to +4 (net: remove 3 lines, add 5–7 including comment) |
++| `packages/opencode/test/cli/cmd/tui/session-integration.test.ts` | modify | Update test "Shell shows 'Model context output' label" → assert `Model context output` is absent from `shellSource`; add test asserting `marginTop={1}` present in `shellSource` | +4 to +8 (net: replace 1 test, add 1 test) |
++
++## 16. TDD Behavior Slices
++
++**Agreed seam**: Source-level assertion in `session-integration.test.ts`, reading
++the `Shell` function source slice (consistent with existing test pattern at
++lines 29–32 and 124–128). A full component mount is not feasible (requires many
++providers, per existing test file header).
++
++| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
++| --- | --- | --- | --- | --- |
++| 1 | Assert `shellSource` contains `marginTop={1}` (spacing mechanism in body) | Current body `<box>` has no `marginTop` between command and output | Wrap output `<text>` in `<box marginTop={1}>` | Existing tests (lines 98–128, 142–151) still pass |
++| 2 | Assert `shellSource` does NOT contain `Model context output` (text line removed) | Current body has `<Show when={showContextOutput()}>` with "Model context output" text | Remove the `<Show>` block | Existing toggle/onRightClick tests (lines 143–151) still pass; title `contextLabel="returned to model"` unchanged |
++
++## 17. Chinese Comment Budget
++
++| Metric | Estimate | Method |
++| --- | --- | --- |
++| Effective changed code lines `E` | 4–5 | Remove 3-line `<Show>` block; add `<box marginTop={1}>` wrapper (2 lines); exclude imports, formatting, comment lines |
++| Required Chinese explanatory comments `C` | 1 | `if E > 0: C >= max(1, ceil(5 * 0.15)) = max(1, 1) = 1` |
++
++### Planned comment
++
++A Chinese comment adjacent to the output wrapper explaining:
++- Why the `marginTop` separator exists: keeps expanded view consistent with
++  collapsed preview's empty line between command and output.
++- Why "Model context output" was removed: title label and background color
++  already distinguish context mode; unified empty-line spacing is cleaner.
++
++Example:
++```tsx
++{/* "Model context output" 文字行已移除：标题标签 · returned to model 和
++    背景色已足够区分上下文模式，命令与输出之间统一用空行分隔，与折叠预览保持一致。 */}
++```
++
++## 18. Verification
++
++| Command | Working directory | Evidence produced |
++| --- | --- | --- |
++| `bun test test/cli/cmd/tui/session-integration.test.ts` | `packages/opencode` | New assertions pass (green); existing assertions still pass |
++| `bun run D:\Temp\opencode\shell-spacing-feedback.ts` | any | Feedback loop goes green (separator found, "Model context output" absent) |
++| `bun typecheck` | `packages/opencode` | No type errors introduced |
++
++## 19. Diff Budget
++
++| Metric | Estimate | Justification |
++| --- | --- | --- |
++| Files added | 0 | No new files |
++| Files modified | 2 | `session/index.tsx` (fix) + `session-integration.test.ts` (test) |
++| Files deleted | 0 | No deletions |
++| Production lines | +2 to +4 net | Remove 3-line `<Show>` block, add `<box marginTop={1}>` wrapper + Chinese comment |
++| Test lines | +4 to +8 net | Replace 1 test assertion, add 1 new test |
++| Generated lines | 0 | No generated files |
++
++## 20. Real Risks and Open Decisions
++
++### Open Decisions Requiring the User
++
++None. The user confirmed: keep title label `returned to model` as-is; remove
++"Model context output" body text; unify to empty-line spacing.
++
++### Real Risks
++
++| Risk | Evidence | Mitigation |
++| --- | --- | --- |
++| `marginTop` on inner body `<box>` may stack with BlockTool's `marginTop={1}` on body wrapper | BlockTool body wrapper already has `marginTop={1}` (line 2639) | The separator `<box>` is *inside* the body `<box>`, not on the body wrapper itself; `marginTop` provides spacing between the command `<text>` and the output `<box>` within the same body container — no stacking with the outer wrapper |
++| Removing "Model context output" may confuse users who relied on it to identify context mode | The text was the only body-internal indicator | Title suffix `· returned to model` + background color change (`theme.diffContextBg`) + border color (`theme.info`) + different output content already provide four independent visual signals; the body text was redundant |
++
++### Rejected Speculation
++
++| Concern | Why rejected |
++| --- | --- |
++| "Maybe the v2 Bash component also needs fixing" | v2 is a debug-only feature plugin (`internal:session-v2-debug`), not production. No evidence it is reachable by users. |
++| "Maybe `shellPreviewText` should remove the empty line to match the body" | User explicitly wants spacing to always be present, not removed. |
++| "Maybe BlockTool should add `gap` to its root" | Existing test (line 106–109) asserts BlockTool does NOT use `gap={1}`; codebase convention is `marginTop`. |
++| "Maybe the title label should change from 'returned to model'" | User explicitly confirmed: "就当前这样就OK,就是return to model,就这样" |
++
++## 21. Audit Contract
++
++The independent auditor must:
++
++- Read this exact file and the original requirement.
++- Reconstruct behavior from repository evidence.
++- Treat builder summaries as untrusted.
++- Audit the complete original scope on every round.
++- Require evidence for every blocking finding.
++- Check both under-design and over-design.
++- Check root-cause repair, fallback, ownership, tests, code quality, and the 15
++  percent Chinese explanatory-comment plan.
++
++## 22. Plan Audit Record
++
++| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | R1 | yes | None | NB-01: INV-04 wording overstates empty-output case in context mode. NB-02: Feedback-loop script lives outside repository. | APPROVE — No blocking findings | ses_093f891b7ffeuJMhpwYI2H3LyY |
++| 2 | R2 | yes | None | NB-01: External feedback-loop script lives outside repository (supplementary to in-repo TDD slices). NB-02: E estimate in §17 excludes test lines; policy defines E to include tests — likely real E ≈ 6–8, but planned 2-line comment provides adequate C margin. NB-03: Updated test at line 153 retains contradictory name "Shell shows 'Model context output' label" after flipping to absence assertion — rename recommended. | APPROVE — No blocking findings | ses_093d0ab83ffehvMBvjbnAICkpA |
++
++R1 was approved but superseded by R2 (user requested removal of "Model context
++output" body text, changing the primary-path design from conditional separator
++to unconditional empty line + text removal). R2 requires a fresh full-scope
++audit.
++
++Any substantive revision invalidates earlier approval.
++
++The orchestrating primary agent must copy the independent verdict without
++paraphrasing. A clean verdict may update only the administrative approval fields
++for the exact audited revision. It must not be combined with a design change.
++
++## 23. Implementation Evidence
++
++### Actual Files and Diff
++
++**Files changed**: 2
++
++1. `packages/opencode/src/cli/cmd/tui/routes/session/index.tsx` — Shell function body JSX
++2. `packages/opencode/test/cli/cmd/tui/session-integration.test.ts` — source-level assertions
++
++**Production diff** (`session/index.tsx`):
++```diff
++           <box>
++             <text fg={theme.text}>$ {props.input.command}</text>
++-            <Show when={showContextOutput()}>
++-              <text fg={theme.info}>Model context output</text>
++-            </Show>
+++            {/* 上下文输出模式的内联文字标签已移除：标题 · returned to model 和背景色
+++                已足够区分上下文模式，命令与输出之间统一用空行分隔，与折叠预览保持一致。 */}
++             <Show when={output()}>
++-              <text fg={theme.text}>{output()}</text>
+++              <box marginTop={1}>
+++                <text fg={theme.text}>{output()}</text>
+++              </box>
++             </Show>
++           </box>
++```
++
++**Test diff** (`session-integration.test.ts`):
++```diff
++-    test("Shell shows 'Model context output' label", () => {
++-      expect(sessionSource).toContain("Model context output")
+++    test("Shell does not show 'Model context output' inline label", () => {
+++      expect(shellSource).not.toContain("Model context output")
++     })
+++
+++    test("Shell body has marginTop spacing between command and output", () => {
+++      expect(shellSource).toContain("marginTop={1}")
+++    })
++```
++
++NB-03 from plan audit R2 addressed: test renamed from "Shell shows 'Model
++ context output' label" to "Shell does not show 'Model context output' inline
++ label" to match the flipped assertion.
++
++### Red-Green Test Evidence
++
++**Red phase** (before fix, 2 tests fail):
++```
++(fail) Shell does not show 'Model context output' inline label [1.16ms]
++  Expected to not contain: "Model context output"
++(fail) Shell body has marginTop spacing between command and output [0.66ms]
++  Expected to contain: "marginTop={1}"
++33 pass, 2 fail
++```
++
++**Green phase** (after fix, all pass):
++```
++35 pass, 0 fail
++67 expect() calls
++Ran 35 tests across 1 file. [4.10s]
++```
++
++### Verification Commands and Results
++
++| Command | Working directory | Result |
++| --- | --- | --- |
++| `bun test test/cli/cmd/tui/session-integration.test.ts` | `packages/opencode` | 35 pass, 0 fail |
++| `bun test test/cli/cmd/tui/` | `packages/opencode` | 243 pass, 0 fail (full TUI suite) |
++| `bun run D:\Temp\opencode\shell-spacing-feedback.ts` | any | 3 PASS, 0 FAIL |
++| `bun typecheck` | `packages/opencode` | 1 pre-existing error in `prompt-submit-transport.test.tsx` (unrelated file, not modified by this task) |
++
++### Original Feedback-Loop Result
++
++```
++PASS: collapsed preview has empty line between command and output
++PASS: expanded body has marginTop spacing between command and output
++PASS: 'Model context output' text line is absent from Shell body
++```
++
++### Actual Secondary and Replacement Path Inventory
++
++| Path | Status | Classification | Produces success? | Decision-surface share |
++| --- | --- | --- | --- | --- |
++| Collapsed preview (`shellPreviewText` with `""` empty line) | preserved | primary-contract branch | yes | 0% |
++| Expanded body (unconditional `marginTop={1}` on output wrapper) | implemented | primary-contract branch | yes | 100% |
++| "Model context output" body text line | removed | superseded workaround | n/a | 0% |
++| v2 debug `Bash` component | preserved | existing compatibility (debug-only) | yes | 0% |
++
++No new alternate success path, fallback, or diagnostic path introduced.
++
++### Chinese Comment Calculation
++
++| Metric | Actual | Exclusions and evidence |
++| --- | --- | --- |
++| Effective changed code lines `E` | 7 | Production: 2 added (`<box marginTop={1}>`, `</box>`); re-indentation of `<text>` line is formatter-only (excluded). Tests: 2 modified (test name + assertion), 3 added (new test block). Removed lines not counted as added/modified. |
++| Qualifying Chinese comment lines `C` | 2 | `{/* 上下文输出模式的内联文字标签已移除：标题 · returned to model 和背景色` + `已足够区分上下文模式，命令与输出之间统一用空行分隔，与折叠预览保持一致。 */}` — explains why the text was removed (invariant: title + bg distinguish context mode) and why spacing is unified (compatibility: consistent with collapsed preview). |
++| Ratio `C / E` | 2/7 = 0.286 | Exceeds 0.15 threshold. |
++| Required minimum `C` | 2 | `if E > 0: C >= max(1, ceil(7 * 0.15)) = max(1, 2) = 2` |
++
++### Remaining Unverified Items
++
++- Pre-existing typecheck error in `prompt-submit-transport.test.tsx` (unrelated to this task, present before changes).
++
++## 24. Implementation Audit Record
++
++| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | R2 | yes | None | NB-01: Coarse source-string assertion for spacing mechanism (passes red→green, matches file convention as regression guard without full mount). NB-02: External feedback-loop script lives outside repository (supplementary to in-repo TDD slices). | APPROVE — No blocking findings | ses_093c1647affeJ0mJe0dZHM7wPx |
++
++The task may be marked `verified` only after an independent full-scope result of
++`No blocking findings` for the current implementation and approved plan
++revision.
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 61c33c1167ef9bd1ac85accd056d88d5b7709c60..b606d11295970132166f6b55e76db5db194af1b0 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -2714,11 +2714,12 @@ function Shell(props: ToolProps<typeof ShellTool>) {
+         >
+           <box>
+             <text fg={theme.text}>$ {props.input.command}</text>
+-            <Show when={showContextOutput()}>
+-              <text fg={theme.info}>Model context output</text>
+-            </Show>
++            {/* 上下文输出模式的内联文字标签已移除：标题 · returned to model 和背景色
++                已足够区分上下文模式，命令与输出之间统一用空行分隔，与折叠预览保持一致。 */}
+             <Show when={output()}>
+-              <text fg={theme.text}>{output()}</text>
++              <box marginTop={1}>
++                <text fg={theme.text}>{output()}</text>
++              </box>
+             </Show>
+           </box>
+         </BlockTool>
+diff --git a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
+index 2995cb72879d57c271c22bd8612f9b129f993bd9..adf05dff03face55649cf97debf0bed7c7223063 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
++++ b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
+@@ -150,8 +150,12 @@ describe("Session route integration points", () => {
+       expect(sessionSource).toContain("onRightClick={contextOutputAvailable")
+     })
+ 
+-    test("Shell shows 'Model context output' label", () => {
+-      expect(sessionSource).toContain("Model context output")
++    test("Shell does not show 'Model context output' inline label", () => {
++      expect(shellSource).not.toContain("Model context output")
++    })
++
++    test("Shell body has marginTop spacing between command and output", () => {
++      expect(shellSource).toContain("marginTop={1}")
+     })
+   })
+ 

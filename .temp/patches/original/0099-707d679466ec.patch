@@ -1,0 +1,176 @@
+From 707d679466ec973af1dca2a64f3c8fa98738a8d4 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 7 May 2026 13:13:46 +0800
+Subject: [PATCH] =?UTF-8?q?feat(agent):=20=E6=B7=BB=E5=8A=A0=20VSCode=20?=
+ =?UTF-8?q?=E7=AC=94=E8=AE=B0=E6=9C=AC=E7=9B=B8=E5=85=B3=E6=9D=83=E9=99=90?=
+ =?UTF-8?q?=E9=80=89=E9=A1=B9=EF=BC=8C=E6=9B=B4=E6=96=B0=E8=AE=A1=E5=88=92?=
+ =?UTF-8?q?=E6=A8=A1=E5=BC=8F=E6=8F=8F=E8=BF=B0=EF=BC=8C=E4=BC=98=E5=8C=96?=
+ =?UTF-8?q?=E6=B6=88=E6=81=AF=E4=BD=BF=E7=94=A8=E7=BB=9F=E8=AE=A1=E9=80=BB?=
+ =?UTF-8?q?=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
+index b9ab01934019a0de7a4c408e7c4da415866c084f..cca50f3a4b99ef966e2689cedb77fcf8da64a9d0 100644
+--- a/packages/opencode/src/agent/agent.ts
++++ b/packages/opencode/src/agent/agent.ts
+@@ -153,6 +153,9 @@ export const layer = Layer.effect(
+                 edit: "ask",
+                 write: "ask",
+                 apply_patch: "ask",
++                vscode_notebook_run: "ask",
++                vscode_notebook_edit: "ask",
++                vscode_notebook_env: "ask",
+               }),
+               user,
+             ),
+@@ -161,7 +164,7 @@ export const layer = Layer.effect(
+           },
+           plan: {
+             name: "plan",
+-            description: "Plan mode. Disallows all edit tools.",
++            description: "Plan mode. Disallows all edit tools and notebook mutations.",
+             options: {},
+             permission: Permission.merge(
+               defaults,
+@@ -176,6 +179,9 @@ export const layer = Layer.effect(
+                   [path.join(".opencode", "plans", "*.md")]: "allow",
+                   [path.relative(ctx.worktree, path.join(Global.Path.data, path.join("plans", "*.md")))]: "allow",
+                 },
++                vscode_notebook_run: "deny",
++                vscode_notebook_edit: "deny",
++                vscode_notebook_env: "deny",
+               }),
+               user,
+             ),
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 9a8353f6a6efa34e63fde7fa7f5d708632d0527f..890dee3ccb2046a514a278bc2a28d788c6be95fa 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -1548,19 +1548,26 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
+           setExpanded((prev) => !prev)
+         }}
+       >
+-        {/* 使用 markdownEmph 还原旧版斜体黄字主题键，配合 ITALIC 属性重现斜体语义 */}
+-        <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>Thinking ({renderedContent().length.toLocaleString()} chars):</text>
+-        <code
+-          filetype="markdown"
+-          drawUnstyledText={false}
+-          streaming={true}
+-          syntaxStyle={subtleSyntax()}
+-          content={preview()}
+-          conceal={ctx.conceal()}
+-          fg={theme.textMuted}
+-        />
++        {/* Wrap elements in separate boxes to isolate rendering bounds during fast streaming, preventing overlap */}
++        <box>
++          {/* 使用 markdownEmph 还原旧版斜体黄字主题键，配合 ITALIC 属性重现斜体语义 */}
++          <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>Thinking ({renderedContent().length.toLocaleString()} chars):</text>
++        </box>
++        <box>
++          <code
++            filetype="markdown"
++            drawUnstyledText={false}
++            streaming={true}
++            syntaxStyle={subtleSyntax()}
++            content={preview()}
++            conceal={ctx.conceal()}
++            fg={theme.textMuted}
++          />
++        </box>
+         <Show when={overflow()}>
+-          <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
++          <box>
++            <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
++          </box>
+         </Show>
+       </box>
+     </Show>
+diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
+index 06d6bf8e92e44a0bc04c98a51366a71d7d58743d..f8d3698a008baac96223192ffb5edfd06a928d78 100644
+--- a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
++++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
+@@ -295,7 +295,7 @@ function messageTokens(messages: WithParts[], ratio: number) {
+   }
+ }
+ 
+-function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"] {
++function usageTotals(messages: WithParts[], ratio: number): ContextUsageData["details"]["usage"] {
+   const usage: ContextUsageData["details"]["usage"] = {
+     input: 0,
+     output: 0,
+@@ -305,23 +305,19 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
+     total: 0,
+     cost: 0,
+   }
+-  let confirmed = false
+   for (const msg of messages) {
+-    for (const part of msg.parts) {
+-      if (part.type !== "step-finish") continue
+-      confirmed = true
+-      usage.input += part.tokens.input
+-      usage.output += part.tokens.output
+-      usage.reasoning += part.tokens.reasoning
+-      usage.cacheRead += part.tokens.cache.read
+-      usage.cacheWrite += part.tokens.cache.write
+-      usage.cost += part.cost
+-    }
+-  }
+-
+-  if (!confirmed) {
+-    for (const msg of messages) {
+-      if (msg.info.role !== "assistant") continue
++    const hasStepFinish = msg.parts.some((p) => p.type === "step-finish")
++    if (hasStepFinish) {
++      for (const part of msg.parts) {
++        if (part.type !== "step-finish") continue
++        usage.input += part.tokens.input
++        usage.output += part.tokens.output
++        usage.reasoning += part.tokens.reasoning
++        usage.cacheRead += part.tokens.cache.read
++        usage.cacheWrite += part.tokens.cache.write
++        usage.cost += part.cost
++      }
++    } else if (msg.info.role === "assistant") {
+       usage.input += msg.info.tokens.input
+       usage.output += msg.info.tokens.output
+       usage.reasoning += msg.info.tokens.reasoning
+@@ -330,6 +326,27 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
+       usage.cost += msg.info.cost
+     }
+   }
++
++  const lastMsg = messages.findLast((m) => m.info.role === "assistant" && !m.info.time.completed)
++  if (lastMsg) {
++    const lastParts = lastMsg.parts
++    const lastSFIdx = lastParts.reduce((i, p, idx) => (p.type === "step-finish" ? idx : i), -1)
++    let outputChars = 0
++    let inputChars = 0
++    for (let i = lastSFIdx + 1; i < lastParts.length; i++) {
++      const p = lastParts[i]
++      if (p.type === "text" && !p.ignored) outputChars += (p.text ?? "").length
++      if (p.type === "reasoning") outputChars += (p.text ?? "").length
++      if (p.type === "tool") {
++        if (p.state.status === "pending") outputChars += (p.state.raw ?? "").length
++        else outputChars += JSON.stringify(p.state.input ?? {}).length
++        if (p.state.status === "completed") inputChars += (p.state.output ?? "").length
++      }
++    }
++    usage.output += Math.round(outputChars / ratio)
++    usage.input += Math.round(inputChars / ratio)
++  }
++
+   usage.total = usage.input + usage.output + usage.reasoning + usage.cacheRead + usage.cacheWrite
+   return usage
+ }
+@@ -862,7 +879,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+ 
+   // 消息部分始终用 TUI 实时迭代（messages 内容随每轮变化）
+   const msg = messageTokens(compacted, ratio)
+-  const usage = usageTotals(raw)
++  const usage = usageTotals(raw, ratio)
+ 
+   // ── 各组件 token 估算 ──
+   let envTokens: number

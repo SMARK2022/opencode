@@ -1,0 +1,155 @@
+From 85442a1f1e6860e3752e75e89353368d53a360d1 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Tue, 5 May 2026 07:12:45 +0800
+Subject: [PATCH] =?UTF-8?q?feat(notebook):=20=E4=BC=98=E5=8C=96=E8=99=9A?=
+ =?UTF-8?q?=E6=8B=9F=E6=96=87=E6=A1=A3=E8=A1=8C=E8=8C=83=E5=9B=B4=E8=AE=A1?=
+ =?UTF-8?q?=E7=AE=97=EF=BC=8C=E4=BF=AE=E6=AD=A3=E8=A1=8C=E5=8F=B7=E5=A4=84?=
+ =?UTF-8?q?=E7=90=86=E9=80=BB=E8=BE=91=EF=BC=8C=E5=A2=9E=E5=BC=BA=E6=BA=90?=
+ =?UTF-8?q?=E4=BB=A3=E7=A0=81=E6=B8=B2=E6=9F=93=E6=95=88=E7=8E=87?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/sdks/vscode/src/notebook/format.ts b/sdks/vscode/src/notebook/format.ts
+index c2a4fbd1bdfd97253cdb58df03982398057366ed..03fa5edcaccb96bf51cf355a5f9f20ea27e26ecb 100644
+--- a/sdks/vscode/src/notebook/format.ts
++++ b/sdks/vscode/src/notebook/format.ts
+@@ -205,15 +205,14 @@ export function runtimeLabel(notebook: vscode.NotebookDocument) {
+ // ---------------------------------------------------------------------------
+ 
+ /**
+- * Computes 1-based inclusive physical line ranges for every cell in the virtual document.
+- * Headers (`--: ...`) do NOT consume line numbers; only source lines and blank separators do.
++ * Computes 1-based inclusive source line ranges for every cell in the virtual document.
++ * Headers (`--: ...`) and visual separators do NOT consume line numbers.
+  *
+  * Layout per cell:
+  *   --:  header line            (no line number)
+  *   N:   source line 0          (numbered)
+  *   ...
+  *   N+k: source line last       (numbered)
+- *   N+k+1: (blank separator)    (numbered)
+  *
+  * Returns a Map from cell index to `{ start, end }` where both are 1-based inclusive.
+  */
+@@ -227,7 +226,7 @@ export function computeVirtualRanges(notebook: vscode.NotebookDocument) {
+     } else {
+       ranges.set(cell.index, { start: next, end: next }) // empty cell — point range
+     }
+-    next += count + 1 // source lines + blank separator
++    next += Math.max(1, count)
+   }
+   return ranges
+ }
+diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/source.ts
+index 37d9787696163c252516208cef5e0ce99d08210b..b9d0cfb16c33346d96525678ca4a7a2b16510f27 100644
+--- a/sdks/vscode/src/notebook/source.ts
++++ b/sdks/vscode/src/notebook/source.ts
+@@ -7,10 +7,10 @@
+  *   A: <source line 0>                                          (1-based global)
+  *   ...
+  *   B: <source line last>
+- *   B+1: (blank line)
+  *
+- * Cell headers do NOT consume line numbers. Line ranges in headers are
+- * 1-based inclusive. Target a cell with `cellId` (Copilot-style #VSC-xxxxxxxx).
++ * Cell headers and visual separators do NOT consume line numbers. Line ranges
++ * in headers are 1-based inclusive. Target a cell with `cellId`
++ * (Copilot-style #VSC-xxxxxxxx).
+  */
+ import * as vscode from "vscode"
+ import { stringProp, numberProp } from "../util"
+@@ -70,7 +70,6 @@ export async function notebookSource(input: Record<string, unknown>) {
+   let bytes = 0
+   let rendered = 0
+   let cut = false
+-  let globalLineNum = 0
+   let lastRenderedLine = 0
+   const outputCells: string[] = []
+ 
+@@ -83,8 +82,6 @@ export async function notebookSource(input: Record<string, unknown>) {
+     const srcEnd = Math.min(globalEnd, cellRange.end)
+ 
+     if (srcStart > srcEnd) {
+-      // No source lines from this cell in range — skip cell entirely
+-      globalLineNum = cellRange.end // advance counter
+       continue
+     }
+ 
+@@ -104,21 +101,20 @@ export async function notebookSource(input: Record<string, unknown>) {
+     rendered++
+ 
+     // Render source lines
+-    const sourceLines = cell.document.getText().split(/\r?\n/)
+-    for (let i = 0; i < sourceLines.length; i++) {
+-      globalLineNum++
++    for (let i = 0; i < cell.document.lineCount; i++) {
++      const globalLineNum = cellRange.start + i
+       if (globalLineNum < globalStart) continue
+       if (globalLineNum > globalEnd) {
+-        globalLineNum = cellRange.end
+         break
+       }
+       if (rendered >= limit) {
+         cut = true
+         break
+       }
+-      const src = sourceLines[i].length > 2000
+-        ? sourceLines[i].substring(0, 2000) + "... (line truncated to 2000 chars)"
+-        : sourceLines[i]
++      const sourceLine = cell.document.lineAt(i).text
++      const src = sourceLine.length > 2000
++        ? sourceLine.substring(0, 2000) + "... (line truncated to 2000 chars)"
++        : sourceLine
+       const outLine = `${globalLineNum}: ${src}`
+       const outBytes = Buffer.byteLength(outLine, "utf8")
+       if (bytes + outBytes > maxBytes && outputCells.length > 0) {
+@@ -132,24 +128,9 @@ export async function notebookSource(input: Record<string, unknown>) {
+     }
+ 
+     if (cut) break
+-
+-    // Blank separator
+-    globalLineNum++
+-    if (globalLineNum >= globalStart && globalLineNum <= globalEnd) {
+-      if (rendered < limit) {
+-        const blankLine = `${globalLineNum}: `
+-        const blBytes = Buffer.byteLength(blankLine, "utf8")
+-        if (bytes + blBytes <= maxBytes) {
+-          outputCells.push(blankLine)
+-          bytes += blBytes
+-          rendered++
+-          lastRenderedLine = globalLineNum
+-        }
+-      }
+-    }
+   }
+ 
+-  if (!cut) lastRenderedLine = Math.min(globalEnd, globalLineNum)
++  if (!cut) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
+   const more = lastRenderedLine < globalEnd
+ 
+   let output = warning ? `${warning}\n\n` : ""
+@@ -163,8 +144,6 @@ export async function notebookSource(input: Record<string, unknown>) {
+     output += `\n\n(Output capped at 12 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
+   } else if (more) {
+     output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
+-  } else {
+-    output += `\n\n(End of file — total ${totalLines} lines)`
+   }
+   output += "\n</content>"
+ 
+diff --git a/sdks/vscode/src/notebook/summary.ts b/sdks/vscode/src/notebook/summary.ts
+index 84f0733eb6e95e8831d43568bd01f08eacdbe37c..8ae1efdf0320e2138a6116a2d8530ce3f86cfa5a 100644
+--- a/sdks/vscode/src/notebook/summary.ts
++++ b/sdks/vscode/src/notebook/summary.ts
+@@ -56,7 +56,7 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
+     `Notebook: ${toPosixPath(notebook.uri.fsPath || notebook.uri.toString())}`,
+     `Type: ${notebook.notebookType}, dirty=${notebook.isDirty}, num_cells=${notebook.cellCount}, runtime=${runtimeLabel(notebook) ?? "unknown"}. ${status}`,
+     "",
+-    `Conventions: cell indexes (cN) are 1-based; cell IDs (#VSC-xxxxxxxx) are stable across insert/delete; line range=[A,B] is 1-based inclusive in the virtual source document.`,
++    `Conventions: cell indexes (cN) are 1-based; cell IDs (#VSC-xxxxxxxx) are stable across insert/delete; line range=[A,B] is 1-based inclusive in the virtual source document; headers and visual separators are unnumbered.`,
+     "",
+     'Cells (format: cN id=<#VSC-xxx> <kind>/<lang> lines=<count> range=[A,B] exec="<run state>" existing_outs="<mime list>" first="<first source line>"):',
+     ...cells.map((cell) => {

@@ -1,0 +1,448 @@
+From 9e190548fc7af57e6af4304cf7b3641db69b5b88 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 24 May 2026 21:13:51 +0800
+Subject: [PATCH] =?UTF-8?q?feat(terminal):=20=E5=A2=9E=E5=BC=BA=E8=99=9A?=
+ =?UTF-8?q?=E6=8B=9F=E7=BB=88=E7=AB=AF=E6=98=BE=E7=A4=BA=EF=BC=8C=E6=94=AF?=
+ =?UTF-8?q?=E6=8C=81=E9=83=A8=E5=88=86=E6=8E=A7=E5=88=B6=E5=BA=8F=E5=88=97?=
+ =?UTF-8?q?=E7=BC=93=E5=86=B2=E5=92=8C=E6=9C=80=E5=A4=A7=E8=A1=8C=E6=95=B0?=
+ =?UTF-8?q?/=E5=AD=97=E7=AC=A6=E9=99=90=E5=88=B6?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
+index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee1bb7c04e 100644
+--- a/packages/opencode/src/tool/bash-compress.ts
++++ b/packages/opencode/src/tool/bash-compress.ts
+@@ -329,16 +329,27 @@ function redactSecrets(text: string): { text: string; redacted: number } {
+  * 虚拟终端渲染器 - 处理 ANSI 控制序列
+  * 支持光标移动、清屏、清行等操作，将终端重绘输出转换为稳定的文本
+  */
++type VirtualTerminalOptions = {
++  maxLines?: number
++  maxChars?: number
++  bufferPartialControl?: boolean
++}
++
+ class VirtualTerminal {
+   private lines: string[] = []
+   private cursorRow = 0
+   private cursorCol = 0
+   private frameCount = 0
++  private pendingControl = ''
++
++  constructor(private readonly options: VirtualTerminalOptions = {}) {}
+   
+   // ANSI CSI 序列解析正则
+   private readonly CSI_REGEX = /\x1b\[([0-9;?]*)([A-Za-z])/g
+   
+-  processChunk(chunk: string): void {
++  processChunk(input: string): void {
++    const chunk = this.pendingControl + input
++    this.pendingControl = ''
+     let pos = 0
+     
+     while (pos < chunk.length) {
+@@ -348,7 +359,18 @@ class VirtualTerminal {
+       
+       if (!match) {
+         // 没有更多控制序列，处理剩余文本
+-        this.writeText(chunk.slice(pos))
++        const rest = chunk.slice(pos)
++        const partial = this.options.bufferPartialControl ? this.partialControl(rest) : ''
++        if (partial) {
++          // Live shell chunks may split ESC or ESC[2K across arbitrary byte
++          // boundaries. Buffer only a suffix that can still become one of the CSI
++          // controls this renderer understands; complete or unknown sequences keep
++          // following the existing parse path instead of hiding visible text.
++          this.writeText(rest.slice(0, rest.length - partial.length))
++          this.pendingControl = partial
++        } else {
++          this.writeText(rest)
++        }
+         break
+       }
+       
+@@ -364,6 +386,55 @@ class VirtualTerminal {
+       
+       pos = this.CSI_REGEX.lastIndex
+     }
++
++    this.trimDisplay()
++  }
++
++  private partialControl(text: string) {
++    const esc = text.lastIndexOf('\x1b')
++    if (esc < 0) return ''
++    const suffix = text.slice(esc)
++    if (suffix === '\x1b') return suffix
++    if (/^\x1b\[[0-9;?]*$/.test(suffix)) return suffix
++    return ''
++  }
++
++  private trimDisplay(): void {
++    // Live metadata used to be bounded by `preview(last + chunk)`. Keep that
++    // invariant for the terminal-display path too; otherwise long-running tools
++    // would trade clean CR rendering for unbounded screen storage and repeated
++    // whole-buffer joins. Compression uses an unbounded VirtualTerminal by not
++    // passing these display-only limits.
++    if (this.options.maxLines !== undefined && this.lines.length > this.options.maxLines) {
++      const drop = this.lines.length - this.options.maxLines
++      this.lines = this.lines.slice(drop)
++      this.cursorRow = Math.max(0, this.cursorRow - drop)
++    }
++
++    if (this.options.maxChars === undefined || this.lines.length === 0) return
++
++    let total = 0
++    let start = this.lines.length
++    for (let i = this.lines.length - 1; i >= 0; i--) {
++      const line = this.lines[i]
++      const size = line.length + (start === this.lines.length ? 0 : 1)
++      if (total + size > this.options.maxChars) {
++        if (start === this.lines.length) {
++          const drop = Math.max(0, line.length - this.options.maxChars)
++          this.lines[i] = line.slice(drop)
++          if (this.cursorRow === i) this.cursorCol = Math.max(0, this.cursorCol - drop)
++          start = i
++        }
++        break
++      }
++      total += size
++      start = i
++    }
++
++    if (start > 0 && start < this.lines.length) {
++      this.lines = this.lines.slice(start)
++      this.cursorRow = Math.max(0, this.cursorRow - start)
++    }
+   }
+   
+   private handleCSI(params: string, command: string): void {
+@@ -421,31 +492,57 @@ class VirtualTerminal {
+   }
+   
+   private writeText(text: string): void {
+-    for (const char of text) {
++    for (let pos = 0; pos < text.length;) {
++      const char = text[pos]
+       if (char === '\r') {
+         this.cursorCol = 0
+         this.frameCount++
+-      } else if (char === '\n') {
++        pos++
++        continue
++      }
++
++      if (char === '\n') {
+         this.cursorRow++
+         this.cursorCol = 0
+-      } else if (char === '\b') {
++        this.trimDisplay()
++        pos++
++        continue
++      }
++
++      if (char === '\b') {
+         this.cursorCol = Math.max(0, this.cursorCol - 1)
+-      } else {
+-        // 确保行存在
+-        this.ensureLine(this.cursorRow)
+-        
+-        // 扩展行到光标位置
+-        while (this.lines[this.cursorRow].length < this.cursorCol) {
+-          this.lines[this.cursorRow] += ' '
+-        }
+-        
+-        // 写入字符
+-        const line = this.lines[this.cursorRow]
+-        this.lines[this.cursorRow] = 
+-          line.slice(0, this.cursorCol) + char + line.slice(this.cursorCol + 1)
+-        this.cursorCol++
++        pos++
++        continue
++      }
++
++      let end = pos + 1
++      while (end < text.length && text[end] !== '\r' && text[end] !== '\n' && text[end] !== '\b') {
++        end++
+       }
++      this.writeRun(text.slice(pos, end))
++      pos = end
++    }
++  }
++
++  private writeRun(input: string): void {
++    // Plain output can arrive as very large chunks. Batch normal text and, in
++    // live-display mode, keep only the suffix that metadata can ever show so the
++    // terminal renderer stays bounded before the final preview() call.
++    const text = this.options.maxChars === undefined ? input : input.slice(-this.options.maxChars)
++    this.ensureLine(this.cursorRow)
++
++    if (this.options.maxChars !== undefined && this.cursorCol > this.options.maxChars) {
++      this.lines[this.cursorRow] = ''
++      this.cursorCol = this.options.maxChars
++    }
++    while (this.lines[this.cursorRow].length < this.cursorCol) {
++      this.lines[this.cursorRow] += ' '
+     }
++
++    const line = this.lines[this.cursorRow]
++    this.lines[this.cursorRow] = line.slice(0, this.cursorCol) + text + line.slice(this.cursorCol + text.length)
++    this.cursorCol += text.length
++    this.trimDisplay()
+   }
+   
+   private ensureLine(row: number): void {
+@@ -457,12 +554,39 @@ class VirtualTerminal {
+   getStableOutput(): string {
+     return this.lines.filter(line => line.trim().length > 0).join('\n')
+   }
++
++  getDisplayOutput(): string {
++    // Display snapshots model what the user sees in a terminal, not what the
++    // model receives. Preserve intentional blank rows inside the visible screen,
++    // but trim the implicit empty rows created only by a trailing newline or clear.
++    const last = this.lines.findLastIndex(line => line.trim().length > 0)
++    if (last < 0) return ''
++    return this.lines.slice(0, last + 1).join('\n')
++  }
+   
+   getFrameCount(): number {
+     return this.frameCount
+   }
+ }
+ 
++export function createTerminalDisplay(options?: Pick<VirtualTerminalOptions, 'maxLines' | 'maxChars'>) {
++  const terminal = new VirtualTerminal({ ...options, bufferPartialControl: true })
++
++  return {
++    push(chunk: string) {
++      // Reuse the same terminal renderer as compression so live metadata and
++      // final compression cannot diverge on CR redraws, clear-line sequences, or
++      // cursor movement. This helper intentionally returns only the display view;
++      // callers that need faithful model output must keep their own raw stream.
++      terminal.processChunk(chunk)
++      return terminal.getDisplayOutput()
++    },
++    value() {
++      return terminal.getDisplayOutput()
++    },
++  }
++}
++
+ // 使用虚拟终端渲染器替代简单的回车折叠
+ function normalizeTerminalOutput(text: string, config: CompressionConfig): { text: string; frames: number } {
+   // 如果没有 ANSI 控制字符和回车，直接返回
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+index 86a6fc3fc3db28e14a6005d41bcbf46bbeac949b..fa960d7d51c9dcd8cdd8600038c4e02de48ad30e 100644
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -29,6 +29,7 @@ import {
+   BashDiagnosticCollector,
+   bashCompressionMetadata,
+   compressVisibleOutput,
++  createTerminalDisplay,
+   normalizePowerShellOutput,
+   renderDiagnosticAppendix,
+ } from "./bash-compress"
+@@ -792,7 +793,6 @@ export const ShellTool = Tool.define(
+       const limits = yield* trunc.limits()
+       const keep = limits.maxBytes * 2
+       let full = ""
+-      let last = ""
+       const list: Chunk[] = []
+       let used = 0
+       let file = ""
+@@ -836,9 +836,13 @@ export const ShellTool = Tool.define(
+       })
+ 
+       const decoder = createAutoTextDecoder({ encoding: input.encoding })
++      const display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
++      let displayed = false
+       const onChunk = (chunk: string) => {
+         if (!chunk) return Effect.void
+         diag.push(chunk)
++        const visible = preview(display.push(chunk))
++        displayed = true
+         const size = Buffer.byteLength(chunk, "utf-8")
+         list.push({ text: chunk, size })
+         used += size
+@@ -848,9 +852,6 @@ export const ShellTool = Tool.define(
+           used -= item.size
+           cut = true
+         }
+-
+-        last = preview(last + chunk)
+-
+         if (file) {
+           sink?.write(chunk)
+         } else {
+@@ -868,7 +869,11 @@ export const ShellTool = Tool.define(
+               Effect.andThen(
+                 ctx.metadata({
+                   metadata: {
+-                    output: last,
++                    // `metadata.output` is the default live UI surface. Keep it
++                    // as a terminal display snapshot so CR progress and clear-line
++                    // redraws do not leak control bytes into TUI/OpenTUI, while the
++                    // raw chunks below still feed truncation and the model output.
++                    output: visible,
+                     description: input.description,
+                   },
+                 }),
+@@ -879,7 +884,11 @@ export const ShellTool = Tool.define(
+ 
+         return ctx.metadata({
+           metadata: {
+-            output: last,
++            // Same invariant as the truncated branch above: metadata is the
++            // default display channel, not the faithful model-return channel. An
++            // empty terminal screen after a clear-line/clear-screen sequence is a
++            // valid display state, so never fall back to the raw chunk preview here.
++            output: visible,
+             description: input.description,
+           },
+         })
+@@ -980,10 +989,15 @@ export const ShellTool = Tool.define(
+       }
+ 
+       const durationMs = Date.now() - started
++      const displayOutput = preview(display.value())
+       return {
+         title: input.description,
+         metadata: {
+-          output: last || preview(output),
++          // Completion metadata preserves the final terminal screen for default
++          // UI rendering. The `output` field returned alongside this metadata is
++          // intentionally left on the existing raw/compressed/truncated path so
++          // right-click "model context output" and provider input stay unchanged.
++          output: displayed ? displayOutput : preview(output),
+           exit: code,
+           description: input.description,
+           truncated: cut,
+diff --git a/packages/opencode/test/tool/bash-compress.test.ts b/packages/opencode/test/tool/bash-compress.test.ts
+index 9bfcab5412043852f23d3e42b1dbaf0d881f5764..85370eb092d0f034127cc8a704351aaf47c1815a 100644
+--- a/packages/opencode/test/tool/bash-compress.test.ts
++++ b/packages/opencode/test/tool/bash-compress.test.ts
+@@ -1,7 +1,31 @@
+ import { describe, expect, test } from "bun:test"
+-import { compressVisibleOutput, normalizePowerShellOutput } from "../../src/tool/bash-compress"
++import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput } from "../../src/tool/bash-compress"
+ 
+ describe("tool.bash-compress", () => {
++  test("renders split terminal clear-line sequences without leaking partial escapes", () => {
++    const display = createTerminalDisplay()
++
++    display.push("boot\nworking\r\x1b[")
++    display.push("2Kdone\n")
++
++    // Child-process chunks can split CSI bytes anywhere. The display renderer
++    // must buffer the partial ESC[ prefix so the default live tool output never
++    // shows raw escape fragments while still applying the completed clear-line.
++    expect(display.value()).toBe("boot\ndone")
++  })
++
++  test("bounds large single-line display chunks", () => {
++    const display = createTerminalDisplay({ maxChars: 12 })
++
++    display.push("x".repeat(10_000))
++    display.push("y".repeat(10_000))
++
++    // Live shell metadata is a preview surface. Very large plain chunks should
++    // stay bounded before and after rendering instead of building an unbounded
++    // virtual terminal line that preview() would immediately truncate.
++    expect(display.value()).toBe("y".repeat(12))
++  })
++
+   test("decodes PowerShell CLIXML with the standard header", () => {
+     const clixml = [
+       "#< CLIXML",
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index 9cf7dd21204edd3337adfa32200205b72dd63716..ea6b873173162ff0bf131c29d60999a17245bacf 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -1575,6 +1575,82 @@ describe("tool.shell permissions", () => {
+   )
+ })
+ 
++describe("tool.shell display output", () => {
++  it.live(
++    "renders carriage-return progress in metadata without changing returned output",
++    () =>
++      runIn(
++        projectRoot,
++        Effect.gen(function* () {
++          // Decimal ASCII bytes keep the Bun snippet quote-free across pwsh,
++          // Windows cmd, and POSIX shells. They spell "one\rtwo\rthree\nfinal\n",
++          // the minimal terminal-progress shape where two frames are overwritten.
++          const progressBytes = [
++            111, 110, 101, 13, 116, 119, 111, 13, 116, 104, 114, 101, 101, 10, 102, 105, 110, 97,
++            108, 10,
++          ]
++          const script = `process.stdout.write(Buffer.from([${progressBytes.join(",")}]))`
++          const text = `${bin} -e ${evalarg(script)}`
++          const result = yield* run({
++            command: PS.has(sh()) ? `& ${text}` : text,
++            description: "Emit carriage-return progress",
++            compress_output: false,
++          })
++
++          // Default shell metadata is the live UI surface. It must match terminal
++          // redraw semantics so OpenTUI does not expose raw CR bytes as `\\x0d`,
++          // while `result.output` below remains the faithful model-return value.
++          expect(result.metadata.output).toContain("three")
++          expect(result.metadata.output).toContain("final")
++          expect(result.metadata.output).not.toContain("one")
++          expect(result.metadata.output).not.toContain("two")
++          expect(result.metadata.output).not.toContain("\r")
++          expect(result.output).toContain("one")
++          expect(result.output).toContain("two")
++          expect(result.output).toContain("three")
++        }),
++      ),
++    15_000,
++  )
++
++  it.live(
++    "keeps clear-line display metadata clean when command exits non-zero",
++    () =>
++      runIn(
++        projectRoot,
++        Effect.gen(function* () {
++          // The byte sequence is "boot\nworking\r\x1b[2Kdone\n". 27,91,50,75 is
++          // ESC[2K, the ANSI clear-line command used by progress renderers before
++          // repainting the current line; exit 7 covers non-zero tool completion.
++          const clearLineBytes = [
++            98, 111, 111, 116, 10, 119, 111, 114, 107, 105, 110, 103, 13, 27, 91, 50, 75, 100, 111,
++            110, 101, 10,
++          ]
++          const script = `process.stdout.write(Buffer.from([${clearLineBytes.join(",")}])); process.exit(7)`
++          const text = `${bin} -e ${evalarg(script)}`
++          const result = yield* run({
++            command: PS.has(sh()) ? `& ${text}` : text,
++            description: "Emit clear-line progress then fail",
++            compress_output: false,
++          })
++
++          // Non-zero exits still render the same default terminal snapshot; the
++          // failure status belongs to metadata.exit and must not force the UI back
++          // to raw control sequences or discard the returned model output.
++          expect(result.metadata.exit).toBe(7)
++          expect(result.metadata.output).toContain("boot")
++          expect(result.metadata.output).toContain("done")
++          expect(result.metadata.output).not.toContain("working")
++          expect(result.metadata.output).not.toContain("\r")
++          expect(result.metadata.output).not.toContain("\x1b")
++          expect(result.output).toContain("working")
++          expect(result.output).toContain("done")
++        }),
++      ),
++    15_000,
++  )
++})
++
+ describe("tool.shell abort", () => {
+   it.live(
+     "preserves output when aborted",

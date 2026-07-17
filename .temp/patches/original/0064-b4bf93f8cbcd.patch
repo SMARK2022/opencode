@@ -1,0 +1,512 @@
+From b4bf93f8cbcdead7b42b08afbfbb5975817b2624 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 2 May 2026 04:50:55 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E4=BC=98=E5=8C=96=20token=20=E4=BC=B0?=
+ =?UTF-8?q?=E7=AE=97=E9=80=BB=E8=BE=91=EF=BC=8C=E6=94=AF=E6=8C=81=E4=BB=8E?=
+ =?UTF-8?q?=E6=9C=8D=E5=8A=A1=E7=AB=AF=E8=8E=B7=E5=8F=96=E5=AE=9E=E6=97=B6?=
+ =?UTF-8?q?=E8=BE=93=E5=85=A5=20token=20=E4=BC=B0=E7=AE=97?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+index 327cdc34cd2b102cf0df99c8c2ca0486d46e38b7..bf416d979f9281ee575554ab903bdef572843919 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+@@ -30,7 +30,7 @@ import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v
+ import { TuiEvent } from "../../event"
+ import { iife } from "@/util/iife"
+ import { Locale } from "@/util/locale"
+-import { estimateUserInputTokens, estimateRequestOverhead, sumConfirmed as sharedSumConfirmed, getContextSize as sharedGetContextSize, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
++import { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from "../../util/token-estimate"
+ import { formatDuration, formatDurationCompact } from "@/util/format"
+ import { createColors, createFrames } from "../../ui/spinner.ts"
+ import { useDialog } from "@tui/ui/dialog"
+@@ -248,25 +248,10 @@ export function Prompt(props: PromptProps) {
+     const getParts = (id: string) => sync.data.part[id] ?? []
+ 
+     const lastUser = users.at(-1)
+-    const requestModel =
+-      lastUser &&
+-      sync.data.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
+     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
+ 
+-    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
+-
+     if (requestAssistants.length === 0) {
+-      if (!isRunning) return
+-      const tokens = bootstrapInputTokens
+-      const pct = tokens > 0 && requestModel?.limit.context ? `${Math.round((tokens / requestModel.limit.context) * 100)}%` : undefined
+-      return {
+-        input: tokens,
+-        output: 0,
+-        totalInput: tokens,
+-        totalOutput: 0,
+-        context: tokens > 0 ? (pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens)) : undefined,
+-        cost: undefined,
+-      }
++      return
+     }
+ 
+     // 显示规则：外面是当前 step 的估算 token；括号里是当前 user request / agent loop 的累计 token。
+@@ -280,7 +265,7 @@ export function Prompt(props: PromptProps) {
+       output: currentOutput,
+       totalInput,
+       totalOutput,
+-    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
++    } = computeFinalTokens(last, lastParts, requestConfirmed)
+     const requestTokens = currentInput + currentOutput
+     const actualTotalTokens = currentInput + currentOutput
+     const totalTokens = totalInput + totalOutput
+diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
+index b36b142499307692f07de9b1f84bedb07be24a52..e552ee2dfb92b455af84e285d9c2947793cde162 100644
+--- a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
++++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
+@@ -3,7 +3,7 @@ import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plug
+ import { createEffect, createMemo, createSignal } from "solid-js"
+ import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
+ import { createTokenFlowPulse } from "../../util/signal"
+-import { estimateUserInputTokens, estimateRequestOverhead, sumConfirmed as sharedSumConfirmed, getContextSize as sharedGetContextSize, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
++import { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from "../../util/token-estimate"
+ 
+ const id = "internal:sidebar-context"
+ 
+@@ -38,29 +38,8 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
+     const lastUser = users.at(-1)
+     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
+ 
+-    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
+-
+     if (requestAssistants.length === 0) {
+-      if (!isRunning()) {
+-        return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
+-      }
+-      const requestModel =
+-        lastUser &&
+-        props.api.state.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
+-      const percent =
+-        bootstrapInputTokens > 0 && requestModel?.limit.context
+-          ? Math.round((bootstrapInputTokens / requestModel.limit.context) * 100)
+-          : null
+-      return {
+-        tokens: bootstrapInputTokens,
+-        totalTokens: bootstrapInputTokens,
+-        input: bootstrapInputTokens,
+-        output: 0,
+-        totalInput: bootstrapInputTokens,
+-        totalOutput: 0,
+-        percent,
+-        cost: 0,
+-      }
++      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
+     }
+ 
+     // 显示规则：外面是最后一个 step 的累计（真实上下文大小）；括号里是当前 user request / agent loop 的累计。
+@@ -74,7 +53,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
+       output,
+       totalInput,
+       totalOutput,
+-    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
++    } = computeFinalTokens(last, lastParts, requestConfirmed)
+     const tokens = input + output
+     const totalTokens = totalInput + totalOutput
+     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
+index 78b0886930127d0c7a568e832d6a84d243a16068..2b469bbb10ed1b9c44db14fea290aed901b6114a 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
+@@ -7,7 +7,7 @@ import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
+ import { useCommandDialog } from "@tui/component/dialog-command"
+ import { useKeybind } from "../../context/keybind"
+ import { Locale } from "@/util/locale"
+-import { estimateUserInputTokens, estimateRequestOverhead, sumConfirmed as sharedSumConfirmed, getContextSize as sharedGetContextSize, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
++import { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from "../../util/token-estimate"
+ import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+ import { useTerminalDimensions } from "@opentui/solid"
+ 
+@@ -55,25 +55,10 @@ export function SubagentFooter() {
+     const getParts = (id: string) => sync.data.part[id] ?? []
+ 
+     const lastUser = users.at(-1)
+-    const requestModel =
+-      lastUser &&
+-      sync.data.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
+     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
+ 
+-    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
+-
+     if (requestAssistants.length === 0) {
+-      if (!isRunning) return
+-      const tokens = bootstrapInputTokens
+-      const pct = tokens > 0 && requestModel?.limit.context ? `${Math.round((tokens / requestModel.limit.context) * 100)}%` : undefined
+-      return {
+-        input: tokens,
+-        output: 0,
+-        totalInput: tokens,
+-        totalOutput: 0,
+-        context: tokens > 0 ? (pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens)) : undefined,
+-        cost: undefined,
+-      }
++      return
+     }
+ 
+     // 显示规则：外面是当前 step 的估算 token；括号里是当前 user request / agent loop 的累计 token。
+@@ -87,7 +72,7 @@ export function SubagentFooter() {
+       output: currentOutput,
+       totalInput,
+       totalOutput,
+-    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
++    } = computeFinalTokens(last, lastParts, requestConfirmed)
+     const requestTokens = currentInput + currentOutput
+     const totalTokens = totalInput + totalOutput
+ 
+diff --git a/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts b/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts
+index fe63c35146eabf4f10072cee531e2b8147e8ff3c..ad3825fd9ff0b93ca11aa892063e4327e0d8f503 100644
+--- a/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts
++++ b/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts
+@@ -1,4 +1,4 @@
+-import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
++import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+ import { estimate as estimateTokens } from "@/util/token"
+ 
+ export type UsageInfo = {
+@@ -10,16 +10,6 @@ export type UsageInfo = {
+   cost: string | undefined
+ }
+ 
+-// Rough overhead for system prompt content (instructions, environment info, prompt templates)
+-// The exact system prompt is assembled server-side and includes model identity, working dir,
+-// git context, platform info, skills, user instructions, etc. — typically 1500-4000 chars.
+-export const SYSTEM_PROMPT_OVERHEAD = 800
+-
+-// Rough overhead for tool definitions (descriptions, parameter schemas, output schemas)
+-// Each tool adds name + description + JSON schema. With ~15-25 active tools, this
+-// can easily be 3000-8000+ chars.
+-export const TOOL_DEFINITION_OVERHEAD = 2000
+-
+ export function estimateDataUrlInputTokens(url: string, mime: string) {
+   if (!url.startsWith("data:")) return 0
+   const comma = url.indexOf(",")
+@@ -31,29 +21,7 @@ export function estimateDataUrlInputTokens(url: string, mime: string) {
+   return Math.max(1, estimateTokens(url.slice(comma + 1)))
+ }
+ 
+-export function estimateUserInputTokens(parts: ReadonlyArray<{ type: string; [key: string]: any }>) {
+-  return parts.reduce((sum, part) => {
+-    if (part.type === "text" && !part.synthetic && !part.ignored) {
+-      return sum + estimateTokens(part.text ?? "")
+-    }
+-    if (part.type === "file") {
+-      return sum + estimateDataUrlInputTokens(part.url ?? "", part.mime ?? "")
+-    }
+-    if (part.type === "agent") {
+-      return sum + estimateTokens(part.name ?? "")
+-    }
+-    if (part.type === "subtask") {
+-      return sum + estimateTokens(`${part.description ?? ""}\n${part.prompt ?? ""}`)
+-    }
+-    return sum
+-  }, 0)
+-}
+-
+-/** Rough estimate of system prompt + tool definition overhead (chars). */
+-export function estimateRequestOverhead(): number {
+-  return SYSTEM_PROMPT_OVERHEAD + TOOL_DEFINITION_OVERHEAD
+-}
+-
++/** 累加所有已完成 request 的 step-finish 确认 token（不含当前 step 的流式追加） */
+ export function sumConfirmed(
+   items: AssistantMessage[],
+   getParts: (id: string) => ReadonlyArray<{ type: string; [key: string]: any }>,
+@@ -77,49 +45,14 @@ export function sumConfirmed(
+   )
+ }
+ 
+-export function getContextSize(
+-  item: AssistantMessage,
+-  getParts: (id: string) => ReadonlyArray<{ type: string; [key: string]: any }>,
+-): number {
+-  const parts = getParts(item.id)
+-  for (let i = parts.length - 1; i >= 0; i--) {
+-    const p = parts[i]
+-    if (p.type === "step-finish") {
+-      return (
+-        p.tokens.input +
+-        p.tokens.cache.read +
+-        p.tokens.cache.write +
+-        p.tokens.output +
+-        p.tokens.reasoning
+-      )
+-    }
+-  }
+-  return 0
+-}
+-
+-export function getBootstrapInputTokens(
+-  users: UserMessage[],
+-  assistants: AssistantMessage[],
+-  getParts: (id: string) => ReadonlyArray<{ type: string; [key: string]: any }>,
+-): number {
+-  const lastUser = users.at(-1)
+-  const lastUserParts = lastUser ? getParts(lastUser.id) : []
+-  const estimatedPromptInputTokens = estimateUserInputTokens(lastUserParts)
+-  const previousAssistant = lastUser ? assistants.findLast((item) => item.parentID !== lastUser.id) : assistants.at(-1)
+-  
+-  const requestOverhead = estimateRequestOverhead()
+-  const previousContextSize = previousAssistant ? getContextSize(previousAssistant, getParts) : 0
+-  
+-  return previousContextSize > 0
+-    ? previousContextSize + estimatedPromptInputTokens
+-    : estimatedPromptInputTokens + requestOverhead
+-}
+-
++/**
++ * 合并 step-finish 真实值、流式追加估算，以及 assistant message 上的服务端请求体估算。
++ * finish-step 到达前，prompt.ts 会先把真实请求体估算写入 lastAssistant.tokens.input。
++ */
+ export function computeFinalTokens(
+   lastAssistant: AssistantMessage,
+   lastParts: ReadonlyArray<{ type: string; [key: string]: any }>,
+   requestConfirmed: { input: number; output: number },
+-  bootstrapInputTokens: number,
+ ) {
+   const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
+   const streamingOut = lastAssistant.time.completed
+@@ -153,16 +86,17 @@ export function computeFinalTokens(
+     !hasInFlightTail && lastStepFinish
+       ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
+       : 0
+-  
+-  // 修复：currentInput 应该反映当前步骤的真实输入（包括 bootstrap 或确认值）
+-  const currentInput = Math.max(currentStepInputConfirmed, bootstrapInputTokens) + pendingInputTokens
++
++  const assistantInputEstimate =
++    lastSFIdx < 0 ? lastAssistant.tokens.input + lastAssistant.tokens.cache.read + lastAssistant.tokens.cache.write : 0
++  const currentStepInput = currentStepInputConfirmed || assistantInputEstimate
++  const previousInput = currentStepInputConfirmed ? requestConfirmed.input - currentStepInputConfirmed : requestConfirmed.input
++  const previousOutput = currentStepOutputConfirmed ? requestConfirmed.output - currentStepOutputConfirmed : requestConfirmed.output
++  const currentInput = currentStepInput + pendingInputTokens
+   const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
+-  
+-  // 修复：totalInput 应该始终包含当前步骤的完整上下文
+-  // 如果当前步骤已确认（有 step-finish），使用确认值；否则使用 bootstrap 估算
+-  const currentStepTotalInput = currentStepInputConfirmed > 0 ? currentStepInputConfirmed : bootstrapInputTokens
+-  const totalInput = requestConfirmed.input + currentStepTotalInput + pendingInputTokens
+-  const totalOutput = requestConfirmed.output + pendingOutputTokens
++
++  const totalInput = previousInput + currentStepInput + pendingInputTokens
++  const totalOutput = previousOutput + currentOutput
+ 
+   return {
+     input: currentInput,
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 7d7375c4c8989bcf0dd37ccba82594c698c72eee..a7de59c0b62133c671e7a5d59759ea9c88351f17 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -54,7 +54,6 @@ import { InstanceState } from "@/effect/instance-state"
+ import { TaskTool, type TaskPromptOps } from "@/tool/task"
+ import { SessionRunState } from "./run-state"
+ import { EffectBridge } from "@/effect/bridge"
+-
+ // @ts-ignore
+ globalThis.AI_SDK_LOG_WARNINGS = false
+ 
+@@ -1438,7 +1437,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             time: { created: Date.now() },
+             sessionID,
+           }
+-          yield* sessions.updateMessage(msg)
+           const handle = yield* processor.create({
+             assistantMessage: msg,
+             sessionID,
+@@ -1501,6 +1499,45 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             const system = [...env, ...instructions, ...(skills ? [skills] : []), ...(mcpInstr ? [mcpInstr] : [])]
+             const format = lastUser.format ?? { type: "text" as const }
+             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
++            const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])]
++            // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
++            // 从本 session 历史 assistant 的 output text/reasoning 推算真实 chars-per-token 比值，
++            // 按累积字符量停止（≥16000），不按轮数，代替固定 /4
++            const systemText = [
++              ...(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)),
++              ...system,
++              ...(lastUser.system ? [lastUser.system] : []),
++            ].join("\n")
++            const messagesText = JSON.stringify(messages)
++            const disabledTools = Permission.disabled(Object.keys(tools), Permission.merge(agent.permission, session.permission ?? []))
++            const toolsText = Object.entries(tools)
++              .filter(([name]) => lastUser.tools?.[name] !== false && !disabledTools.has(name))
++              .map(([name, tool]) => {
++                const item = tool as { description?: string; inputSchema?: unknown }
++                return `Tool: ${name}\n${item.description ?? ""}\n${JSON.stringify(item.inputSchema)}`
++              })
++              .join("\n")
++            const inputChars = [systemText, messagesText, toolsText].join("\n").length
++            let historyOutputTokens = 0
++            let historyOutputChars = 0
++            for (let i = msgs.length - 1; i >= 0 && historyOutputChars < 16000; i--) {
++              const m = msgs[i]
++              if (m.info.role !== "assistant") continue
++              const sf = m.parts.findLast((p) => p.type === "step-finish")
++              if (!sf) continue
++              const chars = m.parts
++                .filter((p) => p.type === "text" || p.type === "reasoning")
++                .reduce((sum, p) => sum + ((p as any).text?.length ?? 0), 0)
++              const tokens = (sf.tokens.output ?? 0) + (sf.tokens.reasoning ?? 0)
++              historyOutputTokens += tokens
++              historyOutputChars += chars
++            }
++            const charsPerToken = historyOutputTokens > 0 && historyOutputChars > 500
++              ? historyOutputChars / historyOutputTokens
++              : 4
++            const estimatedInput = Math.round(inputChars / charsPerToken)
++            handle.message.tokens.input = estimatedInput
++            yield* sessions.updateMessage(handle.message)
+             const result = yield* handle.process({
+               user: lastUser,
+               agent,
+@@ -1508,7 +1545,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+               sessionID,
+               parentSessionID: session.parentID,
+               system,
+-              messages: [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])],
++              messages,
+               tools,
+               model,
+               toolChoice: format.type === "json_schema" ? "required" : undefined,
+diff --git a/packages/opencode/test/cli/tui/token-estimate.test.ts b/packages/opencode/test/cli/tui/token-estimate.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6684f892f0d24313a798581c246ae0d99e339a70
+--- /dev/null
++++ b/packages/opencode/test/cli/tui/token-estimate.test.ts
+@@ -0,0 +1,129 @@
++import { describe, expect, test } from "bun:test"
++import type { AssistantMessage, Part } from "@opencode-ai/sdk/v2"
++import { computeFinalTokens } from "@/cli/cmd/tui/util/token-estimate"
++
++function assistant(tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read: number; write: number } }, completed?: number): AssistantMessage {
++  return {
++    id: "2",
++    sessionID: "s",
++    role: "assistant",
++    time: { created: 2, completed },
++    parentID: "1",
++    modelID: "model",
++    providerID: "test",
++    mode: "general",
++    agent: "general",
++    path: { cwd: ".", root: "." },
++    cost: 0,
++    tokens: { input: tokens?.input ?? 0, output: tokens?.output ?? 0, reasoning: tokens?.reasoning ?? 0, cache: tokens?.cache ?? { read: 0, write: 0 } },
++  } as AssistantMessage
++}
++
++function text(id: string, text: string): Part {
++  return { id, sessionID: "s", messageID: "2", type: "text", text } as Part
++}
++
++function stepFinish(input: number, output: number, reasoning = 0, cacheRead = 0, cacheWrite = 0): Part {
++  return {
++    id: "sf",
++    sessionID: "s",
++    messageID: "2",
++    type: "step-finish",
++    reason: "stop",
++    cost: 0,
++    tokens: { input, output, reasoning, cache: { read: cacheRead, write: cacheWrite } },
++  } as Part
++}
++
++describe("token estimate — computeFinalTokens", () => {
++  test("uses assistant message tokens.input before the first step-finish (daemon estimate)", () => {
++    const result = computeFinalTokens(
++      assistant({ input: 5200 }),
++      [text("p1", "Hello")], // streaming text
++      { input: 0, output: 0 },
++    )
++
++    expect(result.input).toBe(5200) // estimate from message.tokens.input
++    expect(result.output).toBe(1)   // "Hello".length / 4 ≈ 1
++    expect(result.totalInput).toBe(5200)
++    expect(result.totalOutput).toBe(1)
++  })
++
++  test("uses step-finish tokens and ignores assistant estimate once confirmed", () => {
++    const result = computeFinalTokens(
++      assistant({ input: 9999 }, 3),
++      [stepFinish(5100, 200, 10, 20, 30)],
++      { input: 5370, output: 350 },
++    )
++
++    expect(result.input).toBe(5150)
++    expect(result.output).toBe(210)
++    expect(result.totalInput).toBe(5370)
++    expect(result.totalOutput).toBe(350)
++  })
++
++  test("streaming text + assistant estimate: shows estimate for input, text for output", () => {
++    const result = computeFinalTokens(
++      assistant({ input: 8000 }), // in-flight, not completed
++      [text("p1", "abcdefgh")],     // 8 chars streaming
++      { input: 0, output: 0 },
++    )
++
++    expect(result.input).toBe(8000)
++    expect(result.output).toBe(2) // 8/4 = 2
++  })
++
++  test("streaming text without assistant estimate or step-finish returns 0 input", () => {
++    const result = computeFinalTokens(
++      assistant({ input: 0 }),
++      [text("p1", "abcdefgh")],
++      { input: 0, output: 0 },
++    )
++
++    expect(result.input).toBe(0)
++    expect(result.output).toBe(2)
++  })
++
++  test("pending tool call adds to streaming output estimate", () => {
++    const toolPending: Part = {
++      id: "t1",
++      sessionID: "s",
++      messageID: "2",
++      type: "tool",
++      callID: "c1",
++      tool: "bash",
++      state: { status: "pending", input: {}, raw: "pending-raw-text" },
++    } as Part
++
++    const result = computeFinalTokens(
++      assistant({ input: 5000 }),
++      [text("p1", "ab"), toolPending, text("p2", "cd")],
++      { input: 0, output: 0 },
++    )
++
++    // streamingOut: "ab" (2) + "pending-raw-text" (17) + "cd" (2) = 21 chars → 5 tokens
++    // pendingInput: 0 (no completed tool)
++    expect(result.input).toBe(5000)
++    expect(result.output).toBe(5)
++  })
++
++  test("multiple requests: respects previous confirmed tokens", () => {
++    // request 1 assistant: step-finish with real tokens
++    const requestConfirmed = { input: 5000, output: 200 }
++
++    // request 2 assistant: streaming with estimate
++    const result = computeFinalTokens(
++      assistant({ input: 7000 }),
++      [text("p1", "abcdefgh")],
++      requestConfirmed,
++    )
++
++    // currentInput = 7000 (estimate), currentOutput = 2 (streaming)
++    // totalInput = 5000 + 7000 + 0 = 12000
++    // totalOutput = 200 + 2 = 202
++    expect(result.input).toBe(7000)
++    expect(result.output).toBe(2)
++    expect(result.totalInput).toBe(12000)
++    expect(result.totalOutput).toBe(202)
++  })
++})

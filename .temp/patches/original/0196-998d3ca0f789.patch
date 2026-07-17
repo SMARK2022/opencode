@@ -1,0 +1,444 @@
+From 998d3ca0f789f5285d902e2703608d2fc4a762e3 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 22 May 2026 23:39:51 +0800
+Subject: [PATCH] feat(permission): add auto review config schema
+
+
+diff --git a/packages/opencode/src/config/agent.ts b/packages/opencode/src/config/agent.ts
+index a6719e86743a447b2180b1626d7dc30f418ac337..c8200fe7009b877c4820af69a877a2f05e341cf1 100644
+--- a/packages/opencode/src/config/agent.ts
++++ b/packages/opencode/src/config/agent.ts
+@@ -45,6 +45,10 @@ const AgentSchema = Schema.StructWithRest(
+       description: "Maximum number of agentic iterations before forcing text-only response",
+     }),
+     maxSteps: Schema.optional(PositiveInt).annotate({ description: "@deprecated Use 'steps' field instead." }),
++    // Agent permissions are tool rules only. Auto-review controls are global
++    // permission-pipeline settings today; if they appear in agent frontmatter,
++    // StructWithRest preserves them under options instead of pretending the
++    // runtime reviewer honors per-agent policy/model overrides.
+     permission: Schema.optional(ConfigPermission.Info),
+   }),
+   [Schema.Record(Schema.String, Schema.Any)],
+@@ -93,7 +97,7 @@ const normalize = (agent: Schema.Schema.Type<typeof AgentSchema>): Schema.Schema
+   globalThis.Object.assign(permission, agent.permission)
+ 
+   const steps = agent.steps ?? agent.maxSteps
+-  return { ...agent, options, permission, ...(steps !== undefined ? { steps } : {}) }
++  return { ...agent, options, permission: permission as Schema.Schema.Type<typeof ConfigPermission.Info>, ...(steps !== undefined ? { steps } : {}) }
+ }
+ 
+ export const Info = AgentSchema.pipe(
+diff --git a/packages/opencode/src/config/permission.ts b/packages/opencode/src/config/permission.ts
+index 1092ae2b7e14dea2ec7f040adbab17d825311288..c851be06af3314000b4099255db48618437978f7 100644
+--- a/packages/opencode/src/config/permission.ts
++++ b/packages/opencode/src/config/permission.ts
+@@ -1,18 +1,63 @@
+ export * as ConfigPermission from "./permission"
+ import { Schema, SchemaGetter } from "effect"
+ 
+-export const Action = Schema.Literals(["ask", "allow", "deny"]).annotate({ identifier: "PermissionActionConfig" })
++// `auto` is a permission action, not an approval policy. It means the request
++// enters deterministic precheck and, when needed, the configured reviewer before
++// falling back to user approval. Keep it in the same union as allow/ask/deny so
++// existing permission maps and generated SDK types use one action vocabulary.
++export const Action = Schema.Literals(["ask", "allow", "deny", "auto"]).annotate({ identifier: "PermissionActionConfig" })
+ export type Action = Schema.Schema.Type<typeof Action>
+ 
++export const ApprovalsReviewer = Schema.Literals(["user", "auto_review"]).annotate({
++  identifier: "ApprovalsReviewer",
++  description: "Choose whether prompt-risk permission requests go to the user or the automatic reviewer.",
++})
++export type ApprovalsReviewer = Schema.Schema.Type<typeof ApprovalsReviewer>
++
++export const AutoReview = Schema.Struct({
++  // Reviewer configuration lives beside permission rules because it controls how
++  // `action: "auto"` is resolved, but these fields are not themselves rules and
++  // are skipped by Permission.fromConfig.
++  model: Schema.optional(Schema.String).annotate({ description: "Reviewer model in provider/model form." }),
++  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Reviewer timeout in milliseconds. Defaults to 90000." }),
++  policy_path: Schema.optional(Schema.String).annotate({ description: "Markdown policy file appended to the default tenant policy." }),
++  policy: Schema.optional(Schema.String).annotate({ description: "Inline markdown policy appended to the reviewer policy prompt." }),
++  fallback: Schema.optional(Schema.Literals(["deny", "user"])).annotate({
++    description: "On reviewer failure, either fail closed or fall back to user approval. Defaults to deny.",
++  }),
++  strict: Schema.optional(Schema.Boolean).annotate({ description: "Route even low-risk precheck allows through reviewer." }),
++  max_consecutive_denials: Schema.optional(Schema.Number).annotate({ description: "Circuit breaker consecutive denial threshold." }),
++  max_recent_denials: Schema.optional(Schema.Number).annotate({ description: "Circuit breaker recent denial threshold." }),
++  recent_denial_window: Schema.optional(Schema.Number).annotate({ description: "Circuit breaker recent decision window." }),
++}).annotate({ identifier: "AutoReviewConfig" })
++export type AutoReview = Schema.Schema.Type<typeof AutoReview>
++
+ export const Object = Schema.Record(Schema.String, Action).annotate({ identifier: "PermissionObjectConfig" })
+ export type Object = Schema.Schema.Type<typeof Object>
+ 
+ export const Rule = Schema.Union([Action, Object]).annotate({ identifier: "PermissionRuleConfig" })
+ export type Rule = Schema.Schema.Type<typeof Rule>
+ 
++// StructWithRest validates control fields through the rest schema too, so the
++// rest value union must be wide enough for the explicit controls below. The
++// filter after InputObject narrows that back down: only named control fields can
++// use control-shaped values, while arbitrary permission names must be rules.
++const InputValue = Schema.Union([Rule, ApprovalsReviewer, AutoReview])
++
++const controlsOnlyOnControlKeys = Schema.makeFilter<Record<string, unknown>>((data) => {
++  for (const [key, value] of globalThis.Object.entries(data)) {
++    if (key === "approvals_reviewer" || key === "auto_review") continue
++    if (isRuleValue(value)) continue
++    return `Unsupported permission control "${key}".`
++  }
++})
++
+ // Known permission keys get explicit types in the Effect schema for generated
+-// docs/types. Runtime config parsing uses Effect's `propertyOrder: "original"`
+-// parse option so user key order is preserved for permission precedence.
++// docs/types, while only the explicit `approvals_reviewer` and `auto_review`
++// fields accept control values. Unknown keys are treated as ordinary permission
++// names and must be rules, so typoed/unsupported controls do not parse and then
++// disappear during Permission.fromConfig. Runtime parsing uses Effect's
++// `propertyOrder: "original"` option so user key order is preserved.
+ const InputObject = Schema.StructWithRest(
+   Schema.Struct({
+     read: Schema.optional(Rule),
+@@ -32,9 +77,11 @@ const InputObject = Schema.StructWithRest(
+     lsp: Schema.optional(Rule),
+     doom_loop: Schema.optional(Action),
+     skill: Schema.optional(Rule),
++    approvals_reviewer: Schema.optional(ApprovalsReviewer),
++    auto_review: Schema.optional(AutoReview),
+   }),
+-  [Schema.Record(Schema.String, Rule)],
+-)
++  [Schema.Record(Schema.String, InputValue)],
++).check(controlsOnlyOnControlKeys)
+ 
+ // Input the user writes in config: either a single Action (shorthand for "*")
+ // or an object of per-target rules.
+@@ -45,6 +92,16 @@ const InputSchema = Schema.Union([Action, InputObject])
+ const normalizeInput = (input: Schema.Schema.Type<typeof InputSchema>): Schema.Schema.Type<typeof InputObject> =>
+   typeof input === "string" ? { "*": input } : input
+ 
++function isRuleValue(value: unknown): value is Rule {
++  if (isActionValue(value)) return true
++  if (!value || typeof value !== "object" || Array.isArray(value)) return false
++  return globalThis.Object.values(value).every(isActionValue)
++}
++
++function isActionValue(value: unknown): value is Action {
++  return value === "ask" || value === "allow" || value === "deny" || value === "auto"
++}
++
+ export const Info = InputSchema.pipe(
+   Schema.decodeTo(InputObject, {
+     decode: SchemaGetter.transform(normalizeInput),
+@@ -54,5 +111,29 @@ export const Info = InputSchema.pipe(
+     encode: SchemaGetter.passthrough({ strict: false }),
+   }),
+ ).annotate({ identifier: "PermissionConfig" })
+-type _Info = Schema.Schema.Type<typeof InputObject>
+-export type Info = { -readonly [K in keyof _Info]: _Info[K] }
++export type Info = {
++  // The schema above preserves user key order for permission precedence, but the
++  // generated TypeScript type from StructWithRest is too narrow once control
++  // fields are mixed with arbitrary permission names. Keep this hand-written
++  // structural type aligned with InputObject and fromConfig's runtime guards.
++  read?: Rule
++  edit?: Rule
++  glob?: Rule
++  grep?: Rule
++  list?: Rule
++  bash?: Rule
++  task?: Rule
++  external_directory?: Rule
++  todowrite?: Action
++  question?: Action
++  webfetch?: Action
++  websearch?: Action
++  repo_clone?: Rule
++  repo_overview?: Rule
++  lsp?: Rule
++  doom_loop?: Action
++  skill?: Rule
++  approvals_reviewer?: ApprovalsReviewer
++  auto_review?: AutoReview
++  [key: string]: Rule | Action | ApprovalsReviewer | AutoReview | undefined
++}
+diff --git a/packages/opencode/src/permission/evaluate.ts b/packages/opencode/src/permission/evaluate.ts
+index 2b0604f4baccbe12aaff31a33595d6be81ec18dc..74c991ed9ec278e4b6235e56dd09a67e34c5bf58 100644
+--- a/packages/opencode/src/permission/evaluate.ts
++++ b/packages/opencode/src/permission/evaluate.ts
+@@ -3,7 +3,10 @@ import { Wildcard } from "@/util/wildcard"
+ type Rule = {
+   permission: string
+   pattern: string
+-  action: "allow" | "deny" | "ask"
++  // `auto` participates in the same last-match-wins evaluator as allow/ask/deny;
++  // the Permission service decides later whether precheck, reviewer, or user
++  // approval handles the matching request.
++  action: "allow" | "deny" | "ask" | "auto"
+ }
+ 
+ export function evaluate(permission: string, pattern: string, ...rulesets: Rule[][]): Rule {
+diff --git a/packages/opencode/test/config/config.test.ts b/packages/opencode/test/config/config.test.ts
+index 7cacafc39fec4e2330e215f818d5c20a4308ba36..ef1f5336e4566ea315f2ffab52519e4436a61d72 100644
+--- a/packages/opencode/test/config/config.test.ts
++++ b/packages/opencode/test/config/config.test.ts
+@@ -862,6 +862,38 @@ Ordered permissions`,
+   })
+ })
+ 
++test("agent markdown auto-review controls stay options instead of permission rules", async () => {
++  await using tmp = await tmpdir({
++    init: async (dir) => {
++      const agentDir = path.join(dir, ".opencode", "agent")
++      await fs.mkdir(agentDir, { recursive: true })
++
++      await Filesystem.write(
++        path.join(agentDir, "reviewed.md"),
++        `---
++permission:
++  bash: auto
++approvals_reviewer: auto_review
++auto_review:
++  fallback: user
++---
++Reviewed permissions`,
++      )
++    },
++  })
++  await withTestInstance({
++    directory: tmp.path,
++    fn: async (ctx) => {
++      const config = await load(ctx)
++      expect(config.agent?.reviewed?.permission).toEqual({ bash: "auto" })
++      expect(config.agent?.reviewed?.options).toMatchObject({
++        approvals_reviewer: "auto_review",
++        auto_review: { fallback: "user" },
++      })
++    },
++  })
++})
++
+ test("loads agents from .opencode/agents (plural)", async () => {
+   await using tmp = await tmpdir({
+     init: async (dir) => {
+@@ -1782,6 +1814,51 @@ test("config parser preserves permission order while rejecting unknown top-level
+   }
+ })
+ 
++test("config parser accepts permission auto review controls", () => {
++  // This covers the schema boundary rather than Permission.fromConfig: the
++  // auto_review object contains numbers/booleans that must not be parsed as
++  // arbitrary permission action values.
++  const config = ConfigParse.schema(
++    Config.Info,
++    {
++      permission: {
++        bash: "auto",
++        approvals_reviewer: "auto_review",
++        auto_review: {
++          strict: true,
++          fallback: "user",
++          policy: "Deny unrequested pushes.",
++          max_consecutive_denials: 1,
++          max_recent_denials: 2,
++          recent_denial_window: 3,
++        },
++      },
++    },
++    "test",
++  )
++
++  expect(config.permission?.bash).toBe("auto")
++  expect(config.permission?.approvals_reviewer).toBe("auto_review")
++  expect(config.permission?.auto_review?.max_consecutive_denials).toBe(1)
++})
++
++test("config parser rejects unsupported approval_policy control", () => {
++  for (const approval_policy of ["on_request", { fallback: "user" }]) {
++    expect(() =>
++      ConfigParse.schema(
++        Config.Info,
++        {
++          permission: {
++            bash: "auto",
++            approval_policy,
++          },
++        },
++        "test",
++      ),
++    ).toThrow()
++  }
++})
++
+ // MCP config merging tests
+ 
+ test("project config can override MCP server enabled status", async () => {
+diff --git a/packages/sdk/js/src/gen/types.gen.ts b/packages/sdk/js/src/gen/types.gen.ts
+index 5e4fd8906155b9c88d29cda1c44adafcb09b4aaf..be30f101ed0de78db7a02702cd818fe5489dd459 100644
+--- a/packages/sdk/js/src/gen/types.gen.ts
++++ b/packages/sdk/js/src/gen/types.gen.ts
+@@ -972,6 +972,41 @@ export type KeybindsConfig = {
+   terminal_title_toggle?: string
+ }
+ 
++export type PermissionActionConfig = "ask" | "allow" | "deny" | "auto"
++
++export type ApprovalsReviewer = "user" | "auto_review"
++
++export type AutoReviewConfig = {
++  model?: string
++  timeout_ms?: number
++  policy_path?: string
++  policy?: string
++  fallback?: "deny" | "user"
++  strict?: boolean
++  max_consecutive_denials?: number
++  max_recent_denials?: number
++  recent_denial_window?: number
++}
++
++export type PermissionObjectConfig = {
++  [key: string]: PermissionActionConfig
++}
++
++export type PermissionRuleConfig = PermissionActionConfig | PermissionObjectConfig
++
++export type PermissionConfig =
++  | PermissionActionConfig
++  | {
++      edit?: PermissionRuleConfig
++      bash?: PermissionRuleConfig
++      webfetch?: PermissionActionConfig
++      doom_loop?: PermissionActionConfig
++      external_directory?: PermissionRuleConfig
++      approvals_reviewer?: ApprovalsReviewer
++      auto_review?: AutoReviewConfig
++      [key: string]: PermissionRuleConfig | PermissionActionConfig | ApprovalsReviewer | AutoReviewConfig | undefined
++    }
++
+ export type AgentConfig = {
+   model?: string
+   temperature?: number
+@@ -994,17 +1029,7 @@ export type AgentConfig = {
+    * Maximum number of agentic iterations before forcing text-only response
+    */
+   maxSteps?: number
+-  permission?: {
+-    edit?: "ask" | "allow" | "deny"
+-    bash?:
+-      | ("ask" | "allow" | "deny")
+-      | {
+-          [key: string]: "ask" | "allow" | "deny"
+-        }
+-    webfetch?: "ask" | "allow" | "deny"
+-    doom_loop?: "ask" | "allow" | "deny"
+-    external_directory?: "ask" | "allow" | "deny"
+-  }
++  permission?: PermissionConfig
+   [key: string]:
+     | unknown
+     | string
+@@ -1015,17 +1040,7 @@ export type AgentConfig = {
+     | boolean
+     | ("subagent" | "primary" | "all")
+     | number
+-    | {
+-        edit?: "ask" | "allow" | "deny"
+-        bash?:
+-          | ("ask" | "allow" | "deny")
+-          | {
+-              [key: string]: "ask" | "allow" | "deny"
+-            }
+-        webfetch?: "ask" | "allow" | "deny"
+-        doom_loop?: "ask" | "allow" | "deny"
+-        external_directory?: "ask" | "allow" | "deny"
+-      }
++    | PermissionConfig
+     | undefined
+ }
+ 
+@@ -1323,17 +1338,7 @@ export type Config = {
+    */
+   instructions?: Array<string>
+   layout?: LayoutConfig
+-  permission?: {
+-    edit?: "ask" | "allow" | "deny"
+-    bash?:
+-      | ("ask" | "allow" | "deny")
+-      | {
+-          [key: string]: "ask" | "allow" | "deny"
+-        }
+-    webfetch?: "ask" | "allow" | "deny"
+-    doom_loop?: "ask" | "allow" | "deny"
+-    external_directory?: "ask" | "allow" | "deny"
+-  }
++  permission?: PermissionConfig
+   tools?: {
+     [key: string]: boolean
+   }
+@@ -1591,13 +1596,13 @@ export type Agent = {
+   temperature?: number
+   color?: string
+   permission: {
+-    edit: "ask" | "allow" | "deny"
++    edit: "ask" | "allow" | "deny" | "auto"
+     bash: {
+-      [key: string]: "ask" | "allow" | "deny"
++      [key: string]: "ask" | "allow" | "deny" | "auto"
+     }
+-    webfetch?: "ask" | "allow" | "deny"
+-    doom_loop?: "ask" | "allow" | "deny"
+-    external_directory?: "ask" | "allow" | "deny"
++    webfetch?: "ask" | "allow" | "deny" | "auto"
++    doom_loop?: "ask" | "allow" | "deny" | "auto"
++    external_directory?: "ask" | "allow" | "deny" | "auto"
+   }
+   model?: {
+     modelID: string
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+index 35c542da363dbce5cd2d238ce8ff7db296678254..48000f8f18af0f8a7879c34fbedc8d2591113a8d 100644
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -718,7 +718,7 @@ export type Part =
+   | RetryPart
+   | CompactionPart
+ 
+-export type PermissionAction = "allow" | "deny" | "ask"
++export type PermissionAction = "allow" | "deny" | "ask" | "auto"
+ 
+ export type PermissionRule = {
+   permission: string
+@@ -934,7 +934,21 @@ export type ReferenceConfig = {
+   [key: string]: ReferenceConfigEntry
+ }
+ 
+-export type PermissionActionConfig = "ask" | "allow" | "deny"
++export type PermissionActionConfig = "ask" | "allow" | "deny" | "auto"
++
++export type ApprovalsReviewer = "user" | "auto_review"
++
++export type AutoReviewConfig = {
++  model?: string
++  timeout_ms?: number
++  policy_path?: string
++  policy?: string
++  fallback?: "deny" | "user"
++  strict?: boolean
++  max_consecutive_denials?: number
++  max_recent_denials?: number
++  recent_denial_window?: number
++}
+ 
+ export type PermissionObjectConfig = {
+   [key: string]: PermissionActionConfig
+@@ -962,7 +976,9 @@ export type PermissionConfig =
+       lsp?: PermissionRuleConfig
+       doom_loop?: PermissionActionConfig
+       skill?: PermissionRuleConfig
+-      [key: string]: PermissionRuleConfig | PermissionActionConfig | undefined
++      approvals_reviewer?: ApprovalsReviewer
++      auto_review?: AutoReviewConfig
++      [key: string]: PermissionRuleConfig | PermissionActionConfig | ApprovalsReviewer | AutoReviewConfig | undefined
+     }
+ 
+ export type AgentConfig = {

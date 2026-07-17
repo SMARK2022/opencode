@@ -1,0 +1,402 @@
+From 69385b87b007c84683c258d2d4ec856830d4388e Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 8 Jun 2026 15:27:42 +0800
+Subject: [PATCH] =?UTF-8?q?feat(permission):=20=E5=A2=9E=E5=BC=BA=E6=9D=83?=
+ =?UTF-8?q?=E9=99=90=E5=A4=84=E7=90=86=E9=80=BB=E8=BE=91=EF=BC=8C=E6=94=AF?=
+ =?UTF-8?q?=E6=8C=81=E5=8E=9F=E5=A7=8B=E6=8B=92=E7=BB=9D=E6=A8=A1=E5=BC=8F?=
+ =?UTF-8?q?=E5=92=8C=E7=8E=AF=E5=A2=83=E5=8F=98=E9=87=8F=E5=A4=84=E7=90=86?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/permission/index.ts
+index eeb2aa28f7a28620d754ce86dc071310eafe1690..16596745a0600803a1437041b1c8d4a71c51c1f8 100644
+--- a/packages/opencode/src/permission/index.ts
++++ b/packages/opencode/src/permission/index.ts
+@@ -225,6 +225,16 @@ export const layer = Layer.effect(
+       let needsAuto = false
+       const autoPatterns: string[] = []
+ 
++      for (const pattern of rawDenyPatterns(request.metadata)) {
++        const denied = rawDenyRule(request.permission, pattern, ruleset)
++        log.info("evaluated raw deny evidence", { permission: request.permission, pattern, denied: Boolean(denied) })
++        if (denied) {
++          return yield* new DeniedError({
++            ruleset: ruleset.filter((rule) => Wildcard.match(request.permission, rule.permission)),
++          })
++        }
++      }
++
+       // Evaluate every requested pattern before taking action. Static deny keeps
+       // highest precedence, while mixed auto/ask requests preserve both gates:
+       // auto can reject critical payloads, but reviewer allow cannot bypass a
+@@ -476,6 +486,30 @@ function isPermissionObject(input: unknown): input is Record<string, Action> {
+   return Boolean(input && typeof input === "object" && !Array.isArray(input))
+ }
+ 
++function rawDenyPatterns(metadata: Readonly<Record<string, unknown>>) {
++  const patterns = metadata.raw_patterns
++  if (!Array.isArray(patterns)) return []
++  // raw_patterns is emitted by shell parsing for raw command evidence that was
++  // intentionally removed from canonical approval patterns. It is deny-only so
++  // sensitive env-assignment rules remain hard stops without giving raw env text
++  // authority to allow, auto-approve, or require extra asks for the canonical command.
++  return patterns.filter((pattern): pattern is string => typeof pattern === "string")
++}
++
++function rawDenyRule(permission: string, pattern: string, ruleset: Ruleset) {
++  // This intentionally does not use the normal last-match-wins evaluator or
++  // approved rules. Raw evidence is hidden from canonical approval patterns, so a
++  // concrete deny such as `GITHUB_TOKEN=*` must remain terminal even if a later
++  // `bash:*` rule would auto/allow the canonical command.
++  return ruleset.find(
++    (rule) =>
++      rule.action === "deny" &&
++      rule.pattern !== "*" &&
++      Wildcard.match(permission, rule.permission) &&
++      Wildcard.match(pattern, rule.pattern),
++  )
++}
++
+ export function merge(...rulesets: Ruleset[]): Ruleset {
+   return rulesets.flat()
+ }
+diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
+index a13d6fabd962f347336c9eb64867da10a79fedae..fb5cee4c3834b52e0cc03acde03fd293e7341e41 100644
+--- a/packages/opencode/src/permission/precheck.ts
++++ b/packages/opencode/src/permission/precheck.ts
+@@ -314,10 +314,30 @@ export function evaluate(input: {
+   // Other permissions default to general allow unless a structured boundary above
+   // promoted them to cautious first, such as workspace delete metadata.
+   if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
+-  return evaluateShell(
+-    typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
+-    0,
+-  )
++  return bashEffect(input)
++}
++
++function bashEffect(input: {
++  patterns: readonly string[]
++  metadata: Readonly<Record<string, unknown>>
++}) {
++  const command = typeof input.metadata.command === "string" ? input.metadata.command : undefined
++  const patternCommand = input.patterns.join(" && ")
++  if (!command) return evaluateShell(patternCommand, 0)
++
++  const raw = evaluateShell(command, 0)
++  if (!patternCommand.trim() || patternCommand === command) return raw
++
++  // Shell metadata is the raw audit/reviewer evidence, while permission patterns
++  // are canonical rule keys that may omit POSIX leading environment assignments.
++  // Auto precheck must consider both views and keep the higher risk so raw
++  // dangerous payloads cannot be weakened, and env assignments cannot downgrade a
++  // canonical `git push --force` pattern from cautious to general.
++  return maxRisk(raw, evaluateShell(patternCommand, 0))
++}
++
++function maxRisk(left: Decision, right: Decision) {
++  return LEVELS.indexOf(right.level) > LEVELS.indexOf(left.level) ? right : left
+ }
+ 
+ function externalDirectoryEffect(input: {
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+index 69b30355b6b6eab856225ce8a29c143b5864193e..cc500f4fd31042acae515ed33f763fef09895221 100644
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -126,6 +126,7 @@ type Part = {
+ type Scan = {
+   dirs: Set<string>
+   patterns: Set<string>
++  raw: Set<string>
+   always: Set<string>
+ }
+ 
+@@ -190,10 +191,32 @@ function parts(node: Node) {
+   return out
+ }
+ 
+-function source(node: Node) {
++function permissionPattern(node: Node, tokens: string[]) {
++  const command = tokens.join(" ")
++  // Permission patterns are the rule-matching key, not raw shell evidence. POSIX
++  // leading environment assignments are skipped by `parts()` so they cannot hide
++  // the actual command from a rule like `git push --force*`. Redirection appears
++  // as a parent suffix in bash and as a child node in PowerShell; in both cases it
++  // remains part of the visible shell effect for redirect-specific rules.
++  const redirect =
++    node
++      .descendantsOfType("redirection")
++      .filter((item): item is Node => Boolean(item))
++      .map((item) => item.text.trim())
++      .join(" ") || redirectedSuffix(node)
++  if (!redirect) return command
++  return `${command} ${redirect}`
++}
++
++function rawPattern(node: Node) {
+   return (node.parent?.type === "redirected_statement" ? node.parent.text : node.text).trim()
+ }
+ 
++function redirectedSuffix(node: Node) {
++  if (node.parent?.type !== "redirected_statement") return ""
++  return node.parent.text.slice(node.endIndex - node.parent.startIndex).trim()
++}
++
+ function commands(node: Node) {
+   return node.descendantsOfType("command").filter((child): child is Node => Boolean(child))
+ }
+@@ -373,6 +396,11 @@ const ask = Effect.fn("ShellTool.ask")(function* (
+     metadata: {
+       action_kind: "shell",
+       command: metadata.command,
++      // raw_patterns is deny-only compatibility evidence. Canonical patterns
++      // deliberately omit POSIX env assignments so `git push --force*` still
++      // matches; the raw form remains available to explicit hard-deny rules
++      // such as `GITHUB_TOKEN=*` without affecting allow/ask/auto routing.
++      ...(scan.raw.size ? { raw_patterns: Array.from(scan.raw) } : {}),
+       cwd: metadata.cwd,
+       shell: metadata.shell,
+       agent: ctx.agent,
+@@ -731,6 +759,7 @@ export const ShellTool = Tool.define(
+       const scan: Scan = {
+         dirs: new Set<string>(),
+         patterns: new Set<string>(),
++        raw: new Set<string>(),
+         always: new Set<string>(),
+       }
+       const shellKind = ShellID.toKind(Shell.name(shell))
+@@ -751,7 +780,10 @@ export const ShellTool = Tool.define(
+         }
+ 
+         if (tokens.length && (!cmd || !CWD.has(cmd))) {
+-          scan.patterns.add(source(node))
++          const pattern = permissionPattern(node, tokens)
++          scan.patterns.add(pattern)
++          const raw = rawPattern(node)
++          if (raw && raw !== pattern) scan.raw.add(raw)
+           const always = BashArity.prefix(tokens)
+           // Auto permission must never suggest broad wrapper or interpreter
+           // allow-rules (for example `bash *`, `python -c *`, or `git *`). Those
+diff --git a/packages/opencode/test/permission/next.test.ts b/packages/opencode/test/permission/next.test.ts
+index 0073386d74a24eac00924ab2edbf081bccb76313..3cddb0d78f1b004417c3419448757fb35e551c95 100644
+--- a/packages/opencode/test/permission/next.test.ts
++++ b/packages/opencode/test/permission/next.test.ts
+@@ -721,6 +721,61 @@ it.instance(
+   { git: true },
+ )
+ 
++it.instance(
++  "ask - raw shell deny evidence remains terminal for canonicalized commands",
++  () =>
++    Effect.gen(function* () {
++      yield* Effect.forEach(["allow", "auto"] as const, (action) =>
++        Effect.gen(function* () {
++          const err = yield* fail(
++            ask({
++              sessionID: SessionID.make("session_test"),
++              permission: "bash",
++              patterns: ["git push --force"],
++              metadata: { command: "GITHUB_TOKEN=x git push --force", raw_patterns: ["GITHUB_TOKEN=x git push --force"] },
++              always: ["git push *"],
++              ruleset: [
++                { permission: "bash", pattern: "GITHUB_TOKEN=*", action: "deny" },
++                { permission: "bash", pattern: "*", action },
++              ],
++            }),
++          )
++          expect(err).toBeInstanceOf(Permission.DeniedError)
++          expect(yield* list()).toHaveLength(0)
++        }),
++      )
++
++      const approved = yield* ask({
++        sessionID: SessionID.make("session_test"),
++        permission: "bash",
++        patterns: ["GITHUB_TOKEN=x git push --force"],
++        metadata: { command: "GITHUB_TOKEN=x git push --force" },
++        always: ["GITHUB_TOKEN=*"],
++        ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
++      }).pipe(Effect.forkScoped)
++      const pending = yield* waitForPending(1)
++      yield* reply({ requestID: pending[0].id, reply: "always" })
++      yield* Fiber.await(approved)
++
++      const err = yield* fail(
++        ask({
++          sessionID: SessionID.make("session_test"),
++          permission: "bash",
++          patterns: ["git push --force"],
++          metadata: { command: "GITHUB_TOKEN=x git push --force", raw_patterns: ["GITHUB_TOKEN=x git push --force"] },
++          always: ["git push *"],
++          ruleset: [
++            { permission: "bash", pattern: "GITHUB_TOKEN=*", action: "deny" },
++            { permission: "bash", pattern: "*", action: "auto" },
++          ],
++        }),
++      )
++      expect(err).toBeInstanceOf(Permission.DeniedError)
++      expect(yield* list()).toHaveLength(0)
++    }),
++  { git: true },
++)
++
+ it.instance(
+   "ask - auto resolves known safe bash commands without pending user approval",
+   () =>
+diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
+index 706c4b3b541dfb4a030b14e1119aad56d781202e..be04e3d5ab8e0815e76036a5a59087db49a4da08 100644
+--- a/packages/opencode/test/permission/precheck.test.ts
++++ b/packages/opencode/test/permission/precheck.test.ts
+@@ -693,4 +693,41 @@ describe("permission precheck bash classifier", () => {
+     expect(bash("git cherry-pick abc123")).toMatchObject({ level: "cautious" })
+     expect(bash("git revert HEAD")).toMatchObject({ level: "cautious" })
+   })
++
++  test("keeps cautious classification when shell metadata has environment assignments", () => {
++    expect(
++      PermissionPrecheck.evaluate({
++        permission: "bash",
++        patterns: ["git push --force"],
++        metadata: { command: "GITHUB_TOKEN=x git push --force" },
++      }),
++    ).toMatchObject({ level: "cautious", reason: "force push requires explicit approval" })
++    expect(
++      PermissionPrecheck.evaluate({
++        permission: "bash",
++        patterns: ['git commit -m "test"'],
++        metadata: { command: 'CI=$GITHUB_TOKEN git commit -m "test"' },
++      }),
++    ).toMatchObject({ level: "cautious" })
++  })
++
++  test("does not lower raw dangerous shell metadata with safer permission patterns", () => {
++    expect(
++      PermissionPrecheck.evaluate({
++        permission: "bash",
++        patterns: ["git status"],
++        metadata: { command: "rm -rf /" },
++      }),
++    ).toMatchObject({ level: "dangerous" })
++  })
++
++  test("does not promote environment-modified read-only shell metadata to safe", () => {
++    expect(
++      PermissionPrecheck.evaluate({
++        permission: "bash",
++        patterns: ["git status --porcelain"],
++        metadata: { command: "FOO=1 git status --porcelain" },
++      }),
++    ).toMatchObject({ level: "general" })
++  })
+ })
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index 31fda4a15fb80cef13858332b54bc831456a44c4..e65c0bc12b4c5b3c25b7209dc5545620336f3026 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -261,6 +261,68 @@ describe("tool.shell permissions", () => {
+     }),
+   )
+ 
++  if (bash) {
++    it.live("omits leading environment assignments from bash permission patterns [bash]", () =>
++      withShell(
++        { label: "bash", shell: bash },
++        Effect.gen(function* () {
++          const tmp = yield* tmpdirScoped()
++          yield* runIn(
++            tmp,
++            Effect.gen(function* () {
++              const err = new Error("stop after permission")
++              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              expect(
++                yield* fail(
++                  {
++                    command: 'CI=true git commit -m "test"',
++                    description: "Commit with CI env",
++                  },
++                  capture(requests, err),
++                ),
++              ).toMatchObject({ message: err.message })
++              const bashReq = requests.find((r) => r.permission === "bash")
++              expect(bashReq).toBeDefined()
++              expect(bashReq!.patterns).toContain('git commit -m "test"')
++              expect(bashReq!.patterns).not.toContain('CI=true git commit -m "test"')
++              expect(bashReq!.metadata.raw_patterns).toContain('CI=true git commit -m "test"')
++            }),
++          )
++        }),
++      ),
++    )
++
++    it.live("omits multiple environment assignments from bash permission patterns [bash]", () =>
++      withShell(
++        { label: "bash", shell: bash },
++        Effect.gen(function* () {
++          const tmp = yield* tmpdirScoped()
++          yield* runIn(
++            tmp,
++            Effect.gen(function* () {
++              const err = new Error("stop after permission")
++              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              expect(
++                yield* fail(
++                  {
++                    command: "FOO=1 BAR=2 echo hello",
++                    description: "Echo with env",
++                  },
++                  capture(requests, err),
++                ),
++              ).toMatchObject({ message: err.message })
++              const bashReq = requests.find((r) => r.permission === "bash")
++              expect(bashReq).toBeDefined()
++              expect(bashReq!.patterns).toContain("echo hello")
++              expect(bashReq!.patterns).not.toContain("FOO=1 BAR=2 echo hello")
++              expect(bashReq!.metadata.raw_patterns).toContain("FOO=1 BAR=2 echo hello")
++            }),
++          )
++        }),
++      ),
++    )
++  }
++
+   each("asks for bash permission with multiple commands", () =>
+     Effect.gen(function* () {
+       const tmp = yield* tmpdirScoped()
+@@ -1558,6 +1620,35 @@ describe("tool.shell permissions", () => {
+     }),
+   )
+ 
++  if (bash) {
++    it.live("keeps redirects after removing environment assignments from permission pattern [bash]", () =>
++      withShell(
++        { label: "bash", shell: bash },
++        Effect.gen(function* () {
++          const tmp = yield* tmpdirScoped()
++          yield* runIn(
++            tmp,
++            Effect.gen(function* () {
++              const err = new Error("stop after permission")
++              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
++              expect(
++                yield* fail(
++                  { command: "CI=true echo hello > output.txt", description: "Redirect output with env" },
++                  capture(requests, err),
++                ),
++              ).toMatchObject({ message: err.message })
++              const bashReq = requests.find((r) => r.permission === "bash")
++              expect(bashReq).toBeDefined()
++              expect(bashReq!.patterns).toContain("echo hello > output.txt")
++              expect(bashReq!.patterns).not.toContain("CI=true echo hello > output.txt")
++              expect(bashReq!.metadata.raw_patterns).toContain("CI=true echo hello > output.txt")
++            }),
++          )
++        }),
++      ),
++    )
++  }
++
+   each("always pattern has space before wildcard to not include different commands", () =>
+     Effect.gen(function* () {
+       const tmp = yield* tmpdirScoped()

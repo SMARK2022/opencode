@@ -1,0 +1,517 @@
+From 5231d218989ed333922d89aedf09a832592e893e Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 16 May 2026 19:33:47 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=E9=A2=84=E8=A7=88?=
+ =?UTF-8?q?=E5=B7=AE=E5=BC=82=E5=8A=9F=E8=83=BD=E5=92=8C=E4=BC=9A=E8=AF=9D?=
+ =?UTF-8?q?=E5=8A=A9=E6=89=8B=E7=8A=B6=E6=80=81=E7=AE=A1=E7=90=86=EF=BC=8C?=
+ =?UTF-8?q?=E4=BC=98=E5=8C=96diff=E6=98=BE=E7=A4=BA=E5=92=8C=E7=8A=B6?=
+ =?UTF-8?q?=E6=80=81=E5=88=B7=E6=96=B0=E9=80=BB=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 1e5ff50842ca7c198b5c8283e41f01d109b93f81..f9ceeaae88f4419f23bd440da263730416d12adc 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -10,6 +10,7 @@ import {
+   onMount,
+   Show,
+   Switch,
++  onCleanup,
+   useContext,
+ } from "solid-js"
+ import { Dynamic } from "solid-js/web"
+@@ -32,6 +33,8 @@ import {
+   type OptimizedBuffer,
+ } from "@opentui/core"
+ import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "@tui/util/smooth-scrollbar"
++import { previewDiff } from "@tui/util/preview-diff"
++import { hasStreamingAssistant, pendingAssistantID, shouldRefreshStaleBusyStatus } from "@tui/util/session-pending"
+ import { Prompt, type PromptRef } from "@tui/component/prompt"
+ import type {
+   AssistantMessage,
+@@ -164,10 +167,9 @@ export function Session() {
+ 
+   const pending = createMemo(() => {
+     const status = sync.data.session_status?.[route.sessionID]
+-    if (!status || status.type === "idle") return undefined
+-    return messages().findLast((x) => x.role === "assistant" && !x.time.completed)?.id
++    return pendingAssistantID(messages(), status)
+   })
+-  const streamingActive = createMemo(() => messages().some((x) => x.role === "assistant" && !x.time.completed))
++  const streamingActive = createMemo(() => hasStreamingAssistant(messages()))
+ 
+   const lastAssistant = createMemo(() => {
+     return messages().findLast((x) => x.role === "assistant")
+@@ -300,6 +302,28 @@ export function Session() {
+     void sync.session.sync(route.sessionID, { force: true })
+   })
+ 
++  createEffect(
++    on(
++      () => {
++        const last = messages().at(-1)
++        return [
++          route.sessionID,
++          sync.data.session_status[route.sessionID]?.type,
++          last?.id,
++          last?.role,
++          last?.role === "assistant" ? last.time.completed : undefined,
++        ] as const
++      },
++      ([sessionID]) => {
++        if (!shouldRefreshStaleBusyStatus(messages(), sync.data.session_status[sessionID])) return
++        const timer = setTimeout(() => {
++          void sync.session.sync(sessionID, { force: true })
++        }, 1_500)
++        onCleanup(() => clearTimeout(timer))
++      },
++    ),
++  )
++
+   let seeded = false
+   let scroll: ScrollBoxRenderable
+   let prompt: PromptRef | undefined
+@@ -2141,6 +2165,47 @@ function Shell(props: ToolProps<typeof ShellTool>) {
+   )
+ }
+ 
++function DiffView(props: { diff: string; filePath?: string; view: "split" | "unified"; syncScroll?: boolean }) {
++  const ctx = use()
++  const { theme, syntax } = useTheme()
++
++  return (
++    <box paddingLeft={1}>
++      <diff
++        diff={props.diff}
++        view={props.view}
++        syncScroll={props.syncScroll ?? true}
++        filetype={filetype(props.filePath)}
++        syntaxStyle={syntax()}
++        showLineNumbers={true}
++        width="100%"
++        wrapMode={ctx.diffWrapMode()}
++        fg={theme.text}
++        addedBg={theme.diffAddedBg}
++        removedBg={theme.diffRemovedBg}
++        contextBg={theme.diffContextBg}
++        addedSignColor={theme.diffHighlightAdded}
++        removedSignColor={theme.diffHighlightRemoved}
++        lineNumberFg={theme.diffLineNumber}
++        lineNumberBg={theme.diffContextBg}
++        addedLineNumberBg={theme.diffAddedLineNumberBg}
++        removedLineNumberBg={theme.diffRemovedLineNumberBg}
++      />
++    </box>
++  )
++}
++
++function DiffPreview(props: { diff: string; filePath?: string; view: "split" | "unified"; maxLines: number }) {
++  return (
++    // The collapsed preview mounts a disposable DiffRenderable, so clipping here
++    // enforces the visible preview budget without leaking scroll offsets into
++    // the full diff that gets mounted after expansion.
++    <box maxHeight={props.maxLines} overflow="hidden">
++      <DiffView diff={props.diff} filePath={props.filePath} view={props.view} syncScroll={false} />
++    </box>
++  )
++}
++
+ function Write(props: ToolProps<typeof WriteTool>) {
+   const ctx = use()
+   const { theme, syntax } = useTheme()
+@@ -2156,7 +2221,6 @@ function Write(props: ToolProps<typeof WriteTool>) {
+     if (diffStyle === "stacked") return "unified"
+     return ctx.width > 120 ? "split" : "unified"
+   })
+-  const ft = createMemo(() => filetype(props.input.filePath))
+   const diffStats = createMemo(() => {
+     const d = diff()
+     if (!d) return { added: 0, removed: 0, total: 0 }
+@@ -2182,31 +2246,15 @@ function Write(props: ToolProps<typeof WriteTool>) {
+           maxLines={10}
+           threshold={20}
+           totalLines={diffStats().total}
+-          preview={<text fg={theme.text}>{previewText(diff()!, 10)}</text>}
++          preview={
++            // Keep collapsed diffs as real DiffRenderable output. previewDiff
++            // truncates by split-pane row budget and rewrites hunk counts, so the
++            // parser sees a valid short diff instead of raw sliced patch text.
++            <DiffPreview diff={previewDiff(diff()!, 10)} filePath={props.input.filePath} view={view()} maxLines={10} />
++          }
+         >
+           <box gap={1} flexDirection="column">
+-            <box paddingLeft={1}>
+-              <diff
+-                diff={diff()!}
+-                view={view()}
+-                syncScroll={true}
+-                filetype={ft()}
+-                syntaxStyle={syntax()}
+-                showLineNumbers={true}
+-                width="100%"
+-                wrapMode={ctx.diffWrapMode()}
+-                fg={theme.text}
+-                addedBg={theme.diffAddedBg}
+-                removedBg={theme.diffRemovedBg}
+-                contextBg={theme.diffContextBg}
+-                addedSignColor={theme.diffHighlightAdded}
+-                removedSignColor={theme.diffHighlightRemoved}
+-                lineNumberFg={theme.diffLineNumber}
+-                lineNumberBg={theme.diffContextBg}
+-                addedLineNumberBg={theme.diffAddedLineNumberBg}
+-                removedLineNumberBg={theme.diffRemovedLineNumberBg}
+-              />
+-            </box>
++            <DiffView diff={diff()!} filePath={props.input.filePath} view={view()} />
+             <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
+           </box>
+         </BlockTool>
+@@ -2388,7 +2436,6 @@ function Task(props: ToolProps<typeof TaskTool>) {
+ 
+ function Edit(props: ToolProps<typeof EditTool>) {
+   const ctx = use()
+-  const { theme, syntax } = useTheme()
+ 
+   const view = createMemo(() => {
+     const diffStyle = ctx.tui.diff_style
+@@ -2396,7 +2443,6 @@ function Edit(props: ToolProps<typeof EditTool>) {
+     return ctx.width > 120 ? "split" : "unified"
+   })
+ 
+-  const ft = createMemo(() => filetype(props.input.filePath))
+   const diffContent = createMemo(() => props.metadata.diff || "")
+ 
+   const stats = createMemo(() => {
+@@ -2423,31 +2469,16 @@ function Edit(props: ToolProps<typeof EditTool>) {
+           maxLines={10}
+           threshold={20}
+           totalLines={stats().total}
+-          preview={<text fg={theme.text}>{previewText(diffContent(), 10)}</text>}
++          preview={
++            // Collapsed preview intentionally mounts a separate short diff. That
++            // avoids the old maxHeight clipping path where the full diff could
++            // receive mouse-wheel events, mutate its internal scrollY, and later
++            // reopen with a stale offset.
++            <DiffPreview diff={previewDiff(diffContent(), 10)} filePath={props.input.filePath} view={view()} maxLines={10} />
++          }
+         >
+           <box gap={1} flexDirection="column">
+-            <box paddingLeft={1}>
+-              <diff
+-                diff={diffContent()}
+-                view={view()}
+-                syncScroll={true}
+-                filetype={ft()}
+-                syntaxStyle={syntax()}
+-                showLineNumbers={true}
+-                width="100%"
+-                wrapMode={ctx.diffWrapMode()}
+-                fg={theme.text}
+-                addedBg={theme.diffAddedBg}
+-                removedBg={theme.diffRemovedBg}
+-                contextBg={theme.diffContextBg}
+-                addedSignColor={theme.diffHighlightAdded}
+-                removedSignColor={theme.diffHighlightRemoved}
+-                lineNumberFg={theme.diffLineNumber}
+-                lineNumberBg={theme.diffContextBg}
+-                addedLineNumberBg={theme.diffAddedLineNumberBg}
+-                removedLineNumberBg={theme.diffRemovedLineNumberBg}
+-              />
+-            </box>
++            <DiffView diff={diffContent()} filePath={props.input.filePath} view={view()} />
+             <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
+           </box>
+         </BlockTool>
+@@ -2463,7 +2494,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
+ 
+ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
+   const ctx = use()
+-  const { theme, syntax } = useTheme()
++  const { theme } = useTheme()
+ 
+   const files = createMemo(() => props.metadata.files ?? [])
+ 
+@@ -2516,7 +2547,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
+                       </text>
+                     }
+                   >
+-                    <text fg={theme.text}>{previewText(file.patch || "", 10)}</text>
++                    <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} />
+                   </Show>
+                 }
+               >
+@@ -2529,28 +2560,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
+                       </text>
+                     }
+                   >
+-                    <box paddingLeft={1}>
+-                      <diff
+-                        diff={file.patch || ""}
+-                        view={view()}
+-                        syncScroll={true}
+-                        filetype={filetype(file.filePath)}
+-                        syntaxStyle={syntax()}
+-                        showLineNumbers={true}
+-                        width="100%"
+-                        wrapMode={ctx.diffWrapMode()}
+-                        fg={theme.text}
+-                        addedBg={theme.diffAddedBg}
+-                        removedBg={theme.diffRemovedBg}
+-                        contextBg={theme.diffContextBg}
+-                        addedSignColor={theme.diffHighlightAdded}
+-                        removedSignColor={theme.diffHighlightRemoved}
+-                        lineNumberFg={theme.diffLineNumber}
+-                        lineNumberBg={theme.diffContextBg}
+-                        addedLineNumberBg={theme.diffAddedLineNumberBg}
+-                        removedLineNumberBg={theme.diffRemovedLineNumberBg}
+-                      />
+-                    </box>
++                    <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
+                   </Show>
+                   <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
+                 </box>
+diff --git a/packages/opencode/src/cli/cmd/tui/util/preview-diff.ts b/packages/opencode/src/cli/cmd/tui/util/preview-diff.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ddc5ae2a74121e2fc3423733814059981b624c7
+--- /dev/null
++++ b/packages/opencode/src/cli/cmd/tui/util/preview-diff.ts
+@@ -0,0 +1,88 @@
++export function previewDiff(input: string, maxLines: number) {
++  const limit = Math.max(1, maxLines)
++  const src = input.split("\n")
++  const out: string[] = []
++  const body: string[] = []
++  let oldStart = "", newStart = "", suffix = "", left = 0, right = 0, cut = false
++  let expectedOld = 0,
++    expectedNew = 0,
++    changed = false
++
++  // Flush each preview hunk as a fresh, parser-valid hunk. The preview may drop
++  // trailing body lines, so the original @@ counts must be rewritten to the
++  // actual old/new line counts that remain visible to DiffRenderable.
++  const flush = () => {
++    if (!oldStart) return
++
++    const oldVisible = body.filter((line) => line[0] === " " || line[0] === "-").length
++    const newVisible = body.filter((line) => line[0] === " " || line[0] === "+").length
++    const countMismatch = oldVisible !== expectedOld || newVisible !== expectedNew
++    const incomplete = oldVisible < expectedOld || newVisible < expectedNew
++    // Match previewText's "N visible rows plus one ellipsis row" contract, but
++    // keep the ellipsis as a legal context line so parsePatch accepts it. The
++    // incomplete branch covers metadata that was already clipped mid-hunk.
++    if (cut || incomplete) body.push(" …")
++    changed ||= cut || countMismatch
++    out.push(
++      `@@ -${oldStart},${body.filter((line) => line[0] === " " || line[0] === "-").length} +${newStart},${body.filter((line) => line[0] === " " || line[0] === "+").length} @@${suffix}`,
++      ...body,
++    )
++    oldStart = newStart = suffix = ""
++    expectedOld = expectedNew = left = right = 0
++    body.length = 0
++  }
++
++  for (let i = 0; i < src.length; i++) {
++    const line = src[i]
++    if (cut) continue
++
++    const hunk = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/)
++    if (hunk) {
++      flush()
++      oldStart = hunk[1]
++      expectedOld = Number(hunk[2] ?? 1)
++      newStart = hunk[3]
++      expectedNew = Number(hunk[4] ?? 1)
++      suffix = hunk[5] ?? ""
++      continue
++    }
++
++    if (!oldStart) {
++      out.push(line)
++      continue
++    }
++
++    if (line[0] === " ") {
++      if (left >= limit || right >= limit) {
++        cut = true
++        continue
++      }
++      body.push(line)
++      left++
++      right++
++      continue
++    }
++
++    if ((line[0] === "-" && !line.startsWith("---")) || (line[0] === "+" && !line.startsWith("+++"))) {
++      const del: string[] = []
++      const add: string[] = []
++      let j = i
++      while (src[j] && /^[+-]/.test(src[j]) && !/^(---|\+\+\+)/.test(src[j])) {
++        ;(src[j][0] === "-" ? del : add).push(src[j])
++        j++
++      }
++      const paired = del.length > 0 && add.length > 0
++      const take = paired ? Math.min(del.length, add.length, limit - left, limit - right) : 0
++      const dl = paired ? take : Math.min(del.length, limit - left)
++      const al = paired ? take : Math.min(add.length, limit - right)
++      body.push(...del.slice(0, dl), ...add.slice(0, al))
++      left += dl
++      right += al
++      cut ||= dl < del.length || al < add.length
++      i = j - 1
++    }
++  }
++
++  flush()
++  return changed ? out.join("\n") : input
++}
+diff --git a/packages/opencode/src/cli/cmd/tui/util/session-pending.ts b/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..587aeb84509fed5a49c56546ddc2165615a74fb0
+--- /dev/null
++++ b/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
+@@ -0,0 +1,17 @@
++import type { Message, SessionStatus } from "@opencode-ai/sdk/v2"
++
++export function hasStreamingAssistant(messages: Message[]) {
++  return messages.some((message) => message.role === "assistant" && !message.time.completed)
++}
++
++export function pendingAssistantID(messages: Message[], status: SessionStatus | undefined) {
++  if (!status || status.type === "idle") return undefined
++  return messages.findLast((message) => message.role === "assistant" && !message.time.completed)?.id
++}
++
++export function shouldRefreshStaleBusyStatus(messages: Message[], status: SessionStatus | undefined) {
++  // A busy status with no open assistant stream usually means the SSE update
++  // was missed while SQLite already has the completed message. Force one DB
++  // refresh instead of keeping the prompt disabled indefinitely.
++  return status?.type === "busy" && !hasStreamingAssistant(messages)
++}
+diff --git a/packages/opencode/test/cli/cmd/tui/preview-diff.test.ts b/packages/opencode/test/cli/cmd/tui/preview-diff.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..156b90f2031c56eabf4ee83b212895ec86802dcf
+--- /dev/null
++++ b/packages/opencode/test/cli/cmd/tui/preview-diff.test.ts
+@@ -0,0 +1,79 @@
++import { describe, expect, test } from "bun:test"
++import { parsePatch } from "diff"
++import { previewDiff } from "../../../../src/cli/cmd/tui/util/preview-diff"
++
++const sample = `Index: /tmp/models.test.ts
++===================================================================
++--- /tmp/models.test.ts
+++++ /tmp/models.test.ts
++@@ -132,47 +132,26 @@
++ describe("ModelsDev Service", () => {
++   it.live("get() returns providers from disk when cache file exists", () =>
++     Effect.gen(function* () {
++       yield* writeCache(fixture)
++-      const state = yield* Ref.make(initialState)
++-      const cache = yield* ModelsDev.get(state)
+++      const cache = yield* ModelsDev.get()
+++      expect(cache.providers).toHaveLength(1)
++       expect(cache.providers[0]?.id).toBe("anthropic")
++     })
++   )
++`
++
++const partialHunk = `Index: /tmp/prompt.ts
++===================================================================
++--- /tmp/prompt.ts
+++++ /tmp/prompt.ts
++@@ -512,10 +512,10 @@
++ const result = yield* item.execute(args, ctx).pipe(
++   Effect.catchCauseIf(
++     (cause) => !Cause.hasInterruptsOnly(cause),
++     (cause) => {
++-    const error = Cause.squash(cause)
++-    if (error instanceof Permission.RejectedError || error instanceof Question.RejectedError) {
++-      return Effect.fail(error)
++-    }
++-    return Effect.succeed({
++-      title: item.id,`
++
++const completeSmall = `Index: /tmp/small.ts
++===================================================================
++--- /tmp/small.ts
+++++ /tmp/small.ts
++@@ -1,3 +1,3 @@
++ const value = 1
++-const oldName = value
+++const newName = value
++ export { value }`
++
++describe("previewDiff", () => {
++  test("returns a parseable truncated diff with rewritten hunk counts", () => {
++    const preview = previewDiff(sample, 5)
++    const hunk = parsePatch(preview)[0]?.hunks[0]
++
++    expect(hunk?.lines).toEqual([
++      " describe(\"ModelsDev Service\", () => {",
++      "   it.live(\"get() returns providers from disk when cache file exists\", () =>",
++      "     Effect.gen(function* () {",
++      "       yield* writeCache(fixture)",
++      "-      const state = yield* Ref.make(initialState)",
++      "+      const cache = yield* ModelsDev.get()",
++      " …",
++    ])
++    expect(hunk?.oldLines).toBe(6)
++    expect(hunk?.newLines).toBe(6)
++    expect(preview).not.toContain("\n…")
++  })
++
++  test("keeps small diffs unchanged", () => {
++    expect(previewDiff(completeSmall, 20)).toBe(completeSmall)
++  })
++
++  test("repairs an already-clipped hunk before diff rendering", () => {
++    const hunk = parsePatch(previewDiff(partialHunk, 10))[0]?.hunks[0]
++
++    expect(hunk?.lines.at(-1)).toBe(" …")
++    expect(hunk?.oldLines).toBe(11)
++    expect(hunk?.newLines).toBe(5)
++  })
++})
+diff --git a/packages/opencode/test/cli/cmd/tui/session-pending.test.ts b/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..230bbdf86eec6464963a942a691fc3901378b420
+--- /dev/null
++++ b/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
+@@ -0,0 +1,34 @@
++import { describe, expect, test } from "bun:test"
++import type { AssistantMessage, Message } from "@opencode-ai/sdk/v2"
++import { hasStreamingAssistant, pendingAssistantID, shouldRefreshStaleBusyStatus } from "../../../../src/cli/cmd/tui/util/session-pending"
++
++const assistant = (id: string, completed?: number): AssistantMessage => ({
++  id,
++  sessionID: "ses_test",
++  role: "assistant",
++  time: { created: 1, completed },
++  parentID: "msg_user",
++  modelID: "model",
++  providerID: "provider",
++  mode: "build",
++  agent: "build",
++  path: { cwd: "/tmp", root: "/tmp" },
++  cost: 0,
++  tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++})
++
++describe("session pending helpers", () => {
++  test("finds the active assistant only while the session is non-idle", () => {
++    const messages: Message[] = [assistant("done", 2), assistant("open")]
++
++    expect(hasStreamingAssistant(messages)).toBe(true)
++    expect(pendingAssistantID(messages, { type: "busy" })).toBe("open")
++    expect(pendingAssistantID(messages, { type: "idle" })).toBeUndefined()
++  })
++
++  test("refreshes stale busy state when no assistant is streaming", () => {
++    expect(shouldRefreshStaleBusyStatus([assistant("done", 2)], { type: "busy" })).toBe(true)
++    expect(shouldRefreshStaleBusyStatus([assistant("open")], { type: "busy" })).toBe(false)
++    expect(shouldRefreshStaleBusyStatus([assistant("done", 2)], { type: "idle" })).toBe(false)
++  })
++})
