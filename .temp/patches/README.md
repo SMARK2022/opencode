@@ -39,7 +39,7 @@ bun .temp/patches/src/apply-cumulative.ts --keep-failure
 
 脚本会：
 
-1. 检查目标 HEAD 仍是 manifest 基线，并记录目标 worktree 的完整前后指纹；已有无关修改不进入 clone，也不会被清理。
+1. 检查 manifest baseline commit 仍存在于目标仓库，并记录目标 worktree 的完整前后指纹；目标 HEAD 可以已经前进，已有无关修改不进入 clone，也不会被清理。
 2. 从源仓库创建隔离临时 clone。
 3. 对每个 `current` patch 先执行 `git apply --check`，再执行实际应用。
 4. 每一步保存累计状态，失败时恢复到上一个成功状态。
