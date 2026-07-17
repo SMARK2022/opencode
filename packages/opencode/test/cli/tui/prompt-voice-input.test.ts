@@ -121,6 +121,18 @@ describe("prompt voice input", () => {
     expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400)).toBe("Transcribing voice...")
   })
 
+  // 主 Prompt 的底栏需要和文件、命令提示共享 75 列，使用完整文案会挤压成多行。
+  // compact 只改变该消费者的展示，不得改变 DialogPrompt / QuestionPrompt 的默认契约。
+  // recording 仍保留 stop 快捷键，缩短阶段词不能牺牲用户如何停止录音的信息。
+  // 固定 now 继续验证计时值，避免 compact 分支绕过原有录音时钟。
+  test("formats compact main Prompt voice status without losing the stop shortcut", () => {
+    const compact = { compact: true }
+    expect(voiceInputStatusText({ type: "starting" }, "alt+v", 4_400, compact)).toBe("Starting...")
+    expect(voiceInputStatusText({ type: "recording", startedAt: 1_000 }, "alt+v", 4_400, compact)).toBe("Rec 00:03 · alt+v stop")
+    expect(voiceInputStatusText({ type: "stopping" }, "alt+v", 4_400, compact)).toBe("Saving...")
+    expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400, compact)).toBe("Transcribing...")
+  })
+
   // createRefreshClock 是三处组件（主 Prompt / QuestionPrompt / DialogPrompt）录音计时器走数的
   // 基础设施：recording 期间每秒刷新 now 信号驱动 voiceInputStatusText 重算，idle 时停止。
   // 该契约此前零测试覆盖——一旦被破坏，question/dialog 组件的计时器会冻结在 00:00

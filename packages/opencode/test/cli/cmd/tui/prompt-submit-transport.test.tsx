@@ -1,13 +1,17 @@
 /** @jsxImportSource @opentui/solid */
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
 import { Global } from "@opencode-ai/core/global"
 import { testRender, useRenderer } from "@opentui/solid"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { onCleanup } from "solid-js"
+import fs from "fs/promises"
+import path from "path"
+import { pathToFileURL } from "url"
 import type { Agent, Model, Provider } from "@opencode-ai/sdk/v2"
 import { tmpdir } from "../../../fixture/fixture"
 import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
 import { Prompt, type PromptRef } from "../../../../src/cli/cmd/tui/component/prompt"
+import { PromptVoiceRecorder } from "../../../../src/cli/cmd/tui/prompt-voice-recorder"
 import { FrecencyProvider } from "../../../../src/cli/cmd/tui/component/prompt/frecency"
 import { PromptHistoryProvider } from "../../../../src/cli/cmd/tui/component/prompt/history"
 import { PromptStashProvider } from "../../../../src/cli/cmd/tui/component/prompt/stash"
@@ -375,12 +379,175 @@ test("TUI prompt keeps image placeholder highlighted after wide text is inserted
   })
 })
 
+test("keeps the constrained Prompt extension bar on one row across active states", async () => {
+  const previousState = Global.Path.state
+  const previousRegistry = process.env.OPENCODE_IDE_REGISTRY_DIR
+  await using tmp = await tmpdir()
+  Global.Path.state = tmp.path
+  process.env.OPENCODE_IDE_REGISTRY_DIR = path.join(tmp.path, "ide")
+  await fs.mkdir(process.env.OPENCODE_IDE_REGISTRY_DIR, { recursive: true })
+  await Bun.write(path.join(tmp.path, "kv.json"), "{}")
+  // 重复片段刻意让路径超过 75 个终端单元，验证的是可见 suffix 而非 JavaScript 字符数阈值。
+  await Bun.write(
+    path.join(process.env.OPENCODE_IDE_REGISTRY_DIR, "vscode.json"),
+    JSON.stringify({
+      schema: 1,
+      updatedAt: Date.now(),
+      workspaceFolders: [{ fsPath: process.cwd(), uri: pathToFileURL(process.cwd()).toString() }],
+      active: { textEditor: pathToFileURL(path.join(process.cwd(), `${"very-long-".repeat(8)}hotspots.md`)).toString() },
+    }),
+  )
+  // recorder 只隔离本机麦克风边界；状态切换仍走真实 controller、快捷键和挂起转写进程。
+  const recorder = spyOn(PromptVoiceRecorder, "startPromptVoiceRecorder").mockResolvedValue({ file: path.join(tmp.path, "voice.wav"), stop: async () => {}, abort: async () => {} })
+
+  try {
+    await withPrompt(
+      () => undefined,
+      async (_prompt, _route, app, context) => {
+        // 160 列终端内限制真实 Prompt 为首页的 75 列，专门锁定“终端宽但 Prompt 窄”的首个偏差。
+        // 断言最终字符帧而非复制 Yoga 算法，确保宽字符、flex 收缩和 renderer 换行都走生产路径。
+        const waitForFrame = async (predicate: (frame: string) => boolean) => {
+          for (let index = 0; index < 200; index++) {
+            await app.renderOnce()
+            const frame = app.captureCharFrame()
+            if (predicate(frame)) return frame
+            await Bun.sleep(10)
+          }
+          throw new Error("Prompt footer frame did not settle")
+        }
+        const extensionRows = (frame: string) => {
+          const lines = frame.split("\n")
+          // 输入框底边是稳定的用户可见边界，避免用组件节点或私有 renderer 尺寸定义“扩展栏”。
+          const separator = lines.findIndex((line) => line.includes("╹"))
+          return lines.slice(separator + 1).filter((line) => line.trim()).length
+        }
+
+        const idle = await waitForFrame((frame) => frame.includes("hotspots.md"))
+        app.mockInput.pressKey("v", { meta: true })
+        const recording = await waitForFrame((frame) => frame.includes("Recording") || frame.includes("Rec 00:"))
+        app.mockInput.pressKey("v", { meta: true })
+        const transcribing = await waitForFrame((frame) => frame.includes("Transcribing"))
+
+        // 再次触发同一绑定必须先取消挂起转写，避免测试把子进程和 90 秒超时泄漏到后续用例。
+        app.mockInput.pressKey("v", { meta: true })
+        await waitForFrame((frame) => !frame.includes("Transcribing"))
+        emitSessionStatus(context, "evt-prompt-footer-busy", { type: "busy" })
+        await wait(() => context.sync.data.session_status?.[sessionID]?.type === "busy")
+        const busy = await settlePromptFrame(app)
+
+        // 超长 retry 同时施压摘要、固定元数据和 interrupt，防止仅修普通文件行却漏掉错误态。
+        emitSessionStatus(context, "evt-prompt-footer-retry", {
+          type: "retry",
+          attempt: 7,
+          next: Date.now() + 9_000,
+          message: "Cannot connect to API: The socket connection was closed unexpectedly. Inspect the full provider transport failure for additional diagnostic information.",
+        })
+        await wait(() => context.sync.data.session_status?.[sessionID]?.type === "retry")
+        const retry = await settlePromptFrame(app)
+
+        // idle 当前可能恰好单行，但仍必须进入矩阵，防止修 active 状态时破坏原始长文件场景。
+        expect([idle, busy, recording, transcribing, retry].map(extensionRows)).toEqual([1, 1, 1, 1, 1])
+        expect(idle).toContain("hotspots.md")
+        expect(busy).toContain("hotspots.md")
+        expect(busy).toContain("interrupt")
+        expect(recording).toContain("Rec 00:")
+        expect(recording).toContain("alt+v stop")
+        expect(transcribing).toContain("Transcribing...")
+        expect(transcribing).not.toContain("Transcribing voice...")
+      },
+      {
+        width: 160,
+        promptWidth: 75,
+        config: createTuiResolvedConfig({ voice: { transcriber: { command: process.execPath, args: ["-e", "await new Promise(() => {})", "{file}"] } } }),
+      },
+    )
+  } finally {
+    recorder.mockRestore()
+    Global.Path.state = previousState
+    if (previousRegistry === undefined) delete process.env.OPENCODE_IDE_REGISTRY_DIR
+    else process.env.OPENCODE_IDE_REGISTRY_DIR = previousRegistry
+  }
+})
+
+test("opens the original retry error from the compact details affordance", async () => {
+  const previousState = Global.Path.state
+  await using tmp = await tmpdir()
+  Global.Path.state = tmp.path
+  await Bun.write(path.join(tmp.path, "kv.json"), "{}")
+  // 长度落在旧 80/120 门槛夹缝内，并携带换行与重复空格以区分摘要和原始详情。
+  const message = "Retry provider request failed:\nThe socket   closed before the response completed. diagnostic-tail-81-to-120"
+
+  try {
+    await withPrompt(
+      () => undefined,
+      async (prompt, _route, app, context) => {
+        // 模块级 draft stash 会跨同文件用例保留，先清空以免前一条图片草稿污染对话框帧。
+        prompt.reset()
+        emitSessionStatus(context, "evt-prompt-footer-details", { type: "retry", attempt: 2, next: Date.now() + 9_000, message })
+        await wait(() => context.sync.data.session_status?.[sessionID]?.type === "retry")
+        let frame = await settlePromptFrame(app)
+
+        // footer 只展示压平后的单行摘要；换行和重复空格不能重新占用状态栏宽度。
+        const lines = frame.split("\n")
+        const detailsY = lines.findIndex((line) => line.includes("details"))
+        const footerLine = lines[detailsY] ?? ""
+        expect(footerLine).toContain("Retry provider request f")
+        expect(footerLine).toContain("tail-81-to-120")
+        expect(footerLine).not.toContain("socket   closed")
+        expect(footerLine).not.toContain("click to expand")
+        const detailsX = lines[detailsY]?.indexOf("details") ?? -1
+        expect(detailsX).toBeGreaterThanOrEqual(0)
+        // 坐标来自最终字符帧中的可见令牌，确保测试覆盖用户实际能点击的命中区域。
+        const targetX = detailsX + Math.floor("details".length / 2)
+        app.renderer.clearSelection()
+        await app.mockMouse.moveTo(targetX, detailsY)
+        await app.renderOnce()
+        await app.mockMouse.click(targetX, detailsY)
+
+        // 点击行为通过真实 dialog frame 验证，避免断言私有 handler 或 DialogAlert 调用次数。
+        frame = await settlePromptFrame(app)
+        expect(frame).toContain("Retry Error")
+        // 对话框保留三连空格，证明压平只属于 footer 展示层，没有污染诊断原文。
+        expect(frame).toContain("The socket   closed before the response completed")
+        expect(frame).toContain("diagnostic-tail-81-to-120")
+      },
+      { width: 160, promptWidth: 100 },
+    )
+  } finally {
+    Global.Path.state = previousState
+  }
+})
+
 type FetchHandler = Parameters<typeof createFetch>[0]
+type PromptContext = { emit: ReturnType<typeof createEventSource>["emit"]; sync: ReturnType<typeof useSync> }
+type PromptStatus = NonNullable<PromptContext["sync"]["data"]["session_status"]>[string]
+
+function emitSessionStatus(context: PromptContext, id: string, status: PromptStatus) {
+  // 状态必须经过 SDK event source 进入 SyncProvider，测试不能直接写 store 绕过生产消费链。
+  context.emit({ directory, project: "proj_test", payload: { id, type: "session.status", properties: { sessionID, status } } })
+}
+
+async function settlePromptFrame(app: Awaited<ReturnType<typeof testRender>>) {
+  // promptWidth 在首帧由 Yoga 回填；等待固定数量的真实渲染帧后再读取最终布局。
+  for (let index = 0; index < 5; index++) await app.renderOnce()
+  return app.captureCharFrame()
+}
 
 async function withPrompt(
   override: FetchHandler,
-  run: (prompt: PromptRef, route: ReturnType<typeof useRoute>, app: Awaited<ReturnType<typeof testRender>>) => Promise<void>,
-  options: { initialRoute?: Route; promptSessionID?: string } = {},
+  run: (
+    prompt: PromptRef,
+    route: ReturnType<typeof useRoute>,
+    app: Awaited<ReturnType<typeof testRender>>,
+    context: PromptContext,
+  ) => Promise<void>,
+  options: {
+    initialRoute?: Route
+    promptSessionID?: string
+    width?: number
+    promptWidth?: number
+    config?: ReturnType<typeof createTuiResolvedConfig>
+  } = {},
 ) {
   const calls = createFetch(override)
   const events = createEventSource()
@@ -411,10 +578,13 @@ async function withPrompt(
           prompt = ref
           ready()
         }}
+        config={options.config}
+        promptWidth={options.promptWidth}
       />
     ),
     {
-      width: 100,
+      // 默认 100 列保持旧 transport 用例不变，只有布局回归显式模拟首页的 75 列 Prompt。
+      width: options.width ?? 100,
       height: 20,
       footerHeight: 0,
     },
@@ -424,7 +594,7 @@ async function withPrompt(
     await mounted
     await wait(() => sync.status === "complete" && local.model.ready)
     // 只把 renderer 传给需要断言用户可见帧的测试；既有 transport 测试会自然忽略第三个参数。
-    await run(prompt, route, app)
+    await run(prompt, route, app, { emit: events.emit, sync })
   } finally {
     app.renderer.destroy()
   }
@@ -453,12 +623,14 @@ function PromptHarness(props: {
   events: ReturnType<typeof createEventSource>["source"]
   initialRoute: Route
   promptSessionID: string | undefined
+  promptWidth: number | undefined
+  config: ReturnType<typeof createTuiResolvedConfig> | undefined
   onContext: (sync: ReturnType<typeof useSync>, local: ReturnType<typeof useLocal>) => void
   onRoute: (route: ReturnType<typeof useRoute>) => void
   onPrompt: (prompt: PromptRef) => void
 }) {
   const renderer = useRenderer()
-  const config = createTuiResolvedConfig()
+  const config = props.config ?? createTuiResolvedConfig()
   const keymap = createDefaultOpenTuiKeymap(renderer)
   onCleanup(registerOpencodeKeymap(keymap, renderer, config))
 
@@ -484,6 +656,7 @@ function PromptHarness(props: {
                                         <EditorContextProvider>
                                           <PromptProbe
                                             sessionID={props.promptSessionID}
+                                            width={props.promptWidth}
                                             onContext={props.onContext}
                                             onRoute={props.onRoute}
                                             onPrompt={props.onPrompt}
@@ -512,13 +685,14 @@ function PromptHarness(props: {
 
 function PromptProbe(props: {
   sessionID: string | undefined
+  width: number | undefined
   onContext: (sync: ReturnType<typeof useSync>, local: ReturnType<typeof useLocal>) => void
   onRoute: (route: ReturnType<typeof useRoute>) => void
   onPrompt: (prompt: PromptRef) => void
 }) {
   props.onContext(useSync(), useLocal())
   props.onRoute(useRoute())
-  return (
+  const prompt = (
     <Prompt
       sessionID={props.sessionID}
       placeholders={{ normal: [], shell: [] }}
@@ -528,4 +702,6 @@ function PromptProbe(props: {
       }}
     />
   )
+  if (!props.width) return prompt
+  return <box width={props.width}>{prompt}</box>
 }

@@ -215,7 +215,8 @@ export function Prompt(props: PromptProps) {
   const editorFileLabelDisplay = createMemo(() => {
     const file = editorFileLabel()
     if (!file) return
-    return Locale.truncateMiddle(file, Math.max(12, Math.min(48, Math.floor(dimensions().width / 3))))
+    // 首页和侧栏会让 Prompt 窄于终端；文件预算必须跟随最终 Yoga 宽度，不能再借用终端总宽。
+    return Locale.truncateMiddle(file, Math.max(12, Math.min(48, Math.floor(promptWidth() / 3))))
   })
   const editorContextLabelState = createMemo(() => editor.labelState())
   const [auto, setAuto] = createSignal<AutocompleteRef>()
@@ -443,7 +444,8 @@ export function Prompt(props: PromptProps) {
   const voiceInputBusy = createMemo(() => voiceInputStatus().type !== "idle")
   const voiceInputStatusText = createMemo(() =>
     // shortcut 来自 keymap；兜底值只影响展示，不注册额外 keybind。
-    PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now()),
+    // compact 仅缩短主 Prompt 的展示；dialog/question 继续使用 formatter 的默认完整文案。
+    PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now(), { compact: true }),
   )
   const voiceInput = PromptVoiceInput.createVoiceInputController({
     // controller 每次启动前读取当前配置，但录音开始后会固定 activeTranscriber，避免停止时后端漂移。
@@ -1898,93 +1900,91 @@ export function Prompt(props: PromptProps) {
             }
           />
         </box>
-        <box width="100%" flexDirection="row" justifyContent="space-between">
+        {/* footer 是固定一行的状态面：任意可变内容都只能收缩或裁切，不能反向抬高 Prompt。 */}
+        <box width="100%" height={1} minWidth={0} flexDirection="row" alignItems="center" justifyContent="space-between" gap={1} overflow="hidden">
           <Switch>
             <Match when={voiceInputBusy()}>
-              <box paddingLeft={3} flexDirection="row" gap={1}>
+              {/* 语音阶段和停止快捷键属于 P0 状态，文件名及普通 chrome 必须先让出宽度。 */}
+              <box height={1} paddingLeft={3} flexShrink={0} flexDirection="row" alignItems="center" gap={1}>
                 {/* 录音中显示红点，保存/转写阶段显示 spinner，让用户区分“仍在收音”和“正在处理”。 */}
                 <Show when={voiceInputStatus().type === "recording"} fallback={<Spinner color={theme.accent} />}>
                   <text fg={theme.error}>●</text>
                 </Show>
-                <text fg={theme.accent}>{voiceInputStatusText()}</text>
+                <text fg={theme.accent} wrapMode="none">{voiceInputStatusText()}</text>
               </box>
             </Match>
             <Match when={running()}>
-              <box
-                flexDirection="row"
-                gap={1}
-                flexGrow={1}
-                justifyContent={status().type === "retry" ? "space-between" : "flex-start"}
-              >
-                <box flexShrink={0} flexDirection="row" gap={1}>
-                  <box marginLeft={1}>
-                    <Show when={kv.get("animations_enabled", true)} fallback={<text fg={theme.textMuted}>[⋯]</text>}>
-                      <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={40} />
-                    </Show>
-                  </box>
-                  <box flexDirection="row" gap={1} flexShrink={0}>
-                    {(() => {
-                      const retry = createMemo(() => {
-                        const s = status()
-                        if (s.type !== "retry") return
-                        return s
-                      })
-                      const message = createMemo(() => {
-                        const r = retry()
-                        if (!r) return
-                        if (r.message.includes("exceeded your current quota") && r.message.includes("gemini"))
-                          return "gemini is way too hot right now"
-                        if (r.message.length > 80) return r.message.slice(0, 80) + "..."
-                        return r.message
-                      })
-                      const isTruncated = createMemo(() => {
-                        const r = retry()
-                        if (!r) return false
-                        return r.message.length > 120
-                      })
-                      const seconds = createMemo(() => {
-                        const next = retry()?.next
-                        // Retry countdown 复用同一个 UI refresh clock；它只负责刷新 now，
-                        // 不再为同一 footer 区域额外创建第二个 interval 生命周期。
-                        return next ? Math.round((next - now()) / 1000) : 0
-                      })
-                      const handleMessageClick = () => {
-                        const r = retry()
-                        if (!r) return
-                        if (isTruncated()) {
-                          void DialogAlert.show(dialog, "Retry Error", r.message)
-                        }
-                      }
-
-                      const retryText = () => {
-                        const r = retry()
-                        if (!r) return ""
-                        const baseMessage = message()
-                        const truncatedHint = isTruncated() ? " (click to expand)" : ""
-                        const duration = formatDuration(seconds())
-                        const retryInfo = ` [retrying ${duration ? `in ${duration} ` : ""}attempt #${r.attempt}]`
-                        return baseMessage + truncatedHint + retryInfo
-                      }
-
-                      return (
-                        <Show when={retry()}>
-                          <box onMouseUp={handleMessageClick}>
-                            <text fg={theme.error}>{retryText()}</text>
-                          </box>
-                        </Show>
-                      )
-                    })()}
-                  </box>
+              {/* running 行允许消息区域降到零宽，保证 interrupt 不会被长错误反向挤出。 */}
+              <box flexDirection="row" gap={1} flexGrow={1} minWidth={0} height={1} overflow="hidden" alignItems="center" justifyContent={status().type === "retry" ? "space-between" : "flex-start"}>
+                <box marginLeft={1} flexShrink={0}>
+                  <Show when={kv.get("animations_enabled", true)} fallback={<text fg={theme.textMuted}>[⋯]</text>}>
+                    <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={40} />
+                  </Show>
                 </box>
-                <box flexDirection="row" gap={1}>
-                  <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
+                {(() => {
+                  const retry = createMemo(() => {
+                    const s = status()
+                    if (s.type !== "retry") return
+                    return s
+                  })
+                  const message = createMemo(() => {
+                    const r = retry()
+                    if (!r) return
+                    if (r.message.includes("exceeded your current quota") && r.message.includes("gemini"))
+                      return "gemini is way too hot right now"
+                    // footer 摘要压平空白即可，原始 message 仍原样交给详情对话框。
+                    return r.message.replace(/\s+/g, " ").trim()
+                  })
+                  const seconds = createMemo(() => {
+                    const next = retry()?.next
+                    // Retry countdown 复用同一个 UI refresh clock；它只负责刷新 now，
+                    // 不再为同一 footer 区域额外创建第二个 interval 生命周期。
+                    return next ? Math.round((next - now()) / 1000) : 0
+                  })
+                  const handleMessageClick = () => {
+                    const r = retry()
+                    if (!r) return
+                    // details 对所有 retry 都稳定可用，避免 80/120 两套阈值制造不可展开区间。
+                    void DialogAlert.show(dialog, "Retry Error", r.message)
+                  }
+
+                  const retryInfo = () => {
+                    const r = retry()
+                    if (!r) return ""
+                    const duration = formatDuration(seconds())
+                    return duration ? `retry in ${duration} · #${r.attempt}` : `retry · #${r.attempt}`
+                  }
+
+                  return (
+                    <Show when={retry()}>
+                      {/* 摘要占用剩余空间，details 与 retry 元数据保持固定，形成稳定的信息优先级。 */}
+                      <box minWidth={0} flexBasis={0} flexGrow={1} flexShrink={1} flexDirection="row" gap={1} overflow="hidden">
+                        <box minWidth={0} flexBasis={0} flexGrow={1} flexShrink={1} flexDirection="row" gap={1} overflow="hidden" onMouseUp={handleMessageClick}>
+                          {/* OpenTUI 命中的子 text 不可靠冒泡到 box；可见摘要本身也必须承接详情点击。 */}
+                          <text minWidth={0} flexBasis={0} flexGrow={1} flexShrink={1} fg={theme.error} wrapMode="none" truncate onMouseUp={handleMessageClick}>
+                            {message()}
+                          </text>
+                          <text flexShrink={0} fg={theme.textMuted} wrapMode="none" onMouseUp={handleMessageClick}>
+                            details
+                          </text>
+                        </box>
+                        <text flexShrink={0} fg={theme.error} wrapMode="none">
+                          {retryInfo()}
+                        </text>
+                      </box>
+                    </Show>
+                  )
+                })()}
+                {/* interrupt 和活跃时长是运行态的固定操作反馈，不参与错误摘要的收缩竞争。 */}
+                <box height={1} flexShrink={0} flexDirection="row" alignItems="center" gap={1}>
+                  <text fg={store.interrupt > 0 ? theme.primary : theme.text} wrapMode="none">
                     esc{" "}
                     <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
                       {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
                     </span>
                   </text>
                   <Show when={activeDuration() > 0}>
-                    <text fg={theme.textMuted}>
+                    <text fg={theme.textMuted} wrapMode="none">
                       {"· "}
                       <span style={{ fg: theme.text }}>{Locale.durationClock(activeDuration())}</span>
                     </text>
@@ -2029,11 +2029,15 @@ export function Prompt(props: PromptProps) {
             </Match>
             <Match when={true}>{props.hint ?? <text />}</Match>
           </Switch>
+          {/* retry 已在左侧承载完整 P0 链；其他状态才分配文件身份与普通快捷键区域。 */}
           <Show when={status().type !== "retry"}>
-            <box gap={2} flexDirection="row">
+            <box height={1} minWidth={0} flexShrink={1} gap={2} flexDirection="row" alignItems="center" overflow="hidden">
               <Show when={editorContextLabelState() !== "none" ? editorFileLabelDisplay() : undefined}>
                 {(file) => (
-                  <text fg={editorContextLabelState() === "pending" ? theme.secondary : theme.textMuted}>{file()}</text>
+                  // 文件身份保留可辨识后缀，但仍先于不可换行的操作提示收缩。
+                  <text minWidth={0} flexShrink={1} fg={editorContextLabelState() === "pending" ? theme.secondary : theme.textMuted} wrapMode="none" truncate>
+                    {file()}
+                  </text>
                 )}
               </Show>
               <Switch>
@@ -2053,7 +2057,7 @@ export function Prompt(props: PromptProps) {
                               }
                             >
                               {/* prompt width > 90：分拆 ↑/↓ 流量(当前 step)，空格内聚为流动组，与总量/费用以 · 分隔；
-                                  相比旧版逐段 · 更紧凑，借鉴窄屏分组思想：流动组 | 占用组 | 费用 */}
+                                      相比旧版逐段 · 更紧凑，借鉴窄屏分组思想：流动组 | 占用组 | 费用 */}
                               <text fg={theme.textMuted} wrapMode="none">
                                 <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
                                 {item().context ? ` · ${item().context}` : ""}
@@ -2063,24 +2067,24 @@ export function Prompt(props: PromptProps) {
                           )}
                         </Match>
                     <Match when={true}>
-                      <text fg={theme.text}>
+                      <text flexShrink={0} fg={theme.text} wrapMode="none">
                         {agentShortcut()} <span style={{ fg: theme.textMuted }}>agents</span>
                       </text>
                     </Match>
                   </Switch>
-                  <text fg={theme.text}>
+                  <text flexShrink={0} fg={theme.text} wrapMode="none">
                     {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
                   </text>
                   {/* 仅显示判定：promptWidth>120 才露出 voice 提示(比 usage 的 >90 更晚)，窄终端把 chrome 让给更高频信息；
                       不影响 Alt+V 绑定本身，窄终端隐藏提示文案但快捷键仍可转录。 */}
                   <Show when={PromptVoiceInput.voiceHintVisible(tuiConfig.voice?.transcriber, promptWidth())}>
-                    <text fg={theme.text}>
+                    <text flexShrink={0} fg={theme.text} wrapMode="none">
                       {voiceShortcut() || voiceShortcutFallback} <span style={{ fg: theme.textMuted }}>voice</span>
                     </text>
                   </Show>
                 </Match>
                 <Match when={store.mode === "shell"}>
-                  <text fg={theme.text}>
+                  <text flexShrink={0} fg={theme.text} wrapMode="none">
                     esc <span style={{ fg: theme.textMuted }}>exit shell mode</span>
                   </text>
                 </Match>
