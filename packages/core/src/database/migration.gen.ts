@@ -41,6 +41,8 @@ export const migrations = (
     import("./migration/20260622170816_reset_v2_session_state"),
     import("./migration/20260622202450_simplify_session_input"),
     import("./migration/20260623000000_session_step_usage"),
+    import("./migration/20260717035626_cold_storage"),
+    import("./migration/20260717035627_native_cold_storage"),
     import("./migration/20260723100000_normalize_global_session_path"),
     import("./migration/20260725100000_migrate_review_agent"),
     import("./migration/20260726100000_session_goal"),

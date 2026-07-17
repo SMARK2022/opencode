@@ -200,13 +200,28 @@ export default {
         );
       `)
       yield* tx.run(`
+        CREATE TABLE \`cold_storage\` (
+          \`hash\` text PRIMARY KEY,
+          \`kind\` text NOT NULL,
+          \`codec\` text NOT NULL,
+          \`payload\` blob NOT NULL,
+          \`raw_bytes\` integer NOT NULL,
+          \`compressed_bytes\` integer NOT NULL,
+          \`ref_count\` integer DEFAULT 0 NOT NULL,
+          \`time_created\` integer NOT NULL,
+          \`time_updated\` integer NOT NULL
+        );
+      `)
+      yield* tx.run(`
         CREATE TABLE \`message\` (
           \`id\` text PRIMARY KEY,
           \`session_id\` text NOT NULL,
           \`time_created\` integer NOT NULL,
           \`time_updated\` integer NOT NULL,
           \`data\` text NOT NULL,
-          CONSTRAINT \`fk_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
+          \`cold_ref\` text,
+          CONSTRAINT \`fk_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE,
+          CONSTRAINT \`fk_message_cold_ref_cold_storage_hash_fk\` FOREIGN KEY (\`cold_ref\`) REFERENCES \`cold_storage\`(\`hash\`) ON DELETE RESTRICT
         );
       `)
       yield* tx.run(`
@@ -217,7 +232,9 @@ export default {
           \`time_created\` integer NOT NULL,
           \`time_updated\` integer NOT NULL,
           \`data\` text NOT NULL,
-          CONSTRAINT \`fk_part_message_id_message_id_fk\` FOREIGN KEY (\`message_id\`) REFERENCES \`message\`(\`id\`) ON DELETE CASCADE
+          \`cold_ref\` text,
+          CONSTRAINT \`fk_part_message_id_message_id_fk\` FOREIGN KEY (\`message_id\`) REFERENCES \`message\`(\`id\`) ON DELETE CASCADE,
+          CONSTRAINT \`fk_part_cold_ref_cold_storage_hash_fk\` FOREIGN KEY (\`cold_ref\`) REFERENCES \`cold_storage\`(\`hash\`) ON DELETE RESTRICT
         );
       `)
       yield* tx.run(`
@@ -250,7 +267,9 @@ export default {
           \`time_created\` integer NOT NULL,
           \`time_updated\` integer NOT NULL,
           \`data\` text NOT NULL,
-          CONSTRAINT \`fk_session_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
+          \`cold_ref\` text,
+          CONSTRAINT \`fk_session_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE,
+          CONSTRAINT \`fk_session_message_cold_ref_cold_storage_hash_fk\` FOREIGN KEY (\`cold_ref\`) REFERENCES \`cold_storage\`(\`hash\`) ON DELETE RESTRICT
         );
       `)
       yield* tx.run(`
@@ -335,11 +354,14 @@ export default {
       yield* tx.run(
         `CREATE UNIQUE INDEX \`permission_project_action_resource_idx\` ON \`permission\` (\`project_id\`,\`action\`,\`resource\`);`,
       )
+      yield* tx.run(`CREATE INDEX \`cold_storage_ref_count_idx\` ON \`cold_storage\` (\`ref_count\`);`)
       yield* tx.run(
         `CREATE INDEX \`message_session_time_created_id_idx\` ON \`message\` (\`session_id\`,\`time_created\`,\`id\`);`,
       )
+      yield* tx.run(`CREATE INDEX \`message_cold_ref_idx\` ON \`message\` (\`cold_ref\`);`)
       yield* tx.run(`CREATE INDEX \`part_message_id_id_idx\` ON \`part\` (\`message_id\`,\`id\`);`)
       yield* tx.run(`CREATE INDEX \`part_session_idx\` ON \`part\` (\`session_id\`);`)
+      yield* tx.run(`CREATE INDEX \`part_cold_ref_idx\` ON \`part\` (\`cold_ref\`);`)
       yield* tx.run(
         `CREATE INDEX \`session_input_session_pending_delivery_seq_idx\` ON \`session_input\` (\`session_id\`,\`promoted_seq\`,\`delivery\`,\`admitted_seq\`);`,
       )
@@ -359,6 +381,7 @@ export default {
         `CREATE INDEX \`session_message_session_time_created_id_idx\` ON \`session_message\` (\`session_id\`,\`time_created\`,\`id\`);`,
       )
       yield* tx.run(`CREATE INDEX \`session_message_time_created_idx\` ON \`session_message\` (\`time_created\`);`)
+      yield* tx.run(`CREATE INDEX \`session_message_cold_ref_idx\` ON \`session_message\` (\`cold_ref\`);`)
       yield* tx.run(`CREATE INDEX \`session_project_idx\` ON \`session\` (\`project_id\`);`)
       yield* tx.run(`CREATE INDEX \`session_workspace_idx\` ON \`session\` (\`workspace_id\`);`)
       yield* tx.run(`CREATE INDEX \`session_parent_idx\` ON \`session\` (\`parent_id\`);`)

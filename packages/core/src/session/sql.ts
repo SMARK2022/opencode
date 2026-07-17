@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, index, primaryKey, real, uniqueIndex } from "drizzle-orm/sqlite-core"
+import { sqliteTable, text, integer, index, primaryKey, real, uniqueIndex, blob } from "drizzle-orm/sqlite-core"
 import * as DatabasePath from "../database/path"
 import { ProjectTable } from "../project/sql"
 import type { SessionMessage } from "./message"
@@ -19,6 +19,35 @@ import type { Revert } from "@opencode-ai/schema/revert"
 type SessionMessageData = Omit<(typeof SessionMessage.Message)["Encoded"], "type" | "id">
 type V1MessageData = Omit<SessionV1.Info, "id" | "sessionID">
 type V1PartData = Omit<SessionV1.Part, "id" | "sessionID" | "messageID">
+
+// #493：StoredInfoData 把可外移字段放宽为 unknown，hot/cold row 都可持久化，但 raw row 不能冒充完整业务 Info。
+// 只有 cold-aware decoder 在恢复并通过业务 Schema 后才能跨越该静态边界。
+type StoredInfoData<T extends SessionV1.Info = SessionV1.Info> = T extends SessionV1.User
+  ? Omit<T, "id" | "sessionID" | "summary"> & {
+      summary?: Omit<NonNullable<T["summary"]>, "diffs"> & { diffs: unknown[] }
+    }
+  : Omit<T, "id" | "sessionID">
+
+// #493：StoredPartData 只放宽 tool output、attachment URL、reasoning text 与 file data URI 四类冷字段。
+// discriminator 和其余热结构保持精确，使 search/usage/eligibility 无需把 projection 强转为完整 Part。
+type StoredPartData<T extends SessionV1.Part = SessionV1.Part> = T extends SessionV1.ToolPart
+  ? Omit<T, "id" | "sessionID" | "messageID" | "state"> & {
+      state:
+        | Exclude<T["state"], { status: "completed" }>
+        | (Omit<Extract<T["state"], { status: "completed" }>, "output" | "attachments"> & {
+            output: unknown
+            attachments?: Array<
+              Omit<NonNullable<Extract<T["state"], { status: "completed" }>["attachments"]>[number], "url"> & {
+                url: unknown
+              }
+            >
+          })
+    }
+  : T extends SessionV1.ReasoningPart
+    ? Omit<T, "id" | "sessionID" | "messageID" | "text"> & { text: unknown }
+    : T extends SessionV1.FilePart
+      ? Omit<T, "id" | "sessionID" | "messageID" | "url"> & { url: unknown }
+      : Omit<T, "id" | "sessionID" | "messageID">
 
 export const SessionTable = sqliteTable(
   "session",
@@ -66,6 +95,24 @@ export const SessionTable = sqliteTable(
   ],
 )
 
+// #493：cold_storage 只保存可由 owner row 引用的字段 envelope；它不是第二份 Session 数据库。
+// hash 针对未压缩 canonical bytes，因而 codec 或压缩级别变化不会破坏内容去重身份。
+// ref_count 是正常事务路径的快速计数，verify 仍会用 message/part 的真实引用反算一致性。
+export const ColdStorageTable = sqliteTable(
+  "cold_storage",
+  {
+    hash: text().primaryKey(),
+    kind: text().$type<"message" | "part" | "session_message">().notNull(),
+    codec: text().$type<"zstd">().notNull(),
+    payload: blob({ mode: "buffer" }).notNull(),
+    raw_bytes: integer().notNull(),
+    compressed_bytes: integer().notNull(),
+    ref_count: integer().notNull().default(0),
+    ...Timestamps,
+  },
+  (table) => [index("cold_storage_ref_count_idx").on(table.ref_count)],
+)
+
 export const MessageTable = sqliteTable(
   "message",
   {
@@ -75,9 +122,15 @@ export const MessageTable = sqliteTable(
       .notNull()
       .references(() => SessionTable.id, { onDelete: "cascade" }),
     ...Timestamps,
-    data: text({ mode: "json" }).notNull().$type<V1MessageData>(),
+    data: text({ mode: "json" }).notNull().$type<StoredInfoData>(),
+    // #493：cold_ref 非空时 data 是类型安全的热 projection；业务读取必须先经过 cold-aware decoder。
+    // RESTRICT 防止计数错误时误删仍被 Message 引用的唯一 payload。
+    cold_ref: text().references(() => ColdStorageTable.hash, { onDelete: "restrict" }),
   },
-  (table) => [index("message_session_time_created_id_idx").on(table.session_id, table.time_created, table.id)],
+  (table) => [
+    index("message_session_time_created_id_idx").on(table.session_id, table.time_created, table.id),
+    index("message_cold_ref_idx").on(table.cold_ref),
+  ],
 )
 
 export const PartTable = sqliteTable(
@@ -90,11 +143,15 @@ export const PartTable = sqliteTable(
       .references(() => MessageTable.id, { onDelete: "cascade" }),
     session_id: text().$type<SessionSchema.ID>().notNull(),
     ...Timestamps,
-    data: text({ mode: "json" }).notNull().$type<V1PartData>(),
+    // #493：Part projection 只清空获准的 output/text/data-URI 字段；tool input、类型和结构元数据常驻主表。
+    // 这样 search、usage 与 compact boundary 可在不触碰 blob 的情况下继续工作。
+    data: text({ mode: "json" }).notNull().$type<StoredPartData>(),
+    cold_ref: text().references(() => ColdStorageTable.hash, { onDelete: "restrict" }),
   },
   (table) => [
     index("part_message_id_id_idx").on(table.message_id, table.id),
     index("part_session_idx").on(table.session_id),
+    index("part_cold_ref_idx").on(table.cold_ref),
   ],
 )
 
@@ -129,12 +186,15 @@ export const SessionMessageTable = sqliteTable(
     seq: integer().notNull(),
     ...Timestamps,
     data: text({ mode: "json" }).notNull().$type<SessionMessageData>(),
+    // Native投影与V1共用payload表，seq、身份和审批所需热字段不外移。
+    cold_ref: text().references(() => ColdStorageTable.hash, { onDelete: "restrict" }),
   },
   (table) => [
     uniqueIndex("session_message_session_seq_idx").on(table.session_id, table.seq),
     index("session_message_session_type_seq_idx").on(table.session_id, table.type, table.seq),
     index("session_message_session_time_created_id_idx").on(table.session_id, table.time_created, table.id),
     index("session_message_time_created_idx").on(table.time_created),
+    index("session_message_cold_ref_idx").on(table.cold_ref),
   ],
 )
 

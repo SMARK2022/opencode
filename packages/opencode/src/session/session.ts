@@ -272,6 +272,7 @@ export type GlobalListInput = {
 
 export const Event = {
   Created: SessionV1.Event.Created,
+  Forked: SessionV1.Event.Forked,
   Updated: SessionV1.Event.Updated,
   Deleted: SessionV1.Event.Deleted,
   Diff: SessionV1.Event.Diff,
@@ -417,9 +418,10 @@ export interface Interface {
     delta: string
   }) => Effect.Effect<void>
   /** Finds the first message matching the predicate, searching newest-first. */
+  // #493：predicate 只接收 HotInfo 热字段——扫描不得为冷存的 tool/reasoning payload 预热；匹配项才 hydrate。
   readonly findMessage: (
     sessionID: SessionID,
-    predicate: (msg: SessionV1.WithParts) => boolean,
+    predicate: (info: MessageV2.HotInfo) => boolean,
   ) => Effect.Effect<Option.Option<SessionV1.WithParts>, NotFound>
 }
 
@@ -442,7 +444,7 @@ const layer: Layer.Layer<
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const { db } = yield* Database.Service
+    const { db, sync } = yield* Database.Service
     const database = yield* Database.Service
     const background = yield* BackgroundJob.Service
     const events = yield* EventV2Bridge.Service
@@ -566,25 +568,22 @@ const layer: Layer.Layer<
 
     const remove: Interface["remove"] = Effect.fnUntraced(function* (sessionID: SessionID) {
       const session = yield* get(sessionID)
-      try {
-        // `remove` needs to work in all cases, such as broken sessions that
-        // run cleanup without instance state.
-        const hasInstance = yield* InstanceState.directory.pipe(
-          Effect.as(true),
-          Effect.catchCause(() => Effect.succeed(false)),
-        )
+      // `remove` needs to work in all cases, such as broken sessions that
+      // run cleanup without instance state.
+      const hasInstance = yield* InstanceState.directory.pipe(
+        Effect.as(true),
+        Effect.catchCause(() => Effect.succeed(false)),
+      )
 
-        if (hasInstance) yield* cancelBackgroundJobs(background, sessionID)
-        const kids = yield* children(sessionID)
-        for (const child of kids) {
-          yield* remove(child.id)
-        }
-
-        yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session })
-        yield* events.remove(sessionID)
-      } catch (error) {
-        yield* Effect.logError("failed to remove session", { sessionID, error })
+      if (hasInstance) yield* cancelBackgroundJobs(background, sessionID)
+      const kids = yield* children(sessionID)
+      for (const child of kids) {
+        yield* remove(child.id)
       }
+
+      // #493：cold release 与删除失败必须向上传播——静默吞错会留下违反引用计数不变式的库。
+      yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session })
+      yield* events.remove(sessionID)
     })
 
     const updateMessage = <T extends SessionV1.Info>(msg: T): Effect.Effect<T> =>
@@ -628,12 +627,8 @@ const layer: Layer.Layer<
         .get()
         .pipe(Effect.orDie)
       if (!row) return
-      return {
-        ...row.data,
-        id: row.id,
-        sessionID: row.session_id,
-        messageID: row.message_id,
-      } as SessionV1.Part
+      // #493：direct read 与批量 hydrate 共享 cold-aware decoder——corruption 必须失败而不是返回占位。
+      return yield* Database.withSync(database, () => MessageV2.decodePartRow(sync, row))
     })
 
     const create = Effect.fn("Session.create")(function* (input?: {
@@ -671,35 +666,25 @@ const layer: Layer.Layer<
         title,
         metadata: structuredClone(original.metadata),
       })
-      const msgs = yield* messages({ sessionID: input.sessionID })
-      const idMap = new Map<string, MessageID>()
-      const target = input.messageID ? msgs.findIndex((msg) => msg.info.id === input.messageID) : msgs.length
-
-      for (const msg of msgs.slice(0, target < 0 ? msgs.length : target)) {
-        const newID = MessageID.ascending()
-        idMap.set(msg.info.id, newID)
-
-        const parentID = msg.info.role === "assistant" && msg.info.parentID ? idMap.get(msg.info.parentID) : undefined
-        const cloned = yield* updateMessage({
-          ...msg.info,
-          sessionID: session.id,
-          id: newID,
-          ...(parentID && { parentID }),
+      // #493：复用 layer 内已解构的 database 服务——避免新增 Effect R 依赖泄漏到 Interface。
+      const { sync } = database
+      // #493：source→target 映射在业务 owner 生成，projector 只消费确定映射；父子 ID 永不共享。
+      // raw rows 不经过 Message decoder，cold prefix 不会因 fork 被预热后重新压缩。
+      const raw = yield* Database.withSync(database, () => MessageV2.rawForkRows(sync, { sessionID: input.sessionID, messageID: input.messageID }))
+      const messageMap = raw.messages.map((row) => ({ sourceID: row.id, targetID: MessageID.ascending() }))
+      const partMap = raw.parts.map((row) => ({ sourceID: row.id, targetID: PartID.ascending() }))
+      yield* events
+        .publish(Event.Forked, {
+          sourceSessionID: input.sessionID,
+          targetSessionID: session.id,
+          messageMap,
+          partMap,
         })
-
-        for (const part of msg.parts) {
-          const p: SessionV1.Part = {
-            ...part,
-            id: PartID.ascending(),
-            messageID: cloned.id,
-            sessionID: session.id,
-          }
-          if (p.type === "compaction" && p.tail_start_id) {
-            p.tail_start_id = idMap.get(p.tail_start_id)
-          }
-          yield* updatePart(p)
-        }
-      }
+        .pipe(
+          // #493：target session 已创建；clone 事务拒绝时删除空 target，不留用户可见 orphan。
+          // 清理只处理本次新建 session，不回退到 hydrate-and-copy 的第二条成功路径。
+          Effect.tapError(() => remove(session.id)),
+        )
       return session
     })
 
@@ -798,7 +783,8 @@ const layer: Layer.Layer<
     })
 
     const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
-      if (input.limit) {
+      // #493：0 是显式有界空范围而非“未提供”——退化为全量会在 cold session 上触发无意义持久预热。
+      if (input.limit !== undefined) {
         // #106：过滤下沉到 MessageV2.page，避免 limit 路径双重 filter
         return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit, fromMessageID: input.fromMessageID }).pipe(
           Effect.provideService(Database.Service, database),
@@ -851,21 +837,8 @@ const layer: Layer.Layer<
 
     /** Finds the first message matching the predicate, searching newest-first. */
     const findMessage: Interface["findMessage"] = Effect.fn("Session.findMessage")(function* (sessionID, predicate) {
-      const size = 50
-      let before: string | undefined
-      while (true) {
-        const page = yield* MessageV2.page({ sessionID, limit: size, before }).pipe(
-          Effect.provideService(Database.Service, database),
-        )
-        if (page.items.length === 0) break
-        for (let i = page.items.length - 1; i >= 0; i--) {
-          const item = page.items[i]
-          if (item && predicate(item)) return Option.some(item)
-        }
-        if (!page.more || !page.cursor) break
-        before = page.cursor
-      }
-      return Option.none<SessionV1.WithParts>()
+      // #493：热扫描代理到 findHot——每页只构造 HotInfo，冷 owner 不变；首个匹配才完整 hydrate。
+      return yield* MessageV2.findHot({ sessionID, predicate }).pipe(Effect.provideService(Database.Service, database))
     })
 
     return Service.of({

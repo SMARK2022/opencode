@@ -751,7 +751,9 @@ const layer = Layer.effect(
       // 在写入 marker 之前读取最新 user，避免 newest-first 查询命中 marker 自身；
       // technical source 已有 lineage 时继续向原 canonical turn 透传，不能形成 lineage 链。
       const source = Option.getOrUndefined(
-        yield* session.findMessage(input.sessionID, (message) => message.info.role === "user").pipe(Effect.orDie),
+        // #493：predicate 只读取 role——历史 cold Parts 与 summary.diffs 不参与 marker source 定位；
+      // 最终匹配仍 hydrate 完整 user，goalTurnID/model 等 lineage 输入不会来自不完整 projection。
+      yield* session.findMessage(input.sessionID, (info) => info.role === "user").pipe(Effect.orDie),
       )
       const msg = yield* session.updateMessage({
         id: MessageID.ascending(),

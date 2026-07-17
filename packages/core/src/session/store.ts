@@ -1,8 +1,9 @@
 export * as SessionStore from "./store"
 
-import { eq } from "drizzle-orm"
+import { and, eq } from "drizzle-orm"
 import { Context, Effect, Layer, Schema } from "effect"
 import { Database } from "../database/database"
+import { ColdStorage } from "../storage/cold-storage"
 import { makeGlobalNode } from "../effect/app-node"
 import { SessionHistory } from "./history"
 import { MessageDecodeError } from "./error"
@@ -22,6 +23,7 @@ export interface Interface {
   ) => Effect.Effect<SessionMessage.Message[], MessageDecodeError>
   readonly message: (
     messageID: SessionMessage.ID,
+    sessionID?: SessionSchema.ID,
   ) => Effect.Effect<{ readonly sessionID: SessionSchema.ID; readonly message: SessionMessage.Message } | undefined>
 }
 
@@ -51,17 +53,18 @@ const layer = Layer.effect(
       runnerContext: Effect.fn("SessionStore.runnerContext")(function* (sessionID, baselineSeq) {
         return yield* SessionHistory.loadForRunner(db, sessionID, baselineSeq)
       }),
-      message: Effect.fn("SessionStore.message")(function* (messageID) {
+      message: Effect.fn("SessionStore.message")(function* (messageID, sessionID) {
         const row = yield* db
           .select()
           .from(SessionMessageTable)
-          .where(eq(SessionMessageTable.id, messageID))
+          .where(and(eq(SessionMessageTable.id, messageID), sessionID ? eq(SessionMessageTable.session_id, sessionID) : undefined))
           .get()
           .pipe(Effect.orDie)
-        return row
+        const restored = row ? (yield* ColdStorage.readSessionMessageRows(db, [row]))[0] : undefined
+        return restored
           ? {
-              sessionID: SessionSchema.ID.make(row.session_id),
-              message: yield* decodeMessage({ ...row.data, id: row.id, type: row.type }).pipe(Effect.orDie),
+              sessionID: SessionSchema.ID.make(restored.session_id),
+              message: yield* decodeMessage({ ...restored.data, id: restored.id, type: restored.type }).pipe(Effect.orDie),
             }
           : undefined
       }),

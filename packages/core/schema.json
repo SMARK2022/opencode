@@ -63,6 +63,10 @@
       "entityType": "tables"
     },
     {
+      "name": "cold_storage",
+      "entityType": "tables"
+    },
+    {
       "name": "message",
       "entityType": "tables"
     },
@@ -1370,6 +1374,96 @@
       "autoincrement": false,
       "default": null,
       "generated": null,
+      "name": "hash",
+      "entityType": "columns",
+      "table": "cold_storage"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "kind",
+      "entityType": "columns",
+      "table": "cold_storage"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "codec",
+      "entityType": "columns",
+      "table": "cold_storage"
+    },
+    {
+      "type": "blob",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "payload",
+      "entityType": "columns",
+      "table": "cold_storage"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "raw_bytes",
+      "entityType": "columns",
+      "table": "cold_storage"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "compressed_bytes",
+      "entityType": "columns",
+      "table": "cold_storage"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "ref_count",
+      "entityType": "columns",
+      "table": "cold_storage"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_created",
+      "entityType": "columns",
+      "table": "cold_storage"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "time_updated",
+      "entityType": "columns",
+      "table": "cold_storage"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
       "name": "id",
       "entityType": "columns",
       "table": "message"
@@ -1411,6 +1505,16 @@
       "default": null,
       "generated": null,
       "name": "data",
+      "entityType": "columns",
+      "table": "message"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cold_ref",
       "entityType": "columns",
       "table": "message"
     },
@@ -1471,6 +1575,16 @@
       "default": null,
       "generated": null,
       "name": "data",
+      "entityType": "columns",
+      "table": "part"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cold_ref",
       "entityType": "columns",
       "table": "part"
     },
@@ -1651,6 +1765,16 @@
       "default": null,
       "generated": null,
       "name": "data",
+      "entityType": "columns",
+      "table": "session_message"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cold_ref",
       "entityType": "columns",
       "table": "session_message"
     },
@@ -2210,6 +2334,17 @@
       "table": "message"
     },
     {
+      "columns": ["cold_ref"],
+      "tableTo": "cold_storage",
+      "columnsTo": ["hash"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_message_cold_ref_cold_storage_hash_fk",
+      "entityType": "fks",
+      "table": "message"
+    },
+    {
       "columns": [
         "message_id"
       ],
@@ -2221,6 +2356,17 @@
       "onDelete": "CASCADE",
       "nameExplicit": false,
       "name": "fk_part_message_id_message_id_fk",
+      "entityType": "fks",
+      "table": "part"
+    },
+    {
+      "columns": ["cold_ref"],
+      "tableTo": "cold_storage",
+      "columnsTo": ["hash"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_part_cold_ref_cold_storage_hash_fk",
       "entityType": "fks",
       "table": "part"
     },
@@ -2266,6 +2412,17 @@
       "onDelete": "CASCADE",
       "nameExplicit": false,
       "name": "fk_session_message_session_id_session_id_fk",
+      "entityType": "fks",
+      "table": "session_message"
+    },
+    {
+      "columns": ["cold_ref"],
+      "tableTo": "cold_storage",
+      "columnsTo": ["hash"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_session_message_cold_ref_cold_storage_hash_fk",
       "entityType": "fks",
       "table": "session_message"
     },
@@ -2452,6 +2609,13 @@
       "nameExplicit": false,
       "name": "project_pk",
       "table": "project",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["hash"],
+      "nameExplicit": false,
+      "name": "cold_storage_pk",
+      "table": "cold_storage",
       "entityType": "pks"
     },
     {
@@ -2716,6 +2880,20 @@
     {
       "columns": [
         {
+          "value": "ref_count",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "cold_storage_ref_count_idx",
+      "entityType": "indexes",
+      "table": "cold_storage"
+    },
+    {
+      "columns": [
+        {
           "value": "session_id",
           "isExpression": false
         },
@@ -2732,6 +2910,20 @@
       "where": null,
       "origin": "manual",
       "name": "message_session_time_created_id_idx",
+      "entityType": "indexes",
+      "table": "message"
+    },
+    {
+      "columns": [
+        {
+          "value": "cold_ref",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "message_cold_ref_idx",
       "entityType": "indexes",
       "table": "message"
     },
@@ -2764,6 +2956,20 @@
       "where": null,
       "origin": "manual",
       "name": "part_session_idx",
+      "entityType": "indexes",
+      "table": "part"
+    },
+    {
+      "columns": [
+        {
+          "value": "cold_ref",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "part_cold_ref_idx",
       "entityType": "indexes",
       "table": "part"
     },
@@ -2902,6 +3108,20 @@
       "where": null,
       "origin": "manual",
       "name": "session_message_time_created_idx",
+      "entityType": "indexes",
+      "table": "session_message"
+    },
+    {
+      "columns": [
+        {
+          "value": "cold_ref",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "session_message_cold_ref_idx",
       "entityType": "indexes",
       "table": "session_message"
     },

@@ -33,6 +33,11 @@ import { ProviderTest } from "../fake/provider"
 import { testEffect } from "../lib/effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { TestConfig } from "../fixture/config"
+// #493：compact eligibility 直测 ColdStorage——四象限经由真实 compaction 结构验证双门禁；
+// Database 沿用文件既有 import（L4），此处只补 ColdStorage/SessionTable/eq。
+import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+import { SessionTable } from "@opencode-ai/core/session/sql"
+import { eq } from "drizzle-orm"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { LLMEvent, Usage } from "@opencode-ai/llm"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -2760,4 +2765,109 @@ describe("SessionNs.getUsage", () => {
     expect(result.tokens.cache.read).toBe(200)
     expect(result.tokens.cache.write).toBe(300)
   })
+})
+
+describe("ColdStorage compact eligibility", () => {
+  itCompaction.instance("freezes only the compacted head when the session is still recent", () =>
+    Effect.gen(function* () {
+      // recent+completed boundary 先证明 head eligible、tail ineligible，再把同 session 变老证明 age 规则覆盖 tail。
+      // age-only 与 neither 使用独立 session，避免前一 boundary 结构污染另两象限。
+      // 所有 tool output 都真实超过 4 KiB，断言只比较 eligibility 而不被门槛 false negative 干扰。
+      // marker/summary 由现有 compaction helper 生成，测试不复制 production completed-boundary SQL。
+      const ssn = yield* SessionNs.Service
+      // 沿用真实 projector 写入完整 tool 终态；四组样本只改变输出及所属 session。
+      const addCompletedToolPart = (input: { sessionID: SessionID; messageID: MessageID; tool: string; output: string }) => ssn.updatePart({
+        id: PartID.ascending(), type: "tool",
+        sessionID: input.sessionID, messageID: input.messageID,
+        tool: input.tool, callID: crypto.randomUUID(),
+        state: {
+          status: "completed", input: {}, output: input.output,
+          title: input.tool, metadata: {}, time: { start: 1, end: 2 },
+        },
+      })
+      const test = yield* TestInstance
+      // #493：eligibility/freeze 走同一同步 drizzle client（Database.Service.sync），与运行时同连接。
+      const { sync } = yield* Database.Service
+      const session = yield* ssn.create({ title: "compact cold eligibility" })
+      const head = yield* createUserMessage(session.id, "head")
+      const headPart = yield* addCompletedToolPart({
+        sessionID: session.id,
+        messageID: head.id,
+        tool: "read",
+        output: "head-output-".repeat(512),
+      })
+      const tail = yield* createUserMessage(session.id, "tail")
+      const tailPart = yield* addCompletedToolPart({
+        sessionID: session.id,
+        messageID: tail.id,
+        tool: "read",
+        output: "tail-output-".repeat(512),
+      })
+      const marker = yield* ssn.updatePart({
+        id: PartID.ascending(),
+        messageID: head.id,
+        sessionID: session.id,
+        type: "compaction",
+        auto: false,
+        tail_start_id: tail.id,
+        recent_user_messages: [{ id: head.id, text: "memento-".repeat(1024) }],
+      })
+      const summary = yield* createSummaryAssistantMessage(
+        session.id,
+        head.id,
+        test.directory,
+        "summary-text-".repeat(512),
+      )
+      const summaryParts = yield* MessageV2.parts(summary.id)
+      const summaryText = summaryParts[0]
+      sync
+        .update(SessionTable)
+        .set({ time_updated: Date.now() })
+        .where(eq(SessionTable.id, session.id))
+        .run()
+      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: headPart.id })).toBe(true)
+      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: tailPart.id })).toBe(false)
+      // marker/memento 与普通 summary text 即使超过门槛也不是冷字段；boundary 只能授权白名单，不扩展类型集合。
+      // summary assistant Message 同样没有 user summary.diffs，不能因它位于 completed boundary 附近被整行冻结。
+      // 三项 false 与 head tool true 联合锁定“compact 决定 eligibility、extraction 决定字段”的双门禁。
+      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: marker.id })).toBe(false)
+      expect(ColdStorage.isEligibleOwner(sync, { type: "message", id: summary.id })).toBe(false)
+      expect(summaryText ? ColdStorage.isEligibleOwner(sync, { type: "part", id: summaryText.id }) : undefined).toBe(false)
+      expect(ColdStorage.freezeOwner(sync, { type: "part", id: headPart.id }).type).toBe("frozen")
+      expect(ColdStorage.freezeOwner(sync, { type: "part", id: tailPart.id }).type).toBe("skipped")
+      // 把同 session 变老证明 age 规则覆盖 tail：31 天前的 session 使 tail tool part 也可冻结。
+      sync
+        .update(SessionTable)
+        .set({ time_updated: Date.now() - 31 * 24 * 60 * 60 * 1000 })
+        .where(eq(SessionTable.id, session.id))
+        .run()
+      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: tailPart.id })).toBe(true)
+      yield* ssn.remove(session.id)
+      const oldSession = yield* ssn.create({ title: "age-only cold eligibility" })
+      const oldUser = yield* createUserMessage(oldSession.id, "old")
+      const oldPart = yield* addCompletedToolPart({
+        sessionID: oldSession.id,
+        messageID: oldUser.id,
+        tool: "read",
+        output: "age-only-output-".repeat(512),
+      })
+      sync
+        .update(SessionTable)
+        .set({ time_updated: Date.now() - 31 * 24 * 60 * 60 * 1000 })
+        .where(eq(SessionTable.id, oldSession.id))
+        .run()
+      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: oldPart.id })).toBe(true)
+      yield* ssn.remove(oldSession.id)
+      const recentSession = yield* ssn.create({ title: "recent cold eligibility" })
+      const recentUser = yield* createUserMessage(recentSession.id, "recent")
+      const recentPart = yield* addCompletedToolPart({
+        sessionID: recentSession.id,
+        messageID: recentUser.id,
+        tool: "read",
+        output: "recent-output-".repeat(512),
+      })
+      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: recentPart.id })).toBe(false)
+      yield* ssn.remove(recentSession.id)
+    }),
+  )
 })

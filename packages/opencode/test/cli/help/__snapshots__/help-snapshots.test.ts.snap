@@ -414,8 +414,15 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 database tools
 
 Commands:
-  opencode db [query]     open an interactive sqlite3 shell or run a query                 [default]
-  opencode db path        print the database path
+  opencode db compress         freeze eligible cold fields into the database cold store
+  opencode db expand           thaw cold fields back into the primary tables
+  opencode db status           show cold-storage metrics or a persisted task
+  opencode db resume <taskID>  resume an interrupted cold-storage task
+  opencode db verify           verify cold payload hashes and reference counts
+  opencode db cleanup          report or remove unreferenced cold payloads
+  opencode db vacuum           reclaim unused SQLite pages
+  opencode db [query]          open an interactive sqlite3 shell or run a query            [default]
+  opencode db path             print the database path
 
 Positionals:
   query  SQL query to execute                                                               [string]

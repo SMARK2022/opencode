@@ -557,7 +557,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       // 此处只判断 loop 是否有可消费的 user history，不重复 Goal-turn classifier；
       // canonical/technical 身份仍由 SessionPrompt 在唯一执行路径中权威判定。
       const user = yield* session
-        .findMessage(ctx.params.sessionID, (message) => message.info.role === "user")
+        // #493：role predicate 走热索引式分页——无 user 时不因一次 Goal mutation 展开任何 cold Part。
+        .findMessage(ctx.params.sessionID, (info) => info.role === "user")
         .pipe(Effect.orDie)
       if (Option.isSome(user)) {
         // busy Session 继续由 RunState.ensureRunning 去重；后台 failure 必须沿用现有

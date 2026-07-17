@@ -9,6 +9,8 @@ import { Effect } from "effect"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 import { Database } from "@opencode-ai/core/database/database"
 import { ServerLock } from "@/cli/tui/server-lock"
+// #493：daemon maintenance 全部 SQL 位于 core ColdStorage；worker 只装配生命周期。
+import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 import { EventClients } from "@opencode-ai/server/event-clients"
 import { SessionActivity } from "@/session/activity"
 import { HttpApiApp } from "@/server/routes/instance/httpapi/server"
@@ -25,6 +27,23 @@ let onUncaughtException: (error: Error) => void = (_error: Error) => {}
 process.on("unhandledRejection", onUnhandledRejection)
 process.on("uncaughtException", onUncaughtException)
 
+// #493：daemon 内唯一 maintenance 运行态；task promise 只在 terminal/interrupted checkpoint 后释放。
+let activeMaintenance:
+  | { taskID: string; controller: AbortController; promise: Promise<void> }
+  | undefined
+let maintenanceRecoveryPromise: Promise<void> | undefined
+let maintenanceShutdownRequested = false
+
+// control 错误映射只决定本机 HTTP status，不改写 task terminal 状态或吞掉 ColdStorage failure。
+// busy 与 lease-lost 分开反馈，CLI 可区分"已有任务"与"当前 owner 已失效"的恢复动作。
+// 未知异常保持 500，禁止把 corruption/程序缺陷降级为参数错误后继续运行。
+function maintenanceError(error: unknown) {
+  if (error instanceof ServerLock.MaintenanceBusyError) return { status: 409, message: error.message }
+  if (error instanceof ServerLock.MaintenanceLeaseError) return { status: 503, message: error.message }
+  if (error instanceof ColdStorage.ValidationError) return { status: 400, message: error.message }
+  return { status: 500, message: error instanceof Error ? error.message : String(error) }
+}
+
 const isDaemon = process.env.OPENCODE_PROCESS_ROLE === "worker"
 // 共享 daemon 是唯一生产入口；线程 RPC 不再持有数据库或转发事件。
 
@@ -34,6 +53,8 @@ if (isDaemon) {
   // 非print-logs启动时stdout由launcher丢弃；生命周期消息仍携带结构化原因。
   const log = {
     info: (message: string, fields: Record<string, unknown> = {}) => console.log(`[daemon] ${message}`, fields),
+    // #493：maintenance 失败走结构化 error 日志——与 info 同构，便于 launcher/测试侧统一解析。
+    error: (message: string, fields: Record<string, unknown> = {}) => console.log(`[daemon] [ERROR] ${message}`, fields),
   }
   // printLogs 判定与 daemon.ts launcher 端（argv 决定 stdio + env 透传）保持语义一致：
   // worker 端再看 argv||env。若仅经 env 注入 OPENCODE_PRINT_LOGS=1 而不带 --print-logs
@@ -67,9 +88,145 @@ if (isDaemon) {
 
   // 所有退出入口收敛到这个闭包，不能从事件 callback 单独调用 Database.close。
   
+  async function maintain(prepared: ColdStorage.PreparedMaintenance, runtime: ColdStorage.MaintenanceRuntime = { checkpoint: async () => {} }) {
+    const database = await AppRuntime.runPromise(Database.Service)
+    // 每批只预约本 runtime 的同一连接；文件 checkpoint 期间释放预约，普通会话仍可继续。
+    return ColdStorage.maintain(database.sync, prepared, {
+      ...runtime,
+      run: (body) => Effect.runPromise(Database.withSync(database, body)),
+    })
+  }
+
+  // runMaintenance 在返回 202 前登记 activeMaintenance，使 startup/idle timer 从第一刻就看到活跃任务。
+  // task-backed operation 必须先获得跨进程 lease；新 task 可注入已获取 lease，resume/recovery 在此获取。
+  // task promise 只在 terminal/interrupted checkpoint 后释放 lease 和 active 标记，daemon 不会提前退出。
+  // shutdown race 通过 maintenanceShutdownRequested 立即 abort 刚创建的 controller，避免恢复窗口漏掉停止信号。
+  async function runMaintenance(
+    prepared: ColdStorage.PreparedMaintenance,
+    existing?: ColdStorage.MaintenanceTask,
+    acquired?: ServerLock.MaintenanceLease,
+  ) {
+    if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Expected task-backed maintenance" })
+    const task = existing ?? prepared.task
+    const lease = acquired ?? (await ServerLock.acquireMaintenanceLease(task))
+    const controller = new AbortController()
+    const promise = (async () => {
+      try {
+        await maintain(prepared, {
+          task,
+          lease,
+          signal: controller.signal,
+          checkpoint: (next) => ServerLock.writeMaintenanceTask(next),
+        })
+      } catch (error) {
+        log.error("database maintenance failed", { taskID: task.taskID, error: String(error) })
+      } finally {
+        await lease.release()
+        if (activeMaintenance?.taskID === task.taskID) activeMaintenance = undefined
+        armIdleTimer()
+      }
+    })()
+    activeMaintenance = { taskID: task.taskID, controller, promise }
+    if (maintenanceShutdownRequested) controller.abort()
+    cancelIdleTimer("maintenance-started")
+    cancelStartupIdleTimer("maintenance-started")
+    void promise
+    return task
+  }
+
+  // startMaintenance 只做 request decode、prepare、task conflict 和 runtime 装配，operation SQL 全部留在 ColdStorage。
+  // immediate read-only request 不创建 task；vacuum 虽 immediate write，仍使用同一 maintenance lease。
+  // 新 task 在 lease owner 可见后写 queued record，消除 status 把启动中任务误判 interrupted 的窗口。
+  async function startMaintenance(input: unknown) {
+    const request = ColdStorage.parseMaintenanceRequest(input)
+    const prepared = ColdStorage.prepareMaintenance(request)
+    if (prepared.type === "immediate") {
+      if (request.operation === "vacuum") {
+        // interrupted task 虽不持有 live lease，仍是待恢复的 nonterminal 工作；vacuum 不得绕过它重排数据库页面。
+        // daemon 与 offline CLI 都先做同一冲突检查，再用 pseudo taskID 获取 lease，保持运行域行为一致。
+        const existing = await ServerLock.findNonterminalMaintenanceTask()
+        if (existing) throw new ServerLock.MaintenanceBusyError(`Maintenance task already exists: ${existing.taskID}`)
+        const pseudo = { taskID: `vacuum_${crypto.randomUUID()}`, dbPath: Database.path() }
+        const lease = await ServerLock.acquireMaintenanceLease(pseudo)
+        try {
+          return await maintain(prepared, { lease, checkpoint: async () => {} })
+        } finally {
+          await lease.release()
+        }
+      }
+      return await maintain(prepared)
+    }
+    const existing = await ServerLock.findNonterminalMaintenanceTask()
+    if (existing) throw new ServerLock.MaintenanceBusyError(`Maintenance task already exists: ${existing.taskID}`)
+    const lease = await ServerLock.acquireMaintenanceLease(prepared.task)
+    try {
+      await ServerLock.writeMaintenanceTask(prepared.task)
+      const task = await runMaintenance(prepared, undefined, lease)
+      return { type: "task" as const, task }
+    } catch (error) {
+      await lease.release()
+      throw error
+    }
+  }
+
+  // resume 先 reconcile dead owner，只接受 interrupted；running/completed/failed/queued 都返回明确 conflict。
+  // prepared 的随机新 task 仅验证 schema，实际 maintain 注入原 task，因此 cursor/计数/taskID 保持连续。
+  // 返回 running 只表示 daemon 已登记 active；最终结果由持久 task record 查询，不阻塞 control request。
+  async function resumeMaintenance(taskID: string) {
+    const task = await ServerLock.reconcileMaintenanceTask(taskID)
+    if (!task) return { status: 404 as const, body: { error: `Maintenance task not found: ${taskID}` } }
+    if (task.status !== "interrupted") {
+      return { status: 409 as const, body: { error: `Maintenance task is ${task.status}` } }
+    }
+    if (activeMaintenance) throw new ServerLock.MaintenanceBusyError()
+    const prepared = ColdStorage.prepareMaintenance(task.args)
+    if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Interrupted task is not resumable" })
+    await runMaintenance(prepared, task)
+    return { status: 202 as const, body: { taskID: task.taskID, operation: task.operation, status: "running" } }
+  }
+
+  function maintenanceTaskID(input: unknown) {
+    // resume control 只接受 taskID 字符串；operation/args/cursor 必须从已验证的持久 record 获取。
+    // 返回 undefined 让同一 ValidationError 路径处理 malformed JSON，不使用 unchecked body cast。
+    if (
+      typeof input !== "object" ||
+      input === null ||
+      !("taskID" in input) ||
+      typeof input.taskID !== "string" ||
+      input.taskID.length > 128 ||
+      !/^dbm_[A-Za-z0-9_-]+$/.test(input.taskID)
+    )
+      return
+    return input.taskID
+  }
+
+  // daemon startup 只恢复唯一 interrupted task；多个 nonterminal 或损坏 record 由 task store hard-fail。
+  // caller 在启动 timer/watcher 前 await 本函数；返回时要么 activeMaintenance 已登记，要么已证明无需恢复。
+  // 因而 isActive 不需要第四种临时状态，所有 shutdown 判定保持批准的单一 predicate。
+  async function recoverInterruptedMaintenance() {
+    const task = await ServerLock.findNonterminalMaintenanceTask()
+    if (!task || task.status !== "interrupted") return
+    const prepared = ColdStorage.prepareMaintenance(task.args)
+    if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Interrupted task is not resumable" })
+    await runMaintenance(prepared, task)
+  }
+
   async function gracefulShutdown(exitCode = 0, reason = "unknown") {
     if (shutdownInProgress) return
     shutdownInProgress = true
+    // #493：graceful shutdown 先阻止新 maintenance，再 abort 当前 task，并等待其批次结束和 interrupted checkpoint。
+    // recovery promise 可能在第一次 active 检查后才登记任务，所以等待后必须再次检查并 abort 该 race。
+    // maintenance 先停，随后既有 runtime finalizer checkpoint/close，最后才释放 daemon lock。
+    maintenanceShutdownRequested = true
+    if (activeMaintenance) {
+      activeMaintenance.controller.abort()
+      await activeMaintenance.promise.catch(() => undefined)
+    }
+    if (maintenanceRecoveryPromise) await maintenanceRecoveryPromise.catch(() => undefined)
+    if (activeMaintenance) {
+      activeMaintenance.controller.abort()
+      await activeMaintenance.promise.catch(() => undefined)
+    }
     cancelIdleTimer("shutdown")
     cancelStartupIdleTimer("shutdown")
     cancelLauncherWatcher("shutdown")
@@ -157,8 +314,11 @@ if (isDaemon) {
   let sseClients = 0
 
   // #235：活跃判定统一收敛——SSE client 或 session runner 任一活跃即阻止退出
+  // #493：maintenance 与 SSE/session runner 同属 daemon liveness；任一存在都禁止 startup/regular idle shutdown。
+  // startup 在启动 timer 前已 await recovery 注册 activeMaintenance，因此这里不需要临时恢复标志。
+  // 所有 launcher/startup/idle timer 复用该 predicate，避免各自遗漏新的后台工作类型。
   function isActive() {
-    return sseClients > 0 || SessionActivity.count() > 0
+    return sseClients > 0 || SessionActivity.count() > 0 || activeMaintenance !== undefined
   }
 
   function cancelIdleTimer(reason: string) {
@@ -315,6 +475,62 @@ if (isDaemon) {
         if (!lockToken || request.headers.get(ServerLock.CONTROL_TOKEN_HEADER) !== lockToken)
           return new Response("unauthorized", { status: 401 })
         const url = new URL(request.url)
+      // #493：maintenance start 是 daemon 私有控制面，不进入 public HTTP/OpenAPI/SDK。
+      // handler 只解析 JSON、调用共同 dispatcher 并返回 task/report，不能复制 eligibility 或 SQL。
+      // task-backed response 只暴露 identity/status/createdAt，不把 payload、cursor 内部对象或 lock token 回传。
+      if (request.method === "POST" && url.pathname === ServerLock.CONTROL_MAINTENANCE_PATH) {
+        return request
+          .json()
+          .then((body: unknown) => startMaintenance(body))
+          .then((body) =>
+            body.type === "task"
+              ? Response.json(
+                  {
+                    taskID: body.task.taskID,
+                    operation: body.task.operation,
+                    status: body.task.status,
+                    createdAt: body.task.createdAt,
+                  },
+                  { status: 202 },
+                )
+              : Response.json(body, { status: 200 }),
+          )
+          .catch((error) => {
+            const mapped = maintenanceError(error)
+            return Response.json({ error: mapped.message }, { status: mapped.status })
+          })
+      }
+      // task status 与 daemon health 分离；不存在返回 404，损坏 record 返回错误而不是伪造空任务。
+      // reconcile 让强制终止进程留下的 running/queued 状态在查询时变为可恢复 interrupted。
+      if (request.method === "GET" && url.pathname === ServerLock.CONTROL_MAINTENANCE_STATUS_PATH) {
+        const taskID = url.searchParams.get("task")
+        if (!taskID) return Response.json({ error: "task query is required" }, { status: 400 })
+        return ServerLock.reconcileMaintenanceTask(taskID)
+          .then((task) => (task ? Response.json(task) : Response.json({ error: "task not found" }, { status: 404 })))
+          .catch((error) => {
+            const mapped = maintenanceError(error)
+            return Response.json({ error: mapped.message }, { status: mapped.status })
+          })
+      }
+      // resume 参数只含 taskID，operation/args 必须来自持久 record，防止控制调用改变原任务语义。
+      // conflict 状态保留 409，调用方不能把重复 resume 当成幂等 completed 成功。
+      if (request.method === "POST" && url.pathname === ServerLock.CONTROL_MAINTENANCE_RESUME_PATH) {
+        return request
+          .json()
+          .then((body: unknown) => {
+            const taskID = maintenanceTaskID(body)
+            if (!taskID) throw new ColdStorage.ValidationError({ message: "taskID is required" })
+            return resumeMaintenance(taskID)
+          })
+          .then((result) => {
+            if ("body" in result) return Response.json(result.body, { status: result.status })
+            return Response.json(result)
+          })
+          .catch((error) => {
+            const mapped = maintenanceError(error)
+            return Response.json({ error: mapped.message }, { status: mapped.status })
+          })
+      }
         if (request.method === "GET" && url.pathname === ServerLock.CONTROL_STATUS_PATH)
           return Response.json({ tuiClients: sseClients, sessionActivity: SessionActivity.count() })
         if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
@@ -328,6 +544,11 @@ if (isDaemon) {
     lockToken = await ServerLock.write(internalServer.port, externalUrl, network, controlServer.port)
     log.info("daemon lock written", { pid: process.pid, port: internalServer.port, controlPort: controlServer.port, externalUrl, launcherPID: LAUNCHER_PID })
     // 锁发布后才启用启动期保护，首个订阅到达后转由运行期空闲路径负责。
+    // 先恢复持久任务并登记 activeMaintenance，再让既有 idle/launcher 判定观察它。
+    maintenanceRecoveryPromise = recoverInterruptedMaintenance().catch((error) => {
+      log.error("maintenance recovery failed", { error: String(error) })
+    })
+    await maintenanceRecoveryPromise
     maybeScheduleStartupIdleShutdown()
     startLauncherWatcher()
     // #71：锁可见后再做 best-effort 外部插件预热，避免 npm/代理阻塞 TUI 健康等待。

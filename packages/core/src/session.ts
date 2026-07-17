@@ -13,6 +13,7 @@ import { Prompt } from "./session/prompt"
 import { PromptInput } from "@opencode-ai/schema/prompt-input"
 import { EventV2 } from "./event"
 import { Database } from "./database/database"
+import { ColdStorage } from "./storage/cold-storage"
 import { SessionProjector } from "./session/projector"
 import { SessionMessageTable, SessionTable } from "./session/sql"
 import { searchCondition } from "./session/search"
@@ -398,10 +399,12 @@ const layer = Layer.effect(
         const rows = yield* (input.limit === undefined ? query.all() : query.limit(input.limit).all()).pipe(
           Effect.orDie,
         )
-        return yield* Effect.forEach(direction === "previous" ? rows.toReversed() : rows, decode)
+        // 只恢复实际返回页，cursor探针与范围外消息仍保持冷态。
+        const restored = yield* ColdStorage.readSessionMessageRows(db, rows)
+        return yield* Effect.forEach(direction === "previous" ? restored.toReversed() : restored, decode)
       }),
       message: Effect.fn("V2Session.message")(function* (input) {
-        const stored = yield* store.message(input.messageID)
+        const stored = yield* store.message(input.messageID, input.sessionID)
         return stored?.sessionID === input.sessionID ? stored.message : undefined
       }),
       context: Effect.fn("V2Session.context")(function* (sessionID) {

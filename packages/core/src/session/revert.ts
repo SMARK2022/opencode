@@ -3,6 +3,7 @@ export * as SessionRevert from "./revert"
 import { and, asc, eq, gt } from "drizzle-orm"
 import { DateTime, Effect, Schema } from "effect"
 import { Database } from "../database/database"
+import { ColdStorage } from "../storage/cold-storage"
 import { EventV2 } from "../event"
 import { Location } from "../location"
 import { RelativePath } from "../schema"
@@ -51,7 +52,8 @@ const plan = Effect.fn("SessionRevert.plan")(function* (input: BoundaryInput) {
   const decode = Schema.decodeUnknownEffect(SessionMessage.Message)
   const files = new Map<RelativePath, Snapshot.ID>()
   const records: Record<string, unknown>[] = []
-  for (const row of rows) {
+  const restored = yield* ColdStorage.readSessionMessageRows(db, rows.filter(row => !Schema.is(SessionMessage.Hidden)(row.data.metadata?.hidden)))
+  for (const row of restored) {
     const message = yield* decode({ ...row.data, id: row.id, type: row.type }).pipe(Effect.orDie)
     if (message.type !== "assistant" || Schema.is(SessionMessage.Hidden)(message.metadata?.hidden)) continue
     records.push(...message.content.flatMap(part => part.type === "tool" && part.state.status === "completed" ? [part.state.structured] : []))

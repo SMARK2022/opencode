@@ -968,7 +968,8 @@ const layer = Layer.effect(
         }
       }
       const match = yield* sessions
-        .findMessage(sessionID, (m) => m.info.role === "user" && !!m.info.model)
+        // #493：model fallback predicate 只依赖 role/model 热字段——扫描旧 session 不为 summary.diffs 或 Parts 预热。
+        .findMessage(sessionID, (info) => info.role === "user" && !!info.model)
         .pipe(Effect.orDie)
       if (Option.isSome(match) && match.value.info.role === "user") return match.value.info.model
       return yield* provider.defaultModel().pipe(Effect.orDie)
@@ -1443,7 +1444,9 @@ const layer = Layer.effect(
     })
 
     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
-      const match = yield* sessions.findMessage(sessionID, (m) => m.info.role !== "user").pipe(Effect.orDie)
+      // #493：compact 只需定位最新 assistant——热 predicate 避免为每个历史候选读取 tool/reasoning output。
+      // 找到后返回完整 WithParts，compact caller 继续消费真实 message。
+      const match = yield* sessions.findMessage(sessionID, (info) => info.role !== "user").pipe(Effect.orDie)
       if (Option.isSome(match)) return match.value
       const msgs = yield* sessions.messages({ sessionID, limit: 1 }).pipe(Effect.orDie)
       if (msgs.length > 0) return msgs[0]

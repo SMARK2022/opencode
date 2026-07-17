@@ -269,10 +269,11 @@ export function make(db: Database.Interface["db"]): Interface {
       yield* db.transaction(() => Effect.gen(function* () {
       const assistant = input.assistant
       const now = Date.now()
-      // V1 parts 只在此持久化适配边界解码；不把数据库 JSON 断言成新执行模型。
+      // 账本只解码 step-finish 热字段，不读取或预热同助手的工具、推理及文件冷 payload。
       // 原生 V2 已传入单步快照，不读取 V1 parts，也不桥接旧 runner。
       const parts = input.usage ? [] : (yield* db.select().from(PartTable)
-        .where(and(eq(PartTable.message_id, assistant.id), eq(PartTable.session_id, input.sessionID)))
+        .where(and(eq(PartTable.message_id, assistant.id), eq(PartTable.session_id, input.sessionID),
+          sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`))
         .all().pipe(Effect.orDie)).map(row => Schema.decodeUnknownSync(SessionV1.Part)({
           ...row.data, id: row.id, sessionID: row.session_id, messageID: row.message_id,
         }))
