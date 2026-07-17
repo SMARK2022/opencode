@@ -55,3 +55,7 @@ bun .temp/patches/src/apply-cumulative.ts --materialize <index>
 ```
 
 `index=0` 物化 exact target baseline；`1..452` 从 baseline 累计应用 `current[1..index]`。成功状态发布到 `states/NNNN-<sha12>/repo`，失败构建不会替换同 index 的旧成功状态。脚本会清理中断 staging、恢复未完成发布事务、删除 provenance 失效状态，并按成功发布时间保留最近五个状态，绝不按 index 大小保留。
+
+## Per-Commit Records
+
+在首次编辑每个 current patch 前创建 `.temp/patches/records/NNNN-<sha12>.md`，并在每次编辑、materialize、测试和审计结果后立即更新。每个 manifest commit 只能有一份独立完整 record，禁止合并多个 commit、延迟创建或在批次结束时统一补写。Record 必须说明 source 行为、上游与目标的不一致、实际适配、保留和修订的行为、验证证据以及最终审计 verdict。
