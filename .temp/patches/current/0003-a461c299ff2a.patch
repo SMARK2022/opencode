@@ -1,30 +1,19 @@
-From a461c299ff2a104ebdf3a5e94944ce6a80057c70 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Wed, 22 Apr 2026 01:04:25 +0800
-Subject: [PATCH] =?UTF-8?q?feat(usage):=20=E4=BC=98=E5=8C=96=E6=B6=88?=
- =?UTF-8?q?=E6=81=AF=E4=BD=BF=E7=94=A8=E6=83=85=E5=86=B5=E8=AE=A1=E7=AE=97?=
- =?UTF-8?q?=EF=BC=8C=E6=B7=BB=E5=8A=A0=E8=BE=93=E5=85=A5=E5=92=8C=E8=BE=93?=
- =?UTF-8?q?=E5=87=BA=E6=B5=81=E9=87=8F=E6=98=BE=E7=A4=BA?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index 2e08e66a4a2d471d1a0ae8ad68ac62809c97ef9d..ccb660956938e73619e7b8501824aa85c7377373 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -159,17 +159,26 @@ export function Prompt(props: PromptProps) {
-   const usage = createMemo(() => {
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -262,17 +262,30 @@
      if (!props.sessionID) return
+     const session = sync.session.get(props.sessionID)
      const msg = sync.data.message[props.sessionID] ?? []
 -    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
++    // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
 +    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
      if (!last) return
  
 -    const tokens =
 -      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
 -    if (tokens <= 0) return
++    // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
 +    const chars = (sync.data.part[last.id] ?? []).reduce((sum, part) => {
 +      if (part.type === "text" && !part.ignored) return sum + part.text.length
 +      if (part.type === "reasoning") return sum + part.text.length
@@ -33,19 +22,21 @@ index 2e08e66a4a2d471d1a0ae8ad68ac62809c97ef9d..ccb660956938e73619e7b8501824aa85
 +    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
 +    const outputActual = last.tokens.output + last.tokens.reasoning
 +    const outputEstimated = Math.round(chars / 4)
++    // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
 +    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
 +    const tokens = input + output
 +    if (tokens <= 0 && input <= 0 && output <= 0) return
  
      const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
      const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
-     const cost = msg.reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
+     const cost = session?.cost ?? 0
      return {
++      // 添加输入/输出流量显示，用于 footer 展示
 +      flow: `↑ ${Locale.number(input)} · ↓ ${Locale.number(output)}`,
        context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
        cost: cost > 0 ? money.format(cost) : undefined,
      }
-@@ -1338,7 +1347,7 @@ export function Prompt(props: PromptProps) {
+@@ -1652,7 +1665,7 @@
                      <Match when={usage()}>
                        {(item) => (
                          <text fg={theme.textMuted} wrapMode="none">
@@ -54,15 +45,17 @@ index 2e08e66a4a2d471d1a0ae8ad68ac62809c97ef9d..ccb660956938e73619e7b8501824aa85
                          </text>
                        )}
                      </Match>
-diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-index 9ffe77979150118963c67b5c25a7330f1a460724..7fe0c458f309a2d94898a6ca88d2cd904f9d72f8 100644
---- a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-@@ -15,19 +15,31 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
-   const cost = createMemo(() => msg().reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0))
+
+
+diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
+--- a/packages/tui/src/feature-plugins/sidebar/context.tsx
++++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
+@@ -17,19 +17,34 @@
+   const cost = createMemo(() => session()?.cost ?? 0)
  
    const state = createMemo(() => {
 -    const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
++    // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
 +    const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant")
      if (!last) {
        return {
@@ -75,6 +68,7 @@ index 9ffe77979150118963c67b5c25a7330f1a460724..7fe0c458f309a2d94898a6ca88d2cd90
  
 -    const tokens =
 -      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
++    // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
 +    const chars = props.api.state.part(last.id).reduce((sum, part) => {
 +      if (part.type === "text" && !part.ignored) return sum + part.text.length
 +      if (part.type === "reasoning") return sum + part.text.length
@@ -83,6 +77,7 @@ index 9ffe77979150118963c67b5c25a7330f1a460724..7fe0c458f309a2d94898a6ca88d2cd90
 +    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
 +    const outputActual = last.tokens.output + last.tokens.reasoning
 +    const outputEstimated = Math.round(chars / 4)
++    // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
 +    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
 +    const tokens = input + output
      const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
@@ -93,29 +88,33 @@ index 9ffe77979150118963c67b5c25a7330f1a460724..7fe0c458f309a2d94898a6ca88d2cd90
        percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
      }
    })
-@@ -37,6 +49,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
+@@ -39,6 +54,8 @@
        <text fg={theme().text}>
          <b>Context</b>
        </text>
++      {/* 添加输入/输出流量显示 */}
 +      <text fg={theme().textMuted}>↑ {state().input.toLocaleString()} · ↓ {state().output.toLocaleString()}</text>
        <text fg={theme().textMuted}>{state().tokens.toLocaleString()} tokens</text>
        <text fg={theme().textMuted}>{state().percent ?? 0}% used</text>
        <text fg={theme().textMuted}>{money.format(cost())} spent</text>
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-index 55695996076ec89c747c7aa63e0eed22565def80..fbb824fa8471f801713d0a0b1dca34b024edb6a2 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-@@ -33,12 +33,20 @@ export function SubagentFooter() {
+
+
+diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
+--- a/packages/tui/src/routes/session/subagent-footer.tsx
++++ b/packages/tui/src/routes/session/subagent-footer.tsx
+@@ -32,12 +32,23 @@
  
    const usage = createMemo(() => {
      const msg = messages()
 -    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
++    // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
 +    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
      if (!last) return
  
 -    const tokens =
 -      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
 -    if (tokens <= 0) return
++    // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
 +    const chars = (sync.data.part[last.id] ?? []).reduce((sum, part) => {
 +      if (part.type === "text" && !part.ignored) return sum + part.text.length
 +      if (part.type === "reasoning") return sum + part.text.length
@@ -124,21 +123,23 @@ index 55695996076ec89c747c7aa63e0eed22565def80..fbb824fa8471f801713d0a0b1dca34b0
 +    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
 +    const outputActual = last.tokens.output + last.tokens.reasoning
 +    const outputEstimated = Math.round(chars / 4)
++    // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
 +    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
 +    const tokens = input + output
 +    if (tokens <= 0 && input <= 0 && output <= 0) return
  
      const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
      const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
-@@ -50,6 +58,7 @@ export function SubagentFooter() {
+@@ -49,6 +60,8 @@
      })
  
      return {
++      // 添加输入/输出流量显示，用于 footer 展示
 +      flow: `↑ ${Locale.number(input)} · ↓ ${Locale.number(output)}`,
        context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
        cost: cost > 0 ? money.format(cost) : undefined,
      }
-@@ -87,7 +96,7 @@ export function SubagentFooter() {
+@@ -88,7 +101,7 @@
              <Show when={usage()}>
                {(item) => (
                  <text fg={theme.textMuted} wrapMode="none">
@@ -147,3 +148,5 @@ index 55695996076ec89c747c7aa63e0eed22565def80..fbb824fa8471f801713d0a0b1dca34b0
                  </text>
                )}
              </Show>
+
+

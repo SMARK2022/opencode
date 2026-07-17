@@ -1,90 +1,59 @@
-From 9f117055c5a8a09f5cc7080786accf853bdb25fe Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Tue, 21 Apr 2026 20:15:53 +0800
-Subject: [PATCH] =?UTF-8?q?feat(session):=20=E6=B7=BB=E5=8A=A0=E5=90=8CCla?=
- =?UTF-8?q?udeCode=E4=B8=80=E6=A0=B7=E7=9A=84git=E4=B8=8A=E4=B8=8B?=
- =?UTF-8?q?=E6=96=87=E5=A4=84=E7=90=86=E5=92=8C=E9=85=8D=E7=BD=AE=E9=80=89?=
- =?UTF-8?q?=E9=A1=B9=E9=80=BB=E8=BE=91?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+diff --git a/packages/opencode/src/effect/runtime-flags.ts b/packages/opencode/src/effect/runtime-flags.ts
+--- a/packages/opencode/src/effect/runtime-flags.ts
++++ b/packages/opencode/src/effect/runtime-flags.ts
+@@ -19,6 +19,8 @@
+   disableDefaultPlugins: bool("OPENCODE_DISABLE_DEFAULT_PLUGINS"),
+   disableEmbeddedWebUi: bool("OPENCODE_DISABLE_EMBEDDED_WEB_UI"),
+   disableExternalSkills: bool("OPENCODE_DISABLE_EXTERNAL_SKILLS"),
++  // 关闭 system prompt 中的详细 git 上下文注入，仅保留是否为 git 仓库的信息
++  disableGit: bool("OPENCODE_DISABLE_GIT"),
+   disableLspDownload: bool("OPENCODE_DISABLE_LSP_DOWNLOAD"),
+   disableClaudeCodePrompt: Config.all({
+     broad: bool("OPENCODE_DISABLE_CLAUDE_CODE"),
 
 
-diff --git a/packages/opencode/src/flag/flag.ts b/packages/opencode/src/flag/flag.ts
-index 72c8931f5b715f7e1431837308252dc177c764e0..d22bff94007f4df59a55e62c3251da3e0b52deab 100644
---- a/packages/opencode/src/flag/flag.ts
-+++ b/packages/opencode/src/flag/flag.ts
-@@ -49,6 +49,8 @@ export const Flag = {
-   OPENCODE_DISABLE_CLAUDE_CODE_SKILLS,
-   OPENCODE_DISABLE_EXTERNAL_SKILLS: OPENCODE_DISABLE_CLAUDE_CODE_SKILLS || truthy("OPENCODE_DISABLE_EXTERNAL_SKILLS"),
-   OPENCODE_FAKE_VCS: process.env["OPENCODE_FAKE_VCS"],
-+  // 关闭 system prompt 中的详细 git 上下文注入。
-+  OPENCODE_DISABLE_GIT: truthy("OPENCODE_DISABLE_GIT"),
-   OPENCODE_SERVER_PASSWORD: process.env["OPENCODE_SERVER_PASSWORD"],
-   OPENCODE_SERVER_USERNAME: process.env["OPENCODE_SERVER_USERNAME"],
-   OPENCODE_ENABLE_QUESTION_TOOL: truthy("OPENCODE_ENABLE_QUESTION_TOOL"),
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 431189d19cc032956325c0d55e7c8139619b26f6..0f25c9575b4899a7219f43d170dfe40134892c56 100644
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -1472,7 +1472,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
- 
-             const [skills, env, instructions, modelMsgs] = yield* Effect.all([
-               sys.skills(agent),
--              Effect.sync(() => sys.environment(model)),
-+              // environment 改为异步：需要在此处拉取 git 上下文。
-+              sys.environment(model),
-               instruction.system().pipe(Effect.orDie),
-               MessageV2.toModelMessagesEffect(msgs, model),
-             ])
 diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
-index ec60f6eef77f198e22f81af66bd5544d84e090a3..66cdf633998af9f75e13bb4533efb7c2229b406f 100644
 --- a/packages/opencode/src/session/system.ts
 +++ b/packages/opencode/src/session/system.ts
-@@ -15,6 +15,11 @@ import type { Provider } from "@/provider"
- import type { Agent } from "@/agent/agent"
- import { Permission } from "@/permission"
- import { Skill } from "@/skill"
+@@ -23,7 +23,12 @@
+ import { Reference } from "@opencode-ai/core/reference"
+ import { MCP } from "@/mcp"
+ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 +import { Git } from "@/git"
-+import { Flag } from "@/flag"
-+
++import { RuntimeFlags } from "@/effect/runtime-flags"
+ 
 +// 将 git 状态上下文限制在固定长度，避免提示词膨胀。
 +const MAX_STATUS_CHARS = 2000
- 
- export function provider(model: Provider.Model) {
-   if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
-@@ -33,7 +38,7 @@ export function provider(model: Provider.Model) {
- }
- 
- export interface Interface {
--  readonly environment: (model: Provider.Model) => string[]
-+  readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
-   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
- }
- 
-@@ -43,10 +48,69 @@ export const layer = Layer.effect(
-   Service,
-   Effect.gen(function* () {
-     const skill = yield* Skill.Service
-+    const git = yield* Git.Service
 +
+ export function provider(model: Provider.Model) {
+   if (model.api.id.includes("muse-spark")) return [PROMPT_META]
+   if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
+@@ -55,10 +60,77 @@
+     const skill = yield* Skill.Service
+     const mcp = yield* MCP.Service
+     const locations = yield* LocationServiceMap.Service
++    const git = yield* Git.Service
++    const flags = yield* RuntimeFlags.Service
+ 
 +    // 该缓存是会话级快照，按 cwd 作为键。
 +    // 为保持“快照语义”，会话内不主动失效。
 +    const gitContextCache = new Map<string, string>()
 +
++    // 采集 git 上下文（分支、状态、最近提交等），按 cwd 缓存，会话内不主动失效
 +    const getGitContext = Effect.fn("SystemPrompt.gitContext")(function* () {
-+      const cwd = Instance.directory
++      const ctx = yield* InstanceState.context
++      const cwd = ctx.directory
 +      const cached = gitContextCache.get(cwd)
 +      if (cached) return cached
 +
-+      const project = Instance.project
 +      // 允许关闭详细 git 上下文，但仍保留是否为 git 仓库的信息。
-+      if (Flag.OPENCODE_DISABLE_GIT) {
-+        const result = `Is directory a git repo: ${project.vcs === "git" ? "yes" : "no"}`
++      if (flags.disableGit) {
++        const result = `Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`
 +        gitContextCache.set(cwd, result)
 +        return result
 +      }
-+      if (project.vcs !== "git") {
++      // 检查是否为 git 仓库，非 git 仓库只返回基本信息
++      if (ctx.project.vcs !== "git") {
 +        const result = "Is directory a git repo: no"
 +        gitContextCache.set(cwd, result)
 +        return result
@@ -95,23 +64,27 @@ index ec60f6eef77f198e22f81af66bd5544d84e090a3..66cdf633998af9f75e13bb4533efb7c2
 +        git.branch(cwd),
 +        git.defaultBranch(cwd),
 +        git.run(["config", "user.name"], { cwd }).pipe(
-+          Effect.map(r => r.text().trim()),
-+          Effect.orElseSucceed(() => "")
++          Effect.map((r) => r.text().trim()),
++          Effect.orElseSucceed(() => ""),
 +        ),
 +        git.status(cwd).pipe(
-+          Effect.map(items => items.map(item => `${item.code} ${item.file}`).join("\n")),
-+          Effect.orElseSucceed(() => "")
++          Effect.map((items) => items.map((item) => `${item.code} ${item.file}`).join("\n")),
++          Effect.orElseSucceed(() => ""),
 +        ),
 +        git.run(["log", "--oneline", "-n", "5"], { cwd }).pipe(
-+          Effect.map(r => r.text().trim()),
-+          Effect.orElseSucceed(() => "")
-+        )
++          Effect.map((r) => r.text().trim()),
++          Effect.orElseSucceed(() => ""),
++        ),
 +      ], { concurrency: 5 })
 +
-+      const truncatedStatus = status.length > MAX_STATUS_CHARS
-+        ? status.substring(0, MAX_STATUS_CHARS) + "\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using BashTool)"
-+        : status
++      // git status 超过 2k 字符时截断，避免 system prompt 膨胀
++      const truncatedStatus =
++        status.length > MAX_STATUS_CHARS
++          ? status.substring(0, MAX_STATUS_CHARS) +
++            "\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using BashTool)"
++          : status
 +
++      // 组装 git 上下文多行文本，按字段逐行排列
 +      const lines = [
 +        `Is directory a git repo: yes`,
 +        `This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.`,
@@ -119,46 +92,38 @@ index ec60f6eef77f198e22f81af66bd5544d84e090a3..66cdf633998af9f75e13bb4533efb7c2
 +        `Main branch (you will usually use this for PRs): ${defaultBranch?.name ?? "unknown"}`,
 +        ...(userName ? [`Git user: ${userName}`] : []),
 +        `Status:\n${truncatedStatus || "(clean)"}`,
-+        `Recent commits:\n${log || "(no commits)"}`
++        `Recent commits:\n${log || "(no commits)"}`,
 +      ]
 +      const result = lines.join("\n")
 +      gitContextCache.set(cwd, result)
 +      return result
 +    })
- 
++
      return Service.of({
--      environment(model) {
--        const project = Instance.project
-+      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
+       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
+         const ctx = yield* InstanceState.context
 +        const gitContext = yield* getGitContext
-         return [
-           [
-             `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
-@@ -54,13 +118,14 @@ export const layer = Layer.effect(
+         const references = yield* Effect.gen(function* () {
+           return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
+         }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
+@@ -69,7 +141,8 @@
              `<env>`,
-             `  Working directory: ${Instance.directory}`,
-             `  Workspace root folder: ${Instance.worktree}`,
--            `  Is directory a git repo: ${project.vcs === "git" ? "yes" : "no"}`,
-+            // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致。
+             `  Working directory: ${ctx.directory}`,
+             `  Workspace root folder: ${ctx.worktree}`,
+-            `  Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`,
++            // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致
 +            ...gitContext.split("\n").map((line) => `  ${line}`),
              `  Platform: ${process.platform}`,
              `  Today's date: ${new Date().toDateString()}`,
              `</env>`,
-           ].join("\n"),
-         ]
--      },
-+      }),
- 
-       skills: Effect.fn("SystemPrompt.skills")(function* (agent: Agent.Info) {
-         if (Permission.disabled(["skill"], agent.permission).has("skill")) return
-@@ -79,6 +144,9 @@ export const layer = Layer.effect(
-   }),
- )
- 
--export const defaultLayer = layer.pipe(Layer.provide(Skill.defaultLayer))
-+export const defaultLayer = layer.pipe(
-+  Layer.provide(Skill.defaultLayer),
-+  Layer.provide(Git.defaultLayer)
-+)
+@@ -139,7 +212,8 @@
+ export const node = LayerNode.make({
+   service: Service,
+   layer: layer,
+-  deps: [Skill.node, MCP.node, locationServiceMapNode],
++  // 依赖 Git 服务采集 git 上下文，依赖 RuntimeFlags 读取 OPENCODE_DISABLE_GIT 开关
++  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node],
+ })
  
  export * as SystemPrompt from "./system"
+

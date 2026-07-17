@@ -1,35 +1,61 @@
-From 6c994e2db366fa0231cd37279657b9afbcbbf735 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Wed, 22 Apr 2026 02:20:16 +0800
-Subject: [PATCH] =?UTF-8?q?feat(signal):=20=E6=B7=BB=E5=8A=A0=E8=8A=82?=
- =?UTF-8?q?=E6=B5=81=E4=BF=A1=E5=8F=B7=E5=88=9B=E5=BB=BA=E5=87=BD=E6=95=B0?=
- =?UTF-8?q?=EF=BC=8C=E4=BC=98=E5=8C=96=E6=80=A7=E8=83=BD=E5=92=8C=E5=93=8D?=
- =?UTF-8?q?=E5=BA=94=E9=80=9F=E5=BA=A6=20feat(subagent-footer):=20?=
- =?UTF-8?q?=E6=9B=B4=E6=96=B0=E4=BD=BF=E7=94=A8=E6=83=85=E5=86=B5=E8=AE=A1?=
- =?UTF-8?q?=E7=AE=97=E9=80=BB=E8=BE=91=EF=BC=8C=E6=B7=BB=E5=8A=A0=E5=B7=A5?=
- =?UTF-8?q?=E5=85=B7=E8=BE=93=E5=87=BA=E5=AD=97=E7=AC=A6=E4=BC=B0=E7=AE=97?=
- =?UTF-8?q?=20feat(context):=20=E5=A2=9E=E5=BC=BA=E7=8A=B6=E6=80=81?=
- =?UTF-8?q?=E8=AE=A1=E7=AE=97=EF=BC=8C=E6=94=AF=E6=8C=81=E5=B7=A5=E5=85=B7?=
- =?UTF-8?q?=E8=BE=93=E5=87=BA=E5=AD=97=E7=AC=A6=E4=BC=B0=E7=AE=97?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+diff --git a/packages/tui/src/util/signal.ts b/packages/tui/src/util/signal.ts
+--- a/packages/tui/src/util/signal.ts
++++ b/packages/tui/src/util/signal.ts
+@@ -16,6 +16,39 @@
+   return [get, debounced]
+ }
+ 
++// 节流信号：首次更新立即触发，后续在节流窗口内最多再触发一次尾部更新
++export function createThrottledSignal<T>(value: T, ms: number): [Accessor<T>, (value: T) => void] {
++  const [get, set] = createSignal<T>(value)
++  let timer: ReturnType<typeof setTimeout> | undefined
++  let lastValue: T | undefined
++  let hasPending = false
++
++  const throttled = (next: T) => {
++    // 首次调用立即设置，并启动节流窗口
++    if (!timer) {
++      set(() => next)
++      timer = setTimeout(() => {
++        timer = undefined
++        // 尾部刷新：窗口内有新值则补发一次
++        if (hasPending) {
++          hasPending = false
++          set(() => lastValue as T)
++        }
++      }, ms)
++      return
++    }
++    // 窗口内的后续调用暂存，等待尾部刷新
++    lastValue = next
++    hasPending = true
++  }
++
++  onCleanup(() => {
++    if (timer) clearTimeout(timer)
++  })
++
++  return [get, throttled]
++}
++
+ export function createFadeIn(show: Accessor<boolean>, enabled: Accessor<boolean>) {
+   const [alpha, setAlpha] = createSignal(show() ? 1 : 0)
+   let revealed = show()
 
 
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index ccb660956938e73619e7b8501824aa85c7377373..5f5f0c506c78c81c6b6138cb2cfa0ddec70d3637 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -36,7 +36,7 @@ import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -47,7 +47,7 @@
  import { DialogAlert } from "../../ui/dialog-alert"
  import { useToast } from "../../ui/toast"
  import { useKV } from "../../context/kv"
 -import { createFadeIn } from "../../util/signal"
 +import { createFadeIn, createThrottledSignal } from "../../util/signal"
- import { useTextareaKeybindings } from "../textarea-keybindings"
  import { DialogSkill } from "../dialog-skill"
- import { DialogWorkspaceCreate, restoreWorkspaceSession } from "../dialog-workspace-create"
-@@ -156,18 +156,36 @@ export function Prompt(props: PromptProps) {
+ import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
+ import { useArgs } from "../../context/args"
+@@ -258,7 +258,9 @@
      return messages.findLast((m): m is UserMessage => m.role === "user")
    })
  
@@ -38,10 +64,12 @@ index ccb660956938e73619e7b8501824aa85c7377373..5f5f0c506c78c81c6b6138cb2cfa0dde
 +
 +  const usageRaw = createMemo((): UsageInfo | undefined => {
      if (!props.sessionID) return
+     const session = sync.session.get(props.sessionID)
      const msg = sync.data.message[props.sessionID] ?? []
-     const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
+@@ -267,12 +269,28 @@
      if (!last) return
  
+     // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
 -    const chars = (sync.data.part[last.id] ?? []).reduce((sum, part) => {
 +    const parts = sync.data.part[last.id] ?? []
 +    const chars = parts.reduce((sum, part) => {
@@ -51,10 +79,9 @@ index ccb660956938e73619e7b8501824aa85c7377373..5f5f0c506c78c81c6b6138cb2cfa0dde
      }, 0)
 -    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
 +
-+    // Estimate tokens from tool outputs that arrived after the last step-finish
-+    // (i.e. results gathered but not yet sent to the API in a new step).
-+    // Once the message is complete the API's input_tokens already includes them,
-+    // so we only do this during streaming to give live feedback on large writes.
++    // 流式输出时，估算最后一个 step-finish 之后的工具输出 token
++    // 消息完成后 API 的 input_tokens 已包含这些，仅在流式中补充以提供实时反馈
++    // 找到最后一个 step-finish part 的索引，之后的 completed tool parts 产出尚未计入的字符
 +    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
 +    const toolOutputChars = !last.time.completed
 +      ? parts.reduce((sum, part, i) => {
@@ -64,49 +91,53 @@ index ccb660956938e73619e7b8501824aa85c7377373..5f5f0c506c78c81c6b6138cb2cfa0dde
 +        }, 0)
 +      : 0
 +
++    // 输入 token = API 返回的 input/cache 之和 + 流式中工具输出字符估算
 +    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
 +    const input = inputBase + Math.round(toolOutputChars / 4)
      const outputActual = last.tokens.output + last.tokens.reasoning
      const outputEstimated = Math.round(chars / 4)
-     const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
-@@ -184,6 +202,9 @@ export function Prompt(props: PromptProps) {
+     // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
+@@ -290,6 +308,10 @@
+       cost: cost > 0 ? money.format(cost) : undefined,
      }
    })
- 
++
++  // 节流 usage 信号，避免流式输出时频繁刷新导致 UI 卡顿
 +  const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
 +  createEffect(() => setUsageThrottled(usageRaw()))
-+
+ 
    const [store, setStore] = createStore<{
      prompt: PromptInfo
-     mode: "normal" | "shell"
-diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-index 7fe0c458f309a2d94898a6ca88d2cd904f9d72f8..6f63658cbbe362ccfccb2b1046b9ad6580fe0656 100644
---- a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-@@ -1,6 +1,7 @@
+
+
+diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
+--- a/packages/tui/src/feature-plugins/sidebar/context.tsx
++++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
+@@ -1,7 +1,8 @@
  import type { AssistantMessage } from "@opencode-ai/sdk/v2"
- import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
+ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
+ import type { BuiltinTuiPlugin } from "../builtins"
 -import { createMemo } from "solid-js"
 +import { createEffect, createMemo, createSignal } from "solid-js"
-+import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
++import { createThrottledSignal } from "../../util/signal"
  
  const id = "internal:sidebar-context"
  
-@@ -14,7 +15,9 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
-   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
-   const cost = createMemo(() => msg().reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0))
+@@ -16,7 +17,9 @@
+   const session = createMemo(() => props.api.state.session.get(props.session_id))
+   const cost = createMemo(() => session()?.cost ?? 0)
  
 -  const state = createMemo(() => {
 +  type StateValue = { tokens: number; input: number; output: number; percent: number | null }
 +
 +  const stateRaw = createMemo((): StateValue => {
+     // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
      const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant")
      if (!last) {
-       return {
-@@ -25,12 +28,25 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
-       }
+@@ -29,12 +32,27 @@
      }
  
+     // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
 -    const chars = props.api.state.part(last.id).reduce((sum, part) => {
 +    const parts = props.api.state.part(last.id)
 +    const chars = parts.reduce((sum, part) => {
@@ -116,7 +147,8 @@ index 7fe0c458f309a2d94898a6ca88d2cd904f9d72f8..6f63658cbbe362ccfccb2b1046b9ad65
      }, 0)
 -    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
 +
-+    // Estimate tokens from tool outputs that arrived after the last step-finish.
++    // 流式输出时，估算最后一个 step-finish 之后的工具输出 token
++    // 找到最后一个 step-finish part 的索引，之后的 completed tool parts 产出尚未计入的字符
 +    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
 +    const toolOutputChars = !last.time.completed
 +      ? parts.reduce((sum, part, i) => {
@@ -126,41 +158,42 @@ index 7fe0c458f309a2d94898a6ca88d2cd904f9d72f8..6f63658cbbe362ccfccb2b1046b9ad65
 +        }, 0)
 +      : 0
 +
++    // 输入 token = API 返回的 input/cache 之和 + 流式中工具输出字符估算
 +    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
 +    const input = inputBase + Math.round(toolOutputChars / 4)
      const outputActual = last.tokens.output + last.tokens.reasoning
      const outputEstimated = Math.round(chars / 4)
-     const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
-@@ -44,6 +60,10 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
+     // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
+@@ -49,6 +67,10 @@
      }
    })
  
-+  const [state, setStateThrottled] = createSignal<StateValue>({ tokens: 0, input: 0, output: 0, percent: null })
-+  const triggerStateUpdate = leadingAndTrailing(throttle, (v: StateValue) => setStateThrottled(() => v), 50)
-+  createEffect(() => triggerStateUpdate(stateRaw()))
++  // 节流 state 信号，避免流式输出时频繁刷新导致 UI 卡顿
++  const [state, setStateThrottled] = createThrottledSignal<StateValue>({ tokens: 0, input: 0, output: 0, percent: null }, 50)
++  createEffect(() => setStateThrottled(stateRaw()))
 +
    return (
      <box>
        <text fg={theme().text}>
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-index fbb824fa8471f801713d0a0b1dca34b024edb6a2..ad3d945b866925674a20bbd6dedb7c0377d10dba 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-@@ -1,4 +1,4 @@
+
+
+diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
+--- a/packages/tui/src/routes/session/subagent-footer.tsx
++++ b/packages/tui/src/routes/session/subagent-footer.tsx
+@@ -1,10 +1,11 @@
 -import { createMemo, createSignal, Show } from "solid-js"
 +import { createEffect, createMemo, createSignal, Show } from "solid-js"
- import { useRouteData } from "@tui/context/route"
- import { useSync } from "@tui/context/sync"
- import { useTheme } from "@tui/context/theme"
-@@ -7,6 +7,7 @@ import type { AssistantMessage } from "@opencode-ai/sdk/v2"
- import { useCommandDialog } from "@tui/component/dialog-command"
- import { useKeybind } from "../../context/keybind"
- import { Locale } from "@/util"
+ import { useRouteData } from "../../context/route"
+ import { useSync } from "../../context/sync"
+ import { useTheme } from "../../context/theme"
+ import { SplitBorder } from "../../ui/border"
+ import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+ import { Locale } from "../../util/locale"
 +import { createThrottledSignal } from "../../util/signal"
  import { useTerminalDimensions } from "@opentui/solid"
+ import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
  
- export function SubagentFooter() {
-@@ -31,17 +32,32 @@ export function SubagentFooter() {
+@@ -30,19 +31,36 @@
      return { label, index: index + 1, total: siblings.length }
    })
  
@@ -169,9 +202,11 @@ index fbb824fa8471f801713d0a0b1dca34b024edb6a2..ad3d945b866925674a20bbd6dedb7c03
 +
 +  const usageRaw = createMemo((): UsageInfo | undefined => {
      const msg = messages()
+     // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
      const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
      if (!last) return
  
+     // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
 -    const chars = (sync.data.part[last.id] ?? []).reduce((sum, part) => {
 +    const parts = sync.data.part[last.id] ?? []
 +    const chars = parts.reduce((sum, part) => {
@@ -181,7 +216,8 @@ index fbb824fa8471f801713d0a0b1dca34b024edb6a2..ad3d945b866925674a20bbd6dedb7c03
      }, 0)
 -    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
 +
-+    // Estimate tokens from tool outputs that arrived after the last step-finish.
++    // 流式输出时，估算最后一个 step-finish 之后的工具输出 token
++    // 找到最后一个 step-finish part 的索引，之后的 completed tool parts 产出尚未计入的字符
 +    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
 +    const toolOutputChars = !last.time.completed
 +      ? parts.reduce((sum, part, i) => {
@@ -191,46 +227,22 @@ index fbb824fa8471f801713d0a0b1dca34b024edb6a2..ad3d945b866925674a20bbd6dedb7c03
 +        }, 0)
 +      : 0
 +
++    // 输入 token = API 返回的 input/cache 之和 + 流式中工具输出字符估算
 +    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
 +    const input = inputBase + Math.round(toolOutputChars / 4)
      const outputActual = last.tokens.output + last.tokens.reasoning
      const outputEstimated = Math.round(chars / 4)
-     const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
-@@ -64,6 +80,9 @@ export function SubagentFooter() {
+     // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
+@@ -67,6 +85,10 @@
      }
    })
  
++  // 节流 usage 信号，避免流式输出时频繁刷新导致 UI 卡顿
 +  const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
 +  createEffect(() => setUsageThrottled(usageRaw()))
 +
    const { theme } = useTheme()
-   const keybind = useKeybind()
-   const command = useCommandDialog()
-diff --git a/packages/opencode/src/cli/cmd/tui/util/signal.ts b/packages/opencode/src/cli/cmd/tui/util/signal.ts
-index 7d20ae04ba319dab3064423a0648e447103142a5..594f777ab20cf705a799a9ec64bfad36bd82cfbd 100644
---- a/packages/opencode/src/cli/cmd/tui/util/signal.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/signal.ts
-@@ -1,11 +1,22 @@
- import { createEffect, createSignal, on, onCleanup, type Accessor } from "solid-js"
--import { debounce, type Scheduled } from "@solid-primitives/scheduled"
-+import { debounce, leadingAndTrailing, throttle, type Scheduled } from "@solid-primitives/scheduled"
- 
- export function createDebouncedSignal<T>(value: T, ms: number): [Accessor<T>, Scheduled<[value: T]>] {
-   const [get, set] = createSignal(value)
-   return [get, debounce((v: T) => set(() => v), ms)]
- }
- 
-+/**
-+ * Creates a signal whose value is updated at most once every `ms` milliseconds.
-+ * Uses leading-and-trailing throttle so the first update is applied immediately
-+ * and a final update is always flushed after the throttle window closes.
-+ */
-+export function createThrottledSignal<T>(value: T, ms: number): [Accessor<T>, (v: T) => void] {
-+  const [get, set] = createSignal<T>(value)
-+  const trigger = leadingAndTrailing(throttle, (v: T) => set(() => v), ms)
-+  return [get, trigger]
-+}
-+
- export function createFadeIn(show: Accessor<boolean>, enabled: Accessor<boolean>) {
-   const [alpha, setAlpha] = createSignal(show() ? 1 : 0)
-   let revealed = show()
+   const keymap = useOpencodeKeymap()
+   const parentShortcut = useCommandShortcut("session.parent")
+
+
