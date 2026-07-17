@@ -1,0 +1,184 @@
+From 9878a7b146549fae03650cde566fbc4c530d8e0f Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 14 Jun 2026 11:28:05 +0800
+Subject: [PATCH] =?UTF-8?q?feat(playwright):=20=E6=9B=B4=E6=96=B0=20Playwr?=
+ =?UTF-8?q?ight=20=E4=BE=9D=E8=B5=96=E8=87=B3=201.60.0=EF=BC=8C=E5=B9=B6?=
+ =?UTF-8?q?=E6=B7=BB=E5=8A=A0=20E2E=20=E6=B5=8B=E8=AF=95=E4=BB=A5=E9=AA=8C?=
+ =?UTF-8?q?=E8=AF=81=E5=AE=89=E8=A3=85=E6=B5=81=E7=A8=8B?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index 651aaae56681426cfb21277039fffd8411e376c9..2df6b36782ff7727c378efff77222f4b01ab3216 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -487,12 +487,16 @@ jobs:
+       - name: Install Playwright system dependencies
+         if: runner.os == 'Linux'
+         working-directory: packages/app
+-        run: bunx playwright install-deps chromium
++        # setup-bun 使用 hoisted 安装，显式走根 node_modules 的锁定版本，避免 bunx 重新解析到未修复的安装器。
++        timeout-minutes: 10
++        run: bun ../../node_modules/.bin/playwright install-deps chromium
+ 
+       - name: Install Playwright browsers
+         if: steps.playwright-cache.outputs.cache-hit != 'true'
+         working-directory: packages/app
+-        run: bunx playwright install chromium
++        # 浏览器下载和解压发生在 E2E 测试前，独立超时可以防止 install 卡住占满整个 warning job。
++        timeout-minutes: 15
++        run: bun ../../node_modules/.bin/playwright install chromium
+ 
+       - name: Run upstream app e2e tests
+         id: e2e
+diff --git a/.temp/chatgpt-browser-agent b/.temp/chatgpt-browser-agent
+index ab5cd74bd13d2cda881975c4d72fd41fef3455e6..e0300d03831389e07a8dceaf0edb96782e403279 160000
+--- a/.temp/chatgpt-browser-agent
++++ b/.temp/chatgpt-browser-agent
+@@ -1 +1 @@
+-Subproject commit ab5cd74bd13d2cda881975c4d72fd41fef3455e6
++Subproject commit e0300d03831389e07a8dceaf0edb96782e403279
+diff --git a/bun.lock b/bun.lock
+index a3e8239e7951684d382955d5be463499baea9167..b97508f3b1c700a64086a4ee6790c81be6dd6813 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -729,7 +729,7 @@
+     "@opentui/keymap": "0.2.11",
+     "@opentui/solid": "0.2.11",
+     "@pierre/diffs": "1.1.0-beta.18",
+-    "@playwright/test": "1.59.1",
++    "@playwright/test": "1.60.0",
+     "@sentry/solid": "10.36.0",
+     "@sentry/vite-plugin": "4.6.0",
+     "@solid-primitives/storage": "4.3.3",
+@@ -1800,7 +1800,7 @@
+ 
+     "@planetscale/database": ["@planetscale/database@1.19.0", "https://registry.npmmirror.com/@planetscale/database/-/database-1.19.0.tgz", {}, "sha512-Tv4jcFUFAFjOWrGSio49H6R2ijALv0ZzVBfJKIdm+kl9X046Fh4LLawrF9OMsglVbK6ukqMJsUCeucGAFTBcMA=="],
+ 
+-    "@playwright/test": ["@playwright/test@1.59.1", "https://registry.npmmirror.com/@playwright/test/-/test-1.59.1.tgz", { "dependencies": { "playwright": "1.59.1" }, "bin": { "playwright": "cli.js" } }, "sha512-PG6q63nQg5c9rIi4/Z5lR5IVF7yU5MqmKaPOe0HSc0O2cX1fPi96sUQu5j7eo4gKCkB2AnNGoWt7y4/Xx3Kcqg=="],
++    "@playwright/test": ["@playwright/test@1.60.0", "https://registry.npmmirror.com/@playwright/test/-/test-1.60.0.tgz", { "dependencies": { "playwright": "1.60.0" }, "bin": { "playwright": "cli.js" } }, "sha512-O71yZIbAh/PxDMNGns37GHBIfrVkEVyn+AXyIa5dOTfb4/xNvRWV+Vv/NMbNCtODB/pO7vLlF2OTmMVLhmr7Ag=="],
+ 
+     "@poppinss/colors": ["@poppinss/colors@4.1.6", "https://registry.npmmirror.com/@poppinss/colors/-/colors-4.1.6.tgz", { "dependencies": { "kleur": "^4.1.5" } }, "sha512-H9xkIdFswbS8n1d6vmRd8+c10t2Qe+rZITbbDHHkQixH5+2x1FDGmi/0K+WgWiqQFKPSlIYB7jlH6Kpfn6Fleg=="],
+ 
+@@ -4192,9 +4192,9 @@
+ 
+     "pkg-up": ["pkg-up@3.1.0", "https://registry.npmmirror.com/pkg-up/-/pkg-up-3.1.0.tgz", { "dependencies": { "find-up": "^3.0.0" } }, "sha512-nDywThFk1i4BQK4twPQ6TA4RT8bDY96yeuCVBWL3ePARCiEKDRSrNGbFIgUJpLp+XeIR65v8ra7WuJOFUBtkMA=="],
+ 
+-    "playwright": ["playwright@1.59.1", "https://registry.npmmirror.com/playwright/-/playwright-1.59.1.tgz", { "dependencies": { "playwright-core": "1.59.1" }, "optionalDependencies": { "fsevents": "2.3.2" }, "bin": { "playwright": "cli.js" } }, "sha512-C8oWjPR3F81yljW9o5OxcWzfh6avkVwDD2VYdwIGqTkl+OGFISgypqzfu7dOe4QNLL2aqcWBmI3PMtLIK233lw=="],
++    "playwright": ["playwright@1.60.0", "https://registry.npmmirror.com/playwright/-/playwright-1.60.0.tgz", { "dependencies": { "playwright-core": "1.60.0" }, "optionalDependencies": { "fsevents": "2.3.2" }, "bin": { "playwright": "cli.js" } }, "sha512-hheHdokM8cdqCb0lcE3s+zT4t4W+vvjpGxsZlDnikarzx8tSzMebh3UiFtgqwFwnTnjYQcsyMF8ei2mCO/tpeA=="],
+ 
+-    "playwright-core": ["playwright-core@1.59.1", "https://registry.npmmirror.com/playwright-core/-/playwright-core-1.59.1.tgz", { "bin": { "playwright-core": "cli.js" } }, "sha512-HBV/RJg81z5BiiZ9yPzIiClYV/QMsDCKUyogwH9p3MCP6IYjUFu/MActgYAvK0oWyV9NlwM3GLBjADyWgydVyg=="],
++    "playwright-core": ["playwright-core@1.60.0", "https://registry.npmmirror.com/playwright-core/-/playwright-core-1.60.0.tgz", { "bin": { "playwright-core": "cli.js" } }, "sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu+4qtD36qKc/Hn56StUW57IA=="],
+ 
+     "plist": ["plist@3.1.0", "https://registry.npmmirror.com/plist/-/plist-3.1.0.tgz", { "dependencies": { "@xmldom/xmldom": "^0.8.8", "base64-js": "^1.5.1", "xmlbuilder": "^15.1.1" } }, "sha512-uysumyrvkUX0rX/dEVqt8gC3sTBzd4zoWfLeS29nb53imdaXVvLINYXTI2GNqzaMuvacNx4uJQ8+b3zXR0pkgQ=="],
+ 
+diff --git a/package.json b/package.json
+index 6b1a045171a8fb8c1c3ad7c5a4f81d85f600bd5e..74d126ace0451e1a1beffec7794ea89a8c540422 100644
+--- a/package.json
++++ b/package.json
+@@ -65,7 +65,7 @@
+       "marked": "17.0.1",
+       "marked-shiki": "1.2.1",
+       "remend": "1.3.0",
+-      "@playwright/test": "1.59.1",
++      "@playwright/test": "1.60.0",
+       "semver": "7.7.4",
+       "typescript": "5.8.2",
+       "@typescript/native-preview": "7.0.0-dev.20251207.1",
+diff --git a/packages/opencode/test/ci/upstream-e2e-workflow.test.ts b/packages/opencode/test/ci/upstream-e2e-workflow.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..bafcc7a8d3e71fa198d364702446dbc26cdde1e7
+--- /dev/null
++++ b/packages/opencode/test/ci/upstream-e2e-workflow.test.ts
+@@ -0,0 +1,89 @@
++import { describe, expect, test } from "bun:test"
++import fs from "fs/promises"
++import path from "path"
++
++const root = path.resolve(import.meta.dir, "../../../..")
++
++describe("upstream app e2e workflow", () => {
++  test("installs browsers with the locked workspace Playwright and bounded setup time", async () => {
++    const workflow = await fs.readFile(path.join(root, ".github/workflows/test.yml"), "utf8")
++    const job = section(workflow, "  upstream-e2e-warning:")
++    const installDeps = step(job, "Install Playwright system dependencies")
++    const installBrowsers = step(job, "Install Playwright browsers")
++    const catalog = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8")).workspaces.catalog
++    const playwrightVersion = catalog["@playwright/test"]
++    const lockfile = await fs.readFile(path.join(root, "bun.lock"), "utf8")
++
++    // Node 24.16+ 会让 Playwright 1.60.0 之前的浏览器解压停在 100%，
++    // 所以上游 E2E 的公开契约是使用已包含修复的 workspace 版本。
++    expect(atLeast(playwrightVersion, "1.60.0")).toBe(true)
++    // catalog 和 lockfile 必须同步，否则 workflow 读到的是新版本，实际安装仍可能是旧安装器。
++    expect(lockfile).toContain(`"@playwright/test": "${playwrightVersion}"`)
++    expect(lockfile).toContain(`"@playwright/test@${playwrightVersion}"`)
++    expect(lockfile).toContain(`"playwright@${playwrightVersion}"`)
++    expect(lockfile).toContain(`"playwright-core@${playwrightVersion}"`)
++
++    // Linux 系统依赖和浏览器安装都发生在测试步骤之前，必须各自有边界，
++    // 否则一个下载或解压卡住会吞掉整个 warning job 的超时时间。
++    expect(field(installDeps, "timeout-minutes")).toBe("10")
++    expect(field(installBrowsers, "timeout-minutes")).toBe("15")
++
++    expect(playwrightCommand(installDeps)).toEqual([
++      "bun",
++      "../../node_modules/.bin/playwright",
++      "install-deps",
++      "chromium",
++    ])
++    expect(playwrightCommand(installBrowsers)).toEqual([
++      "bun",
++      "../../node_modules/.bin/playwright",
++      "install",
++      "chromium",
++    ])
++
++    // 安装命令必须停留在 packages/app 的依赖边界内，并显式使用 hoisted 后的根 bin，
++    // 避免 bunx 重新解析版本，也避免管道、重定向、子命令等 shell 组合改变 CI 安全边界。
++    expect(field(installDeps, "working-directory")).toBe("packages/app")
++    expect(field(installBrowsers, "working-directory")).toBe("packages/app")
++    expect(job).not.toContain("bunx playwright")
++  })
++})
++
++function section(source: string, marker: string) {
++  const start = source.indexOf(marker)
++  expect(start).toBeGreaterThanOrEqual(0)
++  const rest = source.slice(start + marker.length)
++  const next = rest.search(/\n  [A-Za-z0-9_-]+:/)
++  return marker + (next === -1 ? rest : rest.slice(0, next))
++}
++
++function step(source: string, name: string) {
++  const marker = `      - name: ${name}`
++  const start = source.indexOf(marker)
++  expect(start).toBeGreaterThanOrEqual(0)
++  const rest = source.slice(start + marker.length)
++  const next = rest.indexOf("\n      - name:")
++  return marker + (next === -1 ? rest : rest.slice(0, next))
++}
++
++function field(source: string, key: string) {
++  const match = source.match(new RegExp(`^        ${key}: (.+)$`, "m"))
++  return match?.[1]
++}
++
++function playwrightCommand(source: string) {
++  const command = field(source, "run")
++  expect(command).toBeTruthy()
++  expect(/[|;&><`$]/.test(command!)).toBe(false)
++  return command!.split(" ")
++}
++
++function atLeast(actual: string, minimum: string) {
++  const actualParts = actual.split(".").map(Number)
++  const minimumParts = minimum.split(".").map(Number)
++  // 只比较主版本号段即可覆盖 Playwright 的固定版本约束，同时避免引入新的 semver 依赖。
++  const comparison = Array.from({ length: Math.max(actualParts.length, minimumParts.length) }, (_, index) =>
++    Math.sign((actualParts[index] ?? 0) - (minimumParts[index] ?? 0)),
++  ).find((value) => value !== 0)
++  return (comparison ?? 0) >= 0
++}

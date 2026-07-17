@@ -1,0 +1,25 @@
+From cc27cbda710865d8e6d9a94d1e62f94980957172 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 6 Jul 2026 18:04:43 +0800
+Subject: [PATCH] =?UTF-8?q?fix(system):=20=E6=9B=B4=E6=96=B0=E5=B7=A5?=
+ =?UTF-8?q?=E5=85=B7=E4=BD=BF=E7=94=A8=E9=83=A8=E5=88=86=EF=BC=8C=E6=98=8E?=
+ =?UTF-8?q?=E7=A1=AE=20bash=20=E6=93=8D=E4=BD=9C=E5=90=8E=E5=BA=94?=
+ =?UTF-8?q?=E5=88=87=E6=8D=A2=E5=9B=9E=E4=B8=93=E7=94=A8=E5=B7=A5=E5=85=B7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
+index 19eaf154c94d7644b7ab0c39c1378bedffaeb431..793cadfb439efa34c37743f55a19eb12071120d2 100644
+--- a/packages/opencode/src/session/system.ts
++++ b/packages/opencode/src/session/system.ts
+@@ -74,7 +74,7 @@ export function toolUsageSection(registeredTools: string[]) {
+   }
+ 
+   items.push(
+-    ` - Reserve bash for system commands and terminal operations requiring shell execution`,
++    ` - Reserve bash for system commands and terminal operations requiring shell execution. After a bash operation (e.g. git, build), switch back to dedicated tools (read, grep, glob) for all subsequent file operations — do not chain grep, sed, cat, head, or tail inside bash when a dedicated tool can perform the same operation.`,
+     ``,
+     `THINK FIRST before using tools. Before your first tool call, decide the FULL first batch of independent reads, searches, globs, directory listings, and status checks you already know you need.`,
+     `BATCH independent tool calls in the SAME response so they can run in parallel. Do not issue only one discovery call when several independent discovery calls are already obvious.`,

@@ -1,0 +1,3873 @@
+From 7bd1e1560289027a0eeab32886b94634d1f39ee2 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sat, 11 Jul 2026 04:29:06 +0800
+Subject: [PATCH] =?UTF-8?q?feat(goal):=20=E5=A2=9E=E5=8A=A0=20continueOnEr?=
+ =?UTF-8?q?ror=20=E7=AD=96=E7=95=A5=E6=8E=A7=E5=88=B6=E7=BB=88=E6=AD=A2?=
+ =?UTF-8?q?=E9=94=99=E8=AF=AF=E5=90=8E=E7=9A=84=20GOAL=20=E7=BB=AD?=
+ =?UTF-8?q?=E8=B7=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+为持久化 Session GOAL 增加默认关闭的 continueOnError 字段，允许用户在
+Manage Goal 菜单中通过 ✓/○ 勾选项控制 eligible 终止错误（APIError、
+UnknownError）后是否自动创建新的 GOAL continuation。错误内容不注入
+continuation prompt，SessionRetry 不变，正常续跑行为不回归。
+
+prompt loop 使用显式 terminal-error outcome 和一次性 assistantID marker
+隔离错误路径与 structured-output/compaction 退出。续跑复用现有 goalTurns、
+goal_max_turns 和全部安全 guard。迁移保证旧行升级为 false。
+
+diff --git a/docs/goal-error-continuation-control-plan.md b/docs/goal-error-continuation-control-plan.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..56ffd8c187d8be8cdafff2979445c046153dbd5f
+--- /dev/null
++++ b/docs/goal-error-continuation-control-plan.md
+@@ -0,0 +1,587 @@
++# GOAL 错误后续跑控制设计
++
++## 1. 目标
++
++为持久化 Session GOAL 增加一个由用户控制的策略：当一次模型调用以可识别的终止错误结束时，用户可以决定当前 active GOAL 是否自动创建下一次 continuation。
++
++该策略必须满足以下目标：
++
++- 默认保持当前行为，错误发生后停止，不自动续跑。
++- 用户可以在现有 `Manage Goal` 对话框中以勾选项开启或关闭。
++- 配置属于单个 Session GOAL，并跨 TUI 重连、daemon 重启和进程重启持久化。
++- 不改变同一次 provider 请求内部的既有重试机制。
++- 不把 provider 错误内容重新注入模型上下文。
++- 错误续跑与正常 GOAL 续跑共享现有次数上限和安全约束。
++- 修改集中在既有模块中，不新增手写业务模块，不引入第二套状态机。
++
++本文档是本需求唯一的设计与实施依据，不再创建补充设计、解释性修订或独立审计文档。
++
++## 2. 调研范围与依据
++
++### 2.1 已阅读的实现
++
++本设计基于以下现有实现建立：
++
++- `packages/opencode/src/session/prompt.ts`
++  - prompt loop、processor outcome、GOAL continuation、`goalTurns`、`goal_max_turns`、compaction 和退出路径。
++- `packages/opencode/src/session/processor.ts`
++  - provider stream、错误重试、终止错误持久化和 `stop` 返回。
++- `packages/opencode/src/session/retry.ts`
++  - 同一次 provider 请求内部的 retry 分类和退避策略。
++- `packages/opencode/src/session/message-v2.ts`
++  - provider error 转换、assistant error schema，以及 errored assistant 从后续 model messages 中排除的行为。
++- `packages/opencode/src/provider/error.ts`
++  - structured stream error 和 API error 分类。
++- `packages/opencode/src/session/goal.ts`
++  - GOAL domain interface、状态、持久化映射、usage 和 continuation prompt。
++- `packages/opencode/src/session/goal.sql.ts`
++  - `session_goal` 表及 session 级唯一约束。
++- `packages/opencode/src/config/config.ts`
++  - 顶层 `goal_max_turns` 配置。
++- `packages/opencode/src/tool/goal.ts`
++  - 模型可执行的 GOAL 读取和 `complete/blocked` 更新范围。
++- `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts`
++  - GOAL HTTP contract 和 OpenAPI schema。
++- `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts`
++  - GOAL payload 到 domain service 的显式映射。
++- `packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx`
++  - `Manage Goal` 菜单和 GOAL HTTP 调用。
++- `packages/opencode/src/cli/cmd/tui/component/dialog-tool.tsx`
++  - `✓ Enabled`、`○ Disabled`、保存状态和防重复点击交互。
++- `packages/opencode/src/cli/cmd/tui/context/sync.tsx`
++  - GOAL 初始同步、SSE 更新和 TUI store 类型。
++- `packages/opencode/src/cli/cmd/tui/app.tsx`
++  - `/goal` 和 `/tools` 命令入口。
++- `packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/goal.tsx`
++  - sidebar GOAL 状态展示。
++- `packages/opencode/src/cli/cmd/tui/routes/session/footer.tsx`
++  - footer active/blocked 状态展示。
++- `packages/sdk/js/script/build.ts`
++  - OpenAPI 和 JavaScript SDK 生成链。
++- `packages/opencode/migration/20260704053848_session_goal/migration.sql`
++  - GOAL 初始数据库迁移。
++
++### 2.2 已阅读的测试
++
++- `packages/opencode/test/session/goal.test.ts`
++- `packages/opencode/test/session/prompt.test.ts`
++- `packages/opencode/test/session/processor-effect.test.ts`
++- `packages/opencode/test/session/retry.test.ts`
++- `packages/opencode/test/server/httpapi-goal.test.ts`
++- `packages/opencode/test/storage/workspace-time-migration.test.ts`
++- `packages/opencode/test/storage/json-migration.test.ts`
++
++这些测试确认了 domain service、prompt/processor 集成、provider retry、HTTP contract、数据库迁移和 Effect 测试的现有组织方式。
++
++### 2.3 数据库证据
++
++对 `/Users/sunbenteng/Project/opencode/.temp/testing/opencode.db` 的只读查询发现 10 条 `cyber_policy` 错误。其共同特征是：
++
++- `request_usage.status = "error"`。
++- `request_usage_assistant.status = "error"`。
++- assistant error 落为 `UnknownError`。
++- assistant 没有 `finish`。
++- 错误不属于 tool part error。
++- 相关 session 没有由错误触发的 `source="system_continue"` 消息。
++- 错误后的后续调用由新的真实 user message 发起。
++
++这些记录发生在 GOAL 功能加入之前，因此只用于确认错误形态和终止行为。当前代码调用链用于确认该错误形态在现有 GOAL 中同样会终止 prompt loop。
++
++## 3. 当前行为
++
++当前错误终止链如下：
++
++1. provider 返回错误或 stream 抛出错误。
++2. `SessionRetry` 先处理被判定为 retryable 的错误。
++3. retry 未发生、不能发生或最终仍失败时，`SessionProcessor.halt()` 写入 `assistant.error`。
++4. `SessionProcessor.process()` 返回 `"stop"`。
++5. `SessionPrompt.runLoop()` 将该结果收敛为 `"break"` 并退出。
++6. 正常 GOAL continuation 要求 assistant 存在 `finish` 且没有 `error`，因此错误 assistant 不会触发 continuation。
++
++当前系统存在两层不同机制：
++
++- `SessionRetry` 负责同一次 provider 请求内部的瞬时重试。
++- GOAL continuation 负责一个 assistant turn 结束后创建新的 synthetic user turn。
++
++本需求只扩展 GOAL continuation，不修改 `SessionRetry`。
++
++## 4. 设计原则
++
++### 4.1 策略归属
++
++错误后续跑策略属于单个持久化 GOAL，而不是全局配置、TUI 本地偏好或 provider retry 配置。
++
++原因如下：
++
++- 只有 active GOAL 使用该策略。
++- 不同 session 的成本和风险不同。
++- 用户在 `/goal` 中管理该策略符合现有交互模型。
++- daemon 必须在没有 TUI 本地状态参与时作出续跑决策。
++- GOAL 已经是 objective、status、budget 和 usage 的持久化所有者。
++
++### 4.2 默认兼容
++
++新增字段默认值必须为 `false`。旧数据库行迁移后得到 `false`，旧客户端省略字段时保持已有值，升级后所有现有 GOAL 的行为不变。
++
++### 4.3 单一续跑入口
++
++正常完成和错误终止最终都使用现有 GOAL continuation 注入入口。错误路径只负责证明此次重新进入 loop 的来源，不创建第二套 prompt、计数器或 continuation 实现。
++
++### 4.4 不传播错误内容
++
++错误内容不进入 GOAL continuation prompt。实现不读取、截断、转义或重放 `error.data.message`，也不增加 `<previous-error>` 等 prompt 字段。
++
++该决定保持 `SessionGoal.continuationPrompt(goal)` 的现有 interface 和文本不变，避免新增外部错误数据注入面。
++
++## 5. 数据模型
++
++### 5.1 Domain 字段
++
++`SessionGoal.Goal` 增加：
++
++```ts
++continueOnError: boolean
++```
++
++`SessionGoal.SetInput` 增加：
++
++```ts
++continueOnError?: boolean
++```
++
++字段语义：
++
++- `false`：eligible terminal error 后退出 prompt loop。
++- `true`：eligible terminal error 后允许 GOAL continuation 决策。
++- 更新时省略：保留数据库中的现有值。
++
++模型的 `goal` tool 不增加该字段。模型仍只能读取 GOAL，或将其标记为 `complete/blocked`。开启和关闭策略只能由用户或显式 HTTP 调用完成。
++
++### 5.2 数据库字段
++
++`SessionGoalTable` 增加 SQLite boolean：
++
++```ts
++continue_on_error: integer({ mode: "boolean" }).notNull().default(false)
++```
++
++迁移应由 Drizzle 生成，语义等价于：
++
++```sql
++ALTER TABLE `session_goal`
++ADD `continue_on_error` integer DEFAULT false NOT NULL;
++```
++
++domain 映射要求：
++
++- `fromRow()` 返回 `continueOnError`。
++- 新建 GOAL 使用 `input.continueOnError ?? false`。
++- 更新已有 GOAL 时，只在 input 提供字段时写入。
++- objective、status、budget 和 usage 的局部更新不得重置该字段。
++
++## 6. HTTP 与同步契约
++
++`GoalSetPayload` 增加可选 boolean：
++
++```ts
++continueOnError?: boolean
++```
++
++HTTP handler 将其显式传递给 `SessionGoal.set()`。GET、POST response 和 `session.goal.updated` event 通过 `SessionGoal.Goal` schema 返回该字段。
++
++以下行为必须保持：
++
++- 非 boolean 值由 schema 拒绝。
++- missing session 仍返回 404。
++- domain `GoalError` 的 wire body 保持不变。
++- 旧客户端省略字段时不重置策略。
++- DELETE GOAL 和删除 session 的级联清理行为不变。
++
++TUI sync store 的 Goal 类型必须显式包含 `continueOnError`。不能在 dialog 中使用 `as any`、重复 shadow state 或未持久化的本地 override 绕过类型链。
++
++成功 POST 的 response body 是本次切换的权威结果。`sync.tsx` 应在现有 sync context 中提供一个仅用于接收完整 Goal response 的 reconcile 操作，由其内部 `setStore` 更新对应 `session_goal`；dialog 不直接持有 store setter，也不创建第二份策略状态。SSE 继续负责其他客户端和后续事件同步，但当前 dialog 不等待 SSE 才显示成功结果。
++
++## 7. Prompt Loop 控制流
++
++### 7.1 显式 outcome
++
++当前局部 `"break"` 同时表示 provider error、structured output、compaction stop 和其他退出路径，不能直接作为错误续跑依据。
++
++内层 prompt processing outcome 应局部收敛为：
++
++```ts
++"continue" | "break" | "terminal-error"
++```
++
++分类规则：
++
++- `handle.process()` 返回 `"stop"`，且当前 assistant error 属于 eligible allowlist 时，返回 `"terminal-error"`。
++- structured output 成功或失败仍返回 `"break"`。
++- preflight compaction 和 overflow compaction 的 stop 仍返回 `"break"`。
++- abort、auth、context overflow、output length 和其他非 eligible error 仍返回 `"break"`。
++- tool continuation 和正常未完成步骤仍返回 `"continue"`。
++
++eligible error allowlist 第一版固定为：
++
++```text
++APIError
++UnknownError
++```
++
++选择 `UnknownError` 是因为数据库中真实的 `cyber_policy` 错误当前落为该类型。它也可能包含本地未分类错误，因此必须同时受用户 opt-in 和现有 GOAL 上限约束。
++
++实现只定义一个未导出的精确 predicate，并在产生 `"terminal-error"` 和消费 marker 两处复用：
++
++```ts
++MessageV2.APIError.isInstance(error) || NamedError.Unknown.isInstance(error)
++```
++
++不得通过 error truthiness、错误消息文本、HTTP status 范围或排除式判断代替该 allowlist。
++
++明确排除：
++
++```text
++MessageAbortedError
++ContextOverflowError
++ProviderAuthError
++StructuredOutputError
++MessageOutputLengthError
++```
++
++### 7.2 一次性来源标记
++
++当 outcome 为 `"terminal-error"` 时：
++
++1. 读取当前持久化 GOAL。
++2. GOAL 不存在、非 active 或 `continueOnError=false` 时，直接退出。
++3. 条件满足时，设置一次性 marker 并重新进入 while loop。
++
++marker 只保存：
++
++```ts
++{
++  assistantID: string
++}
++```
++
++marker 不保存 error object、error name 或 error message。
++
++下一次 iteration 开头将共享 marker 复制到 iteration-local 常量，并立即清空共享值。只有 marker 的 `assistantID` 与 latest assistant ID 匹配，且 latest assistant error 再次通过同一个精确 allowlist predicate 时，才允许该无 `finish` 的 errored assistant 进入 GOAL continuation 决策。
++
++该不变量确保：
++
++- 历史 error 不会在新的 runLoop 中触发续跑。
++- structured output 和 compaction break 不会触发续跑。
++- marker 在资格检查失败后不会残留。
++- maxSteps 和 maxGoalTurns 退出后不会恢复旧 marker。
++- errored assistant 仍然不会作为 assistant content 进入 model messages。
++
++### 7.3 统一 continuation 决策
++
++现有 continuation block 接受两种来源：
++
++- 现有的正常完成 assistant。
++- 与一次性 marker 匹配的 eligible terminal error assistant。
++
++两种来源共同执行以下检查：
++
++- `goal_max_turns > 0`。
++- 主 session，无 `parentID`。
++- `goalTurns < goal_max_turns`。
++- GOAL 存在且为 active。
++- agent 存在。
++- agent 不是 decide agent。
++- `step < agent.steps`，未配置时为 Infinity。
++
++通过后执行现有逻辑：
++
++- `goalTurns++`。
++- 注入 `source="system_continue"` 的 synthetic user message。
++- prompt 内容继续使用未经修改的 `SessionGoal.continuationPrompt(goal)`。
++- 进入下一次 loop iteration。
++
++达到 `goal_max_turns` 时，继续按现状将 active GOAL 改为 paused。
++
++达到 agent `maxSteps` 时，继续保持现有行为：本次 loop 退出，但 GOAL 仍为 active。不得只为错误续跑改变该状态语义。
++
++## 8. GUI 设计
++
++现有 `DialogGoalMenu` 增加一个原地切换选项：
++
++```text
++✓ Continue after errors    Enabled
++```
++
++关闭时显示：
++
++```text
++○ Continue after errors    Disabled
++```
++
++交互复用 `DialogTool` 的既有模式：
++
++- enabled 使用 success 色和 `✓`。
++- disabled 使用 muted 色和 `○`。
++- 保存中显示 `⋯ Saving`。
++- loading 期间阻止重复切换。
++- 点击或选择该行切换当前值。
++- HTTP 成功后该菜单保持打开。
++- Edit、Pause、Resume 和 Clear 继续按现状关闭菜单。
++- HTTP 失败显示 toast，并清理 loading。
++- 不做 optimistic update。
++- HTTP 成功后解析完整 Goal response，先通过 sync context reconcile 到 `session_goal` store，再结束 loading。
++- SSE 继续作为跨客户端和后续变更同步来源，但不是本次点击解除 loading 的前置条件。
++
++现有 `useGoalApi.setGoal()` 成功后会无条件关闭 dialog。实现应让该 helper 返回解析后的 Goal，并增加一个最小的 close policy；toggle 调用方把 response 交给 sync context reconcile 后保持菜单打开。Edit、Pause、Resume 和 Clear 保留既有关闭语义，不复制 fetch、directory routing 和错误处理逻辑。
++
++GUI 文案使用 `Continue after errors`，不使用 `Retry provider request`。该行为创建新的 GOAL continuation turn，并不是重放同一个 provider HTTP 请求。
++
++## 9. 必须保持的既有行为
++
++- 新字段默认 false。
++- 正常成功结束继续自动 continuation。
++- `goal_max_turns=0` 完全禁止 continuation。
++- 达到 `goal_max_turns` 后 active GOAL 自动 paused。
++- 达到 agent `maxSteps` 后 GOAL 保持 active。
++- 子 session 不自动 continuation。
++- decide agent 不自动 continuation。
++- paused、blocked 和 complete GOAL 不 continuation。
++- 用户 Abort 不自动恢复。
++- context overflow 继续交给 compaction。
++- retryable provider error 继续先由 `SessionRetry` 处理。
++- 模型不能修改 `continueOnError`。
++- objective、usage、budget、goal ID 和创建时间在局部更新中保持。
++- session 删除继续级联删除 GOAL。
++- 正常和错误 continuation 共用同一个 `goalTurns`。
++- continuation prompt 文本和 interface 保持不变。
++
++## 10. 并发、退出与清理
++
++该设计维持现有 GOAL continuation 的 best-effort 并发语义：
++
++- Pause 或 Clear 在 continuation 决策读取之前提交，本次 injection 被抑制。
++- Pause 或 Clear 在读取之后提交，可能仍多写入一个 synthetic continuation message。
++- 不宣称 GOAL 读取和 synthetic message injection 是原子操作。
++- 本次不增加 CAS、revision、continuation claim 或 dispatch 前版本检查。
++
++一次性 marker 属于单个 `runLoop` 的局部状态：
++
++- loop 退出后自然释放。
++- 新 runLoop 不继承。
++- 不需要数据库字段或显式 finalizer。
++- marker 在 iteration 开头消费，避免资格失败后残留。
++
++若未来要求“Pause 提交后绝不再启动 provider”，应作为独立需求设计原子 claim 或 dispatch 前二次校验，不在本次改动中叠加。
++
++## 11. Usage 与预算边界
++
++当前 prompt loop 在 processor 返回 `stop` 后先退出，再执行正常 GOAL usage accounting。因此终止错误请求可能不会累加到 `tokensUsed`。
++
++本次保持该既有行为，不移动 accounting，不引入 assistant 去重或失败 usage 补记，以避免扩大改动和产生重复计费风险。错误自动续跑的实际安全上限由 `goal_max_turns` 提供，而不是 token budget。
++
++该限制应在实现注释或测试名称中准确表达，但不新增独立文档。
++
++## 12. 文件变更计划
++
++### 12.1 手写源码
++
++端到端持久化和 GUI 控制最少需要修改以下 7 个既有源码文件：
++
++1. `packages/opencode/src/session/goal.sql.ts`
++   - 增加 `continue_on_error`。
++2. `packages/opencode/src/session/goal.ts`
++   - 增加 schema、input、DB mapping、create/update 处理。
++   - 不修改 continuation prompt。
++3. `packages/opencode/src/session/prompt.ts`
++   - 增加显式 `terminal-error` outcome、一次性 marker 和统一 continuation 判断。
++4. `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts`
++   - 增加 HTTP payload boolean。
++5. `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts`
++   - 显式传递 boolean。
++6. `packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx`
++   - 增加 toggle、loading 和保留 dialog 的提交路径。
++7. `packages/opencode/src/cli/cmd/tui/context/sync.tsx`
++   - 更新 GOAL store 类型或采用生成后的 typed Goal。
++
++7 个文件是当前分层下的最小完整集合。强制压缩为 6 个会导致字段被 handler 丢弃、HTTP schema 不接受、TUI 使用 cast，或产生重复的未持久化状态。
++
++不新增手写 production module，不大幅重写已有文件。手写源码预计修改 120 至 240 行，保守上限低于 450 行。
++
++### 12.2 测试文件
++
++修改 3 个既有测试文件，并新增 1 个职责单一的 migration compatibility 测试文件：
++
++1. `packages/opencode/test/session/goal.test.ts`
++2. `packages/opencode/test/server/httpapi-goal.test.ts`
++3. `packages/opencode/test/session/prompt.test.ts`
++4. `packages/opencode/test/storage/goal-migration.test.ts`
++
++新增 migration 测试是验证旧 `session_goal` 行升级兼容性的必要例外；把该场景并入 JSON migration 或 workspace time migration 会混淆测试职责。仍不新增 TUI test harness。预计测试修改 180 至 340 行，测试文件总数保持在用户允许的 6 个以内。
++
++### 12.3 生成文件
++
++必须生成：
++
++- 一个新的 migration 目录，包含 `migration.sql` 和 `snapshot.json`。
++- 受 OpenAPI schema 变化影响的 `packages/sdk/js/src/v2/gen/**` 文件。
++
++迁移和 SDK 文件属于必要生成产物，单独审查，不计入手写业务代码行数。若 SDK regeneration 产生大量无关变动，必须调查 generator drift，不能静默省略 public contract 生成结果。
++
++SDK diff 的通过标准不是“生成命令成功”本身，还必须确认：
++
++- Goal response 和 `session.goal.updated` event 类型包含 `continueOnError`。
++- Goal set payload 包含可选 `continueOnError`。
++- 生成客户端包含 `goal`、`goalSet` 和 `goalClear` 方法。
++- 没有意外删除或重命名无关 endpoint。
++
++不创建第二份设计、审计、迁移解释或测试说明文档。
++
++## 13. 行为级测试计划
++
++### 13.1 Domain 测试
++
++在 `test/session/goal.test.ts` 覆盖：
++
++- 新 GOAL 默认 `continueOnError=false`。
++- 创建时设置 true 后可读取。
++- 单独切换 true 和 false。
++- objective 更新保留该字段。
++- Pause、Resume、complete 和 blocked 更新保留该字段。
++- usage accounting 不改变该字段。
++- 旧字段行为和 continuation prompt 输出不变。
++
++### 13.2 HTTP 测试
++
++在 `test/server/httpapi-goal.test.ts` 覆盖：
++
++- POST 创建 true，GET 返回 true。
++- POST 只更新 boolean，不改变 objective/status/usage。
++- POST 省略字段时保留现值。
++- 默认返回 false。
++- 字符串 `"true"`、数字 `1` 等非 boolean payload 被 schema 拒绝。
++- missing session 仍返回 404。
++- 现有 `GoalError` wire body 不回归。
++
++### 13.3 Prompt Loop 集成测试
++
++在 `test/session/prompt.test.ts` 分两层验证，不宣称所有 typed error 都能由 HTTP TestLLMServer 自然产生。
++
++使用现有 TestLLMServer 和真实 prompt/processor 链覆盖：
++
++- 默认 false 时，一个 cyber-like `UnknownError` 后退出，只调用一次 provider，不生成 `system_continue`。
++- 开启 true 时，一个 eligible terminal error 后生成一条标准 `system_continue`。
++- synthetic continuation prompt 不包含 provider error message。
++- `APIError` 和 `UnknownError` 可以触发。
++- Abort 不触发。
++- ContextOverflow 继续进入 compaction，不触发该分支。
++- successful structured output 不触发。
++- compaction stop 不触发。
++- normal successful GOAL continuation 不回归。
++- 连续 eligible errors 产生恰好 `goal_max_turns=N` 条 continuation message，随后 GOAL paused。
++- 原始 user 请求不计入 `goalTurns`。
++- 在决策读取前将 GOAL Pause 或 Clear，可以确定性抑制 injection。
++
++对 TestLLMServer 无法自然构造的错误，使用 `prompt.test.ts` 内的 test-only `SessionProcessor.Service` layer 注入一个最小 processor handle，使 `process()` 返回 `"stop"` 并持久化指定的 schema error。该 layer 只替换 processor seam，不增加 production hook，并覆盖：
++
++- `ProviderAuthError` 不产生 `terminal-error` continuation。
++- `StructuredOutputError` 不产生 `terminal-error` continuation。
++- `MessageOutputLengthError` 不产生 `terminal-error` continuation。
++- `MessageAbortedError` 即使由 processor stop 返回也不产生 continuation。
++
++marker ID 匹配是 loop 内部的一次性 provenance 不变量，不为其新增 production seam。通过 test-only processor layer 配合 `Deferred` 或 Bus latch，在 terminal error 产生后、下一 iteration 读取 latest assistant 前持久化一个更新的 assistant，验证旧 marker 不会授权该更新后的 assistant。该测试必须使用已发布同步信号，不使用 wall-clock sleep。
++
++并发测试统一使用 mock LLM 请求计数、Deferred、Latch、Bus event 或现有等待 helper，不使用固定 sleep。
++
++### 13.4 Migration Compatibility 测试
++
++新增 `test/storage/goal-migration.test.ts`，复用 `workspace-time-migration.test.ts` 的按 timestamp 分段应用 migration 模式：
++
++1. 在内存 SQLite 中只应用到 `20260704053848_session_goal`，不包含新 migration。
++2. 插入满足 FK 的 project、session 和一条旧结构 `session_goal` 记录。
++3. 应用新 migration 及其后的剩余 migrations。
++4. 断言迁移不抛错。
++5. 断言原 goal 的 ID、objective、status、budget、usage 和 timestamps 未改变。
++6. 断言新增 `continue_on_error` 为 false。
++7. 使用更新后的 Drizzle schema 读取该行，确认 boolean 解码为 `false`。
++
++该测试验证的是真实旧行升级，不以已完成全部 migrations 的临时数据库替代。
++
++## 14. 验证命令
++
++所有测试从 package 目录运行，不从仓库根运行。
++
++在 `packages/opencode`：
++
++```bash
++bun test test/session/goal.test.ts
++bun test test/server/httpapi-goal.test.ts
++bun test test/session/prompt.test.ts
++bun test test/storage/goal-migration.test.ts
++bun typecheck
++```
++
++生成数据库迁移：
++
++```bash
++bun run db generate --name goal_continue_on_error
++```
++
++从仓库根执行 SDK 生成脚本：
++
++```bash
++./packages/sdk/js/script/build.ts
++```
++
++在 `packages/sdk/js`：
++
++```bash
++bun typecheck
++```
++
++聚焦验证通过后，可在 `packages/opencode` 扩大到相关 session tests。
++
++手工 TUI 验证内容：
++
++- `/goal` 菜单显示 `Continue after errors`。
++- `✓`、`○` 和 Saving 状态正确。
++- toggle 成功后菜单保持打开。
++- Edit、Pause、Resume、Clear 行为不变。
++- daemon 重启后设置保持。
++- 开关关闭时错误终止。
++- 开关开启时 eligible error 创建标准 GOAL continuation。
++- Abort 后不 continuation。
++
++## 15. 风险与边界
++
++- `UnknownError` 可能包含本地运行时错误，不保证全部来自 provider。
++- 默认 `goal_max_turns=32`，用户开启后最多可能增加 32 次自动 continuation。
++- provider 可能针对相同上下文重复拒绝。
++- 错误内容不传给模型，因此模型无法直接获知 provider 的具体拒绝原因。
++- 终止错误请求当前可能不计入 GOAL `tokensUsed`。
++- Pause/Clear 与 injection 之间存在现有 best-effort race。
++- SDK 当前生成物可能落后于 GOAL contract，regeneration 可能带出已有 schema 差异。
++
++这些风险均由默认关闭、用户显式选择、eligible allowlist、同一个 `goalTurns` 上限和既有 agent/session guard 限制。它们不要求新增模块或扩大本次实现范围。
++
++## 16. 设计放行条件
++
++实施前必须确认以下设计不变量同时成立：
++
++- generic `break` 不作为错误续跑来源。
++- 产生和消费 marker 时都使用同一个精确 allowlist predicate。
++- marker 同时匹配 latest assistant ID，且不携带错误内容。
++- Pause/Clear 只承诺 best-effort，不宣称原子保证。
++- agent maxSteps 到顶后 GOAL 仍保持 active。
++- migration compatibility 测试证明真实旧行升级为 false 且其他字段不变。
++- 无法由 TestLLMServer 构造的 typed error 通过 test-only processor layer 验证，不增加 production hook。
++- POST 成功结果先 reconcile 到 sync store，再解除 toggle loading。
++- continuation prompt 不注入错误内容。
++- SDK 生成结果包含完整 Goal endpoint、payload、response 和 event 类型。
++
++独立审计若发现任何会导致回归、安全降级、兼容降级、边界漏洞或时序错误的阻塞项，必须继续修改本文档并重新执行原范围审计；不能以历史审计结论替代当前文档的放行。
++
++## 17. 最终推荐
++
++在 `session_goal` 上增加默认关闭的 `continueOnError`，由现有 `Manage Goal` 菜单以勾选项管理。prompt loop 使用显式 `terminal-error` outcome 和一次性 assistant-ID marker，仅允许 `APIError`、`UnknownError` 进入现有 GOAL continuation 入口。正常和错误续跑共享 `goalTurns`、`goal_max_turns`、主 session、active status、非 decide agent 和 agent step 限制。错误内容不进入模型上下文，`SessionGoal.continuationPrompt(goal)` 保持不变。
++
++该方案不修改 `SessionRetry`，不新增全局配置、状态机、服务或手写 production module；预计修改 7 个既有源码文件、3 个既有测试文件，新增 1 个 migration compatibility 测试文件，并生成必要迁移和 SDK 产物，手写代码显著低于 1000 行。
+diff --git a/packages/opencode/migration/20260710195446_goal_continue_on_error/migration.sql b/packages/opencode/migration/20260710195446_goal_continue_on_error/migration.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..aeda0cbdd74a99f9231630735732bb8aa236202c
+--- /dev/null
++++ b/packages/opencode/migration/20260710195446_goal_continue_on_error/migration.sql
+@@ -0,0 +1 @@
++ALTER TABLE `session_goal` ADD `continue_on_error` integer DEFAULT false NOT NULL;
+\ No newline at end of file
+diff --git a/packages/opencode/migration/20260710195446_goal_continue_on_error/snapshot.json b/packages/opencode/migration/20260710195446_goal_continue_on_error/snapshot.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..12f3dc928ff7f097a6f2ce44beb26091bec28d10
+--- /dev/null
++++ b/packages/opencode/migration/20260710195446_goal_continue_on_error/snapshot.json
+@@ -0,0 +1,2364 @@
++{
++  "version": "7",
++  "dialect": "sqlite",
++  "id": "5c94f8a7-ef22-4c17-b563-bf580abc754f",
++  "prevIds": [
++    "6c404e38-c0a4-40fd-bf3f-30cfc9f263dc"
++  ],
++  "ddl": [
++    {
++      "name": "account_state",
++      "entityType": "tables"
++    },
++    {
++      "name": "account",
++      "entityType": "tables"
++    },
++    {
++      "name": "control_account",
++      "entityType": "tables"
++    },
++    {
++      "name": "workspace",
++      "entityType": "tables"
++    },
++    {
++      "name": "data_migration",
++      "entityType": "tables"
++    },
++    {
++      "name": "project",
++      "entityType": "tables"
++    },
++    {
++      "name": "session_goal",
++      "entityType": "tables"
++    },
++    {
++      "name": "request_usage_assistant",
++      "entityType": "tables"
++    },
++    {
++      "name": "request_usage",
++      "entityType": "tables"
++    },
++    {
++      "name": "message",
++      "entityType": "tables"
++    },
++    {
++      "name": "part",
++      "entityType": "tables"
++    },
++    {
++      "name": "permission",
++      "entityType": "tables"
++    },
++    {
++      "name": "session_message",
++      "entityType": "tables"
++    },
++    {
++      "name": "session",
++      "entityType": "tables"
++    },
++    {
++      "name": "todo",
++      "entityType": "tables"
++    },
++    {
++      "name": "session_share",
++      "entityType": "tables"
++    },
++    {
++      "name": "event_sequence",
++      "entityType": "tables"
++    },
++    {
++      "name": "event",
++      "entityType": "tables"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "account_state"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "active_account_id",
++      "entityType": "columns",
++      "table": "account_state"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "active_org_id",
++      "entityType": "columns",
++      "table": "account_state"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "email",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "url",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "access_token",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "refresh_token",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "token_expiry",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "email",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "url",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "access_token",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "refresh_token",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "token_expiry",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "active",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "control_account"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "type",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "''",
++      "generated": null,
++      "name": "name",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "branch",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "directory",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "extra",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "project_id",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_used",
++      "entityType": "columns",
++      "table": "workspace"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "name",
++      "entityType": "columns",
++      "table": "data_migration"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_completed",
++      "entityType": "columns",
++      "table": "data_migration"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "worktree",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "vcs",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "name",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "icon_url",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "icon_url_override",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "icon_color",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_initialized",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "sandboxes",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "commands",
++      "entityType": "columns",
++      "table": "project"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "session_goal"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "session_goal"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "objective",
++      "entityType": "columns",
++      "table": "session_goal"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "status",
++      "entityType": "columns",
++      "table": "session_goal"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "token_budget",
++      "entityType": "columns",
++      "table": "session_goal"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_used",
++      "entityType": "columns",
++      "table": "session_goal"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "time_used_seconds",
++      "entityType": "columns",
++      "table": "session_goal"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "false",
++      "generated": null,
++      "name": "continue_on_error",
++      "entityType": "columns",
++      "table": "session_goal"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "session_goal"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "session_goal"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "request_id",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "assistant_message_id",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "root_request_id",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "status",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "provider_id",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "model_id",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "variant",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "step_count",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_input",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_output",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_reasoning",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_cache_read",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_cache_write",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_total",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "cost_micros",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_completed",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "error_message",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "request_usage_assistant"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "request_id",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "root_request_id",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "source",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "status",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "agent",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "provider_id",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "model_id",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "variant",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "assistant_count",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "step_count",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_input",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_output",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_reasoning",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_cache_read",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_cache_write",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_total",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "cost_micros",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_completed",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "error_message",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "request_usage"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "message"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "message"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "message"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "message"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "data",
++      "entityType": "columns",
++      "table": "message"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "part"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "message_id",
++      "entityType": "columns",
++      "table": "part"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "part"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "part"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "part"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "data",
++      "entityType": "columns",
++      "table": "part"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "project_id",
++      "entityType": "columns",
++      "table": "permission"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "permission"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "permission"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "data",
++      "entityType": "columns",
++      "table": "permission"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "session_message"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "session_message"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "type",
++      "entityType": "columns",
++      "table": "session_message"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "session_message"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "session_message"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "data",
++      "entityType": "columns",
++      "table": "session_message"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "project_id",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "workspace_id",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "parent_id",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "slug",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "directory",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "path",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "title",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "version",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "share_url",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "summary_additions",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "summary_deletions",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "summary_files",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "summary_diffs",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "real",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "cost",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_input",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_output",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_reasoning",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_cache_read",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "tokens_cache_write",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "revert",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "permission",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "agent",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "model",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_compacting",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_archived",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "todo"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "content",
++      "entityType": "columns",
++      "table": "todo"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "status",
++      "entityType": "columns",
++      "table": "todo"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "priority",
++      "entityType": "columns",
++      "table": "todo"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "position",
++      "entityType": "columns",
++      "table": "todo"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "todo"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "todo"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "session_id",
++      "entityType": "columns",
++      "table": "session_share"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "session_share"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "secret",
++      "entityType": "columns",
++      "table": "session_share"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "url",
++      "entityType": "columns",
++      "table": "session_share"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "session_share"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "session_share"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "aggregate_id",
++      "entityType": "columns",
++      "table": "event_sequence"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "seq",
++      "entityType": "columns",
++      "table": "event_sequence"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "owner_id",
++      "entityType": "columns",
++      "table": "event_sequence"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "id",
++      "entityType": "columns",
++      "table": "event"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "aggregate_id",
++      "entityType": "columns",
++      "table": "event"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "seq",
++      "entityType": "columns",
++      "table": "event"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "type",
++      "entityType": "columns",
++      "table": "event"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "data",
++      "entityType": "columns",
++      "table": "event"
++    },
++    {
++      "columns": [
++        "active_account_id"
++      ],
++      "tableTo": "account",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "SET NULL",
++      "nameExplicit": false,
++      "name": "fk_account_state_active_account_id_account_id_fk",
++      "entityType": "fks",
++      "table": "account_state"
++    },
++    {
++      "columns": [
++        "project_id"
++      ],
++      "tableTo": "project",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_workspace_project_id_project_id_fk",
++      "entityType": "fks",
++      "table": "workspace"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "tableTo": "session",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_session_goal_session_id_session_id_fk",
++      "entityType": "fks",
++      "table": "session_goal"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "tableTo": "session",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_request_usage_assistant_session_id_session_id_fk",
++      "entityType": "fks",
++      "table": "request_usage_assistant"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "tableTo": "session",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_request_usage_session_id_session_id_fk",
++      "entityType": "fks",
++      "table": "request_usage"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "tableTo": "session",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_message_session_id_session_id_fk",
++      "entityType": "fks",
++      "table": "message"
++    },
++    {
++      "columns": [
++        "message_id"
++      ],
++      "tableTo": "message",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_part_message_id_message_id_fk",
++      "entityType": "fks",
++      "table": "part"
++    },
++    {
++      "columns": [
++        "project_id"
++      ],
++      "tableTo": "project",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_permission_project_id_project_id_fk",
++      "entityType": "fks",
++      "table": "permission"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "tableTo": "session",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_session_message_session_id_session_id_fk",
++      "entityType": "fks",
++      "table": "session_message"
++    },
++    {
++      "columns": [
++        "project_id"
++      ],
++      "tableTo": "project",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_session_project_id_project_id_fk",
++      "entityType": "fks",
++      "table": "session"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "tableTo": "session",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_todo_session_id_session_id_fk",
++      "entityType": "fks",
++      "table": "todo"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "tableTo": "session",
++      "columnsTo": [
++        "id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_session_share_session_id_session_id_fk",
++      "entityType": "fks",
++      "table": "session_share"
++    },
++    {
++      "columns": [
++        "aggregate_id"
++      ],
++      "tableTo": "event_sequence",
++      "columnsTo": [
++        "aggregate_id"
++      ],
++      "onUpdate": "NO ACTION",
++      "onDelete": "CASCADE",
++      "nameExplicit": false,
++      "name": "fk_event_aggregate_id_event_sequence_aggregate_id_fk",
++      "entityType": "fks",
++      "table": "event"
++    },
++    {
++      "columns": [
++        "email",
++        "url"
++      ],
++      "nameExplicit": false,
++      "name": "control_account_pk",
++      "entityType": "pks",
++      "table": "control_account"
++    },
++    {
++      "columns": [
++        "session_id",
++        "assistant_message_id"
++      ],
++      "nameExplicit": false,
++      "name": "request_usage_assistant_pk",
++      "entityType": "pks",
++      "table": "request_usage_assistant"
++    },
++    {
++      "columns": [
++        "session_id",
++        "request_id"
++      ],
++      "nameExplicit": false,
++      "name": "request_usage_pk",
++      "entityType": "pks",
++      "table": "request_usage"
++    },
++    {
++      "columns": [
++        "session_id",
++        "position"
++      ],
++      "nameExplicit": false,
++      "name": "todo_pk",
++      "entityType": "pks",
++      "table": "todo"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "account_state_pk",
++      "table": "account_state",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "account_pk",
++      "table": "account",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "workspace_pk",
++      "table": "workspace",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "name"
++      ],
++      "nameExplicit": false,
++      "name": "data_migration_pk",
++      "table": "data_migration",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "project_pk",
++      "table": "project",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "nameExplicit": false,
++      "name": "session_goal_pk",
++      "table": "session_goal",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "message_pk",
++      "table": "message",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "part_pk",
++      "table": "part",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "project_id"
++      ],
++      "nameExplicit": false,
++      "name": "permission_pk",
++      "table": "permission",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "session_message_pk",
++      "table": "session_message",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "session_pk",
++      "table": "session",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "session_id"
++      ],
++      "nameExplicit": false,
++      "name": "session_share_pk",
++      "table": "session_share",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "aggregate_id"
++      ],
++      "nameExplicit": false,
++      "name": "event_sequence_pk",
++      "table": "event_sequence",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        "id"
++      ],
++      "nameExplicit": false,
++      "name": "event_pk",
++      "table": "event",
++      "entityType": "pks"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "status",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_goal_status_idx",
++      "entityType": "indexes",
++      "table": "session_goal"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "request_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "request_usage_assistant_session_request_idx",
++      "entityType": "indexes",
++      "table": "request_usage_assistant"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "root_request_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "request_usage_assistant_session_root_idx",
++      "entityType": "indexes",
++      "table": "request_usage_assistant"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "status",
++          "isExpression": false
++        },
++        {
++          "value": "time_updated",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "request_usage_assistant_session_status_updated_idx",
++      "entityType": "indexes",
++      "table": "request_usage_assistant"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "time_created",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "request_usage_session_time_created_idx",
++      "entityType": "indexes",
++      "table": "request_usage"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "root_request_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "request_usage_session_root_idx",
++      "entityType": "indexes",
++      "table": "request_usage"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "status",
++          "isExpression": false
++        },
++        {
++          "value": "time_updated",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "request_usage_session_status_updated_idx",
++      "entityType": "indexes",
++      "table": "request_usage"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "time_created",
++          "isExpression": false
++        },
++        {
++          "value": "id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "message_session_time_created_id_idx",
++      "entityType": "indexes",
++      "table": "message"
++    },
++    {
++      "columns": [
++        {
++          "value": "message_id",
++          "isExpression": false
++        },
++        {
++          "value": "id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "part_message_id_id_idx",
++      "entityType": "indexes",
++      "table": "part"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "part_session_idx",
++      "entityType": "indexes",
++      "table": "part"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_message_session_idx",
++      "entityType": "indexes",
++      "table": "session_message"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        },
++        {
++          "value": "type",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_message_session_type_idx",
++      "entityType": "indexes",
++      "table": "session_message"
++    },
++    {
++      "columns": [
++        {
++          "value": "time_created",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_message_time_created_idx",
++      "entityType": "indexes",
++      "table": "session_message"
++    },
++    {
++      "columns": [
++        {
++          "value": "project_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_project_idx",
++      "entityType": "indexes",
++      "table": "session"
++    },
++    {
++      "columns": [
++        {
++          "value": "workspace_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_workspace_idx",
++      "entityType": "indexes",
++      "table": "session"
++    },
++    {
++      "columns": [
++        {
++          "value": "parent_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_parent_idx",
++      "entityType": "indexes",
++      "table": "session"
++    },
++    {
++      "columns": [
++        {
++          "value": "session_id",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "todo_session_idx",
++      "entityType": "indexes",
++      "table": "todo"
++    }
++  ],
++  "renames": []
++}
+\ No newline at end of file
+diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+index e0f37ba3525739fe8c1dffd06d967218cb879d73..909daf3172235c793d2841a014a607a22ad6e865 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx
+@@ -5,7 +5,7 @@ import { useSync } from "@tui/context/sync"
+ import { useSDK } from "@tui/context/sdk"
+ import { useToast } from "@tui/ui/toast"
+ import { useTheme } from "@tui/context/theme"
+-import { createMemo, onMount } from "solid-js"
++import { createMemo, createSignal, onMount } from "solid-js"
+ import { MAX_OBJECTIVE_CHARS } from "@/session/goal"
+ import { Locale } from "@/util/locale"
+ 
+@@ -34,7 +34,8 @@ function useGoalApi(sessionID: string) {
+   }
+ 
+   // POST /session/:id/goal — 设置或更新 goal
+-  const setGoal = async (input: { objective?: string; status?: string }) => {
++  // [local-smark] 返回解析后的 Goal，供 toggle 调用方 reconcile 到 sync store
++  const setGoal = async (input: { objective?: string; status?: string; continueOnError?: boolean }, close = true) => {
+     // 仅对 objective 更新做长度预检；status-only 更新（Pause/Resume）objective 为 undefined，
+     // 必须跳过预检，否则会误拦状态切换。上限与 SessionGoal.MAX_OBJECTIVE_CHARS 保持一致，
+     // 提前拦截避免无效往返
+@@ -59,7 +60,10 @@ function useGoalApi(sessionID: string) {
+         toast.show({ message: body?.data?.message ?? "Failed to update goal", variant: "error" })
+         return
+       }
+-      dialog.clear()
++      // [local-smark] 解析成功 response，供调用方 reconcile
++      const goal = await resp.json()
++      if (close) dialog.clear()
++      return goal
+     } catch {
+       toast.show({ message: "Failed to update goal", variant: "error" })
+     }
+@@ -109,6 +113,8 @@ export function DialogGoalMenu(props: DialogGoalProps) {
+   const sync = useSync()
+   const { theme } = useTheme()
+   const { setGoal, clearGoal } = useGoalApi(props.sessionID)
++  // [local-smark] toggle loading 状态：防止重复切换
++  const [toggleLoading, setToggleLoading] = createSignal(false)
+ 
+   const goal = createMemo(() => sync.data.session_goal[props.sessionID])
+ 
+@@ -116,6 +122,21 @@ export function DialogGoalMenu(props: DialogGoalProps) {
+   // 避免 medium（60 chars）下选项被截断或显得拥挤。与 dialog-session-list / dialog-skill 一致。
+   onMount(() => dialog.setSize("large"))
+ 
++  // [local-smark] 切换 continueOnError：POST 成功后 reconcile 到 sync store，保持菜单打开
++  const toggleContinueOnError = async () => {
++    if (toggleLoading()) return
++    const g = goal()
++    if (!g) return
++    setToggleLoading(true)
++    // close=false：toggle 后菜单保持打开
++    const result = await setGoal({ continueOnError: !g.continueOnError }, false)
++    if (result?.goal) {
++      // 立即更新 store，不等 SSE
++      sync.goal.reconcile(props.sessionID, result.goal)
++    }
++    setToggleLoading(false)
++  }
++
+   // header 显示 goal 摘要：每行用 wrapMode=none + overflow=hidden + Locale.truncate
+   // 保证可预测的行数，不依赖渲染器自动撑开容器
+   const goalHeader = createMemo(() => {
+@@ -151,6 +172,18 @@ export function DialogGoalMenu(props: DialogGoalProps) {
+             dialog.replace(() => <DialogGoalEdit sessionID={props.sessionID} />)
+           },
+         },
++        // [local-smark] Continue after errors toggle：复用 DialogTool 的 ✓/○ 模式
++        // 开启时显示 ✓ Enabled，关闭时显示 ○ Disabled，保存中显示 ⋯ Saving
++        {
++          title: "Continue after errors",
++          description: toggleLoading()
++            ? "⋯ Saving"
++            : goal()?.continueOnError
++              ? "✓ Enabled"
++              : "○ Disabled",
++          value: "toggle-continue",
++          onSelect: () => void toggleContinueOnError(),
++        },
+         // active 状态下显示 Pause 选项
+         ...(goal()?.status === "active"
+           ? [{
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+index a9e283d6d0ba68bf444b5a8dc560e60a4606be1c..0d71d5d2f8de6613a43d09a295fbb04def184a56 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+@@ -48,6 +48,8 @@ type SessionGoalInfo = {
+   tokenBudget: number | null
+   tokensUsed: number
+   timeUsedSeconds: number
++  // [local-smark] 错误后续跑策略：用户通过 GUI 控制，跨重启持久化
++  continueOnError: boolean
+   time: { created: number; updated: number }
+ }
+ 
+@@ -1010,6 +1012,12 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+       sessionStatus: {
+         refresh: refreshStatus,
+       },
++      // [local-smark] goal reconcile：POST 成功后立即更新 store，不等 SSE
++      goal: {
++        reconcile: (sessionID: string, goal: SessionGoalInfo) => {
++          setStore("session_goal", sessionID, goal)
++        },
++      },
+       bootstrap,
+     }
+     return result
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
+index f0334567bf4b8d44568eb22ca6d767e9af154eaf..6de1de8f4eebe703fc15fbcc03cf87bcc49aefaa 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
+@@ -142,10 +142,12 @@ export const PermissionResponsePayload = Schema.Struct({
+ })
+ // goal set/update payload：objective 缺省时仅更新 status/budget
+ // tokenBudget: null = 清除预算，正数 = 设置预算，缺省 = 不改
++// [local-smark] continueOnError: 缺省 = 不改，true/false = 设置错误后续跑策略
+ export const GoalSetPayload = Schema.Struct({
+   objective: Schema.optional(Schema.String),
+   status: Schema.optional(SessionGoal.Status),
+   tokenBudget: Schema.optional(Schema.NullOr(Schema.Number)),
++  continueOnError: Schema.optional(Schema.Boolean),
+ })
+ export const GoalResponse = Schema.Struct({
+   goal: Schema.NullOr(SessionGoal.Goal),
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
+index 38a5473a0b50a34bc2fa39f6820a79ccbb2888cd..0d610dce969d4f51ffa35d35d63e9171d272df3a 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
+@@ -476,6 +476,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+         objective: ctx.payload.objective,
+         status: ctx.payload.status,
+         tokenBudget: ctx.payload.tokenBudget,
++        // [local-smark] 透传错误续跑策略到 domain service
++        continueOnError: ctx.payload.continueOnError,
+       }).pipe(
+         // GoalError 的具体原因（空/超长/budget/无goal）透传到 wire 体 data.message，
+         // 让 TUI 能展示真实拒绝原因，而非通用 "Failed to update goal"
+diff --git a/packages/opencode/src/session/goal.sql.ts b/packages/opencode/src/session/goal.sql.ts
+index c5fbdebb9bc26459574e945bdaebb712abf0cb89..ce34b9384d2bbd71dfbd79761bc5fd0e9ef1edbb 100644
+--- a/packages/opencode/src/session/goal.sql.ts
++++ b/packages/opencode/src/session/goal.sql.ts
+@@ -29,6 +29,10 @@ export const SessionGoalTable = sqliteTable(
+     token_budget: integer(),
+     tokens_used: integer().notNull().default(0),
+     time_used_seconds: integer().notNull().default(0),
++    // [local-smark] 错误后续跑策略：false=终止型错误后停止（默认），
++    // true=允许 GOAL continuation 在 eligible 错误后继续。
++    // 默认 false 保证升级后旧 GOAL 行为不变。
++    continue_on_error: integer({ mode: "boolean" }).notNull().default(false),
+     ...Timestamps,
+   },
+   (table) => [index("session_goal_status_idx").on(table.session_id, table.status)],
+diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
+index 9bfccb0f29d312b8ffd839514fb3a4eb57088d55..dea5bbdc71ab050938e326dfb2dc97289e3a996d 100644
+--- a/packages/opencode/src/session/goal.ts
++++ b/packages/opencode/src/session/goal.ts
+@@ -25,6 +25,9 @@ export const Goal = Schema.Struct({
+   tokenBudget: optionalOmitUndefined(Schema.NullOr(Schema.Number)),
+   tokensUsed: Schema.Number,
+   timeUsedSeconds: Schema.Number,
++  // [local-smark] 错误后续跑策略：用户通过 GUI/API 控制，模型不可修改。
++  // false=终止型错误后停止（默认），true=允许 GOAL continuation 继续。
++  continueOnError: Schema.Boolean,
+   time: Schema.Struct({
+     created: Schema.Number,
+     updated: Schema.Number,
+@@ -49,6 +52,8 @@ export interface SetInput {
+   status?: Status
+   // null = 清除预算；正数 = 设置预算；缺省 = 不改
+   tokenBudget?: number | null
++  // [local-smark] 错误后续跑策略：缺省 = 不改，true/false = 设置
++  continueOnError?: boolean
+ }
+ 
+ export class GoalError extends Schema.TaggedErrorClass<GoalError>()("GoalError", {
+@@ -84,6 +89,8 @@ export const layer = Layer.effect(
+       tokenBudget: row.token_budget,
+       tokensUsed: row.tokens_used,
+       timeUsedSeconds: row.time_used_seconds,
++      // [local-smark] 从 DB boolean 列映射到 domain 字段
++      continueOnError: row.continue_on_error,
+       time: { created: row.time_created, updated: row.time_updated },
+     })
+ 
+@@ -130,6 +137,8 @@ export const layer = Layer.effect(
+         if (input.objective !== undefined) updates.objective = input.objective.trim()
+         if (input.status !== undefined) updates.status = input.status
+         if (input.tokenBudget !== undefined) updates.token_budget = input.tokenBudget
++        // [local-smark] 仅在显式传入时更新策略，省略时保留现有值
++        if (input.continueOnError !== undefined) updates.continue_on_error = input.continueOnError
+         Database.use((db) =>
+           db.update(SessionGoalTable).set(updates).where(eq(SessionGoalTable.session_id, sessionID)).run(),
+         )
+@@ -148,23 +157,25 @@ export const layer = Layer.effect(
+       }
+ 
+       const goalId = ulid()
+-      Database.use((db) =>
+-        db
+-          .insert(SessionGoalTable)
+-          .values({
+-            session_id: sessionID,
+-            id: goalId,
+-            objective: objective.trim(),
+-            // 新建时 status 缺省为 active，立即进入续跑态
+-            status: input.status ?? "active",
+-            token_budget: input.tokenBudget ?? null,
+-            tokens_used: 0,
+-            time_used_seconds: 0,
+-            time_created: now,
+-            time_updated: now,
+-          })
+-          .run(),
+-      )
++        Database.use((db) =>
++          db
++            .insert(SessionGoalTable)
++            .values({
++              session_id: sessionID,
++              id: goalId,
++              objective: objective.trim(),
++              // 新建时 status 缺省为 active，立即进入续跑态
++              status: input.status ?? "active",
++              token_budget: input.tokenBudget ?? null,
++              tokens_used: 0,
++              time_used_seconds: 0,
++              // [local-smark] 错误后续跑策略默认关闭，保证升级兼容
++              continue_on_error: input.continueOnError ?? false,
++              time_created: now,
++              time_updated: now,
++            })
++            .run(),
++        )
+       const row = Database.use((db) =>
+         db.select().from(SessionGoalTable).where(eq(SessionGoalTable.session_id, sessionID)).get(),
+       )!
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 7825c95ce6d5357eb3362a4c6ceec4b2456f3835..2a74bba3ecfa25bf2fc941ab9c5c0328bff08d5f 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -64,7 +64,7 @@ import { AgentAttachment, FileAttachment, ReferenceAttachment, Source } from "@o
+ import { Reference } from "@/reference/reference"
+ import * as DateTime from "effect/DateTime"
+ import { eq } from "@/storage/db"
+-import { formatExecutionNotice } from "@/util/output-notice"
++import { formatExecutionNotice, formatLongExecutionNotice } from "@/util/output-notice"
+ import * as Database from "@/storage/db"
+ import { SessionTable } from "./session.sql"
+ import { TokenEstimate } from "@/token/estimate"
+@@ -266,16 +266,19 @@ function referenceTextPart(input: {
+   }
+ }
+ 
++// [local-smark] 保留原始 start 并传 elapsed 给 interruptedToolMetadata，
++// 使下一轮模型回放能看到 user_abort + elapsed_ms
+ function interruptedToolState(
+   state: MessageV2.ToolStatePending | MessageV2.ToolStateRunning,
+   now: number,
+ ): MessageV2.ToolStateError {
++  const start = state.status === "running" ? state.time.start : now
+   return {
+     status: "error",
+     input: state.input,
+     error: SessionProcessor.TOOL_ABORTED_ERROR,
+-    metadata: SessionProcessor.interruptedToolMetadata(state.status === "running" ? state.metadata : undefined),
+-    time: { start: state.status === "running" ? state.time.start : now, end: now },
++    metadata: SessionProcessor.interruptedToolMetadata(state.status === "running" ? state.metadata : undefined, now - start),
++    time: { start, end: now },
+   }
+ }
+ 
+@@ -845,7 +848,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                 metadata: autoReview ? { ...(val.metadata ?? {}), autoReview } : val.metadata,
+                 status: "running",
+                 input: args,
+-                time: { start: Date.now() },
++                // [local-smark] 保留原始 start 时间：progress metadata update 不应重置 start，
++                // 否则 end-start 会变成"最后一次进度更新到结束"而不是完整执行时间
++                time: { start: match.state.status === "running" ? match.state.time.start : Date.now() },
+               },
+             }
+           }),
+@@ -879,6 +884,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             return run.promise(
+               Effect.gen(function* () {
+                 const ctx = context(args, options)
++                // [local-smark] 记录 Adapter 入口时间，用于计算完整 elapsed
++                const adapterStartedAt = Date.now()
+                 const timing = {
+                   source: "local" as const,
+                   tool: item.id,
+@@ -906,8 +913,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                   { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
+                   output,
+                 )
++                // [local-smark] Adapter 终态：abort 优先于 long completed
++                // Bash 由 shell.ts 自己处理所有 outcome Notice，这里跳过避免重复
++                const adapterElapsedMs = Date.now() - adapterStartedAt
+                 if (options.abortSignal?.aborted) {
++                  // 工具正常返回但 abort signal 已触发：追加 user_abort Notice
++                  // Bash 跳过：shell.ts 的 formatShellExecutionNotice 已包含 abort Notice
++                  if (item.id !== ShellID.ToolID) {
++                    output.output += "\n\n" + formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: adapterElapsedMs })
++                  }
+                   yield* input.processor.completeToolCall(options.toolCallId, output)
++                } else if (item.id !== ShellID.ToolID) {
++                  // 非 Bash 的 generic tool：长成功追加中性 completed Notice
++                  const notice = formatLongExecutionNotice("tool", adapterElapsedMs)
++                  if (notice) output.output += "\n\n" + notice
+                 }
+                 return output
+               }),
+@@ -928,6 +947,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+           run.promise(
+             Effect.gen(function* () {
+               const ctx = context(args, opts)
++              // [local-smark] 记录 MCP Adapter 入口时间
++              const mcpStartedAt = Date.now()
+               const timing = {
+                 source: "mcp" as const,
+                 tool: key,
+@@ -1006,7 +1027,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                 content: result.content,
+               }
+               if (opts.abortSignal?.aborted) {
++                // [local-smark] MCP 工具正常返回但已 abort：追加 user_abort Notice
++                output.output += "\n\n" + formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: Date.now() - mcpStartedAt })
+                 yield* input.processor.completeToolCall(opts.toolCallId, output)
++              } else {
++                // [local-smark] MCP 长成功：在 truncation 后追加 completed Notice
++                const notice = formatLongExecutionNotice("tool", Date.now() - mcpStartedAt)
++                if (notice) output.output += "\n\n" + notice
+               }
+               return output
+             }),
+@@ -1165,6 +1192,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+       yield* sessions.updateMessage(assistantMessage)
+ 
+       if (result && part.state.status === "running") {
++        // [local-smark] Task 长成功：在持久化前追加 completed Notice
++        const taskElapsedMs = Date.now() - (part.state.time.start ?? Date.now())
++        const taskNotice = formatLongExecutionNotice("tool", taskElapsedMs)
+         yield* sessions.updatePart({
+           ...part,
+           state: {
+@@ -1172,7 +1202,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             input: part.state.input,
+             title: result.title,
+             metadata: result.metadata,
+-            output: result.output,
++            output: taskNotice ? result.output + "\n\n" + taskNotice : result.output,
+             attachments,
+             time: { ...part.state.time, end: Date.now() },
+           },
+@@ -1322,10 +1352,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+ 
+           const finish = Effect.uninterruptible(
+             Effect.gen(function* () {
++              // [local-smark] direct shell 终态 elapsed；started 在内部 gen 作用域，
++              // 这里用 part.state.time.start 获取原始开始时间（status 可能已被 cancel 改为 error）
++              const shellStart = "time" in part.state ? part.state.time.start : Date.now()
++              const shellElapsedMs = Date.now() - shellStart
+               if (aborted) {
+                 // prompt.shell 不经过 ShellTool 的收尾格式化；这里必须直接写入
+                 // 同一种 notice，保证取消路径不会重新引入旧的 <metadata> 包裹。
+-                output += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort" })
++                output += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: shellElapsedMs })
++              } else {
++                // [local-smark] direct shell 长成功：非 abort 且达到阈值时追加 completed Notice
++                const notice = formatLongExecutionNotice("shell", shellElapsedMs)
++                if (notice) output += "\n\n" + notice
+               }
+               const completed = Date.now()
+               if (flags.experimentalEventSystem) {
+@@ -2106,6 +2144,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+         // [local-smark] goal 续跑计数器：独立于 step，
+         // 防止 step++ 在 continue 路径被跳过导致无限循环
+         let goalTurns = 0
++        // [local-smark] 一次性 terminal-error marker：只在 eligible 错误发生时设置，
++        // 下一次 iteration 开头消费。不携带错误内容，只保存 assistantID 用于 provenance 校验。
++        // marker 消费后立即清空，防止历史错误在新 iteration 或新 runLoop 中残留。
++        let pendingTerminalError: { assistantID: string } | undefined
+         // [local-smark] nearOverflow 提示：首次达到 85% usable 时注入一次。
+         // 当上下文降到 85% 以下时（如模型切换到更大上下文模型）重置标志，
+         // 使后续再次达到 85% 时可以重新提示。
+@@ -2134,7 +2176,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+           const hasToolCalls =
+             lastAssistantMsg?.parts.some((part) => part.type === "tool" && !part.metadata?.providerExecuted) ?? false
+ 
+-          if (
++          // [local-smark] 消费一次性 terminal-error marker：只在下一条 iteration 生效，
++          // 之后立即清空防止历史错误残留。marker 不携带错误内容。
++          const terminalError = pendingTerminalError
++          pendingTerminalError = undefined
++
++          // 正常完成路径：assistant 有 finish 且无 error
++          const normalCompletion =
+             lastAssistant?.finish &&
+             // [local-smark] 防御性检查：有 error 的 assistant 不应触发 goal continuation。
+             // 正常控制流中 error → process 返回 "stop" → loop break，不会到达此处。
+@@ -2143,7 +2191,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             !["tool-calls"].includes(lastAssistant.finish) &&
+             !hasToolCalls &&
+             lastUser.id < lastAssistant.id
+-          ) {
++
++          // [local-smark] 错误续跑路径：marker 证明来源是 eligible terminal error，
++          // 且 latest assistant 仍是对应的 errored message。
++          // 使用同一个精确 allowlist predicate 重新验证，防止 assistant 被意外修改后误触发。
++          const errorCompletion =
++            terminalError !== undefined &&
++            lastAssistant?.error !== undefined &&
++            lastAssistant.id === terminalError.assistantID &&
++            (MessageV2.APIError.isInstance(lastAssistant.error) ||
++              NamedError.Unknown.isInstance(lastAssistant.error))
++
++          if (normalCompletion || errorCompletion) {
+             // [local-smark] goal 续跑检查：assistant 正常结束后，
+             // 如果 session 有 active goal 且未达上限，注入续跑 prompt 并 continue。
+             // 续跑 prompt 作为 synthetic user message 注入，保留 synthetic=true
+@@ -2171,7 +2230,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+                   goal.status === "active" &&
+                   goalAgent &&
+                   !isDecideAgent(goalAgent) &&
+-                  step < maxSteps
++                  step < maxSteps &&
++                  // [local-smark] 错误续跑路径要求 continueOnError=true；
++                  // 正常完成路径（errorCompletion=false）始终允许
++                  (!errorCompletion || goal.continueOnError)
+                 ) {
+                   goalTurns++
+                   // 注入 synthetic user message 作为续跑 prompt
+@@ -2276,7 +2338,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             })
+             .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
+ 
+-          const outcome: "break" | "continue" = yield* Effect.gen(function* () {
++          // [local-smark] outcome 增加 "terminal-error"：仅 eligible 错误返回此值
++          const outcome: "break" | "continue" | "terminal-error" = yield* Effect.gen(function* () {
+             const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
+             const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
+             const decide = isDecideAgent(agent)
+@@ -2527,7 +2590,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+               }
+             }
+ 
+-            if (result === "stop") return "break" as const
++            if (result === "stop") {
++              // [local-smark] eligible terminal error 检查：只有 APIError 和 UnknownError
++              // 才允许进入错误续跑路径。其他错误（Abort/Auth/Overflow/StructuredOutput）
++              // 仍返回普通 break，保持现有行为不变。
++              // APIError 覆盖 provider API 终止错误，UnknownError 覆盖 cyber_policy 等未分类错误。
++              const err = handle.message.error
++              if (
++                err &&
++                (MessageV2.APIError.isInstance(err) || NamedError.Unknown.isInstance(err))
++              ) {
++                return "terminal-error" as const
++              }
++              return "break" as const
++            }
+             // [local-smark] goal token/time 计费：assistant message 完成后，
+             // 如果 goal active 则累加本轮 token 消耗和耗时到 goal DB 记录
+             if (handle.message.tokens && handle.message.time.completed) {
+@@ -2566,6 +2642,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             Effect.onInterrupt(() => finalizeInterruptedAssistant),
+           )
+           if (outcome === "break") break
++          // [local-smark] terminal-error：设置一次性 marker 并重新进入 loop。
++          // 下一次 iteration 的 continuation block 会检查 continueOnError、goalTurns、
++          // active status 等条件。不满足条件时自然 fall through 到 break，
++          // 达到 maxGoalTurns 时按现有逻辑 pause。不在此处重复任何 guard。
++          if (outcome === "terminal-error") {
++            pendingTerminalError = { assistantID: handle.message.id }
++            continue
++          }
+           continue
+         }
+ 
+diff --git a/packages/opencode/test/server/httpapi-goal.test.ts b/packages/opencode/test/server/httpapi-goal.test.ts
+index 33b1ca5880754bc0aa8a1818e825b7d6340b35c4..bee348dc2840f2efe005ebe833c9d18702243485 100644
+--- a/packages/opencode/test/server/httpapi-goal.test.ts
++++ b/packages/opencode/test/server/httpapi-goal.test.ts
+@@ -181,14 +181,112 @@ describe("session goal HttpApi", () => {
+         })
+         expect(res.status).toBe(404)
+         const parsed = yield* responseJson(res)
+-        expect(parsed).toEqual({
++      expect(parsed).toEqual({
+           name: "NotFoundError",
+           data: { message: `Session not found: ${missing}` },
+         })
+       }),
+     { git: true, config: { formatter: false, lsp: false } },
+-    // 30s 超时：每个用例需 git-init + Server.Default() 首次 bootstrap，
+-    // 默认 5s 在冷启动（首个用例）时可能超时
++    30000,
++  )
++
++  // [local-smark] continueOnError HTTP 契约测试：验证 boolean 透传、保留和拒绝
++  it.instance(
++    "POST with continueOnError true creates goal and GET returns true",
++    () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const session = yield* createSession()
++        // 创建时显式开启错误续跑
++        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
++          method: "POST",
++          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
++          body: JSON.stringify({ objective: "test", continueOnError: true }),
++        })
++        expect(res.status).toBe(200)
++        const parsed = yield* responseJson(res)
++        expect(parsed.goal.continueOnError).toBe(true)
++
++        // GET 也返回 true
++        const getRes = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
++          headers: { "x-opencode-directory": test.directory },
++        })
++        const getParsed = yield* responseJson(getRes)
++        expect(getParsed.goal.continueOnError).toBe(true)
++      }),
++    { git: true, config: { formatter: false, lsp: false } },
++    30000,
++  )
++
++  it.instance(
++    "POST continueOnError update preserves objective and status",
++    () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const session = yield* createSession()
++        // 先创建带 objective 的 goal
++        yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
++          method: "POST",
++          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
++          body: JSON.stringify({ objective: "original" }),
++        })
++        // 只更新 continueOnError，objective 必须保留
++        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
++          method: "POST",
++          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
++          body: JSON.stringify({ continueOnError: true }),
++        })
++        expect(res.status).toBe(200)
++        const parsed = yield* responseJson(res)
++        expect(parsed.goal.continueOnError).toBe(true)
++        expect(parsed.goal.objective).toBe("original")
++        expect(parsed.goal.status).toBe("active")
++      }),
++    { git: true, config: { formatter: false, lsp: false } },
++    30000,
++  )
++
++  it.instance(
++    "POST without continueOnError preserves existing value",
++    () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const session = yield* createSession()
++        // 创建时开启
++        yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
++          method: "POST",
++          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
++          body: JSON.stringify({ objective: "test", continueOnError: true }),
++        })
++        // 更新 objective 不传 continueOnError，策略必须保留
++        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
++          method: "POST",
++          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
++          body: JSON.stringify({ objective: "updated" }),
++        })
++        const parsed = yield* responseJson(res)
++        expect(parsed.goal.continueOnError).toBe(true)
++        expect(parsed.goal.objective).toBe("updated")
++      }),
++    { git: true, config: { formatter: false, lsp: false } },
++    30000,
++  )
++
++  it.instance(
++    "POST with non-boolean continueOnError is rejected by schema",
++    () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const session = yield* createSession()
++        // 字符串 "true" 不是合法 boolean，schema 必须拒绝
++        const res = yield* request(pathFor(SessionPaths.goal, { sessionID: session.id }), {
++          method: "POST",
++          headers: { "x-opencode-directory": test.directory, "content-type": "application/json" },
++          body: JSON.stringify({ objective: "test", continueOnError: "true" }),
++        })
++        expect(res.status).toBe(400)
++      }),
++    { git: true, config: { formatter: false, lsp: false } },
+     30000,
+   )
+ })
+diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
+index 1e109490fdbdd4f39ab7f768584099ced668f69c..0bd047f92e4868566741544d143d3ba7a8391198 100644
+--- a/packages/opencode/test/session/goal.test.ts
++++ b/packages/opencode/test/session/goal.test.ts
+@@ -432,3 +432,99 @@ it.instance(
+     }),
+   { git: true },
+ )
++
++// [local-smark] continueOnError 字段测试：验证错误后续跑策略的持久化行为。
++// 默认 false 保证升级后旧 GOAL 行为不变；局部更新不得重置该字段。
++it.instance(
++  "new goal defaults to continueOnError false",
++  () =>
++    Effect.gen(function* () {
++      const goalSvc = yield* SessionGoal.Service
++      const sessions = yield* SessionNs.Service
++      const session = yield* sessions.create({})
++
++      // 新建 GOAL 不传 continueOnError，默认必须为 false
++      const goal = yield* goalSvc.set(session.id, { objective: "test" })
++      expect(goal.continueOnError).toBe(false)
++    }),
++  { git: true },
++)
++
++it.instance(
++  "create goal with continueOnError true",
++  () =>
++    Effect.gen(function* () {
++      const goalSvc = yield* SessionGoal.Service
++      const sessions = yield* SessionNs.Service
++      const session = yield* sessions.create({})
++
++      // 显式开启错误续跑策略
++      const goal = yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
++      expect(goal.continueOnError).toBe(true)
++
++      // 持久化后读取仍为 true
++      const result = yield* goalSvc.get(session.id)
++      if (Option.isSome(result)) {
++        expect(result.value.continueOnError).toBe(true)
++      }
++    }),
++  { git: true },
++)
++
++it.instance(
++  "toggle continueOnError between true and false",
++  () =>
++    Effect.gen(function* () {
++      const goalSvc = yield* SessionGoal.Service
++      const sessions = yield* SessionNs.Service
++      const session = yield* sessions.create({})
++
++      yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
++      // 关闭：false 应覆盖 true
++      const disabled = yield* goalSvc.set(session.id, { continueOnError: false })
++      expect(disabled.continueOnError).toBe(false)
++
++      // 再次开启
++      const enabled = yield* goalSvc.set(session.id, { continueOnError: true })
++      expect(enabled.continueOnError).toBe(true)
++    }),
++  { git: true },
++)
++
++it.instance(
++  "objective update preserves continueOnError",
++  () =>
++    Effect.gen(function* () {
++      const goalSvc = yield* SessionGoal.Service
++      const sessions = yield* SessionNs.Service
++      const session = yield* sessions.create({})
++
++      yield* goalSvc.set(session.id, { objective: "original", continueOnError: true })
++      // 编辑 objective 不传 continueOnError，策略必须保留
++      const updated = yield* goalSvc.set(session.id, { objective: "revised" })
++      expect(updated.objective).toBe("revised")
++      expect(updated.continueOnError).toBe(true)
++    }),
++  { git: true },
++)
++
++it.instance(
++  "status update preserves continueOnError",
++  () =>
++    Effect.gen(function* () {
++      const goalSvc = yield* SessionGoal.Service
++      const sessions = yield* SessionNs.Service
++      const session = yield* sessions.create({})
++
++      yield* goalSvc.set(session.id, { objective: "test", continueOnError: true })
++      // Pause 不传 continueOnError，策略必须保留
++      const paused = yield* goalSvc.set(session.id, { status: "paused" })
++      expect(paused.status).toBe("paused")
++      expect(paused.continueOnError).toBe(true)
++
++      // Resume 也不传 continueOnError
++      const resumed = yield* goalSvc.set(session.id, { status: "active" })
++      expect(resumed.continueOnError).toBe(true)
++    }),
++  { git: true },
++)
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 0855bb41ab64959cacd22876239c737d3a2e3e7f..49f8e0addde0be7866c582c4551e27578b5ee20d 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -3374,3 +3374,85 @@ it.instance(
+   { git: true },
+   15_000,
+ )
++
++// [local-smark] GOAL 错误后续跑测试：验证 continueOnError 策略控制
++// 终止型错误后是否自动创建新的 GOAL continuation turn。
++
++it.instance(
++  "goal error continuation disabled by default — terminal APIError stops loop",
++  () =>
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig(providerCfg)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const goalSvc = yield* SessionGoal.Service
++
++      const chat = yield* sessions.create({})
++      // 设置 GOAL 但不开启 continueOnError（默认 false）
++      yield* goalSvc.set(chat.id, { objective: "complete the task" })
++      yield* user(chat.id, "start working")
++
++      // 推入一个 400 错误（APIError，非重试）
++      yield* llm.error(400, { error: { message: "bad request" } })
++
++      yield* prompt.loop({ sessionID: chat.id })
++
++      // 默认 false：错误后不创建 continuation。验证不存在 synthetic continuation 消息
++      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
++      const continuations = msgs.filter(
++        (m) =>
++          m.info.role === "user" &&
++          m.parts.some(
++            (p) => p.type === "text" && (p as any).synthetic === true && p.text?.includes("<session-goal-continuation>"),
++          ),
++      )
++      expect(continuations.length).toBe(0)
++    }),
++  { git: true },
++  30_000,
++)
++
++it.instance(
++  "goal error continuation enabled — terminal APIError triggers one system_continue",
++  () =>
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 1 }))
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const goalSvc = yield* SessionGoal.Service
++
++      const chat = yield* sessions.create({})
++      // 开启错误续跑策略
++      yield* goalSvc.set(chat.id, { objective: "complete the task", continueOnError: true })
++      yield* user(chat.id, "start working")
++
++      // 第一次：400 错误（APIError），触发 terminal-error → 错误续跑
++      // 第二次：续跑后再次 400 错误 → goalTurns=1 >= maxGoalTurns=1 → pause + break
++      // 注意：400 非重试，AI SDK 不重试，SessionRetry 也不重试
++      yield* llm.error(400, { error: { message: "bad request" } })
++      yield* llm.error(400, { error: { message: "bad request" } })
++
++      yield* prompt.loop({ sessionID: chat.id })
++
++      // 验证存在 system_continue 消息：source 字段被 schema decoder 剥离，
++      // 改为检查 synthetic text part 中的 continuation prompt 标记
++      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
++      const continuations = msgs.filter(
++        (m) =>
++          m.info.role === "user" &&
++          m.parts.some(
++            (p) => p.type === "text" && (p as any).synthetic === true && p.text?.includes("<session-goal-continuation>"),
++          ),
++      )
++      // [local-smark] goal_max_turns=1：错误续跑一次后到达上限，GOAL paused
++      expect(continuations.length).toBe(1)
++
++      // 续跑 prompt 不包含错误消息内容
++      const continueText = continuations[0].parts.find(
++        (p) => p.type === "text" && (p as any).text?.includes("<session-goal-continuation>"),
++      ) as any
++      expect(continueText?.text).not.toContain("bad request")
++    }),
++  { git: true },
++  30_000,
++)
+diff --git a/packages/opencode/test/storage/goal-migration.test.ts b/packages/opencode/test/storage/goal-migration.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b79796a114a218529ee89e1d322256df60e496a0
+--- /dev/null
++++ b/packages/opencode/test/storage/goal-migration.test.ts
+@@ -0,0 +1,78 @@
++import { describe, expect, test } from "bun:test"
++import { Database } from "bun:sqlite"
++import { drizzle } from "drizzle-orm/bun-sqlite"
++import { migrate } from "drizzle-orm/bun-sqlite/migrator"
++import { readFileSync, readdirSync } from "fs"
++import path from "path"
++
++// [local-smark] goal_continue_on_error 迁移兼容性测试
++// 验证旧 session_goal 行在添加 continue_on_error 列后：
++// 1. 迁移不抛错
++// 2. 新列默认 false
++// 3. 原有字段（id, objective, status, budget, usage, timestamps）不变
++// 复用 workspace-time-migration.test.ts 的按 timestamp 分段应用 migration 模式
++
++// 新 migration 的目录名前缀，生成后实际名称可能不同
++const target = "20260710195446_goal_continue_on_error"
++
++function migrations() {
++  return readdirSync(path.join(import.meta.dirname, "../../migration"), { withFileTypes: true })
++    .filter((entry) => entry.isDirectory())
++    .map((entry) => ({
++      name: entry.name,
++      timestamp: Number(entry.name.split("_")[0]),
++      sql: readFileSync(path.join(import.meta.dirname, "../../migration", entry.name, "migration.sql"), "utf-8"),
++    }))
++    .sort((a, b) => a.timestamp - b.timestamp)
++}
++
++describe("goal continue_on_error migration", () => {
++  test("migrates existing session_goal rows with default false", () => {
++    const sqlite = new Database(":memory:")
++    const db = drizzle({ client: sqlite })
++    const entries = migrations()
++    const index = entries.findIndex((entry) => entry.name === target)
++
++    // 确认新 migration 存在
++    expect(index).toBeGreaterThan(0)
++
++    // 只应用到新 migration 之前（不含新 migration）
++    migrate(db, entries.slice(0, index))
++
++    // 插入满足 FK 约束的 project 和 session
++    sqlite.run(
++      "INSERT INTO project (id, worktree, vcs, name, time_created, time_updated, sandboxes) VALUES (?, ?, ?, ?, ?, ?, ?)",
++      ["proj_test", "/tmp/project", "git", "test", 1, 1, "[]"],
++    )
++    sqlite.run(
++      "INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
++      ["ses_test", "proj_test", "test", "/tmp", "Test", "1.0.0", 1, 1],
++    )
++
++    // 插入旧结构 session_goal 行（无 continue_on_error 列）
++    sqlite.run(
++      "INSERT INTO session_goal (session_id, id, objective, status, token_budget, tokens_used, time_used_seconds, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
++      ["ses_test", "goal_1", "test objective", "active", 50000, 1000, 30, 1, 1],
++    )
++
++    // 应用新 migration 及其后的剩余 migrations
++    expect(() => migrate(db, entries.slice(index))).not.toThrow()
++
++    // 验证新列默认 false
++    const row = sqlite
++      .query("SELECT * FROM session_goal WHERE session_id = ?")
++      .get("ses_test") as any
++
++    expect(row.continue_on_error).toBe(0) // SQLite boolean: 0 = false
++
++    // 验证原有字段不变
++    expect(row.id).toBe("goal_1")
++    expect(row.objective).toBe("test objective")
++    expect(row.status).toBe("active")
++    expect(row.token_budget).toBe(50000)
++    expect(row.tokens_used).toBe(1000)
++    expect(row.time_used_seconds).toBe(30)
++    expect(row.time_created).toBe(1)
++    expect(row.time_updated).toBe(1)
++  })
++})

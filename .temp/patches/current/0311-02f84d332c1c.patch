@@ -1,0 +1,84 @@
+From 02f84d332c1cf4c798c4b1feb06f2332b0cddc59 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 15 Jun 2026 10:09:35 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tests):=20=E4=BD=BF=E7=94=A8=20Node=20fs=20?=
+ =?UTF-8?q?=E6=9B=BF=E4=BB=A3=20Bun=20=E5=86=99=E5=85=A5=E6=96=87=E4=BB=B6?=
+ =?UTF-8?q?=EF=BC=8C=E7=A1=AE=E4=BF=9D=20Windows=20CI=20=E4=B8=AD=20fixtur?=
+ =?UTF-8?q?e=20=E6=96=87=E4=BB=B6=E5=86=85=E5=AE=B9=E4=B8=80=E8=87=B4?=
+ =?UTF-8?q?=E6=80=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx b/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
+index 02fd2e85c9c0163c257e11f5590cff0df7f8279a..9f180f79bd27015734306f87204f48b5d71912ad 100644
+--- a/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
++++ b/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
+@@ -129,21 +129,28 @@ export async function mount(override?: FetchHandler) {
+     return <box />
+   }
+ 
+-  const app = await testRender(() => (
+-    <ArgsProvider>
+-      <ExitProvider>
+-        <KVProvider>
+-          <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
+-            <ProjectProvider>
+-              <SyncProvider>
+-                <Probe />
+-              </SyncProvider>
+-            </ProjectProvider>
+-          </SDKProvider>
+-        </KVProvider>
+-      </ExitProvider>
+-    </ArgsProvider>
+-  ))
++  const app = await testRender(
++    () => (
++      <ArgsProvider>
++        <ExitProvider>
++          <KVProvider>
++            <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
++              <ProjectProvider>
++                <SyncProvider>
++                  <Probe />
++                </SyncProvider>
++              </ProjectProvider>
++            </SDKProvider>
++          </KVProvider>
++        </ExitProvider>
++      </ArgsProvider>
++    ),
++    {
++      // core/testing 在 Linux 默认关闭 renderer 线程，但 Windows 默认开启。
++      // sync 套件会反复 mount/destroy；禁用线程让 Windows 清理路径和 Linux 一致，避免文件级 hook 等待 native renderer 线程退出超时。
++      useThread: false,
++    },
++  )
+ 
+   await ready
+   await wait(() => sync.status === "complete")
+diff --git a/packages/opencode/test/tool/repo_clone.test.ts b/packages/opencode/test/tool/repo_clone.test.ts
+index 020f5d91f6e9dba81b026d4d99f6e7118c1766df..d16a87da8ab17d70b3fbc7e99ab6f0fa13d98d9b 100644
+--- a/packages/opencode/test/tool/repo_clone.test.ts
++++ b/packages/opencode/test/tool/repo_clone.test.ts
+@@ -1,4 +1,5 @@
+ import { afterEach, describe, expect } from "bun:test"
++import * as fs from "node:fs/promises"
+ import path from "path"
+ import { pathToFileURL } from "node:url"
+ import { Cause, Effect, Exit, Layer } from "effect"
+@@ -63,7 +64,11 @@ const commitFile = Effect.fn("RepoCloneToolTest.commitFile")(function* (
+   content: string,
+   message: string,
+ ) {
+-  yield* Effect.promise(() => Bun.write(path.join(cwd, file), content))
++  yield* Effect.promise(() => fs.writeFile(path.join(cwd, file), content, "utf8"))
++  const written = yield* Effect.promise(() => fs.readFile(path.join(cwd, file), "utf8"))
++  // Bun 1.3.13 的 Windows CI 曾把刚写入的 fixture 文件提交为空内容；
++  // 这里先用 Node fs 读回确认，再让 Git 参与，避免把写入时序误判成 repo_clone 行为回归。
++  if (written !== content) throw new Error(`git fixture write mismatch for ${file}`)
+   yield* git(cwd, ["add", "--", file])
+   const staged = yield* git(cwd, ["diff", "--cached", "--name-only", "--", file])
+   // CI 上曾出现工作区已写入但 commit 没有纳入文件的情况；先验证 staged 内容，失败时直接指向 fixture 根因。

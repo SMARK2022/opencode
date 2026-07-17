@@ -1,0 +1,234 @@
+From ae347450700ce816778c524ba48ace2487bf3c86 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Wed, 24 Jun 2026 19:51:50 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui/sync):=20=E7=BC=93=E5=86=B2=20fire-and-?=
+ =?UTF-8?q?forget=20=E7=AB=9E=E6=80=81=E4=B8=AD=E4=B8=A2=E5=BC=83=E7=9A=84?=
+ =?UTF-8?q?=20delta=EF=BC=8C=E6=81=A2=E5=A4=8D=E5=AD=90=E4=BC=9A=E8=AF=9D?=
+ =?UTF-8?q?=E8=BF=9B=E5=85=A5=E5=89=8D=E7=9A=84=E6=B5=81=E5=BC=8F=E6=96=87?=
+ =?UTF-8?q?=E6=9C=AC?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+daemon 的 message.part.updated 通过 fire-and-forget 发送（void
+Effect.runPromise），而 message.part.delta 通过 yield* await 发送。当
+delta 先于 part.updated 到达时，applyPartDelta 因 store 中缺少对应
+message/part 而 drop delta。delta 是 bus-only（不写 DB），被 drop 后
+永久丢失——子会话在用户进入前已开始 streaming，但 store 中没有其
+message/part，所有 delta 被 drop；进入时 session.sync 从 DB 拉到
+text=""，进入后只有新 delta 从空开始累积，表现为消息每次进入都从
+0 开始只显示末尾片段。
+
+新增 orphanPartDeltas 缓冲（按 partID 索引），applyPartDelta 在
+missing-message/missing-part 时缓冲而非永久丢弃。
+message.part.updated 创建/插入 part 后以及 session.sync 从 DB 创建
+parts 后调用 replayOrphanDeltas 重放缓冲 delta。终态 part（time.end
+存在）跳过 replay 避免污染权威完整文本。part.removed/hidden/onCleanup
+清理对应缓冲。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+index c1354a2496c438d482fd1c7a3ec697440b94a97f..faf99adcf81bf3d0efa5e5f35740395b3b24b367 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+@@ -133,6 +133,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+     let pendingPartDeltas: EventMessagePartDelta[] = []
+     let pendingPartDeltaTimer: Timer | undefined
+     const loggedPartDeltaApplications = new Set<string>()
++    // 缓冲因 part 尚未到达而被 drop 的 delta，按 partID 索引。
++    // daemon 的 message.part.updated 是 fire-and-forget（void Effect.runPromise），
++    // 而 message.part.delta 是 await（yield* bus.publish）。当 delta 先于
++    // part.updated 到达时，store 中没有对应 part，delta 会被 drop。
++    // delta 是 bus-only（不写 DB），被 drop 后永久丢失——子会话进入前
++    // 已生成的流式文本将无法恢复。缓冲后在 part.updated 创建 part 时 replay。
++    const orphanPartDeltas = new Map<string, EventMessagePartDelta[]>()
+ 
+     function targetsSamePartDelta(previous: EventMessagePartDelta, next: EventMessagePartDelta) {
+       // Only adjacent deltas for the same Solid store cell are safe to merge.
+@@ -185,11 +192,19 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+     function applyPartDelta(event: EventMessagePartDelta) {
+       const parts = store.part[event.properties.messageID]
+       if (!parts) {
++        // part 尚未到达（fire-and-forget 竞态）：缓冲 delta，等 part.updated 创建 part 后 replay
++        const buffered = orphanPartDeltas.get(event.properties.partID)
++        if (buffered) buffered.push(event)
++        else orphanPartDeltas.set(event.properties.partID, [event])
+         logPartDeltaApplication(event, "delta.drop", "missing-message")
+         return
+       }
+       const result = Binary.search(parts, event.properties.partID, (p) => p.id)
+       if (!result.found) {
++        // part 在数组中不存在（part.updated 尚未到达）：同样缓冲
++        const buffered = orphanPartDeltas.get(event.properties.partID)
++        if (buffered) buffered.push(event)
++        else orphanPartDeltas.set(event.properties.partID, [event])
+         logPartDeltaApplication(event, "delta.drop", "missing-part")
+         return
+       }
+@@ -210,6 +225,36 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+       logPartDeltaApplication(event, "delta.apply")
+     }
+ 
++    // 当 part.updated 终于到达并创建 part 后，replay 之前因 part 缺失而缓冲的 delta。
++    // 合并同一 partID 的连续 delta 以减少 reactive 更新次数，然后逐条 apply。
++    // replay 后清除缓冲，避免终态 part.updated 再次触发时重复应用。
++    // 终态 part（time.end 存在）不 replay：其文本是权威完整的，追加 delta 会污染。
++    function replayOrphanDeltas(partID: string, messageID: string) {
++      const buffered = orphanPartDeltas.get(partID)
++      if (!buffered || buffered.length === 0) return
++      // 检查 store 中的 part 是否已终态（text-end 的 DB 快照携带完整文本）
++      const parts = store.part[messageID]
++      if (parts) {
++        const found = Binary.search(parts, partID, (p) => p.id)
++        if (found.found) {
++          const part = parts[found.index]
++          if ((part.type === "text" || part.type === "reasoning") && part.time?.end) {
++            orphanPartDeltas.delete(partID)
++            return
++          }
++        }
++      }
++      const coalesced = coalescePartDeltas(buffered)
++      // 仅应用 messageID 匹配的 delta（partID 全局唯一，此处防御未来可能的碰撞）
++      const matched = coalesced.filter((event) => event.properties.messageID === messageID)
++      if (matched.length === 0) return
++      // 匹配后才删除缓冲，未匹配的保留以防 partID 碰撞时另一 message 仍需 replay
++      orphanPartDeltas.delete(partID)
++      for (const event of matched) {
++        applyPartDelta(event)
++      }
++    }
++
+     // 单调合并守卫：防止 pending 阶段的短快照覆盖已累积的长流式文本。
+     // daemon 的 message.part.updated 通过 fire-and-forget 发送（void
+     // Effect.runPromise），而 message.part.delta 通过 yield* await 发送。
+@@ -656,11 +701,15 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+                 draft.splice(foundAt.index, 1)
+               }),
+             )
++            // 清除该 part 的缓冲 delta（part 已隐藏移除，delta 不再需要）
++            orphanPartDeltas.delete(part.id)
+             break
+           }
+           const parts = store.part[part.messageID]
+           if (!parts) {
+             setStore("part", part.messageID, [part])
++            // part 首次创建：replay 在 part.updated 之前到达的缓冲 delta
++            replayOrphanDeltas(part.id, part.messageID)
+             break
+           }
+           const result = Binary.search(parts, part.id, (p) => p.id)
+@@ -676,6 +725,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+               draft.splice(result.index, 0, part)
+             }),
+           )
++          // part 插入到已有数组：replay 在 part.updated 之前到达的缓冲 delta
++          replayOrphanDeltas(part.id, part.messageID)
+           break
+         }
+ 
+@@ -696,6 +747,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+               }),
+             )
+           }
++          // 清除该 part 的缓冲 delta（part 已移除，delta 不再需要）
++          orphanPartDeltas.delete(event.properties.partID)
+           break
+         }
+ 
+@@ -717,6 +770,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+     onCleanup(() => {
+       if (pendingPartDeltaTimer) clearTimeout(pendingPartDeltaTimer)
+       pendingPartDeltas = []
++      orphanPartDeltas.clear()
+       loggedPartDeltaApplications.clear()
+     })
+ 
+@@ -894,6 +948,14 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+             }),
+           )
+           setStore("session_status", reconcile(status.data ?? {}))
++          // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。
++          // 这对子会话尤其关键：进入子会话前 delta 全部被缓冲（store 中没有 message），
++          // sync 从 DB 拉到 text="" 的 part 后必须 replay 缓冲 delta 才能恢复完整文本。
++          for (const message of messages.data ?? []) {
++            for (const part of message.parts) {
++              replayOrphanDeltas(part.id, message.info.id)
++            }
++          }
+           fullSyncedSessions.add(sessionID)
+         },
+       },
+diff --git a/packages/opencode/test/cli/cmd/tui/sync.test.tsx b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
+index 4e7f83d2da6b74c849faacf58de43e3c88b0c8e6..3325fc097ca111d1845ab626c01bbc5b371c0ef9 100644
+--- a/packages/opencode/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
+@@ -532,6 +532,7 @@ describe("tui sync", () => {
+     })
+ 
+     try {
++      // delta 在 part 创建前到达（模拟 fire-and-forget 竞态），被缓冲而非永久丢弃
+       emit(deltaEvent("delta_missing", "secret"))
+       await wait(() => logs.some((entry) => entry.extra?.phase === "delta.drop"))
+ 
+@@ -543,18 +544,20 @@ describe("tui sync", () => {
+       emit(deltaEvent("delta_2", "lo"))
+       emit(deltaEvent("delta_3", " world"))
+ 
++      // 缓冲的 "secret" 在 part 创建时被 replay，所以 raw = "secret" + "hello world"
+       await wait(
+         () =>
+           sync.data.part.msg_1?.[0]?.type === "tool" &&
+           sync.data.part.msg_1[0].state.status === "pending" &&
+-          sync.data.part.msg_1[0].state.raw === "hello world",
++          sync.data.part.msg_1[0].state.raw === "secrethello world",
+       )
+       await wait(() => logs.some((entry) => entry.extra?.phase === "delta.apply"))
+-      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { raw: "hello world" } })
++      expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { raw: "secrethello world" } })
+       const phases = logs.map((entry) => entry.extra?.phase)
+       expect(phases.filter((phase) => phase === "delta.receive")).toHaveLength(1)
+       expect(phases).toContain("delta.drop")
+       expect(phases).toContain("delta.apply")
++      // 日志 payload 不携带 delta 正文
+       expect(JSON.stringify(logs)).not.toContain("hello world")
+       expect(JSON.stringify(logs)).not.toContain("secret")
+     } finally {
+@@ -746,4 +749,38 @@ describe("tui sync", () => {
+       Global.Path.state = previous
+     }
+   })
++
++  // 复现子会话进入时的核心问题：子会话在用户进入前已在 streaming，
++  // 但 TUI store 中没有子会话的 message/part，delta 因 missing-message 被 drop。
++  // 修复后 delta 被缓冲，当 part.updated 终于到达创建 part 时 replay，
++  // 恢复进入前已生成的完整流式文本。
++  test("replays buffered deltas when part.updated arrives after delta was dropped", async () => {
++    const previous = Global.Path.state
++    await using tmp = await tmpdir()
++    Global.Path.state = tmp.path
++    await Bun.write(`${tmp.path}/kv.json`, "{}")
++    const message = assistantMessage()
++    const startPart = textPart("part_sub", "")
++    const { app, emit, sync } = await mount()
++
++    try {
++      // 子会话 streaming 已开始：delta 先于 part.updated 到达（fire-and-forget 竞态）
++      // 此时 store 中没有子会话的 message/part，delta 被缓冲而非永久丢弃
++      emit(textDeltaEvent("delta_pre_1", "ASDF", "part_sub"))
++      emit(textDeltaEvent("delta_pre_2", "GHJKL", "part_sub"))
++      await Bun.sleep(30)
++
++      // part.updated 终于到达，创建 part — 缓冲的 delta 应被 replay
++      emit(messageEvent(message))
++      emit(partEvent(startPart))
++      await wait(() => sync.data.part.msg_1?.[0]?.type === "text")
++
++      // 缓冲的 delta 被 replay，text 恢复为 "ASDFGHJKL"（而非 part.updated 的空文本）
++      expect(sync.data.part.msg_1?.[0]?.type).toBe("text")
++      if (sync.data.part.msg_1?.[0]?.type === "text") expect(sync.data.part.msg_1[0].text).toBe("ASDFGHJKL")
++    } finally {
++      app.renderer.destroy()
++      Global.Path.state = previous
++    }
++  })
+ })

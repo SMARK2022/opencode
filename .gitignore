@@ -31,5 +31,9 @@ opencode-dev
 UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
+
+# Patch replay artifacts are isolated from the v1.17.18 source tree.
+.temp/patches/reports/
+.temp/patches/states/
 tsconfig.tsbuildinfo
 /artifacts/

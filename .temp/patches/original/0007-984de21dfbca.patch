@@ -1,0 +1,51 @@
+From 984de21dfbca5dbbdaa1848c30133f5b2727e397 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 22 Apr 2026 09:34:57 +0800
+Subject: [PATCH] =?UTF-8?q?feat(version):=20=E6=B7=BB=E5=8A=A0=E7=89=88?=
+ =?UTF-8?q?=E6=9C=AC=E7=8E=AF=E5=A2=83=E5=8A=A0=E8=BD=BD=E5=8A=9F=E8=83=BD?=
+ =?UTF-8?q?=EF=BC=8C=E7=A1=AE=E4=BF=9D=E5=9C=A8=E6=A8=A1=E5=9D=97=E8=AF=84?=
+ =?UTF-8?q?=E4=BC=B0=E6=97=B6=E8=AE=BE=E7=BD=AE=20OPENCODE=5FVERSION?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/package.json b/packages/opencode/package.json
+index 5d8fd4b540a2d06c59b907e1d82f4e3547ac1b31..f89302c4f16a57db56afd113d753d74652de93a2 100644
+--- a/packages/opencode/package.json
++++ b/packages/opencode/package.json
+@@ -1,6 +1,6 @@
+ {
+   "$schema": "https://json.schemastore.org/package.json",
+-  "version": "1.14.19",
++  "version": "1.14.19-smark",
+   "name": "opencode",
+   "type": "module",
+   "license": "MIT",
+diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
+index 85e1e105f174ab9cfa8fd1379883b07be8638989..54b58514cc78574e17be6495fde9c819ed519b57 100755
+--- a/packages/opencode/script/build.ts
++++ b/packages/opencode/script/build.ts
+@@ -1,5 +1,8 @@
+ #!/usr/bin/env bun
+ 
++// CRITICAL: Load version-env first to set OPENCODE_VERSION before any other imports
++import "./version-env"
++
+ import { $ } from "bun"
+ import fs from "fs"
+ import path from "path"
+diff --git a/packages/opencode/script/version-env.ts b/packages/opencode/script/version-env.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..936f1258b433c05e3e4aabf893c26d75fe294dd1
+--- /dev/null
++++ b/packages/opencode/script/version-env.ts
+@@ -0,0 +1,7 @@
++// MUST be loaded before any other imports (especially @opencode-ai/script)
++// to ensure OPENCODE_VERSION is set at module evaluation time.
++// Usage: bun run build.ts --version=1.14.19-smark
++const versionArg = process.argv[2]
++if (versionArg?.startsWith("--version=")) {
++  process.env.OPENCODE_VERSION = versionArg.replace("--version=", "")
++}
+\ No newline at end of file

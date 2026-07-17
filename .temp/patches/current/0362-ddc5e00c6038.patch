@@ -1,0 +1,324 @@
+From ddc5e00c6038ca2a9dbe55913c67ec7ec7e40989 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sat, 4 Jul 2026 13:35:18 +0800
+Subject: [PATCH] =?UTF-8?q?fix(provider):=20connect=20provider=20=E4=B8=8D?=
+ =?UTF-8?q?=E5=86=8D=E6=9D=80=E8=BF=90=E8=A1=8C=E4=B8=AD=E4=BC=9A=E8=AF=9D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+之前在 TUI/Web app 中连接或断开 provider 时，服务端会调
+disposeAllInstances 销毁所有实例，导致其他正在运行的会话
+（含不同 provider/model）被 SessionRunState finalizer 强制取消。
+
+改为在 authSet/authRemove/OAuth callback 三个服务端 handler 中
+调用 refreshProviderCaches：仅用 ScopedCache.invalidateAll 刷新
+Provider.Service 缓存（不触碰 SessionRunState），发 global.disposed
+通知客户端刷新 UI。运行中会话继续用旧密钥跑完，下一条新消息惰性
+重建缓存并获取新密钥。configUpdate 路径保留旧行为（已知限制）。
+
+diff --git a/packages/app/src/components/dialog-connect-provider.tsx b/packages/app/src/components/dialog-connect-provider.tsx
+index e305743799af95c4a23c0fbbcbb014851da74d48..05e280fed2588a2eb5d9ebacc2eec8332d428f0d 100644
+--- a/packages/app/src/components/dialog-connect-provider.tsx
++++ b/packages/app/src/components/dialog-connect-provider.tsx
+@@ -332,7 +332,8 @@ export function DialogConnectProvider(props: { provider: string }) {
+   })
+ 
+   async function complete() {
+-    await globalSDK.client.global.dispose()
++    // 不再调 global.dispose()——服务端 authSet/callback handler 已刷新 Provider 缓存。
++    // global.disposed 事件会触发 bootstrap.refetch() 使 UI 获取最新 provider 列表。
+     dialog.close()
+     showToast({
+       variant: "success",
+diff --git a/packages/app/src/components/settings-providers.tsx b/packages/app/src/components/settings-providers.tsx
+index cc69327f80d5fa1e478cf94c301cc28046965d27..a195ef42a45a4e74a545f9e3b08f5dd9592bd831 100644
+--- a/packages/app/src/components/settings-providers.tsx
++++ b/packages/app/src/components/settings-providers.tsx
+@@ -112,7 +112,8 @@ export const SettingsProviders: Component = () => {
+     await globalSDK.client.auth
+       .remove({ providerID })
+       .then(async () => {
+-        await globalSDK.client.global.dispose()
++        // 不再调 global.dispose()——服务端 authRemove handler 已刷新 Provider 缓存。
++        // global.disposed 事件会触发 UI 刷新。
+         showToast({
+           variant: "success",
+           icon: "circle-check",
+diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx
+index 2caa67b559acaa80f09d5c57664c74e86caab51e..097a8b671aa488bdead51328f4c2208b89d59d8e 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/dialog-provider.tsx
+@@ -265,7 +265,8 @@ function AutoMethod(props: AutoMethodProps) {
+       dialog.clear()
+       return
+     }
+-    await sdk.client.instance.dispose()
++    // 不再调 instance.dispose()——服务端 authSet/callback handler 已刷新 Provider 缓存。
++    // 仅靠 bootstrap() 刷新 TUI 本地数据，运行中的会话不受影响。
+     await sync.bootstrap()
+     dialog.replace(() => <DialogModel providerID={props.providerID} />)
+   })
+@@ -316,7 +317,7 @@ function CodeMethod(props: CodeMethodProps) {
+           code: value,
+         })
+         if (!error) {
+-          await sdk.client.instance.dispose()
++          // 不再调 instance.dispose()——服务端 callback handler 已刷新 Provider 缓存
+           await sync.bootstrap()
+           dialog.replace(() => <DialogModel providerID={props.providerID} />)
+           return
+@@ -389,7 +390,7 @@ function ApiMethod(props: ApiMethodProps) {
+             ...(props.metadata ? { metadata: props.metadata } : {}),
+           },
+         })
+-        await sdk.client.instance.dispose()
++        // 不再调 instance.dispose()——服务端 authSet handler 已刷新 Provider 缓存
+         await sync.bootstrap()
+         if (props.custom && !sync.data.provider_next.all.some((provider) => provider.id === props.providerID)) {
+           toast.show({
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+index faf99adcf81bf3d0efa5e5f35740395b3b24b367..ca4cfb071a4caa0b2a01853bba3a8dce02991b8b 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+@@ -480,10 +480,15 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+       if (event.type !== "message.part.delta") flushPartDeltas()
+       switch (event.type) {
+         case "global.disposed":
+-          if (daemonStopReason(event) !== DisposedReason.DaemonStop) break
+-          daemonStopSeen = true
+-          exit.message.set("opencode daemon stopped.")
+-          void exit()
++          if (daemonStopReason(event) === DisposedReason.DaemonStop) {
++            daemonStopSeen = true
++            exit.message.set("opencode daemon stopped.")
++            void exit()
++          } else {
++            // 非 DaemonStop 的 global.disposed 来自 auth 变更后的 Provider 缓存刷新。
++            // 不销毁实例，仅刷新 TUI 本地数据以获取最新 provider 列表。
++            void bootstrap()
++          }
+           break
+         case "server.connected":
+           loggedPartDeltaApplications.clear()
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index ec9a0e43cc27d0f67f18f69da24ab99d1b38a045..a953a53cc2a2ff01fff3e4e50e550bd19a23cd64 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -16,7 +16,7 @@ import { iife } from "@/util/iife"
+ import { Global } from "@opencode-ai/core/global"
+ import path from "path"
+ import { pathToFileURL } from "url"
+-import { Effect, Layer, Context, Schema, Types } from "effect"
++import { Effect, Layer, Context, Schema, Types, ScopedCache } from "effect"
+ import { EffectBridge } from "@/effect/bridge"
+ import { InstanceState } from "@/effect/instance-state"
+ import { EffectPromise } from "@/effect/promise"
+@@ -1153,6 +1153,9 @@ export interface Interface {
+   ) => Effect.Effect<{ providerID: ProviderID; modelID: string } | undefined>
+   readonly getSmallModel: (providerID: ProviderID) => Effect.Effect<Model | undefined>
+   readonly defaultModel: () => Effect.Effect<{ providerID: ProviderID; modelID: ModelID }>
++  // 刷新所有目录的 Provider 缓存条目，不触发 SessionRunState 的 finalizer。
++  // auth 变更后调用，使下一次 getLanguage/getProvider 惰性重建并读取新密钥。
++  readonly invalidateAll: () => Effect.Effect<void>
+ }
+ 
+ interface State {
+@@ -1774,6 +1777,12 @@ export const layer = Layer.effect(
+ 
+     const list = Effect.fn("Provider.list")(() => InstanceState.use(state, (s) => s.providers))
+ 
++    // 仅刷新 Provider.Service 的 ScopedCache（所有目录），不触碰 SessionRunState
++    // 等其他服务的缓存——这是 "auth 变更不杀会话" 的结构性保证。
++    const invalidateAll = Effect.fn("Provider.invalidateAll")(() =>
++      ScopedCache.invalidateAll(state.cache),
++    )
++
+     async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>) {
+       try {
+         using _ = log.time("getSDK", {
+@@ -2124,7 +2133,7 @@ export const layer = Layer.effect(
+       }
+     })
+ 
+-    return Service.of({ list, getProvider, getModel, getLanguage, closest, getSmallModel, defaultModel })
++    return Service.of({ list, getProvider, getModel, getLanguage, closest, getSmallModel, defaultModel, invalidateAll })
+   }),
+ )
+ 
+diff --git a/packages/opencode/src/server/global-lifecycle.ts b/packages/opencode/src/server/global-lifecycle.ts
+index aa761a42b4018d384ebebb4da4fe8594f4c3415a..2c54a3cc5ec04bc22508ab8bb370d6d1c7d824d3 100644
+--- a/packages/opencode/src/server/global-lifecycle.ts
++++ b/packages/opencode/src/server/global-lifecycle.ts
+@@ -1,5 +1,6 @@
+ import { GlobalBus } from "@/bus/global"
+ import { InstanceStore } from "@/project/instance-store"
++import { Provider } from "@/provider/provider"
+ import * as Log from "@opencode-ai/core/util/log"
+ import { Effect } from "effect"
+ import { Event } from "./event"
+@@ -34,4 +35,18 @@ export const disposeAllInstancesAndEmitGlobalDisposed = Effect.fn("Server.dispos
+   },
+ )
+ 
++// auth 变更后刷新所有实例的 Provider 缓存（不销毁实例、不杀会话）。
++// 仅失效 Provider.Service 的 ScopedCache，不触碰 SessionRunState 等其他服务。
++// 发 global.disposed 通知客户端刷新 provider 列表（空 properties，非 DaemonStop）。
++// 失败仅告警不阻断——auth 已写入文件，下次访问会惰性重建。
++export const refreshProviderCaches = Effect.fn("Server.refreshProviderCaches")(function* () {
++  const provider = yield* Provider.Service
++  yield* provider.invalidateAll().pipe(
++    Effect.catchCause((cause) =>
++      Effect.sync(() => log.warn("provider cache refresh failed", { cause })),
++    ),
++  )
++  yield* emitGlobalDisposed
++})
++
+ export * as GlobalLifecycle from "./global-lifecycle"
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/control.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/control.ts
+index e1ede2274b69c84d7e679bab4da9403bfee38f5c..6a16513ab4bb61dccc50f0563b8a4d2c06667fb3 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/control.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/control.ts
+@@ -1,5 +1,6 @@
+ import { Auth } from "@/auth"
+ import { ProviderID } from "@/provider/schema"
++import { refreshProviderCaches } from "@/server/global-lifecycle"
+ import * as Log from "@opencode-ai/core/util/log"
+ import { Effect } from "effect"
+ import { HttpApiBuilder } from "effect/unstable/httpapi"
+@@ -15,11 +16,15 @@ export const controlHandlers = HttpApiBuilder.group(RootHttpApi, "control", (han
+       payload: Auth.Info
+     }) {
+       yield* auth.set(ctx.params.providerID, ctx.payload).pipe(Effect.orDie)
++      // auth 写入后刷新 Provider 缓存（不杀会话），使下次请求获取新密钥
++      yield* refreshProviderCaches()
+       return true
+     })
+ 
+     const authRemove = Effect.fn("ControlHttpApi.authRemove")(function* (ctx: { params: { providerID: ProviderID } }) {
+       yield* auth.remove(ctx.params.providerID).pipe(Effect.orDie)
++      // auth 移除后同样刷新 Provider 缓存，使该 provider 不再出现在 connected 列表
++      yield* refreshProviderCaches()
+       return true
+     })
+ 
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/provider.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/provider.ts
+index dba684228bf485cdffe0a3d1b31fe077bef2ffb4..52ac46a1a1aff602e10f24d1f76158db87de21b9 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/provider.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/provider.ts
+@@ -3,6 +3,7 @@ import { Config } from "@/config/config"
+ import { ModelsDev } from "@opencode-ai/core/models"
+ import { Provider } from "@/provider/provider"
+ import { ProviderID } from "@/provider/schema"
++import { refreshProviderCaches } from "@/server/global-lifecycle"
+ import { mapValues } from "remeda"
+ import { Effect, Schema } from "effect"
+ import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
+@@ -100,6 +101,8 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
+           code: ctx.payload.code,
+         }),
+       )
++      // OAuth 回调内部已写入 auth，刷新 Provider 缓存使新凭据立即生效
++      yield* refreshProviderCaches()
+       return true
+     })
+ 
+diff --git a/packages/opencode/test/fake/provider.ts b/packages/opencode/test/fake/provider.ts
+index 5f8f7a3302a13912ffc9ac87667f04203c8c3965..0e4f865b1abcc63c16b90ddf3c7e5d8f2d76704d 100644
+--- a/packages/opencode/test/fake/provider.ts
++++ b/packages/opencode/test/fake/provider.ts
+@@ -73,6 +73,8 @@ export namespace ProviderTest {
+           defaultModel: Effect.fn("TestProvider.defaultModel")(() =>
+             Effect.succeed({ providerID: row.id, modelID: mdl.id }),
+           ),
++          // 测试 fake 也需要实现 invalidateAll，保持 Interface 完整
++          invalidateAll: Effect.fn("TestProvider.invalidateAll")(() => Effect.void),
+           ...override,
+         }),
+       ),
+diff --git a/packages/opencode/test/provider/provider.test.ts b/packages/opencode/test/provider/provider.test.ts
+index 3df6cee8fbcd7626dde8092ea39f4df9414610f1..8e6a61868776cafc79b0096970d702c2deb84818 100644
+--- a/packages/opencode/test/provider/provider.test.ts
++++ b/packages/opencode/test/provider/provider.test.ts
+@@ -89,6 +89,11 @@ async function closest(providerID: ProviderID, query: string[], ctx: InstanceCon
+   return run(ctx, (provider) => provider.closest(providerID, query))
+ }
+ 
++// 刷新 Provider.Service 全部目录的缓存条目——模拟 auth 变更后的服务端行为
++async function invalidateAll(ctx: InstanceContext) {
++  return run(ctx, (provider) => provider.invalidateAll())
++}
++
+ async function getSmallModel(providerID: ProviderID, ctx: InstanceContext) {
+   return run(ctx, (provider) => provider.getSmallModel(providerID))
+ }
+@@ -2831,3 +2836,68 @@ test("opencode loader keeps paid models when auth exists", async () => {
+     }
+   }
+ })
++
++// invalidateAll 的核心行为：刷新 Provider.Service 缓存后，
++// 下次 list() 会重新读取 env/auth，反映最新的连接状态。
++// 这验证了 "auth 变更后不销毁实例、仅刷 provider 缓存" 的关键路径。
++test("invalidateAll 后 provider.list 反映最新的 env 状态", async () => {
++  await using tmp = await tmpdir({
++    init: async (dir) => {
++      await Bun.write(
++        path.join(dir, "opencode.json"),
++        JSON.stringify({ $schema: "https://opencode.ai/config.json" }),
++      )
++    },
++  })
++  await withTestInstance({
++    directory: tmp.path,
++    fn: async (ctx) => {
++      // 设置 env → provider 初始化后包含 anthropic
++      set(ctx, "ANTHROPIC_API_KEY", "test-api-key")
++      const before = await list(ctx)
++      expect(before[ProviderID.anthropic]).toBeDefined()
++
++      // 移除 env，但缓存仍持有旧数据（未刷新）
++      remove(ctx, "ANTHROPIC_API_KEY")
++      const stale = await list(ctx)
++      expect(stale[ProviderID.anthropic]).toBeDefined()
++
++      // 刷新缓存后，下次 list 重新读取 env → anthropic 不再存在
++      await invalidateAll(ctx)
++      const after = await list(ctx)
++      expect(after[ProviderID.anthropic]).toBeUndefined()
++    },
++  })
++})
++
++// invalidateAll 不能破坏后续的 getLanguage 调用——
++// 缓存被清空后，下次 getLanguage 应惰性重建并正常返回。
++// 这验证了 invalidateAll 是安全的：不产生半态或损坏的缓存。
++test("invalidateAll 后 getLanguage 仍能正常重建缓存", async () => {
++  await using tmp = await tmpdir({
++    init: async (dir) => {
++      await Bun.write(
++        path.join(dir, "opencode.json"),
++        JSON.stringify({ $schema: "https://opencode.ai/config.json" }),
++      )
++    },
++  })
++  await withTestInstance({
++    directory: tmp.path,
++    fn: async (ctx) => {
++      set(ctx, "ANTHROPIC_API_KEY", "test-api-key")
++      const model = await getModel(ProviderID.anthropic, ModelID.make("claude-sonnet-4-20250514"), ctx)
++      // 首次调用 → 初始化缓存
++      const lang1 = await getLanguage(model, ctx)
++      expect(lang1).toBeDefined()
++
++      // 刷新缓存 → 清空
++      await invalidateAll(ctx)
++
++      // 再次调用 → 惰性重建，应正常返回
++      const model2 = await getModel(ProviderID.anthropic, ModelID.make("claude-sonnet-4-20250514"), ctx)
++      const lang2 = await getLanguage(model2, ctx)
++      expect(lang2).toBeDefined()
++    },
++  })
++})

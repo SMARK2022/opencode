@@ -1,0 +1,53 @@
+From bba9c227dfcfd36029a7b4ef62ed81546c493b51 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 15 Jun 2026 11:53:11 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tests):=20=E5=A2=9E=E5=BC=BA=E4=BA=8B?=
+ =?UTF-8?q?=E4=BB=B6=E6=BA=90=E6=B8=85=E7=90=86=E9=80=BB=E8=BE=91=EF=BC=8C?=
+ =?UTF-8?q?=E7=A1=AE=E4=BF=9D=E6=B5=8B=E8=AF=95=E5=90=8E=E4=B8=8D=E7=95=99?=
+ =?UTF-8?q?=E5=AD=98=E4=BD=99=E7=95=99=E7=8A=B6=E6=80=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx b/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
+index 9f180f79bd27015734306f87204f48b5d71912ad..4bf72cff9d23b9439b4e95e1995a803055f04c54 100644
+--- a/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
++++ b/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
+@@ -1,5 +1,6 @@
+ /** @jsxImportSource @opentui/solid */
+ import { testRender } from "@opentui/solid"
++import { engine } from "@opentui/core"
+ import { onMount } from "solid-js"
+ import { ArgsProvider } from "../../../../src/cli/cmd/tui/context/args"
+ import { ExitProvider } from "../../../../src/cli/cmd/tui/context/exit"
+@@ -49,6 +50,9 @@ export function createEventSource() {
+       if (!fn) throw new Error("event source not ready")
+       fn(event)
+     },
++    dispose() {
++      fn = undefined
++    },
+   }
+ }
+ 
+@@ -151,6 +155,19 @@ export async function mount(override?: FetchHandler) {
+       useThread: false,
+     },
+   )
++  const destroy = app.renderer.destroy.bind(app.renderer)
++  app.renderer.destroy = () => {
++    // Solid cleanup should unsubscribe the test event source, but Windows full-run
++    // failures showed a file-level cleanup timeout after every named sync test passed.
++    // Clear the test transport and detach OpenTUI's global engine explicitly so no
++    // destroyed renderer or event callback survives the last sync fixture teardown.
++    events.dispose()
++    try {
++      destroy()
++    } finally {
++      engine.detach()
++    }
++  }
+ 
+   await ready
+   await wait(() => sync.status === "complete")

@@ -1,0 +1,30 @@
+From 53122e9f78b4beb80a835cd7b8616cf47af3ad1c Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 17 Jul 2026 16:05:28 +0800
+Subject: [PATCH] =?UTF-8?q?chore(submodule):=20=E6=B3=A8=E5=86=8C=20OpenTU?=
+ =?UTF-8?q?I=20SMARK=20=E5=88=86=E6=94=AF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+将 SMARK2022/opentui:smark/main 以 gitlink 固定到 15cecf50，方便其他主机通过 thirdparty/opentui 初始化同一份源码。\n该提交只建立源码与 provenance 链接，不宣称 OpenCode release consumer 已完成。
+
+diff --git a/.gitmodules b/.gitmodules
+index 2d55dbd5b65819b170121911e0ff139b8da7bb2c..67be70d25e0482260ecb21ae4af64ef83c8dc369 100644
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -2,3 +2,7 @@
+ 	path = thirdparty/chatgpt-browser-agent
+ 	url = https://github.com/SMARK2022/chatgpt-browser-agent-smark.git
+ 	branch = smark/main
++[submodule "thirdparty/opentui"]
++	path = thirdparty/opentui
++	url = https://github.com/SMARK2022/opentui.git
++	branch = smark/main
+diff --git a/thirdparty/opentui b/thirdparty/opentui
+new file mode 160000
+index 0000000000000000000000000000000000000000..15cecf50fe68f39ad03699a346b90f490983fb73
+--- /dev/null
++++ b/thirdparty/opentui
+@@ -0,0 +1 @@
++Subproject commit 15cecf50fe68f39ad03699a346b90f490983fb73

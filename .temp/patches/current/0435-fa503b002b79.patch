@@ -1,0 +1,643 @@
+From fa503b002b79ef1fbddad702d00507c9a8251545 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Wed, 15 Jul 2026 14:14:18 +0800
+Subject: [PATCH] =?UTF-8?q?fix(goal):=20=E5=B0=86=E5=B7=A5=E5=85=B7?=
+ =?UTF-8?q?=E5=8F=82=E6=95=B0=20mark=20=E6=94=B9=E4=B8=BA=20operate=20?=
+ =?UTF-8?q?=E5=B9=B6=E6=96=B0=E5=A2=9E=20read=20=E6=93=8D=E4=BD=9C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+显式 operate=read 消除空对象读取歧义，required:["operate"] 确保 provider 签名不再把所有字段误显示为必填或全可选，模型能正确区分读取与状态变更。
+
+同步 goal.txt、continuation prompt 和所有模型可见拒绝消息从 mark 到 operate，不保留旧参数兼容分支。
+
+diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
+index f29b1f20470882cf0560f5d4b99a938b82519d7b..e9ddc6b08702279c0c3e4a1704063afb82d5e864 100644
+--- a/packages/opencode/src/session/goal.ts
++++ b/packages/opencode/src/session/goal.ts
+@@ -346,18 +346,18 @@ export const layer = Layer.effect(
+ 
+         // CAS 校验：snapshot 必须匹配当前 row，防止 stale write
+         if (row.id !== input.snapshot.goalID)
+-          return { type: "error", message: "The goal ID in your read snapshot does not match the current goal. The goal may have been cleared and recreated since you last read it. Call get again to read the current goal." }
++          return { type: "error", message: "The goal ID in your read snapshot does not match the current goal. The goal may have been cleared and recreated since you last read it. Call operate read again to read the current goal." }
+         if (row.generation !== input.snapshot.generation)
+-          return { type: "error", message: "The objective has been edited since you last read the goal, so your read snapshot is stale. Call get again to read the updated goal before marking its status." }
++          return { type: "error", message: "The objective has been edited since you last read the goal, so your read snapshot is stale. Call operate read again before changing the goal." }
+         if (row.status !== input.snapshot.status)
+-          return { type: "error", message: "The goal status has changed since you last read it. Call get again to read the current goal before marking its status." }
++          return { type: "error", message: "The goal status has changed since you last read it. Call operate read again before changing the goal." }
+ 
+         // 模型 terminal transition 只允许 active source；在 reason/audit 写入前拒绝 terminal re-mark，
+         // 防止 user-owned terminal 被改写 terminal_turn_id 后由模型自行恢复。
+         if ((input.status === "complete" || input.status === "blocked") && row.status !== "active") {
+           return {
+             type: "error",
+-            message: `Marking a goal as ${input.status} is only valid for an active goal, but this goal is currently ${row.status}. Do not mark a paused or terminal goal again; wait for the user to resume it, or if you previously ended it, use mark active only in a later real user turn after reading it again.`,
++            message: `Marking a goal as ${input.status} is only valid for an active goal, but this goal is currently ${row.status}. Do not mark a paused or terminal goal again; wait for the user to resume it, or if you previously ended it, use operate active only in a later real user turn after reading it again.`,
+           }
+         }
+ 
+@@ -367,9 +367,9 @@ export const layer = Layer.effect(
+           // complete 需要 reason
+           const trimmedReason = input.reason?.trim() ?? ""
+           if (trimmedReason === "")
+-            return { type: "error", message: "Marking the goal as complete requires a non-empty reason explaining why the objective has been achieved. Provide that reason, then retry with mark complete." }
++            return { type: "error", message: "Marking the goal as complete requires a non-empty reason explaining why the objective has been achieved. Provide that reason, then retry with operate complete." }
+           if (trimmedReason.length > MAX_REASON_CHARS)
+-            return { type: "error", message: `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with mark complete.` }
++            return { type: "error", message: `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with operate complete.` }
+ 
+           Database.use((db) =>
+             db.update(SessionGoalTable).set({
+@@ -392,9 +392,9 @@ export const layer = Layer.effect(
+         if (input.status === "blocked") {
+           const trimmedReason = input.reason?.trim() ?? ""
+           if (trimmedReason === "")
+-            return { type: "error", message: "Marking the goal as blocked requires a non-empty reason explaining what is preventing progress. Provide that reason, then retry with mark blocked." }
++            return { type: "error", message: "Marking the goal as blocked requires a non-empty reason explaining what is preventing progress. Provide that reason, then retry with operate blocked." }
+           if (trimmedReason.length > MAX_REASON_CHARS)
+-            return { type: "error", message: `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with mark blocked.` }
++            return { type: "error", message: `The reason must be at most ${MAX_REASON_CHARS} characters. Shorten it, then retry with operate blocked.` }
+ 
+           // 同一 turn 只有相同 reason 才是幂等重试；reason 改变表示模型修正 blocker，
+           // 必须落入下方 attempt-1 写路径替换 baseline，不能保留已经撤回的旧理由。
+@@ -458,7 +458,7 @@ export const layer = Layer.effect(
+           // already-active 不能作为幂等成功，否则模型会误认为执行被重新启动；
+           // 明确导回 objective，保持 Tool transition 只负责真正的状态变化。
+           if (row.status === "active")
+-            return { type: "error", message: "This goal is already active, so there is no terminal state to recover from. Continue working toward the current objective instead of calling mark active again." }
++            return { type: "error", message: "This goal is already active, so there is no terminal state to recover from. Continue working toward the current objective instead of calling operate active again." }
+           // 仅 model-produced terminal 可恢复（terminal_turn_id 非 null）
+           if (!row.terminal_turn_id)
+             return { type: "error", message: "This goal was marked as complete or blocked by the user, not by you. You can only resume goals that you yourself marked as complete or blocked. The user must resume this goal themselves." }
+@@ -589,16 +589,16 @@ export function continuationPrompt(goal: Goal): string {
+     "- Treat uncertain or indirect evidence as not achieved; gather stronger evidence or continue the work.",
+     "- The audit must prove completion, not merely fail to find obvious remaining work.",
+     "",
+-    'Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Marking the goal complete is a claim that the full objective has been finished and can withstand requirement-by-requirement scrutiny. Only mark the goal achieved when current evidence proves every requirement has been satisfied and no required work remains. If the evidence is incomplete, weak, indirect, merely consistent with completion, or leaves any requirement missing, incomplete, or unverified, keep working instead of marking the goal complete. If the objective is achieved, call the goal tool with mark "complete" so usage accounting is preserved. If the achieved goal has a token budget, report the final consumed token budget to the user after the goal tool succeeds.',
++    'Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Marking the goal complete is a claim that the full objective has been finished and can withstand requirement-by-requirement scrutiny. Only mark the goal achieved when current evidence proves every requirement has been satisfied and no required work remains. If the evidence is incomplete, weak, indirect, merely consistent with completion, or leaves any requirement missing, incomplete, or unverified, keep working instead of marking the goal complete. If the objective is achieved, call the goal tool with operate "complete" so usage accounting is preserved. If the achieved goal has a token budget, report the final consumed token budget to the user after the goal tool succeeds.',
+     "",
+     "Blocked audit:",
+-    '- Call the goal tool with mark "blocked" and a concise reason when a blocker prevents meaningful progress. The first call starts the audit and keeps the goal active.',
++    '- Call the goal tool with operate "blocked" and a concise reason when a blocker prevents meaningful progress. The first call starts the audit and keeps the goal active.',
+     '- Before calling it again, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints.',
+-    '- If the same condition still prevents progress after that exploration, call the goal tool with mark "blocked" in the next eligible Goal turn using the same trimmed reason. The blocked audit requires two consecutive eligible Goal turns; the second valid call marks the goal as blocked.',
++    '- If the same condition still prevents progress after that exploration, call the goal tool with operate "blocked" in the next eligible Goal turn using the same trimmed reason. The blocked audit requires two consecutive eligible Goal turns; the second valid call marks the goal as blocked.',
+     '- If the user resumes a goal that was previously marked "blocked", treat the resumed run as a fresh audit with the same two-turn and exact-reason requirements.',
+-    '- Use mark "blocked" only when you are truly at an impasse and cannot make meaningful progress without user input or an external-state change.',
+-    '- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; call the goal tool with mark "blocked".',
+-    '- Never use mark "blocked" merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.',
++    '- Use operate "blocked" only when you are truly at an impasse and cannot make meaningful progress without user input or an external-state change.',
++    '- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; call the goal tool with operate "blocked".',
++    '- Never use operate "blocked" merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.',
+     "",
+     "Do not call the goal tool unless the goal is complete or the strict blocked audit above is satisfied. Do not mark a goal complete merely because the budget is nearly exhausted or because you are stopping work.",
+     "</session-goal-continuation>",
+diff --git a/packages/opencode/src/tool/goal.ts b/packages/opencode/src/tool/goal.ts
+index 47e87e3ff8f5616a0cdaff07b3e9540028b345b5..969fedfdbc1907b536aea51d0c789281abf7724a 100644
+--- a/packages/opencode/src/tool/goal.ts
++++ b/packages/opencode/src/tool/goal.ts
+@@ -18,17 +18,17 @@ export interface GoalTurnContext {
+ }
+ 
+ // goal 工具参数：
+-// 无 mark → get 模式：返回当前 goal 的状态、objective、用量、预算和代际
+-// 有 mark → transition 模式：需要先 get 建立 read snapshot
++// operate=read → 返回当前 goal 的状态、objective、用量、预算和代际
++// 其他 operate → transition 模式：需要先 read 建立 snapshot
+ // complete/blocked 需要 reason；active 用于从 model-produced terminal 恢复
+ export const Parameters = Schema.Struct({
+-  mark: Schema.optional(Schema.Literals(["complete", "blocked", "active"] as const)).annotate({
++  operate: Schema.Literals(["read", "complete", "blocked", "active"] as const).annotate({
+     description:
+-      "Mark the goal as `complete` when the objective is achieved. Mark it as `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. Mark as `active` to resume a model-produced terminal goal in a later user turn. Omit to get the current goal status.",
++      "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. Use `active` to resume a model-produced terminal goal in a later user turn.",
+   }),
+   reason: Schema.optional(Schema.String).annotate({
+     description:
+-      "Required when marking `complete` or `blocked`. A concise explanation of why the goal is being marked. Ignored for `active`.",
++      "Required when operate is `complete` or `blocked`. A concise explanation of why the goal is being marked. Ignored for `read` and `active`.",
+   }),
+ })
+ 
+@@ -40,23 +40,23 @@ export interface GoalToolExtra {
+   goalTurn?: GoalTurnContext
+ }
+ 
+-// 省略 mark 被刻意保留为读取动作；若拆成第二个工具，trusted snapshot 无法留在同一 Tool context。
+-// transition 必须先 get 建立 read snapshot——防止模型不看 GOAL 就直接终态化。
++// 显式 read 避免 provider 把可选字段错误展示成必填后，模型无法表达读取动作。
++// transition 必须先 operate=read 建立 snapshot——防止模型不看 GOAL 就直接终态化。
+ // 不允许模型 pause/resume/clear/改预算——这些由用户或系统控制。
+ export const GoalTool = Tool.define(
+   "goal",
+   Effect.succeed({
+     description: DESCRIPTION,
+     parameters: Parameters,
+-    execute: (params: { mark?: "complete" | "blocked" | "active"; reason?: string }, ctx: Tool.Context) =>
++    execute: (params: { operate: "read" | "complete" | "blocked" | "active"; reason?: string }, ctx: Tool.Context) =>
+       Effect.gen(function* () {
+         const extra = ctx.extra as GoalToolExtra | undefined
+         if (!extra?.goalSvc) {
+           return yield* Effect.fail(new Error("goal tool requires goalSvc in ctx.extra"))
+         }
+ 
+-        // 无 mark 参数 → get 模式：返回当前 goal 的完整信息
+-        if (params.mark === undefined) {
++        // read 是唯一读取动作，不再依赖 provider 对空对象/可选字段的展示语义。
++        if (params.operate === "read") {
+           const goalOpt = yield* extra.goalSvc.get(ctx.sessionID)
+           if (Option.isNone(goalOpt)) {
+             return {
+@@ -96,12 +96,12 @@ export const GoalTool = Tool.define(
+           }
+         }
+ 
+-        // 有 mark 参数 → transition 模式
+-        // read gate：必须先 get 建立 trusted snapshot，防止模型不看 GOAL 就终态化
++        // 其他 operate → transition 模式
++        // read gate：必须先 operate=read 建立 trusted snapshot，防止模型不看 GOAL 就终态化
+         if (!extra.goalTurn?.read) {
+           return yield* Effect.fail(
+             new Error(
+-              "You must call the goal tool with no arguments to read the current goal before marking it. Read the current goal, then retry the transition with mark and reason.",
++              "You must call the goal tool with operate `read` before changing the goal. Read the current goal, then retry with operate and reason.",
+             ),
+           )
+         }
+@@ -111,7 +111,7 @@ export const GoalTool = Tool.define(
+           turnID: extra.goalTurn.id,
+           previousTurnID: extra.goalTurn.previousID,
+           userInitiated: extra.goalTurn.userInitiated,
+-          status: params.mark,
++          status: params.operate,
+           reason: params.reason,
+         })
+ 
+@@ -144,7 +144,7 @@ export const GoalTool = Tool.define(
+         return {
+           title: "Goal blocked (pending)",
+           metadata: {},
+-          output: `Blocked attempt ${result.attempt} of ${result.required}. Before marking as blocked, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call mark blocked again in the next eligible Goal turn with the same trimmed reason to confirm the blocker is persistent.`,
++          output: `Blocked attempt ${result.attempt} of ${result.required}. Before marking as blocked, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call operate blocked again in the next eligible Goal turn with the same trimmed reason to confirm the blocker is persistent.`,
+         }
+       }).pipe(Effect.orDie),
+   }),
+diff --git a/packages/opencode/src/tool/goal.txt b/packages/opencode/src/tool/goal.txt
+index 2467888d29270cc7c698e9119284cc137d324d15..e71dee07e8334e7984db1729eff2e8d61d402b74 100644
+--- a/packages/opencode/src/tool/goal.txt
++++ b/packages/opencode/src/tool/goal.txt
+@@ -1,13 +1,13 @@
+-Get the current goal, or mark its status.
++Read the current goal, or change its status.
+ 
+-Call with no arguments to get the current goal for this session, including status, objective, token and elapsed-time usage, remaining token budget, and objective generation. You MUST call get before marking any status — the tool will reject status changes without a prior get in the same goal turn.
++Call with `operate: "read"` to get the current goal for this session, including status, objective, token and elapsed-time usage, remaining token budget, and objective generation. You MUST read before changing any status — the tool rejects transitions without a prior read in the same Goal turn.
+ 
+-Call with `mark` and `reason` to mark the goal as achieved, blocked, or resumed:
+-- Mark as `complete` with a `reason` only when the objective has actually been achieved and no required work remains.
+-- Mark as `blocked` with a `reason` only when the same blocking condition remains across two consecutive eligible Goal turns using the same trimmed reason, counting the original/user-triggered turn and any automatic Goal continuation. The first call keeps the Goal active: re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call `mark: "blocked"` again in the next eligible Goal turn with the same trimmed reason. The second consecutive call marks the Goal as blocked.
+-- Mark as `active` (no reason needed) to resume a goal that you previously marked complete or blocked, but only in a later user-initiated turn. You cannot resume a goal that was paused or terminated by the user.
++Call with `operate` and, when required, `reason` to change the goal:
++- Use `operate: "complete"` with a `reason` only when the objective has actually been achieved and no required work remains.
++- Use `operate: "blocked"` with a `reason` only when the same blocking condition remains across two consecutive eligible Goal turns using the same trimmed reason, counting the original/user-triggered turn and any automatic Goal continuation. The first call keeps the Goal active: re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call `operate: "blocked"` again in the next eligible Goal turn with the same trimmed reason. The second consecutive call marks the Goal as blocked.
++- Use `operate: "active"` (no reason needed) to resume a goal that you previously marked complete or blocked, but only in a later user-initiated turn. You cannot resume a goal that was paused or terminated by the user.
+ - If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least two consecutive resumed goal turns, mark as `blocked` again.
+-- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; mark as `blocked`.
++- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; use `operate: "blocked"`.
+ - Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.
+ - Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.
+ - You cannot use this tool to pause, resume (from paused), or clear a goal; those status changes are controlled by the user.
+diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
+index 39188cfc0bc08fbd30ad5e1dff50f2ba84673fac..f60991f3e531bf2231376d64e4f677de8a8d210e 100644
+--- a/packages/opencode/test/session/goal.test.ts
++++ b/packages/opencode/test/session/goal.test.ts
+@@ -393,13 +393,13 @@ it.instance(
+       if (Option.isSome(result)) {
+         const prompt = SessionGoal.continuationPrompt(result.value)
+         // 续跑 prompt 是模型判断 terminal transition 的真实 contract；除目标和预算外，
+-        // 必须使用实际参数名 `mark`，并与 runtime 的两轮同 reason 规则完全一致。
++        // 必须使用实际参数名 `operate`，并与 runtime 的两轮同 reason 规则完全一致。
+         expect(prompt).toContain("<session-goal-continuation>")
+         expect(prompt).toContain("build the feature")
+         expect(prompt).toContain("Tokens used: 1234")
+         expect(prompt).toContain("Token budget: 50000")
+         expect(prompt).toContain("Tokens remaining: 48766")
+-        expect(prompt).toContain('call the goal tool with mark "complete"')
++        expect(prompt).toContain('call the goal tool with operate "complete"')
+         expect(prompt).toContain("two consecutive eligible Goal turns")
+         expect(prompt).toContain("the same trimmed reason")
+         // continuation 是自动续跑前的完整合同，不能只让首次 Tool result 承担探索指导。
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index f251943f440697027c9c7dab3db5722221dd4d1f..c888082ee40d82041ededac9c4d6c8e73f4201d5 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -3956,8 +3956,8 @@ it.instance(
+       })
+       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
+       yield* llm.push(
+-        reply().tool("goal", {}),
+-        reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }),
++        reply().tool("goal", { operate: "read" }),
++        reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }),
+         reply().text("pending recorded").stop(),
+       )
+       yield* prompt.loop({ sessionID: chat.id })
+@@ -3984,8 +3984,8 @@ it.instance(
+       // D 经真实 Prompt/GoalTool path 再次使用同 reason；若 chronology 被 S rewind，
+       // 这里会错误成为 attempt 2 并把 Goal 终态化，因此最终 active 是行为级信号。
+       yield* llm.push(
+-        reply().tool("goal", {}),
+-        reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }),
++        reply().tool("goal", { operate: "read" }),
++        reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }),
+         reply().text("second pending recorded").stop(),
+       )
+       yield* prompt.loop({ sessionID: chat.id })
+@@ -4030,8 +4030,8 @@ it.instance(
+         goalContinuation: true,
+       })
+       yield* llm.push(
+-        reply().tool("goal", {}),
+-        reply().tool("goal", { mark: "blocked", reason: "persistent blocker" }),
++        reply().tool("goal", { operate: "read" }),
++        reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }),
+         reply().text("blocked recorded").stop(),
+       )
+       yield* prompt.loop({ sessionID: chat.id })
+@@ -4062,8 +4062,8 @@ it.instance(
+       const terminalTurn = yield* user(chat.id, "finish now", { created: 1_000 })
+       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
+       yield* llm.push(
+-        reply().tool("goal", {}),
+-        reply().tool("goal", { mark: "complete", reason: "all work verified" }),
++        reply().tool("goal", { operate: "read" }),
++        reply().tool("goal", { operate: "complete", reason: "all work verified" }),
+         reply().text("complete recorded").stop(),
+       )
+       yield* prompt.loop({ sessionID: chat.id })
+@@ -4076,8 +4076,8 @@ it.instance(
+         synthetic: true,
+       })
+       yield* llm.push(
+-        reply().tool("goal", {}),
+-        reply().tool("goal", { mark: "active" }),
++        reply().tool("goal", { operate: "read" }),
++        reply().tool("goal", { operate: "active" }),
+         reply().text("technical recovery rejected").stop(),
+       )
+       yield* prompt.loop({ sessionID: chat.id })
+@@ -4092,8 +4092,8 @@ it.instance(
+         goalContinuation: true,
+       })
+       yield* llm.push(
+-        reply().tool("goal", {}),
+-        reply().tool("goal", { mark: "active" }),
++        reply().tool("goal", { operate: "read" }),
++        reply().tool("goal", { operate: "active" }),
+         reply().text("continuation recovery rejected").stop(),
+       )
+       yield* prompt.loop({ sessionID: chat.id })
+@@ -4102,8 +4102,8 @@ it.instance(
+ 
+       yield* user(chat.id, "please continue", { created: 4_000 })
+       yield* llm.push(
+-        reply().tool("goal", {}),
+-        reply().tool("goal", { mark: "active" }),
++        reply().tool("goal", { operate: "read" }),
++        reply().tool("goal", { operate: "active" }),
+         reply().text("recovery accepted").stop(),
+       )
+       yield* prompt.loop({ sessionID: chat.id })
+diff --git a/packages/opencode/test/tool/goal.test.ts b/packages/opencode/test/tool/goal.test.ts
+index fc7d147db58b247c45c12f088d868d3c43a805be..996fc523190f84d399415dc4dee41773c30e20a9 100644
+--- a/packages/opencode/test/tool/goal.test.ts
++++ b/packages/opencode/test/tool/goal.test.ts
+@@ -60,24 +60,24 @@ const setupGoalTool = Effect.fn("test.setupGoalTool")(function* (objective?: str
+ })
+ 
+ // [local-smark] GoalTool read gate 行为测试：
+-// 验证模型必须先 get 才能写 terminal status，
++// 验证模型必须先 operate=read 才能写 terminal status，
+ // 验证 reason 和 blocked streak 通过 Tool 正确传播，
+ // 验证 active recovery 通过 Tool 正确拒绝或成功
+ 
+ it.instance(
+-  "get returns no goal message when no goal exists",
++  "read operation returns no goal message when no goal exists",
+   () =>
+     Effect.gen(function* () {
+       const { goalSvc, session, def } = yield* setupGoalTool()
+ 
+-      const result = yield* def.execute({}, makeCtx(session.id, goalSvc))
++      const result = yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc))
+       expect(result.output).toContain("No goal")
+     }),
+   { git: true },
+ )
+ 
+ it.instance(
+-  "get returns goal info and writes read snapshot to goalTurn",
++  "read operation returns goal info and writes snapshot to goalTurn",
+   () =>
+     Effect.gen(function* () {
+       const { goalSvc, session, def } = yield* setupGoalTool("test objective")
+@@ -87,9 +87,9 @@ it.instance(
+         id: "turn1",
+         userInitiated: true,
+       }
+-      const result = yield* def.execute({}, makeCtx(session.id, goalSvc, goalTurn))
++      const result = yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, goalTurn))
+ 
+-      // get 返回 goal 信息
++      // read 返回 Goal 信息，并建立 transition 所需的 trusted snapshot。
+       expect(result.output).toContain("test objective")
+       expect(result.output).toContain("active")
+ 
+@@ -101,7 +101,7 @@ it.instance(
+ )
+ 
+ it.instance(
+-  "mark without prior get explains how to establish the read gate",
++  "transition without prior read explains how to establish the read gate",
+   () =>
+     Effect.gen(function* () {
+       const { goalSvc, session, def } = yield* setupGoalTool("test")
+@@ -109,7 +109,7 @@ it.instance(
+       // goalTurn 无 read snapshot → transition 必须失败
+       const goalTurn: GoalTurnContext = { id: "turn1", userInitiated: true }
+       const result = yield* def.execute(
+-        { mark: "complete", reason: "done" },
++        { operate: "complete", reason: "done" },
+         makeCtx(session.id, goalSvc, goalTurn),
+       ).pipe(Effect.exit)
+ 
+@@ -117,26 +117,26 @@ it.instance(
+       if (Exit.isFailure(result)) {
+         // Tool wrapper 把执行失败转为 defect；模型最终看到的正是 squash 后的消息。
+         const error = Cause.squash(result.cause) as Error
+-        expect(error.message).toContain("call the goal tool with no arguments")
+-        expect(error.message).toContain("retry the transition with mark")
++        expect(error.message).toContain("operate `read`")
++        expect(error.message).toContain("retry with operate and reason")
+       }
+     }),
+   { git: true },
+ )
+ 
+ it.instance(
+-  "complete after get succeeds and persists reason",
++  "complete after read succeeds and persists reason",
+   () =>
+     Effect.gen(function* () {
+       const { goalSvc, session, def } = yield* setupGoalTool("test")
+ 
+-      // 先 get 建立 read snapshot
++      // 先显式 read 建立 snapshot，随后同一 Goal turn 才允许 transition。
+       const goalTurn: GoalTurnContext = { id: "turn1", userInitiated: true }
+-      yield* def.execute({}, makeCtx(session.id, goalSvc, goalTurn))
++      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, goalTurn))
+ 
+       // 再 complete
+       const result = yield* def.execute(
+-        { mark: "complete", reason: "all done" },
++        { operate: "complete", reason: "all done" },
+         makeCtx(session.id, goalSvc, goalTurn),
+       )
+       expect(result.output).toContain("complete")
+@@ -153,15 +153,15 @@ it.instance(
+ )
+ 
+ it.instance(
+-  "missing terminal reason explains how to retry the mark",
++  "missing terminal reason explains how to retry the operation",
+   () =>
+     Effect.gen(function* () {
+       const { goalSvc, session, def } = yield* setupGoalTool("test")
+ 
+       const turn: GoalTurnContext = { id: "turn1", userInitiated: true }
+-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn))
++      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn))
+       const result = yield* def.execute(
+-        { mark: "complete" },
++        { operate: "complete" },
+         makeCtx(session.id, goalSvc, turn),
+       ).pipe(Effect.exit)
+ 
+@@ -170,7 +170,7 @@ it.instance(
+         // 模型需要同时知道拒绝原因和下一次合法调用，不接受只有名词短语的错误。
+         const error = Cause.squash(result.cause) as Error
+         expect(error.message).toContain("non-empty reason")
+-        expect(error.message).toContain("retry with mark complete")
++        expect(error.message).toContain("retry with operate complete")
+       }
+     }),
+   { git: true },
+@@ -182,11 +182,11 @@ it.instance(
+     Effect.gen(function* () {
+       const { goalSvc, session, def } = yield* setupGoalTool("original")
+       const turn: GoalTurnContext = { id: "turn1", userInitiated: true }
+-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn))
++      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn))
+       yield* goalSvc.set(session.id, { objective: "revised" })
+ 
+       const result = yield* def.execute(
+-        { mark: "complete", reason: "finished original" },
++        { operate: "complete", reason: "finished original" },
+         makeCtx(session.id, goalSvc, turn),
+       ).pipe(Effect.exit)
+       expect(Exit.isFailure(result)).toBe(true)
+@@ -194,7 +194,7 @@ it.instance(
+         // stale rejection 不能只说 mismatch；模型必须知道重新读取 revised Goal 后再决策。
+         const error = Cause.squash(result.cause) as Error
+         expect(error.message).toContain("objective has been edited")
+-        expect(error.message).toContain("Call get again")
++        expect(error.message).toContain("Call operate read again")
+       }
+     }),
+   { git: true },
+@@ -206,11 +206,11 @@ it.instance(
+     Effect.gen(function* () {
+       const { goalSvc, session, def } = yield* setupGoalTool("test")
+ 
+-      // Turn 1: get then blocked → pending
++      // Turn 1: read then blocked → pending
+       const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
+-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
++      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
+       const r1 = yield* def.execute(
+-        { mark: "blocked", reason: "stuck on X" },
++        { operate: "blocked", reason: "stuck on X" },
+         makeCtx(session.id, goalSvc, turn1),
+       )
+       expect(r1.output).toContain("attempt 1")
+@@ -227,11 +227,11 @@ it.instance(
+       expect(def.description).toContain("re-read relevant files")
+       expect(def.description).toContain("overlooked dependencies or constraints")
+ 
+-      // 新 turn 必须重新 get；复用 t1 snapshot 会掩盖 read-per-turn gate 是否真实生效。
++      // 新 turn 必须重新 read；复用 t1 snapshot 会掩盖 read-per-turn gate 是否真实生效。
+       const turn2: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: true }
+-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn2))
++      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn2))
+       const r2 = yield* def.execute(
+-        { mark: "blocked", reason: "stuck on X" },
++        { operate: "blocked", reason: "stuck on X" },
+         makeCtx(session.id, goalSvc, turn2),
+       )
+       expect(r2.output).toContain("blocked")
+@@ -251,19 +251,19 @@ it.instance(
+       const { goalSvc, session, def } = yield* setupGoalTool("test")
+ 
+       const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
+-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
+-      yield* def.execute({ mark: "blocked", reason: "blocker A" }, makeCtx(session.id, goalSvc, turn1))
++      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
++      yield* def.execute({ operate: "blocked", reason: "blocker A" }, makeCtx(session.id, goalSvc, turn1))
+       const changed = yield* def.execute(
+-        { mark: "blocked", reason: "blocker B" },
++        { operate: "blocked", reason: "blocker B" },
+         makeCtx(session.id, goalSvc, turn1),
+       )
+       expect(changed.output).toContain("attempt 1 of 2")
+ 
+       // 新 baseline 是 B；下一 turn 再用已撤回的 A 只能重新开始，不能 terminal。
+       const turn2: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: true }
+-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn2))
++      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn2))
+       const oldReason = yield* def.execute(
+-        { mark: "blocked", reason: "blocker A" },
++        { operate: "blocked", reason: "blocker A" },
+         makeCtx(session.id, goalSvc, turn2),
+       )
+       expect(oldReason.output).toContain("attempt 1 of 2")
+@@ -281,10 +281,10 @@ it.instance(
+ 
+       // Turn 1: complete
+       const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
+-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
++      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
+       // active 不是可幂等“恢复”的成功分支；拒绝必须把模型导回当前 objective，
+       // 否则模型只知道没有 terminal，却不知道合法动作是继续执行而非再次调用工具。
+-      const already = yield* def.execute({ mark: "active" }, makeCtx(session.id, goalSvc, turn1)).pipe(Effect.exit)
++      const already = yield* def.execute({ operate: "active" }, makeCtx(session.id, goalSvc, turn1)).pipe(Effect.exit)
+       expect(Exit.isFailure(already)).toBe(true)
+       if (Exit.isFailure(already)) {
+         const error = Cause.squash(already.cause) as Error
+@@ -292,15 +292,15 @@ it.instance(
+         expect(error.message).toContain("Continue working toward the current objective")
+       }
+       yield* def.execute(
+-        { mark: "complete", reason: "done" },
++        { operate: "complete", reason: "done" },
+         makeCtx(session.id, goalSvc, turn1),
+       )
+ 
+-      // Turn 2: get then active recovery
++      // Turn 2: read then active recovery
+       const turn2: GoalTurnContext = { id: "t2", userInitiated: true }
+-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn2))
++      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn2))
+       const result = yield* def.execute(
+-        { mark: "active" },
++        { operate: "active" },
+         makeCtx(session.id, goalSvc, turn2),
+       )
+       expect(result.output).toContain("resumed")
+@@ -316,17 +316,17 @@ it.instance(
+ 
+       // Same turn: complete then active → reject
+       const turn1: GoalTurnContext = { id: "t1", userInitiated: true }
+-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
++      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
+       yield* def.execute(
+-        { mark: "complete", reason: "done" },
++        { operate: "complete", reason: "done" },
+         makeCtx(session.id, goalSvc, turn1),
+       )
+ 
+-      // terminal 写入后同一 turn 重新 get，确保本断言到达 recovery actor/turn guard，
++      // terminal 写入后同一 turn 重新 read，确保本断言到达 recovery actor/turn guard，
+       // 而不是被旧 active snapshot 的 status-CAS 提前拒绝。
+-      yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
++      yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
+       const result = yield* def.execute(
+-        { mark: "active" },
++        { operate: "active" },
+         makeCtx(session.id, goalSvc, turn1),
+       ).pipe(Effect.exit)
+       expect(Exit.isFailure(result)).toBe(true)
+@@ -343,16 +343,16 @@ it.instance(
+   "user-produced terminal cannot be re-marked or recovered through the tool",
+   () =>
+     Effect.gen(function* () {
+-      yield* Effect.forEach(["complete", "blocked"] as const, (mark) =>
++      yield* Effect.forEach(["complete", "blocked"] as const, (operation) =>
+         Effect.gen(function* () {
+           const { goalSvc, session, def } = yield* setupGoalTool("test")
+           yield* goalSvc.set(session.id, { status: "complete", reason: "user done" })
+ 
+-          const turn1: GoalTurnContext = { id: `remark-${mark}`, userInitiated: true }
+-          yield* def.execute({}, makeCtx(session.id, goalSvc, turn1))
++          const turn1: GoalTurnContext = { id: `remark-${operation}`, userInitiated: true }
++          yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
+           // terminal re-mark 必须在写 reason/audit/provenance 前失败，否则模型能洗白 user ownership。
+           const remark = yield* def.execute(
+-            { mark, reason: "model claim" },
++            { operate: operation, reason: "model claim" },
+             makeCtx(session.id, goalSvc, turn1),
+           ).pipe(Effect.exit)
+           expect(Exit.isFailure(remark)).toBe(true)
+@@ -365,10 +365,10 @@ it.instance(
+           const persisted = yield* goalSvc.get(session.id)
+           expect(Option.getOrUndefined(persisted)?.reason).toBe("user done")
+           // 新真实用户 turn 仍不能 active，证明 re-mark 没有写入 model terminal_turn_id。
+-          const turn2: GoalTurnContext = { id: `recover-${mark}`, userInitiated: true }
+-          yield* def.execute({}, makeCtx(session.id, goalSvc, turn2))
++          const turn2: GoalTurnContext = { id: `recover-${operation}`, userInitiated: true }
++          yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn2))
+           const recovery = yield* def.execute(
+-            { mark: "active" },
++            { operate: "active" },
+             makeCtx(session.id, goalSvc, turn2),
+           ).pipe(Effect.exit)
+           expect(Exit.isFailure(recovery)).toBe(true)
+diff --git a/packages/opencode/test/tool/parameters.test.ts b/packages/opencode/test/tool/parameters.test.ts
+index a002e6c8bfa87dc144eb6c4a9c05a7b2295405e8..d312afb6e5331c9d946b66373b374382981d2437 100644
+--- a/packages/opencode/test/tool/parameters.test.ts
++++ b/packages/opencode/test/tool/parameters.test.ts
+@@ -41,18 +41,23 @@ describe("tool parameters", () => {
+     test("bash", () => expect(toJsonSchema(Shell)).toMatchSnapshot())
+     test("edit", () => expect(toJsonSchema(Edit)).toMatchSnapshot())
+     test("glob", () => expect(toJsonSchema(Glob)).toMatchSnapshot())
+-    test("goal exposes only the mutation verb", () => {
++    test("goal requires an explicit operation including read", () => {
+       const schema = toJsonSchema(Goal)
+-      // 模型只应看到动词 `mark`；重新暴露 `status` 会恢复“筛选条件还是写动作”的歧义。
+-      expect(schema.properties).toHaveProperty("mark")
++      // 显式 read 消除“文字要求空调用、签名却显示必填”的矛盾；只有 operate 必填，
++      // reason 仍由 complete/blocked 的 domain transition 按操作类型校验。
++      expect(schema.required).toEqual(["operate"])
++      expect(schema.properties).toHaveProperty("operate")
+       expect(schema.properties).toHaveProperty("reason")
++      expect(schema.properties).not.toHaveProperty("mark")
+       expect(schema.properties).not.toHaveProperty("status")
+-      // provider description 是模型在调用前看到的合同；必须直接固定 turn 身份和 reason 归一规则，
+-      // 不能退化为容易在同一 turn 重试的泛化 “two attempts”。
+-      const mark = schema.properties?.mark
+-      if (!mark || typeof mark !== "object") throw new Error("expected Goal mark property schema")
+-      expect(mark.description).toContain("two consecutive eligible Goal turns")
+-      expect(mark.description).toContain("same trimmed reason")
++      const operate = schema.properties?.operate
++      if (!operate || typeof operate !== "object") throw new Error("expected Goal operate property schema")
++      expect(operate.enum).toEqual(["read", "complete", "blocked", "active"])
++      expect(operate.description).toContain("two consecutive eligible Goal turns")
++      expect(operate.description).toContain("same trimmed reason")
++      expect(parse(Goal, { operate: "read" })).toEqual({ operate: "read" })
++      expect(accepts(Goal, {})).toBe(false)
++      expect(accepts(Goal, { mark: "complete", reason: "done" })).toBe(false)
+     })
+     test("grep", () => expect(toJsonSchema(Grep)).toMatchSnapshot())
+     test("invalid", () => expect(toJsonSchema(Invalid)).toMatchSnapshot())

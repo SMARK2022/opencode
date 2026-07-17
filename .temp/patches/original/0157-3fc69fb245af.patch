@@ -1,0 +1,133 @@
+From 3fc69fb245afc5e8e16db2cf13c45d6612f378a9 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 17 May 2026 16:58:05 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E4=B8=8A=E4=B8=8B?=
+ =?UTF-8?q?=E6=96=87=E4=BD=BF=E7=94=A8=E5=BF=AB=E7=85=A7=E5=8A=9F=E8=83=BD?=
+ =?UTF-8?q?=EF=BC=8C=E6=94=AF=E6=8C=81=E6=B5=81=E5=BC=8F=E5=B7=A5=E5=85=B7?=
+ =?UTF-8?q?=E8=BE=93=E5=85=A5=E5=A2=9E=E9=87=8F=E8=B7=9F=E8=B8=AA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+index 4017e87874c368d1ceed27ee181618f29617dbf3..bdb79b9625cd306a916df527d97e252bad604858 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+@@ -379,6 +379,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+             event.properties.messageID,
+             produce((draft) => {
+               const part = draft[result.index]
++              if (part.type === "tool" && part.state.status === "pending" && event.properties.field === "raw") {
++                part.state.raw += event.properties.delta
++                return
++              }
+               const field = event.properties.field as keyof typeof part
+               const existing = part[field] as string | undefined
+               ;(part[field] as string) = (existing ?? "") + event.properties.delta
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
+index 4ba012d53c19bf653cd0dcb82954f3674ff82f31..709d675afe9967955070d2bb621b75cf91b7b4cb 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
+@@ -7,6 +7,7 @@ import { useProject } from "@tui/context/project"
+ import { useSync } from "@tui/context/sync"
+ import { useTheme } from "@tui/context/theme"
+ import { TextAttributes } from "@opentui/core"
++import type { Message, Part } from "@opencode-ai/sdk/v2"
+ import { Locale } from "@/util"
+ import { createThrottledSignal } from "../../util/signal"
+ import {
+@@ -22,6 +23,12 @@ function formatTokens(tokens: number) {
+   return String(tokens)
+ }
+ 
++export function contextUsageSnapshot<T extends Message[] | Part[]>(value: T): T {
++  // The JSON roundtrip deliberately reads nested Solid store fields. A shallow
++  // array copy misses tool/text deltas and only refreshes on whole-part updates.
++  return JSON.parse(JSON.stringify(value)) as T
++}
++
+ function percent(tokens: number, max: number) {
+   if (!max) return "0.0%"
+   return `${((tokens / max) * 100).toFixed(1)}%`
+@@ -226,8 +233,10 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
+   useRenderer()
+ 
+   const inputRaw = createMemo(() => {
+-    const messages = [...(sync.data.message[props.sessionID] ?? [])]
+-    const parts = Object.fromEntries(messages.map((msg) => [msg.id, [...(sync.data.part[msg.id] ?? [])]]))
++    const messages = contextUsageSnapshot([...(sync.data.message[props.sessionID] ?? [])])
++    const parts = Object.fromEntries(
++      messages.map((msg) => [msg.id, contextUsageSnapshot([...(sync.data.part[msg.id] ?? [])])]),
++    )
+     const paths = project.instance.path()
+     return {
+       messages,
+diff --git a/packages/opencode/test/cli/tui/context-usage.test.ts b/packages/opencode/test/cli/tui/context-usage.test.ts
+index a2ca26440603f3f33811a5d352f5303fd5645011..82d21812bd90d0a949f1e58625aca639dd4009c5 100644
+--- a/packages/opencode/test/cli/tui/context-usage.test.ts
++++ b/packages/opencode/test/cli/tui/context-usage.test.ts
+@@ -1,7 +1,9 @@
+ import { describe, expect, test } from "bun:test"
++import { createMemo, createRoot } from "solid-js"
++import { createStore, produce } from "solid-js/store"
+ import type { Message, Part, Provider } from "@opencode-ai/sdk/v2"
+ import { computeContextData, filterCompactedMessages } from "@/cli/cmd/tui/util/context-usage"
+-import { contextUsageDetailLines, contextUsageFooter } from "@/cli/cmd/tui/routes/session/context-usage"
++import { contextUsageDetailLines, contextUsageFooter, contextUsageSnapshot } from "@/cli/cmd/tui/routes/session/context-usage"
+ 
+ const provider: Provider = {
+   id: "test",
+@@ -77,6 +79,52 @@ function text(messageID: string, value: string): Part {
+ }
+ 
+ describe("context usage", () => {
++  test("snapshot tracks streaming tool input deltas", () => {
++    createRoot((dispose) => {
++      const [store, setStore] = createStore<{ parts: Record<string, Part[]> }>({
++        parts: {
++          message: [
++            {
++              id: "tool",
++              sessionID: "s",
++              messageID: "message",
++              type: "tool",
++              tool: "bash",
++              callID: "call",
++              state: { status: "pending", input: {}, raw: "" },
++            } as Part,
++          ],
++        },
++      })
++      let runs = 0
++      const snapshot = createMemo(() => {
++        runs++
++        return contextUsageSnapshot([...(store.parts.message ?? [])])
++      })
++
++      const initial = snapshot()[0]
++      if (!initial || initial.type !== "tool" || initial.state.status !== "pending") {
++        throw new Error("expected pending tool part")
++      }
++      expect(initial.state.raw).toBe("")
++      setStore(
++        "parts",
++        "message",
++        produce((draft) => {
++          const part = draft[0]
++          if (part?.type === "tool" && part.state.status === "pending") part.state.raw = '{"filePath"'
++        }),
++      )
++      const updated = snapshot()[0]
++      if (!updated || updated.type !== "tool" || updated.state.status !== "pending") {
++        throw new Error("expected pending tool part")
++      }
++      expect(updated.state.raw).toBe('{"filePath"')
++      expect(runs).toBe(2)
++      dispose()
++    })
++  })
++
+   test("precise allocation from daemon step-finish inputBreakdown", async () => {
+     const messages = [user("1", { bash: true }), assistant("2", "1")]
+     const parts: Record<string, Part[]> = {

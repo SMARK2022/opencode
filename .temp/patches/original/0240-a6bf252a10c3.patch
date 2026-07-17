@@ -1,0 +1,489 @@
+From a6bf252a10c38e0af49f0f34c64a436ee7838f4f Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Wed, 27 May 2026 18:11:34 +0800
+Subject: [PATCH] =?UTF-8?q?feat(logging):=20=E4=BC=98=E5=8C=96=E6=97=A5?=
+ =?UTF-8?q?=E5=BF=97=E8=AE=B0=E5=BD=95=EF=BC=8C=E8=B0=83=E6=95=B4=E5=8F=91?=
+ =?UTF-8?q?=E5=B8=83=E6=97=A5=E5=BF=97=E7=BA=A7=E5=88=AB=E4=B8=BADEBUG?=
+ =?UTF-8?q?=EF=BC=8C=E6=B7=BB=E5=8A=A0fetch=E8=AF=B7=E6=B1=82=E7=9A=84?=
+ =?UTF-8?q?=E8=AF=A6=E7=BB=86=E6=97=B6=E9=97=B4=E8=B7=9F=E8=B8=AA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/bus/index.ts b/packages/opencode/src/bus/index.ts
+index 282b3c7af0230f54a23bbd6bf46c44e77bf68900..1966d3413e0d0c2a662448151669a9d5d0b35f65 100644
+--- a/packages/opencode/src/bus/index.ts
++++ b/packages/opencode/src/bus/index.ts
+@@ -99,7 +99,10 @@ export const layer = Layer.effect(
+       return Effect.gen(function* () {
+         const s = yield* InstanceState.get(state)
+         const payload: Payload = { id: options?.id ?? createID(), type: def.type, properties }
+-        log.info("publishing", { type: def.type })
++        // Bus publish is on the token-delta hot path, so INFO logging here can
++        // dominate daemon logs without adding timing or payload diagnostics.
++        // Keep the event available at DEBUG while preserving delivery semantics.
++        log.debug("publishing", { type: def.type })
+ 
+         const ps = s.typed.get(def.type)
+         if (ps) yield* PubSub.publish(ps, payload)
+diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index a2c69604cf2b961a7661abd36b9f19cc5c3b9a93..fcaae8e9ff135cd671d0465806286af2212781c6 100644
+--- a/packages/opencode/src/provider/provider.ts
++++ b/packages/opencode/src/provider/provider.ts
+@@ -32,7 +32,13 @@ import { ModelStatus } from "./model-status"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ 
+ const log = Log.create({ service: "provider" })
++// Keep transport diagnostics under a separate service so provider catalogue
++// loading remains readable and callers can filter only fetch/SSE milestones.
++const fetchLog = Log.create({ service: "provider.fetch" })
+ const DEFAULT_TIMEOUT_MS = 300_000
++// Process-local correlation is enough here: the id only ties fetch.start,
++// fetch.response and SSE milestones inside one daemon log, never across runs.
++let providerFetchRequestID = 0
+ const SDK_DEFAULT_API_URL: Record<string, string> = {
+   "@ai-sdk/anthropic": "https://api.anthropic.com/v1",
+   "@ai-sdk/google": "https://generativelanguage.googleapis.com/v1beta",
+@@ -75,17 +81,69 @@ function shouldUseCopilotResponsesApi(modelID: string): boolean {
+   return Number(match[1]) >= 5 && !modelID.startsWith("gpt-5-mini")
+ }
+ 
+-function wrapSSE(res: Response, ms: number, ctl: AbortController) {
++type FetchTiming = {
++  requestID: number
++  providerID: string
++  modelID: string
++  sessionID?: string
++  startedAt: number
++}
++
++function timing(input: FetchTiming, phase: string, extra?: Record<string, unknown>) {
++  // Phase names are the stable contract for diagnosing whether a stall happens
++  // before headers, before raw SSE chunks, or before AI SDK semantic events.
++  fetchLog.info("timing", {
++    phase,
++    requestID: input.requestID,
++    providerID: input.providerID,
++    modelID: input.modelID,
++    sessionID: input.sessionID,
++    elapsedMs: Date.now() - input.startedAt,
++    ...extra,
++  })
++}
++
++function errorFields(error: unknown) {
++  if (error instanceof Error) {
++    const code = "code" in error && typeof error.code === "string" ? error.code : undefined
++    return { errorName: error.name, errorMessage: error.message, errorCode: code }
++  }
++  return { errorMessage: String(error) }
++}
++
++function bodyBytes(body: unknown) {
++  // Only measure already-buffered bodies. Streams and form bodies are not read
++  // here because diagnostics must not consume or duplicate provider requests.
++  if (typeof body === "string") return new TextEncoder().encode(body).byteLength
++  if (body instanceof Uint8Array) return body.byteLength
++  return undefined
++}
++
++function wrapSSE(res: Response, ms: number, ctl: AbortController, timingInput: FetchTiming) {
+   if (typeof ms !== "number" || ms <= 0) return res
+   if (!res.body) return res
+   if (!res.headers.get("content-type")?.includes("text/event-stream")) return res
+ 
+   const reader = res.body.getReader()
++  let chunkCount = 0
++  let bytes = 0
++  let maxGapMs = 0
++  let lastChunkAt = Date.now()
+   const body = new ReadableStream<Uint8Array>({
+     async pull(ctrl) {
+       const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
++        // `chunkTimeout` measures raw SSE body progress, not AI SDK semantic
++        // parts. Logging the timeout with raw counts distinguishes a missing
++        // HTTP/SSE body from heartbeats that never become model output.
+         const id = setTimeout(() => {
+           const err = Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" })
++          timing(timingInput, "sse.timeout", {
++            chunkTimeoutMs: ms,
++            idleMs: Date.now() - lastChunkAt,
++            chunkCount,
++            bytes,
++            maxGapMs,
++          })
+           ctl.abort(err)
+           void reader.cancel(err)
+           reject(err)
+@@ -101,13 +159,27 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
+             reject(err)
+           },
+         )
++      }).catch((error) => {
++        const fields = errorFields(error)
++        if (fields.errorCode !== "SSE_READ_TIMEOUT") {
++          timing(timingInput, "sse.error", { chunkCount, bytes, maxGapMs, ...fields })
++        }
++        throw error
+       })
+ 
+       if (part.done) {
++        timing(timingInput, "sse.end", { chunkCount, bytes, maxGapMs })
+         ctrl.close()
+         return
+       }
+ 
++      const now = Date.now()
++      const gapMs = now - lastChunkAt
++      lastChunkAt = now
++      chunkCount++
++      bytes += part.value.byteLength
++      maxGapMs = Math.max(maxGapMs, gapMs)
++      if (chunkCount === 1) timing(timingInput, "sse.first_chunk", { gapMs, bytes: part.value.byteLength })
+       ctrl.enqueue(part.value)
+     },
+     async cancel(reason) {
+@@ -1797,17 +1869,49 @@ export const layer = Layer.effect(
+             }
+           }
+ 
+-          const res = customFetch
+-            ? await NetworkProxy.fetchWithRoute(customFetch, input, { ...opts, purpose: "provider" })
+-            : await NetworkProxy.fetch(input, {
++          const headers = new Headers(opts.headers)
++          const timingInput = {
++            requestID: ++providerFetchRequestID,
++            providerID: model.providerID,
++            modelID: model.id,
++            sessionID: headers.get("x-session-affinity") ?? headers.get("x-opencode-session") ?? undefined,
++            startedAt: Date.now(),
++          }
++          const timeoutMs =
++            options["timeout"] === false ? undefined : typeof options["timeout"] === "number" ? options["timeout"] : DEFAULT_TIMEOUT_MS
++
++          // This timing is deliberately provider-local and payload-free: it
++          // captures request size and transport milestones without logging body
++          // content, authorization headers, prompts, tool outputs, or raw chunks.
++          timing(timingInput, "fetch.start", {
++            method: opts.method,
++            timeoutMs,
++            chunkTimeoutMs: typeof chunkTimeout === "number" && chunkTimeout > 0 ? chunkTimeout : undefined,
++            bodyBytes: bodyBytes(opts.body),
++          })
++
++          const res = await (customFetch
++            ? NetworkProxy.fetchWithRoute(customFetch, input, { ...opts, purpose: "provider" })
++            : NetworkProxy.fetch(input, {
+                 ...opts,
+                 purpose: "provider",
+                 // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+                 timeout: false,
+               })
++          ).catch((error) => {
++            timing(timingInput, "fetch.error", errorFields(error))
++            throw error
++          })
++
++          const contentType = res.headers.get("content-type") ?? undefined
++          timing(timingInput, "fetch.response", {
++            status: res.status,
++            contentType,
++            isSSE: contentType?.includes("text/event-stream") ?? false,
++          })
+ 
+           if (!chunkAbortCtl) return res
+-          return wrapSSE(res, chunkTimeout, chunkAbortCtl)
++          return wrapSSE(res, chunkTimeout, chunkAbortCtl, timingInput)
+         }
+ 
+         const bundledLoader = BUNDLED_PROVIDERS[model.api.npm]
+diff --git a/packages/opencode/test/bus/bus.test.ts b/packages/opencode/test/bus/bus.test.ts
+index 08449861621cbc9411a4e25f9f1f27bd284acc6a..343c622a225b48d249df726978366711decf66bb 100644
+--- a/packages/opencode/test/bus/bus.test.ts
++++ b/packages/opencode/test/bus/bus.test.ts
+@@ -1,5 +1,7 @@
+ import { afterEach, describe, expect } from "bun:test"
+ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
++import { Global } from "@opencode-ai/core/global"
++import * as Log from "@opencode-ai/core/util/log"
+ import { Deferred, Effect, Layer, Schema } from "effect"
+ import { Bus } from "../../src/bus"
+ import { BusEvent } from "../../src/bus/bus-event"
+@@ -13,6 +15,20 @@ const TestEvent = {
+ 
+ const it = testEffect(Layer.mergeAll(Bus.layer, CrossSpawnSpawner.defaultLayer))
+ 
++function readLog(file: string) {
++  return Effect.promise(async () => {
++    let content = ""
++    for (let i = 0; i < 20; i++) {
++      content = await Bun.file(file)
++        .text()
++        .catch(() => "")
++      if (content) return content
++      await new Promise((resolve) => setTimeout(resolve, 10))
++    }
++    return content
++  })
++}
++
+ describe("Bus", () => {
+   afterEach(() => disposeAllInstances())
+ 
+@@ -76,6 +92,37 @@ describe("Bus", () => {
+         yield* bus.publish(TestEvent.Ping, { value: 1 })
+       }),
+     )
++
++    it.instance("publish still delivers when info-level publish logs are suppressed", () =>
++      Effect.gen(function* () {
++        const previous = Global.Path.log
++        const dir = yield* tmpdirScoped()
++        yield* Effect.addFinalizer(() =>
++          Effect.promise(async () => {
++            Global.Path.log = previous
++            await Log.init({ print: false, dev: true, level: "DEBUG" })
++          }),
++        )
++
++        Global.Path.log = dir
++        yield* Effect.promise(() => Log.init({ print: false, dev: false, level: "INFO" }))
++        const logFile = Log.file()
++        const bus = yield* Bus.Service
++        const received: number[] = []
++        const done = yield* Deferred.make<void>()
++
++        yield* bus.subscribeCallback(TestEvent.Ping, (evt) => {
++          received.push(evt.properties.value)
++          Deferred.doneUnsafe(done, Effect.void)
++        })
++        yield* bus.publish(TestEvent.Ping, { value: 7 })
++        yield* Deferred.await(done).pipe(Effect.timeout("2 seconds"))
++
++        const content = yield* readLog(logFile)
++        expect(received).toEqual([7])
++        expect(content).not.toContain("type=test.ping publishing")
++      }),
++    )
+   })
+ 
+   describe("unsubscribe", () => {
+diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
+index aac12e9adc3430e2fe88eb398398ec3e754f51db..e330e35ea22920601d6a48f040e2c02226a96dd5 100644
+--- a/packages/opencode/test/session/llm.test.ts
++++ b/packages/opencode/test/session/llm.test.ts
+@@ -7,6 +7,8 @@ import { makeRuntime } from "../../src/effect/run-service"
+ import { InstanceRef } from "../../src/effect/instance-ref"
+ import { LLM } from "../../src/session/llm"
+ import type { InstanceContext } from "../../src/project/instance-context"
++import { Global } from "@opencode-ai/core/global"
++import * as Log from "@opencode-ai/core/util/log"
+ import { Provider } from "@/provider/provider"
+ import { ProviderTransform } from "@/provider/transform"
+ import { ModelsDev } from "@opencode-ai/core/models"
+@@ -157,6 +159,38 @@ function timeout(ms: number) {
+   })
+ }
+ 
++async function readLogUntil(file: string, ready: (content: string) => boolean) {
++  let content = ""
++  for (let i = 0; i < 50; i++) {
++    content = await Bun.file(file)
++      .text()
++      .catch(() => "")
++    if (ready(content)) return content
++    await new Promise((resolve) => setTimeout(resolve, 10))
++  }
++  return content
++}
++
++async function withInfoLog<T>(fn: (file: string) => Promise<T>) {
++  const previous = Global.Path.log
++  await using tmp = await tmpdir()
++  Global.Path.log = tmp.path
++  await Log.init({ print: false, dev: false, level: "INFO" })
++  try {
++    return await fn(Log.file())
++  } finally {
++    Global.Path.log = previous
++    await Log.init({ print: false, dev: true, level: "DEBUG" })
++  }
++}
++
++function providerFetchEvents(content: string) {
++  return content
++    .split("\n")
++    .filter((line) => line.includes("service=provider.fetch"))
++    .map((line) => Object.fromEntries(Array.from(line.matchAll(/([A-Za-z.]+)=([^\s]+)/g), (match) => [match[1], match[2]])))
++}
++
+ function waitStreamingRequest(pathname: string) {
+   const request = deferred<Capture>()
+   const requestAborted = deferred<void>()
+@@ -320,7 +354,165 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
+   })
+ }
+ 
++function createStalledEventResponse() {
++  const encoder = new TextEncoder()
++  return new Response(
++    new ReadableStream<Uint8Array>({
++      start(controller) {
++        controller.enqueue(encoder.encode(": heartbeat\n\n"))
++      },
++    }),
++    {
++      status: 200,
++      headers: { "Content-Type": "text/event-stream" },
++    },
++  )
++}
++
+ describe("session.llm.stream", () => {
++  test("logs provider response and first raw SSE chunk when chunk timeout is enabled", async () => {
++    const server = state.server
++    if (!server) throw new Error("Server not initialized")
++
++    const providerID = "timed-openai-compatible"
++    const request = waitRequest(
++      "/chat/completions",
++      new Response(createChatStream("Hello"), {
++        status: 200,
++        headers: { "Content-Type": "text/event-stream" },
++      }),
++    )
++
++    await withInfoLog(async (logFile) => {
++      await using tmp = await tmpdir({
++        config: {
++          enabled_providers: [providerID],
++          provider: {
++            [providerID]: {
++              npm: "@ai-sdk/openai-compatible",
++              name: "Timed Provider",
++              options: { apiKey: "test-key", baseURL: `${server.url.origin}/v1`, chunkTimeout: 1_000 },
++              models: { "gpt-test": { name: "GPT Test", modalities: { input: ["text"], output: ["text"] } } },
++            },
++          },
++        },
++      })
++
++      await withTestInstance({
++        directory: tmp.path,
++        fn: async (ctx) => {
++          const model = await getModel(ProviderID.make(providerID), ModelID.make("gpt-test"), ctx)
++          const sessionID = SessionID.make("session-provider-fetch-timing")
++          const agent = {
++            name: "test",
++            mode: "primary",
++            options: {},
++            permission: [{ permission: "*", pattern: "*", action: "allow" }],
++          } satisfies Agent.Info
++          await drain(
++            {
++              user: {
++                id: MessageID.make("msg_user-provider-fetch-timing"),
++                sessionID,
++                role: "user",
++                time: { created: Date.now() },
++                agent: agent.name,
++                model: { providerID: ProviderID.make(providerID), modelID: model.id },
++              },
++              sessionID,
++              model,
++              agent,
++              system: ["You are a helpful assistant."],
++              messages: [{ role: "user", content: "Hello" }],
++              tools: {},
++            },
++            ctx,
++          )
++        },
++      })
++
++      await request
++      const events = providerFetchEvents(await readLogUntil(logFile, (content) => content.includes("phase=sse.end")))
++      expect(events.map((event) => event.phase)).toEqual([
++        "fetch.start",
++        "fetch.response",
++        "sse.first_chunk",
++        "sse.end",
++      ])
++      expect(events.find((event) => event.phase === "fetch.response")?.status).toBe("200")
++      expect(events.find((event) => event.phase === "fetch.response")?.isSSE).toBe("true")
++      expect(Number(events.find((event) => event.phase === "sse.first_chunk")?.bytes)).toBeGreaterThan(0)
++      expect(Number(events.find((event) => event.phase === "sse.end")?.chunkCount)).toBeGreaterThan(0)
++    })
++  })
++
++  test("logs SSE timeout when a streaming response stalls after the first raw chunk", async () => {
++    const server = state.server
++    if (!server) throw new Error("Server not initialized")
++
++    const providerID = "stalled-openai-compatible"
++    const request = waitRequest("/chat/completions", createStalledEventResponse())
++
++    await withInfoLog(async (logFile) => {
++      await using tmp = await tmpdir({
++        config: {
++          enabled_providers: [providerID],
++          provider: {
++            [providerID]: {
++              npm: "@ai-sdk/openai-compatible",
++              name: "Stalled Provider",
++              options: { apiKey: "test-key", baseURL: `${server.url.origin}/v1`, chunkTimeout: 25 },
++              models: { "gpt-test": { name: "GPT Test", modalities: { input: ["text"], output: ["text"] } } },
++            },
++          },
++        },
++      })
++
++      await withTestInstance({
++        directory: tmp.path,
++        fn: async (ctx) => {
++          const model = await getModel(ProviderID.make(providerID), ModelID.make("gpt-test"), ctx)
++          const sessionID = SessionID.make("session-provider-fetch-timeout")
++          const agent = {
++            name: "test",
++            mode: "primary",
++            options: {},
++            permission: [{ permission: "*", pattern: "*", action: "allow" }],
++          } satisfies Agent.Info
++          await expect(
++            drain(
++              {
++                user: {
++                  id: MessageID.make("msg_user-provider-fetch-timeout"),
++                  sessionID,
++                  role: "user",
++                  time: { created: Date.now() },
++                  agent: agent.name,
++                  model: { providerID: ProviderID.make(providerID), modelID: model.id },
++                },
++                sessionID,
++                model,
++                agent,
++                system: ["You are a helpful assistant."],
++                messages: [{ role: "user", content: "Hello" }],
++                tools: {},
++              },
++              ctx,
++            ),
++          ).rejects.toThrow()
++        },
++      })
++
++      await request
++      const events = providerFetchEvents(await readLogUntil(logFile, (content) => content.includes("phase=sse.timeout")))
++      expect(events.map((event) => event.phase)).toContain("fetch.response")
++      expect(events.map((event) => event.phase)).toContain("sse.timeout")
++      expect(events.find((event) => event.phase === "sse.timeout")?.chunkCount).toBe("1")
++      expect(events.find((event) => event.phase === "sse.timeout")?.chunkTimeoutMs).toBe("25")
++      expect(Number(events.find((event) => event.phase === "sse.timeout")?.idleMs)).toBeGreaterThanOrEqual(25)
++    })
++  })
++
+   for (const item of [
+     { name: "options.headers.User-Agent", options: { headers: { "User-Agent": "codex_cli_rs/0.2333" } } },
+     { name: "options.header-ua", options: { "header-ua": "codex_cli_rs/0.2333" } },

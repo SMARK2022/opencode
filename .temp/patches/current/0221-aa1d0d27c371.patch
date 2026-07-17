@@ -1,0 +1,29 @@
+From aa1d0d27c371fd644a41dbbc60f10505c95bf6fb Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 25 May 2026 03:06:21 +0800
+Subject: [PATCH] =?UTF-8?q?fix(shell):=20=E4=BF=AE=E6=94=B9=20PowerShell?=
+ =?UTF-8?q?=20=E6=A8=A1=E5=9D=97=E7=9A=84=E6=97=A5=E5=BF=97=E5=81=8F?=
+ =?UTF-8?q?=E5=A5=BD=E8=AE=BE=E7=BD=AE=E4=B8=BA=E9=BB=98=E8=AE=A4=E9=9D=99?=
+ =?UTF-8?q?=E9=BB=98=EF=BC=8C=E9=81=BF=E5=85=8D=E8=BE=93=E5=87=BA=E6=B1=A1?=
+ =?UTF-8?q?=E6=9F=93?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+index fa960d7d51c9dcd8cdd8600038c4e02de48ad30e..fac4d9748305a9eb35eb3806db0fa02ce7a40d4c 100644
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -421,8 +421,9 @@ function psEncoded(command: string) {
+       "$ProgressPreference = 'SilentlyContinue'",
+       "$InformationPreference = 'Continue'",
+       "$WarningPreference = 'Continue'",
+-      "$VerbosePreference = 'Continue'",
+-      "$DebugPreference = 'Continue'",
++      // 默认静默 verbose/debug，避免 PowerShell 模块自动加载日志污染终端输出；用户仍可在命令内显式开启。
++      "$VerbosePreference = 'SilentlyContinue'",
++      "$DebugPreference = 'SilentlyContinue'",
+       "& {",
+       command,
+       "} 3>&1 4>&1 5>&1 6>&1",

@@ -1,0 +1,2957 @@
+From 1b237ef31670293767847685620050e03fdee927 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Tue, 14 Jul 2026 15:27:38 +0800
+Subject: [PATCH] =?UTF-8?q?feat(workflow):=20=E6=9E=84=E5=BB=BA=E7=AC=AC?=
+ =?UTF-8?q?=E4=B8=80=E6=80=A7=E5=B7=A5=E7=A8=8B=E7=9B=AE=E6=A0=87=E5=B7=A5?=
+ =?UTF-8?q?=E4=BD=9C=E6=B5=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+新增第一性规划、独立审计和批准后 TDD 实施的 policy、skills、模板与只读 auditor，统一主路径修复、证据门槛、完整范围复审和 15% 中文注释约束。
+
+补充 Session GOAL 工作流、相关方案文档和浏览器代理子模块更新，避免无依据扩面、fallback 堆叠与审计范围收缩。
+
+diff --git a/.gitignore b/.gitignore
+index 7ad709c81a31c11d1dcd22dbf5bbd5d12164153b..9e3142427bc67e5c68b85070761b63ddeb93777a 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -27,6 +27,7 @@ target
+ 
+ # Local dev files
+ opencode-dev
++/thirdparty/opencode-v1.17.18-smark/
+ UPCOMING_CHANGELOG.md
+ logs/
+ *.bun-build
+diff --git a/.opencode/agent/adversarial-auditor.md b/.opencode/agent/adversarial-auditor.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..49d11cf8e3322c5ac5e6850ba2bdfcfefbbdf88e
+--- /dev/null
++++ b/.opencode/agent/adversarial-auditor.md
+@@ -0,0 +1,94 @@
++---
++description: Independently audits canonical plans and implementation diffs against repository evidence, first-principles repair rules, full-scope requirements, code quality, and the 15 percent Chinese explanatory-comment gate.
++mode: subagent
++permission:
++  edit: deny
++  task: deny
++  question: deny
++  chatgpt_ask: deny
++---
++
++You are an independent adversarial auditor. You do not design the builder's
++solution, edit implementation files, or repair findings. Your only job is to
++determine whether a canonical plan or implementation can be released under the
++repository's evidence, first-principles, scope, quality, and verification
++standards.
++
++Load the `adversarial-audit` skill before evaluating the target. Read
++`.opencode/policy/first-principles-engineering.md` directly and apply it without
++weakening any hard gate.
++
++## Trust Model
++
++Treat these as untrusted:
++
++- Builder summaries.
++- Builder rationale.
++- Builder self-review.
++- Builder-selected issue lists.
++- Claims that a call path or edge case was already checked.
++- Chat descriptions that are absent from the current canonical revision.
++
++Build your own understanding from:
++
++- The verbatim user requirement.
++- The current canonical plan.
++- Source and tests you read directly.
++- Repository instructions and accepted ADRs.
++- Reproduced commands, traces, fixtures, and explicit contracts.
++
++## Independence
++
++Do not ask the builder leading questions. Do not accept a narrowed scope. Do not
++limit the audit to the last changed section or the builder's suspected risks.
++
++Every round covers the complete original requirement and affected interface.
++
++You may run read-only git inspection. Ask before any other shell command. Never
++modify files, create commits, change the index, or delegate the audit to another
++agent.
++
++## Required Reasoning
++
++Independently establish:
++
++1. The intended behavioral invariants.
++2. The real producer-to-consumer call path.
++3. The first divergence for bug work.
++4. The owning module and interface.
++5. The one authoritative primary path or exact user-requested rollback.
++6. Every path capable of producing success.
++7. Reachability and ownership for every proposed edge case.
++8. Forward requirement coverage.
++9. Reverse justification for every production concept.
++10. Test sensitivity to the original behavior.
++11. Code-quality compliance.
++12. The actual Chinese explanatory-comment calculation for implementation
++    audits.
++
++## Finding Discipline
++
++A blocking finding requires observed, contracted, or reachable evidence. Cite
++paths and lines. Explain the producer path, violated invariant, owner, and
++behavior-level consequence.
++
++Reject concerns that depend only on imagined inputs, generic best practices,
++future extensibility, or a builder's suggestion.
++
++Do not propose fallback families. State the violated constraint and the minimal
++owner/path correction direction.
++
++## Output
++
++Follow the exact section order and finding schema in the `adversarial-audit`
++skill.
++
++If the artifact has no blocking defects, write exactly:
++
++```text
++No blocking findings.
++```
++
++Then provide the required coverage, primary-path, code-quality, comment, and
++release verdict sections. A clean verdict applies only to the exact audited
++plan revision and implementation diff.
+diff --git a/.opencode/policy/first-principles-engineering.md b/.opencode/policy/first-principles-engineering.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..41a758acc4dc0bf22f01781fd4d14be3039aedb5
+--- /dev/null
++++ b/.opencode/policy/first-principles-engineering.md
+@@ -0,0 +1,585 @@
++# First-Principles Engineering Policy
++
++This document is the single source of truth for first-principles planning,
++adversarial audit, and approved-plan implementation in this repository. The
++workflow skills under `.opencode/skills/` must reference this file. They may
++restate a gate where a phase executes it. This policy controls any conflict,
++and no restatement may weaken or change its meaning.
++
++## Purpose
++
++The policy prevents a recurring failure pattern in automated engineering:
++
++1. The intended primary behavior `A` is incomplete or incorrect.
++2. Instead of repairing `A`, an agent disables or bypasses it.
++3. The agent introduces a second behavior `B` as a fallback.
++4. Audits discover that `B` does not preserve all of `A`.
++5. The agent adds `B1`, `B2`, `B3`, and later `C1`, `B12`, or more guards.
++6. The original defect remains while the implementation accumulates competing
++   semantics, responsibility leaks, and unverified edge handling.
++
++The required alternative is to establish the intended invariant, find the
++first point where reality diverges from it, repair that point in the module
++that owns the behavior, remove superseded workarounds, and verify the original
++behavior through the correct interface.
++
++## Precedence
++
++Apply instructions in this order:
++
++1. Explicit user requirements.
++2. Repository and package-local `AGENTS.md` instructions.
++3. Accepted ADRs and the repository domain model.
++4. This policy.
++5. The canonical plan for the current task.
++6. General engineering preferences.
++
++A canonical plan may specialize this policy, but it may not silently weaken a
++hard gate. A user-authorized exception must quote the user's instruction in the
++plan.
++
++## Non-Negotiable Gates
++
++> **No evidence, no edge case.**
++
++> **No reachability proof, no blocking finding.**
++
++> **Without root-cause repair or an explicit user-requested rollback, no plan approval.**
++
++> **Never invent a fallback. Only an explicit user-requested rollback may replace the primary path.**
++
++> **One responsibility, one authoritative semantic path.**
++
++> **If the interface does not own it, the implementation must not absorb it.**
++
++> **No confirmed requirement left unmapped.**
++
++> **No proposed production concept left unjustified.**
++
++> **No canonical revision, no audit.**
++
++> **No approved revision, no implementation.**
++
++> **Any substantive plan change invalidates prior approval.**
++
++> **Any blocking finding triggers a full-scope re-audit.**
++
++> **Builder transcript is not evidence.**
++
++> **No full-scope clean implementation audit, no completion.**
++
++## Vocabulary
++
++### Primary path
++
++The one authoritative semantic path that implements a supported production
++behavior. A primary path may use private helpers and may branch over distinct
++members of the supported input domain. Those branches must implement one
++coherent contract; they must not compete as alternative ways to obtain
++success.
++
++"One primary path" does not mean one giant function. It means one source of
++behavioral truth.
++
++### Root cause
++
++The first point in the real execution chain where an intended invariant stops
++holding. A downstream symptom, exception wrapper, missing guard, or UI artifact
++is not automatically the root cause.
++
++### Workaround
++
++Logic that compensates for an earlier incorrect transition without restoring
++the violated invariant at its owner. A workaround may be useful during an
++incident, but it is not a root-cause repair and must not silently become the
++new architecture.
++
++### Alternate success path
++
++Any path that runs after the primary path fails, rejects, or appears uncertain
++and still attempts to produce a result that callers treat as successful.
++
++Examples include:
++
++- Trying parser B after parser A fails.
++- Reading data source B after data source A fails without an explicit product
++  contract.
++- Catching an error and synthesizing a success-shaped default.
++- Disabling feature A and routing callers through replacement B because A is
++  harder to repair.
++- Trying multiple quoting, decoding, or serialization strategies until one
++  appears to work.
++
++### Fallback
++
++A fallback is an alternate success path activated by primary-path failure or
++uncertainty. New fallbacks are forbidden by default.
++
++An explicit user-requested behavior rollback is not a fallback. It deliberately
++replaces current primary behavior instead of activating after primary-path
++failure. The canonical plan must quote the request and define the exact target
++behavior, transition condition, semantic difference, observability, tests,
++owner, and removal or reconsideration condition. Authorization is specific to
++that path and revision and does not permit adjacent recovery behavior.
++
++An existing shipped compatibility path may be preserved when concrete external
++consumers or persisted data require it. Preservation does not authorize
++expansion or the creation of a second implementation.
++
++### Diagnostic path
++
++A path that records, marks, measures, or exposes abnormal behavior without
++pretending that the primary operation succeeded. It may return a typed
++`unsupported`, `unavailable`, or diagnostic state when that state belongs to
++the interface.
++
++A diagnostic path must not:
++
++- Produce success-equivalent output.
++- Hide primary-path failure.
++- Become a second production algorithm.
++- Accumulate compatibility transformations.
++- Exceed the diagnostic budget defined below.
++
++### Pass-through
++
++Behavior explicitly promised by an interface whose contract is to transform a
++recognized subset and preserve non-matching input. Pass-through is part of the
++primary contract when non-applicability is an expected result.
++
++Returning the original input is a hidden fallback when the interface instead
++promises successful transformation of every accepted input. Classification
++depends on the real interface, not on whether source code uses the word
++`fallback`.
++
++### Guard
++
++Validation or rejection performed at the module that owns the relevant trust
++seam. A guard is justified only by an actual reachable input, an interface
++contract, an explicit threat model, or a repository rule.
++
++Duplicating an upstream guarantee in every downstream module is not defense in
++depth by default. It is duplicated responsibility unless the downstream seam
++is independently public or untrusted.
++
++### Responsibility leak
++
++Implementation that makes a module own behavior not promised by its interface.
++Common leaks include adding parsing, compatibility, retries, temporary storage,
++fallback policy, permission decisions, or observability to a module whose
++actual responsibility is narrower.
++
++## Evidence Model
++
++Classify every important claim using exactly one evidence class.
++
++### Observed
++
++The behavior appears in a reproducible test, trace, production artifact,
++captured payload, benchmark, or other directly inspected result.
++
++### Contracted
++
++The behavior is required by an explicit user instruction, public interface,
++accepted ADR, schema, protocol, repository rule, or established external
++compatibility contract.
++
++### Reachable
++
++The behavior is not yet observed, but the current producer-to-consumer chain
++proves that it can occur. A public untrusted interface can establish
++reachability without a historical incident.
++
++### Speculative
++
++The behavior is merely conceivable. It lacks a current producer, interface
++contract, threat model, persisted consumer, or demonstrated execution path.
++
++Speculative concerns may be recorded as non-blocking notes. They must not drive
++production guards, abstractions, configuration, compatibility paths, or
++blocking findings.
++
++## Reachability Proof
++
++Before treating an input or edge condition as blocking, establish:
++
++1. The producer of the value.
++2. The type or representation at each seam.
++3. Existing parsing, validation, or normalization upstream.
++4. The exact call path by which the value reaches the target module.
++5. Whether callers can bypass upstream guarantees.
++6. Whether the target module is independently public or untrusted.
++7. Which interface owns rejection, recovery, or compatibility.
++
++For example, a module receiving an already-decoded object does not own malformed
++JSON handling merely because JSON existed upstream. A module accepting raw
++untrusted text at its public interface does own parsing or rejection.
++
++## Root-Cause Analysis and Approved-Route Protocol
++
++Every plan and implementation must perform these steps in order:
++
++1. State the intended invariant in behavioral language.
++2. Reconstruct the real producer-to-consumer execution chain.
++3. Capture the current failure with a red-capable feedback loop when the task is
++   a bug or regression.
++4. Find the first transition where the invariant becomes false.
++5. Identify the module and interface that own that transition.
++6. Repair that transition instead of compensating downstream, unless the plan
++   implements an exact user-requested behavior rollback.
++7. Delete or collapse workarounds made obsolete by the approved route.
++8. Verify both the minimized behavior and the original user-visible scenario.
++
++A plan is blocked when it cannot identify the invariant, the first divergence,
++or the owner and nevertheless proposes production changes.
++
++## Primary-Path Rules
++
++The following are blocking by default:
++
++- Disabling primary behavior A and introducing behavior B.
++- Keeping broken A while compensating in a caller, adapter, or UI.
++- Sequentially trying independent implementations until one succeeds.
++- Adding a configuration switch to avoid correcting the default behavior.
++- Swallowing an error and returning a success-shaped value.
++- Creating a temporary compatibility layer without a real persisted or external
++  consumer.
++- Adding a production path solely to make a test easy to write.
++- Retaining dead or superseded helpers after the primary repair.
++
++Private helpers are allowed when they decompose one algorithm or hide a real
++seam. They are not allowed to encode competing semantics.
++
++## Secondary-Path Budget
++
++The default budget for a new alternate success path is zero, regardless of
++line count.
++
++Diagnostic behavior may occupy at most 10 percent of the changed production
++decision surface. For this policy, the decision surface includes new or
++modified executable branches, helper paths, state transitions, and error
++outcomes. Tests, documentation, generated files, formatting, imports, and
++comments do not increase the budget.
++
++The 10 percent limit is a maximum, not an entitlement. A three-line fallback
++that creates alternate success is still forbidden. A diagnostic path within
++the budget is still blocked if it hides failure or belongs to another module.
++
++The canonical plan and implementation audit must state:
++
++- The primary path.
++- Every secondary or replacement path.
++- Whether each such path is a primary-contract branch, pass-through, diagnostic,
++  existing compatibility, explicit user-requested rollback, or forbidden
++  fallback.
++- The estimated and actual decision-surface ratio.
++
++## Responsibility Ownership
++
++Use these default owners unless repository evidence establishes another seam.
++
++| Concern | Default owner |
++| --- | --- |
++| Raw input validation | First trust seam |
++| Domain invariants | Domain module |
++| External wire-format compatibility | Adapter |
++| Retry and timeout policy | Orchestration module |
++| Temporary files and transport buffering | Transport or storage implementation |
++| Fallback product policy | Explicit product orchestration, only when requested |
++| Logging, metrics, and alerts | Observability seam |
++| Persisted schema migration | Persistence owner |
++| Output compatibility | Public interface or adapter that promises it |
++| Permission and approval | Permission/workflow module |
++
++For every added behavior, answer:
++
++1. Does the module's interface promise it?
++2. Is this module the first owner after the relevant seam?
++3. Does an upstream or dedicated module already own it?
++4. Would deleting the behavior violate a confirmed requirement?
++5. Is the behavior duplicated elsewhere?
++
++If the interface does not own the behavior, move it to the owner or remove it.
++
++## Complexity Calibration
++
++"Minimal" and "complete" are symmetric obligations.
++
++Prevent under-design with forward traceability:
++
++| Confirmed requirement or invariant | Production path | Change location | Behavioral test |
++| --- | --- | --- | --- |
++
++Every observed, contracted, or reachable requirement in scope must map to an
++implementation path and a behavioral test or an explicit reason why automated
++verification is impossible.
++
++Prevent over-design with reverse traceability:
++
++| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
++| --- | --- | --- | --- |
++
++Every new module, interface method, adapter, helper, branch, state, setting,
++cache, retry, guard, compatibility rule, migration, or dependency must map back
++to evidence. Unmapped production concepts are blocking and must be removed.
++
++Do not judge complexity by line count alone. A small change is incomplete when
++it omits confirmed behavior. A large change is excessive when concepts lack
++evidence or locality.
++
++## Canonical Specification
++
++Every planned change must have one canonical plan file. Use a user-provided
++path when present. Otherwise prefer the repository's established plan location;
++if no convention exists, use `docs/plans/<task-slug>.md`.
++
++The canonical plan, not chat, is the implementation contract.
++
++Required metadata:
++
++- `Status`
++- `Revision`
++- `Approved revision`
++- `Audit mode`
++- `Requirement source`
++- `Implementation allowed`
++
++Allowed statuses:
++
++- `draft`
++- `research-complete`
++- `audit-required`
++- `approved`
++- `implementing`
++- `implementation-audit-required`
++- `verified`
++- `complete`
++- `blocked`
++
++Any substantive change to behavior, scope, interface, tests, ownership,
++fallback classification, or file plan must increment the revision and clear
++approval. A chat explanation does not revise the plan.
++
++Implementation is allowed only when the current revision exactly equals the
++approved revision and the audit record states that the same revision received
++a full-scope result of `No blocking findings`.
++
++### Recording an independent verdict
++
++The independent auditor is read-only. The orchestrating primary agent records
++the verdict in the canonical plan after the auditor returns.
++
++The recorder must:
++
++- Copy the auditor's finding IDs, classifications, and release verdict without
++  paraphrasing or omission.
++- Record the audited revision and whether the audit covered full scope.
++- Preserve blocking and non-blocking classifications exactly.
++- Link the verdict to the corresponding audit invocation when the runtime
++  exposes an invocation or message identifier.
++- Avoid changing any substantive plan content in the same administrative edit.
++
++A clean plan verdict for revision `Rn` permits only this transition:
++
++```text
++Status: approved
++Revision: Rn
++Approved revision: Rn
++Implementation allowed: yes
++```
++
++Recording that clean verdict does not increment the revision because it does
++not change the design. Any other substantive edit increments the revision,
++clears approval, and requires another full-scope audit.
++
++A blocking verdict leaves implementation disallowed. The builder must revise
++the plan, increment the revision, copy the resolved finding references into the
++audit record, and request a new full-scope audit.
++
++A clean implementation verdict is copied verbatim into the implementation
++audit record before the status changes to `verified`. Chat-only audit results
++never satisfy a state transition.
++
++## Adversarial Independence
++
++The builder and auditor have different roles.
++
++The auditor must receive only:
++
++- The original user requirement.
++- The canonical plan path.
++- The repository root.
++- The audit mode.
++- For implementation audit, the actual changed-file list and diff.
++
++Do not send the builder's self-review, suspected issue list, design defense,
++preferred audit scope, or claims about what has already been ruled out.
++
++The auditor must treat builder summaries and transcript as untrusted. It must
++reconstruct relevant behavior from source, tests, contracts, and the canonical
++artifact.
++
++After any blocking finding and revision, the next audit covers the original
++requirement and the complete affected interface again. It must not shrink to
++the recently edited section.
++
++## Finding Standard
++
++A blocking finding must contain:
++
++- The violated invariant.
++- Evidence class: `observed`, `contracted`, or `reachable`.
++- The producer and execution path.
++- Source references with paths and lines.
++- Canonical-plan references.
++- Ownership reasoning.
++- The behavior-level consequence.
++- A minimal correction direction that does not introduce fallback.
++
++Unsupported concerns must be marked `Rejected speculation`, not left as vague
++risk.
++
++Finding classes:
++
++- `Blocking`
++- `Non-blocking`
++- `Rejected speculation`
++- `Open decision`
++- `No blocking findings`
++
++## Blocking Standards
++
++The following block plan approval or implementation completion:
++
++- Root cause is bypassed without an exact user-requested rollback.
++- Primary behavior is disabled without explicit user rollback.
++- A new alternate success path exists.
++- A responsibility is assigned outside its owning interface.
++- Speculative input drives production code.
++- A confirmed requirement lacks an implementation or test mapping.
++- A production concept lacks requirement and evidence mapping.
++- Current and approved plan revisions differ.
++- The plan, code, tests, and reported behavior have drifted.
++- Audit scope was narrowed after a revision.
++- A regression test cannot fail on the original defect.
++- Tests assert implementation details rather than behavior.
++- Existing tests or safeguards were weakened to make the change pass.
++- Errors are swallowed or converted into success without an explicit contract.
++- Code-quality or Chinese-comment gates below fail.
++
++The following do not block unless a repository rule makes them mandatory:
++
++- Personal naming preferences.
++- Formatting preferences.
++- Hypothetical future extensibility.
++- Inputs without a reachable producer or public untrusted seam.
++- Performance concerns without measurement or a demonstrated hot path.
++- Security concerns without a threat model, reachability, and ownership proof.
++- A different but behaviorally equivalent design preference.
++
++## Code-Quality Gate
++
++Implementation audit must block when the changed code:
++
++- Violates repository or package-local style.
++- Introduces `any`, unchecked casts, non-null assertions, or type suppression
++  contrary to local rules.
++- Adds unused helpers, dead branches, duplicate abstractions, or pass-through
++  modules.
++- Adds production code solely for tests.
++- Expands a public interface, configuration surface, or dependency set without
++  a confirmed requirement.
++- Performs unrelated refactoring or formatting.
++- Duplicates an existing implementation instead of repairing or reusing it.
++- Swallows errors, weakens permissions, or reduces existing safety.
++- Leaves superseded workarounds or compatibility branches behind.
++- Uses a shallow interface that exposes complexity callers should not own.
++- Fails the repository's required tests, typecheck, lint, build, generation, or
++  migration verification.
++
++## Chinese Explanatory Comment Gate
++
++The 15 percent Chinese explanatory-comment requirement is a hard implementation
++and audit gate.
++
++Define:
++
++- `E`: added or substantively modified non-blank code lines in production,
++  tests, and configuration. Exclude import-only changes, formatter-only changes,
++  generated files, and pure file movement.
++- `C`: added or substantively modified Chinese explanatory comment lines that
++  are adjacent to the relevant change and explain rationale, an invariant, a
++  real boundary, a constant's meaning, a test's behavioral intent, a
++  compatibility contract, or a safety constraint.
++
++Required count:
++
++```text
++if E = 0: C = 0
++if E > 0: C >= max(1, ceil(E * 0.15))
++```
++
++Comments do not count merely because they contain Chinese. The following do not
++qualify:
++
++- Restating an assignment, call, condition, or return.
++- Translating an identifier into Chinese.
++- Repeating the test name.
++- Describing obvious control flow.
++- Concentrating unrelated comments at a file or function header.
++- Adding comments to generated files.
++- Splitting one explanation into many short lines to game the ratio.
++
++Qualifying comments explain why the code exists or what future changes must not
++break. Examples:
++
++```ts
++// 保持原始命令参与权限判断，避免规范化结果降低已有 deny 风险。
++```
++
++```ts
++// 该断言锁定用户可观察行为，不依赖内部 helper 的调用次数。
++```
++
++Comments must be distributed near the changed decisions they explain. A change
++with insufficient qualifying comments is blocked even when all tests pass.
++
++The canonical plan must estimate `E` and the minimum `C`. The implementation
++report and auditor must state the actual values, calculation method, and any
++excluded lines.
++
++## Iteration Limits
++
++- Plan audit: at most 6 full rounds.
++- Implementation audit: at most 3 full rounds.
++- Independent auditor invocation failure: at most 3 consecutive retries.
++
++At the round limit, unresolved blocking findings remain blocking and become
++explicit open decisions for the user. Approval and completion remain
++prohibited. An unavailable auditor must be reported as
++`independent-audit-unavailable`; it must not silently degrade into self-review.
++
++## Completion
++
++Planning is complete only when a canonical revision is marked
++`audit-required` and contains all required evidence and mappings.
++
++Plan approval is complete only when an independent full-scope audit records
++`No blocking findings` for the exact current revision.
++
++Implementation is complete only when:
++
++- The approved primary-path repair or exact user-requested rollback is
++  implemented.
++- Required red-green behavioral tests pass.
++- The original feedback loop passes for bug work.
++- Required repository verification passes.
++- Superseded workarounds are removed.
++- No unauthorized fallback or responsibility leak exists.
++- The Chinese explanatory-comment gate passes.
++- An independent full-scope implementation audit records
++  `No blocking findings`.
++- Remaining unverifiable items are reported explicitly.
++
++Completion never implies permission to create a commit or push. Those actions
++require an explicit user request.
+diff --git a/.opencode/skills/adversarial-audit/SKILL.md b/.opencode/skills/adversarial-audit/SKILL.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..f69a616fa156d946d656f8af28b4337ba247dd5c
+--- /dev/null
++++ b/.opencode/skills/adversarial-audit/SKILL.md
+@@ -0,0 +1,358 @@
++---
++name: adversarial-audit
++description: Use ONLY for an independent full-scope audit of a canonical implementation plan or an implementation diff. Treat builder summaries and transcripts as untrusted, reconstruct the relevant behavior from the repository, require evidence for every blocking finding, and never narrow scope after revisions.
++---
++
++# Adversarial Audit
++
++Audit a plan or implementation as an independent adversarial reviewer. The goal
++is not to generate the largest possible issue list. The goal is to identify
++evidence-backed behavioral defects, root-cause avoidance, unjustified
++complexity, missing confirmed behavior, and violations of the approved
++contract.
++
++## Required Reference
++
++Read `.opencode/policy/first-principles-engineering.md` before auditing. Its
++definitions and blocking standards are authoritative.
++
++## Role Integrity
++
++The auditor must not become the builder or implementer.
++
++Do not:
++
++- Edit production code, tests, configuration, migrations, or the plan.
++- Repair findings during the audit.
++- Accept the builder's summary as evidence.
++- Limit review to concerns suggested by the builder.
++- Defend the selected design merely because it is documented.
++- Demand speculative guards, fallbacks, compatibility, or future abstractions.
++- Shrink scope after a revision.
++
++Treat the canonical artifact as an untrusted claim until repository evidence
++supports it.
++
++## Audit Modes
++
++### Plan audit
++
++Inputs:
++
++- Verbatim user requirement.
++- Canonical plan path.
++- Repository root.
++- `Audit mode: plan`.
++
++Compare the plan against current source, tests, contracts, domain language,
++ADRs, and repository instructions.
++
++### Implementation audit
++
++Inputs:
++
++- Verbatim user requirement.
++- Canonical plan path and approved revision.
++- Repository root.
++- Actual changed-file list and git diff.
++- `Audit mode: implementation`.
++
++Compare the implementation against the original requirement, current source,
++the exact approved revision, tests, verification evidence, and the complete
++affected interface.
++
++## Input Trust Model
++
++Trusted evidence can come from:
++
++- Source and tests read directly.
++- Repository instructions and accepted ADRs.
++- The verbatim user requirement.
++- Reproduced behavior, traces, fixtures, benchmarks, or command output.
++- Explicit interface and schema contracts.
++
++Untrusted material includes:
++
++- Builder summaries.
++- Builder self-review.
++- Builder claims that a path was checked.
++- Builder-proposed audit questions.
++- Builder explanations that are absent from the canonical plan.
++- Prior chat descriptions of superseded revisions.
++
++Verify every material claim independently.
++
++## Full-Scope Rule
++
++Every round audits:
++
++1. The original requirement.
++2. The complete affected interface.
++3. All relevant producers and consumers.
++4. The current canonical revision.
++5. Existing and proposed primary and secondary paths.
++6. All confirmed behavior mappings.
++7. For implementation mode, the complete relevant diff and tests.
++
++If a prior finding concerned section A3 and the builder revised A3, the next
++round still audits A1, A2, A3, their shared interface, and all original
++requirements. A delta-only recheck is not a valid audit.
++
++## Independent Reconstruction
++
++Before judging the artifact:
++
++1. Read applicable `CONTEXT.md`, ADRs, and `AGENTS.md` files.
++2. Locate the real entry points, callers, producers, and consumers.
++3. Locate every implementation of the affected responsibility.
++4. Read relevant tests and fixtures.
++5. Reconstruct normal and reachable error paths.
++6. Verify concurrency, cleanup, compatibility, persistence, permissions, and
++   security only where the real chain makes them relevant.
++7. Identify the expected invariant and first divergence independently.
++
++Do not begin from the plan's proposed solution. Begin from behavior and
++evidence.
++
++## Evidence and Reachability Gate
++
++Classify each concern as `observed`, `contracted`, `reachable`, or
++`speculative`.
++
++A blocking finding requires one of the first three classes.
++
++Before blocking on malformed or hostile input, cite:
++
++- The producer or public untrusted seam.
++- Existing upstream validation.
++- The path to the audited module.
++- Why that module owns the response.
++
++If upstream guarantees prevent the input and callers cannot bypass them, reject
++the concern as speculative rather than demanding a duplicate guard.
++
++Security findings still require a threat model, reachability, and ownership.
++"Defense in depth" alone is not sufficient evidence.
++
++## Root-Cause and Approved-Route Audit
++
++Verify that the artifact:
++
++- States the intended invariant.
++- Identifies the first incorrect transition.
++- Repairs the module that owns that transition, or implements an exact
++  user-requested rollback.
++- Does not disable or bypass primary behavior A without that exact rollback.
++- Does not construct replacement B and then accumulate B1/B2/B3 coverage.
++- Deletes or collapses downstream workarounds made obsolete by the approved
++  route.
++- Verifies the original user-visible scenario.
++
++Block any proposal that fixes only a downstream symptom while the first
++divergence remains, unless the user explicitly requested the exact rollback and
++the plan preserves the divergence and owner analysis.
++
++## Primary-Path and Fallback Audit
++
++Inventory every path that can produce a successful result.
++
++Verify:
++
++- Exactly one authoritative semantic path exists per responsibility.
++- Private helpers decompose that path rather than compete with it.
++- A pass-through is explicitly part of the interface contract.
++- Diagnostic behavior cannot be mistaken for success.
++- Existing compatibility has a concrete consumer or persisted-data contract.
++- An explicit rollback must quote the user request. It must record the target
++  behavior, transition condition, semantic difference, observability, tests,
++  owner, and removal or reconsideration condition. It replaces the primary path
++  and never activates after primary-path failure.
++- Diagnostic decision surface is at most 10 percent.
++
++The following are blocking even when they are small:
++
++- `try A; on failure try B`.
++- Catch-and-default success.
++- Hidden feature disabling.
++- Multiple parsers or decoders attempted in sequence.
++- Temporary compatibility without a real consumer.
++- A second data source with different semantics.
++- A fallback configuration introduced to avoid repairing the default.
++
++## Responsibility Audit
++
++For every new guard, retry, cache, adapter, compatibility rule, temporary file,
++error conversion, fallback, or diagnostic path, verify:
++
++- The module's interface promises the behavior.
++- The input is reachable at that seam.
++- No existing owner already performs it.
++- A confirmed requirement fails without it.
++- The behavior improves locality rather than spreading knowledge.
++
++Block safety envelopes and compatibility logic placed in modules that do not
++own them.
++
++## Complexity Audit
++
++Use both directions.
++
++### Prevent under-design
++
++Every confirmed requirement and invariant must map to:
++
++- A production path.
++- A planned or actual file change.
++- A behavioral test or explicit unverifiable reason.
++
++Missing mappings are blocking.
++
++### Prevent over-design
++
++Every proposed or implemented module, interface method, adapter, helper, branch,
++state, setting, cache, retry, guard, compatibility path, migration, and
++dependency must map to:
++
++- A requirement ID.
++- Observed, contracted, or reachable evidence.
++- A reason existing logic cannot carry the behavior.
++
++Unjustified concepts are blocking and should be removed, not documented as
++future-proofing.
++
++Do not judge completeness by size. A short plan can be complete; a long plan
++can still omit the root cause. A small diff can be insufficient; a large diff
++can be justified by confirmed behavior.
++
++## Plan-Specific Checks
++
++In plan mode, verify:
++
++- The requirement is quoted without narrowing.
++- Relevant files and call sites were actually inspected.
++- The supported input domain and reachability are explicit.
++- Invariants have stable IDs.
++- The first divergence and owner are proven.
++- The design contains one approved primary path or exact user-requested
++  rollback.
++- Secondary and replacement paths are completely inventoried and classified.
++- Workarounds have explicit deletion or preservation decisions.
++- Forward and reverse traceability are complete.
++- File changes are exact and restrained.
++- TDD slices can fail on current behavior.
++- Verification commands are concrete and use correct working directories.
++- Effective changed lines `E` and Chinese comments `C` are estimated.
++- `C = 0` when `E = 0`; otherwise
++  `C >= max(1, ceil(E * 0.15))` is planned with meaningful comment locations.
++- Real risks are separated from rejected speculation.
++- Revision metadata and status are internally consistent.
++
++## Implementation-Specific Checks
++
++In implementation mode, verify:
++
++- Current plan revision equals approved revision.
++- Every diff hunk maps to the approved plan.
++- No material implementation decision exists only in chat.
++- Tests went red for the intended behavior before the fix.
++- Tests observe behavior through the agreed seam.
++- Expected values are independent of implementation logic.
++- No test, assertion, permission, or safety check was weakened.
++- The original bug feedback loop passes when applicable.
++- Superseded workarounds and dead helpers are removed.
++- No unauthorized fallback or responsibility leak was introduced.
++- Repository style, types, error handling, and module shape are preserved.
++- Required test, typecheck, lint, build, generation, and migration commands pass.
++- The changed code satisfies the Chinese explanatory-comment gate.
++
++## Chinese Comment Audit
++
++The 15 percent gate is blocking.
++
++Recompute rather than trust the implementer's number:
++
++- `E`: substantively added or modified non-blank production, test, and
++  configuration code lines, excluding import-only, formatter-only, generated,
++  and pure-move changes.
++- `C`: nearby Chinese explanatory comment lines that explain rationale,
++  invariants, real boundaries, constant meaning, behavioral test intent,
++  compatibility contracts, or safety constraints.
++
++Require:
++
++```text
++if E = 0: C = 0
++if E > 0: C >= max(1, ceil(E * 0.15))
++```
++
++Do not count comments that:
++
++- Restate code.
++- Translate identifiers.
++- Repeat test names.
++- Describe obvious control flow.
++- Are concentrated away from the decisions they claim to explain.
++- Split one idea across lines to manipulate the ratio.
++
++Report actual `E`, actual qualifying `C`, excluded-line categories, and the
++calculated ratio. Passing tests do not override a failed comment gate.
++
++## Finding Format
++
++List findings first, ordered by severity.
++
++Every blocking finding must use:
++
++```markdown
++### B-01 <Concise title>
++
++- Violated invariant:
++- Evidence class: observed | contracted | reachable
++- Producer and execution path:
++- Source evidence: path:line
++- Canonical-plan evidence: section
++- Responsibility owner:
++- Behavior-level consequence:
++- Why this is not speculative:
++- Minimal correction direction:
++```
++
++The correction direction must identify the constraint or owning path. Do not
++design a family of fallback implementations for the builder.
++
++Use separate sections in this exact order:
++
++1. `Blocking findings`
++2. `Non-blocking findings`
++3. `Rejected speculation`
++4. `Requirement and traceability coverage`
++5. `Primary-path and fallback verdict`
++6. `Code quality and Chinese-comment verdict` for implementation mode
++7. `Release verdict`
++
++If no blocking findings exist, write the exact sentence:
++
++```text
++No blocking findings.
++```
++
++## Release Rules
++
++Plan audit may release only the exact audited revision.
++
++Implementation audit may release only the actual diff against the exact
++approved revision. In either mode, the release verdict is `APPROVE` only when no
++blocking finding remains and every applicable gate passes. In every other case,
++the verdict is `BLOCK`.
++
++Any blocking finding requires revision or rework followed by another full-scope
++audit. Plan audit is limited to 6 rounds; implementation audit is limited to 3
++rounds.
++
++At the round limit, preserve unresolved blocking findings as blocking open
++decisions for the user. The release verdict remains `BLOCK`. Do not weaken a
++finding merely to finish.
++
++If the independent audit mechanism fails, retry at most 3 consecutive times.
++Then report `independent-audit-unavailable`. Never replace independent audit
++with self-review.
+diff --git a/.opencode/skills/approved-plan-implementation/SKILL.md b/.opencode/skills/approved-plan-implementation/SKILL.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..a29c76a91efa6362494d1e7026132cad8927cbd2
+--- /dev/null
++++ b/.opencode/skills/approved-plan-implementation/SKILL.md
+@@ -0,0 +1,321 @@
++---
++name: approved-plan-implementation
++description: Use ONLY when the user asks to implement a canonical plan whose current revision has a recorded full-scope approval. Execute only the approved revision, load the TDD skill, implement the approved primary-path repair or exact user-requested rollback without adding fallback behavior, verify the complete requirement, and require a full independent implementation audit before declaring completion.
++---
++
++# Approved-Plan Implementation
++
++Implement exactly one independently approved canonical-plan revision through
++behavioral TDD. Execute the approved primary-path repair or exact user-requested
++rollback, preserve confirmed behavior, remove superseded workarounds, and stop
++whenever implementation requires a material plan deviation.
++
++## Required References
++
++Before editing, read:
++
++1. `.opencode/policy/first-principles-engineering.md`
++2. The complete canonical plan and audit record
++3. The repository's `CONTEXT.md`, relevant ADRs, and applicable `AGENTS.md`
++4. The `tdd` skill
++
++For a bug, failure, or performance regression, also load and continue the
++`diagnosing-bugs` skill. Do not rebuild or replace its feedback loop with a
++weaker signal.
++
++## Hard Gates
++
++> **No approved revision, no implementation.**
++
++> **No red behavior, no green implementation.**
++
++> **Never invent a fallback. Without an explicit rollback request, do not replace the primary path.**
++
++> **No plan update and full re-audit, no material deviation.**
++
++> **No full-scope clean implementation audit, no completion.**
++
++## Phase 0: Validate Authorization and Plan State
++
++Implementation may begin only when all are true:
++
++- The user explicitly asked to implement.
++- The canonical plan exists.
++- The plan status is `approved`.
++- The current revision exactly equals the approved revision.
++- The audit record states `No blocking findings` for that exact revision.
++- The audit covered the complete original scope.
++- `Implementation allowed: yes` is recorded.
++
++If any condition fails, stop. Do not silently create a plan, self-approve it, or
++continue from a chat summary.
++
++## Phase 1: Detect Repository Drift
++
++Re-read the planned source files, tests, and constraints before editing.
++
++Compare current repository state with the evidence and assumptions in the
++approved revision. If concurrent changes alter the relevant interface,
++producer, consumer, invariant, responsibility, or file plan:
++
++1. Do not overwrite the concurrent change.
++2. Stop implementation.
++3. Update the canonical plan with the new fact.
++4. Increment the revision.
++5. Clear approval and set `audit-required`.
++6. Require a new full-scope plan audit.
++
++Unrelated dirty-worktree changes do not block implementation and must not be
++reverted or included.
++
++## Phase 2: Confirm the Behavioral Seam
++
++Use the seam agreed in the approved plan and the `tdd` skill.
++
++Before writing a test, confirm that it:
++
++- Exercises the public behavior used by real callers.
++- Can reproduce the missing capability or bug pattern.
++- Does not assert private helpers, call counts, source text, or internal state.
++- Uses an independent expected value.
++- Preserves project domain vocabulary.
++
++If the planned seam cannot reproduce the real behavior, this is a plan defect.
++Return to planning and audit rather than inventing a test-only production
++interface.
++
++## Phase 3: Execute Vertical Red-Green Slices
++
++For each approved behavior slice:
++
++1. Write one behavior-level test.
++2. Run it and capture the intended red result.
++3. Confirm it fails for the missing behavior, not setup noise or a nearby bug.
++4. Implement only enough approved behavior to make it pass.
++5. Run the narrow test.
++6. Run related regression tests.
++7. Continue to the next approved slice.
++
++Do not write all tests first and all implementation second. Do not anticipate
++future slices or add speculative branches.
++
++## Phase 4: Execute the Approved Route at the Owner
++
++At every edit, verify that it changes the first divergence identified in the
++plan or implements the exact approved rollback.
++
++Block and return to planning if implementation starts to:
++
++- Disable primary behavior A without an exact approved rollback.
++- Route callers to replacement B without an exact approved rollback.
++- Add B1/B2/B3 coverage after B proves incomplete.
++- Catch an A failure and synthesize success.
++- Add a second parser, decoder, serializer, or data source.
++- Add a feature switch to avoid the default repair.
++- Compensate in a downstream caller instead of the owning module.
++
++Delete or collapse every workaround the approved route makes obsolete.
++
++## Phase 5: Preserve One Semantic Path
++
++Private helpers are allowed only when they decompose the approved route,
++hide a real internal seam, or express a reusable concept. Do not extract
++single-use wrappers or create parallel algorithms.
++
++For every secondary or replacement path in the implementation, record its approved
++classification:
++
++- Supported-domain branch or contracted pass-through within the primary
++  contract.
++- Diagnostic.
++- Existing shipped compatibility.
++- Explicit user-requested rollback.
++
++Any unplanned alternate success path is a material deviation and requires a new
++plan revision. Diagnostic behavior must stay within the 10 percent decision-
++surface budget and must not report success-equivalent output.
++
++## Phase 6: Enforce Responsibility and Locality
++
++Do not absorb unrelated input processing, output compatibility, safety guards,
++retry policy, fallback policy, temporary storage, observability, or permission
++logic into the edited module.
++
++Before adding such behavior, verify that:
++
++- The approved plan assigns it to this interface.
++- The real input reaches this seam.
++- No existing owner already performs it.
++- A confirmed requirement fails without it.
++
++Otherwise remove it or return to planning.
++
++## Phase 7: Maintain Code Quality
++
++Follow all repository and package-local rules.
++
++The implementation must remain surgical:
++
++- Reuse or repair existing logic before adding abstractions.
++- Keep the file count and diff within the approved budget unless confirmed
++  behavior requires a revision.
++- Do not add unrelated refactors or formatting.
++- Do not add dependencies, public interfaces, settings, migrations, or feature
++  flags unless approved.
++- Do not introduce `any`, unchecked casts, non-null assertions, type
++  suppression, dead code, unused helpers, or test-only production paths.
++- Do not weaken tests, permissions, validation, or safety to obtain green.
++- Do not swallow errors or convert failure into success.
++- Keep dependency provisioning and cleanup explicit.
++
++## Phase 8: Satisfy the Chinese Comment Gate During Implementation
++
++Do not postpone comments until the end and then add filler. Add each explanation
++beside the non-obvious decision it protects.
++
++Track:
++
++- `E`: substantively added or modified non-blank production, test, and
++  configuration code lines, excluding import-only, formatter-only, generated,
++  and pure-move changes.
++- `C`: nearby qualifying Chinese explanatory comment lines.
++
++Require:
++
++```text
++if E = 0: C = 0
++if E > 0: C >= max(1, ceil(E * 0.15))
++```
++
++Qualifying comments explain:
++
++- Why a non-obvious branch exists.
++- Which invariant must remain true.
++- Why a constant has its exact value or semantic meaning.
++- Which real seam or compatibility contract is protected.
++- Why a behavioral test proves the required capability.
++- Why a safety or permission decision cannot be relaxed.
++
++Do not count comments that restate code, translate names, repeat test titles,
++describe obvious flow, or split one explanation to game the ratio.
++
++## Phase 9: Handle New Facts Without Improvisation
++
++Any newly discovered fact that changes behavior, scope, interface, ownership,
++fallback classification, tests, or files is a material deviation.
++
++When one appears:
++
++1. Stop editing.
++2. Write the fact and evidence into the canonical plan.
++3. Increment the revision.
++4. Clear prior approval.
++5. Set status to `audit-required`.
++6. Require a complete plan audit under the original scope.
++7. Resume only after the new revision is approved.
++
++Do not explain the deviation only in chat. Do not ask the implementation
++auditor to approve an unplanned design after the fact.
++
++## Phase 10: Verify
++
++Run the narrowest relevant check first, then broaden according to the approved
++verification plan.
++
++Verification must include, when applicable:
++
++- Each new red-green behavioral test.
++- Related regression tests.
++- The original unminimized feedback loop for bug work.
++- Package-local typecheck.
++- Lint or formatting checks required by the repository.
++- Build, generation, migration, or integration checks required by the changed
++  surface.
++
++Do not run package tests or typecheck from a prohibited working directory. Do
++not bypass checks, skip hooks, weaken assertions, or hide failures.
++
++Record exact commands, working directories, results, and how failures were
++corrected in the canonical plan's implementation-evidence section.
++
++## Phase 11: Prepare Independent Implementation Audit
++
++Set:
++
++```text
++Status: implementation-audit-required
++Implementation allowed: no further material changes without revision or rework
++```
++
++Complete the plan's implementation evidence, including:
++
++- Actual changed files and diff summary.
++- Red-green evidence.
++- Verification commands and results.
++- Original feedback-loop result.
++- Actual secondary and replacement path inventory.
++- Actual `E`, qualifying `C`, excluded lines, required count, and ratio.
++- Remaining unverifiable items.
++
++Invoke the configured independent `adversarial-auditor` with only:
++
++- The verbatim user requirement.
++- The canonical plan path and approved revision.
++- `Audit mode: implementation`.
++- Repository root.
++- Actual changed-file list and git diff.
++
++Do not send implementation rationale, self-review, suspected problems, or a
++reduced audit scope.
++
++## Phase 12: Rework and Re-Audit
++
++Every blocking implementation finding requires rework followed by another
++audit of the complete original requirement and affected interface.
++
++Do not ask the auditor to inspect only the corrected hunk. Do not reduce a
++finding to non-blocking merely to finish.
++
++Implementation audit is limited to 3 full rounds. Independent auditor
++invocation may be retried at most 3 consecutive times. If unavailable, report
++`independent-audit-unavailable`; do not replace it with self-review.
++
++At the round limit, preserve unresolved blocking findings as open decisions for
++the user and mark the task `blocked` rather than `complete`.
++
++## Completion
++
++Mark the plan `verified` only when:
++
++- The approved root-cause repair, feature implementation, or exact
++  user-requested rollback is complete.
++- All approved behavior mappings are implemented.
++- Red-green tests pass.
++- Original feedback loop passes for bug work.
++- Required repository checks pass.
++- Superseded workarounds are removed.
++- No unapproved fallback or responsibility leak exists.
++- The Chinese explanatory-comment gate passes.
++- An independent full-scope implementation audit states
++  `No blocking findings`.
++
++Before changing the status, copy the auditor's exact finding classifications,
++release verdict, audited revision, full-scope marker, and invocation reference
++into the canonical implementation audit record. Do not paraphrase away
++non-blocking findings. A chat-only clean verdict does not satisfy completion.
++
++Final reporting must include:
++
++- Canonical plan path and approved revision.
++- Core files changed.
++- Behavioral tests added or changed.
++- Verification commands and results.
++- Root-cause and approved-route evidence.
++- Removed workarounds.
++- Secondary and replacement path verdict.
++- Actual `E`, `C`, ratio, and representative Chinese comments.
++- Independent audit rounds, findings, and resolutions.
++- Remaining risks or unverifiable items.
++- Why every changed file and production concept was necessary.
++
++Do not create a commit or push unless the user explicitly requests that action.
+diff --git a/.opencode/skills/first-principles-planning/SKILL.md b/.opencode/skills/first-principles-planning/SKILL.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c0553268dbf918cbab4391281591af4238c9b3ad
+--- /dev/null
++++ b/.opencode/skills/first-principles-planning/SKILL.md
+@@ -0,0 +1,315 @@
++---
++name: first-principles-planning
++description: Use ONLY when the user asks for an implementation plan, design proposal, root-cause repair plan, or when the approved-plan workflow requires a fresh canonical plan. Research the current repository from scratch, write or revise the versioned canonical plan, and do not modify production code.
++---
++
++# First-Principles Planning
++
++Produce an evidence-bounded, independently auditable implementation plan. The
++default route must repair the owning primary path. Only an exact, quoted
++user-requested rollback may replace that path, and it must never become a
++failure-triggered fallback implementation.
++
++## Required References
++
++Before planning, read:
++
++1. `.opencode/policy/first-principles-engineering.md`
++2. `.opencode/templates/canonical-plan.md`
++3. The repository's `CONTEXT.md`, relevant ADRs, and every applicable
++   `AGENTS.md`
++
++The shared policy is authoritative. Do not copy a weaker interpretation into
++the plan.
++
++## Scope
++
++This skill may inspect the repository and create or revise the canonical plan.
++It must not modify production code, tests, configuration, migrations, or
++generated files.
++
++This skill does not audit its own plan. It prepares the artifact for an
++independent adversarial audit.
++
++## Hard Gates
++
++> **Start from current repository evidence for every new task.**
++
++> **Without root-cause repair or an explicit user-requested rollback, no audit handoff.**
++
++> **Never invent a fallback. Only an explicit user-requested rollback may replace the primary path.**
++
++> **No evidence, no edge case.**
++
++> **No canonical document, no final plan.**
++
++Do not claim that prior conversation, an old audit, or a nearby implementation
++has already established the current task. Re-read the current files and verify
++the current call path.
++
++## Phase 0: Establish the Canonical Artifact
++
++1. Identify the stable source of the user requirement.
++2. Select exactly one canonical plan path.
++3. Use the repository's existing plan location when one exists; otherwise use
++   `docs/plans/<task-slug>.md`.
++4. Copy the structure from `.opencode/templates/canonical-plan.md`.
++5. Set `Status: draft`, `Revision: R1`, `Approved revision: none`, and
++   `Implementation allowed: no` for a new plan.
++6. Quote the user requirement without narrowing or embellishing it.
++
++If a plan already exists, read its complete current revision and audit record.
++Never maintain a second plan in chat.
++
++## Phase 1: Rebuild Repository Context
++
++Read enough of the actual repository to reconstruct the relevant behavior, not
++just the entry point.
++
++Inspect all relevant instances of:
++
++- Domain vocabulary and ADRs.
++- Public and internal interfaces.
++- Producers and consumers.
++- Callers and references.
++- Existing tests and fixtures.
++- Configuration and feature selection.
++- Error propagation.
++- Concurrency, cancellation, shutdown, and cleanup when reachable.
++- Persistence and generated-code chains when reachable.
++- Permission and security seams when reachable.
++- Existing compatibility and fallback behavior.
++
++Search for every call site and every duplicate implementation of the affected
++responsibility. Record what was read and why it matters in the plan.
++
++Completeness is bounded by evidence. Do not invent malformed inputs, hostile
++callers, compatibility consumers, or future extension points without proving a
++producer, public untrusted interface, contract, or repository rule.
++
++## Phase 2: Establish the Feedback Signal
++
++If the task is a bug, failure, or performance regression, load and follow the
++`diagnosing-bugs` skill before designing the repair.
++
++The plan must record:
++
++- The red-capable command or harness.
++- The exact user-visible symptom it catches.
++- The observed result.
++- The minimized reproduction.
++
++Do not replace diagnosis with source inspection. No red-capable feedback signal
++means no root-cause repair plan, unless the inability to reproduce is itself
++explicitly documented and returned to the user as a blocker under the
++`diagnosing-bugs` rules.
++
++For a new feature, identify the behavioral capability and the public seam at
++which a failing TDD slice will express its absence.
++
++## Phase 3: State Invariants and Find the First Divergence
++
++Assign stable IDs to every confirmed requirement and invariant.
++
++For each violated invariant:
++
++1. State the expected behavior without referring to a proposed implementation.
++2. Trace the real execution path.
++3. Identify the first transition where the invariant becomes false.
++4. Identify the module and interface that own that transition.
++5. Separate downstream symptoms from the root cause.
++6. Record the evidence class and source reference.
++
++A plan is blocked if it proposes changes before locating the first divergence.
++
++## Phase 4: Design One Approved Primary Path
++
++Design one authoritative semantic path that repairs the first divergence. If
++the user explicitly requests behavior rollback, design only the exact quoted
++replacement behavior and retain the invariant, divergence, and owner analysis.
++
++The design may use private helpers, but every helper must support the same
++contract. Do not introduce competing parsers, serializers, data sources,
++recovery implementations, or feature switches.
++
++Explicitly audit the proposed design for this prohibited pattern:
++
++```text
++primary A is wrong -> disable A -> add B -> add B1/B2/B3 to recover A's cases
++```
++
++If the proposal matches that pattern outside an exact user-requested rollback,
++discard it and return to the first divergence. A rollback replaces the current
++primary behavior directly. It does not authorize B1/B2/B3 recovery branches.
++
++Inventory every current and proposed secondary or replacement path. Classify it
++as:
++
++- Supported-domain branch within the primary contract.
++- Contracted pass-through.
++- Diagnostic path.
++- Existing shipped compatibility.
++- Explicit user-requested rollback.
++- Forbidden fallback.
++
++Reject every forbidden fallback. The default allowance for a new alternate
++success path is zero. For an explicit rollback, record the exact user quote,
++target behavior, transition condition, semantic difference, observability,
++tests, owner, and removal or reconsideration condition. The authorization is
++specific to one path and one revision.
++
++## Phase 5: Enforce Responsibility
++
++For every proposed guard, compatibility branch, retry, temporary file, cache,
++setting, adapter, error conversion, and diagnostic behavior, establish:
++
++- The interface that promises it.
++- The seam that makes the input reachable.
++- Why this module owns it.
++- Why no existing module already owns it.
++- Which confirmed requirement would fail without it.
++
++If those facts cannot be established, remove the behavior from the plan.
++
++Do not place a full safety envelope around every internal helper. Put validation
++at the real trust seam, compatibility in the owning adapter, retry in
++orchestration, and observability in its own seam.
++
++## Phase 6: Balance Completeness and Restraint
++
++Complete both traceability tables from the canonical template.
++
++Forward traceability blocks under-design:
++
++```text
++confirmed requirement -> production path -> file change -> behavioral test
++```
++
++Reverse traceability blocks over-design:
++
++```text
++proposed concept -> requirement ID -> evidence -> why reuse is insufficient
++```
++
++Every confirmed requirement must map forward. Every proposed production concept
++must map backward. Do not approve a plan with an empty cell justified only by
++"best practice", "defense in depth", "future-proofing", or "safer fallback".
++
++## Phase 7: Plan TDD and Verification
++
++Load the `tdd` skill when defining test seams and behavior slices.
++
++The test plan must:
++
++- Name the agreed public seam.
++- Proceed one vertical behavior slice at a time.
++- State why each test fails before implementation.
++- Use independent expected values.
++- Avoid private methods, source-text checks, call-count assertions, and tests
++  that reproduce implementation logic.
++- Cover only observed, contracted, or reachable normal, boundary, error,
++  concurrency, cleanup, compatibility, permission, and security behavior.
++
++List exact verification commands and their working directories. Respect the
++repository rule that tests and typechecks run from package directories when
++required.
++
++## Phase 8: Plan Code Quality and Chinese Comments
++
++Estimate effective changed code lines `E` and the required qualifying Chinese
++explanatory comments:
++
++```text
++if E = 0: C = 0
++if E > 0: C >= max(1, ceil(E * 0.15))
++```
++
++Identify the exact non-obvious invariants, test intentions, constants, real
++boundaries, compatibility reasons, and safety decisions that require nearby
++Chinese explanation.
++
++Do not plan comments that restate assignments or control flow. The ratio is a
++hard gate, but meaningless Chinese text does not count.
++
++## Phase 9: Write the Full Plan
++
++Complete every applicable section of the canonical template, including:
++
++- Current behavior and evidence.
++- Supported input domain and reachability.
++- Invariants and first divergence.
++- Responsibility ownership.
++- Single approved primary path or exact user-requested rollback.
++- Secondary and replacement path inventory and ratio.
++- Workaround deletion.
++- Forward and reverse traceability.
++- File-level changes.
++- TDD slices.
++- Chinese comment budget.
++- Verification commands.
++- Diff budget.
++- Real risks, open decisions, and rejected speculation.
++- Audit contract.
++
++Use `Not applicable` with a concrete reason when a template section genuinely
++does not apply. Do not silently omit sections.
++
++Set the plan to:
++
++```text
++Status: audit-required
++Approved revision: none
++Implementation allowed: no
++```
++
++## Audit Handoff
++
++Provide the independent auditor only:
++
++- The verbatim user requirement.
++- The canonical plan path.
++- The repository root.
++- `Audit mode: plan`.
++
++Do not send a self-review, suspected issue list, defense of the design, or
++preferred audit scope.
++
++Any blocking finding requires:
++
++1. A plan revision.
++2. A revision increment.
++3. Cleared approval.
++4. A new audit of the complete original scope.
++
++If the auditor returns `No blocking findings` for the exact current revision,
++the orchestrating primary agent must copy the verdict and audit metadata into
++the canonical plan without paraphrasing. That administrative edit may set:
++
++```text
++Status: approved
++Approved revision: <current revision>
++Implementation allowed: yes
++```
++
++Do not combine verdict recording with a design change. Any substantive change
++increments the revision, clears approval, and requires another full-scope
++audit.
++
++Plan audit is limited to 6 full rounds. Independent auditor invocation may be
++retried at most 3 consecutive times. Never substitute self-review for an
++unavailable independent auditor.
++
++## Completion Output
++
++Do not paste a second complete plan into chat. Report:
++
++- Canonical plan path.
++- Current revision.
++- Current status.
++- The proven root cause or feature seam.
++- The one-sentence primary-repair or rollback direction.
++- Whether real open decisions remain.
++- Whether independent audit is pending, approved, or unavailable.
++
++Do not modify implementation code and do not claim implementation permission
++until the exact revision receives a full-scope `No blocking findings` result.
+diff --git a/.opencode/templates/canonical-plan.md b/.opencode/templates/canonical-plan.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a87964c397f0301ceaf48d1bab02c0eddce313a
+--- /dev/null
++++ b/.opencode/templates/canonical-plan.md
+@@ -0,0 +1,264 @@
++# Canonical Implementation Plan: <Task Name>
++
++> Status: draft
++>
++> Revision: R1
++>
++> Approved revision: none
++>
++> Audit mode: full-scope
++>
++> Requirement source: <verbatim user request or stable issue reference>
++>
++> Implementation allowed: no
++>
++> Last updated: <YYYY-MM-DD>
++
++This file is the sole implementation specification for this task. Chat
++summaries, superseded revisions, and builder rationale outside this file are
++not implementation authority.
++
++## 1. Verbatim Requirement
++
++Quote the user's requirement without rewriting its meaning.
++
++## 2. Explicit Non-Goals
++
++List behavior that this task does not change. Do not use this section to hide a
++confirmed requirement.
++
++## 3. Repository Context
++
++Record the relevant `CONTEXT.md`, ADRs, `AGENTS.md` files, package instructions,
++and existing design conventions.
++
++| Source | Why it constrains this task |
++| --- | --- |
++|  |  |
++
++## 4. Files and Evidence Read
++
++List every source file, test, configuration file, generated artifact, trace, or
++document used to establish the plan.
++
++| Evidence | Relevance | Evidence class |
++| --- | --- | --- |
++|  |  | observed / contracted / reachable |
++
++## 5. Current Behavior
++
++Describe the current producer-to-consumer path. Include only relevant and
++proven concurrency, exit, cleanup, compatibility, persistence, permission, and
++security behavior.
++
++```text
++producer -> seam -> module -> adapter -> observable result
++```
++
++## 6. Supported Input Domain and Reachability
++
++| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
++| --- | --- | --- | --- | --- | --- |
++|  |  |  |  |  | observed / contracted / reachable / speculative |
++
++Speculative rows cannot justify production logic or blocking findings.
++
++## 7. Required Invariants
++
++Assign stable IDs.
++
++| ID | Behavioral invariant | Evidence | Existing test |
++| --- | --- | --- | --- |
++| INV-01 |  |  |  |
++
++## 8. First Divergence and Root Cause
++
++State where each violated invariant first becomes false. Distinguish the root
++cause from downstream symptoms and workarounds.
++
++| Invariant | First divergence | Owning module/interface | Proof |
++| --- | --- | --- | --- |
++|  |  |  |  |
++
++For bug work, record the red-capable feedback-loop command and observed output.
++
++## 9. Responsibility and Seam
++
++| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
++| --- | --- | --- | --- | --- |
++|  |  |  |  |  |
++
++## 10. Single Approved Primary-Path Design
++
++Describe one authoritative semantic path. The default route repairs the first
++divergence. An explicit user-requested rollback may replace current primary
++behavior, but it must not coexist as a failure-triggered recovery path. Private
++helpers may decompose the implementation but must not create competing success
++behavior.
++
++```text
++input -> validation at owning seam -> primary operation -> observable result
++```
++
++Explain why the route repairs the first divergence. For an explicit rollback,
++quote the request and record the exact target behavior, transition condition,
++semantic difference, observability, tests, owner, and removal or reconsideration
++condition.
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
++| --- | --- | --- | --- | --- | --- |
++|  |  | primary-contract branch / pass-through / diagnostic / existing compatibility / explicit user-requested rollback / forbidden fallback | yes/no |  | remove / preserve / reject |
++
++New alternate success paths are forbidden. An explicit user-requested rollback
++may replace the primary path only when its quoted, path-specific authorization
++appears here.
++
++## 12. Workaround Deletion and Replacement
++
++| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
++| --- | --- | --- | --- |
++|  |  |  |  |
++
++## 13. Forward Traceability
++
++This table prevents under-design.
++
++| Requirement or invariant | Production path | Planned file/change | Behavioral test |
++| --- | --- | --- | --- |
++|  |  |  |  |
++
++No confirmed requirement may remain unmapped.
++
++## 14. Reverse Traceability
++
++This table prevents over-design.
++
++| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
++| --- | --- | --- | --- |
++|  |  |  |  |
++
++No production concept may remain unjustified.
++
++## 15. File-Level Change Plan
++
++| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
++| --- | --- | --- | --- |
++|  |  |  |  |
++
++## 16. TDD Behavior Slices
++
++Use one confirmed seam and one vertical behavior slice at a time.
++
++| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
++| --- | --- | --- | --- | --- |
++| 1 |  |  |  |  |
++
++Tests must observe public behavior and use an independent expected value.
++
++## 17. Chinese Comment Budget
++
++| Metric | Estimate | Method |
++| --- | --- | --- |
++| Effective changed code lines `E` |  | Exclude imports, formatting, generated files, and pure moves |
++| Required Chinese explanatory comments `C` |  | `if E = 0: C = 0`; `if E > 0: C >= max(1, ceil(E * 0.15))` |
++
++List the invariants, non-obvious constraints, constants, compatibility reasons,
++test intentions, and safety decisions that require nearby Chinese explanation.
++
++## 18. Verification
++
++List exact commands and the behavior each command proves. Respect package-local
++test and typecheck instructions.
++
++| Command | Working directory | Evidence produced |
++| --- | --- | --- |
++|  |  |  |
++
++## 19. Diff Budget
++
++| Metric | Estimate | Justification |
++| --- | --- | --- |
++| Files added |  |  |
++| Files modified |  |  |
++| Files deleted |  |  |
++| Production lines |  |  |
++| Test lines |  |  |
++| Generated lines |  |  |
++
++The budget is an audit signal, not permission to omit confirmed behavior.
++
++## 20. Real Risks and Open Decisions
++
++Include only observed, contracted, or reachable risks. Put speculative concerns
++in a separate non-blocking subsection.
++
++### Open Decisions Requiring the User
++
++Use this section only for irreducible product or policy choices.
++
++### Rejected Speculation
++
++Record plausible-sounding concerns that were investigated and rejected for lack
++of reachability, ownership, or contract evidence.
++
++## 21. Audit Contract
++
++The independent auditor must:
++
++- Read this exact file and the original requirement.
++- Reconstruct behavior from repository evidence.
++- Treat builder summaries as untrusted.
++- Audit the complete original scope on every round.
++- Require evidence for every blocking finding.
++- Check both under-design and over-design.
++- Check root-cause repair, fallback, ownership, tests, code quality, and the 15
++  percent Chinese explanatory-comment plan.
++
++## 22. Plan Audit Record
++
++| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++|  |  | yes |  |  |  |  |
++
++Any substantive revision invalidates earlier approval.
++
++The orchestrating primary agent must copy the independent verdict without
++paraphrasing. A clean verdict may update only the administrative approval fields
++for the exact audited revision. It must not be combined with a design change.
++
++## 23. Implementation Evidence
++
++Complete only after implementation.
++
++### Actual Files and Diff
++
++### Red-Green Test Evidence
++
++### Verification Commands and Results
++
++### Original Feedback-Loop Result
++
++### Actual Secondary and Replacement Path Inventory
++
++### Chinese Comment Calculation
++
++| Metric | Actual | Exclusions and evidence |
++| --- | --- | --- |
++| Effective changed code lines `E` |  |  |
++| Qualifying Chinese comment lines `C` |  |  |
++| Ratio `C / E` |  | `N/A` when `E = 0` |
++| Required minimum `C` |  | `if E = 0: C = 0`; `if E > 0: C >= max(1, ceil(E * 0.15))` |
++
++### Remaining Unverified Items
++
++## 24. Implementation Audit Record
++
++| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++|  |  | yes |  |  |  |  |
++
++The task may be marked `verified` only after an independent full-scope result of
++`No blocking findings` for the current implementation and approved plan
++revision.
+diff --git a/docs/Proposal/stats-foreground-theme-repair-plan.md b/docs/Proposal/stats-foreground-theme-repair-plan.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..1c80358de177cf2a63c67dd834cc9164e8498510
+--- /dev/null
++++ b/docs/Proposal/stats-foreground-theme-repair-plan.md
+@@ -0,0 +1,565 @@
++# Canonical Implementation Plan: Stats 前景色与 ANSI 状态修复
++
++> Status: audit-required
++>
++> Revision: R3
++>
++> Approved revision: none
++>
++> Audit mode: full-scope
++>
++> Requirement source: 用户关于 `opencode stats` 深色模式前景色变暗、主题色退化以及“只提出第一性原理方案，不实施修改”的原文要求
++>
++> Implementation allowed: no
++>
++> Last updated: 2026-07-14
++
++This file is the sole implementation specification for the focused foreground
++color regression described below. The existing broad Stats information
++architecture proposal remains evidence and context; it is not authority for
++this focused repair when the two documents differ.
++
++## 1. Verbatim Requirement
++
++> “请注意你当前修改的内容极其丑陋……当前我发现你的修改会导致颜色,你可以看到,颜色中虚线那一行,它的颜色都会变暗,也就是前面的折线的颜色都会变暗。同时,貌似你当前的配色风格,和我们最开始什么都没修改的时候……那几次的修改的配色好像比现在的更好看一点,现在的好像有一点过于没有主题色,然后也没有主题的色系等等内容。请你完整检查检查,看看什么情况。”
++>
++> “请注意理论上来说紫色的背景去掉是没问题的,问题是前景色有问题,你可以检查检查前景色的配色到底是怎么样的。同时请按照第一性原理进行相应的计划提出,而不要进行任何实施和修改。”
++
++本计划只处理上述前景色与 ANSI 状态问题。用户明确要求当前阶段不实施代码修改；因此本 revision 只定义未来实现，不授权任何生产代码、测试、配置、数据库或生成文件改动。
++
++## 2. Explicit Non-Goals
++
++- 不恢复历史紫色 panel background；当前 `49m` 默认背景恢复和无具体背景色约束保持不变。
++- 不回滚整个 `da7d9d8e3` Stats 重构，不改变 Dashboard、Timeline、Breakdown、Sessions、Insights 的数据投影、布局职责或页面数量。
++- 不修改 fork provenance、tail-only 统计、session/message 去重、数据库 schema、migration、SDK、HTTP API 或数据聚合口径。
++- 不新增 `--theme`、`stats.theme`、dark/light 配置项、环境变量猜测、持久化 KV 或状态机。
++- 不启动 OpenTUI renderer，不在普通 `stats` 命令中发送 OSC terminal-palette 查询，不把 TUI `ThemeProvider` 强行接入纯字符串 CLI renderer。
++- 不在 `render.ts` 的每个页面、每个表格或每条折线调用点分别补颜色；前景色必须由共享 chart seam 统一拥有。
++- 不通过恢复固定 24-bit RGB 作为失败后的 fallback；历史 RGB 方案在亮色终端的对比度问题仍是已确认的既有风险。
++- 不改变 `--color always/never/auto`、`NO_COLOR`、TTY 判断、可见宽度、无色形状、无点折线、背景安全和省略号约束。
++- 当前阶段不运行会修改生成物的正式 build，不提交 commit，不 push，不清理或覆盖工作区其他修改。
++
++## 3. Repository Context
++
++| Source | Why it constrains this task |
++| --- | --- |
++| `CONTEXT.md` | 说明当前仓库是 SMARK fork，Stats v1 与 TUI/v2 代码并存；不能把 TUI runtime 假定成普通 Stats 的可用依赖。 |
++| `AGENTS.md` | 规定测试必须从 package 目录运行、优先最小修改、避免无关重构，并要求保留共享工作区修改。 |
++| `packages/opencode/AGENTS.md` | 规定 package 的 typecheck 命令、Effect/模块边界和不新增重复抽象的风格。 |
++| `packages/opencode/test/AGENTS.md` | 规定行为级测试 seam、避免实现耦合，以及不使用时序 sleep 伪造同步。 |
++| `.opencode/policy/first-principles-engineering.md` | 要求修复首个分歧、单一 primary path、禁止未经授权 fallback、要求正反向可追溯。 |
++| `.opencode/templates/canonical-plan.md` | 规定本文件的 canonical plan 结构、revision、审计与实现证据字段。 |
++| `docs/adr/README.md` | 本问题属于 Stats 单模块输出契约；除非引入跨模块主题契约，不新增 ADR。 |
++| `docs/proposal/stats-terminal-information-architecture.md` | 现有 Stats 设计基线：无具体背景、终端语义色、共享 chart palette、页面职责和宽度不变量。其主题结论需要在本问题中针对 ANSI 状态泄漏重新校验。 |
++
++## 4. Files and Evidence Read
++
++| Evidence | Relevance | Evidence class |
++| --- | --- | --- |
++| `packages/opencode/src/cli/cmd/stats/charts.ts` | 当前 `palette`、`TEXT_RESET`、`gridStyle`、`ChartCanvas.render()`、`paint()` 和所有图表 primitive 的唯一共享实现。 | observed |
++| `packages/opencode/src/cli/cmd/stats/render.ts` | 页面层只通过 `charts.ts` 的 palette alias 和公开 renderer 输出，证明无需逐页改色。 | observed |
++| `packages/opencode/src/cli/cmd/stats.ts` | 证明 Stats 是独立的 Effect CLI handler，直接调用纯字符串 renderer，不创建 TUI renderer。 | observed |
++| `packages/opencode/src/cli/ui.ts` | 普通 CLI 已有 `TEXT_INFO_BOLD`、`TEXT_SUCCESS_BOLD`、`TEXT_WARNING_BOLD`、`TEXT_DANGER_BOLD`、`TEXT_HIGHLIGHT_BOLD` 等 ANSI semantic role 约定。 | observed / contracted |
++| `packages/opencode/src/cli/cmd/tui/context/theme.tsx` | `ThemeProvider` 依赖 renderer、KV、config 和 Solid context；`generateSystem()` 从 renderer palette 生成主题。 | observed |
++| `packages/opencode/src/cli/cmd/tui/context/theme/opencode.json` | 默认 TUI theme 的 primary/secondary/accent/status/text 语义，说明主题 token 与背景 token 是分开的。 | observed |
++| `packages/opencode/src/cli/cmd/run/theme.ts` | `resolveRunTheme(renderer)` 的 renderer-dependent adapter 先例；不能直接作为 standalone Stats 输入。 | observed |
++| `node_modules/@opentui/core/lib/terminal-palette.d.ts` | `TerminalPalette.detect()` 会通过 terminal palette detector 查询终端，证明直接探测不是零副作用的纯函数。 | observed / reachable |
++| `packages/opencode/test/cli/stats-render-width.test.ts` | 现有所有页面的行为级宽度、颜色、背景、无色等测试 seam；尚未覆盖 grid dim 泄漏。 | observed |
++| `packages/opencode/test/cli/run/theme.test.ts` | 证明 theme adapter 测试依赖 `CliRenderer`/`TerminalColors`，不是 Stats renderer 的现有 seam。 | observed |
++| `git show 8facd64e2:packages/opencode/src/cli/cmd/stats/charts.ts` | 早期 Stats 的固定 RGB foreground palette。 | observed |
++| `git show 75a4cc2bb` | 移除具体 panel background、保留 RGB foreground 的过渡；证明背景去除和前景 palette 改变是两个独立决策。 | observed |
++| `git show da7d9d8e3` | 当前从固定 RGB 转为 ANSI semantic palette 的实现来源。 | observed |
++| 最小 `renderRoundedLineChart()` Bun harness | 真实运行当前 renderer，观察到 `\x1b[2;39m` 后直接出现 `\x1b[34m`，无中间 `\x1b[22m`。 | observed |
++| 当前工作区 `git status --short` | Stats 生产代码、Stats 测试和现有 Stats proposal 当前没有工作树修改；其他 staged/unstaged 修改必须保留。 | observed |
++
++### 4.1 Current Diagnostic Evidence
++
++从 `packages/opencode` 执行的最小只读 harness：
++
++```text
++bun --conditions=browser -e '<renderRoundedLineChart minimal ANSI state probe>'
++```
++
++得到的关键片段：
++
++```text
++"\u001b[2;39m┄┄┄┄┄┄┄┄\u001b[34m╭───────╮..."
++```
++
++同一次运行统计到：
++
++```json
++{
++  "dimStarts": 16,
++  "intensityResets": 20
++}
++```
++
++`\x1b[2;39m` 设置 dim 和默认 foreground；`\x1b[34m` 只改变 foreground，不清除 dim。因而在同一 style run 中，折线 glyph 会继承网格的 dim 状态。该证据直接复现用户描述的“虚线后前面的折线颜色变暗”，不是截图推测。
++
++## 5. Current Behavior
++
++### 5.1 Producer-to-consumer path
++
++```text
++StatsCommand
++  -> loadReport()
++  -> renderDashboard/renderBreakdown/renderTimeline/renderSessions/renderInsights
++  -> charts.ts palette/renderContext/ChartCanvas
++  -> ANSI string
++  -> console.log()
++  -> user terminal
++```
++
++页面层的 `render.ts` 将 `charts.ts` 的 `palette` 映射到 `theme` alias；没有第二套实际颜色表。所有折线、百分比堆积条、表格和 callout 最终通过 `paint()` 或 `ChartCanvas.render()` 输出 ANSI。
++
++### 5.2 Current foreground palette
++
++当前 `charts.ts` 使用：
++
++| Role | Current escape | Current semantic intent |
++| --- | --- | --- |
++| `axis/title/white` | `\x1b[39m` | 交给终端默认前景，避免固定 RGB 在浅色终端失去对比。 |
++| `subtitle` | `\x1b[36m` | 使用 terminal cyan。 |
++| `blue/green/yellow/purple/red` | 基础 ANSI 颜色槽 | 多系列身份和状态语义。 |
++| `orange/pink` | bright ANSI 槽 | 与基础系列区分。 |
++| `muted/grid` | `\x1b[2;39m` | 低优先级网格、分隔线、未填充条。 |
++
++该 palette 不输出具体 background；`render.ts`/`charts.ts` 的 panel 只使用 `\x1b[49m` 恢复默认背景。
++
++### 5.3 Current failure
++
++`ChartCanvas.render()` 当前在 `cell.style !== active` 时直接输出：
++
++```text
++previous style -> new palette foreground
++```
++
++而不是：
++
++```text
++previous style -> clear intensity/foreground -> new palette foreground
++```
++
++因此 `gridStyle` 的 dim 状态可进入数据线 style。该状态还会影响后续标题、轴和其它同一行 glyph 的观感，故用户看到的是多页面共同的前景退化，而不是某个 Breakdown composer 的局部配色错误。
++
++## 6. Supported Input Domain and Reachability
++
++| Input or condition | Producer | Upstream guarantees | Reachable path | Owner | Classification |
++| --- | --- | --- | --- | --- | --- |
++| `--color always` | yargs `colorMode()` | 允许显式开启 ANSI | 所有 Stats renderer | `charts.ts` color seam | observed / contracted |
++| `--color never` | yargs `colorMode()` | 禁止 ANSI | 所有 Stats renderer | `charts.ts` color seam | observed / contracted |
++| `--color auto` + TTY | `useColor()` | 由 TTY 与 `NO_COLOR` 决定 | 所有 Stats renderer | `charts.ts` color seam | observed / contracted |
++| `NO_COLOR` | process environment | auto 模式关闭颜色 | 所有 Stats renderer | `useColor()` | observed / contracted |
++| grid/axis/series style transition | `ChartCanvas` 绘图 primitive | Cell 已带合法 `ChartStyle` | 折线、热力图和其它 canvas primitive | `ChartCanvas.render()` | observed / reachable |
++| `paint()` 文本片段 | 页面与 chart primitive | 文本已是字符串，颜色由调用方语义指定 | 表格、legend、callout、stack | `paint()`/共享 palette | observed |
++| 深色或浅色终端的 ANSI 色槽 | terminal profile | 终端解释 ANSI foreground | `console.log()` 后用户终端 | terminal, not Stats | reachable |
++| OpenCode TUI custom theme | TUI config/KV + renderer | 需要 TUI provider/runtime | 不经过 standalone Stats command | TUI ThemeProvider | observed as non-reachable for Stats |
++| OpenTUI OSC palette query | `TerminalPalette.detect()` | 会写/读 terminal control sequence | 当前 Stats 未调用 | terminal adapter | reachable but explicitly out of scope |
++
++没有证据表明 Stats 命令当前接收 `ThemeJson`、`CliRenderer` 或用户选中的 TUI theme；因此不能把这些类型假定为现有输入。
++
++## 7. Required Invariants
++
++| ID | Behavioral invariant | Evidence | Existing test |
++| --- | --- | --- | --- |
++| INV-FG-01 | 每个 chart style run 在输出新 foreground 前必须清除前一 style 的 dim/bold/foreground 状态；数据 glyph 不得继承 grid 的 dim。 | 最小 ANSI harness；`ChartCanvas.render()` 当前 transition。 | 缺失，需新增 red test。 |
++| INV-FG-02 | Grid、axis、text、series 使用同一共享 semantic palette；页面层不得自行复制或覆盖颜色角色。R3 固定 role-to-ANSI contract：`title=95m`、`subtitle=96m`、`blue=94m`、`cyan=96m`、`green=92m`、`yellow=93m`、`orange=33m`、`purple=95m`、`pink=35m`、`red=91m`、`axis/white=39m`、`muted/grid=2;39m`。只有 `muted/grid` 可以携带 dim。 | `render.ts` 只 alias `charts.ts.palette`；`renderRoundedLineChart()`、tables、stacks 共用 `paint`；`cli/ui.ts` 已使用 bright ANSI semantic roles。 | 部分由 colored breakdown/status 测试覆盖；R3 新增 exact public palette contract 和全入口矩阵。 |
++| INV-FG-03 | Stats 不绘制具体背景；彩色 panel 只能使用 `49m` 恢复默认背景，不能恢复历史紫色 background。 | `never emits terminal background ANSI` 测试与 `BACKGROUND_RESET`。 | 已有 `stats-render-width.test.ts:1307`。 |
++| INV-FG-04 | `stripAnsi(color=always)` 的可见正文和几何必须等于 `color=never`；前景修复不能改变布局。 | `stripAnsi`/固定宽度测试。 | 已有多页面覆盖。 |
++| INV-FG-05 | 彩色折线仍无密集点；颜色只加速身份识别，无色模式继续有形状/完整名称。 | `renderRoundedLineChart()` 与现有 breakdown tests。 | 已有 `keeps colored breakdown trend lines free of point markers`。 |
++| INV-FG-06 | 所有 Stats 页面、可达 option 分支、兼容 alias、root shortcut 和 interactive view 继续到达同一 shared render path；不因修复新增页面专属 palette。 | `stats.ts` command mapping、root dispatch、interactive callback table、`renderModels/renderProviders` wrapper、timeline/heatmap/forecast branches。 | R3 新增真实 CLI dispatch/PTY 行为测试与彩色 renderer 矩阵。 |
++
++## 8. First Divergence and Root Cause
++
++| Invariant | First divergence | Owning module/interface | Proof |
++| --- | --- | --- | --- |
++| `INV-FG-01` | `ChartCanvas.render()` line 419 在 `cell.style !== active` 时直接拼接 `ctx.palette[active.color]`，没有先发 `TEXT_RESET`。 | `packages/opencode/src/cli/cmd/stats/charts.ts`, private `ChartCanvas.render()` but publicly observed through `renderRoundedLineChart()`. | Raw output contains `\x1b[2;39m...\x1b[34m` with no `\x1b[22m` between grid and series. |
++| `INV-FG-02` | 当前 shared `palette` 已从历史主题 RGB 收敛为 default/ANSI roles；中性标题和轴不再携带历史紫色层次，且当前普通 ANSI series 在 dim leak 后进一步变暗。 | `charts.ts` `palette`; `render.ts` is only consumer alias. | `git show 75a4cc2bb` vs current `da7d9d8e3`, plus current palette lines 94-113 and user-visible output. |
++| `INV-FG-03` | 没有发现当前背景 invariant 的新分歧；background removal is working and must be preserved. | `render.ts` `panel()` and `charts.ts` `renderPanel()`. | Existing background test passes in prior baseline; current code emits `49m`, not concrete background. |
++
++### Root-cause separation
++
++- **确定性行为 bug**：ANSI intensity state transition 缺少 reset，是折线被虚线变暗的首个分歧。
++- **视觉策略退化**：foreground role mapping 从历史固定 purple RGB 变成 ANSI/default 后，主题层次改变；这不是通过恢复 background 可以解决的问题。
++- **不是根因**：series priority、series identity、point marker、各 Breakdown composer、panel width 和 database aggregation。它们都在 style transition 之前或之后消费同一结果，不能解释 dim 状态跨 style run 传播。
++
++## 9. Responsibility and Seam
++
++| Concern | Owner | Interface promise | Why it belongs here | Why another module does not own it |
++| --- | --- | --- | --- | --- |
++| ANSI style reset and transition | `ChartCanvas.render()` in `charts.ts` | 将 Cell 网格转换为不泄漏终端状态的行字符串 | 它是第一个把相邻 style 变成 ANSI sequence 的模块，也是首个 invariant 失真的位置。 | `render.ts` 只组合页面；在调用方补 reset 会遗漏其它 chart primitive。 |
++| Semantic foreground palette | `charts.ts` exported `palette`/`renderContext` seam | 所有 chart/text primitive 使用同一 role-to-ANSI 映射 | 当前所有页面已集中 alias 到这里，最小切入点只有一个。 | `render.ts` 的 `theme` 是 alias，不应成为第二 palette；TUI theme 依赖不存在的 runtime context。 |
++| Background reset | existing `panel()` / `renderPanel()` | 只清理上游背景，不指定具体颜色 | 当前行为已满足用户认可的背景去除，不需要与前景修复耦合。 | `ChartCanvas` 不拥有 panel 边界；恢复 background 会扩大回归面。 |
++| User-visible regression test | `renderRoundedLineChart()` and page renderers | 从公开输出观察 ANSI state、text、width | 真实 bug 可在纯字符串 seam 确定复现，速度快且不依赖 PTY。 | 测试私有 `ChartCanvas` 或源码文本会锁定实现，不符合 TDD seam。 |
++| CLI alias/root/interactive dispatch | `packages/opencode/src/cli/cmd/stats.ts` command tree and handlers | 公开 CLI 参数必须实际选择预期 renderer；interactive 必须实际切换五个 view | 这些行为属于命令模块，不是 builder 或 renderer primitive；真实 subprocess/PTY 才能观察 dispatch 和 cleanup。 | 不在生产代码中新增 test-only dispatch helper；isolated builder assertions 只能补充参数校验。 |
++| Dynamic TUI theme selection | TUI `ThemeProvider` | 仅在 OpenTUI/Solid/KV/config provider tree 中提供 ThemeJson | 当前 Stats command 没有该输入；本任务不扩展生命周期。 | `stats.ts`、普通 CLI 和 pipe/redirection 不应启动 TUI runtime 或增加 OSC cleanup。 |
++
++## 10. Single Approved Primary-Path Design
++
++### 10.1 Authoritative path
++
++```text
++ChartSeries/Cell styles
++  -> shared renderContext() and semantic foreground palette
++  -> ChartCanvas.render()
++       -> before every style transition: clear intensity + foreground
++       -> apply exactly one active style
++       -> row-final reset
++  -> page panel() applies only 49m boundary reset
++  -> console.log() emits stable ANSI/plain output
++```
++
++### 10.2 Primary repair
++
++1. 在 `ChartCanvas.render()` 的 style transition owner 处，先输出现有 `TEXT_RESET`，再输出新 style 的 bold/foreground。首个 cell style 也必须从干净的 intensity state 开始，避免继承调用者或上一行的 dim。
++2. 保留 `TEXT_RESET = \x1b[22m\x1b[39m` 的职责：它只恢复 intensity/foreground，不触碰 background；background 继续由 panel 的 `49m` 边界负责。
++3. 将 foreground role mapping 继续集中在 `charts.ts`，采用已经存在于普通 CLI 和 OpenCode system theme 语义中的 ANSI 槽位。R3 的唯一目标表如下；这些是 public `--color always` 输出契约，不是实现者可自由选择的视觉建议：
++
++   | Role | ANSI | Semantic responsibility |
++   | --- | --- | --- |
++   | `title` | `\x1b[95m` | 主题/二级 accent；标题和 section identity。 |
++   | `subtitle` | `\x1b[96m` | primary/info；页面说明和辅助标签。 |
++   | `blue` | `\x1b[94m` | info/第一系列，避免普通蓝在深色 profile 中过暗。 |
++   | `cyan` | `\x1b[96m` | primary/highlight。 |
++   | `green` | `\x1b[92m` | success/positive usage。 |
++   | `yellow` | `\x1b[93m` | warning/attention。 |
++   | `orange` | `\x1b[33m` | 次级 amber，和 bright warning 保持可区分。 |
++   | `purple` | `\x1b[95m` | accent/forecast/high intensity。 |
++   | `pink` | `\x1b[35m` | 次级 magenta/forecast 对照。 |
++   | `red` | `\x1b[91m` | error/danger。 |
++   | `axis`、`white` | `\x1b[39m` | 终端默认前景；正文和精确值不依赖彩色。 |
++   | `muted`、`grid` | `\x1b[2;39m` | 解释性文字、网格和未填充段；只能表达低优先级结构。 |
++
++   bright/normal 的组合复用 `packages/opencode/src/cli/ui.ts` 的普通 CLI 语义；不查询 TUI runtime，不加入 RGB 或 background 通道。
++4. 调整 palette 时只修改 role-to-foreground code，不修改 `ChartColor` public union、`seriesColor()` 顺序、render page 调用点或无色分支。R3 的可验收条件是：每个 role 的实际 escape code 与上表一致；数据线不处于 dim；标题/辅助层级有稳定的 cyan/magenta 主题色；系列仍可区分。
++5. 不在 style transition 失败时切换另一种 renderer、不捕获异常合成成功输出、不按终端类型建立第二套 success path。当前 semantic ANSI table 是唯一 primary path。
++
++### 10.3 Why this repairs the first divergence
++
++Reset 放在 `ChartCanvas.render()` 的 style transition 前，直接恢复被 grid 设置的 dim state；这是比在数据线调用方、legend 或 panel 外层补 reset 更早、也更完整的修复。共享 palette 的角色校准则解决当前历史 RGB 与默认 ANSI 之间的视觉层次变化，但仍保留终端负责最终 RGB 的设计原则。
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path | Current or proposed | Classification | Produces success? | Decision-surface share | Disposition |
++| --- | --- | --- | --- | ---: | --- |
++| `ChartCanvas.render()` shared reset + palette | proposed | primary-contract path | yes | 100% | approve |
++| `paint()` per-fragment reset | existing | primary-contract path for non-canvas text | yes | existing | preserve; no semantic expansion |
++| `render.ts` page-local color patches | proposed alternative | forbidden fallback/duplicate ownership | yes | 0% allowed | reject |
++| TUI `useTheme()`/`ThemeProvider` from Stats | proposed alternative | forbidden runtime coupling | yes | 0% allowed | reject |
++| `TerminalPalette.detect()` OSC query in Stats | proposed alternative | new side-effecting alternate path | yes | 0% allowed | reject |
++| Restore historical 24-bit RGB after ANSI looks poor | proposed alternative | unapproved behavior rollback/fallback | yes | 0% allowed | reject unless user later gives exact path-specific rollback authorization |
++| Restore purple panel background | proposed alternative | forbidden visual workaround | yes | 0% allowed | reject |
++| `color=never` plain output | existing | contracted pass-through | yes | existing | preserve |
++
++No new alternate success path is authorized. The only implementation path is
++the shared chart renderer plus its single semantic palette.
++
++## 12. Workaround Deletion and Replacement
++
++| Existing workaround or duplicate | Why it existed | Why the approved route supersedes it | Delete or collapse location |
++| --- | --- | --- | --- |
++| No current page-level reset workaround | None observed | No downstream workaround should be added; repair the owner directly. | None |
++| Historical `fg(r,g,b)`/panel background design | Earlier visual theme implementation | Background is already correctly removed; fixed RGB is not a safe dark/light contract. | Do not reintroduce; current `charts.ts` remains the sole palette. |
++| Any future per-page color override | Would compensate for a shared palette/state bug | Shared `renderContext()` must remain the only role mapping. | Reject before implementation. |
++
++## 13. Forward Traceability
++
++| Requirement or invariant | Production path | Planned file/change | Behavioral test |
++| --- | --- | --- | --- |
++| Foreground line must not dim after grid | `ChartCanvas.render()` | Reset intensity/foreground before each style transition | Public `renderRoundedLineChart()` ANSI state test |
++| Theme hierarchy must be shared | `palette` + `renderContext()` | Implement the exact R3 role table in `charts.ts`; keep `render.ts` alias | Minimal chart role-contract test with independent literal ANSI expectations |
++| Purple background removal remains | `panel()`/`renderPanel()` | No background changes | Existing concrete-background test remains green |
++| No-color behavior remains exact | `useColor()` and `paint()` | No change to mode selection or plain branch | `stripAnsi(always) === never` across pages |
++| Series identity remains stable and marker-free | `seriesColor()`/`renderRoundedLineChart()` | No change to color order or points policy | Existing breakdown trend and wrapper tests |
++| All entrypoints share repair | `stats.ts` -> page renderers/options/aliases/interactive callbacks | No page-specific palette; shared primitive only | Complete colored renderer/option matrix plus real CLI alias, root-shortcut and PTY interactive dispatch test |
++| Empty-report foreground remains valid | no-match/new installation -> page empty renderer | No production branch change; shared role table must apply safely | Colored empty report through all five exported page renderers, including separate Insights empty path |
++
++## 14. Reverse Traceability
++
++| Proposed production concept | Requirement ID | Evidence | Why existing logic cannot carry it |
++| --- | --- | --- | --- |
++| Reset before every `ChartCanvas` style transition | `INV-FG-01` | Raw `2;39m -> 34m` trace | Existing transition only applies new color and leaves intensity state active. |
++| One shared semantic foreground table | `INV-FG-02`, `INV-FG-06` | `render.ts` aliases `charts.ts.palette`; multiple primitives consume it | Page-level values would duplicate the existing owner and drift. |
++| Keep `49m` panel boundary unchanged | `INV-FG-03` | Existing background test and current panel code | Foreground transition cannot clear background without violating panel responsibility. |
++| Public ANSI stream regression parser | `INV-FG-01`, `INV-FG-04` | `renderRoundedLineChart()` is an existing exported seam | A private `ChartCanvas` test would not prove the actual user-visible path. |
++| Exact R3 semantic ANSI role table | `INV-FG-02` | `cli/ui.ts`, `generateSystem()` and current palette history | Current palette uses several normal slots and default title/subtitle roles; it cannot satisfy the reported theme hierarchy contract without an explicit mapping. |
++| Actual CLI dispatch/PTY verification | `INV-FG-06` | `stats.ts` owns aliases, root shortcut precedence and private interactive callback table | Isolated builders and direct renderer calls cannot prove which handler/view the public command selected. |
++| Colored empty-page partition | `INV-FG-02`, `INV-FG-03`, `INV-FG-04`, `INV-FG-06` | `renderEmptyStatsPage()` plus separate `renderInsights()` empty branch | Existing empty fixture only runs `color=never`, so it cannot catch foreground/background state regressions. |
++
++## 15. File-Level Change Plan
++
++| File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
++| --- | --- | --- | ---: |
++| `packages/opencode/src/cli/cmd/stats/charts.ts` | modify | Repair `ChartCanvas.render()` transition reset; refine only the shared foreground role table; keep background, width, series order and plain branch unchanged. | +8 to +24 / -2 to -12 |
++| `packages/opencode/test/cli/stats-render-width.test.ts` | modify | Add behavior-level ANSI state regression, exact shared palette contract, and complete colored renderer/option matrix; update only assertions whose public role mapping intentionally changes. | +55 to +110 / -0 to -18 |
++| `packages/opencode/test/cli/stats-command.test.ts` | add | Invoke the real Stats CLI with temporary database state and argument arrays; verify aliases/root shortcuts and non-TTY/PTY interactive view dispatch without adding a production test seam. | +90 to +180 / 0 |
++| `packages/opencode/test/cli/stats-data.test.ts` | no change planned | Existing isolated builder tests continue to validate defaults and rejected options, but are not treated as alias/handler dispatch proof. | 0 / 0 |
++| `packages/opencode/src/cli/cmd/stats/render.ts` | no change planned | Continue consuming `charts.ts` palette alias; no page-local color changes are necessary. | 0 / 0 |
++| `packages/opencode/src/cli/cmd/stats.ts` | no change planned | Keep command/TTY/NO_COLOR/interactive lifecycle unchanged; actual dispatch is observed through the new CLI subprocess/PTY test rather than a test-only production export. | 0 / 0 |
++| `packages/opencode/src/cli/cmd/tui/context/theme.tsx` | no change planned | Do not couple standalone Stats to Solid/OpenTUI theme runtime. | 0 / 0 |
++| `packages/opencode/src/cli/ui.ts` | no change planned | Reuse existing semantic role vocabulary as evidence; avoid changing unrelated CLI output. | 0 / 0 |
++| `docs/proposal/stats-terminal-information-architecture.md` | no change planned in implementation patch | Existing broad proposal remains historical context; this focused plan is the authority for the foreground regression. | 0 / 0 |
++| Database schema/migrations/SDK/generated files | no change | No persisted or protocol data is involved. | 0 / 0 |
++
++## 16. TDD Behavior Slices
++
++The agreed public seams are `renderRoundedLineChart()` for the minimized
++regression, the five exported page renderers for visible output, and the actual
++Stats CLI process/PTY for alias, root-shortcut and interactive dispatch. The
++existing yargs builder tests only supplement option validation. No private
++`ChartCanvas` method, source-text assertion, palette constant assertion, or
++test-only production dispatch export is allowed as the primary behavior test.
++
++| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
++| --- | --- | --- | --- | --- |
++| 1 | Render a small colored line chart whose path crosses a grid row and assert that a series glyph is never emitted while ANSI dim is active. | Current output has `2;39m` followed by `34m` without `22m`; the public ANSI stream is red-capable. | Reset intensity/foreground before each canvas style transition and keep row-final reset. | Prevents grid dim from darkening every line chart and all pages that reuse it. |
++| 2 | Render the same chart with `color=never`; assert visible rows and labels equal `stripAnsi(color=always)`. | Any reset/palette edit that injects visible text or changes geometry would diverge. | Keep color mode branching and visible layout untouched. | Protects no-color, pipe, snapshot and fixed-width behavior. |
++| 3 | Render the exact R3 palette contract through a minimal public chart/text output; assert each changed role emits its literal ANSI code and only muted/grid may set dim. | Current `title=39m`, `blue=34m`, `green=32m` and other roles do not match the R3 contract, so this test is red before implementation. | Replace only the shared palette table with the R3 mapping. | Makes the theme hierarchy deterministic instead of leaving visual choice to the implementer. |
++| 4 | Run a colored renderer matrix: Dashboard normal and narrow; all seven Breakdown dimensions; Timeline tokens, cost, and heatmap; Sessions; Insights default and forecast. For each output assert role contract, no concrete RGB/background, `stripAnsi(always) === never`, and fixed visible width. | Existing detailed-page matrix is mostly `color=never`; several reachable colored branches are not covered by current background/role assertions. | Keep every branch on the shared `charts.ts` path and preserve each page's existing visible text. | Prevents a palette change from fixing the main chart while breaking heatmap, status, cost or forecast colors. |
++| 5 | Render `emptyReport()` with `color=always` and `never` through Dashboard, all seven Breakdown dimensions, Timeline, Sessions and the separately implemented Insights empty branch; assert R3 roles, only `49m` background reset, strip equivalence and fixed width. | Existing empty-page matrix is `color=never` only, so current tests cannot detect a foreground/background regression in the early-return paths. | Reuse the shared palette without changing either empty renderer. | Protects new installation and no-match filters across all page entrypoints. |
++| 6 | Spawn the actual Stats CLI against a temporary empty database/cwd using argument arrays for every canonical command, alias and root shortcut; assert process success, expected page identity, R3 title role, no concrete background, and decolored equivalence within each alias class. | Isolated builders cannot prove which handler yargs dispatches or whether root shortcuts propagate `color`. | Add test-only subprocess coverage; do not change `stats.ts`. | Protects all public command routes through their owning CLI interface. |
++| 7 | Spawn `stats --interactive --color always` in a PTY, wait for the rendered page identity, send `n` to observe Dashboard -> Breakdown -> Timeline -> Sessions -> Insights, then send `q` and assert cursor/raw cleanup on exit. | Direct renderer tests cannot observe the private callback table, color propagation, key dispatch or finalizer. | Add a deterministic PTY test that waits on output events rather than wall-clock sleeps. | Protects the actual five-view interactive success path and cleanup. |
++| 8 | Run existing background, marker-free, width, injection-sanitization and all-page no-ellipsis tests unchanged. | A broad ANSI change can regress background reset, point policy or width accounting even if the dim test passes. | Make the state/palette change without changing visible glyph count or panel boundaries. | Protects unrelated but adjacent terminal contracts. |
++
++### 16.1 Colored reachability matrix
++
++The following matrix is the minimum complete color test partition. Rows with
++the same renderer and no additional color consumer may share one assertion;
++the option branches listed here must not be silently omitted.
++
++| Reachable entry/option class | Public seam | Distinct foreground consumers to assert |
++| --- | --- | --- |
++| Dashboard, width `>=60` | `renderDashboard(report, { color: "always" })` | title/subtitle, daily blue series, token component roles, health/status roles, lollipop/stack roles, grid. |
++| Dashboard, width `<60` | same seam with `withColumns(40)` | narrow daily chart, compact headers, model/session bars, shared role reset. |
++| Breakdown: model | `renderBreakdown(..., { by: "model", color: "always" })` | top-series roles, token composition blue/green/purple/yellow/pink, table identity colors. |
++| Breakdown: provider | `by: "provider"` | cost trend, provider identity, risk red/orange, reliability/status colors. |
++| Breakdown: agent/source/project | each `by` value | series identity, context/portfolio tables, muted/grid separators, project/runtime colors. |
++| Breakdown: tool | `by: "tool"` | estimated-context trend, tool identity, call/error/duration values, issuing-runtime table. |
++| Breakdown: status | `by: "status"` | completed green, error red, aborted yellow, running blue, failure leader values. |
++| Timeline tokens | `renderTimeline(..., { metric: "tokens", color: "always" })` | main blue line, component series, model/provider sparklines. |
++| Timeline cost | `metric: "cost"` and `StatsCostsCommand` option class | cost line, health rows, unavailable branch when cost is zero. |
++| Timeline heatmap | `heatmap: true` and `StatsHeatmapCommand` option class | grid/muted zero cells, blue/purple/pink intensity levels, legend. |
++| Sessions | `renderSessions(..., { color: "always" })` | distribution/rank bars, positive/error accents, session identity and muted metadata. |
++| Insights default | `renderInsights(..., { color: "always" })` | usage shape, attribution table, outlier red/orange, action callout accent. |
++| Insights forecast | `forecast: true` and `StatsForecastCommand` option class | observed pink sparkline, projected purple sparkline, unavailable branch. |
++| Empty report: shared pages | `emptyReport()` through Dashboard, all Breakdown dimensions, Timeline and Sessions with `color: "always"` | title/subtitle/muted roles, only `49m`, strip equivalence and fixed width before any normal chart section. |
++| Empty report: Insights | `renderInsights(emptyReport(), { color: "always" })` | separate Insights early return with the same foreground/background/plain invariants. |
++| Dashboard/root aliases | `stats`, `dashboard`, `dash`, `overview`, `summary`, plus root `--models`/`--tools` shortcuts | same Dashboard or Breakdown renderer, same R3 role contract; no alternate palette. |
++| Breakdown aliases | `breakdown`, `by`, `models`, `model`, `providers`, `provider` | same model/provider/selected-dimension renderer and same role contract. |
++| Timeline aliases | `timeline`, `daily`, `heatmap`, `heat`, `costs`, `cost`, `tokens`, `token` | same token/cost/heatmap renderer and same role contract. |
++| Session/Insights aliases | `sessions`, `session`, `insights`, `insight`, `forecast`, `run-rate` | same Sessions/Insights renderer and same role contract. |
++| Interactive views | `--interactive`/`-i` five view callbacks | same five canonical renderers; non-TTY still renders once and does not create a second palette. |
++| Canonical/wrapper aliases | actual CLI subprocess matrix plus existing direct wrappers | same decolored body and same shared ANSI role contract; no alternate palette. |
++
++### 16.2 Actual CLI harness contract
++
++`packages/opencode/test/cli/stats-command.test.ts` must exercise the owning
++command interface rather than cloning builders with stub handlers:
++
++- Create a fixture directory through existing `tmpdir({ git: true })`; point
++  `OPENCODE_DB` at an absolute database path under that fixture and set
++  `OPENCODE_PURE=1` so the test never reads the user's database or plugins.
++- Spawn Bun with an argv array (`process.execPath`, `--conditions=browser`,
++  `src/index.ts`, command args); never construct a shell string. Capture stdout,
++  stderr and exit status and fail on timeout/non-zero exit.
++- Execute every alias class listed in §16.1. Empty output is sufficient for
++  dispatch identity because each renderer emits its page title before the
++  empty-state message; the direct renderer matrix separately covers populated
++  color consumers.
++- The non-TTY `--interactive` case must emit exactly one Dashboard and exit,
++  proving the public fallback branch without entering raw mode.
++- The TTY case must use the existing Bun PTY adapter, accumulate data events,
++  wait for each page identity before sending the next `n`, and send `q` only
++  after Insights is observed. Use an event/deferred timeout, never a fixed
++  sleep. The test must always kill/dispose the PTY on failure and assert the
++  final cursor reset sequence.
++- No test may depend on `.temp/testing/opencode.db`, the user's current cwd, a
++  pre-existing terminal theme, network access or shared process-global DB state.
++
++### 16.3 Red test expectation
++
++The first test must fail on the current implementation before any production
++change. Its expected state is independent of the implementation:
++
++```text
++grid style may set dim
++series style must begin only after dim=false
++series glyph must be visible under its own foreground role
++```
++
++The test must parse the public SGR stream as a small terminal state machine,
++not inspect `ChartCanvas`, `gridStyle`, or the source code. It must not assert
++only that `\x1b[22m` appears somewhere; the assertion must associate every
++series glyph with the state active at that glyph.
++
++## 17. Chinese Comment Budget
++
++The future implementation is intentionally small, but every changed behavior
++must explain why the invariant exists near the changed line rather than in a
++file-level essay.
++
++| Metric | Estimate | Method |
++| --- | ---: | --- |
++| Effective changed code lines `E` | 170-325 | Includes executable production and behavior-test lines in the three planned implementation files; excludes imports, formatting, this proposal, and existing unchanged comments. |
++| Required Chinese explanatory comments `C` | 26-49 minimum | `max(1, ceil(E * 0.15))`; comments distributed near transition reset, each role table boundary, no-background boundary, option matrix intent, command harness isolation and PTY cleanup. |
++| Planned qualifying comment locations | 32-58 | Explain why reset precedes color, why background remains separate, why ANSI semantic roles are used instead of renderer probing, why each option class is tested, and why subprocess/PTY tests use isolated state and output signals. |
++
++Comments must not restate assignments. They must cover:
++
++- The invariant that `grid` dim cannot cross into a data style run.
++- The separation between foreground/intensity reset and panel background reset.
++- Why the shared palette is semantic and terminal-defined rather than a second page-local palette.
++- Why the ordinary CLI cannot safely query TUI theme state or OSC palette during Stats output.
++- Why the regression test observes glyph state rather than merely checking for an escape code.
++- Why command dispatch must be observed through the real CLI rather than isolated builders.
++- Why the PTY waits for page output and guarantees cleanup instead of using timing sleeps.
++
++## 18. Verification
++
++These commands are for the future implementation phase only; none is authorized
++by this current plan revision until approval is recorded.
++
++| Command | Working directory | Evidence produced |
++| --- | --- | --- |
++| `bun test test/cli/stats-render-width.test.ts --test-name-pattern "chart|foreground|background|color"` | `packages/opencode` | Red/green feedback for the renderer and adjacent ANSI contracts. The exact test name may be narrowed after the first red slice without changing the seam. |
++| `bun test test/cli/stats-render-width.test.ts` | `packages/opencode` | All page-level visible output, width, no-color, background and marker regressions. |
++| `bun test test/cli/stats-command.test.ts` | `packages/opencode` | Actual argv dispatch, aliases, root shortcuts, non-TTY interactive and PTY five-view behavior with isolated database/cwd. |
++| `bun test test/cli/stats-data.test.ts test/cli/stats-render-width.test.ts test/cli/stats-command.test.ts` | `packages/opencode` | Data/render/command compatibility and no accidental aggregation impact. |
++| `bun typecheck` | `packages/opencode` | Package-local TypeScript validation, not bare `tsc`. |
++| `bunx oxlint src/cli/cmd/stats/charts.ts test/cli/stats-render-width.test.ts test/cli/stats-command.test.ts` | `packages/opencode` | Scoped lint for the three changed files; use the repository's installed oxlint version. |
++| `git diff --check` | repository root | Whitespace and patch integrity. |
++| Raw ANSI probe using `renderRoundedLineChart()` | `packages/opencode` | Confirms no series glyph is emitted under dim and records the exact transition sequence. |
++| 140-column PTY/manual output for Dashboard, Timeline, Model, Provider, Tool, Sessions and Insights | repository root / real macOS terminal | Confirms the corrected foreground remains visible in the reported dark profile without restoring background. |
++
++Do not run the formal build as the first verification: package instructions
++and the existing proposal document that it can rewrite
++`packages/core/src/models-snapshot.*`. If a final build is later requested, it
++must be isolated and its generated-file diff explicitly inspected.
++
++## 19. Diff Budget
++
++| Metric | Estimate | Justification |
++| --- | ---: | --- |
++| Files added | 1 | A dedicated actual-command behavior test; no runtime file is added. |
++| Files modified | 2 | One shared renderer/palette owner and the existing renderer behavior test. |
++| Files deleted | 0 | No dead helper is proven to be superseded by this focused repair. |
++| Production lines | +8 to +24 / -2 to -12 | One transition reset and a constrained semantic palette adjustment in `charts.ts`. |
++| Test lines | +165 to +300 / -0 to -18 | Public ANSI-state test, exact role contract, populated/empty option matrix, actual CLI aliases and PTY interactive cycle. |
++| Generated lines | 0 | No build, schema, SDK or snapshot change. |
++| Schema/migration changes | 0 | Foreground rendering has no persistence contract. |
++
++If implementation exceeds three changed implementation files or introduces a new renderer,
++theme config, fallback palette or page-specific color table, stop and re-audit
++the design before continuing.
++
++## 20. Real Risks and Open Decisions
++
++### Confirmed risks
++
++- ANSI color slots are terminal-defined; an extreme custom terminal palette can still have poor contrast. This is a known property of delegating final RGB to the terminal, not a reason to query or guess macOS appearance.
++- A reset before every style run increases invisible escape bytes but does not change visible columns; the raw output contract must remain compatible with terminals and `stripAnsi`.
++- Bright versus normal ANSI slots can change perceived hierarchy across terminal profiles; the fixed R3 role mapping must be checked in both the existing dark profile and a light-profile synthetic/PTY case.
++- The current worktree contains unrelated staged/unstaged changes, including `docs/prompts.md`; future implementation must isolate only the three planned Stats files.
++- Actual CLI/PTY tests are slower and own process cleanup; they must use isolated database paths, output-driven readiness and unconditional child termination so a failed assertion cannot leave a process or raw terminal state behind.
++
++### Open Decisions Requiring the User
++
++None for the current R3 implementation scope. The role table in §10.2 is the
++recommended and now explicit contract: it keeps terminal-defined colors,
++introduces the existing CLI bright semantic slots where the current dark-mode
++foreground is too weak, and does not restore fixed RGB or backgrounds.
++
++Restoring the historical fixed RGB foreground palette would be a separate,
++exact user-authorized behavior rollback. It is intentionally excluded from R3
++because it would reintroduce the documented light-terminal contrast risk.
++
++### Rejected Speculation
++
++- macOS dark-mode detection through `process.platform`, `TERM_PROGRAM`, or arbitrary environment variables: no reliable producer/contract for terminal appearance was found.
++- Starting `CliRenderer` solely for Stats: would add lifecycle, output and cleanup behavior not owned by the standalone command.
++- Calling `TerminalPalette.detect()` from Stats: it performs terminal control-sequence I/O and is unsafe for redirected/non-TTY output without a new orchestration contract.
++- Recoloring each page independently: current call graph proves all pages already share `charts.ts.palette`; duplication would create drift rather than repair the first divergence.
++- Restoring panel background to make foreground appear stronger: user explicitly accepted background removal, and background cannot clear a leaked dim state.
++- Changing data aggregation, session fork logic or schema: no data path participates in the observed ANSI transition.
++
++## 21. Audit Contract
++
++The independent auditor must:
++
++- Read this exact file and the original quoted requirement.
++- Reconstruct the current ANSI producer-to-consumer path from repository evidence, not from this plan's conclusions.
++- Verify that the raw `2;39m -> 34m` trace proves a reachable first divergence.
++- Audit the complete scope: state reset, foreground palette, background preservation, no-color, width, all page renderers, aliases, tests, comments, diff budget and rejected alternatives.
++- Treat all builder summaries and prior implementation explanations as untrusted.
++- Require evidence for every blocking finding.
++- Reject any design that adds page-local palettes, TUI runtime coupling, terminal-query fallback, fixed RGB fallback or unrelated data/schema changes.
++- Check under-design as well as over-design: the plan must include a behavioral red test and a visible dark-terminal verification, not only source inspection.
++- Check the 15 percent Chinese explanatory-comment budget for the eventual implementation diff.
++
++## 22. Plan Audit Record
++
++| Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| 1 | R1 | yes | B-01: foreground role mapping was unresolved; B-02: colored option/alias matrix was incomplete. | N-01: verbatim section contained duplicated non-requirement sentences; N-02: root-cause owner was correct; N-03: comment arithmetic was correct; N-04: two-file budget was reasonable for the state fix. | BLOCK — Canonical plan revision R1 | `ses_0a0e1ad46ffe1D3hLS3SFtUYUr` |
++| 2 | R2 | yes | B-01: alias/root/interactive coverage used isolated builders instead of the owning dispatch interface; B-02: colored empty-page paths were omitted. | N-01: exact palette was explicit but visually unverified; N-02: root cause and owner were correct; N-03: comment/diff arithmetic was consistent. | BLOCK — Canonical plan revision R2 | `ses_0a0cb5cffffeLBhc2gQouSfY4q` |
++| pending | R3 | pending | pending | pending | pending | pending |
++
++Any substantive revision invalidates this record and increments the revision.
++No implementation may begin until the exact current revision receives a full
++scope `No blocking findings` result and the administrative approval fields are
++updated separately.
++
++## 23. Implementation Evidence
++
++Not applicable. This revision explicitly forbids implementation and contains
++no production, test, configuration, migration or generated-file changes.
++
++### Actual Files and Diff
++
++Not applicable; future implementation is limited to the file-level plan in §15.
++
++### Red-Green Test Evidence
++
++Not applicable; the read-only harness is recorded in §4.1. The formal behavior
++test must be written first during an approved implementation phase.
++
++### Verification Commands and Results
++
++Not applicable for implementation. Existing prior Stats checks remain baseline
++evidence only; this focused plan has not changed code and has not rerun a full
++test suite.
++
++### Original Feedback-Loop Result
++
++The minimized read-only harness is red-capable: it observes a grid dim start
++followed by a series foreground without an intensity reset. It is not yet a
++repository test because the current user forbids implementation changes.
++
++### Actual Secondary and Replacement Path Inventory
++
++Not applicable; no implementation exists.
++
++### Chinese Comment Calculation
++
++| Metric | Actual | Exclusions and evidence |
++| --- | ---: | --- |
++| Effective changed code lines `E` | 0 | No production or test code changed in this revision. |
++| Qualifying Chinese comment lines `C` | 0 | Proposal text is not implementation code. |
++| Ratio `C / E` | N/A | `E = 0`. |
++| Required minimum `C` | 0 | `if E = 0: C = 0`. |
++
++### Remaining Unverified Items
++
++- The R3 role table is explicit, but its visual result has not yet been observed on the user's macOS terminal because implementation is not authorized.
++- The formal red test has not been added or run because implementation is not authorized.
++- No real PTY capture was changed or regenerated in this planning-only revision.
++
++## 24. Implementation Audit Record
++
++| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
++| --- | --- | --- | --- | --- | --- | --- |
++| pending | R3 | pending | pending | pending | pending | pending |
++
++The task remains `audit-required` and implementation is prohibited until the
++plan receives independent full-scope approval.
+diff --git a/docs/plans/session-goal-transition-integrity.md b/docs/plans/session-goal-transition-integrity.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..46d451827c48cb1c222268e4ae61a5020196314d
+--- /dev/null
++++ b/docs/plans/session-goal-transition-integrity.md
+@@ -0,0 +1,238 @@
++# Session GOAL Transition Integrity
++
++Status: audit-required
++Revision: R1
++Approved revision: none
++Implementation allowed: no
++Audit mode: full-scope
++Date: 2026-07-14
++
++## 1. Scope and Decision
++
++本方案只处理当前 GOAL 生命周期中已经被代码和行为测试确认的完整性缺口：
++
++- 模型可以不读取当前 GOAL，直接写入 `complete` 或 `blocked`。
++- `complete` 和 `blocked` 没有持久化、可审计的理由约束。
++- `blocked`/`complete` 没有受控的模型恢复到 `active` 的路径。
++- 用户编辑 objective 后，旧模型 turn 仍可能依据旧快照写入终态。
++- Goal continuation、usage 归属和 HTTP/TUI Resume 没有共享同一份状态代际。
++
++本方案不引入第二个模型、evaluator、动态 stop-condition、Goal history 表、通用工作流状态机或新的配置项。`active | paused | complete | blocked` 保持现有公开状态集合；`active` 继续表示可以被 session loop 执行。
++
++推荐方案是把不变量收敛到三个现有 owning boundary：
++
++1. `SessionGoal` 负责持久化 revision、理由、CAS 和跨请求原子转换。
++2. `GoalTool` 负责模型 turn 内的真实 read-before-write 和模型可写状态边界。
++3. `SessionPrompt` 负责每个 Goal turn 的权威上下文、stale continuation 保护、resume loop 和 usage 归属。
++
++HTTP、TUI、OpenAPI/SDK 只传播用户控制和持久化结果，不复制 Goal 业务规则。
++
++## 2. Requirements
++
++| ID | 必须满足的行为 | 证据/验证 |
++|---|---|---|
++| REQ-01 | 模型只能在当前 Goal turn 已成功读取当前 Goal 后写入模型状态；无 Goal 或未读取时写入失败且不产生写入。 | `GoalTool` 行为测试；现有红色 harness |
++| REQ-02 | `complete`、`blocked` 必须带非空、受长度限制的 reason；reason 进入持久化结果和 API/SDK 响应。 | Tool、domain、HTTP 测试 |
++| REQ-03 | 模型可从 `blocked` 或 `complete` 恢复到 `active`，但只能在新的真实用户 Goal turn、先读取当前 Goal 后执行；模型不能把 `paused` 自行恢复。 | prompt/Tool 行为测试 |
++| REQ-04 | objective 或用户状态变更后，旧 turn 的终态写入必须因 Goal ID/revision 不匹配而失败，不能覆盖新目标。 | 并发/CAS 测试 |
++| REQ-05 | 每个 Goal turn 使用权威 objective/status/revision；continuation、compaction、错误和退出路径不能继续执行旧代际。 | prompt 集成测试 |
++| REQ-06 | provider 请求已开始后发生编辑/clear，不要求立即取消 provider；但旧请求的最终写入和 usage 不能污染新 Goal。 | 时序测试 |
++| REQ-07 | 用户通过 HTTP/TUI 将 terminal Goal 恢复为 `active` 后，idle session 能进入现有 prompt loop；busy session 不创建重复 loop。 | HTTP/TUI 测试 |
++| REQ-08 | 当前 continue-on-error、`goal_max_turns`、permission、abort、compaction 和旧 HTTP contract 的既有安全边界继续有效。 | 回归测试和边界矩阵 |
++| REQ-09 | 公开字段变更同步 OpenAPI、生成 SDK、TUI 类型和事件；不手改生成文件。 | SDK build/typecheck |
++
++## 3. Repository and Process Constraints
++
++- 当前仓库生产路径以 `packages/opencode/src/session` 为准；`CONTEXT.md` 标明 v1 是当前有效路径，v2 仍在进行中。
++- 测试必须从 `packages/opencode` 等 package 目录运行，不能从仓库根目录运行。
++- 任何 implementation 前必须先以本方案获得独立 full-scope audit 的 `approved` revision；当前文件明确禁止实施。
++- 未来实现须先写行为级测试，再确认当前实现能暴露缺口，再实现生产代码。
++- 未来 git diff 中新增/修改的有效代码行至少 15% 对应清晰中文解释性注释；注释解释不变量、竞态、兼容或安全原因，不复述表面代码。
++- 不覆盖工作树中预先存在的 `.gitignore`、`.opencode/*`、`docs/Proposal/stats-foreground-theme-repair-plan.md`、`docs/prompts.md`、`thirdparty/chatgpt-browser-agent` 修改。
++- 本次调研只使用仓库 `.temp/codex` 的本地 Codex 源码和 `gh` 只读查询；不使用 ChatGPT 证据。
++
++## 4. Evidence Read Before Planning
++
++### OpenCode production and tests
++
++| 文件 | 关联职责 |
++|---|---|
++| `packages/opencode/src/session/goal.ts` | Goal service、CRUD、状态写入、usage、continuation prompt |
++| `packages/opencode/src/session/goal.sql.ts` | `session_goal` 表和现有状态/字段 |
++| `packages/opencode/src/tool/goal.ts` | 模型可见 Goal read/write tool |
++| `packages/opencode/src/tool/goal.txt` | 当前 prompt-only completion/blocked 规则 |
++| `packages/opencode/src/tool/registry.ts` | GoalTool 注册、service layer 注入 |
++| `packages/opencode/src/tool/selection.ts` | permission/tool 可见性过滤 |
++| `packages/opencode/src/session/prompt.ts` | run loop、Goal continuation、provider dispatch、usage、abort |
++| `packages/opencode/src/session/processor.ts` | provider stream、tool settle、retry、stop、error、abort |
++| `packages/opencode/src/session/run-state.ts` | busy/idle、ensureRunning、cancel、运行互斥 |
++| `packages/opencode/src/session/request-usage.ts` | request/assistant usage 聚合和错误边界 |
++| `packages/opencode/src/session/compaction.ts` | compaction、summary、synthetic continuation |
++| `packages/opencode/src/session/message-v2.ts` | 消息类型、metadata、parts、latest/compacted 读取 |
++| `packages/opencode/src/session/schema.ts` | Session/Prompt 输入 schema |
++| `packages/opencode/src/session/session.sql.ts` | session 状态和消息关联 |
++| `packages/opencode/src/session/request-usage.sql.ts` | request usage 持久化结构 |
++| `packages/opencode/src/session/todo.ts` | 同 session 内另一种模型任务状态边界，用于避免复制其抽象 |
++| `packages/opencode/src/storage/db.ts` | SQLite transaction、migration、事务行为 |
++| `packages/opencode/src/storage/db.bun.ts` | Bun 数据库实现入口 |
++| `packages/opencode/src/tool/truncate.ts` | Tool wrapper 的输出截断依赖 |
++| `packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts` | Goal HTTP handler、service layer、错误转换 |
++| `packages/opencode/src/server/routes/instance/httpapi/groups/session.ts` | Goal endpoint、OpenAPI payload/response |
++| `packages/opencode/src/server/routes/instance/httpapi/server.ts` | HTTP layer 注入 SessionPrompt/SessionGoal |
++| `packages/opencode/src/server/routes/instance/httpapi/api.ts` | HTTP API 共享 contract |
++| `packages/opencode/src/cli/cmd/tui/component/dialog-goal.tsx` | TUI create/edit/pause/resume/clear |
++| `packages/opencode/src/cli/cmd/tui/context/sync.tsx` | TUI Goal store、SSE/POST reconcile |
++| `packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/goal.tsx` | Goal 状态/usage 展示 |
++| `packages/opencode/src/config/config.ts` | `goal_max_turns` 和配置边界 |
++| `packages/opencode/migration/20260704053848_session_goal/migration.sql` | 原始 Goal schema |
++| `packages/opencode/migration/20260710195446_goal_continue_on_error/migration.sql` | `continue_on_error` 历史 migration |
++| `packages/opencode/test/session/goal.test.ts` | Goal CRUD、resume、continueOnError |
++| `packages/opencode/test/server/httpapi-goal.test.ts` | Goal HTTP 行为 contract |
++| `packages/opencode/test/storage/goal-migration.test.ts` | 旧 schema/default/migration 兼容 |
++| `packages/opencode/test/session/prompt.test.ts` | continuation、terminal error、usage、prompt 时序 |
++| `packages/opencode/test/lib/effect.ts` | readiness/poll 测试辅助，避免固定 sleep |
++
++### Contract and generation
++
++| 文件 | 关联职责 |
++|---|---|
++| `packages/sdk/openapi.json` | 当前生成输入 contract；现有 HTTP Goal 描述未完整同步到 SDK v2 |
++| `packages/sdk/js/script/build.ts` | SDK 生成链，未来不能手改 generated output |
++| `packages/sdk/js/src/v2/gen/sdk.gen.ts` | 当前生成 client；无完整 Goal method |
++| `packages/sdk/js/src/v2/gen/types.gen.ts` | 当前生成 types；无完整 Goal schema |
++| `packages/sdk/js/src/v2/gen/client.gen.ts` | 生成 client 基础实现 |
++| `packages/sdk/js/src/v2/gen/client/types.gen.ts` | 生成 client types |
++| `packages/sdk/js/src/v2/gen/core/*.gen.ts` | 生成基础序列化/SSE/auth/query 支撑 |
++
++### Existing design and repository constraints
++
++| 文件 | 关联职责 |
++|---|---|
++| `CONTEXT.md` | 当前 v1/v2 边界和领域上下文 |
++| `AGENTS.md` | 测试、类型检查、SDK 生成和工作树约束 |
++| `docs/adr/README.md` | ADR/领域文档布局约定 |
++| `docs/goal-error-continuation-control-plan.md` | 既有 continue-on-error、race、usage 和上限设计 |
++| `docs/prompts.md` | 本次 workflow 的调研、审计、TDD 和 commit 要求；文件有预存修改，未覆盖 |
++| `.opencode/policy/first-principles-engineering.md` | canonical plan 和审计门槛 |
++| `.opencode/templates/canonical-plan.md` | plan 必须包含的结构和 traceability 要求 |
++| `.opencode/skills/first-principles-planning/SKILL.md` | first-principles 调研和方案流程 |
++| `.opencode/skills/adversarial-audit/SKILL.md` | 独立 full-scope plan/diff audit 规则 |
++| `.opencode/skills/tdd/SKILL.md` | 未来 implementation 的 TDD 约束 |
++
++## 5. External First-Party Evidence
++
++### Local Codex source
++
++本地 Codex 仓库为 `.temp/codex`，当前 HEAD 为 `0d1733b5e9ea027a0ff9d75cc3e11103f045f1ce`，工作树干净。已读取：
++
++- `codex-rs/ext/goal/src/tool.rs`、`api.rs`、`runtime.rs`、`spec.rs`、`steering.rs`、`accounting.rs`、`extension.rs`。
++- `codex-rs/state/src/model/thread_goal.rs`、`state/src/runtime/goals.rs`。
++- `codex-rs/app-server/src/request_processors/thread_goal_processor.rs`。
++- `codex-rs/tui/src/app/thread_goal_actions.rs`、`tui/src/chatwidget/goal_menu.rs`。
++- `codex-rs/state/migrations/0029_thread_goals.sql`、`0033_thread_goal_stopped_statuses.sql`。
++- `codex-rs/ext/goal/tests/goal_extension_backend.rs`。
++
++可借鉴但不直接移植的事实：
++
++- `GoalUpdate.expected_goal_id` 用于防止 Goal 被替换后旧 request 错误更新/计账；这是本方案采用 Goal ID + revision CAS 的依据。
++- objective 外部修改会通过 steering/运行时事件告知正在运行的 turn；本方案只借鉴“下一次 provider dispatch 使用新 snapshot”，不承诺中途取消 provider。
++- usage accounting 与终态状态更新分离；本方案把 request 开始时的 expected Goal ID 传到最终计账，避免先 complete/blocked 后丢 usage。
++- idle gate 接受用户提交；本方案用同一原则补齐 HTTP/TUI active resume 的 idle loop 触发。
++- Codex 当前 model tool schema 仍主要是 status 更新，不能证明 read-before-write、reason 或 revision 约束已经存在，因此不能把它当作本需求的完整解决方案。
++
++已核对的本地 Codex 相关提交：
++
++- `1e65b3e0af32cc6b29bd7bb2e326f50c4d212e93`：Goal edit 和 objective 更新路径。
++- `c4fe2bdf11e9d21d7eab043683b8f495bb7b0bfe`：durable external thread goals。
++- `c62d79259d0ccd83ad515d3444840e0e0e18059a`：terminal turn error 后 block active Goal。
++- `b6841f6adb591120722e80f5f66b334f462a6505`：idle gate 接受用户提交。
++- `542585959ce9ab66c509be7111a1627fceb97bb1`：Goal continuation permission context。
++
++### OpenCode upstream PR evidence
++
++| PR | 状态/结论 | 本方案的取舍 |
++|---|---|---|
++| [#27163](https://github.com/anomalyco/opencode/pull/27163) | OPEN；native per-session Goal、持久化、continuation、SDK/TUI；模型写入仍偏终态，不提供本需求的 read/CAS/reason 不变量 | 借鉴 ownership，不直接 cherry-pick |
++| [#32743](https://github.com/anomalyco/opencode/pull/32743) | OPEN；`/goal`、active/paused/completed、model update/complete/pause/resume、auto continuation；仍未证明旧 turn revision 和真实 read gate | 借鉴公开 contract 方向，拒绝直接扩大为另一套状态实现 |
++| [#31770](https://github.com/anomalyco/opencode/pull/31770) | CLOSED；evaluator-based auto continuation、fail-open、`MAX_GOAL_REACT` | 不采用第二模型/evaluator；fail-open 与本需求的安全不变量冲突 |
++| [#33944](https://github.com/anomalyco/opencode/pull/33944) | CLOSED；evaluator stop-condition，主要是 judge/service seam | 不采用 evaluator；本次只修复当前 Goal state ownership |
++
++## 6. Current Behavior and Call Chain
++
++### Model write path
++
++1. `SessionPrompt.runLoop` 在 `packages/opencode/src/session/prompt.ts` 中组装工具。
++2. `packages/opencode/src/tool/registry.ts` 注册 `GoalTool`，注入 `SessionGoal.defaultLayer`。
++3. `packages/opencode/src/tool/goal.ts` 的 schema 将 `status` 作为可选字段；模型可以直接传 `complete`/`blocked`。
++4. `GoalTool` 当前对 `status` 做最小判断后直接调用 `goalSvc.set(ctx.sessionID, { status })`。
++5. `SessionGoal.set()` 在数据库写入并发布 Goal event；没有检查本 turn 是否调用过 get，没有 expected id/revision，没有 reason。
++
++已用真实 GoalTool 路径复现：
++
++```text
++bun -e '... GoalTool ... def.execute({ status: "complete" }, ctx) ...'
++=> {"calls":{"get":0,"set":1},"result":"Failure"}
++```
++
++`result: Failure` 是 harness 的 output wrapper 失败，不影响关键事实：`get=0`、`set=1`。现有行为因此满足“模型无需阅读 Goal 即可触发终态写入”的红色证据。
++
++### User edit/resume path
++
++1. HTTP `POST /session/{sessionID}/goal` 在 `handlers/session.ts` 调用 `goalSvc.set`。
++2. TUI `dialog-goal.tsx` Edit/Resume 通过 raw fetch 发送 objective/status。
++3. TUI sync 通过 SSE/POST response 更新本地 Goal store。
++4. 当前 handler 只写 DB，不会在 idle session 上自动 fork `SessionPrompt.loop`；因此 `complete/blocked -> active` 可能只改变状态，不恢复执行。
++
++### Continuation and usage path
++
++1. `SessionPrompt.runLoop` 读取 Goal continuation 条件并在正常完成后注入下一轮。
++2. continuation 与 Goal 状态没有共同 revision；用户 Edit/Clear 后旧 loop 仍可能继续。
++3. 当前 `accountUsage()` 主要要求当前 row status 为 `active`。模型先写终态后，当前已完成 request 可能不计账。
++4. clear/recreate 后若只按 session ID 计账，旧 request 可能污染新 Goal；当前没有 expected Goal ID 保护。
++
++## 7. First Divergence and Ownership
++
++第一分歧不是 UI、HTTP 或 evaluator，而是 `GoalTool -> SessionGoal.set()`：模型可写入动作没有可信 read snapshot、reason、revision 或 actor boundary。
++
++责任边界固定如下：
++
++| 不变量 | 唯一 owner | 不能放在哪里 |
++|---|---|---|
++| row schema、revision、CAS、reason/audit streak | `SessionGoal` | 不能只放 prompt 或 TUI |
++| 模型必须先 read、模型可写状态集合 | `GoalTool` + 本 turn context | 不能相信模型自报的 id/revision |
++| 当前 turn 权威上下文、stale continuation、provider 起始 Goal snapshot | `SessionPrompt` | 不能让 HTTP handler 重复 loop 规则 |
++| 用户 active resume 是否启动 idle loop | HTTP/TUI integration seam，调用 `SessionPrompt.loop` | 不能把 loop 复制到 Goal service |
++| API schema、SDK 类型、TUI transport | OpenAPI/generated SDK | 不能手改 generated files |
++
++## 8. Required State Invariants
++
++### Goal row
++
++保留现有稳定 `id`，新增最小字段：
++
++- `revision`：从 `1` 开始，每个 objective 或 status/reason/audit 状态有效变更递增。
++- `transition_reason`：当前 terminal 状态的最后有效理由；active/paused 可为 null。
++- `blocked_reason`：当前连续 blocked 依据，或把同一字段作为 audit reason 使用；具体字段名由实现阶段按 schema 风格确定，但不能把 streak 仅留在内存。
++- `blocked_streak`：同一连续 Goal turn 中相同 normalized reason 的有效 blocked 次数。
++- `blocked_last_turn_id`：防止同一 turn 重复调用伪造多次。
++
++如果审计认为 `transition_reason` 和 `blocked_reason` 可安全合并，必须证明不会丢失 terminal audit；否则保持两个字段，避免用隐式 JSON 扩展字段替代 schema。
++
++### Model transition
++
++- `complete` 和 `blocked` 必须携带 reason；空白 trim 后拒绝，长度上限固定在 domain 常量，避免无限 prompt/DB/API payload。
++- 模型 transition 只能接受 `active`、`complete`、`blocked`；`paused` 仍是用户/system 控制状态。
++- `blocked` 只有在连续三个不同 Goal turn、相同 normalized reason 且每个 turn 都基于当前 Goal read 后才成功；不足三次返回可观察的业务错误，不改变 status。
++- 同一 turn 的第二次 blocked 不能增加 streak；reason 改变、Goal revision 改变、objective 编辑、clear/recreate 或 turn 中断都会清零并从 1 重新开始。
++- `complete` 不需要三次 streak，但必须 reason 和当前 Goal read；写入时必须通过 ID + revision CAS。
++- `blocked`/`complete -> active` 只允许新真实用户 Goal turn；必须先读取 terminal Goal；不能在同一模型 turn 中自解锁，不能从 `paused` 进入 active。
++- 用户 HTTP/TUI 可以直接把 `paused`、`blocked`、`complete` 恢复为 `active`，但必须通过同一 domain set/CAS，并由 integration seam 触发 idle loop。
++
++### Revision and CAS
++
++- model tool 的 write 携带由本 turn `get` 产生的 trusted `{ goalID, revision }`，不是模型输入的自由字符串。
++- `SessionGoal` 在同一个 SQLite immediate transaction 中重新确认 row ID/revision/objective 状态，再更新并递增 revision。
++- mismatch 返回 typed stale transition error；不写 status、reason、streak，不吞错，不自动 fallback 到当前 Goal。
++- HTTP/TUI 用户写入也使用 revision；若 UI 未携带 revision，先读当前 row 后按用户动作提交，冲突则返回明确 conflict，而不是覆盖。
++ 
++## 9. Recommended Minimal Implementation
+diff --git a/docs/prompts.md b/docs/prompts.md
+index f0cd3105512c27cdd799e9dd7e505a5004153ba6..d3508db3e0182c909401527d8b24b090d821c302 100644
+--- a/docs/prompts.md
++++ b/docs/prompts.md
+@@ -4,6 +4,131 @@
+ 
+ -------------
+ 
++## 新版：基于 Skills 与 Session GOAL 的第一性工作流
++
++本节是当前推荐工作流。它只负责组织现有 policy、skills、canonical template 和独立 auditor，不复制或弱化这些文件中的完整规则。每次执行都必须读取磁盘上的当前版本；本节与它们发生冲突时，以用户原始需求、仓库指令和当前 policy 为准。下一个分隔符之后的旧版 prompts 保持原样，仅作为历史存档。
++
++### 使用方式
++
++1. 在目标 Session 中运行 `/goal`，创建或编辑 GOAL。
++2. 复制下面的 GOAL objective，并替换所有 `<...>` 占位符。
++3. `目标终态` 必须明确选择 `approved-plan-only`、`verified-implementation` 或 `verified-implementation-and-commit`。
++4. 未明确选择 commit 终态时，不得 stage、commit 或 push。任何终态都不包含 push；push 需要另一条明确的用户指令。
++5. 下面的模板本体保持在 5500 字符以内，为具体目标原文预留空间；Session GOAL objective 的硬上限为 6400 字符。只复制代码块，不要复制本节说明。
++6. 如果替换原始需求后会超过上限，不得截断需求。先把完整原文保存到稳定的 issue 或 specification 文件，再在 objective 中填写该路径。
++
++### GOAL Objective
++
++```markdown
++# Session GOAL
++
++## 参数
++
++- **原始需求**：<逐字需求，或稳定 issue / specification 路径>
++- **目标终态**：<approved-plan-only | verified-implementation | verified-implementation-and-commit>
++- **Canonical plan**：<用户路径；否则按仓库约定，最终回退到 docs/plans/<task-slug>.md>
++
++## GOAL 合同
++
++- 跨 continuation 保持完整需求、范围和放行标准，不得缩小终态。
++- skills 和文档按阶段即时加载，禁止开局一次性读取全部内容。
++- 审计材料只由 `adversarial-auditor` subagent 加载；primary agent 不预读、不自审。
++- 阶段加载的 policy、skill、template、仓库指令和 canonical plan 是权威依据。
++- 仅在目标终态被当前证据逐项证明后标记 `complete`。同一真实阻塞连续至少 3 个 GOAL turns 且无法继续推进时才标记 `blocked`。
++
++## 第一性门禁
++
++- “完整”覆盖证据证明受影响的 interface、producer、consumer、调用链和行为映射，不等于扫描整个仓库。无法绕过的上游保证不得在下游重复实现，speculative 边界不得驱动代码或 blocking finding。
++- 默认修复 primary path 的 first divergence。禁止 A -> B -> B1/B2/B3、平行实现、catch-and-success 和临时 fallback。只有用户原文明确要求时才允许精确 rollback，且不得成为失败后的备用成功路径。
++- 必要增强可由 invariant、仓库规则、真实 compatibility、reachable safety risk 或 threat model 证明，无需逐字对应用户原句，但须归属正确 owner、保持必要范围并具备行为验证。speculative defense-in-depth 禁止。
++- 门禁只约束行为、证据、owner 和验证，不规定函数数、文件数或代码结构。采用仓库最自然、内聚且足以承载需求和必要安全性的设计。
++- 每个 production concept 必须映射到用户需求、既有 invariant、仓库规则或真实安全/兼容证据，并说明现有逻辑为何无法承载。diff 大小不能替代完整性判断。
++- 只维护一个 canonical plan；聊天摘要、旧审计和 builder 自述不构成实施授权。
++
++## 阶段 1：构建 Canonical Plan
++
++### 此时加载
++
++- `first-principles-planning`，并按其要求读取当前 policy、canonical template、`CONTEXT.md`、ADR 和适用的 `AGENTS.md`。
++- bug、失败或性能回归在建立反馈信号时加载 `diagnosing-bugs`。
++- 仅在设计 test seam 和 behavior slice 时加载 `tdd`。
++- 不得加载 `adversarial-audit` 或 `approved-plan-implementation`。
++
++### 产物和门禁
++
++- 从当前仓库重新调查，不把旧方案或旧审计当作已确认事实。只创建或修订 plan，不修改 production、tests、config、migration 或 generated files。
++- bug 类任务必须建立并实际运行能够捕获用户原始症状的 red-capable feedback loop。没有该信号时不得仅靠源码阅读猜根因，应继续构建信号或记录真实环境阻塞。
++- 完成 template 各字段：evidence/domain/reachability、invariant/divergence/owner、route/paths/workaround、file/TDD/verification/diff、risks/speculation/audit/comments。
++- forward mapping：requirement/invariant -> path/file/test。reverse mapping：concept -> requirement/invariant/safety evidence + 不可复用原因。缺失映射不得提交审计。
++- 完成后设置 `Status: audit-required`、`Approved revision: none`、`Implementation allowed: no`。
++
++## 阶段 2：独立方案审计
++
++### Primary Agent
++
++- 只调用 `adversarial-auditor`、发送 handoff、接收并原样记录 verdict。
++- 不加载 `adversarial-audit`，不发送自评、问题猜测、设计辩护、建议审计范围或“已经检查过”的声明。
++- handoff 仅含原始需求、plan 路径、repository root 和 `Audit mode: plan`。
++
++### Auditor Subagent
++
++- 本轮开始时自行加载 `adversarial-audit`、policy 和必要仓库证据。
++- 按自身 skill 独立审计；primary agent 不复述、筛选或预判审计标准。
++
++### 放行
++
++- 任一 blocking finding 都要求修订同一 plan、递增 revision、清空 approval，并按原始需求和完整 affected interface full-scope 重审，禁止 delta-only review。
++- 最多 6 轮。连续调用失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽后 blockers 仍保持 blocking，并作为开放决定交给用户。
++- exact revision 仅在获得 `No blocking findings` 和 `APPROVE` 后，才原样记录 verdict，设置 `Status: approved`、`Approved revision: <current>`、`Implementation allowed: yes`；不得夹带设计修改。
++- `approved-plan-only` 在完成逐项终态审计后标记 GOAL `complete`，不得实施代码。
++
++## 阶段 3：按批准 Revision 实施
++
++### 此时加载
++
++- 仅在目标包含 implementation 且 exact revision 已批准时加载 `approved-plan-implementation`，并加载或继续执行 `tdd`。
++- bug 类任务继续使用既有 `diagnosing-bugs` feedback loop。
++
++### TDD 和修改边界
++
++- 实施前重读批准范围。interface、producer、consumer、invariant、owner、tests 或 file plan 发生相关漂移时停止，修订 plan 并重新审计；不覆盖、不回退、不夹带无关 worktree 修改。
++- 在批准 seam 逐个执行 `red -> minimal approved behavior -> green -> regression`。expected value 必须独立；不得断言 private helper、源码、调用次数、复制 production algorithm 或 horizontal slicing。
++- 只执行 approved repair/rollback。任何 behavior/scope/interface/ownership/fallback/test seam/file/concept 偏离都必须停止，递增 revision、清空 approval 并 full-scope plan audit。禁止 auditor 事后批准未计划设计。
++- 必要安全增强若在实施中才被发现，必须作为新事实进入 plan 和审计，不能静默加入，也不能仅因未逐字出现在用户需求中而直接删除。
++- 保持仓库命名、分层、类型、错误处理、module shape 和测试组织。禁止无依据的 refactor/dependency/public API/config/migration、类型逃逸、dead/unused/test-only code、弱化测试或安全约束，并删除淘汰 workaround。
++
++### 注释和验证
++
++- `E` 排除空行、import-only、formatter-only、generated 和 pure-move 变化。必须满足 `if E = 0: C = 0` 与 `if E > 0: C >= max(1, ceil(E * 0.15))`。
++- `C` 只计算邻近修改点并解释 invariant、真实边界、常量、测试意图、compatibility 或 safety 的中文注释。复述代码、翻译 identifier、重复测试名、显然流程、集中堆放和拆行凑数均不计入。
++- 从最窄测试扩展到 regression、原始 loop、package-local typecheck/lint/build/generation/migration/integration。遵守工作目录，不跳过、隐藏或弱化失败，并记录命令、目录、结果和修正。
++
++## 阶段 4：独立实现审计
++
++- implementation evidence 记录 files/diff、red-green、verification、原始 loop、paths、E/C、排除行、未验证项。设置 `Status: implementation-audit-required`，未经 revision 不再 material change。
++- primary agent 只发送原始需求、plan/approved revision、repository root、`Audit mode: implementation`、changed files/diff，不发送实现辩护、自评、怀疑点或缩减范围。
++- auditor subagent 自行加载审计 skill、policy 和仓库证据，按原始需求和完整 affected interface 审计，禁止只看最近修正。
++- blocker 必须返工并 full-scope 重审，最多 3 轮。连续失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽仍有 blocker 时标记 `blocked`，不得 `complete`。
++- 只有实际 diff 获得 `No blocking findings` 和 `APPROVE`，且测试、验证、责任边界、workaround 删除和中文注释门禁全部通过，才能原样记录 verdict 并设置 `Status: verified`。
++
++## 可选 Commit
++
++仅当终态是 `verified-implementation-and-commit` 且状态已 verified：
++
++1. 检查 `git status`、`git diff`、`git diff --cached` 和 `git log --oneline -10`。
++2. 只 stage 本 GOAL 相关文件，排除 secret、credential 和无关修改。index 已有无关内容时不得夹带或擅自清除，应停止并报告。
++3. 不创建空 commit。提交信息使用中文多行格式：`type(scope): 简短中文说明`，type 只取 `fix|feat|refactor|test|chore`，scope 使用受影响模块，后续 1 至 2 段说明原因、行为边界和避免的回归。
++4. 不得 amend、不得 `--no-verify`、不得跳过 hook、不得 push。
++5. hook 拒绝时修复原因并创建新 commit，不得 amend 失败尝试。commit 成功后检查 `git status` 并报告 commit id。其他目标终态不得 commit。
++
++## 最终证据
++
++- 报告 plan/revision、核心文件、测试/验证结果、approved-route 证据、删除的 workaround、path verdict、E/C 与代表性注释、全部审计轮次、剩余风险/未验证项及每个改动的必要性。
++- token budget、turn 结束、部分成果或总结文本都不能证明完成。仍有 required work 时保持 GOAL active。
++```
++
++-------------
++
+ 请注意！！！你需要从头开始！！！从调研开始进行，在你接到一个新的任务或者需求的时候，你必须从第一项调研开始进行，不能直接认为你之前已经完整审计过了就直接进行跳步，这不被允许！！！
+ 
+ ## 只调研，不改代码，输出完整方案
+diff --git a/thirdparty/chatgpt-browser-agent b/thirdparty/chatgpt-browser-agent
+index 83d16691f12666a8e9ee827acc14dbdade2aa594..6d27a8924669f330a4fb8ce57dc2d07e588caf45 160000
+--- a/thirdparty/chatgpt-browser-agent
++++ b/thirdparty/chatgpt-browser-agent
+@@ -1 +1 @@
+-Subproject commit 83d16691f12666a8e9ee827acc14dbdade2aa594
++Subproject commit 6d27a8924669f330a4fb8ce57dc2d07e588caf45

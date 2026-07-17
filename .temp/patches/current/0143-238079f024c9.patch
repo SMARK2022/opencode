@@ -1,0 +1,434 @@
+From 238079f024c911ae1367b9f95f46f2b0cc413bc2 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 14 May 2026 05:05:33 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=9B=B4=E6=96=B0=E6=89=80=E6=9C=89?=
+ =?UTF-8?q?=E7=9B=B8=E5=85=B3=E5=8C=85=E7=9A=84=E7=89=88=E6=9C=AC=E5=8F=B7?=
+ =?UTF-8?q?=E8=87=B31.14.41=EF=BC=8Csession=E8=B7=AF=E5=BE=84=E7=AE=A1?=
+ =?UTF-8?q?=E7=90=86=E5=A2=9E=E5=BC=BA=E4=BC=9A=E8=AF=9D=E7=AE=A1=E7=90=86?=
+ =?UTF-8?q?=E5=92=8C=E8=B7=AF=E5=BE=84=E5=A4=84=E7=90=86=E5=8A=9F=E8=83=BD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/bun.lock b/bun.lock
+index d12d82fca739c0d860070bc108ab6957502ed91a..5856ab8381bc4914ce571f3d0dda47d8b420c454 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -29,7 +29,7 @@
+     },
+     "packages/app": {
+       "name": "@opencode-ai/app",
+-      "version": "1.14.39",
++      "version": "1.14.41",
+       "dependencies": {
+         "@kobalte/core": "catalog:",
+         "@opencode-ai/core": "workspace:*",
+@@ -85,7 +85,7 @@
+     },
+     "packages/console/app": {
+       "name": "@opencode-ai/console-app",
+-      "version": "1.14.39",
++      "version": "1.14.41",
+       "dependencies": {
+         "@cloudflare/vite-plugin": "1.15.2",
+         "@ibm/plex": "6.4.1",
+@@ -120,7 +120,7 @@
+     },
+     "packages/console/core": {
+       "name": "@opencode-ai/console-core",
+-      "version": "1.14.39",
++      "version": "1.14.41",
+       "dependencies": {
+         "@aws-sdk/client-sts": "3.782.0",
+         "@jsx-email/render": "1.1.1",
+@@ -147,7 +147,7 @@
+     },
+     "packages/console/function": {
+       "name": "@opencode-ai/console-function",
+-      "version": "1.14.39",
++      "version": "1.14.41",
+       "dependencies": {
+         "@ai-sdk/anthropic": "3.0.64",
+         "@ai-sdk/openai": "3.0.48",
+@@ -171,7 +171,7 @@
+     },
+     "packages/console/mail": {
+       "name": "@opencode-ai/console-mail",
+-      "version": "1.14.39",
++      "version": "1.14.41",
+       "dependencies": {
+         "@jsx-email/all": "2.2.3",
+         "@jsx-email/cli": "1.4.3",
+@@ -195,7 +195,7 @@
+     },
+     "packages/core": {
+       "name": "@opencode-ai/core",
+-      "version": "1.14.39",
++      "version": "1.14.41",
+       "bin": {
+         "opencode": "./bin/opencode",
+       },
+@@ -229,7 +229,7 @@
+     },
+     "packages/desktop": {
+       "name": "@opencode-ai/desktop",
+-      "version": "1.14.39",
++      "version": "1.14.41",
+       "dependencies": {
+         "drizzle-orm": "catalog:",
+         "effect": "catalog:",
+@@ -283,7 +283,7 @@
+     },
+     "packages/enterprise": {
+       "name": "@opencode-ai/enterprise",
+-      "version": "1.14.39",
++      "version": "1.14.41",
+       "dependencies": {
+         "@opencode-ai/core": "workspace:*",
+         "@opencode-ai/ui": "workspace:*",
+@@ -312,7 +312,7 @@
+     },
+     "packages/function": {
+       "name": "@opencode-ai/function",
+-      "version": "1.14.39",
++      "version": "1.14.41",
+       "dependencies": {
+         "@octokit/auth-app": "8.0.1",
+         "@octokit/rest": "catalog:",
+@@ -328,7 +328,7 @@
+     },
+     "packages/opencode": {
+       "name": "opencode",
+-      "version": "1.14.39-smark",
++      "version": "1.14.41-smark",
+       "bin": {
+         "opencode": "./bin/opencode",
+       },
+@@ -473,7 +473,7 @@
+     },
+     "packages/plugin": {
+       "name": "@opencode-ai/plugin",
+-      "version": "1.14.39",
++      "version": "1.14.41",
+       "dependencies": {
+         "@opencode-ai/sdk": "workspace:*",
+         "effect": "catalog:",
+@@ -508,7 +508,7 @@
+     },
+     "packages/sdk/js": {
+       "name": "@opencode-ai/sdk",
+-      "version": "1.14.39",
++      "version": "1.14.41",
+       "dependencies": {
+         "cross-spawn": "catalog:",
+       },
+@@ -523,7 +523,7 @@
+     },
+     "packages/slack": {
+       "name": "@opencode-ai/slack",
+-      "version": "1.14.39",
++      "version": "1.14.41",
+       "dependencies": {
+         "@opencode-ai/sdk": "workspace:*",
+         "@slack/bolt": "^3.17.1",
+@@ -558,7 +558,7 @@
+     },
+     "packages/ui": {
+       "name": "@opencode-ai/ui",
+-      "version": "1.14.39",
++      "version": "1.14.41",
+       "dependencies": {
+         "@kobalte/core": "catalog:",
+         "@opencode-ai/core": "workspace:*",
+@@ -607,7 +607,7 @@
+     },
+     "packages/web": {
+       "name": "@opencode-ai/web",
+-      "version": "1.14.39",
++      "version": "1.14.41",
+       "dependencies": {
+         "@astrojs/cloudflare": "12.6.3",
+         "@astrojs/markdown-remark": "6.3.1",
+diff --git a/packages/opencode/src/cli/cmd/session.ts b/packages/opencode/src/cli/cmd/session.ts
+index 0cebaf3d3afb22d5de51c5edb6144d46b7bec09d..d188e4e1f91e625ec541b02dc5b1a39b33a53b3f 100644
+--- a/packages/opencode/src/cli/cmd/session.ts
++++ b/packages/opencode/src/cli/cmd/session.ts
+@@ -17,6 +17,8 @@ import { AppRuntime } from "@/effect/app-runtime"
+ import { Database, eq, sql } from "@/storage"
+ import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
+ import { formatNumber } from "./stats"
++import { Instance } from "@/project/instance"
++import { SessionPath } from "@/session/path"
+ 
+ const MICROS = 1_000_000
+ 
+@@ -95,7 +97,14 @@ export const SessionListCommand = effectCmd({
+         default: false,
+       }),
+   handler: Effect.fn("Cli.session.list")(function* (args) {
+-    const sessions = yield* Session.Service.use((svc) => svc.list({ roots: true, limit: args.maxCount }))
++    const sessions = yield* Session.Service.use((svc) =>
++      svc.list({
++        directory: Instance.directory,
++        path: SessionPath.relative(Instance.worktree, Instance.directory),
++        roots: true,
++        limit: args.maxCount,
++      }),
++    )
+ 
+     if (sessions.length === 0) return
+ 
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+index 7495ce4fdce59f5e45639fe9aad5e25f761e0f14..25000bb13ed82153c21696a069cce84c969adec7 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+@@ -115,10 +115,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+     let syncedWorkspace = project.workspace.current()
+     let connectedOnce = false
+ 
+-    function sessionListQuery(): { scope?: "project"; path?: string } {
++    function sessionListQuery(): { directory?: string; scope?: "project"; path?: string } {
+       if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
+       if (!project.data.instance.path.worktree || !project.data.instance.path.directory) return { scope: "project" }
+       return {
++        directory: project.data.instance.path.directory,
+         path: SessionPath.relative(project.data.instance.path.worktree, project.data.instance.path.directory),
+       }
+     }
+diff --git a/packages/opencode/src/session/path.ts b/packages/opencode/src/session/path.ts
+index 597a4b3351bbc37638e729ed4a6a8e403851a889..f203fc309383ad52485a01911f8cc17b2de60f08 100644
+--- a/packages/opencode/src/session/path.ts
++++ b/packages/opencode/src/session/path.ts
+@@ -23,6 +23,25 @@ function windowsAbsolute(directory: string) {
+   return /^[A-Za-z]:\//.test(result) ? result : undefined
+ }
+ 
++function isDriveQualified(value: string) {
++  return /^[A-Za-z]:(?:\/|$)/.test(value)
++}
++
++export function ancestors(value: string, options?: { root?: boolean }) {
++  const normalized = value.replace(/\/+$/, "")
++  if (!normalized) return [""]
++
++  const prefixes = normalized.split("/").flatMap((_, index, parts) => {
++    const prefix = parts.slice(0, index + 1).join("/")
++    // Windows drive roots may exist in old data as either `F:` or `F:/`.
++    // Match both while still treating `F:/A` as the child namespace.
++    if (/^[A-Za-z]:$/.test(prefix)) return [prefix, `${prefix}/`]
++    return [prefix]
++  })
++
++  return [...new Set([...(options?.root && !isDriveQualified(normalized) ? [""] : []), ...prefixes])]
++}
++
+ export function aliases(input: { path: string; directory?: string; global?: boolean }) {
+   // Historical Windows global sessions used both `F:/...` and drive-relative
+   // `...` forms depending on the daemon current drive. Query both spellings so
+diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
+index e5dedb8ae25305a3d5618733e72af2d907a35249..89aa621d63a69eed7ee3b7a3339dbab82d38dd67 100644
+--- a/packages/opencode/src/session/session.ts
++++ b/packages/opencode/src/session/session.ts
+@@ -18,6 +18,7 @@ import { like } from "drizzle-orm"
+ import { inArray } from "drizzle-orm"
+ import { lt } from "drizzle-orm"
+ import { or } from "drizzle-orm"
++import { sql } from "drizzle-orm"
+ import { SyncEvent } from "../sync"
+ import type { SQL } from "drizzle-orm"
+ import { PartTable, SessionTable } from "./session.sql"
+@@ -134,6 +135,38 @@ function sessionPath(worktree: string, cwd: string) {
+   return SessionPath.relative(worktree, cwd)
+ }
+ 
++function relatedPathConditions(input: { path: string; directory?: string; global?: boolean; root?: boolean }) {
++  return SessionPath.aliases(input).flatMap((item) => {
++    const prefix = item.replace(/\/+$/, "")
++    return [
++      ...SessionPath.ancestors(item, { root: input.root }).map((ancestor) => eq(SessionTable.path, ancestor)),
++      like(SessionTable.path, prefix ? `${prefix}/%` : "%"),
++    ]
++  })
++}
++
++function relatedDirectoryConditions(directory: string) {
++  const column = sql<string>`replace(${SessionTable.directory}, ${"\\"}, "/")`
++  const normalized = path.resolve(directory).replaceAll("\\", "/").replace(/\/+$/, "")
++  const comparable = process.platform === "win32" ? sql<string>`lower(${column})` : column
++  const value = process.platform === "win32" ? normalized.toLowerCase() : normalized
++  return [
++    ...SessionPath.ancestors(value).map((ancestor) => eq(comparable, ancestor)),
++    like(comparable, value ? `${value}/%` : "%"),
++  ]
++}
++
++function directoryMatchesPath(input: { directory?: string; path: string; projectID: ProjectID }) {
++  if (!input.directory) return false
++  const project = Database.use((db) =>
++    db.select({ worktree: ProjectTable.worktree }).from(ProjectTable).where(eq(ProjectTable.id, input.projectID)).get(),
++  )
++  if (!project) return false
++  const left = SessionPath.relative(project.worktree, input.directory)
++  const right = input.path.replaceAll("\\", "/")
++  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right
++}
++
+ const Summary = Schema.Struct({
+   additions: NonNegativeInt,
+   deletions: NonNegativeInt,
+@@ -811,29 +844,52 @@ function* listByProject(
+     projectID: ProjectID
+   },
+ ) {
+-  const conditions = [eq(SessionTable.project_id, input.projectID)]
++  const conditions: SQL[] = []
+ 
+   if (input.workspaceID) {
+     conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
+   }
+   if (input.path !== undefined) {
+-    if (input.path) {
+-      const conds = SessionPath.aliases({
++    const projectPath = or(
++      ...relatedPathConditions({
+         path: input.path,
+         directory: input.directory,
+         global: input.projectID === ProjectID.global,
+-      }).flatMap((item) => [eq(SessionTable.path, item), like(SessionTable.path, `${item}/%`)])
+-
+-      conditions.push(
+-        input.directory
+-          ? or(...conds, and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory))!)!
+-          : or(...conds)!,
+-      )
+-    }
++        root: true,
++      }),
++    )!
++    const useDirectoryFallback = directoryMatchesPath({
++      directory: input.directory,
++      path: input.path,
++      projectID: input.projectID,
++    })
++    const globalPath = useDirectoryFallback && input.directory
++      ? or(
++          ...relatedPathConditions({
++            path: SessionPath.relative("/", input.directory),
++            directory: input.directory,
++            global: true,
++          }),
++        )
++      : undefined
++    const nullPath = input.directory ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory)) : undefined
++
++    conditions.push(
++      or(
++        and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath)! : projectPath),
++        ...(globalPath && input.projectID !== ProjectID.global
++          ? [and(eq(SessionTable.project_id, ProjectID.global), nullPath ? or(globalPath, nullPath)! : globalPath)]
++          : []),
++        ...(useDirectoryFallback ? [or(...relatedDirectoryConditions(input.directory!))] : []),
++      )!,
++    )
+   } else if (input.scope !== "project" && !Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
++    conditions.push(eq(SessionTable.project_id, input.projectID))
+     if (input.directory) {
+       conditions.push(eq(SessionTable.directory, input.directory))
+     }
++  } else {
++    conditions.push(eq(SessionTable.project_id, input.projectID))
+   }
+   if (input.roots) {
+     conditions.push(isNull(SessionTable.parent_id))
+diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/opencode/test/server/session-list.test.ts
+index 56d314cdc7c2ace79733a0d10196fa3eaa96f22f..239560f30125fe6b9a2110242c34f3829cd801df 100644
+--- a/packages/opencode/test/server/session-list.test.ts
++++ b/packages/opencode/test/server/session-list.test.ts
+@@ -12,6 +12,7 @@ import { Database } from "@/storage/db"
+ import { SessionTable } from "@/session/session.sql"
+ import { eq } from "drizzle-orm"
+ import { SessionPath } from "@/session/path"
++import { $ } from "bun"
+ 
+ void Log.init({ print: false })
+ const originalWorkspaces = Flag.OPENCODE_EXPERIMENTAL_WORKSPACES
+@@ -102,7 +103,7 @@ describe("session.list", () => {
+     })
+   })
+ 
+-  test("filters by path and ignores directory when path is provided", async () => {
++  test("filters by path relatives and ignores directory when path is provided", async () => {
+     Flag.OPENCODE_EXPERIMENTAL_WORKSPACES = false
+     await using tmp = await tmpdir({ git: true })
+     await mkdir(path.join(tmp.path, "packages", "opencode", "src", "deep"), { recursive: true })
+@@ -111,6 +112,7 @@ describe("session.list", () => {
+     await WithInstance.provide({
+       directory: tmp.path,
+       fn: async () => {
++        const root = await svc.create({ title: "root" })
+         const parent = await WithInstance.provide({
+           directory: path.join(tmp.path, "packages", "opencode"),
+           fn: async () => svc.create({ title: "parent" }),
+@@ -134,7 +136,8 @@ describe("session.list", () => {
+             path: "packages/opencode/src",
+           })
+         ).map((s) => s.id)
+-        expect(pathIDs).not.toContain(parent.id)
++        expect(pathIDs).toContain(root.id)
++        expect(pathIDs).toContain(parent.id)
+         expect(pathIDs).toContain(current.id)
+         expect(pathIDs).toContain(deeper.id)
+         expect(pathIDs).not.toContain(sibling.id)
+@@ -142,6 +145,51 @@ describe("session.list", () => {
+     })
+   })
+ 
++  test("builds path ancestors", () => {
++    expect(SessionPath.ancestors("packages/opencode/src", { root: true })).toEqual([
++      "",
++      "packages",
++      "packages/opencode",
++      "packages/opencode/src",
++    ])
++    expect(SessionPath.ancestors("F:/A/B/C")).toEqual(["F:", "F:/", "F:/A", "F:/A/B", "F:/A/B/C"])
++  })
++
++  test("includes global parent sessions from a git child project", async () => {
++    Flag.OPENCODE_EXPERIMENTAL_WORKSPACES = false
++    await using tmp = await tmpdir()
++    const repo = path.join(tmp.path, "repo")
++    const child = path.join(repo, "packages", "opencode")
++    await mkdir(child, { recursive: true })
++    await $`git init`.cwd(repo).quiet()
++    await $`git config core.fsmonitor false`.cwd(repo).quiet()
++    await $`git config commit.gpgsign false`.cwd(repo).quiet()
++    await $`git config user.email "test@opencode.test"`.cwd(repo).quiet()
++    await $`git config user.name "Test"`.cwd(repo).quiet()
++    await $`git commit --allow-empty -m "root commit"`.cwd(repo).quiet()
++
++    const parent = await WithInstance.provide({
++      directory: tmp.path,
++      fn: async () => svc.create({ title: "global-parent" }),
++    })
++    await WithInstance.provide({
++      directory: child,
++      fn: async () => {
++        const current = await svc.create({ title: "git-current" })
++        const ids = (
++          await svc.list({
++            directory: child,
++            path: SessionPath.relative(repo, child),
++            roots: true,
++          })
++        ).map((s) => s.id)
++
++        expect(ids).toContain(parent.id)
++        expect(ids).toContain(current.id)
++      },
++    })
++  })
++
+   test("falls back to directory when filtering legacy sessions without path", async () => {
+     Flag.OPENCODE_EXPERIMENTAL_WORKSPACES = false
+     await using tmp = await tmpdir({ git: true })

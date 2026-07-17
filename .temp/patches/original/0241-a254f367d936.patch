@@ -1,0 +1,25 @@
+From a254f367d936c20a7195d5a7bcad44ef74abd58e Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Wed, 27 May 2026 18:49:32 +0800
+Subject: [PATCH] =?UTF-8?q?feat(worker):=20=E6=B3=A8=E9=87=8A=E4=BF=AE?=
+ =?UTF-8?q?=E6=94=B9=EF=BC=8C=E5=B0=86=E5=AE=88=E6=8A=A4=E8=BF=9B=E7=A8=8B?=
+ =?UTF-8?q?=E7=9A=84=E7=A9=BA=E9=97=B2=E8=B6=85=E6=97=B6=E4=BB=8E8?=
+ =?UTF-8?q?=E7=A7=92=E8=B0=83=E6=95=B4=E4=B8=BA4=E7=A7=92?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
+index 6a23af9633cce54cf0f261028c1580fd74f4ea8e..02a386ef52298a724a6d4fa9819381a2bf89bfaf 100644
+--- a/packages/opencode/src/cli/cmd/tui/worker.ts
++++ b/packages/opencode/src/cli/cmd/tui/worker.ts
+@@ -151,7 +151,7 @@ process.prependListener("uncaughtException", () => void gracefulShutdown("uncaug
+ // 活跃 SSE client 或 SessionActivity 都会阻止退出；launcher watcher 只在首个
+ // SSE client 到来前生效，用来更快清理已经失去启动 TUI 接管的孤儿 daemon。
+ const IDLE_TIMEOUT_MS = (() => {
+-  // [local-smark] After the last TUI disconnects, keep the daemon around for at most 8s by default.
++  // [local-smark] After the last TUI disconnects, keep the daemon around for at most 4s by default.
+   const value = Number(process.env.OPENCODE_DAEMON_IDLE_TIMEOUT_MS ?? 4_000)
+   return Number.isFinite(value) && value >= 0 ? value : 4_000
+ })()

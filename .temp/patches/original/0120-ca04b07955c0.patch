@@ -1,0 +1,186 @@
+From ca04b07955c0cf2ebcd84e7f2b7d2b75b0a37334 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 9 May 2026 17:59:50 +0800
+Subject: [PATCH] =?UTF-8?q?fix:=20=E5=AF=B9=E8=AF=9D=E5=88=97=E8=A1=A8?=
+ =?UTF-8?q?=E6=98=BE=E7=A4=BA=E6=9B=B4=E6=96=B0=EF=BC=8C=E6=9B=B4=E6=96=B0?=
+ =?UTF-8?q?=E7=89=88=E6=9C=AC=E5=8F=B7=E8=87=B3=201.14.39.0=EF=BC=8C?=
+ =?UTF-8?q?=E5=B9=B6=E4=BF=AE=E5=A4=8D=20ESLint=20=E9=85=8D=E7=BD=AE?=
+ =?UTF-8?q?=E4=B8=AD=E7=9A=84=E8=AD=A6=E5=91=8A=E8=A7=84=E5=88=99?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
+index e155795fea7371867d96f8fac6cf13798a22a575..7bbb6bba9a419eb9e3f2b4ad064450bb883916cd 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
+@@ -16,14 +16,16 @@ import { openWorkspaceSelect, type WorkspaceSelection, warpWorkspaceSession } fr
+ import { Spinner } from "./spinner"
+ import { errorMessage } from "@/util/error"
+ import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
+-import type { TextPart } from "@opencode-ai/sdk/v2"
++import type { Part, TextPart } from "@opencode-ai/sdk/v2"
+ import { WorkspaceLabel } from "./workspace-label"
+ 
+ type WorkspaceStatus = "connected" | "connecting" | "disconnected" | "error"
+ 
+ const SESSION_LIST_PREVIEW_LINES = 2
+-const SESSION_LIST_PREVIEW_MESSAGE_LIMIT = 20
++const SESSION_LIST_PREVIEW_PAGE_SIZE = 16
++const SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT = 200
+ const SESSION_LIST_PREVIEW_SESSION_LIMIT = 50
++const SESSION_LIST_PREVIEW_CONCURRENCY = 6
+ 
+ export function DialogSessionList() {
+   const dialog = useDialog()
+@@ -36,40 +38,80 @@ export function DialogSessionList() {
+   const toast = useToast()
+   const [toDelete, setToDelete] = createSignal<string>()
+   const [search, setSearch] = createDebouncedSignal("", 150)
+-  const [previews, setPreviews] = createSignal<Record<string, string>>({})
++  const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
++
++  function textFromUserMessage(parts: Part[]) {
++    return (parts.filter((p) => p.type === "text" && !p.synthetic && !p.ignored) as TextPart[])
++      .map((p) => p.text)
++      .join(" ")
++      .replace(/\s+/g, " ")
++      .trim()
++  }
++
++  async function loadPreviewLines(sessionID: string) {
++    const lines: string[] = []
++    let before: string | undefined
++    let scanned = 0
++
++    while (lines.length < SESSION_LIST_PREVIEW_LINES && scanned < SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT) {
++      const limit = Math.min(SESSION_LIST_PREVIEW_PAGE_SIZE, SESSION_LIST_PREVIEW_MESSAGE_SCAN_LIMIT - scanned)
++      const result = await sdk.client.session.messages({
++        sessionID,
++        limit,
++        before,
++      })
++
++      const messages = result.data ?? []
++      scanned += limit
++
++      for (let i = messages.length - 1; i >= 0 && lines.length < SESSION_LIST_PREVIEW_LINES; i--) {
++        const message = messages[i]
++        if (message.info.role !== "user") continue
++
++        const text = textFromUserMessage(message.parts)
++        if (text) lines.push(text)
++      }
++
++      const cursor = result.response.headers.get("X-Next-Cursor")
++      if (!cursor) break
++      before = cursor
++    }
++
++    return lines
++  }
+ 
+   createEffect(
+     on(
+       () => sessions(),
+       (sessions) => {
+         if (SESSION_LIST_PREVIEW_LINES <= 0) return
++
+         const unloaded = sessions
+           .slice(0, SESSION_LIST_PREVIEW_SESSION_LIMIT)
+           .filter((s) => !(s.id in (previews() ?? {})))
+ 
+         if (unloaded.length === 0) return
+ 
+-        void Promise.all(
+-          unloaded.map(async (session) => {
+-            try {
+-              const result = await sdk.client.session.messages({
+-                sessionID: session.id,
+-                limit: SESSION_LIST_PREVIEW_MESSAGE_LIMIT,
+-              })
+-              const userMsg = result.data?.findLast((x) => x.info.role === "user")
+-              if (!userMsg) return
+-              const text = (userMsg.parts
+-                .filter((p) => p.type === "text" && !p.synthetic && !p.ignored) as TextPart[])
+-                .map((p) => p.text)
+-                .join(" ")
+-                .replace(/\s+/g, " ")
+-                .trim()
+-              if (text) {
+-                setPreviews((prev) => ({ ...prev, [session.id]: text }))
+-              }
+-            } catch {}
+-          }),
+-        )
++        void (async () => {
++          const next: Record<string, string[]> = {}
++
++          for (let i = 0; i < unloaded.length; i += SESSION_LIST_PREVIEW_CONCURRENCY) {
++            const chunk = unloaded.slice(i, i + SESSION_LIST_PREVIEW_CONCURRENCY)
++
++            await Promise.all(
++              chunk.map(async (session) => {
++                try {
++                  const lines = await loadPreviewLines(session.id)
++                  if (lines.length > 0) next[session.id] = lines
++                } catch {}
++              }),
++            )
++          }
++
++          if (Object.keys(next).length > 0) {
++            setPreviews((prev) => ({ ...prev, ...next }))
++          }
++        })()
+       },
+     ),
+   )
+@@ -197,8 +239,7 @@ export function DialogSessionList() {
+         const isDeleting = toDelete() === x.id
+         const status = sync.data.session_status?.[x.id]
+         const isWorking = status?.type === "busy"
+-        const previewText = previews()[x.id]
+-        const previewLines = SESSION_LIST_PREVIEW_LINES > 0 && previewText ? [previewText] : undefined
++        const previewLines = previews()[x.id]
+         return {
+           title: isDeleting ? `Press ${keybind.print("session_delete")} again to confirm` : x.title,
+           bg: isDeleting ? theme.error : undefined,
+diff --git a/sdks/vscode/eslint.config.mjs b/sdks/vscode/eslint.config.mjs
+index bcaaf8a966613dc74df6d9e9dba2c3828a181b0b..01658023ceb68f3ba35247f647582bb7a918fe43 100644
+--- a/sdks/vscode/eslint.config.mjs
++++ b/sdks/vscode/eslint.config.mjs
+@@ -25,10 +25,8 @@ export default [
+         },
+       ],
+ 
+-      curly: "warn",
+       eqeqeq: "warn",
+       "no-throw-literal": "warn",
+-      semi: "warn",
+     },
+   },
+ ]
+diff --git a/sdks/vscode/package.json b/sdks/vscode/package.json
+index 5accb42571f429a6e60a2ad695d96175db59ef42..0148464e8eeff8514f61abb06a693fd550e748bd 100644
+--- a/sdks/vscode/package.json
++++ b/sdks/vscode/package.json
+@@ -2,7 +2,7 @@
+   "name": "opencode-ide-bridge",
+   "displayName": "OpenCode IDE Bridge",
+   "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, workspace context sharing, and terminal integration — all on 127.0.0.1 with Bearer-token authentication.",
+-  "version": "1.14.39",
++  "version": "1.14.39.0",
+   "publisher": "SMARK2022",
+   "homepage": "https://github.com/anomalyco/opencode",
+   "repository": {
+@@ -100,7 +100,7 @@
+     ]
+   },
+   "scripts": {
+-    "vsix": "bun run package && npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.14.39.vsix",
++    "vsix": "bun run package && bun x @vscode/vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.14.39.0.vsix",
+     "compile": "bun run check-types && bun run lint && node esbuild.js",
+     "watch:esbuild": "node esbuild.js --watch",
+     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",

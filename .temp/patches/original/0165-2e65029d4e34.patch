@@ -1,0 +1,380 @@
+From 2e65029d4e3465a36e1645d6fc2aede375d07ab7 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 18 May 2026 20:04:52 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=9B=B4=E6=96=B0=20TUI=20=E6=9E=B6?=
+ =?UTF-8?q?=E6=9E=84=EF=BC=8C=E7=A6=81=E7=94=A8=20RPC-thread=EF=BC=8C?=
+ =?UTF-8?q?=E4=BC=98=E5=8C=96=E4=BA=8B=E4=BB=B6=E5=A4=84=E7=90=86=E4=B8=8E?=
+ =?UTF-8?q?=E6=B5=8B=E8=AF=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/docs/merge-upstream-log.md b/docs/merge-upstream-log.md
+index 60eee2cd7d71277e1585afc4cf1df872484df24b..e7ed07fd35c4dee462e8259e663893a340546dbb 100644
+--- a/docs/merge-upstream-log.md
++++ b/docs/merge-upstream-log.md
+@@ -667,3 +667,28 @@
+ - 结果: `49 pass, 0 fail, 77 expect() calls`。
+ 
+ ---
++
++## Phase 19: daemon 架构保留与 RPC-thread runtime 禁用
++
++### 操作 19.1: 架构确认
++
++- 当前分支保留本地 devsmark 的共享 daemon 架构: `TuiThreadCommand -> Daemon.ensure() -> worker daemon HTTP/SSE -> TUI SDK`。
++- 上游 `upstream/dev` 使用 per-TUI RPC-thread 架构: `TuiThreadCommand -> new Worker(worker.ts) -> Rpc.client -> RPC fetch/events`。
++- 决策: 本地继续使用 daemon 架构，因为 daemon 是 TUI 场景下的单一 SQLite owner，用于避免多个 opencode/TUI 实例并发写数据库导致竞态。
++
++### 操作 19.2: 禁用 RPC-thread 生产路径
++
++- `packages/opencode/src/cli/cmd/tui/thread.ts`: 添加 `[local-devsmark]` 注释，明确不要重新引入 per-TUI `Rpc.client/new Worker` 启动路径，除非数据库 ownership 模型重做。
++- `packages/opencode/src/cli/cmd/tui/worker.ts`: 删除/禁用 `export const rpc` 与 `Rpc.listen(rpc)`，并移除相关 `Rpc`、`ServerAuth`、`writeHeapSnapshot`、`upgrade`、`Effect` 等 RPC-only import；worker 只保留 shared daemon HTTP/SSE 路径。
++- `packages/opencode/src/cli/cmd/tui/app.tsx`: 从 `tui()` 输入类型和 `SDKProvider` 挂载中移除生产 `fetch`/`events` transport injection，防止后续误以为 upstream RPC-thread transport 仍需保留。
++- `packages/opencode/src/cli/cmd/tui/context/sdk.tsx`: 删除生产 `fetch`/`events` override 分支，默认始终启动 daemon SSE；保留显式 `SDKTestTransport`，只作为 focused tests 的注入 seam，不由 `tui()` 暴露。
++- `packages/opencode/test/cli/cmd/tui/sdk.test.tsx`、`test/cli/cmd/tui/sync-fixture.tsx`、`test/cli/tui/use-event.test.tsx`: 将测试挂载从顶层 `fetch/events` 改为 `testTransport`。
++- `packages/opencode/src/cli/cmd/tui/context/event.ts`: 对事件过滤进一步收紧: global 事件单独返回；若事件明确带 `project`，只按 project 匹配并返回，不再 fallback 到 workspace/directory，避免不同 project 的 daemon event 通过目录匹配串入当前 TUI。
++
++### 验证
++
++- 命令: `bun test --timeout 30000 ./test/cli/cmd/tui/sdk.test.tsx ./test/cli/tui/use-event.test.tsx ./test/cli/cmd/tui/session-integration.test.ts`（目录: `packages/opencode`）。
++- 结果: `42 pass, 0 fail, 70 expect() calls`。
++- 额外检查: `bun typecheck` 不再出现因移除生产 `fetch/events` override 导致的 `SDKProvider` 类型错误；剩余错误仍是既有的 `dialog-tool.tsx`、`context-usage.tsx`、`server-lock.ts` 与 session test mock 类型问题。
++
++---
+diff --git a/packages/opencode/src/cli/cmd/tui/app.tsx b/packages/opencode/src/cli/cmd/tui/app.tsx
+index 36f83bb61e6c1c250458224e7118cc2ac57bb0bf..e9bc51be368a085c4497dd182a08fc6a4ff4f655 100644
+--- a/packages/opencode/src/cli/cmd/tui/app.tsx
++++ b/packages/opencode/src/cli/cmd/tui/app.tsx
+@@ -71,7 +71,6 @@ import { FormatError, FormatUnknownError } from "@/cli/error"
+ import { CommandPaletteProvider, useCommandPalette } from "./context/command-palette"
+ import { OpencodeKeymapProvider, registerOpencodeKeymap, useBindings, useOpencodeKeymap } from "./keymap"
+ 
+-import type { EventSource } from "./context/sdk"
+ import { DialogVariant } from "./component/dialog-variant"
+ 
+ const appBindingCommands = [
+@@ -164,9 +163,7 @@ export function tui(input: {
+   config: TuiConfig.Resolved
+   onSnapshot?: () => Promise<string[]>
+   directory?: string
+-  fetch?: typeof fetch
+   headers?: RequestInit["headers"]
+-  events?: EventSource
+   reconnect?: () => Promise<string>
+ }) {
+   // promise to prevent immediate exit
+@@ -247,9 +244,7 @@ export function tui(input: {
+                         <SDKProvider
+                           url={input.url}
+                           directory={input.directory}
+-                          fetch={input.fetch}
+                           headers={input.headers}
+-                          events={input.events}
+                           reconnect={input.reconnect}
+                         >
+                           <ProjectProvider>
+diff --git a/packages/opencode/src/cli/cmd/tui/context/event.ts b/packages/opencode/src/cli/cmd/tui/context/event.ts
+index 3d6d7e1414c437860b195db657e6ccda4357fe32..0e90a1dc18f0fd9d6a4610c37fa0d881a3c83a02 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/event.ts
++++ b/packages/opencode/src/cli/cmd/tui/context/event.ts
+@@ -54,11 +54,16 @@ export function useEvent() {
+         return
+       }
+ 
+-      if (event.directory === "global" || event.project === project.project()) {
++      if (event.directory === "global") {
+         handler(event.payload, { workspace: event.workspace })
+         return
+       }
+ 
++      if (event.project) {
++        if (event.project === project.project()) handler(event.payload, { workspace: event.workspace })
++        return
++      }
++
+       if (project.workspace.current()) {
+         if (event.workspace === project.workspace.current()) handler(event.payload, { workspace: event.workspace })
+         return
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sdk.tsx b/packages/opencode/src/cli/cmd/tui/context/sdk.tsx
+index c028b405d43dbef7aee66e7283dca995f2334330..430b849da4558770eb3b8252561bc0a3716a658e 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sdk.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sdk.tsx
+@@ -6,8 +6,11 @@ import { Flag } from "@opencode-ai/core/flag/flag"
+ import { batch, onCleanup, onMount } from "solid-js"
+ import { ConnectionError } from "../util/connection-error"
+ 
+-export type EventSource = {
+-  subscribe: (handler: (event: GlobalEvent) => void) => Promise<() => void>
++export type SDKTestTransport = {
++  fetch?: typeof fetch
++  events?: {
++    subscribe: (handler: (event: GlobalEvent) => void) => Promise<() => void>
++  }
+ }
+ 
+ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+@@ -15,11 +18,12 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+   init: (props: {
+     url: string
+     directory?: string
+-    fetch?: typeof fetch
+     headers?: RequestInit["headers"]
+-    events?: EventSource
+     reconnect?: () => Promise<string>
+     heartbeatTimeout?: number
++    // [local-devsmark] Test-only transport injection. Production TUI must not
++    // use this as an RPC-thread escape hatch; `tui()` does not expose it.
++    testTransport?: SDKTestTransport
+   }) => {
+     const abort = new AbortController()
+     let sse: AbortController | undefined
+@@ -30,7 +34,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+         baseUrl: url,
+         signal: abort.signal,
+         directory: props.directory,
+-        fetch: props.fetch,
++        fetch: props.testTransport?.fetch,
+         headers: props.headers,
+       })
+     }
+@@ -160,18 +164,18 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+     }
+ 
+     onMount(async () => {
+-      if (props.events) {
+-        const unsub = await props.events.subscribe(handleEvent)
++      // [local-devsmark][deprecated-rpc-thread] The upstream RPC event-source
++      // production branch is disabled. Production always uses daemon HTTP/SSE so
++      // one daemon owns SQLite writes across concurrent TUI instances. The only
++      // alternate event source left is `testTransport`, used by focused tests.
++      if (props.testTransport?.events) {
++        const unsub = await props.testTransport.events.subscribe(handleEvent)
+         onCleanup(unsub)
+ 
+-        if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
+-          // Start syncing workspaces, it's important to do this after
+-          // we've started listening to events
+-          await sdk.sync.start().catch(() => {})
+-        }
+-      } else {
+-        startSSE()
++        if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) await sdk.sync.start().catch(() => {})
++        return
+       }
++      startSSE()
+     })
+ 
+     onCleanup(() => {
+@@ -186,7 +190,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+       },
+       directory: props.directory,
+       event: emitter,
+-      fetch: props.fetch ?? fetch,
++      fetch: props.testTransport?.fetch ?? fetch,
+       get url() {
+         return url
+       },
+diff --git a/packages/opencode/src/cli/cmd/tui/thread.ts b/packages/opencode/src/cli/cmd/tui/thread.ts
+index 69188b304fdb2d0613e642998ce27319b3712752..cd20081f9b6c625eaa9af99b38dbd60dfbe2e6ef 100644
+--- a/packages/opencode/src/cli/cmd/tui/thread.ts
++++ b/packages/opencode/src/cli/cmd/tui/thread.ts
+@@ -11,6 +11,11 @@ import { TuiConfig } from "./config/tui"
+ import { validateSession } from "./validate-session"
+ import { Daemon } from "./daemon"
+ 
++// [local-devsmark] Keep the TUI on the shared daemon transport instead of the
++// upstream RPC-thread transport. The daemon is the single SQLite owner for TUI
++// sessions, which avoids cross-TUI database write races when multiple opencode
++// instances are open. Do not reintroduce per-TUI Rpc.client/new Worker startup
++// here unless the database ownership model is redesigned.
+ export const DAEMON_START_TIMEOUT_MS = Daemon.DAEMON_START_TIMEOUT_MS
+ export const SERVER_ELECTION_TIMEOUT_MS = Daemon.SERVER_ELECTION_TIMEOUT_MS
+ export const _spawn = Daemon._spawn
+diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
+index e6f61eaca032e90f97062f29b8537dd0317bbcbe..b4fb6ac29e130fd35e15dc1855a35ea75051b00b 100644
+--- a/packages/opencode/src/cli/cmd/tui/worker.ts
++++ b/packages/opencode/src/cli/cmd/tui/worker.ts
+@@ -2,13 +2,8 @@ import { Installation } from "@/installation"
+ import { Server } from "@/server/server"
+ import * as Log from "@opencode-ai/core/util/log"
+ import { InstanceRuntime } from "@/project/instance-runtime"
+-import { Rpc } from "@/util/rpc"
+-import { upgrade } from "@/cli/upgrade"
+ import { Config } from "@/config/config"
+ import { Flag } from "@opencode-ai/core/flag/flag"
+-import { GlobalBus } from "@/bus/global"
+-import { ServerAuth } from "@/server/auth"
+-import { writeHeapSnapshot } from "node:v8"
+ import { AppRuntime } from "@/effect/app-runtime"
+ import { ensureProcessMetadata } from "@opencode-ai/core/util/opencode-process"
+ import * as Database from "@/storage/db"
+@@ -19,8 +14,6 @@ import path from "path"
+ import { Global } from "@opencode-ai/core/global"
+ import { resolvePluginTarget, createPluginEntry } from "@/plugin/shared"
+ import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+-import { Effect } from "effect"
+-import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
+ import { SessionActivity } from "@/session/activity"
+ 
+ ensureProcessMetadata("worker")
+@@ -178,56 +171,8 @@ SessionActivity.onChange(() => {
+   maybeScheduleIdleShutdown()
+ })
+ 
+-let server: Awaited<ReturnType<typeof Server.listen>> | undefined
+-
+-export const rpc = {
+-  async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {
+-    const headers = { ...input.headers }
+-    const auth = ServerAuth.header()
+-    if (auth && !headers["authorization"] && !headers["Authorization"]) {
+-      headers["Authorization"] = auth
+-    }
+-    const request = new Request(input.url, {
+-      method: input.method,
+-      headers,
+-      body: input.body,
+-    })
+-    const response = await Server.Default().app.fetch(request)
+-    const body = await response.text()
+-    return {
+-      status: response.status,
+-      headers: Object.fromEntries(response.headers.entries()),
+-      body,
+-    }
+-  },
+-  snapshot() {
+-    const result = writeHeapSnapshot("server.heapsnapshot")
+-    return result
+-  },
+-  async server(input: { port: number; hostname: string; mdns?: boolean; cors?: string[] }) {
+-    if (server) await server.stop(true)
+-    server = await Server.listen(input)
+-    return { url: server.url.toString() }
+-  },
+-  async checkUpgrade(input: { directory: string }) {
+-    await InstanceRuntime.load({ directory: input.directory })
+-    await upgrade().catch(() => {})
+-  },
+-  async reload() {
+-    await AppRuntime.runPromise(
+-      Effect.gen(function* () {
+-        const cfg = yield* Config.Service
+-        yield* cfg.invalidate()
+-        yield* disposeAllInstancesAndEmitGlobalDisposed({ swallowErrors: true })
+-      }),
+-    )
+-  },
+-  async shutdown() {
+-    Log.Default.info("worker shutting down")
+-
+-    await InstanceRuntime.disposeAllInstances()
+-    if (server) await server.stop(true)
+-  },
+-}
+-
+-Rpc.listen(rpc)
++// [local-devsmark][deprecated-rpc-thread] Upstream's per-TUI RPC surface was
++// intentionally disabled. This worker is the shared daemon process and exposes
++// HTTP/SSE via ServerLock instead, so one daemon owns SQLite writes across TUI
++// instances. Do not add Rpc.listen/Rpc.emit/Rpc.client paths here unless the
++// daemon database ownership model is replaced.
+diff --git a/packages/opencode/test/cli/cmd/tui/sdk.test.tsx b/packages/opencode/test/cli/cmd/tui/sdk.test.tsx
+index de79a269bfb6b906ae443d47a2f2941c8cc2b727..4969d93dd6bb9028664944426e1bb3b31c31c42a 100644
+--- a/packages/opencode/test/cli/cmd/tui/sdk.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/sdk.test.tsx
+@@ -57,7 +57,7 @@ describe("SDKProvider", () => {
+     }) as typeof globalThis.fetch
+ 
+     const app = await testRender(() => (
+-      <SDKProvider url="http://old" fetch={fetch} reconnect={async () => "http://new"}>
++      <SDKProvider url="http://old" testTransport={{ fetch }} reconnect={async () => "http://new"}>
+         <Probe onReady={ready} />
+       </SDKProvider>
+     ))
+@@ -93,7 +93,7 @@ describe("SDKProvider", () => {
+     }) as typeof globalThis.fetch
+ 
+     const app = await testRender(() => (
+-      <SDKProvider url="http://old" fetch={fetch} reconnect={async () => "http://new"} heartbeatTimeout={50}>
++      <SDKProvider url="http://old" testTransport={{ fetch }} reconnect={async () => "http://new"} heartbeatTimeout={50}>
+         <Probe onReady={ready} />
+       </SDKProvider>
+     ))
+diff --git a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
+index 3a46e2b5a9c7c5b0df6a7db4a9b9a1b60ada52c6..ed66112e155f63478c3cb9aa639b1f995d0488f2 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
++++ b/packages/opencode/test/cli/cmd/tui/session-integration.test.ts
+@@ -171,10 +171,13 @@ describe("Session route integration points", () => {
+   })
+ 
+   describe("event dispatch", () => {
+-    test("project/global event match returns before workspace fallback", () => {
++    test("global and explicit project event matches return before workspace fallback", () => {
+       const eventSource = readFileSync(path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/context/event.ts"), "utf-8")
+       expect(eventSource).toMatch(
+-        /if \(event\.directory === "global" \|\| event\.project === project\.project\(\)\) \{\s*handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}/,
++        /if \(event\.directory === "global"\) \{\s*handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}/,
++      )
++      expect(eventSource).toMatch(
++        /if \(event\.project\) \{\s*if \(event\.project === project\.project\(\)\) handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}/,
+       )
+     })
+   })
+diff --git a/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx b/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
+index 5f51374c16c53051bc04f58af886fa5d17c09a74..8bfce8f74a608d0c9bb14012b47446649e19463a 100644
+--- a/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
++++ b/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
+@@ -5,7 +5,7 @@ import { ArgsProvider } from "../../../../src/cli/cmd/tui/context/args"
+ import { ExitProvider } from "../../../../src/cli/cmd/tui/context/exit"
+ import { KVProvider, useKV } from "../../../../src/cli/cmd/tui/context/kv"
+ import { ProjectProvider, useProject } from "../../../../src/cli/cmd/tui/context/project"
+-import { SDKProvider, type EventSource } from "../../../../src/cli/cmd/tui/context/sdk"
++import { SDKProvider, type SDKTestTransport } from "../../../../src/cli/cmd/tui/context/sdk"
+ import { SyncProvider, useSync } from "../../../../src/cli/cmd/tui/context/sync"
+ import type { GlobalEvent } from "@opencode-ai/sdk/v2"
+ 
+@@ -27,7 +27,9 @@ export function json(data: unknown, init?: ResponseInit) {
+   })
+ }
+ 
+-export function eventSource(): EventSource {
++type TestEventSource = NonNullable<SDKTestTransport["events"]>
++
++export function eventSource(): TestEventSource {
+   return { subscribe: async () => () => {} }
+ }
+ 
+@@ -42,7 +44,7 @@ export function createEventSource() {
+           if (fn === handler) fn = undefined
+         }
+       },
+-    } satisfies EventSource,
++    } satisfies TestEventSource,
+     emit(event: GlobalEvent) {
+       if (!fn) throw new Error("event source not ready")
+       fn(event)
+@@ -125,7 +127,7 @@ export async function mount(override?: FetchHandler) {
+     <ArgsProvider>
+       <ExitProvider>
+         <KVProvider>
+-          <SDKProvider url="http://test" directory={directory} fetch={calls.fetch} events={events.source}>
++          <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
+             <ProjectProvider>
+               <SyncProvider>
+                 <Probe />
+diff --git a/packages/opencode/test/cli/tui/use-event.test.tsx b/packages/opencode/test/cli/tui/use-event.test.tsx
+index d690cfd6cec868080a2815525d88143fc593ba3b..62c21d00bf927ef167a9eb9f36efe5f96221ee13 100644
+--- a/packages/opencode/test/cli/tui/use-event.test.tsx
++++ b/packages/opencode/test/cli/tui/use-event.test.tsx
+@@ -82,7 +82,7 @@ async function mount() {
+   })
+ 
+   const app = await testRender(() => (
+-    <SDKProvider url="http://test" directory="/tmp/root" events={source.source} fetch={fetch}>
++    <SDKProvider url="http://test" directory="/tmp/root" testTransport={{ events: source.source, fetch }}>
+       <ProjectProvider>
+         <Probe
+           onReady={async (ctx) => {

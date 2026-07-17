@@ -1,0 +1,413 @@
+From 59aeb3d239f3344454644048d8e9ae7bcd800c9b Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Tue, 19 May 2026 05:51:51 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=94=AF=E6=8C=81=E9=80=9A=E8=BF=87?=
+ =?UTF-8?q?=E7=8E=AF=E5=A2=83=E5=8F=98=E9=87=8F=E9=85=8D=E7=BD=AE=E5=AE=88?=
+ =?UTF-8?q?=E6=8A=A4=E8=BF=9B=E7=A8=8B=E7=9A=84=E7=A9=BA=E9=97=B2=E8=B6=85?=
+ =?UTF-8?q?=E6=97=B6=E6=97=B6=E9=97=B4=EF=BC=8C=E5=B9=B6=E6=B7=BB=E5=8A=A0?=
+ =?UTF-8?q?=E7=9B=B8=E5=BA=94=E7=9A=84=E6=B5=8B=E8=AF=95?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
+index b4fb6ac29e130fd35e15dc1855a35ea75051b00b..deb20eeaf44a674c84f89054689eab498dc98357 100644
+--- a/packages/opencode/src/cli/cmd/tui/worker.ts
++++ b/packages/opencode/src/cli/cmd/tui/worker.ts
+@@ -126,7 +126,10 @@ process.prependListener("uncaughtException", () => void gracefulShutdown())
+ // Exit 30 s after the last SSE client disconnects AND no session runners are
+ // active.  The timer only starts after the first connection, so a slow-starting
+ // TUI does not race the daemon.
+-const IDLE_TIMEOUT_MS = 30_000
++const IDLE_TIMEOUT_MS = (() => {
++  const value = Number(process.env.OPENCODE_DAEMON_IDLE_TIMEOUT_MS ?? 30_000)
++  return Number.isFinite(value) && value >= 0 ? value : 30_000
++})()
+ 
+ let hadClient = false
+ let sseClients = 0
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
+index 739d18d6d970298326441fe7ce37d2628b06da60..d8138f0ab6d26749fbbe0db2c147a3a736b0c250 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
+@@ -7,13 +7,12 @@ import { Installation } from "@/installation"
+ import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
+ import { InstallationVersion } from "@opencode-ai/core/installation/version"
+ import * as Log from "@opencode-ai/core/util/log"
+-import { Effect, Queue, Schema } from "effect"
+-import * as Stream from "effect/Stream"
++import { Effect, Schema } from "effect"
+ import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
+ import { HttpApiBuilder } from "effect/unstable/httpapi"
+-import * as Sse from "effect/unstable/encoding/Sse"
+ import { RootHttpApi } from "../api"
+ import { GlobalUpgradeInput } from "../groups/global"
++import { PassThrough } from "node:stream"
+ 
+ const log = Log.create({ service: "server" })
+ 
+@@ -27,13 +26,8 @@ export function onSseClientCountChange(cb: (n: number) => void) {
+   onSseCountChange = cb
+ }
+ 
+-function eventData(data: unknown): Sse.Event {
+-  return {
+-    _tag: "Event",
+-    event: "message",
+-    id: undefined,
+-    data: JSON.stringify(data),
+-  }
++function eventData(data: unknown) {
++  return `data: ${JSON.stringify(data)}\n\n`
+ }
+ 
+ function parseBody(body: string) {
+@@ -44,36 +38,68 @@ function parseBody(body: string) {
+   }
+ }
+ 
+-function eventResponse() {
++type AbortSource = {
++  once: (event: "aborted", listener: () => void) => unknown
++  off: (event: "aborted", listener: () => void) => unknown
++}
++
++function abortSource(source: object): AbortSource | undefined {
++  const candidate = source as { once?: unknown; off?: unknown }
++  if (typeof candidate.once !== "function" || typeof candidate.off !== "function") return
++  return candidate as AbortSource
++}
++
++function onRequestAbort(request: HttpServerRequest.HttpServerRequest, close: () => void) {
++  if (request.source instanceof Request) {
++    request.source.signal.addEventListener("abort", close, { once: true })
++    return () => request.source instanceof Request && request.source.signal.removeEventListener("abort", close)
++  }
++
++  const source = abortSource(request.source)
++  if (!source) return () => {}
++  source.once("aborted", close)
++  return () => source.off("aborted", close)
++}
++
++function eventResponse(request: HttpServerRequest.HttpServerRequest) {
+   // [local-smark] Track SSE client count for daemon idle-timeout
+   sseClientCount++
+   onSseCountChange?.(sseClientCount)
+   log.info("global event connected")
+-  const events = Stream.callback<GlobalBusEvent>((queue) => {
+-    const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
+-    return Effect.acquireRelease(
+-      Effect.sync(() => GlobalBus.on("event", handler)),
+-      () => Effect.sync(() => GlobalBus.off("event", handler)),
+-    )
+-  })
+-  const heartbeat = Stream.tick("10 seconds").pipe(
+-    Stream.drop(1),
+-    Stream.map(() => ({ payload: { id: Bus.createID(), type: "server.heartbeat", properties: {} } })),
++
++  const stream = new PassThrough()
++  const write = (event: GlobalBusEvent) => {
++    if (stream.destroyed) return
++    stream.write(eventData(event))
++  }
++  const handler = (event: GlobalBusEvent) => write(event)
++  const heartbeat = setInterval(
++    () => write({ payload: { id: Bus.createID(), type: "server.heartbeat", properties: {} } }),
++    10_000,
+   )
++  let closed = false
++  let unsubscribeRequestAbort = () => {}
++  const close = () => {
++    if (closed) return
++    closed = true
++    clearInterval(heartbeat)
++    GlobalBus.off("event", handler)
++    unsubscribeRequestAbort()
++    if (!stream.destroyed) stream.end()
++    sseClientCount = Math.max(0, sseClientCount - 1)
++    onSseCountChange?.(sseClientCount)
++    log.info("global event disconnected")
++  }
++
++  heartbeat.unref?.()
++  GlobalBus.on("event", handler)
++  unsubscribeRequestAbort = onRequestAbort(request, close)
++  stream.once("close", close)
++  stream.once("error", close)
++  write({ payload: { id: Bus.createID(), type: "server.connected", properties: {} } })
+ 
+-  return HttpServerResponse.stream(
+-    Stream.make({ payload: { id: Bus.createID(), type: "server.connected", properties: {} } }).pipe(
+-      Stream.concat(events.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
+-      Stream.map(eventData),
+-      Stream.pipeThroughChannel(Sse.encode()),
+-      Stream.encodeText,
+-      // [local-smark] Decrement SSE client count on disconnect
+-      Stream.ensuring(Effect.sync(() => {
+-        sseClientCount--
+-        onSseCountChange?.(sseClientCount)
+-        log.info("global event disconnected")
+-      })),
+-    ),
++  return HttpServerResponse.raw(
++    stream,
+     {
+       contentType: "text/event-stream",
+       headers: {
+@@ -96,7 +122,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
+     })
+ 
+     const event = Effect.fn("GlobalHttpApi.event")(function* () {
+-      return eventResponse()
++      return eventResponse(yield* HttpServerRequest.HttpServerRequest)
+     })
+ 
+     const configGet = Effect.fn("GlobalHttpApi.configGet")(function* () {
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 87c3c0114392509f7c7794e3737807f92dfd70fc..0df5ecb94d9dcfea7b70998f216fed537d77f03d 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -47,7 +47,7 @@ import { Truncate } from "@/tool/truncate"
+ import { Image } from "@/image/image"
+ import { decodeDataUrl } from "@/util/data-url"
+ import { Process } from "@/util/process"
+-import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
++import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Semaphore, Types } from "effect"
+ import * as EffectLogger from "@opencode-ai/core/effect/logger"
+ import { InstanceState } from "@/effect/instance-state"
+ import { TaskTool, type TaskPromptOps } from "@/tool/task"
+@@ -269,6 +269,25 @@ function referenceTextPart(input: {
+   }
+ }
+ 
++function interruptedToolState(
++  state: MessageV2.ToolStatePending | MessageV2.ToolStateRunning,
++  now: number,
++): MessageV2.ToolStateError {
++  return {
++    status: "error",
++    input: state.input,
++    error: "Tool execution aborted",
++    metadata: state.status === "running" ? { ...state.metadata, interrupted: true } : { interrupted: true },
++    time: { start: state.status === "running" ? state.time.start : now, end: now },
++  }
++}
++
++type OpenToolPart = MessageV2.ToolPart & { state: MessageV2.ToolStatePending | MessageV2.ToolStateRunning }
++
++function isOpenToolPart(part: MessageV2.Part): part is OpenToolPart {
++  return part.type === "tool" && (part.state.status === "pending" || part.state.status === "running")
++}
++
+ export interface Interface {
+   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+   readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts, Image.Error>
+@@ -311,6 +330,7 @@ export const layer = Layer.effect(
+     const references = yield* Reference.Service
+     const events = yield* EventV2Bridge.Service
+     const flags = yield* RuntimeFlags.Service
++    const cancelLocks = new Map<SessionID, Semaphore.Semaphore>()
+     const runner = Effect.fn("SessionPrompt.runner")(function* () {
+       return yield* EffectBridge.make()
+     })
+@@ -322,11 +342,22 @@ export const layer = Layer.effect(
+         loop: (input: LoopInput) => loop(input),
+       } satisfies TaskPromptOps
+     })
++    const cancelLock = (sessionID: SessionID) => {
++      const hit = cancelLocks.get(sessionID)
++      if (hit) return hit
++      const next = Semaphore.makeUnsafe(1)
++      cancelLocks.set(sessionID, next)
++      return next
++    }
+ 
+     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
+-      yield* elog.info("cancel", { sessionID })
+-      yield* state.cancel(sessionID)
+-      yield* abortPendingAssistants(sessionID)
++      yield* cancelLock(sessionID).withPermits(1)(
++        Effect.gen(function* () {
++          yield* elog.info("cancel", { sessionID })
++          yield* state.cancel(sessionID)
++          yield* abortPendingAssistants(sessionID)
++        }),
++      )
+     })
+ 
+     const abortPendingAssistants = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
+@@ -344,6 +375,7 @@ export const layer = Layer.effect(
+         pending,
+         Effect.fnUntraced(function* (msg) {
+           const assistant = msg.info
++          yield* abortPendingToolParts(msg.parts, now)
+           assistant.time.completed = now
+           assistant.error ??= new MessageV2.AbortedError({ message: "Aborted" }).toObject()
+           if (msg.parts.length === 0) assistant.hidden = { time: now, reason: "repair-empty-dangling-assistant" as const }
+@@ -354,10 +386,21 @@ export const layer = Layer.effect(
+         }),
+         { discard: true },
+       )
+-      // NOTE: Tool part states are NOT modified here. Each tool has its own
+-      // interrupt/cancel handler that finalizes its state (e.g. bash truncates
+-      // output and completes, task tool cancels child session). Forcing all
+-      // running tools to "error" here would race with those handlers.
++    })
++
++    const abortPendingToolParts = Effect.fn("SessionPrompt.abortPendingToolParts")(function* (
++      parts: MessageV2.Part[],
++      now: number,
++    ) {
++      yield* Effect.forEach(
++        parts.filter(isOpenToolPart),
++        (part) =>
++          sessions.updatePart({
++            ...part,
++            state: interruptedToolState(part.state, now),
++          }),
++        { discard: true },
++      )
+     })
+ 
+     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {
+diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
+index 7fb3eb8d279d68c69412111590a0c92f2a2deb0a..8736c2872bb9853b9a500d3d304b31e92c358f71 100644
+--- a/packages/opencode/test/cli/tui/daemon.test.ts
++++ b/packages/opencode/test/cli/tui/daemon.test.ts
+@@ -31,11 +31,12 @@ afterEach(() => {
+  * lock appears and the HTTP server responds.  Returns the running proc and the
+  * live lock contents.
+  */
+-async function spawnDaemon(lockPath: string) {
++async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
+   const root = path.dirname(lockPath)
+   const proc = Bun.spawn([process.execPath, WORKER_TS], {
+     env: {
+       ...process.env,
++      ...env,
+       OPENCODE_PROCESS_ROLE: "worker",
+       OPENCODE_LOCK_PATH: lockPath,
+       OPENCODE_DB: path.join(root, "opencode.db"),
+@@ -160,6 +161,42 @@ describe("daemon lifecycle", () => {
+     DAEMON_START_TIMEOUT_MS + 5_000,
+   )
+ 
++  test(
++    "daemon exits after the last SSE client disconnects",
++    async () => {
++      await using tmp = await tmpdir()
++      const lockPath = path.join(tmp.path, "tui-server.json")
++      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "250" })
++
++      try {
++        const ctrl = new AbortController()
++        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, { signal: ctrl.signal })
++        expect(res.ok).toBe(true)
++        if (!res.body) throw new Error("missing SSE body")
++
++        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
++        try {
++          const first = await reader.read()
++          expect(first.value).toContain("server.connected")
++          await Bun.sleep(750)
++          expect(ServerLockModule.alive(proc.pid)).toBe(true)
++        } finally {
++          ctrl.abort()
++          await reader.cancel().catch(() => undefined)
++          reader.releaseLock()
++        }
++
++        const exitCode = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
++        expect(exitCode).toBe(0)
++        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
++      } finally {
++        if (ServerLockModule.alive(proc.pid)) proc.kill()
++        await proc.exited.catch(() => undefined)
++      }
++    },
++    DAEMON_START_TIMEOUT_MS + 10_000,
++  )
++
+   test(
+     "compiled-binary path: spawning with OPENCODE_PROCESS_ROLE=worker env bypasses yargs and starts daemon",
+     async () => {
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 891efc18721d4b1738d5861e2904f7255d3a110e..7fdde32f3b1ad6f156817ac2107f74e2bf540b6f 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -1043,6 +1043,63 @@ it.instance(
+   30_000,
+ )
+ 
++it.instance(
++  "cancel finalizes stale running tool parts without an active runner",
++  () =>
++    Effect.gen(function* () {
++      const { prompt, sessions, chat } = yield* boot()
++      const { assistant } = yield* seed(chat.id)
++      const started = Date.now()
++
++      yield* sessions.updatePart({
++        id: PartID.ascending(),
++        messageID: assistant.id,
++        sessionID: chat.id,
++        type: "tool",
++        callID: "call_running",
++        tool: "read",
++        state: {
++          status: "running",
++          input: { filePath: "README.md" },
++          title: "Read README.md",
++          metadata: { source: "stale-test" },
++          time: { start: started },
++        },
++      })
++      yield* sessions.updatePart({
++        id: PartID.ascending(),
++        messageID: assistant.id,
++        sessionID: chat.id,
++        type: "tool",
++        callID: "call_pending",
++        tool: "bash",
++        state: {
++          status: "pending",
++          input: { command: "sleep 30" },
++          raw: '{"command":"sleep 30"}',
++        },
++      })
++
++      yield* prompt.cancel(chat.id)
++
++      const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: assistant.id })
++      const tools = stored.parts.filter((part): part is MessageV2.ToolPart => part.type === "tool")
++      expect(stored.info.role).toBe("assistant")
++      if (stored.info.role !== "assistant") return
++      expect(stored.info.time.completed).toBeNumber()
++      expect(stored.info.error?.name).toBe("MessageAbortedError")
++      expect(tools).toHaveLength(2)
++      for (const tool of tools) {
++        expect(tool.state.status).toBe("error")
++        if (tool.state.status !== "error") continue
++        expect(tool.state.error).toBe("Tool execution aborted")
++        expect(tool.state.metadata?.interrupted).toBe(true)
++        expect(tool.state.time.end).toBeGreaterThanOrEqual(tool.state.time.start)
++      }
++    }),
++  { git: true },
++)
++
+ it.instance(
+   "cancel propagates from slash command subtask to child session",
+   () =>
+@@ -1682,7 +1739,9 @@ unix(
+       const run = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+       yield* llm.wait(1)
+       yield* Effect.sleep(150)
++      const cancel = yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
+       yield* prompt.cancel(chat.id)
++      yield* Fiber.await(cancel)
+ 
+       const exit = yield* Fiber.await(run)
+       expect(Exit.isSuccess(exit)).toBe(true)

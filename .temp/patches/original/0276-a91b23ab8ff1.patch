@@ -1,0 +1,99 @@
+From a91b23ab8ff1db3cb5c0041e3d6925a19cb17322 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 31 May 2026 15:29:20 +0800
+Subject: [PATCH] =?UTF-8?q?test(image):=20=E8=A1=A5=E5=85=85=E5=9B=BE?=
+ =?UTF-8?q?=E7=89=87=E9=99=84=E4=BB=B6=E8=BE=B9=E7=95=8C=E7=94=A8=E4=BE=8B?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+覆盖调用方传入更小 token budget 时仍需压缩的图片场景，确保默认限制内的输入不会绕过更严格的调用边界。
+
+同时补充 read 工具对有效 JPEG 和损坏图片的断言，避免不可解码的图片字节被当作附件继续返回。
+
+diff --git a/packages/opencode/test/image/image.test.ts b/packages/opencode/test/image/image.test.ts
+index c5d832cd5e23d1a444a5395f157534adb9f3a1b8..e5b9eab00fb41566a7be4a820ab253338aa24166 100644
+--- a/packages/opencode/test/image/image.test.ts
++++ b/packages/opencode/test/image/image.test.ts
+@@ -58,6 +58,32 @@ describe("Image", () => {
+     }),
+   )
+ 
++  it.effect("shrinks images that fit default limits when a caller supplies a smaller token budget", () =>
++    Effect.gen(function* () {
++      const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
++      const source = new photon.PhotonImage(
++        new Uint8Array(
++          Array.from({ length: 1_200 * 900 * 4 }, (_, index) => {
++            if (index % 4 === 3) return 255
++            return (Math.floor(index / 4) * (index % 4 === 0 ? 1 : index % 4 === 1 ? 7 : 13)) % 251
++          }),
++        ),
++        1_200,
++        900,
++      )
++      const input = part("image/jpeg", Buffer.from(source.get_bytes_jpeg(95)).toString("base64"))
++      const image = yield* Image.Service
++      const result = yield* image.normalize(input, { tokenBudget: 1_600 })
++      const base64 = result.url.slice(result.url.indexOf(";base64,") + ";base64,".length)
++
++      source.free()
++      expect(input.url.slice(input.url.indexOf(";base64,") + ";base64,".length).length).toBeGreaterThan(1_600 * 750)
++      expect(result.url).not.toBe(input.url)
++      expect(base64.length).toBeLessThanOrEqual(1_600 * 750)
++      expect(result.url.startsWith(`data:${result.mime};base64,`)).toBe(true)
++    }),
++  )
++
+   it.effect("resizes images that fit the byte limit but exceed dimension limits", () =>
+     Effect.gen(function* () {
+       const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
+diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
+index 25545ed20e61c31a9e04b5c8f14128dc37ed1784..e979dfa3db6e5dd38139e873290bc46999ae25c0 100644
+--- a/packages/opencode/test/tool/read.test.ts
++++ b/packages/opencode/test/tool/read.test.ts
+@@ -22,6 +22,7 @@ import { Filesystem } from "@/util/filesystem"
+ import { disposeAllInstances, provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
+ import { testEffect } from "../lib/effect"
+ import { Reference } from "@/reference/reference"
++import { Image } from "@/image/image"
+ 
+ const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
+ 
+@@ -57,6 +58,7 @@ const readLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
+     LSP.defaultLayer,
+     referenceLayer(flags),
+     Truncate.defaultLayer,
++    Image.defaultLayer,
+   )
+ 
+ const it = testEffect(readLayer())
+@@ -592,7 +594,10 @@ describe("tool.read truncation", () => {
+   it.live("detects attachment media from file contents", () =>
+     Effect.gen(function* () {
+       const dir = yield* tmpdirScoped()
+-      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01])
++      const jpeg = Buffer.from(
++        "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/ASP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/ASP/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Al//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EFBQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EFBQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EFBABAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z",
++        "base64",
++      )
+       yield* put(path.join(dir, "image.bin"), jpeg)
+ 
+       const result = yield* exec(dir, { filePath: path.join(dir, "image.bin") })
+@@ -602,6 +607,16 @@ describe("tool.read truncation", () => {
+     }),
+   )
+ 
++  it.live("fails invalid image attachments instead of returning undecodable bytes", () =>
++    Effect.gen(function* () {
++      const dir = yield* tmpdirScoped()
++      yield* put(path.join(dir, "broken.jpg"), Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]))
++
++      const error = yield* fail(dir, { filePath: path.join(dir, "broken.jpg") })
++      expect(error.message).toBe("Image could not be decoded")
++    }),
++  )
++
+   it.live("large image files are properly attached without error", () =>
+     Effect.gen(function* () {
+       const result = yield* exec(FIXTURES_DIR, { filePath: path.join(FIXTURES_DIR, "large-image.png") })

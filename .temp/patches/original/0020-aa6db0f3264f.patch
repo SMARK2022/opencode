@@ -1,0 +1,454 @@
+From aa6db0f3264f22d5d8ff0dfc11cd6ac2aee11279 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 23 Apr 2026 16:52:36 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E4=B8=8A=E4=B8=8B=E6=96=87=E6=8F=90?=
+ =?UTF-8?q?=E7=A4=BA=E8=AF=8D=E5=A2=9E=E5=BC=BA=20enhance=20system=20promp?=
+ =?UTF-8?q?t=20with=20environment=20details=20and=20tool=20usage=20guideli?=
+ =?UTF-8?q?nes?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
+index 2b0028d6b17777cc0f7f12495e17eb8260fff4bc..516b14f291bf9e902badd167975dd6bd9b4ada40 100644
+--- a/packages/opencode/src/provider/claudecode.ts
++++ b/packages/opencode/src/provider/claudecode.ts
+@@ -6,27 +6,27 @@ import { createHash, randomUUID } from "crypto"
+ export const VERSION = "2.1.117" // 当前最新的 Claude Code 版本号
+ const SALT = "59cf53e54c78"
+ 
+-// CLI 身份声明 Block
+-export const CLI_IDENTITY_BLOCK = {
+-  type: "text" as const,
+-  text: "You are Claude Code, Anthropic's official CLI for Claude.",
+-  cache_control: { type: "ephemeral" as const },
+-}
+-
+-// 主 System Prompt Block (这里仅为摘要仿真)
+-export const MAIN_SYSTEM_BLOCK = {
+-  type: "text" as const,
+-  text: [
+-    "You are an interactive agent that helps users with software engineering tasks.",
+-    "Use the instructions below and the tools available to you to assist the user.",
+-    "",
+-    "# System",
+-    " - All text you output outside of tool use is displayed to the user.",
+-    " - Tool results and user messages may include <system-reminder> tags.",
+-    " - The conversation has unlimited context through automatic summarization.",
+-  ].join("\n"),
+-  cache_control: { type: "ephemeral" as const },
+-}
++// // CLI 身份声明 Block
++// export const CLI_IDENTITY_BLOCK = {
++//   type: "text" as const,
++//   text: "You are Claude Code, Anthropic's official CLI for Claude.",
++//   cache_control: { type: "ephemeral" as const },
++// }
++
++// // 主 System Prompt Block (这里仅为摘要仿真)
++// export const MAIN_SYSTEM_BLOCK = {
++//   type: "text" as const,
++//   text: [
++//     "You are an interactive agent that helps users with software engineering tasks.",
++//     "Use the instructions below and the tools available to you to assist the user.",
++//     "",
++//     "# System",
++//     " - All text you output outside of tool use is displayed to the user.",
++//     " - Tool results and user messages may include <system-reminder> tags.",
++//     " - The conversation has unlimited context through automatic summarization.",
++//   ].join("\n"),
++//   cache_control: { type: "ephemeral" as const },
++// }
+ 
+ // ============================================================================
+ // 会话状态管理
+@@ -83,12 +83,12 @@ export function buildBillingHeaderBlock(fp: string) {
+   }
+ }
+ 
+-/**
+- * 构建必须的 System Blocks 组合
+- */
+-export function buildSystemBlocks(fp: string) {
+-  return [buildBillingHeaderBlock(fp), CLI_IDENTITY_BLOCK, MAIN_SYSTEM_BLOCK]
+-}
++// /**
++//  * 构建必须的 System Blocks 组合
++//  */
++// export function buildSystemBlocks(fp: string) {
++//   return [buildBillingHeaderBlock(fp), CLI_IDENTITY_BLOCK, MAIN_SYSTEM_BLOCK]
++// }
+ 
+ /**
+  * 构建紧凑的 User ID Metadata 字符串
+@@ -289,15 +289,15 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
+ 
+     const fp = computeFingerprint(firstUserText, VERSION)
+ 
+-    // 2. 合并 System Blocks (将我们的 Block 插入到最前面，而不是直接覆盖)
+-    let newSystem = buildSystemBlocks(fp)
+-    if (originalBody.system) {
+-      if (Array.isArray(originalBody.system)) {
+-        newSystem = newSystem.concat(originalBody.system)
+-      } else {
+-        newSystem.push({ type: "text" as const, text: originalBody.system })
+-      }
+-    }
++    // // 2. 合并 System Blocks (将我们的 Block 插入到最前面，而不是直接覆盖)
++    // let newSystem = buildSystemBlocks(fp)
++    // if (originalBody.system) {
++    //   if (Array.isArray(originalBody.system)) {
++    //     newSystem = newSystem.concat(originalBody.system)
++    //   } else {
++    //     newSystem.push({ type: "text" as const, text: originalBody.system })
++    //   }
++    // }
+ 
+     // 3. 合并 Metadata (保留原有字段)
+     const newMetadata = {
+@@ -352,7 +352,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
+ 
+     const patchedBody = {
+       ...originalBody,
+-      system: newSystem,
++      // system: newSystem,
+       metadata: newMetadata,
+       tools: patchedTools,
+       ...(thinking ? { thinking } : {}),
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 0ff9416831baa53f0a9c28c099d44e35ccb1080a..2614b9ca3df67bf3c618f38e63f4ebc6360fc10a 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -1520,14 +1520,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+ 
+             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+ 
+-            const [skills, env, instructions, modelMsgs] = yield* Effect.all([
++            const [skills, env, instructions, mcpInstr, modelMsgs] = yield* Effect.all([
+               sys.skills(agent),
+               // environment 改为异步：需要在此处拉取 git 上下文。
+               sys.environment(model),
+               instruction.system().pipe(Effect.orDie),
++              sys.mcpInstructions(),
+               MessageV2.toModelMessagesEffect(msgs, model),
+             ])
+-            const system = [...env, ...(skills ? [skills] : []), ...instructions]
++            const system = [...env, ...(skills ? [skills] : []), ...instructions, ...(mcpInstr ? [mcpInstr] : [])]
+             const format = lastUser.format ?? { type: "text" as const }
+             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+             const result = yield* handle.process({
+diff --git a/packages/opencode/src/session/prompt/anthropic.txt b/packages/opencode/src/session/prompt/anthropic.txt
+index 21d9c0e9f2163f2c5124c8cd1754cbb7dd9d7f06..7a555b7cc65dd16913998c19e1403b04396606bd 100644
+--- a/packages/opencode/src/session/prompt/anthropic.txt
++++ b/packages/opencode/src/session/prompt/anthropic.txt
+@@ -16,17 +16,28 @@ When the user directly asks about OpenCode (eg. "can OpenCode do...", "does Open
+ - Your output will be displayed on a command line interface. Your responses should be short and concise. You can use GitHub-flavored markdown for formatting, and will be rendered in a monospace font using the CommonMark specification.
+ - Output text to communicate with the user; all text you output outside of tool use is displayed to the user. Only use tools to complete tasks. Never use tools like Bash or code comments as means to communicate with the user during the session.
+ - NEVER create files unless they're absolutely necessary for achieving your goal. ALWAYS prefer editing an existing file to creating a new one. This includes markdown files.
++- When referencing specific functions or pieces of code include the pattern `file_path:line_number` to allow the user to easily navigate to the source code location.
+ 
+ # Professional objectivity
+ Prioritize technical accuracy and truthfulness over validating the user's beliefs. Focus on facts and problem-solving, providing direct, objective technical info without any unnecessary superlatives, praise, or emotional validation. It is best for the user if OpenCode honestly applies the same rigorous standards to all ideas and disagrees when necessary, even if it may not be what the user wants to hear. Objective guidance and respectful correction are more valuable than false agreement. Whenever there is uncertainty, it's best to investigate to find the truth first rather than instinctively confirming the user's beliefs.
+ 
+-# Task Management
+-You have access to the TodoWrite tools to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
+-These tools are also EXTREMELY helpful for planning tasks, and for breaking down larger complex tasks into smaller steps. If you do not use this tool when planning, you may forget to do important tasks - and that is unacceptable.
++# Doing tasks
++The user will primarily request you perform software engineering tasks. This includes solving bugs, adding new functionality, refactoring code, explaining code, and more. For these tasks the following steps are recommended:
++- Read the relevant files and understand the existing code before making changes. Do not propose changes to code you have not read.
++- Use the TodoWrite tool to plan the task and break it into steps when the scope is non-trivial.
++- Implement the minimal change that satisfies the request. Do not add features, refactor surrounding code, or make "improvements" beyond what was asked.
++- Do not add comments, docstrings, or type annotations to code you did not change.
++- Do not add error handling or validation for scenarios that cannot happen given the existing codebase guarantees.
++- Do not create helpers or abstractions for one-time operations. Three similar lines of code is better than a premature abstraction.
++- Be careful not to introduce security vulnerabilities such as command injection, XSS, SQL injection, and other OWASP top 10 vulnerabilities. If you notice that you wrote insecure code, immediately fix it.
++- Before reporting a task complete, verify it actually works: run the test, execute the script, check the output. If you cannot verify, say so explicitly rather than claiming success.
+ 
+-It is critical that you mark todos as completed as soon as you are done with a task. Do not batch up multiple tasks before marking them as completed.
++Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are automatically added by the system, and bear no direct relation to the specific tool results or user messages in which they appear.
+ 
+-Examples:
++# Task Management
++You have access to the TodoWrite tool to help you manage and plan tasks. Use this tool VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress. This tool is also EXTREMELY helpful for planning tasks and breaking down larger complex tasks into smaller steps. If you do not use this tool when planning, you may forget to do important tasks — and that is unacceptable.
++
++Mark todos as completed as soon as you are done with a task. Do not batch up multiple tasks before marking them as completed.
+ 
+ <example>
+ user: Run the build and fix any type errors
+@@ -43,10 +54,7 @@ marking the first todo as in_progress
+ Let me start working on the first item...
+ 
+ The first item has been fixed, let me mark the first todo as completed, and move on to the second item...
+-..
+-..
+ </example>
+-In the above example, the assistant completes all the tasks, including the 10 error fixes and running the build and fixing all errors.
+ 
+ <example>
+ user: Help me write a new feature that allows users to track their usage metrics and export them to various formats
+@@ -59,47 +67,30 @@ Adding the following todos to the todo list:
+ 
+ Let me start by researching the existing codebase to understand what metrics we might already be tracking and how we can build on that.
+ 
+-I'm going to search for any existing metrics or telemetry code in the project.
+-
+-I've found some existing telemetry code. Let me mark the first todo as in_progress and start designing our metrics tracking system based on what I've learned...
+-
+ [Assistant continues implementing the feature step by step, marking todos as in_progress and completed as they go]
+ </example>
+ 
+-
+-# Doing tasks
+-The user will primarily request you perform software engineering tasks. This includes solving bugs, adding new functionality, refactoring code, explaining code, and more. For these tasks the following steps are recommended:
+-- 
+-- Use the TodoWrite tool to plan the task if required
+-
+-- Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are automatically added by the system, and bear no direct relation to the specific tool results or user messages in which they appear.
+-
+-
+ # Tool usage policy
+-- When doing file search, prefer to use the Task tool in order to reduce context usage.
++- When doing file search or broad codebase exploration, prefer to use the Task tool in order to reduce context usage. Do not use Glob or Grep directly for questions whose answer requires understanding multiple files.
+ - You should proactively use the Task tool with specialized agents when the task at hand matches the agent's description.
+-
+ - When WebFetch returns a message about a redirect to a different host, you should immediately make a new WebFetch request with the redirect URL provided in the response.
+-- You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead. Never use placeholders or guess missing parameters in tool calls.
+-- If the user specifies that they want you to run tools "in parallel", you MUST send a single message with multiple tool use content blocks. For example, if you need to launch multiple agents in parallel, send a single message with multiple Task tool calls.
+-- Use specialized tools instead of bash commands when possible, as this provides a better user experience. For file operations, use dedicated tools: Read for reading files instead of cat/head/tail, Edit for editing instead of sed/awk, and Write for creating files instead of cat with heredoc or echo redirection. Reserve bash tools exclusively for actual system commands and terminal operations that require shell execution. NEVER use bash echo or other command-line tools to communicate thoughts, explanations, or instructions to the user. Output all communication directly in your response text instead.
+-- VERY IMPORTANT: When exploring the codebase to gather context or to answer a question that is not a needle query for a specific file/class/function, it is CRITICAL that you use the Task tool instead of running search commands directly.
+-<example>
+-user: Where are errors from the client handled?
+-assistant: [Uses the Task tool to find the files that handle client errors instead of using Glob or Grep directly]
+-</example>
+-<example>
+-user: What is the codebase structure?
+-assistant: [Uses the Task tool]
+-</example>
++- Never use placeholders or guess missing parameters in tool calls.
+ 
+-IMPORTANT: Always use the TodoWrite tool to plan and track tasks throughout the conversation.
++**Parallel tool calls:** You can call multiple tools in a single response. When there are no dependencies between tool calls, make ALL independent calls in parallel within a single message. This is critical for efficiency — do not make sequential calls when parallel is possible. Only call sequentially when one result is needed to inform the next call.
+ 
+-# Code References
++Examples of when to call in parallel:
++- Reading multiple independent files at the same time
++- Launching multiple Task agents for independent subtasks
++- Running a search while also reading a known file
++
++Examples of when to call sequentially:
++- You need the result of a file read before you know which line to edit
++- You need a search result before you can decide which file to open
+ 
++# Code References
+ When referencing specific functions or pieces of code include the pattern `file_path:line_number` to allow the user to easily navigate to the source code location.
+ 
+ <example>
+ user: Where are errors from the client handled?
+ assistant: Clients are marked as failed in the `connectToServer` function in src/services/process.ts:712.
+-</example>
++</example>
+\ No newline at end of file
+diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
+index 9091a51a809171f78addadddcda1dd1f0244ca1d..b17fd74a5a8b6726bbacec5337297c14b887278f 100644
+--- a/packages/opencode/src/session/system.ts
++++ b/packages/opencode/src/session/system.ts
+@@ -1,4 +1,6 @@
+ import { Context, Effect, Layer } from "effect"
++import { type as osType, release as osRelease } from "os"
++import path from "path"
+ 
+ import { Instance } from "../project/instance"
+ 
+@@ -17,6 +19,8 @@ import { Permission } from "@/permission"
+ import { Skill } from "@/skill"
+ import { Git } from "@/git"
+ import { Flag } from "@/flag/flag"
++import { MCP } from "@/mcp"
++import { ToolRegistry } from "@/tool"
+ 
+ // 将 git 状态上下文限制在固定长度，避免提示词膨胀。
+ const MAX_STATUS_CHARS = 2000
+@@ -40,6 +44,7 @@ export function provider(model: Provider.Model) {
+ export interface Interface {
+   readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
+   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
++  readonly mcpInstructions: () => Effect.Effect<string | undefined>
+ }
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
+@@ -49,11 +54,69 @@ export const layer = Layer.effect(
+   Effect.gen(function* () {
+     const skill = yield* Skill.Service
+     const git = yield* Git.Service
++    const mcp = yield* MCP.Service
++    const registry = yield* ToolRegistry.Service
+ 
+     // 该缓存是会话级快照，按 cwd 作为键。
+     // 为保持“快照语义”，会话内不主动失效。
+     const gitContextCache = new Map<string, string>()
+ 
++    const getEnvExtras = Effect.fn("SystemPrompt.envExtras")(function* () {
++      const shell = process.env.SHELL ?? process.env.COMSPEC ?? "unknown"
++      const shellName = shell.includes("zsh") ? "zsh"
++        : shell.includes("bash") ? "bash"
++        : shell.includes("fish") ? "fish"
++        : shell.includes("nu")   ? "nu"
++        : shell.includes("cmd")  ? "cmd"
++        : shell.includes("powershell") ? "powershell"
++        : shell.includes("pwsh") ? "pwsh"
++        : path.basename(shell, ".exe").toLowerCase()
++
++      const shellLine = process.platform === "win32"
++        ? `${shellName} (use Unix shell syntax — /dev/null not NUL, forward slashes)`
++        : shellName
++
++      const osVersion = process.platform === "win32"
++        ? `${osType()} ${osRelease()}`
++        : `${osType()} ${osRelease()}`
++
++      return { shellLine, osVersion }
++    })
++
++    const getKnowledgeCutoff = (modelApiId: string): string | null => {
++      if (modelApiId.includes("claude-sonnet-4-6")) return "August 2025"
++      if (modelApiId.includes("claude-opus-4-6"))   return "May 2025"
++      if (modelApiId.includes("claude-haiku-4"))     return "February 2025"
++      if (modelApiId.includes("claude-opus-4") || modelApiId.includes("claude-sonnet-4")) return "January 2025"
++      if (modelApiId.includes("gpt-4o"))  return "October 2024"
++      if (modelApiId.includes("gemini-2")) return "January 2025"
++      return null
++    }
++
++    const getToolUsageSection = (registeredTools: string[]): string => {
++      const has = (name: string) => registeredTools.includes(name)
++
++      const items: string[] = [
++        `Do NOT use the bash tool when a dedicated tool is available.`,
++        `Using dedicated tools lets the user review and track your work:`,
++      ]
++
++      if (has("read"))  items.push(` - To read files use the read tool instead of cat, head, tail, or sed`)
++      if (has("edit"))  items.push(` - To edit files use the edit tool instead of sed or awk`)
++      if (has("write")) items.push(` - To create files use the write tool instead of echo redirection or heredoc`)
++      if (has("grep"))  items.push(` - To search file content use the grep tool instead of grep/rg`)
++      if (has("glob"))  items.push(` - To find files use the glob tool instead of find or ls`)
++
++      items.push(
++        ` - Reserve bash for system commands and terminal operations requiring shell execution`,
++        `You can call multiple tools in a single response. When there are no dependencies between calls,` +
++        ` make them IN PARALLEL. Maximize parallel tool calls to increase efficiency.` +
++        ` Only call sequentially when one result is needed to inform the next.`,
++      )
++
++      return ["# Using your tools", ...items].join("\n")
++    }
++
+     const getGitContext = Effect.fn("SystemPrompt.gitContext")(function* () {
+       const cwd = Instance.directory
+       const cached = gitContextCache.get(cwd)
+@@ -96,12 +159,13 @@ export const layer = Layer.effect(
+ 
+       const lines = [
+         `Is directory a git repo: yes`,
+-        `This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.`,
++        `This is the git status at the start of the conversation.`,
++        `Note that this status is a snapshot in time, and will not update during the conversation.`,
+         `Current branch: ${branch ?? "(detached)"}`,
+         `Main branch (you will usually use this for PRs): ${defaultBranch?.name ?? "unknown"}`,
+         ...(userName ? [`Git user: ${userName}`] : []),
+         `Status:\n${truncatedStatus || "(clean)"}`,
+-        `Recent commits:\n${log || "(no commits)"}`
++        `Recent commits:\n${log || "(no commits)"}`,
+       ]
+       const result = lines.join("\n")
+       gitContextCache.set(cwd, result)
+@@ -111,19 +175,55 @@ export const layer = Layer.effect(
+     return Service.of({
+       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
+         const gitContext = yield* getGitContext()
++        const { shellLine, osVersion } = yield* getEnvExtras()
++        const isWorktree = Instance.worktree !== Instance.directory
++        const cutoff = getKnowledgeCutoff(model.api.id)
++        const toolIds = yield* registry.ids()
++        const envLines: string[] = [
++          `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
++          `Here is some useful information about the environment you are running in:`,
++          `<env>`,
++          `  Working directory: ${Instance.directory}`,
++          `  Workspace root folder: ${Instance.worktree}`,
++          // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致。
++          ...gitContext.split("\n").map((line) => `  ${line}`),
++          `  Platform: ${process.platform}`,
++          `  Shell: ${shellLine}`,
++          `  OS Version: ${osVersion}`,
++          ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
++          `  Today's date: ${new Date().toDateString()}`,
++          ...(isWorktree ? [
++            `  This is a git worktree — run ALL commands from this directory.`,
++            `  Do NOT cd to the original repository root.`,
++          ] : []),
++          `</env>`,
++        ]
+         return [
+-          [
+-            `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
+-            `Here is some useful information about the environment you are running in:`,
+-            `<env>`,
+-            `  Working directory: ${Instance.directory}`,
+-            `  Workspace root folder: ${Instance.worktree}`,
+-            // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致。
+-            ...gitContext.split("\n").map((line) => `  ${line}`),
+-            `  Platform: ${process.platform}`,
+-            `  Today's date: ${new Date().toDateString()}`,
+-            `</env>`,
+-          ].join("\n"),
++          envLines.join("\n"),
++          getToolUsageSection(toolIds),
++          `# Executing actions with care
++Carefully consider the reversibility and blast radius of actions before proceeding:
++- Local, reversible actions (editing files, running tests, reading code): proceed freely.
++- Actions that are hard to reverse or affect shared state: confirm with the user first.
++
++
++Actions that typically require user confirmation before proceeding:
++- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes
++- Force-pushing, git reset --hard, amending published commits
++- Pushing code, creating or closing PRs, commenting on issues
++- Sending messages to external services (Slack, email, webhooks)
++- Modifying CI/CD pipelines or shared infrastructure
++
++When you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user's in-progress work.`,
++          `# Output efficiency
++Go straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.
++
++Focus text output on:
++- Decisions that need the user's input
++- High-level status updates at key milestones (e.g. "build passing", "all tests green")
++- Errors or blockers that change the plan
++
++If you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`,
+         ]
+       }),
+ 
+@@ -140,13 +240,19 @@ export const layer = Layer.effect(
+           Skill.fmt(list, { verbose: true }),
+         ].join("\n")
+       }),
++
++      mcpInstructions: Effect.fn("SystemPrompt.mcpInstructions")(function* () {
++        return undefined
++      }),
+     })
+   }),
+ )
+ 
+ export const defaultLayer = layer.pipe(
+   Layer.provide(Skill.defaultLayer),
+-  Layer.provide(Git.defaultLayer)
++  Layer.provide(Git.defaultLayer),
++  Layer.provide(MCP.defaultLayer),
++  Layer.provide(ToolRegistry.defaultLayer)
+ )
+ 
+ export * as SystemPrompt from "./system"

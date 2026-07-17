@@ -1,0 +1,278 @@
+From f71acd28f6549852fa2c997c5f38f225aaea8dd8 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 25 May 2026 03:47:51 +0800
+Subject: [PATCH] =?UTF-8?q?feat(vscode-bridge):=20=E5=A2=9E=E5=BC=BA=20VS?=
+ =?UTF-8?q?=20Code=20=E6=A1=A5=E6=8E=A5=E6=8F=92=E4=BB=B6=E7=9A=84?=
+ =?UTF-8?q?=E6=9D=83=E9=99=90=E6=A3=80=E6=9F=A5=E9=80=BB=E8=BE=91=EF=BC=8C?=
+ =?UTF-8?q?=E7=A1=AE=E4=BF=9D=20notebook=20=E7=BC=96=E8=BE=91=E5=92=8C?=
+ =?UTF-8?q?=E7=8E=AF=E5=A2=83=E6=93=8D=E4=BD=9C=E7=9A=84=E6=9D=83=E9=99=90?=
+ =?UTF-8?q?=E7=AE=A1=E7=90=86=E6=9B=B4=E7=B2=BE=E7=A1=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
+index f07836710eab917b368d93ed38b13f6d244b5102..5fd3a25ed64d89cf68f4953f5d65727fdc0af48b 100644
+--- a/packages/opencode/src/plugin/vscode-bridge.ts
++++ b/packages/opencode/src/plugin/vscode-bridge.ts
+@@ -170,6 +170,13 @@ export const VscodeBridgePlugin = async () => ({
+       description: VscodeNotebookDescriptions.edit,
+       args: editArgs,
+       execute: async (args, context) => {
++        // notebook 编辑是独立工具能力，必须使用自己的权限 key；否则 plan
++        // mode 对 vscode_notebook_edit 的 deny 不会覆盖到这里，只会落到通用
++        // edit 规则，导致 notebook 写入权限和普通文件编辑权限混在一起。
++        await ask(context, "vscode_notebook_edit", args)
++        // 继续保留通用 edit 门禁：既有配置若用 permission.edit 禁止写入，
++        // notebook cell 修改也不能绕过。顺序先专属后通用，确保更精确的
++        // vscode_notebook_edit deny/ask 先表达，再由 edit 维持历史兼容边界。
+         await ask(context, "edit", args)
+         return {
+           output: await call("/notebook/edit", args, context, 30_000),
+@@ -180,10 +187,16 @@ export const VscodeBridgePlugin = async () => ({
+     vscode_notebook_env: tool({
+       description: VscodeNotebookDescriptions.env,
+       args: envArgs,
+-      execute: async (args, context) => ({
+-        output: await call("/notebook/env", args, context, 120_000),
+-        metadata: { endpoint: "/notebook/env" },
+-      }),
++      execute: async (args, context) => {
++        // env 包含 configure/restart/save 等会改变 VS Code/Jupyter 状态的操作；
++        // 即使 info 偏只读，也保持工具级权限和 agent 配置中的
++        // vscode_notebook_env 完全一致，避免新增 operation 级配置面。
++        await ask(context, "vscode_notebook_env", args)
++        return {
++          output: await call("/notebook/env", args, context, 120_000),
++          metadata: { endpoint: "/notebook/env" },
++        }
++      },
+     }),
+   },
+ })
+diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool/registry.ts
+index ecaf772253905d4eae0f988038a8b0def4ce51a3..1a6c81974acfa8b178e84617bb99c364bf431633 100644
+--- a/packages/opencode/src/tool/registry.ts
++++ b/packages/opencode/src/tool/registry.ts
+@@ -54,6 +54,7 @@ import { Reference } from "@/reference/reference"
+ import { BackgroundJob } from "@/background/job"
+ import { SessionStatus } from "@/session/status"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
++import { EffectBridge } from "@/effect/bridge"
+ 
+ const log = Log.create({ service: "tool.registry" })
+ 
+@@ -140,6 +141,10 @@ export const layer: Layer.Layer<
+     const state = yield* InstanceState.make<State>(
+       Effect.fn("ToolRegistry.state")(function* (ctx) {
+         const custom: Tool.Def[] = []
++        // 插件工具的 execute 是普通 async 函数，会跨出当前 Effect fiber。
++        // 这里捕获实例上下文，确保插件内部手动运行 context.ask 时仍使用
++        // 当前项目的 InstanceRef，而不是落到全局运行时后丢失权限状态。
++        const bridge = yield* EffectBridge.make()
+ 
+         function fromPlugin(id: string, def: ToolDefinition): Tool.Def {
+           // Plugin tools still expose Zod args publicly; keep that compatibility
+@@ -160,7 +165,10 @@ export const layer: Layer.Layer<
+               Effect.gen(function* () {
+                 const pluginCtx: PluginToolContext = {
+                   ...toolCtx,
+-                  ask: (req) => toolCtx.ask(req),
++                  // 保持 @opencode-ai/plugin 的 ask 仍返回 Effect，同时把它绑定到
++                  // 当前 tool execution 的实例上下文；插件可以继续用
++                  // Effect.runPromise(context.ask(...))，但不会绕开项目级权限状态。
++                  ask: (req) => bridge.run(toolCtx.ask(req)),
+                   directory: ctx.directory,
+                   worktree: ctx.worktree,
+                 }
+diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..72adfa3c302ca3a301c8ef65c468a50a76526b06
+--- /dev/null
++++ b/packages/opencode/test/plugin/vscode-bridge.test.ts
+@@ -0,0 +1,114 @@
++import { describe, expect, test } from "bun:test"
++import { Effect } from "effect"
++import type { ToolContext } from "@opencode-ai/plugin"
++import { VscodeBridgePlugin } from "@/plugin/vscode-bridge"
++
++describe("vscode bridge plugin", () => {
++  test("checks notebook mutation permissions before calling the VS Code bridge", async () => {
++    const plugin = await VscodeBridgePlugin()
++    const calls: Array<{ permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }> = []
++    const stop = "stopped after permission check"
++    const filePath = "F:\\project with spaces\\demo.ipynb"
++
++    const context = (): ToolContext => ({
++      sessionID: "ses_test",
++      messageID: "msg_test",
++      agent: "build",
++      directory: "F:\\project with spaces",
++      worktree: "F:\\project with spaces",
++      abort: new AbortController().signal,
++      metadata: () => undefined,
++      ask(input) {
++        calls.push({
++          permission: input.permission,
++          patterns: [...input.patterns],
++          always: [...input.always],
++          metadata: input.metadata,
++        })
++        // 这个错误是测试哨兵：权限层拒绝后，工具必须停止在本地，
++        // 不能继续进入真实的 127.0.0.1 VS Code bridge 调用。
++        return Effect.die(new Error(stop))
++      },
++    })
++
++    await expect(
++      plugin.tool.vscode_notebook_run.execute(
++        {
++          filePath,
++          cellId: "#VSC-12345678",
++          timeoutMs: 1_000,
++        },
++        context(),
++      ),
++    ).rejects.toThrow(stop)
++
++    await expect(
++      plugin.tool.vscode_notebook_edit.execute(
++        {
++          filePath,
++          cellId: "#VSC-12345678",
++          editType: "edit",
++          newCode: "print('changed')",
++          language: "python",
++        },
++        context(),
++      ),
++    ).rejects.toThrow(stop)
++
++    await expect(
++      plugin.tool.vscode_notebook_env.execute(
++        {
++          filePath,
++          operation: "restart",
++          reason: "test restart approval",
++        },
++        context(),
++      ),
++    ).rejects.toThrow(stop)
++
++    expect(calls.map((call) => call.permission)).toEqual([
++      "vscode_notebook_run",
++      "vscode_notebook_edit",
++      "vscode_notebook_env",
++    ])
++    for (const call of calls) {
++      expect(call.patterns).toEqual([filePath])
++      expect(call.always).toEqual([filePath])
++      expect(call.metadata.args).toMatchObject({ filePath })
++    }
++  })
++
++  test("keeps notebook edits covered by the generic edit permission gate", async () => {
++    const plugin = await VscodeBridgePlugin()
++    const filePath = "F:\\project with spaces\\demo.ipynb"
++    const stop = "generic edit denied"
++    const calls: string[] = []
++
++    await expect(
++      plugin.tool.vscode_notebook_edit.execute(
++        {
++          filePath,
++          cellId: "#VSC-12345678",
++          editType: "edit",
++          newCode: "print('changed')",
++          language: "python",
++        },
++        {
++          sessionID: "ses_test",
++          messageID: "msg_test",
++          agent: "build",
++          directory: "F:\\project with spaces",
++          worktree: "F:\\project with spaces",
++          abort: new AbortController().signal,
++          metadata: () => undefined,
++          ask(input) {
++            calls.push(input.permission)
++            return input.permission === "edit" ? Effect.die(new Error(stop)) : Effect.void
++          },
++        },
++      ),
++    ).rejects.toThrow(stop)
++
++    expect(calls).toEqual(["vscode_notebook_edit", "edit"])
++  })
++})
+diff --git a/packages/opencode/test/tool/registry.test.ts b/packages/opencode/test/tool/registry.test.ts
+index d796a8d4a7b83185ad53fd8444091b843d902bf9..35eb31bd1420f3946497cd651d515883c836d355 100644
+--- a/packages/opencode/test/tool/registry.test.ts
++++ b/packages/opencode/test/tool/registry.test.ts
+@@ -389,6 +389,65 @@ describe("tool.registry", () => {
+     }),
+   )
+ 
++  it.instance("preserves instance context when plugin tools run permission asks inside async execute", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const customTools = path.join(test.directory, ".opencode", "tools")
++      const pluginTool = pathToFileURL(path.resolve(import.meta.dir, "../../../plugin/src/tool.ts")).href
++      const globalWithEffect = globalThis as typeof globalThis & { __opencodeTestEffect?: typeof Effect }
++      globalWithEffect.__opencodeTestEffect = Effect
++      yield* Effect.addFinalizer(() =>
++        Effect.sync(() => {
++          delete globalWithEffect.__opencodeTestEffect
++        }),
++      )
++      yield* Effect.promise(() => fs.mkdir(customTools, { recursive: true }))
++      yield* Effect.promise(() =>
++        Bun.write(
++          path.join(customTools, "ask.ts"),
++          [
++            `import { tool } from ${JSON.stringify(pluginTool)}`,
++            "const Effect = globalThis.__opencodeTestEffect",
++            "if (!Effect) throw new Error('missing test Effect')",
++            "export default tool({",
++            "  description: 'ask tool',",
++            "  args: {},",
++            "  execute: async (_args, context) => {",
++            "    await Effect.runPromise(context.ask({ permission: 'plugin_ask', patterns: ['*'], always: ['*'], metadata: { reason: 'inside-plugin-promise' } }))",
++            "    return 'asked'",
++            "  },",
++            "})",
++            "",
++          ].join("\n"),
++        ),
++      )
++
++      const registry = yield* ToolRegistry.Service
++      const loaded = (yield* registry.all()).find((tool) => tool.id === "ask")
++      if (!loaded) throw new Error("custom ask tool was not loaded")
++      const agents = yield* Agent.Service
++      let asked: string | undefined
++      const result = yield* loaded.execute({}, {
++        sessionID: SessionID.make("ses_test"),
++        messageID: MessageID.make("msg_test"),
++        agent: (yield* agents.defaultInfo()).name,
++        abort: new AbortController().signal,
++        messages: [],
++        metadata: () => Effect.void,
++        ask: (req) =>
++          InstanceState.directory.pipe(
++            Effect.map((dir) => {
++              expect(dir).toBe(test.directory)
++              asked = req.permission
++            }),
++          ),
++      } satisfies Tool.Context)
++
++      expect(result.output).toBe("asked")
++      expect(asked).toBe("plugin_ask")
++    }),
++  )
++
+   it.instance("loads legacy JSON-schema-shaped custom tools with wire schema", () =>
+     Effect.gen(function* () {
+       const test = yield* TestInstance

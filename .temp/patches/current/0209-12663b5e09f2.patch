@@ -1,0 +1,2023 @@
+From 12663b5e09f2fba7968a322868b7a06a34a3609a Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 24 May 2026 03:51:27 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E8=87=AA=E5=8A=A8?=
+ =?UTF-8?q?=E5=AE=A1=E6=89=B9=E7=B3=BB=E7=BB=9F=EF=BC=8Cenhance=20permissi?=
+ =?UTF-8?q?on=20reviewer=20functionality=20and=20transcript=20handling?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Exclude reviewer protocol request cells from the transcript to prevent them from being used as authorization evidence.
+- Update session processor to preserve auto-review metadata during tool execution and error handling.
+- Add tests to verify the correct rendering of auto-review results in various scenarios, including completed and errored shell tools.
+- Refactor test utilities to support user messages and improve readability.
+- Ensure that the permission reviewer prompt correctly displays the rationale and decision before the decision tool is invoked.
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index 264399990fb4f4acd1d1c86fdfcbb4b2e67ef15a..eec38cbac533d321396f316fac681eea2c80b4b9 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -281,7 +281,11 @@ export function Session() {
+   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
+   const local = useLocal()
+   const userMessageAgentColors = createMemo(() => {
+-    return new Map(messages().filter((m) => m.role === "user").map((m) => [m.id, local.agent.color(m.agent)]))
++    return new Map(
++      messages()
++        .filter((m) => m.role === "user")
++        .map((m) => [m.id, local.agent.color(m.agent)]),
++    )
+   })
+   function drawSessionScrollbar(this: unknown, buffer: OptimizedBuffer) {
+     const s = scroll
+@@ -1886,6 +1890,9 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
+         <Match when={props.part.tool === "question"}>
+           <Question {...toolprops} />
+         </Match>
++        <Match when={props.part.tool === "permission_review_decision"}>
++          <PermissionReviewDecision {...toolprops} />
++        </Match>
+         <Match when={props.part.tool === "skill"}>
+           <Skill {...toolprops} />
+         </Match>
+@@ -1991,21 +1998,88 @@ function GenericTool(props: ToolProps<any>) {
+         </InlineTool>
+       }
+     >
+-        <BlockTool
+-          title={`# ${props.tool} ${input(props.input)}`}
+-          part={props.part}
+-          maxLines={10}
+-          threshold={20}
+-          totalLines={output().split("\n").length}
+-          totalChars={output().length}
+-          preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
+-        >
++      <BlockTool
++        title={`# ${props.tool} ${input(props.input)}`}
++        part={props.part}
++        maxLines={10}
++        threshold={20}
++        totalLines={output().split("\n").length}
++        totalChars={output().length}
++        preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
++      >
+         <text fg={theme.text}>{output()}</text>
+-        </BlockTool>
++      </BlockTool>
+     </Show>
+   )
+ }
+ 
++type AutoReviewMetadata = {
++  reviewID: string
++  sessionID?: string
++  status?: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user"
++  precheck?: { level: string; reason: string }
++  result?: { risk_level: string; user_authorization: string; rationale: string }
++}
++
++function autoReviewMetadata(metadata: Partial<Tool.InferMetadata<any>>): AutoReviewMetadata | undefined {
++  const value = (metadata as Record<string, unknown>).autoReview
++  if (!value || typeof value !== "object" || Array.isArray(value)) return
++  const review = value as Record<string, unknown>
++  if (typeof review.reviewID !== "string") return
++  return review as AutoReviewMetadata
++}
++
++function autoReviewLabel(review: AutoReviewMetadata) {
++  const agent = "@permission-reviewer"
++  // Keep the main shell card to the agreed two-line contract: command first,
++  // then one compact review status line. The three glyphs are stable UI states:
++  // ◌ means the hidden reviewer agent is running, ✓ means the reviewer allowed
++  // execution, and ! covers all non-allow terminal outcomes.
++  switch (review.status) {
++    case "allowed":
++      return `✓ auto review · allowed · auth ${review.result?.user_authorization ?? "unknown"} · ${agent}`
++    case "denied":
++      return `! auto review · denied · ${review.result?.risk_level ?? "unknown"} risk · auth ${review.result?.user_authorization ?? "unknown"} · ${agent}`
++    case "timed_out":
++      return `! auto review · timed out · failed closed · ${agent}`
++    case "failed":
++      return `! auto review · failed · failed closed · ${agent}`
++    case "fallback_user":
++      return `! auto review · unavailable · asking user · ${agent}`
++    default:
++      return `◌ auto review · ${review.precheck?.level ?? "reviewing"} · ${agent}`
++  }
++}
++
++function autoReviewColor(review: AutoReviewMetadata, theme: ReturnType<typeof useTheme>["theme"]) {
++  if (review.status === "allowed") return theme.success
++  if (review.status && review.status !== "reviewing") return theme.warning
++  return theme.info
++}
++
++function AutoReviewLine(props: { review: AutoReviewMetadata }) {
++  const { theme } = useTheme()
++  const { navigate } = useRoute()
++  const renderer = useRenderer()
++  const [hover, setHover] = createSignal(false)
++  const clickable = createMemo(() => Boolean(props.review.sessionID))
++  return (
++    <box
++      onMouseOver={() => clickable() && setHover(true)}
++      onMouseOut={() => setHover(false)}
++      onMouseUp={() => {
++        if (!props.review.sessionID) return
++        if (renderer.getSelection()?.getSelectedText()) return
++        navigate({ type: "session", sessionID: props.review.sessionID })
++      }}
++    >
++      <text fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none">
++        {autoReviewLabel(props.review)}
++      </text>
++    </box>
++  )
++}
++
+ function InlineTool(props: {
+   icon: string
+   iconColor?: RGBA
+@@ -2085,7 +2159,12 @@ function InlineTool(props: {
+           <Spinner color={fg()} children={props.children} />
+         </Match>
+         <Match when={true}>
+-          <text paddingLeft={3} fg={fg()} wrapMode="none" attributes={denied() ? TextAttributes.STRIKETHROUGH : undefined}>
++          <text
++            paddingLeft={3}
++            fg={fg()}
++            wrapMode="none"
++            attributes={denied() ? TextAttributes.STRIKETHROUGH : undefined}
++          >
+             <Show fallback={<>~ {props.pending}</>} when={props.complete}>
+               <span style={{ fg: props.iconColor }}>{props.icon}</span> {props.children}
+             </Show>
+@@ -2207,8 +2286,10 @@ function BlockTool(props: {
+ 
+ function Shell(props: ToolProps<typeof ShellTool>) {
+   const { theme } = useTheme()
++  const { navigate } = useRoute()
+   const pathFormatter = usePathFormatter()
+   const isRunning = createMemo(() => props.part.state.status === "running")
++  const autoReview = createMemo(() => autoReviewMetadata(props.metadata))
+   const [showContextOutput, setShowContextOutput] = createSignal(false)
+   const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
+   const output = createMemo(() => {
+@@ -2216,8 +2297,13 @@ function Shell(props: ToolProps<typeof ShellTool>) {
+     return stripAnsi(text?.trim() ?? "")
+   })
+   const shellPreviewText = createMemo(() => {
+-    if (!output()) return `$ ${props.input.command ?? ""}`
+-    return [`$ ${props.input.command ?? ""}`, "", output()].join("\n")
++    const review = autoReview()
++    const header = [`$ ${props.input.command ?? ""}`, review ? autoReviewLabel(review) : undefined].filter(Boolean)
++    // Collapsed shell previews must keep the same two-line review contract as
++    // the expanded body; otherwise long outputs hide the allow/deny reviewer
++    // result until the user expands the command card.
++    if (!output()) return header.join("\n")
++    return [...header, "", output()].join("\n")
+   })
+ 
+   const workdirDisplay = createMemo(() => {
+@@ -2255,8 +2341,9 @@ function Shell(props: ToolProps<typeof ShellTool>) {
+           contextLabel="returned to model"
+           preview={<text fg={theme.text}>{previewText(shellPreviewText(), 10)}</text>}
+         >
+-          <box gap={1}>
++          <box>
+             <text fg={theme.text}>$ {props.input.command}</text>
++            <Show when={autoReview()}>{(review) => <AutoReviewLine review={review()} />}</Show>
+             <Show when={showContextOutput()}>
+               <text fg={theme.info}>Model context output</text>
+             </Show>
+@@ -2267,14 +2354,59 @@ function Shell(props: ToolProps<typeof ShellTool>) {
+         </BlockTool>
+       </Match>
+       <Match when={true}>
+-        <InlineTool icon="$" pending="Writing command..." complete={props.input.command} part={props.part}>
+-          {props.input.command}
++        <InlineTool
++          icon="$"
++          pending="Writing command..."
++          complete={props.input.command}
++          part={props.part}
++          onClick={() => {
++            const sessionID = autoReview()?.sessionID
++            if (sessionID) navigate({ type: "session", sessionID })
++          }}
++        >
++          {[props.input.command, autoReview() ? `  ${autoReviewLabel(autoReview()!)}` : undefined]
++            .filter(Boolean)
++            .join("\n")}
+         </InlineTool>
+       </Match>
+     </Switch>
+   )
+ }
+ 
++function PermissionReviewDecision(props: ToolProps<any>) {
++  const { theme } = useTheme()
++  const decision = createMemo(() => ({ ...props.input, ...props.metadata }) as Record<string, unknown>)
++  const outcome = createMemo(() => (decision().outcome === "allow" ? "allowed" : "denied"))
++  const risk = createMemo(() => String(decision().risk_level ?? "unknown"))
++  const auth = createMemo(() => String(decision().user_authorization ?? "unknown"))
++  const rationale = createMemo(() => (typeof decision().rationale === "string" ? decision().rationale : ""))
++  return (
++    <BlockTool title={`Permission review decision`} part={props.part} maxLines={0}>
++      <box flexDirection="column" gap={1}>
++        {/* Keep the structured decision evidence in the tool cell: the assistant text may debate alternatives, but this metadata is the audited final reviewer output. */}
++        <box gap={1}>
++          <text fg={theme.textMuted}>outcome</text>
++          <text fg={theme.text}>{outcome()}</text>
++        </box>
++        <box gap={1}>
++          <text fg={theme.textMuted}>risk</text>
++          <text fg={theme.text}>{risk()}</text>
++        </box>
++        <box gap={1}>
++          <text fg={theme.textMuted}>auth</text>
++          <text fg={theme.text}>{auth()}</text>
++        </box>
++        <Show when={rationale()}>
++          <box flexDirection="column">
++            <text fg={theme.textMuted}>rationale</text>
++            <text fg={theme.text}>{rationale()}</text>
++          </box>
++        </Show>
++      </box>
++    </BlockTool>
++  )
++}
++
+ function DiffView(props: { diff: string; filePath?: string; view: "split" | "unified"; syncScroll?: boolean }) {
+   const ctx = use()
+   const { theme, syntax } = useTheme()
+@@ -2356,7 +2488,9 @@ function Write(props: ToolProps<typeof WriteTool>) {
+           threshold={20}
+           totalLines={diffStats().total}
+           totalChars={diff()!.length}
+-          preview={<DiffPreview diff={previewDiff(diff()!, 10)} filePath={props.input.filePath} view={view()} maxLines={10} />}
++          preview={
++            <DiffPreview diff={previewDiff(diff()!, 10)} filePath={props.input.filePath} view={view()} maxLines={10} />
++          }
+         >
+           <box gap={1} flexDirection="column">
+             <DiffView diff={diff()!} filePath={props.input.filePath} view={view()} />
+@@ -2600,7 +2734,14 @@ function Edit(props: ToolProps<typeof EditTool>) {
+           threshold={20}
+           totalLines={stats().total}
+           totalChars={diffContent().length}
+-          preview={<DiffPreview diff={previewDiff(diffContent(), 10)} filePath={props.input.filePath} view={view()} maxLines={10} />}
++          preview={
++            <DiffPreview
++              diff={previewDiff(diffContent(), 10)}
++              filePath={props.input.filePath}
++              view={view()}
++              maxLines={10}
++            />
++          }
+         >
+           <box gap={1} flexDirection="column">
+             <DiffView diff={diffContent()} filePath={props.input.filePath} view={view()} />
+@@ -2628,7 +2769,8 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
+     const filePath = pendingPath(pathFormatter, stats.filePath)
+     return (
+       <>
+-        Patch <Show when={filePath} fallback={`${stats.fileCount} file${stats.fileCount === 1 ? "" : "s"}`}>
++        Patch{" "}
++        <Show when={filePath} fallback={`${stats.fileCount} file${stats.fileCount === 1 ? "" : "s"}`}>
+           {filePath}
+         </Show>
+         <PendingStats stats={stats} />
+@@ -2660,45 +2802,50 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
+ 
+   return (
+     <Switch>
+-        <Match when={files().length > 0}>
+-          <For each={files()}>
+-            {(file) => (
+-              <BlockTool
+-                title={title(file)}
+-                part={props.part}
+-                maxLines={10}
+-                threshold={20}
+-                totalLines={(file.patch ?? "").split("\n").length}
+-                totalChars={(file.patch ?? "").length}
+-                preview={
+-                  <Show
+-                    when={file.type !== "delete"}
+-                    fallback={
+-                      <text fg={theme.diffRemoved} paddingLeft={1}>
+-                        -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
+-                      </text>
+-                    }
+-                  >
+-                    <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} />
+-                  </Show>
+-                }
+-              >
+-                <box gap={1} flexDirection="column">
+-                  <Show
+-                    when={file.type !== "delete"}
+-                    fallback={
+-                      <text fg={theme.diffRemoved} paddingLeft={1}>
+-                        -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
+-                      </text>
+-                    }
+-                  >
+-                    <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
+-                  </Show>
+-                  <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
+-                </box>
+-              </BlockTool>
+-            )}
+-          </For>
++      <Match when={files().length > 0}>
++        <For each={files()}>
++          {(file) => (
++            <BlockTool
++              title={title(file)}
++              part={props.part}
++              maxLines={10}
++              threshold={20}
++              totalLines={(file.patch ?? "").split("\n").length}
++              totalChars={(file.patch ?? "").length}
++              preview={
++                <Show
++                  when={file.type !== "delete"}
++                  fallback={
++                    <text fg={theme.diffRemoved} paddingLeft={1}>
++                      -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
++                    </text>
++                  }
++                >
++                  <DiffPreview
++                    diff={previewDiff(file.patch || "", 10)}
++                    filePath={file.filePath}
++                    view={view()}
++                    maxLines={10}
++                  />
++                </Show>
++              }
++            >
++              <box gap={1} flexDirection="column">
++                <Show
++                  when={file.type !== "delete"}
++                  fallback={
++                    <text fg={theme.diffRemoved} paddingLeft={1}>
++                      -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
++                    </text>
++                  }
++                >
++                  <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
++                </Show>
++                <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
++              </box>
++            </BlockTool>
++          )}
++        </For>
+       </Match>
+       <Match when={true}>
+         <InlineTool icon="%" pending={pending()} complete={false} part={props.part}>
+diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
+index 57e247666c64f0a3e35245507e40984fd7c983ff..3ec2c26a96d3598df02ee59061d263c9fdd63eb5 100644
+--- a/packages/opencode/src/permission/precheck.ts
++++ b/packages/opencode/src/permission/precheck.ts
+@@ -6,7 +6,10 @@ export type Decision = { level: Level; reason: string }
+ // an explicit `ask` result when the wrapper is too open-ended to inspect. These
+ // helper result types intentionally do not include `allow`: wrapper execution is
+ // never safe enough for deterministic approval by itself.
+-type UnwrapResult = { action: "script"; script: string; reason: string } | { action: "ask"; reason: string } | { action: "none" }
++type UnwrapResult =
++  | { action: "script"; script: string; reason: string }
++  | { action: "ask"; reason: string }
++  | { action: "none" }
+ type RemoteResult = { action: "remote"; script?: string; reason: string } | { action: "none" }
+ 
+ // [local-smark] 四级预审分层开始
+@@ -168,10 +171,16 @@ export function evaluate(input: {
+     // shell 发起的 external_directory 不是独立工具动作，它只是 bash 命令执行前
+     // 的项目外路径门禁。复用同一条命令的预审结果，避免项目外路径先触发普通
+     // ask，从而绕开 Auto agent 的 bash auto 路由。
+-    return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
++    return evaluateShell(
++      typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
++      0,
++    )
+   }
+   if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
+-  return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
++  return evaluateShell(
++    typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
++    0,
++  )
+ }
+ 
+ export function canAlwaysAllowPrefix(tokens: string[]) {
+@@ -207,7 +216,8 @@ function evaluateShell(command: string, depth: number): Decision {
+   if (dangerous) return dangerous
+   const cautious = decisions.find((item) => item.level === "cautious")
+   if (cautious) return cautious
+-  if (decisions.every((item) => item.level === "safe")) return { level: "safe", reason: "known read-only shell command" }
++  if (decisions.every((item) => item.level === "safe"))
++    return { level: "safe", reason: "known read-only shell command" }
+   return decisions.find((item) => item.level === "general") ?? { level: "general", reason: "unknown shell command" }
+ }
+ 
+@@ -388,7 +398,11 @@ function unwrap(tokens: string[]): UnwrapResult {
+   if (cmd === "cmd") {
+     const index = tokens.findIndex((item, i) => i > 0 && ["/c", "/k"].includes(item.toLowerCase()))
+     if (index >= 0 && tokens[index + 1]) {
+-      return { action: "script", script: joinShellTokens(tokens.slice(index + 1)), reason: "cmd wrapper requires explicit approval" }
++      return {
++        action: "script",
++        script: joinShellTokens(tokens.slice(index + 1)),
++        reason: "cmd wrapper requires explicit approval",
++      }
+     }
+     return { action: "ask", reason: "cmd wrapper without a plain script requires explicit approval" }
+   }
+@@ -400,7 +414,8 @@ function unwrap(tokens: string[]): UnwrapResult {
+   if (["pythonw", "pyw", "pypy", "pypy3", "deno", "osascript"].includes(cmd)) {
+     return { action: "ask", reason: "script interpreter requires explicit approval" }
+   }
+-  if (cmd === "bun" && tokens[1] === "x") return { action: "ask", reason: "package executor requires explicit approval" }
++  if (cmd === "bun" && tokens[1] === "x")
++    return { action: "ask", reason: "package executor requires explicit approval" }
+   if (cmd === "env") return { action: "ask", reason: "env wrapper requires explicit approval" }
+   if (["sudo", "doas", "su", "pkexec"].includes(cmd)) {
+     return { action: "ask", reason: "privilege wrapper requires explicit approval" }
+@@ -472,7 +487,11 @@ function dangerousRaw(command: string) {
+   // Remote downloads piped directly to interpreters execute unreviewed network
+   // bytes as code. Privilege/env wrappers are included because they are common
+   // install-script indirections and should not downgrade to prompt.
+-  if (/\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|python|node|ruby|perl|pwsh|powershell|cmd|iex|invoke-expression)\b/i.test(normalized)) {
++  if (
++    /\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|python|node|ruby|perl|pwsh|powershell|cmd|iex|invoke-expression)\b/i.test(
++      normalized,
++    )
++  ) {
+     return "remote download piped to interpreter; review the script locally before running safe commands"
+   }
+   // PowerShell aliases for web download plus `iex` are equivalent to curl|sh.
+@@ -514,23 +533,43 @@ function dangerousRaw(command: string) {
+     return "credential file sent with network transfer"
+   }
+   // `scp`, `sftp`, and `rsync` use `host:path` syntax rather than pipes/flags.
+-  if (new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`, "i").test(normalized)) {
++  if (
++    new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`, "i").test(normalized)
++  ) {
+     return "credential file sent with remote transfer"
+   }
+   // Common interpreter APIs and reverse shell idioms are scanned as raw text
+   // because their dangerous target may be inside strings rather than tokens.
+-  if (/\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|[A-Za-z]:[\\/]?)(?=[\s)'"]|$))/i.test(normalized)) {
++  if (
++    /\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|[A-Za-z]:[\\/]?)(?=[\s)'"]|$))/i.test(
++      normalized,
++    )
++  ) {
+     return "critical PowerShell recursive delete"
+   }
+-  if (/\bshutil\.rmtree\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) return "critical Python recursive delete"
+-  if (/\bos\.(?:remove|unlink|rmdir)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) return "critical Python file removal"
+-  if (/(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) {
++  if (/\bshutil\.rmtree\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized))
++    return "critical Python recursive delete"
++  if (/\bos\.(?:remove|unlink|rmdir)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized))
++    return "critical Python file removal"
++  if (
++    /(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(
++      normalized,
++    )
++  ) {
+     return "critical Node.js file removal"
+   }
+-  if (/\bsubprocess\.(?:run|call|Popen)\([^)]*["']rm["'][^)]*["']-[^"']*[rf][^"']*["'][^)]*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) {
++  if (
++    /\bsubprocess\.(?:run|call|Popen)\([^)]*["']rm["'][^)]*["']-[^"']*[rf][^"']*["'][^)]*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(
++      normalized,
++    )
++  ) {
+     return "critical recursive delete through interpreter"
+   }
+-  if (/\/dev\/tcp\/|\b(?:nc|ncat|netcat)\b[^|;]*(?:\s-e\s|\s--exec\s|\s--sh-exec\s)|\bsocat\b[^|;]*EXEC:|bash\s+-i\s+>&\s+\/dev\/tcp\//i.test(normalized)) {
++  if (
++    /\/dev\/tcp\/|\b(?:nc|ncat|netcat)\b[^|;]*(?:\s-e\s|\s--exec\s|\s--sh-exec\s)|\bsocat\b[^|;]*EXEC:|bash\s+-i\s+>&\s+\/dev\/tcp\//i.test(
++      normalized,
++    )
++  ) {
+     return "reverse shell pattern"
+   }
+ }
+@@ -543,7 +582,7 @@ function cautiousRaw(command: string) {
+   // 本地敏感读取提升到 cautious，避免 safe 绕过，同时不把普通 `$HOME` 查询送审。
+   if (
+     new RegExp(
+-      String.raw`(?:^|[;&|]\s*)\b(?:cat|type|Get-Content|gc|Get-ChildItem|gci|ls|dir|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
++      String.raw`\b(?:cat|type|Get-Content|gc|Get-ChildItem|gci|ls|dir|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
+       "i",
+     ).test(normalized)
+   ) {
+@@ -564,14 +603,19 @@ function riskyTokens(tokens: string[]): Decision | undefined {
+     }
+     return { level: "cautious", reason: "recursive force delete requires explicit approval" }
+   }
+-  if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/"))) return { level: "dangerous", reason: "raw disk write" }
++  if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/")))
++    return { level: "dangerous", reason: "raw disk write" }
+   if (["mkfs", "mkfs.ext4", "fdisk", "parted", "wipefs", "shutdown", "reboot", "halt", "poweroff"].includes(cmd)) {
+     return { level: "dangerous", reason: "system destructive command" }
+   }
+   if (cmd === "git" && tokens[1] === "reset" && tokens.includes("--hard")) {
+     return { level: "cautious", reason: "destructive git reset requires explicit approval" }
+   }
+-  if (cmd === "git" && tokens[1] === "clean" && tokens.some((item) => item.startsWith("-") && item.includes("f") && item.includes("d"))) {
++  if (
++    cmd === "git" &&
++    tokens[1] === "clean" &&
++    tokens.some((item) => item.startsWith("-") && item.includes("f") && item.includes("d"))
++  ) {
+     return { level: "cautious", reason: "destructive git clean requires explicit approval" }
+   }
+   if (cmd === "git" && tokens[1] === "push" && tokens.some((item) => item === "--force" || item === "-f")) {
+@@ -592,7 +636,8 @@ function riskyTokens(tokens: string[]): Decision | undefined {
+     }
+     return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
+   }
+-  if (["scp", "sftp", "rsync"].includes(cmd)) return { level: "cautious", reason: "remote file transfer requires explicit approval" }
++  if (["scp", "sftp", "rsync"].includes(cmd))
++    return { level: "cautious", reason: "remote file transfer requires explicit approval" }
+ }
+ 
+ function cautiousGitSubcommand(tokens: string[]) {
+@@ -602,7 +647,10 @@ function cautiousGitSubcommand(tokens: string[]) {
+   // cautious 后仅 auto 分支的 reviewer/user 会判断是否符合用户意图。
+   const subcommand = tokens[1]
+   if (!subcommand) return false
+-  if (["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean"].includes(subcommand)) return true
++  if (
++    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean"].includes(subcommand)
++  )
++    return true
+   return subcommand === "branch" && !gitBranchSafe(tokens.slice(2))
+   // [local-smark] Git 谨慎子命令识别结束
+ }
+@@ -613,7 +661,26 @@ function readsSensitivePath(tokens: string[]) {
+   // dangerous；但它会把密钥内容或密钥存在性暴露给 shell 输出和模型上下文，
+   // 所以从 safe/general 提升为 cautious，交给 reviewer 判断是否确有授权。
+   const cmd = normalizeCommandName(tokens[0])
+-  if (!["cat", "type", "get-content", "gc", "get-childitem", "gci", "ls", "dir", "grep", "rg", "head", "tail", "less", "more", "sed", "awk"].includes(cmd)) {
++  if (
++    ![
++      "cat",
++      "type",
++      "get-content",
++      "gc",
++      "get-childitem",
++      "gci",
++      "ls",
++      "dir",
++      "grep",
++      "rg",
++      "head",
++      "tail",
++      "less",
++      "more",
++      "sed",
++      "awk",
++    ].includes(cmd)
++  ) {
+     return false
+   }
+   return hasSensitivePath(tokens)
+@@ -624,7 +691,9 @@ function joinShellTokens(tokens: string[]) {
+   // Reconstruct cmd/WSL payloads for recursive raw scanning without reusing the
+   // original command text. Quoting keeps spaces intact and avoids inventing new
+   // separators while still surfacing dangerous substrings to `dangerousRaw`.
+-  return tokens.map((item) => (/^[A-Za-z0-9_./:=@%+-]+$/.test(item) ? item : `'${item.replaceAll("'", "'\\''")}'`)).join(" ")
++  return tokens
++    .map((item) => (/^[A-Za-z0-9_./:=@%+-]+$/.test(item) ? item : `'${item.replaceAll("'", "'\\''")}'`))
++    .join(" ")
+ }
+ 
+ function decodePowerShell(input: string) {
+@@ -632,7 +701,9 @@ function decodePowerShell(input: string) {
+   // rather than deny because opaque encoded text is risky but not evidence of a
+   // specific critical payload.
+   try {
+-    return Buffer.from(input, "base64").toString("utf16le").replace(/^\uFEFF/, "")
++    return Buffer.from(input, "base64")
++      .toString("utf16le")
++      .replace(/^\uFEFF/, "")
+   } catch {
+     return
+   }
+@@ -643,7 +714,10 @@ function hasRecursiveForceDeleteFlags(tokens: string[]) {
+   // short flags (`-r -f`, `-R -f`), or long flags. Treat the pair as equivalent
+   // before checking protected targets so option spelling cannot downgrade a root
+   // delete from deny to prompt.
+-  return tokens.some((item) => item === "--recursive" || /^-[^-]*[rR]/.test(item)) && tokens.some((item) => item === "--force" || /^-[^-]*f/.test(item))
++  return (
++    tokens.some((item) => item === "--recursive" || /^-[^-]*[rR]/.test(item)) &&
++    tokens.some((item) => item === "--force" || /^-[^-]*f/.test(item))
++  )
+ }
+ 
+ function protectedDeleteTarget(input: string) {
+@@ -673,13 +747,16 @@ function safeTokens(tokens: string[]) {
+   // `cat README.md` is otherwise a safe file read.
+   const cmd = normalizeCommandName(tokens[0])
+   if (hasSensitivePath(tokens)) return false
+-  if (["pwd", "whoami", "id", "uname", "which", "ls", "cat", "head", "wc", "file", "stat", "grep"].includes(cmd)) return true
++  if (["pwd", "whoami", "id", "uname", "which", "ls", "cat", "head", "wc", "file", "stat", "grep"].includes(cmd))
++    return true
+   if (cmd === "tail") return !tokens.some((item) => item === "-f" || item === "--follow")
+   if (cmd === "rg") return !tokens.some(unsafeRipgrepFlag)
+-  if (cmd === "find") return !tokens.some((item) => ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint"].includes(item))
++  if (cmd === "find")
++    return !tokens.some((item) => ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint"].includes(item))
+   if (cmd === "sed") return tokens.length <= 4 && tokens[1] === "-n" && /^\d+(?:,\d+)?p$/.test(tokens[2] ?? "")
+   if (cmd === "git") return gitSafe(tokens)
+-  if (["npm", "pnpm", "yarn"].includes(cmd)) return ["ls", "list", "view", "info", "why", "outdated"].includes(tokens[1])
++  if (["npm", "pnpm", "yarn"].includes(cmd))
++    return ["ls", "list", "view", "info", "why", "outdated"].includes(tokens[1])
+   return versionSafe(tokens)
+ }
+ 
+@@ -692,7 +769,8 @@ function gitSafe(tokens: string[]) {
+   const safe = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame"])
+   let subcommand: string | undefined
+   for (let i = 1; i < tokens.length; i++) {
+-    if (unsafeGlobal.has(tokens[i]) || Array.from(unsafeGlobal).some((item) => tokens[i].startsWith(item + "="))) return false
++    if (unsafeGlobal.has(tokens[i]) || Array.from(unsafeGlobal).some((item) => tokens[i].startsWith(item + "=")))
++      return false
+     if (unsafeReadFlag.has(tokens[i])) return false
+     if (tokens[i] === "remote") return tokens[i + 1] === "-v"
+     if (tokens[i] === "config") return tokens[i + 1] === "--get" || tokens[i + 1] === "--list"
+@@ -706,7 +784,15 @@ function unsafeRipgrepFlag(item: string) {
+   // [local-smark] rg 外部命令 flag 保护开始
+   // `rg --pre=cmd` 和 `--hostname-bin=cmd` 会执行外部程序；native shell backend
+   // 没有 sandbox，因此这些 read-looking 命令不能进入 safe 直通路径。
+-  return item === "-z" || item === "--pre" || item.startsWith("--pre=") || item === "--hostname-bin" || item.startsWith("--hostname-bin=") || item === "--search-zip" || item.startsWith("--search-zip=")
++  return (
++    item === "-z" ||
++    item === "--pre" ||
++    item.startsWith("--pre=") ||
++    item === "--hostname-bin" ||
++    item.startsWith("--hostname-bin=") ||
++    item === "--search-zip" ||
++    item.startsWith("--search-zip=")
++  )
+   // [local-smark] rg 外部命令 flag 保护结束
+ }
+ 
+diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
+index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa2af00ac5 100644
+--- a/packages/opencode/src/permission/reviewer/service.ts
++++ b/packages/opencode/src/permission/reviewer/service.ts
+@@ -1,10 +1,14 @@
+ import { Config } from "@/config/config"
+ import { Provider } from "@/provider/provider"
++import { ProviderTransform } from "@/provider/transform"
+ import { Session } from "@/session/session"
+ import { MessageV2 } from "@/session/message-v2"
+ import { MessageID, PartID, SessionID } from "@/session/schema"
+-import { generateObject, type ModelMessage } from "ai"
++import { toJsonSchema } from "@/util/effect-zod"
++import { jsonSchema, streamText, tool, wrapLanguageModel, type ModelMessage } from "ai"
+ import { Context, Effect, Layer, Schema, Semaphore } from "effect"
++import * as Stream from "effect/Stream"
++import { mergeDeep } from "remeda"
+ import { PermissionReviewerPrompt } from "./prompt"
+ import { Assessment, ReviewerRequest } from "./schema"
+ import { PermissionReviewerTranscript } from "./transcript"
+@@ -47,6 +51,9 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pe
+ 
+ const REVIEWER_MESSAGE_FETCH_LIMIT = 120
+ 
++const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
++  mergeDeep(target, source ?? {}) as Record<string, any>
++
+ // The reviewer layer is provider-backed but intentionally receives only a bounded
+ // transcript projection plus the planned action JSON. It never reuses the main
+ // agent's model messages, tools, or scratchpad as reviewer context.
+@@ -58,123 +65,134 @@ export const layer = Layer.effect(
+     const sessions = yield* Session.Service
+     const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
+ 
+-    const review: Interface["review"] = (input) => Effect.gen(function* () {
+-      const cfg = yield* config.get()
+-      const permission = cfg.permission
+-      if (!reviewerEnabled(permission, input.metadata)) return yield* new ReviewerDisabled()
+-      const autoReview = permission?.auto_review
+-
+-      const run = Effect.gen(function* () {
+-        const request = new ReviewerRequest({
+-          permission: input.permission,
+-          patterns: [...input.patterns],
+-          metadata: { ...input.metadata },
+-          precheck: input.precheck,
+-        })
+-        const tenantPolicy = yield* loadTenantPolicy(autoReview)
+-        // Transcript collection is best-effort and bounded twice: fetch a wider
+-        // recent window than the final reviewer prompt, then let transcript
+-        // selection preserve user anchors and cap entries/chars. This avoids
+-        // walking very old sessions on the permission path while still keeping
+-        // substantially more authorization context than the final prompt size.
+-        const transcript = input.sessionID
+-          ? yield* MessageV2.page({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT })
+-              .pipe(
++    const review: Interface["review"] = (input) =>
++      Effect.gen(function* () {
++        const cfg = yield* config.get()
++        const permission = cfg.permission
++        if (!reviewerEnabled(permission, input.metadata)) return yield* new ReviewerDisabled()
++        const autoReview = permission?.auto_review
++
++        const run = Effect.gen(function* () {
++          const request = new ReviewerRequest({
++            permission: input.permission,
++            patterns: [...input.patterns],
++            metadata: { ...input.metadata },
++            precheck: input.precheck,
++          })
++          const model = autoReview?.model
++            ? // User-specified reviewer models use the same provider/model parser as
++              // normal agent config so aliases and provider validation stay in one
++              // place. A bad model fails closed unless fallback=user is configured.
++              yield* provider.getModel(
++                Provider.parseModel(autoReview.model).providerID,
++                Provider.parseModel(autoReview.model).modelID,
++              )
++            : yield* Effect.gen(function* () {
++                const current = yield* provider.defaultModel()
++                return (
++                  (yield* provider.getSmallModel(current.providerID)) ??
++                  (yield* provider.getModel(current.providerID, current.modelID))
++                )
++              })
++          const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
++          yield* markToolReviewing(input, reviewerSession?.id)
++          const tenantPolicy = yield* loadTenantPolicy(autoReview)
++          // Transcript collection is best-effort and bounded twice: fetch a wider
++          // recent window than the final reviewer prompt, then let transcript
++          // selection preserve user anchors and cap entries/chars. This avoids
++          // walking very old sessions on the permission path while still keeping
++          // substantially more authorization context than the final prompt size.
++          const transcript = input.sessionID
++            ? yield* MessageV2.page({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT }).pipe(
+                 Effect.map((page) => {
+                   const transcript = PermissionReviewerTranscript.fromMessages(page.items)
+                   return { ...transcript, truncated: transcript.truncated || page.more }
+                 }),
+                 Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
+               )
+-          : { entries: [], truncated: false, entryTruncated: false }
+-        const messages = buildMessages({
+-          system: PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy),
+-          userItems: PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason),
+-        })
+-        const model = autoReview?.model
+-          // User-specified reviewer models use the same provider/model parser as
+-          // normal agent config so aliases and provider validation stay in one
+-          // place. A bad model fails closed unless fallback=user is configured.
+-          ? yield* provider.getModel(
+-              Provider.parseModel(autoReview.model).providerID,
+-              Provider.parseModel(autoReview.model).modelID,
+-            )
+-          : yield* Effect.gen(function* () {
+-              const current = yield* provider.defaultModel()
+-              return (yield* provider.getSmallModel(current.providerID)) ?? (yield* provider.getModel(current.providerID, current.modelID))
+-            })
+-        const language = yield* provider.getLanguage(model)
+-        const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
+-        yield* markToolReviewing(input)
+-        const reviewerUser = reviewerSession
+-          ? yield* recordReviewerRequest({
+-              session: reviewerSession,
+-              model,
+-              text: messages.map((message) => `${message.role}: ${message.content}`).join("\n\n"),
+-            })
+-          : undefined
+-        // Use structured generation instead of free-form text parsing. The schema
+-        // enforces the JSON shape; PermissionAuto still performs semantic checks
+-        // for contradictory allows after the object is returned.
+-        const assessment = yield* Effect.promise(() =>
+-          generateObject({
+-            model: language,
++            : { entries: [], truncated: false, entryTruncated: false }
++          const messages = buildMessages({
++            system: PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy),
++            userItems: PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason),
++          })
++          const reviewerUser = reviewerSession
++            ? yield* recordReviewerRequest({
++                session: reviewerSession,
++                model,
++                text: renderReviewerPrompt(messages),
++              })
++            : undefined
++          const assessment = yield* runReviewerAgent({
++            session: reviewerSession,
++            model,
++            parentID: reviewerUser?.id,
+             messages,
+-            schema: Object.assign(Schema.toStandardSchemaV1(Assessment), Schema.toStandardJSONSchemaV1(Assessment)),
+-          }).then((result) => result.object),
+-        ).pipe(
+-          Effect.timeoutOrElse({
+-            // Timeout is a security boundary: if the reviewer cannot complete in
+-            // time, the tool call must not execute unless explicit user fallback
+-            // is configured below.
+-            duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
+-            orElse: () => Effect.fail(new ReviewerTimedOut()),
+-          }),
+-          Effect.mapError((error) => (isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))),
+-        )
++          }).pipe(
++            Effect.timeoutOrElse({
++              // Timeout is a security boundary: if the reviewer cannot complete in
++              // time, the tool call must not execute unless explicit user fallback
++              // is configured below.
++              duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
++              orElse: () => Effect.fail(new ReviewerTimedOut()),
++            }),
++            Effect.mapError((error) =>
++              isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }),
++            ),
++          )
++          yield* markToolReviewed(input, assessment)
+ 
+-        if (reviewerSession && reviewerUser) {
+-          yield* recordReviewerDecision({ session: reviewerSession, model, parentID: reviewerUser.id, assessment })
+-        }
++          return {
++            action: assessment.outcome,
++            reason: assessment.rationale,
++            reviewID: input.reviewID,
++            risk_level: assessment.risk_level,
++            user_authorization: assessment.user_authorization,
++          } satisfies PermissionAuto.ReviewDecision
++        })
+ 
+-        return {
+-          action: assessment.outcome,
+-          reason: assessment.rationale,
+-          reviewID: input.reviewID,
+-          risk_level: assessment.risk_level,
+-          user_authorization: assessment.user_authorization,
+-        } satisfies PermissionAuto.ReviewDecision
++        return yield* run.pipe(
++          Effect.catch((error: unknown) =>
++            Effect.gen(function* () {
++              yield* markToolReviewFailed(
++                input,
++                autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)
++                  ? "fallback_user"
++                  : error instanceof ReviewerTimedOut
++                    ? "timed_out"
++                    : "failed",
++                errorMessage(error),
++              )
++              // `fallback: "user"` is deliberately narrow: disabled reviewer already
++              // means normal user routing, while all other failures become an explicit
++              // fallback signal for PermissionAuto. Default behavior is fail-closed.
++              if (autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)) {
++                return yield* new ReviewerFallbackToUser({ reason: errorMessage(error) })
++              }
++              return yield* Effect.fail(error)
++            }),
++          ),
++        )
+       })
+ 
+-      return yield* run.pipe(
+-        Effect.catch((error: unknown) =>
+-          // `fallback: "user"` is deliberately narrow: disabled reviewer already
+-          // means normal user routing, while all other failures become an explicit
+-          // fallback signal for PermissionAuto. Default behavior is fail-closed.
+-          autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)
+-            ? Effect.fail(new ReviewerFallbackToUser({ reason: errorMessage(error) }))
+-            : Effect.fail(error),
+-        ),
+-      )
+-    })
+-
+     return Service.of({ review })
+ 
+     function getReviewerSession(parentID: SessionID, model: Provider.Model) {
+-      return reviewerSessionLock(parentID).withPermits(1)(Effect.gen(function* () {
+-        const existing = (yield* sessions.children(parentID)).find((item) => item.agent === "permission-reviewer")
+-        if (existing) return existing
+-        // A single child session per parent mirrors Codex's reusable guardian
+-        // trunk: later reviews append new request/decision turns instead of
+-        // creating detached one-off records, enabling future transcript deltas by
+-        // child session id without changing the permission API again.
+-        return yield* sessions.create({
+-          parentID,
+-          title: "Auto permission review (@permission-reviewer subagent)",
+-          agent: "permission-reviewer",
+-          model: { providerID: model.providerID, id: model.id },
+-        })
+-      }))
++      return reviewerSessionLock(parentID).withPermits(1)(
++        Effect.gen(function* () {
++          const existing = (yield* sessions.children(parentID)).find((item) => item.agent === "permission-reviewer")
++          if (existing) return existing
++          // A single child session per parent mirrors Codex's reusable guardian
++          // trunk: later reviews append new request/decision turns instead of
++          // creating detached one-off records, enabling future transcript deltas by
++          // child session id without changing the permission API again.
++          return yield* sessions.create({
++            parentID,
++            title: "Auto permission review (@permission-reviewer subagent)",
++            agent: "permission-reviewer",
++            model: { providerID: model.providerID, id: model.id },
++          })
++        }),
++      )
+     }
+ 
+     function reviewerSessionLock(parentID: SessionID) {
+@@ -203,58 +221,300 @@ export const layer = Layer.effect(
+           sessionID: input.session.id,
+           messageID: message.id,
+           type: "text",
+-          // The text is synthetic protocol input: it should be inspectable in the
+-          // hidden reviewer child session, but must not later count as human
+-          // authorization evidence if that child transcript is projected again.
+-          synthetic: true,
++          // This visible child-session message is the audit-friendly reviewer
++          // request cell. It mirrors the exact bounded system/user prompt sent to
++          // the reviewer model so the hidden child agent feels like a normal
++          // subagent run instead of an opaque audit summary. The metadata marker
++          // keeps this generated protocol cell out of future authorization
++          // evidence if reviewer child transcripts are ever projected again.
++          metadata: { permissionReviewerRequest: true },
+           text: input.text,
+         } satisfies MessageV2.TextPart)
+         return message
+       })
+     }
+ 
+-    function recordReviewerDecision(input: {
+-      session: Session.Info
++    function runReviewerAgent(input: {
++      session: Session.Info | undefined
+       model: Provider.Model
+-      parentID: MessageID
+-      assessment: Schema.Schema.Type<typeof Assessment>
++      parentID: MessageID | undefined
++      messages: readonly ModelMessage[]
+     }) {
++      const session = input.session
++      const parentID = input.parentID
++      if (!session || !parentID) return runReviewerStream(input.messages, input.model)
+       return Effect.gen(function* () {
+-        const message = yield* sessions.updateMessage({
++        const message: MessageV2.Assistant = {
+           id: MessageID.ascending(),
+-          parentID: input.parentID,
++          parentID,
+           role: "assistant",
+           mode: "permission-reviewer",
+           agent: "permission-reviewer",
+-          path: { cwd: input.session.directory, root: input.session.directory },
++          path: { cwd: session.directory, root: session.directory },
+           cost: 0,
+           tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+           modelID: input.model.id,
+           providerID: input.model.providerID,
+-          sessionID: input.session.id,
+-          time: { created: Date.now(), completed: Date.now() },
+-          finish: "tool-calls",
+-        } satisfies MessageV2.Assistant)
+-        yield* sessions.updatePart({
+-          id: PartID.ascending(),
+-          sessionID: input.session.id,
++          sessionID: session.id,
++          time: { created: Date.now() },
++        }
++        yield* sessions.updateMessage(message)
++        const assessment = yield* runReviewerStream(input.messages, input.model, {
++          sessionID: session.id,
+           messageID: message.id,
+-          type: "tool",
+-          callID: `permission-review-${input.parentID}`,
+-          tool: "permission_review_decision",
+-          state: {
+-            status: "completed",
+-            input: input.assessment,
+-            output: JSON.stringify(input.assessment),
+-            title: input.assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
+-            metadata: input.assessment,
+-            time: { start: message.time.created, end: message.time.completed ?? Date.now() },
+-          },
+-        } satisfies MessageV2.ToolPart)
++        }).pipe(
++          Effect.tapError((error) =>
++            Effect.gen(function* () {
++              message.error = MessageV2.fromError(error, { providerID: input.model.providerID })
++              message.time.completed = Date.now()
++              yield* sessions.updateMessage(message)
++            }),
++          ),
++        )
++        message.finish = "tool-calls"
++        message.time.completed = Date.now()
++        yield* sessions.updateMessage(message)
++        return assessment
++      })
++    }
++
++    function runReviewerStream(
++      messages: readonly ModelMessage[],
++      model: Provider.Model,
++      persist?: { sessionID: SessionID; messageID: MessageID },
++    ) {
++      return Effect.acquireUseRelease(
++        Effect.sync(() => new AbortController()),
++        (abort) =>
++          Effect.gen(function* () {
++            const language = yield* provider.getLanguage(model)
++            const providerInfo = yield* provider.getProvider(model.providerID)
++            const sessionID = persist?.sessionID ?? "permission-reviewer"
++            const options = mergeOptions(
++              ProviderTransform.options({ model, sessionID, providerOptions: providerInfo.options }),
++              model.options,
++            )
++            const result = streamText({
++              model: wrapLanguageModel({
++                model: language,
++                middleware: [
++                  {
++                    specificationVersion: "v3" as const,
++                    async transformParams(args) {
++                      if (args.type === "stream") {
++                        // Match normal SessionPrompt requests: provider adapters
++                        // expect opencode's message normalization before seeing
++                        // reasoning/tool-call payloads.
++                        // @ts-expect-error AI SDK's internal prompt type is narrower than ModelMessage here.
++                        args.params.prompt = ProviderTransform.message(args.params.prompt, model, options)
++                      }
++                      return args.params
++                    },
++                  },
++                ],
++              }),
++              messages: [...messages],
++              tools: {
++                permission_review_decision: tool({
++                  description: "Submit the structured allow/deny decision for this permission review.",
++                  inputSchema: jsonSchema(toJsonSchema(Assessment) as Parameters<typeof jsonSchema>[0]),
++                  execute: async (assessment) => ({
++                    title: assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
++                    metadata: assessment,
++                    output: JSON.stringify(assessment),
++                  }),
++                }),
++              },
++              // Some OpenAI-compatible providers reject forced tool_choice even
++              // though they can emit tool calls. The reviewer prompt requires this
++              // tool, and absence of the call still fails closed below.
++              maxRetries: 0,
++              providerOptions: ProviderTransform.providerOptions(model, options),
++              maxOutputTokens: ProviderTransform.maxOutputTokens(model),
++              abortSignal: abort.signal,
++            })
++            let assessment: Schema.Schema.Type<typeof Assessment> | undefined
++            let textPart: MessageV2.TextPart | undefined
++            let reasoningPart: MessageV2.ReasoningPart | undefined
++            const toolParts = new Map<string, MessageV2.ToolPart>()
++            const toolInput = new Map<string, string>()
++
++            yield* Stream.runForEach(
++              Stream.fromAsyncIterable(result.fullStream, (error) => error),
++              Effect.fnUntraced(function* (event) {
++                if (!persist) {
++                  if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
++                    assessment = Schema.decodeUnknownSync(Assessment)(event.input)
++                  }
++                  return
++                }
++                if (event.type === "reasoning-start") {
++                  reasoningPart = yield* sessions.updatePart({
++                    id: PartID.ascending(),
++                    sessionID: persist.sessionID,
++                    messageID: persist.messageID,
++                    type: "reasoning",
++                    text: "",
++                    time: { start: Date.now() },
++                    metadata: event.providerMetadata,
++                  } satisfies MessageV2.ReasoningPart)
++                  return
++                }
++                if (event.type === "reasoning-delta" && reasoningPart) {
++                  reasoningPart.text += event.text
++                  if (event.providerMetadata) reasoningPart.metadata = event.providerMetadata
++                  yield* sessions.updatePart(reasoningPart)
++                  return
++                }
++                if (event.type === "reasoning-end" && reasoningPart) {
++                  reasoningPart.time = { ...reasoningPart.time, end: Date.now() }
++                  if (event.providerMetadata) reasoningPart.metadata = event.providerMetadata
++                  yield* sessions.updatePart(reasoningPart)
++                  reasoningPart = undefined
++                  return
++                }
++                if (event.type === "text-start") {
++                  textPart = yield* sessions.updatePart({
++                    id: PartID.ascending(),
++                    sessionID: persist.sessionID,
++                    messageID: persist.messageID,
++                    type: "text",
++                    text: "",
++                    time: { start: Date.now() },
++                    metadata: event.providerMetadata,
++                  } satisfies MessageV2.TextPart)
++                  return
++                }
++                if (event.type === "text-delta" && textPart) {
++                  textPart.text += event.text
++                  if (event.providerMetadata) textPart.metadata = event.providerMetadata
++                  yield* sessions.updatePart(textPart)
++                  return
++                }
++                if (event.type === "text-end" && textPart) {
++                  textPart.time = { start: textPart.time?.start ?? Date.now(), end: Date.now() }
++                  if (event.providerMetadata) textPart.metadata = event.providerMetadata
++                  yield* sessions.updatePart(textPart)
++                  textPart = undefined
++                  return
++                }
++                if (event.type === "tool-input-start") {
++                  const part = yield* sessions.updatePart({
++                    id: PartID.ascending(),
++                    sessionID: persist.sessionID,
++                    messageID: persist.messageID,
++                    type: "tool",
++                    callID: event.id,
++                    tool: event.toolName,
++                    state: { status: "pending", input: {}, raw: "" },
++                  } satisfies MessageV2.ToolPart)
++                  toolParts.set(event.id, part)
++                  return
++                }
++                if (event.type === "tool-input-delta") {
++                  toolInput.set(event.id, (toolInput.get(event.id) ?? "") + event.delta)
++                  return
++                }
++                if (event.type === "tool-input-end") {
++                  const part = toolParts.get(event.id)
++                  if (!part || part.state.status !== "pending") return
++                  const next = {
++                    ...part,
++                    state: { ...part.state, raw: toolInput.get(event.id) ?? "" },
++                  } satisfies MessageV2.ToolPart
++                  toolParts.set(event.id, yield* sessions.updatePart(next))
++                  return
++                }
++                if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
++                  assessment = Schema.decodeUnknownSync(Assessment)(event.input)
++                  const existing = toolParts.get(event.toolCallId)
++                  const part = yield* sessions.updatePart({
++                    ...(existing ?? {
++                      id: PartID.ascending(),
++                      sessionID: persist.sessionID,
++                      messageID: persist.messageID,
++                      type: "tool" as const,
++                      callID: event.toolCallId,
++                      tool: event.toolName,
++                    }),
++                    state: {
++                      status: "completed",
++                      input: assessment,
++                      title: assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
++                      metadata: assessment,
++                      output: JSON.stringify(assessment),
++                      time: { start: Date.now(), end: Date.now() },
++                    },
++                  } satisfies MessageV2.ToolPart)
++                  toolParts.set(event.toolCallId, part)
++                  return
++                }
++                if (event.type === "tool-error") {
++                  return yield* new ReviewerRunError({ reason: errorMessage(event.error) })
++                }
++                if (event.type === "error") {
++                  return yield* new ReviewerRunError({ reason: errorMessage(event.error) })
++                }
++              }),
++            )
++
++            if (textPart)
++              yield* sessions.updatePart({
++                ...textPart,
++                time: { start: textPart.time?.start ?? Date.now(), end: Date.now() },
++              })
++            if (reasoningPart)
++              yield* sessions.updatePart({
++                ...reasoningPart,
++                time: { start: reasoningPart.time.start, end: Date.now() },
++              })
++            if (!assessment)
++              return yield* new ReviewerRunError({ reason: "reviewer did not call permission_review_decision" })
++            return assessment
++          }),
++        (abort) => Effect.sync(() => abort.abort()),
++      )
++    }
++
++    function markToolReviewing(input: PermissionAuto.ReviewInput, reviewerSessionID: SessionID | undefined) {
++      return updateToolAutoReview(input, {
++        status: "reviewing",
++        ...(reviewerSessionID ? { sessionID: reviewerSessionID } : {}),
+       })
+     }
+ 
+-    function markToolReviewing(input: PermissionAuto.ReviewInput) {
++    function markToolReviewed(input: PermissionAuto.ReviewInput, assessment: Schema.Schema.Type<typeof Assessment>) {
++      return updateToolAutoReview(input, {
++        status: assessment.outcome === "allow" ? "allowed" : "denied",
++        result: {
++          risk_level: assessment.risk_level,
++          user_authorization: assessment.user_authorization,
++          rationale: assessment.rationale,
++        },
++      })
++    }
++
++    function markToolReviewFailed(
++      input: PermissionAuto.ReviewInput,
++      status: "timed_out" | "failed" | "fallback_user",
++      reason: string,
++    ) {
++      return updateToolAutoReview(input, { status, error: reason })
++    }
++
++    function updateToolAutoReview(
++      input: PermissionAuto.ReviewInput,
++      patch: {
++        status: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user"
++        sessionID?: SessionID
++        error?: string
++        result?: {
++          risk_level: Schema.Schema.Type<typeof Assessment>["risk_level"]
++          user_authorization: Schema.Schema.Type<typeof Assessment>["user_authorization"]
++          rationale: string
++        }
++      },
++    ) {
+       if (!input.sessionID || !input.tool) return Effect.void
+       return Effect.gen(function* () {
+         const message = yield* MessageV2.get({ sessionID: input.sessionID!, messageID: input.tool!.messageID })
+@@ -262,21 +522,29 @@ export const layer = Layer.effect(
+           (item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === input.tool!.callID,
+         )
+         if (!part || (part.state.status !== "pending" && part.state.status !== "running")) return
++        const metadata = part.state.status === "running" ? part.state.metadata : {}
++        const current =
++          metadata?.autoReview && typeof metadata.autoReview === "object" && !Array.isArray(metadata.autoReview)
++            ? metadata.autoReview
++            : {}
+         yield* sessions.updatePart({
+           ...part,
+           state: {
+             status: "running",
+             input: part.state.status === "pending" ? { raw: part.state.raw } : part.state.input,
+-            title: `Auto review: ${input.precheck.level}`,
++            title:
++              patch.status === "reviewing" ? `Auto review: ${input.precheck.level}` : `Auto review: ${patch.status}`,
+             metadata: {
+-              ...(part.state.status === "running" ? part.state.metadata : {}),
++              ...metadata,
+               // This metadata is intentionally small and stable: clients can show
+               // that deterministic precheck handed the tool to the reviewer
+               // without rendering the hidden reviewer prompt or trusting it as a
+               // permission result.
+               autoReview: {
++                ...current,
+                 reviewID: input.reviewID,
+                 precheck: input.precheck,
++                ...patch,
+               },
+             },
+             time: { start: part.state.status === "running" ? part.state.time.start : Date.now() },
+@@ -302,8 +570,19 @@ function buildMessages(input: { system: string; userItems: readonly PermissionRe
+   ] satisfies ModelMessage[]
+ }
+ 
++function renderReviewerPrompt(messages: readonly ModelMessage[]) {
++  return messages
++    .map((message) =>
++      [
++        `${message.role}:`,
++        typeof message.content === "string" ? message.content : JSON.stringify(message.content, null, 2),
++      ].join("\n"),
++    )
++    .join("\n\n")
++}
++
+ function isReviewerError(error: unknown): error is Error {
+-  // Preserve typed reviewer failures through the generateObject error mapping;
++  // Preserve typed reviewer failures through provider stream error mapping;
+   // everything else is wrapped as ReviewerRunError for one fail-closed path.
+   return error instanceof ReviewerTimedOut || error instanceof ReviewerRunError
+ }
+@@ -319,7 +598,8 @@ function reviewerEnabled(permission: Config.Info["permission"], metadata: Readon
+ 
+ function errorMessage(error: unknown) {
+   if (error instanceof Error) return error.message
+-  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message
++  if (error && typeof error === "object" && "message" in error && typeof error.message === "string")
++    return error.message
+   return String(error)
+ }
+ 
+@@ -330,8 +610,8 @@ function loadTenantPolicy(autoReview: { policy?: string; policy_path?: string }
+     // the baseline critical-deny taxonomy.
+     const pathPolicy = autoReview?.policy_path
+       ? yield* Effect.promise(() => Bun.file(autoReview.policy_path!).text()).pipe(
+-          Effect.mapError((error) =>
+-            new ReviewerRunError({ reason: `failed to load auto_review.policy_path: ${String(error)}` }),
++          Effect.mapError(
++            (error) => new ReviewerRunError({ reason: `failed to load auto_review.policy_path: ${String(error)}` }),
+           ),
+         )
+       : ""
+@@ -341,10 +621,7 @@ function loadTenantPolicy(autoReview: { policy?: string; policy_path?: string }
+   })
+ }
+ 
+-export const defaultLayer = layer.pipe(
+-  Layer.provide(Config.defaultLayer),
+-  Layer.provide(Provider.defaultLayer),
+-)
++export const defaultLayer = layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(Provider.defaultLayer))
+ 
+ // Permission.defaultLayer consumes this bundled reviewer layer before building
+ // Permission.Service. `Layer.suspend` preserves the historical cycle boundary:
+diff --git a/packages/opencode/src/permission/reviewer/transcript.ts b/packages/opencode/src/permission/reviewer/transcript.ts
+index 12f579d202d3a3372d729aa6b632e35aed2b1342..599016108b39880d47205ba40a0caf50b717afd9 100644
+--- a/packages/opencode/src/permission/reviewer/transcript.ts
++++ b/packages/opencode/src/permission/reviewer/transcript.ts
+@@ -57,6 +57,11 @@ function renderPart(part: MessageV2.Part) {
+   // reviewer over-trust the agent's own rationale.
+   if (part.hidden) return ""
+   if (part.type === "text" && part.synthetic) return ""
++  // Reviewer child-session request cells are visible for audit/navigation, but
++  // they are protocol records generated by opencode, not fresh user approval.
++  // Exclude them if a future incremental review ever projects the reviewer
++  // child transcript back into another review request.
++  if (part.type === "text" && part.metadata?.permissionReviewerRequest === true) return ""
+   if (part.type === "reasoning") return ""
+   if (part.type === "text") return truncate(part.text)
+   if (part.type === "tool") return renderTool(part)
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index f299cd6e44e284ce5765d39ac6ba1805ed3b1890..8a8cf647db2d242a07a22010e9cdb426b2dd109b 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -200,7 +200,13 @@ export const layer = Layer.effect(
+             status: "completed",
+             input: match.part.state.input,
+             output: output.output,
+-            metadata: output.metadata,
++            // Permission auto-review annotates the running tool part before the
++            // reviewed command executes. Tool completion replaces metadata with
++            // the tool's own result, so preserve that small review envelope here
++            // to keep the final shell card linked to the reviewer subagent.
++            metadata: match.part.state.metadata?.autoReview
++              ? { ...output.metadata, autoReview: match.part.state.metadata.autoReview }
++              : output.metadata,
+             title: output.title,
+             time: { start: match.part.state.time.start, end: Date.now() },
+             attachments: output.attachments,
+@@ -222,6 +228,10 @@ export const layer = Layer.effect(
+             status: "error",
+             input: match.part.state.input,
+             error: errorMessage(error),
++            // Denied/failed auto reviews terminalize the shell as an error, but
++            // the UI still needs the review result line and reviewer-session link
++            // that were attached while the tool was running.
++            metadata: match.part.state.metadata?.autoReview ? { autoReview: match.part.state.metadata.autoReview } : undefined,
+             time: { start: match.part.state.time.start, end: Date.now() },
+           },
+         })
+diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+index b095d719d40f36774df4141b4121a6a7c77ef244..44dba32b3dbe1440504ee21a9884c25a8853ef10 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -3,7 +3,13 @@ import { expect, test } from "bun:test"
+ import { Global } from "@opencode-ai/core/global"
+ import { testRender, useRenderer } from "@opentui/solid"
+ import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
+-import type { AssistantMessage, GlobalEvent, Part, Session as SessionInfo } from "@opencode-ai/sdk/v2"
++import type {
++  AssistantMessage,
++  GlobalEvent,
++  Part,
++  Session as SessionInfo,
++  UserMessage as SDKUserMessage,
++} from "@opencode-ai/sdk/v2"
+ import { onCleanup } from "solid-js"
+ import { tmpdir } from "../../../fixture/fixture"
+ import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
+@@ -39,7 +45,7 @@ test("assistant inline tool messages are separated outside the message border",
+       msg_two: [completedToolPart("part_grep", "msg_two", "grep", { pattern: "needle" })],
+     },
+     async (app) => {
+-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Grep \"needle\"")))
++      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes('Grep "needle"')))
+       const read = findRow(frame, "Read alpha.ts")
+ 
+       expect(frame[read]).toMatch(/^┃\s+→ Read alpha\.ts/)
+@@ -61,7 +67,8 @@ test("assistant internal part spacing keeps the same message border continuous",
+     async (app) => {
+       const frame = await waitForFrame(
+         app,
+-        (lines) => lines.some((line) => line.includes("Thinking")) && lines.some((line) => line.includes("Read alpha.ts")),
++        (lines) =>
++          lines.some((line) => line.includes("Thinking")) && lines.some((line) => line.includes("Read alpha.ts")),
+       )
+       const thinking = findRow(frame, "Thinking")
+ 
+@@ -76,7 +83,10 @@ test("assistant first visible part does not inherit top spacing from hidden part
+   await withRenderedSession(
+     [assistantMessage("msg_hidden", 1)],
+     {
+-      msg_hidden: [textPart("part_empty", "msg_hidden", "   "), textPart("part_visible", "msg_hidden", "First visible")],
++      msg_hidden: [
++        textPart("part_empty", "msg_hidden", "   "),
++        textPart("part_visible", "msg_hidden", "First visible"),
++      ],
+     },
+     async (app) => {
+       const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("First visible")))
+@@ -127,7 +137,9 @@ test("pending edit tool shows streamed deletion and addition counts", async () =
+       ],
+     },
+     async (app) => {
+-      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/space file.ts +1 -2")))
++      const frame = await waitForFrame(app, (lines) =>
++        lines.some((line) => line.includes("Edit src/space file.ts +1 -2")),
++      )
+       expect(frame[findRow(frame, "Edit src/space file.ts")]).toContain("+1 -2")
+     },
+   )
+@@ -236,11 +248,240 @@ test("pending tool line counts update from streamed raw deltas", async () => {
+   )
+ })
+ 
++test("shell tool renders auto review as a second status line", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_auto_review", 1)],
++    {
++      msg_auto_review: [
++        runningToolPart("part_shell_review", "msg_auto_review", "bash", {
++          command: 'Get-Content -Path "$env:USERPROFILE\\.ssh\\id_rsa"',
++          metadata: {
++            autoReview: {
++              reviewID: "review_shell",
++              sessionID: "ses_reviewer_child",
++              status: "reviewing",
++              precheck: { level: "cautious", reason: "private key access requires reviewer approval" },
++            },
++          },
++        }),
++      ],
++    },
++    async (app) => {
++      const frame = await waitForFrame(app, (lines) =>
++        lines.some((line) => line.includes("◌ auto review · cautious · @permission-reviewer")),
++      )
++      const command = findRow(frame, 'Get-Content -Path "$env:USERPROFILE\\.ssh\\id_rsa"')
++      expect(frame[command + 1]).toContain("◌ auto review · cautious · @permission-reviewer")
++    },
++  )
++})
++
++test("completed shell tool keeps the auto review result line", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_auto_review_done", 1)],
++    {
++      msg_auto_review_done: [
++        completedToolPart(
++          "part_shell_review_done",
++          "msg_auto_review_done",
++          "bash",
++          { command: "git push origin main" },
++          {
++            output: "pushed",
++            autoReview: {
++              reviewID: "review_shell_done",
++              sessionID: "ses_reviewer_child",
++              status: "allowed",
++              precheck: { level: "cautious", reason: "git push requires reviewer approval" },
++              result: { risk_level: "high", user_authorization: "high", rationale: "user explicitly requested push" },
++            },
++          },
++        ),
++      ],
++    },
++    async (app) => {
++      const frame = await waitForFrame(app, (lines) =>
++        lines.some((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer")),
++      )
++      const command = findRow(frame, "$ git push origin main")
++      expect(frame[command + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
++    },
++  )
++})
++
++test("collapsed completed shell preview keeps the auto review result line", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_auto_review_collapsed", 1)],
++    {
++      msg_auto_review_collapsed: [
++        completedToolPart(
++          "part_shell_review_collapsed",
++          "msg_auto_review_collapsed",
++          "bash",
++          { command: "git push origin main" },
++          {
++            output: Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n"),
++            autoReview: {
++              reviewID: "review_shell_collapsed",
++              sessionID: "ses_reviewer_child",
++              status: "allowed",
++              precheck: { level: "cautious", reason: "git push requires reviewer approval" },
++              result: { risk_level: "high", user_authorization: "high", rationale: "user explicitly requested push" },
++            },
++          },
++        ),
++      ],
++    },
++    async (app) => {
++      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
++      expect(frame.some((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))).toBe(
++        true,
++      )
++    },
++  )
++})
++
++test("errored shell tool keeps the denied auto review result line", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_auto_review_error", 1)],
++    {
++      msg_auto_review_error: [
++        errorToolPart(
++          "part_shell_review_error",
++          "msg_auto_review_error",
++          "bash",
++          { command: "git push origin main" },
++          "auto reviewer denied",
++          {
++            autoReview: {
++              reviewID: "review_shell_error",
++              sessionID: "ses_reviewer_child",
++              status: "denied",
++              precheck: { level: "cautious", reason: "git push requires reviewer approval" },
++              result: { risk_level: "high", user_authorization: "unknown", rationale: "push was not authorized" },
++            },
++          },
++        ),
++      ],
++    },
++    async (app) => {
++      const frame = await waitForFrame(app, (lines) =>
++        lines.some((line) => line.includes("! auto review · denied · high risk · auth unknown")),
++      )
++      const command = findRow(frame, "git push origin main")
++      expect(frame[command + 1]).toContain("! auto review · denied · high risk · auth unknown")
++    },
++  )
++})
++
++test("permission review decision renders as a reviewer cell", async () => {
++  await withRenderedSession(
++    [assistantMessage("msg_review_decision", 1)],
++    {
++      msg_review_decision: [
++        completedToolPart(
++          "part_review_decision",
++          "msg_review_decision",
++          "permission_review_decision",
++          {
++            outcome: "deny",
++            risk_level: "high",
++            user_authorization: "unknown",
++            rationale: "private key read was not explicitly authorized",
++          },
++          {
++            outcome: "deny",
++            risk_level: "high",
++            user_authorization: "unknown",
++            rationale: "private key read was not explicitly authorized",
++          },
++        ),
++      ],
++    },
++    async (app) => {
++      const frame = await waitForFrame(
++        app,
++        (lines) =>
++          lines.some((line) => line.includes("denied")) &&
++          lines.some((line) => line.includes("high")) &&
++          lines.some((line) => line.includes("unknown")) &&
++          lines.some((line) => line.includes("rationale")) &&
++          lines.some((line) => line.includes("private key read was not explicitly authorized")),
++      )
++      expect(frame.some((line) => line.includes("! Permission review decision"))).toBe(false)
++    },
++  )
++})
++
++test("reviewer child session shows full reviewer prompt and assistant rationale before decision tool", async () => {
++  await withRenderedSession(
++    [userMessage("msg_review_request", 1), assistantMessage("msg_review_answer", 2, "msg_review_request")],
++    {
++      msg_review_request: [
++        textPart(
++          "part_review_request",
++          "msg_review_request",
++          [
++            "system:",
++            "You are opencode's isolated permission reviewer.",
++            "",
++            "user:",
++            ">>> TRANSCRIPT START",
++            "[1] user: please inspect the exact key file",
++            ">>> TRANSCRIPT END",
++            ">>> APPROVAL REQUEST START",
++            '{"permission":"bash"}',
++            ">>> APPROVAL REQUEST END",
++          ].join("\n"),
++          { metadata: { permissionReviewerRequest: true } },
++        ),
++      ],
++      msg_review_answer: [
++        textPart(
++          "part_review_text",
++          "msg_review_answer",
++          "The requested private key read is not explicitly authorized.",
++        ),
++        completedToolPart(
++          "part_review_decision_flow",
++          "msg_review_answer",
++          "permission_review_decision",
++          {
++            outcome: "deny",
++            risk_level: "high",
++            user_authorization: "unknown",
++            rationale: "private key read was not explicitly authorized",
++          },
++          {
++            outcome: "deny",
++            risk_level: "high",
++            user_authorization: "unknown",
++            rationale: "private key read was not explicitly authorized",
++          },
++        ),
++      ],
++    },
++    async (app) => {
++      await waitForFrame(
++        app,
++        (lines) =>
++          lines.some((line) => line.includes(">>> TRANSCRIPT START")) &&
++          lines.some((line) => line.includes(">>> APPROVAL REQUEST START")) &&
++          lines.some((line) => line.includes("rationale")) &&
++          lines.some((line) => line.includes("private key read")),
++      )
++    },
++    {},
++    { height: 42 },
++  )
++})
++
+ async function withRenderedSession(
+-  messages: AssistantMessage[],
++  messages: Array<AssistantMessage | SDKUserMessage>,
+   parts: Record<string, Part[]>,
+   run: (app: Awaited<ReturnType<typeof testRender>>, emit: (event: GlobalEvent) => void) => Promise<void>,
+   kv: Record<string, unknown> = {},
++  dimensions: { width?: number; height?: number } = {},
+ ) {
+   const previous = Global.Path.state
+   await using tmp = await tmpdir()
+@@ -261,8 +502,8 @@ async function withRenderedSession(
+ 
+   const events = createEventSource()
+   const app = await testRender(() => <SessionHarness fetch={calls.fetch} events={events.source} />, {
+-    width: 80,
+-    height: 16,
++    width: dimensions.width ?? 80,
++    height: dimensions.height ?? 16,
+     footerHeight: 0,
+   })
+ 
+@@ -274,7 +515,10 @@ async function withRenderedSession(
+   }
+ }
+ 
+-function SessionHarness(props: { fetch: typeof globalThis.fetch; events: ReturnType<typeof createEventSource>["source"] }) {
++function SessionHarness(props: {
++  fetch: typeof globalThis.fetch
++  events: ReturnType<typeof createEventSource>["source"]
++}) {
+   const renderer = useRenderer()
+   const config = createTuiResolvedConfig()
+   const keymap = createDefaultOpenTuiKeymap(renderer)
+@@ -361,13 +605,24 @@ function sessionInfo() {
+   } satisfies SessionInfo
+ }
+ 
+-function assistantMessage(id: string, created: number) {
++function userMessage(id: string, created: number) {
++  return {
++    id,
++    sessionID,
++    role: "user",
++    time: { created },
++    agent: "permission-reviewer",
++    model: { providerID: "provider", modelID: "model" },
++  } satisfies SDKUserMessage
++}
++
++function assistantMessage(id: string, created: number, parentID = "msg_user") {
+   return {
+     id,
+     sessionID,
+     role: "assistant",
+     time: { created, completed: created + 1 },
+-    parentID: "msg_user",
++    parentID,
+     modelID: "model",
+     providerID: "provider",
+     mode: "build",
+@@ -378,17 +633,24 @@ function assistantMessage(id: string, created: number) {
+   } satisfies AssistantMessage
+ }
+ 
+-function textPart(id: string, messageID: string, text: string) {
++function textPart(id: string, messageID: string, text: string, extra: Partial<Extract<Part, { type: "text" }>> = {}) {
+   return {
+     id,
+     sessionID,
+     messageID,
+     type: "text",
+     text,
++    ...extra,
+   } satisfies Extract<Part, { type: "text" }>
+ }
+ 
+-function completedToolPart(id: string, messageID: string, tool: string, input: Record<string, unknown>) {
++function completedToolPart(
++  id: string,
++  messageID: string,
++  tool: string,
++  input: Record<string, unknown>,
++  metadata: Record<string, unknown> = {},
++) {
+   return {
+     id,
+     sessionID,
+@@ -401,7 +663,56 @@ function completedToolPart(id: string, messageID: string, tool: string, input: R
+       input,
+       output: "",
+       title: tool,
+-      metadata: {},
++      metadata,
++      time: { start: 1, end: 2 },
++    },
++  } satisfies Extract<Part, { type: "tool" }>
++}
++
++function runningToolPart(
++  id: string,
++  messageID: string,
++  tool: string,
++  input: Record<string, unknown> & { metadata?: Record<string, unknown> },
++) {
++  const metadata = input.metadata ?? {}
++  return {
++    id,
++    sessionID,
++    messageID,
++    type: "tool",
++    callID: id,
++    tool,
++    state: {
++      status: "running",
++      input: Object.fromEntries(Object.entries(input).filter(([key]) => key !== "metadata")),
++      title: tool,
++      metadata,
++      time: { start: 1 },
++    },
++  } satisfies Extract<Part, { type: "tool" }>
++}
++
++function errorToolPart(
++  id: string,
++  messageID: string,
++  tool: string,
++  input: Record<string, unknown>,
++  error: string,
++  metadata: Record<string, unknown> = {},
++) {
++  return {
++    id,
++    sessionID,
++    messageID,
++    type: "tool",
++    callID: id,
++    tool,
++    state: {
++      status: "error",
++      input,
++      error,
++      metadata,
+       time: { start: 1, end: 2 },
+     },
+   } satisfies Extract<Part, { type: "tool" }>
+diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
+index 0ee134d83985b40e0158c8a32654a653c6c2fea7..3d6e97a09e39286f24d690eb06b3059a6ff654a7 100644
+--- a/packages/opencode/test/permission/auto.test.ts
++++ b/packages/opencode/test/permission/auto.test.ts
+@@ -20,7 +20,12 @@ const shellExternalDirectory = (command: string, reviewer?: PermissionAuto.Revie
+       {
+         permission: "external_directory",
+         patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
+-        metadata: { action_kind: "shell", command, cwd: process.cwd(), shell: process.platform === "win32" ? "powershell" : "bash" },
++        metadata: {
++          action_kind: "shell",
++          command,
++          cwd: process.cwd(),
++          shell: process.platform === "win32" ? "powershell" : "bash",
++        },
+       },
+       reviewer,
+     ),
+@@ -161,11 +166,20 @@ describe("permission auto routing", () => {
+     await expect(
+       bash(String.raw`Get-ChildItem -Path "$env:USERPROFILE\.ssh" -Force -ErrorAction SilentlyContinue`, reviewer),
+     ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
++    await expect(
++      bash(
++        String.raw`if (Test-Path -LiteralPath "$env:USERPROFILE\.ssh\id_rsa") { Get-Content -LiteralPath "$env:USERPROFILE\.ssh\id_rsa" } else { "id_rsa not found" }`,
++        reviewer,
++      ),
++    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
+     expect(called).toBe(true)
+   })
+ 
+   test("uses shell evidence for external directory auto routing", async () => {
+-    await expect(shellExternalDirectory("git status --porcelain")).resolves.toMatchObject({ action: "allow", source: "precheck" })
++    await expect(shellExternalDirectory("git status --porcelain")).resolves.toMatchObject({
++      action: "allow",
++      source: "precheck",
++    })
+ 
+     let called = false
+     await expect(
+@@ -196,7 +210,9 @@ describe("permission auto routing", () => {
+           {
+             permission: "external_directory",
+             patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
+-            metadata: { filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa" },
++            metadata: {
++              filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa",
++            },
+           },
+           {
+             review: () =>
+diff --git a/packages/opencode/test/permission/reviewer-prompt.test.ts b/packages/opencode/test/permission/reviewer-prompt.test.ts
+index 864c9107765b5384350469614e078103b661e922..4f0e00535226eaafcbc644448bed37af3e844322 100644
+--- a/packages/opencode/test/permission/reviewer-prompt.test.ts
++++ b/packages/opencode/test/permission/reviewer-prompt.test.ts
+@@ -150,6 +150,22 @@ describe("permission reviewer prompt", () => {
+     expect(transcript.emptyEntries).toBe(true)
+   })
+ 
++  test("transcript excludes reviewer protocol request cells as authorization evidence", () => {
++    const transcript = PermissionReviewerTranscript.fromMessages([
++      {
++        info: userInfo("msg_reviewer_protocol"),
++        parts: [
++          textPart("msg_reviewer_protocol", "prt_reviewer_protocol", "Auto permission review request", {
++            metadata: { permissionReviewerRequest: true },
++          }),
++        ],
++      },
++    ])
++
++    expect(transcript.entries).toEqual([])
++    expect(transcript.emptyEntries).toBe(true)
++  })
++
+   test("transcript bounds a single retained entry with many visible parts", () => {
+     const transcript = PermissionReviewerTranscript.fromMessages([
+       {
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index ae16af6a8172b375869706955359752bfad22782..e96bf41c70446d14349a0061893d622e1182561d 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -507,7 +507,9 @@ it.instance(
+         permission: [{ permission: "*", pattern: "*", action: "allow" }],
+       })
+       const payload = Buffer.from(
+-        yield* Effect.promise(() => Bun.file(path.join(import.meta.dir, "../tool/fixtures/large-image.png")).arrayBuffer()),
++        yield* Effect.promise(() =>
++          Bun.file(path.join(import.meta.dir, "../tool/fixtures/large-image.png")).arrayBuffer(),
++        ),
+       ).toString("base64")
+ 
+       yield* prompt.prompt({
+@@ -752,6 +754,82 @@ it.instance(
+   { git: true },
+ )
+ 
++it.instance(
++  "auto permission reviewer persists real reasoning and decision tool parts",
++  () =>
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig(providerCfg)
++      const permissions = yield* Permission.Service
++      const sessions = yield* Session.Service
++      const chat = yield* sessions.create({ title: "Reviewer stream" })
++      const command = String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa"`
++      yield* llm.push(
++        reply()
++          .reason("Checking whether the user explicitly authorized private key disclosure.")
++          .tool("permission_review_decision", {
++            outcome: "deny",
++            risk_level: "high",
++            user_authorization: "unknown",
++            rationale: "private key read was not explicitly authorized",
++          })
++          .item(),
++      )
++
++      yield* permissions
++        .ask({
++          sessionID: chat.id,
++          permission: "bash",
++          patterns: [command],
++          metadata: { command, agent: "Auto" },
++          always: ["*"],
++          ruleset: [{ permission: "bash", pattern: "*", action: "auto" }],
++        })
++        .pipe(Effect.flip)
++
++      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
++      expect(reviewer).toBeDefined()
++      if (!reviewer) return
++
++      const msgs = yield* MessageV2.filterCompactedEffect(reviewer.id)
++      const inputs = yield* llm.inputs
++      expect(inputs[0].tool_choice).not.toBe("required")
++      expect(JSON.stringify(inputs[0].tools)).toContain("permission_review_decision")
++      expect(inputs[0].tools).toEqual(
++        expect.arrayContaining([
++          expect.objectContaining({
++            function: expect.objectContaining({
++              name: "permission_review_decision",
++              parameters: expect.objectContaining({ type: "object" }),
++            }),
++          }),
++        ]),
++      )
++      expect(inputs[0].max_tokens).toBe(10000)
++      expect(
++        msgs.some((msg) =>
++          msg.parts.some((part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true),
++        ),
++      ).toBe(true)
++      expect(
++        msgs.some((msg) =>
++          msg.parts.some((part) => part.type === "reasoning" && part.text.includes("explicitly authorized")),
++        ),
++      ).toBe(true)
++      expect(
++        msgs.some((msg) =>
++          msg.parts.some(
++            (part) =>
++              part.type === "tool" &&
++              part.tool === "permission_review_decision" &&
++              part.state.status === "completed" &&
++              part.state.metadata?.rationale === "private key read was not explicitly authorized",
++          ),
++        ),
++      ).toBe(true)
++    }),
++  { git: true },
++)
++
+ it.instance(
+   "failed subtask preserves metadata on error tool state",
+   () =>

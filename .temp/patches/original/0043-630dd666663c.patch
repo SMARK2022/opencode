@@ -1,0 +1,230 @@
+From 630dd666663c712e3648751860f5372e192750c0 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Tue, 28 Apr 2026 02:04:39 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=8A=A0=E6=95=B0=E6=8D=AE?=
+ =?UTF-8?q?=E9=9B=86=E9=B2=81=E6=A3=92=E6=80=A7=E3=80=81=E8=87=AA=E5=8A=A8?=
+ =?UTF-8?q?=E9=87=8D=E8=AF=95=E6=9C=BA=E5=88=B6=E6=B7=BB=E5=8A=A0=20OPENCO?=
+ =?UTF-8?q?DE=5FDB=5FDURABLE=20=E6=A0=87=E5=BF=97=EF=BC=8C=E6=9B=B4?=
+ =?UTF-8?q?=E6=96=B0=E6=95=B0=E6=8D=AE=E5=BA=93=E9=85=8D=E7=BD=AE=E5=92=8C?=
+ =?UTF-8?q?=E5=B7=A5=E5=85=B7=E8=BE=93=E5=85=A5=E7=BC=93=E5=86=B2=E9=80=BB?=
+ =?UTF-8?q?=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/core/src/flag/flag.ts b/packages/core/src/flag/flag.ts
+index d22bff94007f4df59a55e62c3251da3e0b52deab..b7ad7231203ca166fdeb2d1aa8fe56ba48897395 100644
+--- a/packages/core/src/flag/flag.ts
++++ b/packages/core/src/flag/flag.ts
+@@ -79,6 +79,7 @@ export const Flag = {
+   OPENCODE_DISABLE_EMBEDDED_WEB_UI: truthy("OPENCODE_DISABLE_EMBEDDED_WEB_UI"),
+   OPENCODE_DB: process.env["OPENCODE_DB"],
+   OPENCODE_DISABLE_CHANNEL_DB: truthy("OPENCODE_DISABLE_CHANNEL_DB"),
++  OPENCODE_DB_DURABLE: truthy("OPENCODE_DB_DURABLE"),
+   OPENCODE_SKIP_MIGRATIONS: truthy("OPENCODE_SKIP_MIGRATIONS"),
+   OPENCODE_STRICT_CONFIG_DEPS: truthy("OPENCODE_STRICT_CONFIG_DEPS"),
+ 
+diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
+index df09d5cc9c7bf8dc66c0b4d5bc0395169afb3494..0b3a9b623e09ac92023ed441fb37520c1f77f8c7 100644
+--- a/packages/opencode/src/cli/cmd/tui/worker.ts
++++ b/packages/opencode/src/cli/cmd/tui/worker.ts
+@@ -12,6 +12,7 @@ import { writeHeapSnapshot } from "node:v8"
+ import { Heap } from "@/cli/heap"
+ import { AppRuntime } from "@/effect/app-runtime"
+ import { ensureProcessMetadata } from "@opencode-ai/core/util/opencode-process"
++import * as Database from "@/storage/db"
+ 
+ ensureProcessMetadata("worker")
+ 
+@@ -91,6 +92,7 @@ export const rpc = {
+ 
+     await Instance.disposeAll()
+     if (server) await server.stop(true)
++    Database.close()
+   },
+ }
+ 
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index c8ff4aa39f69f2e767bd5abd2d3c26ed0bd830f9..2251c485e507c3b49fcc29025aab5a92a23f2bda 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -66,6 +66,7 @@ type ToolCall = {
+ 
+ interface ProcessorContext extends Input {
+   toolcalls: Record<string, ToolCall>
++  toolInputBuffer: Record<string, string>
+   shouldBreak: boolean
+   snapshot: string | undefined
+   blocked: boolean
+@@ -116,6 +117,7 @@ export const layer: Layer.Layer<
+         sessionID: input.sessionID,
+         model: input.model,
+         toolcalls: {},
++        toolInputBuffer: {},
+         shouldBreak: false,
+         snapshot: initialSnapshot,
+         blocked: false,
+@@ -280,25 +282,40 @@ export const layer: Layer.Layer<
+             return
+ 
+           case "tool-input-delta":
+-            yield* updateToolCall(value.id, (match) => {
+-              if (match.state.status !== "pending") return match
+-              return {
+-                ...match,
+-                state: {
+-                  ...match.state,
+-                  raw: match.state.raw + value.delta,
+-                },
+-              }
+-            })
++            // Accumulate raw in memory — no DB write per token.
++            ctx.toolInputBuffer[value.id] = (ctx.toolInputBuffer[value.id] ?? "") + value.delta
++            // Publish a bus-only delta so the UI stays real-time.
++            const tcall = ctx.toolcalls[value.id]
++            if (tcall)
++              yield* session.updatePartDelta({
++                sessionID: tcall.sessionID,
++                messageID: tcall.messageID,
++                partID: tcall.partID,
++                field: "raw",
++                delta: value.delta,
++              })
+             return
+ 
+-          case "tool-input-end":
++          case "tool-input-end": {
++            // Flush the accumulated raw string to DB in a single write.
++            const buffered = ctx.toolInputBuffer[value.id]
++            if (buffered) {
++              delete ctx.toolInputBuffer[value.id]
++              yield* updateToolCall(value.id, (match) => {
++                if (match.state.status !== "pending") return match
++                return { ...match, state: { ...match.state, raw: match.state.raw + buffered } }
++              })
++            }
+             return
++          }
+ 
+           case "tool-call": {
+             if (ctx.assistantMessage.summary) {
+               throw new Error(`Tool call not allowed while generating summary: ${value.toolName}`)
+             }
++            // Flush any remaining buffer that wasn't flushed by tool-input-end.
++            const pendingRaw = ctx.toolInputBuffer[value.toolCallId]
++            if (pendingRaw) delete ctx.toolInputBuffer[value.toolCallId]
+             yield* updateToolCall(value.toolCallId, (match) => ({
+               ...match,
+               tool: value.toolName,
+@@ -522,10 +539,16 @@ export const layer: Layer.Layer<
+           const part = match.part
+           const end = Date.now()
+           const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
++          // Merge any un-flushed raw buffer into the part before writing error state.
++          const pendingRaw = ctx.toolInputBuffer[toolCallID]
++          if (pendingRaw) delete ctx.toolInputBuffer[toolCallID]
+           yield* session.updatePart({
+             ...part,
+             state: {
+               ...part.state,
++              ...(part.state.status === "pending" && pendingRaw
++                ? { raw: part.state.raw + pendingRaw }
++                : {}),
+               status: "error",
+               error: "Tool execution aborted",
+               metadata: { ...metadata, interrupted: true },
+@@ -534,6 +557,7 @@ export const layer: Layer.Layer<
+           })
+         }
+         ctx.toolcalls = {}
++        ctx.toolInputBuffer = {}
+         ctx.assistantMessage.time.completed = Date.now()
+         yield* session.updateMessage(ctx.assistantMessage)
+         const reqUsage2 = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+diff --git a/packages/opencode/src/session/retry.ts b/packages/opencode/src/session/retry.ts
+index e81e1973751fe3b229805074d8aa50abb885bde9..f0229b7989d88ceecc91be45189208552a3ac544 100644
+--- a/packages/opencode/src/session/retry.ts
++++ b/packages/opencode/src/session/retry.ts
+@@ -58,7 +58,8 @@ export function retryable(error: Err) {
+     const status = error.data.statusCode
+     // 5xx errors are transient server failures and should always be retried,
+     // even when the provider SDK doesn't explicitly mark them as retryable.
+-    if (!error.data.isRetryable && !(status !== undefined && status >= 500)) return undefined
++    // Underlying network exceptions (where statusCode is undefined) should also be retried.
++    if (!error.data.isRetryable && !(status !== undefined && status >= 500) && status !== undefined) return undefined
+     if (error.data.responseBody?.includes("FreeUsageLimitError")) return GO_UPSELL_MESSAGE
+     return error.data.message.includes("Overloaded") ? "Provider is overloaded" : error.data.message
+   }
+diff --git a/packages/opencode/src/storage/db.ts b/packages/opencode/src/storage/db.ts
+index e442b2a76d1eee8edfff53e1a5ac68fd65645fa0..43931143933935226abc4a2b2b9d87acea861c74 100644
+--- a/packages/opencode/src/storage/db.ts
++++ b/packages/opencode/src/storage/db.ts
+@@ -9,7 +9,7 @@ import { Log } from "../util"
+ import { NamedError } from "@opencode-ai/core/util/error"
+ import z from "zod"
+ import path from "path"
+-import { readFileSync, readdirSync, existsSync } from "fs"
++import { readFileSync, readdirSync, existsSync, statSync } from "fs"
+ import { Flag } from "@opencode-ai/core/flag/flag"
+ import { InstallationChannel } from "@opencode-ai/core/installation/version"
+ import { InstanceState } from "@/effect"
+@@ -86,12 +86,31 @@ export const Client = lazy(() => {
+ 
+   const db = init(Path)
+ 
++  // busy_timeout must be set FIRST so subsequent PRAGMAs can wait if another
++  // process holds a lock during startup or migration.
++  db.run("PRAGMA busy_timeout = 30000")
+   db.run("PRAGMA journal_mode = WAL")
+-  db.run("PRAGMA synchronous = NORMAL")
+-  db.run("PRAGMA busy_timeout = 5000")
++  db.run("PRAGMA synchronous = " + (Flag.OPENCODE_DB_DURABLE ? "FULL" : "NORMAL"))
+   db.run("PRAGMA cache_size = -64000")
+   db.run("PRAGMA foreign_keys = ON")
+-  db.run("PRAGMA wal_checkpoint(PASSIVE)")
++  try {
++    db.run("PRAGMA wal_checkpoint(PASSIVE)")
++  } catch (e) {
++    log.warn("wal_checkpoint on open failed (another process may be active)", { error: String(e) })
++  }
++
++  // Warn if a large WAL file is present — indicates prior crash without checkpoint.
++  try {
++    const walStat = statSync(Path + "-wal")
++    if (walStat.size > 1024 * 1024) {
++      log.warn("large WAL file detected — recovering uncommitted data", {
++        path: Path + "-wal",
++        bytes: walStat.size,
++      })
++    }
++  } catch {
++    // WAL file absent — normal case
++  }
+ 
+   // Apply schema migrations
+   const entries =
+@@ -115,6 +134,11 @@ export const Client = lazy(() => {
+ })
+ 
+ export function close() {
++  try {
++    Client().$client.run("PRAGMA wal_checkpoint(TRUNCATE)")
++  } catch (e) {
++    log.warn("wal_checkpoint on close failed", { error: String(e) })
++  }
+   Client().$client.close()
+   Client.reset()
+ }
+diff --git a/packages/opencode/src/tool/task.txt b/packages/opencode/src/tool/task.txt
+index 892006bb86cbdb164c22646cbb6384e49e69ca1d..35a27cc608199dec746469970eceda96921b87ca 100644
+--- a/packages/opencode/src/tool/task.txt
++++ b/packages/opencode/src/tool/task.txt
+@@ -28,6 +28,7 @@ Usage notes:
+ - Trust completed agent results by default, but inspect changed files before integrating or reporting final success.
+ - Reuse task_id only when continuing the same subagent context is useful.
+ - The agent result is returned to you, not directly to the user; summarize relevant results yourself.
++
+ Example usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):
+ 
+ <example_agent_descriptions>

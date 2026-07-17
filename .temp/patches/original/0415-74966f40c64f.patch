@@ -1,0 +1,434 @@
+From 74966f40c64fb83eed93b772e21f2adb1330c562 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sat, 11 Jul 2026 05:10:34 +0800
+Subject: [PATCH] =?UTF-8?q?fix(cancel):=20=E9=87=8D=E5=8F=A0=20cancel=20?=
+ =?UTF-8?q?=E5=85=B1=E4=BA=AB=20single-flight=20=E6=93=8D=E4=BD=9C?=
+ =?UTF-8?q?=EF=BC=8C=E4=BF=AE=E5=A4=8D=20replacement=20loop=20=E8=A2=AB?=
+ =?UTF-8?q?=E8=AF=AF=E6=9D=80?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+将 cancelLocks semaphore 替换为 Deferred 单次操作：同一 Session 的重叠
+cancel 调用 join 同一个 Deferred<Exit>，不再各自独立执行 state.cancel。
+消除排队 cancel 在旧操作完成后重新读取 Runner 并误伤 replacement loop
+的时序窗口。
+
+同时为非 Bash 工具和 MCP 工具透传 AbortSignal 给 Effect.runPromise，
+使 Effect 包装可被协作式中断，避免取消时固定等待 2s settle 兜底。
+Bash 保持豁免以保留 cooperative abort 输出语义。
+
+Processor 新增 toolPermit 串行化 completeToolCall/failToolCall/cleanup
+的 terminal state 写入，确保 ToolPart 终态有唯一 winner，防止 late
+metadata 或 cleanup 覆盖已完成的工具结果。
+
+diff --git a/packages/opencode/src/effect/bridge.ts b/packages/opencode/src/effect/bridge.ts
+index 99f16f43712f937a5715e29713987e8c0344da67..7e1635ba7699fb3d82dac90feb111ab5200df2ba 100644
+--- a/packages/opencode/src/effect/bridge.ts
++++ b/packages/opencode/src/effect/bridge.ts
+@@ -5,7 +5,10 @@ import { InstanceRef, WorkspaceRef } from "./instance-ref"
+ import { attachWith } from "./run-service"
+ 
+ export interface Shape {
+-  readonly promise: <A, E, R>(effect: Effect.Effect<A, E, R>) => Promise<A>
++  // RunOptions 透传给 Effect.runPromise，用于支持 AbortSignal 等运行时控制。
++  // 非 Bash 工具通过 { signal: options.abortSignal } 实现协作式中断，
++  // 而 Bash 保持豁免以保留自身的 cooperative abort 输出语义。
++  readonly promise: <A, E, R>(effect: Effect.Effect<A, E, R>, options?: Effect.RunOptions) => Promise<A>
+   readonly fork: <A, E, R>(effect: Effect.Effect<A, E, R>) => Fiber.Fiber<A, E>
+   readonly run: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E>
+   readonly bind: <Args extends readonly unknown[], Result>(fn: (...args: Args) => Result) => (...args: Args) => Result
+@@ -61,8 +64,10 @@ export function make(): Effect.Effect<Shape> {
+       attachWith(effect.pipe(Effect.provide(ctx)) as Effect.Effect<A, E, never>, { instance, workspace })
+ 
+     return {
+-      promise: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+-        restoreWorkspace(workspace, () => Effect.runPromise(wrap(effect))),
++      // 透传 RunOptions（含 AbortSignal）给 Effect.runPromise，
++      // 使调用方可通过 signal 中断 Effect 包装及其 finalizer。
++      promise: <A, E, R>(effect: Effect.Effect<A, E, R>, options?: Effect.RunOptions) =>
++        restoreWorkspace(workspace, () => Effect.runPromise(wrap(effect), options)),
+       fork: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+         restoreWorkspace(workspace, () => Effect.runFork(wrap(effect))),
+       run: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+diff --git a/packages/opencode/src/mcp/index.ts b/packages/opencode/src/mcp/index.ts
+index 832811b281a532e9e1eac797e69490ec7d772756..6abefc4b1b2f85ad0fb89eb24d69781341fcaca8 100644
+--- a/packages/opencode/src/mcp/index.ts
++++ b/packages/opencode/src/mcp/index.ts
+@@ -165,7 +165,10 @@ function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number
+   return dynamicTool({
+     description: mcpTool.description ?? "",
+     inputSchema: jsonSchema(schema),
+-    execute: async (args: unknown) => {
++    // 接收 AI SDK 传入的 ToolExecutionOptions（含 abortSignal），
++    // 将 signal 透传给 MCP client.callTool，使取消操作能协作式中断 MCP 传输层。
++    // timeout 和 resetTimeoutOnProgress 保持不变，避免破坏现有超时语义。
++    execute: async (args: unknown, options?: { abortSignal?: AbortSignal }) => {
+       return client.callTool(
+         {
+           name: mcpTool.name,
+@@ -175,6 +178,8 @@ function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number
+         {
+           resetTimeoutOnProgress: true,
+           timeout,
++          // 透传 abortSignal：MCP client 可在取消时中断正在进行的工具调用
++          ...(options?.abortSignal ? { signal: options.abortSignal } : {}),
+         },
+       )
+     },
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+index d0305b742d94a9352de5f2348677c935c49c55c4..7aa134bd8816799f77f8b4a61940c22974e01c00 100644
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -1,4 +1,4 @@
+-import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Option } from "effect"
++import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Option, Semaphore } from "effect"
+ import * as Stream from "effect/Stream"
+ import { Agent } from "@/agent/agent"
+ import { Bus } from "@/bus"
+@@ -168,6 +168,10 @@ export const layer = Layer.effect(
+         hasToolCall: false,
+       }
+       let aborted = false
++      // [local-smark] Tool 终态写入许可：串行化 completeToolCall / failToolCall /
++      // cleanup 的 read-check-write，确保 ToolPart terminal state 有唯一 winner。
++      // 不在 permit 内 await Tool Deferred——settleToolCall 的 Deferred.succeed 是同步的。
++      const toolPermit = Semaphore.makeUnsafe(1)
+       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
+       let timing:
+         | { startedAt: number; firstStreamEvent: boolean; firstDelta: Set<string> }
+@@ -250,75 +254,87 @@ export const layer = Layer.effect(
+           attachments?: MessageV2.FilePart[]
+         },
+       ) {
+-        const match = yield* readToolCall(toolCallID)
+-        if (!match) return
+-        if (match.part.state.status !== "running") {
+-          // Another cleanup path may already have terminalized the persisted
+-          // part.  Still settle the in-memory deferred so the LLM loop cannot
+-          // wait forever on a tool call whose DB state is already final.
+-          yield* settleToolCall(toolCallID)
+-          return
+-        }
+-        yield* session.updatePart({
+-          ...match.part,
+-          state: {
+-            status: "completed",
+-            // [local-smark] 当工具返回 _formattedContent 时（write 被 auto-format
+-            // 改变了内容），直接用格式化后的内容覆盖 state.input.content。
+-            // 这样 DB 中持久化的 input 就是磁盘上的实际内容，后续上下文重放时
+-            // 模型看到的内容与磁盘一致，避免 edit 基于过期内容匹配 oldString 失败。
+-            // 原始 input 不保留——format 后的内容才是真实落盘内容。
+-            input: output.metadata?._formattedContent
+-              ? { ...match.part.state.input, content: output.metadata._formattedContent }
+-              : match.part.state.input,
+-            output: output.output,
+-            // 从持久化 metadata 中 strip 掉 _formattedContent，避免冗余存储
+-            metadata: (() => {
+-              const { _formattedContent, ...rest } = output.metadata ?? {}
+-              return match.part.state.metadata?.autoReview
+-                ? { ...rest, autoReview: match.part.state.metadata.autoReview }
+-                : rest
+-            })(),
+-            title: output.title,
+-            time: { start: match.part.state.time.start, end: Date.now() },
+-            attachments: output.attachments,
+-          },
+-        })
+-        yield* settleToolCall(toolCallID)
++        // [local-smark] terminal state 写入需要串行化：确保 read-check-write 原子，
++          // 防止 late metadata/result 或 cleanup 与正常完成路径竞争覆盖终态。
++          yield* toolPermit.withPermits(1)(
++            Effect.gen(function* () {
++              const match = yield* readToolCall(toolCallID)
++              if (!match) return
++              if (match.part.state.status !== "running") {
++                // Another cleanup path may already have terminalized the persisted
++                // part.  Still settle the in-memory deferred so the LLM loop cannot
++                // wait forever on a tool call whose DB state is already final.
++                yield* settleToolCall(toolCallID)
++                return
++              }
++              yield* session.updatePart({
++                ...match.part,
++                state: {
++                  status: "completed",
++                  // [local-smark] 当工具返回 _formattedContent 时（write 被 auto-format
++                  // 改变了内容），直接用格式化后的内容覆盖 state.input.content。
++                  // 这样 DB 中持久化的 input 就是磁盘上的实际内容，后续上下文重放时
++                  // 模型看到的内容与磁盘一致，避免 edit 基于过期内容匹配 oldString 失败。
++                  // 原始 input 不保留——format 后的内容才是真实落盘内容。
++                  input: output.metadata?._formattedContent
++                    ? { ...match.part.state.input, content: output.metadata._formattedContent }
++                    : match.part.state.input,
++                  output: output.output,
++                  // 从持久化 metadata 中 strip 掉 _formattedContent，避免冗余存储
++                  metadata: (() => {
++                    const { _formattedContent, ...rest } = output.metadata ?? {}
++                    return match.part.state.metadata?.autoReview
++                      ? { ...rest, autoReview: match.part.state.metadata.autoReview }
++                      : rest
++                  })(),
++                  title: output.title,
++                  time: { start: match.part.state.time.start, end: Date.now() },
++                  attachments: output.attachments,
++                },
++              })
++              yield* settleToolCall(toolCallID)
++            }),
++          )
+       })
+ 
+       const failToolCall = Effect.fn("SessionProcessor.failToolCall")(function* (toolCallID: string, error: unknown) {
+-        const match = yield* readToolCall(toolCallID)
+-        if (!match) return false
+-        if (match.part.state.status !== "running") {
+-          yield* settleToolCall(toolCallID)
+-          return false
+-        }
+-        const reason = errorMessage(error)
+-        const toolAborted = aborted || reason === "Aborted" || reason === TOOL_ABORTED_ERROR
+-        // [local-smark] abort 时保留原 metadata 并写入 server-owned elapsedMs marker，
+-        // 使下一轮模型回放能追加 user_abort + elapsed_ms Notice。
+-        // 非 abort error 仅保留 autoReview envelope，保持既有行为
+-        const failStart = match.part.state.time?.start ?? Date.now()
+-        yield* session.updatePart({
+-          ...match.part,
+-          state: {
+-            status: "error",
+-            input: match.part.state.input,
+-            error: toolAborted ? TOOL_ABORTED_ERROR : reason,
+-            metadata: toolAborted
+-              ? interruptedToolMetadata(match.part.state.metadata, Date.now() - failStart)
+-              : match.part.state.metadata?.autoReview
+-                ? { autoReview: match.part.state.metadata.autoReview }
+-                : undefined,
+-            time: { start: failStart, end: Date.now() },
+-          },
+-        })
+-        if (error instanceof Permission.RejectedError || error instanceof Question.RejectedError) {
+-          ctx.blocked = ctx.shouldBreak
+-        }
+-        yield* settleToolCall(toolCallID)
+-        return true
++        // [local-smark] terminal state 写入串行化，与 completeToolCall 共享同一 permit，
++          // 确保 fail / complete / cleanup 三条终态路径有唯一 winner。
++          return yield* toolPermit.withPermits(1)(
++            Effect.gen(function* () {
++              const match = yield* readToolCall(toolCallID)
++              if (!match) return false
++              if (match.part.state.status !== "running") {
++                yield* settleToolCall(toolCallID)
++                return false
++              }
++              const reason = errorMessage(error)
++              const toolAborted = aborted || reason === "Aborted" || reason === TOOL_ABORTED_ERROR
++              // [local-smark] abort 时保留原 metadata 并写入 server-owned elapsedMs marker，
++              // 使下一轮模型回放能追加 user_abort + elapsed_ms Notice。
++              // 非 abort error 仅保留 autoReview envelope，保持既有行为
++              const failStart = match.part.state.time?.start ?? Date.now()
++              yield* session.updatePart({
++                ...match.part,
++                state: {
++                  status: "error",
++                  input: match.part.state.input,
++                  error: toolAborted ? TOOL_ABORTED_ERROR : reason,
++                  metadata: toolAborted
++                    ? interruptedToolMetadata(match.part.state.metadata, Date.now() - failStart)
++                    : match.part.state.metadata?.autoReview
++                      ? { autoReview: match.part.state.metadata.autoReview }
++                      : undefined,
++                  time: { start: failStart, end: Date.now() },
++                },
++              })
++              if (error instanceof Permission.RejectedError || error instanceof Question.RejectedError) {
++                ctx.blocked = ctx.shouldBreak
++              }
++              yield* settleToolCall(toolCallID)
++              return true
++            }),
++          )
+       })
+ 
+       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
+@@ -927,28 +943,37 @@ export const layer = Layer.effect(
+         }
+ 
+         for (const toolCallID of Object.keys(ctx.toolcalls)) {
+-          const match = yield* readToolCall(toolCallID)
+-          if (!match) continue
+-          const part = match.part
+-          const end = Date.now()
+-          const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
+-          // Merge any un-flushed raw buffer into the part before writing error state.
+-          const pendingRaw = ctx.toolInputBuffer[toolCallID]
+-          if (pendingRaw) delete ctx.toolInputBuffer[toolCallID]
+-          yield* session.updatePart({
+-            ...part,
+-            state: {
+-              ...part.state,
+-              ...(part.state.status === "pending" && pendingRaw
+-                ? { raw: part.state.raw + pendingRaw }
+-                : {}),
+-              status: "error",
+-              error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
+-              // [local-smark] abort 时写入 elapsed marker，供下一轮回放追加 Notice
+-              metadata: aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata,
+-              time: { start: "time" in part.state ? part.state.time.start : end, end },
+-            },
+-          })
++          // [local-smark] cleanup 终态写入也走 permit，确保与 completeToolCall /
++          // failToolCall 串行化。如果工具已完成（终态由 stream event 写入），
++          // readToolCall 重读后 status !== "running"，直接跳过不覆盖。
++          yield* toolPermit.withPermits(1)(
++            Effect.gen(function* () {
++              const match = yield* readToolCall(toolCallID)
++              if (!match) return
++              const part = match.part
++              // 已终态的 ToolPart 不覆盖——stream event 的 complete/fail 是 winner
++              if (part.state.status !== "running" && part.state.status !== "pending") return
++              const end = Date.now()
++              const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
++              // Merge any un-flushed raw buffer into the part before writing error state.
++              const pendingRaw = ctx.toolInputBuffer[toolCallID]
++              if (pendingRaw) delete ctx.toolInputBuffer[toolCallID]
++              yield* session.updatePart({
++                ...part,
++                state: {
++                  ...part.state,
++                  ...(part.state.status === "pending" && pendingRaw
++                    ? { raw: part.state.raw + pendingRaw }
++                    : {}),
++                  status: "error",
++                  error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
++                  // [local-smark] abort 时写入 elapsed marker，供下一轮回放追加 Notice
++                  metadata: aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata,
++                  time: { start: "time" in part.state ? part.state.time.start : end, end },
++                },
++              })
++            }),
++          )
+         }
+         ctx.toolcalls = {}
+         ctx.toolInputBuffer = {}
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 5c2fc316f12c088931f3e2bc9c8e8374c4225482..1107d3bcb82d88bcebc38b4dfc17bd9b300b3ff0 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -414,8 +414,9 @@ export const layer = Layer.effect(
+     })
+ 
+     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
+-      // 原子 check-and-set：Effect 协作式调度不会在同步代码块中切让 fiber，
+-      // get 和 set 之间无 yield*，保证只一个 cancel 能进入 body。
++      // 原子 check-and-set：Deferred.make 虽有 yield* 但不涉及异步 I/O，
++      // Effect 协作式调度不会在此同步分配中切让 fiber。get 和 set 之间
++      // 无真正的异步边界，保证只一个 cancel 能进入 body。
+       // 后续 cancel 观察到已有 Deferred，直接 await 并重放同一 Exit。
+       const existing = cancelOps.get(sessionID)
+       if (existing) {
+@@ -445,7 +446,10 @@ export const layer = Layer.effect(
+           Effect.uninterruptible(
+             Effect.gen(function* () {
+               cancelOps.delete(sessionID)
+-              yield* Deferred.done(deferred, exit as Exit.Exit<void>).pipe(Effect.asVoid)
++              // 用 succeed 而非 done：Deferred 的成功类型就是 Exit<void>，
++              // exit 本身是 Effect.onExit 回调收到的 Exit<void, never>，
++              // 作为值存入 Deferred 供 joiner 重放。
++              yield* Deferred.succeed(deferred, exit as Exit.Exit<void>).pipe(Effect.asVoid)
+             }),
+           ),
+         ),
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 49f8e0addde0be7866c582c4551e27578b5ee20d..348a9ca249f477295ba82a2aa827571232426305 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -1855,6 +1855,88 @@ it.instance(
+   30_000,
+ )
+ 
++// [local-smark] 验证重叠 cancel 共享同一个操作：第二个 cancel join 第一个的
++// Deferred，不会在第一个完成后重新执行 state.cancel 误伤 replacement loop。
++// 旧 semaphore 实现下，第二个 cancel 排队等待第一个完成，然后重新调用
++// state.cancel 取消已经启动的 replacement Runner。single-flight 修复后，
++// 两个 cancel 共享同一 Exit，replacement 安全。
++// 使用 task 工具挂起控制 cancel 耗时：task.execute 用 Effect.callback 永不 resume，
++// cancel 的 Fiber.interrupt 等待 Processor cleanup 的 2s settle 超时，
++// 这段时间内第二个 cancel 能 join 第一个的 Deferred。
++it.instance(
++  "overlapping cancels share single-flight and do not retarget replacement loop",
++  () =>
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig(providerCfg)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const status = yield* SessionStatus.Service
++      const registry = yield* ToolRegistry.Service
++      const { task } = yield* registry.named()
++      const chat = yield* sessions.create({ title: "Overlap cancel" })
++      yield* seed(chat.id)
++
++      // 修改 task.execute 使其永不返回（Effect.callback 不调用 resume），
++      // cancel 时 Processor cleanup 需等待 2s settle 超时才能终态化。
++      const taskReady = yield* Deferred.make<void>()
++      const original = task.execute
++      task.execute = (_args, ctx) =>
++        Effect.callback<never>((_resume) => {
++          succeedVoid(taskReady)
++          return Effect.sync(() => {})
++        })
++      yield* Effect.addFinalizer(() => Effect.sync(() => void (task.execute = original)))
++
++      // 让 LLM 正常回复（不含工具调用），然后用 addSubtask 触发 task 工具
++      yield* llm.push(reply().text("thinking").stop().item())
++      yield* llm.hang
++      const msg = yield* user(chat.id, "first")
++      yield* addSubtask(chat.id, msg.id)
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
++
++      // 等待 task 工具开始执行
++      yield* awaitWithTimeout(Deferred.await(taskReady), "task tool never started", "10 seconds")
++
++      // Fork 第一个 cancel——task 工具永不返回，Fiber.interrupt 需等待 2s settle
++      yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
++
++      // 等待 session 变 idle（Runner.cancel 已执行 idleIfCurrent，Fiber.interrupt 仍在进行）
++      yield* pollWithTimeout(
++        Effect.gen(function* () {
++          const s = yield* status.get(chat.id)
++          return s.type === "idle" ? (true as const) : undefined
++        }),
++        "session never became idle after first cancel",
++      )
++
++      // 立即提交 replacement 和第二个 cancel
++      yield* llm.push(reply().text("replacement response").stop().item())
++      yield* user(chat.id, "second")
++      const fiber2 = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
++
++      // 第二个 cancel——single-flight 下 join 第一个的 Deferred，不重新执行 state.cancel
++      yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
++
++      // 等待 replacement loop 完成
++      const exit2 = yield* Fiber.await(fiber2).pipe(Effect.timeout("15 seconds"))
++      expect(Exit.isSuccess(exit2 ?? Exit.void)).toBe(true)
++
++      // 关键断言：replacement assistant 不应有 AbortedError
++      const messages = yield* MessageV2.filterCompactedEffect(chat.id)
++      const assistants = messages.filter((m) => m.info.role === "assistant")
++      const lastAssistant = assistants.at(-1)
++      expect(lastAssistant?.info.role).toBe("assistant")
++      if (lastAssistant?.info.role === "assistant") {
++        expect(lastAssistant.info.error?.name).not.toBe("MessageAbortedError")
++      }
++
++      // 清理
++      yield* Fiber.await(fiber).pipe(Effect.timeout("5 seconds"), Effect.ignore)
++    }),
++  { git: true },
++  60_000,
++)
++
+ it.instance(
+   "cancel finalizes subtask tool state",
+   () =>

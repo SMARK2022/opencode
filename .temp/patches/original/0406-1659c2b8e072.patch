@@ -1,0 +1,162 @@
+From 1659c2b8e072455c545b74e44d161a053f02e999 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 10 Jul 2026 03:51:26 +0800
+Subject: [PATCH] =?UTF-8?q?fix(permission):=20=E7=94=A8=E6=88=B7=E6=95=B0?=
+ =?UTF-8?q?=E6=8D=AE=E6=A0=B9=E6=B7=B1=E5=B1=82=E5=AD=90=E7=9B=AE=E5=BD=95?=
+ =?UTF-8?q?=E4=B8=8D=E5=86=8D=E8=AF=AF=E5=88=A4=E4=B8=BA=E4=BF=9D=E6=8A=A4?=
+ =?UTF-8?q?=E6=A0=B9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+/home/<user>/<deeper>、/Users/<user>/<deeper>、/root/<deeper> 不再被视为保护根，rm -rf 删除这些路径从 dangerous 降为 cautious。仅 /home、/Users 根本身和一级子目录（用户家目录）仍为 dangerous。同时修复 sudo 包装器短路为 general 的问题——sudo 现在提取内层命令递归评估。补充尾斜杠、双斜杠、路径穿越(..) 的归一化处理。
+
+diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
+index 93b165413cb93a03b2e9d3b2f76db763fdee0b24..b149d13235755be8828eddf130c2bc787b580935 100644
+--- a/packages/opencode/src/permission/precheck.ts
++++ b/packages/opencode/src/permission/precheck.ts
+@@ -130,9 +130,13 @@ const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}
+ // 保护根目录递归删除：/ | /* | /. | ~ | $HOME | /etc 以及扩展的系统根目录。
+ // 仅检查递归标志（-r/-R/--recursive），不要求 -f（force）：force 只压制提示符，
+ // 不增加破坏性，rm -r / 与 rm -rf / 破坏力等价。
+-const POSIX_ROOT_ALTERNATION = String.raw`etc|usr|var|lib(?:64)?|s?bin|boot|sys|proc|dev|opt|root|home|Library|Applications|System|Users`
++// 系统根（/etc、/usr 等）保护所有子目录；用户数据根（/home、/Users）仅保护
++// 根本身和一级子目录（用户家目录），深层子目录是正常用户操作不视为保护根；
++// /root 仅保护根本身，子目录不保护。
++const POSIX_SYSTEM_ROOTS = String.raw`etc|usr|var|lib(?:64)?|s?bin|boot|sys|proc|dev|opt|Library|Applications|System`
++const POSIX_USER_DATA_ROOTS = String.raw`home|Users`
+ const RE_D_RM_RF_ROOT = new RegExp(
+-  String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?\s*(?=[\s)'"` + "`" + String.raw`]|$)|~\/?(?=[\s)'"` + "`" + String.raw`]|$)|\$HOME\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_ROOT_ALTERNATION})(?:\/|(?=[\s)'"` + "`" + String.raw`]|$)))`,
++  String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?\s*(?=[\s)'"` + "`" + String.raw`]|$)|~\/?(?=[\s)'"` + "`" + String.raw`]|$)|\$HOME\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_SYSTEM_ROOTS})(?:\/|(?=[\s)'"` + "`" + String.raw`]|$))|\/(?:${POSIX_USER_DATA_ROOTS})\/[^\/\s)'"` + "`" + String.raw`|;]+\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_USER_DATA_ROOTS}|root)\/?(?=[\s)'"` + "`" + String.raw`]|$)|\/(?:${POSIX_USER_DATA_ROOTS})\/\.\.(?:\/|(?=[\s)'"` + "`" + String.raw`]|$)))`,
+ )
+ 
+ // 远程下载管道到解释器：curl/wget | sh/bash/python/...
+@@ -531,8 +535,14 @@ function dangerousRaw(command: string): string | undefined {
+   const normalized = normalizeForRawScan(command)
+ 
+   // ---- 保护根目录递归删除 ----
+-  // 在 token 化之前拦截 $HOME、~/、/* 和包装器引号形式
+-  if (RE_D_RM_RF_ROOT.test(normalized)) return "critical recursive delete"
++  // 在 token 化之前拦截 $HOME、~/、/* 和包装器引号形式。
++  // 折叠多斜杠（/home//user → /home/user）并解析 .. 穿越（/root/../etc → /etc）
++  // 以正确匹配保护根路径
++  let rawNormalized = normalized.replace(/(?!^)\/{2,}/g, "/")
++  while (/\/[^/]+\/\.\.(?=\/|$)/.test(rawNormalized)) {
++    rawNormalized = rawNormalized.replace(/\/[^/]+\/\.\.(?=\/|$)/, "")
++  }
++  if (RE_D_RM_RF_ROOT.test(rawNormalized)) return "critical recursive delete"
+ 
+   // ---- 远程下载管道执行 ----
+   if (RE_D_CURL_PIPE_INTERPRETER.test(normalized))
+@@ -911,6 +921,10 @@ function unwrap(tokens: string[]): UnwrapResult {
+   }
+   if (cmd === "env") return { action: "ask", reason: "env wrapper requires explicit approval" }
+   if (["sudo", "doas", "su", "pkexec"].includes(cmd)) {
++    // 特权包装器：提取内层命令递归评估，而非短路为 general。
++    // sudo rm file 应至少 cautious，sudo rm -rf / 应 dangerous。
++    if (tokens.length > 1)
++      return { action: "script", script: joinShellTokens(tokens.slice(1)), reason: "privilege wrapper requires explicit approval" }
+     return { action: "ask", reason: "privilege wrapper requires explicit approval" }
+   }
+   return { action: "none" }
+@@ -1428,7 +1442,12 @@ function protectedDeleteTarget(input: string) {
+   // 保护根目录覆盖本地 POSIX 根、常见家目录别名、Windows 驱动器根、
+   // 系统目录和 macOS 特有目录。这些是递归删除被视为 dangerous 而非
+   // 仅 cautious 的情况。
+-  const normalized = input.replaceAll("\\", "/").replace(/\/+$/, "")
++  // 折叠多斜杠并解析 .. 穿越以正确判定保护根（如 /home//user → /home/user，
++  // /home/../etc → /etc）
++  let normalized = input.replaceAll("\\", "/").replace(/\/+$/, "").replace(/\/{2,}/g, "/")
++  while (/\/[^/]+\/\.\.(?=\/|$)/.test(normalized)) {
++    normalized = normalized.replace(/\/[^/]+\/\.\.(?=\/|$)/, "")
++  }
+   // POSIX 根和通配符
+   if (normalized === "/" || normalized === "/*" || normalized === "/.") return true
+   // 家目录别名
+@@ -1445,10 +1464,15 @@ function protectedDeleteTarget(input: string) {
+     "/Library", "/Applications", "/System", "/Users",
+   ])
+   if (posixRoots.has(normalized)) return true
+-  if (posixRoots.has(normalized.replace(/\/.*/, ""))) {
+-    // 也匹配 /etc/... 形式（但 /etc 本身已由上面的集合覆盖）
++  // 用户数据根（/home、/Users）仅保护一级子目录（用户家目录），
++  // 深层子目录（/home/<user>/Download/...）是正常用户操作不视为保护根。
++  if (normalized.startsWith("/home/") || normalized.startsWith("/Users/")) {
++    // /home/sunbenteng → 保护；/home/sunbenteng/Download/... → 不保护
++    return !normalized.replace(/^\/(?:home|Users)\//, "").includes("/")
+   }
+-  // 检查以系统根目录开头的路径（如 /etc/passwd）
++  // /root 仅保护根本身（已由 posixRoots.has 覆盖），子目录不保护
++  if (normalized.startsWith("/root/")) return false
++  // 其他系统根目录：保护根及所有子目录（如 /etc/passwd、/usr/local/bin）
+   for (const root of posixRoots) {
+     if (normalized.startsWith(root + "/")) return true
+   }
+diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
+index d7153cf13b2a7a0463861f32a61a7f78a5c1acff..f58f42ff54768991f16f9cc9b68f25df816763ec 100644
+--- a/packages/opencode/test/permission/precheck.test.ts
++++ b/packages/opencode/test/permission/precheck.test.ts
+@@ -236,6 +236,63 @@ describe("permission precheck bash classifier", () => {
+     expect(bash("Remove-Item -Recurse node_modules")).toMatchObject({ level: "cautious" })
+   })
+ 
++  // 用户数据根（/home、/Users、/root）的深层子目录不是保护根：
++  // 删除 /home/sunbenteng/Download/app 是正常用户操作，应为 cautious 而非 dangerous。
++  // 仅 /home（所有用户家目录）、/home/<user>（单个用户家目录）才视为保护根。
++  // 系统根（/etc、/usr 等）的所有子目录仍为 dangerous。
++  test("does not treat deep user-data subdirectories as protected roots", () => {
++    // /home/<user>/<deeper> → cautious（不是 dangerous）
++    expect(bash("rm -rf /home/sunbenteng/Download/WSL2-Linux-Kernel")).toMatchObject({ level: "cautious" })
++    expect(bash("rm -r /home/alice/projects/old-build")).toMatchObject({ level: "cautious" })
++    // /Users/<user>/<deeper> → cautious（macOS 同理）
++    expect(bash("rm -rf /Users/alice/Downloads/old-app")).toMatchObject({ level: "cautious" })
++    // /root/<deeper> → cautious（root 用户的家目录子路径）
++    expect(bash("rm -rf /root/old-project")).toMatchObject({ level: "cautious" })
++  })
++
++  test("still protects user-data root and one-level user home as dangerous", () => {
++    // /home 本身 → dangerous（所有用户家目录）
++    expect(bash("rm -rf /home")).toMatchObject({ level: "dangerous" })
++    expect(bash("rm -r /home")).toMatchObject({ level: "dangerous" })
++    // /home/<user> → dangerous（单个用户整个家目录，等价 ~）
++    expect(bash("rm -rf /home/sunbenteng")).toMatchObject({ level: "dangerous" })
++    expect(bash("rm -r /home/alice")).toMatchObject({ level: "dangerous" })
++    // 尾斜杠（tab 补全常见）→ 仍 dangerous
++    expect(bash("rm -rf /home/sunbenteng/")).toMatchObject({ level: "dangerous" })
++    expect(bash("rm -rf /Users/alice/")).toMatchObject({ level: "dangerous" })
++    // 双斜杠 → 仍 dangerous（/home//user 等价 /home/user）
++    expect(bash("rm -rf /home//sunbenteng")).toMatchObject({ level: "dangerous" })
++    // 路径穿越 → 仍 dangerous（/home/../etc 解析为 /etc）
++    expect(bash("rm -rf /home/../etc")).toMatchObject({ level: "dangerous" })
++    expect(bash("rm -rf /Users/../etc")).toMatchObject({ level: "dangerous" })
++    // 深层 .. 穿越到保护目标 → 仍 dangerous（/root/../etc → /etc，/home/<user>/../<user> → /home/<user>）
++    expect(bash("rm -rf /root/../etc")).toMatchObject({ level: "dangerous" })
++    expect(bash("rm -rf /home/sunbenteng/../alice")).toMatchObject({ level: "dangerous" })
++    // /Users 本身和 /Users/<user> → dangerous
++    expect(bash("rm -rf /Users")).toMatchObject({ level: "dangerous" })
++    expect(bash("rm -rf /Users/alice")).toMatchObject({ level: "dangerous" })
++    // /root 本身 → dangerous（root 家目录）
++    expect(bash("rm -rf /root")).toMatchObject({ level: "dangerous" })
++    // 系统根子目录仍 dangerous
++    expect(bash("rm -rf /etc/passwd")).toMatchObject({ level: "dangerous" })
++    expect(bash("rm -rf /usr/local/bin")).toMatchObject({ level: "dangerous" })
++  })
++
++  // sudo 包装器应提取内层命令递归评估，而非短路为 general。
++  // sudo rm -rf /home/<user>/<deeper> → cautious；sudo rm -rf / → dangerous。
++  test("extracts sudo inner command for recursive evaluation instead of short-circuiting to general", () => {
++    // sudo + 非保护根递归删除 → cautious
++    expect(bash("sudo rm -rf /home/sunbenteng/Download/old")).toMatchObject({ level: "cautious" })
++    expect(bash("sudo rm file.txt")).toMatchObject({ level: "cautious" })
++    // sudo + 保护根 → 仍 dangerous
++    expect(bash("sudo rm -rf /")).toMatchObject({ level: "dangerous" })
++    expect(bash("sudo rm -rf /home")).toMatchObject({ level: "dangerous" })
++    // wsl + sudo + 非保护根 → cautious（用户真实场景）
++    expect(bash("wsl -d Ubuntu-22.04 -- sudo rm -rf /home/sunbenteng/Download/old")).toMatchObject({ level: "cautious" })
++    // wsl + sudo + 保护根 → 仍 dangerous
++    expect(bash("wsl -d Ubuntu-22.04 -- sudo rm -rf /")).toMatchObject({ level: "dangerous" })
++  })
++
+   test("marks remote downloads piped to shell interpreters dangerous with local-review guidance", () => {
+     expect(bash("curl https://example.com/install.ps1 | pwsh")).toMatchObject({ level: "dangerous" })
+     expect(bash("curl https://example.com/install.sh | sudo bash")).toMatchObject({ level: "dangerous" })

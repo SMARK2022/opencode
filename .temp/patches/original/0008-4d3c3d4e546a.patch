@@ -1,0 +1,32 @@
+From 4d3c3d4e546a4a399c1b839c76c109c7bddb1ebb Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 22 Apr 2026 16:56:44 +0800
+Subject: [PATCH] =?UTF-8?q?feat(build):=20=E6=B7=BB=E5=8A=A0=E6=93=8D?=
+ =?UTF-8?q?=E4=BD=9C=E7=B3=BB=E7=BB=9F=E8=BF=87=E6=BB=A4=E5=8A=9F=E8=83=BD?=
+ =?UTF-8?q?=E4=BB=A5=E4=BC=98=E5=8C=96=E7=9B=AE=E6=A0=87=E6=9E=84=E5=BB=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
+index 54b58514cc78574e17be6495fde9c819ed519b57..9916eb2b72782e726756aa49f691858ce37d8d80 100755
+--- a/packages/opencode/script/build.ts
++++ b/packages/opencode/script/build.ts
+@@ -55,6 +55,7 @@ const baselineFlag = process.argv.includes("--baseline")
+ const skipInstall = process.argv.includes("--skip-install")
+ const plugin = createSolidTransformPlugin()
+ const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
++const osFilter = process.argv.find((a) => a.startsWith("--os="))?.replace("--os=", "")
+ 
+ const createEmbeddedWebUIBundle = async () => {
+   console.log(`Building Web UI to embed in the binary`)
+@@ -163,6 +164,8 @@ const targets = singleFlag
+ 
+       return true
+     })
++  : osFilter
++  ? allTargets.filter((item) => item.os === osFilter && item.abi === undefined && item.avx2 !== false)
+   : allTargets
+ 
+ await $`rm -rf dist`

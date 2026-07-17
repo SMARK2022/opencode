@@ -1,0 +1,846 @@
+From 564b45dcaa4b6cb8b2a28f186e69a1f8169735d7 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Tue, 26 May 2026 18:57:48 +0800
+Subject: [PATCH] =?UTF-8?q?feat(notebook):=20=E5=AE=8C=E6=95=B4=E4=BF=AE?=
+ =?UTF-8?q?=E6=94=B9=E6=B7=BB=E5=8A=A0=E7=AC=94=E8=AE=B0=E6=9C=AC=E5=B7=A5?=
+ =?UTF-8?q?=E5=85=B7=E7=9A=84=E8=A1=8C=E4=B8=BA=E6=B5=8B=E8=AF=95=EF=BC=8C?=
+ =?UTF-8?q?=E5=A2=9E=E5=BC=BA=E7=BC=96=E8=BE=91=E3=80=81=E8=BF=90=E8=A1=8C?=
+ =?UTF-8?q?=E5=92=8C=E7=8E=AF=E5=A2=83=E6=93=8D=E4=BD=9C=E7=9A=84=E6=80=BB?=
+ =?UTF-8?q?=E7=BB=93=E9=80=BB=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts b/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..69cb319b23f81371fd3123b70c53980e20cf6512
+--- /dev/null
++++ b/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts
+@@ -0,0 +1,310 @@
++import { beforeEach, expect, mock, test } from "bun:test"
++
++const NotebookCellKind = { Markup: 1, Code: 2 } as const
++const EndOfLine = { LF: 1, CRLF: 2 } as const
++const notebookPath = "/tmp/notebook tool demo.ipynb"
++
++let activeNotebook: ReturnType<typeof createNotebook>
++let cellSequence = 0
++let executionOrder = 0
++const notebookListeners = new Set<(event: { notebook: typeof activeNotebook; cellChanges: Array<{ cell: NotebookCell; executionSummary?: NotebookCell["executionSummary"] }> }) => void>()
++const textListeners = new Set<(event: { document: NotebookCell["document"] }) => void>()
++
++// The VS Code extension package does not expose a lightweight test harness, so
++// this behavior test exercises the public bridge handlers through a minimal fake
++// `vscode` module. The fake owns only stable API surface used by notebook tools;
++// it intentionally avoids reaching into private helper functions.
++mock.module("vscode", () => ({
++  NotebookCellKind,
++  EndOfLine,
++  ConfigurationTarget: { Global: 1 },
++  NotebookRange: class {
++    constructor(readonly start: number, readonly end: number) {}
++  },
++  NotebookCellData: class {
++    metadata?: Record<string, unknown>
++    constructor(readonly kind: number, readonly value: string, readonly languageId: string) {}
++  },
++  NotebookEdit: {
++    replaceCells: (range: { start: number; end: number }, cells: Array<{ kind: number; value: string; languageId: string }>) => ({ type: "replace", range, cells }),
++    deleteCells: (range: { start: number; end: number }) => ({ type: "delete", range }),
++  },
++  WorkspaceEdit: class {
++    readonly entries: Array<Record<string, unknown>> = []
++    set(uri: UriLike, edits: unknown[]) {
++      this.entries.push({ type: "notebook", uri, edits })
++    }
++    replace(uri: UriLike, range: unknown, text: string) {
++      this.entries.push({ type: "text", uri, range, text })
++    }
++  },
++  Position: class {
++    constructor(readonly line: number, readonly character: number) {}
++  },
++  Range: class {
++    constructor(readonly start: unknown, readonly end: unknown) {}
++  },
++  Uri: {
++    file: (value: string) => createUri(value),
++    parse: (value: string) => createUri(value.replace(/^file:\/\//, "")),
++    joinPath: (base: UriLike, ...parts: string[]) => createUri([base.fsPath, ...parts].join("/").replace(/\/+/g, "/")),
++  },
++  workspace: {
++    notebookDocuments: [] as Array<typeof activeNotebook>,
++    workspaceFolders: [{ uri: createUri("/tmp") }],
++    fs: {
++      createDirectory: async () => undefined,
++      writeFile: async () => undefined,
++      readFile: async () => new Uint8Array(),
++    },
++    getWorkspaceFolder: () => ({ uri: createUri("/tmp") }),
++    openNotebookDocument: async () => activeNotebook,
++    applyEdit: async (edit: { entries: Array<Record<string, unknown>> }) => applyEdit(edit.entries),
++    onDidChangeNotebookDocument: (listener: (event: { notebook: typeof activeNotebook; cellChanges: Array<{ cell: NotebookCell; executionSummary?: NotebookCell["executionSummary"] }> }) => void) => {
++      notebookListeners.add(listener)
++      return { dispose: () => notebookListeners.delete(listener) }
++    },
++    onDidChangeTextDocument: (listener: (event: { document: NotebookCell["document"] }) => void) => {
++      textListeners.add(listener)
++      return { dispose: () => textListeners.delete(listener) }
++    },
++    getConfiguration: () => ({
++      get: () => false,
++      update: async () => undefined,
++    }),
++  },
++  window: {
++    activeNotebookEditor: undefined as NotebookEditor | undefined,
++    visibleNotebookEditors: [] as NotebookEditor[],
++    showNotebookDocument: async (notebook: typeof activeNotebook, options?: { selections?: Array<{ start: number; end: number }> }) => {
++      const editor: NotebookEditor = {
++        notebook,
++        selection: options?.selections?.[0] ?? { start: 0, end: 1 },
++        revealRange: () => undefined,
++      }
++      vscodeMock.window.activeNotebookEditor = editor
++      vscodeMock.window.visibleNotebookEditors = [editor]
++      return editor
++    },
++  },
++  commands: {
++    getCommands: async () => ["notebook.cell.execute", "jupyter.restartkernel", "notebook.selectKernel"],
++    executeCommand: async (command: string) => {
++      if (command === "notebook.cell.execute") executeSelectedCell()
++      if (command === "notebook.selectKernel") return true
++      return undefined
++    },
++  },
++  extensions: {
++    getExtension: () => undefined,
++  },
++  CancellationTokenSource: class {
++    readonly token = {}
++    cancel() {}
++    dispose() {}
++  },
++}))
++
++const vscodeModule = "vscode"
++const vscodeMock = (await import(vscodeModule)) as {
++  workspace: { notebookDocuments: Array<typeof activeNotebook> }
++  window: { activeNotebookEditor?: NotebookEditor; visibleNotebookEditors: NotebookEditor[] }
++}
++const { notebookSummary } = (await import(sdkNotebookUrl("summary"))) as { notebookSummary: (filePath: string) => Promise<ToolResult> }
++const { notebookSource } = (await import(sdkNotebookUrl("source"))) as { notebookSource: (input: Record<string, unknown>) => Promise<ToolResult> }
++const { editNotebook } = (await import(sdkNotebookUrl("edit"))) as { editNotebook: (input: Record<string, unknown>) => Promise<ToolResult> }
++const { runNotebook } = (await import(sdkNotebookUrl("run"))) as { runNotebook: (input: Record<string, unknown>) => Promise<ToolResult> }
++const { readNotebookCellOutput } = (await import(sdkNotebookUrl("output"))) as {
++  readNotebookCellOutput: (filePath: string, index?: number, cellId?: string) => Promise<ToolResult>
++}
++const { notebookEnv } = (await import(sdkNotebookUrl("env"))) as { notebookEnv: (input: Record<string, unknown>) => Promise<ToolResult> }
++
++beforeEach(() => {
++  cellSequence = 0
++  executionOrder = 0
++  activeNotebook = createNotebook()
++  vscodeMock.workspace.notebookDocuments = [activeNotebook]
++  vscodeMock.window.activeNotebookEditor = undefined
++  vscodeMock.window.visibleNotebookEditors = []
++  notebookListeners.clear()
++  textListeners.clear()
++})
++
++test("notebook tools expose a consistent Notebook plus tool header before details", async () => {
++  const summary = await notebookSummary(notebookPath)
++  await expectHeader(summary, "Summary")
++  expect(summary.summary).toContain("Fields: cN is 1-based display position")
++  expect(summary.summary).not.toContain("Conventions:")
++
++  const source = await notebookSource({ filePath: notebookPath, cellId: cellFragment(1), limit: 5 })
++  await expectHeader(source, "Source")
++  expect(source.summary.split("\n")[1]).toContain("target=")
++
++  await expectHeader(await editNotebook({ filePath: notebookPath, cellId: cellFragment(1), editType: "insert", newCode: "value = 1", language: "python" }), "Edit")
++  await expectHeader(await runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 1_000 }), "Run")
++
++  const output = await readNotebookCellOutput(notebookPath, undefined, cellFragment(2))
++  await expectHeader(output, "Output")
++  expect(output.summary.split("\n")[1]).toContain("target=")
++  expect(output.summary.split("\n")[1]).toContain("dirty=true")
++  expect(output.summary.split("\n")[1]).toContain("runtime=")
++
++  const env = await notebookEnv({ filePath: notebookPath, operation: "info" })
++  await expectHeader(env, "Env")
++  expect(env.summary.split("\n")[1]).toContain("target=notebook")
++  expect(env.summary.split("\n")[1]).toContain("dirty=true")
++  expect(env.summary.split("\n")[1]).toContain("runtime=")
++})
++
++test("source rejects stale cell IDs instead of reading a different notebook range", async () => {
++  await expect(notebookSource({ filePath: notebookPath, cellId: "#VSC-deadbeef", offset: 1, limit: 5 })).rejects.toThrow("Notebook cell not found")
++})
++
++test("insert result identifies the inserted cell ID before reporting shifted cells", async () => {
++  const result = await editNotebook({ filePath: notebookPath, cellId: cellFragment(1), editType: "insert", newCode: "value = 1", language: "python" })
++  const data = result.data as Record<string, unknown>
++  const insertedCellId = data.insertedCellId
++
++  expect(typeof insertedCellId).toBe("string")
++  expect(result.summary).toContain(`Inserted: c2 id=${insertedCellId}`)
++  expect(result.summary.indexOf("Inserted:")).toBeLessThan(result.summary.indexOf("Shifted:"))
++})
++
++async function expectHeader(result: { summary: string }, label: string) {
++  const lines = result.summary.split("\n")
++  expect(lines[0]).toBe(`Notebook: ${notebookPath}`)
++  expect(lines[1].startsWith(`${label}: `)).toBe(true)
++}
++
++function cellFragment(index: number) {
++  return activeNotebook.cellAt(index - 1).document.uri.fragment
++}
++
++function sdkNotebookUrl(module: string) {
++  return new URL(`../../../../sdks/vscode/src/notebook/${module}.ts`, import.meta.url).href
++}
++
++function createNotebook() {
++  const notebook = {
++    uri: createUri(notebookPath),
++    notebookType: "jupyter-notebook",
++    metadata: { kernelspec: { display_name: "Python 3.11" }, language_info: { name: "python", version: "3.11" } },
++    isDirty: true,
++    isUntitled: false,
++    isClosed: false,
++    version: 1,
++    cells: [] as NotebookCell[],
++    get cellCount() {
++      return this.cells.length
++    },
++    getCells() {
++      return this.cells
++    },
++    cellAt(index: number) {
++      return this.cells[index]
++    },
++    async save() {
++      this.isDirty = false
++      this.version++
++      return true
++    },
++  }
++  notebook.cells = [
++    createCell(notebook, NotebookCellKind.Markup, "markdown", "# Demo\n\nIntro"),
++    createCell(notebook, NotebookCellKind.Code, "python", "print('ready')", [{ mime: "application/vnd.code.notebook.stdout", text: "ready\n" }]),
++  ]
++  updateIndexes(notebook)
++  return notebook
++}
++
++function createCell(notebook: ReturnType<typeof createNotebook>, kind: number, languageId: string, text: string, outputs: Array<{ mime: string; text: string }> = []): NotebookCell {
++  const fragment = `cell-${++cellSequence}`
++  const document = createDocument(`${notebookPath}#${fragment}`, fragment, languageId, text)
++  return {
++    index: 0,
++    notebook,
++    kind,
++    document,
++    metadata: {},
++    outputs: outputs.map((output, outputIndex) => ({
++      metadata: {},
++      items: [{ mime: output.mime, data: new TextEncoder().encode(output.text) }],
++      outputIndex,
++    })),
++    executionSummary: outputs.length ? { executionOrder: ++executionOrder, success: true, timing: { startTime: 1, endTime: 2 } } : undefined,
++  }
++}
++
++function createDocument(value: string, fragment: string, languageId: string, text: string) {
++  return {
++    uri: createUri(value, fragment),
++    languageId,
++    eol: EndOfLine.LF,
++    version: 1,
++    get lineCount() {
++      return this.getText().split("\n").length
++    },
++    getText: () => text,
++    setText(next: string) {
++      text = next
++      this.version++
++    },
++    lineAt(index: number) {
++      return { text: text.split("\n")[index] ?? "", range: { end: {} } }
++    },
++  }
++}
++
++function createUri(value: string, fragment = ""): UriLike {
++  return {
++    fsPath: value.split("#")[0],
++    fragment,
++    toString: () => `file://${value}`,
++  }
++}
++
++function applyEdit(entries: Array<Record<string, unknown>>) {
++  for (const entry of entries) {
++    if (entry.type === "notebook") {
++      for (const edit of entry.edits as Array<{ type: string; range: { start: number; end: number }; cells?: Array<{ kind: number; value: string; languageId: string }> }>) {
++        if (edit.type === "delete") activeNotebook.cells.splice(edit.range.start, edit.range.end - edit.range.start)
++        if (edit.type === "replace") activeNotebook.cells.splice(edit.range.start, edit.range.end - edit.range.start, ...(edit.cells ?? []).map((cell) => createCell(activeNotebook, cell.kind, cell.languageId, cell.value)))
++      }
++      activeNotebook.version++
++      activeNotebook.isDirty = true
++      updateIndexes(activeNotebook)
++    }
++    if (entry.type === "text") {
++      const document = activeNotebook.cells.map((cell) => cell.document).find((item) => item.uri.toString() === (entry.uri as UriLike).toString())
++      document?.setText(String(entry.text))
++      for (const listener of textListeners) if (document) listener({ document })
++    }
++  }
++  return true
++}
++
++function updateIndexes(notebook: ReturnType<typeof createNotebook>) {
++  notebook.cells.forEach((cell, index) => {
++    cell.index = index
++  })
++}
++
++function executeSelectedCell() {
++  const index = vscodeMock.window.activeNotebookEditor?.selection.start ?? 0
++  const cell = activeNotebook.cellAt(index)
++  cell.executionSummary = { executionOrder: ++executionOrder, success: true, timing: { startTime: 10, endTime: 12 } }
++  for (const listener of notebookListeners) listener({ notebook: activeNotebook, cellChanges: [{ cell, executionSummary: cell.executionSummary }] })
++}
++
++type UriLike = { fsPath: string; fragment: string; toString(): string }
++type ToolResult = { summary: string; data?: unknown }
++type NotebookEditor = { notebook: typeof activeNotebook; selection: { start: number; end: number }; revealRange(range: { start: number; end: number }): void }
++type NotebookCell = {
++  index: number
++  notebook: ReturnType<typeof createNotebook>
++  kind: number
++  document: ReturnType<typeof createDocument>
++  metadata: Record<string, unknown>
++  outputs: Array<{ metadata: Record<string, unknown>; items: Array<{ mime: string; data: Uint8Array }>; outputIndex: number }>
++  executionSummary?: { executionOrder?: number; success?: boolean; timing?: { startTime: number; endTime: number } }
++}
+diff --git a/sdks/vscode/src/notebook/edit.ts b/sdks/vscode/src/notebook/edit.ts
+index b70cf4c7b18546192bb7381dd20f36a9e952cb60..bd8a9a1280289962c24b1ed1d036770b26919c34 100644
+--- a/sdks/vscode/src/notebook/edit.ts
++++ b/sdks/vscode/src/notebook/edit.ts
+@@ -23,8 +23,9 @@ import {
+   fullDocumentRange,
+   documentEol,
+   previewText,
++  quoteForSummary,
+ } from "../util"
+-import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges } from "./format"
++import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges, notebookHeader, cellRef } from "./format"
+ import { resolveNotebook, resolveNotebookCell } from "./resolve"
+ 
+ const EDIT_TYPES = new Set(["insert", "edit", "delete"])
+@@ -120,8 +121,9 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
+   const edit = new vscode.WorkspaceEdit()
+   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(insertIndex, insertIndex), [newCell])])
+   const applied = await applyNotebookEditAndWait(notebook, edit)
++  const insertedCell = notebook.cellAt(insertIndex)
+   const shiftedCell = shiftedOldIdx !== undefined ? notebook.cellAt(shiftedOldIdx + 1) : undefined
+-  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, affectedCellIndex: insertIndex, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source, beforeSource: "", afterSource: source })
++  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, insertedCell, affectedCellIndex: insertIndex, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source, beforeSource: "", afterSource: source })
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -482,6 +484,7 @@ function compactEditResult(
+     beforeCount: number
+     afterCount: number
+     anchorCell?: vscode.NotebookCell
++    insertedCell?: vscode.NotebookCell
+     deletedCellIndex?: number
+     affectedCellIndex?: number
+     kind?: string
+@@ -501,32 +504,54 @@ function compactEditResult(
+     afterSource?: string
+   },
+ ) {
++  const target = info.editType === "insert" && info.anchorCell
++    ? `after ${cellRef(info.anchorCell)}`
++    : info.editType === "insert" && info.insertedCell
++      ? `at ${cellRef(info.insertedCell)}`
++      : info.editType === "delete" && info.deletedId
++        ? `c${(info.deletedCellIndex ?? 0) + 1} id=${info.deletedId} ${info.deletedKind}/${info.deletedLang}`
++        : info.anchorCell
++          ? cellRef(info.anchorCell)
++          : `index=${info.opIndex}`
+   const lines: Array<string | undefined> = [
+-    `Notebook edit: applied=${info.applied} op=${info.editType} at=${info.opIndex} num_cells=${info.beforeCount}->${info.afterCount} dirty=${notebook.isDirty}.`,
++    ...notebookHeader(notebook, "Edit", [
++      `op=${info.editType}`,
++      `applied=${info.applied}`,
++      `dirty=${notebook.isDirty}`,
++      `cells=${info.beforeCount}->${info.afterCount}`,
++      `target=${quoteForSummary(target)}`,
++    ]),
+   ]
+ 
+-  // --- Anchor ---
+   if (info.editType === "delete" && info.deletedId) {
+-    // Deleted cell: strikethrough with full metadata
+     const dIdx = (info.deletedCellIndex ?? 0) + 1
+-    lines.push(`Anchor: ~~c${dIdx} id=${info.deletedId} ${info.deletedKind}/${info.deletedLang} lines=${info.deletedLineCount} first=${JSON.stringify(info.deletedFirst)}~~`)
++    // Deleted ids are intentionally shown as invalid handles so agents do not
++    // reuse them after a successful delete; the shifted row below is the next
++    // safe continuation point when one exists.
++    lines.push(`Deleted: c${dIdx} id=${info.deletedId} ${info.deletedKind}/${info.deletedLang} lines=${info.deletedLineCount} first=${JSON.stringify(info.deletedFirst)}`)
+   } else if (info.anchorCell) {
+-    const displayIdx = info.deletedCellIndex !== undefined ? info.deletedCellIndex + 1 : c1(info.anchorCell)
+     const anchorId = copilotLikeCellId(info.anchorCell)
+     const typePart = info.oldKind
+       ? `${info.oldKind}/${info.oldLang}->${info.kind}/${info.language}`
+       : `${cellTypeLabel(info.anchorCell.kind)}/${info.anchorCell.document.languageId}`
+-    lines.push(`Anchor: c${displayIdx} id=${anchorId} ${typePart}.`)
++    lines.push(`Anchor: c${c1(info.anchorCell)} id=${anchorId} ${typePart}.`)
+     if (info.oldKind) {
+       lines.push(`NOTE: Type change replaced the cell. Use id=${anchorId} for subsequent operations on this cell.`)
+     }
+   }
+ 
++  if (info.editType === "insert" && info.insertedCell) {
++    lines.push(`Inserted: c${c1(info.insertedCell)} id=${copilotLikeCellId(info.insertedCell)} ${cellTypeLabel(info.insertedCell.kind)}/${info.insertedCell.document.languageId}.`)
++  }
++
+   // --- Affected ---
+   if ((info.editType === "delete" || info.editType === "insert") && info.shiftedCell) {
+     const oldIdx = (info.shiftedOldIdx ?? 0) + 1
+     const newIdx = c1(info.shiftedCell)
+-    lines.push(`Affected: c${oldIdx}->c${newIdx} id=${copilotLikeCellId(info.shiftedCell)} ${cellTypeLabel(info.shiftedCell.kind)}/${info.shiftedCell.document.languageId} lines=${info.shiftedCell.document.lineCount} first=${JSON.stringify(previewText((info.shiftedCell.document.getText().split("\n")[0] ?? "").trim(), 50))}`)
++    // `Shifted` names index movement separately from the inserted/deleted cell;
++    // this avoids the previous ambiguous `Affected` row being mistaken for the
++    // newly inserted cell id.
++    lines.push(`Shifted: c${oldIdx}->c${newIdx} id=${copilotLikeCellId(info.shiftedCell)} ${cellTypeLabel(info.shiftedCell.kind)}/${info.shiftedCell.document.languageId} lines=${info.shiftedCell.document.lineCount} first=${JSON.stringify(previewText((info.shiftedCell.document.getText().split("\n")[0] ?? "").trim(), 50))}`)
+   }
+ 
+   if (info.contextSummary) {
+@@ -545,6 +570,8 @@ function compactEditResult(
+       cellCountBefore: info.beforeCount,
+       cellCountAfter: info.afterCount,
+       anchorCellIndex: info.anchorCell?.index,
++      insertedCellIndex: info.insertedCell?.index,
++      insertedCellId: info.insertedCell ? copilotLikeCellId(info.insertedCell) : undefined,
+       deletedCellIndex: info.deletedCellIndex,
+       affectedCellIndex: info.affectedCellIndex,
+       dirty: notebook.isDirty,
+diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
+index 8a9a06b0abc7f7a8c83a407e7a7aa8c4ef6edd59..31feaeece7537b7e23c4c0121a6ef4a5399c7475 100644
+--- a/sdks/vscode/src/notebook/env.ts
++++ b/sdks/vscode/src/notebook/env.ts
+@@ -40,8 +40,9 @@
+  */
+ import * as vscode from "vscode"
+ import { TextDecoder } from "node:util"
+-import { extensionState, extensionInfo, stringProp } from "../util"
++import { extensionState, extensionInfo, stringProp, quoteForSummary } from "../util"
+ import { resolveNotebook } from "./resolve"
++import { notebookHeader, runtimeLabel } from "./format"
+ 
+ // ---------------------------------------------------------------------------
+ // Types
+@@ -142,6 +143,19 @@ export async function notebookEnv(input: Record<string, unknown>) {
+   }
+ }
+ 
++function envSummaryHeader(notebook: vscode.NotebookDocument, operation: Operation, status?: string, dirty = String(notebook.isDirty), runtime = runtimeLabel(notebook) ?? "unknown") {
++  // Env operations all target notebook-level state rather than a cell. Keeping
++  // target/dirty/runtime in the shared second line prevents failure branches
++  // from losing the context needed for the model's next tool decision.
++  return notebookHeader(notebook, "Env", [
++    `operation=${operation}`,
++    "target=notebook",
++    status ? `status=${status}` : undefined,
++    `dirty=${dirty}`,
++    `runtime=${quoteForSummary(runtime)}`,
++  ])
++}
++
+ // ===========================================================================
+ // info — kernel / interpreter / metadata snapshot
+ // ===========================================================================
+@@ -154,7 +168,7 @@ async function probeNotebookEnv(notebook: vscode.NotebookDocument, reason?: stri
+   return {
+     ran: false,
+     summary: [
+-      `Operation: info`,
++      ...envSummaryHeader(notebook, "info", undefined, String(notebook.isDirty), activeRuntime ? formatActiveRuntime(activeRuntime) : runtimeLabel(notebook) ?? "unknown"),
+       `Notebook runtime: ${activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"}`,
+       `Python/Jupyter extensions: ${extensionState(PYTHON_ID)}/${extensionState(JUPYTER_ID)}.`,
+       `Notebook saved metadata: ${formatSavedMetadata(savedMetadata)}.`,
+@@ -203,6 +217,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
+   const jupyter = vscode.extensions.getExtension(JUPYTER_ID)
+   if (!jupyter) {
+     return configureResult({
++      notebook,
+       path: primaryPath,
+       reason,
+       status: "failed",
+@@ -273,6 +288,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
+ 
+   if (preCheck.configured) {
+     return configureResult({
++      notebook,
+       path: primaryPath,
+       reason,
+       status: "configured",
+@@ -379,6 +395,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
+ 
+   // ---- node 10: construct response ----
+   return configureResult({
++    notebook,
+     path: primaryPath,
+     reason,
+     status,
+@@ -464,6 +481,7 @@ function resolveConfigureStatus(
+ }
+ 
+ function configureResult(input: {
++  notebook: vscode.NotebookDocument
+   path: string
+   reason?: string
+   status: ConfigureStatus
+@@ -483,8 +501,7 @@ function configureResult(input: {
+   return {
+     ran: true,
+     summary: [
+-      "Operation: configure",
+-      `Status: ${input.status}`,
++      ...envSummaryHeader(input.notebook, "configure", input.status),
+       input.summary,
+       guidance,
+       input.reason ? `Reason: ${input.reason}` : "",
+@@ -569,7 +586,10 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
+   if (!jupyter) {
+     return {
+       ran: true,
+-      summary: "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first.",
++      summary: [
++        ...envSummaryHeader(notebook, "restart", "failed"),
++        "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first.",
++      ].join("\n"),
+       data: { path: primaryPath, operation: "restart", reason, jupyterFound: false, durationMs: Date.now() - startedAt },
+     }
+   }
+@@ -580,7 +600,10 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
+   if (!allCommands.includes(RESTART_CMD)) {
+     return {
+       ran: true,
+-      summary: "jupyter.restartkernel command is not registered. Check that the Jupyter extension is correctly installed.",
++      summary: [
++        ...envSummaryHeader(notebook, "restart", "failed"),
++        "jupyter.restartkernel command is not registered. Check that the Jupyter extension is correctly installed.",
++      ].join("\n"),
+       data: {
+         path: primaryPath,
+         operation: "restart",
+@@ -614,7 +637,7 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
+     return {
+       ran: true,
+       summary: [
+-        "Operation: restart",
++        ...envSummaryHeader(notebook, "restart", "requested"),
+         "Kernel restart requested. All runtime state from previous cell executions should be cleared.",
+         "Rerun setup or import cells before running dependent cells.",
+         reason ? `Reason: ${reason}` : "",
+@@ -633,7 +656,10 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
+     const message = error instanceof Error ? error.message : String(error)
+     return {
+       ran: true,
+-      summary: `Kernel restart invocation failed: ${message}.`,
++      summary: [
++        ...envSummaryHeader(notebook, "restart", "failed"),
++        `Kernel restart invocation failed: ${message}.`,
++      ].join("\n"),
+       data: { path: primaryPath, operation: "restart", reason, error: message, durationMs: Date.now() - startedAt },
+     }
+   } finally {
+@@ -657,7 +683,7 @@ async function saveNotebook(notebook: vscode.NotebookDocument, reason?: string)
+     return {
+       ran: true,
+       summary: [
+-        "Operation: save",
++        ...envSummaryHeader(notebook, "save", "skipped", `${notebook.isDirty}->${notebook.isDirty}`),
+         "Saved: skipped — notebook is untitled and has no stable file path.",
+         "Use a Save As / create-file workflow first, then save the named notebook.",
+         reason ? `Reason: ${reason}` : "",
+@@ -708,7 +734,7 @@ async function saveNotebook(notebook: vscode.NotebookDocument, reason?: string)
+   return {
+     ran: true,
+     summary: [
+-      `Operation: save`,
++      ...envSummaryHeader(notebook, "save", saved ? "saved" : saveError ? "error" : "not-confirmed", `${beforeDirty}->${afterDirty}`),
+       `Saved: ${saved ? "yes" : saveError ? "error" : "not confirmed"}`,
+       `Dirty: ${beforeDirty} -> ${afterDirty}  Version: ${beforeVersion} -> ${afterVersion}`,
+       saveError ? `Save error: ${saveError}` : undefined,
+diff --git a/sdks/vscode/src/notebook/format.ts b/sdks/vscode/src/notebook/format.ts
+index cfc0116319ce6bc73a4b823b0f393eab7c631a5b..7c9e8c721c6cc5adb79c2889ed448158740a2387 100644
+--- a/sdks/vscode/src/notebook/format.ts
++++ b/sdks/vscode/src/notebook/format.ts
+@@ -17,6 +17,7 @@ import {
+   previewText,
+   formatBytes,
+   quoteForSummary,
++  toPosixPath,
+ } from "../util"
+ 
+ // ---------------------------------------------------------------------------
+@@ -215,6 +216,35 @@ export function runtimeLabel(notebook: vscode.NotebookDocument) {
+   return languageName ?? null
+ }
+ 
++/**
++ * Returns the path string shown to the model at the top of every notebook tool
++ * result. Keep this display-only path POSIX-normalized for token efficiency;
++ * data payloads can continue carrying the original VS Code fsPath/URI shape.
++ */
++export function notebookPath(notebook: vscode.NotebookDocument) {
++  return toPosixPath(notebook.uri.fsPath || notebook.uri.toString())
++}
++
++/**
++ * All notebook tools start with the same two model-facing lines:
++ * `Notebook:` identifies the document, and `<Tool>:` carries operation fields.
++ * This invariant lets agents parse summaries without relearning per-tool layout.
++ */
++export function notebookHeader(notebook: vscode.NotebookDocument, label: string, fields: Array<string | undefined>) {
++  return [
++    `Notebook: ${notebookPath(notebook)}`,
++    `${label}: ${fields.filter(Boolean).join(" ")}`,
++  ]
++}
++
++/**
++ * Compact cell references always pair the shifting display index with the stable
++ * #VSC identifier, because agents must never treat cN alone as a durable handle.
++ */
++export function cellRef(cell: vscode.NotebookCell) {
++  return `c${c1(cell)} id=${copilotLikeCellId(cell)} ${cellTypeLabel(cell.kind)}/${cell.document.languageId}`
++}
++
+ // ---------------------------------------------------------------------------
+ // Virtual document line ranges
+ // ---------------------------------------------------------------------------
+diff --git a/sdks/vscode/src/notebook/output.ts b/sdks/vscode/src/notebook/output.ts
+index 46e78bfb1783d6f1572c6dff1bc7639d84490299..8bde3a7bcad421df67398a23dde41c94a811a97d 100644
+--- a/sdks/vscode/src/notebook/output.ts
++++ b/sdks/vscode/src/notebook/output.ts
+@@ -7,15 +7,16 @@
+  */
+ import * as vscode from "vscode"
+ import * as path from "node:path"
++import { quoteForSummary } from "../util"
+ import {
+-  c1,
+-  copilotLikeCellId,
+   existingOuts,
+   compactCell,
+   runtimeLabel,
+   isTextLikeMime,
+   extensionForMime,
+   formatArtifactSummary,
++  notebookHeader,
++  cellRef,
+ } from "./format"
+ import { resolveNotebook, resolveNotebookCell } from "./resolve"
+ 
+@@ -45,11 +46,16 @@ async function serializeNotebookCellOutput(notebook: vscode.NotebookDocument, ce
+     )
+   ).flat()
+ 
+-  const cellId = copilotLikeCellId(cell)
+   const summaryLines = [
+-    `Cell c${c1(cell)} id=${cellId} existing outputs: ${existingOuts(cell).join(", ") || "none"}.`,
+-    `ArtifactsRoot: .opencode/cache/notebook-outputs/`,
++    ...notebookHeader(notebook, "Output", [
++      `target=${quoteForSummary(cellRef(cell))}`,
++      `dirty=${notebook.isDirty}`,
++      `runtime=${quoteForSummary(runtimeLabel(notebook) ?? "unknown")}`,
++      `outs=${quoteForSummary(existingOuts(cell).join(",") || "none")}`,
++      `artifacts=${artifacts.length}`,
++    ]),
+     "",
++    `ArtifactsRoot: .opencode/cache/notebook-outputs/`,
+     "Artifacts:",
+     ...artifacts.map((a) => formatArtifactSummary(a)),
+   ].join("\n")
+diff --git a/sdks/vscode/src/notebook/run.ts b/sdks/vscode/src/notebook/run.ts
+index 0f4be392293676256499e7cf0448aad030bc2457..fd66900d1d4e40e79fe3a3028a11da2ed9364c38 100644
+--- a/sdks/vscode/src/notebook/run.ts
++++ b/sdks/vscode/src/notebook/run.ts
+@@ -9,7 +9,7 @@
+  * Primary input: `cellId` (Copilot-style #VSC-xxxxxxxx).
+  */
+ import * as vscode from "vscode"
+-import { stringProp, numberProp, toPosixPath, quoteForSummary } from "../util"
++import { stringProp, numberProp, quoteForSummary } from "../util"
+ import {
+   c1,
+   copilotLikeCellId,
+@@ -17,6 +17,8 @@ import {
+   executionText,
+   runtimeLabel,
+   formatArtifactSummary,
++  notebookHeader,
++  cellRef,
+ } from "./format"
+ import { resolveNotebook, resolveNotebookCell } from "./resolve"
+ import { serializeNotebookOutputItem } from "./output"
+@@ -138,9 +140,8 @@ function resolveRunTarget(notebook: vscode.NotebookDocument, cellId: string, end
+ }
+ 
+ function describeRunTarget(cells: vscode.NotebookCell[]) {
+-  if (cells.length === 1) return `cell ${c1(cells[0])}`
+-  const indices = cells.map((c) => c1(c))
+-  return `range ${indices[0]}-${indices[indices.length - 1]}`
++  if (cells.length === 1) return cellRef(cells[0])
++  return `${cellRef(cells[0])}..${cellRef(cells[cells.length - 1])}`
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -175,9 +176,12 @@ function runSummaryText(
+ ) {
+   const artifactRoot = ".opencode/cache/notebook-outputs/"
+   return [
+-    `Notebook: ${toPosixPath(notebook.uri.fsPath || notebook.uri.toString())}`,
+-    `Run: target=${target} completed=${completed} dirty=${notebook.isDirty} runtime=${runtimeLabel(notebook) ?? "unknown"}`,
+-    `ArtifactsRoot: ${artifactRoot}`,
++    ...notebookHeader(notebook, "Run", [
++      `target=${quoteForSummary(target)}`,
++      `completed=${completed}`,
++      `dirty=${notebook.isDirty}`,
++      `runtime=${quoteForSummary(runtimeLabel(notebook) ?? "unknown")}`,
++    ]),
+     "",
+     "Cells:",
+     ...cells.map(
+@@ -185,6 +189,7 @@ function runSummaryText(
+         `c${c.i} id=${c.id} exec=${quoteForSummary(c.exec)} outs=${quoteForSummary(c.existing_outs.join(",") || "none")}`,
+     ),
+     "",
++    `ArtifactsRoot: ${artifactRoot}`,
+     "Artifacts:",
+     ...cells.flatMap((c) => c.artifacts.map((a) => formatArtifactSummary(a, c.i))),
+   ].join("\n")
+diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/source.ts
+index 2f3ea39549665ac93fc035968ccbf6ed16091c9f..39fbb7f37cb41833e6cb910bd2f111ad26dd98d1 100644
+--- a/sdks/vscode/src/notebook/source.ts
++++ b/sdks/vscode/src/notebook/source.ts
+@@ -13,8 +13,8 @@
+  * (Copilot-style #VSC-xxxxxxxx).
+  */
+ import * as vscode from "vscode"
+-import { stringProp, numberProp } from "../util"
+-import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges } from "./format"
++import { stringProp, numberProp, quoteForSummary } from "../util"
++import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges, runtimeLabel, notebookHeader, cellRef } from "./format"
+ import { resolveNotebook, resolveNotebookCell } from "./resolve"
+ 
+ // ---------------------------------------------------------------------------
+@@ -34,13 +34,10 @@ export async function notebookSource(input: Record<string, unknown>) {
+ 
+   const ranges = computeVirtualRanges(notebook)
+ 
+-  // Resolve target cell via cellId (stable identifier; no cellIndex in schema)
++  // A supplied cellId is a precise request, not a hint. If it is stale or bogus,
++  // fail like edit/run/output instead of silently returning unrelated source.
+   const cellId = stringProp(input, "cellId")
+-  let cell: vscode.NotebookCell | undefined
+-  if (cellId) {
+-    try { cell = resolveNotebookCell(notebook, undefined, cellId) }
+-    catch { cell = undefined }
+-  }
++  const cell = cellId ? resolveNotebookCell(notebook, undefined, cellId) : undefined
+   const targetCellIndex = cell?.index
+ 
+   // Determine line window
+@@ -56,8 +53,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+         globalStart = offset
+       } else {
+         globalStart = range.start
+-        warning =
+-          "WARNING: Offset out of bounds for the specified cell! ALWAYS use GLOBAL document line numbers (1-based). Offset reset to default."
++        warning = "Offset is outside the target cell range; reset to the cell range start. Offsets are global virtual source line numbers."
+       }
+     } else {
+       globalStart = range.start
+@@ -131,7 +127,23 @@ export async function notebookSource(input: Record<string, unknown>) {
+   if (!bytesCut && renderedLines < limit) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
+   const more = lastRenderedLine < globalEnd
+ 
+-  let output = warning ? `${warning}\n\n` : ""
++  const targetRange = targetCellIndex !== undefined ? ranges.get(targetCellIndex) : undefined
++  let output = [
++    ...notebookHeader(notebook, "Source", [
++      `target=${quoteForSummary(cell ? cellRef(cell) : "all")}`,
++      targetRange ? `range=[${targetRange.start},${targetRange.end}]` : undefined,
++      `offset=${globalStart}`,
++      `limit=${limit}`,
++      `returned=${renderedLines}`,
++      `total=${totalLines}`,
++      `truncated=${bytesCut || more}`,
++      `dirty=${notebook.isDirty}`,
++      `runtime=${quoteForSummary(runtimeLabel(notebook) ?? "unknown")}`,
++    ]),
++    warning ? `Warning: ${warning}` : undefined,
++    "",
++  ].filter((line): line is string => line !== undefined).join("\n")
++  output += "\n"
+   output +=
+     [`<path>${notebook.uri.fsPath || notebook.uri.toString()}</path>`, `<type>notebook</type>`, "<content>"].join(
+       "\n",
+@@ -150,7 +162,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+     summary: output,
+     data: {
+       path: notebook.uri.fsPath || notebook.uri.toString(),
+-      target: targetCellIndex !== undefined ? `cell ${targetCellIndex}` : "all",
++      target: targetCellIndex !== undefined ? `cell ${targetCellIndex + 1}` : "all",
+       cellId: cellId ?? (targetCellIndex !== undefined ? copilotLikeCellId(notebook.cellAt(targetCellIndex)) : undefined),
+       globalStart,
+       limit,
+diff --git a/sdks/vscode/src/notebook/summary.ts b/sdks/vscode/src/notebook/summary.ts
+index 6e3918aea28295d0f75b77fdc366f8217a881274..2767bebee883475a0dc2d6de5f34140f23d14c3c 100644
+--- a/sdks/vscode/src/notebook/summary.ts
++++ b/sdks/vscode/src/notebook/summary.ts
+@@ -3,8 +3,8 @@
+  * execution state, and output MIME types as a compact LLM-friendly summary.
+  */
+ import * as vscode from "vscode"
+-import { toPosixPath, quoteForSummary } from "../util"
+-import { compactCell, runtimeLabel, computeVirtualRanges } from "./format"
++import { quoteForSummary } from "../util"
++import { compactCell, runtimeLabel, computeVirtualRanges, notebookHeader } from "./format"
+ import { resolveNotebook } from "./resolve"
+ 
+ // ---------------------------------------------------------------------------
+@@ -53,10 +53,18 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
+       : `${executed.length}/${code.length} code cells executed`
+ 
+   return [
+-    `Notebook: ${toPosixPath(notebook.uri.fsPath || notebook.uri.toString())}`,
+-    `Type: ${notebook.notebookType}, dirty=${notebook.isDirty}, num_cells=${notebook.cellCount}, runtime=${runtimeLabel(notebook) ?? "unknown"}. ${status}`,
++    ...notebookHeader(notebook, "Summary", [
++      `type=${notebook.notebookType}`,
++      `dirty=${notebook.isDirty}`,
++      `cells=${notebook.cellCount}`,
++      `runtime=${quoteForSummary(runtimeLabel(notebook) ?? "unknown")}`,
++      `status=${quoteForSummary(status)}`,
++    ]),
+     "",
+-    `Conventions: cell indexes (cN) are 1-based; cell IDs (#VSC-xxxxxxxx) are stable for existing cells within the current session (insert/delete preserves the URI). Cell replacement (type change) produces a new ID — the edit response shows the updated ID; line range=[A,B] is 1-based inclusive in the virtual source document; headers and visual separators are unnumbered.`,
++    // Keep the contract reminder short: the detailed rules live in tool
++    // descriptions, while this line preserves the invariants needed for the next
++    // call without crowding out the first-screen cell list.
++    `Fields: cN is 1-based display position; id is the stable #VSC handle; range=[A,B] uses global virtual source lines.`,
+     "",
+     'Cells (format: cN id=<#VSC-xxx> <kind>/<lang> lines=<count> range=[A,B] exec="<run state>" existing_outs="<mime list>" first="<first source line>"):',
+     ...cells.map((cell) => {

@@ -1,0 +1,225 @@
+From fc63945230100998fe253b53f7c000338ae176ce Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 22 Apr 2026 20:22:30 +0800
+Subject: [PATCH] =?UTF-8?q?feat(signal):=20=E6=B7=BB=E5=8A=A0createTokenFl?=
+ =?UTF-8?q?owPulse=E5=87=BD=E6=95=B0=EF=BC=8C=E4=BC=98=E5=8C=96=E8=BE=93?=
+ =?UTF-8?q?=E5=85=A5=E8=BE=93=E5=87=BA=E6=B5=81=E5=8A=A8=E7=8A=B6=E6=80=81?=
+ =?UTF-8?q?=E7=9A=84=E7=AE=A1=E7=90=86?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+index 7e114073921ddb5741c67f505746f8541e1224a3..39ffbf5d20ae4faa68ccf43ab1c6bf087e3b5077 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+@@ -36,7 +36,7 @@ import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
+ import { DialogAlert } from "../../ui/dialog-alert"
+ import { useToast } from "../../ui/toast"
+ import { useKV } from "../../context/kv"
+-import { createFadeIn, createThrottledSignal } from "../../util/signal"
++import { createFadeIn, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+ import { useTextareaKeybindings } from "../textarea-keybindings"
+ import { DialogSkill } from "../dialog-skill"
+ import { DialogWorkspaceCreate, restoreWorkspaceSession } from "../dialog-workspace-create"
+@@ -156,7 +156,7 @@ export function Prompt(props: PromptProps) {
+     return messages.findLast((m): m is UserMessage => m.role === "user")
+   })
+ 
+-  type UsageInfo = { flow: string; context: string | undefined; cost: string | undefined }
++  type UsageInfo = { input: number; output: number; context: string | undefined; cost: string | undefined }
+ 
+   const usageRaw = createMemo((): UsageInfo | undefined => {
+     if (!props.sessionID) return
+@@ -167,7 +167,7 @@ export function Prompt(props: PromptProps) {
+     // If no assistant messages yet, show zeros when running
+     if (assistants.length === 0) {
+       if (!isRunning) return
+-      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
++      return { input: 0, output: 0, context: undefined, cost: undefined }
+     }
+ 
+     // Sum confirmed tokens across all assistant messages (each tool-call round creates a new message)
+@@ -217,14 +217,15 @@ export function Prompt(props: PromptProps) {
+ 
+     if (tokens <= 0) {
+       if (!isRunning) return
+-      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
++      return { input: 0, output: 0, context: undefined, cost: undefined }
+     }
+ 
+     const model = sync.data.provider.find((item) => item.id === agg.providerID)?.models[agg.modelID]
+     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
+     const cost = msg.reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
+     return {
+-      flow: `↑ ${Locale.number(totalInput)} · ↓ ${Locale.number(totalOutput)}`,
++      input: totalInput,
++      output: totalOutput,
+       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
+       cost: cost > 0 ? money.format(cost) : undefined,
+     }
+@@ -232,6 +233,7 @@ export function Prompt(props: PromptProps) {
+ 
+   const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
+   createEffect(() => setUsageThrottled(usageRaw()))
++  const usageFlow = createTokenFlowPulse(usage)
+ 
+   const [store, setStore] = createStore<{
+     prompt: PromptInfo
+@@ -1396,7 +1398,10 @@ export function Prompt(props: PromptProps) {
+                     <Match when={usage()}>
+                       {(item) => (
+                         <text fg={theme.textMuted} wrapMode="none">
+-                          {[item().flow, item().context, item().cost].filter(Boolean).join(" · ")}
++                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} ·{" "}
++                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
++                          {item().context ? ` · ${item().context}` : ""}
++                          {item().cost ? ` · ${item().cost}` : ""}
+                         </text>
+                       )}
+                     </Match>
+diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
+index 1c22f5300d6fc975d604ffb57b652057c1d2b96c..3afb6d897cae002d96bcbc782f1882f2b962b3c8 100644
+--- a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
++++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
+@@ -2,6 +2,7 @@ import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+ import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
+ import { createEffect, createMemo, createSignal } from "solid-js"
+ import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
++import { createTokenFlowPulse } from "../../util/signal"
+ 
+ const id = "internal:sidebar-context"
+ 
+@@ -82,13 +83,17 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
+   const [state, setStateThrottled] = createSignal<StateValue>({ tokens: 0, input: 0, output: 0, percent: null })
+   const triggerStateUpdate = leadingAndTrailing(throttle, (v: StateValue) => setStateThrottled(() => v), 50)
+   createEffect(() => triggerStateUpdate(stateRaw()))
++  const flow = createTokenFlowPulse(state)
+ 
+   return (
+     <box>
+       <text fg={theme().text}>
+         <b>Context</b>
+       </text>
+-      <text fg={theme().textMuted}>↑ {state().input.toLocaleString()} · ↓ {state().output.toLocaleString()}</text>
++      <text fg={theme().textMuted}>
++        <span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {state().input.toLocaleString()} ·{" "}
++        <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {state().output.toLocaleString()}
++      </text>
+       <text fg={theme().textMuted}>{state().tokens.toLocaleString()} tokens</text>
+       <text fg={theme().textMuted}>{state().percent ?? 0}% used</text>
+       <text fg={theme().textMuted}>{money.format(cost())} spent</text>
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
+index 3ba98c88bfe629d222534e48336a9329b6bb516b..34061dd0b4376b7fb3cc60d40ae6e19eb19b66e4 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
+@@ -7,7 +7,7 @@ import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+ import { useCommandDialog } from "@tui/component/dialog-command"
+ import { useKeybind } from "../../context/keybind"
+ import { Locale } from "@/util"
+-import { createThrottledSignal } from "../../util/signal"
++import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+ import { useTerminalDimensions } from "@opentui/solid"
+ 
+ export function SubagentFooter() {
+@@ -36,7 +36,7 @@ export function SubagentFooter() {
+ 
+   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
+ 
+-  type UsageInfo = { flow: string; context: string | undefined; cost: string | undefined }
++  type UsageInfo = { input: number; output: number; context: string | undefined; cost: string | undefined }
+ 
+   const usageRaw = createMemo((): UsageInfo | undefined => {
+     const isRunning = (status()?.type ?? "idle") !== "idle"
+@@ -46,7 +46,7 @@ export function SubagentFooter() {
+     // If no assistant messages yet, show zeros when running
+     if (assistants.length === 0) {
+       if (!isRunning) return
+-      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
++      return { input: 0, output: 0, context: undefined, cost: undefined }
+     }
+ 
+     // Sum confirmed tokens across all assistant messages (each tool-call round creates a new message)
+@@ -96,14 +96,15 @@ export function SubagentFooter() {
+ 
+     if (tokens <= 0) {
+       if (!isRunning) return
+-      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
++      return { input: 0, output: 0, context: undefined, cost: undefined }
+     }
+ 
+     const model = sync.data.provider.find((item) => item.id === agg.providerID)?.models[agg.modelID]
+     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
+     const cost = msg.reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
+     return {
+-      flow: `↑ ${Locale.number(totalInput)} · ↓ ${Locale.number(totalOutput)}`,
++      input: totalInput,
++      output: totalOutput,
+       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
+       cost: cost > 0 ? money.format(cost) : undefined,
+     }
+@@ -111,6 +112,7 @@ export function SubagentFooter() {
+ 
+   const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
+   createEffect(() => setUsageThrottled(usageRaw()))
++  const usageFlow = createTokenFlowPulse(usage)
+ 
+   const { theme } = useTheme()
+   const keybind = useKeybind()
+@@ -144,7 +146,10 @@ export function SubagentFooter() {
+             <Show when={usage()}>
+               {(item) => (
+                 <text fg={theme.textMuted} wrapMode="none">
+-                  {[item().flow, item().context, item().cost].filter(Boolean).join(" · ")}
++                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} ·{" "}
++                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
++                  {item().context ? ` · ${item().context}` : ""}
++                  {item().cost ? ` · ${item().cost}` : ""}
+                 </text>
+               )}
+             </Show>
+diff --git a/packages/opencode/src/cli/cmd/tui/util/signal.ts b/packages/opencode/src/cli/cmd/tui/util/signal.ts
+index 594f777ab20cf705a799a9ec64bfad36bd82cfbd..03d51218e295fce740d204a142750b1093d8f46b 100644
+--- a/packages/opencode/src/cli/cmd/tui/util/signal.ts
++++ b/packages/opencode/src/cli/cmd/tui/util/signal.ts
+@@ -50,3 +50,39 @@ export function createFadeIn(show: Accessor<boolean>, enabled: Accessor<boolean>
+ 
+   return alpha
+ }
++
++export function createTokenFlowPulse<T extends { input: number; output: number } | undefined>(
++  value: Accessor<T>,
++  ms = 900,
++) {
++  const [flow, setFlow] = createSignal({ input: false, output: false })
++  let inputTimer: ReturnType<typeof setTimeout> | undefined
++  let outputTimer: ReturnType<typeof setTimeout> | undefined
++
++  createEffect(
++    on(value, (next, prev) => {
++      if (!next) {
++        setFlow({ input: false, output: false })
++        return
++      }
++      if (!prev) return
++      if (next.input > prev.input) {
++        if (inputTimer) clearTimeout(inputTimer)
++        setFlow((x) => ({ ...x, input: true }))
++        inputTimer = setTimeout(() => setFlow((x) => ({ ...x, input: false })), ms)
++      }
++      if (next.output > prev.output) {
++        if (outputTimer) clearTimeout(outputTimer)
++        setFlow((x) => ({ ...x, output: true }))
++        outputTimer = setTimeout(() => setFlow((x) => ({ ...x, output: false })), ms)
++      }
++    }),
++  )
++
++  onCleanup(() => {
++    if (inputTimer) clearTimeout(inputTimer)
++    if (outputTimer) clearTimeout(outputTimer)
++  })
++
++  return flow
++}

@@ -1,0 +1,33 @@
+From 863b3787d3a90f095ac7b053cc1e56c5842b5d10 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 2 Jul 2026 21:18:37 +0800
+Subject: [PATCH] =?UTF-8?q?fix(config):=20=E7=A7=BB=E9=99=A4=E4=B8=8D?=
+ =?UTF-8?q?=E5=BF=85=E8=A6=81=E7=9A=84=20mcp=20=E9=85=8D=E7=BD=AE=E9=A1=B9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/.opencode/opencode.jsonc b/.opencode/opencode.jsonc
+index e5a77a6a25ad9a2d1c5b1eb32864c4010cf4fb6b..d05c4b436e2504495212f335ff3e5db52173d457 100644
+--- a/.opencode/opencode.jsonc
++++ b/.opencode/opencode.jsonc
+@@ -2,18 +2,6 @@
+   "$schema": "https://opencode.ai/config.json",
+   "provider": {},
+   "permission": {},
+-  "mcp": {
+-    "chatgpt": {
+-      "type": "local",
+-      "command": [
+-        "D:\\Program Files\\nodejs\\node.exe",
+-        "F:\\ML\\PythonAIProject\\Claude-Code\\opencode\\thirdparty\\chatgpt-browser-agent\\mcp-server.js"
+-      ],
+-      "enabled": true,
+-      // opencode 当前同一个 timeout 同时约束连接与工具调用；这里优先保证长回答不会被宿主提前切断。
+-      "timeout": 690000
+-    }
+-  },
+   "tools": {
+     "github-triage": false,
+     "github-pr-search": false,

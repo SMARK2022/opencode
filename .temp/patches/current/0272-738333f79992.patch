@@ -1,0 +1,59 @@
+From 738333f79992bd1a206f62f9dacfc50df3728f4b Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Sat, 30 May 2026 00:02:38 +0800
+Subject: [PATCH] =?UTF-8?q?fix(test):=20=E4=BF=AE=E5=A4=8Dlinux=E7=9A=84?=
+ =?UTF-8?q?=E4=B8=8D=E6=AD=A3=E5=B8=B8=E7=9A=84=E9=94=99=E8=AF=AF=E9=97=AE?=
+ =?UTF-8?q?=E9=A2=98?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+index 1f45770ab95505595330ec73d6012b7880dd5361..752bd95159e41aec1d3f4f989ac318087241daba 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -1589,11 +1589,7 @@ test("non-shell auto review status opens the reviewer child session", async () =
+     },
+     async (app) => {
+       await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
+-      const raw = app.captureCharFrame().split("\n")
+-      const y = raw.findIndex((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))
+-      expect(y).toBeGreaterThanOrEqual(0)
+-
+-      await app.mockMouse.click(35, y + 1)
++      await clickVisibleText(app, "✓ auto review · allowed · auth high · @permission-reviewer")
+ 
+       await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
+     },
+@@ -1642,10 +1638,7 @@ test("block auto review click opens reviewer without toggling the tool card", as
+     },
+     async (app) => {
+       let frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
+-      const y = app.captureCharFrame().split("\n").findIndex((line) => line.includes("✓ auto review · allowed · auth high"))
+-      expect(y).toBeGreaterThanOrEqual(0)
+-
+-      await app.mockMouse.click(35, y + 1)
++      await clickVisibleText(app, "✓ auto review · allowed · auth high")
+ 
+       await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
+       frame = rows(app.captureCharFrame())
+@@ -1936,6 +1929,18 @@ function findRow(frame: string[], text: string) {
+   return index
+ }
+ 
++async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, text: string) {
++  const raw = app.captureCharFrame().split("\n")
++  const y = raw.findIndex((line) => line.includes(text))
++  expect(y).toBeGreaterThanOrEqual(0)
++  const x = raw[y].indexOf(text)
++  expect(x).toBeGreaterThanOrEqual(0)
++  // Click inside the rendered label rather than at a fixed column. The exact
++  // gutter can shift between OpenTUI renderers in the same process on Linux, but
++  // the user-visible label is the stable behaviour this test cares about.
++  await app.mockMouse.click(x + 1, y + 1)
++}
++
+ function sessionInfo(extra: Partial<SessionInfo> = {}) {
+   return {
+     id: sessionID,

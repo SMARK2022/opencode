@@ -1,0 +1,27 @@
+From abd9240ff8bbdc8f164cdc96796aea7f188d7b85 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 11 Jun 2026 01:30:51 +0800
+Subject: [PATCH] =?UTF-8?q?feat(test):=20=E5=B0=86SDK=E4=BA=8B=E4=BB=B6?=
+ =?UTF-8?q?=E8=B6=85=E6=97=B6=E8=AE=BE=E7=BD=AE=E4=BB=8E1=E7=A7=92?=
+ =?UTF-8?q?=E5=A2=9E=E5=8A=A0=E5=88=B010=E7=A7=92=EF=BC=8C=E4=BB=A5?=
+ =?UTF-8?q?=E9=80=82=E5=BA=94Windows=E7=8E=AF=E5=A2=83=E4=B8=8B=E7=9A=84?=
+ =?UTF-8?q?=E5=BB=B6=E8=BF=9F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/test/server/httpapi-sdk.test.ts b/packages/opencode/test/server/httpapi-sdk.test.ts
+index 4a11be61eca23a592f888f6dacf965a097984ffe..d6b2410197439face69925062c7ff54606c84c94 100644
+--- a/packages/opencode/test/server/httpapi-sdk.test.ts
++++ b/packages/opencode/test/server/httpapi-sdk.test.ts
+@@ -176,7 +176,8 @@ function firstEvent(open: (signal: AbortSignal) => Promise<{ stream: AsyncIterat
+         Effect.flatMap((events) =>
+           call(() => events.stream.next()).pipe(
+             Effect.timeoutOrElse({
+-              duration: "1 second",
++              // 这个 helper 覆盖 default/raw 与 global/instance 的 SDK SSE 首事件；Windows 上首包可能晚于 1 秒，测试只验证事件最终到达而不定义低延迟 SLA。
++              duration: "10 seconds",
+               orElse: () => Effect.fail(new Error("timed out waiting for SDK event")),
+             }),
+           ),

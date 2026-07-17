@@ -1,0 +1,104 @@
+From 43455e508d78993636072cb51a04f46334851f3e Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 3 May 2026 14:19:42 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E4=BC=98=E5=8C=96=E5=8A=A9=E6=89=8B?=
+ =?UTF-8?q?=E6=B6=88=E6=81=AF=E7=BB=84=E4=BB=B6=EF=BC=8C=E6=B7=BB=E5=8A=A0?=
+ =?UTF-8?q?=E5=8F=AF=E5=B1=95=E5=BC=80=E7=9A=84=E6=8E=A8=E7=90=86=E9=83=A8?=
+ =?UTF-8?q?=E5=88=86=E9=A2=84=E8=A7=88=E5=8A=9F=E8=83=BD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index ddda4e0143291add54f2630da552727629302f44..cbf3ca1178077dee48343cdbce93337bab23907c 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -1138,7 +1138,7 @@ export function Session() {
+                           }
+                         }
+ 
+-                        return (
++  return (
+                           <box
+                             onMouseOver={() => setHover(true)}
+                             onMouseOut={() => setHover(false)}
+@@ -1417,7 +1417,13 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
+   const keybind = useKeybind()
+ 
+   return (
+-    <>
++    <box
++      id={props.message.id}
++      border={["left"]}
++      customBorderChars={SplitBorder.customBorderChars}
++      borderColor={theme.backgroundElement}
++      marginTop={1}
++    >
+       <For each={props.parts}>
+         {(part, index) => {
+           const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
+@@ -1481,7 +1487,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
+           </box>
+         </Match>
+       </Switch>
+-    </>
++    </box>
+   )
+ }
+ 
+@@ -1494,11 +1500,20 @@ const PART_MAPPING = {
+ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
+   const { theme, subtleSyntax } = useTheme()
+   const ctx = use()
++  const renderer = useRenderer()
++  const [expanded, setExpanded] = createSignal(false)
+   const content = createMemo(() => {
+     // Filter out redacted reasoning chunks from OpenRouter
+     // OpenRouter sends encrypted reasoning data that appears as [REDACTED]
+     return props.part.text.replace("[REDACTED]", "").trim()
+   })
++  const lines = createMemo(() => content().split("\n"))
++  const PREVIEW = 5
++  const overflow = createMemo(() => lines().length > PREVIEW)
++  const preview = createMemo(() => {
++    if (expanded() || !overflow()) return content()
++    return [...lines().slice(0, PREVIEW), "…"].join("\n")
++  })
+   return (
+     <Show when={content() && ctx.showThinking()}>
+       <box
+@@ -1509,16 +1524,32 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
+         border={["left"]}
+         customBorderChars={SplitBorder.customBorderChars}
+         borderColor={theme.backgroundElement}
++        onMouseUp={() => {
++          if (renderer.getSelection()?.getSelectedText()) return
++          setExpanded((prev) => !prev)
++        }}
+       >
++        <code
++          filetype="markdown"
++          drawUnstyledText={false}
++          streaming={false}
++          syntaxStyle={subtleSyntax()}
++          content={"_Thinking (" + content().length.toLocaleString() + " chars):_"}
++          conceal={ctx.conceal()}
++          fg={theme.textMuted}
++        />
+         <code
+           filetype="markdown"
+           drawUnstyledText={false}
+           streaming={true}
+           syntaxStyle={subtleSyntax()}
+-          content={"_Thinking:_ " + content()}
++          content={preview()}
+           conceal={ctx.conceal()}
+           fg={theme.textMuted}
+         />
++        <Show when={overflow()}>
++          <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
++        </Show>
+       </box>
+     </Show>
+   )

@@ -1,0 +1,14 @@
+From bd57082d7a3e45973e852db142758935c9f17c2d Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Fri, 29 May 2026 18:19:22 +0800
+Subject: [PATCH] =?UTF-8?q?chore(actions):=20=E5=BD=92=E6=A1=A3=E6=97=A7?=
+ =?UTF-8?q?=E6=B5=8B=E8=AF=95=20workflow?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/.github/workflows/test.yml b/archived/github-workflows/test.yml
+similarity index 100%
+rename from .github/workflows/test.yml
+rename to archived/github-workflows/test.yml

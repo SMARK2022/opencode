@@ -1,0 +1,214 @@
+From 6c44755b057faab18d36617569d58982288247b7 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Thu, 16 Jul 2026 04:05:32 +0800
+Subject: [PATCH] =?UTF-8?q?fix(workflow):=20=E6=9B=B4=E6=96=B0=E5=AE=A1?=
+ =?UTF-8?q?=E8=AE=A1=E6=B5=81=E7=A8=8B=E4=BB=A5=E6=98=8E=E7=A1=AE=E9=98=BB?=
+ =?UTF-8?q?=E5=A1=9E=E6=9D=A1=E4=BB=B6=E5=92=8C=E6=98=A0=E5=B0=84=E8=A6=81?=
+ =?UTF-8?q?=E6=B1=82?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/.opencode/policy/first-principles-engineering.md b/.opencode/policy/first-principles-engineering.md
+index 41a758acc4dc0bf22f01781fd4d14be3039aedb5..c4285c986ca26abf48b85f8dec907f99e1a94bb9 100644
+--- a/.opencode/policy/first-principles-engineering.md
++++ b/.opencode/policy/first-principles-engineering.md
+@@ -265,14 +265,12 @@ The 10 percent limit is a maximum, not an entitlement. A three-line fallback
+ that creates alternate success is still forbidden. A diagnostic path within
+ the budget is still blocked if it hides failure or belongs to another module.
+ 
+-The canonical plan and implementation audit must state:
+-
+-- The primary path.
+-- Every secondary or replacement path.
+-- Whether each such path is a primary-contract branch, pass-through, diagnostic,
+-  existing compatibility, explicit user-requested rollback, or forbidden
+-  fallback.
+-- The estimated and actual decision-surface ratio.
++The canonical plan must state the primary path, inventory and classify every
++secondary or replacement path, and estimate the ratio. Implementation audit
++uses the actual diff. A missing or stale estimate is non-blocking when every
++path is classified, no available calculation exceeds the limit, and no release
++claim is false. Block a forbidden fallback, an unclassifiable success path, or a
++demonstrated over-budget diagnostic surface.
+ 
+ ## Responsibility Ownership
+ 
+@@ -425,16 +423,13 @@ the recently edited section.
+ 
+ ## Finding Standard
+ 
+-A blocking finding must contain:
+-
+-- The violated invariant.
+-- Evidence class: `observed`, `contracted`, or `reachable`.
+-- The producer and execution path.
+-- Source references with paths and lines.
+-- Canonical-plan references.
+-- Ownership reasoning.
+-- The behavior-level consequence.
+-- A minimal correction direction that does not introduce fallback.
++A blocking finding must establish an observed, contracted, or reachable
++violated invariant; producer and execution path; source and plan references;
++owner; concrete production, test, or contract consequence; and a minimal
++no-fallback correction. Inability to prove an estimate, line or word count,
++metadata field, or documentation location is not itself a behavior-level
++consequence. Such discrepancies are non-blocking when the artifact remains
++executable, no hard threshold demonstrably fails, and no release claim is false.
+ 
+ Unsupported concerns must be marked `Rejected speculation`, not left as vague
+ risk.
+@@ -456,8 +451,9 @@ The following block plan approval or implementation completion:
+ - A new alternate success path exists.
+ - A responsibility is assigned outside its owning interface.
+ - Speculative input drives production code.
+-- A confirmed requirement lacks an implementation or test mapping.
+-- A production concept lacks requirement and evidence mapping.
++- A confirmed requirement has no executable owner or path, or no behaviorally
++  sensitive verification or explicit unverifiable reason.
++- A production concept lacks observed, contracted, or reachable justification.
+ - Current and approved plan revisions differ.
+ - The plan, code, tests, and reported behavior have drifted.
+ - Audit scope was narrowed after a revision.
+@@ -544,9 +540,10 @@ break. Examples:
+ Comments must be distributed near the changed decisions they explain. A change
+ with insufficient qualifying comments is blocked even when all tests pass.
+ 
+-The canonical plan must estimate `E` and the minimum `C`. The implementation
+-report and auditor must state the actual values, calculation method, and any
+-excluded lines.
++The canonical plan must commit to the minimum and provide a feasible `E`/`C`
++estimate. Estimate arithmetic or line-scope drift is non-blocking when it does
++not authorize a lower ratio. The implementation report and auditor must state
++actual values, calculation method, and excluded lines.
+ 
+ ## Iteration Limits
+ 
+diff --git a/.opencode/skills/adversarial-audit/SKILL.md b/.opencode/skills/adversarial-audit/SKILL.md
+index f69a616fa156d946d656f8af28b4337ba247dd5c..f1d1456a1d6f873f2537bbe10d26f5d9d4ab39d5 100644
+--- a/.opencode/skills/adversarial-audit/SKILL.md
++++ b/.opencode/skills/adversarial-audit/SKILL.md
+@@ -199,13 +199,11 @@ Use both directions.
+ 
+ ### Prevent under-design
+ 
+-Every confirmed requirement and invariant must map to:
+-
+-- A production path.
+-- A planned or actual file change.
+-- A behavioral test or explicit unverifiable reason.
+-
+-Missing mappings are blocking.
++Every confirmed requirement and invariant must map to an executable owner and
++path, a planned or actual file change, and a behaviorally sensitive test or
++explicit unverifiable reason. A missing mapping blocks only when confirmed
++behavior would otherwise be unimplemented or unverifiable; a misplaced or
++duplicated citation does not.
+ 
+ ### Prevent over-design
+ 
+@@ -241,9 +239,9 @@ In plan mode, verify:
+ - File changes are exact and restrained.
+ - TDD slices can fail on current behavior.
+ - Verification commands are concrete and use correct working directories.
+-- Effective changed lines `E` and Chinese comments `C` are estimated.
+-- `C = 0` when `E = 0`; otherwise
+-  `C >= max(1, ceil(E * 0.15))` is planned with meaningful comment locations.
++- The `E`/`C` estimate is feasible and commits implementation to the actual hard
++  minimum; arithmetic or line-scope drift that preserves that minimum is
++  non-blocking.
+ - Real risks are separated from rejected speculation.
+ - Revision metadata and status are internally consistent.
+ 
+@@ -267,9 +265,10 @@ In implementation mode, verify:
+ 
+ ## Chinese Comment Audit
+ 
+-The 15 percent gate is blocking.
++An actual implementation failure of the 15 percent gate is blocking. Plan mode
++audits feasibility and commitment to the minimum, not estimate exactness.
+ 
+-Recompute rather than trust the implementer's number:
++In implementation mode, recompute rather than trust the implementer's number:
+ 
+ - `E`: substantively added or modified non-blank production, test, and
+   configuration code lines, excluding import-only, formatter-only, generated,
+@@ -312,7 +311,8 @@ Every blocking finding must use:
+ - Source evidence: path:line
+ - Canonical-plan evidence: section
+ - Responsibility owner:
+-- Behavior-level consequence:
++- Concrete production, test, or contract consequence, not estimate, wording,
++  metadata, or evidence-placement discrepancy:
+ - Why this is not speculative:
+ - Minimal correction direction:
+ ```
+@@ -342,7 +342,8 @@ Plan audit may release only the exact audited revision.
+ 
+ Implementation audit may release only the actual diff against the exact
+ approved revision. In either mode, the release verdict is `APPROVE` only when no
+-blocking finding remains and every applicable gate passes. In every other case,
++blocking finding remains and every phase-applicable hard gate passes.
++Non-blocking record corrections do not prevent approval. In every other case,
+ the verdict is `BLOCK`.
+ 
+ Any blocking finding requires revision or rework followed by another full-scope
+diff --git a/docs/workflow.md b/docs/workflow.md
+index ce9c72d10cf3d12d9dc1505a0b0c5a66f4b6f9cc..2190a4d7ea665f65dc077a2c0c412965d553068e 100644
+--- a/docs/workflow.md
++++ b/docs/workflow.md
+@@ -12,7 +12,7 @@
+ - skills 和文档按阶段即时加载，禁止开局一次性读取全部内容。
+ - 审计材料只由 `adversarial-auditor` subagent 加载；primary agent 不预读、不自审。
+ - 阶段加载的 policy、skill、template、仓库指令和 canonical plan 是权威依据。
+-- 仅在目标终态被当前证据逐项证明后标记 `complete`。同一真实阻塞连续至少 3 个 GOAL turns 且无法继续推进时才标记 `blocked`。
++- 仅在目标终态被当前证据逐项证明后标记 `complete`。同一真实阻塞在两个连续 eligible GOAL turns 中保持不变且无法继续推进时，才在第二次标记 `blocked`。
+ 
+ ## 第一性门禁
+ 
+@@ -37,7 +37,7 @@
+ - 从当前仓库重新调查，不把旧方案或旧审计当作已确认事实。只创建或修订 plan，不修改 production、tests、config、migration 或 generated files。
+ - bug 类任务必须建立并实际运行能够捕获用户原始症状的 red-capable feedback loop。没有该信号时不得仅靠源码阅读猜根因，应继续构建信号或记录真实环境阻塞。
+ - 完成 template 各字段：evidence/domain/reachability、invariant/divergence/owner、route/paths/workaround、file/TDD/verification/diff、risks/speculation/audit/comments。
+-- forward mapping：requirement/invariant -> path/file/test。reverse mapping：concept -> requirement/invariant/safety evidence + 不可复用原因。缺失映射不得提交审计。
++- forward mapping：requirement/invariant -> owner/path/file/test。reverse mapping：concept -> requirement/invariant/safety evidence + 不可复用原因。确认行为没有 executable path、行为测试或明确 unverifiable reason 时不得提交；引用位置、估算和重复证据不构成映射缺失。
+ - 完成后设置 `Status: audit-required`、`Approved revision: none`、`Implementation allowed: no`。
+ 
+ ## 阶段 2：独立方案审计
+@@ -55,8 +55,8 @@
+ 
+ ### 放行
+ 
+-- 任一 blocking finding 都要求修订同一 plan、递增 revision、清空 approval，并按原始需求和完整 affected interface full-scope 重审，禁止 delta-only review。
+-- 最多 6 轮，当进入第 4 轮的时候注意提醒subagent避免过分的进行部分犄角旮旯的苛责审计，整体无重大问题可以放行。连续调用失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽后 blockers 仍保持 blocking，并作为开放决定交给用户。
++- 经 policy 证实的 blocking finding 要求修订同一 plan、递增 revision、清空 approval，并按原始需求和完整 affected interface full-scope 重审；non-blocking record correction 不清空 approval 或触发重审。
++- 最多 6 轮，每轮使用同一材料性标准，不得以轮次、边角问题或“整体无重大问题”诱导 auditor 升降判级。连续调用失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽后 blockers 仍保持 blocking，并作为开放决定交给用户。
+ - exact revision 仅在获得 `No blocking findings` 和 `APPROVE` 后，才原样记录 verdict，设置 `Status: approved`、`Approved revision: <current>`、`Implementation allowed: yes`；不得夹带设计修改。
+ - `approved-plan-only` 在完成逐项终态审计后标记 GOAL `complete`，不得实施代码。
+ 
+@@ -86,7 +86,7 @@
+ - implementation evidence 记录 files/diff、red-green、verification、原始 loop、paths、E/C、排除行、未验证项。设置 `Status: implementation-audit-required`，未经 revision 不再 material change。
+ - primary agent 只发送原始需求、plan/approved revision、repository root、`Audit mode: implementation`、changed files/diff，不发送实现辩护、自评、怀疑点或缩减范围。
+ - auditor subagent 自行加载审计 skill、policy 和仓库证据，按原始需求和完整 affected interface 审计，禁止只看最近修正。
+-- blocker 必须返工并 full-scope 重审，最多 4 轮。连续失败 4 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽仍有 blocker 时标记 `blocked`，不得 `complete`。
++- blocker 必须返工并 full-scope 重审，最多 3 轮。连续失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽仍有 blocker 时标记 `blocked`，不得 `complete`。
+ - 只有实际 diff 获得 `No blocking findings` 和 `APPROVE`，且测试、验证、责任边界、workaround 删除和中文注释门禁全部通过，才能原样记录 verdict 并设置 `Status: verified`。
+ 
+ ## 可选 Commit
+@@ -94,7 +94,7 @@
+ 仅当终态是 `verified-implementation-and-commit` 且状态已 verified：
+ 
+ 1. 检查 `git status`、`git diff`、`git diff --cached` 和 `git log --oneline -10`。
+-2. 只 stage 本 GOAL 相关文件，排除 secret、credential 和无关修改。index 已有无关内容时不得夹带或擅自清除，应停止并报告。
++2. 确定本 GOAL 的完整路径清单并排除 secret、credential。工作区或 index 有无关内容时，使用 `git commit --only -- <本 GOAL 路径...>` 提交相关路径；相关 untracked files 先单独 `git add -- <paths>`，无关 staged/unstaged 内容保持原样。若同一路径混有无关修改，停止并报告。
+ 3. 不创建空 commit。提交信息使用中文多行格式：`type(scope): 简短中文说明`，type 只取 `fix|feat|refactor|test|chore`，scope 使用受影响模块，后续 1 至 2 段说明原因、行为边界和避免的回归。
+ 4. 不得 amend、不得 `--no-verify`、不得跳过 hook、不得 push。
+ 5. hook 拒绝时修复原因并创建新 commit，不得 amend 失败尝试。commit 成功后检查 `git status` 并报告 commit id。其他目标终态不得 commit。
+@@ -102,4 +102,4 @@
+ ## 最终证据
+ 
+ - 报告 plan/revision、核心文件、测试/验证结果、approved-route 证据、删除的 workaround、path verdict、E/C 与代表性注释、全部审计轮次、剩余风险/未验证项及每个改动的必要性。
+-- token budget、turn 结束、部分成果或总结文本都不能证明完成。仍有 required work 时保持 GOAL active。
+\ No newline at end of file
++- token budget、turn 结束、部分成果或总结文本都不能证明完成。仍有 required work 时保持 GOAL active。

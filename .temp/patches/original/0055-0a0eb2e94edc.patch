@@ -1,0 +1,111 @@
+From 0a0eb2e94edc650d854c7256b14024a86484a6db Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 30 Apr 2026 03:59:36 +0800
+Subject: [PATCH] fix: PowerShell UTF-8 output encoding on Windows
+
+Use -EncodedCommand with UTF-8 Console prologue when spawning PowerShell
+(powershell.exe / pwsh.exe) on Windows. This forces Console.OutputEncoding
+to UTF-8 before the user's command runs, so Format-Table, Write-Output, and
+other PowerShell cmdlets emit UTF-8 bytes. Stream.decodeText() continues
+to decode as UTF-8 without any fallback logic.
+
+Root cause: Get-ChildItem | Format-Table output in Chinese locales emits
+GBK/OEM bytes; Stream.decodeText() (UTF-8) replaces invalid bytes with U+FFFD.
+
+Fix details:
+- psUtf8(): wraps command with [Console]::OutputEncoding / InputEncoding /
+  OutputEncoding = UTF8Encoding prologue + exit code passthrough
+- psEncoded(): base64(UTF-16LE) encodes the wrapper for -EncodedCommand,
+  making command text containing non-ASCII characters safe on all locales
+- Remove JAVA_TOOL_OPTIONS / RUBYOPT from shellEnv: too broad, causes Java
+  stderr noise and Ruby encoding side effects; Python vars kept (targeted)
+- Add Windows-only test: PowerShell outputs Chinese without U+FFFD chars
+
+diff --git a/packages/opencode/src/tool/bash.ts b/packages/opencode/src/tool/bash.ts
+index 49d186d47647f73426563ddef9445e3feeb10ab9..66ac8c87d0a2aa4914b3f990b7955ebddff93d5e 100644
+--- a/packages/opencode/src/tool/bash.ts
++++ b/packages/opencode/src/tool/bash.ts
+@@ -339,9 +339,23 @@ const ask = Effect.fn("BashTool.ask")(function* (ctx: Tool.Context, scan: Scan)
+   })
+ })
+ 
++function psUtf8(command: string) {
++  return [
++    "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
++    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
++    "$OutputEncoding = [Console]::OutputEncoding",
++    command,
++    "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
++  ].join("\n")
++}
++
++function psEncoded(command: string) {
++  return Buffer.from(psUtf8(command), "utf16le").toString("base64")
++}
++
+ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
+   if (process.platform === "win32" && Shell.ps(shell)) {
+-    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
++    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", psEncoded(command)], {
+       cwd,
+       env,
+       stdin: "ignore",
+@@ -545,13 +559,12 @@ export const BashTool = Tool.define(
+         { env: {} },
+       )
+ 
+-      // 兼容性修改：探测 Windows 平台并静默挂载 UTF-8 强控变量以解决管道读取乱码
++      // On Windows, ensure Python programs use UTF-8 for stdout/stderr.
++      // PowerShell Console encoding is handled at spawn time via -EncodedCommand wrapper.
+       const isWin = process.platform === "win32"
+       const utf8EnvOverrides = isWin ? {
+         PYTHONIOENCODING: "utf-8",
+         PYTHONUTF8: "1",
+-        JAVA_TOOL_OPTIONS: `${process.env.JAVA_TOOL_OPTIONS || ""} -Dfile.encoding=UTF-8`.trim(),
+-        RUBYOPT: `${process.env.RUBYOPT || ""} -Eutf-8`.trim()
+       } : {}
+ 
+       return {
+diff --git a/packages/opencode/test/tool/bash.test.ts b/packages/opencode/test/tool/bash.test.ts
+index 513cfa18eaab5f18798f48c31a1d4a959c37ac86..d48535cf8fb41b6e6bae160d81465c6d037fc8fb 100644
+--- a/packages/opencode/test/tool/bash.test.ts
++++ b/packages/opencode/test/tool/bash.test.ts
+@@ -184,6 +184,38 @@ describe("tool.bash", () => {
+   })
+ })
+ 
++describe("tool.bash windows encoding", () => {
++  if (process.platform !== "win32") return
++
++  for (const item of ps) {
++    test(
++      `PowerShell outputs Chinese without replacement characters [${item.label}]`,
++      withShell(item, async () => {
++        await using tmp = await tmpdir()
++        await Instance.provide({
++          directory: tmp.path,
++          fn: async () => {
++            const bash = await initBash()
++            const result = await Effect.runPromise(
++              bash.execute(
++                {
++                  command: `Write-Output "桌面 大学文档 毕业设计 压缩感知"`,
++                  description: "Echo Chinese text",
++                },
++                ctx,
++              ),
++            )
++            expect(result.output).toContain("桌面")
++            expect(result.output).toContain("大学文档")
++            expect(result.output).toContain("毕业设计")
++            expect(result.output).not.toContain("\uFFFD")
++          },
++        })
++      }),
++    )
++  }
++})
++
+ describe("tool.bash permissions", () => {
+   each("asks for bash permission with correct pattern", async () => {
+     await using tmp = await tmpdir()

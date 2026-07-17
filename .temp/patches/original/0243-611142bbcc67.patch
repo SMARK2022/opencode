@@ -1,0 +1,487 @@
+From 611142bbcc672e9a201209d3319934a6422ae589 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Thu, 28 May 2026 02:26:43 +0800
+Subject: [PATCH] =?UTF-8?q?feat(session):=20=E5=A2=9E=E5=8A=A0=E4=BC=9A?=
+ =?UTF-8?q?=E8=AF=9D=E8=80=97=E6=97=B6=E8=AE=A1=E7=AE=97=E9=80=BB=E8=BE=91?=
+ =?UTF-8?q?=EF=BC=8C=E4=BC=98=E5=8C=96=E6=B6=88=E6=81=AF=E6=97=B6=E9=97=B4?=
+ =?UTF-8?q?=E6=88=B3=E5=A4=84=E7=90=86=EF=BC=8C=E7=A1=AE=E4=BF=9D=E5=87=86?=
+ =?UTF-8?q?=E7=A1=AE=E6=80=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+index d4e1104c704cc7a9cf20490ee88d747e9a449494..c8eda39f9952e0879aa528569913c7bdfcac62fe 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+@@ -42,7 +42,7 @@ import { TuiEvent } from "../../event"
+ import { iife } from "@/util/iife"
+ import { Locale } from "@/util/locale"
+ import { tokenAccounting } from "@/token/accounting"
+-import { formatDuration, formatDurationCompact } from "@/util/format"
++import { formatDuration } from "@/util/format"
+ import { createColors, createFrames } from "../../ui/spinner.ts"
+ import { useDialog } from "@tui/ui/dialog"
+ import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
+@@ -50,7 +50,8 @@ import { DialogAlert } from "../../ui/dialog-alert"
+ import { useToast } from "../../ui/toast"
+ import { useKV } from "../../context/kv"
+ // [local-smark] Token flow pulse and throttled signal for usage display
+-import { createFadeIn, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
++import { createFadeIn, createRefreshClock, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
++import { activeTurnDuration } from "../../util/session-pending"
+ import { DialogSkill } from "../dialog-skill"
+ import {
+   confirmWorkspaceFileChanges,
+@@ -412,7 +413,6 @@ export function Prompt(props: PromptProps) {
+     extmarkToPartIndex: Map<number, number>
+     interrupt: number
+     placeholder: number
+-    agentLoopStartTime: number | undefined
+   }>({
+     placeholder: randomIndex(list().length),
+     prompt: {
+@@ -422,7 +422,15 @@ export function Prompt(props: PromptProps) {
+     mode: "normal",
+     extmarkToPartIndex: new Map(),
+     interrupt: 0,
+-    agentLoopStartTime: undefined,
++  })
++
++  const running = createMemo(() => status().type !== "idle")
++  const now = createRefreshClock(running)
++  const activeDuration = createMemo(() => {
++    if (!props.sessionID) return 0
++    // 左下角耗时只复用 transcript 时间戳口径；now 只是刷新中的临时 end。
++    // 这样权限弹窗、/context 面板或 SSE 重连造成 Prompt 重挂载时不会重新起算。
++    return activeTurnDuration(sync.data.message[props.sessionID] ?? [], status(), now())
+   })
+ 
+   createEffect(
+@@ -435,35 +443,6 @@ export function Prompt(props: PromptProps) {
+     ),
+   )
+ 
+-  // Track agent loop start time
+-  createEffect(
+-    on(
+-      () => status().type,
+-      (currentType, prevType) => {
+-        if (currentType === "busy" && prevType !== "busy") {
+-          setStore("agentLoopStartTime", Date.now())
+-        } else if (currentType === "idle" && prevType !== "idle") {
+-          setStore("agentLoopStartTime", undefined)
+-        }
+-      },
+-    ),
+-  )
+-
+-  // Timer signal for agent loop elapsed time
+-  const [elapsedSeconds, setElapsedSeconds] = createSignal(0)
+-
+-  createEffect(() => {
+-    if (store.agentLoopStartTime) {
+-      const interval = setInterval(() => {
+-        const elapsed = Math.floor((Date.now() - store.agentLoopStartTime!) / 1000)
+-        setElapsedSeconds(elapsed)
+-      }, 1000)
+-      onCleanup(() => clearInterval(interval))
+-    } else {
+-      setElapsedSeconds(0)
+-    }
+-  })
+-
+   // Initialize agent/model/variant from last user message when session changes.
+   //
+   // Two bugs this guards against:
+@@ -1810,7 +1789,7 @@ export function Prompt(props: PromptProps) {
+         </box>
+         <box width="100%" flexDirection="row" justifyContent="space-between">
+           <Switch>
+-            <Match when={status().type !== "idle"}>
++            <Match when={running()}>
+               <box
+                 flexDirection="row"
+                 gap={1}
+@@ -1843,16 +1822,11 @@ export function Prompt(props: PromptProps) {
+                         if (!r) return false
+                         return r.message.length > 120
+                       })
+-                      const [seconds, setSeconds] = createSignal(0)
+-                      onMount(() => {
+-                        const timer = setInterval(() => {
+-                          const next = retry()?.next
+-                          if (next) setSeconds(Math.round((next - Date.now()) / 1000))
+-                        }, 1000)
+-
+-                        onCleanup(() => {
+-                          clearInterval(timer)
+-                        })
++                      const seconds = createMemo(() => {
++                        const next = retry()?.next
++                        // Retry countdown 复用同一个 UI refresh clock；它只负责刷新 now，
++                        // 不再为同一 footer 区域额外创建第二个 interval 生命周期。
++                        return next ? Math.round((next - now()) / 1000) : 0
+                       })
+                       const handleMessageClick = () => {
+                         const r = retry()
+@@ -1889,10 +1863,10 @@ export function Prompt(props: PromptProps) {
+                       {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
+                     </span>
+                   </text>
+-                  <Show when={store.agentLoopStartTime && elapsedSeconds() > 0}>
++                  <Show when={activeDuration() > 0}>
+                     <text fg={theme.textMuted}>
+                       {"· "}
+-                      <span style={{ fg: theme.text }}>{formatDurationCompact(elapsedSeconds())}</span>
++                      <span style={{ fg: theme.text }}>{Locale.durationClock(activeDuration())}</span>
+                     </text>
+                   </Show>
+                 </box>
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index b0101a5c9d51f62b9600695ab681db78230649b0..f85cb7ef402025bcef6383918ae19cc4edd5f312 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -107,7 +107,12 @@ import { PathFormatterProvider, usePathFormatter } from "../../context/path-form
+ // [local-smark] Local TUI features
+ import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "@tui/util/smooth-scrollbar"
+ import { previewDiff } from "@tui/util/preview-diff"
+-import { pendingAssistantID, shouldCullSessionViewport, shouldRefreshStaleBusyStatus } from "@tui/util/session-pending"
++import {
++  assistantTurnDuration,
++  pendingAssistantID,
++  shouldCullSessionViewport,
++  shouldRefreshStaleBusyStatus,
++} from "@tui/util/session-pending"
+ import { ConnectionError } from "../../util/connection-error"
+ import { ContextUsagePanel } from "./context-usage"
+ import {
+@@ -1588,10 +1593,9 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
+ 
+   const duration = createMemo(() => {
+     if (!final()) return 0
+-    if (!props.message.time.completed) return 0
+-    const user = messages().find((x) => x.role === "user" && x.id === props.message.parentID)
+-    if (!user || !user.time) return 0
+-    return props.message.time.completed - user.time.created
++    // 消息 footer 是完成态的权威展示，耗时必须和运行中 footer 共用
++    // parent user -> assistant completed 的 transcript 口径，避免两套算法漂移。
++    return assistantTurnDuration(messages(), props.message)
+   })
+ 
+   const childShortcut = useCommandShortcut("session.child.first")
+@@ -1674,7 +1678,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
+               <span style={{ fg: theme.text }}>{Locale.titlecase(props.message.mode)}</span>
+               <span style={{ fg: theme.textMuted }}> · {model()}</span>
+               <Show when={duration()}>
+-                <span style={{ fg: theme.textMuted }}> · {Locale.duration(duration())}</span>
++                <span style={{ fg: theme.textMuted }}> · {Locale.durationClock(duration())}</span>
+               </Show>
+               <Show when={props.message.error?.name === "MessageAbortedError"}>
+                 <span style={{ fg: theme.textMuted }}> · interrupted</span>
+diff --git a/packages/opencode/src/cli/cmd/tui/util/session-pending.ts b/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
+index 73680b4d06f7330508ae75a8cd7657a61b678a93..2ea434aa84d2e15c527beae76c1af94609907b90 100644
+--- a/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
++++ b/packages/opencode/src/cli/cmd/tui/util/session-pending.ts
+@@ -1,4 +1,4 @@
+-import type { Message, SessionStatus } from "@opencode-ai/sdk/v2"
++import type { AssistantMessage, Message, SessionStatus, UserMessage } from "@opencode-ai/sdk/v2"
+ 
+ type SessionViewportMessage = {
+   role?: string
+@@ -42,3 +42,47 @@ export function shouldRefreshStaleBusyStatus(messages: Message[], status: Sessio
+   // refresh instead of keeping the prompt disabled indefinitely.
+   return status?.type === "busy" && !hasStreamingAssistant(messages)
+ }
++
++// 会话耗时只从 transcript 中已经持久化的消息时间戳推导：user.time.created
++// 是 turn 的唯一开始边界，assistant.time.completed 是完成边界。TUI 的刷新
++// tick 只能提供运行中的临时 end，不允许再维护独立 start time，否则 Prompt
++// remount、SSE 重连或 retry 状态切换都会让左下角耗时和消息 footer 口径分叉。
++export function assistantTurnDuration(messages: Message[], assistant: AssistantMessage, now?: number) {
++  const end = assistant.time.completed ?? now
++  if (end === undefined) return 0
++
++  const user = messages.find((message): message is UserMessage => {
++    return message.role === "user" && message.id === assistant.parentID
++  })
++  if (!user) return 0
++
++  return durationSince(user.time.created, end)
++}
++
++export function activeTurnDuration(messages: Message[], status: SessionStatus | undefined, now: number) {
++  if (!status || status.type === "idle") return 0
++
++  const user = messages.findLast((message): message is UserMessage => message.role === "user")
++  if (!user) return 0
++
++  const assistant = messages.findLast((message): message is AssistantMessage => {
++    return message.role === "assistant" && message.parentID === user.id
++  })
++  if (!assistant) return durationSince(user.time.created, now)
++
++  // tool-calls / unknown 表示同一个 user turn 还可能继续执行工具或下一步模型调用。
++  // 运行中 footer 必须继续按 parent user 计时，不能停在上一条 assistant.completed。
++  if (!assistant.time.completed || assistant.finish === "tool-calls" || assistant.finish === "unknown") {
++    return durationSince(user.time.created, now)
++  }
++
++  // 非 idle status 可能是重连后遗留的 stale busy。已 terminal 的 assistant 不再
++  // 显示运行时耗时，避免左下角把上一轮完成耗时误认为当前仍在运行。
++  if (assistant.finish) return 0
++
++  return assistantTurnDuration(messages, assistant)
++}
++
++function durationSince(start: number, end: number) {
++  return Math.max(0, end - start)
++}
+diff --git a/packages/opencode/src/cli/cmd/tui/util/signal.ts b/packages/opencode/src/cli/cmd/tui/util/signal.ts
+index 03d51218e295fce740d204a142750b1093d8f46b..d9f57ebe0fd444de1853235a4a513943ae63e425 100644
+--- a/packages/opencode/src/cli/cmd/tui/util/signal.ts
++++ b/packages/opencode/src/cli/cmd/tui/util/signal.ts
+@@ -17,6 +17,24 @@ export function createThrottledSignal<T>(value: T, ms: number): [Accessor<T>, (v
+   return [get, trigger]
+ }
+ 
++export function createRefreshClock(active: Accessor<boolean>, ms = 1000) {
++  const [now, setNow] = createSignal(Date.now())
++
++  createEffect(
++    on(active, (enabled) => {
++      // 这个 clock 只负责驱动 UI 重新计算“当前时间”，不持有业务计时起点。
++      // 耗时边界必须继续来自 session messages，保证重连和组件重挂载后口径不变。
++      setNow(Date.now())
++      if (!enabled) return
++
++      const timer = setInterval(() => setNow(Date.now()), ms)
++      onCleanup(() => clearInterval(timer))
++    }),
++  )
++
++  return now
++}
++
+ export function createFadeIn(show: Accessor<boolean>, enabled: Accessor<boolean>) {
+   const [alpha, setAlpha] = createSignal(show() ? 1 : 0)
+   let revealed = show()
+diff --git a/packages/opencode/src/util/format.ts b/packages/opencode/src/util/format.ts
+index a09b64ee818ef678d66c9fe39e51584c4983e84a..4ae62eac450acb9cd4af28e9ecb886666e1fb776 100644
+--- a/packages/opencode/src/util/format.ts
++++ b/packages/opencode/src/util/format.ts
+@@ -18,22 +18,3 @@ export function formatDuration(secs: number) {
+   const weeks = Math.floor(secs / 604800)
+   return weeks === 1 ? "~1 week" : `~${weeks} weeks`
+ }
+-
+-export function formatDurationCompact(secs: number) {
+-  if (secs <= 0) return "0s"
+-  if (secs < 60) return `${secs}s`
+-  if (secs < 3600) {
+-    const mins = Math.floor(secs / 60)
+-    const remaining = secs % 60
+-    return `${mins}m${remaining}s`
+-  }
+-  const hours = Math.floor(secs / 3600)
+-  const mins = Math.floor((secs % 3600) / 60)
+-  const remaining = secs % 60
+-  if (hours < 24) {
+-    return remaining > 0 ? `${hours}h${mins}m${remaining}s` : `${hours}h${mins}m`
+-  }
+-  const days = Math.floor(secs / 86400)
+-  const remainingHours = Math.floor((secs % 86400) / 3600)
+-  return `${days}d${remainingHours}h`
+-}
+diff --git a/packages/opencode/src/util/locale.ts b/packages/opencode/src/util/locale.ts
+index f37b14ac29fa4a41dec763338e8fa595f00a34e7..ca81cf3924c347359b9ec7265d164e2b12500bf0 100644
+--- a/packages/opencode/src/util/locale.ts
++++ b/packages/opencode/src/util/locale.ts
+@@ -58,6 +58,27 @@ export function duration(input: number) {
+   return `${days}d ${hours}h`
+ }
+ 
++export function durationClock(input: number) {
++  // 面向“正在刷新”的 turn/clock 展示：起点来自持久化 message timestamp，
++  // 和本地刷新 tick 通常不会整秒对齐；这里必须向下取整，避免 1.1s、2.1s
++  // 这种看起来像计时漂移的小数秒，同时不夸大已经经过的真实耗时。
++  if (input < 1000) return `${input}ms`
++  if (input < 60000) return `${Math.floor(input / 1000)}s`
++  if (input < 3600000) {
++    const minutes = Math.floor(input / 60000)
++    const seconds = Math.floor((input % 60000) / 1000)
++    return `${minutes}m ${seconds}s`
++  }
++  if (input < 86400000) {
++    const hours = Math.floor(input / 3600000)
++    const minutes = Math.floor((input % 3600000) / 60000)
++    return `${hours}h ${minutes}m`
++  }
++  const days = Math.floor(input / 86400000)
++  const hours = Math.floor((input % 86400000) / 3600000)
++  return `${days}d ${hours}h`
++}
++
+ export function truncate(str: string, len: number): string {
+   if (str.length <= len) return str
+   let end = len - 1
+diff --git a/packages/opencode/test/cli/cmd/tui/session-pending.test.ts b/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
+index 91cb9ca746b8ceebd5d14c29052cc62069374cce..86a305a442806c3bed3772431fc15d216b288e01 100644
+--- a/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
++++ b/packages/opencode/test/cli/cmd/tui/session-pending.test.ts
+@@ -1,20 +1,37 @@
+ import { describe, expect, test } from "bun:test"
+-import type { AssistantMessage, Message } from "@opencode-ai/sdk/v2"
++import type { AssistantMessage, Message, UserMessage } from "@opencode-ai/sdk/v2"
+ import {
++  activeTurnDuration,
++  assistantTurnDuration,
+   hasStreamingAssistant,
+   pendingAssistantID,
+   shouldCullSessionViewport,
+   shouldRefreshStaleBusyStatus,
+ } from "../../../../src/cli/cmd/tui/util/session-pending"
+ 
+-const assistant = (id: string, completed?: number): AssistantMessage => ({
++const user = (id: string, created: number): UserMessage => ({
++  id,
++  sessionID: "ses_test",
++  role: "user",
++  time: { created },
++  agent: "build",
++  model: { providerID: "provider", modelID: "model" },
++})
++
++const assistant = (
++  id: string,
++  completed?: number,
++  parentID = "msg_user",
++  finish?: AssistantMessage["finish"],
++): AssistantMessage => ({
+   id,
+   sessionID: "ses_test",
+   role: "assistant",
+   time: { created: 1, completed },
+-  parentID: "msg_user",
++  parentID,
+   modelID: "model",
+   providerID: "provider",
++  finish,
+   mode: "build",
+   agent: "build",
+   path: { cwd: "/tmp", root: "/tmp" },
+@@ -48,4 +65,81 @@ describe("session pending helpers", () => {
+   test("keeps session viewport culling enabled after the assistant message completes", () => {
+     expect(shouldCullSessionViewport([assistant("done", 2)])).toBe(true)
+   })
++
++  test("derives completed assistant turn duration from the parent user timestamp", () => {
++    const reply = assistant("reply", 6_500)
++
++    expect(assistantTurnDuration([user("msg_user", 1_000), reply], reply)).toBe(5_500)
++  })
++
++  test("derives streaming assistant turn duration from the parent user timestamp and current time", () => {
++    const reply = assistant("reply")
++
++    expect(assistantTurnDuration([user("msg_user", 1_000), reply], reply, 6_200)).toBe(5_200)
++  })
++
++  test("returns no assistant turn duration when the parent user is unavailable", () => {
++    const reply = assistant("reply", 6_500, "missing_user")
++
++    expect(assistantTurnDuration([user("msg_user", 1_000), reply], reply)).toBe(0)
++  })
++
++  test("clamps assistant turn duration when persisted timestamps arrive out of order", () => {
++    const reply = assistant("reply", 500)
++
++    expect(assistantTurnDuration([user("msg_user", 1_000), reply], reply)).toBe(0)
++  })
++
++  test("derives active turn duration from the latest user before the assistant exists", () => {
++    const messages: Message[] = [
++      user("first", 1_000),
++      assistant("done", 2_000, "first", "stop"),
++      user("latest", 5_000),
++    ]
++
++    expect(activeTurnDuration(messages, { type: "busy" }, 7_000)).toBe(2_000)
++  })
++
++  test("derives active turn duration from the latest user's streaming assistant", () => {
++    const messages: Message[] = [
++      user("first", 1_000),
++      assistant("done", 2_000, "first", "stop"),
++      user("latest", 3_000),
++      assistant("open", undefined, "latest"),
++    ]
++
++    expect(activeTurnDuration(messages, { type: "busy" }, 8_000)).toBe(5_000)
++  })
++
++  test("keeps active duration running through tool-call continuation turns", () => {
++    const messages: Message[] = [
++      user("msg_user", 1_000),
++      assistant("tools", 2_500, "msg_user", "tool-calls"),
++    ]
++
++    expect(activeTurnDuration(messages, { type: "busy" }, 6_000)).toBe(5_000)
++  })
++
++  test("keeps active duration running while the session is retrying", () => {
++    const messages: Message[] = [user("msg_user", 1_000), assistant("open", undefined, "msg_user")]
++
++    expect(activeTurnDuration(messages, { type: "retry", attempt: 2, message: "quota", next: 6_000 }, 4_500)).toBe(
++      3_500,
++    )
++  })
++
++  test("returns no active duration for stale busy status after a terminal assistant finish", () => {
++    const messages: Message[] = [
++      user("msg_user", 1_000),
++      assistant("done", 6_000, "msg_user", "stop"),
++    ]
++
++    expect(activeTurnDuration(messages, { type: "busy" }, 8_000)).toBe(0)
++  })
++
++  test("returns no active duration while the session is idle", () => {
++    const messages: Message[] = [user("msg_user", 1_000), assistant("open", undefined, "msg_user")]
++
++    expect(activeTurnDuration(messages, { type: "idle" }, 8_000)).toBe(0)
++  })
+ })
+diff --git a/packages/opencode/test/util/locale.test.ts b/packages/opencode/test/util/locale.test.ts
+index 88e160eaa42b39380d027b0d7fba46be5bfa83eb..12a5cbdc02bd0fb5d5318a161a7d6c0c403c3ffd 100644
+--- a/packages/opencode/test/util/locale.test.ts
++++ b/packages/opencode/test/util/locale.test.ts
+@@ -1,5 +1,26 @@
+ import { describe, expect, test } from "bun:test"
+-import { truncate, truncateMiddle } from "@/util/locale"
++import { durationClock, truncate, truncateMiddle } from "@/util/locale"
++
++describe("Locale.durationClock", () => {
++  test("formats ticking turn durations without decimal seconds", () => {
++    // 运行中 footer 每秒刷新，但开始时间来自持久化 message timestamp，天然不会对齐到整秒。
++    // 这些断言锁定“向下取整且不显示小数”的用户可见行为，避免出现 1.1s、2.1s 这类抖动感。
++    expect(durationClock(999)).toBe("999ms")
++    expect(durationClock(1_000)).toBe("1s")
++    expect(durationClock(1_100)).toBe("1s")
++    expect(durationClock(11_100)).toBe("11s")
++    expect(durationClock(59_900)).toBe("59s")
++  })
++
++  test("keeps existing minute and larger duration shape", () => {
++    // 超过一分钟后继续沿用 transcript footer 的 `1m 20s` 形态；本 formatter
++    // 只移除一分钟以内的小数秒，不改变分钟、小时、天级展示结构。
++    expect(durationClock(60_000)).toBe("1m 0s")
++    expect(durationClock(80_000)).toBe("1m 20s")
++    expect(durationClock(3_600_000)).toBe("1h 0m")
++    expect(durationClock(90_000_000)).toBe("1d 1h")
++  })
++})
+ 
+ describe("Locale.truncate", () => {
+   test("truncates ASCII string correctly", () => {

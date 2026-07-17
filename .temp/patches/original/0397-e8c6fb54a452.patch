@@ -1,0 +1,75 @@
+From e8c6fb54a452d7477f71f5d667bf2fed5fafcdff Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Tue, 7 Jul 2026 14:23:17 +0800
+Subject: [PATCH] =?UTF-8?q?fix(ci):=20=E8=B7=B3=E8=BF=87=20CI=20=E6=97=A0?=
+ =?UTF-8?q?=E7=94=A8=E4=BA=8C=E8=BF=9B=E5=88=B6=E4=B8=8B=E8=BD=BD=E5=B9=B6?=
+ =?UTF-8?q?=E5=9B=BA=E5=AE=9A=20ghostty-web=20=E6=B5=AE=E5=8A=A8=E4=BE=9D?=
+ =?UTF-8?q?=E8=B5=96?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+setup-bun 复合动作的 Install dependencies 步骤新增 skip-env 变量
+（ELECTRON_SKIP_BINARY_DOWNLOAD/PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD/HUSKY 等），
+与 build-opencode.yml Windows 步骤保持一致，跳过 CI 不需要的 electron/playwright/
+puppeteer/cypress 预构建二进制下载与 husky hook 安装。upstream-e2e 的 playwright
+浏览器由 test.yml 独立步骤安装，且 step 级 env 不跨步骤持久化，不受影响；
+native postinstall（node-pty/tree-sitter 等）不读取这些变量，照常编译。
+
+ghostty-web 依赖从 github:anomalyco/ghostty-web#main（浮动分支引用）pin 到不可变
+commit 513463a，消除上游 main 推送导致的 bun.lock 反复改写与重新下载。pin 锁定的
+是改动前已解析的同一 commit，行为零变化。
+
+diff --git a/.github/actions/setup-bun/action.yml b/.github/actions/setup-bun/action.yml
+index d30e4965f15bcbc9ea71386b71669e6c5a6dfef2..33632c32878ffc8075038b62a143173af635e37a 100644
+--- a/.github/actions/setup-bun/action.yml
++++ b/.github/actions/setup-bun/action.yml
+@@ -47,6 +47,22 @@ runs:
+       shell: bash
+ 
+     - name: Install dependencies
++      env:
++        # CI 无需 electron/playwright/puppeteer/cypress 的预构建二进制：
++        # opencode/core/http-recorder 单测不依赖它们；upstream-e2e 的 playwright
++        # 浏览器由 test.yml 的独立步骤安装（PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD 仅抑制
++        # bun install 的 postinstall 自动下载，不影响后续 `playwright install` CLI）。
++        # 与 build-opencode.yml 的 Windows install 步骤保持一致。
++        # 注意：electron 的 install.js 实际检查 ELECTRON_SKIP_BINARY_DOWNLOAD（另一个
++        # ELECTRON_SKIP_DOWNLOAD 供 electron-builder 等工具识别，两者都设以对齐先例）。
++        ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
++        ELECTRON_SKIP_DOWNLOAD: "1"
++        PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
++        PUPPETEER_SKIP_DOWNLOAD: "1"
++        CYPRESS_INSTALL_BINARY: "0"
++        # CI 不提交代码，无需 husky 安装 git hook；HUSKY=0 让 husky 9 直接 return（exit 0）。
++        # 测试中的 git commit 均在 os.tmpdir() 的独立 repo 中执行，不读取根 .husky/，互不影响。
++        HUSKY: "0"
+       run: |
+         # Workaround for patched peer variants
+         # e.g. ./patches/ for standard-openapi
+diff --git a/bun.lock b/bun.lock
+index 40bfd590fe85ead6d0902fb01f0c29804d71b270..5a5f4146bd855b5f8ae5234478dad14da58ee036 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -55,7 +55,7 @@
+         "diff": "catalog:",
+         "effect": "catalog:",
+         "fuzzysort": "catalog:",
+-        "ghostty-web": "github:anomalyco/ghostty-web#main",
++        "ghostty-web": "github:anomalyco/ghostty-web#513463a6f1190253057e8a3f0dac8f6ee8393553",
+         "luxon": "catalog:",
+         "marked": "catalog:",
+         "marked-shiki": "catalog:",
+diff --git a/packages/app/package.json b/packages/app/package.json
+index a4d6bb59db8cc01cadedb2bd9641f45f294ec40f..3438cdd58f7674391acb2f861c67efedb57628e0 100644
+--- a/packages/app/package.json
++++ b/packages/app/package.json
+@@ -64,7 +64,7 @@
+     "diff": "catalog:",
+     "effect": "catalog:",
+     "fuzzysort": "catalog:",
+-    "ghostty-web": "github:anomalyco/ghostty-web#main",
++    "ghostty-web": "github:anomalyco/ghostty-web#513463a6f1190253057e8a3f0dac8f6ee8393553",
+     "luxon": "catalog:",
+     "marked": "catalog:",
+     "marked-shiki": "catalog:",

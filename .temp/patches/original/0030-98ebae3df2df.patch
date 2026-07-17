@@ -1,0 +1,36 @@
+From 98ebae3df2dfe5a5d70b49eb34bc0a354a97bf91 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 26 Apr 2026 12:19:57 +0800
+Subject: [PATCH] =?UTF-8?q?fix:=20=E6=B7=BB=E5=8A=A0Windows=E5=B9=B3?=
+ =?UTF-8?q?=E5=8F=B0=E5=85=BC=E5=AE=B9=E6=80=A7=E4=BF=AE=E6=94=B9=E4=BB=A5?=
+ =?UTF-8?q?=E8=A7=A3=E5=86=B3=E7=AE=A1=E9=81=93=E8=AF=BB=E5=8F=96=E4=B9=B1?=
+ =?UTF-8?q?=E7=A0=81=E9=97=AE=E9=A2=98?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/tool/bash.ts b/packages/opencode/src/tool/bash.ts
+index 927068c87e7f84e085f39ae74d7ad06bce3d5779..84b95cc7c1919c7dafad0c8b496794b8713b3777 100644
+--- a/packages/opencode/src/tool/bash.ts
++++ b/packages/opencode/src/tool/bash.ts
+@@ -495,8 +495,19 @@ export const BashTool = Tool.define(
+         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
+         { env: {} },
+       )
++
++      // 兼容性修改：探测 Windows 平台并静默挂载 UTF-8 强控变量以解决管道读取乱码
++      const isWin = process.platform === "win32"
++      const utf8EnvOverrides = isWin ? {
++        PYTHONIOENCODING: "utf-8",
++        PYTHONUTF8: "1",
++        JAVA_TOOL_OPTIONS: `${process.env.JAVA_TOOL_OPTIONS || ""} -Dfile.encoding=UTF-8`.trim(),
++        RUBYOPT: `${process.env.RUBYOPT || ""} -Eutf-8`.trim()
++      } : {}
++
+       return {
+         ...process.env,
++        ...utf8EnvOverrides,
+         ...extra.env,
+       }
+     })

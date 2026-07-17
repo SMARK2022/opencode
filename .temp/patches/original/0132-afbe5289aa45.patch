@@ -1,0 +1,340 @@
+From afbe5289aa45e1c8b7ae42ac90a34f46f0838ac9 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Wed, 13 May 2026 01:01:21 +0800
+Subject: [PATCH] =?UTF-8?q?feat(session-path):=20=E6=B7=BB=E5=8A=A0?=
+ =?UTF-8?q?=E4=BC=9A=E8=AF=9D=E8=B7=AF=E5=BE=84=E5=A4=84=E7=90=86=E5=8A=9F?=
+ =?UTF-8?q?=E8=83=BD=EF=BC=8C=E6=94=AF=E6=8C=81Windows=E5=85=A8=E5=B1=80?=
+ =?UTF-8?q?=E4=BC=9A=E8=AF=9D=E8=B7=AF=E5=BE=84=E7=9A=84=E8=A7=84=E8=8C=83?=
+ =?UTF-8?q?=E5=8C=96=E5=92=8C=E5=85=BC=E5=AE=B9=E6=80=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/migration/20260513000000_normalize_global_session_path/migration.sql b/packages/opencode/migration/20260513000000_normalize_global_session_path/migration.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..175cde91d169acc1df3e86bb35737c816f68443b
+--- /dev/null
++++ b/packages/opencode/migration/20260513000000_normalize_global_session_path/migration.sql
+@@ -0,0 +1,7 @@
++UPDATE `session`
++SET `path` = replace(`directory`, '\', '/')
++WHERE `project_id` = 'global'
++  AND `path` IS NOT NULL
++  AND substr(`path`, 2, 2) != ':/'
++  AND substr(replace(`directory`, '\', '/'), 2, 2) = ':/'
++  AND substr(replace(`directory`, '\', '/'), 4) = `path`;
+diff --git a/packages/opencode/src/cli/cmd/tui/context/event.ts b/packages/opencode/src/cli/cmd/tui/context/event.ts
+index 156f9c94768a9d43e5d1273bb02fd31482fa24eb..d92f1c9be92ba4bfab27957a13cbfd19294f7061 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/event.ts
++++ b/packages/opencode/src/cli/cmd/tui/context/event.ts
+@@ -1,6 +1,21 @@
+ import type { Event } from "@opencode-ai/sdk/v2"
+ import { useProject } from "./project"
+ import { useSDK } from "./sdk"
++import { AppFileSystem } from "@opencode-ai/core/filesystem"
++
++function sameDirectory(a?: string, b?: string) {
++  if (!a || !b) return false
++  try {
++    // Server events and TUI state can carry equivalent Windows paths with
++    // different slash/case/realpath spelling. Normalize before filtering so
++    // valid daemon updates are not dropped by a string-form mismatch.
++    const left = AppFileSystem.resolve(a)
++    const right = AppFileSystem.resolve(b)
++    return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right
++  } catch {
++    return a === b
++  }
++}
+ 
+ export function useEvent() {
+   const project = useProject()
+@@ -12,6 +27,11 @@ export function useEvent() {
+         return
+       }
+ 
++      if (event.payload.type === "server.connected") {
++        handler(event.payload)
++        return
++      }
++
+       // Special hack for truly global events
+       if (event.directory === "global") {
+         handler(event.payload)
+@@ -25,7 +45,7 @@ export function useEvent() {
+         return
+       }
+ 
+-      if (event.directory === project.instance.directory()) {
++      if (sameDirectory(event.directory, project.instance.directory())) {
+         handler(event.payload)
+       }
+     })
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+index 18866772d806cc92638d08ec1b8a04a5ced3559f..7495ce4fdce59f5e45639fe9aad5e25f761e0f14 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+@@ -30,8 +30,8 @@ import { useArgs } from "./args"
+ import { batch, onMount } from "solid-js"
+ import * as Log from "@opencode-ai/core/util/log"
+ import { emptyConsoleState, type ConsoleState } from "@/config/console-state"
+-import path from "path"
+ import { useKV } from "./kv"
++import { SessionPath } from "@/session/path"
+ 
+ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+   name: "Sync",
+@@ -113,14 +113,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+ 
+     const fullSyncedSessions = new Set<string>()
+     let syncedWorkspace = project.workspace.current()
++    let connectedOnce = false
+ 
+     function sessionListQuery(): { scope?: "project"; path?: string } {
+       if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
+       if (!project.data.instance.path.worktree || !project.data.instance.path.directory) return { scope: "project" }
+       return {
+-        path: path
+-          .relative(path.resolve(project.data.instance.path.worktree), project.data.instance.path.directory)
+-          .replaceAll("\\", "/"),
++        path: SessionPath.relative(project.data.instance.path.worktree, project.data.instance.path.directory),
+       }
+     }
+ 
+@@ -132,6 +131,16 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+ 
+     event.subscribe((event) => {
+       switch (event.type) {
++        case "server.connected":
++          if (!connectedOnce) {
++            connectedOnce = true
++            break
++          }
++          // SSE has no replay buffer. After a reconnect, refresh persisted state
++          // from SQLite so missed message/status events cannot leave the TUI stale.
++          fullSyncedSessions.clear()
++          void bootstrap({ fatal: false }).catch(() => undefined)
++          break
+         case "server.instance.disposed":
+           void bootstrap()
+           break
+@@ -542,8 +551,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+           if (last.role === "user") return "working"
+           return last.time.completed ? "idle" : "working"
+         },
+-        async sync(sessionID: string) {
+-          if (fullSyncedSessions.has(sessionID)) return
++        async sync(sessionID: string, options?: { force?: boolean }) {
++          if (!options?.force && fullSyncedSessions.has(sessionID)) return
+           const [session, messages, todo, diff] = await Promise.all([
+             sdk.client.session.get({ sessionID }, { throwOnError: true }),
+             sdk.client.session.messages({ sessionID, limit: 100 }),
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+index a1a4b7a71ed8f94d06c3ee94f86587e06e9ea13d..9f6a6ea52a1edbe60a82fae352d2359e5cabcd7f 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
+@@ -287,6 +287,13 @@ export function Session() {
+     }
+   })
+ 
++  event.on("server.connected", () => {
++    // A reconnect means the SSE stream may have missed message deltas while the
++    // daemon kept writing SQLite. Force a DB-backed refresh for the visible
++    // session so the UI cannot stay stuck on an old pending state.
++    void sync.session.sync(route.sessionID, { force: true })
++  })
++
+   let seeded = false
+   let scroll: ScrollBoxRenderable
+   let prompt: PromptRef | undefined
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
+index 71680ce1527fc9ecf7aacd455b80dab8b9519c99..ac16874d2936a0f8c5b7a214964bbc4836ba8ffe 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
+@@ -16,6 +16,7 @@ import { SessionRunState } from "@/session/run-state"
+ import { SessionStatus } from "@/session/status"
+ import { SessionSummary } from "@/session/summary"
+ import { Todo } from "@/session/todo"
++import { InstanceStore } from "@/project/instance-store"
+ import { MessageID, PartID, SessionID } from "@/session/schema"
+ import { NotFoundError } from "@/storage/storage"
+ import { NamedError } from "@opencode-ai/core/util/error"
+@@ -56,6 +57,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+     const requestUsage = yield* SessionRequestUsage.Service
+     const summary = yield* SessionSummary.Service
+     const bus = yield* Bus.Service
++    const store = yield* InstanceStore.Service
+     const scope = yield* Scope.Scope
+ 
+     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
+@@ -225,7 +227,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+     })
+ 
+     const abort = Effect.fn("SessionHttpApi.abort")(function* (ctx: { params: { sessionID: SessionID } }) {
+-      yield* promptSvc.cancel(ctx.params.sessionID)
++      const info = yield* session.get(ctx.params.sessionID).pipe(Effect.mapError(() => new HttpApiError.NotFound({})))
++      // Session runners are stored per instance directory. Route abort through
++      // the session's own directory so a differently-normalized TUI request can
++      // still interrupt the run that created the session.
++      yield* store.provide({ directory: info.directory }, promptSvc.cancel(ctx.params.sessionID))
+       return true
+     })
+ 
+diff --git a/packages/opencode/src/server/routes/instance/session.ts b/packages/opencode/src/server/routes/instance/session.ts
+index 4cf393b259f2df8874af90a0d2582cf3bdec370e..631188caa4b528162a2c81d8f334b08a9c655a43 100644
+--- a/packages/opencode/src/server/routes/instance/session.ts
++++ b/packages/opencode/src/server/routes/instance/session.ts
+@@ -29,6 +29,7 @@ import { Bus } from "@/bus"
+ import { NamedError } from "@opencode-ai/core/util/error"
+ import { NotFoundError } from "@/storage"
+ import { jsonRequest, runRequest } from "./trace"
++import { InstanceStore } from "@/project/instance-store"
+ 
+ const log = Log.create({ service: "server" })
+ 
+@@ -560,8 +561,14 @@ export const SessionRoutes = lazy(() =>
+       ),
+       async (c) =>
+         jsonRequest("SessionRoutes.abort", c, function* () {
+-          const svc = yield* SessionPrompt.Service
+-          yield* svc.cancel(c.req.valid("param").sessionID)
++          const sessionID = c.req.valid("param").sessionID
++          const sessions = yield* Session.Service
++          const store = yield* InstanceStore.Service
++          const info = yield* sessions.get(sessionID)
++          // Runners live in InstanceState keyed by directory. Use the session's
++          // persisted directory so abort still reaches the original run even if
++          // the current TUI/request directory was normalized differently.
++          yield* store.provide({ directory: info.directory }, SessionPrompt.Service.use((svc) => svc.cancel(sessionID)))
+           return true
+         }),
+     )
+diff --git a/packages/opencode/src/session/path.ts b/packages/opencode/src/session/path.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..597a4b3351bbc37638e729ed4a6a8e403851a889
+--- /dev/null
++++ b/packages/opencode/src/session/path.ts
+@@ -0,0 +1,35 @@
++import path from "path"
++
++function isGlobalRoot(worktree: string) {
++  return worktree === "/" || worktree === "\\"
++}
++
++export function relative(worktree: string, directory: string) {
++  const resolvedDirectory = path.resolve(directory)
++  // On Windows, `path.resolve("/")` binds to the daemon's current drive. A
++  // shared daemon can be started from C: while serving a request for F:, so use
++  // a drive-qualified path for global sessions. Keeping the drive avoids
++  // collisions between C:/repo and F:/repo that share the same drive-relative
++  // suffix.
++  if (process.platform === "win32" && isGlobalRoot(worktree)) return resolvedDirectory.replaceAll("\\", "/")
++
++  const base = path.resolve(worktree)
++  return path.relative(base, resolvedDirectory).replaceAll("\\", "/")
++}
++
++function windowsAbsolute(directory: string) {
++  if (process.platform !== "win32") return
++  const result = path.resolve(directory).replaceAll("\\", "/")
++  return /^[A-Za-z]:\//.test(result) ? result : undefined
++}
++
++export function aliases(input: { path: string; directory?: string; global?: boolean }) {
++  // Historical Windows global sessions used both `F:/...` and drive-relative
++  // `...` forms depending on the daemon current drive. Query both spellings so
++  // old rows remain visible while new writes keep the drive-qualified form.
++  const absolute = input.global && input.directory ? windowsAbsolute(input.directory) : undefined
++  const driveRelative = (absolute ?? input.path).replace(/^[A-Za-z]:\//, "")
++  return [...new Set([input.path, absolute, driveRelative].filter((item): item is string => !!item))]
++}
++
++export * as SessionPath from "./path"
+diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
+index 41087bb4a2a3aed5884fc4be7106f3468c012fe4..e5dedb8ae25305a3d5618733e72af2d907a35249 100644
+--- a/packages/opencode/src/session/session.ts
++++ b/packages/opencode/src/session/session.ts
+@@ -40,6 +40,7 @@ import { Effect, Layer, Option, Context, Schema, Types } from "effect"
+ import { zod } from "@/util/effect-zod"
+ import { NonNegativeInt, optionalOmitUndefined, withStatics } from "@/util/schema"
+ import { searchCondition } from "./search"
++import { SessionPath } from "./path"
+ 
+ import { createDefaultTitle, isDefaultTitle } from "./title"
+ 
+@@ -130,7 +131,7 @@ function getForkedTitle(title: string): string {
+ }
+ 
+ function sessionPath(worktree: string, cwd: string) {
+-  return path.relative(path.resolve(worktree), cwd).replaceAll("\\", "/")
++  return SessionPath.relative(worktree, cwd)
+ }
+ 
+ const Summary = Schema.Struct({
+@@ -817,7 +818,11 @@ function* listByProject(
+   }
+   if (input.path !== undefined) {
+     if (input.path) {
+-      const conds = [eq(SessionTable.path, input.path), like(SessionTable.path, `${input.path}/%`)]
++      const conds = SessionPath.aliases({
++        path: input.path,
++        directory: input.directory,
++        global: input.projectID === ProjectID.global,
++      }).flatMap((item) => [eq(SessionTable.path, item), like(SessionTable.path, `${item}/%`)])
+ 
+       conditions.push(
+         input.directory
+diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/opencode/test/server/session-list.test.ts
+index 20478dde844e46d74b81a4f3f3e24bfc3d6cc85b..56d314cdc7c2ace79733a0d10196fa3eaa96f22f 100644
+--- a/packages/opencode/test/server/session-list.test.ts
++++ b/packages/opencode/test/server/session-list.test.ts
+@@ -11,6 +11,7 @@ import path from "path"
+ import { Database } from "@/storage/db"
+ import { SessionTable } from "@/session/session.sql"
+ import { eq } from "drizzle-orm"
++import { SessionPath } from "@/session/path"
+ 
+ void Log.init({ print: false })
+ const originalWorkspaces = Flag.OPENCODE_EXPERIMENTAL_WORKSPACES
+@@ -174,6 +175,40 @@ describe("session.list", () => {
+     })
+   })
+ 
++  test("lists legacy Windows global sessions stored without drive", async () => {
++    if (process.platform !== "win32") return
++    Flag.OPENCODE_EXPERIMENTAL_WORKSPACES = false
++    await using tmp = await tmpdir()
++
++    await WithInstance.provide({
++      directory: tmp.path,
++      fn: async () => {
++        const session = await svc.create({ title: "legacy-drive-relative-path" })
++        const legacy = path.resolve(tmp.path).replaceAll("\\", "/").replace(/^[A-Za-z]:\//, "")
++        // Older Windows global sessions could persist a drive-relative `...`
++        // path when the daemon happened to run on the same drive. The list query
++        // should still find those rows from the drive-qualified current path.
++        Database.use((db) => db.update(SessionTable).set({ path: legacy }).where(eq(SessionTable.id, session.id)).run())
++
++        const ids = (
++          await svc.list({
++            directory: tmp.path,
++            path: SessionPath.relative("/", tmp.path),
++          })
++        ).map((s) => s.id)
++        expect(ids).toContain(session.id)
++
++        const pathOnlyIDs = (await svc.list({ path: SessionPath.relative("/", tmp.path) })).map((s) => s.id)
++        expect(pathOnlyIDs).toContain(session.id)
++      },
++    })
++  })
++
++  test("normalizes Windows global session paths against the request drive", () => {
++    if (process.platform !== "win32") return
++    expect(SessionPath.relative("/", "F:\\ML\\PythonAIProject\\Claude-Code")).toBe("F:/ML/PythonAIProject/Claude-Code")
++  })
++
+   test("filters root sessions", async () => {
+     await using tmp = await tmpdir({ git: true })
+     await WithInstance.provide({

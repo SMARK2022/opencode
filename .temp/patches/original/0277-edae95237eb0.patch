@@ -1,0 +1,722 @@
+From edae95237eb0eea6a997f50d9eb3aca26db36da1 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 31 May 2026 16:06:57 +0800
+Subject: [PATCH] =?UTF-8?q?fix(image):=20=E7=BB=9F=E4=B8=80=E5=9B=BE?=
+ =?UTF-8?q?=E7=89=87=E9=99=84=E4=BB=B6=E5=8E=8B=E7=BC=A9=E8=BE=B9=E7=95=8C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+将 read 工具的图片附件处理收敛到 Image.Service，并按调用方 token budget 收紧 base64 上限，避免默认尺寸内的大图绕过模型预算。
+
+保留 resizer 不可用时 read 附件回退，但损坏图片仍返回解码错误；同步测试 registry/session 依赖与图片处理草案，降低工具链回归风险。
+
+diff --git a/docs/draft/image-processing-unification-plan.md b/docs/draft/image-processing-unification-plan.md
+index 4525a39689d432e6b21c1160e8c6a87d53820228..6f3270e70ead909d59d7405283cefdbcf99790f9 100644
+--- a/docs/draft/image-processing-unification-plan.md
++++ b/docs/draft/image-processing-unification-plan.md
+@@ -69,7 +69,7 @@ sharp metadata fast path
+         ↓
+ 需要处理时 sharp resize/compress
+         ↓
+-photon fallback 或 typed error
++typed error；read 工具仅在 resizer 不可用时兼容返回原始图片
+ ```
+ 
+ 实现原则：
+diff --git a/packages/opencode/src/image/image.ts b/packages/opencode/src/image/image.ts
+index 2a3c4fa5c009386af0998aa20cc0d2b8f1a3921c..5a25e0dd4f2e922d17ab0d1ff97e05f504617498 100644
+--- a/packages/opencode/src/image/image.ts
++++ b/packages/opencode/src/image/image.ts
+@@ -1,17 +1,20 @@
+ import { Config } from "@/config/config"
+ import type { MessageV2 } from "@/session/message-v2"
+ import * as Log from "@opencode-ai/core/util/log"
+-import photonWasm from "@silvia-odwyer/photon-node/photon_rs_bg.wasm" with { type: "file" }
+ import { Context, Effect, Layer, Schema } from "effect"
+-import path from "node:path"
+-import { fileURLToPath } from "node:url"
+ 
+ const MAX_BASE64_BYTES = 5 * 1024 * 1024
+ const MAX_WIDTH = 2000
+ const MAX_HEIGHT = 2000
+ const AUTO_RESIZE = true
+-const JPEG_QUALITIES = [80, 85, 70, 55, 40]
++// Keep this in sync with token/estimate.ts: image payload budget is estimated from base64 characters.
++const TOKEN_ESTIMATE_BASE64_CHARS = 750
++const RESIZE_STEPS = 32
++const RESIZE_STEP_RATIO = 0.75
++const JPEG_QUALITIES = [85, 70, 55, 40]
+ const log = Log.create({ service: "image" })
++type Sharp = typeof import("sharp")
++type SharpMetadata = import("sharp").Metadata
+ 
+ export class ResizerUnavailableError extends Schema.TaggedErrorClass<ResizerUnavailableError>()(
+   "ImageResizerUnavailableError",
+@@ -52,7 +55,12 @@ export class SizeError extends Schema.TaggedErrorClass<SizeError>()("ImageSizeEr
+ export type Error = ResizerUnavailableError | InvalidDataUrlError | DecodeError | SizeError
+ 
+ export interface Interface {
+-  readonly normalize: (input: MessageV2.FilePart) => Effect.Effect<MessageV2.FilePart, Error>
++  readonly normalize: (
++    input: MessageV2.FilePart,
++    options?: {
++      readonly tokenBudget?: number
++    },
++  ) => Effect.Effect<MessageV2.FilePart, Error>
+ }
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
+@@ -61,99 +69,52 @@ export const layer = Layer.effect(
+   Service,
+   Effect.gen(function* () {
+     const config = yield* Config.Service
+-    const loadPhoton = yield* Effect.cached(
+-      Effect.sync(() => {
+-        // Patched photon-node reads this during module init so Bun compiled binaries use the embedded wasm path.
+-        ;(globalThis as typeof globalThis & { __OPENCODE_PHOTON_WASM_PATH?: string }).__OPENCODE_PHOTON_WASM_PATH =
+-          path.isAbsolute(photonWasm) ? photonWasm : fileURLToPath(new URL(photonWasm, import.meta.url))
+-      }).pipe(
+-        Effect.andThen(() => Effect.tryPromise(() => import("@silvia-odwyer/photon-node"))),
+-        Effect.tapError((error) => Effect.sync(() => log.warn("failed to load photon", { error }))),
+-        Effect.mapError(() => new ResizerUnavailableError()),
+-      ),
++    const loadSharp = yield* Effect.cached(
++      Effect.tryPromise({
++        try: async () => {
++          const mod = await import("sharp")
++          const value: unknown = Reflect.get(mod, "default")
++          if (isSharp(value)) return value
++          if (isSharp(mod)) return mod
++          throw new Error("sharp module did not expose a callable export")
++        },
++        catch: (error) => {
++          log.warn("failed to load sharp", { error })
++          return new ResizerUnavailableError()
++        },
++      }),
+     )
+ 
+-    const normalize = Effect.fn("Image.normalize")(function* (input: MessageV2.FilePart) {
++    const normalize = Effect.fn("Image.normalize")(function* (
++      input: MessageV2.FilePart,
++      options?: {
++        readonly tokenBudget?: number
++      },
++    ) {
+       const image = (yield* config.get()).attachment?.image
+       const info = {
+         autoResize: image?.auto_resize ?? AUTO_RESIZE,
+         maxWidth: image?.max_width ?? MAX_WIDTH,
+         maxHeight: image?.max_height ?? MAX_HEIGHT,
+-        maxBase64Bytes: image?.max_base64_bytes ?? MAX_BASE64_BYTES,
++        maxBase64Bytes: targetMaxBase64Bytes(image?.max_base64_bytes ?? MAX_BASE64_BYTES, options),
+       }
+       if (!input.url.startsWith("data:") || !input.url.includes(";base64,"))
+         return yield* new InvalidDataUrlError({ url: input.url })
+ 
+       const base64 = input.url.slice(input.url.indexOf(";base64,") + ";base64,".length)
+       const bytes = Buffer.byteLength(base64, "utf8")
+-
+-      const photon = yield* loadPhoton
+-
+-      const decoded = yield* Effect.try({
+-        try: () => photon.PhotonImage.new_from_byteslice(Buffer.from(base64, "base64")),
+-        catch: (error) => {
+-          log.warn("failed to decode image", { error })
+-          return new DecodeError()
+-        },
+-      })
+-
+-      try {
+-        const originalWidth = decoded.get_width()
+-        const originalHeight = decoded.get_height()
+-        if (originalWidth <= info.maxWidth && originalHeight <= info.maxHeight && bytes <= info.maxBase64Bytes)
+-          return input
+-        if (!info.autoResize)
+-          return yield* new SizeError({
+-            bytes,
+-            max: info.maxBase64Bytes,
+-            width: originalWidth,
+-            height: originalHeight,
+-            max_width: info.maxWidth,
+-            max_height: info.maxHeight,
+-          })
+-
+-        const scale = Math.min(1, info.maxWidth / originalWidth, info.maxHeight / originalHeight)
+-        for (const size of Array.from({ length: 32 }).reduce<Array<{ width: number; height: number }>>((acc) => {
+-          const previous = acc.at(-1) ?? {
+-            width: Math.max(1, Math.round(originalWidth * scale)),
+-            height: Math.max(1, Math.round(originalHeight * scale)),
+-          }
+-          const next =
+-            acc.length === 0
+-              ? previous
+-              : {
+-                  width: previous.width === 1 ? 1 : Math.max(1, Math.floor(previous.width * 0.75)),
+-                  height: previous.height === 1 ? 1 : Math.max(1, Math.floor(previous.height * 0.75)),
+-                }
+-          return acc.some((item) => item.width === next.width && item.height === next.height) ? acc : [...acc, next]
+-        }, [])) {
+-          const resized = photon.resize(decoded, size.width, size.height, photon.SamplingFilter.Lanczos3)
+-          const candidate = [
+-            { data: Buffer.from(resized.get_bytes()).toString("base64"), mime: "image/png" },
+-            ...JPEG_QUALITIES.map((quality) => ({
+-              data: Buffer.from(resized.get_bytes_jpeg(quality)).toString("base64"),
+-              mime: "image/jpeg",
+-            })),
+-          ]
+-            .map((item) => ({ ...item, bytes: Buffer.byteLength(item.data, "utf8") }))
+-            .find((item) => item.bytes <= info.maxBase64Bytes)
+-          resized.free()
+-
+-          if (candidate) {
+-            log.info("using resized image", {
+-              from_mime: input.mime,
+-              to_mime: candidate.mime,
+-              from: `${originalWidth}x${originalHeight}`,
+-              to: `${size.width}x${size.height}`,
+-            })
+-            return {
+-              ...input,
+-              mime: candidate.mime,
+-              url: `data:${candidate.mime};base64,${candidate.data}`,
+-            }
+-          }
+-        }
+-
++      const buffer = Buffer.from(base64, "base64")
++      if (buffer.length === 0) return yield* new DecodeError()
++
++      const sharp = yield* loadSharp
++      const metadata = yield* readMetadata(sharp, buffer)
++      if (!metadata.width || !metadata.height) return yield* new DecodeError()
++
++      const originalWidth = metadata.width
++      const originalHeight = metadata.height
++      // Historical session images may be normalized again during replay; metadata-only pass-through avoids lossy rewrites.
++      if (originalWidth <= info.maxWidth && originalHeight <= info.maxHeight && bytes <= info.maxBase64Bytes) return input
++      if (!info.autoResize)
+         return yield* new SizeError({
+           bytes,
+           max: info.maxBase64Bytes,
+@@ -162,15 +123,120 @@ export const layer = Layer.effect(
+           max_width: info.maxWidth,
+           max_height: info.maxHeight,
+         })
+-      } finally {
+-        decoded.free()
++
++      const hasAlpha = Boolean(metadata.hasAlpha)
++      const preserveAlpha = hasAlpha && options?.tokenBudget === undefined
++      for (const size of resizeSizes(originalWidth, originalHeight, info.maxWidth, info.maxHeight)) {
++        const candidate = yield* encodeCandidate(sharp, buffer, size, hasAlpha, preserveAlpha, info.maxBase64Bytes)
++        if (candidate) {
++          log.info("using resized image", {
++            from_mime: input.mime,
++            to_mime: candidate.mime,
++            from: `${originalWidth}x${originalHeight}`,
++            to: `${size.width}x${size.height}`,
++          })
++          return {
++            ...input,
++            mime: candidate.mime,
++            url: `data:${candidate.mime};base64,${candidate.data}`,
++          }
++        }
+       }
++
++      return yield* new SizeError({
++        bytes,
++        max: info.maxBase64Bytes,
++        width: originalWidth,
++        height: originalHeight,
++        max_width: info.maxWidth,
++        max_height: info.maxHeight,
++      })
+     })
+ 
+     return Service.of({ normalize })
+   }),
+ )
+ 
++function targetMaxBase64Bytes(
++  configuredMax: number,
++  options?: {
++    readonly tokenBudget?: number
++  },
++) {
++  if (options?.tokenBudget === undefined) return configuredMax
++  return Math.min(configuredMax, Math.max(0, Math.floor(options.tokenBudget * TOKEN_ESTIMATE_BASE64_CHARS)))
++}
++
++function isSharp(value: unknown): value is Sharp {
++  return typeof value === "function"
++}
++
++function readMetadata(sharp: Sharp, buffer: Buffer): Effect.Effect<SharpMetadata, DecodeError> {
++  return Effect.tryPromise({
++    try: () => sharp(buffer).metadata(),
++    catch: (error) => {
++      log.warn("failed to decode image metadata", { error })
++      return new DecodeError()
++    },
++  })
++}
++
++function resizeSizes(originalWidth: number, originalHeight: number, maxWidth: number, maxHeight: number) {
++  const scale = Math.min(1, maxWidth / originalWidth, maxHeight / originalHeight)
++  return Array.from({ length: RESIZE_STEPS }).reduce<Array<{ width: number; height: number }>>((acc) => {
++    const previous = acc.at(-1) ?? {
++      width: Math.max(1, Math.round(originalWidth * scale)),
++      height: Math.max(1, Math.round(originalHeight * scale)),
++    }
++    const next =
++      acc.length === 0
++        ? previous
++        : {
++            width: previous.width === 1 ? 1 : Math.max(1, Math.floor(previous.width * RESIZE_STEP_RATIO)),
++            height: previous.height === 1 ? 1 : Math.max(1, Math.floor(previous.height * RESIZE_STEP_RATIO)),
++          }
++    return acc.some((item) => item.width === next.width && item.height === next.height) ? acc : [...acc, next]
++  }, [])
++}
++
++function encodeCandidate(
++  sharp: Sharp,
++  buffer: Buffer,
++  size: { width: number; height: number },
++  hasAlpha: boolean,
++  preserveAlpha: boolean,
++  maxBase64Bytes: number,
++) {
++  return Effect.tryPromise({
++    try: async () => {
++      const resized = sharp(buffer).rotate().resize(size.width, size.height, {
++        fit: "inside",
++        withoutEnlargement: true,
++      })
++      if (preserveAlpha) {
++        const encoded = (await resized.clone().png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer()).toString(
++          "base64",
++        )
++        if (Buffer.byteLength(encoded, "utf8") <= maxBase64Bytes) return { data: encoded, mime: "image/png" }
++      }
++
++      for (const quality of JPEG_QUALITIES) {
++        // Transparent inputs prefer PNG above unless a strict token budget makes bounded latency more important.
++        const encoded = (await (hasAlpha ? resized.clone().flatten({ background: "#ffffff" }) : resized.clone())
++          .jpeg({ quality })
++          .toBuffer()).toString("base64")
++        if (Buffer.byteLength(encoded, "utf8") <= maxBase64Bytes) return { data: encoded, mime: "image/jpeg" }
++      }
++
++      return undefined
++    },
++    catch: (error) => {
++      log.warn("failed to resize image", { error })
++      return new DecodeError()
++    },
++  })
++}
++
+ export const defaultLayer = layer.pipe(Layer.provide(Config.defaultLayer))
+ 
+ export * as Image from "./image"
+diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
+index 8489361821a048603f85df38d8486f8d99ace8d2..6c0fb5ee3eae84d6ad006a38ec573011c91bb3de 100644
+--- a/packages/opencode/src/tool/read.ts
++++ b/packages/opencode/src/tool/read.ts
+@@ -11,10 +11,12 @@ import { InstanceState } from "@/effect/instance-state"
+ import { assertExternalDirectoryEffect } from "./external-directory"
+ import { Instruction } from "../session/instruction"
+ // [local-smark] read tool enhancements: image processing, outline
+-import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from "@/util/media"
++import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
+ import type { MessageV2 } from "../session/message-v2"
+ import { readOutline, type Outline } from "./read-outline"
+ import { Reference } from "@/reference/reference"
++import { Image } from "@/image/image"
++import { PartID } from "@/session/schema"
+ 
+ const DEFAULT_READ_LIMIT = 200
+ const MAX_BYTES = 16 * 1024
+@@ -337,6 +339,7 @@ export const ReadTool = Tool.define(
+     const instruction = yield* Instruction.Service
+     const lsp = yield* LSP.Service
+     const reference = yield* Reference.Service
++    const image = yield* Image.Service
+     const scope = yield* Scope.Scope
+ 
+     const miss = Effect.fn("ReadTool.miss")(function* (filepath: string) {
+@@ -528,10 +531,28 @@ export const ReadTool = Tool.define(
+       if (isImage || isPdfAttachment(mime)) {
+         const bytes = yield* fs.readFile(filepath)
+ 
+-        // 图片使用三级压缩策略
++        // 图片走 Image.Service，确保 read、粘贴和 tool-result 共享同一套尺寸与预算边界。
+         if (isImageAttachment(mime)) {
+-          const processed = yield* Effect.promise(() => processImageWithTokenBudget(bytes, mime))
+-          const msg = `Image read successfully (${formatSize(processed.originalSize)} → compressed for model)`
++          const input = {
++            id: PartID.ascending(),
++            messageID: ctx.messageID,
++            sessionID: ctx.sessionID,
++            type: "file" as const,
++            mime,
++            url: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`,
++          }
++          const attachment = yield* image.normalize(
++            input,
++            // `read` results enter the model immediately, so keep its payload near the existing image token cap.
++            { tokenBudget: 1600 },
++          ).pipe(
++            // If the native resizer cannot load, preserve the old read behavior: attach the original bytes instead of failing.
++            Effect.catchIf(
++              (error) => error instanceof Image.ResizerUnavailableError,
++              () => Effect.succeed(input),
++            ),
++          )
++          const msg = `Image read successfully (${formatSize(bytes.length)} → compressed for model)`
+           return {
+             title,
+             output: msg,
+@@ -543,8 +564,8 @@ export const ReadTool = Tool.define(
+             attachments: [
+               {
+                 type: "file" as const,
+-                mime: processed.mime,
+-                url: `data:${processed.mime};base64,${processed.data}`,
++                mime: attachment.mime,
++                url: attachment.url,
+               },
+             ],
+           }
+diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool/registry.ts
+index 1a6c81974acfa8b178e84617bb99c364bf431633..04b9d8dac71352518b554fb316c8aefef9b72ab8 100644
+--- a/packages/opencode/src/tool/registry.ts
++++ b/packages/opencode/src/tool/registry.ts
+@@ -55,6 +55,7 @@ import { BackgroundJob } from "@/background/job"
+ import { SessionStatus } from "@/session/status"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { EffectBridge } from "@/effect/bridge"
++import { Image } from "@/image/image"
+ 
+ const log = Log.create({ service: "tool.registry" })
+ 
+@@ -99,6 +100,7 @@ export const layer: Layer.Layer<
+   | LSP.Service
+   | Instruction.Service
+   | AppFileSystem.Service
++  | Image.Service
+   | Bus.Service
+   | HttpClient.HttpClient
+   | ChildProcessSpawner
+@@ -400,7 +402,7 @@ export const defaultLayer = Layer.suspend(() =>
+       Layer.provide(Skill.defaultLayer),
+       Layer.provide(Agent.defaultLayer),
+       Layer.provide(Session.defaultLayer),
+-      Layer.provide(Layer.mergeAll(SessionStatus.defaultLayer, BackgroundJob.defaultLayer)),
++      Layer.provide(Layer.mergeAll(SessionStatus.defaultLayer, BackgroundJob.defaultLayer, Image.defaultLayer)),
+       Layer.provide(Provider.defaultLayer),
+       Layer.provide(Git.defaultLayer),
+       Layer.provide(Reference.defaultLayer),
+diff --git a/packages/opencode/src/util/media.ts b/packages/opencode/src/util/media.ts
+index ce0405b0d0301b3a94fb59340313302c09415307..cd797ac4a7243f6fe5c826e138b36a9b97329223 100644
+--- a/packages/opencode/src/util/media.ts
++++ b/packages/opencode/src/util/media.ts
+@@ -25,131 +25,10 @@ export function sniffAttachmentMime(bytes: Uint8Array, fallback: string) {
+   return fallback
+ }
+ 
+-// 图片 token 预算 - 约等于 1024x768 图片的 token 数
+-const IMAGE_TOKEN_BUDGET = 1600
+-
+-// 图片处理结果
+-export interface ProcessedImage {
+-  data: string
+-  mime: string
+-  originalSize: number
+-}
+-
+-// 动态导入 sharp（可选依赖） - 哨兵值模式避免无限重试
+-const SHARP_UNAVAILABLE = Symbol("SHARP_UNAVAILABLE")
+-let sharpCached: typeof import("sharp") | typeof SHARP_UNAVAILABLE | null = null
+-
+-async function getSharp(): Promise<typeof import("sharp") | null> {
+-  if (sharpCached === SHARP_UNAVAILABLE) return null  // 失败后不重试
+-  if (sharpCached !== null) return sharpCached as typeof import("sharp")
+-  try {
+-    const mod = await import("sharp")
+-    // 处理 ESM/CJS 互操作
+-    sharpCached = ((mod as any).default ?? mod) as typeof import("sharp")
+-    return sharpCached as typeof import("sharp")
+-  } catch {
+-    sharpCached = SHARP_UNAVAILABLE  // 标记为不可用
+-    return null
+-  }
+-}
+-
+-// 估算图片 token：byteLength * 4/3 / 750
+-function estimateImageTokens(byteLength: number): number {
+-  return Math.ceil((byteLength * 4) / 3 / 750)
+-}
+-
+-// 格式化文件大小
+ function formatSize(bytes: number): string {
+   if (bytes < 1024) return `${bytes} B`
+   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+ }
+ 
+-// 三级图片压缩策略
+-export async function processImageWithTokenBudget(
+-  bytes: Uint8Array,
+-  mime: string,
+-  maxTokens: number = IMAGE_TOKEN_BUDGET,
+-): Promise<ProcessedImage> {
+-  const originalSize = bytes.length
+-  const buffer = Buffer.from(bytes)
+-
+-  // Level 0: 估算无需压缩的情况
+-  const estimatedTokens = estimateImageTokens(buffer.length)
+-  if (estimatedTokens <= maxTokens) {
+-    return {
+-      data: buffer.toString("base64"),
+-      mime,
+-      originalSize,
+-    }
+-  }
+-
+-  // 尝试使用 sharp 进行压缩
+-  const sharp = await getSharp()
+-  if (!sharp) {
+-    // 无 sharp 时直接返回原始数据
+-    return {
+-      data: buffer.toString("base64"),
+-      mime,
+-      originalSize,
+-    }
+-  }
+-
+-  try {
+-    const meta = await sharp(buffer).metadata()
+-    const maxDim = 1568
+-    const scale = Math.min(
+-      maxDim / (meta.width ?? maxDim),
+-      maxDim / (meta.height ?? maxDim),
+-      1,
+-    )
+-
+-    // Level 1: 标准尺寸缩放（最长边 1568px，符合 Claude vision 最优分辨率）
+-    if (scale < 1) {
+-      const resized = await sharp(buffer)
+-        .resize(Math.floor((meta.width ?? maxDim) * scale), Math.floor((meta.height ?? maxDim) * scale), {
+-          fit: "inside",
+-          withoutEnlargement: true,
+-        })
+-        .jpeg({ quality: 85 })
+-        .toBuffer()
+-
+-      const l1Tokens = estimateImageTokens(resized.length)
+-      if (l1Tokens <= maxTokens) {
+-        return { data: resized.toString("base64"), mime: "image/jpeg", originalSize }
+-      }
+-    }
+-
+-    // Level 2: 质量递减压缩（无论是否缩放过都尝试）
+-    for (const [width, quality] of [
+-      [800, 60],
+-      [800, 40],
+-      [600, 20],
+-    ] as [number, number][]) {
+-      const compressed = await sharp(buffer)
+-        .resize(width, width, { fit: "inside", withoutEnlargement: true })
+-        .jpeg({ quality })
+-        .toBuffer()
+-      if (estimateImageTokens(compressed.length) <= maxTokens) {
+-        return { data: compressed.toString("base64"), mime: "image/jpeg", originalSize }
+-      }
+-    }
+-
+-    // Level 3: 极限兜底压缩（只有前两级都超出预算才到这里）
+-    const fallback = await sharp(buffer)
+-      .resize(400, 400, { fit: "inside", withoutEnlargement: true })
+-      .jpeg({ quality: 20 })
+-      .toBuffer()
+-
+-    return { data: fallback.toString("base64"), mime: "image/jpeg", originalSize }
+-  } catch {
+-    // 压缩失败时返回原始数据
+-    return {
+-      data: buffer.toString("base64"),
+-      mime,
+-      originalSize,
+-    }
+-  }
+-}
+-
+ export { formatSize }
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 129de06a95d0e2b1d20af0fedf273e1608e21719..0147db13d41ac89bf376b4069a5360cb0e7cf285 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -154,6 +154,13 @@ const lsp = Layer.succeed(
+ const status = SessionStatus.layer.pipe(Layer.provideMerge(Bus.layer))
+ const run = SessionRunState.layer.pipe(Layer.provide(status))
+ const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
++// The registry path only needs ReadTool construction here; image normalization itself is exercised separately.
++const registryImage = Layer.succeed(
++  Image.Service,
++  Image.Service.of({
++    normalize: (input) => Effect.succeed(input),
++  }),
++)
+ 
+ const processorCreateStarted: Array<() => void> = []
+ const blockingProcessor = Layer.succeed(
+@@ -194,6 +201,7 @@ function makeHttp(input?: { processor?: "blocking" }) {
+     Layer.provide(Ripgrep.defaultLayer),
+     Layer.provide(Format.defaultLayer),
+     Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
++    Layer.provide(registryImage),
+     Layer.provideMerge(todo),
+     Layer.provideMerge(question),
+     Layer.provideMerge(deps),
+diff --git a/packages/opencode/test/session/snapshot-tool-race.test.ts b/packages/opencode/test/session/snapshot-tool-race.test.ts
+index 664b02a6cc2f8872aafebc9067d7d3052757a36e..03906c24569bac96ddf4185a1c148f9c7b859e12 100644
+--- a/packages/opencode/test/session/snapshot-tool-race.test.ts
++++ b/packages/opencode/test/session/snapshot-tool-race.test.ts
+@@ -111,6 +111,13 @@ const lsp = Layer.succeed(
+ const status = SessionStatus.layer.pipe(Layer.provideMerge(Bus.layer))
+ const run = SessionRunState.layer.pipe(Layer.provide(status))
+ const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
++// This race test does not read images; a pass-through Image service keeps the registry dependency lightweight.
++const registryImage = Layer.succeed(
++  Image.Service,
++  Image.Service.of({
++    normalize: (input) => Effect.succeed(input),
++  }),
++)
+ 
+ function makeHttp() {
+   const deps = Layer.mergeAll(
+@@ -143,6 +150,7 @@ function makeHttp() {
+     Layer.provide(Ripgrep.defaultLayer),
+     Layer.provide(Format.defaultLayer),
+     Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
++    Layer.provide(registryImage),
+     Layer.provideMerge(todo),
+     Layer.provideMerge(question),
+     Layer.provideMerge(deps),
+diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
+index e979dfa3db6e5dd38139e873290bc46999ae25c0..a2c4edfc72f515709c8fff5814749a5b4032ec50 100644
+--- a/packages/opencode/test/tool/read.test.ts
++++ b/packages/opencode/test/tool/read.test.ts
+@@ -49,7 +49,7 @@ const referenceLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
+     Layer.provide(RuntimeFlags.layer(flags)),
+   )
+ 
+-const readLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
++const readLayer = (flags: Partial<RuntimeFlags.Info> = {}, imageLayer = Image.defaultLayer) =>
+   Layer.mergeAll(
+     Agent.defaultLayer,
+     AppFileSystem.defaultLayer,
+@@ -58,11 +58,22 @@ const readLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
+     LSP.defaultLayer,
+     referenceLayer(flags),
+     Truncate.defaultLayer,
+-    Image.defaultLayer,
++    imageLayer,
+   )
+ 
+ const it = testEffect(readLayer())
+ const scout = testEffect(readLayer({ experimentalScout: true }))
++const noResizer = testEffect(
++  readLayer(
++    {},
++    Layer.succeed(
++      Image.Service,
++      Image.Service.of({
++        normalize: () => Effect.fail(new Image.ResizerUnavailableError()),
++      }),
++    ),
++  ),
++)
+ 
+ const init = Effect.fn("ReadToolTest.init")(function* () {
+   const info = yield* ReadTool
+@@ -620,13 +631,36 @@ describe("tool.read truncation", () => {
+   it.live("large image files are properly attached without error", () =>
+     Effect.gen(function* () {
+       const result = yield* exec(FIXTURES_DIR, { filePath: path.join(FIXTURES_DIR, "large-image.png") })
++      const attachment = result.attachments?.[0]
+       expect(result.metadata.truncated).toBe(false)
+       expect(result.attachments).toBeDefined()
+       expect(result.attachments?.length).toBe(1)
+-      expect(result.attachments?.[0].type).toBe("file")
+-      expect(result.attachments?.[0]).not.toHaveProperty("id")
+-      expect(result.attachments?.[0]).not.toHaveProperty("sessionID")
+-      expect(result.attachments?.[0]).not.toHaveProperty("messageID")
++      expect(attachment?.type).toBe("file")
++      if (!attachment) return
++      const base64 = attachment.url.slice(attachment.url.indexOf(";base64,") + ";base64,".length)
++      expect(base64.length).toBeLessThanOrEqual(1_600 * 750)
++      expect(attachment).not.toHaveProperty("id")
++      expect(attachment).not.toHaveProperty("sessionID")
++      expect(attachment).not.toHaveProperty("messageID")
++    }),
++  )
++
++  noResizer.live("falls back to original image bytes when the image resizer is unavailable", () =>
++    Effect.gen(function* () {
++      const dir = yield* tmpdirScoped()
++      const png = Buffer.from(
++        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
++        "base64",
++      )
++      yield* put(path.join(dir, "image.png"), png)
++
++      const result = yield* exec(dir, { filePath: path.join(dir, "image.png") })
++      expect(result.output).toStartWith("Image read successfully")
++      expect(result.attachments?.[0]).toMatchObject({
++        type: "file",
++        mime: "image/png",
++        url: `data:image/png;base64,${png.toString("base64")}`,
++      })
+     }),
+   )
+ 
+diff --git a/packages/opencode/test/tool/registry.test.ts b/packages/opencode/test/tool/registry.test.ts
+index 35eb31bd1420f3946497cd651d515883c836d355..792d02c9c5bdea091b603ff2e1d3790f78b11b15 100644
+--- a/packages/opencode/test/tool/registry.test.ts
++++ b/packages/opencode/test/tool/registry.test.ts
+@@ -33,11 +33,19 @@ import { ProviderID, ModelID } from "@/provider/schema"
+ import { ToolJsonSchema } from "@/tool/json-schema"
+ import { MessageID, SessionID } from "@/session/schema"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
++import { Image } from "@/image/image"
+ 
+ const node = CrossSpawnSpawner.defaultLayer
+ const configLayer = TestConfig.layer({
+   directories: () => InstanceState.directory.pipe(Effect.map((dir) => [path.join(dir, ".opencode")])),
+ })
++// Registry tests only enumerate tool definitions; real image resizing is covered in image/read tests.
++const registryImage = Layer.succeed(
++  Image.Service,
++  Image.Service.of({
++    normalize: (input) => Effect.succeed(input),
++  }),
++)
+ 
+ const registryLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
+   ToolRegistry.layer
+@@ -49,7 +57,7 @@ const registryLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
+       Layer.provide(Skill.defaultLayer),
+       Layer.provide(Agent.defaultLayer),
+       Layer.provide(Session.defaultLayer),
+-      Layer.provide(Layer.mergeAll(SessionStatus.defaultLayer, BackgroundJob.defaultLayer)),
++      Layer.provide(Layer.mergeAll(SessionStatus.defaultLayer, BackgroundJob.defaultLayer, registryImage)),
+       Layer.provide(Provider.defaultLayer),
+       Layer.provide(Git.defaultLayer),
+       Layer.provide(Reference.defaultLayer),

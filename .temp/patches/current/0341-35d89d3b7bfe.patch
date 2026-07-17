@@ -1,0 +1,52 @@
+From 35d89d3b7bfe6198a8d1f4fc8187fefe7c4317f4 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 25 Jun 2026 04:08:03 +0800
+Subject: [PATCH] =?UTF-8?q?fix(test/fixture):=20withDisposalTimeout=20?=
+ =?UTF-8?q?=E7=9B=B4=E6=8E=A5=20race=20=E5=8E=9F=E5=A7=8B=20Promise=20?=
+ =?UTF-8?q?=E9=81=BF=E5=85=8D=20.finally=20=E5=BE=AE=E4=BB=BB=E5=8A=A1?=
+ =?UTF-8?q?=E5=BB=B6=E8=BF=9F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+p.finally(() => clearTimeout(timer)) 会创建中间 Promise，在 p settle 后
+额外引入一个微任务轮次才让 Promise.race settle。Bus 测试依赖
+disposeAllInstances 返回后 InstanceDisposed 事件已在 PubSub 队列中，
+跨 runtime 的事件投递对这一微任务延迟敏感，在 Linux CI 上导致
+InstanceDisposed 投递超时。
+
+改为在 p 上注册 .then/.catch 回调清除定时器，Promise.race 直接竞争
+原始 p，保持与无超时保护时完全一致的 settle 时序。
+
+diff --git a/packages/opencode/test/fixture/fixture.ts b/packages/opencode/test/fixture/fixture.ts
+index 934abede2fefb78f0f3936cb7a7e5c8675818001..443ddfd8d7fd79a98de1ad1dbc224cdb2654b52d 100644
+--- a/packages/opencode/test/fixture/fixture.ts
++++ b/packages/opencode/test/fixture/fixture.ts
+@@ -56,7 +56,12 @@ export async function reloadTestInstance(input: { directory: string }) {
+ const DISPOSAL_TIMEOUT = 5_000
+ const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
+   // 用 setTimeout 而非 Bun.sleep，以便在 p 先 settle 时 clearTimeout
+-  // 避免向后续测试输出虚假的 "timed out" 警告
++  // 避免向后续测试输出虚假的 "timed out" 警告。
++  //
++  // 关键不变量：Promise.race 直接竞争原始 p（不包 .finally()），
++  // 确保 settle 时序与无超时保护时完全一致——Bus 测试依赖
++  // disposeAllInstances 返回后 InstanceDisposed 事件已在 PubSub
++  // 队列中，额外的微任务轮次会扰动跨 runtime 的事件投递时序。
+   let timer: ReturnType<typeof setTimeout> | undefined
+   const timeout = new Promise<void>((resolve) => {
+     timer = setTimeout(() => {
+@@ -64,10 +69,9 @@ const withDisposalTimeout = <T>(p: Promise<T>, label: string) => {
+       resolve()
+     }, DISPOSAL_TIMEOUT)
+   })
+-  return Promise.race([
+-    p.finally(() => { if (timer) clearTimeout(timer) }),
+-    timeout,
+-  ]) as Promise<T>
++  // 在 p 上注册 settle 回调清除定时器，但不改变 p 本身的 settle 行为
++  p.then(() => { if (timer) clearTimeout(timer) }, () => { if (timer) clearTimeout(timer) })
++  return Promise.race([p, timeout]) as Promise<T>
+ }
+ 
+ export async function disposeAllInstances() {

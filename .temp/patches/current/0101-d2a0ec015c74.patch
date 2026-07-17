@@ -1,0 +1,62 @@
+From d2a0ec015c745b82afd6ad29d3e9fd3350bbf88f Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 7 May 2026 13:51:36 +0800
+Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E6=B7=BB=E5=8A=A0=E5=AF=B9=20V?=
+ =?UTF-8?q?SCode=20=E7=AC=94=E8=AE=B0=E6=9C=AC=E7=9A=84=E8=BF=90=E8=A1=8C?=
+ =?UTF-8?q?=E5=92=8C=E7=8E=AF=E5=A2=83=E9=80=89=E9=A1=B9=E6=94=AF=E6=8C=81?=
+ =?UTF-8?q?=EF=BC=8C=E4=BC=98=E5=8C=96=E5=8D=95=E5=85=83=E6=A0=BC=20ID=20?=
+ =?UTF-8?q?=E8=A7=A3=E6=9E=90=E9=80=BB=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
+index cca50f3a4b99ef966e2689cedb77fcf8da64a9d0..2767953855720cdc30ab8968951b963f88039a25 100644
+--- a/packages/opencode/src/agent/agent.ts
++++ b/packages/opencode/src/agent/agent.ts
+@@ -134,6 +134,8 @@ export const layer = Layer.effect(
+                 question: "allow",
+                 plan_enter: "allow",
+                 bash: "ask",
++                vscode_notebook_run: "ask",
++                vscode_notebook_env: "ask",
+               }),
+               user,
+             ),
+diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
+index 90ba056f9b38050fc119b89252c8f1376654334e..5060dbf79211b9b3119ac7a7d8343ac0237f5e85 100644
+--- a/packages/opencode/src/plugin/vscode-bridge.ts
++++ b/packages/opencode/src/plugin/vscode-bridge.ts
+@@ -49,7 +49,7 @@ const runArgs = {
+     .enum(["cell", "range"])
+     .optional()
+     .describe("Optional run kind hint. The bridge runs a range whenever endCellId is provided; otherwise it runs one cell."),
+-  cellId: z.string().describe("Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx."),
++  cellId: z.string().describe("Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx. Also supports TOP and BOTTOM for the first/last cell."),
+   endCellId: z
+     .string()
+     .optional()
+diff --git a/sdks/vscode/src/notebook/run.ts b/sdks/vscode/src/notebook/run.ts
+index 3e9a0d1bd8ebaa15eab7253ad0171e9ca50d268a..0f4be392293676256499e7cf0448aad030bc2457 100644
+--- a/sdks/vscode/src/notebook/run.ts
++++ b/sdks/vscode/src/notebook/run.ts
+@@ -121,10 +121,16 @@ export async function runNotebook(input: Record<string, unknown>) {
+ // ---------------------------------------------------------------------------
+ 
+ function resolveRunTarget(notebook: vscode.NotebookDocument, cellId: string, endCellId?: string) {
+-  const startCell = resolveNotebookCell(notebook, undefined, cellId)
++  function resolveCell(id: string) {
++    const upper = id.toUpperCase()
++    if (upper === "TOP") return notebook.cellAt(0)
++    if (upper === "BOTTOM") return notebook.cellAt(Math.max(0, notebook.cellCount - 1))
++    return resolveNotebookCell(notebook, undefined, id)
++  }
++  const startCell = resolveCell(cellId)
+   if (!endCellId) return [startCell]
+ 
+-  const endCell = resolveNotebookCell(notebook, undefined, endCellId)
++  const endCell = resolveCell(endCellId)
+   if (endCell.index < startCell.index) {
+     throw new Error("endCellId must refer to the same cell or a later cell than cellId")
+   }

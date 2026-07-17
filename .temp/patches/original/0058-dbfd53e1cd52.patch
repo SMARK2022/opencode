@@ -1,0 +1,33 @@
+From dbfd53e1cd5209e0992d9596b616eccaa6e5edc4 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Thu, 30 Apr 2026 16:59:01 +0800
+Subject: [PATCH] =?UTF-8?q?fix:=20=E5=BC=BA=E5=88=B6=E4=BD=BF=E7=94=A8=20U?=
+ =?UTF-8?q?nicode=20=E5=AE=BD=E5=BA=A6=E8=A1=A8=E4=BB=A5=E8=A7=A3=E5=86=B3?=
+ =?UTF-8?q?=20macOS=20=E4=B8=8A=20CJK=20=E5=AD=97=E7=AC=A6=E6=B8=B2?=
+ =?UTF-8?q?=E6=9F=93=E9=97=AE=E9=A2=98?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/tui/app.tsx b/packages/opencode/src/cli/cmd/tui/app.tsx
+index f0d472657b663005b671d481296d7bfe02e9143a..bc9cbf2480ad08bc38aa4c50b631cb0564c42f5e 100644
+--- a/packages/opencode/src/cli/cmd/tui/app.tsx
++++ b/packages/opencode/src/cli/cmd/tui/app.tsx
+@@ -132,6 +132,16 @@ export function tui(input: {
+       await TuiPluginRuntime.dispose()
+     }
+ 
++    // On macOS, opentui 0.1.104+ may detect the terminal as using wcwidth mode,
++    // which relies on the system C library wcwidth() with locale support.
++    // In compiled Bun binaries the locale context for the native Zig layer may
++    // differ from the shell, causing wcwidth() to return -1 for CJK characters
++    // and rendering them as empty cells. Force the built-in Unicode width tables
++    // (mode 2026) instead, which is locale-independent and always correct.
++    if (process.platform === "darwin") {
++      process.env.OPENTUI_FORCE_UNICODE = "1"
++    }
++
+     const renderer = await createCliRenderer(rendererConfig(input.config))
+     const mode = (await renderer.waitForThemeMode(1000)) ?? "dark"
+ 

@@ -1,0 +1,158 @@
+From ebeaf3561ec52ff13d16005fa111b9717187c3e0 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 18 Jun 2026 11:16:09 +0800
+Subject: [PATCH] =?UTF-8?q?feat(tests):=20=E4=BD=BF=E7=94=A8=E7=9F=AD?=
+ =?UTF-8?q?=E4=BC=9A=E8=AF=9D=E8=B6=85=E6=97=B6=E5=92=8C=E5=A2=9E=E5=8A=A0?=
+ =?UTF-8?q?shell=E6=B5=8B=E8=AF=95=E8=B6=85=E6=97=B6?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index 8f683f7a977b4487a00c6c87c3da3a4f990125aa..7d63c7c8574f9c9289df07b79f941693d49633a6 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -70,6 +70,7 @@ const ref = {
+   providerID: ProviderID.make("test"),
+   modelID: ModelID.make("test-model"),
+ }
++const shortSessionTimeout = process.platform === "win32" ? 15_000 : 3_000
+ 
+ function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
+   return Effect.acquireUseRelease(
+@@ -1549,7 +1550,7 @@ it.instance(
+       expect((yield* status.get(chat.id)).type).toBe("idle")
+     }),
+   { git: true },
+-  3_000,
++  shortSessionTimeout,
+ )
+ 
+ // Cancel semantics
+@@ -1578,7 +1579,7 @@ it.instance(
+       }
+     }),
+   { git: true },
+-  3_000,
++  shortSessionTimeout,
+ )
+ 
+ it.instance(
+@@ -1605,7 +1606,7 @@ it.instance(
+       }
+     }),
+   { git: true },
+-  3_000,
++  shortSessionTimeout,
+ )
+ 
+ race.instance(
+@@ -1695,7 +1696,7 @@ race.instance(
+       }
+     }),
+   { git: true },
+-  3_000,
++  shortSessionTimeout,
+ )
+ 
+ it.instance(
+@@ -1863,7 +1864,7 @@ it.instance(
+       }
+     }),
+   { git: true },
+-  3_000,
++  shortSessionTimeout,
+ )
+ 
+ // Queue semantics
+@@ -1905,7 +1906,7 @@ it.instance(
+       expect(a.info.role).toBe("assistant")
+     }),
+   { git: true },
+-  3_000,
++  shortSessionTimeout,
+ )
+ 
+ it.instance(
+@@ -1974,7 +1975,7 @@ it.instance(
+       expect(JSON.stringify(inputs.at(-1)?.messages)).toContain("second")
+     }),
+   { git: true },
+-  3_000,
++  shortSessionTimeout,
+ )
+ 
+ it.instance(
+@@ -2004,7 +2005,7 @@ it.instance(
+       yield* Fiber.await(fiber)
+     }),
+   { git: true },
+-  3_000,
++  shortSessionTimeout,
+ )
+ 
+ it.instance(
+@@ -2052,7 +2053,7 @@ it.instance(
+       yield* Fiber.await(fiber)
+     }),
+   { git: true },
+-  3_000,
++  shortSessionTimeout,
+ )
+ 
+ // Shell semantics
+@@ -2082,7 +2083,7 @@ it.instance(
+       yield* Fiber.await(fiber)
+     }),
+   { git: true },
+-  3_000,
++  shortSessionTimeout,
+ )
+ 
+ unix(
+@@ -2989,7 +2990,7 @@ it.instance(
+       }
+     }),
+   { git: true },
+-  3_000,
++  shortSessionTimeout,
+ )
+ 
+ // Agent variant
+diff --git a/packages/opencode/test/tool/repo_clone.test.ts b/packages/opencode/test/tool/repo_clone.test.ts
+index d16a87da8ab17d70b3fbc7e99ab6f0fa13d98d9b..919cf7870562e35cccb9da39d63cd80c5c1dc4db 100644
+--- a/packages/opencode/test/tool/repo_clone.test.ts
++++ b/packages/opencode/test/tool/repo_clone.test.ts
+@@ -208,6 +208,7 @@ describe("tool.repo_clone", () => {
+         expect(yield* waitForContent(fs, path.join(first.metadata.localPath, "README.md"), "v2 updated\n")).toBe("v2 updated\n")
+       }),
+     ),
++    60_000,
+   )
+ 
+   it.live("clones a configured branch", () =>
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index 579f637537c93de6e5ae54575d24e904d1cde7cb..7da8736ccd17ed1bd237f794a1c99409d0c53976 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -172,9 +172,10 @@ const withShell = <A, E, R>(item: { label: string; shell: string }, self: Effect
+ const each = (
+   name: string,
+   fn: (item: { label: string; shell: string }) => Effect.Effect<void, unknown, ShellTestServices>,
++  timeout?: number,
+ ) => {
+   for (const item of shells) {
+-    it.live(`${name} [${item.label}]`, () => withShell(item, fn(item)))
++    it.live(`${name} [${item.label}]`, () => withShell(item, fn(item)), timeout)
+   }
+ }
+ 
+@@ -210,6 +211,7 @@ describe("tool.shell", () => {
+         expect(result.metadata.output).toContain("test")
+       }),
+     ),
++    60_000,
+   )
+ 
+   it.live("falls back from terminal-only configured shell", () =>

@@ -1,0 +1,312 @@
+From f4304858229cc5be8cf2729cd6ef4dc1b97e57b0 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Thu, 7 May 2026 02:50:34 +0800
+Subject: [PATCH] =?UTF-8?q?feat(session):=20=E6=B7=BB=E5=8A=A0=E9=9A=90?=
+ =?UTF-8?q?=E8=97=8F=E6=B6=88=E6=81=AF=E5=A4=84=E7=90=86=E9=80=BB=E8=BE=91?=
+ =?UTF-8?q?=EF=BC=8C=E6=94=AF=E6=8C=81=E6=92=A4=E9=94=80=E6=93=8D=E4=BD=9C?=
+ =?UTF-8?q?=E5=B9=B6=E5=9C=A8=E6=95=B0=E6=8D=AE=E5=BA=93=E4=B8=AD=E4=BF=9D?=
+ =?UTF-8?q?=E7=95=99=E9=9A=90=E8=97=8F=E6=B6=88=E6=81=AF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/app/src/context/global-sync/event-reducer.ts b/packages/app/src/context/global-sync/event-reducer.ts
+index 5f43c341bc0b57eb45a071bdc36e439e01f957b1..9a3be8588b52edcc10eecf5935359635c5f3bc2f 100644
+--- a/packages/app/src/context/global-sync/event-reducer.ts
++++ b/packages/app/src/context/global-sync/event-reducer.ts
+@@ -183,6 +183,19 @@ export function applyDirectoryEvent(input: {
+     }
+     case "message.updated": {
+       const info = clean((event.properties as { info: Message }).info)
++      if ((info as unknown as { hidden?: unknown }).hidden) {
++        input.setStore(
++          produce((draft) => {
++            const messages = draft.message[info.sessionID]
++            if (messages) {
++              const result = Binary.search(messages, info.id, (m) => m.id)
++              if (result.found) messages.splice(result.index, 1)
++            }
++            delete draft.part[info.id]
++          }),
++        )
++        break
++      }
+       const messages = input.store.message[info.sessionID]
+       if (!messages) {
+         input.setStore("message", info.sessionID, [info])
+@@ -218,6 +231,23 @@ export function applyDirectoryEvent(input: {
+     }
+     case "message.part.updated": {
+       const part = (event.properties as { part: Part }).part
++      if ((part as unknown as { hidden?: unknown }).hidden) {
++        const parts = input.store.part[part.messageID]
++        if (!parts) break
++        const foundAt = Binary.search(parts, part.id, (p) => p.id)
++        if (!foundAt.found) break
++        input.setStore(
++          produce((draft) => {
++            const list = draft.part[part.messageID]
++            if (!list) return
++            const next = Binary.search(list, part.id, (p) => p.id)
++            if (!next.found) return
++            list.splice(next.index, 1)
++            if (list.length === 0) delete draft.part[part.messageID]
++          }),
++        )
++        break
++      }
+       if (SKIP_PARTS.has(part.type)) break
+       const parts = input.store.part[part.messageID]
+       if (!parts) {
+diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+index 24609dd81e4fe7b8aea2571c51124c33b489abb4..18866772d806cc92638d08ec1b8a04a5ced3559f 100644
+--- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
++++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
+@@ -251,30 +251,45 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+         }
+ 
+         case "message.updated": {
+-          const messages = store.message[event.properties.info.sessionID]
++          const info = event.properties.info
++          if ((info as Record<string, unknown>).hidden) {
++            const messages = store.message[info.sessionID]
++            const result = Binary.search(messages, info.id, (m) => m.id)
++            if (result.found) {
++              setStore(
++                "message",
++                info.sessionID,
++                produce((draft) => {
++                  draft.splice(result.index, 1)
++                }),
++              )
++            }
++            break
++          }
++          const messages = store.message[info.sessionID]
+           if (!messages) {
+-            setStore("message", event.properties.info.sessionID, [event.properties.info])
++            setStore("message", info.sessionID, [info])
+             break
+           }
+-          const result = Binary.search(messages, event.properties.info.id, (m) => m.id)
++          const result = Binary.search(messages, info.id, (m) => m.id)
+           if (result.found) {
+-            setStore("message", event.properties.info.sessionID, result.index, reconcile(event.properties.info))
++            setStore("message", info.sessionID, result.index, reconcile(info))
+             break
+           }
+           setStore(
+             "message",
+-            event.properties.info.sessionID,
++            info.sessionID,
+             produce((draft) => {
+-              draft.splice(result.index, 0, event.properties.info)
++              draft.splice(result.index, 0, info)
+             }),
+           )
+-          const updated = store.message[event.properties.info.sessionID]
++          const updated = store.message[info.sessionID]
+           if (updated.length > 100) {
+             const oldest = updated[0]
+             batch(() => {
+               setStore(
+                 "message",
+-                event.properties.info.sessionID,
++                info.sessionID,
+                 produce((draft) => {
+                   draft.shift()
+                 }),
+@@ -304,21 +319,36 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+           break
+         }
+         case "message.part.updated": {
+-          const parts = store.part[event.properties.part.messageID]
++          const part = event.properties.part
++          if ((part as Record<string, unknown>).hidden) {
++            const parts = store.part[part.messageID]
++            if (!parts) break
++            const foundAt = Binary.search(parts, part.id, (p) => p.id)
++            if (!foundAt.found) break
++            setStore(
++              "part",
++              part.messageID,
++              produce((draft) => {
++                draft.splice(foundAt.index, 1)
++              }),
++            )
++            break
++          }
++          const parts = store.part[part.messageID]
+           if (!parts) {
+-            setStore("part", event.properties.part.messageID, [event.properties.part])
++            setStore("part", part.messageID, [part])
+             break
+           }
+-          const result = Binary.search(parts, event.properties.part.id, (p) => p.id)
++          const result = Binary.search(parts, part.id, (p) => p.id)
+           if (result.found) {
+-            setStore("part", event.properties.part.messageID, result.index, reconcile(event.properties.part))
++            setStore("part", part.messageID, result.index, reconcile(part))
+             break
+           }
+           setStore(
+             "part",
+-            event.properties.part.messageID,
++            part.messageID,
+             produce((draft) => {
+-              draft.splice(result.index, 0, event.properties.part)
++              draft.splice(result.index, 0, part)
+             }),
+           )
+           break
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index 105a71a734d3259baafbe190ce051a18f8eaf31c..6683b67d6dda8b9a6335fd70c77074dec8b1c8cc 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -38,6 +38,11 @@ interface FetchDecompressionError extends Error {
+ export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached image(s) from tool result:"
+ export { isMedia }
+ 
++const Hidden = Schema.Struct({
++  time: NonNegativeInt,
++  reason: Schema.Literal("undo"),
++})
++
+ export const OutputLengthError = namedSchemaError("MessageOutputLengthError", {})
+ export const AbortedError = namedSchemaError("MessageAbortedError", { message: Schema.String })
+ export const StructuredOutputError = namedSchemaError("StructuredOutputError", {
+@@ -87,6 +92,7 @@ const partBase = {
+   id: PartID,
+   sessionID: SessionID,
+   messageID: MessageID,
++  hidden: Schema.optional(Hidden),
+ }
+ 
+ export const SnapshotPart = Schema.Struct({
+@@ -401,6 +407,7 @@ export type ToolPart = Omit<Types.DeepMutable<Schema.Schema.Type<typeof ToolPart
+ const messageBase = {
+   id: MessageID,
+   sessionID: SessionID,
++  hidden: Schema.optional(Hidden),
+ }
+ 
+ export const User = Schema.Struct({
+@@ -1056,14 +1063,17 @@ export function page(input: { sessionID: SessionID; limit: number; before?: stri
+   }
+ }
+ 
+-export function* stream(sessionID: SessionID) {
++export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean }) {
+   const size = 50
+   let before: string | undefined
+   while (true) {
+     const next = page({ sessionID, limit: size, before })
+     if (next.items.length === 0) break
+     for (let i = next.items.length - 1; i >= 0; i--) {
+-      yield next.items[i]
++      const msg = next.items[i]
++      if (!opts?.includeHidden && msg.info.hidden) continue
++      if (!opts?.includeHidden) msg.parts = msg.parts.filter((p) => !p.hidden)
++      yield msg
+     }
+     if (!next.more || !next.cursor) break
+     before = next.cursor
+diff --git a/packages/opencode/src/session/revert.ts b/packages/opencode/src/session/revert.ts
+index 58d69a2040e2dfd063aedd965996738dfc3f0b54..02e564b3e95464e4e0ab1bcf2b721920ea208c1d 100644
+--- a/packages/opencode/src/session/revert.ts
++++ b/packages/opencode/src/session/revert.ts
+@@ -122,9 +122,9 @@ export const layer = Layer.effect(
+         remove.push(msg)
+       }
+       for (const msg of remove) {
+-        yield* sync.run(MessageV2.Event.Removed, {
+-          sessionID,
+-          messageID: msg.info.id,
++        yield* sessions.updateMessage({
++          ...msg.info,
++          hidden: { time: Date.now(), reason: "undo" },
+         })
+       }
+       if (session.revert.partID && target) {
+@@ -134,11 +134,10 @@ export const layer = Layer.effect(
+           const removeParts = target.parts.slice(idx)
+           target.parts = target.parts.slice(0, idx)
+           for (const part of removeParts) {
+-            yield* sync.run(MessageV2.Event.PartRemoved, {
+-              sessionID,
+-              messageID: target.info.id,
+-              partID: part.id,
+-            })
++            yield* sessions.updatePart({
++              ...part,
++              hidden: { time: Date.now(), reason: "undo" },
++            } satisfies MessageV2.Part)
+           }
+         }
+       }
+diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
+index 5593efc9714b7280debedee9abc704f4e3549048..1278089b909591f03331b002c037f05981d704aa 100644
+--- a/packages/opencode/src/session/session.ts
++++ b/packages/opencode/src/session/session.ts
+@@ -696,7 +696,9 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service |
+ 
+     const messages = Effect.fn("Session.messages")(function* (input: { sessionID: SessionID; limit?: number }) {
+       if (input.limit) {
+-        return MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).items
++        return MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).items.filter(
++          (m) => !m.info.hidden,
++        )
+       }
+       return Array.from(MessageV2.stream(input.sessionID)).reverse()
+     })
+diff --git a/packages/opencode/test/session/revert-compact.test.ts b/packages/opencode/test/session/revert-compact.test.ts
+index c70c17d451869b8d0cb5a13290f79e51628e5071..44109f0e31556329c24d4c614f1e55e275390dac 100644
+--- a/packages/opencode/test/session/revert-compact.test.ts
++++ b/packages/opencode/test/session/revert-compact.test.ts
+@@ -636,4 +636,45 @@ describe("revert + compact workflow", () => {
+       { git: true },
+     ),
+   )
++
++  it.live(
++    "cleanup preserves hidden messages in database",
++    provideTmpdirInstance(
++      () =>
++        Effect.gen(function* () {
++          const session = yield* Session.Service
++          const revert = yield* SessionRevert.Service
++
++          const info = yield* session.create({})
++          const sid = info.id
++
++          const u1 = yield* user(sid)
++          yield* text(sid, u1.id, "hello")
++          const a1 = yield* assistant(sid, u1.id, info.directory)
++          yield* text(sid, a1.id, "hi")
++
++          yield* session.setRevert({
++            sessionID: sid,
++            revert: { messageID: u1.id },
++            summary: { additions: 0, deletions: 0, files: 0 },
++          })
++
++          yield* revert.cleanup(yield* session.get(sid))
++
++          const visible = yield* session.messages({ sessionID: sid })
++          expect(visible.length).toBe(0)
++
++          const hidden = MessageV2.get({ sessionID: sid, messageID: u1.id })
++          expect(hidden.info.hidden).toBeDefined()
++          expect(hidden.info.hidden!.reason).toBe("undo")
++
++          const u1raw = MessageV2.get({ sessionID: sid, messageID: u1.id })
++          expect(u1raw.info.id).toBe(u1.id)
++          expect(u1raw.info.hidden?.reason).toBe("undo")
++
++          yield* session.remove(sid)
++        }),
++      { git: true },
++    ),
++  )
+ })

@@ -1,0 +1,156 @@
+From 1841858d35f3de74e268b04d9d675a55d58cb53c Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 6 Jul 2026 03:11:41 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tui,voice):=20=E4=BF=AE=E5=A4=8D=20Question?=
+ =?UTF-8?q?Prompt/DialogPrompt=20=E5=BD=95=E9=9F=B3=E8=AE=A1=E6=97=B6?=
+ =?UTF-8?q?=E5=99=A8=E5=86=BB=E7=BB=93=E5=9C=A8=2000:00?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+question.tsx 和 dialog-prompt.tsx 调用 voiceInputStatusText 时缺少第三参数
+now()，且未创建 createRefreshClock 驱动周期刷新。recording 稳态期间
+voiceInputStatus() 不再变化，内联 JSX 表达式无响应式依赖触发重算，计时器
+永久停在录音开始瞬间的 00:00。主 Prompt 不受影响（已有 createRefreshClock）。
+
+复刻主 Prompt 已验证模式：每组件创建 createRefreshClock(() => status 为
+recording) 并将 now() 传入 voiceInputStatusText。同时补 createRefreshClock
+行为契约测试（active tick / inactive stop / dispose cleanup），此前该 util
+零测试覆盖。DialogPrompt 所有消费者（Goal、Session 重命名、Provider 配置等）
+自动获得修复。
+
+diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx
+index 430687ecba51b39923a239539f9be147e4fc5b5c..10f52854e7f8b8e118e1fde15784045cf6a0cd8c 100644
+--- a/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx
++++ b/packages/opencode/src/cli/cmd/tui/routes/session/question.tsx
+@@ -13,6 +13,7 @@ import { useBindings, useCommandShortcut } from "../../keymap"
+ import { PromptVoiceInput } from "../../prompt-voice-input"
+ import { PromptVoiceRecorder } from "../../prompt-voice-recorder"
+ import { Spinner } from "../../component/spinner"
++import { createRefreshClock } from "../../util/signal"
+ 
+ export function QuestionPrompt(props: { request: QuestionRequest }) {
+   const sdk = useSDK()
+@@ -44,6 +45,9 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
+   const voiceInputBusy = () => voiceInputStatus().type !== "idle"
+   const voiceShortcut = useCommandShortcut("prompt.voice.toggle")
+   const voiceShortcutFallback = process.platform === "darwin" ? "f8" : "alt+v"
++  // 录音计时器需要每秒刷新 now 信号驱动 footer 的 Recording MM:SS 走数；
++  // 缺少它时 voiceInputStatusText 的 now 参数只在录音开始瞬间求值一次，计时器冻结在 00:00。
++  const now = createRefreshClock(() => voiceInputStatus().type === "recording")
+ 
+   function insertVoiceText(text: string) {
+     // stale ref 守卫：退出 editing 后 textarea 已被 <Show> 销毁，
+@@ -575,7 +579,7 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
+                 <text fg={theme.error}>●</text>
+               </Show>
+               <text fg={theme.accent}>
+-                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback)}
++                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now())}
+               </text>
+             </box>
+           </Show>
+diff --git a/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx b/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
+index 408722b01a9ae83feeaf7649fe6ad11dd1ab6914..7e01d221aa6b261a7c4ee32ba3c145735ad161e8 100644
+--- a/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
++++ b/packages/opencode/src/cli/cmd/tui/ui/dialog-prompt.tsx
+@@ -8,6 +8,7 @@ import { useBindings, useCommandShortcut } from "../keymap"
+ import { PromptVoiceInput } from "../prompt-voice-input"
+ import { PromptVoiceRecorder } from "../prompt-voice-recorder"
+ import { Spinner } from "../component/spinner"
++import { createRefreshClock } from "../util/signal"
+ import { Show, createEffect, onCleanup, onMount, createSignal, type JSX } from "solid-js"
+ 
+ export type DialogPromptProps = {
+@@ -38,6 +39,9 @@ export function DialogPrompt(props: DialogPromptProps) {
+   const voiceInputBusy = () => voiceInputStatus().type !== "idle"
+   const voiceShortcut = useCommandShortcut("prompt.voice.toggle")
+   const voiceShortcutFallback = process.platform === "darwin" ? "f8" : "alt+v"
++  // 录音计时器需要每秒刷新 now 信号驱动 footer 的 Recording MM:SS 走数；
++  // 缺少它时 voiceInputStatusText 的 now 参数只在录音开始瞬间求值一次，计时器冻结在 00:00。
++  const now = createRefreshClock(() => voiceInputStatus().type === "recording")
+ 
+   function insertVoiceText(text: string) {
+     // isDestroyed 守卫：录音转写完成时 textarea 可能已被 busy/ESC 销毁，
+@@ -158,7 +162,7 @@ export function DialogPrompt(props: DialogPromptProps) {
+                 <text fg={theme.error}>●</text>
+               </Show>
+               <text fg={theme.accent}>
+-                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback)}
++                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now())}
+               </text>
+             </box>
+           </Show>
+diff --git a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
+index 1472e38153d883d63d0b983e1e3c1715038ccf6c..a9b18f24ecbef9df62aa5bb1094415fc7e6c1b88 100644
+--- a/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
++++ b/packages/opencode/test/cli/tui/prompt-voice-input.test.ts
+@@ -1,5 +1,6 @@
+ import { describe, expect, test } from "bun:test"
+ import path from "path"
++import { createRoot, createSignal } from "solid-js"
+ import { tmpdir } from "../../fixture/fixture"
+ import {
+   createVoiceInputController,
+@@ -9,6 +10,7 @@ import {
+   type VoiceRecorderHandle,
+   type VoiceTranscriber,
+ } from "../../../src/cli/cmd/tui/prompt-voice-input"
++import { createRefreshClock } from "../../../src/cli/cmd/tui/util/signal"
+ 
+ const nodeJson = (script: string): VoiceTranscriber => ({
+   command: process.execPath,
+@@ -87,6 +89,53 @@ describe("prompt voice input", () => {
+     expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400)).toBe("Transcribing voice...")
+   })
+ 
++  // createRefreshClock 是三处组件（主 Prompt / QuestionPrompt / DialogPrompt）录音计时器走数的
++  // 基础设施：recording 期间每秒刷新 now 信号驱动 voiceInputStatusText 重算，idle 时停止。
++  // 该契约此前零测试覆盖——一旦被破坏，question/dialog 组件的计时器会冻结在 00:00
++  // （voiceInputStatusText 的 now 参数只在录音开始瞬间求值一次，之后无周期信号触发重算）。
++  // 使用 createRoot 隔离响应式作用域，10ms 短间隔加速测试，避免真实 1s 等待。
++  test("createRefreshClock ticks while active, stops when inactive, and cleans up on dispose", async () => {
++    let readNow: () => number = () => 0
++    let setActive: (v: boolean) => void = () => {}
++    const dispose = createRoot((d) => {
++      const [active, setA] = createSignal(false)
++      setActive = setA
++      readNow = createRefreshClock(active, 10)
++      return d
++    })
++    try {
++      // createEffect 延迟到 microtask 执行；先冲刷一次让初始 effect（active=false）跑完，
++      // 确保 idle 基线值取的是 effect 执行后的 now，而非 createSignal 初始值。
++      await new Promise((r) => setTimeout(r, 0))
++      const idle = readNow()
++
++      // active=true → effect 重跑启动 setInterval，now 应随 interval tick 前进
++      setActive(true)
++      await new Promise((r) => setTimeout(r, 50))
++      expect(readNow()).toBeGreaterThan(idle)
++
++      // active=false → onCleanup 清理 interval，now 停止前进
++      setActive(false)
++      await new Promise((r) => setTimeout(r, 50))
++      const stopped = readNow()
++      await new Promise((r) => setTimeout(r, 50))
++      expect(readNow()).toBe(stopped)
++
++      // 再次 active 后立即 dispose，模拟组件在录音中被卸载：
++      // dispose 必须触发 onCleanup 清理正在运行的 interval，否则定时器泄漏
++      setActive(true)
++      await new Promise((r) => setTimeout(r, 30))
++      const beforeDispose = readNow()
++      dispose()
++      await new Promise((r) => setTimeout(r, 50))
++      // dispose 后 now 不再前进，证明 onCleanup 清理了活跃 interval
++      expect(readNow()).toBe(beforeDispose)
++    } catch (e) {
++      dispose()
++      throw e
++    }
++  })
++
+   // voice 提示是 footer 的引导文案，窄终端会挤占输入区，必须延迟到 prompt 足够宽才显示。
+   // 阈值为开区间 ">140"：140 本身仍隐藏，与 usage 显示的 ">100" 同语义，避免边界行为漂移。
+   // 未配置转写器时无论多宽都不显示，避免引导用户使用未启用的能力。

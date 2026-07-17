@@ -1,0 +1,74 @@
+From 7ccf79b7fe1f54ba04a7b578e676a9e74924e06b Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 15 Jun 2026 02:08:18 +0800
+Subject: [PATCH] =?UTF-8?q?fix(tests):=20=E4=BF=AE=E5=A4=8D=20Windows=20CI?=
+ =?UTF-8?q?=20=E4=B8=AD=20git=20=E6=8F=90=E4=BA=A4=E9=AA=8C=E8=AF=81?=
+ =?UTF-8?q?=E9=80=BB=E8=BE=91=EF=BC=8C=E4=BC=98=E5=8C=96=E6=96=87=E4=BB=B6?=
+ =?UTF-8?q?=E6=A3=80=E6=9F=A5=E6=96=B9=E5=BC=8F?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/.temp/chatgpt-browser-agent b/.temp/chatgpt-browser-agent
+index e0300d03831389e07a8dceaf0edb96782e403279..eb86999257fe0725315b08979e645c5cdcee1903 160000
+--- a/.temp/chatgpt-browser-agent
++++ b/.temp/chatgpt-browser-agent
+@@ -1 +1 @@
+-Subproject commit e0300d03831389e07a8dceaf0edb96782e403279
++Subproject commit eb86999257fe0725315b08979e645c5cdcee1903
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index e7ba0d94f1357c2f2e03713ae8e9075fe497845d..8f683f7a977b4487a00c6c87c3da3a4f990125aa 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -1165,17 +1165,17 @@ it.instance(
+       }))
+       const prompt = yield* SessionPrompt.Service
+       const sessions = yield* Session.Service
++      const test = yield* TestInstance
+       const chat = yield* sessions.create({
+         title: "Shell review metadata",
+         permission: [
+           { permission: "bash", pattern: "*", action: "auto" },
+-          // This test targets the bash review envelope. The sensitive path would
+-          // otherwise create a separate external_directory prompt and block the
+-          // shell before the reviewed bash permission can complete.
+-          { permission: "external_directory", pattern: "*", action: "allow" },
+         ],
+       })
+-      const command = "cat ~/.ssh/id_rsa"
++      // 本用例只需要触发 SSH 私钥名的 cautious 预审并产生 shell 输出；
++      // 使用项目内文件避免 Windows runner 上家目录路径和缺失文件错误拖慢到 15s 超时边界。
++      yield* Effect.promise(() => Bun.write(path.join(test.directory, "id_rsa"), "review-output\n"))
++      const command = "cat id_rsa"
+       yield* prompt.prompt({
+         sessionID: chat.id,
+         agent: "build",
+@@ -1237,7 +1237,9 @@ it.instance(
+       ).toBe(true)
+     }),
+   { git: true },
+-  15_000,
++  // 这是 shell 执行、auto reviewer 子会话和审计回链的完整集成链路；
++  // Windows CI 慢机曾在 15s 边界取消，30s 仍保持有限等待且不会放宽任何行为断言。
++  30_000,
+ )
+ 
+ it.instance(
+diff --git a/packages/opencode/test/tool/repo_clone.test.ts b/packages/opencode/test/tool/repo_clone.test.ts
+index 9a8d6ab527f72120fbefa4cdc839f9e7a1041b91..020f5d91f6e9dba81b026d4d99f6e7118c1766df 100644
+--- a/packages/opencode/test/tool/repo_clone.test.ts
++++ b/packages/opencode/test/tool/repo_clone.test.ts
+@@ -69,9 +69,9 @@ const commitFile = Effect.fn("RepoCloneToolTest.commitFile")(function* (
+   // CI 上曾出现工作区已写入但 commit 没有纳入文件的情况；先验证 staged 内容，失败时直接指向 fixture 根因。
+   if (!staged.split(/\r?\n/).includes(file)) throw new Error(`git did not stage ${file}`)
+   yield* git(cwd, ["commit", "-m", message])
+-  const clean = yield* gitResult(cwd, ["diff", "--quiet", "--exit-code", "HEAD", "--", file])
+-  // refresh 用例依赖远端提交真实变化；用 Git 自身 diff 判断，避免 Windows runner 上 stdout 换行形态影响 fixture 校验。
+-  if (clean.exitCode !== 0) throw new Error(`git did not commit ${file}`)
++  const tree = yield* git(cwd, ["ls-tree", "--name-only", "HEAD", "--", file])
++  // 只验证文件进入 HEAD 树；内容正确性由后面的 bare repo 与 clone 断言覆盖，避免 Windows 换行状态误杀 fixture。
++  if (!tree.split(/\r?\n/).includes(file)) throw new Error(`git did not commit ${file}`)
+ })
+ 
+ function githubFileBase(dir: string) {

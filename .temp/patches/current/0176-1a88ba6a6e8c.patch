@@ -1,0 +1,3664 @@
+From 1a88ba6a6e8cdae4e98288e66224650004a5eb52 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Tue, 19 May 2026 16:54:37 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20stats=E7=AB=AF=E7=82=B9=E4=BF=A1?=
+ =?UTF-8?q?=E6=81=AF=E4=B8=B0=E5=AF=8C=E4=B8=8E=E9=87=8D=E6=9E=84=20add=20?=
+ =?UTF-8?q?insights=20and=20rendering=20for=20stats=20analysis?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Implement tests to verify correct counting of CJK text by terminal display columns.
+- Ensure fixed-width output for CJK-heavy dashboard and session renderings.
+- Prevent double truncation of breakdown rank bars in rendered output.
+- Introduced a new insights module in `insights.ts` to generate various insights based on usage statistics, including trend analysis, concentration insights, cache efficiency, and cost volatility.
+- Implemented rendering functions in `render.ts` to display insights and breakdowns of usage data, including dashboards, timelines, and session details.
+- Enhanced the overall reporting capabilities with detailed metrics and visualizations for better understanding of usage patterns and cost management.
+
+diff --git a/.gitignore b/.gitignore
+index 7cc08d1e8afdb667b92225e6351e7371562c8735..3efc98ba147be9b8c022f9624320747e78765ada 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -30,4 +30,5 @@ UPCOMING_CHANGELOG.md
+ logs/
+ *.bun-build
+ tsconfig.tsbuildinfo
+-archived/
+\ No newline at end of file
++archived/
++.temp/
+\ No newline at end of file
+diff --git a/packages/opencode/src/cli/cmd/session.ts b/packages/opencode/src/cli/cmd/session.ts
+index 2f4069fdf40d1d30725d90dda3ebc15dc0d54113..9d683229e4fd19623baf4a4f6bb53e8d8da2a285 100644
+--- a/packages/opencode/src/cli/cmd/session.ts
++++ b/packages/opencode/src/cli/cmd/session.ts
+@@ -218,6 +218,8 @@ function formatSessionTable(
+         `${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${timeStr.padEnd(20)} ${costStr.padStart(8)}  ${tokensStr.padStart(7)}`,
+       )
+     }
++    lines.push("")
++    lines.push("Run opencode stats sessions for distribution, outliers, and drilldown hints.")
+   } else {
+     const header = `Session ID${" ".repeat(maxIdWidth - 10)}  Title${" ".repeat(maxTitleWidth - 5)}  Updated`
+     lines.push(header)
+diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/src/cli/cmd/stats-render.ts
+deleted file mode 100644
+index dd18805470dc5a26e6533f76d2c1dae5978db781..0000000000000000000000000000000000000000
+--- a/packages/opencode/src/cli/cmd/stats-render.ts
++++ /dev/null
+@@ -1,686 +0,0 @@
+-import type { DailyUsage, StatsReport, TokenTotals, UsageGroup } from "./stats-data"
+-import { Locale } from "@/util/locale"
+-import { formatNumber } from "../format"
+-import {
+-  dailySeries,
+-  fitVisible,
+-  layersFromTokenParts,
+-  metricFormatter,
+-  renderCallout,
+-  renderComparisonTable,
+-  renderCompositionDonut,
+-  renderGauge,
+-  renderHeatmap,
+-  renderHistogram,
+-  renderHorizon,
+-  renderMatrix,
+-  renderMetricRibbon,
+-  renderPercentStack,
+-  renderRankBars,
+-  renderRoundedLineChart,
+-  renderSlopeChart,
+-  renderSmallMultiples,
+-  renderStackedAreaChart,
+-  renderStreamStackChart,
+-  renderTabs,
+-  renderTwoColumn,
+-  renderWaterfall,
+-  seriesFromUsage,
+-  statsContentWidth,
+-  type ChartColor,
+-} from "./stats-charts"
+-
+-export { formatNumber } from "../format"
+-
+-const RESET = "\x1b[0m"
+-const BOLD = "\x1b[1m"
+-const TEXT_RESET = "\x1b[22m\x1b[39m"
+-const ANSI_RE = /\x1b\[[0-9;]*m/g
+-
+-const fg = (r: number, g: number, b: number) => `\x1b[38;2;${r};${g};${b}m`
+-const bg = (r: number, g: number, b: number) => `\x1b[48;2;${r};${g};${b}m`
+-
+-const theme = {
+-  bg: bg(25, 8, 28),
+-  title: fg(224, 222, 226),
+-  subtitle: fg(150, 132, 155),
+-  muted: fg(122, 106, 130),
+-  border: fg(86, 55, 88),
+-  sep: fg(96, 80, 98),
+-  blue: fg(78, 199, 224),
+-  green: fg(82, 205, 126),
+-  yellow: fg(224, 186, 76),
+-  purple: fg(190, 120, 225),
+-  pink: fg(230, 120, 175),
+-  white: fg(226, 226, 226),
+-  danger: fg(235, 116, 116),
+-}
+-
+-export type ColorMode = "auto" | "always" | "never"
+-export type StatsRenderOptions = {
+-  color?: ColorMode
+-  limit?: number
+-  metric?: "tokens" | "cost"
+-  sort?: "cost" | "tokens" | "calls" | "updated"
+-}
+-
+-export const useColor = (mode: ColorMode = "auto") => {
+-  if (mode === "always") return true
+-  if (mode === "never") return false
+-  if (process.env.NO_COLOR) return false
+-  return Boolean(process.stdout.isTTY)
+-}
+-
+-const visibleLength = (text: string) => text.replace(ANSI_RE, "").length
+-
+-const padEndAnsi = (text: string, width: number) => text + " ".repeat(Math.max(0, width - visibleLength(text)))
+-const padStartAnsi = (text: string, width: number) => " ".repeat(Math.max(0, width - visibleLength(text))) + text
+-
+-const color = (text: string, name: keyof typeof theme, enabled: boolean, bold = false) => {
+-  if (!enabled) return text
+-  return `${bold ? BOLD : ""}${theme[name]}${text}${TEXT_RESET}`
+-}
+-
+-const panel = (lines: string[], enabled: boolean) => {
+-  const rows = lines.map((line) => `  ${fitVisible(line, statsContentWidth())}  `)
+-  if (!enabled) return rows.join("\n")
+-  return rows.map((line) => `${theme.bg}${line}${RESET}`).join("\n")
+-}
+-
+-const dateRange = (report: StatsReport) => {
+-  if (report.requestedDays === 0) return "Today"
+-  if (report.requestedDays) return `Last ${report.requestedDays} days`
+-  if (report.daily.length === 0) return "All time"
+-  return `${new Date(report.dateRange.earliest).toLocaleDateString()} - ${new Date(report.dateRange.latest).toLocaleDateString()}`
+-}
+-
+-const money = (value: number) => {
+-  if (!Number.isFinite(value)) return "$0.00"
+-  if (value >= 100) return `$${value.toFixed(0)}`
+-  if (value >= 10) return `$${value.toFixed(1)}`
+-  return `$${value.toFixed(4)}`
+-}
+-
+-const percent = (value: number, total: number) => {
+-  if (!total) return "0.0%"
+-  return `${((value / total) * 100).toFixed(1)}%`
+-}
+-
+-const tokenParts = (tokens: TokenTotals) => [
+-  { label: "In", value: tokens.input, color: "blue" as const },
+-  { label: "Out", value: tokens.output + tokens.reasoning, color: "green" as const },
+-  { label: "Cache Read", value: tokens.cache.read, color: "yellow" as const },
+-  { label: "Cache Write", value: tokens.cache.write, color: "purple" as const },
+-]
+-
+-const segmentWidths = (values: number[], width: number) => {
+-  const total = values.reduce((acc, value) => acc + value, 0)
+-  if (total <= 0) return values.map(() => 0)
+-  const raw = values.map((value) => (value / total) * width)
+-  const sizes = raw.map((value, index) => (values[index] > 0 ? Math.max(1, Math.floor(value)) : 0))
+-  while (sizes.reduce((acc, value) => acc + value, 0) > width) {
+-    const index = sizes.reduce((best, value, current) => (value > sizes[best] ? current : best), 0)
+-    sizes[index]--
+-  }
+-  while (sizes.reduce((acc, value) => acc + value, 0) < width) {
+-    const index = raw.reduce((best, value, current) => (value - sizes[current] > raw[best] - sizes[best] ? current : best), 0)
+-    sizes[index]++
+-  }
+-  return sizes
+-}
+-
+-const tokenStack = (tokens: TokenTotals, width: number, enabled: boolean) => {
+-  const parts = tokenParts(tokens)
+-  if (parts.every((part) => part.value <= 0)) return " ".repeat(width)
+-  const sizes = segmentWidths(
+-    parts.map((part) => part.value),
+-    width,
+-  )
+-  return parts
+-    .map((part, index) => color("█".repeat(sizes[index]), part.color, enabled))
+-    .join("")
+-    .padEnd(width)
+-}
+-
+-const metricBar = (value: number, max: number, width: number, enabled: boolean, name: keyof typeof theme) => {
+-  const filled = max <= 0 ? 0 : Math.round((value / max) * width)
+-  return color("█".repeat(filled), name, enabled) + color("░".repeat(Math.max(0, width - filled)), "border", enabled)
+-}
+-
+-const sparkline = (values: number[], enabled: boolean) => {
+-  const chars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+-  const max = Math.max(0, ...values)
+-  if (max === 0) return color(chars[0].repeat(values.length), "muted", enabled)
+-  return values
+-    .map((value) => color(chars[Math.min(chars.length - 1, Math.floor((value / max) * (chars.length - 1)))], "pink", enabled))
+-    .join("")
+-}
+-
+-const title = (text: string, enabled: boolean) => color(text, "title", enabled, true)
+-const muted = (text: string, enabled: boolean) => color(text, "muted", enabled)
+-const sep = (enabled: boolean) => color(" · ", "sep", enabled)
+-
+-const fullChartWidth = () => Math.max(38, statsContentWidth() - 8)
+-const halfChartWidth = () => Math.max(22, Math.floor((statsContentWidth() - 5) / 2) - 8)
+-const compactBarWidth = () => Math.max(10, Math.floor(statsContentWidth() / 5))
+-
+-const hero = (label: string, value: string, enabled: boolean, accent: keyof typeof theme) =>
+-  `${color("●", accent, enabled)} ${color(label, "subtitle", enabled)} ${color(value, "white", enabled, true)}`
+-
+-const legend = (enabled: boolean) =>
+-  [
+-    `${color("●", "blue", enabled)} Input`,
+-    `${color("●", "green", enabled)} Output + Reasoning`,
+-    `${color("●", "yellow", enabled)} Cache Read`,
+-    `${color("●", "purple", enabled)} Cache Write`,
+-  ].join(sep(enabled))
+-
+-const dailyLabels = (daily: DailyUsage[]) => daily.map((item) => item.label)
+-
+-const dailyTokenPoints = (report: StatsReport) =>
+-  report.daily.map((item) => ({ day: item.day, label: item.label, value: item.tokens.total }))
+-
+-const dailyCostPoints = (report: StatsReport) =>
+-  report.daily.map((item) => ({ day: item.day, label: item.label, value: item.cost }))
+-
+-const groupRows = (groups: UsageGroup[], metric: "tokens" | "cost", limit: number) =>
+-  groups.slice(0, limit).map((group, index) => ({
+-    label: group.label,
+-    value: metric === "cost" ? group.cost : group.tokens.total,
+-    subvalue: `${formatNumber(group.assistantCalls)} calls · ${formatNumber(group.sessions)} sessions`,
+-    color: ["blue", "green", "yellow", "purple", "pink", "cyan", "orange", "red"][index % 8] as ChartColor,
+-  }))
+-
+-const tokenPartRows = (report: StatsReport) => [
+-  {
+-    label: "All tokens",
+-    parts: [
+-      { label: "Input", value: report.total.tokens.input, color: "blue" as ChartColor },
+-      { label: "Output", value: report.total.tokens.output + report.total.tokens.reasoning, color: "green" as ChartColor },
+-      { label: "Cache Read", value: report.total.tokens.cache.read, color: "yellow" as ChartColor },
+-      { label: "Cache Write", value: report.total.tokens.cache.write, color: "purple" as ChartColor },
+-    ],
+-  },
+-]
+-
+-const modelProviderMatrix = (report: StatsReport) => {
+-  const models = report.models.slice(0, 8)
+-  const providers = report.providers.slice(0, 6)
+-  const values = providers.map((provider) =>
+-    models.map((model) => {
+-      const providerHit = model.providers.find((item) => item.id === provider.id)?.tokens ?? 0
+-      const modelHit = provider.models.find((item) => item.id === model.id)?.tokens ?? 0
+-      return Math.min(providerHit, modelHit)
+-    }),
+-  )
+-  return { models, providers, values }
+-}
+-
+-const costWaterfallRows = (report: StatsReport) => [
+-  ...report.providers.slice(0, 6).map((provider, index) => ({
+-    label: provider.label,
+-    value: provider.cost,
+-    color: ["pink", "purple", "blue", "green", "yellow", "orange"][index % 6] as ChartColor,
+-  })),
+-  { label: "Unshown", value: report.providers.slice(6).reduce((acc, provider) => acc + provider.cost, 0), color: "muted" as ChartColor },
+-]
+-
+-const sessionCostValues = (report: StatsReport) => report.sessions.map((session) => session.cost)
+-
+-const sessionTokenValues = (report: StatsReport) => report.sessions.map((session) => session.tokens.total)
+-
+-const renderRichHeader = (report: StatsReport, options: StatsRenderOptions, active: string) => {
+-  const enabled = useColor(options.color)
+-  return [
+-    title("opencode stats", enabled),
+-    muted(`${dateRange(report)}${sep(enabled)}${report.days} day window${sep(enabled)}${report.sessionsWithUsage}/${report.totalSessions} sessions with usage`, enabled),
+-    renderMetricRibbon({
+-      color: options.color,
+-      metrics: [
+-        { label: "Cost", value: money(report.total.cost), color: "pink", detail: `${money(report.total.cost / Math.max(report.days, 1))}/day` },
+-        { label: "Tokens", value: formatNumber(report.total.tokens.total), color: "blue", detail: `${formatNumber(report.tokensPerSession)} avg/session` },
+-        { label: "Requests", value: formatNumber(report.total.requests), color: "green" },
+-        { label: "Tools", value: formatNumber(report.totalTools), color: "yellow" },
+-      ],
+-    }),
+-    renderTabs({
+-      color: options.color,
+-      tabs: ["dashboard", "timeline", "models", "providers", "sessions", "insights"].map((label) => ({
+-        label,
+-        active: label === active,
+-      })),
+-    }),
+-    renderTabs({
+-      color: options.color,
+-      tabs: ["charts", "heatmap", "costs", "tokens", "forecast"].map((label) => ({
+-        label,
+-        active: label === active,
+-      })),
+-    }),
+-  ]
+-}
+-
+-const topGroups = (groups: UsageGroup[], options: StatsRenderOptions) => {
+-  const sort = options.sort ?? "cost"
+-  const sorted = [...groups].sort((a, b) => {
+-    if (sort === "tokens") return b.tokens.total - a.tokens.total
+-    if (sort === "calls") return b.assistantCalls - a.assistantCalls
+-    return b.cost - a.cost || b.tokens.total - a.tokens.total
+-  })
+-  return sorted.slice(0, options.limit ?? 8)
+-}
+-
+-const renderGroupRows = (groups: UsageGroup[], report: StatsReport, options: StatsRenderOptions, enabled: boolean) => {
+-  const rows: string[] = []
+-  const items = topGroups(groups, options)
+-  const maxCost = Math.max(0, ...items.map((item) => item.cost))
+-  const maxTokens = Math.max(0, ...items.map((item) => item.tokens.total))
+-  items.forEach((item, index) => {
+-    const share = percent(item.tokens.total, report.total.tokens.total)
+-    const heading = `${padStartAnsi(String(index + 1), 2)} ${color("●", index % 2 === 0 ? "blue" : "green", enabled)} ${padEndAnsi(color(item.label, "white", enabled, true), 34)} ${padStartAnsi(money(item.cost), 10)} ${padStartAnsi(formatNumber(item.tokens.total), 9)} tok ${padStartAnsi(String(item.assistantCalls), 5)} calls ${padStartAnsi(share, 7)}`
+-    rows.push(heading)
+-    rows.push(
+-      `   ${tokenStack(item.tokens, 42, enabled)}  ${muted(
+-        `In ${formatNumber(item.tokens.input)} / Out ${formatNumber(item.tokens.output + item.tokens.reasoning)} / Cache ${formatNumber(item.tokens.cache.read + item.tokens.cache.write)}`,
+-        enabled,
+-      )}`,
+-    )
+-    rows.push(
+-      `   ${metricBar(options.metric === "tokens" ? item.tokens.total : item.cost, options.metric === "tokens" ? maxTokens : maxCost, 42, enabled, options.metric === "tokens" ? "blue" : "pink")}  ${muted(`${item.sessions} sessions`, enabled)}`,
+-    )
+-  })
+-  if (rows.length === 0) rows.push(muted("No usage data for this range.", enabled))
+-  return rows
+-}
+-
+-export function renderDashboard(report: StatsReport, options: StatsRenderOptions = {}) {
+-  const enabled = useColor(options.color)
+-  const lines = [
+-    ...renderRichHeader(report, options, "dashboard"),
+-    "",
+-    ...renderRoundedLineChart({
+-      title: "Tokens per day",
+-      series: [dailySeries(dailyTokenPoints(report), "blue", "tokens")],
+-      color: options.color,
+-      metric: "tokens",
+-      width: fullChartWidth(),
+-      height: 12,
+-    }),
+-    "",
+-    ...renderTwoColumn(
+-      renderComparisonTable({
+-        title: "Top models",
+-        headers: ["model", "tokens", "share"],
+-        rows: topGroups(report.models, { ...options, limit: options.limit ?? 5, sort: "tokens" }).map((model) => [
+-          Locale.truncate(model.label, 22),
+-          formatNumber(model.tokens.total),
+-          percent(model.tokens.total, report.total.tokens.total),
+-        ]),
+-        color: options.color,
+-      }),
+-      renderComparisonTable({
+-        title: "Top providers",
+-        headers: ["provider", "cost", "share"],
+-        rows: topGroups(report.providers, { ...options, limit: options.limit ?? 5, sort: "cost" }).map((provider) => [
+-          Locale.truncate(provider.label, 22),
+-          money(provider.cost),
+-          percent(provider.cost, report.total.cost),
+-        ]),
+-        color: options.color,
+-      }),
+-      5,
+-    ),
+-    "",
+-    ...renderTwoColumn(
+-      renderPercentStack({ title: "Token composition", rows: tokenPartRows(report), color: options.color, width: halfChartWidth() }),
+-      renderComparisonTable({
+-        title: "Snapshot",
+-        headers: ["metric", "value"],
+-        rows: [
+-          ["cost / day", money(report.total.cost / Math.max(report.days, 1))],
+-          ["tokens / session", formatNumber(report.tokensPerSession)],
+-          ["median session", formatNumber(report.medianTokensPerSession)],
+-          ["requests", formatNumber(report.total.requests)],
+-          ["assistant calls", formatNumber(report.total.assistantCalls)],
+-        ],
+-        color: options.color,
+-      }),
+-      5,
+-    ),
+-    "",
+-    ...renderCallout({
+-      title: "Focused views",
+-      body: "Use stats timeline, models, providers, sessions, costs, tokens, insights, or forecast for deeper drilldowns.",
+-      color: options.color,
+-      accent: "purple",
+-    }),
+-  ]
+-  return panel(lines, enabled)
+-}
+-
+-export function renderOverview(report: StatsReport, options: StatsRenderOptions = {}) {
+-  const enabled = useColor(options.color)
+-  const lines = [
+-    title("opencode stats overview", enabled),
+-    muted(dateRange(report), enabled),
+-    "",
+-    hero("Sessions", `${formatNumber(report.sessionsWithUsage)} with usage / ${formatNumber(report.totalSessions)} total`, enabled, "blue"),
+-    hero("Messages", formatNumber(report.totalMessages), enabled, "green"),
+-    hero("Assistant calls", formatNumber(report.total.assistantCalls), enabled, "yellow"),
+-    hero("Total cost", money(report.total.cost), enabled, "pink"),
+-    hero("Avg tokens/session", formatNumber(report.tokensPerSession), enabled, "purple"),
+-    hero("Median tokens/session", formatNumber(report.medianTokensPerSession), enabled, "white"),
+-    "",
+-    `${color("Token stack", "subtitle", enabled, true)} ${tokenStack(report.total.tokens, 62, enabled)}`,
+-    `            ${legend(enabled)}`,
+-    "",
+-    title("Tool usage", enabled),
+-    ...(report.toolUsage.slice(0, options.limit ?? 10).map((tool, index) =>
+-      `${padStartAnsi(String(index + 1), 2)} ${padEndAnsi(color(tool.id, "white", enabled, true), 28)} ${metricBar(tool.count, report.toolUsage[0]?.count ?? 0, 30, enabled, "yellow")} ${formatNumber(tool.count)}`,
+-    )),
+-  ]
+-  if (report.toolUsage.length === 0) lines.push(muted("No tool usage data for this range.", enabled))
+-  return panel(lines, enabled)
+-}
+-
+-export function renderModels(report: StatsReport, options: StatsRenderOptions = {}) {
+-  const enabled = useColor(options.color)
+-  const lines = [
+-    ...renderRichHeader(report, options, "models"),
+-    "",
+-    ...renderRoundedLineChart({
+-      title: "Model usage over time",
+-      series: seriesFromUsage(report.modelSeries, options.metric ?? "tokens", options.limit ?? 8),
+-      color: options.color,
+-      metric: options.metric ?? "tokens",
+-      width: fullChartWidth(),
+-      height: 12,
+-    }),
+-    "",
+-    muted(" # model                                cost      tokens calls   share", enabled),
+-    ...renderGroupRows(report.models, report, { limit: options.limit ?? 12, metric: options.metric ?? "tokens", sort: options.sort }, enabled),
+-  ]
+-  return panel(
+-    lines,
+-    enabled,
+-  )
+-}
+-
+-export function renderProviders(report: StatsReport, options: StatsRenderOptions = {}) {
+-  const enabled = useColor(options.color)
+-  const matrix = modelProviderMatrix(report)
+-  return panel(
+-    [
+-      ...renderRichHeader(report, options, "providers"),
+-      "",
+-      ...renderRoundedLineChart({
+-        title: "Provider spend over time",
+-        series: seriesFromUsage(report.providerSeries, options.metric ?? "cost", options.limit ?? 8),
+-        color: options.color,
+-        metric: options.metric ?? "cost",
+-        width: fullChartWidth(),
+-        height: 12,
+-      }),
+-      "",
+-      ...renderMatrix({
+-        title: "Provider × model token matrix",
+-        xLabels: matrix.models.map((model) => model.label),
+-        yLabels: matrix.providers.map((provider) => provider.label),
+-        values: matrix.values,
+-        color: options.color,
+-      }),
+-      "",
+-      muted(" # provider                             cost      tokens calls   share", enabled),
+-      ...renderGroupRows(report.providers, report, { limit: options.limit ?? 12, metric: options.metric ?? "cost", sort: options.sort }, enabled),
+-    ],
+-    enabled,
+-  )
+-}
+-
+-export function renderTimeline(report: StatsReport, options: StatsRenderOptions = {}) {
+-  const enabled = useColor(options.color)
+-  const metric = options.metric ?? "tokens"
+-  const mainSeries = dailySeries(metric === "cost" ? dailyCostPoints(report) : dailyTokenPoints(report), metric === "cost" ? "pink" : "blue", metric)
+-  return panel(
+-    [
+-      ...renderRichHeader(report, options, "timeline"),
+-      "",
+-      ...renderRoundedLineChart({
+-        title: `${metric === "cost" ? "Cost" : "Tokens"} per day`,
+-        series: [mainSeries],
+-        color: options.color,
+-        metric,
+-        width: fullChartWidth(),
+-        height: 12,
+-      }),
+-      "",
+-      ...renderStackedAreaChart({
+-        title: "Token component stack by day",
+-        layers: layersFromTokenParts(report.tokenPartSeries),
+-        labels: dailyLabels(report.daily),
+-        color: options.color,
+-        width: fullChartWidth(),
+-        height: 12,
+-      }),
+-      "",
+-      ...renderHeatmap({
+-        title: metric === "cost" ? "Cost heatmap" : "Token heatmap",
+-        points: metric === "cost" ? dailyCostPoints(report) : dailyTokenPoints(report),
+-        color: options.color,
+-        width: Math.min(54, statsContentWidth()),
+-        formatter: metricFormatter(metric),
+-      }),
+-      "",
+-      legend(enabled),
+-    ],
+-    enabled,
+-  )
+-}
+-
+-export function renderSessions(report: StatsReport, options: StatsRenderOptions = {}) {
+-  const enabled = useColor(options.color)
+-  const sort = options.sort ?? "cost"
+-  const sessions = [...report.sessions]
+-    .sort((a, b) => {
+-      if (sort === "tokens") return b.tokens.total - a.tokens.total
+-      if (sort === "updated") return b.updated - a.updated
+-      if (sort === "calls") return b.assistantCalls - a.assistantCalls
+-      return b.cost - a.cost || b.tokens.total - a.tokens.total
+-    })
+-    .slice(0, options.limit ?? 20)
+-  const maxCost = Math.max(0, ...sessions.map((session) => session.cost))
+-  const lines = [
+-    ...renderRichHeader(report, options, "sessions"),
+-    "",
+-    ...renderTwoColumn(
+-      renderHistogram({
+-        title: "Session cost distribution",
+-        values: sessionCostValues(report),
+-        color: options.color,
+-        width: Math.max(12, halfChartWidth() - 18),
+-        formatter: metricFormatter("cost"),
+-      }),
+-      renderHistogram({
+-        title: "Session token distribution",
+-        values: sessionTokenValues(report),
+-        color: options.color,
+-        width: Math.max(12, halfChartWidth() - 18),
+-        formatter: formatNumber,
+-      }),
+-      5,
+-    ),
+-    "",
+-    title(`Session leaderboard · sorted by ${sort}`, enabled),
+-    ...sessions.flatMap((session, index) => [
+-      `${padStartAnsi(String(index + 1), 2)} ${padEndAnsi(color(session.id, "blue", enabled, true), 24)} ${padEndAnsi(Locale.truncate(session.title, 34), 36)} ${padStartAnsi(money(session.cost), 10)} ${padStartAnsi(formatNumber(session.tokens.total), 9)} tok`,
+-      `   ${metricBar(session.cost, maxCost, 42, enabled, "pink")} ${muted(`${session.models.slice(0, 3).join(", ") || "unknown model"}`, enabled)}`,
+-    ]),
+-  ]
+-  if (sessions.length === 0) lines.push(muted("No session usage data for this range.", enabled))
+-  return panel(lines, enabled)
+-}
+-
+-export function renderCharts(report: StatsReport, options: StatsRenderOptions = {}) {
+-  const enabled = useColor(options.color)
+-  const metric = options.metric ?? "tokens"
+-  const modelLines = seriesFromUsage(report.modelSeries, metric, options.limit ?? 6)
+-  const providerLines = seriesFromUsage(report.providerSeries, metric, options.limit ?? 6)
+-  const lines = [
+-    ...renderRichHeader(report, options, "charts"),
+-    "",
+-    ...renderTwoColumn(
+-      renderRoundedLineChart({
+-        title: "Model usage",
+-        series: modelLines,
+-        color: options.color,
+-        metric,
+-        width: halfChartWidth(),
+-        height: 10,
+-      }),
+-      renderRoundedLineChart({
+-        title: "Provider usage",
+-        series: providerLines,
+-        color: options.color,
+-        metric,
+-        width: halfChartWidth(),
+-        height: 10,
+-      }),
+-      5,
+-    ),
+-    "",
+-    ...renderTwoColumn(
+-      renderStackedAreaChart({
+-        title: "Token components",
+-        layers: layersFromTokenParts(report.tokenPartSeries),
+-        labels: dailyLabels(report.daily),
+-        color: options.color,
+-        width: halfChartWidth(),
+-        height: 10,
+-      }),
+-      renderStreamStackChart({
+-        title: "Model mix over time",
+-        layers: report.modelSeries.slice(0, options.limit ?? 6).map((series, index) => ({
+-          id: series.id,
+-          label: series.label,
+-          color: ["blue", "green", "yellow", "purple", "pink", "cyan"][index % 6] as ChartColor,
+-          values: series.points.map((point) => (metric === "cost" ? point.cost : point.tokens.total)),
+-          total: metric === "cost" ? series.cost : series.tokens.total,
+-        })),
+-        labels: dailyLabels(report.daily),
+-        color: options.color,
+-        width: halfChartWidth(),
+-        height: 10,
+-      }),
+-      5,
+-    ),
+-    "",
+-    ...renderTwoColumn(
+-      renderHorizon({ title: "Model activity rows", series: modelLines, color: options.color, width: Math.max(10, halfChartWidth() - 26), formatter: metricFormatter(metric) }),
+-      renderSmallMultiples({ title: "Provider trend rows", series: providerLines, color: options.color, width: Math.max(10, halfChartWidth() - 26), formatter: metricFormatter(metric) }),
+-      5,
+-    ),
+-  ]
+-  return panel(lines, enabled)
+-}
+-
+-export function renderHeatmapPage(report: StatsReport, options: StatsRenderOptions = {}) {
+-  const enabled = useColor(options.color)
+-  const matrix = modelProviderMatrix(report)
+-  const lines = [
+-    ...renderRichHeader(report, options, "heatmap"),
+-    "",
+-    ...renderTwoColumn(
+-      renderHeatmap({ title: "Daily tokens", points: dailyTokenPoints(report), color: options.color, width: Math.max(22, Math.floor((statsContentWidth() - 8) / 2)), formatter: formatNumber }),
+-      renderHeatmap({ title: "Daily cost", points: dailyCostPoints(report), color: options.color, width: Math.max(22, Math.floor((statsContentWidth() - 8) / 2)), formatter: metricFormatter("cost") }),
+-      8,
+-    ),
+-    "",
+-    ...renderMatrix({
+-      title: "Provider × model token density",
+-      xLabels: matrix.models.map((model) => model.label),
+-      yLabels: matrix.providers.map((provider) => provider.label),
+-      values: matrix.values,
+-      color: options.color,
+-    }),
+-  ]
+-  return panel(lines, enabled)
+-}
+-
+-export function renderCosts(report: StatsReport, options: StatsRenderOptions = {}) {
+-  const enabled = useColor(options.color)
+-  const lines = [
+-    ...renderRichHeader(report, options, "costs"),
+-    "",
+-    ...renderTwoColumn(
+-      renderRoundedLineChart({
+-        title: "Daily cost",
+-        series: [dailySeries(dailyCostPoints(report), "pink", "daily cost")],
+-        color: options.color,
+-        metric: "cost",
+-        width: halfChartWidth(),
+-        height: 10,
+-      }),
+-      renderWaterfall({
+-        title: "Provider cost waterfall",
+-        rows: costWaterfallRows(report),
+-        color: options.color,
+-        width: Math.max(12, halfChartWidth() - 24),
+-        formatter: metricFormatter("cost"),
+-      }),
+-      5,
+-    ),
+-    "",
+-    ...renderTwoColumn(
+-      renderHistogram({ title: "Session cost distribution", values: sessionCostValues(report), color: options.color, width: Math.max(12, halfChartWidth() - 18), formatter: metricFormatter("cost") }),
+-      renderRankBars({ title: "Cost by model", rows: groupRows(report.models, "cost", options.limit ?? 10), color: options.color, width: Math.max(8, halfChartWidth() - 42), formatter: metricFormatter("cost") }),
+-      5,
+-    ),
+-  ]
+-  return panel(lines, enabled)
+-}
+-
+-export function renderTokens(report: StatsReport, options: StatsRenderOptions = {}) {
+-  const enabled = useColor(options.color)
+-  const lines = [
+-    ...renderRichHeader(report, options, "tokens"),
+-    "",
+-    ...renderStackedAreaChart({
+-      title: "Input / output / cache over time",
+-      layers: layersFromTokenParts(report.tokenPartSeries),
+-      labels: dailyLabels(report.daily),
+-      color: options.color,
+-      width: fullChartWidth(),
+-      height: 12,
+-    }),
+-    "",
+-    ...renderTwoColumn(
+-      renderPercentStack({ title: "Token share", rows: tokenPartRows(report), color: options.color, width: Math.max(16, halfChartWidth() - 12) }),
+-      renderCompositionDonut({
+-        title: "Top model token share",
+-        rows: report.models.slice(0, options.limit ?? 8).map((model, index) => ({
+-          label: model.label,
+-          value: model.tokens.total,
+-          color: ["blue", "green", "yellow", "purple", "pink", "cyan", "orange", "red"][index % 8] as ChartColor,
+-        })),
+-        color: options.color,
+-        formatter: formatNumber,
+-      }),
+-      5,
+-    ),
+-    "",
+-    ...renderComparisonTable({
+-      title: "Token ledger",
+-      headers: ["kind", "tokens", "share"],
+-      rows: [
+-        ["input", formatNumber(report.total.tokens.input), percent(report.total.tokens.input, report.total.tokens.total)],
+-        ["output", formatNumber(report.total.tokens.output + report.total.tokens.reasoning), percent(report.total.tokens.output + report.total.tokens.reasoning, report.total.tokens.total)],
+-        ["cache read", formatNumber(report.total.tokens.cache.read), percent(report.total.tokens.cache.read, report.total.tokens.total)],
+-        ["cache write", formatNumber(report.total.tokens.cache.write), percent(report.total.tokens.cache.write, report.total.tokens.total)],
+-      ],
+-      color: options.color,
+-    }),
+-    "",
+-    renderGauge({ label: "Cache share", value: report.total.tokens.cache.read + report.total.tokens.cache.write, max: report.total.tokens.total, color: options.color, width: Math.max(18, statsContentWidth() - 28) }),
+-  ]
+-  return panel(lines, enabled)
+-}
+diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/cmd/stats.ts
+index 59146d2f2f2ffe2614678b2341e2c9c8b43071e7..1c75352fba80d3639a8f5b52a76ef84857a189d2 100644
+--- a/packages/opencode/src/cli/cmd/stats.ts
++++ b/packages/opencode/src/cli/cmd/stats.ts
+@@ -2,29 +2,33 @@ import type { Argv } from "yargs"
+ import { Effect } from "effect"
+ import { effectCmd } from "../effect-cmd"
+ import { InstanceRef } from "@/effect/instance-ref"
+-import { aggregateStats, type StatsReport } from "./stats-data"
+-import { renderForecast, renderInsights } from "./stats-insights"
++import { aggregateStats, type StatsReport } from "./stats/data"
++import { renderInsights } from "./stats/insights"
+ import {
+-  renderCharts,
+-  renderCosts,
++  renderBreakdown,
+   renderDashboard,
+-  renderHeatmapPage,
+   renderModels,
+-  renderOverview,
+   renderProviders,
+   renderSessions,
+   renderTimeline,
+-  renderTokens,
++  type BreakdownDimension,
+   type ColorMode,
+   type StatsRenderOptions,
+-} from "./stats-render"
++} from "./stats/render"
+ 
+-export { formatNumber } from "./stats-render"
++export { formatNumber } from "./stats/render"
+ 
+ type BaseArgs = {
+   days?: number
+   project?: string
+   color?: string
++  session?: string
++  model?: string
++  provider?: string
++  source?: string
++  agent?: string
++  status?: string
++  tool?: string
+ }
+ 
+ type DashboardArgs = BaseArgs & {
+@@ -40,9 +44,24 @@ type DetailArgs = BaseArgs & {
+   sort?: string
+ }
+ 
++type TimelineArgs = DetailArgs & {
++  heatmap?: boolean
++}
++
++type BreakdownArgs = DetailArgs & {
++  dimension?: string
++  by?: string
++}
++
++type InsightsArgs = DetailArgs & {
++  forecast?: boolean
++}
++
+ const colorChoices = ["auto", "always", "never"] as const
+ const metricChoices = ["tokens", "cost"] as const
+ const sortChoices = ["cost", "tokens", "calls", "updated"] as const
++const breakdownChoices = ["model", "provider", "agent", "source", "project", "tool", "status"] as const
++const statusChoices = ["running", "completed", "error", "aborted"] as const
+ 
+ const nonNegativeInteger = (value: unknown): value is number =>
+   typeof value === "number" && Number.isInteger(value) && value >= 0
+@@ -94,7 +113,6 @@ const withDetailOptions = (yargs: Argv) =>
+       describe: "primary bar metric",
+       type: "string",
+       choices: metricChoices,
+-      default: "tokens",
+     })
+     .option("sort", {
+       describe: "sort order",
+@@ -102,10 +120,80 @@ const withDetailOptions = (yargs: Argv) =>
+       choices: sortChoices,
+       default: "cost",
+     })
++    .option("session", {
++      describe: "filter by session id/title/directory substring",
++      type: "string",
++    })
++    .option("model", {
++      describe: "filter by model id substring",
++      type: "string",
++    })
++    .option("provider", {
++      describe: "filter by provider id substring",
++      type: "string",
++    })
++    .option("source", {
++      describe: "filter by request source substring",
++      type: "string",
++    })
++    .option("agent", {
++      describe: "filter by agent substring",
++      type: "string",
++    })
++    .option("status", {
++      describe: "filter by request status",
++      type: "string",
++      choices: statusChoices,
++    })
++    .option("tool", {
++      describe: "filter by tool name substring",
++      type: "string",
++    })
++
++const withTimelineOptions = (yargs: Argv) =>
++  withDetailOptions(yargs).option("heatmap", {
++    describe: "include the calendar heatmap section",
++    type: "boolean",
++    default: true,
++  })
++
++const withBreakdownOptions = (yargs: Argv) =>
++  withDetailOptions(yargs)
++    .positional("dimension", {
++      describe: "attribution dimension",
++      type: "string",
++      choices: breakdownChoices,
++      default: "model",
++    })
++    .option("by", {
++      alias: "b",
++      describe: "attribution dimension",
++      type: "string",
++      choices: breakdownChoices,
++    })
++
++const withInsightsOptions = (yargs: Argv) =>
++  withDetailOptions(yargs).option("forecast", {
++    describe: "include run-rate projection charts",
++    type: "boolean",
++    default: false,
++  })
+ 
+ const loadReport = Effect.fn("Cli.stats.load")(function* (args: BaseArgs) {
+   const ctx = yield* InstanceRef
+-  return yield* aggregateStats({ days: args.days, projectFilter: args.project, currentProject: ctx?.project })
++  const report: StatsReport = yield* aggregateStats({
++    days: args.days,
++    projectFilter: args.project,
++    currentProject: ctx?.project,
++    sessionFilter: args.session,
++    modelFilter: args.model,
++    providerFilter: args.provider,
++    sourceFilter: args.source,
++    agentFilter: args.agent,
++    statusFilter: args.status,
++    toolFilter: args.tool,
++  })
++  return report
+ })
+ 
+ const colorMode = (value?: string): ColorMode => {
+@@ -123,55 +211,65 @@ const sortMode = (value?: string): StatsRenderOptions["sort"] => {
+   return "cost"
+ }
+ 
++const breakdownMode = (value?: string): BreakdownDimension => {
++  if (value === "provider" || value === "agent" || value === "source" || value === "project" || value === "tool" || value === "status") return value
++  return "model"
++}
++
+ const renderOptions = (args: DetailArgs | DashboardArgs): StatsRenderOptions => ({
+   color: colorMode(args.color),
+   limit: "limit" in args ? args.limit : undefined,
+-  metric: "metric" in args ? metricMode(args.metric) : undefined,
++  metric: "metric" in args && args.metric !== undefined ? metricMode(args.metric) : undefined,
+   sort: "sort" in args ? sortMode(args.sort) : undefined,
+ })
+ 
+-export const StatsOverviewCommand = effectCmd({
+-  command: "overview",
+-  aliases: ["summary"],
+-  describe: "show a rich usage overview",
+-  builder: (yargs) =>
+-    withBaseOptions(yargs).option("limit", {
+-      alias: "n",
+-      describe: "number of tools to show",
+-      type: "number",
+-    }),
+-  handler: Effect.fn("Cli.stats.overview")(function* (args: BaseArgs & { limit?: number }) {
+-    console.log(renderOverview(yield* loadReport(args), { color: colorMode(args.color), limit: args.limit }))
++const timelineOptions = (args: TimelineArgs): StatsRenderOptions => ({
++  ...renderOptions(args),
++  heatmap: args.heatmap,
++})
++
++const breakdownOptions = (args: BreakdownArgs): StatsRenderOptions => ({
++  ...renderOptions(args),
++  by: breakdownMode(args.by ?? args.dimension),
++})
++
++export const StatsBreakdownCommand = effectCmd({
++  command: "breakdown [dimension]",
++  aliases: ["by"],
++  describe: "attribute cost, tokens, and requests by one dimension",
++  builder: withBreakdownOptions,
++  handler: Effect.fn("Cli.stats.breakdown")(function* (args: BreakdownArgs) {
++    console.log(renderBreakdown(yield* loadReport(args), breakdownOptions(args)))
+   }),
+ })
+ 
+ export const StatsModelsCommand = effectCmd({
+   command: "models",
+   aliases: ["model"],
+-  describe: "rank token usage and cost by model id",
++  describe: false,
+   builder: withDetailOptions,
+   handler: Effect.fn("Cli.stats.models")(function* (args: DetailArgs) {
+-    console.log(renderModels(yield* loadReport(args), renderOptions(args)))
++    console.log(renderModels(yield* loadReport(args), { ...renderOptions(args), by: "model" }))
+   }),
+ })
+ 
+ export const StatsProvidersCommand = effectCmd({
+   command: "providers",
+   aliases: ["provider"],
+-  describe: "rank token usage and cost by provider",
++  describe: false,
+   builder: withDetailOptions,
+   handler: Effect.fn("Cli.stats.providers")(function* (args: DetailArgs) {
+-    console.log(renderProviders(yield* loadReport(args), renderOptions(args)))
++    console.log(renderProviders(yield* loadReport(args), { ...renderOptions(args), by: "provider", metric: args.metric === "tokens" ? "tokens" : "cost" }))
+   }),
+ })
+ 
+ export const StatsTimelineCommand = effectCmd({
+   command: "timeline",
+   aliases: ["daily"],
+-  describe: "render daily token stacks or cost bars",
+-  builder: withDetailOptions,
+-  handler: Effect.fn("Cli.stats.timeline")(function* (args: DetailArgs) {
+-    console.log(renderTimeline(yield* loadReport(args), renderOptions(args)))
++  describe: "inspect daily trends, token mix, request outcomes, and heatmap",
++  builder: withTimelineOptions,
++  handler: Effect.fn("Cli.stats.timeline")(function* (args: TimelineArgs) {
++    console.log(renderTimeline(yield* loadReport(args), timelineOptions(args)))
+   }),
+ })
+ 
+@@ -187,7 +285,7 @@ export const StatsSessionsCommand = effectCmd({
+ 
+ export const StatsDashboardCommand = effectCmd({
+   command: "dashboard",
+-  aliases: ["dash"],
++  aliases: ["dash", "overview", "summary"],
+   describe: "show a balanced usage dashboard",
+   builder: (yargs) =>
+     withBaseOptions(yargs)
+@@ -198,7 +296,7 @@ export const StatsDashboardCommand = effectCmd({
+       })
+       .option("interactive", {
+         alias: "i",
+-        describe: "cycle dashboard views with keyboard shortcuts",
++        describe: "cycle stats views with keyboard shortcuts",
+         type: "boolean",
+         default: false,
+       }),
+@@ -212,43 +310,33 @@ export const StatsDashboardCommand = effectCmd({
+   }),
+ })
+ 
+-export const StatsChartsCommand = effectCmd({
+-  command: "charts",
+-  aliases: ["graphs"],
+-  describe: "show the chart gallery for visual diagnostics",
+-  builder: withDetailOptions,
+-  handler: Effect.fn("Cli.stats.charts")(function* (args: DetailArgs) {
+-    console.log(renderCharts(yield* loadReport(args), renderOptions(args)))
+-  }),
+-})
+-
+ export const StatsHeatmapCommand = effectCmd({
+   command: "heatmap",
+   aliases: ["heat"],
+-  describe: "show density maps for days and provider/model usage",
+-  builder: withDetailOptions,
+-  handler: Effect.fn("Cli.stats.heatmap")(function* (args: DetailArgs) {
+-    console.log(renderHeatmapPage(yield* loadReport(args), renderOptions(args)))
++  describe: false,
++  builder: withTimelineOptions,
++  handler: Effect.fn("Cli.stats.heatmap")(function* (args: TimelineArgs) {
++    console.log(renderTimeline(yield* loadReport(args), { ...timelineOptions(args), heatmap: true }))
+   }),
+ })
+ 
+ export const StatsCostsCommand = effectCmd({
+   command: "costs",
+   aliases: ["cost"],
+-  describe: "show cost-only curves, waterfalls, and distributions",
+-  builder: withDetailOptions,
+-  handler: Effect.fn("Cli.stats.costs")(function* (args: DetailArgs) {
+-    console.log(renderCosts(yield* loadReport(args), renderOptions(args)))
++  describe: false,
++  builder: withTimelineOptions,
++  handler: Effect.fn("Cli.stats.costs")(function* (args: TimelineArgs) {
++    console.log(renderTimeline(yield* loadReport(args), { ...renderOptions(args), metric: "cost" }))
+   }),
+ })
+ 
+ export const StatsTokensCommand = effectCmd({
+   command: "tokens",
+   aliases: ["token"],
+-  describe: "show token-only input/output/cache stacks and ledger",
+-  builder: withDetailOptions,
+-  handler: Effect.fn("Cli.stats.tokens")(function* (args: DetailArgs) {
+-    console.log(renderTokens(yield* loadReport(args), renderOptions(args)))
++  describe: false,
++  builder: withTimelineOptions,
++  handler: Effect.fn("Cli.stats.tokens")(function* (args: TimelineArgs) {
++    console.log(renderTimeline(yield* loadReport(args), { ...renderOptions(args), metric: "tokens" }))
+   }),
+ })
+ 
+@@ -256,19 +344,19 @@ export const StatsInsightsCommand = effectCmd({
+   command: "insights",
+   aliases: ["insight"],
+   describe: "show trend insights, risks, recommendations, and outliers",
+-  builder: withDetailOptions,
+-  handler: Effect.fn("Cli.stats.insights")(function* (args: DetailArgs) {
+-    console.log(renderInsights(yield* loadReport(args), { color: colorMode(args.color), limit: args.limit }))
++  builder: withInsightsOptions,
++  handler: Effect.fn("Cli.stats.insights")(function* (args: InsightsArgs) {
++    console.log(renderInsights(yield* loadReport(args), { color: colorMode(args.color), limit: args.limit, forecast: args.forecast }))
+   }),
+ })
+ 
+ export const StatsForecastCommand = effectCmd({
+   command: "forecast",
+   aliases: ["run-rate"],
+-  describe: "project cost run-rate and month-end spend",
++  describe: false,
+   builder: withDetailOptions,
+   handler: Effect.fn("Cli.stats.forecast")(function* (args: DetailArgs) {
+-    console.log(renderForecast(yield* loadReport(args), { color: colorMode(args.color) }))
++    console.log(renderInsights(yield* loadReport(args), { color: colorMode(args.color), limit: args.limit, forecast: true }))
+   }),
+ })
+ 
+@@ -276,32 +364,46 @@ export const StatsCommand = effectCmd({
+   command: "stats",
+   describe: "show token usage and cost statistics",
+   builder: (yargs: Argv) =>
+-    withBaseOptions(yargs)
++    yargs
++      .option("days", {
++        describe: "show stats for the last N days (0 means today, default: all time)",
++        type: "number",
++      })
++      .option("project", {
++        describe: "filter by project (default: all projects, empty string: current project)",
++        type: "string",
++      })
++      .option("color", {
++        describe: "ANSI color mode",
++        type: "string",
++        choices: colorChoices,
++        default: "auto",
++      })
+       .option("tools", {
+-        describe: "number of tools to show in overview mode",
++        describe: "shortcut to tool breakdown; optionally pass number of tools",
+         type: "number",
+       })
+       .option("models", {
+-        describe: "legacy shortcut: show top model rows in the dashboard; pass a number for top N",
++        describe: "shortcut to model breakdown; pass a number for top N",
+       })
+       .option("limit", {
+         alias: "n",
+-        describe: "number of model/provider rows to show",
++        describe: "number of rows to show",
+         type: "number",
+       })
+       .option("interactive", {
+         alias: "i",
+-        describe: "cycle dashboard views with keyboard shortcuts",
++        describe: "cycle stats views with keyboard shortcuts",
+         type: "boolean",
+         default: false,
+       })
+-      .command(StatsOverviewCommand)
++      .check(validateStatsArgs)
+       .command(StatsDashboardCommand)
++      .command(StatsBreakdownCommand)
+       .command(StatsModelsCommand)
+       .command(StatsProvidersCommand)
+       .command(StatsTimelineCommand)
+       .command(StatsSessionsCommand)
+-      .command(StatsChartsCommand)
+       .command(StatsHeatmapCommand)
+       .command(StatsCostsCommand)
+       .command(StatsTokensCommand)
+@@ -315,7 +417,11 @@ export const StatsCommand = effectCmd({
+       return
+     }
+     if (args.tools !== undefined) {
+-      console.log(renderOverview(yield* loadReport(args), { color: colorMode(args.color), limit: args.tools }))
++      console.log(renderBreakdown(yield* loadReport(args), { color: colorMode(args.color), limit: args.tools, by: "tool" }))
++      return
++    }
++    if (args.models !== undefined) {
++      console.log(renderBreakdown(yield* loadReport(args), { color: colorMode(args.color), limit, by: "model" }))
+       return
+     }
+     console.log(renderDashboard(yield* loadReport(args), { color: colorMode(args.color), limit }))
+@@ -346,15 +452,10 @@ function runInteractiveDashboard(reports: { days?: number; report: StatsReport }
+ 
+         const views = [
+           { name: "dashboard", render: (report: StatsReport) => renderDashboard(report, { color: colorMode(args.color), limit: args.limit }) },
+-          { name: "models", render: (report: StatsReport) => renderModels(report, { color: colorMode(args.color), limit: args.limit }) },
+-          {
+-            name: "providers",
+-            render: (report: StatsReport) => renderProviders(report, { color: colorMode(args.color), limit: args.limit, metric: "cost" }),
+-          },
++          { name: "breakdown", render: (report: StatsReport) => renderBreakdown(report, { color: colorMode(args.color), limit: args.limit, by: "model" }) },
+           { name: "timeline", render: (report: StatsReport) => renderTimeline(report, { color: colorMode(args.color), limit: 30 }) },
+           { name: "sessions", render: (report: StatsReport) => renderSessions(report, { color: colorMode(args.color), limit: args.limit }) },
+           { name: "insights", render: (report: StatsReport) => renderInsights(report, { color: colorMode(args.color), limit: args.limit }) },
+-          { name: "forecast", render: (report: StatsReport) => renderForecast(report, { color: colorMode(args.color) }) },
+         ]
+         const stdin = process.stdin as NodeJS.ReadStream & { setRawMode?: (mode: boolean) => NodeJS.ReadStream }
+         let view = 0
+diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/src/cli/cmd/stats/charts.ts
+similarity index 75%
+rename from packages/opencode/src/cli/cmd/stats-charts.ts
+rename to packages/opencode/src/cli/cmd/stats/charts.ts
+index dc4ef4901ef1cbeda3678480ad64c453ce1ae130..186862bf10ea927bd708737a74471ad92d39387f 100644
+--- a/packages/opencode/src/cli/cmd/stats-charts.ts
++++ b/packages/opencode/src/cli/cmd/stats/charts.ts
+@@ -1,6 +1,6 @@
+-import { formatNumber } from "../format"
+-import type { TokenPartSeries, UsageSeries } from "./stats-data"
+-import type { ColorMode } from "./stats-render"
++import { formatNumber } from "../../format"
++import type { TokenPartSeries, UsageSeries } from "./data"
++import type { ColorMode } from "./render"
+ 
+ const RESET = "\x1b[0m"
+ const BOLD = "\x1b[1m"
+@@ -8,7 +8,6 @@ const TEXT_RESET = "\x1b[22m\x1b[39m"
+ const ANSI_RE = /\x1b\[[0-9;]*m/g
+ const ANSI_PREFIX_RE = /^\x1b\[[0-9;]*m/
+ const DEFAULT_PANEL_WIDTH = 104
+-const MAX_PANEL_WIDTH = 118
+ const MIN_PANEL_WIDTH = 58
+ const PANEL_PADDING = 2
+ 
+@@ -49,6 +48,7 @@ export type ChartSeries = {
+   id: string
+   label: string
+   color: ChartColor
++  mark?: string
+   points: ChartPoint[]
+   total?: number
+ }
+@@ -110,6 +110,7 @@ const palette: Record<ChartColor, string> = {
+ }
+ 
+ const chartColors: ChartColor[] = ["blue", "green", "yellow", "purple", "pink", "cyan", "orange", "red"]
++const chartMarks = ["●", "◆", "■", "▲", "◇", "○", "✕", "+"]
+ 
+ const axisStyle: ChartStyle = { color: "axis", priority: 20 }
+ const gridStyle: ChartStyle = { color: "grid", priority: 0 }
+@@ -122,7 +123,37 @@ const useColor = (mode: ColorMode = "auto") => {
+   return Boolean(process.stdout.isTTY)
+ }
+ 
+-export const visibleLength = (text: string) => text.replace(ANSI_RE, "").length
++const isCombining = (code: number) =>
++  (code >= 0x0300 && code <= 0x036f) ||
++  (code >= 0x1ab0 && code <= 0x1aff) ||
++  (code >= 0x1dc0 && code <= 0x1dff) ||
++  (code >= 0x20d0 && code <= 0x20ff) ||
++  (code >= 0xfe20 && code <= 0xfe2f) ||
++  (code >= 0xfe00 && code <= 0xfe0f) ||
++  code === 0x200d
++
++const isWide = (code: number) =>
++  code >= 0x1100 &&
++  (code <= 0x115f ||
++    code === 0x2329 ||
++    code === 0x232a ||
++    (code >= 0x2e80 && code <= 0xa4cf) ||
++    (code >= 0xac00 && code <= 0xd7a3) ||
++    (code >= 0xf900 && code <= 0xfaff) ||
++    (code >= 0xfe10 && code <= 0xfe19) ||
++    (code >= 0xfe30 && code <= 0xfe6f) ||
++    (code >= 0xff00 && code <= 0xff60) ||
++    (code >= 0xffe0 && code <= 0xffe6) ||
++    (code >= 0x1f300 && code <= 0x1faff))
++
++const charWidth = (char: string) => {
++  const code = char.codePointAt(0)
++  if (code === undefined) return 0
++  if (code === 0 || code < 32 || (code >= 0x7f && code < 0xa0) || isCombining(code)) return 0
++  return isWide(code) ? 2 : 1
++}
++
++export const visibleLength = (text: string) => Array.from(text.replace(ANSI_RE, "")).reduce((sum, char) => sum + charWidth(char), 0)
+ 
+ export const stripAnsi = (text: string) => text.replace(ANSI_RE, "")
+ 
+@@ -132,10 +163,10 @@ export const padStartVisible = (text: string, width: number) =>
+   " ".repeat(Math.max(0, width - visibleLength(text))) + text
+ 
+ export const statsPanelWidth = (width?: number) => {
+-  const columns = Number(process.stdout.columns)
++  const columns = Number(process.stdout.columns ?? process.env.COLUMNS)
+   const terminalWidth = Number.isFinite(columns) && columns > 0 ? Math.max(20, columns - 2) : DEFAULT_PANEL_WIDTH
+-  const preferred = width ?? DEFAULT_PANEL_WIDTH
+-  return Math.max(Math.min(MIN_PANEL_WIDTH, terminalWidth), Math.min(preferred, terminalWidth, MAX_PANEL_WIDTH))
++  const preferred = width ?? terminalWidth
++  return Math.max(Math.min(MIN_PANEL_WIDTH, terminalWidth), Math.min(preferred, terminalWidth))
+ }
+ 
+ export const statsContentWidth = (width?: number) => Math.max(20, statsPanelWidth(width) - PANEL_PADDING * 2)
+@@ -148,7 +179,8 @@ export const truncateVisible = (text: string, width: number) => {
+   const parts: string[] = []
+   let visible = 0
+   let index = 0
+-  while (index < text.length && visible < width - 1) {
++  const target = width - visibleLength("…")
++  while (index < text.length && visible < target) {
+     const ansi = text.slice(index).match(ANSI_PREFIX_RE)?.[0]
+     if (ansi) {
+       parts.push(ansi)
+@@ -157,8 +189,10 @@ export const truncateVisible = (text: string, width: number) => {
+     }
+     const char = Array.from(text.slice(index))[0]
+     if (!char) break
++    const nextWidth = charWidth(char)
++    if (visible + nextWidth > target) break
+     parts.push(char)
+-    visible++
++    visible += nextWidth
+     index += char.length
+   }
+ 
+@@ -210,12 +244,6 @@ const money = (value: number) => {
+   return `$${value.toFixed(3)}`
+ }
+ 
+-const braille = (value: number, max: number) => {
+-  const chars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+-  if (max <= 0) return chars[0]
+-  return chars[Math.min(chars.length - 1, Math.floor((value / max) * (chars.length - 1)))]
+-}
+-
+ class ChartCanvas {
+   readonly width: number
+   readonly height: number
+@@ -399,15 +427,19 @@ const labelTicks = (labels: string[], width: number) => {
+   const indexes = labels.length <= 4 ? range(labels.length) : [0, Math.floor(labels.length / 3), Math.floor((labels.length * 2) / 3), labels.length - 1]
+   for (const index of indexes) {
+     const label = labels[index]
++    const labelWidth = visibleLength(label)
+     const x = clamp(
+-      Math.round((index / Math.max(1, labels.length - 1)) * (width - 1)) - Math.floor(label.length / 2),
++      Math.round((index / Math.max(1, labels.length - 1)) * (width - 1)) - Math.floor(labelWidth / 2),
+       0,
+-      Math.max(0, width - label.length),
++      Math.max(0, width - labelWidth),
+     )
+-    Array.from(label).forEach((char, offset) => {
+-      const pos = x + offset
++    let pos = x
++    for (const char of Array.from(label)) {
++      const width = charWidth(char)
+       if (pos >= 0 && pos < line.length) line[pos] = char
+-    })
++      if (width === 2 && pos + 1 < line.length) line[pos + 1] = ""
++      pos += width
++    }
+   }
+   return line.join("")
+ }
+@@ -421,8 +453,11 @@ const withYAxis = (plotLines: string[], max: number, formatter: (value: number)
+   return plotLines.map((line, index) => `${paint(padStartVisible(labels[index], width), "muted", ctx)} ${line}`)
+ }
+ 
+-const legend = (series: { label: string; color: ChartColor }[], ctx: RenderContext) =>
+-  series.map((item) => `${paint("●", item.color, ctx)} ${paint(item.label, item.color, ctx)}`).join(paint(" · ", "muted", ctx))
++const legend = (series: { label: string; color: ChartColor; mark?: string }[], ctx: RenderContext) =>
++  series.map((item) => `${paint(item.mark ?? "●", item.color, ctx)} ${paint(item.label, item.color, ctx)}`).join(paint(" · ", "muted", ctx))
++
++const layerLegend = (layers: { label: string; color: ChartColor }[], ctx: RenderContext) =>
++  layers.map((item) => `${paint("■", item.color, ctx)} ${paint(item.label, item.color, ctx)}`).join(paint(" · ", "muted", ctx))
+ 
+ export const metricFormatter = (metric: "tokens" | "cost") => (metric === "cost" ? money : formatNumber)
+ 
+@@ -431,6 +466,7 @@ export const seriesFromUsage = (series: UsageSeries[], metric: "tokens" | "cost"
+     id: item.id,
+     label: item.label,
+     color: chartColors[index % chartColors.length],
++    mark: chartMarks[index % chartMarks.length],
+     total: metric === "cost" ? item.cost : item.tokens.total,
+     points: item.points.map((point) => ({
+       x: point.day,
+@@ -453,6 +489,7 @@ export const dailySeries = (points: { day: number; label: string; value: number
+   id: label,
+   label,
+   color,
++  mark: chartMarks[0],
+   total: points.reduce((acc, point) => acc + point.value, 0),
+   points: points.map((point) => ({ x: point.day, y: point.value, label: point.label, value: point.value })),
+ })
+@@ -469,7 +506,7 @@ export function renderRoundedLineChart(input: {
+   const width = input.width ?? 64
+   const height = input.height ?? 12
+   const formatter = metricFormatter(input.metric ?? "tokens")
+-  const nonEmpty = input.series.filter((item) => item.points.length > 0)
++  const nonEmpty = input.series.filter((item) => item.points.some((point) => point.y > 0))
+   if (nonEmpty.length === 0) return [paint(input.title, "title", ctx, true), paint("No line data for this range.", "muted", ctx)]
+   const bounds = boundsForSeries(nonEmpty)
+   const plotLeft = width > 1 ? 1 : 0
+@@ -484,6 +521,7 @@ export function renderRoundedLineChart(input: {
+     const style: ChartStyle = { color: item.color, priority: 30 + index }
+     const mapped = item.points.map((point) => ({ x: plotLeft + xMap(point.x, bounds, plotWidth), y: yMap(point.y, bounds, plotHeight) }))
+     drawOrthogonalPolyline(canvas, mapped, style)
++    mapped.forEach((point) => canvas.put(point.x, point.y, item.mark ?? chartMarks[index % chartMarks.length], style, style.priority + 5))
+   })
+   const labels = nonEmpty[0]?.points.map((point) => point.label ?? dateLabel(point.x)) ?? []
+   return [
+@@ -534,49 +572,7 @@ export function renderStackedAreaChart(input: {
+     paint(input.title, "title", ctx, true),
+     ...withYAxis(canvas.render(ctx), maxTotal, input.formatter ?? formatNumber, ctx),
+     `${" ".repeat(7)}${paint(labelTicks(labels, width), "muted", ctx)}`,
+-    legend(layers, ctx),
+-  ]
+-}
+-
+-export function renderStreamStackChart(input: {
+-  title: string
+-  layers: ChartLayer[]
+-  labels?: string[]
+-  width?: number
+-  height?: number
+-  color?: ColorMode
+-}) {
+-  const ctx = renderContext(input.color)
+-  const width = input.width ?? 64
+-  const height = input.height ?? 13
+-  const layers = input.layers.filter((layer) => layer.values.some((value) => value > 0))
+-  if (layers.length === 0) return [paint(input.title, "title", ctx, true), paint("No stream data for this range.", "muted", ctx)]
+-  const maxLength = Math.max(...layers.map((layer) => layer.values.length), 0)
+-  const columns = range(width).map((index) => {
+-    const sourceIndex = maxLength <= 1 ? 0 : Math.round((index / Math.max(1, width - 1)) * (maxLength - 1))
+-    return layers.map((layer) => layer.values[sourceIndex] ?? 0)
+-  })
+-  const maxTotal = niceMax(Math.max(...columns.map((column) => column.reduce((acc, value) => acc + value, 0)), 1))
+-  const center = Math.floor(height / 2)
+-  const canvas = new ChartCanvas(width, height)
+-  columns.forEach((column, x) => {
+-    const total = column.reduce((acc, value) => acc + value, 0)
+-    let cursor = center - Math.round((total / maxTotal) * center)
+-    column.forEach((value, layerIndex) => {
+-      const size = value <= 0 ? 0 : Math.max(1, Math.round((value / maxTotal) * (height - 1)))
+-      for (const y of range(size).map((offset) => clamp(cursor + offset, 0, height - 1))) {
+-        canvas.put(x, y, "█", { color: layers[layerIndex].color, priority: 10 + layerIndex })
+-      }
+-      cursor += size
+-    })
+-  })
+-  canvas.horizontal(0, width - 1, center, "─", gridStyle)
+-  const labels = input.labels ?? range(maxLength).map(String)
+-  return [
+-    paint(input.title, "title", ctx, true),
+-    ...canvas.render(ctx),
+-    paint(labelTicks(labels, width), "muted", ctx),
+-    legend(layers, ctx),
++    layerLegend(layers, ctx),
+   ]
+ }
+ 
+@@ -590,11 +586,12 @@ export function renderHeatmap(input: {
+ }) {
+   const ctx = renderContext(input.color)
+   const width = input.width ?? 52
+-  const maxWeeks = Math.max(1, width - 4)
++  // Each day cell is 2 columns wide so the calendar reads naturally.
++  const maxWeeks = Math.max(1, Math.floor((width - 4) / 2))
+   const points = input.points.slice(-maxWeeks * 7)
+   if (points.length === 0) return [paint(input.title, "title", ctx, true), paint(input.emptyLabel ?? "No heatmap data.", "muted", ctx)]
+   const max = safeMax(points.map((point) => point.value))
+-  const levels = [" ", "░", "▒", "▓", "█"]
++  const levels = ["  ", "░░", "▒▒", "▓▓", "██"]
+   const rows = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((label) => `${paint(label, "muted", ctx)} `)
+   const start = new Date(points[0].day)
+   const offset = (start.getDay() + 6) % 7
+@@ -648,6 +645,9 @@ export function renderRankBars(input: {
+   rows: { label: string; value: number; subvalue?: string; color?: ChartColor }[]
+   color?: ColorMode
+   width?: number
++  totalWidth?: number
++  labelWidth?: number
++  subvalueWidth?: number
+   formatter?: (value: number) => string
+ }) {
+   const ctx = renderContext(input.color)
+@@ -656,12 +656,37 @@ export function renderRankBars(input: {
+   if (rows.length === 0) return [paint(input.title, "title", ctx, true), paint("No ranked data.", "muted", ctx)]
+   const max = Math.max(...rows.map((row) => row.value), 1)
+   const formatter = input.formatter ?? formatNumber
++  const valWidth = Math.max(...rows.map((row) => visibleLength(formatter(row.value))), 6)
++  if (input.totalWidth) {
++    const totalWidth = Math.max(20, input.totalWidth)
++    const hasSubvalue = rows.some((row) => row.subvalue)
++    const subvalueWidth = hasSubvalue && totalWidth >= 52 ? Math.min(input.subvalueWidth ?? 12, Math.max(0, totalWidth - 42)) : 0
++    const labelWidth = Math.max(
++      6,
++      Math.min(input.labelWidth ?? 18, Math.max(6, totalWidth - valWidth - (subvalueWidth ? subvalueWidth + 1 : 0) - 10)),
++    )
++    const barWidth = Math.max(1, totalWidth - 2 - 1 - labelWidth - 1 - 1 - valWidth - (subvalueWidth ? subvalueWidth + 1 : 0))
++    return [
++      fitVisible(paint(input.title, "title", ctx, true), totalWidth),
++      ...rows.map((row, index) => {
++        const color = row.color ?? chartColors[index % chartColors.length]
++        const size = Math.max(1, Math.round((row.value / max) * barWidth))
++        const subvalue = subvalueWidth ? ` ${fitVisible(paint(row.subvalue ?? "", "muted", ctx), subvalueWidth)}` : ""
++        return fitVisible(
++          `${paint(String(index + 1).padStart(2), "muted", ctx)} ${padEndVisible(paint(truncateVisible(row.label, labelWidth), "white", ctx, true), labelWidth)} ${paint("█".repeat(size), color, ctx)}${paint("░".repeat(barWidth - size), "grid", ctx)} ${paint(padStartVisible(formatter(row.value), valWidth), "subtitle", ctx)}${subvalue}`,
++          totalWidth,
++        )
++      }),
++    ]
++  }
++  // label(24) + space(1) + bar(width) + space(1) + val(valWidth) + space(1) + subvalue
++  const labelWidth = 24
+   return [
+     paint(input.title, "title", ctx, true),
+     ...rows.map((row, index) => {
+       const color = row.color ?? chartColors[index % chartColors.length]
+       const size = Math.max(1, Math.round((row.value / max) * width))
+-      return `${paint(String(index + 1).padStart(2), "muted", ctx)} ${padEndVisible(paint(row.label.slice(0, 28), "white", ctx, true), 30)} ${paint("█".repeat(size), color, ctx)}${paint("░".repeat(width - size), "grid", ctx)} ${paint(formatter(row.value).padStart(8), "subtitle", ctx)} ${paint(row.subvalue ?? "", "muted", ctx)}`
++      return `${paint(String(index + 1).padStart(2), "muted", ctx)} ${padEndVisible(paint(truncateVisible(row.label, labelWidth), "white", ctx, true), labelWidth)} ${paint("█".repeat(size), color, ctx)}${paint("░".repeat(width - size), "grid", ctx)} ${paint(padStartVisible(formatter(row.value), valWidth), "subtitle", ctx)} ${paint(row.subvalue ?? "", "muted", ctx)}`
+     }),
+   ]
+ }
+@@ -680,106 +705,18 @@ export function renderMatrix(input: {
+   }
+   const max = safeMax(input.values.flat())
+   const shades = [" ", "░", "▒", "▓", "█"]
+-  const header = `${" ".repeat(16)}${input.xLabels.map((label) => paint(label.slice(0, 3).padStart(4), "muted", ctx)).join("")}`
++  const header = `${" ".repeat(16)}${input.xLabels.map((label) => paint(padStartVisible(truncateVisible(label, 3), 4), "muted", ctx)).join("")}`
+   const rows = input.yLabels.map((label, y) => {
+     const cells = input.xLabels.map((_, x) => {
+       const value = input.values[y]?.[x] ?? 0
+       const level = max <= 0 ? 0 : Math.min(shades.length - 1, Math.ceil((value / max) * (shades.length - 1)))
+       return paint(shades[level].repeat(4), chartColors[level % chartColors.length], ctx)
+     })
+-    return `${paint(label.slice(0, 14).padEnd(14), "white", ctx, true)}  ${cells.join("")}`
++    return `${padEndVisible(paint(truncateVisible(label, 14), "white", ctx, true), 14)}  ${cells.join("")}`
+   })
+   return [paint(input.title, "title", ctx, true), header, ...rows]
+ }
+ 
+-export function renderWaterfall(input: {
+-  title: string
+-  rows: { label: string; value: number; color?: ChartColor }[]
+-  color?: ColorMode
+-  width?: number
+-  formatter?: (value: number) => string
+-}) {
+-  const ctx = renderContext(input.color)
+-  const width = input.width ?? 56
+-  const formatter = input.formatter ?? formatNumber
+-  const max = safeMax(input.rows.map((row) => Math.abs(row.value)))
+-  const center = Math.floor(width / 2)
+-  const lines = input.rows.map((row, index) => {
+-    const size = max <= 0 ? 0 : Math.max(1, Math.round((Math.abs(row.value) / max) * center))
+-    const color = row.color ?? (row.value >= 0 ? chartColors[index % chartColors.length] : "red")
+-    const left = row.value < 0 ? `${" ".repeat(center - size)}${paint("█".repeat(size), color, ctx)}` : " ".repeat(center)
+-    const right = row.value >= 0 ? paint("█".repeat(size), color, ctx) : ""
+-    return `${paint(row.label.slice(0, 18).padEnd(18), "white", ctx, true)} ${left}${paint("│", "axis", ctx)}${right.padEnd(center)} ${paint(formatter(row.value), "subtitle", ctx)}`
+-  })
+-  return [paint(input.title, "title", ctx, true), ...lines]
+-}
+-
+-export function renderHorizon(input: {
+-  title: string
+-  series: ChartSeries[]
+-  color?: ColorMode
+-  width?: number
+-  formatter?: (value: number) => string
+-}) {
+-  const ctx = renderContext(input.color)
+-  const width = input.width ?? 64
+-  const rows = input.series.map((series, index) => {
+-    const max = safeMax(series.points.map((point) => point.y))
+-    const values = range(width).map((slot) => {
+-      const source = series.points.length <= 1 ? 0 : Math.round((slot / Math.max(1, width - 1)) * (series.points.length - 1))
+-      return series.points[source]?.y ?? 0
+-    })
+-    const line = values.map((value) => paint(braille(value, max), series.color, ctx)).join("")
+-    return `${padEndVisible(paint(series.label.slice(0, 20), "white", ctx, true), 22)} ${line} ${paint(input.formatter?.(max) ?? formatNumber(max), "muted", ctx)}`
+-  })
+-  if (rows.length === 0) rows.push(paint("No horizon data.", "muted", ctx))
+-  return [paint(input.title, "title", ctx, true), ...rows]
+-}
+-
+-export function renderSmallMultiples(input: {
+-  title: string
+-  series: ChartSeries[]
+-  color?: ColorMode
+-  width?: number
+-  formatter?: (value: number) => string
+-}) {
+-  const ctx = renderContext(input.color)
+-  const width = input.width ?? 24
+-  const rows = input.series.map((series) => {
+-    const max = safeMax(series.points.map((point) => point.y))
+-    const sampled = range(width).map((slot) => {
+-      const source = series.points.length <= 1 ? 0 : Math.round((slot / Math.max(1, width - 1)) * (series.points.length - 1))
+-      return series.points[source]?.y ?? 0
+-    })
+-    return `${padEndVisible(paint(series.label.slice(0, 22), "white", ctx, true), 24)} ${sampled.map((value) => paint(braille(value, max), series.color, ctx)).join("")} ${paint(input.formatter?.(max) ?? formatNumber(max), "muted", ctx)}`
+-  })
+-  if (rows.length === 0) rows.push(paint("No small multiple data.", "muted", ctx))
+-  return [paint(input.title, "title", ctx, true), ...rows]
+-}
+-
+-export function renderCompositionDonut(input: {
+-  title: string
+-  rows: { label: string; value: number; color?: ChartColor }[]
+-  color?: ColorMode
+-  formatter?: (value: number) => string
+-}) {
+-  const ctx = renderContext(input.color)
+-  const rows = input.rows.filter((row) => row.value > 0)
+-  const total = rows.reduce((acc, row) => acc + row.value, 0)
+-  if (total <= 0) return [paint(input.title, "title", ctx, true), paint("No composition data.", "muted", ctx)]
+-  const ring = "◜████◝\n██  ██\n██  ██\n◟████◞".split("\n").map((line, index) => paint(line, chartColors[index % chartColors.length], ctx))
+-  const legendRows = rows.slice(0, 6).map((row, index) => {
+-    const color = row.color ?? chartColors[index % chartColors.length]
+-    const share = ((row.value / total) * 100).toFixed(1)
+-    return `${paint("●", color, ctx)} ${padEndVisible(paint(row.label.slice(0, 24), "white", ctx, true), 26)} ${paint(`${share}%`.padStart(7), "subtitle", ctx)} ${paint(input.formatter?.(row.value) ?? formatNumber(row.value), "muted", ctx)}`
+-  })
+-  const height = Math.max(ring.length, legendRows.length)
+-  return [
+-    paint(input.title, "title", ctx, true),
+-    ...range(height).map((index) => `${padEndVisible(ring[index] ?? "", 10)} ${legendRows[index] ?? ""}`),
+-  ]
+-}
+-
+ export function renderPanel(input: { title?: string; lines: string[]; color?: ColorMode; width?: number }) {
+   const ctx = renderContext(input.color)
+   const content = input.title ? [paint(input.title, "title", ctx, true), ...input.lines] : input.lines
+@@ -790,9 +727,9 @@ export function renderPanel(input: { title?: string; lines: string[]; color?: Co
+   return lines.map((line) => `${palette.panel}${line}${RESET}`).join("\n")
+ }
+ 
+-export function renderTwoColumn(left: string[], right: string[], gap = 4, width = statsContentWidth()) {
++export function renderTwoColumn(left: string[], right: string[], gap = 4, width = statsContentWidth(), leftFraction = 0.5) {
+   const safeGap = Math.max(1, Math.min(gap, 8))
+-  const leftWidth = Math.max(1, Math.floor((width - safeGap) / 2))
++  const leftWidth = Math.max(1, Math.floor((width - safeGap) * Math.min(0.9, Math.max(0.1, leftFraction))))
+   const rightWidth = Math.max(1, width - safeGap - leftWidth)
+   const height = Math.max(left.length, right.length)
+   return range(height).map((index) => `${fitVisible(left[index] ?? "", leftWidth)}${" ".repeat(safeGap)}${fitVisible(right[index] ?? "", rightWidth)}`)
+@@ -838,22 +775,6 @@ export function renderNarrative(input: { title: string; lines: string[]; color?:
+   return [paint(input.title, "title", ctx, true), ...input.lines.map((line) => `${paint("│", "grid", ctx)} ${paint(line, "subtitle", ctx)}`)]
+ }
+ 
+-export function renderGauge(input: {
+-  label: string
+-  value: number
+-  max: number
+-  color?: ColorMode
+-  width?: number
+-  formatter?: (value: number) => string
+-}) {
+-  const ctx = renderContext(input.color)
+-  const width = input.width ?? 32
+-  const ratio = input.max <= 0 ? 0 : clamp(input.value / input.max, 0, 1)
+-  const filled = Math.round(ratio * width)
+-  const bar = `${paint("█".repeat(filled), "green", ctx)}${paint("░".repeat(width - filled), "grid", ctx)}`
+-  return `${paint(input.label, "white", ctx, true)} ${bar} ${paint(input.formatter?.(input.value) ?? formatNumber(input.value), "subtitle", ctx)}`
+-}
+-
+ export function renderSlopeChart(input: {
+   title: string
+   rows: { label: string; start: number; end: number; color?: ChartColor }[]
+@@ -876,7 +797,7 @@ export function renderSlopeChart(input: {
+       return " "
+     }).join("")
+     const color = row.color ?? chartColors[index % chartColors.length]
+-    return `${padEndVisible(paint(row.label.slice(0, 22), "white", ctx, true), 24)} ${paint(line, color, ctx)} ${paint(`${input.formatter?.(row.start) ?? formatNumber(row.start)} → ${input.formatter?.(row.end) ?? formatNumber(row.end)}`, "muted", ctx)}`
++    return `${padEndVisible(paint(truncateVisible(row.label, 22), "white", ctx, true), 24)} ${paint(line, color, ctx)} ${paint(`${input.formatter?.(row.start) ?? formatNumber(row.start)} → ${input.formatter?.(row.end) ?? formatNumber(row.end)}`, "muted", ctx)}`
+   })
+   return [paint(input.title, "title", ctx, true), ...rows]
+ }
+@@ -889,15 +810,20 @@ export function renderPercentStack(input: {
+ }) {
+   const ctx = renderContext(input.color)
+   const width = input.width ?? 48
++  // Reserve space for label(20) + space(1) + total(~8) + space(1) = 30; bar gets the rest
++  const barWidth = Math.max(4, width - 30)
+   const rows = input.rows.map((row) => {
+     const total = row.parts.reduce((acc, part) => acc + part.value, 0)
+     const pieces = row.parts.map((part) => {
+-      const size = total <= 0 ? 0 : Math.round((part.value / total) * width)
++      const size = total <= 0 ? 0 : Math.max(0, Math.round((part.value / total) * barWidth))
+       return paint("█".repeat(size), part.color, ctx)
+     })
+-    return `${padEndVisible(paint(row.label.slice(0, 18), "white", ctx, true), 20)} ${pieces.join("").padEnd(width)} ${paint(formatNumber(total), "muted", ctx)}`
++    return `${padEndVisible(paint(truncateVisible(row.label, 18), "white", ctx, true), 20)} ${padEndVisible(pieces.join(""), barWidth)} ${paint(formatNumber(total), "muted", ctx)}`
+   })
+-  return [paint(input.title, "title", ctx, true), ...rows]
++  // Legend showing each part
++  const allParts = input.rows[0]?.parts ?? []
++  const legendLine = allParts.map((part) => `${paint("■", part.color, ctx)} ${paint(part.label, "muted", ctx)}`).join(paint("  ", "muted", ctx))
++  return [paint(input.title, "title", ctx, true), ...rows, legendLine]
+ }
+ 
+ export function renderDayLabels(points: { label: string }[], width: number, color?: ColorMode) {
+@@ -908,7 +834,7 @@ export function renderDayLabels(points: { label: string }[], width: number, colo
+ export function renderCallout(input: { title: string; body: string; color?: ColorMode; accent?: ChartColor }) {
+   const ctx = renderContext(input.color)
+   const accent = input.accent ?? "yellow"
+-  const width = Math.min(72, statsContentWidth() - 2)
++  const width = Math.max(20, statsContentWidth() - 2)
+   const innerWidth = Math.max(10, width - 2)
+   return [
+     `${paint("╭", accent, ctx)}${paint("─".repeat(width), "grid", ctx)}${paint("╮", accent, ctx)}`,
+diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src/cli/cmd/stats/data.ts
+similarity index 51%
+rename from packages/opencode/src/cli/cmd/stats-data.ts
+rename to packages/opencode/src/cli/cmd/stats/data.ts
+index 73487bd66d8c1654330ed211bc8df6dd644cd577..f914524c8e55d08b090d4151b8ee535e7aca9102 100644
+--- a/packages/opencode/src/cli/cmd/stats-data.ts
++++ b/packages/opencode/src/cli/cmd/stats/data.ts
+@@ -1,5 +1,6 @@
+ import { Effect } from "effect"
+ import { Session } from "@/session/session"
++import type { MessageV2 } from "@/session/message-v2"
+ import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
+ import { NotFoundError } from "@/storage/storage"
+ import { Database, eq } from "@/storage/db"
+@@ -18,11 +19,28 @@ export type TokenTotals = {
+   total: number
+ }
+ 
++export type InputComponentTotals = {
++  system: number
++  instructions: number
++  skills: number
++  toolSchemas: number
++  userMessages: number
++  assistantText: number
++  reasoning: number
++  toolCalls: number
++  toolResults: number
++  attachments: number
++}
++
+ export type UsageTotals = {
+   tokens: TokenTotals
++  components: InputComponentTotals
+   cost: number
+   requests: number
+   assistantCalls: number
++  errors: number
++  aborted: number
++  durationMs: number
+ }
+ 
+ export type UsageGroup = UsageTotals & {
+@@ -64,6 +82,14 @@ export type SessionUsage = UsageTotals & {
+   models: string[]
+ }
+ 
++export type ToolUsage = {
++  id: string
++  count: number
++  inputChars: number
++  outputChars: number
++  contextTokens: number
++}
++
+ export type StatsReport = {
+   totalSessions: number
+   sessionsWithUsage: number
+@@ -75,12 +101,21 @@ export type StatsReport = {
+   total: UsageTotals
+   models: UsageGroup[]
+   providers: UsageGroup[]
++  agents: UsageGroup[]
++  sources: UsageGroup[]
++  statuses: UsageGroup[]
++  projects: UsageGroup[]
+   daily: DailyUsage[]
+   modelSeries: UsageSeries[]
+   providerSeries: UsageSeries[]
++  agentSeries: UsageSeries[]
++  sourceSeries: UsageSeries[]
++  statusSeries: UsageSeries[]
++  projectSeries: UsageSeries[]
+   tokenPartSeries: TokenPartSeries[]
+   sessions: SessionUsage[]
+-  toolUsage: { id: string; count: number }[]
++  toolUsage: ToolUsage[]
++  modelProviderTokens: { providerID: string; modelID: string; tokens: number }[]
+   tokensPerSession: number
+   medianTokensPerSession: number
+ }
+@@ -89,27 +124,56 @@ export type StatsFilter = {
+   days?: number
+   projectFilter?: string
+   currentProject?: Project.Info
++  sessionFilter?: string
++  modelFilter?: string
++  providerFilter?: string
++  sourceFilter?: string
++  agentFilter?: string
++  statusFilter?: string
++  toolFilter?: string
+ }
+ 
+ type UsageEvent = {
+   time: number
+   sessionID: SessionID
++  projectID: string
+   providerID: string
+   modelID: string
++  source: string
++  agent: string
++  status: string
+   tokens: TokenTotals
++  components: InputComponentTotals
+   cost: number
+   requests: number
+   assistantCalls: number
++  errors: number
++  aborted: number
++  durationMs: number
+ }
+ 
+ type SessionAggregate = {
+   session: Session.Info
+   messageCount: number
+-  toolUsage: Record<string, number>
++  toolUsage: Record<string, ToolUsage>
++  toolEvents: ToolUsageEvent[]
+   totalEvents: UsageEvent[]
+   breakdownEvents: UsageEvent[]
+ }
+ 
++type ToolUsageEvent = {
++  time: number
++  sessionID: SessionID
++  projectID: string
++  providerID: string
++  modelID: string
++  source: string
++  agent: string
++  status: string
++  toolID: string
++  contextTokens: number
++}
++
+ type UsageGroupAccumulator = UsageGroup & {
+   sessionIDs: Set<SessionID>
+   providerTotals: Map<string, number>
+@@ -124,11 +188,28 @@ const emptyTokens = (): TokenTotals => ({
+   total: 0,
+ })
+ 
++const emptyComponents = (): InputComponentTotals => ({
++  system: 0,
++  instructions: 0,
++  skills: 0,
++  toolSchemas: 0,
++  userMessages: 0,
++  assistantText: 0,
++  reasoning: 0,
++  toolCalls: 0,
++  toolResults: 0,
++  attachments: 0,
++})
++
+ const emptyUsage = (): UsageTotals => ({
+   tokens: emptyTokens(),
++  components: emptyComponents(),
+   cost: 0,
+   requests: 0,
+   assistantCalls: 0,
++  errors: 0,
++  aborted: 0,
++  durationMs: 0,
+ })
+ 
+ const tokenTotal = (tokens: Omit<TokenTotals, "total">) =>
+@@ -167,15 +248,77 @@ const addTokens = (target: TokenTotals, value: TokenTotals) => {
+   target.total += value.total
+ }
+ 
++const addComponents = (target: InputComponentTotals, value: InputComponentTotals) => {
++  target.system += value.system
++  target.instructions += value.instructions
++  target.skills += value.skills
++  target.toolSchemas += value.toolSchemas
++  target.userMessages += value.userMessages
++  target.assistantText += value.assistantText
++  target.reasoning += value.reasoning
++  target.toolCalls += value.toolCalls
++  target.toolResults += value.toolResults
++  target.attachments += value.attachments
++}
++
+ const addUsage = (target: UsageTotals, event: UsageEvent) => {
+   addTokens(target.tokens, event.tokens)
++  addComponents(target.components, event.components)
+   target.cost += event.cost
+   target.requests += event.requests
+   target.assistantCalls += event.assistantCalls
++  target.errors += event.errors
++  target.aborted += event.aborted
++  target.durationMs += event.durationMs
+ }
+ 
+ const increment = (map: Map<string, number>, key: string, value: number) => map.set(key, (map.get(key) ?? 0) + value)
+ 
++const textMatches = (value: string | undefined, filter: string | undefined) => {
++  if (filter === undefined) return true
++  return (value ?? "").toLowerCase().includes(filter.toLowerCase())
++}
++
++const eventMatches = (event: UsageEvent, input: StatsFilter) =>
++  textMatches(event.modelID, input.modelFilter) &&
++  textMatches(event.providerID, input.providerFilter) &&
++  textMatches(event.source, input.sourceFilter) &&
++  textMatches(event.agent, input.agentFilter) &&
++  textMatches(event.status, input.statusFilter)
++
++const toolEventMatches = (event: ToolUsageEvent, input: StatsFilter) =>
++  textMatches(event.toolID, input.toolFilter) &&
++  textMatches(event.modelID, input.modelFilter) &&
++  textMatches(event.providerID, input.providerFilter) &&
++  textMatches(event.source, input.sourceFilter) &&
++  textMatches(event.agent, input.agentFilter) &&
++  textMatches(event.status, input.statusFilter)
++
++const sessionMatches = (session: Session.Info, input: StatsFilter) =>
++  textMatches(session.id, input.sessionFilter) ||
++  textMatches(session.title, input.sessionFilter) ||
++  textMatches(session.directory, input.sessionFilter)
++
++const getToolUsage = (map: Record<string, ToolUsage>, id: string) => {
++  const existing = map[id]
++  if (existing) return existing
++  const item = { id, count: 0, inputChars: 0, outputChars: 0, contextTokens: 0 }
++  map[id] = item
++  return item
++}
++
++const addToolUsage = (map: Record<string, ToolUsage>, usage: ToolUsage) => {
++  const item = getToolUsage(map, usage.id)
++  item.count += usage.count
++  item.inputChars += usage.inputChars
++  item.outputChars += usage.outputChars
++  item.contextTokens += usage.contextTokens
++}
++
++const addToolContextTokens = (map: Record<string, ToolUsage>, toolID: string, contextTokens: number) => {
++  getToolUsage(map, toolID).contextTokens += contextTokens
++}
++
+ const getGroup = (map: Map<string, UsageGroupAccumulator>, id: string, label: string) => {
+   const existing = map.get(id)
+   if (existing) return existing
+@@ -208,9 +351,13 @@ const finalizeGroups = (map: Map<string, UsageGroupAccumulator>) =>
+       id: group.id,
+       label: group.label,
+       tokens: group.tokens,
++      components: group.components,
+       cost: group.cost,
+       requests: group.requests,
+       assistantCalls: group.assistantCalls,
++      errors: group.errors,
++      aborted: group.aborted,
++      durationMs: group.durationMs,
+       sessions: group.sessionIDs.size,
+       providers: Array.from(group.providerTotals, ([id, tokens]) => ({ id, tokens })).sort((a, b) => b.tokens - a.tokens),
+       models: Array.from(group.modelTotals, ([id, tokens]) => ({ id, tokens })).sort((a, b) => b.tokens - a.tokens),
+@@ -226,6 +373,15 @@ const dayStart = (time: number) => {
+ const dateLabel = (time: number) =>
+   new Date(time).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+ 
++const buildDayBuckets = (start: number, end: number) => {
++  const startDay = dayStart(start)
++  const endDay = dayStart(Math.max(startDay, end))
++  return Array.from({ length: Math.floor((endDay - startDay) / MS_IN_DAY) + 1 }, (_, index) => {
++    const day = startDay + index * MS_IN_DAY
++    return { day, label: dateLabel(day), ...emptyUsage() } satisfies DailyUsage
++  })
++}
++
+ const getDaily = (map: Map<number, DailyUsage>, time: number) => {
+   const day = dayStart(time)
+   const existing = map.get(day)
+@@ -259,12 +415,20 @@ const finalizeSeries = (map: Map<string, Map<number, DailyUsage>>, days: DailyUs
+           addUsage(series, {
+             time: point.day,
+             sessionID: "" as SessionID,
++            projectID: id,
+             providerID: id,
+             modelID: id,
++            source: id,
++            agent: id,
++            status: id,
+             tokens: point.tokens,
++            components: point.components,
+             cost: point.cost,
+             requests: point.requests,
+             assistantCalls: point.assistantCalls,
++            errors: point.errors,
++            aborted: point.aborted,
++            durationMs: point.durationMs,
+           })
+           series.points.push(point)
+           return series
+@@ -323,12 +487,108 @@ const windowDays = (days?: number) => {
+ 
+ const includeTime = (cutoff: number, time: number) => cutoff === 0 || time >= cutoff
+ 
++const rowDuration = (row: { time_created: number; time_completed: number | null }) =>
++  row.time_completed ? Math.max(0, row.time_completed - row.time_created) : 0
++
++const statusCounts = (status: string, requests: number) => ({
++  errors: status === "error" ? requests : 0,
++  aborted: status === "aborted" ? requests : 0,
++})
++
++const stepInputTokens = (part: MessageV2.StepFinishPart) => part.tokens.input + part.tokens.cache.read + part.tokens.cache.write
++
++const componentsFromStep = (part: MessageV2.StepFinishPart) => {
++  if (!part.inputBreakdown || !part.inputChars) return emptyComponents()
++  const inputTokens = stepInputTokens(part)
++  const media = part.inputBreakdown.media
++  const attachmentTokens = media?.tokens
++  const textTokens = attachmentTokens === undefined ? inputTokens : Math.max(0, inputTokens - attachmentTokens)
++  const textChars = media ? Math.max(1, part.inputChars - media.rawChars + media.textChars) : part.inputChars
++  const alloc = (chars: number) => Math.round((chars / textChars) * textTokens)
++  return {
++    system: alloc(part.inputBreakdown.system),
++    instructions: alloc(part.inputBreakdown.instructions),
++    skills: alloc(part.inputBreakdown.skills),
++    toolSchemas: alloc(part.inputBreakdown.tools),
++    userMessages: alloc(part.inputBreakdown.messages.userText),
++    assistantText: alloc(part.inputBreakdown.messages.assistantText),
++    reasoning: alloc(part.inputBreakdown.messages.reasoning),
++    toolCalls: alloc(part.inputBreakdown.messages.toolInput),
++    toolResults: alloc(part.inputBreakdown.messages.toolOutput),
++    attachments: attachmentTokens ?? alloc(part.inputBreakdown.messages.attachments),
++  } satisfies InputComponentTotals
++}
++
++const componentsFromAssistant = (message: MessageV2.WithParts | undefined) => {
++  const components = emptyComponents()
++  for (const part of message?.parts ?? []) {
++    if (part.type !== "step-finish") continue
++    addComponents(components, componentsFromStep(part))
++  }
++  return components
++}
++
++const toolInputChars = (part: MessageV2.ToolPart) => {
++  if (part.state.status === "pending") return part.state.raw.length
++  return JSON.stringify(part.state.input).length
++}
++
++const toolOutputChars = (part: MessageV2.ToolPart) => {
++  if (part.state.status === "completed") return part.state.output.length + (part.state.attachments ?? []).reduce((sum, item) => sum + item.url.length, 0)
++  if (part.state.status === "error") return part.state.error.length
++  return 0
++}
++
++const toolCharsByName = (messages: MessageV2.WithParts[], time: number) => {
++  const result = new Map<string, { inputChars: number; outputChars: number }>()
++  for (const message of messages) {
++    if (message.info.time.created > time) continue
++    for (const part of message.parts) {
++      if (part.type !== "tool") continue
++      const item = result.get(part.tool) ?? { inputChars: 0, outputChars: 0 }
++      item.inputChars += toolInputChars(part)
++      item.outputChars += toolOutputChars(part)
++      result.set(part.tool, item)
++    }
++  }
++  return result
++}
++
++const toolEventsFromAssistant = (input: {
++  message: MessageV2.WithParts | undefined
++  visibleMessages: MessageV2.WithParts[]
++  event: Omit<UsageEvent, "tokens" | "components" | "cost" | "requests" | "assistantCalls" | "errors" | "aborted" | "durationMs">
++}) => {
++  if (!input.message) return []
++  const components = componentsFromAssistant(input.message)
++  const chars = toolCharsByName(input.visibleMessages, input.message.info.time.created)
++  const inputTotal = Array.from(chars.values()).reduce((sum, item) => sum + item.inputChars, 0)
++  const outputTotal = Array.from(chars.values()).reduce((sum, item) => sum + item.outputChars, 0)
++  return Array.from(chars.entries())
++    .map(([toolID, item]) => ({
++      time: input.event.time,
++      sessionID: input.event.sessionID,
++      projectID: input.event.projectID,
++      providerID: input.event.providerID,
++      modelID: input.event.modelID,
++      source: input.event.source,
++      agent: input.event.agent,
++      status: input.event.status,
++      toolID,
++      contextTokens:
++        (inputTotal > 0 ? Math.round((components.toolCalls * item.inputChars) / inputTotal) : 0) +
++        (outputTotal > 0 ? Math.round((components.toolResults * item.outputChars) / outputTotal) : 0),
++    }))
++    .filter((event) => event.contextTokens > 0)
++}
++
+ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (session: Session.Info, cutoff: number) {
+   const svc = yield* Session.Service
+   const messages = yield* svc
+     .messages({ sessionID: session.id })
+     .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([])))
+   const visibleMessages = messages.filter((message) => includeTime(cutoff, message.info.time.created))
++  const messagesByID = new Map(visibleMessages.map((message) => [message.info.id, message]))
+   const requestUsageRows = Database.use((db) =>
+     db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, session.id)).all(),
+   )
+@@ -337,34 +597,57 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+   )
+   const totalEvents: UsageEvent[] = []
+   const breakdownEvents: UsageEvent[] = []
++  const toolEvents: ToolUsageEvent[] = []
+ 
+   if (requestUsageRows.length > 0) {
+     const requestRows = requestUsageRows.filter((row) => includeTime(cutoff, row.time_created))
+     const assistantRows = assistantUsageRows.filter((row) => includeTime(cutoff, row.time_created))
++    const requestsByID = new Map(requestRows.map((row) => [row.request_id, row]))
+ 
+     if (assistantRows.length > 0) {
+       const assistantRequests = new Set(assistantRows.map((row) => row.request_id))
+-      const assistantEvents = assistantRows.map((row) => ({
+-        time: row.time_created,
+-        sessionID: session.id,
+-        providerID: row.provider_id,
+-        modelID: row.model_id,
+-        tokens: rowTokens(row),
+-        cost: row.cost_micros / MICROS,
+-        requests: 0,
+-        assistantCalls: 1,
+-      }))
++      const assistantEvents = assistantRows.map((row) => {
++        const request = requestsByID.get(row.request_id)
++        const message = messagesByID.get(row.assistant_message_id)
++        const event = {
++          time: row.time_created,
++          sessionID: session.id,
++          projectID: session.projectID,
++          providerID: row.provider_id,
++          modelID: row.model_id,
++          source: request?.source ?? "assistant",
++          agent: request?.agent ?? session.agent ?? "unknown",
++          status: row.status,
++          tokens: rowTokens(row),
++          components: componentsFromAssistant(message),
++          cost: row.cost_micros / MICROS,
++          requests: 0,
++          assistantCalls: 1,
++          errors: 0,
++          aborted: 0,
++          durationMs: 0,
++        }
++        toolEvents.push(...toolEventsFromAssistant({ message, visibleMessages, event }))
++        return event
++      })
+       const fallbackRequestEvents = requestRows
+         .filter((row) => !assistantRequests.has(row.request_id))
+         .map((row) => ({
+           time: row.time_created,
+           sessionID: session.id,
++          projectID: session.projectID,
+           providerID: row.provider_id,
+           modelID: row.model_id,
++          source: row.source,
++          agent: row.agent || session.agent || "unknown",
++          status: row.status,
+           tokens: rowTokens(row),
++          components: emptyComponents(),
+           cost: row.cost_micros / MICROS,
+           requests: 1,
+           assistantCalls: row.assistant_count || 1,
++          ...statusCounts(row.status, 1),
++          durationMs: rowDuration(row),
+         }))
+       totalEvents.push(...assistantEvents)
+       totalEvents.push(...fallbackRequestEvents)
+@@ -372,12 +655,19 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+         ...requestRows.filter((row) => assistantRequests.has(row.request_id)).map((row) => ({
+           time: row.time_created,
+           sessionID: session.id,
++          projectID: session.projectID,
+           providerID: row.provider_id,
+           modelID: row.model_id,
++          source: row.source,
++          agent: row.agent || session.agent || "unknown",
++          status: row.status,
+           tokens: emptyTokens(),
++          components: emptyComponents(),
+           cost: 0,
+           requests: 1,
+           assistantCalls: 0,
++          ...statusCounts(row.status, 1),
++          durationMs: rowDuration(row),
+         })),
+       )
+       breakdownEvents.push(...assistantEvents)
+@@ -386,12 +676,19 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+       const requestEvents = requestRows.map((row) => ({
+         time: row.time_created,
+         sessionID: session.id,
++        projectID: session.projectID,
+         providerID: row.provider_id,
+         modelID: row.model_id,
++        source: row.source,
++        agent: row.agent || session.agent || "unknown",
++        status: row.status,
+         tokens: rowTokens(row),
++        components: emptyComponents(),
+         cost: row.cost_micros / MICROS,
+         requests: 1,
+         assistantCalls: row.assistant_count || 1,
++        ...statusCounts(row.status, 1),
++        durationMs: rowDuration(row),
+       }))
+       totalEvents.push(...requestEvents)
+       breakdownEvents.push(...requestEvents)
+@@ -403,27 +700,39 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+       const event = {
+         time: message.info.time.created,
+         sessionID: session.id,
++        projectID: session.projectID,
+         providerID: message.info.providerID,
+         modelID: message.info.modelID,
++        source: "legacy-message",
++        agent: session.agent ?? "unknown",
++        status: "completed",
+         tokens,
++        components: componentsFromAssistant(message),
+         cost: message.info.cost ?? 0,
+         requests: 0,
+         assistantCalls: 1,
++        errors: 0,
++        aborted: 0,
++        durationMs: 0,
+       }
++      toolEvents.push(...toolEventsFromAssistant({ message, visibleMessages, event }))
+       totalEvents.push(event)
+       breakdownEvents.push(event)
+     }
+   }
+ 
+-  const toolUsage: Record<string, number> = {}
++  const toolUsage: Record<string, ToolUsage> = {}
+   for (const message of visibleMessages) {
+     for (const part of message.parts) {
+       if (part.type !== "tool" || !part.tool) continue
+-      toolUsage[part.tool] = (toolUsage[part.tool] ?? 0) + 1
++      const item = getToolUsage(toolUsage, part.tool)
++      item.count++
++      item.inputChars += toolInputChars(part)
++      item.outputChars += toolOutputChars(part)
+     }
+   }
+ 
+-  return { session, messageCount: visibleMessages.length, toolUsage, totalEvents, breakdownEvents } satisfies SessionAggregate
++  return { session, messageCount: visibleMessages.length, toolUsage, toolEvents, totalEvents, breakdownEvents } satisfies SessionAggregate
+ })
+ 
+ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input: StatsFilter = {}) {
+@@ -431,6 +740,7 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+   const sessions = yield* getAllSessions
+   const filteredSessions = sessions
+     .filter((session) => includeTime(cutoff, session.time.updated))
++    .filter((session) => sessionMatches(session, input))
+     .filter((session) => {
+       if (input.projectFilter === undefined) return true
+       if (input.projectFilter === "") return session.projectID === input.currentProject?.id
+@@ -444,20 +754,33 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+   const aggregates = yield* Effect.forEach(filteredSessions, (session) => aggregateSession(session, cutoff), {
+     concurrency: 20,
+   })
++  const filteredAggregates = input.toolFilter === undefined
++    ? aggregates
++    : aggregates.filter((aggregate) => Object.values(aggregate.toolUsage).some((tool) => textMatches(tool.id, input.toolFilter)))
+ 
+   const total = emptyUsage()
+   const daily = new Map<number, DailyUsage>()
+   const modelSeries = new Map<string, Map<number, DailyUsage>>()
+   const providerSeries = new Map<string, Map<number, DailyUsage>>()
++  const agentSeries = new Map<string, Map<number, DailyUsage>>()
++  const sourceSeries = new Map<string, Map<number, DailyUsage>>()
++  const statusSeries = new Map<string, Map<number, DailyUsage>>()
++  const projectSeries = new Map<string, Map<number, DailyUsage>>()
+   const models = new Map<string, UsageGroupAccumulator>()
+   const providers = new Map<string, UsageGroupAccumulator>()
+-  const toolUsage: Record<string, number> = {}
++  const agents = new Map<string, UsageGroupAccumulator>()
++  const sources = new Map<string, UsageGroupAccumulator>()
++  const statuses = new Map<string, UsageGroupAccumulator>()
++  const projects = new Map<string, UsageGroupAccumulator>()
++  const modelProviderTokens = new Map<string, number>()
++  const toolUsage: Record<string, ToolUsage> = {}
+   const sessionsWithUsage: SessionUsage[] = []
+   const sessionTokenTotals: number[] = []
+   let totalMessages = 0
+   let totalTools = 0
+ 
+-  for (const aggregate of aggregates) {
++  for (const aggregate of filteredAggregates) {
++    const matchingTools = Object.values(aggregate.toolUsage).filter((tool) => textMatches(tool.id, input.toolFilter))
+     const sessionUsage: SessionUsage = {
+       id: aggregate.session.id,
+       title: aggregate.session.title,
+@@ -466,7 +789,7 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+       created: aggregate.session.time.created,
+       updated: aggregate.session.time.updated,
+       messages: aggregate.messageCount,
+-      tools: Object.values(aggregate.toolUsage).reduce((acc, count) => acc + count, 0),
++      tools: matchingTools.reduce((acc, tool) => acc + tool.count, 0),
+       providers: [],
+       models: [],
+       ...emptyUsage(),
+@@ -476,21 +799,31 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+ 
+     totalMessages += aggregate.messageCount
+     totalTools += sessionUsage.tools
+-    for (const [tool, count] of Object.entries(aggregate.toolUsage)) {
+-      toolUsage[tool] = (toolUsage[tool] ?? 0) + count
+-    }
++    matchingTools.forEach((tool) => addToolUsage(toolUsage, { ...tool, contextTokens: 0 }))
++    aggregate.toolEvents
++      .filter((event) => toolEventMatches(event, input))
++      .forEach((event) => addToolContextTokens(toolUsage, event.toolID, event.contextTokens))
+ 
+-    for (const event of aggregate.totalEvents) {
++    for (const event of aggregate.totalEvents.filter((event) => eventMatches(event, input))) {
+       addUsage(total, event)
+       addUsage(sessionUsage, event)
+       addUsage(getDaily(daily, event.time), event)
+     }
+ 
+-    for (const event of aggregate.breakdownEvents) {
++    for (const event of aggregate.breakdownEvents.filter((event) => eventMatches(event, input))) {
+       addGroup(models, event.modelID, event.modelID, event)
+       addGroup(providers, event.providerID, event.providerID, event)
++      addGroup(agents, event.agent, event.agent, event)
++      addGroup(sources, event.source, event.source, event)
++      addGroup(statuses, event.status, event.status, event)
++      addGroup(projects, event.projectID, event.projectID, event)
+       addUsage(getSeriesDaily(modelSeries, event.modelID, event.time), event)
+       addUsage(getSeriesDaily(providerSeries, event.providerID, event.time), event)
++      addUsage(getSeriesDaily(agentSeries, event.agent, event.time), event)
++      addUsage(getSeriesDaily(sourceSeries, event.source, event.time), event)
++      addUsage(getSeriesDaily(statusSeries, event.status, event.time), event)
++      addUsage(getSeriesDaily(projectSeries, event.projectID, event.time), event)
++      increment(modelProviderTokens, `${event.providerID}\0${event.modelID}`, event.tokens.total)
+       sessionProviders.add(event.providerID)
+       sessionModels.add(event.modelID)
+     }
+@@ -509,9 +842,13 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+     Date.now(),
+   )
+   const fallbackLatest = filteredSessions.reduce((latest, session) => Math.max(latest, session.time.updated), 0)
+-  const earliest = sortedDaily.at(0)?.day ?? fallbackEarliest
+-  const latest = sortedDaily.at(-1)?.day ?? fallbackLatest
+-  const effectiveDays = windowDays(input.days) ?? Math.max(1, Math.ceil((latest - earliest) / MS_IN_DAY) + 1)
++  const requestedWindow = windowDays(input.days)
++  const latest = requestedWindow ? dayStart(Date.now()) : dayStart((sortedDaily.at(-1)?.day ?? fallbackLatest) || fallbackEarliest)
++  const earliest = requestedWindow
++    ? latest - (requestedWindow - 1) * MS_IN_DAY
++    : dayStart(sortedDaily.at(0)?.day ?? fallbackEarliest)
++  const completeDaily = buildDayBuckets(earliest, latest).map((day) => daily.get(day.day) ?? day)
++  const effectiveDays = completeDaily.length
+   const sortedSessionTotals = sessionTokenTotals.sort((a, b) => a - b)
+   const mid = Math.floor(sortedSessionTotals.length / 2)
+   const medianTokensPerSession =
+@@ -522,7 +859,7 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+         : sortedSessionTotals[mid]
+ 
+   return {
+-    totalSessions: filteredSessions.length,
++    totalSessions: filteredAggregates.length,
+     sessionsWithUsage: sessionsWithUsage.length,
+     totalMessages,
+     totalTools,
+@@ -532,14 +869,25 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+     total,
+     models: finalizeGroups(models),
+     providers: finalizeGroups(providers),
+-    daily: sortedDaily,
+-    modelSeries: finalizeSeries(modelSeries, sortedDaily),
+-    providerSeries: finalizeSeries(providerSeries, sortedDaily),
+-    tokenPartSeries: tokenPartSeries(sortedDaily),
++    agents: finalizeGroups(agents),
++    sources: finalizeGroups(sources),
++    statuses: finalizeGroups(statuses),
++    projects: finalizeGroups(projects),
++    daily: completeDaily,
++    modelSeries: finalizeSeries(modelSeries, completeDaily),
++    providerSeries: finalizeSeries(providerSeries, completeDaily),
++    agentSeries: finalizeSeries(agentSeries, completeDaily),
++    sourceSeries: finalizeSeries(sourceSeries, completeDaily),
++    statusSeries: finalizeSeries(statusSeries, completeDaily),
++    projectSeries: finalizeSeries(projectSeries, completeDaily),
++    tokenPartSeries: tokenPartSeries(completeDaily),
+     sessions: sessionsWithUsage.sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total),
+-    toolUsage: Object.entries(toolUsage)
+-      .map(([id, count]) => ({ id, count }))
+-      .sort((a, b) => b.count - a.count),
++    toolUsage: Object.values(toolUsage)
++      .sort((a, b) => b.contextTokens - a.contextTokens || b.count - a.count),
++    modelProviderTokens: Array.from(modelProviderTokens, ([key, tokens]) => {
++      const [providerID, modelID] = key.split("\0")
++      return { providerID, modelID, tokens }
++    }),
+     tokensPerSession: sessionsWithUsage.length > 0 ? total.tokens.total / sessionsWithUsage.length : 0,
+     medianTokensPerSession,
+   } satisfies StatsReport
+diff --git a/packages/opencode/src/cli/cmd/stats-insights.ts b/packages/opencode/src/cli/cmd/stats/insights.ts
+similarity index 83%
+rename from packages/opencode/src/cli/cmd/stats-insights.ts
+rename to packages/opencode/src/cli/cmd/stats/insights.ts
+index 2fced5262b398f804483b4bc7b6c635846145a89..dc0671daa248786c1ab34d836702437a3740aac1 100644
+--- a/packages/opencode/src/cli/cmd/stats-insights.ts
++++ b/packages/opencode/src/cli/cmd/stats/insights.ts
+@@ -1,11 +1,10 @@
+-import type { DailyUsage, SessionUsage, StatsReport, UsageGroup } from "./stats-data"
+-import type { ColorMode } from "./stats-render"
+-import { formatNumber } from "../format"
++import type { DailyUsage, SessionUsage, StatsReport, UsageGroup } from "./data"
++import type { ColorMode, StatsRenderOptions } from "./render"
++import { formatNumber } from "../../format"
+ import {
+   metricFormatter,
+   renderCallout,
+   renderComparisonTable,
+-  renderGauge,
+   renderHistogram,
+   renderRankBars,
+   renderRoundedLineChart,
+@@ -19,7 +18,8 @@ import {
+   padEndVisible,
+   padStartVisible,
+   type ChartColor,
+-} from "./stats-charts"
++} from "./charts"
++import { renderStatsHeader } from "./render"
+ 
+ export type InsightSeverity = "info" | "good" | "warn" | "risk"
+ 
+@@ -323,7 +323,7 @@ const recommendationRows = (cards: InsightCard[]) =>
+       if (card.id === "cache-efficiency") return [card.title, "Review prompt reuse and cache-friendly system prompt boundaries."]
+       if (card.id === "cost-efficiency") return [card.title, "Inspect expensive models and route routine tasks to lower-cost models."]
+       if (card.id === "session-outlier") return [card.title, "Open the top session and inspect long loops or repeated tool retries."]
+-      if (card.id === "cost-volatility") return [card.title, "Use stats timeline/costs to find burst days before they become habits."]
++      if (card.id === "cost-volatility") return [card.title, "Use stats timeline --metric cost to find burst days before they become habits."]
+       return [card.title, "Investigate this signal with the detailed stats subcommands."]
+     })
+ 
+@@ -428,18 +428,74 @@ function providerMomentumRows(report: StatsReport) {
+   })
+ }
+ 
+-export function renderInsights(report: StatsReport, options: { color?: ColorMode; limit?: number } = {}) {
++const forecastLedgerRows = (forecast: ForecastReport) => [
++  ["daily average", money(forecast.dailyAverage)],
++  ["weekly run-rate", money(forecast.weeklyRunRate)],
++  ["monthly run-rate", money(forecast.monthlyRunRate)],
++  ["projected month-end", money(forecast.projectedMonthEnd)],
++  ["confidence", `${(forecast.confidence * 100).toFixed(0)}%`],
++]
++
++const forecastDetailLines = (report: StatsReport, forecast: ForecastReport, color?: ColorMode) => [
++  "",
++  ...renderTwoColumn(
++    renderRoundedLineChart({
++      title: "Observed daily cost",
++      series: [dailySeries(dailyPointValues(report.daily, "cost"), "pink", "observed cost")],
++      color,
++      metric: "cost",
++      width: halfChartWidth(),
++      height: 10,
++    }),
++    renderRoundedLineChart({
++      title: "Projected month-end spend",
++      series: forecastSeries(forecast),
++      color,
++      metric: "cost",
++      width: halfChartWidth(),
++      height: 10,
++    }),
++    5,
++  ),
++  "",
++  ...renderSlopeChart({
++    title: "Cost slope · first third vs last third",
++    rows: report.providers.slice(0, 8).map((provider) => {
++      const series = report.providerSeries.find((item) => item.id === provider.id)
++      const item = trend(series?.points.map((point) => point.cost) ?? [])
++      return { label: provider.label, start: item.first, end: item.last }
++    }),
++    color,
++    formatter: metricFormatter("cost"),
++  }),
++]
++
++export function renderInsights(report: StatsReport, options: { color?: ColorMode; limit?: number; forecast?: boolean } & StatsRenderOptions = {}) {
+   const cards = buildInsights(report)
+   const forecast = buildForecast(report)
++  const ctx = renderContext(options.color)
++
++  // Sparkline of daily costs
++  const dailyCosts = dailyValues(report.daily, "cost")
++  const maxCost = Math.max(...dailyCosts, 1)
++  const sparkChars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
++  const sparkline = dailyCosts.map((v) => paint(sparkChars[Math.min(sparkChars.length - 1, Math.floor((v / maxCost) * (sparkChars.length - 1)))], v > maxCost * 0.7 ? "red" : v > maxCost * 0.4 ? "yellow" : "green", ctx)).join("")
++
+   const lines = [
+-    ...renderCallout({
+-      title: "opencode stats insights",
+-      body: "Signals, recommendations, and outlier analysis derived from the selected stats range.",
+-      color: options.color,
+-      accent: "cyan",
++    ...renderStatsHeader(report, options, "insights"),
++    // Insight cards — wider value column
++    ...cards.flatMap((card) => {
++      const accent = severityColor[card.severity]
++      const value = card.value ? paint(card.value, accent, ctx, true) : ""
++      const detail = card.detail ? paint(` · ${card.detail}`, "muted", ctx) : ""
++      return [
++        `${paint("●", accent, ctx)} ${padEndVisible(paint(card.title, "white", ctx, true), 30)} ${padStartVisible(value, 14)}${detail}`,
++        `  ${paint(card.body, "subtitle", ctx)}`,
++      ]
+     }),
+     "",
+-    ...renderInsightCards(cards, options.color),
++    // Daily cost sparkline
++    `${paint("Daily cost", "subtitle", ctx, true)}  ${sparkline}  ${paint(`peak ${money(maxCost)}`, "muted", ctx)}`,
+     "",
+     ...renderTwoColumn(
+       renderRankBars({
+@@ -475,68 +531,26 @@ export function renderInsights(report: StatsReport, options: { color?: ColorMode
+     ),
+     "",
+     ...renderTwoColumn(
+-      [renderGauge({ label: "Forecast confidence", value: forecast.confidence, max: 1, color: options.color, width: Math.max(12, halfChartWidth() - 28), formatter: (value) => `${(value * 100).toFixed(0)}%` })],
+-      renderHistogram({ title: "Daily cost variance", values: dailyValues(report.daily, "cost"), color: options.color, width: Math.max(12, halfChartWidth() - 18), formatter: metricFormatter("cost") }),
+-      5,
+-    ),
+-  ]
+-  return renderPanel({ lines, color: options.color })
+-}
+-
+-export function renderForecast(report: StatsReport, options: { color?: ColorMode } = {}) {
+-  const forecast = buildForecast(report)
+-  const costs = dailyPointValues(report.daily, "cost")
+-  const lines = [
+-    ...renderCallout({
+-      title: "opencode stats forecast",
+-      body: "Run-rate projection using active-day averages and observed daily volatility.",
+-      color: options.color,
+-      accent: "pink",
+-    }),
+-    "",
+-    ...renderTwoColumn(
+-      renderRoundedLineChart({
+-        title: "Observed daily cost",
+-        series: [dailySeries(costs, "pink", "observed cost")],
++      renderComparisonTable({
++        title: "Run-rate forecast",
++        headers: ["metric", "value"],
++        rows: [
++          ...forecastLedgerRows(forecast),
++          ["active days", String(dailyCosts.filter((v) => v > 0).length)],
++          ["zero days", String(dailyCosts.filter((v) => v === 0).length)],
++        ],
+         color: options.color,
+-        metric: "cost",
+-        width: halfChartWidth(),
+-        height: 10,
+       }),
+-      renderRoundedLineChart({
+-        title: "Projected month-end spend",
+-        series: forecastSeries(forecast),
++      renderHistogram({
++        title: "Daily cost distribution",
++        values: dailyValues(report.daily, "cost"),
+         color: options.color,
+-        metric: "cost",
+-        width: halfChartWidth(),
+-        height: 10,
++        width: Math.max(12, halfChartWidth() - 18),
++        formatter: metricFormatter("cost"),
+       }),
+       5,
+     ),
+-    "",
+-    ...renderComparisonTable({
+-      title: "Run-rate ledger",
+-      headers: ["metric", "value"],
+-      rows: [
+-        ["daily average", money(forecast.dailyAverage)],
+-        ["weekly run-rate", money(forecast.weeklyRunRate)],
+-        ["monthly run-rate", money(forecast.monthlyRunRate)],
+-        ["projected month-end", money(forecast.projectedMonthEnd)],
+-        ["confidence", `${(forecast.confidence * 100).toFixed(0)}%`],
+-      ],
+-      color: options.color,
+-    }),
+-    "",
+-    ...renderSlopeChart({
+-      title: "Cost slope · first third vs last third",
+-      rows: report.providers.slice(0, 8).map((provider) => {
+-        const series = report.providerSeries.find((item) => item.id === provider.id)
+-        const item = trend(series?.points.map((point) => point.cost) ?? [])
+-        return { label: provider.label, start: item.first, end: item.last }
+-      }),
+-      color: options.color,
+-      formatter: metricFormatter("cost"),
+-    }),
++    ...(options.forecast ? forecastDetailLines(report, forecast, options.color) : []),
+   ]
+   return renderPanel({ lines, color: options.color })
+ }
+diff --git a/packages/opencode/src/cli/cmd/stats/render.ts b/packages/opencode/src/cli/cmd/stats/render.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f3c45238c72e01ac452360732821a2771abf7744
+--- /dev/null
++++ b/packages/opencode/src/cli/cmd/stats/render.ts
+@@ -0,0 +1,872 @@
++import type { DailyUsage, StatsReport, TokenTotals, UsageGroup, UsageSeries } from "./data"
++import { formatNumber } from "../../format"
++import {
++  dailySeries,
++  fitVisible,
++  layersFromTokenParts,
++  metricFormatter,
++  renderCallout,
++  renderComparisonTable,
++  renderHeatmap,
++  renderHistogram,
++  renderMatrix,
++  renderMetricRibbon,
++  renderPercentStack,
++  renderRankBars,
++  renderRoundedLineChart,
++  renderStackedAreaChart,
++  renderTabs,
++  renderTwoColumn,
++  seriesFromUsage,
++  padEndVisible,
++  padStartVisible,
++  statsContentWidth,
++  truncateVisible,
++  type ChartColor,
++  type ChartLayer,
++  type ChartSeries,
++} from "./charts"
++
++export { formatNumber } from "../../format"
++
++const RESET = "\x1b[0m"
++const BOLD = "\x1b[1m"
++const TEXT_RESET = "\x1b[22m\x1b[39m"
++
++const fg = (r: number, g: number, b: number) => `\x1b[38;2;${r};${g};${b}m`
++const bg = (r: number, g: number, b: number) => `\x1b[48;2;${r};${g};${b}m`
++
++const theme = {
++  bg: bg(25, 8, 28),
++  title: fg(224, 222, 226),
++  subtitle: fg(150, 132, 155),
++  muted: fg(122, 106, 130),
++  border: fg(86, 55, 88),
++  sep: fg(96, 80, 98),
++  blue: fg(78, 199, 224),
++  cyan: fg(76, 215, 220),
++  green: fg(82, 205, 126),
++  yellow: fg(224, 186, 76),
++  orange: fg(232, 145, 76),
++  purple: fg(190, 120, 225),
++  pink: fg(230, 120, 175),
++  red: fg(238, 106, 114),
++  white: fg(226, 226, 226),
++}
++
++export type ColorMode = "auto" | "always" | "never"
++export type StatsRenderOptions = {
++  color?: ColorMode
++  limit?: number
++  metric?: "tokens" | "cost"
++  sort?: "cost" | "tokens" | "calls" | "updated"
++  by?: BreakdownDimension
++  heatmap?: boolean
++}
++
++export type BreakdownDimension = "model" | "provider" | "agent" | "source" | "project" | "tool" | "status"
++
++export const useColor = (mode: ColorMode = "auto") => {
++  if (mode === "always") return true
++  if (mode === "never") return false
++  if (process.env.NO_COLOR) return false
++  return Boolean(process.stdout.isTTY)
++}
++
++const color = (text: string, name: keyof typeof theme, enabled: boolean, bold = false) => {
++  if (!enabled) return text
++  return `${bold ? BOLD : ""}${theme[name]}${text}${TEXT_RESET}`
++}
++
++const panel = (lines: string[], enabled: boolean) => {
++  const rows = lines.map((line) => `  ${fitVisible(line, statsContentWidth())}  `)
++  if (!enabled) return rows.join("\n")
++  return rows.map((line) => `${theme.bg}${line}${RESET}`).join("\n")
++}
++
++const dateRange = (report: StatsReport) => {
++  if (report.requestedDays === 0) return "Today"
++  if (report.requestedDays) return `Last ${report.requestedDays} days`
++  if (report.daily.length === 0) return "All time"
++  return `${new Date(report.dateRange.earliest).toLocaleDateString()} - ${new Date(report.dateRange.latest).toLocaleDateString()}`
++}
++
++const money = (value: number) => {
++  if (!Number.isFinite(value)) return "$0.00"
++  if (value >= 100) return `$${value.toFixed(0)}`
++  if (value >= 10) return `$${value.toFixed(1)}`
++  return `$${value.toFixed(4)}`
++}
++
++const percent = (value: number, total: number) => {
++  if (!total) return "0.0%"
++  return `${((value / total) * 100).toFixed(1)}%`
++}
++
++const metricBar = (value: number, max: number, width: number, enabled: boolean, name: keyof typeof theme) => {
++  const filled = max <= 0 ? 0 : Math.round((value / max) * width)
++  return color("█".repeat(filled), name, enabled) + color("░".repeat(Math.max(0, width - filled)), "border", enabled)
++}
++
++const title = (text: string, enabled: boolean) => color(text, "title", enabled, true)
++const muted = (text: string, enabled: boolean) => color(text, "muted", enabled)
++const sep = (enabled: boolean) => color(" · ", "sep", enabled)
++const activityColors = ["blue", "green", "yellow", "purple", "pink"] as const
++
++const fullChartWidth = () => Math.max(38, statsContentWidth() - 8)
++const halfChartWidth = () => Math.max(22, Math.floor((statsContentWidth() - 5) / 2) - 8)
++
++const dailyLabels = (daily: DailyUsage[]) => daily.map((item) => item.label)
++
++const dailyTokenPoints = (report: StatsReport) =>
++  report.daily.map((item) => ({ day: item.day, label: item.label, value: item.tokens.total }))
++
++const dailyCostPoints = (report: StatsReport) =>
++  report.daily.map((item) => ({ day: item.day, label: item.label, value: item.cost }))
++
++const groupRows = (groups: UsageGroup[], metric: "tokens" | "cost", limit: number) =>
++  groups.slice(0, limit).map((group, index) => ({
++    label: group.label,
++    value: metric === "cost" ? group.cost : group.tokens.total,
++    subvalue: `${formatNumber(group.assistantCalls)}c/${formatNumber(group.sessions)}s`,
++    color: ["blue", "green", "yellow", "purple", "pink", "cyan", "orange", "red"][index % 8] as ChartColor,
++  }))
++
++const tokenPartRows = (report: StatsReport) => [
++  {
++    label: "All tokens",
++    parts: [
++      { label: "Input", value: report.total.tokens.input, color: "blue" as ChartColor },
++      { label: "Output", value: report.total.tokens.output + report.total.tokens.reasoning, color: "green" as ChartColor },
++      { label: "Cache Read", value: report.total.tokens.cache.read, color: "yellow" as ChartColor },
++      { label: "Cache Write", value: report.total.tokens.cache.write, color: "purple" as ChartColor },
++    ],
++  },
++]
++
++const modelProviderMatrix = (report: StatsReport) => {
++  const models = report.models.slice(0, 8)
++  const providers = report.providers.slice(0, 6)
++  const joint = new Map(report.modelProviderTokens.map((item) => [`${item.providerID}\0${item.modelID}`, item.tokens]))
++  const values = providers.map((provider) =>
++    models.map((model) => joint.get(`${provider.id}\0${model.id}`) ?? 0),
++  )
++  return { models, providers, values }
++}
++
++const sessionCostValues = (report: StatsReport) => report.sessions.map((session) => session.cost)
++
++const sessionTokenValues = (report: StatsReport) => report.sessions.map((session) => session.tokens.total)
++
++const safeDivide = (value: number, divisor: number) => {
++  if (!divisor || !Number.isFinite(value) || !Number.isFinite(divisor)) return 0
++  return value / divisor
++}
++
++const avgDuration = (durationMs: number, requests: number) => {
++  const seconds = safeDivide(durationMs, requests) / 1000
++  if (seconds >= 60) return `${(seconds / 60).toFixed(1)}m`
++  return `${seconds.toFixed(1)}s`
++}
++
++const cacheShare = (tokens: TokenTotals) => percent(tokens.cache.read + tokens.cache.write, tokens.total)
++const cacheTokens = (tokens: TokenTotals) => tokens.cache.read + tokens.cache.write
++const outputTokens = (tokens: TokenTotals) => tokens.output + tokens.reasoning
++const inputContextTokens = (group: UsageGroup) =>
++  group.components.system +
++  group.components.instructions +
++  group.components.skills +
++  group.components.toolSchemas +
++  group.components.userMessages +
++  group.components.assistantText +
++  group.components.reasoning +
++  group.components.toolCalls +
++  group.components.toolResults +
++  group.components.attachments
++
++const dashboardCallout = (report: StatsReport) => {
++  const topSession = report.sessions[0]
++  if (report.total.errors + report.total.aborted > 0) {
++    return `${formatNumber(report.total.errors + report.total.aborted)} failed or aborted requests in this range; inspect stats insights for wasted-cost signals.`
++  }
++  if (topSession && topSession.cost > report.total.cost * 0.35) {
++    return `${topSession.title || topSession.id} accounts for ${percent(topSession.cost, report.total.cost)} of cost; inspect it with opencode session info -s ${topSession.id}.`
++  }
++  return `Cache is ${cacheShare(report.total.tokens)} of tokens; use stats timeline for daily changes and stats breakdown for attribution.`
++}
++
++const tokenComponentLineSeries = (report: StatsReport): ChartSeries[] =>
++  report.tokenPartSeries
++    .filter((part) => part.total > 0)
++    .map((part, index) => ({
++      id: part.id,
++      label: part.label,
++      color: ["blue", "green", "yellow", "purple"][index % 4] as ChartColor,
++      mark: ["●", "◆", "■", "▲"][index % 4],
++      total: part.total,
++      points: part.points.map((point) => ({ x: point.day, y: point.value, label: point.label, value: point.value })),
++    }))
++
++const sparkline = (values: number[], width: number, enabled: boolean, name: (typeof activityColors)[number]) => {
++  const chars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
++  const max = Math.max(0, ...values.filter(Number.isFinite))
++  const sampled = Array.from({ length: width }, (_, index) => {
++    if (values.length === 0) return 0
++    return values[Math.round((index / Math.max(1, width - 1)) * (values.length - 1))] ?? 0
++  })
++  return sampled.map((value) => color(chars[max <= 0 ? 0 : Math.min(chars.length - 1, Math.floor((value / max) * (chars.length - 1)))], name, enabled)).join("")
++}
++
++const activityRows = (titleText: string, series: UsageSeries[], metric: "tokens" | "cost", limit: number, enabled: boolean) => {
++  const formatter = metricFormatter(metric)
++  const rows = series
++    .filter((item) => (metric === "cost" ? item.cost : item.tokens.total) > 0)
++    .slice(0, limit)
++  return [
++    title(titleText, enabled),
++    ...rows.map((item, index) => {
++      const itemColor = activityColors[index % activityColors.length]
++      const total = metric === "cost" ? item.cost : item.tokens.total
++      const values = item.points.map((point) => metric === "cost" ? point.cost : point.tokens.total)
++      return `${fitVisible(color(item.label, "white", enabled, true), 24)} ${sparkline(values, 14, enabled, itemColor)} ${padStartVisible(formatter(total), 9)}`
++    }),
++  ]
++}
++
++const renderUsageGroupDetails = (input: {
++  title: string
++  groups: UsageGroup[]
++  total: UsageGroup | StatsReport["total"]
++  metric: "tokens" | "cost"
++  limit: number
++  enabled: boolean
++}) => {
++  const maxMetric = Math.max(0, ...input.groups.slice(0, input.limit).map((group) => input.metric === "cost" ? group.cost : group.tokens.total))
++  const maxSessions = Math.max(0, ...input.groups.slice(0, input.limit).map((group) => group.sessions))
++  const width = statsContentWidth()
++  const labelWidth = Math.max(10, Math.min(34, width - 52))
++  const barWidth = Math.max(8, Math.min(42, width - 44))
++  const marks = ["●", "◆", "■", "▲", "◇", "○", "+", "×"]
++  const colors = ["blue", "green", "yellow", "purple", "pink", "cyan", "orange", "red"] as const
++  return [
++    title(input.title, input.enabled),
++    ...input.groups.slice(0, input.limit).flatMap((group, index) => {
++      const groupColor = colors[index % colors.length]
++      const metricValue = input.metric === "cost" ? group.cost : group.tokens.total
++      const shareBase = input.metric === "cost" ? input.total.cost : input.total.tokens.total
++      return [
++        fitVisible(
++          `${padStartVisible(String(index + 1), 2)} ${color(marks[index % marks.length], groupColor, input.enabled)} ${fitVisible(color(group.label, "white", input.enabled, true), labelWidth)} ${padStartVisible(money(group.cost), 9)} ${padStartVisible(`${formatNumber(group.tokens.total)} tok`, 13)} ${padStartVisible(`${formatNumber(group.assistantCalls)} calls`, 11)} ${padStartVisible(percent(metricValue, shareBase), 7)}`,
++          width,
++        ),
++        fitVisible(
++          `   ${metricBar(metricValue, maxMetric, barWidth, input.enabled, groupColor)}  In ${formatNumber(group.tokens.input)} / Out ${formatNumber(outputTokens(group.tokens))} / Cache ${formatNumber(cacheTokens(group.tokens))}`,
++          width,
++        ),
++        fitVisible(
++          `   ${metricBar(group.sessions, maxSessions, barWidth, input.enabled, "border")}  ${formatNumber(group.sessions)} sessions · req ${formatNumber(group.requests)} · cache ${cacheShare(group.tokens)}`,
++          width,
++        ),
++      ]
++    }),
++  ]
++}
++
++const renderInputComponentTable = (by: BreakdownDimension, groups: UsageGroup[], options: StatsRenderOptions, limit: number) => {
++  const rows = groups
++    .filter((group) => inputContextTokens(group) > 0)
++    .slice(0, limit)
++    .map((group) => [
++      truncateVisible(group.label, 18),
++      formatNumber(inputContextTokens(group)),
++      formatNumber(group.components.toolSchemas),
++      formatNumber(group.components.userMessages),
++      formatNumber(group.components.toolResults),
++      formatNumber(group.components.attachments),
++    ])
++  if (rows.length === 0) return []
++  return renderComparisonTable({
++    title: `${breakdownTitle(by)} input context components · est tokens`,
++    headers: [by, "ctx", "schemas", "user", "tool out", "attach"],
++    rows,
++    color: options.color,
++  })
++}
++
++const requestOutcomeLayers = (report: StatsReport): ChartLayer[] => [
++  {
++    id: "completed",
++    label: "Completed",
++    color: "green",
++    values: report.daily.map((day) => Math.max(0, day.requests - day.errors - day.aborted)),
++    total: Math.max(0, report.total.requests - report.total.errors - report.total.aborted),
++  },
++  {
++    id: "errors",
++    label: "Errors",
++    color: "red",
++    values: report.daily.map((day) => day.errors),
++    total: report.total.errors,
++  },
++  {
++    id: "aborted",
++    label: "Aborted",
++    color: "yellow",
++    values: report.daily.map((day) => day.aborted),
++    total: report.total.aborted,
++  },
++]
++
++const breakdownTitle = (by: BreakdownDimension) => {
++  if (by === "model") return "Models"
++  if (by === "provider") return "Providers"
++  if (by === "agent") return "Agents"
++  if (by === "source") return "Sources"
++  if (by === "project") return "Projects"
++  if (by === "status") return "Request status"
++  return "Tools"
++}
++
++const breakdownGroups = (report: StatsReport, by: BreakdownDimension) => {
++  if (by === "model") return report.models
++  if (by === "provider") return report.providers
++  if (by === "agent") return report.agents
++  if (by === "source") return report.sources
++  if (by === "project") return report.projects
++  if (by === "status") return report.statuses
++  return []
++}
++
++const breakdownSeries = (report: StatsReport, by: BreakdownDimension) => {
++  if (by === "model") return report.modelSeries
++  if (by === "provider") return report.providerSeries
++  if (by === "agent") return report.agentSeries
++  if (by === "source") return report.sourceSeries
++  if (by === "project") return report.projectSeries
++  if (by === "status") return report.statusSeries
++  return []
++}
++
++const breakdownRows = (groups: UsageGroup[], report: StatsReport, limit: number) =>
++  groups.slice(0, limit).map((group) => [
++    truncateVisible(group.label, 26),
++    money(group.cost),
++    formatNumber(group.tokens.total),
++    formatNumber(group.requests),
++    formatNumber(group.assistantCalls),
++    percent(group.cost, report.total.cost),
++    money(safeDivide(group.cost, group.requests)),
++  ])
++
++const renderRichHeader = (report: StatsReport, options: StatsRenderOptions, active: string) => {
++  const enabled = useColor(options.color)
++  return [
++    title("opencode stats", enabled),
++    muted(`${dateRange(report)}${sep(enabled)}${report.days} day window${sep(enabled)}${report.sessionsWithUsage}/${report.totalSessions} sessions with usage`, enabled),
++    renderMetricRibbon({
++      color: options.color,
++      metrics: [
++        { label: "Cost", value: money(report.total.cost), color: "pink", detail: `${money(report.total.cost / Math.max(report.days, 1))}/day` },
++        { label: "Tokens", value: formatNumber(report.total.tokens.total), color: "blue", detail: `${formatNumber(report.tokensPerSession)} avg/session` },
++        { label: "Requests", value: formatNumber(report.total.requests), color: "green" },
++        { label: "Cache", value: cacheShare(report.total.tokens), color: "yellow" },
++        { label: "Errors", value: formatNumber(report.total.errors + report.total.aborted), color: "red" },
++      ],
++    }),
++    renderTabs({
++      color: options.color,
++      tabs: ["dashboard", "timeline", "breakdown", "sessions", "insights"].map((label) => ({
++        label,
++        active: label === active,
++      })),
++    }),
++    "",
++  ]
++}
++
++const topGroups = (groups: UsageGroup[], options: StatsRenderOptions) => {
++  const sort = options.sort ?? "cost"
++  const sorted = [...groups].sort((a, b) => {
++    if (sort === "tokens") return b.tokens.total - a.tokens.total
++    if (sort === "calls") return b.assistantCalls - a.assistantCalls
++    return b.cost - a.cost || b.tokens.total - a.tokens.total
++  })
++  return sorted.slice(0, options.limit ?? 8)
++}
++
++export function renderStatsHeader(report: StatsReport, options: StatsRenderOptions, active: string) {
++  return renderRichHeader(report, options, active)
++}
++
++export function renderDashboard(report: StatsReport, options: StatsRenderOptions = {}) {
++  const enabled = useColor(options.color)
++  const topSession = report.sessions[0]
++  const cacheReadPct = percent(report.total.tokens.cache.read, report.total.tokens.total)
++  const inputPct = percent(report.total.tokens.input, report.total.tokens.total)
++  const outputPct = percent(report.total.tokens.output + report.total.tokens.reasoning, report.total.tokens.total)
++  const lines = [
++    ...renderRichHeader(report, options, "dashboard"),
++    ...renderTwoColumn(
++      renderRoundedLineChart({
++        title: "Token components",
++        series: tokenComponentLineSeries(report),
++        color: options.color,
++        metric: "tokens",
++        width: halfChartWidth(),
++        height: 12,
++      }),
++      renderRoundedLineChart({
++        title: "Model mix over time",
++        series: seriesFromUsage(report.modelSeries, "tokens", 5),
++        color: options.color,
++        metric: "tokens",
++        width: halfChartWidth(),
++        height: 12,
++      }),
++      5,
++    ),
++    "",
++    // Two-column: top models + top providers with richer data
++    ...renderTwoColumn(
++      renderComparisonTable({
++        title: "Top models",
++        headers: ["model", "cost", "tokens", "calls", "share"],
++        rows: topGroups(report.models, { ...options, limit: options.limit ?? 6, sort: "tokens" }).map((model) => [
++          truncateVisible(model.label, 20),
++          money(model.cost),
++          formatNumber(model.tokens.total),
++          formatNumber(model.assistantCalls),
++          percent(model.tokens.total, report.total.tokens.total),
++        ]),
++        color: options.color,
++      }),
++      renderComparisonTable({
++        title: "Top providers",
++        headers: ["provider", "cost", "tokens", "calls", "share"],
++        rows: topGroups(report.providers, { ...options, limit: options.limit ?? 6, sort: "cost" }).map((provider) => [
++          truncateVisible(provider.label, 18),
++          money(provider.cost),
++          formatNumber(provider.tokens.total),
++          formatNumber(provider.assistantCalls),
++          percent(provider.cost, report.total.cost),
++        ]),
++        color: options.color,
++      }),
++      5,
++    ),
++    "",
++    ...renderTwoColumn(
++      activityRows("Model activity rows", report.modelSeries, "tokens", 6, enabled),
++      activityRows("Provider trend rows", report.providerSeries, "tokens", 6, enabled),
++      5,
++    ),
++    "",
++    // Three-column: token composition + snapshot + top session
++    ...renderTwoColumn(
++      [
++        ...renderPercentStack({ title: "Token composition", rows: tokenPartRows(report), color: options.color, width: halfChartWidth() }),
++        "",
++        ...renderComparisonTable({
++          title: "Token ledger",
++          headers: ["kind", "tokens", "share"],
++          rows: [
++            ["input", formatNumber(report.total.tokens.input), inputPct],
++            ["output", formatNumber(report.total.tokens.output + report.total.tokens.reasoning), outputPct],
++            ["cache read", formatNumber(report.total.tokens.cache.read), cacheReadPct],
++            ["cache write", formatNumber(report.total.tokens.cache.write), percent(report.total.tokens.cache.write, report.total.tokens.total)],
++          ],
++          color: options.color,
++        }),
++      ],
++      renderComparisonTable({
++        title: "Usage snapshot",
++        headers: ["metric", "value"],
++        rows: [
++          ["cost total", money(report.total.cost)],
++          ["cost / day", money(safeDivide(report.total.cost, report.days))],
++          ["cost / request", money(safeDivide(report.total.cost, report.total.requests))],
++          ["tokens total", formatNumber(report.total.tokens.total)],
++          ["tokens / session", formatNumber(report.tokensPerSession)],
++          ["median session", formatNumber(report.medianTokensPerSession)],
++          ["cache share", cacheShare(report.total.tokens)],
++          ["cache read", cacheReadPct],
++          ["requests", formatNumber(report.total.requests)],
++          ["assistant calls", formatNumber(report.total.assistantCalls)],
++          ["sessions w/ usage", `${report.sessionsWithUsage} / ${report.totalSessions}`],
++          ["avg duration", avgDuration(report.total.durationMs, report.total.requests)],
++          ["failed / aborted", formatNumber(report.total.errors + report.total.aborted)],
++          ["tools used", formatNumber(report.totalTools)],
++          ["top tool", report.toolUsage[0] ? `${report.toolUsage[0].id} (${formatNumber(report.toolUsage[0].count)})` : "—"],
++        ],
++        color: options.color,
++      }),
++      5,
++    ),
++    "",
++    // Top sessions inline
++    title("Top sessions by cost", enabled),
++    ...report.sessions.slice(0, 5).flatMap((session, index) => {
++      const bar = metricBar(session.cost, Math.max(0, ...report.sessions.slice(0, 5).map((s) => s.cost)), 36, enabled, "pink")
++      return [
++        `${padStartVisible(String(index + 1), 2)} ${fitVisible(color(session.title || session.id, "white", enabled, true), 42)} ${padStartVisible(money(session.cost), 9)} ${padStartVisible(formatNumber(session.tokens.total), 8)} tok`,
++        `   ${bar} ${muted(`${session.models.slice(0, 2).join(", ")} · ${formatNumber(session.requests)} req · ${avgDuration(session.durationMs, session.requests)} avg`, enabled)}`,
++      ]
++    }),
++    "",
++    ...renderCallout({
++      title: "Next question",
++      body: dashboardCallout(report),
++      color: options.color,
++      accent: "purple",
++    }),
++  ]
++  return panel(lines, enabled)
++}
++
++export function renderBreakdown(report: StatsReport, options: StatsRenderOptions = {}) {
++  const enabled = useColor(options.color)
++  const by = options.by ?? "model"
++  const groups = breakdownGroups(report, by)
++  const metric = options.metric ?? "tokens"
++  const limit = options.limit ?? 12
++
++  if (by === "tool") {
++    const hasContextTokens = report.toolUsage.some((tool) => tool.contextTokens > 0)
++    const gap = 5
++    const contentWidth = statsContentWidth()
++    const ledgerWidth = Math.min(76, Math.max(42, Math.floor(contentWidth * 0.55)))
++    const rankWidth = Math.max(24, contentWidth - gap - ledgerWidth)
++    const rows = report.toolUsage.slice(0, limit).map((tool, index) => ({
++      label: tool.id,
++      value: hasContextTokens && metric === "tokens" ? tool.contextTokens : tool.count,
++      subvalue: hasContextTokens ? `${formatNumber(tool.count)} calls` : percent(tool.count, report.totalTools),
++      color: ["yellow", "blue", "green", "purple", "pink", "cyan"][index % 6] as ChartColor,
++    }))
++    const tokenTotal = report.toolUsage.reduce((sum, tool) => sum + tool.contextTokens, 0)
++    return panel(
++      [
++        ...renderRichHeader(report, options, "breakdown"),
++        title(`Tool breakdown · ${report.totalTools} total calls · ${formatNumber(tokenTotal)} est context tokens`, enabled),
++        muted("Estimated ctx tokens from step inputBreakdown.", enabled),
++        muted("Allocation uses tool-call/result chars × confirmed input/cache tokens.", enabled),
++        "",
++        ...renderTwoColumn(
++          renderRankBars({
++            title: hasContextTokens && metric === "tokens" ? "Tool context tokens" : "Tool calls",
++            rows,
++            color: options.color,
++            totalWidth: rankWidth,
++            labelWidth: 18,
++            subvalueWidth: 10,
++            formatter: formatNumber,
++          }),
++          renderComparisonTable({
++            title: "Tool ledger",
++            headers: ["tool", "calls", "ctx tok", "in chars", "out chars", "share"],
++            rows: report.toolUsage.slice(0, limit).map((tool) => [
++              truncateVisible(tool.id, 22),
++              formatNumber(tool.count),
++              formatNumber(tool.contextTokens),
++              formatNumber(tool.inputChars),
++              formatNumber(tool.outputChars),
++              hasContextTokens ? percent(tool.contextTokens, tokenTotal) : percent(tool.count, report.totalTools),
++            ]),
++            color: options.color,
++          }),
++          gap,
++          contentWidth,
++          rankWidth / Math.max(1, contentWidth - gap),
++        ),
++      ],
++      enabled,
++    )
++  }
++
++  const topGroup = groups[0]
++  const topShare = topGroup ? percent(metric === "cost" ? topGroup.cost : topGroup.tokens.total, metric === "cost" ? report.total.cost : report.total.tokens.total) : "—"
++  const summaryLine = topGroup
++    ? `${breakdownTitle(by)} · top: ${topGroup.label} (${topShare}) · ${groups.length} total · sorted by ${metric === "cost" ? "cost" : "tokens"}`
++    : `${breakdownTitle(by)} · no data in this range`
++  const ledgerGap = 4
++  const contentWidth = statsContentWidth()
++  const ledgerWidth = Math.min(82, Math.max(42, Math.floor(contentWidth * 0.58)))
++  const rankWidth = Math.max(24, contentWidth - ledgerGap - ledgerWidth)
++
++  const lines = [
++    ...renderRichHeader(report, options, "breakdown"),
++    muted(summaryLine, enabled),
++    "",
++    ...renderRoundedLineChart({
++      title: `${breakdownTitle(by)} over time`,
++      series: seriesFromUsage(breakdownSeries(report, by), metric, Math.min(limit, 8)),
++      color: options.color,
++      metric,
++      width: fullChartWidth(),
++      height: 12,
++    }),
++    "",
++    ...renderUsageGroupDetails({
++      title: `${breakdownTitle(by)} token detail`,
++      groups: topGroups(groups, { ...options, limit, sort: options.sort }),
++      total: report.total,
++      metric,
++      limit,
++      enabled,
++    }),
++    "",
++    ...renderTwoColumn(
++      renderRankBars({
++        title: metric === "cost" ? `Cost by ${by}` : `Tokens by ${by}`,
++        rows: groupRows(groups, metric, limit),
++        color: options.color,
++        totalWidth: rankWidth,
++        labelWidth: 18,
++        subvalueWidth: 9,
++        formatter: metricFormatter(metric),
++      }),
++      renderComparisonTable({
++        title: `${breakdownTitle(by)} ledger`,
++        headers: [by, "cost", "tokens", "calls", "sessions", "share", "$/call"],
++        rows: topGroups(groups, { ...options, limit, sort: options.sort }).map((group) => [
++          truncateVisible(group.label, 22),
++          money(group.cost),
++          formatNumber(group.tokens.total),
++          formatNumber(group.assistantCalls),
++          String(group.sessions),
++          percent(metric === "cost" ? group.cost : group.tokens.total, metric === "cost" ? report.total.cost : report.total.tokens.total),
++          money(safeDivide(group.cost, group.assistantCalls)),
++        ]),
++        color: options.color,
++      }),
++      ledgerGap,
++      contentWidth,
++      rankWidth / Math.max(1, contentWidth - ledgerGap),
++    ),
++    "",
++    // Token composition for this dimension
++    ...renderPercentStack({
++      title: `Token composition across all ${by}s`,
++      rows: tokenPartRows(report),
++      color: options.color,
++      width: Math.min(fullChartWidth(), statsContentWidth() - 4),
++    }),
++  ]
++
++  if (by === "source") {
++    lines.push("", ...renderInputComponentTable(by, groups, options, limit))
++  }
++
++  if (by === "provider") {
++    const matrix = modelProviderMatrix(report)
++    lines.push(
++      "",
++      ...renderMatrix({
++        title: "Provider × model token matrix",
++        xLabels: matrix.models.map((model) => model.label),
++        yLabels: matrix.providers.map((provider) => provider.label),
++        values: matrix.values,
++        color: options.color,
++      }),
++    )
++  }
++
++  return panel(lines, enabled)
++}
++
++export function renderModels(report: StatsReport, options: StatsRenderOptions = {}) {
++  return renderBreakdown(report, { ...options, by: "model" })
++}
++
++export function renderProviders(report: StatsReport, options: StatsRenderOptions = {}) {
++  return renderBreakdown(report, { ...options, by: "provider", metric: options.metric ?? "cost" })
++}
++
++
++export function renderTimeline(report: StatsReport, options: StatsRenderOptions = {}) {
++  const enabled = useColor(options.color)
++  const metric = options.metric ?? "tokens"
++  const mainSeries = metric === "cost"
++    ? [dailySeries(dailyCostPoints(report), "pink", "cost")]
++    : tokenComponentLineSeries(report)
++
++  // Top 5 active days by the chosen metric
++  const sortedDays = [...report.daily]
++    .filter((d) => (metric === "cost" ? d.cost : d.tokens.total) > 0)
++    .sort((a, b) => (metric === "cost" ? b.cost - a.cost : b.tokens.total - a.tokens.total))
++    .slice(0, 5)
++
++  return panel(
++    [
++      ...renderRichHeader(report, options, "timeline"),
++      ...renderRoundedLineChart({
++        title: metric === "cost" ? "Cost per day" : "Token components per day",
++        series: mainSeries,
++        color: options.color,
++        metric,
++        width: fullChartWidth(),
++        height: 12,
++      }),
++      "",
++      ...renderTwoColumn(
++        activityRows("Model activity rows", report.modelSeries, metric, 6, enabled),
++        activityRows("Provider trend rows", report.providerSeries, metric, 6, enabled),
++        5,
++      ),
++      "",
++      ...renderStackedAreaChart({
++        title: "Token component stack by day",
++        layers: layersFromTokenParts(report.tokenPartSeries),
++        labels: dailyLabels(report.daily),
++        color: options.color,
++        width: fullChartWidth(),
++        height: 10,
++      }),
++      "",
++      ...renderStackedAreaChart({
++        title: "Request outcomes by day",
++        layers: requestOutcomeLayers(report),
++        labels: dailyLabels(report.daily),
++        color: options.color,
++        width: fullChartWidth(),
++        height: 7,
++        formatter: formatNumber,
++      }),
++      ...(options.heatmap === false
++        ? []
++        : [
++          "",
++          ...renderHeatmap({
++            title: metric === "cost" ? "Cost heatmap · calendar view" : "Token heatmap · calendar view",
++            points: metric === "cost" ? dailyCostPoints(report) : dailyTokenPoints(report),
++            color: options.color,
++            width: Math.min(Math.floor(statsContentWidth() * 0.7), statsContentWidth()),
++            formatter: metricFormatter(metric),
++          }),
++        ]),
++      "",
++      ...renderTwoColumn(
++        renderComparisonTable({
++          title: "Timeline ledger",
++          headers: ["metric", "value"],
++          rows: [
++            ["period", `${report.days} days`],
++            ["daily avg cost", money(safeDivide(report.total.cost, report.days))],
++            ["daily avg tokens", formatNumber(safeDivide(report.total.tokens.total, report.days))],
++            ["peak day cost", money(Math.max(0, ...report.daily.map((d) => d.cost)))],
++            ["peak day tokens", formatNumber(Math.max(0, ...report.daily.map((d) => d.tokens.total)))],
++            ["requests", formatNumber(report.total.requests)],
++            ["errors", formatNumber(report.total.errors)],
++            ["aborted", formatNumber(report.total.aborted)],
++            ["error rate", percent(report.total.errors + report.total.aborted, report.total.requests)],
++            ["avg duration", avgDuration(report.total.durationMs, report.total.requests)],
++            ["cache read share", percent(report.total.tokens.cache.read, report.total.tokens.total)],
++          ],
++          color: options.color,
++        }),
++        renderComparisonTable({
++          title: `Top ${sortedDays.length} active days`,
++          headers: ["date", metric === "cost" ? "cost" : "tokens", "req", "cache%"],
++          rows: sortedDays.map((d) => [
++            d.label,
++            metric === "cost" ? money(d.cost) : formatNumber(d.tokens.total),
++            formatNumber(d.requests),
++            percent(d.tokens.cache.read, d.tokens.total),
++          ]),
++          color: options.color,
++        }),
++        5,
++      ),
++      "",
++      muted(`Use --metric cost to switch to cost trend. Active days: ${report.daily.filter((d) => d.tokens.total > 0).length} of ${report.days}.`, enabled),
++    ],
++    enabled,
++  )
++}
++
++export function renderSessions(report: StatsReport, options: StatsRenderOptions = {}) {
++  const enabled = useColor(options.color)
++  const sort = options.sort ?? "cost"
++  const sessions = [...report.sessions]
++    .sort((a, b) => {
++      if (sort === "tokens") return b.tokens.total - a.tokens.total
++      if (sort === "updated") return b.updated - a.updated
++      if (sort === "calls") return b.assistantCalls - a.assistantCalls
++      return b.cost - a.cost || b.tokens.total - a.tokens.total
++    })
++    .slice(0, options.limit ?? 20)
++  const maxCost = Math.max(0, ...sessions.map((session) => session.cost))
++  const maxTokens = Math.max(0, ...sessions.map((session) => session.tokens.total))
++
++  // Per-session stats
++  const sessionCosts = report.sessions.map((s) => s.cost)
++  const sessionTokens = report.sessions.map((s) => s.tokens.total)
++  const p50Cost = sessionCosts.slice().sort((a, b) => a - b)[Math.floor(sessionCosts.length / 2)] ?? 0
++  const p95Cost = sessionCosts.slice().sort((a, b) => a - b)[Math.floor(sessionCosts.length * 0.95)] ?? 0
++  const p50Tokens = sessionTokens.slice().sort((a, b) => a - b)[Math.floor(sessionTokens.length / 2)] ?? 0
++
++  const lines = [
++    ...renderRichHeader(report, options, "sessions"),
++    ...renderTwoColumn(
++      renderHistogram({
++        title: "Session cost distribution",
++        values: sessionCostValues(report),
++        color: options.color,
++        width: Math.max(12, halfChartWidth() - 18),
++        formatter: metricFormatter("cost"),
++      }),
++      renderHistogram({
++        title: "Session token distribution",
++        values: sessionTokenValues(report),
++        color: options.color,
++        width: Math.max(12, halfChartWidth() - 18),
++        formatter: formatNumber,
++      }),
++      5,
++    ),
++    "",
++    ...renderTwoColumn(
++      renderComparisonTable({
++        title: "Session statistics",
++        headers: ["metric", "value"],
++        rows: [
++          ["sessions with usage", String(report.sessionsWithUsage)],
++          ["total sessions", String(report.totalSessions)],
++          ["p50 cost", money(p50Cost)],
++          ["p95 cost", money(p95Cost)],
++          ["max cost", money(maxCost)],
++          ["p50 tokens", formatNumber(p50Tokens)],
++          ["max tokens", formatNumber(maxTokens)],
++          ["avg req / session", (safeDivide(report.total.requests, report.sessionsWithUsage)).toFixed(1)],
++          ["avg calls / session", (safeDivide(report.total.assistantCalls, report.sessionsWithUsage)).toFixed(1)],
++          ["avg duration", avgDuration(report.total.durationMs, report.total.requests)],
++        ],
++        color: options.color,
++      }),
++      renderComparisonTable({
++        title: "Top tools",
++        headers: ["tool", "calls", "share"],
++        rows: report.toolUsage.slice(0, 8).map((tool) => [
++          truncateVisible(tool.id, 20),
++          formatNumber(tool.count),
++          percent(tool.count, report.totalTools),
++        ]),
++        color: options.color,
++      }),
++      5,
++    ),
++    "",
++    title(`Session leaderboard · sorted by ${sort}`, enabled),
++    ...sessions.flatMap((session, index) => {
++      const cacheRatio = percent(session.tokens.cache.read, session.tokens.total)
++      const bar = metricBar(session.cost, maxCost, 36, enabled, "pink")
++      return [
++        `${padStartVisible(String(index + 1), 2)} ${fitVisible(color(session.title || session.id, "white", enabled, true), 46)} ${padStartVisible(money(session.cost), 9)} ${padStartVisible(formatNumber(session.tokens.total), 8)} tok`,
++        `   ${bar} ${muted(`${session.models.slice(0, 2).join(", ") || "?"} · ${formatNumber(session.requests)} req · ${formatNumber(session.assistantCalls)} calls · ${avgDuration(session.durationMs, session.requests)} avg · cache ${cacheRatio}`, enabled)}`,
++      ]
++    }),
++    "",
++    muted("Run opencode session info -s <ID> for per-session model/provider token breakdown.", enabled),
++  ]
++  if (sessions.length === 0) lines.push(muted("No session usage data for this range.", enabled))
++  return panel(lines, enabled)
++}
+diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/opencode/test/cli/stats-render-width.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a54a87e428f7ac22b1aa68af3b6a7ca3962279d
+--- /dev/null
++++ b/packages/opencode/test/cli/stats-render-width.test.ts
+@@ -0,0 +1,199 @@
++import { describe, expect, test } from "bun:test"
++import type { SessionID } from "../../src/session/schema"
++import type { InputComponentTotals, StatsReport, TokenTotals, UsageTotals } from "../../src/cli/cmd/stats/data"
++import { renderBreakdown, renderDashboard, renderSessions } from "../../src/cli/cmd/stats/render"
++import { fitVisible, truncateVisible, visibleLength } from "../../src/cli/cmd/stats/charts"
++
++const day = 86_400_000
++const start = Date.UTC(2026, 3, 27)
++
++const tokens = (value: number): TokenTotals => ({
++  input: value,
++  output: value / 2,
++  reasoning: 0,
++  cache: { read: value * 3, write: value / 10 },
++  total: value + value / 2 + value * 3 + value / 10,
++})
++
++const components = (): InputComponentTotals => ({
++  system: 0,
++  instructions: 0,
++  skills: 0,
++  toolSchemas: 0,
++  userMessages: 0,
++  assistantText: 0,
++  reasoning: 0,
++  toolCalls: 0,
++  toolResults: 0,
++  attachments: 0,
++})
++
++const usage = (value: number, cost: number, requests: number, calls: number, errors = 0, durationMs = 0): UsageTotals => ({
++  tokens: tokens(value),
++  components: components(),
++  cost,
++  requests,
++  assistantCalls: calls,
++  errors,
++  aborted: 0,
++  durationMs,
++})
++
++const addUsage = (items: UsageTotals[]): UsageTotals =>
++  items.reduce(
++    (acc, item) => ({
++      tokens: {
++        input: acc.tokens.input + item.tokens.input,
++        output: acc.tokens.output + item.tokens.output,
++        reasoning: acc.tokens.reasoning + item.tokens.reasoning,
++        cache: {
++          read: acc.tokens.cache.read + item.tokens.cache.read,
++          write: acc.tokens.cache.write + item.tokens.cache.write,
++        },
++        total: acc.tokens.total + item.tokens.total,
++      },
++      components: components(),
++      cost: acc.cost + item.cost,
++      requests: acc.requests + item.requests,
++      assistantCalls: acc.assistantCalls + item.assistantCalls,
++      errors: acc.errors + item.errors,
++      aborted: acc.aborted + item.aborted,
++      durationMs: acc.durationMs + item.durationMs,
++    }),
++    usage(0, 0, 0, 0),
++  )
++
++const report = (): StatsReport => {
++  const daily = [20, 80, 12, 160, 35, 200].map((value, index) => ({
++    day: start + index * day,
++    label: `5月${index + 1}`,
++    ...usage(value * 1_000_000, value / 4, value, value * 3, index === 1 ? 2 : 0, value * 60_000),
++  }))
++  const total = addUsage(daily)
++  const group = (id: string, multiplier: number) => ({
++    id,
++    label: id,
++    ...usage(total.tokens.input * multiplier, total.cost * multiplier, Math.round(total.requests * multiplier), Math.round(total.assistantCalls * multiplier), 0, total.durationMs * multiplier),
++    sessions: Math.max(1, Math.round(8 * multiplier)),
++    providers: [],
++    models: [],
++  })
++  const part = (id: "input" | "output" | "cacheRead" | "cacheWrite", label: string, pick: (input: TokenTotals) => number) => ({
++    id,
++    label,
++    points: daily.map((item) => ({ day: item.day, label: item.label, value: pick(item.tokens) })),
++    total: daily.reduce((sum, item) => sum + pick(item.tokens), 0),
++  })
++  const series = (item: ReturnType<typeof group>) => ({
++    ...item,
++    points: daily.map((point) => ({
++      ...point,
++      ...usage(point.tokens.input * (item.id.includes("claude") ? 1 : 0.35), point.cost * (item.id.includes("claude") ? 1 : 0.35), point.requests, point.assistantCalls),
++    })),
++  })
++
++  return {
++    totalSessions: 8,
++    sessionsWithUsage: 6,
++    totalMessages: 40,
++    totalTools: 120,
++    days: daily.length,
++    requestedDays: 0,
++    dateRange: { earliest: start, latest: start + (daily.length - 1) * day },
++    total,
++    models: [group("claude-opus-4-6", 0.6), group("gpt-5.5", 0.4)],
++    providers: [group("DaXiao Codex", 0.7), group("本地提供商", 0.3)],
++    agents: [group("build", 1)],
++    sources: [group("prompt", 1)],
++    statuses: [group("completed", 1)],
++    projects: [group("本地项目", 1)],
++    daily,
++    modelSeries: [series(group("claude-opus-4-6", 0.6)), series(group("gpt-5.5", 0.4))],
++    providerSeries: [series(group("DaXiao Codex", 0.7)), series(group("本地提供商", 0.3))],
++    agentSeries: [series(group("build", 1))],
++    sourceSeries: [series(group("prompt", 1))],
++    statusSeries: [series(group("completed", 1))],
++    projectSeries: [series(group("本地项目", 1))],
++    tokenPartSeries: [
++      part("input", "Input", (item) => item.input),
++      part("output", "Output + Reasoning", (item) => item.output + item.reasoning),
++      part("cacheRead", "Cache Read", (item) => item.cache.read),
++      part("cacheWrite", "Cache Write", (item) => item.cache.write),
++    ],
++    sessions: [
++      {
++        id: "ses_cjk" as SessionID,
++        title: "分支与dev分支合并冲突检测",
++        projectID: "project",
++        directory: "/tmp/project",
++        created: start,
++        updated: start + day,
++        messages: 12,
++        tools: 8,
++        providers: ["anthropic"],
++        models: ["claude-opus-4-6", "deepseek-v4-pro"],
++        ...usage(70_000_000, 30, 12, 90, 1, 600_000),
++      },
++      {
++        id: "ses_long" as SessionID,
++        title: "README文档更新与中文本地化",
++        projectID: "project",
++        directory: "/tmp/project",
++        created: start,
++        updated: start + day * 2,
++        messages: 8,
++        tools: 5,
++        providers: ["openai"],
++        models: ["gpt-5.5"],
++        ...usage(20_000_000, 3, 6, 20, 0, 400_000),
++      },
++    ],
++    toolUsage: [
++      { id: "apply_patch", count: 70, inputChars: 1200, outputChars: 2400, contextTokens: 800 },
++      { id: "bash", count: 50, inputChars: 900, outputChars: 1800, contextTokens: 600 },
++    ],
++    modelProviderTokens: [{ providerID: "DaXiao Codex", modelID: "claude-opus-4-6", tokens: 1000 }],
++    tokensPerSession: total.tokens.total / 6,
++    medianTokensPerSession: 20_000_000,
++  }
++}
++
++const withColumns = (columns: number, run: () => void) => {
++  const original = Object.getOwnPropertyDescriptor(process.stdout, "columns")
++  Object.defineProperty(process.stdout, "columns", { value: columns, configurable: true })
++  try {
++    run()
++  } finally {
++    if (original) Object.defineProperty(process.stdout, "columns", original)
++  }
++}
++
++describe("stats render width", () => {
++  test("counts CJK text by terminal display columns", () => {
++    expect(visibleLength("中文abc")).toBe(7)
++    expect(visibleLength(fitVisible("中文", 6))).toBe(6)
++    expect(visibleLength(truncateVisible("中文abc", 5))).toBe(5)
++  })
++
++  test("keeps CJK-heavy dashboard and session output fixed-width", () => {
++    for (const columns of [80, 120]) {
++      withColumns(columns, () => {
++        for (const output of [renderDashboard(report(), { color: "always" }), renderSessions(report(), { color: "always" })]) {
++          const widths = new Set(output.split("\n").map(visibleLength))
++          expect(widths).toEqual(new Set([columns - 2]))
++        }
++      })
++    }
++  })
++
++  test("keeps breakdown rank bars from being double-truncated", () => {
++    withColumns(140, () => {
++      for (const output of [renderBreakdown(report(), { color: "never", by: "tool" }), renderBreakdown(report(), { color: "never", by: "source" })]) {
++        const widths = new Set(output.split("\n").map(visibleLength))
++        expect(widths).toEqual(new Set([138]))
++        expect(output).not.toContain("ctx tok ·")
++        expect(output).not.toContain("…")
++      }
++    })
++  })
++})

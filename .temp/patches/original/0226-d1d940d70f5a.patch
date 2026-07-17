@@ -1,0 +1,2881 @@
+From d1d940d70f5a8d9f2b42500cccd7541d02e0e892 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Mon, 25 May 2026 19:26:29 +0800
+Subject: [PATCH] feat: add design document for opencode Windows Sandbox
+ migration
+
+- Introduced a comprehensive design document outlining the migration strategy for integrating a Windows Sandbox into the opencode shell security model.
+- Detailed the architecture, including the new enforcement layer, sandbox policy builder, and backend selection.
+- Defined the scope of the initial implementation focusing on the `bash` tool and avoiding global changes to `ChildProcessSpawner`.
+- Analyzed the current opencode security model and identified gaps in OS-level enforcement.
+- Proposed a phased rollout plan to implement the sandbox features incrementally.
+
+diff --git a/docs/codex-sandbox-windows-design.md b/docs/codex-sandbox-windows-design.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..4cf58df785cf3dc8b8d348ca461fe4f1e5603a0a
+--- /dev/null
++++ b/docs/codex-sandbox-windows-design.md
+@@ -0,0 +1,1392 @@
++## Assistant (Auto · GPT-5.5 · 170.4s)
++
++**结论**
++`codex-rs/windows-sandbox-rs` 的 Windows sandbox 不是一个简单的“命令前面套一个 sandbox.exe”的模型，而是一套多层组合：
++
++- 上层：Codex core 根据权限策略决定是否进入 Windows sandbox。
++- 中层：Windows sandbox 后端把权限策略转换成 Windows 可执行的“用户身份 + 受限 token + 文件 ACL + 网络规则”。
++- 下层：真正运行命令时，要么由当前进程直接用 restricted token 启动子进程，要么先登录专用 sandbox 用户，再通过 `codex-command-runner.exe` 做 IPC 启动和流式 I/O。
++- 权限 enforcement 的核心不是单点机制，而是组合机制：Windows local user、restricted token restricting SIDs、capability-like SID、NTFS DACL allow/deny ACE、防火墙/WFP、环境变量降级、私有 desktop、job object。
++
++下面按顶层到低层梳理。
++
++**源码定位**
++关键目录：
++
++```text
++.temp/codex/codex-rs/windows-sandbox-rs/
++```
++
++关键二进制：
++
++```text
++codex-windows-sandbox-setup
++codex-command-runner
++```
++
++关键模块：
++
++```text
++windows-sandbox-rs/src/lib.rs
++windows-sandbox-rs/src/setup.rs
++windows-sandbox-rs/src/identity.rs
++windows-sandbox-rs/src/spawn_prep.rs
++windows-sandbox-rs/src/token.rs
++windows-sandbox-rs/src/process.rs
++windows-sandbox-rs/src/elevated_impl.rs
++windows-sandbox-rs/src/elevated/ipc_framed.rs
++windows-sandbox-rs/src/elevated/runner_client.rs
++windows-sandbox-rs/src/bin/command_runner/win.rs
++windows-sandbox-rs/src/bin/setup_main/win.rs
++windows-sandbox-rs/src/unified_exec/
++```
++
++上层接入点：
++
++```text
++core/src/exec.rs
++core/src/unified_exec/process_manager.rs
++core/src/windows_sandbox.rs
++sandboxing/src/manager.rs
++protocol/src/config_types.rs
++```
++
++**一、最顶层：Codex 如何决定启用 Windows Sandbox**
++Windows sandbox 的开关不是由 `windows-sandbox-rs` 自己决定，而是由 Codex core 的权限模型决定。
++
++配置枚举在：
++
++```rust
++pub enum WindowsSandboxLevel {
++    Disabled,
++    RestrictedToken,
++    Elevated,
++}
++```
++
++位置：`protocol/src/config_types.rs`
++
++含义：
++
++```text
++Disabled          不用 Windows sandbox
++RestrictedToken   使用 legacy/unelevated restricted-token 后端
++Elevated          使用 elevated sandbox user + command runner 后端
++```
++
++选择逻辑在 `core/src/windows_sandbox.rs`：
++
++- `windows.sandbox = "elevated"` -> `WindowsSandboxLevel::Elevated`
++- `windows.sandbox = "unelevated"` -> `WindowsSandboxLevel::RestrictedToken`
++- 如果没有显式配置，则看 feature flags：
++  - `WindowsSandboxElevated` -> `Elevated`
++  - `WindowsSandbox` -> `RestrictedToken`
++  - 否则 `Disabled`
++
++然后 `sandboxing/src/manager.rs` 根据运行时权限判断是否需要平台 sandbox：
++
++```text
++PermissionProfile
++        |
++        v
++FileSystemSandboxPolicy + NetworkSandboxPolicy
++        |
++        v
++SandboxManager::select_initial(...)
++        |
++        v
++SandboxType::WindowsRestrictedToken
++```
++
++注意名字叫 `WindowsRestrictedToken`，但它只是上层统一的 Windows sandbox 类型。真正后端可能是：
++
++```text
++RestrictedToken legacy backend
++Elevated backend
++```
++
++是否用 elevated 后端由 `core/src/exec.rs` 再判断：
++
++```rust
++proxy_enforced || matches!(sandbox_level, WindowsSandboxLevel::Elevated)
++```
++
++也就是说：
++
++- 配置为 elevated 时，用 elevated 后端。
++- 即使配置是 restricted-token，只要有 managed network/proxy enforcement，也会强制走 elevated 后端，因为网络隔离依赖专用 sandbox 用户身份。
++
++**二、整体抽象架构图**
++```text
+++--------------------------------------------------------------------------------+
++|                                Codex Frontend / API                             |
++|                                                                                |
++|  user tool call / app-server RPC / unified exec request                         |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|                                  codex-core                                     |
++|                                                                                |
++|  PermissionProfile                                                             |
++|      -> FileSystemSandboxPolicy                                                |
++|      -> NetworkSandboxPolicy                                                   |
++|                                                                                |
++|  SandboxManager chooses SandboxType::WindowsRestrictedToken                     |
++|                                                                                |
++|  WindowsSandboxLevel: Disabled | RestrictedToken | Elevated                     |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|                         Windows Sandbox Adapter Layer                           |
++|                                                                                |
++|  core/src/exec.rs                                                              |
++|  core/src/unified_exec/process_manager.rs                                      |
++|                                                                                |
++|  decides backend:                                                              |
++|    - legacy restricted-token backend                                           |
++|    - elevated sandbox-user runner backend                                      |
+++-----------------------------+--------------------------+-----------------------+
++                              |                          |
++                              v                          v
+++------------------------------------------+  +----------------------------------+
++| Legacy / Unelevated Backend              |  | Elevated Backend                 |
++|                                          |  |                                  |
++| Parent creates restricted token directly |  | Parent logs into sandbox user    |
++| Parent applies some ACLs                 |  | Parent talks to runner via pipes |
++| Parent starts child directly             |  | Runner creates restricted token  |
++|                                          |  | Runner starts child              |
+++-----------------------------+------------+  +----------------+-----------------+
++                              |                            |
++                              v                            v
+++--------------------------------------------------------------------------------+
++|                              Windows OS Primitives                              |
++|                                                                                |
++|  CreateRestrictedToken                                                         |
++|  CreateProcessAsUserW                                                          |
++|  CreateProcessWithLogonW                                                       |
++|  NTFS DACL / ACE                                                               |
++|  Local users/groups                                                            |
++|  Windows Firewall / WFP                                                        |
++|  Named pipes                                                                   |
++|  ConPTY / anonymous pipes                                                      |
++|  Job objects                                                                   |
++|  Private desktop                                                               |
+++--------------------------------------------------------------------------------+
++```
++
++**三、命令是如何进入 sandbox 的**
++从用户角度看，Codex 收到的是一个普通命令：
++
++```text
++command: ["powershell.exe", "-Command", "..."]
++cwd: C:\workspace
++env: {...}
++permission_profile: read-only / workspace-write / managed split policy
++timeout
++tty/stdin/private desktop
++```
++
++Codex core 会把它变成 `ExecRequest`。在 Windows 上，如果 sandbox 类型是 `WindowsRestrictedToken`，不会直接 `spawn_child_async`，而是进入 Windows sandbox 执行路径。
++
++有两类运行入口：
++
++```text
++1. shell tool / captured exec
++   core/src/exec.rs -> exec_windows_sandbox(...)
++
++2. unified exec / interactive session
++   core/src/unified_exec/process_manager.rs
++   -> spawn_windows_sandbox_session_legacy(...)
++   -> spawn_windows_sandbox_session_elevated_for_permission_profile(...)
++```
++
++两类入口共享同一套底层权限模型，但 I/O 形态不同：
++
++```text
++captured exec:
++  等命令结束，收集 stdout/stderr，返回一次性结果
++
++unified exec:
++  返回 SpawnedProcess，支持持续 stdin/stdout/stderr、resize、terminate
++```
++
++**四、两条后端：legacy 与 elevated**
++Windows sandbox 有两个后端，这一点很重要。
++
++```text
+++----------------------------+-----------------------------------------------+
++| 后端                       | 特点                                          |
+++----------------------------+-----------------------------------------------+
++| RestrictedToken / legacy   | 不创建专用用户，直接基于当前用户 token 派生  |
++|                            | restricted token，然后 CreateProcessAsUserW   |
+++----------------------------+-----------------------------------------------+
++| Elevated                   | 创建/使用专用本地用户，父进程用 named pipe   |
++|                            | 与 codex-command-runner.exe 通信，runner 再   |
++|                            | 派生 restricted token 并启动真实命令          |
+++----------------------------+-----------------------------------------------+
++```
++
++legacy 后端能力较弱：
++
++- 可以做 workspace-write。
++- 可以做 deny-write carveout。
++- 不能完整强制 split read restrictions。
++- 不能完整强制 deny-read。
++- 网络禁用主要靠环境变量和工具 stub，例如 proxy 指向 `127.0.0.1:9`、`CARGO_NET_OFFLINE=1`、`NPM_CONFIG_OFFLINE=true`、禁用 `ssh/scp` 等。
++
++elevated 后端能力更完整：
++
++- 使用专用 Windows 本地用户。
++- 能用用户身份做防火墙/WFP 网络隔离。
++- 能用 setup helper 提前配置 read/write/deny ACL。
++- 能用 command runner 在 sandbox 用户下派生受限 token。
++- 支持更复杂的 managed permission profile。
++
++**五、Elevated 后端的总体数据流**
++这是最完整、最核心的路径。
++
++```text
+++-------------------+
++| codex-core         |
++| exec request       |
+++---------+---------+
++          |
++          v
+++-------------------------------+
++| prepare_elevated_spawn_context |
++|                               |
++| - normalize env               |
++| - compute read/write roots    |
++| - compute deny-read/write     |
++| - require sandbox creds       |
++| - ensure setup/refresh        |
++| - compute capability SIDs     |
+++---------------+---------------+
++                |
++                v
+++------------------------------------+
++| parent process                      |
++|                                    |
++| create named pipes                 |
++| launch codex-command-runner.exe    |
++| as sandbox user                    |
++| using CreateProcessWithLogonW      |
+++---------------+--------------------+
++                |
++                | length-prefixed JSON frames
++                v
+++------------------------------------+
++| codex-command-runner.exe            |
++| running as CodexSandboxOffline      |
++| or CodexSandboxOnline               |
++|                                    |
++| receives SpawnRequest              |
++| derives restricted token           |
++| starts actual command              |
+++---------------+--------------------+
++                |
++                v
+++------------------------------------+
++| actual user command                 |
++|                                    |
++| restricted token                   |
++| ACL-gated filesystem               |
++| firewall/WFP-gated network         |
++| optional private desktop           |
++| job object lifetime control        |
+++------------------------------------+
++```
++
++**六、Elevated 后端接收指令的协议**
++父进程和 `codex-command-runner.exe` 之间不是用 stdin 文本协议，而是用 named pipe 上的 length-prefixed JSON frame。
++
++协议定义在：
++
++```text
++windows-sandbox-rs/src/elevated/ipc_framed.rs
++```
++
++frame 格式：
++
++```text
++[u32 little-endian length][JSON payload]
++```
++
++最大 frame 长度：
++
++```rust
++8 * 1024 * 1024
++```
++
++协议版本：
++
++```rust
++IPC_PROTOCOL_VERSION = 2
++```
++
++消息类型：
++
++```text
++parent -> runner:
++  spawn_request
++  stdin
++  close_stdin
++  resize
++  terminate
++
++runner -> parent:
++  spawn_ready
++  output
++  exit
++  error
++```
++
++核心 `SpawnRequest` 内容：
++
++```text
++command
++cwd
++env
++permission_profile
++permission_profile_cwd
++codex_home
++real_codex_home
++cap_sids
++timeout_ms
++tty
++stdin_open
++use_private_desktop
++```
++
++抽象图：
++
++```text
+++-------------------------+                  +-----------------------------+
++| Parent Codex Process    |                  | codex-command-runner.exe     |
+++-------------------------+                  +-----------------------------+
++| create pipe-in          |                  | open --pipe-in               |
++| create pipe-out         |                  | open --pipe-out              |
++| DACL: only sandbox user |                  | runs as sandbox user         |
+++------------+------------+                  +--------------+--------------+
++             |                                              |
++             | SpawnRequest                                 |
++             +--------------------------------------------->|
++             |                                              |
++             | SpawnReady                                   |
++             |<---------------------------------------------+
++             |                                              |
++             | Stdin / CloseStdin / Resize / Terminate      |
++             +--------------------------------------------->|
++             |                                              |
++             | Output(stdout/stderr) / Exit / Error         |
++             |<---------------------------------------------+
++```
++
++Pipe 安全点：
++
++- pipe name 随机 nonce。
++- pipe DACL 只允许 sandbox user 连接。
++- parent 连接后校验 named pipe client PID 是否等于刚启动的 runner PID。
++- 如果握手失败，parent 会终止 runner，避免遗留进程。
++
++对应模块：
++
++```text
++elevated/runner_pipe.rs
++elevated/runner_client.rs
++```
++
++**七、Runner 如何启动真实命令**
++`codex-command-runner.exe` 入口在：
++
++```text
++windows-sandbox-rs/src/bin/command_runner/win.rs
++```
++
++它的职责很明确：
++
++```text
++1. 读取 --pipe-in / --pipe-out
++2. 打开 parent 创建的 named pipes
++3. 读取 SpawnRequest
++4. 根据 permission_profile 决定 token 模式
++5. 根据 cap_sids 创建 restricted token
++6. 选择 pipes 或 ConPTY
++7. 调用 CreateProcessAsUserW 启动真实命令
++8. 把 stdout/stderr 编码成 Output frame 发回 parent
++9. 接收 stdin/resize/terminate
++10. wait 子进程，发送 Exit frame
++```
++
++Runner 内部执行图：
++
++```text
+++-------------------------------+
++| codex-command-runner.exe      |
++| running as sandbox user       |
+++---------------+---------------+
++                |
++                v
+++-------------------------------+
++| read SpawnRequest             |
++|                               |
++| command/cwd/env/permissions   |
++| cap_sids/tty/timeout          |
+++---------------+---------------+
++                |
++                v
+++-------------------------------+
++| resolve token mode            |
++|                               |
++| no writable roots             |
++|   -> ReadOnlyCapability       |
++| writable roots exist          |
++|   -> WritableRootsCapability  |
+++---------------+---------------+
++                |
++                v
+++-------------------------------+
++| CreateRestrictedToken         |
++|                               |
++| restricting SIDs include:     |
++| - capability SIDs             |
++| - sandbox user SID            |
++| - logon SID                   |
++| - Everyone SID                |
+++---------------+---------------+
++                |
++                v
+++-------------------------------+
++| spawn actual process          |
++|                               |
++| tty=true  -> ConPTY           |
++| tty=false -> anonymous pipes  |
++|                               |
++| CreateProcessAsUserW          |
+++---------------+---------------+
++                |
++                v
+++-------------------------------+
++| stream I/O over framed IPC    |
++| wait/timeout/terminate        |
++| send exit                     |
+++-------------------------------+
++```
++
++Timeout 逻辑：
++
++- runner 用 `WaitForSingleObject(process, timeout)`。
++- 超时则 `TerminateProcess`。
++- exit code 设置为 `128 + 64`。
++- 上层 core 最终会把 timeout 映射成 shell-style `124`。
++
++生命周期控制：
++
++- runner 会创建 `JobObject`，设置 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`。
++- runner 退出或 job handle 关闭时，尽量杀掉子进程树。
++
++**八、权限模型：从 Codex 策略到 Windows enforcement**
++Codex 的上层策略不是 Windows 原生格式。它先变成：
++
++```text
++PermissionProfile
++        |
++        v
++FileSystemSandboxPolicy
++NetworkSandboxPolicy
++```
++
++Windows 专用解析在：
++
++```text
++windows-sandbox-rs/src/resolved_permissions.rs
++```
++
++核心抽象：
++
++```rust
++ResolvedWindowsSandboxPermissions {
++    file_system: FileSystemSandboxPolicy,
++    network: NetworkSandboxPolicy,
++}
++```
++
++它负责：
++
++- 把 `:workspace_roots` 这种符号路径绑定到实际 `cwd`。
++- 计算 readable roots。
++- 计算 writable roots。
++- 处理 Windows 的 `TEMP` / `TMP`。
++- 判断是否需要 network block。
++- 判断 token 是 readonly 还是 writable-roots。
++- 拒绝 Windows sandbox 无法保证的权限，比如 full-disk write。
++
++抽象图：
++
++```text
+++---------------------------+
++| PermissionProfile         |
++|                           |
++| read-only                 |
++| workspace-write           |
++| managed split policy      |
+++-------------+-------------+
++              |
++              v
+++---------------------------+
++| Runtime permissions       |
++|                           |
++| FileSystemSandboxPolicy   |
++| NetworkSandboxPolicy      |
+++-------------+-------------+
++              |
++              v
+++-------------------------------+
++| ResolvedWindowsSandboxPermissions |
+++-------------+-----------------+
++              |
++              +--------------------------+
++              |                          |
++              v                          v
+++------------------------+     +--------------------------+
++| readable_roots         |     | writable_roots           |
++|                        |     |                          |
++| helper bin             |     | workspace cwd            |
++| C:\Windows             |     | extra writable roots     |
++| Program Files          |     | TEMP/TMP when allowed    |
++| explicit read roots    |     | read-only subpath denies |
+++------------------------+     +--------------------------+
++              |
++              v
+++-------------------------------+
++| Windows token mode            |
++|                               |
++| no writable roots: readonly   |
++| has writable roots: writable  |
+++-------------------------------+
++```
++
++**九、Capability SID 的设计**
++Windows 没有 Linux Landlock 那种直接传策略的接口，所以这里模拟出 capability 的概念。
++
++模块：
++
++```text
++windows-sandbox-rs/src/cap.rs
++```
++
++它会在 `CODEX_HOME/cap_sid` 持久化随机 SID 字符串：
++
++```text
++readonly
++workspace
++workspace_by_cwd
++writable_root_by_path
++```
++
++这些 SID 不一定对应真实 Windows account。它们作为 restricted token 的 restricting SIDs 使用，并被写入文件 DACL。
++
++核心思想：
++
++```text
++token 里携带某 capability SID
++        +
++文件/目录 DACL 允许该 capability SID
++        =
++该 token 才能访问该路径
++```
++
++workspace-write 下会为每个 root 生成独立 SID：
++
++```text
++workspace root C:\repo
++  -> S-1-5-21-a-b-c-d
++
++extra writable root D:\tmp
++  -> S-1-5-21-e-f-g-h
++```
++
++这样旧的 writable root ACL 不会自动扩大新命令的权限，因为当前 token 只携带本次允许 root 的 cap_sids。
++
++图：
++
++```text
+++-----------------------------+
++| CODEX_HOME/cap_sid          |
+++-----------------------------+
++| readonly SID                |
++| workspace_by_cwd            |
++| writable_root_by_path       |
+++--------------+--------------+
++               |
++               v
+++-----------------------------+
++| SpawnRequest.cap_sids       |
++| only SIDs needed this run   |
+++--------------+--------------+
++               |
++               v
+++-----------------------------+
++| CreateRestrictedToken       |
++| restricting SIDs = cap_sids |
+++--------------+--------------+
++               |
++               v
+++-----------------------------+
++| NTFS DACL                   |
++| path grants/denies cap SID  |
+++-----------------------------+
++```
++
++**十、文件权限如何 enforce**
++文件权限主要靠 NTFS DACL。
++
++模块：
++
++```text
++acl.rs
++deny_read_acl.rs
++deny_read_state.rs
++workspace_acl.rs
++setup_main/win.rs
++```
++
++文件权限分成几类：
++
++```text
++read roots:
++  给 sandbox group 补 read/execute ACE
++
++write roots:
++  给 sandbox group 和 root capability SID 补 read/write/execute/delete ACE
++
++deny-write paths:
++  给对应 writable root capability SID 加 deny-write ACE
++
++deny-read paths:
++  给 sandbox group 或 capability SID 加 deny-read ACE，并持久化状态
++
++protected workspace children:
++  对 .codex / .agents 加 deny-write ACE
++```
++
++为什么 setup 要提前创建 missing deny paths？
++
++因为 deny ACE 必须挂在真实 filesystem object 上。如果路径不存在，sandboxed command 可能先在 writable parent 下创建它，再绕过 deny。代码会把 missing deny-read/deny-write path 先 materialize 成目录，再加 deny ACE。
++
++deny-read 的特殊点：
++
++```text
++deny-read ACL 是持久状态
++```
++
++位置：
++
++```text
++.sandbox/deny_read_acl_state.json
++```
++
++原因是 sandbox 子进程或孙进程可能在 parent 退出后继续存在，所以不能在每次命令结束后立刻撤 ACL。实现采用 reconcile 模式：
++
++```text
++1. 先应用本次 desired deny-read ACL
++2. 再撤销同一 principal 旧的、这次不需要的 deny-read ACL
++3. 更新 deny_read_acl_state.json
++```
++
++文件权限图：
++
++```text
+++-------------------------------+
++| Resolved permissions          |
+++---------------+---------------+
++                |
++                v
+++-------------------------------+
++| Compute paths                 |
++|                               |
++| read_roots                    |
++| write_roots                   |
++| deny_read_paths               |
++| deny_write_paths              |
+++---------------+---------------+
++                |
++                v
+++-------------------------------+
++| Setup / refresh applies ACLs  |
+++---------------+---------------+
++                |
++                +-----------------------------+
++                |                             |
++                v                             v
+++-----------------------------+   +-----------------------------+
++| Allow ACE                   |   | Deny ACE                    |
++|                             |   |                             |
++| sandbox group read/execute  |   | deny read on secrets        |
++| capability write root       |   | deny write on .git/.codex   |
+++-----------------------------+   +-----------------------------+
++                |
++                v
+++-------------------------------+
++| Child process access check    |
++|                               |
++| sandbox user identity         |
++| restricted token SIDs         |
++| NTFS DACL                     |
+++-------------------------------+
++```
++
++**十一、网络权限如何 enforce**
++网络 enforcement 分两层，legacy 与 elevated 差别很大。
++
++Legacy restricted-token 后端：
++
++- 不使用专用 sandbox user。
++- 网络禁用主要通过环境变量和工具 stub。
++- `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 指向 `127.0.0.1:9`。
++- `NO_PROXY=localhost,127.0.0.1,::1`。
++- `PIP_NO_INDEX=1`。
++- `NPM_CONFIG_OFFLINE=true`。
++- `CARGO_NET_OFFLINE=true`。
++- `GIT_SSH_COMMAND=cmd /c exit 1`。
++- PATH 前置 denybin，拦截 `ssh` / `scp`。
++
++对应模块：
++
++```text
++env.rs
++spawn_prep.rs
++```
++
++Elevated 后端：
++
++- 根据网络策略选择 sandbox identity：
++  - network disabled 或 proxy enforced -> `CodexSandboxOffline`
++  - network enabled -> `CodexSandboxOnline`
++- offline 用户被 Windows Firewall/WFP 规则限制。
++- online 用户不走 offline block。
++
++对应模块：
++
++```text
++setup.rs
++identity.rs
++setup_main/win/firewall.rs
++wfp.rs
++wfp/filter_specs.rs
++```
++
++offline 网络隔离包括：
++
++```text
++Windows Firewall:
++  - block non-loopback outbound
++  - block loopback UDP
++  - block loopback TCP except allowed proxy ports
++  - optional allow local binding mode
++
++WFP:
++  - block ICMP
++  - block DNS 53
++  - block DNS-over-TLS 853
++  - block SMB 445/139
++```
++
++网络图：
++
++```text
+++-----------------------------+
++| NetworkSandboxPolicy        |
+++--------------+--------------+
++               |
++               v
+++-----------------------------+
++| SandboxNetworkIdentity      |
++|                             |
++| Offline if network blocked  |
++| Online if network enabled   |
+++--------------+--------------+
++               |
++      +--------+---------+
++      |                  |
++      v                  v
+++-------------+    +----------------+
++| Offline user|    | Online user    |
++|             |    |                |
++| Firewall    |    | no offline     |
++| WFP filters |    | block rules    |
+++-------------+    +----------------+
++```
++
++**十二、Setup 机制：为什么需要一个 elevated helper**
++完整的 elevated sandbox 需要改系统级状态：
++
++- 创建本地用户。
++- 创建本地组。
++- 配置 Windows Firewall。
++- 安装 WFP filters。
++- 修改文件/目录 ACL。
++- 锁定 `.sandbox`、`.sandbox-bin`、`.sandbox-secrets`。
++- 写入 DPAPI 加密的 sandbox 用户密码。
++
++这些需要管理员权限，所以有独立二进制：
++
++```text
++codex-windows-sandbox-setup.exe
++```
++
++父进程通过 `ShellExecuteExW` + `runas` 提权启动它，并传入 base64 JSON payload。
++
++payload 主要字段：
++
++```text
++version
++offline_username
++online_username
++codex_home
++command_cwd
++read_roots
++write_roots
++deny_read_paths
++deny_write_paths
++proxy_ports
++allow_local_binding
++real_user
++mode
++refresh_only
++```
++
++setup artifact：
++
++```text
++CODEX_HOME/
++  cap_sid
++  .sandbox/
++    setup_marker.json
++    deny_read_acl_state.json
++    codex-sandbox.log
++  .sandbox-bin/
++    codex-command-runner-<version>.exe
++  .sandbox-secrets/
++    sandbox_users.json
++```
++
++setup 流程图：
++
++```text
+++------------------------------+
++| require_logon_sandbox_creds  |
+++--------------+---------------+
++               |
++               v
+++------------------------------+
++| check setup_marker.json      |
++| check sandbox_users.json     |
++| check version/proxy drift    |
+++--------------+---------------+
++               |
++      missing/stale?
++               |
++       +-------+-------+
++       |               |
++       v               v
+++-------------+   +-------------------+
++| run setup   |   | use existing creds|
++| elevated    |   +-------------------+
+++------+------+             |
++       |                    |
++       v                    v
+++------------------------------+
++| always run setup refresh     |
++| non-elevated helper          |
++| refresh ACLs for current run |
+++--------------+---------------+
++               |
++               v
+++------------------------------+
++| return SandboxCreds          |
++| username + DPAPI password    |
+++------------------------------+
++```
++
++setup helper 内部：
++
++```text
+++-----------------------------------------+
++| codex-windows-sandbox-setup.exe         |
+++-------------------+---------------------+
++                    |
++                    v
+++-----------------------------------------+
++| decode base64 JSON payload              |
++| validate SETUP_VERSION                  |
+++-------------------+---------------------+
++                    |
++                    v
+++-----------------------------------------+
++| if full setup:                          |
++| - create CodexSandboxUsers group        |
++| - create CodexSandboxOffline user       |
++| - create CodexSandboxOnline user        |
++| - generate random passwords             |
++| - DPAPI protect passwords               |
++| - write .sandbox-secrets/sandbox_users  |
++| - write setup_marker                    |
++| - hide users                            |
+++-------------------+---------------------+
++                    |
++                    v
+++-----------------------------------------+
++| network setup                           |
++| - firewall offline block                |
++| - proxy allowlist                       |
++| - WFP filters                           |
+++-------------------+---------------------+
++                    |
++                    v
+++-----------------------------------------+
++| filesystem setup                        |
++| - apply deny-read synchronously         |
++| - spawn read ACL helper                 |
++| - grant write roots                     |
++| - apply deny-write carveouts            |
++| - lock sandbox dirs                     |
+++-----------------------------------------+
++```
++
++**十三、为什么还有 read ACL helper**
++`setup_main/win.rs` 里有 `ReadAclsOnly` 模式。full setup 不直接同步完成所有 read grant，而是可能启动同一个 setup exe 的 read-only helper 模式。
++
++原因从实现看主要是：
++
++- read roots 可能很多。
++- read grant 是可刷新、可并发的问题。
++- 用 named mutex `Local\CodexSandboxReadAcl` 避免多个 read ACL helper 同时跑。
++- deny-read 必须同步应用在命令启动前，而 read allow grant 可以由 helper 刷新。
++
++与 runner 的关系：
++
++- command runner 启动时会探测 read ACL mutex。
++- 如果 read ACL helper 正在运行，runner 会给 cwd 创建 junction，避免 ACL helper 改 cwd 相关 ACL 时影响启动路径。
++- 逻辑在 `bin/command_runner/win/cwd_junction.rs`。
++
++**十四、真实命令如何被创建**
++最终调用 Windows API 的地方在：
++
++```text
++process.rs
++```
++
++核心 API：
++
++```rust
++CreateProcessAsUserW
++```
++
++它接收：
++
++```text
++restricted token
++argv command line
++cwd
++environment block
++stdio handles
++private desktop setting
++```
++
++stdio 两种方式：
++
++```text
++tty=true:
++  ConPTY
++  stdout/stderr 合并为 PTY output
++  支持 resize
++
++tty=false:
++  anonymous pipes
++  stdout/stderr 分离
++```
++
++private desktop：
++
++- 默认配置里 `windows.sandbox_private_desktop` 默认为 true。
++- 代码会创建 `CodexSandboxDesktop-<nonce>`。
++- 给当前 logon SID 授权 desktop access。
++- 子进程的 `STARTUPINFO.lpDesktop` 指向该 private desktop。
++- 目的是减少 GUI/desktop 对主用户交互面的影响。
++
++**十五、Captured exec 与 Unified exec 的差异**
++Captured exec：
++
++```text
++core/src/exec.rs
++  -> exec_windows_sandbox(...)
++  -> run_windows_sandbox_capture_for_permission_profile_elevated(...)
++  -> parent waits for runner output frames
++  -> returns stdout/stderr/exit_code/timed_out
++```
++
++图：
++
++```text
+++-------------+       +---------+       +--------+
++| shell tool  | ----> | capture | ----> | result |
+++-------------+       +---------+       +--------+
++```
++
++Unified exec：
++
++```text
++core/src/unified_exec/process_manager.rs
++  -> spawn_windows_sandbox_session_elevated_for_permission_profile(...)
++  -> returns SpawnedProcess
++  -> ProcessDriver wraps pipes/IPC
++  -> caller can write stdin, read stream, resize, terminate
++```
++
++图：
++
++```text
+++------------------+
++| unified exec open|
+++---------+--------+
++          |
++          v
+++------------------+
++| SpawnedProcess   |
++| session handle   |
+++---------+--------+
++          |
++          +-----------------+
++          |                 |
++          v                 v
+++----------------+   +----------------+
++| live stdout    |   | live stdin     |
++| live stderr    |   | resize/kill    |
+++----------------+   +----------------+
++```
++
++Elevated unified exec 复用 same runner IPC，只是 parent 不是一次性收集 output，而是把 frame 转成 `ProcessDriver` 的 channels。
++
++**十六、Legacy 后端的逻辑**
++legacy 后端在：
++
++```text
++unified_exec/backends/legacy.rs
++lib.rs windows_impl
++spawn_prep.rs
++```
++
++它没有专用 sandbox 用户，也没有 command runner。流程：
++
++```text
+++-----------------------------+
++| parent process              |
+++--------------+--------------+
++               |
++               v
+++-----------------------------+
++| parse legacy SandboxPolicy  |
+++--------------+--------------+
++               |
++               v
+++-----------------------------+
++| normalize env               |
++| maybe apply no-network env  |
+++--------------+--------------+
++               |
++               v
+++-----------------------------+
++| create capability SIDs      |
++| create restricted token     |
+++--------------+--------------+
++               |
++               v
+++-----------------------------+
++| apply write ACLs / denies   |
+++--------------+--------------+
++               |
++               v
+++-----------------------------+
++| CreateProcessAsUserW child  |
+++-----------------------------+
++```
++
++legacy 后端限制：
++
++- 如果不是 full-disk read，会拒绝。
++- 如果有 deny-read，会拒绝。
++- 如果 split writable root 语义无法映射成 legacy policy，会拒绝。
++- 不会为了“安全”降级成 unsandboxed。
++
++这点很重要：代码里多处出现“refusing to run unsandboxed”，说明无法 enforce 时宁可失败，也不悄悄放行。
++
++**十七、Elevated 与 Legacy 对比图**
++```text
+++----------------------+-----------------------------+-----------------------------+
++| 维度                 | Legacy RestrictedToken      | Elevated                    |
+++----------------------+-----------------------------+-----------------------------+
++| 执行身份             | 当前用户派生 token          | 专用 sandbox local user     |
++| 提权 setup           | 不需要完整 setup            | 需要 setup/refresh          |
++| 启动真实命令         | parent 直接 CreateProcess   | runner 再 CreateProcess     |
++| IPC                  | 无 runner IPC               | named pipe framed JSON      |
++| 文件写限制           | capability SID + ACL        | sandbox group + cap SID ACL |
++| 文件读限制           | 不支持复杂 deny-read        | 支持 deny-read ACL          |
++| 网络限制             | env/stub 降级               | firewall + WFP + identity   |
++| proxy enforcement    | 不适合                      | 强制使用                    |
++| TTY                  | ConPTY                      | runner 内 ConPTY            |
++| stdout/stderr        | parent 读 pipes             | runner 转 Output frames     |
+++----------------------+-----------------------------+-----------------------------+
++```
++
++**十八、端到端主流程图：Elevated Shell Tool**
++```text
+++--------------------------------------------------------------------------------+
++| User / Model Tool Call                                                          |
++|                                                                                |
++| command + cwd + env + PermissionProfile + timeout                              |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++| codex-core exec_windows_sandbox                                                |
++|                                                                                |
++| - apply NetworkProxy env if needed                                             |
++| - decide elevated backend                                                      |
++| - resolve filesystem overrides                                                 |
++| - find CODEX_HOME                                                              |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++| windows-sandbox elevated_impl                                                  |
++|                                                                                |
++| - resolve PermissionProfile                                                    |
++| - normalize env                                                                |
++| - compute read/write/deny roots                                                |
++| - require sandbox creds                                                        |
++| - compute cap_sids                                                             |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++| identity/setup                                                                 |
++|                                                                                |
++| - check setup marker/users                                                     |
++| - if missing/stale: run setup helper with UAC                                  |
++| - always run setup refresh                                                     |
++| - return sandbox username/password                                             |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++| runner_client                                                                  |
++|                                                                                |
++| - create random named pipe pair                                                |
++| - DACL pipes for sandbox user                                                  |
++| - launch codex-command-runner.exe via CreateProcessWithLogonW                  |
++| - verify pipe client PID                                                       |
++| - send SpawnRequest                                                            |
++| - wait SpawnReady                                                              |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++| codex-command-runner.exe                                                       |
++|                                                                                |
++| - read SpawnRequest                                                            |
++| - create restricted token with cap_sids                                        |
++| - spawn real command via CreateProcessAsUserW                                  |
++| - send Output frames                                                           |
++| - send Exit frame                                                              |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++| codex-core                                                                     |
++|                                                                                |
++| - aggregate stdout/stderr                                                      |
++| - map timeout                                                                  |
++| - return ExecToolCallOutput                                                    |
+++--------------------------------------------------------------------------------+
++```
++
++**十九、完整抽象设计图**
++```text
+++================================================================================+
++|                           WINDOWS SANDBOX ABSTRACT DESIGN                       |
+++================================================================================+
++|                                                                                |
++|  Policy Plane                                                                  |
++|  +---------------------+     +------------------------------+                   |
++|  | PermissionProfile   | --> | ResolvedWindowsPermissions   |                   |
++|  +---------------------+     +------------------------------+                   |
++|             |                                |                                  |
++|             |                                v                                  |
++|             |                  +-----------------------------+                  |
++|             |                  | read/write/deny roots       |                  |
++|             |                  | network identity            |                  |
++|             |                  | token mode                  |                  |
++|             |                  +-----------------------------+                  |
++|             |                                                                   |
++|             v                                                                   |
++|  Setup Plane                                                                   |
++|  +---------------------+     +------------------------------+                   |
++|  | require credentials | --> | codex-windows-sandbox-setup  |                   |
++|  +---------------------+     +------------------------------+                   |
++|             |                                |                                  |
++|             |                                v                                  |
++|             |                  +-----------------------------+                  |
++|             |                  | local users/group           |                  |
++|             |                  | DPAPI secrets               |                  |
++|             |                  | ACL refresh                 |                  |
++|             |                  | firewall/WFP                |                  |
++|             |                  | helper materialization      |                  |
++|             |                  +-----------------------------+                  |
++|             |                                                                   |
++|             v                                                                   |
++|  Execution Plane                                                               |
++|  +---------------------+     +------------------------------+                   |
++|  | parent process      | --> | runner or direct spawn       |                   |
++|  +---------------------+     +------------------------------+                   |
++|             |                                |                                  |
++|             |                                v                                  |
++|             |                  +-----------------------------+                  |
++|             |                  | CreateRestrictedToken       |                  |
++|             |                  | CreateProcessAsUserW        |                  |
++|             |                  | ConPTY / pipes              |                  |
++|             |                  | Job object                  |                  |
++|             |                  | private desktop             |                  |
++|             |                  +-----------------------------+                  |
++|             |                                                                   |
++|             v                                                                   |
++|  Enforcement Plane                                                             |
++|  +---------------------+     +------------------------------+                   |
++|  | NTFS DACL           |     | Windows Firewall / WFP       |                   |
++|  | capability SIDs     |     | offline/online sandbox user  |                   |
++|  | deny ACEs           |     | proxy allowlist              |                   |
++|  +---------------------+     +------------------------------+                   |
++|                                                                                |
+++================================================================================+
++```
++
++**二十、核心安全边界总结**
++文件系统边界：
++
++- 不是靠拦截 syscall。
++- 靠 Windows token access check + NTFS DACL。
++- read roots/write roots/deny roots 都会转换成 ACL。
++- writable root 用 capability SID 精确绑定。
++- deny-read/deny-write 用 deny ACE 强制 carveout。
++- `.codex` / `.agents` 作为 workspace 内的敏感目录会额外保护。
++
++身份边界：
++
++- elevated 使用专用本地用户，而不是当前真实用户。
++- offline/online 两个用户分离网络语义。
++- 密码随机生成并用 DPAPI 保护。
++- 用户放入 `CodexSandboxUsers` 组，便于统一 ACL 管理。
++
++token 边界：
++
++- 真实命令不是拿完整 sandbox 用户 token 跑。
++- runner 会再次调用 `CreateRestrictedToken`。
++- restricted token 携带本次命令允许的 capability SIDs。
++- 这样即使历史 ACL 留在某路径上，本次 token 没有对应 SID，也不能获得对应权限。
++
++网络边界：
++
++- elevated offline 用户被 firewall/WFP 规则限制。
++- WFP 额外阻断 ICMP、DNS、SMB 等容易绕过普通代理语义的通道。
++- proxy-enforced 会强制 elevated，因为只有 sandbox 用户身份才能让防火墙规则可靠生效。
++
++进程边界：
++
++- 命令用 `CreateProcessAsUserW` 启动。
++- TTY 用 ConPTY。
++- 非 TTY 用匿名 pipes。
++- runner 用 job object 管理生命周期。
++- 可选 private desktop 降低 GUI/desktop 交互风险。
++
++IPC 边界：
++
++- parent 与 runner 通过 named pipes。
++- pipe DACL 限制为 sandbox user。
++- parent 校验 connected client PID。
++- frame 有版本和最大长度限制。
++- output/stdin 都 base64 放在 JSON payload 内，避免二进制流破坏协议。
++
++**二十一、一个具体例子**
++假设策略是 workspace-write，网络禁用，命令为：
++
++```text
++powershell.exe -Command "npm test"
++cwd = C:\repo
++```
++
++elevated 后端会抽象成：
++
++```text
++filesystem:
++  read:
++    helper bin
++    C:\Windows
++    C:\Program Files
++    C:\Program Files (x86)
++    C:\ProgramData
++    C:\repo
++  write:
++    C:\repo
++    TEMP/TMP if policy allows
++  deny-write:
++    C:\repo\.git
++    C:\repo\.codex
++    C:\repo\.agents
++  deny-read:
++    explicit secret paths if policy contains them
++
++network:
++  offline identity
++```
++
++执行时：
++
++```text
++1. setup 确保 CodexSandboxOffline 存在。
++2. setup 给 C:\repo 添加 sandbox group/capability write ACE。
++3. setup 给 .git/.codex/.agents 添加 deny-write ACE。
++4. firewall/WFP 确保 CodexSandboxOffline 出网受限。
++5. parent 用 CodexSandboxOffline 登录 runner。
++6. parent 把 SpawnRequest 发给 runner。
++7. runner 创建含 C:\repo capability SID 的 restricted token。
++8. runner 用 restricted token 启动 powershell/npm。
++9. npm 可以在 C:\repo 写测试产物。
++10. npm 不能写 protected carveout。
++11. npm 出网会被 offline 用户规则限制。
++12. stdout/stderr 通过 runner frames 回到 Codex。
++```
++
++**二十二、需要注意的设计取舍**
++这个 Windows sandbox 的设计很工程化，但不是“完美内核级 sandbox”：
++
++- 它大量依赖 Windows ACL 的正确性。
++- elevated 模式需要一次性 setup，有 UAC 和本地用户管理成本。
++- deny-read/deny-write 会修改真实文件系统 ACL，因此需要状态文件和 refresh/reconcile。
++- legacy 模式网络隔离明显弱于 elevated。
++- elevated 模式更完整，但复杂度更高，涉及 helper copy、DPAPI、firewall、WFP、named pipe、runner。
++- 对无法直接 enforce 的策略，代码倾向于拒绝运行，而不是悄悄降级成无 sandbox。
++
++整体看，Codex 的 Windows sandbox 设计目标不是“每次临时创建一个容器”，而是：
++
++```text
++先长期准备一套可复用的 Windows sandbox 基础设施，
++每次运行时再把当前命令的 permission profile 映射成：
++  - 当前应该用哪个 sandbox 用户
++  - 当前 token 应携带哪些 capability SIDs
++  - 当前文件系统上哪些 ACL 必须存在
++  - 当前网络身份是否应该 offline
++  - 当前 I/O 应如何通过 runner 转发
++最后用 Windows 原生安全检查完成 enforcement。
++```
+diff --git a/docs/opencode-sandbox-windows-design.md b/docs/opencode-sandbox-windows-design.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..cd278583b3b8d0c643d7723821eb68d5edd7d003
+--- /dev/null
++++ b/docs/opencode-sandbox-windows-design.md
+@@ -0,0 +1,1465 @@
++# opencode Windows Sandbox 设计方案
++
++## 结论
++
++opencode 当前 shell 安全链路主要是“执行前准入”模型：权限规则、静态 precheck、自动 reviewer、人工审批、session cache、circuit breaker 共同决定一次工具调用是否可以开始执行。
++
++Codex Windows sandbox 是“执行时 enforcement”模型：即使一次命令已经被允许执行，子进程仍只能在 OS 级别访问被授予的文件、网络和进程能力。
++
++因此，面向 opencode 的正确迁移方向不是用 sandbox 替换现有 permission，也不是让 reviewer 生成 sandbox 策略，而是在现有 permission 之后、shell spawn 之前新增一个 deterministic sandbox enforcement layer。
++
++目标结构：
++
++```text
+++--------------------------------------------------------------------------------+
++|                                opencode Agent                                   |
++|                                                                                |
++|  build / interactive / auto / custom agent                                      |
++|  agent.permission + session.permission                                          |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|                           Admission / Policy Gate                               |
++|                                                                                |
++|  Permission.evaluate                                                            |
++|  external_directory gate                                                        |
++|  PermissionPrecheck                                                             |
++|  PermissionReviewer                                                             |
++|  user approval                                                                  |
++|  session cache / circuit breaker                                                |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|                         Sandbox Policy Builder                                  |
++|                                                                                |
++|  deterministic inputs only                                                      |
++|  command / cwd / shell / scan / workspace / config / precheck metadata          |
++|                                                                                |
++|  output: SandboxProfile                                                         |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|                              Sandbox.Service                                    |
++|                                                                                |
++|  select backend                                                                 |
++|  check readiness                                                                |
++|  prepare OS policy                                                              |
++|  spawn command                                                                  |
++|  stream stdout/stderr                                                           |
++|  kill / cleanup                                                                 |
+++----------------------+-----------------+-------------------+-------------------+
++                       |                 |                   |
++                       v                 v                   v
+++-----------------------------+  +------------------+  +--------------------------+
++| Windows Elevated Backend    |  | Windows Legacy   |  | Noop / Observe Backend   |
++| dedicated user + runner     |  | restricted token |  | current behavior         |
+++-----------------------------+  +------------------+  +--------------------------+
++                       |
++                       v
+++--------------------------------------------------------------------------------+
++|                            OS Enforcement Plane                                 |
++|                                                                                |
++|  restricted token / capability SID / NTFS ACL / Firewall WFP / job object       |
++|  named-pipe runner / pipes or ConPTY / optional private desktop                 |
+++--------------------------------------------------------------------------------+
++```
++
++## 范围
++
++本设计文档只覆盖 opencode shell 工具的 Windows sandbox 迁移方案。
++
++第一阶段建议只接入 `bash` tool，也就是当前 `ShellTool` 暴露的 shell 执行能力。不要一开始替换全局 `ChildProcessSpawner`，因为 opencode 内部大量流程也使用 child process，例如 git discovery、snapshot、ripgrep、formatter、session prompt helper。全局替换会把内部工具链一起沙箱化，兼容风险过大。
++
++本设计不把 opencode 已有的 `Project.sandboxes` 当成安全沙箱。当前字段表示 git worktree 或多 checkout 目录记录，不是 OS-level sandbox enforcement。
++
++## 当前 opencode 安全模型
++
++### 顶层：Agent 与权限来源
++
++opencode 的权限先从 agent/session 层组合出来。
++
++核心事实：
++
++- 默认权限由 `packages/opencode/src/agent/agent.ts` 构造。
++- `build` agent 近似全工具可用。
++- `interactive` agent 对 shell/notebook run/env 默认 ask。
++- `auto` agent 当前把 `bash` 与 shell-originated `external_directory` 接入 `auto`。
++- 用户配置 `config.permission` 会通过 `Permission.fromConfig` 转成 ruleset。
++- session permission 会和 agent permission 在工具上下文处 merge。
++
++当前 auto agent 的重要语义：
++
++```text
++auto agent
++  bash: auto
++  external_directory: auto except whitelisted dirs
++  edit/write/apply_patch: still follows build-like allow shape
++```
++
++这说明当前 auto 的重点是 shell risk gate，而不是所有写工具都改成 reviewer 审批。
++
++### 中层：Tool Context ask 边界
++
++工具执行时通过 `ctx.ask(...)` 请求权限。
++
++对 shell 来说，`ShellTool.execute` 的逻辑顺序是：
++
++```text
+++--------------------------------------------------------------------------------+
++|                              ShellTool.execute                                  |
+++--------------------------------------------------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  resolve cwd                                                                     |
++|  parse command with tree-sitter                                                  |
++|  shell compatibility check                                                       |
++|  collect external dirs and command patterns                                      |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  ask external_directory if command references paths outside workspace            |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  ask bash with command patterns                                                  |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  run command through ChildProcessSpawner                                         |
+++--------------------------------------------------------------------------------+
++```
++
++shell 的 `external_directory` 不是独立工具动作。它只是 shell 命令执行前的项目外路径门禁。opencode 当前已经把同一条 shell command、cwd、shell、agent 写入 `external_directory` metadata，避免 auto 模式下项目外路径先退回普通人工 ask，从而绕开后续 bash auto 路由。
++
++关键 metadata：
++
++```text
++metadata.action_kind = "shell"
++metadata.command     = raw shell command
++metadata.cwd         = resolved cwd
++metadata.shell       = shell name
++metadata.agent       = current agent
++```
++
++这些 metadata 对未来 sandbox policy builder 也很关键，因为 patterns 是用户展示摘要，不应被当成完整安全事实。
++
++### 权限规则：last-match-wins
++
++`Permission.evaluate` 使用 last-match-wins。
++
++抽象模型：
++
++```text
++ruleset = defaults + agent-specific + user config + session permission + approved cache
++
++for each requested pattern:
++  find last matching rule by permission and pattern
++  default action is ask
++
++  deny  -> immediate DeniedError
++  allow -> continue
++  auto  -> enter PermissionAuto
++  ask   -> create pending request
++```
++
++这意味着新增 sandbox config 不应混入现有 permission ruleset。permission ruleset 决定“是否允许尝试执行”，sandbox policy 决定“允许执行后实际可访问什么”。
++
++### Auto admission
++
++当前 `PermissionAuto.evaluate` 的核心行为：
++
++```text
+++--------------------------------------------------------------------------------+
++|                         PermissionAuto.evaluate                                 |
+++--------------------------------------------------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  PermissionPrecheck.evaluate                                                    |
+++----------------------------------------+---------------------------------------+
++                                         |
++              +--------------------------+---------------------------+
++              |                          |                           |
++              v                          v                           v
+++-----------------------------+ +--------------------------+ +--------------------+
++| dangerous                   | | safe                     | | general shell      |
++| deny by precheck            | | allow unless strict      | | allow unless strict|
+++-----------------------------+ +--------------------------+ +--------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  cautious / strict / non-shell general                                          |
++|  -> reviewer if available                                                       |
++|  -> ask only when reviewer disabled by config or fallback=user                  |
++|  -> deny when reviewer unavailable for native auto agent                        |
+++--------------------------------------------------------------------------------+
++```
++
++当前四级 precheck：
++
++```text
++safe       known read-only shell command
++general    unknown or opaque command requiring broader judgment
++cautious   visible sensitive or risky operation requiring reviewer/user boundary
++dangerous  critical operation that fails closed before execution
++```
++
++`PermissionPrecheck` 目前真正覆盖 `bash` 和 shell-originated `external_directory`。非 shell 权限直接回到 `general`。
++
++### Reviewer boundary
++
++当前 reviewer 是一个隐藏的 `permission-reviewer` child session。
++
++它接收：
++
++```text
++bounded transcript projection
++ReviewerRequest
++  permission
++  patterns
++  metadata
++  precheck
++tenant policy
++```
++
++它必须通过 `permission_review_decision` tool 返回结构化结果：
++
++```text
++outcome: allow | deny
++risk_level: low | medium | high | critical
++user_authorization: unknown | low | medium | high
++rationale: string
++```
++
++硬约束：
++
++- reviewer 不调用 `permission_review_decision` 就 fail closed。
++- reviewer timeout 默认 fail closed。
++- provider/schema/stream error 默认 fail closed。
++- 只有显式 `fallback: "user"` 才回到人工审批。
++- reviewer allow 对 `critical` 或“非低风险且无用户授权证据”的矛盾结果会被代码层转成 deny。
++
++这层适合判断“是否允许尝试执行”，但不应负责生成 OS sandbox policy。
++
++### 当前执行层
++
++权限通过后，shell 实际执行路径是：
++
++```text
+++--------------------------------------------------------------------------------+
++|                                ShellTool.run                                    |
++|                                                                                |
++|  metadata live output                                                           |
++|  output decoder                                                                 |
++|  terminal display snapshot                                                      |
++|  truncation sink                                                                |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  ChildProcessSpawner.spawn(cmd(...))                                            |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  CrossSpawnSpawner.spawnCommand                                                 |
++|  cross-spawn                                                                    |
++|  node child_process                                                             |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  real OS process with host user privileges                                      |
+++--------------------------------------------------------------------------------+
++```
++
++当前没有 OS-level filesystem/network sandbox。命令一旦通过 permission gate，就以当前用户权限运行。precheck/reviewer 可以阻止一部分命令开始执行，但无法阻止命令运行后动态构造路径、读取未扫描到的文件、访问网络、派生子进程等行为。
++
++## Codex Windows sandbox 基线
++
++`docs/codex-sandbox-windows-design.md` 里的 Codex Windows sandbox 可以概括为三层：
++
++```text
+++--------------------------------------------------------------------------------+
++|                              Codex Permission Model                             |
++|                                                                                |
++|  PermissionProfile                                                             |
++|      -> FileSystemSandboxPolicy                                                |
++|      -> NetworkSandboxPolicy                                                   |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|                              Sandbox Selection                                  |
++|                                                                                |
++|  WindowsSandboxLevel                                                           |
++|      Disabled                                                                  |
++|      RestrictedToken                                                           |
++|      Elevated                                                                  |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|                            Windows Backend                                      |
++|                                                                                |
++|  RestrictedToken legacy backend                                                 |
++|  Elevated backend with dedicated sandbox user                                   |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|                          Runtime Enforcement                                    |
++|                                                                                |
++|  dedicated local user                                                           |
++|  restricted token                                                               |
++|  capability-like SID                                                            |
++|  NTFS DACL allow/deny ACE                                                       |
++|  Firewall / WFP                                                                |
++|  named pipe IPC                                                                |
++|  ConPTY or pipes                                                               |
++|  job object                                                                    |
++|  optional private desktop                                                       |
+++--------------------------------------------------------------------------------+
++```
++
++Codex 的关键点不是“在命令前面包一个 sandbox.exe”，而是把 policy 转成 Windows 原生 enforcement：用户身份、token、ACL、WFP/firewall、IPC runner、job object 组合起来。
++
++Codex Windows elevated backend 主要有两个 helper binary：
++
++```text
++codex-windows-sandbox-setup
++codex-command-runner
++```
++
++父进程和 command runner 之间使用 named pipe 上的 length-prefixed JSON frame。协议里有 version，例如 Codex 文档里记录的 `IPC_PROTOCOL_VERSION = 2`。runner 接收 `SpawnRequest`，派生 restricted token，设置 pipes 或 ConPTY，再启动真实命令。
++
++Codex 的重要安全不变量：
++
++```text
++admission policy is not enforcement
++PermissionProfile must be converted to OS policy
++DangerFullAccess and ExternalSandbox are rejected by sandbox parse layer
++ACL state is reconciled, not blindly appended
++network enforcement may require elevated backend
++runner identity and pipe client PID must be verified
++```
++
++## 差距分析
++
++opencode 当前能力：
++
++```text
+++--------------------------------------------------------------------------------+
++| Capability                                                                     |
+++--------------------------------------+-----------------------------------------+
++| permission rules                       | yes                                     |
++| external_directory gate                | yes, static scan based                  |
++| deterministic shell precheck           | yes                                     |
++| LLM reviewer                           | yes                                     |
++| user approval                          | yes                                     |
++| reviewer audit child session           | yes                                     |
++| session review cache                   | yes                                     |
++| circuit breaker event                  | yes                                     |
++| OS filesystem sandbox                  | no                                      |
++| OS network sandbox                     | no                                      |
++| restricted token / dedicated user      | no                                      |
++| command runner IPC                     | no                                      |
++| ACL reconciliation                     | no                                      |
+++--------------------------------------------------------------------------------+
++```
++
++当前最大安全空洞：
++
++```text
++static scan sees: npm test
++permission allows: npm test
++runtime process can still read: ~/.ssh/id_ed25519, ~/.aws/credentials, arbitrary home files
++```
++
++如果接入 sandbox，正确结果应该是：
++
++```text
++static scan sees: npm test
++permission allows: npm test
++sandbox allows: workspace read/write and selected temp roots
++sandbox denies: sensitive home credentials and non-approved external paths
++runtime dynamic path access: blocked by OS
++```
++
++## 目标模型
++
++新增一层 `Sandbox.Service`，只负责执行时限制。
++
++分层职责：
++
++```text
+++--------------------------------------------------------------------------------+
++| Layer                                | Responsibility                           |
+++--------------------------------------+-----------------------------------------+
++| Agent / Config                       | declare desired permission and sandbox   |
++| Permission.Service                   | decide whether a tool call may run       |
++| PermissionPrecheck                   | deterministic risk preclassification     |
++| PermissionReviewer                   | model-assisted admission decision        |
++| SandboxPolicyBuilder                 | deterministic profile construction       |
++| Sandbox.Service                      | backend selection and lifecycle          |
++| Windows backend                      | translate profile to OS enforcement      |
++| OS                                   | actually deny forbidden access           |
+++--------------------------------------------------------------------------------+
++```
++
++Important separation：
++
++```text
++Permission answer:
++  May this tool call be attempted?
++
++Sandbox answer:
++  Once attempted, what can the spawned process actually access?
++```
++
++## 推荐模块设计
++
++建议新增模块：
++
++```text
++packages/opencode/src/config/sandbox.ts
++packages/opencode/src/sandbox/profile.ts
++packages/opencode/src/sandbox/policy-builder.ts
++packages/opencode/src/sandbox/sandbox.ts
++packages/opencode/src/sandbox/backend/noop.ts
++packages/opencode/src/sandbox/backend/windows-elevated.ts
++packages/opencode/src/sandbox/backend/windows-restricted-token.ts
++packages/opencode/src/sandbox/backend/errors.ts
++```
++
++如果 Windows backend 使用 Rust helper，建议新增独立 package 或 crate 目录，不直接塞入 `packages/opencode/src/tool`：
++
++```text
++packages/sandbox/windows-rs/
++packages/sandbox/windows-rs/src/bin/opencode-windows-sandbox-setup.rs
++packages/sandbox/windows-rs/src/bin/opencode-command-runner.rs
++packages/sandbox/windows-rs/src/ipc.rs
++packages/sandbox/windows-rs/src/setup.rs
++packages/sandbox/windows-rs/src/token.rs
++packages/sandbox/windows-rs/src/acl.rs
++packages/sandbox/windows-rs/src/firewall.rs
++packages/sandbox/windows-rs/src/process.rs
++```
++
++TypeScript 层不要直接关心每个 Windows API 细节，只处理 readiness、profile、spawn request、stream/kill/exit 抽象。
++
++## Config 设计
++
++建议新增顶层 `sandbox` 配置，而不是塞进 `permission`。
++
++示例：
++
++```jsonc
++{
++  "sandbox": {
++    "enabled": true,
++    "mode": "enforce",
++    "scope": "shell",
++    "fallback": "deny",
++    "filesystem": {
++      "workspace": "read_write",
++      "external": "approved_only",
++      "deny_read": [
++        "~/.ssh/*",
++        "~/.aws/credentials",
++        "~/.config/gcloud/*",
++        "~/.kube/config",
++        "~/.npmrc",
++        "~/.netrc",
++        "~/.git-credentials",
++        "*.env",
++        "*.env.*"
++      ]
++    },
++    "network": {
++      "mode": "inherit"
++    },
++    "windows": {
++      "level": "elevated",
++      "setup": "auto"
++    }
++  }
++}
++```
++
++建议 schema 语义：
++
++```text
++enabled:
++  false -> preserve current behavior
++  true  -> build SandboxProfile for supported tool scopes
++
++mode:
++  observe -> build and log profile, but execute current path
++  enforce -> backend must enforce or fail closed
++
++scope:
++  shell -> only shell tool
++
++fallback:
++  deny -> fail closed if backend unavailable in enforce mode
++  unsandboxed -> only allowed for explicit development or observe mode
++
++filesystem.workspace:
++  read_only
++  read_write
++
++filesystem.external:
++  deny
++  approved_only
++  read_only_approved
++  read_write_approved
++
++network.mode:
++  inherit
++  deny
++  allowlist
++  managed_proxy
++
++windows.level:
++  disabled
++  restricted_token
++  elevated
++```
++
++默认值建议保守 rollout：
++
++```text
++sandbox.enabled = false
++sandbox.mode = observe when explicitly enabled without enforce
++sandbox.scope = shell
++sandbox.fallback = deny for enforce
++network.mode = inherit for first milestone
++windows.level = elevated when enforce + network managed/deny is requested
++```
++
++## SandboxProfile
++
++`SandboxProfile` 是 TypeScript 层的核心 domain object。它应使用 Effect Schema 定义，保持可序列化、可审计、可传给 Rust helper。
++
++建议形状：
++
++```text
++SandboxProfile
++├─ id
++│  request_id
++│  session_id
++│  message_id
++│  call_id
++│
++├─ tool
++│  name: bash
++│  shell: bash | zsh | pwsh | powershell | cmd
++│  command: raw command
++│  cwd: absolute path
++│
++├─ mode
++│  observe | enforce
++│
++├─ filesystem
++│  workspace_root
++│  cwd
++│  read_roots
++│  write_roots
++│  deny_read_roots
++│  external_roots
++│  temp_roots
++│
++├─ network
++│  mode: inherit | deny | allowlist | managed_proxy
++│  allowlist
++│  proxy
++│
++├─ process
++│  timeout_ms
++│  tty
++│  detached
++│  kill_tree
++│  private_desktop
++│
++├─ environment
++│  inherit_strategy
++│  env
++│  home_strategy
++│  path_strategy
++│
++└─ audit
++   agent
++   precheck_level
++   precheck_reason
++   reviewer_review_id
++   permission_patterns
++   approved_external_patterns
++```
++
++重要不变量：
++
++```text
++all paths are absolute and normalized before reaching backend
++workspace root never equals global root unless explicitly supported
++deny_read_roots cannot be removed by reviewer output
++external_roots only come from deterministic approval state
++command patterns are audit text, not enforcement roots
++```
++
++## ShellTool 接入点
++
++推荐在 `ask(ctx, scan, ...)` 之后、`run(...)` 之前创建 profile。
++
++目标结构：
++
++```text
++execute(params, ctx)
++  resolve cwd
++  parse command
++  collect scan
++  ask external_directory and bash
++
++  profile = SandboxPolicyBuilder.fromShell({
++    ctx,
++    params,
++    cwd,
++    shell,
++    scan,
++    instanceCtx,
++    config,
++  })
++
++  run({ ..., sandboxProfile: profile }, ctx)
++```
++
++`ShellTool.run` 当前处理 output streaming、decoder、truncation、timeout、abort、metadata。这些能力应该尽量复用。`Sandbox.Service.spawnShell` 应返回接近 `ChildProcessHandle` 的接口：
++
++```text
++SandboxProcessHandle
++  stdout: Stream<Uint8Array>
++  stderr: Stream<Uint8Array>
++  all: Stream<Uint8Array>
++  exitCode: Effect<number>
++  kill(options): Effect<void>
++```
++
++这样 `ShellTool.run` 的输出逻辑不需要大改。
++
++## SandboxPolicyBuilder
++
++policy builder 应完全 deterministic。
++
++输入：
++
++```text
++InstanceContext
++  directory
++  worktree
++  project
++
++Shell execution
++  command
++  cwd
++  shell
++  timeout
++  env
++
++Scan result
++  dirs
++  patterns
++  always
++
++Permission metadata
++  precheck level/reason if available
++  reviewer reviewID if available
++
++Config
++  sandbox config
++  tool_output config only for output behavior, not enforcement
++```
++
++输出规则建议：
++
++```text
++workspace_root:
++  if git project: instance.worktree
++  otherwise: instance.directory
++
++read_roots:
++  workspace_root
++  cwd if inside workspace
++  opencode skill/temp/truncation roots when necessary
++
++write_roots:
++  workspace_root when filesystem.workspace=read_write
++  configured temp/output roots
++  approved external roots when external=read_write_approved
++
++deny_read_roots:
++  config sandbox.filesystem.deny_read
++  default sensitive credential patterns
++
++external_roots:
++  only roots from shell scan that passed external_directory permission
++```
++
++注意：静态 scan 只能发现可见路径，不能保证完整。因此外部路径授权应只扩大可访问根，不应作为“命令不会访问其他路径”的证明。真正阻止动态路径访问的是 OS sandbox。
++
++## Reviewer 与 Sandbox 的关系
++
++Reviewer 不应直接生成或扩大 sandbox policy。
++
++允许：
++
++```text
++reviewer allow/deny controls admission
++reviewID is included in audit metadata
++rationale is recorded in child session and tool metadata
++```
++
++禁止：
++
++```text
++reviewer output adds read root
++reviewer output adds write root
++reviewer output disables deny_read
++reviewer output disables network enforcement
++reviewer output switches backend to unsandboxed
++```
++
++如果未来希望 reviewer 建议策略变更，应作为 human-visible proposal，由用户显式修改 config 或一次性授权，而不是模型直接修改 OS enforcement profile。
++
++## Windows Elevated Backend
++
++推荐优先实现 elevated backend，因为它能承载 Codex 文档里的完整能力：专用 sandbox 用户、ACL、network enforcement、runner IPC。
++
++整体结构：
++
++```text
+++--------------------------------------------------------------------------------+
++|                            TypeScript opencode                                  |
++|                                                                                |
++|  Sandbox.Service.spawnShell                                                     |
++|  SandboxProfile                                                                 |
++|  readiness check                                                                |
++|  create SpawnRequest                                                            |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|                    opencode-windows-sandbox client layer                        |
++|                                                                                |
++|  locate helper binaries                                                         |
++|  run setup helper if configured                                                 |
++|  create named pipes                                                             |
++|  launch runner as sandbox user                                                  |
++|  send length-prefixed JSON frame                                                |
++|  expose output streams                                                          |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|                         opencode-command-runner.exe                             |
++|                                                                                |
++|  validate IPC protocol version                                                  |
++|  receive SpawnRequest                                                           |
++|  derive restricted token                                                        |
++|  apply capability SIDs                                                          |
++|  create pipes or ConPTY                                                         |
++|  create job object                                                              |
++|  CreateProcessAsUserW                                                           |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|                           Sandbox Child Process                                 |
++|                                                                                |
++|  runs as dedicated sandbox user                                                 |
++|  constrained by restricted token                                                |
++|  constrained by NTFS ACL                                                        |
++|  constrained by firewall/WFP when enabled                                       |
++|  constrained by job object                                                      |
+++--------------------------------------------------------------------------------+
++```
++
++### Setup helper
++
++`opencode-windows-sandbox-setup` 应负责：
++
++```text
++create or refresh dedicated local users
++create required local groups or capability identities
++install or refresh firewall/WFP rules when network sandbox is enabled
++prepare base ACLs for workspace/temp roots
++apply deny-read ACLs for configured sensitive roots
++reconcile stale ACL entries from previous runs
++report readiness state and version
++```
++
++Setup 必须幂等。多次运行不能不断堆积 ACL 或 firewall rules。
++
++### Runner IPC
++
++建议复用 Codex 风格：named pipe + length-prefixed JSON frames。
++
++抽象 protocol：
++
++```text
++Frame
++  u32 little-endian length
++  JSON payload
++
++Message
++  SpawnRequest
++  Stdin
++  CloseStdin
++  Resize
++  Terminate
++  SpawnReady
++  Output
++  Exit
++  Error
++```
++
++`SpawnRequest` 需要包含：
++
++```text
++protocol_version
++request_id
++command
++args or shell command form
++cwd
++env
++timeout_ms
++filesystem policy
++network policy
++capability SIDs
++stdio mode
++tty mode
++private_desktop
++job options
++audit metadata
++```
++
++安全约束：
++
++```text
++pipe DACL only allows expected sandbox identity
++parent validates pipe client PID or identity
++runner validates protocol version
++runner refuses unknown dangerous policy modes
++runner refuses full host access in enforce mode
++frame size has strict upper bound
++```
++
++### Filesystem enforcement
++
++Windows 文件隔离应组合使用 dedicated user、restricted token、capability-like SID、NTFS DACL。
++
++建议映射：
++
++```text
++SandboxProfile.read_roots
++  -> DACL allow read/execute for sandbox identity or read capability SID
++
++SandboxProfile.write_roots
++  -> DACL allow write/modify for write capability SID
++
++SandboxProfile.deny_read_roots
++  -> explicit deny read ACE for sandbox principal
++
++per-run external_roots
++  -> per-run capability SID only included in this token
++```
++
++为什么需要 per-run capability：
++
++```text
++If an old command approved C:\tmp\foo,
++future commands must not automatically inherit C:\tmp\foo access.
++
++Persistent ACL may mention capability SID,
++but current token only carries capabilities for this run.
++```
++
++ACL reconciliation：
++
++```text
+++--------------------------------------------------------------------------------+
++|                         ACL Reconciliation                                      |
+++--------------------------------------------------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  compute desired ACL state for current profile                                  |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  apply missing allow/deny ACE                                                   |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  remove stale ACE owned by opencode sandbox principal                           |
++|  only when no longer desired                                                    |
+++--------------------------------------------------------------------------------+
++```
++
++不要在每次命令结束后立刻撤 ACL。子进程或孙进程可能仍短暂存在。应由 setup/refresh/reconcile 做一致性维护。
++
++### Network enforcement
++
++第一阶段建议 `network.mode = inherit`，先稳定 filesystem sandbox。
++
++第二阶段增加：
++
++```text
++network.mode = deny
++network.mode = allowlist
++network.mode = managed_proxy
++```
++
++Windows 网络隔离建议走 elevated backend，因为 dedicated sandbox user 能作为 firewall/WFP 规则作用对象。
++
++抽象：
++
++```text
+++--------------------------------------------------------------------------------+
++|                              Network Policy                                     |
+++--------------------------------------+-----------------------------------------+
++| inherit                               | no network restriction yet              |
++| deny                                  | block outbound for sandbox user         |
++| allowlist                             | allow configured host/port, deny rest   |
++| managed_proxy                         | route through opencode-controlled proxy |
+++--------------------------------------------------------------------------------+
++```
++
++### Process containment
++
++Windows backend 应使用 job object 管理 process tree。
++
++要求：
++
++```text
++timeout kills process tree
++abort kills process tree
++runner death cleans child when possible
++child cannot easily escape parent lifecycle
++resource limits can be added later
++```
++
++TTY 初期可以走 pipes。ConPTY 可作为后续增强，服务于需要真实 terminal 行为的命令。
++
++## Windows Restricted Token Backend
++
++restricted-token backend 可作为低权限 fallback，但能力弱于 elevated。
++
++适合：
++
++```text
++no dedicated user setup
++basic token restriction
++some local filesystem ACL use cases
++development or observe path
++```
++
++不适合：
++
++```text
++strong per-user firewall/WFP enforcement
++complex ACL reconciliation
++managed network proxy enforcement
++multi-run durable isolation
++```
++
++建议在 `mode=enforce` 且请求 network deny/proxy 时，不允许自动降级到 restricted token。
++
++## Noop / Observe Backend
++
++noop backend 用于迁移早期。
++
++行为：
++
++```text
++enabled=false:
++  no profile required
++  current spawn path
++
++mode=observe:
++  build profile
++  emit metadata/event
++  current spawn path
++
++mode=enforce with noop selected:
++  fail closed unless config explicitly says fallback=unsandboxed for development
++```
++
++observe metadata 示例：
++
++```text
++metadata.sandbox = {
++  mode: "observe",
++  backend: "noop",
++  profileID: "...",
++  workspaceRoot: "...",
++  readRoots: 3,
++  writeRoots: 1,
++  denyReadRoots: 8,
++  network: "inherit"
++}
++```
++
++## Tool Metadata 与事件
++
++应新增可审计事件，但不要泄漏完整敏感路径列表给模型上下文。
++
++建议事件：
++
++```text
++sandbox.profile.created
++sandbox.backend.selected
++sandbox.setup.required
++sandbox.setup.completed
++sandbox.spawn.started
++sandbox.spawn.failed
++sandbox.policy.denied
++sandbox.process.exited
++```
++
++tool metadata 建议只放摘要：
++
++```text
++metadata.sandbox = {
++  status: "disabled" | "observed" | "enforced" | "failed",
++  backend: "noop" | "windows_elevated" | "windows_restricted_token",
++  mode: "observe" | "enforce",
++  network: "inherit" | "deny" | "allowlist" | "managed_proxy",
++  profileID: string,
++  setupRequired: boolean,
++  failureReason?: string
++}
++```
++
++完整 profile 可以写入本地 audit store 或 debug log，但不要默认回传给模型。
++
++## Security Invariants
++
++必须保持的安全不变量：
++
++```text
++1. sandbox enforcement starts only after permission admission succeeds
++2. sandbox profile is deterministic
++3. reviewer output cannot widen sandbox profile
++4. enforce mode backend unavailable means fail closed
++5. unknown backend protocol version means fail closed
++6. unknown filesystem policy mode means fail closed
++7. full host access is not representable in enforce mode unless explicit developer-only escape hatch
++8. external directory approval grants only selected roots, not arbitrary home access
++9. deny_read roots override read/write roots where OS allows explicit deny precedence
++10. output streaming behavior must not bypass sandbox process creation
++11. timeout and abort must terminate sandbox child tree
++12. setup helper must be idempotent and auditable
++```
++
++Path security rules：
++
++```text
++normalize all paths before policy construction
++reject relative paths in backend request
++resolve cwd before spawn
++do not treat project worktree "/" as global allow root
++handle Windows drive casing consistently
++preserve UNC path rules explicitly
++do not follow untrusted symlink assumptions in TypeScript as enforcement proof
++```
++
++## 与 external_directory 的关系
++
++当前 shell scanner 会把 visible path arguments 收集到 `scan.dirs`。
++
++这个机制保留，但角色要调整：
++
++```text
++before sandbox:
++  scan.dirs is the main boundary for asking external_directory
++
++after sandbox:
++  scan.dirs is still UX/admission evidence
++  approved dirs become extra allowed roots
++  unscanned dynamic external access is blocked by OS
++```
++
++目标流程：
++
++```text
+++--------------------------------------------------------------------------------+
++|  command: node -e "fs.readFileSync(process.env.HOME + '/.ssh/id_ed25519')"      |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  static scan may not see final dynamic path                                     |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  permission may allow if reviewer/user approves attempt                         |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++|  sandbox deny_read_roots block ~/.ssh/id_ed25519 at OS level                    |
+++--------------------------------------------------------------------------------+
++```
++
++## Failure Modes
++
++建议错误类型：
++
++```text
++SandboxDisabledError
++SandboxUnsupportedPlatformError
++SandboxBackendUnavailableError
++SandboxSetupRequiredError
++SandboxSetupFailedError
++SandboxPolicyInvalidError
++SandboxProtocolError
++SandboxSpawnError
++SandboxAccessDeniedError
++SandboxProcessTerminatedError
++```
++
++用户可见错误应简洁，避免给出绕过建议：
++
++```text
++Sandbox enforcement rejected this shell command because the Windows sandbox backend is not ready. Configure sandbox setup or ask the user to run without sandbox explicitly.
++```
++
++不要提示 agent 用 Python、PowerShell、MCP 或其他工具绕过同一结果。
++
++## Rollout Plan
++
++### Phase 1: schema and noop service
++
++新增：
++
++```text
++ConfigSandbox
++SandboxProfile schema
++Sandbox.Service
++Noop backend
++observe metadata
++```
++
++不改变实际执行行为。
++
++### Phase 2: shell-only policy builder
++
++接入 `ShellTool.execute`。
++
++完成：
++
++```text
++after permission ask, build SandboxProfile
++mode=observe writes tool metadata
++mode=enforce with noop fails closed
++unit test profile builder
++```
++
++### Phase 3: Windows helper packaging and readiness
++
++完成：
++
++```text
++locate helper binaries
++version check
++setup required detection
++setup auto/manual config
++surface user-friendly setup failure
++```
++
++### Phase 4: Windows elevated spawn path
++
++完成：
++
++```text
++named pipe IPC
++SpawnRequest
++runner process
++stdout/stderr/all streams
++exit code
++kill/timeout
++job object cleanup
++```
++
++### Phase 5: filesystem ACL enforcement
++
++完成：
++
++```text
++workspace read/write
++approved external roots
++deny_read sensitive roots
++ACL reconciliation
++per-run capability SIDs
++```
++
++### Phase 6: network enforcement
++
++完成：
++
++```text
++network=deny
++allowlist or managed proxy
++firewall/WFP setup
++network denial tests
++```
++
++### Phase 7: broaden platform/backend support
++
++完成：
++
++```text
++Windows restricted-token fallback if useful
++Linux sandbox backend
++macOS seatbelt or compatible backend
++selective support for non-shell tools only after shell is stable
++```
++
++## Test Strategy
++
++### Unit tests
++
++```text
++ConfigSandbox schema parse and defaults
++SandboxProfile path normalization
++workspace root selection
++external roots mapping
++deny_read roots override behavior
++network policy parse
++unsupported policy fail closed
++```
++
++### Integration tests for shell path
++
++```text
++observe mode keeps current spawn behavior
++enforce mode calls Sandbox.Service
++backend unavailable fails closed
++timeout kills process tree
++abort kills process tree
++output truncation and compression unchanged
++metadata.sandbox is preserved across running updates
++```
++
++### Windows backend tests
++
++```text
++setup helper is idempotent
++helper version mismatch fails closed
++named pipe protocol mismatch fails closed
++runner identity validation works
++workspace write allowed
++non-approved external write denied
++approved external write allowed
++deny_read sensitive file denied
++dynamic sensitive path denied
++network deny blocks outbound
++job object cleans child tree
++```
++
++### Regression tests for existing permission behavior
++
++```text
++auto safe shell still allows before sandbox
++auto dangerous shell still denies before sandbox
++cautious shell still reaches reviewer
++reviewer timeout still fails closed
++external_directory shell metadata still carries command/cwd/shell/agent
++Project.sandboxes behavior unchanged
++internal git discovery is not sandboxed by shell-only rollout
++```
++
++Tests should run from package directories, for example `packages/opencode`, not repo root.
++
++## Implementation Notes For Effect
++
++Follow opencode local Effect style：
++
++```text
++Use Effect.gen(function* () { ... }) for workflows
++Use Effect.fn("Sandbox.method") for service methods
++Use Schema.Class and Schema.TaggedErrorClass for domain types
++Use Layer.effect for service construction
++Use InstanceState only when state is per workspace/project
++Prefer ChildProcessSpawner abstractions at TypeScript boundaries
++Keep helper-specific native protocol behind backend modules
++```
++
++`Sandbox.Service` sketch：
++
++```text
++export interface Interface {
++  readonly profileFromShell: (input: ShellProfileInput) => Effect.Effect<SandboxProfile, SandboxError>
++  readonly spawnShell: (input: SpawnShellInput) => Effect.Effect<SandboxProcessHandle, SandboxError, Scope.Scope>
++  readonly readiness: () => Effect.Effect<SandboxReadiness, SandboxError>
++}
++```
++
++Layer wiring should be explicit in `AppLayer` and `ToolRegistry.defaultLayer` once shell starts depending on it.
++
++## Why Not Replace Permission
++
++Sandbox 不能替代 permission，因为：
++
++```text
++permission gives user/reviewer intent boundary
++sandbox gives OS capability boundary
++permission can reject destructive intent before it starts
++sandbox can block unexpected runtime behavior after it starts
++both are required for defense in depth
++```
++
++Example：
++
++```text
++rm -rf /
++  permission/precheck should deny before execution
++  sandbox should also make root deletion impossible if somehow executed
++
++npm test
++  permission may allow
++  sandbox should still block credential exfiltration
++```
++
++## Why Not Let Reviewer Build Policy
++
++Reviewer 是 probabilistic policy advisor，不是 deterministic enforcement compiler。
++
++风险：
++
++```text
++model may miss path normalization issues
++model may overgrant because command sounds harmless
++model may be prompt-injected by transcript/tool arguments
++model may generate inconsistent roots across retries
++model output is not a stable security boundary
++```
++
++正确边界：
++
++```text
++Reviewer decides allow/deny for admission.
++SandboxPolicyBuilder deterministically constructs roots.
++Windows backend enforces roots.
++```
++
++## Naming Guidance
++
++避免使用 `Project.sandboxes` 作为安全概念。
++
++推荐命名：
++
++```text
++SandboxProfile
++ExecutionSandbox
++SandboxBackend
++SandboxReadiness
++SandboxPolicyBuilder
++WindowsSandboxBackend
++```
++
++避免：
++
++```text
++ProjectSandbox
++SandboxDirectory
++project.sandboxes as enforcement roots
++```
++
++因为当前 project sandbox 语义更接近 git checkout/worktree，不是 OS sandbox。
++
++## Open Questions
++
++需要实现前确认的问题：
++
++```text
++1. Windows helper binary 是直接移植 Codex Rust crate，还是先做 opencode 最小子集？
++2. sandbox.enabled 默认是否永远 false，还是 auto agent 默认 observe？
++3. workspace 写权限默认 read_write 还是 read_only + explicit write command allow？
++4. shell rc 文件读取失败是否允许 fallback synthetic home？
++5. Windows network enforcement 第一版是否必须进入 scope，还是先只做 filesystem？
++6. ACL deny_read 默认是否覆盖所有 .env，还是沿用 read tool 中 .env.example allow 例外？
++7. helper setup 是否允许自动提权提示，还是只给手动安装命令？
++```
++
++## Recommended First Milestone
++
++第一阶段应先做 shell-only observe/enforce 架构，不急于完整移植 Windows helper。
++
++最小可交付：
++
++```text
++ConfigSandbox schema
++SandboxProfile schema
++Sandbox.Service noop backend
++ShellTool integration after permission ask
++observe metadata
++enforce mode fail-closed without backend
++profile builder tests
++```
++
++这样可以先稳定 TypeScript/Effect 边界和 audit UX，再把 Codex Windows elevated backend 接到底层。否则一开始把 Rust IPC、ACL、WFP、Tool UI、permission 混在一起，会让调试边界非常模糊。
++
++## Final Target
++
++最终 opencode shell 安全模型应是：
++
++```text
+++--------------------------------------------------------------------------------+
++| User / Agent asks to run shell command                                          |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++| Existing opencode admission                                                     |
++|                                                                                |
++| rules -> external_directory -> precheck -> reviewer/user                        |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                  allowed to attempt
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++| Deterministic sandbox profile                                                   |
++|                                                                                |
++| workspace roots, approved external roots, deny_read roots, network mode         |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                  enforced spawn
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++| Windows sandbox backend                                                         |
++|                                                                                |
++| dedicated user, restricted token, ACL, WFP/firewall, runner IPC, job object     |
+++----------------------------------------+---------------------------------------+
++                                         |
++                                  constrained process
++                                         |
++                                         v
+++--------------------------------------------------------------------------------+
++| Command output streams back through existing ShellTool output pipeline          |
+++--------------------------------------------------------------------------------+
++```
++
++这保留了 opencode 现有 auto review 的 UX 和审查价值，同时补上 Codex sandbox 的关键能力：运行时 OS enforcement。

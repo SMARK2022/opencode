@@ -1,0 +1,327 @@
+From 9c4cf37be9e45c174c5b6bacb900a7bfaaa0c225 Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Thu, 28 May 2026 13:13:28 +0800
+Subject: [PATCH] =?UTF-8?q?feat(prompt):=20=E6=9B=B4=E6=96=B0=20promptOffs?=
+ =?UTF-8?q?etWidth=20=E5=87=BD=E6=95=B0=E6=B3=A8=E9=87=8A=E5=B9=B6?=
+ =?UTF-8?q?=E5=9C=A8=E5=A4=9A=E4=B8=AA=E5=9C=B0=E6=96=B9=E5=BA=94=E7=94=A8?=
+ =?UTF-8?q?=EF=BC=8C=E7=A1=AE=E4=BF=9D=E6=96=87=E6=9C=AC=E5=A4=84=E7=90=86?=
+ =?UTF-8?q?=E9=80=BB=E8=BE=91=E5=87=86=E7=A1=AE?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/packages/opencode/src/cli/cmd/prompt-display.ts b/packages/opencode/src/cli/cmd/prompt-display.ts
+index 4e8cb9046ac65c31b65f68ee46d705f032e3fcf3..765e2f322cd9e725572e9e886329d4511db2c4d4 100644
+--- a/packages/opencode/src/cli/cmd/prompt-display.ts
++++ b/packages/opencode/src/cli/cmd/prompt-display.ts
+@@ -1,6 +1,7 @@
+ const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" })
+ 
+-function promptOffsetWidth(value: string) {
++// Textarea 的 offset 不是 JS 字符索引：换行占 1 个位置，宽字符按终端显示宽度计算。
++export function promptOffsetWidth(value: string) {
+   let width = 0
+   for (const part of graphemes.segment(value)) {
+     // Textarea offsets count newlines as one position; Bun.stringWidth counts them as zero.
+diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+index c8eda39f9952e0879aa528569913c7bdfcac62fe..389a799e0bff796612eb4adab168977a059e1367 100644
+--- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
++++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
+@@ -66,6 +66,7 @@ import { type WorkspaceStatus } from "../workspace-label"
+ import { useCommandPalette } from "../../context/command-palette"
+ import { useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
+ import { useTuiConfig } from "../../context/tui-config"
++import { promptOffsetWidth } from "@/cli/cmd/prompt-display"
+ 
+ export type PromptProps = {
+   sessionID?: string
+@@ -619,7 +620,9 @@ export function Prompt(props: PromptProps) {
+               // if the virtual text is deleted, remove the part
+               if (newStart === -1) return null
+ 
+-              const newEnd = newStart + virtualText.length
++              // Editor 返回 JS 字符索引；part source 保存 Textarea offset，必须转换后再恢复高亮。
++              const start = promptOffsetWidth(content.slice(0, newStart))
++              const end = start + promptOffsetWidth(virtualText)
+ 
+               if (part.type === "file" && part.source?.text) {
+                 return {
+@@ -628,8 +631,8 @@ export function Prompt(props: PromptProps) {
+                     ...part.source,
+                     text: {
+                       ...part.source.text,
+-                      start: newStart,
+-                      end: newEnd,
++                      start,
++                      end,
+                     },
+                   },
+                 }
+@@ -640,8 +643,8 @@ export function Prompt(props: PromptProps) {
+                   ...part,
+                   source: {
+                     ...part.source,
+-                    start: newStart,
+-                    end: newEnd,
++                    start,
++                    end,
+                   },
+                 }
+               }
+@@ -657,7 +660,7 @@ export function Prompt(props: PromptProps) {
+             parts: updatedNonTextParts,
+           })
+           restoreExtmarksFromParts(updatedNonTextParts)
+-          input.cursorOffset = Bun.stringWidth(content)
++          input.cursorOffset = promptOffsetWidth(content)
+         },
+       },
+       {
+@@ -850,36 +853,61 @@ export function Prompt(props: PromptProps) {
+ 
+   function syncExtmarksWithPromptParts() {
+     const allExtmarks = input.extmarks.getAllForTypeId(promptPartTypeId)
+-    setStore(
+-      produce((draft) => {
+-        const newMap = new Map<number, number>()
+-        const newParts: typeof draft.prompt.parts = []
+-
+-        for (const extmark of allExtmarks) {
+-          const partIndex = draft.extmarkToPartIndex.get(extmark.id)
+-          if (partIndex !== undefined) {
+-            const part = draft.prompt.parts[partIndex]
+-            if (part) {
+-              if (part.type === "agent" && part.source) {
+-                part.source.start = extmark.start
+-                part.source.end = extmark.end
+-              } else if (part.type === "file" && part.source?.text) {
+-                part.source.text.start = extmark.start
+-                part.source.text.end = extmark.end
+-              } else if (part.type === "text" && part.source?.text) {
+-                part.source.text.start = extmark.start
+-                part.source.text.end = extmark.end
+-              }
+-              newMap.set(extmark.id, newParts.length)
+-              newParts.push(part)
+-            }
+-          }
++    const text = input.plainText
++    const used: Array<{ start: number; end: number }> = []
++    const parts: PromptInfo["parts"] = []
++
++    for (const extmark of allExtmarks) {
++      const partIndex = store.extmarkToPartIndex.get(extmark.id)
++      if (partIndex === undefined) continue
++
++      const part = store.prompt.parts[partIndex]
++      if (!part) continue
++
++      const virtualText = part.type === "agent" ? part.source?.value : part.source?.text?.value
++      if (!virtualText) continue
++
++      // OpenTUI 会按 JS 长度移动 extmark；中文/emoji 前插会让坐标漂移。
++      // 以当前可见占位符文本为准重建 span，避免把漂移坐标同步回 prompt parts。
++      let from = 0
++      let best: { start: number; end: number; distance: number } | undefined
++      while (true) {
++        const index = text.indexOf(virtualText, from)
++        if (index === -1) break
++
++        const start = promptOffsetWidth(text.slice(0, index))
++        const end = start + promptOffsetWidth(virtualText)
++        if (!used.some((span) => span.start < end && start < span.end)) {
++          const distance = Math.abs(start - extmark.start)
++          if (!best || distance < best.distance) best = { start, end, distance }
+         }
+ 
+-        draft.extmarkToPartIndex = newMap
+-        draft.prompt.parts = newParts
+-      }),
+-    )
++        from = index + virtualText.length
++      }
++      if (!best) continue
++
++      used.push(best)
++      if (part.type === "agent" && part.source) {
++        parts.push({ ...part, source: { ...part.source, start: best.start, end: best.end } })
++        continue
++      }
++      if (part.type === "file" && part.source?.text) {
++        parts.push({
++          ...part,
++          source: { ...part.source, text: { ...part.source.text, start: best.start, end: best.end } },
++        })
++        continue
++      }
++      if (part.type === "text" && part.source?.text) {
++        parts.push({
++          ...part,
++          source: { text: { ...part.source.text, start: best.start, end: best.end } },
++        })
++      }
++    }
++
++    setStore("prompt", "parts", parts)
++    restoreExtmarksFromParts(parts)
+   }
+ 
+   const stashCommands = createMemo(() =>
+@@ -1368,7 +1396,8 @@ export function Prompt(props: PromptProps) {
+   function pasteText(text: string, virtualText: string) {
+     const currentOffset = input.visualCursor.offset
+     const extmarkStart = currentOffset
+-    const extmarkEnd = extmarkStart + Bun.stringWidth(virtualText)
++    // extmark start 来自 Textarea visual offset，end 必须使用同一 offset 口径。
++    const extmarkEnd = extmarkStart + promptOffsetWidth(virtualText)
+ 
+     input.insertText(virtualText + " ")
+ 
+@@ -1469,7 +1498,8 @@ export function Prompt(props: PromptProps) {
+       return x.mime.startsWith("image/")
+     }).length
+     const virtualText = pdf ? `[PDF ${count + 1}]` : `[Image ${count + 1}]`
+-    const extmarkEnd = extmarkStart + Bun.stringWidth(virtualText)
++    // 图片/PDF 占位符与粘贴摘要共享 extmark 不变量：start/end 都是 Textarea offset。
++    const extmarkEnd = extmarkStart + promptOffsetWidth(virtualText)
+     const textToInsert = virtualText + " "
+ 
+     input.insertText(textToInsert)
+diff --git a/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx b/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx
+index 2b03d8842dc36c10007a015d02ae2a90af948810..a46b160b6475e4a62ff72975ecb978b03f272f59 100644
+--- a/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx
++++ b/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx
+@@ -288,11 +288,98 @@ test("accepted TUI slash-command submission clears without waiting for completio
+   })
+ })
+ 
++test("TUI prompt keeps pasted text summary highlighted after wide text is inserted before it", async () => {
++  const previous = Global.Path.state
++  await using tmp = await tmpdir()
++  Global.Path.state = tmp.path
++  await Bun.write(`${tmp.path}/kv.json`, "{}")
++
++  await withPrompt(
++    (url) => {
++      if (url.pathname === "/config/providers") return json({ providers: [provider], default: { provider: model.id } })
++      if (url.pathname === "/provider") return json({ all: [provider], default: { provider: model.id }, connected: [] })
++      if (url.pathname === "/agent") return json([agent])
++    },
++    async (_prompt, _route, app) => {
++      // 三行 bracketed paste 会触发产品内置的摘要文案；prefix 刻意使用中文宽字符复现坐标漂移。
++      const summary = "[Pasted ~3 lines]"
++      const prefix = "就按照这种来修改 "
++
++      await app.mockInput.pasteBracketedText("one\ntwo\nthree")
++      await wait(() => app.captureCharFrame().includes(summary))
++
++      app.mockInput.pressKey("HOME")
++      await app.mockInput.typeText(prefix)
++
++      // 行为断言走真实 TUI 渲染帧：用户可见的黄色高亮必须只覆盖粘贴摘要，
++      // 不能因为摘要前插入中文宽字符而吞掉前缀或漏掉摘要尾部。
++      const line = await waitForSpanLine(app, prefix.trim(), summary)
++      const prefixSpan = line.spans.find((span) => span.text.includes(prefix.trim()))
++      const summarySpan = line.spans.find((span) => span.text === summary)
++
++      expect(prefixSpan).toBeDefined()
++      expect(summarySpan).toBeDefined()
++      expect(colorKey(summarySpan!.bg)).not.toBe(colorKey(prefixSpan!.bg))
++    },
++  ).finally(() => {
++    Global.Path.state = previous
++  })
++})
++
++test("TUI prompt keeps image placeholder highlighted after wide text is inserted before it", async () => {
++  const previous = Global.Path.state
++  await using tmp = await tmpdir()
++  Global.Path.state = tmp.path
++  await Bun.write(`${tmp.path}/kv.json`, "{}")
++
++  await withPrompt(
++    (url) => {
++      if (url.pathname === "/config/providers") return json({ providers: [provider], default: { provider: model.id } })
++      if (url.pathname === "/provider") return json({ all: [provider], default: { provider: model.id }, connected: [] })
++      if (url.pathname === "/agent") return json([agent])
++    },
++    async (prompt, _route, app) => {
++      // [Image 1] 是首个图片附件的用户可见占位符；中文 prefix 用来验证文件 extmark 不被前插宽字符拖偏。
++      const placeholder = "[Image 1]"
++      const prefix = "就按照这种来修改 "
++
++      prompt.set({
++        input: `${placeholder} `,
++        parts: [
++          {
++            type: "file",
++            mime: "image/png",
++            filename: "clipboard.png",
++            url: "data:image/png;base64,abc",
++            // 模拟真实图片粘贴后的可见占位符；断言用户可见 span，不依赖内部 extmark id。
++            source: { type: "file", path: "clipboard.png", text: { start: 0, end: placeholder.length, value: placeholder } },
++          },
++        ],
++      })
++      await wait(() => app.captureCharFrame().includes(placeholder))
++
++      app.mockInput.pressKey("HOME")
++      await app.mockInput.typeText(prefix)
++
++      // 图片占位符使用文件 extmark 样式；这里比较前景色，避免绑定具体主题色值。
++      const line = await waitForSpanLine(app, prefix.trim(), placeholder)
++      const prefixSpan = line.spans.find((span) => span.text.includes(prefix.trim()))
++      const imageSpan = line.spans.find((span) => span.text === placeholder)
++
++      expect(prefixSpan).toBeDefined()
++      expect(imageSpan).toBeDefined()
++      expect(colorKey(imageSpan!.fg)).not.toBe(colorKey(prefixSpan!.fg))
++    },
++  ).finally(() => {
++    Global.Path.state = previous
++  })
++})
++
+ type FetchHandler = Parameters<typeof createFetch>[0]
+ 
+ async function withPrompt(
+   override: FetchHandler,
+-  run: (prompt: PromptRef, route: ReturnType<typeof useRoute>) => Promise<void>,
++  run: (prompt: PromptRef, route: ReturnType<typeof useRoute>, app: Awaited<ReturnType<typeof testRender>>) => Promise<void>,
+   options: { initialRoute?: Route; promptSessionID?: string } = {},
+ ) {
+   const calls = createFetch(override)
+@@ -336,12 +423,31 @@ async function withPrompt(
+   try {
+     await mounted
+     await wait(() => sync.status === "complete" && local.model.ready)
+-    await run(prompt, route)
++    // 只把 renderer 传给需要断言用户可见帧的测试；既有 transport 测试会自然忽略第三个参数。
++    await run(prompt, route, app)
+   } finally {
+     app.renderer.destroy()
+   }
+ }
+ 
++async function waitForSpanLine(app: Awaited<ReturnType<typeof testRender>>, ...texts: string[]) {
++  // captureSpans 按样式切分文本；等待包含所有可见片段的行，避免断言依赖 DOM/组件结构。
++  let frame = app.captureSpans()
++  await wait(() => {
++    frame = app.captureSpans()
++    return frame.lines.some((line) => texts.every((text) => line.spans.map((span) => span.text).join("").includes(text)))
++  })
++
++  const line = frame.lines.find((line) => texts.every((text) => line.spans.map((span) => span.text).join("").includes(text)))
++  if (!line) throw new Error(`missing span line containing ${texts.join(", ")}`)
++  return line
++}
++
++function colorKey(color: { buffer: ArrayLike<number> }) {
++  // 颜色由 OpenTUI 暴露为 RGBA buffer；序列化后只比较“是否同色”，不绑定具体主题色值。
++  return Array.from(color.buffer).join(",")
++}
++
+ function PromptHarness(props: {
+   fetch: typeof globalThis.fetch
+   events: ReturnType<typeof createEventSource>["source"]

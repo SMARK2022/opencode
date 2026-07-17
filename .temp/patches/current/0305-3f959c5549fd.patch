@@ -1,0 +1,394 @@
+From 3f959c5549fd6fbd2425dde4efcef6f846963a2b Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 14 Jun 2026 15:13:17 +0800
+Subject: [PATCH] =?UTF-8?q?feat(tests):=20=E6=9B=B4=E6=96=B0=20Playwright?=
+ =?UTF-8?q?=20=E5=AE=89=E8=A3=85=E5=92=8C=E6=B5=8B=E8=AF=95=E6=B5=81?=
+ =?UTF-8?q?=E7=A8=8B=EF=BC=8C=E4=BC=98=E5=8C=96=20Windows=20CI=20=E5=85=BC?=
+ =?UTF-8?q?=E5=AE=B9=E6=80=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index 2df6b36782ff7727c378efff77222f4b01ab3216..29a52700b3b82930f44cf6ac437458264ba040ae 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -487,21 +487,25 @@ jobs:
+       - name: Install Playwright system dependencies
+         if: runner.os == 'Linux'
+         working-directory: packages/app
+-        # setup-bun 使用 hoisted 安装，显式走根 node_modules 的锁定版本，避免 bunx 重新解析到未修复的安装器。
++        # setup-bun 使用 hoisted 安装，显式走根 node_modules 的锁定 CLI，避免 bunx 重新解析到未修复的安装器。
++        # Windows 上 Bun 执行 .bin shim 会重映射 bin metadata；Node 直接执行 CLI 不触发该边界。
+         timeout-minutes: 10
+-        run: bun ../../node_modules/.bin/playwright install-deps chromium
++        run: node ../../node_modules/playwright/cli.js install-deps chromium
+ 
+       - name: Install Playwright browsers
+         if: steps.playwright-cache.outputs.cache-hit != 'true'
+         working-directory: packages/app
+         # 浏览器下载和解压发生在 E2E 测试前，独立超时可以防止 install 卡住占满整个 warning job。
++        # 继续走锁定的 Node CLI，确保安装和测试阶段使用同一个 Playwright 入口。
+         timeout-minutes: 15
+-        run: bun ../../node_modules/.bin/playwright install chromium
++        run: node ../../node_modules/playwright/cli.js install chromium
+ 
+       - name: Run upstream app e2e tests
+         id: e2e
+         continue-on-error: true
+-        run: bun run --cwd packages/app test:e2e:local
++        working-directory: packages/app
++        # 不通过 package script 解析 playwright bin，避免 Windows Bun 再次触发 .bin metadata remap。
++        run: node ../../node_modules/playwright/cli.js test
+         env:
+           CI: true
+           PLAYWRIGHT_JUNIT_OUTPUT: e2e/junit-${{ matrix.os_label }}.xml
+diff --git a/packages/opencode/test/ci/upstream-e2e-workflow.test.ts b/packages/opencode/test/ci/upstream-e2e-workflow.test.ts
+index 83677a61d06727ad6834d815d2e25cf783458fac..8c1d06331e30aeac998e65744d6e67e82a096a63 100644
+--- a/packages/opencode/test/ci/upstream-e2e-workflow.test.ts
++++ b/packages/opencode/test/ci/upstream-e2e-workflow.test.ts
+@@ -10,6 +10,7 @@ describe("upstream app e2e workflow", () => {
+     const job = section(workflow, "  upstream-e2e-warning:")
+     const installDeps = step(job, "Install Playwright system dependencies")
+     const installBrowsers = step(job, "Install Playwright browsers")
++    const runE2E = step(job, "Run upstream app e2e tests")
+     const catalog = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8")).workspaces.catalog
+     const playwrightVersion = catalog["@playwright/test"]
+     const lockfile = await fs.readFile(path.join(root, "bun.lock"), "utf8")
+@@ -29,23 +30,29 @@ describe("upstream app e2e workflow", () => {
+     expect(field(installBrowsers, "timeout-minutes")).toBe("15")
+ 
+     expect(playwrightCommand(installDeps)).toEqual([
+-      "bun",
+-      "../../node_modules/.bin/playwright",
++      "node",
++      "../../node_modules/playwright/cli.js",
+       "install-deps",
+       "chromium",
+     ])
+     expect(playwrightCommand(installBrowsers)).toEqual([
+-      "bun",
+-      "../../node_modules/.bin/playwright",
++      "node",
++      "../../node_modules/playwright/cli.js",
+       "install",
+       "chromium",
+     ])
++    expect(playwrightCommand(runE2E)).toEqual(["node", "../../node_modules/playwright/cli.js", "test"])
+ 
+-    // 安装命令必须停留在 packages/app 的依赖边界内，并显式使用 hoisted 后的根 bin，
+-    // 避免 bunx 重新解析版本，也避免管道、重定向、子命令等 shell 组合改变 CI 安全边界。
++    // 安装和测试命令必须停留在 packages/app 的依赖边界内，并显式使用 hoisted 后的根 CLI。
++    // Windows 上 Bun 执行 .bin shim 会尝试重映射 bin metadata；直接用 Node 执行锁定 CLI 可避开该边界。
+     expect(field(installDeps, "working-directory")).toBe("packages/app")
+     expect(field(installBrowsers, "working-directory")).toBe("packages/app")
++    expect(field(runE2E, "working-directory")).toBe("packages/app")
++    // E2E 入口改为直接执行 CLI 后仍必须保留 JUnit 输出位置，
++    // 后续汇总步骤依赖这个约定判断 warning job 是否产出报告。
++    expect(envField(runE2E, "PLAYWRIGHT_JUNIT_OUTPUT")).toBe("e2e/junit-${{ matrix.os_label }}.xml")
+     expect(job).not.toContain("bunx playwright")
++    expect(job).not.toContain(".bin/playwright")
+   })
+ })
+ 
+@@ -71,6 +78,11 @@ function field(source: string, key: string) {
+   return match?.[1]
+ }
+ 
++function envField(source: string, key: string) {
++  const match = source.match(new RegExp(`^          ${key}: (.+)$`, "m"))
++  return match?.[1]
++}
++
+ function playwrightCommand(source: string) {
+   const command = field(source, "run")
+   expect(command).toBeTruthy()
+diff --git a/packages/opencode/test/fixture/plugin-deps.ts b/packages/opencode/test/fixture/plugin-deps.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1c7a6befe1e24246b7380c38328fa8abe94b8510
+--- /dev/null
++++ b/packages/opencode/test/fixture/plugin-deps.ts
+@@ -0,0 +1,14 @@
++import { mkdir } from "fs/promises"
++import path from "path"
++
++export async function markConfigDependenciesInstalled(dir: string) {
++  // Config 会为每个配置目录补齐 @opencode-ai/plugin；测试里的本地 file 插件已经可直接导入，
++  // 这里仅写入生产 Npm.install 认可的最小安装标记，避免 Windows CI 在单测中真实跑 Arborist。
++  await mkdir(path.join(dir, "node_modules"), { recursive: true })
++  // package-lock.json 的根 dependencies 记录的是“配置目录依赖已满足”的契约，
++  // 不是 fixture 要加载的插件源码；插件源码仍来自 .opencode/plugin 下的真实文件。
++  await Bun.write(
++    path.join(dir, "package-lock.json"),
++    JSON.stringify({ packages: { "": { dependencies: { "@opencode-ai/plugin": "0.0.0" } } } }),
++  )
++}
+diff --git a/packages/opencode/test/installation/install-script.test.ts b/packages/opencode/test/installation/install-script.test.ts
+index e2d97394eb4ff73af588ff25deb74db671b6cfa1..ca1c91a97bf31d287381790f63a8fe8f7c156e41 100644
+--- a/packages/opencode/test/installation/install-script.test.ts
++++ b/packages/opencode/test/installation/install-script.test.ts
+@@ -119,11 +119,36 @@ async function createReleaseAsset(dir: string, marker: string) {
+   const asset = path.join(dir, `opencode-linux-x64-${marker}.tar.gz`)
+ 
+   await writeExecutable(path.join(payload, "opencode"), `#!/usr/bin/env bash\necho "${VERSION}"\n# ${marker}\n`)
+-  await runCommand(["tar", "-czf", asset, "-C", payload, "opencode"], dir)
++  // release asset 是 fake curl 的唯一输入；必须在这里验证 tar 成功，
++  // 否则 Windows CI 会延迟到 cp cannot stat，掩盖真正的归档失败原因。
++  const result = await runCommand(archiveCommand(asset, payload), dir)
++  if (result.code !== 0) throw new Error(result.output || `failed to create release asset: ${asset}`)
++  if (!existsSync(asset)) throw new Error(`release asset was not created: ${asset}`)
+ 
+   return asset
+ }
+ 
++function archiveCommand(asset: string, payload: string) {
++  if (process.platform !== "win32") return ["tar", "-czf", asset, "-C", payload, "opencode"]
++  // GitHub Windows runner 的安装脚本实际由 Git Bash 执行；归档也走同一 POSIX PATH，
++  // 让 tar 产物和后续 fake curl/cp 使用一致的 /c/... 路径语义。
++  return [
++    BASH,
++    "-c",
++    [
++      "exec",
++      "env",
++      quoteForSh(`PATH=${bashPath()}`),
++      "tar",
++      "-czf",
++      quoteForSh(bashPathForFile(asset)),
++      "-C",
++      quoteForSh(bashPathForFile(payload)),
++      "opencode",
++    ].join(" "),
++  ]
++}
++
+ async function writeFakeReleaseCommands(dir: string, asset: string) {
+   await writeIdCommand(dir, 501)
+   await writeExecutable(
+diff --git a/packages/opencode/test/preload.ts b/packages/opencode/test/preload.ts
+index c449045c6daca87d1a4219b6badcb308f3888804..7feacfe9847457e0d8d1b33533eebb08e55064b9 100644
+--- a/packages/opencode/test/preload.ts
++++ b/packages/opencode/test/preload.ts
+@@ -5,6 +5,7 @@ import path from "path"
+ import fs from "fs/promises"
+ import { setTimeout as sleep } from "node:timers/promises"
+ import { afterAll } from "bun:test"
++import { markConfigDependenciesInstalled } from "./fixture/plugin-deps"
+ 
+ // Set XDG env vars FIRST, before any src/ imports
+ const dir = path.join(os.tmpdir(), "opencode-test-data-" + process.pid)
+@@ -38,6 +39,10 @@ process.env["OPENCODE_MODELS_PATH"] = path.join(import.meta.dir, "tool", "fixtur
+ process.env["OPENCODE_EXPERIMENTAL_EVENT_SYSTEM"] = "true"
+ process.env["OPENCODE_EXPERIMENTAL_WORKSPACES"] = "true"
+ 
++// 全局配置目录本轮测试不需要真实安装 @opencode-ai/plugin；只预置依赖完成标记，
++// 保留“没有全局 opencode.json/opencode.jsonc”的配置语义，同时避免 Windows full run 等待 npm reify。
++await markConfigDependenciesInstalled(path.join(process.env["XDG_CONFIG_HOME"], "opencode"))
++
+ // Set test home directory to isolate tests from user's actual home directory
+ // This prevents tests from picking up real user configs/skills from ~/.claude/skills
+ const testHome = path.join(dir, "home")
+diff --git a/packages/opencode/test/provider/provider.test.ts b/packages/opencode/test/provider/provider.test.ts
+index ede52b838cb97046f6e4355a8b3e89b5f333c02b..3df6cee8fbcd7626dde8092ea39f4df9414610f1 100644
+--- a/packages/opencode/test/provider/provider.test.ts
++++ b/packages/opencode/test/provider/provider.test.ts
+@@ -20,6 +20,7 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
+ import { Config } from "@/config/config"
+ import { Auth } from "@/auth"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
++import { markConfigDependenciesInstalled } from "../fixture/plugin-deps"
+ 
+ const env = makeRuntime(Env.Service, Env.defaultLayer)
+ const originalEnv = new Map<string, string | undefined>()
+@@ -96,14 +97,6 @@ async function defaultModel(ctx: InstanceContext) {
+   return run(ctx, (provider) => provider.defaultModel())
+ }
+ 
+-async function markPluginDependenciesReady(dir: string) {
+-  await mkdir(path.join(dir, "node_modules"), { recursive: true })
+-  await Bun.write(
+-    path.join(dir, "package-lock.json"),
+-    JSON.stringify({ packages: { "": { dependencies: { "@opencode-ai/plugin": "0.0.0" } } } }),
+-  )
+-}
+-
+ function paid(providers: Awaited<ReturnType<typeof list>>) {
+   const item = providers[ProviderID.make("opencode")]
+   expect(item).toBeDefined()
+@@ -2635,8 +2628,8 @@ test("plugin config providers persist after instance dispose", async () => {
+       const configDir = path.join(dir, ".opencode")
+       const root = path.join(configDir, "plugin")
+       await mkdir(root, { recursive: true })
+-      await markPluginDependenciesReady(configDir)
+-      await markPluginDependenciesReady(Global.Path.config)
++      await markConfigDependenciesInstalled(configDir)
++      await markConfigDependenciesInstalled(Global.Path.config)
+       await Bun.write(
+         path.join(root, "demo-provider.ts"),
+         [
+@@ -2694,8 +2687,12 @@ test("plugin config providers persist after instance dispose", async () => {
+ test("plugin config enabled and disabled providers are honored", async () => {
+   await using tmp = await tmpdir({
+     init: async (dir) => {
+-      const root = path.join(dir, ".opencode", "plugin")
++      const configDir = path.join(dir, ".opencode")
++      const root = path.join(configDir, "plugin")
+       await mkdir(root, { recursive: true })
++      // 这个用例只验证 plugin config hook 对 provider allow/deny 的影响，
++      // 不应把配置目录依赖安装耗时纳入断言路径。
++      await markConfigDependenciesInstalled(configDir)
+       await Bun.write(
+         path.join(root, "provider-filter.ts"),
+         [
+diff --git a/packages/opencode/test/server/httpapi-provider.test.ts b/packages/opencode/test/server/httpapi-provider.test.ts
+index 490b947fd9c7eb34e3d90886ecc7d59dddb960a9..c0a910425f23f0b7c6e4c04e12544b1031a66a00 100644
+--- a/packages/opencode/test/server/httpapi-provider.test.ts
++++ b/packages/opencode/test/server/httpapi-provider.test.ts
+@@ -7,6 +7,7 @@ import * as Log from "@opencode-ai/core/util/log"
+ import { resetDatabase } from "../fixture/db"
+ import { TestInstance } from "../fixture/fixture"
+ import { testEffect } from "../lib/effect"
++import { markConfigDependenciesInstalled } from "../fixture/plugin-deps"
+ 
+ void Log.init({ print: false })
+ 
+@@ -115,9 +116,16 @@ function requestCallback(input: {
+   })
+ }
+ 
++function markLocalPluginDependencies(dir: string) {
++  // HTTP tests intentionally exercise the production Server.Default app. 本地 file 插件无需真实 npm install，
++  // 只补齐 Config.waitForDependencies 认可的最小标记，避免 Windows CI 在请求中等待 Arborist。
++  return Effect.promise(() => markConfigDependenciesInstalled(path.join(dir, ".opencode")))
++}
++
+ function writeProviderAuthPlugin(dir: string) {
+   return Effect.gen(function* () {
+     const fs = yield* AppFileSystem.Service
++    yield* markLocalPluginDependencies(dir)
+ 
+     yield* fs.writeWithDirs(
+       path.join(dir, ".opencode", "plugin", "provider-oauth-parity.ts"),
+@@ -152,6 +160,7 @@ function writeProviderAuthPlugin(dir: string) {
+ function writeProviderAuthValidationPlugin(dir: string) {
+   return Effect.gen(function* () {
+     const fs = yield* AppFileSystem.Service
++    yield* markLocalPluginDependencies(dir)
+ 
+     yield* fs.writeWithDirs(
+       path.join(dir, ".opencode", "plugin", "provider-oauth-validation.ts"),
+@@ -193,6 +202,7 @@ function writeProviderAuthValidationPlugin(dir: string) {
+ function writeFunctionOptionsPlugin(dir: string) {
+   return Effect.gen(function* () {
+     const fs = yield* AppFileSystem.Service
++    yield* markLocalPluginDependencies(dir)
+ 
+     yield* fs.writeWithDirs(
+       path.join(dir, ".opencode", "plugin", "provider-function-options.ts"),
+@@ -224,6 +234,7 @@ function writeFunctionOptionsPlugin(dir: string) {
+ function writeProviderModelsMutationPlugin(dir: string) {
+   return Effect.gen(function* () {
+     const fs = yield* AppFileSystem.Service
++    yield* markLocalPluginDependencies(dir)
+ 
+     yield* fs.writeWithDirs(
+       path.join(dir, ".opencode", "plugin", "provider-models-mutation.ts"),
+diff --git a/packages/opencode/test/tool/repo_clone.test.ts b/packages/opencode/test/tool/repo_clone.test.ts
+index 550c8c385b1d26c3ba6adcae50701abd240588a0..44b07fd0e954f9adfcae2935c093857305a1a709 100644
+--- a/packages/opencode/test/tool/repo_clone.test.ts
++++ b/packages/opencode/test/tool/repo_clone.test.ts
+@@ -1,6 +1,7 @@
+ import { afterEach, describe, expect } from "bun:test"
+ import path from "path"
+ import { pathToFileURL } from "node:url"
++import type * as Scope from "effect/Scope"
+ import { Cause, Effect, Exit, Layer } from "effect"
+ import { AppFileSystem } from "@opencode-ai/core/filesystem"
+ import { Agent } from "../../src/agent/agent"
+@@ -77,6 +78,28 @@ const githubBase = <A, E, R>(url: string, self: Effect.Effect<A, E, R>) =>
+       }),
+   )
+ 
++const waitForContent = (
++  fs: AppFileSystem.Interface,
++  file: string,
++  content: string,
++  attempts = 50,
++): Effect.Effect<string, AppFileSystem.Error | Error> =>
++  Effect.gen(function* () {
++    const actual = yield* fs.readFileStringSafe(file)
++    if (actual === content) return actual
++    if (attempts <= 0) return yield* Effect.fail(new Error(`timed out waiting for ${file}`))
++    yield* Effect.sleep("100 millis")
++    return yield* waitForContent(fs, file, content, attempts - 1)
++  })
++
++const isolateRepoCache = (fs: AppFileSystem.Interface, cache: string): Effect.Effect<void, never, Scope.Scope> =>
++  Effect.gen(function* () {
++    // repo_clone 测试使用固定 GitHub shorthand；先清掉全局 cache，
++    // 防止 full run 中其他 reference/read/repo 测试留下同名工作区污染内容断言。
++    yield* fs.remove(cache, { recursive: true }).pipe(Effect.ignore)
++    yield* Effect.addFinalizer(() => fs.remove(cache, { recursive: true }).pipe(Effect.ignore))
++  })
++
+ describe("tool.repo_clone", () => {
+   it.live("clones a repo into the managed cache and reuses it on subsequent calls", () =>
+     provideTmpdirInstance((_dir) =>
+@@ -90,6 +113,8 @@ describe("tool.repo_clone", () => {
+         // Global.Path.repos 下同一个 owner/repo 缓存而互相读到对方的工作区。
+         const remoteDir = path.join(remoteRoot, owner)
+         const remoteRepo = path.join(remoteDir, "repo.git")
++        const cache = path.join(Global.Path.repos, "github.com", owner, repo)
++        yield* isolateRepoCache(fs, cache)
+ 
+         yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "v1\n"))
+         yield* git(source, ["add", "."])
+@@ -105,9 +130,9 @@ describe("tool.repo_clone", () => {
+         )
+ 
+         expect(cloned.metadata.status).toBe("cloned")
+-        expect(cloned.metadata.localPath).toBe(path.join(Global.Path.repos, "github.com", owner, repo))
++        expect(cloned.metadata.localPath).toBe(cache)
+         expect(cached.metadata.status).toBe("cached")
+-        expect(yield* fs.readFileString(path.join(cloned.metadata.localPath, "README.md"))).toBe("v1\n")
++        expect(yield* waitForContent(fs, path.join(cloned.metadata.localPath, "README.md"), "v1\n")).toBe("v1\n")
+       }),
+     ),
+   )
+@@ -124,6 +149,8 @@ describe("tool.repo_clone", () => {
+         // 场景在全量 CI 中提前写入同名缓存，导致本测试刷新错误来源。
+         const remoteDir = path.join(remoteRoot, owner)
+         const remoteRepo = path.join(remoteDir, "repo.git")
++        const cache = path.join(Global.Path.repos, "github.com", owner, repo)
++        yield* isolateRepoCache(fs, cache)
+ 
+         yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "v1\n"))
+         yield* git(source, ["add", "."])
+@@ -150,7 +177,7 @@ describe("tool.repo_clone", () => {
+ 
+         expect(first.metadata.status).toBe("cloned")
+         expect(refreshed.metadata.status).toBe("refreshed")
+-        expect(yield* fs.readFileString(path.join(first.metadata.localPath, "README.md"))).toBe("v2\n")
++        expect(yield* waitForContent(fs, path.join(first.metadata.localPath, "README.md"), "v2\n")).toBe("v2\n")
+       }),
+     ),
+   )
+@@ -167,6 +194,8 @@ describe("tool.repo_clone", () => {
+         // 结果依赖其他测试先后顺序，而不是依赖本用例创建的远端仓库。
+         const remoteDir = path.join(remoteRoot, owner)
+         const remoteRepo = path.join(remoteDir, "repo.git")
++        const cache = path.join(Global.Path.repos, "github.com", owner, repo)
++        yield* isolateRepoCache(fs, cache)
+ 
+         yield* Effect.promise(() => Bun.write(path.join(source, "README.md"), "main\n"))
+         yield* git(source, ["add", "."])
+@@ -186,7 +215,7 @@ describe("tool.repo_clone", () => {
+ 
+         expect(result.metadata.status).toBe("cloned")
+         expect(result.metadata.branch).toBe("docs")
+-        expect(yield* fs.readFileString(path.join(result.metadata.localPath, "DOCS.md"))).toBe("docs\n")
++        expect(yield* waitForContent(fs, path.join(result.metadata.localPath, "DOCS.md"), "docs\n")).toBe("docs\n")
+       }),
+     ),
+   )
