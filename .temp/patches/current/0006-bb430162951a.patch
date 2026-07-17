@@ -1,20 +1,7 @@
-From bb430162951a92c9139ee820da30866a4cdfbc6d Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Wed, 22 Apr 2026 03:24:06 +0800
-Subject: [PATCH] =?UTF-8?q?feat(usage):=20=E4=BC=98=E5=8C=96=E4=BD=BF?=
- =?UTF-8?q?=E7=94=A8=E4=BF=A1=E6=81=AF=E8=AE=A1=E7=AE=97=EF=BC=8C=E7=A1=AE?=
- =?UTF-8?q?=E4=BF=9D=E5=9C=A8=E6=97=A0=E5=9B=9E=E5=A4=8D=E6=97=B6=E6=98=BE?=
- =?UTF-8?q?=E7=A4=BA=E9=9B=B6=E5=80=BC?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index 5f5f0c506c78c81c6b6138cb2cfa0ddec70d3637..691b8a1ca743b2d09d6f53753938af32263a8ab2 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -156,13 +156,19 @@ export function Prompt(props: PromptProps) {
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -258,15 +258,22 @@
      return messages.findLast((m): m is UserMessage => m.role === "user")
    })
  
@@ -23,25 +10,28 @@ index 5f5f0c506c78c81c6b6138cb2cfa0ddec70d3637..691b8a1ca743b2d09d6f53753938af32
  
    const usageRaw = createMemo((): UsageInfo | undefined => {
      if (!props.sessionID) return
++    // 会话运行中（非 idle）时即使没有助手回复也显示零值用量
 +    const isRunning = status().type !== "idle"
+     const session = sync.session.get(props.sessionID)
      const msg = sync.data.message[props.sessionID] ?? []
+     // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
      const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
 -    if (!last) return
 +
 +    if (!last) {
 +      if (!isRunning) return
-+      // Show zeroed display immediately when the prompt was sent but no reply yet
++      // 已发送 prompt 但尚无助手回复时立即显示零值
 +      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
 +    }
  
+     // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
      const parts = sync.data.part[last.id] ?? []
-     const chars = parts.reduce((sum, part) => {
-@@ -184,13 +190,28 @@ export function Prompt(props: PromptProps) {
-         }, 0)
+@@ -289,14 +296,29 @@
        : 0
  
+     // 输入 token = API 返回的 input/cache 之和 + 流式中工具输出字符估算
 -    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
-+    // Sum tokens across all completed steps; last.tokens is per-last-step only (processor.ts overwrites it)
++    // 累加所有 step-finish parts 的 token（last.tokens 仅含最后一步）
 +    const cumTokens = parts.reduce(
 +      (acc, part) => {
 +        if (part.type !== "step-finish") return acc
@@ -57,23 +47,25 @@ index 5f5f0c506c78c81c6b6138cb2cfa0ddec70d3637..691b8a1ca743b2d09d6f53753938af32
 -    const outputActual = last.tokens.output + last.tokens.reasoning
 +    const outputActual = cumTokens.output
      const outputEstimated = Math.round(chars / 4)
+     // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
      const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
      const tokens = input + output
 -    if (tokens <= 0 && input <= 0 && output <= 0) return
-+
 +    if (tokens <= 0 && input <= 0 && output <= 0) {
++      // 运行中但 token 尚未到达时显示零值，避免 footer 闪烁
 +      if (!isRunning) return
 +      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
 +    }
  
      const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
      const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
-diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-index 6f63658cbbe362ccfccb2b1046b9ad6580fe0656..522b6b660aa10f82bad33e33f8cafc32fab42bb0 100644
---- a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-@@ -20,12 +20,9 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
-   const stateRaw = createMemo((): StateValue => {
+
+
+diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
+--- a/packages/tui/src/feature-plugins/sidebar/context.tsx
++++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
+@@ -23,12 +23,8 @@
+     // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
      const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant")
      if (!last) {
 -      return {
@@ -82,18 +74,17 @@ index 6f63658cbbe362ccfccb2b1046b9ad6580fe0656..522b6b660aa10f82bad33e33f8cafc32
 -        output: 0,
 -        percent: null,
 -      }
-+      // Always show zeros so the display is visible from the moment a prompt is sent.
-+      // The sidebar always renders something; there is no hidden/fallback state.
++      // 始终显示零值，sidebar 从 prompt 发送起即可见
 +      return { tokens: 0, input: 0, output: 0, percent: null }
      }
  
-     const parts = props.api.state.part(last.id)
-@@ -45,9 +42,20 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
-         }, 0)
+     // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
+@@ -51,9 +47,20 @@
        : 0
  
+     // 输入 token = API 返回的 input/cache 之和 + 流式中工具输出字符估算
 -    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
-+    // Sum tokens across all completed steps; last.tokens is per-last-step only (processor.ts overwrites it)
++    // 累加所有 step-finish parts 的 token（last.tokens 仅含最后一步）
 +    const cumTokens = parts.reduce(
 +      (acc, part) => {
 +        if (part.type !== "step-finish") return acc
@@ -109,41 +100,46 @@ index 6f63658cbbe362ccfccb2b1046b9ad6580fe0656..522b6b660aa10f82bad33e33f8cafc32
 -    const outputActual = last.tokens.output + last.tokens.reasoning
 +    const outputActual = cumTokens.output
      const outputEstimated = Math.round(chars / 4)
+     // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
      const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
-     const tokens = input + output
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-index ad3d945b866925674a20bbd6dedb7c0377d10dba..a949fded1ff234d3d19edd71c741979cd6e64313 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-@@ -32,12 +32,20 @@ export function SubagentFooter() {
+
+
+diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
+--- a/packages/tui/src/routes/session/subagent-footer.tsx
++++ b/packages/tui/src/routes/session/subagent-footer.tsx
+@@ -31,14 +31,24 @@
      return { label, index: index + 1, total: siblings.length }
    })
  
 -  type UsageInfo = { flow: string; context: string; cost: string | undefined }
++  // 获取会话状态，用于判断是否正在运行
 +  const status = createMemo(() => sync.data.session_status?.[route.sessionID])
-+
-+  type UsageInfo = { flow: string; context: string | undefined; cost: string | undefined }
  
++  type UsageInfo = { flow: string; context: string | undefined; cost: string | undefined }
++
    const usageRaw = createMemo((): UsageInfo | undefined => {
++    // 会话运行中（非 idle）时即使没有助手回复也显示零值用量
 +    const isRunning = (status()?.type ?? "idle") !== "idle"
      const msg = messages()
+     // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
      const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
 -    if (!last) return
-+
+ 
 +    if (!last) {
 +      if (!isRunning) return
-+      // Show zeroed display immediately when the prompt was sent but no reply yet
++      // 已发送 prompt 但尚无助手回复时立即显示零值
 +      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
 +    }
- 
++
+     // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
      const parts = sync.data.part[last.id] ?? []
      const chars = parts.reduce((sum, part) => {
-@@ -56,13 +64,28 @@ export function SubagentFooter() {
-         }, 0)
+@@ -59,14 +69,29 @@
        : 0
  
+     // 输入 token = API 返回的 input/cache 之和 + 流式中工具输出字符估算
 -    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
-+    // Sum tokens across all completed steps; last.tokens is per-last-step only (processor.ts overwrites it)
++    // 累加所有 step-finish parts 的 token（last.tokens 仅含最后一步）
 +    const cumTokens = parts.reduce(
 +      (acc, part) => {
 +        if (part.type !== "step-finish") return acc
@@ -159,14 +155,17 @@ index ad3d945b866925674a20bbd6dedb7c0377d10dba..a949fded1ff234d3d19edd71c741979c
 -    const outputActual = last.tokens.output + last.tokens.reasoning
 +    const outputActual = cumTokens.output
      const outputEstimated = Math.round(chars / 4)
+     // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
      const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
      const tokens = input + output
 -    if (tokens <= 0 && input <= 0 && output <= 0) return
-+
 +    if (tokens <= 0 && input <= 0 && output <= 0) {
++      // 运行中但 token 尚未到达时显示零值，避免 footer 闪烁
 +      if (!isRunning) return
 +      return { flow: `↑ ${Locale.number(0)} · ↓ ${Locale.number(0)}`, context: undefined, cost: undefined }
 +    }
  
      const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
      const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
+
+
