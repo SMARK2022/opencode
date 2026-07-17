@@ -256,6 +256,7 @@ function commandText(result: CommandResult) {
 async function repositoryFingerprint(repo: string) {
   // status 文本不能识别“同一路径仍为 modified、但内容再次变化”，所以同时纳入完整 diff。
   // 指纹只用于确认脚本没有改变用户工作区，不要求用户在运行前清理已有修改。
+  const head = requireGit(repo, ["rev-parse", "HEAD"]).trim()
   const status = requireGit(repo, ["status", "--porcelain", "--untracked-files=all"])
   const worktreeDiff = requireGit(repo, ["diff", "--binary", "--full-index", "--no-ext-diff"])
   const indexDiff = requireGit(repo, ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff"])
@@ -266,7 +267,7 @@ async function repositoryFingerprint(repo: string) {
   const untrackedHashes = await Promise.all(
     untracked.map(async (path) => `${path}\t${await fileSha256(resolve(repo, path))}`),
   )
-  return sha256([status, worktreeDiff, indexDiff, ...untrackedHashes].join("\0"))
+  return sha256([head, status, worktreeDiff, indexDiff, ...untrackedHashes].join("\0"))
 }
 
 function isSmarkAuthor(name: string, email: string) {
@@ -634,10 +635,9 @@ async function main() {
     outcomes: [],
   }
   const runID = `${report.mode}-${materializeIndex === undefined ? "" : String(materializeIndex).padStart(4, "0") + "-"}${report.startedAt.replace(/[:.]/g, "-")}`
-  const targetHead = requireGit(targetRepo, ["rev-parse", "HEAD"]).trim()
   report.targetRepoFingerprintBefore = await repositoryFingerprint(targetRepo)
-  // 目标 worktree 可以含有他人修改；固定 commit clone 不读取这些内容，并验证运行前后指纹不变。
-  if (targetHead !== manifest.targetBaseline) throw new Error(`target HEAD changed: expected ${manifest.targetBaseline}, got ${targetHead}`)
+  // 目标 worktree 可以在 baseline 之后继续提交；只要求 immutable baseline 对象仍可独立 clone。
+  requireGit(targetRepo, ["cat-file", "-e", manifest.targetBaseline + "^{commit}"])
 
   // 物化构建位于 states 同一文件系统，成功目录发布可以使用原子 rename。
   const tempRoot = await mkdtemp(
@@ -646,7 +646,8 @@ async function main() {
   const simulationRepo = join(tempRoot, "repo")
   const checkpointPath = join(tempRoot, "last-success.patch")
   await Bun.write(checkpointPath, new Uint8Array())
-  requireGit(tempRoot, ["clone", "--no-local", "--no-hardlinks", sourceRepo, simulationRepo])
+  // 从目标仓库复制测试环境，避免依赖父仓库当前 HEAD 或目标 worktree 的脏内容。
+  requireGit(tempRoot, ["clone", "--no-local", "--no-hardlinks", targetRepo, simulationRepo])
   requireGit(simulationRepo, ["checkout", "--detach", manifest.targetBaseline])
   // 物化状态必须从空白 exact baseline 开始，不能继承主工作区或旧状态内容。
   const simulationStatus = requireGit(simulationRepo, ["status", "--porcelain", "--untracked-files=all"])
@@ -714,7 +715,7 @@ async function main() {
   if (sourceRepoHeadAfter !== sourceRepoHeadBefore || report.sourceRepoFingerprintAfter !== report.sourceRepoFingerprintBefore) {
     report.integrityFailure = "source repository changed during dry-run"
   }
-  if (report.targetRepoFingerprintAfter !== report.targetRepoFingerprintBefore || targetHead !== requireGit(targetRepo, ["rev-parse", "HEAD"]).trim()) {
+  if (report.targetRepoFingerprintAfter !== report.targetRepoFingerprintBefore) {
     report.integrityFailure = "target repository changed during dry-run"
   }
   if (report.stoppedAt !== undefined || report.integrityFailure) {
