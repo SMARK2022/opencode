@@ -408,11 +408,25 @@ export async function acquireMaintenanceLease(
     if (!latestRaw) throw new MaintenanceBusyError("Database maintenance owner changed during stale reclaim")
     const latest = maintenanceOwner(latestRaw)
     if (latest.token !== staleOwner.token || alive(latest.pid)) throw new MaintenanceBusyError()
-    try {
-      await rename(lockDir, path.join(root, `stale-${staleOwner.token}`))
-    } catch {
-      throw new MaintenanceBusyError()
+    // #495：所有 contender 都 rename 到旧 token 命名的同一 tombstone；winner 占住目标后，延迟重试不会搬走新 lock。
+    // 一秒边界覆盖 CI 已观察到的 641-876ms Windows sharing 生命周期，同时避免永久等待损坏或长期占用的 lock。
+    // retry 期间不再读取 owner；旧目录一旦被 winner 搬走，其他 contender 只能失败，不能把新 owner 误判成旧 owner。
+    // 25ms 只决定下一次同 rename 探测的节奏，不参与 lease 成功判定或测试的 elapsed-time 断言。
+    const renameDeadline = Date.now() + 1_000
+    while (true) {
+      try {
+        await rename(lockDir, path.join(root, `stale-${staleOwner.token}`))
+        break
+      } catch (error) {
+        const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined
+        // 仅 NT sharing 对应的三类瞬时错误可等待；目标已存在、路径损坏等结果仍立即保持 busy 语义。
+        if (!code || !["EPERM", "EACCES", "EBUSY"].includes(code) || Date.now() >= renameDeadline) {
+          throw new MaintenanceBusyError()
+        }
+        await Bun.sleep(25)
+      }
     }
+    // tombstone 搬走后重新 mkdir 才是 owner 变更的原子边界；提前建目录会让其他 contender 误判成功。
     try {
       await mkdir(lockDir)
     } catch {

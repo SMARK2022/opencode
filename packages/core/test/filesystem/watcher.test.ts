@@ -2,7 +2,7 @@ import { $ } from "bun"
 import { describe, expect } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
-import { ConfigProvider, Deferred, Duration, Effect, Fiber, Layer, Option, Stream } from "effect"
+import { ConfigProvider, Deferred, Duration, Effect, Exit, Fiber, Layer, Logger, Option, Stream } from "effect"
 import { Config } from "@opencode-ai/core/config"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -15,7 +15,8 @@ import { location } from "../fixture/location"
 import { tmpdir } from "../fixture/tmpdir"
 import { testEffect } from "../lib/effect"
 
-const describeWatcher = Watcher.hasNativeBinding() && !process.env.CI ? describe : describe.skip
+// capability检查只排除确实没有native binding的平台；CI环境本身不能成为行为回归的skip理由。
+const describeWatcher = Watcher.hasNativeBinding() ? describe : describe.skip
 
 type WatcherEvent = { file: string; event: "add" | "change" | "unlink" }
 
@@ -176,6 +177,31 @@ describeWatcher("Watcher", () => {
         yield* noUpdate((event) => event.file === file, fs.writeFileString(file, "plain"))
       }),
     ),
+  )
+
+  it.live("reports acquisition failure without disabling the Location", () =>
+    Effect.gen(function* () {
+      const logs: string[] = []
+      const tmp = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      )
+      const root = path.join(tmp.path, "removed-watch-root")
+      // Instance context先建立、再删除真实root，保证失败来自native subscribe而不是fixture或配置构造。
+      yield* Effect.promise(() => fs.mkdir(root))
+      yield* Effect.promise(() => fs.rm(root, { recursive: true }))
+      const result = yield* Effect.void.pipe(
+        // vcs存根只为进入root订阅分支；root在订阅前已被删除，git leg不会参与本用例。
+        provide(root, { type: "git", store: AbsolutePath.make(path.join(root, ".git")) }),
+        Effect.scoped,
+        Effect.provide(Logger.layer([Logger.make((entry) => logs.push(String(entry.message)))])),
+        Effect.exit,
+      )
+      // 目标没有独立 init consumer；保留 Location 可用，同时用失败诊断区分真实订阅与降级。
+      // 不绑定 Parcel 错误字符串或重试次数，业务层仍可读取已持久化 Session。
+      expect(Exit.isSuccess(result)).toBe(true)
+      expect(logs.some((message) => message.includes("failed to init watcher service"))).toBe(true)
+    }),
   )
 
   it.live("cleanup stops publishing events", () =>
