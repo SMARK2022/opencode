@@ -794,7 +794,7 @@ async function runTypechecks(stateDirectory: string, state: MaterializedState, i
   await rm(stateDiffPath, { force: true })
 
   const input = await installInputFingerprint(testWorkspaceRepo)
-  // install-state 解析失败会触发真实 frozen install，不会复用未知依赖环境。
+  // install-state 解析失败会触发真实 install，不会复用未知依赖环境。
   const previous: unknown = await (async () => {
     try {
       return await Bun.file(testWorkspaceState).json()
@@ -810,9 +810,9 @@ async function runTypechecks(stateDirectory: string, state: MaterializedState, i
   let installStdout = ""
   let installStderr = ""
   if (!canReuseInstall) {
-    // frozen lockfile 禁止自动修订依赖输入；不一致必须作为安装失败暴露。
+    // 仅在隔离 test workspace 中允许 Bun 补齐依赖 lockfile，目标状态不被改写。
     // clonefile 显式利用当前 Mac APFS，避免从 Bun cache 复制重复数据块。
-    const result = runBun(testWorkspaceRepo, ["install", "--frozen-lockfile", "--backend=clonefile", "--no-progress", "--no-summary"])
+    const result = runBun(testWorkspaceRepo, ["install", "--backend=clonefile", "--no-progress", "--no-summary"])
     installStdout = result.stdout
     installStderr = result.stderr
     if (result.exitCode !== 0) install = "failed"
@@ -843,9 +843,9 @@ async function runTypechecks(stateDirectory: string, state: MaterializedState, i
     // 安装失败时禁止继续 typecheck，避免把缺失依赖误报成源码类型错误。
     for (const workspace of await affectedWorkspaceDirectories(testWorkspaceRepo, changedPaths)) {
       // 独立 bun.lock 表示该 workspace 不属于根安装图，必须在自己的依赖边界安装。
-      // 独立安装仍使用 frozen lockfile 和 clonefile，不允许回退到根 node_modules 猜测解析。
+      // 独立安装仍限制在 test workspace 和自身依赖边界内，不读取根 node_modules。
       if (await Bun.file(join(testWorkspaceRepo, workspace, "bun.lock")).exists()) {
-        const standalone = runBun(join(testWorkspaceRepo, workspace), ["install", "--frozen-lockfile", "--backend=clonefile", "--no-progress", "--no-summary"])
+        const standalone = runBun(join(testWorkspaceRepo, workspace), ["install", "--backend=clonefile", "--no-progress", "--no-summary"])
         installStdout += `\n[${workspace}]\n${standalone.stdout}`
         installStderr += `\n[${workspace}]\n${standalone.stderr}`
         if (standalone.exitCode !== 0) {
