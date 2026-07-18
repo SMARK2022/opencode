@@ -1,34 +1,22 @@
-From 589bb20e905fa4a8246af5394283a68e226ed61a Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Wed, 22 Apr 2026 21:02:23 +0800
-Subject: [PATCH] =?UTF-8?q?feat(version):=20=E4=BC=98=E5=8C=96=E7=89=88?=
- =?UTF-8?q?=E6=9C=AC=E7=8E=AF=E5=A2=83=E5=8A=A0=E8=BD=BD=E9=80=BB=E8=BE=91?=
- =?UTF-8?q?=EF=BC=8C=E6=94=AF=E6=8C=81=E9=80=9A=E8=BF=87--version=E5=8F=82?=
- =?UTF-8?q?=E6=95=B0=E8=AE=BE=E7=BD=AEOPENCODE=5FVERSION?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/packages/opencode/script/version-env.ts b/packages/opencode/script/version-env.ts
-index 936f1258b433c05e3e4aabf893c26d75fe294dd1..0d81451021363eb5777acfeb58cd168553967dce 100644
 --- a/packages/opencode/script/version-env.ts
 +++ b/packages/opencode/script/version-env.ts
-@@ -1,7 +1,12 @@
- // MUST be loaded before any other imports (especially @opencode-ai/script)
- // to ensure OPENCODE_VERSION is set at module evaluation time.
- // Usage: bun run build.ts --version=1.14.19-smark
+@@ -1,7 +1,14 @@
+ // 必须在所有其他 import 之前加载（尤其是 @opencode-ai/script），
+ // 确保 OPENCODE_VERSION 在模块求值时已设置。
+ // 用法: bun run build.ts --version=1.17.20-smark
 -const versionArg = process.argv[2]
 -if (versionArg?.startsWith("--version=")) {
 -  process.env.OPENCODE_VERSION = versionArg.replace("--version=", "")
 -}
-\ No newline at end of file
++// 支持两种参数形式：--version=X（等号形式，可在 argv 任意位置）和 --version X（空格分隔形式）
 +const versionFromEquals = process.argv.find((arg) => arg.startsWith("--version="))?.replace("--version=", "")
 +if (versionFromEquals) {
 +  process.env.OPENCODE_VERSION = versionFromEquals
 +}
 +
 +const versionIndex = process.argv.findIndex((arg) => arg === "--version")
++// versionIndex + 1 边界检查：防止 --version 为最后一个参数时读取 undefined
 +if (versionIndex >= 0 && process.argv[versionIndex + 1]) {
 +  process.env.OPENCODE_VERSION = process.argv[versionIndex + 1]
 +}

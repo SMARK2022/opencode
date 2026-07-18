@@ -1,18 +1,12 @@
-From 4b7f10eebc35940f687671defec6bf4603c106c1 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Thu, 23 Apr 2026 14:23:40 +0800
-Subject: [PATCH] chore: set opencode version to 1.14.20-smark
-
-
 diff --git a/packages/opencode/package.json b/packages/opencode/package.json
-index b6c3a0f226d6696c680031892d7a32046cbcc23a..a4c5978ee8c62cd58616b011254bc76cfde08830 100644
 --- a/packages/opencode/package.json
 +++ b/packages/opencode/package.json
-@@ -1,6 +1,6 @@
+@@ -1,7 +1,7 @@
  {
    "$schema": "https://json.schemastore.org/package.json",
--  "version": "1.14.21-smark",
-+  "version": "1.14.20-smark",
+   "version": "1.17.20-smark",
+-  "//version-note": "版本固定在 1.17.20-smark，不跟踪源 1.14.21-smark 版本号",
++  "//version-note": "版本固定在 1.17.20-smark，不跟踪源 1.14.20-smark 版本号",
    "name": "opencode",
    "type": "module",
    "license": "MIT",
