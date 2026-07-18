@@ -6,7 +6,7 @@ import fs from "fs/promises"
 import path from "path"
 import yargs from "yargs"
 import { tmpdir } from "../../fixture/fixture"
-import { TuiThreadCommand, resolveThreadDirectory, discoverOrSpawnDaemon,
+import { DaemonProcess, TuiThreadCommand, resolveThreadDirectory, discoverOrSpawnDaemon,
   DAEMON_START_TIMEOUT_MS, SERVER_ELECTION_TIMEOUT_MS, SERVER_ELECTION_STALE_MS, SERVER_POLL_INTERVAL_MS, status, printDaemonExitHint } from "../../../src/cli/cmd/tui"
 import type { DiscoverDaemonDeps } from "../../../src/cli/cmd/tui"
 import { resolveNetworkOptionsNoConfig } from "../../../src/cli/network"
@@ -168,6 +168,60 @@ describe("tui thread", () => {
     // 显式给出本地默认值，保证用例只测试 owner 状态，不误进入 external listener 分支。
     const localNet = { port: 0, hostname: "127.0.0.1", mdns: false, cors: [] as string[] }
 
+    test("awaits asynchronous spawn and releases the election lease on rejection", async () => {
+      let published = false
+      let released = 0
+      let unrefs = 0
+      const acquire: DiscoverDaemonDeps["acquire"] = async () => ({ release: async () => { released++ } }) as never
+      const proc = { pid: FAKE_DAEMON_PID, exited: hangingExited(), unref() { unrefs++ }, kill() { throw new Error("delivered owner must survive") } }
+      // 所有 I/O 均显式注入；异步返回前不发布锁，不能误用 Promise 当作真实进程 handle。
+      const result = await discoverOrSpawnDaemon(localNet as never, baseDeps({
+        placement: () => "/tmp/async-daemon.json",
+        read: async () => published ? fakeLock : undefined,
+        acquire,
+        spawn: async () => {
+          await Promise.resolve()
+          published = true
+          return proc
+        },
+      }))
+      expect(result).toEqual({ url: "http://127.0.0.1:9999", fwdPid: FAKE_DAEMON_PID, lockPath: "/tmp/async-daemon.json" })
+      expect(unrefs).toBe(1)
+      if (process.platform === "win32") {
+        // 只替换 native spawn 边界；真实 adapter 读取分块 PID 并持续 drain，整个测试不创建进程。
+        const encoder = new TextEncoder()
+        const stdout = new ReadableStream<Uint8Array>({ start(controller) {
+          controller.enqueue(encoder.encode("99"))
+          controller.enqueue(encoder.encode("999\r\nworker output"))
+          controller.close()
+        } })
+        const wrapper = { pid: 12345, exited: Promise.resolve(0), stdout, unref() { unrefs++ }, kill() {} }
+        const spawn = spyOn(Bun, "spawn").mockReturnValue(wrapper as never)
+        try {
+          const target = "C:\\fake worker\\target.ts"
+          const handle = await DaemonProcess.spawn([process.execPath, target], { env: { ...process.env }, stdout: "ignore" })
+          expect(handle.pid).toBe(FAKE_DAEMON_PID)
+          expect(await handle.exited).toBe(0)
+          expect(stdout.locked).toBe(false)
+          expect(spawn).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ windowsHide: true, stdout: "pipe", env: expect.objectContaining({ OPENCODE_DAEMON_TARGET: target }) }))
+          handle.unref()
+          expect(unrefs).toBe(2)
+        } finally {
+          spawn.mockRestore()
+        }
+      }
+
+      // spawn 本身拒绝时也须释放相同选举 lease，不交付替代进程或伪造 URL。
+      const failure = new Error("async spawn rejected")
+      await expect(discoverOrSpawnDaemon(localNet as never, baseDeps({
+        placement: () => "/tmp/async-daemon.json",
+        read: async () => undefined,
+        acquire,
+        spawn: async () => { throw failure },
+      }))).rejects.toBe(failure)
+      expect(released).toBe(2)
+    })
+
     test("reuses existing server: returns HTTP URL, no daemon spawned", async () => {
       const aliases = { NO_PROXY: "upper.example", no_proxy: "lower.example" }
       expect(NetworkProxy.noProxyString(Object.values(aliases))).toBe("localhost,127.0.0.1,::1,::ffff:127.0.0.1,::ffff:7f00:1,upper.example,lower.example")
@@ -252,7 +306,8 @@ describe("tui thread", () => {
               })
               // 全量转发的保护覆盖所有非代理父键，而非仅检查上述四个 fixture 值。
               Object.entries(parent).forEach(([key, value]) => {
-                if (proxyKeys.includes(key) || ["OPENCODE_PROCESS_ROLE", "OPENCODE_LOCK_PATH", "OPENCODE_EXTERNAL_NETWORK", "OPENCODE_PRINT_LOGS"].includes(key)) return
+                // launcher 身份属于本次 spawn 的 owner；其余非代理父键仍须逐项完整转发。
+                if (proxyKeys.includes(key) || ["OPENCODE_PROCESS_ROLE", "OPENCODE_DAEMON_LAUNCHER_PID", "OPENCODE_LOCK_PATH", "OPENCODE_EXTERNAL_NETWORK", "OPENCODE_PRINT_LOGS"].includes(key)) return
                 expect(env?.[key]).toBe(value)
               })
               expect(env?.OPENCODE_PROCESS_ROLE).toBe("worker")

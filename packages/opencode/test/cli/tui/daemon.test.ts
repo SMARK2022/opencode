@@ -10,7 +10,9 @@
  * 隔离：OPENCODE_LOCK_PATH 设置为临时目录，测试不会触碰真实 XDG state 目录。
  */
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdir } from "fs/promises"
+import { mkdir, rename } from "fs/promises"
+// #495：win32 spawn adapter 测试沿目标唯一 DaemonProcess seam。
+import { DaemonProcess } from "../../../src/cli/cmd/tui"
 import path from "path"
 import { fileURLToPath } from "url"
 import { tmpdir } from "../../fixture/fixture"
@@ -20,6 +22,13 @@ import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
 import { win32DetachConsole } from "@opencode-ai/tui/terminal-win32"
 
 const WORKER_TS = fileURLToPath(new URL("../../../src/cli/tui/worker.ts", import.meta.url))
+
+// #495：maintenance retry 注入 worker——mock fs/promises.rename 注入一次 EACCES 并发布 marker。
+const MAINTENANCE_RETRY_WORKER = fileURLToPath(new URL("./maintenance-retry-worker.ts", import.meta.url))
+
+
+
+// #495：marker 读取以 published readiness 为准——不依赖调度延迟或 elapsed-time 断言。
 // stop 的命令注册和参数解析必须通过真实 CLI 入口保留回归覆盖。
 const INDEX_TS = fileURLToPath(new URL("../../../src/index.ts", import.meta.url))
 const credentials = { username: "daemon-test", password: "daemon-test-password" }
@@ -726,6 +735,191 @@ test(
       )
     },
     10_000,
+  )
+
+  test.skipIf(process.platform !== "win32")(
+    "maintenance owner handle produces the transient rename code used by stale reclaim",
+    async () => {
+      await using tmp = await tmpdir()
+      const dbPath = path.join(tmp.path, "lease-sharing.db")
+      const lockDir = path.join(`${dbPath}.maintenance`, "lock")
+      const ownerPath = path.join(lockDir, "owner.json")
+      // owner.json 先于任何 lease 竞争写入，reclaim 路径读到的是本用例构造的 stale 快照。
+      await mkdir(lockDir, { recursive: true })
+      await Bun.write(
+        ownerPath,
+        JSON.stringify({
+          // PID 取 Windows 合法上限但宿主不可达：alive() 探测必然失败，构造确定性 stale owner。
+          pid: 2_147_483_647,
+          token: "dead-sharing-owner",
+          taskID: "dbm_dead_sharing",
+          dbPath: path.resolve(dbPath),
+          startedAt: 1,
+        }),
+      )
+      // FileShare.Read 拒绝 delete/rename，复现 CI 全量负载下 scanner 或延迟 reader 留下的真实 NT sharing boundary。
+      // holder 用 stdin 作为释放协议，测试控制真实 handle 时序而非依赖 PowerShell timer 精度。
+      const holder = Bun.spawn(
+        [
+          "pwsh",
+          "-NoProfile",
+          "-Command",
+          '$stream=[System.IO.File]::Open($env:OWNER_PATH,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::Read); [Console]::Out.WriteLine("ready"); [Console]::Out.Flush(); [Console]::In.ReadLine() | Out-Null; $stream.Dispose()',
+        ],
+        { env: { ...process.env, OWNER_PATH: ownerPath }, stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+      )
+      // ready 行是 holder 完成句柄建立的协议；未就绪就 rename 会测到竞态而非 sharing 边界。
+      const ready = await holder.stdout.getReader().read()
+      expect(new TextDecoder().decode(ready.value)).toContain("ready")
+
+      try {
+        // 真实 NT 句柄只验证 production 允许列表的错误形状，retry 时序由独立 worker 的 published marker 证明。
+        const conflict = await rename(lockDir, path.join(`${dbPath}.maintenance`, "stale-dead-sharing-owner")).catch(
+          (error: unknown) => error,
+        )
+        const code = typeof conflict === "object" && conflict !== null && "code" in conflict ? (conflict as { code?: string }).code : undefined
+        // #495：code 必须属于 production retry 白名单——形状断言而非次数断言。
+        expect(code !== undefined && ["EPERM", "EACCES", "EBUSY"].includes(code)).toBe(true)
+      } finally {
+        // 释放协议经 stdin 而非 kill：Dispose 路径也被覆盖，handle 泄漏窗口才被真实关闭。
+        await holder.stdin.write("release\n")
+        await holder.stdin.end()
+        if (ServerLock.alive(holder.pid)) holder.kill()
+        await holder.exited.catch(() => undefined)
+      }
+    },
+    10_000,
+  )
+
+  test(
+    "maintenance lease retries after a published transient rename conflict",
+    async () => {
+      await using tmp = await tmpdir()
+      const dbPath = path.join(tmp.path, "lease-injected.db")
+      const worker = Bun.spawn([process.execPath, MAINTENANCE_RETRY_WORKER], {
+        env: { ...process.env, OPENCODE_TEST_MAINTENANCE_DB: dbPath },
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      // 文本流按行读 marker；worker 侧只写 \n 结尾行，跨平台换行判定不依赖二进制解析。
+      const reader = worker.stdout.pipeThrough(new TextDecoderStream()).getReader()
+
+      try {
+        // worker marker 证明 public acquisition 已收到首次 EACCES；此后 release 不再依赖调度延迟或 elapsed time。
+        expect(await readUntil(reader, "rename-blocked")).toContain("rename-blocked")
+        await worker.stdin.write("release\n")
+        await worker.stdin.end()
+        expect(await readUntil(reader, "lease-owned")).toContain("lease-owned")
+        // 退出码 0 证明 retry 后的 acquisition 完整走完 release 生命周期，而非中途 fail。
+        expect(await worker.exited).toBe(0)
+      } finally {
+        reader.releaseLock()
+        if (ServerLock.alive(worker.pid)) worker.kill()
+        await worker.exited.catch(() => undefined)
+      }
+    },
+    10_000,
+  )
+
+  test.skipIf(process.platform !== "win32")(
+    "Windows daemon wrapper preserves a worker target path containing spaces",
+    async () => {
+      await using tmp = await tmpdir()
+      const directory = path.join(tmp.path, "worker path with spaces")
+      const marker = path.join(tmp.path, "worker.json")
+      // 空格同时出现在目录与文件名：任何一层把 target 拼进命令行字符串都会在此用例失败。
+      const worker = path.join(directory, "worker script.ts")
+      await mkdir(directory, { recursive: true })
+      await Bun.write(
+        worker,
+        `await Bun.write(Bun.stdout, "x".repeat(1_000_000))\nawait Bun.write(process.env.DAEMON_SPACE_MARKER!, JSON.stringify({ pid: process.pid }))\n`,
+      )
+      // marker 写在大输出之后，若 adapter 只读取 PID 首行而不持续 drain，本测试会卡在可观察 ready 之前。
+      // target 来自真实空格路径；marker 位于大段 stdout 之后，同时证明 PID channel 持续 drain 而不会堵住 worker。
+      const proc = await DaemonProcess.spawn([process.execPath, worker], {
+        env: { ...process.env, DAEMON_SPACE_MARKER: marker },
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+        detached: false,
+      })
+      try {
+        // 轮询上限只约束测试等待；adapter 的 60s 握手预算独立存在，两者不得互相假设。
+        const deadline = Date.now() + 10_000
+        let pid: number | undefined
+        while (Date.now() < deadline) {
+          const value = await Bun.file(marker)
+            .json()
+            .catch(() => undefined)
+          if (typeof value?.pid === "number") {
+            pid = value.pid
+            break
+          }
+          await Bun.sleep(25)
+        }
+        // adapter 暴露的必须是真实 worker 而非 wrapper PID，startup timeout 和 Server Lock 才能共享同一 owner。
+        expect(pid).toBe(proc.pid)
+      } finally {
+        proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    20_000,
+  )
+
+  test.skipIf(process.platform !== "win32")(
+    "Windows daemon remains healthy after its launcher exits",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const project = path.join(tmp.path, "project")
+      await mkdir(project, { recursive: true })
+      // #495：Project 内故意放置同名假程序，证明 wrapper 解析依赖 SystemRoot 绝对路径而不是当前 cwd 搜索顺序。
+      await Bun.write(path.join(project, "powershell.exe"), "not a system executable")
+      // #495：目标 owner 是 cmd/tui 的 discoverOrSpawnDaemon（旧树 Daemon.ensure 的等价 seam）。
+      const tuiUrl = fileURLToPath(new URL("../../../src/cli/cmd/tui.ts", import.meta.url))
+      const parentCode = `
+        const { discoverOrSpawnDaemon } = await import(${JSON.stringify(tuiUrl)})
+        const { url } = await discoverOrSpawnDaemon({} as never)
+        const ctrl = new AbortController()
+        const response = await fetch(url + "/global/event", { headers: ${JSON.stringify(ServerLock.headers(credentials))}, signal: ctrl.signal })
+        const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
+        await reader.read()
+        const lock = await Bun.file(process.env.OPENCODE_LOCK_PATH!).json()
+        process.stdout.write(JSON.stringify(lock) + "\\n")
+        ctrl.abort()
+        await reader.cancel().catch(() => undefined)
+        process.exit(0)
+      `
+      const launcher = Bun.spawn([process.execPath, "-e", parentCode], {
+        cwd: project,
+        env: {
+          ...isolatedDaemonEnv(lockPath),
+          OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000",
+          OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "60000",
+        },
+        // launcher 本身退出后 lock 与 daemon 必须存活；本用例的关键时序是先观察 lock 再结束 parent。
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const firstLine = await new Response(launcher.stdout).text()
+      const lock = JSON.parse(firstLine.trim()) as ServerLock.ServerLock
+      expect(await launcher.exited).toBe(0)
+      try {
+        // #495：Project 中的同名程序不能参与 wrapper 解析；launcher 退出也不能成为 daemon 生命周期事件。
+        // 同一 PID/lock 必须继续服务，第二个 TUI 才能复用 owner 而不是发布替代 daemon。
+        await Bun.sleep(500)
+        expect(ServerLock.alive(lock.pid)).toBe(true)
+        // 断言原 lock PID 而非任意 health 响应，防止 replacement daemon 把 parent-exit 回归伪装成成功。
+        expect(await ServerLock.ping(lock.port, credentials)).toBe(true)
+        expect((await Bun.file(lockPath).json()).pid).toBe(lock.pid)
+      } finally {
+        await runDaemonStop(lockPath).catch(() => undefined)
+        if (ServerLock.alive(lock.pid)) process.kill(lock.pid)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 10_000,
   )
 
   test(

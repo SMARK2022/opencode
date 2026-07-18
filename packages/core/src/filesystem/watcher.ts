@@ -95,10 +95,14 @@ const layer = Layer.effect(
       const pending = w.subscribe(directory, callback, { ignore, backend })
       return Effect.promise(() => pending).pipe(
         Effect.tap((subscription) => Effect.sync(() => subscriptions.push(subscription))),
+        // 部分原生 backend（win32 实测）对已删除目录仍 resolve；acquisition 后核实目录真实存在，
+        // 静默空订阅正是“失败被缓存成成功”的形态，不允许跨平台回退。
+        Effect.tap(() => fs.existsSafe(directory).pipe(Effect.filterOrFail((exists) => exists))),
         Effect.timeout(SUBSCRIBE_TIMEOUT_MS),
         Effect.catchCause((cause) => {
           pending.then((subscription) => subscription.unsubscribe()).catch(() => {})
-          return Effect.logError("failed to subscribe", { directory, cause: Cause.pretty(cause) })
+          // #495：订阅获取失败必须向上传播——静默降级会让调用方误认为 watcher 已就绪。
+          return Effect.failCause(cause)
         }),
       )
     }
@@ -107,9 +111,8 @@ const layer = Layer.effect(
       .filter((entry): entry is Config.Document => entry.type === "document")
       .flatMap((item) => item.info.watcher?.ignore ?? [])
     if (location.vcs && (yield* Flag.OPENCODE_EXPERIMENTAL_FILEWATCHER)) {
-      yield* Effect.forkScoped(
-        subscribe(location.directory, [...Ignore.PATTERNS, ...config, ...protecteds(location.directory)]),
-      )
+      // 订阅就绪必须被等待；失败交既有 Location 诊断边界，不能静默留在后台 fiber。
+      yield* subscribe(location.directory, [...Ignore.PATTERNS, ...config, ...protecteds(location.directory)])
     }
 
     if (location.vcs?.type === "git") {
@@ -119,13 +122,14 @@ const layer = Layer.effect(
         const ignore = (yield* fs.readDirectoryEntries(vcs).pipe(Effect.catch(() => Effect.succeed([])))).flatMap(
           (entry) => (entry.name === "HEAD" ? [] : [entry.name]),
         )
-        yield* Effect.forkScoped(subscribe(vcs, ignore))
+        yield* subscribe(vcs, ignore)
       }
     }
 
     return Service.of({})
   }).pipe(
     Effect.catchCause((cause) => {
+      // Location 仍可服务 Session；监听失败沿既有诊断降级，不能让辅助 watcher 拖垮整个服务树。
       return Effect.logError("failed to init watcher service", { cause: Cause.pretty(cause) }).pipe(
         Effect.as(Service.of({})),
       )
