@@ -2,6 +2,7 @@
 
 import fs from "node:fs/promises"
 import path from "node:path"
+import { verifyRemoteAnnotatedTagCommit } from "./opentui-provenance"
 
 const root = path.resolve(import.meta.dir, "../../..")
 const version = "0.4.3-smark.1"
@@ -29,6 +30,7 @@ const lock = await Bun.file(path.join(root, "bun.lock")).text()
 // 先读lock再解析realpath：包目录看似正确时，registry resolution仍可能隐藏在锁文件中。
 // 每个family成员都必须同时出现URL key和override value，漏掉任一项都会允许mixed graph。
 // 因此这里不是版本检查的重复实现，而是编译前唯一integrity边界。
+// package family作为一个闭包验证；任一成员失败都不能输出看似完整的部分evidence。
 const packageRoots = await Promise.all(
   Object.entries(assets).map(async ([name, asset]) => {
     const expected = `${release}/${asset}-${version}.tgz`
@@ -38,6 +40,7 @@ const packageRoots = await Promise.all(
     if (!lock.includes(`"${name}@${expected}"`) || !lock.includes(`"${name}": "${expected}"`)) {
       throw new Error(`${name} is not locked to ${expected}`)
     }
+    // manifest从实际resolver结果向上定位，不能相信workspace顶层同名目录就是consumer真正加载的副本。
     const packageRoot = await realPackageRoot(name, root)
     const manifest = await Bun.file(path.join(packageRoot, "package.json")).json()
     // packed manifest同时证明name/version和repository owner，避免fork二进制伪装为upstream产物。
@@ -60,34 +63,42 @@ for (const name of ["@opentui/core", "@opentui/keymap", "@opentui/solid"] as con
       realPackageRoot(name, from),
     ),
   )
+  // 版本相同仍可能拥有两套FFI或响应式状态，因此成功条件是object identity对应的唯一realpath。
   if (new Set(roots).size !== 1) throw new Error(`${name} resolves to multiple realpaths: ${roots.join(", ")}`)
 }
 
-const solidManifests = await Array.fromAsync(
-  new Bun.Glob("**/node_modules/solid-js/package.json").scan({ cwd: root, onlyFiles: true }),
-)
-// thirdparty目录故意排除：它是源码审计入口，不属于OpenCode workspace runtime closure。
-// 如果把submodule的Solid算入consumer graph，source provenance会错误地变成运行时依赖。
+// 从实际runtime consumer解析而非扫描物理目录；Bun hidden store中的旧副本也会进入compiled graph。
+// thirdparty源码不属于consumer graph；root、应用、plugin和OpenTUI renderer必须共享同一Solid owner。
+const solidPackageRoot = new Map(packageRoots).get("@opentui/solid")
+if (!solidPackageRoot) throw new Error("Installed OpenTUI Solid package is missing from closure")
 const solidRoots = await Promise.all(
-  solidManifests
-    .filter((file) => !file.split(/[\\/]/).includes("thirdparty"))
-    .map((file) => fs.realpath(path.dirname(path.join(root, file)))),
+  [root, path.join(root, "packages/opencode"), path.join(root, "packages/plugin"), solidPackageRoot].map((from) =>
+    realPackageRoot("solid-js", from),
+  ),
 )
-const solidVersions = await Promise.all(
-  [...new Set(solidRoots)].map(async (directory) => (await Bun.file(path.join(directory, "package.json")).json()).version),
+// 以realpath为key保存版本，使重复consumer不会稀释真正的第二个Solid owner。
+const solidVersions = new Map(
+  await Promise.all(
+    [...new Set(solidRoots)].map(
+      async (directory) => [directory, (await Bun.file(path.join(directory, "package.json")).json()).version] as const,
+    ),
+  ),
 )
 // realpath唯一和version唯一是两个独立条件；相同版本的两份Solid仍会分裂响应式owner。
 // OpenTUI Solid/keymap精确要求1.9.12；任意嵌套1.9.10都会让响应式owner和renderer运行在不同runtime。
-if (new Set(solidRoots).size !== 1 || solidVersions.some((item) => item !== "1.9.12")) {
-  throw new Error(`solid-js closure mismatch: ${solidRoots.map((item, index) => `${item}@${solidVersions[index]}`).join(", ")}`)
+if (new Set(solidRoots).size !== 1 || [...solidVersions.values()].some((item) => item !== "1.9.12")) {
+  throw new Error(
+    `solid-js closure mismatch: ${solidRoots.map((item) => `${item}@${solidVersions.get(item)}`).join(", ")}`,
+  )
 }
 
+// gitlink缺失会作为undefined进入同一identity比较并失败，不能回退到submodule当前HEAD自证来源。
 const gitlink = (await git(["ls-tree", "HEAD", "thirdparty/opentui"], root)).trim().split(/\s+/)[2]
 // gitlink从root tree读取，不相信工作树目录名；它才是clone后所有消费者共享的source pin。
-const tagCommit = (await git(["-C", "thirdparty/opentui", "rev-parse", `${tag}^{commit}`], root)).trim()
-// branch tip可以继续接收workflow修复，source pin只能比较gitlink与不可移动tag的解引用commit。
-if (!gitlink || gitlink !== tagCommit) throw new Error(`OpenTUI gitlink ${gitlink} does not match ${tag} commit ${tagCommit}`)
+// branch tip可以继续接收workflow修复；远端peeled tag才是不依赖checkout深度的release source事实。
+await verifyRemoteAnnotatedTagCommit({ repository, tag, cwd: root, expectedCommit: gitlink })
 
+// remote tag证明发布身份，nested HEAD/status另证本次构建源码；两项证据不能互相替代。
 const nestedHead = (await git(["-C", "thirdparty/opentui", "rev-parse", "HEAD"], root)).trim()
 const nestedStatus = (await git(["-C", "thirdparty/opentui", "status", "--porcelain"], root)).trim()
 // 初始化后的submodule必须可直接审计同一source；dirty或停在workflow branch tip都不能冒充gitlink证据。
@@ -104,6 +115,7 @@ const header = report && typeof report === "object" && "header" in report ? repo
 const glibcVersionRuntime =
   header && typeof header === "object" && "glibcVersionRuntime" in header ? header.glibcVersionRuntime : undefined
 const abi = platform === "linux" && !glibcVersionRuntime ? "-musl" : ""
+// native包名由当前宿主ABI派生，避免用已安装但不会被本target加载的另一平台二进制通过门禁。
 const nativeName = `@opentui/core-${platform}-${process.arch}${abi}`
 const nativeRoot = new Map(packageRoots).get(nativeName)
 if (!nativeRoot) throw new Error(`No installed native package for ${nativeName}`)
@@ -122,7 +134,7 @@ console.log(
     tag,
     gitlink,
     packages: packageRoots.length,
-    solid: { version: solidVersions[0], realpath: solidRoots[0] },
+    solid: { version: solidVersions.get(solidRoots[0]), realpath: solidRoots[0] },
     native: { name: nativeName, file: nativeFile, sha256: nativeHash },
   }),
 )
@@ -130,8 +142,10 @@ console.log(
 async function realPackageRoot(name: string, from: string) {
   // 从解析后的entry向上寻找manifest，验证的是实际realpath而不是package.json中的声明路径。
   // 这样可以捕获hoisted、嵌套或symlink导致的重复runtime，而不依赖安装器内部布局。
+  // resolution起点就是consumer边界，显式传入from可捕获workspace局部hoist和hidden store漂移。
   const entry = Bun.resolveSync(name, from)
   let directory = path.dirname(await fs.realpath(entry))
+  // 只沿解析后entry的祖先查找manifest，不能横向扫描并挑选一个期望版本冒充实际owner。
   while (directory !== path.dirname(directory)) {
     const manifest = path.join(directory, "package.json")
     if (await Bun.file(manifest).exists()) return fs.realpath(directory)

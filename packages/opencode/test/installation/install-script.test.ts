@@ -7,6 +7,7 @@ import { tmpdir } from "../fixture/fixture"
 
 const INSTALL_SCRIPT = fileURLToPath(new URL("../../../../install", import.meta.url))
 const VERSION = "1.2.3-smark"
+// Windows优先Git Bash以匹配Actions producer；仅在固定安装缺失时才使用当前环境可解析的bash。
 const BASH = preferredWindowsGitBash() ?? Bun.which("bash") ?? "bash"
 
 describe("install script", () => {
@@ -227,7 +228,9 @@ async function runInstall(args: string[], env: Record<string, string | undefined
 
 async function runBinary(file: string) {
   const result = await runCommand(
-    process.platform === "win32" ? bashCommand(bashPathForFile(file), ["--version"], { PATH: bashPath() }) : [file, "--version"],
+    process.platform === "win32"
+      ? bashCommand(bashPathForFile(file), ["--version"], { PATH: bashPath() })
+      : [file, "--version"],
     path.dirname(file),
     process.env,
   )
@@ -287,22 +290,40 @@ function bashEnv(env: Record<string, string | undefined>) {
 function bashCommand(script: string, args: string[], env: Record<string, string | undefined>) {
   if (process.platform !== "win32") return [BASH, script, ...args]
   // Windows CI 使用 Git Bash，本地机器可能把 bash.exe 解析到 WSL；统一通过
-  // env + /bin/bash 执行，既保留 bash-only 的 pipefail，也避免 login shell 重置 PATH。
+  // environment assignments + /bin/bash执行，既保留bash-only的pipefail，也避免login shell重置PATH。
   const assignments = Object.entries(env)
     .filter((entry): entry is [string, string] => entry[1] !== undefined)
-    .map(([key, value]) => quoteForSh(`${key}=${value}`))
+    // key来自测试定义的环境名，value单独quote后仍保留assignment-word语法并安全容纳空格路径。
+    .map(([key, value]) => `${key}=${quoteForSh(value)}`)
   return [
     BASH,
     "-c",
-    ["exec", "env", ...assignments, "/bin/bash", quoteForSh(script), ...args.map((arg) => quoteForSh(bashPathForFile(arg)))].join(" "),
+    // assignment由shell builtin直接应用；先通过PATH查找env会在设置目标PATH之前形成自举竞态。
+    // 不使用login shell，用户profile不能在fixture命令启动前再次覆盖隔离PATH。
+    [
+      ...assignments,
+      "exec",
+      "/bin/bash",
+      quoteForSh(script),
+      ...args.map((arg) => quoteForSh(bashPathForFile(arg))),
+    ].join(" "),
   ]
 }
 
 function bashPath(...entries: string[]) {
-  if (process.platform !== "win32") return [...entries, process.env.PATH].filter((item): item is string => Boolean(item)).join(":")
+  if (process.platform !== "win32")
+    return [...entries, process.env.PATH].filter((item): item is string => Boolean(item)).join(":")
   // Windows POSIX 层不会可靠解析原生 PATH 里的 `C:\...` drive colon；测试只需要
   // fake-bin 中的桩命令和基础工具链，所以固定基础 PATH 来隔离用户环境。
-  return [...entries.map(bashPathForFile), "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"].join(":")
+  return [
+    ...entries.map(bashPathForFile),
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+  ].join(":")
 }
 
 function bashPathForFile(file: string) {

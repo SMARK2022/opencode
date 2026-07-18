@@ -1,7 +1,7 @@
 import { describe, expect } from "bun:test"
 import path from "path"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
-import { ConfigProvider, Deferred, Effect, Layer, Option } from "effect"
+import { ConfigProvider, Deferred, Effect, Exit, Layer, Option } from "effect"
 import { TestInstance, provideInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { GlobalBus, type GlobalEvent } from "../../src/bus/global"
@@ -9,8 +9,8 @@ import { Config } from "@/config/config"
 import { FileWatcher } from "../../src/file/watcher"
 import { Git } from "../../src/git"
 
-// Native @parcel/watcher bindings aren't reliably available in CI (missing on Linux, flaky on Windows)
-const describeWatcher = FileWatcher.hasNativeBinding() && !process.env.CI ? describe : describe.skip
+// capability检查只排除确实没有native binding的平台；CI环境本身不能成为行为回归的skip理由。
+const describeWatcher = FileWatcher.hasNativeBinding() ? describe : describe.skip
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -187,6 +187,25 @@ describeWatcher("FileWatcher", () => {
           Effect.tap((evt) => Effect.sync(() => expect(evt).toEqual({ file, event: "add" }))),
         ),
       )
+    }),
+  )
+
+  it.instance("reports native subscription acquisition failure instead of publishing readiness", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const fs = yield* AppFileSystem.Service
+      const root = path.join(test.directory, "removed-watch-root")
+      yield* fs.makeDirectory(root)
+
+      const result = yield* Effect.gen(function* () {
+        const watcher = yield* FileWatcher.Service
+        // Instance context先建立、再删除真实root，保证失败来自native subscribe而不是fixture或配置构造。
+        yield* fs.remove(root, { recursive: true })
+        yield* watcher.init()
+      }).pipe(Effect.provide(watcherLayer), provideInstance(root), Effect.scoped, Effect.exit)
+
+      // 行为契约只要求init暴露acquisition failure；不耦合Parcel错误字符串或内部重试次数。
+      expect(Exit.isFailure(result)).toBe(true)
     }),
   )
 

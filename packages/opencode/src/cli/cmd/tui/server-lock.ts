@@ -48,6 +48,11 @@ export class MaintenanceLeaseError extends Error {
   }
 }
 
+// 25ms只决定下一次同rename探测的节奏，不参与lease成功判定或测试的elapsed-time断言。
+const MAINTENANCE_RENAME_RETRY_MS = 25
+// deadline限制真实损坏锁的等待成本；一秒来源于本仓库641-876ms Windows sharing观测区间。
+const MAINTENANCE_RENAME_TIMEOUT_MS = 1_000
+
 // Overrideable for tests; undefined means use the default path.
 let _lockPath: string | undefined
 export function _setLockPath(p: string | undefined) {
@@ -89,7 +94,9 @@ export async function write(port: number, externalUrl?: string, controlPort?: nu
 }
 
 export async function read(): Promise<ServerLock | undefined> {
-  const raw = await Bun.file(getLockPath()).text().catch(() => undefined)
+  const raw = await Bun.file(getLockPath())
+    .text()
+    .catch(() => undefined)
   if (!raw) return
   try {
     return JSON.parse(raw) as ServerLock
@@ -148,14 +155,6 @@ function maintenanceTaskName(taskID: string) {
     throw new MaintenanceLeaseError("Maintenance task ID is invalid")
   }
   return taskID
-}
-
-type MaintenanceOwner = {
-  pid: number
-  token: string
-  taskID: string
-  dbPath: string
-  startedAt: number
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -240,12 +239,15 @@ export async function readMaintenanceTask(taskID: string, dbPath?: string) {
   const expectedPath = path.resolve(dbPath ?? DatabasePath())
   // task 文件先按当前 DB root 定位，再核对 record 内 dbPath；不能反过来信任文件内容选择要锁的数据库。
   // 规范化 path 消除 Windows 斜杠/相对路径差异，同时保留不同真实 DB 之间的硬隔离。
-  const raw = await Bun.file(taskPath(taskID, expectedPath)).text().catch(() => undefined)
+  const raw = await Bun.file(taskPath(taskID, expectedPath))
+    .text()
+    .catch(() => undefined)
   if (!raw) return undefined
   try {
     const task = parseMaintenanceTask(JSON.parse(raw))
     // record 所在 root 与内部 dbPath 必须一致，否则 resume 可能锁住一个 DB 却修改当前进程的另一个 DB。
-    if (path.resolve(task.dbPath) !== expectedPath) throw new MaintenanceLeaseError("Maintenance task database path mismatch")
+    if (path.resolve(task.dbPath) !== expectedPath)
+      throw new MaintenanceLeaseError("Maintenance task database path mismatch")
     return task
   } catch {
     throw new MaintenanceLeaseError(`Maintenance task record is corrupt: ${taskID}`)
@@ -298,9 +300,9 @@ export async function findNonterminalMaintenanceTask(dbPath = DatabasePath()) {
   const reconciled = await Promise.all(
     (await listMaintenanceTasks(dbPath)).map((task) => reconcileMaintenanceTask(task.taskID, dbPath)),
   )
-  const tasks = reconciled.filter((task): task is MaintenanceTask => task !== undefined).filter((task) =>
-    task.status === "queued" || task.status === "running" || task.status === "interrupted",
-  )
+  const tasks = reconciled
+    .filter((task): task is MaintenanceTask => task !== undefined)
+    .filter((task) => task.status === "queued" || task.status === "running" || task.status === "interrupted")
   if (tasks.length > 1) throw new MaintenanceBusyError("Multiple nonterminal maintenance tasks require manual repair")
   return tasks[0]
 }
@@ -357,10 +359,22 @@ export async function acquireMaintenanceLease(
     if (!latestRaw) throw new MaintenanceBusyError("Database maintenance owner changed during stale reclaim")
     const latest = maintenanceOwner(latestRaw)
     if (latest.token !== staleOwner.token || alive(latest.pid)) throw new MaintenanceBusyError()
-    try {
-      await rename(lockDir, path.join(root, `stale-${staleOwner.token}`))
-    } catch {
-      throw new MaintenanceBusyError()
+    // 所有contender都rename到旧token命名的同一tombstone；winner占住目标后，延迟重试不会搬走新lock。
+    // 一秒边界覆盖CI已观察到的641-876ms sharing生命周期，同时避免永久等待损坏或长期占用的lock。
+    // retry期间不再读取owner；旧目录一旦被winner搬走，其他contender只能失败，不能把新owner误判成旧owner。
+    const renameDeadline = Date.now() + MAINTENANCE_RENAME_TIMEOUT_MS
+    while (true) {
+      try {
+        await rename(lockDir, path.join(root, `stale-${staleOwner.token}`))
+        break
+      } catch (error) {
+        const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined
+        // 仅NT sharing对应的三类瞬时错误可等待；目标已存在、路径损坏等结果仍立即保持busy语义。
+        if (!code || !["EPERM", "EACCES", "EBUSY"].includes(code) || Date.now() >= renameDeadline) {
+          throw new MaintenanceBusyError()
+        }
+        await Bun.sleep(MAINTENANCE_RENAME_RETRY_MS)
+      }
     }
     try {
       await mkdir(lockDir)
@@ -393,7 +407,9 @@ export async function acquireMaintenanceLease(
     token,
     assertOwned,
     release: async () => {
-      const ownerRaw = await Bun.file(path.join(lockDir, "owner.json")).text().catch(() => undefined)
+      const ownerRaw = await Bun.file(path.join(lockDir, "owner.json"))
+        .text()
+        .catch(() => undefined)
       if (!ownerRaw) return
       if (maintenanceOwner(ownerRaw).token !== token) return
       await rm(lockDir, { recursive: true, force: true })

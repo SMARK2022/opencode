@@ -28,19 +28,23 @@ const SERVER_POLL_INTERVAL_MS = 200
 type Args = NetworkOptions
 type DaemonExit = { exitCode: number } | { error: unknown }
 export type Status = { tuiClients: number; sessionActivity: number }
+// adapter只暴露ensure实际依赖的四项authority，wrapper细节不能泄漏给选主和健康检查调用方。
+type DaemonProcess = Pick<ReturnType<typeof Bun.spawn>, "pid" | "exited" | "unref" | "kill">
+// Promise返回允许Windows先完成worker PID握手，Unix测试注入仍可保持同步Bun.spawn形状。
+type SpawnDaemon = (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) => DaemonProcess | Promise<DaemonProcess>
 
 // Exposed for tests only.  Keep the daemon spawn path injectable without
 // forcing production code through a heavier process abstraction.
-let spawnImpl = (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) => Bun.spawn(cmd, opts)
+let spawnImpl: SpawnDaemon = spawnDaemon
 export const _spawn = (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) => spawnImpl(cmd, opts)
-export function _setSpawn(fn: typeof spawnImpl | undefined) {
-  spawnImpl = fn ?? ((cmd, opts) => Bun.spawn(cmd, opts))
+export function _setSpawn(fn: SpawnDaemon | undefined) {
+  spawnImpl = fn ?? spawnDaemon
 }
 
-let reloadTarget: ReturnType<typeof Bun.spawn> | undefined
+let reloadTarget: DaemonProcess | undefined
 let reloadForwarderInstalled = false
 
-function forwardReload(proc: ReturnType<typeof Bun.spawn>) {
+function forwardReload(proc: DaemonProcess) {
   if (process.platform === "win32") return
   reloadTarget = proc
   if (reloadForwarderInstalled) return
@@ -59,11 +63,131 @@ async function target() {
   return fileURLToPath(new URL("./worker.ts", import.meta.url))
 }
 
+async function spawnDaemon(cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) {
+  // 平台分支在默认adapter内部一次选择，Windows失败后绝不回退到会随parent死亡的direct Bun child。
+  if (process.platform !== "win32") return Bun.spawn(cmd, opts)
+  const systemRoot = process.env.SystemRoot
+  // wrapper必须来自受OS管理的绝对目录，Project cwd中的同名powershell.exe不能参与可执行文件解析。
+  if (!systemRoot || !path.isAbsolute(systemRoot)) throw new Error("Windows SystemRoot is not an absolute path")
+  if (!cmd[0] || !cmd[1]) throw new Error("Windows daemon executable and worker target are required")
+
+  // encoded script内容固定，两个动态路径只经环境变量传入，避免路径字符改变PowerShell语法结构。
+  const script = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$target = $env:OPENCODE_DAEMON_TARGET
+if ([string]::IsNullOrEmpty($target) -or $target.Contains([char]34)) { exit 87 }
+# Start-Process会把ArgumentList重新拼成native command line；显式保留双引号才能让空格路径仍是一个argv。
+$arguments = [char]34 + $target + [char]34
+$start = @{ FilePath = $env:OPENCODE_DAEMON_EXECUTABLE; ArgumentList = $arguments; PassThru = $true }
+if ($env:OPENCODE_PRINT_LOGS -eq '1') { $worker = Start-Process @start -NoNewWindow }
+else { $worker = Start-Process @start -WindowStyle Hidden }
+[Console]::Out.WriteLine($worker.Id)
+[Console]::Out.Flush()
+$worker.WaitForExit()
+exit $worker.ExitCode
+`
+  // absolute system wrapper避免Project cwd选择同名程序；encoded source保持动态路径只作为data进入脚本。
+  const wrapper = Bun.spawn(
+    [
+      path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
+    ],
+    {
+      ...opts,
+      env: {
+        // 继承调用方隔离环境后只追加wrapper协议字段，worker看到的配置与原direct spawn保持一致。
+        ...opts?.env,
+        OPENCODE_DAEMON_EXECUTABLE: cmd[0],
+        OPENCODE_DAEMON_TARGET: cmd[1],
+      },
+      stdout: "pipe",
+      detached: false,
+    },
+  )
+  const stdout = wrapper.stdout
+  if (!stdout || typeof stdout === "number") throw new Error("Windows daemon wrapper has no stdout pipe")
+  const reader = stdout.getReader()
+  const timeout = Promise.withResolvers<never>()
+  // timer必须在PID握手完成时清除；普通Promise.race不会取消sleep，残留回调会在60秒后误杀健康wrapper。
+  const timer = setTimeout(() => {
+    try {
+      wrapper.kill()
+    } catch {}
+    timeout.reject(new Error("Windows daemon wrapper did not publish the worker PID"))
+  }, DAEMON_START_TIMEOUT_MS)
+  const worker = await Promise.race([readWorkerPID(reader), timeout.promise]).finally(() => clearTimeout(timer))
+  // PID首行之后继续消费同一pipe；否则daemon日志填满pipe会阻塞worker，--print-logs也会静默丢失stdout。
+  const output = drainWrapperOutput(reader, worker.remainder, opts?.stdout === "inherit")
+  // lock发布前wrapper的exit/PID仍代表同一worker；timeout kill不能只结束wrapper后留下无锁后台进程。
+  return {
+    pid: worker.pid,
+    // exit同时等待pipe EOF，确保大量stdout不会在worker退出后留下未消费的native handle。
+    exited: Promise.all([wrapper.exited, output]).then(([code]) => code),
+    unref: () => wrapper.unref(),
+    kill: (signal?: Parameters<DaemonProcess["kill"]>[0]) => {
+      // 先终止真实worker再关闭supervisor，避免wrapper消失后留下无lock生命周期观察者的孤儿worker。
+      try {
+        process.kill(worker.pid, signal)
+      } catch {}
+      try {
+        wrapper.kill()
+      } catch {}
+    },
+  }
+}
+
+async function readWorkerPID(reader: ReadableStreamDefaultReader<Uint8Array>) {
+  // 首个换行是wrapper协议边界；同一chunk中后续worker日志必须作为remainder交给drain而不能丢弃。
+  const decoder = new TextDecoder()
+  let text = ""
+  try {
+    while (!text.includes("\n")) {
+      const next = await reader.read()
+      if (next.done) throw new Error("Windows daemon wrapper exited before publishing the worker PID")
+      text += decoder.decode(next.value, { stream: true })
+    }
+    const end = text.indexOf("\n")
+    const pid = Number(text.slice(0, end).trim())
+    if (!Number.isSafeInteger(pid) || pid <= 0)
+      throw new Error(`Windows daemon wrapper published an invalid PID: ${text}`)
+    return { pid, remainder: text.slice(end + 1) }
+  } catch (error) {
+    reader.releaseLock()
+    throw error
+  }
+}
+
+async function drainWrapperOutput(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  remainder: string,
+  forward: boolean,
+) {
+  // 默认模式也必须消费数据防止pipe背压；forward仅控制用户可见性，不改变worker是否能继续运行。
+  try {
+    if (forward && remainder) process.stdout.write(remainder)
+    while (true) {
+      const next = await reader.read()
+      if (next.done) return
+      if (forward) process.stdout.write(next.value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 function applyProxyEnv(env: Record<string, string>) {
   // Merge loopback addresses into NO_PROXY so the daemon never proxies its own
   // server.  This must run for every respawn because reconnect can create a new
   // worker long after the original launcher setup finished.
-  const parts = (env.NO_PROXY ?? env.no_proxy ?? "").split(",").map((s) => s.trim()).filter(Boolean)
+  const parts = (env.NO_PROXY ?? env.no_proxy ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
   const no = NetworkProxy.noProxyString(parts)
   env.NO_PROXY = no
   env.no_proxy = no
@@ -120,16 +244,14 @@ function lockUrl(lock: ServerLock, external: boolean) {
 async function existingOwnerUrl(external: boolean) {
   const lock = await ServerLock.read()
 
-  if (!lock)
-    return { type: "missing" as const }
+  if (!lock) return { type: "missing" as const }
 
-  if (!ServerLock.alive(lock.pid))
-    return { type: "dead" as const, lock }
+  if (!ServerLock.alive(lock.pid)) return { type: "dead" as const, lock }
 
   // pid alive — whether or not HTTP ping succeeded, the owner still exists.
   const responsive = await ServerLock.ping(lock.port, { headers: ServerAuth.headers() })
   return {
-    type: responsive ? "responsive" as const : "unresponsive" as const,
+    type: responsive ? ("responsive" as const) : ("unresponsive" as const),
     url: lockUrl(lock, external),
     lock,
   }
@@ -185,7 +307,7 @@ export async function ensure(args: Args) {
     if (existing.type === "dead") await ServerLock.clear()
 
     const printLogs = process.argv.includes("--print-logs")
-    const proc = spawnImpl([process.execPath, await target()], {
+    const proc = await spawnImpl([process.execPath, await target()], {
       env: {
         ...env,
         ...(printLogs ? { OPENCODE_PRINT_LOGS: "1" } : {}),
@@ -204,10 +326,8 @@ export async function ensure(args: Args) {
       // Unix Ctrl+C is delivered to the foreground process group. Detaching the
       // worker gives it its own group so TUI exits do not accidentally take down
       // the shared daemon.
-      // Windows 不能用 detached:true（Bun #31603：子进程被 job object 绑定，
-      // parent 退出即杀）。Windows 的 daemon Ctrl+C 免疫改由 worker 进程内
-      // 调用 FreeConsole 实现（见 worker.ts win32DetachConsole）：worker 脱离
-      // 共享 console 后，CTRL_C_EVENT 不再送达，等价 Unix detached 进程组。
+      // Windows 不能用 detached:true（Bun #31603）；spawnDaemon以system PowerShell
+      // 托管worker生命周期，worker仍通过FreeConsole隔离共享console的CTRL_C_EVENT。
       detached: process.platform !== "win32",
     })
     proc.unref()
