@@ -22,9 +22,9 @@
 
 你必须先连续完成五个 index，再推进一个批次。最后一项完成后运行 `bun .temp/patches/src/apply-cumulative.ts --typecheck <batch-end>`，确认五个 current 非空、累计 apply 到批次末项、没有删除测试或遗漏 source hunk、每项 record 完整、自动安装和全部适用 typecheck 通过，并确认 source/target HEAD 与内容指纹未变。452 项不能被五整除，最后一批只含 `451-452`；这是唯一少于五项的终止批次。
 
-批次验证完成后，你必须在同一条 message 中并行启动两个独立 auditor sub-agent，分别审计完整批次。两者使用相同 handoff，彼此不得读取结论；使用 `.opencode/agent/adversarial-patch-auditor.md`，主 agent 不得自审或发送 builder 解释、怀疑列表、辩护和建议范围。handoff 必须包含原始需求、连续 index、每项完整 original/current、manifest、records、materialized/typecheck reports、install 指纹、目标 baseline、workflow 和审计 skill 路径。普通批次取得两份完整五项结果，终止批次取得两份完整两项结果。
+批次验证完成后，你必须在同一条 message 中并行启动两个独立 auditor sub-agent，分别审计完整批次 （要求一个正向审计，一个从批次最后一个committ开始向前审计）。两者使用相同 handoff，彼此不得读取结论；使用 `.opencode/agent/adversarial-patch-auditor.md`，主 agent 不得自审或发送 builder 解释、怀疑列表、辩护和建议范围。handoff 必须包含原始需求、连续 index、每项完整 original/current、manifest、records、materialized/typecheck reports、install 指纹、目标 baseline、workflow 和审计 skill 路径。普通批次取得两份完整五项结果，终止批次取得两份完整两项结果。
 
-两个 auditor 必须分别重新读取每个 source patch、上游实现、当前 target state、完整调用链、测试、错误、并发、退出、清理、schema、migration、文档和报告。两个结果都必须检查目标是否实现 source 全部行为、是否以上游更强实现为基线完成 SMARK 优化、是否存在真实 bug、错误状态转换、隐藏成功、fallback、owner 泄漏、测试失效、兼容回归或文档与 patch 不一致。patch 能够 apply 只证明文本可以合并，不能证明实现正确。`B` 只用于有 observed、contracted 或 reachable 证据的行为缺陷；`G` 只用于实际硬门禁失败；字数、估算、metadata、证据位置和旧措辞本身只能是 `N`，除非已经导致行为不可执行、硬阈值失败或 release claim 虚假。每项最终只能是 `PASS` 或 `BLOCK`；两份结果必须一致且都无未关闭 `B/G` 才能放行。
+两个 auditor 必须分别重新读取每个 source patch、上游实现、当前 target state、完整调用链、测试、错误、并发、退出、清理、schema、migration、文档和报告。两个结果都必须检查目标是否实现 source 全部行为、是否以上游更强实现为基线完成 SMARK 优化、是否存在真实 bug、错误状态转换、隐藏成功、fallback、owner 泄漏、测试失效、兼容回归或文档与 patch 不一致。patch 能够 apply 只证明文本可以合并，不能证明实现正确。`B` 用于有 observed、contracted 或 reachable 证据的行为缺陷；`G` 用于实际硬门禁失败；字数、估算、metadata本身只能是 `N`，除非已经导致行为不可执行、硬阈值失败或 release claim 虚假。每项最终只能是 `PASS` 或 `BLOCK`；两份结果必须一致且都无未关闭 `B/G` 才能放行。
 
 ## 阻塞后的修订循环
 
