@@ -1,425 +1,10 @@
-From b94a79527811d967986a92a4fb8ba572801beebf Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Thu, 23 Apr 2026 20:39:27 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=E7=94=A8=E6=88=B7?=
- =?UTF-8?q?=E8=BE=93=E5=85=A5=E5=92=8C=E8=AF=B7=E6=B1=82=E5=BC=80=E9=94=80?=
- =?UTF-8?q?=E4=BC=B0=E7=AE=97=E5=8A=9F=E8=83=BD=EF=BC=8C=E4=BC=98=E5=8C=96?=
- =?UTF-8?q?=E4=B8=8A=E4=B8=8B=E6=96=87=E7=AE=A1=E7=90=86?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index c9995dd16875271e39b2a052c0101eb8073f174e..feb2c2fae38239c1bf61aeab754932f030c375b4 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -29,6 +29,7 @@ import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v
- import { TuiEvent } from "../../event"
- import { iife } from "@/util/iife"
- import { Locale } from "@/util"
-+import { estimateUserInputTokens, estimateRequestOverhead, sumConfirmed as sharedSumConfirmed, getContextSize as sharedGetContextSize, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
- import { formatDuration } from "@/util/format"
- import { createColors, createFrames } from "../../ui/spinner.ts"
- import { useDialog } from "@tui/ui/dialog"
-@@ -172,89 +173,44 @@ export function Prompt(props: PromptProps) {
-     const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
-     const users = msg.filter((item): item is UserMessage => item.role === "user")
- 
--    // If no assistant messages yet, show zeros when running
--    if (assistants.length === 0) {
--      if (!isRunning) return
--      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
--    }
--
--    const sumConfirmed = (items: AssistantMessage[]) =>
--      items.reduce(
--        (acc, a) => {
--          const parts = sync.data.part[a.id] ?? []
--          const { input, output } = parts.reduce(
--            (t, p) => {
--              if (p.type !== "step-finish") return t
--              return {
--                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
--                output: t.output + p.tokens.output + p.tokens.reasoning,
--              }
--            },
--            { input: 0, output: 0 },
--          )
--          return { input: acc.input + input, output: acc.output + output }
--        },
--        { input: 0, output: 0 },
--      )
-+    const getParts = (id: string) => sync.data.part[id] ?? []
- 
-     const lastUser = users.at(-1)
-+    const requestModel =
-+      lastUser &&
-+      sync.data.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
-     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
- 
-+    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
-+
-     if (requestAssistants.length === 0) {
-       if (!isRunning) return
-+      const tokens = bootstrapInputTokens
-+      const pct = tokens > 0 && requestModel?.limit.context ? `${Math.round((tokens / requestModel.limit.context) * 100)}%` : undefined
-       return {
--        input: 0,
-+        input: tokens,
-         output: 0,
--        totalInput: 0,
-+        totalInput: tokens,
-         totalOutput: 0,
--        context: undefined,
-+        context: tokens > 0 ? (pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens)) : undefined,
-         cost: undefined,
-       }
-     }
- 
-     // 显示规则：外面是当前 step 的估算 token；括号里是当前 user request / agent loop 的累计 token。
--    const requestConfirmed = sumConfirmed(requestAssistants)
-+    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
- 
-     // Add streaming estimates from the last (potentially in-flight) message of current request
-     const last = requestAssistants.at(-1)!
-     const lastParts = sync.data.part[last.id] ?? []
--    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
--    const streamingOut = last.time.completed
--      ? 0
--      : lastParts.reduce((sum, p, i) => {
--          if (i <= lastSFIdx) return sum
--          if (p.type === "text" && !p.ignored) return sum + p.text.length
--          if (p.type === "reasoning") return sum + p.text.length
--          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
--          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
--          return sum
--        }, 0)
--    const pendingIn = last.time.completed
--      ? 0
--      : lastParts.reduce((sum, p, i) => {
--          if (i <= lastSFIdx) return sum
--          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
--          return sum
--        }, 0)
--
--    const pendingInputTokens = Math.round(pendingIn / 4)
--    const pendingOutputTokens = Math.round(streamingOut / 4)
--    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
--    const lastStepFinish =
--      lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined
--    const currentStepInputConfirmed =
--      !hasInFlightTail && lastStepFinish
--        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
--        : 0
--    const currentStepOutputConfirmed =
--      !hasInFlightTail && lastStepFinish
--        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
--        : 0
--    const currentInput = currentStepInputConfirmed + pendingInputTokens
--    const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
--    const totalInput = requestConfirmed.input + pendingInputTokens
--    const totalOutput = requestConfirmed.output + pendingOutputTokens
-+    const {
-+      input: currentInput,
-+      output: currentOutput,
-+      totalInput,
-+      totalOutput,
-+    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
-     const requestTokens = currentInput + currentOutput
-+    const actualTotalTokens = currentInput + currentOutput
-     const totalTokens = totalInput + totalOutput
- 
-     if (requestTokens <= 0 && totalTokens <= 0) {
-@@ -270,14 +226,17 @@ export function Prompt(props: PromptProps) {
-     }
- 
-     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
--    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
-+    const pct =
-+      actualTotalTokens > 0 && model?.limit.context
-+        ? `${Math.round((actualTotalTokens / model.limit.context) * 100)}%`
-+        : undefined
-     const cost = requestAssistants.reduce((sum, item) => sum + (item.cost || 0), 0)
-     return {
-       input: currentInput,
-       output: currentOutput,
-       totalInput,
-       totalOutput,
--      context: requestTokens > 0 ? (pct ? `${Locale.number(requestTokens)} (${pct})` : Locale.number(requestTokens)) : undefined,
-+      context: actualTotalTokens > 0 ? (pct ? `${Locale.number(actualTotalTokens)} (${pct})` : Locale.number(actualTotalTokens)) : undefined,
-       cost: cost > 0 ? money.format(cost) : undefined,
-     }
-   })
-diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-index 89b87ae8bd21f39929e8d9365eb96b5cbbcb0dcc..b36b142499307692f07de9b1f84bedb07be24a52 100644
---- a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-@@ -3,6 +3,7 @@ import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plug
- import { createEffect, createMemo, createSignal } from "solid-js"
- import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
- import { createTokenFlowPulse } from "../../util/signal"
-+import { estimateUserInputTokens, estimateRequestOverhead, sumConfirmed as sharedSumConfirmed, getContextSize as sharedGetContextSize, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
- 
- const id = "internal:sidebar-context"
- 
-@@ -14,6 +15,7 @@ const money = new Intl.NumberFormat("en-US", {
- function View(props: { api: TuiPluginApi; session_id: string }) {
-   const theme = () => props.api.theme.current
-   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
-+  const isRunning = createMemo(() => (props.api.state.session.status(props.session_id)?.type ?? "idle") !== "idle")
- 
-   type StateValue = {
-     tokens: number
-@@ -31,79 +33,48 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
-     const assistants = messages.filter((item): item is AssistantMessage => item.role === "assistant")
-     const users = messages.filter((item): item is UserMessage => item.role === "user")
- 
--    // If no assistant messages yet, show zeros
--    if (assistants.length === 0) {
--      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
--    }
--
--    const sumConfirmed = (items: AssistantMessage[]) =>
--      items.reduce(
--        (acc, a) => {
--          const parts = props.api.state.part(a.id)
--          const { input, output } = parts.reduce(
--            (t, p) => {
--              if (p.type !== "step-finish") return t
--              return {
--                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
--                output: t.output + p.tokens.output + p.tokens.reasoning,
--              }
--            },
--            { input: 0, output: 0 },
--          )
--          return { input: acc.input + input, output: acc.output + output }
--        },
--        { input: 0, output: 0 },
--      )
-+    const getParts = (id: string) => props.api.state.part(id)
- 
-     const lastUser = users.at(-1)
-     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
- 
-+    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
-+
-     if (requestAssistants.length === 0) {
--      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
-+      if (!isRunning()) {
-+        return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
-+      }
-+      const requestModel =
-+        lastUser &&
-+        props.api.state.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
-+      const percent =
-+        bootstrapInputTokens > 0 && requestModel?.limit.context
-+          ? Math.round((bootstrapInputTokens / requestModel.limit.context) * 100)
-+          : null
-+      return {
-+        tokens: bootstrapInputTokens,
-+        totalTokens: bootstrapInputTokens,
-+        input: bootstrapInputTokens,
-+        output: 0,
-+        totalInput: bootstrapInputTokens,
-+        totalOutput: 0,
-+        percent,
-+        cost: 0,
-+      }
-     }
- 
-     // 显示规则：外面是最后一个 step 的累计（真实上下文大小）；括号里是当前 user request / agent loop 的累计。
--    const requestConfirmed = sumConfirmed(requestAssistants)
-+    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
- 
-     // Add streaming estimates from the last (potentially in-flight) message of current request
-     const last = requestAssistants.at(-1)!
-     const lastParts = props.api.state.part(last.id)
--    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
--    const streamingOut = last.time.completed
--      ? 0
--      : lastParts.reduce((sum, p, i) => {
--          if (i <= lastSFIdx) return sum
--          if (p.type === "text" && !p.ignored) return sum + p.text.length
--          if (p.type === "reasoning") return sum + p.text.length
--          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
--          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
--          return sum
--        }, 0)
--    const pendingIn = last.time.completed
--      ? 0
--      : lastParts.reduce((sum, p, i) => {
--          if (i <= lastSFIdx) return sum
--          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
--          return sum
--        }, 0)
--
--    const pendingInputTokens = Math.round(pendingIn / 4)
--    const pendingOutputTokens = Math.round(streamingOut / 4)
--    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
--    const lastStepFinish =
--      lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined
--    const currentStepInputConfirmed =
--      !hasInFlightTail && lastStepFinish
--        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
--        : 0
--    const currentStepOutputConfirmed =
--      !hasInFlightTail && lastStepFinish
--        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
--        : 0
--    const input = currentStepInputConfirmed + pendingInputTokens
--    const output = currentStepOutputConfirmed + pendingOutputTokens
--    const totalInput = requestConfirmed.input + pendingInputTokens
--    const totalOutput = requestConfirmed.output + pendingOutputTokens
-+    const {
-+      input,
-+      output,
-+      totalInput,
-+      totalOutput,
-+    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
-     const tokens = input + output
-     const totalTokens = totalInput + totalOutput
-     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-index fb6738d6692139ab5a0c1f9046362e86d36088ad..d0c2f6c1adb2c216be9993a762f255631c1f968e 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-@@ -7,6 +7,7 @@ import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
- import { useCommandDialog } from "@tui/component/dialog-command"
- import { useKeybind } from "../../context/keybind"
- import { Locale } from "@/util"
-+import { estimateUserInputTokens, estimateRequestOverhead, sumConfirmed as sharedSumConfirmed, getContextSize as sharedGetContextSize, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
- import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
- import { useTerminalDimensions } from "@opentui/solid"
- 
-@@ -51,88 +52,42 @@ export function SubagentFooter() {
-     const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
-     const users = msg.filter((item): item is UserMessage => item.role === "user")
- 
--    // If no assistant messages yet, show zeros when running
--    if (assistants.length === 0) {
--      if (!isRunning) return
--      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
--    }
--
--    const sumConfirmed = (items: AssistantMessage[]) =>
--      items.reduce(
--        (acc, a) => {
--          const parts = sync.data.part[a.id] ?? []
--          const { input, output } = parts.reduce(
--            (t, p) => {
--              if (p.type !== "step-finish") return t
--              return {
--                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
--                output: t.output + p.tokens.output + p.tokens.reasoning,
--              }
--            },
--            { input: 0, output: 0 },
--          )
--          return { input: acc.input + input, output: acc.output + output }
--        },
--        { input: 0, output: 0 },
--      )
-+    const getParts = (id: string) => sync.data.part[id] ?? []
- 
-     const lastUser = users.at(-1)
-+    const requestModel =
-+      lastUser &&
-+      sync.data.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
-     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
- 
-+    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
-+
-     if (requestAssistants.length === 0) {
-       if (!isRunning) return
-+      const tokens = bootstrapInputTokens
-+      const pct = tokens > 0 && requestModel?.limit.context ? `${Math.round((tokens / requestModel.limit.context) * 100)}%` : undefined
-       return {
--        input: 0,
-+        input: tokens,
-         output: 0,
--        totalInput: 0,
-+        totalInput: tokens,
-         totalOutput: 0,
--        context: undefined,
-+        context: tokens > 0 ? (pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens)) : undefined,
-         cost: undefined,
-       }
-     }
- 
-     // 显示规则：外面是当前 step 的估算 token；括号里是当前 user request / agent loop 的累计 token。
--    const requestConfirmed = sumConfirmed(requestAssistants)
-+    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
- 
-     // Add streaming estimates from the last (potentially in-flight) message of current request
-     const last = requestAssistants.at(-1)!
-     const lastParts = sync.data.part[last.id] ?? []
--    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
--    const streamingOut = last.time.completed
--      ? 0
--      : lastParts.reduce((sum, p, i) => {
--          if (i <= lastSFIdx) return sum
--          if (p.type === "text" && !p.ignored) return sum + p.text.length
--          if (p.type === "reasoning") return sum + p.text.length
--          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
--          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
--          return sum
--        }, 0)
--    const pendingIn = last.time.completed
--      ? 0
--      : lastParts.reduce((sum, p, i) => {
--          if (i <= lastSFIdx) return sum
--          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
--          return sum
--        }, 0)
--
--    const pendingInputTokens = Math.round(pendingIn / 4)
--    const pendingOutputTokens = Math.round(streamingOut / 4)
--    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
--    const lastStepFinish =
--      lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined
--    const currentStepInputConfirmed =
--      !hasInFlightTail && lastStepFinish
--        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
--        : 0
--    const currentStepOutputConfirmed =
--      !hasInFlightTail && lastStepFinish
--        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
--        : 0
--    const currentInput = currentStepInputConfirmed + pendingInputTokens
--    const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
--    const totalInput = requestConfirmed.input + pendingInputTokens
--    const totalOutput = requestConfirmed.output + pendingOutputTokens
-+    const {
-+      input: currentInput,
-+      output: currentOutput,
-+      totalInput,
-+      totalOutput,
-+    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
-     const requestTokens = currentInput + currentOutput
-     const totalTokens = totalInput + totalOutput
- 
-@@ -149,7 +104,10 @@ export function SubagentFooter() {
-     }
- 
-     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
--    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
-+    const pct =
-+      requestTokens > 0 && model?.limit.context
-+        ? `${Math.round((requestTokens / model.limit.context) * 100)}%`
-+        : undefined
-     const cost = requestAssistants.reduce((sum, item) => sum + (item.cost || 0), 0)
-     return {
-       input: currentInput,
-diff --git a/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts b/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts
+diff --git a/packages/tui/src/util/token-estimate.ts b/packages/tui/src/util/token-estimate.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..98f45d2858c19d44bb6f195c300397c98135a8da
 --- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts
-@@ -0,0 +1,177 @@
++++ b/packages/tui/src/util/token-estimate.ts
+@@ -0,0 +1,212 @@
 +import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
-+import { estimate as estimateTokens } from "@/util/token"
++import { estimate } from "@opencode-ai/core/util/token"
 +
 +export type UsageInfo = {
 +  input: number
@@ -430,50 +15,62 @@ index 0000000000000000000000000000000000000000..98f45d2858c19d44bb6f195c300397c9
 +  cost: string | undefined
 +}
 +
-+// Rough overhead for system prompt content (instructions, environment info, prompt templates)
-+// The exact system prompt is assembled server-side and includes model identity, working dir,
-+// git context, platform info, skills, user instructions, etc. — typically 1500-4000 chars.
++// 系统提示词的 token 开销估算常量
++// 服务端组装的系统提示包含模型身份、工作目录、git 上下文、平台信息、技能和用户指令，
++// 典型长度 1500-4000 字符；取 800 token 作为下界估算，避免低估引导上下文
 +export const SYSTEM_PROMPT_OVERHEAD = 800
 +
-+// Rough overhead for tool definitions (descriptions, parameter schemas, output schemas)
-+// Each tool adds name + description + JSON schema. With ~15-25 active tools, this
-+// can easily be 3000-8000+ chars.
++// 工具定义的 token 开销估算常量
++// 每个工具包含名称、描述和 JSON Schema；15-25 个活跃工具可达 3000-8000+ 字符，
++// 取 2000 token 作为合理上界，确保引导估算覆盖工具定义占用
 +export const TOOL_DEFINITION_OVERHEAD = 2000
 +
++// 估算 data URL（base64 编码的图片/PDF）的输入 token 数
++// 图片按每 750 字符约 1 token 估算（Anthropic 视觉编码），上限 1600 token
++// PDF 按每 1100 字符约 1 token 估算；其他类型回退到通用文本估算
 +export function estimateDataUrlInputTokens(url: string, mime: string) {
 +  if (!url.startsWith("data:")) return 0
 +  const comma = url.indexOf(",")
 +  if (comma < 0) return 0
 +  const payloadLength = url.length - comma - 1
 +  if (payloadLength <= 0) return 0
++  // 图片 token 随分辨率增长，但 Anthropic 对单图有 1600 token 上限
 +  if (mime.startsWith("image/")) return Math.max(1, Math.min(1600, Math.round(payloadLength / 750)))
++  // PDF 按 base64 负载密度估算，每 1100 字符约 1 token
 +  if (mime === "application/pdf") return Math.max(1, Math.round(payloadLength / 1100))
-+  return Math.max(1, estimateTokens(url.slice(comma + 1)))
++  return Math.max(1, estimate(url.slice(comma + 1)))
 +}
 +
++// 估算用户输入部件列表的 token 数
++// 遍历 text/file/agent/subtask 四种部件类型，分别按其内容特征估算
++// synthetic 和 ignored 的 text 部件跳过，因为它们不发送到 API
 +export function estimateUserInputTokens(parts: ReadonlyArray<{ type: string; [key: string]: any }>) {
 +  return parts.reduce((sum, part) => {
 +    if (part.type === "text" && !part.synthetic && !part.ignored) {
-+      return sum + estimateTokens(part.text ?? "")
++      return sum + estimate(part.text ?? "")
 +    }
 +    if (part.type === "file") {
 +      return sum + estimateDataUrlInputTokens(part.url ?? "", part.mime ?? "")
 +    }
 +    if (part.type === "agent") {
-+      return sum + estimateTokens(part.name ?? "")
++      return sum + estimate(part.name ?? "")
 +    }
 +    if (part.type === "subtask") {
-+      return sum + estimateTokens(`${part.description ?? ""}\n${part.prompt ?? ""}`)
++      return sum + estimate(`${part.description ?? ""}\n${part.prompt ?? ""}`)
 +    }
 +    return sum
 +  }, 0)
 +}
 +
-+/** Rough estimate of system prompt + tool definition overhead (chars). */
++// 估算单次请求的系统开销：系统提示词 + 工具定义
++// 此值用于引导估算——当尚无助手回复时，用户输入加上此开销即为预估上下文
 +export function estimateRequestOverhead(): number {
 +  return SYSTEM_PROMPT_OVERHEAD + TOOL_DEFINITION_OVERHEAD
 +}
 +
++// 累加指定助手消息列表中所有 step-finish 部件的已确认 token
++// step-finish 是 API 返回的每轮确认点，包含真实的 input/output/cache token
++// input 包含 cache.read + cache.write，因为缓存 token 也计入上下文窗口
 +export function sumConfirmed(
 +  items: AssistantMessage[],
 +  getParts: (id: string) => ReadonlyArray<{ type: string; [key: string]: any }>,
@@ -497,6 +94,9 @@ index 0000000000000000000000000000000000000000..98f45d2858c19d44bb6f195c300397c9
 +  )
 +}
 +
++// 获取指定助手消息的上下文大小
++// 从部件列表末尾向前查找最后一个 step-finish，返回其全部 token 总和
++// 末尾查找是因为上下文大小以最新一轮确认为准，早期 step-finish 的值已过时
 +export function getContextSize(
 +  item: AssistantMessage,
 +  getParts: (id: string) => ReadonlyArray<{ type: string; [key: string]: any }>,
@@ -517,6 +117,10 @@ index 0000000000000000000000000000000000000000..98f45d2858c19d44bb6f195c300397c9
 +  return 0
 +}
 +
++// 引导估算：在助手回复前预估用户输入的上下文 token
++// 策略：如果存在上一轮助手消息，用其上下文大小 + 当前用户输入；
++// 否则用用户输入 + 系统开销（系统提示词 + 工具定义）。
++// previousAssistant 通过 parentID 不匹配最后用户消息来排除当前请求的助手
 +export function getBootstrapInputTokens(
 +  users: UserMessage[],
 +  assistants: AssistantMessage[],
@@ -525,16 +129,22 @@ index 0000000000000000000000000000000000000000..98f45d2858c19d44bb6f195c300397c9
 +  const lastUser = users.at(-1)
 +  const lastUserParts = lastUser ? getParts(lastUser.id) : []
 +  const estimatedPromptInputTokens = estimateUserInputTokens(lastUserParts)
++  // 查找属于上一轮请求的助手消息（parentID 不匹配当前最后用户消息）
 +  const previousAssistant = lastUser ? assistants.findLast((item) => item.parentID !== lastUser.id) : assistants.at(-1)
-+  
++
 +  const requestOverhead = estimateRequestOverhead()
 +  const previousContextSize = previousAssistant ? getContextSize(previousAssistant, getParts) : 0
-+  
++
++  // 有历史上下文时累加用户输入；否则用用户输入 + 系统开销
 +  return previousContextSize > 0
 +    ? previousContextSize + estimatedPromptInputTokens
 +    : estimatedPromptInputTokens + requestOverhead
 +}
 +
++// 计算最终 token：当前 step 确认值 + 流式估算 + 引导 token
++// 流式估算从最后一个 step-finish 之后的部分部件提取，按字符数 / 4 近似 token
++// hasInFlightTail 判断尾部是否有未完成工具调用，有则当前 step 尚未确认
++// bootstrapInputTokens 在 requestConfirmed.input 为 0 时作为 totalInput 的补充
 +export function computeFinalTokens(
 +  lastAssistant: AssistantMessage,
 +  lastParts: ReadonlyArray<{ type: string; [key: string]: any }>,
@@ -542,6 +152,7 @@ index 0000000000000000000000000000000000000000..98f45d2858c19d44bb6f195c300397c9
 +  bootstrapInputTokens: number,
 +) {
 +  const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
++  // 流式输出估算：text/reasoning 字符 + pending 工具的 raw + completed 工具的 input
 +  const streamingOut = lastAssistant.time.completed
 +    ? 0
 +    : lastParts.reduce((sum, p, i) => {
@@ -552,6 +163,8 @@ index 0000000000000000000000000000000000000000..98f45d2858c19d44bb6f195c300397c9
 +        if (p.type === "tool" && p.state?.status !== "pending") return sum + JSON.stringify(p.state.input ?? {}).length
 +        return sum
 +      }, 0)
++  // 流式输入估算：最后一个 step-finish 之后的 completed 工具输出
++  // 这些输出将在下一轮 API 调用中计入 input_tokens
 +  const pendingIn = lastAssistant.time.completed
 +    ? 0
 +    : lastParts.reduce((sum, p, i) => {
@@ -560,8 +173,10 @@ index 0000000000000000000000000000000000000000..98f45d2858c19d44bb6f195c300397c9
 +        return sum
 +      }, 0)
 +
++  // 字符数 / 4 是通用 token 估算比率，适用于英文为主的代码和文本
 +  const pendingInputTokens = Math.round(pendingIn / 4)
 +  const pendingOutputTokens = Math.round(streamingOut / 4)
++  // 尾部有进行中的工具调用时当前 step 尚未确认，currentStep 显示 0
 +  const hasInFlightTail = !lastAssistant.time.completed && lastParts.some((_, i) => i > lastSFIdx)
 +  const lastStepFinish =
 +    lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined
@@ -573,7 +188,10 @@ index 0000000000000000000000000000000000000000..98f45d2858c19d44bb6f195c300397c9
 +    !hasInFlightTail && lastStepFinish
 +      ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
 +      : 0
++  // requestConfirmed.input 为 0 时（首轮请求），用引导 token 补充 totalInput
 +  const promptInputEstimate = requestConfirmed.input === 0 ? bootstrapInputTokens : 0
++  // currentInput 取 currentStepInputConfirmed 和 bootstrapInputTokens 的较大值，
++  // 确保显示不低于引导估算，避免首轮显示 0 后跳变的用户体验问题
 +  const currentInput = Math.max(currentStepInputConfirmed, bootstrapInputTokens) + pendingInputTokens
 +  const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
 +  const totalInput = requestConfirmed.input + pendingInputTokens + promptInputEstimate
@@ -587,6 +205,8 @@ index 0000000000000000000000000000000000000000..98f45d2858c19d44bb6f195c300397c9
 +  }
 +}
 +
++// 获取上下文窗口大小限制
++// 用于计算 context 百分比，在引导估算和实时估算中均被调用
 +export function getContextLimit(
 +  provider: ReadonlyArray<{ id: string; models: Record<string, { limit: { context: number; input?: number; output: number } }> }>,
 +  providerID: string | undefined,
@@ -595,3 +215,449 @@ index 0000000000000000000000000000000000000000..98f45d2858c19d44bb6f195c300397c9
 +  if (!providerID || !modelID) return undefined
 +  return provider.find((item) => item.id === providerID)?.models[modelID]?.limit.context
 +}
+
+
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -41,6 +41,7 @@
+ import { Locale } from "../../util/locale"
+ import { errorMessage } from "../../util/error"
+ import { formatDuration } from "../../util/format"
++import { sumConfirmed as sharedSumConfirmed, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
+ import { createColors, createFrames } from "../../ui/spinner"
+ import { useDialog } from "../../ui/dialog"
+ import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
+@@ -281,95 +282,51 @@
+     const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
+     const users = msg.filter((item): item is UserMessage => item.role === "user")
+ 
+-    if (assistants.length === 0) {
+-      if (!isRunning) return
+-      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
+-    }
+-
+-    // 累加已确认的 step-finish token 的辅助函数，按消息列表聚合
+-    const sumConfirmed = (items: AssistantMessage[]) =>
+-      items.reduce(
+-        (acc, a) => {
+-          const parts = sync.data.part[a.id] ?? []
+-          const { input, output } = parts.reduce(
+-            (t, p) => {
+-              if (p.type !== "step-finish") return t
+-              return {
+-                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
+-                output: t.output + p.tokens.output + p.tokens.reasoning,
+-              }
+-            },
+-            { input: 0, output: 0 },
+-          )
+-          return { input: acc.input + input, output: acc.output + output }
+-        },
+-        { input: 0, output: 0 },
+-      )
++    // 引导估算：在助手回复前预估用户输入的上下文 token
++    const getParts = (id: string) => sync.data.part[id] ?? []
+ 
+     // 本次请求的助手消息 = parentID 匹配最后一条用户消息的助手消息
+     const lastUser = users.at(-1)
++    // 查找当前请求对应的模型，用于计算 context 百分比
++    const requestModel =
++      lastUser &&
++      sync.data.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
+     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
+ 
+-    // 本次请求尚无助手回复时显示零值
++    // 引导 token：用户输入 + 系统开销 或 上一轮上下文 + 用户输入
++    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
++
++    // 本次请求尚无助手回复时显示引导估算值
+     if (requestAssistants.length === 0) {
+       if (!isRunning) return
+-      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
++      const tokens = bootstrapInputTokens
++      // 计算引导 token 占上下文窗口的百分比
++      const pct = tokens > 0 && requestModel?.limit.context ? `${Math.round((tokens / requestModel.limit.context) * 100)}%` : undefined
++      return {
++        input: tokens,
++        output: 0,
++        totalInput: tokens,
++        totalOutput: 0,
++        context: tokens > 0 ? (pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens)) : undefined,
++        cost: undefined,
++      }
+     }
+ 
+     // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
+-    const requestConfirmed = sumConfirmed(requestAssistants)
++    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
+ 
+-    // 从最后一条消息添加流式估算
++    // 从最后一条消息添加流式估算，统一委托给 computeFinalTokens
+     const last = requestAssistants.at(-1)!
+     const lastParts = sync.data.part[last.id] ?? []
+-    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
+-    // 流式输出：text/reasoning 字符 + pending 工具的 raw + completed 工具的 input
+-    // pending 工具的 state.raw 由 processor.ts 的 tool-input-delta handler 累积
+-    const streamingOut = last.time.completed
+-      ? 0
+-      : lastParts.reduce((sum, p, i) => {
+-          if (i <= lastSFIdx) return sum
+-          if (p.type === "text" && !p.ignored) return sum + p.text.length
+-          if (p.type === "reasoning") return sum + p.text.length
+-          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
+-          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
+-          return sum
+-        }, 0)
+-    // 流式输入：最后一个 step-finish 之后的 completed 工具输出
+-    // 这些输出将在下一轮 API 调用中计入 input_tokens
+-    const pendingIn = last.time.completed
+-      ? 0
+-      : lastParts.reduce((sum, p, i) => {
+-          if (i <= lastSFIdx) return sum
+-          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
+-          return sum
+-        }, 0)
+-
+-    // 拆分为当前 step 和请求累计的输入输出
+-    // pendingInputTokens/pendingOutputTokens 是流式中的估算值，两边共用
+-    const pendingInputTokens = Math.round(pendingIn / 4)
+-    const pendingOutputTokens = Math.round(streamingOut / 4)
+-    // 当前 step：如果尾部有进行中的工具调用，则当前 step 尚未确认，显示 0
+-    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
+-    // 使用 lastSFIdx 直接索引，避免 reverse() 遍历
+-    const lastStepFinish =
+-      lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined
+-    const currentStepInputConfirmed =
+-      !hasInFlightTail && lastStepFinish
+-        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
+-        : 0
+-    const currentStepOutputConfirmed =
+-      !hasInFlightTail && lastStepFinish
+-        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
+-        : 0
+-    // currentInput/Output 来自当前 step 的已确认 token + 流式估算
+-    const currentInput = currentStepInputConfirmed + pendingInputTokens
+-    const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
+-    // totalInput/Output 来自本次请求的累计 token + 流式估算
+-    const totalInput = requestConfirmed.input + pendingInputTokens
+-    const totalOutput = requestConfirmed.output + pendingOutputTokens
+-    // requestTokens 用于 context 百分比，totalTokens 用于括号显示
++    const {
++      input: currentInput,
++      output: currentOutput,
++      totalInput,
++      totalOutput,
++    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
++    // requestTokens 用于 context 百分比和显示
+     const requestTokens = currentInput + currentOutput
++    const actualTotalTokens = currentInput + currentOutput
+     const totalTokens = totalInput + totalOutput
+ 
+     if (requestTokens <= 0 && totalTokens <= 0) {
+@@ -378,7 +335,11 @@
+     }
+ 
+     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
+-    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
++    // 使用 actualTotalTokens 计算百分比，与显示值一致
++    const pct =
++      actualTotalTokens > 0 && model?.limit.context
++        ? `${Math.round((actualTotalTokens / model.limit.context) * 100)}%`
++        : undefined
+     const cost = session?.cost ?? 0
+     return {
+       // 返回数值而非格式化字符串，由 JSX 配合 usageFlow 信号控制显示
+@@ -386,7 +347,7 @@
+       output: currentOutput,
+       totalInput,
+       totalOutput,
+-      context: requestTokens > 0 ? (pct ? `${Locale.number(requestTokens)} (${pct})` : Locale.number(requestTokens)) : undefined,
++      context: actualTotalTokens > 0 ? (pct ? `${Locale.number(actualTotalTokens)} (${pct})` : Locale.number(actualTotalTokens)) : undefined,
+       cost: cost > 0 ? money.format(cost) : undefined,
+     }
+   })
+
+
+diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
+--- a/packages/tui/src/feature-plugins/sidebar/context.tsx
++++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
+@@ -3,6 +3,7 @@
+ import type { BuiltinTuiPlugin } from "../builtins"
+ import { createEffect, createMemo, createSignal } from "solid-js"
+ import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
++import { sumConfirmed as sharedSumConfirmed, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
+ 
+ const id = "internal:sidebar-context"
+ 
+@@ -16,6 +17,8 @@
+   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
+   const session = createMemo(() => props.api.state.session.get(props.session_id))
+   const cost = createMemo(() => session()?.cost ?? 0)
++  // 会话运行中（非 idle）时显示引导估算
++  const isRunning = createMemo(() => (props.api.state.session.status(props.session_id)?.type ?? "idle") !== "idle")
+ 
+   // 主值展示"本次请求"累计；括号内显示会话总累计
+   type StateValue = {
+@@ -34,91 +37,49 @@
+     const assistants = messages.filter((item): item is AssistantMessage => item.role === "assistant")
+     const users = messages.filter((item): item is UserMessage => item.role === "user")
+ 
+-    if (assistants.length === 0) {
+-      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
+-    }
++    // 引导估算：在助手回复前预估用户输入的上下文 token
++    const getParts = (id: string) => props.api.state.part(id)
+ 
+-    // 累加已确认的 step-finish token 的辅助函数，按消息列表聚合
+-    const sumConfirmed = (items: AssistantMessage[]) =>
+-      items.reduce(
+-        (acc, a) => {
+-          const parts = props.api.state.part(a.id)
+-          const { input, output } = parts.reduce(
+-            (t, p) => {
+-              if (p.type !== "step-finish") return t
+-              return {
+-                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
+-                output: t.output + p.tokens.output + p.tokens.reasoning,
+-              }
+-            },
+-            { input: 0, output: 0 },
+-          )
+-          return { input: acc.input + input, output: acc.output + output }
+-        },
+-        { input: 0, output: 0 },
+-      )
+-
+-    // 本次请求的助手消息 = parentID 匹配最后一条用户消息的助手消息
++    // 无助手消息时显示引导估算值（运行中）或零值（空闲）
+     const lastUser = users.at(-1)
+     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
++    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
+ 
+-    // 本次请求尚无助手回复时返回零值，避免 at(-1)! 解引用 undefined
+     if (requestAssistants.length === 0) {
+-      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
++      if (!isRunning()) {
++        return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
++      }
++      // 引导估算：显示预估的输入 token 和百分比
++      const requestModel =
++        lastUser &&
++        props.api.state.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
++      const percent =
++        bootstrapInputTokens > 0 && requestModel?.limit.context
++          ? Math.round((bootstrapInputTokens / requestModel.limit.context) * 100)
++          : null
++      return {
++        tokens: bootstrapInputTokens,
++        totalTokens: bootstrapInputTokens,
++        input: bootstrapInputTokens,
++        output: 0,
++        totalInput: bootstrapInputTokens,
++        totalOutput: 0,
++        percent,
++      }
+     }
+ 
+     // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
+-    const requestConfirmed = sumConfirmed(requestAssistants)
++    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
+ 
+-    // 从最后一条消息添加流式估算
++    // 从最后一条消息添加流式估算，统一委托给 computeFinalTokens
+     const last = requestAssistants.at(-1)!
+     const lastParts = props.api.state.part(last.id)
+-    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
+-    // 流式输出：text/reasoning + pending 工具 raw + completed 工具 input
+-    // pending 工具的 state.raw 由 processor.ts 累积流式 delta
+-    const streamingOut = last.time.completed
+-      ? 0
+-      : lastParts.reduce((sum, p, i) => {
+-          if (i <= lastSFIdx) return sum
+-          if (p.type === "text" && !p.ignored) return sum + p.text.length
+-          if (p.type === "reasoning") return sum + p.text.length
+-          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
+-          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
+-          return sum
+-        }, 0)
+-    // 流式输入：最后一个 step-finish 之后的 completed 工具输出
+-    const pendingIn = last.time.completed
+-      ? 0
+-      : lastParts.reduce((sum, p, i) => {
+-          if (i <= lastSFIdx) return sum
+-          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
+-          return sum
+-        }, 0)
+-
+-    // 拆分为当前 step 和请求累计的输入输出
+-    // pendingInputTokens/pendingOutputTokens 是流式中的估算值，两边共用
+-    const pendingInputTokens = Math.round(pendingIn / 4)
+-    const pendingOutputTokens = Math.round(streamingOut / 4)
+-    // 当前 step：如果尾部有进行中的工具调用，则当前 step 尚未确认，显示 0
+-    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
+-    // 使用 lastSFIdx 直接索引，避免 reverse() 遍历
+-    const lastStepFinish =
+-      lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined
+-    const currentStepInputConfirmed =
+-      !hasInFlightTail && lastStepFinish
+-        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
+-        : 0
+-    const currentStepOutputConfirmed =
+-      !hasInFlightTail && lastStepFinish
+-        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
+-        : 0
+-    // input/output 来自当前 step 的已确认 token + 流式估算
+-    const input = currentStepInputConfirmed + pendingInputTokens
+-    const output = currentStepOutputConfirmed + pendingOutputTokens
+-    // totalInput/Output 来自本次请求的累计 token + 流式估算
+-    const totalInput = requestConfirmed.input + pendingInputTokens
+-    const totalOutput = requestConfirmed.output + pendingOutputTokens
+-    // tokens 用于百分比，totalTokens 用于括号显示
++    const {
++      input,
++      output,
++      totalInput,
++      totalOutput,
++    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
+     const tokens = input + output
+     const totalTokens = totalInput + totalOutput
+     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
+
+
+diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
+--- a/packages/tui/src/routes/session/subagent-footer.tsx
++++ b/packages/tui/src/routes/session/subagent-footer.tsx
+@@ -5,6 +5,7 @@
+ import { SplitBorder } from "../../ui/border"
+ import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
+ import { Locale } from "../../util/locale"
++import { sumConfirmed as sharedSumConfirmed, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
+ import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+ import { useTerminalDimensions } from "@opentui/solid"
+ import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
+@@ -56,94 +57,48 @@
+     const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
+     const users = msg.filter((item): item is UserMessage => item.role === "user")
+ 
+-    if (assistants.length === 0) {
+-      if (!isRunning) return
+-      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
+-    }
++    // 引导估算：在助手回复前预估用户输入的上下文 token
++    const getParts = (id: string) => sync.data.part[id] ?? []
+ 
+-    // 累加已确认的 step-finish token 的辅助函数，按消息列表聚合
+-    const sumConfirmed = (items: AssistantMessage[]) =>
+-      items.reduce(
+-        (acc, a) => {
+-          const parts = sync.data.part[a.id] ?? []
+-          const { input, output } = parts.reduce(
+-            (t, p) => {
+-              if (p.type !== "step-finish") return t
+-              return {
+-                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
+-                output: t.output + p.tokens.output + p.tokens.reasoning,
+-              }
+-            },
+-            { input: 0, output: 0 },
+-          )
+-          return { input: acc.input + input, output: acc.output + output }
+-        },
+-        { input: 0, output: 0 },
+-      )
+-
+     // 本次请求的助手消息 = parentID 匹配最后一条用户消息的助手消息
+     const lastUser = users.at(-1)
++    // 查找当前请求对应的模型，用于计算 context 百分比
++    const requestModel =
++      lastUser &&
++      sync.data.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
+     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
+ 
+-    // 本次请求尚无助手回复时显示零值
++    // 引导 token：用户输入 + 系统开销 或 上一轮上下文 + 用户输入
++    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
++
++    // 本次请求尚无助手回复时显示引导估算值
+     if (requestAssistants.length === 0) {
+       if (!isRunning) return
+-      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
++      const tokens = bootstrapInputTokens
++      // 计算引导 token 占上下文窗口的百分比
++      const pct = tokens > 0 && requestModel?.limit.context ? `${Math.round((tokens / requestModel.limit.context) * 100)}%` : undefined
++      return {
++        input: tokens,
++        output: 0,
++        totalInput: tokens,
++        totalOutput: 0,
++        context: tokens > 0 ? (pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens)) : undefined,
++        cost: undefined,
++      }
+     }
+ 
+     // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
+-    const requestConfirmed = sumConfirmed(requestAssistants)
++    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
+ 
+-    // 从最后一条消息添加流式估算
++    // 从最后一条消息添加流式估算，统一委托给 computeFinalTokens
+     const last = requestAssistants.at(-1)!
+     const lastParts = sync.data.part[last.id] ?? []
+-    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
+-    // 流式输出：text/reasoning + pending 工具 raw + completed 工具 input
+-    // pending 工具的 state.raw 由 processor.ts 累积流式 delta
+-    const streamingOut = last.time.completed
+-      ? 0
+-      : lastParts.reduce((sum, p, i) => {
+-          if (i <= lastSFIdx) return sum
+-          if (p.type === "text" && !p.ignored) return sum + p.text.length
+-          if (p.type === "reasoning") return sum + p.text.length
+-          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
+-          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
+-          return sum
+-        }, 0)
+-    // 流式输入：最后一个 step-finish 之后的 completed 工具输出
+-    // 这些输出将在下一轮 API 调用中计入 input_tokens
+-    const pendingIn = last.time.completed
+-      ? 0
+-      : lastParts.reduce((sum, p, i) => {
+-          if (i <= lastSFIdx) return sum
+-          if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
+-          return sum
+-        }, 0)
+-
+-    // 拆分为当前 step 和请求累计的输入输出
+-    // pendingInputTokens/pendingOutputTokens 是流式中的估算值，两边共用
+-    const pendingInputTokens = Math.round(pendingIn / 4)
+-    const pendingOutputTokens = Math.round(streamingOut / 4)
+-    // 当前 step：如果尾部有进行中的工具调用，则当前 step 尚未确认，显示 0
+-    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
+-    // 使用 lastSFIdx 直接索引，避免 reverse() 遍历
+-    const lastStepFinish =
+-      lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined
+-    const currentStepInputConfirmed =
+-      !hasInFlightTail && lastStepFinish
+-        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
+-        : 0
+-    const currentStepOutputConfirmed =
+-      !hasInFlightTail && lastStepFinish
+-        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
+-        : 0
+-    // currentInput/Output 来自当前 step 的已确认 token + 流式估算
+-    const currentInput = currentStepInputConfirmed + pendingInputTokens
+-    const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
+-    // totalInput/Output 来自本次请求的累计 token + 流式估算
+-    const totalInput = requestConfirmed.input + pendingInputTokens
+-    const totalOutput = requestConfirmed.output + pendingOutputTokens
+-    // requestTokens 用于 context 百分比，totalTokens 用于括号显示
++    const {
++      input: currentInput,
++      output: currentOutput,
++      totalInput,
++      totalOutput,
++    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
+     const requestTokens = currentInput + currentOutput
+     const totalTokens = totalInput + totalOutput
+ 
+

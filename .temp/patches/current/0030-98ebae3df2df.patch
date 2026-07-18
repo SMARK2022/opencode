@@ -10,17 +10,17 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
-diff --git a/packages/opencode/src/tool/bash.ts b/packages/opencode/src/tool/bash.ts
-index 927068c87e7f84e085f39ae74d7ad06bce3d5779..84b95cc7c1919c7dafad0c8b496794b8713b3777 100644
---- a/packages/opencode/src/tool/bash.ts
-+++ b/packages/opencode/src/tool/bash.ts
-@@ -495,8 +495,19 @@ export const BashTool = Tool.define(
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -419,8 +419,20 @@ ShellTool.shellEnv
          { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
          { env: {} },
        )
 +
 +      // 兼容性修改：探测 Windows 平台并静默挂载 UTF-8 强控变量以解决管道读取乱码
 +      const isWin = process.platform === "win32"
++      // 非 Windows 平台无副作用，utf8EnvOverrides 为空对象
 +      const utf8EnvOverrides = isWin ? {
 +        PYTHONIOENCODING: "utf-8",
 +        PYTHONUTF8: "1",

@@ -1,39 +1,32 @@
-From bbbf5f1dd94da64931b95ae8ee236f3509f7b486 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Thu, 23 Apr 2026 00:33:11 +0800
-Subject: [PATCH] =?UTF-8?q?feat(provider):=20=E6=B7=BB=E5=8A=A0claudecode?=
- =?UTF-8?q?=E6=8F=90=E4=BE=9B=E8=80=85=E6=94=AF=E6=8C=81=EF=BC=8C=E9=9B=86?=
- =?UTF-8?q?=E6=88=90API=E5=AF=86=E9=92=A5=E5=92=8C=E5=9F=BA=E6=9C=ACURL?=
- =?UTF-8?q?=E9=85=8D=E7=BD=AE?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/packages/opencode/package.json b/packages/opencode/package.json
-index f89302c4f16a57db56afd113d753d74652de93a2..4d393df0510fb6622eb14ce78ef3896ff1a89476 100644
 --- a/packages/opencode/package.json
 +++ b/packages/opencode/package.json
-@@ -109,6 +109,7 @@
-     "@hono/zod-validator": "catalog:",
-     "@lydell/node-pty": "catalog:",
-     "@modelcontextprotocol/sdk": "1.27.1",
+@@ -81,6 +81,7 @@
+     "@ff-labs/fff-bun": "0.9.4",
+     "@gitlab/opencode-gitlab-auth": "1.3.3",
+     "@modelcontextprotocol/sdk": "1.29.0",
 +    "@node-rs/xxhash": "1.7.6",
-     "@npmcli/arborist": "9.4.0",
-     "@npmcli/config": "10.8.1",
      "@octokit/graphql": "9.0.2",
+     "@octokit/rest": "catalog:",
+     "@openauthjs/openauth": "catalog:",
+
+
 diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2b03936f4b4e5f9759a03251bc8c3e8a19b74611
 --- /dev/null
 +++ b/packages/opencode/src/provider/claudecode.ts
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,240 @@
 +import { createHash, randomUUID } from "crypto"
 +import { xxh64 } from "@node-rs/xxhash"
 +
-+// --- Constants ---
++// --- 常量与基础配置 ---
++// Claude Code 版本号和指纹盐值，用于计费头和请求签名
++// Claude Code CLI 版本号
 +export const VERSION = "2.1.117"
++// 指纹计算盐值，与 Claude Code 官方一致
++// 指纹盐值：与 Claude Code 官方二进制一致，修改会导致计费头校验失败
 +const SALT = "59cf53e54c78"
++// Anthropic API beta 特性列表
 +const ANTHROPIC_BETAS = [
 +  "claude-code-20250219",
 +  "interleaved-thinking-2025-05-14",
@@ -42,12 +35,15 @@ index 0000000000000000000000000000000000000000..2b03936f4b4e5f9759a03251bc8c3e8a
 +  "prompt-caching-scope-2026-01-05",
 +].join(",")
 +
++// CLI 身份标识块，注入 system prompt 标识为 Claude Code
 +export const CLI_IDENTITY_BLOCK = {
 +  type: "text" as const,
 +  text: "You are Claude Code, Anthropic's official CLI for Claude.",
++  // ephemeral 缓存控制：允许 API 对此块进行 prompt caching
 +  cache_control: { type: "ephemeral" as const },
 +}
 +
++// 主系统提示块，模拟 Claude Code 的系统提示词
 +export const MAIN_SYSTEM_BLOCK = {
 +  type: "text" as const,
 +  text: [
@@ -62,7 +58,8 @@ index 0000000000000000000000000000000000000000..2b03936f4b4e5f9759a03251bc8c3e8a
 +  cache_control: { type: "ephemeral" as const },
 +}
 +
-+// --- Session State Management ---
++// --- 会话状态管理 ---
++// 单例模式管理 sessionId/deviceId/accountUuid
 +export interface CubenceSession {
 +  sessionId: string
 +  deviceId: string
@@ -72,6 +69,7 @@ index 0000000000000000000000000000000000000000..2b03936f4b4e5f9759a03251bc8c3e8a
 +let sessionInstance: CubenceSession | null = null
 +
 +export function getSession(opts?: { deviceId?: string }): CubenceSession {
++  // 进程级单例：同一进程内复用相同的 sessionId/deviceId，避免每请求生成新会话
 +  if (!sessionInstance) {
 +    sessionInstance = {
 +      sessionId: randomUUID(),
@@ -82,30 +80,36 @@ index 0000000000000000000000000000000000000000..2b03936f4b4e5f9759a03251bc8c3e8a
 +  return sessionInstance
 +}
 +
-+// --- Logic functions ---
++// --- 逻辑函数 ---
++// 指纹计算、计费头构建、系统块组装、元数据生成
++// 计算消息指纹：取消息文本特定位置的字符 + 盐值 + 版本，SHA-256 取前 3 位
 +export function computeFingerprint(messageText: string, version: string): string {
++  // 指纹取消息文本的第 4、7、20 位字符，位置不足时补 "0"
 +  const pick = (i: number) => (messageText.length > i ? messageText[i] : "0")
 +  const chars = pick(4) + pick(7) + pick(20)
 +  const input = `${SALT}${chars}${version}`
 +  return createHash("sha256").update(input, "utf8").digest("hex").slice(0, 3)
 +}
 +
++// 构建计费头块，包含版本、入口和 cch 占位符
 +export function buildBillingHeaderBlock(fp: string) {
 +  return {
 +    type: "text" as const,
 +    text: [
 +      `x-anthropic-billing-header:`,
 +      ` cc_version=${VERSION}.${fp};`,
-+      ` cc_entrypoint=cli;`,
++      ` cc_entrypoint=cli;`, // 入口标识：CLI 方式调用
 +      ` cch=00000;`,
 +    ].join(""),
 +  }
 +}
 +
++// 组装完整的系统块列表：计费头 + CLI 身份 + 主系统提示
 +export function buildSystemBlocks(fp: string) {
 +  return [buildBillingHeaderBlock(fp), CLI_IDENTITY_BLOCK, MAIN_SYSTEM_BLOCK]
 +}
 +
++// 构建用户元数据 JSON，包含设备 ID、账号 UUID 和会话 ID
 +export function buildMetadataUserId(opts: { deviceId: string; sessionId: string; accountUuid?: string }) {
 +  return JSON.stringify({
 +    device_id: opts.deviceId,
@@ -114,6 +118,7 @@ index 0000000000000000000000000000000000000000..2b03936f4b4e5f9759a03251bc8c3e8a
 +  })
 +}
 +
++// 构建请求头，包含 Anthropic 版本、beta 特性和 Bearer 认证
 +export function buildRequestHeaders(opts: { token: string; sessionId: string }): Record<string, string> {
 +  return {
 +    "content-type": "application/json",
@@ -126,13 +131,16 @@ index 0000000000000000000000000000000000000000..2b03936f4b4e5f9759a03251bc8c3e8a
 +  }
 +}
 +
-+// --- CCH computation ---
++// --- CCH 完整性校验计算 ---
++// xxh64 哈希取低 20 位，用于请求体完整性签名
++// 计算 CCH：对请求体字节做 xxh64 哈希，取低 20 位十六进制
 +export function computeCch(bodyBytes: Uint8Array): string {
 +  const hash: bigint = xxh64(bodyBytes)
 +  const low20 = hash & BigInt(0xfffff)
 +  return low20.toString(16).padStart(5, "0")
 +}
 +
++// 替换请求体中的 cch=00000 占位符为实际计算值
 +export function patchCch(bodyStr: string): string {
 +  const PLACEHOLDER = "cch=00000"
 +
@@ -145,16 +153,20 @@ index 0000000000000000000000000000000000000000..2b03936f4b4e5f9759a03251bc8c3e8a
 +  const bodyBytes = new TextEncoder().encode(bodyStr)
 +  const cch = computeCch(bodyBytes)
 +
++  // idx+4 跳过 "cch=" 前缀，idx+9 跳过 "cch=00000" 占位符全长
 +  return bodyStr.slice(0, idx + 4) + cch + bodyStr.slice(idx + 9)
 +}
 +
 +// --- Fetch Wrapper ---
++// 创建 Claude Code 风格的 fetch 包装器
++// 拦截 /v1/messages 请求，注入 system 块、metadata、thinking 和 cch
 +export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; baseUrl: string }) {
 +  const { session, token, baseUrl } = opts
 +
 +  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
 +    const url = typeof input === "string" ? input : input.toString()
 +
++    // 非 /v1/messages 请求直接透传，不注入 Claude Code 头
 +    if (!url.includes("/v1/messages")) {
 +      return fetch(input, init)
 +    }
@@ -165,7 +177,8 @@ index 0000000000000000000000000000000000000000..2b03936f4b4e5f9759a03251bc8c3e8a
 +
 +    const firstUserMessage = (originalBody.messages ?? []).find((m: { role: string }) => m.role === "user")
 +
-+    const firstUserText = (() => {
++    // 提取第一条用户消息的文本内容，用于指纹计算
++const firstUserText = (() => {
 +      if (!firstUserMessage) return ""
 +      const content = firstUserMessage.content
 +      if (typeof content === "string") return content
@@ -178,7 +191,8 @@ index 0000000000000000000000000000000000000000..2b03936f4b4e5f9759a03251bc8c3e8a
 +      return ""
 +    })()
 +
-+    const fp = computeFingerprint(firstUserText, VERSION)
++    // 计算消息指纹，用于计费头和 CCH 签名
++const fp = computeFingerprint(firstUserText, VERSION)
 +
 +    const patchedBody = {
 +      ...originalBody,
@@ -227,6 +241,7 @@ index 0000000000000000000000000000000000000000..2b03936f4b4e5f9759a03251bc8c3e8a
 +}
 +
 +// --- Provider registration ---
++// 创建 Claude Code 提供者配置，返回 baseURL、fetch 和 headers
 +export function createClaudeCodeProvider(token: string, baseUrl: string) {
 +  const session = getSession()
 +
@@ -237,17 +252,19 @@ index 0000000000000000000000000000000000000000..2b03936f4b4e5f9759a03251bc8c3e8a
 +      token,
 +      baseUrl,
 +    }),
-+    headers: {}, // Let our fetch wrapper handle headers
++    // headers 留空：认证头由 fetch wrapper 根据 authMode 动态设置，避免 SDK 覆盖
++    headers: {},
 +  }
 +}
+
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
-index 6e116fe41ea71025b20c8043af9e6df63a1f9165..60bfe5991bf9ea5582101bbaac0b56019f61427f 100644
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -140,6 +140,27 @@ function useLanguageModel(sdk: any) {
+@@ -167,6 +167,28 @@
  
  function custom(dep: CustomDep): Record<string, CustomLoader> {
    return {
++    // claudecode 提供者：包装 Anthropic API，注入 Claude Code 风格的计费头和系统块
 +    claudecode: Effect.fnUntraced(function* (provider: Info) {
 +      const auth = yield* dep.auth(provider.id)
 +      const env = yield* dep.env()
@@ -272,12 +289,14 @@ index 6e116fe41ea71025b20c8043af9e6df63a1f9165..60bfe5991bf9ea5582101bbaac0b5601
      anthropic: () =>
        Effect.succeed({
          autoload: false,
-@@ -1149,7 +1170,7 @@ const layer: Layer.Layer<
-                   provider.npm ??
-                   existingModel?.api.npm ??
-                   modelsDev[providerID]?.npm ??
--                  "@ai-sdk/openai-compatible",
-+                  (providerID === "claudecode" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible"),
-                 url: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[providerID]?.api ?? "",
-               },
-               status: model.status ?? existingModel?.status ?? "active",
+@@ -1434,7 +1456,8 @@
+               provider.npm ??
+               existingModel?.api.npm ??
+               modelsDev[providerID]?.npm ??
+-              "@ai-sdk/openai-compatible"
++              // claudecode 模型路由到 @ai-sdk/anthropic 而非默认的 openai-compatible
++              (providerID === "claudecode" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible")
+             const name = iife(() => {
+               if (model.name) return model.name
+               if (model.id && model.id !== modelID) return modelID
+
