@@ -1,258 +1,5 @@
-From ab8ce2ad4405bb591fad947692c69c5a41f38441 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Sat, 25 Apr 2026 17:36:39 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0Bash=E8=BE=93?=
- =?UTF-8?q?=E5=87=BA=E5=8E=8B=E7=BC=A9=E5=8A=9F=E8=83=BD=E5=92=8C=E7=9B=B8?=
- =?UTF-8?q?=E5=85=B3=E9=85=8D=E7=BD=AE?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-- Introduced `compress_output` parameter in Bash tool schema to control output compression.
-- Implemented Bash output compression logic in the Bash tool, allowing for reduced repetitive output.
-- Enhanced diagnostic collection to include compression statistics and duration metrics.
-- Updated usage documentation to inform users about the new compression feature and its implications.
-- Added `bash_compression` option in the configuration to enable or disable output compression globally.
-
-diff --git a/packages/opencode/src/cli/cmd/tui/app.tsx b/packages/opencode/src/cli/cmd/tui/app.tsx
-index eb5cb44e8daa512ac668634d326c251448160cf3..e81cffdb48249afee4c5d1fef0a7fd95fd2583d3 100644
---- a/packages/opencode/src/cli/cmd/tui/app.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/app.tsx
-@@ -23,7 +23,7 @@ import { DialogProvider, useDialog } from "@tui/ui/dialog"
- import { DialogProvider as DialogProviderList } from "@tui/component/dialog-provider"
- import { ErrorComponent } from "@tui/component/error-component"
- import { PluginRouteMissing } from "@tui/component/plugin-route-missing"
--import { ProjectProvider } from "@tui/context/project"
-+import { ProjectProvider, useProject } from "@tui/context/project"
- import { EditorContextProvider } from "@tui/context/editor"
- import { useEvent } from "@tui/context/event"
- import { SDKProvider, useSDK } from "@tui/context/sdk"
-@@ -221,6 +221,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
-   const themeState = useTheme()
-   const { theme, mode, setMode, locked, lock, unlock } = themeState
-   const sync = useSync()
-+  const project = useProject()
-   const exit = useExit()
-   const promptRef = usePromptRef()
-   const routes: RouteMap = new Map()
-@@ -405,6 +406,11 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
-   )
- 
-   const connected = useConnected()
-+  const [bashCompressionOverride, setBashCompressionOverride] = createSignal<boolean>()
-+  createEffect(() => {
-+    setBashCompressionOverride(sync.data.config.tool_output?.bash_compression ?? true)
-+  })
-+  const bashCompressionEnabled = createMemo(() => bashCompressionOverride() ?? true)
-   command.register(() => [
-     {
-       title: "Switch session",
-@@ -627,6 +633,50 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
-       },
-       category: "System",
-     },
-+    {
-+      title: bashCompressionEnabled() ? "Disable Bash output compression" : "Enable Bash output compression",
-+      value: "bash.output_compression.toggle",
-+      slash: {
-+        name: "bash-compression",
-+        aliases: ["toggle-bash-compression"],
-+      },
-+      onSelect: async (dialog) => {
-+        const next = !bashCompressionEnabled()
-+        setBashCompressionOverride(next)
-+        const workspace = project.workspace.current()
-+
-+        const result = await sdk.client.config.update(
-+          {
-+            workspace,
-+            config: {
-+              tool_output: {
-+                bash_compression: next,
-+              },
-+            },
-+          },
-+          { throwOnError: false },
-+        )
-+
-+        if (result.error) {
-+          setBashCompressionOverride(!next)
-+          toast.show({
-+            variant: "error",
-+            message: "Failed to update Bash output compression setting",
-+            duration: 5000,
-+          })
-+          return
-+        }
-+
-+        await sync.bootstrap({ fatal: false })
-+        toast.show({
-+          variant: "info",
-+          message: next ? "Bash output compression enabled" : "Bash output compression disabled",
-+          duration: 3000,
-+        })
-+        dialog.clear()
-+      },
-+      category: "System",
-+    },
-     {
-       title: "Help",
-       value: "help.show",
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index c04e58acecaed42be5a0dbd1081880451223612b..e2e2c8f4bbe0dd8a01a406c737c4d0221374f025 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -21,7 +21,15 @@ import { useEvent } from "@tui/context/event"
- import { SplitBorder } from "@tui/component/border"
- import { Spinner } from "@tui/component/spinner"
- import { selectedForeground, useTheme } from "@tui/context/theme"
--import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
-+import {
-+  BoxRenderable,
-+  ScrollBoxRenderable,
-+  addDefaultParsers,
-+  TextAttributes,
-+  RGBA,
-+  MouseButton,
-+  type MouseEvent as TuiMouseEvent,
-+} from "@opentui/core"
- import { Prompt, type PromptRef } from "@tui/component/prompt"
- import type {
-   AssistantMessage,
-@@ -1742,13 +1750,21 @@ function BlockTool(props: {
-   title: string
-   children: JSX.Element
-   onClick?: () => void
-+  onRightClick?: () => void
-   part?: ToolPart
-   spinner?: boolean
-+  contextView?: boolean
-+  contextLabel?: string
- }) {
-   const { theme } = useTheme()
-   const renderer = useRenderer()
-   const [hover, setHover] = createSignal(false)
-   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
-+  const background = createMemo(() => {
-+    if (props.contextView) return theme.diffContextBg
-+    if (hover()) return theme.backgroundMenu
-+    return theme.backgroundPanel
-+  })
-   return (
-     <box
-       border={["left"]}
-@@ -1757,13 +1773,20 @@ function BlockTool(props: {
-       paddingLeft={2}
-       marginTop={1}
-       gap={1}
--      backgroundColor={hover() ? theme.backgroundMenu : theme.backgroundPanel}
-+      backgroundColor={background()}
-       customBorderChars={SplitBorder.customBorderChars}
--      borderColor={theme.background}
--      onMouseOver={() => props.onClick && setHover(true)}
-+      borderColor={props.contextView ? theme.info : theme.background}
-+      onMouseOver={() => (props.onClick || props.onRightClick) && setHover(true)}
-       onMouseOut={() => setHover(false)}
--      onMouseUp={() => {
-+      onMouseUp={(evt?: TuiMouseEvent) => {
-         if (renderer.getSelection()?.getSelectedText()) return
-+        if (evt?.button === MouseButton.RIGHT) {
-+          if (!props.onRightClick) return
-+          evt.preventDefault()
-+          evt.stopPropagation()
-+          props.onRightClick()
-+          return
-+        }
-         props.onClick?.()
-       }}
-     >
-@@ -1772,6 +1795,7 @@ function BlockTool(props: {
-         fallback={
-           <text paddingLeft={3} fg={theme.textMuted}>
-             {props.title}
-+            <Show when={props.contextView && props.contextLabel}> · {props.contextLabel}</Show>
-           </text>
-         }
-       >
-@@ -1789,7 +1813,12 @@ function Bash(props: ToolProps<typeof BashTool>) {
-   const { theme } = useTheme()
-   const sync = useSync()
-   const isRunning = createMemo(() => props.part.state.status === "running")
--  const output = createMemo(() => stripAnsi(props.metadata.output?.trim() ?? ""))
-+  const [showContextOutput, setShowContextOutput] = createSignal(false)
-+  const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
-+  const output = createMemo(() => {
-+    const text = showContextOutput() && contextOutputAvailable() ? props.output : props.metadata.output
-+    return stripAnsi(text?.trim() ?? "")
-+  })
-   const [expanded, setExpanded] = createSignal(false)
-   const lines = createMemo(() => output().split("\n"))
-   const overflow = createMemo(() => lines().length > 10)
-@@ -1823,6 +1852,12 @@ function Bash(props: ToolProps<typeof BashTool>) {
-     return `# ${desc} in ${wd}`
-   })
- 
-+  const toggleContextOutput = () => {
-+    if (!contextOutputAvailable()) return
-+    setExpanded(true)
-+    setShowContextOutput((prev) => !prev)
-+  }
-+
-   return (
-     <Switch>
-       <Match when={props.metadata.output !== undefined}>
-@@ -1831,9 +1866,15 @@ function Bash(props: ToolProps<typeof BashTool>) {
-           part={props.part}
-           spinner={isRunning()}
-           onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
-+          onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
-+          contextView={showContextOutput()}
-+          contextLabel="returned to model"
-         >
-           <box gap={1}>
-             <text fg={theme.text}>$ {props.input.command}</text>
-+            <Show when={showContextOutput()}>
-+              <text fg={theme.info}>Model context output</text>
-+            </Show>
-             <Show when={output()}>
-               <text fg={theme.text}>{limited()}</text>
-             </Show>
-diff --git a/packages/opencode/src/config/config.ts b/packages/opencode/src/config/config.ts
-index f1ceb1b4ed396aa6a8310f511f432a5dec332605..183ff2e9eda1208b6c12c8f5fb03959a46eaf40a 100644
---- a/packages/opencode/src/config/config.ts
-+++ b/packages/opencode/src/config/config.ts
-@@ -209,10 +209,14 @@ export const Info = Schema.Struct({
-       max_bytes: Schema.optional(PositiveInt).annotate({
-         description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 51200)",
-       }),
-+      bash_compression: Schema.optional(Schema.Boolean).annotate({
-+        description:
-+          "Enable Bash output compression before truncation. Defaults to true. When enabled, repeated lines, repeated blocks, progress redraws, and obvious inline repeated patterns may be compacted while preserving the full raw output on disk.",
-+      }),
-     }),
-   ).annotate({
-     description:
--      "Thresholds for truncating tool output. When output exceeds either limit, the full text is written to the truncation directory and a preview is returned.",
-+      "Thresholds and presentation options for tool output. When output exceeds either limit, the full text is written to the truncation directory and a preview is returned.",
-   }),
-   compaction: Schema.optional(
-     Schema.Struct({
-diff --git a/packages/opencode/src/provider/sdk/copilot/responses/openai-responses-language-model.ts b/packages/opencode/src/provider/sdk/copilot/responses/openai-responses-language-model.ts
-index 250d1f6f3405e7c9bda1af2abc78f7466ed8e5f4..e005f850b7b751177b88ea181b8ea0151d13938d 100644
---- a/packages/opencode/src/provider/sdk/copilot/responses/openai-responses-language-model.ts
-+++ b/packages/opencode/src/provider/sdk/copilot/responses/openai-responses-language-model.ts
-@@ -280,7 +280,7 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV3 {
-       // provider options:
-       max_tool_calls: openaiOptions?.maxToolCalls,
-       metadata: openaiOptions?.metadata,
--      parallel_tool_calls: openaiOptions?.parallelToolCalls,
-+      parallel_tool_calls: openaiOptions?.parallelToolCalls ?? true,
-       previous_response_id: openaiOptions?.previousResponseId,
-       store: openaiOptions?.store,
-       user: openaiOptions?.user,
 diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..21f8b47654b8205b5ea836d2e9d930225b1ce11a
 --- /dev/null
 +++ b/packages/opencode/src/tool/bash-compress.ts
 @@ -0,0 +1,949 @@
@@ -1205,215 +952,357 @@ index 0000000000000000000000000000000000000000..21f8b47654b8205b5ea836d2e9d93022
 +    compressionInlinePatternGroups: stats.inlinePatternGroups,
 +  }
 +}
-diff --git a/packages/opencode/src/tool/bash.ts b/packages/opencode/src/tool/bash.ts
-index 2cb3ffbeffc73b70a7446daee386d29ce14ba2da..927068c87e7f84e085f39ae74d7ad06bce3d5779 100644
---- a/packages/opencode/src/tool/bash.ts
-+++ b/packages/opencode/src/tool/bash.ts
-@@ -1,4 +1,4 @@
--import { Schema } from "effect"
-+import { Effect, Option, Schema, Stream } from "effect"
- import os from "os"
- import { createWriteStream } from "node:fs"
- import * as Tool from "./tool"
-@@ -17,9 +17,15 @@ import { Shell } from "@/shell/shell"
- import { BashArity } from "@/permission/arity"
+
+
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -14,6 +14,7 @@
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { Shell } from "@opencode-ai/core/shell"
+ import { ShellID } from "./shell/id"
++import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "./bash-compress"
+ 
  import * as Truncate from "./truncate"
  import { Plugin } from "@/plugin"
--import { Effect, Stream } from "effect"
- import { ChildProcess } from "effect/unstable/process"
- import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
-+import { Config } from "@/config"
-+import {
-+  BashDiagnosticCollector,
-+  bashCompressionMetadata,
-+  compressVisibleOutput,
-+  renderDiagnosticAppendix,
-+} from "./bash-compress"
- 
- const MAX_METADATA_LENGTH = 30_000
- const DEFAULT_TIMEOUT = Flag.OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS || 2 * 60 * 1000
-@@ -60,6 +66,10 @@ export const Parameters = Schema.Struct({
-     description:
-       "Clear, concise description of what this command does in 5-10 words. Examples:\nInput: git status\nOutput: Shows working tree status\n\nInput: npm install\nOutput: Installs package dependencies\n\nInput: mkdir foo\nOutput: Creates directory 'foo'",
-   }),
-+  compress_output: Schema.optional(Schema.Boolean).annotate({
-+    description:
-+      "Whether this Bash call may compress repetitive output before returning it. Defaults to the user's Bash output compression setting. Set false when exact raw formatting is important.",
-+  }),
- })
- 
- type Part = {
-@@ -216,6 +226,10 @@ function preview(text: string) {
-   return "...\n\n" + text.slice(-MAX_METADATA_LENGTH)
- }
- 
-+function bashCompressionEnabled(config?: Config.Info) {
-+  return config?.tool_output?.bash_compression ?? true
-+}
-+
- function tail(text: string, maxLines: number, maxBytes: number) {
-   const lines = text.split("\n")
-   if (lines.length <= maxLines && Buffer.byteLength(text, "utf-8") <= maxBytes) {
-@@ -496,6 +510,7 @@ export const BashTool = Tool.define(
+@@ -524,6 +525,7 @@
+         cwd: string
          env: NodeJS.ProcessEnv
          timeout: number
-         description: string
 +        compressOutput: boolean
        },
        ctx: Tool.Context,
      ) {
-@@ -511,6 +526,9 @@ export const BashTool = Tool.define(
-       let expired = false
-       let aborted = false
+@@ -564,6 +566,10 @@
+         ).pipe(Effect.catch(() => Effect.void))
+       })
  
-+      const started = Date.now()
++      // 压缩诊断收集器：收集流式输出用于诊断分析
 +      const diag = new BashDiagnosticCollector()
++      const started = Date.now()
 +
        yield* ctx.metadata({
          metadata: {
            output: "",
-@@ -524,6 +542,8 @@ export const BashTool = Tool.define(
- 
-           yield* Effect.forkScoped(
+@@ -579,6 +585,8 @@
              Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
-+              diag.push(chunk)
-+
                const size = Buffer.byteLength(chunk, "utf-8")
                list.push({ text: chunk, size })
++              // 收集诊断信息用于压缩后的附录生成
++              diag.push(chunk)
                used += size
-@@ -599,6 +619,10 @@ export const BashTool = Tool.define(
-         }),
-       ).pipe(Effect.orDie)
- 
-+      diag.end()
-+      const durationMs = Date.now() - started
-+      const diagnosticSnapshot = diag.snapshot()
-+
-       const meta: string[] = []
-       if (expired) {
-         meta.push(
-@@ -607,9 +631,13 @@ export const BashTool = Tool.define(
+               while (used > keep && list.length > 1) {
+                 const item = list.shift()
+@@ -658,9 +666,12 @@
        }
        if (aborted) meta.push("User aborted the command")
        const raw = list.map((item) => item.text).join("")
 -      const end = tail(raw, limits.maxLines, limits.maxBytes)
-+
++      // 压缩可见输出：启用时移除冗余行，保留关键诊断信息
 +      const compressed = compressVisibleOutput(raw, { enabled: input.compressOutput })
++      diag.end()
 +      const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
-+
        if (end.cut) cut = true
 -      if (!file && end.cut) {
-+
 +      if (!file && (end.cut || compressed.stats.applied)) {
          file = yield* trunc.write(raw)
        }
  
-@@ -620,9 +648,20 @@ export const BashTool = Tool.define(
+@@ -671,6 +682,9 @@
          output = `...output truncated...\n\nFull output saved to: ${file}\n\n` + output
        }
  
-+      const appendix = renderDiagnosticAppendix(diagnosticSnapshot, {
-+        durationMs,
-+        exitCode: code,
-+        visibleOutput: output,
-+      })
-+
-+      if (appendix) {
-+        output += "\n\n" + appendix
-+      }
-+
++      // 诊断附录：无条件计算，追加到输出末尾（与 SMARK 源一致）
++      const appendix = renderDiagnosticAppendix(diag.snapshot(), { durationMs: Date.now() - started, exitCode: code, visibleOutput: output })
++      if (appendix) output += "\n\n" + appendix
        if (meta.length > 0) {
-         output += "\n\n<bash_metadata>\n" + meta.join("\n") + "\n</bash_metadata>"
+         output += "\n\n<shell_metadata>\n" + meta.join("\n") + "\n</shell_metadata>"
        }
-+
-       if (sink) {
-         const stream = sink
-         yield* Effect.promise(
-@@ -641,7 +680,11 @@ export const BashTool = Tool.define(
+@@ -681,6 +695,12 @@
            exit: code,
-           description: input.description,
            truncated: cut,
 -          ...(cut && file ? { outputPath: file } : {}),
-+          durationMs,
-+          diagnosticErrorLikeLines: diagnosticSnapshot.errorLikeLines,
-+          diagnosticWarningLikeLines: diagnosticSnapshot.warningLikeLines,
-+          ...bashCompressionMetadata(compressed.stats),
 +          ...((cut || compressed.stats.applied) && file ? { outputPath: file } : {}),
++          // 包含压缩统计信息：applied、removedLines 等
++          ...bashCompressionMetadata(compressed.stats),
++          // 诊断元数据：暴露执行时长和错误/警告行数
++          durationMs: Date.now() - started,
++          diagnosticErrorLikeLines: diag.snapshot().errorLikeLines,
++          diagnosticWarningLikeLines: diag.snapshot().warningLikeLines,
          },
          output,
        }
-@@ -662,6 +705,17 @@ export const BashTool = Tool.define(
-         log.info("bash tool using shell", { shell })
- 
+@@ -693,10 +709,13 @@
+         const name = Shell.name(shell)
          const limits = yield* trunc.limits()
-+        const configSvc = yield* Effect.serviceOption(Config.Service)
-+        const config = Option.isSome(configSvc)
-+          ? yield* configSvc.value.get().pipe(Effect.catch(() => Effect.succeed(undefined)))
-+          : undefined
-+        const userCompressionEnabled = bashCompressionEnabled(config)
-+        const compressionGuidance = userCompressionEnabled
-+          ? [
-+              "  - Bash output compression is enabled by default. Repetitive output may be compacted before being returned, while the full raw output is still saved to a file when needed.",
-+              "  - Use `compress_output: false` for commands where exact raw formatting matters, such as snapshot tests, binary/text fixture generation, or commands whose spacing is the result.",
-+            ].join("\n")
-+          : ""
+         const prompt = ShellPrompt.render(name, process.platform, limits, defaultTimeoutMs)
++        // 压缩指引：仅在启用时告知模型可以使用 compress_output: false
++        const compressionEnabled = cfg.tool_output?.bash_compression ?? true
++        const compressionGuidance = compressionEnabled ? "Bash output compression is enabled by default. Use `compress_output: false` for commands where exact raw formatting matters, such as snapshot tests, binary/text fixture generation, or commands whose spacing is the result of careful formatting." : ""
+         // 追加 per-shell 指引、目录列表命令和专用工具列表到提示词描述
+         const shellGuidanceText = shellGuidance(name)
+         const listCmd = listCommand(name)
+-        const enhancedDescription = prompt.description + (shellGuidanceText ? "\n\n" + shellGuidanceText : "") + "\nDirectory listing command: " + listCmd + "\nDedicated tools (prefer over shell):\n- File listing/search: Use Glob or Read directory output (NOT ls/find/dir/Get-ChildItem -Recurse)\n- Content search: Use Grep (NOT grep/rg/findstr/Select-String)\n- Read files: Use Read (NOT cat/head/tail/type/Get-Content)\n- Edit files: Use Edit (NOT sed/awk/PowerShell text replacement)\n- Write files: Use Write (NOT echo redirection/heredoc/Out-File/Set-Content)\n- Communication: Output text directly (NOT echo/printf)"
++        const enhancedDescription = prompt.description + (shellGuidanceText ? "\n\n" + shellGuidanceText : "") + "\nDirectory listing command: " + listCmd + (compressionGuidance ? "\n\n" + compressionGuidance : "") + "\nDedicated tools (prefer over shell):\n- File listing/search: Use Glob or Read directory output (NOT ls/find/dir/Get-ChildItem -Recurse)\n- Content search: Use Grep (NOT grep/rg/findstr/Select-String)\n- Read files: Use Read (NOT cat/head/tail/type/Get-Content)\n- Edit files: Use Edit (NOT sed/awk/PowerShell text replacement)\n- Write files: Use Write (NOT echo redirection/heredoc/Out-File/Set-Content)\n- Communication: Output text directly (NOT echo/printf)"
+         yield* Effect.logInfo("shell tool using shell", { shell })
  
          return {
-           description: DESCRIPTION.replaceAll("${directory}", Instance.directory)
-@@ -671,7 +725,8 @@ export const BashTool = Tool.define(
-             .replaceAll("${shellGuidance}", shellGuidance(name))
-             .replaceAll("${listCommand}", listCommand(name))
-             .replaceAll("${maxLines}", String(limits.maxLines))
--            .replaceAll("${maxBytes}", String(limits.maxBytes)),
-+            .replaceAll("${maxBytes}", String(limits.maxBytes))
-+            .replaceAll("${compressionGuidance}", compressionGuidance),
-           parameters: Parameters,
-           execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
-             Effect.gen(function* () {
-@@ -689,6 +744,11 @@ export const BashTool = Tool.define(
-               const scan = yield* collect(root, cwd, ps, shell)
-               if (!Instance.containsPath(cwd)) scan.dirs.add(cwd)
-               yield* ask(ctx, scan)
-+              const configSvc = yield* Effect.serviceOption(Config.Service)
-+              const config = Option.isSome(configSvc)
-+                ? yield* configSvc.value.get().pipe(Effect.catch(() => Effect.succeed(undefined)))
-+                : undefined
-+              const compressOutput = bashCompressionEnabled(config) && (params.compress_output ?? true)
- 
-               return yield* run(
-                 {
-@@ -699,6 +759,7 @@ export const BashTool = Tool.define(
+@@ -713,6 +732,8 @@
+               }
+               const timeout = params.timeout ?? defaultTimeoutMs
+               const ps = Shell.ps(shell)
++              // 从配置和参数决定是否启用输出压缩，默认启用
++              const compressOutput = (cfg.tool_output?.bash_compression ?? true) && (params.compress_output ?? true)
+               yield* Effect.scoped(
+                 Effect.gen(function* () {
+                   const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
+@@ -734,6 +755,7 @@
+                   cwd,
                    env: yield* shellEnv(ctx, cwd),
                    timeout,
-                   description: params.description,
 +                  compressOutput,
                  },
                  ctx,
                )
-diff --git a/packages/opencode/src/tool/bash.txt b/packages/opencode/src/tool/bash.txt
-index 2966577c71b8a298593bc816a4bd6341760dd568..087e251b8cfc2e0d449432c687bc4ecb39c5d7ca 100644
---- a/packages/opencode/src/tool/bash.txt
-+++ b/packages/opencode/src/tool/bash.txt
-@@ -33,6 +33,7 @@ Usage notes:
-   - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms (2 minutes).
-   - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
-   - If the output exceeds ${maxLines} lines or ${maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use `head`, `tail`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching.
-+${compressionGuidance}
- 
-   - Avoid using shell for file operations. Prefer dedicated tools:
-     - File listing/search: Use Glob or Read directory output (NOT ls/find/dir/Get-ChildItem -Recurse)
+
+
+diff --git a/packages/opencode/src/tool/shell/prompt.ts b/packages/opencode/src/tool/shell/prompt.ts
+--- a/packages/opencode/src/tool/shell/prompt.ts
++++ b/packages/opencode/src/tool/shell/prompt.ts
+@@ -18,6 +18,10 @@
+     timeout: Schema.optional(PositiveInt).annotate({ description: "Optional timeout in milliseconds" }),
+     workdir: Schema.optional(Schema.String).annotate({
+       description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
++    }),
++    // 启用输出压缩以减少 token 用量
++    compress_output: Schema.optional(Schema.Boolean).annotate({
++      description: "Enable output compression to reduce token usage",
+     }),
+   })
+ }
+
+
+diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config/config.ts
+--- a/packages/core/src/v1/config/config.ts
++++ b/packages/core/src/v1/config/config.ts
+@@ -138,6 +138,10 @@
+       max_bytes: Schema.optional(PositiveInt).annotate({
+         description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 51200)",
+       }),
++      // 启用 Bash 输出压缩，减少 token 用量
++      bash_compression: Schema.optional(Schema.Boolean).annotate({
++        description: "Enable Bash output compression to reduce token usage",
++      }),
+     }),
+   ).annotate({
+     description:
+
+
+diff --git a/packages/core/src/config/tool-output.ts b/packages/core/src/config/tool-output.ts
+--- a/packages/core/src/config/tool-output.ts
++++ b/packages/core/src/config/tool-output.ts
+@@ -6,4 +6,5 @@
+ export class Info extends Schema.Class<Info>("ConfigV2.ToolOutput")({
+   max_lines: PositiveInt.pipe(Schema.optional),
+   max_bytes: PositiveInt.pipe(Schema.optional),
++  bash_compression: Schema.Boolean.pipe(Schema.optional),
+ }) {}
+
+
+diff --git a/packages/core/src/github-copilot/responses/openai-responses-language-model.ts b/packages/core/src/github-copilot/responses/openai-responses-language-model.ts
+--- a/packages/core/src/github-copilot/responses/openai-responses-language-model.ts
++++ b/packages/core/src/github-copilot/responses/openai-responses-language-model.ts
+@@ -280,7 +280,7 @@
+       // provider options:
+       max_tool_calls: openaiOptions?.maxToolCalls,
+       metadata: openaiOptions?.metadata,
+-      parallel_tool_calls: openaiOptions?.parallelToolCalls,
++      parallel_tool_calls: openaiOptions?.parallelToolCalls ?? true,
+       previous_response_id: openaiOptions?.previousResponseId,
+       store: openaiOptions?.store,
+       user: openaiOptions?.user,
+
+
 diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
-index 40e661b46a2d4c479916e7847c37b10649007a35..8403f988f5f6ad9a09f261b08497722ec8b9ab43 100644
 --- a/packages/sdk/js/src/v2/gen/types.gen.ts
 +++ b/packages/sdk/js/src/v2/gen/types.gen.ts
-@@ -1645,6 +1645,10 @@ export type Config = {
-      * Maximum bytes of tool output before it is truncated and saved to disk (default: 51200)
-      */
+@@ -2005,6 +2005,7 @@
+   tool_output?: {
+     max_lines?: number
      max_bytes?: number
-+    /**
-+     * Enable Bash output compression before truncation. Defaults to true. When enabled, repeated lines, repeated blocks, progress redraws, and obvious inline repeated patterns may be compacted while preserving the full raw output on disk.
-+     */
 +    bash_compression?: boolean
    }
    compaction?: {
-     /**
+     auto?: boolean
+
+
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -378,6 +378,13 @@
+   const themeState = useTheme()
+   const { theme, mode, setMode, locked, lock, unlock } = themeState
+   const sync = useSync()
++  // Bash 输出压缩覆盖信号，允许用户通过命令切换
++  const [bashCompressionOverride, setBashCompressionOverride] = createSignal<boolean | undefined>(undefined)
++  createEffect(() => {
++    const configVal = sync.data.config?.tool_output?.bash_compression ?? true
++    setBashCompressionOverride(configVal)
++  })
++  const bashCompressionEnabled = createMemo(() => bashCompressionOverride() ?? true)
+   const project = useProject()
+   const exit = useExit()
+   const promptRef = usePromptRef()
+@@ -568,6 +575,26 @@
+         },
+       },
+       {
++      name: "bash.output_compression.toggle",
++      title: bashCompressionEnabled() ? "Disable Bash output compression" : "Enable Bash output compression",
++      category: "System",
++      slashName: "bash-compression",
++      slashAliases: ["toggle-bash-compression"],
++      run: async () => {
++        const next = !bashCompressionEnabled()
++        const workspace = project.workspace.current()
++        setBashCompressionOverride(next)
++        const result = await sdk.client.config.update({ workspace, config: { tool_output: { bash_compression: next } } }, { throwOnError: false })
++        if (result.error) {
++          setBashCompressionOverride(!next)
++          toast.show({ message: "Failed to toggle bash compression", variant: "error" })
++          return
++        }
++        await sync.bootstrap({ fatal: false })
++        toast.show({ message: next ? "Bash compression enabled" : "Bash compression disabled", variant: "success" })
++      },
++    },
++    {
+         name: "session.list",
+         title: "Switch session",
+         category: "Session",
+
+
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -25,7 +25,15 @@
+ import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
+ import { Spinner } from "../../component/spinner"
+ import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
+-import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
++import {
++  BoxRenderable,
++  ScrollBoxRenderable,
++  addDefaultParsers,
++  TextAttributes,
++  RGBA,
++  MouseButton,
++  type MouseEvent as TuiMouseEvent,
++} from "@opentui/core"
+ import { Prompt, type PromptRef } from "../../component/prompt"
+ import type {
+   AssistantMessage,
+@@ -1988,13 +1996,23 @@
+   title?: string
+   children: JSX.Element
+   onClick?: () => void
++  // 右键切换上下文视图：显示返回给模型的输出
++  onRightClick?: () => void
+   part?: ToolPart
+   spinner?: boolean
++  contextView?: boolean
++  contextLabel?: string
+ }) {
+   const { theme } = useTheme()
+   const renderer = useRenderer()
+   const [hover, setHover] = createSignal(false)
+   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
++  // 上下文视图时使用 diffContextBg 背景色
++  const background = createMemo(() => {
++    if (props.contextView) return theme.diffContextBg
++    if (hover()) return theme.backgroundMenu
++    return theme.backgroundPanel
++  })
+   return (
+     <box
+       ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
+@@ -2004,13 +2022,21 @@
+       paddingLeft={2}
+       marginTop={1}
+       gap={1}
+-      backgroundColor={hover() ? theme.backgroundMenu : theme.backgroundPanel}
++      backgroundColor={background()}
+       customBorderChars={SplitBorder.customBorderChars}
+-      borderColor={theme.background}
+-      onMouseOver={() => props.onClick && setHover(true)}
++      borderColor={props.contextView ? theme.info : theme.background}
++      onMouseOver={() => (props.onClick || props.onRightClick) && setHover(true)}
+       onMouseOut={() => setHover(false)}
+-      onMouseUp={() => {
++      onMouseUp={(evt?: TuiMouseEvent) => {
+         if (renderer.getSelection()?.getSelectedText()) return
++        // 右键触发上下文视图切换
++        if (evt?.button === MouseButton.RIGHT) {
++          if (!props.onRightClick) return
++          evt.preventDefault()
++          evt.stopPropagation()
++          props.onRightClick()
++          return
++        }
+         props.onClick?.()
+       }}
+     >
+@@ -2021,6 +2047,7 @@
+             fallback={
+               <text paddingLeft={3} fg={theme.textMuted}>
+                 {title()}
++                <Show when={props.contextView && props.contextLabel}> · {props.contextLabel}</Show>
+               </text>
+             }
+           >
+@@ -2041,7 +2068,13 @@
+   const pathFormatter = usePathFormatter()
+   const ctx = use()
+   const isRunning = createMemo(() => props.part.state.status === "running")
+-  const output = createMemo(() => stripAnsi(stringValue(props.metadata.output)?.trim() ?? ""))
++  // 上下文输出信号：右键切换显示返回给模型的内容
++  const [showContextOutput, setShowContextOutput] = createSignal(false)
++  const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
++  const output = createMemo(() => {
++    const text = showContextOutput() && contextOutputAvailable() ? props.output : stringValue(props.metadata.output)
++    return stripAnsi(text?.trim() ?? "")
++  })
+   const [expanded, setExpanded] = createSignal(false)
+   const maxLines = 10
+   const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
+@@ -2065,6 +2098,13 @@
+     return `# Running in ${wd}`
+   })
+ 
++  // 切换上下文输出显示
++  const toggleContextOutput = () => {
++    if (!contextOutputAvailable()) return
++    setExpanded(true)
++    setShowContextOutput((prev) => !prev)
++  }
++
+   return (
+     <Switch>
+       <Match when={stringValue(props.metadata.output) !== undefined}>
+@@ -2072,9 +2112,15 @@
+           title={title()}
+           part={props.part}
+           onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
++          onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
++          contextView={showContextOutput()}
++          contextLabel="returned to model"
+         >
+           <box gap={1}>
+             <Show when={isRunning()} fallback={<text fg={theme.text}>$ {stringValue(props.input.command)}</text>}>
++            <Show when={showContextOutput()}>
++              <text fg={theme.info}>Model context output</text>
++            </Show>
+               <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
+             </Show>
+             <Show when={output()}>
+

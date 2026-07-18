@@ -1,18 +1,4 @@
-From 7dc9f1ab534a46ca8ac44d90ea953ba5e2d1b7b5 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Sat, 25 Apr 2026 05:21:20 +0800
-Subject: [PATCH] =?UTF-8?q?refactor:=20=E6=9B=B4=E6=96=B0=E6=8F=90?=
- =?UTF-8?q?=E7=A4=BA=E8=AF=8D=E5=92=8C=E5=B7=A5=E5=85=B7=E4=BD=BF=E7=94=A8?=
- =?UTF-8?q?=E8=AF=B4=E6=98=8E=EF=BC=8C=E5=A2=9E=E5=BC=BA=E4=B8=80=E8=87=B4?=
- =?UTF-8?q?=E6=80=A7=E5=92=8C=E6=B8=85=E6=99=B0=E5=BA=A6=EF=BC=8C=E4=BC=98?=
- =?UTF-8?q?=E5=8C=96=E4=BB=A3=E7=A0=81=E6=89=A7=E8=A1=8C=E6=8C=87=E5=AF=BC?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/packages/opencode/src/session/prompt/codex.txt b/packages/opencode/src/session/prompt/codex.txt
-index d595cadb0ea24c10cf3f8c202893e70debcc67dd..3d3c6d8a4456f42c2ea2ec1f7bbb760672c37b39 100644
 --- a/packages/opencode/src/session/prompt/codex.txt
 +++ b/packages/opencode/src/session/prompt/codex.txt
 @@ -1,11 +1,11 @@
@@ -29,11 +15,12 @@ index d595cadb0ea24c10cf3f8c202893e70debcc67dd..3d3c6d8a4456f42c2ea2ec1f7bbb7606
  
  ## Tool usage
  - Prefer specialized tools over shell for file operations:
+
+
 diff --git a/packages/opencode/src/session/prompt/default.txt b/packages/opencode/src/session/prompt/default.txt
-index 9321503964e127fc9ee4534f60a60f44d4cd59c9..7c2111a421a5fb29f89dc27207bde309964f1bae 100644
 --- a/packages/opencode/src/session/prompt/default.txt
 +++ b/packages/opencode/src/session/prompt/default.txt
-@@ -34,7 +34,7 @@ assistant: Yes
+@@ -29,7 +29,7 @@
  
  <example>
  user: what command should I run to list files in the current directory?
@@ -42,7 +29,7 @@ index 9321503964e127fc9ee4534f60a60f44d4cd59c9..7c2111a421a5fb29f89dc27207bde309
  </example>
  
  <example>
-@@ -50,7 +50,7 @@ assistant: 150000
+@@ -40,7 +40,7 @@
  
  <example>
  user: what files are in the directory src/?
@@ -51,11 +38,12 @@ index 9321503964e127fc9ee4534f60a60f44d4cd59c9..7c2111a421a5fb29f89dc27207bde309
  user: which file contains the implementation of foo?
  assistant: src/foo.c
  </example>
+
+
 diff --git a/packages/opencode/src/session/prompt/gemini.txt b/packages/opencode/src/session/prompt/gemini.txt
-index 338a49cb7de45aa949d7d61c7b79d184ad823cd9..4a044172aa4cd3474fcafddd2a34f17fedf2f59a 100644
 --- a/packages/opencode/src/session/prompt/gemini.txt
 +++ b/packages/opencode/src/session/prompt/gemini.txt
-@@ -53,7 +53,7 @@ When requested to perform tasks like fixing bugs, adding features, refactoring,
+@@ -53,7 +53,7 @@
  - **File Paths:** Always use absolute paths when referring to files with tools like 'read' or 'write'. Relative paths are not supported. You must provide an absolute path.
  - **Parallelism:** Execute multiple independent tool calls in parallel when feasible, especially reads, searches, and status checks. Parallel writes are only appropriate when target files or edit ranges cannot conflict.
  - **Command Execution:** Use the 'bash' tool for running shell commands, remembering the safety rule to explain modifying commands first.
@@ -64,7 +52,7 @@ index 338a49cb7de45aa949d7d61c7b79d184ad823cd9..4a044172aa4cd3474fcafddd2a34f17f
  - **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
  - **Respect User Confirmations:** Most tool calls (also denoted as 'function calls') will first require confirmation from the user, where they will either approve or cancel the function call. If a user cancels a function call, respect their choice and do _not_ try to make the function call again. It is okay to request the tool call again _only_ if the user requests that same tool call on a subsequent prompt. When a user cancels a function call, assume best intentions from the user and consider inquiring if they prefer any alternative paths forward.
  
-@@ -74,12 +74,12 @@ model: true
+@@ -74,12 +74,12 @@
  
  <example>
  user: list files here.
@@ -79,11 +67,12 @@ index 338a49cb7de45aa949d7d61c7b79d184ad823cd9..4a044172aa4cd3474fcafddd2a34f17f
  </example>
  
  <example>
+
+
 diff --git a/packages/opencode/src/session/prompt/trinity.txt b/packages/opencode/src/session/prompt/trinity.txt
-index 2ad57dced20aa1fb3d37e0eb6f12b3ce63d460fa..71a746791bc55d58afb6609f010d9da74ab70d78 100644
 --- a/packages/opencode/src/session/prompt/trinity.txt
 +++ b/packages/opencode/src/session/prompt/trinity.txt
-@@ -26,7 +26,7 @@ assistant: Yes
+@@ -26,7 +26,7 @@
  
  <example>
  user: what command should I run to list files in the current directory?
@@ -92,7 +81,7 @@ index 2ad57dced20aa1fb3d37e0eb6f12b3ce63d460fa..71a746791bc55d58afb6609f010d9da7
  </example>
  
  <example>
-@@ -42,7 +42,7 @@ assistant: 150000
+@@ -42,7 +42,7 @@
  
  <example>
  user: what files are in the directory src/?
@@ -101,173 +90,143 @@ index 2ad57dced20aa1fb3d37e0eb6f12b3ce63d460fa..71a746791bc55d58afb6609f010d9da7
  user: which file contains the implementation of foo?
  assistant: src/foo.c
  </example>
+
+
 diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
-index 877d725b0f22954de69418b3e3a4792e1cd321d4..20d6103e0c880f2a3d5671cf32268c44ba94e799 100644
 --- a/packages/opencode/src/session/system.ts
 +++ b/packages/opencode/src/session/system.ts
-@@ -1,6 +1,5 @@
- import { Context, Effect, Layer } from "effect"
+@@ -27,6 +27,7 @@
+ import { RuntimeFlags } from "@/effect/runtime-flags"
  import { type as osType, release as osRelease } from "os"
--import path from "path"
- 
- import { Instance } from "../project/instance"
- 
-@@ -21,6 +20,7 @@ import { Git } from "@/git"
- import { Flag } from "@/flag/flag"
- import { MCP } from "@/mcp"
- import { ToolRegistry } from "@/tool"
-+import { Shell } from "@/shell/shell"
+ import { ToolRegistry } from "@/tool/registry"
++import { Shell } from "@opencode-ai/core/shell"
  
  // 将 git 状态上下文限制在固定长度，避免提示词膨胀。
  const MAX_STATUS_CHARS = 2000
-@@ -62,25 +62,42 @@ export const layer = Layer.effect(
-     const gitContextCache = new Map<string, string>()
+@@ -59,22 +60,20 @@
  
-     const getEnvExtras = Effect.fn("SystemPrompt.envExtras")(function* () {
--      const shell = process.env.SHELL ?? process.env.COMSPEC ?? "unknown"
--      const shellName = shell.includes("zsh") ? "zsh"
--        : shell.includes("bash") ? "bash"
--        : shell.includes("fish") ? "fish"
--        : shell.includes("nu")   ? "nu"
--        : shell.includes("cmd")  ? "cmd"
--        : shell.includes("powershell") ? "powershell"
--        : shell.includes("pwsh") ? "pwsh"
--        : path.basename(shell, ".exe").toLowerCase()
--
--      const shellLine = process.platform === "win32"
--        ? `${shellName} (use Unix shell syntax — /dev/null not NUL, forward slashes)`
--        : shellName
-+      const actualShell = Shell.acceptable()
-+      const shellName = Shell.name(actualShell)
-+      const shellNotes =
-+        process.platform !== "win32"
-+          ? [`Shell: ${shellName}`]
-+          : shellName === "powershell"
-+            ? [
-+                `Shell: powershell (Windows PowerShell 5.1)`,
-+                `Shell syntax: use PowerShell syntax, not Unix shell syntax.`,
-+                `Do NOT use Unix-only commands such as tail, head, sed, awk, or grep in shell commands.`,
-+                `Do NOT use /dev/null. Use $null or dedicated tools instead.`,
-+                `Do NOT use && or || in Windows PowerShell 5.1. Use A; if ($?) { B } for conditional chaining.`,
-+              ]
-+            : shellName === "pwsh"
-+              ? [
-+                  `Shell: pwsh (PowerShell 7+)`,
-+                  `Shell syntax: use PowerShell syntax. Bash-like && and || are supported, but Unix utilities such as tail/head/sed/awk/grep may not exist.`,
-+                  `For file reads/searches/listing, use dedicated OpenCode tools instead of shell commands.`,
-+                ]
-+              : shellName === "cmd"
-+                ? [
-+                    `Shell: cmd.exe`,
-+                    `Shell syntax: use Windows cmd syntax, not Bash or PowerShell syntax.`,
-+                    `Use dir instead of ls, type instead of cat, and do not use tail/head/sed/awk/grep.`,
-+                    `For file reads/searches/listing, use dedicated OpenCode tools instead of shell commands.`,
-+                  ]
-+                : [
-+                    `Shell: ${shellName}`,
-+                    `Shell syntax: this Windows shell may not support Unix commands. Prefer dedicated OpenCode tools for file operations.`,
-+                  ]
+ // 获取环境额外信息：检测 shell 类型并生成 Windows 兼容提示
+ const getEnvExtras = Effect.fn("SystemPrompt.envExtras")(function* () {
+-  const shell = process.env.SHELL ?? process.env.COMSPEC ?? "unknown"
+-  // 检测 shell 类型：支持 zsh/bash/fish/nu/cmd/powershell/pwsh
+-  const shellName = shell.includes("zsh") ? "zsh"
+-    : shell.includes("bash") ? "bash"
+-    : shell.includes("fish") ? "fish"
+-    : shell.includes("nu")   ? "nu"
+-    : shell.includes("cmd")  ? "cmd"
+-    : shell.includes("powershell") ? "powershell"
+-    : shell.includes("pwsh") ? "pwsh"
+-    : shell.split("/").pop() ?? shell
+-  // Windows 下提示使用 Unix shell 语法
+-  const shellLine = process.platform === "win32"
+-    ? `${shellName} (use Unix shell syntax — /dev/null not NUL, forward slashes)`
+-    : shellName
++  const actualShell = Shell.acceptable()
++  const shellName = Shell.name(actualShell)
++  const shellNotes =
++    process.platform !== "win32"
++      ? [`Shell: ${shellName}`]
++      : shellName === "powershell"
++        ? [`Shell: powershell (Windows PowerShell 5.1)`, `Shell syntax: use PowerShell syntax, not Unix shell syntax.`, `Do NOT use Unix-only commands such as tail, head, sed, awk, or grep in shell commands.`, `Do NOT use /dev/null. Use $null or dedicated tools instead.`, `Do NOT use && or || in Windows PowerShell 5.1. Use A; if ($?) { B } for conditional chaining.`]
++        : shellName === "pwsh"
++          ? [`Shell: pwsh (PowerShell 7+)`, `Shell syntax: use PowerShell syntax. Bash-like && and || are supported, but Unix utilities such as tail/head/sed/awk/grep may not exist.`, `For file reads/searches/listing, use dedicated OpenCode tools instead of shell commands.`]
++          : shellName === "cmd"
++            ? [`Shell: cmd.exe`, `Shell syntax: use Windows cmd syntax, not Bash or PowerShell syntax.`, `Use dir instead of ls, type instead of cat, and do not use tail/head/sed/awk/grep.`, `For file reads/searches/listing, use dedicated OpenCode tools instead of shell commands.`]
++            : [`Shell: ${shellName}`, `Shell syntax: this Windows shell may not support Unix commands. Prefer dedicated OpenCode tools for file operations.`]
+   const osVersion = `${osType()} ${osRelease()}`
+-  return { shellLine, osVersion }
++  return { shellNotes, osVersion }
+ })
  
-       const osVersion = process.platform === "win32"
-         ? `${osType()} ${osRelease()}`
-         : `${osType()} ${osRelease()}`
- 
--      return { shellLine, osVersion }
-+      return { shellNotes, osVersion }
-     })
- 
-     const getKnowledgeCutoff = (modelApiId: string): string | null => {
-@@ -106,6 +123,12 @@ export const layer = Layer.effect(
-       if (has("write")) items.push(` - To create files use the write tool instead of echo redirection or heredoc`)
-       if (has("grep"))  items.push(` - To search file content use the grep tool instead of grep/rg`)
-       if (has("glob"))  items.push(` - To find files use the glob tool instead of find or ls`)
-+      if (has("todowrite"))  items.push(` - For non-trivial multi-step work, use the todowrite tool to track progress`)
-+      if (process.platform === "win32") {
-+        items.push(
-+          ` - On Windows, do not use Unix text utilities such as tail/head/sed/awk/grep for file operations. Use read/grep/glob, or shell-native commands only when a terminal operation truly requires shell execution.`,
-+        )
-+      }
- 
-       items.push(
-         ` - Reserve bash for system commands and terminal operations requiring shell execution`,
-@@ -118,6 +141,15 @@ export const layer = Layer.effect(
-         `Only call tools sequentially when one result is needed to decide the next call, or when writes may conflict.`,
-       )
- 
-+      if (has("todo")) {
-+        items.push(
-+          ``,
-+          `Keep todo state current while working: only one item should be in_progress at a time.`,
-+          `Move an item to in_progress before completing it; do not jump directly from pending to completed.`,
-+          `If your understanding changes, update the todo list before continuing implementation.`,
-+        )
-+      }
-+
-       return ["# Using your tools", ...items].join("\n")
-     }
- 
-@@ -179,7 +211,7 @@ export const layer = Layer.effect(
-     return Service.of({
-       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
+ // 根据模型 API ID 估算知识截止日期（含 Claude 4 系列）
+@@ -102,6 +101,9 @@
+   if (has("write")) items.push(` - To create files use the write tool instead of echo redirection or heredoc`)
+   if (has("grep"))  items.push(` - To search file content use the grep tool instead of grep/rg`)
+   if (has("glob"))  items.push(` - To find files use the glob tool instead of find or ls`)
++  if (has("todowrite")) items.push(` - For non-trivial multi-step work, use the todowrite tool to track progress`)
++  if (process.platform === "win32") items.push(` - On Windows, do not use Unix text utilities such as tail/head/sed/awk/grep for file operations. Use read/grep/glob, or shell-native commands only when a terminal operation truly requires shell execution.`)
++  if (has("todo")) items.push(``, `Keep todo state current while working: only one item should be in_progress at a time.`, `Move an item to in_progress before completing it; do not jump directly from pending to completed.`, `If your understanding changes, update the todo list before continuing implementation.`)
+   items.push(
+     ` - Reserve bash for system commands and terminal operations requiring shell execution`,
+     // 并行调用指引：独立读取和搜索应并行执行，避免 echo 拼接
+@@ -198,7 +200,7 @@
          const gitContext = yield* getGitContext()
+         // 获取环境额外信息：shell 类型和 OS 版本，用于系统提示词
+         // 获取环境额外信息：shell 和 OS 版本
 -        const { shellLine, osVersion } = yield* getEnvExtras()
 +        const { shellNotes, osVersion } = yield* getEnvExtras()
-         const isWorktree = Instance.worktree !== Instance.directory
+         // 根据模型估算知识截止日期
+         const isWorktree = ctx.worktree !== ctx.directory
          const cutoff = getKnowledgeCutoff(model.api.id)
-         const toolIds = yield* registry.ids()
-@@ -192,7 +224,7 @@ export const layer = Layer.effect(
-           // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致。
-           ...gitContext.split("\n").map((line) => `  ${line}`),
-           `  Platform: ${process.platform}`,
--          `  Shell: ${shellLine}`,
-+          ...shellNotes.map((line) => `  ${line}`),
-           `  OS Version: ${osVersion}`,
-           ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
-           `  Today's date: ${new Date().toDateString()}`,
-@@ -219,6 +251,21 @@ Actions that typically require user confirmation before proceeding:
- - Modifying CI/CD pipelines or shared infrastructure
- 
- When you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user's in-progress work.`,
-+          `# Shared worktree
-+You may be working in a dirty worktree with user or other-agent changes.
-+- If unknown changes are in files you need to edit, read them first and work with the current contents.
-+- If unknown changes are unrelated to your task, ignore them.
-+- If unknown changes directly block your task or make the correct edit ambiguous, ask the user one concise question.
-+- Never revert, overwrite, or clean up changes you did not make unless explicitly asked.`,
-+          `# Verification
-+Before reporting a coding task complete, verify the change when feasible.
-+Start with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.
-+If you cannot verify, state that plainly and explain the blocker.`,
-+          `# Context continuity
-+The conversation may be compacted or resumed from a summary when context gets long.
-+After compaction, resume from the summary and current messages rather than restarting from scratch.
-+Compaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.
-+Before your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.`,
-           `# Output efficiency
- Go straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.
- 
-diff --git a/packages/opencode/src/tool/bash.ts b/packages/opencode/src/tool/bash.ts
-index 0a7e1a6dc2c2bfe2b18c1e6a39d699abbcf09fb1..2cb3ffbeffc73b70a7446daee386d29ce14ba2da 100644
---- a/packages/opencode/src/tool/bash.ts
-+++ b/packages/opencode/src/tool/bash.ts
-@@ -58,7 +58,7 @@ export const Parameters = Schema.Struct({
-   }),
-   description: Schema.String.annotate({
-     description:
--      "Clear, concise description of what this command does in 5-10 words. Examples:\nInput: ls\nOutput: Lists files in current directory\n\nInput: git status\nOutput: Shows working tree status\n\nInput: npm install\nOutput: Installs package dependencies\n\nInput: mkdir foo\nOutput: Creates directory 'foo'",
-+      "Clear, concise description of what this command does in 5-10 words. Examples:\nInput: git status\nOutput: Shows working tree status\n\nInput: npm install\nOutput: Installs package dependencies\n\nInput: mkdir foo\nOutput: Creates directory 'foo'",
-   }),
- })
- 
-@@ -323,6 +323,89 @@ const parser = lazy(async () => {
+@@ -216,7 +218,7 @@
+             `  Workspace root folder: ${ctx.worktree}`,
+             // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致
+             ...gitContext.split("\n").map((line: string) => `  ${line}`),
+-            `  Shell: ${shellLine}`,
++            ...shellNotes.map((line) => `  ${line}`),
+             `  OS Version: ${osVersion}`,
+             ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
+             `  Platform: ${process.platform}`,
+@@ -247,6 +249,9 @@
+           // 执行操作时的安全指引：提醒模型在执行破坏性操作前需要确认
+           `# Executing actions with care\nCarefully consider the reversibility and blast radius of actions before proceeding:\n- Local, reversible actions (editing files, running tests, reading code): proceed freely.\n- Actions that are hard to reverse or affect shared state: confirm with the user first.\n\n\nActions that typically require user confirmation before proceeding:\n- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes\n- Force-pushing, git reset --hard, amending published commits\n- Pushing code, creating or closing PRs, commenting on issues\n- Sending messages to external services (Slack, email, webhooks)\n- Modifying CI/CD pipelines or shared infrastructure\n\nWhen you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user\x27s in-progress work.`,
+           // 输出效率指引：提醒模型保持简洁高效的输出
++        `# Shared worktree\n\nYou may be working in a dirty worktree with user or other-agent changes.\n- If unknown changes are in files you need to edit, read them first and work with the current contents.\n- If unknown changes are unrelated to your task, ignore them.\n- If unknown changes directly block your task or make the correct edit ambiguous, ask the user one concise question.\n- Never revert, overwrite, or clean up changes you did not make unless explicitly asked.`,
++        `# Verification\n\nBefore reporting a coding task complete, verify the change when feasible.\nStart with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.\nIf you cannot verify, state that plainly and explain the blocker.`,
++        `# Context continuity\n\nThe conversation may be compacted or resumed from a summary when context gets long.\nAfter compaction, resume from the summary and current messages rather than restarting from scratch.\nCompaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.\nBefore your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.`,
+           `# Output efficiency\nGo straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.\n\nFocus text output on:\n- Decisions that need the user\x27s input\n- High-level status updates at key milestones (e.g. "build passing", "all tests green")\n- Errors or blockers that change the plan\n\nIf you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`,
+         ].filter((part): part is string => part !== undefined)
+       }),
+
+
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -334,7 +334,99 @@
+   ps.setLanguage(psLanguage)
    return { bash, ps }
  })
- 
-+const UNIX_TEXT_COMMANDS = new Set(["tail", "head", "sed", "awk", "grep"])
 +
++// Windows 下禁止使用的 Unix 文本工具集合
++const UNIX_TEXT_COMMANDS = new Set(["tail", "head", "sed", "awk", "grep"])
+ 
++// 检测 Windows shell 下是否误用 Unix 工具，返回错误消息阻止执行
++function shellCompatibilityError(root: Node, shellName: string): string | undefined {
++  if (process.platform !== "win32") return
++  if (shellName !== "powershell" && shellName !== "pwsh" && shellName !== "cmd") return
++  for (const node of commands(root)) {
++    const command = parts(node)
++    const raw = command[0]?.text
++    if (!raw) continue
++    const name = raw.toLowerCase().replace(/\.exe$/, "")
++    if (UNIX_TEXT_COMMANDS.has(name)) {
++      // Unix 文本工具在 Windows shell 中不存在，返回错误阻止执行
++      return [
++        `The current shell is ${shellName}, but the command uses Unix utility \`${raw}\`.`,
++        `Use OpenCode's dedicated tools instead: read for files, grep for content search, glob for file search.`,
++        shellName === "powershell" || shellName === "pwsh"
++          ? `If a shell command is truly required, use PowerShell equivalents such as Get-Content -Tail or Select-String.`
++          : `If a shell command is truly required in cmd.exe, use cmd-native commands such as dir/type/findstr.`,
++      ].join(" ")
++    }
++    if (shellName === "cmd" && name === "ls") {
++      // cmd.exe 中 ls 不是原生命令，引导使用 read/glob
++      return `The current shell is cmd.exe, where \`ls\` is not native. Use read/glob for file listing, or \`dir\` only when a shell command is required.`
++    }
++    // PowerShell 中 find 语义不同，引导使用 glob/grep
++    if ((shellName === "powershell" || shellName === "pwsh") && name === "find") {
++      return `The current shell is ${shellName}; \`find\` is ambiguous on Windows. Use glob for file search or grep for content search.`
++    }
++  }
++}
++
++
++// 生成 per-shell 指引文本：Windows 下按 shell 类型提供 Unix 工具禁用和替代方案
++// powershell 5.1 不支持 && ||，需要用 A; if ($?) { B } 条件链
 +function shellGuidance(name: string) {
 +  if (process.platform !== "win32") return ""
 +
++  // Windows PowerShell 5.1：禁止 Unix 工具，提供 PowerShell 等价命令
 +  if (name === "powershell") {
 +    return [
 +      "PowerShell notes:",
@@ -281,6 +240,7 @@ index 0a7e1a6dc2c2bfe2b18c1e6a39d699abbcf09fb1..2cb3ffbeffc73b70a7446daee386d29c
 +    ].join("\n")
 +  }
 +
++  // PowerShell 7+：支持 && || 但 Unix 工具可能不存在
 +  if (name === "pwsh") {
 +    return [
 +      "PowerShell notes:",
@@ -292,6 +252,7 @@ index 0a7e1a6dc2c2bfe2b18c1e6a39d699abbcf09fb1..2cb3ffbeffc73b70a7446daee386d29c
 +    ].join("\n")
 +  }
 +
++  // cmd.exe：使用 Windows cmd 语法，禁止 Unix 工具
 +  if (name === "cmd") {
 +    return [
 +      "Windows cmd notes:",
@@ -303,12 +264,14 @@ index 0a7e1a6dc2c2bfe2b18c1e6a39d699abbcf09fb1..2cb3ffbeffc73b70a7446daee386d29c
 +    ].join("\n")
 +  }
 +
++  // 未知 Windows shell：提供通用建议
 +  return [
-+    "Windows shell notes:",
 +    "- This shell may not support Unix utilities. Prefer dedicated OpenCode tools for file operations.",
 +  ].join("\n")
 +}
 +
++// 返回当前 shell 的目录列表命令，用于提示词中的目录验证指引
++// 非 Windows 返回 ls，PowerShell 返回 Get-ChildItem，cmd 返回 dir
 +function listCommand(name: string) {
 +  if (process.platform !== "win32") return "`ls`"
 +  if (name === "powershell" || name === "pwsh") return "`Get-ChildItem`"
@@ -316,143 +279,71 @@ index 0a7e1a6dc2c2bfe2b18c1e6a39d699abbcf09fb1..2cb3ffbeffc73b70a7446daee386d29c
 +  return "the shell-native directory listing command"
 +}
 +
-+function shellCompatibilityError(root: Node, shellName: string): string | undefined {
-+  if (process.platform !== "win32") return
-+  if (shellName !== "powershell" && shellName !== "pwsh" && shellName !== "cmd") return
-+
-+  for (const node of commands(root)) {
-+    const command = parts(node)
-+    const raw = command[0]?.text
-+    if (!raw) continue
-+    const name = raw.toLowerCase().replace(/\.exe$/, "")
-+
-+    if (UNIX_TEXT_COMMANDS.has(name)) {
-+      return [
-+        `The current shell is ${shellName}, but the command uses Unix utility \`${raw}\`.`,
-+        `Use OpenCode's dedicated tools instead: read for files, grep for content search, glob for file search.`,
-+        shellName === "powershell" || shellName === "pwsh"
-+          ? `If a shell command is truly required, use PowerShell equivalents such as Get-Content -Tail or Select-String.`
-+          : `If a shell command is truly required in cmd.exe, use cmd-native commands such as dir/type/findstr.`,
-+      ].join(" ")
-+    }
-+
-+    if (shellName === "cmd" && name === "ls") {
-+      return `The current shell is cmd.exe, where \`ls\` is not native. Use read/glob for file listing, or \`dir\` only when a shell command is required.`
-+    }
-+
-+    if ((shellName === "powershell" || shellName === "pwsh") && name === "find") {
-+      return `The current shell is ${shellName}; \`find\` is ambiguous on Windows. Use glob for file search or grep for content search.`
-+    }
-+  }
-+}
-+
- // TODO: we may wanna rename this tool so it works better on other shells
- export const BashTool = Tool.define(
-   "bash",
-@@ -570,8 +653,12 @@ export const BashTool = Tool.define(
+ export const ShellTool = Tool.define(
+   ShellID.ToolID,
+   Effect.gen(function* () {
+@@ -601,10 +693,14 @@
          const name = Shell.name(shell)
-         const chain =
-           name === "powershell"
--            ? "If the commands depend on each other and must run sequentially, avoid '&&' in this shell because Windows PowerShell 5.1 does not support it. Use PowerShell conditionals such as `cmd1; if ($?) { cmd2 }` when later commands must depend on earlier success."
--            : "If the commands depend on each other and must run sequentially, use a single Bash call with '&&' to chain them together (e.g., `git add . && git commit -m \"message\" && git push`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before Bash for git operations, or git add before git commit), run these operations sequentially instead."
-+            ? "If commands depend on each other, do NOT use '&&' or '||'. Use `cmd1; if ($?) { cmd2 }`."
-+            : name === "pwsh"
-+              ? "If commands depend on each other, use `&&` when the second command should only run after the first succeeds. Use `;` only for unconditional sequencing."
-+              : name === "cmd"
-+                ? "If commands depend on each other, use `&&` for conditional sequencing in cmd.exe."
-+                : "If commands depend on each other, use a single shell call with '&&' to chain them together."
-         log.info("bash tool using shell", { shell })
- 
          const limits = yield* trunc.limits()
-@@ -581,6 +668,8 @@ export const BashTool = Tool.define(
-             .replaceAll("${os}", process.platform)
-             .replaceAll("${shell}", name)
-             .replaceAll("${chaining}", chain)
-+            .replaceAll("${shellGuidance}", shellGuidance(name))
-+            .replaceAll("${listCommand}", listCommand(name))
-             .replaceAll("${maxLines}", String(limits.maxLines))
-             .replaceAll("${maxBytes}", String(limits.maxBytes)),
-           parameters: Parameters,
-@@ -595,6 +684,8 @@ export const BashTool = Tool.define(
-               const timeout = params.timeout ?? DEFAULT_TIMEOUT
-               const ps = PS.has(name)
-               const root = yield* parse(params.command, ps)
-+              const compatibility = shellCompatibilityError(root, name)
+         const prompt = ShellPrompt.render(name, process.platform, limits, defaultTimeoutMs)
++        // 追加 per-shell 指引、目录列表命令和专用工具列表到提示词描述
++        const shellGuidanceText = shellGuidance(name)
++        const listCmd = listCommand(name)
++        const enhancedDescription = prompt.description + (shellGuidanceText ? "\n\n" + shellGuidanceText : "") + "\nDirectory listing command: " + listCmd + "\nDedicated tools (prefer over shell):\n- File listing/search: Use Glob or Read directory output (NOT ls/find/dir/Get-ChildItem -Recurse)\n- Content search: Use Grep (NOT grep/rg/findstr/Select-String)\n- Read files: Use Read (NOT cat/head/tail/type/Get-Content)\n- Edit files: Use Edit (NOT sed/awk/PowerShell text replacement)\n- Write files: Use Write (NOT echo redirection/heredoc/Out-File/Set-Content)\n- Communication: Output text directly (NOT echo/printf)"
+         yield* Effect.logInfo("shell tool using shell", { shell })
+ 
+         return {
+-          description: prompt.description,
++          description: enhancedDescription,
+           parameters: prompt.parameters,
+           execute: (params: Parameters, ctx: Tool.Context) =>
+             Effect.gen(function* () {
+@@ -622,7 +718,10 @@
+                   const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
+                     Effect.sync(() => tree.delete()),
+                   )
+-                  const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
++                                // parse 后检测 Unix 工具误用，不兼容时抛出错误阻止执行
++              const compatibility = shellCompatibilityError(tree.rootNode, name)
 +              if (compatibility) throw new Error(compatibility)
-               const scan = yield* collect(root, cwd, ps, shell)
-               if (!Instance.containsPath(cwd)) scan.dirs.add(cwd)
-               yield* ask(ctx, scan)
-diff --git a/packages/opencode/src/tool/bash.txt b/packages/opencode/src/tool/bash.txt
-index 668cea307ce43993c1c5463229d8dec4f3d2ec3c..2966577c71b8a298593bc816a4bd6341760dd568 100644
---- a/packages/opencode/src/tool/bash.txt
-+++ b/packages/opencode/src/tool/bash.txt
-@@ -1,16 +1,22 @@
--Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.
-+Executes a shell command in the current workspace with optional timeout.
++              const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
+                   if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
+                   yield* ask(ctx, scan, params)
+                 }),
+
+
+diff --git a/packages/opencode/src/tool/shell/prompt.ts b/packages/opencode/src/tool/shell/prompt.ts
+--- a/packages/opencode/src/tool/shell/prompt.ts
++++ b/packages/opencode/src/tool/shell/prompt.ts
+@@ -64,7 +64,7 @@
  
--Be aware: OS: ${os}, Shell: ${shell}
-+Environment:
-+- OS: ${os}
-+- Shell: ${shell}
-+- Working directory: ${directory}
- 
- All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - use `workdir` instead.
- 
- IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
- 
-+${shellGuidance}
-+
- Before executing the command, please follow these steps:
- 
- 1. Directory Verification:
--   - If the command will create new directories or files, first use `ls` to verify the parent directory exists and is the correct location
--   - For example, before running "mkdir foo/bar", first use `ls foo` to check that "foo" exists and is the intended parent directory
-+   - If the command will create new directories or files, first verify the parent directory exists and is correct.
-+   - Prefer the read or glob tools for workspace directory checks.
-+   - If shell verification is necessary, use the shell-native listing command: ${listCommand}
- 
- 2. Command Execution:
-    - Always quote file paths that contain spaces with double quotes (e.g., rm "path with spaces/file.txt")
-@@ -28,12 +34,12 @@ Usage notes:
-   - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
-   - If the output exceeds ${maxLines} lines or ${maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use `head`, `tail`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching.
- 
--  - Avoid using Bash with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
--    - File search: Use Glob (NOT find or ls)
--    - Content search: Use Grep (NOT grep or rg)
--    - Read files: Use Read (NOT cat/head/tail)
--    - Edit files: Use Edit (NOT sed/awk)
--    - Write files: Use Write (NOT echo >/cat <<EOF)
-+  - Avoid using shell for file operations. Prefer dedicated tools:
-+    - File listing/search: Use Glob or Read directory output (NOT ls/find/dir/Get-ChildItem -Recurse)
-+    - Content search: Use Grep (NOT grep/rg/findstr/Select-String)
-+    - Read files: Use Read (NOT cat/head/tail/type/Get-Content)
-+    - Edit files: Use Edit (NOT sed/awk/PowerShell text replacement)
-+    - Write files: Use Write (NOT echo redirection/heredoc/Out-File/Set-Content)
-     - Communication: Output text directly (NOT echo/printf)
-   - When issuing multiple commands:
-     - If the commands are independent and can run in parallel, make multiple Bash tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two Bash tool calls in parallel.
+ function chainGuidance(name: string) {
+   if (name === "powershell") {
+-    return "If the commands depend on each other and must run sequentially, avoid '&&' in this shell because Windows PowerShell (5.1) does not support it. Use PowerShell conditionals such as `cmd1; if ($?) { cmd2 }` when later commands must depend on earlier success."
++    return "If the commands depend on each other and must run sequentially, do NOT use '&&' or '||'. Use `cmd1; if ($?) { cmd2 }`."
+   }
+   if (PS.has(name)) {
+     return "If the commands depend on each other and must run sequentially, use a single bash tool call with '&&' to chain them together (e.g., `git add . && git commit -m \"message\" && git push`). For instance, if one operation must complete before another starts (like New-Item before Copy-Item, Write before bash for git operations, or git add before git commit), run these operations sequentially instead."
+
+
 diff --git a/packages/opencode/src/tool/task.txt b/packages/opencode/src/tool/task.txt
-index fba8470d1b4b19f8a8f7e0f5959f2055e68daf11..892006bb86cbdb164c22646cbb6384e49e69ca1d 100644
 --- a/packages/opencode/src/tool/task.txt
 +++ b/packages/opencode/src/tool/task.txt
-@@ -2,24 +2,32 @@ Launch a new agent to handle complex, multistep tasks autonomously.
+@@ -2,18 +2,30 @@
  
  When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
  
--When to use the Task tool:
--- When you are instructed to execute custom slash commands. Use the Task tool with the slash command invocation as the entire prompt. The slash command can take arguments. For example: Task(description="Check the file", prompt="/check-file path/to/file.py")
+-When NOT to use the Task tool:
+-- If you want to read a specific file path, use the Read or Glob tool instead of the Task tool, to find the match more quickly
+-- If you are searching for a specific class definition like "class Foo", use the Grep tool instead, to find the match more quickly
+-- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Task tool, to find the match more quickly
+-- If no available agent is a good fit for the task, use other tools directly
 +Use task when:
 +- The user invokes a custom slash command; pass the slash command invocation as the full prompt.
 +- A broad codebase question requires multiple rounds of search/read synthesis.
 +- A non-blocking subtask can run in parallel while you continue useful local work.
 +- A specialized agent clearly matches the task and can materially advance the request.
  
--When NOT to use the Task tool:
--- If you want to read a specific file path, use the Read or Glob tool instead of the Task tool, to find the match more quickly
--- If you are searching for a specific class definition like "class Foo", use the Glob tool instead, to find the match more quickly
--- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Task tool, to find the match more quickly
--- Other tasks that are not related to the agent descriptions above
 +Do NOT use task when:
 +- You need to read a known file path; use read.
 +- You need to find files by name; use glob.
@@ -467,173 +358,53 @@ index fba8470d1b4b19f8a8f7e0f5959f2055e68daf11..892006bb86cbdb164c22646cbb6384e4
 +- Include relevant paths, constraints, and expected final output.
 +- Ask for concise findings when you only need a summary.
 +- Tell the agent how to verify its work when verification is possible.
- 
++
++
  Usage notes:
 -1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
--2. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result. The output includes a task_id you can reuse later to continue the same subagent session.
--3. Each agent invocation starts with a fresh context unless you provide task_id to resume the same subagent session (which continues with its previous messages and tool outputs). When starting fresh, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
--4. The agent's outputs should generally be trusted
--5. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent. Tell it how to verify its work if possible (e.g., relevant test commands).
--6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
--
+-2. Once you have delegated work to an agent, do not duplicate that work yourself. Continue with non-overlapping tasks, or wait for the result. For background tasks, you will be notified automatically when the result is ready.
+-3. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result. The output includes a task_id you can reuse later to continue the same subagent session.
+-4. Each agent invocation starts with a fresh context unless you provide task_id to resume the same subagent session (which continues with its previous messages and tool outputs). When starting fresh, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
+-5. The agent's outputs should generally be trusted
+-6. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent. Tell it how to verify its work if possible (e.g., relevant test commands).
+-7. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 +- Launch independent agents in parallel in one response when their scopes do not overlap.
 +- Trust completed agent results by default, but inspect changed files before integrating or reporting final success.
 +- Reuse task_id only when continuing the same subagent context is useful.
 +- The agent result is returned to you, not directly to the user; summarize relevant results yourself.
- Example usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):
- 
- <example_agent_descriptions>
+
+
 diff --git a/packages/opencode/src/tool/todowrite.txt b/packages/opencode/src/tool/todowrite.txt
-index 2737cd18b62a62241e9ba7de790ab8670501b3bf..e888308c47467a59cb897b30d5e6379e272bb676 100644
 --- a/packages/opencode/src/tool/todowrite.txt
 +++ b/packages/opencode/src/tool/todowrite.txt
-@@ -2,23 +2,21 @@ Use this tool to create and manage a structured task list for your current codin
- It also helps the user understand the progress of the task and overall progress of their requests.
+@@ -1,19 +1,16 @@
+ Create and maintain a structured task list for the current coding session. Tracks progress, organizes multi-step work, and surfaces status to the user.
  
- ## When to Use This Tool
--Use this tool proactively in these scenarios:
-+Use this tool to create and manage the structured task list for the current coding session.
- 
--1. Complex multistep tasks - When a task requires 3 or more distinct steps or actions
--2. Non-trivial and complex tasks - Tasks that require careful planning or multiple operations
--3. User explicitly requests todo list - When the user directly asks you to use the todo list
--4. User provides multiple tasks - When users provide a list of things to be done (numbered or comma-separated)
--5. After receiving new instructions - Immediately capture user requirements as todos. Feel free to edit the todo list based on new information.
--6. After completing a task - Mark it complete and add any new follow-up tasks
--7. When you start working on a new task, mark the todo as in_progress. Ideally you should only have one todo as in_progress at a time. Complete existing tasks before starting new ones.
+-## When to use
+-Use proactively when:
+-- The task requires 3+ distinct steps or actions (not just 3 tool calls for a single conceptual step)
+-- The work is non-trivial and benefits from planning
+-- The user provides multiple tasks (numbered or comma-separated) or explicitly asks for a todo list
+-- New instructions arrive - capture them as todos
+-- You start a task - mark it `in_progress` (only one at a time) before working
+-- You finish a task - mark it `completed` and add any follow-ups discovered during the work
 +Use todowrite when:
 +- The task has 3 or more meaningful steps.
 +- The user explicitly asks for a todo list or progress tracking.
 +- The user provides multiple tasks or requirements.
 +- The work needs planning, implementation, and verification phases.
 +- New instructions change the plan and the task list should be updated.
-+
+ 
+-## When NOT to use
+-Skip when:
+-- The work is a single, straightforward task (or <3 trivial steps)
+-- The request is purely informational or conversational
+-- Tracking adds no organizational value
 +Do not use todowrite when:
 +- The task is a single straightforward action.
 +- The task is trivial or purely informational.
 +- Tracking would add noise without improving execution.
  
--## When NOT to Use This Tool
- 
--Skip using this tool when:
--1. There is only a single, straightforward task
--2. The task is trivial and tracking it provides no organizational benefit
--3. The task can be completed in less than 3 trivial steps
--4. The task is purely conversational or informational
- 
- NOTE that you should not use this tool if there is only one trivial task to do. In this case you are better off just doing the task directly.
- 
-@@ -39,7 +37,7 @@ Assistant: I'll help add a dark mode toggle to your application settings. Let me
- The assistant used the todo list because:
- 1. Adding dark mode is a multi-step feature requiring UI, state management, and styling changes
- 2. The user explicitly requested tests and build be run afterward
--3. The assistant inferred that tests and build need to pass by adding "Ensure tests and build succeed" as the final task
-+3. The assistant inferred that tests and build need to pass by adding "Run tests and build process" as the final task
- </reasoning>
- </example>
- 
-@@ -52,43 +50,9 @@ Assistant: I've found 15 instances of 'getCwd' across 8 different files. Let me
- 
- <reasoning>
- The assistant used the todo list because:
--1. First, the assistant searched to understand the scope of the task
--2. Upon finding multiple occurrences across different files, it determined this was a complex task with multiple steps
-+1. The assistant first searched to understand the scope of the task
-+2. After finding many occurrences across multiple files, it determined this was a complex multi-step change
- 3. The todo list helps ensure every instance is tracked and updated systematically
--4. This approach prevents missing any occurrences and maintains code consistency
--</reasoning>
--</example>
--
--
--<example>
--User: I need to implement these features for my e-commerce site: user registration, product catalog, shopping cart, and checkout flow.
--Assistant: I'll help implement these features. First, let's add all the features to the todo list.
--*Creates a todo list breaking down each feature into specific tasks based on the project architecture*
--Assistant: Let's start with user registration. This will involve creating database models, API endpoints, and frontend forms that integrate with your existing authentication system.
--
--<reasoning>
--The assistant used the todo list because:
--1. The user provided multiple complex features to implement in a comma separated list
--2. The todo list helps organize these large features into manageable tasks
--3. This approach allows for tracking progress across the entire implementation
--</reasoning>
--</example>
--
--<example>
--User: Can you help optimize my React application? It's rendering slowly and has performance issues.</user>
--Assistant: I'll help optimize your React application. First, let me examine your codebase to identify potential performance bottlenecks.
--*Reviews component structure, render patterns, state management, and data fetching*
--Assistant: After analyzing your codebase, I've identified several performance issues. Let me create a todo list to track our optimization efforts.
--*Creates todo list with items like: 1) Implement memoization for expensive calculations in ProductList, 2) Add virtualization for long lists in Dashboard, 3) Optimize image loading in Gallery component, 4) Fix state update loops in ShoppingCart, 5) Review bundle size and implement code splitting*
--Let's start by implementing memoization for the expensive calculations in your ProductList component.</assistant>
--
--<reasoning>
--The assistant used the todo list because:
--1. First, the assistant examined the codebase to identify specific performance issues
--2. Based on this analysis, it identified multiple optimization opportunities
--3. Performance optimization is a non-trivial task requiring multiple steps
--4. The todo list helps methodically track improvements across different components
--5. This systematic approach ensures all performance bottlenecks are addressed
- </reasoning>
- </example>
- 
-@@ -117,32 +81,6 @@ The assistant did not use the todo list because this is an informational request
- </reasoning>
- </example>
- 
--<example>
--User: Can you add a comment to the calculateTotal function to explain what it does?
--Assistant: Sure, let me add a comment to the calculateTotal function to explain what it does.
--* Uses the Edit tool to add a comment to the calculateTotal function *
--
--<reasoning>
--The assistant did not use the todo list because this is a single, straightforward task confined to one location in the code. Adding a comment doesn't require tracking multiple steps or systematic organization.
--</reasoning>
--</example>
--
--<example>
--User: Run npm install for me and tell me what happens.
--Assistant: I'll run the npm install command for you.
--
--*Executes: npm install*
--
--The command completed successfully. Here's the output:
--[Output of npm install command]
--
--All dependencies have been installed according to your package.json file.
--
--<reasoning>
--The assistant did not use the todo list because this is a single command execution with immediate results. There are no multiple steps to track or organize, making the todo list unnecessary for this straightforward task.
--</reasoning>
--</example>
--
- ## Task States and Management
- 
- 1. **Task States**: Use these states to track progress:
-@@ -151,17 +89,14 @@ The assistant did not use the todo list because this is a single command executi
-    - completed: Task finished successfully
-    - cancelled: Task no longer needed
- 
--2. **Task Management**:
--   - Update task status in real-time as you work
--   - Mark tasks complete IMMEDIATELY after finishing (don't batch completions)
--   - Only have ONE task in_progress at any time
--   - Complete current tasks before starting new ones
--   - Cancel tasks that become irrelevant
-+2. **Task Management Rules**:
-+   - Keep items short, concrete, and verifiable.
-+   - Use exactly one in_progress item at a time.
-+   - Move an item to in_progress before working on it.
-+   - Mark items completed as soon as they are finished; do not batch completions (this can be called PARALLEL to your coding step since it's just updating the list).
-+   - Cancel items that are no longer relevant.
-+   - Update the list when your understanding changes before continuing implementation.
-+   - Include verification as a task when the work has meaningful risk or the user requested tests/builds.
- 
--3. **Task Breakdown**:
--   - Create specific, actionable items
--   - Break complex tasks into smaller, manageable steps
--   - Use clear, descriptive task names
- 
- When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.
--
+ ## States
+ - `pending` - not started
+

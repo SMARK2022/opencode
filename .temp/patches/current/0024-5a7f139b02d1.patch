@@ -1,41 +1,11 @@
-From 5a7f139b02d19f1853d788ca59220bdee00ba37e Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Fri, 24 Apr 2026 00:55:58 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E4=BC=98=E5=8C=96=E8=BE=93=E5=85=A5?=
- =?UTF-8?q?=E6=96=87=E6=9C=AC=E5=A4=84=E7=90=86=E5=92=8C=E7=B3=BB=E7=BB=9F?=
- =?UTF-8?q?=E5=9D=97=E5=90=88=E5=B9=B6=E9=80=BB=E8=BE=91=EF=BC=8C=E7=A1=AE?=
- =?UTF-8?q?=E4=BF=9D=E6=AD=A3=E7=A1=AE=E6=8F=92=E5=85=A5=E5=92=8C=E4=BF=9D?=
- =?UTF-8?q?=E7=95=99=E5=8E=9F=E6=9C=89=E5=AD=97=E6=AE=B5?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index 593fcb7235ec51e52ab5c4cb90a3b50bb4e39f24..165187ab835dbaa37574d03d664fc28f50c0c4e9 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -809,8 +809,9 @@ export function Prompt(props: PromptProps) {
-       if (partIndex !== undefined) {
-         const part = store.prompt.parts[partIndex]
-         if (part?.type === "text" && part.text) {
--          const before = inputText.slice(0, extmark.start)
--          const after = inputText.slice(extmark.end)
-+          const buf = Buffer.from(inputText)
-+          const before = buf.subarray(0, extmark.start).toString("utf8")
-+          const after = buf.subarray(extmark.end).toString("utf8")
-           inputText = before + part.text + after
-         }
-       }
 diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
-index 3e68fa0a0811276dc6771ffb807862bd9bfcdd7c..4c88ecb775129a0ccb785d94bfb7c848ce6b2cad 100644
 --- a/packages/opencode/src/provider/claudecode.ts
 +++ b/packages/opencode/src/provider/claudecode.ts
-@@ -290,15 +290,15 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
- 
+@@ -285,15 +285,16 @@
+     // 计算消息指纹，用于计费头和 CCH 签名
      const fp = computeFingerprint(firstUserText, VERSION)
  
--    // // 2. 合并 System Blocks (将我们的 Block 插入到最前面，而不是直接覆盖)
+-    // 2. 系统块合并已禁用：不再注入伪造的系统块，保留原始 system
 -    // let newSystem = buildSystemBlocks(fp)
 -    // if (originalBody.system) {
 -    //   if (Array.isArray(originalBody.system)) {
@@ -44,8 +14,9 @@ index 3e68fa0a0811276dc6771ffb807862bd9bfcdd7c..4c88ecb775129a0ccb785d94bfb7c848
 -    //     newSystem.push({ type: "text" as const, text: originalBody.system })
 -    //   }
 -    // }
-+    // 2. 合并 System Blocks (将我们的 Block 插入到最前面，而不是直接覆盖)
++    // 2. 合并 System Blocks：仅注入计费头块，保留原始 system
 +    let newSystem: any[] = [buildBillingHeaderBlock(fp)]
++    // 原始 system 可能是数组或字符串，两种形式都需合并到计费头之后
 +    if (originalBody.system) {
 +      if (Array.isArray(originalBody.system)) {
 +        newSystem = newSystem.concat(originalBody.system)
@@ -54,14 +25,15 @@ index 3e68fa0a0811276dc6771ffb807862bd9bfcdd7c..4c88ecb775129a0ccb785d94bfb7c848
 +      }
 +    }
  
-     // 3. 合并 Metadata (保留原有字段)
+     // 3. 合并 Metadata（保留原有字段，只覆盖 user_id）
      const newMetadata = {
-@@ -353,7 +353,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
+@@ -346,7 +347,7 @@
  
      const patchedBody = {
        ...originalBody,
--      // system: newSystem,
+-      // system: newSystem, // 已禁用：不再注入伪造系统块
 +      system: newSystem,
        metadata: newMetadata,
        tools: patchedTools,
        ...(thinking ? { thinking } : {}),
+

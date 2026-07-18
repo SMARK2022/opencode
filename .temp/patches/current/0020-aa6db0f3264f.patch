@@ -1,31 +1,30 @@
-From aa6db0f3264f22d5d8ff0dfc11cd6ac2aee11279 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Thu, 23 Apr 2026 16:52:36 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E4=B8=8A=E4=B8=8B=E6=96=87=E6=8F=90?=
- =?UTF-8?q?=E7=A4=BA=E8=AF=8D=E5=A2=9E=E5=BC=BA=20enhance=20system=20promp?=
- =?UTF-8?q?t=20with=20environment=20details=20and=20tool=20usage=20guideli?=
- =?UTF-8?q?nes?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
-index 2b0028d6b17777cc0f7f12495e17eb8260fff4bc..516b14f291bf9e902badd167975dd6bd9b4ada40 100644
 --- a/packages/opencode/src/provider/claudecode.ts
 +++ b/packages/opencode/src/provider/claudecode.ts
-@@ -6,27 +6,27 @@ import { createHash, randomUUID } from "crypto"
- export const VERSION = "2.1.117" // 当前最新的 Claude Code 版本号
+@@ -7,28 +7,32 @@
+ // 指纹计算盐值，与 Claude Code 官方一致
+ // 指纹盐值：与 Claude Code 官方二进制一致，修改会导致计费头校验失败
  const SALT = "59cf53e54c78"
- 
--// CLI 身份声明 Block
+-// CLI 身份标识块，注入 system prompt 标识为 Claude Code
 -export const CLI_IDENTITY_BLOCK = {
 -  type: "text" as const,
 -  text: "You are Claude Code, Anthropic's official CLI for Claude.",
+-  // ephemeral 缓存控制：允许 API 对此块进行 prompt caching
 -  cache_control: { type: "ephemeral" as const },
 -}
--
--// 主 System Prompt Block (这里仅为摘要仿真)
++// 禁用 CLI 身份标识块：不再注入伪造的 Claude Code 身份，保留原始 system
++// 上游 V2 不需要 CLI 身份欺骗，直接使用模型原始 system prompt
++// 禁用 CLI 身份标识块：不再注入伪造的 Claude Code 身份，保留原始 system
++// 上游 V2 不需要 CLI 身份欺骗，直接使用模型原始 system prompt
++// CLI 身份标识块已禁用：不再注入伪造的 Claude Code 身份
++// export const CLI_IDENTITY_BLOCK = {
++//   type: "text" as const,
++//   text: "You are Claude Code, Anthropic's official CLI for Claude.",
++//   // ephemeral 缓存控制：允许 API 对此块进行 prompt caching
++//   cache_control: { type: "ephemeral" as const },
++// }
+ 
+-// 主系统提示块，模拟 Claude Code 的系统提示词
 -export const MAIN_SYSTEM_BLOCK = {
 -  type: "text" as const,
 -  text: [
@@ -39,14 +38,7 @@ index 2b0028d6b17777cc0f7f12495e17eb8260fff4bc..516b14f291bf9e902badd167975dd6bd
 -  ].join("\n"),
 -  cache_control: { type: "ephemeral" as const },
 -}
-+// // CLI 身份声明 Block
-+// export const CLI_IDENTITY_BLOCK = {
-+//   type: "text" as const,
-+//   text: "You are Claude Code, Anthropic's official CLI for Claude.",
-+//   cache_control: { type: "ephemeral" as const },
-+// }
-+
-+// // 主 System Prompt Block (这里仅为摘要仿真)
++// 主系统提示块已禁用：不再注入伪造的 Claude Code 系统提示
 +// export const MAIN_SYSTEM_BLOCK = {
 +//   type: "text" as const,
 +//   text: [
@@ -61,32 +53,28 @@ index 2b0028d6b17777cc0f7f12495e17eb8260fff4bc..516b14f291bf9e902badd167975dd6bd
 +//   cache_control: { type: "ephemeral" as const },
 +// }
  
- // ============================================================================
- // 会话状态管理
-@@ -83,12 +83,12 @@ export function buildBillingHeaderBlock(fp: string) {
+ // --- 会话状态管理 ---
+ // 单例模式管理 sessionId/deviceId/accountUuid
+@@ -76,10 +80,10 @@
    }
  }
  
--/**
-- * 构建必须的 System Blocks 组合
-- */
+-// 组装完整的系统块列表：计费头 + CLI 身份 + 主系统提示
 -export function buildSystemBlocks(fp: string) {
 -  return [buildBillingHeaderBlock(fp), CLI_IDENTITY_BLOCK, MAIN_SYSTEM_BLOCK]
 -}
-+// /**
-+//  * 构建必须的 System Blocks 组合
-+//  */
++// buildSystemBlocks 已禁用：不再注入伪造的系统块
 +// export function buildSystemBlocks(fp: string) {
 +//   return [buildBillingHeaderBlock(fp), CLI_IDENTITY_BLOCK, MAIN_SYSTEM_BLOCK]
 +// }
  
- /**
-  * 构建紧凑的 User ID Metadata 字符串
-@@ -289,15 +289,15 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
- 
+ // 构建用户元数据 JSON，包含设备 ID、账号 UUID 和会话 ID
+ export function buildMetadataUserId(opts: { deviceId: string; sessionId: string; accountUuid?: string }) {
+@@ -287,15 +291,15 @@
+     // 计算消息指纹，用于计费头和 CCH 签名
      const fp = computeFingerprint(firstUserText, VERSION)
  
--    // 2. 合并 System Blocks (将我们的 Block 插入到最前面，而不是直接覆盖)
+-    // 2. 合并 System Blocks（将我们的 Block 插入到最前面，保留原有 system）
 -    let newSystem = buildSystemBlocks(fp)
 -    if (originalBody.system) {
 -      if (Array.isArray(originalBody.system)) {
@@ -95,7 +83,7 @@ index 2b0028d6b17777cc0f7f12495e17eb8260fff4bc..516b14f291bf9e902badd167975dd6bd
 -        newSystem.push({ type: "text" as const, text: originalBody.system })
 -      }
 -    }
-+    // // 2. 合并 System Blocks (将我们的 Block 插入到最前面，而不是直接覆盖)
++    // 2. 系统块合并已禁用：不再注入伪造的系统块，保留原始 system
 +    // let newSystem = buildSystemBlocks(fp)
 +    // if (originalBody.system) {
 +    //   if (Array.isArray(originalBody.system)) {
@@ -105,39 +93,19 @@ index 2b0028d6b17777cc0f7f12495e17eb8260fff4bc..516b14f291bf9e902badd167975dd6bd
 +    //   }
 +    // }
  
-     // 3. 合并 Metadata (保留原有字段)
+     // 3. 合并 Metadata（保留原有字段，只覆盖 user_id）
      const newMetadata = {
-@@ -352,7 +352,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
+@@ -349,7 +353,7 @@
  
      const patchedBody = {
        ...originalBody,
 -      system: newSystem,
-+      // system: newSystem,
++      // system: newSystem, // 已禁用：不再注入伪造系统块
        metadata: newMetadata,
        tools: patchedTools,
        ...(thinking ? { thinking } : {}),
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 0ff9416831baa53f0a9c28c099d44e35ccb1080a..2614b9ca3df67bf3c618f38e63f4ebc6360fc10a 100644
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -1520,14 +1520,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
- 
-             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
- 
--            const [skills, env, instructions, modelMsgs] = yield* Effect.all([
-+            const [skills, env, instructions, mcpInstr, modelMsgs] = yield* Effect.all([
-               sys.skills(agent),
-               // environment 改为异步：需要在此处拉取 git 上下文。
-               sys.environment(model),
-               instruction.system().pipe(Effect.orDie),
-+              sys.mcpInstructions(),
-               MessageV2.toModelMessagesEffect(msgs, model),
-             ])
--            const system = [...env, ...(skills ? [skills] : []), ...instructions]
-+            const system = [...env, ...(skills ? [skills] : []), ...instructions, ...(mcpInstr ? [mcpInstr] : [])]
-             const format = lastUser.format ?? { type: "text" as const }
-             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
-             const result = yield* handle.process({
+
+
 diff --git a/packages/opencode/src/session/prompt/anthropic.txt b/packages/opencode/src/session/prompt/anthropic.txt
 index 21d9c0e9f2163f2c5124c8cd1754cbb7dd9d7f06..7a555b7cc65dd16913998c19e1403b04396606bd 100644
 --- a/packages/opencode/src/session/prompt/anthropic.txt
@@ -249,206 +217,143 @@ index 21d9c0e9f2163f2c5124c8cd1754cbb7dd9d7f06..7a555b7cc65dd16913998c19e1403b04
 -</example>
 +</example>
 \ No newline at end of file
+
+
+
+
+
+
 diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
-index 9091a51a809171f78addadddcda1dd1f0244ca1d..b17fd74a5a8b6726bbacec5337297c14b887278f 100644
 --- a/packages/opencode/src/session/system.ts
 +++ b/packages/opencode/src/session/system.ts
-@@ -1,4 +1,6 @@
- import { Context, Effect, Layer } from "effect"
-+import { type as osType, release as osRelease } from "os"
-+import path from "path"
- 
- import { Instance } from "../project/instance"
- 
-@@ -17,6 +19,8 @@ import { Permission } from "@/permission"
- import { Skill } from "@/skill"
+@@ -25,6 +25,8 @@
+ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
  import { Git } from "@/git"
- import { Flag } from "@/flag/flag"
-+import { MCP } from "@/mcp"
-+import { ToolRegistry } from "@/tool"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
++import { type as osType, release as osRelease } from "os"
++import { ToolRegistry } from "@/tool/registry"
  
  // 将 git 状态上下文限制在固定长度，避免提示词膨胀。
  const MAX_STATUS_CHARS = 2000
-@@ -40,6 +44,7 @@ export function provider(model: Provider.Model) {
- export interface Interface {
-   readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
-   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
-+  readonly mcpInstructions: () => Effect.Effect<string | undefined>
+@@ -53,6 +55,61 @@
  }
  
  export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
-@@ -49,11 +54,69 @@ export const layer = Layer.effect(
-   Effect.gen(function* () {
-     const skill = yield* Skill.Service
++
++
++// 获取环境额外信息：检测 shell 类型并生成 Windows 兼容提示
++const getEnvExtras = Effect.fn("SystemPrompt.envExtras")(function* () {
++  const shell = process.env.SHELL ?? process.env.COMSPEC ?? "unknown"
++  // 检测 shell 类型：支持 zsh/bash/fish/nu/cmd/powershell/pwsh
++  const shellName = shell.includes("zsh") ? "zsh"
++    : shell.includes("bash") ? "bash"
++    : shell.includes("fish") ? "fish"
++    : shell.includes("nu")   ? "nu"
++    : shell.includes("cmd")  ? "cmd"
++    : shell.includes("powershell") ? "powershell"
++    : shell.includes("pwsh") ? "pwsh"
++    : shell.split("/").pop() ?? shell
++  // Windows 下提示使用 Unix shell 语法
++  const shellLine = process.platform === "win32"
++    ? `${shellName} (use Unix shell syntax — /dev/null not NUL, forward slashes)`
++    : shellName
++  const osVersion = `${osType()} ${osRelease()}`
++  return { shellLine, osVersion }
++})
++
++// 根据模型 API ID 估算知识截止日期（含 Claude 4 系列）
++const getKnowledgeCutoff = (modelApiId: string): string | undefined => {
++  if (modelApiId.includes("claude-sonnet-4-6")) return "August 2025"
++  if (modelApiId.includes("claude-opus-4-6")) return "May 2025"
++  if (modelApiId.includes("claude-haiku-4")) return "February 2025"
++  if (modelApiId.includes("claude-opus-4") || modelApiId.includes("claude-sonnet-4")) return "January 2025"
++  if (modelApiId.includes("gpt-4o")) return "October 2024"
++  if (modelApiId.includes("gemini-2")) return "January 2025"
++  return undefined
++}
++
++// 构建工具使用指引文本：按已注册工具生成 per-tool 替代指引
++const getToolUsageSection = (toolIds: string[]) => {
++  if (toolIds.length === 0) return undefined
++  const has = (name: string) => toolIds.includes(name)
++  const items: string[] = [
++    `Do NOT use the bash tool when a dedicated tool is available.`,
++    `Using dedicated tools lets the user review and track your work:`,
++  ]
++  // 按已注册工具生成专用替代指引
++  if (has("read"))  items.push(` - To read files use the read tool instead of cat, head, tail, or sed`)
++  if (has("edit"))  items.push(` - To edit files use the edit tool instead of sed or awk`)
++  if (has("write")) items.push(` - To create files use the write tool instead of echo redirection or heredoc`)
++  if (has("grep"))  items.push(` - To search file content use the grep tool instead of grep/rg`)
++  if (has("glob"))  items.push(` - To find files use the glob tool instead of find or ls`)
++  items.push(
++    ` - Reserve bash for system commands and terminal operations requiring shell execution`,
++    `You can call multiple tools in a single response. When there are no dependencies between calls,` +
++    ` make them IN PARALLEL. Maximize parallel tool calls to increase efficiency.` +
++    ` Only call sequentially when one result is needed to inform the next.`,
++  )
++  return ["# Using your tools", ...items].join("\n")
++}
+ 
+ const layer = Layer.effect(
+   Service,
+@@ -62,6 +119,7 @@
+     const locations = yield* LocationServiceMap.Service
      const git = yield* Git.Service
-+    const mcp = yield* MCP.Service
+     const flags = yield* RuntimeFlags.Service
 +    const registry = yield* ToolRegistry.Service
  
      // 该缓存是会话级快照，按 cwd 作为键。
      // 为保持“快照语义”，会话内不主动失效。
-     const gitContextCache = new Map<string, string>()
- 
-+    const getEnvExtras = Effect.fn("SystemPrompt.envExtras")(function* () {
-+      const shell = process.env.SHELL ?? process.env.COMSPEC ?? "unknown"
-+      const shellName = shell.includes("zsh") ? "zsh"
-+        : shell.includes("bash") ? "bash"
-+        : shell.includes("fish") ? "fish"
-+        : shell.includes("nu")   ? "nu"
-+        : shell.includes("cmd")  ? "cmd"
-+        : shell.includes("powershell") ? "powershell"
-+        : shell.includes("pwsh") ? "pwsh"
-+        : path.basename(shell, ".exe").toLowerCase()
-+
-+      const shellLine = process.platform === "win32"
-+        ? `${shellName} (use Unix shell syntax — /dev/null not NUL, forward slashes)`
-+        : shellName
-+
-+      const osVersion = process.platform === "win32"
-+        ? `${osType()} ${osRelease()}`
-+        : `${osType()} ${osRelease()}`
-+
-+      return { shellLine, osVersion }
-+    })
-+
-+    const getKnowledgeCutoff = (modelApiId: string): string | null => {
-+      if (modelApiId.includes("claude-sonnet-4-6")) return "August 2025"
-+      if (modelApiId.includes("claude-opus-4-6"))   return "May 2025"
-+      if (modelApiId.includes("claude-haiku-4"))     return "February 2025"
-+      if (modelApiId.includes("claude-opus-4") || modelApiId.includes("claude-sonnet-4")) return "January 2025"
-+      if (modelApiId.includes("gpt-4o"))  return "October 2024"
-+      if (modelApiId.includes("gemini-2")) return "January 2025"
-+      return null
-+    }
-+
-+    const getToolUsageSection = (registeredTools: string[]): string => {
-+      const has = (name: string) => registeredTools.includes(name)
-+
-+      const items: string[] = [
-+        `Do NOT use the bash tool when a dedicated tool is available.`,
-+        `Using dedicated tools lets the user review and track your work:`,
-+      ]
-+
-+      if (has("read"))  items.push(` - To read files use the read tool instead of cat, head, tail, or sed`)
-+      if (has("edit"))  items.push(` - To edit files use the edit tool instead of sed or awk`)
-+      if (has("write")) items.push(` - To create files use the write tool instead of echo redirection or heredoc`)
-+      if (has("grep"))  items.push(` - To search file content use the grep tool instead of grep/rg`)
-+      if (has("glob"))  items.push(` - To find files use the glob tool instead of find or ls`)
-+
-+      items.push(
-+        ` - Reserve bash for system commands and terminal operations requiring shell execution`,
-+        `You can call multiple tools in a single response. When there are no dependencies between calls,` +
-+        ` make them IN PARALLEL. Maximize parallel tool calls to increase efficiency.` +
-+        ` Only call sequentially when one result is needed to inform the next.`,
-+      )
-+
-+      return ["# Using your tools", ...items].join("\n")
-+    }
-+
-     const getGitContext = Effect.fn("SystemPrompt.gitContext")(function* () {
-       const cwd = Instance.directory
-       const cached = gitContextCache.get(cwd)
-@@ -96,12 +159,13 @@ export const layer = Layer.effect(
- 
-       const lines = [
-         `Is directory a git repo: yes`,
--        `This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.`,
-+        `This is the git status at the start of the conversation.`,
-+        `Note that this status is a snapshot in time, and will not update during the conversation.`,
-         `Current branch: ${branch ?? "(detached)"}`,
-         `Main branch (you will usually use this for PRs): ${defaultBranch?.name ?? "unknown"}`,
-         ...(userName ? [`Git user: ${userName}`] : []),
-         `Status:\n${truncatedStatus || "(clean)"}`,
--        `Recent commits:\n${log || "(no commits)"}`
-+        `Recent commits:\n${log || "(no commits)"}`,
-       ]
-       const result = lines.join("\n")
-       gitContextCache.set(cwd, result)
-@@ -111,19 +175,55 @@ export const layer = Layer.effect(
-     return Service.of({
-       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
+@@ -132,6 +190,14 @@
+         const ctx = yield* InstanceState.context
+         // getGitContext 是 Effect.fn，返回的是函数而非 Effect，必须调用以获取 Effect
          const gitContext = yield* getGitContext()
++        // 获取环境额外信息：shell 类型和 OS 版本，用于系统提示词
++        // 获取环境额外信息：shell 和 OS 版本
 +        const { shellLine, osVersion } = yield* getEnvExtras()
-+        const isWorktree = Instance.worktree !== Instance.directory
++        // 根据模型估算知识截止日期
++        const isWorktree = ctx.worktree !== ctx.directory
 +        const cutoff = getKnowledgeCutoff(model.api.id)
-+        const toolIds = yield* registry.ids()
-+        const envLines: string[] = [
-+          `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
-+          `Here is some useful information about the environment you are running in:`,
-+          `<env>`,
-+          `  Working directory: ${Instance.directory}`,
-+          `  Workspace root folder: ${Instance.worktree}`,
-+          // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致。
-+          ...gitContext.split("\n").map((line) => `  ${line}`),
-+          `  Platform: ${process.platform}`,
-+          `  Shell: ${shellLine}`,
-+          `  OS Version: ${osVersion}`,
-+          ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
-+          `  Today's date: ${new Date().toDateString()}`,
-+          ...(isWorktree ? [
-+            `  This is a git worktree — run ALL commands from this directory.`,
-+            `  Do NOT cd to the original repository root.`,
-+          ] : []),
-+          `</env>`,
-+        ]
-         return [
--          [
--            `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
--            `Here is some useful information about the environment you are running in:`,
--            `<env>`,
--            `  Working directory: ${Instance.directory}`,
--            `  Workspace root folder: ${Instance.worktree}`,
--            // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致。
++        // 使用 layer 中捕获的 registry 获取已注册工具列表
++        const toolIds = yield* registry.ids().pipe(Effect.orDie)
+         const references = yield* Effect.gen(function* () {
+           return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
+         }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
+@@ -143,9 +209,13 @@
+             `  Working directory: ${ctx.directory}`,
+             `  Workspace root folder: ${ctx.worktree}`,
+             // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致
 -            ...gitContext.split("\n").map((line) => `  ${line}`),
--            `  Platform: ${process.platform}`,
--            `  Today's date: ${new Date().toDateString()}`,
--            `</env>`,
--          ].join("\n"),
-+          envLines.join("\n"),
++            ...gitContext.split("\n").map((line: string) => `  ${line}`),
++            `  Shell: ${shellLine}`,
++            `  OS Version: ${osVersion}`,
++            ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
+             `  Platform: ${process.platform}`,
+             `  Today's date: ${new Date().toDateString()}`,
++            ...(isWorktree ? [`This is a git worktree — run ALL commands from this directory.`, `Do NOT cd to the original repository root.`] : []),
+             `</env>`,
+           ].join("\n"),
+           references.length === 0
+@@ -166,6 +236,12 @@
+                   ]),
+                 "</available_references>",
+               ].join("\n"),
++          // 工具使用指引：根据已注册工具列表生成
 +          getToolUsageSection(toolIds),
-+          `# Executing actions with care
-+Carefully consider the reversibility and blast radius of actions before proceeding:
-+- Local, reversible actions (editing files, running tests, reading code): proceed freely.
-+- Actions that are hard to reverse or affect shared state: confirm with the user first.
-+
-+
-+Actions that typically require user confirmation before proceeding:
-+- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes
-+- Force-pushing, git reset --hard, amending published commits
-+- Pushing code, creating or closing PRs, commenting on issues
-+- Sending messages to external services (Slack, email, webhooks)
-+- Modifying CI/CD pipelines or shared infrastructure
-+
-+When you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user's in-progress work.`,
-+          `# Output efficiency
-+Go straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.
-+
-+Focus text output on:
-+- Decisions that need the user's input
-+- High-level status updates at key milestones (e.g. "build passing", "all tests green")
-+- Errors or blockers that change the plan
-+
-+If you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`,
-         ]
++          // 执行操作时的安全指引：提醒模型在执行破坏性操作前需要确认
++          `# Executing actions with care\nCarefully consider the reversibility and blast radius of actions before proceeding:\n- Local, reversible actions (editing files, running tests, reading code): proceed freely.\n- Actions that are hard to reverse or affect shared state: confirm with the user first.\n\n\nActions that typically require user confirmation before proceeding:\n- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes\n- Force-pushing, git reset --hard, amending published commits\n- Pushing code, creating or closing PRs, commenting on issues\n- Sending messages to external services (Slack, email, webhooks)\n- Modifying CI/CD pipelines or shared infrastructure\n\nWhen you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user\x27s in-progress work.`,
++          // 输出效率指引：提醒模型保持简洁高效的输出
++          `# Output efficiency\nGo straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.\n\nFocus text output on:\n- Decisions that need the user\x27s input\n- High-level status updates at key milestones (e.g. "build passing", "all tests green")\n- Errors or blockers that change the plan\n\nIf you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`,
+         ].filter((part): part is string => part !== undefined)
        }),
  
-@@ -140,13 +240,19 @@ export const layer = Layer.effect(
-           Skill.fmt(list, { verbose: true }),
-         ].join("\n")
-       }),
-+
-+      mcpInstructions: Effect.fn("SystemPrompt.mcpInstructions")(function* () {
-+        return undefined
-+      }),
-     })
-   }),
- )
- 
- export const defaultLayer = layer.pipe(
-   Layer.provide(Skill.defaultLayer),
--  Layer.provide(Git.defaultLayer)
-+  Layer.provide(Git.defaultLayer),
-+  Layer.provide(MCP.defaultLayer),
-+  Layer.provide(ToolRegistry.defaultLayer)
- )
+@@ -214,7 +290,7 @@
+   service: Service,
+   layer: layer,
+   // 依赖 Git 服务采集 git 上下文，依赖 RuntimeFlags 读取 OPENCODE_DISABLE_GIT 开关
+-  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node],
++  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node, ToolRegistry.node],
+ })
  
  export * as SystemPrompt from "./system"

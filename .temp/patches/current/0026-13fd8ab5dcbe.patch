@@ -1,19 +1,4 @@
-From 13fd8ab5dcbef4509b906cd4f8c6df26de393b57 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Sat, 25 Apr 2026 01:19:00 +0800
-Subject: [PATCH] =?UTF-8?q?fix:=20=E6=9B=B4=E6=96=B0=E5=AE=8C=E6=95=B4?=
- =?UTF-8?q?=E6=8F=90=E7=A4=BA=E8=AF=8D=EF=BC=8C=E4=BB=A5=E7=A1=AE=E4=BF=9D?=
- =?UTF-8?q?=E5=B7=A5=E5=85=B7=E4=BD=BF=E7=94=A8=E8=AF=B4=E6=98=8E=E7=9A=84?=
- =?UTF-8?q?=E4=B8=80=E8=87=B4=E6=80=A7=E5=92=8C=E6=B8=85=E6=99=B0=E5=BA=A6?=
- =?UTF-8?q?=EF=BC=8C=E5=90=8C=E6=97=B6=E5=A2=9E=E5=BC=BA=E5=B9=B6=E8=A1=8C?=
- =?UTF-8?q?=E8=B0=83=E7=94=A8?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/packages/opencode/src/session/prompt/anthropic.txt b/packages/opencode/src/session/prompt/anthropic.txt
-index 7a555b7cc65dd16913998c19e1403b04396606bd..0ab790fba8321280ccbee82273492b588b8be703 100644
 --- a/packages/opencode/src/session/prompt/anthropic.txt
 +++ b/packages/opencode/src/session/prompt/anthropic.txt
 @@ -1,4 +1,4 @@
@@ -22,7 +7,7 @@ index 7a555b7cc65dd16913998c19e1403b04396606bd..0ab790fba8321280ccbee82273492b58
  
  You are an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
  
-@@ -9,7 +9,7 @@ If the user asks for help or wants to give feedback inform them of the following
+@@ -9,7 +9,7 @@
  - To give feedback, users should report the issue at
    https://github.com/anomalyco/opencode
  
@@ -31,7 +16,7 @@ index 7a555b7cc65dd16913998c19e1403b04396606bd..0ab790fba8321280ccbee82273492b58
  
  # Tone and style
  - Only use emojis if the user explicitly requests it. Avoid using emojis in all communication unless asked.
-@@ -24,7 +24,7 @@ Prioritize technical accuracy and truthfulness over validating the user's belief
+@@ -24,7 +24,7 @@
  # Doing tasks
  The user will primarily request you perform software engineering tasks. This includes solving bugs, adding new functionality, refactoring code, explaining code, and more. For these tasks the following steps are recommended:
  - Read the relevant files and understand the existing code before making changes. Do not propose changes to code you have not read.
@@ -40,7 +25,7 @@ index 7a555b7cc65dd16913998c19e1403b04396606bd..0ab790fba8321280ccbee82273492b58
  - Implement the minimal change that satisfies the request. Do not add features, refactor surrounding code, or make "improvements" beyond what was asked.
  - Do not add comments, docstrings, or type annotations to code you did not change.
  - Do not add error handling or validation for scenarios that cannot happen given the existing codebase guarantees.
-@@ -35,19 +35,19 @@ The user will primarily request you perform software engineering tasks. This inc
+@@ -35,19 +35,19 @@
  Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are automatically added by the system, and bear no direct relation to the specific tool results or user messages in which they appear.
  
  # Task Management
@@ -63,7 +48,7 @@ index 7a555b7cc65dd16913998c19e1403b04396606bd..0ab790fba8321280ccbee82273492b58
  
  marking the first todo as in_progress
  
-@@ -58,7 +58,7 @@ The first item has been fixed, let me mark the first todo as completed, and move
+@@ -58,7 +58,7 @@
  
  <example>
  user: Help me write a new feature that allows users to track their usage metrics and export them to various formats
@@ -72,7 +57,7 @@ index 7a555b7cc65dd16913998c19e1403b04396606bd..0ab790fba8321280ccbee82273492b58
  Adding the following todos to the todo list:
  1. Research existing metrics tracking in the codebase
  2. Design the metrics collection system
-@@ -71,21 +71,23 @@ Let me start by researching the existing codebase to understand what metrics we
+@@ -71,21 +71,23 @@
  </example>
  
  # Tool usage policy
@@ -101,20 +86,21 @@ index 7a555b7cc65dd16913998c19e1403b04396606bd..0ab790fba8321280ccbee82273492b58
  
  # Code References
  When referencing specific functions or pieces of code include the pattern `file_path:line_number` to allow the user to easily navigate to the source code location.
-@@ -93,4 +95,4 @@ When referencing specific functions or pieces of code include the pattern `file_
+@@ -93,4 +95,4 @@
  <example>
  user: Where are errors from the client handled?
  assistant: Clients are marked as failed in the `connectToServer` function in src/services/process.ts:712.
 -</example>
 \ No newline at end of file
 +</example>
+
+
 diff --git a/packages/opencode/src/session/prompt/copilot-gpt-5.txt b/packages/opencode/src/session/prompt/copilot-gpt-5.txt
-index 87cab043bdd2cf8a7506d22b33fd9a1feb8b6e4d..5b297611bdc04390b72af0d9db30a75480c27d0c 100644
 --- a/packages/opencode/src/session/prompt/copilot-gpt-5.txt
 +++ b/packages/opencode/src/session/prompt/copilot-gpt-5.txt
-@@ -93,10 +93,9 @@ Remember that you MUST add links for all workspace files, for example: [path/to/
+@@ -93,10 +93,9 @@
  These instructions only apply when the question is about the user's workspace.
- Unless it is clear that the user's question relates to the current workspace, you should avoid using the code search tools and instead prefer to answer the user's question directly.
+ Unless it is clear that the user's question relates to the current workspace, you should avoid using workspace search tools and instead prefer to answer the user's question directly.
  Remember that you can call multiple tools in one response.
 -Use semantic_search to search for high level concepts or descriptions of functionality in the user's question. This is the best place to start if you don't know where to look or the exact strings found in the codebase.
 -Prefer search_workspace_symbols over grep_search when you have precise code identifiers to search for.
@@ -126,7 +112,7 @@ index 87cab043bdd2cf8a7506d22b33fd9a1feb8b6e4d..5b297611bdc04390b72af0d9db30a754
  
  </codeSearchToolUseInstructions>
  When suggesting code changes or new content, use Markdown code blocks.
-@@ -117,11 +116,10 @@ In the code block, use a line comment with '...existing code...' to indicate cod
+@@ -117,11 +116,10 @@
  If the user is requesting a code sample, you can answer it directly without using any tools.
  When using a tool, follow the JSON schema very carefully and make sure to include ALL required properties.
  No need to ask permission before using a tool.
@@ -142,11 +128,12 @@ index 87cab043bdd2cf8a7506d22b33fd9a1feb8b6e4d..5b297611bdc04390b72af0d9db30a754
  When invoking a tool that takes a file path, always use the absolute file path.
  Tools can be disabled by the user. You may see tools used previously in the conversation that are not currently available. Be careful to only use the tools that are currently available to you.
  </toolUseInstructions>
+
+
 diff --git a/packages/opencode/src/session/prompt/default.txt b/packages/opencode/src/session/prompt/default.txt
-index 365663eeef6240fa9cb8d03981648629173611a0..9321503964e127fc9ee4534f60a60f44d4cd59c9 100644
 --- a/packages/opencode/src/session/prompt/default.txt
 +++ b/packages/opencode/src/session/prompt/default.txt
-@@ -6,7 +6,7 @@ If the user asks for help or wants to give feedback inform them of the following
+@@ -6,7 +6,7 @@
  - /help: Get help with using opencode
  - To give feedback, users should report the issue at https://github.com/anomalyco/opencode/issues
  
@@ -155,7 +142,7 @@ index 365663eeef6240fa9cb8d03981648629173611a0..9321503964e127fc9ee4534f60a60f44
  
  # Tone and style
  You should be concise, direct, and to the point. When you run a non-trivial bash command, you should explain what the command does and why you are running it, to make sure the user understands what you are doing (this is especially important when you are running a command that will make changes to the user's system).
-@@ -39,7 +39,7 @@ assistant: ls
+@@ -34,20 +34,20 @@
  
  <example>
  user: what command should I run to watch files in the current directory?
@@ -163,8 +150,6 @@ index 365663eeef6240fa9cb8d03981648629173611a0..9321503964e127fc9ee4534f60a60f44
 +assistant: [use the glob tool to list relevant files in the current directory, then read docs/commands in the relevant file to find out how to watch files]
  npm run dev
  </example>
- 
-@@ -50,14 +50,14 @@ assistant: 150000
  
  <example>
  user: what files are in the directory src/?
@@ -181,7 +166,7 @@ index 365663eeef6240fa9cb8d03981648629173611a0..9321503964e127fc9ee4534f60a60f44
  </example>
  
  # Proactiveness
-@@ -88,8 +88,8 @@ NEVER commit changes unless the user explicitly asks you to. It is VERY IMPORTAN
+@@ -78,8 +78,8 @@
  - Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are NOT part of the user's provided input or the tool result.
  
  # Tool usage policy
@@ -192,11 +177,12 @@ index 365663eeef6240fa9cb8d03981648629173611a0..9321503964e127fc9ee4534f60a60f44
  
  You MUST answer concisely with fewer than 4 lines of text (not including tool use or code generation), unless user asks for detail.
  
+
+
 diff --git a/packages/opencode/src/session/prompt/gemini.txt b/packages/opencode/src/session/prompt/gemini.txt
-index 87fe422bc7509a373867cbfb9718d6ffbd1566ca..338a49cb7de45aa949d7d61c7b79d184ad823cd9 100644
 --- a/packages/opencode/src/session/prompt/gemini.txt
 +++ b/packages/opencode/src/session/prompt/gemini.txt
-@@ -51,7 +51,7 @@ When requested to perform tasks like fixing bugs, adding features, refactoring,
+@@ -51,7 +51,7 @@
  
  ## Tool Usage
  - **File Paths:** Always use absolute paths when referring to files with tools like 'read' or 'write'. Relative paths are not supported. You must provide an absolute path.
@@ -205,7 +191,7 @@ index 87fe422bc7509a373867cbfb9718d6ffbd1566ca..338a49cb7de45aa949d7d61c7b79d184
  - **Command Execution:** Use the 'bash' tool for running shell commands, remembering the safety rule to explain modifying commands first.
  - **Background Processes:** Use background processes (via \`&\`) for commands that are unlikely to stop on their own, e.g. \`node server.js &\`. If unsure, ask the user.
  - **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
-@@ -74,7 +74,7 @@ model: true
+@@ -74,7 +74,7 @@
  
  <example>
  user: list files here.
@@ -214,7 +200,7 @@ index 87fe422bc7509a373867cbfb9718d6ffbd1566ca..338a49cb7de45aa949d7d61c7b79d184
  </example>
  
  <example>
-@@ -144,7 +144,7 @@ It appears the \`updateUserProfile\` method in \`UserProfileService.java\` is re
+@@ -144,7 +144,7 @@
  user: Where are all the 'app.config' files in this project? I need to check their settings.
  model:
  [tool_call: glob for pattern '**/app.config']
@@ -223,8 +209,9 @@ index 87fe422bc7509a373867cbfb9718d6ffbd1566ca..338a49cb7de45aa949d7d61c7b79d184
  I found the following 'app.config' files:
  - /path/to/moduleA/app.config
  - /path/to/moduleB/app.config
+
+
 diff --git a/packages/opencode/src/session/prompt/gpt.txt b/packages/opencode/src/session/prompt/gpt.txt
-index 9068df4778dc1a88c143e3b4a872d20c3341390f..977b98f8e027bee10a22d9dd4819edf0bad0d289 100644
 --- a/packages/opencode/src/session/prompt/gpt.txt
 +++ b/packages/opencode/src/session/prompt/gpt.txt
 @@ -1,9 +1,9 @@
@@ -240,11 +227,12 @@ index 9068df4778dc1a88c143e3b4a872d20c3341390f..977b98f8e027bee10a22d9dd4819edf0
  
  ## Editing Approach
  
+
+
 diff --git a/packages/opencode/src/session/prompt/kimi.txt b/packages/opencode/src/session/prompt/kimi.txt
-index beff6755f97d7ca3e4cf2f919bdbd63a9d30e31a..d617de54d55507457ea1be441148fca0511b50ef 100644
 --- a/packages/opencode/src/session/prompt/kimi.txt
 +++ b/packages/opencode/src/session/prompt/kimi.txt
-@@ -10,7 +10,7 @@ When handling the user's request, if it involves creating, modifying, or running
+@@ -10,7 +10,7 @@
  
  If the `task` tool is available, you can use it to delegate a focused subtask to a subagent instance. When delegating, provide a complete prompt with all necessary context because a newly created subagent does not automatically see your current context.
  
@@ -253,11 +241,12 @@ index beff6755f97d7ca3e4cf2f919bdbd63a9d30e31a..d617de54d55507457ea1be441148fca0
  
  The results of the tool calls will be returned to you in a tool message. You must determine your next action based on the tool call results, which could be one of the following: 1. Continue working on the task, 2. Inform the user that the task is completed or has failed, or 3. Ask the user for more information.
  
+
+
 diff --git a/packages/opencode/src/session/prompt/plan-reminder-anthropic.txt b/packages/opencode/src/session/prompt/plan-reminder-anthropic.txt
-index 28f1e629dbe73248ef7589e39d5472a4ee772ceb..bdccc1c69094ee9a15c46877d61f9584859d7c66 100644
 --- a/packages/opencode/src/session/prompt/plan-reminder-anthropic.txt
 +++ b/packages/opencode/src/session/prompt/plan-reminder-anthropic.txt
-@@ -7,7 +7,7 @@ Plan mode is active. The user indicated that they do not want you to execute yet
+@@ -7,7 +7,7 @@
  
  ## Plan File Info
  
@@ -266,7 +255,7 @@ index 28f1e629dbe73248ef7589e39d5472a4ee772ceb..bdccc1c69094ee9a15c46877d61f9584
  
  You should build your plan incrementally by writing to or editing this file. NOTE that this is the only file you are allowed to edit - other than this you are only allowed to take READ-ONLY actions.
  
-@@ -30,7 +30,7 @@ You should build your plan incrementally by writing to or editing this file. NOT
+@@ -30,7 +30,7 @@
     - Use 1 agent when: the task is isolated to known files, the user provided specific file paths, or you're making a small targeted change. Use multiple agents when: the scope is uncertain, multiple areas of the codebase are involved, or you need to understand existing patterns before planning.
     - Take into account any context you already have from the user's request or from the conversation so far when deciding how many agents to launch
  
@@ -275,7 +264,7 @@ index 28f1e629dbe73248ef7589e39d5472a4ee772ceb..bdccc1c69094ee9a15c46877d61f9584
  
  ### Phase 2: Planning
  
-@@ -46,7 +46,7 @@ In the agent prompt:
+@@ -46,7 +46,7 @@
  
  1. Collect all agent responses
  2. Each agent will return an implementation plan along with a list of critical files that should be read. You should keep these in mind and read them before you start implementing the plan
@@ -284,7 +273,7 @@ index 28f1e629dbe73248ef7589e39d5472a4ee772ceb..bdccc1c69094ee9a15c46877d61f9584
  
  ### Phase 4: Final Plan
  
-@@ -55,11 +55,11 @@ Once you have all the information you need, ensure that the plan file has been u
+@@ -55,11 +55,11 @@
  - Key insights from different perspectives
  - Critical files that need modification
  
@@ -299,11 +288,12 @@ index 28f1e629dbe73248ef7589e39d5472a4ee772ceb..bdccc1c69094ee9a15c46877d61f9584
  
  ---
  
+
+
 diff --git a/packages/opencode/src/session/prompt/trinity.txt b/packages/opencode/src/session/prompt/trinity.txt
-index 28ee4c4f26925da493ac40704a3cdacd11204211..2ad57dced20aa1fb3d37e0eb6f12b3ce63d460fa 100644
 --- a/packages/opencode/src/session/prompt/trinity.txt
 +++ b/packages/opencode/src/session/prompt/trinity.txt
-@@ -31,7 +31,7 @@ assistant: ls
+@@ -31,7 +31,7 @@
  
  <example>
  user: what command should I run to watch files in the current directory?
@@ -312,7 +302,7 @@ index 28ee4c4f26925da493ac40704a3cdacd11204211..2ad57dced20aa1fb3d37e0eb6f12b3ce
  npm run dev
  </example>
  
-@@ -42,14 +42,14 @@ assistant: 150000
+@@ -42,14 +42,14 @@
  
  <example>
  user: what files are in the directory src/?
@@ -329,7 +319,7 @@ index 28ee4c4f26925da493ac40704a3cdacd11204211..2ad57dced20aa1fb3d37e0eb6f12b3ce
  </example>
  
  # Proactiveness
-@@ -71,7 +71,7 @@ When making changes to files, first understand the file's code conventions. Mimi
+@@ -71,7 +71,7 @@
  
  # Doing tasks
  The user will primarily request you perform software engineering tasks. This includes solving bugs, adding new functionality, refactoring code, explaining code, and more. For these tasks the following steps are recommended:
@@ -338,7 +328,7 @@ index 28ee4c4f26925da493ac40704a3cdacd11204211..2ad57dced20aa1fb3d37e0eb6f12b3ce
  - Implement the solution using all tools available to you
  - Verify the solution if possible with tests. NEVER assume specific test framework or test script. Check the README or search codebase to determine the testing approach.
  - VERY IMPORTANT: When you have completed a task, you MUST run the lint and typecheck commands (e.g. npm run lint, npm run typecheck, ruff, etc.) with Bash if they were provided to you to ensure your code is correct. If you are unable to find the correct command, ask the user for the command to run and if they supply it, proactively suggest writing it to AGENTS.md so that you will know to run it next time.
-@@ -80,8 +80,8 @@ NEVER commit changes unless the user explicitly asks you to. It is VERY IMPORTAN
+@@ -80,8 +80,8 @@
  - Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are NOT part of the user's provided input or the tool result.
  
  # Tool usage policy
@@ -349,33 +339,37 @@ index 28ee4c4f26925da493ac40704a3cdacd11204211..2ad57dced20aa1fb3d37e0eb6f12b3ce
  - When the user's request is vague, use the question tool to clarify before reading files or making changes.
  - Avoid repeating the same tool with the same parameters once you have useful results. Use the result to take the next step (e.g. pick one match, read that file, then act); do not search again in a loop.
  
+
+
 diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
-index b17fd74a5a8b6726bbacec5337297c14b887278f..877d725b0f22954de69418b3e3a4792e1cd321d4 100644
 --- a/packages/opencode/src/session/system.ts
 +++ b/packages/opencode/src/session/system.ts
-@@ -109,9 +109,13 @@ export const layer = Layer.effect(
+@@ -104,9 +104,14 @@
+   if (has("glob"))  items.push(` - To find files use the glob tool instead of find or ls`)
+   items.push(
+     ` - Reserve bash for system commands and terminal operations requiring shell execution`,
+-    `You can call multiple tools in a single response. When there are no dependencies between calls,` +
+-    ` make them IN PARALLEL. Maximize parallel tool calls to increase efficiency.` +
+-    ` Only call sequentially when one result is needed to inform the next.`,
++    // 并行调用指引：独立读取和搜索应并行执行，避免 echo 拼接
++    ``,
++    `PARALLELIZE tool calls whenever possible, especially independent file reads, searches, and status checks.`,
++    `Issue independent tool calls in the same response so they can run in parallel.`,
++    `Never chain bash commands with separators like \`echo "====";\` to simulate grouped output, because it renders poorly for the user.`,
++    `Parallel writes are only appropriate when target files or edit ranges cannot conflict.`,
++    `For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.`,
++    `Only call tools sequentially when one result is needed to decide the next call, or when writes may conflict.`,
+   )
+   return ["# Using your tools", ...items].join("\n")
+ }
+@@ -167,7 +172,8 @@
+       const truncatedStatus =
+         status.length > MAX_STATUS_CHARS
+           ? status.substring(0, MAX_STATUS_CHARS) +
+-            "\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using BashTool)"
++            // 截断提示中工具名统一小写，与提示词文件保持一致
++            "\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using the bash tool)"
+           : status
  
-       items.push(
-         ` - Reserve bash for system commands and terminal operations requiring shell execution`,
--        `You can call multiple tools in a single response. When there are no dependencies between calls,` +
--        ` make them IN PARALLEL. Maximize parallel tool calls to increase efficiency.` +
--        ` Only call sequentially when one result is needed to inform the next.`,
-+        ``,
-+        `PARALLELIZE tool calls whenever possible, especially independent file reads, searches, and status checks.`,
-+        `Issue independent tool calls in the same response so they can run in parallel.`,
-+        `Never chain bash commands with separators like \`echo "====";\` to simulate grouped output, because it renders poorly for the user.`,
-+        `Parallel writes are only appropriate when target files or edit ranges cannot conflict.`,
-+        `For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.`,
-+        `Only call tools sequentially when one result is needed to decide the next call, or when writes may conflict.`,
-       )
- 
-       return ["# Using your tools", ...items].join("\n")
-@@ -154,7 +158,7 @@ export const layer = Layer.effect(
-       ], { concurrency: 5 })
- 
-       const truncatedStatus = status.length > MAX_STATUS_CHARS
--        ? status.substring(0, MAX_STATUS_CHARS) + "\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using BashTool)"
-+        ? status.substring(0, MAX_STATUS_CHARS) + "\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using the bash tool)"
-         : status
- 
-       const lines = [
+       // 组装 git 上下文多行文本，按字段逐行排列
+
