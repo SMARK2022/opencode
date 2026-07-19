@@ -15,7 +15,11 @@ import { MessageV2 } from "../../src/session/message-v2"
 import { Snapshot } from "../../src/snapshot"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { provideTmpdirInstance } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { awaitWithTimeout, testEffect } from "../lib/effect"
+import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
+import { WorkspaceV2 } from "@opencode-ai/core/workspace"
+import { disposeInstance } from "@/effect/instance-registry"
+import { InstanceState } from "@/effect/instance-state"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 
@@ -635,6 +639,9 @@ describe("revert + compact workflow", () => {
         Effect.gen(function* () {
           const session = yield* Session.Service
           const runState = yield* SessionRunState.Service
+          const source = yield* InstanceState.context
+          // 只切换实例引用，不启动模型、LSP或操作系统shell。
+          const target = { ...source, directory: path.join(source.directory, "target") }
 
           const info = yield* session.create({})
           const sid = info.id
@@ -664,12 +671,57 @@ describe("revert + compact workflow", () => {
           expect(Exit.isFailure(yield* runState.startExclusive(sid, Effect.succeed(fakeResult), Effect.succeed(fakeResult)).pipe(Effect.exit))).toBe(true)
           expect(Exit.isFailure(yield* runState.beginRevert(sid).pipe(Effect.exit))).toBe(true)
 
+          // 其它目录同样受维护租约约束；销毁其空State不能取消原目录的owner。
+          expect(Exit.isFailure(yield* runState.assertNotBusy(sid).pipe(Effect.provideService(InstanceRef, target), Effect.exit))).toBe(true)
+          expect(Exit.isFailure(yield* runState.startExclusive(sid, Effect.succeed(fakeResult), Effect.succeed(fakeResult)).pipe(Effect.provideService(InstanceRef, target), Effect.exit))).toBe(true)
+          expect(Exit.isFailure(yield* runState.beginRevert(sid).pipe(Effect.provideService(InstanceRef, target), Effect.exit))).toBe(true)
+          yield* Effect.promise(() => disposeInstance(target.directory))
+          expect(Exit.isFailure(yield* runState.assertNotBusy(sid).pipe(Effect.exit))).toBe(true)
+
           // 手动终结 deferred 以释放租约——fakeResult 经 never 泛化后可满足 WithParts 成功通道
           yield* (Deferred.succeed(release, fakeResult as never) as Effect.Effect<boolean>)
           const exit = yield* Effect.exit(Fiber.join(owner))
           expect(Exit.isSuccess(exit)).toBe(true)
           // 释放后 Busy 检查恢复通过
           yield* runState.assertNotBusy(sid)
+          const shellStarted = yield* Deferred.make<void>()
+          const shellEnd = yield* Deferred.make<SessionV1.WithParts>()
+          const queuedStarted = yield* Deferred.make<void>()
+          const queuedEnd = yield* Deferred.make<SessionV1.WithParts>()
+          const shell = yield* runState.startShell(sid, Effect.succeed(fakeResult),
+            Deferred.succeed(shellStarted, undefined).pipe(Effect.andThen(Deferred.await(shellEnd))),
+          ).pipe(Effect.provideService(WorkspaceRef, WorkspaceV2.ID.make("wrk_source")), Effect.forkChild)
+          yield* awaitWithTimeout(Deferred.await(shellStarted), "logical shell did not start")
+          const queued = yield* runState.ensureRunning(sid, Effect.succeed(fakeResult), Effect.gen(function* () {
+            // D的shell fiber接续T的work时，Instance与显式空Workspace都必须来自T。
+            expect((yield* InstanceState.context).directory).toBe(target.directory)
+            expect(yield* WorkspaceRef).toBeUndefined()
+            yield* Deferred.succeed(queuedStarted, undefined)
+            return yield* Deferred.await(queuedEnd)
+          })).pipe(Effect.provideService(InstanceRef, target), Effect.provideService(WorkspaceRef, undefined), Effect.forkChild)
+          yield* Effect.yieldNow
+          expect(yield* Deferred.isDone(queuedStarted)).toBe(false)
+          yield* Deferred.succeed(shellEnd, fakeResult)
+          yield* Fiber.join(shell)
+          yield* awaitWithTimeout(Deferred.await(queuedStarted), "queued caller context was not preserved")
+          // 运行中跨目录join不能执行第二份work，目标目录取消后两个等待者均收到中断结果。
+          let duplicate = false
+          const joined = yield* runState.ensureRunning(sid, Effect.succeed(fakeResult), Effect.sync(() => {
+            duplicate = true
+            return fakeResult
+          })).pipe(Effect.forkChild)
+          yield* Effect.yieldNow
+          expect(duplicate).toBe(false)
+          yield* runState.cancel(sid).pipe(Effect.provideService(InstanceRef, target))
+          const results = yield* Effect.all([Fiber.join(queued), Fiber.join(joined)])
+          expect(results).toEqual([fakeResult, fakeResult])
+          yield* runState.assertNotBusy(sid)
+          // 撤回登记也跨目录共享，endRevert后同一Session才可再次进入维护。
+          yield* runState.beginRevert(sid)
+          expect(Exit.isFailure(yield* runState.assertNotReverting(sid).pipe(Effect.provideService(InstanceRef, target), Effect.exit))).toBe(true)
+          expect(Exit.isFailure(yield* runState.startExclusive(sid, Effect.succeed(fakeResult), Effect.succeed(fakeResult)).pipe(Effect.provideService(InstanceRef, target), Effect.exit))).toBe(true)
+          yield* runState.endRevert(sid).pipe(Effect.provideService(InstanceRef, target))
+          yield* runState.startExclusive(sid, Effect.succeed(fakeResult), Effect.succeed(fakeResult))
         }),
       {},
     ),

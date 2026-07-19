@@ -61,6 +61,8 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Format } from "../../src/format"
 import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
+// 跨目录caller必须共享原Session的运行结果与取消入口。
+import { InstanceRef } from "@/effect/instance-ref"
 import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 import { httpError, reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -3057,17 +3059,24 @@ it.instance(
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig(providerCfg)
       const prompt = yield* SessionPrompt.Service
+      const run = yield* SessionRunState.Service
       const sessions = yield* Session.Service
+      // #499：T 侧目录的 InstanceRef——第二个 caller 经 T 目录提交，控制面必须仍命中 D 的同一 Runner。
+      const source = yield* InstanceRef
+      if (!source) return yield* Effect.die(new Error("InstanceRef not provided"))
+      const target = { ...source, directory: path.join(source.directory, "target") }
       const chat = yield* sessions.create({ title: "Pinned" })
       yield* llm.hang
       yield* user(chat.id, "hello")
 
       const a = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
       yield* llm.wait(1)
-      const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.provideService(InstanceRef, target), Effect.forkChild)
       yield* Effect.sleep(50)
 
-      yield* prompt.cancel(chat.id)
+      // #499：T 的 join、busy 与 cancel 必须命中 D 的同一 Runner，不能按目录再建控制面。
+      expect(Exit.isFailure(yield* run.assertNotBusy(chat.id).pipe(Effect.provideService(InstanceRef, target), Effect.exit))).toBe(true)
+      yield* prompt.cancel(chat.id).pipe(Effect.provideService(InstanceRef, target))
       const [exitA, exitB] = yield* Effect.all([Fiber.await(a), Fiber.await(b)])
       expect(Exit.isSuccess(exitA)).toBe(true)
       expect(Exit.isSuccess(exitB)).toBe(true)
