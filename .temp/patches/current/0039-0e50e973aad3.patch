@@ -1,17 +1,11 @@
-From 0e50e973aad35d6a25961ff091a4761cb2f831b6 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Mon, 27 Apr 2026 00:47:41 +0800
-Subject: [PATCH] fix: add node-gyp dep, setup-node/python/msbuild for Windows
- build, fix DEB control indent
-
-
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
-index afd9b66fae2ee6d55578e1a1e1dedf89eadd7d5d..4445f57deecf231e4f6cfe25d05526ede9982c82 100644
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -51,15 +51,15 @@ jobs:
+@@ -65,16 +65,17 @@ jobs:
            chmod 755 "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
-           
+ 
+           # heredoc 写入 control 文件：dpkg 要求字段顶格无缩进，EOF 标记结束
++          # control 内容必须顶格（column 0），否则 dpkg 解析字段时前导空格会导致格式错误
            cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
 -          Package: opencode
 -          Version: ${VERSION}
@@ -31,31 +25,34 @@ index afd9b66fae2ee6d55578e1a1e1dedf89eadd7d5d..4445f57deecf231e4f6cfe25d05526ed
 +Description: opencode AI-powered development tool (smark build)
 + A standalone AI coding assistant with TUI, version ${VERSION}.
 +EOF
-           
+ 
            dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
  
-@@ -102,6 +102,16 @@ jobs:
+@@ -123,6 +124,20 @@ jobs:
      steps:
        - uses: actions/checkout@v4
  
++      # Windows 原生编译工具链：Bun 在 Windows 构建时需编译 native addon
++      # setup-node 提供 node-gyp 所需的 Node.js 运行时（22 LTS）
 +      - uses: actions/setup-node@v4
 +        with:
 +          node-version: "22"
 +
++      # setup-python：node-gyp 依赖 Python 构建 native addon，Windows runner 默认不带
 +      - uses: actions/setup-python@v5
 +        with:
 +          python-version: "3.12"
 +
++      # setup-msbuild：Windows C++ 编译工具链，native addon 的 .node 文件需 MSBuild
 +      - uses: microsoft/setup-msbuild@v2
 +
        - uses: ./.github/actions/setup-bun
  
        - name: Build Windows
 diff --git a/package.json b/package.json
-index b2c8a2d7a8ae78a2cffb20c4763d81ab76bed005..bcd12a02ccd2d4199d9ab27fecff9ce702e001a7 100644
 --- a/package.json
 +++ b/package.json
-@@ -89,6 +89,7 @@
+@@ -101,6 +101,7 @@
      "@typescript/native-preview": "catalog:",
      "glob": "13.0.5",
      "husky": "9.1.7",

@@ -1,24 +1,14 @@
-From 20058ecde9366ce2062ba6716fdb385af1defa5a Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Mon, 27 Apr 2026 00:02:54 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=20GitHub=20Actions?=
- =?UTF-8?q?=20=E5=B7=A5=E4=BD=9C=E6=B5=81=E4=BB=A5=E6=9E=84=E5=BB=BA?=
- =?UTF-8?q?=E5=92=8C=E6=89=93=E5=8C=85=20OpenCode=20CLI=20=E6=94=AF?=
- =?UTF-8?q?=E6=8C=81=20Linux=E3=80=81macOS=20=E5=92=8C=20Windows?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
 new file mode 100644
-index 0000000000000000000000000000000000000000..0580c59c600fc2befdd52fd712a818154039bde0
 --- /dev/null
 +++ b/.github/workflows/build-opencode.yml
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,129 @@
++# 构建工作流：手动触发，编译打包 OpenCode CLI 为三大平台原生二进制
++# 产物包含 Linux(tar.gz/deb)、macOS(tar.gz)、Windows(zip) 多架构包
 +name: Build OpenCode CLI
 +
 +on:
++  # workflow_dispatch 手动触发：版本号作为必填输入，控制产物命名和嵌入版本
 +  workflow_dispatch:
 +    inputs:
 +      version:
@@ -27,21 +17,26 @@ index 0000000000000000000000000000000000000000..0580c59c600fc2befdd52fd712a81815
 +        type: string
 +
 +jobs:
++  # 三平台并行构建：Linux/macOS/Windows 互不依赖，提升 CI 吞吐
++  # Linux 构建：产出 tar.gz 通用包和 deb Debian 系包两种格式
 +  build-linux:
 +    runs-on: ubuntu-latest
 +    steps:
 +      - uses: actions/checkout@v4
 +
++      # setup-bun 复用自定义 composite action，统一 Bun 版本和缓存策略
 +      - uses: ./.github/actions/setup-bun
 +
 +      - name: Build Linux
 +        run: |
 +          cd packages/opencode
++          # --skip-embed-web-ui：跳过内嵌 Web UI 编译，CLI-only 构建减小产物体积
 +          bun run script/build.ts --version=${{ inputs.version }} --os=linux --skip-embed-web-ui
-+        
++
 +      - name: Package Linux tar.gz
 +        run: |
 +          cd packages/opencode/dist/opencode-linux-x64/bin
++          # tar.gz 打包：保留单文件二进制，解压即用
 +          tar -czf ../../../opencode-linux-x64-${{ inputs.version }}.tar.gz opencode
 +
 +      - name: Package Linux .deb
@@ -49,13 +44,16 @@ index 0000000000000000000000000000000000000000..0580c59c600fc2befdd52fd712a81815
 +          DEB_DIR="/tmp/deb_build"
 +          PKG_NAME="opencode_${{ inputs.version }}_amd64"
 +          BINARY="packages/opencode/dist/opencode-linux-x64/bin/opencode"
-+          
++
++          # deb 包结构：DEBIAN/control 存元数据，usr/local/bin 存可执行文件（FHS 规范）
 +          mkdir -p "${DEB_DIR}/${PKG_NAME}/DEBIAN"
 +          mkdir -p "${DEB_DIR}/${PKG_NAME}/usr/local/bin"
-+          
++
 +          cp "$BINARY" "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
++          # chmod 755：确保二进制对所有用户可执行，符合 deb 包权限规范
 +          chmod 755 "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
-+          
++
++          # heredoc 写入 control 文件：dpkg 要求字段顶格无缩进，EOF 标记结束
 +          cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
 +          Package: opencode
 +          Version: ${{ inputs.version }}
@@ -66,9 +64,10 @@ index 0000000000000000000000000000000000000000..0580c59c600fc2befdd52fd712a81815
 +          Description: opencode AI-powered development tool (smark build)
 +           A standalone AI coding assistant with TUI, version ${{ inputs.version }}.
 +          EOF
-+          
++
 +          dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${{ inputs.version }}_amd64.deb"
 +
++      # upload-artifact 汇总本平台产物，供后续下载或发布
 +      - uses: actions/upload-artifact@v4
 +        with:
 +          name: opencode-linux
@@ -76,7 +75,9 @@ index 0000000000000000000000000000000000000000..0580c59c600fc2befdd52fd712a81815
 +            packages/opencode/dist/opencode-linux-x64-${{ inputs.version }}.tar.gz
 +            packages/opencode/dist/opencode_${{ inputs.version }}_amd64.deb
 +
++  # macOS 构建：arm64 (Apple Silicon) 和 x64 (Intel) 双架构
 +  build-macos:
++    # macOS runner 原生支持跨架构编译，无需交叉编译工具链
 +    runs-on: macos-latest
 +    steps:
 +      - uses: actions/checkout@v4
@@ -87,7 +88,7 @@ index 0000000000000000000000000000000000000000..0580c59c600fc2befdd52fd712a81815
 +        run: |
 +          cd packages/opencode
 +          bun run script/build.ts --version=${{ inputs.version }} --os=darwin --skip-embed-web-ui
-+        
++
 +      - name: Package macOS tar.gz
 +        run: |
 +          cd packages/opencode/dist/opencode-darwin-arm64/bin
@@ -102,6 +103,7 @@ index 0000000000000000000000000000000000000000..0580c59c600fc2befdd52fd712a81815
 +            packages/opencode/dist/opencode-darwin-arm64-${{ inputs.version }}.tar.gz
 +            packages/opencode/dist/opencode-darwin-x64-${{ inputs.version }}.tar.gz
 +
++  # Windows 构建：x64 和 arm64 双架构，使用 pwsh 执行 PowerShell 脚本
 +  build-windows:
 +    runs-on: windows-latest
 +    steps:
@@ -114,11 +116,12 @@ index 0000000000000000000000000000000000000000..0580c59c600fc2befdd52fd712a81815
 +        run: |
 +          cd packages/opencode
 +          bun run script/build.ts --version=${{ inputs.version }} --os=win32 --skip-embed-web-ui
-+        
++
 +      - name: Package Windows zip
 +        shell: pwsh
 +        run: |
 +          cd packages/opencode/dist/opencode-windows-x64/bin
++          # Compress-Archive 为 Windows 标准压缩格式，用户无需额外工具解压
 +          Compress-Archive -Path "opencode.exe" -DestinationPath "../../../opencode-windows-x64-${{ inputs.version }}.zip"
 +          cd ../../opencode-windows-arm64/bin
 +          Compress-Archive -Path "opencode.exe" -DestinationPath "../../../opencode-windows-arm64-${{ inputs.version }}.zip"

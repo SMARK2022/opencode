@@ -518,3 +518,5 @@ after five independent `PASS` results with no open `B/G`; the terminal batch
 releases only after both entries pass. Any blocker keeps the whole batch blocked
 and requires repair, cumulative re-materialization from the earliest affected
 index, and full-scope re-audit of the same batch.
+
+> 请保持严格准确，且一旦有降级特征时时请你严格准确且提高警惕！最终审计报告不仅要包含如上的全部内容，同时完整全面包含相对较为严格的完整审计建议，如：#xxxx缺失了很多有效信息，请**全量**完整兼顾上下游以及目标合并分支后进行有效的融合，而不能只修改一处！同时也警惕current patch相较于origin patch出现较大文件长度变化且无合理有效原因和证据说明的改动。整体文档长度必须至少满足50行、3000字符以上，并包含完整全量的有效信息，同时凑字数无效，否则视为`BLOCK`！！！
