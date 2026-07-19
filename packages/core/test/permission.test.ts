@@ -47,6 +47,7 @@ let reviewBeforeStream: Deferred.Deferred<void> | undefined
 let reviewArrivals: Deferred.Deferred<void> | undefined
 let reviewScript: Stream.Stream<LLMEvent>[] | undefined
 let reviewOAuth = false
+let reviewOpenTool = false
 const reviewBodies: unknown[] = []
 const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
   prepare: () => Effect.die("unused"),
@@ -69,6 +70,7 @@ const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
     }
     // 在决策gate之前交付真实事件，断言中途投影而不是伪造最终助手对象。
     return Stream.make(
+      ...(reviewOpenTool ? [LLMEvent.toolInputStart({ id: "review-incomplete", name: "permission_review_decision" })] : []),
       LLMEvent.reasoningStart({ id: "review-reason" }),
       LLMEvent.reasoningDelta({ id: "review-reason", text: "Actual reviewer reasoning before decision." }),
       LLMEvent.reasoningEnd({ id: "review-reason" }),
@@ -730,6 +732,9 @@ describe("PermissionV2", () => {
   }))
 
   it.effect("persists live native review traces and keeps outcomes through tool settlement", () => Effect.gen(function* () {
+    // 只在此真实DB用例注入未完成输入，覆盖正常裁决与取消的自动attempt清理。
+    reviewOpenTool = true
+    yield* Effect.addFinalizer(() => Effect.sync(() => { reviewOpenTool = false }))
     reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
     assessment = { outcome: "allow", rationale: "bounded requested change", risk_level: "low", user_authorization: "high" }
     reviewRequests.length = 0
@@ -761,6 +766,18 @@ describe("PermissionV2", () => {
     // 中途普通工具进度和最终结果都不得擦除审批，审批本身不等于工具执行结果。
     yield* Deferred.succeed(reviewGate, undefined)
     expect(yield* Fiber.join(fiber)).toMatchObject({ effect: "allow" })
+    const completedReview = (yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)
+    if (!completedReview || completedReview.type !== "assistant") return yield* Effect.die("Missing completed reviewer")
+    expect(completedReview).toMatchObject({ content: expect.arrayContaining([
+      expect.objectContaining({ id: "review-incomplete", state: expect.objectContaining({ status: "error" }) }),
+      expect.objectContaining({ id: "review", state: expect.objectContaining({ status: "completed" }) }),
+    ]) })
+    // 模拟已提交Success的通知返回窗口：迟到清理必须尊重真实投影的completed winner。
+    yield* events.publish(SessionEvent.Tool.Failed, { sessionID: SessionV2.ID.make(child.id), assistantMessageID: completedReview.id,
+      timestamp: yield* DateTime.now, callID: "review", error: { type: "unknown", message: "late attempt cleanup" }, provider: { executed: false } })
+    expect((yield* sessions.message(completedReview.id))?.message).toMatchObject({ content: expect.arrayContaining([
+      expect.objectContaining({ id: "review", state: expect.objectContaining({ status: "completed" }) }),
+    ]) })
     yield* events.publish(SessionEvent.Tool.Progress, {
       sessionID: request.sessionID, assistantMessageID, callID: "parent", timestamp: yield* DateTime.now,
       structured: { progress: "after-review" }, content: [],
@@ -781,6 +798,7 @@ describe("PermissionV2", () => {
     yield* Fiber.interrupt(cancel)
     expect(reviewRequests).toHaveLength(beforeCancel + 1)
     expect((yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)).toMatchObject({ type: "assistant", finish: "error" })
+    expect((yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)).toMatchObject({ content: expect.arrayContaining([expect.objectContaining({ id: "review-incomplete", state: expect.objectContaining({ status: "error" }) })]) })
     expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed" } }, { state: { status: "running", structured: { autoReview: { status: "aborted", sessionID: child.id } } } }] })
     yield* publisher.failUnsettledTools("Tool execution interrupted", false, true)
     expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed" } }, { state: { status: "error", structured: { autoReview: { status: "aborted" } } } }] })

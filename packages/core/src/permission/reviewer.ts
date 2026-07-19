@@ -164,6 +164,9 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
           Effect.onExit((exit) => Effect.gen(function* () {
             const finalizer = exit._tag === "Failure"
             yield* publisher.flush(finalizer)
+            // 成功裁决或文本回退也可能遗留其它call的输入，attempt退出必须一并闭合。
+            if (exit._tag === "Success")
+              yield* publisher.failUnsettledTools("Tool execution did not complete before stream ended", false, finalizer)
             if (exit._tag === "Failure") {
               const failure = Cause.squash(exit.cause)
               const reason = failure instanceof Error ? failure.message : "Review cancelled"

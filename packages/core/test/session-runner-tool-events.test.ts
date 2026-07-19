@@ -12,11 +12,12 @@ import { createLLMEventPublisher } from "@opencode-ai/core/session/runner/publis
 const sessionID = SessionV2.ID.make("ses_tool_event_test")
 const base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
 
-const capture = () => {
+const capture = (beforePublish = (_type: string) => {}) => {
   const published: Array<{ readonly type: string; readonly data: unknown }> = []
   const events = EventV2.Service.of({
     publish: (definition, data) =>
       Effect.sync(() => {
+        beforePublish(definition.type)
         const event = { id: EventV2.ID.create(), type: definition.type, data } as EventV2.Payload<typeof definition>
         published.push({
           type: definition.durable
@@ -86,6 +87,9 @@ test("local tool success serializes media base64 once and reconstructs from stru
       { type: "file", uri: `data:image/png;base64,${base64}`, mime: "image/png" },
     ],
   })
+  // 正常结果已提交后，attempt清理不能另发失败终态。
+  await Effect.runPromise(publisher.failUnsettledTools("stream ended", false, true))
+  expect(published.filter(event => event.type === "session.next.tool.failed.1")).toHaveLength(0)
 })
 
 test("provider-executed success retains its compatibility result", async () => {
@@ -113,6 +117,21 @@ test("binary failure emits no success event", async () => {
   expect(repeated).toBeUndefined()
   expect(published.some((event) => event.type === "session.next.tool.success.1")).toBe(false)
   expect(published.some((event) => event.type === "session.next.tool.failed.1")).toBe(true)
+  let rejected = false
+  const retryable = capture(type => {
+    if (type !== SessionEvent.Tool.Failed.type || rejected) return
+    rejected = true
+    throw new Error("terminal commit failed")
+  })
+  await Effect.runPromise(retryable.publisher.publish(call))
+  // 终态写入失败不能先把内存标记为settled，否则退出清理会漏掉持久running。
+  const failed = await Effect.runPromise(retryable.publisher.publish(LLMEvent.toolResult({ id: call.id, name: call.name,
+    result: { type: "error", value: "failed" } })).pipe(Effect.exit))
+  expect(failed._tag).toBe("Failure")
+  await Effect.runPromise(retryable.publisher.failUnsettledTools("stream ended", false, true))
+  expect(retryable.published.filter(event => event.type === "session.next.tool.failed.1")).toHaveLength(1)
+  await Effect.runPromise(retryable.publisher.failUnsettledTools("repeated cleanup", false, true))
+  expect(retryable.published.filter(event => event.type === "session.next.tool.failed.1")).toHaveLength(1)
 })
 
 test("old success event data containing result still decodes", () => {
