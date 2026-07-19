@@ -25,6 +25,8 @@ type Match = (hit: Hit) => boolean
 type Queue = {
   item: Item
   match?: Match
+  // repeat只定义显式队列项的消费生命周期，不改变queue-miss的默认响应语义。
+  repeat?: boolean
 }
 
 type Wait = {
@@ -609,6 +611,7 @@ namespace TestLLMServer {
   export interface Service {
     readonly url: string
     readonly push: (...input: (Item | Reply)[]) => Effect.Effect<void>
+    readonly pushRepeat: (...input: (Item | Reply)[]) => Effect.Effect<void>
     readonly pushMatch: (match: Match, ...input: (Item | Reply)[]) => Effect.Effect<void>
     readonly textMatch: (match: Match, value: string, opts?: { usage?: Usage }) => Effect.Effect<void>
     readonly toolMatch: (match: Match, name: string, input: unknown) => Effect.Effect<void>
@@ -646,6 +649,11 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
         list = [...list, ...input.map((value) => ({ item: item(value) }))]
       }
 
+      const queueRepeat = (...input: (Item | Reply)[]) => {
+        // 显式repeat producer持续服务后续请求，避免用缺少fixture配置时的默认成功冒充恢复。
+        list = [...list, ...input.map((value) => ({ item: item(value), repeat: true }))]
+      }
+
       const queueMatch = (match: Match, ...input: (Item | Reply)[]) => {
         list = [...list, ...input.map((value) => ({ item: item(value), match }))]
       }
@@ -661,7 +669,8 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
         const index = list.findIndex((entry) => !entry.match || entry.match(hit))
         if (index === -1) return
         const first = list[index]
-        list = [...list.slice(0, index), ...list.slice(index + 1)]
+        // 普通项仍保持one-shot；只有调用方明确声明的repeat项在命中后留在同一队列。
+        if (!first.repeat) list = [...list.slice(0, index), ...list.slice(index + 1)]
         return first.item
       }
 
@@ -712,6 +721,9 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
             : `unix://${server.address.path}/v1`,
         push: Effect.fn("TestLLMServer.push")(function* (...input: (Item | Reply)[]) {
           queue(...input)
+        }),
+        pushRepeat: Effect.fn("TestLLMServer.pushRepeat")(function* (...input: (Item | Reply)[]) {
+          queueRepeat(...input)
         }),
         pushMatch: Effect.fn("TestLLMServer.pushMatch")(function* (match: Match, ...input: (Item | Reply)[]) {
           queueMatch(match, ...input)
