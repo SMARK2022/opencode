@@ -237,7 +237,6 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
   ) {
     for (const [callID, tool] of tools) {
       if (tool.settled || (hostedOnly && !tool.providerExecuted)) continue
-      tool.settled = true
       yield* events.publish(SessionEvent.Tool.Failed, {
         sessionID: input.sessionID,
         timestamp: yield* timestamp,
@@ -249,6 +248,8 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
           ...(tool.providerMetadata === undefined ? {} : { metadata: tool.providerMetadata }),
         },
       }, { finalizer })
+      // 发布失败仍保留未结算身份；提交后通知中断则由持久投影的终态guard保留winner。
+      tool.settled = true
     }
   })
 
@@ -379,7 +380,6 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
           if (event.result.type === "error") return
           return yield* Effect.die(`Duplicate tool result: ${event.id}`)
         }
-        tool.settled = true
         const result = settledOutput(event.output, event.result)
         const provider = {
           executed: event.providerExecuted === true || tool.providerExecuted,
@@ -395,6 +395,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
             result: event.result,
             provider,
           })
+          tool.settled = true
           return { failed: true, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
         }
         yield* events.publish(SessionEvent.Tool.Success, {
@@ -407,6 +408,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
           ...(provider.executed ? { result: event.result } : {}),
           provider,
         })
+        tool.settled = true
         return { failed: false, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
       }
       case "tool-error": {
@@ -415,7 +417,6 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
         if (tool.name !== event.name)
           return yield* Effect.die(`Tool error name changed for ${event.id}: ${tool.name} -> ${event.name}`)
         if (tool.settled) return yield* Effect.die(`Duplicate tool error: ${event.id}`)
-        tool.settled = true
         yield* events.publish(SessionEvent.Tool.Failed, {
           sessionID: input.sessionID,
           timestamp: yield* timestamp,
@@ -427,6 +428,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
             ...(event.providerMetadata === undefined ? {} : { metadata: event.providerMetadata }),
           },
         })
+        tool.settled = true
         return { failed: true, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
       }
       case "step-finish":

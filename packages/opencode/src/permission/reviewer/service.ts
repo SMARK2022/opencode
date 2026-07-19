@@ -637,8 +637,45 @@ export const layer = Layer.effect(
 // #227：textOutput 累积所有 text-delta——JSON 回退解析需要完整文本而非首个分片
             let reasoningPart: ReasoningPart | undefined
             // #209：toolParts/toolInput 按 callID 索引——一个 tool-call 的 input-start/delta/end/call 共享同一 callID
-            const toolParts = new Map<string, ToolPart>()
+            // #497：Map 只表达 attempt 对 Part identity 的 ownership，不缓存可变 state；
+            // durable state 的单一真相留在 Session.Service，避免发布窗口产生双重 winner。
+            const toolParts = new Map<string, PartID>()
             const toolInput = new Map<string, string>()
+            const finalizeOpenToolParts = Effect.fnUntraced(function* (error: string, interrupted: boolean) {
+              if (!persist) return
+              const end = Date.now()
+              yield* Effect.forEach(
+                toolParts.values(),
+                Effect.fnUntraced(function* (partID) {
+                  // #497：registry 只保存首次 durable write 前分配的稳定 identity；退出时必须
+                  // 重读存储，才能同时覆盖 commit 后 return 前中断并尊重 completed winner。
+                  const part = yield* session.getPart({
+                    sessionID: persist.sessionID,
+                    messageID: persist.messageID,
+                    partID,
+                  })
+                  if (!part || part.type !== "tool") return
+                  if (part.state.status !== "pending" && part.state.status !== "running") return
+                  const start = part.state.status === "running" ? part.state.time.start : end
+                  const metadata = part.state.status === "running" ? part.state.metadata : undefined
+                  yield* session.updatePart({
+                    ...part,
+                    state: {
+                      status: "error",
+                      input: part.state.input,
+                      error,
+                      // #497：interrupted marker 属于真实 user/timeout abort；普通 incomplete stream
+                      // 保持原错误语义，不能让 Provider replay 把协议失败误判成用户取消。
+                      metadata: interrupted
+                        ? { ...metadata, interrupted: true, executionElapsedMs: Math.floor(end - start) }
+                        : metadata,
+                      time: { start, end },
+                    },
+                  } satisfies ToolPart)
+                }),
+                { discard: true },
+              )
+            })
 
             const iterator = result.fullStream[Symbol.asyncIterator]()
             const close = iterator.return
@@ -721,7 +758,7 @@ export const layer = Layer.effect(
                 }
                 if (event.type === "tool-input-start") {
                   // #209：工具输入先建 pending 壳——delta 缓冲到 toolInput Map，end 时回填 raw
-                  const part = yield* session.updatePart({
+                  const part = {
                     id: PartID.ascending(),
                     sessionID: persist.sessionID,
                     messageID: persist.messageID,
@@ -729,8 +766,11 @@ export const layer = Layer.effect(
                     callID: event.id,
                     tool: event.toolName,
                     state: { status: "pending", input: {}, raw: "" },
-                  } satisfies ToolPart)
-                  toolParts.set(event.id, part)
+                  } satisfies ToolPart
+                  // #497：identity 必须先于 updatePart 注册：SQLite commit 早于事件发布和返回，
+                  // 中断若落在其间，attempt cleanup 仍能通过 PartID 找到 durable pending。
+                  toolParts.set(event.id, part.id)
+                  yield* session.updatePart(part)
                   return
                 }
                 if (event.type === "tool-input-delta") {
@@ -740,14 +780,20 @@ export const layer = Layer.effect(
                 }
                 if (event.type === "tool-input-end") {
 // #227：input 聚合完成时回填 state.input——running 状态先持久化保证 UI 及时
-                  const part = toolParts.get(event.id)
-                  // #209：part 不存在或已非 pending 时跳过——tool-call 可能先于 tool-input-end 到达导致状态已 completed
-                  if (!part || part.state.status !== "pending") return
-                  const next = {
+                  const partID = toolParts.get(event.id)
+                  if (!partID) return
+                  // #497：raw 参数更新也必须从 durable Part 起步；创建写入可能已经 commit，
+                  // 但调用返回与内存 snapshot 更新并不构成持久化顺序保证。
+                  const part = yield* session.getPart({
+                    sessionID: persist.sessionID,
+                    messageID: persist.messageID,
+                    partID,
+                  })
+                  if (!part || part.type !== "tool" || part.state.status !== "pending") return
+                  yield* session.updatePart({
                     ...part,
                     state: { ...part.state, raw: toolInput.get(event.id) ?? "" },
-                  } satisfies ToolPart
-                  toolParts.set(event.id, yield* session.updatePart(next))
+                  } satisfies ToolPart)
                   return
                 }
                 if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
@@ -755,17 +801,31 @@ export const layer = Layer.effect(
                   assessment = assessmentFromUnknown(event.input)
                   if (!assessment) return
                   // #209：toolCallId 可能与 tool-input-start 的 event.id 不同——无 existing 时新建 part 壳
-                  const existing = toolParts.get(event.toolCallId)
-// #227：toolCallId 与 input-start 的 event.id 可能不同——无 existing 时新建 part
-                  const part = yield* session.updatePart({
-                    ...(existing ?? {
-                      id: PartID.ascending(),
-                      sessionID: persist.sessionID,
-                      messageID: persist.messageID,
-                      type: "tool" as const,
-                      callID: event.toolCallId,
-                      tool: event.toolName,
-                    }),
+                  const registered = toolParts.get(event.toolCallId)
+                  const partID = registered ?? PartID.ascending()
+                  // #497：部分 Provider 直接发 tool-call；该路径同样在首次 durable write 前登记，
+                  // 保持所有 attempt-owned Tool Part 只有一个 closure 所有者。
+                  if (!registered) toolParts.set(event.toolCallId, partID)
+                  // #497：completed 转换基于存储中的最新 ID/raw/metadata，避免先前 pending 写入
+                  // 已提交但尚未返回时，旧对象重新成为后续 terminal write 的来源。
+                  const current = registered
+                    ? yield* session.getPart({
+                        sessionID: persist.sessionID,
+                        messageID: persist.messageID,
+                        partID,
+                      })
+                    : undefined
+                  yield* session.updatePart({
+                    ...(current?.type === "tool"
+                      ? current
+                      : {
+                          id: partID,
+                          sessionID: persist.sessionID,
+                          messageID: persist.messageID,
+                          type: "tool" as const,
+                          callID: event.toolCallId,
+                          tool: event.toolName,
+                        }),
                     state: {
                       status: "completed",
                       input: assessment,
@@ -777,7 +837,6 @@ export const layer = Layer.effect(
                       time: { start: Date.now(), end: Date.now() },
                     },
                   })
-                  toolParts.set(event.toolCallId, part)
                   return
                 }
                 if (event.type === "tool-error") {
@@ -835,7 +894,26 @@ export const layer = Layer.effect(
                   return yield* Effect.fail(event.error)
                 }
               }),
+            ).pipe(
+              Effect.onInterrupt(() =>
+                // #497：真实 abort 的 open tool part 闭合为 error+interrupted marker。
+                finalizeOpenToolParts("Tool execution aborted", true).pipe(
+                  Effect.catch(() => Effect.void),
+                  Effect.catchDefect(() => Effect.void),
+                ),
+              ),
+              // #497：Provider failure 的原始 shape 仍交给 SessionRetry；cleanup 失败不能把
+              // status/header 等诊断替换成第二个错误，也不能伪造 reviewer 成功结果。
+              Effect.tapError(() =>
+                finalizeOpenToolParts("Tool execution did not complete before stream ended", false).pipe(
+                  Effect.catch(() => Effect.void),
+                  Effect.catchDefect(() => Effect.void),
+                ),
+              ),
             )
+            // #497：正常 drain 仍可能只有 tool-input-start 而没有合法 tool-call；在协议
+            // retry/fallback 接管前先闭合本 attempt，防止每次重试累积 pending Part。
+            yield* finalizeOpenToolParts("Tool execution did not complete before stream ended", false)
 
             // #209：流结束后收尾未关闭的 text/reasoning part——provider 可能不发 *-end 事件，避免 part 残留无结束时间
             if (textPart)
