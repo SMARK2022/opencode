@@ -144,12 +144,12 @@ function planWorkspaceRequest(
 
 function planRequest(
   request: HttpServerRequest.HttpServerRequest,
-  sessionWorkspaceID?: WorkspaceID,
+  session?: Session.Info,
 ): Effect.Effect<RequestPlan, never, Workspace.Service> {
   return Effect.gen(function* () {
     const url = requestURL(request)
     const envWorkspaceID = configuredWorkspaceID()
-    const workspaceID = selectedWorkspaceID(url, sessionWorkspaceID)
+    const workspaceID = selectedWorkspaceID(url, session?.workspaceID)
     const workspace = yield* resolveWorkspace(workspaceID, envWorkspaceID)
 
     if (workspaceID && workspace === undefined && !envWorkspaceID) {
@@ -160,7 +160,12 @@ function planRequest(
       return yield* planWorkspaceRequest(request, url, workspace)
     }
 
-    return RequestPlan.Local({ directory: defaultDirectory(request, url), workspaceID: envWorkspaceID ?? workspaceID })
+    // Workspace forwarding 先保留既有执行目标；只有最终留在本地的 Session 请求
+    // 才以持久化目录覆盖 caller hint，确保 prompt、Task 与 abort 共享同一 Runner owner。
+    return RequestPlan.Local({
+      directory: session?.directory ?? defaultDirectory(request, url),
+      workspaceID: envWorkspaceID ?? workspaceID,
+    })
   })
 }
 
@@ -194,7 +199,7 @@ function routeHttpApiWorkspace<E>(
           Effect.catchDefect(() => Effect.succeed(undefined)),
         )
       : undefined
-    const plan = yield* planRequest(request, session?.workspaceID)
+    const plan = yield* planRequest(request, session)
     return yield* routeWorkspace(client, effect, plan)
   })
 }

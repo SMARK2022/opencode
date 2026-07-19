@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Effect, Fiber, Layer } from "effect"
 import { createOpenAI } from "@ai-sdk/openai"
 import { Auth } from "../../src/auth"
 import { Config } from "../../src/config/config"
@@ -78,6 +78,12 @@ describe("permission reviewer service", () => {
   const customOauth = testEffect(customOauthFixture.layer)
   const oauthHook = testEffect(oauthHookFixture.layer)
   const implicitAuto = testEffect(implicitAutoFixture.layer)
+  const pendingClosureFixture = reviewerClosureFixture("pending")
+  const pendingClosure = testEffect(pendingClosureFixture.layer)
+  const completedClosureFixture = reviewerClosureFixture("completed")
+  const completedClosure = testEffect(completedClosureFixture.layer)
+  const drainedClosureFixture = reviewerClosureFixture("drain")
+  const drainedClosure = testEffect(drainedClosureFixture.layer)
 
   oauth.effect("sends reviewer policy as OpenAI OAuth instructions while keeping action evidence in user input", () =>
     Effect.gen(function* () {
@@ -288,7 +294,151 @@ describe("permission reviewer service", () => {
     }),
   )
   // [local-smark] reviewer token/breakdown 持久化测试结束
+
+  pendingClosure.live("closes a pending decision Tool committed before updatePart returns", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      const fiber = yield* reviewer
+        .review(reviewInput("review_pending_closure", undefined, SessionID.make("session_parent_closure")))
+        .pipe(Effect.forkChild)
+
+      // readiness 在 durable store 写入后、updatePart 返回前发布，精确覆盖 SQLite
+      // 已提交但 attempt registry 尚不可见的生产窗口；固定 sleep 无法证明这一边界。
+      yield* Effect.promise(() => pendingClosureFixture.committed.promise).pipe(Effect.timeout("2 seconds"))
+      yield* Fiber.interrupt(fiber)
+
+      // 断言读取独立持久化副本，而非被中断调用的返回值；只有 attempt cleanup
+      // 通过稳定 Part identity 重读并写终态，才能把这里的 pending 改成 error。
+      const decision = [...pendingClosureFixture.parts.values()].find(
+        (part): part is MessageV2.ToolPart => part.type === "tool",
+      )
+      expect(decision?.state.status).toBe("error")
+      if (decision?.state.status !== "error") return
+      expect(decision.state.error).toBe("Tool execution aborted")
+      expect(decision.state.metadata?.interrupted).toBe(true)
+    }),
+  )
+
+  completedClosure.live("preserves a completed decision Tool committed before updatePart returns", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      const fiber = yield* reviewer
+        .review(reviewInput("review_completed_winner", undefined, SessionID.make("session_parent_closure")))
+        .pipe(Effect.forkChild)
+
+      // 该 barrier 位于 completed durable write 与调用返回之间，正好与 pending 用例
+      // 形成竞态两侧；中断 cleanup 若信任旧 snapshot 就会错误覆盖已提交 winner。
+      yield* Effect.promise(() => completedClosureFixture.committed.promise).pipe(Effect.timeout("2 seconds"))
+      yield* Fiber.interrupt(fiber)
+
+      const decision = [...completedClosureFixture.parts.values()].find(
+        (part): part is MessageV2.ToolPart => part.type === "tool",
+      )
+      // completed 是协议决策的权威终态；cleanup 只能重读后跳过，不能为了统一
+      // abort 外观把已经成功持久化的 allow/deny 降级成 error。
+      expect(decision?.state.status).toBe("completed")
+      if (decision?.state.status !== "completed") return
+      expect(decision.state.metadata.reviewID).toBe("review_completed_winner")
+      expect(decision.state.output).toBe(JSON.stringify(REVIEWER_ASSESSMENT))
+    }),
+  )
+
+  drainedClosure.live("closes open decision Tools before an incomplete stream failure escapes", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      // 协议失败仍走既有 retry/fallback policy；这里忽略最终 Exit，只验证每个 attempt
+      // 在把失败交给外层前，已经关闭自己持久化的 Tool lifecycle。
+      yield* Effect.exit(
+        reviewer.review(reviewInput("review_drained_closure", undefined, SessionID.make("session_parent_closure"))),
+      )
+
+      const decisions = [...drainedClosureFixture.parts.values()].filter(
+        (part): part is MessageV2.ToolPart => part.type === "tool",
+      )
+      // 至少一个 Tool 证明测试确实越过 tool-input-start；开放集合为空才对应 TUI
+      // spinner 的生产输入，不能用 reviewer 最终失败本身替代 Part 终态断言。
+      expect(decisions.length).toBeGreaterThan(0)
+      expect(decisions.filter((part) => part.state.status === "pending" || part.state.status === "running")).toEqual([])
+      expect(decisions.every((part) => part.state.status === "error")).toBe(true)
+    }),
+  )
 })
+
+function reviewerClosureFixture(block: "pending" | "completed" | "drain") {
+  const parts = new Map<string, MessageV2.Part>()
+  const committed = Promise.withResolvers<void>()
+  const model = reviewerModel(OPENAI_PROVIDER_ID)
+  const fetch = Object.assign(
+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(block === "completed" ? openAIReviewDecisionStream() : openAIReviewPendingStream(), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    { preconnect: () => {} },
+  )
+  const provider = ProviderTest.fake({
+    model,
+    info: ProviderTest.info({ id: model.providerID, options: {} }, model),
+    getLanguage: Effect.fn("ReviewerClosureTest.getLanguage")(() =>
+      Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5")),
+    ),
+  })
+  const parentSession: Session.Info = {
+    id: SessionID.make("session_parent_closure"),
+    slug: "parent-closure",
+    projectID: ProjectID.make("project_reviewer_closure"),
+    directory: "/tmp",
+    title: "Parent closure",
+    model: { id: model.id, providerID: model.providerID },
+    version: "test",
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 1, updated: 1 },
+  }
+  const childSession: Session.Info = {
+    ...parentSession,
+    id: SessionID.make("session_reviewer_closure"),
+    parentID: parentSession.id,
+    agent: "permission-reviewer",
+    title: "Auto permission review",
+  }
+  const sessionLayer = Layer.mock(Session.Service)({
+    get: () => Effect.succeed(parentSession),
+    children: () => Effect.succeed([]),
+    create: (input) => Effect.succeed({ ...childSession, ...input }),
+    updateMessage: (message) => Effect.succeed(message),
+    getPart: (input) => Effect.succeed(parts.get(input.partID)),
+    updatePart: (part) =>
+      Effect.gen(function* () {
+        // structuredClone 模拟 projector 的持久化快照，防止生产代码随后修改同一引用
+        // 让测试误以为发生了第二次 durable write。
+        parts.set(part.id, structuredClone(part))
+        // pending barrier 验证 cleanup 能发现“已提交、未返回”的新 Part；completed barrier
+        // 验证同一窗口内的 terminal winner 不会被 registry 中的旧阶段覆盖。
+        if (
+          part.type === "tool" &&
+          ((block === "pending" && part.state.status === "pending") ||
+            (block === "completed" && part.state.status === "completed"))
+        ) {
+          committed.resolve()
+          // 事务已经提交；这里模拟 SyncEvent 后续可中断的 convert/publish/return 边界。
+          return yield* Effect.never
+        }
+        return part
+      }),
+  })
+  return {
+    parts,
+    committed,
+    layer: PermissionReviewer.layer.pipe(
+      Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
+      Layer.provide(provider.layer),
+      Layer.provide(authLayer({ type: "api", key: "test-key" })),
+      Layer.provide(pluginLayer()),
+      Layer.provide(sessionLayer),
+    ),
+  }
+}
 
 function reviewerFixture(
   authInfo: Auth.Info | undefined,
@@ -358,6 +508,22 @@ function reviewerFixture(
   }
 }
 
+function sessionPartStore(captured?: MessageV2.Part[]) {
+  const parts = new Map<string, MessageV2.Part>()
+  // getPart 与 updatePart 共享同一 store，保证旧测试也经过生产新增的权威读取边界；
+  // 若仍只回显 update 参数，completed 测试会绕过本次修复真正依赖的持久化语义。
+  const getPart: Session.Interface["getPart"] = (input) => Effect.succeed(parts.get(input.partID))
+  const updatePart: Session.Interface["updatePart"] = (part) =>
+    Effect.sync(() => {
+      // reviewer 的生产路径现在以 durable Part 为权威；通用 fixture 同时实现读写合同，
+      // 避免旧 mock 只回显参数而掩盖 pending -> completed 的真实持久化转换。
+      parts.set(part.id, structuredClone(part))
+      captured?.push(part)
+      return part
+    })
+  return { getPart, updatePart }
+}
+
 // [local-smark] parentSessionModelFixture 开始
 // 这个 fixture 模拟真实 bug 的触发条件：全局 defaultModel 返回一个未注册的
 // provider（zhipuai），而父会话实际使用的是 openai/gpt-5。当前实现会让
@@ -421,12 +587,13 @@ function parentSessionModelFixture() {
     agent: "permission-reviewer",
     title: "Auto permission review",
   }
+  const partStore = sessionPartStore()
   const sessionLayer = Layer.mock(Session.Service)({
     get: () => Effect.succeed(parentSession),
     children: () => Effect.succeed([]),
     create: (input) => Effect.succeed({ ...childSession, ...input }),
     updateMessage: (msg) => Effect.succeed(msg),
-    updatePart: (part) => Effect.succeed(part),
+    ...partStore,
   })
   return {
     bodies,
@@ -501,12 +668,13 @@ function explicitModelOverrideFixture() {
     agent: "permission-reviewer",
     title: "Auto permission review",
   }
+  const partStore = sessionPartStore()
   const sessionLayer = Layer.mock(Session.Service)({
     get: () => Effect.succeed(parentSession),
     children: () => Effect.succeed([]),
     create: (input) => Effect.succeed({ ...childSession, ...input }),
     updateMessage: (msg) => Effect.succeed(msg),
-    updatePart: (part) => Effect.succeed(part),
+    ...partStore,
   })
   return {
     bodies,
@@ -601,12 +769,13 @@ function staleParentModelFixture() {
     agent: "permission-reviewer",
     title: "Auto permission review",
   }
+  const partStore = sessionPartStore()
   const sessionLayer = Layer.mock(Session.Service)({
     get: () => Effect.succeed(parentSession),
     children: () => Effect.succeed([]),
     create: (input) => Effect.succeed({ ...childSession, ...input }),
     updateMessage: (msg) => Effect.succeed(msg),
-    updatePart: (part) => Effect.succeed(part),
+    ...partStore,
   })
   return {
     bodies,
@@ -679,16 +848,14 @@ function reviewerTokenCaptureFixture(authInfo: Auth.Info) {
     agent: "permission-reviewer",
     title: "Auto permission review",
   }
+  const partStore = sessionPartStore(parts)
   const sessionLayer = Layer.mock(Session.Service)({
     get: () => Effect.succeed(parentSession),
     children: () => Effect.succeed([]),
     create: (input) => Effect.succeed({ ...childSession, ...input }),
     updateMessage: (msg) => Effect.succeed(msg),
-    // 捕获所有 updatePart 调用，用于断言 step-finish part 的 tokens 和 inputBreakdown
-    updatePart: (part) => {
-      parts.push(part)
-      return Effect.succeed(part)
-    },
+    // capture 与 durable map 共用一次 update，token 断言和 reviewer 状态机看到同一事实。
+    ...partStore,
   })
   return {
     parts,
@@ -841,6 +1008,27 @@ function openAIReviewDecisionStream() {
         incomplete_details: null,
         usage: { input_tokens: 1, input_tokens_details: null, output_tokens: 1, output_tokens_details: null },
         service_tier: null,
+      },
+    },
+  ]
+    .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+    .join("")
+}
+
+function openAIReviewPendingStream() {
+  // output_item.added 足以让 AI SDK 发布 tool-input-start；刻意不发送 done/completed，
+  // 使 reviewer 停在已创建 pending Part、尚无合法 Assessment 的真实中断位置。
+  return [
+    { type: "response.created", response: { id: "resp_pending", created_at: 0, model: "gpt-5", service_tier: null } },
+    {
+      type: "response.output_item.added",
+      output_index: 0,
+      item: {
+        type: "function_call",
+        id: "fc_pending",
+        call_id: "call_pending",
+        name: "permission_review_decision",
+        arguments: "",
       },
     },
   ]

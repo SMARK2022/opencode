@@ -1,7 +1,7 @@
 import { afterEach, describe, expect } from "bun:test"
 import { mkdir } from "node:fs/promises"
 import path from "node:path"
-import { Effect, Layer } from "effect"
+import { Effect, Fiber, Layer } from "effect"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { registerAdapter } from "../../src/control-plane/adapters"
 import type { WorkspaceAdapter } from "../../src/control-plane/types"
@@ -22,12 +22,14 @@ import { SessionMessageTable, SessionTable } from "@/session/session.sql"
 import { SessionMessage } from "@opencode-ai/core/session-message"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import * as DateTime from "effect/DateTime"
 import * as Log from "@opencode-ai/core/util/log"
 import { eq } from "drizzle-orm"
 import { resetDatabase } from "../fixture/db"
-import { disposeAllInstances, TestInstance } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { disposeAllInstances, TestInstance, tmpdirScoped } from "../fixture/fixture"
+import { pollWithTimeout, testEffect } from "../lib/effect"
+import { TestLLMServer } from "../lib/llm-server"
 
 void Log.init({ print: false })
 
@@ -41,7 +43,16 @@ const instanceStoreLayer = InstanceStore.defaultLayer.pipe(
     Layer.succeed(InstanceBootstrapService.Service, InstanceBootstrapService.Service.of({ run: Effect.void })),
   ),
 )
-const it = testEffect(Layer.mergeAll(instanceStoreLayer, Project.defaultLayer, Session.defaultLayer, workspaceLayer))
+const it = testEffect(
+  Layer.mergeAll(
+    instanceStoreLayer,
+    Project.defaultLayer,
+    Session.defaultLayer,
+    workspaceLayer,
+    TestLLMServer.layer,
+    CrossSpawnSpawner.defaultLayer,
+  ),
+)
 
 function app() {
   return Server.Default().app
@@ -399,6 +410,147 @@ describe("session HttpApi", () => {
         ).toBe(true)
       }),
     { git: true, config: { formatter: false, lsp: false, share: "disabled" } },
+  )
+
+  it.instance(
+    "keeps foreground Task execution and abort on the persisted Session owner",
+    () =>
+      Effect.gen(function* () {
+        const owner = (yield* TestInstance).directory
+        const callerA = yield* tmpdirScoped()
+        const callerB = yield* tmpdirScoped()
+        const llm = yield* TestLLMServer
+        const providerConfig = {
+          $schema: "https://opencode.ai/config.json",
+          provider: {
+            test: {
+              name: "Test",
+              id: "test",
+              env: [],
+              npm: "@ai-sdk/openai-compatible",
+              models: {
+                "test-model": {
+                  id: "test-model",
+                  name: "Test Model",
+                  attachment: false,
+                  reasoning: false,
+                  temperature: false,
+                  tool_call: true,
+                  release_date: "2025-01-01",
+                  limit: { context: 100_000, output: 10_000 },
+                  cost: { input: 0, output: 0 },
+                  options: {},
+                },
+              },
+              options: { apiKey: "test-key", baseURL: llm.url },
+            },
+          },
+        }
+        // 三个目录共用同一 Provider 配置，只让 directory ownership 成为变量；
+        // 否则错误 owner 可能先因缺少模型失败，测试就无法到达真实 Runner 分叉。
+        yield* Effect.promise(() =>
+          Promise.all(
+            [owner, callerA, callerB].map((directory) =>
+              Bun.write(path.join(directory, "opencode.json"), JSON.stringify(providerConfig)),
+            ),
+          ),
+        )
+        const chat = yield* createSession({
+          title: "Pinned foreground Task",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        const promptPath = pathFor(SessionPaths.prompt, { sessionID: chat.id })
+        const sendPrompt = (directory: string, text: string) =>
+          request(promptPath, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-opencode-directory": directory },
+            body: JSON.stringify({
+              agent: "build",
+              model: { providerID: "test", modelID: "test-model" },
+              parts: [{ type: "text", text }],
+            }),
+          })
+
+        // 第一轮由主 Agent 产生真实 foreground task，child 的 Provider 流保持挂起；
+        // 父 Tool 因而稳定停在 running，形成与生产事故相同的阻塞边界。
+        yield* llm.tool("task", {
+          description: "hold child",
+          prompt: "wait until cancelled",
+          subagent_type: "general",
+        })
+        yield* llm.hang
+        // 该第三个响应只会被错误目录创建的第二个 Runner 消费；正确 join 不会触碰它。
+        yield* llm.hang
+
+        const first = yield* sendPrompt(callerA, "start foreground task").pipe(Effect.forkChild)
+        const runningTask = yield* pollWithTimeout(
+          Effect.gen(function* () {
+            const messages = yield* MessageV2.filterCompactedEffect(chat.id)
+            return messages
+              .flatMap((message) => message.parts)
+              .find(
+                (part): part is MessageV2.ToolPart =>
+                  part.type === "tool" &&
+                  part.tool === "task" &&
+                  part.state.status === "running" &&
+                  typeof part.state.metadata?.sessionId === "string",
+              )
+          }),
+          "foreground task never became running",
+          "10 seconds",
+        )
+        if (runningTask.state.status !== "running") throw new Error("foreground task did not remain running")
+        const childID = SessionID.make(String(runningTask.state.metadata?.sessionId))
+        // Task metadata 会早于 child Provider 请求落库；等待第二个 HTTP hit 才能证明
+        // child fiber 已真正越过 prompt 边界，后续 abort 终态断言因而不会误测启动前取消。
+        yield* llm.wait(2)
+
+        const second = yield* sendPrompt(callerB, "join the same foreground task").pipe(Effect.forkChild)
+        // 第二条 user Message 是公共持久化 readiness signal：它证明第二个请求已经
+        // 穿过 HttpApi 并到达 prompt，而无需用固定 sleep 猜测 join/start 时机。
+        yield* pollWithTimeout(
+          Effect.gen(function* () {
+            const messages = yield* MessageV2.filterCompactedEffect(chat.id)
+            return messages.filter((message) => message.info.role === "user").length === 2 ? true : undefined
+          }),
+          "second prompt never reached the Session",
+          "10 seconds",
+        )
+
+        // abort 故意来自持久化 owner，而非任一 caller hint；只有 Session.directory
+        // 在 middleware 成为权威后，它才能命中两个调用共同等待的真实 Runner。
+        expect(
+          yield* requestJson<boolean>(pathFor(SessionPaths.abort, { sessionID: chat.id }), {
+            method: "POST",
+            headers: { "x-opencode-directory": owner },
+          }),
+        ).toBe(true)
+
+        const [firstResponse, secondResponse] = yield* Effect.all([Fiber.join(first), Fiber.join(second)], {
+          concurrency: "unbounded",
+        }).pipe(Effect.timeout("10 seconds"))
+        const firstResult = yield* json<MessageV2.WithParts>(firstResponse)
+        const secondResult = yield* json<MessageV2.WithParts>(secondResponse)
+        // 相同 assistant ID 是 Runner join 的外部结果；两次 Provider 请求分别属于
+        // parent 和 child，若第二个 parent work 真执行则计数会增加到三次。
+        expect(firstResult.info.id).toBe(secondResult.info.id)
+        expect(yield* llm.calls).toBe(2)
+
+        const parentTask = (yield* MessageV2.filterCompactedEffect(chat.id))
+          .flatMap((message) => message.parts)
+          .find((part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "task")
+        // 父 Tool 的 error 终态直接驱动 TUI 停止 spinner；child assistant 终态则证明
+        // abort 到达真实子 fiber，而非只在另一个 InstanceState 中修补 SQLite 外观。
+        expect(parentTask?.state.status).toBe("error")
+        const childAssistants = (yield* MessageV2.filterCompactedEffect(childID)).filter(
+          (message): message is MessageV2.WithParts & { info: MessageV2.Assistant } =>
+            message.info.role === "assistant",
+        )
+        expect(childAssistants.length).toBeGreaterThan(0)
+        expect(childAssistants.every((message) => message.info.time.completed !== undefined)).toBe(true)
+      }),
+    { git: true, config: { formatter: false, lsp: false, share: "disabled" } },
+    30_000,
   )
 
   it.instance(
