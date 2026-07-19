@@ -1,36 +1,16 @@
-From 1e324d225d2aa0195dec66bcdfa17973f05e7d7d Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Sun, 26 Apr 2026 17:54:19 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E5=B7=AE=E5=BC=82?=
- =?UTF-8?q?=E8=A7=86=E5=9B=BE=EF=BC=8C=E6=B7=BB=E5=8A=A0=E8=A1=8C=E7=BB=9F?=
- =?UTF-8?q?=E8=AE=A1=E4=BF=A1=E6=81=AF=EF=BC=8C=E4=BC=98=E5=8C=96=E6=98=BE?=
- =?UTF-8?q?=E7=A4=BA=E9=80=BB=E8=BE=91?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 74f59ae2bdeb16d6dd739591c084e017bb467e83..8aeaf53eab9ca1d836ae208e4342b2f723b6079f 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -2102,33 +2102,36 @@ function Edit(props: ToolProps<typeof EditTool>) {
-   const view = createMemo(() => {
-     const diffStyle = ctx.tui.diff_style
-     if (diffStyle === "stacked") return "unified"
--    // Default to "auto" behavior
-     return ctx.width > 120 ? "split" : "unified"
-   })
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -2467,24 +2467,31 @@
+   const ft = createMemo(() => filetype(stringValue(props.input.filePath)))
  
-   const ft = createMemo(() => filetype(props.input.filePath))
--
-   const diffContent = createMemo(() => props.metadata.diff || "")
-   
--  const lines = createMemo(() => diffContent().split("\n"))
--  const overflow = createMemo(() => lines().length > 20)
+   const diffContent = createMemo(() => stringValue(props.metadata.diff) ?? "")
+-  const diffLines = createMemo(() => diffContent().split("\n"))
+-  const diffOverflow = createMemo(() => diffLines().length > 20)
 -  const limitedDiff = createMemo(() => {
--    if (expanded() || !overflow()) return diffContent()
--    return [...lines().slice(0, 10), "…"].join("\n")
+-    if (expanded() || !diffOverflow()) return diffContent()
+-    return [...diffLines().slice(0, 10), "…"].join("\n")
++  // diff 行统计 memo：计算新增/删除/总计行数，用于标题和展开判断
 +  const stats = createMemo(() => {
 +    const lines = diffContent().split("\n")
 +    let added = 0, removed = 0
@@ -40,28 +20,38 @@ index 74f59ae2bdeb16d6dd739591c084e017bb467e83..8aeaf53eab9ca1d836ae208e4342b2f7
 +    }
 +    return { added, removed, total: lines.length }
    })
- 
++  // 超过 20 行时启用展开/收缩，避免长 diff 占用过多屏幕
 +  const overflow = createMemo(() => stats().total > 20)
-+
+ 
    return (
      <Switch>
-       <Match when={props.metadata.diff !== undefined}>
-         <BlockTool 
--          title={"← Edit " + normalizePath(props.input.filePath!)} 
-+          title={"← Edit " + normalizePath(props.input.filePath!) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
+       <Match when={stringValue(props.metadata.diff) !== undefined}>
+         <BlockTool
+-          title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath))}
++          title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath)) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
            part={props.part}
-           onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
+-          onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}  // 点击展开/收缩 diff
++          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}  // 点击展开/收缩 diff
          >
-           <box gap={1} flexDirection="column">
--            <box paddingLeft={1}>
-+            <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
-               <diff
--                diff={limitedDiff()}
-+                diff={diffContent()}
-                 view={view()}
-                 filetype={ft()}
-                 syntaxStyle={syntax()}
-@@ -2175,37 +2178,25 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
+-          <box paddingLeft={1}>
++          {/* 使用 maxHeight 限制初始显示高度，展开时移除限制 */}
++          <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
+             <diff
+-              diff={limitedDiff()}
++              diff={diffContent()}
+               view={view()}
+               filetype={ft()}
+               syntaxStyle={syntax()}
+@@ -2503,7 +2510,7 @@
+               removedLineNumberBg={theme.diffRemovedLineNumberBg}
+             />
+           </box>
+-          <Show when={diffOverflow()}>
++          <Show when={overflow()}>
+             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+           </Show>
+           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
+@@ -2531,37 +2538,28 @@
      return ctx.width > 120 ? "split" : "unified"
    })
  
@@ -90,56 +80,61 @@ index 74f59ae2bdeb16d6dd739591c084e017bb467e83..8aeaf53eab9ca1d836ae208e4342b2f7
 -      </box>
 -    )
 -  }
++  // diff 文件标题：包含文件类型图标和行统计信息
 +  function title(file: { type: string; relativePath: string; filePath: string; deletions: number; patch?: string }) {
 +    const baseTitle = (() => {
 +      if (file.type === "delete") return "# Deleted " + file.relativePath
 +      if (file.type === "add") return "# Created " + file.relativePath
-+      if (file.type === "move") return "# Moved " + normalizePath(file.filePath) + " → " + file.relativePath
++      if (file.type === "move") return "# Moved " + pathFormatter.format(file.filePath) + " → " + file.relativePath
 +      return "← Patched " + file.relativePath
 +    })()
-+
+ 
+-  function title(file: { type: string; relativePath: string; filePath: string; deletions: number }) {
+-    if (file.type === "delete") return "# Deleted " + file.relativePath
+-    if (file.type === "add") return "# Created " + file.relativePath
+-    if (file.type === "move") return "# Moved " + pathFormatter.format(file.filePath) + " → " + file.relativePath
+-    return "← Patched " + file.relativePath
 +    if (file.type === "delete" || !file.patch) return baseTitle
 +
++    // 统计 patch 行数：+ 开头为新增，- 开头为删除
 +    const lines = file.patch.split("\n")
 +    let added = 0, removed = 0
 +    for (const line of lines) {
 +      if (line.startsWith("+") && !line.startsWith("+++")) added++
 +      if (line.startsWith("-") && !line.startsWith("---")) removed++
 +    }
- 
--  function title(file: { type: string; relativePath: string; filePath: string; deletions: number }) {
--    if (file.type === "delete") return "# Deleted " + file.relativePath
--    if (file.type === "add") return "# Created " + file.relativePath
--    if (file.type === "move") return "# Moved " + normalizePath(file.filePath) + " → " + file.relativePath
--    return "← Patched " + file.relativePath
++
++    // 无变更行时不显示统计，有变更时附加 +added -removed 后缀
 +    if (added === 0 && removed === 0) return baseTitle
 +    return `${baseTitle} +${added} -${removed}`
    }
  
    return (
-@@ -2217,10 +2208,6 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
- 
+@@ -2573,11 +2571,6 @@
+             const [patchExpanded, setPatchExpanded] = createSignal(false)
              const patchLines = createMemo(() => (file.patch || "").split("\n"))
-             const overflow = createMemo(() => patchLines().length > 20)
+             const patchOverflow = createMemo(() => patchLines().length > 20)
 -            const limitedPatch = createMemo(() => {
--              if (expanded() || !overflow()) return file.patch
+-              if (patchExpanded() || !patchOverflow()) return file.patch
 -              return [...patchLines().slice(0, 10), "…"].join("\n")
 -            })
- 
+-
              return (
-               <BlockTool 
-@@ -2232,12 +2219,32 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
-                   <Show
-                     when={file.type !== "delete"}
-                     fallback={
--                      <text fg={theme.diffRemoved}>
-+                      <text fg={theme.diffRemoved} paddingLeft={1}>
-                         -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
-                       </text>
-                     }
-                   >
--                    <Diff diff={limitedPatch()} filePath={file.filePath} />
-+                    <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
+             <BlockTool
+               title={title(file)}
+@@ -2587,12 +2580,33 @@
+               <Show
+                 when={file.type !== "delete"}
+                 fallback={
+-                  <text fg={theme.diffRemoved}>
++                  <text fg={theme.diffRemoved} paddingLeft={1}>
+                     -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
+                   </text>
+                 }
+               >
+-                <Diff diff={limitedPatch()} filePath={file.filePath} />
++                {/* 内联 diff 组件：移除独立 Diff 函数，直接使用 maxHeight 控制折叠 */}
++                    <box paddingLeft={1} maxHeight={patchExpanded() ? undefined : 15}>
 +                      <diff
 +                        diff={file.patch || ""}
 +                        view={view()}
@@ -160,6 +155,7 @@ index 74f59ae2bdeb16d6dd739591c084e017bb467e83..8aeaf53eab9ca1d836ae208e4342b2f7
 +                        removedLineNumberBg={theme.diffRemovedLineNumberBg}
 +                      />
 +                    </box>
-                   </Show>
-                   <Show when={overflow() && file.type !== "delete"}>
-                     <text fg={theme.textMuted} paddingLeft={1}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+                 <Show when={patchOverflow()}>
+                   <text fg={theme.textMuted}>{patchExpanded() ? "Click to collapse" : "Click to expand"}</text>
+                 </Show>
+

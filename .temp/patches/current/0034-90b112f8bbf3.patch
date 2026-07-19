@@ -1,29 +1,19 @@
-From 90b112f8bbf3df2adac64cd488d4b8065ce02f65 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Sun, 26 Apr 2026 17:27:08 +0800
-Subject: [PATCH] =?UTF-8?q?fix:=20=E4=BF=AE=E5=A4=8D=E8=AE=A1=E7=AE=97?=
- =?UTF-8?q?=E6=9C=80=E7=BB=88=E4=BB=A4=E7=89=8C=E6=97=B6=E7=9A=84=E8=BE=93?=
- =?UTF-8?q?=E5=85=A5=E5=92=8C=E6=80=BB=E8=BE=93=E5=85=A5=E9=80=BB=E8=BE=91?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts b/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts
-index 98f45d2858c19d44bb6f195c300397c98135a8da..fe63c35146eabf4f10072cee531e2b8147e8ff3c 100644
---- a/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts
-@@ -153,10 +153,15 @@ export function computeFinalTokens(
+diff --git a/packages/tui/src/util/token-estimate.ts b/packages/tui/src/util/token-estimate.ts
+--- a/packages/tui/src/util/token-estimate.ts
++++ b/packages/tui/src/util/token-estimate.ts
+@@ -183,13 +183,14 @@
      !hasInFlightTail && lastStepFinish
        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
        : 0
+-  // requestConfirmed.input 为 0 时（首轮请求），用引导 token 补充 totalInput
 -  const promptInputEstimate = requestConfirmed.input === 0 ? bootstrapInputTokens : 0
-+  
+-  // currentInput 取 currentStepInputConfirmed 和 bootstrapInputTokens 的较大值，
+-  // 确保显示不低于引导估算，避免首轮显示 0 后跳变的用户体验问题
 +  // 修复：currentInput 应该反映当前步骤的真实输入（包括 bootstrap 或确认值）
    const currentInput = Math.max(currentStepInputConfirmed, bootstrapInputTokens) + pendingInputTokens
    const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
 -  const totalInput = requestConfirmed.input + pendingInputTokens + promptInputEstimate
-+  
++
 +  // 修复：totalInput 应该始终包含当前步骤的完整上下文
 +  // 如果当前步骤已确认（有 step-finish），使用确认值；否则使用 bootstrap 估算
 +  const currentStepTotalInput = currentStepInputConfirmed > 0 ? currentStepInputConfirmed : bootstrapInputTokens
@@ -31,3 +21,4 @@ index 98f45d2858c19d44bb6f195c300397c98135a8da..fe63c35146eabf4f10072cee531e2b81
    const totalOutput = requestConfirmed.output + pendingOutputTokens
  
    return {
+

@@ -1,363 +1,285 @@
-From 0a3cda97c01a91b6da6ed3bca4b64cb4059de9ee Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Sun, 26 Apr 2026 17:50:15 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E6=9B=B4=E6=96=B0=E6=BB=9A=E5=8A=A8?=
- =?UTF-8?q?=E8=A7=86=E5=9B=BE=E7=BB=84=E4=BB=B6=EF=BC=8C=E5=A2=9E=E5=BC=BA?=
- =?UTF-8?q?=E5=8F=AF=E8=A7=86=E5=8C=96=E5=92=8C=E4=BA=A4=E4=BA=92=E6=80=A7?=
- =?UTF-8?q?=EF=BC=8C=E6=94=AF=E6=8C=81=E5=8A=A8=E6=80=81=E5=B1=95=E5=BC=80?=
- =?UTF-8?q?=E5=92=8C=E6=94=B6=E7=BC=A9?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 3a0848e668828a400c7d530a0266ed94bf217f48..74f59ae2bdeb16d6dd739591c084e017bb467e83 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -169,7 +169,7 @@ export function Session() {
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -263,7 +263,9 @@
    const [timestamps, setTimestamps] = kv.signal<"hide" | "show">("timestamps", "hide")
    const [showDetails, setShowDetails] = kv.signal("tool_details_visibility", true)
    const [showAssistantMetadata, _setShowAssistantMetadata] = kv.signal("assistant_metadata_visibility", true)
 -  const [showScrollbar, setShowScrollbar] = kv.signal("scrollbar_visible", false)
-+  const [showScrollbar, setShowScrollbar] = kv.signal("scrollbar_enabled", true)
++  const [showScrollbar, setShowScrollbar] = // 滚动条默认启用：改善长输出的可读性
++        // 滚动条默认启用：改善长输出的可读性
++        kv.signal("scrollbar_enabled", true)
    const [diffWrapMode] = kv.signal<"word" | "none">("diff_wrap_mode", "word")
    const [_animationsEnabled, _setAnimationsEnabled] = kv.signal("animations_enabled", true)
    const [showGenericToolOutput, setShowGenericToolOutput] = kv.signal("generic_tool_output_visibility", false)
-@@ -1061,7 +1061,7 @@ export function Session() {
-       }}
-     >
-       <box flexDirection="row">
--        <box flexGrow={1} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={1}>
-+        <box flexGrow={1} paddingBottom={1} paddingLeft={2} paddingRight={1} gap={1}>
-           <Show when={session()}>
-             <scrollbox
-               ref={(r) => (scroll = r)}
-@@ -1069,11 +1069,11 @@ export function Session() {
-                 paddingRight: showScrollbar() ? 1 : 0,
-               }}
-               verticalScrollbarOptions={{
--                paddingLeft: 1,
-+                paddingLeft: 0,
-                 visible: showScrollbar(),
-                 trackOptions: {
-                   backgroundColor: theme.backgroundElement,
--                  foregroundColor: theme.border,
-+                  foregroundColor: theme.textMuted,
-                 },
-               }}
-               stickyScroll={true}
-@@ -1895,25 +1895,42 @@ function Bash(props: ToolProps<typeof BashTool>) {
- 
- function Write(props: ToolProps<typeof WriteTool>) {
+@@ -1171,7 +1173,7 @@
+         }}
+       >
+         <box flexDirection="row" flexGrow={1} minHeight={0}>
+-          <box flexGrow={1} minHeight={0} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={1}>
++          <box flexGrow={1} minHeight={0} paddingBottom={1} paddingLeft={2} paddingRight={1} gap={1}>
+             <Show when={session()}>
+               <scrollbox
+                 ref={(r) => (scroll = r)}
+@@ -1179,11 +1181,11 @@ export function Session() {
+                   paddingRight: showScrollbar() ? 1 : 0,
+                 }}
+                 verticalScrollbarOptions={{
+-                  paddingLeft: 1,
++                  paddingLeft: 0, // 滚动条紧贴右侧，消除左侧留白
+                   visible: showScrollbar(),
+                   trackOptions: {
+                     backgroundColor: theme.backgroundElement,
+-                    foregroundColor: theme.border,
++                    foregroundColor: theme.textMuted, // 使用柔和文字色，降低滚动条视觉强度
+                   },
+                 }}
+                 stickyScroll={true}
+@@ -2144,23 +2146,40 @@
+ function Write(props: ToolProps) {
    const { theme, syntax } = useTheme()
+   const pathFormatter = usePathFormatter()
++  const ctx = use()
++  // 文件内容展开/收缩：超过 10 行时默认收缩，点击展开
 +  const [expanded, setExpanded] = createSignal(false)
    const code = createMemo(() => {
-     if (!props.input.content) return ""
-     return props.input.content
+     return stringValue(props.input.content) ?? ""
    })
- 
-+  const lines = createMemo(() => code().split("\n"))
-+  const overflow = createMemo(() => lines().length > 20)
-+  const limitedCode = createMemo(() => {
-+    if (expanded() || !overflow()) return code()
-+    return [...lines().slice(0, 10), "…"].join("\n")
++  const maxLines = 20
++  const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
++  const collapsed = createMemo(() => collapseToolOutput(code(), maxLines, maxChars()))
++  const limited = createMemo(() => {
++    if (expanded() || !collapsed().overflow) return code()
++    return collapsed().output
 +  })
-+
+ 
    return (
      <Switch>
        <Match when={props.metadata.diagnostics !== undefined}>
--        <BlockTool title={"# Wrote " + normalizePath(props.input.filePath!)} part={props.part}>
--          <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
--            <code
--              conceal={false}
--              fg={theme.text}
--              filetype={filetype(props.input.filePath!)}
--              syntaxStyle={syntax()}
--              content={code()}
--            />
--          </line_number>
--          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
-+        <BlockTool 
-+          title={"# Wrote " + normalizePath(props.input.filePath!)} 
+-        <BlockTool title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))} part={props.part}>
++        <BlockTool
++          title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))}
 +          part={props.part}
-+          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
++          onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
 +        >
-+          <box gap={1} flexDirection="column">
-+            <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
-+              <code
-+                conceal={false}
-+                fg={theme.text}
-+                filetype={filetype(props.input.filePath!)}
-+                syntaxStyle={syntax()}
-+                content={limitedCode()}
-+              />
-+            </line_number>
-+            <Show when={overflow()}>
-+              <text fg={theme.textMuted} paddingLeft={1}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-+            </Show>
-+            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
-+          </box>
+           <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
+             <code
+               conceal={false}
+               fg={theme.text}
+               filetype={filetype(stringValue(props.input.filePath))}
+               syntaxStyle={syntax()}
+-              content={code()}
++              content={limited()}
+             />
+           </line_number>
++          <Show when={collapsed().overflow}>
++            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
++          </Show>
+           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
          </BlockTool>
        </Match>
-       <Match when={true}>
-@@ -2080,6 +2097,7 @@ function Task(props: ToolProps<typeof TaskTool>) {
- function Edit(props: ToolProps<typeof EditTool>) {
+@@ -2435,6 +2454,8 @@
    const ctx = use()
    const { theme, syntax } = useTheme()
+   const pathFormatter = usePathFormatter()
++  // diff 内容展开/收缩：超过 20 行时默认收缩，避免长 diff 占满终端
 +  const [expanded, setExpanded] = createSignal(false)
  
    const view = createMemo(() => {
      const diffStyle = ctx.tui.diff_style
-@@ -2090,34 +2108,50 @@ function Edit(props: ToolProps<typeof EditTool>) {
+@@ -2446,14 +2467,24 @@
+   const ft = createMemo(() => filetype(stringValue(props.input.filePath)))
  
-   const ft = createMemo(() => filetype(props.input.filePath))
- 
--  const diffContent = createMemo(() => props.metadata.diff)
-+  const diffContent = createMemo(() => props.metadata.diff || "")
-+  
-+  const lines = createMemo(() => diffContent().split("\n"))
-+  const overflow = createMemo(() => lines().length > 20)
+   const diffContent = createMemo(() => stringValue(props.metadata.diff) ?? "")
++  const diffLines = createMemo(() => diffContent().split("\n"))
++  const diffOverflow = createMemo(() => diffLines().length > 20)
 +  const limitedDiff = createMemo(() => {
-+    if (expanded() || !overflow()) return diffContent()
-+    return [...lines().slice(0, 10), "…"].join("\n")
++    if (expanded() || !diffOverflow()) return diffContent()
++    return [...diffLines().slice(0, 10), "…"].join("\n")
 +  })
  
    return (
      <Switch>
-       <Match when={props.metadata.diff !== undefined}>
--        <BlockTool title={"← Edit " + normalizePath(props.input.filePath!)} part={props.part}>
--          <box paddingLeft={1}>
--            <diff
--              diff={diffContent()}
--              view={view()}
--              filetype={ft()}
--              syntaxStyle={syntax()}
--              showLineNumbers={true}
--              width="100%"
--              wrapMode={ctx.diffWrapMode()}
--              fg={theme.text}
--              addedBg={theme.diffAddedBg}
--              removedBg={theme.diffRemovedBg}
--              contextBg={theme.diffContextBg}
--              addedSignColor={theme.diffHighlightAdded}
--              removedSignColor={theme.diffHighlightRemoved}
--              lineNumberFg={theme.diffLineNumber}
--              lineNumberBg={theme.diffContextBg}
--              addedLineNumberBg={theme.diffAddedLineNumberBg}
--              removedLineNumberBg={theme.diffRemovedLineNumberBg}
--            />
-+        <BlockTool 
-+          title={"← Edit " + normalizePath(props.input.filePath!)} 
+       <Match when={stringValue(props.metadata.diff) !== undefined}>
+-        <BlockTool title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath))} part={props.part}>
++        <BlockTool
++          title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath))}
 +          part={props.part}
-+          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
++          onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}  // 点击展开/收缩 diff
 +        >
-+          <box gap={1} flexDirection="column">
-+            <box paddingLeft={1}>
-+              <diff
-+                diff={limitedDiff()}
-+                view={view()}
-+                filetype={ft()}
-+                syntaxStyle={syntax()}
-+                showLineNumbers={true}
-+                width="100%"
-+                wrapMode={ctx.diffWrapMode()}
-+                fg={theme.text}
-+                addedBg={theme.diffAddedBg}
-+                removedBg={theme.diffRemovedBg}
-+                contextBg={theme.diffContextBg}
-+                addedSignColor={theme.diffHighlightAdded}
-+                removedSignColor={theme.diffHighlightRemoved}
-+                lineNumberFg={theme.diffLineNumber}
-+                lineNumberBg={theme.diffContextBg}
-+                addedLineNumberBg={theme.diffAddedLineNumberBg}
-+                removedLineNumberBg={theme.diffRemovedLineNumberBg}
-+              />
-+            </box>
-+            <Show when={overflow()}>
-+              <text fg={theme.textMuted} paddingLeft={1}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-+            </Show>
-+            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
+           <box paddingLeft={1}>
+             <diff
+-              diff={diffContent()}
++              diff={limitedDiff()}
+               view={view()}
+               filetype={ft()}
+               syntaxStyle={syntax()}
+@@ -2472,6 +2503,9 @@
+               removedLineNumberBg={theme.diffRemovedLineNumberBg}
+             />
            </box>
--          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
++          <Show when={diffOverflow()}>
++            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
++          </Show>
+           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
          </BlockTool>
        </Match>
-       <Match when={true}>
-@@ -2178,21 +2212,41 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
+@@ -2534,8 +2568,22 @@
      <Switch>
        <Match when={files().length > 0}>
          <For each={files()}>
 -          {(file) => (
 -            <BlockTool title={title(file)} part={props.part}>
--              <Show
--                when={file.type !== "delete"}
--                fallback={
--                  <text fg={theme.diffRemoved}>
--                    -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
--                  </text>
--                }
 +          {(file) => {
-+            const [expanded, setExpanded] = createSignal(false)
-+
++            // patch 内容展开/收缩：多文件 patch 超过 20 行时收缩，避免长 patch 占满终端
++            const [patchExpanded, setPatchExpanded] = createSignal(false)
 +            const patchLines = createMemo(() => (file.patch || "").split("\n"))
-+            const overflow = createMemo(() => patchLines().length > 20)
++            const patchOverflow = createMemo(() => patchLines().length > 20)
 +            const limitedPatch = createMemo(() => {
-+              if (expanded() || !overflow()) return file.patch
++              if (patchExpanded() || !patchOverflow()) return file.patch
 +              return [...patchLines().slice(0, 10), "…"].join("\n")
 +            })
 +
 +            return (
-+              <BlockTool 
-+                title={title(file)} 
-+                part={props.part}
-+                onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
++            <BlockTool
++              title={title(file)}
++              part={props.part}
++              onClick={patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}  // 点击展开/收缩 patch
++            >
+               <Show
+                 when={file.type !== "delete"}
+                 fallback={
+@@ -2544,11 +2592,15 @@
+                   </text>
+                 }
                >
 -                <Diff diff={file.patch} filePath={file.filePath} />
--                <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
--              </Show>
--            </BlockTool>
++                <Diff diff={limitedPatch()} filePath={file.filePath} />
++                <Show when={patchOverflow()}>
++                  <text fg={theme.textMuted}>{patchExpanded() ? "Click to collapse" : "Click to expand"}</text>
++                </Show>
+                 <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
+               </Show>
+             </BlockTool>
 -          )}
-+                <box gap={1} flexDirection="column">
-+                  <Show
-+                    when={file.type !== "delete"}
-+                    fallback={
-+                      <text fg={theme.diffRemoved}>
-+                        -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
-+                      </text>
-+                    }
-+                  >
-+                    <Diff diff={limitedPatch()} filePath={file.filePath} />
-+                  </Show>
-+                  <Show when={overflow() && file.type !== "delete"}>
-+                    <text fg={theme.textMuted} paddingLeft={1}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-+                  </Show>
-+                  <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
-+                </box>
-+              </BlockTool>
 +            )
 +          }}
          </For>
        </Match>
        <Match when={true}>
-diff --git a/packages/ui/src/components/message-part.tsx b/packages/ui/src/components/message-part.tsx
-index 01327220508549c175f4695e0d3eb4ab5e1826fc..f6924dfd80a1ac8fa0dd21290be47403fb0197d2 100644
---- a/packages/ui/src/components/message-part.tsx
-+++ b/packages/ui/src/components/message-part.tsx
-@@ -583,11 +583,13 @@ function renderable(part: PartType, showReasoningSummaries = true) {
- 
+
+
+diff --git a/packages/session-ui/src/components/message-part.tsx b/packages/session-ui/src/components/message-part.tsx
+--- a/packages/session-ui/src/components/message-part.tsx
++++ b/packages/session-ui/src/components/message-part.tsx
+@@ -730,6 +730,8 @@
  function toolDefaultOpen(tool: string, shell = false, edit = false) {
    if (tool === "bash") return shell
-+  // edit/write/apply_patch 默认收缩（类似 bash 工具）
    if (tool === "edit" || tool === "write" || tool === "apply_patch") return edit
++  // 非工具消息不默认展开
 +  return undefined
  }
  
- function partDefaultOpen(part: PartType, shell = false, edit = false) {
--  if (part.type !== "tool") return
-+  if (part.type !== "tool") return undefined
-   return toolDefaultOpen(part.tool, shell, edit)
- }
- 
-@@ -1895,9 +1897,11 @@ ToolRegistry.register({
+ export function partDefaultOpen(part: PartType, shell = false, edit = false) {
+@@ -2184,9 +2186,11 @@ ToolRegistry.register({
      return (
        <div data-component="edit-tool">
          <BasicTool
 -          {...props}
            icon="code-lines"
-           defer
+           defer={props.deferContent !== false}
 +          status={props.status}
 +          hideDetails={props.hideDetails}
 +          defaultOpen={props.defaultOpen}
            trigger={
              <div data-component="edit-trigger">
                <div data-slot="message-part-title-area">
-@@ -1967,9 +1971,11 @@ ToolRegistry.register({
+@@ -2251,9 +2255,11 @@ ToolRegistry.register({
      return (
        <div data-component="write-tool">
          <BasicTool
 -          {...props}
            icon="code-lines"
-           defer
+           defer={props.deferContent !== false}
 +          status={props.status}
 +          hideDetails={props.hideDetails}
 +          defaultOpen={props.defaultOpen}
            trigger={
              <div data-component="write-trigger">
                <div data-slot="message-part-title-area">
-@@ -2049,9 +2055,11 @@ ToolRegistry.register({
+@@ -2334,9 +2340,11 @@ ToolRegistry.register({
          fallback={
            <div data-component="apply-patch-tool">
              <BasicTool
 -              {...props}
                icon="code-lines"
-               defer
+               defer={props.deferContent !== false}
 +              status={props.status}
 +              hideDetails={props.hideDetails}
 +              defaultOpen={props.defaultOpen}
                trigger={{
                  title: i18n.t("ui.tool.patch"),
                  subtitle: subtitle(),
+
+
 diff --git a/packages/ui/src/components/scroll-view.css b/packages/ui/src/components/scroll-view.css
-index f6a49e241c6ed2ee00a821061bc1f02f816315c3..be6a26d52b6557022c88510852e376e59c0220c4 100644
 --- a/packages/ui/src/components/scroll-view.css
 +++ b/packages/ui/src/components/scroll-view.css
-@@ -1,6 +1,8 @@
- .scroll-view {
-   position: relative;
+@@ -4,6 +4,8 @@
+   flex-direction: column;
+   min-height: 0;
    overflow: hidden;
-+  height: 100%;
-+  width: 100%;
++  height: 100%; /* 滚动视图填满父容器高度 */
++  width: 100%; /* 滚动视图填满父容器宽度 */
  }
  
  .scroll-view__viewport {
-@@ -17,13 +19,20 @@
+@@ -21,13 +23,18 @@
  
  .scroll-view__thumb {
    position: absolute;
 -  right: 0;
++  /* 滚动条右移 4px，避免遮挡内容 */
 +  right: 4px;
    top: 0;
    width: 12px;
    transition: opacity 200ms ease;
 -  cursor: default;
++  /* 指针变为手型，提示可拖拽 */
 +  cursor: pointer;
    user-select: none;
-   opacity: 0;
-+  pointer-events: none;
++  /* 确保滚动条显示在内容之上，包括 sticky header */
 +  z-index: 100;
-+}
-+
-+.scroll-view__thumb[data-visible="true"] {
-+  opacity: 1;
-+  pointer-events: auto;
+   opacity: 0;
++  pointer-events: none; /* 默认不拦截指针事件，仅在可见时启用拖拽 */
  }
  
  .scroll-view__thumb::after {
-@@ -33,30 +42,28 @@
+@@ -37,30 +44,33 @@
    transform: translateX(-50%);
    top: 0;
    bottom: 0;
 -  width: 4px;
-+  width: 6px;
++  width: 6px;  /* 加宽滚动条，改善可点击区域 */
    border-radius: 9999px;
 -  background-color: var(--border-weak-base);
-+  background-color: rgba(0, 0, 0, 0.3);
++  background-color: rgba(0, 0, 0, 0.3); /* 浅色模式下半透明黑色滚动条 */
    backdrop-filter: blur(4px);
 -  transition: background-color 150ms ease;
-+  transition: all 150ms ease;
++  transition: all 150ms ease; /* 宽度与颜色统一过渡，悬停时更顺滑 */
  }
  
  .scroll-view__thumb:hover::after,
  .scroll-view__thumb[data-dragging="true"]::after {
 -  background-color: var(--border-strong-base);
-+  width: 8px;
++  width: 8px; /* 悬停/拖拽时加宽，增强可点击区域 */
 +  background-color: rgba(0, 0, 0, 0.5);
  }
  
  .dark .scroll-view__thumb::after,
  [data-theme="dark"] .scroll-view__thumb::after {
 -  background-color: var(--border-weak-base);
-+  background-color: rgba(255, 255, 255, 0.3);
++  background-color: rgba(255, 255, 255, 0.3); /* 深色模式下半透明白色滚动条 */
  }
  
  .dark .scroll-view__thumb:hover::after,
@@ -365,43 +287,47 @@ index f6a49e241c6ed2ee00a821061bc1f02f816315c3..be6a26d52b6557022c88510852e376e5
  .dark .scroll-view__thumb[data-dragging="true"]::after,
  [data-theme="dark"] .scroll-view__thumb[data-dragging="true"]::after {
 -  background-color: var(--border-strong-base);
--}
--
--.scroll-view__thumb[data-visible="true"] {
--  opacity: 1;
 +  width: 8px;
 +  background-color: rgba(255, 255, 255, 0.5);
  }
+ 
+ .scroll-view__thumb[data-visible="true"] {
+   opacity: 1;
++  pointer-events: auto; /* 可见时启用指针事件，允许拖拽滚动条 */
+ }
+
+
 diff --git a/packages/ui/src/components/scroll-view.tsx b/packages/ui/src/components/scroll-view.tsx
-index 3ff00f117d22d4f7c4dd4612a45621c2d74d15f0..01b2c5dc94d058a0186063f6163d37adfcbac08b 100644
 --- a/packages/ui/src/components/scroll-view.tsx
 +++ b/packages/ui/src/components/scroll-view.tsx
-@@ -223,12 +223,12 @@ export function ScrollView(props: ScrollViewProps) {
+@@ -296,12 +296,14 @@
            ref={thumbRef}
            onPointerDown={onThumbPointerDown}
            class="scroll-view__thumb"
--          data-visible={isHovered() || isDragging()}
--          data-dragging={isDragging()}
-+          data-visible={isHovered() || isDragging() ? "true" : undefined}
-+          data-dragging={isDragging() ? "true" : undefined}
+-          data-visible={thumbVisible()}
++          // data-visible 用字符串 "true" 而非布尔值，匹配 CSS [data-visible="true"] 选择器
++        data-visible={thumbVisible() ? "true" : undefined}
+           data-dragging={isDragging()}
            style={{
              height: `${thumbHeight()}px`,
              transform: `translateY(${thumbTop()}px)`,
 -            "z-index": 100, // ensure it displays over content
-+            "pointer-events": "auto",
++            // 滚动条可交互：启用指针事件以便拖拽
++        "pointer-events": "auto", // ensure it displays over content
            }}
          />
        </Show>
-diff --git a/packages/ui/src/components/session-turn.css b/packages/ui/src/components/session-turn.css
-index 54076f3f893950021aed188e4ed285ef80f830ed..fe85d944fb3946d6c034eb3c8f0dc2e26343d162 100644
---- a/packages/ui/src/components/session-turn.css
-+++ b/packages/ui/src/components/session-turn.css
+
+
+diff --git a/packages/session-ui/src/components/session-turn.css b/packages/session-ui/src/components/session-turn.css
+--- a/packages/session-ui/src/components/session-turn.css
++++ b/packages/session-ui/src/components/session-turn.css
 @@ -7,16 +7,21 @@
    align-items: flex-start;
    justify-content: flex-start;
  
 -  [data-slot="session-turn-content"] {
-+  /* ScrollView 容器样式 */
++  /* ScrollView 容器样式：仅设置尺寸，滚动交由 ScrollView 自身处理 */
 +  .scroll-view[data-slot="session-turn-content"] {
      flex-grow: 1;
      width: 100%;
@@ -420,19 +346,34 @@ index 54076f3f893950021aed188e4ed285ef80f830ed..fe85d944fb3946d6c034eb3c8f0dc2e2
      display: none;
    }
  
-diff --git a/packages/ui/src/components/session-turn.tsx b/packages/ui/src/components/session-turn.tsx
-index b35f718ef047862964c1eb63614f12de454c7185..d615a2a656c58de96a8b35ba74cf62d5319bdfa7 100644
---- a/packages/ui/src/components/session-turn.tsx
-+++ b/packages/ui/src/components/session-turn.tsx
-@@ -25,6 +25,7 @@ import { TextReveal } from "./text-reveal"
- import { createAutoScroll } from "../hooks"
- import { useI18n } from "../context/i18n"
+@@ -239,3 +239,13 @@
+ [data-slot="session-turn-list"] {
+   gap: 24px;
+ }
++
++/* ScrollView 容器使用自身滚动条，非 ScrollView 的 div 保留原生 overflow-y 滚动 */
++.scroll-view[data-slot="session-turn-content"] {
++  overflow: auto;
++}
++
++:not(.scroll-view)[data-slot="session-turn-content"] {
++  overflow-y: auto;
++  scrollbar-width: none;
++}
+
+
+diff --git a/packages/session-ui/src/components/session-turn.tsx b/packages/session-ui/src/components/session-turn.tsx
+--- a/packages/session-ui/src/components/session-turn.tsx
++++ b/packages/session-ui/src/components/session-turn.tsx
+@@ -25,6 +25,7 @@
+ import { createAutoScroll } from "@opencode-ai/ui/hooks"
+ import { useI18n } from "@opencode-ai/ui/context/i18n"
  import { normalize } from "./session-diff"
-+import { ScrollView } from "./scroll-view"
++import { ScrollView } from "@opencode-ai/ui/scroll-view"
  
  function record(value: unknown): value is Record<string, unknown> {
    return !!value && typeof value === "object" && !Array.isArray(value)
-@@ -376,8 +377,8 @@ export function SessionTurn(
+@@ -383,8 +384,8 @@
  
    return (
      <div data-component="session-turn" class={props.classes?.root}>
@@ -443,7 +384,7 @@ index b35f718ef047862964c1eb63614f12de454c7185..d615a2a656c58de96a8b35ba74cf62d5
          onScroll={autoScroll.handleScroll}
          data-slot="session-turn-content"
          class={props.classes?.content}
-@@ -527,7 +528,7 @@ export function SessionTurn(
+@@ -536,7 +537,7 @@
            </Show>
            {props.children}
          </div>
@@ -452,3 +393,4 @@ index b35f718ef047862964c1eb63614f12de454c7185..d615a2a656c58de96a8b35ba74cf62d5
      </div>
    )
  }
+
