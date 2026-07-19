@@ -119,11 +119,11 @@ function noUpdate<E>(
 
 function ready(directory: string) {
   const file = path.join(directory, `.watcher-${Math.random().toString(36).slice(2)}`)
-  const head = path.join(directory, ".git", "HEAD")
 
   return Effect.gen(function* () {
     const fs = yield* AppFileSystem.Service
     const git = yield* Git.Service
+    const gitRoot = path.join(directory, ".git")
 
     yield* nextUpdate(
       directory,
@@ -131,6 +131,10 @@ function ready(directory: string) {
       fs.writeFileString(file, "ready"),
     ).pipe(Effect.ensuring(fs.remove(file, { force: true }).pipe(Effect.ignore)), Effect.asVoid)
 
+    if (!(yield* fs.existsSafe(gitRoot))) return
+    // production订阅realpath；readiness必须监听同一事件路径，不能用symlink拼写等待另一个名字。
+    const actualGit = yield* fs.realPath(gitRoot)
+    const head = path.join(actualGit, "HEAD")
     if (!(yield* fs.existsSafe(head))) return
 
     const branch = `watch-${Math.random().toString(36).slice(2)}`
@@ -139,7 +143,7 @@ function ready(directory: string) {
       directory,
       (evt) => evt.file === head && evt.event !== "unlink",
       fs
-        .writeFileString(path.join(directory, ".git", "refs", "heads", branch), hash.trim() + "\n")
+        .writeFileString(path.join(actualGit, "refs", "heads", branch), hash.trim() + "\n")
         .pipe(Effect.andThen(fs.writeFileString(head, `ref: refs/heads/${branch}\n`))),
     ).pipe(Effect.asVoid)
   })

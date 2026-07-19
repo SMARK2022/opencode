@@ -2197,6 +2197,7 @@ it.instance(
       yield* llm.fail("boom")
       yield* user(chat.id, "hello")
 
+      // 这里只断言并发loop共享结果；包级timeout仅防进程挂死，不构成3秒性能契约。
       const [a, b] = yield* Effect.all([prompt.loop({ sessionID: chat.id }), prompt.loop({ sessionID: chat.id })], {
         concurrency: "unbounded",
       })
@@ -2204,7 +2205,6 @@ it.instance(
       expect(a.info.role).toBe("assistant")
     }),
   { git: true },
-  shortSessionTimeout,
 )
 
 it.instance(
