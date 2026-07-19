@@ -28,10 +28,11 @@ import { createSimpleContext } from "./helper"
 import type { Snapshot } from "@/snapshot"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
-import { batch, onCleanup, onMount } from "solid-js"
+import { batch, createEffect, onCleanup, onMount } from "solid-js"
 import * as Log from "@opencode-ai/core/util/log"
 import { emptyConsoleState, type ConsoleState } from "@/config/console-state"
 import { useKV } from "./kv"
+import { useRoute } from "./route"
 // [local-smark] SessionPath for daemon multi-instance path management
 import { SessionPath } from "@/session/path"
 import { aggregateFailures } from "./aggregate-failures"
@@ -140,6 +141,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     const project = useProject()
     const sdk = useSDK()
     const kv = useKV()
+    const route = useRoute()
 
     const fullSyncedSessions = new Set<string>()
     // [local-smark] daemon multi-instance workspace tracking
@@ -153,6 +155,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     let questionRefreshes = 0
     let permissionRefreshVersion = 0
     let questionRefreshVersion = 0
+    let lspRefreshVersion = 0
+    let lspRoute: string | undefined
     const permissionChanges = new Map<string, { sessionID: string; requestID: string; version: number }>()
     const questionChanges = new Map<string, { sessionID: string; requestID: string; version: number }>()
     let pendingPartDeltas: EventMessagePartDelta[] = []
@@ -164,6 +168,33 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     // delta 是 bus-only（不写 DB），被 drop 后永久丢失——子会话进入前
     // 已生成的流式文本将无法恢复。缓冲后在 part.updated 创建 part 时 replay。
     const orphanPartDeltas = new Map<string, EventMessagePartDelta[]>()
+
+    function clearLsp(owner?: string) {
+      lspRoute = owner
+      setStore("lsp", reconcile([]))
+    }
+
+    async function refreshLsp() {
+      const version = ++lspRefreshVersion
+      const current = route.data
+      if (current.type !== "session") return clearLsp()
+      const match = Binary.search(store.session, current.sessionID, (session) => session.id)
+      if (!match.found) return clearLsp(current.sessionID)
+      const session = store.session[match.index]
+      const owner = `${current.sessionID}\0${session.directory}\0${session.workspaceID ?? ""}`
+      // snapshot owner 在请求前切换；同步清空才能保证 B 的网络请求挂起或失败时，
+      // sidebar/footer 也绝不会继续渲染已经属于 A 的 rows。
+      if (lspRoute !== owner) clearLsp(owner)
+      const response = await sdk.client.lsp.status({ directory: session.directory, workspace: session.workspaceID })
+      // route A 的请求可能在切到 B 后才返回；只有最新 token 能提交，
+      // 否则一次网络乱序就会把 B 的右侧列表重新污染成 A。
+      if (version !== lspRefreshVersion) return
+      setStore("lsp", reconcile((response.data ?? []).filter((item) => item.sessionIDs?.includes(current.sessionID))))
+    }
+
+    // route 与 Session snapshot 都是 reactive 输入。Session 列表在 bootstrap 后到达时，
+    // 当前 route 会自动补做一次正确目录/Workspace 的 LSP 请求。
+    createEffect(() => void refreshLsp())
 
     function targetsSamePartDelta(previous: EventMessagePartDelta, next: EventMessagePartDelta) {
       // Only adjacent deltas for the same Solid store cell are safe to merge.
@@ -812,8 +843,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "lsp.updated": {
-          const workspace = project.workspace.current()
-          void sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", x.data ?? []))
+          void refreshLsp()
           break
         }
 
@@ -908,7 +938,6 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
             sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
-            sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
             sdk.client.mcp.status({ workspace }).then((x) => setStore("mcp", reconcile(x.data ?? {}))),
             sdk.client.experimental.resource
               .list({ workspace })

@@ -8,19 +8,19 @@ import * as LSPServer from "./server"
 import { Config } from "@/config/config"
 import { Process } from "@/util/process"
 import { spawn as lspspawn } from "./launch"
-import { Effect, Layer, Context, Schema } from "effect"
+import { Effect, Layer, Context, Option, Schema, Semaphore } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { containsPath } from "@/project/instance-context"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { InstanceRef } from "@/effect/instance-ref"
-import { makeRuntime } from "@/effect/run-service"
+import { SessionID } from "@/session/schema"
+import { EffectBridge } from "@/effect/bridge"
+import { GlobalBus, type GlobalEvent } from "@/bus/global"
 // [local-smark] VSCode Bridge LSP backend：优先通过 bridge 获取 VSCode 的 LSP 能力
 import * as VscodeBridge from "@/ide/vscode-bridge"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 
 const log = Log.create({ service: "lsp" })
-const busRuntime = makeRuntime(Bus.Service, Bus.layer)
 
 export const Event = {
   Updated: BusEvent.define("lsp.updated", Schema.Struct({})),
@@ -61,6 +61,7 @@ export const Status = Schema.Struct({
   name: Schema.String,
   root: Schema.String,
   status: Schema.Literals(["connected", "error"]),
+  sessionIDs: Schema.optional(Schema.Array(SessionID)),
 }).annotate({ identifier: "LSPStatus" })
 export type Status = typeof Status.Type
 
@@ -119,11 +120,22 @@ const filterExperimentalServers = (servers: Record<string, LSPServer.Info>, flag
 
 type LocInput = { file: string; line: number; character: number }
 
+interface ClientEntry {
+  client: LSPClient.Info
+  owners: Map<SessionID, object>
+  unscoped: boolean
+}
+type PendingClient = { promise: Promise<ClientEntry | undefined>; owners: Set<object | undefined> }
+
 interface State {
-  clients: LSPClient.Info[]
+  updated: Effect.Effect<void>
+  clients: ClientEntry[]
   servers: Record<string, LSPServer.Info>
   broken: Set<string>
-  spawning: Map<string, Promise<LSPClient.Info | undefined>>
+  spawning: Map<string, PendingClient>
+  tokens: Map<SessionID, object>
+  bridgeOwners: Map<SessionID, object>
+  closed: boolean
   // bridge 能连通不代表 diagnostics endpoint 成功；status 需要这条信号避免 clean 误报。
   bridgeDiagnostics?: "ok" | "failed"
   // 保存最近一次 strong touch 的同请求快照，后续 diagnostics() 只读缓存，不再产生第二段等待。
@@ -149,11 +161,23 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/LSP") {}
 
+type SessionOwner = { readonly sessionID: SessionID; readonly token: object; readonly active: Effect.Effect<void> }
+
+const CurrentOwner = Context.Reference<SessionOwner | undefined>("@opencode/LSP/SessionOwner", { defaultValue: () => undefined })
+
+export function withSession(sessionID: SessionID, active: Effect.Effect<void>) {
+  return <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.provideService(CurrentOwner, { sessionID, token: {}, active }))
+}
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
     const flags = yield* RuntimeFlags.Service
+    const fs = yield* AppFileSystem.Service
+    const bridge = yield* EffectBridge.make()
+    const states = new Set<State>()
+    const lifecycle = Semaphore.makeUnsafe(1)
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("LSP.state")(function* (ctx) {
@@ -207,19 +231,25 @@ export const layer = Layer.effect(
         }
 
         const s: State = {
+          updated: Effect.promise(() => Bus.publish(Event.Updated, {}, { context: { instance: ctx } })),
           clients: [],
           servers,
           broken: new Set(),
           spawning: new Map(),
+          tokens: new Map(),
+          bridgeOwners: new Map(),
+          closed: false,
           bridgeDiagnostics: undefined,
           bridgeSnapshot: {},
         }
 
-        yield* Effect.addFinalizer(() =>
-          Effect.promise(async () => {
-            await Promise.all(s.clients.map((client) => client.shutdown()))
-          }),
-        )
+        states.add(s)
+        yield* Effect.addFinalizer(() => {
+          // closed 先于 shutdown，阻止跨过 initialize 的旧 fiber 在 finalizer 后回挂孤儿 client。
+          s.closed = true
+          states.delete(s)
+          return shutdown(detach(s, s.clients))
+        })
 
         return s
       }),
@@ -229,9 +259,38 @@ export const layer = Layer.effect(
       const ctx = yield* InstanceState.context
       if (!containsPath(file, ctx)) return [] as LSPClient.Info[]
       const s = yield* InstanceState.get(state)
+      yield* pruneMissingRoots(s)
+      const owner = yield* CurrentOwner
+      const token = owner?.token
       return yield* Effect.promise(async () => {
         const extension = path.parse(file).ext || file
         const result: LSPClient.Info[] = []
+
+        // client 身份属于 server/root；Session generation 只是一份独立 claim。
+        // 这样并发 Session 可以复用进程，同时 status 仍能按 Session 精确投影。
+        async function claim(entry: ClientEntry, pending?: PendingClient) {
+          if (!owner) {
+            const changed = !entry.unscoped
+            entry.unscoped = true
+            if (changed) await bridge.promise(s.updated)
+            return entry.client
+          }
+          if (!s.closed && s.tokens.get(owner.sessionID) === owner.token) {
+            const changed = entry.owners.get(owner.sessionID) !== owner.token
+            entry.owners.set(owner.sessionID, owner.token)
+            if (changed) await bridge.promise(s.updated)
+            return entry.client
+          }
+
+          // token 已退休时，请求不能继续消费 client。若该 entry 没有其他 owner，
+          // 立即走统一 detach；共享 entry 则只拒绝这次旧 claim。
+          // spawning waiter 与 Promise 共存；旧 claimant 仅在没有当前 waiter 时回收，让新 generation 原子接管。
+          const waiting = !s.closed && (pending?.owners.has(undefined) || [...s.tokens.values()].some((token) => pending?.owners.has(token)))
+          if (s.clients.includes(entry) && !entry.unscoped && entry.owners.size === 0 && !waiting) {
+            await bridge.promise(shutdown(detach(s, [entry])))
+            await bridge.promise(s.updated)
+          }
+        }
 
         async function schedule(server: LSPServer.Info, root: string, key: string) {
           const handle = await server
@@ -263,15 +322,26 @@ export const layer = Layer.effect(
           })
 
           if (!client) return undefined
+          // initialize 是 root 可消失的异步边界；注册前复验，避免消费已不可能使用的 client。
+          if (!(await bridge.promise(fs.existsSafe(root)))) {
+            await client.shutdown()
+            return undefined
+          }
 
-          const existing = s.clients.find((x) => x.root === root && x.serverID === server.id)
+          const existing = s.clients.find((x) => x.client.root === root && x.client.serverID === server.id)
           if (existing) {
             await Process.stop(handle.process)
             return existing
           }
 
-          s.clients.push(client)
-          return client
+          const entry: ClientEntry = { client, owners: new Map(), unscoped: false }
+          s.clients.push(entry)
+          // 监听后再检查退出码，同时覆盖“注册前已退出”和“注册后退出”；重复回调
+          // 由 exact-entry detach 幂等吸收，不需要第二套进程状态判断。
+          const exited = () => bridge.fork(removeExitedClient(s, entry))
+          handle.process.once("exit", exited)
+          if (handle.process.exitCode !== null || handle.process.signalCode !== null) exited()
+          return entry
         }
 
         for (const server of Object.values(s.servers)) {
@@ -281,36 +351,40 @@ export const layer = Layer.effect(
           if (!root) continue
           if (s.broken.has(root + server.id)) continue
 
-          const match = s.clients.find((x) => x.root === root && x.serverID === server.id)
+          const match = s.clients.find((x) => x.client.root === root && x.client.serverID === server.id)
           if (match) {
-            result.push(match)
+            const client = await claim(match)
+            if (client) result.push(client)
             continue
           }
 
           const inflight = s.spawning.get(root + server.id)
           if (inflight) {
-            const client = await inflight
-            if (!client) continue
-            result.push(client)
+            inflight.owners.add(token)
+            const entry = await inflight.promise
+            inflight.owners.delete(token)
+            if (!entry) continue
+            const client = await claim(entry, inflight)
+            if (client) result.push(client)
             continue
           }
 
           const task = schedule(server, root, root + server.id)
-          s.spawning.set(root + server.id, task)
+          const pending = { promise: task, owners: new Set([token]) }
+          s.spawning.set(root + server.id, pending)
 
           task.finally(() => {
-            if (s.spawning.get(root + server.id) === task) {
+            if (s.spawning.get(root + server.id) === pending) {
               s.spawning.delete(root + server.id)
             }
           })
 
-          const client = await task
-          if (!client) continue
+          const entry = await task
+          pending.owners.delete(token)
+          if (!entry) continue
 
-          result.push(client)
-          void busRuntime.runPromise((bus) =>
-            bus.publish(Event.Updated, {}).pipe(Effect.provideService(InstanceRef, ctx)),
-          )
+          const client = await claim(entry, pending)
+          if (client) result.push(client)
         }
 
         return result
@@ -324,7 +398,7 @@ export const layer = Layer.effect(
 
     const runAll = Effect.fnUntraced(function* <T>(fn: (client: LSPClient.Info) => Promise<T>) {
       const s = yield* InstanceState.get(state)
-      return yield* Effect.promise(() => Promise.all(s.clients.map((x) => fn(x))))
+      return yield* Effect.promise(() => Promise.all(s.clients.map((x) => fn(x.client))))
     })
 
     // [local-smark] 尝试发现支持 LSP 的 VSCode bridge。resolveBridge 有 5s 缓存。
@@ -391,12 +465,94 @@ export const layer = Layer.effect(
     }
 
     const init = Effect.fn("LSP.init")(function* () {
-      yield* InstanceState.get(state)
+      const s = yield* InstanceState.get(state)
+      const owner = yield* CurrentOwner
+      if (owner) yield* beginSession(s, owner)
     })
+
+    function detach(s: State, entries: ClientEntry[]) {
+      // registry 是进程生命周期的权威索引；同步 detach 后才允许异步 shutdown，
+      // 因而 admission/deletion 的线性化锁不需要等待外部进程退出。
+      const discarded = new Set(entries)
+      s.clients = s.clients.filter((entry) => !discarded.has(entry))
+      return entries
+    }
+
+    const shutdown = (entries: ClientEntry[]) =>
+      Effect.promise(() => Promise.all(entries.map((entry) => entry.client.shutdown())).then(() => undefined))
+
+    const removeExitedClient = Effect.fnUntraced(function* (s: State, entry: ClientEntry) {
+      // reset/root cleanup 已先 detach 时，迟到 exit 只属于旧对象；按对象身份检查
+      // 可防止同 server/root 的 replacement 被旧进程终态误删。
+      if (!s.clients.includes(entry)) return
+      yield* shutdown(detach(s, [entry]))
+      yield* s.updated
+    })
+
+    const pruneMissingRoots = Effect.fnUntraced(function* (s: State) {
+      const existing = yield* Effect.forEach(s.clients, (entry) => fs.existsSafe(entry.client.root), { concurrency: "unbounded" })
+      const stale = s.clients.filter((_, index) => !existing[index])
+      const detached = detach(s, stale)
+      if (detached.length === 0) return
+      yield* shutdown(detached)
+      yield* s.updated
+    })
+
+    function retireSession(s: State, sessionID: SessionID) {
+      // token 先失效再撤销 claim，仍在 initialize 的旧请求恢复后只能走
+      // orphan detach；新 run 与删除共用这一条状态转换。
+      s.tokens.delete(sessionID)
+      const bridgeChanged = s.bridgeOwners.delete(sessionID)
+      // map 后再 some，确保同一 Session 跨多个 root 的 claims 全部撤销；
+      // 直接 some(delete) 会在首个 true 后短路并留下后续 client。
+      const changed = s.clients.map((entry) => entry.owners.delete(sessionID)).some(Boolean) || bridgeChanged
+      const unused = s.clients.filter((entry) => !entry.unscoped && entry.owners.size === 0)
+      return { changed: changed || unused.length > 0, detached: detach(s, unused) }
+    }
+
+    function retireEverywhere(sessionID: SessionID) {
+      const retired = [...states].map((state) => ({ state, ...retireSession(state, sessionID) }))
+      return {
+        changed: retired.filter((item) => item.changed).map((item) => item.state),
+        detached: retired.flatMap((item) => item.detached),
+      }
+    }
+
+    const finishTransition = (transition: ReturnType<typeof retireEverywhere>) => Effect.all([shutdown(transition.detached), Effect.forEach(transition.changed, (state) => state.updated)], { concurrency: "unbounded", discard: true })
+
+    const beginSession = Effect.fnUntraced(function* (s: State, owner: SessionOwner) {
+      const transition = yield* lifecycle.withPermits(1)(
+        Effect.gen(function* () {
+          // Session 存在性检查与内存 transition 共用线性化点：删除先完成时
+          // admission 失败；admission 先完成时，后到删除必然看见已安装 token。
+          yield* owner.active
+          const retired = retireEverywhere(owner.sessionID)
+          if (!s.closed) s.tokens.set(owner.sessionID, owner.token)
+          return retired
+        }),
+      )
+      yield* finishTransition(transition)
+    })
+
+    // Session 模块经 MessageV2 依赖 LSP；这里在 layer 已完成模块求值后再取正式事件定义，
+    // 避免为删除清理制造静态 Session -> LSP -> Session 环。
+    const deleted = (yield* Effect.promise(() => import("@/session/session"))).Event.Deleted.type
+    const decodeSessionID = Schema.decodeUnknownOption(SessionID)
+    const onGlobalEvent = (event: GlobalEvent) => {
+      if (event.payload?.type !== deleted) return
+      const sessionID = decodeSessionID(event.payload.properties?.sessionID)
+      if (Option.isNone(sessionID)) return
+
+      // 地址簿只遍历已经物化的 State，不创建 cache；持久化 D、事件 envelope
+      // 与 Workspace target T 即使不同，也不会漏掉真实 claim。
+      bridge.fork(lifecycle.withPermits(1)(Effect.sync(() => retireEverywhere(sessionID.value))).pipe(Effect.flatMap(finishTransition)))
+    }
+    yield* Effect.acquireRelease(Effect.sync(() => GlobalBus.on("event", onGlobalEvent)), () => Effect.sync(() => GlobalBus.off("event", onGlobalEvent)))
 
     const status = Effect.fn("LSP.status")(function* () {
       const ctx = yield* InstanceState.context
       const s = yield* InstanceState.get(state)
+      yield* pruneMissingRoots(s)
       // [local-smark] 有 bridge 且 diagnostics 未失败时才返回 VSCode 连接状态。
       const bridge = yield* resolveLspBridge()
       if (bridge && s.bridgeDiagnostics !== "failed") {
@@ -405,15 +561,18 @@ export const layer = Layer.effect(
           name: "VSCode",
           root: ".",
           status: "connected" as const,
+          ...(s.bridgeOwners.size ? { sessionIDs: [...s.bridgeOwners.keys()] } : {}),
         }]
       }
       const result: Status[] = []
-      for (const client of s.clients) {
+      for (const entry of s.clients) {
+        const client = entry.client
         result.push({
           id: client.serverID,
           name: s.servers[client.serverID].id,
           root: path.relative(ctx.directory, client.root),
           status: "connected",
+          ...(entry.owners.size ? { sessionIDs: [...entry.owners.keys()] } : {}),
         })
       }
       return result
@@ -439,13 +598,21 @@ export const layer = Layer.effect(
     })
 
     const touchFile = Effect.fn("LSP.touchFile")(function* (input: string, diagnostics?: "document" | "full") {
+      const s = yield* InstanceState.get(state)
+      const owner = yield* CurrentOwner
       // [local-smark] bridge 下区分 light warm 与 strong diagnostics：read warm 不应打开 VSCode。
       const bridge = yield* resolveLspBridge(input)
       if (bridge) {
+        // Bridge 连接由外部进程拥有；这里只在异步解析后校验 token 并记录可见性，
+        // release 只删除 claim，绝不关闭或重连外部 Bridge。
+        if (owner && !s.closed && s.tokens.get(owner.sessionID) === owner.token) {
+          const changed = s.bridgeOwners.get(owner.sessionID) !== owner.token
+          s.bridgeOwners.set(owner.sessionID, owner.token)
+          if (changed) yield* s.updated
+        }
         if (!diagnostics) return
         const touched = yield* callLspBridge("/lsp/touch", { filePath: input }, input, 1000)
         const mapped = bridgeDiagnosticsToMap(touched)
-        const s = yield* InstanceState.get(state)
         if (mapped) {
           const normalized = AppFileSystem.normalizePath(input)
           // 空数组也覆盖旧快照，保证“未发现错误”不会保留上一次错误。
@@ -459,7 +626,6 @@ export const layer = Layer.effect(
         return
       }
       if (diagnostics) {
-        const s = yield* InstanceState.get(state)
         // strong touch 没有 bridge 时直接标记失败；仅 light warm 保留原有内置 LSP 兼容路径。
         s.bridgeDiagnostics = "failed"
         return
@@ -656,7 +822,7 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(RuntimeFlags.defaultLayer))
+export const defaultLayer = layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(RuntimeFlags.defaultLayer), Layer.provide(AppFileSystem.defaultLayer))
 
 export * as Diagnostic from "./diagnostic"
 

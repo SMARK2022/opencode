@@ -50,12 +50,14 @@ import * as Database from "../../src/storage/db"
 import { Ripgrep } from "../../src/file/ripgrep"
 import { Format } from "../../src/format"
 import { Reference } from "../../src/reference/reference"
-import { TestInstance } from "../fixture/fixture"
+import { provideInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
 import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 import { httpError, reply, TestLLMServer } from "../lib/llm-server"
 import { SyncEvent } from "@/sync"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { InstanceState } from "@/effect/instance-state"
+import { InstanceRef } from "@/effect/instance-ref"
 
 void Log.init({ print: false })
 
@@ -140,10 +142,11 @@ const mcp = Layer.succeed(
   }),
 )
 
+const lspDirectories: string[] = []
 const lsp = Layer.succeed(
   LSP.Service,
   LSP.Service.of({
-    init: () => Effect.void,
+    init: () => InstanceState.directory.pipe(Effect.tap((directory) => Effect.sync(() => lspDirectories.push(directory))), Effect.asVoid),
     status: () => Effect.succeed([]),
     hasClients: () => Effect.succeed(false),
     touchFile: () => Effect.void,
@@ -2143,17 +2146,23 @@ it.instance(
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig(providerCfg)
       const prompt = yield* SessionPrompt.Service
+      const run = yield* SessionRunState.Service
       const sessions = yield* Session.Service
+      const source = yield* InstanceRef
+      if (!source) return yield* Effect.die(new Error("InstanceRef not provided"))
+      const target = { ...source, directory: path.join(source.directory, "target") }
       const chat = yield* sessions.create({ title: "Pinned" })
       yield* llm.hang
       yield* user(chat.id, "hello")
 
       const a = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
       yield* llm.wait(1)
-      const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      const b = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.provideService(InstanceRef, target), Effect.forkChild)
       yield* Effect.sleep(50)
 
-      yield* prompt.cancel(chat.id)
+      // T 的 join、busy 与 cancel 必须命中 D 的同一 Runner，不能按目录再建控制面。
+      expect(Exit.isFailure(yield* run.assertNotBusy(chat.id).pipe(Effect.provideService(InstanceRef, target), Effect.exit))).toBe(true)
+      yield* prompt.cancel(chat.id).pipe(Effect.provideService(InstanceRef, target))
       const [exitA, exitB] = yield* Effect.all([Fiber.await(a), Fiber.await(b)])
       expect(Exit.isSuccess(exitA)).toBe(true)
       expect(Exit.isSuccess(exitB)).toBe(true)
@@ -2162,7 +2171,7 @@ it.instance(
       }
     }),
   { git: true },
-  shortSessionTimeout,
+  10_000,
 )
 
 // Queue semantics
@@ -2172,6 +2181,7 @@ it.instance(
   () =>
     Effect.gen(function* () {
       const { prompt, run, chat } = yield* boot()
+      const offset = lspDirectories.length
       yield* seed(chat.id, { finish: "stop" })
 
       const [a, b] = yield* Effect.all([prompt.loop({ sessionID: chat.id }), prompt.loop({ sessionID: chat.id })], {
@@ -2180,6 +2190,11 @@ it.instance(
 
       expect(a.info.id).toBe(b.info.id)
       expect(a.info.role).toBe("assistant")
+      // 两个并发 caller 共享一个 Running work；若 admission 也推进 generation，
+      // 同一次真实 agent run 会错误触发两次 LSP ownership refresh。
+      expect(lspDirectories.slice(offset)).toHaveLength(1)
+      yield* prompt.loop({ sessionID: chat.id })
+      expect(lspDirectories.slice(offset)).toHaveLength(2)
       yield* run.assertNotBusy(chat.id)
     }),
   { git: true },
@@ -3027,6 +3042,8 @@ it.instance(
       const { llm } = yield* useServerConfig(providerCfg)
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
+      const target = yield* tmpdirScoped({ git: true })
+      yield* writeConfig(target, providerCfg(llm.url))
       const chat = yield* sessions.create({
         title: "Pinned",
         permission: [{ permission: "*", pattern: "*", action: "allow" }],
@@ -3038,7 +3055,8 @@ it.instance(
         .pipe(Effect.forkChild)
       yield* waitForBusy(chat.id)
 
-      const loop = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      const offset = lspDirectories.length
+      const loop = yield* provideInstance(target)(prompt.loop({ sessionID: chat.id })).pipe(Effect.forkChild)
       yield* Effect.sleep(50)
 
       expect(yield* llm.calls).toBe(0)
@@ -3052,6 +3070,9 @@ it.instance(
         expect(exit.value.parts.some((part) => part.type === "text" && part.text === "after-shell")).toBe(true)
       }
       expect(yield* llm.calls).toBe(1)
+      // queued Prompt 的 Effect 最终由 D shell fiber 启动，但 admission 必须保留
+      // 提交方 T 的 InstanceRef；否则 Read/LSP 会重新归属旧目录 D。
+      expect(lspDirectories.slice(offset)).toEqual([target])
     }),
   { git: true },
   // Windows Actions 上 shell 进程与测试 LLM 首次请求都可能有冷启动开销；10s 仍能及时发现队列死锁。

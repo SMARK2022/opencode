@@ -1861,6 +1861,7 @@ export type LspStatus = {
   name: string
   root: string
   status: "connected" | "error"
+  sessionIDs?: Array<string>
 }
 
 export type FormatterStatus = {

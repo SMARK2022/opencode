@@ -231,6 +231,53 @@ function textDeltaEvent(id: string, delta: string, partID = "part_text"): Global
 }
 
 describe("tui sync", () => {
+  test("projects LSP status through the active Session route and rejects a late response", async () => {
+    const [sessionA, sessionB] = [{ id: "ses_lsp_a", directory: "/workspace/a", workspaceID: "wrk_a", time: { created: 1, updated: 1 } }, { id: "ses_lsp_b", directory: "/workspace/b", workspaceID: "wrk_b", time: { created: 1, updated: 1 } }]
+    const requests: Array<{ directory: string | null; workspace: string | null }> = []
+    const delayedA = Promise.withResolvers<void>(), delayedB = Promise.withResolvers<void>()
+    let refreshA = false
+    const { app, emit, route, sync } = await mount((url) => {
+        if (url.pathname === "/session") return json([sessionA, sessionB])
+        if (url.pathname !== "/lsp") return
+        return (async () => {
+          requests.push({ directory: url.searchParams.get("directory"), workspace: url.searchParams.get("workspace") })
+          if (url.searchParams.get("directory") === sessionA.directory) {
+            if (refreshA) await delayedA.promise
+            return json([{ id: "typescript", name: "typescript", root: "a", status: "connected", sessionIDs: [sessionA.id] }])
+          }
+          await delayedB.promise
+          return json([{ id: "typescript", name: "typescript", root: "b", status: "connected", sessionIDs: [sessionB.id] }])
+        })()
+    }, { type: "session", sessionID: sessionA.id })
+
+    try {
+      await wait(() => sync.data.lsp[0]?.root === "a")
+      refreshA = true
+      // project 不同的 LSP invalidation 仍须进入当前 route 的唯一 refresh。
+      emit({ directory: sessionA.directory, project: "proj_b", payload: { id: "evt_lsp_a", type: "lsp.updated", properties: {} } })
+      await wait(() => requests.filter((request) => request.directory === sessionA.directory).length === 2)
+
+      route.navigate({ type: "session", sessionID: sessionB.id })
+      await wait(() => requests.some((request) => request.directory === sessionB.directory))
+      // B 响应仍被阻塞时，route owner 已变化；旧 A snapshot 必须同步失效，
+      // 否则 sidebar/footer 会继续把 A 的 LSP 显示在 B 下。
+      expect(sync.data.lsp).toEqual([])
+      expect(requests).toContainEqual({ directory: sessionB.directory, workspace: sessionB.workspaceID })
+      delayedB.resolve()
+      await wait(() => sync.data.lsp[0]?.root === "b")
+
+      delayedA.resolve()
+      await wait(() => sync.data.lsp[0]?.root === "b")
+
+      route.navigate({ type: "home" })
+      await wait(() => sync.data.lsp.length === 0)
+    } finally {
+      delayedA.resolve()
+      delayedB.resolve()
+      app.renderer.destroy()
+    }
+  })
+
   test("recovers pending permission and question requests after reconnect", async () => {
     const previous = Global.Path.state
     await using tmp = await tmpdir()

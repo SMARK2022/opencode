@@ -8,6 +8,7 @@ import { KVProvider, useKV } from "../../../../src/cli/cmd/tui/context/kv"
 import { ProjectProvider, useProject } from "../../../../src/cli/cmd/tui/context/project"
 import { SDKProvider, type SDKTestTransport } from "../../../../src/cli/cmd/tui/context/sdk"
 import { SyncProvider, useSync } from "../../../../src/cli/cmd/tui/context/sync"
+import { RouteProvider, useRoute, type Route } from "../../../../src/cli/cmd/tui/context/route"
 import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 
 export const worktree = "/tmp/opencode"
@@ -109,13 +110,14 @@ export function createFetch(override?: FetchHandler) {
   return { fetch, session }
 }
 
-type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; sync: ReturnType<typeof useSync> }
+type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; route: ReturnType<typeof useRoute>; sync: ReturnType<typeof useSync> }
 
-export async function mount(override?: FetchHandler) {
+export async function mount(override?: FetchHandler, initialRoute?: Route) {
   const calls = createFetch(override)
   const events = createEventSource()
   let sync!: ReturnType<typeof useSync>
   let project!: ReturnType<typeof useProject>
+  let route!: ReturnType<typeof useRoute>
   let kv!: ReturnType<typeof useKV>
   let done!: () => void
   const ready = new Promise<void>((resolve) => {
@@ -123,10 +125,11 @@ export async function mount(override?: FetchHandler) {
   })
 
   function Probe() {
-    const ctx: Ctx = { kv: useKV(), project: useProject(), sync: useSync() }
+    const ctx: Ctx = { kv: useKV(), project: useProject(), route: useRoute(), sync: useSync() }
     onMount(() => {
       sync = ctx.sync
       project = ctx.project
+      route = ctx.route
       kv = ctx.kv
       done()
     })
@@ -138,13 +141,15 @@ export async function mount(override?: FetchHandler) {
       <ArgsProvider>
         <ExitProvider>
           <KVProvider>
-            <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
-              <ProjectProvider>
-                <SyncProvider>
-                  <Probe />
-                </SyncProvider>
-              </ProjectProvider>
-            </SDKProvider>
+            <RouteProvider initialRoute={initialRoute}>
+              <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
+                <ProjectProvider>
+                  <SyncProvider>
+                    <Probe />
+                  </SyncProvider>
+                </ProjectProvider>
+              </SDKProvider>
+            </RouteProvider>
           </KVProvider>
         </ExitProvider>
       </ArgsProvider>
@@ -171,5 +176,5 @@ export async function mount(override?: FetchHandler) {
 
   await ready
   await wait(() => sync.status === "complete")
-  return { app, emit: events.emit, kv, project, sync, session: calls.session }
+  return { app, emit: events.emit, kv, project, route, sync, session: calls.session }
 }

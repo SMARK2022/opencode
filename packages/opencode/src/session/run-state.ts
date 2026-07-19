@@ -7,6 +7,9 @@ import { MessageV2 } from "./message-v2"
 import { SessionID } from "./schema"
 import { SessionStatus } from "./status"
 import { SessionActivity } from "./activity"
+import { LSP } from "@/lsp/lsp"
+import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
+import { attachWith } from "@/effect/run-service"
 
 export interface Interface {
   readonly assertNotBusy: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
@@ -43,11 +46,16 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const background = yield* BackgroundJob.Service
     const status = yield* SessionStatus.Service
+    const sessions = yield* Session.Service
+    const lsp = yield* LSP.Service
+    // Runner 身份必须跨 Project 唯一，否则 Workspace 将 Session 从 D 路由到 T 后，
+    // T 会把 D 的活跃 run 误判为空闲；InstanceState 只继续拥有资源释放责任。
+    const runners = new Map<SessionID, Runner.Runner<MessageV2.WithParts>>()
 
     const state = yield* InstanceState.make(
       Effect.fn("SessionRunState.state")(function* (ctx) {
         const scope = yield* Scope.Scope
-        const runners = new Map<SessionID, Runner.Runner<MessageV2.WithParts>>()
+        const owned = new Map<SessionID, Runner.Runner<MessageV2.WithParts>>()
         // revert 进行中标记：beginRevert 原子 check-and-set，endRevert 清除。
         // assertNotBusy 和 assertNotReverting 检查此 Set 阻止 revert 期间的 prompt/shell 竞争。
         const reverting = new Set<SessionID>()
@@ -55,16 +63,19 @@ export const layer = Layer.effect(
         const exclusive = new Map<SessionID, symbol>()
         yield* Effect.addFinalizer(
           Effect.fnUntraced(function* () {
-            yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
+            // D 销毁时只能取消仍由 D 创建的同一对象；旧 finalizer 不能误删
+            // 已在 T 重建的同 Session Runner。
+            const active = [...owned].filter(([sessionID, runner]) => runners.get(sessionID) === runner)
+            yield* Effect.forEach(active, ([, runner]) => runner.cancel, {
               concurrency: "unbounded",
               discard: true,
             })
-            runners.clear()
+            owned.clear()
             reverting.clear()
             exclusive.clear()
           }),
         )
-        return { runners, scope, reverting, exclusive }
+        return { owned, scope, reverting, exclusive }
       }),
     )
 
@@ -73,23 +84,25 @@ export const layer = Layer.effect(
       onInterrupt: Effect.Effect<MessageV2.WithParts>,
     ) {
       const data = yield* InstanceState.get(state)
-      const existing = data.runners.get(sessionID)
+      const existing = runners.get(sessionID)
       if (existing) return existing
       const next = Runner.make<MessageV2.WithParts>(data.scope, {
         onIdle: Effect.gen(function* () {
-          data.runners.delete(sessionID)
+          if (runners.get(sessionID) === next) runners.delete(sessionID)
+          data.owned.delete(sessionID)
           yield* status.set(sessionID, { type: "idle" })
         }),
         onBusy: status.set(sessionID, { type: "busy" }),
         onInterrupt,
       })
-      data.runners.set(sessionID, next)
+      runners.set(sessionID, next)
+      data.owned.set(sessionID, next)
       return next
     })
 
     const assertNotBusy = Effect.fn("SessionRunState.assertNotBusy")(function* (sessionID: SessionID) {
       const data = yield* InstanceState.get(state)
-      const existing = data.runners.get(sessionID)
+      const existing = runners.get(sessionID)
       if (existing?.busy) yield* busyError(sessionID)
       // revert 进行中也视为 busy——阻止 compact/deleteMessage 等操作与 revert 并发
       if (data.reverting.has(sessionID)) yield* busyError(sessionID)
@@ -119,8 +132,7 @@ export const layer = Layer.effect(
     })
 
     const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
-      const data = yield* InstanceState.get(state)
-      const existing = data.runners.get(sessionID)
+      const existing = runners.get(sessionID)
       if (!existing || !existing.busy) {
         // 无 runner 时仍需取消可能残留的 background jobs
         yield* Effect.all([cancelBackgroundJobs(background, sessionID), status.set(sessionID, { type: "idle" })], {
@@ -142,12 +154,21 @@ export const layer = Layer.effect(
       onInterrupt: Effect.Effect<MessageV2.WithParts>,
       work: Effect.Effect<MessageV2.WithParts>,
     ) {
+      const refs = { instance: yield* InstanceRef, workspace: yield* WorkspaceRef }
       const tracked = Effect.acquireUseRelease(
         Effect.sync(() => SessionActivity.begin(`session:${sessionID}`)),
-        () => work,
+        () =>
+          Effect.gen(function* () {
+            // admission 位于 Runner 真正执行的 work 内；Running caller 只等待 done，
+            // 不会退休当前 run 仍使用的 LSP claim。
+            yield* lsp.init()
+            return yield* work
+          }).pipe(LSP.withSession(sessionID, sessions.get(sessionID).pipe(Effect.asVoid, Effect.orDie))),
         (end) => Effect.sync(end),
       )
-      return yield* (yield* runner(sessionID, onInterrupt)).ensureRunning(tracked)
+      // ShellThenRun 由旧 D shell fiber 启动；显式绑定提交方 T 的 references，
+      // 防止延迟执行时把 Prompt 和 Read/LSP 工作重新路由回 D。
+      return yield* (yield* runner(sessionID, onInterrupt)).ensureRunning(attachWith(tracked, refs))
     })
 
     const startExclusive = Effect.fn("SessionRunState.startExclusive")(function* (
@@ -225,6 +246,8 @@ export const layer = Layer.effect(
 export const defaultLayer = layer.pipe(
   Layer.provide(BackgroundJob.defaultLayer),
   Layer.provide(SessionStatus.defaultLayer),
+  Layer.provide(Session.defaultLayer),
+  Layer.provide(LSP.defaultLayer),
 )
 
 const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(function* (

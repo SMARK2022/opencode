@@ -59,6 +59,13 @@ export function useEvent() {
         return
       }
 
+      // lsp.updated 只表示“当前 route 需要重拉”，不携带可渲染状态；跨 Project
+      // 放行后仍由 SyncProvider 按 active Session 请求和过滤，不能在这里丢失通知。
+      if (event.payload.type === "lsp.updated") {
+        handler(event.payload, { workspace: event.workspace })
+        return
+      }
+
       if (event.project) {
         if (event.project === project.project()) handler(event.payload, { workspace: event.workspace })
         return
