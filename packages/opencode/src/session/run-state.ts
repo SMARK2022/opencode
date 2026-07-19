@@ -8,6 +8,7 @@ import { Session } from "./session"
 import { SessionID } from "./schema"
 import { SessionActivity } from "@/session/activity"
 import { SessionStatus } from "./status"
+import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
 
 export interface Interface {
   readonly assertNotBusy: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
@@ -44,29 +45,30 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const background = yield* BackgroundJob.Service
     const status = yield* SessionStatus.Service
+    // 按Session而非目录共享运行、撤回和维护登记，跨工作区不能绕过同一把锁。
+    const runners = new Map<SessionID, Runner.Runner<SessionV1.WithParts>>()
+    const reverting = new Set<SessionID>()
+    const exclusive = new Map<SessionID, symbol>()
 
     const state = yield* InstanceState.make(
       Effect.fn("SessionRunState.state")(function* () {
         const scope = yield* Scope.Scope
-        const runners = new Map<SessionID, Runner.Runner<SessionV1.WithParts>>()
-        // revert 进行中标记：beginRevert 原子 check-and-set，endRevert 清除。
-        // assertNotBusy 和 assertNotReverting 检查此 Set 阻止 revert 期间的 prompt/shell 竞争。
-        const reverting = new Set<SessionID>()
-        const exclusive = new Map<SessionID, symbol>()
-        // #482：独占租约表——compaction 等维护性工作经 startExclusive 登记后，
-        // assertNotBusy/beginRevert 视为 Busy，防止 prompt、shell 与维护工作并发冲突
+        // 目录销毁只取消自身持有的对象，不能清空跨目录权威索引或他人的维护租约。
+        const owned = new Map<SessionID, Runner.Runner<SessionV1.WithParts>>()
         yield* Effect.addFinalizer(
           Effect.fnUntraced(function* () {
-            yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
+            // 固定本次清理集合，并以对象身份排除已由其它目录接管的Session。
+            yield* Effect.forEach([...owned], ([id, runner]) => runners.get(id) === runner ? runner.cancel : Effect.void, {
               concurrency: "unbounded",
               discard: true,
             })
-            runners.clear()
-            reverting.clear()
-            exclusive.clear()
+            for (const [id, runner] of owned) {
+              if (runners.get(id) === runner) runners.delete(id)
+            }
+            owned.clear()
           }),
         )
-        return { runners, scope, reverting, exclusive }
+        return { runners, owned, scope, reverting, exclusive }
       }),
     )
 
@@ -79,6 +81,9 @@ const layer = Layer.effect(
       if (existing) return existing
       const next = Runner.make<SessionV1.WithParts>(data.scope, {
         onIdle: Effect.gen(function* () {
+          // 迟到idle既不能删除replacement，也不能把新运行的状态发布为空闲。
+          if (data.owned.get(sessionID) === next) data.owned.delete(sessionID)
+          if (data.runners.get(sessionID) !== next) return
           data.runners.delete(sessionID)
           yield* status.set(sessionID, { type: "idle" })
         }),
@@ -86,6 +91,7 @@ const layer = Layer.effect(
         onInterrupt,
       })
       data.runners.set(sessionID, next)
+      data.owned.set(sessionID, next)
       return next
     })
 
@@ -144,10 +150,16 @@ const layer = Layer.effect(
       onInterrupt: Effect.Effect<SessionV1.WithParts>,
       work: Effect.Effect<SessionV1.WithParts>,
     ) {
+      const instance = yield* InstanceState.context
+      const workspace = yield* InstanceState.workspaceID
       // 登记实际 work 而非等待者，排队或取消等待不提前释放活动标记。
       const tracked = SessionActivity.track(`session:${sessionID}`, work)
       const current = yield* runner(sessionID, onInterrupt)
-      return yield* current.ensureRunning(tracked)
+      // queued work可能由旧shell fiber启动，显式提供空WorkspaceRef也不能沿用旧值。
+      return yield* current.ensureRunning(tracked.pipe(
+        Effect.provideService(InstanceRef, instance),
+        Effect.provideService(WorkspaceRef, workspace),
+      ))
     })
 
     // #482：compaction/cleanup 的独占执行入口——复用 shell runner 的并发控制，
