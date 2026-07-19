@@ -1,21 +1,23 @@
-From d870520f12842b16f3fc0df79c13fb26f3bee078 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Mon, 27 Apr 2026 00:09:18 +0800
-Subject: [PATCH] feat: add multi-platform build workflow with auto-trigger on
- dev-smark push
-
-
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
-index 0580c59c600fc2befdd52fd712a818154039bde0..afd9b66fae2ee6d55578e1a1e1dedf89eadd7d5d 100644
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -5,8 +5,19 @@ on:
+@@ -1,15 +1,28 @@
+-# 构建工作流：手动触发，编译打包 OpenCode CLI 为三大平台原生二进制
++# 构建工作流：手动触发或 dev-smark 推送自动触发，编译打包 OpenCode CLI
+ # 产物包含 Linux(tar.gz/deb)、macOS(tar.gz)、Windows(zip) 多架构包
+ name: Build OpenCode CLI
+ 
+ on:
+-  # workflow_dispatch 手动触发：版本号作为必填输入，控制产物命名和嵌入版本
++  # workflow_dispatch 手动触发：版本号可选，缺省时使用 env.DEFAULT_VERSION
+   workflow_dispatch:
      inputs:
        version:
          description: 'Version (e.g., 1.14.25-smark)'
 -        required: true
 +        required: false
          type: string
++  # push 自动触发：dev-smark 分支推送时自动构建，路径过滤避免无关变更触发 CI
 +  push:
 +    branches:
 +      - dev-smark
@@ -25,35 +27,39 @@ index 0580c59c600fc2befdd52fd712a818154039bde0..afd9b66fae2ee6d55578e1a1e1dedf89
 +      - "package.json"
 +      - "bun.lock"
 +
++# 默认版本号：push 触发时无 inputs.version，回退到此常量保证产物命名一致
 +env:
 +  DEFAULT_VERSION: "1.14.25-smark"
  
  jobs:
-   build-linux:
-@@ -19,17 +30,18 @@ jobs:
-       - name: Build Linux
+   # 三平台并行构建：Linux/macOS/Windows 互不依赖，提升 CI 吞吐
+@@ -26,18 +39,21 @@ jobs:
          run: |
            cd packages/opencode
+           # --skip-embed-web-ui：跳过内嵌 Web UI 编译，CLI-only 构建减小产物体积
 -          bun run script/build.ts --version=${{ inputs.version }} --os=linux --skip-embed-web-ui
++          # inputs.version || env.DEFAULT_VERSION：手动触发用输入值，push 触发回退默认值
 +          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=linux --skip-embed-web-ui
-         
+ 
        - name: Package Linux tar.gz
          run: |
            cd packages/opencode/dist/opencode-linux-x64/bin
+           # tar.gz 打包：保留单文件二进制，解压即用
 -          tar -czf ../../../opencode-linux-x64-${{ inputs.version }}.tar.gz opencode
 +          tar -czf ../../../opencode-linux-x64-${{ inputs.version || env.DEFAULT_VERSION }}.tar.gz opencode
  
        - name: Package Linux .deb
          run: |
++          # VERSION shell 变量：避免在 heredoc 中展开 GitHub表达式，deb 元数据需纯 shell 变量
 +          VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
            DEB_DIR="/tmp/deb_build"
 -          PKG_NAME="opencode_${{ inputs.version }}_amd64"
 +          PKG_NAME="opencode_${VERSION}_amd64"
            BINARY="packages/opencode/dist/opencode-linux-x64/bin/opencode"
-           
-           mkdir -p "${DEB_DIR}/${PKG_NAME}/DEBIAN"
-@@ -40,23 +52,23 @@ jobs:
-           
+ 
+           # deb 包结构：DEBIAN/control 存元数据，usr/local/bin 存可执行文件（FHS 规范）
+@@ -51,24 +67,25 @@ jobs:
+           # heredoc 写入 control 文件：dpkg 要求字段顶格无缩进，EOF 标记结束
            cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
            Package: opencode
 -          Version: ${{ inputs.version }}
@@ -66,10 +72,12 @@ index 0580c59c600fc2befdd52fd712a818154039bde0..afd9b66fae2ee6d55578e1a1e1dedf89
 -           A standalone AI coding assistant with TUI, version ${{ inputs.version }}.
 +           A standalone AI coding assistant with TUI, version ${VERSION}.
            EOF
-           
+ 
 -          dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${{ inputs.version }}_amd64.deb"
 +          dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
  
+       # upload-artifact 汇总本平台产物，供后续下载或发布
++      # 通配符路径：避免版本号变化时遗漏产物，自动匹配所有版本包
        - uses: actions/upload-artifact@v4
          with:
            name: opencode-linux
@@ -79,17 +87,18 @@ index 0580c59c600fc2befdd52fd712a818154039bde0..afd9b66fae2ee6d55578e1a1e1dedf89
 +            packages/opencode/dist/opencode-linux-x64-*.tar.gz
 +            packages/opencode/dist/opencode_*_amd64.deb
  
+   # macOS 构建：arm64 (Apple Silicon) 和 x64 (Intel) 双架构
    build-macos:
-     runs-on: macos-latest
-@@ -68,21 +80,22 @@ jobs:
+@@ -82,21 +99,23 @@ jobs:
        - name: Build macOS
          run: |
            cd packages/opencode
 -          bun run script/build.ts --version=${{ inputs.version }} --os=darwin --skip-embed-web-ui
 +          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=darwin --skip-embed-web-ui
-         
+ 
        - name: Package macOS tar.gz
          run: |
++          # VERSION shell 变量：统一两架构的命名，避免重复展开 GitHub 表达式
 +          VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
            cd packages/opencode/dist/opencode-darwin-arm64/bin
 -          tar -czf ../../../opencode-darwin-arm64-${{ inputs.version }}.tar.gz opencode
@@ -107,20 +116,22 @@ index 0580c59c600fc2befdd52fd712a818154039bde0..afd9b66fae2ee6d55578e1a1e1dedf89
 +            packages/opencode/dist/opencode-darwin-arm64-*.tar.gz
 +            packages/opencode/dist/opencode-darwin-x64-*.tar.gz
  
+   # Windows 构建：x64 和 arm64 双架构，使用 pwsh 执行 PowerShell 脚本
    build-windows:
-     runs-on: windows-latest
-@@ -95,19 +108,20 @@ jobs:
+@@ -110,20 +129,22 @@ jobs:
          shell: pwsh
          run: |
            cd packages/opencode
 -          bun run script/build.ts --version=${{ inputs.version }} --os=win32 --skip-embed-web-ui
 +          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=win32 --skip-embed-web-ui
-         
+ 
        - name: Package Windows zip
          shell: pwsh
          run: |
++          # PowerShell 变量语法 $VERSION：与 bash 不同，pwsh 用 $ 前缀引用变量
 +          $VERSION = "${{ inputs.version || env.DEFAULT_VERSION }}"
            cd packages/opencode/dist/opencode-windows-x64/bin
+           # Compress-Archive 为 Windows 标准压缩格式，用户无需额外工具解压
 -          Compress-Archive -Path "opencode.exe" -DestinationPath "../../../opencode-windows-x64-${{ inputs.version }}.zip"
 +          Compress-Archive -Path "opencode.exe" -DestinationPath "../../../opencode-windows-x64-$VERSION.zip"
            cd ../../opencode-windows-arm64/bin
