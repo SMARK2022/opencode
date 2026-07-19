@@ -3116,6 +3116,7 @@ it.instance("concurrent loop callers all receive same error result", () =>
     yield* llm.fail("boom")
     yield* user(chat.id, "hello")
 
+      // #496：这里只断言并发 loop 共享结果；包级 timeout 仅防进程挂死，不构成 3 秒性能契约。
     const [a, b] = yield* Effect.all([prompt.loop({ sessionID: chat.id }), prompt.loop({ sessionID: chat.id })], {
       concurrency: "unbounded",
     })
