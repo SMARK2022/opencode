@@ -8,7 +8,7 @@ import { SyncEvent } from "../sync"
 import { Database } from "@/storage/db"
 import { ColdStorage } from "@/storage/cold"
 import { NotFoundError } from "@/storage/storage"
-import { and, desc, eq, gte, inArray, lt, or, sql } from "drizzle-orm"
+import { and, desc, eq, gte, inArray, lt, lte, or, sql } from "drizzle-orm"
 import { MessageTable, PartTable, SessionTable } from "./session.sql"
 import * as ProviderError from "@/provider/error"
 import { iife } from "@/util/iife"
@@ -21,6 +21,7 @@ import { Effect, Option, Schema, Types } from "effect"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
 import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import { MessageError } from "./message-error"
+import { CompactionBoundary } from "./compaction-boundary"
 import { AuthError, OutputLengthError } from "./message-error"
 import { formatCompactionClearedNotice, formatExecutionNotice } from "@/util/output-notice"
 export { AuthError, OutputLengthError } from "./message-error"
@@ -654,9 +655,22 @@ export type HotInfo =
   | Assistant
   | (Omit<User, "summary"> & { summary?: Omit<NonNullable<User["summary"]>, "diffs"> })
 
+export type ChronologyPart = {
+  type: string
+  synthetic?: true
+  metadata?: { goal_continuation?: true }
+}
+
+export type ChronologyMessage = {
+  info: HotInfo
+  parts: ChronologyPart[]
+}
+
 const UpdatedEventSchema = Schema.Struct({
   sessionID: SessionID,
   info: Info,
+  // summary.diffs 是派生的 per-user metadata；更新它不会改变 completed Tool history。
+  summaryOnly: Schema.optional(Schema.Boolean),
 })
 
 const RemovedEventSchema = Schema.Struct({
@@ -807,21 +821,90 @@ const infoFromRestored = (row: typeof MessageTable.$inferSelect) => {
   return value
 }
 
+// HotInfo 不访问 payload，批量 chronology 可线性扫描大型 Session 而不持久 thaw。
+// cold_ref/key 不暴露给 consumer，前端和 session logic 不判断 owner storage version。
 function hotInfo(row: typeof MessageTable.$inferSelect): HotInfo {
   if (row.data.role === "assistant") {
+    // Assistant projection 无冷业务字段，可直接保留 hidden/model/time 等 lifecycle 信息。
+    // 外部 SQL 破坏仍由真实 consumer 暴露，HotInfo 不制造 placeholder 修复。
+    // spread 保持同毫秒 chronology 与可见性所需的全部 hot fields。
     return { ...row.data, id: row.id, sessionID: row.session_id }
   }
+  // User 唯一冷字段是 summary.diffs；重建 summary 时类型层明确排除它。
   const summary = row.data.summary
     ? {
         ...(row.data.summary.title !== undefined ? { title: row.data.summary.title } : {}),
         ...(row.data.summary.body !== undefined ? { body: row.data.summary.body } : {}),
       }
     : undefined
+  // title/body 继续服务列表、Goal 和 model lookup，routine predicate 不丢可见信息。
+  // 该精简值不能用于 provider replay；完整 Message consumer 必须经过 hydrate。
   return {
     ...row.data,
     id: row.id,
     sessionID: row.session_id,
     summary,
+  }
+}
+
+// Goal chronology 只读取 Message hot info 与三个 Part locator 字段；Tool output、Reasoning、附件和 summary.diffs
+// 不会进入 JS，也不会触发持久 thaw。排序继续使用 persisted time，再以 MessageID 处理同毫秒 tie。
+export function chronology(sessionID: SessionID): ChronologyMessage[] {
+  return Database.use((db) => {
+    const messages = db
+      .select()
+      .from(MessageTable)
+      .where(eq(MessageTable.session_id, sessionID))
+      .orderBy(MessageTable.time_created, MessageTable.id)
+      .all()
+    const parts = db
+      .select({
+        messageID: PartTable.message_id,
+        type: sql<string>`json_extract(${PartTable.data}, '$.type')`,
+        synthetic: sql<number | null>`json_extract(${PartTable.data}, '$.synthetic')`,
+        goalContinuation: sql<number | null>`json_extract(${PartTable.data}, '$.metadata.goal_continuation')`,
+      })
+      .from(PartTable)
+      .where(eq(PartTable.session_id, sessionID))
+      .orderBy(PartTable.message_id, PartTable.id)
+      .all()
+    const byMessage = new Map<string, ChronologyPart[]>()
+    for (const part of parts) {
+      const value: ChronologyPart = {
+        type: part.type,
+        ...(part.synthetic === 1 ? { synthetic: true as const } : {}),
+        ...(part.goalContinuation === 1 ? { metadata: { goal_continuation: true as const } } : {}),
+      }
+      const list = byMessage.get(part.messageID)
+      if (list) list.push(value)
+      else byMessage.set(part.messageID, [value])
+    }
+    return messages.map((message) => ({ info: hotInfo(message), parts: byMessage.get(message.id) ?? [] }))
+  })
+}
+
+// cancel ownership 只依赖 Message parent/time hot fields。Parts 由 caller 仅为选中的 incomplete assistant 定点 hydrate，
+// 因而已完成 assistant 的冷 Tool history 不会因一次取消操作被扫描并预热。
+export function cancelSnapshot(sessionID: SessionID) {
+  const messages = Database.use((db) =>
+    db
+      .select()
+      .from(MessageTable)
+      .where(eq(MessageTable.session_id, sessionID))
+      .orderBy(MessageTable.time_created, MessageTable.id)
+      .all()
+      .map(hotInfo),
+  )
+  const parentIDs = new Set(
+    messages.flatMap((message) => (message.role === "assistant" ? [message.parentID] : [])),
+  )
+  return {
+    pendingAssistantIDs: messages.flatMap((message) =>
+      message.role === "assistant" && !message.time.completed ? [message.id] : [],
+    ),
+    orphanUserIDs: messages.flatMap((message) =>
+      message.role === "user" && !parentIDs.has(message.id) ? [message.id] : [],
+    ),
   }
 }
 
@@ -844,14 +927,17 @@ export const decodePartRow = part
 const older = (row: Cursor) =>
   or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
 
+// hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
+// refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
 function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
-  // page 先批量 thaw Message，再只查询该 page 的 Parts；范围外历史不会因一个 UI 请求被预热。
-  // Part 按 message_id 分组后恢复原 order，持久预热副作用与返回 transcript 范围严格一致。
-  // 任一 payload corruption 会使整个 hydrate 抛错，禁止同一 page 混合完整对象与占位对象。
+  // 任一 Message corruption 让整个范围失败，不能返回半完整、半 skeleton 的 transcript。
+  // Message refs 在单次批量 seam 中 thaw，避免逐 owner 重复打开共享 pack。
   const restoredRows = ColdStorage.thawMessageRows(rows)
+  // 只按选中 Message IDs 查询 children，范围外 archive 不进入 JS 或持久预热。
   const ids = restoredRows.map((row) => row.id)
   const partByMessage = new Map<string, Part[]>()
   if (ids.length > 0) {
+    // Part query 的 persisted order 是最终 child order，Map 只做 message_id join。
     const partRows = Database.use((db) =>
       db
         .select()
@@ -860,6 +946,8 @@ function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
         .orderBy(PartTable.message_id, PartTable.id)
         .all(),
     )
+    // grouped thaw 让 shared pack 在本范围最多解压一次，同时保留原 Part 顺序。
+    // 任一 Part payload 损坏都抛错，禁止同一 page 混入占位对象。
     const restoredParts = ColdStorage.thawPartRows(partRows)
     for (const row of restoredParts) {
       const next = partFromRestored(row)
@@ -869,6 +957,9 @@ function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
     }
   }
 
+  // 持久 thaw 在返回前完成，前端不会收到临时 lazy proxy。
+  // restoredRows 保持原 page 顺序，child Map 不改变 newest/oldest 语义。
+  // 因此持久预热副作用与本次返回 transcript 的范围严格一致。
   return restoredRows.map((row) => ({
     info: infoFromRestored(row),
     parts: partByMessage.get(row.id) ?? [],
@@ -1326,6 +1417,37 @@ export const findHot = Effect.fn("MessageV2.findHot")(function* (input: {
   }
 })
 
+// 自动 summary 只需要目标 user 与其 assistant children；按 snapshotMaxID 封住查询，
+// 避免并发追加被部分计入 per-user diff，也避免为一个 turn hydrate 整个 Session。
+export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssistantChildren")(function* (input: {
+  sessionID: SessionID
+  messageID: MessageID
+  throughMessageID: MessageID
+}) {
+  const rows = Database.use((db) =>
+    db
+      .select()
+      .from(MessageTable)
+      .where(
+        and(
+          eq(MessageTable.session_id, input.sessionID),
+          lte(MessageTable.id, input.throughMessageID),
+          or(
+            eq(MessageTable.id, input.messageID),
+            and(
+              sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
+              sql`json_extract(${MessageTable.data}, '$.parentID') = ${input.messageID}`,
+            ),
+          ),
+        ),
+      )
+      .orderBy(MessageTable.time_created, MessageTable.id)
+      .all(),
+  )
+  if (!rows.some((row) => row.id === input.messageID)) return [] as WithParts[]
+  return hydrate(rows)
+})
+
 // fork 只读取 raw storage rows 和结构关系，不经 info/part decoder，因而不会把 source prefix 持久 thaw。
 // messageID 是 exclusive fork point；Message 与 Part 使用相同 ascending ID 边界保留完整前缀。
 // Part 直接按 session+message_id 范围选择，避免把全部 MessageID 展开成超 SQLite 上限的 IN 参数。
@@ -1357,7 +1479,7 @@ export function rawForkRows(input: { sessionID: SessionID; messageID?: MessageID
   })
 }
 
-export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean }) {
+export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean; fromMessageID?: MessageID }) {
   const size = 50
   let before: string | undefined
   // Compaction recovery needs hidden structural anchors; callers that build a
@@ -1365,7 +1487,7 @@ export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean }
   const includeHidden = opts?.includeHidden ?? true
   while (true) {
     const next = Effect.runSync(
-      page({ sessionID, limit: size, before, includeHidden }).pipe(
+      page({ sessionID, limit: size, before, includeHidden, fromMessageID: opts?.fromMessageID }).pipe(
         Effect.catchIf(NotFoundError.isInstance, () =>
           Effect.succeed({ items: [] as WithParts[], more: false, cursor: undefined }),
         ),
@@ -1573,7 +1695,11 @@ function visibleCompactions(items: WithParts[]) {
 }
 
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
-  return filterCompacted(stream(sessionID))
+  const boundary = CompactionBoundary.latest(sessionID)
+  const cutoff = boundary?.tailStartID ?? boundary?.markerID
+  // cutoff 先于任何 business hydrate 决定；无 tail 时 marker 本身就是 head 终点，
+  // 有 tail 时从原始 retained turn 开始读取，再由 filterCompacted 恢复 provider 顺序。
+  return filterCompacted(stream(sessionID, { fromMessageID: cutoff }))
 })
 
 // filterCompacted reorders messages for model consumption

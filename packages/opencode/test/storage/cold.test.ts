@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Effect, Exit, Layer } from "effect"
+import { Context, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { ColdStorage } from "@/storage/cold"
 import { Database } from "@/storage/db"
 import { Session as SessionNs } from "@/session/session"
@@ -14,19 +14,130 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { BackgroundJob } from "@/background/job"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { testEffect } from "../lib/effect"
+import { SessionSummary } from "@/session/summary"
+import { Server } from "@/server/server"
+import { SessionPaths } from "@/server/routes/instance/httpapi/groups/session"
+import { aggregateStats } from "@/cli/cmd/stats/data"
+import { TestInstance } from "../fixture/fixture"
+import type { SessionID } from "@/session/schema"
+import path from "path"
 
+const sessionLayer = SessionNs.layer.pipe(
+  Layer.provide(Bus.layer),
+  Layer.provide(Storage.defaultLayer),
+  Layer.provide(SyncEvent.defaultLayer),
+  Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
+  Layer.provide(BackgroundJob.defaultLayer),
+)
+const summaryLayer = SessionSummary.layer.pipe(
+  Layer.provide(sessionLayer),
+  Layer.provide(Storage.defaultLayer),
+  Layer.provide(Bus.layer),
+)
 const it = testEffect(
   Layer.mergeAll(
-    SessionNs.layer.pipe(
-      Layer.provide(Bus.layer),
-      Layer.provide(Storage.defaultLayer),
-      Layer.provide(SyncEvent.defaultLayer),
-      Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
-      Layer.provide(BackgroundJob.defaultLayer),
-    ),
+    sessionLayer,
+    summaryLayer,
+    Storage.defaultLayer,
     CrossSpawnSpawner.defaultLayer,
   ),
 )
+
+class MirrorReadGate extends Context.Service<
+  MirrorReadGate,
+  { readonly ready: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void> }
+>()("@test/MirrorReadGate") {}
+
+const mirrorReadGateLayer = Layer.effect(
+  MirrorReadGate,
+  Effect.gen(function* () {
+    return MirrorReadGate.of({ ready: yield* Deferred.make<void>(), release: yield* Deferred.make<void>() })
+  }),
+)
+const delayedStorageLayer = Layer.effect(
+  Storage.Service,
+  Effect.gen(function* () {
+    const storage = yield* Storage.Service
+    const gate = yield* MirrorReadGate
+    return Storage.Service.of({
+      ...storage,
+      read: <T>(key: string[]) => {
+        if (key[0] !== "session_diff") return storage.read<T>(key)
+        return Deferred.succeed(gate.ready, undefined).pipe(
+          Effect.andThen(Deferred.await(gate.release)),
+          Effect.andThen(storage.read<T>(key)),
+        )
+      },
+    })
+  }),
+).pipe(Layer.provide(Storage.defaultLayer), Layer.provide(mirrorReadGateLayer))
+const raceSessionLayer = SessionNs.layer.pipe(
+  Layer.provide(Bus.layer),
+  Layer.provide(delayedStorageLayer),
+  Layer.provide(SyncEvent.defaultLayer),
+  Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
+  Layer.provide(BackgroundJob.defaultLayer),
+)
+const raceIt = testEffect(
+  Layer.mergeAll(raceSessionLayer, delayedStorageLayer, mirrorReadGateLayer, CrossSpawnSpawner.defaultLayer),
+)
+
+function addCompletedSummaryEdit(
+  sessions: SessionNs.Interface,
+  input: { sessionID: SessionID; directory: string; file: string; patch: string },
+) {
+  return Effect.gen(function* () {
+    const userID = MessageID.ascending()
+    yield* sessions.updateMessage({
+      id: userID,
+      sessionID: input.sessionID,
+      role: "user",
+      time: { created: Date.now() },
+      agent: "build",
+      model: { providerID: ProviderID.make("test-provider"), modelID: ModelID.make("test-model") },
+    })
+    const assistantID = MessageID.ascending()
+    yield* sessions.updateMessage({
+      id: assistantID,
+      sessionID: input.sessionID,
+      role: "assistant",
+      parentID: userID,
+      mode: "build",
+      agent: "build",
+      path: { cwd: input.directory, root: input.directory },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: ModelID.make("test-model"),
+      providerID: ProviderID.make("test-provider"),
+      time: { created: Date.now(), completed: Date.now() },
+    })
+    const partID = PartID.ascending()
+    yield* sessions.updatePart({
+      id: partID,
+      sessionID: input.sessionID,
+      messageID: assistantID,
+      type: "tool",
+      callID: `edit-${input.file}`,
+      tool: "edit",
+      state: {
+        status: "completed",
+        input: {},
+        output: "ok",
+        title: "edit",
+        metadata: {
+          filediff: {
+            file: path.join(input.directory, input.file),
+            patch: input.patch,
+            additions: 1,
+            deletions: 0,
+          },
+        },
+        time: { start: 0, end: 1 },
+      },
+    })
+    return { userID, assistantID, partID }
+  })
+}
 
 function coldOwnerCount(sessionIDs: string[]) {
   const allowed = new Set(sessionIDs)
@@ -624,17 +735,16 @@ describe.serial("ColdStorage", () => {
     }),
   )
 
-  // search 用例使用互不重叠的 input/output needle，明确区分允许索引与禁止索引的数据面。
-  // tool input 常驻 projection，session list 应能按它定位会话而无需访问 cold blob。
-  // tool output 和 provider metadata 都属于结果面，即使原文存在也不得污染 session 搜索。
+  // search 用例使用互不重叠的 Text/input/output needle，明确区分允许索引与禁止索引的数据面。
+  // visible Text 是用户定位 Session 的稳定内容；Tool identity/input/output/metadata 全部属于归档面。
   // output 被实际冻结且超过门槛，排除“搜索没命中只是测试没有冷数据”的假阳性。
   // 两次 list 后 owner 仍为 cold，证明 searchCondition 只执行 SQL 热投影，不调用 decoder。
   // 测试走 Session.list 公共接口，覆盖 TUI quick switch 实际使用的搜索路径。
   // 不断言标题搜索等既有行为，避免把本测试扩展成与冷存储无关的宽泛回归。
   // metadata 故意含 output needle，锁定 provider/internal metadata 同样不可进入结果。
-  // input 匹配使用 JSON 叶子值而非键名，保留现有“搜值不搜 command 键”的契约。
+  // visible Text 正向断言防止删除 Tool 分支时误伤仍受支持的 Session 定位内容。
   // 删除会话验证 search 只读操作没有制造额外 owner 或 payload。
-  it.instance("searches hot tool identity and input without thawing cold output", () =>
+  it.instance("excludes Tool fields while preserving visible Text search without thaw", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionNs.Service
       const session = yield* sessions.create({ title: "cold search" })
@@ -642,6 +752,7 @@ describe.serial("ColdStorage", () => {
       const partID = PartID.ascending()
       const inputNeedle = "visible-search-input-unique"
       const outputNeedle = "hidden-search-output-unique"
+      const textNeedle = "visible-session-text-unique"
       yield* sessions.updateMessage({
         id: messageID,
         sessionID: session.id,
@@ -672,6 +783,14 @@ describe.serial("ColdStorage", () => {
           time: { start: 1, end: 2 },
         },
       })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: session.id,
+        messageID,
+        type: "text",
+        text: textNeedle,
+        time: { start: 1, end: 2 },
+      })
       Database.use((db) =>
         db
           .update(SessionTable)
@@ -681,8 +800,9 @@ describe.serial("ColdStorage", () => {
       )
       expect(ColdStorage.freezeOwner({ type: "part", id: partID }).type).toBe("frozen")
 
-      expect((yield* sessions.list({ search: inputNeedle })).some((item) => item.id === session.id)).toBe(true)
+      expect((yield* sessions.list({ search: inputNeedle })).some((item) => item.id === session.id)).toBe(false)
       expect((yield* sessions.list({ search: outputNeedle })).some((item) => item.id === session.id)).toBe(false)
+      expect((yield* sessions.list({ search: textNeedle })).some((item) => item.id === session.id)).toBe(true)
       expect(coldOwnerCount([session.id])).toBe(1)
       yield* sessions.remove(session.id)
     }),
@@ -964,17 +1084,72 @@ describe.serial("ColdStorage", () => {
       )
       expect(ColdStorage.freezeOwner({ type: "part", id: partID, now: Date.now() }).type).toBe("frozen")
       const beforeVerify = ColdStorage.verify({ repair: false }).refCountMismatches
-      const hash = Database.use(
+      const owner = Database.use(
         (db) =>
-          db.select({ hash: PartTable.cold_ref }).from(PartTable).where(Database.eq(PartTable.id, partID)).get()?.hash,
+          db
+            .select({ hash: PartTable.cold_ref, key: PartTable.cold_key })
+            .from(PartTable)
+            .where(Database.eq(PartTable.id, partID))
+            .get(),
       )
-      if (!hash) throw new Error("Expected a cold ref for verify test")
+      if (!owner?.hash || !owner.key) throw new Error("Expected a packed cold owner for verify test")
+      const hash = owner.hash
       Database.use((db) =>
         db.update(ColdStorageTable).set({ ref_count: 99 }).where(Database.eq(ColdStorageTable.hash, hash)).run(),
       )
       expect(ColdStorage.verify({ repair: false }).refCountMismatches).toBe(beforeVerify + 1)
       expect(ColdStorage.verify({ repair: true }).repaired).toBeGreaterThanOrEqual(1)
       expect(ColdStorage.verify({ repair: false }).refCountMismatches).toBe(beforeVerify)
+
+      // 合法 frame 搭配不存在的随机 entry key，专门区分完整 owner verify 与旧 payload-only task。
+      Database.use((db) =>
+        db.update(PartTable).set({ cold_key: Buffer.alloc(32, 0xa5) }).where(Database.eq(PartTable.id, partID)).run(),
+      )
+      const verifyTask = ColdStorage.prepareMaintenance({ operation: "verify", repair: true, batchSize: 50 })
+      if (verifyTask.type !== "task") throw new Error("Expected task-backed repair")
+      const verified = yield* Effect.promise(() =>
+        ColdStorage.maintain(verifyTask, { lease: { assertOwned() {} }, checkpoint: async () => {} }),
+      )
+      if (verified.type !== "task") throw new Error("Expected task result for repair")
+      // repair 不可修 key；task 必须报告 corruption，不能因 payload hash 正常而 completed/failed=0。
+      expect(verified.task.failed).toBeGreaterThan(0)
+      Database.use((db) =>
+        db.update(PartTable).set({ cold_key: owner.key }).where(Database.eq(PartTable.id, partID)).run(),
+      )
+
+      const baselineOwners = ColdStorage.verify({ repair: false }).corruptOwners
+      // dirty 没有 claimed cursor 是非法 Session 状态；repair 只能报告，不能猜测清 bit 或制造 cursor。
+      Database.use((db) =>
+        db
+          .update(SessionTable)
+          .set({ summary_init_dirty: true })
+          .where(Database.eq(SessionTable.id, session.id))
+          .run(),
+      )
+      const summaryTask = ColdStorage.prepareMaintenance({ operation: "verify", repair: true, batchSize: 50 })
+      if (summaryTask.type !== "task") throw new Error("Expected task-backed summary repair")
+      const summaryVerified = yield* Effect.promise(() =>
+        ColdStorage.maintain(summaryTask, { lease: { assertOwned() {} }, checkpoint: async () => {} }),
+      )
+      if (summaryVerified.type !== "task") throw new Error("Expected task result for summary repair")
+      expect(summaryVerified.task.failed).toBeGreaterThan(0)
+      expect(ColdStorage.verify({ repair: false }).corruptOwners).toBe(baselineOwners + 1)
+      expect(
+        Database.use((db) =>
+          db
+            .select({ dirty: SessionTable.summary_init_dirty })
+            .from(SessionTable)
+            .where(Database.eq(SessionTable.id, session.id))
+            .get()?.dirty,
+        ),
+      ).toBe(true)
+      Database.use((db) =>
+        db
+          .update(SessionTable)
+          .set({ summary_init_dirty: false })
+          .where(Database.eq(SessionTable.id, session.id))
+          .run(),
+      )
 
       const expanded = ColdStorage.expand({ sessionID: session.id, all: false })
       expect(expanded.expanded).toBe(1)
@@ -1317,6 +1492,945 @@ describe.serial("ColdStorage", () => {
       expect(resumed.type === "task" ? resumed.task.status : undefined).toBe("completed")
       expect(coldOwnerCount([session.id])).toBe(1)
       yield* sessions.remove(session.id)
+    }),
+  )
+})
+
+describe.serial("Packed ColdStorage V2", () => {
+  // maintenance batch 必须把同 Session/kind 的小 owner 装入同一 pack；相同 ref 配合不同 key 才能定位各自 entry。
+  // refcount 以真实 owner 数计为 2，而不是按 payload 行或 Session 计为 1；expand 后 payload 应由最后一个 owner 释放。
+  // 恢复预期直接使用压缩前持久 business rows，避免测试复制 extraction、codec 或 entry selector 算法。
+  it.instance("packs small Part owners together and expands them losslessly", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({ title: "shared Part pack" })
+      const first = yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/pack-a.ts",
+        patch: "+pack-a\n",
+      })
+      // 两个 Tool 使用不同文件和 patch，排除内容去重碰巧共享 entry key 的假阳性。
+      const second = yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/pack-b.ts",
+        patch: "+pack-b\n",
+      })
+      const ids = [first.partID, second.partID]
+      // 原始 rows 在压缩前读取，是允许的业务基线；压缩后的 skeleton 不参与 expected 构造。
+      const original = Database.use((db) =>
+        db
+          .select({ id: PartTable.id, data: PartTable.data })
+          .from(PartTable)
+          .where(Database.inArray(PartTable.id, ids))
+          .orderBy(PartTable.id)
+          .all(),
+      )
+      // maintenance 走公开 dispatcher 与真实 lease contract，不能用 direct freeze 掩盖 batch packing 差异。
+      const result = yield* Effect.promise(() =>
+        ColdStorage.maintain(
+          ColdStorage.prepareMaintenance({
+            operation: "compress",
+            olderThanMs: 0,
+            batchSize: ColdStorage.DEFAULT_BATCH_SIZE,
+          }),
+          { lease: { assertOwned() {} }, checkpoint: async () => {} },
+        ),
+      )
+      expect(result.type === "task" ? result.task.status : undefined).toBe("completed")
+
+      // key 只断言互异而不复制二进制编码，未来可改变 key representation 而不削弱 entry identity。
+      const packed = Database.use((db) =>
+        db
+          .select({ id: PartTable.id, ref: PartTable.cold_ref, key: PartTable.cold_key })
+          .from(PartTable)
+          .where(Database.inArray(PartTable.id, ids))
+          .orderBy(PartTable.id)
+          .all(),
+      )
+      expect(packed).toHaveLength(2)
+      expect(packed[0]?.ref).toBe(packed[1]?.ref)
+      expect(packed[0]?.key).not.toEqual(packed[1]?.key)
+      // payload refcount 从真实表读取，证明共享收益与 owner 生命周期同时成立。
+      expect(
+        Database.use((db) =>
+          db
+            .select({ refs: ColdStorageTable.ref_count })
+            .from(ColdStorageTable)
+            .where(Database.eq(ColdStorageTable.hash, packed[0]?.ref ?? ""))
+            .get(),
+        ),
+      ).toEqual({ refs: 2 })
+
+      // expand 后同时比较 data 和空 payload 表，防止“业务值恢复但 orphan pack 遗留”的半成功。
+      ColdStorage.expand({ all: true })
+      expect(
+        Database.use((db) =>
+          db
+            .select({ id: PartTable.id, data: PartTable.data })
+            .from(PartTable)
+            .where(Database.inArray(PartTable.id, ids))
+            .orderBy(PartTable.id)
+            .all(),
+        ),
+      ).toEqual(original)
+      // fixture DB 随 Instance scope 清理，断言不依赖其他测试的全局 payload 数量。
+      expect(Database.use((db) => db.select().from(ColdStorageTable).all())).toEqual([])
+    }),
+  )
+
+  // legacy mirror 是迁移前已发布的数据来源，首次公开读取必须先转入同库 DB authority。
+  // 删除 mirror 后 Session、Summary service 与 HTTP 三个消费者都只能得到同一持久值。
+  // expected 完全由测试字面量构造，不读取 summary payload 反向生成预期值。
+  it.instance("adopts a legacy diff once for every public diff seam", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* SessionNs.Service
+      const summary = yield* SessionSummary.Service
+      const storage = yield* Storage.Service
+      const session = yield* sessions.create({ title: "legacy summary adoption" })
+      const expected = [{ file: "legacy.ts", additions: 3, deletions: 1 }]
+
+      // 该兼容只允许 pending initialization 使用一次，不能演变为 corruption 后的 fallback。
+      yield* storage.write(["session_diff", session.id], expected)
+      expect(yield* sessions.diff(session.id)).toEqual(expected)
+      // mirror 删除模拟用户清理外部缓存目录，后续成功不能依赖文件幸存。
+      yield* storage.remove(["session_diff", session.id])
+      // 第二次读取不检查 helper 调用次数，只观察外部数据源已经不存在时的业务结果。
+      expect(yield* summary.diff({ sessionID: session.id })).toEqual(expected)
+
+      // 三个 seam 共用同一 Session，能够暴露任一 caller 绕过 DB authority 的分叉实现。
+      // HTTP 路径使用公开 route 常量与真实 instance header，不复制 handler 内部函数。
+      const response = yield* Effect.promise(() =>
+        Promise.resolve(
+          Server.Default().app.request(SessionPaths.diff.replace(":sessionID", session.id), {
+            headers: { "x-opencode-directory": test.directory },
+          }),
+        ),
+      )
+      const body = yield* Effect.promise(() => response.text())
+      // 非 200 会保留 response body，确保 codec/Storage defect 不被空数组断言掩盖。
+      if (response.status !== 200) throw new Error(`HTTP ${response.status}: ${body}`)
+      // missing patch 的更细兼容形状由 unchanged HTTP regression 单独覆盖，本例只锁定 authority 生命周期。
+      expect(JSON.parse(body)).toEqual(expected)
+    }),
+  )
+
+  // 首次 automatic summarize 即使只有 legacy materialization，也必须更新 Session counters。
+  // 第二次执行使用同一边界并在 mirror 删除后读取，必须保持 aggregate 和 counters 稳定。
+  it.instance("publishes legacy materialization through automatic summarize exactly once", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const summary = yield* SessionSummary.Service
+      const storage = yield* Storage.Service
+      const session = yield* sessions.create({ title: "automatic legacy materialization" })
+      const messageID = MessageID.ascending()
+      // user Message 没有 Tool child，刻意制造“payload 改变但增量为空”的 materialized 分支。
+      yield* sessions.updateMessage({
+        id: messageID,
+        sessionID: session.id,
+        role: "user",
+        time: { created: Date.now() },
+        agent: "build",
+        model: { providerID: ProviderID.make("test-provider"), modelID: ModelID.make("test-model") },
+      })
+      // expected 数字来自 literal legacy 行，不从 Session counters 反推，避免同源错误。
+      const expected = [{ file: "legacy-auto.ts", additions: 4, deletions: 2 }]
+      // storage.write 仍是 existing downgrade mirror orchestration，不是新的 production authority。
+      yield* storage.write(["session_diff", session.id], expected)
+
+      yield* summary.summarize({ sessionID: session.id, messageID })
+      // counters 由公开 Session.get 观察，避免断言 SummaryCache private CAS 结果。
+      expect((yield* sessions.get(session.id)).summary).toMatchObject({ additions: 4, deletions: 2, files: 1 })
+      // 第二次 summarize 证明 cursor-only 重放不会重复增加 files/additions/deletions。
+      yield* summary.summarize({ sessionID: session.id, messageID })
+      // mirror 在第二次后删除，随后 Summary service 必须仍从 DB ref 返回同一累计值。
+      yield* storage.remove(["session_diff", session.id])
+      expect(yield* summary.diff({ sessionID: session.id })).toEqual(expected)
+      // Bus 发布次数不作为断言，因为用户可观察 counters/diff 已覆盖 exactly-once 语义。
+      // 该用例与普通 Session.diff 初始化分开，防止先读 cache 掩盖 automatic 路径差异。
+      expect((yield* sessions.get(session.id)).summary).toMatchObject({ additions: 4, deletions: 2, files: 1 })
+    }),
+  )
+
+  // mirror 与第一轮累计值逐字段相等时只能证明 prefix，不能声称覆盖初始化时已持久化的最新 Tool tail。
+  // expected 两个文件各出现一次；丢失第二项或重复第一项都会改变公开数组与计数。
+  it.instance("keeps the Tool tail after proving a legacy cumulative prefix", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* SessionNs.Service
+      const storage = yield* Storage.Service
+      const session = yield* sessions.create({ title: "legacy prefix with tail" })
+      // 两个文件不同使 append 与 merge 行为可直接观察，不依赖 patch parser。
+      const first = { file: "src/first.ts", patch: "+first\n", additions: 1, deletions: 0, status: "added" as const }
+      // second literal 完全由测试构造，若 cursor 错标为当前最大值就会稳定丢失该项。
+      const second = { file: "src/second.ts", patch: "+second\n", additions: 1, deletions: 0, status: "added" as const }
+      yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: first.file,
+        patch: first.patch,
+      })
+      // mirror 写入严格位于 first Tool 与 second Tool 之间，复现正常 summarize 的真实持久顺序。
+      // first literal 同时作为 mirror 与 expected prefix，lineage proof 必须逐字段匹配才可抑制 seed。
+      yield* storage.write(["session_diff", session.id], [first])
+      yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: second.file,
+        patch: second.patch,
+      })
+
+      // 文件顺序也参与断言，保护按 MessageID 累计的用户展示语义。
+      // 测试不读取 summary_cursor，结果数组本身就是 public contract 的充分证据。
+      expect(yield* sessions.diff(session.id)).toEqual([first, second])
+      // 删除 mirror 后重复读取证明正确 tail 已进入同库 payload，而非每次重新读文件。
+      yield* storage.remove(["session_diff", session.id])
+      // 同一 worktree path normalization 在 helper 和 expected 中使用相对路径，排除平台分隔符噪声。
+      expect(yield* sessions.diff(session.id)).toEqual([first, second])
+    }),
+  )
+
+  // 不可证明 lineage 的 legacy aggregate 是 opaque seed；full expand 必须先把它转为同一 Session 的 hot seed。
+  // 删除 mirror 后仍返回逐字段原值，证明 expand 没有重新启用外部文件 fallback。
+  it.instance("preserves an opaque legacy aggregate across full expand", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* SessionNs.Service
+      const storage = yield* Storage.Service
+      const session = yield* sessions.create({ title: "opaque legacy expand" })
+      // 同 Session 只有一个 Tool，使 opaque 判断的反例最小且每个输入都负载必要。
+      yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/opaque.ts",
+        patch: "+tool-evidence\n",
+      })
+      // Tool evidence 与 legacy 修改同一文件但 patch/计数不同，刻意阻止 cumulative-prefix proof。
+      // expected 不从 hot seed 列读取，避免直接断言 private representation。
+      const expected = [
+        { file: "src/opaque.ts", patch: "+legacy-import\n", additions: 7, deletions: 3, status: "modified" as const },
+      ]
+      yield* storage.write(["session_diff", session.id], expected)
+      // 首次公开结果必须选择 persisted legacy 语义，不能把两个来源猜测性拼接。
+      expect(yield* sessions.diff(session.id)).toEqual(expected)
+      // hot seed 留在 Session 行而非外部目录，所以用户清理 mirror 不影响可逆性。
+      yield* storage.remove(["session_diff", session.id])
+
+      // expand 使用公开 ColdStorage operation，覆盖 summary owner 与 Message/Part owner 的统一清理路径。
+      ColdStorage.expand({ all: true })
+      // ref/cursor 归零只证明 representation 展开，随后 public diff byte-equal 才证明业务值未丢失。
+      expect(
+        Database.use((db) =>
+          db
+            .select({ ref: SessionTable.summary_ref, cursor: SessionTable.summary_cursor })
+            .from(SessionTable)
+            .where(Database.eq(SessionTable.id, session.id))
+            .get(),
+        ),
+      ).toEqual({ ref: null, cursor: null })
+      // next diff 可重新压入 DB payload，但该表示变化不能改变 FileDiff 数组。
+      expect(yield* sessions.diff(session.id)).toEqual(expected)
+    }),
+  )
+
+  // opaque seed 覆盖 first Tool；second Tool 是可证明的 post-seed suffix。
+  // suffix replacement 必须保留 seed，只从当前 second Part 重建，不能累计旧版 suffix patch。
+  it.instance("preserves an opaque seed while rebuilding a mutated post-seed suffix", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* SessionNs.Service
+      const storage = yield* Storage.Service
+      const session = yield* sessions.create({ title: "opaque suffix mutation" })
+      // first Tool evidence 与 seed 不同，确保前缀确实不可追溯而不是普通 exact-prefix case。
+      yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/pre-seed.ts",
+        patch: "+tool-before-seed\n",
+      })
+      // suffix 文件与 seed 文件不同，使 merge index 不会掩盖位置分类错误。
+      const seed = {
+        file: "src/imported.ts",
+        patch: "+opaque-legacy\n",
+        additions: 5,
+        deletions: 1,
+        status: "modified" as const,
+      }
+      yield* storage.write(["session_diff", session.id], [seed])
+      expect(yield* sessions.diff(session.id)).toEqual([seed])
+      // mirror 在 mutation 前已删除，projector 只能保存 DB seed 并从当前 Part 重建。
+      yield* storage.remove(["session_diff", session.id])
+
+      // second Tool 在初始化后创建，其 MessageID 严格大于 seed cursor，提供持久位置分类证据。
+      const suffix = yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/suffix.ts",
+        patch: "+suffix-old\n",
+      })
+      expect(yield* sessions.diff(session.id)).toEqual([
+        seed,
+        { file: "src/suffix.ts", patch: "+suffix-old\n", additions: 1, deletions: 0, status: "added" },
+      ])
+      // replacement 复用同一 PartID，模拟公开 PATCH/完整 projector replacement，而非新增第三条 diff。
+      yield* sessions.updatePart({
+        id: suffix.partID,
+        sessionID: session.id,
+        messageID: suffix.assistantID,
+        type: "tool",
+        callID: "edit-suffix-replaced",
+        tool: "edit",
+        state: {
+          status: "completed",
+          input: {},
+          output: "ok",
+          title: "edit",
+          metadata: {
+            filediff: {
+              file: path.join(test.directory, "src/suffix.ts"),
+              patch: "+suffix-new\n",
+              additions: 1,
+              deletions: 0,
+            },
+          },
+          time: { start: 0, end: 1 },
+        },
+      })
+      // expected 同时拒绝 seed 丢失、old suffix 遗留和 old+new patch 重复三类错误。
+      // status/additions/deletions 与 patch 一起断言，防止只修字符串却保留旧 projection 标量。
+      // public Session.diff 是 frontend/HTTP 共用业务 seam，测试不调用 invalidation helper。
+      expect(yield* sessions.diff(session.id)).toEqual([
+        seed,
+        { file: "src/suffix.ts", patch: "+suffix-new\n", additions: 1, deletions: 0, status: "added" },
+      ])
+    }),
+  )
+
+  // opaque seed 无法把某段反向归属给 covered Tool；该历史被修改后必须退休 seed并从当前 rows 完整重建。
+  // mirror 已删除，确保 rebuilt 值没有通过兼容文件取回失效 patch。
+  it.instance("retires an opaque seed after a covered history mutation", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* SessionNs.Service
+      const storage = yield* Storage.Service
+      const session = yield* sessions.create({ title: "opaque covered mutation" })
+      // mutation MessageID 位于 seed cursor 内，和上一用例的 post-seed 条件形成互补边界。
+      const edit = yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/covered.ts",
+        patch: "+covered-old\n",
+      })
+      // legacy 文件与 Tool 文件不同，若 seed 未退休会在结果中清晰多出 imported.ts。
+      const seed = [
+        { file: "src/imported.ts", patch: "+opaque\n", additions: 9, deletions: 4, status: "modified" as const },
+      ]
+      yield* storage.write(["session_diff", session.id], seed)
+      expect(yield* sessions.diff(session.id)).toEqual(seed)
+      // mirror 清理不会删除 per-Message summary 或 Tool metadata，因此零数据损失仍可由重建证明。
+      yield* storage.remove(["session_diff", session.id])
+
+      // Part business row 始终存在，测试只让派生 Session aggregate 失效，不混入删除语义。
+      // 不尝试从 opaque seed 减去旧 Tool，锁定“正式失效后全量重建”而非不可证明的 lineage 算法。
+      yield* sessions.updatePart({
+        id: edit.partID,
+        sessionID: session.id,
+        messageID: edit.assistantID,
+        type: "tool",
+        callID: "edit-covered-replaced",
+        tool: "edit",
+        state: {
+          status: "completed",
+          input: {},
+          output: "ok",
+          title: "edit",
+          metadata: {
+            filediff: {
+              file: path.join(test.directory, "src/covered.ts"),
+              patch: "+covered-new\n",
+              additions: 1,
+              deletions: 0,
+            },
+          },
+          time: { start: 0, end: 1 },
+        },
+      })
+      // replacement expected 只来自当前 visible Tool metadata，是现有 Revert 重建语义的独立字面量。
+      // files 数量从一到一但文件名变化，防止仅检查 counters 的弱断言漏掉 stale seed。
+      // 完整 public array 比较同时保护顺序、路径、patch、计数与 status。
+      expect(yield* sessions.diff(session.id)).toEqual([
+        { file: "src/covered.ts", patch: "+covered-new\n", additions: 1, deletions: 0, status: "added" },
+      ])
+    }),
+  )
+
+  // persisted claim 是初始化 I/O 的 durable boundary；covered closed Tool mutation 必须把它标成 dirty。
+  // resumed public diff 随后跳过 stale mirror，只从当前 rows 重建 replacement patch。
+  it.instance("rejects a stale mirror after a claimed boundary becomes dirty", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* SessionNs.Service
+      const storage = yield* Storage.Service
+      const session = yield* sessions.create({ title: "dirty initialization claim" })
+      const edit = yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/claim.ts",
+        patch: "+claim-old\n",
+      })
+      // stale mirror 使用不同文件和大计数，若被采用会产生一眼可见的错误结果。
+      yield* storage.write(["session_diff", session.id], [
+        { file: "src/stale.ts", patch: "+stale\n", additions: 20, deletions: 10, status: "modified" },
+      ])
+      // 测试直接构造 crash-resume 可见的 persisted claim，而不是依赖不可控 wall-clock race。
+      Database.use((db) =>
+        db
+          .update(SessionTable)
+          .set({
+            summary_initialized: false,
+            summary_init_dirty: false,
+            // claim cursor 指向 completed Assistant，满足“covered closed history”而非 running activity。
+            summary_cursor: edit.assistantID,
+            summary_ref: null,
+            // summary_ref/seed 显式为空，保证 fixture 表示 pending initialization 而不是 materialized cache。
+            summary_seed: null,
+            time_updated: SessionTable.time_updated,
+          })
+          .where(Database.eq(SessionTable.id, session.id))
+          .run(),
+      )
+      // Part replacement 经公开 Session service 投影，使 dirty 与 owner replacement 共享真实 transaction。
+      yield* sessions.updatePart({
+        id: edit.partID,
+        sessionID: session.id,
+        messageID: edit.assistantID,
+        type: "tool",
+        callID: "edit-claim-replaced",
+        tool: "edit",
+        state: {
+          status: "completed",
+          input: {},
+          output: "ok",
+          title: "edit",
+          metadata: {
+            filediff: {
+              file: path.join(test.directory, "src/claim.ts"),
+              patch: "+claim-new\n",
+              additions: 1,
+              deletions: 0,
+            },
+          },
+          time: { start: 0, end: 1 },
+        },
+      })
+      // 首次 diff 即恢复 current Tool 值，证明 dirty resume 在文件 I/O 前跳过 mirror。
+      // expected 不读取 summary_init_dirty；用户结果比内部 bit 更能保护 crash-resume contract。
+      // 本例与 Deferred race 并存，分别覆盖进程重启状态和同进程 I/O 窗口。
+      expect(yield* sessions.diff(session.id)).toEqual([
+        { file: "src/claim.ts", patch: "+claim-new\n", additions: 1, deletions: 0, status: "added" },
+      ])
+    }),
+  )
+
+  // pending Tool 没有稳定 filediff metadata，不属于 aggregate producer；input/output 变化不能污染 claim。
+  // claim 保持 clean 时首次读取仍采用合法 mirror，避免无关 active-turn 写入抛弃可恢复历史。
+  it.instance("keeps an initialization claim clean for a pending Tool update", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* SessionNs.Service
+      const storage = yield* Storage.Service
+      const session = yield* sessions.create({ title: "clean initialization claim" })
+      const edit = yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/existing.ts",
+        patch: "+existing\n",
+      })
+      // existing completed Tool 作为重建反例：若 claim 被误标 dirty，结果会变成 existing.ts。
+      // literal mirror 与 existing Tool 完全不同，使 clean/dirty 两条路径可由公开结果判别。
+      const expected = [
+        { file: "src/imported.ts", patch: "+imported\n", additions: 8, deletions: 2, status: "modified" as const },
+      ]
+      yield* storage.write(["session_diff", session.id], expected)
+      Database.use((db) =>
+        db
+          .update(SessionTable)
+          .set({
+            summary_initialized: false,
+            summary_init_dirty: false,
+            summary_cursor: edit.assistantID,
+            summary_ref: null,
+            summary_seed: null,
+            time_updated: SessionTable.time_updated,
+          })
+          .where(Database.eq(SessionTable.id, session.id))
+          .run(),
+      )
+
+      // pending Part 插入和 replacement 都位于 captured closed Message 下，专门测试 projector 的 producer 分类。
+      // pending Tool 保持热态，测试不把冷 codec 行为混入初始化分类。
+      const pendingID = PartID.ascending()
+      yield* sessions.updatePart({
+        id: pendingID,
+        sessionID: session.id,
+        messageID: edit.assistantID,
+        type: "tool",
+        callID: "pending-tool",
+        tool: "edit",
+        state: { status: "pending", input: { file: "src/pending.ts" }, raw: "pending" },
+      })
+      // callID 保持相同，模拟流式 Tool input 更新而非另一个独立调用。
+      // raw/input 两次变化均不产生 completed metadata，故任何 dirty 都是过度失效。
+      yield* sessions.updatePart({
+        id: pendingID,
+        sessionID: session.id,
+        messageID: edit.assistantID,
+        type: "tool",
+        callID: "pending-tool",
+        tool: "edit",
+        state: { status: "pending", input: { file: "src/pending.ts", content: "changed" }, raw: "changed" },
+      })
+      // 不检查 dirty=false 列值，避免测试耦合 bit 表示；只验证其业务后果。
+      // 该正常 active-turn 路径避免频繁废弃 legacy import，属于性能与兼容共同边界。
+      expect(yield* sessions.diff(session.id)).toEqual(expected)
+    }),
+  )
+
+  // hidden 是 transcript 可见性，不是 usage/statistics 删除；完整 report 必须与隐藏前逐字段相同。
+  // v2 cold_stats 保存既有统计标量；owner/ref/key/projection/refcount 的前后快照证明 Stats 没有持久 thaw。
+  it.instance("keeps hidden data in Stats without thawing packed owners", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({ title: "hidden packed stats" })
+      const edit = yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/stats.ts",
+        patch: "+stats\n",
+      })
+      // expected report 由 hot path 生成，不从 cold_stats 反推，避免 projector 与测试共享错误公式。
+      // 同一 report 包含 session/tool/model/agent/token/字符等所有现有透视结构。
+      const hot = yield* aggregateStats()
+      Database.use((db) => {
+        const row = db.select().from(MessageTable).where(Database.eq(MessageTable.id, edit.assistantID)).get()
+        if (!row) throw new Error("Stats fixture assistant is missing")
+        // hidden 采用真实 undo reason shape，不用 boolean 伪造旧 schema。
+        db.update(MessageTable)
+          .set({ data: { ...row.data, hidden: { reason: "undo", time: Date.now() } }, time_updated: row.time_updated })
+          .where(Database.eq(MessageTable.id, row.id))
+          .run()
+      })
+      // hot report 在 hidden 标记前捕获，随后 byte-deep equality 证明 hidden rows 仍计入全部 public pivots。
+      expect(yield* aggregateStats()).toEqual(hot)
+
+      // Tool output 虽很小仍进入 v2 projection，freeze result 证明测试确实覆盖 cold owner。
+      expect(
+        ColdStorage.freezeOwner({ type: "part", id: edit.partID, now: Date.now() + 1_000, olderThanMs: 0 }).type,
+      ).toBe("frozen")
+      // state snapshot 包含 owner ref/key/stats 与所有 payload refcount，防止只检查 cold_ref 的弱证明。
+      const state = () =>
+        Database.use((db) => ({
+          owner: db
+            .select({ ref: PartTable.cold_ref, key: PartTable.cold_key, stats: PartTable.cold_stats })
+            .from(PartTable)
+            .where(Database.eq(PartTable.id, edit.partID))
+            .get(),
+          payloads: db
+            .select({ hash: ColdStorageTable.hash, refs: ColdStorageTable.ref_count })
+            .from(ColdStorageTable)
+            .orderBy(ColdStorageTable.hash)
+            .all(),
+        }))
+      const before = state()
+      // aggregateStats 不经过 Session.messages，故完成后 owner 必须逐字段保持不变。
+      expect(yield* aggregateStats()).toEqual(hot)
+      expect(state()).toEqual(before)
+      // v1 parity 由真实 current-copy CLI copy 单独验证，本 fixture 聚焦 hidden 与 v2 metadata-only path。
+    }),
+  )
+
+  // page SQL 先选定一条 Message 再 hydrate；第二条只作为 next-page 范围之外的数据，不能被顺带 thaw。
+  // 随后的显式 full-history Session.messages 保持原合同并恢复其余 owner，证明冷热选择由调用意图决定。
+  it.instance("thaws only the requested Message page before an explicit full-history read", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({ title: "bounded Message page" })
+      const ids: PartID[] = []
+      // 三条 Message 使用递增时间与 ID，最新一页选择不依赖 SQLite 未定义顺序。
+      for (const index of [1, 2, 3]) {
+        const messageID = MessageID.ascending()
+        yield* sessions.updateMessage({
+          id: messageID,
+          sessionID: session.id,
+          role: "assistant",
+          parentID: MessageID.ascending(),
+          modelID: ModelID.make("test-model"),
+          providerID: ProviderID.make("test-provider"),
+          mode: "build",
+          agent: "build",
+          path: { cwd: session.directory, root: session.directory },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created: Date.now() + index, completed: Date.now() + index },
+        })
+        const partID = PartID.ascending()
+        ids.push(partID)
+        // 每条 reasoning 文本唯一且足够大，freeze 不会因 no-fields 或体积条件跳过。
+        // Parts 属于不同 Messages，避免同 Message sibling grouping 把范围边界混淆。
+        yield* sessions.updatePart({
+          id: partID,
+          sessionID: session.id,
+          messageID,
+          type: "reasoning",
+          text: `bounded-${index}-`.repeat(512),
+          time: { start: index, end: index + 1 },
+        })
+      }
+      Database.use((db) =>
+        db
+          .update(SessionTable)
+          .set({ time_updated: Date.now() - 31 * 24 * 60 * 60 * 1000 })
+          .where(Database.eq(SessionTable.id, session.id))
+          .run(),
+      )
+      ids.forEach((id) => expect(ColdStorage.freezeOwner({ type: "part", id }).type).toBe("frozen"))
+      expect(coldOwnerCount([session.id])).toBe(3)
+
+      // 测试不调用 thawOwner，所有恢复均由 MessageV2 public business seam 触发。
+      const page = yield* MessageV2.page({ sessionID: session.id, limit: 1 })
+      expect(page.items).toHaveLength(1)
+      // page limit=1 同时断言 more=true，证明第二条仅作为范围探针而非被 hydrate 的 item。
+      expect(page.more).toBe(true)
+      // cold owner 数从 3 到 2 是持久预热范围的数据库证据，不断言内部 SQL 次数。
+      expect(coldOwnerCount([session.id])).toBe(2)
+      // explicit no-limit consumer 随后降到 0，保护 export/Revert 类完整历史合同。
+      expect(yield* sessions.messages({ sessionID: session.id })).toHaveLength(3)
+      // 原始文本可由完整 suite 的 Message round-trip覆盖，本例只锁定选择范围和 owner 生命周期。
+      expect(coldOwnerCount([session.id])).toBe(0)
+    }),
+  )
+
+  // completed Compaction 没有 tail_start_id 时 marker 本身就是兼容 cutoff，不能因缺少 tail 回退到完整 Session。
+  // filterCompactedEffect 必须先查询 boundary 再 stream/hydrate，故旧 reasoning owner 在 routine prompt window 后仍为 cold。
+  it.instance("keeps a no-tail compacted head cold while returning the retained window", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({ title: "no-tail compacted boundary" })
+      const oldUser = MessageID.ascending()
+      yield* sessions.updateMessage({
+        id: oldUser,
+        sessionID: session.id,
+        role: "user",
+        time: { created: Date.now() },
+        agent: "build",
+        model: { providerID: ProviderID.make("test-provider"), modelID: ModelID.make("test-model") },
+      })
+      const oldAssistant = MessageID.ascending()
+      yield* sessions.updateMessage({
+        id: oldAssistant,
+        sessionID: session.id,
+        role: "assistant",
+        parentID: oldUser,
+        modelID: ModelID.make("test-model"),
+        providerID: ProviderID.make("test-provider"),
+        mode: "build",
+        agent: "build",
+        path: { cwd: session.directory, root: session.directory },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: Date.now() + 1, completed: Date.now() + 2 },
+        finish: "stop",
+      })
+      const oldPart = PartID.ascending()
+      yield* sessions.updatePart({
+        id: oldPart,
+        sessionID: session.id,
+        messageID: oldAssistant,
+        type: "reasoning",
+        text: "compacted-head-".repeat(512),
+        time: { start: 1, end: 2 },
+      })
+      // marker 与 finished summary Assistant 形成真实 durable pair，单独 marker 不足以建立 cutoff。
+      const marker = MessageID.ascending()
+      yield* sessions.updateMessage({
+        id: marker,
+        sessionID: session.id,
+        role: "user",
+        time: { created: Date.now() + 3 },
+        agent: "build",
+        model: { providerID: ProviderID.make("test-provider"), modelID: ModelID.make("test-model") },
+      })
+      // Compaction Part 故意不写 tail_start_id，复现 shipped compatibility 数据而非新 tail 形状。
+      // 该无-tail案例与 tail_start_id 既有单测互补，防止 compatibility 分支被优化遗漏。
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        sessionID: session.id,
+        messageID: marker,
+        type: "compaction",
+        auto: true,
+      })
+      const summary = MessageID.ascending()
+      // summary 同时设置 summary、finish 与 completed，覆盖 boundary query 的全部完成条件。
+      yield* sessions.updateMessage({
+        id: summary,
+        sessionID: session.id,
+        role: "assistant",
+        parentID: marker,
+        modelID: ModelID.make("test-model"),
+        providerID: ProviderID.make("test-provider"),
+        mode: "build",
+        agent: "build",
+        path: { cwd: session.directory, root: session.directory },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: Date.now() + 4, completed: Date.now() + 5 },
+        summary: true,
+        finish: "stop",
+      })
+      // Session age 让 old owner 可冻结，但 boundary 选择仍由 completed Compaction 而非 age 决定。
+      Database.use((db) =>
+        db
+          .update(SessionTable)
+          .set({ time_updated: Date.now() - 31 * 24 * 60 * 60 * 1000 })
+          .where(Database.eq(SessionTable.id, session.id))
+          .run(),
+      )
+      expect(ColdStorage.freezeOwner({ type: "part", id: oldPart }).type).toBe("frozen")
+
+      // filterCompactedEffect 是 routine prompt 实际 seam，不以纯 filterCompacted 数组测试替代 DB 范围行为。
+      const window = yield* MessageV2.filterCompactedEffect(session.id)
+      // expected 只含 marker 与 summary，若 cutoff 未应用就会多出 old user/assistant。
+      expect(window.map((message) => message.info.id)).toEqual([marker, summary])
+      // old reasoning 是唯一 cold owner；结果后仍为 1 可直接证明 head 未被业务 hydrate。
+      expect(coldOwnerCount([session.id])).toBe(1)
+    }),
+  )
+
+  // refcount 是 payload 与真实 owner 的完整性事实；projection 可解析也不能绕过这一 metadata gate。
+  // Stats 和 Session.diff 均必须 hard-fail；Summary 可保留 crash-resume claim，但不能 repair archive 或提交 summary ref。
+  it.instance("fails Stats and summary inspect on refcount drift without archive repair", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({ title: "inspect refcount drift" })
+      const edit = yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/integrity.ts",
+        patch: "+integrity\n",
+      })
+      expect(
+        ColdStorage.freezeOwner({ type: "part", id: edit.partID, now: Date.now() + 1_000, olderThanMs: 0 }).type,
+      ).toBe("frozen")
+      // Part ref 从真实 owner 行读取，测试不复制 content hash 或 pack identity 算法。
+      const partRef = Database.use((db) =>
+        db
+          .select({ hash: PartTable.cold_ref })
+          .from(PartTable)
+          .where(Database.eq(PartTable.id, edit.partID))
+          .get()?.hash,
+      )
+      if (!partRef) throw new Error("Integrity fixture did not create a cold Part owner")
+
+      // drift 值 99 明显不同于真实 owner 数 1，避免与内容寻址共享引用偶然相等。
+      Database.use((db) =>
+        db.update(ColdStorageTable).set({ ref_count: 99 }).where(Database.eq(ColdStorageTable.hash, partRef)).run(),
+      )
+      // Stats failure 前 snapshot 包含完整 payload metadata 和 bytes，确保异常路径没有 repair 副作用。
+      const state = () =>
+        Database.use((db) => ({
+          session: db
+            .select({ ref: SessionTable.summary_ref, cursor: SessionTable.summary_cursor })
+            .from(SessionTable)
+            .where(Database.eq(SessionTable.id, session.id))
+            .get(),
+          part: db
+            .select({ ref: PartTable.cold_ref, key: PartTable.cold_key, stats: PartTable.cold_stats })
+            .from(PartTable)
+            .where(Database.eq(PartTable.id, edit.partID))
+            .get(),
+          payloads: db.select().from(ColdStorageTable).orderBy(ColdStorageTable.hash).all(),
+        }))
+      const beforeStats = state()
+      // v2 Stats 只能读取 cold_stats；错误投影不能触发 decodePack fallback 或成功报表。
+      expect(Exit.isFailure(yield* Effect.exit(aggregateStats()))).toBe(true)
+      expect(state()).toEqual(beforeStats)
+      // 首次 Session.diff 必须 inspect 冷 Tool metadata；同一 refcount drift 不能比 Stats 更宽松。
+      expect(Exit.isFailure(yield* Effect.exit(sessions.diff(session.id)))).toBe(true)
+      const afterSummary = state()
+      // claim 只记录已检查边界；Part owner 和损坏 payload 仍逐字段保持原样。
+      expect(afterSummary.session).toEqual({ ref: null, cursor: edit.assistantID })
+      expect(afterSummary.part).toEqual(beforeStats.part)
+      expect(afterSummary.payloads).toEqual(beforeStats.payloads)
+
+      // 恢复 Part 后先建立合法 summary，再单独破坏 Session ref 以隔离第二个 gate。
+      Database.use((db) =>
+        db.update(ColdStorageTable).set({ ref_count: 1 }).where(Database.eq(ColdStorageTable.hash, partRef)).run()
+      )
+      expect(yield* sessions.diff(session.id)).toHaveLength(1)
+      const summaryRef = Database.use((db) =>
+        db
+          .select({ hash: SessionTable.summary_ref })
+          .from(SessionTable)
+          .where(Database.eq(SessionTable.id, session.id))
+          .get()?.hash,
+      )
+      if (!summaryRef) throw new Error("Integrity fixture did not create a summary owner")
+      Database.use((db) =>
+        db.update(ColdStorageTable).set({ ref_count: 99 }).where(Database.eq(ColdStorageTable.hash, summaryRef)).run(),
+      )
+      const beforeSummary = state()
+      // Session.diff 在无新 delta 时仍必须检查 referenced aggregate，不能把 unchanged 当作免检成功。
+      expect(Exit.isFailure(yield* Effect.exit(sessions.diff(session.id)))).toBe(true)
+      // repair 只属于显式 db verify --repair，本例普通读取没有修正损坏的授权。
+      expect(state()).toEqual(beforeSummary)
+    }),
+  )
+
+  // readiness 只在 mirror read 已进入后发布，此时 claim cursor 已先行持久化，mutation 必须在同一真实竞态窗口标 dirty。
+  // 释放 read 后 stale bytes 仍会返回给 initializer，但 final immediate-state check 必须丢弃它并采用当前 Tool rows。
+  // 首次和后续公开结果都用 literal replacement expected 验证，不断言内部 helper 或调用次数。
+  raceIt.instance("discards a delayed stale mirror after a covered public Part replacement", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const gate = yield* MirrorReadGate
+      const sessions = yield* SessionNs.Service
+      const storage = yield* Storage.Service
+      const session = yield* sessions.create({ title: "delayed dirty initialization" })
+      const edit = yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/race.ts",
+        patch: "+race-old\n",
+      })
+      // stale 文件在 release 时仍存在，成功不能归因于 NotFound compatibility branch。
+      yield* storage.write(["session_diff", session.id], [
+        { file: "src/stale-race.ts", patch: "+stale\n", additions: 30, deletions: 12, status: "modified" },
+      ])
+
+      // Storage wrapper 最终委托真实 filesystem read，Deferred 只控制顺序而不伪造 mirror 类型或内容。
+      const first = yield* sessions.diff(session.id).pipe(Effect.forkChild)
+      // readiness 替代固定 sleep，慢速 CI 也不会在 claim 尚未落盘时提前 mutation。
+      yield* Deferred.await(gate.ready).pipe(Effect.timeout("5 seconds"))
+      // replacement 与 claim 位于不同 transaction，真实模拟前端请求和后台初始化交错。
+      yield* sessions.updatePart({
+        id: edit.partID,
+        sessionID: session.id,
+        messageID: edit.assistantID,
+        type: "tool",
+        callID: "edit-race-replaced",
+        tool: "edit",
+        state: {
+          status: "completed",
+          input: {},
+          output: "ok",
+          title: "edit",
+          metadata: {
+            filediff: {
+              file: path.join(test.directory, "src/race.ts"),
+              patch: "+race-new\n",
+              additions: 1,
+              deletions: 0,
+            },
+          },
+          time: { start: 0, end: 1 },
+        },
+      })
+      yield* Deferred.succeed(gate.release, undefined)
+      // expected 文件与 stale 文件不同，直接证明 final transaction 观察到了 dirty witness。
+      const expected = [
+        { file: "src/race.ts", patch: "+race-new\n", additions: 1, deletions: 0, status: "added" as const },
+      ]
+      expect(yield* Fiber.join(first)).toEqual(expected)
+      // 第二次 public diff 证明 stale mirror 从未提交成 seed，不只是首个 fiber 临时返回正确。
+      // test layer 只替换 Storage service，production 不增加 race hook 或延迟配置。
+      expect(yield* sessions.diff(session.id)).toEqual(expected)
+    }),
+  )
+
+  // claim ceiling 在外部 read 前持久化，但 Message 可由公开删除在等待期间消失；提交游标必须在 final transaction 重新取值。
+  // 删除的 Tool 不能从 stale mirror 复活，且第二次读取不能因 ahead cursor 报错。
+  raceIt.instance("commits the remaining closed boundary after deleting the claimed latest Message", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const gate = yield* MirrorReadGate
+      const sessions = yield* SessionNs.Service
+      const storage = yield* Storage.Service
+      const session = yield* sessions.create({ title: "deleted initialization ceiling" })
+      // 两个完整 Tool turns 使 captured ceiling 与删除后最大 closed boundary 必然不同。
+      const firstEdit = yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/remains.ts",
+        patch: "+remains\n",
+      })
+      const removedEdit = yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/removed.ts",
+        patch: "+removed\n",
+      })
+      // mirror 包含即将删除的文件，若 initializer 信任 pre-I/O ceiling 会把 removed.ts 永久保存。
+      yield* storage.write(["session_diff", session.id], [
+        { file: "src/remains.ts", patch: "+remains\n", additions: 1, deletions: 0, status: "added" },
+        { file: "src/removed.ts", patch: "+removed\n", additions: 1, deletions: 0, status: "added" },
+      ])
+
+      const pending = yield* sessions.diff(session.id).pipe(Effect.forkChild)
+      yield* Deferred.await(gate.ready).pipe(Effect.timeout("5 seconds"))
+      // public removeMessage 触发真实 projector、Part cascade 与 summary dirty，不直接修改 owner 表。
+      // 只删除 latest Assistant，保留其 parent User，预期 cursor 因而可用独立 userID 字面事实断言。
+      yield* sessions.removeMessage({ sessionID: session.id, messageID: removedEdit.assistantID })
+      yield* Deferred.succeed(gate.release, undefined)
+      // remaining Tool expected 来自第一轮 literal metadata，不读取 rebuild payload。
+      const expected = [
+        { file: "src/remains.ts", patch: "+remains\n", additions: 1, deletions: 0, status: "added" as const },
+      ]
+      // Deferred release 后 first fiber 必须完成，证明删除不会让 initialization CAS 永久卡住。
+      expect(yield* Fiber.join(pending)).toEqual(expected)
+      // second diff 防止超前 cursor 在下一轮才暴露“cursor ahead of history”错误。
+      expect(yield* sessions.diff(session.id)).toEqual(expected)
+      expect(
+        Database.use((db) =>
+          db
+            .select({ cursor: SessionTable.summary_cursor })
+            .from(SessionTable)
+            .where(Database.eq(SessionTable.id, session.id))
+            .get(),
+        ),
+      ).toEqual({ cursor: removedEdit.userID })
+      // ID 比较断言证明保留 user 确实晚于 first Assistant，测试边界不是偶然等于旧 cursor。
+      expect(firstEdit.assistantID < removedEdit.userID).toBe(true)
+    }),
+  )
+
+  // 显式 vacuum 的用户可观察结果是 main+WAL 物理整理完成；只返回 page count 而留下完整 WAL 会伪报成功。
+  // fixture 使用真实 SQLite 文件与公开 maintenance dispatcher，不 mock checkpoint 或文件长度。
+  it.instance("truncates WAL before explicit vacuum reports success", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      yield* sessions.create({ title: "vacuum WAL checkpoint" })
+      // confirm=true 与 lease 同时提供，覆盖 production 对破坏性物理操作的双重授权门禁。
+      // 本测试不执行自动 vacuum，只有显式 operation 才拥有 checkpoint/truncate 副作用。
+      const result = yield* Effect.promise(() =>
+        ColdStorage.maintain(ColdStorage.prepareMaintenance({ operation: "vacuum", confirm: true }), {
+          lease: { assertOwned() {} },
+          checkpoint: async () => {},
+        }),
+      )
+      // maintenance dispatcher 仍返回原有 vacuum report，前端/CLI contract 没有新增字段。
+      expect(result.type).toBe("vacuum")
+      // 文件大小在 command 返回后读取，确保断言观察的是 terminal 状态而非并发 checkpoint 中间态。
+      // current-scale 1.35 GB temp-copy gate另行证明同一逻辑在真实 WAL 模式清零大文件。
+      const wal = Bun.file(`${Database.getPath()}-wal`)
+      // WAL 不存在和零字节都视为成功，兼容 SQLite fixture 选择 DELETE/内存 journal 的情况。
+      // 非零 WAL 直接失败，避免只看 pageCount 而忽略磁盘上第二份数据库。
+      // checkpoint busy 时 production hard-fail，不能以测试环境通常无 reader 为理由吞掉失败。
+      expect(yield* Effect.promise(async () => ((await wal.exists()) ? wal.size : 0))).toBe(0)
     }),
   )
 })

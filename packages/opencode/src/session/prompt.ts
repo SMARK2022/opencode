@@ -4,6 +4,7 @@ import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
 import * as Log from "@opencode-ai/core/util/log"
 import { SessionRevert } from "./revert"
+import { NotFoundError } from "@/storage/storage"
 import * as Session from "./session"
 import { Agent } from "../agent/agent"
 import { Provider } from "@/provider/provider"
@@ -140,7 +141,7 @@ function isDecideAgent(agent: Agent.Info) {
   return agent.name === "decide"
 }
 
-function deriveGoalTurn(messages: Iterable<MessageV2.WithParts>): GoalTurnContext | undefined {
+function deriveGoalTurn(messages: Iterable<MessageV2.ChronologyMessage>): GoalTurnContext | undefined {
   const turns = Array.from(messages)
     .flatMap((message) => {
       // technical wrapper 的 goalTurnID 只表达 lineage，不是新的 canonical source；
@@ -467,16 +468,9 @@ export const layer = Layer.effect(
       yield* Effect.gen(function* () {
         yield* elog.info("cancel", { sessionID })
         // 所有 cancel 归属都从同一同步快照推导，避免多次扫描把 replacement prompt 混入旧边界。
-        const messages = Array.from(MessageV2.stream(sessionID))
-        const parentIDs = new Set(
-          messages.flatMap((message) => (message.info.role === "assistant" ? [message.info.parentID] : [])),
-        )
-        const pendingIds = new Set(
-          messages.filter((m) => m.info.role === "assistant" && !m.info.time.completed).map((m) => m.info.id),
-        )
-        const orphanIDs = messages.flatMap((message) =>
-          message.info.role === "user" && !parentIDs.has(message.info.id) ? [message.info.id] : [],
-        )
+        const snapshot = MessageV2.cancelSnapshot(sessionID)
+        const pendingIds = new Set(snapshot.pendingAssistantIDs)
+        const orphanIDs = snapshot.orphanUserIDs
         // orphan集合在cancel前冻结，后续replacement prompt不会被旧取消操作误标为aborted。
         yield* state.cancel(sessionID)
         yield* abortPendingAssistants(sessionID, pendingIds)
@@ -509,13 +503,15 @@ export const layer = Layer.effect(
       )
     })
 
-    const abortPendingAssistants: (sessionID: SessionID, pendingIds?: Set<string>) => Effect.Effect<void> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID, pendingIds?: Set<string>) {
+    const abortPendingAssistants: (sessionID: SessionID, pendingIds?: Set<MessageID>) => Effect.Effect<void> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID, pendingIds?: Set<MessageID>) {
       const pending = [] as (MessageV2.WithParts & { info: MessageV2.Assistant })[]
-      for (const msg of MessageV2.stream(sessionID)) {
-        if (msg.info.role !== "assistant") continue
+      const ids = pendingIds ?? new Set(MessageV2.cancelSnapshot(sessionID).pendingAssistantIDs)
+      for (const id of ids) {
+        const msg = yield* MessageV2.get({ sessionID, messageID: id }).pipe(
+          Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(undefined)),
+        )
+        if (!msg || msg.info.role !== "assistant") continue
         if (msg.info.time.completed) continue
-        // 只终态化 cancel 开始前已存在的消息，不触碰 cancel 后新建的消息
-        if (pendingIds && !pendingIds.has(msg.info.id)) continue
         pending.push(msg as MessageV2.WithParts & { info: MessageV2.Assistant })
       }
       // 子会话递归时不传 pendingIds——子会话无用户输入竞态
@@ -2300,7 +2296,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
           // Goal continuity 来自未裁剪的持久化 Message chronology；provider window 会因 Compaction
           // 重排，late technical wrapper 也可能晚于新用户落盘，两者都不能改变 current/previous turn。
-          const nextGoalTurn = deriveGoalTurn(MessageV2.stream(sessionID))
+          const nextGoalTurn = deriveGoalTurn(MessageV2.chronology(sessionID))
           if (!nextGoalTurn) goalTurn = undefined
           if (nextGoalTurn && (!goalTurn || goalTurn.id !== nextGoalTurn.id)) goalTurn = nextGoalTurn
 

@@ -26,6 +26,7 @@ import { ProjectTable } from "../project/project.sql"
 import { Storage } from "@/storage/storage"
 import * as Log from "@opencode-ai/core/util/log"
 import { MessageV2 } from "./message-v2"
+import { SummaryCache } from "./summary-cache"
 import type { InstanceContext } from "../project/instance-context"
 import { InstanceState } from "@/effect/instance-state"
 import { Snapshot } from "@/snapshot"
@@ -560,6 +561,7 @@ export interface Interface {
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
   readonly updateMessage: <T extends MessageV2.Info>(msg: T) => Effect.Effect<T>
+  readonly updateMessageSummary: (msg: MessageV2.User) => Effect.Effect<MessageV2.User>
   readonly removeMessage: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<MessageID>
   readonly removePart: (input: { sessionID: SessionID; messageID: MessageID; partID: PartID }) => Effect.Effect<PartID>
   readonly getPart: (input: {
@@ -700,6 +702,11 @@ export const layer: Layer.Layer<
         return msg
       }).pipe(Effect.withSpan("Session.updateMessage"))
 
+    const updateMessageSummary = Effect.fn("Session.updateMessageSummary")(function* (msg: MessageV2.User) {
+      yield* sync.run(MessageV2.Event.Updated, { sessionID: msg.sessionID, info: msg, summaryOnly: true })
+      return msg
+    })
+
     const updatePart = <T extends MessageV2.Part>(part: T): Effect.Effect<T> =>
       Effect.gen(function* () {
         yield* sync.run(MessageV2.Event.PartUpdated, {
@@ -836,9 +843,9 @@ export const layer: Layer.Layer<
     })
 
     const diff = Effect.fn("Session.diff")(function* (sessionID: SessionID) {
-      return yield* storage
-        .read<Snapshot.FileDiff[]>(["session_diff", sessionID])
-        .pipe(Effect.orElseSucceed((): Snapshot.FileDiff[] => []))
+      const result = SummaryCache.normalizeDiffPaths(yield* SummaryCache.load({ sessionID, storage }))
+      yield* storage.write(["session_diff", sessionID], result).pipe(Effect.ignore)
+      return result
     })
 
     const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
@@ -922,6 +929,7 @@ export const layer: Layer.Layer<
       children,
       remove,
       updateMessage,
+      updateMessageSummary,
       removeMessage,
       removePart,
       updatePart,

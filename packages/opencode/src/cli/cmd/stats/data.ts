@@ -1,17 +1,14 @@
 import { Effect } from "effect"
 import { Session } from "@/session/session"
-import type { MessageV2 } from "@/session/message-v2"
 import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
-import { NotFoundError } from "@/storage/storage"
-import { Database, eq, gte } from "@/storage/db"
-import { SessionTable } from "@/session/session.sql"
+import { Database, and, gte, inArray, sql } from "@/storage/db"
+import { MessageTable, PartTable, SessionTable, type PartColdStats } from "@/session/session.sql"
+import { ColdStorage } from "@/storage/cold"
 import type { Project } from "@/project/project"
 import { ProjectTable } from "@/project/project.sql"
-import type { SessionID } from "@/session/schema"
+import type { MessageID, SessionID } from "@/session/schema"
 
 const MICROS = 1_000_000
-// catchIf 需要显式类型守卫才能只消解 NotFound，其他存储错误必须继续向上失败。
-const isNotFoundError = (error: unknown): error is NotFoundError => NotFoundError.isInstance(error)
 const displayText = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()
 
 const projectIdentity = (
@@ -220,9 +217,46 @@ type ToolUsageEvent = {
 }
 
 type ToolEventSeed = {
-  message: MessageV2.WithParts | undefined
+  message: StatsMessage | undefined
   components: InputComponentTotals
   event: Omit<UsageEvent, "tokens" | "components" | "cost" | "requests" | "assistantCalls" | "errors" | "aborted" | "durationMs">
+}
+
+type StatsToolPart = Extract<PartColdStats, { type: "tool" }> & {
+  tool: string
+  status: "pending" | "running" | "completed" | "error"
+  start?: number
+  end?: number
+}
+
+type StatsStepPart = Extract<PartColdStats, { type: "step-finish" }>
+type StatsPart = StatsToolPart | StatsStepPart
+
+type StatsMessage =
+  | { id: MessageID; time: number; role: "user"; parts: StatsPart[] }
+  | {
+      id: MessageID
+      time: number
+      role: "assistant"
+      providerID: string
+      modelID: string
+      agent: string
+      cost: number
+      tokens: TokenTotals
+      parts: StatsPart[]
+    }
+
+// 内部 scalar snapshot 不导出，公开 StatsReport schema 不因存储优化改变。
+type StatsRows = {
+  // messages 只包含统计需要的 role/time/model/token 与 Tool/Step 标量，不是可回放 transcript。
+  // 空 Session 显式表现为空数组，aggregate 不需要通过 NotFound fallback 合成成功。
+  messages: Map<SessionID, StatsMessage[]>
+  // Part 标量已由 ColdStorage 验证，聚合层不再理解 pack/ref/key 或 codec。
+  // requests 保留既有 attribution rows，cold projection 不成为新的 usage 权威。
+  requests: Map<SessionID, (typeof RequestUsageTable.$inferSelect)[]>
+  // loader 一次建立三类 rows，所有透视表基于同一批 DB 事实计算。
+  // 三个 Map 都以已过滤 SessionID 为 key，跨项目数据不能在聚合阶段误关联。
+  assistants: Map<SessionID, (typeof RequestUsageAssistantTable.$inferSelect)[]>
 }
 
 type UsageGroupAccumulator = UsageGroup & {
@@ -601,80 +635,39 @@ const statusCounts = (status: string, requests: number) => ({
   aborted: status === "aborted" ? requests : 0,
 })
 
-const stepInputTokens = (part: MessageV2.StepFinishPart) => part.tokens.input + part.tokens.cache.read + part.tokens.cache.write
-
-const componentsFromStep = (part: MessageV2.StepFinishPart) => {
-  const inputChars = finiteStat(part.inputChars)
-  if (!part.inputBreakdown || inputChars <= 0) return emptyComponents()
-  const inputTokens = finiteStat(stepInputTokens(part))
-  const media = part.inputBreakdown.media
-  const attachmentTokens = Number.isFinite(media?.tokens) ? media?.tokens : undefined
-  const textTokens = attachmentTokens === undefined ? inputTokens : Math.max(0, inputTokens - attachmentTokens)
-  const textChars = media ? Math.max(1, inputChars - finiteStat(media.rawChars) + finiteStat(media.textChars)) : inputChars
-  // 本地 1.15.3 记录可能把 `inputBreakdown.messages` 持久化为 `{}`。
-  // 缺失计数表示“贡献未知”而不是整条统计无效；所有派生组件必须保持有限值，
-  // 防止兼容旧记录时把 NaN 坐标传给工具图表。
-  const alloc = (chars?: number) => Math.round((finiteStat(chars) / textChars) * textTokens)
-  return {
-    system: alloc(part.inputBreakdown.system),
-    instructions: alloc(part.inputBreakdown.instructions),
-    skills: alloc(part.inputBreakdown.skills),
-    toolSchemas: alloc(part.inputBreakdown.tools),
-    userMessages: alloc(part.inputBreakdown.messages?.userText),
-    assistantText: alloc(part.inputBreakdown.messages?.assistantText),
-    reasoning: alloc(part.inputBreakdown.messages?.reasoning),
-    toolCalls: alloc(part.inputBreakdown.messages?.toolInput),
-    toolResults: alloc(part.inputBreakdown.messages?.toolOutput),
-    attachments: attachmentTokens ?? alloc(part.inputBreakdown.messages?.attachments),
-  } satisfies InputComponentTotals
-}
-
 const finiteStat = (value: number | undefined) => typeof value === "number" && Number.isFinite(value) ? value : 0
 
-const componentsFromAssistant = (message: MessageV2.WithParts | undefined) => {
+const componentsFromAssistant = (message: StatsMessage | undefined) => {
   const components = emptyComponents()
   for (const part of message?.parts ?? []) {
     if (part.type !== "step-finish") continue
-    addComponents(components, componentsFromStep(part))
+    addComponents(components, part.components)
   }
   return components
 }
 
-const toolInputChars = (part: MessageV2.ToolPart) => {
-  // pending 只能读取原始输入；其他状态使用结构化 JSON，保持与历史统计口径一致。
-  if (part.state.status === "pending") return part.state.raw.length
-  return JSON.stringify(part.state.input).length
-}
-
-const toolOutputChars = (part: MessageV2.ToolPart) => {
-  // completed 计输出与附件 URL，error 计错误文本；running 尚无稳定输出，必须为 0。
-  if (part.state.status === "completed") return part.state.output.length + (part.state.attachments ?? []).reduce((sum, item) => sum + item.url.length, 0)
-  if (part.state.status === "error") return part.state.error.length
-  return 0
-}
-
-const toolDuration = (part: MessageV2.ToolPart) => {
+const toolDuration = (part: StatsToolPart) => {
   // pending/running 没有完整结束时间；调用仍计数，但不能用当前时间伪造耗时。
-  if (part.state.status !== "completed" && part.state.status !== "error") return 0
-  return Math.max(0, part.state.time.end - part.state.time.start)
+  if ((part.status !== "completed" && part.status !== "error") || part.start === undefined || part.end === undefined) return 0
+  return Math.max(0, part.end - part.start)
 }
 
 // 保留既有上下文归因公式，但每个 Session 只扫描一次，避免按 Assistant turn 重复遍历。
-const toolEventsFromAssistants = (visibleMessages: MessageV2.WithParts[], seeds: ToolEventSeed[]) => {
+const toolEventsFromAssistants = (visibleMessages: StatsMessage[], seeds: ToolEventSeed[]) => {
   const tasks = seeds
-    .filter((seed): seed is ToolEventSeed & { message: MessageV2.WithParts } => seed.message !== undefined)
-    .sort((a, b) => a.message.info.time.created - b.message.info.time.created)
+    .filter((seed): seed is ToolEventSeed & { message: StatsMessage } => seed.message !== undefined)
+    .sort((a, b) => a.message.time - b.message.time)
   if (tasks.length === 0) return []
 
   const deltas = visibleMessages
     .flatMap((message) =>
       message.parts
-        .filter((part): part is MessageV2.ToolPart => part.type === "tool")
+        .filter((part): part is StatsToolPart => part.type === "tool")
         .map((part) => ({
-          time: message.info.time.created,
+          time: message.time,
           toolID: part.tool,
-          inputChars: toolInputChars(part),
-          outputChars: toolOutputChars(part),
+          inputChars: part.inputChars,
+          outputChars: part.outputChars,
         })),
     )
     .sort((a, b) => a.time - b.time)
@@ -687,7 +680,7 @@ const toolEventsFromAssistants = (visibleMessages: MessageV2.WithParts[], seeds:
 
   for (const task of tasks) {
     // 既有归因口径包含该 Assistant turn 之前及同一时刻产生的全部工具消息。
-    while (deltaIndex < deltas.length && deltas[deltaIndex].time <= task.message.info.time.created) {
+    while (deltaIndex < deltas.length && deltas[deltaIndex].time <= task.message.time) {
       const delta = deltas[deltaIndex]
       const item = chars.get(delta.toolID) ?? { inputChars: 0, outputChars: 0 }
       item.inputChars += delta.inputChars
@@ -721,26 +714,149 @@ const toolEventsFromAssistants = (visibleMessages: MessageV2.WithParts[], seeds:
   return result
 }
 
-const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (session: Session.Info, cutoff: number) {
-  const svc = yield* Session.Service
-  const messages = yield* svc
-    .messages({ sessionID: session.id })
-    .pipe(Effect.catchIf(isNotFoundError, () => Effect.succeed([])))
-  const visibleMessages = messages.filter((message) => includeTime(cutoff, message.info.time.created))
-  const messagesByID = new Map(visibleMessages.map((message) => [message.info.id, message]))
-  const requestUsageRows = Database.use((db) =>
-    db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, session.id)).all(),
+function append<K, V>(map: Map<K, V[]>, key: K, value: V) {
+  const values = map.get(key)
+  if (values) values.push(value)
+  else map.set(key, [value])
+}
+
+// Stats 读取 selected Session 的 scalar projection，而不是调用 transcript hydration。
+// Message SELECT 明确排除 user summary.diffs；Part 只读取 Tool/StepFinish，避免把无关 archive 搬入 JS。
+const loadStatsRows = (sessionIDs: SessionID[]) =>
+  Effect.sync(() =>
+    Database.use((db): StatsRows => {
+      // 2000-ID chunk 与 maintenance 上限一致，并绕开 SQLite variable 数量限制。
+      const batches = sessionIDs.flatMap((_, index) =>
+        index % ColdStorage.DEFAULT_BATCH_SIZE === 0
+          ? [sessionIDs.slice(index, index + ColdStorage.DEFAULT_BATCH_SIZE)]
+          : [],
+      )
+      // SQLite 只提取 Message 标量，大型 summary.diffs 不进入 JavaScript heap。
+      const messageRows = batches.flatMap((batch) =>
+        db
+          .select({
+            id: MessageTable.id,
+            sessionID: MessageTable.session_id,
+            time: MessageTable.time_created,
+            role: sql<string>`json_extract(${MessageTable.data}, '$.role')`,
+            providerID: sql<string | null>`json_extract(${MessageTable.data}, '$.providerID')`,
+            modelID: sql<string | null>`json_extract(${MessageTable.data}, '$.modelID')`,
+            agent: sql<string | null>`json_extract(${MessageTable.data}, '$.agent')`,
+            cost: sql<number | null>`json_extract(${MessageTable.data}, '$.cost')`,
+            tokensInput: sql<number | null>`json_extract(${MessageTable.data}, '$.tokens.input')`,
+            tokensOutput: sql<number | null>`json_extract(${MessageTable.data}, '$.tokens.output')`,
+            tokensReasoning: sql<number | null>`json_extract(${MessageTable.data}, '$.tokens.reasoning')`,
+            tokensCacheRead: sql<number | null>`json_extract(${MessageTable.data}, '$.tokens.cache.read')`,
+            tokensCacheWrite: sql<number | null>`json_extract(${MessageTable.data}, '$.tokens.cache.write')`,
+            tokensTotal: sql<number | null>`json_extract(${MessageTable.data}, '$.tokens.total')`,
+          })
+          .from(MessageTable)
+          .where(inArray(MessageTable.session_id, batch))
+          .all(),
+      )
+      // Part query 保留 Tool name/status/time 与 Step tokens 这些既有 hot 统计输入。
+      const partRows = batches.flatMap((batch) =>
+        db
+          .select()
+          .from(PartTable)
+          .where(
+            and(
+              inArray(PartTable.session_id, batch),
+              sql`json_extract(${PartTable.data}, '$.type') in ('tool', 'step-finish')`,
+            ),
+          )
+          .orderBy(PartTable.message_id, PartTable.id)
+          .all(),
+      )
+      // v2 读同行投影，v1 grouped decode，hot 现场计算；三者复用 ColdStorage 公式。
+      const projections = ColdStorage.inspectPartStats(db, partRows)
+      const parts = new Map<MessageID, StatsPart[]>()
+      partRows.forEach((row, index) => {
+        // discriminator 不匹配立即失败，不能丢弃异常 Part 后返回不完整报告。
+        const projection = projections[index]
+        if (row.data.type === "step-finish") {
+          if (projection?.type !== "step-finish") throw new Error(`Stats Step projection is unavailable: ${row.id}`)
+          append(parts, row.message_id, projection)
+          return
+        }
+        if (row.data.type !== "tool") throw new Error(`Stats query returned an unsupported Part: ${row.id}`)
+        if (projection?.type !== "tool") throw new Error(`Stats Tool projection is unavailable: ${row.id}`)
+        const state = row.data.state
+        append(parts, row.message_id, {
+          ...projection,
+          tool: row.data.tool,
+          status: state.status,
+          ...(state.status === "pending" ? {} : { start: state.time.start }),
+          ...(state.status === "completed" || state.status === "error" ? { end: state.time.end } : {}),
+        })
+      })
+
+      // Parts 只按 message_id 关联，孤立行不会被猜测归属另一个 Assistant。
+      const messages = new Map<SessionID, StatsMessage[]>()
+      for (const row of messageRows) {
+        const messageParts = parts.get(row.id) ?? []
+        if (row.role === "user") {
+          append(messages, row.sessionID, { id: row.id, time: row.time, role: "user", parts: messageParts })
+          continue
+        }
+        if (row.role !== "assistant" || row.providerID === null || row.modelID === null || row.agent === null) {
+          throw new Error(`Stats Message projection is invalid: ${row.id}`)
+        }
+        append(messages, row.sessionID, {
+          id: row.id,
+          time: row.time,
+          role: "assistant",
+          providerID: row.providerID,
+          modelID: row.modelID,
+          agent: row.agent,
+          cost: finiteStat(row.cost ?? undefined),
+          tokens: normalizeTokens({
+            input: finiteStat(row.tokensInput ?? undefined),
+            output: finiteStat(row.tokensOutput ?? undefined),
+            reasoning: finiteStat(row.tokensReasoning ?? undefined),
+            cache: {
+              read: finiteStat(row.tokensCacheRead ?? undefined),
+              write: finiteStat(row.tokensCacheWrite ?? undefined),
+            },
+            ...(row.tokensTotal === null ? {} : { total: row.tokensTotal }),
+          }),
+          parts: messageParts,
+        })
+      }
+      // persisted time 后用 ID 打破同毫秒平局，保持旧 Session.messages chronology。
+      for (const rows of messages.values()) rows.sort((a, b) => a.time - b.time || a.id.localeCompare(b.id))
+
+      const requests = new Map<SessionID, (typeof RequestUsageTable.$inferSelect)[]>()
+      const assistants = new Map<SessionID, (typeof RequestUsageAssistantTable.$inferSelect)[]>()
+      // attribution 两表同样分块读取，替代原先每 Session 两次 SQL 的 N+1 往返。
+      for (const batch of batches) {
+        for (const row of db.select().from(RequestUsageTable).where(inArray(RequestUsageTable.session_id, batch)).all()) {
+          append(requests, row.session_id, row)
+        }
+        for (const row of db.select().from(RequestUsageAssistantTable).where(inArray(RequestUsageAssistantTable.session_id, batch)).all()) {
+          append(assistants, row.session_id, row)
+        }
+      }
+      // 快照只活一次命令且没有 owner mutation，不能升级为需失效维护的全局 cache。
+      return { messages, requests, assistants }
+    }),
   )
-  const assistantUsageRows = Database.use((db) =>
-    db.select().from(RequestUsageAssistantTable).where(eq(RequestUsageAssistantTable.session_id, session.id)).all(),
-  )
+
+const aggregateSession = (session: Session.Info, cutoff: number, rows: StatsRows) => {
+  // cutoff 继续作用于 Message/RequestUsage 的持久时间，raw loader 不能以 Session updated 替代事件窗口。
+  // toolCalls 归属 Assistant runtime；request shell 存在时不能把 legacy message 猜成精确 request。
+  const messages = rows.messages.get(session.id) ?? []
+  const visibleMessages = messages.filter((message) => includeTime(cutoff, message.time))
+  const messagesByID = new Map(visibleMessages.map((message) => [message.id, message]))
+  const requestUsageRows = rows.requests.get(session.id) ?? []
+  const assistantUsageRows = rows.assistants.get(session.id) ?? []
   const storedRequestsByID = new Map(requestUsageRows.map((row) => [row.request_id, row]))
   const assistantUsageByMessageID = new Map(assistantUsageRows.map((row) => [row.assistant_message_id, row]))
   // ToolPart ownership 与 context consumption 在同一次 Message 扫描中建立，避免第二次读取 Session。
+  // Tool chars 来自同行投影，status/error/duration 来自同一 hot Part tuple。
   const toolCalls = visibleMessages.flatMap((message): ToolCallAttribution[] => {
-    const info = message.info
-    if (info.role !== "assistant") return []
-    const assistant = assistantUsageByMessageID.get(info.id)
+    if (message.role !== "assistant") return []
+    const assistant = assistantUsageByMessageID.get(message.id)
     const request = assistant ? storedRequestsByID.get(assistant.request_id) : undefined
     // 有 request 数据却找不到 Assistant row 通常是 fork/cutoff 历史，不能猜测它原属哪个请求。
     // 有 AssistantUsage 时优先采用 request source/final status；只有 row 时回退 Assistant 状态。
@@ -748,19 +864,19 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
     // 整个 Session 都没有 RequestUsage 才能使用 legacy completed，不能把 fork 历史伪装成精确归因。
     const status = assistant ? request?.status ?? assistant.status : requestUsageRows.length > 0 ? "unknown" : "completed"
     return message.parts
-      .filter((part): part is MessageV2.ToolPart => part.type === "tool")
+      .filter((part): part is StatsToolPart => part.type === "tool")
       .map((part) => ({
         toolID: part.tool,
-        modelID: assistant?.model_id ?? info.modelID,
-        providerID: assistant?.provider_id ?? info.providerID,
-        agent: request?.agent ?? info.agent ?? session.agent ?? "unknown",
+        modelID: assistant?.model_id ?? message.modelID,
+        providerID: assistant?.provider_id ?? message.providerID,
+        agent: request?.agent ?? message.agent ?? session.agent ?? "unknown",
         projectID: session.projectID,
         source,
         status,
         calls: 1,
-        inputChars: toolInputChars(part),
-        outputChars: toolOutputChars(part),
-        errors: part.state.status === "error" ? 1 : 0,
+        inputChars: part.inputChars,
+        outputChars: part.outputChars,
+        errors: part.status === "error" ? 1 : 0,
         durationMs: toolDuration(part),
       }))
   })
@@ -769,6 +885,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
   const toolEvents: ToolUsageEvent[] = []
 
   if (requestUsageRows.length > 0) {
+    // Step components 按 Assistant message ID 关联，不能跨 Assistant 平均再回填模型维度。
     const requestRows = requestUsageRows.filter((row) => includeTime(cutoff, row.time_created))
     const assistantRows = assistantUsageRows.filter((row) => includeTime(cutoff, row.time_created))
     const requestsByID = new Map(requestRows.map((row) => [row.request_id, row]))
@@ -869,24 +986,25 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
       totalEvents.push(...requestEvents)
       breakdownEvents.push(...requestEvents)
     }
+    // 缺 Assistant 明细时保留既有 fallbackRequestEvent 域，不扫描 transcript 猜替代 owner。
   } else {
+    // 仅无 RequestUsage 的 legacy Session 才采用 Assistant Message totals。
     const legacyToolEvents: ToolEventSeed[] = []
     for (const message of visibleMessages) {
-      if (message.info.role !== "assistant") continue
-      const tokens = normalizeTokens(message.info.tokens ?? emptyTokens())
+      if (message.role !== "assistant") continue
       const components = componentsFromAssistant(message)
       const event = {
-        time: message.info.time.created,
+        time: message.time,
         sessionID: session.id,
         projectID: session.projectID,
-        providerID: message.info.providerID,
-        modelID: message.info.modelID,
+        providerID: message.providerID,
+        modelID: message.modelID,
         source: "legacy-message",
         agent: session.agent ?? "unknown",
         status: "completed",
-        tokens,
+        tokens: message.tokens,
         components,
-        cost: message.info.cost ?? 0,
+        cost: message.cost,
         requests: 0,
         assistantCalls: 1,
         errors: 0,
@@ -897,6 +1015,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
       totalEvents.push(event)
       breakdownEvents.push(event)
     }
+    // toolEvents 沿用时间前缀累计字符，存储路径变化不改变 context attribution。
     toolEvents.push(...toolEventsFromAssistants(visibleMessages, legacyToolEvents))
   }
 
@@ -906,19 +1025,22 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
       if (part.type !== "tool" || !part.tool) continue
       const item = getToolUsage(toolUsage, part.tool)
       item.count++
-      item.inputChars += toolInputChars(part)
-      item.outputChars += toolOutputChars(part)
+      item.inputChars += part.inputChars
+      item.outputChars += part.outputChars
     }
   }
 
+  // 公共 filters 在 aggregate 后统一执行，loader 不提前按 model/tool/status 改变分母。
   return { session, messageCount: visibleMessages.length, toolUsage, toolEvents, toolCalls, totalEvents, breakdownEvents } satisfies SessionAggregate
-})
+}
 
 export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input: StatsFilter = {}) {
-  // 先按 session 更新时间缩小读取集合，再在 session 内按事件时间执行精确窗口过滤。
+  // 先筛 Session 再读取 rows 是空间修复的关键，未命中 project/session filter 的 archive 不进入内存。
+  // all-time 仍覆盖全部 selected sessions，只改变数据取得方式，不通过缩短窗口伪造性能收益。
   const cutoff = cutoffFromDays(input.days)
   const sessions = yield* getSessions(cutoff)
   const filteredSessions = sessions
+    // Session updated 先缩小读取集合，精确事件 cutoff 仍在各 Session aggregate 内执行。
     .filter((session) => includeTime(cutoff, session.time.updated))
     .filter((session) => sessionMatches(session, input))
     .filter((session) => {
@@ -931,12 +1053,16 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
     process.stderr.write(`Large dataset detected (${filteredSessions.length} sessions). This may take a while...\n`)
   }
 
-  const aggregates = yield* Effect.forEach(filteredSessions, (session) => aggregateSession(session, cutoff), {
-    concurrency: 20,
-  })
+  // raw snapshot 一次读取，移除旧 concurrency:20 的 per-session hydration/N+1。
+  const rows = yield* loadStatsRows(filteredSessions.map((session) => session.id))
+  // loader/inspect 均无写入，v1 decode 也不会清 owner/ref 或补写 cold_stats。
+  const aggregates = filteredSessions.map((session) => aggregateSession(session, cutoff, rows))
+  // 任一 projection corruption 作为 Effect failure 返回，不用零值或部分 report 掩盖。
+  // toolFilter 保持原公开过滤顺序，在完整 Session toolUsage 形成后才筛选。
   const filteredAggregates = input.toolFilter === undefined
     ? aggregates
     : aggregates.filter((aggregate) => Object.values(aggregate.toolUsage).some((tool) => textMatches(tool.id, input.toolFilter)))
+  // Project identity 单独批量读取；path 只用于显示，ID 仍是 series 关联键。
   const projectRows = new Map<string, { name: string | null; worktree: string }>(
     // 查询结果只作为显示索引；显式 string 键避免 branded ProjectID 泄漏到通用统计类型。
     (yield* getProjects()).map((row) => [row.id, row] as const),
@@ -953,6 +1079,7 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
     ]),
   )
 
+  // total、breakdown 与各 series 共用同一 SessionAggregate，不再各自触发 transcript 读取。
   const total = emptyUsage()
   const daily = new Map<number, DailyUsage>()
   const modelSeries = new Map<string, Map<number, DailyUsage>>()

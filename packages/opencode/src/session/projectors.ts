@@ -45,6 +45,21 @@ function applyUsage(db: TxOrDb, sessionID: Session.Info["id"], value: Usage, sig
     .run()
 }
 
+function summaryMessageSource(data: (typeof MessageTable.$inferSelect)["data"]) {
+  if (data.hidden) return false
+  if (data.role === "user") return true
+  return data.time.completed !== undefined
+}
+
+function summaryPartSource(data: (typeof PartTable.$inferSelect)["data"] | undefined) {
+  if (!data || data.hidden || data.type !== "tool" || data.state.status !== "completed") return undefined
+  return data.state.metadata
+}
+
+function sameSummaryPart(left: unknown, right: unknown) {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
 function grab<T extends object, K1 extends keyof T, X>(
   obj: T,
   field1: K1,
@@ -140,15 +155,26 @@ export default [
   SyncEvent.project(MessageV2.Event.Updated, (db, data) => {
     const time_created = data.info.time.created
     const { id, sessionID, ...rest } = data.info
+    const previous = db.select().from(MessageTable).where(eq(MessageTable.id, id)).get()
+    const moved = previous && previous.session_id !== sessionID
+    const changed =
+      !data.summaryOnly &&
+      (previous ? moved || summaryMessageSource(previous.data) !== summaryMessageSource(rest) : summaryMessageSource(rest))
 
     try {
       // durable event 携带完整业务 Info；replaceMessage 统一清旧 ref，projector 不猜测冷字段 touched mask。
+      // 可见/closed 边界必须用 replacement 前的 owner 判断；隐藏旧行后再检查会漏掉 covered-history dirty witness。
+      if (changed && previous && summaryMessageSource(previous.data)) {
+        ColdStorage.invalidateSessionSummaryBefore(db, previous.session_id, id)
+      }
       ColdStorage.replaceMessage(db, {
         id,
         session_id: sessionID,
         time_created,
         data: rest,
       })
+      // per-user summary.diffs 只改变派生 metadata；它不能让相同 Tool history 的 aggregate 失效。
+      if (changed && summaryMessageSource(rest)) ColdStorage.invalidateSessionSummaryBefore(db, sessionID, id)
     } catch (err) {
       if (!foreign(err)) throw err
       log.warn("ignored late message update", { messageID: id, sessionID })
@@ -156,6 +182,11 @@ export default [
   }),
 
   SyncEvent.project(MessageV2.Event.Removed, (db, data) => {
+    const message = db
+      .select({ data: MessageTable.data })
+      .from(MessageTable)
+      .where(and(eq(MessageTable.id, data.messageID), eq(MessageTable.session_id, data.sessionID)))
+      .get()
     for (const row of db
       .select()
       .from(PartTable)
@@ -163,6 +194,9 @@ export default [
       .all()) {
       const previous = usage(row.data)
       if (previous) applyUsage(db, data.sessionID, previous, -1)
+    }
+    if (message && summaryMessageSource(message.data)) {
+      ColdStorage.invalidateSessionSummaryBefore(db, data.sessionID, data.messageID)
     }
     ColdStorage.releaseMessage(db, data.messageID, data.sessionID)
     db.delete(MessageTable)
@@ -179,6 +213,10 @@ export default [
     const previous = row && usage(row.data)
     if (previous) applyUsage(db, data.sessionID, previous, -1)
 
+    const restored = row ? ColdStorage.inspectPartRows(db, [row])[0]?.data : undefined
+    if (summaryPartSource(restored) !== undefined) {
+      ColdStorage.invalidateSessionSummaryBefore(db, data.sessionID, data.messageID)
+    }
     ColdStorage.releasePart(db, data.partID, data.sessionID)
     db.delete(PartTable)
       .where(and(eq(PartTable.id, data.partID), eq(PartTable.session_id, data.sessionID)))
@@ -188,9 +226,18 @@ export default [
   SyncEvent.project(MessageV2.Event.PartUpdated, (db, data) => {
     const { id, messageID, sessionID, ...rest } = data.part
     const row = db.select().from(PartTable).where(eq(PartTable.id, id)).get()
+    const previous = row ? ColdStorage.inspectPartRows(db, [row])[0]?.data : undefined
+    const before = summaryPartSource(previous)
+    const after = summaryPartSource(rest)
+    const moved = row && (row.session_id !== sessionID || row.message_id !== messageID)
+    const changed = moved || !sameSummaryPart(before, after)
 
     try {
       // usage 差量与完整 Part replacement 位于同一 transaction，cold update 失败不能只提交统计变化。
+      // 旧父级在 replace 前失效；跨 Session/Message move 还必须在 replace 后失效新父级，不能只修一侧 aggregate。
+      if (changed && row && before !== undefined) {
+        ColdStorage.invalidateSessionSummaryBefore(db, row.session_id, row.message_id)
+      }
       ColdStorage.replacePart(db, {
         id,
         message_id: messageID,
@@ -198,6 +245,7 @@ export default [
         time_created: data.time,
         data: rest,
       })
+      if (changed && after !== undefined) ColdStorage.invalidateSessionSummaryBefore(db, sessionID, messageID)
       const previous = row && usage(row.data)
       const next = usage(data.part)
       if (previous) applyUsage(db, row.session_id, previous, -1)

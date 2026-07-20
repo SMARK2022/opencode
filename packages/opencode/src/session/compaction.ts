@@ -798,10 +798,10 @@ export const layer = Layer.effect(
       if (!cfg.compaction?.prune) return
       log.info("pruning")
 
-      const msgs = yield* session
-        .messages({ sessionID: input.sessionID })
-        .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(undefined)))
-      if (!msgs) return
+      // prune 只会扫描到最新 completed Compaction；boundary 以前的 Tool output
+      // 已由 summary 取代，先 hydrate 再 break 会把整段归档 head 无意义预热。
+      const msgs = yield* MessageV2.filterCompactedEffect(input.sessionID)
+      if (msgs.length === 0) return
 
       let total = 0
       let pruned = 0

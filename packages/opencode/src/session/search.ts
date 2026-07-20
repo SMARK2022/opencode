@@ -6,7 +6,7 @@ import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./se
  *
  * 搜索是 session 列表/TUI quick switch 的“可定位内容”投影，不是持久化
  * JSON 的全文搜索。这里必须只索引用户能用来识别会话的字段：标题、可见
- * 文本、工具名/工具输入、shell command 等。thinking/reasoning、tool result、
+ * 文本、文件/引用/子任务定位和 shell command 等。Tool identity/input/result、
  * shell output、metadata、token/snapshot 等字段虽然持久化在同一 JSON 中，
  * 但它们不是 session 搜索的契约，继续搜索会让结果被模型内部思考或大段
  * 工具输出污染。
@@ -58,9 +58,8 @@ function uriMatches(value: SQL, needle: string) {
 }
 
 function jsonLeafMatches(data: SQL, path: string, needle: string) {
-  // json_tree(...).atom 只返回叶子值，故搜索 `$.state.input` 时不会因为
-  // `command`、`path`、`description` 这些 JSON 键名命中；这保持 tool command
-  // 值可搜索，同时避免“搜 command 命中所有工具调用”的旧行为。
+  // json_tree(...).atom 只返回叶子值，故 files 数组中的真实路径可命中，
+  // `files` 等 JSON 键名本身不会让所有 Patch Part 产生伪匹配。
   return sql`exists (
     select 1
     from json_tree(${data}, ${path}) as search_value
@@ -73,7 +72,6 @@ function jsonLeafMatches(data: SQL, path: string, needle: string) {
 function messagePartMatches(needle: string) {
   return sql`(
     ${messageTextPartMatches(needle)}
-    or ${messageToolPartMatches(needle)}
     or ${messageAttachmentPartMatches(needle)}
     or ${messageSubtaskPartMatches(needle)}
     or ${messagePatchPartMatches(needle)}
@@ -89,31 +87,6 @@ function messageTextPartMatches(needle: string) {
     and coalesce(json_extract(${PartTable.data}, '$.synthetic'), 0) = 0
     and coalesce(json_extract(${PartTable.data}, '$.ignored'), 0) = 0
     and ${textMatches(sql`json_extract(${PartTable.data}, '$.text')`, needle)}
-  )`
-}
-
-function messageToolPartMatches(needle: string) {
-  // Tool output/error/metadata 可能非常大，也可能包含模型内部材料。这里把
-  // 可搜索面限定为可见工具身份和输入值，包括 pending raw JSON，以及
-  // completed/error 状态里的 state.input command 对象。
-  return sql`(
-    json_extract(${PartTable.data}, '$.type') = 'tool'
-    and (
-      ${textMatches(sql`json_extract(${PartTable.data}, '$.tool')`, needle)}
-      or ${textMatches(sql`json_extract(${PartTable.data}, '$.state.title')`, needle)}
-      or ${messageToolRawMatches(needle)}
-      or ${jsonLeafMatches(sql`${PartTable.data}`, "$.state.input", needle)}
-    )
-  )`
-}
-
-function messageToolRawMatches(needle: string) {
-  // Pending tool input 先落在 state.raw，内容通常是模型正在流式输出的 JSON
-  // 字符串。只有 raw 已经是合法 JSON 时才按叶子值搜索；这样 pending command
-  // 值仍可被定位，但 `command`/`path` 这类键名不会重新污染 session 搜索。
-  return sql`(
-    json_valid(json_extract(${PartTable.data}, '$.state.raw'))
-    and ${jsonLeafMatches(sql`json_extract(${PartTable.data}, '$.state.raw')`, "$", needle)}
   )`
 }
 
@@ -137,7 +110,7 @@ function messageAttachmentPartMatches(needle: string) {
 function messageSubtaskPartMatches(needle: string) {
   // Subtask part 是面向用户的委派请求。prompt/description/command 保持可
   // 搜索，使 session 搜索能按“交给子代理做了什么”定位父会话；子代理结果仍在
-  // tool output 中，由 messageToolPartMatches 统一排除。
+  // tool output 中，继续由白名单之外的字段排除。
   return sql`(
     json_extract(${PartTable.data}, '$.type') = 'subtask'
     and (
@@ -209,8 +182,7 @@ function sessionUserMessageMatches(needle: string) {
 
 function sessionAssistantMessageMatches(needle: string) {
   // v2 assistant content 把可见文本、reasoning 和 tool 混在同一个数组里。
-  // 这里逐项遍历并只白名单 assistant text、tool identity 和 input values；
-  // tool content/structured/provider metadata 属于结果面，不能进入 session list search。
+  // Tool identity/input/result 属于归档数据，不进入 session list search；只保留可见 text。
   return sql`(
     ${SessionMessageTable.type} = 'assistant'
     and exists (
@@ -220,13 +192,6 @@ function sessionAssistantMessageMatches(needle: string) {
         (
           json_extract(content.value, '$.type') = 'text'
           and ${textMatches(sql`json_extract(content.value, '$.text')`, needle)}
-        )
-        or (
-          json_extract(content.value, '$.type') = 'tool'
-          and (
-            ${textMatches(sql`json_extract(content.value, '$.name')`, needle)}
-            or ${jsonLeafMatches(sql`content.value`, "$.state.input", needle)}
-          )
         )
       )
       limit 1
