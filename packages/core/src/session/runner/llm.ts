@@ -125,9 +125,6 @@ const layer = Layer.effect(
     const referenceGuidance = yield* ReferenceGuidance.Service
     const config = yield* Config.Service
     const permission = yield* PermissionV2.Service
-    // 同工具成功才重置错误；不同Session和不同工具互不冲掉计数。
-    // 同一助手的并行失败共享一次机会，模型看过结果后的新消息才继续累加。
-    const errors = new Map<SessionSchema.ID, Map<string, { count: number; lastMessageID: string }>>()
     const nearOverflowNotified = new Set<SessionSchema.ID>()
     const snapshots = yield* Snapshot.Service
     const db = (yield* Database.Service).db
@@ -408,24 +405,22 @@ const layer = Layer.effect(
         withPublication(Effect.gen(function* () {
           // publisher只为已接受的终态返回凭证，重复/忽略事件不能虚增错误。
           const settled = yield* publisher.publish(event, outputPaths)
-          if (!settled) return
-          const counts = errors.get(session.id) ?? new Map<string, { count: number; lastMessageID: string }>()
-          errors.set(session.id, counts)
-          if (!settled.failed) { counts.delete(settled.name); return }
-          // 消息身份取已确认的终态凭证，不把各自callID当作模型已看到结果。
-          const entry = counts.get(settled.name) ?? { count: 0, lastMessageID: "" }
-          if (entry.lastMessageID !== settled.assistantMessageID) {
-            entry.count++
-            entry.lastMessageID = settled.assistantMessageID
-          }
-          counts.set(settled.name, entry)
-          if (entry.count < 3) return
+          if (!settled?.failed) return
+          // 沿已提交凭证定点重读当前助手，先前历史复用本turn的compaction/epoch可见快照。
+          const current = yield* store.message(settled.assistantMessageID, session.id)
+          if (!current || current.message.type !== "assistant")
+            return yield* Effect.die("Accepted tool failure is missing its projected assistant")
+          // 不另扫或thaw历史；当前pending不占窗口，成功及不同输入都会自然打断连续失败。
+          const recent = [...context.filter(message => message.id !== settled.assistantMessageID), current.message]
+            .flatMap(message => message.type === "assistant"
+              ? message.content.filter((part): part is SessionMessage.AssistantTool => part.type === "tool" && part.state.status !== "pending")
+              : []).slice(-3)
+          // JSON.stringify比较沿原合同，不规范化键序，也不把同工具的所有错误累加成第二数据源。
+          if (recent.length !== 3 || !recent.every(part => part.name === settled.name && part.state.status === "error" && JSON.stringify(part.state.input) === JSON.stringify(settled.input))) return
           yield* permission.assert({ action: "doom_loop", resources: [settled.name], save: [settled.name], sessionID: session.id, agent: agent.id,
-            metadata: { tool: settled.name, input: settled.input, consecutiveErrors: entry.count },
+            metadata: { tool: settled.name, input: settled.input, consecutiveErrors: 3 },
             source: { type: "tool", messageID: settled.assistantMessageID, callID: settled.callID },
           }).pipe(Effect.orDie)
-          // 保留消息身份，阈值后的同批剩余失败不能再次消费下一轮计数。
-          entry.count = 0
         }))
       let overflowFailure: ProviderErrorEvent | undefined
       // 只有本轮显式provider错误携带续跑资格，不能从投影中的unknown推断中断或EOF。
@@ -480,20 +475,6 @@ const layer = Layer.effect(
             yield* Effect.uninterruptibleMask((restore) =>
               restore(
                 Effect.gen(function* () {
-                  const history = yield* getContext(session.id).pipe(Effect.orDie)
-                  const current = history.find(message => message.type === "assistant" && message.id === assistantMessageID)
-                  const parts = current?.type === "assistant" ? current.content : []
-                  const index = parts.findIndex(part => part.type === "tool" && part.id === event.id)
-                  let recent = parts.slice(0, index + 1).slice(-3)
-                  if (recent.length < 3) {
-                    const previous = history.findLast(message => message.type === "assistant" && message.id !== assistantMessageID)
-                    if (previous?.type === "assistant") recent = [...previous.content.filter(part => part.type === "tool" && part.state.status !== "pending").slice(-3), ...recent].slice(-3)
-                  }
-                  // 每次只检查截止当前call的三项，避免并行后到调用使较早call误触发。
-                  if (recent.length === 3 && recent.every(part => part.type === "tool" && part.state.status !== "pending" && part.name === event.name && JSON.stringify(part.state.input) === JSON.stringify(event.input)))
-                    yield* permission.assert({ action: "doom_loop", resources: [event.name], save: [event.name], sessionID: session.id, agent: agent.id,
-                      metadata: { tool: event.name, input: event.input }, source: { type: "tool", messageID: assistantMessageID, callID: event.id },
-                    }).pipe(Effect.orDie)
                   return yield* toolMaterialization.settle({
                   sessionID: session.id,
                   agent: agent.id,

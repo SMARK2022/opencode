@@ -658,9 +658,9 @@ describe("Session.findMessage", () => {
     ),
   )
 
-  // #493：doom-loop tail 只取前一个可见 assistant 的末尾 tool rows——hidden part/assistant 双向过滤，
-  // 匹配的 3 条 thaw 回填（coldOwners 5→2），范围外 owner 不变。
-  it.instance("bounds doom-loop history to the previous assistant tool tail", () =>
+  // #493/#508：doom-loop tail 跨多个可见 assistant 取末尾 tool rows——hidden part/assistant 双向过滤，
+  // 匹配 rows thaw 回填，范围外 owner 不变。
+  it.instance("bounds doom-loop history to the preceding multi-assistant tool tail", () =>
     withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
         const { sync } = yield* Database.Service
@@ -727,6 +727,23 @@ describe("Session.findMessage", () => {
             time: { start: 12, end: 13 },
           },
         })
+        // #508：跨多个 visible assistant 各 1 tool：limit=2 必须返回 2 条（单 previous-assistant 只会得到 1）。
+        const midAssistantID = yield* addAssistant(sessionID, userID)
+        const midPartID = PartID.make("prt_00000000000000000000000000")
+        yield* session.updatePart({
+          id: midPartID,
+          sessionID,
+          messageID: midAssistantID,
+          type: "tool",
+          callID: "bounded-mid",
+          tool: "read",
+          state: {
+            status: "error",
+            input: { mid: true },
+            error: "missing",
+            time: { start: 14, end: 15 },
+          },
+        })
         const currentAssistantID = yield* addAssistant(sessionID, userID)
         sync
           .update(SessionTable)
@@ -738,15 +755,24 @@ describe("Session.findMessage", () => {
         }
 
         // 旧全量 Session.messages 默认排除 hidden Message/Part；bounded seam 必须保持同一可见性语义。
-        // hidden assistant 更靠近 current、hidden part 位于 visible tail 之后，任一过滤缺失都会改变 expected IDs。
+        // 最近 3 条 visible non-pending tools：previous 末尾 2 条 + mid 1 条（hidden 不占配额）。
         const tail = yield* MessageV2.previousAssistantToolTail({
           sessionID,
           before: { id: currentAssistantID, time: Date.now() },
           limit: 3,
         })
-        expect(tail.map((part) => part.id)).toEqual(partIDs.slice(-3))
-        expect(tail.every((part) => part.type === "tool" && part.state.status === "completed")).toBe(true)
-        expect(ColdStorage.status(sync).coldOwners).toBe(2)
+        expect(tail.map((part) => part.id)).toEqual([...partIDs.slice(-2), midPartID])
+        expect(tail.every((part) => part.type === "tool" && part.state.status !== "pending")).toBe(true)
+        // 五个 frozen owner 只恢复 previous 的两个；mid 未冻结，后一次查询不能再 thaw 其它 owner。
+        expect(ColdStorage.status(sync).coldOwners).toBe(3)
+
+        const two = yield* MessageV2.previousAssistantToolTail({
+          sessionID,
+          before: { id: currentAssistantID, time: Date.now() },
+          limit: 2,
+        })
+        // 证明跨 assistant：最近 2 条来自 previous 末尾 1 条 + mid，而非只扫 mid 一个 assistant。
+        expect(two.map((part) => part.id)).toEqual([partIDs[partIDs.length - 1], midPartID])
       }),
     ),
   )
