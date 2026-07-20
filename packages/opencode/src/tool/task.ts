@@ -17,6 +17,10 @@ import { Permission } from "@/permission"
 import { Database } from "@opencode-ai/core/database/database"
 import { InstanceState } from "@/effect/instance-state"
 import { FileEvidence } from "@opencode-ai/core/session/file-evidence"
+import { formatTaskIdNotice } from "@/util/output-notice"
+
+// SessionID 的 Schema 生成器使用固定 26 位 body；完整 ID = "ses_" + body，旧 brand 边界不收紧。
+const SESSION_ID_BODY_LENGTH = 26
 
 // 只适配V1历史形状，聚合、预算与转义均由两代共用的Core owner承担。
 export function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[], worktree: string): string | undefined {
@@ -90,10 +94,13 @@ function renderOutput(input: {
   state: "running" | "completed" | "error"
   summary?: string
   text: string
+  notice?: string
 }) {
   const tag = input.state === "error" ? "task_error" : "task_result"
   return [
     `<task id="${input.sessionID}" state="${input.state}">`,
+    // #507：notice 插在骨架元信息与结果体之间，供模型读，不影响 task_result 解析
+    ...(input.notice ? [input.notice] : []),
     ...(input.summary ? [`<summary>${input.summary}</summary>`] : []),
     `<${tag}>`,
     input.text,
@@ -169,9 +176,41 @@ export const TaskTool = Tool.define(
         })
       }
 
-      const session = params.task_id
-        ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
-        : undefined
+      // #507：task_id 是 optional string，不是 SessionID brand。对非 "ses*" raw 直接
+      // SessionID.make 会同步抛 brand 错误并中断整次 execute；只能对已过域门闸的候选 make+get。
+      const lookupSession = (id: string) =>
+        id.startsWith("ses")
+          ? sessions.get(SessionID.make(id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+          : Effect.succeed(undefined)
+
+      const rawTaskID = params.task_id
+      const resolved = yield* Effect.gen(function* () {
+        if (!rawTaskID) return { mode: "create" as const, reason: "omitted" as const }
+
+        // 候选 1：raw 已是 SessionID 域成员（startsWith "ses"）
+        const exact = yield* lookupSession(rawTaskID)
+        if (exact) return { mode: "resume" as const, session: exact }
+
+        // 候选 2：用户指定的 26-body 补全（生成器字面量 ses_）；与 brand 边界 "ses" 分工
+        // 补全后仍是普通 ses* 候选——miss 不再二次变换（不加前缀/截断），
+        // 与乱串同归 invalid_provided，保证 miss 路径单一。
+        if (rawTaskID.length === SESSION_ID_BODY_LENGTH && !rawTaskID.startsWith("ses")) {
+          const prefixed = yield* lookupSession("ses_" + rawTaskID)
+          if (prefixed) return { mode: "resume" as const, session: prefixed }
+        }
+
+        // 能用就用；不能用就当错误走创建，不因非法 ID 硬失败
+        return { mode: "create" as const, reason: "invalid_provided" as const, provided: rawTaskID }
+      })
+
+      // resume 取已命中 session；create 时 session 保持 undefined 以走 sessions.create
+      const session = resolved.mode === "resume" ? resolved.session : undefined
+      // 仅在“传了但无法命中已有 Session”时提示；省略 task_id 的正常新建不插 notice
+      // notice 与 create 绑定：不伪装 resume 成功，只声明独立新上下文
+      const invalidTaskIdNotice =
+        resolved.mode === "create" && resolved.reason === "invalid_provided"
+          ? formatTaskIdNotice({ provided: resolved.provided })
+          : undefined
       // 执行代理可能不同于持久化 parent.agent；用 ctx.agent 防止切换代理后继承旧权限。
       const parentAgent = yield* agent.get(ctx.agent)
       const childPermission = deriveSubagentSessionPermission(
@@ -263,8 +302,11 @@ export const TaskTool = Tool.define(
         // 从 ctx.messages 提取 read tool parts 的文件路径和 range，
         // 不做 fs.stat（避免 I/O），stale 由子 agent 的 read size+modifiedMs 门控处理。
         // worktree 用于计算相对路径，通过 InstanceState.context 获取（与 read.ts 同款用法）。
+        // #507：默认必须跟真实 resolve.mode：resume→none，新建（含非法 task_id 导致的新建）→summary。
+        // 不能用 raw params.task_id 真值——假 ID 会伪装成 resume 并丢掉父 inspected 摘要。
         const instance = yield* InstanceState.context
-        const inspectedFilesMode = params.inspected_files ?? (params.task_id ? "none" : "summary")
+        const inspectedFilesMode =
+          params.inspected_files ?? (resolved.mode === "resume" ? "none" : "summary")
         const parentContext = inspectedFilesMode !== "none" && ctx.messages.length > 0
           ? buildParentInspectedFilesSummary(ctx.messages, instance.worktree)
           : undefined
@@ -341,6 +383,8 @@ export const TaskTool = Tool.define(
       })
 
       const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (
+        // #507：inject 是子任务完成后注入父会话的 synthetic 结果文本，不属于创建时回执，
+        // 不挂 invalid notice（notice 只随 started/updated/completed 回执出现）。
         state: "completed" | "error",
         text: string,
       ) {
@@ -393,6 +437,9 @@ export const TaskTool = Tool.define(
             state: "running",
             summary: "Background task updated",
             text: BACKGROUND_UPDATED,
+            // #507：background 回执同样挂 invalid notice（若有），与前台 output 合同一致；
+            // extend 更新回执与 started 同属「本次调用回执」，一致性挂载而非语义新增。
+            notice: invalidTaskIdNotice,
           }),
         }
       }
@@ -425,6 +472,8 @@ export const TaskTool = Tool.define(
             state: "running",
             summary: "Background task started",
             text: BACKGROUND_STARTED,
+            // #507：background 启动回执同样挂 invalid notice（若有），与前台 output 合同一致
+            notice: invalidTaskIdNotice,
           }),
         }
       }
@@ -457,7 +506,12 @@ export const TaskTool = Tool.define(
             return {
               title: params.description,
               metadata,
-              output: renderOutput({ sessionID: nextSession.id, state: "completed", text: result?.output ?? "" }),
+              output: renderOutput({
+                sessionID: nextSession.id,
+                state: "completed",
+                text: result?.output ?? "",
+                notice: invalidTaskIdNotice,
+              }),
             }
           }),
         (_, exit) =>
