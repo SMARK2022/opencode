@@ -63,14 +63,20 @@ export function createEventSource() {
 }
 
 // #237：扩展 request 参数，让 /log 等端点测试能截获请求体验证日志契约
-export type FetchHandler = (url: URL, request?: Request) => Response | Promise<Response> | undefined
+// #0503：init 第三参转发 method/body——goal POST 等控制面 mutation 断言依赖它；
+// 既有 handler 忽略额外参数不受影响
+export type FetchHandler = (
+  url: URL,
+  request?: Request,
+  init?: RequestInit,
+) => Response | Promise<Response> | undefined
 
 export function createFetch(override?: FetchHandler, events?: ReturnType<typeof createEventSource>) {
   const session = [] as URL[]
-  const fetch = (async (input: RequestInfo | URL) => {
+  const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
     if (url.pathname === "/session") session.push(url)
-    const overridden = await override?.(url, input instanceof Request ? input : undefined)
+    const overridden = await override?.(url, input instanceof Request ? input : undefined, init)
     if (overridden) return overridden
     if (url.pathname === "/api/event" && events) return events.response()
 

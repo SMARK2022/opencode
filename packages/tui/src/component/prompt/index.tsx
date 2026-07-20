@@ -38,6 +38,9 @@ import { usePromptStash } from "../../prompt/stash"
 import { DialogStash } from "../dialog-stash"
 import { PromptVoiceInput } from "../../prompt-voice-input"
 import { PromptVoiceRecorder } from "../../prompt-voice-recorder"
+import { parseGoalSlashInput } from "../../util/parse-goal-slash"
+import { executeGoalSlashIntent } from "../../util/goal-http"
+import { openGoalDialog } from "../dialog-goal"
 import { type AutocompleteRef, Autocomplete } from "./autocomplete"
 import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v2"
@@ -1264,6 +1267,40 @@ export function Prompt(props: PromptProps) {
         .catch(() => restoreDraftAfterBackgroundFailure(submitted, currentMode))
       setStore("mode", "normal")
     } else if (
+      // #0503：local Goal 控制面优先于 server template slash：避免未来同名 command 误进 LLM
+      parseGoalSlashInput(inputText) !== undefined
+    ) {
+      // #0503：sessionID 是 submit 头部 create 后的权威值——home 提交 /goal 也能命中正确实例
+      const intent = parseGoalSlashInput(inputText)!
+      // #0503：失败 early-return 保留草稿；成功 fall-through 共享尾（含 home navigate，INV-11）
+      const ok = await executeGoalSlashIntent({
+        intent,
+        sessionID,
+        sdkUrl: sdk.url,
+        directory: sync.path.directory || sdk.directory,
+        fetch: (input, init) => sdk.fetch(input, init),
+        onError: (message) => toast.show({ message, variant: "error" }),
+        onReconcile: (goal) => {
+          // #0503：Schema optional tokenBudget/reason 与 TUI store 必填 null 的窄化对齐
+          sync.goal.reconcile(sessionID, {
+            ...goal,
+            tokenBudget: goal.tokenBudget ?? null,
+            reason: goal.reason ?? null,
+          })
+        },
+        openDialog: (hasGoal) => {
+          openGoalDialog({
+            sessionID,
+            hasGoal,
+            replace: (view) => dialog.replace(view),
+          })
+        },
+        // #0503：hasGoal 在提交时读取快照——零参数 dialog 的菜单/编辑分支由此决定
+        hasGoal: !!sync.data.session_goal[sessionID],
+      })
+      // #0503：失败 return false——上层 stopPropagation 语义保持，草稿仍在输入框
+      if (!ok) return false
+    } else if (
       inputText.startsWith("/") &&
       sync.data.command.some((x) => x.name === inputText.split("\n")[0].split(" ")[0].slice(1))
     ) {
@@ -1315,7 +1352,10 @@ export function Prompt(props: PromptProps) {
       ...store.prompt,
       mode: currentMode,
     })
-    input.extmarks.clear()
+    // #0503：await 的 control 路径（如 /goal HTTP）返回时 textarea 可能已销毁；清草稿以 store 为准
+    if (input && !input.isDestroyed) {
+      input.extmarks.clear()
+    }
     setStore("prompt", {
       input: "",
       parts: [],
@@ -1332,7 +1372,10 @@ export function Prompt(props: PromptProps) {
         route.navigate({ type: "session", sessionID })
       }, 50)
     }
-    input.clear()
+    // #0503：同上——销毁后的 clear 调用会在旧 renderer 上复活幽灵状态
+    if (input && !input.isDestroyed) {
+      input.clear()
+    }
     if (finishMoveProgress) move.finishSubmit()
     return true
   }
