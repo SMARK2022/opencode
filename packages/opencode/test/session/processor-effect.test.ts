@@ -1851,6 +1851,9 @@ unavailable.live("omits an image attachment when normalization is unavailable", 
           expect(part.state.output).toContain(
             "[1 image omitted: could not be resized below the image size limit.]",
           )
+          // #509：raw AI tool 可不返回 title；上游 toolResultOutput 在 producer 层已把缺省 title 归一为
+          // 工具名（string），completed 终态持久化后 ColdStorage.freeze/status 全库扫描不会遇到 undefined。
+          expect(part.state.title).toBe("image_read")
         }
         // 直接回读MessageV2而不是相信内存结果，确认附件确实未随part持久化
         const stored = yield* MessageV2.parts(msg.id)
