@@ -6,8 +6,8 @@ import { useSDK } from "@tui/context/sdk"
 import { useToast } from "@tui/ui/toast"
 import { useTheme } from "@tui/context/theme"
 import { createMemo, createSignal, onMount } from "solid-js"
-import { MAX_OBJECTIVE_CHARS } from "@/session/goal"
 import { Locale } from "@/util/locale"
+import { goalEndpointUrl, goalHttpClear, goalHttpSet } from "@tui/util/goal-http"
 
 // [local-smark] goal 管理 dialog
 // SDK 未重新生成 goalSet/goalClear 方法，直接用 sdk.fetch 调用 HTTP 端点
@@ -17,72 +17,40 @@ interface DialogGoalProps {
   sessionID: string
 }
 
-// 封装 goal HTTP 调用：统一错误处理和 dialog 关闭
+// 封装 goal HTTP 调用：统一错误处理和 dialog 关闭；实现落到 shared goal-http
 function useGoalApi(sessionID: string) {
   const sdk = useSDK()
   const sync = useSync()
   const toast = useToast()
   const dialog = useDialog()
 
-  // 构建带 directory query param 的 URL
-  // workspace routing 中间件通过 directory 定位实例
   const goalUrl = () => {
-    const url = new URL(`/session/${sessionID}/goal`, sdk.url)
     const dir = sync.path.directory || sdk.directory
-    if (dir) url.searchParams.set("directory", dir)
-    return url
+    return goalEndpointUrl(sdk.url, sessionID, dir || undefined)
   }
 
+  const deps = () => ({
+    url: goalUrl(),
+    fetch: (input: string | URL, init?: RequestInit) => sdk.fetch(input, init),
+    onError: (message: string) => toast.show({ message, variant: "error" as const }),
+  })
+
   // POST /session/:id/goal — 设置或更新 goal
-  // [local-smark] 返回解析后的 Goal，供 toggle 调用方 reconcile 到 sync store
-  const setGoal = async (input: { objective?: string; status?: string; continueOnError?: boolean }, close = true) => {
-    // 仅对 objective 更新做长度预检；status-only 更新（Pause/Resume）objective 为 undefined，
-    // 必须跳过预检，否则会误拦状态切换。上限与 SessionGoal.MAX_OBJECTIVE_CHARS 保持一致，
-    // 提前拦截避免无效往返
-    if (input.objective !== undefined && input.objective.trim().length > MAX_OBJECTIVE_CHARS) {
-      toast.show({
-        message: `Goal objective must be at most ${MAX_OBJECTIVE_CHARS} characters`,
-        variant: "error",
-      })
-      return
-    }
-    try {
-      const resp = await sdk.fetch(goalUrl(), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
-      })
-      if (!resp.ok) {
-        // 服务器返回 NamedError 形态 {name, data:{message}}；提取 data.message
-        // 让用户看到具体原因（如 budget/无goal 等 client 未预判的拒绝）。
-        // 解析失败或无 message 时回退通用文案，兼容中间件非 JSON 响应
-        const body = await resp.json().catch(() => null)
-        toast.show({ message: body?.data?.message ?? "Failed to update goal", variant: "error" })
-        return
-      }
-      // [local-smark] 解析成功 response，供调用方 reconcile
-      const goal = await resp.json()
-      if (close) dialog.clear()
-      return goal
-    } catch {
-      toast.show({ message: "Failed to update goal", variant: "error" })
-    }
+  // 返回解析后的 Goal，供 toggle 调用方 reconcile 到 sync store
+  const setGoal = async (
+    input: { objective?: string; status?: string; continueOnError?: boolean },
+    close = true,
+  ) => {
+    const goal = await goalHttpSet(deps(), input)
+    if (goal === undefined) return
+    if (close) dialog.clear()
+    return goal
   }
 
   // DELETE /session/:id/goal — 清除 goal
   const clearGoal = async () => {
-    try {
-      const resp = await sdk.fetch(goalUrl(), {
-        method: "DELETE",
-      })
-      if (!resp.ok) {
-        toast.show({ message: "Failed to clear goal", variant: "error" })
-        return
-      }
-      dialog.clear()
-    } catch {
-      toast.show({ message: "Failed to clear goal", variant: "error" })
-    }
+    const ok = await goalHttpClear(deps())
+    if (ok) dialog.clear()
   }
 
   return { setGoal, clearGoal }
@@ -239,4 +207,18 @@ function DialogGoalEdit(props: DialogGoalProps) {
       onCancel={() => dialog.clear()}
     />
   )
+}
+
+// 供 prompt `/goal` 零参数路径使用：直接用 submit 权威 sessionID 打开 dialog，
+// 不走 goal.manage 的 route.type===session 守卫（home 上 create 后路由可能尚未切换）
+export function openGoalDialog(input: {
+  sessionID: string
+  hasGoal: boolean
+  replace: (view: () => unknown) => void
+}) {
+  if (input.hasGoal) {
+    input.replace(() => <DialogGoalMenu sessionID={input.sessionID} />)
+    return
+  }
+  input.replace(() => <DialogGoal sessionID={input.sessionID} />)
 }

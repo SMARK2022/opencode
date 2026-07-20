@@ -536,7 +536,32 @@ export function Autocomplete(props: {
   )
 
   const commands = createMemo((): AutocompleteOption[] => {
-    const results: AutocompleteOption[] = [...command.slashes()]
+    // local slash 默认立即 run（开 dialog 等）；
+    // /goal 特判插入 "/goal "：与 server command 参数输入一致，
+    // 让用户可继续键入含空格的长 objective 再 Enter 提交（INV-01 UX）
+    const results: AutocompleteOption[] = command.slashes().map((entry) => {
+      if (entry.display === "/goal") {
+        return {
+          display: entry.display,
+          description: entry.description,
+          aliases: entry.aliases,
+          onSelect: () => {
+            // 清空当前行 slash 草稿后写入带尾空格的命令前缀
+            const newText = "/goal "
+            const cursor = props.input().logicalCursor
+            props.input().deleteRange(0, 0, cursor.row, cursor.col)
+            props.input().insertText(newText)
+            props.input().cursorOffset = Bun.stringWidth(newText)
+          },
+        }
+      }
+      return {
+        display: entry.display,
+        description: entry.description,
+        aliases: entry.aliases,
+        onSelect: entry.onSelect,
+      }
+    })
 
     for (const serverCommand of sync.data.command) {
       if (serverCommand.source === "skill") continue

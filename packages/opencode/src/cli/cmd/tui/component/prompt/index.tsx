@@ -68,6 +68,9 @@ import { useTuiConfig } from "../../context/tui-config"
 import { promptOffsetWidth } from "@/cli/cmd/prompt-display"
 import { PromptVoiceInput } from "../../prompt-voice-input"
 import { PromptVoiceRecorder } from "../../prompt-voice-recorder"
+import { parseGoalSlashInput } from "../../util/parse-goal-slash"
+import { executeGoalSlashIntent } from "../../util/goal-http"
+import { openGoalDialog } from "../dialog-goal"
 
 export type PromptProps = {
   sessionID?: string
@@ -1369,6 +1372,33 @@ export function Prompt(props: PromptProps) {
         .catch(() => restoreDraftAfterBackgroundFailure(submitted, currentMode))
       setStore("mode", "normal")
     } else if (
+      // local Goal 控制面优先于 server template slash：避免未来同名 command 误进 LLM
+      iife(() => parseGoalSlashInput(inputText) !== undefined)
+    ) {
+      const intent = parseGoalSlashInput(inputText)!
+      // 失败 early-return 保留草稿；成功 fall-through 共享尾（含 home navigate，INV-11）
+      const ok = await executeGoalSlashIntent({
+        intent,
+        sessionID: sessionID!,
+        sdkUrl: sdk.url,
+        directory: sync.path.directory || sdk.directory,
+        fetch: (input, init) => sdk.fetch(input, init),
+        onError: (message) => toast.show({ message, variant: "error" }),
+        onReconcile: (goal) => {
+          // Schema optional tokenBudget 与 TUI store 必填 null 的窄化对齐
+          if (goal) sync.goal.reconcile(sessionID!, { ...goal, tokenBudget: goal.tokenBudget ?? null, reason: goal.reason ?? null })
+        },
+        openDialog: (hasGoal) => {
+          openGoalDialog({
+            sessionID: sessionID!,
+            hasGoal,
+            replace: (view) => dialog.replace(view),
+          })
+        },
+        hasGoal: !!sync.data.session_goal[sessionID!],
+      })
+      if (!ok) return false
+    } else if (
       inputText.startsWith("/") &&
       iife(() => {
         const firstLine = inputText.split("\n")[0]
@@ -1433,7 +1463,10 @@ export function Prompt(props: PromptProps) {
       ...store.prompt,
       mode: currentMode,
     })
-    input.extmarks.clear()
+    // await 的 control 路径（如 /goal HTTP）返回时 textarea 可能已销毁；清草稿以 store 为准
+    if (input && !input.isDestroyed) {
+      input.extmarks.clear()
+    }
     setStore("prompt", {
       input: "",
       parts: [],
@@ -1453,7 +1486,9 @@ export function Prompt(props: PromptProps) {
         })
       }, 50)
     }
-    input.clear()
+    if (input && !input.isDestroyed) {
+      input.clear()
+    }
     return true
   }
   const exit = useExit()

@@ -292,6 +292,173 @@ test("accepted TUI slash-command submission clears without waiting for completio
   })
 })
 
+// INV-01 + INV-04：多词 objective 必须整串 POST body.objective，
+// 且不得误走 prompt_async（控制面 mutation ≠ 聊天消息）
+// 期望值 "fix the login bug" 为独立规格字面量，证明未 argv 切碎
+test("TUI /goal multi-word objective posts whole string without prompt_async", async () => {
+  const previous = Global.Path.state
+  await using tmp = await tmpdir()
+  Global.Path.state = tmp.path
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  let goalPosts = 0
+  let promptAsync = 0
+  let postedObjective = ""
+  // 故意含空格的自然语言任务：若被 split 成多 token，POST 字段会错
+  const draft = "/goal fix the login bug"
+
+  await withPrompt(
+    (url, _request, init) => {
+      if (url.pathname === "/config/providers") return json({ providers: [provider], default: { provider: model.id } })
+      if (url.pathname === "/provider") return json({ all: [provider], default: { provider: model.id }, connected: [] })
+      if (url.pathname === "/agent") return json([agent])
+      // 仅统计 Goal 控制面 POST；方法可能在 init 或 Request 上
+      if (url.pathname === `/session/${sessionID}/goal` && (init?.method === "POST" || _request?.method === "POST")) {
+        goalPosts += 1
+        const body = typeof init?.body === "string" ? JSON.parse(init.body) : {}
+        postedObjective = body.objective ?? ""
+        // 返回完整 Goal 形态，触发 reconcile 路径但不依赖 SSE
+        return json({
+          goal: {
+            sessionID,
+            id: "goal_test",
+            objective: body.objective,
+            status: "active",
+            tokenBudget: null,
+            tokensUsed: 0,
+            timeUsedSeconds: 0,
+            continueOnError: false,
+            generation: 1,
+            reason: null,
+            time: { created: 1, updated: 1 },
+          },
+        })
+      }
+      // 若 submit 误路由到聊天，此处会计数，断言要求保持 0
+      if (url.pathname === `/session/${sessionID}/prompt_async`) {
+        promptAsync += 1
+        return json({})
+      }
+    },
+    async (prompt) => {
+      prompt.set({ input: draft, parts: [] })
+      // 与既有 shell/command transport 一致：不 await，避免测试 harness 生命周期竞态
+      void prompt.submit()
+      await wait(() => goalPosts > 0)
+      // 成功尾必须清草稿（store），证明共享 post-success 完成
+      await wait(() => prompt.current.input === "")
+      expect(postedObjective).toBe("fix the login bug")
+      expect(promptAsync).toBe(0)
+      expect(prompt.current.input).toBe("")
+    },
+  ).finally(() => {
+    Global.Path.state = previous
+  })
+})
+
+// INV-05：Goal HTTP 失败时不得清草稿、不得降级为 prompt_async 发出原文
+// 400 模拟 domain 拒绝（如空 objective）；用户应能就地改字重试
+test("failed TUI /goal submission keeps the draft text", async () => {
+  const previous = Global.Path.state
+  await using tmp = await tmpdir()
+  Global.Path.state = tmp.path
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  let goalPosts = 0
+  const draft = "/goal fix the login bug"
+
+  await withPrompt(
+    (url, _request, init) => {
+      if (url.pathname === "/config/providers") return json({ providers: [provider], default: { provider: model.id } })
+      if (url.pathname === "/provider") return json({ all: [provider], default: { provider: model.id }, connected: [] })
+      if (url.pathname === "/agent") return json([agent])
+      if (url.pathname === `/session/${sessionID}/goal` && (init?.method === "POST" || _request?.method === "POST")) {
+        goalPosts += 1
+        // NamedError 形态：data.message 应被 toast 消费（本用例只断言草稿保留）
+        return json({ name: "GoalError", data: { message: "goal objective must not be empty" } }, { status: 400 })
+      }
+    },
+    async (prompt) => {
+      prompt.set({ input: draft, parts: [] })
+      void prompt.submit()
+      await wait(() => goalPosts > 0)
+      // 给失败路径 early-return 一点时间，确保没有异步清草稿
+      await Bun.sleep(20)
+      expect(prompt.current.input).toBe(draft)
+    },
+  ).finally(() => {
+    Global.Path.state = previous
+  })
+})
+
+// INV-11 / plan B-01：home 无 sessionID 时先 create，再 goal POST，
+// 成功必须 fall-through 共享尾 delayed navigate，不能 early-return 丢路由
+// 同时断言多词 objective "a b c" 仍整串写入（与 INV-01 叠加）
+test("home TUI /goal creates session posts objective and navigates", async () => {
+  const previous = Global.Path.state
+  await using tmp = await tmpdir()
+  Global.Path.state = tmp.path
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  // 固定 create 返回 id，便于断言 navigate 目标 session
+  const createdID = "ses_goal_home_nav"
+  let goalPosts = 0
+  let postedObjective = ""
+  let promptAsync = 0
+  const draft = "/goal a b c"
+
+  await withPrompt(
+    (url, _request, init) => {
+      if (url.pathname === "/config/providers") return json({ providers: [provider], default: { provider: model.id } })
+      if (url.pathname === "/provider") return json({ all: [provider], default: { provider: model.id }, connected: [] })
+      if (url.pathname === "/agent") return json([agent])
+      // submit 在 props.sessionID 为空时创建 session
+      if (url.pathname === "/session" && (init?.method === "POST" || _request?.method === "POST")) {
+        return json({ id: createdID, slug: "x", version: "1", projectID: "proj_test", directory, title: "t", time: { created: 1, updated: 1 } })
+      }
+      // Goal 必须写到刚创建的 session，而不是旧常量 sessionID
+      if (url.pathname === `/session/${createdID}/goal` && (init?.method === "POST" || _request?.method === "POST")) {
+        goalPosts += 1
+        const body = typeof init?.body === "string" ? JSON.parse(init.body) : {}
+        postedObjective = body.objective ?? ""
+        return json({
+          goal: {
+            sessionID: createdID,
+            id: "goal_home",
+            objective: body.objective,
+            status: "active",
+            tokenBudget: null,
+            tokensUsed: 0,
+            timeUsedSeconds: 0,
+            continueOnError: false,
+            generation: 1,
+            reason: null,
+            time: { created: 1, updated: 1 },
+          },
+        })
+      }
+      if (url.pathname.includes("prompt_async")) {
+        promptAsync += 1
+        return json({})
+      }
+    },
+    async (prompt, route) => {
+      prompt.set({ input: draft, parts: [] })
+      void prompt.submit()
+      await wait(() => goalPosts > 0)
+      expect(postedObjective).toBe("a b c")
+      expect(promptAsync).toBe(0)
+      // 共享尾 setTimeout(50) navigate；等到 route 进入新 session
+      await wait(() => route.data.type === "session" && (route.data as { sessionID?: string }).sessionID === createdID)
+      expect(route.data).toEqual({ type: "session", sessionID: createdID })
+    },
+    {
+      // 显式 home + 无 promptSessionID，复现 create-then-send 生产路径
+      initialRoute: { type: "home" },
+      promptSessionID: undefined,
+    },
+  ).finally(() => {
+    Global.Path.state = previous
+  })
+})
+
 test("TUI prompt keeps pasted text summary highlighted after wide text is inserted before it", async () => {
   const previous = Global.Path.state
   await using tmp = await tmpdir()
