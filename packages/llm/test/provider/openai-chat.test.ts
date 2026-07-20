@@ -80,15 +80,41 @@ describe("OpenAI Chat route", () => {
         LLM.request({
           model,
           messages: [
+            // retry 空块含纯空白都不形成 wire 消息；trim 仅判空，不改变有效原文。
+            Message.assistant([{ type: "reasoning", text: "" }]),
+            Message.assistant([{ type: "reasoning", text: " \n\t " }]),
             Message.assistant([
-              { type: "reasoning", text: "thinking" },
+              { type: "reasoning", text: "  thinking  " },
               { type: "text", text: "Hello" },
             ]),
+            Message.assistant([{ type: "reasoning", text: "" }, { type: "text", text: "Answer" }]),
+            Message.assistant([{ type: "reasoning", text: "" },
+              ToolCallPart.make({ id: "call_502", name: "read", input: { filePath: "a.ts" } })]),
           ],
         }),
       )
 
-      expect(prepared.body.messages).toEqual([{ role: "assistant", content: "Hello", reasoning_content: "thinking" }])
+      expect(prepared.body.messages).toEqual([
+        { role: "assistant", content: "Hello", reasoning_content: "  thinking  " },
+        { role: "assistant", content: "Answer" },
+        { role: "assistant", content: null, tool_calls: [{ id: "call_502", type: "function",
+          function: { name: "read", arguments: '{"filePath":"a.ts"}' } }] },
+      ])
+      // 复用真实 prepare 校验 DeepSeek：先删除空消息，再为有内容的助手补必填字段。
+      const deepseek = yield* LLMClient.prepare<OpenAIChat.OpenAIChatBody>(LLM.request({
+        model: model.route.model({ id: "deepseek-reasoner" }),
+        messages: [
+          Message.assistant([{ type: "reasoning", text: "" }]),
+          Message.assistant("Answer"),
+          Message.assistant([{ type: "reasoning", text: "  thinking  " },
+            ToolCallPart.make({ id: "call_503", name: "read", input: {} })]),
+        ],
+      }))
+      expect(deepseek.body.messages).toEqual([
+        { role: "assistant", content: "Answer", reasoning_content: "" },
+        { role: "assistant", content: null, reasoning_content: "  thinking  ",
+          tool_calls: [{ id: "call_503", type: "function", function: { name: "read", arguments: "{}" } }] },
+      ])
     }),
   )
 
