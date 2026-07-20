@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import { DateTime, Effect, Layer, Schema } from "effect"
-import { asc, eq, sql } from "drizzle-orm"
+import { asc, eq, inArray, sql } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import { DatabaseMigration } from "@opencode-ai/core/database/migration"
 import stepUsageMigration from "@opencode-ai/core/database/migration/20260623000000_session_step_usage"
@@ -123,6 +123,35 @@ describe("SessionProjector", () => {
       expect(restored?.time_created).toBe(0)
       expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
       expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, otherID)).get())?.data).toMatchObject({ content: body })
+      const hidden = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, hiddenID)).get()
+      if (!hidden) return yield* Effect.die("Native hidden fixture is missing")
+      const distinctData = { ...hidden.data, content: [{ type: "reasoning" as const, id: "distinct", text: "a different Native entry" }] }
+      yield* db.update(SessionMessageTable).set({ data: distinctData }).where(eq(SessionMessageTable.id, hiddenID)).run()
+      const originals = yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, [oldID, hiddenID])).orderBy(SessionMessageTable.seq).all()
+      // 同Session不同内容必须共享一个pack并保留不同entry key，而不是只证明相同envelope去重。
+      yield* Database.withSync({ db, sync: db.sync }, sync => {
+        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: oldID, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
+        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: hiddenID, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
+      })
+      const packed = yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, [oldID, hiddenID])).orderBy(SessionMessageTable.seq).all()
+      expect(new Set(packed.map(row => row.cold_ref)).size).toBe(1)
+      expect(new Set(packed.map(row => row.cold_key?.toString("hex"))).size).toBe(2)
+      const bad = packed.find(row => row.id === hiddenID)
+      if (!bad?.cold_key) return yield* Effect.die("Native pack key is missing")
+      const key = Buffer.from(bad.cold_key)
+      // 第二个key损坏时完整选集必须回滚，不能先热化第一条或消耗共享引用。
+      yield* db.update(SessionMessageTable).set({ cold_key: Buffer.alloc(1), time_updated: bad.time_updated }).where(eq(SessionMessageTable.id, hiddenID)).run()
+      const broken = yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, [oldID, hiddenID])).orderBy(SessionMessageTable.seq).all()
+      expect((yield* ColdStorage.readSessionMessageRows(db, broken).pipe(Effect.exit))._tag).toBe("Failure")
+      expect(yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, [oldID, hiddenID])).orderBy(SessionMessageTable.seq).all()).toEqual(broken)
+      expect((yield* db.select().from(ColdStorageTable).get())?.ref_count).toBe(2)
+      yield* db.update(SessionMessageTable).set({ cold_key: key, time_updated: bad.time_updated }).where(eq(SessionMessageTable.id, hiddenID)).run()
+      expect(yield* Effect.promise(() => ColdStorage.maintain(db.sync, ColdStorage.prepareMaintenance({
+        operation: "expand", sessionID, all: false, batchSize: 1,
+      }), runtime))).toMatchObject({ type: "task", task: { status: "completed", processed: 2 } })
+      // 全行比较同时锁定seq、时间、正文及ref/key/stats清理，不靠删断言掩盖格式差异。
+      expect(yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, [oldID, hiddenID])).orderBy(SessionMessageTable.seq).all()).toEqual(originals)
+      expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
     }),
   )
   previewIt.effect("reads complete legacy turns without populating the request ledger", () =>
@@ -327,7 +356,9 @@ describe("SessionProjector", () => {
       // late completion先恢复完整tool内容，再在同一事件事务中覆盖结算。
       yield* db.update(SessionTable).set({ time_updated: 0 }).where(eq(SessionTable.id, sessionID)).run()
       yield* Database.withSync({ db, sync: db.sync }, sync => {
-        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID }).type).toBe("frozen")
+        // 内部摘要只inspect，必须仍是冷owner；迟到完成事件随后自行恢复并交换引用。
+        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID })).toMatchObject({ type: "skipped", reason: "already-cold" })
+        expect(sync.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get()?.cold_ref).toBeTruthy()
       })
       yield* events.publish(SessionEvent.Step.Ended, settlement)
       expect((yield* SessionHistory.load(db, sessionID)).find(message => message.id === assistantMessageID)).toMatchObject({ content: expected.content })

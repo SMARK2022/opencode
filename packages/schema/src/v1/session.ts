@@ -667,6 +667,9 @@ const events = {
     schema: {
       sessionID: SessionID,
       info: Info,
+      // #0500：summary.diffs 是派生的 per-user metadata；更新它不会改变 completed Tool history，
+      // 消费端据此跳过 diff-cache 重建而非全量失效。
+      summaryOnly: Schema.optional(Schema.Boolean),
     },
   }),
   MessageRemoved: define({

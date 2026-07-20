@@ -91,8 +91,10 @@ export const summarize = Effect.fn("ToolDiffs.summarize")(function* (db: Databas
       eq(RequestUsageAssistantTable.assistant_message_id, SessionMessageTable.id),
     )).where(and(eq(SessionMessageTable.session_id, input.sessionID), eq(RequestUsageAssistantTable.request_id, owner.requestID)))
     .orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
-  // 真实请求归属先筛选，工具结果在既有聚合器消费前完整恢复。
-  const restored = yield* ColdStorage.readSessionMessageRows(db, rows.map(row => row.message).filter(row => !hidden(row.data.metadata?.hidden)))
+  // 内部摘要按精确request/seq选集恢复内存副本，不把业务历史持久预热。
+  const restored = yield* Database.withSync({ db, sync: db.sync }, sync =>
+    ColdStorage.inspectSessionMessageRows(sync, rows.map(row => row.message).filter(row => !hidden(row.data.metadata?.hidden))),
+  )
   const messages = restored.map(row => decode({ ...row.data, id: row.id, type: row.type }))
     .filter((message): message is SessionMessage.Assistant => message.type === "assistant" && !hidden(message.metadata?.hidden))
   // Native与V1同样只消费当前请求的完成工具；整树快照既不参与归因，也不再吞错补成功。

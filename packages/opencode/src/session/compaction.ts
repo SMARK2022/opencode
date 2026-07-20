@@ -392,15 +392,21 @@ const layer = Layer.effect(
 
     // goes backwards through parts until there are PRUNE_PROTECT tokens worth of tool
     // calls, then erases output of older tool calls to free context space
+    // #0500：prune 经 boundary-first 读取需要 Database.Service——层内解引用保持 Service.of 的 R=never 合同。
+    const pruneDatabase = yield* Database.Service
     const prune = Effect.fn("SessionCompaction.prune")(function* (input: { sessionID: SessionID }) {
       const cfg = yield* config.get()
       if (!cfg.compaction?.prune) return
       yield* Effect.logInfo("pruning")
 
-      const msgs = yield* session
-        .messages({ sessionID: input.sessionID })
-        .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(undefined)))
-      if (!msgs) return
+      // #0500：prune 只会扫描到最新 completed Compaction；boundary 以前的 Tool output
+      // 已由 summary 取代，先 hydrate 再 break 会把整段归档 head 无意义预热。
+      // #0500：prune 经 filterCompactedEffect 从最新 completed boundary 起读——
+      // 归档 head 不被无意义预热。
+      const msgs = yield* MessageV2.filterCompactedEffect(input.sessionID).pipe(
+        Effect.provideService(Database.Service, pruneDatabase),
+      )
+      if (msgs.length === 0) return
 
       let total = 0
       let pruned = 0

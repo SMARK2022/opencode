@@ -939,8 +939,8 @@ describe("session.list", () => {
           } as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
         })
 
-        // #265：正向项覆盖全部白名单 arm——text、files 三字段、agents、references 七字段、
-        // #265：assistant text/tool 身份与 input 叶子、shell command、data: URI 行的 name
+        // #265/#0500：正向项覆盖白名单 arm——text、files 三字段、agents、references 七字段、
+        // #0500：assistant tool 身份/input 已归档不可搜，正向只保留可见定位面。
         // #265：逐项断言保证每个 arm 都有独立回归锚——一处退化立即定位到具体字段
         for (const term of [
           "v2-user-visible-needle",
@@ -955,18 +955,22 @@ describe("session.list", () => {
           "v2-target-visible-needle",
           "file:///tmp/v2-target-visible.ts",
           "v2-assistant-visible-needle",
-          "bash",
-          "quoted v2 path",
-          "v2 folder/file.ts",
           "v2-shell-pipe-needle",
         ]) {
           expect(yield* searchIDs(term)).toContain(session.id)
         }
 
-        // #265：负向项与 SQL 分支的映射——reasoning：无分支；tool result/structured：state 白名单外；
-        // #265：provider metadata：白名单外；shell output：仅搜 command；data: URI：uriMatches 前缀排除；
-        // #265：mime 与键名 command/output：叶子值匹配天然不命中键
+        // #0500：v2 Tool identity/input/result、reasoning、metadata 与 shell output 都不得使 Session 可搜索；
+        // toolCommand 内的全部 shell 字面量若命中，说明搜索重新扩张到归档 JSON。
         for (const term of [
+          "bash",
+          "quoted v2 path",
+          '$TARGET',
+          'grep "v2 safe phrase"',
+          '> "v2 out file"',
+          "$(pwd)",
+          'rm -rf "./v2 danger"',
+          "v2 folder/file.ts",
           "v2-thinking-hidden-needle",
           "v2-tool-result-hidden-needle",
           "v2-structured-hidden-needle",
@@ -986,7 +990,7 @@ describe("session.list", () => {
 
   // #265：v1 工具分支锚定——pending raw 的 json_valid 守卫与 input 叶子路径需要独立用例覆盖
   it.instance(
-    "searches v1 tool input leaves without indexing tool output or key names",
+    "does not search v1 tool identity, input, or titles",
     () =>
       Effect.gen(function* () {
         const session = yield* withSession({ title: "v1 tool holder" })
@@ -1029,14 +1033,14 @@ describe("session.list", () => {
             time: { start: Date.now() },
           }),
         )
-        // #265：input 值与 pending raw 的叶子值命中；output/metadata/键名不命中
-        expect(yield* searchIDs("v1-tool-input-needle")).toContain(session.id)
-        expect(yield* searchIDs("v1-pending-raw-needle")).toContain(session.id)
-        expect(yield* searchIDs("v1-done-input-needle")).toContain(session.id)
-        // #265：state.title 是白名单身份字段——工具标题命中必须独立锚定
-        expect(yield* searchIDs("visible-tool-title-v1-needle")).toContain(session.id)
-        // #265：tool 名正向断言锚定 messageToolPartMatches 的 $.tool arm——与 v2 侧 $.name 分支路径不同，缺一不可
-        expect(yield* searchIDs("bash")).toContain(session.id)
+        // #0500：Tool identity/input/result 全部归档——v1 定位面只剩标题与可见 Text；
+        // 若任一工具词命中，说明 v1 搜索重新扩张到归档 JSON（INV-09）。
+        expect(yield* searchIDs("v1-tool-input-needle")).not.toContain(session.id)
+        expect(yield* searchIDs("v1-pending-raw-needle")).not.toContain(session.id)
+        expect(yield* searchIDs("v1-done-input-needle")).not.toContain(session.id)
+        // #0500：state.title 与 tool 名同属归档身份字段，不再参与定位。
+        expect(yield* searchIDs("visible-tool-title-v1-needle")).not.toContain(session.id)
+        expect(yield* searchIDs("bash")).not.toContain(session.id)
         // #265：命中/排除交错断言——防止白名单被放宽成全字段搜索后负向项静默通过
         expect(yield* searchIDs("v1-output-hidden-needle")).not.toContain(session.id)
         expect(yield* searchIDs("v1-metadata-hidden-needle")).not.toContain(session.id)

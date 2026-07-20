@@ -2,7 +2,8 @@ import { sql, type SQL } from "drizzle-orm"
 import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./sql"
 
 // #265：搜索是 session 列表/TUI quick switch 的“可定位内容”投影，不是持久化 JSON 的全文搜索。
-// 只索引用户能用来识别会话的字段：标题、可见文本、工具名/工具输入、shell command 等。
+// 只索引用户能用来识别会话的字段：标题、可见文本、文件/引用/子任务定位和 shell command 等。
+// #0500：Tool identity/input/result 属于归档数据（INV-09）——session 搜索永不打开 cold Tool 字段。
 // thinking/reasoning、tool result、shell output、metadata、token/snapshot 等字段不是 session 搜索的契约。
 // 使用 instr(lower(...)) 做大小写不敏感的精确子串匹配，避免 SQLite LIKE 把 % / _ 当作通配符。
 // 空白搜索返回 undefined，避免 instr(text, "") 把所有行都当作命中。
@@ -70,7 +71,6 @@ function messagePartMatches(needle: string) {
   // #265：五分支 or 联合——新增 part 类型默认不可搜索，必须显式入白名单才可见
   return sql`(
     ${messageTextPartMatches(needle)}
-    or ${messageToolPartMatches(needle)}
     or ${messageAttachmentPartMatches(needle)}
     or ${messageSubtaskPartMatches(needle)}
     or ${messagePatchPartMatches(needle)}
@@ -89,29 +89,6 @@ function messageTextPartMatches(needle: string) {
 }
 
 // #265：工具输出和错误可能很大，只搜索工具名和输入
-function messageToolPartMatches(needle: string) {
-  // #265：四个命中面——工具名/state.title 身份、pending raw、input 叶子值；输出与错误永不进入
-  return sql`(
-    json_extract(${PartTable.data}, '$.type') = 'tool'
-    and (
-      ${textMatches(sql`json_extract(${PartTable.data}, '$.tool')`, needle)}
-      or ${textMatches(sql`json_extract(${PartTable.data}, '$.state.title')`, needle)}
-      or ${messageToolRawMatches(needle)}
-      or ${jsonLeafMatches(sql`${PartTable.data}`, "$.state.input", needle)}
-    )
-  )`
-}
-
-// #265：pending raw 是模型正在流式输出的 JSON 字符串，只有合法 JSON 时才按叶子值搜索
-function messageToolRawMatches(needle: string) {
-  // #265：raw 与 input 同层级但互斥存在——pending 阶段只有 raw，完成后只有 input
-  return sql`(
-    json_valid(json_extract(${PartTable.data}, '$.state.raw'))
-    and ${jsonLeafMatches(sql`json_extract(${PartTable.data}, '$.state.raw')`, "$", needle)}
-  )`
-}
-
-// #265：附件定位字段是短小标签/路径，不索引 raw url 和 source text
 function messageAttachmentPartMatches(needle: string) {
   // #265：source.* 子字段来自多形态附件源（本地路径/远程 URI/客户端名）——非重复设计
   return sql`(
@@ -202,7 +179,7 @@ function sessionUserMessageMatches(needle: string) {
 
 // #265：assistant 投影的 content 混合数组是 v2 特有形状——reasoning/tool/text 混存，必须逐项判型
 function sessionAssistantMessageMatches(needle: string) {
-  // #265：tool 分支的 input 叶子值复用 jsonLeafMatches——与 v1 侧同一键名排除语义
+  // #0500：Tool identity/input/result 属于归档数据——v1/v2 两侧一致移除，只保留可见 text
   return sql`(
     ${SessionMessageTable.type} = 'assistant'
     and exists (
@@ -212,13 +189,6 @@ function sessionAssistantMessageMatches(needle: string) {
         (
           json_extract(content.value, '$.type') = 'text'
           and ${textMatches(sql`json_extract(content.value, '$.text')`, needle)}
-        )
-        or (
-          json_extract(content.value, '$.type') = 'tool'
-          and (
-            ${textMatches(sql`json_extract(content.value, '$.name')`, needle)}
-            or ${jsonLeafMatches(sql`content.value`, "$.state.input", needle)}
-          )
         )
       )
       limit 1

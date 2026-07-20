@@ -83,7 +83,8 @@ function isDecideAgent(agent: Agent.Info) {
 
 // 过长 thinking 只保留首尾，避免 decide 上下文被推理占满
 // 阈值 400：中段用省略号替换，保留语义锚点
-function deriveGoalTurn(messages: Iterable<SessionV1.WithParts>): GoalTurnContext | undefined {
+// #0500：Goal continuity 只需要 hot 定位字段——chronology 不触 payload，也未裁剪的持久化顺序保持不变。
+function deriveGoalTurn(messages: Iterable<MessageV2.ChronologyMessage>): GoalTurnContext | undefined {
   const turns = Array.from(messages)
     .flatMap((message) => {
       // technical wrapper 的 goalTurnID 只表达 lineage，不是新的 canonical source；
@@ -335,10 +336,10 @@ const layer = Layer.effect(
             // #216：等待runner前固定已有子会话列表，父取消后再沿各自owner终态化。
             const children = yield* sessions.children(sessionID)
             // pending与queued孤儿身份从同次读取冻结，旧cancel不得重新扫描replacement请求。
-            const messages = yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([])))
-            const parentIDs = new Set(messages.flatMap((message) => message.info.role === "assistant" ? [message.info.parentID] : []))
-            const pending = messages.filter((message) => message.info.role === "assistant" && !message.info.time.completed).map((message) => message.info.id)
-            const orphanIDs = messages.flatMap((message) => message.info.role === "user" && !parentIDs.has(message.info.id) ? [message.info.id] : [])
+            // 只读 hot 定位，已完成助手的冷 Tool 不因取消而持久预热；后续仍沿现有逐 ID 收尾 owner。
+            const snapshot = yield* MessageV2.cancelSnapshot(sessionID).pipe(Effect.provideService(Database.Service, database))
+            const pending = snapshot.pendingAssistantIDs
+            const orphanIDs = snapshot.orphanUserIDs
             yield* state.cancel(sessionID)
             yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
               discard: true,
@@ -1576,14 +1577,10 @@ const layer = Layer.effect(
 
           // Goal continuity 来自未裁剪的持久化 Message chronology；provider window 会因 Compaction
           // 重排，late technical wrapper 也可能晚于新用户落盘，两者都不能改变 current/previous turn。
-          // 目标 MessageV2.stream 返回 Effect（分页拉取），必须先 yield 展开为数组
-          const persistedMessages = yield* MessageV2.stream(sessionID).pipe(
-            // [local-smark] stream 的 R 含 Database.Service，必须就地 provide（与上方 filterCompactedEffect 同一契约）；
-            // 缺失时 Database.Service 泄入 runLoop 的 R，破坏 Effect<WithParts> 注解
-            Effect.provideService(Database.Service, database),
-            Effect.orDie,
+          // #0500：chronology 只读 hot 定位字段——冷 Tool history 不进入 Goal continuity 扫描。
+          const nextGoalTurn = deriveGoalTurn(
+            yield* MessageV2.chronology(sessionID).pipe(Effect.provideService(Database.Service, database)),
           )
-          const nextGoalTurn = deriveGoalTurn(persistedMessages)
           if (!nextGoalTurn) goalTurn = undefined
           if (nextGoalTurn && (!goalTurn || goalTurn.id !== nextGoalTurn.id)) goalTurn = nextGoalTurn
 

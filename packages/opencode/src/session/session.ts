@@ -17,7 +17,7 @@ import { SessionV2 } from "@opencode-ai/core/session"
 import * as SessionExecutionLocal from "@opencode-ai/core/session/execution/local"
 import { locationServiceMapLayer } from "@opencode-ai/core/location-services"
 
-import { NotFoundError } from "@/storage/storage"
+import { NotFoundError, Storage } from "@/storage/storage"
 import { eq } from "drizzle-orm"
 import { and } from "drizzle-orm"
 import { gte } from "drizzle-orm"
@@ -32,6 +32,8 @@ import type { SQL } from "drizzle-orm"
 import { PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { MessageV2 } from "./message-v2"
+// #0500：diff 聚合的唯一 DB 权威在 SummaryCache——session.diff 只是镜像写出与读取 seam。
+import { SummaryCache } from "./summary-cache"
 import type { InstanceContext } from "../project/instance-context"
 import { InstanceState } from "@/effect/instance-state"
 import { Snapshot } from "@/snapshot"
@@ -401,6 +403,8 @@ export interface Interface {
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
   readonly updateMessage: <T extends SessionV1.Info>(msg: T) => Effect.Effect<T>
+  // #0500：summaryOnly 更新入口——只改派生 per-user diffs，不触发 aggregate 失效。
+  readonly updateMessageSummary: (msg: SessionV1.User) => Effect.Effect<SessionV1.User>
   readonly removeMessage: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<MessageID>
   readonly removePart: (input: { sessionID: SessionID; messageID: MessageID; partID: PartID }) => Effect.Effect<PartID>
   readonly getPart: (input: {
@@ -440,7 +444,7 @@ export type Patch = Omit<Partial<Info>, "time" | "share" | "summary" | "revert" 
 const layer: Layer.Layer<
   Service,
   never,
-  BackgroundJob.Service | RuntimeFlags.Service | Database.Service | EventV2Bridge.Service
+  BackgroundJob.Service | RuntimeFlags.Service | Database.Service | EventV2Bridge.Service | Storage.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -449,6 +453,7 @@ const layer: Layer.Layer<
     const background = yield* BackgroundJob.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const storage = yield* Storage.Service
 
     const createNext = Effect.fn("Session.createNext")(function* (input: {
       id?: SessionID
@@ -591,6 +596,12 @@ const layer: Layer.Layer<
         yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID: msg.sessionID, info: msg })
         return msg
       }).pipe(Effect.withSpan("Session.updateMessage"))
+
+    const updateMessageSummary = Effect.fn("Session.updateMessageSummary")(function* (msg: SessionV1.User) {
+      // #0500：summaryOnly 标记让 projector 跳过 aggregate 失效——diffs 是派生 metadata。
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID: msg.sessionID, info: msg, summaryOnly: true })
+      return msg
+    })
 
     const updatePart = <T extends SessionV1.Part>(part: T): Effect.Effect<T> =>
       Effect.gen(function* () {
@@ -778,8 +789,10 @@ const layer: Layer.Layer<
     })
 
     const diff = Effect.fn("Session.diff")(function* (sessionID: SessionID) {
-      void sessionID
-      return [] as Snapshot.FileDiff[]
+      // #0500：DB 权威聚合经 SummaryCache 读取；外部 session_diff 只作兼容镜像同步写出。
+      const result = SummaryCache.normalizeDiffPaths(yield* SummaryCache.load({ sessionID, storage }).pipe(Effect.provideService(Database.Service, database)))
+      yield* storage.write(["session_diff", sessionID], result).pipe(Effect.ignore)
+      return result
     })
 
     const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
@@ -863,6 +876,7 @@ const layer: Layer.Layer<
       children,
       remove,
       updateMessage,
+      updateMessageSummary,
       removeMessage,
       removePart,
       updatePart,
@@ -943,7 +957,7 @@ function listByProject(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [BackgroundJob.node, RuntimeFlags.node, Database.node, EventV2Bridge.node],
+  deps: [BackgroundJob.node, RuntimeFlags.node, Database.node, EventV2Bridge.node, Storage.node],
 })
 
 export * as Session from "./session"

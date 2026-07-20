@@ -9,8 +9,9 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import type { SessionV1 } from "@opencode-ai/core/v1/session"
-import { RequestUsageTable } from "@opencode-ai/core/session/request-usage.sql"
-import { MessageTable, PartTable, SessionTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
+import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core/session/request-usage.sql"
+import { ColdStorageTable, MessageTable, PartTable, SessionTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
+import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionSchema } from "@opencode-ai/core/session/schema"
 import { Session } from "../../src/session/session"
@@ -149,5 +150,25 @@ it.effect("stats merges mixed history after noReply without double counting ledg
     expect(withNative.toolUsage.find((tool) => tool.id === "native-tool")?.contextTokens).toBeGreaterThan(0)
     const nativeAgent = yield* aggregateStats({ projectFilter: projectID, agentFilter: "native-agent" })
     expect(nativeAgent.total).toMatchObject({ tokens: { total: 40 }, cost: 0.5, components: { system: 20, toolCalls: 10, toolResults: 10 } })
+    // 非零组件、旧历史补计和多维过滤在两代归档后必须保持同一完整报表。
+    const filters = [{ projectFilter: projectID }, { projectFilter: projectID, days: 1 },
+      { projectFilter: projectID, modelFilter: "legacy-model", providerFilter: "legacy-provider", sourceFilter: "legacy-message" },
+      { projectFilter: projectID, sourceFilter: "command", agentFilter: "ledger-agent", statusFilter: "completed" },
+      { projectFilter: projectID, agentFilter: "native-agent" }, { projectFilter: projectID, toolFilter: "native-tool" }]
+    const hot = yield* Effect.forEach(filters, filter => aggregateStats(filter))
+    yield* Effect.promise(() => ColdStorage.maintain(database.db.sync, ColdStorage.prepareMaintenance({
+      operation: "compress", sessionID, olderThanMs: 0, batchSize: 2,
+    }), { lease: { assertOwned() {} }, checkpoint: async () => {},
+      run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)) }))
+    const stored = Effect.all([database.db.select().from(MessageTable).all(), database.db.select().from(PartTable).all(),
+      database.db.select().from(SessionMessageTable).all(), database.db.select().from(ColdStorageTable).all(),
+      database.db.select().from(RequestUsageTable).all(), database.db.select().from(RequestUsageAssistantTable).all()])
+    const before = yield* stored
+    expect(before[1].some(row => row.cold_key)).toBe(true)
+    expect(before[2].some(row => row.cold_key)).toBe(true)
+    for (const [index, filter] of filters.entries()) {
+      expect(yield* aggregateStats(filter)).toEqual(hot[index])
+    }
+    expect(yield* stored).toEqual(before)
   }),
 )

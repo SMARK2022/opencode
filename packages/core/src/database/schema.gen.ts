@@ -207,6 +207,7 @@ export default {
           \`time_updated\` integer NOT NULL,
           \`data\` text NOT NULL,
           \`cold_ref\` text REFERENCES \`cold_storage\`(\`hash\`),
+          \`cold_key\` blob,
           CONSTRAINT \`fk_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
         );
       `)
@@ -219,6 +220,8 @@ export default {
           \`time_updated\` integer NOT NULL,
           \`data\` text NOT NULL,
           \`cold_ref\` text REFERENCES \`cold_storage\`(\`hash\`),
+          \`cold_key\` blob,
+          \`cold_stats\` text,
           CONSTRAINT \`fk_part_message_id_message_id_fk\` FOREIGN KEY (\`message_id\`) REFERENCES \`message\`(\`id\`) ON DELETE CASCADE
         );
       `)
@@ -253,6 +256,8 @@ export default {
           \`time_updated\` integer NOT NULL,
           \`data\` text NOT NULL,
           \`cold_ref\` text REFERENCES \`cold_storage\`(\`hash\`),
+          \`cold_key\` blob,
+          \`cold_stats\` text,
           CONSTRAINT \`fk_session_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
         );
       `)
@@ -272,6 +277,11 @@ export default {
           \`summary_deletions\` integer,
           \`summary_files\` integer,
           \`summary_diffs\` text,
+          \`summary_ref\` text REFERENCES \`cold_storage\`(\`hash\`),
+          \`summary_cursor\` text,
+          \`summary_initialized\` integer DEFAULT 0 NOT NULL,
+          \`summary_init_dirty\` integer DEFAULT 0 NOT NULL,
+          \`summary_seed\` text,
           \`metadata\` text,
           \`cost\` real DEFAULT 0 NOT NULL,
           \`tokens_input\` integer DEFAULT 0 NOT NULL,
@@ -384,6 +394,8 @@ export default {
       `)
       yield* tx.run(`CREATE INDEX \`cold_storage_ref_count_idx\` ON \`cold_storage\` (\`ref_count\`);`)
       yield* tx.run(`CREATE INDEX \`message_cold_ref_idx\` ON \`message\` (\`cold_ref\`);`)
+      // #0500：summary payload cache 的 RESTRICT 引用索引——expand/cleanup 反算共用。
+      yield* tx.run(`CREATE INDEX \`session_summary_ref_idx\` ON \`session\` (\`summary_ref\`);`)
       yield* tx.run(`CREATE INDEX \`part_cold_ref_idx\` ON \`part\` (\`cold_ref\`);`)
       yield* tx.run(`CREATE INDEX \`session_message_cold_ref_idx\` ON \`session_message\` (\`cold_ref\`);`)
     })

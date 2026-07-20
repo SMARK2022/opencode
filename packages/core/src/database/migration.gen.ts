@@ -50,5 +50,7 @@ export const migrations = (
     // #493：cold_storage 表 + message/part.cold_ref 引用列
     import("./migration/20260717035626_cold_storage"),
     import("./migration/20260717035627_native_cold_storage"),
+    import("./migration/20260930100000_cold_storage_pack_v2"),
+    import("./migration/20260930100001_native_cold_storage_pack_v2"),
   ])
 ).map((module) => module.default) satisfies DatabaseMigration.Migration[]
