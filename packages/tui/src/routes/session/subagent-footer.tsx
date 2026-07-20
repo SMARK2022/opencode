@@ -9,7 +9,6 @@ import { getContextLimit } from "../../util/token-estimate"
 import { tokenAccounting } from "../../util/token-accounting"
 // #122：subagent footer 共用 accounting
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
-import { useTerminalDimensions } from "@opentui/solid"
 import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 
 export function SubagentFooter() {
@@ -44,9 +43,9 @@ export function SubagentFooter() {
   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
 
   // 子代理用数值分开两方向，使仅有工具输入增长时不会同时点亮输出箭头。
-  // 子代理主值与括号使用自己的请求/全局范围，不能读父会话请求投影。
+  // 子代理只显示自己的当前 step；请求累计交给 sidebar，不借父会话投影。
   // 保留数值输入输出字段，节流和箭头脉冲仍消费原来契约。
-  type UsageInfo = { input: number; output: number; totalInput: number; totalOutput: number; context: string | undefined; cost: string | undefined }
+  type UsageInfo = { input: number; output: number; context: string | undefined; cost: string | undefined }
 
   const usageRaw = createMemo((): UsageInfo | undefined => {
     // 会话运行中（非 idle）时即使没有助手回复也显示零值用量
@@ -59,7 +58,7 @@ export function SubagentFooter() {
     if (!confirmed) {
       if (!isRunning) return
       // 零值仍是有效运行快照，随后增长能与零基线比较。
-      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
+      return { input: 0, output: 0, context: undefined, cost: undefined }
     }
 
     // 用户消息淘汰后仍按持久化请求身份取尾部，不能退回全局最后助手。
@@ -68,15 +67,15 @@ export function SubagentFooter() {
     // 无回复且空闲保持隐藏；运行中使用引导，确认后仍读自己的完整投影。
     if (!request || (!request.assistantID && !isRunning)) {
       if (!isRunning) return
-      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
+      return { input: 0, output: 0, context: undefined, cost: undefined }
     }
     const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
     const last = requestAssistants.at(-1)
-    // 主值属于当前 step；括号与费用都属于该子代理的完整当前请求。
+    // 主值属于当前 step，费用仍属于该子代理的完整当前请求。
 
     // footer 的缓存只供未确认尾部，助手淘汰后不能丢掉已确认请求累计。
     const lastParts = last ? (sync.data.part[last.id] ?? []) : []
-    // 保留 #14 的 step/request 区别；共享估算不会把全局 tokens 填入括号。
+    // 保留 step/request 区别；累计仍参与可见性判断，但不再追加到箭头后。
     // 子会话的 prepared 密度只随它自己的请求读取，父会话与旧模型确认样本不参与。
     // 子代理传自己的完整投影，沿既有节流与费用范围展示统计。
     const { input: currentInput, output: currentOutput, totalInput, totalOutput } = tokenAccounting(msg, (id) => sync.data.part[id] ?? [], undefined, { session: session(), last, parts: lastParts }).request
@@ -85,7 +84,7 @@ export function SubagentFooter() {
 
     if (requestTokens <= 0 && totalTokens <= 0) {
       if (!isRunning) return
-      return { input: 0, output: 0, totalInput, totalOutput, context: undefined, cost: undefined }
+      return { input: 0, output: 0, context: undefined, cost: undefined }
     }
 
     // 原生模型信息也从当前请求投影读取，不要求先有 V1 助手消息。
@@ -99,8 +98,6 @@ export function SubagentFooter() {
     return {
       input: currentInput,
       output: currentOutput,
-      totalInput,
-      totalOutput,
       context: requestTokens > 0 ? (pct ? `${Locale.number(requestTokens)} (${pct})` : Locale.number(requestTokens)) : undefined,
       cost: cost > 0 ? money.format(cost) : undefined,
     }
@@ -120,9 +117,6 @@ export function SubagentFooter() {
   const previousShortcut = useCommandShortcut("session.child.previous")
   const nextShortcut = useCommandShortcut("session.child.next")
   const [hover, setHover] = createSignal<"parent" | "prev" | "next" | null>(null)
-  // #109：窄终端隐藏累计 token
-  const dimensions = useTerminalDimensions()
-  const showCumulative = createMemo(() => dimensions().width > 120)
 
   return (
     <box flexShrink={0}>
@@ -151,8 +145,9 @@ export function SubagentFooter() {
               {(item) => (
                 <text fg={theme.textMuted} wrapMode="none">
                   {/* Show 提供有效 item 后才格式化计数，undefined 的清空快照不进入这段文本。 */}
-                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{showCumulative() ? `(${Locale.number(item().totalInput)})` : ""} ·{" "}
-                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}{showCumulative() ? `(${Locale.number(item().totalOutput)})` : ""}
+                  {/* 两方向用空格内聚并保留独立脉冲；context/cost 仍以中点分组。 */}
+                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{" "}
+                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
                   {item().context ? ` · ${item().context}` : ""}
                   {item().cost ? ` · ${item().cost}` : ""}
                 </text>
