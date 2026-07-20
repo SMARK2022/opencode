@@ -695,7 +695,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
           dialog.replace(() => <DialogSessionList />)
         },
       },
-      // [local-smark] /goal 命令：无 goal 时弹出设置框，有 goal 时弹出管理菜单。
+      // [local-smark] /goal 命令：命令面板/快捷键直接开 dialog；prompt 中 `/goal <text>` 走 submit 解析
       // goal 功能 0367 起始终可用（不再需要 experimental.goals 开关）
       {
         name: "goal.manage",
