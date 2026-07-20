@@ -5,7 +5,7 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 // #493：冷扫描不变量直测——findHot/tail 不预热、limit-0 有界空范围、hidden 跳过。
 import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 import { Database } from "@opencode-ai/core/database/database"
-import { SessionTable } from "@opencode-ai/core/session/sql"
+import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { eq } from "drizzle-orm"
 import { Effect, Option } from "effect"
 import { Session as SessionNs } from "@/session/session"
@@ -18,6 +18,25 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 
 const it = testEffect(LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node])))
+
+// #509：测试进程共享 preload SQLite；ColdStorage.status().coldOwners 是全库计数，不能当作当前 fixture 的局部结果。
+// 只统计本 session 的 cold_ref owner，才能在同进程多 suite 下稳定断言 thaw 副作用。
+function sessionColdOwners(sync: Parameters<typeof ColdStorage.status>[0], sessionID: SessionID) {
+  return (
+    sync
+      .select({ cold_ref: MessageTable.cold_ref })
+      .from(MessageTable)
+      .where(eq(MessageTable.session_id, sessionID))
+      .all()
+      .filter((row) => row.cold_ref).length +
+    sync
+      .select({ cold_ref: PartTable.cold_ref })
+      .from(PartTable)
+      .where(eq(PartTable.session_id, sessionID))
+      .all()
+      .filter((row) => row.cold_ref).length
+  )
+}
 
 const withSession = <A, E, R>(
   fn: (input: { session: SessionNs.Interface; sessionID: SessionID }) => Effect.Effect<A, E, R>,
@@ -645,7 +664,9 @@ describe("Session.findMessage", () => {
         expect(ColdStorage.freezeOwner(sync, { type: "part", id: partID, now: Date.now() }).type).toBe("frozen")
         const none = yield* session.findMessage(sessionID, () => false)
         expect(Option.isNone(none)).toBe(true)
-        expect(ColdStorage.status(sync).coldOwners).toBe(1)
+        // #509：无匹配扫描不得 thaw；session 级 cold 计数仍为 1。顺带调用 status() 确保 freeze 后 payload 元数据健康。
+        expect(sessionColdOwners(sync, sessionID)).toBe(1)
+        expect(ColdStorage.status(sync).coldOwners).toBeGreaterThanOrEqual(1)
         const match = yield* session.findMessage(sessionID, (info) => info.role === "user")
         expect(Option.isSome(match)).toBe(true)
         const matchedPart = Option.isSome(match) ? match.value.parts.find((part) => part.id === partID) : undefined
@@ -653,7 +674,7 @@ describe("Session.findMessage", () => {
           matchedPart?.type === "tool" && matchedPart.state.status === "completed" ? matchedPart.state.output : undefined,
         ).toBe(output)
         expect(Option.isSome(match) ? match.value.parts.some((part) => part.id === hiddenPartID) : true).toBe(false)
-        expect(ColdStorage.status(sync).coldOwners).toBe(0)
+        expect(sessionColdOwners(sync, sessionID)).toBe(0)
       }),
     ),
   )
@@ -763,8 +784,8 @@ describe("Session.findMessage", () => {
         })
         expect(tail.map((part) => part.id)).toEqual([...partIDs.slice(-2), midPartID])
         expect(tail.every((part) => part.type === "tool" && part.state.status !== "pending")).toBe(true)
-        // 五个 frozen owner 只恢复 previous 的两个；mid 未冻结，后一次查询不能再 thaw 其它 owner。
-        expect(ColdStorage.status(sync).coldOwners).toBe(3)
+        // 本 session 的五个 frozen owner 只 thaw 两个；局部精确值不依赖其它 fixture 留存。
+        expect(sessionColdOwners(sync, sessionID)).toBe(3)
 
         const two = yield* MessageV2.previousAssistantToolTail({
           sessionID,
