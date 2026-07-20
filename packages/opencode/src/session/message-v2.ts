@@ -1525,12 +1525,12 @@ export function stepFinishParts(messageID: MessageID) {
   return rows.flatMap((row) => (row.data.type === "step-finish" ? [row.data] : []))
 }
 
-// doom-loop 只需要前一个 assistant 的非 pending tool tail，不能为此加载并 thaw 整个 session transcript。
-// cursor 以当前 persisted time/id 为准，调用方时间只作为 row 暂缺时的兼容边界。
-// Part 查询按 ID 倒序 limit 后再恢复正序，返回语义与旧 slice(-N) 保持一致。
-// 只对最终选中的少量 tool rows执行 thaw，历史中其他 cold output 不受检测副作用影响。
-// previous assistant 和其 Parts 都排除 hidden，保持旧全量 Session.messages 路径的可见性语义。
-// hidden row 在 SQL limit 前过滤，不能占用 tail 配额后让真正连续的 visible tool 被截掉。
+// doom-loop AND 窗口需要 cursor 之前、跨多个 visible assistant 的有界非 pending tool tail。
+// 不变量：1-tool-per-step × N 时 limit=3 必须能凑满 3 条，否则 AND 永远不可达（旧单 previous 深度不足）。
+// 每 step 新建 assistant 且常 1 tool/turn 时，只读「单个 previous assistant」窗口长度永远 < 3。
+// 因此按 session join 倒序取 limit 条 tool part；hidden message/part 在 LIMIT 前过滤以免占配额。
+// 只 thaw 最终选中的少量 rows，不 hydrate 全 transcript。
+// 倒序 LIMIT 后再 reverse：调用方看到旧→新正序，与 transcript 时间线一致，AND 比较最近尾部。
 export function previousAssistantToolTail(input: {
   sessionID: SessionID
   before: { id: MessageID; time: number }
@@ -1543,29 +1543,32 @@ export function previousAssistantToolTail(input: {
       .from(MessageTable)
       .where(eq(MessageTable.id, input.before.id))
       .get()
+    // cursor 以 DB 已持久 time 为准；调用方 time 仅在 row 暂缺时兜底，避免与写入竞态错位。
     const cursor = { id: input.before.id, time: current?.time ?? input.before.time }
-    const assistant = db
-      .select({ id: MessageTable.id })
-      .from(MessageTable)
+    return db
+      .select({
+        id: PartTable.id,
+        message_id: PartTable.message_id,
+        session_id: PartTable.session_id,
+        time_created: PartTable.time_created,
+        time_updated: PartTable.time_updated,
+        data: PartTable.data,
+        cold_ref: PartTable.cold_ref,
+        cold_key: PartTable.cold_key,
+        cold_stats: PartTable.cold_stats,
+      })
+      .from(PartTable)
+      .innerJoin(MessageTable, eq(PartTable.message_id, MessageTable.id))
       .where(
         and(
+          eq(PartTable.session_id, input.sessionID),
           eq(MessageTable.session_id, input.sessionID),
+          // 仅 assistant transcript 参与 doom 窗口；user/system 文本不得挤占 LIMIT。
           sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
           sql`json_type(${MessageTable.data}, '$.hidden') is null`,
           older(cursor),
-        ),
-      )
-      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
-      .limit(1)
-      .get()
-    if (!assistant) return []
-    return db
-      .select()
-      .from(PartTable)
-      .where(
-        and(
-          eq(PartTable.message_id, assistant.id),
           sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
+          // pending 尚无终态，不能当作「脱扣」计入连续失败窗口。
           sql`json_extract(${PartTable.data}, '$.state.status') != 'pending'`,
           sql`json_type(${PartTable.data}, '$.hidden') is null`,
         ),

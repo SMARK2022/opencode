@@ -254,6 +254,9 @@ unavailable.live("omits an image attachment when normalization is unavailable", 
           // 失败图片不能回到provider，但工具文本仍需保留，避免丢失非图片结果。
           expect(part.state.attachments).toBeUndefined()
           expect(part.state.output).toContain("image omitted")
+          // raw AI tool 可不返回 title；completed 终态必须持久化为 string，空串合法，
+          // 否则 JSON 省略 title 后 ColdStorage.freeze/status 会在全库扫描时报 corruption。
+          expect(part.state.title).toBe("")
         }
       }),
     { git: true, config: (url) => providerCfg(url) },
@@ -1069,10 +1072,9 @@ it.live("session.processor effect tests mark interruptions aborted without manua
   ),
 )
 
-// [local-smark] consecutive-error breaker：同一 assistant message 内的并行 error
-// 只应计 1 次失败事件。3 个并行 read 全部 fail 时不应触发 doom_loop permission ask。
-// 当前实现（无消息边界感知）会在 count 达到 3 时误触发——本测试暴露此缺口。
-it.live("consecutive-error breaker: same-batch parallel errors do not trigger doom_loop", () =>
+// 保护：并行探索多个不同 path 时即使全部失败也不应 doom_loop（input 不等 → AND 失败）。
+// 若误用「同 tool 名计数到 3」会在单 step 内误杀合法多文件读取。
+it.live("doom_loop AND: same-batch parallel different-input errors do not trigger", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
       Effect.gen(function* () {
@@ -1082,7 +1084,6 @@ it.live("consecutive-error breaker: same-batch parallel errors do not trigger do
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
         const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
 
-        // 脚本 3 个并行 read 调用（index 0/1/2），全部 fail
         yield* llm.push(
           parallelToolCalls([
             { id: "call_1", name: "read", args: JSON.stringify({ path: "A" }) },
@@ -1114,8 +1115,6 @@ it.live("consecutive-error breaker: same-batch parallel errors do not trigger do
           tools: { read: failingRead },
         })
 
-        // doom_loop 未触发：3 个并行 error 来自同一 assistant message，
-        // 消息边界感知后只计 1 次失败事件，count 不足 3
         expect(result).toBe("continue")
         expect(handle.message.error).toBeUndefined()
       }),
@@ -1123,11 +1122,9 @@ it.live("consecutive-error breaker: same-batch parallel errors do not trigger do
   ),
 )
 
-// [local-smark] consecutive-error breaker：跨 turn 连续 error 应触发 doom_loop。
-// 3 个独立 turn 各 1 个 read fail → 每个 turn 不同 ctx.assistantMessage.id →
-// count 递增到 3 → 触发 permission.ask → DeniedError → halt → process 返回 "stop"。
-// 此测试在修复前后均应通过（跨 turn 触发是既有正确行为），用作回归守卫。
-it.live("consecutive-error breaker: cross-turn errors trigger doom_loop", () =>
+// 保护：跨 turn 换参重试（A/B/C 不同 path）是合理探索，仅连续失败不得拦截。
+// 这是用户明确否定的旧 consecutiveErrorMap 语义；期望全程 continue。
+it.live("doom_loop AND: cross-turn different-input errors do not trigger", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
       Effect.gen(function* () {
@@ -1135,14 +1132,12 @@ it.live("consecutive-error breaker: cross-turn errors trigger doom_loop", () =>
         const chat = yield* session.create({})
         const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
 
-        // 脚本 3 个 LLM 响应，每个含 1 个 read 调用（全部 fail）
         yield* llm.push(
           reply().tool("read", { path: "A" }),
           reply().tool("read", { path: "B" }),
           reply().tool("read", { path: "C" }),
         )
 
-        // 3 个 turn，每个新建 assistant message（不同 MessageID.ascending()）
         for (let turn = 0; turn < 3; turn++) {
           const parent = yield* user(chat.id, `turn ${turn}`)
           const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
@@ -1169,16 +1164,119 @@ it.live("consecutive-error breaker: cross-turn errors trigger doom_loop", () =>
             tools: { read: failingRead },
           })
 
+          expect(result).toBe("continue")
+          expect(handle.message.error).toBeUndefined()
+        }
+      }),
+    { git: true, config: (url) => denyDoomLoopConfig(url) },
+  ),
+)
+
+// 核心：生产默认每 step 新 assistant、每 turn 1 tool；同 path 三次 error 必须在第 3 次 stop。
+// 覆盖 multi-assistant tail 深度；禁止用「单 assistant 堆 3 条 tool」冒充此形状。
+it.live("doom_loop AND: cross-turn same-input errors trigger", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+
+        yield* llm.push(
+          reply().tool("read", { path: "same" }),
+          reply().tool("read", { path: "same" }),
+          reply().tool("read", { path: "same" }),
+        )
+
+        for (let turn = 0; turn < 3; turn++) {
+          const parent = yield* user(chat.id, `same ${turn}`)
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const handle = yield* processors.create({
+            assistantMessage: msg,
+            sessionID: chat.id,
+            model: mdl,
+          })
+
+          const result = yield* handle.process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies MessageV2.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: `same ${turn}` }],
+            tools: { read: failingRead },
+          })
+
           if (turn < 2) {
-            // 前 2 个 turn：count 不足 3，doom_loop 未触发
             expect(result).toBe("continue")
             expect(handle.message.error).toBeUndefined()
           } else {
-            // 第 3 个 turn：count=3，doom_loop 触发
-            // permission.ask 抛 DeniedError → halt → error 设置 → process 返回 "stop"
             expect(result).toBe("stop")
             expect(handle.message.error).toBeDefined()
           }
+        }
+      }),
+    { git: true, config: (url) => denyDoomLoopConfig(url) },
+  ),
+)
+
+// 保护：相同 input 的成功重复调用（缓存/重读）不得再走旧 tool-call 相同输入预检。
+// deny 配置下若仍 stop，说明错误地在 tool-call 或 completed 状态触发了 doom_loop。
+const successRead = aiTool({
+  description: "read",
+  inputSchema: z.object({ path: z.string() }),
+  execute: async (): Promise<{ output: string }> => ({ output: "ok" }),
+})
+
+it.live("doom_loop AND: identical successful calls do not trigger", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+
+        yield* llm.push(
+          reply().tool("read", { path: "same" }),
+          reply().tool("read", { path: "same" }),
+          reply().tool("read", { path: "same" }),
+        )
+
+        for (let turn = 0; turn < 3; turn++) {
+          const parent = yield* user(chat.id, `ok ${turn}`)
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const handle = yield* processors.create({
+            assistantMessage: msg,
+            sessionID: chat.id,
+            model: mdl,
+          })
+
+          const result = yield* handle.process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies MessageV2.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: `ok ${turn}` }],
+            tools: { read: successRead },
+          })
+
+          expect(result).toBe("continue")
+          expect(handle.message.error).toBeUndefined()
         }
       }),
     { git: true, config: (url) => denyDoomLoopConfig(url) },

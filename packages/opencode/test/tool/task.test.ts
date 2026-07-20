@@ -452,7 +452,282 @@ describe("tool.task", () => {
       expect(kids[0]?.id).toBe(result.metadata.sessionId)
       expect(result.metadata.sessionId).not.toBe("ses_missing")
       expect(result.output).toContain(`task_id: ${result.metadata.sessionId}`)
+      // ses* 但 DB 不存在：新建独立上下文，并 notice 标明非法 provided
+      // notice 字段固定：type/reason/provided/action，供模型识别「非法 ID → 独立新上下文」
+      expect(result.output).toContain('type="task_id"')
+      expect(result.output).toContain('reason="invalid_provided"')
+      expect(result.output).toContain('provided="ses_missing"')
+      expect(result.output).toContain('action="created_new"')
+      // 系统分配的 sessionId 绝不能回写成调用方提供的非法串
       expect(seen?.sessionID).toBe(result.metadata.sessionId)
+    }),
+  )
+
+  // INV-04：裸 26-body 补 ses_ 后若 session 存在则 resume，不得 brand 失败也不得新建
+  it.instance("execute resumes when task_id is the 26-char body of an existing session", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const child = yield* sessions.create({ parentID: chat.id, title: "Body resume child" })
+      // 生成器 ID = "ses_" + 26 body；模型漏前缀时应命中同一 session
+      const body = child.id.slice("ses_".length)
+      expect(body.length).toBe(26)
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+      const promptOps = stubOps({ text: "resumed-body", onPrompt: (input) => (seen = input) })
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "continue prior subagent work",
+          subagent_type: "general",
+          task_id: body,
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      // resume 成功：metadata 与 prompt 的 session 必须是原 child，不是新建 ID
+      expect(result.metadata.sessionId).toBe(child.id)
+      expect(result.output).toContain(`task_id: ${child.id}`)
+      // 合法恢复路径禁止 illegal notice，避免模型误判为新上下文
+      expect(result.output).not.toContain('reason="invalid_provided"')
+      expect(seen?.sessionID).toBe(child.id)
+    }),
+  )
+
+  // INV-03/09：非 ses* 乱串不得让 SessionID.make 炸掉工具；应 create + invalid notice
+  it.instance("execute creates a child for non-ses task_id without brand failure", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+      const promptOps = stubOps({ text: "fresh", onPrompt: (input) => (seen = input) })
+      // 含引号以锁定 notice attribute escape（INV-07）
+      const provided = 'not-a-session"with-quote'
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "start work without a real task id",
+          subagent_type: "general",
+          task_id: provided,
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      // 非 ses* 输入：execute 必须成功完成（无 brand Die），并只创建一个 child
+      const kids = yield* sessions.children(chat.id)
+      expect(kids).toHaveLength(1)
+      expect(result.metadata.sessionId).toBe(kids[0]?.id)
+      // 主键永远是系统 ses_ ID，从不把非法 provided 当 session 主键
+      expect(result.metadata.sessionId).not.toBe(provided)
+      expect(result.output).toContain(`task_id: ${result.metadata.sessionId}`)
+      expect(result.output).toContain('reason="invalid_provided"')
+      expect(result.output).toContain('action="created_new"')
+      // provided 中的引号须 attribute-escape，不能原样打断 notice
+      expect(result.output).toContain('provided="not-a-session&quot;with-quote"')
+      expect(seen?.sessionID).toBe(result.metadata.sessionId)
+    }),
+  )
+
+  // INV-01：省略 task_id 是正常新建，不得出现 invalid_provided notice
+  it.instance("execute creates without invalid notice when task_id is omitted", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const promptOps = stubOps({ text: "omit-ok" })
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "fresh subagent",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      // 省略参数时只有 task_id 行与 task_result，没有 task_id 类型 notice
+      expect(result.output).toContain(`task_id: ${result.metadata.sessionId}`)
+      expect(result.output).not.toContain('reason="invalid_provided"')
+      expect(result.output).not.toContain('type="task_id"')
+    }),
+  )
+
+  // INV-02/08：完整合法 resume 骨架保持兼容，且无 illegal notice
+  it.instance("execute resumes full task_id without invalid notice", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const child = yield* sessions.create({ parentID: chat.id, title: "Full id child" })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const promptOps = stubOps({ text: "full-resume" })
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "resume with full id",
+          subagent_type: "general",
+          task_id: child.id,
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      // 完整 ID 命中：sessionId 不变，且无 invalid notice
+      expect(result.metadata.sessionId).toBe(child.id)
+      expect(result.output).not.toContain('reason="invalid_provided"')
+    }),
+  )
+
+  // INV-05：26-body 补前缀后仍不存在 → 与其他 invalid 相同，create + notice
+  it.instance("execute creates for unknown 26-char body with invalid notice", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const promptOps = stubOps({ text: "unknown-body" })
+      // 12 hex + 14 base62 形态的占位 body，保证长度门闸触发 ses_ 候选
+      const body = "0".repeat(12) + "a".repeat(14)
+      expect(body.length).toBe(26)
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "no matching body",
+          subagent_type: "general",
+          task_id: body,
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      // 26 乱串：触发 body 候选但 get miss，仍 create 且 notice 回显 provided body
+      const kids = yield* sessions.children(chat.id)
+      expect(kids).toHaveLength(1)
+      expect(result.metadata.sessionId).toBe(kids[0]?.id)
+      expect(result.output).toContain('reason="invalid_provided"')
+      expect(result.output).toContain(`provided="${body}"`)
+    }),
+  )
+
+  // INV-06：非法 task_id 导致的新建必须走 summary 默认，不能因 raw task_id 真值伪装 resume
+  it.instance("execute uses summary inspected_files default when invalid task_id creates", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+      const promptOps = stubOps({ text: "with-context", onPrompt: (input) => (seen = input) })
+      // 最小已完成 read part：非法 task_id 新建应默认 summary 并注入 parent_context
+      const readPart: MessageV2.ToolPart = {
+        id: PartID.ascending(),
+        type: "tool",
+        tool: "read",
+        callID: "call-read-1",
+        sessionID: chat.id,
+        messageID: assistant.id,
+        state: {
+          status: "completed",
+          input: { filePath: "/tmp/repo/src/a.ts" },
+          output: "ok",
+          title: "Read",
+          metadata: {
+            read: {
+              path: "/tmp/repo/src/a.ts",
+              canonicalPath: "/tmp/repo/src/a.ts",
+              start: 1,
+              end: 20,
+              total: 20,
+              size: 100,
+              modified: "2026-01-01 00:00:00",
+              modifiedMs: 1,
+            },
+          },
+          time: { start: Date.now(), end: Date.now() },
+        },
+      }
+      const messages: MessageV2.WithParts[] = [
+        {
+          info: assistant,
+          parts: [readPart],
+        },
+      ]
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "use parent context",
+          subagent_type: "general",
+          task_id: "not-a-real-id",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages,
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      // 非法 ID 新建仍应带 invalid notice
+      expect(result.output).toContain('reason="invalid_provided"')
+      // prompt parts 中必须出现 parent_context，证明 inspected 默认是 summary 而非 none
+      const parentCtx = seen?.parts.find(
+        (part) => part.type === "text" && "text" in part && String(part.text).includes("<parent_context>"),
+      )
+      expect(parentCtx).toBeDefined()
     }),
   )
 

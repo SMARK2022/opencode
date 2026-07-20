@@ -19,6 +19,10 @@ import { Permission } from "@/permission"
 import path from "path"
 import { InstanceState } from "@/effect/instance-state"
 import { mergeRanges } from "@/util/range"
+import { formatTaskIdNotice } from "@/util/output-notice"
+
+// SessionID 生成 body 固定 26（见 packages/core Identifier LENGTH / id.ts）；完整 ID = "ses_" + body。
+const SESSION_ID_BODY_LENGTH = 26
 
 // [local-smark] 从父 session 的 messages 提取已读文件列表，
 // 生成紧凑的 markdown 表格作为子 agent 的 parent_context。
@@ -137,9 +141,11 @@ export const Parameters = Schema.Struct({
   }),
 })
 
-function output(sessionID: SessionID, text: string) {
+// notice 插在 task_id 元信息与 <task_result> 之间，供模型读，不影响 result 体解析
+function output(sessionID: SessionID, text: string, notice?: string) {
   return [
     `task_id: ${sessionID} (for resuming to continue this task if needed)`,
+    ...(notice ? [notice] : []),
     "",
     "<task_result>",
     text,
@@ -147,10 +153,12 @@ function output(sessionID: SessionID, text: string) {
   ].join("\n")
 }
 
-function backgroundOutput(sessionID: SessionID) {
+// background 与 foreground 共用同一 invalid notice 插入点，避免只修 output() 漏 background
+function backgroundOutput(sessionID: SessionID, notice?: string) {
   return [
     `task_id: ${sessionID} (for polling this task with task_status)`,
     "state: running",
+    ...(notice ? [notice] : []),
     "",
     "<task_result>",
     "Background task started. Continue your current work and call task_status when you need the result.",
@@ -232,10 +240,40 @@ export const TaskTool = Tool.define(
         })
       }
 
-      const taskID = params.task_id
-      const session = taskID
-        ? yield* sessions.get(SessionID.make(taskID)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
-        : undefined
+      // task_id 是 optional string，不是 SessionID brand。对非 "ses*" raw 直接
+      // SessionID.make 会同步抛 brand 错误并中断整次 execute；只能对已过域门闸的候选 make+get。
+      const lookupSession = (id: string) =>
+        id.startsWith("ses")
+          ? sessions.get(SessionID.make(id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+          : Effect.succeed(undefined)
+
+      const rawTaskID = params.task_id
+      const resolved = yield* Effect.gen(function* () {
+        if (!rawTaskID) return { mode: "create" as const, reason: "omitted" as const }
+
+        // 候选 1：raw 已是 SessionID 域成员（startsWith "ses"）
+        const exact = yield* lookupSession(rawTaskID)
+        if (exact) return { mode: "resume" as const, session: exact }
+
+        // 候选 2：用户指定的 26-body 补全（生成器字面量 ses_）；与 brand 边界 "ses" 分工
+        if (rawTaskID.length === SESSION_ID_BODY_LENGTH && !rawTaskID.startsWith("ses")) {
+          const prefixed = yield* lookupSession("ses_" + rawTaskID)
+          if (prefixed) return { mode: "resume" as const, session: prefixed }
+        }
+
+        // 能用就用；不能用就当错误走创建，不因非法 ID 硬失败
+        return { mode: "create" as const, reason: "invalid_provided" as const, provided: rawTaskID }
+      })
+
+      // resume 取已命中 session；create 时 session 保持 undefined 以走 sessions.create
+      const session = resolved.mode === "resume" ? resolved.session : undefined
+      // 仅在“传了但无法命中已有 Session”时提示；省略 task_id 的正常新建不插 notice
+      // notice 与 create 绑定：不伪装 resume 成功，只声明独立新上下文
+      const invalidTaskIdNotice =
+        resolved.mode === "create" && resolved.reason === "invalid_provided"
+          ? formatTaskIdNotice({ provided: resolved.provided })
+          : undefined
+
       const parent = yield* sessions.get(ctx.sessionID)
       // The current tool context is the actual delegation source. Persisted
       // session.agent can be absent or stale on resumed sessions, so it is only a
@@ -304,12 +342,14 @@ export const TaskTool = Tool.define(
         const parts = yield* ops.resolvePromptParts(params.prompt)
 
         // [local-smark] 根据 inspected_files 参数传递父 session 的已读文件列表。
-        // 新 subagent 默认 "summary"，resume 默认 "none"（子 session 已有自己的 read 历史）。
+        // 默认必须跟真实 resolve.mode：resume→none，新建（含非法 task_id 导致的新建）→summary。
+        // 不能用 raw params.task_id 真值——假 ID 会伪装成 resume 并丢掉父 inspected 摘要。
         // 从 ctx.messages 提取 read tool parts 的文件路径和 range，
         // 不做 fs.stat（避免 I/O），stale 由子 agent 的 read size+modifiedMs 门控处理。
         // worktree 用于计算相对路径，通过 InstanceState.context 获取（与 read.ts 同款用法）。
         const instance = yield* InstanceState.context
-        const inspectedFilesMode = params.inspected_files ?? (params.task_id ? "none" : "summary")
+        const inspectedFilesMode =
+          params.inspected_files ?? (resolved.mode === "resume" ? "none" : "summary")
         const parentContext = inspectedFilesMode !== "none" && ctx.messages.length > 0
           ? buildParentInspectedFilesSummary(ctx.messages, instance.worktree)
           : undefined
@@ -449,7 +489,8 @@ export const TaskTool = Tool.define(
             ...metadata,
             jobId: info.id,
           },
-          output: backgroundOutput(nextSession.id),
+          // background 启动回执同样挂 invalid notice（若有），与前台 output 合同一致
+          output: backgroundOutput(nextSession.id, invalidTaskIdNotice),
         }
       }
 
@@ -469,7 +510,7 @@ export const TaskTool = Tool.define(
             return {
               title: params.description,
               metadata,
-              output: output(nextSession.id, text),
+              output: output(nextSession.id, text, invalidTaskIdNotice),
             }
           }),
         (_, exit) =>

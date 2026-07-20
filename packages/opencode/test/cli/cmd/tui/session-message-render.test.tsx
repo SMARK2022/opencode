@@ -10,7 +10,7 @@ import type {
   Session as SessionInfo,
   UserMessage as SDKUserMessage,
 } from "@opencode-ai/sdk/v2"
-import { onCleanup } from "solid-js"
+import { createEffect, onCleanup } from "solid-js"
 import { tmpdir } from "../../../fixture/fixture"
 import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
 import { ArgsProvider } from "../../../../src/cli/cmd/tui/context/args"
@@ -23,7 +23,7 @@ import { ProjectProvider } from "../../../../src/cli/cmd/tui/context/project"
 import { PromptRefProvider } from "../../../../src/cli/cmd/tui/context/prompt"
 import { RouteProvider } from "../../../../src/cli/cmd/tui/context/route"
 import { SDKProvider } from "../../../../src/cli/cmd/tui/context/sdk"
-import { SyncProvider } from "../../../../src/cli/cmd/tui/context/sync"
+import { SyncProvider, useSync } from "../../../../src/cli/cmd/tui/context/sync"
 import { ThemeProvider } from "../../../../src/cli/cmd/tui/context/theme"
 import { TuiConfigProvider } from "../../../../src/cli/cmd/tui/context/tui-config"
 import { FrecencyProvider } from "../../../../src/cli/cmd/tui/component/prompt/frecency"
@@ -2952,13 +2952,46 @@ async function withRenderedSession(
   })
 
   const events = createEventSource()
-  const app = await testRender(() => <SessionHarness fetch={calls.fetch} events={events.source} />, {
-    width: dimensions.width ?? 80,
-    height: dimensions.height ?? 16,
-    footerHeight: 0,
-  })
+  // testRender 返回只表示根已挂载；Session 异步 session.get/sync 后才有 transcript。
+  // SyncReadyProbe 观察公开 store，与 frame timeout 分离，避免空白帧被误判为 presentation 回归。
+  let syncReady = false
+  const messageIDs = messages.map((message) => message.id)
+  const app = await testRender(
+    () => (
+      <SessionHarness
+        fetch={calls.fetch}
+        events={events.source}
+        messageIDs={messageIDs}
+        onSyncReady={() => {
+          syncReady = true
+        }}
+      />
+    ),
+    {
+      width: dimensions.width ?? 80,
+      height: dimensions.height ?? 16,
+      footerHeight: 0,
+      // Windows 默认 threaded renderer；本文件反复 mount/destroy Session 根，
+      // 关闭线程与 sync-fixture/session-v2-error 一致，避免 native 清理竞态。
+      useThread: false,
+    },
+  )
 
   try {
+    // 单循环 poll：ready 立即继续；超时才抛 missing-data。禁止 Promise.race loser
+    // 在成功后继续 renderOnce（否则会污染 destroy 与后续测试的 event loop）。
+    const syncDeadline = Date.now() + 10_000
+    while (!syncReady) {
+      if (Date.now() >= syncDeadline) {
+        throw new Error(
+          `timed out waiting for session sync data (session=${sessionID}, messages=${messageIDs.join(",")})`,
+        )
+      }
+      await app.renderOnce()
+      await Promise.resolve()
+      await new Promise((resolve) => process.nextTick(resolve))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
     await run(app, events.emit)
   } finally {
     app.renderer.destroy()
@@ -2969,6 +3002,8 @@ async function withRenderedSession(
 function SessionHarness(props: {
   fetch: typeof globalThis.fetch
   events: ReturnType<typeof createEventSource>["source"]
+  messageIDs: string[]
+  onSyncReady: () => void
 }) {
   const renderer = useRenderer()
   // visibility 用例通过真实 binding 进入已注册 command，不给所有测试暴露 keymap 内部对象。
@@ -2991,6 +3026,7 @@ function SessionHarness(props: {
                   >
                     <ProjectProvider>
                       <SyncProvider>
+                        <SyncReadyProbe messageIDs={props.messageIDs} onReady={props.onSyncReady} />
                         <ThemeProvider mode="dark">
                           <LocalProvider>
                             <PromptStashProvider>
@@ -3023,16 +3059,49 @@ function SessionHarness(props: {
   )
 }
 
+// 观察 Sync 公开 store：session 存在、message 列表已装、每个 fixture message 有 part 数组。
+// 不复制 Session 内部状态机；onReady 只触发一次。
+function SyncReadyProbe(props: { messageIDs: string[]; onReady: () => void }) {
+  const sync = useSync()
+  let fired = false
+  createEffect(() => {
+    if (fired) return
+    if (!sync.session.get(sessionID)) return
+    const infos = sync.data.message[sessionID]
+    if (!infos) return
+    for (const id of props.messageIDs) {
+      if (!infos.some((message) => message.id === id)) return
+      if (sync.data.part[id] === undefined) return
+    }
+    fired = true
+    props.onReady()
+  })
+  return <box />
+}
+
+// Sync 已就绪后仅等待渲染进度。Reasoning 使用 drawUnstyledText=false + TreeSitter Worker，
+// 每轮 renderOnce + microtask/nextTick/setTimeout(0) 让 ONESHOT_HIGHLIGHT_RESPONSE 落地；
+// 5s 墙钟只作诊断上界，不是 Sync readiness，也不弱化四项可见断言。
+const FRAME_WAIT_DEADLINE_MS = 5_000
+
 async function waitForFrame(app: Awaited<ReturnType<typeof testRender>>, predicate: (lines: string[]) => boolean) {
   const start = Date.now()
+  let frame: string[] = []
+  let passes = 0
 
-  for (;;) {
+  while (Date.now() - start < FRAME_WAIT_DEADLINE_MS) {
+    passes++
     await app.renderOnce()
-    const frame = rows(app.captureCharFrame())
+    frame = rows(app.captureCharFrame())
     if (predicate(frame)) return frame
-    if (Date.now() - start > 2_000) throw new Error(`timed out waiting for frame:\n${frame.join("\n")}`)
-    await Bun.sleep(10)
+    await Promise.resolve()
+    await new Promise((resolve) => process.nextTick(resolve))
+    await new Promise((resolve) => setTimeout(resolve, 0))
   }
+
+  throw new Error(
+    `timed out waiting for frame after ${Date.now() - start}ms (${passes} passes):\n${frame.join("\n")}`,
+  )
 }
 
 function rows(frame: string) {

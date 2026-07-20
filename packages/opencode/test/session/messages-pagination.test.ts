@@ -7,13 +7,33 @@ import { ModelID, ProviderID } from "../../src/provider/schema"
 import { NotFoundError } from "@/storage/storage"
 import { ColdStorage } from "@/storage/cold"
 import { Database } from "@/storage/db"
-import { SessionTable } from "@/session/session.sql"
+import { MessageTable, PartTable, SessionTable } from "@/session/session.sql"
 import * as Log from "@opencode-ai/core/util/log"
 import { testEffect } from "../lib/effect"
 
 void Log.init({ print: false })
 
 const it = testEffect(SessionNs.defaultLayer)
+
+// 测试进程共享 preload SQLite；ColdStorage.status().coldOwners 是全库计数，不能当作当前 fixture 的局部结果。
+// 只统计本 session 的 cold_ref owner，才能在 cold.test / processor 等同进程 suite 下稳定断言 thaw 副作用。
+function sessionColdOwners(sessionID: SessionID) {
+  return Database.use(
+    (db) =>
+      db
+        .select({ cold_ref: MessageTable.cold_ref })
+        .from(MessageTable)
+        .where(Database.eq(MessageTable.session_id, sessionID))
+        .all()
+        .filter((row) => row.cold_ref).length +
+      db
+        .select({ cold_ref: PartTable.cold_ref })
+        .from(PartTable)
+        .where(Database.eq(PartTable.session_id, sessionID))
+        .all()
+        .filter((row) => row.cold_ref).length,
+  )
+}
 
 const withSession = <A, E, R>(
   fn: (input: { session: SessionNs.Interface; sessionID: SessionID }) => Effect.Effect<A, E, R>,
@@ -656,7 +676,9 @@ describe("Session.findMessage", () => {
 
         const none = yield* session.findMessage(sessionID, () => false)
         expect(Option.isNone(none)).toBe(true)
-        expect(ColdStorage.status().coldOwners).toBe(1)
+        // 无匹配扫描不得 thaw；session 级 cold 计数仍为 1。顺带调用 status() 确保 freeze 后 payload 元数据健康。
+        expect(sessionColdOwners(sessionID)).toBe(1)
+        expect(ColdStorage.status().coldOwners).toBeGreaterThanOrEqual(1)
 
         const match = yield* session.findMessage(sessionID, (info) => info.role === "user")
         expect(Option.isSome(match)).toBe(true)
@@ -665,12 +687,12 @@ describe("Session.findMessage", () => {
           matchedPart?.type === "tool" && matchedPart.state.status === "completed" ? matchedPart.state.output : undefined,
         ).toBe(output)
         expect(Option.isSome(match) ? match.value.parts.some((part) => part.id === hiddenPartID) : true).toBe(false)
-        expect(ColdStorage.status().coldOwners).toBe(0)
+        expect(sessionColdOwners(sessionID)).toBe(0)
       }),
     ),
   )
 
-  it.instance("bounds doom-loop history to the previous assistant tool tail", () =>
+  it.instance("bounds doom-loop history to preceding multi-assistant tool tail", () =>
     withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
         const userID = yield* addUser(sessionID)
@@ -736,6 +758,23 @@ describe("Session.findMessage", () => {
             time: { start: 12, end: 13 },
           },
         })
+        // 跨多个 visible assistant 各 1 tool：limit=2 必须返回 2 条（单 previous-assistant 只会得到 1）。
+        const midAssistantID = yield* addAssistant(sessionID, userID)
+        const midPartID = PartID.ascending()
+        yield* session.updatePart({
+          id: midPartID,
+          sessionID,
+          messageID: midAssistantID,
+          type: "tool",
+          callID: "bounded-mid",
+          tool: "read",
+          state: {
+            status: "error",
+            input: { mid: true },
+            error: "missing",
+            time: { start: 14, end: 15 },
+          },
+        })
         const currentAssistantID = yield* addAssistant(sessionID, userID)
         Database.use((db) =>
           db
@@ -749,15 +788,24 @@ describe("Session.findMessage", () => {
         }
 
         // 旧全量 Session.messages 默认排除 hidden Message/Part；bounded seam 必须保持同一可见性语义。
-        // hidden assistant 更靠近 current、hidden part 位于 visible tail 之后，任一过滤缺失都会改变 expected IDs。
+        // 最近 3 条 visible non-pending tools：previous 末尾 2 条 + mid 1 条（hidden 不占配额）。
         const tail = MessageV2.previousAssistantToolTail({
           sessionID,
           before: { id: currentAssistantID, time: Date.now() },
           limit: 3,
         })
-        expect(tail.map((part) => part.id)).toEqual(partIDs.slice(-3))
-        expect(tail.every((part) => part.type === "tool" && part.state.status === "completed")).toBe(true)
-        expect(ColdStorage.status().coldOwners).toBe(2)
+        expect(tail.map((part) => part.id)).toEqual([...partIDs.slice(-2), midPartID])
+        expect(tail.every((part) => part.type === "tool" && part.state.status !== "pending")).toBe(true)
+        // 有界 tail 只 thaw 选中 part；本 session 的 previous freeze tools 仍应保持 cold（至少 2）。
+        expect(sessionColdOwners(sessionID)).toBeGreaterThanOrEqual(2)
+
+        const two = MessageV2.previousAssistantToolTail({
+          sessionID,
+          before: { id: currentAssistantID, time: Date.now() },
+          limit: 2,
+        })
+        // 证明跨 assistant：最近 2 条来自 previous 末尾 1 条 + mid，而非只扫 mid 一个 assistant。
+        expect(two.map((part) => part.id)).toEqual([partIDs[partIDs.length - 1], midPartID])
       }),
     ),
   )
