@@ -15,9 +15,10 @@ export type UsageStats = {
 }
 
 export function formatUsageStats(usage: UsageStats) {
+  // 箭头后空格对齐主面板 live compact flow（↑ n ↓ n），永久 footer 与 exit stdout 共用此模板。
   const flow = [
-    usage.input > 0 ? `↑${Locale.number(usage.input)}` : "",
-    usage.output > 0 ? `↓${Locale.number(usage.output)}` : "",
+    usage.input > 0 ? `↑ ${Locale.number(usage.input)}` : "",
+    usage.output > 0 ? `↓ ${Locale.number(usage.output)}` : "",
   ].filter(Boolean)
   const cost = usage.cost > 0 ? money.format(usage.cost) : ""
 

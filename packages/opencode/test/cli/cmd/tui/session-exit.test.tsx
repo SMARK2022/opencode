@@ -34,15 +34,15 @@ const sessionID = "ses_exit"
 const test = baseTest.serial
 
 test("formats each usage field independently", () => {
-  // normal fixture 同时包含三类值，锁定 OpenCode 既有 flow/cost 分隔符，而不是只验证字段存在。
-  expect(formatUsageStats({ input: 12_300, output: 970, cost: 0.01 })).toBe("↑12.3K ↓970 · $0.01")
+  // 箭头后空格对齐主面板 live compact flow；normal fixture 同时锁定 flow/cost 分隔符。
+  expect(formatUsageStats({ input: 12_300, output: 970, cost: 0.01 })).toBe("↑ 12.3K ↓ 970 · $0.01")
   // input-only 是中断 Session 的有效记录，不能用 output/cost 的零值制造噪声。
   // 全零则返回空字符串，由两个 consumer 共同省略整行，避免永久记录出现 Stats 0。
-  expect(formatUsageStats({ input: 1_200, output: 0, cost: 0 })).toBe("↑1.2K")
+  expect(formatUsageStats({ input: 1_200, output: 0, cost: 0 })).toBe("↑ 1.2K")
   // input+cost 锁定 token flow 与费用之间的中点，避免过滤零 output 后把 cost 当成第二个 flow 字段。
-  expect(formatUsageStats({ input: 1_200, output: 0, cost: 0.01 })).toBe("↑1.2K · $0.01")
+  expect(formatUsageStats({ input: 1_200, output: 0, cost: 0.01 })).toBe("↑ 1.2K · $0.01")
   // output+cost 证明同一分隔规则不依赖 input 存在，cost-only 则证明不会产生孤立中点。
-  expect(formatUsageStats({ input: 0, output: 970, cost: 0.01 })).toBe("↓970 · $0.01")
+  expect(formatUsageStats({ input: 0, output: 970, cost: 0.01 })).toBe("↓ 970 · $0.01")
   expect(formatUsageStats({ input: 0, output: 0, cost: 0.01 })).toBe("$0.01")
   expect(formatUsageStats({ input: 0, output: 0, cost: 0 })).toBe("")
 })
@@ -63,7 +63,8 @@ test("emits Session stats through the real ExitProvider stdout path", async () =
   )
   expect(output).toContain("Stats")
   // 970 output + 30 reasoning 必须显示为 1.0K，防止 Session projection 静默丢弃 reasoning。
-  expect(output).toContain("↑12.3K ↓1.0K · $0.01")
+  // 箭头后空格是用户可见 compact 形态，与 message footer 共用 formatUsageStats。
+  expect(output).toContain("↑ 12.3K ↓ 1.0K · $0.01")
   expect(output).toContain("Continue")
 })
 

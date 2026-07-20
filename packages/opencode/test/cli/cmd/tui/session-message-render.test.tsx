@@ -63,12 +63,12 @@ test("completed assistant footer renders pure input, output, and cost", async ()
     async (app) => {
       const frame = await waitForFrame(
         app,
-        (lines) => lines.some((line) => line.includes("usage answer")) && lines.some((line) => line.includes("↑12.3K")),
+        (lines) => lines.some((line) => line.includes("usage answer")) && lines.some((line) => line.includes("↑ 12.3K")),
       )
-      // 真实 renderer 的 footer 锁定用户可观察格式，而不是内部 accounting 字段。
+      // 真实 renderer 的 footer 锁定用户可观察 compact 格式（箭头后空格），而不是内部 accounting 字段。
       // cache read/write fixture 保持非零，若误读 totalInput，期望的 12.3K 就会变成 cache-inclusive 数值。
       // output 与 cost 的 literal 同时证明 formatter 没有只显示 input 而遗漏其他永久字段。
-      expect(frame.some((line) => line.includes("↑12.3K ↓1.0K · $0.01"))).toBe(true)
+      expect(frame.some((line) => line.includes("↑ 12.3K ↓ 1.0K · $0.01"))).toBe(true)
     },
   )
 })
@@ -92,9 +92,9 @@ test("completed assistant footer omits zero output and cost", async () => {
     async (app) => {
       const frame = await waitForFrame(
         app,
-        (lines) => lines.some((line) => line.includes("input-only answer")) && lines.some((line) => line.includes("↑1.2K")),
+        (lines) => lines.some((line) => line.includes("input-only answer")) && lines.some((line) => line.includes("↑ 1.2K")),
       )
-      const footer = frame.find((line) => line.includes("↑1.2K")) ?? ""
+      const footer = frame.find((line) => line.includes("↑ 1.2K")) ?? ""
       // input-only 是有效统计，不应因格式化便利带出另外两个零字段。
       // 断言针对捕获到的最终 footer 行，而不是 formatUsageStats 的返回值或内部 signal。
       // 这样可以发现 JSX 在 formatter 之后重新拼接零值的回归。
@@ -134,10 +134,10 @@ test("completed assistant footer accumulates a multi-step request", async () => 
     async (app) => {
       const frame = await waitForFrame(
         app,
-        (lines) => lines.some((line) => line.includes("multi-step answer")) && lines.some((line) => line.includes("↑12.3K")),
+        (lines) => lines.some((line) => line.includes("multi-step answer")) && lines.some((line) => line.includes("↑ 12.3K")),
       )
       // 最终 assistant 的 footer 必须读取同一 parent 下两个 assistant 的累计，而不是只取最后一步。
-      expect(frame.some((line) => line.includes("↑12.3K ↓1.1K · $0.01"))).toBe(true)
+      expect(frame.some((line) => line.includes("↑ 12.3K ↓ 1.1K · $0.01"))).toBe(true)
     },
   )
 })
@@ -165,6 +165,94 @@ test("completed assistant footer omits a zero usage group", async () => {
       expect(footer).not.toContain("↑")
       expect(footer).not.toContain("↓")
       expect(footer).not.toContain("$")
+    },
+  )
+})
+
+test("subagent footer shows compact step flow without request cumulative parentheses", async () => {
+  const childID = "ses_usage_child"
+  // 两个 step 的 pure input 故意不同，使 request total 与当前 step 分叉；宽终端曾把 total 画成括号。
+  // step-finish 的 cache 固定 100/50（见 stepFinishPart），因此最新 step 显示含 cache 的 6.5K，request total 为 12.6K。
+  await withRenderedSession(
+    [assistantMessage("msg_task_usage", 1)],
+    {
+      msg_task_usage: [
+        completedToolPart(
+          "part_task_usage",
+          "msg_task_usage",
+          "task",
+          { description: "usage child", subagent_type: "general" },
+          { sessionId: childID },
+        ),
+      ],
+    },
+    async (app) => {
+      await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("General Task") && line.includes("usage child")),
+      )
+      const raw = app.captureCharFrame().split("\n")
+      const y = raw.findIndex((line) => line.includes("General Task") && line.includes("usage child"))
+      expect(y).toBeGreaterThanOrEqual(0)
+      await app.mockMouse.click(35, y + 1)
+
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("usage child visible")) &&
+          lines.some((line) => line.includes("General") && line.includes("↑")),
+      )
+      const footer = frame.find((line) => line.includes("General") && line.includes("↑")) ?? ""
+      // 主面板宽屏 compact：↑ step ↓ step，空格分隔，无 request 累积括号。
+      expect(footer).toContain("↑ 6.5K ↓ 1.0K")
+      // 禁止旧形态 ↑ 6.5K(12.6K)；勿用 not.toContain("(")——sibling (1 of n) 与 (p%) 仍合法。
+      expect(footer).not.toContain("↑ 6.5K(12.6K)")
+      // request totalOutput = 100 + (900+100) = 1.1K，与当前 step ↓ 1.0K 分叉。
+      expect(footer).not.toContain("↓ 1.0K(1.1K)")
+      expect(footer).not.toMatch(/↑\s*[\d.]+[KM]?\(/)
+    },
+    {},
+    { width: 140, height: 24 },
+    {
+      [childID]: {
+        info: sessionInfo({ id: childID, parentID: sessionID, title: "usage child (@general subagent)" }),
+        messages: [
+          {
+            ...userMessage("msg_child_user", 1),
+            sessionID: childID,
+            agent: "general",
+          },
+          {
+            ...assistantMessage("msg_child_first", 2, "msg_child_user"),
+            sessionID: childID,
+            finish: "tool-calls",
+            agent: "general",
+            cost: 0.005,
+          },
+          {
+            ...assistantMessage("msg_child_last", 3, "msg_child_user"),
+            sessionID: childID,
+            finish: "stop",
+            agent: "general",
+            cost: 0.005,
+          },
+        ],
+        parts: {
+          msg_child_first: [
+            textPart("part_child_first", "msg_child_first", "tool step", { sessionID: childID }),
+            {
+              ...stepFinishPart("part_child_first_finish", "msg_child_first", 6_000, 100, 0, 0.005),
+              sessionID: childID,
+            },
+          ],
+          msg_child_last: [
+            textPart("part_child_last", "msg_child_last", "usage child visible", { sessionID: childID }),
+            {
+              ...stepFinishPart("part_child_last_finish", "msg_child_last", 6_300, 900, 100, 0.005),
+              sessionID: childID,
+            },
+          ],
+        },
+      },
     },
   )
 })

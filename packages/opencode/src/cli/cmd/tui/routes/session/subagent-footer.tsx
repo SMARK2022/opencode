@@ -9,7 +9,6 @@ import { Locale } from "@/util/locale"
 import { tokenAccounting } from "@/token/accounting"
 import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { activeTurnPair } from "../../util/session-pending"
-import { useTerminalDimensions } from "@opentui/solid"
 import { useCommandPalette } from "../../context/command-palette"
 import { useCommandShortcut } from "../../keymap"
 
@@ -41,11 +40,10 @@ export function SubagentFooter() {
 
   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
 
+  // 与主面板 prompt 宽屏 compact 同构：只投影当前 step，request 累积由 sidebar 承载。
   type UsageInfo = {
     input: number
     output: number
-    totalInput: number
-    totalOutput: number
     context: string | undefined
     cost: string | undefined
   }
@@ -69,15 +67,14 @@ export function SubagentFooter() {
 
     if (stepTotal <= 0 && requestTotal <= 0) {
       if (!isRunning) return
-      return { input: 0, output: 0, totalInput: acc.request.totalInput, totalOutput: acc.request.totalOutput, context: undefined, cost: undefined }
+      // running 占位仅维持流量脉冲，不携带 request 累积字段。
+      return { input: 0, output: 0, context: undefined, cost: undefined }
     }
 
     const pct = acc.contextPercent != null ? `${acc.contextPercent}%` : undefined
     return {
       input: acc.step.input,
       output: acc.step.output,
-      totalInput: acc.request.totalInput,
-      totalOutput: acc.request.totalOutput,
       context: stepTotal > 0 ? (pct ? `${Locale.number(stepTotal)} (${pct})` : Locale.number(stepTotal)) : undefined,
       cost: acc.request.cost > 0 ? money.format(acc.request.cost) : undefined,
     }
@@ -93,8 +90,6 @@ export function SubagentFooter() {
   const previousShortcut = useCommandShortcut("session.child.previous")
   const nextShortcut = useCommandShortcut("session.child.next")
   const [hover, setHover] = createSignal<"parent" | "prev" | "next" | null>(null)
-  const dimensions = useTerminalDimensions()
-  const showCumulative = createMemo(() => dimensions().width > 120)
 
   return (
     <box flexShrink={0}>
@@ -122,8 +117,8 @@ export function SubagentFooter() {
             <Show when={usage()}>
               {(item) => (
                 <text fg={theme.textMuted} wrapMode="none">
-                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{showCumulative() ? `(${Locale.number(item().totalInput)})` : ""} ·{" "}
-                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}{showCumulative() ? `(${Locale.number(item().totalOutput)})` : ""}
+                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{" "}
+                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
                   {item().context ? ` · ${item().context}` : ""}
                   {item().cost ? ` · ${item().cost}` : ""}
                 </text>
