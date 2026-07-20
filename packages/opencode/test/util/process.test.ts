@@ -61,8 +61,10 @@ describe("util.process", () => {
         node(`require("fs").writeFileSync(${JSON.stringify(marker)}, "1"); setInterval(() => {}, 1000)`),
         { abort: abort.signal, nothrow: true },
       )
-      // 轮询 marker 文件直到子进程确认已启动；3s 超时仅防死锁，不作为性能契约。
-      const deadline = Date.now() + 3_000
+      // readiness 仅覆盖 marker 发布；8s 死锁诊断，不计入 abort 语义窗口。
+      // 外层 Bun timeout 15s ≥ readiness(8s) + abort 预算(2s) + cleanup/assert 余量(5s)，
+      // 避免 Windows 慢启动把整个测试预算耗光后还没执行 abort 断言。
+      const deadline = Date.now() + 8_000
       while (!(await Bun.file(marker).exists())) {
         if (Date.now() > deadline) throw new Error("child process did not signal readiness")
         await Bun.sleep(10)
@@ -72,13 +74,13 @@ describe("util.process", () => {
       abort.abort()
       const out = await running
       expect(out.code).not.toBe(0)
-      // 2000ms 仅保护 abort 语义正确性（进程树被杀），3000ms test timeout 是死锁保护。
+      // 2000ms 是 abort 语义合同（进程树被杀），不是调度性能契约；外层 15s 只防死锁。
       expect(Date.now() - abortStart).toBeLessThan(2_000)
     } finally {
       abort.abort()
       await fs.rm(path.dirname(marker), { recursive: true, force: true }).catch(() => {})
     }
-  }, 3000)
+  }, 15_000)
 
   test("aborts a Windows process tree before resolving", async () => {
     if (process.platform !== "win32") return
