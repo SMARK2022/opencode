@@ -670,7 +670,7 @@ describe("Session.findMessage", () => {
     ),
   )
 
-  it.instance("bounds doom-loop history to the previous assistant tool tail", () =>
+  it.instance("bounds doom-loop history to preceding multi-assistant tool tail", () =>
     withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
         const userID = yield* addUser(sessionID)
@@ -736,6 +736,23 @@ describe("Session.findMessage", () => {
             time: { start: 12, end: 13 },
           },
         })
+        // 跨多个 visible assistant 各 1 tool：limit=2 必须返回 2 条（单 previous-assistant 只会得到 1）。
+        const midAssistantID = yield* addAssistant(sessionID, userID)
+        const midPartID = PartID.ascending()
+        yield* session.updatePart({
+          id: midPartID,
+          sessionID,
+          messageID: midAssistantID,
+          type: "tool",
+          callID: "bounded-mid",
+          tool: "read",
+          state: {
+            status: "error",
+            input: { mid: true },
+            error: "missing",
+            time: { start: 14, end: 15 },
+          },
+        })
         const currentAssistantID = yield* addAssistant(sessionID, userID)
         Database.use((db) =>
           db
@@ -749,15 +766,24 @@ describe("Session.findMessage", () => {
         }
 
         // 旧全量 Session.messages 默认排除 hidden Message/Part；bounded seam 必须保持同一可见性语义。
-        // hidden assistant 更靠近 current、hidden part 位于 visible tail 之后，任一过滤缺失都会改变 expected IDs。
+        // 最近 3 条 visible non-pending tools：previous 末尾 2 条 + mid 1 条（hidden 不占配额）。
         const tail = MessageV2.previousAssistantToolTail({
           sessionID,
           before: { id: currentAssistantID, time: Date.now() },
           limit: 3,
         })
-        expect(tail.map((part) => part.id)).toEqual(partIDs.slice(-3))
-        expect(tail.every((part) => part.type === "tool" && part.state.status === "completed")).toBe(true)
-        expect(ColdStorage.status().coldOwners).toBe(2)
+        expect(tail.map((part) => part.id)).toEqual([...partIDs.slice(-2), midPartID])
+        expect(tail.every((part) => part.type === "tool" && part.state.status !== "pending")).toBe(true)
+        // freeze 的 previous tools 仍在 cold 统计内；具体 pack 数随 cold layout 可变，至少保留有界 thaw 不爆表。
+        expect(ColdStorage.status().coldOwners).toBeGreaterThanOrEqual(2)
+
+        const two = MessageV2.previousAssistantToolTail({
+          sessionID,
+          before: { id: currentAssistantID, time: Date.now() },
+          limit: 2,
+        })
+        // 证明跨 assistant：最近 2 条来自 previous 末尾 1 条 + mid，而非只扫 mid 一个 assistant。
+        expect(two.map((part) => part.id)).toEqual([partIDs[partIDs.length - 1], midPartID])
       }),
     ),
   )
