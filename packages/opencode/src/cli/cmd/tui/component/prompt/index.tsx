@@ -447,7 +447,7 @@ export function Prompt(props: PromptProps) {
   const voiceInputBusy = createMemo(() => voiceInputStatus().type !== "idle")
   const voiceInputStatusText = createMemo(() =>
     // shortcut 来自 keymap；兜底值只影响展示，不注册额外 keybind。
-    // compact 仅缩短主 Prompt 的展示；dialog/question 继续使用 formatter 的默认完整文案。
+    // compact 与 DialogPrompt / QuestionPrompt 统一 short profile；默认长文案留给兼容 consumer。
     PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now(), { compact: true }),
   )
   const voiceInput = PromptVoiceInput.createVoiceInputController({
@@ -1992,15 +1992,17 @@ export function Prompt(props: PromptProps) {
 
                   return (
                     <Show when={retry()}>
-                      {/* 摘要占用剩余空间，details 与 retry 元数据保持固定，形成稳定的信息优先级。 */}
+                      {/* 外层组可伸展以承接剩余宽度，但摘要文本本身不 grow，避免短错误与 (details) 被拉开。 */}
                       <box minWidth={0} flexBasis={0} flexGrow={1} flexShrink={1} flexDirection="row" gap={1} overflow="hidden">
-                        <box minWidth={0} flexBasis={0} flexGrow={1} flexShrink={1} flexDirection="row" gap={1} overflow="hidden" onMouseUp={handleMessageClick}>
+                        <box minWidth={0} flexShrink={1} flexDirection="row" gap={1} overflow="hidden" onMouseUp={handleMessageClick}>
                           {/* OpenTUI 命中的子 text 不可靠冒泡到 box；可见摘要本身也必须承接详情点击。 */}
-                          <text minWidth={0} flexBasis={0} flexGrow={1} flexShrink={1} fg={theme.error} wrapMode="none" truncate onMouseUp={handleMessageClick}>
+                          {/* content-based shrinkable：minWidth=0+flexShrink，禁止 flexBasis=0 把短文压成零宽。 */}
+                          <text minWidth={0} flexShrink={1} fg={theme.error} wrapMode="none" truncate onMouseUp={handleMessageClick}>
                             {message()}
                           </text>
-                          <text flexShrink={0} fg={theme.textMuted} wrapMode="none" onMouseUp={handleMessageClick}>
-                            details
+                          {/* 括号化红色入口与错误同色，既短又保持“属于诊断”的视觉归属。 */}
+                          <text flexShrink={0} fg={theme.error} wrapMode="none" onMouseUp={handleMessageClick}>
+                            (details)
                           </text>
                         </box>
                         <text flexShrink={0} fg={theme.error} wrapMode="none">

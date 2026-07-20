@@ -121,16 +121,26 @@ describe("prompt voice input", () => {
     expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400)).toBe("Transcribing voice...")
   })
 
-  // 主 Prompt 的底栏需要和文件、命令提示共享 75 列，使用完整文案会挤压成多行。
-  // compact 只改变该消费者的展示，不得改变 DialogPrompt / QuestionPrompt 的默认契约。
+  // 三面板统一 short profile：主 Prompt / DialogPrompt / QuestionPrompt 共用 compact 文案。
   // recording 仍保留 stop 快捷键，缩短阶段词不能牺牲用户如何停止录音的信息。
   // 固定 now 继续验证计时值，避免 compact 分支绕过原有录音时钟。
-  test("formats compact main Prompt voice status without losing the stop shortcut", () => {
+  test("formats compact shared voice status without losing the stop shortcut", () => {
     const compact = { compact: true }
     expect(voiceInputStatusText({ type: "starting" }, "alt+v", 4_400, compact)).toBe("Starting...")
     expect(voiceInputStatusText({ type: "recording", startedAt: 1_000 }, "alt+v", 4_400, compact)).toBe("Rec 00:03 · alt+v stop")
     expect(voiceInputStatusText({ type: "stopping" }, "alt+v", 4_400, compact)).toBe("Saving...")
     expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400, compact)).toBe("Transcribing...")
+  })
+
+  // INV-01 硬门禁：formatter 双 profile 不能证明 call-site 选择；任一 consumer 漏传 compact 必须失败。
+  // 完整挂载 Question/Dialog 生命周期成本过高，因此对生产 call-site 源码做 fail-capable 契约断言。
+  test("DialogPrompt and QuestionPrompt call sites select the compact voice profile", async () => {
+    const root = path.resolve(import.meta.dir, "../../../src/cli/cmd/tui")
+    const dialogSource = await Bun.file(path.join(root, "ui/dialog-prompt.tsx")).text()
+    const questionSource = await Bun.file(path.join(root, "routes/session/question.tsx")).text()
+    // 必须同时包含 voiceInputStatusText 调用与 compact: true，防止只写注释或死代码。
+    expect(dialogSource).toMatch(/voiceInputStatusText\([\s\S]*?compact:\s*true/)
+    expect(questionSource).toMatch(/voiceInputStatusText\([\s\S]*?compact:\s*true/)
   })
 
   // createRefreshClock 是三处组件（主 Prompt / QuestionPrompt / DialogPrompt）录音计时器走数的

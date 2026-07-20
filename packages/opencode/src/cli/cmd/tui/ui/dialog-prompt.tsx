@@ -163,7 +163,10 @@ export function DialogPrompt(props: DialogPromptProps) {
                 <text fg={theme.error}>●</text>
               </Show>
               <text fg={theme.accent}>
-                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now())}
+                {/* compact 与主 Prompt 统一 short profile；生命周期/快捷键仍由本面板 footer 承载。 */}
+                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now(), {
+                  compact: true,
+                })}
               </text>
             </box>
           </Show>

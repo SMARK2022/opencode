@@ -579,7 +579,10 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
                 <text fg={theme.error}>●</text>
               </Show>
               <text fg={theme.accent}>
-                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now())}
+                {/* compact 与主 Prompt 统一 short profile；select/submit/esc 等外围控件保持面板本地布局。 */}
+                {PromptVoiceInput.voiceInputStatusText(voiceInputStatus(), voiceShortcut() || voiceShortcutFallback, now(), {
+                  compact: true,
+                })}
               </text>
             </box>
           </Show>
