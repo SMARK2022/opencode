@@ -118,6 +118,21 @@ export function formatCompactionClearedNotice() {
   return formatNotice({ type: "compaction_cleared", source: "tool_output", reason: "old_result_pruned" })
 }
 
+// task 工具：模型传了无法解析为已有 Session 的 task_id 时，仍新建任务但用 notice 标明独立上下文。
+// provided 走 attribute escape，避免引号/尖括号破坏 <opencode_notice> 骨架。
+export function formatTaskIdNotice(input: { provided: string }) {
+  // severity=warning：任务已成功创建，但模型应改用返回的合法 task_id 继续
+  return formatNotice({
+    type: "task_id",
+    source: "task",
+    severity: "warning",
+    reason: "invalid_provided",
+    provided: input.provided,
+    // action 固定 created_new，避免与 resume 语义混淆
+    action: "created_new",
+  })
+}
+
 function formatNotice(input: Notice) {
   return `<opencode_notice ${Object.entries(input)
     .flatMap(([key, value]) => (value === undefined || value === "" ? [] : [`${key}="${escapeAttribute(String(value))}"`]))
