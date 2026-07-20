@@ -248,14 +248,18 @@ function color(theme: ReturnType<typeof useTheme>["theme"], name: ContextCategor
 
 // 符号补充颜色辨识；输入与工具定义共享颜色时仍须有不同标记。
 function categoryMarker(name: string) {
+  // 新 mass 类别必须有独立 marker，否则列表与网格图例无法区分 Attachments/Unaccounted。
   if (name === "System prompt") return "◆"
   if (name === "Instructions") return "◇"
   if (name === "Skills") return "●"
   if (name === "Tool definitions") return "◦"
   if (name === "User Messages") return "▰"
   if (name === "Tool Results") return "▾"
+  if (name === "Attachments") return "▣"
   if (name === "Assistant Messages") return "▱"
   if (name === "Tool Calls") return "▴"
+  if (name === "Pending") return "◌"
+  if (name === "Unaccounted") return "×"
   if (name === "Free space") return "·"
   return "×"
 }
@@ -324,23 +328,28 @@ function CategoryList(props: { data: ContextUsageData }) {
   // 数值列只截断展示文本，超窗口百分比仍保留大于 100% 的实际估算。
   const valueWidth = 14
   // 无 provider reserve 时整项不存在，按分类过滤而非补一个看似有测量依据的零值。
+  // tokens===0 不进列表，避免 Attachments 等零值噪音；网格 weights 仍可含零（waterline 为 no-op）。
   const groups = createMemo(() => [
     {
       title: "Prompt",
-      categories: props.data.categories.filter((item) =>
-        ["System prompt", "Instructions", "Skills", "Tool definitions"].includes(item.name),
+      categories: props.data.categories.filter(
+        (item) =>
+          item.tokens > 0 && ["System prompt", "Instructions", "Skills", "Tool definitions"].includes(item.name),
       ),
     },
     {
       title: "Conversation",
-      categories: props.data.categories.filter((item) =>
-        ["User Messages", "Tool Results", "Assistant Messages", "Tool Calls"].includes(item.name),
+      // 附件与待上传结果等额拆桶，列表与网格使用同一组类别。
+      categories: props.data.categories.filter(
+        (item) =>
+          item.tokens > 0 &&
+          ["User Messages", "Tool Results", "Attachments", "Assistant Messages", "Tool Calls", "Pending"].includes(item.name),
       ),
     },
     {
       title: "Window",
-      categories: props.data.categories.filter((item) =>
-        ["Free space", "Model reserve", "Autocompact buffer"].includes(item.name),
+      categories: props.data.categories.filter(
+        (item) => item.tokens > 0 && ["Unaccounted", "Free space", "Model reserve", "Autocompact buffer"].includes(item.name),
       ),
     },
   ].filter((group) => group.categories.length > 0))
