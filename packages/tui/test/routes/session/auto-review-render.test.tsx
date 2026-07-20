@@ -5,7 +5,7 @@ import { autoReviewLabel, autoReviewMetadata, toolDisplay } from "../../../src/r
 import { sessionMessageContentWidth } from "../../../src/routes/session/layout"
 import { testRender, useRenderer } from "@opentui/solid"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
-import { onCleanup } from "solid-js"
+import { createEffect, onCleanup } from "solid-js"
 import type { AssistantMessage, Part, UserMessage } from "@opencode-ai/sdk/v2"
 import { tmpdir } from "../../fixture/fixture"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
@@ -26,7 +26,7 @@ import { ProjectProvider } from "../../../src/context/project"
 import { PromptRefProvider } from "../../../src/context/prompt"
 import { RouteProvider, useRoute } from "../../../src/context/route"
 import { SDKProvider } from "../../../src/context/sdk"
-import { SyncProvider } from "../../../src/context/sync"
+import { SyncProvider, useSync } from "../../../src/context/sync"
 import { ThemeProvider } from "../../../src/context/theme"
 import { TuiConfigProvider } from "../../../src/config"
 import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../src/keymap"
@@ -36,7 +36,6 @@ import { PromptHistoryProvider } from "../../../src/component/prompt/history"
 import { PromptStashProvider } from "../../../src/component/prompt/stash"
 import { DialogProvider } from "../../../src/ui/dialog"
 import { ToastProvider } from "../../../src/ui/toast"
-import { wait } from "../../cli/cmd/tui/sync-fixture"
 
 describe("auto review rendering (#209)", () => {
   test("autoReviewMetadata returns undefined for missing autoReview", () => {
@@ -513,6 +512,9 @@ test.each(["bounded", "boundary", "conceal", "insert", "remove", "show"] as cons
     }
     if (scenario === "bounded" || scenario === "show") {
       if (scenario === "show") {
+        // visibility=true 不预设 disclosure；原 #481 契约要求用户先展开局部 run。
+        await frame("▼ 展开查看完整推理")
+        await clickVisibleText(app, "▼ 展开查看完整推理")
         expect(await frame("short thought 10", "▲ 收起推理")).not.toContain("▼ 展开查看完整推理")
         await clickVisibleText(app, "▲ 收起推理")
       }
@@ -552,7 +554,7 @@ test.each(["bounded", "boundary", "conceal", "insert", "remove", "show"] as cons
       await Bun.sleep(5)
       return false
     }, { maxPasses: 400 })
-  }, { width: 110, height: 48 }, {}, { thinking_mode: scenario === "show" ? "show" : "hide" })
+  }, { width: 110, height: 48 }, {}, { thinking_visibility: true })
 })
 
 test.each(["glob", "grep"] as const)("completed partial %s remains visibly incomplete with details off", async (tool) => {
@@ -589,11 +591,19 @@ async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, tex
 
 // 没有已排队的渲染不等于事件合并定时器已完成，等待可观察帧并持续推进原生绘制。
 async function waitForReviewFrame(app: Awaited<ReturnType<typeof testRender>>, predicate: (frame: string) => Promise<boolean>, options: { maxPasses: number }) {
-  for (let pass = 0; pass < options.maxPasses; pass++) {
+  const start = Date.now()
+  let passes = 0
+  let frame = ""
+  while (Date.now() - start < 5_000) {
+    passes++
     await app.renderOnce()
-    if (await predicate(app.captureCharFrame())) return
+    frame = app.captureCharFrame()
+    if (await predicate(frame)) return
+    await Promise.resolve()
+    await new Promise((resolve) => process.nextTick(resolve))
+    await new Promise((resolve) => setTimeout(resolve, 0))
   }
-  throw new Error(`Expected session frame did not appear:\n${app.captureCharFrame()}`)
+  throw new Error(`Expected session frame did not appear after ${Date.now() - start}ms (${passes} passes, prior budget ${options.maxPasses}):\n${frame}`)
 }
 
 async function withRenderedReview(
@@ -623,12 +633,21 @@ async function withRenderedReview(
     }
     if (url.pathname.startsWith("/session/")) return json([])
   }, events)
-  const observed: { route?: ReturnType<typeof useRoute> } = {}
-  const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} />, {
-    width: dimensions.width ?? 110, height: dimensions.height ?? 56, footerHeight: 0, screenMode: "alternate-screen",
+  const messageIDs = messages.map((message) => message.info.id)
+  const observed: { route?: ReturnType<typeof useRoute>; syncReady: boolean } = { syncReady: false }
+  const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} messageIDs={messageIDs} onSyncReady={() => { observed.syncReady = true }} />, {
+    width: dimensions.width ?? 110, height: dimensions.height ?? 56, footerHeight: 0, screenMode: "alternate-screen", useThread: false,
   })
   try {
-    await wait(() => Boolean(observed.route))
+    // 根挂载不代表 Session transcript 已入库；单循环成功即退出，不留下并行 loser 绘制。
+    const syncDeadline = Date.now() + 10_000
+    while (!observed.syncReady) {
+      if (Date.now() >= syncDeadline) throw new Error(`session sync data missing: ${sessionID}, ${messageIDs.join(",")}`)
+      await app.renderOnce()
+      await Promise.resolve()
+      await new Promise((resolve) => process.nextTick(resolve))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
     if (!observed.route) throw new Error("review route was not mounted")
     await run(app, observed.route, events.emit)
   } finally {
@@ -640,6 +659,8 @@ function ReviewHarness(props: {
   state: string
   fetch: typeof globalThis.fetch
   events: ReturnType<typeof createEventSource>["source"]
+  messageIDs: string[]
+  onSyncReady: () => void
   observe: (route: ReturnType<typeof useRoute>) => void
 }) {
   const renderer = useRenderer()
@@ -658,7 +679,7 @@ function ReviewHarness(props: {
                   <ProjectProvider><PermissionProvider><LocationProvider><DataProvider><SyncProvider>
                     <ThemeProvider mode="dark"><LocalProvider><PromptStashProvider><DialogProvider>
                       <FrecencyProvider><PromptHistoryProvider><PromptRefProvider><EditorContextProvider>
-                        <ReviewProbe observe={props.observe} />
+                        <ReviewProbe observe={props.observe} messageIDs={props.messageIDs} onSyncReady={props.onSyncReady} />
                       </EditorContextProvider></PromptRefProvider></PromptHistoryProvider></FrecencyProvider>
                     </DialogProvider></PromptStashProvider></LocalProvider></ThemeProvider>
                   </SyncProvider></DataProvider></LocationProvider></PermissionProvider></ProjectProvider>
@@ -672,8 +693,18 @@ function ReviewHarness(props: {
   )
 }
 
-function ReviewProbe(props: { observe: (route: ReturnType<typeof useRoute>) => void }) {
+function ReviewProbe(props: { observe: (route: ReturnType<typeof useRoute>) => void; messageIDs: string[]; onSyncReady: () => void }) {
+  const sync = useSync()
   props.observe(useRoute())
+  let fired = false
+  // 观察公开 store 的初始 Session 消息/part 数组，子会话仅在真实导航后由既有路径加载。
+  createEffect(() => {
+    if (fired || !sync.session.get(sessionID)) return
+    const infos = sync.data.message[sessionID]
+    if (!infos || props.messageIDs.some((id) => !infos.some((info) => info.id === id) || sync.data.part[id] === undefined)) return
+    fired = true
+    props.onSyncReady()
+  })
   return <Session />
 }
 
@@ -820,14 +851,16 @@ test.each(["short", "long"] as const)("streaming reasoning defaults to stable co
       await waitForReviewFrame(app, async (value) => { if (value.includes(text)) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
       return app.captureCharFrame()
     }
-    // 首个可见正文帧已带入口，不能等到跨过五行后才切换裁剪模式。
+    // #481：首个短正文没有虚假 overflow；先点短正文也不能预写后续 expanded。
     const initial = await frame("short stream thought")
-    expect(initial).toContain("▼ 展开查看完整推理")
-    expect(initial.split("\n").filter((line) => line.includes("▼ 展开查看完整推理"))).toHaveLength(1)
+    expect(initial).not.toContain("▼ 展开查看完整推理")
+    expect(initial.split("\n").filter((line) => line.includes("▼ 展开查看完整推理"))).toHaveLength(0)
+    // 再增长仍受共享五行预算，不能以短内容点击绕过默认收缩。
+    await clickVisibleText(app, "short stream thought")
     emit({ directory, project: "proj_test", payload: { id: "evt_default_grow", type: "message.part.delta", properties: { sessionID, messageID, partID: source.id, field: "text", delta: suffix } } })
     const grown = await frame("second stream line")
-    expect(grown).toContain("▼ 展开查看完整推理")
-    if (scenario === "long") expect(grown).not.toContain("STREAM_TAIL")
+    if (scenario === "short") expect(grown).not.toContain("▼ 展开查看完整推理")
+    if (scenario === "long") expect(await frame("▼ 展开查看完整推理")).not.toContain("STREAM_TAIL")
     const body = app.renderer.root.findDescendantById(`text-${source.id}`)
     expect(body?.parent?.parent?.height).toBeLessThanOrEqual(5)
     // 父Message仍pending，只以原始Part的end解除流式guard。
@@ -848,5 +881,5 @@ test.each(["short", "long"] as const)("streaming reasoning defaults to stable co
     expect(app.captureCharFrame()).not.toContain("STREAM_TAIL")
     await clickVisibleText(app, "▼ 展开查看完整推理")
     expect(await frame("STREAM_TAIL")).toContain("STREAM_TAIL")
-  }, { width: 80, height: 48 }, {}, { thinking_mode: "hide", sidebar: "hide" })
+  }, { width: 80, height: 48 }, {}, { thinking_visibility: true, sidebar: "hide" })
 })
