@@ -4287,12 +4287,12 @@ describe("SessionRunnerLLM", () => {
         },
         { type: "assistant", finish: "stop", content: [{ type: "text", id: "text-after-error", text: "Recovered" }] },
       ])
-      // 第一轮错误已持久化；两个新step继续同工具失败才触发第三次错误审批。
+      // 不同输入的跨turn失败是合法探索，不能再由独立计数Map触发审批。
       const failedTurn = (id: string, attempt: number) => [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id, name: "missing", input: { attempt } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })]
       responses = [failedTurn("error-two", 2), failedTurn("error-three", 3), fragmentFixture("text", "error-recovered", ["Recovered again"]).completeEvents]
       yield* session.resume(sessionID)
-      expect(doomAssertions).toMatchObject([{ action: "doom_loop", resources: ["missing"], metadata: { tool: "missing", consecutiveErrors: 3 } }])
-      // 六个不同输入排除独立的同输入doom-loop，只核对同一助手的失败边界。
+      expect(doomAssertions).toEqual([])
+      // 并行不同输入同样不满足AND；仍断言全部失败结果实际发布。
       const failedBatch = (prefix: string) => [
         LLMEvent.stepStart({ index: 0 }),
         ...Array.from({ length: 6 }, (_, index) => LLMEvent.toolCall({ id: `${prefix}-${index}`, name: "missing", input: { prefix, index } })),
@@ -4308,22 +4308,21 @@ describe("SessionRunnerLLM", () => {
       )
       expect(parallelErrors).toHaveLength(6)
       expect(parallelErrors.every(part => part.type === "tool" && part.state.status === "error")).toBe(true)
-      // 新消息才递增；第三次触发后仍保留其身份，后面五个失败不能重复审批。
+      // 跨消息混合不同输入仍不得触发；不把不同参数的失败只按工具名累计。
       responses = [failedTurn("parallel-next", 4), failedBatch("threshold-errors"), fragmentFixture("text", "threshold-recovered", ["Changed strategy"]).completeEvents]
       yield* session.resume(sessionID)
-      // 实际六个终态都已发布，断言一次审批也覆盖触发后同批剩余结算。
-      expect(doomAssertions).toHaveLength(1)
-      expect(doomAssertions).toMatchObject([{ action: "doom_loop", resources: ["missing"], metadata: { tool: "missing", consecutiveErrors: 3 } }])
+      // 只改变旧OR预期，真实多工具终态与后续恢复断言保持。
+      expect(doomAssertions).toEqual([])
       doomAssertions.length = 0
       responses = [
         ...[1, 2].map(attempt => [
           LLMEvent.stepStart({ index: 0 }),
-          LLMEvent.toolCall({ id: `echo-invalid-${attempt}`, name: "echo", input: { attempt } }),
+          LLMEvent.toolCall({ id: `echo-invalid-${attempt}`, name: "echo", input: { attempt: 1 } }),
           LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
           LLMEvent.finish({ reason: "tool-calls" }),
         ]),
         [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id: "echo-reset", name: "echo", input: { text: "reset" } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })],
-        [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id: "echo-after-reset", name: "echo", input: { attempt: 3 } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })],
+        [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id: "echo-after-reset", name: "echo", input: { attempt: 1 } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })],
         fragmentFixture("text", "reset-recovered", ["Recovered after reset"]).completeEvents,
       ]
       yield* session.resume(sessionID)
@@ -4336,8 +4335,29 @@ describe("SessionRunnerLLM", () => {
         fragmentFixture("text", "loop-recovered", ["Changed strategy"]).completeEvents,
       ]
       yield* session.resume(sessionID)
-      expect(doomAssertions).toMatchObject([{ action: "doom_loop", resources: ["echo"], metadata: { tool: "echo", input: { text: "same" } } }])
+      expect(doomAssertions).toEqual([])
+
+      // 同参1+1+1跨三个助手，第3次实际失败才审批；不靠在同一消息堆三条伪造窗口。
+      responses = [failedTurn("same-one", 0), failedTurn("same-two", 0), failedTurn("same-three", 0),
+        fragmentFixture("text", "same-recovered", ["Changed strategy"]).completeEvents]
+      yield* session.resume(sessionID)
       expect(doomAssertions).toHaveLength(1)
+      expect(doomAssertions).toMatchObject([{ action: "doom_loop", resources: ["missing"], metadata: { tool: "missing", input: { attempt: 0 }, consecutiveErrors: 3 } }])
+      doomAssertions.length = 0
+      // provider的tool-error与随后重复error-result只产生一个已接受终态凭证。
+      const remoteFailure = (id: string) => [
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.toolCall({ id, name: "remote", input: { same: true }, providerExecuted: true }),
+        LLMEvent.toolError({ id, name: "remote", message: "failed" }),
+        LLMEvent.toolResult({ id, name: "remote", result: { type: "error", value: "failed" }, providerExecuted: true }),
+        LLMEvent.stepFinish({ index: 0, reason: "stop" }), LLMEvent.finish({ reason: "stop" }),
+      ]
+      for (let attempt = 0; attempt < 3; attempt++) {
+        responses = [remoteFailure(`remote-${attempt}`)]
+        yield* session.resume(sessionID)
+        expect(doomAssertions).toHaveLength(attempt === 2 ? 1 : 0)
+      }
+      expect(doomAssertions).toMatchObject([{ action: "doom_loop", resources: ["remote"], metadata: { tool: "remote", input: { same: true }, consecutiveErrors: 3 } }])
     }),
   )
 
