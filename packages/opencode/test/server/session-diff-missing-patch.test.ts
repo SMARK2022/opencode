@@ -4,11 +4,11 @@
  * the response was Schema-encoded against `Snapshot.FileDiff` with
  * `patch: Schema.String` (required), so any session whose stored
  * `summary_diffs` had a row without `patch` returned HTTP 400 and the
- * session never loaded. Legacy session-level diffs are no longer surfaced,
- * but the endpoint remains compatible and must still return successfully.
+ * session never loaded. SMARK 保留旧缓存作为冷摘要的迁移种子，
+ * 缺少 patch 的有效文件统计仍应返回。
  *
  * This test inserts a session row with a missing-patch diff entry and
- * asserts that GET /session/<id>/diff returns 200 with empty data.
+ * 验证 GET /session/<id>/diff 返回 200 并保留原文件统计。
  */
 import { afterEach, describe, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -41,7 +41,7 @@ const withSession = (input?: Parameters<Session.Interface["create"]>[0]) =>
 
 describe("session diff with missing patch (#26574)", () => {
   it.instance(
-    "GET /session/<id>/diff ignores legacy session-level diff storage",
+    "GET /session/<id>/diff accepts legacy diff seeds without patch text",
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -60,7 +60,7 @@ describe("session diff with missing patch (#26574)", () => {
         )
 
         expect(response.status).toBe(200)
-        expect(yield* response.json).toEqual([])
+        expect(yield* response.json).toEqual([{ file: "legacy.txt", additions: 1, deletions: 0 }])
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )

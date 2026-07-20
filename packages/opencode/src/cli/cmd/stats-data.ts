@@ -9,12 +9,12 @@ import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core
 // #174：NotFound 变空数组
 // #174：单会话 NotFound 降级为空数组，不中断整批
 // #174：单会话缺失降级为空，不中断整批
-import { NotFoundError } from "@/storage/storage"
 import { Database } from "@opencode-ai/core/database/database"
-import { eq, sql, gte } from "drizzle-orm"
+import { and, gte, inArray, sql } from "drizzle-orm"
 // #174：SessionTable 只用于枚举，不在此写用量
-import { SessionTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
+import { MessageTable, PartTable, SessionTable, SessionMessageTable, type PartColdStats } from "@opencode-ai/core/session/sql"
 import { SessionMessage } from "@opencode-ai/core/session/message"
+import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 import type { Project } from "@/project/project"
 // #483：Project 身份读取——project group 的 label/path 来自存储行，不再用裸 ID 展示
 import { ProjectTable } from "@opencode-ai/core/project/sql"
@@ -565,6 +565,50 @@ const statusCounts = (status: string, requests: number) => ({
 // #174：aggregateSession 生成只读 StatsReport 快照
 
 // #176：工具上下文事件（按 assistant 时刻归因）
+type StatsToolPart = Extract<PartColdStats, { type: "tool" }> & {
+  tool: string
+  status: "pending" | "running" | "completed" | "error"
+  start?: number
+  end?: number
+}
+
+type StatsStepPart = Extract<PartColdStats, { type: "step-finish" }>
+type StatsPart = StatsToolPart | StatsStepPart
+
+type StatsMessage =
+  | { id: MessageID; time: number; role: "user"; parts: StatsPart[] }
+  | {
+      id: MessageID
+      time: number
+      role: "assistant"
+      providerID: string
+      modelID: string
+      parentID?: MessageID
+      agent?: string
+      cost: number
+      tokens: TokenTotals
+      parts: StatsPart[]
+    }
+
+// #0500：内部 scalar snapshot 不导出，公开 StatsReport schema 不因存储优化改变。
+type StatsRows = {
+  // messages 只包含统计需要的 role/time/model/token 与 Tool/Step 标量，不是可回放 transcript。
+  // 空 Session 显式表现为空数组，aggregate 不需要通过 NotFound fallback 合成成功。
+  messages: Map<SessionID, StatsMessage[]>
+  // Part 标量已由 ColdStorage 验证，聚合层不再理解 pack/ref/key 或 codec。
+  // requests 保留既有 attribution rows，cold projection 不成为新的 usage 权威。
+  requests: Map<SessionID, (typeof RequestUsageTable.$inferSelect)[]>
+  // loader 一次建立三类 rows，所有透视表基于同一批 DB 事实计算。
+  // 三个 Map 都以已过滤 SessionID 为 key，跨项目数据不能在聚合阶段误关联。
+  assistants: Map<SessionID, (typeof RequestUsageAssistantTable.$inferSelect)[]>
+}
+
+function append<K, V>(map: Map<K, V[]>, key: K, value: V) {
+  const values = map.get(key)
+  if (values) values.push(value)
+  else map.set(key, [value])
+}
+
 type ToolUsageEvent = {
   time: number
   sessionID: SessionID
@@ -659,35 +703,12 @@ const addToolCall = (map: Map<string, ToolCallAttribution>, call: ToolCallAttrib
   map.set(key, item)
 }
 
-// #176：tip ToolPart 状态机上的输入字符
-// #176：pending 用 raw，其余序列化 input
-const toolInputChars = (part: { state: { status: string; raw?: string; input?: unknown } }) => {
-  if (part.state.status === "pending") return (part.state.raw ?? "").length
-  try {
-    return JSON.stringify(part.state.input ?? {}).length
-  } catch {
-    return 0
-  }
-}
-
-// #176：完成/错误态输出字符（含附件 URL 长度）
-// #176：completed 含附件 URL 长度
-const toolOutputChars = (part: {
-  state: { status: string; output?: string; error?: string; attachments?: { url: string }[] }
-}) => {
-  if (part.state.status === "completed") {
-    return (part.state.output ?? "").length + (part.state.attachments ?? []).reduce((sum, item) => sum + item.url.length, 0)
-  }
-  if (part.state.status === "error") return (part.state.error ?? "").length
-  return 0
-}
-
-// #483：pending/running 没有完整结束时间；调用仍计数，但不能用当前时间伪造耗时
-const toolDuration = (part: { state: { status: string; time?: { start: number; end?: number } } }) => {
-  if (part.state.status !== "completed" && part.state.status !== "error") return 0
-  const time = part.state.time
-  if (!time) return 0
-  return Math.max(0, (time.end ?? time.start) - time.start)
+// #0500：pending/running 没有完整结束时间；调用仍计数，但不能用当前时间伪造耗时。
+// start/end 来自 cold 投影与 hot state.time 的同值拷贝。
+const toolDuration = (part: StatsToolPart) => {
+  if (part.status !== "completed" && part.status !== "error") return 0
+  if (part.start === undefined || part.end === undefined) return 0
+  return Math.max(0, part.end - part.start)
 }
 
 
@@ -739,56 +760,19 @@ const addComponents = (target: InputComponentTotals, value: InputComponentTotals
 
 // #176：step-finish 上的 input 侧 token（含 cache）
 // #176：step input 含 cache 读写
-const stepInputTokens = (part: any) => {
-  const tokens = part.tokens ?? emptyTokens()
-  return (tokens.input ?? 0) + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0)
-}
-
-// #176：从 step-finish.inputBreakdown 按字符占比分摊到组件 token
-// #176：按字符占比把 input tokens 分到组件
-const componentsFromStep = (part: any): InputComponentTotals => {
-  // #176：无 breakdown 时该 step 贡献 0 组件
-  if (!part?.inputBreakdown || !part?.inputChars) return emptyComponents()
-  const inputTokens = stepInputTokens(part)
-  // #176：media tokens 从文本池剥离
-  const media = part.inputBreakdown.media
-  const attachmentTokens = media?.tokens
-  const textTokens = attachmentTokens === undefined ? inputTokens : Math.max(0, inputTokens - attachmentTokens)
-  const textChars = media
-    ? Math.max(1, part.inputChars - (media.rawChars ?? 0) + (media.textChars ?? 0))
-    : part.inputChars
-  // #176：字符→token 四舍五入分摊
-  const alloc = (chars: number) => Math.round((chars / textChars) * textTokens)
-  const bd = part.inputBreakdown
-  const messages = bd.messages ?? {}
-  return {
-    system: alloc(bd.system ?? 0),
-    instructions: alloc(bd.instructions ?? 0),
-    skills: alloc(bd.skills ?? 0),
-    toolSchemas: alloc(bd.tools ?? 0),
-    userMessages: alloc(messages.userText ?? 0),
-    assistantText: alloc(messages.assistantText ?? 0),
-    reasoning: alloc(messages.reasoning ?? 0),
-    toolCalls: alloc(messages.toolInput ?? 0),
-    toolResults: alloc(messages.toolOutput ?? 0),
-    attachments: attachmentTokens ?? alloc(messages.attachments ?? 0),
-  }
-}
-
-// #176：汇总 assistant 消息内全部 step-finish 组件
-// #176：汇总消息内全部 step-finish
-const componentsFromAssistant = (message: any | undefined) => {
+const componentsFromAssistant = (message: StatsMessage | undefined) => {
   const components = emptyComponents()
   for (const part of message?.parts ?? []) {
     if (part.type !== "step-finish") continue
-    addComponents(components, componentsFromStep(part))
+    // #0500：Step components 直接取 cold_stats 同行投影——聚合层不再重算字符分摊。
+    addComponents(components, part.components)
   }
   return components
 }
 
 const toolEventsFromAssistant = (input: {
   // #176：兼容 Session.WithParts，不绑死 tokens 形状
-  message: any
+  message: StatsMessage | undefined
   chars: Map<string, { inputChars: number; outputChars: number }>
   event: {
     time: number
@@ -833,22 +817,22 @@ const toolEventsFromAssistant = (input: {
 // #180：单遍扫描 assistants，避免每条消息重复 toolCharsByName
 // #180：批量种子入口，语义同逐条但可扩展单遍优化
 const toolEventsFromAssistants = (
-  assistants: Array<{ message: any; event: any }>,
-  visibleMessages: any[],
+  assistants: Array<{ message: StatsMessage | undefined; event: { time: number; sessionID: SessionID; projectID: string; providerID: string; modelID: string; source: string; agent: string; status: string } }>,
+  visibleMessages: StatsMessage[],
 ) => {
-  const ordered = assistants.filter((item) => item.message).toSorted((a, b) => a.message.info.time.created - b.message.info.time.created)
-  const messages = visibleMessages.toSorted((a, b) => a.info.time.created - b.info.time.created)
+  const ordered = assistants.filter((item): item is typeof item & { message: StatsMessage } => !!item.message).toSorted((a, b) => a.message.time - b.message.time)
+  const messages = visibleMessages.toSorted((a, b) => a.time - b.time)
   const chars = new Map<string, { inputChars: number; outputChars: number }>()
   const events: ToolUsageEvent[] = []
   let index = 0
   // 时间游标只消费每条历史工具一次，保留“创建时间不晚于助手”的原归因边界。
   for (const item of ordered) {
-    while (index < messages.length && messages[index].info.time.created <= item.message.info.time.created) {
+    while (index < messages.length && messages[index].time <= item.message.time) {
       for (const part of messages[index].parts) {
         if (part.type !== "tool" || !part.tool) continue
         const weight = chars.get(part.tool) ?? { inputChars: 0, outputChars: 0 }
-        weight.inputChars += toolInputChars(part)
-        weight.outputChars += toolOutputChars(part)
+        weight.inputChars += part.inputChars
+        weight.outputChars += part.outputChars
         chars.set(part.tool, weight)
       }
       index++
@@ -858,58 +842,186 @@ const toolEventsFromAssistants = (
   return events
 }
 
-const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (session: Session.Info, cutoff: number) {
-  const svc = yield* Session.Service
-  const legacyMessages = yield* svc
-    .messages({ sessionID: session.id })
-    .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([])))
-  const { db } = yield* Database.Service
-  const requestUsageRows = yield* db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, session.id)).all().pipe(Effect.orDie)
-  const assistantUsageRows = yield* db.select().from(RequestUsageAssistantTable).where(eq(RequestUsageAssistantTable.session_id, session.id)).all().pipe(Effect.orDie)
-  const legacyIDs = new Set(legacyMessages.map((message) => String(message.info.id)))
-  const projected = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, session.id)).all().pipe(Effect.orDie)
-  // 两种历史共享账本，但原生工具只在 session_message；同 ID 的迁移投影不能重复计数。
-  const nativeMessages = projected.filter((row) => !legacyIDs.has(row.id) && (row.type === "assistant" || row.type === "user") && includeTime(cutoff, row.time_created)).map((row) => {
-    const message = Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type })
-    const assistant = message.type === "assistant" ? message : undefined
-    const estimate = assistant?.inputEstimate
-    return {
-      info: {
-        id: MessageID.make(row.id), role: assistant ? "assistant" as const : "user" as const,
-        time: { created: row.time_created }, tokens: assistant?.tokens ?? emptyTokens(), cost: assistant?.cost ?? 0,
-        // 精确账本关联用于既有去重；无记录时不猜测相邻请求或模型。
-        parentID: assistantUsageRows.find((usage) => usage.assistant_message_id === MessageID.make(row.id))?.request_id,
-        modelID: assistant?.model.id, providerID: assistant?.model.providerID,
-      },
-      parts: [
-        ...(assistant?.content ?? []).flatMap((part) => part.type !== "tool" ? [] : [{
-          type: "tool" as const, tool: part.name, state: {
-            status: part.state.status, input: part.state.input,
-            // 原生时间经Schema解码为DateTime，在此统一成旧投影的毫秒契约。
-            time: {
+// #0500：json_extract 的 NULL/类型漂移统一收敛为有限数值，防止 NaN 坐标进入图表。
+const finiteStat = (value: number | undefined) => (typeof value === "number" && Number.isFinite(value) ? value : 0)
+
+// #0500：Stats 读取 selected Session 的 scalar projection，而不是调用 transcript hydration。
+// Message SELECT 明确排除 user summary.diffs；Part 只读取 Tool/StepFinish，避免把无关 archive 搬入 JS。
+const loadStatsRows = (sessionIDs: SessionID[], cutoff: number) =>
+  Effect.gen(function* () {
+    const database = yield* Database.Service
+    return yield* Database.withSync(database, (sync): StatsRows => {
+      // 2000-ID chunk 与 maintenance 上限一致，并绕开 SQLite variable 数量限制。
+      const batches = sessionIDs.flatMap((_, index) =>
+        index % ColdStorage.DEFAULT_BATCH_SIZE === 0
+          ? [sessionIDs.slice(index, index + ColdStorage.DEFAULT_BATCH_SIZE)]
+          : [],
+      )
+      // SQLite 只提取 Message 标量，大型 summary.diffs 不进入 JavaScript heap。
+      const messageRows = batches.flatMap((batch) =>
+        sync
+          .select({
+            id: MessageTable.id,
+            sessionID: MessageTable.session_id,
+            time: MessageTable.time_created,
+            role: sql<string>`json_extract(${MessageTable.data}, '$.role')`,
+            parentID: sql<string | null>`json_extract(${MessageTable.data}, '$.parentID')`,
+            providerID: sql<string | null>`json_extract(${MessageTable.data}, '$.providerID')`,
+            modelID: sql<string | null>`json_extract(${MessageTable.data}, '$.modelID')`,
+            agent: sql<string | null>`json_extract(${MessageTable.data}, '$.agent')`,
+            cost: sql<number | null>`json_extract(${MessageTable.data}, '$.cost')`,
+            tokensInput: sql<number | null>`json_extract(${MessageTable.data}, '$.tokens.input')`,
+            tokensOutput: sql<number | null>`json_extract(${MessageTable.data}, '$.tokens.output')`,
+            tokensReasoning: sql<number | null>`json_extract(${MessageTable.data}, '$.tokens.reasoning')`,
+            tokensCacheRead: sql<number | null>`json_extract(${MessageTable.data}, '$.tokens.cache.read')`,
+            tokensCacheWrite: sql<number | null>`json_extract(${MessageTable.data}, '$.tokens.cache.write')`,
+            tokensTotal: sql<number | null>`json_extract(${MessageTable.data}, '$.tokens.total')`,
+          })
+          .from(MessageTable)
+          .where(inArray(MessageTable.session_id, batch))
+          .all(),
+      )
+      // Part query 保留 Tool name/status/time 与 Step tokens 这些既有 hot 统计输入。
+      const partRows = batches.flatMap((batch) =>
+        sync
+          .select()
+          .from(PartTable)
+          .where(
+            and(
+              inArray(PartTable.session_id, batch),
+              sql`json_extract(${PartTable.data}, '$.type') in ('tool', 'step-finish')`,
+            ),
+          )
+          .orderBy(PartTable.message_id, PartTable.id)
+          .all(),
+      )
+      // v2 读同行投影，v1 grouped decode，hot 现场计算；三者复用 ColdStorage 公式。
+      const projections = ColdStorage.inspectPartStats(sync, partRows)
+      const parts = new Map<MessageID, StatsPart[]>()
+      partRows.forEach((row, index) => {
+        // discriminator 不匹配立即失败，不能丢弃异常 Part 后返回不完整报告。
+        const projection = projections[index]
+        if (row.data.type === "step-finish") {
+          if (projection?.type !== "step-finish") throw new Error("Stats Step projection is unavailable: " + row.id)
+          append(parts, row.message_id, projection)
+          return
+        }
+        if (row.data.type !== "tool") throw new Error("Stats query returned an unsupported Part: " + row.id)
+        if (projection?.type !== "tool") throw new Error("Stats Tool projection is unavailable: " + row.id)
+        const state = row.data.state
+        append(parts, row.message_id, {
+          ...projection,
+          tool: row.data.tool,
+          status: state.status,
+          ...(state.status === "pending" ? {} : { start: state.time.start }),
+          ...(state.status === "completed" || state.status === "error" ? { end: state.time.end } : {}),
+        })
+      })
+
+      // Parts 只按 message_id 关联，孤立行不会被猜测归属另一个 Assistant。
+      const messages = new Map<SessionID, StatsMessage[]>()
+      for (const row of messageRows) {
+        const messageParts = parts.get(row.id) ?? []
+        if (row.role === "user") {
+          append(messages, row.sessionID, { id: row.id, time: row.time, role: "user", parts: messageParts })
+          continue
+        }
+        if (row.role !== "assistant" || row.providerID === null || row.modelID === null || row.agent === null) {
+          throw new Error("Stats Message projection is invalid: " + row.id)
+        }
+        append(messages, row.sessionID, {
+          id: row.id,
+          time: row.time,
+          role: "assistant",
+          providerID: row.providerID,
+          modelID: row.modelID,
+          agent: row.agent,
+          ...(row.parentID ? { parentID: MessageID.make(row.parentID) } : {}),
+          cost: finiteStat(row.cost ?? undefined),
+          tokens: normalizeTokens({
+            input: finiteStat(row.tokensInput ?? undefined),
+            output: finiteStat(row.tokensOutput ?? undefined),
+            reasoning: finiteStat(row.tokensReasoning ?? undefined),
+            cache: {
+              read: finiteStat(row.tokensCacheRead ?? undefined),
+              write: finiteStat(row.tokensCacheWrite ?? undefined),
+            },
+            ...(row.tokensTotal === null ? {} : { total: row.tokensTotal }),
+          }),
+          parts: messageParts,
+        })
+      }
+      // persisted time 后用 ID 打破同毫秒平局，保持旧 Session.messages chronology。
+      for (const rows of messages.values()) rows.sort((a, b) => a.time - b.time || a.id.localeCompare(b.id))
+
+      // attribution 两表同样分块读取，替代原先每 Session 两次 SQL 的 N+1 往返。
+      const requests = new Map<SessionID, (typeof RequestUsageTable.$inferSelect)[]>()
+      const assistants = new Map<SessionID, (typeof RequestUsageAssistantTable.$inferSelect)[]>()
+      for (const batch of batches) {
+        for (const row of sync.select().from(RequestUsageTable).where(inArray(RequestUsageTable.session_id, batch)).all()) {
+          append(requests, row.session_id, row)
+        }
+        for (const row of sync
+          .select()
+          .from(RequestUsageAssistantTable)
+          .where(inArray(RequestUsageAssistantTable.session_id, batch))
+          .all()) {
+          append(assistants, row.session_id, row)
+        }
+      }
+      // Native沿同一只读冷统计入口取字符投影，身份、模型和精确账本关联仍由原消息承担。
+      const legacyIDs = new Set(messageRows.map((row) => String(row.id)))
+      for (const batch of batches) {
+        const projected = sync.select().from(SessionMessageTable).where(inArray(SessionMessageTable.session_id, batch)).all()
+          .filter(row => !legacyIDs.has(row.id) && (row.type === "assistant" || row.type === "user") && includeTime(cutoff, row.time_created))
+        const nativeStats = ColdStorage.inspectSessionMessageStats(sync, projected)
+        for (const [rowIndex, row] of projected.entries()) {
+          const message = Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type })
+          const id = MessageID.make(row.id)
+          if (message.type !== "assistant") {
+            append(messages, row.session_id, { id, time: row.time_created, role: "user", parts: [] })
+            continue
+          }
+          const parts: StatsPart[] = message.content.flatMap((part, contentIndex): StatsToolPart[] => {
+            if (part.type !== "tool") return []
+            const state = part.state
+            const projection = nativeStats[rowIndex]?.tools[String(contentIndex)]
+            if (!projection) throw new Error("Native Stats Tool projection is unavailable: " + row.id)
+            return [{ version: 1, type: "tool", tool: part.name, status: state.status, ...projection,
               start: DateTime.toEpochMillis(part.time.ran ?? part.time.created),
               end: DateTime.toEpochMillis(part.time.completed ?? part.time.ran ?? part.time.created),
-            },
-            raw: typeof part.state.input === "string" ? part.state.input : undefined,
-            output: part.state.status === "completed" ? part.state.content.filter((item) => item.type === "text").map((item) => item.text).join("\n") : undefined,
-            error: part.state.status === "error" ? part.state.error.message : undefined,
-            attachments: part.state.status === "completed" ? part.state.content.flatMap((item) => item.type === "file" ? [{ url: item.uri }] : []) : [],
-          },
-        }]),
-        ...(estimate?.confirmed ? [{ type: "step-finish" as const, tokens: assistant?.tokens, inputChars: estimate.bodyChars, inputBreakdown: estimate.inputBreakdown }] : []),
-      ],
-    }
+            }]
+          })
+          const estimate = message.inputEstimate
+          const step = estimate?.confirmed ? ColdStorage.projectPartStats({ type: "step-finish", reason: "stop",
+            tokens: normalizeTokens(message.tokens ?? emptyTokens()), cost: message.cost ?? 0, inputChars: estimate.bodyChars, inputBreakdown: estimate.inputBreakdown }) : undefined
+          if (step?.type === "step-finish") parts.push(step)
+          // 同 ID 投影只保留一份；parent 仍从精确账本取得，混合历史不会按相邻时间猜测归属。
+          append(messages, row.session_id, { id, time: row.time_created, role: "assistant", parts,
+            providerID: message.model.providerID, modelID: message.model.id, tokens: normalizeTokens(message.tokens ?? emptyTokens()), cost: message.cost ?? 0,
+            parentID: assistants.get(row.session_id)?.find((usage) => usage.assistant_message_id === id)?.request_id,
+          })
+        }
+      }
+      for (const rows of messages.values()) rows.sort((a, b) => a.time - b.time || a.id.localeCompare(b.id))
+      return { messages, requests, assistants } satisfies StatsRows
+    })
   })
-  const visibleMessages = [...legacyMessages, ...nativeMessages].filter((message) => includeTime(cutoff, message.info.time.created))
+
+// #180：SQL 会话预过滤 + 工具事件单遍生成
+const aggregateSession = (session: Session.Info, cutoff: number, rows: StatsRows) => {
+  // #0500：visibleMessages 来自 loader 的 scalar snapshot——loader 不提前按 model/tool/status 改变分母。
+  const visibleMessages = (rows.messages.get(session.id) ?? []).filter((message) => includeTime(cutoff, message.time))
+  const requestUsageRows = rows.requests.get(session.id) ?? []
+  const assistantUsageRows = rows.assistants.get(session.id) ?? []
   // #483：ToolPart ownership 与 context consumption 在同一次 Message 扫描中建立，避免第二次读取 Session；
   // 两个索引都以原始行为准，cutoff 只影响事件投影不影响 ownership 关联
   const storedRequestsByID = new Map(requestUsageRows.map((row) => [row.request_id, row]))
   const assistantUsageByMessageID = new Map(assistantUsageRows.map((row) => [row.assistant_message_id, row]))
   const toolCalls: ToolCallAttribution[] = []
   for (const message of visibleMessages) {
-    const info = message.info
-    if (info.role !== "assistant") continue
-    const assistant = assistantUsageByMessageID.get(info.id)
+    if (message.role !== "assistant") continue
+    const assistant = assistantUsageByMessageID.get(message.id)
     const request = assistant ? storedRequestsByID.get(assistant.request_id) : undefined
     // #483：有 request 数据却找不到 Assistant row 通常是 fork/cutoff 历史，不能猜测它原属哪个请求；
     // source 三态：assistant-row 归因 > unattributed（有 request 体系但断链）> legacy-message（无 request 体系）
@@ -919,18 +1031,19 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
     const status = assistant ? request?.status ?? assistant.status : requestUsageRows.length > 0 ? "unknown" : "completed"
     for (const part of message.parts) {
       if (part.type !== "tool" || !part.tool) continue
+      // #0500：字符/耗时标量来自 cold 投影；errors 按 status 判定，不再序列化 input/output。
       toolCalls.push({
         toolID: part.tool,
-        modelID: assistant?.model_id ?? (info as { modelID?: string }).modelID ?? "unknown",
-        providerID: assistant?.provider_id ?? (info as { providerID?: string }).providerID ?? "unknown",
-        agent: request?.agent ?? (info as { agent?: string }).agent ?? session.agent ?? "unknown",
+        modelID: assistant?.model_id ?? message.modelID,
+        providerID: assistant?.provider_id ?? message.providerID,
+        agent: request?.agent ?? message.agent ?? session.agent ?? "unknown",
         projectID: session.projectID,
         source,
         status,
         calls: 1,
-        inputChars: toolInputChars(part),
-        outputChars: toolOutputChars(part),
-        errors: part.state.status === "error" ? 1 : 0,
+        inputChars: part.inputChars,
+        outputChars: part.outputChars,
+        errors: part.status === "error" ? 1 : 0,
         durationMs: toolDuration(part),
       })
     }
@@ -939,6 +1052,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
   const breakdownEvents: UsageEvent[] = []
 
   if (requestUsageRows.length > 0) {
+    // #0500：Step components 按 Assistant message ID 关联，不能跨 Assistant 平均再回填模型维度。
 // #174：time_created 过滤 usage
     const requestRows = requestUsageRows.filter((row) => includeTime(cutoff, row.time_created))
     const assistantRows = assistantUsageRows.filter((row) => includeTime(cutoff, row.time_created))
@@ -948,7 +1062,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
       const assistantRequests = new Set(assistantRows.map((row) => row.request_id))
       // #176：构造时精确 join：request_id 直接取 request 维，不做时间/模型猜测
       const requestsByID = new Map(requestRows.map((row) => [row.request_id, row]))
-      const messagesByID = new Map(visibleMessages.map((message) => [message.info.id, message]))
+      const messagesByID = new Map(visibleMessages.map((message) => [message.id, message]))
       const assistantEvents = assistantRows.map((row) => {
         const request = requestsByID.get(row.request_id)
         return {
@@ -1052,16 +1166,16 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
   )
   assistantUsageRows.forEach((row) => fallbackRequests.delete(row.request_id))
   for (const message of visibleMessages) {
-    if (message.info.role !== "assistant") continue
-    if (tracked.has(message.info.id) || (message.info.parentID && fallbackRequests.has(message.info.parentID))) continue
-    const tokens = normalizeTokens(message.info.tokens ?? emptyTokens())
+    if (message.role !== "assistant") continue
+    if (tracked.has(message.id) || (message.parentID && fallbackRequests.has(message.parentID))) continue
+    const tokens = message.tokens
     const event = {
-      time: message.info.time.created,
+      time: message.time,
       sessionID: session.id,
-      providerID: (message.info as { providerID?: string }).providerID ?? "unknown",
-      modelID: (message.info as { modelID?: string }).modelID ?? "unknown",
+      providerID: message.providerID,
+      modelID: message.modelID,
       tokens,
-      cost: message.info.cost ?? 0,
+      cost: message.cost,
       requests: 0,
       assistantCalls: 1,
       // #176：补入的历史助手没有账本明细，组件取消息实况、请求结局计量保持零基。
@@ -1084,8 +1198,9 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
       const item = getToolUsage(toolUsage, part.tool)
       // Called/Progress/Success 覆盖同一 parts 项，统一扫描只计一次调用。
       item.count++
-      item.inputChars += toolInputChars(part)
-      item.outputChars += toolOutputChars(part)
+      // #0500：冷投影标量——hot/v1/v2 共用 ColdStorage 公式（INV-20/26）。
+      item.inputChars += part.inputChars
+      item.outputChars += part.outputChars
     }
   }
 
@@ -1095,7 +1210,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
     const assistantRows = assistantUsageRows.filter((row) => includeTime(cutoff, row.time_created))
     const requestsByID = new Map(requestRows.map((row) => [row.request_id, row]))
     // #180：assistant_message_id → 消息映射，种子在此复用避免二次扫描
-    const messagesByID = new Map(visibleMessages.map((message) => [message.info.id, message]))
+    const messagesByID = new Map(visibleMessages.map((message) => [message.id, message]))
         // #180：先收集 assistant 种子再统一生成事件
     const seeds = assistantRows.map((row) => {
       const request = requestsByID.get(row.request_id)
@@ -1119,15 +1234,15 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
   }
   // #176：工具上下文沿用同一助手覆盖集合，混合历史只补未入账消息。
   const seeds = visibleMessages
-    .filter((message) => message.info.role === "assistant" && !tracked.has(message.info.id) && !(message.info.parentID && fallbackRequests.has(message.info.parentID)))
+    .filter((message): message is Extract<StatsMessage, { role: "assistant" }> => message.role === "assistant" && !tracked.has(message.id) && !(message.parentID && fallbackRequests.has(message.parentID)))
     .map((message) => ({
       message,
       event: {
-        time: message.info.time.created,
+        time: message.time,
         sessionID: session.id,
         projectID: session.projectID,
-        providerID: (message.info as { providerID?: string }).providerID ?? "unknown",
-        modelID: (message.info as { modelID?: string }).modelID ?? "unknown",
+        providerID: message.providerID,
+        modelID: message.modelID,
         source: "legacy-message",
         agent: session.agent ?? "unknown",
         status: "completed",
@@ -1143,8 +1258,9 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
     event.status = event.status ?? "completed"
   }
 
+  // #0500：公共 filters 在 aggregate 后统一执行，loader 不提前按 model/tool/status 改变分母。
   return { session, messageCount: visibleMessages.length, toolUsage, toolEvents, toolCalls, totalEvents, breakdownEvents } satisfies SessionAggregate
-})
+}
 
 // #174：aggregateStats 唯一写路径
 // #174：唯一写 StatsReport 的路径
@@ -1173,12 +1289,11 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
 
 // #174：aggregates 写聚合快照，页面不得再 select
 // #174：aggregates 生成只读 StatsReport 快照
-  const aggregates = yield* Effect.forEach(filteredSessions, (session) => aggregateSession(session, cutoff), {
-// #174：concurrency 保护 SQLite
-// #174：并发明细设上限，降低 SQLite 争用
-// #174：并发明细设上限保护 SQLite
-    concurrency: 20,
-  })
+  // #0500：raw snapshot 一次读取，移除旧 concurrency:20 的 per-session hydration/N+1。
+  const rows = yield* loadStatsRows(filteredSessions.map((session) => session.id), cutoff)
+  // loader/inspect 均无写入，v1 decode 也不会清 owner/ref 或补写 cold_stats。
+  const aggregates = filteredSessions.map((session) => aggregateSession(session, cutoff, rows))
+  // #0500：toolFilter 保持原公开过滤顺序，在完整 Session toolUsage 形成后才筛选。
 
   const total = emptyUsage()
   const daily = new Map<number, DailyUsage>()

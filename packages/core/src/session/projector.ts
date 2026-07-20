@@ -113,6 +113,23 @@ function applyUsage(
     .pipe(Effect.orDie)
 }
 
+// #0500：summary 聚合的可见性来源判定——隐藏行、未闭合 assistant 与非 user 行不构成 diff 源。
+function summaryMessageSource(data: (typeof MessageTable.$inferSelect)["data"]) {
+  if (data.hidden) return false
+  if (data.role === "user") return true
+  return data.time.completed !== undefined
+}
+
+// #0500：只有已完成的 Tool metadata 参与 summary aggregate；其它 part 形态一律不是失效证据。
+function summaryPartSource(data: (typeof PartTable.$inferSelect)["data"] | undefined) {
+  if (!data || data.hidden || data.type !== "tool" || data.state.status !== "completed") return undefined
+  return data.state.metadata
+}
+
+function sameSummaryPart(left: unknown, right: unknown) {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
 function run(db: DatabaseService, event: SessionEvent.Event) {
   return Effect.gen(function* () {
     const ledger = SessionRequestUsage.make(db)
@@ -442,17 +459,35 @@ const layer = Layer.effectDiscard(
         const id = event.data.info.id
         const sessionID = event.data.info.sessionID
         const data = messageData(event.data.info)
+        // #0500：可见/closed 边界变化才失效 aggregate；per-user summary.diffs 只改派生 metadata。
+        // 判定必须用 replacement 前的 owner——隐藏旧行后再检查会漏掉 covered-history dirty witness。
+        const previous = sync.select().from(MessageTable).where(eq(MessageTable.id, id)).get()
+        const moved = previous && previous.session_id !== sessionID
+        const changed =
+          !event.data.summaryOnly &&
+          (previous ? moved || summaryMessageSource(previous.data) !== summaryMessageSource(data) : summaryMessageSource(data))
         // #493：durable event 携带完整业务 Info；replaceMessage 统一清旧 ref 并落库。
+        if (changed && previous && summaryMessageSource(previous.data)) {
+          ColdStorage.invalidateSessionSummaryBefore(sync, previous.session_id, id)
+        }
         ColdStorage.replaceMessage(sync, {
           id,
           session_id: sessionID,
           time_created,
           data,
         })
+        // #0500：per-user summary.diffs 不能让相同 Tool history 的 aggregate 失效（summaryOnly 之外才失效）。
+        if (changed && summaryMessageSource(data)) ColdStorage.invalidateSessionSummaryBefore(sync, sessionID, id)
       }),
     )
     yield* events.project(SessionV1.Event.MessageRemoved, (event) =>
       Effect.gen(function* () {
+        // #0500：删除前先取 owner 行——可见/closed 的被删 Message 是 summary 失效证据。
+        const message = sync
+          .select({ data: MessageTable.data })
+          .from(MessageTable)
+          .where(and(eq(MessageTable.id, event.data.messageID), eq(MessageTable.session_id, event.data.sessionID)))
+          .get()
         const rows = yield* db
           .select()
           .from(PartTable)
@@ -462,6 +497,10 @@ const layer = Layer.effectDiscard(
         for (const row of rows) {
           const previous = usage(row.data)
           if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
+        }
+        // #0500：可见/closed 被删 Message 使其之前窗口的 aggregate 失效。
+        if (message && summaryMessageSource(message.data)) {
+          ColdStorage.invalidateSessionSummaryBefore(sync, event.data.sessionID, event.data.messageID)
         }
         // #493：删除 Message 前释放其自身与级联 Parts 的 cold 引用（RESTRICT FK 要求先清 ref）。
         ColdStorage.releaseMessage(sync, event.data.messageID, event.data.sessionID)
@@ -482,6 +521,11 @@ const layer = Layer.effectDiscard(
           .pipe(Effect.orDie)
         const previous = row && usage(row.data)
         if (previous) yield* applyUsage(db, event.data.sessionID, previous, -1)
+        // #0500：删除前经 inspect 恢复完整 Tool metadata——已完成 Tool 是 summary 失效证据。
+        const restored = row ? ColdStorage.inspectPartRows(sync, [row])[0]?.data : undefined
+        if (summaryPartSource(restored) !== undefined) {
+          ColdStorage.invalidateSessionSummaryBefore(sync, event.data.sessionID, event.data.messageID)
+        }
         // #493：删除 Part 前释放其 cold 引用。
         ColdStorage.releasePart(sync, event.data.partID, event.data.sessionID)
         yield* db
@@ -498,7 +542,17 @@ const layer = Layer.effectDiscard(
         const sessionID = event.data.part.sessionID
         const data = partData(event.data.part)
         const row = yield* db.select().from(PartTable).where(eq(PartTable.id, id)).get().pipe(Effect.orDie)
+        // #0500：completed Tool metadata 变化或跨父级 move 都使两侧 aggregate 失效。
+        const previousPart = row ? ColdStorage.inspectPartRows(sync, [row])[0]?.data : undefined
+        const before = summaryPartSource(previousPart)
+        const after = summaryPartSource(data)
+        const moved = row && (row.session_id !== sessionID || row.message_id !== messageID)
+        const changed = moved || !sameSummaryPart(before, after)
         // #493：usage 差量与完整 Part replacement 位于同一投影；cold update 失败不能只提交统计变化。
+        // #0500：旧父级在 replace 前失效；跨 Session/Message move 还必须在 replace 后失效新父级。
+        if (changed && row && before !== undefined) {
+          ColdStorage.invalidateSessionSummaryBefore(sync, row.session_id, row.message_id)
+        }
         ColdStorage.replacePart(sync, {
           id,
           message_id: messageID,
@@ -506,6 +560,7 @@ const layer = Layer.effectDiscard(
           time_created: event.data.time,
           data,
         })
+        if (changed && after !== undefined) ColdStorage.invalidateSessionSummaryBefore(sync, sessionID, messageID)
         const previous = row && usage(row.data)
         const next = usage(event.data.part)
         if (previous) yield* applyUsage(db, row.session_id, previous, -1)

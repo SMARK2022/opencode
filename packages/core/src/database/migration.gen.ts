@@ -48,6 +48,8 @@ export const migrations = (
     import("./migration/20260726100000_session_goal"),
     import("./migration/20260812100000_goal_continue_on_error"),
     import("./migration/20260901100000_session_goal_integrity"),
+    import("./migration/20260930100000_cold_storage_pack_v2"),
+    import("./migration/20260930100001_native_cold_storage_pack_v2"),
     import("./migration/20261009114905_session_request_usage"),
   ])
 ).map((module) => module.default) satisfies DatabaseMigration.Migration[]

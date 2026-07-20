@@ -8,64 +8,14 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { Snapshot } from "@/snapshot"
 import { InstanceState } from "@/effect/instance-state"
 import { Session } from "./session"
+import { MessageV2 } from "./message-v2"
+// #0500：aggregate 权威与 per-file 归一化移入 SummaryCache——summary 层只剩 seam 编排。
+import { SummaryCache } from "./summary-cache"
 import { SessionID, MessageID } from "./schema"
 import { Config } from "@/config/config"
+import { Storage } from "@/storage/storage"
+import { Database } from "@opencode-ai/core/database/database"
 
-function unquoteGitPath(input: string) {
-  if (!input.startsWith('"')) return input
-  if (!input.endsWith('"')) return input
-  const body = input.slice(1, -1)
-  const bytes: number[] = []
-
-  for (let i = 0; i < body.length; i++) {
-    const char = body[i]!
-    if (char !== "\\") {
-      bytes.push(char.charCodeAt(0))
-      continue
-    }
-
-    const next = body[i + 1]
-    if (!next) {
-      bytes.push("\\".charCodeAt(0))
-      continue
-    }
-
-    if (next >= "0" && next <= "7") {
-      const chunk = body.slice(i + 1, i + 4)
-      const match = chunk.match(/^[0-7]{1,3}/)
-      if (!match) {
-        bytes.push(next.charCodeAt(0))
-        i++
-        continue
-      }
-      bytes.push(parseInt(match[0], 8))
-      i += match[0].length
-      continue
-    }
-
-    const escaped =
-      next === "n"
-        ? "\n"
-        : next === "r"
-          ? "\r"
-          : next === "t"
-            ? "\t"
-            : next === "b"
-              ? "\b"
-              : next === "f"
-                ? "\f"
-                : next === "v"
-                  ? "\v"
-                  : next === "\\" || next === '"'
-                    ? next
-                    : undefined
-
-    bytes.push((escaped ?? next).charCodeAt(0))
-    i++
-  }
-
-  return Buffer.from(bytes).toString()
-}
 
 export interface Interface {
   readonly summarize: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<void>
@@ -82,6 +32,8 @@ const layer = Layer.effect(
     const events = yield* EventV2Bridge.Service
     const nativeMessages = yield* SessionStore.Service
     const config = yield* Config.Service
+    const storage = yield* Storage.Service
+    const database = yield* Database.Service
 
     const computeDiff = Effect.fn("SessionSummary.computeDiff")(function* (input: { messages: SessionV1.WithParts[] }) {
       // 修改文件只按本会话已完成工具的真实metadata归因；整树快照会混入同目录其他会话的改动。
@@ -98,47 +50,64 @@ const layer = Layer.effect(
       sessionID: SessionID
       messageID: MessageID
     }) {
+      if ((yield* config.get()).snapshot === false) return
+      // #0500：prepareDelta 返回 snapshot 上界与上次已提交基线；重活只在 boundary 后进行。
+      const prepared = yield* SummaryCache.prepareDelta({
+        sessionID: input.sessionID,
+        targetMessageID: input.messageID,
+        storage,
+      }).pipe(Effect.provideService(Database.Service, database))
+      // 只取目标 user 与其 assistant children——为一个 turn hydrate 整个 Session 是无意义预热。
+      const messages = prepared.snapshotMaxID
+        ? yield* MessageV2.targetWithAssistantChildren({
+            sessionID: input.sessionID,
+            messageID: input.messageID,
+            throughMessageID: MessageID.make(prepared.snapshotMaxID),
+          }).pipe(Effect.provideService(Database.Service, database))
+        : []
+      const target = messages.find((message) => message.info.id === input.messageID)
+      if (target?.info.role === "user") {
+        const msgDiffs = yield* computeDiff({ messages })
+        target.info.summary = { ...target.info.summary, diffs: msgDiffs }
+        yield* sessions.updateMessageSummary(target.info)
+      }
+      // aggregate 在 per-user metadata 持久化后 CAS 提交；两者共享同一 snapshot 上界，
+      // 但 summary-only update 不改变 Tool history，也不得使旧 ref/cursor 失效。
+      yield* SummaryCache.commit(prepared).pipe(Effect.provideService(Database.Service, database))
+      // cursor-only 提交没有改变 aggregate，既不需要读取旧 payload，也不重复广播/写兼容 mirror。
+      if (prepared.type === "unchanged") return
+      const diffs = prepared.diffs
       yield* sessions.setSummary({
         sessionID: input.sessionID,
         summary: {
-          additions: 0,
-          deletions: 0,
-          files: 0,
+          additions: diffs.reduce((sum, x) => sum + x.additions, 0),
+          deletions: diffs.reduce((sum, x) => sum + x.deletions, 0),
+          files: diffs.length,
         },
       })
-      yield* events.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: [] })
-      if ((yield* config.get()).snapshot === false) return
-      const all = yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)
-      if (!all.length) return
-
-      const messages = all.filter(
-        (m) => m.info.id === input.messageID || (m.info.role === "assistant" && m.info.parentID === input.messageID),
-      )
-      const target = messages.find((m) => m.info.id === input.messageID)
-      if (!target || target.info.role !== "user") return
-      const msgDiffs = yield* computeDiff({ messages })
-      target.info.summary = { ...target.info.summary, diffs: msgDiffs }
-      yield* sessions.updateMessage(target.info)
+      yield* storage.write(["session_diff", input.sessionID], diffs).pipe(Effect.ignore)
+      yield* events.publish(Session.Event.Diff, { sessionID: input.sessionID, diff: diffs })
     })
 
     const diff = Effect.fn("SessionSummary.diff")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {
-      if (!input.messageID) return []
-      // 两代消息分表；按已保存的身份读取Native摘要，不执行工具或解析模型可见文本。
-      const native = yield* nativeMessages.message(SessionMessage.ID.make(input.messageID))
-      if (native?.sessionID === input.sessionID && native.message.type === "user") {
-        return native.message.summary?.diffs.map((item) => ({ ...item })) ?? []
+      if (input.messageID) {
+        // 混合历史按 Message 身份选择持久 owner，精确回合不能退回整个会话的汇总。
+        const native = yield* nativeMessages.message(SessionMessage.ID.make(input.messageID), input.sessionID)
+        if (native) return native.message.type === "user" ? native.message.summary?.diffs.map(item => ({ ...item })) ?? [] : []
+        const legacy = yield* MessageV2.get({ sessionID: input.sessionID, messageID: input.messageID }).pipe(
+          Effect.provideService(Database.Service, database),
+          // 查询不存在或隐藏的回合返回空集合；数据库和冷包故障仍沿原错误路径传播。
+          Effect.catchTag("NotFoundError", () => Effect.succeed(undefined)),
+        )
+        return legacy?.info.role === "user" ? SummaryCache.normalizeDiffPaths(legacy.info.summary?.diffs ?? []) : []
       }
-      const message = (yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).find(
-        (item) => item.info.id === input.messageID,
+      // #0500：DB 权威聚合经 SummaryCache 读取；路径归一化后同步镜像，用户清理后可重建。
+      const diffs = yield* SummaryCache.load({ sessionID: input.sessionID, storage }).pipe(
+        Effect.provideService(Database.Service, database),
       )
-      if (!message || message.info.role !== "user") return []
-      const diffs = message.info.summary?.diffs ?? []
-      return diffs.map((item) => {
-        if (item.file === undefined) return item
-        const file = unquoteGitPath(item.file)
-        if (file === item.file) return item
-        return { ...item, file }
-      })
+      const next = SummaryCache.normalizeDiffPaths(diffs)
+      yield* storage.write(["session_diff", input.sessionID], next).pipe(Effect.ignore)
+      return next
     })
 
     return Service.of({ summarize, diff, computeDiff })
@@ -157,7 +126,7 @@ export const node = LayerNode.make({
   service: Service,
   layer: layer,
   // 两代摘要读取仍使用各自持久消息表，不再为Modified Files构造整树快照。
-  deps: [Session.node, EventV2Bridge.node, Config.node, SessionStore.node],
+  deps: [Session.node, EventV2Bridge.node, Config.node, SessionStore.node, Storage.node, Database.node],
 })
 
 export * as SessionSummary from "./summary"

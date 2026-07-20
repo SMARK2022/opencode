@@ -16,6 +16,8 @@ import eventSourcedSessionInputMigration from "@opencode-ai/core/database/migrat
 import contextEpochAgentMigration from "@opencode-ai/core/database/migration/20260605042240_add_context_epoch_agent"
 import simplifyIntegrationCredentialsMigration from "@opencode-ai/core/database/migration/20260611192811_lush_chimera"
 import simplifySessionInputMigration from "@opencode-ai/core/database/migration/20260622202450_simplify_session_input"
+import coldStoragePackMigration from "@opencode-ai/core/database/migration/20260930100000_cold_storage_pack_v2"
+import nativeColdStoragePackMigration from "@opencode-ai/core/database/migration/20260930100001_native_cold_storage_pack_v2"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -144,6 +146,9 @@ describe("DatabaseMigration", () => {
           ),
         ).toBeUndefined()
         expect(yield* db.get(sql`SELECT count(*) as count FROM migration`)).toEqual({ count: migrations.length })
+        // fresh DDL与旧库ALTER必须同时具有Native pack列，不能只靠空库跳过迁移体。
+        expect(yield* db.all(sql`SELECT name FROM pragma_table_info('session_message') WHERE name IN ('cold_key', 'cold_stats') ORDER BY name`))
+          .toEqual([{ name: "cold_key" }, { name: "cold_stats" }])
         expect(
           yield* db.all(
             sql`SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('event_aggregate_seq_idx', 'event_aggregate_type_seq_idx', 'session_input_session_pending_seq_idx', 'session_input_session_pending_delivery_seq_idx', 'session_input_session_admitted_seq_idx', 'session_input_session_promoted_seq_idx', 'session_message_session_idx', 'session_message_session_type_idx', 'session_message_session_seq_idx', 'session_message_session_type_seq_idx', 'session_message_session_time_created_id_idx') ORDER BY name`,
@@ -160,6 +165,24 @@ describe("DatabaseMigration", () => {
         ])
       }),
     )
+    await run(Effect.gen(function* () {
+      const db = yield* makeDb
+      // 仅建立本次迁移读取的既有表，真实SQLite执行全部ALTER并验证原Native行不变。
+      yield* db.run(sql`CREATE TABLE cold_storage (hash text PRIMARY KEY)`)
+      yield* db.run(sql`CREATE TABLE message (id text PRIMARY KEY)`)
+      yield* db.run(sql`CREATE TABLE part (id text PRIMARY KEY)`)
+      yield* db.run(sql`CREATE TABLE session (id text PRIMARY KEY)`)
+      yield* db.run(sql`CREATE TABLE session_message (id text PRIMARY KEY, data text NOT NULL, cold_ref text REFERENCES cold_storage(hash))`)
+      yield* db.run(sql`INSERT INTO cold_storage (hash) VALUES ('legacy-ref')`)
+      yield* db.run(sql`INSERT INTO session_message (id, data, cold_ref) VALUES ('msg_legacy', '{"content":[]}', 'legacy-ref')`)
+      yield* DatabaseMigration.applyOnly(db, [coldStoragePackMigration, nativeColdStoragePackMigration])
+      expect(yield* db.get(sql`SELECT id, data, cold_ref, cold_key, cold_stats FROM session_message`))
+        .toEqual({ id: "msg_legacy", data: '{"content":[]}', cold_ref: "legacy-ref", cold_key: null, cold_stats: null })
+      expect(yield* db.all(sql`SELECT name FROM pragma_table_info('session_message') WHERE name IN ('cold_key', 'cold_stats') ORDER BY name`))
+        .toEqual([{ name: "cold_key" }, { name: "cold_stats" }])
+      expect(yield* db.get(sql`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'session_summary_ref_idx'`))
+        .toEqual({ name: "session_summary_ref_idx" })
+    }))
   })
 
   test("rejects a non-empty database without a session table", async () => {

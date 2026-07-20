@@ -220,6 +220,7 @@ export default {
           \`time_updated\` integer NOT NULL,
           \`data\` text NOT NULL,
           \`cold_ref\` text,
+          \`cold_key\` blob,
           CONSTRAINT \`fk_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE,
           CONSTRAINT \`fk_message_cold_ref_cold_storage_hash_fk\` FOREIGN KEY (\`cold_ref\`) REFERENCES \`cold_storage\`(\`hash\`) ON DELETE RESTRICT
         );
@@ -233,6 +234,8 @@ export default {
           \`time_updated\` integer NOT NULL,
           \`data\` text NOT NULL,
           \`cold_ref\` text,
+          \`cold_key\` blob,
+          \`cold_stats\` text,
           CONSTRAINT \`fk_part_message_id_message_id_fk\` FOREIGN KEY (\`message_id\`) REFERENCES \`message\`(\`id\`) ON DELETE CASCADE,
           CONSTRAINT \`fk_part_cold_ref_cold_storage_hash_fk\` FOREIGN KEY (\`cold_ref\`) REFERENCES \`cold_storage\`(\`hash\`) ON DELETE RESTRICT
         );
@@ -268,6 +271,8 @@ export default {
           \`time_updated\` integer NOT NULL,
           \`data\` text NOT NULL,
           \`cold_ref\` text,
+          \`cold_key\` blob,
+          \`cold_stats\` text,
           CONSTRAINT \`fk_session_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE,
           CONSTRAINT \`fk_session_message_cold_ref_cold_storage_hash_fk\` FOREIGN KEY (\`cold_ref\`) REFERENCES \`cold_storage\`(\`hash\`) ON DELETE RESTRICT
         );
@@ -288,6 +293,11 @@ export default {
           \`summary_deletions\` integer,
           \`summary_files\` integer,
           \`summary_diffs\` text,
+          \`summary_ref\` text,
+          \`summary_cursor\` text,
+          \`summary_initialized\` integer DEFAULT false NOT NULL,
+          \`summary_init_dirty\` integer DEFAULT false NOT NULL,
+          \`summary_seed\` text,
           \`metadata\` text,
           \`cost\` real DEFAULT 0 NOT NULL,
           \`tokens_input\` integer DEFAULT 0 NOT NULL,
@@ -303,7 +313,8 @@ export default {
           \`time_updated\` integer NOT NULL,
           \`time_compacting\` integer,
           \`time_archived\` integer,
-          CONSTRAINT \`fk_session_project_id_project_id_fk\` FOREIGN KEY (\`project_id\`) REFERENCES \`project\`(\`id\`) ON DELETE CASCADE
+          CONSTRAINT \`fk_session_project_id_project_id_fk\` FOREIGN KEY (\`project_id\`) REFERENCES \`project\`(\`id\`) ON DELETE CASCADE,
+          CONSTRAINT \`fk_session_summary_ref_cold_storage_hash_fk\` FOREIGN KEY (\`summary_ref\`) REFERENCES \`cold_storage\`(\`hash\`) ON DELETE RESTRICT
         );
       `)
       yield* tx.run(`
@@ -385,6 +396,7 @@ export default {
       yield* tx.run(`CREATE INDEX \`session_project_idx\` ON \`session\` (\`project_id\`);`)
       yield* tx.run(`CREATE INDEX \`session_workspace_idx\` ON \`session\` (\`workspace_id\`);`)
       yield* tx.run(`CREATE INDEX \`session_parent_idx\` ON \`session\` (\`parent_id\`);`)
+      yield* tx.run(`CREATE INDEX \`session_summary_ref_idx\` ON \`session\` (\`summary_ref\`);`)
       yield* tx.run(`CREATE INDEX \`todo_session_idx\` ON \`todo\` (\`session_id\`);`)
     })
   },

@@ -1,6 +1,10 @@
 import { expect } from "bun:test"
+import { createHash } from "node:crypto"
+import { eq } from "drizzle-orm"
 import { DateTime, Effect } from "effect"
 import { Database } from "@opencode-ai/core/database/database"
+import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core/session/request-usage.sql"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -13,7 +17,7 @@ import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Prompt } from "@opencode-ai/core/session/prompt"
 import { SessionSchema } from "@opencode-ai/core/session/schema"
-import { SessionTable } from "@opencode-ai/core/session/sql"
+import { ColdStorageTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Session } from "../../src/session/session"
 import { aggregateStats } from "../../src/cli/cmd/stats-data"
@@ -52,7 +56,8 @@ it.effect("stats counts native and mixed transcripts without duplicate projectio
     yield* events.publish(SessionEvent.Tool.Input.Started, { ...call, name: "echo" })
     yield* events.publish(SessionEvent.Tool.Called, { ...call, tool: "echo", input: {}, provider: { executed: false } })
     yield* events.publish(SessionEvent.Tool.Progress, { ...call, structured: {}, content: [{ type: "text", text: "progress" }] })
-    yield* events.publish(SessionEvent.Tool.Success, { ...call, structured: {}, content: [{ type: "text", text: "done" }], provider: { executed: false } })
+    const structured = { legacy: "native legacy ".repeat(500) }
+    yield* events.publish(SessionEvent.Tool.Success, { ...call, structured, content: [{ type: "text", text: "done" }], provider: { executed: false } })
     yield* events.publish(SessionEvent.Step.Ended, { sessionID, assistantMessageID, timestamp, finish: "stop", cost: 0.5, tokens })
     const native = yield* aggregateStats({ projectFilter: projectID })
     expect(native.totalMessages).toBe(2)
@@ -61,6 +66,49 @@ it.effect("stats counts native and mixed transcripts without duplicate projectio
     expect(native.toolUsage[0]).toMatchObject({ inputChars: 2, outputChars: 4 })
     expect(native.total).toMatchObject({ cost: 0.5, tokens: { total: 10 } })
     expect(native.sessions[0]).toMatchObject({ messages: 2, tools: 1 })
+    // 三种持久表示须生成同一完整报表；统计不得回热owner、交换引用或补写账本。
+    const stored = Effect.all([database.db.select().from(SessionMessageTable).all(), database.db.select().from(ColdStorageTable).all(),
+      database.db.select().from(RequestUsageTable).all(), database.db.select().from(RequestUsageAssistantTable).all()])
+    yield* Database.withSync(database, sync => {
+      expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
+    })
+    const packed = yield* database.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get()
+    if (!packed?.cold_ref) return yield* Effect.die("Native packed fixture is missing")
+    const packedRef = packed.cold_ref
+    expect(packed.cold_key).toHaveLength(32)
+    expect(packed.cold_stats?.tools["0"]).toEqual({ inputChars: 2, outputChars: 4 })
+    const archive = yield* database.db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, packedRef)).get()
+    if (!archive) return yield* Effect.die("Native pack payload is missing")
+    expect(archive.kind).toBe("session-message-pack")
+    // 损坏frame仍可读同行统计，证明Stats没有暗中解包；完整业务读取另由codec负责拒绝。
+    yield* database.db.update(ColdStorageTable).set({ payload: Buffer.from([0]) }).where(eq(ColdStorageTable.hash, packedRef)).run()
+    const packedBefore = yield* stored
+    expect(yield* aggregateStats({ projectFilter: projectID })).toEqual(native)
+    expect(yield* stored).toEqual(packedBefore)
+    yield* database.db.update(ColdStorageTable).set({ payload: archive.payload }).where(eq(ColdStorageTable.hash, packedRef)).run()
+    // 从真实writer生成的fields建立旧版envelope夹具，不在测试重写字段抽取规则。
+    const frame: unknown = JSON.parse(Buffer.from(Bun.zstdDecompressSync(archive.payload)).toString("utf8"))
+    if (!frame || typeof frame !== "object" || !("entries" in frame) || !Array.isArray(frame.entries)) return yield* Effect.die("Native pack entries are missing")
+    const entry: unknown = frame.entries[0]
+    if (!entry || typeof entry !== "object" || !("fields" in entry)) return yield* Effect.die("Native pack fields are missing")
+    const raw = Buffer.from(JSON.stringify({ fields: entry.fields, owner: "session_message", version: 1 }))
+    const payload = Buffer.from(Bun.zstdCompressSync(raw))
+    const hash = createHash("sha256").update("session_message").update(Buffer.from([0])).update(raw).digest("hex")
+    yield* Database.withSync(database, sync => sync.transaction(tx => {
+      tx.insert(ColdStorageTable).values({ hash, kind: "session_message", codec: "zstd", payload, raw_bytes: raw.byteLength,
+        compressed_bytes: payload.byteLength, ref_count: 1, time_created: now, time_updated: now }).run()
+      tx.update(SessionMessageTable).set({ cold_ref: hash, cold_key: null, cold_stats: null }).where(eq(SessionMessageTable.id, assistantMessageID)).run()
+      tx.delete(ColdStorageTable).where(eq(ColdStorageTable.hash, packedRef)).run()
+    }, { behavior: "immediate" }))
+    const legacyBefore = yield* stored
+    expect(yield* aggregateStats({ projectFilter: projectID })).toEqual(native)
+    expect(yield* stored).toEqual(legacyBefore)
+    yield* Database.withSync(database, sync => {
+      expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
+    })
+    const upgradedBefore = yield* stored
+    expect(yield* aggregateStats({ projectFilter: projectID })).toEqual(native)
+    expect(yield* stored).toEqual(upgradedBefore)
     // 同 ID 的迁移副本不双计；另一个旧消息仍进入全历史统计，但不进入最近一天。
     for (const item of [
       { id: SessionV1.MessageID.make(assistantMessageID), tool: "echo", time: now },

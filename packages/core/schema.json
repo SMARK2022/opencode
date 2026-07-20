@@ -1519,6 +1519,16 @@
       "table": "message"
     },
     {
+      "type": "blob",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cold_key",
+      "entityType": "columns",
+      "table": "message"
+    },
+    {
       "type": "text",
       "notNull": false,
       "autoincrement": false,
@@ -1585,6 +1595,26 @@
       "default": null,
       "generated": null,
       "name": "cold_ref",
+      "entityType": "columns",
+      "table": "part"
+    },
+    {
+      "type": "blob",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cold_key",
+      "entityType": "columns",
+      "table": "part"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cold_stats",
       "entityType": "columns",
       "table": "part"
     },
@@ -1779,6 +1809,26 @@
       "table": "session_message"
     },
     {
+      "type": "blob",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cold_key",
+      "entityType": "columns",
+      "table": "session_message"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cold_stats",
+      "entityType": "columns",
+      "table": "session_message"
+    },
+    {
       "type": "text",
       "notNull": false,
       "autoincrement": false,
@@ -1915,6 +1965,56 @@
       "default": null,
       "generated": null,
       "name": "summary_diffs",
+      "entityType": "columns",
+      "table": "session"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "summary_ref",
+      "entityType": "columns",
+      "table": "session"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "summary_cursor",
+      "entityType": "columns",
+      "table": "session"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "summary_initialized",
+      "entityType": "columns",
+      "table": "session"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "summary_init_dirty",
+      "entityType": "columns",
+      "table": "session"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "summary_seed",
       "entityType": "columns",
       "table": "session"
     },
@@ -2438,6 +2538,17 @@
       "onDelete": "CASCADE",
       "nameExplicit": false,
       "name": "fk_session_project_id_project_id_fk",
+      "entityType": "fks",
+      "table": "session"
+    },
+    {
+      "columns": ["summary_ref"],
+      "tableTo": "cold_storage",
+      "columnsTo": ["hash"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_session_summary_ref_cold_storage_hash_fk",
       "entityType": "fks",
       "table": "session"
     },
@@ -3164,6 +3275,20 @@
       "where": null,
       "origin": "manual",
       "name": "session_parent_idx",
+      "entityType": "indexes",
+      "table": "session"
+    },
+    {
+      "columns": [
+        {
+          "value": "summary_ref",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "session_summary_ref_idx",
       "entityType": "indexes",
       "table": "session"
     },
