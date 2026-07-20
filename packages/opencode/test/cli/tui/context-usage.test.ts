@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { createMemo, createRoot } from "solid-js"
 import { createStore, produce } from "solid-js/store"
 import type { Message, Part, Provider } from "@opencode-ai/sdk/v2"
-import { computeContextData, filterCompactedMessages } from "@/cli/cmd/tui/util/context-usage"
+import { computeContextData, contextGrid, filterCompactedMessages, type ContextCategory } from "@/cli/cmd/tui/util/context-usage"
 import { contextUsageDetailLines, contextUsageFooter, contextUsageRefreshKey, contextUsageSnapshot } from "@/cli/cmd/tui/routes/session/context-usage"
 
 const provider: Provider = {
@@ -658,5 +658,154 @@ describe("context usage", () => {
     expect(data.maxTokens).toBe(20_000)
     // totalTokens 取自活跃 assistantA 的 step（17000 input + 600 output），不受 queued user 影响
     expect(data.totalTokens).toBe(17_600)
+  })
+
+  // 网格 seat：累积水位线（waterline）——整数刻度被谁的累积区间跨过，格子就归谁。
+  // 预期值独立手算 floor(cum*seats/sum)-floor(prev*seats/sum)，不复制实现源码。
+
+  function countByCategory(rows: ReturnType<typeof contextGrid>) {
+    const map = new Map<string, number>()
+    for (const cell of rows.flat()) {
+      map.set(cell.categoryName, (map.get(cell.categoryName) ?? 0) + 1)
+    }
+    return map
+  }
+
+  function cat(name: string, tokens: number, color: ContextCategory["color"] = "primary"): ContextCategory {
+    return { name, tokens, color, isDeferred: name === "Free space" || name === "Model reserve" || name === "Autocompact buffer" }
+  }
+
+  test("grid seats always fill the fixed total under waterline apportionment", () => {
+    // lock-in：用户要求“分配总数必须达到 total”；回归时若丢席会先在这里红。
+    const categories = [
+      cat("System prompt", 1_000),
+      cat("Input Messages", 3_000),
+      cat("Free space", 16_000),
+    ]
+    // contextLimit 仅影响 gridSize；<100k → width 10；rows 10 → total 100
+    const rows = contextGrid(categories, 20_000, { columns: 100, rows: 10 })
+    expect(rows.flat()).toHaveLength(100)
+    const counts = countByCategory(rows)
+    expect([...counts.values()].reduce((a, b) => a + b, 0)).toBe(100)
+  })
+
+  test("sub-half used fragments still occupy seats when their waterline crosses integers", () => {
+    // 红路径：亚半格碎片合起来应占多格——旧独立 round 会全灭，水位跨 1..4 刻度应给出 used=4。
+    // 10×800 + free 192000 = 200000；seats=100 → 每 used exact=0.4；合计 used exact=4
+    const used = Array.from({ length: 10 }, (_, i) => cat(`U${i}`, 800))
+    const categories = [...used, cat("Free space", 192_000)]
+    const rows = contextGrid(categories, 50_000, { columns: 100, rows: 10 })
+    const counts = countByCategory(rows)
+    const usedCells = used.reduce((sum, c) => sum + (counts.get(c.name) ?? 0), 0)
+    expect(usedCells).toBe(4)
+    expect(counts.get("Free space")).toBe(96)
+    expect(rows.flat()).toHaveLength(100)
+  })
+
+  test("waterline assigns seats by cumulative stack order, not largest-remainder frac race", () => {
+    // 顺序敏感：LRM 会按 frac 抢席给 B，水位线按栈序跨刻度使 B=0——锁死用户要的叠高语义。
+    // 手算 waterline seats=100, weights [2300,400,97300] → A=2,B=0,Free=98
+    const categories = [cat("A", 2_300), cat("B", 400), cat("Free space", 97_300)]
+    const rows = contextGrid(categories, 50_000, { columns: 100, rows: 10 })
+    const counts = countByCategory(rows)
+    expect(counts.get("A")).toBe(2)
+    expect(counts.get("B") ?? 0).toBe(0)
+    expect(counts.get("Free space")).toBe(98)
+  })
+
+  test("single used block at one third of mass gets exactly one third of seats", () => {
+    // 用户症状：100K 占 300K 时应约三分之一图标带，不能明显偏短。
+    const categories = [cat("Input Messages", 100_000), cat("Free space", 200_000)]
+    const rows = contextGrid(categories, 50_000, { columns: 100, rows: 12 })
+    expect(rows.flat()).toHaveLength(120)
+    expect(countByCategory(rows).get("Input Messages")).toBe(40)
+  })
+
+  test("multi-category used share stays within one seat of exact waterline total", () => {
+    // 多类拆分后 used 合计仍须贴近 exact；禁止 Free 吸余数导致 used 系统少席。
+    const categories = [
+      cat("System prompt", 14_000),
+      cat("Instructions", 11_000),
+      cat("Skills", 4_000),
+      cat("Tool definitions", 17_000),
+      cat("Input Messages", 23_000),
+      cat("Tool results", 13_000),
+      cat("Output Messages", 10_000),
+      cat("Tool calls", 8_000),
+      cat("Free space", 200_000),
+    ]
+    const rows = contextGrid(categories, 50_000, { columns: 100, rows: 16 })
+    expect(rows.flat()).toHaveLength(160)
+    const counts = countByCategory(rows)
+    const usedNames = new Set(categories.filter((c) => c.name !== "Free space").map((c) => c.name))
+    const usedCells = [...counts.entries()].filter(([n]) => usedNames.has(n)).reduce((s, [, n]) => s + n, 0)
+    expect(Math.abs(usedCells - 160 / 3)).toBeLessThanOrEqual(1)
+  })
+
+  test("attachments mass is painted so used cells track real step used share", async () => {
+    // INV-03：attachments 已计入 used 却无色块时 Free 会吞席；必须出现 Attachments 类别与格子。
+    const messages = [user("1"), assistant("2", "1")]
+    const parts: Record<string, Part[]> = {
+      "1": [text("1", "hello")],
+      "2": [
+        text("2", "world"),
+        {
+          id: "sf",
+          sessionID: "s",
+          messageID: "2",
+          type: "step-finish",
+          reason: "stop",
+          cost: 0,
+          tokens: { input: 400, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          inputChars: 1000,
+          inputBreakdown: {
+            system: 100,
+            instructions: 100,
+            skills: 0,
+            tools: 100,
+            messages: {
+              userText: 100,
+              assistantText: 0,
+              reasoning: 0,
+              toolInput: 0,
+              toolOutput: 100,
+              attachments: 500,
+              total: 700,
+            },
+          },
+        } as Part,
+      ],
+    }
+    const data = await computeContextData({
+      messages,
+      parts,
+      providers: [provider],
+      config: { compaction: { reserved: 0 } },
+      agents: [],
+      paths: { cwd: process.cwd(), worktree: process.cwd() },
+      columns: 100,
+      instructionFiles: [],
+      skills: [],
+      toolDefinitions: [],
+    })
+    // provider context=20000；attachments 应按比例分到 confirmed input 并进入色块
+    expect(data.categories.find((c) => c.name === "Attachments")?.tokens).toBeGreaterThan(0)
+    const flat = data.gridRows.flat()
+    expect(flat.filter((c) => c.categoryName === "Attachments").length).toBeGreaterThan(0)
+  })
+
+  test("autocompact buffer seats remain a contiguous tail after waterline", () => {
+    // INV-04：Autocompact 席位来自同一 waterline 结果，仅序列化贴尾，不能再二次 round。
+    const categories = [
+      cat("Input Messages", 40_000),
+      cat("Free space", 40_000),
+      cat("Autocompact buffer", 20_000),
+    ]
+    const rows = contextGrid(categories, 50_000, { columns: 100, rows: 10 })
+    const flat = rows.flat()
+    expect(flat).toHaveLength(100)
+    const tail = flat.slice(-20)
+    expect(tail.every((c) => c.categoryName === "Autocompact buffer")).toBe(true)
+    expect(flat.filter((c) => c.categoryName === "Autocompact buffer")).toHaveLength(20)
   })
 })

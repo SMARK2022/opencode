@@ -602,60 +602,30 @@ export function contextGrid(categories: ContextCategory[], contextLimit: number,
   const { width: gridW, height: gridH } = gridSize(contextLimit, options?.columns, options?.rows)
   const total = gridW * gridH
   const cells: GridSquare[] = []
-  const tail = categories.find((category) => category.name === "Autocompact buffer")
-  const body = categories.filter((category) => category.name !== "Autocompact buffer")
 
-  const countFor = (category: ContextCategory, remaining: number) => {
-    const exact = contextLimit > 0 ? (category.tokens / contextLimit) * total : 0
-    let count = Math.round(exact)
-    if (category.tokens > 0 && !category.isDeferred && count === 0 && exact >= 0.5) count = 1
-    return {
-      exact,
-      count: Math.max(0, Math.min(count, remaining)),
-    }
-  }
+  // 累积水位线（waterline）：按类别顺序叠高，整数刻度被谁的累积区间跨过格子就归谁。
+  // 分母用 Σ weights（非 contextLimit），保证 Σ counts === total，且不把舍入误差整段倒给 Free。
+  const weights = categories.map((category) => Math.max(0, category.tokens))
+  const mass = weights.reduce((sum, weight) => sum + weight, 0)
+  const counts = waterlineCounts(weights, total)
 
-  const tailCount = tail ? countFor(tail, total).count : 0
-  const bodyLimit = total - tailCount
+  // Autocompact 只调整序列化贴尾，不二次 round seat（INV-04）。
+  const body = categories.flatMap((category, index) => (category.name === "Autocompact buffer" ? [] : [{ category, index }]))
+  const tail = categories.flatMap((category, index) => (category.name === "Autocompact buffer" ? [{ category, index }] : []))
 
-  // Pre-compute all body category counts so rounding remainder can be given
-  // to Free space at its natural position, not appended after Model reserve.
-  const counts = body.map((_) => 0)
-  let remaining = bodyLimit
-  for (let ci = 0; ci < body.length; ci++) {
-    const count = countFor(body[ci], remaining).count
-    counts[ci] = count
-    remaining -= count
-  }
-
-  // Rounding remainder → add to Free space in place
-  const freeIdx = body.findIndex((c) => c.name === "Free space")
-  if (freeIdx >= 0 && remaining > 0) counts[freeIdx] += remaining
-
-  // Render in natural category order with pre-computed counts
-  for (let ci = 0; ci < body.length; ci++) {
-    const category = body[ci]
-    const count = counts[ci]
-    const exact = contextLimit > 0 ? (category.tokens / contextLimit) * total : 0
+  for (const item of [...body, ...tail]) {
+    const count = counts[item.index] ?? 0
+    // fullness 用连续 exact（tokens/mass*total），与 waterline 整数 count 对齐边界半格符号。
+    const exact = mass > 0 ? (weights[item.index] / mass) * total : 0
     for (let i = 0; i < count; i++) {
       const fullness = Math.max(0, Math.min(1, exact - i))
+      const isFree = item.category.name === "Free space"
+      const isReserve = item.category.name === "Model reserve" || item.category.name === "Autocompact buffer"
       cells.push({
-        symbol: category.name === "Free space" ? "⛶" : category.name === "Model reserve" ? "⛝" : fullness >= 0.7 ? "⛁" : "⛀",
-        categoryName: category.name,
-        color: category.color,
+        symbol: isFree ? "⛶" : isReserve ? "⛝" : fullness >= 0.7 ? "⛁" : "⛀",
+        categoryName: item.category.name,
+        color: item.category.color,
         fullness,
-      })
-    }
-  }
-  if (tail) {
-    const exact = contextLimit > 0 ? (tail.tokens / contextLimit) * total : 0
-    while (cells.length < total) {
-      const i = cells.length - bodyLimit
-      cells.push({
-        symbol: "⛝",
-        categoryName: tail.name,
-        color: tail.color,
-        fullness: Math.max(0, Math.min(1, exact - i)),
       })
     }
   }
@@ -663,6 +633,23 @@ export function contextGrid(categories: ContextCategory[], contextLimit: number,
   const rows: GridSquare[][] = []
   for (let i = 0; i < cells.length; i += gridW) rows.push(cells.slice(i, i + gridW))
   return rows
+}
+
+function waterlineCounts(weights: number[], seats: number) {
+  // 禁止 per-category Math.round 与 remainder→Free：那会让亚半格 used 全灭、图标比例系统性偏短。
+  if (seats <= 0) return weights.map(() => 0)
+  const sum = weights.reduce((total, weight) => total + weight, 0)
+  if (sum <= 0) {
+    // 无 mass 时把全部席位放在最后一类，避免静默丢 seat。
+    return weights.map((_, index) => (index === weights.length - 1 ? seats : 0))
+  }
+  let cum = 0
+  return weights.map((weight) => {
+    const prev = cum
+    cum += weight
+    // 望远镜恒等式：相邻差之和 = floor(seats) - 0，故 Σ counts 恒等于 seats（INV-01）。
+    return Math.floor((cum * seats) / sum) - Math.floor((prev * seats) / sum)
+  })
 }
 
 export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
@@ -679,6 +666,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   let instructionTokens = 0
   let skillTokens = 0
   let toolDefTokens = 0
+  let pendingTokens = 0
   let instructionDetails: Array<{ path: string; tokens: number }> = []
   let skillDetails: Array<{ name: string; tokens: number; path: string }> = []
   let toolDefs: Array<{ name: string; tokens: number }> = []
@@ -692,6 +680,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     instructionTokens = bd.instructions
     skillTokens = bd.skills
     toolDefTokens = bd.tools
+    // pending 与 attachments 必须进入网格 weights，否则 used mass 无色块、席位被 Free 吞掉（INV-03）。
+    pendingTokens = bd.pending
 
     msgDetails = {
       userText: bd.userMessages,
@@ -757,21 +747,36 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
   const used = acc.step.input + acc.step.output
   const free = maxTokens ? Math.max(0, wind.usableInput - used) : 0
 
-  const categories: ContextCategory[] = [
+  // 权重向量顺序钉死：全部 used mass（含 Attachments/Pending/Unaccounted）连续且位于 Free/reserve/buffer 之前。
+  // category.tokens 保持 accounting 真值；gap>0 才插入 Unaccounted，gap<=0 禁止扣减 used 桶。
+  const usedCategories: ContextCategory[] = [
     { name: "System prompt", tokens: envTokens, color: "primary" },
     { name: "Instructions", tokens: instructionTokens, color: "info" },
     { name: "Skills", tokens: skillTokens, color: "success" },
     { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
     { name: "Input Messages", tokens: msgDetails.userText, color: "warning" },
     { name: "Tool results", tokens: msgDetails.toolResults, color: "warning" },
+    { name: "Attachments", tokens: msgDetails.attachments, color: "warning" },
     { name: "Output Messages", tokens: msgDetails.assistantText + msgDetails.reasoning, color: "accent" },
     { name: "Tool calls", tokens: msgDetails.toolCalls, color: "accent" },
+    { name: "Pending", tokens: pendingTokens, color: "warning" },
+  ]
+  // Window 段永远在 used mass 之后，保证水位先淹没真实占用再画 Free/reserve/buffer。
+  const windowCategories: ContextCategory[] = [
     { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
     ...(wind.providerReserve > 0
       ? [{ name: "Model reserve", tokens: wind.providerReserve, color: "textMuted" as const, isDeferred: true }]
       : []),
     { name: "Autocompact buffer", tokens: wind.compactionBuffer, color: "textMuted", isDeferred: true },
   ]
+  const painted = [...usedCategories, ...windowCategories].reduce((sum, category) => sum + category.tokens, 0)
+  // gap>0：欠账 mass 用 Unaccounted 补到 contextLimit，禁止静默增大 Free。
+  // gap<=0（含超窗）：不改写任何 accounting 桶的 tokens，waterline 分母允许 > contextLimit。
+  const gap = maxTokens > 0 ? maxTokens - painted : 0
+  const unaccounted: ContextCategory[] =
+    gap > 0 ? [{ name: "Unaccounted", tokens: gap, color: "textMuted" }] : []
+  // Unaccounted 插在 Free 之前，避免把未知 mass 画成“空闲”。
+  const categories: ContextCategory[] = [...usedCategories, ...unaccounted, ...windowCategories]
 
   return {
     model: [modelInfo.providerID, modelInfo.modelID].filter(Boolean).join("/") || "(unknown)",

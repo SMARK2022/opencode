@@ -165,14 +165,18 @@ function color(theme: ReturnType<typeof useTheme>["theme"], name: ContextCategor
 }
 
 function categoryMarker(name: string) {
+  // 新 mass 类别必须有独立 marker，否则列表与网格图例无法区分 Attachments/Pending/Unaccounted。
   if (name === "System prompt") return "◆"
   if (name === "Instructions") return "◇"
   if (name === "Skills") return "●"
   if (name === "Tool definitions") return "◦"
   if (name === "Input Messages") return "▰"
   if (name === "Tool results") return "▾"
+  if (name === "Attachments") return "▣"
   if (name === "Output Messages") return "▱"
   if (name === "Tool calls") return "▴"
+  if (name === "Pending") return "◌"
+  if (name === "Unaccounted") return "×"
   if (name === "Free space") return "·"
   return "×"
 }
@@ -239,23 +243,31 @@ function CategoryList(props: { data: ContextUsageData }) {
   const { theme } = useTheme()
   const labelWidth = 20
   const valueWidth = 14
+  // tokens===0 不进列表，避免 Attachments/Pending 等零值噪音；网格 weights 仍可含零（waterline 为 no-op）。
   const groups = createMemo(() => [
     {
       title: "Prompt",
-      categories: props.data.categories.filter((item) =>
-        ["System prompt", "Instructions", "Skills", "Tool definitions"].includes(item.name),
+      categories: props.data.categories.filter(
+        (item) =>
+          item.tokens > 0 &&
+          ["System prompt", "Instructions", "Skills", "Tool definitions"].includes(item.name),
       ),
     },
     {
       title: "Conversation",
-      categories: props.data.categories.filter((item) =>
-        ["Input Messages", "Tool results", "Output Messages", "Tool calls"].includes(item.name),
+      categories: props.data.categories.filter(
+        (item) =>
+          item.tokens > 0 &&
+          ["Input Messages", "Tool results", "Attachments", "Output Messages", "Tool calls", "Pending", "Unaccounted"].includes(
+            item.name,
+          ),
       ),
     },
     {
       title: "Window",
-      categories: props.data.categories.filter((item) =>
-        ["Free space", "Model reserve", "Autocompact buffer"].includes(item.name),
+      categories: props.data.categories.filter(
+        (item) =>
+          item.tokens > 0 && ["Free space", "Model reserve", "Autocompact buffer"].includes(item.name),
       ),
     },
   ].filter((group) => group.categories.length > 0))
