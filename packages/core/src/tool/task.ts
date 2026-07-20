@@ -22,6 +22,7 @@ import { Tools } from "./tools"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { TaskPrompt } from "./task-prompt"
+import { formatTaskIdNotice } from "../util/output-notice"
 
 export const name = "task"
 export const description = TaskPrompt.description
@@ -36,7 +37,7 @@ export const Input = Schema.Struct({
   }),
   background: Schema.Boolean.pipe(Schema.optional).annotate({ description: "Run independent work in the background; completion is delivered automatically. Requires experimental background subagents." }),
 })
-export const Output = Schema.Struct({ task_id: Schema.String, state: Schema.Literals(["running", "completed"]), output: Schema.String })
+export const Output = Schema.Struct({ task_id: Schema.String, state: Schema.Literals(["running", "completed"]), output: Schema.String, notice: Schema.optional(Schema.String) })
 
 export const layer = Layer.effectDiscard(Effect.gen(function* () {
   const tools = yield* Tools.Service
@@ -70,7 +71,7 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
   yield* tools.register({ [name]: Tool.make({
     description: `${description}\n\nBackground mode returns immediately and delivers completion automatically. Do not sleep or poll; continue non-overlapping work.`,
     input: Input, output: Output,
-    toModelOutput: ({ output }) => [{ type: "text", text: `task_id: ${output.task_id}\n<task_${output.state === "running" ? "status" : "result"}>\n${output.output}\n</task_${output.state === "running" ? "status" : "result"}>` }],
+    toModelOutput: ({ output }) => [{ type: "text", text: `task_id: ${output.task_id}\n${output.notice ? `${output.notice}\n` : ""}<task_${output.state === "running" ? "status" : "result"}>\n${output.output}\n</task_${output.state === "running" ? "status" : "result"}>` }],
     execute: (input, context) => Effect.gen(function* () {
       const agent = (yield* available).find(item => item.id === input.subagent_type)
       if (!agent) return yield* new ToolFailure({ message: `Unknown agent type: ${input.subagent_type} is not a valid agent type` })
@@ -90,10 +91,15 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
         current = yield* sessions.get(current.parentID)
       }
       if (depth >= maxDepth) return yield* new ToolFailure({ message: `Subagent depth limit reached (${maxDepth}). Increase "subagent_depth" to allow nested subagents.` })
-      const existing = input.task_id ? yield* store.get(SessionV2.ID.make(input.task_id)) : undefined
+      // 沿旧 brand 的 ses 前缀构造候选；只有完整26位裸body补一次前缀，不做模糊查找。
+      const candidate = input.task_id?.startsWith("ses") ? input.task_id
+        : input.task_id?.length === 26 ? `ses_${input.task_id}` : undefined
+      const existing = candidate ? yield* store.get(SessionV2.ID.make(candidate)) : undefined
       // 恢复必须仍属于本父会话与Location，不把任意其他Session当作委派目标。
-      if (input.task_id && (!existing || existing.parentID !== parent.id || existing.location.directory !== location.directory || existing.location.workspaceID !== location.workspaceID))
+      if (existing && (existing.parentID !== parent.id || existing.location.directory !== location.directory || existing.location.workspaceID !== location.workspaceID))
         return yield* new ToolFailure({ message: `Unknown task_id: ${input.task_id}` })
+      // 未命中才新建并告知独立上下文；越界命中继续拒绝，DB defect及中断也不能当miss。
+      const notice = input.task_id && !existing ? formatTaskIdNotice({ provided: input.task_id }) : undefined
       const history = yield* sessions.context(parent.id)
       const assistant = history.findLast(item => item.type === "assistant" && item.id === context.assistantMessageID)
       const model = agent.model ?? (assistant?.type === "assistant" ? assistant.model : parent.model)
@@ -115,7 +121,8 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
         agent: agent.id, model, permissions: childPermission,
       }))
       // 摘录冻结于本次父历史，排队的extension不能改采稍后的其他调用上下文。
-      const parentContext = (input.inspected_files ?? (input.task_id ? "none" : "summary")) === "summary"
+      // 默认跟实际恢复结果，非法ID导致新建仍须带父已读摘要。
+      const parentContext = (input.inspected_files ?? (existing ? "none" : "summary")) === "summary"
         ? FileEvidence.parentSummary(history.flatMap(message => message.type === "assistant" ? message.content.flatMap(part =>
           part.type === "tool" && part.name === "read" && part.provider?.executed !== true && part.time.pruned === undefined && part.state.status === "completed"
             ? [part.state.structured.read] : []) : []), location.project.directory) : undefined
@@ -160,7 +167,7 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
         // 完成消息走父Session的durable admission与advisory wake，不递归运行V1或轮询进度。
         return sessions.prompt({ sessionID: parent.id, prompt: { text: `<task id="${child.id}" state="${result.info.status}">\n${result.info.output ?? result.info.error ?? ""}\n</task>` } }).pipe(Effect.asVoid)
       }), Effect.catch(error => Effect.logError("Failed to deliver background task result", error)), Effect.forkIn(scope, { startImmediately: true }), Effect.asVoid)
-      const running = { task_id: child.id, state: "running" as const, output: "The task is working in the background. You will be notified automatically when it finishes. DO NOT sleep, poll, or duplicate this task's work. Continue non-overlapping work." }
+      const running = { task_id: child.id, state: "running" as const, notice, output: "The task is working in the background. You will be notified automatically when it finishes. DO NOT sleep, poll, or duplicate this task's work. Continue non-overlapping work." }
       // 子任务可能在start返回前运行；先保证挂接取消责任，再恢复前台等待的可中断性。
       return yield* Effect.uninterruptibleMask(restore => Effect.gen(function* () {
       if (yield* background.extend({ id: child.id, run: restore(runTask) })) return running
@@ -174,7 +181,7 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
         Effect.flatMap((result): Effect.Effect<typeof Output.Type, ToolFailure> => {
           if (result?.metadata?.background === true) return Effect.succeed(running)
           if (result?.status === "error" || result?.status === "cancelled") return new ToolFailure({ message: result.error ?? "Task cancelled" })
-          return Effect.succeed({ task_id: child.id, state: "completed" as const, output: result?.output ?? "" })
+          return Effect.succeed({ task_id: child.id, state: "completed" as const, notice, output: result?.output ?? "" })
         }),
         Effect.onInterrupt(() => background.cancel(child.id).pipe(Effect.andThen(sessions.interrupt(child.id)))),
       )

@@ -1452,7 +1452,7 @@ describe("SessionRunnerLLM", () => {
     const invoke = (task_id?: string, subagent_type = "research", inspected_files?: "none" | "summary") => registry.materialize().pipe(Effect.flatMap(tools => tools.settle({
       sessionID, agent: AgentV2.ID.make("plan"), assistantMessageID: SessionMessage.ID.make("msg_task_parent"),
       call: { type: "tool-call", id: task_id ? "call-task-resume" : "call-task-first", name: "task",
-        input: { description: "Research scoped implementation", prompt: "Inspect the requested module", subagent_type, ...(task_id ? { task_id } : {}), ...(inspected_files ? { inspected_files } : {}) } },
+        input: { description: "Research scoped implementation", prompt: "Inspect the requested module", subagent_type, ...(task_id === undefined ? {} : { task_id }), ...(inspected_files ? { inspected_files } : {}) } },
     })))
     const first = yield* invoke()
     expect(first.result.type).toBe("text")
@@ -1645,6 +1645,39 @@ describe("SessionRunnerLLM", () => {
     expect(yield* sessions.active).not.toContain(child.id)
     streamGate = undefined
     streamStarted = undefined
+
+    // 真实leaf/DB/fake模型验证省略、空串、非法及不存在ID；新建默认summary，裸body恢复不重复提示。
+    for (const provided of [undefined, "", 'not-a-session"<&', "ses_missing", "a".repeat(26)]) {
+      response = fragmentFixture("text", "invalid-task", ["Fresh result"]).completeEvents
+      const created = yield* invoke(provided)
+      const data = Schema.decodeUnknownSync(TaskTool.Output)(created.output?.structured)
+      expect(data.task_id).not.toBe(provided)
+      expect(data.state).toBe("completed")
+      const fresh = SessionV2.ID.make(data.task_id)
+      expect((yield* sessions.context(fresh)).findLast(message => message.type === "user")).toMatchObject({ text: expect.stringContaining("<parent_context>") })
+      if (provided) {
+        expect(data.notice).toContain('reason="invalid_provided"')
+        expect(data.notice).toContain('action="created_new"')
+        expect(created.output?.content[0]).toMatchObject({ type: "text", text: expect.stringContaining('reason="invalid_provided"') })
+      } else {
+        expect(data.notice).toBeUndefined()
+        expect(created.output?.content[0]).toMatchObject({ type: "text", text: expect.not.stringContaining("opencode_notice") })
+      }
+      const body = data.task_id.slice("ses_".length)
+      expect(body).toHaveLength(26)
+      response = fragmentFixture("text", "resume-body", ["Body resumed"]).completeEvents
+      const restored = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(body)).output?.structured)
+      expect(restored.task_id).toBe(fresh)
+      expect(restored.notice).toBeUndefined()
+      expect((yield* sessions.context(fresh)).findLast(message => message.type === "user")).toMatchObject({ text: "Inspect the requested module" })
+    }
+    // 有效ID越界仍拒绝；不能把异Location命中当miss并偷偷新建或推进旧任务。
+    const beforeForeign = yield* sessions.context(child.id)
+    yield* db.update(SessionTable).set({ directory: "/elsewhere" }).where(eq(SessionTable.id, child.id)).run().pipe(Effect.orDie)
+    const wrongLocation = yield* invoke(childID)
+    expect(wrongLocation.result).toMatchObject({ type: "error", value: `Unknown task_id: ${childID}` })
+    expect(yield* sessions.context(child.id)).toEqual(beforeForeign)
+    yield* db.update(SessionTable).set({ directory: "/project" }).where(eq(SessionTable.id, child.id)).run().pipe(Effect.orDie)
   }).pipe(Effect.provide(Layer.effect(BackgroundJob.Service, BackgroundJob.make))))
 
   it.live("includes the effective default agent system before durable context", () =>
