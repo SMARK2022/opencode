@@ -1028,77 +1028,62 @@ function gridSize(contextLimit: number, columns?: number, rows?: number) {
   }
 }
 
-// 网格是有损采样：小于半格的分类可无符号，右侧整数明细仍保留它，不能从符号数还原 token。
+// 上下文网格：累积水位线（waterline）分配席位——整数刻度被谁的累积区间跨过格子就归谁。
+// 分母用 Σ weights（非 contextLimit），保证 Σ counts === total，且不把舍入误差整段倒给 Free。
 export function contextGrid(categories: ContextCategory[], contextLimit: number, options?: { columns?: number; rows?: number }) {
   const { width: gridW, height: gridH } = gridSize(contextLimit, options?.columns, options?.rows)
   const total = gridW * gridH
   const cells: GridSquare[] = []
-  // buffer 从尾部分配，避免前面的大额 reserve 抢走安全缓冲的最后一格。
-  const tail = categories.find((category) => category.name === "Autocompact buffer")
-  const body = categories.filter((category) => category.name !== "Autocompact buffer")
+  // 负 token 不参与水位：max(0,·) 钳制保证 Σ weights 与累积区间单调不减。
+  const weights = categories.map((category) => Math.max(0, category.tokens))
+  const mass = weights.reduce((sum, weight) => sum + weight, 0)
+  const counts = waterlineCounts(weights, total)
 
-  const countFor = (category: ContextCategory, remaining: number) => {
-    // 小分类只在超过半格时可见，不能每项强占一格并让许多 tiny 工具淹没实际窗口比例。
-    const exact = contextLimit > 0 ? (category.tokens / contextLimit) * total : 0
-    let count = Math.round(exact)
-    if (category.tokens > 0 && !category.isDeferred && count === 0 && exact >= 0.5) count = 1
-    return {
-      exact,
-      count: Math.max(0, Math.min(count, remaining)),
-    }
-  }
+  // Autocompact 只调整序列化贴尾，不二次 round seat（INV-04）。
+  const body = categories.flatMap((category, index) => (category.name === "Autocompact buffer" ? [] : [{ category, index }]))
+  const tail = categories.flatMap((category, index) => (category.name === "Autocompact buffer" ? [{ category, index }] : []))
 
-  // reserve/free 与其他分类共享 bodyLimit，先扣除尾部容量才能避免大额 reserve 吞掉压缩缓冲。
-  const tailCount = tail ? countFor(tail, total).count : 0
-  const bodyLimit = total - tailCount
-  // 剩余容量约束每次分配，即使估算超过窗口也不会渲染无限格子。
-  // #125：先算各 body 分类格子数，余数并入 Free space 原位
-  const counts = body.map((_) => 0)
-  let remaining = bodyLimit
-  for (let ci = 0; ci < body.length; ci++) {
-    const count = countFor(body[ci], remaining).count
-    counts[ci] = count
-    remaining -= count
-  }
-  const freeIdx = body.findIndex((c) => c.name === "Free space")
-  // #125：舍入余数给 Free space，避免尾部追加打乱顺序
-  if (freeIdx >= 0 && remaining > 0) counts[freeIdx] += remaining
-
-  for (let ci = 0; ci < body.length; ci++) {
-    const category = body[ci]
-    const count = counts[ci]
-    const exact = contextLimit > 0 ? (category.tokens / contextLimit) * total : 0
-    for (let k = 0; k < count; k++) {
-      // 超窗口估算的余量仍夹在 [0,1]，否则饱满度会越过已定义的两档填充符号。
-      const fullness = Math.max(0, Math.min(1, exact - k))
+  for (const item of [...body, ...tail]) {
+    const count = counts[item.index] ?? 0
+    // fullness 用连续 exact（tokens/mass*total），与 waterline 整数 count 对齐边界半格符号。
+    const exact = mass > 0 ? (weights[item.index] / mass) * total : 0
+    for (let i = 0; i < count; i++) {
+      const fullness = Math.max(0, Math.min(1, exact - i))
+      // 单格字形契约：reserve=U+26DD、低饱满=U+26C0 必须保持单码点——双码点 CJK 或组合附加符
+      // 会把行宽撑开或渲染为空，破坏网格列对齐；码点级断言见下方 symbol 契约测试。
+      const isFree = item.category.name === "Free space"
+      const isReserve = item.category.name === "Model reserve" || item.category.name === "Autocompact buffer"
       cells.push({
-        symbol: category.name === "Free space" ? "⛶" : category.name === "Model reserve" ? "⛝" : fullness >= 0.7 ? "⛁" : "⛀",
-        categoryName: category.name,
-        color: category.color,
+        symbol: isFree ? "⛶" : isReserve ? "⛝" : fullness >= 0.7 ? "⛁" : "⛀",
+        categoryName: item.category.name,
+        color: item.category.color,
         fullness,
       })
     }
   }
-
-  // 尾部饱满度使用 tail 自身比例而非总 used，安全缓冲不会因消息增长被画成消息占用。
-  if (tail) {
-    const exact = contextLimit > 0 ? (tail.tokens / contextLimit) * total : 0
-    while (cells.length < total) {
-      const i = cells.length - bodyLimit
-      cells.push({
-        symbol: "⛝",
-        categoryName: tail.name,
-        color: tail.color,
-        fullness: Math.max(0, Math.min(1, exact - i)),
-      })
-    }
-  }
-
   // 只切已有有限 cells，最后一行不足列宽也不增加虚构 used token。
   const rows: GridSquare[][] = []
   for (let i = 0; i < cells.length; i += gridW) rows.push(cells.slice(i, i + gridW))
   return rows
 }
+
+function waterlineCounts(weights: number[], seats: number) {
+  // 禁止 per-category Math.round 与 remainder→Free：那会让亚半格 used 全灭、图标比例系统性偏短。
+  if (seats <= 0) return weights.map(() => 0)
+  const sum = weights.reduce((total, weight) => total + weight, 0)
+  if (sum <= 0) {
+    // 无 mass 时把全部席位放在最后一类，避免静默丢 seat。
+    return weights.map((_, index) => (index === weights.length - 1 ? seats : 0))
+  }
+  let cum = 0
+  return weights.map((weight) => {
+    const prev = cum
+    cum += weight
+    // 望远镜恒等式：相邻差之和 = floor(seats) - 0，故 Σ counts 恒等于 seats（INV-01）。
+    return Math.floor((cum * seats) / sum) - Math.floor((prev * seats) / sum)
+  })
+}
+
 
 // 窗口分类使用裁剪结果；确认消费独立交给 usageTotals，不能从字符估算的 used 反算计费用量。
 export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
@@ -1174,21 +1159,24 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     toolResults: acc.breakdown.toolResults + acc.breakdown.pending,
     attachments: acc.breakdown.attachments, compactionSummary: 0,
   } : msg.details
-  const userMessageTokens = messageDetails.userText + messageDetails.attachments
+  const userMessageTokens = messageDetails.userText
   const assistantMessageTokens = messageDetails.assistantText + messageDetails.reasoning + messageDetails.compactionSummary
   // 源消息分类已区分工具入参与返回；部件归助手不能把工具结果并入助手正文，工具定义也只归广告开销。
   const toolCallTokens = messageDetails.toolCalls
-  const toolResultTokens = messageDetails.toolResults
-  // 四桶只重组同一份冻结整数，直接相加才能保留拆分前 used；逐桶重估会引入额外舍入误差。
-  const messageTotal = userMessageTokens + toolResultTokens + assistantMessageTokens + toolCallTokens
+  const pendingTokens = acc.breakdown?.pending ?? 0
+  const toolResultTokens = messageDetails.toolResults - pendingTokens
+  // 附件与 pending 等额拆出，详情仍保留原口径；不重新按字符估算或把同一 pending 计两次。
+  const messageTotal = userMessageTokens + toolResultTokens + assistantMessageTokens + toolCallTokens + messageDetails.attachments + pendingTokens
   const window = windowDetails(input, windowModel, maxTokens)
   // used 包含上传输入与本 step 输出；free、模型预留和压缩缓冲不计入消费。
   // 分类分别 round 后相加会有短文本舍入误差；确认消费仍独立读取 provider 字段。
   const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens + messageTotal
-  // 超出 usable 时自由空间归零，但 used 保留真实估算，不能为了百分比好看裁掉超额载荷。
-  const free = maxTokens ? Math.max(0, window.usableInput - used) : 0
+  // Free 与顶栏消费同一当前窗口；显式请求零值不借历史估算，旧 transcript 仍保留原重建路径。
+  const stepWindowTokens = input.session?.request && !input.session.request.assistantID ? prepared?.input ?? 0 : acc.step.input + acc.step.output
+  const totalTokens = stepWindowTokens > 0 || input.session?.request ? stepWindowTokens : used
+  const free = maxTokens ? Math.max(0, window.usableInput - totalTokens) : 0
 
-  const categories: ContextCategory[] = [
+  const usedCategories: ContextCategory[] = [
     { name: "System prompt", tokens: envTokens, color: "primary" },
     { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
     { name: "Skills", tokens: skillTokens, color: "success" },
@@ -1196,25 +1184,33 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
     { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
     { name: "User Messages", tokens: userMessageTokens, color: "warning" },
     { name: "Tool Results", tokens: toolResultTokens, color: "warning" },
+    { name: "Attachments", tokens: messageDetails.attachments, color: "warning" },
     { name: "Assistant Messages", tokens: assistantMessageTokens, color: "accent" },
     { name: "Tool Calls", tokens: toolCallTokens, color: "accent" },
-    // free 非零也不能进入 used；isDeferred 只影响网格可见性门槛，不改变百分比分子。
+    { name: "Pending", tokens: pendingTokens, color: "warning" },
+  ]
+  // used mass 保持连续且位于所有 Window 类别之前，Autocompact 只在渲染时贴尾。
+  const windowCategories: ContextCategory[] = [
     { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
     ...(window.providerReserve > 0
       ? [{ name: "Model reserve", tokens: window.providerReserve, color: "textMuted" as const, isDeferred: true }]
       : []),
     { name: "Autocompact buffer", tokens: window.compactionBuffer, color: "textMuted", isDeferred: true },
   ]
+  const painted = [...usedCategories, ...windowCategories].reduce((sum, category) => sum + category.tokens, 0)
+  // 分类欠账补在 Free 之前；超窗不扣减任何真实分类，席位按整体 mass 归一化。
+  const gap = maxTokens > 0 ? maxTokens - painted : 0
+  const unaccounted: ContextCategory[] = gap > 0 ? [{ name: "Unaccounted", tokens: gap, color: "textMuted" }] : []
+  const categories = [...usedCategories, ...unaccounted, ...windowCategories]
 
   // 返回脱离流式 proxy 的数值与字符串，resize 消费同一轮完成的估算结果。
   // 首包前没有助手时仍使用服务端准备值；旧历史无统计时保留分类估算。
-  const stepWindowTokens = input.session?.request && !input.session.request.assistantID ? prepared?.input ?? 0 : acc.step.input + acc.step.output
   return {
     model: [input.session?.request?.model?.providerID ?? modelInfo.providerID, input.session?.request?.model?.modelID ?? modelInfo.modelID].filter(Boolean).join("/") || "(unknown)",
-    totalTokens: stepWindowTokens > 0 ? stepWindowTokens : used,
+    totalTokens,
     maxTokens,
     // #136：percentage 与 totalTokens 同源窗口，避免主柱与百分比分叉
-    percentage: maxTokens ? (stepWindowTokens > 0 ? stepWindowTokens : used) / maxTokens : 0,
+    percentage: maxTokens ? totalTokens / maxTokens : 0,
     categories,
     // 未知窗口只选择可渲染的网格分母，maxTokens 与百分比仍保留未知值 0。
     gridRows: contextGrid(categories, maxTokens || Math.max(used + window.compactionBuffer + free, 1), { columns: input.columns }),
