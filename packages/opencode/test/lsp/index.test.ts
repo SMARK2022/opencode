@@ -289,16 +289,14 @@ describe("lsp.spawn", () => {
           const dir = (yield* TestInstance).directory
           const spy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
 
-          try {
-            yield* lsp.hover({
-              file: path.join(dir, "src", "inside.ts"),
-              line: 0,
-              character: 0,
-            })
-            expect(spy).toHaveBeenCalledTimes(0)
-          } finally {
-            spy.mockRestore()
-          }
+          // Effect 失败不运行生成器的 JS finally；由测试 scope 恢复 spy，零 spawn 断言不变。
+          yield* Effect.addFinalizer(() => Effect.sync(() => spy.mockRestore()))
+          yield* lsp.hover({
+            file: path.join(dir, "src", "inside.ts"),
+            line: 0,
+            character: 0,
+          })
+          expect(spy).toHaveBeenCalledTimes(0)
         }),
       ),
     {
