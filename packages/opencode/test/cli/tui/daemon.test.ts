@@ -26,6 +26,7 @@ const WORKER_TS = fileURLToPath(new URL("../../../src/cli/cmd/tui/worker.ts", im
 const INDEX_TS = fileURLToPath(new URL("../../../src/index.ts", import.meta.url))
 const DAEMON_TS_URL = new URL("../../../src/cli/cmd/tui/daemon.ts", import.meta.url).href
 const MAINTENANCE_RETRY_WORKER = fileURLToPath(new URL("./maintenance-retry-worker.ts", import.meta.url))
+const TASK_WRITE_RETRY_WORKER = fileURLToPath(new URL("./task-write-retry-worker.ts", import.meta.url))
 
 const DAEMON_START_TIMEOUT_MS = 30_000
 const DAEMON_STOP_TIMEOUT_MS = 60_000
@@ -572,6 +573,34 @@ describe("daemon lifecycle", () => {
       await worker.stdin.end()
       expect(await readUntil(reader, "lease-owned")).toContain("lease-owned")
       expect(await worker.exited).toBe(0)
+    } finally {
+      reader.releaseLock()
+      if (ServerLockModule.alive(worker.pid)) worker.kill()
+      await worker.exited.catch(() => undefined)
+    }
+  }, 10_000)
+
+  test("writeMaintenanceTask retries after a published transient task-file rename conflict", async () => {
+    // 覆盖 checkpoint 路径：task json 的 tmp→rename 与 Windows 轮询 reader 竞争时的 EPERM 重试，
+    // 与 stale lock directory rename 共用 renameWithTransientRetry 合同。
+    await using tmp = await tmpdir()
+    const dbPath = path.join(tmp.path, "task-write-injected.db")
+    const worker = Bun.spawn([process.execPath, TASK_WRITE_RETRY_WORKER], {
+      env: { ...process.env, OPENCODE_TEST_MAINTENANCE_DB: dbPath },
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const reader = worker.stdout.pipeThrough(new TextDecoderStream()).getReader()
+
+    try {
+      expect(await readUntil(reader, "rename-blocked")).toContain("rename-blocked")
+      await worker.stdin.write("release\n")
+      await worker.stdin.end()
+      expect(await readUntil(reader, "write-ok")).toContain("write-ok")
+      expect(await worker.exited).toBe(0)
+      const task = await ServerLockModule.readMaintenanceTask("dbm_write_atomic_retry", dbPath)
+      expect(task?.status).toBe("interrupted")
     } finally {
       reader.releaseLock()
       if (ServerLockModule.alive(worker.pid)) worker.kill()

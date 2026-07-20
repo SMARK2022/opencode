@@ -7,13 +7,33 @@ import { ModelID, ProviderID } from "../../src/provider/schema"
 import { NotFoundError } from "@/storage/storage"
 import { ColdStorage } from "@/storage/cold"
 import { Database } from "@/storage/db"
-import { SessionTable } from "@/session/session.sql"
+import { MessageTable, PartTable, SessionTable } from "@/session/session.sql"
 import * as Log from "@opencode-ai/core/util/log"
 import { testEffect } from "../lib/effect"
 
 void Log.init({ print: false })
 
 const it = testEffect(SessionNs.defaultLayer)
+
+// 测试进程共享 preload SQLite；ColdStorage.status().coldOwners 是全库计数，不能当作当前 fixture 的局部结果。
+// 只统计本 session 的 cold_ref owner，才能在 cold.test / processor 等同进程 suite 下稳定断言 thaw 副作用。
+function sessionColdOwners(sessionID: SessionID) {
+  return Database.use(
+    (db) =>
+      db
+        .select({ cold_ref: MessageTable.cold_ref })
+        .from(MessageTable)
+        .where(Database.eq(MessageTable.session_id, sessionID))
+        .all()
+        .filter((row) => row.cold_ref).length +
+      db
+        .select({ cold_ref: PartTable.cold_ref })
+        .from(PartTable)
+        .where(Database.eq(PartTable.session_id, sessionID))
+        .all()
+        .filter((row) => row.cold_ref).length,
+  )
+}
 
 const withSession = <A, E, R>(
   fn: (input: { session: SessionNs.Interface; sessionID: SessionID }) => Effect.Effect<A, E, R>,
@@ -656,7 +676,9 @@ describe("Session.findMessage", () => {
 
         const none = yield* session.findMessage(sessionID, () => false)
         expect(Option.isNone(none)).toBe(true)
-        expect(ColdStorage.status().coldOwners).toBe(1)
+        // 无匹配扫描不得 thaw；session 级 cold 计数仍为 1。顺带调用 status() 确保 freeze 后 payload 元数据健康。
+        expect(sessionColdOwners(sessionID)).toBe(1)
+        expect(ColdStorage.status().coldOwners).toBeGreaterThanOrEqual(1)
 
         const match = yield* session.findMessage(sessionID, (info) => info.role === "user")
         expect(Option.isSome(match)).toBe(true)
@@ -665,7 +687,7 @@ describe("Session.findMessage", () => {
           matchedPart?.type === "tool" && matchedPart.state.status === "completed" ? matchedPart.state.output : undefined,
         ).toBe(output)
         expect(Option.isSome(match) ? match.value.parts.some((part) => part.id === hiddenPartID) : true).toBe(false)
-        expect(ColdStorage.status().coldOwners).toBe(0)
+        expect(sessionColdOwners(sessionID)).toBe(0)
       }),
     ),
   )
@@ -774,8 +796,8 @@ describe("Session.findMessage", () => {
         })
         expect(tail.map((part) => part.id)).toEqual([...partIDs.slice(-2), midPartID])
         expect(tail.every((part) => part.type === "tool" && part.state.status !== "pending")).toBe(true)
-        // freeze 的 previous tools 仍在 cold 统计内；具体 pack 数随 cold layout 可变，至少保留有界 thaw 不爆表。
-        expect(ColdStorage.status().coldOwners).toBeGreaterThanOrEqual(2)
+        // 有界 tail 只 thaw 选中 part；本 session 的 previous freeze tools 仍应保持 cold（至少 2）。
+        expect(sessionColdOwners(sessionID)).toBeGreaterThanOrEqual(2)
 
         const two = MessageV2.previousAssistantToolTail({
           sessionID,

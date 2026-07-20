@@ -254,6 +254,9 @@ unavailable.live("omits an image attachment when normalization is unavailable", 
           // 失败图片不能回到provider，但工具文本仍需保留，避免丢失非图片结果。
           expect(part.state.attachments).toBeUndefined()
           expect(part.state.output).toContain("image omitted")
+          // raw AI tool 可不返回 title；completed 终态必须持久化为 string，空串合法，
+          // 否则 JSON 省略 title 后 ColdStorage.freeze/status 会在全库扫描时报 corruption。
+          expect(part.state.title).toBe("")
         }
       }),
     { git: true, config: (url) => providerCfg(url) },

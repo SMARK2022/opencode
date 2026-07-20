@@ -288,7 +288,10 @@ export const layer = Layer.effect(
                       ? { ...rest, autoReview: match.part.state.metadata.autoReview }
                       : rest
                   })(),
-                  title: output.title,
+                  // ToolStateCompleted.title 契约是 string；raw AI SDK / 测试 tool 可不返回 title。
+                  // 缺省写成空串（与 tool/registry 插件路径一致），禁止 undefined 经 JSON 省略后
+                  // 让 ColdStorage extractPart 在 freeze/status 全库扫描时抛 corruption。
+                  title: typeof output.title === "string" ? output.title : "",
                   time: { start: match.part.state.time.start, end: Date.now() },
                   attachments: output.attachments,
                 },

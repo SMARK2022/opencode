@@ -203,28 +203,40 @@ function taskPath(taskID: string, dbPath?: string) {
   return path.join(maintenanceRoot(dbPath), "tasks", `${maintenanceTaskName(taskID)}.json`)
 }
 
+// Windows reader 可能在 Bun.file().text() 返回后短暂持有目标句柄；仅对 NT sharing 三类错误重试。
+// 截止与 stale lock directory rename 共用 MAINTENANCE_RENAME_TIMEOUT_MS（覆盖 CI 观测的 641-876ms）。
+// 其他错误立即失败；耗尽后把 lastError 抛给调用方——writeAtomic 原样上抛，stale reclaim 再映射 busy。
+async function renameWithTransientRetry(from: string, to: string) {
+  const deadline = Date.now() + MAINTENANCE_RENAME_TIMEOUT_MS
+  let lastError: unknown
+  while (true) {
+    try {
+      await rename(from, to)
+      return
+    } catch (error) {
+      lastError = error
+      const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined
+      if (!code || !["EPERM", "EACCES", "EBUSY"].includes(code) || Date.now() >= deadline) break
+      await Bun.sleep(MAINTENANCE_RENAME_RETRY_MS)
+    }
+  }
+  throw lastError
+}
+
 // tmp+rename 保证 reader 只看到旧完整 record 或新完整 record，永远不读取半写 JSON。
 // tmp 带随机后缀，daemon 与 CLI 即使异常并发 checkpoint 也不会覆盖彼此的临时文件。
-// Windows reader 可能在 Bun.file().text() 返回后短暂持有旧句柄；仅对 EPERM/EACCES/EBUSY 有限重试。
+// Windows 轮询 task status 时 reader 与 checkpoint rename 竞争；共用 renameWithTransientRetry。
 // 其他错误和重试耗尽仍向上抛出，maintain 会把 checkpoint 失败记录为 task failure 而不是伪造进度。
 async function writeAtomic(file: string, value: unknown) {
   await mkdir(path.dirname(file), { recursive: true })
   const tmp = `${file}.${randomUUID()}.tmp`
   await Bun.write(tmp, JSON.stringify(value, null, 2))
-  let lastError: unknown
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      await rename(tmp, file)
-      return
-    } catch (error) {
-      lastError = error
-      const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined
-      if (!code || !["EPERM", "EACCES", "EBUSY"].includes(code) || attempt === 4) break
-      await Bun.sleep(25)
-    }
+  try {
+    await renameWithTransientRetry(tmp, file)
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => undefined)
+    throw error
   }
-  await rm(tmp, { force: true }).catch(() => undefined)
-  throw lastError
 }
 
 export async function writeMaintenanceTask(task: MaintenanceTask) {
@@ -360,21 +372,12 @@ export async function acquireMaintenanceLease(
     const latest = maintenanceOwner(latestRaw)
     if (latest.token !== staleOwner.token || alive(latest.pid)) throw new MaintenanceBusyError()
     // 所有contender都rename到旧token命名的同一tombstone；winner占住目标后，延迟重试不会搬走新lock。
-    // 一秒边界覆盖CI已观察到的641-876ms sharing生命周期，同时避免永久等待损坏或长期占用的lock。
+    // 与 writeAtomic 共用 Windows sharing 重试合同；耗尽或非瞬态错误映射为 busy，不暴露底层 rename 细节。
     // retry期间不再读取owner；旧目录一旦被winner搬走，其他contender只能失败，不能把新owner误判成旧owner。
-    const renameDeadline = Date.now() + MAINTENANCE_RENAME_TIMEOUT_MS
-    while (true) {
-      try {
-        await rename(lockDir, path.join(root, `stale-${staleOwner.token}`))
-        break
-      } catch (error) {
-        const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined
-        // 仅NT sharing对应的三类瞬时错误可等待；目标已存在、路径损坏等结果仍立即保持busy语义。
-        if (!code || !["EPERM", "EACCES", "EBUSY"].includes(code) || Date.now() >= renameDeadline) {
-          throw new MaintenanceBusyError()
-        }
-        await Bun.sleep(MAINTENANCE_RENAME_RETRY_MS)
-      }
+    try {
+      await renameWithTransientRetry(lockDir, path.join(root, `stale-${staleOwner.token}`))
+    } catch {
+      throw new MaintenanceBusyError()
     }
     try {
       await mkdir(lockDir)
