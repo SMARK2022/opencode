@@ -234,6 +234,9 @@ function normalizeMessages(
         if (!Array.isArray(msg.content)) return msg
         const filtered = msg.content.filter((part) => {
           if (part.type === "text") return part.text !== ""
+          // #502：Kimi 重试会持久化 reasoning("")；空 reasoning 在 interleaved 降级后变成
+          // reasoning_content:"" 触发 Moonshot 400——在降级前丢弃，整条空 assistant 随后移除。
+          if (part.type === "reasoning") return part.text.trim().length > 0
           return true
         })
         // #492：全空 content 的 assistant 直接删除消息，而不是保留空壳触发 400。

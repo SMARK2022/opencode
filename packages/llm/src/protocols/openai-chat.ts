@@ -286,9 +286,23 @@ const lowerToolMessages = Effect.fn("OpenAIChat.lowerToolMessages")(function* (m
   return { messages, images }
 })
 
-const lowerMessage = Effect.fn("OpenAIChat.lowerMessage")(function* (message: OpenAIChatRequestMessage) {
+const lowerMessage = Effect.fn("OpenAIChat.lowerMessage")(function* (message: OpenAIChatRequestMessage, requiresReasoning: boolean) {
   if (message.role === "user") return [yield* lowerUserMessage(message)]
-  if (message.role === "assistant") return [yield* lowerAssistantMessage(message)]
+  if (message.role === "assistant") {
+    // 只在 Chat 降级处筛空 reasoning；其它协议仍可重放空文本携带的签名或加密元数据。
+    const content = message.content.filter((part) => {
+      if (part.type === "text") return part.text !== ""
+      if (part.type === "reasoning") return part.text.trim().length > 0
+      return true
+    })
+    // Kimi retry 的空壳整条移除，Tool call 和非空原文仍按既有协议降级。
+    if (content.length === 0) return []
+    const lowered = yield* lowerAssistantMessage({ ...message, content })
+    // DeepSeek 的必填空字段在过滤之后补回，不能重新生成已丢弃的空消息。
+    return [requiresReasoning && lowered.reasoning_content === undefined
+      ? { ...lowered, reasoning_content: "" }
+      : lowered]
+  }
   return (yield* lowerToolMessages(message)).messages
 })
 
@@ -326,7 +340,7 @@ const lowerMessages = Effect.fn("OpenAIChat.lowerMessages")(function* (request: 
       continue
     }
     flushImages()
-    messages.push(...(yield* lowerMessage(message)))
+    messages.push(...(yield* lowerMessage(message, request.model.id.toLowerCase().includes("deepseek"))))
   }
   flushImages()
   return messages

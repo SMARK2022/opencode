@@ -2280,6 +2280,10 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
           },
         ],
       },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Answer" }],
+      },
     ] as any[]
 
     const result = ProviderTransform.message(
@@ -2321,7 +2325,7 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
       {},
     )
 
-    expect(result).toHaveLength(1)
+    expect(result).toHaveLength(2)
     expect(result[0].content).toEqual([
       {
         type: "text",
@@ -2335,6 +2339,9 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
       },
     ])
     expect(result[0].providerOptions?.openaiCompatible?.reasoning_content).toBe("Let me think about this...")
+    // DeepSeek 的兼容分支位于公共空内容过滤之后，无显式 reasoning 时仍必须补回空字段。
+    expect(result[1].content).toEqual([{ type: "text", text: "Answer" }])
+    expect(result[1].providerOptions?.openaiCompatible?.reasoning_content).toBe("")
   })
 
   test("Non-DeepSeek providers leave reasoning content unchanged", () => {
@@ -2982,7 +2989,8 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
       toolcall: true,
       input: { text: true, audio: false, image: false, video: false, pdf: false },
       output: { text: true, audio: false, image: false, video: false, pdf: false },
-      interleaved: false,
+      // #502：kimi 走 reasoning_content interleaved——空 reasoning 过滤的降级路径由此激活。
+      interleaved: { field: "reasoning_content" },
     },
     cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
     limit: { context: 131_072, output: 16_384 },
@@ -3028,6 +3036,8 @@ describe("ProviderTransform.message - openai-compatible empty content filter", (
           role: "assistant",
           content: [
             { type: "text", text: "" },
+            // #502：空 reasoning 与空 text 同为 Moonshot 400 源——一并过滤。
+            { type: "reasoning", text: "" },
             { type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { command: "ls" } },
           ],
         },
@@ -3079,6 +3089,41 @@ describe("ProviderTransform.message - openai-compatible empty content filter", (
       // 占位 text 必须位于数组头部（prepend 契约），其后才是被保留的 tool-call。
       expect(result[0].content[0]).toEqual({ type: "text", text: " " })
       expect(result[0].content[1].type).toBe("tool-call")
+    })
+
+    // #502：Kimi 重试持久化 reasoning("")——空 reasoning 在 interleaved 降级后变成
+    // reasoning_content:"" 触发 Moonshot 400；过滤必须发生在降级之前。
+    test("drops assistant messages whose only part is empty reasoning", () => {
+      const msgs: ModelMessage[] = [{ role: "assistant", content: [{ type: "reasoning", text: "" }] }]
+
+      const result = ProviderTransform.message(msgs, kimiModel, {})
+
+      // 全部 parts 被过滤的 assistant 整条移除——不进入后续降级/重试。
+      expect(result).toEqual([])
+    })
+
+    test("preserves whitespace-surrounded non-empty reasoning", () => {
+      const msgs: ModelMessage[] = [
+        {
+          role: "assistant",
+          content: [
+            { type: "reasoning", text: "  thinking  " },
+            { type: "text", text: "Answer" },
+          ],
+        },
+      ]
+
+      const result = ProviderTransform.message(msgs, kimiModel, {})
+
+      // 非空 reasoning 保留原始空白——trim 只用于判空，不修改载荷；
+      // interleaved 降级把同一原文写入 reasoning_content。
+      expect(result).toEqual([
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "Answer" }],
+          providerOptions: { openaiCompatible: { reasoning_content: "  thinking  " } },
+        },
+      ])
     })
   })
 
