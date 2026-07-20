@@ -192,6 +192,9 @@ function normalizeMessages(
         if (!Array.isArray(msg.content)) return msg
         const filtered = msg.content.filter((part) => {
           if (part.type === "text") return part.text !== ""
+          // retry 可能留下独立的空 reasoning block，必须在 interleaved lowering 前移除，
+          // 否则它会成为 content:"" 且 reasoning_content:"" 的无效 assistant wire message。
+          if (part.type === "reasoning") return part.text.trim().length > 0
           return true
         })
         if (filtered.length === 0) return undefined

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import type { ModelMessage } from "ai"
 import { ProviderTransform } from "@/provider/transform"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 
@@ -1069,7 +1070,7 @@ describe("ProviderTransform.schema - moonshot $ref siblings", () => {
 })
 
 describe("ProviderTransform.message - DeepSeek reasoning content", () => {
-  test("DeepSeek with tool calls includes reasoning_content in providerOptions", () => {
+  test("DeepSeek preserves explicit and required empty reasoning_content", () => {
     const msgs = [
       {
         role: "assistant",
@@ -1082,6 +1083,10 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
             input: { command: "echo hello" },
           },
         ],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Answer" }],
       },
     ] as any[]
 
@@ -1124,7 +1129,7 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
       {},
     )
 
-    expect(result).toHaveLength(1)
+    expect(result).toHaveLength(2)
     expect(result[0].content).toEqual([
       {
         type: "text",
@@ -1138,6 +1143,9 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
       },
     ])
     expect(result[0].providerOptions?.openaiCompatible?.reasoning_content).toBe("Let me think about this...")
+    // DeepSeek 的兼容分支位于公共空内容过滤之后，无显式 reasoning 时仍必须补回空字段。
+    expect(result[1].content).toEqual([{ type: "text", text: "Answer" }])
+    expect(result[1].providerOptions?.openaiCompatible?.reasoning_content).toBe("")
   })
 
   test("Non-DeepSeek providers leave reasoning content unchanged", () => {
@@ -1734,12 +1742,13 @@ describe("ProviderTransform.message - openai-compatible non-empty assistant cont
     name: "Kimi K3",
     capabilities: {
       temperature: true,
-      reasoning: false,
+      reasoning: true,
       attachment: true,
       toolcall: true,
       input: { text: true, audio: false, image: true, video: false, pdf: false },
       output: { text: true, audio: false, image: false, video: false, pdf: false },
-      interleaved: false,
+      // Kimi 的真实 capability 会在空内容过滤后执行 reasoning_content lowering，fixture 必须覆盖该顺序。
+      interleaved: { field: "reasoning_content" },
     },
     cost: { input: 0.003, output: 0.015, cache: { read: 0.0003, write: 0.00375 } },
     limit: { context: 200000, output: 8192 },
@@ -1771,6 +1780,7 @@ describe("ProviderTransform.message - openai-compatible non-empty assistant cont
         role: "assistant",
         content: [
           { type: "text", text: "" },
+          { type: "reasoning", text: "" },
           { type: "tool-call", toolCallId: "tc1", toolName: "bash", input: { command: "ls" } },
         ],
       },
@@ -1779,10 +1789,49 @@ describe("ProviderTransform.message - openai-compatible non-empty assistant cont
     const result = ProviderTransform.message(msgs, oaiCompatibleModel, {}) as any[]
 
     expect(result).toHaveLength(1)
-    // 空 text part 被过滤后仅剩 tool-call，补充空格 text 使 content 非空
+    // 空 reasoning 与空 text 都可丢弃；Tool call 是可重放语义，仍由既有空格保证 wire content 非空。
     expect(result[0].content).toHaveLength(2)
     expect(result[0].content[0]).toEqual({ type: "text", text: " " })
     expect(result[0].content[1].type).toBe("tool-call")
+  })
+
+  test("drops assistant messages whose only part is empty reasoning", () => {
+    const msgs: ModelMessage[] = [
+      {
+        role: "assistant",
+        content: [{ type: "reasoning", text: "" }],
+      },
+    ]
+
+    const result = ProviderTransform.message(msgs, oaiCompatibleModel, {})
+
+    // 复现 Kimi retry 留下的独立 reasoning block，断言 Provider adapter 的对外消息合同。
+    // 该断言不依赖内部 helper，防止 interleaved lowering 再生成 wire content:""。
+    expect(result).toEqual([])
+  })
+
+  test("preserves whitespace-surrounded non-empty reasoning", () => {
+    const msgs: ModelMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "  thinking  " },
+          { type: "text", text: "Answer" },
+        ],
+      },
+    ]
+
+    const result = ProviderTransform.message(msgs, oaiCompatibleModel, {})
+
+    // 前后空白不等于空 reasoning，语义文本及其原始间隔必须完整进入 reasoning_content。
+    // 该断言观察 Provider adapter 的公开输出，不绑定内部过滤函数或调用次数。
+    expect(result).toEqual([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Answer" }],
+        providerOptions: { openaiCompatible: { reasoning_content: "  thinking  " } },
+      },
+    ])
   })
 
   test("does not add space when assistant message already has non-empty text", () => {
