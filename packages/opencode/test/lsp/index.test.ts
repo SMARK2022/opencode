@@ -407,58 +407,120 @@ describe("lsp.spawn", () => {
       (dir) =>
         Effect.gen(function* () {
           const lsp = yield* LSP.Service
-          const observed = { shutdowns: 0, create: LSPClient.create }, create = spyOn(LSPClient, "create").mockImplementation(async (input) => { const client = await observed.create(input); return { ...client, shutdown: async () => { observed.shutdowns++; await client.shutdown() } } })
+          const observed = { shutdowns: 0, create: LSPClient.create }
+          const create = spyOn(LSPClient, "create").mockImplementation(async (input) => {
+            const client = await observed.create(input)
+            return {
+              ...client,
+              shutdown: async () => {
+                observed.shutdowns++
+                await client.shutdown()
+              },
+            }
+          })
           yield* Effect.addFinalizer(() => Effect.sync(() => create.mockRestore()))
+
+          // prune 认 client.root 是否存在，不认 process.cwd。
+          // fake 进程 cwd 固定为 instance 目录，避免 Windows 因 cwd 锁住 root 而无法删/改名目录。
+          // Effect.gen 的 JS finally 在 Effect 失败时不执行；spawn/root spy 必须按 iteration 用 scoped finalizer 恢复。
           for (const terminal of ["root", "process"] as const) {
-            const root = path.join(dir, terminal), file = path.join(root, "index.ts")
-            let child: ReturnType<typeof lspSpawn> | undefined
+            const root = path.join(dir, terminal)
+            const file = path.join(root, "index.ts")
             yield* Effect.promise(() => fs.mkdir(root, { recursive: true }))
             yield* Effect.promise(() => Bun.write(file, "export {}\n"))
-            const resolveRoot = spyOn(LSPServer.Typescript, "root").mockResolvedValue(root)
-            const spawn = spyOn(LSPServer.Typescript, "spawn").mockImplementation(async () => ({ process: (child = lspSpawn(process.execPath, [fakeServerPath], { cwd: root })) }))
-            try {
-              yield* lsp.touchFile(file)
-              expect((yield* lsp.status()).some((item) => item.id === "typescript")).toBe(true)
-              if (!child) return yield* Effect.die(new Error("fake LSP process was not captured"))
-              const processHandle = child
-              // root 与 child exit 都必须进入 exact-entry detach/shutdown 终态，而不是只隐藏 status row。
-              if (terminal === "root") yield* Effect.promise(() => fs.rm(root, { recursive: true, force: true }))
-              else yield* Effect.promise(() => Process.stop(processHandle))
-              yield* pollWithTimeout(
-                lsp.status().pipe(Effect.map((rows) => (!rows.some((item) => item.id === "typescript") && observed.shutdowns === (terminal === "root" ? 1 : 2) ? true : undefined))),
-                `${terminal} terminal did not remove LSP client`,
-              )
-            } finally {
-              resolveRoot.mockRestore()
-              spawn.mockRestore()
-            }
+            yield* Effect.scoped(
+              Effect.gen(function* () {
+                let child: ReturnType<typeof lspSpawn> | undefined
+                const resolveRoot = spyOn(LSPServer.Typescript, "root").mockResolvedValue(root)
+                const spawn = spyOn(LSPServer.Typescript, "spawn").mockImplementation(async () => ({
+                  process: (child = lspSpawn(process.execPath, [fakeServerPath], { cwd: dir })),
+                }))
+                yield* Effect.addFinalizer(() =>
+                  Effect.sync(() => {
+                    resolveRoot.mockRestore()
+                    spawn.mockRestore()
+                  }),
+                )
+                yield* lsp.touchFile(file)
+                expect((yield* lsp.status()).some((item) => item.id === "typescript")).toBe(true)
+                if (!child) return yield* Effect.die(new Error("fake LSP process was not captured"))
+                const processHandle = child
+                // root 消失与 child exit 都必须 exact-entry detach/shutdown，而不是只从 status 列表隐藏。
+                if (terminal === "root") yield* Effect.promise(() => fs.rm(root, { recursive: true, force: true }))
+                else yield* Effect.promise(() => Process.stop(processHandle))
+                yield* pollWithTimeout(
+                  lsp.status().pipe(
+                    Effect.map((rows) =>
+                      !rows.some((item) => item.id === "typescript") && observed.shutdowns === (terminal === "root" ? 1 : 2)
+                        ? true
+                        : undefined,
+                    ),
+                  ),
+                  `${terminal} terminal did not remove LSP client`,
+                )
+              }),
+            )
           }
+
+          // handoff：新 generation 接管 inflight spawn；reload：无接管者时 disposed State 清孤儿；
+          // missing-root：initialize 完成前 root 消失则不得登记可用 client，进程须退出。
           const sessionID = SessionID.make("ses_lsp_stale_generation")
           for (const transition of ["handoff", "reload", "missing-root"] as const) {
-            const root = path.join(dir, transition), file = path.join(root, "index.ts")
+            const root = path.join(dir, transition)
+            const file = path.join(root, "index.ts")
             const [started, release] = yield* Effect.all([Deferred.make<void>(), Deferred.make<void>()])
-            let child: ReturnType<typeof lspSpawn> | undefined
             yield* Effect.promise(() => fs.mkdir(root, { recursive: true }))
             yield* Effect.promise(() => Bun.write(file, "export {}\n"))
-            const resolveRoot = spyOn(LSPServer.Typescript, "root").mockResolvedValue(root)
-            const spawn = spyOn(LSPServer.Typescript, "spawn").mockImplementation(async () => { child = lspSpawn(process.execPath, [fakeServerPath], { cwd: root }); Effect.runSync(Deferred.succeed(started, undefined)); await Effect.runPromise(Deferred.await(release)); return { process: child } })
-            try {
-              const touch = yield* Effect.gen(function* () {
-                yield* lsp.init()
-                yield* lsp.touchFile(file)
-              }).pipe(LSP.withSession(sessionID, Effect.void), Effect.forkChild)
-              yield* awaitWithTimeout(Deferred.await(started), "LSP spawn did not reach the controlled boundary")
+            // 与 terminal 环相同：scoped finalizer 保证本 transition 失败也不会把 mock 泄漏到下一轮。
+            yield* Effect.scoped(
+              Effect.gen(function* () {
+                let child: ReturnType<typeof lspSpawn> | undefined
+                const resolveRoot = spyOn(LSPServer.Typescript, "root").mockResolvedValue(root)
+                const spawn = spyOn(LSPServer.Typescript, "spawn").mockImplementation(async () => {
+                  // cwd=dir 使 missing-root 的 rename(root) 在 Windows 上可达，仍测 client.root 复验。
+                  child = lspSpawn(process.execPath, [fakeServerPath], { cwd: dir })
+                  Effect.runSync(Deferred.succeed(started, undefined))
+                  await Effect.runPromise(Deferred.await(release))
+                  return { process: child }
+                })
+                yield* Effect.addFinalizer(() =>
+                  Effect.sync(() => {
+                    resolveRoot.mockRestore()
+                    spawn.mockRestore()
+                  }),
+                )
+                const touch = yield* Effect.gen(function* () {
+                  yield* lsp.init()
+                  yield* lsp.touchFile(file)
+                }).pipe(LSP.withSession(sessionID, Effect.void), Effect.forkChild)
+                yield* awaitWithTimeout(Deferred.await(started), "LSP spawn did not reach the controlled boundary")
 
-              // 新 token 必须接管同一 spawn；没有接管者的 disposed State 仍要销毁孤儿。
-              const handoff = Effect.yieldNow.pipe(Effect.andThen(Deferred.succeed(release, undefined)), Effect.forkChild, Effect.andThen(touchAs(lsp, sessionID, file)))
-              yield* (transition === "handoff" ? handoff : (transition === "missing-root" ? Effect.promise(() => fs.rename(root, `${root}.gone`)) : Effect.promise(() => disposeInstance(dir))).pipe(Effect.andThen(Deferred.succeed(release, undefined))))
-              yield* Fiber.join(touch)
-              if (transition === "missing-root") yield* pollWithTimeout(Effect.sync(() => child && (child.exitCode !== null || child.signalCode !== null) ? true : undefined), "missing-root client process did not exit")
-              expect((yield* lsp.status()).filter((item) => item.id === "typescript")).toEqual(transition === "handoff" ? [expect.objectContaining({ sessionIDs: [sessionID] })] : [])
-            } finally {
-              resolveRoot.mockRestore()
-              spawn.mockRestore()
-            }
+                // 新 token 接管同一 spawn；无接管者时 disposed State / 消失 root 仍须销毁孤儿。
+                const handoff = Effect.yieldNow.pipe(
+                  Effect.andThen(Deferred.succeed(release, undefined)),
+                  Effect.forkChild,
+                  Effect.andThen(touchAs(lsp, sessionID, file)),
+                )
+                yield* (transition === "handoff"
+                  ? handoff
+                  : (transition === "missing-root"
+                      ? Effect.promise(() => fs.rename(root, `${root}.gone`))
+                      : Effect.promise(() => disposeInstance(dir))
+                    ).pipe(Effect.andThen(Deferred.succeed(release, undefined))))
+                yield* Fiber.join(touch)
+                if (transition === "missing-root") {
+                  yield* pollWithTimeout(
+                    Effect.sync(() =>
+                      child && (child.exitCode !== null || child.signalCode !== null) ? true : undefined,
+                    ),
+                    "missing-root client process did not exit",
+                  )
+                }
+                expect((yield* lsp.status()).filter((item) => item.id === "typescript")).toEqual(
+                  transition === "handoff" ? [expect.objectContaining({ sessionIDs: [sessionID] })] : [],
+                )
+              }),
+            )
           }
         }),
       { config: typescriptOnly },
