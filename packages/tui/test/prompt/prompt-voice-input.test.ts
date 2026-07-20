@@ -922,8 +922,8 @@ describe("prompt voice input", () => {
 })
 
 describe("voiceInputStatusText compact", () => {
-  // #491：compact 矩阵锁住主 Prompt 单行预算的四个阶段文案与兜底快捷键提示。
-  // #491：compact 只缩短主 Prompt 展示；recording 仍保留 stop 快捷键提示。
+  // #491/#505：三面板统一 short profile——主 Prompt / DialogPrompt / QuestionPrompt 共用 compact 文案。
+  // recording 仍保留 stop 快捷键，缩短阶段词不能牺牲用户如何停止录音的信息。
   test("provides compact variants while keeping the stop shortcut visible", () => {
     const idle = { type: "idle" as const }
     expect(voiceInputStatusText(idle, "alt+v")).toBe("")
@@ -939,5 +939,16 @@ describe("voiceInputStatusText compact", () => {
     expect(voiceInputStatusText({ type: "transcribing" }, "alt+v", 4_400, { compact: true })).toBe(
       "Transcribing...",
     )
+  })
+
+  // INV-01 硬门禁：formatter 双 profile 不能证明 call-site 选择；任一 consumer 漏传 compact 必须失败。
+  // 完整挂载 Question/Dialog 生命周期成本过高，因此对生产 call-site 源码做 fail-capable 契约断言。
+  test("DialogPrompt and QuestionPrompt call sites select the compact voice profile", async () => {
+    const root = path.resolve(import.meta.dir, "../../src")
+    const dialogSource = await Bun.file(path.join(root, "ui/dialog-prompt.tsx")).text()
+    const questionSource = await Bun.file(path.join(root, "routes/session/question.tsx")).text()
+    // 必须同时包含 voiceInputStatusText 调用与 compact: true，防止只写注释或死代码。
+    expect(dialogSource).toMatch(/voiceInputStatusText\([\s\S]*?compact:\s*true/)
+    expect(questionSource).toMatch(/voiceInputStatusText\([\s\S]*?compact:\s*true/)
   })
 })

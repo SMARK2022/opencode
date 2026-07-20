@@ -581,16 +581,19 @@ test("opens the original retry error from the compact details affordance", async
 
       // footer 只展示压平后的单行摘要；换行和重复空格不能重新占用状态栏宽度。
       const lines = frame.split("\n")
-      const detailsY = lines.findIndex((line) => line.includes("details"))
+      const detailsToken = "(details)"
+      const detailsY = lines.findIndex((line) => line.includes(detailsToken))
       const footerLine = lines[detailsY] ?? ""
-      expect(footerLine).toContain("Retry provider request f")
+      // #505：中间截断保留可辨识后缀与详情入口；不再要求完整前缀连续出现。
+      expect(footerLine).toContain("Retry provider request")
       expect(footerLine).toContain("tail-81-to-120")
+      expect(footerLine).toContain(detailsToken)
       expect(footerLine).not.toContain("socket   closed")
       expect(footerLine).not.toContain("click to expand")
-      const detailsX = lines[detailsY]?.indexOf("details") ?? -1
+      const detailsX = lines[detailsY]?.indexOf(detailsToken) ?? -1
       expect(detailsX).toBeGreaterThanOrEqual(0)
       // 坐标来自最终字符帧中的可见令牌，确保测试覆盖用户实际能点击的命中区域。
-      const targetX = detailsX + Math.floor("details".length / 2)
+      const targetX = detailsX + Math.floor(detailsToken.length / 2)
       app.renderer.clearSelection()
       await app.mockMouse.moveTo(targetX, detailsY)
       await app.renderOnce()
@@ -602,6 +605,45 @@ test("opens the original retry error from the compact details affordance", async
       // 对话框保留三连空格，证明压平只属于 footer 展示层，没有污染诊断原文。
       expect(frame).toContain("The socket   closed before the response completed")
       expect(frame).toContain("diagnostic-tail-81-to-120")
+    },
+    stateDir,
+    { width: 160, promptWidth: 100 },
+  )
+})
+
+// #505：短错误必须与红色 (details) 左起成组；flexGrow 会把详情推到行尾并制造“两端对齐”假象。
+test("keeps short retry details left-aligned and error-colored", async () => {
+  await using tmp = await tmpdir()
+  const stateDir = path.join(tmp.path, "state")
+  await fs.mkdir(stateDir, { recursive: true })
+  await Bun.write(path.join(stateDir, "kv.json"), "{}")
+
+  await withPrompt(
+    () => undefined,
+    async (_prompt, _route, app, context) => {
+      emitSessionStatus(context, "evt-prompt-footer-short-details", {
+        type: "retry",
+        attempt: 1,
+        next: Date.now() + 9_000,
+        message: "Short error",
+      })
+      await wait(() => context.sync.data.session_status?.[sessionID]?.type === "retry")
+      const frame = await settlePromptFrame(app)
+
+      const footerLine = frame.split("\n").find((line) => line.includes("(details)")) ?? ""
+      // 连续 token 证明 summary 未占用剩余空白把 details 推远。
+      expect(footerLine).toContain("Short error (details)")
+
+      // 色彩断言走 spans： fg 归一为字符串后比较，两个 span 必须同色（error）。
+      const spans = (app as unknown as { captureSpans: () => { lines: Array<{ spans: Array<{ text: string; fg?: unknown }> }> } }).captureSpans()
+      const line = spans.lines.find((item) => item.spans.some((span) => span.text.includes("(details)")))
+      const errorSpan = line?.spans.find((span) => span.text.includes("Short error"))
+      const detailsSpan = line?.spans.find((span) => span.text.includes("(details)"))
+      expect(errorSpan).toBeDefined()
+      expect(detailsSpan).toBeDefined()
+      const colorKey = (fg: unknown) => JSON.stringify(typeof fg === "function" ? fg.name : fg)
+      // 详情入口与错误摘要同色，避免 muted 弱化可点击诊断入口。
+      expect(colorKey(detailsSpan!.fg)).toBe(colorKey(errorSpan!.fg))
     },
     stateDir,
     { width: 160, promptWidth: 100 },
