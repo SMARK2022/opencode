@@ -293,13 +293,15 @@ describe("SessionProjector", () => {
       yield* SessionInput.promoteSteers(db, events, sessionID, first.admittedSeq)
       const assistantMessageID = SessionMessage.ID.make("msg_diff_assistant")
       yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID, timestamp: created, agent: "build", model, snapshot: "tree_before" })
-      const complete = (id: SessionMessage.ID, callID: string, name: string, structured: Record<string, unknown>) => Effect.gen(function* () {
+      const complete = (id: SessionMessage.ID, callID: string, name: string, structured: Record<string, unknown>, input: Record<string, unknown> = {}) => Effect.gen(function* () {
         yield* events.publish(SessionEvent.Tool.Input.Started, { sessionID, assistantMessageID: id, callID, name, timestamp: created })
-        yield* events.publish(SessionEvent.Tool.Called, { sessionID, assistantMessageID: id, callID, tool: name, input: {}, provider: { executed: false }, timestamp: created })
+        yield* events.publish(SessionEvent.Tool.Called, { sessionID, assistantMessageID: id, callID, tool: name, input, provider: { executed: false }, timestamp: created })
         yield* events.publish(SessionEvent.Tool.Success, { sessionID, assistantMessageID: id, callID, structured, content: [{ type: "text", text: "native output ".repeat(600) }], provider: { executed: false }, timestamp: created })
       })
       // 真实完成投影同时覆盖三种工具形状、嵌套Location和最终格式化diff，不使用展示正文反推。
-      yield* complete(assistantMessageID, "edit", "edit", { files: [{ file: "a.ts", patch: "+edit\n", additions: 1, deletions: 0, status: "modified" }] })
+      const truth = { path: "a.ts", edits: [{ oldString: "\u201Cbefore\u201D", newString: "after" }] }
+      yield* complete(assistantMessageID, "edit", "edit", { files: [{ file: "a.ts", patch: "+edit\n", additions: 1, deletions: 0, status: "modified" }], syncInput: truth },
+        { path: "a.ts", oldString: '"before"', newString: "after" })
       yield* complete(assistantMessageID, "patch", "apply_patch", { files: [
         { file: "a.ts", patch: "+patch\n", additions: 1, deletions: 0, status: "modified" },
         { file: "gone.ts", patch: "-gone\n", additions: 0, deletions: 1, status: "deleted" },
@@ -308,6 +310,10 @@ describe("SessionProjector", () => {
         diff: "--- before\n+++ after\n+formatted\n", formattedContent: "formatted\n" })
       const expected = (yield* SessionHistory.load(db, sessionID)).find(message => message.id === assistantMessageID)
       if (!expected || expected.type !== "assistant") return yield* Effect.die("Missing native tool fixture")
+      // 整参数面替换旧字段，暂态真值不在 structured 与历史输入重复保存。
+      const edited = expected.content.find(part => part.type === "tool" && part.id === "edit")
+      expect(edited).toMatchObject({ state: { input: truth } })
+      expect(edited && "state" in edited && edited.state.status === "completed" ? edited.state.structured : undefined).not.toHaveProperty("syncInput")
       const before = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get()
       // 两次独立冻结分别检验普通history和runner入口，不能把第二次热读冒充恢复。
       for (const runner of [false, true]) {

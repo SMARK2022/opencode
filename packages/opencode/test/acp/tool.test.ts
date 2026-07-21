@@ -95,6 +95,57 @@ describe("acp tool conversion", () => {
     ])
   })
 
+  // #514：edit 参数面迁移 edits[] 后，_syncInput 回写的 state.input 不再含顶层 oldString；
+  // ACP diff 展示必须优先读 edits[0]，否则新会话的 completed edit diff 内容恒空。
+  test("edit diff prefers edits[0] over legacy top-level fields", () => {
+    expect(
+      completedToolContent("edit", {
+        status: "completed",
+        input: {
+          filePath: "/tmp/file.ts",
+          edits: [{ oldString: "“hello”", newString: '"hi"' }],
+        },
+        output: "edited /tmp/file.ts",
+      }),
+    ).toEqual([
+      {
+        type: "content",
+        content: { type: "text", text: "edited /tmp/file.ts" },
+      },
+      {
+        type: "diff",
+        path: "/tmp/file.ts",
+        oldText: "“hello”",
+        newText: '"hi"',
+      },
+    ])
+  })
+
+  test("edit diff falls back to legacy top-level fields for history replay", () => {
+    expect(
+      completedToolContent("edit", {
+        status: "completed",
+        input: {
+          filePath: "/tmp/legacy.ts",
+          oldString: "before",
+          newString: "after",
+        },
+        output: "edited /tmp/legacy.ts",
+      }),
+    ).toEqual([
+      {
+        type: "content",
+        content: { type: "text", text: "edited /tmp/legacy.ts" },
+      },
+      {
+        type: "diff",
+        path: "/tmp/legacy.ts",
+        oldText: "before",
+        newText: "after",
+      },
+    ])
+  })
+
   test("omits edit diffs until old and new text fields exist", () => {
     expect(
       completedToolContent("write", {

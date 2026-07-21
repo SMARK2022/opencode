@@ -323,8 +323,19 @@ function locationFrom(...values: unknown[]): ToolCallLocation[] {
 }
 
 function diffContent(input: ToolInput): ToolCallContent[] {
-  const oldText = stringValue(input.oldString)
-  const newText = stringValue(input.newString) ?? stringValue(input.content)
+  // #514：edit 参数面已迁移为 edits[]（_syncInput 回写后 state.input 只含 { filePath, edits }）；
+  // ACP diff 展示优先 edits[0]，历史会话仍可能只有顶层 oldString/newString，需双形态兼容。
+  // 完整 multi-edit 统一 diff 非本任务目标，空 multi 体可接受（与源 hunk 同一裁定）。
+  const edits = Array.isArray(input.edits) ? input.edits : []
+  const first = edits[0] && typeof edits[0] === "object" ? (edits[0] as Record<string, unknown>) : undefined
+  const oldText =
+    typeof first?.["oldString"] === "string"
+      ? first["oldString"]
+      : stringValue(input.oldString)
+  const newText =
+    typeof first?.["newString"] === "string"
+      ? first["newString"]
+      : stringValue(input.newString) ?? stringValue(input.content)
   if (oldText === undefined || newText === undefined) return []
 
   return [

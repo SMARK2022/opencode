@@ -7,6 +7,7 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FileMutation } from "@opencode-ai/core/file-mutation"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Format } from "@opencode-ai/core/format"
 import { Location } from "@opencode-ai/core/location"
 import { LocationMutation } from "@opencode-ai/core/location-mutation"
 import { PermissionV2 } from "@opencode-ai/core/permission"
@@ -79,7 +80,7 @@ const filesystem = Layer.effect(
   }),
 ).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
 
-const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, history: ReturnType<typeof toolHistory> = []) => {
+const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, history: ReturnType<typeof toolHistory> = [], formatter: Format.Interface["file"] = () => Effect.succeed(false)) => {
   const activeLocation = Layer.succeed(
     Location.Service,
     Location.Service.of(location({ directory: AbsolutePath.make(directory) })),
@@ -100,6 +101,8 @@ const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Inte
           [FSUtil.node, filesystem],
           [Location.node, activeLocation],
           [PermissionV2.node, permission],
+          // 仅替换进程型 formatter，文件条件提交及工具真实结算保持原实现。
+          [Format.node, Layer.succeed(Format.Service, { file: formatter })],
           [SessionStore.node, Layer.mock(SessionStore.Service, { context: id => Effect.succeed(id === sessionID ? history : []) })],
           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
         ],
@@ -108,7 +111,7 @@ const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Inte
   )
 }
 
-const call = (input: typeof EditTool.Input.Type, id = "call-edit") => ({
+const call = (input: typeof EditTool.Input.Type | { path: string; oldString: string; newString: string; replaceAll?: boolean }, id = "call-edit") => ({
   sessionID,
   ...toolIdentity,
   call: { type: "tool-call" as const, id, name: "edit", input },
@@ -117,6 +120,50 @@ const call = (input: typeof EditTool.Input.Type, id = "call-edit") => ({
 const it = testEffect(Layer.empty)
 
 describe("EditTool", () => {
+  it.live("applies snapshot batches and normalized literals through the same Native leaf", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      tmp => Effect.gen(function* () {
+        reset()
+        const target = path.join(tmp.path, "batch.txt")
+        const run = (edits: typeof EditTool.Input.Type["edits"]) => withTool(tmp.path,
+          registry => settleTool(registry, call({ path: "batch.txt", edits })), toolHistory("batch.txt"))
+        yield* Effect.promise(() => fs.writeFile(target, "alpha\nbeta\ngamma\n"))
+        // 逆序输入且替换长度不同，必须按同一快照坐标倒序写入。
+        const batch = yield* run([{ oldString: "gamma", newString: "long-G" }, { oldString: "alpha", newString: "A" }])
+        expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("A\nbeta\nlong-G\n")
+        expect(batch.output?.structured).toMatchObject({ replacements: 2 })
+        expect(writes).toHaveLength(1)
+        for (const example of [
+          { before: "foo", edits: [{ oldString: "foo", newString: "bar" }, { oldString: "bar", newString: "baz" }], reason: "Could not find" },
+          { before: "abcdef", edits: [{ oldString: "abcd", newString: "X" }, { oldString: "cdef", newString: "Y" }], reason: "overlap" },
+        ]) {
+          reset()
+          yield* Effect.promise(() => fs.writeFile(target, example.before))
+          expect((yield* run(example.edits)).result).toMatchObject({ type: "error", value: expect.stringContaining(example.reason) })
+          expect(writes).toEqual([])
+          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(example.before)
+        }
+        reset()
+        yield* Effect.promise(() => fs.writeFile(target, "pad  \nsay \u201Chello\u201D end\n"))
+        const quoted = yield* run([{ oldString: '"hello"', newString: "$& $1" }])
+        expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("pad  \nsay $& $1 end\n")
+        expect(quoted.output?.structured).toMatchObject({ syncInput: { path: "batch.txt", edits: [{ oldString: "\u201Chello\u201D", newString: "$& $1" }] } })
+        // formatter 真正改写磁盘后，回执展示最终 diff，历史局部 newString 仍保留用户意图。
+        const formatted = yield* withTool(tmp.path,
+          registry => settleTool(registry, call({ path: "batch.txt", edits: [{ oldString: "end", newString: "done" }] })),
+          toolHistory("batch.txt", "edit"), filepath => Effect.promise(async () => {
+            await fs.writeFile(filepath, (await fs.readFile(filepath, "utf8")) + "\n")
+            return true
+          }))
+        expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("pad  \nsay $& $1 done\n\n")
+        expect(formatted.result).toMatchObject({ type: "text", value: expect.stringContaining("+say $& $1 done") })
+        expect(formatted.output?.structured).toMatchObject({ syncInput: { edits: [{ oldString: "end", newString: "done" }] } })
+      }),
+      tmp => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("registers and replaces relative exact text through FileMutation once", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -152,6 +199,7 @@ describe("EditTool", () => {
                 })
                 expect(settled.output?.structured).toEqual({
                   replacements: 1,
+                  syncInput: { path: "hello.txt", edits: [{ oldString: "before", newString: "after" }] },
                   files: [
                     {
                       file: "hello.txt",
@@ -221,7 +269,7 @@ describe("EditTool", () => {
               expect(result.type).toBe("text")
               expect(assertions.map((input) => input.action)).toEqual(["external_directory", "edit"])
               // 授权证据保留原始替换串，不通过提前读取外部文件生成第二份内容。
-              expect(assertions[0]?.metadata).toMatchObject({ action_kind: "tool", tool: "edit", operation: "edit", oldString: "before", newString: "after" })
+                expect(assertions[0]?.metadata).toMatchObject({ action_kind: "tool", tool: "edit", operation: "edit", edits: [{ oldString: "before", newString: "after" }] })
               expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after")
               expect(writes).toHaveLength(1)
             }),
@@ -354,11 +402,11 @@ describe("EditTool", () => {
                 ).toEqual({
                   type: "error",
                   value:
-                    "Found multiple exact matches for oldString. Provide more surrounding context or set replaceAll to true.",
+                    "Found multiple matches for oldString. Provide more surrounding context to make the match unique.",
                 })
                 // 重叠literal也是第二候选，不能只按replaceAll的非重叠计数放行。
                 yield* Effect.promise(() => fs.writeFile(target, "aaaa"))
-                expect(yield* executeTool(registry, call({ path: "matches.txt", oldString: "aa", newString: "x" }))).toMatchObject({ type: "error", value: expect.stringContaining("multiple exact matches") })
+                expect(yield* executeTool(registry, call({ path: "matches.txt", oldString: "aa", newString: "x" }))).toMatchObject({ type: "error", value: expect.stringContaining("multiple matches") })
                 // 候选行号是实际窗口起点，而非带上一行context的起点。
                 yield* Effect.promise(() => fs.writeFile(target, "header\nconst preferred = true\n"))
                 const missing = yield* executeTool(registry, call({ path: "matches.txt", oldString: "const preferred = false", newString: "x" }))
@@ -488,7 +536,7 @@ test("keeps the locked edit schema, semantics docstring, and deferred TODOs visi
   )
   const schema = definition[0]?.inputSchema as { readonly properties?: Record<string, unknown> }
 
-  expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["newString", "oldString", "path", "replaceAll"])
+  expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["edits", "path"])
   expect(source).toContain(
     "absolute external paths retain mutation capability through a separate\n * external_directory approval before edit approval.",
   )

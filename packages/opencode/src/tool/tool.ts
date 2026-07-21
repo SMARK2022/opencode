@@ -62,6 +62,8 @@ export interface Def<
   description: string
   parameters: Parameters
   jsonSchema?: JSONSchema7
+  /** #514：在 Schema.decode 之前折叠兼容入参（如 edit 的 legacy oldString → edits[]）。 */
+  prepareArguments?(args: unknown): unknown
   execute(args: Schema.Schema.Type<Parameters>, ctx: Context): Effect.Effect<ExecuteResult<M>>
   formatValidationError?(error: unknown): string
 }
@@ -155,7 +157,10 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           ...(ctx.callID ? { "tool.call_id": ctx.callID } : {}),
         }
         return Effect.gen(function* () {
-          const decoded = yield* decode(args).pipe(
+          // #514：prepareArguments 必须先于 Schema.decode：否则无法在 wire 上只暴露 edits[]
+          // 的同时兼容 legacy 顶层 oldString/newString。该钩子只做入参折叠，不改变成功语义。
+          const prepared = toolInfo.prepareArguments ? toolInfo.prepareArguments(args) : args
+          const decoded = yield* decode(prepared).pipe(
             Effect.mapError(
               (error) =>
                 new InvalidArgumentsError({
