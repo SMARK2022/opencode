@@ -15,6 +15,7 @@ import { trimDiff } from "./edit"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import * as Bom from "@/util/bom"
 import { normalizeLineEndings } from "@/util/line-ending"
+import * as Mutation from "./file-mutation-coordinator"
 
 export const Parameters = Schema.Struct({
   content: Schema.String.annotate({ description: "The content to write to the file" }),
@@ -46,12 +47,20 @@ export const WriteTool = Tool.define(
             metadata: { action_kind: "tool", tool: "write", operation: "write", content: params.content },
           })
 
-          const exists = yield* fs.existsSafe(filepath)
-          const source = exists ? yield* Bom.readFile(fs, filepath) : { bom: false, text: "" }
+          // write proposal 使用同一次 raw read 捕获 expected state，避免 Permission 后提交旧内容。
+          const proposal = yield* Mutation.read(fs, filepath)
+          if (proposal.version.state === "other") {
+            if (proposal.version.kind === "Directory") throw new Error(`Path is a directory, not a file: ${filepath}`)
+            throw new Error(`Path is not a file: ${filepath}`)
+          }
+          const exists = proposal.version.state === "file"
+          const source = Bom.split(Mutation.decode(proposal))
+          // exists 只表示 proposal 时的 file state；commit recheck 仍以 tagged version 为准。
           const next = Bom.split(params.content)
           const desiredBom = source.bom || next.bom
           const contentOld = source.text
           const contentNew = next.text
+          // diff/metadata 仍基于 proposal 文本；formatter 后的最终内容只在 commit 内重新读取。
 
           const diff = trimDiff(
             createTwoFilesPatch(filepath, filepath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
@@ -66,12 +75,20 @@ export const WriteTool = Tool.define(
             },
           })
 
-          yield* fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
-          // [local-smark] 捕获 format 是否运行，用于后续判断是否需要检测内容变化
-          const formatted = yield* format.file(filepath)
-          if (formatted) {
-            yield* Bom.syncFile(fs, filepath, desiredBom)
-          }
+          let formatted = false
+          let finalSource = source
+          // formatter 仍在同一 commit critical section，避免第二个 mutation 看到半完成内容。
+          yield* Mutation.commit({
+            fs,
+            expected: [proposal],
+            execute: Effect.gen(function* () {
+              yield* fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
+              // [local-smark] 捕获 format 是否运行，用于后续判断是否需要检测内容变化
+              formatted = yield* format.file(filepath)
+              if (formatted) yield* Bom.syncFile(fs, filepath, desiredBom)
+              if (exists || formatted) finalSource = yield* Bom.readFile(fs, filepath)
+            }),
+          }).pipe(Effect.orDie)
           // 覆写已有文件时，基于格式化后的最终落盘内容生成 diff，供 TUI 以 git diff 形式展示
           let metadataDiff: string | undefined
           // [local-smark] 当 auto-format 改变了写入内容时，将格式化后的内容
@@ -83,7 +100,7 @@ export const WriteTool = Tool.define(
           // 覆写和新文件都检查：新文件也可能被 formatter 改变内容。
           let formattedContent: string | undefined
           if (exists || formatted) {
-            const finalSource = yield* Bom.readFile(fs, filepath)
+            // finalSource 在 commit lock 内读取，metadata 不会引用另一个 mutation 的中间内容。
             if (exists) {
               metadataDiff = trimDiff(
                 createTwoFilesPatch(

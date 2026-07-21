@@ -1,5 +1,5 @@
 import * as path from "path"
-import { Effect, Schema, Semaphore } from "effect"
+import { Effect, Schema } from "effect"
 import * as Tool from "./tool"
 import { LSP } from "@/lsp/lsp"
 import { createTwoFilesPatch, diffLines } from "diff"
@@ -16,6 +16,7 @@ import * as Bom from "@/util/bom"
 import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
 import { closestWindow } from "@/patch/match"
 import { applyEdits, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
+import * as Mutation from "./file-mutation-coordinator"
 
 /**
  * 兼容导出：单点替换 = applyEdits 单元素，保证测试与外部调用仍见 replace API。
@@ -23,18 +24,6 @@ import { applyEdits, replace as applyExactReplace, type EditReplacement } from "
  */
 export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
   return applyExactReplace(content, oldString, newString, replaceAll)
-}
-
-const locks = new Map<string, Semaphore.Semaphore>()
-
-function lock(filePath: string) {
-  const resolvedFilePath = AppFileSystem.resolve(filePath)
-  const hit = locks.get(resolvedFilePath)
-  if (hit) return hit
-
-  const next = Semaphore.makeUnsafe(1)
-  locks.set(resolvedFilePath, next)
-  return next
 }
 
 const EditItem = Schema.Struct({
@@ -182,36 +171,46 @@ export const EditTool = Tool.define(
           let contentNew = ""
           let syncInput: { filePath: string; edits: EditReplacement[] } | undefined
 
-          yield* lock(filePath).withPermits(1)(
-            Effect.gen(function* () {
-              if (isCreate(edits)) {
-                const existed = yield* afs.existsSafe(filePath)
-                const source = existed ? yield* Bom.readFile(afs, filePath) : { bom: false, text: "" }
-                const next = Bom.split(edits[0].newString)
-                const desiredBom = source.bom || next.bom
-                contentOld = source.text
-                contentNew = next.text
-                diff = trimDiff(
-                  createTwoFilesPatch(
-                    filePath,
-                    filePath,
-                    normalizeLineEndings(contentOld),
-                    normalizeLineEndings(contentNew),
-                  ),
-                )
-                yield* ctx.ask({
-                  permission: "edit",
-                  patterns: [path.relative(instance.worktree, filePath)],
-                  always: ["*"],
-                  metadata: {
-                    filepath: filePath,
-                    diff,
-                  },
-                })
+          // 先取得与 edits[] proposal 同源的 raw bytes/version；Permission 期间不持有 mutation lock。
+          const proposal = yield* Mutation.read(afs, filePath)
+          const source = Bom.split(Mutation.decode(proposal))
+          // source.text 只供当前 edit-apply owner 使用；coordinator 不知道 edits[] 的匹配规则。
+          if (proposal.version.state === "other") {
+            if (proposal.version.kind === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
+            throw new Error(`Path is not a file: ${filePath}`)
+          }
+
+          if (isCreate(edits)) {
+            const next = Bom.split(edits[0].newString)
+            const desiredBom = source.bom || next.bom
+            const existed = proposal.version.state === "file"
+            // create/overwrite 继续允许覆盖 unchanged existing file；只有 Permission 后的变化产生 conflict。
+            contentOld = source.text
+            contentNew = next.text
+            diff = trimDiff(
+              createTwoFilesPatch(
+                filePath,
+                filePath,
+                normalizeLineEndings(contentOld),
+                normalizeLineEndings(contentNew),
+              ),
+            )
+            yield* ctx.ask({
+              permission: "edit",
+              patterns: [path.relative(instance.worktree, filePath)],
+              always: ["*"],
+              metadata: {
+                filepath: filePath,
+                diff,
+              },
+            })
+            // 旧 edit 的 create/overwrite 语义保留，只有 commit 阶段新增 state recheck。
+            yield* Mutation.commit({
+              fs: afs,
+              expected: [proposal],
+              execute: Effect.gen(function* () {
                 yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
-                if (yield* format.file(filePath)) {
-                  contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
-                }
+                if (yield* format.file(filePath)) contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
                 // create+format：若落盘与写入不同，历史 newString 改为最终磁盘内容。
                 const finalLF = normalizeLineEndings(contentNew)
                 const wroteLF = normalizeLineEndings(next.text)
@@ -219,101 +218,105 @@ export const EditTool = Tool.define(
                   filePath,
                   edits: [{ oldString: "", newString: finalLF !== wroteLF ? contentNew : edits[0].newString }],
                 }
-                yield* bus.publish(File.Event.Edited, { file: filePath })
-                yield* bus.publish(FileWatcher.Event.Updated, {
-                  file: filePath,
-                  event: existed ? "change" : "add",
-                })
-                return
+              }),
+            }).pipe(Effect.orDie)
+            // commit 成功后才发布 Edited/Updated，Permission reject 或 version conflict 不产生成功事件。
+            yield* bus.publish(File.Event.Edited, { file: filePath })
+            yield* bus.publish(FileWatcher.Event.Updated, {
+              file: filePath,
+              event: existed ? "change" : "add",
+            })
+          } else {
+            if (proposal.version.state === "absent") throw new Error(`File ${filePath} not found`)
+            contentOld = source.text
+
+            // 匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
+            const ending = detectLineEnding(contentOld)
+            const baseLF = normalizeLineEndings(contentOld)
+            // normalize 只属于 edit-apply owner 的 proposal 阶段，commit 不会重新解释模型输入。
+            const editsLF = edits.map((edit) => ({
+              oldString: normalizeLineEndings(edit.oldString),
+              newString: normalizeLineEndings(edit.newString),
+              replaceAll: edit.replaceAll,
+            }))
+
+            let applied
+            try {
+              // 单/多 edit 同一 applyEdits；失败诊断的 closest 只解释，不参与成功替换。
+              applied = applyEdits(baseLF, editsLF, filePath)
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error)
+              if (message.includes("Could not find") || message.includes("Could not find oldString")) {
+                const probe = editsLF.find((e) => baseLF.indexOf(e.oldString) === -1) ?? editsLF[0]
+                const closest = closestWindow(contentOld, convertToLineEnding(probe.oldString, ending))
+                throw new Error(
+                  message +
+                    (closest
+                      ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
+                      : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
+                )
               }
+              throw error
+            }
 
-              const info = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
-              if (!info) throw new Error(`File ${filePath} not found`)
-              if (info.type === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
-              const source = yield* Bom.readFile(afs, filePath)
-              contentOld = source.text
+            contentNew = convertToLineEnding(applied.contentNew, ending)
+            const desiredBom = source.bom || Bom.split(contentNew).bom
+            contentNew = Bom.split(contentNew).text
 
-              // 匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
-              const ending = detectLineEnding(contentOld)
-              const baseLF = normalizeLineEndings(contentOld)
-              const editsLF = edits.map((edit) => ({
-                oldString: normalizeLineEndings(edit.oldString),
-                newString: normalizeLineEndings(edit.newString),
-                replaceAll: edit.replaceAll,
-              }))
-
-              let applied
-              try {
-                // 单/多 edit 同一 applyEdits；失败诊断的 closest 只解释，不参与成功替换。
-                applied = applyEdits(baseLF, editsLF, filePath)
-              } catch (error) {
-                const message = error instanceof Error ? error.message : String(error)
-                if (message.includes("Could not find") || message.includes("Could not find oldString")) {
-                  const probe = editsLF.find((e) => baseLF.indexOf(e.oldString) === -1) ?? editsLF[0]
-                  const closest = closestWindow(contentOld, convertToLineEnding(probe.oldString, ending))
-                  throw new Error(
-                    message +
-                      (closest
-                        ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
-                        : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
-                  )
-                }
-                throw error
-              }
-
-              contentNew = convertToLineEnding(applied.contentNew, ending)
-              const desiredBom = source.bom || Bom.split(contentNew).bom
-              contentNew = Bom.split(contentNew).text
-
-              diff = trimDiff(
-                createTwoFilesPatch(
-                  filePath,
-                  filePath,
-                  normalizeLineEndings(contentOld),
-                  normalizeLineEndings(contentNew),
-                ),
-              )
-              yield* ctx.ask({
-                permission: "edit",
-                patterns: [path.relative(instance.worktree, filePath)],
-                always: ["*"],
-                metadata: {
-                  filepath: filePath,
-                  diff,
-                },
-              })
-
-              yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
-              if (yield* format.file(filePath)) {
-                contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
-              }
-              yield* bus.publish(File.Event.Edited, { file: filePath })
-              yield* bus.publish(FileWatcher.Event.Updated, {
-                file: filePath,
-                event: "change",
-              })
-              diff = trimDiff(
-                createTwoFilesPatch(
-                  filePath,
-                  filePath,
-                  normalizeLineEndings(contentOld),
-                  normalizeLineEndings(contentNew),
-                ),
-              )
-
-              // INV-16：成功后始终发完整参数面 { filePath, edits }，
-              // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
-              // actualOld 已在 applyEdits.syncEdits 中；此处只做行尾风格还原便于回放。
-              syncInput = {
+            diff = trimDiff(
+              createTwoFilesPatch(
                 filePath,
-                edits: applied.syncEdits.map((edit) => ({
-                  oldString: convertToLineEnding(edit.oldString, ending),
-                  newString: convertToLineEnding(edit.newString, ending),
-                  ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
-                })),
-              }
-            }).pipe(Effect.orDie),
-          )
+                filePath,
+                normalizeLineEndings(contentOld),
+                normalizeLineEndings(contentNew),
+              ),
+            )
+            yield* ctx.ask({
+              permission: "edit",
+              patterns: [path.relative(instance.worktree, filePath)],
+              always: ["*"],
+              metadata: {
+                filepath: filePath,
+                diff,
+              },
+            })
+
+            // applyEdits 已完成全部匹配与 overlap 校验，coordinator 只负责 stale proposal 防护。
+            yield* Mutation.commit({
+              fs: afs,
+              expected: [proposal],
+              execute: Effect.gen(function* () {
+                yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
+                if (yield* format.file(filePath)) contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+              }),
+            }).pipe(Effect.orDie)
+            // diagnostics 在 commit 后执行，LSP 观察到的是已经完成 formatter 的磁盘内容。
+            yield* bus.publish(File.Event.Edited, { file: filePath })
+            yield* bus.publish(FileWatcher.Event.Updated, {
+              file: filePath,
+              event: "change",
+            })
+            diff = trimDiff(
+              createTwoFilesPatch(
+                filePath,
+                filePath,
+                normalizeLineEndings(contentOld),
+                normalizeLineEndings(contentNew),
+              ),
+            )
+
+            // INV-16：成功后始终发完整参数面 { filePath, edits }，
+            // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
+            // actualOld 已在 applyEdits.syncEdits 中；此处只做行尾风格还原便于回放。
+            syncInput = {
+              filePath,
+              edits: applied.syncEdits.map((edit) => ({
+                oldString: convertToLineEnding(edit.oldString, ending),
+                newString: convertToLineEnding(edit.newString, ending),
+                ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
+              })),
+            }
+          }
 
           const diffOld = normalizeLineEndings(contentOld)
           const diffNew = normalizeLineEndings(contentNew)
@@ -373,7 +376,7 @@ export const EditTool = Tool.define(
             title: `${path.relative(instance.worktree, filePath)}`,
             output,
           }
-        }),
+        }).pipe(Effect.orDie),
     }
   }),
 )

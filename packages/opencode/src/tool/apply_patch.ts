@@ -18,6 +18,7 @@ import { File } from "../file"
 import { Format } from "../format"
 import * as Bom from "@/util/bom"
 import { normalizeLineEndings } from "@/util/line-ending"
+import * as Mutation from "./file-mutation-coordinator"
 
 // [local-smark] 处理单个 hunk 的独立函数，支持 per-file atomicity。
 // 调用方用 Effect.exit 捕获成功/失败，失败时收集错误继续处理其他 hunk。
@@ -32,81 +33,152 @@ type FileChange = {
   additions: number
   deletions: number
   bom: boolean
+  expected: Mutation.MutationRead[]
 }
 
-const processSingleHunk = Effect.fn("ApplyPatchTool.processSingleHunk")(function* (
-  hunk: Patch.Hunk,
-  filePath: string,
+type HunkGroup = { filePath: string; canonicalPath: string; hunks: Patch.Hunk[] }
+
+// group 代表一个最终 FileChange；它不是把多个 parser entry 当成一个 chunks 数组。
+// 这样既能一次 commit，也能保留每个 entry 的 Patch owner 语义。
+
+const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* (
+  group: HunkGroup,
   instance: InstanceContext,
   afs: AppFileSystem.Interface,
-  ctx: Tool.Context,
-  patchText: string,
 ) {
-  switch (hunk.type) {
+  const first = group.hunks[0]
+  switch (first.type) {
     case "add": {
+      if (group.hunks.length !== 1) throw new Error(`Conflicting operations for ${group.filePath}`)
+      const snapshot = yield* Mutation.read(afs, group.filePath)
+      // add 的旧 diff 语义继续从空文本计算，但 expected 保留真实 existing/missing state。
+      if (snapshot.version.state === "other") throw new Error(`Path is not a file: ${group.filePath}`)
       const oldContent = ""
-      const newContent = hunk.contents.length === 0 || hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`
+      const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
       const next = Bom.split(newContent)
       const diffOld = normalizeLineEndings(oldContent)
       const diffNew = normalizeLineEndings(next.text)
-      const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
-      let additions = 0
-      let deletions = 0
-      for (const change of diffLines(diffOld, diffNew)) {
-        if (change.added) additions += change.count || 0
-        if (change.removed) deletions += change.count || 0
-      }
-      return { filePath, oldContent, newContent: next.text, type: "add" as const, diff, additions, deletions, bom: next.bom }
+      const diff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, diffNew))
+      const { additions, deletions } = countDiff(diffOld, diffNew)
+      // add 保留既有空文本 diff 展示，同时用真实 snapshot 防止 missing/empty 混淆。
+      return { filePath: group.filePath, oldContent, newContent: next.text, type: "add" as const, diff, additions, deletions, bom: next.bom, expected: [snapshot] }
     }
     case "update": {
-      const stats = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
-      if (!stats || stats.type === "Directory") {
-        return yield* Effect.fail(new Error(`Failed to read file to update: ${filePath}`))
-      }
-      const source = yield* Bom.readFile(afs, filePath)
+      const snapshot = yield* Mutation.read(afs, group.filePath)
+      if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to update: ${group.filePath}`))
+      // update 只接受 proposal read 观察到的 file state，目录和 missing 不进入 matcher 成功域。
+      const source = Bom.split(Mutation.decode(snapshot))
+      // source BOM 随 working copy 传给 Patch owner，最终 BOM 仍由既有 Bom contract 决定。
       const oldContent = source.text
-      let newContent = oldContent
-      let bom = source.bom
+      let working = Bom.join(source.text, source.bom)
+      let movePath: string | undefined
+      let moveCanonicalPath: string | undefined
       try {
-        const fileUpdate = Patch.deriveNewContentsFromChunks(filePath, hunk.chunks, Bom.join(source.text, source.bom))
-        newContent = fileUpdate.content
-        bom = fileUpdate.bom
+        // 每个 parsed Update File entry 独立调用 Patch owner；entry 之间才共享 working copy。
+        // 下一 entry 只接收上一 entry 的最终 content，entry 内部生成文本仍由 Patch owner 隔离。
+        for (const hunk of group.hunks) {
+          if (hunk.type !== "update") throw new Error(`Conflicting operations for ${group.filePath}`)
+          const fileUpdate = Patch.deriveNewContentsFromChunks(group.filePath, hunk.chunks, working)
+          working = Bom.join(fileUpdate.content, fileUpdate.bom)
+          if (hunk.move_path) {
+            const nextMovePath = path.resolve(instance.directory, hunk.move_path)
+            const nextMoveCanonicalPath = AppFileSystem.resolve(nextMovePath)
+            if (moveCanonicalPath && moveCanonicalPath !== nextMoveCanonicalPath) {
+              throw new Error(`Conflicting move destinations for ${group.filePath}`)
+            }
+            movePath = nextMovePath
+            moveCanonicalPath = nextMoveCanonicalPath
+          }
+        }
       } catch (error) {
-        // Patch owner 仍持有失败 chunk 身份与 persisted text；Tool 只聚合其错误，不能运行第二套 matcher。
+        // 每个 parsed entry 保留 Patch owner 的 cursor 边界；Tool 只丢弃 working copy，不运行第二套 matcher。
         return yield* Effect.fail(error instanceof Error ? error : new Error(String(error)))
       }
+      const next = Bom.split(working)
       const diffOld = normalizeLineEndings(oldContent)
-      const diffNew = normalizeLineEndings(newContent)
-      const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
-      let additions = 0
-      let deletions = 0
-      for (const change of diffLines(diffOld, diffNew)) {
-        if (change.added) additions += change.count || 0
-        if (change.removed) deletions += change.count || 0
-      }
-      const movePath = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
+      const diffNew = normalizeLineEndings(next.text)
+      const diff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, diffNew))
+      const { additions, deletions } = countDiff(diffOld, diffNew)
+      const expected = [snapshot]
       if (movePath) {
-        yield* assertExternalDirectoryEffect(ctx, movePath, {
-          metadata: { action_kind: "tool", tool: "apply_patch", operation: "move", patchText },
-        })
+        // move destination 也是 proposal 的 expected state，不能只锁 source。
+        // destination 既要参与 version recheck，也要参与 canonical key 排序。
+        const destination = yield* Mutation.read(afs, movePath)
+        if (destination.version.state === "other") throw new Error(`Path is not a file: ${movePath}`)
+        expected.push(destination)
       }
-      return { filePath, oldContent, newContent, type: hunk.move_path ? "move" as const : "update" as const, movePath, diff, additions, deletions, bom }
+      return { filePath: group.filePath, oldContent, newContent: next.text, type: movePath ? "move" as const : "update" as const, movePath, diff, additions, deletions, bom: next.bom, expected }
     }
     case "delete": {
-      const source = yield* Bom.readFile(afs, filePath)
-      const contentToDelete = source.text
-      const diffOld = normalizeLineEndings(contentToDelete)
-      const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, ""))
-      let deletions = 0
-      for (const change of diffLines(diffOld, "")) {
-        if (change.removed) deletions += change.count || 0
-      }
-      return { filePath, oldContent: contentToDelete, newContent: "", type: "delete" as const, diff: deleteDiff, additions: 0, deletions, bom: source.bom }
+      if (group.hunks.length !== 1) throw new Error(`Conflicting operations for ${group.filePath}`)
+      const snapshot = yield* Mutation.read(afs, group.filePath)
+      if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to delete: ${group.filePath}`))
+      const source = Bom.split(Mutation.decode(snapshot))
+      const diffOld = normalizeLineEndings(source.text)
+      const deleteDiff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, ""))
+      const { deletions } = countDiff(diffOld, "")
+      // delete 的 proposal 只记录 source state；commit 仍在所有 patch target 校验后才执行。
+      return { filePath: group.filePath, oldContent: source.text, newContent: "", type: "delete" as const, diff: deleteDiff, additions: 0, deletions, bom: source.bom, expected: [snapshot] }
     }
     default:
-      return yield* Effect.fail(new Error(`Unknown hunk type: ${(hunk as { type: string }).type}`))
+      return yield* Effect.fail(new Error(`Unknown hunk type: ${(first as { type: string }).type}`))
   }
 })
+
+function countDiff(oldContent: string, newContent: string) {
+  let additions = 0
+  let deletions = 0
+  for (const change of diffLines(oldContent, newContent)) {
+    if (change.added) additions += change.count || 0
+    if (change.removed) deletions += change.count || 0
+  }
+  return { additions, deletions }
+}
+
+function groupHunks(hunks: Patch.Hunk[], instance: InstanceContext) {
+  const groups = new Map<string, HunkGroup>()
+  for (const hunk of hunks) {
+    const filePath = path.resolve(instance.directory, hunk.path)
+    const canonicalPath = AppFileSystem.resolve(filePath)
+    const group = groups.get(canonicalPath)
+    // realpath alias 归并到同一 source proposal，避免同一文件生成两个完整-file writes。
+    // missing leaf 继续使用 resolved fallback，保持 AppFileSystem.resolve 的既有边界。
+    if (group) group.hunks.push(hunk)
+    else groups.set(canonicalPath, { filePath, canonicalPath, hunks: [hunk] })
+  }
+  return [...groups.values()]
+}
+
+function validateOwnership(groups: HunkGroup[], instance: InstanceContext) {
+  const sources = new Set(groups.map((group) => group.canonicalPath))
+  const destinations = new Set<string>()
+  // source/destination ownership 在 Permission 前解析；锁排序不能替代语义冲突判断。
+  for (const group of groups) {
+    const first = group.hunks[0]
+    const compatible = group.hunks.every((hunk) => hunk.type === first.type) && (first.type === "update" || group.hunks.length === 1)
+    // ownership conflict 在 Permission 前拒绝；锁排序只能避免死锁，不能选择语义。
+    // 同 source 的 update entry 是唯一允许聚合的组合；add/delete 不凭猜测重建新语义。
+    if (!compatible) throw new Error(`Conflicting operations for ${group.filePath}`)
+    if (first.type !== "update") continue
+    const groupDestinations = new Set<string>()
+    for (const hunk of group.hunks) {
+      if (hunk.type !== "update") continue
+      if (!hunk.move_path) continue
+      // move 同时消费 source 并产生 destination，任何交叉 ownership 都会改变另一个操作的结果。
+      const destination = AppFileSystem.resolve(path.resolve(instance.directory, hunk.move_path))
+      if (
+        destination === group.canonicalPath ||
+        sources.has(destination) ||
+        destinations.has(destination) ||
+        (groupDestinations.size > 0 && !groupDestinations.has(destination))
+      ) {
+        throw new Error(`Conflicting mutation ownership for ${group.filePath}`)
+      }
+      groupDestinations.add(destination)
+    }
+    for (const destination of groupDestinations) destinations.add(destination)
+  }
+}
 
 export const Parameters = Schema.Struct({
   patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
@@ -148,17 +220,7 @@ export const ApplyPatchTool = Tool.define(
       const instance = yield* InstanceState.context
 
       // Validate file paths and check permissions
-      const fileChanges: Array<{
-        filePath: string
-        oldContent: string
-        newContent: string
-        type: "add" | "update" | "delete" | "move"
-        movePath?: string
-        diff: string
-        additions: number
-        deletions: number
-        bom: boolean
-      }> = []
+      const fileChanges: FileChange[] = []
 
       let totalDiff = ""
 
@@ -168,17 +230,27 @@ export const ApplyPatchTool = Tool.define(
       // 用 Effect.exit 捕获每个 hunk 的成功/失败，不中断循环。
       const hunkErrors: string[] = []
 
-      for (const hunk of hunks) {
-        const filePath = path.resolve(instance.directory, hunk.path)
-        yield* assertExternalDirectoryEffect(ctx, filePath, {
-          metadata: { action_kind: "tool", tool: "apply_patch", operation: hunk.type, patchText: params.patchText },
-        })
+      const groups = groupHunks(hunks, instance)
+      validateOwnership(groups, instance)
+      for (const group of groups) {
+        for (const hunk of group.hunks) {
+          const filePath = path.resolve(instance.directory, hunk.path)
+          yield* assertExternalDirectoryEffect(ctx, filePath, {
+            metadata: { action_kind: "tool", tool: "apply_patch", operation: hunk.type, patchText: params.patchText },
+          })
+          if (hunk.type === "update" && hunk.move_path) {
+            const movePath = path.resolve(instance.directory, hunk.move_path)
+            yield* assertExternalDirectoryEffect(ctx, movePath, {
+              metadata: { action_kind: "tool", tool: "apply_patch", operation: "move", patchText: params.patchText },
+            })
+          }
+        }
 
-        // 用 Effect.exit 捕获 hunk 处理的成功/失败
-        const exit = yield* Effect.exit(processSingleHunk(hunk, filePath, instance, afs, ctx, params.patchText))
+        // 同一 source 的所有 entry 共享一次 proposal；失败时只丢弃 working copy。
+        const exit = yield* Effect.exit(processHunkGroup(group, instance, afs))
         if (Exit.isFailure(exit)) {
           const err = Cause.squash(exit.cause)
-          hunkErrors.push(`${hunk.path}: ${err instanceof Error ? err.message : String(err)}`)
+          hunkErrors.push(`${group.filePath}: ${err instanceof Error ? err.message : String(err)}`)
           continue
         }
         const change = exit.value
@@ -219,48 +291,60 @@ export const ApplyPatchTool = Tool.define(
 
       // Apply the changes
       const updates: Array<{ file: string; event: "add" | "change" | "unlink" }> = []
+      const editedFiles: string[] = []
+      const expected = fileChanges.flatMap((change) => change.expected)
+      // 所有 source/destination 在这里一次性交给 coordinator，避免逐 change recheck 产生 partial commit。
 
-      for (const change of fileChanges) {
-        const edited = change.type === "delete" ? undefined : (change.movePath ?? change.filePath)
-        switch (change.type) {
-          case "add":
-            // Create parent directories (recursive: true is safe on existing/root dirs)
+      yield* Mutation.commit({
+        fs: afs,
+        expected,
+        execute: Effect.gen(function* () {
+          for (const change of fileChanges) {
+            const edited = change.type === "delete" ? undefined : (change.movePath ?? change.filePath)
+            switch (change.type) {
+              case "add":
+                // Create parent directories (recursive: true is safe on existing/root dirs)
 
-            yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
-            updates.push({ file: change.filePath, event: "add" })
-            break
+                yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
+                updates.push({ file: change.filePath, event: "add" })
+                break
 
-          case "update":
-            yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
-            updates.push({ file: change.filePath, event: "change" })
-            break
+              case "update":
+                yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
+                updates.push({ file: change.filePath, event: "change" })
+                break
 
-          case "move":
-            if (change.movePath) {
-              // Create parent directories (recursive: true is safe on existing/root dirs)
+              case "move":
+                if (change.movePath) {
+                  // Create parent directories (recursive: true is safe on existing/root dirs)
 
-              yield* afs.writeWithDirs(change.movePath!, Bom.join(change.newContent, change.bom))
-              yield* afs.remove(change.filePath)
-              updates.push({ file: change.filePath, event: "unlink" })
-              updates.push({ file: change.movePath, event: "add" })
+                  yield* afs.writeWithDirs(change.movePath, Bom.join(change.newContent, change.bom))
+                  yield* afs.remove(change.filePath)
+                  updates.push({ file: change.filePath, event: "unlink" })
+                  updates.push({ file: change.movePath, event: "add" })
+                }
+                break
+
+              case "delete":
+                yield* afs.remove(change.filePath)
+                updates.push({ file: change.filePath, event: "unlink" })
+                break
             }
-            break
 
-          case "delete":
-            yield* afs.remove(change.filePath)
-            updates.push({ file: change.filePath, event: "unlink" })
-            break
-        }
-
-        if (edited) {
-          if (yield* format.file(edited)) {
-            yield* Bom.syncFile(afs, edited, change.bom)
+            if (edited) {
+              if (yield* format.file(edited)) {
+                yield* Bom.syncFile(afs, edited, change.bom)
+              }
+              editedFiles.push(edited)
+            }
           }
-          yield* bus.publish(File.Event.Edited, { file: edited })
-        }
-      }
+        }),
+      }).pipe(Effect.orDie)
 
       // Publish file change events
+      for (const file of editedFiles) {
+        yield* bus.publish(File.Event.Edited, { file })
+      }
       for (const update of updates) {
         yield* bus.publish(FileWatcher.Event.Updated, update)
       }
