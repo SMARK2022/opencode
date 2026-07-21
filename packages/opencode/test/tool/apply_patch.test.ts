@@ -938,6 +938,37 @@ EOF`
       }),
     )
 
+  // 两个不同 end 与 failed chunk 具有相同最小距离；Patch 不能按文件顺序挑选一个 actual。
+  // 文件不变断言同时证明 tie 仍属于 diagnostic failure，而不是 fuzzy replacement success。
+  it.instance("suppresses a multi-end closest tie", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const target = path.join(test.directory, "multi-end-tie.txt")
+      const original = "target sequence alpha beta gammo\nfiller\ntarget sequence alpha beta gammi\n"
+      yield* writeText(target, original)
+      const patchText = [
+        "*** Begin Patch",
+        "*** Update File: multi-end-tie.txt",
+        "@@",
+        "-target sequence alpha beta gamma",
+        "+replacement",
+        "*** End Patch",
+      ].join("\n")
+
+      const exit = yield* execute({ patchText }, ctx).pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as Error
+        expect(error.message).toContain("No reliable nearby candidate was found")
+        expect(error.message).not.toContain("gammo")
+        expect(error.message).not.toContain("gammi")
+      }
+      expect(yield* readText(target)).toBe(original)
+    }),
+  )
+
   // Tool wrapper 不能在 owner 丢失身份后重扫第一个 chunk；提示必须绑定真正失败的第二个 chunk。
   // 失败身份由 Patch owner 的主路径确定，wrapper 只负责组合既有错误文案和 actual 证据。
   // 长字符集 decoy 同时证明 bounded window 选择第 4 行候选，而不是重复旧的无界 scorer。

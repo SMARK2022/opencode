@@ -16,6 +16,7 @@ import { ModelID, ProviderID } from "../../src/provider/schema"
 import * as Tool from "../../src/tool/tool"
 import { testEffect } from "../lib/effect"
 import { FileWatcher } from "../../src/file/watcher"
+import { closestWindow } from "@/patch/match"
 
 const ctx = {
   sessionID: SessionID.make("ses_test-edit-session"),
@@ -177,6 +178,73 @@ const onceBus = Effect.fn("EditToolTest.onceBus")(function* (def: typeof FileWat
   const unsub = yield* bus.subscribeCallback(def, () => Effect.runSync(Deferred.succeed(deferred, undefined)))
   yield* Effect.addFinalizer(() => Effect.sync(unsub))
   return deferred
+})
+
+function scalarDistance(left: string[], right: string[]) {
+  // oracle 使用普通二维递推的一行压缩形式，与 production bit-vector 不共享 profile、carry 或 block 边界。
+  // tiny fixture 仍逐个比较 Unicode point，避免 JS UTF-16 下标替 oracle 引入另一套距离定义。
+  const row = Array.from({ length: right.length + 1 }, (_, index) => index)
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex++) {
+    let diagonal = row[0]
+    row[0] = leftIndex
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex++) {
+      const above = row[rightIndex]
+      row[rightIndex] = Math.min(
+        above + 1,
+        row[rightIndex - 1] + 1,
+        diagonal + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
+      )
+      diagonal = above
+    }
+  }
+  return row[right.length]
+}
+
+function scalarClosest(content: string, expected: string) {
+  const text = Array.from(content)
+  const pattern = Array.from(expected)
+  let distance = Number.POSITIVE_INFINITY
+  let spans: { start: number; end: number }[] = []
+  // 穷举只接受非空 half-open span，直接对应 diagnostic 必须展示实际文件证据的契约。
+  // 该 oracle 不假定候选等长，因此能独立覆盖 insertion/deletion 产生的变长最优窗口。
+  for (let start = 0; start < text.length; start++) {
+    for (let end = start + 1; end <= text.length; end++) {
+      const current = scalarDistance(pattern, text.slice(start, end))
+      if (current > distance) continue
+      if (current < distance) {
+        distance = current
+        spans = []
+      }
+      spans.push({ start, end })
+    }
+  }
+  // 全部 span 的最小值确定后才判断 tie，避免枚举顺序替某个 endpoint 或长度背书。
+  if (spans.length !== 1) return undefined
+  const span = spans[0]
+  const score = 1 - distance / Math.max(pattern.length, span.end - span.start)
+  // score gate 与 production 使用同一公开契约常量，但距离和唯一性均来自独立标量证据。
+  return score >= 0.5 ? { line: 1, score } : undefined
+}
+
+test("closestWindow agrees with an exhaustive scalar span oracle", () => {
+  // 二元字母表穷举所有 1..5 长输入，包含 unique、same-end tie、multi-end tie 和低分结果。
+  // expected value 完全由 pairwise Levenshtein 生成，不读取 private helper 或 production 中间状态。
+  for (let contentLength = 1; contentLength <= 5; contentLength++) {
+    for (let contentBits = 0; contentBits < 2 ** contentLength; contentBits++) {
+      const content = Array.from({ length: contentLength }, (_, index) => ((contentBits >>> index) & 1 ? "a" : "b")).join("")
+      for (let expectedLength = 1; expectedLength <= 5; expectedLength++) {
+        for (let expectedBits = 0; expectedBits < 2 ** expectedLength; expectedBits++) {
+          const expected = Array.from({ length: expectedLength }, (_, index) =>
+            (expectedBits >>> index) & 1 ? "a" : "b",
+          ).join("")
+          const oracle = scalarClosest(content, expected)
+          const actual = closestWindow(content, expected)
+          // 仅比较公开的 candidate existence、line 与 score；excerpt 格式由真实 Edit seam 单独验证。
+          expect(actual && { line: actual.line, score: actual.score }).toEqual(oracle)
+        }
+      }
+    }
+  }
 })
 
 describe("tool.edit", () => {
@@ -423,6 +491,87 @@ describe("tool.edit", () => {
       }),
     )
 
+    // renderer 只允许有限 diff 输入；超限时必须回到既有 no-reliable 文案，不能把大型 actual 作为诊断证据提交。
+    // 该行为保护四秒预算，同时不改变 replacement success，因为 closest 只在 applyEdits 失败后运行。
+    it.instance("suppresses actual when diagnostic rendering budget is exceeded", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "render-budget.txt")
+        const body = Array.from({ length: 2200 }, (_, index) => String.fromCharCode(33 + ((index * 37) % 90))).join("")
+        const actual = "actual-only:" + body
+        const actualPoints = Array.from(actual)
+        const mismatchIndex = 1000
+        const requested = actualPoints
+          .slice(0, mismatchIndex)
+          .concat(actualPoints[mismatchIndex] === "X" ? "Y" : "X", actualPoints.slice(mismatchIndex + 1))
+          .join("")
+        yield* put(filepath, actual)
+
+        const error = yield* fail({ filePath: filepath, oldString: requested, newString: "replacement" })
+
+        expect(error.message).toContain("No reliable nearby candidate was found")
+        expect(error.message).not.toContain(actual)
+      }),
+    )
+
+    // working-set 预检必须先于 closest 的 expected 归一化分配；超限只复用既有 no-reliable 文案。
+    // 真实 Edit seam 同时证明大型 oldString 不会被截短后误报某段 actual。
+    it.instance("suppresses actual when diagnostic workspace budget is exceeded", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "workspace-budget.txt")
+        yield* put(filepath, "actual content must remain private")
+
+        const error = yield* fail({ filePath: filepath, oldString: "x".repeat(1_000_000), newString: "replacement" })
+
+        expect(error.message).toContain("No reliable nearby candidate was found")
+        expect(error.message).not.toContain("actual content")
+      }),
+    )
+
+    // 31/32/33 等边界覆盖跨 word carry 和最后 partial block；actual 与差异列均由 fixture 独立确定。
+    // 每个候选都放在第二行，避免测试通过 private matcher state 观察实现细节。
+    it.instance("keeps Myers word boundary candidates exact", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "word-boundary.txt")
+        for (const length of [31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 399, 400]) {
+          const actual = Array.from({ length }, (_, index) => String.fromCharCode(33 + ((index * 37) % 90))).join("")
+          const points = Array.from(actual)
+          const mismatchIndex = Math.floor(length / 2)
+          const requested = points
+            .slice(0, mismatchIndex)
+            .concat(points[mismatchIndex] === "X" ? "Y" : "X", points.slice(mismatchIndex + 1))
+            .join("")
+          yield* put(filepath, `unrelated decoy\n${actual}\n`)
+
+          const error = yield* fail({ filePath: filepath, oldString: requested, newString: "replacement" })
+
+          expect(error.message).toContain("Closest match at line 2")
+          expect(error.message).toContain(`difference: requested columns ${mismatchIndex + 1}-${mismatchIndex + 1}`)
+        }
+      }),
+    )
+
+    // lineStarts/lineContentEnds 必须直接定位尾部候选，不能复制并 split 它前面的完整文件。
+    // 二万行 fixture 的一基行号是独立常量，覆盖大前缀与 renderer handoff。
+    it.instance("reports a candidate after a large file prefix", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "large-prefix.txt")
+        yield* put(filepath, "filler\n".repeat(20_000) + "target sequence alpha beta gamxa\n")
+
+        const error = yield* fail({
+          filePath: filepath,
+          oldString: "target sequence alpha beta gamma",
+          newString: "replacement",
+        })
+
+        expect(error.message).toContain("Closest match at line 20001")
+        expect(error.message).toContain("gamxa")
+      }),
+    )
+
     it.instance("closest match accepts the normalized score boundary", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -532,6 +681,20 @@ describe("tool.edit", () => {
         })
 
         expect(error.message).toContain("No reliable nearby candidate was found")
+      }),
+    )
+
+    // `aa` 到同一 end 的 `ba` 与 `a` 都是 distance=1；forward end 唯一仍必须由 reverse length 判 tie。
+    it.instance("suppresses a same-end closest tie", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "same-end-tie.txt")
+        yield* put(filepath, "ba")
+
+        const error = yield* fail({ filePath: filepath, oldString: "aa", newString: "replacement" })
+
+        expect(error.message).toContain("No reliable nearby candidate was found")
+        expect(error.message).not.toContain('actual: "ba"')
       }),
     )
 
