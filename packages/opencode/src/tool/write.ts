@@ -15,6 +15,8 @@ import { trimDiff } from "./edit"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import * as Bom from "@/util/bom"
 import { normalizeLineEndings } from "@/util/line-ending"
+// #518：write 参与共享 file-mutation coordinator——proposal 版本耦合 + Permission 后持锁 + 提交前 recheck
+import * as Mutation from "./file-mutation-coordinator"
 // #131：write 元数据 diff 归一行尾
 
 export const Parameters = Schema.Struct({
@@ -46,8 +48,16 @@ export const WriteTool = Tool.define(
             metadata: { action_kind: "tool", tool: "write", operation: "write", content: params.content },
           })
 
-          const exists = yield* fs.existsSafe(filepath)
-          const source = exists ? yield* Bom.readFile(fs, filepath) : { bom: false, text: "" }
+          // #518：write proposal 使用同一次 raw read 捕获 expected state，避免 Permission 后提交旧内容。
+          const proposal = yield* Mutation.read(fs, filepath)
+          // #518：目录等 other 状态在 Permission 前拒绝；让 ask 展示这类错误只会制造必然失败的审批。
+          if (proposal.version.state === "other") {
+            if (proposal.version.kind === "Directory") throw new Error(`Path is a directory, not a file: ${filepath}`)
+            throw new Error(`Path is not a file: ${filepath}`)
+          }
+          const exists = proposal.version.state === "file"
+          const source = Bom.split(Mutation.decode(proposal))
+          // #518：exists 只表示 proposal 时的 file state；commit recheck 仍以 tagged version 为准。
           const next = Bom.split(params.content)
           const desiredBom = source.bom || next.bom
           const contentOld = source.text
@@ -55,6 +65,7 @@ export const WriteTool = Tool.define(
 
           const diff = trimDiff(
             // #131：permission 元数据忽略纯行尾 diff
+            // #518：diff 基于proposal 时的旧内容；ask 展示的是本次写入的意图而非磁盘实时状态。
             createTwoFilesPatch(filepath, filepath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
           )
           yield* ctx.ask({
@@ -67,12 +78,25 @@ export const WriteTool = Tool.define(
             },
           })
 
-          yield* fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
-          // [local-smark] 捕获 format 是否运行，用于后续判断是否需要检测内容变化
-          const formatted = yield* format.file(filepath)
-          if (formatted) {
-            yield* Bom.syncFile(fs, filepath, desiredBom)
-          }
+          let formatted = false
+          let finalSource: { bom: boolean; text: string } | undefined
+          // #518：formatter 仍在同一 commit critical section，避免第二个 mutation 看到半完成内容。
+          // #518：expected 只带一个 proposal；write 的 expected state 就是目标路径本身的 tagged version。
+          yield* Mutation.commit({
+            fs,
+            expected: [proposal],
+            execute: Effect.gen(function* () {
+              // #518：recheck 通过后写盘；外部 writer 在 ask 窗口内创建/修改文件会在这里被拒绝。
+              yield* fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
+              // [local-smark] 捕获 format 是否运行，用于后续判断是否需要检测内容变化
+              formatted = yield* format.file(filepath)
+              if (formatted) {
+                yield* Bom.syncFile(fs, filepath, desiredBom)
+              }
+              // #518：finalSource 在锁内读取，metadata 不会引用另一个 mutation 的中间内容。
+              if (exists || formatted) finalSource = yield* Bom.readFile(fs, filepath)
+            }),
+          }).pipe(Effect.orDie)
           // 覆写已有文件时，基于格式化后的最终落盘内容生成 diff，供 TUI 以 git diff 形式展示
           // 格式化后的最终内容：格式化可能改变文件内容，因此基于最终落盘内容生成 diff
           // [local-smark] 当 auto-format 改变了写入内容时，将格式化后的内容
@@ -84,9 +108,8 @@ export const WriteTool = Tool.define(
           // 覆写和新文件都检查：新文件也可能被 formatter 改变内容。
           let metadataDiff: string | undefined
           let formattedContent: string | undefined
-          if (exists || formatted) {
-            // 最终内容读取：格式化后重新读取文件，确保 diff 反映实际落盘内容
-            const finalSource = yield* Bom.readFile(fs, filepath)
+          // #518：finalSource 只在锁内赋值；冲突失败时保持 undefined，不生成误导性 metadata。
+          if (finalSource) {
             // diff 生成：使用 createTwoFilesPatch 生成 git diff 格式，trimDiff 清理头部
             if (exists) {
             metadataDiff = trimDiff(
@@ -108,7 +131,7 @@ export const WriteTool = Tool.define(
             if (formatted && normalizeLineEndings(finalSource.text) !== normalizeLineEndings(contentNew)) {
               formattedContent = finalSource.text
             }
-          } else if (!exists) {
+          } else {
             // 未格式化的新文件复用写前diff；该分支属于外层最终内容判断。
             metadataDiff = diff
           }

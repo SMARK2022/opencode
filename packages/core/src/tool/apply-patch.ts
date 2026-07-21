@@ -115,6 +115,25 @@ const layer = Layer.effectDiscard(
                     ? yield* mutation.resolve({ path: hunk.movePath, kind: "file" }) : undefined
                   targets.push({ hunk, target, destination })
                 }
+                // 重复 update 可组合，Delete/Add 可重写；跨源 Move 争用不能靠提交顺序猜测。
+                const groups = new Map<string, typeof targets>()
+                const destinations = new Map<string, string>()
+                for (const item of targets) {
+                  const group = groups.get(item.target.canonical) ?? []
+                  group.push(item)
+                  groups.set(item.target.canonical, group)
+                  const destination = item.destination
+                  if (!destination || destination.canonical === item.target.canonical) continue
+                  const owner = destinations.get(destination.canonical)
+                  if (owner && owner !== item.target.canonical || targets.some(other => other.target.canonical === destination.canonical)) return yield* fail(item.hunk.path)
+                  if (group.some(other => other.destination && other.destination.canonical !== destination.canonical)) return yield* fail(item.hunk.path)
+                  destinations.set(destination.canonical, item.target.canonical)
+                }
+                for (const group of groups.values()) {
+                  const rewrite = group.length === 2 && group[0].hunk.type === "delete" && group[1].hunk.type === "add"
+                  if (group.length > 1 && !rewrite && group.some(item => item.hunk.type !== "update")) return yield* fail(group[0].hunk.path)
+                }
+
                 // 相同目录和操作仍合并授权；不同操作保留各自语义并携带完整patch。
                 const externalDirectories = new Map<string, LocationMutation.ExternalDirectoryAuthorization & { operation: Patch.Hunk["type"] | "move" }>()
                 for (const { hunk, target, destination } of targets) {
@@ -147,8 +166,13 @@ const layer = Layer.effectDiscard(
                 // 授权仍先于读盘；预备失败只排除对应文件，不丢弃其他已验证操作。
                 const errors: string[] = []
                 const prepared: Prepared[] = []
+                const expected = new Map<string, { target: LocationMutation.Target; content: Uint8Array | undefined }>()
+                const failed = new Set<string>()
                 for (const { hunk, target, destination } of targets) {
+                  if (failed.has(target.canonical)) continue
                   yield* Effect.gen(function* () {
+                    const snapshot = expected.get(target.canonical) ?? { target, content: yield* fs.readFile(target.canonical).pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined))) }
+                    expected.set(target.canonical, snapshot)
                     if (hunk.type === "add") {
                       prepared.push({
                         ...hunk,
@@ -160,9 +184,11 @@ const layer = Layer.effectDiscard(
                       return
                     }
                     if ((yield* fs.stat(target.canonical)).type !== "File") yield* fail(hunk.path)
-                    const source = yield* fs.readFile(target.canonical)
-                    const original = new TextDecoder("utf-8", { ignoreBOM: true }).decode(source)
-                    const before = original.replace(/^\uFEFF/, "")
+                    const source = snapshot.content
+                    if (source === undefined) return yield* fail(hunk.path)
+                    const previous = prepared.find(change => change.type === "update" && change.target.canonical === target.canonical)
+                    const original = previous?.type === "update" ? previous.content : new TextDecoder("utf-8", { ignoreBOM: true }).decode(source)
+                    const before = previous?.before ?? original.replace(/^\uFEFF/, "")
                     if (hunk.type === "delete") {
                       prepared.push({ ...hunk, target, before, after: "" })
                       return
@@ -172,16 +198,25 @@ const layer = Layer.effectDiscard(
                       // owning Patch保留失败chunk身份；此处不再运行第二套猜测位置的matcher。
                       catch: (error) => new ToolFailure({ message: String(error) }),
                     })
-                    prepared.push({
+                    if (destination && !expected.has(destination.canonical)) {
+                      expected.set(destination.canonical, { target: destination, content: yield* fs.readFile(destination.canonical).pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined))) })
+                    }
+                    // 每个 parsed entry 重置 Patch cursor，只合并最终写盘，不重复提交同一前像。
+                    const change = {
                       ...hunk,
                       target,
                       source,
-                      destination,
+                      destination: destination ?? (previous?.type === "update" ? previous.destination : undefined),
                       content: Patch.joinBom(update.content, update.bom),
                       before,
                       after: update.content,
-                    })
+                    }
+                    if (previous) prepared.splice(prepared.indexOf(previous), 1, change)
+                    else prepared.push(change)
                   }).pipe(Effect.catch(error => {
+                    failed.add(target.canonical)
+                    const index = prepared.findIndex(change => change.target.canonical === target.canonical)
+                    if (index !== -1) prepared.splice(index, 1)
                     errors.push(error instanceof ToolFailure ? error.message : fail(hunk.path).message)
                     return Effect.void
                   }))
@@ -189,7 +224,9 @@ const layer = Layer.effectDiscard(
 
                 if (prepared.length === 0) return yield* new ToolFailure({ message: errors.join("\n") })
                 const patchFiles: Array<typeof FileDiff.Info.Type> = []
-                yield* Effect.forEach(
+                yield* files.commit({
+                  expected: [...expected.values()].filter(item => prepared.some(change => change.target.canonical === item.target.canonical || change.type === "update" && change.destination?.canonical === item.target.canonical)),
+                  execute: files => Effect.forEach(
                   prepared,
                   (change) =>
                     Effect.gen(function* () {
@@ -235,9 +272,11 @@ const layer = Layer.effectDiscard(
                       ? new ToolFailure({ message: `${fail(change.path).message}. Destination ${error.destination} was written, but source ${error.path} could not be removed: ${error.reason}` })
                       : fail(change.path))),
                   { discard: true },
-                )
+                ) })
                 return { applied, files: patchFiles, ...(errors.length ? { errors } : {}) }
-              }).pipe(Effect.mapError((error) => (error instanceof ToolFailure ? error : fail("patch", error))))
+              }).pipe(Effect.mapError(error => error instanceof FileMutation.StaleContentError
+                ? new ToolFailure({ message: `File changed before commit: ${error.path}. Read the file again and retry.` })
+                : error instanceof ToolFailure ? error : fail("patch", error)))
             },
           }),
           "edit",

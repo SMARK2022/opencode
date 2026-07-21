@@ -599,6 +599,49 @@ describe("tool.apply_patch freeform", () => {
     }),
   )
 
+  // #518：同 source 重复声明同一 move destination 是合法输入；分组后两个 entry 共享一次 proposal。
+  // 预期内容由两次 entry 的手工推导值叠加，验证 cursor 链而不是最后一个 entry 生效。
+  it.instance("accepts repeated identical move declarations for one source", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const original = path.join(test.directory, "old", "name.txt")
+      yield* makeDir(path.dirname(original))
+      yield* writeText(original, "old content\nsecond line\n")
+
+      const patchText =
+        "*** Begin Patch\n*** Update File: old/name.txt\n*** Move to: renamed/name.txt\n@@\n-old content\n+new content\n*** Update File: old/name.txt\n*** Move to: renamed/name.txt\n@@\n-second line\n+third line\n*** End Patch"
+
+      yield* execute({ patchText }, ctx)
+
+      yield* expectReadFailure(original)
+      expect(yield* readText(path.join(test.directory, "renamed/name.txt"))).toBe("new content\nthird line\n")
+    }),
+  )
+
+  // #518：symlink alias 与真实目录 canonical 等价；同一 destination 不得被误判为 ownership 冲突。
+  it.instance("accepts canonical-equivalent repeated move destinations", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const original = path.join(test.directory, "old", "name.txt")
+      const renamed = path.join(test.directory, "renamed")
+      yield* makeDir(path.dirname(original))
+      yield* makeDir(renamed)
+      yield* Effect.promise(() => fs.symlink(renamed, path.join(test.directory, "alias")))
+      yield* writeText(original, "old content\nsecond line\n")
+      yield* writeText(path.join(renamed, "name.txt"), "existing\n")
+
+      const patchText =
+        "*** Begin Patch\n*** Update File: old/name.txt\n*** Move to: renamed/name.txt\n@@\n-old content\n+new content\n*** Update File: old/name.txt\n*** Move to: alias/name.txt\n@@\n-second line\n+third line\n*** End Patch"
+
+      yield* execute({ patchText }, ctx)
+
+      yield* expectReadFailure(original)
+      expect(yield* readText(path.join(renamed, "name.txt"))).toBe("new content\nthird line\n")
+    }),
+  )
+
   it.instance("moves file overwriting existing destination", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance

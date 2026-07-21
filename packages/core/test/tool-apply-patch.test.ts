@@ -16,6 +16,7 @@ import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { ApplyPatchTool } from "@opencode-ai/core/tool/apply-patch"
 import { location } from "./fixture/location"
+import { Format } from "@opencode-ai/core/format"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
 import { toolIdentity, executeTool, settleTool, toolDefinitions } from "./lib/tool"
@@ -30,6 +31,7 @@ let blockRemoveTarget: string | undefined
 let removeStarted: Deferred.Deferred<void> | undefined
 let releaseRemove: Deferred.Deferred<void> | undefined
 let afterEditApproval = (): Effect.Effect<void> => Effect.void
+let beforeRead = (_target: string): Effect.Effect<void> => Effect.void
 
 const permission = Layer.succeed(
   PermissionV2.Service,
@@ -62,6 +64,7 @@ const reset = () => {
   removeStarted = undefined
   releaseRemove = undefined
   afterEditApproval = () => Effect.void
+  beforeRead = () => Effect.void
 }
 
 const filesystem = Layer.effect(
@@ -73,7 +76,7 @@ const filesystem = Layer.effect(
       readFile: (target) =>
         Effect.sync(() => {
           if (!editApproved) readsBeforeEditApproval++
-        }).pipe(Effect.andThen(fs.readFile(target))),
+        }).pipe(Effect.andThen(Effect.suspend(() => beforeRead(target))), Effect.andThen(fs.readFile(target))),
       remove: (target, options) => {
         if (failRemoveTarget && path.basename(target) === failRemoveTarget) return Effect.die("forced remove failure")
         if (blockRemoveTarget && path.basename(target) === blockRemoveTarget && removeStarted && releaseRemove)
@@ -107,6 +110,8 @@ const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Inte
         [
           [FSUtil.node, filesystem],
           [Location.node, activeLocation],
+          // 真实文件提交保留；格式化出口显式隔离，不让本套读取用户配置或启动外部命令。
+          [Format.node, Layer.succeed(Format.Service, Format.Service.of({ file: () => Effect.succeed(false) }))],
           [PermissionV2.node, permission],
           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
         ],
@@ -401,6 +406,9 @@ describe("ApplyPatchTool", () => {
             // 真实 leaf 的模型输出也必须去重，而非只在共享 helper 单测中修正文案。
             expect(JSON.stringify(failed)).not.toContain("const after = good(1)")
             expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(persisted)
+            const repeated = yield* executeTool(registry, call("*** Begin Patch\n*** Update File: retry.txt\n@@\n-alpha\n+ALPHA\n*** Update File: retry.txt\n@@\n-missing\n+done\n*** End Patch", "repeated-failure"))
+            expect(repeated.type).toBe("error")
+            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(persisted)
           }),
         )
       },
@@ -523,6 +531,41 @@ describe("ApplyPatchTool", () => {
         })
       },
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+  it.live("coordinates Native patch proposals before committing any target", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      tmp => Effect.gen(function* () {
+        reset()
+        const first = path.join(tmp.path, "first.txt")
+        const second = path.join(tmp.path, "second.txt")
+        yield* Effect.promise(() => Promise.all([fs.writeFile(first, "first\nlast\n"), fs.writeFile(second, "second\n")]))
+        yield* withTool(tmp.path, registry => Effect.gen(function* () {
+          const repeated = yield* settleTool(registry, call("*** Begin Patch\n*** Update File: first.txt\n@@\n-last\n+LAST\n*** Update File: first.txt\n@@\n-first\n+FIRST\n*** End Patch", "repeated-success"))
+          expect(repeated.result.type).toBe("text")
+          expect(Schema.decodeUnknownSync(ApplyPatchTool.Output)(repeated.output?.structured).files).toHaveLength(1)
+          expect(yield* Effect.promise(() => fs.readFile(first, "utf8"))).toBe("FIRST\nLAST\n")
+          yield* Effect.promise(() => fs.writeFile(first, "first\n"))
+          reset()
+          const collision = yield* executeTool(registry, call("*** Begin Patch\n*** Update File: first.txt\n*** Move to: destination.txt\n@@\n-first\n+FIRST\n*** Update File: second.txt\n*** Move to: destination.txt\n@@\n-second\n+SECOND\n*** End Patch", "ownership"))
+          expect(collision.type).toBe("error")
+          expect(assertions).toHaveLength(0)
+          expect(yield* Effect.promise(() => fs.readFile(first, "utf8"))).toBe("first\n")
+          expect(yield* exists(path.join(tmp.path, "destination.txt"))).toBe(false)
+          let secondReads = 0
+          // 第二份前像已取得后，外部 writer 在最终复核中改它；第一份内容也不能先写。
+          beforeRead = target => path.basename(target) === "second.txt" && ++secondReads === 2
+            ? Effect.promise(() => fs.writeFile(second, "external\n")).pipe(Effect.orDie)
+            : Effect.void
+          const stale = yield* executeTool(registry, call("*** Begin Patch\n*** Update File: first.txt\n@@\n-first\n+FIRST\n*** Update File: second.txt\n@@\n-second\n+SECOND\n*** End Patch", "stale-batch"))
+          expect(stale).toMatchObject({ type: "error", value: expect.stringContaining("File changed before commit") })
+          expect(yield* Effect.promise(() => fs.readFile(first, "utf8"))).toBe("first\n")
+          expect(yield* Effect.promise(() => fs.readFile(second, "utf8"))).toBe("external\n")
+          expect(readsBeforeEditApproval).toBe(0)
+        }))
+      }),
+      tmp => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
   )
 })
