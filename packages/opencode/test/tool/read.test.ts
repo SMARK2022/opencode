@@ -870,6 +870,75 @@ describe("tool.read visible context", () => {
     }),
   )
 
+  // 等长改写 + utimes 锁死 mtime：size/mtime 无法区分版本，必须靠 head-sample fp 失效 suppress。
+  it.live("does not stub when equal-size rewrite preserves mtime but head content changes", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "equal-mtime.txt")
+      const input = { filePath, offset: 1, limit: 2 }
+      const before = "AAA\nBBB\nCCC"
+      const after = "XXX\nBBB\nCCC"
+      expect(Buffer.byteLength(before)).toBe(Buffer.byteLength(after))
+      yield* put(filePath, before)
+
+      const first = yield* exec(dir, input)
+      const stamp = yield* Effect.promise(async () => {
+        const { stat } = await import("fs/promises")
+        return stat(filePath)
+      })
+      yield* put(filePath, after)
+      yield* Effect.promise(async () => {
+        const { utimes } = await import("fs/promises")
+        await utimes(filePath, stamp.atime, stamp.mtime)
+      })
+      const second = yield* exec(dir, input, { ...ctx, messages: [readMessage(input, first)] })
+
+      expect(second.output).toContain("<content>")
+      expect(second.output).toContain("1: XXX")
+      expect(second.output).not.toContain("<stub")
+    }),
+  )
+
+  // 历史 read 缺 fp：证明不足，禁止回退到 size+mtime 弱键 suppress。
+  it.live("does not stub when visible history matches size and mtime but lacks fp", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "legacy-fp.txt")
+      const input = { filePath, offset: 1, limit: 2 }
+      yield* put(filePath, "one\ntwo\nthree")
+
+      const first = yield* exec(dir, input)
+      const legacy = structuredClone(first)
+      const readMeta = legacy.metadata.read as Record<string, unknown> | undefined
+      if (readMeta) delete readMeta.fp
+      const second = yield* exec(dir, input, { ...ctx, messages: [readMessage(input, legacy)] })
+
+      expect(second.output).toContain("<content>")
+      expect(second.output).toContain("1: one")
+      expect(second.output).not.toContain("<stub")
+    }),
+  )
+
+  // 未改文件时 suppress 收益必须保留：新 read 写入非空 fp，同版本同区间仍 stub。
+  it.live("writes non-empty fp on non-stub reads and still stubs unchanged same range", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "fp-stub.txt")
+      const input = { filePath, offset: 1, limit: 2 }
+      yield* put(filePath, "one\ntwo\nthree")
+
+      const first = yield* exec(dir, input)
+      // 前向写入 fp，供后续 turn 做内容身份比对（无历史回填）。
+      const fp = (first.metadata.read as { fp?: string } | undefined)?.fp
+      expect(typeof fp).toBe("string")
+      expect(fp!.length).toBeGreaterThan(0)
+
+      const second = yield* exec(dir, input, { ...ctx, messages: [readMessage(input, first)] })
+      expect(second.output).toContain('<stub status="stub_same_range_visible">')
+      expect(second.output).not.toContain("<content>")
+    }),
+  )
+
   it.live("returns full content with a short note for significant overlap", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
