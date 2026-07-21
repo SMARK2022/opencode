@@ -1159,6 +1159,7 @@ export type SessionsHistoryOutput = {
           readonly sessionID: string
           readonly messageID: string
           readonly text: string
+          readonly metadata?: { readonly [x: string]: JsonValue }
         }
       }
     | {
@@ -1790,6 +1791,7 @@ export type SessionsEventsOutput =
         readonly sessionID: string
         readonly messageID: string
         readonly text: string
+        readonly metadata?: { readonly [x: string]: unknown }
       }
     }
   | {

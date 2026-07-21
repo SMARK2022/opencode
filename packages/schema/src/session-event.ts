@@ -133,6 +133,8 @@ export const Synthetic = Event.define({
     ...Base,
     messageID: SessionMessage.ID,
     text: Schema.String,
+    // 消息展示快照属于 durable data；envelope metadata 不参与事件重放。
+    metadata: SessionMessage.Synthetic.fields.metadata,
   },
 })
 export type Synthetic = typeof Synthetic.Type

@@ -6,10 +6,14 @@ import { useRoute } from "../../context/route"
 import { useClipboard } from "../../context/clipboard"
 import type { PromptInfo } from "../../component/prompt/history"
 import { stripPromptPartIDs as strip } from "../../prompt/part"
+// #520：DialogSelectOption.onSelect 的 ctx 类型；显式标注使 filter 后的 options 保持完整推断。
+import { type DialogContext } from "../../ui/dialog"
 
 export function DialogMessage(props: {
   messageID: string
   sessionID: string
+  // #520：subtype 已由 Session renderer 从持久化 Part 判定；Dialog 不再解析 synthetic XML。
+  goalContinuation?: boolean
   setPrompt?: (prompt: PromptInfo) => void
   // submit 回调由调用方传入——dialog.replace 渲染上下文脱离 PromptRefProvider，
   // 不能在此组件内直接 usePromptRef，必须通过 prop 传递。
@@ -38,13 +42,13 @@ export function DialogMessage(props: {
 
   return (
     <DialogSelect
-      title="Message Actions"
+      title={props.goalContinuation ? "Goal Continuation" : "Message Actions"}
       options={[
         {
           title: "Revert",
           value: "session.revert",
           description: "undo messages and file changes",
-          onSelect: (dialog) => {
+          onSelect: (dialog: DialogContext) => {
             const msg = message()
             if (!msg) return
 
@@ -63,7 +67,7 @@ export function DialogMessage(props: {
           title: "Retry",
           value: "session.retry",
           description: "revert to here and resend",
-          onSelect: async (dialog) => {
+          onSelect: async (dialog: DialogContext) => {
             const msg = message()
             if (!msg) return
             dialog.clear()
@@ -92,7 +96,7 @@ export function DialogMessage(props: {
           title: "Copy",
           value: "message.copy",
           description: "message text to clipboard",
-          onSelect: async (dialog) => {
+          onSelect: async (dialog: DialogContext) => {
             const msg = message()
             if (!msg) return
 
@@ -112,7 +116,7 @@ export function DialogMessage(props: {
           title: "Fork",
           value: "session.fork",
           description: "create a new session",
-          onSelect: async (dialog) => {
+          onSelect: async (dialog: DialogContext) => {
             const result = await sdk.client.session.fork({
               sessionID: props.sessionID,
               messageID: props.messageID,
@@ -138,7 +142,9 @@ export function DialogMessage(props: {
             dialog.clear()
           },
         },
-      ]}
+        // #520：先复用原有 option handler 再收窄集合，确保 continuation 没有复制出来的 Revert 实现。
+        // Goal continuation 的 synthetic 正文不能 Copy/Retry/Fork；保留同一个 Revert owner，避免第二套回退路径。
+      ].filter((option) => !props.goalContinuation || option.value === "session.revert")}
     />
   )
 }

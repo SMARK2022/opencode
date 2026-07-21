@@ -24,6 +24,7 @@ import {
 } from "../../../src/routes/session"
 import { layoutGroups } from "../../../src/util/layout"
 import { collapseToolOutput } from "../../../src/util/collapse-tool-output"
+import { goalContinuation } from "../../../src/routes/session/goal-continuation"
 
 let testSetup: Awaited<ReturnType<typeof testRender>> | undefined
 
@@ -401,6 +402,8 @@ describe("TUI inline tool wrapping", () => {
       selectedForeground,
       MouseButton,
       collapseToolOutput,
+      // 执行生产 JSX 时注入同一个纯函数，避免另写 Goal 卡片判定。
+      goalContinuation,
       stripAnsi,
       autoReviewLabel,
       ToolAutoReview,

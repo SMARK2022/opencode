@@ -37,6 +37,7 @@ import { GoalTool } from "@opencode-ai/core/tool/goal"
 import GOAL_DESCRIPTION from "../../opencode/src/tool/goal.txt"
 import { SessionInput } from "@opencode-ai/core/session/input"
 import { SessionMessage } from "@opencode-ai/core/session/message"
+import { SessionMessageUpdater } from "@opencode-ai/core/session/message-updater"
 import { Prompt } from "@opencode-ai/core/session/prompt"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core/session/request-usage.sql"
@@ -768,6 +769,11 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     // queue 先提升；其后两个无证据完成才切策略，不能按 provider step 提前计轮。
     expect(userTexts(requests[2]!).at(-1)).not.toContain("<strategy-switch")
     expect(userTexts(requests[3]!).at(-1)).toContain('mode="breadth-first-replan"')
+    const continuations = (yield* session.context(sessionID)).filter(message => message.type === "synthetic")
+    expect(continuations.map(message => message.metadata)).toEqual([
+      { goal_continuation: true, goal_continuation_mode: "continue", goal_continuation_turn: 1, goal_continuation_max_turns: 2 },
+      { goal_continuation: true, goal_continuation_mode: "replan", goal_continuation_turn: 2, goal_continuation_max_turns: 2 },
+    ])
     expect(requests[0]!.tools.map(tool => tool.name)).toContain("goal")
     // 检查真实模型签名，防止仅改 executor 却仍广告可选 mark 的旧合同。
     expect(requests[0]!.tools.find(tool => tool.name === "goal")?.inputSchema).toMatchObject({ required: ["operate"] })
@@ -837,6 +843,17 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     yield* goals.set(sessionID, { objective: "Verify two-turn blocking and later recovery", status: "active" })
     // 技术提醒仍进入模型历史，但不得重置trusted read或伪造另一个eligible turn。
     const goalDatabase = yield* Database.Service
+    // 验证真正存入事件 data 的快照；重放不能依赖只存在于实时 envelope 的字段。
+    const recorded = yield* goalDatabase.db.select().from(EventTable).where(eq(EventTable.aggregate_id, sessionID)).all().pipe(Effect.orDie)
+    expect(recorded.filter(event => event.type === EventV2.versionedType(SessionEvent.Synthetic.type, 1)).map(event => event.data.metadata))
+      .toEqual(continuations.map(message => message.metadata))
+    const replayed: SessionMessageUpdater.MemoryState = { messages: [] }
+    for (const event of recorded.filter(event => event.type === EventV2.versionedType(SessionEvent.Synthetic.type, 1))) {
+      yield* SessionMessageUpdater.update(SessionMessageUpdater.memory(replayed), Schema.decodeUnknownSync(SessionEvent.Synthetic)({
+        id: event.id, type: SessionEvent.Synthetic.type, data: event.data,
+      }))
+    }
+    expect(replayed.messages.map(message => message.metadata)).toEqual(continuations.map(message => message.metadata))
     const beforeReminder = yield* SessionHistory.goalTurn(goalDatabase.db, sessionID)
     const goalEvents = yield* EventV2.Service
     yield* goalEvents.publish(SessionEvent.Synthetic, { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text: "Technical plan reminder" })
@@ -853,6 +870,9 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     yield* session.resume(sessionID)
     expect(requests).toHaveLength(6)
     expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({ status: "blocked", reason: "persistent blocker" })
+    expect((yield* session.context(sessionID)).filter(message => message.type === "synthetic").at(-1)?.metadata).toEqual({
+      goal_continuation: true, goal_continuation_mode: "block-check", goal_continuation_turn: 1, goal_continuation_max_turns: 2,
+    })
 
     // 后续真实用户才可恢复模型终态；以EOF停止本轮，避免额外自动续跑影响该边界断言。
     yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Resume this blocked goal" }), resume: false })

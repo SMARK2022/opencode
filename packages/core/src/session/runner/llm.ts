@@ -211,7 +211,7 @@ const layer = Layer.effect(
 
     // 仅当前 drain 持有待注入目标；不新增调度器或崩溃后自动恢复。
     type GoalContinuation = {
-      goal?: SessionGoal.Goal; turns: number
+      goal?: SessionGoal.Goal & { viewMode: "continue" | "replan" | "block-check"; maxTurns: number }; turns: number
       mode?: SessionGoal.ContinuationMode
       progressLedger: SessionGoalProgress.GoalProgressLedger
       progressGate: { noProgressTurns: number; replanRequired: boolean }
@@ -255,12 +255,20 @@ const layer = Layer.effect(
           }
           // 新用户输入优先；合成续跑保留当前步数额度，并由原历史投影持久化。
           if (continuation.goal) {
+            const pending = continuation.goal
             const goal = yield* goals.get(session.id)
             continuation.goal = undefined
             if (Option.isSome(goal) && goal.value.status === "active") {
               yield* events.publish(SessionEvent.Synthetic, {
                 sessionID: session.id, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now,
                 text: SessionGoal.continuationPrompt(goal.value, continuation.mode),
+                // 候选模式和额度在 admission 时采样，发布成功后才递增本 drain 的计数。
+                metadata: {
+                  goal_continuation: true,
+                  goal_continuation_mode: pending.viewMode,
+                  goal_continuation_turn: continuation.turns + 1,
+                  goal_continuation_max_turns: pending.maxTurns,
+                },
               })
               continuation.turns++
             }
@@ -759,12 +767,18 @@ const layer = Layer.effect(
               const goal = yield* goals.get(input.sessionID)
               if (Option.isSome(goal) && goal.value.status === "active") {
                 // 只在既有 eligible completion 边界计一次，provider step 或 compaction 不另计轮。
+                const messages = yield* SessionHistory.goalTurnMessages(db, input.sessionID)
                 const signal = SessionGoalProgress.absorbGoalTurnEvidence(
-                  SessionGoalProgress.nativeEvidence(yield* SessionHistory.goalTurnMessages(db, input.sessionID)), location.directory, continuation.progressLedger,
+                  SessionGoalProgress.nativeEvidence(messages), location.directory, continuation.progressLedger,
                 )
                 SessionGoalProgress.updateGoalProgressGate(continuation.progressGate, signal)
                 continuation.mode = continuation.progressGate.replanRequired ? "replan" : "ordinary"
-                continuation.goal = goal.value
+                continuation.goal = {
+                  ...goal.value, maxTurns: maxGoalTurns,
+                  // blockedAttempt 已由真实 GoalTool 校验并保存，不从 prose 或可变状态反推。
+                  viewMode: messages.some(message => message.type === "assistant" && message.content.some(part => part.type === "tool" && part.name === "goal" && part.state.status === "completed" && part.state.structured.blockedAttempt !== undefined))
+                    ? "block-check" : continuation.mode === "replan" ? "replan" : "continue",
+                }
                 needsContinuation = true
                 // 下个安全边界也检查 queue，避免候选 Goal 抢占刚到达的用户输入。
                 promotion = "queue"

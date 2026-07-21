@@ -188,6 +188,7 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
               type: "synthetic",
               sessionID: event.data.sessionID,
               text: event.data.text,
+              metadata: event.data.metadata ? { ...event.metadata, ...event.data.metadata } : event.metadata,
               time: { created: event.data.timestamp },
             })
           })
