@@ -61,6 +61,10 @@ describe("Patch", () => {
     expect(derive("old\n", [{ oldLines: [], newLines: ["inserted"] }, { oldLines: ["old"], newLines: [] }])).toBe("inserted\n")
     // 提示只取失败chunk的磁盘候选，不能显示第一chunk已丢弃的replacement。
     expect(() => derive("alpha\nconst after = good()\n", [{ oldLines: ["alpha"], newLines: ["ALPHA"] }, { oldLines: ["const after = good(1)"], newLines: ["done"] }])).toThrow('Closest match at line 2:\nline 2 actual: "const after = good()"')
+    // CRLF原文在比较空间等价，cursor之前的原始块只能报位置，不能再次输出requested。
+    expect(() => derive("alpha\r\nbeta\r\nmiddle\r\nomega\r\n", [
+      { oldLines: ["middle"], newLines: ["MIDDLE"] }, { oldLines: ["alpha", "beta"], newLines: ["ALPHA", "BETA"] },
+    ])).toThrow("exists at this location in the original file")
     expect(() => derive("“old”\n", [{ oldLines: ['"old"'], newLines: ["new"] }])).toThrow("Failed to find expected lines")
   })
 

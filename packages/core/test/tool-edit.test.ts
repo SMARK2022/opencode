@@ -164,6 +164,42 @@ describe("EditTool", () => {
     ),
   )
 
+  it.live("diagnoses the failed Native edit from the shared DP span", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      tmp => Effect.gen(function* () {
+        const target = path.join(tmp.path, "candidate.txt")
+        const candidate = "prefix target sequence alpha beta gamxa suffix"
+        // 场景均调用真实registry/leaf；formatter替身隔离进程，任何失败不得落盘。
+        for (const example of [
+          { before: `target sequence alpha beta deltta\n${candidate}\n`, edits: [{ oldString: "target sequence alpha beta gamma", newString: "replacement" }], shown: ["Closest match at line 2", candidate], absent: ["target sequence alpha beta deltta"] },
+          { before: "\u{1F600} prefix\r\nactual content\r\n", edits: [{ oldString: "actual contxnt", newString: "replacement" }], shown: ["Closest match at line 2", 'line 2 actual: "actual content"'], absent: [] },
+          { before: "alpha\n\nbeta\n", edits: [{ oldString: "alpha\nbeta", newString: "replacement" }], shown: ["Closest match at line 1", "alpha\n\nbeta"], absent: [] },
+          // 长上下文不能把已证明的变长actual裁掉，也不能重新按expected行数截窗。
+          { before: `${"p".repeat(400)}alpha\n\nbeta${"s".repeat(400)}\n`, edits: [{ oldString: "alpha\nbeta", newString: "replacement" }], shown: ["alpha\n\nbeta"], absent: [] },
+          { before: "ab", edits: [{ oldString: "abcd", newString: "replacement" }], shown: ['line 1 actual: "ab"'], absent: [] },
+          { before: "a", edits: [{ oldString: "abcd", newString: "replacement" }], shown: ["No reliable nearby candidate was found"], absent: ["Closest match"] },
+          // 内部子串和整段同距时也必须抑制，不能靠遍历顺序选择其中一条证据。
+          { before: "xb", edits: [{ oldString: "ab", newString: "replacement" }], shown: ["No reliable nearby candidate was found"], absent: ["Closest match"] },
+          { before: "actual contant\nactual contont", edits: [{ oldString: "actual content", newString: "replacement" }], shown: ["No reliable nearby candidate was found"], absent: ["Closest match"] },
+          { before: "say \u201Chello\u201D\nworld\n", edits: [{ oldString: '"hello"', newString: '"hi"' }, { oldString: "worxd", newString: "mars" }], shown: ["edits[1]", "Closest match at line 2", "world"], absent: ["say \u201Chello\u201D"] },
+        ]) {
+          reset()
+          yield* Effect.promise(() => fs.writeFile(target, example.before))
+          const result = yield* withTool(tmp.path,
+            registry => executeTool(registry, call({ path: "candidate.txt", edits: example.edits })), toolHistory("candidate.txt"))
+          expect(result.type).toBe("error")
+          if (result.type !== "error") throw new Error("Expected failed edit")
+          for (const shown of example.shown) expect(result.value).toContain(shown)
+          for (const absent of example.absent) expect(result.value).not.toContain(absent)
+          expect(writes).toEqual([])
+          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(example.before)
+        }
+      }),
+      tmp => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("registers and replaces relative exact text through FileMutation once", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -420,7 +456,9 @@ describe("EditTool", () => {
                 yield* Effect.promise(() => fs.writeFile(target, `return value;\n${prefix} private int x = 0;`))
                 const mismatch = yield* executeTool(registry, call({ path: "matches.txt", oldString: `return value;\n${prefix} private int x = 1;`, newString: "replacement" }))
                 expect(mismatch).toEqual({ type: "error", value: expect.stringContaining("x = 0") })
-                expect(mismatch).toEqual({ type: "error", value: expect.stringContaining("x = 1") })
+                // requested已在输入中；DP回执保留精确差异列及实际尾部，不重复请求正文。
+                expect(mismatch).toEqual({ type: "error", value: expect.stringContaining("difference: requested columns 918-918 differ from actual columns 918-918") })
+                expect(JSON.stringify(mismatch)).not.toContain("x = 1")
                 expect(JSON.stringify(mismatch)).not.toContain("p".repeat(500))
                 expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(`return value;\n${prefix} private int x = 0;`)
                 expect(writes).toEqual([])
