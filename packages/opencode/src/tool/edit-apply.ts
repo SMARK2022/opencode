@@ -13,6 +13,14 @@ export type EditReplacement = {
   replaceAll?: boolean
 }
 
+export class EditApplyError extends Error {
+  // 失败索引只在 owner 内传递，用于 multi-edit 诊断，不进入 Schema、metadata 或用户可见文案。
+  // 继承 Error 的既有 message，使调用方获得身份而不改变原有错误渲染契约。
+  constructor(message: string, readonly editIndex: number) {
+    super(message)
+  }
+}
+
 export type ApplyEditsResult = {
   contentNew: string
   usedNormalized: boolean
@@ -417,15 +425,19 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
   const allRanges: TextReplacement[] = []
   const syncEdits: EditReplacement[] = []
 
+  // 整批共用一个 pre-edit replacementBase，保证失败 index 对应模型提交的原始顺序，而不是增量结果。
+  // 诊断因此可以精确绑定单条 edit，同时维持原有 reverse apply 和原子失败边界。
   for (let i = 0; i < edits.length; i++) {
     const edit = edits[i]
     // 统一 locate：在 replacementBase 上 exact-first（base 已是原文或已归一化）
     const match = findMatch(replacementBase, edit.oldString)
     if (!match.found) {
-      throw new Error(
+      // 记录 locate 的真实索引；closest 调用方必须使用它，不能回退到 edits[0] 猜测。
+      throw new EditApplyError(
         edits.length === 1
           ? `Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.`
           : `Could not find edits[${i}].oldString in ${path}. The oldString must match exactly including all whitespace and newlines.`,
+        i,
       )
     }
 
@@ -434,10 +446,11 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
       ? countOccurrences(replacementBase, edit.oldString)
       : exactLiteralCount(replacementBase, edit.oldString)
     if (occurrences > 1 && edit.replaceAll !== true) {
-      throw new Error(
+      throw new EditApplyError(
         edits.length === 1
           ? `Found multiple matches for oldString. Provide more surrounding context to make the match unique.`
           : `Found ${occurrences} occurrences of edits[${i}] in ${path}. Each oldString must be unique. Provide more context to make it unique.`,
+        i,
       )
     }
 
@@ -446,10 +459,12 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
       : enumerateExactRanges(replacementBase, edit.oldString, edit.replaceAll === true)
 
     if (ranges.length === 0) {
-      throw new Error(
+      // 该失败属于当前 edit 的成功域检查，只有当前 oldString 可以成为诊断 probe。
+      throw new EditApplyError(
         edits.length === 1
           ? `Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.`
           : `Could not find edits[${i}].oldString in ${path}.`,
+        i,
       )
     }
 
@@ -482,6 +497,7 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
   }
 
   // exact：原文 reverse 切串（旧 replace 的推广）；normalized：preserve 触碰行
+  // closest 从未参与这里的 range 生成，任何相似文本都不能越过 exact/closed-normalization 成功域。
   const contentNew = usedNormalized
     ? applyReplacementsPreservingUnchangedLines(content, replacementBase, allRanges)
     : applyReplacements(replacementBase, allRanges)

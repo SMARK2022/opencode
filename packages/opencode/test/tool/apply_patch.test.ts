@@ -332,6 +332,41 @@ describe("tool.apply_patch freeform", () => {
     }),
   )
 
+  // CRLF 文件中的多行 candidate 与 Patch 的 LF expected 在 normalized 空间等价，不能再次回显 expected block。
+  // candidate 已位于 cursor 之前，测试同时锁定“原文件证据”与“当前步骤不可重用”的边界。
+  // 断言组合 patch input 和 error output，确保用户上下文中不会出现第二份 requested block。
+  it.instance("does not repeat a CRLF candidate before the patch cursor", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const target = path.join(test.directory, "crlf_cursor_candidate.txt")
+      yield* writeText(target, "alpha\r\nbeta\r\nmiddle\r\nomega\r\n")
+      const patchText = [
+        "*** Begin Patch",
+        "*** Update File: crlf_cursor_candidate.txt",
+        "@@",
+        "-middle",
+        "+MIDDLE",
+        "@@",
+        "-alpha",
+        "-beta",
+        "+ALPHA",
+        "+BETA",
+        "*** End Patch",
+      ].join("\n")
+
+      const exit = yield* execute({ patchText }, ctx).pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as Error
+        expect(error.message).toContain("exists at this location in the original file")
+        expect((patchText + error.message).split("alpha\n-beta").length - 1).toBe(1)
+        expect(error.message).not.toContain("alpha\nbeta")
+      }
+      expect(yield* readText(target)).toBe("alpha\r\nbeta\r\nmiddle\r\nomega\r\n")
+    }),
+  )
+
   // 前序 replacement 已从 working copy 消费 alpha；persisted candidate 只能解释原文件位置，不能猜测 cursor 原因。
   // Tool input 有两个独立 `-alpha` 请求，result 不得制造第三份，且整个文件仍按单 hunk 原子失败。
   it.instance("does not repeat an exact candidate consumed by a prior chunk", () =>
@@ -904,15 +939,17 @@ EOF`
     )
 
   // Tool wrapper 不能在 owner 丢失身份后重扫第一个 chunk；提示必须绑定真正失败的第二个 chunk。
+  // 失败身份由 Patch owner 的主路径确定，wrapper 只负责组合既有错误文案和 actual 证据。
   // 长字符集 decoy 同时证明 bounded window 选择第 4 行候选，而不是重复旧的无界 scorer。
   // 失败 chunk 的 requested 只留在 patchText，result 用 actual 与列区间提供增量证据。
+  // 断言因此同时锁定失败归因、去重约束和列差异 renderer，避免测试只验证“有错误”。
   it.instance("reports the reliable candidate for the chunk that actually failed", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
       const { ctx } = makeCtx()
       const target = path.join(test.directory, "failed_chunk.txt")
       const decoy = "a".repeat(180) + "t".repeat(180) + "e".repeat(180)
-      const candidate = "prefix target sequence alpha beta gammo suffix"
+      const candidate = "prefix target sequence alpha beta gamxa suffix"
       yield* writeText(target, `first\n${decoy}\nfiller\n${candidate}\n`)
 
       const patchText = [
@@ -955,7 +992,8 @@ EOF`
       yield* writeText(goodFile, "hello\n")
       yield* writeText(badFile, "world\n")
 
-      // good.txt 的 context 正确，bad.txt 的 context 错误
+      // good.txt 的 context 正确，bad.txt 的 context 错误。
+      // 多文件聚合仍允许成功文件落盘，但失败文件只能报告诊断，不得改变其内容。
       const patchText = [
         "*** Begin Patch",
         "*** Update File: good.txt",

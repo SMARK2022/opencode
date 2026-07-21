@@ -15,7 +15,7 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import * as Bom from "@/util/bom"
 import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
 import { closestWindow } from "@/patch/match"
-import { applyEdits, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
+import { applyEdits, EditApplyError, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
 import * as Mutation from "./file-mutation-coordinator"
 
 /**
@@ -247,7 +247,13 @@ export const EditTool = Tool.define(
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error)
               if (message.includes("Could not find") || message.includes("Could not find oldString")) {
-                const probe = editsLF.find((e) => baseLF.indexOf(e.oldString) === -1) ?? editsLF[0]
+                if (!(error instanceof EditApplyError)) throw error
+                const probe = editsLF[error.editIndex]
+                // owner 已确定失败 edit；缺失内部索引时必须原样失败，不能用首条 edit 猜测。
+                if (!probe) throw error
+                // closest 只解释这条失败 oldString，不参与 replacement success，也不启动第二 matcher。
+                // normalized batch 中前一条 edit 可能已经成功定位，但它不是本次失败的诊断证据。
+                // 保持既有 message 前缀不变，新增信息只来自同一主路径返回的 actual candidate。
                 const closest = closestWindow(contentOld, convertToLineEnding(probe.oldString, ending))
                 throw new Error(
                   message +

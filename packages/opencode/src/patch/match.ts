@@ -84,30 +84,54 @@ export type ClosestWindow = {
   score: number
 }
 
-function bigrams(text: string) {
-  // Array.from 按 Unicode code point 切分，避免代理对被拆开后制造不存在的相似度。
-  const points = Array.from(text)
-  const result = new Map<string, number>()
-  for (let index = 0; index < points.length - 1; index++) {
-    const pair = points[index] + points[index + 1]
-    result.set(pair, (result.get(pair) ?? 0) + 1)
-  }
-  return result
+type NormalizedText = {
+  points: string[]
+  rawStarts: number[]
+  rawEnds: number[]
 }
 
-function similarity(expected: string, candidate: string) {
-  const expectedPairs = bigrams(expected)
-  const candidatePairs = bigrams(candidate)
-  const expectedCount = [...expectedPairs.values()].reduce((sum, count) => sum + count, 0)
-  const candidateCount = [...candidatePairs.values()].reduce((sum, count) => sum + count, 0)
-  if (expectedCount === 0 || candidateCount === 0) return 0
+type CandidateSpan = { start: number; end: number }
 
-  // multiset 取最小频次保留重复字符权重，不能退化回“出现过即可”的字符集合。
-  const common = [...expectedPairs].reduce(
-    (sum, [pair, count]) => sum + Math.min(count, candidatePairs.get(pair) ?? 0),
-    0,
-  )
-  return (2 * common) / (expectedCount + candidateCount)
+type MatchState = {
+  distance: number
+  span: CandidateSpan
+  hasDistinctEqualSpan: boolean
+}
+
+function normalizeText(text: string): NormalizedText {
+  // DP 只在 code-point 空间计算距离；raw 边界单独保留，避免 astral 字符和 CRLF 被误当成 UTF-16 单元。
+  // 每个 normalized point 都对应一个连续原文区间，renderer 只能使用这张映射，不能重新搜索候选。
+  const points: string[] = []
+  const rawStarts: number[] = []
+  const rawEnds: number[] = []
+
+  for (let offset = 0; offset < text.length;) {
+    const start = offset
+    const codePoint = text.codePointAt(offset)!
+    const value = String.fromCodePoint(codePoint)
+    offset += value.length
+    if (codePoint === 13 && text[offset] === "\n") offset++
+    points.push(codePoint === 10 || codePoint === 13 ? "\n" : value)
+    rawStarts.push(start)
+    rawEnds.push(offset)
+  }
+
+  return { points, rawStarts, rawEnds }
+}
+
+function sameSpan(left: CandidateSpan | undefined, right: CandidateSpan | undefined) {
+  return left?.start === right?.start && left?.end === right?.end
+}
+
+function chooseState(left: MatchState, right: MatchState): MatchState {
+  if (left.distance < right.distance) return left
+  if (right.distance < left.distance) return right
+  // 同一 span 的多条最短路径是等价证据；不同 span 必须保留 tie 状态，不能由转移顺序代表文件位置。
+  // 该合并只发生在同一个 DP 单元，不会把距离更差的候选带入最终结果。
+  if (sameSpan(left.span, right.span)) {
+    return { ...left, hasDistinctEqualSpan: left.hasDistinctEqualSpan || right.hasDistinctEqualSpan }
+  }
+  return { ...left, hasDistinctEqualSpan: true }
 }
 
 function truncateExcerpt(text: string, limit: number) {
@@ -123,6 +147,8 @@ function truncateExcerpt(text: string, limit: number) {
 
 // Edit 与 Patch 共用此 renderer，避免同一 candidate 在两个 Tool result 中重新形成相互漂移的 expected 副本。
 function formatClosestDifference(expected: string[], candidate: string[], startLine: number) {
+  if (expected.length !== candidate.length) return ""
+
   const output: string[] = []
   for (const [index, actual] of candidate.entries()) {
     const requested = expected[index]
@@ -175,44 +201,115 @@ function formatClosestDifference(expected: string[], candidate: string[], startL
   return output.join("\n")
 }
 
-// 诊断按完整 expected block 的行数比较窗口；有序 bigram multiset 同时惩罚无关长行和字符重排。
-// 分数低于 0.5 或最佳分并列时不声称存在 closest，宁可要求重新 read 也不提供错误位置。
+// DP 的第一行允许跳过全文前缀；最终距离因此代表 expected 到任意连续子串的最小编辑距离。
+// span 的等距分支只记录“存在其他位置”，不会用转移顺序猜测唯一候选。
+// 末尾扫描必须先聚合全局最小距离，再统一应用 tie 和 reliability，不能提前返回第一个最优终点。
 export function closestWindow(content: string, expected: string): ClosestWindow | undefined {
-  // trim 仅用于诊断评分；返回 excerpt 始终取 raw file text，不能伪装成规范化后的文件内容。
-  const lines = content.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n")
   const expectedLines = expected.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n")
   if (expectedLines.length === 0 || expectedLines.every((line) => line.trim() === "")) return undefined
 
-  const normalizedExpected = expectedLines.map((line) => line.trim()).join("\n")
-  let bestIndex = -1
-  let bestScore = 0
-  let tied = false
-  for (let index = 0; index <= lines.length - expectedLines.length; index++) {
-    const score = similarity(
-      normalizedExpected,
-      lines.slice(index, index + expectedLines.length).map((line) => line.trim()).join("\n"),
-    )
-    if (score > bestScore) {
-      // 严格更高分会开启新的唯一候选；旧候选之间的 tie 不应污染新的最大值。
-      bestIndex = index
-      bestScore = score
-      tied = false
-      continue
+  const text = normalizeText(content)
+  const pattern = normalizeText(expected).points
+  if (pattern.length === 0 || text.points.length === 0) return undefined
+
+  let previous: Array<MatchState | undefined> = Array.from({ length: text.points.length + 1 }, () => undefined)
+
+  for (let patternIndex = 1; patternIndex <= pattern.length; patternIndex++) {
+    const current: Array<MatchState | undefined> = [undefined]
+
+    for (let textIndex = 1; textIndex <= text.points.length; textIndex++) {
+      // 删除前置 expected 字符后从当前 text 字符启动候选，保留“尚未消费 text 前缀”的路径。
+      // 该 empty predecessor 是内部子串能够成为等距候选的必要状态，不能被上一格 active span 覆盖。
+      let state: MatchState = {
+        distance: patternIndex - 1 + (pattern[patternIndex - 1] === text.points[textIndex - 1] ? 0 : 1),
+        span: { start: textIndex - 1, end: textIndex },
+        hasDistinctEqualSpan: false,
+      }
+
+      const deletionSource = previous[textIndex]
+      if (deletionSource) {
+        // deletion 延续同一连续候选，只增加 expected 消耗；它不能缩短 span 或回到已消费的 text。
+        state = chooseState(state, {
+          distance: deletionSource.distance + 1,
+          span: deletionSource.span,
+          hasDistinctEqualSpan: deletionSource.hasDistinctEqualSpan,
+        })
+      }
+
+      const insertionSource = current[textIndex - 1]
+      if (insertionSource) {
+        // insertion 只延长当前候选尾部；候选起点只能由 pair 或 empty transition 决定。
+        state = chooseState(state, {
+          distance: insertionSource.distance + 1,
+          span: { start: insertionSource.span.start, end: textIndex },
+          hasDistinctEqualSpan: insertionSource.hasDistinctEqualSpan,
+        })
+      }
+
+      const pairSource = previous[textIndex - 1]
+      if (pairSource) {
+        // pair 是唯一同时消费新 expected/text point 的对角转移，比较单位保持为 code point。
+        state = chooseState(state, {
+          distance: pairSource.distance + (pattern[patternIndex - 1] === text.points[textIndex - 1] ? 0 : 1),
+          span: { start: pairSource.span.start, end: textIndex },
+          hasDistinctEqualSpan: pairSource.hasDistinctEqualSpan,
+        })
+      }
+      current.push(state)
     }
-    if (score === bestScore && score > 0) tied = true
+
+    previous = current
   }
 
-  if (bestIndex === -1 || bestScore < 0.5 || tied) return undefined
-  const candidate = lines.slice(bestIndex, bestIndex + expectedLines.length)
-  const candidateText = candidate.join("\n")
-  // working copy 可能已消费或越过原文；persisted candidate 若含完整 expected，只能报告位置而不能回显第二份文本。
-  const excerpt = candidateText.includes(expected)
-    ? "Exact requested text exists at this location in the original file but is unavailable to the current patch step."
-    : formatClosestDifference(expectedLines, candidate, bestIndex + 1) || truncateExcerpt(candidateText, 500)
-  // 行号绑定候选窗口起点而非 surrounding context 起点，修复旧 Edit 提示的 off-by-one。
-  return {
-    line: bestIndex + 1,
-    excerpt: truncateExcerpt(excerpt, 500),
-    score: bestScore,
+  let bestDistance = Number.POSITIVE_INFINITY
+  const spans = new Map<string, CandidateSpan>()
+  let tied = false
+  for (const state of previous) {
+    if (!state?.span) continue
+    if (state.distance < bestDistance) {
+      bestDistance = state.distance
+      spans.clear()
+      spans.set(`${state.span.start}:${state.span.end}`, state.span)
+      tied = state.hasDistinctEqualSpan
+      continue
+    }
+    if (state.distance !== bestDistance) continue
+    if (state.hasDistinctEqualSpan) tied = true
+    spans.set(`${state.span.start}:${state.span.end}`, state.span)
   }
+
+  if (!Number.isFinite(bestDistance) || tied || spans.size !== 1) return undefined
+  const span = spans.values().next().value as CandidateSpan
+  const candidatePointLength = span.end - span.start
+  // 分母同时包含 expected 与候选长度，插入/删除的可靠性不会因候选变长而超过 1。
+  // 只应用一次既有阈值；低分结果不能通过缩短 excerpt、重排候选或再次搜索获得展示资格。
+  const score = 1 - bestDistance / Math.max(pattern.length, candidatePointLength)
+  if (score < 0.5) return undefined
+
+  const rawStart = text.rawStarts[span.start]
+  const rawEnd = text.rawEnds[span.end - 1]
+  const candidateText = content.slice(rawStart, rawEnd)
+  // 零距离等价必须比较同一 normalized points；raw includes 会把 CRLF 与 LF 误判为不同文本。
+  // Patch expected 来自 LF 行数组，CRLF raw span 仍可被证明是同一块原始文本，不能因此回显 expected。
+  // raw candidate 只用于展示证据，等价判断不依赖第二次搜索或另一套归一化规则。
+  const isEquivalentCandidate =
+    candidatePointLength === pattern.length && pattern.every((point, index) => text.points[span.start + index] === point)
+  const renderStart = Math.max(content.lastIndexOf("\n", rawStart - 1), content.lastIndexOf("\r", rawStart - 1)) + 1
+  const nextLF = content.indexOf("\n", rawEnd)
+  const nextCR = content.indexOf("\r", rawEnd)
+  const lineEnd = [nextLF, nextCR].filter((index) => index !== -1).reduce((min, index) => Math.min(min, index), content.length)
+  const renderedText = content.slice(renderStart, lineEnd).replaceAll("\r\n", "\n").replaceAll("\r", "\n")
+  const candidate = renderedText.split("\n")
+  const line = content.slice(0, renderStart).split(/\r\n|\r|\n/).length
+  // 展示扩展只改变上下文范围，不改变 score、line 起点或 raw 边界，因此提示与选择始终来自同一候选。
+  // 变长分支直接截取 DP raw span，完整行只服务等行数列差异，避免长前后缀遮蔽已证明的 actual。
+  // raw span 可能只是行内片段；展示时扩展到包含行，但 candidateText 仍来自 DP span，候选身份不会漂移。
+  // 只有行数相同才计算列差异；变长窗口直接展示同一 raw span，renderer 不得自行选择另一段文本。
+  const excerpt = isEquivalentCandidate
+    ? "Exact requested text exists at this location in the original file but is unavailable to the current patch step."
+    : candidate.length === expectedLines.length
+      ? formatClosestDifference(expectedLines, candidate, line) || truncateExcerpt(renderedText, 500)
+      : truncateExcerpt(candidateText, 500)
+
+  return { line, excerpt: truncateExcerpt(excerpt, 500), score }
 }

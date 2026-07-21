@@ -305,12 +305,12 @@ describe("tool.edit", () => {
       Effect.gen(function* () {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "file.txt")
-        // 文件内容含 "actual content"，模型搜索 "actual contnet"（拼写错误）
+        // 文件内容含 "actual content"，模型搜索 "actual contxnt"（单字符拼写错误）
         yield* put(filepath, "line1\nactual content here\nline3")
 
         const error = yield* fail({
           filePath: filepath,
-          oldString: "actual contnet",
+          oldString: "actual contxnt",
           newString: "replacement",
         })
 
@@ -327,7 +327,7 @@ describe("tool.edit", () => {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "decoy.txt")
         const decoy = "a".repeat(180) + "t".repeat(180) + "e".repeat(180)
-        const candidate = "prefix target sequence alpha beta gammo suffix"
+        const candidate = "prefix target sequence alpha beta gamxa suffix"
         yield* put(filepath, `${decoy}\nfiller one\nfiller two\n${candidate}\n`)
 
         const error = yield* fail({
@@ -345,6 +345,111 @@ describe("tool.edit", () => {
     // 两行窗口只有一个字符不同，bounded score 应可靠选择真实候选并报告其起始行。
     // requested 全文已存在于 Tool input；错误只展示 actual 局部和一基差异列，避免再次复制 oldString。
     // 独立列号断言同时证明长公共前缀不会掩盖真正变化字符。
+    it.instance("closest match prioritizes ordered edit distance over context length", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "ordered-distance.txt")
+        const candidate = "prefix target sequence alpha beta gamxa suffix"
+        yield* put(filepath, `target sequence alpha beta deltta\n${candidate}\n`)
+
+        const error = yield* fail({
+          filePath: filepath,
+          oldString: "target sequence alpha beta gamma",
+          newString: "replacement",
+        })
+
+        expect(error.message).toContain("Closest match at line 2")
+        expect(error.message).toContain(candidate)
+        expect(error.message).not.toContain("target sequence alpha beta deltta")
+      }),
+    )
+
+    it.instance("closest match preserves raw offsets across CRLF and astral text", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "raw-offsets.txt")
+        // astral 字符占两个 UTF-16 单元，CRLF 又会在比较空间折叠成一个 point。
+        // 用户最终看到的行号和 actual 片段仍必须来自原始边界，而不是 code-point index。
+        yield* put(filepath, "😀 prefix\r\nactual content\r\n")
+
+        const error = yield* fail({
+          filePath: filepath,
+          oldString: "actual contxnt",
+          newString: "replacement",
+        })
+
+        expect(error.message).toContain("Closest match at line 2")
+        expect(error.message).toContain('line 2 actual: "actual content"')
+      }),
+    )
+
+    it.instance("closest match renders the DP span when a line is inserted", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "variable-span.txt")
+        // DP 返回的候选跨过一个空行，renderer 只能展示同一 raw span，不能重选等长行窗口。
+        // 这个断言保护变长候选的证据完整性，并让模型看到实际插入的空行。
+        yield* put(filepath, "alpha\n\nbeta\n")
+
+        const error = yield* fail({
+          filePath: filepath,
+          oldString: "alpha\nbeta",
+          newString: "replacement",
+        })
+
+        expect(error.message).toContain("Closest match at line 1")
+        expect(error.message).toContain("alpha\n\nbeta")
+      }),
+    )
+
+    it.instance("keeps a long variable candidate span visible", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "long-variable-span.txt")
+        const prefix = "p".repeat(400)
+        const suffix = "s".repeat(400)
+        // 完整行上下文会把 DP 选中的中间 span 推入 omission marker，测试必须锁定 span 本身仍可见。
+        // 预期值是手写的 raw candidate，不从 matcher 反向生成，避免测试与实现共享错误。
+        // 这条断言只验证诊断证据保留，不允许相似文本进入成功替换路径。
+        yield* put(filepath, `${prefix}alpha\n\nbeta${suffix}\n`)
+
+        const error = yield* fail({
+          filePath: filepath,
+          oldString: "alpha\nbeta",
+          newString: "replacement",
+        })
+
+        expect(error.message).toContain("alpha\n\nbeta")
+      }),
+    )
+
+    it.instance("closest match accepts the normalized score boundary", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "score-boundary.txt")
+        yield* put(filepath, "ab")
+
+        const error = yield* fail({
+          filePath: filepath,
+          oldString: "abcd",
+          newString: "replacement",
+        })
+
+        expect(error.message).toContain("Closest match at line 1")
+        expect(error.message).toContain('line 1 actual: "ab"')
+
+        yield* put(filepath, "a")
+        const below = yield* fail({
+          filePath: filepath,
+          oldString: "abcd",
+          newString: "replacement",
+        })
+        // 低于阈值时即使存在数学上的最小窗口，也不能把它包装成可行动的定位信息。
+        // 该断言锁定一次性 gate，避免未来为了“多匹配到一些”增加退化重试。
+        expect(below.message).toContain("No reliable nearby candidate was found")
+      }),
+    )
+
     it.instance("closest match shows actual candidate for a single-char mismatch", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -368,6 +473,7 @@ describe("tool.edit", () => {
 
     // oldString 与文件结构完全无关时没有可信位置，任何 excerpt 都会制造 false precision。
     // 低于阈值的候选必须被抑制，并明确要求重新读取文件。
+    // 该行为是一次性 reliability gate，不允许通过第二次匹配降低证据标准。
     it.instance("suppresses candidates when oldString structure mismatches file", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -388,6 +494,7 @@ describe("tool.edit", () => {
 
     // 两个窗口与 expected 只有最后一个字符不同且得分完全相同，任何择一都会制造假精度。
     // tie gate 必须省略两处文本并明确要求重新 read，而不是依赖文件顺序。
+    // 断言只锁定用户可见的“无唯一证据即不展示”契约，不依赖 matcher 的内部遍历顺序。
     it.instance("suppresses tied closest candidates", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -406,6 +513,25 @@ describe("tool.edit", () => {
         expect(error.message).toContain("No reliable nearby candidate was found")
         expect(error.message).not.toContain("gammo")
         expect(error.message).not.toContain("gammi")
+      }),
+    )
+
+    // 候选可以从更长窗口的内部起点开始；等距时不能因为 DP 转移顺序丢掉内部候选。
+    // 该最小反例专门覆盖 empty predecessor，否则较长窗口会错误覆盖内部子串。
+    // 失败信息必须要求重新读取，而不是选择其中一个同距位置制造假精度。
+    it.instance("suppresses a tied inner candidate", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "inner-tie.txt")
+        yield* put(filepath, "xb")
+
+        const error = yield* fail({
+          filePath: filepath,
+          oldString: "ab",
+          newString: "replacement",
+        })
+
+        expect(error.message).toContain("No reliable nearby candidate was found")
       }),
     )
 
@@ -905,6 +1031,28 @@ describe("tool.edit", () => {
         })
         expect(error.message).toMatch(/Could not find|bar/)
         expect(yield* load(filepath)).toBe("foo")
+      }),
+    )
+
+    // 前一条 normalized edit 可以成功定位，但失败报告必须只携带真正缺失条目的 actual 证据。
+    // 该断言同时保护 editIndex 传播和错误正文去重，防止 wrapper 回退到第一条 oldString。
+    it.instance("diagnoses only the missing normalized edit", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "missing-normalized-edit.txt")
+        yield* put(filepath, "say “hello”\nworld\n")
+
+        const error = yield* fail({
+          filePath: filepath,
+          edits: [
+            { oldString: '"hello"', newString: '"hi"' },
+            { oldString: "worxd", newString: "mars" },
+          ],
+        })
+
+        expect(error.message).toContain("Closest match at line 2")
+        expect(error.message).toContain("world")
+        expect(error.message).not.toContain("say “hello”")
       }),
     )
 
