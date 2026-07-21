@@ -1292,6 +1292,7 @@ export type SessionsHistoryOutput = {
           readonly assistantMessageID: string
           readonly error: { readonly type: "unknown"; readonly message: string }
           readonly aborted?: boolean
+          readonly discardIncompleteAttempt?: boolean
         }
       }
     | {
@@ -1467,6 +1468,7 @@ export type SessionsHistoryOutput = {
         readonly data: {
           readonly timestamp: number
           readonly sessionID: string
+          readonly assistantMessageID?: string
           readonly attempt: number
           readonly error: {
             readonly message: string
@@ -1921,6 +1923,7 @@ export type SessionsEventsOutput =
         readonly assistantMessageID: string
         readonly error: { readonly type: "unknown"; readonly message: string }
         readonly aborted?: boolean
+        readonly discardIncompleteAttempt?: boolean
       }
     }
   | {
@@ -2096,6 +2099,7 @@ export type SessionsEventsOutput =
       readonly data: {
         readonly timestamp: number
         readonly sessionID: string
+        readonly assistantMessageID?: string
         readonly attempt: number
         readonly error: {
           readonly message: string

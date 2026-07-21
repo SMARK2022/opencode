@@ -1101,6 +1101,7 @@ export type GlobalEvent = {
           assistantMessageID: string
           error: SessionErrorUnknown
           aborted?: boolean
+          discardIncompleteAttempt?: boolean
         }
       }
     | {
@@ -1276,6 +1277,7 @@ export type GlobalEvent = {
         properties: {
           timestamp: number
           sessionID: string
+          assistantMessageID?: string
           attempt: number
           error: SessionNextRetryError
         }
@@ -4061,6 +4063,7 @@ export type SyncEventSessionNextStepFailed = {
       assistantMessageID: string
       error: SessionErrorUnknown
       aborted?: boolean
+      discardIncompleteAttempt?: boolean
     }
   }
 }
@@ -4280,6 +4283,7 @@ export type SyncEventSessionNextRetried = {
     data: {
       timestamp: number
       sessionID: string
+      assistantMessageID?: string
       attempt: number
       error: SessionNextRetryError
     }
@@ -5113,6 +5117,7 @@ export type SessionNextStepFailed = {
     assistantMessageID: string
     error: SessionErrorUnknown
     aborted?: boolean
+    discardIncompleteAttempt?: boolean
   }
 }
 
@@ -5365,6 +5370,7 @@ export type SessionNextRetried = {
   data: {
     timestamp: number
     sessionID: string
+    assistantMessageID?: string
     attempt: number
     error: SessionNextRetryError
   }
@@ -7336,6 +7342,7 @@ export type EventSessionNextStepFailed = {
     assistantMessageID: string
     error: SessionErrorUnknown
     aborted?: boolean
+    discardIncompleteAttempt?: boolean
   }
 }
 
@@ -7525,6 +7532,7 @@ export type EventSessionNextRetried = {
   properties: {
     timestamp: number
     sessionID: string
+    assistantMessageID?: string
     attempt: number
     error: SessionNextRetryError
   }

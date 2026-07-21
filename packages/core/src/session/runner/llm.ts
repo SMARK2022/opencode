@@ -38,6 +38,7 @@ import { SessionTodo } from "../todo"
 import { SessionEvent } from "../event"
 import { SessionHistory } from "../history"
 import { SessionGoal } from "../goal"
+import { SessionRetry } from "../retry"
 import { SessionGoalProgress } from "../goal-progress"
 import { SessionInput } from "../input"
 import { SessionMessage } from "../message"
@@ -429,10 +430,16 @@ const layer = Layer.effect(
       let overflowFailure: ProviderErrorEvent | undefined
       // 只有本轮显式provider错误携带续跑资格，不能从投影中的unknown推断中断或EOF。
       let terminalError = false
+      let hasToolCall = false
+      const incomplete = new LLMError({ module: "SessionRunner", method: "stream", reason: new InvalidProviderOutputReason({
+        message: "Provider returned incomplete completion (finish_reason: unknown)",
+      }) })
+      const retryError = new SessionV1.APIError({ message: incomplete.reason.message, isRetryable: true, metadata: { finishReason: "unknown" } })
       // 请求归属与工具读取门寿命不同：dispatch固定代际，终态后的同代最终消耗仍结算。
       const dispatchedGoal = yield* goals.get(session.id)
       const expectedUsage = Option.isSome(dispatchedGoal) && dispatchedGoal.value.status === "active" ? { goalID: dispatchedGoal.value.id, generation: dispatchedGoal.value.generation } : undefined
-      const providerStream = llm.stream(request, (body) => Effect.gen(function* () {
+      // 每个获准 retry 才重新调用唯一 stream；不能反复消费同一个已构造响应。
+      const providerStream = Effect.suspend(() => llm.stream(request, (body) => Effect.gen(function* () {
         // 同一次 compile 已合并模型/路由默认值并完成协议 lowering，估算只读取该有效正文。
         inputEstimate = {
           ...Token.estimateRequest(body, samples, system.sections),
@@ -467,6 +474,12 @@ const layer = Layer.effect(
                 return
               }
               terminalError = !isContextOverflowFailure(event)
+            }
+            if (event.type === "tool-call") hasToolCall = true
+            if (event.type === "step-finish" && event.reason === "unknown" && !hasToolCall && !publisher.stepSettlement()) {
+              // 成功事件和用量确认前清理；tool-bearing attempt 从不重放。
+              yield* withPublication(publisher.failAssistant(incomplete.reason.message, false, false, true))
+              return yield* incomplete
             }
             yield* publish(event)
             if (event.type !== "tool-call" || event.providerExecuted) return
@@ -517,7 +530,16 @@ const layer = Layer.effect(
         }),
         // 成功 EOF 保留默认残片通知；只有失败/中断 cleanup 使用退出安全模式。
         Effect.onExit(exit => withPublication(publisher.flush(exit._tag === "Failure"))),
-      )
+      )).pipe(Effect.retry({
+        while: error => error === incomplete,
+        schedule: SessionRetry.policy({
+          provider: String(model.provider), parse: () => retryError.toObject(),
+          set: ({ attempt }) => Effect.gen(function* () {
+            hasToolCall = false
+            yield* withPublication(publisher.retry(attempt, retryError.data))
+          }),
+        }),
+      }))
 
       return yield* Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {

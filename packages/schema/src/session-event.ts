@@ -220,6 +220,8 @@ export namespace Step {
       error: UnknownError,
       // 旧失败事件缺少此属性仍按 error；新中断使用明确标志，不解析错误文案。
       aborted: Schema.Boolean.pipe(optional),
+      // 仅无 Tool 的不完整 attempt 撤回前缀；必须随 durable data 保存，不能放实时 envelope。
+      discardIncompleteAttempt: Schema.Boolean.pipe(optional),
     },
   })
   export type Failed = typeof Failed.Type
@@ -420,6 +422,8 @@ export const Retried = Event.define({
   ...options,
   schema: {
     ...Base,
+    // 旧重试无助手身份不改变投影；Native 重试明确复用已绑定请求的同一助手。
+    assistantMessageID: SessionMessage.ID.pipe(optional),
     attempt: Schema.Finite,
     error: RetryError,
   },
