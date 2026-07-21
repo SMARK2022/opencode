@@ -1,5 +1,5 @@
 // 成功后的确认性复读可省略；失败恢复和未读范围仍可正常读取。
-import { Effect, Option, Schema, Scope, Stream } from "effect"
+import { Effect, Option, Schema, Scope } from "effect"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { Hash } from "@opencode-ai/core/util/hash"
 import * as path from "path"
@@ -7,7 +7,9 @@ import * as Tool from "./tool"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { LSP } from "@/lsp/lsp"
 import DESCRIPTION from "./read.txt"
-import { readOutline, readOutlineCached, type Outline } from "./read-outline"
+import { readOutlineCached, type Outline } from "./read-outline"
+// page 和 outline 共用预算与解析器，不重复扫描完整尾部。
+import { createAuxiliaryBudget, readTextPage } from "@opencode-ai/core/tool/read-lines"
 import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
@@ -28,8 +30,6 @@ const SAMPLE_BYTES = 4096
 const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
 
 const MAX_CONTENT_TOKENS = 16000
-// #142：正文限幅后只追加有界计数，避免为 total 扫描整个超大文件
-const MAX_SCAN_BYTES = 256 * 1024
 
 
 // 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
@@ -130,8 +130,6 @@ function findUnexpandedFileInContext(
   }
   return false
 }
-
-class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
 
 // `offset` and `limit` were originally `z.coerce.number()` — the runtime
 // coercion was useful when the tool was called from a shell but serves no
@@ -288,45 +286,6 @@ export const ReadTool = Tool.define<
           return Option.getOrElse(yield* file.readAlloc(Math.min(sampleSize, fileSize)), () => new Uint8Array())
         }),
       )
-    })
-
-    const lines = Effect.fn("ReadTool.lines")(function* (filepath: string, opts: { limit: number; offset: number }) {
-      const start = opts.offset - 1
-      const raw: string[] = []
-      const flags = { bytes: 0, count: 0, cut: false, more: false, done: false, scanBytes: 0 }
-
-      // #142：保留手动解码及末尾未换行的处理；正文限幅后最多再计数 256 KiB。
-      // #142：未到 EOF 就停流时，count 只是下界，不能冒充精确总行数。
-      const decoder = new TextDecoder("utf-8")
-      yield* fs.stream(filepath).pipe(
-        Stream.map((bytes) => decoder.decode(bytes, { stream: true })),
-        Stream.splitLines,
-        Stream.runForEach((text) =>
-          Effect.gen(function* () {
-            if (flags.done) return yield* new ReadStop()
-            flags.count += 1
-            if (flags.count <= start) return
-
-            const line = text // 保留完整行，由总字节预算决定当前页是否接纳。
-            const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
-            if (!flags.cut && raw.length < opts.limit && flags.bytes + size <= MAX_BYTES) {
-              raw.push(line)
-              flags.bytes += size
-              return
-            }
-
-            flags.cut = flags.cut || raw.length < opts.limit
-            flags.more = true
-            flags.scanBytes += size
-            if (flags.scanBytes <= MAX_SCAN_BYTES) return
-            flags.done = true
-            return yield* new ReadStop()
-          }),
-        ),
-        Effect.catchTag("ReadStop", () => Effect.void),
-      )
-
-      return { raw, count: flags.count, totalExact: !flags.done, cut: flags.cut, more: flags.more, offset: opts.offset }
     })
 
     const isBinaryFile = (filepath: string, bytes: Uint8Array) => {
@@ -564,7 +523,16 @@ export const ReadTool = Tool.define<
         ))
       }
 
-      const file = yield* lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 })
+      // 每次 execute 仅创建一个预算；Effect 中断同时关闭底层 Node 流。
+      const auxiliaryBudget = createAuxiliaryBudget()
+      const file = yield* Effect.promise((signal) =>
+        readTextPage(filepath, {
+          limit: params.limit ?? DEFAULT_READ_LIMIT,
+          offset: params.offset || 1,
+          budget: auxiliaryBudget,
+          signal,
+        }),
+      )
       if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
         return yield* Effect.fail(
           new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),
@@ -626,8 +594,12 @@ const visibleReads = collectVisibleReads(ctx.messages.filter(message => message.
 const stub = findReadStub(visibleReads, current, file.raw.join("\n").length)
       if (stub) {
         // #142：可见范围 stub，避免重复灌入相同内容
+        // covering 的总行数与 EOF 证明必须一起发布，沿用目标已有 totalExact。
+        const owner = stub.status === "stub_covered_range_visible" ? stub.covering : current
         const read = {
           ...current,
+          total: owner.total,
+          totalExact: owner.totalExact,
           returned: 0,
           stub: true as const,
           stubStatus: stub.status,
@@ -639,8 +611,8 @@ const stub = findReadStub(visibleReads, current, file.raw.join("\n").length)
           modified,
           start,
           end,
-          total: file.count,
-          totalExact: file.totalExact,
+          total: owner.total,
+          totalExact: owner.totalExact,
           status: stub.status,
           coveredBy: "coveredBy" in stub ? stub.coveredBy : undefined,
           unread: computeUnreadRanges(visibleReads, current),
@@ -665,7 +637,9 @@ const stub = findReadStub(visibleReads, current, file.raw.join("\n").length)
       // #142：异步 outline
 // [local-smark] 使用 readOutlineCached 替代 readOutline，
 // 按 canonicalPath+size+modifiedMs 缓存 outline，避免每次 read 重新扫描文件
-const outline = yield* Effect.promise(() => readOutlineCached(filepath, file.count, file.offset, size, mtimeMs, file.totalExact))
+const outline = yield* Effect.promise((signal) =>
+        readOutlineCached(filepath, file.count, file.offset, size, mtimeMs, file.totalExact, auxiliaryBudget, signal),
+      )
       // #142：部分重叠仍返回内容，但附 note
       // #142：overlap 判定
 const overlap = findOverlapNote(visibleReads, current)

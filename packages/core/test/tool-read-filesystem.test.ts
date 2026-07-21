@@ -6,6 +6,8 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { ReadToolFileSystem } from "@opencode-ai/core/tool/read-filesystem"
 import { ReadPresentation } from "@opencode-ai/core/tool/read-presentation"
+import { ReadLines } from "@opencode-ai/core/tool/read-lines"
+import { readOutlineCached } from "@opencode-ai/core/tool/read-outline"
 import { utimes } from "fs/promises"
 import { testEffect } from "./lib/effect"
 
@@ -18,6 +20,54 @@ const fixture = Effect.gen(function* () {
 })
 
 describe("ReadToolFileSystem", () => {
+  it.live("shares bounded parser and outline budgets while preserving Native text boundaries", () =>
+    Effect.gen(function* () {
+      const data = yield* fixture
+      const file = path.join(data.directory, "bounded.ts")
+      const source = "export function first() {}\n" + "// filler with a stable payload\n".repeat(100_000)
+      yield* data.files.writeFileString(file, source)
+      const native = yield* ReadToolFileSystem.read(data.fs, file, "bounded.ts", { limit: 20 })
+      expect(native).toMatchObject({ type: "text-page", truncated: true, next: 21 })
+      if (!("read" in native) || !native.read) throw new Error("Expected bounded text metadata")
+      expect(native.read.totalExact).toBe(false)
+      expect(native.read.total).toBeGreaterThanOrEqual(native.read.end + 1)
+      expect(native.read.total).toBeLessThan(100_001)
+      expect("outline" in native ? native.outline : undefined).toBeUndefined()
+      // 同一解析器的 Node 驱动也使用共享额度，统计是实际交付的 chunk 而非 OS 观测。
+      const budget = ReadLines.createAuxiliaryBudget()
+      const parsed = yield* Effect.promise(() => ReadLines.readTextPage(file, { limit: 20, offset: 1, budget }))
+      expect(parsed.raw).toHaveLength(20)
+      expect(parsed.physicalBytesRead).toBeLessThanOrEqual(256 * 1024 + 16 * 1024)
+      expect(parsed.postWindowBytes).toBeLessThanOrEqual(256 * 1024 + 16 * 1024)
+      expect(budget.remaining).toBe(0)
+      expect(yield* Effect.promise(() => readOutlineCached(file, parsed.count, 1, Buffer.byteLength(source), undefined, false, budget))).toBeUndefined()
+      const plain = path.join(data.directory, "boundaries.txt")
+      yield* data.files.writeFileString(plain, "alpha\r\n\rbravo\ncharlie")
+      expect(yield* ReadToolFileSystem.read(data.fs, plain, "boundaries.txt", { limit: 20 }))
+        .toMatchObject({ content: "alpha\n\nbravo\ncharlie", truncated: false, read: { total: 4, totalExact: true } })
+      // 单行超过正文预算也必须有界停止；不能为了等换行组装整份文件。
+      yield* data.files.writeFileString(plain, "x".repeat(1024 * 1024))
+      expect(yield* ReadToolFileSystem.read(data.fs, plain, "boundaries.txt"))
+        .toMatchObject({ content: "", truncated: true, read: { returned: 0, total: 1, totalExact: false, cut: true } })
+      const firstLine = "a".repeat(16 * 1024 - 4) + "\u{1F600}"
+      yield* data.files.writeFileString(plain, `\uFEFF${firstLine}\nbeta`)
+      const unicode = yield* Effect.promise(() => ReadLines.readTextPage(plain, { offset: 1, limit: 20, contentBytesLimit: Infinity }))
+      expect(unicode.raw).toEqual([`\uFEFF${firstLine}`, "beta"])
+      expect(yield* ReadToolFileSystem.read(data.fs, plain, "boundaries.txt", { limit: 20 }))
+        .toMatchObject({ content: firstLine, truncated: true, next: 2 })
+      // LF 和孤立 CR 后的坏字节均在已完成单行页之外，不得使该页失败。
+      for (const end of [10, 13]) {
+        yield* data.files.writeFile(plain, Uint8Array.from([111, 110, 101, end, 0x80]))
+        expect(yield* ReadToolFileSystem.read(data.fs, plain, "boundaries.txt", { limit: 1 })).toMatchObject({ content: "one", truncated: true, next: 2 })
+      }
+      yield* Effect.promise(async () => {
+        const controller = new AbortController()
+        controller.abort()
+        await expect(ReadLines.readTextPage(plain, { offset: 1, limit: 1, signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" })
+      })
+    }),
+  )
+
   it.live("preserves head fingerprints across pages and invalidates equal-size equal-mtime rewrites", () =>
     Effect.gen(function* () {
       const data = yield* fixture
@@ -188,8 +238,9 @@ describe("ReadToolFileSystem", () => {
       const binary = path.join(directory, "archive.dat")
       const malformed = path.join(directory, "malformed.txt")
       yield* files.writeFile(binary, Uint8Array.of(0, 1, 2, 3))
-      const malformedContent = new Uint8Array(64 * 1024 + 1).fill(97)
-      malformedContent[64 * 1024] = 0x80
+      // 坏字节置于实际内容窗口，页外扫描现在有界，不能依赖无界组装超长行。
+      const malformedContent = new Uint8Array(4097).fill(97)
+      malformedContent[4096] = 0x80
       yield* files.writeFile(malformed, malformedContent)
 
       const binaryError = yield* ReadToolFileSystem.read(fs, binary, "archive.dat").pipe(Effect.flip)

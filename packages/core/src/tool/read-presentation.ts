@@ -63,7 +63,8 @@ export function findReadStub(visibleReads: readonly ReadRangeMeta[], current: Re
   const sameRange = sameVersion.find((item) => item.start === current.start && item.end === current.end)
   if (sameRange) return { status: "stub_same_range_visible" as const }
   const covering = sameVersion.find((item) => item.start <= current.start && item.end >= current.end)
-  if (covering) return { status: "stub_covered_range_visible" as const, coveredBy: `${covering.start}-${covering.end}` }
+  // 覆盖源同时拥有 total 和精确性，子页不能以较弱下界改写导航事实。
+  if (covering) return { status: "stub_covered_range_visible" as const, coveredBy: `${covering.start}-${covering.end}`, covering }
   // 只有高重叠分支比较正文字符数；完全相同或被覆盖的读取保持原stub语义。
   if (contentLength < 300) return undefined
   // 只使用同版本最佳单交集；多个重复页不能叠加出虚假的80%覆盖。
