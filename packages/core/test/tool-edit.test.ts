@@ -17,6 +17,7 @@ import { SessionStore } from "@opencode-ai/core/session/store"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
 import { EditTool } from "@opencode-ai/core/tool/edit"
+import { closestMatch } from "@opencode-ai/core/tool/edit-excerpt"
 import { location } from "./fixture/location"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
@@ -170,6 +171,9 @@ describe("EditTool", () => {
       tmp => Effect.gen(function* () {
         const target = path.join(tmp.path, "candidate.txt")
         const candidate = "prefix target sequence alpha beta gamxa suffix"
+        const renderActual = "actual-only:" + Array.from({ length: 2200 }, (_, index) => String.fromCharCode(33 + ((index * 37) % 90))).join("")
+        // 单字符差异先满足距离条件，必须仅由展示输入预算拒绝，不能泄漏大型actual。
+        const renderRequested = renderActual.slice(0, 1000) + (renderActual[1000] === "X" ? "Y" : "X") + renderActual.slice(1001)
         // 场景均调用真实registry/leaf；formatter替身隔离进程，任何失败不得落盘。
         for (const example of [
           { before: `target sequence alpha beta deltta\n${candidate}\n`, edits: [{ oldString: "target sequence alpha beta gamma", newString: "replacement" }], shown: ["Closest match at line 2", candidate], absent: ["target sequence alpha beta deltta"] },
@@ -183,6 +187,24 @@ describe("EditTool", () => {
           { before: "xb", edits: [{ oldString: "ab", newString: "replacement" }], shown: ["No reliable nearby candidate was found"], absent: ["Closest match"] },
           { before: "actual contant\nactual contont", edits: [{ oldString: "actual content", newString: "replacement" }], shown: ["No reliable nearby candidate was found"], absent: ["Closest match"] },
           { before: "say \u201Chello\u201D\nworld\n", edits: [{ oldString: '"hello"', newString: '"hi"' }, { oldString: "worxd", newString: "mars" }], shown: ["edits[1]", "Closest match at line 2", "world"], absent: ["say \u201Chello\u201D"] },
+          { before: "ba", edits: [{ oldString: "aa", newString: "replacement" }], shown: ["No reliable nearby candidate was found"], absent: ["Closest match"] },
+          { before: "target sequence alpha beta gammo\nfiller\ntarget sequence alpha beta gammi\n", edits: [{ oldString: "target sequence alpha beta gamma", newString: "replacement" }], shown: ["No reliable nearby candidate was found"], absent: ["gammo", "gammi"] },
+          // 两类超限均必须经过真实wrapper后仍不展示actual，不能由第二renderer绕过。
+          { before: renderActual, edits: [{ oldString: renderRequested, newString: "replacement" }], shown: ["No reliable nearby candidate was found"], absent: ["actual-only:"] },
+          { before: "actual content must remain private", edits: [{ oldString: "x".repeat(1_000_000), newString: "replacement" }], shown: ["No reliable nearby candidate was found"], absent: ["actual content"] },
+          { before: "filler\n".repeat(20_000) + "target sequence alpha beta gamxa\n", edits: [{ oldString: "target sequence alpha beta gamma", newString: "replacement" }], shown: ["Closest match at line 20001", "gamxa"], absent: [] },
+          // 独立构造十四档partial-word/carry边界，不让短oracle冒称覆盖32位进位。
+          ...[31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 399, 400].map(length => {
+            const actual = Array.from({ length }, (_, index) => String.fromCharCode(33 + ((index * 37) % 90))).join("")
+            const index = Math.floor(length / 2)
+            const expected = actual.slice(0, index) + (actual[index] === "X" ? "Y" : "X") + actual.slice(index + 1)
+            return {
+              before: `unrelated decoy\n${actual}\n`,
+              edits: [{ oldString: expected, newString: "replacement" }],
+              shown: ["Closest match at line 2", `difference: requested columns ${index + 1}-${index + 1}`],
+              absent: [],
+            }
+          }),
         ]) {
           reset()
           yield* Effect.promise(() => fs.writeFile(target, example.before))
@@ -586,5 +608,58 @@ test("keeps the locked edit schema, semantics docstring, and deferred TODOs visi
     "Add LSP notification and diagnostics after V2 LSP runtime exists.",
   ]) {
     expect(source).toContain(`TODO: ${todo}`)
+  }
+})
+
+test("Native diagnostic wrapper agrees with an exhaustive scalar span oracle", () => {
+  // 独立逐span标量距离不共享production的bit-vector、carry、endpoint或恢复过程。
+  const distance = (left: string[], right: string[]) => {
+    const row = Array.from({ length: right.length + 1 }, (_, index) => index)
+    for (let i = 1; i <= left.length; i++) {
+      let diagonal = row[0]
+      row[0] = i
+      for (let j = 1; j <= right.length; j++) {
+        const above = row[j]
+        row[j] = Math.min(above + 1, row[j - 1] + 1, diagonal + (left[i - 1] === right[j - 1] ? 0 : 1))
+        diagonal = above
+      }
+    }
+    return row[right.length]
+  }
+  // 穷举所有非空连续span后才判断全局tie与一次score gate，不能偏好终点或长度。
+  const oracle = (content: string, expected: string) => {
+    const text = Array.from(content)
+    const pattern = Array.from(expected)
+    let best = Infinity
+    let spans: { start: number; end: number }[] = []
+    for (let start = 0; start < text.length; start++) {
+      for (let end = start + 1; end <= text.length; end++) {
+        const value = distance(pattern, text.slice(start, end))
+        if (value > best) continue
+        if (value < best) {
+          best = value
+          spans = []
+        }
+        spans.push({ start, end })
+      }
+    }
+    // 同end不同起点也是真实tie；不能让高分替不唯一的证据背书。
+    if (spans.length !== 1) return undefined
+    const span = spans[0]
+    const score = 1 - best / Math.max(pattern.length, span.end - span.start)
+    return score >= 0.5 ? { line: 1, score } : undefined
+  }
+  // 二元1..5长共62×62对检验公开结果；跨word和真实leaf另由上面的场景覆盖。
+  const samples: string[] = []
+  for (let length = 1; length <= 5; length++) {
+    for (let bits = 0; bits < 2 ** length; bits++) {
+      samples.push(Array.from({ length }, (_, index) => (bits >>> index) & 1 ? "a" : "b").join(""))
+    }
+  }
+  for (const content of samples) {
+    for (const expected of samples) {
+      const actual = closestMatch(content, expected)
+      expect(actual && { line: actual.line, score: actual.score }).toEqual(oracle(content, expected))
+    }
   }
 })
