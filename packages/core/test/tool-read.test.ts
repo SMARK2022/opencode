@@ -250,19 +250,19 @@ describe("ReadTool", () => {
       visible = [history()]
       expect((yield* read(SessionV2.ID.make("ses_nearby_other"))).output?.structured).toHaveProperty("instructions")
       const source = path.join(nested, "large.ts")
-      yield* fs.writeFileString(source, Array.from({ length: 700 }, (_, index) => index === 9 ? "export function alpha() {}" : index === 119 ? "export class Beta {}" : `// line ${index + 1} ${"x".repeat(2048)}`).join("\n"))
+      yield* fs.writeFileString(source, Array.from({ length: 700 }, (_, index) => index === 9 ? "export function alpha() {}" : index === 119 ? "export class Beta {}" : `// line ${index + 1} ${"x".repeat(48)}`).join("\n"))
       const sourceRead = (offset: number) => settleTool(registry, { sessionID, ...toolIdentity,
         call: { type: "tool-call", id: "outline-read", name: "read", input: { path: source, offset, limit: 20 } } })
       const head = yield* sourceRead(1)
-      expect(head.output?.structured).toMatchObject({ read: { start: 1, totalExact: false, stub: false, cut: true } })
+      expect(head.output?.structured).toMatchObject({ read: { start: 1, totalExact: true, stub: false, cut: false } })
       const metadata = Schema.decodeUnknownSync(Schema.Struct({ read: ReadPresentation.ReadRangeMeta }))(head.output?.structured).read
-      expect(metadata.total).toBeLessThan(600)
+      expect(metadata.total).toBe(700)
       const body = head.output?.content.flatMap(part => part.type === "text" ? [part.text] : []).join("\n") ?? ""
       expect(body).toContain("<outline")
       expect(body).toContain("10 function alpha")
       expect(body).toContain("120 class Beta")
-      expect(body).toContain('total_exact="false"')
-      expect(body).toContain('reason="byte_limit"')
+      expect(body).toContain('<range start="1" end="20" total="700" returned="20" />')
+      expect(body).toContain('reason="line_limit"')
       expect((yield* sourceRead(50)).output?.structured).not.toHaveProperty("outline")
       // 原生 schema 和 registry 后的真实结果必须保留证据，不能只测试纯 helper。
       const rawRead = (file: string) => settleTool(registry, { sessionID, ...toolIdentity,

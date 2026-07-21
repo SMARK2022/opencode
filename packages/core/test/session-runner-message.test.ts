@@ -89,6 +89,10 @@ describe("toLLMMessages", () => {
     const unknownCovered = { ...eofCovered, read: { ...eofCovered.read, totalExact: false } }
     expect(JSON.stringify(results(read("unknown-wide", unknownCovering), read("unknown-covered", unknownCovered))[1]))
       .toContain("offset=101 for unread lines")
+    // 覆盖源的较大下界不能被子页伪装成更小的精确 EOF。
+    const weaker = { ...unknownCovered, read: { ...unknownCovered.read, total: 50, totalExact: true } }
+    const projected = results(read("owner-wide", unknownCovering), read("weaker-child", weaker))[1]
+    expect(projected).toEqual({ type: "text", value: expect.stringContaining('<range start="10" end="20" total="100" total_exact="false" returned="0" />') })
     const overlap = { ...defaultPage, content: "line\n".repeat(99) + "line", offset: 151, next: 251, read: { ...defaultPage.read, start: 151, end: 250, returned: 100 } }
     expect(JSON.stringify(results(read("overlap-first", defaultPage), read("overlap-next", overlap))[1])).toContain('type=\\"overlap\\"')
     const high = { ...overlap, offset: 121, next: 221, read: { ...overlap.read, start: 121, end: 220 } }

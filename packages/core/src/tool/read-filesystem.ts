@@ -10,11 +10,11 @@ import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
 import { ReadPresentation } from "./read-presentation"
 import { Hash } from "../util/hash"
 import { readOutlineCached } from "./read-outline"
+import { ReadLines } from "./read-lines"
 
 // 默认页与可接受上限分离，过去合法的显式 limit=1500 不能因降低默认值而被 schema 拒绝。
 // 短文件是否分页与目录缺省页复用这个常量，400 行不能只作用于大文件分支。
 export const DEFAULT_READ_LINES = 200
-const MAX_SCAN_BYTES = 256 * 1024
 export const MAX_READ_LINES = 2_000
 // UTF-8 文本页按实际字节受限；原生图片仍使用独立的媒体摄入上限。
 // #178：V2 读路径对齐 16KiB
@@ -219,16 +219,6 @@ const binary = (resource: string, bytes: Uint8Array) => {
   }
   return nonPrintable / bytes.length > 0.3
 }
-const decodeUtf8 = (resource: string, decoder: TextDecoder, bytes?: Uint8Array) =>
-  Effect.try({
-    try: () => decoder.decode(bytes, { stream: bytes !== undefined }),
-    catch: (error) => {
-      if (error instanceof TypeError) return new MalformedUtf8Error({ resource })
-      throw error
-    },
-  })
-const decodeChunk = (resource: string, decoder: TextDecoder, bytes: Uint8Array) =>
-  bytes.includes(0) ? Effect.fail(new BinaryFileError({ resource })) : decodeUtf8(resource, decoder, bytes)
 
 export const inspect = Effect.fn("ReadTool.inspect")(function* (fs: FSUtil.Interface, input: string) {
   const info = yield* fs.stat(input)
@@ -280,167 +270,79 @@ export const read = Effect.fn("ReadTool.read")(function* (
       }
       if (startsWith(first, [0x25, 0x50, 0x44, 0x46]) || extensions.has(path.extname(resource).toLowerCase()))
         return yield* Effect.fail(new BinaryFileError({ resource }))
-      let scanned = 0
-      let totalLines = 0
-      let lastByte: number | undefined
-      // 额外计数只看行界字节，页外的坏 UTF-8 或 NUL 不得推翻已成功读取的页。
-      const count = (chunk: Uint8Array) => {
-        scanned += chunk.length
-        totalLines += chunk.reduce((sum, byte) => sum + Number(byte === 10), 0)
-        lastByte = chunk.at(-1)
-      }
-      count(first)
-      const finish = Effect.fnUntraced(function* (offset: number, returned: number, cut: boolean, eof: boolean) {
-        const total = totalLines + Number(scanned > 0 && lastByte !== 10)
-        const exact = eof || scanned === Number(info.size)
-        const modified = Option.getOrUndefined(info.mtime)?.getTime()
-        const outline = yield* Effect.promise(() => readOutlineCached(real, total, offset, Number(info.size), modified, exact))
-        const after = yield* file.stat
-        const stable = modified !== undefined && after.size === info.size && Option.getOrUndefined(after.mtime)?.getTime() === modified
-        return {
-          read: {
-            path: real,
-            canonicalPath: ReadPresentation.canonicalReadPath(real),
-            type: "file" as const,
-            size: Number(info.size),
-            modified: modified === undefined ? "unknown" : ReadPresentation.formatModified(modified),
-            ...(stable ? { modifiedMs: Math.floor(modified) } : {}),
-            // 与 V1 使用同一原始头部窗口；保留 Native 的稳定 mtime 门控。
-            fp: Hash.fast(Buffer.from(first.subarray(0, 4096))),
-            start: offset,
-            end: Math.max(offset - 1, offset + returned - 1),
-            total,
-            totalExact: exact && stable,
-            returned,
-            stub: false,
-            cut,
-          },
-          ...(outline === undefined ? {} : { outline }),
-        }
+      const offset = page.offset ?? 1
+      const limit = Math.min(page.limit ?? DEFAULT_READ_LINES, MAX_READ_LINES)
+      const budget = ReadLines.createAuxiliaryBudget()
+      const parser = ReadLines.createTextPageParser({
+        limit,
+        offset,
+        budget,
+        strictUtf8: true,
+        ignoreBOM: false,
+        onContentChunk(bytes) {
+          if (binary(resource, bytes)) throw new BinaryFileError({ resource })
+        },
       })
-      // 小于字节预算也可能超过默认行数；只扫描已读取的字节，不预先解码页外的无效 UTF-8。
-      const firstLines = first.reduce((count, byte) => count + Number(byte === 10), 0) + Number(first.length > 0 && first.at(-1) !== 10)
-      const paged =
-        info.size > MAX_READ_BYTES ||
-        first.length < info.size ||
-        page.offset !== undefined ||
-        page.limit !== undefined ||
-        firstLines > DEFAULT_READ_LINES
-      if (!paged) {
-        if (binary(resource, first)) return yield* Effect.fail(new BinaryFileError({ resource }))
-        const decoder = new TextDecoder("utf-8", { fatal: true })
-        const text = [yield* decodeUtf8(resource, decoder, first)]
-        while (true) {
-          const chunk = yield* file.readAlloc(64 * 1024)
-          if (Option.isNone(chunk)) break
-          count(chunk.value)
-          text.push(yield* decodeChunk(resource, decoder, chunk.value))
-        }
-        text.push(yield* decodeUtf8(resource, decoder))
+      // 只翻译实际解码错误，文件句柄和取消仍由原 Effect scope 管理。
+      const parse = <A>(run: () => A) => Effect.try({
+        try: run,
+        catch: (error) => {
+          if (error instanceof BinaryFileError) return error
+          if (error instanceof TypeError) return new MalformedUtf8Error({ resource })
+          throw error
+        },
+      })
+      yield* parse(() => parser.push(first))
+      while (!parser.done) {
+        const chunk = yield* file.readAlloc(ReadLines.AUXILIARY_READ_AHEAD_BYTES)
+        if (Option.isNone(chunk)) break
+        yield* parse(() => parser.push(chunk.value))
+      }
+      const result = yield* parse(() => parser.finish())
+      if (result.raw.length === 0 && offset !== 1) return yield* Effect.fail(new OffsetOutOfRangeError({ offset }))
+      const modified = Option.getOrUndefined(info.mtime)?.getTime()
+      const outline = yield* Effect.promise((signal) =>
+        readOutlineCached(real, result.count, offset, Number(info.size), modified, result.totalExact, budget, signal),
+      )
+      const after = yield* file.stat
+      const stable = modified !== undefined && after.size === info.size && Option.getOrUndefined(after.mtime)?.getTime() === modified
+      const metadata = {
+        read: {
+          path: real,
+          canonicalPath: ReadPresentation.canonicalReadPath(real),
+          type: "file" as const,
+          size: Number(info.size),
+          modified: modified === undefined ? "unknown" : ReadPresentation.formatModified(modified),
+          ...(stable ? { modifiedMs: Math.floor(modified) } : {}),
+          fp: Hash.fast(Buffer.from(first.subarray(0, 4096))),
+          start: offset,
+          end: Math.max(offset - 1, offset + result.raw.length - 1),
+          total: result.count,
+          totalExact: result.totalExact && stable,
+          returned: result.raw.length,
+          stub: false,
+          cut: result.cut,
+        },
+        ...(outline === undefined ? {} : { outline }),
+      }
+      // 完整短文件保留原 Content 字节/换行形态，显式分页仍返回 TextPage。
+      if (page.offset === undefined && page.limit === undefined && !result.more && Number(info.size) <= MAX_READ_BYTES && first.length === Number(info.size) && after.size === info.size) {
         return {
           uri: pathToFileURL(real).href,
           name: path.basename(real),
-          content: text.join(""),
+          content: new TextDecoder("utf-8", { fatal: true }).decode(first),
           encoding: "utf8" as const,
           mime: FSUtil.mimeType(real),
-          ...(yield* finish(1, totalLines + Number(scanned > 0 && lastByte !== 10), false, true)),
+          ...metadata,
         }
       }
-      const offset = page.offset ?? 1
-      // 显式页仍按原有上限 clamp，缺省才使用较小页；next 继续定位首个未返回行。
-      const limit = Math.min(page.limit ?? DEFAULT_READ_LINES, MAX_READ_LINES)
-      const lines: string[] = []
-      const decoder = new TextDecoder("utf-8", { fatal: true })
-      let pending = ""
-      let line = 1
-      let bytes = 0
-      let next: number | undefined
-      let consumed = 0
-      const append = (input: string) => {
-        if (line < offset) {
-          line++
-          return true
-        }
-        if (lines.length >= limit || bytes >= MAX_READ_BYTES) {
-          next = line
-          return false
-        }
-        const text = input
-        const size = Buffer.byteLength(text, "utf-8") + (lines.length > 0 ? 1 : 0)
-        if (bytes + size > MAX_READ_BYTES) {
-          next = line
-          return false
-        }
-        lines.push(text)
-        bytes += size
-        line++
-        return true
-      }
-      const consume = (input: string) => {
-        let text = input
-        while (true) {
-          const index = text.indexOf("\n")
-          if (index === -1) {
-            // 跨块保留完整行，由 append 的字节预算决定整行是否进入当前页。
-            pending += text
-            break
-          }
-          const current = pending + text.slice(0, index)
-          pending = ""
-          text = text.slice(index + 1)
-          if (!append(current.endsWith("\r") ? current.slice(0, -1) : current)) return false
-        }
-        return true
-      }
-      const consumeChunk = Effect.fnUntraced(function* (chunk: Uint8Array) {
-        let start = 0
-        while (start < chunk.length) {
-          if (lines.length >= limit || bytes >= MAX_READ_BYTES) {
-            next = line
-            return false
-          }
-          const newline = chunk.indexOf(10, start)
-          const end = newline === -1 ? chunk.length : newline + 1
-          const segment = chunk.subarray(start, end)
-          consumed += segment.length
-          if (binary(resource, segment)) return yield* Effect.fail(new BinaryFileError({ resource }))
-          if (!consume(yield* decodeUtf8(resource, decoder, segment))) return false
-          start = end
-        }
-        return true
-      })
-      let done = !(yield* consumeChunk(first))
-      while (!done) {
-        const chunk = yield* file.readAlloc(64 * 1024)
-        if (Option.isNone(chunk)) break
-        count(chunk.value)
-        done = !(yield* consumeChunk(chunk.value))
-      }
-      if (!done) {
-        const tail = yield* decodeUtf8(resource, decoder)
-        pending += tail
-        if (pending) append(pending.endsWith("\r") ? pending.slice(0, -1) : pending)
-      }
-      if (lines.length === 0 && offset !== 1) return yield* Effect.fail(new OffsetOutOfRangeError({ offset }))
-      // 正文停止后最多再计数固定字节预算；总行数不足 EOF 时明确作为下界。
-      const scanEnd = consumed + MAX_SCAN_BYTES
-      let eof = !done
-      while (!eof && scanned < Number(info.size) && scanned < scanEnd) {
-        const chunk = yield* file.readAlloc(Math.min(64 * 1024, scanEnd - scanned))
-        if (Option.isNone(chunk)) {
-          eof = true
-          break
-        }
-        count(chunk.value)
-      }
-      const metadata = yield* finish(offset, lines.length, next !== undefined && lines.length < limit, eof)
       return new TextPage({
         type: "text-page",
-        content: lines.join("\n"),
+        content: result.raw.join("\n"),
         mime: FSUtil.mimeType(real),
         offset,
-        truncated: next !== undefined,
-        ...(next === undefined ? {} : { next }),
+        truncated: result.more,
+        ...(result.more ? { next: offset + result.raw.length } : {}),
         ...metadata,
       })
     }),

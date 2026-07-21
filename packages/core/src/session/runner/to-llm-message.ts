@@ -198,11 +198,14 @@ export const toLLMMessages = (messages: readonly SessionMessage.Message[], model
       const overlap = ReadPresentation.findOverlapNote(reads, page.read)
       if (!stub) reads.push(page.read)
       if (!stub && !overlap) return item
-      const text = stub ? ReadPresentation.renderReadStub({ ...page.read, ...stub, unread: ReadPresentation.computeUnreadRanges(reads, page.read) }) : ReadPresentation.renderNativeRead(page, overlap)
+      // 与 V1 共用覆盖源的导航；只改本次模型投影，不修改 durable Read。
+      const owner = stub?.status === "stub_covered_range_visible" ? stub.covering : page.read
+      const text = stub ? ReadPresentation.renderReadStub({ ...page.read, ...stub, total: owner.total, totalExact: owner.totalExact, unread: ReadPresentation.computeUnreadRanges(reads, page.read) }) : ReadPresentation.renderNativeRead(page, overlap)
       // 只替换当前模型正文；新规则和安全提醒保留，持久消息完全不改。
       const replacement = { type: "text" as const, text }
       return { ...item, state: { ...item.state,
         structured: stub ? { ...output, read: { ...page.read, returned: 0, stub: true, stubStatus: stub.status,
+          total: owner.total, totalExact: owner.totalExact,
           coveredBy: "coveredBy" in stub ? stub.coveredBy : undefined } } : output,
         content: item.state.content.length === 0 ? [replacement] : item.state.content.map(part =>
           part.type === "text" && part.text === body ? replacement : part),

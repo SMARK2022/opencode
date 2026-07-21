@@ -1,8 +1,8 @@
 // #142：源文件大纲提示（非语义索引），限制扫描行数与条目预算
 // #142：仅 offset=1 且足够长的源码文件才生成 outline
-import { createReadStream } from "fs"
 import path from "path"
-import { createInterface } from "readline"
+// #515：outline 扫描改走 readTextPage 共享预算，不再拥有第二条流式扫描路径
+import { readTextPage, type AuxiliaryBudget } from "./read-lines"
 
 // #142：短文件无需 outline
 const MIN_LINES = 600
@@ -242,72 +242,50 @@ function truncateItem(item: string) {
 }
 
 // #142：异步流式扫前缀，受 MAX_SCAN_LINES/ENTRIES/CHARS 约束
-export async function readOutline(filepath: string, total: number, offset: number, totalExact = true): Promise<Outline | undefined> {
-  // #142：非文件头或已知不足 600 行则跳过；计数下界不足时仍需验证真实资格。
+export async function readOutline(
+  filepath: string,
+  total: number,
+  offset: number,
+  totalExact = true,
+  budget?: AuxiliaryBudget,
+  signal?: AbortSignal,
+): Promise<Outline | undefined> {
+  // 已知短文件直接跳过，未知下界仍沿目标既有规则确认 600 行资格。
   if (offset > 1 || (totalExact && total < MIN_LINES) || !SOURCE_EXTENSIONS.has(basenameExt(filepath))) return undefined
-  // #142：条目预算先耗尽也必须确认达到 600 行，不能给短文件误报 outline。
+  // page 已耗尽共享额度时不再打开第二条流。
+  if (budget?.remaining === 0) return undefined
   const pendingEligibility = total < MIN_LINES
-
-  // #142：readline 流，避免整文件读入内存
-  const stream = createReadStream(filepath, { encoding: "utf8" })
-  // #142：按行迭代
-const rl = createInterface({ input: stream, crlfDelay: Infinity })
-  // #142：收集 label 行
-const items: string[] = []
-  // #142：字符预算计数
-let chars = 0
-  // #142：扫描行计数
-let count = 0
-  // #142：是否因预算截断
-let truncated = false
-  // #142：确保 finally 关闭流
-try {
-    // #142：顺序扫描前缀
-for await (const text of rl) {
-      count += 1
-      if (truncated && pendingEligibility) {
-        if (count >= MIN_LINES) break
-        continue
-      }
-      // This is a read-tool hint, not a semantic index; never scan an entire
-      // huge file just to discover there are no declarations in the prefix.
-      // #142：扫描上限到点即 truncated
-      if (count > MAX_SCAN_LINES) {
-        truncated = true
-        break
-      }
-
-      // #142：提取 label
-const label = outlineLabel(text, filepath)
-      // #142：无 label 跳过
-if (!label) continue
-      // #142：格式化为 "行号 label"
-const item = truncateItem(`${count} ${label}`)
-      // #142：计入换行开销
-const extra = item.length + (items.length > 0 ? 1 : 0)
-      // #142：条目或字符预算耗尽
+  const items: string[] = []
+  let chars = 0
+  let truncated = false
+  const page = await readTextPage(filepath, {
+    limit: MAX_SCAN_LINES,
+    offset: 1,
+    budget,
+    signal,
+    auxiliaryFromStart: true,
+    captureRaw: false,
+    contentBytesLimit: Number.POSITIVE_INFINITY,
+    onLine: (text, count) => {
+      // 条目已满仍需确认文件资格，不能把短文件的下界当作 600 行证明。
+      if (truncated) return !pendingEligibility || count >= MIN_LINES
+      const label = outlineLabel(text, filepath)
+      if (!label) return
+      const item = truncateItem(`${count} ${label}`)
+      const extra = item.length + (items.length > 0 ? 1 : 0)
       if (items.length >= MAX_ENTRIES || chars + extra > MAX_CHARS) {
         truncated = true
-        if (pendingEligibility && count < MIN_LINES) continue
-        break
+        return !pendingEligibility || count >= MIN_LINES
       }
-      // #142：接受该条目
-items.push(item)
-      // #142：累加字符
-chars += extra
-    }
-  // #142：关闭 readline/stream
-} finally {
-    // #142：关闭接口
-rl.close()
-    // #142：销毁底层流
-stream.destroy()
-  }
-  if (pendingEligibility && count < MIN_LINES) return undefined
-  // #142：无声明则不输出 outline 节点
+      items.push(item)
+      chars += extra
+    },
+  })
+  // 预算耗尽只产生下界，不替代 outline 的最小行数门槛。
+  if (pendingEligibility && page.count < MIN_LINES) return undefined
+  truncated ||= page.more
   if (items.length === 0) return undefined
-  // #142：返回大纲
-return { items, truncated }
+  return { items, truncated }
 }
 
 // [local-smark] outline cache：按 canonicalPath+size+modifiedMs 缓存，
@@ -323,12 +301,14 @@ export async function readOutlineCached(
   size: number,
   modifiedMs: number | undefined,
   totalExact = true,
+  budget?: AuxiliaryBudget,
+  signal?: AbortSignal,
 ): Promise<Outline | undefined> {
   // [local-smark] 仅在 offset<=1 时使用缓存（readOutline 内部也仅在此条件生成 outline）。
   // offset>1 时不查缓存也不生成 outline，保持原有行为。
   if (offset > 1) return undefined
   // 无稳定版本不缓存，仍使用原大纲读取，避免unknown版本串用结果。
-  if (modifiedMs === undefined) return readOutline(filepath, total, offset, totalExact)
+  if (modifiedMs === undefined) return readOutline(filepath, total, offset, totalExact, budget, signal)
   const canonical = process.platform === "win32"
     ? filepath.replaceAll("\\", "/").toLowerCase()
     : filepath.replaceAll("\\", "/")
@@ -337,7 +317,11 @@ export async function readOutlineCached(
   if (cached && cached.size === size && cached.modifiedMs === modifiedMs) {
     return cached.outline
   }
-  const outline = await readOutline(filepath, total, offset, totalExact)
+  // 额度不足不能把“未观察到声明”写成永久的同版本空缓存。
+  if (budget?.remaining === 0) return undefined
+  const outline = await readOutline(filepath, total, offset, totalExact, budget, signal)
+  // 仅完整且非空的大纲可复用，避免部分扫描污染后续有充足预算的读取。
+  if (!outline || outline.truncated) return outline
   // LRU 淘汰：超限时删最早插入的条目（Map 保持插入顺序）
   if (outlineCache.size >= OUTLINE_CACHE_LIMIT) {
     const firstKey = outlineCache.keys().next().value
