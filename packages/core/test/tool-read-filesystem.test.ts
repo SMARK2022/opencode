@@ -5,6 +5,8 @@ import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { ReadToolFileSystem } from "@opencode-ai/core/tool/read-filesystem"
+import { ReadPresentation } from "@opencode-ai/core/tool/read-presentation"
+import { utimes } from "fs/promises"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(LayerNode.compile(LayerNode.group([FSUtil.node, LayerNodePlatform.filesystem])))
@@ -16,6 +18,43 @@ const fixture = Effect.gen(function* () {
 })
 
 describe("ReadToolFileSystem", () => {
+  it.live("preserves head fingerprints across pages and invalidates equal-size equal-mtime rewrites", () =>
+    Effect.gen(function* () {
+      const data = yield* fixture
+      const file = path.join(data.directory, "fingerprint.txt")
+      const stamp = new Date("2026-01-01T00:00:00Z")
+      const before = `AAA\n${"x".repeat(5000)}`
+      yield* data.files.writeFileString(file, before)
+      yield* Effect.promise(() => utimes(file, stamp, stamp))
+      const first = yield* ReadToolFileSystem.read(data.fs, file, "fingerprint.txt", { limit: 1 })
+      const next = yield* ReadToolFileSystem.read(data.fs, file, "fingerprint.txt", { offset: 2 })
+      if (!("read" in first) || !first.read || !("read" in next) || !next.read) throw new Error("Expected text Read metadata")
+      expect(first.read.fp).toHaveLength(40)
+      expect(next.read.fp).toBe(first.read.fp)
+      const unchanged = yield* ReadToolFileSystem.read(data.fs, file, "fingerprint.txt", { limit: 1 })
+      if (!("read" in unchanged) || !unchanged.read) throw new Error("Expected unchanged Read metadata")
+      expect(ReadPresentation.findReadStub([first.read], unchanged.read, 3)?.status).toBe("stub_same_range_visible")
+      // 缺失或空指纹的旧 part 只能交付正文；双侧都须有证明。
+      for (const fp of [undefined, ""]) {
+        expect(ReadPresentation.findReadStub([{ ...first.read, fp }], unchanged.read, 3)).toBeUndefined()
+        expect(ReadPresentation.findReadStub([first.read], { ...unchanged.read, fp }, 3)).toBeUndefined()
+      }
+      // 固定精确时间戳排除文件系统精度差异，验证内容指纹而非 mtime 漂移。
+      yield* data.files.writeFileString(file, `XXX\n${"x".repeat(5000)}`)
+      yield* Effect.promise(() => utimes(file, stamp, stamp))
+      const changed = yield* ReadToolFileSystem.read(data.fs, file, "fingerprint.txt", { limit: 1 })
+      if (!("read" in changed) || !changed.read) throw new Error("Expected changed Read metadata")
+      expect(changed.read.size).toBe(first.read.size)
+      expect(changed.read.modifiedMs).toBe(first.read.modifiedMs)
+      expect(changed.content).toBe("XXX")
+      expect(changed.read.fp).not.toBe(first.read.fp)
+      expect(ReadPresentation.findReadStub([first.read], changed.read, 3)).toBeUndefined()
+      yield* data.files.writeFileString(file, "")
+      const empty = yield* ReadToolFileSystem.read(data.fs, file, "fingerprint.txt")
+      expect("read" in empty ? empty.read?.fp : undefined).toHaveLength(40)
+    }),
+  )
+
   it.live("separates default pages from accepted limits and preserves byte and next boundaries", () =>
     Effect.gen(function* () {
       const fixtureData = yield* fixture

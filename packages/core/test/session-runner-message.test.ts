@@ -16,7 +16,7 @@ const model = Model.make({ id: "model", provider: "provider", route: OpenAIChat.
 
 describe("toLLMMessages", () => {
   test("deduplicates complete Read versions only within the supplied visible history", () => {
-    const metadata = { path: "/note.txt", canonicalPath: "/note.txt", type: "file" as const, size: 2, modified: "version1", modifiedMs: 1, start: 1, end: 1, returned: 1, total: 1, totalExact: true, stub: false }
+    const metadata = { path: "/note.txt", canonicalPath: "/note.txt", type: "file" as const, size: 2, modified: "version1", modifiedMs: 1, fp: "head-v1", start: 1, end: 1, returned: 1, total: 1, totalExact: true, stub: false }
     const output = { uri: "file:///note.txt", encoding: "utf8", mime: "text/plain", content: "v1", read: metadata }
     const read = (value: string, structured: Record<string, unknown> = output,
       input: SessionMessage.ToolStateCompleted["input"] = { path: "note.txt" },
@@ -44,6 +44,10 @@ describe("toLLMMessages", () => {
     expect(second.content[0]).toMatchObject({ state: { structured: output, content: [] } })
     // 新版本或请求范围变化必须重新呈现正文，不能从路径相同推断版本。
     expect(results(first, read("v2", { ...output, content: "v2", read: { ...metadata, modifiedMs: 2 } }))[1]).toMatchObject({ type: "json" })
+    // 指纹变化或任一侧缺失都返回正文，不能回退到相同 size/mtime。
+    for (const fp of [undefined, "", "head-v2"]) {
+      expect(results(first, read("fp-change", { ...output, read: { ...metadata, fp } }))[1]).toMatchObject({ type: "json" })
+    }
     expect(results(first, read("range", { ...output, read: { ...metadata, end: 2, returned: 2 } }))[1]).toMatchObject({ type: "json" })
     expect(results(first, read("path", { ...output, read: { ...metadata, canonicalPath: "/other.txt" } }, { path: "other.txt" }))[1]).toMatchObject({ type: "json" })
     // 没有先前可见完整结果的新 batch/Session 不继承上一调用的证明。
@@ -106,7 +110,7 @@ describe("toLLMMessages", () => {
     const tailSeen = { ...defaultPage, content: "line\n".repeat(39) + "line", read: { ...defaultPage.read, start: 161, end: 200, returned: 40 } }
     const fullyCovered = JSON.stringify(results(read("seen", seen), read("seen-tail", tailSeen), read("full", defaultPage))[2])
     expect(fullyCovered).toContain("no new content to read")
-    const changedTail = { ...tailSeen, read: { ...tailSeen.read, modifiedMs: 2 } }
+    const changedTail = { ...tailSeen, read: { ...tailSeen.read, fp: "head-v2" } }
     const stillUnread = JSON.stringify(results(read("seen2", seen), read("changed-tail", changedTail), read("full2", defaultPage))[2])
     expect(stillUnread).toContain("New unread lines: 161-200")
     expect(stillUnread).toContain("Read offset=161 limit=40")
