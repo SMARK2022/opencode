@@ -38,7 +38,8 @@ const lockfile = path.join(root, "bun.lock")
 // thirdparty/opentui 是独立 Git 仓库；root 依赖维护命令只能读取其 release 身份，不能改写源码 manifest。
 const skip = new Set([".git", ".opencode", ".turbo", "dist", "node_modules", "thirdparty"])
 const keys = ["@opentui/core", "@opentui/keymap", "@opentui/solid"] as const
-const release = !snapshot && ver === "0.4.3-smark.1" ? `https://github.com/SMARK2022/opentui/releases/download/v${ver}` : undefined
+// .2 与 .1 一样属于不可变发布 family，不能误入 registry 分支并删掉 native overrides。
+const release = !snapshot && ["0.4.3-smark.1", "0.4.3-smark.2"].includes(ver) ? `https://github.com/SMARK2022/opentui/releases/download/v${ver}` : undefined
 // 仅映射 source 已发布的完整 family；普通 registry/snapshot 继续沿目标既有入口维护。
 const assets = {
   "@opentui/core": "opentui-core",
