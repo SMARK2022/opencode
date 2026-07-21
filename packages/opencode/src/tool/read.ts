@@ -1,6 +1,7 @@
 // 成功后的确认性复读可省略；失败恢复和未读范围仍可正常读取。
 import { Effect, Option, Schema, Scope, Stream } from "effect"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
+import { Hash } from "@opencode-ai/core/util/hash"
 import * as path from "path"
 import * as Tool from "./tool"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -609,6 +610,8 @@ const current: ReadRangeMeta = {
         size,
         modified,
         modifiedMs: mtimeMs,
+        // 复用已读的 4096B 原始头样本，不新增 I/O，也不回填旧 part。
+        fp: Hash.fast(Buffer.from(sample)),
         start,
         end,
         total: file.count,

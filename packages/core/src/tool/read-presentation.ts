@@ -17,6 +17,8 @@ export const ReadRangeMeta = Schema.Struct({
   size: Schema.Number,
   modified: Schema.String,
   modifiedMs: Schema.optional(Schema.Number),
+  // 历史缺指纹仍可展示正文，但不能证明已见内容属于当前版本。
+  fp: Schema.optional(Schema.String),
   start: Schema.Number,
   end: Schema.Number,
   total: Schema.Number,
@@ -48,9 +50,16 @@ export function formatModified(ms: number) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
 
+// 两代的 stub、重叠和未读指引共用此门控；同 size/mtime 的改写不能仅凭弱键命中。
+function isSameFileVersion(a: ReadRangeMeta, b: ReadRangeMeta) {
+  if (a.modifiedMs === undefined || a.size !== b.size || a.modifiedMs !== b.modifiedMs) return false
+  if (typeof a.fp !== "string" || a.fp.length === 0) return false
+  if (typeof b.fp !== "string" || b.fp.length === 0) return false
+  return a.fp === b.fp
+}
+
 export function findReadStub(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta, contentLength: number) {
-  if (current.modifiedMs === undefined) return undefined
-  const sameVersion = visibleReads.filter((item) => item.canonicalPath === current.canonicalPath && !item.stub && item.modifiedMs === current.modifiedMs && item.size === current.size)
+  const sameVersion = visibleReads.filter((item) => item.canonicalPath === current.canonicalPath && !item.stub && isSameFileVersion(item, current))
   const sameRange = sameVersion.find((item) => item.start === current.start && item.end === current.end)
   if (sameRange) return { status: "stub_same_range_visible" as const }
   const covering = sameVersion.find((item) => item.start <= current.start && item.end >= current.end)
@@ -67,9 +76,8 @@ export function findReadStub(visibleReads: readonly ReadRangeMeta[], current: Re
 }
 
 export function findOverlapNote(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta) {
-  if (current.modifiedMs === undefined) return undefined
   const best = visibleReads
-    .filter((item) => item.canonicalPath === current.canonicalPath && !item.stub && item.modifiedMs === current.modifiedMs && item.size === current.size)
+    .filter((item) => item.canonicalPath === current.canonicalPath && !item.stub && isSameFileVersion(item, current))
     .map((item) => ({ start: Math.max(item.start, current.start), end: Math.min(item.end, current.end) }))
     .filter((item) => item.end >= item.start)
     .sort((a, b) => (b.end - b.start) - (a.end - a.start))[0]
@@ -82,7 +90,7 @@ export function findOverlapNote(visibleReads: readonly ReadRangeMeta[], current:
 
 export function computeUnreadRanges(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta) {
   // 联合范围仅计算指引；路径、版本与实际交付正文仍先过滤，不能改变80%触发口径。
-  const covered = mergeRanges(visibleReads.filter(read => read.canonicalPath === current.canonicalPath && !read.stub && read.size === current.size && read.modifiedMs === current.modifiedMs)
+  const covered = mergeRanges(visibleReads.filter(read => read.canonicalPath === current.canonicalPath && !read.stub && isSameFileVersion(read, current))
     .map(read => ({ start: read.start, end: read.end })))
   const unread: { start: number; end: number }[] = []
   let pos = current.start

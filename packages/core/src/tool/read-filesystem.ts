@@ -8,6 +8,7 @@ import { FSUtil } from "../fs-util"
 import { makeLocationNode } from "../effect/app-node"
 import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
 import { ReadPresentation } from "./read-presentation"
+import { Hash } from "../util/hash"
 import { readOutlineCached } from "./read-outline"
 
 // 默认页与可接受上限分离，过去合法的显式 limit=1500 不能因降低默认值而被 schema 拒绝。
@@ -304,6 +305,8 @@ export const read = Effect.fn("ReadTool.read")(function* (
             size: Number(info.size),
             modified: modified === undefined ? "unknown" : ReadPresentation.formatModified(modified),
             ...(stable ? { modifiedMs: Math.floor(modified) } : {}),
+            // 与 V1 使用同一原始头部窗口；保留 Native 的稳定 mtime 门控。
+            fp: Hash.fast(Buffer.from(first.subarray(0, 4096))),
             start: offset,
             end: Math.max(offset - 1, offset + returned - 1),
             total,
