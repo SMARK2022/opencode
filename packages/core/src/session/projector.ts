@@ -322,8 +322,11 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
       yield* applyUsage(db, event.data.sessionID, usage)
       return
     }
-    if (event.type !== "session.next.step.started" && event.type !== "session.next.step.ended" && event.type !== "session.next.step.failed") return
-    const assistant = yield* adapter.getAssistant(event.data.assistantMessageID)
+    const messageID = event.type === "session.next.step.started" || event.type === "session.next.step.ended" || event.type === "session.next.step.failed" || event.type === "session.next.retried"
+      ? event.data.assistantMessageID : undefined
+    if (messageID === undefined) return
+    // 重试覆写同一助手快照，不能让已恢复请求继续聚合上一 attempt 的错误。
+    const assistant = yield* adapter.getAssistant(messageID)
     if (!assistant) return
     const assistantID = SessionV1.MessageID.make(assistant.id)
     const owned = yield* db.select().from(RequestUsageAssistantTable)
@@ -656,7 +659,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.Tool.Failed, (event) => run(db, event))
     yield* events.project(SessionEvent.Reasoning.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Reasoning.Ended, (event) => run(db, event))
-    // yield* events.project(SessionEvent.Retried, (event) => run(db, event))
+    yield* events.project(SessionEvent.Retried, (event) => run(db, event))
     yield* events.project(SessionEvent.Compaction.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Compaction.Ended, (event) => run(db, event))
     yield* events.project(SessionEvent.Compaction.Failed, (event) => run(db, event))

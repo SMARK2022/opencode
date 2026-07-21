@@ -22,6 +22,7 @@ import { SessionSummary } from "./summary"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import type { Provider } from "@/provider/provider"
 import { Question } from "@/question"
+import { ProviderError } from "@/provider/error"
 import { errorMessage } from "@/util/error"
 import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -177,6 +178,8 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
+  // 本次尝试可撤回的非 Tool Part；工具副作用与已确认 step-finish 不进入集合。
+  attemptPartIDs: Set<PartID>
   // 仅记录本次provider尝试的语义输出；重试不能借用上一轮的标志。
   // 空start/end不算正文，真实tool-call则必须防止重复副作用。
   hasText: boolean
@@ -223,6 +226,7 @@ const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        attemptPartIDs: new Set(),
         hasText: false,
         hasReasoning: false,
         hasToolCall: false,
@@ -230,6 +234,18 @@ const layer = Layer.effect(
       let aborted = false
       // 三条终态写共享许可；只串行读写，不在其中等待工具完成信号。
       const toolPermit = Semaphore.makeUnsafe(1)
+
+      // 只撤回当前不完整尝试，不能把整个 Message 或已执行工具当作可重放副作用。
+      const discardIncompleteAttempt = Effect.fn("SessionProcessor.discardIncompleteAttempt")(function* () {
+        yield* Effect.forEach([...ctx.attemptPartIDs], (partID) =>
+          session.removePart({ sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id, partID }),
+        )
+        ctx.attemptPartIDs.clear()
+        // 耗尽或退避中取消仍会走 cleanup，必须解除引用以免已删除正文被重新保存。
+        ctx.currentText = undefined
+        ctx.reasoningMap = {}
+      })
+
 
       // 这些 milestone 只写 daemon log，不记录 prompt、token 内容、工具参数
       // 或 provider metadata。phase 字符串是后续排查的稳定连接点：
@@ -504,8 +520,11 @@ const layer = Layer.effect(
         switch (value.type) {
           case "reasoning-start":
             if (value.id in ctx.reasoningMap) return
+            // ended reasoning 也可能已落库，集合须独立于当前 reasoningMap 生命周期。
+            const reasoningPartID = PartID.ascending()
+            ctx.attemptPartIDs.add(reasoningPartID)
             ctx.reasoningMap[value.id] = {
-              id: PartID.ascending(),
+              id: reasoningPartID,
               messageID: ctx.assistantMessage.id,
               sessionID: ctx.assistantMessage.sessionID,
               type: "reasoning",
@@ -666,8 +685,11 @@ const layer = Layer.effect(
           case "step-start":
             if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
             // #124：把 daemon 请求前快照写入 step-start，供 streaming 展示分类
+            // 本次 step-start 随失败前缀一起撤回，不制造孤立的成功步骤。
+            const stepPartID = PartID.ascending()
+            ctx.attemptPartIDs.add(stepPartID)
             yield* session.updatePart({
-              id: PartID.ascending(),
+              id: stepPartID,
               messageID: ctx.assistantMessage.id,
               sessionID: ctx.sessionID,
               snapshot: ctx.snapshot,
@@ -701,11 +723,13 @@ const layer = Layer.effect(
               usage: value.usage ?? new Usage({}),
               metadata: value.providerMetadata,
             })
-            // 未知完成且无输出才重试；正常空stop和有工具调用的回合保持原语义。
-            if (value.reason === "unknown" && !ctx.hasText && !ctx.hasReasoning && !ctx.hasToolCall) {
+            // 无真实 Tool 的 unknown（源 other）在发布成功和确认 usage 之前进入原有 retry。
+            if (value.reason === "unknown" && !ctx.hasToolCall) {
+              yield* discardIncompleteAttempt()
               yield* Effect.fail(new SessionV1.APIError({
-                message: `Provider returned empty completion (finish_reason: ${value.reason}), no content/reasoning/tool produced`,
+                message: `Provider returned incomplete completion (finish_reason: ${value.reason})`,
                 isRetryable: true,
+                metadata: { finishReason: value.reason },
               }))
             }
             ctx.assistantMessage.finish = value.reason
@@ -762,8 +786,11 @@ const layer = Layer.effect(
           }
 
           case "text-start":
+            // text-start 即持久化，完成后移出 currentText 的 Part 仍须能撤回。
+            const textPartID = PartID.ascending()
+            ctx.attemptPartIDs.add(textPartID)
             ctx.currentText = {
-              id: PartID.ascending(),
+              id: textPartID,
               messageID: ctx.assistantMessage.id,
               sessionID: ctx.assistantMessage.sessionID,
               type: "text",
@@ -952,6 +979,7 @@ const layer = Layer.effect(
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
+            ctx.attemptPartIDs.clear()
             // 每次重试都重新判断本轮输出，不能被旧标志误放行。
             ctx.hasText = false
             ctx.hasReasoning = false
@@ -1012,6 +1040,8 @@ const layer = Layer.effect(
               Stream.runDrain,
             )
           }).pipe(
+            // 保留 adapter 对 raw network_error 的更强失败路径，只补同一 no-Tool 撤回责任。
+            Effect.tapError((error) => error instanceof ProviderError.ResponseStreamError && error.message === "Provider finish_reason: network_error" && !ctx.hasToolCall ? discardIncompleteAttempt() : Effect.void),
             // 转入已有 compact 结果，保留 cleanup 且不发布虚构的 provider 错误。
             Effect.catchCauseIf(
               (cause) => Cause.squash(cause) === preflightCompaction, () => Effect.void,

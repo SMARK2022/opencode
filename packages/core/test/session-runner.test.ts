@@ -412,6 +412,8 @@ const setup = Effect.gen(function* () {
     .run()
     .pipe(Effect.orDie)
   yield* insertSession(sessionID)
+  // 每个场景只观察自己的请求，不能继承前一用例的续轮次数。
+  requests.length = 0
 })
 
 const providerUnavailable = () =>
@@ -958,11 +960,18 @@ it.effect("defaults native goal continuation to 32 and resets the allowance on a
     yield* session.resume(sessionID)
     expect(requests).toHaveLength(33)
     expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("paused")
-    // 活跃Goal也不能把未知/错误的空结算当正常完成，避免不断注入续跑。
+    // 已执行工具的未知完成不重放，也不能当作普通 Goal 完成；无工具 unknown 由独立重试用例覆盖。
     for (const reason of ["unknown", "error"] as const) {
       yield* goals.set(sessionID, { status: "active" })
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: `Handle empty ${reason}` }), resume: false })
-      responses = [[LLMEvent.stepStart({ index: 0 }), LLMEvent.stepFinish({ index: 0, reason }), LLMEvent.finish({ reason })]]
+      responses = [[
+        LLMEvent.stepStart({ index: 0 }),
+        ...(reason === "unknown" ? [
+          LLMEvent.toolCall({ id: "hosted-unknown", name: "echo", input: { text: "hosted" }, providerExecuted: true }),
+          LLMEvent.toolResult({ id: "hosted-unknown", name: "echo", result: { type: "text", value: "hosted" }, providerExecuted: true }),
+        ] : []),
+        LLMEvent.stepFinish({ index: 0, reason }), LLMEvent.finish({ reason }),
+      ]]
       requests.length = 0
       yield* session.resume(sessionID)
       // 异常停止不是正常额度耗尽，不应把仍活跃的目标误改成paused。
@@ -973,6 +982,90 @@ it.effect("defaults native goal continuation to 32 and resets the allowance on a
 )
 
 describe("SessionRunnerLLM", () => {
+  it.effect("retries incomplete Native completions without replaying tools or retaining failed prefixes", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const runner = yield* SessionRunner.Service
+      const db = (yield* Database.Service).db
+      const usage = SessionRequestUsage.make(db)
+      const events = yield* EventV2.Service
+      const retries = yield* Queue.unbounded<number>()
+      const ended: string[] = []
+      const off = yield* events.listen(event => {
+        if (Schema.is(SessionEvent.Step.Ended)(event)) ended.push(event.data.finish ?? "")
+        if (Schema.is(SessionEvent.Retried)(event)) return Queue.offer(retries, event.data.attempt).pipe(Effect.asVoid)
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => off)
+      yield* Effect.addFinalizer(() => Effect.sync(() => { responses = undefined; responseStream = undefined; requests.length = 0; executions.length = 0 }))
+      const failed = (kind: "empty" | "text" | "reasoning"): LLMEvent[] => [
+        ...(kind === "empty" ? [LLMEvent.stepStart({ index: 0 })] : fragmentFixture(kind, "failed-prefix", ["partial"]).partialEvents),
+        LLMEvent.stepFinish({ index: 0, reason: "unknown", usage: { inputTokens: 777, nonCachedInputTokens: 777, outputTokens: 888 } }),
+        LLMEvent.finish({ reason: "unknown" }),
+      ]
+      const recovered = fragmentFixture("text", "recovered", ["recovered"]).completeEvents
+      for (const kind of ["empty", "text", "reasoning"] as const) {
+        const id = SessionV2.ID.make(`ses_incomplete_${kind}`)
+        yield* insertSession(id)
+        yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Complete the task" }), resume: false })
+        responses = [failed(kind), recovered]
+        requests.length = 0
+        ended.length = 0
+        const fiber = yield* runner.run({ sessionID: id, force: true }).pipe(Effect.forkChild)
+        expect(yield* Queue.take(retries)).toBe(1)
+        expect((yield* session.context(id)).filter(message => message.type === "assistant")).toMatchObject([{ content: [] }])
+        // 等真实重试通知后推进虚拟时钟；不缩短生产退避，也不调用真实provider。
+        yield* TestClock.adjust("3 seconds")
+        yield* Fiber.join(fiber)
+        expect(requests).toHaveLength(2)
+        expect(requests[1]?.messages).toEqual(requests[0]?.messages)
+        const context = yield* session.context(id)
+        expect(context.filter(message => message.type === "assistant")).toMatchObject([{ finish: "stop", content: [{ type: "text", text: "recovered" }] }])
+        expect(JSON.stringify(context)).not.toContain("partial")
+        expect(ended).toEqual(["stop"])
+        expect((yield* usage.list({ sessionID: id }))[0]).toMatchObject({ status: "completed", assistantCount: 1, stepCount: 1, tokens: { total: 0 } })
+        yield* replaySessionProjection(id)
+        expect(yield* session.context(id)).toEqual(context)
+      }
+      for (const cancel of [false, true]) {
+        const id = SessionV2.ID.make(`ses_incomplete_exit_${cancel}`)
+        yield* insertSession(id)
+        yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Handle incomplete output" }), resume: false })
+        responses = Array.from({ length: 6 }, () => failed("reasoning"))
+        requests.length = 0
+        const fiber = yield* runner.run({ sessionID: id, force: true }).pipe(Effect.exit, Effect.forkChild)
+        for (let attempt = 1; attempt <= (cancel ? 1 : 5); attempt++) {
+          expect(yield* Queue.take(retries)).toBe(attempt)
+          if (!cancel) yield* TestClock.adjust("40 seconds")
+        }
+        if (cancel) yield* Fiber.interrupt(fiber)
+        const result = yield* Fiber.await(fiber)
+        expect(cancel ? Exit.isFailure(result) : Exit.isSuccess(result) && Exit.isFailure(result.value)).toBe(true)
+        expect(requests).toHaveLength(cancel ? 1 : 6)
+        expect((yield* session.context(id)).filter(message => message.type === "assistant")).toMatchObject([{ finish: "error", content: [] }])
+        expect((yield* usage.list({ sessionID: id }))[0]).toMatchObject({ status: cancel ? "aborted" : "error", assistantCount: 1, stepCount: 0, tokens: { total: 0 } })
+      }
+      for (const hosted of [false, true]) {
+        const id = SessionV2.ID.make(`ses_incomplete_tool_${hosted}`)
+        yield* insertSession(id)
+        yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Use the tool once" }), resume: false })
+        requests.length = 0
+        executions.length = 0
+        responses = [[
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.toolCall({ id: "once", name: "echo", input: { text: "once" }, providerExecuted: hosted }),
+          ...(hosted ? [LLMEvent.toolResult({ id: "once", name: "echo", result: { type: "text", value: "once" }, providerExecuted: true })] : []),
+          LLMEvent.stepFinish({ index: 0, reason: "unknown" }), LLMEvent.finish({ reason: "unknown" }),
+        ], recovered]
+        yield* runner.run({ sessionID: id, force: true })
+        expect(requests).toHaveLength(hosted ? 1 : 2)
+        expect(executions).toHaveLength(hosted ? 0 : 1)
+        expect(yield* Queue.size(retries)).toBe(0)
+      }
+    }),
+    30000,
+  )
   it.effect("records Native stream and tool milestones without logging payloads", () =>
     Effect.gen(function* () {
       yield* setup

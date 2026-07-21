@@ -215,7 +215,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
     yield* flushFragments(finalizer)
   })
 
-  const failAssistant = Effect.fnUntraced(function* (message: string, aborted = false, finalizer = false) {
+  const failAssistant = Effect.fnUntraced(function* (message: string, aborted = false, finalizer = false, discardIncompleteAttempt = false) {
     if (assistantFailed) return
     yield* flush(finalizer)
     const assistantMessageID = yield* startAssistant(finalizer)
@@ -227,7 +227,21 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
       assistantMessageID,
       error: { type: "unknown", message },
       aborted,
+      ...(discardIncompleteAttempt ? { discardIncompleteAttempt: true } : {}),
     }, { finalizer })
+  })
+
+  const retry = Effect.fn("SessionRunner.retryIncompleteAttempt")(function* (attempt: number, error: SessionEvent.RetryError) {
+    const messageID = yield* startAssistant()
+    yield* events.publish(SessionEvent.Retried, {
+      sessionID: input.sessionID, assistantMessageID: messageID, timestamp: yield* timestamp, attempt, error,
+    })
+    // 同一请求和助手继续；不重新 Started、不退款，也不让旧 fragments 在取消后复活。
+    assistantActive = true
+    assistantFailed = false
+    providerFailed = false
+    stepSettlement = undefined
+    tools.clear()
   })
 
   const failUnsettledTools = Effect.fn("SessionRunner.failUnsettledTools")(function* (
@@ -451,6 +465,7 @@ export const createLLMEventPublisher = (events: EventV2.Interface, input: Input,
     interruptedOutput,
     flush,
     failAssistant,
+    retry,
     failUnsettledTools,
     hasActiveAssistant: () => assistantActive,
     hasAssistantStarted: () => assistantMessageID !== undefined,

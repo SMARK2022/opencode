@@ -244,11 +244,25 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           message.update(event.data.sessionID, (draft) => {
             const currentAssistant = message.assistant(draft, event.data.assistantMessageID)
             if (!currentAssistant) return
+            if (event.data.discardIncompleteAttempt === true) currentAssistant.content = []
             currentAssistant.time.completed = event.data.timestamp
             currentAssistant.finish = "error"
             currentAssistant.error = event.data.error
           })
           break
+        case "session.next.retried": {
+          const messageID = event.data.assistantMessageID
+          if (messageID === undefined) break
+          message.update(event.data.sessionID, draft => {
+            const assistant = message.assistant(draft, messageID)
+            if (!assistant) return
+            assistant.content = []
+            delete assistant.time.completed
+            delete assistant.finish
+            delete assistant.error
+          })
+          break
+        }
         case "session.next.text.started":
           message.update(event.data.sessionID, (draft) => {
             message.assistant(draft, event.data.assistantMessageID)?.content.push({

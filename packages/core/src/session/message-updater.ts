@@ -265,6 +265,8 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       },
       "session.next.step.failed": (event) => {
         return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          // producer 已确认本 attempt 无实际 Tool，撤回前缀而不更改其他失败的 partial 保留。
+          if (event.data.discardIncompleteAttempt === true) draft.content = []
           draft.time.completed = event.data.timestamp
           draft.finish = "error"
           draft.error = event.data.error
@@ -433,7 +435,17 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           }
         })
       },
-      "session.next.retried": () => Effect.void,
+      "session.next.retried": event => {
+        const messageID = event.data.assistantMessageID
+        if (messageID === undefined) return Effect.void
+        return updateOwnedAssistant(SessionMessage.ID.make(messageID), draft => {
+          // 只重置此重试拥有的助手，后到的输入和其它错误不能被跨轮清空。
+          draft.content = []
+          delete draft.time.completed
+          delete draft.finish
+          delete draft.error
+        })
+      },
       "session.next.compaction.started": () => Effect.void,
       "session.next.compaction.delta": () => Effect.void,
       // 失败压缩不替换上下文，使用量 projector 结算而不制造摘要。
