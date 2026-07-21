@@ -17,6 +17,7 @@ import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Instruction } from "../../src/session/instruction"
 import { ReadTool } from "../../src/tool/read"
 import { readOutline } from "../../src/tool/read-outline"
+import { createAuxiliaryBudget, readTextPage } from "../../src/tool/read-lines"
 import { Truncate } from "@/tool/truncate"
 import { Tool } from "@/tool/tool"
 import { Filesystem } from "@/util/filesystem"
@@ -474,6 +475,7 @@ describe("tool.read truncation", () => {
 
       const result = yield* run({ filePath: path.join(test.directory, "large.txt") })
       expect(result.metadata.truncated).toBe(true)
+      // 约 100 KiB 尾部落在辅助额度内，因此 byte_limit 与精确 total 可以同时成立。
       expect(result.output).toContain('total="100"')
       expect(result.metadata.read?.total).toBe(100)
       expect(result.metadata.read?.returned).toBeLessThan(100)
@@ -490,11 +492,155 @@ describe("tool.read truncation", () => {
 
       const result = yield* run({ filePath: path.join(test.directory, "many-lines.txt"), limit: 10 })
       expect(result.metadata.truncated).toBe(true)
+      // count-only 到达 EOF 后仍保留 more，因为返回窗口只包含前 10 行。
       expect(result.output).toContain('<range start="1" end="10" total="100" returned="10" />')
       expect(result.output).toContain('<more offset="11" reason="line_limit" />')
       expect(result.output).toContain("line0")
       expect(result.output).toContain("line9")
       expect(result.output).not.toContain("line10")
+    }),
+  )
+
+  it.instance("bounds post-window line accounting on a large text file", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const trueLineCount = 100_000
+      // 文件刻意远大于 16 KiB + 256 KiB，避免“预算内恰好到 EOF”伪装成早停。
+      const content = Array.from(
+        { length: trueLineCount },
+        (_, i) => `line-${i.toString().padStart(6, "0")} ${"x".repeat(32)}`,
+      ).join("\n")
+      const filePath = path.join(test.directory, "large-post-window.txt")
+      yield* put(filePath, content)
+
+      const result = yield* run({ filePath })
+      const read = result.metadata.read
+
+      expect(read).toBeDefined()
+      if (!read) return
+      expect(read?.returned).toBeGreaterThan(0)
+      // 只要求 lower-bound，不把测试与具体 chunk 边界或计数精度绑定。
+      // end+1 来自确实观察到的未返回行，因此不会把任意估算伪装成可导航 total。
+      expect(read.total).toBeGreaterThanOrEqual(read.end + 1)
+      expect(read.total).toBeLessThan(trueLineCount)
+      expect(result.metadata.truncated).toBe(true)
+      expect(result.output).toContain('<more offset="')
+    }),
+  )
+
+  it.instance("bounds physical post-window input on a large text file", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const trueLineCount = 200_000
+      // 真实文件读取验证物理输入，而不是复制 production 算法计算一个预期数字。
+      const content = "line with a stable payload\n".repeat(trueLineCount)
+      const filePath = path.join(test.directory, "large-physical-bound.txt")
+      yield* put(filePath, content)
+
+      const page = yield* Effect.promise(() =>
+        readTextPage(filePath, {
+          limit: 200,
+          offset: 1,
+          budget: createAuxiliaryBudget(),
+        }),
+      )
+
+      expect(page.raw.length).toBe(200)
+      expect(page.more).toBe(true)
+      expect(page.count).toBeLessThan(trueLineCount)
+      // 256 KiB 是共享辅助预算，16 KiB 是唯一允许的 chunk read-ahead。
+      // 同时约束总物理输入，防止实现只伪造 postWindowBytes 而底层仍读取完整文件。
+      expect(page.postWindowBytes).toBeLessThanOrEqual(256 * 1024 + 16 * 1024)
+      expect(page.physicalBytesRead).toBeLessThanOrEqual(256 * 1024 + 16 * 1024)
+      expect(page.physicalBytesRead).toBeLessThan(Buffer.byteLength(content))
+    }),
+  )
+
+  it.instance("preserves text line boundaries across delimiter forms", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filePath = path.join(test.directory, "line-boundaries.txt")
+      // 同时覆盖 CRLF、孤立 CR、LF、空行和末尾未终止行的既有 readline 语义。
+      yield* put(filePath, "alpha\r\n\rbravo\ncharlie")
+
+      const page = yield* Effect.promise(() => readTextPage(filePath, { limit: 20, offset: 1 }))
+
+      expect(page.raw).toEqual(["alpha", "", "bravo", "charlie"])
+      expect(page.count).toBe(4)
+      expect(page.more).toBe(false)
+    }),
+  )
+
+  it.instance("preserves a UTF-8 sequence split at a chunk boundary", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filePath = path.join(test.directory, "utf8-chunk-boundary.txt")
+      // BOM 和四字节字符共同跨越 16 KiB chunk，锁定增量 decoder 不能丢字节。
+      const firstLine = `${"a".repeat(16 * 1024 - 4)}😀`
+      yield* put(filePath, `\uFEFF${firstLine}\nbeta`)
+
+      const page = yield* Effect.promise(() =>
+        readTextPage(filePath, {
+          limit: 20,
+          offset: 1,
+          contentBytesLimit: Number.POSITIVE_INFINITY,
+        }),
+      )
+
+      expect(page.raw).toEqual([`\uFEFF${firstLine}`, "beta"])
+      expect(page.count).toBe(2)
+      expect(page.more).toBe(false)
+    }),
+  )
+
+  it.instance("bounds an oversized unterminated line without assembling it", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filePath = path.join(test.directory, "oversized-unterminated.txt")
+      // 没有分隔符的百万字节行必须只产生一条观察到的下界，不能等待整行结束。
+      yield* put(filePath, "x".repeat(1024 * 1024))
+
+      const page = yield* Effect.promise(() =>
+        readTextPage(filePath, {
+          limit: 200,
+          offset: 1,
+          budget: createAuxiliaryBudget(),
+        }),
+      )
+
+      expect(page.raw).toEqual([])
+      expect(page.count).toBe(1)
+      expect(page.cut).toBe(true)
+      expect(page.more).toBe(true)
+      // 该断言同时锁住物理流上界和“不会组装任意完整超长行”的实现责任。
+      expect(page.postWindowBytes).toBeLessThanOrEqual(256 * 1024 + 16 * 1024)
+      expect(page.physicalBytesRead).toBeLessThanOrEqual(256 * 1024 + 16 * 1024)
+    }),
+  )
+
+  it.instance("resolves CRLF at the auxiliary boundary with one read-ahead chunk", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const filePath = path.join(test.directory, "crlf-budget-boundary.txt")
+      // CR 落在预算末尾时必须读取一个受限 lookahead，避免把 CRLF 拆成两条逻辑线。
+      yield* put(filePath, `${"a".repeat(256 * 1024 - 1)}\r\nb`)
+
+      const page = yield* Effect.promise(() =>
+        readTextPage(filePath, {
+          limit: 1_000_000,
+          offset: 1,
+          budget: createAuxiliaryBudget(),
+          auxiliaryFromStart: true,
+          captureRaw: false,
+          contentBytesLimit: Number.POSITIVE_INFINITY,
+        }),
+      )
+
+      expect(page.count).toBe(2)
+      expect(page.more).toBe(true)
+      // lookahead 可以补足下界，但不能恢复成一次无界 EOF 扫描。
+      expect(page.postWindowBytes).toBeLessThanOrEqual(256 * 1024 + 16 * 1024)
+      expect(page.physicalBytesRead).toBeLessThanOrEqual(256 * 1024 + 16 * 1024)
     }),
   )
 
@@ -505,6 +651,7 @@ describe("tool.read truncation", () => {
 
       const result = yield* run({ filePath: path.join(test.directory, "small.txt") })
       expect(result.metadata.truncated).toBe(false)
+      // 返回窗口自身覆盖末行时才允许省略 more，这是 schema-free EOF 判据的正向样例。
       expect(result.output).toContain('<range start="1" end="1" total="1" returned="1" />')
       expect(result.output).not.toContain("<more")
     }),
@@ -791,6 +938,39 @@ describe("tool.read visible context", () => {
     }),
   )
 
+  it.live("publishes the covering lower-bound total for a large covered range", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "large-covered.txt")
+      const trueLineCount = 100_000
+      // 两次请求在不同窗口位置结束，使 nested lower-bound 有机会弱于 covering total。
+      yield* put(
+        filePath,
+        Array.from(
+          { length: trueLineCount },
+          (_, i) => `line-${i.toString().padStart(6, "0")} ${"x".repeat(160)}`,
+        ).join("\n"),
+      )
+      const firstInput = { filePath, offset: 10_000, limit: 80 }
+      const secondInput = { filePath, offset: 10_000, limit: 20 }
+
+      const first = yield* exec(dir, firstInput)
+      const coveringTotal = first.metadata.read?.total
+      expect(coveringTotal).toBeDefined()
+      if (coveringTotal === undefined) return
+      expect(coveringTotal).toBeLessThan(trueLineCount)
+
+      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
+
+      expect(second.output).toContain(`<range start="10000" end="10019" total="${coveringTotal}" returned="0" />`)
+      expect(second.output).toContain('covered_by="10000-10079"')
+      expect(second.output).toContain("offset=10080 for unread lines")
+      // stub 的 total 和导航必须由 covering read 拥有，不能被 nested read 覆盖。
+      expect(second.output).not.toContain("end of file reached")
+      expect(second.metadata.read?.total).toBe(coveringTotal)
+    }),
+  )
+
   it.live("stubs same range reaching EOF: declares end of file instead of misleading offset", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
@@ -804,6 +984,7 @@ describe("tool.read visible context", () => {
 
       expect(second.output).toContain('<stub status="stub_same_range_visible">')
       expect(second.output).toContain("are the latest version and already in context")
+      // end===total 且原读取确实返回内容时，stub 才能关闭下一 offset 出口。
       // 关键回归：可见范围已覆盖到末行时不应给出 offset=3（指向 EOF 之后的空行），
       // 应改为显式声明已达文件末尾，避免模型发起必失败的 read
       expect(second.output).toContain("end of file reached")
@@ -1135,6 +1316,47 @@ describe("tool.read outline", () => {
       const result = yield* exec(dir, { filePath, limit: 20 })
       expect(result.output).toContain("1 impl Parser<T>")
       expect(result.output).not.toContain("Parser&lt;T&gt;")
+    }),
+  )
+
+  it.live("shares the bounded auxiliary budget between page accounting and outline", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "budget-exhausted.ts")
+      // page accounting 先耗尽额度；outline 不得另开完整的第二条扫描路径。
+      const source = [
+        "export function first() {}",
+        ...Array.from({ length: 100_000 }, (_, i) => `// filler ${i + 1}`),
+      ].join("\n")
+      yield* put(filePath, source)
+
+      const result = yield* exec(dir, { filePath, limit: 20 })
+
+      expect(result.metadata.truncated).toBe(true)
+      expect(result.output).toContain('<more offset="')
+      // 没有 outline 是预算 owner 的可观察结果，不是 MIN_LINES gate 的偶然结果。
+      expect(result.output).not.toContain("<outline")
+    }),
+  )
+
+  it.live("does not use more alone to bypass the outline line gate", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const filePath = path.join(dir, "below-outline-gate.ts")
+      // 文件物理很大但可观察行数仍低于 600，more 不能替代既有 outline eligibility。
+      const source = [
+        `export function first() { ${"x".repeat(1000)} }`,
+        ...Array.from({ length: 499 }, (_, i) => `// ${i} ${"x".repeat(1000)}`),
+      ].join("\n")
+      yield* put(filePath, source)
+
+      const result = yield* exec(dir, { filePath, limit: 20 })
+
+      expect(result.metadata.truncated).toBe(true)
+      expect(result.metadata.read?.total).toBeLessThan(600)
+      expect(result.output).toContain('<more offset="')
+      // 该断言锁定“more 证明有余量”与“达到 outline 最小行数”的语义分离。
+      expect(result.output).not.toContain("<outline")
     }),
   )
 

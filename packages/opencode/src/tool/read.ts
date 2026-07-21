@@ -1,6 +1,4 @@
 import { Effect, Option, Schema, Scope } from "effect"
-import { createReadStream } from "fs"
-import { createInterface } from "readline"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { Hash } from "@opencode-ai/core/util/hash"
 import * as path from "path"
@@ -14,14 +12,14 @@ import { Instruction } from "../session/instruction"
 // [local-smark] read tool enhancements: image processing, outline
 import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
 import type { MessageV2 } from "../session/message-v2"
-import { readOutline, readOutlineCached, type Outline } from "./read-outline"
+import { readOutlineCached, type Outline } from "./read-outline"
 import { Reference } from "@/reference/reference"
 import { Image } from "@/image/image"
 import { PartID } from "@/session/schema"
 import { mergeRanges } from "@/util/range"
+import { createAuxiliaryBudget, readTextPage } from "./read-lines"
 
 const DEFAULT_READ_LIMIT = 200
-const MAX_BYTES = 16 * 1024
 const SAMPLE_BYTES = 4096
 const MAX_CONTENT_TOKENS = 16000
 const MAX_LINE_LENGTH = 2000
@@ -246,9 +244,15 @@ function findReadStub(visibleReads: ReadMetadata[], current: ReadMetadata) {
 
   const covering = sameVersion.find((read) => read.start <= current.start && read.end >= current.end)
   if (covering) {
-    return { status: "stub_covered_range_visible" as const, coveredBy: `${covering.start}-${covering.end}` }
+    return { status: "stub_covered_range_visible" as const, covering }
   }
   return undefined
+}
+
+function isTotalExact(read: ReadMetadata) {
+  // 无新增 exactness 字段：只有返回窗口自身抵达 total 时，total 才能证明真实 EOF。
+  if (read.total === 0 && read.end === 0) return true
+  return read.returned > 0 && read.end === read.total
 }
 
 function findOverlapNote(visibleReads: ReadMetadata[], current: ReadMetadata) {
@@ -298,7 +302,7 @@ function computeUnreadRanges(
   return unread
 }
 
-function renderContentLines(file: Awaited<ReturnType<typeof lines>>) {
+function renderContentLines(file: Awaited<ReturnType<typeof readTextPage>>) {
   return file.raw
     .map((line, i) => {
       // Keep source text verbatim. Only structural wrapper fields are escaped;
@@ -351,6 +355,7 @@ function renderReadStub(input: {
   total: number
   status: ReadStubStatus
   coveredBy?: string
+  reachedEof: boolean
 }) {
   // 可见覆盖范围的末行：被覆盖时取外部已读区间的 end，否则即本次请求的 end。
   // 用于推导下一段未读内容的起始 offset，给模型一个明确的"往哪读"指令，
@@ -358,13 +363,11 @@ function renderReadStub(input: {
   const visibleEnd = input.coveredBy ? Number(input.coveredBy.split("-")[1]) : input.end
   // 下一段未读内容的起始行 = 可见末行 + 1。这是打破"重复读同范围"循环的关键锚点。
   const nextOffset = visibleEnd + 1
-  // 上界钳制：当可见范围已覆盖到文件末尾（visibleEnd >= total）时再给 offset 会指向
-  // EOF 之后的空区间，误导模型发起必失败的 read。此时文案改为声明已达末尾，彻底关闭
-  // offset 出口、仅保留 grep 兜底，消除"还能继续读"的错觉。
-  const reachedEof = visibleEnd >= input.total
+  // EOF 必须由调用方通过返回窗口 end===total 证明；lower-bound total 即使数值接近
+  // visibleEnd 也不能关闭 offset 出口，否则会把辅助早停误报成真实文件末尾。
   // offset 出口：未到末尾时给出精确跳读指令；到末尾时退化为 pub grep 兜底，
   // 使第二行在任何分支下都提供至少一个可执行动作，不留空指令。
-  const offsetExit = reachedEof
+  const offsetExit = input.reachedEof
     ? "No unread lines remain (end of file reached); use grep to locate symbols."
     : `Use offset=${nextOffset} for unread lines, or grep to locate symbols.`
   // 两行高信息量文案。findReadStub 已经过 isSameFileVersion（size+mtime+fp）门控，故可断言
@@ -696,8 +699,14 @@ export const ReadTool = Tool.define(
         ))
       }
 
+      // budget 在 execute 级创建一次，page 与后续 outline 必须消费同一引用而非各自初始化。
+      const auxiliaryBudget = createAuxiliaryBudget()
       const file = yield* Effect.promise(() =>
-        lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 }),
+        readTextPage(filepath, {
+          limit: params.limit ?? DEFAULT_READ_LIMIT,
+          offset: params.offset || 1,
+          budget: auxiliaryBudget,
+        }),
       )
       if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
         return yield* Effect.fail(
@@ -727,16 +736,22 @@ export const ReadTool = Tool.define(
       const visibleReads = collectVisibleReads(ctx.messages, canonicalPath)
       const stub = findReadStub(visibleReads, current)
       if (stub) {
-        const read = { ...current, returned: 0, stub: true, stubStatus: stub.status, coveredBy: stub.coveredBy }
+        // covered stub 的导航事实由外层覆盖读取拥有，不能发布本次嵌套读取的较弱下界。
+        const publishedTotal = stub.status === "stub_covered_range_visible" ? stub.covering.total : current.total
+        const coveredBy =
+          stub.status === "stub_covered_range_visible" ? `${stub.covering.start}-${stub.covering.end}` : undefined
+        const read = { ...current, total: publishedTotal, returned: 0, stub: true, stubStatus: stub.status, coveredBy }
         const output = renderReadStub({
           path: filepath,
           size,
           modified,
           start,
           end,
-          total: file.count,
+          total: publishedTotal,
           status: stub.status,
-          coveredBy: stub.coveredBy,
+          coveredBy,
+          // lower-bound total 始终大于 end，因此不会被误写成“已到文件末尾”。
+          reachedEof: isTotalExact(stub.status === "stub_covered_range_visible" ? stub.covering : current),
         })
         return {
           title,
@@ -828,7 +843,9 @@ export const ReadTool = Tool.define(
         returned: file.raw.length,
         // [local-smark] 使用 readOutlineCached 替代 readOutline，
         // 按 canonicalPath+size+modifiedMs 缓存 outline，避免每次 read 重新扫描文件
-        outline: yield* Effect.promise(() => readOutlineCached(filepath, file.count, file.offset, size, versionMs)),
+        outline: yield* Effect.promise(() =>
+          readOutlineCached(filepath, file.count, file.offset, size, versionMs, auxiliaryBudget),
+        ),
         overlap: findOverlapNote(visibleReads, current),
         content: renderContentLines(file),
         more: truncated ? { offset: end + 1, reason: file.cut ? "byte_limit" : "line_limit" } : undefined,
@@ -867,53 +884,3 @@ export const ReadTool = Tool.define(
     }
   }),
 )
-
-// [local-smark] Custom lines reader with byte-cap for read tool
-async function lines(filepath: string, opts: { limit: number; offset: number }) {
-  const stream = createReadStream(filepath, { encoding: "utf8" })
-  const rl = createInterface({
-    input: stream,
-    // Note: we use the crlfDelay option to recognize all instances of CR LF
-    // ('\r\n') in file as a single line break.
-    crlfDelay: Infinity,
-  })
-
-  const start = opts.offset - 1
-  const raw: string[] = []
-  let bytes = 0
-  let count = 0
-  let cut = false
-  let more = false
-  try {
-    for await (const text of rl) {
-      count += 1
-      if (count <= start) continue
-
-      if (raw.length >= opts.limit) {
-        more = true
-        continue
-      }
-
-      if (cut) {
-        more = true
-        continue
-      }
-
-      const line = text
-      const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
-      if (bytes + size > MAX_BYTES) {
-        cut = true
-        more = true
-        continue
-      }
-
-      raw.push(line)
-      bytes += size
-    }
-  } finally {
-    rl.close()
-    stream.destroy()
-  }
-
-  return { raw, count, cut, more, offset: opts.offset }
-}

@@ -1,6 +1,5 @@
-import { createReadStream } from "fs"
 import path from "path"
-import { createInterface } from "readline"
+import { readTextPage, type AuxiliaryBudget } from "./read-lines"
 
 const MIN_LINES = 600
 const MAX_ENTRIES = 32
@@ -224,40 +223,42 @@ function truncateItem(item: string) {
   return item.slice(0, MAX_ITEM_CHARS - 3) + "..."
 }
 
-export async function readOutline(filepath: string, total: number, offset: number): Promise<Outline | undefined> {
+export async function readOutline(
+  filepath: string,
+  total: number,
+  offset: number,
+  budget?: AuxiliaryBudget,
+): Promise<Outline | undefined> {
   if (offset > 1 || total < MIN_LINES || !SOURCE_EXTENSIONS.has(basenameExt(filepath))) return undefined
+  // page accounting 已耗尽共享额度时不得再打开 outline 流，避免第二条扫描路径绕过 256 KiB 上限。
+  if (budget?.remaining === 0) return undefined
 
-  const stream = createReadStream(filepath, { encoding: "utf8" })
-  const rl = createInterface({ input: stream, crlfDelay: Infinity })
   const items: string[] = []
   let chars = 0
-  let count = 0
   let truncated = false
-  try {
-    for await (const text of rl) {
-      count += 1
-      // This is a read-tool hint, not a semantic index; never scan an entire
-      // huge file just to discover there are no declarations in the prefix.
-      if (count > MAX_SCAN_LINES) {
-        truncated = true
-        break
-      }
-
+  const page = await readTextPage(filepath, {
+    limit: MAX_SCAN_LINES,
+    offset: 1,
+    budget,
+    auxiliaryFromStart: true,
+    captureRaw: false,
+    contentBytesLimit: Number.POSITIVE_INFINITY,
+    onLine: (text, count) => {
+      // callback 只接收受限行首并立即抽取标签，outline 不拥有第二套行分隔或整行缓冲逻辑。
       const label = outlineLabel(text, filepath)
-      if (!label) continue
+      if (!label) return
       const item = truncateItem(`${count} ${label}`)
       const extra = item.length + (items.length > 0 ? 1 : 0)
       if (items.length >= MAX_ENTRIES || chars + extra > MAX_CHARS) {
         truncated = true
-        break
+        return true
       }
       items.push(item)
       chars += extra
-    }
-  } finally {
-    rl.close()
-    stream.destroy()
-  }
+    },
+  })
+  // parser 的 more 同时覆盖共享预算和 3000 行早停，二者都要求 outline 标记为不完整。
+  truncated ||= page.more
   if (items.length === 0) return undefined
   return { items, truncated }
 }
@@ -274,6 +275,7 @@ export async function readOutlineCached(
   offset: number,
   size: number,
   modifiedMs: number,
+  budget?: AuxiliaryBudget,
 ): Promise<Outline | undefined> {
   // [local-smark] 仅在 offset<=1 时使用缓存（readOutline 内部也仅在此条件生成 outline）。
   // offset>1 时不查缓存也不生成 outline，保持原有行为。
@@ -286,7 +288,11 @@ export async function readOutlineCached(
   if (cached && cached.size === size && cached.modifiedMs === modifiedMs) {
     return cached.outline
   }
-  const outline = await readOutline(filepath, total, offset)
+  // cache miss 才需要 I/O；共享额度为零时直接省略且不写入“无 outline”的伪完整缓存。
+  if (budget?.remaining === 0) return undefined
+  const outline = await readOutline(filepath, total, offset, budget)
+  // 预算或条目上限导致的截断结果不是完整缓存事实，后续 cache hit 不能把它当作完整 outline。
+  if (outline?.truncated) return outline
   // LRU 淘汰：超限时删最早插入的条目（Map 保持插入顺序）
   if (outlineCache.size >= OUTLINE_CACHE_LIMIT) {
     const firstKey = outlineCache.keys().next().value
