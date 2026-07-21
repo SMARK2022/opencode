@@ -170,7 +170,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
             id: event.data.messageID,
             type: "synthetic",
             // 与其他消息同样保存既有事件metadata，展示标记不改变synthetic授权身份。
-            metadata: event.metadata,
+            metadata: event.data.metadata ? { ...event.metadata, ...event.data.metadata } : event.metadata,
             time: { created: event.data.timestamp },
           }),
         )

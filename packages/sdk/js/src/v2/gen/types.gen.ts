@@ -1020,6 +1020,9 @@ export type GlobalEvent = {
           sessionID: string
           messageID: string
           text: string
+          metadata?: {
+            [key: string]: unknown
+          }
         }
       }
     | {
@@ -3940,6 +3943,9 @@ export type SyncEventSessionNextSynthetic = {
       sessionID: string
       messageID: string
       text: string
+      metadata?: {
+        [key: string]: unknown
+      }
     }
   }
 }
@@ -4976,6 +4982,9 @@ export type SessionNextSynthetic = {
     sessionID: string
     messageID: string
     text: string
+    metadata?: {
+      [key: string]: unknown
+    }
   }
 }
 
@@ -7255,6 +7264,9 @@ export type EventSessionNextSynthetic = {
     sessionID: string
     messageID: string
     text: string
+    metadata?: {
+      [key: string]: unknown
+    }
   }
 }
 

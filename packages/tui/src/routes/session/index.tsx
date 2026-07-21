@@ -16,6 +16,7 @@ import {
   useContext,
 } from "solid-js"
 import { sessionMessageContentWidth } from "./layout"
+import { goalContinuation } from "./goal-continuation"
 
 // #185：可见 part 判定（空 text / 隐藏 completed tool 不占首距）
 export const isVisibleAssistantPart = (
@@ -1429,12 +1430,13 @@ export function Session() {
                       <Match when={message.role === "user"}>
                         <UserMessage
                           index={index()}
-                          onMouseUp={() => {
+                          onMouseUp={(goalContinuation) => {
                             if (renderer.getSelection()?.getSelectedText()) return
                             dialog.replace(() => (
                               <DialogMessage
                                 messageID={message.id}
                                 sessionID={route.sessionID}
+                                goalContinuation={goalContinuation}
                                 setPrompt={(promptInfo) => prompt?.set(promptInfo)}
                                 submit={() => promptRef.current?.submit()}
                               />
@@ -1544,31 +1546,29 @@ export function Session() {
 function UserMessage(props: {
   message: UserMessage
   parts: Part[]
-  onMouseUp: () => void
+  onMouseUp: (goalContinuation: boolean) => void
   index: number
   pending?: number
 }) {
   const ctx = use()
   const local = useLocal()
-  // [local-smark] text memo：包含 synthetic 消息的 objective 提取
-  // synthetic goal 续跑消息不显示原始 XML prompt，只提取 objective 作为用户消息文本
+  // #520：同一个 memo 同时驱动正文、badge 和动作 subtype，三处不会产生不同识别结果。
+  const goal = createMemo(() => goalContinuation(props.parts))
+  // 普通用户文本仍走原路径；旧 continuation 暂时保留既有 objective 提取，
+  // 新 marker 由 goal view 独占，避免同一内容在卡片内重复渲染。
   const text = createMemo(() => {
     const texts = props.parts
       .map((x) => {
         if (x.type !== "text") return null
-        // 非 synthetic 文本直接使用
+        // #520：synthetic Goal 已由上方 exact parser 消费；其他 synthetic 文本不属于用户可见正文。
         if (!x.synthetic) return x.text
-        // synthetic 文本从 <objective> 标签提取摘要并反转义 XML 实体
-        const m = x.text.match(/<objective>([\s\S]*?)<\/objective>/)
-        if (!m) return null
-        return m[1].trim()
-          .replace(/&amp;/g, "&")
-          .replace(/&lt;/g, "<")
-          .replace(/&gt;/g, ">")
+        return null
       })
       .filter(Boolean)
     return texts.join("\n\n")
   })
+  // #520：continuation 只替换现有卡片的正文来源，外层 Agent 身份、时间和附件布局保持共享。
+  const content = createMemo(() => goal()?.objective ?? text())
   const files = createMemo(() => props.parts.flatMap((x) => (x.type === "file" ? [x] : [])))
   const { theme } = useTheme()
   const [hover, setHover] = createSignal(false)
@@ -1581,7 +1581,7 @@ function UserMessage(props: {
 
   return (
     <>
-      <Show when={text()}>
+      <Show when={content()}>
         <box
           id={props.message.id}
           ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
@@ -1597,14 +1597,31 @@ function UserMessage(props: {
             onMouseOut={() => {
               setHover(false)
             }}
-            onMouseUp={props.onMouseUp}
+            // #520：marker 已在同一 Message 内完成识别；动作菜单只接收 subtype 结果，不重复解析 XML。
+            onMouseUp={() => props.onMouseUp(goal() !== undefined)}
             paddingTop={1}
             paddingBottom={1}
             paddingLeft={2}
             backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
             flexShrink={0}
           >
-            <text fg={theme.text}>{text()}</text>
+            <text fg={theme.text}>{content()}</text>
+            <Show when={goal()}>
+              {(item) => (
+                // #520：gap={1} 是两个独立 badge 之间的可见列，不依赖文本尾部空格碰巧分隔。
+                <box flexDirection="row" paddingTop={1} gap={1}>
+                  {/* GOAL badge 与左边框共享 Agent 身份色；mode badge 保持中性，不能伪造新角色。 */}
+                  <text fg={theme.text}>
+                    <span style={{ bg: color(), fg: queuedFg(), bold: true }}> GOAL </span>
+                  </text>
+                  <text fg={theme.text}>
+                    <span style={{ bg: theme.backgroundElement, fg: theme.textMuted }}>
+                      {` ${item().label}${item().count ? ` · ${item().count}` : ""} `}
+                    </span>
+                  </text>
+                </box>
+              )}
+            </Show>
             <Show when={files().length}>
               <box flexDirection="row" paddingBottom={metadataVisible() ? 1 : 0} paddingTop={1} gap={1} flexWrap="wrap">
                 <For each={files()}>
@@ -1643,7 +1660,7 @@ function UserMessage(props: {
       </Show>
       <Show when={compaction()}>
         <box
-          id={text() ? undefined : props.message.id}
+          id={content() ? undefined : props.message.id}
           marginTop={1}
           border={["top"]}
           // compaction.auto 是持久化边界上区分自动/手动压缩的来源；主视图文案需要和 v2 调试视图保持一致。
