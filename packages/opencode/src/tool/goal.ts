@@ -24,7 +24,7 @@ export interface GoalTurnContext {
 export const Parameters = Schema.Struct({
   operate: Schema.Literals(["read", "complete", "blocked", "active"] as const).annotate({
     description:
-      "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. Use `active` to resume a model-produced terminal goal in a later user turn.",
+      "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker in the next eligible turn. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal in a later user turn.",
   }),
   reason: Schema.optional(Schema.String).annotate({
     description:
@@ -140,11 +140,19 @@ export const GoalTool = Tool.define(
           }
         }
 
-        // blocked-pending：第一次 blocked 必须给出四类具体探索动作，并固定下一 turn 的 exact reason。
+        // blocked-pending：第一次调用只启动 audit，必须明确保持 active、继续探索和 exact reason 边界。
+        // 文案只指导模型下一步，不改变 modelTransition 的持久化 ownership 或 two-turn threshold。
         return {
           title: "Goal blocked (pending)",
           metadata: {},
-          output: `Blocked attempt ${result.attempt} of ${result.required}. Before marking as blocked, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call operate blocked again in the next eligible Goal turn with the same trimmed reason to confirm the blocker is persistent.`,
+          output: [
+            `Blocked attempt ${result.attempt} of ${result.required}. The Goal stays active; do not confirm it as blocked yet. Re-check the blocker with a breadth-first pass:`,
+            "1. Restate the exact blocker and the Goal requirement it prevents.",
+            "2. Re-read the most relevant files and inspect one adjacent producer, consumer, test, or configuration path that could change the conclusion.",
+            "3. Run one different search, test, or focused check, and split the blocker into a smaller verifiable question.",
+            "4. If any branch yields a viable path, continue working and do not call blocked again.",
+            'If the same blocker still prevents meaningful progress after this exploration, call operate "blocked" in the next eligible Goal turn with the same trimmed reason. Do not mark the Goal blocked merely because the work is hard, uncertain, or incomplete.',
+          ].join("\n"),
         }
       }).pipe(Effect.orDie),
   }),

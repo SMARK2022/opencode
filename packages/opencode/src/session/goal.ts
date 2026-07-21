@@ -546,11 +546,51 @@ export const layer = Layer.effect(
 
 export const defaultLayer = layer.pipe(Layer.provide(Bus.layer))
 
+// ordinary/replan 只切换 continuation 策略文案，不改变 Goal 持久化状态。
+export type ContinuationMode = "ordinary" | "replan"
+
+// strategy-switch 固定英文块：只在 replan 模式插入，且不得拼入 tool/path 等动态值。
+// 固定文本让模型看到稳定的行为边界；progress ledger 仍是唯一决定何时切换的 owner。
+const STRATEGY_SWITCH_BLOCK = [
+  '<strategy-switch mode="breadth-first-replan">',
+  "The progress gate entered breadth-first re-plan mode after two consecutive eligible Goal turns produced no new qualifying evidence.",
+  "",
+  "Keep the Goal active. This mode changes the work strategy; it does not pause, narrow, complete, or block the Goal. Preserve the full objective and continue until the existing completion or blocked contract is genuinely satisfied.",
+  "",
+  "Evidence strength:",
+  // exploration 与 advancement 必须在 prompt 中分层，避免模型把任意读取当作完成信号。
+  "- Exploration evidence shows that a new branch was inspected. It includes a new non-stub file version or line range, a new completed `grep` or `glob` request with a distinct normalized search scope, a first result from a verification command, or a distinct generic command result.",
+  "- Advancement evidence shows a stronger state change. It includes an effective file diff, a newly completed Todo, or a changed result from a comparable verification command.",
+  // 这两条固定说明对应 classifier 的两个布尔结果，防止 prompt 和代码各自发明边界。
+  "- Exploration evidence resets the raw no-activity count but does not leave this re-plan mode. Ordinary continuation resumes only after advancement evidence appears.",
+  "- Text, reasoning, a rewritten plan, repeated tool input, an unchanged Todo snapshot, a no-op edit, or an identical command result is not qualifying evidence.",
+  "- Do not manufacture a cosmetic edit, mark a Todo complete without completing it, or run an irrelevant command merely to leave this mode.",
+  "",
+  "Required breadth-first re-plan:",
+  // BFS 只改变下一步选择顺序，不创建额外执行器，也不允许缩小用户 objective。
+  "1. Re-derive the complete requirements from the objective and authoritative referenced artifacts. Do not narrow the requested end state.",
+  "2. Build a frontier of evidence nodes tied to the objective: interfaces, producers, consumers, callers, configuration, tests, documents, and external state.",
+  "3. Mark which frontier nodes are already supported by current evidence and which remain unvisited or uncertain.",
+  "4. Explore breadth-first. Inspect one shallow, unvisited node from each high-priority branch before deepening a branch that has already been explored.",
+  "5. For each selected node, choose the smallest action that can distinguish competing explanations: a targeted read, a different search pattern, a focused command, a behavioral test, or a necessary edit.",
+  "6. Record the result, update the frontier, and choose the next unvisited node from the same depth. Do not repeat the same file range, pattern, command, or unchanged edit unless external state has materially changed.",
+  // 不要求模型为了满足 gate 制造改动；可达但无效的动作仍应保持 re-plan。
+  "7. If exploration produces no advancement evidence, remain in breadth-first re-plan mode and move to another unvisited branch. Do not fall back to the previous repeated strategy.",
+  "",
+  "End-of-turn rule:",
+  // 末尾规则把“有证据的探索”和“纯文字计划”区分开，防止 re-plan 自己成为停滞循环。
+  "- State which frontier node was explored, what authoritative evidence was produced, and which node should be visited next.",
+  "- A prose-only re-plan does not satisfy the progress gate; carry out at least one concrete evidence-producing action when a reachable action exists.",
+  "- If current authoritative evidence already proves every requirement, perform the existing completion audit and mark the Goal complete. Do not create artificial work merely to satisfy the gate.",
+  // blocked 仍由 GoalTool/SessionGoal 所有，strategy-switch 不能越权把停滞变成 terminal。
+  "- If a real blocker remains, follow the existing two-turn blocked audit exactly. Stagnation by itself is not a blocker.",
+  "</strategy-switch>",
+].join("\n")
+
 // 构建续跑 prompt：作为 synthetic user message 注入，不进 system prompt
-// 以保持 provider prefix cache 稳定。文本对齐 Codex continuation.md，
-// 仅做最小适配：thread goal → session goal，update_goal → the goal tool，
-// 去掉 update_plan 段（OpenCode 无此工具）。
-export function continuationPrompt(goal: Goal): string {
+// 以保持 provider prefix cache 稳定。replan 只在 Work from evidence 后插入 strategy-switch。
+export function continuationPrompt(goal: Goal, mode: ContinuationMode = "ordinary"): string {
+  // budget/remaining 每轮从当前 Goal 读取，避免 synthetic message 使用旧 usage 快照。
   const budget = goal.tokenBudget ?? "unbounded"
   const remaining = goal.tokenBudget != null ? Math.max(0, goal.tokenBudget - goal.tokensUsed) : "unbounded"
   return [
@@ -573,6 +613,9 @@ export function continuationPrompt(goal: Goal): string {
     "Work from evidence:",
     "Use the current worktree and external state as authoritative. Previous conversation context can help locate relevant work, but inspect the current state before relying on it. Improve, replace, or remove existing work as needed to satisfy the actual objective.",
     "",
+    // replan 模式才插入 BFS 策略块；ordinary 保持历史文案结构不变。
+    // ordinary 保持既有 prompt 形状；只有 gate 明确设置 replan 才增加 BFS block。
+    ...(mode === "replan" ? [STRATEGY_SWITCH_BLOCK, ""] : []),
     "Fidelity:",
     "- Optimize each turn for movement toward the requested end state, not for the smallest stable-looking subset or easiest passing change.",
     "- Do not substitute a narrower, safer, smaller, merely compatible, or easier-to-test solution because it is more likely to pass current tests.",
@@ -592,9 +635,9 @@ export function continuationPrompt(goal: Goal): string {
     'Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Marking the goal complete is a claim that the full objective has been finished and can withstand requirement-by-requirement scrutiny. Only mark the goal achieved when current evidence proves every requirement has been satisfied and no required work remains. If the evidence is incomplete, weak, indirect, merely consistent with completion, or leaves any requirement missing, incomplete, or unverified, keep working instead of marking the goal complete. If the objective is achieved, call the goal tool with operate "complete" so usage accounting is preserved. If the achieved goal has a token budget, report the final consumed token budget to the user after the goal tool succeeds.',
     "",
     "Blocked audit:",
-    '- Call the goal tool with operate "blocked" and a concise reason when a blocker prevents meaningful progress. The first call starts the audit and keeps the goal active.',
-    '- Before calling it again, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints.',
-    '- If the same condition still prevents progress after that exploration, call the goal tool with operate "blocked" in the next eligible Goal turn using the same trimmed reason. The blocked audit requires two consecutive eligible Goal turns; the second valid call marks the goal as blocked.',
+    '- The first blocked call starts the audit and keeps the Goal active; re-check the blocker breadth-first, inspect adjacent producers, consumers, tests, or configuration, and run a different focused check.',
+    '- If any explored branch yields a viable path, continue working and do not call blocked again.',
+    '- If the same blocker still prevents meaningful progress after that exploration, call the goal tool with operate "blocked" in the next eligible Goal turn using the same trimmed reason. The blocked audit requires two consecutive eligible Goal turns; the second valid call marks the goal as blocked.',
     '- If the user resumes a goal that was previously marked "blocked", treat the resumed run as a fresh audit with the same two-turn and exact-reason requirements.',
     '- Use operate "blocked" only when you are truly at an impasse and cannot make meaningful progress without user input or an external-state change.',
     '- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; call the goal tool with operate "blocked".',

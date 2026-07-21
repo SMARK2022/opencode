@@ -2,6 +2,7 @@ import { NodeFileSystem } from "@effect/platform-node"
 import { FetchHttpClient } from "effect/unstable/http"
 import { expect } from "bun:test"
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+import { symlink } from "fs/promises"
 import path from "path"
 import { fileURLToPath, pathToFileURL } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -4271,4 +4272,388 @@ it.instance(
     }),
   { git: true },
   30_000,
+)
+
+function continuationTexts(msgs: MessageV2.WithParts[]) {
+  // 只提取持久化 synthetic user Part，避免把 provider 的普通 user/tool 文本误当续跑结果。
+  return msgs.flatMap((m) =>
+    m.info.role === "user"
+      ? m.parts.flatMap((p) =>
+          p.type === "text" && p.synthetic === true && p.text.includes("<session-goal-continuation>")
+            ? [p.text]
+            : [],
+        )
+      : [],
+  )
+}
+
+// progress gate：两轮无 structured 证据后，下一条 continuation 必须进入 BFS replan。
+it.instance(
+  "goal progress gate switches to replan after two no-evidence completions",
+  () =>
+    Effect.gen(function* () {
+      // max=2 只允许写入 re-plan continuation；第三个 completion 由 hang 保持未完成。
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 2 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goalSvc = yield* SessionGoal.Service
+      const chat = yield* sessions.create({
+        title: "progress gate",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* goalSvc.set(chat.id, { objective: "finish the Goal without stalling" })
+      yield* user(chat.id, "start the Goal")
+
+      // 两轮仅 text 完成：第二轮完成后注入 replan，第三个 completion 只用于观察前的 hang。
+      yield* llm.push(reply().text("turn1 no tools").stop())
+      yield* llm.push(reply().text("turn2 no tools").stop())
+      yield* llm.push(reply().hang().item())
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+      yield* llm.wait(3)
+
+      const texts = continuationTexts(yield* MessageV2.filterCompactedEffect(chat.id))
+      expect(texts.length).toBeGreaterThanOrEqual(2)
+      // 第一轮无证据仍 ordinary；第二轮无证据后下一条 continuation 进入 replan。
+      expect(texts[0]).not.toContain("<strategy-switch")
+      expect(texts[1]).toContain('mode="breadth-first-replan"')
+      expect(texts[1]).toContain("Explore breadth-first")
+
+      // 在第三 completion 尚未结束前，只有 re-plan 已发生，Goal 必须仍是 active。
+      const goal = yield* goalSvc.get(chat.id)
+      expect(goal._tag).toBe("Some")
+      if (goal._tag === "Some") expect(goal.value.status).toBe("active")
+      yield* Fiber.interrupt(fiber)
+    }),
+  { git: true },
+  30_000,
+)
+
+// replan 中 exploration（read）不能退出 replan；advancement（write）才能回到 ordinary。
+it.instance(
+  "goal progress gate keeps replan on read exploration and clears on effective write",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 6 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goalSvc = yield* SessionGoal.Service
+      const chat = yield* sessions.create({
+        title: "progress evidence",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* goalSvc.set(chat.id, { objective: "inspect and then change the file" })
+      yield* user(chat.id, "start")
+      const target = path.join(dir, "gate-note.txt")
+      yield* writeText(target, "seed\n")
+
+      // turn1/turn2：无证据 -> 进入 replan
+      yield* llm.push(reply().text("idle 1").stop())
+      yield* llm.push(reply().text("idle 2").stop())
+      // turn3：新 read 仅 exploration，仍 replan
+      yield* llm.push(
+        reply().tool("read", { filePath: target }),
+        reply().text("read done").stop(),
+      )
+      // turn4：有效 write 是 advancement，下一条 ordinary
+      yield* llm.push(
+        reply().tool("write", { filePath: target, content: "changed by progress gate\n" }),
+        reply().text("write done").stop(),
+      )
+      // turn5：再 idle 一次，下一条 ordinary（计数已清零）
+      yield* llm.push(reply().text("after advance idle").stop())
+      yield* llm.push(reply().text("final").stop())
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const texts = continuationTexts(yield* MessageV2.filterCompactedEffect(chat.id))
+      // 索引：0=after t1 ordinary, 1=after t2 replan next, 2=after read still replan,
+      // 3=after write ordinary, 4=after later idle ordinary
+      expect(texts.length).toBeGreaterThanOrEqual(5)
+      expect(texts[1]).toContain('mode="breadth-first-replan"')
+      expect(texts[2]).toContain('mode="breadth-first-replan"')
+      expect(texts[3]).not.toContain("<strategy-switch")
+      expect(texts[4]).not.toContain("<strategy-switch")
+    }),
+  { git: true },
+  45_000,
+)
+
+// read identity：新版本/range 必须能启动或重置 raw count，重复同一 read 不能伪造 exploration。
+it.instance(
+  "goal progress gate observes read identity and range boundaries",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 9 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goalSvc = yield* SessionGoal.Service
+      const chat = yield* sessions.create({
+        title: "progress read identity",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* goalSvc.set(chat.id, { objective: "distinguish read versions and ranges" })
+      yield* user(chat.id, "start")
+      const target = path.join(dir, "read-identity.txt")
+      yield* writeText(target, "first\nsecond\n")
+      const firstRead = { filePath: target, offset: 0, limit: 1 }
+      // ReadTool 的 offset 是 1-based；offset=2 才会发布与 firstRead 不同的 start/end。
+      const secondRange = { filePath: target, offset: 2, limit: 1 }
+
+      yield* llm.push(reply().text("idle").stop())
+      yield* llm.push(reply().tool("read", firstRead).item(), reply().text("read first").stop())
+      // 相同 path/version/range 的第二次 read 必须复用 identity，不清掉下一个 idle 的停滞计数。
+      yield* llm.push(reply().tool("read", firstRead).item(), reply().text("read duplicate").stop())
+      yield* llm.push(reply().text("read boundary").stop())
+      yield* llm.push(reply().tool("write", { filePath: target, content: "changed\nsecond\n" }).item(), reply().text("advance").stop())
+      yield* llm.push(reply().text("range idle").stop())
+      // range 改变即使文件版本不变也必须形成新的 evidence node。
+      yield* llm.push(reply().tool("read", secondRange).item(), reply().text("read second range").stop())
+      yield* llm.push(reply().text("range boundary").stop())
+      yield* llm.push(reply().text("final boundary").stop())
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const texts = continuationTexts(yield* MessageV2.filterCompactedEffect(chat.id))
+      expect(texts.length).toBeGreaterThanOrEqual(9)
+      expect(texts[1]).not.toContain("<strategy-switch")
+      expect(texts[2]).not.toContain("<strategy-switch")
+      expect(texts[3]).toContain('mode="breadth-first-replan"')
+      expect(texts[6]).not.toContain("<strategy-switch")
+      expect(texts[8]).toContain('mode="breadth-first-replan"')
+    }),
+  { git: true },
+  60_000,
+)
+
+// normalized search/command signatures：重复输入不应伪造新探索；无效 edit 也不应成为 advancement。
+it.instance(
+  "goal progress gate ignores duplicate normalized searches and no-op edits",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 9 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goalSvc = yield* SessionGoal.Service
+      const chat = yield* sessions.create({
+        title: "progress duplicate evidence",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* goalSvc.set(chat.id, { objective: "distinguish new evidence from duplicate activity" })
+      yield* user(chat.id, "start")
+      const target = path.join(dir, "gate-search.txt")
+      yield* writeText(target, "needle\n")
+
+      // grep 的 include/exclude 顺序属于 provider 表示差异，不应改变 semantic scope。
+      const grep = {
+        pattern: "needle",
+        include: ["gate-search.txt", "other.txt"],
+        exclude: ["dist/**", "node_modules/**"],
+      }
+      const repeatedGrep = {
+        ...grep,
+        path: ".",
+        include: ["other.txt", "gate-search.txt"],
+        exclude: ["node_modules/**", "dist/**"],
+      }
+      const glob = { pattern: "gate-search.txt" }
+      const repeatedGlob = { ...glob, path: "." }
+
+      // 新 grep/glob/command 各自只清 raw count；相同 normalized signature 不应清 count。
+      yield* llm.push(reply().text("idle").stop())
+      yield* llm.push(reply().tool("grep", grep).item(), reply().text("grep").stop())
+      // 第一次搜索建立 normalized baseline，下一次仅改变 path spelling 和数组顺序。
+      yield* llm.push(reply().tool("grep", repeatedGrep).item(), reply().text("duplicate grep").stop())
+      yield* llm.push(reply().tool("glob", glob).item(), reply().text("glob").stop())
+      // glob 同样验证缺省目录与显式当前目录的 producer-equivalent identity。
+      yield* llm.push(reply().tool("glob", repeatedGlob).item(), reply().text("duplicate glob").stop())
+      yield* llm.push(
+        reply().tool("bash", { command: `bun -e "process.stdout.write('stable')"`, description: "stable generic command" }).item(),
+        reply().text("command").stop(),
+      )
+      yield* llm.push(
+        reply().tool("bash", { command: `bun -e "process.stdout.write('stable')"`, description: "same generic command" }).item(),
+        reply().text("duplicate command").stop(),
+      )
+      yield* llm.push(
+        reply().tool("edit", {
+          filePath: target,
+          edits: [{ oldString: "needle", newString: "needle" }],
+        }).item(),
+        reply().text("no-op edit").stop(),
+      )
+      yield* llm.push(reply().text("final").stop())
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const texts = continuationTexts(yield* MessageV2.filterCompactedEffect(chat.id))
+      expect(texts.length).toBeGreaterThanOrEqual(8)
+      // 首次 grep/glob/command 都应保持 ordinary，说明它们是 exploration 而非 advancement。
+      expect(texts[1]).not.toContain("<strategy-switch")
+      expect(texts[3]).not.toContain("<strategy-switch")
+      expect(texts[5]).not.toContain("<strategy-switch")
+      // no-op edit 后累计两轮无证据，说明重复搜索/command 没有错误地重置 gate。
+      expect(texts[7]).toContain('mode="breadth-first-replan"')
+    }),
+  { git: true },
+  60_000,
+)
+
+// duplicate probes must be observed before a later write can reset the gate;
+// otherwise unconditional exploration counting would pass the same assertions.
+it.instance(
+  "goal progress gate suppresses duplicate normalized grep glob and command probes",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 15 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goalSvc = yield* SessionGoal.Service
+      const chat = yield* sessions.create({
+        title: "progress normalized probes",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* goalSvc.set(chat.id, { objective: "deduplicate equivalent evidence probes" })
+      yield* user(chat.id, "start")
+      const target = path.join(dir, "normalized-probe.txt")
+      yield* writeText(target, "needle\n")
+      const linkedDir = path.join(dir, "normalized-link")
+      if (process.platform !== "win32") yield* Effect.promise(() => symlink(dir, linkedDir, "dir"))
+      const equivalentDirectory = process.platform === "win32" ? "." : linkedDir
+      const grep = { pattern: "needle", include: ["normalized-probe.txt", "other.txt"], exclude: ["dist/**"] }
+      const repeatedGrep = { ...grep, path: equivalentDirectory, include: ["other.txt", "normalized-probe.txt"] }
+      const glob = { pattern: "*.txt" }
+      const repeatedGlob = { ...glob, path: equivalentDirectory }
+      const command = `bun -e "process.stdout.write('stable')"`
+
+      // 每个 duplicate 后立即接 boundary idle；后续 write 只用于清除前一阶段的 re-plan。
+      // grep 阶段检验缺省 path 与 `.` 的 canonical equivalence 以及数组顺序归一化。
+      yield* llm.push(reply().text("idle").stop())
+      yield* llm.push(reply().tool("grep", grep).item(), reply().text("grep").stop())
+      yield* llm.push(reply().tool("grep", repeatedGrep).item(), reply().text("duplicate grep").stop())
+      yield* llm.push(reply().text("grep boundary").stop())
+      // write 只作为独立 advancement，不能替 duplicate search 隐藏其前一轮判断。
+      yield* llm.push(reply().tool("write", { filePath: target, content: "glob\n" }).item(), reply().text("advance").stop())
+      yield* llm.push(reply().text("glob idle").stop())
+      yield* llm.push(reply().tool("glob", glob).item(), reply().text("glob").stop())
+      yield* llm.push(reply().tool("glob", repeatedGlob).item(), reply().text("duplicate glob").stop())
+      yield* llm.push(reply().text("glob boundary").stop())
+      // glob 阶段重复同一 pattern/scope，随后 boundary idle 必须重新触发 re-plan。
+      yield* llm.push(reply().tool("write", { filePath: target, content: "command\n" }).item(), reply().text("advance again").stop())
+      yield* llm.push(reply().text("command idle").stop())
+      yield* llm.push(reply().tool("bash", { command, description: "stable command" }).item(), reply().text("command").stop())
+      // description 不进入 signature；相同 command/output 仍然是 duplicate generic evidence。
+      yield* llm.push(reply().tool("bash", { command, description: "duplicate command" }).item(), reply().text("duplicate command").stop())
+      yield* llm.push(reply().text("command boundary").stop())
+      yield* llm.push(reply().text("final").stop())
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const texts = continuationTexts(yield* MessageV2.filterCompactedEffect(chat.id))
+      expect(texts.length).toBeGreaterThanOrEqual(14)
+      expect(texts[2]).not.toContain("<strategy-switch")
+      expect(texts[3]).toContain('mode="breadth-first-replan"')
+      expect(texts[7]).not.toContain("<strategy-switch")
+      expect(texts[8]).toContain('mode="breadth-first-replan"')
+      expect(texts[12]).not.toContain("<strategy-switch")
+      expect(texts[13]).toContain('mode="breadth-first-replan"')
+    }),
+  { git: true },
+  90_000,
+)
+
+// verification signature：首次结果只算 exploration，same result 不算新证据，结果改变才算 advancement。
+it.instance(
+  "goal progress gate distinguishes first and changed verification results",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 8 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goalSvc = yield* SessionGoal.Service
+      const chat = yield* sessions.create({
+        title: "progress verification evidence",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* goalSvc.set(chat.id, { objective: "verify changing external state" })
+      yield* user(chat.id, "start")
+
+      const statusPath = path.join(dir, "verification-status.txt")
+      const fixturePath = path.join(dir, "verification.test.ts")
+      yield* writeText(statusPath, "one\n")
+      yield* writeText(
+        fixturePath,
+        [
+          'import { expect, test } from "bun:test"',
+          `test("status", async () => expect(await Bun.file(${JSON.stringify(statusPath)}).text()).toBe("one\\n"))`,
+        ].join("\n"),
+      )
+      const verify = `bun test --timeout 30000 ${fixturePath} >/dev/null 2>&1`
+      const change = `bun -e "await Bun.write('${statusPath}', 'two\\n')"`
+
+      // redirect stdout 使同一 verification 的 signature 只由 exit/result 改变，不受耗时噪声影响。
+      // 第一次相同结果只启动 verification baseline，第二次相同结果必须保持旧 baseline。
+      yield* llm.push(reply().text("idle 1").stop())
+      yield* llm.push(reply().text("idle 2").stop())
+      yield* llm.push(reply().tool("bash", { command: verify, description: "verification one" }).item(), reply().text("verified").stop())
+      // 第二次调用使用同一 command，必须复用 baseline 而不是制造 changed result。
+      yield* llm.push(reply().tool("bash", { command: verify, description: "verification repeat" }).item(), reply().text("same verification").stop())
+      yield* llm.push(reply().tool("bash", { command: change, description: "change verification fixture" }).item(), reply().text("fixture changed").stop())
+      // generic mutation 不提供 advancement；它只改变下一次相同 verification 的结果。
+      yield* llm.push(reply().tool("bash", { command: verify, description: "verification changed" }).item(), reply().text("verification changed").stop())
+      // 相同 command 的 exit 从 0 变 1，才是允许离开 re-plan 的 advancement。
+      yield* llm.push(reply().text("after changed verification").stop())
+      yield* llm.push(reply().text("final").stop())
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const texts = continuationTexts(yield* MessageV2.filterCompactedEffect(chat.id))
+      expect(texts.length).toBeGreaterThanOrEqual(6)
+      // first result establishes baseline and identical repeat is still no new evidence;
+      // only the later changed result may clear the persisted re-plan mode.
+      expect(texts[2]).toContain("<strategy-switch")
+      expect(texts[3]).toContain("<strategy-switch")
+      // changed verification 是 advancement；若只算 exploration，下一轮 idle 就会错误进入 replan。
+      expect(texts[5]).not.toContain("<strategy-switch")
+    }),
+  { git: true },
+  60_000,
+)
+
+// Todo/no-op contract：新完成 Todo 才能推进，重复快照和 no-op edit 都不能推进。
+it.instance(
+  "goal progress gate treats completed Todo as advancement and repeated no-op as stagnation",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 5 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goalSvc = yield* SessionGoal.Service
+      const chat = yield* sessions.create({
+        title: "progress todo evidence",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* goalSvc.set(chat.id, { objective: "finish a structured todo" })
+      yield* user(chat.id, "start")
+      const target = path.join(dir, "todo-note.txt")
+      yield* writeText(target, "same\n")
+      const todos = [{ content: "inspect the note", status: "completed", priority: "high" }]
+
+      // 首个 completed Todo 推进，重复 snapshot 和 no-op edit 必须留下两个无证据 turn。
+      // 末尾 assertion 同时保护 Todo identity 去重和空 diff 过滤，不能只验证其中一条。
+      yield* llm.push(reply().text("idle").stop())
+      yield* llm.push(reply().tool("todowrite", { todos }).item(), reply().text("todo complete").stop())
+      // 同一内容/priority 的第二个 completed snapshot 不代表新增完成事项。
+      yield* llm.push(reply().tool("todowrite", { todos }).item(), reply().text("same todo snapshot").stop())
+      yield* llm.push(
+        reply().tool("edit", {
+          filePath: target,
+          edits: [{ oldString: "same", newString: "same" }],
+        }).item(),
+        reply().text("no-op edit").stop(),
+      )
+      yield* llm.push(reply().text("final").stop())
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const texts = continuationTexts(yield* MessageV2.filterCompactedEffect(chat.id))
+      expect(texts.length).toBeGreaterThanOrEqual(4)
+      expect(texts[1]).not.toContain("<strategy-switch")
+      expect(texts[3]).toContain('mode="breadth-first-replan"')
+    }),
+  { git: true },
+  60_000,
 )

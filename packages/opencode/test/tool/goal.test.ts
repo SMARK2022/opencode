@@ -214,18 +214,24 @@ it.instance(
         makeCtx(session.id, goalSvc, turn1),
       )
       expect(r1.output).toContain("attempt 1")
-      // 首轮不能只是计数；四项动作分别保护证据遗漏、搜索盲区、问题粒度和依赖约束。
-      expect(r1.output).toContain("re-read relevant files")
-      expect(r1.output).toContain("search with different patterns")
-      expect(r1.output).toContain("smaller verifiable steps")
-      expect(r1.output).toContain("overlooked dependencies or constraints")
+      // 首轮必须明确保持 active、继续 BFS 探索和发现路径后继续，而不是只重复计数。
+      expect(r1.output).toContain("The Goal stays active")
+      expect(r1.output).toContain("breadth-first pass")
+      expect(r1.output).toContain("adjacent producer, consumer, test, or configuration path")
+      expect(r1.output).toContain("one different search, test, or focused check")
+      expect(r1.output).toContain("If any branch yields a viable path, continue working")
       expect(r1.output).toContain("next eligible Goal turn")
       expect(r1.output).toContain("same trimmed reason")
+      expect(r1.output).toContain("hard, uncertain, or incomplete")
+      expect(r1.output.length).toBeLessThan(2000)
+      // runtime result、wire description 和 continuation prompt 是三个独立 carrier，
+      // 测试必须同时保护，避免模型在不同可见面收到互相矛盾的 blocked contract。
       // goal.txt 是模型调用工具前的另一可见面，不能与首次 Tool result 使用不同 contract。
       expect(def.description).toContain("two consecutive eligible Goal turns")
       expect(def.description).toContain("same trimmed reason")
-      expect(def.description).toContain("re-read relevant files")
-      expect(def.description).toContain("overlooked dependencies or constraints")
+      expect(def.description).toContain("keeps the Goal active")
+      expect(def.description).toContain("viable path")
+      expect(def.description).toContain("adjacent producers/consumers/tests/configuration")
 
       // 新 turn 必须重新 read；复用 t1 snapshot 会掩盖 read-per-turn gate 是否真实生效。
       const turn2: GoalTurnContext = { id: "t2", previousID: "t1", userInitiated: true }

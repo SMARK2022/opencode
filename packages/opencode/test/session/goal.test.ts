@@ -403,13 +403,42 @@ it.instance(
         expect(prompt).toContain("two consecutive eligible Goal turns")
         expect(prompt).toContain("the same trimmed reason")
         // continuation 是自动续跑前的完整合同，不能只让首次 Tool result 承担探索指导。
-        expect(prompt).toContain("re-read relevant files")
-        expect(prompt).toContain("search with different patterns")
-        expect(prompt).toContain("smaller verifiable steps")
-        expect(prompt).toContain("overlooked dependencies or constraints")
+        // ordinary prompt 同时验证“不改变 blocked ownership”和“提供可执行 BFS 复核”两条边界。
+        expect(prompt).toContain("re-check the blocker breadth-first")
+        expect(prompt).toContain("adjacent producers, consumers, tests, or configuration")
+        expect(prompt).toContain("different focused check")
+        expect(prompt).toContain("viable path")
         expect(prompt).not.toContain('status "blocked"')
         expect(prompt).not.toContain("three consecutive goal turns")
+        // ordinary 模式不得插入 BFS strategy-switch。
+        expect(prompt).not.toContain("<strategy-switch")
+        expect(prompt).not.toContain('mode="breadth-first-replan"')
       }
+    }),
+  { git: true },
+)
+
+it.instance(
+  "continuationPrompt replan mode inserts BFS strategy switch without narrowing objective",
+  () =>
+    Effect.gen(function* () {
+      const goalSvc = yield* SessionGoal.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+
+      const goal = yield* goalSvc.set(session.id, { objective: "build the feature", tokenBudget: 50000 })
+      const prompt = SessionGoal.continuationPrompt(goal, "replan")
+      // replan 只插入固定 strategy 块，objective/budget/audit 合同必须完整保留。
+      expect(prompt).toContain("<session-goal-continuation>")
+      expect(prompt).toContain("build the feature")
+      expect(prompt).toContain('mode="breadth-first-replan"')
+      expect(prompt).toContain("Explore breadth-first")
+      expect(prompt).toContain("Ordinary continuation resumes only after advancement evidence appears")
+      expect(prompt).toContain('call the goal tool with operate "complete"')
+      expect(prompt).toContain("two consecutive eligible Goal turns")
+      // strategy 必须位于 Work from evidence 之后、Fidelity 之前。
+      expect(prompt.indexOf("Work from evidence:")).toBeLessThan(prompt.indexOf("<strategy-switch"))
+      expect(prompt.indexOf("</strategy-switch>")).toBeLessThan(prompt.indexOf("Fidelity:"))
     }),
   { git: true },
 )
