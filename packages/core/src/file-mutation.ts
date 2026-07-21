@@ -73,6 +73,11 @@ export interface RemoveResult {
 }
 
 export interface Interface {
+  // 批次先锁定并校验全部前像，再使用同一 owner 的原语提交；不承诺 I/O 回滚。
+  readonly commit: <A, E, R>(input: {
+    readonly expected: readonly { readonly target: Target; readonly content: Uint8Array | undefined }[]
+    readonly execute: (files: Omit<Interface, "commit">) => Effect.Effect<A, E, R>
+  }) => Effect.Effect<A, E | StaleContentError | FSUtil.Error, R>
   /** Create without replacing an existing target. */
   readonly create: (input: WriteInput) => Effect.Effect<WriteResult, TargetExistsError | FSUtil.Error>
   readonly write: (input: WriteInput) => Effect.Effect<WriteResult, FSUtil.Error>
@@ -155,17 +160,14 @@ const layer = Layer.effect(
     })
 
     const write = Effect.fn("FileMutation.write")((input: WriteInput) =>
-      withTargetLock(input.target)(
         Effect.gen(function* () {
           const existed = yield* fs.exists(input.target.canonical)
           yield* fs.writeWithDirs(input.target.canonical, input.content)
           return writeResult(input.target, existed)
         }),
-      ),
     )
 
     const writeTextPreservingBom = Effect.fn("FileMutation.writeTextPreservingBom")((input: TextWriteInput) =>
-      withTargetLock(input.target)(
         Effect.gen(function* () {
           const next = splitBom(input.content)
           const current = yield* fs
@@ -178,11 +180,9 @@ const layer = Layer.effect(
           if (current === undefined && !input.format) return writeResult(input.target, false)
           return yield* finishText(input, current ? splitBom(new TextDecoder().decode(current)).text : "", Boolean(current && hasUtf8Bom(current)) || next.bom, current !== undefined)
         }),
-      ),
     )
 
     const create = Effect.fn("FileMutation.create")((input: WriteInput) =>
-      withTargetLock(input.target)(
         Effect.gen(function* () {
           const write =
             typeof input.content === "string"
@@ -201,11 +201,9 @@ const layer = Layer.effect(
           return writeResult(input.target, false)
 
         }),
-      ),
     )
 
     const writeIfUnchanged = Effect.fn("FileMutation.writeIfUnchanged")((input: ConditionalWriteInput) =>
-      withTargetLock(input.target)(
         Effect.gen(function* () {
           const current = yield* fs.readFile(input.target.canonical)
           if (!sameBytes(current, input.expected)) {
@@ -218,7 +216,6 @@ const layer = Layer.effect(
             return yield* finishText({ ...input, content: input.content }, splitBom(new TextDecoder().decode(current)).text, splitBom(input.content).bom, true)
           return writeResult(input.target, true)
         }),
-      ),
     )
 
     const moveIfUnchanged = Effect.fn("FileMutation.moveIfUnchanged")((input: ConditionalMoveInput) => {
@@ -237,15 +234,10 @@ const layer = Layer.effect(
         }
         return result
       })
-      if (input.destination.canonical === input.target.canonical) return withTargetLock(input.target)(commit)
-      // 两端按同一顺序取锁，反向Move不会互相持有一半锁而死锁。
-      const first = input.target.canonical < input.destination.canonical ? input.target : input.destination
-      const second = first === input.target ? input.destination : input.target
-      return withTargetLock(first)(withTargetLock(second)(commit))
+      return commit
     })
 
     const remove = Effect.fn("FileMutation.remove")((input: RemoveInput) =>
-      withTargetLock(input.target)(
         Effect.gen(function* () {
           const existed = yield* fs.remove(input.target.canonical).pipe(
             Effect.as(true),
@@ -253,10 +245,38 @@ const layer = Layer.effect(
           )
           return removeResult(input.target, existed)
         }),
-      ),
     )
 
-    return Service.of({ create, write, writeTextPreservingBom, writeIfUnchanged, moveIfUnchanged, remove })
+    const operations = { create, write, writeTextPreservingBom, writeIfUnchanged, moveIfUnchanged, remove }
+    const withTargets = <A, E, R>(targets: readonly Target[], effect: Effect.Effect<A, E, R>) =>
+      [...new Set(targets.map(target => target.canonical))].sort().reduceRight(
+        // 等锁仍可取消；仅全部锁到手后的提交不可中断，formatter 保持其原有退出收尾。
+        (next, key) => locks.withLock(key)(next), Effect.uninterruptible(effect),
+      )
+    const commit: Interface["commit"] = input => withTargets(
+      input.expected.map(item => item.target),
+      Effect.gen(function* () {
+        for (const expected of input.expected) {
+          const current = yield* fs.readFile(expected.target.canonical)
+            .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
+          // undefined 是缺失，空字节是已有空文件；任一漂移都须在首写前拒绝。
+          if (expected.content === undefined ? current !== undefined : current === undefined || !sameBytes(expected.content, current)) {
+            return yield* new StaleContentError({ path: expected.target.canonical })
+          }
+        }
+        return yield* input.execute(operations)
+      }),
+    )
+    // 无锁原语仅交给已持有完整键集的 commit；单文件公开入口仍使用同一组锁。
+    return Service.of({
+      commit,
+      create: input => withTargetLock(input.target)(create(input)),
+      write: input => withTargetLock(input.target)(write(input)),
+      writeTextPreservingBom: input => withTargetLock(input.target)(writeTextPreservingBom(input)),
+      writeIfUnchanged: input => withTargetLock(input.target)(writeIfUnchanged(input)),
+      moveIfUnchanged: input => withTargets([input.target, input.destination], moveIfUnchanged(input)),
+      remove: input => withTargetLock(input.target)(remove(input)),
+    })
   }),
 )
 
