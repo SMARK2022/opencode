@@ -3377,7 +3377,13 @@ function Edit(props: ToolProps) {
       </Match>
       <Match when={true}>
         <InlineTool icon="←" pending={editPending()} complete={stringValue(props.input.filePath)} part={props.part}>
-          Edit {pathFormatter.format(stringValue(props.input.filePath))} {input({ replaceAll: props.input.replaceAll })}
+          {/* #514：replaceAll 徽标读 edits[]——任一条目显式 replaceAll 即展示，兼容 legacy 顶层字段回放 */}
+          Edit {pathFormatter.format(stringValue(props.input.filePath))}{" "}
+          {input({
+            replaceAll: Array.isArray(props.input.edits)
+              ? props.input.edits.some((e) => e?.replaceAll === true)
+              : props.input.replaceAll === true,
+          })}
         </InlineTool>
       </Match>
     </Switch>

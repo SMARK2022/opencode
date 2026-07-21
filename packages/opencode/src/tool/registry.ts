@@ -355,6 +355,8 @@ const layer = Layer.effect(
             parameters: output.parameters,
             jsonSchema,
             execute: tool.execute,
+            // #514：透传 prepareArguments，使 edit 等工具的 legacy 折叠在 registry 包装后仍生效
+            prepareArguments: tool.prepareArguments,
             formatValidationError: tool.formatValidationError,
           }
         }),

@@ -351,6 +351,12 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
               resultMetadata: event.data.provider.metadata,
             }
             match.time.completed = event.data.timestamp
+            const sync = event.data.structured.syncInput
+            // 只有本地 Edit 的完整真值回写输入；provider 同名字段不能改写调用历史。
+            const syncInput = match.name === "edit" && !event.data.provider.executed && sync !== null && typeof sync === "object" &&
+              "path" in sync && typeof sync.path === "string" && "edits" in sync && Array.isArray(sync.edits)
+              ? { path: sync.path, edits: sync.edits }
+              : undefined
             // 只有本地 Write 的格式化真值改写历史输入；空文件同样是有效最终内容。
             const formattedContent = match.name === "write" && !event.data.provider.executed && typeof event.data.structured.formattedContent === "string"
               ? event.data.structured.formattedContent
@@ -358,10 +364,10 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
             match.state = castDraft(
               SessionMessage.ToolStateCompleted.make({
                 status: "completed",
-                input: formattedContent === undefined ? match.state.input : { ...match.state.input, content: formattedContent },
+                input: syncInput ?? (formattedContent === undefined ? match.state.input : { ...match.state.input, content: formattedContent }),
                 // 完成投影后去掉临时整文，避免在 input 与 structured 重复保存。
                 structured: {
-                  ...(formattedContent === undefined ? event.data.structured : Object.fromEntries(Object.entries(event.data.structured).filter(([key]) => key !== "formattedContent"))),
+                  ...Object.fromEntries(Object.entries(event.data.structured).filter(([key]) => !(key === "formattedContent" && formattedContent !== undefined) && !(key === "syncInput" && syncInput !== undefined))),
                   // 终态继续保留本轮reviewID/导航/裁决，不由工具返回值抹去或替换审批事实。
                   ...(match.state.structured.autoReview === undefined ? {} : { autoReview: match.state.structured.autoReview }),
                 },
