@@ -763,6 +763,9 @@ goalTests.effect("continues native goals within the turn limit, preserves queue 
     expect(requests).toHaveLength(4)
     expect(userTexts(requests[1]!)).toEqual(["Start working", "Queued input"])
     expect(userTexts(requests[2]!).at(-1)).toContain("<session-goal-continuation>")
+    // queue 先提升；其后两个无证据完成才切策略，不能按 provider step 提前计轮。
+    expect(userTexts(requests[2]!).at(-1)).not.toContain("<strategy-switch")
+    expect(userTexts(requests[3]!).at(-1)).toContain('mode="breadth-first-replan"')
     expect(requests[0]!.tools.map(tool => tool.name)).toContain("goal")
     // 检查真实模型签名，防止仅改 executor 却仍广告可选 mark 的旧合同。
     expect(requests[0]!.tools.find(tool => tool.name === "goal")?.inputSchema).toMatchObject({ required: ["operate"] })
@@ -909,6 +912,9 @@ goalTests.effect("gates native terminal error continuation and preserves typed a
         if (enabled) {
           // 新回合只携带标准Goal提示，不把错误内容变成新的用户指令。
           expect(userTexts(requests[1]!).at(-1)).toContain("<session-goal-continuation>")
+          // 每次 drain 独立起步；获准错误也与正常完成共用原有进度门控。
+          expect(userTexts(requests[1]!).at(-1)).not.toContain("<strategy-switch")
+          expect(userTexts(requests[2]!).at(-1)).toContain('mode="breadth-first-replan"')
           expect(userTexts(requests[1]!).at(-1)).not.toContain("Provider unavailable")
         }
       }

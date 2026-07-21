@@ -332,6 +332,15 @@ describe("SessionProjector", () => {
         expect((yield* SessionHistory.load(db, sessionID)).find(message => message.id === assistantMessageID)).toEqual(expected)
       }
       // 新提升的输入和助手不能认领旧轮结果；无快照请求仍然保留工具流归因。
+      // 技术提醒不创建 Goal turn，当前 turn 的冷助手也必须按真实选集恢复。
+      yield* events.publish(SessionEvent.Synthetic, { sessionID, messageID: SessionMessage.ID.make("msg_progress_reminder"), timestamp: created, text: "Technical plan reminder" })
+      expect((yield* SessionHistory.goalTurn(db, sessionID))?.id).toBe(first.id)
+      yield* Database.withSync({ db, sync: db.sync }, sync => {
+        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID }).type).toBe("frozen")
+      })
+      expect(yield* SessionHistory.goalTurnMessages(db, sessionID)).toEqual([expected])
+      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get())?.cold_ref).toBeNull()
+      expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
       const later = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_diff_later"), sessionID,
         prompt: Prompt.make({ text: "edit later" }), delivery: "steer" })
       yield* SessionInput.promoteSteers(db, events, sessionID, later.admittedSeq)

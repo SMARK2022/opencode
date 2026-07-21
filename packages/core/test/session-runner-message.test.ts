@@ -9,10 +9,53 @@ import { toLLMMessages } from "@opencode-ai/core/session/runner/to-llm-message"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { DateTime } from "effect"
 import { ReadPresentation } from "@opencode-ai/core/tool/read-presentation"
+import { SessionGoalProgress } from "@opencode-ai/core/session/goal-progress"
 
 const created = DateTime.makeUnsafe(0)
 const id = (value: string) => SessionMessage.ID.make(`msg_${value}`)
 const model = Model.make({ id: "model", provider: "provider", route: OpenAIChat.route })
+
+test("classifies Native goal progress from structured producer receipts", () => {
+  const ledger = SessionGoalProgress.createGoalProgressLedger()
+  const gate = { noProgressTurns: 0, replanRequired: false }
+  const signal = (messages: readonly SessionMessage.Message[]) => SessionGoalProgress.absorbGoalTurnEvidence(SessionGoalProgress.nativeEvidence(messages), "/project", ledger)
+  const tool = (value: string, name: string, input: Record<string, unknown>, structured: Record<string, unknown>, output = "stable") => SessionMessage.Assistant.make({
+    id: id(value), type: "assistant", agent: "build",
+    model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
+    content: [SessionMessage.AssistantTool.make({
+      type: "tool", id: value, name, time: { created, completed: created },
+      state: SessionMessage.ToolStateCompleted.make({
+        status: "completed", input, structured, content: [{ type: "text", text: output }],
+      }),
+    })],
+    time: { created, completed: created },
+  })
+  SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
+  SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
+  expect(gate).toEqual({ noProgressTurns: 2, replanRequired: true })
+  const read = { canonicalPath: "/project/receipt.txt", size: 3, modifiedMs: 1, fp: "head-v1", start: 1, end: 1, stub: false }
+  const receipt = tool("read", "read", { path: "receipt.txt" }, { content: "one", encoding: "utf8", read })
+  const first = signal([receipt])
+  expect(first).toEqual({ exploration: true, advancement: false })
+  SessionGoalProgress.updateGoalProgressGate(gate, first)
+  expect(gate).toEqual({ noProgressTurns: 0, replanRequired: true })
+  expect(signal([receipt])).toEqual({ exploration: false, advancement: false })
+  expect(signal([tool("changed", "read", { path: "receipt.txt" }, { content: "one", encoding: "utf8", read: { ...read, fp: "head-v2" } })])).toEqual({ exploration: true, advancement: false })
+  // 同一正文也须识别版本改变；缺指纹或 stub 都不能制造新的探索。
+  for (const invalid of [{ ...read, fp: undefined }, { ...read, fp: "" }, { ...read, stub: true }]) {
+    expect(signal([tool("invalid", "read", { path: "receipt.txt" }, { content: "one", encoding: "utf8", read: invalid })])).toEqual({ exploration: false, advancement: false })
+  }
+  const command = (hasErrors: boolean) => tool("verify", "bash", { command: "bun test" }, { exit: 0, hasErrors })
+  expect(signal([command(true)])).toEqual({ exploration: true, advancement: false })
+  const changed = signal([command(false)])
+  expect(changed).toEqual({ exploration: false, advancement: true })
+  SessionGoalProgress.updateGoalProgressGate(gate, changed)
+  expect(gate).toEqual({ noProgressTurns: 0, replanRequired: false })
+  const completed = tool("todo", "todowrite", { todos: [{ content: "inspect", priority: "high", status: "completed" }] }, {})
+  expect(signal([completed])).toEqual({ exploration: false, advancement: true })
+  expect(signal([completed])).toEqual({ exploration: false, advancement: false })
+  expect(signal([tool("noop", "write", { path: "receipt.txt" }, { diff: "" })])).toEqual({ exploration: false, advancement: false })
+})
 
 describe("toLLMMessages", () => {
   test("deduplicates complete Read versions only within the supplied visible history", () => {
