@@ -135,20 +135,34 @@ describe("tool parameters", () => {
   })
 
   describe("edit", () => {
-    test("accepts all four fields", () => {
-      expect(parse(Edit, { filePath: "/a", oldString: "x", newString: "y", replaceAll: true })).toEqual({
+    test("accepts filePath + edits array", () => {
+      expect(
+        parse(Edit, {
+          filePath: "/a",
+          edits: [{ oldString: "x", newString: "y", replaceAll: true }],
+        }),
+      ).toEqual({
         filePath: "/a",
-        oldString: "x",
-        newString: "y",
-        replaceAll: true,
+        edits: [{ oldString: "x", newString: "y", replaceAll: true }],
       })
     })
-    test("replaceAll is optional", () => {
-      const parsed = parse(Edit, { filePath: "/a", oldString: "x", newString: "y" })
-      expect(parsed.replaceAll).toBeUndefined()
+    test("replaceAll on edit item is optional", () => {
+      const parsed = parse(Edit, { filePath: "/a", edits: [{ oldString: "x", newString: "y" }] })
+      expect(parsed.edits[0].replaceAll).toBeUndefined()
     })
     test("rejects missing filePath", () => {
-      expect(accepts(Edit, { oldString: "x", newString: "y" })).toBe(false)
+      expect(accepts(Edit, { edits: [{ oldString: "x", newString: "y" }] })).toBe(false)
+    })
+    test("rejects missing edits", () => {
+      expect(accepts(Edit, { filePath: "/a" })).toBe(false)
+    })
+    test("wire schema has filePath+edits only", () => {
+      const schema = toJsonSchema(Edit)
+      expect(schema.required?.slice().sort()).toEqual(["edits", "filePath"])
+      expect(schema.properties).toHaveProperty("edits")
+      expect(schema.properties).not.toHaveProperty("oldString")
+      expect(schema.properties).not.toHaveProperty("newString")
+      expect(schema.properties).not.toHaveProperty("replaceAll")
     })
   })
 

@@ -1,10 +1,16 @@
-Performs exact string replacements in files. 
+Performs string replacements in files. Supports one or more disjoint edits in a single call.
 
 Usage:
-- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. 
+- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
 - When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + colon + space (e.g., `1: `). Everything after that space is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.
 - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
-- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
-- The edit will FAIL if the exact literal `oldString` is not found. Whitespace, indentation, escaping, anchors, and line endings are not normalized for replacement success.
-- The edit will FAIL if `oldString` is found multiple times in the file with an error "Found multiple matches for oldString. Provide more surrounding context to make the match unique." Either provide a larger string with more surrounding context to make it unique or use `replaceAll` to change every instance of `oldString`.
-- Use `replaceAll` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.
+- Prefer one call with multiple entries in `edits[]` for disjoint regions in the same file instead of multiple edit calls.
+- Each `edits[].oldString` is matched against the original file snapshot, not after earlier edits in the same call. Do not emit overlapping or nested edits; merge nearby changes into one edit.
+- Keep each `oldString` as small as possible while still unique. Do not pad with large unchanged regions.
+- Matching tries exact unique literal first, then a conservative normalized form (trailing line whitespace and common unicode quote/dash/space variants). Uniqueness and `replaceAll` both count under that same normalized-aware domain (e.g. ASCII hyphen and en-dash siblings count as multiples).
+- Indent/tab differences and escape artifacts still fail; re-read and copy exact text.
+- The edit will FAIL if `oldString` is found multiple times without `replaceAll`. Provide more surrounding context to make it unique or set `replaceAll` on that edit item.
+- Use `replaceAll` on an edit item to rename a string across the file.
+- Create/overwrite: single edit with empty `oldString` only (raw empty string). Whitespace-only oldString is not create and will fail.
+- If both `edits` and legacy top-level `oldString`/`newString` are sent, `edits` wins when non-empty.
+- Successful normalized matches may rewrite the recorded `oldString` in tool history to the actual file text that was replaced.

@@ -3182,7 +3182,12 @@ function Edit(props: ToolProps<typeof EditTool>) {
       </Match>
       <Match when={true}>
         <InlineTool icon="←" pending={pending()} complete={props.input.filePath} part={props.part}>
-          Edit {pathFormatter.format(props.input.filePath)} {input({ replaceAll: props.input.replaceAll })}
+          Edit {pathFormatter.format(props.input.filePath)}{" "}
+          {input({
+            replaceAll: Array.isArray(props.input.edits)
+              ? props.input.edits.some((e) => e?.replaceAll === true)
+              : false,
+          })}
         </InlineTool>
       </Match>
     </Switch>

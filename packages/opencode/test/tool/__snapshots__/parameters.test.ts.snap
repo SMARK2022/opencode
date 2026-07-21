@@ -69,27 +69,39 @@ exports[`tool parameters JSON Schema (wire shape) edit 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "edits": {
+      "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+      "items": {
+        "properties": {
+          "newString": {
+            "description": "Replacement text for this targeted edit.",
+            "type": "string",
+          },
+          "oldString": {
+            "description": "Exact text for one targeted replacement. It must be unique in the original file (unless replaceAll) and must not overlap other edits[].oldString in the same call.",
+            "type": "string",
+          },
+          "replaceAll": {
+            "description": "Replace all occurrences of oldString for this edit (default false)",
+            "type": "boolean",
+          },
+        },
+        "required": [
+          "oldString",
+          "newString",
+        ],
+        "type": "object",
+      },
+      "type": "array",
+    },
     "filePath": {
       "description": "The absolute path to the file to modify",
       "type": "string",
     },
-    "newString": {
-      "description": "The text to replace it with (must be different from oldString)",
-      "type": "string",
-    },
-    "oldString": {
-      "description": "The text to replace",
-      "type": "string",
-    },
-    "replaceAll": {
-      "description": "Replace all occurrences of oldString (default false)",
-      "type": "boolean",
-    },
   },
   "required": [
     "filePath",
-    "oldString",
-    "newString",
+    "edits",
   ],
   "type": "object",
 }

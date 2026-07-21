@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn } from "bun:test"
+import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
@@ -42,6 +42,29 @@ const layer = Layer.mergeAll(
 )
 
 const it = testEffect(layer)
+
+// mock format：文件末尾追加换行，用于 create+format 的 _syncInput 真值回写
+const mockFormatLayer = Layer.succeed(Format.Service, {
+  init: () => Effect.void,
+  status: () => Effect.succeed([]),
+  file: (filepath: string) =>
+    Effect.promise(async () => {
+      const content = await fs.readFile(filepath, "utf-8")
+      await fs.writeFile(filepath, content + "\n")
+      return true
+    }),
+})
+
+const itFormatted = testEffect(
+  Layer.mergeAll(
+    LSP.defaultLayer,
+    AppFileSystem.defaultLayer,
+    Bus.layer,
+    mockFormatLayer,
+    Truncate.defaultLayer,
+    Agent.defaultLayer,
+  ),
+)
 
 const init = Effect.fn("EditToolTest.init")(function* () {
   const info = yield* EditTool
@@ -96,19 +119,31 @@ function ctxWithPriorRead(filePath: string): Tool.Context {
   }
 }
 
-const run = Effect.fn("EditToolTest.run")(function* (
-  args: Tool.InferParameters<typeof EditTool>,
-  next?: Tool.Context,
-) {
+// 测试入参允许 legacy 顶层字段；execute 前由 prepareArguments 折成 edits[]。
+type EditTestArgs =
+  | Tool.InferParameters<typeof EditTool>
+  | {
+      filePath: string
+      oldString: string
+      newString: string
+      replaceAll?: boolean
+    }
+
+function isCreateArgs(args: EditTestArgs) {
+  if ("edits" in args && Array.isArray(args.edits) && args.edits.length > 0) {
+    return args.edits.length === 1 && args.edits[0]?.oldString === ""
+  }
+  return "oldString" in args && args.oldString === ""
+}
+
+const run = Effect.fn("EditToolTest.run")(function* (args: EditTestArgs, next?: Tool.Context) {
   const tool = yield* init()
-  // [local-smark] 当未指定 next 且 oldString 非空时，自动注入 prior read context，
-  // 模拟生产环境中 edit 前已 read 文件的正常流程。
-  // 显式传入 next 的测试（如 blind edit 检查测试）使用传入的 context。
-  const context = next ?? (args.oldString !== "" ? ctxWithPriorRead(args.filePath) : ctx)
-  return yield* tool.execute(args, context)
+  // [local-smark] 非 create 时注入 prior read；兼容 edits[] 与 legacy 顶层 oldString。
+  const context = next ?? (!isCreateArgs(args) ? ctxWithPriorRead(args.filePath) : ctx)
+  return yield* tool.execute(args as Tool.InferParameters<typeof EditTool>, context)
 })
 
-const fail = Effect.fn("EditToolTest.fail")(function* (args: Tool.InferParameters<typeof EditTool>) {
+const fail = Effect.fn("EditToolTest.fail")(function* (args: EditTestArgs) {
   const exit = yield* run(args).pipe(Effect.exit)
   if (Exit.isFailure(exit)) {
     const err = Cause.squash(exit.cause)
@@ -385,7 +420,9 @@ describe("tool.edit", () => {
 
         // 显式传入 ctx（无 prior read）使 blind edit 检查生效
         const tool = yield* init()
-        const exit = yield* tool.execute({ filePath: filepath, oldString: "content", newString: "modified" }, ctx).pipe(Effect.exit)
+        const exit = yield* tool
+          .execute({ filePath: filepath, edits: [{ oldString: "content", newString: "modified" }] }, ctx)
+          .pipe(Effect.exit)
         expect(Exit.isFailure(exit)).toBe(true)
         if (Exit.isFailure(exit)) {
           const err = Cause.squash(exit.cause) as Error
@@ -827,5 +864,234 @@ describe("tool.edit", () => {
         }
       }),
     )
+  })
+
+  /**
+   * multi-edit / 归一化 / 统一主路径行为片：
+   * - 单条与多条 edits 必须共用 applyEdits，禁止按条数分叉算法
+   * - 期望文件内容用手写字面量，不反向调用 applyEdits 生成
+   * - 失败路径必须在写盘前拒绝（文件字节不变）
+   */
+  describe("multi-edit and normalized match", () => {
+    // 一次调用两个不相交区域：证明 batch 快照 + reverse apply 可落地多块
+    it.instance("applies two disjoint edits in one call", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "multi.txt")
+        yield* put(filepath, "alpha\nbeta\ngamma\n")
+        yield* run({
+          filePath: filepath,
+          edits: [
+            { oldString: "alpha", newString: "A" },
+            { oldString: "gamma", newString: "G" },
+          ],
+        })
+        expect(yield* load(filepath)).toBe("A\nbeta\nG\n")
+      }),
+    )
+
+    // 若顺序应用会得到 baz；快照匹配必须拒绝第二条（bar 不在原文）。
+    it.instance("rejects sequential-dependent edits against original snapshot", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "snap.txt")
+        yield* put(filepath, "foo")
+        const error = yield* fail({
+          filePath: filepath,
+          edits: [
+            { oldString: "foo", newString: "bar" },
+            { oldString: "bar", newString: "baz" },
+          ],
+        })
+        expect(error.message).toMatch(/Could not find|bar/)
+        expect(yield* load(filepath)).toBe("foo")
+      }),
+    )
+
+    // sole domain：ASCII 连字符与 en-dash 在归一化后合并计数，无 replaceAll 必须歧义失败
+    it.instance("rejects hybrid hyphen uniqueness without replaceAll", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "hybrid.txt")
+        yield* put(filepath, "x-y and x\u2013y")
+        const error = yield* fail({
+          filePath: filepath,
+          edits: [{ oldString: "x-y", newString: "z" }],
+        })
+        expect(error.message).toContain("multiple")
+        expect(yield* load(filepath)).toBe("x-y and x\u2013y")
+      }),
+    )
+
+    // INV-16：归一化成功后 _syncInput.oldString 必须是原文弯引号 needle，不是模型 ASCII
+    it.instance("normalized smart-quote match rewrites syncInput oldString", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "quote.txt")
+        yield* put(filepath, "say \u201Chello\u201D end")
+        const result = yield* run({
+          filePath: filepath,
+          edits: [{ oldString: '"hello"', newString: '"hi"' }],
+        })
+        expect(yield* load(filepath)).toBe('say "hi" end')
+        const sync = (result.metadata as { _syncInput?: { edits: Array<{ oldString: string }> } })._syncInput
+        expect(sync?.edits[0]?.oldString).toBe("\u201Chello\u201D")
+      }),
+    )
+
+    // 区间重叠在写盘前拒绝，防止部分成功污染文件
+    it.instance("overlapping edits reject without write", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "overlap.txt")
+        yield* put(filepath, "abcdef")
+        const error = yield* fail({
+          filePath: filepath,
+          edits: [
+            { oldString: "abcd", newString: "XXXX" },
+            { oldString: "cdef", newString: "YYYY" },
+          ],
+        })
+        expect(error.message).toContain("overlap")
+        expect(yield* load(filepath)).toBe("abcdef")
+      }),
+    )
+
+    // INV-04：归一化触碰行 rewrite 时，未触碰行的行尾空白必须保留
+    it.instance("preserves trailing spaces on untouched lines under normalized match", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "preserve.txt")
+        // 第一行仅空白漂移无关；第二行含弯引号待替换
+        yield* put(filepath, "pad  \nsay \u201Chello\u201D\n")
+        yield* run({
+          filePath: filepath,
+          edits: [{ oldString: '"hello"', newString: '"hi"' }],
+        })
+        expect(yield* load(filepath)).toBe('pad  \nsay "hi"\n')
+      }),
+    )
+
+    // R9 slice 13：触碰行行尾空白 — preserve 落盘会 strip，continuous actualOld 替换不会；
+    // 必须同时锁定磁盘字节与 _syncInput mid-line needle，防止把 continuous 当 apply oracle。
+    it.instance("normalized mid-line match: preserve disk drops touched trailing spaces; sync old is continuous needle", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "joint-preserve.txt")
+        // 同一行：弯引号 needle + 行尾两空格
+        yield* put(filepath, "code(\u201Chello\u201D);  \n")
+        const result = yield* run({
+          filePath: filepath,
+          edits: [{ oldString: '"hello"', newString: '"hi"' }],
+        })
+        // preserve：触碰整行从归一化基重写 → 行尾空白消失
+        expect(yield* load(filepath)).toBe('code("hi");\n')
+        // 若误用 continuous replace(actualOld) 作 apply，会得到 'code("hi");  \n'（保留行尾空格）
+        expect(yield* load(filepath)).not.toBe('code("hi");  \n')
+        const sync = (result.metadata as { _syncInput?: { edits: Array<{ oldString: string }> } })._syncInput
+        // 历史 needle 仍是 mid-line 弯引号片段，不是整行
+        expect(sync?.edits[0]?.oldString).toBe("\u201Chello\u201D")
+        expect(sync?.edits[0]?.oldString).not.toContain("code(")
+      }),
+    )
+
+    // INV-07：hybrid 连字符在 replaceAll 下应两处都替换（elevation + sole domain 展开）
+    it.instance("replaceAll elevates hybrid hyphen siblings", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "hybrid-all.txt")
+        yield* put(filepath, "x-y and x\u2013y")
+        yield* run({
+          filePath: filepath,
+          edits: [{ oldString: "x-y", newString: "z", replaceAll: true }],
+        })
+        expect(yield* load(filepath)).toBe("z and z")
+      }),
+    )
+
+    // INV-14：空白-only oldString 归一化后为空 needle，必须拒绝且不写盘
+    it.instance("rejects whitespace-only oldString after normalization", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "empty-norm.txt")
+        yield* put(filepath, "keep me")
+        const error = yield* fail({
+          filePath: filepath,
+          edits: [{ oldString: "   ", newString: "x" }],
+        })
+        expect(error.message).toMatch(/empty after normalization|empty/)
+        expect(yield* load(filepath)).toBe("keep me")
+      }),
+    )
+
+    it.instance("rejects tab-only oldString after normalization", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "tab-norm.txt")
+        yield* put(filepath, "keep me")
+        const error = yield* fail({
+          filePath: filepath,
+          edits: [{ oldString: "\t", newString: "x" }],
+        })
+        expect(error.message).toMatch(/empty after normalization|empty/)
+        expect(yield* load(filepath)).toBe("keep me")
+      }),
+    )
+
+    // INV-16 create+format：format 改写落盘后 _syncInput.newString 必须是最终磁盘内容
+    itFormatted.instance("create+format sets _syncInput newString to final disk text", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "created.txt")
+        const result = yield* run({
+          filePath: filepath,
+          edits: [{ oldString: "", newString: "hello" }],
+        })
+        expect(yield* load(filepath)).toBe("hello\n")
+        const sync = (result.metadata as { _syncInput?: { edits: Array<{ newString: string }> } })._syncInput
+        expect(sync?.edits[0]?.newString).toBe("hello\n")
+      }),
+    )
+  })
+})
+
+// INV-16 processor 参数面替换：legacy 入参 + _syncInput → 仅 { filePath, edits }
+import { resolveCompletedToolInput, stripToolTruthMetadata } from "../../src/session/processor"
+
+describe("tool input truth sync (processor contract)", () => {
+  test("legacy top-level fields dropped when _syncInput present", () => {
+    const prev = {
+      filePath: "/a.ts",
+      oldString: '"hello"',
+      newString: '"hi"',
+      replaceAll: false,
+    }
+    const next = resolveCompletedToolInput(prev, {
+      _syncInput: {
+        filePath: "/a.ts",
+        edits: [{ oldString: "\u201Chello\u201D", newString: '"hi"' }],
+      },
+    })
+    expect(next).toEqual({
+      filePath: "/a.ts",
+      edits: [{ oldString: "\u201Chello\u201D", newString: '"hi"' }],
+    })
+    expect("oldString" in next).toBe(false)
+    expect("newString" in next).toBe(false)
+  })
+
+  test("write _formattedContent still only rewrites content", () => {
+    const prev = { filePath: "/b.ts", content: "x" }
+    const next = resolveCompletedToolInput(prev, { _formattedContent: "x\n" })
+    expect(next).toEqual({ filePath: "/b.ts", content: "x\n" })
+  })
+
+  test("strip removes temporary truth keys", () => {
+    const stripped = stripToolTruthMetadata({
+      diff: "d",
+      _syncInput: { edits: [] },
+      _formattedContent: "x",
+    })
+    expect(stripped).toEqual({ diff: "d" })
   })
 })

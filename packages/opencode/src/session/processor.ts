@@ -39,6 +39,37 @@ const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
 export const TOOL_ABORTED_ERROR = "Tool execution aborted"
 const log = Log.create({ service: "session.processor" })
 
+/**
+ * 工具完成时的 input 真值回写（INV-16 / write format 同构）。
+ * - `_syncInput`：整参数面替换为 { filePath, edits }，丢弃 legacy 顶层替换字段
+ * - `_formattedContent`：仅覆盖 content（write 旧语义）
+ * 有 _syncInput 时优先，不做浅合并旧 input。
+ */
+export function resolveCompletedToolInput(
+  prev: Record<string, unknown>,
+  metadata: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const meta = metadata ?? {}
+  const sync = meta._syncInput
+  if (sync && typeof sync === "object" && Array.isArray((sync as { edits?: unknown }).edits)) {
+    const body = sync as { filePath?: string; edits: unknown[] }
+    return {
+      filePath: typeof body.filePath === "string" ? body.filePath : prev.filePath,
+      edits: body.edits,
+    }
+  }
+  if (typeof meta._formattedContent === "string") {
+    return { ...prev, content: meta._formattedContent }
+  }
+  return prev
+}
+
+/** 持久化 metadata 前去掉真值临时字段，避免进 DB / event。 */
+export function stripToolTruthMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
+  const { _formattedContent: _f, _syncInput: _s, ...rest } = metadata ?? {}
+  return rest
+}
+
 // [local-smark] elapsedMs 由 server 在终态时写入，覆盖工具 metadata 中的同名键，
 // 防止外部伪造。只有 Number.isFinite 且非负的值才写入；旧记录无此字段则不追加
 export function interruptedToolMetadata(metadata: Record<string, unknown> | undefined, elapsedMs?: number): Record<string, unknown> {
@@ -272,18 +303,14 @@ export const layer = Layer.effect(
                 ...match.part,
                 state: {
                   status: "completed",
-                  // [local-smark] 当工具返回 _formattedContent 时（write 被 auto-format
-                  // 改变了内容），直接用格式化后的内容覆盖 state.input.content。
-                  // 这样 DB 中持久化的 input 就是磁盘上的实际内容，后续上下文重放时
-                  // 模型看到的内容与磁盘一致，避免 edit 基于过期内容匹配 oldString 失败。
-                  // 原始 input 不保留——format 后的内容才是真实落盘内容。
-                  input: output.metadata?._formattedContent
-                    ? { ...match.part.state.input, content: output.metadata._formattedContent }
-                    : match.part.state.input,
+                  input: resolveCompletedToolInput(
+                    match.part.state.input as Record<string, unknown>,
+                    output.metadata as Record<string, unknown> | undefined,
+                  ),
                   output: output.output,
-                  // 从持久化 metadata 中 strip 掉 _formattedContent，避免冗余存储
+                  // strip 临时真值字段，避免进持久化 metadata
                   metadata: (() => {
-                    const { _formattedContent, ...rest } = output.metadata ?? {}
+                    const rest = stripToolTruthMetadata(output.metadata as Record<string, unknown> | undefined)
                     return match.part.state.metadata?.autoReview
                       ? { ...rest, autoReview: match.part.state.metadata.autoReview }
                       : rest
@@ -546,9 +573,8 @@ export const layer = Layer.effect(
             }
             // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
             if (flags.experimentalEventSystem) {
-              // [local-smark] strip _formattedContent 与持久化保持一致，
-              // 避免 event 消费方看到临时传递字段
-              const { _formattedContent: _strip, ...eventMetadata } = output.metadata ?? {}
+              // strip 真值临时字段，与持久化 metadata 一致
+              const eventMetadata = stripToolTruthMetadata(output.metadata as Record<string, unknown> | undefined)
               yield* events.publish(SessionEvent.Tool.Success, {
                 sessionID: ctx.sessionID,
                 callID: value.toolCallId,

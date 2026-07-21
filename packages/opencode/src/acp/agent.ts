@@ -1669,13 +1669,25 @@ function completedToolContent(part: ToolPart, kind: ToolKind): ToolCallContent[]
   if (kind === "edit") {
     const input = part.state.input
     const filePath = typeof input["filePath"] === "string" ? input["filePath"] : ""
-    const oldText = typeof input["oldString"] === "string" ? input["oldString"] : ""
-    const newText =
-      typeof input["newString"] === "string"
-        ? input["newString"]
-        : typeof input["content"] === "string"
-          ? input["content"]
+    // ACP diff 展示：优先 edits[0]（新 schema / _syncInput 回写后）；
+    // 历史会话仍可能只有顶层 oldString/newString，需双形态兼容。
+    // 完整 multi-edit 统一 diff 非本任务目标，空 multi 体可接受。
+    const edits = Array.isArray(input["edits"]) ? input["edits"] : []
+    const first = edits[0] && typeof edits[0] === "object" ? (edits[0] as Record<string, unknown>) : undefined
+    const oldText =
+      typeof first?.["oldString"] === "string"
+        ? first["oldString"]
+        : typeof input["oldString"] === "string"
+          ? input["oldString"]
           : ""
+    const newText =
+      typeof first?.["newString"] === "string"
+        ? first["newString"]
+        : typeof input["newString"] === "string"
+          ? input["newString"]
+          : typeof input["content"] === "string"
+            ? input["content"]
+            : ""
     content.push({
       type: "diff",
       path: filePath,

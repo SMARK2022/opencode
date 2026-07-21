@@ -1,8 +1,3 @@
-// the approaches in this edit tool are sourced from
-// https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-23-25.ts
-// https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/utils/editCorrector.ts
-// https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-26-25.ts
-
 import * as path from "path"
 import { Effect, Schema, Semaphore } from "effect"
 import * as Tool from "./tool"
@@ -20,6 +15,15 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import * as Bom from "@/util/bom"
 import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
 import { closestWindow } from "@/patch/match"
+import { applyEdits, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
+
+/**
+ * 兼容导出：单点替换 = applyEdits 单元素，保证测试与外部调用仍见 replace API。
+ * 禁止在此重实现第二套匹配算法。
+ */
+export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
+  return applyExactReplace(content, oldString, newString, replaceAll)
+}
 
 const locks = new Map<string, Semaphore.Semaphore>()
 
@@ -33,16 +37,68 @@ function lock(filePath: string) {
   return next
 }
 
-export const Parameters = Schema.Struct({
-  filePath: Schema.String.annotate({ description: "The absolute path to the file to modify" }),
-  oldString: Schema.String.annotate({ description: "The text to replace" }),
-  newString: Schema.String.annotate({
-    description: "The text to replace it with (must be different from oldString)",
+const EditItem = Schema.Struct({
+  oldString: Schema.String.annotate({
+    description:
+      "Exact text for one targeted replacement. It must be unique in the original file (unless replaceAll) and must not overlap other edits[].oldString in the same call.",
   }),
+  newString: Schema.String.annotate({ description: "Replacement text for this targeted edit." }),
   replaceAll: Schema.optional(Schema.Boolean).annotate({
-    description: "Replace all occurrences of oldString (default false)",
+    description: "Replace all occurrences of oldString for this edit (default false)",
   }),
 })
+
+export const Parameters = Schema.Struct({
+  filePath: Schema.String.annotate({ description: "The absolute path to the file to modify" }),
+  edits: Schema.mutable(Schema.Array(EditItem)).annotate({
+    description:
+      "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+  }),
+})
+
+export type Parameters = Schema.Schema.Type<typeof Parameters>
+
+/**
+ * decode 前折叠 legacy 入参（Pi #2639 教训）：
+ * - wire JSON Schema 只广告 filePath + edits[]，避免模型混用双形态
+ * - 若 edits 缺失且存在顶层 oldString/newString，折成单元素 edits
+ * - 若 edits 已非空，丢弃顶层字段（edits 权威，不 append）
+ * - edits 有时被序列化为 JSON 字符串，尽量 parse 成数组
+ */
+export function prepareEditArguments(input: unknown): unknown {
+  if (!input || typeof input !== "object") return input
+  const args = { ...(input as Record<string, unknown>) }
+
+  if (typeof args.edits === "string") {
+    try {
+      const parsed = JSON.parse(args.edits)
+      if (Array.isArray(parsed)) args.edits = parsed
+    } catch {
+      // 非法 JSON 留给 Schema 拒绝，不在此处吞掉错误
+    }
+  }
+
+  const hasEdits = Array.isArray(args.edits) && args.edits.length > 0
+  if (!hasEdits && typeof args.oldString === "string" && typeof args.newString === "string") {
+    args.edits = [
+      {
+        oldString: args.oldString,
+        newString: args.newString,
+        ...(args.replaceAll === true ? { replaceAll: true } : {}),
+      },
+    ]
+  }
+
+  // edits 权威：丢弃顶层替换字段，避免双形态污染 decode 与历史回放
+  delete args.oldString
+  delete args.newString
+  delete args.replaceAll
+  return args
+}
+
+function isCreate(edits: EditReplacement[]) {
+  return edits.length === 1 && edits[0].oldString === ""
+}
 
 export const EditTool = Tool.define(
   "edit",
@@ -55,44 +111,55 @@ export const EditTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
-      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
+      prepareArguments: prepareEditArguments,
+      execute: (params: Parameters, ctx: Tool.Context) =>
         Effect.gen(function* () {
           if (!params.filePath) {
             throw new Error("filePath is required")
           }
-
-          if (params.oldString === params.newString) {
-            throw new Error("No changes to apply: oldString and newString are identical.")
+          if (!Array.isArray(params.edits) || params.edits.length === 0) {
+            throw new Error("edits must contain at least one replacement.")
           }
 
+          const edits = params.edits as EditReplacement[]
           const instance = yield* InstanceState.context
           const filePath = path.isAbsolute(params.filePath)
             ? params.filePath
             : path.join(instance.directory, params.filePath)
 
-          // [local-smark] blind edit 检查：当 oldString 非空（非创建文件模式）时，
-          // 检查文件是否在当前 session 的消息历史中被 read/write/edit 接触过。
-          // 未接触过的文件可能有过期内容（auto-format、外部修改），
-          // oldString 基于假设会导致匹配失败。
-          // 用 path.resolve 规范化路径比较，避免正斜杠/反斜杠差异导致误拦截。
-          // Windows 下 NTFS 大小写不敏感，需 toLowerCase；Linux/macOS 大小写敏感，不应 lower。
-          // 遵循 read.ts canonicalReadPath 的同一平台分支范式。
-          // apply_patch 的 input 是 patchText 而非 filePath，无法简单匹配，不纳入检查。
-          if (params.oldString !== "") {
+          // INV-06：multi-edit 中禁止空 oldString；仅 length-1 空串表示 create/overwrite。
+          // 空白-only 的 oldString 不是 create，会在 applyEdits 的归一化空 needle 检查处失败。
+          if (edits.some((e, i) => e.oldString === "" && !(edits.length === 1 && i === 0))) {
+            throw new Error("edits[].oldString must not be empty except for a single create/overwrite edit.")
+          }
+
+          for (const edit of edits) {
+            if (edit.oldString === edit.newString && edit.oldString !== "") {
+              throw new Error("No changes to apply: oldString and newString are identical.")
+            }
+          }
+          if (isCreate(edits) && edits[0].oldString === edits[0].newString) {
+            throw new Error("No changes to apply: oldString and newString are identical.")
+          }
+
+          // blind edit 门闩：非 create 时要求 session 内已 read/write/edit 过该路径，
+          // 防止模型基于过期假设构造 oldString 导致误匹配或静默失败。
+          if (!isCreate(edits)) {
             const resolveForCompare = (p: string) => {
               const r = path.resolve(p)
               return process.platform === "win32" ? r.toLowerCase() : r
             }
             const resolvedFilePath = resolveForCompare(filePath)
-            const hasTouched = ctx.messages.some((msg) =>
-              msg.info.role === "assistant" &&
-              msg.parts.some((part) => {
-                if (part.type !== "tool" || part.state.status !== "completed") return false
-                if (part.tool !== "read" && part.tool !== "write" && part.tool !== "edit") return false
-                const input = part.state.input as Record<string, unknown> | undefined
-                if (!input || typeof input.filePath !== "string") return false
-                return resolveForCompare(input.filePath) === resolvedFilePath
-              }),
+            const hasTouched = ctx.messages.some(
+              (msg) =>
+                msg.info.role === "assistant" &&
+                msg.parts.some((part) => {
+                  if (part.type !== "tool" || part.state.status !== "completed") return false
+                  if (part.tool !== "read" && part.tool !== "write" && part.tool !== "edit") return false
+                  const input = part.state.input as Record<string, unknown> | undefined
+                  if (!input || typeof input.filePath !== "string") return false
+                  return resolveForCompare(input.filePath) === resolvedFilePath
+                }),
             )
             if (!hasTouched) {
               throw new Error(
@@ -102,32 +169,35 @@ export const EditTool = Tool.define(
           }
 
           yield* assertExternalDirectoryEffect(ctx, filePath, {
-            // Include the intended edit operation so Auto reviewer decisions are
-            // based on tool evidence, not just the external path glob.
             metadata: {
               action_kind: "tool",
               tool: "edit",
-              operation: params.oldString === "" ? "create" : "edit",
-              oldString: params.oldString,
-              newString: params.newString,
-              replaceAll: params.replaceAll === true,
+              operation: isCreate(edits) ? "create" : "edit",
+              edits,
             },
           })
 
           let diff = ""
           let contentOld = ""
           let contentNew = ""
+          let syncInput: { filePath: string; edits: EditReplacement[] } | undefined
+
           yield* lock(filePath).withPermits(1)(
             Effect.gen(function* () {
-              if (params.oldString === "") {
+              if (isCreate(edits)) {
                 const existed = yield* afs.existsSafe(filePath)
                 const source = existed ? yield* Bom.readFile(afs, filePath) : { bom: false, text: "" }
-                const next = Bom.split(params.newString)
+                const next = Bom.split(edits[0].newString)
                 const desiredBom = source.bom || next.bom
                 contentOld = source.text
                 contentNew = next.text
                 diff = trimDiff(
-                  createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
+                  createTwoFilesPatch(
+                    filePath,
+                    filePath,
+                    normalizeLineEndings(contentOld),
+                    normalizeLineEndings(contentNew),
+                  ),
                 )
                 yield* ctx.ask({
                   permission: "edit",
@@ -141,6 +211,13 @@ export const EditTool = Tool.define(
                 yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
                 if (yield* format.file(filePath)) {
                   contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+                }
+                // create+format：若落盘与写入不同，历史 newString 改为最终磁盘内容。
+                const finalLF = normalizeLineEndings(contentNew)
+                const wroteLF = normalizeLineEndings(next.text)
+                syncInput = {
+                  filePath,
+                  edits: [{ oldString: "", newString: finalLF !== wroteLF ? contentNew : edits[0].newString }],
                 }
                 yield* bus.publish(File.Event.Edited, { file: filePath })
                 yield* bus.publish(FileWatcher.Event.Updated, {
@@ -156,13 +233,37 @@ export const EditTool = Tool.define(
               const source = yield* Bom.readFile(afs, filePath)
               contentOld = source.text
 
+              // 匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
               const ending = detectLineEnding(contentOld)
-              const old = convertToLineEnding(normalizeLineEndings(params.oldString), ending)
-              const replacement = convertToLineEnding(normalizeLineEndings(params.newString), ending)
+              const baseLF = normalizeLineEndings(contentOld)
+              const editsLF = edits.map((edit) => ({
+                oldString: normalizeLineEndings(edit.oldString),
+                newString: normalizeLineEndings(edit.newString),
+                replaceAll: edit.replaceAll,
+              }))
 
-              const next = Bom.split(replace(contentOld, old, replacement, params.replaceAll))
-              const desiredBom = source.bom || next.bom
-              contentNew = next.text
+              let applied
+              try {
+                // 单/多 edit 同一 applyEdits；失败诊断的 closest 只解释，不参与成功替换。
+                applied = applyEdits(baseLF, editsLF, filePath)
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error)
+                if (message.includes("Could not find") || message.includes("Could not find oldString")) {
+                  const probe = editsLF.find((e) => baseLF.indexOf(e.oldString) === -1) ?? editsLF[0]
+                  const closest = closestWindow(contentOld, convertToLineEnding(probe.oldString, ending))
+                  throw new Error(
+                    message +
+                      (closest
+                        ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
+                        : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
+                  )
+                }
+                throw error
+              }
+
+              contentNew = convertToLineEnding(applied.contentNew, ending)
+              const desiredBom = source.bom || Bom.split(contentNew).bom
+              contentNew = Bom.split(contentNew).text
 
               diff = trimDiff(
                 createTwoFilesPatch(
@@ -199,6 +300,18 @@ export const EditTool = Tool.define(
                   normalizeLineEndings(contentNew),
                 ),
               )
+
+              // INV-16：成功后始终发完整参数面 { filePath, edits }，
+              // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
+              // actualOld 已在 applyEdits.syncEdits 中；此处只做行尾风格还原便于回放。
+              syncInput = {
+                filePath,
+                edits: applied.syncEdits.map((edit) => ({
+                  oldString: convertToLineEnding(edit.oldString, ending),
+                  newString: convertToLineEnding(edit.newString, ending),
+                  ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
+                })),
+              }
             }).pipe(Effect.orDie),
           )
 
@@ -225,15 +338,13 @@ export const EditTool = Tool.define(
             },
           })
 
-          let output = "Edit applied successfully."
+          let output = `Edit applied successfully${edits.length > 1 ? ` (${edits.length} blocks)` : ""}.`
           const normalizedFilePath = AppFileSystem.normalizePath(filePath)
-          // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容，诊断反映旧状态。
           const beforeIssues = (yield* lsp.diagnostics())[normalizedFilePath] ?? []
           yield* lsp.touchFile(filePath, "document")
           const afterDiagnostics = yield* lsp.diagnostics()
           const currentIssues = afterDiagnostics[normalizedFilePath] ?? []
           const block = LSP.Diagnostic.reportDelta(filePath, currentIssues, beforeIssues)
-          // [local-smark] 计算新错误数组和摘要供 TUI 渲染
           const newErrorsArr = LSP.Diagnostic.newErrors(currentIssues, beforeIssues)
           const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
           let diagnosticSummary: typeof delta | undefined = delta
@@ -241,25 +352,23 @@ export const EditTool = Tool.define(
             output += `\n\nNew LSP errors introduced by this edit:\n${block}`
             output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
           } else {
-            // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时 baseline 和 current 都为空
             const clients = yield* lsp.status()
             if (clients.length === 0) {
               diagnosticSummary = undefined
               output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
             } else {
-              // [local-smark] 只输出一行检查结果，不展开既有错误详情，保持 edit 反馈高信噪比。
               output += `\n\n${LSP.Diagnostic.checkedMessage(delta, "file")}`
             }
           }
 
           return {
             metadata: {
-              // [local-smark] metadata.diagnostics 存储新错误数组（delta）+ diagnosticSummary 供 TUI
               diagnostics: { [normalizedFilePath]: newErrorsArr },
-              // summary 只有在 LSP 可靠可用时才传给 TUI，避免 unavailable 时出现绿色 clean。
               ...(diagnosticSummary ? { diagnosticSummary } : {}),
               diff,
               filediff,
+              // processor 消费后 strip；覆盖 state.input 为 ground-truth edits
+              ...(syncInput ? { _syncInput: syncInput } : {}),
             },
             title: `${path.relative(instance.worktree, filePath)}`,
             output,
@@ -303,30 +412,4 @@ export function trimDiff(diff: string): string {
   })
 
   return trimmedLines.join("\n")
-}
-
-export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
-  if (oldString === newString) {
-    throw new Error("No changes to apply: oldString and newString are identical.")
-  }
-
-  const first = content.indexOf(oldString)
-  if (first === -1) {
-    // closest 只解释失败；即使分数很高也绝不能转成 replacement success。
-    const closest = closestWindow(content, oldString)
-    throw new Error(
-      `Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.` +
-        (closest
-          ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}`
-          : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
-    )
-  }
-
-  // replaceAll 是调用方对多处 exact literal 的显式授权，必须在 ambiguity 拒绝前处理。
-  if (replaceAll) return content.replaceAll(oldString, newString)
-  // 从下一字符寻找可识别重叠 occurrence；未显式 replaceAll 时，任何第二处精确匹配都必须拒绝。
-  if (content.indexOf(oldString, first + 1) !== -1) {
-    throw new Error("Found multiple matches for oldString. Provide more surrounding context to make the match unique.")
-  }
-  return content.slice(0, first) + newString + content.slice(first + oldString.length)
 }
