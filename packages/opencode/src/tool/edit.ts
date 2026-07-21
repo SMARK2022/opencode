@@ -223,7 +223,12 @@ export const EditTool = Tool.define(
               } catch (error) {
                 const message = error instanceof Error ? error.message : String(error)
                 if (message.includes("Could not find") || message.includes("Could not find oldString")) {
-                  const probe = editsLF.find((e) => !EditApply.findMatch(baseLF, e.oldString).found) ?? editsLF[0]
+                  // 失败索引来自共享替换owner，不能重新扫描成功条目猜测失败归属。
+                  if (!(error instanceof EditApply.EditApplyError)) throw error
+                  const probe = editsLF[error.editIndex]
+                  // 缺失内部索引时必须原样失败，不能用首条 edit 猜测。
+                  if (!probe) throw error
+                  // 只展示同一DP返回的actual，归一化成功的前项不应出现在本次诊断。
                   const closest = closestMatch(contentOld, convertToLineEnding(probe.oldString, ending))
                   throw new Error(
                     message +

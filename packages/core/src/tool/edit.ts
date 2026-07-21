@@ -223,8 +223,10 @@ const layer = Layer.effectDiscard(
                   try: () => EditApply.applyEdits(baseLF, editsLF, input.path),
                   catch: (error) => {
                     const message = error instanceof Error ? error.message : String(error)
-                    if (!message.includes("Could not find")) return new ToolFailure({ message })
-                    const probe = editsLF.find(edit => !EditApply.findMatch(baseLF, edit.oldString).found) ?? editsLF[0]
+                    if (!(error instanceof EditApply.EditApplyError) || !message.includes("Could not find")) return new ToolFailure({ message })
+                    // Native与V1消费同一失败索引，不能把前项归一化成功误判为本次失败。
+                    const probe = editsLF[error.editIndex]
+                    if (!probe) return new ToolFailure({ message })
                     const closest = closestMatch(source.text, convertToLineEnding(probe.oldString, ending))
                     return new ToolFailure({
                       message: message + (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
