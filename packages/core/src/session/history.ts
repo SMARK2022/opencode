@@ -184,4 +184,22 @@ export const goalTurn = Effect.fn("SessionHistory.goalTurn")(function* (db: Data
   }
 })
 
+// 进度取当前 eligible turn 的持久投影，不让 compaction 的 provider 窗口裁掉先前工具证据。
+export const goalTurnMessages = Effect.fn("SessionHistory.goalTurnMessages")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+) {
+  const turn = yield* goalTurn(db, sessionID)
+  if (!turn) return []
+  const boundary = yield* db.select({ seq: SessionMessageTable.seq }).from(SessionMessageTable)
+    .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.id, turn.id))).get().pipe(Effect.orDie)
+  if (!boundary) return []
+  const rows = yield* db.select().from(SessionMessageTable)
+    .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "assistant"), gt(SessionMessageTable.seq, boundary.seq)))
+    .orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
+  // 仅恢复已选 turn 的可见助手；压缩窗口或冷骨架不能抹去实际进度。
+  const restored = yield* ColdStorage.readSessionMessageRows(db, rows.filter(row => !hidden(row.data.metadata?.hidden)))
+  return yield* Effect.forEach(restored, decodeMessageRow)
+})
+
 export * as SessionHistory from "./history"

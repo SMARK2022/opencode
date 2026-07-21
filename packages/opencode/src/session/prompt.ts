@@ -1,3 +1,4 @@
+import { SessionGoalProgress } from "@opencode-ai/core/session/goal-progress"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import path from "path"
@@ -1548,6 +1549,12 @@ const layer = Layer.effect(
         // #364：goal 续跑计数器：独立于 step，
         // 防止 step++ 在 continue 路径被跳过导致无限循环
         let goalTurns = 0
+        // #517：run-local progress gate：跨 continuation 保持，但新 runLoop 从 ordinary 开始；
+        // 用户重新触发 session 时不能继承上一轮未完成任务的瞬时 frontier。
+        const goalProgressLedger = SessionGoalProgress.createGoalProgressLedger()
+        const goalProgressGate = { noProgressTurns: 0, replanRequired: false }
+        // #517：noProgressTurns 只统计没有任何合格 evidence 的 eligible turn，
+        // 不把 provider step、tool-call 数量或模型文字长度当作进度。
         // marker只属于本次loop的eligible错误，下一次迭代消费即清空。
         // 不持久化错误内容，也不让历史助手错误触发新的续跑。
         let pendingTerminalError: { assistantID: string } | undefined
@@ -1661,7 +1668,17 @@ const layer = Layer.effect(
                   (!errorCompletion || goal.continueOnError)
                 ) {
                   goalTurns++
-                  // 注入 synthetic user message 作为续跑 prompt
+                  // #517：先吸收本轮 structured tool/patch 证据，再决定 ordinary/replan 文案；
+                  // 判断发生在 synthetic message 写入前，避免当前 continuation 反向污染自己。
+                  const signal = SessionGoalProgress.absorbGoalTurnEvidence(msgs
+                    .filter((message) => message.info.role === "assistant" && message.info.parentID === lastUser.id)
+                    .map((message) => message.parts.filter((part) => part.type === "tool" || part.type === "patch")), ctx.directory, goalProgressLedger)
+                  SessionGoalProgress.updateGoalProgressGate(goalProgressGate, signal)
+                  // ctx.directory 与真实 search producer 共用 instance 根目录，保证 scope identity 一致。
+                  const continuationMode: SessionGoal.ContinuationMode = goalProgressGate.replanRequired
+                    ? "replan"
+                    : "ordinary"
+                  // 注入 synthetic user message 作为续跑 prompt；ordinary/replan 只是同一操作的文本模式。
                   // noReply=true 避免递归触发 loop；source="system_continue" 供 request usage 追踪
                   // orDie 将 Image.Error 转为 defect，保持 runLoop 的 error 类型为 never
                   yield* prompt({
@@ -1677,10 +1694,18 @@ const layer = Layer.effect(
                       // 为新的 eligible Goal turn，与 compaction/task technical user 区分。
                       // blocked streak 依赖此 marker 判断连续性。
                       metadata: { goal_continuation: true },
-                      text: SessionGoal.continuationPrompt(goal),
+                      text: SessionGoal.continuationPrompt(goal, continuationMode),
                     }],
                   }).pipe(Effect.orDie)
-                  yield* Effect.logInfo("goal continuation", { goalTurns, step })
+                  yield* Effect.logInfo("goal continuation", {
+                    goalTurns,
+                    step,
+                    continuationMode,
+                    noProgressTurns: goalProgressGate.noProgressTurns,
+                    exploration: signal.exploration,
+                    advancement: signal.advancement,
+                  })
+                  // #517：continue 直接回到同一 runLoop，保留 ledger、blocked context 与 usage accounting。
                   continue
                 }
               }

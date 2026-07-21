@@ -55,6 +55,10 @@ describe("tool parameters", () => {
       expect(operate.enum).toEqual(["read", "complete", "blocked", "active"])
       expect(operate.description).toContain("two consecutive eligible Goal turns")
       expect(operate.description).toContain("same trimmed reason")
+      // #517：blocked 首轮 BFS 复核指引进入 wire description。
+      expect(operate.description).toContain("re-check relevant evidence breadth-first")
+      expect(operate.description).toContain("viable path")
+      expect(operate.description).toContain("hard, uncertain, or incomplete")
       expect(parse(Goal, { operate: "read" })).toEqual({ operate: "read" })
       expect(accepts(Goal, {})).toBe(false)
       expect(accepts(Goal, { mark: "complete", reason: "done" })).toBe(false)

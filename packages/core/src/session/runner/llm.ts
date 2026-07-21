@@ -38,6 +38,7 @@ import { SessionTodo } from "../todo"
 import { SessionEvent } from "../event"
 import { SessionHistory } from "../history"
 import { SessionGoal } from "../goal"
+import { SessionGoalProgress } from "../goal-progress"
 import { SessionInput } from "../input"
 import { SessionMessage } from "../message"
 import { SessionInputTable } from "../sql"
@@ -210,6 +211,9 @@ const layer = Layer.effect(
     // 仅当前 drain 持有待注入目标；不新增调度器或崩溃后自动恢复。
     type GoalContinuation = {
       goal?: SessionGoal.Goal; turns: number
+      mode?: SessionGoal.ContinuationMode
+      progressLedger: SessionGoalProgress.GoalProgressLedger
+      progressGate: { noProgressTurns: number; replanRequired: boolean }
       // 同eligible turn跨provider steps与compaction重入共享读取快照。
       goalTurn?: SessionGoal.GoalTurnContext
     }
@@ -255,7 +259,7 @@ const layer = Layer.effect(
             if (Option.isSome(goal) && goal.value.status === "active") {
               yield* events.publish(SessionEvent.Synthetic, {
                 sessionID: session.id, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now,
-                text: SessionGoal.continuationPrompt(goal.value),
+                text: SessionGoal.continuationPrompt(goal.value, continuation.mode),
               })
               continuation.turns++
             }
@@ -712,7 +716,8 @@ const layer = Layer.effect(
       if (!input.force && !hasSteer && !hasQueue) return
       yield* failInterruptedTools(input.sessionID)
       let promotion: SessionInput.Delivery | undefined = hasSteer ? "steer" : hasQueue ? "queue" : undefined
-      const continuation: GoalContinuation = { turns: 0 }
+      // frontier 仅属于本次 drain；新唤醒不继承旧运行的停滞或验证基线。
+      const continuation: GoalContinuation = { turns: 0, progressLedger: SessionGoalProgress.createGoalProgressLedger(), progressGate: { noProgressTurns: 0, replanRequired: false } }
       let shouldRun = input.force || hasSteer || hasQueue
       while (shouldRun) {
         let needsContinuation = true
@@ -731,6 +736,12 @@ const layer = Layer.effect(
               !session.parentID && agent.id !== "decide" && result.step < (agent.info?.steps ?? Infinity)) {
               const goal = yield* goals.get(input.sessionID)
               if (Option.isSome(goal) && goal.value.status === "active") {
+                // 只在既有 eligible completion 边界计一次，provider step 或 compaction 不另计轮。
+                const signal = SessionGoalProgress.absorbGoalTurnEvidence(
+                  SessionGoalProgress.nativeEvidence(yield* SessionHistory.goalTurnMessages(db, input.sessionID)), location.directory, continuation.progressLedger,
+                )
+                SessionGoalProgress.updateGoalProgressGate(continuation.progressGate, signal)
+                continuation.mode = continuation.progressGate.replanRequired ? "replan" : "ordinary"
                 continuation.goal = goal.value
                 needsContinuation = true
                 // 下个安全边界也检查 queue，避免候选 Goal 抢占刚到达的用户输入。
