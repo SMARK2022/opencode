@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
-import { verifyRemoteAnnotatedTagCommit } from "../../script/opentui-provenance"
+import { verifyRemoteAnnotatedTagCommit, verifySourceRevisionAuthorization } from "../../script/opentui-provenance"
 import { tmpdir } from "../fixture/fixture"
 
 test("resolves an annotated release tag from a remote when the shallow checkout has no tags", async () => {
@@ -66,6 +66,36 @@ test("resolves an annotated release tag from a remote when the shallow checkout 
       expectedCommit: commit,
     }),
   ).rejects.toThrow("not found")
+})
+
+test("source-authorized closure rejects a clean source revision outside the manifest", () => {
+  // negative fixture保持parent/nested两处一致，只改变manifest authority，锁定真正的失败边界。
+  const authorized = "a".repeat(40)
+  const unauthorized = "b".repeat(40)
+  const manifest = {
+    schema: 1 as const,
+    sourceGitlink: authorized,
+    releaseTag: "v0.4.3-smark.1" as const,
+    releaseCommit: "c".repeat(40),
+  }
+
+  expect(() =>
+    verifySourceRevisionAuthorization({
+      parentGitlink: authorized,
+      nestedHead: authorized,
+      nestedStatus: "",
+      manifest,
+    }),
+  ).not.toThrow()
+
+  expect(() =>
+    verifySourceRevisionAuthorization({
+      parentGitlink: unauthorized,
+      nestedHead: unauthorized,
+      nestedStatus: "",
+      manifest,
+    }),
+  ).toThrow("authorized source revision")
 })
 
 async function git(args: string[], cwd: string, required = true) {

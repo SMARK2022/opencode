@@ -1,3 +1,27 @@
+export interface OpenTuiSourceRevisionManifest {
+  schema: 1
+  sourceGitlink: string
+  releaseTag: "v0.4.3-smark.1"
+  releaseCommit: string
+}
+
+export function verifySourceRevisionAuthorization(input: {
+  parentGitlink: string
+  nestedHead: string
+  nestedStatus: string
+  manifest: OpenTuiSourceRevisionManifest
+}) {
+  // sourceGitlink是审阅过的本地源码身份，不能由调用者传入任意clean SHA后自证。
+  // releaseCommit单独证明immutable package family，两个身份不可互相替代。
+  if (!/^[0-9a-f]{40}$/.test(input.manifest.sourceGitlink)) throw new Error("invalid OpenTUI sourceGitlink manifest SHA")
+  if (input.parentGitlink !== input.manifest.sourceGitlink) {
+    throw new Error(`OpenTUI parent gitlink is not the authorized source revision: ${input.parentGitlink}`)
+  }
+  if (input.nestedHead !== input.manifest.sourceGitlink || input.nestedStatus) {
+    throw new Error(`OpenTUI source checkout is not clean at the authorized source revision: ${input.nestedHead}`)
+  }
+}
+
 export async function verifyRemoteAnnotatedTagCommit(input: {
   repository: string
   tag: string

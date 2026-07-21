@@ -644,4 +644,4 @@ jobs:
 
       - name: Verify immutable OpenTUI closure
         working-directory: packages/opencode
-        run: bun run script/verify-opentui-closure.ts
+        run: bun run script/verify-opentui-closure.ts --source-revision-authorized
