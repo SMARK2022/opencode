@@ -16,7 +16,7 @@ test("resolves an annotated release tag from a remote when the shallow checkout 
   await Bun.write(path.join(source, "source.txt"), "immutable source\n")
   await git(["add", "source.txt"], source)
   await git(["commit", "-m", "release source"], source)
-  await git(["tag", "-a", "v0.4.3-smark.1", "-m", "immutable release"], source)
+  await git(["tag", "-a", "v0.4.3-smark.2", "-m", "immutable release"], source)
   await git(["tag", "v0.4.3-lightweight"], source)
   const commit = (await git(["rev-parse", "HEAD"], source)).stdout.trim()
   // tag后再提交生成同仓库的有效mismatch，避免用伪造hash绕过远端确实包含该commit的现实条件。
@@ -27,14 +27,14 @@ test("resolves an annotated release tag from a remote when the shallow checkout 
 
   // file:// 强制 Git 遵守 depth/no-tags；直接复制本地目录会把完整 refs 带进 fixture。
   await git(["clone", "--depth", "1", "--no-tags", repository, shallow], tmp.path)
-  const local = await git(["rev-parse", "v0.4.3-smark.1^{commit}"], shallow, false)
+  const local = await git(["rev-parse", "v0.4.3-smark.2^{commit}"], shallow, false)
   expect(local.code).not.toBe(0)
 
   // resolver 读取 remote 的 peeled ref，不依赖 actions/checkout 是否附带 submodule tag refs。
   expect(
     await verifyRemoteAnnotatedTagCommit({
       repository,
-      tag: "v0.4.3-smark.1",
+      tag: "v0.4.3-smark.2",
       cwd: shallow,
       expectedCommit: commit,
     }),
@@ -43,7 +43,7 @@ test("resolves an annotated release tag from a remote when the shallow checkout 
   await expect(
     verifyRemoteAnnotatedTagCommit({
       repository,
-      tag: "v0.4.3-smark.1",
+      tag: "v0.4.3-smark.2",
       cwd: shallow,
       expectedCommit: mismatch,
     }),
@@ -75,7 +75,7 @@ test("source-authorized closure rejects a clean source revision outside the mani
   const manifest = {
     schema: 1 as const,
     sourceGitlink: authorized,
-    releaseTag: "v0.4.3-smark.1" as const,
+    releaseTag: "v0.4.3-smark.2" as const,
     releaseCommit: "c".repeat(40),
   }
 

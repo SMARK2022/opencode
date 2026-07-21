@@ -5,7 +5,7 @@ import path from "node:path"
 import { verifyRemoteAnnotatedTagCommit, verifySourceRevisionAuthorization, type OpenTuiSourceRevisionManifest } from "./opentui-provenance"
 
 const root = path.resolve(import.meta.dir, "../../..")
-const version = "0.4.3-smark.1"
+const version = "0.4.3-smark.2"
 const tag = `v${version}`
 const repository = "https://github.com/SMARK2022/opentui"
 const release = `${repository}/releases/download/${tag}`
@@ -109,7 +109,7 @@ if (sourceManifest) {
     throw new Error("invalid OpenTUI source revision manifest")
   }
   verifySourceRevisionAuthorization({ parentGitlink: gitlink, nestedHead, nestedStatus, manifest: sourceManifest })
-  // source revision and release identity are independent: the new local source pin must not replace the immutable .1 tag proof.
+  // source revision and release identity are independent: the source pin must not replace the immutable tag proof.
   await verifyRemoteAnnotatedTagCommit({ repository, tag: sourceManifest.releaseTag, cwd: root, expectedCommit: sourceManifest.releaseCommit })
 } else {
   // remote tag证明发布身份，nested HEAD/status另证本次构建源码；两项证据不能互相替代。
