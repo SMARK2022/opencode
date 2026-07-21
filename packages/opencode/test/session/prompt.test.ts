@@ -4265,27 +4265,83 @@ it.instance(
       expect(continuations.length).toBe(1)
 
       // 续跑 prompt 不包含错误消息内容
+      // TextPart type guard 通过公开 Part shape 取 metadata，避免测试依赖 any 或私有存储表示。
       const continueText = continuations[0].parts.find(
-        (p) => p.type === "text" && (p as any).text?.includes("<session-goal-continuation>"),
-      ) as any
+        (p): p is MessageV2.TextPart => p.type === "text" && p.text.includes("<session-goal-continuation>"),
+      )
       expect(continueText?.text).not.toContain("bad request")
+      // 错误原因已由上一条 assistant error 展示，continuation 不增加第二套 error mode。
+      // literal continue/1/1 直接证明 producer 没有根据 APIError 生成额外展示状态。
+      expect(continueText?.metadata).toMatchObject({
+        goal_continuation_mode: "continue",
+        goal_continuation_turn: 1,
+        goal_continuation_max_turns: 1,
+      })
     }),
   { git: true },
   30_000,
 )
 
-function continuationTexts(msgs: MessageV2.WithParts[]) {
+function continuationParts(msgs: MessageV2.WithParts[]) {
   // 只提取持久化 synthetic user Part，避免把 provider 的普通 user/tool 文本误当续跑结果。
+  // 返回完整 TextPart 让行为测试读取公开 metadata，同时保留旧 helper 对正文的既有断言。
   return msgs.flatMap((m) =>
     m.info.role === "user"
       ? m.parts.flatMap((p) =>
-          p.type === "text" && p.synthetic === true && p.text.includes("<session-goal-continuation>")
-            ? [p.text]
-            : [],
+          p.type === "text" && p.synthetic === true && p.text.includes("<session-goal-continuation>") ? [p] : [],
         )
       : [],
   )
 }
+
+function continuationTexts(msgs: MessageV2.WithParts[]) {
+  return continuationParts(msgs).map((part) => part.text)
+}
+
+it.instance(
+  "goal blocked pending continuation stores block check",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 2 }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const goalSvc = yield* SessionGoal.Service
+      const chat = yield* sessions.create({
+        title: "blocked check presentation",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* goalSvc.set(chat.id, { objective: "finish the blocked check presentation" })
+      yield* user(chat.id, "start the Goal")
+
+      // 四个排队回复分别覆盖 read、blocked、完成当前 step 和挂起下一轮，不依赖内部调用次数 mock。
+      // 第一轮 blocked 只保持 Goal active；第二个 provider 请求挂起，保留下一条 continuation 供断言。
+      yield* llm.push(
+        reply().tool("goal", { operate: "read" }),
+        reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }),
+        reply().text("pending recorded").stop(),
+        reply().hang().item(),
+      )
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
+      // llm.wait(4) 是 server 发布的请求信号，慢机上也不会用固定 sleep 猜测 continuation 已落库。
+      yield* llm.wait(4)
+
+      const parts = continuationParts(yield* MessageV2.filterCompactedEffect(chat.id))
+      expect(parts).toHaveLength(1)
+      // BLOCK CHECK 必须来自结构化 Tool 结果，而不是 title/output 文案或当前 Goal status。
+      expect(parts[0]?.metadata).toMatchObject({
+        goal_continuation_mode: "block-check",
+        goal_continuation_turn: 1,
+        goal_continuation_max_turns: 2,
+      })
+      const goal = yield* goalSvc.get(chat.id)
+      expect(goal._tag).toBe("Some")
+      // active 断言区分 pending 复查与 terminal blocked，防止展示 metadata 改写 Goal 生命周期。
+      if (goal._tag === "Some") expect(goal.value.status).toBe("active")
+      yield* Fiber.interrupt(fiber)
+    }),
+  { git: true },
+  30_000,
+)
 
 // progress gate：两轮无 structured 证据后，下一条 continuation 必须进入 BFS replan。
 it.instance(
@@ -4317,6 +4373,21 @@ it.instance(
       expect(texts[0]).not.toContain("<strategy-switch")
       expect(texts[1]).toContain('mode="breadth-first-replan"')
       expect(texts[1]).toContain("Explore breadth-first")
+      // 重新读取 persisted Parts，避免复用上方正文数组而把同一实现复制成 expected metadata。
+      const parts = continuationParts(yield* MessageV2.filterCompactedEffect(chat.id))
+      // 1/2 与 2/2 锁定 run-local 递增和同一 max 快照，独立于 Message 在数组中的索引。
+      expect(parts[0]?.metadata).toMatchObject({
+        goal_continuation: true,
+        goal_continuation_mode: "continue",
+        goal_continuation_turn: 1,
+        goal_continuation_max_turns: 2,
+      })
+      expect(parts[1]?.metadata).toMatchObject({
+        goal_continuation: true,
+        goal_continuation_mode: "replan",
+        goal_continuation_turn: 2,
+        goal_continuation_max_turns: 2,
+      })
 
       // 在第三 completion 尚未结束前，只有 re-plan 已发生，Goal 必须仍是 active。
       const goal = yield* goalSvc.get(chat.id)

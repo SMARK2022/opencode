@@ -3,6 +3,12 @@ import DESCRIPTION from "./goal.txt"
 import type { SessionGoal } from "@/session/goal"
 import { Effect, Option, Schema } from "effect"
 
+// 该值是 SessionPrompt 消费的结构化 transition 信号，避免把 TUI/模型可见文案
+// 当成跨 assistant step 的控制协议。
+export const GOAL_BLOCKED_PENDING_TRANSITION = "blocked-pending" as const
+// metadata 保持可选，使 read、complete 和真正 blocked 等既有结果不获得展示副作用。
+type GoalToolMetadata = { goal_transition?: typeof GOAL_BLOCKED_PENDING_TRANSITION }
+
 // Goal turn 受信上下文：由 SessionPrompt 创建并在同一 eligible turn 的
 // provider steps 间复用。GoalTool get 写入 read snapshot，write 读取校验。
 // 模型不能通过工具参数伪造 snapshot 值。
@@ -43,7 +49,7 @@ export interface GoalToolExtra {
 // 显式 read 避免 provider 把可选字段错误展示成必填后，模型无法表达读取动作。
 // transition 必须先 operate=read 建立 snapshot——防止模型不看 GOAL 就直接终态化。
 // 不允许模型 pause/resume/clear/改预算——这些由用户或系统控制。
-export const GoalTool = Tool.define(
+export const GoalTool = Tool.define<typeof Parameters, GoalToolMetadata, never, "goal">(
   "goal",
   Effect.succeed({
     description: DESCRIPTION,
@@ -144,7 +150,8 @@ export const GoalTool = Tool.define(
         // 文案只指导模型下一步，不改变 modelTransition 的持久化 ownership 或 two-turn threshold。
         return {
           title: "Goal blocked (pending)",
-          metadata: {},
+          // 只有第一轮 pending 需要下一条 continuation 复查，terminal blocked 不会进入此分支。
+          metadata: { goal_transition: GOAL_BLOCKED_PENDING_TRANSITION },
           output: [
             `Blocked attempt ${result.attempt} of ${result.required}. The Goal stays active; do not confirm it as blocked yet. Re-check the blocker with a breadth-first pass:`,
             "1. Restate the exact blocker and the Goal requirement it prevents.",

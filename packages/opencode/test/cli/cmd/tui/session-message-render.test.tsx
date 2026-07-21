@@ -1067,6 +1067,204 @@ test("narrow viewport keeps the user message cell from collapsing", async () => 
   )
 })
 
+test("Goal continuation renders integrated mode and turn badges", async () => {
+  // 三种 mode 同时进入一个真实 Session frame，防止 renderer 只覆盖默认 CONTINUE 分支。
+  // objective 使用彼此不同的 literal，预期值不由 production parser 重新计算。
+  const continuations = [
+    { id: "msg_goal_1", objective: "Continue the complete Goal", mode: "continue", label: "CONTINUE", turn: 1 },
+    { id: "msg_goal_2", objective: "Re-plan the complete Goal", mode: "replan", label: "REPLAN", turn: 2 },
+    { id: "msg_goal_3", objective: "Re-check the complete Goal", mode: "block-check", label: "BLOCK CHECK", turn: 3 },
+  ] as const
+  await withRenderedSession(
+    continuations.map((item, index) => userMessage(item.id, index + 1)),
+    Object.fromEntries(
+      continuations.map((item) => [
+        item.id,
+        [
+          textPart(
+            `part_${item.id}`,
+            item.id,
+            [
+              "<session-goal-continuation>",
+              `<objective>${item.objective}</objective>`,
+              "</session-goal-continuation>",
+            ].join("\n"),
+            {
+              synthetic: true,
+              metadata: {
+                goal_continuation: true,
+                goal_continuation_mode: item.mode,
+                goal_continuation_turn: item.turn,
+                goal_continuation_max_turns: 8,
+              },
+            },
+          ),
+        ],
+      ]),
+    ),
+    async (app) => {
+      // waitForFrame 观察最终 terminal cells，而不是 JSX props 或内部 helper 返回值。
+      const frame = await waitForFrame(app, (lines) =>
+        continuations.every(
+          (item) =>
+            lines.some((line) => line.includes(item.objective)) &&
+            lines.some((line) => line.includes(`GOAL`) && line.includes(`${item.label} · ${item.turn} / 8`)),
+        ),
+      )
+      // objective 与 badge 行都保留同一个 Agent 边框；旧的 detached 标签不得重新出现。
+      // 每个 objective 定位自己的卡片，可证明三条 Message 没有合并成独立的共享标签区。
+      for (const item of continuations) {
+        expect(frame[findRow(frame, item.objective)]).toMatch(/^┃/)
+        const badge = frame[findRow(frame, `${item.label} · ${item.turn} / 8`)]
+        expect(badge).toMatch(/^┃/)
+        // 两个 badge 各自带内边距，再由 gap={1} 增加一列；可见文本间应至少保留三格。
+        // 正则检查渲染后的列宽，因此即使 JSX 重排也继续保护用户看到的间距。
+        expect(badge).toMatch(/GOAL\s{3,}(?:CONTINUE|REPLAN|BLOCK CHECK)/)
+      }
+      // detached 文案的缺席锁定一体化卡片，避免历史方案以第二张卡片回归。
+      expect(frame.some((line) => line.includes("Goal continuation"))).toBe(false)
+      // 排除项直接来自用户约束，不能因新增 mode 枚举而悄悄出现在 transcript。
+      expect(
+        frame.some((line) => line.includes("1/2") || line.includes("AFTER ERROR") || line.includes("ACTIVE")),
+      ).toBe(false)
+
+      // captureSpans 读取 renderer 最终颜色；源码中的 theme token 相等不能替代这个行为证据。
+      const spans = app.captureSpans().lines.find((line) =>
+        line.spans
+          .map((span) => span.text)
+          .join("")
+          .includes("CONTINUE · 1 / 8"),
+      )?.spans
+      const border = spans?.find((span) => span.text.includes("┃"))
+      const goal = spans?.find((span) => span.text.includes("GOAL"))
+      const mode = spans?.find((span) => span.text.includes("CONTINUE"))
+      // 比较真实 renderer span，而不是写死 theme 色值，才能覆盖自定义 Agent 颜色合同。
+      // mode 背景必须与身份色不同，证明中性 badge 没有伪装成第二个 Agent 标识。
+      expect(goal?.bg.toInts()).toEqual(border?.fg.toInts())
+      expect(mode?.bg.toInts()).not.toEqual(goal?.bg.toInts())
+    },
+    {},
+    { width: 80, height: 28 },
+  )
+})
+
+test("Goal continuation opens Revert-only actions", async () => {
+  const message = userMessage("msg_goal_actions", 1)
+  await withRenderedSession(
+    [message],
+    {
+      [message.id]: [
+        textPart(
+          "part_goal_actions",
+          message.id,
+          [
+            "<session-goal-continuation>",
+            "<objective>Revert only Goal</objective>",
+            "</session-goal-continuation>",
+          ].join("\n"),
+          {
+            synthetic: true,
+            metadata: {
+              goal_continuation: true,
+              goal_continuation_mode: "continue",
+              goal_continuation_turn: 1,
+              goal_continuation_max_turns: 8,
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Revert only Goal")))
+      // 点击真实 objective 命中生产 hitbox，测试不直接调用 DialogMessage 或私有 callback。
+      await clickVisibleText(app, "Revert only Goal")
+      const frame = await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Message Actions") || line.includes("Goal Continuation")),
+      )
+      // synthetic continuation 只支持已有 Revert；空 Copy/Retry/Fork 入口不能伪装成可执行动作。
+      // 标题只用于确认 subtype 路由，核心合同仍由四个 action 的存在与缺席共同证明。
+      expect(frame.some((line) => line.includes("Goal Continuation"))).toBe(true)
+      expect(frame.some((line) => line.includes("Revert"))).toBe(true)
+      expect(frame.some((line) => line.includes("Retry"))).toBe(false)
+      expect(frame.some((line) => line.includes("Copy"))).toBe(false)
+      expect(frame.some((line) => line.includes("Fork"))).toBe(false)
+    },
+  )
+})
+
+test("ordinary user Message keeps all Message actions", async () => {
+  const message = userMessage("msg_regular_actions", 1)
+  await withRenderedSession(
+    [message],
+    { [message.id]: [textPart("part_regular_actions", message.id, "Regular user actions")] },
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Regular user actions")))
+      await clickVisibleText(app, "Regular user actions")
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Message Actions")))
+      // subtype 过滤不能泄漏到普通用户 Message；四项原有行为继续由同一 DialogMessage 提供。
+      // literal action 顺序来自现有用户菜单，可同时捕获遗漏和意外重排造成的可见回归。
+      const actions = ["Revert", "Retry", "Copy", "Fork"]
+      expect(actions.filter((action) => frame.some((line) => line.includes(action)))).toEqual(actions)
+    },
+    {},
+    { height: 28 },
+  )
+})
+
+test("Goal continuation renders persisted marker-only and exact-envelope history", async () => {
+  // 两个 fixture 都故意省略 detail metadata，模拟功能上线前已经持久化的真实记录。
+  const marker = userMessage("msg_goal_legacy_marker", 1)
+  const envelope = userMessage("msg_goal_legacy_envelope", 2)
+  await withRenderedSession(
+    [marker, envelope],
+    {
+      [marker.id]: [
+        textPart(
+          "part_goal_legacy_marker",
+          marker.id,
+          [
+            "<session-goal-continuation>",
+            "<objective>Historical marker Goal</objective>",
+            '<strategy-switch mode="breadth-first-replan">',
+            "</strategy-switch>",
+            "</session-goal-continuation>",
+          ].join("\n"),
+          { synthetic: true, metadata: { goal_continuation: true } },
+        ),
+      ],
+      [envelope.id]: [
+        textPart(
+          "part_goal_legacy_envelope",
+          envelope.id,
+          [
+            "<session-goal-continuation>",
+            "<objective>Historical envelope Goal</objective>",
+            "</session-goal-continuation>",
+          ].join("\n"),
+          { synthetic: true },
+        ),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("Historical marker Goal")) &&
+          lines.some((line) => line.includes("Historical envelope Goal")) &&
+          lines.some((line) => line.includes("GOAL") && line.includes("REPLAN")) &&
+          lines.some((line) => line.includes("GOAL") && line.includes("CONTINUE")),
+      )
+      // 旧 Message 没有 run-local 快照；从 Message 顺序重建数字会制造另一套 reset 语义。
+      // 同时出现两个 badge 证明 compatibility 仍汇入同一个 renderer，而非 detached fallback。
+      const badges = frame.filter((line) => line.includes("GOAL"))
+      expect(badges).toHaveLength(2)
+      expect(badges.every((line) => !line.includes(" / "))).toBe(true)
+    },
+    {},
+    { width: 80, height: 22 },
+  )
+})
+
 test("auto compaction boundary is labeled in the session message stream", async () => {
   await withRenderedSession(
     [userMessage("msg_compaction_auto", 1), assistantMessage("msg_compaction_summary", 2, "msg_compaction_auto")],

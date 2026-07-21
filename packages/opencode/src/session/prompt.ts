@@ -54,7 +54,7 @@ import { Cause, Deferred, Effect, Exit, Fiber, Latch, Layer, Option, Scope, Cont
 import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
-import { type GoalTurnContext } from "@/tool/goal"
+import { GOAL_BLOCKED_PENDING_TRANSITION, type GoalTurnContext } from "@/tool/goal"
 import { SessionRunState } from "./run-state"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -2647,6 +2647,30 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   const continuationMode: SessionGoal.ContinuationMode = goalProgressGate.replanRequired
                     ? "replan"
                     : "ordinary"
+                  // TUI 需要历史上这一条 continuation 的模式和当前 run-local 计数；
+                  // 这些值在 Message 落库时快照化，不能由后续可变 Goal 状态反推。
+                  // 一个 eligible user 可以拥有多个 assistant/tool steps，必须扫描整棵子树。
+                  // parentID 才是同一 eligible turn 的边界，最新 assistant ID 不能代表整轮历史。
+                  // 只接受 completed ToolPart，避免把仍在流式更新的临时 metadata 当成持久事实。
+                  const blockedCheck = msgs.some(
+                    (message) =>
+                      message.info.role === "assistant" &&
+                      message.info.parentID === lastUser.id &&
+                      message.parts.some(
+                        (part) =>
+                          part.type === "tool" &&
+                          part.tool === "goal" &&
+                          part.state.status === "completed" &&
+                          part.state.metadata.goal_transition === GOAL_BLOCKED_PENDING_TRANSITION,
+                      ),
+                  )
+                  const continuationViewMode = blockedCheck
+                    ? "block-check"
+                    : continuationMode === "replan"
+                      ? "replan"
+                      : "continue"
+                  // 优先级在 producer 处只决议一次，历史 TUI 不会重新组合 BLOCK CHECK 与 REPLAN。
+                  // pending blocked 仍保持 Goal active，因此这里只生成展示模式，不写入新的 Goal Status。
                   // 注入 synthetic user message 作为续跑 prompt；ordinary/replan 只是同一操作的文本模式。
                   // noReply=true 避免递归触发 loop；source="system_continue" 供 request usage 追踪
                   // orDie 将 Image.Error 转为 defect，保持 runLoop 的 error 类型为 never
@@ -2661,15 +2685,26 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                     source: "system_continue",
                     agent: lastUser.agent,
                     model: { providerID: lastUser.model.providerID, modelID: lastUser.model.modelID },
-                    parts: [{
-                      type: "text",
-                      synthetic: true,
-                      // [local-smark] goal_continuation marker 标识此 synthetic user
-                      // 为新的 eligible Goal turn，与 compaction/task technical user 区分。
-                      // blocked streak 依赖此 marker 判断连续性。
-                      metadata: { goal_continuation: true },
-                      text: SessionGoal.continuationPrompt(goal, continuationMode),
-                    }],
+                    parts: [
+                      {
+                        type: "text",
+                        synthetic: true,
+                        // [local-smark] goal_continuation marker 标识此 synthetic user
+                        // 为新的 eligible Goal turn，与 compaction/task technical user 区分。
+                        // blocked streak 依赖此 marker 判断连续性。
+                        metadata: {
+                          // marker 继续承担 turn 身份；新增字段只是同一 Message 的不可变展示快照。
+                          goal_continuation: true,
+                          // mode 已包含 BLOCK CHECK > REPLAN > CONTINUE 的最终选择，consumer 不再读取 Tool 历史。
+                          goal_continuation_mode: continuationViewMode,
+                          // goalTurns 在创建 Message 前刚递增，保存它可避免 TUI 使用下一轮的计数。
+                          goal_continuation_turn: goalTurns,
+                          // max 来自本次 runLoop 已采用的配置，与 turn 共享同一 reset 边界。
+                          goal_continuation_max_turns: maxGoalTurns,
+                        },
+                        text: SessionGoal.continuationPrompt(goal, continuationMode),
+                      },
+                    ],
                   }).pipe(Effect.orDie)
                   yield* slog.info("goal continuation", {
                     goalTurns,
