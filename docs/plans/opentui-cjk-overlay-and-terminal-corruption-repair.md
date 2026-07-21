@@ -1,6 +1,6 @@
 # Canonical Implementation Plan: OpenTUI CJK Overlay and Terminal Corruption Repair
 
-> Status: implementation-audit-required
+> Status: verified
 >
 > Revision: R16
 >
@@ -448,10 +448,15 @@ Complete only after implementation and only for the approved revision.
 
 ### Remaining Unverified Items
 
-- Independent implementation audit must verify the exact R16 diff, recompute the comment gate, and confirm no unrelated parent worktree changes enter the final commit.
+- The shared worktree still contains unrelated edit-tool changes; they were excluded from the parent commit. The required OpenCode typecheck passed in the isolated clean verification tree containing the committed parent baseline, and this boundary was accepted by the user as resolving the audit-only verification blocker.
 
 ## 24. Implementation Audit Record
 
 | Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
 | --- | --- | --- | --- | --- | --- | --- |
-|  |  | yes | pending | pending | pending |  |
+| 3 | R16 | yes | typecheck failed only in the shared worktree because of unrelated edit-tool changes | clean isolated-tree typecheck passed; user accepted this verification boundary | BLOCK, resolved by accepted clean-tree evidence | `ses_07e0e997fffewD4qqC7N6wx7xI` |
+
+### Post-Audit Resolution
+
+- The auditor's only remaining blocker was the shared worktree typecheck boundary, not the R16 implementation. The same required command passed in the isolated clean verification tree, with all unrelated user changes preserved in the original worktree.
+- The user explicitly accepted that clean-tree evidence as resolving the blocker and authorized recording this plan as `verified`.
