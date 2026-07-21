@@ -135,6 +135,8 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: MessageV2.TextPart | undefined
   reasoningMap: Record<string, MessageV2.ReasoningPart>
+  // 只记录本次 stream 已落库且可撤回的非 Tool Part；Tool Part 不进入集合，避免把外部副作用伪装成可安全重放。
+  attemptPartIDs: Set<PartID>
   inputChars: number | undefined
   inputBreakdown: MessageV2.StepFinishPart["inputBreakdown"]
   // [local-smark] 追踪当前 step 是否产生了语义输出（text/reasoning/tool）。
@@ -187,6 +189,7 @@ export const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        attemptPartIDs: new Set(),
         inputChars: undefined,
         inputBreakdown: undefined,
         hasText: false,
@@ -386,8 +389,11 @@ export const layer = Layer.effect(
             }
             // [local-smark] 标记本轮已产生 reasoning 输出，用于 finish-step 空完成检测
             ctx.hasReasoning = true
+            // reasoning Part 在 finish-step 前已落库；记录 ID 让 retry 清理当前 attempt，而不是清理整个 Message。
+            const reasoningPartID = PartID.ascending()
+            ctx.attemptPartIDs.add(reasoningPartID)
             ctx.reasoningMap[value.id] = {
-              id: PartID.ascending(),
+              id: reasoningPartID,
               messageID: ctx.assistantMessage.id,
               sessionID: ctx.assistantMessage.sessionID,
               type: "reasoning",
@@ -683,8 +689,11 @@ export const layer = Layer.effect(
                 })
               }
             }
+            // step-start 也属于当前尝试；失败时与 text/reasoning 一起撤回，避免留下孤立成功步骤。
+            const stepPartID = PartID.ascending()
+            ctx.attemptPartIDs.add(stepPartID)
             yield* session.updatePart({
-              id: PartID.ascending(),
+              id: stepPartID,
               messageID: ctx.assistantMessage.id,
               sessionID: ctx.sessionID,
               snapshot: ctx.snapshot,
@@ -705,6 +714,21 @@ export const layer = Layer.effect(
               usage: value.usage,
               metadata: value.providerMetadata,
             })
+            // [local-smark] `other` 只在没有 Tool 的当前 attempt 中引流到既有 retry；
+            // Tool 生命周期和后续重试策略由 prompt loop 另行拥有，本分支不重放 Tool。
+            // 这里转换的是 Provider completion 语义，不改变外层 retry 的退避或次数。
+            if (value.finishReason === "other" && !ctx.hasToolCall) {
+              yield* Effect.forEach([...ctx.attemptPartIDs], (partID) =>
+                session.removePart({ sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id, partID }),
+              )
+              // 清理先于抛错，确保 retry 接收到的错误不会与上一轮部分输出混合。
+              ctx.attemptPartIDs.clear()
+              throw new MessageV2.APIError({
+                message: `Provider returned incomplete completion (finish_reason: ${value.finishReason})`,
+                isRetryable: true,
+                metadata: { finishReason: value.finishReason },
+              })
+            }
             if (!ctx.assistantMessage.summary) {
               // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
               if (flags.experimentalEventSystem) {
@@ -717,25 +741,6 @@ export const layer = Layer.effect(
                   timestamp: DateTime.makeUnsafe(Date.now()),
                 })
               }
-            }
-            // [local-smark] 空完成检测：provider 返回了 finish-step 但本轮没有产生
-            // 任何 text/reasoning/tool 输出，且 finishReason="other"（AI SDK 对
-            // network_error 等未知 finish_reason 的归一化值）。这通常表示服务端
-            // 推理阶段异常终止（如 GLM-5.2 大上下文下的 network_error）。
-            // 必须在设置 assistantMessage.finish 之前抛出，否则空消息会被
-            // cleanup 写成 time.completed，被 prompt.ts 误判为正常结束。
-            // 抛出 APIError(isRetryable=true) → SessionRetry.retry 重试 →
-            // 耗尽后 halt 设置 error → process 返回 "stop" → loop break。
-            if (
-              value.finishReason === "other" &&
-              !ctx.hasText &&
-              !ctx.hasReasoning &&
-              !ctx.hasToolCall
-            ) {
-              throw new MessageV2.APIError({
-                message: `Provider returned empty completion (finish_reason: ${value.finishReason}), no content/reasoning/tool produced`,
-                isRetryable: true,
-              })
             }
             ctx.assistantMessage.finish = value.finishReason
             ctx.assistantMessage.cost += usage.cost
@@ -810,6 +815,8 @@ export const layer = Layer.effect(
               time: { start: Date.now() },
               metadata: value.providerMetadata,
             }
+            // 结束后的 textPart 不再保存在 currentText 中，集合保留其 ID 供 finish-step 撤回。
+            ctx.attemptPartIDs.add(ctx.currentText.id)
             yield* session.updatePart(ctx.currentText)
             logPartStart("text", { partID: ctx.currentText.id })
             return
@@ -1008,6 +1015,8 @@ export const layer = Layer.effect(
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
+            // 每次 retry 建立新的 attempt 集合；上一轮已撤回，其他错误路径保持原有持久化行为。
+            ctx.attemptPartIDs.clear()
             // [local-smark] 重置语义输出追踪标志：retry 时上一轮的 hasText 等标志
             // 必须清零，否则空完成检测会因残留标志而跳过。
             ctx.hasText = false

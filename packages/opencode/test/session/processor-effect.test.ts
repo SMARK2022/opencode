@@ -1,6 +1,6 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { expect } from "bun:test"
-import { Cause, Effect, Exit, Fiber, Layer, Scope } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Schema, Scope } from "effect"
 import path from "path"
 import type { Agent } from "../../src/agent/agent"
 import { Agent as AgentSvc } from "../../src/agent/agent"
@@ -21,6 +21,8 @@ import { SessionSummary } from "../../src/session/summary"
 import { Snapshot } from "../../src/snapshot"
 import * as Log from "@opencode-ai/core/util/log"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { EventV2 } from "@opencode-ai/core/event"
+import { SessionEvent } from "@opencode-ai/core/session-event"
 import { provideTmpdirServer } from "../fixture/fixture"
 import { awaitWithTimeout, testEffect } from "../lib/effect"
 import { httpError, raw, reply, TestLLMServer } from "../lib/llm-server"
@@ -487,7 +489,6 @@ it.live("session.processor effect tests stop after token overflow requests compa
           sessionID: chat.id,
           model: mdl,
         })
-
         const value = yield* handle.process({
           user: {
             id: parent.id,
@@ -504,7 +505,6 @@ it.live("session.processor effect tests stop after token overflow requests compa
           messages: [{ role: "user", content: "compact" }],
           tools: {},
         })
-
         const parts = MessageV2.parts(msg.id)
 
         expect(value).toBe("compact")
@@ -1357,14 +1357,14 @@ it.live("session.processor empty completion with finish_reason=other throws retr
   ),
 )
 
-it.live("session.processor partial output with finish_reason=other does not throw", () =>
+it.live("session.processor partial output with finish_reason=other retries and recovers", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
       Effect.gen(function* () {
         const { processors, session, provider } = yield* boot()
 
-        // 有 text delta 但 finish_reason=network_error（→ "other"）
-        // hasText=true → 不应触发空完成检测
+        // 第一次有 text delta 但 finish_reason=network_error（→ "other"），
+        // 第二次返回可识别的 stop，验证 partial output 也进入现有 retry。
         yield* llm.push(
           raw({
             head: [
@@ -1379,6 +1379,7 @@ it.live("session.processor partial output with finish_reason=other does not thro
               },
             ],
           }),
+          reply().text("recovered").stop(),
         )
 
         const chat = yield* session.create({})
@@ -1389,6 +1390,11 @@ it.live("session.processor partial output with finish_reason=other does not thro
           assistantMessage: msg,
           sessionID: chat.id,
           model: mdl,
+        })
+        const ended: string[] = []
+        const unsubscribe = yield* (yield* EventV2.Service).sync((event) => {
+          if (Schema.is(SessionEvent.Step.Ended)(event)) ended.push(event.data.finish)
+          return Effect.void
         })
 
         const value = yield* handle.process({
@@ -1407,14 +1413,80 @@ it.live("session.processor partial output with finish_reason=other does not thro
           messages: [{ role: "user", content: "partial output" }],
           tools: {},
         })
+        yield* unsubscribe
 
         const parts = MessageV2.parts(msg.id)
 
-        // 有输出（hasText=true），不触发空完成检测 → 正常完成
+        // partial other 先被转换为 retryable APIError，再由第二次 stop 恢复。
         expect(value).toBe("continue")
-        expect(yield* llm.calls).toBe(1)
+        expect(yield* llm.calls).toBe(2)
         expect(handle.message.error).toBeUndefined()
-        expect(parts.some((part) => part.type === "text" && part.text === "partial")).toBe(true)
+        expect(parts.some((part) => part.type === "text" && part.text === "partial")).toBe(false)
+        expect(parts.some((part) => part.type === "text" && part.text === "recovered")).toBe(true)
+        // 失败的 other 不得先发布成功态，事件流只应看到恢复后的 stop。
+        expect(ended).toEqual(["stop"])
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor reasoning-only finish_reason=other retries and recovers", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        // reasoning-only 与 text fixture 独立，直接覆盖数据库中最常见的 partial-thinking 形态。
+        // 第二个响应使用固定字面量，expected 不复制 production 的 finish 判断。
+        yield* llm.push(
+          raw({
+            head: [
+              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
+              { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { reasoning_content: "partial thinking" } }] },
+            ],
+            tail: [
+              {
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                choices: [{ delta: {}, finish_reason: "network_error" }],
+              },
+            ],
+          }),
+          reply().text("recovered").stop(),
+        )
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "reasoning only")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies MessageV2.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "reasoning only" }],
+          tools: {},
+        })
+
+        const parts = MessageV2.parts(msg.id)
+
+        // 断言用户可观察的恢复结果和失败前缀消失，不依赖 processor 内部追踪字段。
+        expect(value).toBe("continue")
+        expect(yield* llm.calls).toBe(2)
+        expect(handle.message.error).toBeUndefined()
+        // 旧 reasoning Part 若未撤回会与 recovered text 共存，因此该断言能捕获 attempt cleanup 缺失。
+        expect(parts.some((part) => part.type === "reasoning" && part.text === "partial thinking")).toBe(false)
+        expect(parts.some((part) => part.type === "text" && part.text === "recovered")).toBe(true)
       }),
     { git: true, config: (url) => providerCfg(url) },
   ),
