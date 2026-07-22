@@ -763,11 +763,11 @@ it.live("session.processor retries a real first-progress timeout", () =>
         yield* Effect.addFinalizer(() => Effect.sync(() => gate.resolve(undefined)))
 
         // 闸门让首个HTTP response永远晚于500ms；只有Provider的dispatch deadline能先发布retry。
-        // 延迟错误保持one-shot；显式repeat响应为任意合法后续retry提供同一Provider结果。
+        // 延迟错误保持one-shot；repeat响应必须携带stop，才能沿现有other重试合同终止并证明恢复。
         // 这条顺序把 first-progress timeout 放在真实 HTTP producer 与现有 retry consumer 之间验证。
         // 503 仍保留原有服务器错误形状，只有新增的 progress deadline 改变 failure 的产生时机。
         yield* llm.push(httpError(503, { error: "delayed" }, gate.promise))
-        yield* llm.pushRepeat(reply().text("after"))
+        yield* llm.pushRepeat(reply().text("after").stop())
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "first progress")
