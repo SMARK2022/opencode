@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.11-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.12-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **এই শাখা সম্পর্কে**: এটি OpenCode-এর `dev-smark` উন্নত শাখা (বর্তমান সংস্করণ `1.15.11`, CLI release tag `v1.15.11-smark`)। এটি upstream `dev`-এর উপর ভিত্তি করে তৈরি এবং TUI interaction, session management, token statistics, Windows/PowerShell compatibility, VS Code language services ও Notebook integration, network proxy support, এবং installation experience উন্নত করার উপর কেন্দ্রীভূত।
+> **এই শাখা সম্পর্কে**: এটি OpenCode-এর `dev-smark` উন্নত শাখা (বর্তমান সংস্করণ `1.15.12`, CLI release tag `v1.15.12-smark`)। এটি upstream `dev`-এর উপর ভিত্তি করে তৈরি এবং TUI interaction, session management, token statistics, Windows/PowerShell compatibility, VS Code language services ও Notebook integration, network proxy support, এবং installation experience উন্নত করার উপর কেন্দ্রীভূত।
 
 ---
 
@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.11-smark
+  bash -s -- --version 1.15.12-smark
 ```
 
-এটি সম্পূর্ণ form: `bash -s --` `bash`-কে stdin থেকে installer পড়তে এবং `--version 1.15.11-smark` installer arguments হিসেবে পাঠাতে বলে। version `1.15.11-smark` হতে পারে অথবা release tag form `v1.15.11-smark` হতে পারে।
+এটি সম্পূর্ণ form: `bash -s --` `bash`-কে stdin থেকে installer পড়তে এবং `--version 1.15.12-smark` installer arguments হিসেবে পাঠাতে বলে। version `1.15.12-smark` হতে পারে অথবা release tag form `v1.15.12-smark` হতে পারে।
 
 ### Installer Behavior
 
@@ -240,7 +240,7 @@ Internal stats request usage data পছন্দ করে এবং older sess
 
 ### VS Code Language Services ও Notebook Integration
 
-VS Code language services বা Notebook tools ব্যবহার করতে [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) install করুন। repository extension version `1.15.10`, আর SMARK CLI `1.15.11-smark` recommended; দুটির version স্বাধীন। Extension language services ও VS Code/Jupyter Notebook-এর জন্য local authenticated bridge তৈরি করে। Bridge connected না থাকলে CLI built-in LSP ব্যবহার করে, কিন্তু VS Code-backed operations বা Notebook tools পাওয়া যায় না।
+VS Code language services বা Notebook tools ব্যবহার করতে [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) install করুন। repository extension version `1.15.10`, আর SMARK CLI `1.15.12-smark` recommended; দুটির version স্বাধীন। Extension language services ও VS Code/Jupyter Notebook-এর জন্য local authenticated bridge তৈরি করে। Bridge connected না থাকলে CLI built-in LSP ব্যবহার করে, কিন্তু VS Code-backed operations বা Notebook tools পাওয়া যায় না।
 
 Extension কোনো language server bundle করে না; এটি বর্তমান VS Code window-তে enabled language extensions-এর registered providers ব্যবহার করে touch, diagnostics, hover, definition, references এবং document/workspace symbols দেয়। Bridge request fail হলে built-in LSP fallback হয়, আর diagnostics response structure invalid হলেও fallback হয়; অন্য successful response-এ expected result field না থাকলে বর্তমানে empty result হিসেবে ধরা হতে পারে। Implementation ও call hierarchy সবসময় built-in LSP-তে থাকে, এবং valid empty result পুরো project typecheck pass করেছে এমন প্রমাণ নয়।
 

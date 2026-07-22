@@ -7,7 +7,7 @@ Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CL
 | Extension ID | `SMARK2022.opencode-ide-bridge` |
 | Publisher | `SMARK2022` |
 | Repository extension version | `1.15.11` |
-| Recommended CLI | `opencode 1.15.11-smark` |
+| Recommended CLI | `opencode 1.15.12-smark` |
 | Source | https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode |
 
 The CLI and extension are versioned independently. Marketplace may continue to show an older extension release until this repository build is published.
