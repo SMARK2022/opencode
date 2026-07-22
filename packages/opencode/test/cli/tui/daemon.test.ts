@@ -12,7 +12,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { mkdir, rename } from "fs/promises"
 // #495：win32 spawn adapter 测试沿目标唯一 DaemonProcess seam。
-import { DaemonProcess, discoverOrSpawnDaemon } from "../../../src/cli/cmd/tui"
+import { DaemonProcess, connectionInfo, discoverOrSpawnDaemon, type DiscoverDaemonDeps } from "../../../src/cli/cmd/tui"
 import path from "path"
 import { fileURLToPath, pathToFileURL } from "url"
 // #524：db status 压力夹具直接用 bun:sqlite 写入 part 行（FK OFF）。
@@ -88,6 +88,30 @@ async function runDaemonStop(lockPath: string, env: Record<string, string> = {})
   })
   const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
   return { exitCode, stderr }
+}
+
+// #532：机器接口从真实 argv 入口执行，确保 yargs 参数、stdout 协议和 daemon owner 语义一起受测。
+// stdout 只允许一个 JSON value；日志和迁移信息必须留在 stderr，调用方无需解析人类文案。
+async function runDaemonMachine(
+  lockPath: string,
+  command: "status" | "start",
+  env: Record<string, string> = {},
+) {
+  await prepareCliData(lockPath)
+  const args = [process.execPath, INDEX_TS, "daemon", command, "--json"]
+  if (command === "start") args.push("--launcher-pid", String(process.pid))
+  const proc = Bun.spawn(args, {
+    env: isolatedDaemonEnv(lockPath, env),
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [exitCode, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ])
+  return { exitCode, stdout, stderr }
 }
 
 /**
@@ -231,6 +255,113 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
 }
 
 describe("daemon lifecycle", () => {
+  test("observes injected connection owners without process or network access", async () => {
+    const forbidden = () => { throw new Error("observation must not start, elect, clear, or wait") }
+    const lock: ServerLock.ServerLock = { pid: 71, port: 3101, token: "private-token", dbPath: path.resolve("observer-only.db"), channel: "test", startedAt: "2026-10-28" }
+    const observe = (owner: ServerLock.ServerLock | undefined, overrides: Partial<DiscoverDaemonDeps> = {}) => connectionInfo({
+      read: async () => owner, alive: () => true, ping: async () => true,
+      clear: forbidden, acquire: forbidden, spawn: forbidden,
+      sleep: forbidden, resolveDaemonFile: forbidden, resolveNetwork: forbidden,
+      identity: () => ({ dbPath: lock.dbPath, channel: lock.channel }), placement: () => "observer-only",
+      electionTimeoutMs: 1, electionStaleMs: 1, pollMs: 1, waitMs: 1,
+      ...overrides,
+    })
+    // 无controlPort才跳过真实控制面fetch；健康探测及owner读取也全部显式替换。
+    expect(lock.controlPort).toBeUndefined()
+    await expect(observe(undefined)).resolves.toEqual({ running: false })
+    await expect(observe(lock, { alive: () => false })).resolves.toEqual({ running: false })
+    const healthy = await observe(lock)
+    expect(healthy).toEqual({ running: true, pid: 71, url: "http://127.0.0.1:3101", responsive: true })
+    expect(Object.keys(healthy).toSorted()).toEqual(["pid", "responsive", "running", "url"])
+    await expect(observe(lock, { ping: async () => false })).resolves.toMatchObject({ running: true, pid: 71, responsive: false })
+    // 身份不符、探测中换代与读取失败均保留失败，不伪装无owner并触发重建。
+    await expect(observe({ ...lock, dbPath: path.resolve("other.db") })).rejects.toThrow("different database or channel")
+    let reads = 0
+    await expect(observe(lock, { read: async () => ++reads === 1 ? lock : { ...lock, token: "replacement" } })).rejects.toThrow("ownership changed")
+    await expect(observe(lock, { read: async () => { throw new Error("observer read failure") } })).rejects.toThrow("observer read failure")
+  })
+
+  // #532：独立 lock/XDG/DB 保证该查询不可能观察或停止开发者真实 daemon。
+  // running=false 是公开 expected literal，测试不读取 private lock parser 返回类型。
+  // lock 仍不存在证明 status 没有把 read 操作偷偷升级为 ensure。
+  // 真实 CLI 入口同时覆盖 yargs 注册与 stdout 协议，不使用内部 helper 得到假绿。
+  test("daemon status JSON reports no owner without spawning", async () => {
+    await using tmp = await tmpdir()
+    const lockPath = path.join(tmp.path, "tui-server.json")
+
+    const result = await runDaemonMachine(lockPath, "status")
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({ running: false })
+    // status 是纯观察操作；没有 owner 时不得创建 lock 或用 ensure 把查询变成启动
+    expect(await Bun.file(lockPath).exists()).toBe(false)
+  })
+
+  test(
+    "daemon status JSON reports the current owner without private lock fields",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
+
+      try {
+        const result = await runDaemonMachine(lockPath, "status")
+        expect(result.exitCode).toBe(0)
+        expect(JSON.parse(result.stdout)).toEqual({
+          running: true,
+          pid: lock.pid,
+          url: `http://127.0.0.1:${lock.port}`,
+          responsive: true,
+        })
+        // machine contract 只公开连接所需的 PID/URL；token、control port 和 DB 路径仍属于 lock owner
+        expect(result.stdout).not.toContain(lock.token)
+        expect(result.stdout).not.toContain("controlPort")
+        expect(result.stdout).not.toContain("dbPath")
+      } finally {
+        await runDaemonStop(lockPath).catch(() => undefined)
+        if (ServerLock.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS,
+  )
+
+  test(
+    "daemon start JSON creates one owner protected by the external launcher PID and reuses it",
+    async () => {
+      // 250ms startup idle 刻意短于 750ms 观察窗，使错误 launcher PID 稳定暴露。
+      // 测试进程保持存活代表 bot，首次 SSE 尚未建立，隔离两个 liveness 阶段。
+      // 第二次 start 比较同一 PID/URL，证明复用而非仅有另一个健康 owner。
+      // finally 通过 safe stop 清理真实 worker，失败 case 也不遗留实验进程。
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const env = {
+        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000",
+        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
+      }
+
+      const first = await runDaemonMachine(lockPath, "start", env)
+      expect(first.exitCode).toBe(0)
+      const owner = JSON.parse(first.stdout) as { running: boolean; pid: number; url: string; responsive: boolean }
+      expect(owner.running).toBe(true)
+      expect(owner.responsive).toBe(true)
+
+      try {
+        // CLI 已退出且没有 SSE；worker 仍须观察测试进程这个外部 launcher，不能观察短命 CLI PID
+        await Bun.sleep(750)
+        expect(ServerLock.alive(owner.pid)).toBe(true)
+
+        const second = await runDaemonMachine(lockPath, "start", env)
+        expect(second.exitCode).toBe(0)
+        // 重复start在所有平台均保持同一PID/URL，不用平台分支弱化源复用合同。
+        expect(JSON.parse(second.stdout)).toEqual(owner)
+      } finally {
+        await runDaemonStop(lockPath).catch(() => undefined)
+        if (ServerLock.alive(owner.pid)) process.kill(owner.pid)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS,
+  )
+
   // #523：worker 5s deadline 独立于 CLI force path——SIGTERM 直达 worker 验证自杀边界。
   // 前置 /config 请求建立真实 Project context，避免空 worker 立即 idle-exit 干扰 deadline。
   test(
