@@ -142,6 +142,19 @@ export function formatTaskIdNotice(input: { provided: string }) {
   })
 }
 
+// 两代中断投影共用原始恢复提示；纯格式源不反向依赖Task或Session，避免加载环。
+export function formatTaskResumeLine(sessionID: string) {
+  return `task_id: ${sessionID} (for resuming to continue this task if needed)`
+}
+
+// 已有错误正文也可能包含裸task_id；不重复前缀，空正文不生成多余段落。
+export function ensureTaskResumeVisible(text: string, sessionID: string) {
+  const line = formatTaskResumeLine(sessionID)
+  if (text.includes(`task_id: ${sessionID}`)) return text
+  if (text.length === 0) return line
+  return `${line}\n\n${text}`
+}
+
 // 只截模型交付文本；旧单边零上限禁用截断，显式双向预算保留source的零端退化语义。
 export function truncateForCompaction(text: string, maxChars?: number, tailChars?: number) {
   if (tailChars === undefined) {

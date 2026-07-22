@@ -22,7 +22,7 @@ import { Tools } from "./tools"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { TaskPrompt } from "./task-prompt"
-import { formatTaskIdNotice } from "../util/output-notice"
+import { ensureTaskResumeVisible, formatTaskIdNotice } from "../util/output-notice"
 
 export const name = "task"
 export const description = TaskPrompt.description
@@ -115,10 +115,19 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
         }),
         ...(cfg.flatMap(entry => entry.type === "document" && entry.info.experimental?.primary_tools !== undefined ? [entry.info.experimental.primary_tools] : []).at(-1) ?? []).map(action => ({ action: action === "write" || action === "apply_patch" ? "edit" : action, resource: "*", effect: "deny" as const })),
       ]
-      const child = existing ?? (yield* sessions.create({
-        parentID: parent.id, title: `${input.description} (@${agent.id} subagent)`,
-        location: Location.Ref.make({ directory: location.directory, workspaceID: location.workspaceID }),
-        agent: agent.id, model, permissions: childPermission,
+      const child = yield* Effect.uninterruptible(Effect.gen(function* () {
+        const child = existing ?? (yield* sessions.create({
+          parentID: parent.id, title: `${input.description} (@${agent.id} subagent)`,
+          location: Location.Ref.make({ directory: location.directory, workspaceID: location.workspaceID }),
+          agent: agent.id, model, permissions: childPermission,
+        }))
+        // 身份在分配后立即持久交付，取消不能落在create与父工具快照之间。
+        yield* events.publish(SessionEvent.Tool.Progress, {
+          sessionID: parent.id, timestamp: yield* DateTime.now,
+          assistantMessageID: context.assistantMessageID, callID: context.toolCallID,
+          structured: { task_id: child.id }, content: [],
+        })
+        return child
       }))
       // 摘录冻结于本次父历史，排队的extension不能改采稍后的其他调用上下文。
       // 默认跟实际恢复结果，非法ID导致新建仍须带父已读摘要。
@@ -180,7 +189,7 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
       return yield* restore(Effect.raceFirst(background.wait({ id: info.id }).pipe(Effect.map(result => result.info)), background.waitForPromotion(info.id))).pipe(
         Effect.flatMap((result): Effect.Effect<typeof Output.Type, ToolFailure> => {
           if (result?.metadata?.background === true) return Effect.succeed(running)
-          if (result?.status === "error" || result?.status === "cancelled") return new ToolFailure({ message: result.error ?? "Task cancelled" })
+          if (result?.status === "error" || result?.status === "cancelled") return new ToolFailure({ message: ensureTaskResumeVisible(result.error ?? "Task cancelled", child.id) })
           return Effect.succeed({ task_id: child.id, state: "completed" as const, notice, output: result?.output ?? "" })
         }),
         Effect.onInterrupt(() => background.cancel(child.id).pipe(Effect.andThen(sessions.interrupt(child.id)))),
