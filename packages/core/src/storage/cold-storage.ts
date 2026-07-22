@@ -1214,6 +1214,12 @@ type MessagePackItem = {
   oldRef: string | null
 }
 
+// #524：status eligibility 只需要这些字段；完整 freeze/repack 调用方仍可传入整行。
+type MessageValueRow = Pick<
+  typeof MessageTable.$inferSelect,
+  "id" | "session_id" | "data" | "cold_ref" | "cold_key"
+>
+
 // canonical pack 的数组/entry 标点大小可精确增量计算；不能为每个 owner 重编码整个候选 pack，
 // 否则大 Session 会退化为 O(n²)。duplicate key 不增加 raw bytes，但 owner 仍留在当前 chunk 贡献 refcount。
 function splitPacks<T extends { entry: PackEntry }>(owner: OwnerKind, items: T[]) {
@@ -1268,7 +1274,7 @@ function cachedEnvelope(db: TxOrDb, hash: string, owner: OwnerKind, cache?: Map<
   return value
 }
 
-function messageV2Value(db: TxOrDb, row: typeof MessageTable.$inferSelect, cache?: Map<string, Envelope>) {
+function messageV2Value<Row extends MessageValueRow>(db: TxOrDb, row: Row, cache?: Map<string, Envelope>) {
   if (row.cold_key) throw new CorruptionError({ message: "Message v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
   const data = row.cold_ref ? restoreMessage(row.data, cachedEnvelope(db, row.cold_ref, "message", cache), row.cold_ref) : row.data
   const value = extractMessageV2(data)
@@ -1278,7 +1284,7 @@ function messageV2Value(db: TxOrDb, row: typeof MessageTable.$inferSelect, cache
     projection: value.projection,
     entry: { key: value.key, fields: value.fields },
     oldRef: row.cold_ref,
-  } satisfies MessagePackItem
+  }
 }
 
 // 单 owner freeze 也通过 Session/kind pack builder，保证 direct freeze 与 batch compress 产生相同 key/ref 语义。
@@ -1369,7 +1375,13 @@ type PartPackItem = {
   oldRef: string | null
 }
 
-function partV2Value(db: TxOrDb, row: typeof PartTable.$inferSelect, cache?: Map<string, Envelope>) {
+// #524：cold_stats 保留是为了沿用 v1/hot 损坏门禁，而不是把 Stats 当作第二 eligibility 源。
+type PartValueRow = Pick<
+  typeof PartTable.$inferSelect,
+  "id" | "message_id" | "session_id" | "data" | "cold_ref" | "cold_key" | "cold_stats"
+>
+
+function partV2Value<Row extends PartValueRow>(db: TxOrDb, row: Row, cache?: Map<string, Envelope>) {
   if (row.cold_key) throw new CorruptionError({ message: "Part v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
   if (row.cold_stats !== null) throw new CorruptionError({ message: "Hot or v1 Part has an unexpected cold Stats projection", hash: row.cold_ref ?? undefined })
   const data = row.cold_ref ? restorePart(row.data, cachedEnvelope(db, row.cold_ref, "part", cache), row.cold_ref) : row.data
@@ -1381,7 +1393,7 @@ function partV2Value(db: TxOrDb, row: typeof PartTable.$inferSelect, cache?: Map
     stats: projectPartStats(data),
     entry: { key: value.key, fields: value.fields },
     oldRef: row.cold_ref,
-  } satisfies PartPackItem
+  }
 }
 
 // Part direct freeze 与 Message 对称；现有同 Session v2 parts 会在需要时重打包，保证 key/ref 生命周期独立。
@@ -2737,19 +2749,35 @@ function eligibleOwnerCount(db: TxOrDb, now: number, olderThanMs: number) {
   const messageCondition = or(messageCandidate(), isNotNull(MessageTable.cold_ref))
   const partCondition = or(partCandidate(), isNotNull(PartTable.cold_ref))
   if (!messageCondition || !partCondition) return 0
+  // #524：候选投影收窄到 extraction/eligibility 消费列；谓词与边界规则保持不变。
   const messages = db
-    .select()
+    .select({
+      id: MessageTable.id,
+      session_id: MessageTable.session_id,
+      data: MessageTable.data,
+      cold_ref: MessageTable.cold_ref,
+      cold_key: MessageTable.cold_key,
+    })
     .from(MessageTable)
     .where(and(isNull(MessageTable.cold_key), messageCondition))
     .all()
   const parts = db
-    .select()
+    .select({
+      id: PartTable.id,
+      message_id: PartTable.message_id,
+      session_id: PartTable.session_id,
+      data: PartTable.data,
+      cold_ref: PartTable.cold_ref,
+      cold_key: PartTable.cold_key,
+      cold_stats: PartTable.cold_stats,
+    })
     .from(PartTable)
     .where(and(isNull(PartTable.cold_key), partCondition))
     .all()
   const native = db.select().from(SessionMessageTable)
     .where(and(isNull(SessionMessageTable.cold_key), sessionMessageCandidate())).all()
   return (
+    // #524：泛型 messageV2Value/partV2Value 使 status 与 freeze 共享同一 extraction 主路径。
     messages.filter((row) => {
       const value = messageV2Value(db, row, legacyCache)
       if (!value) return false
@@ -3732,10 +3760,21 @@ export function status(db: TxOrDb): StatusReport {
   const pageSize = pragmaNumber(db, "page_size")
   const pages = pragmaNumber(db, "page_count")
   const freelistPages = pragmaNumber(db, "freelist_count")
-  const payloads = db.select().from(ColdStorageTable).all()
+  // #524：status 只汇总同行 metadata；禁止 materialize 不参与报告的压缩 body。
+  const payloads = db
+    .select({
+      hash: ColdStorageTable.hash,
+      kind: ColdStorageTable.kind,
+      raw_bytes: ColdStorageTable.raw_bytes,
+      compressed_bytes: ColdStorageTable.compressed_bytes,
+      ref_count: ColdStorageTable.ref_count,
+    })
+    .from(ColdStorageTable)
+    .all()
   // 所有共享与 mismatch 指标都由真实 owner 反算，stored counter 不能给自身背书。
   const counts = ownerCounts(
     db,
+    // #524：投影行仍携带 hash；ownerCounts 只消费 hash，不读取 payload 列。
     payloads.map((row) => row.hash),
   )
   const coldOwners =
