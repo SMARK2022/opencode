@@ -1,403 +1,236 @@
-From d653e1fc1bd1ba65be4e5e335ec250a6d6b8ce06 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Tue, 28 Apr 2026 15:05:28 +0800
-Subject: [PATCH] feat: enhance tool usage guidance and add context usage tests
-
-- Introduced a new `toolUsageSection` function to provide detailed guidance on tool usage based on registered tools.
-- Added sections for action care, shared worktree, verification, context continuity, and output efficiency to improve user instructions.
-- Refactored static sections into a dedicated function for better organization.
-- Created comprehensive tests for context usage, covering message counting, tool definitions, and context limits.
-- Implemented filtering for compacted message history while retaining relevant summaries and tails.
-
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
+diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..710e450f47df7cf1d68d16c95623113978728bb6
 --- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
-@@ -0,0 +1,305 @@
-+import { createMemo, createResource, For, Show } from "solid-js"
-+import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
-+import { useDialog } from "@tui/ui/dialog"
-+import { useKeybind } from "@tui/context/keybind"
-+import { useLocal } from "@tui/context/local"
-+import { useProject } from "@tui/context/project"
-+import { useSync } from "@tui/context/sync"
-+import { useTheme } from "@tui/context/theme"
-+import { TextAttributes } from "@opentui/core"
-+import { Locale } from "@/util"
-+import {
-+  computeContextData,
-+  type ContextCategoryColor,
-+  type ContextUsageData,
-+  type GridSquare,
-+} from "../../util/context-usage"
-+
-+function formatTokens(tokens: number) {
-+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}m`
-+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`
-+  return String(tokens)
-+}
-+
-+function percent(tokens: number, max: number) {
-+  if (!max) return "0.0%"
-+  return `${((tokens / max) * 100).toFixed(1)}%`
-+}
-+
-+function fixed(input: string, width: number) {
-+  return Locale.truncate(input, width).padEnd(width)
-+}
-+
-+function color(theme: ReturnType<typeof useTheme>["theme"], name: ContextCategoryColor) {
-+  return theme[name] ?? theme.textMuted
-+}
-+
-+function categoryMarker(name: string) {
-+  if (name === "System prompt") return "◆"
-+  if (name === "Instructions") return "◇"
-+  if (name === "Skills") return "●"
-+  if (name === "Tool definitions") return "◦"
-+  if (name === "Input Messages") return "▰"
-+  if (name === "Output Messages") return "▱"
-+  if (name === "Free space") return "·"
-+  return "×"
-+}
-+
-+function displayPath(input: string) {
-+  return input.split(/[\\/]/).pop() || input
-+}
-+
-+export function contextUsageFooter(data: ContextUsageData, columns: number) {
-+  const usage = data.details.usage
-+  const width = Math.max(36, columns - 18)
-+  const text =
-+    usage.total > 0
-+      ? [
-+          `Session Totals`,
-+          `Input ${formatTokens(usage.input)}`,
-+          `Output ${formatTokens(usage.output)}`,
-+          usage.reasoning > 0 ? `Reason ${formatTokens(usage.reasoning)}` : undefined,
-+          `Cache W/R ${formatTokens(usage.cacheWrite)}/${formatTokens(usage.cacheRead)}`,
-+          usage.cost > 0 ? `Cost $${usage.cost.toFixed(4)}` : undefined,
-+        ].filter(Boolean).join("  ")
-+      : [
-+          `Current Window`,
-+          `Used ${formatTokens(data.totalTokens)}`,
-+          `Free ${formatTokens(data.categories.find((item) => item.name === "Free space")?.tokens ?? 0)}`,
-+          `Usable ${formatTokens(data.details.window.usableInput)}`,
-+          `Buffer ${formatTokens(data.details.window.compactionBuffer)}`,
-+        ].join("  ")
-+  return fixed(Locale.truncateMiddle(text, width), width)
-+}
-+
-+function ContextGrid(props: { rows: GridSquare[][] }) {
-+  const { theme } = useTheme()
-+  const gridColor = (name: ContextCategoryColor) => {
-+    if (name === "primary") return theme.primary
-+    if (name === "secondary") return theme.secondary
-+    if (name === "warning") return theme.warning
-+    if (name === "accent") return theme.accent
-+    if (name === "info") return theme.info
-+    if (name === "success") return theme.success
-+    return theme.textMuted
-+  }
-+
-+  return (
-+    <box flexDirection="column" flexShrink={0}>
-+      <For each={props.rows}>
-+        {(row) => (
-+          <box flexDirection="row" flexShrink={0}>
-+            <For each={row}>
-+              {(square) => (
-+                <text fg={gridColor(square.color)} flexShrink={0}>
-+                  {square.symbol + " "}
-+                </text>
-+              )}
-+            </For>
-+          </box>
-+        )}
-+      </For>
-+    </box>
-+  )
-+}
-+
-+function CategoryList(props: { data: ContextUsageData }) {
-+  const { theme } = useTheme()
-+  const labelWidth = 20
-+  const valueWidth = 14
-+  const groups = createMemo(() => [
-+    {
-+      title: "Prompt",
-+      categories: props.data.categories.filter((item) =>
-+        ["System prompt", "Instructions", "Skills", "Tool definitions"].includes(item.name),
-+      ),
-+    },
-+    {
-+      title: "Conversation",
-+      categories: props.data.categories.filter((item) => ["Input Messages", "Output Messages"].includes(item.name)),
-+    },
-+    {
-+      title: "Window",
-+      categories: props.data.categories.filter((item) =>
-+        ["Free space", "Model reserve", "Autocompact buffer"].includes(item.name),
-+      ),
-+    },
-+  ].filter((group) => group.categories.length > 0))
-+
-+  return (
-+    <box flexDirection="column" gap={1} flexGrow={1} paddingLeft={2}>
-+      <For each={groups()}>
-+        {(group) => (
-+          <box flexDirection="column" gap={0}>
-+            <box height={1}><text fg={theme.textMuted}>{group.title}</text></box>
-+            <For each={group.categories}>
-+              {(category) => (
-+                <box flexDirection="row" justifyContent="space-between" height={1}>
-+                  <box flexDirection="row" gap={1} flexShrink={1}>
-+                    <text fg={color(theme, category.color)} flexShrink={0}>
-+                      {categoryMarker(category.name)}
-+                    </text>
-+                    <text fg={theme.text}>{fixed(category.name, labelWidth)}</text>
-+                  </box>
-+                  <text fg={theme.textMuted} flexShrink={0}>
-+                    {fixed(`${formatTokens(category.tokens)} ${percent(category.tokens, props.data.maxTokens)}`.padStart(valueWidth), valueWidth)}
-+                  </text>
-+                </box>
-+              )}
-+            </For>
-+          </box>
-+        )}
-+      </For>
-+    </box>
-+  )
-+}
-+
-+export function contextUsageDetailLines(data: ContextUsageData, columns: number) {
-+  const messages = data.details.messages
-+  const lineWidth = Math.max(36, columns - 8)
-+  const detailWidth = Math.max(18, Math.min(58, Math.floor(columns / 3)))
-+  const files = [
-+    ...data.details.instructions.map((item) => ({ label: item.path, tokens: item.tokens })),
-+    ...data.details.loadedInstructions.map((item) => ({ label: item.path, tokens: item.tokens })),
-+  ]
-+  const input = [
-+    `User ${formatTokens(messages.userText)}`,
-+    `Tool results ${formatTokens(messages.toolResults)}`,
-+    `Files ${formatTokens(messages.attachments)}`,
-+  ]
-+    .filter(Boolean)
-+    .join("  ")
-+  const output = [
-+    `Text ${formatTokens(messages.assistantText)}`,
-+    `Reasoning ${formatTokens(messages.reasoning)}`,
-+    `Tool calls ${formatTokens(messages.toolCalls)}`,
-+    messages.compactionSummary > 0 ? `Summary ${formatTokens(messages.compactionSummary)}` : undefined,
-+  ]
-+    .filter(Boolean)
-+    .join("  ")
-+  const prompt = [
-+    ...files.slice(0, 1).map((item) => `Instruction ${formatTokens(item.tokens)} ${Locale.truncateMiddle(displayPath(item.label), detailWidth)}`),
-+    data.details.toolDefs.length > 0 ? `Tools ${data.details.toolDefs.length}` : undefined,
-+    data.details.skills.length > 0 ? `Skills ${data.details.skills.length}` : undefined,
-+  ]
-+    .filter(Boolean)
-+    .join("  ")
-+
-+  return [
-+    input ? `Input   ${input}` : undefined,
-+    output ? `Output  ${output}` : undefined,
-+    prompt ? `Prompt  ${prompt}` : undefined,
-+  ]
-+    .filter((line): line is string => !!line && line.trim().length > 0)
-+    .map((line) => fixed(Locale.truncateMiddle(line, lineWidth), lineWidth))
-+}
-+
-+function Details(props: { data: ContextUsageData; columns: number }) {
-+  const { theme } = useTheme()
-+  const lines = createMemo(() => contextUsageDetailLines(props.data, props.columns))
-+  return (
-+    <box flexDirection="column" gap={0} paddingTop={1}>
-+      <For each={lines()}>
-+        {(line) => (
-+          <box height={1}>
-+            <text fg={theme.textMuted}>{line}</text>
-+          </box>
-+        )}
-+      </For>
-+    </box>
-+  )
-+}
-+
-+export function ContextUsagePanel(props: { sessionID: string; onClose: () => void }) {
-+  const sync = useSync()
-+  const local = useLocal()
-+  const project = useProject()
-+  const dimensions = useTerminalDimensions()
-+  const dialog = useDialog()
-+  const keybind = useKeybind()
-+  const { theme } = useTheme()
-+  useRenderer()
-+
-+  const input = createMemo(() => {
-+    const messages = [...(sync.data.message[props.sessionID] ?? [])]
-+    const parts = Object.fromEntries(messages.map((msg) => [msg.id, [...(sync.data.part[msg.id] ?? [])]]))
-+    const paths = project.instance.path()
-+    return {
-+      messages,
-+      parts,
-+      providers: [...sync.data.provider],
-+      config: sync.data.config,
-+      agents: [...sync.data.agent],
-+      lastUserModel: local.model.current(),
-+      vcs: sync.data.vcs,
-+      paths: { cwd: paths.directory, worktree: paths.worktree },
-+      columns: dimensions().width,
-+    }
-+  })
-+
-+  const [data] = createResource(() => computeContextData(input()))
-+
-+  useKeyboard((evt) => {
-+    if (dialog.stack.length > 0) return
-+    if (evt.name === "escape" || (evt.ctrl && evt.name === "c") || keybind.match("app_exit", evt)) {
-+      props.onClose()
-+      evt.preventDefault()
-+      evt.stopPropagation()
-+    }
-+  })
-+
-+  return (
-+    <box
-+      flexDirection="column"
-+      backgroundColor={theme.backgroundPanel}
-+      borderStyle="rounded"
-+      borderColor={theme.border}
-+      paddingLeft={1}
-+      paddingRight={1}
-+      marginTop={1}
-+    >
-+      <box flexDirection="row" justifyContent="space-between" marginBottom={1} height={1}>
-+        <box flexDirection="row" gap={1}>
-+          <text fg={theme.primary}>{"◇"}</text>
-+          <text fg={theme.text} attributes={TextAttributes.BOLD}>
-+            Context usage
-+          </text>
-+        </box>
-+        <Show when={data()}>
-+          {(d) => (
-+            <text fg={theme.textMuted}>
-+              {`${formatTokens(d().totalTokens)} / ${formatTokens(d().maxTokens)} (${(d().percentage * 100).toFixed(1)}%)`}
-+            </text>
-+          )}
-+        </Show>
-+      </box>
-+
-+      <Show when={data()}>
-+        {(d) => (
-+          <box flexDirection="column" gap={1}>
-+            <box height={1}>
-+              <text fg={theme.textMuted}>{d().model}</text>
-+            </box>
-+            <box flexDirection="row" gap={2}>
-+              <ContextGrid rows={d().gridRows} />
-+              <CategoryList data={d()} />
-+            </box>
-+            <Details data={d()} columns={dimensions().width} />
-+          </box>
-+        )}
-+      </Show>
-+
-+      <box flexDirection="row" justifyContent="space-between" marginTop={1} height={1}>
-+        <Show when={data()} fallback={<text fg={theme.textMuted}>Loading...</text>}>
-+          {(d) => <text fg={theme.textMuted}>{contextUsageFooter(d(), dimensions().width)}</text>}
-+        </Show>
-+        <box flexDirection="row" gap={1}>
-+          <text fg={theme.text} attributes={TextAttributes.BOLD}>
-+            esc
-+          </text>
-+          <text fg={theme.textMuted}>close</text>
-+        </box>
-+      </box>
-+    </box>
-+  )
-+}
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index c06af892912acd485ad653b8c5146b9cd1163d72..50c4512292184435b8a35a9efbc59aa173a7a849 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -87,6 +87,7 @@ import { Filesystem } from "@/util"
- import { Global } from "@opencode-ai/core/global"
- import { PermissionPrompt } from "./permission"
- import { QuestionPrompt } from "./question"
-+import { ContextUsagePanel } from "./context-usage"
- import { DialogExportOptions } from "../../ui/dialog-export-options"
- import * as Model from "../../util/model"
- import { formatTranscript } from "../../util/transcript"
-@@ -150,8 +151,11 @@ export function Session() {
-     if (session()?.parentID) return []
-     return children().flatMap((x) => sync.data.question[x.id] ?? [])
-   })
--  const visible = createMemo(() => !session()?.parentID && permissions().length === 0 && questions().length === 0)
--  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0)
-+  const [contextVisible, setContextVisible] = createSignal(false)
-+  const visible = createMemo(
-+    () => !session()?.parentID && permissions().length === 0 && questions().length === 0 && !contextVisible(),
-+  )
-+  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0 || contextVisible())
- 
-   const pending = createMemo(() => {
-     return messages().findLast((x) => x.role === "assistant" && !x.time.completed)?.id
-@@ -537,6 +541,18 @@ export function Session() {
-         }
-       },
-     },
-+    {
-+      title: contextVisible() ? "Hide context usage" : "Context usage",
-+      value: "session.context",
-+      category: "Session",
-+      slash: {
-+        name: "context",
-+      },
-+      onSelect: (dialog) => {
-+        dialog.clear()
-+        setContextVisible((visible) => !visible)
-+      },
-+    },
-     {
-       title: "Unshare session",
-       value: "session.unshare",
-@@ -1201,6 +1217,9 @@ export function Session() {
-               <Show when={permissions().length === 0 && questions().length > 0}>
-                 <QuestionPrompt request={questions()[0]} />
-               </Show>
-+              <Show when={permissions().length === 0 && questions().length === 0 && contextVisible()}>
-+                <ContextUsagePanel sessionID={route.sessionID} onClose={() => setContextVisible(false)} />
-+              </Show>
-               <Show when={session()?.parentID}>
-                 <SubagentFooter />
-               </Show>
-diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b99393adc8dc2
---- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-@@ -0,0 +1,737 @@
++++ b/packages/tui/src/util/context-usage.ts
+@@ -0,0 +1,1028 @@
++// 上下文使用量估算工具：为 TUI 上下文使用面板提供 token 分类、网格可视化与窗口详情。
++// V2 将 TUI 拆分为独立包，无法依赖 @opencode-ai/opencode；
++// 原 @/session/system、@/session/overflow、@/skill 的逻辑已内联至本文件。
 +import fs from "fs/promises"
++import { existsSync, readFileSync } from "node:fs"
 +import os from "os"
 +import path from "path"
 +import { fileURLToPath } from "url"
 +import matter from "gray-matter"
 +import type { Agent, Config, Message, Part, Provider, VcsInfo } from "@opencode-ai/sdk/v2"
 +import { Flag } from "@opencode-ai/core/flag/flag"
-+import { estimate as estimateTokens } from "@/util/token"
-+import { Skill } from "@/skill"
-+import {
-+  provider as systemProviderPrompt,
-+  skillsSection as systemSkillsSection,
-+  staticSections as systemStaticSections,
-+  toolUsageSection as systemToolUsageSection,
-+} from "@/session/system"
-+import { usable as overflowUsable } from "@/session/overflow"
++import { estimate as estimateTokens } from "@opencode-ai/core/util/token"
 +import { estimateDataUrlInputTokens } from "./token-estimate"
++
++// 内联 truthy：检查环境变量是否为 truthy 值（"true" 或 "1"）
++// V2 Flag 模块未导出 truthy，此处内联以避免跨包导出解析问题
++function truthy(key: string) {
++  const value = process.env[key]?.toLowerCase()
++  return value === "true" || value === "1"
++}
++
++// ── 内联：原 @/session/system 的工具使用指引与静态段落 ───────────────────
++
++// 与 runtime system.ts provider() 同源：从 monorepo opencode prompt 文本按模型路由加载
++// V2 包边界禁止 import @opencode-ai/opencode，故直接读 packages/opencode/src/session/prompt/*.txt
++const SESSION_PROMPT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../../opencode/src/session/prompt")
++const sessionPromptCache = new Map<string, string>()
++
++function loadSessionPrompt(filename: string) {
++  const hit = sessionPromptCache.get(filename)
++  if (hit !== undefined) return hit
++  // 缺失时返回空串：估算降级但不抛错（发布包旁路可能无 monorepo 布局）
++  const full = path.join(SESSION_PROMPT_DIR, filename)
++  const text = existsSync(full) ? readFileSync(full, "utf8") : ""
++  sessionPromptCache.set(filename, text)
++  return text
++}
++
++function systemProviderPrompt(model: Provider["models"][string]): string[] {
++  // 模型 id 优先 api.id，与 runtime Provider.Model.api.id 选择语义一致
++  const id = (model.api?.id ?? model.id).toLowerCase()
++  if (id.includes("muse-spark")) return [loadSessionPrompt("meta.txt")]
++  if (id.includes("gpt-4") || id.includes("o1") || id.includes("o3")) return [loadSessionPrompt("beast.txt")]
++  if (id.includes("gpt")) {
++    if (id.includes("codex")) return [loadSessionPrompt("codex.txt")]
++    return [loadSessionPrompt("gpt.txt")]
++  }
++  if (id.includes("gemini-")) return [loadSessionPrompt("gemini.txt")]
++  if (id.includes("claude")) return [loadSessionPrompt("anthropic.txt")]
++  if (id.includes("trinity")) return [loadSessionPrompt("trinity.txt")]
++  if (id.includes("minimax") || id.includes("mini-max")) return [loadSessionPrompt("minimax.txt")]
++  if (id.includes("deepseek")) return [loadSessionPrompt("deepseek.txt")]
++  if (id.includes("kimi")) return [loadSessionPrompt("kimi.txt")]
++  return [loadSessionPrompt("default.txt")]
++}
++
++// 工具使用指引：按已注册工具生成 per-tool 专用替代指引，并强调批量并行与安全写入
++function toolUsageSection(registeredTools: string[]) {
++  const has = (name: string) => registeredTools.includes(name)
++  const items: string[] = [
++    `Do NOT use the bash tool when a dedicated tool is available.`,
++    `Using dedicated tools lets the user review and track your work:`,
++  ]
++  // 按已注册工具生成专用替代指引
++  if (has("read")) items.push(` - To read files use the read tool instead of cat, head, tail, or sed`)
++  if (has("edit")) items.push(` - To edit files use the edit tool instead of sed or awk`)
++  if (has("write")) items.push(` - To create files use the write tool instead of echo redirection or heredoc`)
++  if (has("grep")) items.push(` - To search file content use the grep tool instead of grep/rg`)
++  if (has("glob")) items.push(` - To find files use the glob tool instead of find or ls`)
++  if (has("todowrite")) items.push(` - For non-trivial multi-step work, use the todowrite tool to track progress`)
++  if (process.platform === "win32") {
++    items.push(
++      ` - On Windows, do not use Unix text utilities such as tail/head/sed/awk/grep for file operations. Use read/grep/glob, or shell-native commands only when a terminal operation truly requires shell execution.`,
++    )
++  }
++  // 批量并行调用指引：先规划完整批次，再一次性发出
++  items.push(
++    ` - Reserve bash for system commands and terminal operations requiring shell execution`,
++    ``,
++    `THINK FIRST before using tools. Before your first tool call, decide the FULL first batch of independent reads, searches, globs, directory listings, and status checks you already know you need.`,
++    `BATCH independent tool calls in the SAME response so they can run in parallel. Do not issue only one discovery call when several independent discovery calls are already obvious.`,
++    `For directory surveys, use a wide first wave. Example independent batch: glob("*"), glob("*/*"), glob("*/package.json"), glob("*/README*"), glob("*/src/*"), glob("*/packages/*").`,
++    `After the first batch returns, identify all newly relevant directories/files and issue the next independent batch together.`,
++    `BAD: glob("*") -> wait -> glob("*/*") -> wait -> glob("one-dir/*").`,
++    `GOOD: broad independent batch -> summarize discovered structure -> second broad independent batch for important discovered roots.`,
++    `Sequential calls are ONLY for true dependencies, conflicts, or cases where the next target cannot be known without the previous result.`,
++    `DO NOT chain bash commands with separators like \`echo "====";\` to simulate grouped output; it renders poorly for the user.`,
++    `Use bash only when dedicated tools are insufficient or when real terminal execution is required.`,
++    // 并行写入安全：仅限非冲突文件
++    `Parallel writes are allowed ONLY when target files or edit ranges cannot conflict.`,
++    // 单文件多处修改优先用一次编辑
++    `For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.`,
++  )
++  if (has("todo")) {
++    items.push(
++      ``,
++      `Keep todo state current while working: only one item should be in_progress at a time.`,
++      `Move an item to in_progress before completing it; do not jump directly from pending to completed.`,
++      `If your understanding changes, update the todo list before continuing implementation.`,
++    )
++  }
++  return ["# Using your tools", ...items].join("\n")
++}
++
++// 静态指引段：动作谨慎、共享工作树、验证、上下文连续性、输出效率
++const actionCareSection = `# Executing actions with care
++Carefully consider the reversibility and blast radius of actions before proceeding:
++- Local, reversible actions (editing files, running tests, reading code): proceed freely.
++- Actions that are hard to reverse or affect shared state: confirm with the user first.
++
++
++Actions that typically require user confirmation before proceeding:
++- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes
++- Force-pushing, git reset --hard, amending published commits
++- Pushing code, creating or closing PRs, commenting on issues
++- Sending messages to external services (Slack, email, webhooks)
++- Modifying CI/CD pipelines or shared infrastructure
++
++When you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user's in-progress work.`
++
++const sharedWorktreeSection = `# Shared worktree
++You may be working in a dirty worktree with user or other-agent changes.
++- If unknown changes are in files you need to edit, read them first and work with the current contents.
++- If unknown changes are unrelated to your task, ignore them.
++- If unknown changes directly block your task or make the correct edit ambiguous, ask the user one concise question.
++- Never revert, overwrite, or clean up changes you did not make unless explicitly asked.`
++
++const verificationSection = `# Verification
++Before reporting a coding task complete, verify the change when feasible.
++Start with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.
++If you cannot verify, state that plainly and explain the blocker.`
++
++const contextContinuitySection = `# Context continuity
++The conversation may be compacted or resumed from a summary when context gets long.
++After compaction, resume from the summary and current messages rather than restarting from scratch.
++Compaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.
++Before your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.`
++
++const outputEfficiencySection = `# Output efficiency
++Go straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.
++
++Focus text output on:
++- Decisions that need the user's input
++- High-level status updates at key milestones (e.g. "build passing", "all tests green")
++- Errors or blockers that change the plan
++
++If you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`
++
++function staticSections() {
++  return [actionCareSection, sharedWorktreeSection, verificationSection, contextContinuitySection, outputEfficiencySection]
++}
++
++// ── 内联：原 @/skill 的 Skill.fmt 与 escapeHtml ───────────────────────────
++
++// 转义 XML 特殊字符：技能 location 含用户可控路径，嵌入 XML 前必须转义以防注入破坏 prompt 结构
++function escapeHtml(value: string) {
++  return value
++    .replaceAll("&", "&amp;")
++    .replaceAll("<", "&lt;")
++    .replaceAll(">", "&gt;")
++    .replaceAll('"', "&quot;")
++    .replaceAll("'", "&#39;")
++}
++
++// 技能列表格式化：verbose 模式输出 XML 标签结构，非 verbose 输出 Markdown 列表
++function skillFmt(
++  list: Array<{ name: string; description?: string; location: string }>,
++  opts: { verbose: boolean },
++) {
++  const described = list.filter((skill) => skill.description !== undefined)
++  if (described.length === 0) return "No skills are currently available."
++  if (opts.verbose) {
++    return [
++      "<available_skills>",
++      ...described
++        .toSorted((a, b) => a.name.localeCompare(b.name))
++        .flatMap((skill) => [
++          "  <skill>",
++          `    <name>${skill.name}</name>`,
++          `    <description>${skill.description}</description>`,
++          `    <location>${escapeHtml(skill.location)}</location>`,
++          "  </skill>",
++        ]),
++      "</available_skills>",
++    ].join("\n")
++  }
++  return [
++    "## Available Skills",
++    ...described
++      .toSorted((a, b) => a.name.localeCompare(b.name))
++      .map((skill) => `- **${skill.name}**: ${skill.description}`),
++  ].join("\n")
++}
++
++function skillsSection(list: Array<{ name: string; description?: string; location: string }>) {
++  return [
++    "Skills provide specialized instructions and workflows for specific tasks.",
++    "Use the skill tool to load a skill when a task matches its description.",
++    // agents 对技能信息的吸收在 verbose 模式下更好，因此此处用 verbose
++    skillFmt(list, { verbose: true }),
++  ].join("\n")
++}
++
++// ── 内联：原 @/session/overflow 的 usable ─────────────────────────────────
++
++// 压缩缓冲区上界：从输入限制中预留此值以保证自动压缩触发前有余量
++const COMPACTION_BUFFER = 20_000
++
++// 全局输出 token 上限：与模型自身限制取较小值，退化时回退到此全局上限
++const OUTPUT_TOKEN_MAX = 32_000
++
++function maxOutputTokens(model: Provider["models"][string], outputTokenMax = OUTPUT_TOKEN_MAX): number {
++  return Math.min(model.limit.output, outputTokenMax) || outputTokenMax
++}
++
++// 可用输入 token：从输入限制中扣除压缩缓冲区（或模型最大输出 token 的较小值）
++function overflowUsable(input: { cfg: Config; model: Provider["models"][string]; outputTokenMax?: number }): number {
++  const context = input.model.limit.context
++  if (context === 0) return 0
++  const reserved =
++    (input.cfg as { compaction?: { reserved?: number } }).compaction?.reserved ??
++    Math.min(COMPACTION_BUFFER, maxOutputTokens(input.model, input.outputTokenMax))
++  return input.model.limit.input
++    ? Math.max(0, input.model.limit.input - reserved)
++    : Math.max(0, context - maxOutputTokens(input.model, input.outputTokenMax))
++}
++
++// ── 上下文使用数据模型 ───────────────────────────────────────────────────
 +
 +type WithParts = {
 +  info: Message
@@ -482,16 +315,19 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  toolDefinitions?: Array<{ name: string; text: string }>
 +}
 +
++// 指令文件查找顺序：AGENTS.md → CLAUDE.md（除非禁用）→ CONTEXT.md
 +const INSTRUCTION_FILES = [
 +  "AGENTS.md",
-+  ...(Flag.OPENCODE_DISABLE_CLAUDE_CODE_PROMPT ? [] : ["CLAUDE.md"]),
++  ...(truthy("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT") ? [] : ["CLAUDE.md"]),
 +  "CONTEXT.md",
 +]
 +
 +function estimate(input: unknown) {
++  // 字符串直接估算避免序列化开销；对象走稳定序列化以保证相同结构产生可复现的 token 数
 +  return estimateTokens(typeof input === "string" ? input : stableJson(input))
 +}
 +
++// 稳定 JSON 序列化：按键排序以保证相同结构的 token 估算可复现
 +function stableJson(input: unknown): string {
 +  if (input === undefined) return ""
 +  try {
@@ -505,36 +341,44 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +}
 +
 +function estimateFileToken(url: string, mime: string) {
++  // data: URL 内联附件按 base64 解码后估算，与远程 URL 的纯字符串估算逻辑不同
 +  if (url.startsWith("data:")) return estimateDataUrlInputTokens(url, mime)
 +  return estimate(url)
 +}
 +
++// 过滤已压缩历史：保留最近一次压缩摘要后的尾部消息，丢弃被压缩的旧消息
 +export function filterCompactedMessages(msgs: Iterable<WithParts>) {
 +  const result = [] as WithParts[]
 +  const completed = new Set<string>()
 +  let retain: string | undefined
 +  for (const msg of msgs) {
 +    result.push(msg)
++    // 已找到保留目标，持续收集直到命中
 +    if (retain) {
 +      if (msg.info.id === retain) break
 +      continue
 +    }
++    // 遇到带 compaction 部件的用户消息，确定保留起点
 +    if (msg.info.role === "user" && completed.has(msg.info.id)) {
 +      const part = msg.parts.find((item) => item.type === "compaction")
 +      if (!part) continue
++      // 没有 tail_start_id 表示全部压缩，无需保留任何旧消息
 +      if (!part.tail_start_id) break
 +      retain = part.tail_start_id
 +      if (msg.info.id === retain) break
 +      continue
 +    }
++    // 助手消息完成且带摘要时，标记其父用户消息为已完成轮次
 +    if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error) {
 +      completed.add(msg.info.parentID)
 +    }
 +  }
++  // 反转为时间正序
 +  result.reverse()
 +  return result
 +}
 +
++// 按部件类型统计消息 token：区分用户文本、助手文本、推理、工具调用与结果、附件、压缩摘要
 +function messageTokens(messages: WithParts[]) {
 +  const details: ContextUsageData["details"]["messages"] = {
 +    userText: 0,
@@ -545,6 +389,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +    attachments: 0,
 +    compactionSummary: 0,
 +  }
++  // read 工具加载的指令路径，用于后续去重
 +  const loadedInstructionPaths = new Set<string>()
 +  const text = [] as string[]
 +  const toolNames = new Set<string>()
@@ -553,6 +398,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +    for (const part of msg.parts) {
 +      switch (part.type) {
 +        case "text": {
++          // synthetic 和 ignored 的文本部件不发送到 API，跳过统计
 +          if (part.ignored || part.synthetic) continue
 +          text.push(part.text)
 +          const tokens = estimate(part.text)
@@ -562,16 +408,19 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +          break
 +        }
 +        case "reasoning":
++          // 推理 token 单独计入输出分类，不并入助手文本以保留可观测性
 +          details.reasoning += estimate(part.text)
 +          break
 +        case "tool": {
 +          toolNames.add(part.tool)
 +          details.toolCalls += estimate(part.state.input)
 +          if (part.state.status === "completed") {
++            // read 工具的 loaded 元数据记录已加载文件路径
 +            const loaded = part.tool === "read" ? part.state.metadata?.loaded : undefined
 +            if (Array.isArray(loaded)) {
 +              for (const item of loaded) if (typeof item === "string") loadedInstructionPaths.add(item)
 +            }
++            // 已压缩的工具结果用占位符估算，避免读取已清除的大体积输出
 +            details.toolResults += part.state.time.compacted
 +              ? estimate("[Old tool result content cleared]")
 +              : estimate(part.state.output)
@@ -579,14 +428,17 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +              details.attachments += estimateFileToken(attachment.url, attachment.mime)
 +            }
 +          }
++          // pending 状态估算 raw 输入：尚未执行，仅 schema 调用部分计入工具调用开销
 +          if (part.state.status === "pending") details.toolCalls += estimate(part.state.raw)
 +          if (part.state.status === "error") details.toolResults += estimate(part.state.error)
 +          break
 +        }
 +        case "file":
++          // 文件附件按 URL 类型分流估算：data: URL 解码后算，远程 URL 估算字符串本身
 +          details.attachments += estimateFileToken(part.url, part.mime)
 +          break
 +        case "subtask":
++          // 子任务 prompt+description 计入用户文本：子任务由用户侧发起，语义等价于用户输入
 +          details.userText += estimate(`${part.prompt}\n${part.description}`)
 +          break
 +      }
@@ -602,6 +454,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  }
 +}
 +
++// 汇总已确认用量：优先从 step-finish 部件提取，无确认时回退到助手消息自身的 token 字段
 +function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"] {
 +  const usage: ContextUsageData["details"]["usage"] = {
 +    input: 0,
@@ -618,6 +471,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +      if (part.type !== "step-finish") continue
 +      confirmed = true
 +      usage.input += part.tokens.input
++      // output 包含 reasoning，因为推理 token 也计入输出
 +      usage.output += part.tokens.output + part.tokens.reasoning
 +      usage.reasoning += part.tokens.reasoning
 +      usage.cacheRead += part.tokens.cache.read
@@ -626,6 +480,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +    }
 +  }
 +
++  // 无 step-finish 确认时，回退到助手消息自身的 token 累计
 +  if (!confirmed) {
 +    for (const msg of messages) {
 +      if (msg.info.role !== "assistant") continue
@@ -637,11 +492,13 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +      usage.cost += msg.info.cost
 +    }
 +  }
++  // total 不含 cost：cost 是金额而非 token，单独累计避免单位混淆
 +  usage.total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite
 +  return usage
 +}
 +
 +async function exists(filepath: string) {
++  // 静默吞错：文件不存在是扫描时的预期分支，不应抛出中断遍历
 +  try {
 +    await fs.access(filepath)
 +    return true
@@ -651,6 +508,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +}
 +
 +async function readText(filepath: string) {
++  // 静默吞错：读取失败返回空串，与"文件不存在"语义一致，避免调用方逐个 try/catch
 +  try {
 +    return await fs.readFile(filepath, "utf8")
 +  } catch {
@@ -658,20 +516,24 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  }
 +}
 +
++// 从 start 向上遍历到 stop（或根目录），返回所有祖先目录（含 start）
 +function parents(start: string, stop?: string) {
 +  const result: string[] = []
 +  let current = path.resolve(start)
++  // stop 为工作树根边界：向上遍历不越过 worktree，避免扫描到无关的上级目录
 +  const root = stop ? path.resolve(stop) : path.parse(current).root
 +  while (true) {
 +    result.push(current)
 +    if (current === root) break
 +    const next = path.dirname(current)
++    // 已到根，防止无限循环
 +    if (next === current) break
 +    current = next
 +  }
 +  return result
 +}
 +
++// 向上查找同名文件的全部匹配（先近后远）
 +async function findUpAll(filename: string, start: string, stop?: string) {
 +  const result: string[] = []
 +  for (const dir of parents(start, stop)) {
@@ -681,44 +543,48 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  return result
 +}
 +
++// 递归扫描技能文件：收集目录树中所有 SKILL.md 的绝对路径
 +async function scanSkillFiles(root: string, result: Set<string>) {
-+  let entries: Awaited<ReturnType<typeof fs.readdir>>
-+  try {
-+    entries = await fs.readdir(root, { withFileTypes: true })
-+  } catch {
-+    return
-+  }
++  // 使用 .catch 避免 let 类型标注导致的 Dirent 重载歧义
++  const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => null)
++  if (!entries) return
 +  for (const entry of entries) {
-+    const item = path.join(root, entry.name)
++    // entry.name 在某些类型版本下为 Buffer，强制转为 string
++    const name = entry.name as string
++    const item = path.join(root, name)
 +    if (entry.isDirectory()) {
 +      await scanSkillFiles(item, result)
 +      continue
 +    }
-+    if (entry.isFile() && entry.name === "SKILL.md") result.add(path.resolve(item))
++    if (entry.isFile() && name === "SKILL.md") result.add(path.resolve(item))
 +  }
 +}
 +
++// 收集指令文件：优先用外部传入，否则按 INSTRUCTION_FILES 顺序向上查找
 +async function gatherInstructionFiles(input: ComputeContextDataInput) {
 +  if (input.instructionFiles) return input.instructionFiles
 +  const paths = new Set<string>()
 +  const cwd = input.paths.cwd
 +  const worktree = input.paths.worktree
 +
++  // 项目级指令文件：从 cwd 向上查找到 worktree 边界
 +  if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG) {
 +    for (const file of INSTRUCTION_FILES) {
 +      const matches = await findUpAll(file, cwd, worktree)
 +      if (matches.length > 0) {
 +        for (const match of matches) paths.add(path.resolve(match))
++        // 首个命中的指令文件类型即停止：AGENTS.md 与 CLAUDE.md 不应同时加载，避免重复
 +        break
 +      }
 +    }
 +  }
 +
 +  const home = input.paths.home ?? os.homedir()
++  // 全局指令文件：配置目录或 home 下的 AGENTS.md / CLAUDE.md
 +  const globalFiles = [
 +    ...(Flag.OPENCODE_CONFIG_DIR ? [path.join(Flag.OPENCODE_CONFIG_DIR, "AGENTS.md")] : []),
 +    ...(input.paths.config ? [path.join(input.paths.config, "AGENTS.md")] : []),
-+    ...(!Flag.OPENCODE_DISABLE_CLAUDE_CODE_PROMPT ? [path.join(home, ".claude", "CLAUDE.md")] : []),
++    ...(!truthy("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT") ? [path.join(home, ".claude", "CLAUDE.md")] : []),
 +  ]
 +  for (const file of globalFiles) {
 +    if (await exists(file)) {
@@ -727,9 +593,11 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +    }
 +  }
 +
++  // 用户配置的额外指令：支持 ~ 展开和绝对/相对路径
 +  const configured = Array.isArray(input.config?.instructions) ? input.config.instructions : []
 +  for (const raw of configured) {
 +    if (typeof raw !== "string") continue
++    // 跳过远程 URL，仅处理本地文件
 +    if (raw.startsWith("https://") || raw.startsWith("http://")) continue
 +    const expanded = raw.startsWith("~/") ? path.join(home, raw.slice(2)) : raw
 +    const matches = path.isAbsolute(expanded)
@@ -746,6 +614,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  return files
 +}
 +
++// 将技能列表转换为 Skill.Info 兼容形状（content 留空，仅用于格式化）
 +function skillInfo(skills: Array<{ name: string; description: string; path: string }>) {
 +  return skills.map((skill) => ({
 +    name: skill.name,
@@ -755,6 +624,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  }))
 +}
 +
++// 收集技能：优先用外部传入，否则扫描 .claude/.agents/.opencode 等目录
 +async function gatherSkills(input: ComputeContextDataInput) {
 +  if (input.skills) return input.skills
 +  const matches = new Set<string>()
@@ -762,7 +632,8 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  const cwd = input.paths.cwd
 +  const worktree = input.paths.worktree
 +
-+  if (!Flag.OPENCODE_DISABLE_EXTERNAL_SKILLS) {
++  // 外部技能目录（.claude/skills、.agents/skills）：home 和项目祖先目录
++  if (!truthy("OPENCODE_DISABLE_EXTERNAL_SKILLS")) {
 +    for (const dir of [".claude", ".agents"]) {
 +      await scanSkillFiles(path.join(home, dir, "skills"), matches)
 +    }
@@ -773,6 +644,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +    }
 +  }
 +
++  // .opencode 配置目录：项目祖先目录中的 .opencode + home/.opencode
 +  const configDirs = new Set([input.paths.config, Flag.OPENCODE_CONFIG_DIR].filter((x): x is string => !!x))
 +  for (const dir of parents(cwd, worktree)) {
 +    const configDir = path.join(dir, ".opencode")
@@ -782,10 +654,12 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  if (await exists(homeConfig)) configDirs.add(homeConfig)
 +
 +  for (const dir of configDirs) {
++    // 同时兼容 skill/ 和 skills/ 两种目录名
 +    await scanSkillFiles(path.join(dir, "skill"), matches)
 +    await scanSkillFiles(path.join(dir, "skills"), matches)
 +  }
 +
++  // 用户配置的额外技能路径
 +  const configured = input.config?.skills?.paths
 +  if (Array.isArray(configured)) {
 +    for (const raw of configured) {
@@ -795,6 +669,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +    }
 +  }
 +
++  // 解析 SKILL.md frontmatter，提取 name 和 description
 +  const skills = [] as Array<{ name: string; description: string; path: string }>
 +  for (const filepath of matches) {
 +    const content = await readText(filepath)
@@ -810,23 +685,25 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  return skills
 +}
 +
++// 扫描工具定义目录：读取 .ts 源文件提取 Tool.define 的 id 和参数 schema
++// 注意：V2 TUI 无法访问 packages/opencode/src/tool/，此函数在 TUI 中将返回空数组
 +async function scanToolDefinitions() {
 +  const toolDir = fileURLToPath(new URL("../../../../tool/", import.meta.url))
 +  const result = [] as Array<{ name: string; text: string }>
-+  let entries: string[]
-+  try {
-+    entries = await fs.readdir(toolDir)
-+  } catch {
-+    return result
-+  }
++  const entries = await fs.readdir(toolDir).catch(() => null)
++  if (!entries) return result
 +  for (const entry of entries) {
++    // 仅扫描 .ts 源文件：工具定义以 TypeScript 模块组织，.txt 等描述文件由导入解析
 +    if (!entry.endsWith(".ts")) continue
 +    const filepath = path.join(toolDir, entry)
 +    const source = await readText(filepath)
++    // 从源码中正则提取 Tool.define("id") 的工具名
 +    const id = source.match(/Tool\.define(?:<[^>]+>)?\(\s*["']([^"']+)["']/)?.[1]
 +    if (!id) continue
++    // 尝试提取 .txt 描述文件导入
 +    const descriptionImport = source.match(/import\s+([A-Z_]+)\s+from\s+["']\.\/([^"']+\.txt)["']/)
 +    const description = descriptionImport ? await readText(path.join(toolDir, descriptionImport[2])) : ""
++    // 提取 Parameters 常量块作为 schema 文本
 +    const parameterStart = source.search(/(?:export\s+)?const\s+Parameters\s*=/)
 +    const parameterEnd = source.search(/export\s+const\s+\w+Tool\s*=\s*Tool\.define/)
 +    const parameters = parameterStart >= 0
@@ -837,6 +714,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  return result
 +}
 +
++// 收集活跃工具名：从最后一条用户消息的 tools 映射和历史工具调用部件中提取
 +function activeToolNames(messages: WithParts[], lastUser: Message | undefined) {
 +  const names = new Set<string>()
 +  if (lastUser?.role === "user" && lastUser.tools) {
@@ -850,6 +728,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  return names
 +}
 +
++// 动态工具文本：task 工具输出可用子代理列表，skill 工具输出技能列表
 +function dynamicToolText(name: string, input: ComputeContextDataInput, skills: Array<{ name: string; description: string; path: string }>) {
 +  if (name === "task") {
 +    const description = (input.agents ?? [])
@@ -859,10 +738,11 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +      .join("\n")
 +    return ["Available agent types and the tools they have access to:", description].join("\n")
 +  }
-+  if (name === "skill") return Skill.fmt(skillInfo(skills), { verbose: false })
++  if (name === "skill") return skillFmt(skillInfo(skills), { verbose: false })
 +  return ""
 +}
 +
++// 观察到的工具输入样本：最多取 3 条历史调用，用于估算重复调用的 schema 开销
 +function observedToolShape(name: string, messages: WithParts[]) {
 +  const samples: unknown[] = []
 +  for (const msg of messages) {
@@ -873,6 +753,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  return samples.length ? `Observed inputs:\n${stableJson(samples)}` : ""
 +}
 +
++// 工具定义 token：合并静态 schema 文本、动态工具文本和观察到的输入样本
 +async function toolDefinitionTokens(
 +  input: ComputeContextDataInput,
 +  messages: WithParts[],
@@ -881,6 +762,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +) {
 +  const scanned = input.toolDefinitions ?? await scanToolDefinitions()
 +  const active = activeToolNames(messages, lastUser)
++  // 用户未显式禁用工具且无活跃工具时，默认全部内置工具活跃
 +  if (lastUser?.role === "user" && lastUser.tools === undefined && active.size === 0) {
 +    for (const item of scanned) active.add(item.name)
 +  }
@@ -895,6 +777,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  return details.toSorted((a, b) => a.name.localeCompare(b.name))
 +}
 +
++// 基础系统提示词：优先用 agent 自定义 prompt，无 agent prompt 时回退到模型默认提示
 +function baseSystemPrompt(
 +  input: ComputeContextDataInput,
 +  lastUser: Message | undefined,
@@ -903,9 +786,11 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  const agent = lastUser?.role === "user" ? input.agents?.find((item) => item.name === lastUser.agent) : undefined
 +  if (agent?.prompt) return agent.prompt
 +  if (!model) return ""
-+  return systemProviderPrompt(model as any).join("\n")
++  // 无 agent 自定义 prompt 时计入模型默认系统提示（与 runtime provider() 同文本）
++  return systemProviderPrompt(model).join("\n")
 +}
 +
++// 环境信息文本：模型身份、工作目录、git 状态、平台信息 + 工具使用指引 + 静态段落
 +function environmentText(input: ComputeContextDataInput, modelID: string, providerID: string, toolNames: string[]) {
 +  const lines = [
 +    `You are powered by the model named ${modelID}. The exact model ID is ${providerID}/${modelID}`,
@@ -916,6 +801,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +    "  Is directory a git repo: unknown",
 +    `  Current branch: ${input.vcs?.branch ?? "(unknown)"}`,
 +    `  Platform: ${process.platform}`,
++    // Windows 平台需要额外的 shell 兼容提示
 +    ...(process.platform === "win32"
 +      ? [
 +          "  Shell syntax: use PowerShell syntax, not Unix shell syntax.",
@@ -926,9 +812,10 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +    `  Today's date: ${new Date().toDateString()}`,
 +    "</env>",
 +  ]
-+  return [lines.join("\n"), systemToolUsageSection(toolNames), ...systemStaticSections()].join("\n\n")
++  return [lines.join("\n"), toolUsageSection(toolNames), ...staticSections()].join("\n\n")
 +}
 +
++// 当前模型解析：优先用最后一条用户消息指定的模型，否则回退到 local 记录的模型
 +function currentModel(input: ComputeContextDataInput, lastUser: Message | undefined) {
 +  const selected = lastUser?.role === "user" ? lastUser.model : input.lastUserModel
 +  const provider = input.providers.find((item) => item.id === selected?.providerID)
@@ -940,18 +827,23 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  }
 +}
 +
++// 窗口可用 token：从模型输入限制中扣除压缩缓冲区
 +function windowTokens(input: ComputeContextDataInput, model: Provider["models"][string] | undefined) {
 +  if (!model) return 0
 +  const context = model.limit.context
 +  if (!context) return 0
-+  return Math.max(0, Math.min(context, overflowUsable({ cfg: input.config ?? {}, model } as any)))
++  return Math.max(0, Math.min(context, overflowUsable({ cfg: input.config ?? ({} as Config), model })))
 +}
 +
++// 窗口详情：上下文限制、输入限制、可用输入、提供者预留、压缩缓冲区
 +function windowDetails(input: ComputeContextDataInput, model: Provider["models"][string] | undefined) {
 +  const contextLimit = model?.limit.context ?? 0
++  // 输入限制不超过上下文限制
 +  const inputLimit = model?.limit.input ? Math.min(model.limit.input, contextLimit) : contextLimit
 +  const usableInput = windowTokens(input, model)
++  // 提供者预留 = 上下文限制 - 输入限制（模型保留给输出/系统使用的部分）
 +  const providerReserve = Math.max(0, contextLimit - inputLimit)
++  // 压缩缓冲区 = 输入限制 - 可用输入（触发自动压缩前的安全余量）
 +  const compactionBuffer = Math.max(0, inputLimit - usableInput)
 +  return {
 +    contextLimit,
@@ -962,16 +854,19 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  }
 +}
 +
++// 网格尺寸：按上下文限制和终端宽度自适应计算网格列数与行数
 +function gridSize(contextLimit: number, columns?: number, rows?: number) {
 +  const width = columns ?? process.stdout.columns ?? 80
 +  const narrow = width < 80
 +  if (narrow) {
++    // 窄终端使用更小的网格，避免挤压其他面板
 +    return {
 +      width: Math.max(5, Math.min(10, Math.floor(Math.max(12, width - 8) / 2))),
 +      height: rows ?? (contextLimit >= 1_000_000 ? 10 : 5),
 +    }
 +  }
 +
++  // 按上下文窗口大小选择网格宽度档位
 +  const modelWidth = contextLimit >= 1_000_000 ? 32 : contextLimit >= 200_000 ? 24 : contextLimit >= 100_000 ? 16 : 10
 +  const maxWidth = Math.max(10, Math.floor(Math.min(width * 0.36, Math.max(20, width - 72)) / 2))
 +  const modelHeight = contextLimit >= 1_000_000 ? 14 : contextLimit >= 200_000 ? 12 : 10
@@ -981,14 +876,17 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  }
 +}
 +
++// 上下文网格：将 token 分类映射为字符网格行，自由空间和压缩缓冲区分别填充
 +export function contextGrid(categories: ContextCategory[], contextLimit: number, options?: { columns?: number; rows?: number }) {
 +  const { width: gridW, height: gridH } = gridSize(contextLimit, options?.columns, options?.rows)
 +  const total = gridW * gridH
 +  const cells: GridSquare[] = []
++  // 压缩缓冲区放在网格尾部，单独计算其格子数
 +  const tail = categories.find((category) => category.name === "Autocompact buffer")
 +  const body = categories.filter((category) => category.name !== "Autocompact buffer")
 +
 +  const countFor = (category: ContextCategory, remaining: number) => {
++    // 按比例计算格子数，非延迟分类在占比 ≥0.5 时至少占 1 格
 +    const exact = contextLimit > 0 ? (category.tokens / contextLimit) * total : 0
 +    let count = Math.round(exact)
 +    if (category.tokens > 0 && !category.isDeferred && count === 0 && exact >= 0.5) count = 1
@@ -998,11 +896,13 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +    }
 +  }
 +
++  // 缓冲区优先分配尾部格子：保证压缩缓冲区在网格末尾可视化，与自由空间区分
 +  const tailCount = tail ? countFor(tail, total).count : 0
 +  const bodyLimit = total - tailCount
 +  for (const category of body) {
 +    const { exact, count } = countFor(category, bodyLimit - cells.length)
 +    for (let i = 0; i < count; i++) {
++      // 格子饱满度 = 比例余量，用于选择填充字符
 +      const fullness = Math.max(0, Math.min(1, exact - i))
 +      cells.push({
 +        symbol: category.name === "Free space" ? "⛶" : category.name === "Model reserve" ? "⛝" : fullness >= 0.7 ? "⛁" : "⛀",
@@ -1014,6 +914,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +    if (cells.length >= bodyLimit) break
 +  }
 +
++  // 剩余空间填充自由空间格子
 +  const free = categories.find((item) => item.name === "Free space")
 +  while (cells.length < bodyLimit) {
 +    cells.push({
@@ -1023,6 +924,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +      fullness: 0,
 +    })
 +  }
++  // 尾部填充压缩缓冲区格子
 +  if (tail) {
 +    const exact = contextLimit > 0 ? (tail.tokens / contextLimit) * total : 0
 +    while (cells.length < total) {
@@ -1036,12 +938,15 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +    }
 +  }
 +
++  // 按行宽切分为二维网格
 +  const rows: GridSquare[][] = []
 +  for (let i = 0; i < cells.length; i += gridW) rows.push(cells.slice(i, i + gridW))
 +  return rows
 +}
 +
++// 计算上下文使用数据：汇总消息、指令、技能、工具定义的 token 分类与网格
 +export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
++  // 消息按时间倒序过滤压缩历史，再反转回正序
 +  const raw = input.messages.map((msg) => ({ info: msg, parts: input.parts[msg.id] ?? [] }))
 +  const compacted = filterCompactedMessages(raw.toReversed())
 +  const lastUser = compacted.findLast((msg) => msg.info.role === "user")?.info
@@ -1053,6 +958,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  const instructions = await gatherInstructionFiles(input)
 +  const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content) }))
 +  const messageText = msg.text.join("\n")
++  // 加载的指令路径去重：已在消息文本中出现的跳过
 +  const loadedInstructions = [] as Array<{ path: string; tokens: number }>
 +  for (const filepath of msg.loadedInstructionPaths) {
 +    if (messageText.includes(`Instructions from: ${filepath}`)) continue
@@ -1061,14 +967,15 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  }
 +
 +  const skills = await gatherSkills(input)
-+  const skillListing = systemSkillsSection(skillInfo(skills))
++  const skillListing = skillsSection(skillInfo(skills))
 +  const skillTokens = estimate(skillListing)
 +  const skillDetails = skills.map((skill) => ({
 +    name: skill.name,
 +    path: skill.path,
-+    tokens: estimate(systemSkillsSection(skillInfo([skill]))),
++    tokens: estimate(skillsSection(skillInfo([skill]))),
 +  }))
 +  const toolDefs = await toolDefinitionTokens(input, compacted, skills, lastUser)
++  // 系统提示词 = 基础提示 + 环境信息 + 用户自定义 system 覆盖
 +  const systemText = [
 +    baseSystemPrompt(input, lastUser, modelInfo.model),
 +    environmentText(input, modelInfo.modelID, modelInfo.providerID, toolDefs.map((item) => item.name)),
@@ -1078,12 +985,16 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +  const instructionTokens = instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
 +  const loadedInstructionTokens = loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
 +  const toolDefTokens = toolDefs.reduce((sum, item) => sum + item.tokens, 0)
++  // 输入消息 = 用户文本 + 工具结果 + 附件
 +  const inputMessageTokens = msg.details.userText + msg.details.toolResults + msg.details.attachments
++  // 输出消息 = 助手文本 + 推理 + 工具调用 + 压缩摘要
 +  const outputMessageTokens =
 +    msg.details.assistantText + msg.details.reasoning + msg.details.toolCalls + msg.details.compactionSummary
 +  const messageTotal = inputMessageTokens + outputMessageTokens
 +  const window = windowDetails(input, modelInfo.model)
++  // 已用 token = 系统提示 + 指令 + 加载指令 + 技能 + 工具定义 + 消息
 +  const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens + messageTotal
++  // 自由空间 = 可用输入 - 已用（无模型限制时为 0）
 +  const free = maxTokens ? Math.max(0, window.usableInput - used) : 0
 +
 +  const categories: ContextCategory[] = [
@@ -1093,6 +1004,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +    { name: "Tool definitions", tokens: toolDefTokens, color: "warning" },
 +    { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
 +    { name: "Output Messages", tokens: outputMessageTokens, color: "accent" },
++    // 自由空间和缓冲区标记为延迟计算，网格中按比例填充
 +    { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
 +    ...(window.providerReserve > 0
 +      ? [{ name: "Model reserve", tokens: window.providerReserve, color: "textMuted" as const, isDeferred: true }]
@@ -1106,6 +1018,7 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +    maxTokens,
 +    percentage: maxTokens ? used / maxTokens : 0,
 +    categories,
++    // 无模型限制时用已用+缓冲+自由作为网格基数，保证网格有内容
 +    gridRows: contextGrid(categories, maxTokens || Math.max(used + window.compactionBuffer + free, 1), { columns: input.columns }),
 +    details: {
 +      instructions: instructionDetails,
@@ -1118,258 +1031,370 @@ index 0000000000000000000000000000000000000000..a6d051000bc9863418c51dffe81b9939
 +    },
 +  }
 +}
-diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
-index 6853faa3281666ef9705d623ca7c8a9a5b1892ab..7d1348f5005fe69511699810bda29d8238b1fd54 100644
---- a/packages/opencode/src/session/system.ts
-+++ b/packages/opencode/src/session/system.ts
-@@ -47,6 +47,117 @@ export function provider(model: Provider.Model) {
-   return [PROMPT_DEFAULT]
- }
- 
-+export function toolUsageSection(registeredTools: string[]) {
-+  const has = (name: string) => registeredTools.includes(name)
-+
-+  const items: string[] = [
-+    `Do NOT use the bash tool when a dedicated tool is available.`,
-+    `Using dedicated tools lets the user review and track your work:`,
-+  ]
-+
-+  if (has("read")) items.push(` - To read files use the read tool instead of cat, head, tail, or sed`)
-+  if (has("edit")) items.push(` - To edit files use the edit tool instead of sed or awk`)
-+  if (has("write")) items.push(` - To create files use the write tool instead of echo redirection or heredoc`)
-+  if (has("grep")) items.push(` - To search file content use the grep tool instead of grep/rg`)
-+  if (has("glob")) items.push(` - To find files use the glob tool instead of find or ls`)
-+  if (has("todowrite")) items.push(` - For non-trivial multi-step work, use the todowrite tool to track progress`)
-+  if (process.platform === "win32") {
-+    items.push(
-+      ` - On Windows, do not use Unix text utilities such as tail/head/sed/awk/grep for file operations. Use read/grep/glob, or shell-native commands only when a terminal operation truly requires shell execution.`,
-+    )
-+  }
-+
-+  items.push(
-+    ` - Reserve bash for system commands and terminal operations requiring shell execution`,
-+    ``,
-+    `THINK FIRST before using tools. Before your first tool call, decide the FULL first batch of independent reads, searches, globs, directory listings, and status checks you already know you need.`,
-+    `BATCH independent tool calls in the SAME response so they can run in parallel. Do not issue only one discovery call when several independent discovery calls are already obvious.`,
-+    `For directory surveys, use a wide first wave. Example independent batch: glob("*"), glob("*/*"), glob("*/package.json"), glob("*/README*"), glob("*/src/*"), glob("*/packages/*").`,
-+    `After the first batch returns, identify all newly relevant directories/files and issue the next independent batch together.`,
-+    `BAD: glob("*") -> wait -> glob("*/*") -> wait -> glob("one-dir/*").`,
-+    `GOOD: broad independent batch -> summarize discovered structure -> second broad independent batch for important discovered roots.`,
-+    `Sequential calls are ONLY for true dependencies, conflicts, or cases where the next target cannot be known without the previous result.`,
-+    `DO NOT chain bash commands with separators like \`echo "====";\` to simulate grouped output; it renders poorly for the user.`,
-+    `Use bash only when dedicated tools are insufficient or when real terminal execution is required.`,
-+    `Parallel writes are allowed ONLY when target files or edit ranges cannot conflict.`,
-+    `For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.`,
-+  )
-+
-+  if (has("todo")) {
-+    items.push(
-+      ``,
-+      `Keep todo state current while working: only one item should be in_progress at a time.`,
-+      `Move an item to in_progress before completing it; do not jump directly from pending to completed.`,
-+      `If your understanding changes, update the todo list before continuing implementation.`,
-+    )
-+  }
-+
-+  return ["# Using your tools", ...items].join("\n")
-+}
-+
-+export const actionCareSection = `# Executing actions with care
-+Carefully consider the reversibility and blast radius of actions before proceeding:
-+- Local, reversible actions (editing files, running tests, reading code): proceed freely.
-+- Actions that are hard to reverse or affect shared state: confirm with the user first.
-+
-+
-+Actions that typically require user confirmation before proceeding:
-+- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes
-+- Force-pushing, git reset --hard, amending published commits
-+- Pushing code, creating or closing PRs, commenting on issues
-+- Sending messages to external services (Slack, email, webhooks)
-+- Modifying CI/CD pipelines or shared infrastructure
-+
-+When you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user's in-progress work.`
-+
-+export const sharedWorktreeSection = `# Shared worktree
-+You may be working in a dirty worktree with user or other-agent changes.
-+- If unknown changes are in files you need to edit, read them first and work with the current contents.
-+- If unknown changes are unrelated to your task, ignore them.
-+- If unknown changes directly block your task or make the correct edit ambiguous, ask the user one concise question.
-+- Never revert, overwrite, or clean up changes you did not make unless explicitly asked.`
-+
-+export const verificationSection = `# Verification
-+Before reporting a coding task complete, verify the change when feasible.
-+Start with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.
-+If you cannot verify, state that plainly and explain the blocker.`
-+
-+export const contextContinuitySection = `# Context continuity
-+The conversation may be compacted or resumed from a summary when context gets long.
-+After compaction, resume from the summary and current messages rather than restarting from scratch.
-+Compaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.
-+Before your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.`
-+
-+export const outputEfficiencySection = `# Output efficiency
-+Go straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.
-+
-+Focus text output on:
-+- Decisions that need the user's input
-+- High-level status updates at key milestones (e.g. "build passing", "all tests green")
-+- Errors or blockers that change the plan
-+
-+If you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`
-+
-+export function staticSections() {
-+  return [
-+    actionCareSection,
-+    sharedWorktreeSection,
-+    verificationSection,
-+    contextContinuitySection,
-+    outputEfficiencySection,
-+  ]
-+}
-+
-+export function skillsSection(list: Skill.Info[]) {
-+  return [
-+    "Skills provide specialized instructions and workflows for specific tasks.",
-+    "Use the skill tool to load a skill when a task matches its description.",
-+    // the agents seem to ingest the information about skills a bit better if we present a more verbose
-+    // version of them here and a less verbose version in tool description, rather than vice versa.
-+    Skill.fmt(list, { verbose: true }),
-+  ].join("\n")
-+}
-+
- export interface Interface {
-   readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
-   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
-@@ -116,54 +227,6 @@ export const layer = Layer.effect(
-       return null
-     }
- 
--    const getToolUsageSection = (registeredTools: string[]): string => {
--      const has = (name: string) => registeredTools.includes(name)
--
--      const items: string[] = [
--        `Do NOT use the bash tool when a dedicated tool is available.`,
--        `Using dedicated tools lets the user review and track your work:`,
--      ]
--
--      if (has("read"))  items.push(` - To read files use the read tool instead of cat, head, tail, or sed`)
--      if (has("edit"))  items.push(` - To edit files use the edit tool instead of sed or awk`)
--      if (has("write")) items.push(` - To create files use the write tool instead of echo redirection or heredoc`)
--      if (has("grep"))  items.push(` - To search file content use the grep tool instead of grep/rg`)
--      if (has("glob"))  items.push(` - To find files use the glob tool instead of find or ls`)
--      if (has("todowrite"))  items.push(` - For non-trivial multi-step work, use the todowrite tool to track progress`)
--      if (process.platform === "win32") {
--        items.push(
--          ` - On Windows, do not use Unix text utilities such as tail/head/sed/awk/grep for file operations. Use read/grep/glob, or shell-native commands only when a terminal operation truly requires shell execution.`,
--        )
--      }
--
--      items.push(
--        ` - Reserve bash for system commands and terminal operations requiring shell execution`,
--        ``,
--        `THINK FIRST before using tools. Before your first tool call, decide the FULL first batch of independent reads, searches, globs, directory listings, and status checks you already know you need.`,
--        `BATCH independent tool calls in the SAME response so they can run in parallel. Do not issue only one discovery call when several independent discovery calls are already obvious.`,
--        `For directory surveys, use a wide first wave. Example independent batch: glob("*"), glob("*/*"), glob("*/package.json"), glob("*/README*"), glob("*/src/*"), glob("*/packages/*").`,
--        `After the first batch returns, identify all newly relevant directories/files and issue the next independent batch together.`,
--        `BAD: glob("*") -> wait -> glob("*/*") -> wait -> glob("one-dir/*").`,
--        `GOOD: broad independent batch -> summarize discovered structure -> second broad independent batch for important discovered roots.`,
--        `Sequential calls are ONLY for true dependencies, conflicts, or cases where the next target cannot be known without the previous result.`,
--        `DO NOT chain bash commands with separators like \`echo "====";\` to simulate grouped output; it renders poorly for the user.`,
--        `Use bash only when dedicated tools are insufficient or when real terminal execution is required.`,
--        `Parallel writes are allowed ONLY when target files or edit ranges cannot conflict.`,
--        `For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.`,
--      )
--
--      if (has("todo")) {
--        items.push(
--          ``,
--          `Keep todo state current while working: only one item should be in_progress at a time.`,
--          `Move an item to in_progress before completing it; do not jump directly from pending to completed.`,
--          `If your understanding changes, update the todo list before continuing implementation.`,
--        )
--      }
--
--      return ["# Using your tools", ...items].join("\n")
--    }
--
-     const getGitContext = Effect.fn("SystemPrompt.gitContext")(function* () {
-       const cwd = Instance.directory
-       const cached = gitContextCache.get(cwd)
-@@ -247,45 +310,8 @@ export const layer = Layer.effect(
-         ]
-         return [
-           envLines.join("\n"),
--          getToolUsageSection(toolIds),
--          `# Executing actions with care
--Carefully consider the reversibility and blast radius of actions before proceeding:
--- Local, reversible actions (editing files, running tests, reading code): proceed freely.
--- Actions that are hard to reverse or affect shared state: confirm with the user first.
--
--
--Actions that typically require user confirmation before proceeding:
--- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes
--- Force-pushing, git reset --hard, amending published commits
--- Pushing code, creating or closing PRs, commenting on issues
--- Sending messages to external services (Slack, email, webhooks)
--- Modifying CI/CD pipelines or shared infrastructure
--
--When you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user's in-progress work.`,
--          `# Shared worktree
--You may be working in a dirty worktree with user or other-agent changes.
--- If unknown changes are in files you need to edit, read them first and work with the current contents.
--- If unknown changes are unrelated to your task, ignore them.
--- If unknown changes directly block your task or make the correct edit ambiguous, ask the user one concise question.
--- Never revert, overwrite, or clean up changes you did not make unless explicitly asked.`,
--          `# Verification
--Before reporting a coding task complete, verify the change when feasible.
--Start with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.
--If you cannot verify, state that plainly and explain the blocker.`,
--          `# Context continuity
--The conversation may be compacted or resumed from a summary when context gets long.
--After compaction, resume from the summary and current messages rather than restarting from scratch.
--Compaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.
--Before your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.`,
--          `# Output efficiency
--Go straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.
--
--Focus text output on:
--- Decisions that need the user's input
--- High-level status updates at key milestones (e.g. "build passing", "all tests green")
--- Errors or blockers that change the plan
--
--If you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`,
-+          toolUsageSection(toolIds),
-+          ...staticSections(),
-         ]
-       }),
- 
-@@ -293,14 +319,7 @@ If you can say it in one sentence, do not use three. Do not narrate each step or
-         if (Permission.disabled(["skill"], agent.permission).has("skill")) return
- 
-         const list = yield* skill.available(agent)
--
--        return [
--          "Skills provide specialized instructions and workflows for specific tasks.",
--          "Use the skill tool to load a skill when a task matches its description.",
--          // the agents seem to ingest the information about skills a bit better if we present a more verbose
--          // version of them here and a less verbose version in tool description, rather than vice versa.
--          Skill.fmt(list, { verbose: true }),
--        ].join("\n")
-+        return skillsSection(list)
-       }),
- 
-       mcpInstructions: Effect.fn("SystemPrompt.mcpInstructions")(function* () {
-diff --git a/packages/opencode/test/cli/tui/context-usage.test.ts b/packages/opencode/test/cli/tui/context-usage.test.ts
+diff --git a/packages/tui/src/routes/session/context-usage.tsx b/packages/tui/src/routes/session/context-usage.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..29ba3d8559e338bc0a7729fa6086ea1fb6f61204
 --- /dev/null
-+++ b/packages/opencode/test/cli/tui/context-usage.test.ts
-@@ -0,0 +1,283 @@
++++ b/packages/tui/src/routes/session/context-usage.tsx
+@@ -0,0 +1,348 @@
++import { createMemo, createResource, For, Show } from "solid-js"
++import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
++import { useDialog } from "../../ui/dialog"
++import { useLocal } from "../../context/local"
++import { useProject } from "../../context/project"
++import { useSync } from "../../context/sync"
++import { useTheme } from "../../context/theme"
++import { TextAttributes } from "@opentui/core"
++import { Locale } from "../../util/locale"
++import {
++  computeContextData,
++  type ContextCategoryColor,
++  type ContextUsageData,
++  type GridSquare,
++} from "../../util/context-usage"
++
++// 格式化 token 数为人类可读的 k/m 简写
++function formatTokens(tokens: number) {
++  // 阈值对齐模型上下文档位（1m/200k/100k），便于一眼读出量级
++  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}m`
++  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`
++  return String(tokens)
++}
++
++// 计算百分比字符串，分母为 0 时返回 0.0%
++function percent(tokens: number, max: number) {
++  // 分母为 0 时返回 0.0% 而非 NaN：模型限制未知时不应显示异常值
++  if (!max) return "0.0%"
++  return `${((tokens / max) * 100).toFixed(1)}%`
++}
++
++// 固定宽度文本：截断后 padEnd 对齐，保证列布局不偏移
++function fixed(input: string, width: number) {
++  return Locale.truncate(input, width).padEnd(width)
++}
++
++// 从主题中按分类颜色名取实际颜色值，回退到 textMuted
++function color(theme: ReturnType<typeof useTheme>["theme"], name: ContextCategoryColor) {
++  return theme[name] ?? theme.textMuted
++}
++
++// 分类标记符：用不同 Unicode 符号区分系统提示、指令、技能、工具、消息、自由空间
++function categoryMarker(name: string) {
++  if (name === "System prompt") return "◆"
++  if (name === "Instructions") return "◇"
++  if (name === "Skills") return "●"
++  if (name === "Tool definitions") return "◦"
++  if (name === "Input Messages") return "▰"
++  if (name === "Output Messages") return "▱"
++  if (name === "Free space") return "·"
++  return "×"
++}
++
++// 显示路径仅保留文件名部分，兼容 Windows 反斜杠和 Unix 正斜杠
++function displayPath(input: string) {
++  return input.split(/[\\/]/).pop() || input
++}
++
++// 上下文使用面板底部状态行：有确认用量时显示会话总计，否则显示当前窗口用量
++export function contextUsageFooter(data: ContextUsageData, columns: number) {
++  const usage = data.details.usage
++  // 宽度按终端列数自适应，最小 36 字符
++  // 最小 36 字符保证关键字段可见；18 为右侧关闭提示预留的列宽
++  const width = Math.max(36, columns - 18)
++  const text =
++    // 有确认用量（step-finish）时显示会话总计，否则回退到当前窗口余量
++    usage.total > 0
++      ? [
++          `Session Totals`,
++          `Input ${formatTokens(usage.input)}`,
++          `Output ${formatTokens(usage.output)}`,
++          // 推理 token 仅在大于 0 时显示
++          usage.reasoning > 0 ? `Reason ${formatTokens(usage.reasoning)}` : undefined,
++          `Cache W/R ${formatTokens(usage.cacheWrite)}/${formatTokens(usage.cacheRead)}`,
++          usage.cost > 0 ? `Cost $${usage.cost.toFixed(4)}` : undefined,
++        ].filter(Boolean).join("  ")
++      : [
++          `Current Window`,
++          `Used ${formatTokens(data.totalTokens)}`,
++          `Free ${formatTokens(data.categories.find((item) => item.name === "Free space")?.tokens ?? 0)}`,
++          `Usable ${formatTokens(data.details.window.usableInput)}`,
++          `Buffer ${formatTokens(data.details.window.compactionBuffer)}`,
++        ].join("  ")
++  return fixed(Locale.truncateMiddle(text, width), width)
++}
++
++// 上下文网格组件：按行列渲染 GridSquare，颜色取自主题
++function ContextGrid(props: { rows: GridSquare[][] }) {
++  const { theme } = useTheme()
++  // 网格颜色映射：将分类颜色名解析为主题色值
++  const gridColor = (name: ContextCategoryColor) => {
++    if (name === "primary") return theme.primary
++    if (name === "secondary") return theme.secondary
++    if (name === "warning") return theme.warning
++    if (name === "accent") return theme.accent
++    if (name === "info") return theme.info
++    if (name === "success") return theme.success
++    return theme.textMuted
++  }
++
++  // flexShrink={0} 防止网格被压缩：保证格子符号完整显示，不因空间不足被截断
++  return (
++    <box flexDirection="column" flexShrink={0}>
++      <For each={props.rows}>
++        {(row) => (
++          <box flexDirection="row" flexShrink={0}>
++            <For each={row}>
++              {(square) => (
++                <text fg={gridColor(square.color)} flexShrink={0}>
++                  {square.symbol + " "}
++                </text>
++              )}
++            </For>
++          </box>
++        )}
++      </For>
++    </box>
++  )
++}
++
++// 分类列表组件：按 Prompt/Conversation/Window 三组展示 token 明细
++function CategoryList(props: { data: ContextUsageData }) {
++  const { theme } = useTheme()
++  // 标签和数值列宽固定，保证对齐
++  // 固定列宽：label 20 字符覆盖最长分类名，value 14 字符覆盖 "999.9k 100.0%"
++  const labelWidth = 20
++  const valueWidth = 14
++  // 分类分组：Prompt 组含系统提示/指令/技能/工具定义；Conversation 组含输入/输出消息；Window 组含自由空间/预留/缓冲区
++  const groups = createMemo(() => [
++    {
++      title: "Prompt",
++      categories: props.data.categories.filter((item) =>
++        ["System prompt", "Instructions", "Skills", "Tool definitions"].includes(item.name),
++      ),
++    },
++    {
++      title: "Conversation",
++      categories: props.data.categories.filter((item) => ["Input Messages", "Output Messages"].includes(item.name)),
++    },
++    {
++      title: "Window",
++      categories: props.data.categories.filter((item) =>
++        ["Free space", "Model reserve", "Autocompact buffer"].includes(item.name),
++      ),
++    },
++  ].filter((group) => group.categories.length > 0))
++
++  return (
++    <box flexDirection="column" gap={1} flexGrow={1} paddingLeft={2}>
++      <For each={groups()}>
++        {(group) => (
++          <box flexDirection="column" gap={0}>
++            <box height={1}><text fg={theme.textMuted}>{group.title}</text></box>
++            <For each={group.categories}>
++              {(category) => (
++                <box flexDirection="row" justifyContent="space-between" height={1}>
++                  <box flexDirection="row" gap={1} flexShrink={1}>
++                    <text fg={color(theme, category.color)} flexShrink={0}>
++                      {categoryMarker(category.name)}
++                    </text>
++                    <text fg={theme.text}>{fixed(category.name, labelWidth)}</text>
++                  </box>
++                  <text fg={theme.textMuted} flexShrink={0}>
++                    {fixed(`${formatTokens(category.tokens)} ${percent(category.tokens, props.data.maxTokens)}`.padStart(valueWidth), valueWidth)}
++                  </text>
++                </box>
++              )}
++            </For>
++          </box>
++        )}
++      </For>
++    </box>
++  )
++}
++
++// 上下文使用明细行：输入/输出/提示三行，按终端宽度截断避免挤压网格
++export function contextUsageDetailLines(data: ContextUsageData, columns: number) {
++  const messages = data.details.messages
++  // 行宽按终端列数自适应，最小 36 字符
++  // 行宽 = 终端列数 - 8（左侧缩进 2 + 右侧留白 6），最小 36 防止过度截断
++  const lineWidth = Math.max(36, columns - 8)
++  // 路径显示宽度限制在 18-58 之间：太短看不出文件名，太长挤占其他字段
++  const detailWidth = Math.max(18, Math.min(58, Math.floor(columns / 3)))
++  // 合并指令文件和已加载指令为统一列表
++  const files = [
++    ...data.details.instructions.map((item) => ({ label: item.path, tokens: item.tokens })),
++    ...data.details.loadedInstructions.map((item) => ({ label: item.path, tokens: item.tokens })),
++  ]
++  // 输入明细：用户文本 + 工具结果 + 附件
++  const input = [
++    `User ${formatTokens(messages.userText)}`,
++    `Tool results ${formatTokens(messages.toolResults)}`,
++    `Files ${formatTokens(messages.attachments)}`,
++  ]
++    .filter(Boolean)
++    .join("  ")
++  // 输出明细：助手文本 + 推理 + 工具调用 + 压缩摘要（仅 >0 时显示）
++  const output = [
++    `Text ${formatTokens(messages.assistantText)}`,
++    `Reasoning ${formatTokens(messages.reasoning)}`,
++    `Tool calls ${formatTokens(messages.toolCalls)}`,
++    messages.compactionSummary > 0 ? `Summary ${formatTokens(messages.compactionSummary)}` : undefined,
++  ]
++    .filter(Boolean)
++    .join("  ")
++  // 提示明细：首个指令文件的路径 + 工具数 + 技能数
++  const prompt = [
++    ...files.slice(0, 1).map((item) => `Instruction ${formatTokens(item.tokens)} ${Locale.truncateMiddle(displayPath(item.label), detailWidth)}`),
++    data.details.toolDefs.length > 0 ? `Tools ${data.details.toolDefs.length}` : undefined,
++    data.details.skills.length > 0 ? `Skills ${data.details.skills.length}` : undefined,
++  ]
++    .filter(Boolean)
++    .join("  ")
++
++  return [
++    input ? `Input   ${input}` : undefined,
++    output ? `Output  ${output}` : undefined,
++    prompt ? `Prompt  ${prompt}` : undefined,
++  ]
++    // 过滤空行和纯空白行
++    .filter((line): line is string => !!line && line.trim().length > 0)
++    .map((line) => fixed(Locale.truncateMiddle(line, lineWidth), lineWidth))
++}
++
++// 明细组件：渲染 contextUsageDetailLines 的每一行为单行文本
++function Details(props: { data: ContextUsageData; columns: number }) {
++  const { theme } = useTheme()
++  // memo 包装：columns 或 data 变化时才重算明细行，避免每次渲染都重新截断
++  const lines = createMemo(() => contextUsageDetailLines(props.data, props.columns))
++  return (
++    <box flexDirection="column" gap={0} paddingTop={1}>
++      <For each={lines()}>
++        {(line) => (
++          <box height={1}>
++            <text fg={theme.textMuted}>{line}</text>
++          </box>
++        )}
++      </For>
++    </box>
++  )
++}
++
++// 上下文使用面板：从 sync/local/project 收集输入，异步计算上下文数据并渲染网格与明细
++export function ContextUsagePanel(props: { sessionID: string; onClose: () => void }) {
++  const sync = useSync()
++  const local = useLocal()
++  const project = useProject()
++  const dimensions = useTerminalDimensions()
++  const dialog = useDialog()
++  const { theme } = useTheme()
++  useRenderer()
++
++  // 收集计算输入：消息、部件、提供者、配置、代理、模型、VCS、路径、终端宽度
++  const input = createMemo(() => {
++    // 展开拷贝消息数组：避免直接引用 sync 内部状态，防止后续 mutation 影响响应式追踪
++    const messages = [...(sync.data.message[props.sessionID] ?? [])]
++    // 按 messageID 分组部件列表
++    const parts = Object.fromEntries(messages.map((msg) => [msg.id, [...(sync.data.part[msg.id] ?? [])]]))
++    const paths = project.instance.path()
++    return {
++      messages,
++      parts,
++      providers: [...sync.data.provider],
++      config: sync.data.config,
++      agents: [...sync.data.agent],
++      lastUserModel: local.model.current(),
++      vcs: sync.data.vcs,
++      paths: { cwd: paths.directory, worktree: paths.worktree },
++      columns: dimensions().width,
++    }
++  })
++
++  // 异步计算上下文数据，Solid 自动追踪 input 变化并重新计算
++  // createResource 自动追踪 input memo 变化并异步重算，加载中 data() 为 undefined
++  const [data] = createResource(() => computeContextData(input()))
++
++  // 键盘处理：escape 或 Ctrl+C 关闭面板；对话框打开时不拦截按键
++  useKeyboard((evt) => {
++    if (dialog.stack.length > 0) return
++    // V2 TUI 由 keymap 统一管理应用级退出键绑定，此处仅响应 escape 和 Ctrl+C
++    if (evt.name === "escape" || (evt.ctrl && evt.name === "c")) {
++      props.onClose()
++      // 阻止冒泡：防止退出键被上层 keymap 二次处理导致重复关闭
++      evt.preventDefault()
++      evt.stopPropagation()
++    }
++  })
++
++  return (
++    <box
++      flexDirection="column"
++      backgroundColor={theme.backgroundPanel}
++      borderStyle="rounded"
++      borderColor={theme.border}
++      paddingLeft={1}
++      paddingRight={1}
++      marginTop={1}
++    >
++      {/* 标题行：面板名称 + 总量/上限/百分比摘要 */}
++      <box flexDirection="row" justifyContent="space-between" marginBottom={1} height={1}>
++        <box flexDirection="row" gap={1}>
++          <text fg={theme.primary}>{"◇"}</text>
++          <text fg={theme.text} attributes={TextAttributes.BOLD}>
++            Context usage
++          </text>
++        </box>
++        <Show when={data()}>
++          {(d) => (
++            <text fg={theme.textMuted}>
++              {`${formatTokens(d().totalTokens)} / ${formatTokens(d().maxTokens)} (${(d().percentage * 100).toFixed(1)}%)`}
++            </text>
++          )}
++        </Show>
++      </box>
++
++      <Show when={data()}>
++        {(d) => (
++          <box flexDirection="column" gap={1}>
++            {/* 模型标识行 */}
++            <box height={1}>
++              <text fg={theme.textMuted}>{d().model}</text>
++            </box>
++            {/* 网格 + 分类列表并排 */}
++            <box flexDirection="row" gap={2}>
++              <ContextGrid rows={d().gridRows} />
++              <CategoryList data={d()} />
++            </box>
++            {/* 明细行：输入/输出/提示 */}
++            <Details data={d()} columns={dimensions().width} />
++          </box>
++        )}
++      </Show>
++
++      {/* 底部状态行：会话总计或当前窗口用量 + 关闭提示 */}
++      <box flexDirection="row" justifyContent="space-between" marginTop={1} height={1}>
++        <Show when={data()} fallback={<text fg={theme.textMuted}>Loading...</text>}>
++          {(d) => <text fg={theme.textMuted}>{contextUsageFooter(d(), dimensions().width)}</text>}
++        </Show>
++        <box flexDirection="row" gap={1}>
++          <text fg={theme.text} attributes={TextAttributes.BOLD}>
++            esc
++          </text>
++          <text fg={theme.textMuted}>close</text>
++        </box>
++      </box>
++    </box>
++  )
++}
+diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/test/context-usage.test.ts
+@@ -0,0 +1,356 @@
 +import { describe, expect, test } from "bun:test"
 +import type { Message, Part, Provider } from "@opencode-ai/sdk/v2"
-+import { computeContextData, filterCompactedMessages } from "@/cli/cmd/tui/util/context-usage"
-+import { contextUsageDetailLines, contextUsageFooter } from "@/cli/cmd/tui/routes/session/context-usage"
++import { computeContextData, filterCompactedMessages } from "../src/util/context-usage"
++import { contextUsageDetailLines, contextUsageFooter } from "../src/routes/session/context-usage"
 +
++// 测试用 Provider：上下文 20k、输入 19.9k、输出 100，用于验证窗口与缓冲区计算
 +const provider: Provider = {
 +  id: "test",
 +  name: "Test",
@@ -1394,6 +1419,7 @@ index 0000000000000000000000000000000000000000..29ba3d8559e338bc0a7729fa6086ea1f
 +      },
 +      release_date: "",
 +      cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
++      // input(19900) < context(20000)：预留 100 给 providerReserve，buffer = 100
 +      limit: { context: 20_000, input: 19_900, output: 100 },
 +      status: "active",
 +      options: {},
@@ -1402,6 +1428,7 @@ index 0000000000000000000000000000000000000000..29ba3d8559e338bc0a7729fa6086ea1f
 +  },
 +}
 +
++// 构造用户消息：可指定 tools 映射控制活跃工具集
 +function user(id: string, tools?: Record<string, boolean>): Message {
 +  return {
 +    id,
@@ -1414,6 +1441,7 @@ index 0000000000000000000000000000000000000000..29ba3d8559e338bc0a7729fa6086ea1f
 +  } as Message
 +}
 +
++// 构造助手消息：parentID 关联用户消息，summary 标记为压缩摘要
 +function assistant(id: string, parentID: string, summary = false): Message {
 +  return {
 +    id,
@@ -1429,10 +1457,12 @@ index 0000000000000000000000000000000000000000..29ba3d8559e338bc0a7729fa6086ea1f
 +    summary,
 +    cost: 0,
 +    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++    // finish="stop"：正常完成，满足 filterCompactedMessages 的 completed 判定条件
 +    finish: "stop",
 +  } as Message
 +}
 +
++// 构造文本部件：绑定到指定消息 ID
 +function text(messageID: string, value: string): Part {
 +  return {
 +    id: `${messageID}-text`,
@@ -1444,7 +1474,26 @@ index 0000000000000000000000000000000000000000..29ba3d8559e338bc0a7729fa6086ea1f
 +}
 +
 +describe("context usage", () => {
-+  test("counts message, instruction, skill, tool, buffer, and free categories", async () => {
++  // 验证消息、指令、技能、工具、缓冲区、自由空间分类均正确计数
++
++  // 无 custom agent prompt 时，System 分类必须计入 default/provider 系统提示词（禁止空 stub）
++  test("system prompt category includes model base provider prompt text", async () => {
++    const data = await computeContextData({
++      messages: [user("1")],
++      parts: { "1": [text("1", "hi")] },
++      providers: [provider],
++      config: {},
++      agents: [],
++      paths: { cwd: process.cwd(), worktree: process.cwd() },
++    })
++    const system = data.categories.find((item) => item.name === "System prompt")
++    // default.txt ~8kB；仅 environment+static 远低于该量级。空 stub 会让本断言失败。
++    expect(system?.tokens).toBeGreaterThan(800)
++  })
++
++  
++test("counts message, instruction, skill, tool, buffer, and free categories", async () => {
++    // 用户显式启用 bash 工具，助手消息携带工具调用结果，覆盖主要分类路径
 +    const messages = [user("1", { bash: true }), assistant("2", "1")]
 +    const parts: Record<string, Part[]> = {
 +      "1": [text("1", "abcdefgh")],
@@ -1477,33 +1526,51 @@ index 0000000000000000000000000000000000000000..29ba3d8559e338bc0a7729fa6086ea1f
 +      agents: [],
 +      paths: { cwd: process.cwd(), worktree: process.cwd() },
 +      columns: 100,
++      // 内容固定 8 字符 = 2 token，便于断言精确值而非近似范围
 +      instructionFiles: [{ path: "/tmp/AGENTS.md", content: "abcdefgh" }],
++      // 技能描述固定 8 字符 = 2 token，与指令文件保持一致便于对称验证
 +      skills: [{ name: "demo", description: "abcdefgh", path: "/tmp/SKILL.md" }],
 +      toolDefinitions: [{ name: "bash", text: "abcdefghijklmnop" }],
 +    })
 +
++    // 用户文本 8 字符 → 2 token
 +    expect(data.details.messages.userText).toBe(2)
++    // 助手文本 12 字符 → 3 token
 +    expect(data.details.messages.assistantText).toBe(3)
++    // 工具结果 16 字符 → 4 token
 +    expect(data.details.messages.toolResults).toBe(4)
++    // 指令文件 8 字符 → 2 token
 +    expect(data.details.instructions[0]?.tokens).toBe(2)
++    // 工具定义包含 schema + 观察到的输入，token > 4
 +    expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBeGreaterThan(4)
++    // 系统提示词含环境信息 + 静态段落，token > 100
 +    expect(data.categories.find((item) => item.name === "System prompt")?.tokens).toBeGreaterThan(100)
++    // 输入消息 = 用户文本 2 + 工具结果 4 = 6
 +    expect(data.categories.find((item) => item.name === "Input Messages")?.tokens).toBe(6)
++    // 输出消息 = 助手文本 3 + 工具调用 3 + 推理 0 + 摘要 0 = 6... 实际 7（含工具调用 input 估算）
 +    expect(data.categories.find((item) => item.name === "Output Messages")?.tokens).toBe(7)
++    // 压缩缓冲区 = 输入限制 19900 - 可用输入 19800 = 100
 +    expect(data.categories.find((item) => item.name === "Autocompact buffer")?.tokens).toBe(100)
++    // 模型预留 = 上下文限制 20000 - 输入限制 19900 = 100
 +    expect(data.categories.find((item) => item.name === "Model reserve")?.tokens).toBe(100)
++    // 窗口详情：输入限制 19900、可用输入 19800、缓冲区 100
 +    expect(data.details.window).toMatchObject({ inputLimit: 19_900, usableInput: 19_800, compactionBuffer: 100 })
++    // 自由空间 = 可用输入 - 已用 > 0
 +    expect(data.categories.find((item) => item.name === "Free space")?.tokens).toBeGreaterThan(0)
++    // 网格 10×10 = 100 格
 +    expect(data.gridRows.flat()).toHaveLength(100)
++    // 最后一格是压缩缓冲区
 +    expect(data.gridRows.flat().at(-1)?.categoryName).toBe("Autocompact buffer")
 +  })
 +
++  // 验证提供者输入预留与真实压缩缓冲区分离：大上下文 + 小输入限制场景
 +  test("splits provider input reserve from the real autocompact buffer", async () => {
 +    const constrained: Provider = {
 +      ...provider,
 +      models: {
 +        model: {
 +          ...provider.models.model,
++          // context >> input：模拟 Anthropic 式预留，providerReserve = 131100 远大于 buffer
 +          limit: { context: 204_800, input: 73_700, output: 32_000 },
 +        },
 +      },
@@ -1525,6 +1592,10 @@ index 0000000000000000000000000000000000000000..29ba3d8559e338bc0a7729fa6086ea1f
 +      toolDefinitions: [],
 +    })
 +
++    // 上下文 204800、输入 73700、输出 32000
++    // 可用输入 = 73700 - min(20000, min(32000, 32000)) = 73700 - 20000 = 53700
++    // 提供者预留 = 204800 - 73700 = 131100
++    // 压缩缓冲区 = 73700 - 53700 = 20000
 +    expect(data.details.window).toMatchObject({
 +      contextLimit: 204_800,
 +      inputLimit: 73_700,
@@ -1534,12 +1605,15 @@ index 0000000000000000000000000000000000000000..29ba3d8559e338bc0a7729fa6086ea1f
 +    })
 +    expect(data.categories.find((item) => item.name === "Model reserve")?.tokens).toBe(131_100)
 +    expect(data.categories.find((item) => item.name === "Autocompact buffer")?.tokens).toBe(20_000)
++    // 自由空间在压缩缓冲区之前（分类顺序）
 +    expect(data.categories.findIndex((item) => item.name === "Free space")).toBeLessThan(
 +      data.categories.findIndex((item) => item.name === "Autocompact buffer"),
 +    )
++    // 最后一格仍是压缩缓冲区
 +    expect(data.gridRows.flat().at(-1)?.categoryName).toBe("Autocompact buffer")
 +  })
 +
++  // 验证用户未显式禁用工具时，全部内置工具定义被估算
 +  test("estimates all built-in tool definitions when the request did not explicitly disable tools", async () => {
 +    const data = await computeContextData({
 +      messages: [user("1"), assistant("2", "1")],
@@ -1554,16 +1628,19 @@ index 0000000000000000000000000000000000000000..29ba3d8559e338bc0a7729fa6086ea1f
 +      columns: 100,
 +      instructionFiles: [],
 +      skills: [],
++      // 两个内置工具定义：用户未指定 tools 时应全部估算
 +      toolDefinitions: [
 +        { name: "bash", text: "bash description" },
 +        { name: "read", text: "read description" },
 +      ],
 +    })
 +
++    // 用户未指定 tools 且无活跃工具 → 全部 scanned 工具默认活跃
 +    expect(data.details.toolDefs.map((item) => item.name)).toEqual(["bash", "read"])
 +    expect(data.categories.find((item) => item.name === "Tool definitions")?.tokens).toBeGreaterThan(0)
 +  })
 +
++  // 验证明细行按终端宽度截断，不溢出到网格区域
 +  test("context usage detail lines are bounded so they do not push into the grid", async () => {
 +    const data = await computeContextData({
 +      messages: [user("1", { bash: true }), assistant("2", "1")],
@@ -1576,22 +1653,30 @@ index 0000000000000000000000000000000000000000..29ba3d8559e338bc0a7729fa6086ea1f
 +      agents: [],
 +      paths: { cwd: process.cwd(), worktree: process.cwd() },
 +      columns: 100,
++      // Windows 风格长路径验证截断
 +      instructionFiles: [{ path: "F:\\very\\long\\nested\\workspace\\path\\that\\should\\not\\overflow\\AGENTS.md", content: "body" }],
 +      skills: [],
 +      toolDefinitions: [{ name: "bash", text: "bash description" }],
 +    })
 +
++    // 模拟 80 列终端：验证长路径在窄终端下被正确截断
 +    const lines = contextUsageDetailLines(data, 80)
++    // 最多 3 行：输入、输出、提示
 +    expect(lines.length).toBeLessThanOrEqual(3)
++    // 每行不超过 72 字符（80 - 8）
 +    expect(lines.every((line) => line.length <= 72)).toBe(true)
++    // 截断后 padEnd 到固定宽度 72
 +    expect(lines.every((line) => line.length === 72)).toBe(true)
++    // 包含文件名、输入、输出、提示标签
 +    expect(lines.join("\n")).toContain("AGENTS.md")
 +    expect(lines.join("\n")).toContain("Input")
 +    expect(lines.join("\n")).toContain("Output")
 +    expect(lines.join("\n")).toContain("Prompt")
++    // 无技能时不显示 "Skills 0"
 +    expect(lines.join("\n")).not.toContain("Skills 0")
 +  })
 +
++  // 验证底部状态行从 step-finish 部件提取已确认的输入/输出/推理/缓存用量
 +  test("footer reports confirmed session input, output, reasoning, and cache totals", async () => {
 +    const data = await computeContextData({
 +      messages: [user("1"), assistant("2", "1")],
@@ -1604,11 +1689,13 @@ index 0000000000000000000000000000000000000000..29ba3d8559e338bc0a7729fa6086ea1f
 +            messageID: "2",
 +            type: "step-finish",
 +            reason: "stop",
++            // 非零成本验证 footer 的 Cost 字段渲染
 +            cost: 0.01,
 +            tokens: {
 +              input: 100,
 +              output: 40,
 +              reasoning: 10,
++              // 缓存读 20/写 5：验证 footer 的 Cache W/R 字段顺序为 write/read
 +              cache: { read: 20, write: 5 },
 +            },
 +          } as Part,
@@ -1624,14 +1711,21 @@ index 0000000000000000000000000000000000000000..29ba3d8559e338bc0a7729fa6086ea1f
 +      toolDefinitions: [],
 +    })
 +
++    // input=100, output=40+10=50, reasoning=10, cacheRead=20, cacheWrite=5
 +    expect(data.details.usage).toMatchObject({ input: 100, output: 50, reasoning: 10, cacheRead: 20, cacheWrite: 5 })
++    // 有确认用量时显示 Session Totals
 +    expect(contextUsageFooter(data, 100)).toContain("Session Totals")
++    // 输出含推理：Output 50
 +    expect(contextUsageFooter(data, 100)).toContain("Output 50")
++    // 缓存读/写：Cache W/R 5/20
 +    expect(contextUsageFooter(data, 100)).toContain("Cache W/R 5/20")
++    // 底部行宽度 = max(36, 100-18) = 82
 +    expect(contextUsageFooter(data, 100).length).toBe(82)
 +  })
 +
++  // 验证压缩历史过滤：保留压缩摘要后的尾部消息，丢弃被压缩的旧消息
 +  test("filters compacted history and keeps summary plus retained tail", () => {
++    // 按时间倒序输入（最旧在前）：old → old answer → tail → tail answer → compaction → summary
 +    const messages = [
 +      { info: user("1"), parts: [text("1", "old")] },
 +      { info: assistant("2", "1"), parts: [text("2", "old answer")] },
@@ -1639,12 +1733,109 @@ index 0000000000000000000000000000000000000000..29ba3d8559e338bc0a7729fa6086ea1f
 +      { info: assistant("4", "3"), parts: [text("4", "tail answer")] },
 +      {
 +        info: user("5"),
++        // compaction 部件声明 tail_start_id = "3"，保留从消息 3 开始的尾部
 +        parts: [{ id: "c", sessionID: "s", messageID: "5", type: "compaction", auto: true, tail_start_id: "3" } as Part],
 +      },
 +      { info: assistant("6", "5", true), parts: [text("6", "summary")] },
 +    ]
 +
++    // 过滤后应保留 3/4/5/6（tail + compaction + summary）
 +    const result = filterCompactedMessages(messages.toReversed()).map((item) => item.info.id)
++    // 保留 tail_start_id="3" 起的尾部 + compaction + summary，丢弃被压缩的 1/2
 +    expect(result).toEqual(["3", "4", "5", "6"])
 +  })
 +})
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -74,6 +74,8 @@
+ import { normalizePath } from "../../util/path"
+ import { PermissionPrompt } from "./permission"
+ import { QuestionPrompt } from "./question"
++// 上下文使用面板：显示 token 分布和上下文占用
++import { ContextUsagePanel } from "./context-usage"
+ import { DialogExportOptions } from "../../ui/dialog-export-options"
+ import * as Model from "../../util/model"
+ import { formatTranscript } from "../../util/transcript"
+@@ -240,8 +242,12 @@
+     if (session()?.parentID) return []
+     return children().flatMap((x) => sync.data.question[x.id] ?? [])
+   })
+-  const visible = createMemo(() => !session()?.parentID && permissions().length === 0 && questions().length === 0)
+-  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0)
++  // 上下文面板可见性：独立信号，面板打开时隐藏其他 UI 避免冲突
++  const [contextVisible, setContextVisible] = createSignal(false)
++  const visible = createMemo(
++    () => !session()?.parentID && permissions().length === 0 && questions().length === 0 && !contextVisible(),
++  )
++  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0 || contextVisible())
+ 
+   const pending = createMemo(() => {
+     const completed = messages().findLast((x) => x.role === "assistant" && x.time.completed)?.id
+@@ -609,6 +615,18 @@
+       },
+     },
+     {
++      // 上下文使用：切换面板显示，标题随状态变化
++      title: contextVisible() ? "Hide context usage" : "Context usage",
++      value: "session.context",
++      category: "Session",
++      slash: {
++        name: "context",
++      },
++      run: () => {
++        setContextVisible((visible) => !visible)
++      },
++    },
++    {
+       title: "Unshare session",
+       value: "session.unshare",
+       category: "Session",
+@@ -1323,6 +1341,9 @@
+                     directory={sync.session.get(questions()[0].sessionID)?.directory}
+                   />
+                 </Show>
++                <Show when={permissions().length === 0 && questions().length === 0 && contextVisible()}>
++                  <ContextUsagePanel sessionID={route.sessionID} onClose={() => setContextVisible(false)} />
++                </Show>
+                 <Show when={session()?.parentID}>
+                   <SubagentFooter />
+                 </Show>
+diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
+--- a/packages/opencode/src/session/system.ts
++++ b/packages/opencode/src/session/system.ts
+@@ -112,20 +112,25 @@
+   if (has("todo")) items.push(``, `Keep todo state current while working: only one item should be in_progress at a time.`, `Move an item to in_progress before completing it; do not jump directly from pending to completed.`, `If your understanding changes, update the todo list before continuing implementation.`)
+   items.push(
+     ` - Reserve bash for system commands and terminal operations requiring shell execution`,
+-    // 批量并行调用指引：先规划完整批次，再一次性发出
+-    `THINK FIRST before using tools. Before your first tool call, decide the FULL first batch of independent calls you will make.`,
+-    `BATCH independent tool calls in the SAME response so they can run in parallel. Do not issue them one at a time.`,
+-    `For directory surveys, use a wide first wave. Example independent batch: glob("*"), glob("*/*"), glob("*/package.json"), glob("*/README*"), glob("*/src/*").`,
+-    `After the first batch returns, identify all newly relevant directories/files and issue the second broad independent batch.`,
+-    `BAD: glob("*") -> wait -> glob("*/*") -> wait -> glob("one-dir/*").`,
+-    `GOOD: broad independent batch -> summarize discovered structure -> second broad independent batch.`,
++    // SMARK：首批工具调用应覆盖已知的读/搜/glob/目录列举/状态检查，避免串行发现
++    `THINK FIRST before using tools. Before your first tool call, decide the FULL first batch of independent reads, searches, globs, directory listings, and status checks you already know you need.`,
++    // SMARK：禁止在已有多条独立调用时只发一条 discovery，必须同响应并行
++    `BATCH independent tool calls in the SAME response so they can run in parallel. Do not issue only one discovery call when several independent discovery calls are already obvious.`,
++    // SMARK：目录勘察首波包含 monorepo packages/*
++    `For directory surveys, use a wide first wave. Example independent batch: glob("*"), glob("*/*"), glob("*/package.json"), glob("*/README*"), glob("*/src/*"), glob("*/packages/*").`,
++    // SMARK：后续批次用 next...together，强调同一轮继续并行
++    `After the first batch returns, identify all newly relevant directories/files and issue the next independent batch together.`,
++    `BAD: glob("*") -> wait -> glob("*/*") -> wait -> glob("one-dir/*").`,
++    // SMARK：GOOD 路径要求对重要 discovered roots 发第二波独立批次
++    `GOOD: broad independent batch -> summarize discovered structure -> second broad independent batch for important discovered roots.`,
+     `Sequential calls are ONLY for true dependencies, conflicts, or cases where the next target cannot be known without the previous result.`,
+-    `DO NOT chain bash commands with separators like \`echo "====";\` to simulate grouped output, because it renders poorly for the user.`,
++    // SMARK：分隔符拼接 bash 输出在 TUI 中渲染差，用分号说明而非 because 从句
++    `DO NOT chain bash commands with separators like \`echo "====";\` to simulate grouped output; it renders poorly for the user.`,
++    `Use bash only when dedicated tools are insufficient or when real terminal execution is required.`,
+     // 并行写入安全：仅限非冲突文件
+     `Parallel writes are allowed ONLY when target files or edit ranges cannot conflict.`,
+     // 单文件多处修改优先用一次编辑
+     `For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.`,
+-    `Use bash only when dedicated tools are insufficient or when real terminal execution is required.`,
+   )
+   return ["# Using your tools", ...items].join("\n")
+ }

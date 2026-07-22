@@ -1,51 +1,132 @@
-From f9d2e647d8b25df9d5355d1b08d8303f19b39859 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Wed, 29 Apr 2026 05:15:38 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E5=B7=A5=E5=85=B7?=
- =?UTF-8?q?=E4=BD=BF=E7=94=A8=E6=8C=87=E5=AF=BC=EF=BC=8C=E6=B7=BB=E5=8A=A0?=
- =?UTF-8?q?=20Git=20=E5=91=BD=E4=BB=A4=E5=AE=89=E5=85=A8=E5=8D=8F=E8=AE=AE?=
- =?UTF-8?q?=E5=92=8C=E5=A4=9A=E5=B7=A5=E5=85=B7=E4=BD=BF=E7=94=A8=E5=BB=BA?=
- =?UTF-8?q?=E8=AE=AE?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-index 14a588762a047ed6e508775caf48cece32737f9f..8f106b4b908b278af9fcdde8acae149f72c0d65b 100644
---- a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-@@ -1,11 +1,14 @@
- import fs from "fs/promises"
- import os from "os"
- import path from "path"
--import { fileURLToPath } from "url"
-+import { fileURLToPath, pathToFileURL } from "url"
- import matter from "gray-matter"
- import type { Agent, Config, Message, Part, Provider, VcsInfo } from "@opencode-ai/sdk/v2"
+diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
+--- a/packages/tui/src/util/context-usage.ts
++++ b/packages/tui/src/util/context-usage.ts
+@@ -11,6 +11,8 @@
  import { Flag } from "@opencode-ai/core/flag/flag"
- import { estimate as estimateTokens } from "@/util/token"
-+import { toJsonSchema } from "@/util/effect-zod"
-+import { Schema } from "effect"
-+import { Shell } from "@/shell/shell"
- import { Skill } from "@/skill"
- import {
-   provider as systemProviderPrompt,
-@@ -427,29 +430,134 @@ async function gatherSkills(input: ComputeContextDataInput) {
+ import { estimate as estimateTokens } from "@opencode-ai/core/util/token"
+ import { estimateDataUrlInputTokens } from "./token-estimate"
++// 嵌入 catalog：TUI 无法 import opencode Schema，生成期抽取 description/parameters
++import EMBEDDED_TOOL_CATALOG from "./tool-definition-catalog.json"
+ 
+ // 内联 truthy：检查环境变量是否为 truthy 值（"true" 或 "1"）
+ // V2 Flag 模块未导出 truthy，此处内联以避免跨包导出解析问题
+@@ -681,34 +683,6 @@
    return skills
  }
  
+-// 扫描工具定义目录：读取 .ts 源文件提取 Tool.define 的 id 和参数 schema
+-// 注意：V2 TUI 无法访问 packages/opencode/src/tool/，此函数在 TUI 中将返回空数组
 -async function scanToolDefinitions() {
 -  const toolDir = fileURLToPath(new URL("../../../../tool/", import.meta.url))
-+const TOOL_DIR = fileURLToPath(new URL("../../../../tool/", import.meta.url))
+-  const result = [] as Array<{ name: string; text: string }>
+-  const entries = await fs.readdir(toolDir).catch(() => null)
+-  if (!entries) return result
+-  for (const entry of entries) {
+-    // 仅扫描 .ts 源文件：工具定义以 TypeScript 模块组织，.txt 等描述文件由导入解析
+-    if (!entry.endsWith(".ts")) continue
+-    const filepath = path.join(toolDir, entry)
+-    const source = await readText(filepath)
+-    // 从源码中正则提取 Tool.define("id") 的工具名
+-    const id = source.match(/Tool\.define(?:<[^>]+>)?\(\s*["']([^"']+)["']/)?.[1]
+-    if (!id) continue
+-    // 尝试提取 .txt 描述文件导入
+-    const descriptionImport = source.match(/import\s+([A-Z_]+)\s+from\s+["']\.\/([^"']+\.txt)["']/)
+-    const description = descriptionImport ? await readText(path.join(toolDir, descriptionImport[2])) : ""
+-    // 提取 Parameters 常量块作为 schema 文本
+-    const parameterStart = source.search(/(?:export\s+)?const\s+Parameters\s*=/)
+-    const parameterEnd = source.search(/export\s+const\s+\w+Tool\s*=\s*Tool\.define/)
+-    const parameters = parameterStart >= 0
+-      ? source.slice(parameterStart, parameterEnd > parameterStart ? parameterEnd : undefined)
+-      : ""
+-    result.push({ name: id, text: [`Tool: ${id}`, description, parameters].filter(Boolean).join("\n") })
+-  }
+-  return result
+-}
+ 
+ // 收集活跃工具名：从最后一条用户消息的 tools 映射和历史工具调用部件中提取
+ function activeToolNames(messages: WithParts[], lastUser: Message | undefined) {
+@@ -738,25 +712,146 @@
+   return ""
+ }
+ 
+-// 观察到的工具输入样本：最多取 3 条历史调用，用于估算重复调用的 schema 开销
+-function observedToolShape(name: string, messages: WithParts[]) {
+-  const samples: unknown[] = []
+-  for (const msg of messages) {
+-    for (const part of msg.parts) {
+-      if (part.type === "tool" && part.tool === name && samples.length < 3) samples.push(part.state.input)
 +
++// 工具定义 token：合并静态 schema 文本、动态工具文本和动态工具附加文本
++// 嵌入 catalog：TUI 不能 import opencode Schema，生成期抽取 description/parameters
++// 仅列入目标树有 owner 的工具名，禁止空占位
++// 禁止运行时扫 monorepo packages/opencode/src/tool
++const RESOLVED_TOOL_NAMES = [
++  "invalid", "question", "bash", "read", "glob", "grep", "edit", "write", "task",
++  "webfetch", "todowrite", "websearch", "skill", "apply_patch", "lsp", "plan_exit",
++] as const // 名称集合为 const 元组，便于下游字面量联合类型过滤
++
++// resolveToolDescriptions：与 SMARK 静态 import + toJsonSchema 等价的可运输主路径
++// 嵌入 catalog：TUI 不能 import opencode Schema，生成期抽取 description/parameters
++// 仅列入目标树有 owner 的工具名，禁止空占位
++// 禁止运行时扫 monorepo packages/opencode/src/tool
++// 主路径：从嵌入 catalog 组装 Tool/Description/Parameters 文本
++function resolveToolDescriptions(paths: { cwd: string; worktree?: string }) {
++  return RESOLVED_TOOL_NAMES.map((name) => {
++    // 缺失目录项时保持空串而非抛错，避免上下文估算主路径中断
++    const entry = (EMBEDDED_TOOL_CATALOG as Record<string, { description: string; parameters: string }>)[name] ?? {
++      description: "",
++      parameters: "",
+     }
+-  }
+-  return samples.length ? `Observed inputs:\n${stableJson(samples)}` : ""
++    let description = entry.description
++    // 与 bash/shell 描述一致：注入 cwd/worktree 等运行时路径变量
++    if (paths.cwd) description = description.replaceAll("${cwd}", paths.cwd)
++    if (paths.worktree) description = description.replaceAll("${worktree}", paths.worktree)
++    // 解析 shell 模板变量（os/shell/chaining 等），与 SMARK resolveToolDescriptions 一致
++    // 在 cwd/worktree 替换后解析 os/shell/chaining 等 shell 模板变量
++    
++    description = resolveTemplateVars(description, paths as any)
++    const parameters = entry.parameters
++    const parts = ["Tool: " + name]
++    if (description.trim()) parts.push(description.trim())
++    // Parameters 源码切片用于 token 估算，非运行时校验 schema
++    if (parameters.trim()) parts.push("Parameters: " + parameters.trim())
++    // text 顺序固定为 Tool/Description/Parameters，与 SMARK 展示结构对齐
++    return { name, text: parts.join(String.fromCharCode(10)) }
++  })
+ }
+ 
+-// 工具定义 token：合并静态 schema 文本、动态工具文本和观察到的输入样本
+-async function toolDefinitionTokens(
++
++// 兼容旧调用名：同步返回嵌入目录解析结果
++function scanToolDefinitions() {
++  // process.cwd 仅作无 paths 调用时的回退工作目录，正式路径由 computeContextData 传入
++  return resolveToolDescriptions({ cwd: process.cwd() })
++}
++
++// shell 描述模板解析：TUI 无法调用 @/shell，用 env/platform 推断
 +function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
 +  if (!text.includes("${")) return text
 +
-+  const shell = Shell.preferred()
-+  const shellPath = typeof shell === "string" ? shell : (shell as { path: string }).path
-+  const shellName = Shell.name(shellPath)
++  // context-usage 路径补全 shell 描述中未由 runtime shell 渲染的段落变量
++  text = text.replaceAll("${intro}", "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.")
++  text = text.replaceAll("${workdirSection}", "All commands run in the current working directory by default. Use the workdir parameter if you need to run a command in a different directory.")
++  text = text.replaceAll("${commandSection}", "Before executing the command, please follow directory verification and quoting rules for paths with spaces.")
++  text = text.replaceAll("${tmp}", "/tmp")
 +
++  // V2 适配：TUI 无法导入 @/shell/shell，使用环境变量推断 shell 类型
++  const shellName = (() => {
++    const shell = process.env.SHELL ?? ""
++    if (shell.includes("pwsh")) return "pwsh"
++    if (shell.includes("powershell")) return "powershell"
++    if (shell.includes("cmd")) return "cmd"
++    if (process.platform === "win32" && !shell) return "powershell"
++    return "bash"
++  })()
++
++  // 命令链指引：不同 shell 的条件执行语法差异
 +  const chain =
 +    shellName === "powershell"
 +      ? "If commands depend on each other, do NOT use '&&' or '||'. Use `cmd1; if ($?) { cmd2 }`."
@@ -55,6 +136,7 @@ index 14a588762a047ed6e508775caf48cece32737f9f..8f106b4b908b278af9fcdde8acae149f
 +          ? "If commands depend on each other, use `&&` for conditional sequencing in cmd.exe."
 +          : "If commands depend on each other, use a single shell call with '&&' to chain them together."
 +
++  // Windows 平台 shell 特定指引：PowerShell 5.1、PowerShell 7+、cmd.exe
 +  const shellGuidance = (() => {
 +    if (process.platform !== "win32") return ""
 +    if (shellName === "powershell") return [
@@ -89,6 +171,7 @@ index 14a588762a047ed6e508775caf48cece32737f9f..8f106b4b908b278af9fcdde8acae149f
 +    ].join("\n")
 +  })()
 +
++  // 目录列表命令：不同平台/shell 的原生命令
 +  const listCommand =
 +    process.platform !== "win32" ? "`ls`"
 +      : shellName === "powershell" || shellName === "pwsh" ? "`Get-ChildItem`"
@@ -107,243 +190,292 @@ index 14a588762a047ed6e508775caf48cece32737f9f..8f106b4b908b278af9fcdde8acae149f
 +    .replaceAll("${compressionGuidance}", "")
 +}
 +
-+async function resolveToolDescriptions(paths: ContextUsagePaths) {
-   const result = [] as Array<{ name: string; text: string }>
-   let entries: string[]
-   try {
--    entries = await fs.readdir(toolDir)
-+    entries = await fs.readdir(TOOL_DIR)
-   } catch {
-     return result
-   }
-+
-   for (const entry of entries) {
-     if (!entry.endsWith(".ts")) continue
--    const filepath = path.join(toolDir, entry)
-+    const baseName = entry.slice(0, -3)
-+    const filepath = path.join(TOOL_DIR, entry)
-+
-+    // Extract tool ID from source (single regex, very reliable)
-     const source = await readText(filepath)
-     const id = source.match(/Tool\.define(?:<[^>]+>)?\(\s*["']([^"']+)["']/)?.[1]
-     if (!id) continue
--    const descriptionImport = source.match(/import\s+([A-Z_]+)\s+from\s+["']\.\/([^"']+\.txt)["']/)
--    const description = descriptionImport ? await readText(path.join(toolDir, descriptionImport[2])) : ""
--    const parameterStart = source.search(/(?:export\s+)?const\s+Parameters\s*=/)
--    const parameterEnd = source.search(/export\s+const\s+\w+Tool\s*=\s*Tool\.define/)
--    const parameters = parameterStart >= 0
--      ? source.slice(parameterStart, parameterEnd > parameterStart ? parameterEnd : undefined)
--      : ""
--    result.push({ name: id, text: [`Tool: ${id}`, description, parameters].filter(Boolean).join("\n") })
-+
-+    // Find the .txt import path
-+    const txtImport = source.match(/import\s\w+\s+from\s+["']\.\/([^"']+\.txt)["']/)
-+    const txtPath = txtImport ? path.join(TOOL_DIR, txtImport[1]) : path.join(TOOL_DIR, `${baseName}.txt`)
-+
-+    // Load .txt content via dynamic import (proper module loading)
-+    let description = ""
-+    try {
-+      if (await exists(txtPath)) {
-+        const txtModule = await import(pathToFileURL(txtPath).href)
-+        description = txtModule.default ?? ""
-+      }
-+    } catch {
-+      description = await readText(txtPath)
-+    }
-+
-+    // Resolve template variables in description
-+    description = resolveTemplateVars(description, paths)
-+
-+    // Get parameters via dynamic import of the tool module
-+    let parametersText = ""
-+    try {
-+      const mod = await import(pathToFileURL(filepath).href)
-+      const parameters = (mod as Record<string, unknown>).Parameters
-+      if (parameters) {
-+        parametersText = JSON.stringify(toJsonSchema(parameters as Schema.Top))
-+      }
-+    } catch {
-+      // Fall back to source extraction
-+    }
-+    if (!parametersText) {
-+      const paramStart = source.search(/(?:export\s+)?const\s+Parameters\s*=/)
-+      const paramEnd = source.search(/export\s+const\s+\w+Tool\s*=\s*Tool\.define/)
-+      parametersText = paramStart >= 0
-+        ? source.slice(paramStart, paramEnd > paramStart ? paramEnd : undefined)
-+        : ""
-+    }
-+
-+    const text = [`Tool: ${id}`, description, parametersText].filter(Boolean).join("\n")
-+    result.push({ name: id, text })
-   }
-   return result
- }
-@@ -480,23 +588,13 @@ function dynamicToolText(name: string, input: ComputeContextDataInput, skills: A
-   return ""
- }
- 
--function observedToolShape(name: string, messages: WithParts[]) {
--  const samples: unknown[] = []
--  for (const msg of messages) {
--    for (const part of msg.parts) {
--      if (part.type === "tool" && part.tool === name && samples.length < 3) samples.push(part.state.input)
--    }
--  }
--  return samples.length ? `Observed inputs:\n${stableJson(samples)}` : ""
--}
--
- async function toolDefinitionTokens(
++function toolDefinitionTokens(
    input: ComputeContextDataInput,
    messages: WithParts[],
    skills: Array<{ name: string; description: string; path: string }>,
    lastUser: Message | undefined,
  ) {
 -  const scanned = input.toolDefinitions ?? await scanToolDefinitions()
-+  const scanned = input.toolDefinitions ?? await resolveToolDescriptions(input.paths)
++  // 无测试注入时走 catalog 解析，禁止扫 monorepo tool 目录
++  
++  const scanned = input.toolDefinitions ?? resolveToolDescriptions(input.paths)
    const active = activeToolNames(messages, lastUser)
+   // 用户未显式禁用工具且无活跃工具时，默认全部内置工具活跃
    if (lastUser?.role === "user" && lastUser.tools === undefined && active.size === 0) {
-     for (const item of scanned) active.add(item.name)
-@@ -504,9 +602,7 @@ async function toolDefinitionTokens(
+@@ -765,7 +860,7 @@
    const byName = new Map(scanned.map((item) => [item.name, item.text]))
    const details = [] as Array<{ name: string; tokens: number }>
    for (const name of active) {
 -    const text = [byName.get(name), dynamicToolText(name, input, skills), observedToolShape(name, messages)]
--      .filter(Boolean)
--      .join("\n")
-+    const text = [byName.get(name), dynamicToolText(name, input, skills)].filter(Boolean).join("\n")
++    const text = [byName.get(name), dynamicToolText(name, input, skills)]
+       .filter(Boolean)
+       .join("\n")
      details.push({ name, tokens: estimate(text || name) })
-   }
-   return details.toSorted((a, b) => a.name.localeCompare(b.name))
-diff --git a/packages/opencode/src/tool/bash.ts b/packages/opencode/src/tool/bash.ts
-index 7d0fab7c4b78063e4e392f3e78e37f4365b5f39d..f7102194302cd3c5649725d04241b3ee42e03bab 100644
---- a/packages/opencode/src/tool/bash.ts
-+++ b/packages/opencode/src/tool/bash.ts
-@@ -55,6 +55,22 @@ const FILES = new Set([
- ])
- const FLAGS = new Set(["-destination", "-literalpath", "-path"])
- const SWITCHES = new Set(["-confirm", "-debug", "-force", "-nonewline", "-recurse", "-verbose", "-whatif"])
-+const GIT_WRITES = new Set([
-+  "add",
-+  "commit",
-+  "merge",
-+  "rebase",
-+  "cherry-pick",
-+  "revert",
-+  "pull",
-+  "push",
-+  "checkout",
-+  "switch",
-+  "restore",
-+  "reset",
-+  "clean",
-+])
-+const GIT_STASH_WRITES = new Set(["push", "pop", "apply", "drop", "clear", "branch"])
- 
- export const Parameters = Schema.Struct({
-   command: Schema.String.annotate({ description: "The command to execute" }),
-@@ -221,6 +237,37 @@ function pathArgs(list: Part[], ps: boolean) {
-   return out
+@@ -812,16 +907,7 @@
  }
  
-+function gitSubcommand(tokens: string[]) {
-+  const name = tokens[0]?.toLowerCase().replace(/\.exe$/, "")
-+  if (name !== "git") return
-+  let skip = false
-+  for (const token of tokens.slice(1)) {
-+    if (skip) {
-+      skip = false
-+      continue
-+    }
-+    const lower = token.toLowerCase()
-+    if (lower === "-c" || lower === "--git-dir" || lower === "--work-tree" || lower === "--namespace") {
-+      skip = true
-+      continue
-+    }
-+    if (lower.startsWith("--git-dir=") || lower.startsWith("--work-tree=") || lower.startsWith("--namespace=")) continue
-+    if (lower.startsWith("-")) continue
-+    return lower
+ // 当前模型解析：优先用最后一条用户消息指定的模型，否则回退到 local 记录的模型
+-function currentModel(input: ComputeContextDataInput, lastUser: Message | undefined) {
+-  const selected = lastUser?.role === "user" ? lastUser.model : input.lastUserModel
+-  const provider = input.providers.find((item) => item.id === selected?.providerID)
+-  const model = selected?.modelID ? provider?.models[selected.modelID] : undefined
+-  return {
+-    providerID: selected?.providerID ?? provider?.id ?? "",
+-    modelID: selected?.modelID ?? "",
+-    model,
+-  }
+-}
++
+ 
+ // 窗口可用 token：从模型输入限制中扣除压缩缓冲区
+ function windowTokens(input: ComputeContextDataInput, model: Provider["models"][string] | undefined) {
+@@ -941,6 +1027,17 @@
+ }
+ 
+ // 计算上下文使用数据：汇总消息、指令、技能、工具定义的 token 分类与网格
++function currentModel(input: ComputeContextDataInput, lastUser: Message | undefined) {
++  const selected = lastUser?.role === "user" ? lastUser.model : input.lastUserModel
++  const provider = input.providers.find((item) => item.id === selected?.providerID)
++  const model = selected?.modelID ? provider?.models[selected.modelID] : undefined
++  return {
++    providerID: selected?.providerID ?? provider?.id ?? "",
++    modelID: selected?.modelID ?? "",
++    model,
 +  }
 +}
 +
-+function riskyGit(tokens: string[]) {
-+  const subcommand = gitSubcommand(tokens)
-+  if (!subcommand) return false
-+  if (subcommand === "stash") {
-+    const action = tokens.slice(2).map((item) => item.toLowerCase()).find((item) => !item.startsWith("-"))
+ export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
+   // 消息按时间倒序过滤压缩历史，再反转回正序
+   const raw = input.messages.map((msg) => ({ info: msg, parts: input.parts[msg.id] ?? [] }))
+diff --git a/packages/tui/src/util/tool-definition-catalog.json b/packages/tui/src/util/tool-definition-catalog.json
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/src/util/tool-definition-catalog.json
+@@ -0,0 +1,66 @@
++{
++  "invalid": {
++    "description": "Do not use",
++    "parameters": "Schema.Struct({\n  tool: Schema.String,\n  error: Schema.String,\n})"
++  },
++  "question": {
++    "description": "Use this tool when you need to ask the user questions during execution. This allows you to:\n1. Gather user preferences or requirements\n2. Clarify ambiguous instructions\n3. Get decisions on implementation choices as you work\n4. Offer choices to the user about what direction to take.\n\nUsage notes:\n- When `custom` is enabled (default), a \"Type your own answer\" option is added automatically; don't include \"Other\" or catch-all options\n- Answers are returned as arrays of labels; set `multiple: true` to allow selecting more than one\n- If you recommend a specific option, make that the first option in the list and add \"(Recommended)\" at the end of the label\n",
++    "parameters": "Schema.Struct({\n  questions: Schema.mutable(Schema.Array(Question.Prompt)).annotate({ description: \"Questions to ask\" }),\n})"
++  },
++  "bash": {
++    "description": "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.\n\nBe aware: OS: ${os}, Shell: ${shell}\n\nAll commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory.\n\nUse `/tmp` for temporary work outside the workspace. This directory has already been created, already exists, and is pre-approved for external directory access.\n\nIMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.\n\nBefore executing the command, please follow directory verification and quoting rules for paths with spaces.\n\n# Git repository state changes\n\n# 只读检查允许列表（含 rev-parse / remote -v）\nRead-only git inspection commands are allowed when needed, such as `git status`, `git diff`, `git log`, `git show`, `git branch --show-current`, `git rev-parse`, and `git remote -v`.\n\n# 写操作必须由最新用户消息明确要求该操作类型\nDo not run git commands that modify refs, history, the index, the working tree, stashes, or remotes\nunless the latest user message explicitly requests that exact kind of operation.\nThis includes `git add`, `git commit`, `git merge`, `git rebase`, `git cherry-pick`, `git revert`,\n`git pull`, `git push`, `git checkout`, `git switch`, `git restore`, `git reset`, `git clean`,\nand `git stash push/pop/apply/drop/clear`.\nDebugging, fixing tests, syncing a branch, resolving a blocker, or make-it-work is not authorization for these commands.\nIf such an operation seems necessary, explain why and ask first.\n\n# Git Safety Protocol\n- NEVER update the git config\n- NEVER run destructive/irreversible git commands (force push, hard reset, etc) unless the user explicitly requests them\n- NEVER skip hooks (--no-verify, --no-gpg-sign, etc) unless the user explicitly requests it\n- NEVER run force push to main/master; warn the user if they request it\n- Avoid git commit --amend. ONLY use --amend when ALL conditions are met:\n  (1) User explicitly requested amend, OR the commit succeeded and pre-commit hooks auto-modified files that need including\n  (2) HEAD commit was created by you in this conversation (verify: git log -1 --format='%an %ae')\n  (3) Commit has NOT been pushed to remote (verify: git status shows \"Your branch is ahead\")\n- CRITICAL: If commit FAILED or was REJECTED by hook, NEVER amend - fix the issue and create a NEW commit\n- CRITICAL: If you already pushed to remote, NEVER amend unless user explicitly requests it (requires force push)\n- NEVER commit changes unless the latest user message explicitly asks you to.\n  Prior approval to make code changes, debug, test, or inspect git status is not approval to commit.\n\n# Committing changes with git\nOnly create commits when the latest user message explicitly asks you to create a commit. If unclear, ask first.\n- Before committing, inspect `git status`, `git diff`, and `git log --oneline -10`; stage only intended files and never commit secrets.\n- Write a concise commit message that matches the repo style.\n- If a commit fails or hooks reject it, fix the issue and create a new commit; do not amend the failed commit.\n\n# GitHub\n- Before creating a PR, inspect status, diff, remote tracking, recent commits, and the diff from the base branch.\n- Review all commits included in the PR, not just the latest commit.\n- Use `gh` for GitHub tasks, including PRs, issues, checks, and releases; return the PR URL when done.\n",
++    "parameters": "Schema.Struct({\n    command: Schema.String.annotate({ description: \"The command to execute\" }),\n    timeout: Schema.optional(PositiveInt).annotate({ description: \"Optional timeout in milliseconds\" }),\n    workdir: Schema.optional(Schema.String).annotate({\n      description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,\n    }),\n    // 启用输出压缩以减少 token 用量\n    compress_output: Schema.optional(Schema.Boolean).annotate({\n      description: \"Enable output compression to reduce token usage\",\n    }),\n  })"
++  },
++  "read": {
++    "description": "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\nUsage:\n- The filePath parameter should be an absolute path.\n- By default, this tool returns up to 2000 lines from the start of the file.\n- The offset parameter is the line number to start from (1-indexed).\n- To read later sections, call this tool again with a larger offset.\n- Use the grep tool to find specific content in large files or files with long lines.\n- If you are unsure of the correct file path, use the glob tool to look up filenames by glob pattern.\n- Contents are returned with each line prefixed by its line number as `<line>: <content>`. For example, if a file has contents \"foo\\n\", you will receive \"1: foo\\n\". For directories, entries are returned one per line (without line numbers) with a trailing `/` for subdirectories.\n- Any line longer than 2000 characters is truncated.\n- Call this tool in parallel when you know there are multiple files you want to read.\n- Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.\n- This tool can read image files and PDFs and return them as file attachments.\n",
++    "parameters": "Schema.Struct({\n  filePath: Schema.String.annotate({ description: \"The absolute path to the file or directory to read\" }),\n  offset: Schema.optional(NonNegativeInt).annotate({\n    description: \"The line number to start reading from (1-indexed)\",\n  }),\n  limit: Schema.optional(NonNegativeInt).annotate({\n    description: \"The maximum number of lines to read (defaults to 2000)\",\n  }),\n})"
++  },
++  "glob": {
++    "description": "# glob 工具：优先专用搜索，避免 shell find 绕过忽略规则\n- Fast file pattern matching tool that works with any codebase size\n- Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\"\n- Returns matching file paths\n- Use this tool when you need to find files by name patterns\n- For open-ended search, use glob/grep/read directly first. Consider Task only when exploration splits into 2+ independent branches and does not block your next local step.\n- You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.\n",
++    "parameters": "Schema.Struct({\n  pattern: Schema.String.annotate({ description: \"The glob pattern to match files against\" }),\n  path: Schema.optional(Schema.String).annotate({\n    description: `The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter \"undefined\" or \"null\" - simply omit it for the default behavior. Must be a valid directory path if provided.`,\n  }),\n})"
++  },
++  "grep": {
++    "description": "# grep 工具：优先专用内容搜索，避免 shell grep 丢上下文\n- Fast content search tool that works with any codebase size\n- Searches file contents using regular expressions\n- Supports full regex syntax (eg. \"log.*Error\", \"function\\s+\\w+\", etc.)\n- Filter files by pattern with the include parameter (eg. \"*.js\", \"*.{ts,tsx}\")\n- Returns file paths and line numbers with matching lines\n- Use this tool when you need to find files containing specific patterns\n- If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.\n- For open-ended search, use glob/grep/read directly first. Consider Task only when exploration splits into 3+ independent branches and does not block your next local step.\n",
++    "parameters": "Schema.Struct({\n  pattern: Schema.String.annotate({ description: \"The regex pattern to search for in file contents\" }),\n  path: Schema.optional(Schema.String).annotate({\n    description: \"The directory to search in. Defaults to the current working directory.\",\n  }),\n  include: Schema.optional(Schema.String).annotate({\n    description: 'File pattern to include in the search (e.g. \"*.js\", \"*.{ts,tsx}\")',\n  }),\n})"
++  },
++  "edit": {
++    "description": "Performs exact string replacements in files. \n\nUsage:\n- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. \n- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + colon + space (e.g., `1: `). Everything after that space is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.\n- The edit will FAIL if `oldString` is not found in the file with an error \"oldString not found in content\".\n- The edit will FAIL if `oldString` is found multiple times in the file with an error \"Found multiple matches for oldString. Provide more surrounding lines in oldString to identify the correct match.\" Either provide a larger string with more surrounding context to make it unique or use `replaceAll` to change every instance of `oldString`. \n- Use `replaceAll` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.\n",
++    "parameters": "Schema.Struct({\n  filePath: Schema.String.annotate({ description: \"The absolute path to the file to modify\" }),\n  oldString: Schema.String.annotate({ description: \"The text to replace\" }),\n  newString: Schema.String.annotate({\n    description: \"The text to replace it with (must be different from oldString)\",\n  }),\n  replaceAll: Schema.optional(Schema.Boolean).annotate({\n    description: \"Replace all occurrences of oldString (default false)\",\n  }),\n})"
++  },
++  "write": {
++    "description": "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.\n",
++    "parameters": "Schema.Struct({\n  content: Schema.String.annotate({ description: \"The content to write to the file\" }),\n  filePath: Schema.String.annotate({\n    description: \"The absolute path to the file to write (must be absolute, not relative)\",\n  }),\n})"
++  },
++  "task": {
++    "description": "# task 工具：禁止跨会话复用非法 task_id，须显式新建\nLaunch a new agent to handle complex, multistep tasks autonomously.\n\nWhen using the Task tool, you must specify a subagent_type parameter to select which agent type to use.\n\nUse task when:\n- The user invokes a custom slash command; pass the slash command invocation as the full prompt.\n- A broad codebase question splits into 2+ independent search/read branches.\n- A non-blocking subtask can run in parallel while you continue useful local work.\n- A specialized agent clearly matches the task and can materially advance the request.\n- You need an isolated review/research pass and the user requested or accepted that workflow.\n\nDo NOT use task when:\n- You need to read a known file path; use read.\n- You need to find files by name; use glob.\n- You need to search known keywords, symbols, error text, or a small set of files; use grep/read.\n- The next local step is blocked on the result and you can search or read it yourself.\n- The task is trivial, would duplicate work you are already doing, or would only save context.\n- The task is normal debugging, implementation, or verification work in the current thread.\n\nPrompting rules:\n- Make the prompt self-contained unless resuming with task_id.\n- State whether the agent should research only or edit files.\n- For code-editing subtasks, specify the owned files/modules and avoid overlapping write scopes with other agents.\n- Include relevant paths, constraints, and expected final output.\n- Ask for concise findings when you only need a summary.\n- Tell the agent how to verify its work when verification is possible.\n\n\nUsage notes:\n- Launch independent agents in parallel in one response when their scopes do not overlap.\n- Trust completed agent results by default, but inspect changed files before integrating or reporting final success.\n- Reuse task_id only when continuing the same subagent context is useful.\n- The agent result is returned to you, not directly to the user; summarize relevant results yourself.\n\nExample usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):\n\n<example_agent_descriptions>\n\"explorer\": use this agent for broad, independent codebase exploration across multiple unrelated areas\n\"reviewer\": use this agent for an isolated review pass after the user requested or accepted review\n</example_agent_description>\n\n<example>\nuser: \"Where is the database lock error thrown?\"\n<commentary>\nThe target is a known error string, so use grep/read directly instead of Task.\n</commentary>\nassistant: Uses grep for \"database is locked\", then reads the matching files.\n</example>\n\n<example>\nuser: \"Compare the server lifecycle, permission model, and streaming event flow.\"\n<commentary>\nThis has 3 independent research branches and can run in parallel, so Task may be useful.\n</commentary>\nassistant: Uses Task to launch independent exploration for each non-overlapping branch.\n</example>\n",
++    "parameters": "Schema.Struct({\n  ...BaseParameterFields,\n  background: Schema.optional(Schema.Boolean).annotate({\n    description:\n      \"Run the agent in the background. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress\",\n  }),\n})"
++  },
++  "webfetch": {
++    "description": "- Fetches content from a specified URL\n- Takes a URL and optional format as input\n- Fetches the URL content, converts to requested format (markdown by default)\n- Returns the content in the specified format\n- Use this tool when you need to retrieve and analyze web content\n\nUsage notes:\n  - IMPORTANT: if another tool is present that offers better web fetching capabilities, is more targeted to the task, or has fewer restrictions, prefer using that tool instead of this one.\n  - The URL must be a fully-formed valid URL\n  - HTTP URLs will be automatically upgraded to HTTPS\n  - Format options: \"markdown\" (default), \"text\", or \"html\"\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large\n",
++    "parameters": "Schema.Struct({\n  url: Schema.String.annotate({ description: \"The URL to fetch content from\" }),\n  format: Schema.Literals([\"text\", \"markdown\", \"html\"])\n    .annotate({\n      description: \"The format to return the content in (text, markdown, or html). Defaults to markdown.\",\n      default: \"markdown\",\n    })\n    .pipe(Schema.withDecodingDefault(Effect.succeed(\"markdown\" as const))),\n  timeout: Schema.optional(Schema.Number).annotate({ description: \"Optional timeout in seconds (max 120)\" }),\n})"
++  },
++  "todowrite": {
++    "description": "Create and maintain a structured task list for the current coding session. Tracks progress, organizes multi-step work, and surfaces status to the user.\n\nUse todowrite when:\n- The task has 3 or more meaningful steps.\n- The user explicitly asks for a todo list or progress tracking.\n- The user provides multiple tasks or requirements.\n- The work needs planning, implementation, and verification phases.\n- New instructions change the plan and the task list should be updated.\n\nDo not use todowrite when:\n- The task is a single straightforward action.\n- The task is trivial or purely informational.\n- Tracking would add noise without improving execution.\n\n## States\n- `pending` - not started\n- `in_progress` - actively working (exactly ONE at a time)\n- `completed` - finished successfully\n- `cancelled` - no longer needed\n\n## Rules\n- Update status in real time; don't batch completions\n- Mark `completed` only after the required work is actually done, including any required verification. Never based on intent.\n- Keep exactly one `in_progress` while work remains\n- If blocked or partial, keep it `in_progress` and add a follow-up todo describing the blocker\n- Preserve user-provided commands verbatim (flags, args, order)\n- Items should be specific and actionable; break large work into smaller steps\n\n## Examples\n\nUse it:\n- \"Add a dark mode toggle and run the tests\" -> multi-step feature + explicit verification\n- \"Rename getCwd -> getCurrentWorkingDirectory across the repo\" -> grep reveals 15 occurrences in 8 files\n- \"Implement registration, catalog, cart, checkout\" -> multiple complex features\n\nSkip it:\n- \"How do I print Hello World in Python?\" -> informational\n- \"Add a comment to calculateTotal\" -> single edit\n- \"Run npm install and tell me what happened\" -> one command\n\nWhen in doubt, use it.\n",
++    "parameters": "Schema.Struct({\n  todos: Schema.mutable(Schema.Array(Todo.Info)).annotate({ description: \"The updated todo list\" }),\n})"
++  },
++  "websearch": {
++    "description": "- Search the web using the session's web search provider - performs real-time web searches and can scrape content from specific URLs\n- Provides up-to-date information for current events and recent data\n- Supports configurable result counts and returns the content from the most relevant websites\n- Use this tool for accessing information beyond knowledge cutoff\n- Searches are performed automatically within a single API call\n\nUsage notes:\n  - Supports live crawling modes when available: 'fallback' (backup if cached unavailable) or 'preferred' (prioritize live crawling)\n  - Search types when available: 'auto' (balanced), 'fast' (quick results), 'deep' (comprehensive search)\n  - Configurable context length for optimal LLM integration\n  - Domain filtering and advanced search options available\n\nThe current year is {{year}}. You MUST use this year when searching for recent information or current events\n- Example: If the current year is 2026 and the user asks for \"latest AI news\", search for \"AI news 2026\", NOT \"AI news 2025\"\n",
++    "parameters": "Schema.Struct({\n  query: Schema.String.annotate({ description: \"Websearch query\" }),\n  numResults: Schema.optional(Schema.Number).annotate({\n    description: \"Number of search results to return (default: 8)\",\n  }),\n  livecrawl: Schema.optional(Schema.Literals([\"fallback\", \"preferred\"])).annotate({\n    description:\n      \"Live crawl mode - 'fallback': use live crawling as backup if cached content unavailable, 'preferred': prioritize live crawling (default: 'fallback')\",\n  }),\n  type: Schema.optional(Schema.Literals([\"auto\", \"fast\", \"deep\"])).annotate({\n    description: \"Search type - 'auto': balanced search (default), 'fast': quick results, 'deep': comprehensive search\",\n  }),\n  contextMaxCharacters: Schema.optional(Schema.Number).annotate({\n    description: \"Maximum characters for context string optimized for LLMs (default: 10000)\",\n  }),\n})"
++  },
++  "skill": {
++    "description": "Load a specialized skill when the task at hand matches one of the skills listed in the system prompt.\n\nUse this tool to inject the skill's instructions and resources into current conversation. The output may contain detailed workflow guidance as well as references to scripts, files, etc in the same directory as the skill.\n\nThe skill name must match one of the skills listed in your system prompt.\n",
++    "parameters": "Schema.Struct({\n  name: Schema.String.annotate({ description: \"The name of the skill from available_skills\" }),\n})"
++  },
++  "apply_patch": {
++    "description": "Use the `apply_patch` tool to edit files. Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:\n\n*** Begin Patch\n[ one or more file sections ]\n*** End Patch\n\nWithin that envelope, you get a sequence of file operations.\nYou MUST include a header to specify the action you are taking.\nEach operation starts with one of three headers:\n\n*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).\n*** Delete File: <path> - remove an existing file. Nothing follows.\n*** Update File: <path> - patch an existing file in place (optionally with a rename).\n\nExample patch:\n\n```\n*** Begin Patch\n*** Add File: hello.txt\n+Hello world\n*** Update File: src/app.py\n*** Move to: src/main.py\n@@ def greet():\n-print(\"Hi\")\n+print(\"Hello, world!\")\n*** Delete File: obsolete.txt\n*** End Patch\n```\n\nIt is important to remember:\n\n- You must include a header with your intended action (Add/Delete/Update)\n- You must prefix new lines with `+` even when creating a new file\n",
++    "parameters": "Schema.Struct({\n  patchText: Schema.String.annotate({ description: \"The full patch text that describes all changes to be made\" }),\n})"
++  },
++  "lsp": {
++    "description": "Interact with Language Server Protocol (LSP) servers to get code intelligence features.\n\nSupported operations:\n- goToDefinition: Find where a symbol is defined\n- findReferences: Find all references to a symbol\n- hover: Get hover information (documentation, type info) for a symbol\n- documentSymbol: Get all symbols (functions, classes, variables) in a document\n- workspaceSymbol: List project-wide symbols matching a query string\n- goToImplementation: Find implementations of an interface or abstract method\n- prepareCallHierarchy: Get call hierarchy item at a position (functions/methods)\n- incomingCalls: Find all functions/methods that call the function at a position\n- outgoingCalls: Find all functions/methods called by the function at a position\n\nAll operations require:\n- filePath: The file to operate on\n- line: The line number (1-based, as shown in editors)\n- character: The character offset (1-based, as shown in editors)\n\nworkspaceSymbol also accepts:\n- query: A query string to filter symbols by. Empty string requests all symbols.\n\nFor workspaceSymbol, filePath is not sent in the LSP workspace/symbol request. It is used by opencode to select and start the matching LSP server.\n\nNote: LSP servers must be configured for the file type. If no server is available, an error will be returned.\n",
++    "parameters": "Schema.Struct({\n  operation: Schema.Literals(operations).annotate({ description: \"The LSP operation to perform\" }),\n  filePath: Schema.String.annotate({ description: \"The absolute or relative path to the file\" }),\n  line: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).annotate({\n    description: \"The line number (1-based, as shown in editors)\",\n  }),\n  character: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).annotate({\n    description: \"The character offset (1-based, as shown in editors)\",\n  }),\n  query: Schema.optional(Schema.String).annotate({\n    description: \"Search query for workspaceSymbol. Empty string requests all symbols.\",\n  }),\n})"
++  },
++  "plan_exit": {
++    "description": "Use this tool when you have completed the planning phase and are ready to exit plan agent.\n\nThis tool will ask the user if they want to switch to build agent to start implementing the plan.\n\nCall this tool:\n- After you have written a complete plan to the plan file\n- After you have clarified any questions with the user\n- When you are confident the plan is ready for implementation\n\nDo NOT call this tool:\n- Before you have created or finalized the plan\n- If you still have unanswered questions about the implementation\n- If the user has indicated they want to continue planning\n",
++    "parameters": "Schema.Struct({})"
++  }
++}
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -23,6 +23,58 @@
+ import { ShellPrompt, type Parameters } from "./shell/prompt"
+ import { BashArity } from "@/permission/arity"
+ 
++// Git 写操作的子命令集合：这些命令会修改仓库状态，需要用户明确授权
++// Git 写操作集合：修改 refs/index/工作树，须最新用户明确授权
++const GIT_WRITES = new Set(["add", "commit", "merge", "rebase", "cherry-pick", "revert", "pull", "push", "checkout", "switch", "restore", "reset", "clean"])
++// Git stash 写操作：修改 stash 栈，同样需要明确授权
++// stash 写动作集合：push/pop/apply 等修改 stash 栈
++const GIT_STASH_WRITES = new Set(["push", "pop", "apply", "drop", "clear", "branch"])
++
++// 解析 git 子命令，跳过 -c/--git-dir/--work-tree/--namespace 等带值参数
++// 大小写不敏感，处理 Windows .exe 后缀
++function gitSubcommand(tokens: string[]): string | undefined {
++  // 全 token 小写后再比 flag
++  const lower = tokens.map((t) => t.toLowerCase())
++  const cmd = lower[0]?.replace(/\.exe$/, "")
++  if (cmd !== "git") return undefined
++  let i = 1
++  while (i < lower.length) {
++    const t = lower[i]
++    if (t === "-c" || t === "--git-dir" || t === "--work-tree" || t === "--namespace") {
++      i += 2
++      continue
++    }
++    // --git-dir=value 等形式无单独 token 值，靠 startsWith("-") 整段跳过
++    if (t.startsWith("-")) {
++      i++
++      continue
++    }
++    return t
++  }
++  return undefined
++}
++
++// 判断是否为高风险 git 写操作：stash 写操作或任何 GIT_WRITES 中的子命令
++// 用于阻止这些命令被自动加入 always-allow 前缀建议
++// 危险 git 写操作不得 always-allow，必须走最新用户显式授权
++function riskyGit(tokens: string[]): boolean {
++  const sub = gitSubcommand(tokens)
++  if (!sub) return false
++  // stash 子命令需要检查具体操作（push/pop/apply 等才是写操作）
++  // stash 动作必须从 stash 词之后扫描，避免 git -c x=y stash push 被 slice(2) 误判
++  if (sub === "stash") {
++    // 裸 git stash 默认等同于 push，视为写操作
++    const lower = tokens.map((x) => x.toLowerCase())
++    const stashAt = lower.findIndex((x) => x === "stash" || x === "stash.exe")
++    const after = stashAt >= 0 ? lower.slice(stashAt + 1) : lower.slice(2)
++    const action = after.find((x) => !x.startsWith("-"))
 +    if (!action) return true
 +    return GIT_STASH_WRITES.has(action)
 +  }
-+  return GIT_WRITES.has(subcommand)
++  return GIT_WRITES.has(sub)
 +}
 +
- function preview(text: string) {
-   if (text.length <= MAX_METADATA_LENGTH) return text
-   return "...\n\n" + text.slice(-MAX_METADATA_LENGTH)
-@@ -483,7 +530,7 @@ export const BashTool = Tool.define(
++
+ export { Parameters } from "./shell/prompt"
+ 
+ const MAX_METADATA_LENGTH = 30_000
+@@ -500,7 +552,8 @@
  
          if (tokens.length && (!cmd || !CWD.has(cmd))) {
            scan.patterns.add(source(node))
 -          scan.always.add(BashArity.prefix(tokens).join(" ") + " *")
++          // 高风险 git 写操作不自动加入 always-allow 前缀建议
 +          if (!riskyGit(tokens)) scan.always.add(BashArity.prefix(tokens).join(" ") + " *")
          }
        }
  
-diff --git a/packages/opencode/src/tool/bash.txt b/packages/opencode/src/tool/bash.txt
-index abf437badbe3846350143cfe0a5194b3f7406ead..1d90609829d9ff5a89e9713fcf85e925aa38185a 100644
---- a/packages/opencode/src/tool/bash.txt
-+++ b/packages/opencode/src/tool/bash.txt
-@@ -55,9 +55,15 @@ ${compressionGuidance}
-     cd /foo/bar && pytest tests
-     </bad-example>
+diff --git a/packages/opencode/src/tool/shell/shell.txt b/packages/opencode/src/tool/shell/shell.txt
+--- a/packages/opencode/src/tool/shell/shell.txt
++++ b/packages/opencode/src/tool/shell/shell.txt
+@@ -10,12 +10,44 @@
  
+ ${commandSection}
+ 
+-# Git and GitHub
+-- Only commit, amend, push, or create PRs when explicitly requested.
 +# Git repository state changes
 +
++# 只读检查允许列表（含 rev-parse / remote -v）
 +Read-only git inspection commands are allowed when needed, such as `git status`, `git diff`, `git log`, `git show`, `git branch --show-current`, `git rev-parse`, and `git remote -v`.
 +
-+Do not run git commands that modify refs, history, the index, the working tree, stashes, or remotes unless the latest user message explicitly requests that exact kind of operation. This includes `git add`, `git commit`, `git merge`, `git rebase`, `git cherry-pick`, `git revert`, `git pull`, `git push`, `git checkout`, `git switch`, `git restore`, `git reset`, `git clean`, and `git stash push/pop/apply/drop/clear`. Debugging, fixing tests, syncing a branch, resolving a blocker, or "make it work" is not authorization for these commands. If such an operation seems necessary, explain why and ask first.
++# 写操作必须由最新用户消息明确要求该操作类型
++Do not run git commands that modify refs, history, the index, the working tree, stashes, or remotes
++unless the latest user message explicitly requests that exact kind of operation.
++This includes `git add`, `git commit`, `git merge`, `git rebase`, `git cherry-pick`, `git revert`,
++`git pull`, `git push`, `git checkout`, `git switch`, `git restore`, `git reset`, `git clean`,
++and `git stash push/pop/apply/drop/clear`.
++Debugging, fixing tests, syncing a branch, resolving a blocker, or make-it-work is not authorization for these commands.
++If such an operation seems necessary, explain why and ask first.
 +
- # Committing changes with git
- 
--Only create commits when requested by the user. If unclear, ask first. When the user asks you to create a new git commit, follow these steps carefully:
-+Only create commits when the latest user message explicitly asks you to create a commit. If unclear, ask first. When the user asks you to create a new git commit, follow these steps carefully:
- 
- Git Safety Protocol:
- - NEVER update the git config
-@@ -70,7 +76,7 @@ Git Safety Protocol:
-   (3) Commit has NOT been pushed to remote (verify: git status shows "Your branch is ahead")
- - CRITICAL: If commit FAILED or was REJECTED by hook, NEVER amend - fix the issue and create a NEW commit
- - CRITICAL: If you already pushed to remote, NEVER amend unless user explicitly requests it (requires force push)
--- NEVER commit changes unless the user explicitly asks you to. It is VERY IMPORTANT to only commit when explicitly asked, otherwise the user will feel that you are being too proactive.
-+- NEVER commit changes unless the latest user message explicitly asks you to. Prior approval to make code changes, debug, test, or inspect git status is not approval to commit.
- 
- 1. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following bash commands in parallel, each using the Bash tool:
-   - Run a git status command to see all untracked files.
++# 完整 Git 安全协议：禁止未授权 amend/force-push/跳 hook
++# 禁止未授权 amend/force-push/跳 hook；写操作须最新用户授权
++# Git Safety Protocol
++- NEVER update the git config
++- NEVER run destructive/irreversible git commands (force push, hard reset, etc) unless the user explicitly requests them
++- NEVER skip hooks (--no-verify, --no-gpg-sign, etc) unless the user explicitly requests it
++- NEVER run force push to main/master; warn the user if they request it
++- Avoid git commit --amend. ONLY use --amend when ALL conditions are met:
++  (1) User explicitly requested amend, OR the commit succeeded and pre-commit hooks auto-modified files that need including
++  (2) HEAD commit was created by you in this conversation (verify: git log -1 --format='%an %ae')
++  (3) Commit has NOT been pushed to remote (verify: git status shows "Your branch is ahead")
++- CRITICAL: If commit FAILED or was REJECTED by hook, NEVER amend - fix the issue and create a NEW commit
++- CRITICAL: If you already pushed to remote, NEVER amend unless user explicitly requests it (requires force push)
++- NEVER commit changes unless the latest user message explicitly asks you to.
++  Prior approval to make code changes, debug, test, or inspect git status is not approval to commit.
++
++# 提交与 push 必须由最新用户消息明确授权
++# Committing changes with git
++Only create commits when the latest user message explicitly asks you to create a commit. If unclear, ask first.
+ - Before committing, inspect `git status`, `git diff`, and `git log --oneline -10`; stage only intended files and never commit secrets.
+ - Write a concise commit message that matches the repo style.
+-- Do not update git config, skip hooks, use interactive `-i`, force-push, or create empty commits unless explicitly requested.
+ - If a commit fails or hooks reject it, fix the issue and create a new commit; do not amend the failed commit.
++
++# GitHub
+ - Before creating a PR, inspect status, diff, remote tracking, recent commits, and the diff from the base branch.
+ - Review all commits included in the PR, not just the latest commit.
+ - Use `gh` for GitHub tasks, including PRs, issues, checks, and releases; return the PR URL when done.
 diff --git a/packages/opencode/src/tool/glob.txt b/packages/opencode/src/tool/glob.txt
-index 627da6cae9d7278107b984c9db6cae022d88b2aa..4fcd9af8da8c0b0807fb5262df1b13f72a34da6b 100644
 --- a/packages/opencode/src/tool/glob.txt
 +++ b/packages/opencode/src/tool/glob.txt
-@@ -2,5 +2,5 @@
+@@ -1,6 +1,7 @@
++# glob 工具：优先专用搜索，避免 shell find 绕过忽略规则
+ - Fast file pattern matching tool that works with any codebase size
  - Supports glob patterns like "**/*.js" or "src/**/*.ts"
- - Returns matching file paths sorted by modification time
+ - Returns matching file paths
  - Use this tool when you need to find files by name patterns
 -- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead
 +- For open-ended search, use glob/grep/read directly first. Consider Task only when exploration splits into 2+ independent branches and does not block your next local step.
  - You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.
 diff --git a/packages/opencode/src/tool/grep.txt b/packages/opencode/src/tool/grep.txt
-index adf583695aefcb5f9418fee23782ea08954dd83b..524386c71718984556e9a16155072821bb126c7f 100644
 --- a/packages/opencode/src/tool/grep.txt
 +++ b/packages/opencode/src/tool/grep.txt
-@@ -5,4 +5,4 @@
- - Returns file paths and line numbers with at least one match sorted by modification time
+@@ -1,3 +1,4 @@
++# grep 工具：优先专用内容搜索，避免 shell grep 丢上下文
+ - Fast content search tool that works with any codebase size
+ - Searches file contents using regular expressions
+ - Supports full regex syntax (eg. "log.*Error", "function\s+\w+", etc.)
+@@ -5,4 +6,4 @@
+ - Returns file paths and line numbers with matching lines
  - Use this tool when you need to find files containing specific patterns
  - If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.
 -- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead
-+- For open-ended search, use grep/glob/read directly first. Consider Task only when exploration splits into 3+ independent branches and does not block your next local step.
++- For open-ended search, use glob/grep/read directly first. Consider Task only when exploration splits into 3+ independent branches and does not block your next local step.
 diff --git a/packages/opencode/src/tool/task.txt b/packages/opencode/src/tool/task.txt
-index 35a27cc608199dec746469970eceda96921b87ca..019039f76359cc40cc54d1d749f5ddf0936df19d 100644
 --- a/packages/opencode/src/tool/task.txt
 +++ b/packages/opencode/src/tool/task.txt
-@@ -4,16 +4,18 @@ When using the Task tool, you must specify a subagent_type parameter to select w
+@@ -1,19 +1,22 @@
++# task 工具：禁止跨会话复用非法 task_id，须显式新建
+ Launch a new agent to handle complex, multistep tasks autonomously.
+ 
+ When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
  
  Use task when:
  - The user invokes a custom slash command; pass the slash command invocation as the full prompt.
@@ -361,52 +493,35 @@ index 35a27cc608199dec746469970eceda96921b87ca..019039f76359cc40cc54d1d749f5ddf0
 -- The task is trivial or would duplicate work you are already doing.
 +- You need to search known keywords, symbols, error text, or a small set of files; use grep/read.
 +- The next local step is blocked on the result and you can search or read it yourself.
-+- The task is normal debugging, implementation, or verification work in the current thread.
 +- The task is trivial, would duplicate work you are already doing, or would only save context.
++- The task is normal debugging, implementation, or verification work in the current thread.
  
  Prompting rules:
  - Make the prompt self-contained unless resuming with task_id.
-@@ -32,35 +34,22 @@ Usage notes:
- Example usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):
- 
- <example_agent_descriptions>
--"code-reviewer": use this agent after you are done writing a significant piece of code
--"greeting-responder": use this agent when to respond to user greetings with a friendly joke
+@@ -29,3 +32,26 @@
+ - Trust completed agent results by default, but inspect changed files before integrating or reporting final success.
+ - Reuse task_id only when continuing the same subagent context is useful.
+ - The agent result is returned to you, not directly to the user; summarize relevant results yourself.
++
++Example usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):
++
++<example_agent_descriptions>
 +"explorer": use this agent for broad, independent codebase exploration across multiple unrelated areas
 +"reviewer": use this agent for an isolated review pass after the user requested or accepted review
- </example_agent_description>
- 
- <example>
--user: "Please write a function that checks if a number is prime"
--assistant: Sure let me write a function that checks if a number is prime
--assistant: First let me use the Write tool to write a function that checks if a number is prime
--assistant: I'm going to use the Write tool to write the following code:
--<code>
--function isPrime(n) {
--  if (n <= 1) return false
--  for (let i = 2; i * i <= n; i++) {
--    if (n % i === 0) return false
--  }
--  return true
--}
--</code>
++</example_agent_description>
++
++<example>
 +user: "Where is the database lock error thrown?"
- <commentary>
--Since a significant piece of code was written and the task was completed, now use the code-reviewer agent to review the code
++<commentary>
 +The target is a known error string, so use grep/read directly instead of Task.
- </commentary>
--assistant: Now let me use the code-reviewer agent to review the code
--assistant: Uses the Task tool to launch the code-reviewer agent
++</commentary>
 +assistant: Uses grep for "database is locked", then reads the matching files.
- </example>
- 
- <example>
--user: "Hello"
++</example>
++
++<example>
 +user: "Compare the server lifecycle, permission model, and streaming event flow."
- <commentary>
--Since the user is greeting, use the greeting-responder agent to respond with a friendly joke
++<commentary>
 +This has 3 independent research branches and can run in parallel, so Task may be useful.
- </commentary>
--assistant: "I'm going to use the Task tool to launch the with the greeting-responder agent"
++</commentary>
 +assistant: Uses Task to launch independent exploration for each non-overlapping branch.
- </example>
++</example>

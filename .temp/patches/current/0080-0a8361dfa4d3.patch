@@ -1,20 +1,13 @@
 From 0a8361dfa4d3d4b5c7cac3f744743c711fcb8cba Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Tue, 5 May 2026 06:45:28 +0800
-Subject: [PATCH] =?UTF-8?q?feat(notebook):=20=E5=BC=BA=E5=8C=96=E7=AC=94?=
- =?UTF-8?q?=E8=AE=B0=E6=9C=AC=E5=91=BD=E4=BB=A4=E5=92=8C=E7=8E=AF=E5=A2=83?=
- =?UTF-8?q?=E8=A7=A3=E6=9E=90=EF=BC=8C=E4=BC=98=E5=8C=96=E9=94=99=E8=AF=AF?=
- =?UTF-8?q?=E5=A4=84=E7=90=86=E5=92=8C=E5=8F=82=E6=95=B0=E9=AA=8C=E8=AF=81?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
+Subject: [PATCH] feat(notebook): 强化笔记本命令和环境解析，优化错误处理和参数验证
 
 diff --git a/sdks/vscode/src/notebook/commands.ts b/sdks/vscode/src/notebook/commands.ts
-index 36e625e03c9306fbea08a5ba4141a38b14bf66c1..b6fb0d48a853dddaa7f54fb94fc110fd5bf469da 100644
+index 6b40343bcd..4b0d963b7a 100644
 --- a/sdks/vscode/src/notebook/commands.ts
 +++ b/sdks/vscode/src/notebook/commands.ts
-@@ -42,7 +42,7 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
+@@ -45,7 +45,7 @@ const picked = await vscode.window.showQuickPick(
        },
        {
          label: "vscode_notebook_run",
@@ -23,7 +16,7 @@ index 36e625e03c9306fbea08a5ba4141a38b14bf66c1..b6fb0d48a853dddaa7f54fb94fc110fd
          run: async () => await runNotebookCommand(),
        },
        {
-@@ -64,8 +64,8 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
+@@ -67,8 +67,8 @@ const picked = await vscode.window.showQuickPick(
          label: "vscode_notebook_env",
          description: "kernel/environment capability snapshot",
          run: async () => {
@@ -34,13 +27,17 @@ index 36e625e03c9306fbea08a5ba4141a38b14bf66c1..b6fb0d48a853dddaa7f54fb94fc110fd
          },
        },
      ],
-@@ -173,32 +173,29 @@ async function runNotebookCommand() {
+@@ -178,35 +178,38 @@ async function runNotebookCommand() {
+   const notebook = await selectNotebook()
+   if (!notebook) return undefined
+ 
++  // 仅 cell|range：移除 all，避免无 cellId 的整本执行入口
    const target = await vscode.window.showQuickPick(
      [
        { label: "cell", description: "run one selected cell" },
 -      { label: "range", description: "run inclusive zero-based start/end cell range" },
 -      { label: "all", description: "run all cells" },
-+      { label: "range", description: "run from one selected cell through another selected cell" },
++      { label: "range", description: "run inclusive cellId range (pick start then end)" },
      ],
      { title: "vscode_notebook_run", placeHolder: "Select run target" },
    )
@@ -53,7 +50,11 @@ index 36e625e03c9306fbea08a5ba4141a38b14bf66c1..b6fb0d48a853dddaa7f54fb94fc110fd
      const cell = await pickNotebookCell(notebook, "vscode_notebook_run")
      return cell
 -      ? await runNotebook({ filePath: notebook.uri.toString(), target: { type: "cell", cellId: copilotLikeCellId(cell) } })
-+      ? await runNotebook({ filePath: notebook.uri.toString(), type: "cell", cellId: copilotLikeCellId(cell) })
++      ? await runNotebook({
++          filePath: notebook.uri.toString(),
++          type: "cell",
++          cellId: copilotLikeCellId(cell),
++        })
        : undefined
    }
  
@@ -62,6 +63,7 @@ index 36e625e03c9306fbea08a5ba4141a38b14bf66c1..b6fb0d48a853dddaa7f54fb94fc110fd
 -    prompt: "Enter start,end zero-based indices. End is inclusive in this prompt.",
 -    value: "0,0",
 -    ignoreFocusOut: true,
++  // range：两次 pick 得到 start/end cellId
 +  const startCell = await pickNotebookCell(notebook, "vscode_notebook_run range start")
 +  if (!startCell) return undefined
 +  const endCell = await pickNotebookCell(notebook, "vscode_notebook_run range end")
@@ -77,83 +79,89 @@ index 36e625e03c9306fbea08a5ba4141a38b14bf66c1..b6fb0d48a853dddaa7f54fb94fc110fd
 -  return await runNotebook({ filePath: notebook.uri.toString(), target: { type: "range", start, end: end + 1 } })
  }
  
- async function editNotebookCommand() {
+ // 编辑命令：调用 editNotebook API 编辑 cell 内容
 diff --git a/sdks/vscode/src/notebook/edit.ts b/sdks/vscode/src/notebook/edit.ts
-index 03a80f9c14cf50c9a9516b8e930a3ab158189bcb..389709d5b4fc586fb427dc0098e7406a96810c84 100644
+index ebd06ea3e8..63d8dce48c 100644
 --- a/sdks/vscode/src/notebook/edit.ts
 +++ b/sdks/vscode/src/notebook/edit.ts
-@@ -28,6 +28,7 @@ import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges } from "./fo
- import { resolveNotebook, resolveNotebookCell } from "./resolve"
- 
+@@ -27,6 +27,8 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
+ // 公开契约仅三元 editType：insert/edit/delete，旧 7-operation 名称不得再进入 schema
+ // cellId 与 editType 同为必填：定位失败显式报错，禁止猜 cellIndex
  const EDIT_TYPES = new Set(["insert", "edit", "delete"])
++// 编辑同步等待上限：applyEdit 后等 notebook/text 版本推进
 +const EDIT_SYNC_TIMEOUT_MS = 10_000
  
  // ---------------------------------------------------------------------------
  // Handler
-@@ -39,7 +40,9 @@ export async function editNotebook(input: Record<string, unknown>) {
-   const notebook = await resolveNotebook(filePath)
+@@ -41,7 +43,7 @@ export async function editNotebook(input: Record<string, unknown>) {
    const editType = stringProp(input, "editType")
-   if (!editType || !EDIT_TYPES.has(editType)) {
+   // 非法 editType 抛出错误：防止未定义操作导致 notebook 损坏
+ if (!editType || !EDIT_TYPES.has(editType)) {
 -    throw new Error(`Invalid editType: ${editType ?? "<missing>"}. Must be one of: insert, edit, delete`)
-+    throw new Error(
-+      `Invalid editType: ${editType ?? "<missing>"}. Expected one of: insert, edit, delete.`,
-+    )
++    throw new Error(`Invalid editType: ${editType ?? "<missing>"}. Expected one of: insert, edit, delete.`)
    }
  
    const cellId = stringProp(input, "cellId")
-@@ -69,7 +72,7 @@ async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, b
- 
-   const edit = new vscode.WorkspaceEdit()
-   edit.set(notebook.uri, [vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(deletedIndex, deletedIndex + 1))])
--  const applied = await vscode.workspace.applyEdit(edit)
+@@ -78,7 +80,8 @@ const deletedIndex = targetCell.index
+   // 通过 NotebookEdit API 删除 cell：使用 WorkspaceEdit 确保原子性
+ edit.set(notebook.uri, [vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(deletedIndex, deletedIndex + 1))])
+   // 等待编辑应用完成：VS Code 编辑操作是异步的
+-const applied = await vscode.workspace.applyEdit(edit)
++// notebook 结构编辑：等待 notebook.version 推进
 +  const applied = await applyNotebookEditAndWait(notebook, edit)
  
-   let shiftedCell: vscode.NotebookCell | undefined
+   // Capture the cell that shifted into the deleted cell's place (if any)
    let shiftedOldIdx: number | undefined
-@@ -116,7 +119,7 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
-   const newCell = new vscode.NotebookCellData(kind, source, lang)
+@@ -142,7 +145,8 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
    const edit = new vscode.WorkspaceEdit()
+   // 插入/类型变更用 replaceCells，保证 cell 元数据与源码原子更新
    edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(insertIndex, insertIndex), [newCell])])
 -  const applied = await vscode.workspace.applyEdit(edit)
++  // notebook 结构编辑：等待 notebook.version 推进
 +  const applied = await applyNotebookEditAndWait(notebook, edit)
    const shiftedCell = shiftedOldIdx !== undefined ? notebook.cellAt(shiftedOldIdx + 1) : undefined
    return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source })
  }
-@@ -154,7 +157,7 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
- 
+@@ -179,7 +183,8 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
+   const source = targetCell.kind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
    const edit = new vscode.WorkspaceEdit()
    edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), source)
 -  const applied = await vscode.workspace.applyEdit(edit)
++  // 整 cell 源码替换：与当前文档不同才等文本版本
 +  const applied = await applyTextEditAndWait(targetCell.document, edit, source !== targetCell.document.getText())
-   return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source })
- }
- 
-@@ -193,8 +196,10 @@ async function handleTypeChange(
+   return compactEditResult(notebook, {
+     applied,
+     editType: "edit",
+@@ -230,7 +235,8 @@ async function handleTypeChange(
    const newCell = new vscode.NotebookCellData(newKind, newSource, newLang)
    const edit = new vscode.WorkspaceEdit()
    edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(targetCell.index, targetCell.index + 1), [newCell])])
 -  const applied = await vscode.workspace.applyEdit(edit)
--  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary })
-+  const targetIndex = targetCell.index
++  // notebook 结构编辑：等待 notebook.version 推进
 +  const applied = await applyNotebookEditAndWait(notebook, edit)
-+  const updatedCell = notebook.cellAt(targetIndex)
-+  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(updatedCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: updatedCell, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary })
- }
- 
- // ---------------------------------------------------------------------------
-@@ -207,7 +212,7 @@ async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: v
+   const afterCell = notebook.cellAt(targetCell.index)
+   // Anchor 用 oldKind/oldLang 分支显示转换；kind/language 只承载新标签
+   return compactEditResult(notebook, {
+@@ -269,7 +275,8 @@ async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: v
  
    const edit = new vscode.WorkspaceEdit()
    edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), result.source)
 -  const applied = await vscode.workspace.applyEdit(edit)
++  // 文本编辑：内容变化时才等 document.version 推进
 +  const applied = await applyTextEditAndWait(targetCell.document, edit, result.source !== targetCell.document.getText())
-   return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary })
- }
- 
-@@ -351,6 +356,58 @@ function stripCodeFence(source: string) {
-   return match ? match[1] : source
- }
- 
+   // 预览用 newCode：突出替换内容而非整 cell 源码
+   return compactEditResult(notebook, {
+     applied,
+@@ -426,6 +433,67 @@ function stripCodeFence(source: string) {
+ // 压缩编辑结果：只保留变更关键字段，减少返回数据量
+ // 压缩工具结果：只保留 applied/定位/预览，降低序列化体积
+ // 工具结果只保留 applied/定位/预览，禁止回传整 cell 源码膨胀上下文
++
++// ---------------------------------------------------------------------------
++// Apply + wait：确保 agent 看到的 notebook 状态已反映编辑
++// ---------------------------------------------------------------------------
++
++// notebook 级编辑：apply 后等待 version 变化，失败则 throw
 +async function applyNotebookEditAndWait(notebook: vscode.NotebookDocument, edit: vscode.WorkspaceEdit) {
 +  const beforeVersion = notebook.version
 +  const applied = await vscode.workspace.applyEdit(edit)
@@ -162,6 +170,7 @@ index 03a80f9c14cf50c9a9516b8e930a3ab158189bcb..389709d5b4fc586fb427dc0098e7406a
 +  return applied
 +}
 +
++// 文本级编辑：仅在 expectContentChange 时等待 document.version
 +async function applyTextEditAndWait(document: vscode.TextDocument, edit: vscode.WorkspaceEdit, expectContentChange: boolean) {
 +  const beforeVersion = document.version
 +  const applied = await vscode.workspace.applyEdit(edit)
@@ -170,6 +179,7 @@ index 03a80f9c14cf50c9a9516b8e930a3ab158189bcb..389709d5b4fc586fb427dc0098e7406a
 +  return applied
 +}
 +
++// 订阅 onDidChangeNotebookDocument，直到 version 前进或超时
 +async function waitForNotebookVersionChange(notebook: vscode.NotebookDocument, beforeVersion: number, timeoutMs: number) {
 +  if (notebook.version !== beforeVersion) return
 +  await new Promise<void>((resolve, reject) => {
@@ -188,6 +198,7 @@ index 03a80f9c14cf50c9a9516b8e930a3ab158189bcb..389709d5b4fc586fb427dc0098e7406a
 +  })
 +}
 +
++// 订阅 onDidChangeTextDocument，直到 version 前进或超时
 +async function waitForTextDocumentVersionChange(document: vscode.TextDocument, beforeVersion: number, timeoutMs: number) {
 +  if (document.version !== beforeVersion) return
 +  await new Promise<void>((resolve, reject) => {
@@ -206,10 +217,10 @@ index 03a80f9c14cf50c9a9516b8e930a3ab158189bcb..389709d5b4fc586fb427dc0098e7406a
 +  })
 +}
 +
- // ---------------------------------------------------------------------------
- // Edit result
- // ---------------------------------------------------------------------------
-@@ -418,7 +475,7 @@ function compactEditResult(
+ function compactEditResult(
+   notebook: vscode.NotebookDocument,
+   info: {
+@@ -491,7 +559,7 @@ function compactEditResult(
      summary: lines.join("\n"),
      data: {
        applied: info.applied,
@@ -219,73 +230,55 @@ index 03a80f9c14cf50c9a9516b8e930a3ab158189bcb..389709d5b4fc586fb427dc0098e7406a
        cellCountAfter: info.afterCount,
        anchorCellIndex: info.anchorCell?.index,
 diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
-index 9c94213e0d434a72c21ef5f2e029c28d5d00652a..fe41cbfde34d3647cd2152bbefd6754ad7db4e61 100644
+index bd53993d4a..1997dda32c 100644
 --- a/sdks/vscode/src/notebook/env.ts
 +++ b/sdks/vscode/src/notebook/env.ts
-@@ -57,10 +57,10 @@ type SavedMetadata = {
- const PROBE_TIMEOUT_MS = 8_000
- const decoder = new TextDecoder("utf-8")
- 
+@@ -66,10 +66,11 @@ const decoder = new TextDecoder("utf-8")
+ // 环境探测：检测活跃 Jupyter 内核和保存的元数据，不将元数据视为活跃运行时
+ // 区分活动内核与盘上 metadata：二者不可互相替代
+ // 活动内核与盘上 metadata 分列报告：二者不可互相替代
 -export async function notebookEnv(filePath?: string) {
 -  const notebook = await resolveNotebook(filePath).catch(() => undefined)
 -  const activeRuntime = notebook ? await getActiveRuntime(notebook.uri) : null
 -  const savedMetadata = notebook ? await readSavedNotebookMetadata(notebook.uri) : null
 +export async function notebookEnv(filePath: string) {
++  // filePath 必填：禁止静默落到 active notebook
 +  const notebook = await resolveNotebook(filePath)
 +  const activeRuntime = await getActiveRuntime(notebook.uri)
 +  const savedMetadata = await readSavedNotebookMetadata(notebook.uri)
  
    return {
      ran: false,
-@@ -73,7 +73,7 @@ export async function notebookEnv(filePath?: string) {
+@@ -82,7 +83,7 @@ export async function notebookEnv(filePath?: string) {
        activeRuntime?.python?.executable ? `Python executable: ${activeRuntime.python.executable}` : undefined,
      ].filter(Boolean).join("\n"),
      data: {
 -      path: notebook?.uri.fsPath || notebook?.uri.toString(),
-+      path: notebook.uri.fsPath || notebook.uri.toString(),
++      path: notebook.uri.fsPath || notebook?.uri.toString(),
        runtime: activeRuntime,
        saved_metadata: savedMetadata,
        active_notebook: vscode.window.activeNotebookEditor?.notebook.uri.toString(),
-@@ -228,4 +228,4 @@ function extractProbeJson(text: string) {
-     throw new Error(`Runtime probe returned no JSON: ${text.slice(0, 500)}`)
-   }
-   return body.slice(jsonStart, jsonEnd + 1)
--}
-\ No newline at end of file
-+}
 diff --git a/sdks/vscode/src/notebook/output.ts b/sdks/vscode/src/notebook/output.ts
-index c05f03defda1155c782796630fb2642687eaba74..46e78bfb1783d6f1572c6dff1bc7639d84490299 100644
+index 21e8b706ba..664598ebae 100644
 --- a/sdks/vscode/src/notebook/output.ts
 +++ b/sdks/vscode/src/notebook/output.ts
-@@ -24,7 +24,7 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
- // ---------------------------------------------------------------------------
- 
- /** Bridge endpoint handler: reads and serializes all outputs for a specific cell. */
+@@ -27,7 +27,7 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
+ // 读取 cell 输出：返回指定 cell 的执行输出和 artifact 文件路径
+ // 输出标签优先 cellId，避免 cellIndex 在插入删除后错位
+ // 输出读取优先 cellId，避免 insert/delete 后 cellIndex 错位
 -export async function readNotebookCellOutput(filePath?: string, cellIndex?: number, cellId?: string) {
 +export async function readNotebookCellOutput(filePath: string, cellIndex?: number, cellId?: string) {
-   const notebook = await resolveNotebook(filePath)
-   const cell = resolveNotebookCell(notebook, cellIndex, cellId)
-   return await serializeNotebookCellOutput(notebook, cell)
+   // 解析 notebook：通过文件路径查找已打开的文档
+ const notebook = await resolveNotebook(filePath)
+   // 解析 cell：优先用 cellId 查找
 diff --git a/sdks/vscode/src/notebook/resolve.ts b/sdks/vscode/src/notebook/resolve.ts
-index 619ba9682b4cc5e6b098b22251e8d1c4b45246bb..a06673615ca41e118b3e912d406aae2fe71840db 100644
+index 0959cf1da2..8c4f384aa8 100644
 --- a/sdks/vscode/src/notebook/resolve.ts
 +++ b/sdks/vscode/src/notebook/resolve.ts
-@@ -2,25 +2,15 @@
-  * Notebook and cell resolution — locating open notebooks and cells by path, index, or ID.
+@@ -15,22 +15,18 @@ import { cellIdentifiers } from "./format"
   */
- import * as vscode from "vscode"
--import { stringProp, numberProp, uriFromInput } from "../util"
-+import { uriFromInput } from "../util"
- import { cellIdentifiers } from "./format"
- 
- // ---------------------------------------------------------------------------
- // Notebook resolution
- // ---------------------------------------------------------------------------
- 
--/**
-- * Resolves a notebook document from a file path, URI string, or falls back
-- * to the active/first-open notebook. Throws if nothing can be found.
-- */
+ // 解析 notebook：通过文件路径查找已打开的 notebook 文档
+ // 解析 notebook：通过文件路径匹配已打开的 notebook 文档
 -export async function resolveNotebook(filePath?: string) {
 -  if (!filePath) {
 -    const active = vscode.window.activeNotebookEditor?.notebook
@@ -293,49 +286,61 @@ index 619ba9682b4cc5e6b098b22251e8d1c4b45246bb..a06673615ca41e118b3e912d406aae2f
 -    if (vscode.workspace.notebookDocuments.length > 0) return vscode.workspace.notebookDocuments[0]
 -    throw new Error("No active or open notebook document")
 -  }
--
-+/** Resolves a notebook document from an explicit file path or URI string. */
 +export async function resolveNotebook(filePath: string) {
-   const existing = vscode.workspace.notebookDocuments.find(
++  // filePath 必填：禁止回退 active/open notebook，避免误改别的本子
++  if (!filePath) throw new Error("filePath is required")
+ 
+   // 查找已打开的 notebook：按 fsPath 或 URI 字符串匹配
+-const existing = vscode.workspace.notebookDocuments.find(
++  const existing = vscode.workspace.notebookDocuments.find(
      (notebook) => notebook.uri.fsPath === filePath || notebook.uri.toString() === filePath,
    )
-@@ -57,23 +47,3 @@ export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex
+   if (existing) return existing
  
-   return notebook.cellAt(0)
+-  // 打开 notebook 文档：如果未打开则通过 URI 打开
+-return await vscode.workspace.openNotebookDocument(uriFromInput(filePath))
++  // 未打开则按路径打开
++  return await vscode.workspace.openNotebookDocument(uriFromInput(filePath))
  }
--
--// ---------------------------------------------------------------------------
--// Range construction
--// ---------------------------------------------------------------------------
--
--/**
-- * Converts a target descriptor (`{ type: "all"|"range"|"cell", ... }`) into
-- * a `vscode.NotebookRange`. Used by `runNotebook` to select which cells to execute.
-- */
+ 
+ // ---------------------------------------------------------------------------
+@@ -76,17 +72,3 @@ const normalized = cellId.replace(/^#/, "")
+  * a `vscode.NotebookRange`. Used by `runNotebook` to select which cells to execute.
+  */
+ // 构建 NotebookRange：将目标描述符转为 VS Code 范围对象
 -export function notebookRange(notebook: vscode.NotebookDocument, target: Record<string, unknown>, fallbackCellIndex?: number) {
 -  const type = stringProp(target, "type") ?? "cell"
--  if (type === "all") return new vscode.NotebookRange(0, notebook.cellCount)
--  if (type === "range") {
+-  // all 模式：覆盖全部 cell
+-if (type === "all") return new vscode.NotebookRange(0, notebook.cellCount)
+-  // range 模式：按 start/end 指定范围
+-if (type === "range") {
 -    const start = Math.max(0, numberProp(target, "start") ?? 0)
 -    const end = Math.min(notebook.cellCount, numberProp(target, "end") ?? start + 1)
 -    return new vscode.NotebookRange(start, Math.max(start + 1, end))
 -  }
--  const index = Math.max(0, Math.min(notebook.cellCount - 1, numberProp(target, "cellIndex") ?? fallbackCellIndex ?? 0))
+-  // cell 模式：单个 cell，索引边界保护
+-const index = Math.max(0, Math.min(notebook.cellCount - 1, numberProp(target, "cellIndex") ?? fallbackCellIndex ?? 0))
 -  return new vscode.NotebookRange(index, index + 1)
 -}
 diff --git a/sdks/vscode/src/notebook/run.ts b/sdks/vscode/src/notebook/run.ts
-index bc0a139064e49af2612d04efa4415d294355ff4c..675163c93c58c0c80335966ead9a144f4b694b0d 100644
+index 6c82667b4a..9bc24d086b 100644
 --- a/sdks/vscode/src/notebook/run.ts
 +++ b/sdks/vscode/src/notebook/run.ts
-@@ -3,13 +3,13 @@
-  * `notebook.cell.execute` command, waits for completion, and returns per-cell
-  * execution results with artifact-first output.
+@@ -1,15 +1,13 @@
+ /**
+- * `vscode_notebook_run` — executes notebook cells via the native VS Code
+- * `notebook.cell.execute` command, waits for completion, and returns per-cell
+- * execution results with artifact-first output.
++ * `vscode_notebook_run` — executes notebook cells via native VS Code
++ * `notebook.cell.execute`, waits for completion, returns per-cell results.
   *
 - * For `range` and `all` targets, cells are executed **sequentially** one-by-one.
-+ * For `range` targets, cells are executed **sequentially** one-by-one.
-  * Execution stops immediately if any cell fails — remaining cells are skipped.
-  *
-  * Primary input: `cellId` (Copilot-style #VSC-xxxxxxxx).
+- * Execution stops immediately if any cell fails — remaining cells are skipped.
+- *
+- * Primary input: `cellId` (Copilot-style #VSC-xxxxxxxx).
++ * Target types: `cell` | `range` only (no `all`).
++ * Inputs: required `filePath`, `cellId`; range also needs `endCellId`.
++ * Sequential execution; stop on first failure.
   */
  import * as vscode from "vscode"
 -import { isRecord, stringProp, numberProp, toPosixPath, quoteForSummary } from "../util"
@@ -343,52 +348,50 @@ index bc0a139064e49af2612d04efa4415d294355ff4c..675163c93c58c0c80335966ead9a144f
  import {
    c1,
    copilotLikeCellId,
-@@ -27,26 +27,33 @@ import { serializeNotebookOutputItem } from "./output"
- 
- /**
-  * Bridge endpoint handler: runs notebook cells and returns execution results.
-- * Accepts `target: { type: "all" | "range" | "cell", cellId?, start?, end? }`.
-+ * Accepts `cellId` and optional `endCellId`.
-  * Default timeout: 300 000 ms (5 minutes).
-  */
+@@ -34,19 +32,28 @@ import { serializeNotebookOutputItem } from "./output"
+ // 运行 notebook：执行 cell 或 cell 范围，返回每个 cell 的执行结果和输出
+ // 顺序执行：任一 cell 失败立即停止，避免污染后续内核状态
  export async function runNotebook(input: Record<string, unknown>) {
 -  const notebook = await resolveNotebook(stringProp(input, "filePath"))
++  // filePath/cellId 必填：禁止静默落到 active notebook 或猜目标
 +  const filePath = stringProp(input, "filePath")
 +  if (!filePath) throw new Error("filePath is required")
-+  const type = stringProp(input, "type")
-+  if (type !== undefined && type !== "cell" && type !== "range") throw new Error("type must be one of: cell, range")
-+  const cellId = stringProp(input, "cellId")
-+  if (!cellId) throw new Error("cellId is required")
-+
 +  const notebook = await resolveNotebook(filePath)
    const commands = await vscode.commands.getCommands(true)
    if (!commands.includes("notebook.cell.execute")) {
      throw new Error("VS Code command notebook.cell.execute is not available")
    }
  
-   const timeoutMs = numberProp(input, "timeoutMs") ?? 300_000
+   // 默认超时 5 分钟：平衡长时间执行和用户体验
+-const timeoutMs = numberProp(input, "timeoutMs") ?? 300_000
 -  const target = isRecord(input.target) ? input.target : {}
++  const timeoutMs = numberProp(input, "timeoutMs") ?? 300_000
++  const type = stringProp(input, "type")
++  // type 可选：endCellId 才是 range 信号；若显式给出 type 则必须是 cell|range
++  if (type !== undefined && type !== "cell" && type !== "range") {
++    throw new Error(`Invalid run type: ${type}. Expected one of: cell, range.`)
++  }
++  const cellId = stringProp(input, "cellId")
++  if (!cellId) throw new Error("cellId is required")
++  const endCellId = stringProp(input, "endCellId")
  
 -  // Resolve target cells via cellId (only stable identifier; no cellIndex in schema)
--  const cells = resolveRunTarget(notebook, target, stringProp(input, "cellId"))
-+  // Resolve target cells via stable cell IDs. No cellIndex or "all" mode is accepted.
-+  const cells = resolveRunTarget(notebook, cellId, stringProp(input, "endCellId"))
+-  // 解析执行目标：将 cellId 转换为 cell 列表
+-const cells = resolveRunTarget(notebook, target, stringProp(input, "cellId"))
++  // 扁平 target：type/cellId/endCellId 顶层字段，不再嵌套 target 对象
++  const cells = resolveRunTarget(notebook, type, cellId, endCellId)
  
    // Open notebook and reveal first cell
-   const editor = await vscode.window.showNotebookDocument(notebook, {
-     selections: [new vscode.NotebookRange(cells[0].index, cells[0].index + 1)],
-   })
-+  editor.revealRange(new vscode.NotebookRange(cells[0].index, cells[0].index + 1))
- 
-   // Execute sequentially, stop on first error
-   const results: Array<Awaited<ReturnType<typeof compactRunCell>>> = []
-@@ -67,25 +74,29 @@ export async function runNotebook(input: Record<string, unknown>) {
-     editor.selection = new vscode.NotebookRange(cell.index, cell.index + 1)
+   // 打开 notebook 编辑器：确保用户能看到执行过程
+@@ -77,24 +84,31 @@ if (cell.kind !== vscode.NotebookCellKind.Code) {
+ editor.selection = new vscode.NotebookRange(cell.index, cell.index + 1)
      editor.revealRange(new vscode.NotebookRange(cell.index, cell.index + 1))
  
 -    const startedAt = Date.now()
 -    await vscode.commands.executeCommand("notebook.cell.execute")
--    const completed = await waitForSingleCell(notebook, cell.index, startedAt, timeoutMs)
+-    // 等待执行完成：监听 cell 变更事件
+-const completed = await waitForSingleCell(notebook, cell.index, startedAt, timeoutMs)
++        // 先注册 waiter 再 execute，避免错过快速完成的事件
 +    const wait = waitForSingleCell(cell, timeoutMs)
 +    let executionSummary: vscode.NotebookCellExecutionSummary | undefined
 +    try {
@@ -399,6 +402,7 @@ index bc0a139064e49af2612d04efa4415d294355ff4c..675163c93c58c0c80335966ead9a144f
 +    }
  
 -    if (!completed) {
++    // 超时：标记 stoppedAt 与可观测 exec 文案；success===false 同样停止后续 cell
 +    if (!executionSummary) {
        stopped = true
 -    } else {
@@ -414,64 +418,65 @@ index bc0a139064e49af2612d04efa4415d294355ff4c..675163c93c58c0c80335966ead9a144f
 +      failedIndex = cell.index
      }
  
--    results.push(await compactRunCell(notebook, cell))
-+    const result = await compactRunCell(notebook, cell)
-+    if (!executionSummary) result.exec = "timed out (may still be running, waiting for kernel selection, or failed to start)"
+-    // 收集执行结果：包含输出和 artifact 信息
+-results.push(await compactRunCell(notebook, cell))
++    // 结果压缩前刷新 cell，避免旧对象缺 executionSummary
++    const result = await compactRunCell(notebook, notebook.cellAt(cell.index))
++    if (!executionSummary) {
++      result.exec = "timed out (may still be running, waiting for kernel selection, or failed to start)"
++    }
 +    results.push(result)
    }
  
--  const targetDesc = describeRunTarget(cells, notebook.cellCount)
-+  const targetDesc = describeRunTarget(cells)
-   return {
-     ran: true,
-     summary: runSummaryText(notebook, targetDesc, !stopped, results),
-@@ -105,28 +116,18 @@ export async function runNotebook(input: Record<string, unknown>) {
- // Target resolution
- // ---------------------------------------------------------------------------
- 
--function resolveRunTarget(
--  notebook: vscode.NotebookDocument,
+   // 生成目标描述：人类可读的执行范围说明
+@@ -121,24 +135,29 @@ const targetDesc = describeRunTarget(cells, notebook.cellCount)
+ // 解析运行目标：根据 cellId 和 endCellId 确定要执行的 cell 列表
+ // 解析执行目标：将 cellId 转为 cell 列表
+ // 优先 cellId 解析目标；index 仅作内部回退不得进 schema
++// endCellId 是 range 信号：有且不同于 cellId 则扩 inclusive range；type 仅为可选校验提示
++// 禁止 all/index 目标
+ function resolveRunTarget(
+   notebook: vscode.NotebookDocument,
 -  target: Record<string, unknown>,
 -  cellId?: string,
--): vscode.NotebookCell[] {
++  type: string | undefined,
++  cellId: string,
++  endCellId?: string,
+ ): vscode.NotebookCell[] {
 -  const type = stringProp(target, "type") ?? "cell"
 -
 -  if (type === "all") return notebook.getCells().slice()
-+function resolveRunTarget(notebook: vscode.NotebookDocument, cellId: string, endCellId?: string) {
-+  const startCell = resolveNotebookCell(notebook, undefined, cellId)
-+  if (!endCellId) return [startCell]
- 
+-
 -  if (type === "range") {
 -    const start = Math.max(0, numberProp(target, "start") ?? 0)
 -    const end = Math.min(notebook.cellCount, numberProp(target, "end") ?? start + 1)
 -    return notebook.getCells().slice(start, Math.max(start + 1, end))
-+  const endCell = resolveNotebookCell(notebook, undefined, endCellId)
-+  if (endCell.index < startCell.index) {
-+    throw new Error("endCellId must refer to the same cell or a later cell than cellId")
++  const startCell = resolveNotebookCell(notebook, undefined, cellId)
++  const norm = (id: string) => id.replace(/^#/, "")
++  // 有 endCellId 且不等于 cellId → range；否则单 cell
++  if (endCellId && norm(endCellId) !== norm(cellId)) {
++    if (type === "cell") {
++      // type=cell 时禁止不同 endCellId（#84 强化；与 SMARK 对齐）
++      throw new Error("endCellId must not be set when type is cell unless it equals cellId")
++    }
++    const endCell = resolveNotebookCell(notebook, undefined, endCellId)
++    if (endCell.index < startCell.index) {
++      throw new Error("endCellId must refer to the same cell or a later cell than cellId")
++    }
++    return notebook.getCells().slice(startCell.index, endCell.index + 1)
    }
 -
 -  // type === "cell" or missing — resolve by cellId (no cellIndex fallback)
 -  const resolved = resolveNotebookCell(notebook, undefined, cellId ?? stringProp(target, "cellId"))
 -  return [resolved]
-+  return notebook.getCells().slice(startCell.index, endCell.index + 1)
++  return [startCell]
  }
  
--function describeRunTarget(cells: vscode.NotebookCell[], cellCount: number) {
--  if (cells.length === cellCount) return "all"
-+function describeRunTarget(cells: vscode.NotebookCell[]) {
-   if (cells.length === 1) return `cell ${c1(cells[0])}`
-   const indices = cells.map((c) => c1(c))
-   return `range ${indices[0]}-${indices[indices.length - 1]}`
-@@ -184,36 +185,38 @@ function runSummaryText(
- // ---------------------------------------------------------------------------
- 
- /**
-- * Waits for a single code cell to finish executing by watching
-- * `executionSummary.timing.endTime`. Returns `false` on timeout.
-+ * Waits for a single code cell to publish a fresh execution summary.
-+ * The waiter is created before invoking `notebook.cell.execute`, matching the
-+ * VS Code/Copilot pattern so fast executions are not missed.
-  */
+ // 描述运行目标：生成人类可读的执行范围描述
+@@ -214,33 +233,40 @@ function runSummaryText(
+ // 单 cell 等待：失败即停止后续 cell，避免污染内核状态
+ // 等待单 cell 执行结束：timeout 与状态订阅统一在此收敛
+ // 单 cell 等待收敛 timeout 与状态订阅，防止无限挂起
 -async function waitForSingleCell(
 -  notebook: vscode.NotebookDocument,
 -  cellIndex: number,
@@ -492,7 +497,11 @@ index bc0a139064e49af2612d04efa4415d294355ff4c..675163c93c58c0c80335966ead9a144f
 -    const timer = setTimeout(() => {
 -      subscription.dispose()
 -      resolve(false)
++// 预注册：仅当 executionSummary.success 成为 boolean 才完成；超时 resolve(undefined)
++// URI 身份匹配：避免结构变化后 index 错配
 +function waitForSingleCell(cell: vscode.NotebookCell, timeoutMs: number) {
++  const targetUri = cell.document.uri.toString()
++  const notebookUri = cell.notebook.uri.toString()
 +  let subscription: vscode.Disposable | undefined
 +  let timer: ReturnType<typeof setTimeout> | undefined
 +  const promise = new Promise<vscode.NotebookCellExecutionSummary | undefined>((resolve) => {
@@ -507,9 +516,10 @@ index bc0a139064e49af2612d04efa4415d294355ff4c..675163c93c58c0c80335966ead9a144f
 -      subscription.dispose()
 -      resolve(true)
 +    subscription = vscode.workspace.onDidChangeNotebookDocument((event) => {
-+      if (event.notebook.uri.toString() !== cell.notebook.uri.toString()) return
++      if (event.notebook.uri.toString() !== notebookUri) return
 +      for (const change of event.cellChanges) {
-+        if (change.cell !== cell || typeof change.executionSummary?.success !== "boolean") continue
++        if (change.cell.document.uri.toString() !== targetUri) continue
++        if (typeof change.executionSummary?.success !== "boolean") continue
 +        const summary = change.executionSummary
 +        clearTimeout(timer)
 +        subscription?.dispose()
@@ -529,31 +539,36 @@ index bc0a139064e49af2612d04efa4415d294355ff4c..675163c93c58c0c80335966ead9a144f
 +    },
 +  }
  }
++
 diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/source.ts
-index 7aa895653f8fc348fed2f11a002bb487182b455a..37d9787696163c252516208cef5e0ce99d08210b 100644
+index b4e39015e8..09e03f23f1 100644
 --- a/sdks/vscode/src/notebook/source.ts
 +++ b/sdks/vscode/src/notebook/source.ts
-@@ -26,7 +26,9 @@ import { resolveNotebook } from "./resolve"
-  * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 12 KB.
-  */
+@@ -32,7 +32,11 @@ import { resolveNotebook } from "./resolve"
+ // 虚拟源码视图：按 computeVirtualRanges 输出带 range 的 header
+ // 虚拟源码视图：header 带 range，正文行号与 computeVirtualRanges 对齐
  export async function notebookSource(input: Record<string, unknown>) {
 -  const notebook = await resolveNotebook(stringProp(input, "filePath"))
 +  const filePath = stringProp(input, "filePath")
 +  if (!filePath) throw new Error("filePath is required")
++
++  // filePath 必填：禁止 active-notebook 静默回退
 +  const notebook = await resolveNotebook(filePath)
+   // 默认 limit 400：与 read 工具 DEFAULT_READ_LIMIT 对齐，压低上下文
+   // 默认 limit 400：与 read 工具 DEFAULT_READ_LIMIT 对齐压低上下文
    const limit = Math.max(1, numberProp(input, "limit") ?? 400)
-   const offset = Math.max(1, numberProp(input, "offset") ?? 1)
- 
 diff --git a/sdks/vscode/src/notebook/summary.ts b/sdks/vscode/src/notebook/summary.ts
-index 1726607d0b127a02639f08bf5d516f1d769af28b..84f0733eb6e95e8831d43568bd01f08eacdbe37c 100644
+index 4159155ede..658dbf97cd 100644
 --- a/sdks/vscode/src/notebook/summary.ts
 +++ b/sdks/vscode/src/notebook/summary.ts
-@@ -12,7 +12,7 @@ import { resolveNotebook } from "./resolve"
- // ---------------------------------------------------------------------------
- 
- /** Bridge endpoint handler: builds a compact notebook summary for LLM consumption. */
+@@ -15,7 +15,9 @@ import { resolveNotebook } from "./resolve"
+ // 生成 notebook 摘要：cell 列表、执行状态和输出概要
+ // 摘要统一 cellId/cN/range 约定，供 agent 快速选型
+ // 摘要统一 cellId/cN/range 约定，供 agent 选型而无需拉全量 source
 -export async function notebookSummary(filePath?: string) {
 +export async function notebookSummary(filePath: string) {
-   const notebook = await resolveNotebook(filePath)
++  if (!filePath) throw new Error("filePath is required")
++
+   // 解析 notebook：通过文件路径查找已打开的文档
+ const notebook = await resolveNotebook(filePath)
    return compactNotebookResult(notebook, false)
- }

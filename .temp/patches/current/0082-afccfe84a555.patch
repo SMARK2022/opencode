@@ -3,30 +3,34 @@ From: SMARK <3222301373@qq.com>
 Date: Tue, 5 May 2026 16:04:10 +0800
 Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E6=B7=BB=E5=8A=A0VS=20Code?=
  =?UTF-8?q?=E6=A1=A5=E6=8E=A5=E5=8A=9F=E8=83=BD=EF=BC=8C=E6=94=AF=E6=8C=81?=
- =?UTF-8?q?=E7=AC=94=E8=AE=B0=E6=9C=AC=E6=91=98=E8=A6=81=E3=80=81=E6=BA=90?=
- =?UTF-8?q?=E4=BB=A3=E7=A0=81=E8=AF=BB=E5=8F=96=E3=80=81=E6=89=A7=E8=A1=8C?=
- =?UTF-8?q?=E5=92=8C=E7=BC=96=E8=BE=91=E6=93=8D=E4=BD=9C?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
 
 diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/ide/vscode-bridge.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd2162d4877f
+index 0000000000..76508e1915
 --- /dev/null
 +++ b/packages/opencode/src/ide/vscode-bridge.ts
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,495 @@
 +import fs from "fs/promises"
 +import os from "os"
 +import path from "path"
 +import { fileURLToPath } from "url"
 +import { Global } from "@opencode-ai/core/global"
 +
-+const DEFAULT_HEALTH_TIMEOUT = 500
-+const DEFAULT_STALE_MS = 15_000
++// 健康检查超时 2 秒（500ms→2000ms：兼容高延迟网络）：平衡响应速度和误判风险
++// 健康检查超时：过短会在慢机上误杀存活桥接
++const DEFAULT_HEALTH_TIMEOUT = 2_000
++// 过期 TTL 60 秒（15s→60s：兼容慢心跳环境）：无心跳超过此时间的桥接视为过期
++// 注册过期窗口：结合心跳信任避免误删活跃实例
++// stale 60s：registry 清理与发现评分共用同一老化阈值
++const DEFAULT_STALE_MS = 60_000
++// 心跳信任期：10 秒内的桥接跳过健康检查
++// 心跳信任窗内跳过 health，降低探活噪声
++// 心跳信任窗口 10s：过期条目不得当作在线桥
++const DEFAULT_HEARTBEAT_TRUST_MS = 10_000
++// 解析缓存 5 秒：避免频繁扫描锁文件目录
 +const RESOLVE_CACHE_MS = 5_000
 +
++// 桥接条目：包含端口、token、工作区路径和心跳时间
 +export type BridgeEntry = {
 +  schema: 1
 +  id: string
@@ -52,6 +56,7 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +  capabilities?: Record<string, boolean>
 +}
 +
++// 桥接引用：精简的桥接信息，用于匹配和调用
 +export type BridgeRef = Pick<BridgeEntry, "id" | "port" | "token"> & {
 +  host: string
 +  score?: number
@@ -60,6 +65,7 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +
 +type ResolveInput = {
 +  cwd: string
++  // notebook 工具强制带 filePath，与扩展侧锁键一致
 +  filePath?: string
 +  staleMs?: number
 +  healthTimeoutMs?: number
@@ -74,6 +80,7 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +  timeoutMs?: number
 +}
 +
++// 桥接缓存：5 秒 TTL，避免频繁扫描注册目录和发起健康检查
 +let cachedRegistryBridge:
 +  | {
 +      cwd: string
@@ -83,44 +90,81 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +    }
 +  | undefined
 +
++// 全局请求队列：序列化所有桥接 HTTP 请求，防止并发 notebook 工具调用竞争同一 VS Code 桥接
++// 全局串行化 CLI→bridge 调用，避免并发打乱会话状态
++let bridgeRequestQueue = Promise.resolve()
++
++// 注册目录：每个 VS Code 实例在此目录下写入一个 JSON 注册文件
 +export function registryDir() {
++// 环境变量优先：允许测试和自定义安装指定注册目录路径
 +  return process.env.OPENCODE_IDE_REGISTRY_DIR ?? path.join(Global.Path.state, "ide")
 +}
 +
++// 发现桥接：扫描注册目录，返回所有可用桥接（PID 存活 + 健康检查通过）
++// 扫描本机 registry 目录，返回仍存活的 bridge 列表
++// CLI 桥接 API：discoverBridges — 发现/调用 VS Code notebook 能力
 +export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[]> {
++// 注册目录路径：OPENCODE_IDE_REGISTRY_DIR 环境变量优先，默认为 state/ide
 +  const dir = registryDir()
++// 当前时间戳：用于判断注册条目是否过期
 +  const now = Date.now()
++// 过期阈值：调用方可自定义，默认 60 秒
 +  const staleMs = input.staleMs ?? DEFAULT_STALE_MS
++// 读取注册目录：目录不存在时返回空数组，不抛出异常
 +  const files = await fs.readdir(dir).catch((error) => {
++  // 目录不存在时返回空数组：首次运行时注册目录可能尚未创建
 +    if (isMissing(error)) return [] as string[]
++  // 其他 fs 错误向上抛出：权限不足等错误需要调用方处理
 +    throw error
 +  })
 +
++// 活跃桥接列表：只包含 PID 存活且健康检查通过的条目
 +  const live: BridgeEntry[] = []
++// 并行检查所有注册文件：Promise.all 确保所有检查完成后才返回
 +  await Promise.all(
 +    files
++      // 过滤 JSON 文件：注册目录可能包含非 JSON 临时文件
 +      .filter((file) => file.endsWith(".json"))
 +      .map(async (file) => {
++        // 注册文件完整路径：每个 VS Code 实例一个 JSON 文件
 +        const filepath = path.join(dir, file)
++        // 读取注册条目：解析 JSON 并验证 schema 版本
 +        const entry = await readEntry(filepath)
++        // 无效条目跳过：JSON 解析失败或 schema 不匹配时返回 null
++      // 无效条目：JSON 解析失败或 schema 版本不匹配时 readEntry 返回 null
 +        if (!entry) return
-+        if (now - entry.updatedAt > staleMs) {
-+          await removeStale(filepath)
-+          return
-+        }
++        // 先检查进程存活：进程已死则直接移除注册条目，无需进一步检查
 +        if (pidDead(entry.pid)) {
++// 移除过期注册文件：PID 已死的 VS Code 实例留下的残留文件
 +          await removeStale(filepath)
 +          return
 +        }
-+        if (!(await healthCheck(entry, input.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT))) return
-+        live.push(entry)
++        // 注册条目年龄：用于判断是否在心跳信任窗口内
++        const age = now - entry.updatedAt
++        // 心跳信任窗口：10 秒内的注册条目视为活跃，跳过健康检查以降低延迟
++        if (age <= DEFAULT_HEARTBEAT_TRUST_MS) {
++          live.push(entry)
++          return
++        }
++        // 超过信任窗口的条目需要健康检查：通过则保留，不通过且超过 staleMs 才移除
++        if (await healthCheck(entry, input.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT)) {
++          live.push(entry)
++          return
++        }
++        // 过期清理：仅在健康检查失败且超过 staleMs 时删除注册文件
++        if (age > staleMs) await removeStale(filepath)
 +      }),
 +  )
++// 返回活跃桥接列表：已排除过期、PID 失效和健康检查失败的条目
 +  return live
 +}
 +
++// 解析桥接：通过路径匹配选择最佳桥接，优先选择工作区路径最匹配的
++// CLI 桥接 API：resolveBridge — 发现/调用 VS Code notebook 能力
 +export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
++// 环境变量桥接：OPENCODE_IDE_BRIDGE 指定固定桥接，优先于发现流程
 +  const env = envBridge()
++// 环境变量桥接：OPENCODE_IDE_BRIDGE 环境变量指定固定桥接，跳过发现流程
 +  if (env && (await healthCheck(env, input.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT))) return env
 +
 +  const now = Date.now()
@@ -133,26 +177,33 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +    return cachedRegistryBridge.bridge
 +  }
 +
++// 桥接发现：扫描注册目录获取所有活跃桥接
 +  const entries = await discoverBridges(input)
 +  const candidates = input.filePath ? entries.filter((entry) => bridgeMatchesFilePath(entry, input.filePath!)) : entries
++// 无匹配工作区：有可用桥接但没有匹配请求路径的工作区
 +  if (entries.length > 0 && candidates.length === 0) {
 +    throw new Error(`No live VS Code bridge workspace matches filePath: ${input.filePath}. Check the exact notebook path from vscode_notebook_summary.`)
 +  }
 +
++// 评分排序：按工作区路径匹配度和心跳新鲜度排序
 +  const scored = candidates
++    // 评分：健康>心跳新鲜>端口可达，决定 discover 排序
 +    .map((entry) => ({ entry, score: scoreBridge(entry, input.cwd, input.filePath) }))
 +    .sort((a, b) => b.score - a.score || b.entry.updatedAt - a.entry.updatedAt)
 +
++// 最佳桥接：评分最高的候选
 +  const best = scored[0]
 +  if (!best) {
 +    throw new Error("No live VS Code bridge found. Open this workspace in VS Code or launch opencode from the VS Code extension.")
 +  }
 +
++// 次优桥接：用于检测评分并列的冲突
 +  const second = scored[1]
 +  if (second && best.score === second.score && best.entry.updatedAt === second.entry.updatedAt) {
 +    throw new Error("Multiple matching VS Code bridges found. Specify filePath or focus the desired VS Code workspace.")
 +  }
 +
++// 构建桥接引用：包含连接信息和缓存过期时间
 +  const bridge = {
 +    id: best.entry.id,
 +    host: best.entry.host ?? "127.0.0.1",
@@ -161,20 +212,36 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +    score: best.score,
 +    source: "registry",
 +  } satisfies BridgeRef
++// 更新缓存：设置过期时间为当前时间 + RESOLVE_CACHE_MS
 +  cachedRegistryBridge = {
 +    cwd: input.cwd,
 +    filePath: input.filePath,
 +    expiresAt: Date.now() + RESOLVE_CACHE_MS,
 +    bridge,
 +  }
++// 返回匹配桥接：工作区路径匹配度最高的桥接
 +  return bridge
 +}
 +
++// 调用桥接：向 VS Code 扩展发送 HTTP POST 请求，支持超时和中止
++// 对指定 bridge 发鉴权 HTTP，并走请求队列
++// CLI 桥接 API：callBridge — 发现/调用 VS Code notebook 能力
 +export async function callBridge(input: CallInput): Promise<unknown> {
++  // 入队后 FIFO 执行；失败不阻塞后续任务
++  // 客户端全局串行：避免并发 callBridge 打穿扩展侧状态
++  // 请求队列：每次 callBridge 通过 enqueueBridgeRequest 序列化，确保同一时刻只有一个 HTTP 请求在途
++  return await enqueueBridgeRequest(() => callBridgeOnce(input))
++}
++
++// 实际执行桥接调用的函数：从 callBridge 提取，由队列调度
++async function callBridgeOnce(input: CallInput): Promise<unknown> {
 +  await assertExistingLocalFilePath(input.filePath)
++// 解析桥接：通过工作区和文件路径匹配最佳桥接
 +  const bridge = await resolveBridge({ cwd: input.cwd, filePath: input.filePath })
++// HTTP 响应：fetchWithTimeout 支持 AbortController 中止
 +  let response: Response
 +  try {
++    // 发送 HTTP POST：携带 Bearer token 认证，防止未授权调用
 +    response = await fetchWithTimeout(
 +      `http://${bridge.host}:${bridge.port}${input.path}`,
 +      {
@@ -188,12 +255,16 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +      input.timeoutMs,
 +      input.signal,
 +    )
++// 网络错误处理：清除缓存桥接，下次调用将重新发现
 +  } catch (error) {
++// 失效缓存：桥接可能已关闭或不可达，强制下次重新发现
 +    invalidateCachedBridge(bridge)
 +    throw error
 +  }
 +
++// 读取响应体：可能为空（204 No Content）
 +  const text = await response.text()
++// 解析响应体：优先 JSON，失败时保留原始文本
 +  let value: unknown
 +  try {
 +    value = text ? JSON.parse(text) : {}
@@ -201,15 +272,33 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +    value = text
 +  }
 +
++// HTTP 错误：非 2xx 状态码视为失败
 +  if (!response.ok) {
 +    const message = errorFromResponse(value) ?? `VS Code bridge request failed with HTTP ${response.status}`
 +    throw new Error(message)
 +  }
++// 业务错误：HTTP 200 但响应体包含 error 字段
 +  const error = errorFromResponse(value)
 +  if (error) throw new Error(error)
 +  return value
 +}
 +
++// 桥接请求队列调度器：前一个请求完成（或失败）后才执行下一个，finally 确保队列不会卡住
++async function enqueueBridgeRequest<T>(operation: () => Promise<T>): Promise<T> {
++  const previous = bridgeRequestQueue
++  let release!: () => void
++  bridgeRequestQueue = new Promise<void>((resolve) => {
++    release = resolve
++  })
++  await previous
++  try {
++    return await operation()
++  } finally {
++    release()
++  }
++}
++
++// 摘要提取：从桥接响应中提取 summary 字段
 +export function summaryOnly(value: unknown) {
 +  if (value && typeof value === "object" && "summary" in value && typeof value.summary === "string") {
 +    return value.summary
@@ -238,6 +327,7 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +  return score
 +}
 +
++// 工作区匹配：检查桥接的工作区路径是否包含请求的文件路径
 +function bridgeMatchesFilePath(entry: BridgeEntry, filePath: string) {
 +  const target = normalizeInputPath(filePath)
 +  if (!target) return false
@@ -266,6 +356,7 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +  }
 +}
 +
++// 读取注册条目：解析 JSON，验证 schema 版本和必需字段
 +async function readEntry(filepath: string) {
 +  const value = JSON.parse(await fs.readFile(filepath, "utf8")) as unknown
 +  if (!isRecord(value)) return
@@ -280,6 +371,8 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +  return value as BridgeEntry
 +}
 +
++// 健康检查：GET /health 验证桥接服务器是否存活
++// GET /health：确认 HTTP 端口仍响应
 +async function healthCheck(entry: Pick<BridgeEntry, "host" | "port">, timeoutMs: number) {
 +  const response = await fetchWithTimeout(
 +    `http://${entry.host ?? "127.0.0.1"}:${entry.port}/health`,
@@ -289,6 +382,7 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +  return response?.ok === true
 +}
 +
++// 带超时的 fetch：使用 AbortController 在指定时间后中止请求
 +async function fetchWithTimeout(
 +  url: string,
 +  init: RequestInit,
@@ -302,11 +396,14 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +  try {
 +    return await fetch(url, { ...init, signal: controller.signal })
 +  } finally {
++  // 清理定时器：请求完成后立即清除，防止内存泄漏
++// 清理定时器：请求完成后立即清除，防止内存泄漏和空回调
 +    clearTimeout(timer)
 +    signal?.removeEventListener("abort", abort)
 +  }
 +}
 +
++// PID 存活检查：通过 process.kill(pid, 0) 测试进程是否存在，不发送信号
 +function pidDead(pid: number) {
 +  if (!Number.isInteger(pid) || pid <= 0) return false
 +  try {
@@ -318,9 +415,11 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +  }
 +}
 +
++// 路径规范化：将用户输入路径转换为绝对路径，处理 file:// URI 和相对路径
 +function normalizeInputPath(value?: string) {
 +  if (!value) return
 +  let result = value
++// file:// URI 转换：VS Code 使用 file:// URI，桥接需要文件系统路径
 +  if (result.startsWith("file://")) {
 +    try {
 +      result = fileURLToPath(result)
@@ -344,12 +443,14 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +  return target === folder || target.startsWith(folder + "/")
 +}
 +
++// 错误提取：从桥接响应中提取错误消息
 +function errorFromResponse(value: unknown) {
 +  if (!isRecord(value)) return
 +  if (typeof value.error === "string") return value.error
 +  if (value.ok === false) return "VS Code bridge returned ok=false"
 +}
 +
++// 文件存在性检查：确保请求的文件路径在本地存在，防止桥接访问不存在的文件
 +async function assertExistingLocalFilePath(filePath?: string) {
 +  const localPath = localPathFromInput(filePath)
 +  if (!localPath) return
@@ -364,6 +465,7 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +  }
 +}
 +
++// 本地路径提取：从 file:// URI 中提取文件系统路径
 +function localPathFromInput(value?: string) {
 +  if (!value) return
 +  if (value.startsWith("file://")) {
@@ -378,6 +480,7 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +  return
 +}
 +
++// 失效缓存：当桥接调用失败时清除缓存的桥接引用，强制下次重新发现
 +function invalidateCachedBridge(bridge: BridgeRef) {
 +  if (cachedRegistryBridge?.bridge.id === bridge.id) cachedRegistryBridge = undefined
 +}
@@ -386,10 +489,12 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +  return typeof value === "object" && value !== null && !Array.isArray(value)
 +}
 +
++// 错误判断：Node.js fs errno ENOENT 表示文件或目录不存在
 +function isMissing(error: unknown) {
 +  return isRecord(error) && error.code === "ENOENT"
 +}
 +
++// 移除过期注册文件：catch 忽略文件不存在错误（可能被其他进程删除）
 +function removeStale(filepath: string) {
 +  return fs.unlink(filepath).catch((error) => {
 +    if (isMissing(error)) return
@@ -401,31 +506,34 @@ index 0000000000000000000000000000000000000000..4d913fb040accfb1299c73eb12d0dd21
 +  return path.join(process.env.XDG_STATE_HOME ?? path.join(home, ".local", "state"), "opencode", "ide")
 +}
 diff --git a/packages/opencode/src/plugin/index.ts b/packages/opencode/src/plugin/index.ts
-index 69cd4d8d3c863e881395e1b5d51143435892aee6..98164717bddeb2685622ded3616e7c884f133ae8 100644
+index 8eec73edab..aefe54a4f1 100644
 --- a/packages/opencode/src/plugin/index.ts
 +++ b/packages/opencode/src/plugin/index.ts
-@@ -18,6 +18,7 @@ import { gitlabAuthPlugin as GitlabAuthPlugin } from "opencode-gitlab-auth"
+@@ -17,6 +17,8 @@ import { gitlabAuthPlugin as GitlabAuthPlugin } from "opencode-gitlab-auth"
  import { PoeAuthPlugin } from "opencode-poe-auth"
  import { CloudflareAIGatewayAuthPlugin, CloudflareWorkersAuthPlugin } from "./cloudflare"
  import { AzureAuthPlugin } from "./azure"
++// 将 bridge 工具挂到 plugin 索引，会话可直接 call
 +import { VscodeBridgePlugin } from "./vscode-bridge"
- import { Effect, Layer, Context, Stream } from "effect"
- import { EffectBridge } from "@/effect/bridge"
- import { InstanceState } from "@/effect/instance-state"
-@@ -63,6 +64,7 @@ const INTERNAL_PLUGINS: PluginInstance[] = [
-   CloudflareWorkersAuthPlugin,
-   CloudflareAIGatewayAuthPlugin,
-   AzureAuthPlugin,
-+  VscodeBridgePlugin,
- ]
- 
- function isServerPlugin(value: unknown): value is PluginInstance {
+ import { DigitalOceanAuthPlugin } from "./digitalocean"
+ import { XaiAuthPlugin } from "./xai"
+ import { SnowflakeCortexAuthPlugin } from "./snowflake-cortex"
+@@ -75,6 +77,7 @@ function internalPlugins(flags: RuntimeFlags.Info): PluginInstance[] {
+     CloudflareWorkersAuthPlugin,
+     CloudflareAIGatewayAuthPlugin,
+     AzureAuthPlugin,
++    VscodeBridgePlugin,
+     DigitalOceanAuthPlugin,
+     SnowflakeCortexAuthPlugin,
+     XaiAuthPlugin,
 diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..539b8793ede2b47268ebfe1ac278d3be0a1b327b
+index 0000000000..62df37ba73
 --- /dev/null
 +++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,49 @@
++// 工具描述与参数 schema：对齐 VS Code notebook 桥接端点契约
++// 工具描述常量：6 个 notebook 工具的用户可见描述，用于 opencode 的工具注册和 UI 展示
 +export const VscodeNotebookDescriptions = {
 +  summary: [
 +    "Inspect a VS Code notebook and return a compact cell map.",
@@ -475,12 +583,13 @@ index 0000000000000000000000000000000000000000..539b8793ede2b47268ebfe1ac278d3be
 +}
 diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f46fb2f04aa4dde4ca6d0dec2bd7cd9807c90fbf
+index 0000000000..78f07dbf56
 --- /dev/null
 +++ b/packages/opencode/src/plugin/vscode-bridge.ts
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,186 @@
++// Plugin 入口：注册 notebook bridge 工具并转发到 ide/vscode-bridge 客户端
 +import { Effect } from "effect"
-+import { tool, type ToolContext } from "@opencode-ai/plugin"
++import { tool, type ToolContext, type PluginInput, type Hooks } from "@opencode-ai/plugin"
 +import { z } from "zod"
 +import * as VscodeBridge from "@/ide/vscode-bridge"
 +import { VscodeNotebookDescriptions } from "./vscode-bridge-descriptions"
@@ -586,19 +695,23 @@ index 0000000000000000000000000000000000000000..f46fb2f04aa4dde4ca6d0dec2bd7cd98
 +  return VscodeBridge.summaryOnly(value)
 +}
 +
-+async function ask(context: ToolContext, permission: string, args: Record<string, unknown>) {
++// ask 适配：V2 的 ToolContext.ask 返回 Promise<void>，替代 V1 的 Effect.runPromise
++// 用户交互：V2 的 ToolContext.ask 返回 Promise<void>，替代 V1 的 Effect.runPromise
++async function ask(context: ToolContext, permission: string, args: Record<string, unknown>): Promise<void> {
 +  const pattern = typeof args.filePath === "string" ? args.filePath : "*"
-+  await Effect.runPromise(
-+    context.ask({
-+      permission,
-+      patterns: [pattern],
-+      always: [pattern],
-+      metadata: { args },
-+    }),
-+  )
++  await context.ask({
++    permission,
++    patterns: [pattern],
++    always: [pattern],
++    metadata: { args },
++  })
 +}
 +
-+export const VscodeBridgePlugin = async () => ({
++// VS Code 桥接插件：注册 6 个 notebook 工具到 opencode
++// 将 bridge 工具挂到 plugin 索引，会话可直接 call
++export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
++  // 返回 Hooks：init 初始化插件，tool 返回工具列表
++  return {
 +  tool: {
 +    vscode_notebook_summary: tool({
 +      description: VscodeNotebookDescriptions.summary,
@@ -623,6 +736,7 @@ index 0000000000000000000000000000000000000000..f46fb2f04aa4dde4ca6d0dec2bd7cd98
 +        await ask(context, "vscode_notebook_run", args)
 +        const timeoutMs = args.timeoutMs ?? 300_000
 +        return {
++          // run 工具描述：endCellId 为 range 信号，type 仅提示
 +          output: await call("/notebook/run", { ...args, timeoutMs }, context, timeoutMs + 5_000),
 +          metadata: { endpoint: "/notebook/run" },
 +        }
@@ -640,6 +754,7 @@ index 0000000000000000000000000000000000000000..f46fb2f04aa4dde4ca6d0dec2bd7cd98
 +      description: VscodeNotebookDescriptions.edit,
 +      args: editArgs,
 +      execute: async (args, context) => {
++        // 权限检查：在 V2 中通过 Effect 系统执行
 +        await ask(context, "edit", args)
 +        return {
 +          output: await call("/notebook/edit", args, context, 30_000),
@@ -656,17 +771,20 @@ index 0000000000000000000000000000000000000000..f46fb2f04aa4dde4ca6d0dec2bd7cd98
 +      }),
 +    }),
 +  },
-+})
++}
++}
 diff --git a/packages/opencode/test/ide/vscode-bridge.test.ts b/packages/opencode/test/ide/vscode-bridge.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..99f196fee6948feb13bfd98ddb72a78f069cd670
+index 0000000000..912d1fa8b0
 --- /dev/null
 +++ b/packages/opencode/test/ide/vscode-bridge.test.ts
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,141 @@
++// 桥接发现/调用的行为测试：覆盖 health 与鉴权路径
 +import { afterEach, describe, expect, test } from "bun:test"
 +import fs from "fs/promises"
 +import http from "http"
 +import os from "os"
++// 路径处理：构建临时注册文件路径
 +import path from "path"
 +import * as VscodeBridge from "../../src/ide/vscode-bridge"
 +
@@ -675,6 +793,7 @@ index 0000000000000000000000000000000000000000..99f196fee6948feb13bfd98ddb72a78f
 +const originalToken = process.env.OPENCODE_VSCODE_BRIDGE_TOKEN
 +const tempDirs: string[] = []
 +
++// 清理责任：每个测试用例后删除临时目录和注册文件，防止测试间状态泄漏
 +afterEach(async () => {
 +  restoreEnv("OPENCODE_IDE_REGISTRY_DIR", originalRegistryDir)
 +  restoreEnv("OPENCODE_VSCODE_BRIDGE_PORT", originalPort)
@@ -682,8 +801,14 @@ index 0000000000000000000000000000000000000000..99f196fee6948feb13bfd98ddb72a78f
 +  await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })))
 +})
 +
++// 测试套件：VS Code 桥接发现和解析功能
++// 测试意图：验证桥接发现逻辑正确处理过期、PID 失效和健康检查失败的注册条目
 +describe("vscode bridge discovery", () => {
-+  test("env bridge is preferred when healthy", async () => {
++  // 测试用例：验证桥接发现和路径匹配逻辑
++// 边界条件：空目录时应返回空数组，不抛出异常
++// 测试意图：验证 stale 条目（超过 staleMs）被正确移除
++// 测试意图：验证 PID 失效的条目被移除，即使未超过 staleMs
++test("env bridge is preferred when healthy", async () => {
 +    using server = await bridgeServer()
 +    const dir = await tempRegistry()
 +    await writeEntry(dir, "registry", server.port, "/tmp/project")
@@ -696,7 +821,7 @@ index 0000000000000000000000000000000000000000..99f196fee6948feb13bfd98ddb72a78f
 +    expect(bridge.token).toBe("env-token")
 +  })
 +
-+  test("selects registry bridge matching the requested file path", async () => {
++test("selects registry bridge matching the requested file path", async () => {
 +    using first = await bridgeServer()
 +    using second = await bridgeServer()
 +    const dir = await tempRegistry()
@@ -711,7 +836,7 @@ index 0000000000000000000000000000000000000000..99f196fee6948feb13bfd98ddb72a78f
 +    expect(bridge.id).toBe("second")
 +  })
 +
-+  test("rejects file paths that do not match any live VS Code workspace", async () => {
++test("rejects file paths that do not match any live VS Code workspace", async () => {
 +    using server = await bridgeServer()
 +    const dir = await tempRegistry()
 +    await writeEntry(dir, "registry", server.port, "/tmp/project")
@@ -724,7 +849,7 @@ index 0000000000000000000000000000000000000000..99f196fee6948feb13bfd98ddb72a78f
 +    ).rejects.toThrow("No live VS Code bridge workspace matches filePath")
 +  })
 +
-+  test("ignores and removes stale registry entries", async () => {
++test("ignores and removes stale registry entries", async () => {
 +    const dir = await tempRegistry()
 +    await writeEntry(dir, "stale", 9, "/tmp/project", Date.now() - 60_000)
 +
@@ -797,10 +922,11 @@ index 0000000000000000000000000000000000000000..99f196fee6948feb13bfd98ddb72a78f
 +}
 diff --git a/sdks/vscode/src/bridge-registry.ts b/sdks/vscode/src/bridge-registry.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d6efc45865867f7a4515539ac55c24568dc6d161
+index 0000000000..00432b4350
 --- /dev/null
 +++ b/sdks/vscode/src/bridge-registry.ts
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,108 @@
++// 本机 registry：写心跳文件供 CLI 发现活跃扩展实例
 +import * as fs from "node:fs/promises"
 +import * as os from "node:os"
 +import * as path from "node:path"
@@ -810,17 +936,21 @@ index 0000000000000000000000000000000000000000..d6efc45865867f7a4515539ac55c2456
 +const HEARTBEAT_MS = 5_000
 +
 +export type RegistryHandle = {
++  // VS Code 实例 ID：通常为工作区路径的哈希
 +  id: string
 +  dispose(): Promise<void>
 +}
 +
 +type RegistryInput = {
 +  id: string
++  // HTTP 服务器端口：VS Code 扩展启动时分配的随机端口
 +  port: number
++  // 认证 token：每个桥接实例生成唯一 token，防止未授权调用
 +  token: string
 +  createdAt?: number
 +}
 +
++// 注册桥接：写入锁文件并启动心跳，供客户端发现
 +export async function registerBridge(input: RegistryInput): Promise<RegistryHandle> {
 +  const dir = registryDir()
 +  await fs.mkdir(dir, { recursive: true, mode: 0o700 })
@@ -828,13 +958,17 @@ index 0000000000000000000000000000000000000000..d6efc45865867f7a4515539ac55c2456
 +
 +  const file = path.join(dir, `${input.id}.json`)
 +  const createdAt = Date.now()
++  // registry 原子写：先 tmp 再 rename，防半写 JSON
 +  const write = () => writeRegistryFile(file, manifest({ ...input, createdAt }))
 +  await write()
-+  const timer = setInterval(() => void write(), HEARTBEAT_MS)
++  // 心跳定时器：每 5 秒更新锁文件时间戳
++const timer = setInterval(() => void write(), HEARTBEAT_MS)
 +
 +  return {
 +    id: input.id,
-+    async dispose() {
++    // 清理责任：VS Code 关闭时调用 dispose 删除注册文件，opencode 端通过 stale 检查兜底
++// 清理责任：VS Code 关闭时删除注册文件，opencode 端通过 stale 检查兜底
++  async dispose() {
 +      clearInterval(timer)
 +      await fs.unlink(file).catch((error) => {
 +        if (error?.code !== "ENOENT") throw error
@@ -843,16 +977,21 @@ index 0000000000000000000000000000000000000000..d6efc45865867f7a4515539ac55c2456
 +  }
 +}
 +
-+export function registryDir() {
++// 获取锁文件目录：用户配置目录下的 bridges 子目录
++export
++function registryDir() {
 +  return process.env.OPENCODE_IDE_REGISTRY_DIR ?? path.join(xdgStateHome(), "opencode", "ide")
 +}
 +
 +export function manifest(input: RegistryInput) {
 +  const now = Date.now()
 +  return {
-+    schema: 1,
++    // Schema 版本：用于未来注册文件格式迁移，当前固定为 1
++  schema: 1,
 +    id: input.id,
-+    pid: process.pid,
++    // PID 记录：注册文件包含 VS Code 进程 PID，opencode 端通过 PID 存活检查判断桥接是否可用
++// PID 记录：opencode 端通过 PID 存活检查判断桥接是否可用
++  pid: process.pid,
 +    port: input.port,
 +    token: input.token,
 +    host: HOST,
@@ -896,161 +1035,348 @@ index 0000000000000000000000000000000000000000..d6efc45865867f7a4515539ac55c2456
 +  return process.env.XDG_STATE_HOME ?? path.join(os.homedir(), ".local", "state")
 +}
 diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
-index 6acf910e11f28104f2e65eabbca802b857c0294e..b716e104c47e5212ae4fa71458130294c2a1bc8a 100644
+index e2ebad69ad..fb36634193 100644
 --- a/sdks/vscode/src/bridge.ts
 +++ b/sdks/vscode/src/bridge.ts
-@@ -10,8 +10,8 @@
+@@ -1,3 +1,4 @@
++// 扩展 HTTP 服务：把 notebook 工具请求路由到 notebook/* handler
+ /**
+  * HTTP bridge server for the opencode VS Code extension.
+  *
+@@ -8,8 +9,10 @@
+  *
+  * Endpoints:
   *   GET  /health                – liveness check
++ *   GET  /manifest              – redacted bridge identity (auth)
   *   POST /notebook/summary      – notebook structure overview
   *   POST /notebook/source       – paginated virtual source text
-- *   POST /notebook/run          – execute cells
-- *   POST /notebook/edit         – insert/delete/replace cells
-+ *   POST /notebook/run          – execute one cell or a cell-id range
-+ *   POST /notebook/edit         – insert/edit/delete cells
++ // run 工具描述：endCellId 为 range 信号，type 仅提示
+  *   POST /notebook/run          – execute cells
+  *   POST /notebook/edit         – insert/delete/replace cells
   *   POST /notebook/output       – artifact-first output export
-  *   POST /notebook/cell-output  – alias for /notebook/output
+@@ -17,23 +20,31 @@
   *   POST /notebook/env          – kernel/environment snapshot
-@@ -24,6 +24,7 @@ import { runNotebook } from "./notebook/run"
+  */
+ import * as http from "node:http"
++import * as vscode from "vscode"
+ import { isRecord, stringProp } from "./util"
+ import { notebookSummary } from "./notebook/summary"
++import { manifest, registerBridge, type RegistryHandle } from "./bridge-registry"
+ import { notebookSource } from "./notebook/source"
+ import { runNotebook } from "./notebook/run"
  import { editNotebook } from "./notebook/edit"
  import { readNotebookCellOutput } from "./notebook/output"
  import { notebookEnv } from "./notebook/env"
-+import { manifest, registerBridge, type RegistryHandle } from "./bridge-registry"
  
++// 强制 127.0.0.1 监听，不暴露 0.0.0.0
  const BRIDGE_HOST = "127.0.0.1"
  
-@@ -31,8 +32,11 @@ export type BridgeInfo = { port: number; token: string }
+ export type BridgeInfo = { port: number; token: string }
  
  /** The active server instance — closed on extension deactivation. */
  let server: http.Server | undefined
 +let registry: RegistryHandle | undefined
  
+ // 关闭桥接服务器：停止 HTTP 服务器并清理资源
 -export function closeBridge() {
++// 先 dispose registry 再 close server，避免半开状态
 +export async function closeBridge() {
++  // 先注销 registry，再关 HTTP，避免半开状态
 +  await registry?.dispose()
 +  registry = undefined
    server?.close()
    server = undefined
  }
-@@ -47,6 +51,7 @@ export function closeBridge() {
+@@ -47,25 +58,53 @@ export function closeBridge() {
+  * Returns the port and auth token for environment injection into the terminal.
   */
+ // 启动 HTTP 桥接服务器：监听 opencode 工具请求并路由到对应处理函数
++
++// 仅本机 Host 且无 Origin：拒绝浏览器跨源与非 loopback 探测
++// Origin 一律拒绝：浏览器页面不得跨源打本机桥
++function safeLocalRequest(request: http.IncomingMessage) {
++  if (request.headers.origin) return false
++  const host = request.headers.host
++  // Host 限 loopback，防止绑定面被局域网 Host 头绕过
++  return !host || host.startsWith("127.0.0.1:") || host.startsWith("localhost:")
++}
++
++// 启动入口：listen→registry 硬绑定→resolve BridgeInfo
  export async function startBridge(output: { appendLine(value: string): void }): Promise<BridgeInfo> {
    const { randomUUID } = await import("node:crypto")
-+  const id = randomUUID()
    const token = randomUUID()
  
    const httpServer = http.createServer(async (request, response) => {
-@@ -54,6 +59,10 @@ export async function startBridge(output: { appendLine(value: string): void }):
++      if (!safeLocalRequest(request)) {
++        // 403：非本机/带 Origin，先于 401 短路
++        return writeJson(response, 403, { ok: false, error: "Forbidden" })
++      }
+     const url = new URL(request.url ?? "/", `http://${BRIDGE_HOST}`)
      output.appendLine(`[bridge] ${request.method} ${url.pathname}`)
  
      try {
-+      if (!safeLocalRequest(request)) {
-+        return writeJson(response, 403, { ok: false, error: "Forbidden" })
-+      }
-+
        // Health check — no auth required
++      // health 无 token：供 discover 廉价探测
        if (request.method === "GET" && url.pathname === "/health") {
          return writeJson(response, 200, { ok: true, service: "opencode-vscode-bridge" })
-@@ -64,6 +73,10 @@ export async function startBridge(output: { appendLine(value: string): void }):
+       }
+ 
+       // All other endpoints require auth
+       if (!authorized(request, url, token)) {
++        // 401：本机可达但 token 不匹配
          return writeJson(response, 401, { ok: false, error: "Unauthorized" })
        }
  
++      // 鉴权后暴露 redacted manifest，供运维核对桥身份且不泄露 token
 +      if (request.method === "GET" && url.pathname === "/manifest") {
-+        return writeJson(response, 200, manifest({ id, port: addressPort(httpServer), token: "<redacted>" }))
++        const addr = server?.address()
++        const port = addr && typeof addr === "object" ? addr.port : 0
++        return writeJson(
++          response,
++          200,
++          manifest({ id: vscode.env.sessionId || `vscode-${port}`, port, token: "<redacted>" }),
++        )
 +      }
 +
        // Route to notebook handlers
        const result = await routeRequest(request.method ?? "", url.pathname, request, output)
        if (result !== undefined) {
-@@ -90,11 +103,17 @@ export async function startBridge(output: { appendLine(value: string): void }):
+@@ -92,11 +131,25 @@ export async function startBridge(output: { appendLine(value: string): void }):
  
        const base = `http://${BRIDGE_HOST}:${address.port}`
        output.appendLine(`[bridge] listening on ${base}`)
 -      output.appendLine(`[bridge] token ${token}`)
-+      output.appendLine("[bridge] token <redacted>")
-       for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env"]) {
+-      for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env"]) {
 -        output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}${ep === "health" ? "" : `?token=${token}`}`)
-+        output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}`)
-       }
+-      }
 -      resolve({ port: address.port, token })
-+      registerBridge({ id, port: address.port, token })
++      output.appendLine("[bridge] token <redacted>")
++      // 写入本机 registry，供 CLI 发现此 VS Code 桥接实例
++      // 注册成功才 resolve；registry 失败则 startBridge reject
++      registerBridge({
++        // 用 sessionId 作 registry id，同窗多启可区分
++        id: vscode.env.sessionId || `vscode-${address.port}`,
++        port: address.port,
++        token,
++      })
 +        .then((handle) => {
 +          registry = handle
 +          output.appendLine(`[bridge] registry ${handle.id}`)
++          for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env", "manifest"]) {
++            output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}${ep === "health" ? "" : ``}`)
++          }
 +          resolve({ port: address.port, token })
 +        })
++        // registry 写盘失败必须让 activate 失败，禁止半开桥
 +        .catch(reject)
      })
    })
  }
-@@ -117,8 +136,11 @@ async function routeRequest(
-   }
- 
-   switch (pathname) {
--    case "/notebook/summary":
--      return await notebookSummary(stringProp(body, "filePath"))
-+    case "/notebook/summary": {
-+      const filePath = stringProp(body, "filePath")
-+      if (!filePath) throw new Error("filePath is required")
-+      return await notebookSummary(filePath)
-+    }
- 
-     case "/notebook/source":
-       return await notebookSource(body)
-@@ -131,14 +153,18 @@ async function routeRequest(
- 
-     case "/notebook/output":
-     case "/notebook/cell-output": {
--      const filePath = typeof body.filePath === "string" ? body.filePath : undefined
-+      const filePath = stringProp(body, "filePath")
-+      if (!filePath) throw new Error("filePath is required")
-       const cellId = typeof body.cellId === "string" ? body.cellId : undefined
--      output.appendLine(`[bridge] reading raw notebook output ${filePath ?? "<active>"} cellId=${cellId ?? "<auto>"}`)
-+      output.appendLine(`[bridge] reading raw notebook output ${filePath} cellId=${cellId ?? "<auto>"}`)
-       return await readNotebookCellOutput(filePath, undefined, cellId)
-     }
- 
--    case "/notebook/env":
--      return await notebookEnv(isRecord(body) ? stringProp(body, "filePath") : undefined)
-+    case "/notebook/env": {
-+      const filePath = stringProp(body, "filePath")
-+      if (!filePath) throw new Error("filePath is required")
-+      return await notebookEnv(filePath)
-+    }
-   }
- 
-   return undefined
-@@ -149,7 +175,20 @@ async function routeRequest(
+@@ -154,15 +207,20 @@ const body = await readJson(request)
+ // HTTP helpers
  // ---------------------------------------------------------------------------
  
++// 鉴权：仅 Authorization Bearer；health 免鉴权
  function authorized(request: http.IncomingMessage, url: URL, token: string) {
 -  return request.headers.authorization === `Bearer ${token}` || url.searchParams.get("token") === token
++  // 仅 Bearer：禁止 query token 落入 URL/代理/日志侧信道
 +  void url
 +  return request.headers.authorization === `Bearer ${token}`
-+}
-+
-+function safeLocalRequest(request: http.IncomingMessage) {
-+  if (request.headers.origin) return false
-+  const host = request.headers.host
-+  return !host || host.startsWith("127.0.0.1:") || host.startsWith("localhost:")
-+}
-+
-+function addressPort(httpServer: http.Server) {
-+  const address = httpServer.address()
-+  if (!address || typeof address === "string") throw new Error("Bridge server port is not available")
-+  return address.port
  }
  
++// 统一 JSON 响应头，避免 text/plain 误解析
  function writeJson(response: http.ServerResponse, status: number, value: unknown) {
+   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" })
+   response.end(JSON.stringify(value, null, 2))
+ }
+ 
++// body 只解析一次；调用方负责在锁内调用
+ function readJson(request: http.IncomingMessage) {
+   // 返回 Promise：服务器启动后 resolve
+ return new Promise<unknown>((resolve, reject) => {
 diff --git a/sdks/vscode/src/extension.ts b/sdks/vscode/src/extension.ts
-index 2a36de9b092ac2d96b8bb6714a63b75ec82ebe80..9b77492ba1832d6a6016e93603b588786792264e 100644
+index 61ffc750f3..a8f9543b64 100644
 --- a/sdks/vscode/src/extension.ts
 +++ b/sdks/vscode/src/extension.ts
-@@ -20,7 +20,7 @@ const TERMINAL_NAME = "opencode"
+@@ -10,73 +10,55 @@
+  * in `./bridge.ts`, and shared utilities in `./util.ts`.
+  */
+ import * as vscode from "vscode"
+-// 执行逻辑步骤
+ import { startBridge, closeBridge, type BridgeInfo } from "./bridge"
+-// 从 bridge 模块导入启动/关闭函数和类型
+ import { notebookBridgeTools } from "./notebook/commands"
+-// 从 notebook/commands 导入交互式测试命令
+ 
+ const TERMINAL_NAME = "opencode"
+-// 终端名称常量，用于查找已有终端
+ 
+ // ---------------------------------------------------------------------------
+ // Lifecycle
  // ---------------------------------------------------------------------------
  
++// 扩展停用：关闭桥接服务器并清理资源
++// 扩展停用：关闭桥接服务器并清理注册文件，确保不残留过期注册条目
++// 扩展停用：关闭桥接服务器并清理注册文件，确保不残留过期条目
  export function deactivate() {
+-// 扩展卸载钩子：关闭桥接服务器
 -  closeBridge()
++// 返回 Promise：VS Code 等待异步清理完成后再停用扩展
 +  return closeBridge()
  }
  
  export function activate(context: vscode.ExtensionContext) {
+-// 扩展入口：启动桥接、注册命令、初始化输出通道
++  // 输出通道：VS Code 输出面板显示桥接日志和错误信息
+   const output = vscode.window.createOutputChannel("opencode")
+-  // 创建输出通道记录桥接日志
+ 
+   // Start bridge — the promise is awaited lazily when a terminal is opened
+   const bridge = startBridge(output).catch((error) => {
+-  // 异步启动桥接，失败时记录并重抛
+     output.appendLine(`[bridge] failed to start: ${error instanceof Error ? error.message : String(error)}`)
+     throw error
+-    // 抛出异常：中断执行并让调用方处理错误
+   })
+ 
+   context.subscriptions.push(
+     output,
+-    // 执行逻辑步骤
+     vscode.commands.registerCommand("opencode.openNewTerminal", () => openTerminal(context, bridge)),
+-    // 注册 openNewTerminal 命令
+     vscode.commands.registerCommand("opencode.openTerminal", async () => {
+-    // 注册 openTerminal 命令：已有则聚焦
+       const existing = vscode.window.terminals.find((t) => t.name === TERMINAL_NAME)
+-      // 查找已有同名终端避免重复创建
+       if (existing) {
+-      // 条件分支：按业务逻辑分流处理
+         existing.show()
+         return
+-        // 返回结果给调用方
+       }
+       await openTerminal(context, bridge)
+-      // 异步等待操作完成
+     }),
+     vscode.commands.registerCommand("opencode.addFilepathToTerminal", async () => {
+-    // 注册 addFilepathToTerminal 命令
+       const fileRef = getActiveFileRef()
+-      // 定义 fileRef：保存关键中间值或配置
+       const terminal = vscode.window.activeTerminal
+-      // 定义 terminal：保存关键中间值或配置
+       if (!fileRef || !terminal || terminal.name !== TERMINAL_NAME) return
+-      // 前置校验：无文件引用、无终端或非 opencode 终端时跳过
+       // @ts-ignore — creationOptions.env is not in the public type
+       const port = terminal.creationOptions.env?.["_EXTENSION_OPENCODE_PORT"]
+-      // 从终端创建选项中取出 CLI HTTP 端口
+       port ? await appendPrompt(parseInt(port), fileRef) : terminal.sendText(fileRef, false)
+       terminal.show()
+     }),
+     vscode.commands.registerCommand("opencode.showBridgeLog", () => output.show()),
+-    // 注册 showBridgeLog 命令
+     vscode.commands.registerCommand("opencode.notebookBridgeTools", () => notebookBridgeTools(output)),
+-    // 注册 notebookBridgeTools 命令
+   )
+ }
+ 
+@@ -85,69 +67,46 @@ export function activate(context: vscode.ExtensionContext) {
+ // ---------------------------------------------------------------------------
+ 
+ async function openTerminal(context: vscode.ExtensionContext, bridge: Promise<BridgeInfo>) {
+-// 打开新终端并注入桥接环境变量
+   const bridgeInfo = await bridge
+-  // 等待桥接启动完成获取端口和 token
+   const port = Math.floor(Math.random() * (65535 - 16384 + 1)) + 16384
+-  // 随机端口 16384–65535 避开系统端口
+   const terminal = vscode.window.createTerminal({
+-  // 定义 terminal：保存关键中间值或配置
+     name: TERMINAL_NAME,
+     iconPath: {
+       light: vscode.Uri.file(context.asAbsolutePath("images/button-dark.svg")),
+       dark: vscode.Uri.file(context.asAbsolutePath("images/button-light.svg")),
+-      // 调用 VS Code API
+     },
+     location: { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
+     env: {
+-    // 终端环境变量注入块
+       _EXTENSION_OPENCODE_PORT: port.toString(),
+-      // CLI HTTP 端口环境变量
+       OPENCODE_VSCODE_BRIDGE_PORT: bridgeInfo.port.toString(),
+-      // 桥接端口环境变量
+       OPENCODE_VSCODE_BRIDGE_TOKEN: bridgeInfo.token,
+-      // 桥接 token 环境变量
+       OPENCODE_CALLER: "vscode",
+-      // 调用来源标记
+     },
+   })
+ 
+   terminal.show()
+-  // 执行逻辑步骤
+   terminal.sendText(`opencode --port ${port}`)
+-  // 在终端中启动 opencode CLI
+ 
+   const fileRef = getActiveFileRef()
+-  // 获取当前编辑器文件引用
+   if (!fileRef) return
+-  // 无文件引用时返回
+ 
+   // Wait for the opencode TUI to be ready before appending the prompt
+   let tries = 10
+-  // 最多重试 10 次等待 TUI 就绪
+-  while (tries-- > 0) {
+-  // 轮询等待 TUI HTTP 端口可访问
++  while (tries-- > 0) {  // 循环执行
+     await new Promise((resolve) => setTimeout(resolve, 200))
+-    // 每次重试间隔 200ms
+     try {
+       await fetch(`http://localhost:${port}/app`)
+-      // 探测 TUI /app 端点确认就绪
+       await appendPrompt(port, `In ${fileRef}`)
+-      // TUI 就绪后追加文件引用到提示
+       terminal.show()
+       return
+-      // 返回结果给调用方
+     } catch {
+-    // TUI 未就绪时静默重试
+       // not ready yet
+     }
+   }
+ }
+ 
+ async function appendPrompt(port: number, text: string) {
+-// 通过 CLI HTTP 接口追加提示文本
+   await fetch(`http://localhost:${port}/tui/append-prompt`, {
+-  // 异步等待操作完成
+     method: "POST",
+     headers: { "Content-Type": "application/json" },
+     body: JSON.stringify({ text }),
+@@ -159,30 +118,18 @@ async function appendPrompt(port: number, text: string) {
+  * or `undefined` if no suitable editor/workspace is open.
+  */
+ function getActiveFileRef() {
+-// 构建 @relative/path#L1-L5 格式的文件引用
+   const editor = vscode.window.activeTextEditor
+-  // 获取活动文本编辑器
+   if (!editor) return undefined
+-  // 无编辑器时返回 undefined
+ 
+   const folder = vscode.workspace.getWorkspaceFolder(editor.document.uri)
+-  // 确认编辑器文档属于工作区
+   if (!folder) return undefined
+-  // 文档不在工作区内时无法生成相对路径
+ 
+   let ref = `@${vscode.workspace.asRelativePath(editor.document.uri)}`
+-  // 构建 @relative/path 基础引用
+   const sel = editor.selection
+-  // 获取当前选区
+   if (!sel.isEmpty) {
+-  // 有选区时追加行号锚点
+     const startLine = sel.start.line + 1
+-    // 选区起始行转 1-based
+     const endLine = sel.end.line + 1
+-    // 选区结束行转 1-based
+     ref += startLine === endLine ? `#L${startLine}` : `#L${startLine}-${endLine}`
+-    // 单行用 #LN，多行用 #LN-LM
+   }
+   return ref
+-  // 返回结果给调用方
+ }

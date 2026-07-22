@@ -35,5 +35,6 @@ logs/
 # Patch replay artifacts are isolated from the target source tree.
 .temp/patches/reports/
 .temp/patches/states/
+.temp/patches/.test-workspace/
 tsconfig.tsbuildinfo
 /artifacts/

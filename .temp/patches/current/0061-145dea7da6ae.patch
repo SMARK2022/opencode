@@ -1,34 +1,27 @@
-From 145dea7da6aed419a05aa676f107aa772871f3f9 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Fri, 1 May 2026 18:43:25 +0800
-Subject: [PATCH] =?UTF-8?q?fix:=20=E4=BC=98=E5=8C=96=E5=8F=AF=E7=94=A8?=
- =?UTF-8?q?=E7=BC=93=E5=86=B2=E5=8C=BA=E8=AE=A1=E7=AE=97=E9=80=BB=E8=BE=91?=
- =?UTF-8?q?=EF=BC=8C=E7=A1=AE=E4=BF=9D=E6=9B=B4=E5=90=88=E7=90=86=E7=9A=84?=
- =?UTF-8?q?=E9=BB=98=E8=AE=A4=E5=80=BC=E5=A4=84=E7=90=86?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/packages/opencode/src/session/overflow.ts b/packages/opencode/src/session/overflow.ts
-index 6485950dcc8493a13bcdcd908fd193ee973d8e06..6951a0f1f95617fc7d3a2300b9ddf595f219cffc 100644
 --- a/packages/opencode/src/session/overflow.ts
 +++ b/packages/opencode/src/session/overflow.ts
-@@ -4,13 +4,15 @@ import { ProviderTransform } from "@/provider/transform"
+@@ -6,14 +6,19 @@
  import type { MessageV2 } from "./message-v2"
  
  const COMPACTION_BUFFER = 20_000
++// 最小压缩缓冲区：确保即使 provider reserve 很大也有足够空间
 +const COMPACTION_BUFFER_MIN = 5_000
  
- export function usable(input: { cfg: Config.Info; model: Provider.Model }) {
+ export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
    const context = input.model.limit.context
    if (context === 0) return 0
  
 -  const reserved =
--    input.cfg.compaction?.reserved ?? Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model))
-+  const providerReserve = input.model.limit.input ? Math.max(0, context - input.model.limit.input) : 0
+-    input.cfg.compaction?.reserved ??
+-    Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
++// 计算 provider reserve：context 减去 input limit 的差额
++  const inputLimit = input.model.limit.input ?? 0
++  const providerReserve = inputLimit > 0 ? Math.max(0, context - inputLimit) : 0
++  // 默认缓冲：从 COMPACTION_BUFFER 中减去 provider reserve，但不低于 MIN
 +  const defaultBuffer = Math.max(COMPACTION_BUFFER_MIN, COMPACTION_BUFFER - providerReserve)
 +  const reserved = input.cfg.compaction?.reserved ?? defaultBuffer
    return input.model.limit.input
      ? Math.max(0, input.model.limit.input - reserved)
-     : Math.max(0, context - ProviderTransform.maxOutputTokens(input.model))
+     : Math.max(0, context - ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
+

@@ -1,24 +1,14 @@
-From 3a94dd4d099119d33a83c3449bf6df4e9f04dfe9 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Thu, 30 Apr 2026 16:01:30 +0800
-Subject: [PATCH] =?UTF-8?q?fix:=20=E6=B7=BB=E5=8A=A0=E4=BC=9A=E8=AF=9D?=
- =?UTF-8?q?=E7=8A=B6=E6=80=81=E6=A3=80=E6=9F=A5=E4=BB=A5=E4=BC=98=E5=8C=96?=
- =?UTF-8?q?=E5=BE=85=E5=A4=84=E7=90=86=E6=B6=88=E6=81=AF=E9=80=BB=E8=BE=91?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 30bae666b344d76784e26839d1841eec0500925b..4e909ff00576d42832424836c822e98b4c1be3dc 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -158,6 +158,8 @@ export function Session() {
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -250,6 +250,9 @@
    const disabled = createMemo(() => permissions().length > 0 || questions().length > 0 || contextVisible())
  
    const pending = createMemo(() => {
++    // 会话空闲时不查找待处理消息，避免不必要的重渲染
 +    const status = sync.data.session_status?.[route.sessionID]
 +    if (!status || status.type === "idle") return undefined
-     return messages().findLast((x) => x.role === "assistant" && !x.time.completed)?.id
-   })
- 
+     const completed = messages().findLast((x) => x.role === "assistant" && x.time.completed)?.id
+     return messages().findLast((x) => x.role === "assistant" && !x.time.completed && (!completed || x.id > completed))
+       ?.id
+

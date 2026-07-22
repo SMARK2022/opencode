@@ -1,58 +1,32 @@
-From a6e3b3cdafde155ac721edcd71761b17bcc254d2 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Thu, 30 Apr 2026 01:15:25 +0800
-Subject: [PATCH] =?UTF-8?q?fix:=20=E4=BF=AE=E5=A4=8D=20TUI=20=E5=91=BD?=
- =?UTF-8?q?=E4=BB=A4=E7=9A=84=E7=8E=AF=E5=A2=83=E5=8F=98=E9=87=8F=E4=BB=A3?=
- =?UTF-8?q?=E7=90=86=E5=A4=84=E7=90=86=E9=80=BB=E8=BE=91=EF=BC=8C=E5=A2=9E?=
- =?UTF-8?q?=E5=BC=BA=E4=BB=A3=E7=A0=81=E5=8F=AF=E8=AF=BB=E6=80=A7?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/thread.ts b/packages/opencode/src/cli/cmd/tui/thread.ts
-index 46a26dec932b6a89f5aac42aa55061a442461db0..95585bc5d0e3d4ac7a9a99c739c4381bd20301d7 100644
---- a/packages/opencode/src/cli/cmd/tui/thread.ts
-+++ b/packages/opencode/src/cli/cmd/tui/thread.ts
-@@ -43,6 +43,23 @@ async function input(value?: string) {
-   return piped + "\n" + value
- }
- 
-+function proxyEnv() {
-+  const http = process.env.HTTP_PROXY ?? process.env.http_proxy
-+  const https = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? http
-+  const all = process.env.ALL_PROXY ?? process.env.all_proxy
-+  const no = process.env.NO_PROXY ?? process.env.no_proxy
-+
-+  return {
-+    ...(http ? { HTTP_PROXY: http, http_proxy: http } : {}),
-+    ...(https ? { HTTPS_PROXY: https, https_proxy: https } : {}),
-+    ...(all ? { ALL_PROXY: all, all_proxy: all } : {}),
-+    ...(no ? { NO_PROXY: no, no_proxy: no } : {}),
-+    ...(process.env.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS } : {}),
-+    ...(process.env.SSL_CERT_FILE ? { SSL_CERT_FILE: process.env.SSL_CERT_FILE } : {}),
-+    ...(process.env.SSL_CERT_DIR ? { SSL_CERT_DIR: process.env.SSL_CERT_DIR } : {}),
-+  }
-+}
-+
- export const TuiThreadCommand = cmd({
-   command: "$0 [project]",
-   describe: "start opencode tui",
-@@ -109,10 +126,13 @@ export const TuiThreadCommand = cmd({
-         return
-       }
-       const cwd = Filesystem.resolve(process.cwd())
--      const env = sanitizedProcessEnv({
--        [OPENCODE_PROCESS_ROLE]: "worker",
--        [OPENCODE_RUN_ID]: ensureRunID(),
--      })
-+      const env = {
-+        ...sanitizedProcessEnv({
-+          [OPENCODE_PROCESS_ROLE]: "worker",
-+          [OPENCODE_RUN_ID]: ensureRunID(),
-+        }),
-+        ...proxyEnv(),
+diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
+--- a/packages/opencode/src/cli/cmd/tui.ts
++++ b/packages/opencode/src/cli/cmd/tui.ts
+@@ -121,9 +121,28 @@
+         network.hostname !== "127.0.0.1"
+       const daemonFile = await deps.resolveDaemonFile()
+       const printLogs = process.argv.includes("--print-logs")
++      // 全量转发 process.env：#47 已取消 sanitize，代理/CA 变量自然保留
++      // #52 再显式拷贝常见代理键，双大小写均覆盖（对齐 SMARK proxyEnv 意图，非第二数据源）
+       const env = Object.fromEntries(
+         Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+       )
++      for (const key of [
++        "HTTP_PROXY",
++        "http_proxy",
++        "HTTPS_PROXY",
++        "https_proxy",
++        "ALL_PROXY",
++        "all_proxy",
++        "NO_PROXY",
++        "no_proxy",
++        "NODE_EXTRA_CA_CERTS",
++        "SSL_CERT_FILE",
++        "SSL_CERT_DIR",
++      ] as const) {
++        const value = process.env[key]
++        // identity assign：键已在 env 中则覆写为同值，强调代理键不得被省略
++        if (value !== undefined) env[key] = value
 +      }
- 
-       const prompt = await input(args.prompt)
-       const config = await TuiConfig.get()
+       // 以 worker 角色 spawn 守护进程，index 入口旁路 yargs
+       const proc = deps.spawn([process.execPath, daemonFile], {
+         env: {
