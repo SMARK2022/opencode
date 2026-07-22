@@ -299,9 +299,9 @@ describe("tool.apply_patch freeform", () => {
     }),
   )
 
-  // 第二个 chunk 的 exact 文本只存在于 forward cursor 之前；matcher 必须继续失败，诊断也不能回显该文本。
-  // 位置提示来自 immutable 原文件，但不能把它误当成当前 working copy 中仍可替换的 actual。
-  it.instance("does not repeat an exact candidate before the patch cursor", () =>
+  // 乱序唯一 chunk 对 original 定位后应按位置统一成功，不再因 forward cursor 失败。
+  // 固定完整文件结果证明两处改动一次提交，而不是模型重试后只保留部分修改。
+  it.instance("applies unique out-of-order chunks in one update", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
       const { ctx } = makeCtx()
@@ -319,23 +319,14 @@ describe("tool.apply_patch freeform", () => {
         "*** End Patch",
       ].join("\n")
 
-      const exit = yield* execute({ patchText }, ctx).pipe(Effect.exit)
-      expect(Exit.isFailure(exit)).toBe(true)
-      if (Exit.isFailure(exit)) {
-        const error = Cause.squash(exit.cause) as Error
-        expect(error.message).toContain("Closest match at line 1")
-        expect(error.message).toContain("exists at this location in the original file")
-        expect(error.message).not.toContain("alpha")
-        expect((patchText + error.message).split("alpha").length - 1).toBe(1)
-      }
-      expect(yield* readText(target)).toBe("alpha\nmiddle\nomega\n")
+      yield* execute({ patchText }, ctx)
+      expect(yield* readText(target)).toBe("ALPHA\nMIDDLE\nomega\n")
     }),
   )
 
-  // CRLF 文件中的多行 candidate 与 Patch 的 LF expected 在 normalized 空间等价，不能再次回显 expected block。
-  // candidate 已位于 cursor 之前，测试同时锁定“原文件证据”与“当前步骤不可重用”的边界。
-  // 断言组合 patch input 和 error output，确保用户上下文中不会出现第二份 requested block。
-  it.instance("does not repeat a CRLF candidate before the patch cursor", () =>
+  // CRLF 原文同样支持乱序唯一 chunk；写回必须保留原换行风格。
+  // 该断言把匹配坐标与持久化行尾分开，防止 reverse apply 偷偷规范化为 LF。
+  it.instance("applies unique out-of-order chunks on CRLF files", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
       const { ctx } = makeCtx()
@@ -355,21 +346,13 @@ describe("tool.apply_patch freeform", () => {
         "*** End Patch",
       ].join("\n")
 
-      const exit = yield* execute({ patchText }, ctx).pipe(Effect.exit)
-      expect(Exit.isFailure(exit)).toBe(true)
-      if (Exit.isFailure(exit)) {
-        const error = Cause.squash(exit.cause) as Error
-        expect(error.message).toContain("exists at this location in the original file")
-        expect((patchText + error.message).split("alpha\n-beta").length - 1).toBe(1)
-        expect(error.message).not.toContain("alpha\nbeta")
-      }
-      expect(yield* readText(target)).toBe("alpha\r\nbeta\r\nmiddle\r\nomega\r\n")
+      yield* execute({ patchText }, ctx)
+      expect(yield* readText(target)).toBe("ALPHA\r\nBETA\r\nMIDDLE\r\nomega\r\n")
     }),
   )
 
-  // 前序 replacement 已从 working copy 消费 alpha；persisted candidate 只能解释原文件位置，不能猜测 cursor 原因。
-  // Tool input 有两个独立 `-alpha` 请求，result 不得制造第三份，且整个文件仍按单 hunk 原子失败。
-  it.instance("does not repeat an exact candidate consumed by a prior chunk", () =>
+  // 两个 chunk 争用同一 original span 必须原子失败；错误是 overlap，不是 cursor unavailable。
+  it.instance("rejects overlapping chunks for the same original span", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
       const { ctx } = makeCtx()
@@ -391,10 +374,8 @@ describe("tool.apply_patch freeform", () => {
       expect(Exit.isFailure(exit)).toBe(true)
       if (Exit.isFailure(exit)) {
         const error = Cause.squash(exit.cause) as Error
-        expect(error.message).toContain("Closest match at line 1")
-        expect(error.message).toContain("unavailable to the current patch step")
-        expect(error.message).not.toContain("alpha")
-        expect((patchText + error.message).split("alpha").length - 1).toBe(2)
+        expect(error.message).toContain("Overlapping expected lines")
+        expect(error.message).not.toContain("unavailable to the current patch step")
       }
       expect(yield* readText(target)).toBe("alpha\nomega\n")
     }),
@@ -633,6 +614,90 @@ describe("tool.apply_patch freeform", () => {
     }),
   )
 
+  // repeated Update File entries 也属于一个 proposal；先写后方 entry 不应阻断前方唯一 old block。
+  // Tool seam 覆盖 permission/mutation adapter，补足 owner 单测无法发现的 entry grouping 分叉。
+  // 一次 execute 的固定结果证明 permission 后仍只形成一个 FileChange 和一个 mutation commit。
+  it.instance("applies repeated update entries out of file order", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const target = path.join(test.directory, "repeated-order.txt")
+      yield* writeText(target, "alpha\nmiddle\nomega\n")
+      const patchText = [
+        "*** Begin Patch",
+        "*** Update File: repeated-order.txt",
+        "@@",
+        "-omega",
+        "+OMEGA",
+        "*** Update File: repeated-order.txt",
+        "@@",
+        "-alpha",
+        "+ALPHA",
+        "*** End Patch",
+      ].join("\n")
+
+      yield* execute({ patchText }, ctx)
+      expect(yield* readText(target)).toBe("ALPHA\nmiddle\nOMEGA\n")
+    }),
+  )
+
+  // 同文件 repeated entries 属于一个 original proposal；entry2 不能消费 entry1 在本次调用生成的文本。
+  // 失败前不写盘，防止 Tool grouping 保留旧 incremental working 成功路径。
+  // 错误必须来自 Patch locate owner，Tool 不能捕获后退回旧 entry-by-entry apply。
+  it.instance("rejects generated-text dependencies across repeated update entries", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const target = path.join(test.directory, "repeated-generated.txt")
+      yield* writeText(target, "alpha\nomega\n")
+      const patchText = [
+        "*** Begin Patch",
+        "*** Update File: repeated-generated.txt",
+        "@@",
+        "-alpha",
+        "+generated",
+        "*** Update File: repeated-generated.txt",
+        "@@",
+        "-generated",
+        "+wrong",
+        "*** End Patch",
+      ].join("\n")
+
+      yield* expectFailure(execute({ patchText }, ctx), "Failed to find expected lines")
+      expect(yield* readText(target)).toBe("alpha\nomega\n")
+    }),
+  )
+
+  // real source 与 symlink alias 必须归入同一 proposal，alias 拼写不能恢复 incremental generated-text 成功。
+  // 原文件不变同时证明 alias grouping 与单文件原子写入都在真实 Tool boundary 生效。
+  it.instance("rejects generated-text dependencies through a source alias", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const realDir = path.join(test.directory, "source-real")
+      const aliasDir = path.join(test.directory, "source-alias")
+      yield* makeDir(realDir)
+      yield* Effect.promise(() => fs.symlink(realDir, aliasDir))
+      const target = path.join(realDir, "source.txt")
+      yield* writeText(target, "alpha\nomega\n")
+      const patchText = [
+        "*** Begin Patch",
+        "*** Update File: source-real/source.txt",
+        "@@",
+        "-alpha",
+        "+generated",
+        "*** Update File: source-alias/source.txt",
+        "@@",
+        "-generated",
+        "+wrong",
+        "*** End Patch",
+      ].join("\n")
+
+      yield* expectFailure(execute({ patchText }, ctx), "Failed to find expected lines")
+      expect(yield* readText(target)).toBe("alpha\nomega\n")
+    }),
+  )
+
   it.instance("accepts canonical-equivalent repeated move destinations", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -858,9 +923,8 @@ EOF`
     }),
   )
 
-  // 空格与 Tab 仅在 trimEnd 后相等，完整旧块并不是文件中的字面 substring。
-  // Patch 必须失败并保留文件，防止 rstrip compatibility pass 重新成为第三种 success。
-  it.instance("rejects nonliteral trailing whitespace differences", () =>
+  // PI normalize 在 exact miss 后统一 trimEnd；空格与 Tab 行尾差异应落到唯一 whole-line replacement。
+  it.instance("applies a unique trailing-whitespace normalized match", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
       const { ctx } = makeCtx()
@@ -869,12 +933,12 @@ EOF`
 
       const patchText = "*** Begin Patch\n*** Update File: trailing_ws.txt\n@@\n-line2 \n+changed\n*** End Patch"
 
-      yield* expectFailure(execute({ patchText }, ctx), "Failed to find expected lines")
-      expect(yield* readText(target)).toBe("line1\nline2\t\n")
+      yield* execute({ patchText }, ctx)
+      expect(yield* readText(target)).toBe("line1\nchanged\n")
     }),
   )
 
-  // 两种缩进 trim 后相同但逐字不同，不能让 whole-line trim pass 抢在 substring failure 前成功。
+  // PI normalize 不 trimStart；两种前导缩进逐字不同，不能产生 whole-line success。
   // 真实 Tool 文件不变断言同时覆盖 owner error 到写入边界的原子性。
   it.instance("rejects nonliteral leading whitespace differences", () =>
     Effect.gen(function* () {
@@ -890,9 +954,8 @@ EOF`
     }),
   )
 
-  // Unicode punctuation normalization 改变了字面值，不能在 exact-only contract 中产生 replacement success。
-  // 失败提示可以展示可靠候选，但磁盘必须保持原 Unicode 引号和破折号。
-  it.instance("rejects Unicode-normalized matching", () =>
+  // exact miss 后，唯一 Unicode punctuation 等价行由同一 locator 规范化并替换。
+  it.instance("applies a unique Unicode-normalized whole-line match", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
       const { ctx } = makeCtx()
@@ -906,8 +969,23 @@ EOF`
       const patchText =
         '*** Begin Patch\n*** Update File: unicode.txt\n@@\n-He said "hello"\n+He said "hi"\n*** End Patch'
 
-      yield* expectFailure(execute({ patchText }, ctx), "Failed to find expected lines")
-      expect(yield* readText(target)).toBe(`He said ${leftQuote}hello${rightQuote}\nsome${emDash}dash\nend\n`)
+      yield* execute({ patchText }, ctx)
+      expect(yield* readText(target)).toBe(`He said "hi"\nsome${emDash}dash\nend\n`)
+    }),
+  )
+
+  // Tool 必须透传 Patch owner 的 normalized raw span；引号等价不能扩大为整行 replacement 或改写两侧文本。
+  it.instance("applies a unique Unicode-normalized proper substring", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const target = path.join(test.directory, "unicode_substring.txt")
+      yield* writeText(target, "prefix He said “hello” suffix\n")
+      const patchText =
+        '*** Begin Patch\n*** Update File: unicode_substring.txt\n@@\n-He said "hello"\n+fixed\n*** End Patch'
+
+      yield* execute({ patchText }, ctx)
+      expect(yield* readText(target)).toBe("prefix fixed suffix\n")
     }),
   )
 

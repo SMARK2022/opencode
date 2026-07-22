@@ -38,8 +38,8 @@ type FileChange = {
 
 type HunkGroup = { filePath: string; canonicalPath: string; hunks: Patch.Hunk[] }
 
-// group 代表一个最终 FileChange；它不是把多个 parser entry 当成一个 chunks 数组。
-// 这样既能一次 commit，也能保留每个 entry 的 Patch owner 语义。
+// group 代表一个 canonical source proposal；update entries 会合并 chunks，且只派生一个最终 FileChange。
+// add/delete 不合并，避免把同 source 的冲突操作猜成新语义。
 
 const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* (
   group: HunkGroup,
@@ -64,22 +64,19 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
       return { filePath: group.filePath, oldContent, newContent: next.text, type: "add" as const, diff, additions, deletions, bom: next.bom, expected: [snapshot] }
     }
     case "update": {
+      // canonical source 只读取一个 snapshot，定位与最终 Mutation expected 因而观察同一版本。
       const snapshot = yield* Mutation.read(afs, group.filePath)
       if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to update: ${group.filePath}`))
       // update 只接受 proposal read 观察到的 file state，目录和 missing 不进入 matcher 成功域。
       const source = Bom.split(Mutation.decode(snapshot))
-      // source BOM 随 working copy 传给 Patch owner，最终 BOM 仍由既有 Bom contract 决定。
       const oldContent = source.text
-      let working = Bom.join(source.text, source.bom)
       let movePath: string | undefined
       let moveCanonicalPath: string | undefined
+      let fileUpdate: ReturnType<typeof Patch.deriveNewContentsFromChunks>
       try {
-        // 每个 parsed Update File entry 独立调用 Patch owner；entry 之间才共享 working copy。
-        // 下一 entry 只接收上一 entry 的最终 content，entry 内部生成文本仍由 Patch owner 隔离。
-        for (const hunk of group.hunks) {
+        // canonical group 内全部 chunks 一次交给 Patch owner，entry2 不得读取 entry1 在本次 proposal 生成的文本。
+        const chunks = group.hunks.flatMap((hunk) => {
           if (hunk.type !== "update") throw new Error(`Conflicting operations for ${group.filePath}`)
-          const fileUpdate = Patch.deriveNewContentsFromChunks(group.filePath, hunk.chunks, working)
-          working = Bom.join(fileUpdate.content, fileUpdate.bom)
           if (hunk.move_path) {
             const nextMovePath = path.resolve(instance.directory, hunk.move_path)
             const nextMoveCanonicalPath = AppFileSystem.resolve(nextMovePath)
@@ -89,14 +86,14 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
             movePath = nextMovePath
             moveCanonicalPath = nextMoveCanonicalPath
           }
-        }
+          return hunk.chunks
+        })
+        fileUpdate = Patch.deriveNewContentsFromChunks(group.filePath, chunks, Bom.join(source.text, source.bom))
       } catch (error) {
-        // 每个 parsed entry 保留 Patch owner 的 cursor 边界；Tool 只丢弃 working copy，不运行第二套 matcher。
         return yield* Effect.fail(error instanceof Error ? error : new Error(String(error)))
       }
-      const next = Bom.split(working)
       const diffOld = normalizeLineEndings(oldContent)
-      const diffNew = normalizeLineEndings(next.text)
+      const diffNew = normalizeLineEndings(fileUpdate.content)
       const diff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, diffNew))
       const { additions, deletions } = countDiff(diffOld, diffNew)
       const expected = [snapshot]
@@ -107,7 +104,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
         if (destination.version.state === "other") throw new Error(`Path is not a file: ${movePath}`)
         expected.push(destination)
       }
-      return { filePath: group.filePath, oldContent, newContent: next.text, type: movePath ? "move" as const : "update" as const, movePath, diff, additions, deletions, bom: next.bom, expected }
+      return { filePath: group.filePath, oldContent, newContent: fileUpdate.content, type: movePath ? "move" as const : "update" as const, movePath, diff, additions, deletions, bom: fileUpdate.bom, expected }
     }
     case "delete": {
       if (group.hunks.length !== 1) throw new Error(`Conflicting operations for ${group.filePath}`)
@@ -136,6 +133,7 @@ function countDiff(oldContent: string, newContent: string) {
 }
 
 function groupHunks(hunks: Patch.Hunk[], instance: InstanceContext) {
+  // Tool 只拥有 filesystem identity 与 mutation boundary；old block 语义继续下沉给 Patch owner。
   const groups = new Map<string, HunkGroup>()
   for (const hunk of hunks) {
     const filePath = path.resolve(instance.directory, hunk.path)

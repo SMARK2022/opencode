@@ -4,7 +4,7 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import * as Log from "@opencode-ai/core/util/log"
 import * as Bom from "../util/bom"
 import { convertToLineEnding, detectLineEnding, splitLines } from "@/util/line-ending"
-import { closestWindow, lineOffset, locateExact, nextLineOffset } from "./match"
+import { closestWindow, lineOffset, locateContext, locateExact, nextLineOffset } from "./match"
 
 const log = Log.create({ service: "patch" })
 
@@ -342,81 +342,110 @@ export function deriveNewContentsFromChunks(
 }
 
 function applyChunks(originalLines: string[], filePath: string, chunks: UpdateFileChunk[], persistedText: string) {
-  // 所有变换只发生在局部 working copy；任一后续失败都会丢弃它，保持单文件原子性。
-  let lines = [...originalLines]
-  // terminal flag 只记录真实文件终止符，不能与最后一个空逻辑行合并成同一数组元素。
-  let terminated = persistedText.endsWith("\n") || persistedText.endsWith("\r")
-  let cursorOffset = 0
+  // 集合式编辑：全部对 immutable original 定位，成功后再按位置 reverse apply。
+  // 禁止 inter-chunk forward cursor 成功门闸，否则模型乱序唯一 chunk 会被误杀。
+  const terminated = persistedText.endsWith("\n") || persistedText.endsWith("\r")
+  const originalText = workingText(originalLines, terminated)
+  // originalText 是本 proposal 唯一坐标系；任何中间 replacement 都不会重新进入 locator。
   const insertions: string[][] = []
+  const replacements: Array<{ start: number; end: number; text: string }> = []
 
   for (const chunk of chunks) {
-    // 每个 chunk 都先验证 context；pure insertion 只跳过 old block，不能跳过公开的 @@ 约束。
+    // context 只约束本 chunk 的下界，不推进全局共享 cursor。
+    let searchFrom = 0
     if (chunk.change_context) {
-      const context = locateExact(lines, [chunk.change_context], cursorOffset, false, terminated)
+      // searchFrom 是 chunk-local 值，后方 chunk 的 context 不会消费前方 chunk 的搜索范围。
+      const context = locateContext(originalLines, [chunk.change_context], 0, terminated)
       if (context.type !== "found") {
-        // context 的零匹配与多匹配都不能继续，否则同一公开 @@ 字段会出现两套成功语义。
-        // Tool input 保留完整 @@ context；owner 错误只报告失败与 actual 证据，避免再次回显请求文本。
         throw new Error(withCandidate(`Failed to find context in ${filePath}.`, persistedText, chunk.change_context))
       }
-      const text = workingText(lines, terminated)
-      // 两种 location 都转换为包含行起点，再统一消费整行，避免 substring context 只前进到命中末尾。
-      const contextOffset = context.location.kind === "line"
-        ? lineOffset(lines, context.location.startLine)
-        : context.location.startOffset
-      cursorOffset = nextLineOffset(text, contextOffset)
+      const contextOffset =
+        context.location.kind === "line"
+          ? lineOffset(originalLines, context.location.startLine)
+          : context.location.startOffset
+      searchFrom = nextLineOffset(originalText, contextOffset)
     }
 
-    // 插入文本延后到所有匹配成功后统一追加，既不暴露给后续搜索，也能与删除全部原文自然组合。
+    // pure insertion 延后到所有 replacement 成功之后，避免成为后续 old 候选。
     if (chunk.old_lines.length === 0) {
+      // insertion 不占 original span，因此不能参与 overlap，也不能为后续 old block 制造候选。
       insertions.push(chunk.new_lines)
       continue
     }
 
-    const result = locateExact(lines, chunk.old_lines, cursorOffset, chunk.is_end_of_file, terminated)
+    const result = locateExact(originalLines, chunk.old_lines, searchFrom, chunk.is_end_of_file, terminated)
     if (result.type === "ambiguous") {
-      // ambiguity 的修正动作是补充 context；重复打印已在 Tool input 中的 old block 不增加决策信息。
       throw new Error(
         `Found multiple matches for expected lines in ${filePath}. Provide more context to make the match unique.`,
       )
     }
     if (result.type === "not-found") {
       const expected = chunk.old_lines.join("\n")
-      // Tool input 已携带完整 old block；错误正文只补充结果与 actual 证据，避免模型上下文出现第二份请求文本。
       throw new Error(withCandidate(`Failed to find expected lines in ${filePath}.`, persistedText, expected))
     }
 
-    if (result.location.kind === "line") {
-      // exact-line 保留 line splice，避免 generic content span 把整行删除退化为空行。
-      const startLine = result.location.startLine
-      lines.splice(startLine, result.location.endLine - startLine, ...chunk.new_lines)
-      if (lines.length === 0) terminated = false
-      // 纯删除停在存活边界；有 replacement 时越过全部新逻辑行，连零长度行也不能被后续重匹配。
-      const nextLine = startLine + chunk.new_lines.length
-      // EOF replacement 没有后继行起点，使用 text.length + 1 明确表示所有生成行均已消费。
-      cursorOffset = chunk.new_lines.length === 0
-        ? lineOffset(lines, startLine)
-        : nextLine < lines.length
-          ? lineOffset(lines, nextLine)
-          : workingText(lines, terminated).length + 1
-      continue
-    }
+    const span =
+      result.location.kind === "line"
+        ? {
+            start: lineOffset(originalLines, result.location.startLine),
+            end:
+              result.location.endLine < originalLines.length
+                ? lineOffset(originalLines, result.location.endLine)
+                : originalText.length,
+          }
+        : { start: result.location.startOffset, end: result.location.endOffset }
 
-    const text = workingText(lines, terminated)
-    const replacement = chunk.new_lines.join("\n")
-    // slice 只替换 exact literal range，首行前缀和末行后缀始终由原 working text 提供。
-    const next = text.slice(0, result.location.startOffset) + replacement + text.slice(result.location.endOffset)
-    // 字符替换只拥有命中的字面范围；重新分行时保留内部及边界空行，不把它们当作文件终止符丢弃。
-    terminated = next.endsWith("\n")
-    // substring splice 后重新分离 terminal 状态，后续完整 literal 才能继续区分 `foo` 与 `foo\n`。
-    lines = next === "" ? [] : next.split("\n")
-    if (terminated) lines.pop()
-    cursorOffset = result.location.startOffset + replacement.length
+    // whole-line 与 substring 都收成 original 上的 [start,end) 字符窗，便于重叠检测与 reverse apply。
+    // replacement 文本在定位期一并确定换行 ownership，apply 时不再重新解释 line kind。
+    const text =
+      result.location.kind === "line"
+        ? formatLineReplacement(chunk.new_lines, span, originalText, terminated)
+        : chunk.new_lines.join("\n")
+
+    replacements.push({ start: span.start, end: span.end, text })
   }
 
-  // 按 patch 顺序追加数组，让空文件、delete-all 和多 insertion 共用同一分隔符语义。
-  // 最终文件尾换行仍由 deriveNewContentsFromChunks 的既有逻辑统一补齐，避免双重 owner。
+  replacements.sort((left, right) => left.start - right.start)
+  // 只有所有定位都成功后才排序；任何 miss 都会在产生 working copy 之前终止整个文件 proposal。
+  for (let index = 1; index < replacements.length; index++) {
+    const previous = replacements[index - 1]
+    const current = replacements[index]
+    // 同 span 或嵌套必须拒绝：两个 chunk 不能争用同一段 original。
+    // 相邻半开区间不重叠，允许连续两行或同行相邻 substring 各自拥有自己的字符窗。
+    if (previous.start < current.end && current.start < previous.end) {
+      throw new Error(
+        `Overlapping expected lines in ${filePath}. Merge the edits or target disjoint regions.`,
+      )
+    }
+  }
+
+  let next = originalText
+  // 从后向前应用可保持所有较小 original offset 有效，不需要位置增量修正或第二套 cursor。
+  for (const replacement of [...replacements].reverse()) {
+    next = next.slice(0, replacement.start) + replacement.text + next.slice(replacement.end)
+  }
+
+  const nextTerminated = next.endsWith("\n")
+  let lines = next === "" ? [] : next.split("\n")
+  if (nextTerminated) lines.pop()
+
+  // 按 patch 顺序追加 pure insertion，与 delete-all + insert 组合共享 EOF 语义。
   for (const insertion of insertions) lines.push(...insertion)
   return lines
+}
+
+function formatLineReplacement(
+  newLines: string[],
+  span: { start: number; end: number },
+  originalText: string,
+  terminated: boolean,
+) {
+  // whole-line range 的 end 通常落在下一行起点（含旧行尾 LF）；空替换删除整行窗口。
+  if (newLines.length === 0) return ""
+  const body = newLines.join("\n")
+  if (span.end < originalText.length) return `${body}\n`
+  if (terminated && span.end === originalText.length && originalText.endsWith("\n")) return `${body}\n`
+  return body
 }
 
 function workingText(lines: string[], terminated: boolean) {
@@ -458,6 +487,43 @@ function generateUnifiedDiff(oldContent: string, newContent: string): string {
   return hasChanges ? diff : ""
 }
 
+function groupUpdateHunks(hunks: Hunk[], resolvePath: (path: string) => string): Hunk[] {
+  // 只聚合同 source 全为 update 的 proposal；mixed add/delete 维持既有操作顺序，不扩张本任务语义。
+  // 第一遍先盘点 operation type，防止第二遍提前合并 update 后跨过中间 add/delete。
+  const types = new Map<string, Set<Hunk["type"]>>()
+  for (const hunk of hunks) {
+    const key = resolvePath(hunk.path)
+    const value = types.get(key) ?? new Set<Hunk["type"]>()
+    value.add(hunk.type)
+    types.set(key, value)
+  }
+
+  const updates = new Map<string, Extract<Hunk, { type: "update" }>>()
+  return hunks.flatMap((hunk): Hunk[] => {
+    if (hunk.type !== "update") return [hunk]
+    const key = resolvePath(hunk.path)
+    if (types.get(key)?.size !== 1) return [hunk]
+    const existing = updates.get(key)
+    if (!existing) {
+      // clone chunks 避免 proposal grouping 改写 parser 产物，其他 consumer 仍可安全读取原 hunks。
+      const grouped = { ...hunk, chunks: [...hunk.chunks] }
+      updates.set(key, grouped)
+      return [grouped]
+    }
+
+    if (hunk.move_path) {
+      // move destination 也按 consumer 提供的 canonical resolver 比较，alias 不应制造虚假冲突。
+      if (existing.move_path && resolvePath(existing.move_path) !== resolvePath(hunk.move_path)) {
+        throw new Error(`Conflicting move destinations for ${hunk.path}`)
+      }
+      existing.move_path ??= hunk.move_path
+    }
+    // 只合并 parser 已确认的 chunks；定位、唯一与重叠仍由唯一 Patch owner 负责。
+    existing.chunks.push(...hunk.chunks)
+    return []
+  })
+}
+
 // Apply hunks to filesystem
 export const applyHunksToFiles = Effect.fn("Patch.applyHunksToFiles")(function* (hunks: Hunk[]) {
   if (hunks.length === 0) {
@@ -470,7 +536,8 @@ export const applyHunksToFiles = Effect.fn("Patch.applyHunksToFiles")(function* 
   const modified: string[] = []
   const deleted: string[] = []
 
-  for (const hunk of hunks) {
+  // direct apply 与 verified preview 共用此 grouping 契约，避免相同 patch 在 consumer 间分叉。
+  for (const hunk of groupUpdateHunks(hunks, AppFileSystem.resolve)) {
     switch (hunk.type) {
       case "add": {
         yield* fs.writeWithDirs(hunk.path, hunk.contents)
@@ -545,8 +612,12 @@ export const maybeParseApplyPatchVerified = Effect.fn("Patch.maybeParseApplyPatc
       const args = result.args
       const effectiveCwd = args.workdir ? path.resolve(cwd, args.workdir) : cwd
       const changes = new Map<string, ApplyPatchFileChange>()
+      const groupedHunks = groupUpdateHunks(
+        args.hunks,
+        (filePath) => AppFileSystem.resolve(path.resolve(effectiveCwd, filePath)),
+      )
 
-      for (const hunk of args.hunks) {
+      for (const hunk of groupedHunks) {
         const resolvedPath = path.resolve(
           effectiveCwd,
           hunk.type === "update" && hunk.move_path ? hunk.move_path : hunk.path,

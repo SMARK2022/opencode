@@ -141,25 +141,16 @@ describe("Patch namespace", () => {
       expect(result.content).toBe("before one\ntwo after\n")
     })
 
-    // rstrip、trim、Unicode normalization 和 trailing-empty 缩短都不是字面成功。
-    // 每个输入都在旧实现中可达，失败断言防止兼容 pass 悄悄回流。
-    test("rejects nonliteral and shortened old blocks", () => {
-      const cases = [
-        { content: "value\t\n", old: ["value "], name: "trailing whitespace" },
-        { content: "\tvalue\n", old: ["  value"], name: "trimmed whitespace" },
-        { content: "He said “hello”\n", old: ['He said "hello"'], name: "Unicode punctuation" },
-        { content: "foo", old: ["foo", ""], name: "trailing empty line" },
-      ]
-
-      for (const item of cases) {
-        expect(() =>
-          Patch.deriveNewContentsFromChunks(
-            item.name,
-            [{ old_lines: item.old, new_lines: ["changed"] }],
-            item.content,
-          ),
-        ).toThrow("Failed to find expected lines")
-      }
+    // trailing-empty 缩短仍不是完整字面/ fuzzy whole-line 成功域：无终止符的 foo 不能匹配 ["foo",""]。
+    // 空白与 Unicode whole-line fuzzy 由独立正向用例锁定，这里只保留仍应失败的 shortened 形状。
+    test("rejects shortened trailing-empty old blocks", () => {
+      expect(() =>
+        Patch.deriveNewContentsFromChunks(
+          "trailing empty line",
+          [{ old_lines: ["foo", ""], new_lines: ["changed"] }],
+          "foo",
+        ),
+      ).toThrow("Failed to find expected lines")
     })
 
     // 文件真实终止 LF 属于 current working text，完整 old block `foo\n` 应能唯一命中。
@@ -176,6 +167,7 @@ describe("Patch namespace", () => {
 
     // cursor 以第一次 replacement 后的 current text 为坐标，允许同一存活行继续向右匹配。
     // 两个修改必须同时保留；退回 whole-line tuple 会拒绝第二个或覆盖第一个。
+    // 同行多个唯一 substring 按位置统一应用；顺序与乱序由其它用例分别锁定。
     test("composes ordered substring chunks on the same line", () => {
       const result = Patch.deriveNewContentsFromChunks(
         "fixture.txt",
@@ -189,8 +181,254 @@ describe("Patch namespace", () => {
       expect(result.content).toBe("abcXghiY\n")
     })
 
-    // 后续 chunk 只能搜索前一 replacement 之后的存活原文，不能重新消费生成文本。
-    // 整个 working copy 在失败时被丢弃，因此 owner 不会泄漏第一步的局部成功。
+    // 多 chunk 对原始文件独立定位后按位置统一应用；patch 内顺序可以晚于文件顺序。
+    // 这锁住 Session 里 “先改后面再改前面” 仍应一次成功的用户症状，而不是拆多次 tool 调用。
+    test("applies unique out-of-order whole-line chunks against the original file", () => {
+      const result = Patch.deriveNewContentsFromChunks(
+        "multi.txt",
+        [
+          { old_lines: ["e"], new_lines: ["E"] },
+          { old_lines: ["b"], new_lines: ["B"] },
+        ],
+        "a\nb\nc\nd\ne\nf\n",
+      )
+
+      expect(result.content).toBe("a\nB\nc\nd\nE\nf\n")
+    })
+
+    // 每个 @@ context 都只约束自己的 chunk；后方 context 不能推进共享 cursor 并屏蔽前方目标。
+    // 固定最终文本同时证明 context 行未被替换，两个 old block 也没有按 patch 顺序增量消费。
+    test("applies out-of-order chunks with independent change contexts", () => {
+      const result = Patch.deriveNewContentsFromChunks(
+        "context-order.txt",
+        [
+          { change_context: "section-b", old_lines: ["last"], new_lines: ["LAST"] },
+          { change_context: "section-a", old_lines: ["first"], new_lines: ["FIRST"] },
+        ],
+        "section-a\nfirst\ngap\nsection-b\nlast\n",
+      )
+
+      expect(result.content).toBe("section-a\nFIRST\ngap\nsection-b\nLAST\n")
+    })
+
+    // 同行两个唯一 substring 即使在 patch 中颠倒顺序，也必须落到同一最终字面结果。
+    test("applies unique out-of-order substring chunks on the same line", () => {
+      const result = Patch.deriveNewContentsFromChunks(
+        "fixture.txt",
+        [
+          { old_lines: ["JKL"], new_lines: ["Y"] },
+          { old_lines: ["DEF"], new_lines: ["X"] },
+        ],
+        "abcDEFghiJKL",
+      )
+
+      expect(result.content).toBe("abcXghiY\n")
+    })
+
+    // 整行命中也必须全局唯一；取第一处会掩盖模型漏掉的重复结构。
+    test("rejects ambiguous whole-line matches", () => {
+      expect(() =>
+        Patch.deriveNewContentsFromChunks(
+          "fixture.txt",
+          [{ old_lines: ["dup"], new_lines: ["fixed"] }],
+          "dup\nother\ndup\n",
+        ),
+      ).toThrow("Found multiple matches")
+    })
+
+    // exact whole-line 是优先候选层；另一更长行内的同 literal 只属于低层 substring，不能造成旧成功域退化。
+    // 固定结果同时证明外围行未被修改，Session 中 outer/inner while 的缩进形状不会再被误判。
+    test("preserves a unique exact whole-line match when the literal is nested elsewhere", () => {
+      const result = Patch.deriveNewContentsFromChunks(
+        "nested-literal.txt",
+        [{ old_lines: ["  target"], new_lines: ["fixed"] }],
+        "prefix  target suffix\n  target\n",
+      )
+
+      expect(result.content).toBe("prefix  target suffix\nfixed\n")
+    })
+
+    // 两个 chunk 指向同一原文 span 时必须失败且不产生部分成功内容。
+    // 明确断言 overlap 文案，避免实现退回偶然的 cursor unavailable 或任取一个 replacement。
+    test("rejects overlapping replacements for the same original span", () => {
+      expect(() =>
+        Patch.deriveNewContentsFromChunks(
+          "fixture.txt",
+          [
+            { old_lines: ["alpha"], new_lines: ["consumed"] },
+            { old_lines: ["alpha"], new_lines: ["wrong"] },
+          ],
+          "alpha\nomega\n",
+        ),
+      ).toThrow("Overlapping expected lines")
+    })
+
+    // PI normalize 只移除行尾空白，并覆盖 NFKC、特殊空格与常见标点；不得忽略前导缩进。
+    // 固定字面矩阵防止实现只覆盖其中一种转换却声称与 PI 对齐。
+    test("accepts PI-normalized whole-line matches after exact failure", () => {
+      expect(
+        Patch.deriveNewContentsFromChunks(
+          "trailing.txt",
+          [{ old_lines: ["value "], new_lines: ["changed"] }],
+          "value\t\n",
+        ).content,
+      ).toBe("changed\n")
+      expect(
+        Patch.deriveNewContentsFromChunks(
+          "unicode.txt",
+          [{ old_lines: ['He said "hello"'], new_lines: ["ok"] }],
+          "He said “hello”\n",
+        ).content,
+      ).toBe("ok\n")
+      expect(
+        Patch.deriveNewContentsFromChunks(
+          "nfkc.txt",
+          [{ old_lines: ["Hello"], new_lines: ["ok"] }],
+          "Ｈｅｌｌｏ\n",
+        ).content,
+      ).toBe("ok\n")
+      expect(
+        Patch.deriveNewContentsFromChunks(
+          "space.txt",
+          [{ old_lines: ["alpha beta"], new_lines: ["ok"] }],
+          "alpha\u00a0beta\n",
+        ).content,
+      ).toBe("ok\n")
+      expect(() =>
+        Patch.deriveNewContentsFromChunks(
+          "leading.txt",
+          [{ old_lines: ["  value"], new_lines: ["changed"] }],
+          "\tvalue\n",
+        ),
+      ).toThrow("Failed to find expected lines")
+      expect(
+        Patch.deriveNewContentsFromChunks(
+          "substring-first.txt",
+          [{ old_lines: ["value"], new_lines: ["changed"] }],
+          "value\t\n",
+        ).content,
+      ).toBe("changed\t\n")
+    })
+
+    // normalized proper substring 必须回到 original 连续 span；PI 等价引号只改变候选，不拥有行内前后缀。
+    // 断言保留 prefix/suffix，防止实现复制 PI 的 touched-line normalized writeback 而污染未提交字节。
+    test("preserves surrounding text for a unique normalized proper substring", () => {
+      const result = Patch.deriveNewContentsFromChunks(
+        "normalized-substring.txt",
+        [{ old_lines: ['He said "hello"'], new_lines: ["fixed"] }],
+        "prefix He said “hello” suffix\n",
+      )
+
+      expect(result.content).toBe("prefix fixed suffix\n")
+    })
+
+    // normalized start/end 只能落在 raw grapheme boundary；组合字符与完整 compatibility expansion 都应拥有完整原文。
+    // 这些固定结果会击穿按 normalized UTF-16 offset 直接切 raw text 的错误实现。
+    // 完整 ligature 可映射而半个 expansion 不可映射，区分“可连续拥有”与“看起来相似”。
+    test("maps normalized proper substrings to complete raw grapheme spans", () => {
+      expect(
+        Patch.deriveNewContentsFromChunks(
+          "decomposed.txt",
+          [{ old_lines: ["Å"], new_lines: ["X"] }],
+          "prefix A\u030A tail\n",
+        ).content,
+      ).toBe("prefix X tail\n")
+      expect(
+        Patch.deriveNewContentsFromChunks(
+          "ligature.txt",
+          [{ old_lines: ["ffi"], new_lines: ["X"] }],
+          "prefix ﬃ tail\n",
+        ).content,
+      ).toBe("prefix X tail\n")
+      expect(() =>
+        Patch.deriveNewContentsFromChunks(
+          "partial-expansion.txt",
+          [{ old_lines: ["f"], new_lines: ["X"] }],
+          "lead ﬁ tail\n",
+        ),
+      ).toThrow("Failed to find expected lines")
+    })
+
+    // 无法映回 raw boundary 的 normalized occurrence 仍参与全局唯一性；不能忽略它后误写另一处 exact span。
+    // 该候选虽不能写回，但仍证明模型 old block 在 normalized 域并不唯一。
+    test("rejects a safe match when another normalized occurrence cuts a grapheme expansion", () => {
+      expect(() =>
+        Patch.deriveNewContentsFromChunks(
+          "mixed-boundary.txt",
+          [{ old_lines: ["f"], new_lines: ["X"] }],
+          "f and ﬁ\n",
+        ),
+      ).toThrow("Found multiple matches")
+    })
+
+    // normalized proper substring 仍遵守完整 old block 的全局唯一性，并能跨无 trim gap 的换行映回连续 raw span。
+    // multiline 固定结果证明首行前缀与末行后缀都不属于 normalized replacement ownership。
+    test("enforces uniqueness and multiline boundaries for normalized substrings", () => {
+      expect(() =>
+        Patch.deriveNewContentsFromChunks(
+          "normalized-duplicates.txt",
+          [{ old_lines: ['"hello"'], new_lines: ["fixed"] }],
+          "first “hello” then “hello”\n",
+        ),
+      ).toThrow("Found multiple matches")
+      expect(
+        Patch.deriveNewContentsFromChunks(
+          "normalized-multiline.txt",
+          [{ old_lines: ['"alpha', 'beta"'], new_lines: ["one", "two"] }],
+          "before “alpha\nbeta” after\n",
+        ).content,
+      ).toBe("before one\ntwo after\n")
+    })
+
+    // 一个 exact 行与另一个 PI-normalized 等价行属于两个候选，exact 不能绕过全局唯一性。
+    // 两者同属 whole-line active tier，因此不能借 lower-tier 规则选中 ASCII 第一处。
+    test("rejects exact matches with another normalized-equivalent candidate", () => {
+      expect(() =>
+        Patch.deriveNewContentsFromChunks(
+          "normalized-ambiguous.txt",
+          [{ old_lines: ['He said "hello"'], new_lines: ["ok"] }],
+          'He said "hello"\nHe said “hello”\n',
+        ),
+      ).toThrow("Found multiple matches")
+    })
+
+    // context 保留 first eligible 整行契约；重复 context 不应继承 old-block 的全局唯一拒绝。
+    // context 只缩小当前 old block 的搜索域，本身不是 replacement candidate。
+    test("preserves repeated whole-line context when the old block is unique", () => {
+      const result = Patch.deriveNewContentsFromChunks(
+        "context.txt",
+        [{ change_context: "section", old_lines: ["target"], new_lines: ["fixed"] }],
+        "section\nx\nsection\ntarget\n",
+      )
+
+      expect(result.content).toBe("section\nx\nsection\nfixed\n")
+    })
+
+    // EOF 只能在全局唯一已证明后影响定位；末尾候选不能掩盖文件前方的第二个完整候选。
+    // anchor 表达位置偏好而非歧义选择器，否则同一 old block 会因标记存在而静默猜测。
+    test("rejects ambiguous complete blocks even when one occurrence is at EOF", () => {
+      expect(() =>
+        Patch.deriveNewContentsFromChunks(
+          "eof.txt",
+          [{ old_lines: ["marker"], new_lines: ["fixed"], is_end_of_file: true }],
+          "marker\nother\nmarker\n",
+        ),
+      ).toThrow("Found multiple matches")
+    })
+
+    // fuzzy 不得抢在 exact 字面子串之前，否则会吞掉调用方未提交的行内空格。
+    test("prefers exact substring over fuzzy whole-line when both could apply", () => {
+      const result = Patch.deriveNewContentsFromChunks(
+        "fixture.txt",
+        [{ old_lines: ["CDEFG"], new_lines: ["fixed"] }],
+        "  CDEFG  \n",
+      )
+
+      expect(result.content).toBe("  fixed  \n")
+    })
+
+    // 全部对 original 定位，因此后续 chunk 不能消费前序生成文本。
+    // 失败发生在统一 apply 前，保证第一块成功定位也不会泄漏成部分文件结果。
     test("does not rematch text introduced by an earlier chunk", () => {
       expect(() =>
         Patch.deriveNewContentsFromChunks(
@@ -204,8 +442,7 @@ describe("Patch namespace", () => {
       ).toThrow("Failed to find expected lines")
     })
 
-    // 零长度内容仍会生成一个逻辑行，cursor 不能因 replacement 字符数为零而停在该行起点。
-    // 第二个 chunk 若能匹配这个空行，就违反了与非空 generated text 相同的隔离契约。
+    // 空行替换同样不得让第二 chunk 命中生成的空逻辑行。
     test("does not rematch an empty line introduced by an earlier chunk", () => {
       expect(() =>
         Patch.deriveNewContentsFromChunks(
@@ -221,6 +458,7 @@ describe("Patch namespace", () => {
 
     // 整行删除继续使用 line splice，不能把被删行留下成一个空逻辑行。
     // 首、中、末、唯一及多行 block 覆盖所有相邻分隔符位置。
+    // 这些位置共同锁住半开 span 对换行分隔符的 ownership，避免 reverse slice 留双换行。
     test("preserves exact-line deletion semantics", () => {
       const cases = [
         { content: "a\nb\nc\n", old: ["a"], expected: "b\nc\n" },
@@ -242,6 +480,7 @@ describe("Patch namespace", () => {
 
     // pure insertion 是 EOF 行操作：多个 block 保持 patch 顺序，且空文件没有前导空行。
     // 追加动作在匹配全部成功后发生，因此不会成为后续 chunk 的候选文本。
+    // 空文件与非空文件共享同一数组追加契约，最终终止换行仍由 derive owner 统一补齐。
     test("preserves pure insertion order for empty and nonempty files", () => {
       const chunks = [
         { old_lines: [], new_lines: ["beta"] },
@@ -392,6 +631,70 @@ PATCH`
         }
       }),
     )
+
+    // verified preview 必须把同一 canonical source 的 repeated entries 合成一个完整 new_content。
+    // 后一个 Map.set 覆盖前一个完整文件结果会静默丢失修改，因此这里直接断言两个独立结果。
+    // 单一 change key 与双修改内容一起证明 grouping 同时解决 identity 和 overwrite 两类分叉。
+    it.live("combines repeated update entries against one original file", () =>
+      Effect.gen(function* () {
+        const filePath = path.join(tempDir, "verified-repeated.txt")
+        yield* Effect.promise(() => fs.writeFile(filePath, "alpha\nmiddle\nomega\n"))
+        const patchText = "*** Begin Patch\n*** Update File: verified-repeated.txt\n@@\n-omega\n+OMEGA\n*** Update File: verified-repeated.txt\n@@\n-alpha\n+ALPHA\n*** End Patch"
+
+        const result = yield* Patch.maybeParseApplyPatchVerified(["apply_patch", patchText], tempDir)
+
+        expect(result.type).toBe(Patch.MaybeApplyPatchVerified.Body)
+        if (result.type === Patch.MaybeApplyPatchVerified.Body) {
+          expect(result.action.changes).toHaveLength(1)
+          const change = result.action.changes.get(filePath)
+          expect(change?.type).toBe("update")
+          if (change?.type === "update") expect(change.new_content).toBe("ALPHA\nmiddle\nOMEGA\n")
+        }
+      }),
+    )
+
+    // verified 只返回校验结果但仍须执行 original-only：entry2 依赖生成文本时必须是 CorrectnessError。
+    // 此 seam 不写盘，故错误类型而非文件副作用是 consumer parity 的直接可观察结果。
+    // CorrectnessError 还证明 preview 没有用前一 entry 的 new_content 合成第二次成功定位。
+    it.live("rejects generated-text dependencies across repeated entries in verified preview", () =>
+      Effect.gen(function* () {
+        const filePath = path.join(tempDir, "verified-generated.txt")
+        yield* Effect.promise(() => fs.writeFile(filePath, "alpha\nomega\n"))
+        const patchText = "*** Begin Patch\n*** Update File: verified-generated.txt\n@@\n-alpha\n+generated\n*** Update File: verified-generated.txt\n@@\n-generated\n+wrong\n*** End Patch"
+
+        const result = yield* Patch.maybeParseApplyPatchVerified(["apply_patch", patchText], tempDir)
+
+        expect(result.type).toBe(Patch.MaybeApplyPatchVerified.CorrectnessError)
+        if (result.type === Patch.MaybeApplyPatchVerified.CorrectnessError) {
+          expect(result.error.message).toContain("Failed to find expected lines")
+        }
+      }),
+    )
+
+    // canonical identity 而非 lexical path 决定 proposal；symlink alias 不能生成第二个 full-file change。
+    // changes 长度锁住 identity 聚合，固定 new_content 锁住两个 entry 均未被 Map 覆盖丢失。
+    // realpath 归并必须发生在读取与 changes.set 前，事后合并两个完整结果无法恢复丢失的修改。
+    it.live("combines canonical-equivalent source aliases in verified preview", () =>
+      Effect.gen(function* () {
+        const realDir = path.join(tempDir, "verified-real")
+        const aliasDir = path.join(tempDir, "verified-alias")
+        yield* Effect.promise(() => fs.mkdir(realDir))
+        yield* Effect.promise(() => fs.symlink(realDir, aliasDir))
+        const filePath = path.join(realDir, "source.txt")
+        yield* Effect.promise(() => fs.writeFile(filePath, "alpha\nmiddle\nomega\n"))
+        const patchText = "*** Begin Patch\n*** Update File: verified-real/source.txt\n@@\n-omega\n+OMEGA\n*** Update File: verified-alias/source.txt\n@@\n-alpha\n+ALPHA\n*** End Patch"
+
+        const result = yield* Patch.maybeParseApplyPatchVerified(["apply_patch", patchText], tempDir)
+
+        expect(result.type).toBe(Patch.MaybeApplyPatchVerified.Body)
+        if (result.type === Patch.MaybeApplyPatchVerified.Body) {
+          expect(result.action.changes).toHaveLength(1)
+          const change = result.action.changes.get(filePath)
+          expect(change?.type).toBe("update")
+          if (change?.type === "update") expect(change.new_content).toBe("ALPHA\nmiddle\nOMEGA\n")
+        }
+      }),
+    )
   })
 
   describe("applyPatch", () => {
@@ -456,6 +759,75 @@ PATCH`
 
         const content = yield* Effect.promise(() => fs.readFile(filePath, "utf-8"))
         expect(content).toBe("line 1\nline 2 updated\nline 3\n")
+      }),
+    )
+
+    // direct consumer 先聚合同 source entries，再一次对 original 派生；文件顺序不再成为成功门闸。
+    // modified 只出现一次也证明 direct apply 没有恢复逐 entry 写盘和重读的旧路径。
+    // 固定最终文件同时验证 reverse apply 使用 original offsets，而非按 entry 顺序修正位置。
+    it.live("applies repeated update entries out of file order", () =>
+      Effect.gen(function* () {
+        const filePath = path.join(tempDir, "direct-repeated.txt")
+        yield* Effect.promise(() => fs.writeFile(filePath, "alpha\nmiddle\nomega\n"))
+        const patchText = `*** Begin Patch\n*** Update File: ${filePath}\n@@\n-omega\n+OMEGA\n*** Update File: ${filePath}\n@@\n-alpha\n+ALPHA\n*** End Patch`
+
+        const result = yield* Patch.applyPatch(patchText)
+
+        expect(result.modified).toEqual([filePath])
+        expect(yield* Effect.promise(() => fs.readFile(filePath, "utf-8"))).toBe("ALPHA\nmiddle\nOMEGA\n")
+      }),
+    )
+
+    // direct Patch consumer 与 Tool/verified 共用 original-only proposal；entry2 不得消费 entry1 生成文本。
+    // 文件未变断言把 locate failure 与 direct filesystem atomicity 绑定在同一公开 seam。
+    it.live("rejects generated-text dependencies across repeated update entries", () =>
+      Effect.gen(function* () {
+        const filePath = path.join(tempDir, "direct-generated.txt")
+        yield* Effect.promise(() => fs.writeFile(filePath, "alpha\nomega\n"))
+        const patchText = `*** Begin Patch
+*** Update File: ${filePath}
+@@
+-alpha
++generated
+*** Update File: ${filePath}
+@@
+-generated
++wrong
+*** End Patch`
+
+        const exit = yield* Effect.exit(Patch.applyPatch(patchText))
+
+        expect(exit._tag).toBe("Failure")
+        expect(yield* Effect.promise(() => fs.readFile(filePath, "utf-8"))).toBe("alpha\nomega\n")
+      }),
+    )
+
+    // direct consumer 也必须按 realpath 聚合同一物理 source，不能让 symlink 拼写绕过 original-only。
+    // 文件保持原文证明失败发生在统一 derive 之前，第一 entry 没有先通过 alias 写盘。
+    // alias entry 若被当成第二文件会错误消费 generated；该测试因此对 canonical grouping 敏感。
+    it.live("rejects generated-text dependencies through a source alias", () =>
+      Effect.gen(function* () {
+        const realDir = path.join(tempDir, "direct-real")
+        const aliasDir = path.join(tempDir, "direct-alias")
+        yield* Effect.promise(() => fs.mkdir(realDir))
+        yield* Effect.promise(() => fs.symlink(realDir, aliasDir))
+        const filePath = path.join(realDir, "source.txt")
+        yield* Effect.promise(() => fs.writeFile(filePath, "alpha\nomega\n"))
+        const patchText = `*** Begin Patch
+*** Update File: ${filePath}
+@@
+-alpha
++generated
+*** Update File: ${path.join(aliasDir, "source.txt")}
+@@
+-generated
++wrong
+*** End Patch`
+
+        const exit = yield* Effect.exit(Patch.applyPatch(patchText))
+
+        expect(exit._tag).toBe("Failure")
+        expect(yield* Effect.promise(() => fs.readFile(filePath, "utf-8"))).toBe("alpha\nomega\n")
       }),
     )
 

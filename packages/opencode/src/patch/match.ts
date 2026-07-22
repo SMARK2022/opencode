@@ -1,4 +1,7 @@
 import { diffChars } from "diff"
+import { normalizeForMatch } from "../tool/edit-apply"
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" })
 
 export type ExactLocation =
   | { kind: "line"; startLine: number; endLine: number }
@@ -24,8 +27,9 @@ export function nextLineOffset(text: string, offset: number) {
   return newline === -1 ? text.length : newline + 1
 }
 
-// 成功域只有两层：完整整行窗口优先，其后才搜索完整旧块的唯一字面 occurrence。
-// 诊断相似度绝不能进入这里，否则会把提示算法重新变成隐式 replacement fallback。
+// old block 的成功域由一个候选清单决定：exact literal 与 PI-normalized whole-line 共同参与唯一性。
+// exact 只决定替换精度，不能跳过 normalized-equivalent 第二候选；诊断相似度永远不进入写路径。
+// fuzzy 只产生 whole-line 候选，避免规范化后用 substring 吞掉未由 old block 拥有的外围字符。
 export function locateExact(
   lines: string[],
   pattern: string[],
@@ -34,10 +38,12 @@ export function locateExact(
   terminated = false,
 ): ExactResult {
   if (pattern.length === 0) return { type: "not-found" }
+  // EOF 只能在唯一候选已成立后表达位置偏好；全局唯一契约下无需另设提前成功分支。
+  void eof
 
-  // 单次累计全部行起点，避免大文件诊断前的 exact scan 因重复 slice/reduce 退化为二次复杂度。
   const starts: number[] = []
   let offset = 0
+  // 所有 offset 都属于 immutable original；apply 阶段才能按这些坐标反向改副本。
   for (const line of lines) {
     starts.push(offset)
     offset += line.length + 1
@@ -45,37 +51,202 @@ export function locateExact(
   // cursor 落在一行内部时该行已被部分消费，whole-line 分支只能从下一个完整行起点继续。
   const firstEligibleLine = starts.findIndex((offset) => offset >= cursorOffset)
   const startLine = firstEligibleLine === -1 ? lines.length : firstEligibleLine
-  const matchesAt = (index: number) =>
-    index >= startLine &&
-    index + pattern.length <= lines.length &&
-    pattern.every((line, patternIndex) => lines[index + patternIndex] === line)
-
-  // EOF 只改变精确整行分支的优先位置，不能放宽后续 substring 的唯一性。
-  const fromEnd = lines.length - pattern.length
-  if (eof && matchesAt(fromEnd)) {
-    return { type: "found", location: { kind: "line", startLine: fromEnd, endLine: lines.length } }
+  const text = lines.join("\n") + (terminated && lines.length > 0 ? "\n" : "")
+  const literal = pattern.join("\n")
+  const exactLineByOffset = new Map<number, number>()
+  // 此 Map 只给 literal occurrence 标注整行身份，不能另添一个重复候选影响唯一性计数。
+  for (let index = startLine; index <= lines.length - pattern.length; index++) {
+    if (pattern.every((line, patternIndex) => lines[index + patternIndex] === line)) {
+      exactLineByOffset.set(starts[index], index)
+    }
   }
-  for (let index = startLine; index <= fromEnd; index++) {
-    if (matchesAt(index)) {
+
+  const normalizedPattern = pattern.map(normalizeLineForFuzzy)
+  const lineCandidates: Array<{ location: ExactLocation; start: number; end: number }> = []
+  for (const [start, index] of exactLineByOffset) {
+    lineCandidates.push({
+      location: { kind: "line", startLine: index, endLine: index + pattern.length },
+      start,
+      end: index + pattern.length < lines.length ? starts[index + pattern.length] : text.length,
+    })
+  }
+
+  // exact whole-line 激活优先层；其它 normalized whole-line 仍须进入同层唯一性证明。
+  for (let index = startLine; index <= lines.length - pattern.length; index++) {
+    if (!normalizedPattern.every((line, patternIndex) => normalizeLineForFuzzy(lines[index + patternIndex]) === line)) {
+      continue
+    }
+    const start = starts[index]
+    const end = index + pattern.length < lines.length ? starts[index + pattern.length] : text.length
+    if (exactLineByOffset.has(start)) continue
+    lineCandidates.push({
+      location: { kind: "line", startLine: index, endLine: index + pattern.length },
+      start,
+      end,
+    })
+  }
+
+  // proper substring 是 lower tier；只要存在 exact whole-line，就不能反向否决该既有成功域。
+  if (exactLineByOffset.size > 0) {
+    if (lineCandidates.length > 1) return { type: "ambiguous" }
+    return { type: "found", location: lineCandidates[0].location }
+  }
+
+  const candidates: Array<{ location: ExactLocation; start: number; end: number }> = []
+  if (literal.length > 0) {
+    // exact occurrence 从下一字符继续，重叠 occurrence 也必须参与 fallback tier 的全局唯一性。
+    for (let start = text.indexOf(literal, cursorOffset); start !== -1; start = text.indexOf(literal, start + 1)) {
+      candidates.push({
+        location: { kind: "substring", startOffset: start, endOffset: start + literal.length },
+        start,
+        end: start + literal.length,
+      })
+    }
+  }
+  for (const candidate of lineCandidates) {
+    // 同一 normalized 行窗内已有 exact occurrence 时保留精确 span，避免吞掉外围空白。
+    if (candidates.some((exact) => exact.start >= candidate.start && exact.end <= candidate.end)) continue
+    candidates.push(candidate)
+  }
+
+  const normalized = normalizedRawView(text)
+  const normalizedLiteral = normalizeForMatch(literal)
+  let unsafeNormalized = 0
+  if (normalized && normalizedLiteral.length > 0) {
+    for (
+      let start = normalized.text.indexOf(normalizedLiteral);
+      start !== -1;
+      start = normalized.text.indexOf(normalizedLiteral, start + 1)
+    ) {
+      const end = start + normalizedLiteral.length
+      const rawStart = normalized.starts.get(start)
+      const rawEnd = normalized.ends.get(end)
+      // NFKC expansion 内部和跨 trim gap 都没有一个由 old block 独占的连续 original span。
+      const ownerStart = rawStart ?? normalizedOwnerStart(normalized.owners, start)
+      if (ownerStart < cursorOffset) continue
+      if (rawStart === undefined || rawEnd === undefined || hasInternalGap(normalized.gaps, start, end)) {
+        unsafeNormalized++
+        continue
+      }
+      // whole-line 或 exact occurrence 已代表同一 normalized identity 时，不重复增加候选计数。
+      if (candidates.some((candidate) => candidate.start <= rawStart && candidate.end >= rawEnd)) continue
+      candidates.push({
+        location: { kind: "substring", startOffset: rawStart, endOffset: rawEnd },
+        start: rawStart,
+        end: rawEnd,
+      })
+    }
+  }
+
+  // unsafe occurrence 不可写，但仍是 normalized 域的第二候选；忽略它会破坏全局唯一性。
+  if (candidates.length + unsafeNormalized > 1) return { type: "ambiguous" }
+  if (unsafeNormalized > 0) return { type: "not-found" }
+  if (candidates.length > 1) return { type: "ambiguous" }
+  if (candidates.length === 0) return { type: "not-found" }
+  return { type: "found", location: candidates[0].location }
+}
+
+function normalizeLineForFuzzy(line: string) {
+  // Patch 与 Edit 共用一个 PI normalization contract，避免标点、空格或 NFKC 集合静默分叉。
+  return normalizeForMatch(line)
+}
+
+function normalizedRawView(text: string) {
+  const starts = new Map<number, number>([[0, 0]])
+  const ends = new Map<number, number>([[0, 0]])
+  const gaps: number[] = []
+  const owners: Array<{ start: number; end: number; rawStart: number }> = []
+  const parts: string[] = []
+  let normalizedOffset = 0
+  let lineStart = 0
+
+  while (lineStart <= text.length) {
+    const newline = text.indexOf("\n", lineStart)
+    const lineEnd = newline === -1 ? text.length : newline
+    const line = text.slice(lineStart, lineEnd)
+    const retained = line.trimEnd()
+
+    for (const segment of graphemes.segment(retained)) {
+      const rawStart = lineStart + segment.index
+      const rawEnd = rawStart + segment.segment.length
+      // NUL 阻止单个 interior whitespace grapheme 被 normalizeForMatch 的 trimEnd 删除。
+      const value = normalizeForMatch(`${segment.segment}\0`).slice(0, -1)
+      starts.set(normalizedOffset, rawStart)
+      ends.set(normalizedOffset, rawStart)
+      parts.push(value)
+      if (value.length > 0) owners.push({ start: normalizedOffset, end: normalizedOffset + value.length, rawStart })
+      normalizedOffset += value.length
+      starts.set(normalizedOffset, rawEnd)
+      ends.set(normalizedOffset, rawEnd)
+    }
+
+    const retainedEnd = lineStart + retained.length
+    ends.set(normalizedOffset, retainedEnd)
+    if (newline === -1) break
+    starts.set(normalizedOffset, lineEnd)
+    if (retainedEnd < lineEnd) gaps.push(normalizedOffset)
+    parts.push("\n")
+    owners.push({ start: normalizedOffset, end: normalizedOffset + 1, rawStart: newline })
+    normalizedOffset++
+    starts.set(normalizedOffset, newline + 1)
+    ends.set(normalizedOffset, newline + 1)
+    lineStart = newline + 1
+  }
+
+  const normalized = parts.join("")
+  // 不一致表示该输入不能建立可信 raw ownership；只禁用 normalized candidate，绝不改走第二 matcher。
+  if (normalized !== normalizeForMatch(text)) return undefined
+  return { text: normalized, starts, ends, gaps, owners }
+}
+
+function normalizedOwnerStart(owners: Array<{ start: number; end: number; rawStart: number }>, offset: number) {
+  let low = 0
+  let high = owners.length
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    if (owners[middle].end <= offset) low = middle + 1
+    else high = middle
+  }
+  return owners[low]?.rawStart ?? Number.POSITIVE_INFINITY
+}
+
+function hasInternalGap(gaps: number[], start: number, end: number) {
+  let low = 0
+  let high = gaps.length
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    if (gaps[middle] <= start) low = middle + 1
+    else high = middle
+  }
+  return low < gaps.length && gaps[low] < end
+}
+
+// context 是导航下界，不是 old block 候选：保留 first eligible whole-line，后备唯一 literal substring。
+// context 不做 PI normalize，否则仅用于导航的宽松文本会意外改变 old block 的匹配域。
+export function locateContext(lines: string[], pattern: string[], cursorOffset: number, terminated = false): ExactResult {
+  if (pattern.length === 0) return { type: "not-found" }
+  const starts: number[] = []
+  let offset = 0
+  for (const line of lines) {
+    starts.push(offset)
+    offset += line.length + 1
+  }
+  const firstEligibleLine = starts.findIndex((start) => start >= cursorOffset)
+  const startLine = firstEligibleLine === -1 ? lines.length : firstEligibleLine
+  // 重复整行 context 有意选择 first eligible；真正的唯一性仍由随后 old block 证明。
+  for (let index = startLine; index <= lines.length - pattern.length; index++) {
+    if (pattern.every((line, patternIndex) => lines[index + patternIndex] === line)) {
       return { type: "found", location: { kind: "line", startLine: index, endLine: index + pattern.length } }
     }
   }
 
   const literal = pattern.join("\n")
-  // 单个空逻辑行只能由 exact-line 分支定位；空字符串有无限位置，不能进入唯一 substring 判断。
   if (literal.length === 0) return { type: "not-found" }
-  // 行数组不保存文件终止符；substring 搜索必须把当前 terminal LF 恢复成真实字面文本。
-  // 该 LF 只参与完整 literal，不会被 exact-line 分支误认为额外空白逻辑行。
   const text = lines.join("\n") + (terminated && lines.length > 0 ? "\n" : "")
   const first = text.indexOf(literal, cursorOffset)
   if (first === -1) return { type: "not-found" }
-
-  // 从下一字符继续才能识别重叠 occurrence；任何第二个候选都必须拒绝而非猜第一个。
   if (text.indexOf(literal, first + 1) !== -1) return { type: "ambiguous" }
-  return {
-    type: "found",
-    location: { kind: "substring", startOffset: first, endOffset: first + literal.length },
-  }
+  return { type: "found", location: { kind: "substring", startOffset: first, endOffset: first + literal.length } }
 }
 
 export type ClosestWindow = {
