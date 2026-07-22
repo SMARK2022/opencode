@@ -247,6 +247,19 @@ describe("ApplyPatchTool", () => {
                 expect(shown).toContain("-prefix before suffix\n+prefix after suffix")
                 expect(shown).toContain("-remove")
                 expect(yield* exists(remove)).toBe(false)
+                // 两个alias entry按同一原文乱序派生，不能互相触发writeIfUnchanged失败。
+                const repeatFile = path.join(tmp.path, "repeat.txt")
+                yield* Effect.promise(() => fs.writeFile(repeatFile, "first\nsecond\n"))
+                // 新调用重新关闭读盘探针，合并proposal不能绕过原始targets授权。
+                editApproved = false
+                const repeated = yield* settleTool(
+                  registry,
+                  call("*** Begin Patch\n*** Update File: repeat.txt\n@@\n-second\n+SECOND\n*** Update File: ./repeat.txt\n@@\n-first\n+FIRST\n*** End Patch", "call-repeated-update"),
+                )
+                expect(repeated.output?.structured).toMatchObject({ applied: [{ type: "update", resource: "repeat.txt" }], files: [{ file: "repeat.txt", status: "modified" }] })
+                expect(yield* Effect.promise(() => fs.readFile(repeatFile, "utf8"))).toBe("FIRST\nSECOND\n")
+                expect(readsBeforeEditApproval).toBe(0)
+                expect(assertions.at(-1)?.metadata?.files).toEqual([{ type: "update", relativePath: "repeat.txt" }, { type: "update", relativePath: "repeat.txt" }])
               }),
             ),
           ),
@@ -288,6 +301,16 @@ describe("ApplyPatchTool", () => {
                 expect(Schema.decodeUnknownSync(ApplyPatchTool.Output)(fresh.output?.structured).files).toMatchObject([{ file: "moved.txt", status: "deleted", additions: 0, deletions: 1 }, { file: "nested/final.txt", status: "added", additions: 1, deletions: 0 }])
                 expect(yield* exists(path.join(tmp.path, "moved.txt"))).toBe(false)
                 expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "nested/final.txt"), "utf8"))).toBe("\uFEFFfinal\n")
+                // 第二个alias entry才声明Move，聚合不能丢目的地或改用第一个entry的生成文本。
+                const repeatedSource = path.join(tmp.path, "repeat-move.txt")
+                yield* Effect.promise(() => fs.writeFile(repeatedSource, "\uFEFFtop\nbottom\n"))
+                editApproved = false
+                const repeatedMove = yield* settleTool(registry, call("*** Begin Patch\n*** Update File: repeat-move.txt\n@@\n-bottom\n+BOTTOM\n*** Update File: ./repeat-move.txt\n*** Move to: repeated-final.txt\n@@\n-top\n+TOP\n*** End Patch", "repeated-move"))
+                expect(repeatedMove.result.type).toBe("text")
+                expect(repeatedMove.output?.structured).toMatchObject({ files: [{ file: "repeat-move.txt", status: "deleted" }, { file: "repeated-final.txt", status: "added" }] })
+                expect(yield* exists(repeatedSource)).toBe(false)
+                expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "repeated-final.txt"), "utf8"))).toBe("\uFEFFTOP\nBOTTOM\n")
+                expect(readsBeforeEditApproval).toBe(0)
               }),
             ),
           ),

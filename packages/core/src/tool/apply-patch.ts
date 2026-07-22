@@ -82,7 +82,7 @@ const layer = Layer.effectDiscard(
         [name]: Tool.withPermission(
           Tool.make({
             description:
-              "Apply one patch containing add, update, delete, and move file operations. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. Update matches complete exact lines first, then one unique literal substring of the complete old block, preserving surrounding text. Ambiguous or nonliteral matches fail; nearby candidates are diagnostic only. All source and destination targets are resolved and approved before contents are read. Operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
+              "Apply one patch containing add, update, delete, and move file operations. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All source and destination targets are resolved and approved before contents are read. Distinct file operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
             input: Input,
             output: Output,
             toModelOutput: ({ output }) => [{ type: "text", text: toModelOutput(output) }],
@@ -163,14 +163,26 @@ const layer = Layer.effectDiscard(
                   source,
                 })
 
+                // 既有groups已拒绝冲突操作；仅合并update，保留mixed Delete/Add及跨文件顺序。
+                const updates = new Map<string, Patch.UpdateFileChunk[]>()
+                const grouped = targets.flatMap((entry): typeof targets => {
+                  if (entry.hunk.type !== "update") return [entry]
+                  const chunks = updates.get(entry.target.canonical)
+                  if (chunks) { chunks.push(...entry.hunk.chunks); return [] }
+                  const combined = [...entry.hunk.chunks]
+                  updates.set(entry.target.canonical, combined)
+                  return [{ ...entry, hunk: { ...entry.hunk, chunks: combined } }]
+                })
                 // 授权仍先于读盘；预备失败只排除对应文件，不丢弃其他已验证操作。
                 const errors: string[] = []
                 const prepared: Prepared[] = []
                 const expected = new Map<string, { target: LocationMutation.Target; content: Uint8Array | undefined }>()
                 const failed = new Set<string>()
-                for (const { hunk, target, destination } of targets) {
+                for (const { hunk, target } of grouped) {
                   if (failed.has(target.canonical)) continue
                   yield* Effect.gen(function* () {
+                    // Move可在后entry才声明，两端仍沿原始完整targets授权并从既有group取最终目的地。
+                    const destination = groups.get(target.canonical)?.findLast(item => item.destination)?.destination
                     const snapshot = expected.get(target.canonical) ?? { target, content: yield* fs.readFile(target.canonical).pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined))) }
                     expected.set(target.canonical, snapshot)
                     if (hunk.type === "add") {
@@ -186,9 +198,8 @@ const layer = Layer.effectDiscard(
                     if ((yield* fs.stat(target.canonical)).type !== "File") yield* fail(hunk.path)
                     const source = snapshot.content
                     if (source === undefined) return yield* fail(hunk.path)
-                    const previous = prepared.find(change => change.type === "update" && change.target.canonical === target.canonical)
-                    const original = previous?.type === "update" ? previous.content : new TextDecoder("utf-8", { ignoreBOM: true }).decode(source)
-                    const before = previous?.before ?? original.replace(/^\uFEFF/, "")
+                    const original = new TextDecoder("utf-8", { ignoreBOM: true }).decode(source)
+                    const before = original.replace(/^\uFEFF/, "")
                     if (hunk.type === "delete") {
                       prepared.push({ ...hunk, target, before, after: "" })
                       return
@@ -201,18 +212,17 @@ const layer = Layer.effectDiscard(
                     if (destination && !expected.has(destination.canonical)) {
                       expected.set(destination.canonical, { target: destination, content: yield* fs.readFile(destination.canonical).pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined))) })
                     }
-                    // 每个 parsed entry 重置 Patch cursor，只合并最终写盘，不重复提交同一前像。
+                    // 同源全部chunks已对同一原文派生，最后只提交一次并保留真实Move目标。
                     const change = {
                       ...hunk,
                       target,
                       source,
-                      destination: destination ?? (previous?.type === "update" ? previous.destination : undefined),
+                      destination,
                       content: Patch.joinBom(update.content, update.bom),
                       before,
                       after: update.content,
                     }
-                    if (previous) prepared.splice(prepared.indexOf(previous), 1, change)
-                    else prepared.push(change)
+                    prepared.push(change)
                   }).pipe(Effect.catch(error => {
                     failed.add(target.canonical)
                     const index = prepared.findIndex(change => change.target.canonical === target.canonical)

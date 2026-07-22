@@ -29,7 +29,7 @@ describe("Patch", () => {
     const update = Patch.derive("update.txt", [{ oldLines: ["old"], newLines: ["new"] }], "\uFEFFold\n")
     expect(update).toEqual({ content: "new\n", bom: true })
     expect(Patch.joinBom(update.content, update.bom)).toBe("\uFEFFnew\n")
-    // source明确移除规范化成功，BOM断言仍保留，不能靠fuzzy路径验证它。
+    // 新PI规则仍不trimStart；BOM与缩进拒绝保持独立断言。
     expect(() => Patch.derive("update.txt", [{ oldLines: ["  old   "], newLines: ["new"] }], "old\n")).toThrow("Failed to find expected lines")
     // 同时验证补丁解析、上下文匹配、BOM 与精确行尾，不能只归一后比较正文。
     for (const ending of ["\n", "\r\n", "\r"]) {
@@ -61,11 +61,22 @@ describe("Patch", () => {
     expect(derive("old\n", [{ oldLines: [], newLines: ["inserted"] }, { oldLines: ["old"], newLines: [] }])).toBe("inserted\n")
     // 提示只取失败chunk的磁盘候选，不能显示第一chunk已丢弃的replacement。
     expect(() => derive("alpha\nconst after = good()\n", [{ oldLines: ["alpha"], newLines: ["ALPHA"] }, { oldLines: ["const after = good(1)"], newLines: ["done"] }])).toThrow('Closest match at line 2:\nline 2 actual: "const after = good()"')
-    // CRLF原文在比较空间等价，cursor之前的原始块只能报位置，不能再次输出requested。
-    expect(() => derive("alpha\r\nbeta\r\nmiddle\r\nomega\r\n", [
+    // 跨chunk不再推进cursor；乱序唯一块成功后仍写回原CRLF。
+    expect(derive("alpha\r\nbeta\r\nmiddle\r\nomega\r\n", [
       { oldLines: ["middle"], newLines: ["MIDDLE"] }, { oldLines: ["alpha", "beta"], newLines: ["ALPHA", "BETA"] },
-    ])).toThrow("exists at this location in the original file")
-    expect(() => derive("“old”\n", [{ oldLines: ['"old"'], newLines: ["new"] }])).toThrow("Failed to find expected lines")
+    ])).toBe("ALPHA\r\nBETA\r\nMIDDLE\r\nomega\r\n")
+    expect(derive("“old”\n", [{ oldLines: ['"old"'], newLines: ["new"] }])).toBe("new\n")
+    // 乱序chunk只看同一原文；生成依赖、重复span与EOF歧义不得进入成功路径。
+    expect(derive("top\nbottom\n", [{ oldLines: ["bottom"], newLines: ["BOTTOM"] }, { oldLines: ["top"], newLines: ["TOP"] }])).toBe("TOP\nBOTTOM\n")
+    expect(() => derive("old\n", [{ oldLines: ["old"], newLines: ["generated"] }, { oldLines: ["generated"], newLines: ["final"] }])).toThrow("Failed to find expected lines")
+    expect(() => derive("old\n", [{ oldLines: ["old"], newLines: ["a"] }, { oldLines: ["old"], newLines: ["b"] }])).toThrow("Overlapping")
+    expect(() => derive("same\nsame\n", [{ oldLines: ["same"], newLines: ["new"], endOfFile: true }])).toThrow("multiple matches")
+    // 规范化只替换可逆grapheme范围，并将第二个等价候选计入唯一性。
+    expect(derive("left ﬃ right\n", [{ oldLines: ["ffi"], newLines: ["x"] }])).toBe("left x right\n")
+    expect(() => derive("left ﬃ right\n", [{ oldLines: ["fi"], newLines: ["x"] }])).toThrow("Failed to find expected lines")
+    expect(() => derive('"old"\n“old”\n', [{ oldLines: ['"old"'], newLines: ["new"] }])).toThrow("multiple matches")
+    // 重复context仍作本chunk导航下界，不充当跨chunk的消费cursor。
+    expect(derive("section\na\nsection\nb\n", [{ oldLines: ["b"], newLines: ["B"], changeContext: "section" }, { oldLines: ["a"], newLines: ["A"], changeContext: "section" }])).toBe("section\nA\nsection\nB\n")
   })
 
   test("matches EOF-anchored chunks from the end", () => {
