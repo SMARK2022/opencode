@@ -23,7 +23,11 @@ import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import { MessageError } from "./message-error"
 import { CompactionBoundary } from "./compaction-boundary"
 import { AuthError, OutputLengthError } from "./message-error"
-import { formatCompactionClearedNotice, formatExecutionNotice } from "@/util/output-notice"
+import {
+  ensureTaskResumeVisible,
+  formatCompactionClearedNotice,
+  formatExecutionNotice,
+} from "@/util/output-notice"
 export { AuthError, OutputLengthError } from "./message-error"
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
@@ -1198,24 +1202,37 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
               ? formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: Math.floor(rawElapsed) })
               : undefined
             const partialOutput = interrupted ? part.state.metadata?.output : undefined
+            // task 在 create 后把 child id 写入 metadata.sessionId；中断路径无 state.output。
+            // 投影必须 ensure resume 行，否则模型无法续跑（INV-01 投影 first divergence）。
+            // 顺序：先 ensure 基文，再挂既有 abort notice，避免 notice 插在 task_id 之前。
+            // 仅 tool===task 且 sessionId 为 string 时生效；其它工具保持原合同（INV-03）。
+            const taskSessionId =
+              part.tool === "task" && typeof part.state.metadata?.sessionId === "string"
+                ? part.state.metadata.sessionId
+                : undefined
             if (typeof partialOutput === "string") {
+              const body = taskSessionId ? ensureTaskResumeVisible(partialOutput, taskSessionId) : partialOutput
               assistantMessage.parts.push({
                 type: ("tool-" + part.tool) as `tool-${string}`,
                 state: "output-available",
                 toolCallId: part.callID,
                 input: part.state.input,
                 // 有 marker 时追加 abort Notice，使模型能看到取消原因和耗时
-                output: abortNotice ? partialOutput + "\n\n" + abortNotice : partialOutput,
+                output: abortNotice ? body + "\n\n" + abortNotice : body,
                 ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
                 ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
               })
             } else {
+              // 无 partial 时仍走 output-error，不把 abort 伪装成 completed（INV-04）
+              const errorBody = taskSessionId
+                ? ensureTaskResumeVisible(part.state.error, taskSessionId)
+                : part.state.error
               assistantMessage.parts.push({
                 type: ("tool-" + part.tool) as `tool-${string}`,
                 state: "output-error",
                 toolCallId: part.callID,
                 input: part.state.input,
-                errorText: abortNotice ? part.state.error + "\n\n" + abortNotice : part.state.error,
+                errorText: abortNotice ? errorBody + "\n\n" + abortNotice : errorBody,
                 ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
                 ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
               })
@@ -1223,16 +1240,25 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           }
           // Handle pending/running tool calls to prevent dangling tool_use blocks
           // Anthropic/Claude APIs require every tool_use to have a corresponding tool_result
-          if (part.state.status === "pending" || part.state.status === "running")
+          if (part.state.status === "pending" || part.state.status === "running") {
+            // open task 在 running 态 metadata 里常已有 sessionId；投影 resume 行供后续 task 续跑。
+            // pending 无 metadata 字段：无 sessionId 时保持原 interrupted 固定串。
+            const openMeta = "metadata" in part.state ? part.state.metadata : undefined
+            const openTaskSessionId =
+              part.tool === "task" && typeof openMeta?.sessionId === "string" ? openMeta.sessionId : undefined
+            const openBody = openTaskSessionId
+              ? ensureTaskResumeVisible("[Tool execution was interrupted]", openTaskSessionId)
+              : "[Tool execution was interrupted]"
             assistantMessage.parts.push({
               type: ("tool-" + part.tool) as `tool-${string}`,
               state: "output-error",
               toolCallId: part.callID,
               input: part.state.input,
-              errorText: "[Tool execution was interrupted]",
+              errorText: openBody,
               ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
               ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
             })
+          }
         }
         if (part.type === "reasoning") {
           if (differentModel) {

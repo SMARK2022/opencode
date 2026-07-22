@@ -1367,7 +1367,8 @@ describe("tool.edit", () => {
 })
 
 // INV-16 processor 参数面替换：legacy 入参 + _syncInput → 仅 { filePath, edits }
-import { resolveCompletedToolInput, stripToolTruthMetadata } from "../../src/session/processor"
+// INV-07 non-abort fail 保留 task sessionId
+import { failedToolMetadata, resolveCompletedToolInput, stripToolTruthMetadata } from "../../src/session/processor"
 
 describe("tool input truth sync (processor contract)", () => {
   test("legacy top-level fields dropped when _syncInput present", () => {
@@ -1404,5 +1405,27 @@ describe("tool input truth sync (processor contract)", () => {
       _formattedContent: "x",
     })
     expect(stripped).toEqual({ diff: "d" })
+  })
+
+  // INV-07：failToolCall non-abort 终态化的 metadata 合同。
+  // create 后已写入的 sessionId/parentSessionId 必须保留，否则投影层无 resume 源；
+  // title/model 等 running 进度字段必须丢弃，避免 error 态泄漏无关状态。
+  test("failedToolMetadata keeps sessionId and drops progress-only fields", () => {
+    const id = "ses_0123456789abcdef01234567"
+    expect(
+      failedToolMetadata({
+        sessionId: id,
+        parentSessionId: "ses_parentparentparentparentpa",
+        title: "Audit runtime",
+        model: { modelID: "x" },
+        autoReview: { status: "pending" },
+      }),
+    ).toEqual({
+      sessionId: id,
+      parentSessionId: "ses_parentparentparentparentpa",
+      autoReview: { status: "pending" },
+    })
+    expect(failedToolMetadata({ title: "only" })).toBeUndefined()
+    expect(failedToolMetadata(undefined)).toBeUndefined()
   })
 })
