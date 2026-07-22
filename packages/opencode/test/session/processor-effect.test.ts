@@ -891,7 +891,9 @@ it.live("session.processor retries a real first-progress timeout", () =>
         // 第二项仍是同一 Provider 的成功响应，不改变既有 retry 分类和 backoff。
         yield* llm.push(httpError(503, { error: { message: "delayed" } }, gate.promise))
         // 成功响应显式 repeat；后续 retry 仍消费同一 Provider 结果，不借 queue-miss 默认值自证恢复。
-        yield* llm.pushRepeat(reply().text("after"))
+        // #525：repeat 响应必须携带 stop——无 Tool 的 other/unknown finish 是可重试 incomplete，
+        // 只有显式 stop 才代表恢复成功并沿既有 other 重试合同终止。
+        yield* llm.pushRepeat(reply().text("after").stop())
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "first progress")

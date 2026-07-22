@@ -62,7 +62,7 @@ import { Truncate } from "@/tool/truncate"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Format } from "../../src/format"
-import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
+import { provideTmpdirInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
 // 跨目录caller必须共享原Session的运行结果与取消入口。
 import { InstanceRef } from "@/effect/instance-ref"
 import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
@@ -5570,8 +5570,13 @@ it.instance(
       yield* goalSvc.set(chat.id, { objective: "verify changing external state" })
       yield* user(chat.id, "start")
 
-      const statusPath = path.join(dir, "verification-status.txt")
+      // #525：状态放在 Project 外；否则 generic mutation 会被 Snapshot 误记为 Patch advancement。
+      const stateDir = yield* tmpdirScoped()
+      const statusPath = path.join(stateDir, "verification-status.txt")
       const fixturePath = path.join(dir, "verification.test.ts")
+      const changePath = path.join(dir, "verification-change.ts")
+      // #525：输出日志被 gitignore；命令重定向到文件而不是 /dev/null（Windows shell 解析差异）。
+      yield* writeText(path.join(dir, ".gitignore"), "verification-output.log\n")
       yield* writeText(statusPath, "one\n")
       yield* writeText(
         fixturePath,
@@ -5580,17 +5585,19 @@ it.instance(
           `test("status", async () => expect(await Bun.file(${JSON.stringify(statusPath)}).text()).toBe("one\\n"))`,
         ].join("\n"),
       )
-      const verify = `bun test --timeout 30000 ${fixturePath.replaceAll("\\", "/")} >/dev/null 2>&1`
-      const change = `bun -e "await Bun.write('${statusPath.replaceAll("\\", "/")}', 'two\\n')"`
+      // #525：mutation 落盘为不可变相对脚本；外部绝对路径只出现在 Bun 字面量内，不进入 Shell 解析。
+      yield* writeText(changePath, `await Bun.write(${JSON.stringify(statusPath)}, "two\\n")`)
+      const verify = "bun test --timeout 30000 verification.test.ts > verification-output.log 2>&1"
+      const change = "bun verification-change.ts"
 
-      // redirect stdout 使同一 verification 的 signature 只由 exit/result 改变，不受耗时噪声影响。
+      // 忽略输出文件使同一 verification 的 signature 只由 exit/result 改变，不受耗时噪声或 Patch 影响。
       yield* llm.push(reply().text("idle 1").stop())
       yield* llm.push(reply().text("idle 2").stop())
       yield* llm.push(reply().tool("bash", { command: verify, description: "verification one" }).item(), reply().text("verified").stop())
       // 第二次调用使用同一 command，必须复用 baseline 而不是制造 changed result。
       yield* llm.push(reply().tool("bash", { command: verify, description: "verification repeat" }).item(), reply().text("same verification").stop())
       yield* llm.push(reply().tool("bash", { command: change, description: "change verification fixture" }).item(), reply().text("fixture changed").stop())
-      // generic mutation 不提供 advancement；它只改变下一次相同 verification 的结果。
+      // #525：generic mutation 只改变外部状态，不提供 Patch 或 verification advancement。
       yield* llm.push(reply().tool("bash", { command: verify, description: "verification changed" }).item(), reply().text("verification changed").stop())
       // 相同 command 的 exit 从 0 变 1，才是允许离开 re-plan 的 advancement。
       yield* llm.push(reply().text("after changed verification").stop())
@@ -5603,6 +5610,8 @@ it.instance(
       // only the later changed result may clear the persisted re-plan mode.
       expect(texts[2]).toContain("<strategy-switch")
       expect(texts[3]).toContain("<strategy-switch")
+      // #525：generic mutation 只能改变外部验证状态；它不能绕过 re-plan 的 advancement 门槛。
+      expect(texts[4]).toContain("<strategy-switch")
       // changed verification 是 advancement；若只算 exploration，下一轮 idle 就会错误进入 replan。
       expect(texts[5]).not.toContain("<strategy-switch")
     }),
