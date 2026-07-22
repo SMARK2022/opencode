@@ -108,6 +108,27 @@ describe("SessionProjector", () => {
       expect(payload.ref_count).toBe(2)
       // 破坏真实payload后整段读取必须回滚，不能交回空reasoning或消耗引用。
       yield* db.update(ColdStorageTable).set({ payload: Buffer.from([0]) }).where(eq(ColdStorageTable.hash, payload.hash)).run()
+      // Native已打包owner的status只读metadata；坏body不能被此报告解压或被悄悄修复。
+      // 与随后业务读取必失败形成对照，完整行比较继续保护seq/ref/key/stats及共享引用。
+      yield* Database.withSync({ db, sync: db.sync }, sync => {
+        const owners = sync.select().from(SessionMessageTable).all()
+        const payloads = sync.select().from(ColdStorageTable).all()
+        const report = ColdStorage.status(sync)
+        expect(Object.keys(report)).toHaveLength(17)
+        expect(report).toMatchObject({
+          targetBytes: 1_500_000_000, eligibleOwners: 0, coldOwners: 2, payloads: 1,
+          summaryOwners: 0, summaryPayloads: 0, summaryRawBytes: 0, summaryCompressedBytes: 0,
+          rawBytes: payload.raw_bytes * 2, compressedBytes: payload.compressed_bytes,
+          sharedBytes: payload.raw_bytes, refCountMismatches: 0, orphans: 0,
+        })
+        expect(report.pageSize).toBeGreaterThan(0)
+        expect(report.pageCount).toBeGreaterThan(0)
+        expect(report.freelistPages).toBeGreaterThanOrEqual(0)
+        expect(report.activeBytes).toBe((report.pageCount - report.freelistPages) * report.pageSize)
+        expect(ColdStorage.status(sync)).toEqual(report)
+        expect(sync.select().from(SessionMessageTable).all()).toEqual(owners)
+        expect(sync.select().from(ColdStorageTable).all()).toEqual(payloads)
+      })
       const failed = yield* ColdStorage.readSessionMessageRows(db, cold).pipe(Effect.exit)
       expect(failed._tag).toBe("Failure")
       expect((yield* db.select().from(SessionMessageTable).all()).filter(row => row.cold_ref !== null)).toEqual(cold)

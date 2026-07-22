@@ -24,6 +24,8 @@ import { aggregateStats } from "@/cli/cmd/stats-data"
 import { TestInstance, tmpdirScoped } from "../fixture/fixture"
 import type { SessionID } from "@/session/schema"
 import path from "path"
+// #524：metadata 投影子进程脚本需要 fileURL 对齐目标 core 模块路径。
+import { fileURLToPath } from "url"
 
 const coldLayer = LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node, SessionSummary.node, Database.node, EventV2Bridge.node, Storage.node, CrossSpawnSpawner.node]))
 const it = testEffect(coldLayer)
@@ -1041,6 +1043,80 @@ describe.serial("ColdStorage", () => {
   // task 分类断言不依赖随机 taskID，保持测试跨运行稳定。
   // 测试故意不调用 cleanup，verify repair 与 orphan 删除的责任在下一用例独立证明。
   // session 删除发生在 owner 已热态后，验证 expand 不留下外键或 refcount 残余。
+
+  // #524：status metadata 投影在子进程内用 64MiB heap 门禁证明不物化 payload BLOB。
+  it.instance(
+    "reports cold metadata without materializing payload bodies",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        // 128 MiB body 与 64 MiB heap 形成单向失败：select * 必 OOM，metadata 投影必须成功。
+        const bytes = 128 * 1024 * 1024
+        const dbPath = path.join(test.directory, "status-projection.db")
+        // 目标 ColdStorage 位于 core（#493）；脚本按目标模块路径 import，status 接收 db 参数。
+        const script = `
+          process.env.OPENCODE_DB = ${JSON.stringify(dbPath)}
+          const { Effect, ManagedRuntime } = await import("effect")
+          const { Database } = await import(${JSON.stringify(new URL("../../../core/src/database/database.ts", import.meta.url).href)})
+          const { ColdStorage } = await import(${JSON.stringify(new URL("../../../core/src/storage/cold-storage.ts", import.meta.url).href)})
+          // 显式 Layer 初始化自己的连接和 migration，不注册模块级最后连接。
+          const rt = ManagedRuntime.make(Database.layerFromPath(${JSON.stringify(dbPath)}))
+          await rt.runPromise(Effect.void)
+          const hash = "a5".repeat(32)
+          const bytes = ${bytes}
+          // 大 BLOB 是可观察的读取门禁；报告仍只依赖其同行 metadata 与真实 owner count。
+          // zeroblob 避免在 JS 堆分配 128 MiB 缓冲区，只让 SQLite 持有可物化的大 body。
+          // 目标 sync client 即 TxOrDb（#493）；插入用原生 bun:sqlite 绑定参数，避免 drizzle raw 参数语义差异。
+          const { Database: InsertConn } = await import("bun:sqlite")
+          const insertConn = new InsertConn(${JSON.stringify(dbPath)})
+          insertConn.query(
+            "INSERT INTO cold_storage (hash, kind, codec, payload, raw_bytes, compressed_bytes, ref_count, time_created, time_updated) VALUES (?, 'part-pack', 'zstd', zeroblob(?), ?, ?, 0, ?, ?)",
+          ).run(hash, bytes, bytes, bytes, Date.now(), Date.now())
+          insertConn.close()
+          await rt.dispose()
+          Bun.gc(true)
+          const { Database: SQLite } = await import("bun:sqlite")
+          const gate = new SQLite(${JSON.stringify(dbPath)})
+          gate.query("PRAGMA hard_heap_limit = 67108864").get()
+          gate.close()
+          // 重开同一隔离文件，随后预约该 Layer 的连接；heap 门禁不进入共享测试进程。
+          const rt2 = ManagedRuntime.make(Database.layerFromPath(${JSON.stringify(dbPath)}))
+          const database = await rt2.runPromise(Database.Service)
+          const report = await rt2.runPromise(Database.withSync(database, (db) => {
+            db.run("PRAGMA cache_size = -512")
+            return ColdStorage.status(db)
+          }))
+          process.stdout.write(JSON.stringify(report))
+          await rt2.dispose()
+        `
+        const result = yield* Effect.promise(async () => {
+          // hard_heap_limit 必须位于子进程，避免 SQLite 全局上限污染同 runner 的后续测试。
+          const proc = Bun.spawn([process.execPath, "-e", script], {
+            cwd: path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url))),
+            env: { ...process.env, OPENCODE_PROCESS_ROLE: "main" },
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+          })
+          const [exitCode, stdout, stderr] = await Promise.all([
+            proc.exited,
+            new Response(proc.stdout).text(),
+            new Response(proc.stderr).text(),
+          ])
+          return { exitCode, stdout, stderr }
+        })
+        // 旧 unrestricted projection 会因 128 MiB body 越过 64 MiB SQLite 上限而明确失败。
+        expect(result.exitCode, result.stderr).toBe(0)
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          payloads: 1,
+          compressedBytes: bytes,
+          orphans: 1,
+          refCountMismatches: 0,
+        })
+      }),
+    30_000,
+  )
+
   it.instance("verifies, repairs, expands, and classifies maintenance requests", () =>
     Effect.gen(function* () {
       // #493：直查与 ColdStorage 调用共用同一同步 client（与运行时同连接）。

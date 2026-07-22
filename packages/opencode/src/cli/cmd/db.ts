@@ -63,17 +63,19 @@ async function liveDaemon() {
 
 // control request 总是携带当前 lock token，并用短 timeout 把本机 daemon 不可达明确反馈给 CLI。
 // 非 2xx 响应保留 daemon 错误语义，调用方不得在失败后改走 offline 并伪造成功。
-async function daemonRequest(lock: ServerLock.ServerLock, pathname: string, init?: RequestInit) {
+// status 报告显式取消短 deadline；其他 immediate 操作不因此自动获得相同豁免。
+async function daemonRequest(lock: ServerLock.ServerLock, pathname: string, init?: RequestInit, timeoutMs: number | false = 2_000) {
   const response = await fetch(`http://127.0.0.1:${lock.controlPort}${pathname}`, {
     ...init,
     headers: {
       [ServerLock.CONTROL_TOKEN_HEADER]: lock.token,
       ...(init?.headers ?? {}),
     },
-    signal: AbortSignal.timeout(2_000),
+    signal: timeoutMs === false ? undefined : AbortSignal.timeout(timeoutMs),
   })
   const body: unknown = await response.json().catch(() => ({ error: `daemon returned ${response.status}` }))
   if (!response.ok) {
+    // #524：无 deadline 只影响等待上限；错误分类与 offline 回退禁止仍由调用方执行域决定。
     const error = isRecord(body) && typeof body.error === "string" ? body.error : `daemon returned ${response.status}`
     throw new MaintenanceUnavailableError(error)
   }
@@ -122,6 +124,7 @@ async function runOffline(db: Database.Interface, prepared: ColdStorage.Prepared
 
 // 执行域只在命令开始时选择一次：live daemon 只走 control，daemon 缺席才走同一 maintain 的 offline 入口。
 // 两个域都先调用 prepareMaintenance，保证默认值、写授权、task 分类和错误类型完全一致。
+// #524：status 的 deadline 豁免只在 CLI 侧；task 类 control 仍走 2s acknowledgement 合同。
 async function executeMaintenance(db: Database.Interface, request: ColdStorage.MaintenanceRequest) {
   const lock = await liveDaemon()
   if (lock) {
@@ -238,12 +241,19 @@ const StatusCommand = effectCmd({
         return
       }
       if (lock) {
+        // #524：status 没有持久 task 结果可轮询，必须在同一 control 请求中等到完整 StatusReport。
+        // 只有本报告调用显式传 false；task 状态查询和其他操作仍沿原 acknowledgement 合同。
         printMaintenance(
-          await daemonRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ operation: "status" }),
-          }),
+          await daemonRequest(
+            lock,
+            ServerLock.CONTROL_MAINTENANCE_PATH,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ operation: "status" }),
+            },
+            false,
+          ),
         )
         return
       }
