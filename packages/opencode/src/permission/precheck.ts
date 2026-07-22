@@ -148,11 +148,6 @@ const RE_D_PS_DOWNLOAD_EXEC = /\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)
 // Windows 驱动器格式化
 const RE_D_WINDOWS_FORMAT = /\bformat\b\s+[A-Za-z]:/i
 
-// Windows 保护目录删除：rd/rmdir/del /s 作用于盘根或用户目录
-const RE_D_WINDOWS_PROTECTED_DELETE = new RegExp(
-  String.raw`\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"` + "`" + String.raw`]|$)|[A-Za-z]:[\\/](?:Users|Windows|Program Files|Documents and Settings)(?:[\\/][^\s)'"` + "`" + String.raw`]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"` + "`" + String.raw`]|$))`,
-  "i",
-)
 
 // 凭据读取管道到网络传输
 const RE_D_CREDENTIAL_PIPE_NETWORK = new RegExp(
@@ -579,7 +574,8 @@ function dangerousRaw(command: string): string | undefined {
 
   // ---- Windows 破坏性操作 ----
   if (RE_D_WINDOWS_FORMAT.test(normalized)) return "Windows drive format"
-  if (RE_D_WINDOWS_PROTECTED_DELETE.test(normalized)) return "Windows protected directory delete"
+  // Windows 保护递归删除：同段 token 谓词（禁整串子串共现误报）
+  if (windowsProtectedDeleteInCommand(normalized)) return "Windows protected directory delete"
 
   // ---- 凭据外传 ----
   // 敏感文件读取管道到网络传输是 dangerous；单独的敏感读取在 cautiousRaw 处理
@@ -1074,6 +1070,9 @@ function classifyTokens(tokens: string[]): Decision | undefined {
       return { level: "dangerous", reason: "critical PowerShell recursive delete" }
     return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
   }
+  // 与 rm 对称：del/rd/rmdir 保护根递归删除走同一 Windows 谓词，不降到 cautious
+  if (windowsProtectedRecursiveDelete(tokens))
+    return { level: "dangerous", reason: "Windows protected directory delete" }
   if (FILE_DELETE_COMMANDS.has(cmd) && tokens.length > 1)
     return { level: "cautious", reason: "file deletion requires explicit approval" }
   if (findDeletesFile(tokens))
@@ -1463,6 +1462,52 @@ function hasRecursiveDeleteFlags(tokens: string[]) {
   return tokens.some((item) => item === "--recursive" || /^-[^-]*[rR]/.test(item))
 }
 
+// cmd del/rd/rmdir 可合并的单字母开关；s=递归。禁止 tree-sitter、/setup 等非开关词。
+const WINDOWS_CMD_SWITCH_LETTERS = new Set(["a", "f", "p", "q", "s", "u"])
+
+function hasWindowsRecursiveDeleteFlag(tokens: string[]) {
+  return tokens.some(isWindowsRecursiveDeleteFlagToken)
+}
+
+function isWindowsRecursiveDeleteFlagToken(token: string) {
+  const t = token.toLowerCase()
+  if (t === "/s" || t === "-s" || t === "--recursive") return true
+  // 仅整 token 纯开关 cluster：/s/q、/s/p、/sq；不得裸子串匹配 -sitter
+  if (!(t.startsWith("/") || (t.startsWith("-") && !t.startsWith("--")))) return false
+  const body = t.slice(1)
+  if (!body) return false
+  if (body.includes("/")) {
+    const parts = body.split("/")
+    return parts.every((part) => part.length === 1 && WINDOWS_CMD_SWITCH_LETTERS.has(part)) && parts.includes("s")
+  }
+  if (body.length < 1 || body.length > 4) return false
+  return [...body].every((ch) => WINDOWS_CMD_SWITCH_LETTERS.has(ch)) && body.includes("s")
+}
+
+function windowsProtectedRecursiveDelete(tokens: string[]) {
+  // 三元组同时成立才 dangerous：命令名 + 递归开关 + 保护根（与 rm 语义对称）
+  if (tokens.length < 2) return false
+  const cmd = normalizeCommandName(tokens[0])
+  if (cmd !== "del" && cmd !== "erase" && cmd !== "rd" && cmd !== "rmdir") return false
+  const rest = tokens.slice(1)
+  return hasWindowsRecursiveDeleteFlag(rest) && rest.some(protectedDeleteTarget)
+}
+
+// 仅空白切分并保留 \。POSIX tokenize 把 \ 当转义吞掉，C:\Users 会变成 C:Users 导致保护根 FN。
+function windowsCmdTokens(segment: string) {
+  return segment.trim().split(/\s+/).filter(Boolean)
+}
+
+// normalize 后按段扫描；sole windowsCmdTokens，禁止再顺序 tokenize（R5）
+function windowsProtectedDeleteInCommand(normalized: string) {
+  for (const segment of normalized.split(/[;|&]+/)) {
+    const trimmed = segment.trim()
+    if (!trimmed) continue
+    if (windowsProtectedRecursiveDelete(windowsCmdTokens(trimmed))) return true
+  }
+  return false
+}
+
 function protectedDeleteTarget(input: string) {
   // 保护根目录覆盖本地 POSIX 根、常见家目录别名、Windows 驱动器根、
   // 系统目录和 macOS 特有目录。这些是递归删除被视为 dangerous 而非
@@ -1477,8 +1522,9 @@ function protectedDeleteTarget(input: string) {
   if (normalized === "/" || normalized === "/*" || normalized === "/.") return true
   // 家目录别名
   if (normalized === "~" || normalized === "$HOME") return true
-  // Windows 环境变量家目录
+  // Windows 环境变量家目录（%USERPROFILE% 大小写不敏感，对齐旧 raw i 旗）
   if (normalized === "$env:USERPROFILE" || normalized === "$env:SystemDrive") return true
+  if (normalized.toLowerCase() === "%userprofile%") return true
   // Windows 驱动器根：C:\ 或 C:
   if (/^\w:\/?$/.test(normalized)) return true
   // POSIX 系统根目录（扩展版）

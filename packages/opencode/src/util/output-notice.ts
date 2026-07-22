@@ -133,6 +133,24 @@ export function formatTaskIdNotice(input: { provided: string }) {
   })
 }
 
+// task 成功路径与中断/失败投影共用同一 resume 行。
+// 放 util（而非 task.ts）：task 已 import message-v2，若投影再 import task 会形成加载环。
+// 措辞与历史成功 output 对齐：模型靠 `task_id: <SessionID>` 前缀做 resume，禁止第二套方言。
+export function formatTaskResumeLine(sessionID: string) {
+  return `task_id: ${sessionID} (for resuming to continue this task if needed)`
+}
+
+// 仅在缺失时 prepend 一行；已含同一 session 的 task_id 子串则原样返回。
+// 空 text 时只返回 resume 行，避免多余空段落进入模型上下文。
+export function ensureTaskResumeVisible(text: string, sessionID: string) {
+  const line = formatTaskResumeLine(sessionID)
+  if (text.includes(`task_id: ${sessionID}`)) return text
+  if (text.length === 0) return line
+  return `${line}
+
+${text}`
+}
+
 function formatNotice(input: Notice) {
   return `<opencode_notice ${Object.entries(input)
     .flatMap(([key, value]) => (value === undefined || value === "" ? [] : [`${key}="${escapeAttribute(String(value))}"`]))

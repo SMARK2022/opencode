@@ -1460,6 +1460,171 @@ describe("session.message-v2.toModelMessage", () => {
     expect(toolResult.output!.value).toContain('elapsed_ms="5000"')
   })
 
+  // INV-01：task 中断后 metadata.sessionId 已在，但无 state.output。
+  // 模型侧必须仍见与成功路径同形的 resume 行，否则无法 task_id 续跑。
+  // 本用例锁定投影层 first divergence（忽略 sessionId）。
+  test("interrupted task without output still surfaces task_id for resume", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const child = "ses_0123456789abcdef01234567"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-task",
+            tool: "task",
+            state: {
+              status: "error",
+              input: { description: "x", prompt: "y", subagent_type: "explore" },
+              error: "Tool execution aborted",
+              metadata: {
+                interrupted: true,
+                executionElapsedMs: 1000,
+                sessionId: child,
+                parentSessionId: "ses_parentparentparentparentpa",
+              },
+              time: { start: 0, end: 1000 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
+    expect(toolResult.output!.type).toBe("error-text")
+    // 独立期望：字面 resume 行 + 原 abort 错误 + user_abort notice 并存
+    expect(toolResult.output!.value).toContain(`task_id: ${child} (for resuming to continue this task if needed)`)
+    expect(toolResult.output!.value).toContain("Tool execution aborted")
+    expect(toolResult.output!.value).toContain('reason="user_abort"')
+    // INV-05/06 克制：只 prepend 一行，禁止双份 task_id 前缀
+    expect(toolResult.output!.value.split(`task_id: ${child}`).length - 1).toBe(1)
+  })
+
+  // INV-01 open 分支：running/pending 被投影成 interrupted 时同样要带 task_id。
+  // 覆盖 DB 中父 part 未终态化、子 sessionId 已写入的真实形态。
+  test("running task with sessionId surfaces task_id when projected as interrupted", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const child = "ses_abcdef0123456789abcdef01"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-task-open",
+            tool: "task",
+            state: {
+              status: "running",
+              input: { description: "x", prompt: "y", subagent_type: "explore" },
+              metadata: { sessionId: child },
+              time: { start: 0 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
+    expect(toolResult.output!.type).toBe("error-text")
+    expect(toolResult.output!.value).toContain(`task_id: ${child} (for resuming to continue this task if needed)`)
+    expect(toolResult.output!.value).toContain("[Tool execution was interrupted]")
+  })
+
+  // INV-01 + INV-07 下游：create 后 non-abort 失败无 interrupted 标记，
+  // 只要 sessionId 仍在 metadata，投影就必须给出 resume 行（与 abort 对称）。
+  test("non-abort task error with sessionId surfaces task_id", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const child = "ses_111111111111111111111111"
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-task-err",
+            tool: "task",
+            state: {
+              status: "error",
+              input: { description: "x", prompt: "y", subagent_type: "explore" },
+              error: `Task ${child} is already running. Use task_status to check progress.`,
+              metadata: { sessionId: child, parentSessionId: "ses_parentparentparentparentpa" },
+              time: { start: 0, end: 10 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
+    expect(toolResult.output!.type).toBe("error-text")
+    expect(toolResult.output!.value).toContain(`task_id: ${child} (for resuming to continue this task if needed)`)
+    expect(toolResult.output!.value).toContain("already running")
+  })
+
+  // INV-06：metadata.output 已含 resume 行时 ensure 必须 no-op，避免双前缀撑爆上下文。
+  test("interrupted task partial that already has task_id is not double-prefixed", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const child = "ses_222222222222222222222222"
+    const partial = `task_id: ${child} (for resuming to continue this task if needed)\n\npartial body`
+
+    const input: MessageV2.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "run" }] as MessageV2.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-task-partial",
+            tool: "task",
+            state: {
+              status: "error",
+              input: { description: "x", prompt: "y", subagent_type: "explore" },
+              error: "Tool execution aborted",
+              metadata: { interrupted: true, sessionId: child, output: partial },
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as MessageV2.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
+    expect(toolResult.output!.type).toBe("text")
+    expect(toolResult.output!.value.split(`task_id: ${child}`).length - 1).toBe(1)
+    expect(toolResult.output!.value).toContain("partial body")
+  })
+
   // [local-smark] 旧记录无 executionElapsedMs：保持原样，不追溯伪造 elapsed
   test("old interrupted without marker stays unchanged", async () => {
     const userID = "m-user"

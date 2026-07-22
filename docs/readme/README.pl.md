@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.11-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.12-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **O tej gałęzi**: To ulepszona gałąź OpenCode `dev-smark` (bieżąca wersja `1.15.11`, tag wydania CLI `v1.15.11-smark`). Jest oparta na upstream `dev` i koncentruje się na interakcji TUI, zarządzaniu sesjami, statystykach tokenów, zgodności z Windows/PowerShell, usługach językowych i integracji Notebook w VS Code, obsłudze proxy sieciowego i doświadczeniu instalacji.
+> **O tej gałęzi**: To ulepszona gałąź OpenCode `dev-smark` (bieżąca wersja `1.15.12`, tag wydania CLI `v1.15.12-smark`). Jest oparta na upstream `dev` i koncentruje się na interakcji TUI, zarządzaniu sesjami, statystykach tokenów, zgodności z Windows/PowerShell, usługach językowych i integracji Notebook w VS Code, obsłudze proxy sieciowego i doświadczeniu instalacji.
 
 ---
 
@@ -93,10 +93,10 @@ To przekazuje `OPENCODE_INSTALL_DIR` tylko do `curl`, a nie do procesu `bash`, k
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.11-smark
+  bash -s -- --version 1.15.12-smark
 ```
 
-To jest pełna forma: `bash -s --` mówi `bash`, aby odczytał instalator ze stdin i przekazał `--version 1.15.11-smark` jako argumenty instalatora. Wersją może być `1.15.11-smark` albo forma tagu wydania `v1.15.11-smark`.
+To jest pełna forma: `bash -s --` mówi `bash`, aby odczytał instalator ze stdin i przekazał `--version 1.15.12-smark` jako argumenty instalatora. Wersją może być `1.15.12-smark` albo forma tagu wydania `v1.15.12-smark`.
 
 ### Zachowanie Instalatora
 
@@ -240,7 +240,7 @@ Statystyki wewnętrzne preferują dane request usage i cofają się do metadanyc
 
 ### Integracja Usług Językowych I Notebook VS Code
 
-Aby używać usług językowych VS Code lub narzędzi Notebook, zainstaluj [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Wersja rozszerzenia w repozytorium to `1.15.10`, a zalecany SMARK CLI to `1.15.11-smark`; wersje są niezależne. Rozszerzenie tworzy lokalny uwierzytelniony bridge dla usług językowych i VS Code/Jupyter Notebook. Bez połączenia CLI zachowuje wbudowany LSP, lecz operacje VS Code i narzędzia Notebook są niedostępne.
+Aby używać usług językowych VS Code lub narzędzi Notebook, zainstaluj [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Wersja rozszerzenia w repozytorium to `1.15.10`, a zalecany SMARK CLI to `1.15.12-smark`; wersje są niezależne. Rozszerzenie tworzy lokalny uwierzytelniony bridge dla usług językowych i VS Code/Jupyter Notebook. Bez połączenia CLI zachowuje wbudowany LSP, lecz operacje VS Code i narzędzia Notebook są niedostępne.
 
 Rozszerzenie nie zawiera language server; używa providerów zarejestrowanych przez aktywne rozszerzenia językowe w bieżącym oknie VS Code dla touch, diagnostics, hover, definition, references i document/workspace symbols. Nieudane żądanie bridge wraca do wbudowanego LSP, a diagnostics robi to także przy nieprawidłowej strukturze odpowiedzi; inne udane odpowiedzi bez oczekiwanego pola mogą być obecnie interpretowane jako puste. Implementation i call hierarchy zawsze pozostają na wbudowanym LSP, a prawidłowy pusty wynik nie potwierdza pełnego project typecheck.
 

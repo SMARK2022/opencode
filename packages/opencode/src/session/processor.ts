@@ -84,6 +84,20 @@ export function interruptedToolMetadata(metadata: Record<string, unknown> | unde
   return result
 }
 
+// non-abort 终态不得抹掉 task 在 create 后写入的 sessionId：否则模型无法 resume。
+// 这是 INV-07 的 first divergence 修复点：旧逻辑只留 autoReview，会丢掉 child id。
+// 只保留 resume 所需字段 + 既有 autoReview，不把 running 进度 metadata 全量带入 error。
+export function failedToolMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!metadata) return undefined
+  const next: Record<string, unknown> = {}
+  // autoReview 合同保持：与历史 non-abort fail 行为一致
+  if (isRecord(metadata.autoReview)) next.autoReview = metadata.autoReview
+  // sessionId 即 task_id；parentSessionId 便于审计父子关系，投影只消费 sessionId
+  if (typeof metadata.sessionId === "string") next.sessionId = metadata.sessionId
+  if (typeof metadata.parentSessionId === "string") next.parentSessionId = metadata.parentSessionId
+  return Object.keys(next).length > 0 ? next : undefined
+}
+
 export type Result = "compact" | "stop" | "continue"
 
 export type Event = LLM.Event
@@ -346,7 +360,8 @@ export const layer = Layer.effect(
               const toolAborted = aborted || reason === "Aborted" || reason === TOOL_ABORTED_ERROR
               // [local-smark] abort 时保留原 metadata 并写入 server-owned elapsedMs marker，
               // 使下一轮模型回放能追加 user_abort + elapsed_ms Notice。
-              // 非 abort error 仅保留 autoReview envelope，保持既有行为
+              // non-abort 经 failedToolMetadata 保留 sessionId，避免 task create 后失败丢掉 resume id。
+              // 不在此把 abort 改写为 completed，error 语义与 interrupted marker 必须保持。
               const failStart = match.part.state.time?.start ?? Date.now()
               yield* session.updatePart({
                 ...match.part,
@@ -356,9 +371,7 @@ export const layer = Layer.effect(
                   error: toolAborted ? TOOL_ABORTED_ERROR : reason,
                   metadata: toolAborted
                     ? interruptedToolMetadata(match.part.state.metadata, Date.now() - failStart)
-                    : match.part.state.metadata?.autoReview
-                      ? { autoReview: match.part.state.metadata.autoReview }
-                      : undefined,
+                    : failedToolMetadata(match.part.state.metadata),
                   time: { start: failStart, end: Date.now() },
                 },
               })

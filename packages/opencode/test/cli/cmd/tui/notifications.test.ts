@@ -117,25 +117,25 @@ function permission(id: string, sessionID = "session"): PermissionRequest {
 }
 
 describe("internal notifications TUI plugin", () => {
-  test("question and permission are visual-only without sound", async () => {
+  test("question and permission play their semantic sounds", async () => {
     const harness = await setup()
 
     harness.emit({ id: "event-1", type: "question.asked", properties: question("question-1") })
     harness.emit({ id: "event-2", type: "permission.asked", properties: permission("permission-1") })
 
-    // question/permission 保留视觉通知但静音，避免频繁触发时太吵
+    // question/permission 需要用户输入：视觉通知 + 语义音效
     expect(harness.notifications).toEqual([
       {
         title: "Demo session",
         message: "Question needs input",
         notification: { when: "blurred" },
-        sound: false,
+        sound: { name: "question", when: "always" },
       },
       {
         title: "Demo session",
         message: "Permission needs input",
         notification: { when: "blurred" },
-        sound: false,
+        sound: { name: "permission", when: "always" },
       },
     ])
   })
@@ -162,8 +162,12 @@ describe("internal notifications TUI plugin", () => {
     harness.emit({ id: "event-8", type: "permission.asked", properties: permission("permission-1") })
 
     expect(harness.notifications).toHaveLength(4)
-    // 所有 question/permission 通知都应该是 sound: false
-    expect(harness.notifications.every((n) => n.sound === false)).toBe(true)
+    expect(harness.notifications.map((n) => n.sound)).toEqual([
+      { name: "question", when: "always" },
+      { name: "question", when: "always" },
+      { name: "permission", when: "always" },
+      { name: "permission", when: "always" },
+    ])
   })
 
   test("notifies done when an active session completes with a finished assistant", async () => {

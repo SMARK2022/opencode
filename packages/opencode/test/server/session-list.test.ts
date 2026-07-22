@@ -626,6 +626,47 @@ describe("session.list", () => {
     { git: true },
   )
 
+  // 多关键词空格分词后取交集：每 token 各自 title∨内容命中，而不是整串 "A B" 子串
+  it.instance(
+    "intersects whitespace-separated search tokens across title and content",
+    () =>
+      Effect.gen(function* () {
+        const both = yield* withSession({ title: "alpha-holder" })
+        const onlyTitle = yield* withSession({ title: "alpha-only-title" })
+        const onlyBody = yield* withSession({ title: "body-holder" })
+        const neither = yield* withSession({ title: "unrelated-holder" })
+
+        const bothMsg = yield* createSearchUserMessage(both.id)
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: both.id,
+            messageID: bothMsg,
+            type: "text",
+            text: "contains-beta-token",
+          }),
+        )
+
+        const bodyMsg = yield* createSearchUserMessage(onlyBody.id)
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: onlyBody.id,
+            messageID: bodyMsg,
+            type: "text",
+            text: "alpha and beta together",
+          }),
+        )
+
+        const ids = yield* searchIDs("alpha beta")
+        expect(ids).toContain(both.id)
+        expect(ids).toContain(onlyBody.id)
+        expect(ids).not.toContain(onlyTitle.id)
+        expect(ids).not.toContain(neither.id)
+      }),
+    { git: true },
+  )
+
   it.instance(
     "searches v1 visible text and tool input without indexing thinking or tool results",
     () =>

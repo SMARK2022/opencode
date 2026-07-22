@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.11-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.12-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **關於本分支**：這是 OpenCode 的 `dev-smark` 增強分支（目前版本 `1.15.11`，CLI release tag 為 `v1.15.11-smark`）。它基於上游 `dev` 分支，重點增強 TUI 互動、會話管理、Token 統計、Windows/PowerShell 相容性、VS Code 語言服務與 Notebook 整合、網路代理及安裝體驗。
+> **關於本分支**：這是 OpenCode 的 `dev-smark` 增強分支（目前版本 `1.15.12`，CLI release tag 為 `v1.15.12-smark`）。它基於上游 `dev` 分支，重點增強 TUI 互動、會話管理、Token 統計、Windows/PowerShell 相容性、VS Code 語言服務與 Notebook 整合、網路代理及安裝體驗。
 
 > **資料庫遷移提示**：SMARK 分支包含資料庫 schema 自訂與遷移。若你從上游 `dev`、主分支或原分支切換到本分支，請先手動備份本地 `opencode.db`；遷移後的資料庫可能無法無損遷移回上游或原分支。本專案不負責你本地資料庫上下文資訊的 schema 格式相容性問題。
 
@@ -95,10 +95,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.11-smark
+  bash -s -- --version 1.15.12-smark
 ```
 
-這是完整寫法：`bash -s --` 表示讓 `bash` 從 stdin 讀取 installer，並把後面的 `--version 1.15.11-smark` 作為 installer 參數傳入。版本參數可以寫 `1.15.11-smark`，也可以寫 release tag 形式的 `v1.15.11-smark`。
+這是完整寫法：`bash -s --` 表示讓 `bash` 從 stdin 讀取 installer，並把後面的 `--version 1.15.12-smark` 作為 installer 參數傳入。版本參數可以寫 `1.15.12-smark`，也可以寫 release tag 形式的 `v1.15.12-smark`。
 
 ### 安裝腳本行為
 
@@ -253,7 +253,7 @@ submodule 只承載原始碼發現與 provenance，不參與 OpenCode 正常安�
 
 ### VS Code 語言服務與 Notebook 整合
 
-需要使用 VS Code 語言服務或 Notebook 工具時，請安裝擴充套件 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。倉庫內擴充套件版本為 `1.15.10`，建議配合 SMARK CLI `1.15.11-smark`；兩者獨立進行版本管理。擴充套件為語言服務與 VS Code/Jupyter Notebook 建立本地鑑權 bridge；未連線時 CLI 仍使用內建 LSP，但無法使用 VS Code-backed 操作與 Notebook 工具。
+需要使用 VS Code 語言服務或 Notebook 工具時，請安裝擴充套件 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。倉庫內擴充套件版本為 `1.15.10`，建議配合 SMARK CLI `1.15.12-smark`；兩者獨立進行版本管理。擴充套件為語言服務與 VS Code/Jupyter Notebook 建立本地鑑權 bridge；未連線時 CLI 仍使用內建 LSP，但無法使用 VS Code-backed 操作與 Notebook 工具。
 
 擴充套件不會捆綁 language server，而是重用目前 VS Code 視窗中已啟用語言擴充套件註冊的 provider，支援 touch、diagnostics、hover、definition、references 及 document/workspace symbols。Bridge 請求失敗時會回退內建 LSP，diagnostics 回應結構無效時也會回退；其他成功回應若缺少預期結果欄位，目前可能被解讀為空結果。Implementation 與 call hierarchy 始終使用內建 LSP，有效的空結果也不代表完整 project typecheck 已通過。
 

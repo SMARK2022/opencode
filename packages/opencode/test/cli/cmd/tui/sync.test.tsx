@@ -567,12 +567,19 @@ describe("tui sync", () => {
       expect(kv.get("session_directory_filter_enabled", true)).toBe(true)
       expect(session.at(-1)?.searchParams.get("scope")).toBeNull()
       expect(session.at(-1)?.searchParams.get("path")).toBe("packages/opencode")
+      // Path A：半年 lookback + browse limit 1600（与 session-list-params 对齐）
+      expect(session.at(-1)?.searchParams.get("limit")).toBe("1600")
+      const start = Number(session.at(-1)?.searchParams.get("start"))
+      const lookback = 180 * 24 * 60 * 60 * 1000
+      expect(start).toBeGreaterThan(Date.now() - lookback - 60_000)
+      expect(start).toBeLessThanOrEqual(Date.now() - lookback + 60_000)
 
       kv.set("session_directory_filter_enabled", false)
       await sync.session.refresh()
 
       expect(session.at(-1)?.searchParams.get("scope")).toBe("project")
       expect(session.at(-1)?.searchParams.get("path")).toBeNull()
+      expect(session.at(-1)?.searchParams.get("limit")).toBe("1600")
     } finally {
       app.renderer.destroy()
       Global.Path.state = previous
@@ -804,6 +811,130 @@ describe("tui sync", () => {
       )
       await sync.session.sync("ses_1", { force: true })
       expect(sync.data.part.msg_1?.[0]).toMatchObject({ state: { status: "completed", output: "done" } })
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("enriches equal-v0 bash running from raw-only autoReview to structured command", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const message = assistantMessage()
+    const command = "git push origin dev"
+    // equal-v0 生命周期：先到 reviewing raw-only 不得永久挡住后到 structured command，
+    // 且 autoReview envelope 必须保留（否则会出现 Writing command... 或丢审核行）。
+    // 旧 merge 整对象 keep first：command 永久缺失；本用例必须在修复前红、修复后绿。
+    // progressVersion 均缺省 → legacy v0，触发字段 enrich 而非 progress 前进分支。
+    const reviewingRaw = {
+      ...runningShellPart(""),
+      state: {
+        status: "running" as const,
+        input: { raw: JSON.stringify({ command, description: "Push branch" }) },
+        title: "Auto review: cautious",
+        metadata: {
+          autoReview: {
+            reviewID: "review_raw",
+            status: "reviewing",
+            precheck: { level: "cautious", reason: "push requires review" },
+          },
+        },
+        time: { start: 1 },
+      },
+    } satisfies ToolPart
+    const structured = {
+      ...reviewingRaw,
+      state: {
+        status: "running" as const,
+        input: { command, description: "Push branch" },
+        time: { start: 2 },
+      },
+    } satisfies ToolPart
+    const { app, emit, sync } = await mount()
+
+    try {
+      emit(messageEvent(message))
+      emit(partEvent(reviewingRaw))
+      await wait(() => {
+        const part = sync.data.part.msg_1?.[0]
+        if (part?.type !== "tool" || part.state.status !== "running") return false
+        const review = (part.state.metadata as { autoReview?: { status?: string } } | undefined)?.autoReview
+        return review?.status === "reviewing"
+      })
+
+      emit(partEvent(structured))
+      await Bun.sleep(30)
+
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({
+        state: {
+          status: "running",
+          input: { command },
+          metadata: { autoReview: { status: "reviewing" } },
+        },
+      })
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("enriches equal-v0 bash running autoReview without dropping structured command", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const message = assistantMessage()
+    const command = "cat id_rsa"
+    // tool-call-first：先 structured running，再 reviewing envelope，equal-v0 须补 autoReview。
+    // 不得为了补 envelope 而丢掉已有 command，也不得要求 progressVersion 递增。
+    const structured = {
+      ...runningShellPart(""),
+      state: {
+        status: "running" as const,
+        input: { command, description: "Read key" },
+        time: { start: 1 },
+      },
+    } satisfies ToolPart
+    const reviewing = {
+      ...structured,
+      state: {
+        status: "running" as const,
+        input: { command, description: "Read key" },
+        title: "Auto review: cautious",
+        metadata: {
+          autoReview: {
+            reviewID: "review_cmd",
+            status: "reviewing",
+            precheck: { level: "cautious", reason: "key path" },
+          },
+        },
+        time: { start: 1 },
+      },
+    } satisfies ToolPart
+    const { app, emit, sync } = await mount()
+
+    try {
+      emit(messageEvent(message))
+      emit(partEvent(structured))
+      await wait(
+        () =>
+          sync.data.part.msg_1?.[0]?.type === "tool" &&
+          sync.data.part.msg_1[0].state.status === "running" &&
+          (sync.data.part.msg_1[0].state.input as { command?: string }).command === command,
+      )
+
+      emit(partEvent(reviewing))
+      await Bun.sleep(30)
+
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({
+        state: {
+          status: "running",
+          input: { command },
+          metadata: { autoReview: { status: "reviewing" } },
+        },
+      })
     } finally {
       app.renderer.destroy()
       Global.Path.state = previous

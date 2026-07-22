@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.11-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.12-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **حول هذا الفرع**: هذا هو فرع OpenCode المحسن `dev-smark`، الإصدار الحالي `1.15.11` ووسم إصدار CLI هو `v1.15.11-smark`. يعتمد على فرع upstream `dev` ويركز على تحسين تفاعل TUI، وإدارة الجلسات، وإحصاءات token، وتوافق Windows/PowerShell، وتكامل خدمات اللغة وNotebook في VS Code، ووكيل الشبكة، وتجربة التثبيت.
+> **حول هذا الفرع**: هذا هو فرع OpenCode المحسن `dev-smark`، الإصدار الحالي `1.15.12` ووسم إصدار CLI هو `v1.15.12-smark`. يعتمد على فرع upstream `dev` ويركز على تحسين تفاعل TUI، وإدارة الجلسات، وإحصاءات token، وتوافق Windows/PowerShell، وتكامل خدمات اللغة وNotebook في VS Code، ووكيل الشبكة، وتجربة التثبيت.
 
 ---
 
@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.11-smark
+  bash -s -- --version 1.15.12-smark
 ```
 
-هذا هو الشكل الكامل: تعني `bash -s --` أن `bash` يقرأ installer من stdin ويمرر `--version 1.15.11-smark` كوسائط للـ installer. يمكن كتابة الإصدار كـ `1.15.11-smark` أو بصيغة release tag وهي `v1.15.11-smark`.
+هذا هو الشكل الكامل: تعني `bash -s --` أن `bash` يقرأ installer من stdin ويمرر `--version 1.15.12-smark` كوسائط للـ installer. يمكن كتابة الإصدار كـ `1.15.12-smark` أو بصيغة release tag وهي `v1.15.12-smark`.
 
 ### سلوك سكربت التثبيت
 
@@ -240,7 +240,7 @@ opencode
 
 ### تكامل خدمات لغة VS Code وNotebook
 
-لاستخدام خدمات اللغة في VS Code أو أدوات Notebook، ثبت إضافة [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). إصدار الإضافة في المستودع هو `1.15.10`، ويوصى باستخدام SMARK CLI `1.15.11-smark`؛ ولهما إصدارات مستقلة. تنشئ الإضافة bridge محليا موثقا لخدمات اللغة وVS Code/Jupyter Notebook. بدون اتصالها يستمر CLI باستخدام LSP المدمج، لكن خدمات VS Code وأدوات Notebook لا تتوفر.
+لاستخدام خدمات اللغة في VS Code أو أدوات Notebook، ثبت إضافة [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). إصدار الإضافة في المستودع هو `1.15.10`، ويوصى باستخدام SMARK CLI `1.15.12-smark`؛ ولهما إصدارات مستقلة. تنشئ الإضافة bridge محليا موثقا لخدمات اللغة وVS Code/Jupyter Notebook. بدون اتصالها يستمر CLI باستخدام LSP المدمج، لكن خدمات VS Code وأدوات Notebook لا تتوفر.
 
 لا تتضمن الإضافة language server؛ بل تعيد استخدام providers المسجلة بواسطة إضافات اللغة المفعلة في نافذة VS Code الحالية من أجل touch وdiagnostics وhover وdefinition وreferences وdocument/workspace symbols. عند فشل طلب bridge يرجع CLI إلى LSP المدمج، كما يرجع diagnostics إذا كانت بنية الاستجابة غير صالحة؛ أما الاستجابات الناجحة الأخرى التي ينقصها حقل النتيجة المتوقع فقد تفسر حاليا كنتيجة فارغة. تبقى implementation وcall hierarchy على LSP المدمج دائما، والنتيجة الفارغة الصحيحة لا تعني نجاح typecheck كامل للمشروع.
 

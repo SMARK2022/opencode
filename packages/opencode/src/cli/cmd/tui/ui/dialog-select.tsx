@@ -31,6 +31,8 @@ export interface DialogSelectProps<T> {
   onSelect?: (option: DialogSelectOption<T>) => void
   skipFilter?: boolean
   renderFilter?: boolean
+  /** 列表为空时的文案；默认 No results found（Session list 搜索无命中可注入 Not Found …） */
+  empty?: string
   actions?: {
     command: string
     title: string
@@ -455,7 +457,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
         when={grouped().length > 0}
         fallback={
           <box paddingLeft={4} paddingRight={4} paddingTop={1}>
-            <text fg={theme.textMuted}>No results found</text>
+            <text fg={theme.textMuted}>{props.empty ?? "No results found"}</text>
           </box>
         }
       >

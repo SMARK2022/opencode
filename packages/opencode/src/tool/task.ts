@@ -19,7 +19,7 @@ import { Permission } from "@/permission"
 import path from "path"
 import { InstanceState } from "@/effect/instance-state"
 import { mergeRanges } from "@/util/range"
-import { formatTaskIdNotice } from "@/util/output-notice"
+import { formatTaskIdNotice, formatTaskResumeLine } from "@/util/output-notice"
 
 // SessionID 生成 body 固定 26（见 packages/core Identifier LENGTH / id.ts）；完整 ID = "ses_" + body。
 const SESSION_ID_BODY_LENGTH = 26
@@ -141,10 +141,12 @@ export const Parameters = Schema.Struct({
   }),
 })
 
-// notice 插在 task_id 元信息与 <task_result> 之间，供模型读，不影响 result 体解析
+// notice 插在 task_id 元信息与 <task_result> 之间，供模型读，不影响 result 体解析。
+// resume 行与中断投影共用 formatTaskResumeLine（util），避免成功/失败两套措辞（INV-02）。
+// 不在此导出 helper：message-v2 已依赖 util，禁止 message-v2 import task 形成环。
 function output(sessionID: SessionID, text: string, notice?: string) {
   return [
-    `task_id: ${sessionID} (for resuming to continue this task if needed)`,
+    formatTaskResumeLine(sessionID),
     ...(notice ? [notice] : []),
     "",
     "<task_result>",

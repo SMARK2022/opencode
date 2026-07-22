@@ -946,7 +946,7 @@ export const layer = Layer.effect(
           (item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === input.tool!.callID,
         )
         if (!part || (part.state.status !== "pending" && part.state.status !== "running")) return
-        const metadata = part.state.status === "running" ? part.state.metadata : {}
+        const metadata = part.state.status === "running" ? (part.state.metadata ?? {}) : {}
         const current =
           metadata?.autoReview && typeof metadata.autoReview === "object" && !Array.isArray(metadata.autoReview)
             ? metadata.autoReview
@@ -954,11 +954,15 @@ export const layer = Layer.effect(
         // onInterrupt 可能在 handleReviewerFailure 写入终态后延迟触发；
         // "aborted" 不应覆盖更具体的终态（timed_out/failed/fallback_user/allowed/denied）。
         if (patch.status === "aborted" && current.status && current.status !== "reviewing") return
+        // 审核展示写只做一次：优先保留已结构化 input，其次用 ask metadata 中已固定的
+        // command（Shell 在 Permission.ask 时已写入），避免 pending 仍写成 { raw }
+        // 导致 TUI 整段 reviewing 窗显示 Writing command...。
+        const toolInput = reviewDisplayToolInput(part, input.metadata)
         yield* sessions.updatePart({
           ...part,
           state: {
             status: "running",
-            input: part.state.status === "pending" ? { raw: part.state.raw } : part.state.input,
+            input: toolInput,
             title:
               patch.status === "reviewing" ? `Auto review: ${input.precheck.level}` : `Auto review: ${patch.status}`,
             metadata: {
@@ -1200,6 +1204,39 @@ function recordJsonFallbackDecision(
       },
     } satisfies MessageV2.ToolPart)
   })
+}
+
+// 仅 { raw } 是历史 pending 提升形状；任意其它自有键表示已有结构化工具参数。
+// 不得把空 {} 当成 structured，否则会挡住 metadata.command 回填。
+// 判定只看自有键形状，不解析 raw JSON，避免第二套参数源。
+// 与 TUI equal-v0 enrich 共用同一 raw-only 语义，防止 durable/live 对“有无 command”判断分叉。
+function isRawOnlyToolInput(input: Record<string, unknown>) {
+  const keys = Object.keys(input)
+  return keys.length === 1 && keys[0] === "raw" && typeof input.raw === "string"
+}
+
+// structured = 非空且非 raw-only；tool-call 写入的 command/filePath 等均属此类。
+// 空对象不算 structured：pending 初值 {} 必须继续落到 metadata.command 分支。
+function isStructuredToolInput(input: Record<string, unknown>) {
+  return Object.keys(input).length > 0 && !isRawOnlyToolInput(input)
+}
+
+// 审核展示用 input 的唯一决策函数：一次选择、一次写入。
+// 优先级：已有 structured → ask metadata.command → pending.raw → 原值。
+// 该顺序保证“参数已固定仍 Writing command...”在 pending-at-review 路径上可被单一 owner 修复。
+function reviewDisplayToolInput(part: MessageV2.ToolPart, askMetadata: Readonly<Record<string, unknown>>) {
+  const current = part.state.input as Record<string, unknown>
+  // tool-call 已写入的 structured input 优先，禁止用 { raw } 覆盖（INV-02）。
+  if (isStructuredToolInput(current)) return current
+  // Shell ask 在 Permission.ask 时已把固定 command 写入 metadata；pending 提升不得
+  // 只写 { raw }，否则 TUI 在 reviewing 窗缺少 input.command 会显示 Writing command...
+  // 单次 write 即完成：metadata.command 在 selection 时已可用，不做第二成功写。
+  // description 不在 Shell ask metadata 合同内，不在此伪造。
+  const command = askMetadata.command
+  if (typeof command === "string" && command.length > 0) return { command }
+  // 无 command 证据时的窄 residual：仅 pending 才允许 raw 形状展示。
+  if (part.state.status === "pending") return { raw: part.state.raw }
+  return current
 }
 
 export * as PermissionReviewer from "./service"

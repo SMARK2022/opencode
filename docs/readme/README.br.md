@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Branch dev upstream" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Versao npm upstream" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="Branch SMARK" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Versao SMARK atual" src="https://img.shields.io/badge/current-1.15.11-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Versao SMARK atual" src="https://img.shields.io/badge/current-1.15.12-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Sobre este branch**: este e o branch aprimorado `dev-smark` do OpenCode (versao atual `1.15.11`, CLI release tag `v1.15.11-smark`). Ele e baseado no `dev` upstream e foca em interacao TUI, gerenciamento de sessoes, estatisticas de token, compatibilidade com Windows/PowerShell, integracao com servicos de linguagem e Notebook do VS Code, suporte a proxy de rede e experiencia de instalacao.
+> **Sobre este branch**: este e o branch aprimorado `dev-smark` do OpenCode (versao atual `1.15.12`, CLI release tag `v1.15.12-smark`). Ele e baseado no `dev` upstream e foca em interacao TUI, gerenciamento de sessoes, estatisticas de token, compatibilidade com Windows/PowerShell, integracao com servicos de linguagem e Notebook do VS Code, suporte a proxy de rede e experiencia de instalacao.
 
 ---
 
@@ -93,10 +93,10 @@ Isso passa `OPENCODE_INSTALL_DIR` apenas para o `curl`, nao para o processo `bas
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.11-smark
+  bash -s -- --version 1.15.12-smark
 ```
 
-Esta e a forma completa: `bash -s --` diz ao `bash` para ler o instalador de stdin e passar `--version 1.15.11-smark` como argumentos do instalador. A versao pode ser `1.15.11-smark` ou a forma de release tag `v1.15.11-smark`.
+Esta e a forma completa: `bash -s --` diz ao `bash` para ler o instalador de stdin e passar `--version 1.15.12-smark` como argumentos do instalador. A versao pode ser `1.15.12-smark` ou a forma de release tag `v1.15.12-smark`.
 
 ### Comportamento Do Instalador
 
@@ -240,7 +240,7 @@ As estatisticas internas preferem dados de request usage e recorrem a metadados 
 
 ### Integracao Com Servicos De Linguagem E Notebook Do VS Code
 
-Para usar os servicos de linguagem do VS Code ou ferramentas de Notebook, instale [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). A versao da extensao no repositorio e `1.15.10`, com a CLI SMARK `1.15.11-smark` recomendada; as versoes sao independentes. A extensao cria uma bridge local autenticada para servicos de linguagem e VS Code/Jupyter Notebook. Sem conexao, a CLI mantem seu LSP interno, mas operacoes do VS Code e ferramentas de Notebook ficam indisponiveis.
+Para usar os servicos de linguagem do VS Code ou ferramentas de Notebook, instale [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). A versao da extensao no repositorio e `1.15.10`, com a CLI SMARK `1.15.12-smark` recomendada; as versoes sao independentes. A extensao cria uma bridge local autenticada para servicos de linguagem e VS Code/Jupyter Notebook. Sem conexao, a CLI mantem seu LSP interno, mas operacoes do VS Code e ferramentas de Notebook ficam indisponiveis.
 
 A extensao nao inclui um language server; ela reutiliza providers registrados por extensoes de linguagem ativas na janela atual do VS Code para touch, diagnostics, hover, definition, references e document/workspace symbols. Falhas de requisicao da bridge usam o LSP interno, e diagnostics tambem faz fallback quando a estrutura da resposta e invalida; outras respostas bem-sucedidas sem o campo esperado podem ser interpretadas atualmente como vazias. Implementation e call hierarchy continuam sempre no LSP interno, e um resultado vazio valido nao prova que o typecheck completo do projeto passou.
 

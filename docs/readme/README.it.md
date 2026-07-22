@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.11-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.12-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Informazioni su questo ramo**: questo è il ramo potenziato `dev-smark` di OpenCode (versione corrente `1.15.11`, tag di release CLI `v1.15.11-smark`). È basato sul ramo upstream `dev` e si concentra su interazione TUI, gestione delle sessioni, statistiche sui token, compatibilità Windows/PowerShell, servizi linguistici e integrazione Notebook di VS Code, supporto proxy di rete ed esperienza di installazione.
+> **Informazioni su questo ramo**: questo è il ramo potenziato `dev-smark` di OpenCode (versione corrente `1.15.12`, tag di release CLI `v1.15.12-smark`). È basato sul ramo upstream `dev` e si concentra su interazione TUI, gestione delle sessioni, statistiche sui token, compatibilità Windows/PowerShell, servizi linguistici e integrazione Notebook di VS Code, supporto proxy di rete ed esperienza di installazione.
 
 ---
 
@@ -93,10 +93,10 @@ Questo passa `OPENCODE_INSTALL_DIR` solo a `curl`, non al processo `bash` che es
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.11-smark
+  bash -s -- --version 1.15.12-smark
 ```
 
-Questa è la forma completa: `bash -s --` dice a `bash` di leggere l'installer da stdin e di passare `--version 1.15.11-smark` come argomenti dell'installer. La versione può essere `1.15.11-smark` oppure la forma del tag di release `v1.15.11-smark`.
+Questa è la forma completa: `bash -s --` dice a `bash` di leggere l'installer da stdin e di passare `--version 1.15.12-smark` come argomenti dell'installer. La versione può essere `1.15.12-smark` oppure la forma del tag di release `v1.15.12-smark`.
 
 ### Comportamento Dell'Installer
 
@@ -240,7 +240,7 @@ Le statistiche interne preferiscono i dati di request usage e ripiegano sui meta
 
 ### Integrazione Dei Servizi Linguistici E Notebook VS Code
 
-Per usare i servizi linguistici di VS Code o gli strumenti Notebook, installa [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). La versione dell'estensione nel repository è `1.15.10` e si consiglia SMARK CLI `1.15.11-smark`; le versioni sono indipendenti. L'estensione crea un bridge locale autenticato per i servizi linguistici e VS Code/Jupyter Notebook. Senza connessione, la CLI mantiene il proprio LSP integrato, ma le operazioni VS Code e gli strumenti Notebook non sono disponibili.
+Per usare i servizi linguistici di VS Code o gli strumenti Notebook, installa [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). La versione dell'estensione nel repository è `1.15.10` e si consiglia SMARK CLI `1.15.12-smark`; le versioni sono indipendenti. L'estensione crea un bridge locale autenticato per i servizi linguistici e VS Code/Jupyter Notebook. Senza connessione, la CLI mantiene il proprio LSP integrato, ma le operazioni VS Code e gli strumenti Notebook non sono disponibili.
 
 L'estensione non include un language server; riutilizza i provider registrati dalle estensioni di linguaggio attive nella finestra VS Code corrente per touch, diagnostics, hover, definition, references e document/workspace symbols. Gli errori di richiesta del bridge usano l'LSP integrato e diagnostics fa fallback anche se la struttura della risposta non è valida; altre risposte riuscite senza il campo previsto possono essere interpretate attualmente come vuote. Implementation e call hierarchy restano sempre sull'LSP integrato, e un risultato vuoto valido non prova il superamento del typecheck completo del progetto.
 

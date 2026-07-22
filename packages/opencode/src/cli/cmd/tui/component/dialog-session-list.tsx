@@ -18,6 +18,12 @@ import { errorMessage } from "@/util/error"
 import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
 import { WorkspaceLabel } from "./workspace-label"
 import { useCommandShortcut } from "../keymap"
+import {
+  resolveSessionListSource,
+  sessionListEmptyLabel,
+  SESSION_LIST_LOOKBACK_MS,
+  SESSION_LIST_SEARCH_LIMIT,
+} from "@tui/util/session-list-params"
 
 type WorkspaceStatus = "connected" | "connecting" | "disconnected" | "error"
 
@@ -96,8 +102,8 @@ export function DialogSessionList() {
       if (!input.query) return undefined
       const result = await sdk.client.session.list({
         search: input.query,
-        start: Date.now() - 90 * 24 * 60 * 60 * 1000,
-        limit: 100,
+        start: Date.now() - SESSION_LIST_LOOKBACK_MS,
+        limit: SESSION_LIST_SEARCH_LIMIT,
         ...input.filter,
       })
       return result.data ?? []
@@ -105,7 +111,15 @@ export function DialogSessionList() {
   )
 
   const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
-  const sessions = createMemo(() => searchResults() ?? sync.data.session)
+  // 以 debounced query 门闩合流：空串回 Path A；活跃搜索只用 searchResults（含 []）
+  const listSource = createMemo(() =>
+    resolveSessionListSource({
+      query: search(),
+      searchResults: searchResults(),
+      browse: sync.data.session,
+    }),
+  )
+  const sessions = createMemo(() => listSource().sessions)
 
   function recover(session: NonNullable<ReturnType<typeof sessions>[number]>) {
     const workspace = project.workspace.get(session.workspaceID!)
@@ -212,8 +226,8 @@ export function DialogSessionList() {
         .map((x) => [x.id, x]),
     )
 
-    const searchResult = searchResults()
-    const displayOrder = searchResult ? orderByRecency(searchResult) : browseOrder()
+    // 展示顺序与数据源同源：搜索中不用 stale searchResults 真值误判
+    const displayOrder = listSource().source === "search" ? orderByRecency(sessions()) : browseOrder()
 
     const pinned = local.session.pinned().filter((id) => sessionMap.has(id))
     const pinnedSet = new Set(pinned)
@@ -284,6 +298,7 @@ export function DialogSessionList() {
       title="Sessions"
       options={options()}
       skipFilter={true}
+      empty={sessionListEmptyLabel(search())}
       current={currentSessionID()}
       onFilter={setSearch}
       onMove={() => {

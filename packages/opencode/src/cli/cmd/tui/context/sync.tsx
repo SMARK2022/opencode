@@ -35,6 +35,7 @@ import { useKV } from "./kv"
 import { useRoute } from "./route"
 // [local-smark] SessionPath for daemon multi-instance path management
 import { SessionPath } from "@/session/path"
+import { SESSION_LIST_BROWSE_LIMIT, SESSION_LIST_LOOKBACK_MS } from "@tui/util/session-list-params"
 import { aggregateFailures } from "./aggregate-failures"
 import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
 import { DisposedReason } from "@/server/event"
@@ -315,6 +316,52 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     // 可以独立到达；不带 time.end 的短文本不能回退本地已拼接内容。
     // 不带 time.end 的短文本不应回退本地已通过 delta 拼接的长文本。
     // 终态（time.end 存在）始终接受权威最终值，包括 plugin 修改后的文本。
+    // equal-v0 字段补全：只合并 input/autoReview/title，不把 next.output 当更新的进度。
+    // 这是进度合同之外的生命周期 enrich，不是把 progress 比较改成 >=。
+    // reviewing 窗内 shell 尚未 bump progressVersion，equal-v0 很常见。
+    function enrichEqualVersionBashRunning(existing: Part, next: Part): Part {
+      if (existing.type !== "tool" || next.type !== "tool") return existing
+      if (existing.state.status !== "running" || next.state.status !== "running") return existing
+      const existingInput =
+        existing.state.input && typeof existing.state.input === "object" && !Array.isArray(existing.state.input)
+          ? (existing.state.input as Record<string, unknown>)
+          : {}
+      const nextInput =
+        next.state.input && typeof next.state.input === "object" && !Array.isArray(next.state.input)
+          ? (next.state.input as Record<string, unknown>)
+          : {}
+      // raw-only → structured 单向：有 command 后不得再被 raw 快照盖回。
+      // 已有 structured 时保留 existing.input，防止后到的残缺快照回退 command。
+      const existingKeys = Object.keys(existingInput)
+      const existingRawOnly =
+        existingKeys.length === 1 && existingKeys[0] === "raw" && typeof existingInput.raw === "string"
+      const nextStructured = Object.keys(nextInput).some((key) => key !== "raw")
+      const input = existingRawOnly && nextStructured ? nextInput : existingInput
+      const existingMeta =
+        existing.state.metadata && typeof existing.state.metadata === "object" && !Array.isArray(existing.state.metadata)
+          ? existing.state.metadata
+          : {}
+      const nextMeta =
+        next.state.metadata && typeof next.state.metadata === "object" && !Array.isArray(next.state.metadata)
+          ? next.state.metadata
+          : {}
+      // 保留 existingMeta 中的 output/progressVersion；只补 autoReview envelope。
+      // time.start 保留先到 running 的开始时刻，避免审核写重置执行计时观感。
+      return {
+        ...existing,
+        state: {
+          ...existing.state,
+          input,
+          title: next.state.title ?? existing.state.title,
+          metadata: {
+            ...existingMeta,
+            autoReview: nextMeta.autoReview ?? existingMeta.autoReview,
+          },
+          time: existing.state.time,
+        },
+      }
+    }
+
     function mergeLivePart(existing: Part | undefined, next: Part) {
       if (!existing) return next
       if (next.type === "text") {
@@ -350,7 +397,14 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) return 0
             return value
           }
-          return version(next) > version(existing) ? next : existing
+          const nextVersion = version(next)
+          const existingVersion = version(existing)
+          if (nextVersion > existingVersion) return next
+          if (nextVersion < existingVersion) return existing
+          // equal-v0：进度不前进时仍允许 input/autoReview 生命周期字段一次补全，
+          // 避免 reviewing 快照被更早的 raw-only 或无 envelope running 永久挡住。
+          // 不得用 next 的 output/progress 回退 live 输出（不是 progress >=）。
+          return enrichEqualVersionBashRunning(existing, next)
         }
         // tool 只在 pending 阶段保护 raw（delta 累积的参数 JSON）；
         // 非 shell running 状态仍保持既有 PartUpdated 语义。
@@ -401,7 +455,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
     function listSessions() {
       return sdk.client.session
-        .list({ start: Date.now() - 90 * 24 * 60 * 60 * 1000, limit: 1200, ...sessionListQuery() })
+        .list({
+          start: Date.now() - SESSION_LIST_LOOKBACK_MS,
+          limit: SESSION_LIST_BROWSE_LIMIT,
+          ...sessionListQuery(),
+        })
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
     }
 
