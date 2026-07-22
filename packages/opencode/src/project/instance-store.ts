@@ -32,6 +32,8 @@ export const use = serviceUse(Service)
 
 interface Entry {
   readonly deferred: Deferred.Deferred<InstanceContext>
+  // #523：每 entry 独立取消信号——disposeAll 不必等待仍在进行的 bootstrap producer
+  readonly cancel: Deferred.Deferred<void>
 }
 
 const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Service> = Layer.effect(
@@ -64,6 +66,7 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
 
     const removeEntry = (directory: string, entry: Entry) =>
       Effect.sync(() => {
+        // #523：entry 身份比较防止旧 boot 失败删除新 entry 的 cancel/deferred
         if (cache.get(directory) !== entry) return false
         cache.delete(directory)
         return true
@@ -71,7 +74,10 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
 
     const completeLoad = (directory: string, input: LoadInput, entry: Entry) =>
       Effect.gen(function* () {
-        const exit = yield* Effect.exit(boot({ ...input, directory }))
+        // #523：pending bootstrap 与取消信号竞争；取消胜出时以 interrupt 收尾，不再等 boot 完成
+        const exit = yield* Effect.exit(
+          Effect.raceFirst(boot({ ...input, directory }), Deferred.await(entry.cancel).pipe(Effect.andThen(Effect.interrupt))),
+        )
         if (Exit.isFailure(exit)) yield* removeEntry(directory, entry)
         yield* Deferred.done(entry.deferred, exit).pipe(Effect.asVoid)
       })
@@ -112,7 +118,8 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
           const existing = cache.get(directory)
           if (existing) return yield* restore(Deferred.await(existing.deferred))
 
-          const entry: Entry = { deferred: Deferred.makeUnsafe<InstanceContext>() }
+          // #523：cancel 与 deferred 同生命周期；load 失败/取消后 entry 被 remove，信号不跨 entry 泄漏
+          const entry: Entry = { deferred: Deferred.makeUnsafe<InstanceContext>(), cancel: Deferred.makeUnsafe<void>() }
           cache.set(directory, entry)
           yield* Effect.gen(function* () {
             yield* Effect.logInfo("creating instance", { directory: directory })
@@ -128,7 +135,7 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
       return Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
           const previous = cache.get(directory)
-          const entry: Entry = { deferred: Deferred.makeUnsafe<InstanceContext>() }
+          const entry: Entry = { deferred: Deferred.makeUnsafe<InstanceContext>(), cancel: Deferred.makeUnsafe<void>() }
           cache.set(directory, entry)
           yield* Effect.gen(function* () {
             yield* Effect.logInfo("reloading instance", { directory: directory })
@@ -145,6 +152,7 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
     }
 
     const dispose = Effect.fn("InstanceStore.dispose")(function* (ctx: InstanceContext) {
+      // #523：单目录 dispose 不触发 cancel——只有 disposeAll 的批量退出才取消 pending producer
       const entry = cache.get(ctx.directory)
       if (!entry) return yield* disposeContext(ctx)
 
@@ -165,8 +173,13 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
 
     const disposeAllOnce = Effect.fnUntraced(function* () {
       yield* Effect.logInfo("disposing all instances")
+      // 取消和清理使用同一快照，producer 中断删除 cache 不应改变本轮处理集合。
+      const entries = [...cache.entries()]
+      yield* Effect.forEach(entries, (item) => Deferred.succeed(item[1].cancel, undefined), {
+        discard: true,
+      })
       yield* Effect.forEach(
-        [...cache.entries()],
+        entries,
         (item) =>
           Effect.gen(function* () {
             const exit = yield* Deferred.await(item[1].deferred).pipe(Effect.exit)

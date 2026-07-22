@@ -214,6 +214,12 @@ if (isDaemon) {
   async function gracefulShutdown(exitCode = 0, reason = "unknown") {
     if (shutdownInProgress) return
     shutdownInProgress = true
+    // 五秒总预算从入口开始，maintenance 等待也受保护；超时不提前清锁。
+    const shutdownTimer = setTimeout(() => {
+      log.error("daemon shutdown deadline exceeded", { reason, pid: process.pid })
+      process.exit(1)
+    }, 5_000)
+    shutdownTimer.unref?.()
     // #493：graceful shutdown 先阻止新 maintenance，再 abort 当前 task，并等待其批次结束和 interrupted checkpoint。
     // recovery promise 可能在第一次 active 检查后才登记任务，所以等待后必须再次检查并 abort 该 race。
     // maintenance 先停，随后既有 runtime finalizer checkpoint/close，最后才释放 daemon lock。
@@ -231,9 +237,6 @@ if (isDaemon) {
     cancelStartupIdleTimer("shutdown")
     cancelLauncherWatcher("shutdown")
     log.info("daemon shutting down", { reason, hadClient, sseClients, sessionActivity: SessionActivity.count() })
-    // 致命关闭也有上限；只退出当前 daemon，不向其他 owner 发终止信号。
-    const shutdownTimer = setTimeout(() => process.exit(1), 5_000)
-    shutdownTimer.unref?.()
     if (upgradeTimer) clearTimeout(upgradeTimer)
     // 主动停机先通知全局订阅；广播失败也计入退出码，不跳过后续清理。
     const notified = await Promise.allSettled([Promise.resolve().then(() => {
@@ -532,7 +535,8 @@ if (isDaemon) {
           })
       }
         if (request.method === "GET" && url.pathname === ServerLock.CONTROL_STATUS_PATH)
-          return Response.json({ tuiClients: sseClients, sessionActivity: SessionActivity.count() })
+          // 私有状态在入口置位，控制面保留到 disposer 完成后，供发现方等待真实退出。
+          return Response.json({ tuiClients: sseClients, sessionActivity: SessionActivity.count(), stopping: shutdownInProgress })
         if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
           return new Response("not found", { status: 404 })
         // 先返回停止响应，再进入既有关闭闭包，避免在 handler 内中断响应。

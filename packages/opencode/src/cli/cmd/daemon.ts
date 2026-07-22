@@ -10,6 +10,8 @@ import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 const STOP_TIMEOUT_MS = 10_000
 // #259：100ms 是本命令的本地轮询间隔——足够快地反馈 CLI，同时避免对 lock 文件做忙等读取
 const STOP_POLL_INTERVAL_MS = 100
+// 强停仅在认证请求成功且同 owner 复核后发生，确认死亡仍有独立短预算。
+const FORCE_STOP_TIMEOUT_MS = 1_000
 
 export const DaemonCommand = cmd({
   // #259：这里只注册本机 TUI 共享 daemon 的管理入口；不复用 serve，避免把 headless server 生命周期混入
@@ -20,9 +22,9 @@ export const DaemonCommand = cmd({
 })
 
 const DaemonStopCommand = cmd({
-  // #259：stop 明确表示 graceful stop——请求 daemon 自己关闭，不提供 force kill 语义
+  // 先请求正常关闭；超时后只终止重新确认的同一 owner。
   command: "stop",
-  describe: "gracefully stop the shared opencode daemon",
+  describe: "stop the shared opencode daemon",
   builder: (yargs) => withNetworkOptions(yargs),
   async handler() {
     await stopDaemon()
@@ -78,9 +80,27 @@ async function stopDaemon() {
     return
   }
 
-  UI.error(`Timed out waiting for opencode daemon pid=${lock.pid} to stop.`)
-  // #259：超时非零退出——脚本调用方可以据此检测 stop 未完成并采取后续动作
-  process.exitCode = 1
+  // placement 与首次请求一致；等待期间换代的 owner 不能被旧 stop 误杀。
+  const current = await ServerLock.read(lockPath)
+  if (!sameOwner(current, lock)) {
+    UI.error(`Refused to force-stop opencode daemon pid=${lock.pid}: daemon owner changed.`)
+    process.exitCode = 1
+    return
+  }
+  if (!ServerLock.alive(lock.pid)) {
+    await ServerLock.clearIfOwner(lock.token, lockPath)
+    UI.println("Stopped opencode daemon.")
+    return
+  }
+
+  const forceError = await forceStop(lock)
+  if (forceError) {
+    UI.error(`Failed to force-stop opencode daemon pid=${lock.pid}: ${forceError}`)
+    process.exitCode = 1
+    return
+  }
+  await ServerLock.clearIfOwner(lock.token, lockPath)
+  UI.println("Force-stopped opencode daemon.")
 }
 
 async function requestStop(lock: ServerLock.ServerLock, controlPort: number) {
@@ -99,8 +119,8 @@ async function requestStop(lock: ServerLock.ServerLock, controlPort: number) {
   }
 }
 
-async function waitForStop(lock: ServerLock.ServerLock) {
-  const deadline = Date.now() + STOP_TIMEOUT_MS
+async function waitForStop(lock: ServerLock.ServerLock, timeoutMs = STOP_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs
   // 清锁或控制端口断开不代表进程已退出，成功条件仍是实际 PID 消失。
 
   while (Date.now() < deadline) {
@@ -109,4 +129,26 @@ async function waitForStop(lock: ServerLock.ServerLock) {
   }
 
   return false
+}
+
+function sameOwner(current: ServerLock.ServerLock | undefined, expected: ServerLock.ServerLock) {
+  // PID、token 和私有端口三者均来自重新读取的 owner，不能凭旧 PID 授权强停。
+  return (
+    current !== undefined &&
+    current.pid === expected.pid &&
+    current.token === expected.token &&
+    current.controlPort === expected.controlPort
+  )
+}
+
+async function forceStop(lock: ServerLock.ServerLock) {
+  // 发信号不等于确认死亡；kill 抛错后也须复核退出竞态，存活则保留原错误。
+  try {
+    process.kill(lock.pid, "SIGKILL")
+  } catch (error) {
+    if (!ServerLock.alive(lock.pid)) return
+    return errorMessage(error)
+  }
+  if (await waitForStop(lock, FORCE_STOP_TIMEOUT_MS)) return
+  return `daemon pid=${lock.pid} is still alive after force stop`
 }

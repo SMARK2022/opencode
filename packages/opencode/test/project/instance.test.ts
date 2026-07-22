@@ -1,7 +1,9 @@
 import { describe, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { Deferred, Effect, Fiber, Layer } from "effect"
+import { Deferred, Duration, Effect, Fiber, Layer } from "effect"
+import { ProjectV2 } from "@opencode-ai/core/project"
+import { Project } from "../../src/project/project"
 import { InstanceRef } from "../../src/effect/instance-ref"
 import { registerDisposer } from "../../src/effect/instance-registry"
 import { InstanceBootstrap } from "../../src/project/bootstrap"
@@ -118,6 +120,43 @@ describe("InstanceStore", () => {
       const [firstCtx, secondCtx] = yield* Effect.all([Fiber.join(first), Fiber.join(second)])
       expect(secondCtx).toBe(firstCtx)
       expect(initialized).toBe(1)
+    }),
+  )
+
+  // #523：disposeAll 必须取消 pending bootstrap，而不是等待它自然完成。
+  // 契约面：dispose 的 500ms 预算在 release 之前就应完成——取消语义优先于等待。
+  it.live("cancels pending bootstrap during disposeAll", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true })
+      const store = yield* InstanceStore.Service
+      const started = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+
+      // #523：bootstrap 停在 started 之后——load 已完成登记但 producer 未完成。
+      yield* setBootstrap(
+        Effect.gen(function* () {
+          yield* Deferred.succeed(started, undefined)
+          yield* Deferred.await(release)
+        }),
+      )
+
+      const loading = yield* store.load({ directory: dir }).pipe(Effect.forkScoped)
+      // #523：await started 保证 cancel 时 producer 确实在运行中。
+      yield* Deferred.await(started)
+
+      // #523：若不取消 producer，disposeAll 会挂在 Deferred.await(entry.deferred) 上直到 release。
+      const disposal = yield* store.disposeAll().pipe(Effect.forkScoped)
+      const finished = yield* Fiber.join(disposal).pipe(
+        Effect.timeoutOrElse({ duration: Duration.millis(500), orElse: () => Effect.fail(new Error("dispose timeout")) }),
+        Effect.exit,
+      )
+
+      yield* Deferred.succeed(release, undefined)
+      // #523：loading 被 cancel 中断后 join 必须可完成——不能因中断遗留挂起 fiber。
+      yield* Fiber.join(loading).pipe(Effect.exit)
+
+      // release 发生前必须完成取消；最终断言不能被释放 bootstrap 的收尾动作掩盖。
+      expect(finished._tag).toBe("Success")
     }),
   )
 
@@ -246,3 +285,47 @@ describe("InstanceStore", () => {
     }),
   )
 })
+
+testEffect(Layer.empty).live("cancels and re-arms pending bootstrap with isolated services", () =>
+  Effect.gen(function* () {
+    const started = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    let boots = 0
+    let stopped = false
+    const layer = LayerNode.compile(InstanceStore.node, [
+      [Project.node, Layer.mock(Project.Service, {
+        fromDirectory: directory => Effect.succeed({
+          sandbox: directory,
+          project: { id: ProjectV2.ID.make("global"), worktree: directory, sandboxes: [], time: { created: 0, updated: 0 } },
+        }),
+      })],
+      [InstanceStore.bootstrapNode, Layer.succeed(InstanceBootstrap.Service, {
+        // 只有首个producer被Deferred挂住；本测试不装配默认Project/DB/Git或应用启动图。
+        run: Effect.gen(function* () {
+          boots++
+          if (boots !== 1) return
+          yield* Deferred.succeed(started, undefined)
+          yield* Deferred.await(release)
+        }).pipe(Effect.ensuring(Effect.sync(() => { stopped = true }))),
+      })],
+    ])
+    yield* Effect.gen(function* () {
+      const store = yield* InstanceStore.Service
+      const input = { directory: process.cwd() }
+      const loading = yield* store.load(input).pipe(Effect.forkScoped)
+      yield* Deferred.await(started)
+      // release前的500ms合同与source相同，失败也先释放fixture再断言，避免测试自身挂起。
+      const finished = yield* store.disposeAll().pipe(Effect.timeoutOrElse({ duration: Duration.millis(500), orElse: () => Effect.fail(new Error("dispose timeout")) }), Effect.exit)
+      const stoppedBeforeRelease = stopped
+      yield* Deferred.succeed(release, undefined)
+      const loadingExit = yield* Fiber.join(loading).pipe(Effect.exit)
+      expect(finished._tag).toBe("Success")
+      expect(stoppedBeforeRelease).toBe(true)
+      expect(loadingExit._tag).toBe("Failure")
+      // 被取消的旧entry不能留作可复用缓存；新entry仍保持既有load去重。
+      const current = yield* store.load(input)
+      expect(yield* store.load(input)).toBe(current)
+      expect(boots).toBe(2)
+    }).pipe(Effect.provide(layer))
+  }),
+)
