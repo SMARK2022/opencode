@@ -567,12 +567,19 @@ describe("tui sync", () => {
       expect(kv.get("session_directory_filter_enabled", true)).toBe(true)
       expect(session.at(-1)?.searchParams.get("scope")).toBeNull()
       expect(session.at(-1)?.searchParams.get("path")).toBe("packages/opencode")
+      // Path A：半年 lookback + browse limit 1600（与 session-list-params 对齐）
+      expect(session.at(-1)?.searchParams.get("limit")).toBe("1600")
+      const start = Number(session.at(-1)?.searchParams.get("start"))
+      const lookback = 180 * 24 * 60 * 60 * 1000
+      expect(start).toBeGreaterThan(Date.now() - lookback - 60_000)
+      expect(start).toBeLessThanOrEqual(Date.now() - lookback + 60_000)
 
       kv.set("session_directory_filter_enabled", false)
       await sync.session.refresh()
 
       expect(session.at(-1)?.searchParams.get("scope")).toBe("project")
       expect(session.at(-1)?.searchParams.get("path")).toBeNull()
+      expect(session.at(-1)?.searchParams.get("limit")).toBe("1600")
     } finally {
       app.renderer.destroy()
       Global.Path.state = previous

@@ -15,11 +15,25 @@ import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./se
  * LIKE 把用户输入里的 % / _ 当作通配符。
  *
  * 空白搜索返回 undefined，避免 `instr(text, "")` 把所有行都当作命中。
+ *
+ * 多关键词：按空白切成 token，每个 token 仍是 title∨可见内容命中，
+ * token 之间 AND（交集），而不是把 "A B" 当整串子串检索。
  */
 export function searchCondition(search: string): SQL | undefined {
-  const needle = search.trim().toLowerCase()
-  if (!needle) return undefined
+  const tokens = search
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length > 0)
+  if (tokens.length === 0) return undefined
 
+  // 单 token 与历史语义一致；多 token 逐个 AND，等价于「先 A 再 B 再 C」
+  const parts = tokens.map((needle) => tokenCondition(needle))
+  if (parts.length === 1) return parts[0]
+  return sql`(${sql.join(parts, sql` and `)})`
+}
+
+function tokenCondition(needle: string) {
   return sql`(
     ${textMatches(sql`${SessionTable.title}`, needle)}
     or exists (

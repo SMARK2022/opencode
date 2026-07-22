@@ -35,6 +35,7 @@ import { useKV } from "./kv"
 import { useRoute } from "./route"
 // [local-smark] SessionPath for daemon multi-instance path management
 import { SessionPath } from "@/session/path"
+import { SESSION_LIST_BROWSE_LIMIT, SESSION_LIST_LOOKBACK_MS } from "@tui/util/session-list-params"
 import { aggregateFailures } from "./aggregate-failures"
 import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
 import { DisposedReason } from "@/server/event"
@@ -401,7 +402,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
     function listSessions() {
       return sdk.client.session
-        .list({ start: Date.now() - 90 * 24 * 60 * 60 * 1000, limit: 1200, ...sessionListQuery() })
+        .list({
+          start: Date.now() - SESSION_LIST_LOOKBACK_MS,
+          limit: SESSION_LIST_BROWSE_LIMIT,
+          ...sessionListQuery(),
+        })
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
     }
 
