@@ -5,6 +5,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { FileSystem } from "../filesystem"
 import { DecodeError, ResizerUnavailableError, SizeError } from "../image"
+import { isBmp } from "./header"
 
 const JPEG_QUALITIES = [80, 85, 70, 55, 40]
 
@@ -28,8 +29,9 @@ export const make = Effect.gen(function* () {
     },
   ) {
     const photon = yield* loadPhoton
+    const buffer = Buffer.from(content.content, "base64")
     const decoded = yield* Effect.try({
-      try: () => photon.PhotonImage.new_from_byteslice(Buffer.from(content.content, "base64")),
+      try: () => photon.PhotonImage.new_from_byteslice(buffer),
       catch: () => new DecodeError({ resource }),
     })
     try {
@@ -38,7 +40,7 @@ export const make = Effect.gen(function* () {
       const bytes = Buffer.byteLength(content.content, "utf-8")
       const withinLimits = width <= limits.maxWidth && height <= limits.maxHeight && bytes <= limits.maxBase64Bytes
       // 两代共用默认策略：仅原生支持的MIME保持原编码，BMP或未知声明仍须规整。
-      if (withinLimits && ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(content.mime)) return content
+      if (withinLimits && !isBmp(buffer) && ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(content.mime)) return content
       if (!limits.autoResize && !withinLimits)
         return yield* new SizeError({
           resource,

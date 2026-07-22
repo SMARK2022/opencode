@@ -6,6 +6,7 @@ import photonWasm from "@silvia-odwyer/photon-node/photon_rs_bg.wasm" with { typ
 import { Context, Effect, Layer, Schema } from "effect"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { hasPngHeader, hasValidBmpHeader, isBmp, isPng } from "@opencode-ai/core/image/header"
 
 const MAX_BASE64_BYTES = 5 * 1024 * 1024
 const MAX_WIDTH = 2000
@@ -64,6 +65,31 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
 
+// #534：proof 只绑定当前 MIME/URL；插件改写任一字段后必须重新 decode，不能沿用旧附件的成功结论。
+// Symbol 保持 transient：对象内传递可见，JSON/schema 编码天然不可见，最终 consumer 仍显式剥离。
+const normalizedProof = Symbol("opencode.image.normalized")
+type Attachment = { mime: string; url: string }
+
+export function markNormalized<T extends Attachment>(input: T) {
+  return Object.assign(input, { [normalizedProof]: { mime: input.mime, url: input.url } })
+}
+
+export function consumeNormalized<T extends Attachment>(input: T) {
+  const proof = Reflect.get(input, normalizedProof)
+  const attachment = { ...input }
+  // #534：consumer 无论命中与否都先剥离 Symbol，禁止进入 schema、事件或 SQLite；
+  // proof 缺失不是错误：外部 Tool 附件本来就没有 proof，必须按正常路径进入 Image owner。
+  Reflect.deleteProperty(attachment, normalizedProof)
+  return {
+    attachment,
+    valid:
+      typeof proof === "object" &&
+      proof !== null &&
+      Reflect.get(proof, "mime") === input.mime &&
+      Reflect.get(proof, "url") === input.url,
+  }
+}
+
 // #485：导出 layer 供离线维护脚本（script/migrate-image-attachment.ts）复用生产 normalize 链
 export const layer = Layer.effect(
   Service,
@@ -106,9 +132,11 @@ export const layer = Layer.effect(
 
       const base64 = input.url.slice(input.url.indexOf(";base64,") + ";base64,".length)
       const bytes = Buffer.byteLength(base64, "utf8")
+      const buffer = Buffer.from(base64, "base64")
+      // 结构门禁不替代像素解码；按真实bytes预选BMP，禁止失败后换backend。
+      if (buffer.length === 0 || (isPng(buffer) && !hasPngHeader(buffer)) || (isBmp(buffer) && !hasValidBmpHeader(buffer))) return yield* new DecodeError()
 
-      const supported = ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(input.mime)
-      if (["image/tiff", "image/avif", "image/heif", "image/heic"].includes(input.mime)) {
+      if (!isBmp(buffer)) {
         const content = yield* loadSharp.pipe(
           Effect.flatMap((normalize) =>
             normalize(
@@ -143,7 +171,7 @@ export const layer = Layer.effect(
       const photon = yield* loadPhoton
 
       const decoded = yield* Effect.try({
-        try: () => photon.PhotonImage.new_from_byteslice(Buffer.from(base64, "base64")),
+        try: () => photon.PhotonImage.new_from_byteslice(buffer),
         catch: () => new DecodeError(),
       }).pipe(Effect.tapError((error) => Effect.logWarning("failed to decode image", { error })))
 
@@ -153,7 +181,6 @@ export const layer = Layer.effect(
         const withinLimits =
           originalWidth <= info.maxWidth && originalHeight <= info.maxHeight && bytes <= info.maxBase64Bytes
         // BMP 即使未超限也须转成 PNG/JPEG；禁用缩放不禁止等尺寸转码。
-        if (withinLimits && supported) return input
         if (!info.autoResize && !withinLimits)
           return yield* new SizeError({
             bytes,

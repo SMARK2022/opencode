@@ -13,7 +13,7 @@ const metadata = sharpRequire("./package.json") as { version: string; optionalDe
 export async function createSharpNativeFileMap(item: Target) {
   const target = `${item.os === "linux" && item.abi === "musl" ? "linuxmusl" : item.os}-${item.arch}`
   const addonPackage = `@img/sharp-${target}`
-  // 0.33.5未发布Windows ARM64 addon；保留该平台原有Photon能力，不伪造Sharp支持或阻断整个发布。
+  // 支持矩阵取自当前Sharp包声明，未发布的目标不伪造addon或阻断其他平台构建。
   if (!Object.hasOwn(metadata.optionalDependencies, addonPackage)) return { source: `export default ${JSON.stringify({ target, version: metadata.version, addon: null, files: {} })}`, supported: false }
   const packages = [addonPackage, ...(item.os === "win32" ? [] : [`@img/sharp-libvips-${target}`])]
   const files = (await Promise.all(packages.map(async (name) => {
@@ -37,9 +37,12 @@ export const sharpPlugin: BunPlugin = {
     build.onLoad({ filter: /[\\/]sharp[\\/]lib[\\/]sharp\.js$/ }, async (args) => {
       const source = await Bun.file(args.path).text()
       const before = "const paths = ["
-      // 精确匹配当前0.33.5 loader；该版没有0.34.5的x64-v2 guard，不移入不存在的第二锚点。
+      // 0.34.5的绝对释放路径也必须执行Linux x64 CPU检查，不能因改写require路径绕过原guard。
+      const guard = "path.startsWith('@img/sharp-linux-x64')"
       if (source.indexOf(before) === -1 || source.indexOf(before) !== source.lastIndexOf(before)) throw new Error(`Sharp ${metadata.version} loader changed`)
-      return { contents: source.replace(before, "const paths = [globalThis.__OPENCODE_SHARP_NATIVE_PATH,"), loader: "js" }
+      if (source.indexOf(guard) === -1 || source.indexOf(guard) !== source.lastIndexOf(guard)) throw new Error(`Sharp ${metadata.version} CPU guard changed`)
+      return { contents: source.replace(before, "const paths = [globalThis.__OPENCODE_SHARP_NATIVE_PATH,")
+        .replace(guard, "runtimePlatform === 'linux-x64'"), loader: "js" }
     })
   },
 }
@@ -49,7 +52,7 @@ export async function runSharpSmoke(item: Target, target: string, files: string,
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-sharp-smoke-"))
   const outfile = path.join(root, `sharp-smoke${item.os === "win32" ? ".exe" : ""}`)
   const sharp = (await import("sharp")).default
-  // TIFF强制经过共享Sharp adapter；PNG在目标走Photon，不能拿来认证这条原生加载链。
+  // TIFF强制经过共享Sharp adapter，编译验证不能只检查图片metadata或绕过真实归一化服务。
   const input = await sharp(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEUlEQVR4nGP4z8DQAMIMMAYAOOgF/REzMMkAAAAASUVORK5CYII=", "base64")).tiff().toBuffer()
   const source = `
 import { Image } from "./src/image/image"

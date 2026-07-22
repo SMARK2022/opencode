@@ -796,6 +796,8 @@ describe("tool.read truncation", () => {
         expect(attachment).not.toHaveProperty("id")
         expect(attachment).not.toHaveProperty("sessionID")
         expect(attachment).not.toHaveProperty("messageID")
+      // 原PNG保持逐字bytes；BMP/TIFF/AVIF继续遵守目标转码合同。
+      if (name === "image.png") expect(attachment.url).toBe(`data:image/png;base64,${png.toString("base64")}`)
         const normalized = yield* provideInstance(dir)(
           image.normalize(
             { ...attachment, id: PartID.ascending(), sessionID: ctx.sessionID, messageID: ctx.messageID },
@@ -840,18 +842,162 @@ describe("tool.read truncation", () => {
       // 图片文案允许附加说明；原生附件 MIME 与 data URL 断言继续保留。
       expect(result.output).toStartWith("Image read successfully")
       expect(result.attachments?.[0].mime).toBe("image/jpeg")
-      expect(result.attachments?.[0].url.startsWith("data:image/jpeg;base64,")).toBe(true)
+      // #534：content-sniff 只改变 MIME 识别，不得让完整 decode 的成功 JPEG 被重编码；
+      // #534：精确 data URL 同时锁定 MIME 与 base64，单纯 startsWith 无法发现隐式质量损失。
+      expect(result.attachments?.[0].url).toBe(`data:image/jpeg;base64,${jpeg.toString("base64")}`)
     }),
   )
 
-  // #276：损坏图片应返回解码错误，而非当作附件继续返回
-  it.live("fails invalid image attachments instead of returning undecodable bytes", () =>
+  // #534：损坏图片降级为有界 omission 文本——不再向上抛错，坏 bytes 不交给 provider
+  it.live("omits invalid image attachments instead of returning undecodable bytes", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       yield* put(path.join(dir, "broken.jpg"), Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]))
 
-      const error = yield* fail(dir, { filePath: path.join(dir, "broken.jpg") })
-      expect(error.message).toBe("Image could not be decoded")
+      const result = yield* exec(dir, { filePath: path.join(dir, "broken.jpg") })
+      // omission 不带 attachment；loaded 保留文件动作完成事实
+      expect(result.output).toBe("Image omitted: could not be decoded or resized within the image size limit.")
+      expect(result.attachments).toBeUndefined()
+    }),
+  )
+
+  // #534：PNG 首块结构门禁——截断 IHDR（magic 对但块不完整）在 decoder 前稳定拒绝
+  it.live("omits a PNG whose IHDR chunk is truncated", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      // magic + 长度域声明 13 但整体不足 33 字节，IHDR 不可完整读取
+      yield* put(path.join(dir, "bad.png"), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72]))
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "bad.png") })
+      expect(result.output).toBe("Image omitted: could not be decoded or resized within the image size limit.")
+      expect(result.attachments).toBeUndefined()
+    }),
+  )
+
+  // #534：IHDR 完整但 length/type 非法的双变异——两个向量都保留 PNG magic，
+  // 只有固定首块规则能在 decoder 前稳定区分；分开变异避免一个宽松检查恰好因另一字段失败而误绿。
+  it.live("omits PNG first chunks whose IHDR length or type is invalid", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+        "base64",
+      )
+      const badLength = Buffer.from(png)
+      badLength.writeUInt32BE(12, 8)
+      const badType = Buffer.from(png)
+      badType.write("JHDR", 12, "ascii")
+      for (const [name, data] of [
+        ["bad-length.png", badLength],
+        ["bad-type.png", badType],
+      ] as const) {
+        yield* put(path.join(dir, name), data)
+        const result = yield* exec(dir, { filePath: path.join(dir, name) })
+        // omission 结果还证明结构拒绝不会回退到文本读取或原附件透传。
+        expect(result.output).toBe("Image omitted: could not be decoded or resized within the image size limit.")
+        expect(result.attachments).toBeUndefined()
+      }
+    }),
+  )
+
+  // #534：IHDR/尺寸完整但压缩流损坏——metadata-only 实现会错误放行该向量，必须真像素 decode。
+  it.live("omits a PNG whose IDAT stream is corrupt after valid metadata", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+        "base64",
+      )
+      const idat = png.indexOf(Buffer.from("IDAT"))
+      png[idat + 4] ^= 0xff
+      yield* put(path.join(dir, "broken.png"), png)
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "broken.png") })
+      expect(result.output).toBe("Image omitted: could not be decoded or resized within the image size limit.")
+      expect(result.attachments).toBeUndefined()
+    }),
+  )
+
+  // #534：GIF容器合法时保留动画容器和逐字bytes；后帧损坏由同一全页decoder拒绝。
+  // 下面的有效样本与prompt中的坏后帧样本共享原始GIF，只改变错误样本一个字节。
+  it.live("passes a valid multi-frame GIF through with exact bytes", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const gif = Buffer.from(
+        "R0lGODlhBAAEAIAAAExpcUxpcSH/C05FVFNDQVBFMi4wAwEAAAAh+QQFAAAAACwAAAAABAAEAAACBIyPGQUAIfkEBQAAAAAsAAAAAAQABACATGlx/wAAAgSMjxkFADs=",
+        "base64",
+      )
+      yield* put(path.join(dir, "valid.gif"), gif)
+      // 双帧GIF锁定合法pass-through；prompt用例另外锁定坏后帧不能透传。
+      const valid = yield* exec(dir, { filePath: path.join(dir, "valid.gif") })
+      // 全帧验证成功后必须保留原始逐字 bytes，不能把 GIF 压成首帧或其他格式。
+      expect(valid.attachments?.[0].mime).toBe("image/gif")
+      // exact data URL 锁定无损：任何重编码（哪怕转同尺寸 GIF）都会改变 bytes。
+      expect(valid.attachments?.[0].url).toBe(`data:image/gif;base64,${gif.toString("base64")}`)
+    }),
+  )
+
+  // #534：BMP header 门禁——合法 BMP 经 Photon 转码为 PNG 附件；
+  // planes/bpp/offset/file-size 非法时在前置验证拒绝，不依赖 WASM trap，也不被 Photon 宽松接受。
+  it.live("opens valid BMP with Photon and rejects malformed BMP headers", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const bmp = Buffer.alloc(58)
+      bmp.write("BM", 0, "ascii")
+      bmp.writeUInt32LE(bmp.length, 2)
+      bmp.writeUInt32LE(54, 10)
+      bmp.writeUInt32LE(40, 14)
+      bmp.writeInt32LE(1, 18)
+      bmp.writeInt32LE(1, 22)
+      bmp.writeUInt16LE(1, 26)
+      bmp.writeUInt16LE(24, 28)
+      bmp.writeUInt32LE(4, 34)
+      bmp.set([0, 0, 255, 0], 54)
+      yield* put(path.join(dir, "valid.bmp"), bmp)
+
+      const valid = yield* exec(dir, { filePath: path.join(dir, "valid.bmp") })
+      // BMP由Photon完整open并转换成模型可用PNG，不把原容器交回provider。
+      expect(valid.attachments?.[0].mime).toBe("image/png")
+      expect(valid.attachments?.[0].url.startsWith("data:image/png;base64,")).toBe(true)
+
+      const badSize = Buffer.from(bmp)
+      badSize.writeUInt32LE(1, 2)
+      // 四个变异各锁一个 header 字段：file-size/offset/planes/bpp 互不重叠，单独失败互不掩盖。
+      const badOffset = Buffer.from(bmp)
+      badOffset.writeUInt32LE(10, 10)
+      const badPlanes = Buffer.from(bmp)
+      badPlanes.writeUInt16LE(2, 26)
+      const badBpp = Buffer.from(bmp)
+      badBpp.writeUInt16LE(48, 28)
+      for (const [name, data] of [
+        ["bad-size.bmp", badSize],
+        ["bad-offset.bmp", badOffset],
+        ["bad-planes.bmp", badPlanes],
+        ["bad-bpp.bmp", badBpp],
+      ] as const) {
+        yield* put(path.join(dir, name), data)
+        const result = yield* exec(dir, { filePath: path.join(dir, name) })
+        // 每个错误向量都要求无 attachment，防止 WASM trap 被捕获后仍误走成功输出。
+        expect(result.output).toBe("Image omitted: could not be decoded or resized within the image size limit.")
+        expect(result.attachments).toBeUndefined()
+      }
+    }),
+  )
+
+  // #534：SVG 属于 Photon decoder 域外格式——目标唯一谓词 isImageAttachment 将其排除，
+  // read 保持文本读取（源仓的 SVG 解码透传依赖 Sharp 域，目标无对应能力，见 record 裁定）。
+  it.live("reads SVG image media as text instead of decoding it", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="red"/></svg>'
+      // SVG 无二进制 magic；sniff 回退到扩展名 MIME 后由谓词排除，不进 decoder。
+      yield* put(path.join(dir, "vector.svg"), svg)
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "vector.svg") })
+      // 域外格式不走 omission——文本内容完整回显，不进 Image.Service 也不伪造解码失败。
+      expect(result.attachments).toBeUndefined()
+      expect(result.output).toContain("<svg")
+      expect(result.output).toContain("fill=\"red\"")
     }),
   )
 
@@ -873,9 +1019,9 @@ describe("tool.read truncation", () => {
     }),
   )
 
-  // #485：fail-closed 反转 #277 回退契约——处理器不可用时终止本次 Read，
-  // 不再把未经主处理链确认的原始字节继续交给模型
-  noResizer.live("fails closed when the image resizer is unavailable", () =>
+  // #534：resizer 不可用时同样降级为 omission 文本——#485 的 fail-closed 在 read 层被
+  // #534 的可恢复降级取代；不再把原始字节交给模型，但读取动作本身不再终止
+  noResizer.live("omits the image when the resizer is unavailable", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       const png = Buffer.from(
@@ -884,9 +1030,9 @@ describe("tool.read truncation", () => {
       )
       yield* put(path.join(dir, "image.png"), png)
 
-      const error = yield* fail(dir, { filePath: path.join(dir, "image.png") })
-      // 错误必须指向resizer本身，而不是被上层包装成通用读取失败
-      expect(error.message).toBe("Image resizer is unavailable")
+      const result = yield* exec(dir, { filePath: path.join(dir, "image.png") })
+      expect(result.output).toBe("Image omitted: could not be decoded or resized within the image size limit.")
+      expect(result.attachments).toBeUndefined()
     }),
   )
 
@@ -911,7 +1057,7 @@ root_type Monster;`
     }),
   )
 
-  it.live("falls through unsupported image mime types to text", () =>
+  it.live("omits image mime types whose content cannot be decoded", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       const cases = [
@@ -923,8 +1069,10 @@ root_type Monster;`
       for (const item of cases) {
         yield* put(path.join(dir, item[0]), item[1])
         const result = yield* exec(dir, { filePath: path.join(dir, item[0]) })
+        // #534：image/* 不再由 read 白名单放行——内容无法解码时统一降级为 omission 文本，
+        // 不把伪装成图片扩展名的原始字节当作文本回显。
         expect(result.attachments).toBeUndefined()
-        expect(result.output).toContain(item[1])
+        expect(result.output).toBe("Image omitted: could not be decoded or resized within the image size limit.")
       }
     }),
   )

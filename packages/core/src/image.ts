@@ -4,6 +4,7 @@ import { makeLocationNode } from "./effect/app-node"
 import { Context, Effect, Layer, Schema } from "effect"
 import { Config } from "./config"
 import { FileSystem } from "./filesystem"
+import { hasPngHeader, hasValidBmpHeader, isBmp, isPng } from "./image/header"
 
 export class ResizerUnavailableError extends Schema.TaggedErrorClass<ResizerUnavailableError>()(
   "Image.ResizerUnavailableError",
@@ -73,9 +74,12 @@ export const layer = Layer.effect(
           entry.type === "document" && entry.info.attachments?.image ? [entry.info.attachments.image] : [],
         ),
       )
-      const normalize = yield* (["image/tiff", "image/avif", "image/heif", "image/heic"].includes(content.mime)
-        ? loadSharpAdapter
-        : loadAdapter)
+      const buffer = Buffer.from(content.content, "base64")
+      // 与V1同一header合同；错误仍使用当前Location/资源的typed Image错误。
+      if (buffer.length === 0 || (isPng(buffer) && !hasPngHeader(buffer)) || (isBmp(buffer) && !hasValidBmpHeader(buffer)))
+        return yield* new DecodeError({ resource })
+      // 互斥格式分支保留BMP WASM能力，其余格式共用generic全页解码。
+      const normalize = yield* (isBmp(buffer) ? loadAdapter : loadSharpAdapter)
       return yield* normalize(resource, content, {
         autoResize: image.auto_resize ?? true,
         maxWidth: image.max_width ?? 2_000,

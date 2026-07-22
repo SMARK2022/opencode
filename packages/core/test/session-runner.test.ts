@@ -3041,6 +3041,49 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
+  it.live("omits unsafe Native user and tool images while preserving durable prompt retries", () => Effect.gen(function* () {
+    yield* setup
+    const { default: sharp } = yield* Effect.promise(() => import("sharp"))
+    const png = yield* Effect.promise(() => sharp({ create: { width: 1, height: 1, channels: 4, background: "#ff0000" } }).png().toBuffer())
+    const bad = Buffer.from(png)
+    bad[bad.indexOf(Buffer.from("IDAT")) + 4] ^= 0xff
+    const valid = `data:image/png;base64,${png.toString("base64")}`
+    const broken = `data:image/png;base64,${bad.toString("base64")}`
+    const session = yield* SessionV2.Service
+    const registry = yield* ToolRegistry.Service
+    // 真正的canonical工具先完成，再观察下一次fake模型请求；不能只调用图片helper自证。
+    yield* registry.register({ picture: Tool.make({
+      description: "Return a requested image fixture",
+      input: Schema.Struct({}), output: Schema.Struct({}),
+      execute: () => Effect.succeed({}),
+      toModelOutput: () => [{ type: "file", mime: "image/png", data: bad.toString("base64"), name: "broken-tool.png" }, { type: "text", text: "Tool text retained" }],
+    }) })
+    const promptID = SessionMessage.ID.make("msg_native_images")
+    const prompt = { text: "Inspect these images", files: [{ uri: valid, mime: "image/png", name: "valid.png" }, { uri: broken, mime: "image/png", name: "broken.png" }] }
+    yield* session.prompt({ id: promptID, sessionID, prompt, resume: false })
+    requests.length = 0
+    responses = [[
+      LLMEvent.stepStart({ index: 0 }),
+      LLMEvent.toolCall({ id: "call-picture", name: "picture", input: {} }),
+      LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+      LLMEvent.finish({ reason: "tool-calls" }),
+    ], fragmentFixture("text", "images-final", ["Images inspected"]).completeEvents]
+    yield* session.resume(sessionID)
+    expect(requests).toHaveLength(2)
+    const shown = JSON.stringify(requests.map(request => request.messages))
+    expect(shown).toContain(valid)
+    expect(shown).not.toContain(broken)
+    expect(shown).toContain("Image omitted: could not be decoded or resized within the image size limit.")
+    expect(shown).toContain("Tool text retained")
+    // 同ID精确重试仍按原始输入认领，规整不改变durable admission的幂等合同。
+    const retry = yield* session.prompt({ id: promptID, sessionID, prompt, resume: false })
+    expect(retry.id).toBe(promptID)
+    const history = yield* session.context(sessionID)
+    expect(history.find(message => message.type === "user")).toMatchObject({ files: [{ uri: valid }, { uri: broken }] })
+    expect(history.flatMap(message => message.type === "assistant" ? message.content : []).find(part => part.type === "tool" && part.id === "call-picture")).toMatchObject({ state: { status: "completed" } })
+    responses = undefined
+  }))
+
   it.effect("projects reasoning and tool events without executing or continuing tools", () =>
     Effect.gen(function* () {
       yield* setup
