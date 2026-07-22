@@ -763,6 +763,8 @@ describe("tool.read truncation", () => {
       expect(result.attachments?.[0]).not.toHaveProperty("id")
       expect(result.attachments?.[0]).not.toHaveProperty("sessionID")
       expect(result.attachments?.[0]).not.toHaveProperty("messageID")
+      // 未超限图片虽保持原 bytes，也必须先完整 decode；精确相等锁定无损 pass-through 合同。
+      expect(result.attachments?.[0].url).toBe(`data:image/png;base64,${png.toString("base64")}`)
     }),
   )
 
@@ -773,22 +775,168 @@ describe("tool.read truncation", () => {
         "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAEFAqf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/ASP/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/ASP/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAY/Al//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IV//2gAMAwEAAgADAAAAEP/EFBQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8QH//EFBQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8QH//EFBABAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8QH//Z",
         "base64",
       )
-      yield* put(path.join(dir, "image.bin"), jpeg)
+      // fixture 必须能完成像素 decode；旧样本只有 metadata 可读，会掩盖 metadata-only pass-through 回归。
+      yield* put(
+        path.join(dir, "image.bin"),
+        Buffer.from(
+          "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAACAAIDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAj/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAwT/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCbAFAH/9k=",
+          "base64",
+        ),
+      )
 
       const result = yield* exec(dir, { filePath: path.join(dir, "image.bin") })
       expect(result.output).toStartWith("Image read successfully")
       expect(result.attachments?.[0].mime).toBe("image/jpeg")
-      expect(result.attachments?.[0].url.startsWith("data:image/jpeg;base64,")).toBe(true)
+      const persisted = Buffer.from(yield* Effect.promise(() => Bun.file(path.join(dir, "image.bin")).arrayBuffer()))
+      // content-sniff 只改变 MIME 识别，不得让完整 decode 的成功 JPEG 被重编码。
+      // 精确 data URL 同时锁定 MIME 与 base64，单纯断言 image/jpeg 无法发现隐式质量损失。
+      expect(result.attachments?.[0].url).toBe(`data:image/jpeg;base64,${persisted.toString("base64")}`)
     }),
   )
 
-  it.live("fails invalid image attachments instead of returning undecodable bytes", () =>
+  it.live("omits invalid image attachments instead of returning undecodable bytes", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       yield* put(path.join(dir, "broken.jpg"), Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]))
 
-      const error = yield* fail(dir, { filePath: path.join(dir, "broken.jpg") })
-      expect(error.message).toBe("Image could not be decoded")
+      const result = yield* exec(dir, { filePath: path.join(dir, "broken.jpg") })
+      // 内容错误必须被压成稳定文本，既不泄漏坏 bytes，也不终止后续 tool 交互。
+      expect(result.output).toStartWith("Image omitted")
+      expect(result.attachments).toBeUndefined()
+    }),
+  )
+
+  it.live("omits a png whose IDAT stream is corrupt after valid metadata", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+        "base64",
+      )
+      const idat = png.indexOf(Buffer.from("IDAT"))
+      // IHDR 和尺寸保持有效，仅破坏压缩流；metadata-only 实现会错误放行该向量。
+      png[idat + 4] ^= 0xff
+      yield* put(path.join(dir, "broken.png"), png)
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "broken.png") })
+      expect(result.output).toStartWith("Image omitted")
+      expect(result.attachments).toBeUndefined()
+    }),
+  )
+
+  it.live("rejects PNG first chunks whose IHDR length or type is invalid", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+        "base64",
+      )
+      const badLength = Buffer.from(png)
+      badLength.writeUInt32BE(12, 8)
+      const badType = Buffer.from(png)
+      badType.write("JHDR", 12, "ascii")
+      for (const [name, data] of [["bad-length.png", badLength], ["bad-type.png", badType]] as const) {
+        yield* put(path.join(dir, name), data)
+        const result = yield* exec(dir, { filePath: path.join(dir, name) })
+        // 两个向量仍保留 PNG magic，只有固定首块规则能在 decoder 前稳定区分。
+        // length 与 type 分开变异，避免一个宽松检查恰好因另一个字段失败而让测试误绿。
+        // omission 结果还证明结构拒绝不会回退到文本读取或原附件透传。
+        expect(result.output).toStartWith("Image omitted")
+        expect(result.attachments).toBeUndefined()
+      }
+    }),
+  )
+
+  it.live("opens valid BMP with Photon and rejects malformed BMP headers", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const bmp = Buffer.alloc(58)
+      bmp.write("BM", 0, "ascii")
+      bmp.writeUInt32LE(bmp.length, 2)
+      bmp.writeUInt32LE(54, 10)
+      bmp.writeUInt32LE(40, 14)
+      bmp.writeInt32LE(1, 18)
+      bmp.writeInt32LE(1, 22)
+      bmp.writeUInt16LE(1, 26)
+      bmp.writeUInt16LE(24, 28)
+      bmp.writeUInt32LE(4, 34)
+      bmp.set([0, 0, 255, 0], 54)
+      yield* put(path.join(dir, "valid.bmp"), bmp)
+
+      const valid = yield* exec(dir, { filePath: path.join(dir, "valid.bmp") })
+      expect(valid.attachments?.[0].mime).toBe("image/png")
+      expect(Buffer.from(valid.attachments?.[0].url.split(",")[1] ?? "", "base64").subarray(0, 8)).toEqual(
+        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      )
+
+      const badSize = Buffer.from(bmp)
+      badSize.writeUInt32LE(1, 2)
+      const badOffset = Buffer.from(bmp)
+      badOffset.writeUInt32LE(10, 10)
+      const badPlanes = Buffer.from(bmp)
+      badPlanes.writeUInt16LE(2, 26)
+      const badBpp = Buffer.from(bmp)
+      badBpp.writeUInt16LE(48, 28)
+      for (const [name, data] of [
+        ["bad-size.bmp", badSize],
+        ["bad-offset.bmp", badOffset],
+        ["bad-planes.bmp", badPlanes],
+        ["bad-bpp.bmp", badBpp],
+      ] as const) {
+        yield* put(path.join(dir, name), data)
+        const result = yield* exec(dir, { filePath: path.join(dir, name) })
+        // Photon 本身会宽松接受这些头；测试必须证明 owner 的结构门禁先行生效。
+        // planes=2 与 bpp=48 专门锁定 Pi 离散规则，不能仅依赖 offset/file-size 覆盖。
+        // 每个错误向量都要求无 attachment，防止 WASM trap 被捕获后仍误走成功输出。
+        expect(result.output).toStartWith("Image omitted")
+        expect(result.attachments).toBeUndefined()
+      }
+    }),
+  )
+
+  it.live("validates every frame before passing through a GIF", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const gif = Buffer.from(
+        "R0lGODlhBAAEAIAAAExpcUxpcSH/C05FVFNDQVBFMi4wAwEAAAAh+QQFAAAAACwAAAAABAAEAAACBIyPGQUAIfkEBQAAAAAsAAAAAAQABACATGlx/wAAAgSMjxkFADs=",
+        "base64",
+      )
+      yield* put(path.join(dir, "valid.gif"), gif)
+      const valid = yield* exec(dir, { filePath: path.join(dir, "valid.gif") })
+      // 全帧验证成功后必须保留动画容器和逐字 bytes，不能把 GIF 压成首帧或其他格式。
+      // 合法与损坏向量只差第二帧一个字节，使测试能够区分默认首帧 decode 和 pages:-1。
+      expect(valid.attachments?.[0].mime).toBe("image/gif")
+      expect(valid.attachments?.[0].url).toBe(`data:image/gif;base64,${gif.toString("base64")}`)
+      // 第二帧尾部损坏时默认第一页 decode 仍成功，pages:-1 必须拒绝整个附件。
+      // 先复制再变异保持合法 fixture 不变，避免两个断言共享可变 buffer 而相互污染。
+      const broken = Buffer.from(gif)
+      broken[89] = 0
+      yield* put(path.join(dir, "broken.gif"), broken)
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "broken.gif") })
+      expect(result.output).toStartWith("Image omitted")
+      expect(result.attachments).toBeUndefined()
+    }),
+  )
+
+  it.live("decodes generic SVG image media instead of reading it as text", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const svg = Buffer.from(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="red"/></svg>',
+      )
+      yield* put(path.join(dir, "vector.svg"), svg)
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "vector.svg") })
+      expect(result.output).toStartWith("Image read successfully")
+      expect(result.attachments?.[0].mime).toBe("image/svg+xml")
+      expect(result.attachments?.[0].url).toBe(`data:image/svg+xml;base64,${svg.toString("base64")}`)
+
+      yield* put(path.join(dir, "broken.svg"), "<svg><broken")
+      const broken = yield* exec(dir, { filePath: path.join(dir, "broken.svg") })
+      // malformed SVG 仍会被扩展名识别为 image/*；只有统一 Image owner 能阻止 ReadTool 直接成功透传。
+      expect(broken.output).toStartWith("Image omitted")
+      expect(broken.attachments).toBeUndefined()
     }),
   )
 
@@ -809,7 +957,7 @@ describe("tool.read truncation", () => {
     }),
   )
 
-  noResizer.live("fails closed when the image resizer is unavailable", () =>
+  noResizer.live("omits the image when the decoder is unavailable", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       const png = Buffer.from(
@@ -818,9 +966,10 @@ describe("tool.read truncation", () => {
       )
       yield* put(path.join(dir, "image.png"), png)
 
-      // 原图回退会把未经主处理链确认的数据继续交给模型；处理器不可用时必须终止本次 Read。
-      const error = yield* fail(dir, { filePath: path.join(dir, "image.png") })
-      expect(error.message).toBe("Image resizer is unavailable")
+      // 后端不可用时仍禁止原图回退，但 Read 本身以 bounded omission 成功返回，保证会话可继续。
+      const result = yield* exec(dir, { filePath: path.join(dir, "image.png") })
+      expect(result.output).toStartWith("Image omitted")
+      expect(result.attachments).toBeUndefined()
     }),
   )
 
@@ -845,7 +994,7 @@ root_type Monster;`
     }),
   )
 
-  it.live("falls through unsupported image mime types to text", () =>
+  it.live("routes generic image mime types through the decoder", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()
       const cases = [
@@ -858,7 +1007,8 @@ root_type Monster;`
         yield* put(path.join(dir, item[0]), item[1])
         const result = yield* exec(dir, { filePath: path.join(dir, item[0]) })
         expect(result.attachments).toBeUndefined()
-        expect(result.output).toContain(item[1])
+        // 扩展名声明的 image/* 不再落入文本读取；这些伪造内容应被 decoder 安全 omit。
+        expect(result.output).toStartWith("Image omitted")
       }
     }),
   )

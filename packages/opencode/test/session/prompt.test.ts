@@ -59,6 +59,9 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { InstanceRef } from "@/effect/instance-ref"
+import { tool as aiTool } from "ai"
+import { z } from "zod"
+import { SessionEvent } from "@opencode-ai/core/session-event"
 
 void Log.init({ print: false })
 
@@ -76,6 +79,8 @@ const ref = {
   modelID: ModelID.make("test-model"),
 }
 const shortSessionTimeout = process.platform === "win32" ? 15_000 : 3_000
+const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+const twoFrameGif = "R0lGODlhBAAEAIAAAExpcUxpcSH/C05FVFNDQVBFMi4wAwEAAAAh+QQFAAAAACwAAAAABAAEAAACBIyPGQUAIfkEBQAAAAAsAAAAAAQABACATGlx/wAAAgSMjxkFADs="
 
 function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
   return Effect.acquireUseRelease(
@@ -178,6 +183,30 @@ const unavailableImage = Layer.succeed(
   Image.Service,
   Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }),
 )
+const imageNormalizations: string[] = []
+const countingImage = Layer.succeed(
+  Image.Service,
+  Image.Service.of({
+    normalize: (input) => Effect.sync(() => imageNormalizations.push(input.url)).pipe(Effect.as(input)),
+  }),
+)
+const mutatingPlugin = Layer.succeed(
+  Plugin.Service,
+  Plugin.Service.of({
+    trigger: (name, _input, output) =>
+      Effect.sync(() => {
+        if (name !== "chat.message" || typeof output !== "object" || output === null) return output
+        const parts = Reflect.get(output, "parts")
+        if (!Array.isArray(parts)) return output
+        const file = parts.find((part) => typeof part === "object" && part !== null && Reflect.get(part, "type") === "file")
+        // 真实 hook 在 final normalization 前改写 URL；旧 proof 必须失效并让 counting Image owner 再执行一次。
+        if (file) Reflect.set(file, "url", "data:image/png;base64,AQ==")
+        return output
+      }),
+    list: () => Effect.succeed([]),
+    init: () => Effect.void,
+  }),
+)
 
 const processorCreateStarted: Array<() => void> = []
 const blockingProcessor = Layer.succeed(
@@ -187,7 +216,15 @@ const blockingProcessor = Layer.succeed(
   }),
 )
 
-function makeHttp(input?: { processor?: "blocking"; usage?: boolean; image?: "unavailable" }) {
+function makeHttp(input?: {
+  processor?: "blocking"
+  usage?: boolean
+  image?: "unavailable" | "counting"
+  plugin?: "mutate"
+}) {
+  const imageLayer =
+    input?.image === "unavailable" ? unavailableImage : input?.image === "counting" ? countingImage : Image.defaultLayer
+  const registryImageLayer = input?.image === "counting" ? countingImage : registryImage
   const deps = Layer.mergeAll(
     Session.defaultLayer,
     Snapshot.defaultLayer,
@@ -196,7 +233,7 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean; image?: "un
     AgentSvc.defaultLayer,
     Command.defaultLayer,
     Permission.defaultLayer,
-    Plugin.defaultLayer,
+    input?.plugin === "mutate" ? mutatingPlugin : Plugin.defaultLayer,
     Config.defaultLayer,
     ProviderSvc.defaultLayer,
     lsp,
@@ -222,7 +259,7 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean; image?: "un
     Layer.provide(Ripgrep.defaultLayer),
     Layer.provide(Format.defaultLayer),
     Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
-    Layer.provide(registryImage),
+    Layer.provide(registryImageLayer),
     Layer.provideMerge(todo),
     Layer.provideMerge(question),
     Layer.provideMerge(deps),
@@ -233,7 +270,7 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean; image?: "un
       ? blockingProcessor
       : SessionProcessor.layer.pipe(
           Layer.provide(summary),
-          Layer.provide(input?.image === "unavailable" ? unavailableImage : Image.defaultLayer),
+          Layer.provide(imageLayer),
           Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
           Layer.provideMerge(deps),
         )
@@ -246,7 +283,7 @@ function makeHttp(input?: { processor?: "blocking"; usage?: boolean; image?: "un
     TestLLMServer.layer,
     SessionPrompt.layer.pipe(
       Layer.provide(SessionRevert.defaultLayer),
-       Layer.provide(input?.image === "unavailable" ? unavailableImage : Image.defaultLayer),
+      Layer.provide(imageLayer),
       Layer.provide(Reference.defaultLayer),
       Layer.provide(summary),
       Layer.provideMerge(run),
@@ -266,10 +303,12 @@ const it = testEffect(makeHttp())
 const race = testEffect(makeHttp({ processor: "blocking" }))
 const accounting = testEffect(makeHttp({ usage: true }))
 const unavailable = testEffect(makeHttp({ image: "unavailable" }))
+const oneShotImage = testEffect(makeHttp({ image: "counting" }))
+const mutatedImage = testEffect(makeHttp({ image: "counting", plugin: "mutate" }))
 const unix = process.platform !== "win32" ? it.instance : it.instance.skip
 
 unavailable.instance(
-  "fails before persisting an image when the resizer is unavailable",
+  "persists an omission instead of an image when the resizer is unavailable",
   () =>
     Effect.gen(function* () {
       yield* useServerConfig(providerCfg)
@@ -284,9 +323,260 @@ unavailable.instance(
           parts: [{ type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }],
         }),
       )
+      expect(Exit.isSuccess(result)).toBe(true)
+      const messages = yield* MessageV2.filterCompactedEffect(chat.id)
+      // omission 作为 synthetic 诊断落库；失败附件不可残留在任何 part 中或参与真实用户消息分类。
+      expect(messages.flatMap((item) => item.parts).some((part) => part.type === "file")).toBe(false)
+      const omission = messages.flatMap((item) => item.parts).find(
+        (part): part is MessageV2.TextPart => part.type === "text" && part.text.includes("Image omitted"),
+      )
+      expect(omission?.synthetic).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "replaces a pixel-corrupt direct image with a persisted omission",
+  () =>
+    Effect.gen(function* () {
+      yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Malformed image" })
+      const png = Buffer.from(tinyPng, "base64")
+      const idat = png.indexOf(Buffer.from("IDAT"))
+      png[idat + 4] ^= 0xff
+
+      const result = yield* Effect.exit(
+        prompt.prompt({
+          sessionID: chat.id,
+          agent: "build",
+          noReply: true,
+          parts: [{ type: "file", mime: "image/png", url: `data:image/png;base64,${png.toString("base64")}` }],
+        }),
+      )
+      expect(Exit.isSuccess(result)).toBe(true)
+      const parts = (yield* MessageV2.filterCompactedEffect(chat.id)).flatMap((item) => item.parts)
+      // decoder 失败后只能留下 omission 文本，原始坏 data URL 不得进入持久化或后续 provider 请求。
+      expect(parts.some((part) => part.type === "file")).toBe(false)
+      const omission = parts.find(
+        (part): part is MessageV2.TextPart => part.type === "text" && part.text.includes("Image omitted"),
+      )
+      expect(omission?.synthetic).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "decodes before reporting size when auto resize is disabled",
+  () =>
+    Effect.gen(function* () {
+      yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        attachment: { image: { auto_resize: false, max_base64_bytes: 1 } },
+      }))
+      const png = Buffer.from(tinyPng, "base64")
+      const idat = png.indexOf(Buffer.from("IDAT"))
+      png[idat + 4] ^= 0xff
+      const result = yield* Effect.gen(function* () {
+        const image = yield* Image.Service
+        return yield* image
+          .normalize({ id: PartID.ascending(), messageID: MessageID.ascending(),
+            sessionID: SessionID.make("ses_decode_before_size"), type: "file", mime: "image/png",
+            url: `data:image/png;base64,${png.toString("base64")}` })
+          .pipe(Effect.exit)
+      }).pipe(Effect.provide(Image.defaultLayer))
+
       expect(Exit.isFailure(result)).toBe(true)
-      // normalize失败发生在updateMessage/updatePart之前，数据库中不应留下半个用户请求。
-      expect(yield* MessageV2.filterCompactedEffect(chat.id)).toHaveLength(0)
+      if (Exit.isFailure(result)) {
+        // metadata-only 顺序会先产生 SizeError；真实像素损坏必须拥有更早且更准确的 DecodeError。
+        expect(Cause.squash(result.cause)).toBeInstanceOf(Image.DecodeError)
+      }
+      const gif = Buffer.from(twoFrameGif, "base64")
+      gif[89] = 0
+      const gifResult = yield* Effect.gen(function* () {
+        const image = yield* Image.Service
+        return yield* image
+          .normalize({ id: PartID.ascending(), messageID: MessageID.ascending(),
+            sessionID: SessionID.make("ses_all_pages_before_size"), type: "file", mime: "image/gif",
+            url: `data:image/gif;base64,${gif.toString("base64")}` })
+          .pipe(Effect.exit)
+      }).pipe(Effect.provide(Image.defaultLayer))
+      expect(Exit.isFailure(gifResult)).toBe(true)
+      if (Exit.isFailure(gifResult)) {
+        // auto_resize:false 也不能只验证首帧后返回 SizeError；后续帧损坏仍应先归属 DecodeError。
+        expect(Cause.squash(gifResult.cause)).toBeInstanceOf(Image.DecodeError)
+      }
+    }),
+  { git: true },
+)
+
+oneShotImage.instance(
+  "normalizes a ReadTool image once and strips transient proof before persistence",
+  () =>
+    Effect.gen(function* () {
+      imageNormalizations.length = 0
+      const { dir } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "One shot image",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const target = path.join(dir, "one-shot.png")
+      yield* Effect.promise(() => Bun.write(target, Buffer.from(tinyPng, "base64")))
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [
+          { type: "text", text: "inspect @one-shot.png" },
+          { type: "file", mime: "text/plain", filename: "one-shot.png", url: pathToFileURL(target).href,
+            source: { type: "file", path: target, text: { value: "@one-shot.png", start: 8, end: 21 } } },
+        ],
+      })
+      const files = (yield* MessageV2.filterCompactedEffect(chat.id))
+        .flatMap((item) => item.parts)
+        .filter((part): part is MessageV2.FilePart => part.type === "file" && part.mime.startsWith("image/"))
+      // @image 的 Read producer 完成一次 normalize；Prompt final consumer 只消费匹配 proof，不重复调用 owner。
+      // 该输入使用真实 file: reference 而非手工构造 proof，因此会经过 Registry 中的 ReadTool producer。
+      // 最终持久化 file 仍保持图片 MIME，证明跳过的是重复 decode，而不是跳过整个附件处理。
+      expect(imageNormalizations).toHaveLength(1)
+      expect(files).toHaveLength(1)
+      expect(Object.getOwnPropertySymbols(files[0] ?? {})).toHaveLength(0)
+    }),
+  { git: true },
+)
+
+mutatedImage.instance(
+  "invalidates file-reference proof after a chat.message plugin changes the URL",
+  () =>
+    Effect.gen(function* () {
+      imageNormalizations.length = 0
+      const { dir } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Changed image" })
+      const target = path.join(dir, "plugin-image.png")
+      yield* Effect.promise(() => Bun.write(target, Buffer.from(tinyPng, "base64")))
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [
+          { type: "file", mime: "text/plain", filename: "plugin-image.png", url: pathToFileURL(target).href,
+            source: { type: "file", path: target, text: { value: "@plugin-image.png", start: 0, end: 17 } } },
+        ],
+      })
+      // ReadTool 先处理文件，真实 chat.message hook 改写后 final consumer 必须针对新 URL 再处理一次。
+      // 第一次计数属于原文件；第二次必须精确绑定 hook 写入的新 data URL，不能只按 part identity 复用。
+      // hook 返回后才消费 proof，锁定 plugin 边界顺序，防止未来把验证提前到插件之前。
+      expect(imageNormalizations).toHaveLength(2)
+      expect(imageNormalizations[1]).toBe("data:image/png;base64,AQ==")
+      const files = (yield* MessageV2.filterCompactedEffect(chat.id))
+        .flatMap((item) => item.parts)
+        .filter((item): item is MessageV2.FilePart => item.type === "file")
+      expect(files).toHaveLength(1)
+      expect(Object.getOwnPropertySymbols(files[0] ?? {})).toHaveLength(0)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "prepares malformed image attachments on direct tool completion",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const sessions = yield* Session.Service
+      const processors = yield* SessionProcessor.Service
+      const providers = yield* ProviderSvc.Service
+      const agents = yield* AgentSvc.Service
+      const chat = yield* sessions.create({ title: "Direct completion" })
+      const seeded = yield* seed(chat.id)
+      const model = yield* providers.getModel(ref.providerID, ref.modelID)
+      const direct = aiTool({ description: "direct completion probe", inputSchema: z.object({ path: z.string() }) })
+      yield* llm.push(reply().pendingTool("direct", { path: "image.png" }).hang())
+      const handle = yield* processors.create({ assistantMessage: seeded.assistant, sessionID: chat.id, model })
+      const fiber = yield* handle.process({
+        user: { ...seeded.user, role: "user" }, sessionID: chat.id, model, agent: yield* agents.get("build"),
+        system: [], messages: [{ role: "user", content: "run direct completion" }], tools: { direct },
+      }).pipe(Effect.forkChild)
+      const pending = yield* pollWithTimeout(
+        Effect.sync(() =>
+          MessageV2.parts(seeded.assistant.id).find(
+            (part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "direct",
+          ),
+        ),
+        "pending direct tool call was not published",
+      )
+      yield* handle.updateToolCall(pending.callID, (part) => ({ ...part, state: {
+        status: "running", input: pending.state.input, time: { start: Date.now() },
+      } }))
+      yield* handle.completeToolCall(pending.callID, {
+        title: "direct",
+        metadata: {},
+        output: "direct output",
+        attachments: [{ id: PartID.ascending(), messageID: seeded.assistant.id, sessionID: chat.id,
+          type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }],
+      })
+      const tool = MessageV2.parts(seeded.assistant.id).find(
+        (item): item is MessageV2.ToolPart => item.type === "tool" && item.tool === "direct",
+      )
+      expect(tool?.state.status).toBe("completed")
+      if (tool?.state.status !== "completed") return
+      // direct completion 必须先运行统一准备边界；随后到达的普通 tool-result 不得把 omission 终态覆盖回原始附件。
+      // hanging pending call 保持 ctx.toolcalls 可达，随后只使用公开 Handle API 模拟 abort adapter 的直达写入。
+      // 断言 completed 而非 error，证明图片内容失败不会改变 Tool 本身成功完成的终态语义。
+      // attachment 缺失与 omission 同时检查，避免实现只追加诊断文字却仍把坏 bytes 落库。
+      expect(tool.state.output).toContain("image omitted")
+      expect(tool.state.attachments).toBeUndefined()
+      yield* Fiber.interrupt(fiber)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "publishes and persists the same prepared ordinary tool output",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const sessions = yield* Session.Service
+      const processors = yield* SessionProcessor.Service
+      const providers = yield* ProviderSvc.Service
+      const agents = yield* AgentSvc.Service
+      const events = yield* EventV2Bridge.Service
+      const chat = yield* sessions.create({ title: "Prepared parity" })
+      const seeded = yield* seed(chat.id)
+      const model = yield* providers.getModel(ref.providerID, ref.modelID)
+      const successes: unknown[] = []
+      const unsubscribe = yield* events.sync((event) => {
+        if (event.type === SessionEvent.Tool.Success.type) successes.push(event.data)
+        return Effect.void
+      })
+      const ordinary = aiTool({ description: "ordinary image result", inputSchema: z.object({ path: z.string() }),
+        execute: async () => ({ title: "ordinary", metadata: {}, output: "ordinary output",
+          attachments: [{ type: "file" as const, mime: "image/png", url: "data:image/png;base64,AA==" }] }),
+      })
+      yield* llm.push(reply().tool("ordinary", { path: "bad.png" }))
+      const handle = yield* processors.create({ assistantMessage: seeded.assistant, sessionID: chat.id, model })
+      yield* handle.process({ user: { ...seeded.user, role: "user" }, sessionID: chat.id, model,
+        agent: yield* agents.get("build"), system: [], messages: [{ role: "user", content: "ordinary result" }],
+        tools: { ordinary } })
+      yield* unsubscribe
+      const tool = MessageV2.parts(seeded.assistant.id).find(
+        (part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "ordinary",
+      )
+      expect(tool?.state.status).toBe("completed")
+      if (tool?.state.status !== "completed") return
+      const event = successes[0]
+      expect(typeof event).toBe("object")
+      if (typeof event !== "object" || event === null) return
+      // EventV2 和 SQLite 必须消费同一 prepared snapshot：同一 omission 文本，且两边都不存在 file content。
+      // 事件订阅发生在 process 前，捕获真实 SessionEvent.Tool.Success，而不是从数据库反推事件形状。
+      // content 深相等锁定 omission 文案和附件过滤在 publish 前只执行一次，禁止双分支各自处理。
+      // durable state 再断言 attachments 为空，防止事件安全但 SQLite 仍保存未经处理的原始 payload。
+      expect(Reflect.get(event, "content")).toEqual([{ type: "text", text: tool.state.output }])
+      expect(tool.state.attachments).toBeUndefined()
     }),
   { git: true },
 )

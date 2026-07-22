@@ -6,6 +6,8 @@ import { Context, Effect, Layer, Schema } from "effect"
 import { createHash, randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
+// Bun 在 build 时把 wasm 作为 file 资源嵌入，运行时得到可供 Photon loader 读取的路径。
+import photonWasm from "@silvia-odwyer/photon-node/photon_rs_bg.wasm" with { type: "file" }
 
 declare const OPENCODE_COMPILED: boolean | undefined
 
@@ -21,11 +23,38 @@ const JPEG_QUALITIES = [85, 70, 55, 40]
 const log = Log.create({ service: "image" })
 type Sharp = typeof import("sharp")
 type SharpMetadata = import("sharp").Metadata
+type Photon = typeof import("@silvia-odwyer/photon-node")
 type EmbeddedSharp = {
   target: string
   version: string
   addon: string
   files: Record<string, string>
+}
+const normalizedProof = Symbol("opencode.image.normalized")
+type Attachment = { mime: string; url: string }
+
+export function markNormalized<T extends Attachment>(input: T) {
+  // proof 只绑定当前 MIME/URL；插件改写任一字段后必须重新 decode，不能沿用旧附件的成功结论。
+  // 这里只证明 owner 已处理这一份 payload，不证明文件名、synthetic 等展示字段未变化。
+  // Symbol 保持 transient：对象内传递可见，JSON/schema 编码天然不可见，最终 consumer 仍显式删除。
+  return Object.assign(input, { [normalizedProof]: { mime: input.mime, url: input.url } })
+}
+
+export function consumeNormalized<T extends Attachment>(input: T) {
+  const proof = Reflect.get(input, normalizedProof)
+  const attachment = { ...input }
+  // Symbol 仅在本轮内传递 decode 真值，consumer 无论命中与否都先剥离，禁止进入 schema、事件或 SQLite。
+  // 先复制再删除避免修改 producer 持有的对象，也让 event 与 durable snapshot 能共享同一份干净值。
+  // proof 缺失不是错误：外部 Tool 附件本来就没有 proof，必须按正常路径进入 Image owner。
+  Reflect.deleteProperty(attachment, normalizedProof)
+  return {
+    attachment,
+    valid:
+      typeof proof === "object" &&
+      proof !== null &&
+      Reflect.get(proof, "mime") === input.mime &&
+      Reflect.get(proof, "url") === input.url,
+  }
 }
 
 export class ResizerUnavailableError extends Schema.TaggedErrorClass<ResizerUnavailableError>()(
@@ -99,6 +128,20 @@ export const layer = Layer.effect(
         },
       }),
     )
+    const loadPhoton = yield* Effect.cached(
+      Effect.tryPromise({
+        try: async () => {
+          // Photon 的 patched loader 只接受打包时确定的 wasm 路径，不从用户输入或开发机 node_modules 猜测资源。
+          ;(globalThis as typeof globalThis & { __OPENCODE_PHOTON_WASM_PATH?: string }).__OPENCODE_PHOTON_WASM_PATH =
+            photonWasm
+          return import("@silvia-odwyer/photon-node")
+        },
+        catch: (error) => {
+          log.warn("failed to load photon", { error })
+          return new ResizerUnavailableError()
+        },
+      }),
+    )
 
     const normalize = Effect.fn("Image.normalize")(function* (
       input: MessageV2.FilePart,
@@ -121,17 +164,42 @@ export const layer = Layer.effect(
       const buffer = Buffer.from(base64, "base64")
       if (buffer.length === 0) return yield* new DecodeError()
 
-      const sharp = yield* loadSharp
-      const metadata = yield* readMetadata(sharp, buffer)
+      // PNG/BMP 的便宜结构门禁在 decoder 前拒绝已知截断头；它不能替代下面的完整像素解码。
+      // magic 只决定格式分支，不信任调用方 MIME；扩展名错误或 provider MIME 偏差不能改变 decoder 选择。
+      // PNG 结构检查只锁定固定首块，IDAT 完整性仍完全交给 Sharp，避免维护第二套压缩流 parser。
+      if (isPng(buffer) && !hasPngHeader(buffer)) return yield* new DecodeError()
+      const decoded = isBmp(buffer)
+        ? yield* decodeBmp(yield* loadPhoton, buffer)
+        : { buffer, mime: input.mime, width: undefined, height: undefined }
+      // Photon 已完成 BMP 像素 open 并给出尺寸；未超限 BMP 不应为了 metadata 再强制装载 Sharp/native addon。
+      // 超限 BMP 仍延迟进入同一个 Sharp encode policy，因此格式分支不会产生第二套 resize 实现。
+      const sharp = decoded.buffer === buffer ? yield* loadSharp : undefined
+      const metadata = sharp
+        ? yield* readMetadata(sharp, decoded.buffer)
+        : { width: decoded.width, height: decoded.height, hasAlpha: true, pages: 1 }
       if (!metadata.width || !metadata.height) return yield* new DecodeError()
 
       const originalWidth = metadata.width
       const originalHeight = metadata.height
-      // Historical session images may be normalized again during replay; metadata-only pass-through avoids lossy rewrites.
-      if (originalWidth <= info.maxWidth && originalHeight <= info.maxHeight && bytes <= info.maxBase64Bytes) return input
+      // BMP 转 PNG 后以实际待发送 payload 计算预算，不能沿用较小的源 BMP base64 误判为未超限。
+      const normalizedBytes =
+        decoded.buffer === buffer ? bytes : Buffer.byteLength(decoded.buffer.toString("base64"), "utf8")
+      const withinLimits =
+        originalWidth <= info.maxWidth && originalHeight <= info.maxHeight && normalizedBytes <= info.maxBase64Bytes
+      // 非 BMP 的 pass-through/no-resize 都先验证像素；单页 resize 的 encode 自身就是完整 decode，禁止再分配一次 raw buffer。
+      // 多帧 resize 仍先做 all-pages validation，因为后续 encode 只消费首帧，不能让损坏的后续帧逃逸。
+      // 条件按“后续操作是否必然 decode 全部所需内容”划分，而不是在失败后尝试另一条成功路径。
+      // auto_resize:false 必须走 validation 后的 SizeError，确保配置只禁用 resize，不会禁用安全解码。
+      if (sharp && (withinLimits || !info.autoResize || (metadata.pages ?? 1) > 1))
+        yield* decodePixels(sharp, decoded.buffer, metadata.pages)
+      // BMP 已由 Photon 完整 open 并重新编码；再次 raw-decode 只会增加 CPU/峰值内存，不提供新的输入完整性证据。
+      if (withinLimits)
+        return decoded.buffer === buffer
+          ? input
+          : { ...input, mime: decoded.mime, url: `data:${decoded.mime};base64,${decoded.buffer.toString("base64")}` }
       if (!info.autoResize)
         return yield* new SizeError({
-          bytes,
+          bytes: normalizedBytes,
           max: info.maxBase64Bytes,
           width: originalWidth,
           height: originalHeight,
@@ -142,7 +210,14 @@ export const layer = Layer.effect(
       const hasAlpha = Boolean(metadata.hasAlpha)
       const preserveAlpha = hasAlpha && options?.tokenBudget === undefined
       for (const size of resizeSizes(originalWidth, originalHeight, info.maxWidth, info.maxHeight)) {
-        const candidate = yield* encodeCandidate(sharp, buffer, size, hasAlpha, preserveAlpha, info.maxBase64Bytes)
+        const candidate = yield* encodeCandidate(
+          sharp ?? (yield* loadSharp),
+          decoded.buffer,
+          size,
+          hasAlpha,
+          preserveAlpha,
+          info.maxBase64Bytes,
+        )
         if (candidate) {
           log.info("using resized image", {
             from_mime: input.mime,
@@ -159,7 +234,7 @@ export const layer = Layer.effect(
       }
 
       return yield* new SizeError({
-        bytes,
+        bytes: normalizedBytes,
         max: info.maxBase64Bytes,
         width: originalWidth,
         height: originalHeight,
@@ -247,6 +322,85 @@ function readMetadata(sharp: Sharp, buffer: Buffer): Effect.Effect<SharpMetadata
     try: () => sharp(buffer).metadata(),
     catch: (error) => {
       log.warn("failed to decode image metadata", { error })
+      return new DecodeError()
+    },
+  })
+}
+
+function decodePixels(sharp: Sharp, buffer: Buffer, pages?: number): Effect.Effect<void, DecodeError> {
+  return Effect.tryPromise({
+    // metadata() 只读容器头；raw() 才会消费压缩流并暴露截断 IDAT、坏帧等真实解码错误。
+    try: async () =>
+      void (await sharp(buffer, pages && pages > 1 ? { pages: -1 } : undefined)
+        .raw()
+        .toBuffer()),
+    catch: (error) => {
+      log.warn("failed to decode image pixels", { error })
+      return new DecodeError()
+    },
+  })
+}
+
+function isPng(buffer: Buffer) {
+  return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+}
+
+function hasPngHeader(buffer: Buffer) {
+  // PNG 首块必须是固定 13-byte IHDR；提前限定该结构可避免宽松 metadata parser 把坏头当作可传递图片。
+  return buffer.length >= 33 && buffer.readUInt32BE(8) === 13 && buffer.toString("ascii", 12, 16) === "IHDR"
+}
+
+function isBmp(buffer: Buffer) {
+  return buffer.length >= 2 && buffer.toString("ascii", 0, 2) === "BM"
+}
+
+function decodeBmp(
+  photon: Photon,
+  buffer: Buffer,
+): Effect.Effect<{ buffer: Buffer; mime: string; width: number; height: number }, DecodeError> {
+  return Effect.try({
+    try: () => {
+      // Photon 会宽松接受错误 file-size/pixel-offset；在 open 前固定验证 BMP 文件与 DIB 边界，禁止后端差异改变结果。
+      // 结构 gate 只负责证明字段布局可读，不自行解析像素；Photon 仍是 BMP 唯一真实 decoder。
+      // declared size 为 0 是 Pi 接受的合法“未声明”形式，非零时才参与 offset 边界约束。
+      if (buffer.length < 26) throw new Error("invalid BMP file size")
+      const declared = buffer.readUInt32LE(2)
+      const dib = buffer.readUInt32LE(14)
+      const offset = buffer.readUInt32LE(10)
+      // 对齐 Pi 的两类 DIB 布局：COREHEADER 的 planes/bpp 位于 22/24，其余支持的 INFOHEADER 位于 26/28。
+      // DIB 12 与 40..124 的字段偏移不同，混读会把宽高字节误判为 planes/bpp 并产生平台差异。
+      // offset 必须同时落在 DIB 之后和真实 buffer 内；声明长度存在时还不能越过声明末尾。
+      if (declared !== 0 && declared < 26) throw new Error("invalid BMP file size")
+      if (offset < 14 + dib || offset >= buffer.length || (declared !== 0 && offset >= declared))
+        throw new Error("invalid BMP pixel offset")
+      const fields =
+        dib === 12
+          ? buffer.length >= 26
+            ? { planes: buffer.readUInt16LE(22), bpp: buffer.readUInt16LE(24) }
+            : undefined
+          : dib >= 40 && dib <= 124 && buffer.length >= 30
+            ? { planes: buffer.readUInt16LE(26), bpp: buffer.readUInt16LE(28) }
+            : undefined
+      // planes 必须为 1，位深只接受 BMP 规范的离散集合；坏值必须在进入 WASM 前被稳定拒绝，不能依赖 Photon trap。
+      // 该白名单来自 Pi 的 BMP predicate，不根据 Photon 当前恰好能否容忍某个位深动态放宽。
+      // 前置拒绝保证 malformed input 产生普通 DecodeError，而不是让 WASM trap 决定可观测行为。
+      if (!fields || fields.planes !== 1 || ![1, 4, 8, 16, 24, 32].includes(fields.bpp))
+        throw new Error("invalid BMP planes or bits per pixel")
+      const image = photon.PhotonImage.new_from_byteslice(buffer)
+      try {
+        // BMP 在 Photon 中完成真实 open，再转为 PNG 交给统一 Sharp 尺寸/质量策略；不存在失败后换 decoder 的 fallback。
+        return {
+          buffer: Buffer.from(image.get_bytes()),
+          mime: "image/png",
+          width: image.get_width(),
+          height: image.get_height(),
+        }
+      } finally {
+        image.free()
+      }
+    },
+    catch: (error) => {
+      log.warn("failed to decode bmp", { error })
       return new DecodeError()
     },
   })

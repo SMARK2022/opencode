@@ -2242,9 +2242,27 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       )
 
       const parts = yield* Effect.forEach(resolvedParts, (part) =>
-        part.type === "file" && part.mime.startsWith("image/")
-          ? image.normalize(part)
-          : Effect.succeed(part),
+        Effect.gen(function* () {
+          if (part.type !== "file" || !part.mime.startsWith("image/")) return part
+          const proof = Image.consumeNormalized(part)
+          // 匹配 proof 避免 @image/ReadTool 成功结果被重复 decode；插件改写 MIME/URL 后 proof 自动失效。
+          // proof 在 chat.message hook 之后消费，插件看到的是正常附件，但不能让旧 payload 的验证覆盖新 payload。
+          // direct user file 没有 proof，因此与任意外部附件一样始终进入完整 normalize。
+          if (proof.valid) return proof.attachment
+          const normalized = yield* image.normalize(proof.attachment).pipe(Effect.exit)
+          if (Exit.isSuccess(normalized)) return normalized.value
+          // 用户直接附件失败同样降级为可持久化文本，坏 bytes 不进入 provider 请求，后续消息仍可继续。
+          // 替换沿用原 part identity，保证消息排序稳定；仅类型和内容变为 provider-safe text。
+          // 这里不保留 filename/url 摘要，避免 omission 文本意外复制损坏或超大 data URL。
+          return {
+            id: part.id,
+            messageID: part.messageID,
+            sessionID: part.sessionID,
+            type: "text" as const,
+            synthetic: true,
+            text: "[Image omitted: could not be decoded or resized within the image size limit.]",
+          }
+        }),
       )
 
       const parsed = decodeMessageInfo(info, { errors: "all", propertyOrder: "original" })

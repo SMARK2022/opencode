@@ -294,6 +294,37 @@ export const layer = Layer.effect(
         return part
       })
 
+      const prepareToolOutput = Effect.fn("SessionProcessor.prepareToolOutput")(function* (output: {
+        title: string
+        metadata: Record<string, unknown>
+        output: string
+        attachments?: MessageV2.FilePart[]
+      }) {
+        const normalized = yield* Effect.forEach(output.attachments ?? [], (candidate) => {
+          const proof = Image.consumeNormalized(candidate)
+          // ReadTool 的匹配 proof 证明同一 MIME/URL 已 decode；缺失或被插件改写时必须回到唯一 Image owner。
+          // 非图片 attachment 仍经过 consume 是为了统一剥离潜在 transient 字段，但绝不送入图片 decoder。
+          // typed image failure 只移除对应附件；同一个 Tool 的文本和其他成功附件必须继续交付。
+          if (proof.valid) return Effect.succeed(Exit.succeed<MessageV2.FilePart>(proof.attachment))
+          if (!proof.attachment.mime.startsWith("image/"))
+            return Effect.succeed(Exit.succeed<MessageV2.FilePart>(proof.attachment))
+          return image.normalize(proof.attachment).pipe(Effect.exit)
+        })
+        const omitted = normalized.filter(Exit.isFailure).length
+        const attachments = normalized.filter(Exit.isSuccess).map((item) => item.value)
+        return {
+          ...output,
+          // provider 不支持的坏图片降级为文本事实；不保留原 bytes，也不把一次附件失败升级为整个 tool-error。
+          // omission 数量来自同一 normalized 数组，避免事件分支和数据库分支各自过滤后出现计数漂移。
+          // 返回值是唯一 prepared snapshot；调用方不能再次映射 attachments 或重新拼 omission 文案。
+          output:
+            omitted === 0
+              ? output.output
+              : `${output.output}\n\n[${omitted} image${omitted === 1 ? "" : "s"} omitted: could not be decoded or resized within the image size limit.]`,
+          attachments: attachments.length ? attachments : undefined,
+        }
+      })
+
       const completeToolCall = Effect.fn("SessionProcessor.completeToolCall")(function* (
         toolCallID: string,
         output: {
@@ -302,7 +333,12 @@ export const layer = Layer.effect(
           output: string
           attachments?: MessageV2.FilePart[]
         },
+        prepared = false,
       ) {
+        // abort/provider-executed 等直达 completion 的路径也必须经过同一准备函数；普通 result 已准备时复用同一 snapshot。
+        // prepared 标志只区分本函数内部已完成的普通事件路径，不是调用方可伪造的持久化 metadata。
+        // direct 路径默认 false，因此取消时正常返回的 Tool 也无法绕过图片失败降级。
+        const result = prepared ? output : yield* prepareToolOutput(output)
         // [local-smark] terminal state 写入需要串行化：确保 read-check-write 原子，
           // 防止 late metadata/result 或 cleanup 与正常完成路径竞争覆盖终态。
           yield* toolPermit.withPermits(1)(
@@ -322,12 +358,12 @@ export const layer = Layer.effect(
                   status: "completed",
                   input: resolveCompletedToolInput(
                     match.part.state.input as Record<string, unknown>,
-                    output.metadata as Record<string, unknown> | undefined,
+                    result.metadata as Record<string, unknown> | undefined,
                   ),
-                  output: output.output,
+                  output: result.output,
                   // strip 临时真值字段，避免进持久化 metadata
                   metadata: (() => {
-                    const rest = stripToolTruthMetadata(output.metadata as Record<string, unknown> | undefined)
+                    const rest = stripToolTruthMetadata(result.metadata as Record<string, unknown> | undefined)
                     return match.part.state.metadata?.autoReview
                       ? { ...rest, autoReview: match.part.state.metadata.autoReview }
                       : rest
@@ -335,9 +371,9 @@ export const layer = Layer.effect(
                   // ToolStateCompleted.title 契约是 string；raw AI SDK / 测试 tool 可不返回 title。
                   // 缺省写成空串（与 tool/registry 插件路径一致），禁止 undefined 经 JSON 省略后
                   // 让 ColdStorage extractPart 在 freeze/status 全库扫描时抛 corruption。
-                  title: typeof output.title === "string" ? output.title : "",
+                  title: typeof result.title === "string" ? result.title : "",
                   time: { start: match.part.state.time.start, end: Date.now() },
-                  attachments: output.attachments,
+                  attachments: result.attachments,
                 },
               })
               yield* settleToolCall(toolCallID)
@@ -575,21 +611,10 @@ export const layer = Layer.effect(
                 typeof attachment.mime === "string" &&
                 typeof attachment.url === "string",
             )
-            const normalized = yield* Effect.forEach(toolAttachments, (attachment) =>
-              attachment.mime.startsWith("image/")
-                ? image.normalize(attachment).pipe(Effect.exit)
-                : Effect.succeed(Exit.succeed<MessageV2.FilePart>(attachment)),
-            )
-            const omitted = normalized.filter(Exit.isFailure).length
-            const attachments = normalized.filter(Exit.isSuccess).map((item) => item.value)
-            const output = {
+            const output = yield* prepareToolOutput({
               ...value.output,
-              output:
-                omitted === 0
-                  ? value.output.output
-                  : `${value.output.output}\n\n[${omitted} image${omitted === 1 ? "" : "s"} omitted: could not be resized below the image size limit.]`,
-              attachments: attachments?.length ? attachments : undefined,
-            }
+              attachments: toolAttachments.length ? toolAttachments : undefined,
+            })
             // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
             if (flags.experimentalEventSystem) {
               // strip 真值临时字段，与持久化 metadata 一致
@@ -604,7 +629,7 @@ export const layer = Layer.effect(
                     text: output.output,
                   },
                   ...(output.attachments?.map((item: MessageV2.FilePart) => ({
-                    type: "file",
+                    type: "file" as const,
                     uri: item.url,
                     mime: item.mime,
                     name: item.filename,
@@ -616,7 +641,7 @@ export const layer = Layer.effect(
                 timestamp: DateTime.makeUnsafe(Date.now()),
               })
             }
-            yield* completeToolCall(value.toolCallId, output)
+            yield* completeToolCall(value.toolCallId, output, true)
             return
           }
 

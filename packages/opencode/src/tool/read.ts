@@ -10,7 +10,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
 // [local-smark] read tool enhancements: image processing, outline
-import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
+import { isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
 import type { MessageV2 } from "../session/message-v2"
 import { readOutlineCached, type Outline } from "./read-outline"
 import { Reference } from "@/reference/reference"
@@ -391,8 +391,6 @@ function renderReadStub(input: {
   ].join("\n")
 }
 
-const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
-
 // `offset` and `limit` were originally `z.coerce.number()` — the runtime
 // coercion was useful when the tool was called from a shell but serves no
 // purpose in the LLM tool-call path (the model emits typed JSON). The JSON
@@ -629,13 +627,16 @@ export const ReadTool = Tool.define(
       const sample = yield* readSample(filepath, size, SAMPLE_BYTES)
 
       const mime = sniffAttachmentMime(sample, AppFileSystem.mimeType(filepath))
-      const isImage = SUPPORTED_IMAGE_MIMES.has(mime)
+      // fastbidsheet 是历史文本 schema；除此之外真实 image/* 必须进入统一 decoder，不能由白名单绕开。
+      // sniff 只负责把扩展名与 magic 汇成 MIME；是否可解码仍由 Image.Service 的真实 backend 决定。
+      // 单独保留 fastbidsheet 是已存在的文本兼容合同，不是图片失败后的文本 fallback。
+      const isImage = mime.startsWith("image/") && mime !== "image/vnd.fastbidsheet"
 
       if (isImage || isPdfAttachment(mime)) {
         const bytes = yield* fs.readFile(filepath)
 
         // 图片走 Image.Service，确保 read、粘贴和 tool-result 共享同一套尺寸与预算边界。
-        if (isImageAttachment(mime)) {
+        if (isImage) {
           const input = {
             id: PartID.ascending(),
             messageID: ctx.messageID,
@@ -644,11 +645,28 @@ export const ReadTool = Tool.define(
             mime,
             url: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`,
           }
-          const attachment = yield* image.normalize(
-            input,
-            // `read` results enter the model immediately, so keep its payload near the existing image token cap.
-            { tokenBudget: 1600 },
-          )
+          const attachment = yield* image
+            .normalize(
+              input,
+              // `read` results enter the model immediately, so keep its payload near the existing image token cap.
+              { tokenBudget: 1600 },
+            )
+            .pipe(Effect.option)
+          if (Option.isNone(attachment)) {
+            // 图片失败是该 tool 的可恢复内容错误：返回有界文本并继续，不把原始坏 bytes 交给 provider。
+            // omission 不带 attachment，因此 Processor 后续没有可被再次发送或落库的失败 payload。
+            // loaded metadata 仍照常保留，让调用方知道文件读取动作已经完成而不是权限或路径失败。
+            const msg = "Image omitted: could not be decoded or resized within the image size limit."
+            return {
+              title,
+              output: msg,
+              metadata: readToolMetadata({
+                preview: msg,
+                truncated: false,
+                loaded: loaded.map((item) => item.filepath),
+              }),
+            }
+          }
           const msg = `Image read successfully (${formatSize(bytes.length)} → compressed for model)`
           return {
             title,
@@ -659,11 +677,11 @@ export const ReadTool = Tool.define(
               loaded: loaded.map((item) => item.filepath),
             }),
             attachments: [
-              {
+              Image.markNormalized({
                 type: "file" as const,
-                mime: attachment.mime,
-                url: attachment.url,
-              },
+                mime: attachment.value.mime,
+                url: attachment.value.url,
+              }),
             ],
           }
         }
