@@ -9,11 +9,16 @@ import { Provider } from "../../src/provider/provider"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Session } from "../../src/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
-import { SessionID } from "../../src/session/schema"
+import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { ProjectID } from "../../src/project/schema"
 import { testEffect } from "../lib/effect"
 import { TestConfig } from "../fixture/config"
 import { ProviderTest } from "../fake/provider"
+import { Bus } from "../../src/bus"
+import { Storage } from "../../src/storage/storage"
+import { SyncEvent } from "../../src/sync"
+import { RuntimeFlags } from "../../src/effect/runtime-flags"
+import { BackgroundJob } from "../../src/background/job"
 
 // 这个命令覆盖 reviewer 证据里最容易被回归破坏的 shell 形态：空格路径、引号、
 // 环境变量、管道、重定向、子命令和危险删除意图都必须保留在 user evidence，
@@ -362,7 +367,171 @@ describe("permission reviewer service", () => {
       expect(decisions.every((part) => part.state.status === "error")).toBe(true)
     }),
   )
+
+  // durable 必红夹具：MessageV2.get 读到仍为 pending 的父 ToolPart 时，promote 必须用
+  // metadata.command 写出可渲染的 input.command，不能停在历史 { raw } 形状。
+  // 常见 tool-call-first 路径上 SessionPrompt 集成断言往往已绿，故此 fixture 才是 owner 级红测。
+  // 夹具强制 pending-at-review：不依赖 AI SDK 调度竞态，稳定复现 reviewing 窗 raw-only 缺陷。
+  // tool 字段必须带 messageID/callID，否则 updateToolAutoReview 直接 no-op。
+  const parentToolPartFixture = parentToolPartReviewFixture()
+  const parentToolPart = testEffect(parentToolPartFixture.layer)
+
+  parentToolPart.instance("promotes pending parent ToolPart using metadata.command as structured input", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const reviewer = yield* PermissionReviewer.Service
+      // 真实 Session + SQLite：MessageV2.get 与生产同路径，禁止只 mock updatePart。
+      const chat = yield* sessions.create({ title: "pending-command-promote" })
+      const messageID = MessageID.ascending()
+      const callID = "call_pending_command"
+      // 命令字符串是用户可见的独立期望值，不是从实现反推。
+      const command = "cat id_rsa"
+      yield* sessions.updateMessage({
+        id: messageID,
+        sessionID: chat.id,
+        role: "assistant",
+        parentID: MessageID.ascending(),
+        mode: "build",
+        agent: "build",
+        path: { cwd: chat.directory, root: chat.directory },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ModelID.make("gpt-5"),
+        providerID: OPENAI_PROVIDER_ID,
+        time: { created: Date.now() },
+      })
+      // 故意保持 pending：模拟 stream tool-call 尚未把 structured input 落库。
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID,
+        sessionID: chat.id,
+        type: "tool",
+        tool: "bash",
+        callID,
+        state: { status: "pending", input: {}, raw: JSON.stringify({ command, description: "Read key" }) },
+      })
+
+      // review 完成会先后 mark reviewing 与 allowed；两阶段都必须保住 command。
+      yield* reviewer.review({
+        reviewID: "review_pending_command",
+        sessionID: chat.id,
+        permission: "bash",
+        patterns: [command],
+        metadata: { command, cwd: chat.directory, shell: "bash" },
+        precheck: { level: "cautious", reason: "private key path requires review" },
+        tool: { messageID, callID },
+      })
+
+      const stored = yield* MessageV2.get({ sessionID: chat.id, messageID })
+      const part = stored.parts.find((item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === callID)
+      expect(part?.state.status).toBe("running")
+      if (part?.state.status !== "running") return
+      // 用户可观察不变量：reviewing/allowed envelope 写入后 command 必须可渲染。
+      // 旧实现会得到 input.raw 而无 command，TUI 显示 Writing command...
+      expect(part.state.input.command).toBe(command)
+      expect(part.state.metadata?.autoReview?.status).toBe("allowed")
+    }),
+  )
+
+  // regression：已 structured 的 running input 在 merge autoReview 时不得被 { raw } 覆盖。
+  // 该序在旧代码上常已绿，仍锁定 INV-02，防止选择逻辑回退。
+  parentToolPart.instance("keeps structured running input when merging autoReview status", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const reviewer = yield* PermissionReviewer.Service
+      const chat = yield* sessions.create({ title: "structured-keep" })
+      const messageID = MessageID.ascending()
+      const callID = "call_structured_keep"
+      const command = "git push origin dev"
+      yield* sessions.updateMessage({
+        id: messageID,
+        sessionID: chat.id,
+        role: "assistant",
+        parentID: MessageID.ascending(),
+        mode: "build",
+        agent: "build",
+        path: { cwd: chat.directory, root: chat.directory },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ModelID.make("gpt-5"),
+        providerID: OPENAI_PROVIDER_ID,
+        time: { created: Date.now() },
+      })
+      // 先写入 tool-call 形状的 structured running，再跑 review envelope。
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID,
+        sessionID: chat.id,
+        type: "tool",
+        tool: "bash",
+        callID,
+        state: {
+          status: "running",
+          input: { command, description: "Push branch" },
+          time: { start: Date.now() },
+        },
+      })
+
+      yield* reviewer.review({
+        reviewID: "review_structured_keep",
+        sessionID: chat.id,
+        permission: "bash",
+        patterns: [command],
+        metadata: { command, cwd: chat.directory, shell: "bash" },
+        precheck: { level: "cautious", reason: "push requires review" },
+        tool: { messageID, callID },
+      })
+
+      const stored = yield* MessageV2.get({ sessionID: chat.id, messageID })
+      const part = stored.parts.find((item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === callID)
+      expect(part?.state.status).toBe("running")
+      if (part?.state.status !== "running") return
+      // description 来自既有 structured input，不得被仅含 command 的 metadata 提升抹掉。
+      expect(part.state.input.command).toBe(command)
+      expect(part.state.input.description).toBe("Push branch")
+      expect(part.state.metadata?.autoReview?.status).toBe("allowed")
+    }),
+  )
 })
+
+function parentToolPartReviewFixture() {
+  const model = reviewerModel(OPENAI_PROVIDER_ID)
+  const fetch = Object.assign(
+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(openAIReviewDecisionStream(), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    { preconnect: () => {} },
+  )
+  const provider = ProviderTest.fake({
+    model,
+    info: ProviderTest.info({ id: model.providerID, options: {} }, model),
+    getLanguage: Effect.fn("ParentToolPartReviewTest.getLanguage")(() =>
+      Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5")),
+    ),
+  })
+  const sessionLayer = Session.layer.pipe(
+    Layer.provide(Bus.layer),
+    Layer.provide(Storage.defaultLayer),
+    Layer.provide(SyncEvent.defaultLayer),
+    Layer.provide(RuntimeFlags.layer({ experimentalWorkspaces: false })),
+    Layer.provide(BackgroundJob.defaultLayer),
+  )
+  // Session 既供给 PermissionReviewer，也暴露给测试体；MessageV2.get 读 SQLite 真路径。
+  return {
+    layer: Layer.mergeAll(
+      sessionLayer,
+      PermissionReviewer.layer.pipe(
+        Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
+        Layer.provide(provider.layer),
+        Layer.provide(authLayer({ type: "api", key: "test-key" })),
+        Layer.provide(pluginLayer()),
+        Layer.provide(sessionLayer),
+      ),
+    ),
+  }
+}
 
 function reviewerClosureFixture(block: "pending" | "completed" | "drain") {
   const parts = new Map<string, MessageV2.Part>()
