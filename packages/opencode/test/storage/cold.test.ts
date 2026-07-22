@@ -21,6 +21,7 @@ import { aggregateStats } from "@/cli/cmd/stats/data"
 import { TestInstance } from "../fixture/fixture"
 import type { SessionID } from "@/session/schema"
 import path from "path"
+import { fileURLToPath } from "url"
 
 const sessionLayer = SessionNs.layer.pipe(
   Layer.provide(Bus.layer),
@@ -1047,6 +1048,61 @@ describe.serial("ColdStorage", () => {
   // task 分类断言不依赖随机 taskID，保持测试跨运行稳定。
   // 测试故意不调用 cleanup，verify repair 与 orphan 删除的责任在下一用例独立证明。
   // session 删除发生在 owner 已热态后，验证 expand 不留下外键或 refcount 残余。
+  it.instance("reports cold metadata without materializing payload bodies", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      // 128 MiB body 与 64 MiB heap 形成单向失败：select * 必 OOM，metadata 投影必须成功。
+      const bytes = 128 * 1024 * 1024
+      const dbPath = path.join(test.directory, "status-projection.db")
+      const script = `
+        process.env.OPENCODE_DB = ${JSON.stringify(dbPath)}
+        const { Database } = await import(${JSON.stringify(new URL("../../src/storage/db.ts", import.meta.url).href)})
+        const { ColdStorage } = await import(${JSON.stringify(new URL("../../src/storage/cold.ts", import.meta.url).href)})
+        const hash = "a5".repeat(32)
+        const bytes = ${bytes}
+        // 大 BLOB 是可观察的读取门禁；报告仍只依赖其同行 metadata 与真实 owner count。
+        // zeroblob 避免在 JS 堆分配 128 MiB 缓冲区，只让 SQLite 持有可物化的大 body。
+        Database.Client().$client.query(
+          "INSERT INTO cold_storage (hash, kind, codec, payload, raw_bytes, compressed_bytes, ref_count, time_created, time_updated) VALUES (?, 'part-pack', 'zstd', zeroblob(?), ?, ?, 0, ?, ?)"
+        ).run(hash, bytes, bytes, bytes, Date.now(), Date.now())
+        Database.close()
+        Bun.gc(true)
+        const { Database: SQLite } = await import("bun:sqlite")
+        const gate = new SQLite(${JSON.stringify(dbPath)})
+        gate.query("PRAGMA hard_heap_limit = 67108864").get()
+        gate.close()
+        // 缩小页缓存后，heap 差异只来自被查询列，不由默认 64 MiB cache 上限主导。
+        Database.Client().$client.exec("PRAGMA cache_size = -512")
+        process.stdout.write(JSON.stringify(ColdStorage.status()))
+      `
+      const result = yield* Effect.promise(async () => {
+        // hard_heap_limit 必须位于子进程，避免 SQLite 全局上限污染同 runner 的后续测试。
+        const proc = Bun.spawn([process.execPath, "-e", script], {
+          cwd: path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url))),
+          env: { ...process.env, OPENCODE_PROCESS_ROLE: "main" },
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        })
+        const [exitCode, stdout, stderr] = await Promise.all([
+          proc.exited,
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ])
+        return { exitCode, stdout, stderr }
+      })
+      // 旧 unrestricted projection 会因 128 MiB body 越过 64 MiB SQLite 上限而明确失败。
+      expect(result.exitCode, result.stderr).toBe(0)
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        payloads: 1,
+        compressedBytes: bytes,
+        orphans: 1,
+        refCountMismatches: 0,
+      })
+    }),
+    30_000,
+  )
+
   it.instance("verifies, repairs, expands, and classifies maintenance requests", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionNs.Service

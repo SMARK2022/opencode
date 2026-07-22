@@ -14,6 +14,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdir, rename } from "fs/promises"
 import path from "path"
 import { fileURLToPath, pathToFileURL } from "url"
+import { Database as SQLite } from "bun:sqlite"
 import { tmpdir } from "../../fixture/fixture"
 import * as DaemonModule from "../../../src/cli/cmd/tui/daemon"
 import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
@@ -980,6 +981,73 @@ describe("daemon lifecycle", () => {
       }
     },
     DAEMON_START_TIMEOUT_MS + 20_000,
+  )
+
+  test(
+    "db status waits for the daemon's complete report beyond the control acknowledgement deadline",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
+
+      try {
+        if (!lock.controlPort) throw new Error("missing control port")
+        // worker 延迟打开数据库；先走同一 status seam 完成真实 migration，再写入压力夹具。
+        const initialized = await fetch(
+          `http://127.0.0.1:${lock.controlPort}${ServerLockModule.CONTROL_MAINTENANCE_PATH}`,
+          {
+            method: "POST",
+            headers: { [ServerLockModule.CONTROL_TOKEN_HEADER]: lock.token, "content-type": "application/json" },
+            body: JSON.stringify({ operation: "status" }),
+          },
+        )
+        expect(initialized.status).toBe(200)
+        // 该夹具只放大真实 eligibility 扫描，不伪造 worker 延迟或添加测试专用生产分支。
+        const db = new SQLite(lock.dbPath)
+        // 关闭 FK 仅服务压力夹具插入速度，不改变 status 的 eligibility 语义。
+        db.exec("PRAGMA foreign_keys = OFF")
+        const insert = db.prepare(
+          "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, 1, 1, ?)",
+        )
+        // 单一缺失 Session 让每行仍经过公开候选/extraction 路径，同时避免构造无关业务历史。
+        // 40 万 reasoning 行把 exact candidate 扫描推过旧 2s 合同，规模取自 live 证据量级。
+        db.transaction(() => {
+          for (let i = 0; i < 400_000; i++)
+            insert.run(`prt_status_${i}`, "msg_status", "ses_status", '{"type":"reasoning","text":"x"}')
+        })()
+        db.close()
+
+        // 真实 CLI 读取同一 lock/token；旧两秒 deadline 会在 daemon 完成精确报告前退出。
+        const status = Bun.spawn([process.execPath, INDEX_TS, "db", "status"], {
+          env: isolatedDaemonEnv(lockPath),
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        })
+        // 外层安全期限只约束测试进程，不缩短产品 status 对合法数据库的完成合同。
+        const result = await Promise.race([
+          Promise.all([status.exited, new Response(status.stdout).text(), new Response(status.stderr).text()]),
+          Bun.sleep(30_000).then(() => "timeout" as const),
+        ])
+        if (result === "timeout") {
+          status.kill()
+          throw new Error("db status test exceeded 30 seconds")
+        }
+        const [exitCode, stdout, stderr] = result
+        expect(exitCode, stderr).toBe(0)
+        // UI JSON 与一次性 migration 提示共用 stderr，按首个对象边界读取用户可见报告。
+        const output = stdout || stderr.slice(stderr.indexOf("{"))
+        // 完成证据必须是完整 StatusReport 字段，而不是仅证明 HTTP 连接未报错。
+        expect(JSON.parse(output)).toMatchObject({
+          type: "status",
+          report: { eligibleOwners: 0, payloads: 0, refCountMismatches: 0, orphans: 0 },
+        })
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 45_000,
   )
 
   test(

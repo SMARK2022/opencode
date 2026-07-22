@@ -62,17 +62,19 @@ async function liveDaemon() {
   return lock
 }
 
-// control request 总是携带当前 lock token，并用短 timeout 把本机 daemon 不可达明确反馈给 CLI。
+// control request 总是携带当前 lock token；短 timeout 只约束快速 control acknowledgement。
+// 完整 status 扫描随数据库增长，显式 false 避免把合法长计算误报为 daemon 不可达。
 // 非 2xx 响应保留 daemon 错误语义，调用方不得在失败后改走 offline 并伪造成功。
 // 该 helper 只传输 request/result，不包含 operation SQL、eligibility 或 cursor 推进逻辑。
-async function daemonRequest(lock: ServerLock.ServerLock, pathname: string, init?: RequestInit) {
+async function daemonRequest(lock: ServerLock.ServerLock, pathname: string, init?: RequestInit, timeoutMs: number | false = 2_000) {
   const response = await fetch(`http://127.0.0.1:${lock.controlPort}${pathname}`, {
     ...init,
     headers: {
       [ServerLock.CONTROL_TOKEN_HEADER]: lock.token,
       ...(init?.headers ?? {}),
     },
-    signal: AbortSignal.timeout(2_000),
+    // false 表示调用方已确认本地 daemon 身份，不再用固定 deadline 截断合法长计算。
+    signal: timeoutMs === false ? undefined : AbortSignal.timeout(timeoutMs),
   })
   const body: unknown = await response.json().catch(() => ({ error: `daemon returned ${response.status}` }))
   if (!response.ok) {
@@ -222,12 +224,18 @@ const StatusCommand = cmd({
       return
     }
     if (lock) {
+      // status 没有持久 task 结果可轮询，必须在同一 control 请求中等到完整 StatusReport。
       printMaintenance(
-        await daemonRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ operation: "status" }),
-        }),
+        await daemonRequest(
+          lock,
+          ServerLock.CONTROL_MAINTENANCE_PATH,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ operation: "status" }),
+          },
+          false,
+        ),
       )
       return
     }
