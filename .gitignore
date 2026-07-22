@@ -31,6 +31,7 @@ target
 opencode-dev
 # 隔离迁移专用 clone：与目标工作区解耦，避免递归污染
 /thirdparty/opencode-v1.17.18-smark/
+/thirdparty/opencode-telegram-bot/
 UPCOMING_CHANGELOG.md
 logs/
 *.bun-build

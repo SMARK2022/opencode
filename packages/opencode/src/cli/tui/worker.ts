@@ -1,4 +1,5 @@
 import { Server } from "@/server/server"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { InstanceRuntime } from "@/project/instance-runtime"
 import { upgrade } from "@/cli/upgrade"
@@ -585,8 +586,8 @@ if (isDaemon) {
 
   // 升级只是 advisory，不能阻塞健康锁发布或作为发现成功的另一个条件。
   upgradeTimer = setTimeout(() => {
-    // shutdown 已开始时 callback 不再加载新实例。
-    if (shutdownInProgress) return
+    // 禁用升级时也不启动Project实例；不能先加载完整上下文再在upgrade内部拒绝检查。
+    if (shutdownInProgress || Flag.OPENCODE_DISABLE_AUTOUPDATE) return
     // 仅升级任务为 advisory；实例加载失败同样观测，不能变成致命拒绝。
     void InstanceRuntime.load({ directory: process.cwd() }).then(() => upgrade()).catch(() => {})
   }, 1_000)

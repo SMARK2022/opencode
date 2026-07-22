@@ -4,6 +4,8 @@ import { errorMessage } from "@opencode-ai/tui/util/error"
 import { ServerLock } from "@/cli/tui/server-lock"
 import { withNetworkOptions } from "@/cli/network"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+// #532：机器接口复用 discover 的 owner 分类与拉起 seam，不解析 lock/选端口
+import { connectionInfo, discoverOrSpawnDaemon } from "./tui"
 
 // #259：stop 只等待 worker 既有 graceful shutdown 完成，不升级为 SIGKILL
 // 10 秒足够覆盖实例 dispose、server close 和数据库 close，超时则保留现场让用户人工判断
@@ -17,8 +19,60 @@ export const DaemonCommand = cmd({
   // #259：这里只注册本机 TUI 共享 daemon 的管理入口；不复用 serve，避免把 headless server 生命周期混入
   command: "daemon",
   describe: "manage the shared opencode daemon",
-  builder: (yargs) => yargs.command(DaemonStopCommand).demandCommand(),
+  builder: (yargs) => yargs.command(DaemonStatusCommand).command(DaemonStartCommand).command(DaemonStopCommand).demandCommand(),
   async handler() {},
+})
+
+// #532：status 是观察接口，缺少 owner 时返回 running=false 且不得进入 ensure 选主。
+// JSON 不包含 token/controlPort/dbPath，外部 client 只获得连接所需最小 authority。
+// stdout 保持单值协议，日志继续走 stderr，避免 Node 调用方猜测人类输出。
+// responsive=false 仍报告同一存活 owner，调用方不得据此创建第二个 daemon。
+const DaemonStatusCommand = cmd({
+  command: "status",
+  describe: "report the shared opencode daemon connection",
+  builder: (yargs) =>
+    yargs.option("json", {
+      type: "boolean",
+      demandOption: true,
+      describe: "write one machine-readable JSON result to stdout",
+    }),
+  async handler() {
+    // stdout 是外部 client 的协议通道；UI logo、日志和人类诊断必须继续留在 stderr
+    process.stdout.write(JSON.stringify(await connectionInfo()) + "\n")
+  },
+})
+
+// #532：start 只把跨进程请求交给现有 discoverOrSpawnDaemon，CLI 自身不解析 lock 或选择端口。
+// launcher PID 来自长期 client，保护首个 SSE 前窗口而不是绑定短命 CLI。
+// discover 返回后重新查询同一 owner identity，避免输出 spawn wrapper 或旧 lock PID。
+const DaemonStartCommand = cmd({
+  command: "start",
+  describe: "ensure the shared opencode daemon is running",
+  builder: (yargs) =>
+    yargs
+      .option("json", {
+        type: "boolean",
+        demandOption: true,
+        describe: "write one machine-readable JSON result to stdout",
+      })
+      .option("launcher-pid", {
+        type: "number",
+        demandOption: true,
+        describe: "client process that protects startup until the first global SSE connection",
+      }),
+  async handler(args) {
+    // 正整数门禁属于 CLI trust seam；无效 PID 不能进入 worker 环境并改变 startup idle 语义
+    if (!Number.isSafeInteger(args.launcherPid) || args.launcherPid <= 0) throw new Error("launcher-pid must be a positive integer")
+    await discoverOrSpawnDaemon(
+      { port: 0, hostname: "127.0.0.1", mdns: false, "mdns-domain": "opencode.local", cors: [] },
+      undefined,
+      args.launcherPid,
+    )
+    const info = await connectionInfo()
+    if (!info.running) throw new Error("opencode daemon owner disappeared after startup")
+    // discover 与快照共用同一 owner 分类，不向调用方泄漏或要求解析 ServerLock
+    process.stdout.write(JSON.stringify(info) + "\n")
+  },
 })
 
 const DaemonStopCommand = cmd({

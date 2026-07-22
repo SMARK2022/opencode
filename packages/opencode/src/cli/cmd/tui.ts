@@ -4,6 +4,9 @@ import { Flock } from "@opencode-ai/core/util/flock"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { Global } from "@opencode-ai/core/global"
 import path from "path"
+// #532：Windows relay spawn 需要 os.tmpdir 与 randomUUID（env/pid 握手文件）
+import os from "os"
+import { randomUUID } from "node:crypto"
 import { fileURLToPath } from "url"
 import { UI } from "@/cli/ui"
 import { errorMessage } from "@opencode-ai/tui/util/error"
@@ -30,20 +33,74 @@ async function spawnDaemon(cmd: string[], opts: Parameters<typeof Bun.spawn>[1])
   if (!systemRoot || !path.isAbsolute(systemRoot)) throw new Error("Windows SystemRoot is not an absolute path")
   if (!cmd[0] || !cmd[1]) throw new Error("Windows daemon executable and worker target are required")
   // #495：encoded script 内容固定，两个动态路径只经环境变量传入，避免路径字符改变 PowerShell 语法结构。
+  // #532：worker 不再由 wrapper 直接 Start-Process——wrapper 与 CLI 同属 kill-on-close job object，
+  // 其子进程会随短命 launcher 连锁击杀，daemon 无法存活到外部 client 接入（机器接口语义在 Windows 失效）。
+  // 改由 wrapper 经 WMI Win32_Process.Create 拉起 relay（服务进程上下文，天然脱离 CLI job），
+  // relay 在 job 外 Start-Process worker；WMI Create 不继承调用方环境，env 经一次性 JSON 文件传递。
+  const envRecord = { ...(opts?.env ?? {}) } as Record<string, string>
+  // env 文件放在 lock 同目录（隔离的 daemon state root）——泄漏面与 lock 一致，relay 读完即删
+  const baseDir = envRecord.OPENCODE_LOCK_PATH ? path.dirname(envRecord.OPENCODE_LOCK_PATH) : os.tmpdir()
+  const nonce = randomUUID()
+  const envFile = path.join(baseDir, `daemon-env-${nonce}.env`)
+  const pidFile = path.join(baseDir, `daemon-pid-${nonce}.txt`)
+  // 路径/argv/env 值全部 b64 编码：避免引号/空格/大小写重复键（PS5.1 Json 字典对 NO_PROXY/no_proxy 报重复键）
+  const b64u = (s: string) => Buffer.from(s, "utf8").toString("base64")
+  // 过滤 undefined 值：Bun env 对象允许 undefined（写入时丢弃），b64 编码前必须剔除
+  await Bun.write(
+    envFile,
+    Object.entries(envRecord)
+      .filter(([, v]) => v !== undefined)
+      .map(([k, v]) => `${k}\t${b64u(v as string)}`)
+      .join("\n"),
+  )
+  const relayScript = [
+    "$ErrorActionPreference = 'Stop'",
+    `$envPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64u(envFile)}'))`,
+    `$pidPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64u(pidFile)}'))`,
+    `$cwdPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64u(process.cwd())}'))`,
+    `$exePath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64u(cmd[0])}'))`,
+    `$targetPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64u(cmd[1])}'))`,
+    "try {",
+    "  foreach ($line in [IO.File]::ReadAllLines($envPath)) {",
+    "    if ([string]::IsNullOrWhiteSpace($line)) { continue }",
+    "    $parts = $line -split [char]9, 2",
+    "    if ($parts.Count -ne 2 -or $parts[0].Length -eq 0) { continue }",
+    "    [Environment]::SetEnvironmentVariable($parts[0], [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($parts[1])))",
+    "  }",
+    "  $start = @{ FilePath = $exePath; ArgumentList = [char]34 + $targetPath + [char]34; PassThru = $true; WorkingDirectory = $cwdPath }",
+    "  $worker = Start-Process @start -WindowStyle Hidden",
+    "  [IO.File]::WriteAllText($pidPath, [string]$worker.Id)",
+    "  Remove-Item -LiteralPath $envPath",
+    "} catch {",
+    "  # relay 失败可观测：错误落盘在 pid 文件旁，供 launcher 诊断（relay 无 stdout 通道）",
+    "  [IO.File]::WriteAllText(($pidPath + '.err'), ($_ | Out-String))",
+    "}",
+  ].join("\n")
   const script = `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $target = $env:OPENCODE_DAEMON_TARGET
 if ([string]::IsNullOrEmpty($target) -or $target.Contains([char]34)) { exit 87 }
-# Start-Process 会把 ArgumentList 重新拼成 native command line；显式保留双引号才能让空格路径仍是一个 argv。
-$arguments = [char]34 + $target + [char]34
-$start = @{ FilePath = $env:OPENCODE_DAEMON_EXECUTABLE; ArgumentList = $arguments; PassThru = $true }
-if ($env:OPENCODE_PRINT_LOGS -eq '1') { $worker = Start-Process @start -NoNewWindow }
-else { $worker = Start-Process @start -WindowStyle Hidden }
-[Console]::Out.WriteLine($worker.Id)
+# relay 由 WMI 服务进程创建——脱离 CLI 的 job object；其 Start-Process 的 worker 因此在 job 外存活
+$relayEncoded = '${Buffer.from(relayScript, "utf16le").toString("base64")}'
+$relayCmd = [char]34 + (Join-Path $PSHOME 'powershell.exe') + [char]34 + ' -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $relayEncoded
+$startup = ([wmiclass]'Win32_ProcessStartup').CreateInstance()
+$startup.ShowWindow = 0
+$result = ([wmiclass]'Win32_Process').Create($relayCmd, (Get-Location).Path, $startup)
+if ($result.ReturnValue -ne 0) { exit 88 }
+$deadline = (Get-Date).AddSeconds(60)
+$workerPid = 0
+while ((Get-Date) -lt $deadline -and $workerPid -le 0) {
+  if (Test-Path -LiteralPath $env:OPENCODE_DAEMON_PID_FILE) { $workerPid = [int](Get-Content -Raw -LiteralPath $env:OPENCODE_DAEMON_PID_FILE) }
+  else { Start-Sleep -Milliseconds 100 }
+}
+if ($workerPid -le 0) { exit 89 }
+[Console]::Out.WriteLine($workerPid)
 [Console]::Out.Flush()
-$worker.WaitForExit()
-exit $worker.ExitCode
+# worker 可能已自行退出（快速失败路径）：Wait-Process 对不存在的 pid 抛终止错误，
+# 会把健康的 startup 失败误报成 wrapper 崩溃（#179 race 检测消费该退出码）
+if (Get-Process -Id $workerPid -ErrorAction SilentlyContinue) { Wait-Process -Id $workerPid -ErrorAction SilentlyContinue }
+exit 0
 `
   // absolute system wrapper 避免 Project cwd 选择同名程序；encoded source 保持动态路径只作为 data 进入脚本。
   const wrapper = Bun.spawn(
@@ -63,6 +120,8 @@ exit $worker.ExitCode
         ...(opts?.env as Record<string, string>),
         OPENCODE_DAEMON_EXECUTABLE: cmd[0],
         OPENCODE_DAEMON_TARGET: cmd[1],
+        // #532：relay 写出 worker PID 的握手文件路径（env 文件路径已 b64 嵌入 relay 脚本）
+        OPENCODE_DAEMON_PID_FILE: pidFile,
       },
       // stdout 必须 pipe：PID 握手与持续 drain 都依赖该协议通道，inherit 会同时丢失两者。
       stdout: "pipe",
@@ -316,17 +375,58 @@ async function waitForOwnerExit(lock: ServerLock.ServerLock, deps: DiscoverDaemo
   throw new Error(`opencode daemon pid=${lock.pid} is still stopping`)
 }
 
-// #165：共享 daemon 选举/复用；禁止重引入 per-TUI Worker+Rpc.client
-export async function discoverOrSpawnDaemon(
-  networkArgs: Parameters<typeof resolveNetworkOptionsNoConfig>[0],
-  deps: DiscoverDaemonDeps = defaultDiscoverDeps(),
-): Promise<{ url: string; fwdPid?: number; lockPath?: string }> {
-  // 父进程健康探测直接调用 fetch，首次读锁前就须补回环绕过，不能仅在 spawn 后保护子进程。
+function bypassLoopbackProxy() {
   const noProxy = NetworkProxy.noProxyString(
     [process.env.NO_PROXY, process.env.no_proxy].flatMap((value) => (value ?? "").split(",").map((s) => s.trim()).filter(Boolean)),
   )
   process.env.NO_PROXY = noProxy
   process.env.no_proxy = noProxy
+}
+
+// #532：观察与发现共用身份/健康检查；只有发现调用方负责等待、选举和清理。
+async function inspectDaemonOwner(
+  lock: ServerLock.ServerLock | undefined,
+  deps: DiscoverDaemonDeps,
+  lockPath: string | undefined,
+  identity: ReturnType<typeof ServerLock.identity>,
+  network?: ReturnType<typeof resolveNetworkOptionsNoConfig>,
+) {
+  if (!lock || !deps.alive(lock.pid)) return
+  const dbPath = path.normalize(lock.dbPath)
+  const expectedPath = path.normalize(identity.dbPath)
+  if ((process.platform === "win32" ? dbPath.toLowerCase() !== expectedPath.toLowerCase() : dbPath !== expectedPath) || lock.channel !== identity.channel)
+    throw new Error("Existing opencode daemon has a different database or channel; stop it explicitly before switching")
+  if (network && (!lock.externalUrl || JSON.stringify(lock.network) !== JSON.stringify(network)))
+    throw new Error("Existing opencode daemon has incompatible network options; stop it explicitly before changing listeners")
+  const stopping = await ownerIsStopping(lock)
+  const responsive = !stopping && await deps.ping(lock.port)
+  // 探测完成后仍复读同一placement，不能把换代前的PID/端口交给调用方。
+  const current = await deps.read(lockPath)
+  if (current?.token !== lock.token || current.pid !== lock.pid) throw new Error("Opencode daemon ownership changed during discovery")
+  return { lock, stopping, responsive }
+}
+
+// #532：只公开连接字段，不把token、私有控制端口或数据库路径交给外部client。
+export type ConnectionInfo = { running: false } | { running: true; pid: number; url: string; responsive: boolean }
+
+// 纯查询报告存活但不可响应的owner，不清锁或创建第二个daemon。
+export async function connectionInfo(deps: DiscoverDaemonDeps = defaultDiscoverDeps()): Promise<ConnectionInfo> {
+  bypassLoopbackProxy()
+  const lockPath = deps.placement()
+  const owner = await inspectDaemonOwner(await deps.read(lockPath), deps, lockPath, deps.identity())
+  if (!owner) return { running: false }
+  return { running: true, pid: owner.lock.pid, url: `http://127.0.0.1:${owner.lock.port}`, responsive: owner.responsive }
+}
+
+// #165：共享 daemon 选举/复用；禁止重引入 per-TUI Worker+Rpc.client
+// #532：外部client使用长命launcher；TUI缺省仍观察自身。
+export async function discoverOrSpawnDaemon(
+  networkArgs: Parameters<typeof resolveNetworkOptionsNoConfig>[0],
+  deps: DiscoverDaemonDeps = defaultDiscoverDeps(),
+  launcherPid?: number,
+): Promise<{ url: string; fwdPid?: number; lockPath?: string }> {
+  // 父进程健康探测直接调用 fetch，首次读锁前就须补回环绕过，不能仅在 spawn 后保护子进程。
+  bypassLoopbackProxy()
 
   // 身份与网络请求先于快速路径解析，禁止复用另一数据库或忽略显式外部端口。
   const identity = deps.identity()
@@ -336,24 +436,14 @@ export async function discoverOrSpawnDaemon(
   // 同一 DB/channel 共用发现路径；显式网络请求只在复用检查中判断兼容性。
   const lockPath = deps.placement()
   async function reuse(lock: ServerLock.ServerLock | undefined) {
-    if (!lock || !deps.alive(lock.pid)) return null
-    // 活进程身份不符或认证失败均保留原锁，不另建备用 daemon，也不杀其他进程。
-    const dbPath = path.normalize(lock.dbPath)
-    const expectedPath = path.normalize(identity.dbPath)
-    if ((process.platform === "win32" ? dbPath.toLowerCase() !== expectedPath.toLowerCase() : dbPath !== expectedPath) || lock.channel !== identity.channel)
-      throw new Error("Existing opencode daemon has a different database or channel; stop it explicitly before switching")
-    if (external && (!lock.externalUrl || JSON.stringify(lock.network) !== JSON.stringify(network)))
-      throw new Error("Existing opencode daemon has incompatible network options; stop it explicitly before changing listeners")
-    // 快速路径、选举复查和最终交付共用此门；身份不符仍由前面的目标校验拒绝。
-    if (await ownerIsStopping(lock)) {
-      await waitForOwnerExit(lock, deps)
+    const owner = await inspectDaemonOwner(lock, deps, lockPath, identity, external ? network : undefined)
+    if (!owner) return null
+    if (owner.stopping) {
+      await waitForOwnerExit(owner.lock, deps)
       return null
     }
-    if (!(await deps.ping(lock.port))) throw new Error("Existing opencode daemon health or authentication check failed")
-    // 探测期间锁可能换主；复读 token 后才允许把地址交给 TUI。
-    const current = await deps.read(lockPath)
-    if (current?.token !== lock.token || current.pid !== lock.pid) throw new Error("Opencode daemon ownership changed during discovery")
-    return external && lock.externalUrl ? lock.externalUrl : `http://127.0.0.1:${lock.port}`
+    if (!owner.responsive) throw new Error("Existing opencode daemon health or authentication check failed")
+    return external && owner.lock.externalUrl ? owner.lock.externalUrl : `http://127.0.0.1:${owner.lock.port}`
   }
   // 快速检查与持锁复查都调用 reuse，身份、认证与 token 校验不分叉。
   let existingUrl = await reuse(await deps.read(lockPath))
@@ -380,7 +470,8 @@ export async function discoverOrSpawnDaemon(
         return { url: existingUrl, lockPath }
       } else {
         const daemonFile = await deps.resolveDaemonFile()
-        const printLogs = process.argv.includes("--print-logs")
+        // 机器stdout只交付单个JSON；显式TUI日志不受此机器调用分支影响。
+        const printLogs = process.argv.includes("--print-logs") && launcherPid === undefined
         // 全量快照保留 PATH、认证和 CA；归一只覆盖代理键，不另建选择性环境。
         const env = Object.fromEntries(
           Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
@@ -412,7 +503,8 @@ export async function discoverOrSpawnDaemon(
             ...env,
             OPENCODE_PROCESS_ROLE: "worker",
             // 首个订阅前由daemon判断启动方是否仍存活，不改变监听与锁路径运输。
-            OPENCODE_DAEMON_LAUNCHER_PID: String(process.pid),
+            // 短命机器CLI退出后，首个SSE前仍由worker观察真实client。
+            OPENCODE_DAEMON_LAUNCHER_PID: String(launcherPid ?? process.pid),
             ...(lockPath ? { OPENCODE_LOCK_PATH: lockPath } : {}),
             // 覆盖继承的外部监听变量，避免内部请求误启动旧的外部端口。
             OPENCODE_EXTERNAL_NETWORK: external ? JSON.stringify(network) : "",
