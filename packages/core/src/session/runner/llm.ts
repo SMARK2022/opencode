@@ -59,6 +59,8 @@ import { Token } from "../../util/token"
 import { FSUtil } from "../../fs-util"
 import { ToolDiffs } from "../tool-diffs"
 import { Global } from "../../global"
+import { Image } from "../../image"
+import { normalizeImages } from "./images"
 
 /**
  * Runs one durable coding-agent Session until it settles.
@@ -126,6 +128,7 @@ const layer = Layer.effect(
     const skillGuidance = yield* SkillGuidance.Service
     const referenceGuidance = yield* ReferenceGuidance.Service
     const config = yield* Config.Service
+    const image = yield* Image.Service
     const permission = yield* PermissionV2.Service
     const nearOverflowNotified = new Set<SessionSchema.ID>()
     const snapshots = yield* Snapshot.Service
@@ -355,6 +358,8 @@ const layer = Layer.effect(
       const nearOverflow = !decide && !isLastStep && !nearOverflowNotified.has(session.id) && usableTokens > 0 && estimatedInput >= threshold
       if (nearOverflow) nearOverflowNotified.add(session.id)
       const overflowReminder = nearOverflow ? [Message.user("Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.")] : []
+      // 正常请求和压缩共用准备后的消息；不把坏图交给provider，也不改写持久历史。
+      const messages = yield* normalizeImages([...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...reminders.map(text => Message.user(text)), ...overflowReminder, ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])], image)
       const request = LLM.request({
         model,
         http: {
@@ -375,7 +380,7 @@ const layer = Layer.effect(
         } },
         // 模型族正文与V1共用；显式agent system仍替代默认正文，而非重复注入两份身份。
         system: selection.openaiOAuth ? undefined : systemParts,
-        messages: [...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...reminders.map(text => Message.user(text)), ...overflowReminder, ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+        messages,
         tools: toolMaterialization?.definitions ?? [],
         toolChoice: isLastStep || decide ? "none" : undefined,
       })
@@ -820,6 +825,7 @@ export const node = makeLocationNode({
     SkillGuidance.node,
     ReferenceGuidance.node,
     Config.node,
+    Image.node,
     Snapshot.node,
     Database.node,
     FSUtil.node,

@@ -499,8 +499,8 @@ describe("ReadTool", () => {
     }),
   )
 
-  // #485：反转旧回退契约——resizer 不可用时 fail-closed，与 V1 read 工具行为一致
-  itWithoutResizer.effect("fails closed when the resizer is unavailable", () =>
+  // #534：图片内容错误变为文本省略，不发送原始bytes；读取与权限错误仍失败。
+  itWithoutResizer.effect("omits the image when the resizer is unavailable", () =>
     Effect.gen(function* () {
       const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
       readResult = {
@@ -518,11 +518,11 @@ describe("ReadTool", () => {
           ...toolIdentity,
           call: { type: "tool-call", id: "call-image-fallback", name: "read", input: { path: "pixel.png" } },
         }),
-      ).toEqual({ type: "error", value: "Image resizer is unavailable" })
+      ).toMatchObject({ type: "json", value: { encoding: "utf8", mime: "text/plain", content: "Image omitted: could not be decoded or resized within the image size limit." } })
     }),
   )
 
-  it.effect("rejects invalid image data returned by the filesystem", () =>
+  it.effect("omits invalid image data returned by the filesystem", () =>
     Effect.gen(function* () {
       readResult = {
         uri: "file:///truncated.png",
@@ -539,11 +539,11 @@ describe("ReadTool", () => {
           ...toolIdentity,
           call: { type: "tool-call", id: "call-truncated-image", name: "read", input: { path: "truncated.png" } },
         }),
-      ).toEqual({ type: "error", value: "Image could not be decoded: truncated.png" })
+      ).toMatchObject({ type: "json", value: { encoding: "utf8", mime: "text/plain", content: "Image omitted: could not be decoded or resized within the image size limit." } })
     }),
   )
 
-  it.effect("rejects oversized images when resizing is disabled", () =>
+  it.effect("omits oversized images when resizing is disabled", () =>
     Effect.gen(function* () {
       const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
       const source = new photon.PhotonImage(new Uint8Array(Array.from({ length: 16 * 4 }, () => 255)), 16, 1)
@@ -573,8 +573,8 @@ describe("ReadTool", () => {
         call: { type: "tool-call", id: "call-wide-image", name: "read", input: { path: "wide.png" } },
       })
 
-      expect(result.type).toBe("error")
-      if (result.type === "error") expect(result.value).toContain("exceeding configured limits 4x2000")
+      expect(result.type).toBe("json")
+      if (result.type === "json") expect(result.value).toMatchObject({ encoding: "utf8", mime: "text/plain", content: "Image omitted: could not be decoded or resized within the image size limit." })
     }),
   )
 
@@ -645,8 +645,8 @@ describe("ReadTool", () => {
         call: { type: "tool-call", id: "call-max-bytes", name: "read", input: { path: "pixel.png" } },
       })
 
-      expect(result.type).toBe("error")
-      if (result.type === "error") expect(result.value).toContain("/1 bytes")
+      expect(result.type).toBe("json")
+      if (result.type === "json") expect(result.value).toMatchObject({ encoding: "utf8", mime: "text/plain", content: "Image omitted: could not be decoded or resized within the image size limit." })
     }),
   )
 

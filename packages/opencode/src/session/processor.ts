@@ -321,6 +321,37 @@ const layer = Layer.effect(
         return part
       })
 
+      const prepareToolOutput = Effect.fn("SessionProcessor.prepareToolOutput")(function* (output: {
+        title: string
+        metadata: Record<string, unknown>
+        output: string
+        attachments?: SessionV1.FilePart[]
+      }, options?: { readonly tokenBudget?: number }) {
+        const normalized = yield* Effect.forEach(output.attachments ?? [], (candidate) => {
+          const proof = Image.consumeNormalized(candidate)
+          // #534：ReadTool 的匹配 proof 证明同一 MIME/URL 已 decode；缺失或被插件改写时必须回到唯一 Image owner。
+          // 非图片 attachment 仍经过 consume 是为了统一剥离潜在 transient 字段，但绝不送入图片 decoder。
+          // typed image failure 只移除对应附件；同一个 Tool 的文本和其他成功附件必须继续交付。
+          if (proof.valid) return Effect.succeed(Exit.succeed<SessionV1.FilePart>(proof.attachment))
+          if (!proof.attachment.mime.startsWith("image/"))
+            return Effect.succeed(Exit.succeed<SessionV1.FilePart>(proof.attachment))
+          return image.normalize(proof.attachment, options).pipe(Effect.exit)
+        })
+        const omitted = normalized.filter(Exit.isFailure).length
+        const attachments = normalized.filter(Exit.isSuccess).map((item) => item.value)
+        return {
+          ...output,
+          // #534：provider 不支持的坏图片降级为文本事实；不保留原 bytes，也不把一次附件失败升级为整个 tool-error。
+          // omission 计数来自同一 normalized 数组，避免事件分支和数据库分支各自过滤后计数漂移。
+          // 返回值是唯一 prepared snapshot；调用方不能再次映射 attachments 或重新拼 omission 文案。
+          output:
+            omitted === 0
+              ? output.output
+              : `${output.output}\n\n[${omitted} image${omitted === 1 ? "" : "s"} omitted: could not be decoded or resized within the image size limit.]`,
+          attachments: attachments.length ? attachments : undefined,
+        }
+      })
+
       const completeToolCall = Effect.fn("SessionProcessor.completeToolCall")(function* (
         toolCallID: string,
         output: {
@@ -329,6 +360,7 @@ const layer = Layer.effect(
           output: string
           attachments?: SessionV1.FilePart[]
         },
+        prepared = false,
       ) {
         const match = yield* readToolCall(toolCallID)
         if (!match) return
@@ -337,6 +369,8 @@ const layer = Layer.effect(
           yield* settleToolCall(toolCallID)
           return
         }
+        // direct completion也在既有permit内准备；普通事件复用已准备snapshot及Read预算。
+        const result = prepared ? output : yield* prepareToolOutput(output, match.part.tool === "read" ? { tokenBudget: 1600 } : undefined)
         yield* session.updatePart({
           ...match.part,
           state: {
@@ -345,20 +379,20 @@ const layer = Layer.effect(
             // edits 整表替换（丢弃 legacy 顶层字段）优先于旧 content 覆盖语义。
             input: resolveCompletedToolInput(
               match.part.state.input as Record<string, unknown>,
-              output.metadata as Record<string, unknown> | undefined,
+              result.metadata as Record<string, unknown> | undefined,
             ),
-            output: output.output,
+            output: result.output,
             // #209：auto-review 注解在 running 状态附加——completion 替换 metadata 时保留 autoReview 信封
             // #514：strip 真值临时字段（_formattedContent/_syncInput），避免进持久化 metadata
             metadata: (() => {
-              const rest = stripToolTruthMetadata(output.metadata as Record<string, unknown> | undefined)
+              const rest = stripToolTruthMetadata(result.metadata as Record<string, unknown> | undefined)
               return match.part.state.metadata?.autoReview
                 ? { ...rest, autoReview: match.part.state.metadata.autoReview }
                 : rest
             })(),
-            title: output.title,
+            title: result.title,
             time: { start: match.part.state.time.start, end: Date.now() },
-            attachments: output.attachments,
+            attachments: result.attachments,
           },
         })
         yield* settleToolCall(toolCallID)
@@ -648,24 +682,8 @@ const layer = Layer.effect(
               return
             }
             const rawOutput = toolResultOutput(value)
-            const normalized = yield* Effect.forEach(rawOutput.attachments ?? [], (attachment) =>
-              // #485：fail-closed——resizer 不可用时该附件失败省略（omitted 计数），不再回退原图
-              attachment.mime.startsWith("image/")
-                // 沿用唯一附件归一化分支，只有实际 Read 调用携带源预算。
-                ? image.normalize(attachment, toolCall?.part.tool === "read" ? { tokenBudget: 1600 } : undefined).pipe(Effect.exit)
-                : Effect.succeed(Exit.succeed<SessionV1.FilePart>(attachment)),
-            )
-            const omitted = normalized.filter(Exit.isFailure).length
-            const attachments = normalized.filter(Exit.isSuccess).map((item) => item.value)
-            const output = {
-              ...rawOutput,
-              output:
-                omitted === 0
-                  ? rawOutput.output
-                  : `${rawOutput.output}\n\n[${omitted} image${omitted === 1 ? "" : "s"} omitted: could not be resized below the image size limit.]`,
-              attachments: attachments.length ? attachments : undefined,
-            }
-            yield* completeToolCall(value.id, output)
+            const output = yield* prepareToolOutput(rawOutput, toolCall?.part.tool === "read" ? { tokenBudget: 1600 } : undefined)
+            yield* completeToolCall(value.id, output, true)
             return
           }
 

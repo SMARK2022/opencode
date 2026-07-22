@@ -42,6 +42,14 @@ export const make = Effect.gen(function* () {
     const height = swapped ? metadata.width : metadata.height
     const bytes = Buffer.byteLength(content.content, "utf-8")
     const withinLimits = width <= limits.maxWidth && height <= limits.maxHeight && bytes <= limits.maxBase64Bytes
+    // metadata不消费像素；透传、禁缩放和多页编码前必须验证所有待发送pages。
+    // 单页后续编码本身完整解码，不额外生成一份raw副本。
+    if (withinLimits || !limits.autoResize || (metadata.pages ?? 1) > 1)
+      yield* Effect.tryPromise({
+        try: async () => void (await sharp(buffer, (metadata.pages ?? 1) > 1 ? { pages: -1 } : undefined).raw().toBuffer()),
+        catch: () => new Image.DecodeError({ resource }),
+      })
+
     if (withinLimits && ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(content.mime)) return content
     const sizeError = new Image.SizeError({
       resource,

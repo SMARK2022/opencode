@@ -15,7 +15,7 @@ import { symlink } from "fs/promises"
 import { Logging } from "@opencode-ai/core/observability/logging"
 import { Logger, References } from "effect"
 import path from "path"
-import { fileURLToPath } from "url"
+import { fileURLToPath, pathToFileURL } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
@@ -258,12 +258,43 @@ function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; proces
   return LayerNode.compile(promptRoot, replacements)
 }
 
-function makeHttp(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking"; image?: "unavailable" }) {
+function makeHttp(input?: {
+  mcpInstructions?: MCP.ServerInstructions[]
+  processor?: "blocking"
+  image?: "unavailable" | "counting"
+  plugin?: "mutate"
+}) {
   const root = LayerNode.group([promptRoot, testLLMServerNode])
   // #485：resizer 不可用注入——normalize 必然失败，验证 prompt 在持久化前 fail-closed
   const unavailableImage = Layer.succeed(
     Image.Service,
     Image.Service.of({ normalize: () => Effect.fail(new Image.ResizerUnavailableError()) }),
+  )
+  // #534：counting 注入——normalize 仅记录 URL 后原样返回，证明单次 decode 与 proof 消费。
+  const countingImage = Layer.succeed(
+    Image.Service,
+    Image.Service.of({
+      normalize: (input) => Effect.sync(() => imageNormalizations.push(input.url)).pipe(Effect.as(input)),
+    }),
+  )
+  // #534：真实 chat.message hook 在 final normalization 前改写 URL；旧 proof 必须失效并再处理一次。
+  const mutatingPlugin = Layer.succeed(
+    Plugin.Service,
+    Plugin.Service.of({
+      trigger: (name, _input, output) =>
+        Effect.sync(() => {
+          if (name !== "chat.message" || typeof output !== "object" || output === null) return output
+          const parts = Reflect.get(output, "parts")
+          if (!Array.isArray(parts)) return output
+          const file = parts.find(
+            (part) => typeof part === "object" && part !== null && Reflect.get(part, "type") === "file",
+          )
+          if (file) Reflect.set(file, "url", "data:image/png;base64,AQ==")
+          return output
+        }),
+      list: () => Effect.succeed([]),
+      init: () => Effect.void,
+    }),
   )
   const replacements = [
     [SessionSummary.node, summary],
@@ -271,6 +302,8 @@ function makeHttp(input?: { mcpInstructions?: MCP.ServerInstructions[]; processo
     [MCP.node, makeMcp(input?.mcpInstructions)],
     [RuntimeFlags.node, runtimeFlags],
     ...(input?.image === "unavailable" ? [[Image.node, unavailableImage] as const] : []),
+    ...(input?.image === "counting" ? [[Image.node, countingImage] as const] : []),
+    ...(input?.plugin === "mutate" ? [[Plugin.node, mutatingPlugin] as const] : []),
   ] as const
   if (input?.processor === "blocking") {
     return LayerNode.compile(root, [...replacements, [SessionProcessor.node, blockingProcessor]])
@@ -298,27 +331,209 @@ const withMcpInstructions = testEffect(
 )
 const unix = process.platform !== "win32" ? it.instance : it.instance.skip
 const unixNoLLMServer = process.platform !== "win32" ? noLLMServer.instance : noLLMServer.instance.skip
-// #485：resizer 不可用环境——验证 prompt 在持久化前 fail-closed
+// #534：resizer 不可用环境——坏图片降级为 synthetic omission text，消息仍原子落库
 const unavailable = testEffect(makeHttp({ image: "unavailable" }))
+// #534：counting 环境——记录每次 normalize URL，锁定单次 decode 与 proof 消费/失效。
+const imageNormalizations: string[] = []
+const oneShotImage = testEffect(makeHttp({ image: "counting" }))
+const mutatedImage = testEffect(makeHttp({ image: "counting", plugin: "mutate" }))
+// #534：合法 1x1 PNG 与双帧 GIF fixture——损坏变异只用副本，不污染合法向量。
+const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+const twoFrameGif = "R0lGODlhBAAEAIAAAExpcUxpcSH/C05FVFNDQVBFMi4wAwEAAAAh+QQFAAAAACwAAAAABAAEAAACBIyPGQUAIfkEBQAAAAAsAAAAAAQABACATGlx/wAAAgSMjxkFADs="
 unavailable.instance(
-  "fails before persisting an image when the resizer is unavailable",
+  "replaces an undecodable image with a synthetic omission text part",
   () =>
     Effect.gen(function* () {
       yield* useServerConfig(providerCfg)
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const chat = yield* sessions.create({ title: "Pinned" })
+      const result = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }],
+      })
+      // #534：失败降级为可持久化文本——坏 bytes 不进 provider 请求，后续消息仍可继续；
+      // 消息本身原子落库（不再 #485 的整体失败），且不保留 filename/url 摘要避免复制坏 data URL。
+      const stored = yield* MessageV2.filterCompactedEffect(chat.id)
+      const textPart = stored
+        .flatMap((message) => message.parts)
+        .find((part) => part.type === "text" && part.text.startsWith("[Image omitted:"))
+      expect(textPart).toBeDefined()
+      if (textPart?.type !== "text") return
+      expect(textPart.text).toBe("[Image omitted: could not be decoded or resized within the image size limit.]")
+      expect((textPart as { synthetic?: boolean }).synthetic).toBe(true)
+      expect(result).toBeDefined()
+    }),
+  { git: true },
+)
+
+// #534：metadata 完整但像素损坏的直发图——decoder 失败后只能留下 omission 文本，
+// 原始坏 data URL 不得进入持久化或后续 provider 请求。
+it.instance(
+  "replaces a pixel-corrupt direct image with a persisted omission",
+  () =>
+    Effect.gen(function* () {
+      yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Malformed image" })
+      const png = Buffer.from(tinyPng, "base64")
+      // IDAT 翻转保持 IHDR/尺寸有效——与结构门禁向量区分，专门锁定真像素 decode 失败路径。
+      const idat = png.indexOf(Buffer.from("IDAT"))
+      png[idat + 4] ^= 0xff
+
       const result = yield* Effect.exit(
         prompt.prompt({
           sessionID: chat.id,
           agent: "build",
           noReply: true,
-          parts: [{ type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }],
+          parts: [{ type: "file", mime: "image/png", url: `data:image/png;base64,${png.toString("base64")}` }],
         }),
       )
-      expect(Exit.isFailure(result)).toBe(true)
-      // normalize 失败发生在 updateMessage/updatePart 之前，数据库中不应留下半个用户请求
-      expect(yield* MessageV2.filterCompactedEffect(chat.id)).toHaveLength(0)
+      expect(Exit.isSuccess(result)).toBe(true)
+      const parts = (yield* MessageV2.filterCompactedEffect(chat.id)).flatMap((item) => item.parts)
+      expect(parts.some((part) => part.type === "file")).toBe(false)
+      const omission = parts.find((part) => part.type === "text" && part.text.includes("Image omitted"))
+      expect((omission as { synthetic?: boolean } | undefined)?.synthetic).toBe(true)
+    }),
+  { git: true },
+)
+
+// #534：禁用缩放且仅允许1字节时，坏像素仍须先归属decode失败；
+// metadata-only 顺序会先报 SizeError，真实像素损坏必须拥有更早的 DecodeError。
+it.instance(
+  "decodes before reporting size when the token budget is minimal",
+  () =>
+    Effect.gen(function* () {
+      yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        attachment: { image: { auto_resize: false, max_base64_bytes: 1 } },
+      }))
+      const image = yield* Image.Service
+      const png = Buffer.from(tinyPng, "base64")
+      const idat = png.indexOf(Buffer.from("IDAT"))
+      png[idat + 4] ^= 0xff
+      const pngResult = yield* image
+        .normalize(
+          {
+            id: PartID.ascending(),
+            messageID: MessageID.ascending(),
+            sessionID: SessionID.make("ses_decode_before_size"),
+            type: "file",
+            mime: "image/png",
+            url: `data:image/png;base64,${png.toString("base64")}`,
+          },
+          // 配置的1字节上限小于样本；若实现先拒绝尺寸，这里会得到SizeError而非DecodeError。
+          { tokenBudget: 1 },
+        )
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(pngResult)).toBe(true)
+      if (Exit.isFailure(pngResult)) {
+        expect(Cause.squash(pngResult.cause)).toBeInstanceOf(Image.DecodeError)
+      }
+      // 后帧损坏必须由全页解码拒绝，不能因首帧可读或预算判断而成功透传。
+      const gif = Buffer.from(twoFrameGif, "base64")
+      gif[89] = 0
+      const gifResult = yield* image
+        .normalize(
+          {
+            id: PartID.ascending(),
+            messageID: MessageID.ascending(),
+            sessionID: SessionID.make("ses_all_pages_before_size"),
+            type: "file",
+            mime: "image/gif",
+            url: `data:image/gif;base64,${gif.toString("base64")}`,
+          },
+          { tokenBudget: 1 },
+        )
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(gifResult)).toBe(true)
+      if (Exit.isFailure(gifResult)) expect(Cause.squash(gifResult.cause)).toBeInstanceOf(Image.DecodeError)
+    }),
+  { git: true },
+)
+
+// #534：@image 的 Read producer 完成一次 normalize；final consumer 只消费匹配 proof，不重复调用 owner。
+// 最终持久化 file 仍保持图片 MIME，证明跳过的是重复 decode 而不是整个附件处理。
+oneShotImage.instance(
+  "normalizes a ReadTool image once and strips transient proof before persistence",
+  () =>
+    Effect.gen(function* () {
+      imageNormalizations.length = 0
+      const { dir } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "One shot image",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const target = path.join(dir, "one-shot.png")
+      yield* Effect.promise(() => Bun.write(target, Buffer.from(tinyPng, "base64")))
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [
+          { type: "text", text: "inspect @one-shot.png" },
+          {
+            type: "file",
+            mime: "text/plain",
+            filename: "one-shot.png",
+            url: pathToFileURL(target).href,
+            source: { type: "file", path: target, text: { value: "@one-shot.png", start: 8, end: 21 } },
+          },
+        ],
+      })
+      const files = (yield* MessageV2.filterCompactedEffect(chat.id))
+        .flatMap((item) => item.parts)
+        .filter((part) => part.type === "file" && (part as { mime?: string }).mime?.startsWith("image/"))
+      expect(imageNormalizations).toHaveLength(1)
+      // 持久化 file 保持图片 MIME：跳过的是重复 decode，不是整个附件处理链。
+      expect(files).toHaveLength(1)
+      // transient proof Symbol 在持久化前必须被剥离，防止数据库层复制不可枚举标记。
+      expect(Object.getOwnPropertySymbols(files[0] ?? {})).toHaveLength(0)
+    }),
+  { git: true },
+)
+
+// #534：ReadTool 先处理文件，真实 chat.message hook 改写后 final consumer 必须针对新 URL 再处理一次；
+// hook 返回后才消费 proof，锁定 plugin 边界顺序，防止未来把验证提前到插件之前。
+mutatedImage.instance(
+  "invalidates file-reference proof after a chat.message plugin changes the URL",
+  () =>
+    Effect.gen(function* () {
+      imageNormalizations.length = 0
+      const { dir } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Changed image" })
+      const target = path.join(dir, "plugin-image.png")
+      yield* Effect.promise(() => Bun.write(target, Buffer.from(tinyPng, "base64")))
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [
+          {
+            type: "file",
+            mime: "text/plain",
+            filename: "plugin-image.png",
+            url: pathToFileURL(target).href,
+            source: { type: "file", path: target, text: { value: "@plugin-image.png", start: 0, end: 17 } },
+          },
+        ],
+      })
+      // 第一次计数属于原文件；第二次必须精确绑定 hook 写入的新 data URL，不能只按 part identity 复用。
+      expect(imageNormalizations).toHaveLength(2)
+      // 计数为 2 排除“proof 提前失效重读原文件”的变体：那会让第 2 次仍是 file: URL。
+      expect(imageNormalizations[1]).toBe("data:image/png;base64,AQ==")
+      const files = (yield* MessageV2.filterCompactedEffect(chat.id))
+        .flatMap((item) => item.parts)
+        .filter((part) => part.type === "file")
+      expect(files).toHaveLength(1)
+      expect(Object.getOwnPropertySymbols(files[0] ?? {})).toHaveLength(0)
     }),
   { git: true },
 )

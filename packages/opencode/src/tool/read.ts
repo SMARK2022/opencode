@@ -13,7 +13,7 @@ import { createAuxiliaryBudget, readTextPage } from "@opencode-ai/core/tool/read
 import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
-import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
+import { isImageAttachment, isPdfAttachment, sniffAttachmentMime } from "@/util/media"
 // #277：复用 Image.Service；media 已仅有 MIME 辅助函数，不恢复旧压缩路径。
 import { Image } from "@/image/image"
 import { PartID } from "@/session/schema"
@@ -27,7 +27,8 @@ const DEFAULT_READ_LIMIT = 200
 const MAX_BYTES = 16 * 1024
 const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
 const SAMPLE_BYTES = 4096
-const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
+// #534：白名单移除——decoder 域内格式统一进入 Image.Service，域外格式（含 fastbidsheet/svg）
+// 由 util/media.isImageAttachment 单一谓词排除；是否可解码由真实 backend 决定，read 不再自持白名单。
 
 const MAX_CONTENT_TOKENS = 16000
 
@@ -455,20 +456,9 @@ export const ReadTool = Tool.define<
       const sample = yield* readSample(filepath, Number(stat.size), SAMPLE_BYTES)
 
       const mime = sniffAttachmentMime(sample, FSUtil.mimeType(filepath))
-      // BMP 需具备完整文件头和 DIB 头，避免把 BM 开头的纯文本当图片。
-      const header = new DataView(sample.buffer, sample.byteOffset, sample.byteLength)
-      const isImage =
-        SUPPORTED_IMAGE_MIMES.has(mime) ||
-        (["image/tiff", "image/avif", "image/heif", "image/heic"].includes(mime) &&
-          sniffAttachmentMime(sample, "") === mime) ||
-        (mime === "image/bmp" &&
-          sample.length >= 26 &&
-          sample[0] === 0x42 &&
-          sample[1] === 0x4d &&
-          header.getUint32(14, true) >= 12 &&
-          14 + header.getUint32(14, true) <= sample.length &&
-          header.getUint32(10, true) >= 14 + header.getUint32(14, true) &&
-          header.getUint32(10, true) < Number(stat.size))
+      // MIME只分类，完整header/像素检查统一留给Image；坏BMP也应得到省略文本。
+      // SVG及fastbidsheet沿目标共享谓词继续作为文本，不恢复独立格式白名单。
+      const isImage = isImageAttachment(mime)
 
       if (isImage || isPdfAttachment(mime)) {
         const bytes = yield* fs.readFile(filepath)
@@ -489,26 +479,29 @@ export const ReadTool = Tool.define<
                   sessionID: ctx.sessionID,
                 },
                 { tokenBudget: 1600 },
-              )
-              // 不可用与解码失败均不发送原图；下方PDF分支仍原样返回。
-          : input
+              ).pipe(Effect.option)
+          : Option.some(input)
+        // 图片typed失败仅省略该payload；loaded仍记录真实读盘动作，PDF不经过decoder。
+        if (Option.isNone(attachment)) {
+          const msg = "Image omitted: could not be decoded or resized within the image size limit."
+          return {
+            title,
+            output: msg,
+            metadata: readToolMetadata({ preview: msg, truncated: false, loaded: loaded.map((item) => item.filepath) }),
+          }
+        }
         const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
+        // proof只标记图片当前MIME/URL；PDF与返回附件身份保持原合同。
+        const media = { type: "file" as const, mime: attachment.value.mime, url: attachment.value.url }
         return {
           title,
           output: msg,
-          metadata: {
+          metadata: readToolMetadata({
             preview: msg,
             truncated: false,
             loaded: loaded.map((item) => item.filepath),
-          },
-          // #277：工具附件仅投影 MIME 与 URL，内部 ID 不进入返回契约。
-          attachments: [
-            {
-              type: "file" as const,
-              mime: attachment.mime,
-              url: attachment.url,
-            },
-          ],
+          }),
+          attachments: [isImage ? Image.markNormalized(media) : media],
         }
       }
 

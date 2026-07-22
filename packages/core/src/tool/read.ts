@@ -122,13 +122,18 @@ const layer = Layer.effectDiscard(
               if (
                 "encoding" in content &&
                 content.encoding === "base64" &&
-                (SUPPORTED_IMAGE_MIMES.has(content.mime) ||
-                  ["image/bmp", "image/tiff", "image/avif", "image/heif", "image/heic"].includes(content.mime))
+                content.mime.startsWith("image/")
               ) {
                 return yield* image
                   // 1,600 的源估算只约束 Read 图片，不能扩散到用户上传。
                   .normalize(resource, { ...content, encoding: "base64" }, 1600 * 750)
-                  .pipe(Effect.map(attach))
+                  // 只适配Image的typed内容错误；读盘/权限错误与interrupt仍沿原失败通道。
+                  .pipe(Effect.catch(() => Effect.succeed({
+                    ...content,
+                    encoding: "utf8" as const,
+                    mime: "text/plain",
+                    content: "Image omitted: could not be decoded or resized within the image size limit.",
+                  })), Effect.map(attach))
               }
               if ("encoding" in content && content.encoding === "base64")
                 return yield* Effect.fail(new ReadToolFileSystem.BinaryFileError({ resource }))
