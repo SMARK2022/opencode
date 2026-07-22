@@ -279,12 +279,51 @@ describe("permission precheck bash classifier", () => {
     expect(bash("format C:")).toMatchObject({ level: "dangerous" })
     expect(bash("rmdir /s /q C:\\Users\\Alice")).toMatchObject({ level: "dangerous" })
     expect(bash("del /s /q %USERPROFILE%")).toMatchObject({ level: "dangerous" })
+    // #530：cmd 合并开关 /s/q、/s/p 与盘根 X: 必须保持 Windows protected dangerous（不得 demote）
+    expect(bash(String.raw`rmdir /s/q C:\Users\Alice`)).toMatchObject({
+      level: "dangerous",
+      reason: "Windows protected directory delete",
+    })
+    expect(bash("del /s/q %USERPROFILE%")).toMatchObject({
+      level: "dangerous",
+      reason: "Windows protected directory delete",
+    })
+    expect(bash(String.raw`del /s/p C:\Users\Alice`)).toMatchObject({
+      level: "dangerous",
+      reason: "Windows protected directory delete",
+    })
+    expect(bash("del /s C:")).toMatchObject({
+      level: "dangerous",
+      reason: "Windows protected directory delete",
+    })
     // #217：$env:USERPROFILE/$env:SystemDrive 递归删除 dangerous——反引号闭合也命中
     expect(bash(String.raw`Remove-Item -Recurse -Force $env:USERPROFILE`)).toMatchObject({ level: "dangerous" })
     expect(bash("Remove-Item -Recurse -Force $env:SystemDrive\\")).toMatchObject({ level: "dangerous" })
     expect(bash("powershell -Command \"Remove-Item -Recurse -Force $env:USERPROFILE\" 2>&1")).toMatchObject({ level: "dangerous" })
     expect(bash("git status; powershell -Command \"Remove-Item -Recurse -Force $env:USERPROFILE\" 2>&1")).toMatchObject({ level: "dangerous" })
     expect(bash("echo `rm -rf /`")).toMatchObject({ level: "dangerous" })
+  })
+
+  // #530：旧整串正则的用户症状——python heredoc 内 del + tree-sitter 子串 -s + if not m: 盘符形
+  // 不得误报为 Windows protected directory delete（hard deny 会阻断整条命令）。
+  test("does not treat python del plus package names as Windows protected directory delete", () => {
+    const command = [
+      "python3 <<'PY'",
+      'del pkg["x"]',
+      'x = "tree-sitter-powershell"',
+      "if not m:",
+      "    pass",
+      "PY",
+    ].join("\n")
+    expect(bash(command)).not.toMatchObject({
+      level: "dangerous",
+      reason: "Windows protected directory delete",
+    })
+    // #530：非单字母开关 token（/setup）不得借保护根抬升本 family
+    expect(bash("del /setup C:")).not.toMatchObject({
+      level: "dangerous",
+      reason: "Windows protected directory delete",
+    })
   })
 
   test("marks dangerous command substitutions dangerous instead of treating wrappers as safe", () => {
