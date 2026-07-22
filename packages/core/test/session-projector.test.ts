@@ -37,6 +37,10 @@ import { SessionRevert } from "@opencode-ai/core/session/revert"
 const it = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node])))
 const previewIt = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node]),
   [[Database.node, Database.layerFromPath(":memory:")]]))
+// 查询服务与写入fixture共用同一内存DB图，避免内层provide另建空库。
+const listingIt = testEffect(AppNodeBuilder.build(
+  LayerNode.group([Database.node, EventV2.node, SessionProjector.node, SessionV2.node]),
+  [[Database.node, Database.layerFromPath(":memory:")], [SessionExecution.node, SessionExecution.noopLayer]]))
 const sessionsLayer = AppNodeBuilder.build(SessionV2.node, [[SessionExecution.node, SessionExecution.noopLayer]])
 const sessionID = SessionV2.ID.make("ses_projector_test")
 const created = DateTime.makeUnsafe(0)
@@ -57,6 +61,30 @@ const assistantRow = (
 }
 
 describe("SessionProjector", () => {
+  listingIt.effect("intersects Native list tokens across real titles and admitted user messages", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const events = yield* EventV2.Service
+      const ids = ["cross", "title", "body", "neither"].map(value => SessionV2.ID.make(`ses_search_${value}`))
+      const titles = ["alpha-holder", "alpha-only-title", "body-holder", "unrelated-holder"]
+      yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
+      yield* db.insert(SessionTable).values(ids.map((id, index) => ({ id, project_id: Project.ID.global, slug: id, directory: "/project", title: titles[index], version: "test" }))).run()
+      // 正文经过真实admission与提升，跨字段交集不能退化成标题内整串匹配。
+      for (const [index, text] of [[0, "contains beta token"], [2, "alpha and beta together"]] as const) {
+        const input = yield* SessionInput.admit(db, events, { sessionID: ids[index], id: SessionMessage.ID.make(`msg_search_${index}`), prompt: Prompt.make({ text }), delivery: "steer" })
+        yield* SessionInput.promoteSteers(db, events, ids[index], input.admittedSeq)
+      }
+      const sessions = yield* SessionV2.Service
+      const search = (query: string) => sessions.list({ search: query, limit: 1600 }).pipe(Effect.map(items => items.map(item => item.id).toSorted()))
+      expect(yield* search("alpha beta")).toEqual([ids[0], ids[2]].toSorted())
+      // 单词、大小写和空白仍用同一SQL谓词；空搜索不丢会话，零命中不回退。
+      expect(yield* search(" ALPHA\t beta ")).toEqual([ids[0], ids[2]].toSorted())
+      expect(yield* search("alpha")).toEqual(ids.slice(0, 3).toSorted())
+      expect(yield* search("beta")).toEqual([ids[0], ids[2]].toSorted())
+      expect(yield* search("alpha absent")).toEqual([])
+      expect(yield* search(" \t ")).toEqual(ids.toSorted())
+    }),
+  )
   previewIt.effect("maintains Native cold owners by seq and rolls back corrupted reads", () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db

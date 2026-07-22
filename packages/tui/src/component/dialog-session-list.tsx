@@ -18,6 +18,13 @@ import { errorMessage } from "../util/error"
 import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
 import { useCommandShortcut } from "../keymap"
 import { useEvent } from "../context/event"
+import {
+  resolveSessionListSource,
+  sessionListEmptyLabel,
+  SESSION_LIST_BROWSE_LIMIT,
+  SESSION_LIST_LOOKBACK_MS,
+  SESSION_LIST_SEARCH_LIMIT,
+} from "../util/session-list-params"
 
 type SessionListFilter = { scope?: "project"; path?: string }
 
@@ -25,9 +32,11 @@ export function createDialogSessionListQuery(input: { search?: string; filter: S
   const search = input.search?.trim()
   return {
     roots: true,
-    // #306：仅搜索限制 90 天；默认浏览仍能访问更早会话，不能共享搜索的时间过滤。
-    ...(search ? { start: Date.now() - 90 * 24 * 60 * 60 * 1000 } : {}),
-    limit: 100,
+    // #306：仅搜索限制时间窗；默认浏览仍能访问更早会话，不能共享搜索的时间过滤。
+    // #529：搜索与后台缓存共享半年窗；搜索400、默认浏览1600，仍保留浏览无start。
+    ...(search
+      ? { start: Date.now() - SESSION_LIST_LOOKBACK_MS, limit: SESSION_LIST_SEARCH_LIMIT }
+      : { limit: SESSION_LIST_BROWSE_LIMIT }),
     ...(search ? { search } : {}),
     ...input.filter,
   }
@@ -55,6 +64,28 @@ export function matchesDialogSessionSearch(
 
 // #115：会话列表预览默认 2 行
 const SESSION_LIST_PREVIEW_LINES = 2
+
+// #529：服务端搜索是唯一判定权威，客户端不二次过滤服务端返回集（源 plan 禁重复过滤）；
+// token 过滤只作用于本地注入的 extra 行（当前会话+置顶），保留上游对注入行的 title 收窄行为。
+// 跨字段命中（title 含 alpha、content 含 beta）必须直接可见——否则多词交集在显示面退化为 title 内 AND。
+export function visibleSessions<T extends { id: string; title: string }>(input: {
+  result: T[]
+  extra: T[]
+  deleted: Set<string>
+  query: string
+}): T[] {
+  const tokens = input.query
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length > 0)
+  // extra 与服务端同词法（分词 + AND）：注入行与返回集的命中口径不因来源不同而分叉
+  return [
+    ...input.result,
+    ...input.extra.filter((session) => tokens.every((token) => matchesDialogSessionSearch(session, token))),
+  ].filter((session) => !input.deleted.has(session.id))
+  // 注：deleted 排除对两源一致生效——会话删除后服务端缓存与本地注入都不再出现
+}
 // #120：同时预加载预览的会话数上限
 // #306：预览上限从 50 提到 400，预览覆盖更完整，避免滚动时再触发补拉。
 // #366：预览内容由批量端点一次性返回，本文件不再分页拉取/解析消息 parts。
@@ -147,8 +178,17 @@ export function DialogSessionList() {
   )
 
   const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
+  // #529：以 debounced query 门闩合流：空串回 browse；活跃搜索只消费 searchResults（含 []），
+  // 修复 createResource loading（undefined）短暂回退浏览列表的 stale 竞态。
+  const listSource = createMemo(() =>
+    resolveSessionListSource({
+      query: search(),
+      searchResults: searchResults(),
+      browse: browseResults() ?? sync.data.session,
+    }),
+  )
   const sessions = createMemo(() => {
-    const result = searchResults() ?? browseResults() ?? sync.data.session
+    const result = listSource().sessions
     const synced = new Map(sync.data.session.map((session) => [session.id, session]))
     const ids = new Set(result.map((session) => session.id))
     const extra = [currentSessionID(), ...local.session.pinned()].flatMap((id) => {
@@ -157,10 +197,13 @@ export function DialogSessionList() {
       if (session) ids.add(id)
       return session ? [session] : []
     })
-    const query = search().trim().toLowerCase()
-    return [...result.map((session) => synced.get(session.id) ?? session), ...extra]
-      .filter((session) => !deleted().has(session.id))
-      .filter((session) => matchesDialogSessionSearch(session, query, searchResults()))
+    // #529：服务端结果直通；extra（当前会话+置顶）经 visibleSessions 按 token 过滤注入
+    return visibleSessions({
+      result: result.map((session) => synced.get(session.id) ?? session),
+      extra,
+      deleted: deleted(),
+      query: search(),
+    })
   })
 
   onCleanup(
@@ -284,8 +327,8 @@ export function DialogSessionList() {
         .map((x) => [x.id, x]),
     )
 
-    const searchResult = searchResults()
-    const order = searchResult ? orderByRecency(sessions()) : browseOrder()
+    // #529：展示顺序与数据源同源：搜索中不用 stale searchResults 真值误判
+    const order = listSource().source === "search" ? orderByRecency(sessions()) : browseOrder()
     const current = currentSessionID()
     const displayOrder = current && sessionMap.has(current) && !order.includes(current) ? [...order, current] : order
 
@@ -348,6 +391,14 @@ export function DialogSessionList() {
       options={options()}
       skipFilter={true}
       preserveSelection={true}
+      // #529：搜索空命中时展示 Not Found <query>，不回退浏览列表也不误用默认文案
+      emptyView={
+        sessionListEmptyLabel(search()) ? (
+          <box paddingLeft={4} paddingRight={4} paddingTop={1}>
+            <text fg={theme.textMuted}>{sessionListEmptyLabel(search())}</text>
+          </box>
+        ) : undefined
+      }
       current={currentSessionID()}
       onFilter={setSearch}
       onMove={() => {
