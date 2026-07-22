@@ -290,6 +290,32 @@ const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
   waitMs: DAEMON_START_TIMEOUT_MS,
 })
 
+// 只信任带 token 的私有 stopping 状态；探测失败仍执行既有认证健康检查。
+async function ownerIsStopping(lock: ServerLock.ServerLock) {
+  if (!lock.controlPort) return false
+  try {
+    const response = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_STATUS_PATH}`, {
+      headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token },
+      signal: AbortSignal.timeout(500),
+    })
+    if (!response.ok) return false
+    const body: unknown = await response.json()
+    return typeof body === "object" && body !== null && "stopping" in body && body.stopping === true
+  } catch {
+    return false
+  }
+}
+
+async function waitForOwnerExit(lock: ServerLock.ServerLock, deps: DiscoverDaemonDeps) {
+  // 退出确认前既不清锁也不另起进程；超时保持失败，不返回退出中服务的 URL。
+  const deadline = Date.now() + deps.waitMs
+  while (Date.now() < deadline) {
+    if (!deps.alive(lock.pid)) return
+    await deps.sleep(deps.pollMs)
+  }
+  throw new Error(`opencode daemon pid=${lock.pid} is still stopping`)
+}
+
 // #165：共享 daemon 选举/复用；禁止重引入 per-TUI Worker+Rpc.client
 export async function discoverOrSpawnDaemon(
   networkArgs: Parameters<typeof resolveNetworkOptionsNoConfig>[0],
@@ -318,6 +344,11 @@ export async function discoverOrSpawnDaemon(
       throw new Error("Existing opencode daemon has a different database or channel; stop it explicitly before switching")
     if (external && (!lock.externalUrl || JSON.stringify(lock.network) !== JSON.stringify(network)))
       throw new Error("Existing opencode daemon has incompatible network options; stop it explicitly before changing listeners")
+    // 快速路径、选举复查和最终交付共用此门；身份不符仍由前面的目标校验拒绝。
+    if (await ownerIsStopping(lock)) {
+      await waitForOwnerExit(lock, deps)
+      return null
+    }
     if (!(await deps.ping(lock.port))) throw new Error("Existing opencode daemon health or authentication check failed")
     // 探测期间锁可能换主；复读 token 后才允许把地址交给 TUI。
     const current = await deps.read(lockPath)
