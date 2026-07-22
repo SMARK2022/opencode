@@ -26,6 +26,9 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/In
 
 interface Entry {
   readonly deferred: Deferred.Deferred<InstanceContext>
+  // cancel 只终止未完成的 bootstrap；已完成 entry 的 Deferred race 已经结束。
+  // 每个 entry 都有自己的信号，避免一次目录的 disposal 误取消其他目录。
+  readonly cancel: Deferred.Deferred<void>
 }
 
 export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Service> = Layer.effect(
@@ -65,7 +68,18 @@ export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootst
 
     const completeLoad = (directory: string, input: LoadInput, entry: Entry) =>
       Effect.gen(function* () {
-        const exit = yield* Effect.exit(boot({ ...input, directory }))
+        const exit = yield* Effect.exit(
+          boot({ ...input, directory }).pipe(
+            // disposal 先完成 cancel，raceFirst 会中断同一 scope 中尚未完成的 boot。
+            // boot 失败时仍沿用原有 removeEntry 和 Deferred failure 传播。
+            // 因此取消不会留下可被后续请求复用的失败缓存项。
+            Effect.raceFirst(
+              Deferred.await(entry.cancel).pipe(
+                Effect.andThen(Effect.interrupt),
+              ),
+            ),
+          ),
+        )
         if (Exit.isFailure(exit)) yield* removeEntry(directory, entry)
         yield* Deferred.done(entry.deferred, exit).pipe(Effect.asVoid)
       })
@@ -106,7 +120,10 @@ export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootst
           const existing = cache.get(directory)
           if (existing) return yield* restore(Deferred.await(existing.deferred))
 
-          const entry: Entry = { deferred: Deferred.makeUnsafe<InstanceContext>() }
+          const entry: Entry = {
+            deferred: Deferred.makeUnsafe<InstanceContext>(),
+            cancel: Deferred.makeUnsafe<void>(),
+          }
           cache.set(directory, entry)
           yield* Effect.gen(function* () {
             yield* Effect.logInfo("creating instance").pipe(Effect.annotateLogs("directory", directory))
@@ -122,7 +139,10 @@ export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootst
       return Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
           const previous = cache.get(directory)
-          const entry: Entry = { deferred: Deferred.makeUnsafe<InstanceContext>() }
+          const entry: Entry = {
+            deferred: Deferred.makeUnsafe<InstanceContext>(),
+            cancel: Deferred.makeUnsafe<void>(),
+          }
           cache.set(directory, entry)
           yield* Effect.gen(function* () {
             yield* Effect.logInfo("reloading instance").pipe(Effect.annotateLogs("directory", directory))
@@ -150,10 +170,17 @@ export const layer: Layer.Layer<Service, never, Project.Service | InstanceBootst
 
     const disposeAllOnce = Effect.fnUntraced(function* () {
       yield* Effect.logInfo("disposing all instances")
+      const entries = [...cache.entries()]
+      // 先取消仍在 bootstrap 的 producer，避免等待它完成后才有机会关闭同一 scope。
+      // 先复制 entries，保证清理期间 cache 的变化不会改变本轮待处理集合。
+      // 已完成 entry 的 cancel 是幂等 Deferred，不会改变正常 disposal 结果。
+      // 因此普通 shutdown 仍会等待全部已完成实例释放，只有 pending producer 被中断。
+      yield* Effect.forEach(entries, ([, entry]) => Deferred.succeed(entry.cancel, undefined), { discard: true })
       yield* Effect.forEach(
-        [...cache.entries()],
+        entries,
         (item) =>
           Effect.gen(function* () {
+            // 每个 disposer 继续按原顺序执行，新增 cancel 不改变已完成实例的资源释放。
             const exit = yield* Deferred.await(item[1].deferred).pipe(Effect.exit)
             if (Exit.isFailure(exit)) {
               yield* Effect.logWarning("instance dispose failed").pipe(

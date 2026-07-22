@@ -108,6 +108,11 @@ if (externalPort !== undefined) {
 
 // ── Graceful shutdown ──────────────────────────────────────────────────────
 let shutdownInProgress = false
+// worker 自己的 5 秒上限短于 CLI 的 10 秒 stop 等待，确保 CLI force 路径不会遮蔽 worker deadline 回归。
+// 这两个窗口分别保护 worker 生命周期和用户 stop 命令，不能合并成一个隐式超时。
+// worker 先结束 cleanup，只有 disposer 卡住时才进入 deadline 分支。
+const SHUTDOWN_TIMEOUT_MS = 5_000
+let shutdownDeadlineTimer: ReturnType<typeof setTimeout> | undefined
 let lockToken = ""
 let controlServer: ReturnType<typeof Bun.serve> | undefined
 let activeMaintenance:
@@ -247,6 +252,15 @@ async function recoverInterruptedMaintenance() {
 async function gracefulShutdown(reason = "unknown") {
   if (shutdownInProgress) return
   shutdownInProgress = true
+  shutdownDeadlineTimer = setTimeout(() => {
+    // deadline 到达时不能继续等待 disposer；进程退出后由下一次 owner 选举清理 stale lock。
+    // 不在这里清理 lock，避免另一个进程误以为 SQLite 已经释放。
+    // 进程退出后既有 stale-owner reconciliation 负责恢复现场。
+    // 该分支故意不等待任何异步清理，避免 deadline 自身再次被阻塞。
+    log.error("daemon shutdown deadline exceeded", { timeoutMs: SHUTDOWN_TIMEOUT_MS, reason })
+    process.exit(1)
+  }, SHUTDOWN_TIMEOUT_MS)
+  shutdownDeadlineTimer.unref?.()
   maintenanceShutdownRequested = true
   cancelIdleTimer("shutdown")
   cancelStartupIdleTimer("shutdown")
@@ -275,6 +289,8 @@ async function gracefulShutdown(reason = "unknown") {
   // Keep the lock until after disposers and Database.close() finish. Otherwise a
   // reconnecting TUI can spawn a replacement daemon while this process still owns SQLite.
   await ServerLock.clearIfOwner(lockToken)
+  if (shutdownDeadlineTimer) clearTimeout(shutdownDeadlineTimer)
+  shutdownDeadlineTimer = undefined
   process.exit(0)
 }
 
@@ -400,7 +416,15 @@ controlServer = Bun.serve({
         })
     }
     if (request.method === "GET" && url.pathname === ServerLock.CONTROL_STATUS_PATH) {
-      return Response.json({ tuiClients: sseClients, sessionActivity: SessionActivity.count() })
+      // stopping 是 owner 生命周期信号，不改变 status 命令原有的 client/activity 数据。
+      // 只有持有 control token 的本地调用者能观察到这个辅助状态。
+      // 旧客户端忽略新增字段即可继续解析原有响应。
+      // stopping 在 shutdown 入口立即可见，覆盖 disposer 开始后的整个等待窗口。
+      return Response.json({
+        tuiClients: sseClients,
+        sessionActivity: SessionActivity.count(),
+        stopping: shutdownInProgress,
+      })
     }
     if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
       return new Response("not found", { status: 404 })

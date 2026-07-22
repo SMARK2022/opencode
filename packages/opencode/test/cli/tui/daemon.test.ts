@@ -13,7 +13,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { mkdir, rename } from "fs/promises"
 import path from "path"
-import { fileURLToPath } from "url"
+import { fileURLToPath, pathToFileURL } from "url"
 import { tmpdir } from "../../fixture/fixture"
 import * as DaemonModule from "../../../src/cli/cmd/tui/daemon"
 import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
@@ -132,6 +132,47 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
   throw new Error(`Daemon did not start within ${DAEMON_START_TIMEOUT_MS} ms`)
 }
 
+async function spawnHangingDisposerDaemon(lockPath: string) {
+  // registry 必须在 worker 子进程内注册；测试 runner 与 daemon 不共享进程内 Set。
+  // wrapper 先加载 worker，再注册 disposer，确保测试使用真实启动和 shutdown 生命周期。
+  // disposer 永不完成，用来稳定制造原始 teardown 卡点而不是依赖时间竞争。
+  const registry = pathToFileURL(fileURLToPath(new URL("../../../src/effect/instance-registry.ts", import.meta.url))).href
+  const worker = pathToFileURL(WORKER_TS).href
+  const wrapper = [
+    `const { registerDisposer } = await import(${JSON.stringify(registry)})`,
+    `await import(${JSON.stringify(worker)})`,
+    `registerDisposer(async () => new Promise(() => {}))`,
+    `process.stdout.write("disposer-ready\\n")`,
+  ].join("\n")
+  const proc = Bun.spawn([process.execPath, "-e", wrapper], {
+    env: {
+      ...isolatedDaemonEnv(lockPath),
+      OPENCODE_PROCESS_ROLE: "worker",
+    },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "ignore",
+  })
+  const { lock } = await (async () => {
+    const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      const lock = await Bun.file(lockPath)
+        .text()
+        .then((t) => JSON.parse(t) as ServerLockModule.ServerLock)
+        .catch(() => undefined)
+      if (lock && lock.pid === proc.pid && ServerLockModule.alive(lock.pid)) {
+        const ok = await ServerLockModule.ping(lock.port)
+        if (ok) return { lock }
+      }
+      await Bun.sleep(POLL_INTERVAL_MS)
+    }
+    proc.kill()
+    throw new Error(`Hanging disposer daemon did not start within ${DAEMON_START_TIMEOUT_MS} ms`)
+  })()
+  expect(await readFirstLine(proc.stdout)).toBe("disposer-ready")
+  return { proc, lock }
+}
+
 async function readFirstLine(stream: ReadableStream<Uint8Array> | null) {
   if (!stream) throw new Error("missing stdout stream")
   const reader = stream.getReader()
@@ -152,6 +193,30 @@ async function readFirstLine(stream: ReadableStream<Uint8Array> | null) {
   throw new Error("timed out waiting for child pid")
 }
 
+async function spawnEnsureLauncher(lockPath: string) {
+  // launcher 子进程只发布 lock，不建立 SSE；这正是首个 TUI 事件前的真实边界。
+  // detached worker 仍通过环境中的 launcher PID 观察该进程生命周期。
+  const launcherCode = `
+    const { Daemon } = await import(${JSON.stringify(DAEMON_TS_URL)})
+    await Daemon.ensure({})
+    const lock = await Bun.file(process.env.OPENCODE_LOCK_PATH).json()
+    process.stdout.write(JSON.stringify(lock) + "\\n")
+    setInterval(() => {}, 1_000)
+  `
+  const proc = Bun.spawn([process.execPath, "-e", launcherCode], {
+    env: isolatedDaemonEnv(lockPath, {
+      OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000",
+      OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "60000",
+    }),
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    detached: true,
+  })
+  const lock = JSON.parse(await readFirstLine(proc.stdout)) as ServerLockModule.ServerLock
+  return { proc, lock }
+}
+
 async function readUntil(reader: ReadableStreamDefaultReader<string>, text: string) {
   let seen = ""
   while (!seen.includes(text)) {
@@ -163,6 +228,255 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
 }
 
 describe("daemon lifecycle", () => {
+  test(
+    "worker deadline terminates a hanging instance disposer",
+    async () => {
+      await using tmp = await tmpdir({ git: true })
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc, lock } = await spawnHangingDisposerDaemon(lockPath)
+
+      try {
+        const configURL = new URL(`http://127.0.0.1:${lock.port}/config`)
+        configURL.searchParams.set("directory", tmp.path)
+        // 该 route 经过 InstanceStore middleware，确保 hanging disposer 已拥有 Project context。
+        // 先建立真实 Project context，再发送信号，避免只测试一个空闲 worker。
+        expect((await fetch(configURL)).ok).toBe(true)
+        // 直接给 worker SIGTERM，刻意绕开 CLI force path，才能单独验证 worker deadline。
+        // 如果进程只在 CLI 强杀时退出，这个断言会在 7 秒窗口内失败。
+        process.kill(proc.pid, "SIGTERM")
+        const exit = await Promise.race([proc.exited, Bun.sleep(7_000).then(() => "timeout" as const)])
+        expect(exit).not.toBe("timeout")
+        expect(ServerLockModule.alive(proc.pid)).toBe(false)
+        // worker deadline 的成功条件是进程消失，而不是测试主动发送的信号返回。
+        // 该断言也确认 hanging disposer 没有把测试 runner 一起拖入未完成状态。
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    20_000,
+  )
+
+  test(
+    "force stops an authenticated non-exiting owner",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const token = "isolated-force-stop-token"
+      const fakeOwner = `
+        const token = ${JSON.stringify(token)}
+        const publicServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ healthy: true }) })
+        const controlServer = Bun.serve({
+          port: 0,
+          hostname: "127.0.0.1",
+          fetch(request) {
+            if (request.headers.get("x-opencode-daemon-token") !== token) return new Response("unauthorized", { status: 401 })
+            const path = new URL(request.url).pathname
+            if (path === "/shutdown") return Response.json({ ok: true })
+            if (path === "/status") return Response.json({ tuiClients: 0, sessionActivity: 0, stopping: true })
+            return new Response("not found", { status: 404 })
+          },
+        })
+        await Bun.write(${JSON.stringify(lockPath)}, JSON.stringify({
+          pid: process.pid,
+          port: publicServer.port,
+          token,
+          dbPath: "isolated",
+          channel: "local",
+          startedAt: new Date().toISOString(),
+          controlPort: controlServer.port,
+        }))
+        setInterval(() => {}, 1_000)
+      `
+      const proc = Bun.spawn([process.execPath, "-e", fakeOwner], {
+        env: isolatedDaemonEnv(lockPath),
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      })
+
+      try {
+        // 该 owner 不属于 worker cleanup 测试，专门验证 CLI 的授权 force escalation。
+        // fake owner 接受 graceful 请求但保持存活，迫使 stop 命令进入 force 分支。
+        // lock 中的 token、PID 和 controlPort 都来自该同一 owner。
+        const deadline = Date.now() + 5_000
+        while (Date.now() < deadline) {
+          const lock = await Bun.file(lockPath)
+            .text()
+            .then((text) => JSON.parse(text) as ServerLockModule.ServerLock)
+            .catch(() => undefined)
+          if (lock?.pid === proc.pid) break
+          await Bun.sleep(25)
+        }
+        const result = await runDaemonStop(lockPath)
+        expect(result.exitCode).toBe(0)
+        expect(result.stderr).toContain("Force-stopped opencode daemon.")
+        expect(ServerLockModule.alive(proc.pid)).toBe(false)
+        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
+        // lock 清理断言同时覆盖 force 后的 stale-owner recovery 边界。
+        // 复核失败或 PID 仍存活时，测试必须观察到非零退出而不是这个成功文案。
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    30_000,
+  )
+
+  test(
+    "refuses force stop when the lock owner changes after graceful timeout",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const token = "changed-owner-original-token"
+      const replacementToken = "changed-owner-replacement-token"
+      const replacementCode = `
+        const token = ${JSON.stringify(replacementToken)}
+        const publicServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ healthy: true }) })
+        const controlServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ stopping: false }) })
+        await Bun.write(${JSON.stringify(lockPath)}, JSON.stringify({ pid: process.pid, port: publicServer.port, token, dbPath: "replacement", channel: "local", startedAt: new Date().toISOString(), controlPort: controlServer.port }))
+        setInterval(() => {}, 1_000)
+      `
+      const fakeOwner = `
+        const token = ${JSON.stringify(token)}
+        const publicServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ healthy: true }) })
+        const controlServer = Bun.serve({
+          port: 0,
+          hostname: "127.0.0.1",
+          fetch(request) {
+            if (request.headers.get("x-opencode-daemon-token") !== token) return new Response("unauthorized", { status: 401 })
+            if (new URL(request.url).pathname === "/shutdown") {
+              Bun.spawn([process.execPath, "-e", ${JSON.stringify(replacementCode)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" })
+              return Response.json({ ok: true })
+            }
+            return Response.json({ stopping: true })
+          },
+        })
+        await Bun.write(${JSON.stringify(lockPath)}, JSON.stringify({ pid: process.pid, port: publicServer.port, token, dbPath: "original", channel: "local", startedAt: new Date().toISOString(), controlPort: controlServer.port }))
+        setInterval(() => {}, 1_000)
+      `
+      const original = Bun.spawn([process.execPath, "-e", fakeOwner], {
+        env: isolatedDaemonEnv(lockPath),
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      })
+
+      try {
+        const originalDeadline = Date.now() + 5_000
+        while (Date.now() < originalDeadline) {
+          const lock = await Bun.file(lockPath)
+            .text()
+            .then((text) => JSON.parse(text) as ServerLockModule.ServerLock)
+            .catch(() => undefined)
+          if (lock?.pid === original.pid) break
+          await Bun.sleep(POLL_INTERVAL_MS)
+        }
+
+        // graceful 请求会启动 replacement；stop 随后必须基于新 lock 拒绝 SIGKILL。
+        const resultPromise = runDaemonStop(lockPath)
+        let replacementPid: number | undefined
+        const replacementDeadline = Date.now() + 12_000
+        while (Date.now() < replacementDeadline) {
+          const lock = await Bun.file(lockPath)
+            .text()
+            .then((text) => JSON.parse(text) as ServerLockModule.ServerLock)
+            .catch(() => undefined)
+          if (lock?.token === replacementToken) {
+            replacementPid = lock.pid
+            break
+          }
+          await Bun.sleep(POLL_INTERVAL_MS)
+        }
+        const result = await resultPromise
+        expect(result.exitCode).toBe(1)
+        expect(result.stderr).toContain("owner changed")
+        expect(result.stderr).not.toContain("Force-stopped")
+        expect(replacementPid).toBeDefined()
+        expect(ServerLockModule.alive(replacementPid!)).toBe(true)
+        // replacement 存活是 changed-owner 安全断言的核心，而非仅检查错误文案。
+      } finally {
+        if (ServerLockModule.alive(original.pid)) original.kill()
+        const replacement = await Bun.file(lockPath)
+          .text()
+          .then((text) => JSON.parse(text) as ServerLockModule.ServerLock)
+          .catch(() => undefined)
+        if (replacement && replacement.pid !== original.pid && ServerLockModule.alive(replacement.pid)) process.kill(replacement.pid)
+        await original.exited.catch(() => undefined)
+      }
+    },
+    40_000,
+  )
+
+  test("does not reuse an owner that reports stopping", async () => {
+    await using tmp = await tmpdir()
+    const lockPath = path.join(tmp.path, "tui-server.json")
+    ServerLockModule._setLockPath(lockPath)
+    const token = "stopping-owner-token"
+    const fakeOwner = `
+      const token = ${JSON.stringify(token)}
+      const publicServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ healthy: true }) })
+      const controlServer = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch(request) {
+          if (request.headers.get("x-opencode-daemon-token") !== token) return new Response("unauthorized", { status: 401 })
+          if (new URL(request.url).pathname === "/status") return Response.json({ stopping: true })
+          return Response.json({ ok: true })
+        },
+      })
+      await Bun.write(${JSON.stringify(lockPath)}, JSON.stringify({
+        pid: process.pid,
+        port: publicServer.port,
+        token,
+        dbPath: "isolated",
+        channel: "local",
+        startedAt: new Date().toISOString(),
+        controlPort: controlServer.port,
+      }))
+      setTimeout(() => process.exit(0), 300)
+    `
+    const owner = Bun.spawn([process.execPath, "-e", fakeOwner], {
+      env: isolatedDaemonEnv(lockPath),
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    DaemonModule._setSpawn(() => ({
+      pid: process.pid,
+      exited: Promise.resolve(1),
+      unref() {},
+      kill() {},
+    }))
+
+    try {
+      // stopping owner 必须等待退出后再进入选主，不能把旧 public URL 当作成功结果。
+      // fake owner 的 status 只通过 token-protected control endpoint 暴露 stopping。
+      // ensure 若复用旧 URL，测试会在 owner 退出后返回不可用地址并失败。
+      const deadline = Date.now() + 5_000
+      while (Date.now() < deadline) {
+        const lock = await Bun.file(lockPath)
+          .text()
+          .then((text) => JSON.parse(text) as ServerLockModule.ServerLock)
+          .catch(() => undefined)
+        if (lock?.pid === owner.pid) break
+        await Bun.sleep(25)
+      }
+      await expect(
+        DaemonModule.ensure({
+          port: 0,
+          hostname: "127.0.0.1",
+          mdns: false,
+          "mdns-domain": "opencode.local",
+          cors: [],
+        }),
+      ).rejects.toThrow(/daemon exited before startup/)
+    } finally {
+      if (ServerLockModule.alive(owner.pid)) owner.kill()
+      await owner.exited.catch(() => undefined)
+    }
+  })
+
   test(
     "daemon stop command gracefully stops daemon and clears the lock file",
     async () => {
@@ -886,6 +1200,39 @@ describe("daemon lifecycle", () => {
       }
     },
     DAEMON_START_TIMEOUT_MS + 10_000,
+  )
+
+  test(
+    "launcher Ctrl-C before first SSE releases the worker for subsequent acquisition",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const first = await spawnEnsureLauncher(lockPath)
+
+      try {
+        // 真实 launcher 已完成 Daemon.ensure，但刻意没有打开 SSE，再模拟启动期 Ctrl-C。
+        first.proc.kill("SIGINT")
+        const launcherExit = await Promise.race([first.proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
+        expect(launcherExit).not.toBe("timeout")
+
+        const cleanupDeadline = Date.now() + 8_000
+        while (Date.now() < cleanupDeadline && ServerLockModule.alive(first.lock.pid)) await Bun.sleep(POLL_INTERVAL_MS)
+        expect(ServerLockModule.alive(first.lock.pid)).toBe(false)
+        // 这里等待的是 worker PID 死亡，而不是 lock 文件偶然被删除。
+
+        // 清理完成后再次走公开 Daemon.ensure 路径，不能返回第一个已死亡 owner 的旧 URL。
+        const second = await spawnEnsureLauncher(lockPath)
+        expect(second.lock.pid).not.toBe(first.lock.pid)
+        await runDaemonStop(lockPath)
+        second.proc.kill("SIGINT")
+        await second.proc.exited.catch(() => undefined)
+      } finally {
+        if (ServerLockModule.alive(first.proc.pid)) first.proc.kill()
+        if (ServerLockModule.alive(first.lock.pid)) process.kill(first.lock.pid)
+        await first.proc.exited.catch(() => undefined)
+      }
+    },
+    40_000,
   )
 
   test(

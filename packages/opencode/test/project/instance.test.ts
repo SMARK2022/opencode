@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { Deferred, Effect, Fiber, Layer } from "effect"
+import { Deferred, Duration, Effect, Fiber, Layer } from "effect"
 import { InstanceRef } from "../../src/effect/instance-ref"
 import { registerDisposer } from "../../src/effect/instance-registry"
 import { InstanceBootstrap } from "../../src/project/bootstrap-service"
@@ -115,6 +115,37 @@ describe("InstanceStore", () => {
       const [firstCtx, secondCtx] = yield* Effect.all([Fiber.join(first), Fiber.join(second)])
       expect(secondCtx).toBe(firstCtx)
       expect(initialized).toBe(1)
+    }),
+  )
+
+  it.live("cancels pending bootstrap during disposeAll", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true })
+      const store = yield* InstanceStore.Service
+      const started = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+
+      yield* setBootstrap(
+        Effect.gen(function* () {
+          yield* Deferred.succeed(started, undefined)
+          yield* Deferred.await(release)
+        }),
+      )
+
+      const loading = yield* store.load({ directory: dir }).pipe(Effect.forkScoped)
+      yield* Deferred.await(started)
+
+      const disposal = yield* store.disposeAll().pipe(Effect.forkScoped)
+      const finished = yield* Fiber.join(disposal).pipe(
+        Effect.timeoutOrElse({ duration: Duration.millis(500), orElse: () => Effect.fail(new Error("dispose timeout")) }),
+        Effect.exit,
+      )
+
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(loading).pipe(Effect.exit)
+
+      // The disposal contract must cancel the producer instead of waiting for this release.
+      expect(finished._tag).toBe("Success")
     }),
   )
 

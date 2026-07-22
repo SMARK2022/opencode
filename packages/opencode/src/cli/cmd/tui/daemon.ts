@@ -2,7 +2,7 @@ export * as Daemon from "./daemon"
 
 import { hasCliBooleanOption, hasCliOption, resolveNetworkOptionsNoConfig, type NetworkOptions } from "@/cli/network"
 import { Filesystem } from "@/util/filesystem"
-import { ServerLock } from "@/cli/cmd/tui/server-lock"
+import { ServerLock, type ServerLock as ServerLockInfo } from "@/cli/cmd/tui/server-lock"
 import { ServerAuth } from "@/server/auth"
 import { Flock } from "@opencode-ai/core/util/flock"
 import { Global } from "@opencode-ai/core/global"
@@ -234,6 +234,7 @@ function lockUrl(lock: ServerLock, external: boolean) {
 //   - { type: "dead", lock }     → pid is dead, lock is stale
 //   - { type: "responsive" | "unresponsive", url, lock }
 //                                → pid is alive; responsive=HTTP ping OK
+//   - { type: "stopping", lock } → owner has entered graceful shutdown
 //
 // CRITICAL: "unresponsive" means the owner process is alive but its control
 // plane is temporarily blocked (e.g. during a long model call).  We must NOT
@@ -248,6 +249,11 @@ async function existingOwnerUrl(external: boolean) {
 
   if (!ServerLock.alive(lock.pid)) return { type: "dead" as const, lock }
 
+  // stopping owner 仍可能通过 health；必须先看私有状态，不能把它当普通 unresponsive owner 复用。
+  // 这样可以把正在释放资源的 owner 与长时间模型调用中的 owner 区分开。
+  // 前者需要等待，后者仍然遵守原有的单 owner 复用规则。
+  if (await ownerIsStopping(lock)) return { type: "stopping" as const, lock }
+
   // pid alive — whether or not HTTP ping succeeded, the owner still exists.
   const responsive = await ServerLock.ping(lock.port, { headers: ServerAuth.headers() })
   return {
@@ -255,6 +261,33 @@ async function existingOwnerUrl(external: boolean) {
     url: lockUrl(lock, external),
     lock,
   }
+}
+
+async function ownerIsStopping(lock: ServerLockInfo) {
+  if (!lock.controlPort) return false
+  // control status is the only owner-local signal that distinguishes shutdown from a long call.
+  // 该请求必须带 lock token，避免普通 public health 请求伪造 stopping 状态。
+  // 请求失败时保守地返回 false，保留既有 unresponsive owner 的复用语义。
+  const response = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_STATUS_PATH}`, {
+    headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token },
+    signal: AbortSignal.timeout(500),
+  }).catch(() => undefined)
+  if (!response?.ok) return false
+  const body: unknown = await response.json().catch(() => undefined)
+  if (!body || typeof body !== "object" || !("stopping" in body)) return false
+  return body.stopping === true
+}
+
+async function waitForOwnerExit(pid: number) {
+  // 等待期间不另起 daemon，保持 SQLite 单 owner；退出后再回到既有选主路径。
+  // worker 自己有 teardown deadline，因此这里不会无限期等待 disposer。
+  // 超时仍然报错，而不是悄悄启动第二个进程覆盖原 owner。
+  const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    if (!ServerLock.alive(pid)) return
+    await Bun.sleep(SERVER_POLL_INTERVAL_MS)
+  }
+  throw new Error(`opencode daemon pid=${pid} is still stopping`)
 }
 
 function wantsExternal(args: Args) {
@@ -287,6 +320,7 @@ export async function ensure(args: Args) {
   // Fast path: if an owner is alive (responsive OR unresponsive), reuse it.
   const quick = await existingOwnerUrl(external)
   if (quick.type === "responsive" || quick.type === "unresponsive") return quick.url
+  if (quick.type === "stopping") await waitForOwnerExit(quick.lock.pid)
 
   let electionLease: Awaited<ReturnType<typeof Flock.acquire>> | undefined
   try {
@@ -302,6 +336,11 @@ export async function ensure(args: Args) {
     // Re-check under lock: another TUI may have started a daemon while we waited.
     const existing = await existingOwnerUrl(external)
     if (existing.type === "responsive" || existing.type === "unresponsive") return existing.url
+    if (existing.type === "stopping") {
+      // owner 已经承诺退出；等待结束后只清理它自己的 token。
+      await waitForOwnerExit(existing.lock.pid)
+      await ServerLock.clearIfOwner(existing.lock.token)
+    }
 
     // Only clear the lock if the owner is truly dead.
     if (existing.type === "dead") await ServerLock.clear()
