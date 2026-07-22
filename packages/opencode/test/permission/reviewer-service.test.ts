@@ -404,6 +404,66 @@ describe("permission reviewer service", () => {
       expect(decisions.every((part) => part.state.status === "error")).toBe(true)
     }),
   )
+
+  // #531：durable 必红夹具：session.messages 读到仍为 pending 的父 ToolPart 时，promote 必须用
+  // metadata.command 写出可渲染的 input.command，不能停在历史 { raw } 形状。
+  // 常见 tool-call-first 路径上 SessionPrompt 集成断言往往已绿，故此 fixture 才是 owner 级红测。
+  // 夹具强制 pending-at-review：不依赖 AI SDK 调度竞态，稳定复现 reviewing 窗 raw-only 缺陷。
+  const pendingCommandFixture = parentToolPartReviewFixture(
+    parentToolPartSeedMessage("call_pending_command", "pending", "cat id_rsa"),
+  )
+  const structuredKeepFixture = parentToolPartReviewFixture(
+    parentToolPartSeedMessage("call_structured_keep", "running", "git push origin dev"),
+  )
+  const pendingCommand = testEffect(pendingCommandFixture.layer)
+  const structuredKeep = testEffect(structuredKeepFixture.layer)
+
+  pendingCommand.effect("promotes pending parent ToolPart using metadata.command as structured input", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      // tool 字段必须带 messageID/callID，否则 updateToolAutoReview 直接 no-op。
+      const decision = yield* reviewer.review({
+        ...reviewInput("review_pending_command", { command: "cat id_rsa" }),
+        sessionID: SessionID.make("session_parent_tool"),
+        tool: { messageID: "msg_tool_seed", callID: "call_pending_command" },
+      })
+      // decision allow 证明 reviewer 全链走通，提升写不是被静默跳过
+      expect(decision.action).toBe("allow")
+      // 捕获数组含 reviewing 与 allowed 两次 durable 写——终态断言必须取最后一次
+      const part = pendingCommandFixture.captured.findLast(
+        (item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === "call_pending_command",
+      )
+      expect(part?.state.status).toBe("running")
+      if (part?.state.status !== "running") return
+      // 用户可观察不变量：reviewing/allowed envelope 写入后 command 必须可渲染。
+      // 旧实现会得到 input.raw 而无 command，TUI 显示 Writing command...
+      expect((part.state.input as { command?: string }).command).toBe("cat id_rsa")
+      expect(part.state.metadata?.autoReview?.status).toBe("allowed")
+    }),
+  )
+
+  // #531 regression：已 structured 的 running input 在 merge autoReview 时不得被 { raw } 覆盖。
+  // 该序在旧代码上常已绿，仍锁定 INV-02，防止选择逻辑回退。
+  structuredKeep.effect("keeps structured running input when merging autoReview status", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      yield* reviewer.review({
+        ...reviewInput("review_structured_keep", { command: "git push origin dev" }),
+        sessionID: SessionID.make("session_parent_tool"),
+        tool: { messageID: "msg_tool_seed", callID: "call_structured_keep" },
+      })
+      // 捕获数组含 reviewing 与 allowed 两次 durable 写——终态断言必须取最后一次
+      const part = structuredKeepFixture.captured.findLast(
+        (item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === "call_structured_keep",
+      )
+      expect(part?.state.status).toBe("running")
+      if (part?.state.status !== "running") return
+      // description 来自既有 structured input，不得被仅含 command 的 metadata 提升抹掉。
+      expect((part.state.input as { command?: string }).command).toBe("git push origin dev")
+      expect((part.state.input as { description?: string }).description).toBe("Push branch")
+      expect(part.state.metadata?.autoReview?.status).toBe("allowed")
+    }),
+  )
 })
 
 // [local-smark] parentSessionModelFixture 开始
@@ -1090,6 +1150,91 @@ function reviewerClosureFixture(block: "pending" | "completed" | "drain") {
   return {
     parts,
     committed,
+    layer: PermissionReviewer.layer.pipe(
+      Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
+      Layer.provide(provider.layer),
+      Layer.provide(authLayer({ type: "api", key: "test-key" })),
+      Layer.provide(pluginLayer()),
+      Layer.provide(sessionLayer),
+      // #497：reviewer layer 依赖 Database（#206 谱系）——空链 mock 闭合 R。
+      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
+    ),
+  }
+}
+
+// #531：种子消息构造——messages mock 的返回形状与生产 session.messages 一致（info+parts），
+// info 只需满足 updateToolAutoReview 的 m.info.id 匹配，最小对象即可。
+function parentToolPartSeedMessage(callID: string, status: "pending" | "running", command: string) {
+  const seedPart = {
+    id: "part_tool_seed",
+    sessionID: SessionID.make("session_parent_tool"),
+    messageID: "msg_tool_seed",
+    type: "tool",
+    callID,
+    tool: "bash",
+    state:
+      status === "pending"
+        ? { status, input: {}, raw: JSON.stringify({ command, description: "Read key" }) }
+        : { status, input: { command, description: "Push branch" }, time: { start: 1 } },
+  } as MessageV2.ToolPart
+  return {
+    info: { id: "msg_tool_seed", sessionID: seedPart.sessionID, role: "assistant", time: { created: 1 } },
+    parts: [seedPart],
+  } as unknown as MessageV2.WithParts
+}
+
+// #531：durable 提升夹具——session.messages 种子父 ToolPart（pending 或 running），
+// updatePart 经 sessionPartStore 捕获；updateToolAutoReview 的真实选择逻辑全链可测。
+function parentToolPartReviewFixture(seed: MessageV2.WithParts) {
+  const model = reviewerModel(OPENAI_PROVIDER_ID)
+  const captured: MessageV2.Part[] = []
+  const fetch = Object.assign(
+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(openAIReviewDecisionStream(), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    { preconnect: () => {} },
+  )
+  const provider = ProviderTest.fake({
+    model,
+    info: ProviderTest.info({ id: model.providerID, options: {} }, model),
+    getLanguage: Effect.fn("ParentToolPartReviewTest.getLanguage")(() =>
+      Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5")),
+    ),
+  })
+  const parentSession: Session.Info = {
+    id: SessionID.make("session_parent_tool"),
+    slug: "parent-tool",
+    projectID: ProjectV2.ID.make("project_reviewer_tool"),
+    directory: "/tmp",
+    title: "Parent tool part",
+    model: { id: model.id, providerID: model.providerID },
+    version: "test",
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 1, updated: 1 },
+  }
+  const childSession: Session.Info = {
+    ...parentSession,
+    id: SessionID.make("session_reviewer_tool"),
+    parentID: parentSession.id,
+    agent: "permission-reviewer",
+    title: "Auto permission review",
+  }
+  const sessionLayer = Layer.mock(Session.Service)({
+    get: () => Effect.succeed(parentSession),
+    // #531：messages 必须真正返回种子消息——updateToolAutoReview 经 #208 的
+    // session.messages 读父 ToolPart；返回空数组会让提升 no-op，测试沦为双绿空洞。
+    messages: () => Effect.succeed([seed]),
+    children: () => Effect.succeed([]),
+    create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
+    updateMessage: (message) => Effect.succeed(message),
+    findMessage: () => Effect.succeed(Option.none()),
+    ...sessionPartStore(captured),
+  })
+  return {
+    captured,
     layer: PermissionReviewer.layer.pipe(
       Layer.provide(TestConfig.layer({ get: () => Effect.succeed(config(model.providerID)) })),
       Layer.provide(provider.layer),

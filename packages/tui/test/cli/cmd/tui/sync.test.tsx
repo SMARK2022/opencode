@@ -835,6 +835,123 @@ describe("tui sync part delta coalesce (#186)", () => {
     }
   })
 
+  // #531 equal-v0 生命周期：先到 reviewing raw-only 不得永久挡住后到 structured command，
+  // 且 autoReview envelope 必须保留（否则会出现 Writing command... 或丢审核行）。
+  // progressVersion 均缺省 → legacy v0，触发字段 enrich 而非 progress 前进分支。
+  test("enriches equal-v0 bash running from raw-only autoReview to structured command", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const message = assistantMessage()
+    const command = "git push origin dev"
+    const reviewingRaw = {
+      ...runningShellPart(""),
+      state: {
+        status: "running" as const,
+        input: { raw: JSON.stringify({ command, description: "Push branch" }) },
+        title: "Auto review: cautious",
+        metadata: {
+          autoReview: {
+            reviewID: "review_raw",
+            status: "reviewing",
+            precheck: { level: "cautious", reason: "push requires review" },
+          },
+        },
+        time: { start: 1 },
+      },
+    } satisfies ToolPart
+    const structured = {
+      ...reviewingRaw,
+      state: {
+        status: "running" as const,
+        input: { command, description: "Push branch" },
+        time: { start: 2 },
+      },
+    } satisfies ToolPart
+    const { app, emit, sync } = await mount(undefined, tmp.path)
+
+    try {
+      emit(messageEvent(message))
+      emit(partEvent(reviewingRaw))
+      await wait(() => {
+        const part = sync.data.part.msg_1?.[0]
+        if (part?.type !== "tool" || part.state.status !== "running") return false
+        const review = (part.state.metadata as { autoReview?: { status?: string } } | undefined)?.autoReview
+        return review?.status === "reviewing"
+      })
+
+      emit(partEvent(structured))
+      await Bun.sleep(30)
+
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({
+        state: {
+          status: "running",
+          input: { command },
+          metadata: { autoReview: { status: "reviewing" } },
+        },
+      })
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+
+  // #531 tool-call-first：先 structured running，再 reviewing envelope，equal-v0 须补 autoReview。
+  // 不得为了补 envelope 而丢掉已有 command，也不得要求 progressVersion 递增。
+  test("enriches equal-v0 bash running autoReview without dropping structured command", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const message = assistantMessage()
+    const command = "cat id_rsa"
+    const structured = {
+      ...runningShellPart(""),
+      state: {
+        status: "running" as const,
+        input: { command, description: "Read key" },
+        time: { start: 1 },
+      },
+    } satisfies ToolPart
+    const reviewing = {
+      ...structured,
+      state: {
+        status: "running" as const,
+        input: { command, description: "Read key" },
+        title: "Auto review: cautious",
+        metadata: {
+          autoReview: {
+            reviewID: "review_cmd",
+            status: "reviewing",
+            precheck: { level: "cautious", reason: "key path" },
+          },
+        },
+        time: { start: 1 },
+      },
+    } satisfies ToolPart
+    const { app, emit, sync } = await mount(undefined, tmp.path)
+
+    try {
+      emit(messageEvent(message))
+      emit(partEvent(structured))
+      await wait(
+        () =>
+          sync.data.part.msg_1?.[0]?.type === "tool" &&
+          sync.data.part.msg_1[0].state.status === "running" &&
+          (sync.data.part.msg_1[0].state.input as { command?: string }).command === command,
+      )
+
+      emit(partEvent(reviewing))
+      await Bun.sleep(30)
+
+      expect(sync.data.part.msg_1?.[0]).toMatchObject({
+        state: {
+          status: "running",
+          input: { command },
+          metadata: { autoReview: { status: "reviewing" } },
+        },
+      })
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+
   // 复现核心竞态：daemon 的 message.part.updated 事件通过 fire-and-forget
   // 发送（void Effect.runPromise），而 message.part.delta 通过 yield* await
   // 发送。当 text-start 的 part.updated（text=""）因 fiber 调度延迟到 delta
