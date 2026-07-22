@@ -1,7 +1,7 @@
 export * as Patch from "./patch"
 
 import { convertToLineEnding, detectLineEnding, splitLines } from "./util/line-ending"
-import { closestWindow, lineOffset, locateExact, nextLineOffset } from "./patch-match"
+import { closestWindow, lineOffset, locateContext, locateExact, nextLineOffset } from "./patch-match"
 
 export type Hunk =
   | { readonly type: "add"; readonly path: string; readonly contents: string }
@@ -133,51 +133,65 @@ function parseUpdate(lines: ReadonlyArray<string>, start: number) {
 }
 
 function applyChunks(originalLines: string[], path: string, chunks: ReadonlyArray<UpdateFileChunk>, persistedText: string) {
-  // 后续chunk失败只丢弃局部working copy，不能提交该文件已完成的半次修改。
-  let lines = [...originalLines]
-  let terminated = persistedText.endsWith("\n")
-  let cursorOffset = 0
+  // 两代调用方共用immutable original；定位结束前不产生可被后续chunk消费的文本。
+  const terminated = persistedText.endsWith("\n")
+  const originalText = workingText(originalLines, terminated)
   const insertions: Array<ReadonlyArray<string>> = []
+  const replacements: Array<{ start: number; end: number; text: string }> = []
   for (const chunk of chunks) {
+    let searchFrom = 0
     if (chunk.changeContext) {
-      const context = locateExact(lines, [chunk.changeContext], cursorOffset, false, terminated)
-      // 原始 context 已在 Tool input 中；失败只补磁盘实际候选，不再回显请求。
+      const context = locateContext(originalLines, [chunk.changeContext], 0, terminated)
       if (context.type !== "found") throw new Error(withCandidate(`Failed to find context in ${path}.`, persistedText, chunk.changeContext))
-      const text = workingText(lines, terminated)
-      const offset = context.location.kind === "line" ? lineOffset(lines, context.location.startLine) : context.location.startOffset
-      cursorOffset = nextLineOffset(text, offset)
+      const offset = context.location.kind === "line" ? lineOffset(originalLines, context.location.startLine) : context.location.startOffset
+      searchFrom = nextLineOffset(originalText, offset)
     }
     if (chunk.oldLines.length === 0) {
-      // 延迟插入不能变成后续chunk的匹配输入，但仍先验证其公开context。
       insertions.push(chunk.newLines)
       continue
     }
-    const result = locateExact(lines, chunk.oldLines, cursorOffset, chunk.endOfFile, terminated)
-    // 匹配与文件原子性保持不变，三类失败都共享不复制 old block 的诊断合同。
+    const result = locateExact(originalLines, chunk.oldLines, searchFrom, chunk.endOfFile, terminated)
     if (result.type === "ambiguous")
       throw new Error(`Found multiple matches for expected lines in ${path}. Provide more context to make the match unique.`)
     if (result.type === "not-found")
       throw new Error(withCandidate(`Failed to find expected lines in ${path}.`, persistedText, chunk.oldLines.join("\n")))
-    if (result.location.kind === "line") {
-      const startLine = result.location.startLine
-      lines.splice(startLine, result.location.endLine - startLine, ...chunk.newLines)
-      if (lines.length === 0) terminated = false
-      // replacement生成的末行也已消费，不能让后续chunk回头重匹配空逻辑行。
-      const nextLine = startLine + chunk.newLines.length
-      cursorOffset = chunk.newLines.length === 0 ? lineOffset(lines, startLine) : nextLine < lines.length ? lineOffset(lines, nextLine) : workingText(lines, terminated).length + 1
-      continue
-    }
-    const text = workingText(lines, terminated)
-    const replacement = chunk.newLines.join("\n")
-    // 只拥有完整字面命中范围，其外的首行前缀与末行后缀原样保留。
-    const next = text.slice(0, result.location.startOffset) + replacement + text.slice(result.location.endOffset)
-    terminated = next.endsWith("\n")
-    lines = next === "" ? [] : next.split("\n")
-    if (terminated) lines.pop()
-    cursorOffset = result.location.startOffset + replacement.length
+    const span =
+      result.location.kind === "line"
+        ? { start: lineOffset(originalLines, result.location.startLine), end: result.location.endLine < originalLines.length ? lineOffset(originalLines, result.location.endLine) : originalText.length }
+        : { start: result.location.startOffset, end: result.location.endOffset }
+    // 整行span包含其行尾；substring仅拥有匹配字符，不能吞掉原始前后缀。
+    const text =
+      result.location.kind === "line"
+        ? formatLineReplacement(chunk.newLines, span, originalText, terminated)
+        : chunk.newLines.join("\n")
+    replacements.push({ ...span, text })
   }
+  // 先排序再比较相邻半开区间；重复、嵌套和交叉均在任何应用前拒绝。
+  replacements.sort((left, right) => left.start - right.start)
+  for (let index = 1; index < replacements.length; index++) {
+    const previous = replacements[index - 1]
+    const current = replacements[index]
+    if (previous.start < current.end && current.start < previous.end)
+      throw new Error(`Overlapping expected lines in ${path}. Merge the edits or target disjoint regions.`)
+  }
+  let next = originalText
+  // 倒序应用保持原坐标有效，失败诊断仍只读取persistedText。
+  for (const replacement of [...replacements].reverse())
+    next = next.slice(0, replacement.start) + replacement.text + next.slice(replacement.end)
+  const nextTerminated = next.endsWith("\n")
+  const lines = next === "" ? [] : next.split("\n")
+  if (nextTerminated) lines.pop()
+  // 纯插入最后按patch顺序追加，不参与定位或重叠窗口。
   for (const insertion of insertions) lines.push(...insertion)
   return lines
+}
+
+function formatLineReplacement(newLines: ReadonlyArray<string>, span: { start: number; end: number }, originalText: string, terminated: boolean) {
+  if (newLines.length === 0) return ""
+  const body = newLines.join("\n")
+  if (span.end < originalText.length) return `${body}\n`
+  if (terminated && span.end === originalText.length && originalText.endsWith("\n")) return `${body}\n`
+  return body
 }
 
 function workingText(lines: string[], terminated: boolean) {

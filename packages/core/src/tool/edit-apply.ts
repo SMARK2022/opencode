@@ -1,4 +1,6 @@
 export * as EditApply from "./edit-apply"
+import { normalizeForMatch } from "../util/normalize-for-match"
+export { normalizeForMatch } from "../util/normalize-for-match"
 
 /**
  * edit 文本替换的唯一语义所有者（单条与多条 edits 共用）。
@@ -62,22 +64,6 @@ type LineSpan = { start: number; end: number }
  * 明确不在集合内：tab↔空格缩进、转义字面量、任意相似度/Levenshtein。
  * 这些仍必须失败并要求 re-read 精确文本。
  */
-export function normalizeForMatch(text: string): string {
-  return (
-    text
-      .normalize("NFKC")
-      .split("\n")
-      .map((line) => line.trimEnd())
-      .join("\n")
-      // 智能引号 → ASCII，避免聊天字体替换导致 exact 失败
-      .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
-      .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
-      // 各类 dash/minus → 普通连字符
-      .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
-      // 特殊空格 → 普通空格（不含普通 ASCII 空格本身的语义合并之外）
-      .replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ")
-  )
-}
 
 function splitLinesWithEndings(content: string): string[] {
   return content.match(/[^\n]*\n|[^\n]+/g) ?? []
