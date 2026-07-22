@@ -1,36 +1,26 @@
 From 3bab13f27c2fab5c7257d6f26d3e76d9112cc3bb Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Tue, 5 May 2026 05:20:40 +0800
-Subject: [PATCH] =?UTF-8?q?feat(notebook):=20=E5=B7=A5=E5=85=B7=E9=80=BB?=
- =?UTF-8?q?=E8=BE=91=E5=8F=8Aschema=E3=80=81summary=E5=AE=8C=E6=95=B4?=
- =?UTF-8?q?=E9=87=8D=E6=9E=84=20enhance=20cell=20identification=20and=20ou?=
- =?UTF-8?q?tput=20handling?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-- Introduced a stable cell identifier format (#VSC-xxxxxxxx) using SHA1 hash of the cell's document URI.
-- Updated functions to utilize the new copilot-like cell ID for consistent identification across operations.
-- Enhanced output serialization to include more detailed artifact summaries and improved text previews.
-- Implemented virtual document line range computation for accurate line numbering in notebook cells.
-- Refactored notebook source retrieval to support cell targeting via cell ID, improving pagination and output limits.
-- Improved summary generation to reflect new conventions and provide clearer execution state descriptions.
-- Adjusted utility functions for text previewing to allow customizable character limits.
+Subject: [PATCH] feat(notebook): 工具逻辑及schema、summary完整重构 enhance cell identification and output handling
 
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 96bbd965b92bd69474b704f4b167cfc2f2ba0748..9d40d5b984276330771b5e8937aa7f2151d27c99 100644
+index db20050e8b..6d1ef54051 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -13,7 +13,7 @@ import { Instruction } from "../session/instruction"
- import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from "@/util/media"
- import type { MessageV2 } from "../session/message-v2"
+@@ -11,8 +11,10 @@ import { Instruction } from "../session/instruction"
+ import { isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from "@/util/media"
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
  
+-// 默认 read 行数 1000：与截断行上限同步，减小单次工具输出
 -const DEFAULT_READ_LIMIT = 1000
++// 默认 read 行数 400：与 notebook source 默认 limit 对齐，压低单次工具输出
++// 默认 400 行：与 notebook source limit 对齐
++// 默认 400 行：与 notebook source limit 对齐，降低单次工具输出
 +const DEFAULT_READ_LIMIT = 400
  const MAX_LINE_LENGTH = 2000
  const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
- const MAX_BYTES = 24 * 1024
-@@ -141,7 +141,7 @@ export const Parameters = Schema.Struct({
+ // 默认最大读取字节 24KB：压低单次工具输出内存与上下文占用
+@@ -150,7 +152,7 @@ export const Parameters = Schema.Struct({
      description: "The line number to start reading from (1-indexed)",
    }),
    limit: Schema.optional(NonNegativeInt).annotate({
@@ -40,93 +30,554 @@ index 96bbd965b92bd69474b704f4b167cfc2f2ba0748..9d40d5b984276330771b5e8937aa7f21
  })
  
 diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
-index 051999342b4d52e710c7d57e929a369e7ae95e16..6acf910e11f28104f2e65eabbca802b857c0294e 100644
+index 5150c4e139..e2ebad69ad 100644
 --- a/sdks/vscode/src/bridge.ts
 +++ b/sdks/vscode/src/bridge.ts
-@@ -132,10 +132,9 @@ async function routeRequest(
+@@ -17,28 +17,23 @@
+  *   POST /notebook/env          – kernel/environment snapshot
+  */
+ import * as http from "node:http"
+-// 执行逻辑步骤
+ import { isRecord, stringProp } from "./util"
+ import { notebookSummary } from "./notebook/summary"
+ import { notebookSource } from "./notebook/source"
+ import { runNotebook } from "./notebook/run"
+ import { editNotebook } from "./notebook/edit"
+-// 执行逻辑步骤
+ import { readNotebookCellOutput } from "./notebook/output"
+ import { notebookEnv } from "./notebook/env"
+ 
+ const BRIDGE_HOST = "127.0.0.1"
+-// 桥接服务仅绑定本机回环地址，杜绝网络暴露
+ 
+ export type BridgeInfo = { port: number; token: string }
+-// 桥接身份信息：端口号加随机 token
+ 
+ /** The active server instance — closed on extension deactivation. */
+ let server: http.Server | undefined
+-// 模块级持有服务器实例，deactivate 时关闭
+ 
++// 关闭桥接服务器：停止 HTTP 服务器并清理资源
+ export function closeBridge() {
+-// 关闭桥接服务器并清除引用，供 deactivate 调用
+   server?.close()
+   server = undefined
+ }
+@@ -51,82 +46,57 @@ export function closeBridge() {
+  * Starts the HTTP bridge server on a random port.
+  * Returns the port and auth token for environment injection into the terminal.
+  */
++// 启动 HTTP 桥接服务器：监听 opencode 工具请求并路由到对应处理函数
+ export async function startBridge(output: { appendLine(value: string): void }): Promise<BridgeInfo> {
+-// 启动 HTTP 桥接服务器：随机端口、生成 token、注册路由
+   const { randomUUID } = await import("node:crypto")
+-  // 动态导入 crypto 避免扩展启动时加载开销
+   const token = randomUUID()
+-  // UUID 作为唯一鉴权凭证，防止本机其他进程未授权调用
+ 
+   const httpServer = http.createServer(async (request, response) => {
+-  // 创建 HTTP 服务器，所有请求在同一回调中路由
+     const url = new URL(request.url ?? "/", `http://${BRIDGE_HOST}`)
+-    // 构造完整 URL 以解析 pathname 和 searchParams
+     output.appendLine(`[bridge] ${request.method} ${url.pathname}`)
+ 
+     try {
+-    // 请求处理包裹在 try-catch 中，异常返回 500 而非崩溃
+       // Health check — no auth required
+       if (request.method === "GET" && url.pathname === "/health") {
+-      // 健康检查端点：免鉴权，供 CLI 探活
+         return writeJson(response, 200, { ok: true, service: "opencode-vscode-bridge" })
+-        // 返回结果给调用方
+       }
+ 
+       // All other endpoints require auth
+       if (!authorized(request, url, token)) {
+-      // 非健康检查端点必须鉴权，未授权返回 401
+         return writeJson(response, 401, { ok: false, error: "Unauthorized" })
+-        // 返回结果给调用方
+       }
+ 
+       // Route to notebook handlers
+       const result = await routeRequest(request.method ?? "", url.pathname, request, output)
+-      // 路由到 notebook 处理器
+       if (result !== undefined) {
+-      // 路由匹配时返回 200，否则返回 404
+         return writeJson(response, 200, result)
+-        // 返回结果给调用方
+       }
+ 
+       writeJson(response, 404, { ok: false, error: "Not found" })
+-      // 未匹配路由返回 404
+     } catch (error) {
+-    // 捕获处理异常，返回 500 并记录日志
+       const message = error instanceof Error ? error.message : String(error)
+-      // 定义 message：保存关键中间值或配置
+       output.appendLine(`[bridge] error: ${message}`)
+       writeJson(response, 500, { ok: false, error: message })
+     }
+   })
+ 
+   return await new Promise((resolve, reject) => {
+-  // 返回结果给调用方
+     httpServer.once("error", reject)
+-    // 监听失败时 reject
+     httpServer.listen(0, BRIDGE_HOST, () => {
+-    // 端口 0 让操作系统分配可用端口
+       server = httpServer
+-      // 保存服务器实例供 closeBridge 使用
+       const address = httpServer.address()
+-      // 定义 address：保存关键中间值或配置
+       if (!address || typeof address === "string") {
+-      // address 为字符串表示 Unix socket，不支持
+         reject(new Error("Failed to resolve bridge server port"))
+         return
+-        // 返回结果给调用方
+       }
+ 
+       const base = `http://${BRIDGE_HOST}:${address.port}`
+-      // 定义 base：保存关键中间值或配置
+       output.appendLine(`[bridge] listening on ${base}`)
+       output.appendLine(`[bridge] token ${token}`)
+       for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env"]) {
+-      // 遍历集合处理每个元素
+         output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}${ep === "health" ? "" : `?token=${token}`}`)
+       }
+       resolve({ port: address.port, token })
+-      // 返回端口和 token 供环境变量注入
+     })
+   })
+ }
+@@ -135,70 +105,49 @@ export async function startBridge(output: { appendLine(value: string): void }):
+ // Routing
+ // ---------------------------------------------------------------------------
+ 
++// 路由请求：根据路径分发到对应的 notebook 处理函数
++// 请求路由：根据 URL 路径分发到 notebook 处理函数
+ async function routeRequest(
+-// 路由函数：仅接受 POST，按 pathname 分发到 notebook 处理器
+   method: string,
+   pathname: string,
+   request: http.IncomingMessage,
+   output: { appendLine(value: string): void },
+ ) {
+-// 执行逻辑步骤
+   if (method !== "POST") return undefined
+-  // 非 POST 请求不在路由范围
+ 
+-  const body = await readJson(request)
+-  // 读取并解析请求体
++// 读取 JSON 请求体：解析工具参数
++const body = await readJson(request)
+   if (!isRecord(body)) {
+-  // 请求体必须是 JSON 对象
+     throw new Error("Expected JSON object body")
+-    // 抛出异常：中断执行并让调用方处理错误
+   }
+ 
+   switch (pathname) {
+-  // 按值分支路由到对应处理器
+     case "/notebook/summary":
+-    // 摘要端点：返回 notebook 结构概览
+       return await notebookSummary(stringProp(body, "filePath"))
+-      // 返回结果给调用方
+ 
+     case "/notebook/source":
+-    // 源码端点：返回虚拟行号文本
+       return await notebookSource(body)
+-      // 返回结果给调用方
+ 
+     case "/notebook/run":
+-    // 执行端点：运行单元格
+       return await runNotebook(body)
+-      // 返回结果给调用方
+ 
+     case "/notebook/edit":
+-    // 编辑端点：插入/删除/替换单元格
+       return await editNotebook(body)
+-      // 返回结果给调用方
+ 
      case "/notebook/output":
+-    // 输出端点：读取单元格输出
      case "/notebook/cell-output": {
+-    // 输出端点别名
        const filePath = typeof body.filePath === "string" ? body.filePath : undefined
+-      // filePath 可选：缺省时使用活动 notebook
 -      const cellIndex = typeof body.cellIndex === "number" ? body.cellIndex : undefined
+-      // 定义 cellIndex：保存关键中间值或配置
++      // 输出事件路由丢弃 cellIndex 优先分支，统一 cellId
        const cellId = typeof body.cellId === "string" ? body.cellId : undefined
+-      // 定义 cellId：保存关键中间值或配置
 -      output.appendLine(`[bridge] reading raw notebook output ${filePath ?? "<active>"} ${cellId ?? cellIndex ?? "<active cell>"}`)
 -      return await readNotebookCellOutput(filePath, cellIndex, cellId)
+-      // 返回结果给调用方
 +      output.appendLine(`[bridge] reading raw notebook output ${filePath ?? "<active>"} cellId=${cellId ?? "<auto>"}`)
 +      return await readNotebookCellOutput(filePath, undefined, cellId)
      }
  
      case "/notebook/env":
+-    // 环境端点：返回内核和扩展状态
+       return await notebookEnv(isRecord(body) ? stringProp(body, "filePath") : undefined)
+-      // 返回 undefined 表示无结果或用户取消
+   }
+ 
+   return undefined
+-  // 返回 undefined 表示无结果或用户取消
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -206,30 +155,23 @@ async function routeRequest(
+ // ---------------------------------------------------------------------------
+ 
+ function authorized(request: http.IncomingMessage, url: URL, token: string) {
+-// 鉴权函数：接受 Bearer header 或 query token 两种方式
+   return request.headers.authorization === `Bearer ${token}` || url.searchParams.get("token") === token
+-  // 返回结果给调用方
+ }
+ 
+ function writeJson(response: http.ServerResponse, status: number, value: unknown) {
+-// 统一 JSON 响应：UTF-8 Content-Type 加美化序列化
+   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" })
+   response.end(JSON.stringify(value, null, 2))
+ }
+ 
+ function readJson(request: http.IncomingMessage) {
+-// 读取请求体并解析 JSON，空体返回空对象
+-  return new Promise<unknown>((resolve, reject) => {
+-  // 返回结果给调用方
++  // 返回 Promise：服务器启动后 resolve
++return new Promise<unknown>((resolve, reject) => {
+     let body = ""
+     request.setEncoding("utf8")
+-    // 强制 UTF-8 避免多字节字符截断
+     request.on("data", (chunk: string) => {
+-    // 逐块拼接请求体
+       body += chunk
+     })
+     request.on("end", () => {
+-    // 请求体完毕后解析 JSON
+       try {
+         resolve(body ? JSON.parse(body) : {})
+       } catch (error) {
+@@ -237,6 +179,5 @@ function readJson(request: http.IncomingMessage) {
+       }
+     })
+     request.on("error", reject)
+-    // 底层流错误转发为 reject
+   })
+ }
 diff --git a/sdks/vscode/src/notebook/commands.ts b/sdks/vscode/src/notebook/commands.ts
-index 4ec921e54a17decd114a8576d2e76d5bdcb2fb96..36e625e03c9306fbea08a5ba4141a38b14bf66c1 100644
+index 514af92439..6b40343bcd 100644
 --- a/sdks/vscode/src/notebook/commands.ts
 +++ b/sdks/vscode/src/notebook/commands.ts
-@@ -7,7 +7,7 @@
+@@ -6,13 +6,11 @@
+  * They are NOT called by the bridge server — only by the user via the command palette.
   */
  import * as vscode from "vscode"
+-// 执行逻辑步骤
  import { openJsonDocument } from "../util"
 -import { cellKindLabel } from "./format"
 +import { c1, copilotLikeCellId } from "./format"
  import { notebookSummary } from "./summary"
  import { notebookSource } from "./source"
  import { runNotebook } from "./run"
-@@ -124,7 +124,7 @@ async function selectNotebook(required = true) {
- async function pickNotebookCell(notebook: vscode.NotebookDocument, title = "opencode Notebook Bridge Tools") {
+-// 执行逻辑步骤
+ import { editNotebook } from "./edit"
+ import { readNotebookCellOutput } from "./output"
+ import { notebookEnv } from "./env"
+@@ -26,86 +24,69 @@ import { notebookEnv } from "./env"
+  * The user selects one, fills in parameters via sub-pickers, and the result
+  * is logged to the output channel and opened as a JSON document.
+  */
++// 注册 notebook 命令面板命令：提供调试用的 cell 选择和操作入口
++// 注册命令面板命令：提供调试用的 cell 操作入口
+ export async function notebookBridgeTools(output: vscode.OutputChannel) {
+-// 交互式命令：列出全部 notebook 桥接工具供用户选择
+-  const picked = await vscode.window.showQuickPick(
+-  // 等待用户选择工具
++  // 显示 QuickPick：让用户选择 cell
++const picked = await vscode.window.showQuickPick(
+     [
+       {
+         label: "vscode_notebook_summary",
+-        // 摘要工具：返回结构和执行状态
+         description: "structure, cells, execution, output MIME",
+         run: async () => {
+           const notebook = await selectNotebook()
+-          // 定义 notebook：保存关键中间值或配置
+           return notebook ? await notebookSummary(notebook.uri.toString()) : undefined
+-          // 返回 undefined 表示无结果或用户取消
+         },
+       },
+       {
+         label: "vscode_notebook_source",
+-        // 源码工具：读取单元格源码
+         description: "read LLM-friendly cell source code",
+         run: async () => await notebookSourceCommand(),
+       },
+       {
+         label: "vscode_notebook_run",
+-        // 执行工具：运行单元格
+         description: "run one cell, range, or all via native notebook command",
+         run: async () => await runNotebookCommand(),
+       },
+       {
+         label: "vscode_notebook_edit",
+-        // 编辑工具：插入/删除/替换单元格
+         description: "insert, delete, or replace cells via NotebookEdit",
+         run: async () => await editNotebookCommand(),
+       },
+       {
+         label: "vscode_notebook_output",
+-        // 输出工具：导出单元格输出 artifact
+         description: "artifact-first output export under .opencode/cache/notebook-outputs",
+         run: async () => {
+           const notebook = await selectNotebook()
+-          // 定义 notebook：保存关键中间值或配置
+           if (!notebook) return undefined
+-          // 前置校验：排除非法输入或空值情况
+           const cell = await pickNotebookCell(notebook, "vscode_notebook_output")
+-          // 定义 cell：保存关键中间值或配置
+           return cell ? await readNotebookCellOutput(notebook.uri.toString(), cell.index) : undefined
+-          // 返回 undefined 表示无结果或用户取消
+         },
+       },
+       {
+         label: "vscode_notebook_env",
+-        // 环境工具：返回内核和扩展状态
+         description: "kernel/environment capability snapshot",
+         run: async () => {
+           const notebook = await selectNotebook(false)
+-          // 定义 notebook：保存关键中间值或配置
+           return await notebookEnv(notebook?.uri.toString())
+-          // 返回结果给调用方
+         },
+       },
+     ],
+     {
+       title: "opencode Notebook Bridge Tools",
+-      // 执行逻辑步骤
+       placeHolder: "Select a native notebook bridge tool",
+       matchOnDescription: true,
+     },
+   )
+-  if (!picked) return
+-  // 用户取消选择时返回
++  // 用户取消选择：不执行任何操作
++if (!picked) return
+ 
+   output.show(true)
+   output.appendLine(`[notebook-bridge] ${picked.label}`)
+   const result = await picked.run()
+-  // 执行选中的工具
+   if (result === undefined) return
+-  // 工具返回 undefined 时不打开文档
+   output.appendLine(`[notebook-bridge] result ${JSON.stringify(result, null, 2)}`)
+   await openJsonDocument(result)
+-  // 在编辑器中打开 JSON 结果
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -116,200 +97,164 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
+  * Prompts the user to select an open notebook document.
+  * Returns the single open notebook without prompting if there is exactly one.
+  */
++// 选择 notebook：通过 QuickPick UI 让用户选择已打开的 notebook
+ async function selectNotebook(required = true) {
+-// 选择 notebook：无打开时提示，仅一个直接返回
+   const notebooks = [
+-  // 收集去重后的 notebook 列表
+     ...new Map(vscode.workspace.notebookDocuments.map((nb) => [nb.uri.toString(), nb])).values(),
+   ]
+   if (notebooks.length === 0) {
+-  // 无打开 notebook 时按 required 决定提示
+     if (required) void vscode.window.showWarningMessage("No open notebook documents found.")
+-    // 条件分支：按业务逻辑分流处理
+     return undefined
+-    // 返回 undefined 表示无结果或用户取消
+   }
+   if (notebooks.length === 1) return notebooks[0]
+-  // 仅一个 notebook 时跳过选择
+ 
    const picked = await vscode.window.showQuickPick(
+-  // 等待用户选择工具
+     notebooks.map((notebook) => ({
+       label: notebook.uri.fsPath || notebook.uri.toString(),
+       description: notebook.notebookType,
+       detail: `${notebook.cellCount} cells`,
+       notebook,
+-      // 执行逻辑步骤
+     })),
+     {
+       title: "opencode Notebook Bridge Tools",
+       placeHolder: "Select an open notebook",
+       matchOnDescription: true,
+-      // 执行逻辑步骤
+       matchOnDetail: true,
+     },
+   )
+   return picked?.notebook
+-  // 返回结果给调用方
+ }
+ 
+ /** Prompts the user to select a cell within a notebook. */
++// 选择 cell：通过 QuickPick UI 让用户选择 notebook 中的 cell
+ async function pickNotebookCell(notebook: vscode.NotebookDocument, title = "opencode Notebook Bridge Tools") {
+-// QuickPick 选择单元格
+   const picked = await vscode.window.showQuickPick(
+-  // 等待用户选择工具
      notebook.getCells().map((cell) => ({
 -      label: `Cell ${cell.index}`,
 +      label: `Cell ${c1(cell)}`,
        description: cell.kind === vscode.NotebookCellKind.Code ? "code" : "markup",
        detail: `${cell.outputs.length} outputs · ${cell.document.languageId} · ${cell.document.getText().split("\n")[0] ?? ""}`,
        cell,
-@@ -162,7 +162,7 @@ async function notebookSourceCommand() {
+-      // 执行逻辑步骤
+     })),
+     {
+       title,
+       placeHolder: "Select a cell",
+       matchOnDescription: true,
+-      // 执行逻辑步骤
+       matchOnDetail: true,
+     },
+   )
+   return picked?.cell
+-  // 返回结果给调用方
+ }
+ 
+ // ---------------------------------------------------------------------------
+ // Sub-command flows
+ // ---------------------------------------------------------------------------
+ 
++// 源码命令：调用 notebookSource API 获取 cell 源码
+ async function notebookSourceCommand() {
+-// 交互式源码命令：选择全部或单个单元格
+   const notebook = await selectNotebook()
+-  // 定义 notebook：保存关键中间值或配置
+   if (!notebook) return undefined
+-  // 未选择 notebook 时返回
+ 
+   const target = await vscode.window.showQuickPick(
+-  // 定义 target：保存关键中间值或配置
+     [
+       { label: "all", description: "all cells" },
+       { label: "cell", description: "one cell" },
+     ],
+     { title: "vscode_notebook_source target" },
+-    // 执行逻辑步骤
+   )
+   if (!target) return undefined
+-  // 用户取消目标选择时返回
+ 
+   if (target.label === "all") {
+-  // 读取全部单元格源码
+     return await notebookSource({ filePath: notebook.uri.toString() })
+-    // 返回结果给调用方
+   }
    if (target.label === "cell") {
+-  // 读取单个单元格源码
      const cell = await pickNotebookCell(notebook, "vscode_notebook_source cell")
+-    // 定义 cell：保存关键中间值或配置
      if (!cell) return undefined
+-    // 前置校验：排除非法输入或空值情况
 -    return await notebookSource({ filePath: notebook.uri.toString(), cellIndex: cell.index })
+-    // 返回结果给调用方
 +    return await notebookSource({ filePath: notebook.uri.toString(), cellId: copilotLikeCellId(cell) })
    }
  }
  
-@@ -186,7 +186,7 @@ async function runNotebookCommand() {
++// 运行命令：调用 runNotebook API 执行 cell
+ async function runNotebookCommand() {
+-// 交互式执行命令：选择目标后运行
+   const notebook = await selectNotebook()
+-  // 定义 notebook：保存关键中间值或配置
+   if (!notebook) return undefined
+-  // 未选择 notebook 时返回
+ 
+   const target = await vscode.window.showQuickPick(
+-  // 定义 target：保存关键中间值或配置
+     [
+       { label: "cell", description: "run one selected cell" },
+       { label: "range", description: "run inclusive zero-based start/end cell range" },
+       { label: "all", description: "run all cells" },
+     ],
+-    // 执行逻辑步骤
+     { title: "vscode_notebook_run", placeHolder: "Select run target" },
+   )
+   if (!target) return undefined
+-  // 用户取消目标选择时返回
+ 
+   if (target.label === "all") {
+-  // 读取全部单元格源码
+     return await runNotebook({ filePath: notebook.uri.toString(), target: { type: "all" } })
+-    // 返回结果给调用方
+   }
    if (target.label === "cell") {
+-  // 读取单个单元格源码
      const cell = await pickNotebookCell(notebook, "vscode_notebook_run")
+-    // 定义 cell：保存关键中间值或配置
      return cell
+-    // 返回结果给调用方
 -      ? await runNotebook({ filePath: notebook.uri.toString(), target: { type: "cell", cellIndex: cell.index } })
 +      ? await runNotebook({ filePath: notebook.uri.toString(), target: { type: "cell", cellId: copilotLikeCellId(cell) } })
        : undefined
    }
  
-@@ -205,33 +205,47 @@ async function editNotebookCommand() {
+   const rangeText = await vscode.window.showInputBox({
+-  // 输入范围 start,end
+     title: "vscode_notebook_run range",
+     prompt: "Enter start,end zero-based indices. End is inclusive in this prompt.",
+     value: "0,0",
+     ignoreFocusOut: true,
+   })
+   if (!rangeText) return undefined
+-  // 用户取消输入时返回
+   const [start, end] = rangeText.split(",").map((value) => Number(value.trim()))
+-  // 解析范围，end 转为开区间
+   return await runNotebook({ filePath: notebook.uri.toString(), target: { type: "range", start, end: end + 1 } })
+-  // 返回结果给调用方
+ }
+ 
++// 编辑命令：调用 editNotebook API 编辑 cell 内容
+ async function editNotebookCommand() {
+-// 交互式编辑命令：选择操作后收集参数
    const notebook = await selectNotebook()
+-  // 定义 notebook：保存关键中间值或配置
    if (!notebook) return undefined
+-  // 未选择 notebook 时返回
  
 -  const operation = await vscode.window.showQuickPick(
+-  // 定义 operation：保存关键中间值或配置
 -    ["insert_before", "insert_after", "insert_top", "insert_bottom", "replace_source", "replace_cell", "delete"],
 -    { title: "vscode_notebook_edit", placeHolder: "Select edit operation" },
 -  )
 -  if (!operation) return undefined
--
+-  // 用户取消操作选择时返回
++  const editType = await vscode.window.showQuickPick(["insert", "edit", "delete"], {
++    title: "vscode_notebook_edit", placeHolder: "Select editType",
++  })
++  if (!editType) return undefined
+ 
 -  const isPositional = operation === "insert_top" || operation === "insert_bottom"
+-  // 位置操作不需要目标单元格
 -  const cell = isPositional ? undefined : await pickNotebookCell(notebook, "vscode_notebook_edit")
+-  // 定义 cell：保存关键中间值或配置
 -  if (!isPositional && !cell) return undefined
--
+-  // 非位置操作必须选择单元格
++  let cellId: string
++  let cell: vscode.NotebookCell | undefined
+ 
 -  const source =
+-  // 非删除操作时收集源码输入
 -    operation === "delete"
 -      ? undefined
 -      : await vscode.window.showInputBox({
 -          title: "vscode_notebook_edit source",
 -          prompt: "Cell source. Use literal \\n for newlines in this quick test input.",
+-          // 执行逻辑步骤
 -          value: operation === "replace_source" && cell ? cell.document.getText().replace(/\n/g, "\\n") : "",
 -          ignoreFocusOut: true,
 -        })
-+  const editType = await vscode.window.showQuickPick(["insert", "edit", "delete"], {
-+    title: "vscode_notebook_edit", placeHolder: "Select editType",
-+  })
-+  if (!editType) return undefined
-+
-+  let cellId: string
-+  let cell: vscode.NotebookCell | undefined
-+
 +  if (editType === "insert") {
 +    const pos = await vscode.window.showQuickPick(["TOP", "BOTTOM", "After cell..."], {
 +      title: "Insert position", placeHolder: "Pick insert position",
@@ -148,6 +599,7 @@ index 4ec921e54a17decd114a8576d2e76d5bdcb2fb96..36e625e03c9306fbea08a5ba4141a38b
 +  }
  
 -  if (operation !== "delete" && source === undefined) return undefined
+-  // 非删除操作必须提供源码
 +  const newCode = editType === "delete"
 +    ? undefined
 +    : await vscode.window.showInputBox({
@@ -158,21 +610,23 @@ index 4ec921e54a17decd114a8576d2e76d5bdcb2fb96..36e625e03c9306fbea08a5ba4141a38b
 +      })
  
    return await editNotebook({
+-  // 返回结果给调用方
      filePath: notebook.uri.toString(),
 -    operation,
 -    cellIndex: cell?.index,
 -    source: source?.replace(/\\n/g, "\n"),
 -    language: cell?.document.languageId,
+-    // 执行逻辑步骤
 +    editType,
 +    cellId,
 +    newCode: newCode?.replace(/\\n/g, "\n"),
    })
  }
 diff --git a/sdks/vscode/src/notebook/edit.ts b/sdks/vscode/src/notebook/edit.ts
-index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509a48d3c30 100644
+index 0caf6015c4..d22bada0b1 100644
 --- a/sdks/vscode/src/notebook/edit.ts
 +++ b/sdks/vscode/src/notebook/edit.ts
-@@ -1,10 +1,20 @@
+@@ -1,289 +1,409 @@
  /**
 - * `vscode_notebook_edit` — insert, delete, or replace notebook cells
 + * `vscode_notebook_edit` — insert, edit, or delete notebook cells
@@ -196,65 +650,170 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 + *   Context  – only with range edits, showing surrounding lines
   */
  import * as vscode from "vscode"
+-// 执行逻辑步骤
  import {
-@@ -16,174 +26,342 @@ import {
+   isRecord,
+   stringProp,
+   numberProp,
+   sourceProp,
+-  // 执行逻辑步骤
++  // TextEdit 覆盖整文档范围，避免半截替换留下脏文本
+   fullDocumentRange,
    documentEol,
    previewText,
  } from "../util"
 -import { cellKindLabel, runtimeLabel } from "./format"
+-// 执行逻辑步骤
 +import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges } from "./format"
  import { resolveNotebook, resolveNotebookCell } from "./resolve"
  
-+const EDIT_TYPES = new Set(["insert", "edit", "delete"])
-+
- // ---------------------------------------------------------------------------
+-// ---------------------------------------------------------------------------
 -// Constants
-+// Handler
- // ---------------------------------------------------------------------------
- 
+-// ---------------------------------------------------------------------------
+-
 -const EDIT_OPERATIONS = new Set([
+-// 合法编辑操作集合：7 种操作
 -  "insert_before",
 -  "insert_after",
 -  "insert_top",
 -  "insert_bottom",
 -  "replace_source",
+-  // 执行逻辑步骤
 -  "replace_cell",
 -  "delete",
 -])
-+export async function editNotebook(input: Record<string, unknown>) {
-+  const filePath = stringProp(input, "filePath")
-+  if (!filePath) throw new Error("filePath is required")
-+  const notebook = await resolveNotebook(filePath)
-+  const editType = stringProp(input, "editType")
-+  if (!editType || !EDIT_TYPES.has(editType)) {
-+    throw new Error(`Invalid editType: ${editType ?? "<missing>"}. Must be one of: insert, edit, delete`)
-+  }
-+
-+  const cellId = stringProp(input, "cellId")
-+  if (!cellId) throw new Error("cellId is required")
-+
-+  const beforeCount = notebook.cellCount
-+
-+  if (editType === "delete") return await handleDelete(notebook, cellId, beforeCount)
-+  if (editType === "insert") return await handleInsert(notebook, input, cellId, beforeCount)
-+  return await handleEdit(notebook, input, cellId, beforeCount)
-+}
++// 编辑操作类型：insert 插入新 cell、edit 修改 cell 内容、delete 删除 cell
++// 编辑类型校验集合：确保只接受 insert/edit/delete 三种合法操作
++// 三元 editType：insert/edit/delete 取代旧 7-operation schema
++// 三元 editType：insert/edit/delete 取代旧 7-operation 工具契约
++// cellId 必填：禁止用易漂移的 cellIndex 作为主定位键
++// 公开契约仅三元 editType：insert/edit/delete，旧 7-operation 名称不得再进入 schema
++// cellId 与 editType 同为必填：定位失败显式报错，禁止猜 cellIndex
++const EDIT_TYPES = new Set(["insert", "edit", "delete"])
  
  // ---------------------------------------------------------------------------
--// Handler
-+// Delete
+ // Handler
  // ---------------------------------------------------------------------------
  
 -/**
 - * Bridge endpoint handler: applies a structural or content edit to a notebook.
 - * Returns a delta-first summary (not a full notebook dump).
 - */
--export async function editNotebook(input: Record<string, unknown>) {
++// 编辑入口：根据 editType 分发到对应处理函数，filePath 和 editType 为必填参数
++// 入口只做 editType 分派：range/字符串细节下沉到 handler，避免第二套入口
+ export async function editNotebook(input: Record<string, unknown>) {
+-// notebook 编辑处理器：按操作类型执行结构性编辑
 -  const notebook = await resolveNotebook(stringProp(input, "filePath"))
+-  // 定义 notebook：保存关键中间值或配置
 -  const operation = stringProp(input, "operation")
+-  // 读取操作类型
+-
+-  if (!operation || !EDIT_OPERATIONS.has(operation)) {
+-  // 校验操作类型合法性
+-    throw new Error(`Invalid notebook edit operation: ${operation ?? "<missing>"}`)
+-    // 抛出异常：中断执行并让调用方处理错误
++  const filePath = stringProp(input, "filePath")
++  if (!filePath) throw new Error("filePath is required")
++  const notebook = await resolveNotebook(filePath)
++  const editType = stringProp(input, "editType")
++  // 非法 editType 抛出错误：防止未定义操作导致 notebook 损坏
++if (!editType || !EDIT_TYPES.has(editType)) {
++    throw new Error(`Invalid editType: ${editType ?? "<missing>"}. Must be one of: insert, edit, delete`)
+   }
+ 
++  const cellId = stringProp(input, "cellId")
++  if (!cellId) throw new Error("cellId is required")
++
+   const beforeCount = notebook.cellCount
+-  // 记录编辑前单元格数
+-
+-  // --- delete ---------------------------------------------------------------
+-  if (operation === "delete") {
+-  // 删除操作：定位单元格后删除
+-    const cell = resolveNotebookCell(notebook, numberProp(input, "cellIndex"), stringProp(input, "cellId"))
+-    // 定义 cell：保存关键中间值或配置
+-    const edit = new vscode.WorkspaceEdit()
+-    // 定义 edit：保存关键中间值或配置
+-    edit.set(notebook.uri, [vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(cell.index, cell.index + 1))])
+-    const applied = await vscode.workspace.applyEdit(edit)
+-    // 定义 applied：保存关键中间值或配置
+-    if (input.save === true) await notebook.save()
+-    // save=true 时持久化到磁盘
+-    return compactEditResult(notebook, {
+-    // 返回结果给调用方
+-      applied,
+-      operation,
+-      beforeCount,
+-      afterCount: notebook.cellCount,
+-      affectedCellIndex: cell.index,
+-      // 执行逻辑步骤
+-    })
+-  }
+ 
+-  // --- resolve target cell (not needed for insert_top / insert_bottom) ------
+-  const targetCell =
+-  // 非位置操作解析目标单元格
+-    operation === "insert_top" || operation === "insert_bottom"
+-      ? undefined
+-      : resolveNotebookCell(notebook, numberProp(input, "cellIndex"), stringProp(input, "cellId"))
+-
+-  const kind = cellKindFromInput(input, targetCell)
+-  // 推断单元格类型
+-  const language = cellLanguageFromInput(input, kind, targetCell)
+-  // 定义 language：保存关键中间值或配置
+-  const sourceRaw = sourceProp(input, "source", targetCell ? documentEol(targetCell.document) : "\n")
+-  // 读取源码
+-
+-  if (sourceRaw === undefined) {
+-  // 非删除操作缺 source 时抛错
+-    throw new Error(`source is required for ${operation}`)
+-    // 抛出异常：中断执行并让调用方处理错误
+-  }
++  if (editType === "delete") return await handleDelete(notebook, cellId, beforeCount)
++  if (editType === "insert") return await handleInsert(notebook, input, cellId, beforeCount)
++  return await handleEdit(notebook, input, cellId, beforeCount)
++}
+ 
+-  const source = kind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
+-  // code 单元格去除代码围栏
+-
+-  // --- replace_source: TextEdit on existing cell content --------------------
+-  if (operation === "replace_source") {
+-  // replace_source：替换文档全部内容
+-    if (!targetCell) throw new Error("replace_source requires a target cell")
+-    // replace_source 必须有目标单元格
+-    const edit = new vscode.WorkspaceEdit()
+-    // 定义 edit：保存关键中间值或配置
+-    edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), source)
+-    const applied = await vscode.workspace.applyEdit(edit)
+-    // 定义 applied：保存关键中间值或配置
+-    if (input.save === true) await notebook.save()
+-    // save=true 时持久化到磁盘
+-    return compactEditResult(notebook, {
+-    // 返回结果给调用方
+-      applied,
+-      operation,
+-      beforeCount,
+-      afterCount: notebook.cellCount,
+-      affectedCellIndex: targetCell.index,
+-      // 执行逻辑步骤
+-      kind: cellKindLabel(targetCell.kind),
+-      language: targetCell.document.languageId,
+-      sourcePreview: source,
+-    })
+-  }
++// ---------------------------------------------------------------------------
++// Delete
++// ---------------------------------------------------------------------------
++
++// 删除 cell：通过 NotebookEdit API 移除指定 cell，返回操作结果摘要
++// 删除编辑必须走 NotebookEdit API 以保持与 VS Code 撤销栈一致
++// delete 走 NotebookEdit.deleteCells，成功后 compact 摘要给 agent
++// 删除经 NotebookEdit.deleteCells 原子提交，摘要记录移位 cell 供 agent 校验
 +async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, beforeCount: number) {
 +  const targetCell = resolveNotebookCell(notebook, undefined, cellId)
-+  const deletedIndex = targetCell.index
++  // 删除前记录 cell 索引：用于检测后续 cell 是否移位
++const deletedIndex = targetCell.index
 +  const deletedPreview = targetCell.document.getText()
 +  const deletedLineCount = targetCell.document.lineCount
 +  const deletedFirst = previewText((targetCell.document.getText().split("\n")[0] ?? "").trim(), 50)
@@ -263,11 +822,37 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +  const deletedId = copilotLikeCellId(targetCell)
 +  const hasNext = deletedIndex < notebook.cellCount - 1
  
--  if (!operation || !EDIT_OPERATIONS.has(operation)) {
--    throw new Error(`Invalid notebook edit operation: ${operation ?? "<missing>"}`)
-+  const edit = new vscode.WorkspaceEdit()
-+  edit.set(notebook.uri, [vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(deletedIndex, deletedIndex + 1))])
-+  const applied = await vscode.workspace.applyEdit(edit)
+-  // --- insert / replace_cell ------------------------------------------------
+-  const insertIndex =
+-  // 计算插入位置索引
+-    operation === "insert_top"
+-      ? 0
+-      : operation === "insert_bottom"
+-        ? notebook.cellCount
+-        : operation === "insert_after"
+-        // 执行逻辑步骤
+-          ? targetCell!.index + 1
+-          : targetCell!.index // insert_before or replace_cell
+-
+-  const range =
+-  // 构造 NotebookRange
+-    operation === "replace_cell"
+-      ? new vscode.NotebookRange(targetCell!.index, targetCell!.index + 1)
+-      : new vscode.NotebookRange(insertIndex, insertIndex)
+-
+-  const newCell = new vscode.NotebookCellData(kind, source, language)
+-  // 构造新单元格数据
+   const edit = new vscode.WorkspaceEdit()
+-  // 定义 edit：保存关键中间值或配置
+-  edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(range, [newCell])])
+-  const applied = await vscode.workspace.applyEdit(edit)
+-  // 定义 applied：保存关键中间值或配置
+-  if (input.save === true) await notebook.save()
+-  // 条件分支：精确匹配检查确保类型和值安全
++  // 通过 NotebookEdit API 删除 cell：使用 WorkspaceEdit 确保原子性
++edit.set(notebook.uri, [vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(deletedIndex, deletedIndex + 1))])
++  // 等待编辑应用完成：VS Code 编辑操作是异步的
++const applied = await vscode.workspace.applyEdit(edit)
 +
 +  // Capture the cell that shifted into the deleted cell's place (if any)
 +  let shiftedOldIdx: number | undefined
@@ -275,15 +860,24 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +  if (hasNext) {
 +    shiftedOldIdx = deletedIndex + 1
 +    shiftedCell = notebook.cellAt(deletedIndex)
-   }
++  }
  
--  const beforeCount = notebook.cellCount
-+  return compactEditResult(notebook, {
-+    applied,
+-  return compactEditResult(notebook, {
+-  // 返回结果给调用方
++  // 返回压缩后的编辑结果：包含应用状态、类型、预览和上下文
++return compactEditResult(notebook, {
+     applied,
+-    operation,
 +    editType: "delete",
 +    opIndex: `~~${deletedIndex + 1}~~`,
-+    beforeCount,
-+    afterCount: notebook.cellCount,
+     beforeCount,
+     afterCount: notebook.cellCount,
+-    anchorCellIndex: targetCell?.index,
+-    // 执行逻辑步骤
+-    affectedCellIndex: insertIndex,
+-    kind: cellKindLabel(kind),
+-    language,
+-    sourcePreview: source,
 +    anchorCell: targetCell,
 +    deletedCellIndex: deletedIndex,
 +    deletedKind,
@@ -294,31 +888,20 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +    shiftedCell,
 +    shiftedOldIdx,
 +    sourcePreview: deletedPreview,
-+  })
-+}
-+
+   })
+ }
+ 
 +// ---------------------------------------------------------------------------
 +// Insert
 +// ---------------------------------------------------------------------------
 +
++// 插入 cell：在 cellId 指定的 cell 后插入新 cell，支持 TOP/BOTTOM 边缘插入
++// insert 支持 TOP/BOTTOM 与 cellId 邻接，保持与 UI 命令一致
++// TOP/BOTTOM 与 cellId 邻接共用 replaceCells，不另建插入 API
 +async function handleInsert(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number) {
 +  const sourceRaw = sourceProp(input, "newCode", "\n")
 +  if (sourceRaw === undefined) throw new Error("newCode is required for insert")
- 
--  // --- delete ---------------------------------------------------------------
--  if (operation === "delete") {
--    const cell = resolveNotebookCell(notebook, numberProp(input, "cellIndex"), stringProp(input, "cellId"))
--    const edit = new vscode.WorkspaceEdit()
--    edit.set(notebook.uri, [vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(cell.index, cell.index + 1))])
--    const applied = await vscode.workspace.applyEdit(edit)
--    if (input.save === true) await notebook.save()
--    return compactEditResult(notebook, {
--      applied,
--      operation,
--      beforeCount,
--      afterCount: notebook.cellCount,
--      affectedCellIndex: cell.index,
--    })
++
 +  const language = stringProp(input, "language")
 +  const kind = kindFromLang(language)
 +  const lang = language ?? (kind === vscode.NotebookCellKind.Markup ? "markdown" : "python")
@@ -335,45 +918,38 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +  } else {
 +    anchorCell = resolveNotebookCell(notebook, undefined, cellId)
 +    insertIndex = anchorCell.index + 1
-   }
- 
--  // --- resolve target cell (not needed for insert_top / insert_bottom) ------
--  const targetCell =
--    operation === "insert_top" || operation === "insert_bottom"
--      ? undefined
--      : resolveNotebookCell(notebook, numberProp(input, "cellIndex"), stringProp(input, "cellId"))
++  }
++
 +  const newCell = new vscode.NotebookCellData(kind, source, lang)
 +  const shiftedOldIdx = insertIndex < notebook.cellCount ? insertIndex : undefined
 +  const edit = new vscode.WorkspaceEdit()
++  // 插入/类型变更用 replaceCells，保证 cell 元数据与源码原子更新
 +  edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(insertIndex, insertIndex), [newCell])])
 +  const applied = await vscode.workspace.applyEdit(edit)
 +  const shiftedCell = shiftedOldIdx !== undefined ? notebook.cellAt(shiftedOldIdx + 1) : undefined
 +  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source })
 +}
- 
--  const kind = cellKindFromInput(input, targetCell)
--  const language = cellLanguageFromInput(input, kind, targetCell)
--  const sourceRaw = sourceProp(input, "source", targetCell ? documentEol(targetCell.document) : "\n")
++
 +// ---------------------------------------------------------------------------
 +// Edit
 +// ---------------------------------------------------------------------------
 +
++// 编辑 cell：根据是否改变语言选择整行替换或 TextEdit 范围编辑
++// edit 可整 cell 替换或进入字符串/类型变更路径
++// 语言不变走 TextEdit；语言变化走整 cell 替换，两路径不互相 fallback
 +async function handleEdit(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number) {
 +  const targetCell = resolveNotebookCell(notebook, undefined, cellId)
 +  const language = stringProp(input, "language")
 +  const range = readLineRange(input)
 +  const typeChange = language !== undefined && language !== targetCell.document.languageId
- 
--  if (sourceRaw === undefined) {
--    throw new Error(`source is required for ${operation}`)
++
 +  if (typeChange) {
 +    const newKind = kindFromLang(language!)
 +    const oldKind = cellTypeLabel(targetCell.kind)
 +    const oldLang = targetCell.document.languageId
 +    return await handleTypeChange(notebook, targetCell, input, range, newKind, language!, oldKind, oldLang, beforeCount)
-   }
- 
--  const source = kind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
++  }
++
 +  // language unchanged → TextEdit only
 +  if (range) {
 +    return await handleTextEditSource(notebook, targetCell, input, range, beforeCount)
@@ -382,26 +958,11 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +  const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
 +  if (sourceRaw === undefined) throw new Error("newCode is required for edit")
 +  const source = targetCell.kind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
- 
--  // --- replace_source: TextEdit on existing cell content --------------------
--  if (operation === "replace_source") {
--    if (!targetCell) throw new Error("replace_source requires a target cell")
--    const edit = new vscode.WorkspaceEdit()
--    edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), source)
--    const applied = await vscode.workspace.applyEdit(edit)
--    if (input.save === true) await notebook.save()
--    return compactEditResult(notebook, {
--      applied,
--      operation,
--      beforeCount,
--      afterCount: notebook.cellCount,
--      affectedCellIndex: targetCell.index,
--      kind: cellKindLabel(targetCell.kind),
--      language: targetCell.document.languageId,
--      sourcePreview: source,
--    })
++
 +  const edit = new vscode.WorkspaceEdit()
-+  edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), source)
++  // 替换 cell 内容：使用 WorkspaceEdit 的 replace 操作
++edit.replace(targetCell.document.uri, // 获取文档完整范围：用于全量替换 cell 源码
++fullDocumentRange(targetCell.document), source)
 +  const applied = await vscode.workspace.applyEdit(edit)
 +  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source })
 +}
@@ -410,6 +971,8 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +// Type change (language changed → full cell replacement)
 +// ---------------------------------------------------------------------------
 +
++// 修改 cell 类型：code↔markup 转换，通过 NotebookEdit.updateCellMetadata 实现
++// 类型变更必须携带 oldKind/oldLang，供 compact 摘要打印转换箭头
 +async function handleTypeChange(
 +  notebook: vscode.NotebookDocument,
 +  targetCell: vscode.NotebookCell,
@@ -425,8 +988,10 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +  let contextSummary: string | undefined
 +
 +  if (range) {
-+    const result = applyRangeEdit(notebook, targetCell, range, sourceProp(input, "newCode", documentEol(targetCell.document)))
-+    if (!result) throw new Error("newCode is required for edit with range")
++    // 应用范围编辑：在指定行范围内替换内容，失败时返回 undefined
++const result = applyRangeEdit(notebook, targetCell, range, sourceProp(input, "newCode", documentEol(targetCell.document)))
++    // 范围编辑失败抛出错误：确保调用方知道编辑未完成
++if (!result) throw new Error("newCode is required for edit with range")
 +    newSource = result.source
 +    contextSummary = result.context
 +  } else {
@@ -436,44 +1001,15 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +    } else {
 +      newSource = targetCell.document.getText()
 +    }
-   }
- 
--  // --- insert / replace_cell ------------------------------------------------
--  const insertIndex =
--    operation === "insert_top"
--      ? 0
--      : operation === "insert_bottom"
--        ? notebook.cellCount
--        : operation === "insert_after"
--          ? targetCell!.index + 1
--          : targetCell!.index // insert_before or replace_cell
--
--  const range =
--    operation === "replace_cell"
--      ? new vscode.NotebookRange(targetCell!.index, targetCell!.index + 1)
--      : new vscode.NotebookRange(insertIndex, insertIndex)
--
--  const newCell = new vscode.NotebookCellData(kind, source, language)
++  }
++
 +  const newCell = new vscode.NotebookCellData(newKind, newSource, newLang)
-   const edit = new vscode.WorkspaceEdit()
--  edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(range, [newCell])])
++  const edit = new vscode.WorkspaceEdit()
 +  edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(targetCell.index, targetCell.index + 1), [newCell])])
-   const applied = await vscode.workspace.applyEdit(edit)
--  if (input.save === true) await notebook.save()
++  const applied = await vscode.workspace.applyEdit(edit)
 +  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary })
 +}
- 
--  return compactEditResult(notebook, {
--    applied,
--    operation,
--    beforeCount,
--    afterCount: notebook.cellCount,
--    anchorCellIndex: targetCell?.index,
--    affectedCellIndex: insertIndex,
--    kind: cellKindLabel(kind),
--    language,
--    sourcePreview: source,
--  })
++
 +// ---------------------------------------------------------------------------
 +// TextEdit — line range (no type change)
 +// ---------------------------------------------------------------------------
@@ -492,6 +1028,7 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +// Shared: apply a line range to a cell's source + capture context
 +// ---------------------------------------------------------------------------
 +
++// 范围编辑：在 cell 源码的指定行范围内替换内容，用于精确编辑
 +function applyRangeEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, range: { start: number; end: number }, newCode: string | undefined) {
 +  if (newCode === undefined) return undefined
 +
@@ -537,6 +1074,7 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +// Helpers
 +// ---------------------------------------------------------------------------
 +
++// 仅 markdown→Markup，其余一律 Code，防止 languageId 泄漏进 kind
 +function kindFromLang(language?: string) {
 +  return language === "markdown" ? vscode.NotebookCellKind.Markup : vscode.NotebookCellKind.Code
 +}
@@ -550,11 +1088,12 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +  return { start, end }
 +}
 +
++// 去除代码围栏：移除 ``` 标记，用于提取纯代码内容
 +function stripCodeFence(source: string) {
 +  const match = source.match(/^```[\w-]*\r?\n([\s\S]*?)\r?\n```$/)
 +  return match ? match[1] : source
- }
- 
++}
++
  // ---------------------------------------------------------------------------
  // Edit result
  // ---------------------------------------------------------------------------
@@ -563,7 +1102,11 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 - * Builds a delta-first summary of the edit result.
 - * Shows what changed (anchor cell, affected cell) rather than the full notebook state.
 - */
++// 压缩编辑结果：只保留变更关键字段，减少返回数据量
++// 压缩工具结果：只保留 applied/定位/预览，降低序列化体积
++// 工具结果只保留 applied/定位/预览，禁止回传整 cell 源码膨胀上下文
  function compactEditResult(
+-// 构建编辑结果 delta 摘要
    notebook: vscode.NotebookDocument,
    info: {
      applied: boolean
@@ -571,6 +1114,7 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +    editType: string
 +    opIndex: string
      beforeCount: number
+-    // 执行逻辑步骤
      afterCount: number
 -    anchorCellIndex?: number
 +    anchorCell?: vscode.NotebookCell
@@ -578,6 +1122,7 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
      affectedCellIndex?: number
      kind?: string
      language?: string
+-    // 执行逻辑步骤
 +    oldKind?: string
 +    oldLang?: string
 +    deletedKind?: string
@@ -592,6 +1137,7 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
    },
  ) {
 -  const target =
+-  // 定位受影响单元格
 -    info.affectedCellIndex !== undefined && info.affectedCellIndex >= 0 && info.affectedCellIndex < notebook.cellCount
 -      ? notebook.cellAt(info.affectedCellIndex)
 -      : undefined
@@ -600,6 +1146,7 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +  ]
  
 -  const targetText = target
+-  // 定义 targetText：保存关键中间值或配置
 -    ? `c${target.index} ${cellKindLabel(target.kind)}/${target.document.languageId} lines=${target.document.lineCount} first=${JSON.stringify(previewText((target.document.getText().split("\n")[0] ?? "").trim()).slice(0, 120))}`
 -    : "none"
 +  // --- Anchor ---
@@ -635,16 +1182,19 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +  }
  
    return {
+-  // 返回结果给调用方
      ran: false,
 -    summary: [
 -      `Notebook edit: applied=${info.applied} op=${info.operation} cells=${info.beforeCount}->${info.afterCount} dirty=${notebook.isDirty}.`,
 -      info.anchorCellIndex !== undefined ? `Anchor: c${info.anchorCellIndex}.` : undefined,
 -      info.affectedCellIndex !== undefined ? `Affected: c${info.affectedCellIndex}. ${targetText}` : undefined,
+-      // 执行逻辑步骤
 -      info.sourcePreview ? `Preview: ${JSON.stringify(info.sourcePreview.slice(0, 160))}` : undefined,
 -      `Next: use vscode_notebook_source for full cell source; use vscode_notebook_summary for full notebook state.`,
 -    ]
 -      .filter(Boolean)
 -      .join("\n"),
+-      // 执行逻辑步骤
 +    summary: lines.join("\n"),
      data: {
        applied: info.applied,
@@ -652,12 +1202,14 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 +      operation: info.editType,
        cellCountBefore: info.beforeCount,
        cellCountAfter: info.afterCount,
+-      // 执行逻辑步骤
 -      anchorCellIndex: info.anchorCellIndex,
 +      anchorCellIndex: info.anchorCell?.index,
        affectedCellIndex: info.affectedCellIndex,
        dirty: notebook.isDirty,
        kind: info.kind,
-@@ -191,34 +369,3 @@ function compactEditResult(
+       language: info.language,
+-      // 执行逻辑步骤
      },
    }
  }
@@ -668,35 +1220,49 @@ index 290f6643df17f7b2deb088e873889c240ba43b84..8ad82a5a496479c7d4e8ef9fea3e5509
 -
 -/** Infers `NotebookCellKind` from explicit `kind`/`language` input or the existing cell. */
 -function cellKindFromInput(input: Record<string, unknown>, existing?: vscode.NotebookCell) {
+-// 从输入推断单元格类型
 -  const kind = stringProp(input, "kind")
+-  // 定义 kind：保存关键中间值或配置
 -  const language = stringProp(input, "language")
+-  // 定义 language：保存关键中间值或配置
 -  if (kind === "markdown" || language === "markdown") return vscode.NotebookCellKind.Markup
+-  // markdown 类型优先
 -  if (kind === "code") return vscode.NotebookCellKind.Code
+-  // 条件分支：精确匹配检查确保类型和值安全
 -  return existing?.kind ?? vscode.NotebookCellKind.Code
+-  // 返回结果给调用方
 -}
 -
 -/** Infers cell language from explicit input, cell kind, or the existing cell. */
 -function cellLanguageFromInput(
+-// 从输入推断单元格语言
 -  input: Record<string, unknown>,
 -  kind: vscode.NotebookCellKind,
 -  existing?: vscode.NotebookCell,
 -) {
 -  const language = stringProp(input, "language")
+-  // 定义 language：保存关键中间值或配置
 -  if (language) return language
+-  // 条件分支：按业务逻辑分流处理
 -  if (kind === vscode.NotebookCellKind.Markup) return "markdown"
+-  // Markup 类型默认 markdown 语言
 -  return existing?.document.languageId ?? "python"
+-  // 缺省时用现有语言，再缺省用 python
 -}
 -
 -/** Strips surrounding markdown code fences from source text if present. */
 -function stripCodeFence(source: string) {
+-// 去除 markdown 代码围栏
 -  const match = source.match(/^```[\w-]*\r?\n([\s\S]*?)\r?\n```$/)
+-  // 定义 match：保存关键中间值或配置
 -  return match ? match[1] : source
+-  // 返回结果给调用方
 -}
 diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
-index 2d2329586e5f4e57c261cac7cad2b88c377d8669..9c94213e0d434a72c21ef5f2e029c28d5d00652a 100644
+index 94be7339ba..bd53993d4a 100644
 --- a/sdks/vscode/src/notebook/env.ts
 +++ b/sdks/vscode/src/notebook/env.ts
-@@ -1,45 +1,231 @@
+@@ -1,54 +1,255 @@
  /**
 - * `vscode_notebook_env` — returns a capability snapshot of the notebook runtime,
 - * including kernel info, Python/Jupyter extension states, and available commands.
@@ -704,6 +1270,7 @@ index 2d2329586e5f4e57c261cac7cad2b88c377d8669..9c94213e0d434a72c21ef5f2e029c28d
 + *
 + * Runtime source:
 + *   active Jupyter kernel process via Jupyter stable API:
++ // 运行时探测通过 executeCode，而非信任 notebook 文件声明
 + *   api.kernels.getKernel(notebook.uri) + kernel.executeCode(probe).
 + *
 + * Metadata source:
@@ -711,9 +1278,11 @@ index 2d2329586e5f4e57c261cac7cad2b88c377d8669..9c94213e0d434a72c21ef5f2e029c28d
 + *
 + * Important:
 + *   saved metadata is NOT treated as active runtime. If no started kernel exists,
++ // 无活动内核时不得把 saved metadata 伪装成 active runtime
 + *   runtime is reported as no-active-kernel even if metadata says "ML".
   */
  import * as vscode from "vscode"
+-// 执行逻辑步骤
 +import { TextDecoder } from "node:util"
  import { extensionState, extensionInfo } from "../util"
 -import { runtimeLabel } from "./format"
@@ -722,21 +1291,29 @@ index 2d2329586e5f4e57c261cac7cad2b88c377d8669..9c94213e0d434a72c21ef5f2e029c28d
 -// ---------------------------------------------------------------------------
 -// Handler
 -// ---------------------------------------------------------------------------
++// 内核输出项：MIME 类型和原始字节数据，用于序列化执行结果
 +type KernelOutputItem = { mime: string; data: Uint8Array }
 +type KernelOutput = { items: KernelOutputItem[] }
-+
+ 
+-/**
+- * Bridge endpoint handler: returns kernel/environment information.
+- * Falls back gracefully when no notebook is open.
+- */
++// Jupyter 内核接口：语言、状态和 executeCode 方法，用于运行时探测
 +interface KernelLike {
 +  readonly language: string
 +  readonly status?: string
 +  executeCode(code: string, token: vscode.CancellationToken): AsyncIterable<KernelOutput>
 +}
 +
++// Jupyter 扩展接口：通过 kernels.getKernel 获取活跃内核
 +type JupyterLike = {
 +  kernels?: {
 +    getKernel?(uri: vscode.Uri): Promise<KernelLike | undefined>
 +  }
 +}
 +
++// 活跃运行时：包含语言、内核状态和 Python 环境信息（版本、路径、conda 环境）
 +type ActiveRuntime = {
 +  language: string
 +  kernelStatus: string
@@ -761,20 +1338,24 @@ index 2d2329586e5f4e57c261cac7cad2b88c377d8669..9c94213e0d434a72c21ef5f2e029c28d
 +
 +const PROBE_TIMEOUT_MS = 8_000
 +const decoder = new TextDecoder("utf-8")
- 
--/**
-- * Bridge endpoint handler: returns kernel/environment information.
-- * Falls back gracefully when no notebook is open.
-- */
++
++// 环境探测：检测活跃 Jupyter 内核和保存的元数据，不将元数据视为活跃运行时
++// 区分活动内核与盘上 metadata：二者不可互相替代
++// 活动内核与盘上 metadata 分列报告：二者不可互相替代
  export async function notebookEnv(filePath?: string) {
+-// notebook 环境处理器：返回内核和扩展状态快照
    const notebook = await resolveNotebook(filePath).catch(() => undefined)
+-  // 环境端点容错：notebook 解析失败不报错
 -  const commands = await vscode.commands.getCommands(true)
+-  // 获取全部内部命令用于能力检测
 -  const names = [
+-  // 检测的 notebook/jupyter 相关命令列表
 -    "notebook.cell.execute",
 -    "notebook.execute",
 -    "notebook.selectKernel",
 -    "notebook.kernel.restart",
 -    "jupyter.selectKernel",
+-    // 执行逻辑步骤
 -    "jupyter.restartkernel",
 -    "python.setInterpreter",
 -  ]
@@ -782,6 +1363,7 @@ index 2d2329586e5f4e57c261cac7cad2b88c377d8669..9c94213e0d434a72c21ef5f2e029c28d
 +  const savedMetadata = notebook ? await readSavedNotebookMetadata(notebook.uri) : null
 +
    return {
+-  // 返回 ran/summary/data/note 四段式响应
      ran: false,
 -    summary: `Notebook runtime: ${notebook ? (runtimeLabel(notebook) ?? "unknown") : "unknown"}; Python/Jupyter extensions: ${extensionState("ms-python.python")}/${extensionState("ms-toolsai.jupyter")}.`,
 +    summary: [
@@ -795,6 +1377,7 @@ index 2d2329586e5f4e57c261cac7cad2b88c377d8669..9c94213e0d434a72c21ef5f2e029c28d
      data: {
        path: notebook?.uri.fsPath || notebook?.uri.toString(),
 -      runtime: notebook ? runtimeLabel(notebook) : null,
+-      // 执行逻辑步骤
 +      runtime: activeRuntime,
 +      saved_metadata: savedMetadata,
        active_notebook: vscode.window.activeNotebookEditor?.notebook.uri.toString(),
@@ -802,6 +1385,7 @@ index 2d2329586e5f4e57c261cac7cad2b88c377d8669..9c94213e0d434a72c21ef5f2e029c28d
          python: extensionInfo("ms-python.python"),
          jupyter: extensionInfo("ms-toolsai.jupyter"),
        },
+-      // 执行逻辑步骤
 -      commands: Object.fromEntries(names.map((name) => [name, commands.includes(name)])),
      },
 -    note: "Native public VS Code API does not expose full Jupyter kernel/package details; bridge can fallback to extension commands/tools when needed.",
@@ -810,12 +1394,17 @@ index 2d2329586e5f4e57c261cac7cad2b88c377d8669..9c94213e0d434a72c21ef5f2e029c28d
 +  }
 +}
 +
++// 获取活跃运行时：通过 Jupyter 扩展 API 查询当前 notebook 的内核
++// 获取活跃运行时：仅当 Jupyter 扩展可用且内核存在时返回
++// 优先 Jupyter getKernel；无活动内核时明确 no-active-kernel
 +async function getActiveRuntime(uri: vscode.Uri): Promise<ActiveRuntime | null> {
 +  try {
-+    const ext = vscode.extensions.getExtension("ms-toolsai.jupyter")
++    // 查找 Jupyter 扩展：通过 ID 匹配 ms-toolsai.jupyter
++const ext = vscode.extensions.getExtension("ms-toolsai.jupyter")
 +    if (!ext) return null
 +
-+    const api = (ext.isActive ? ext.exports : await ext.activate()) as JupyterLike | undefined
++    // 获取 Jupyter API：如果扩展未激活则先激活
++const api = (ext.isActive ? ext.exports : await ext.activate()) as JupyterLike | undefined
 +    const kernel = await api?.kernels?.getKernel?.(uri)
 +    if (!kernel) return null
 +
@@ -833,6 +1422,11 @@ index 2d2329586e5f4e57c261cac7cad2b88c377d8669..9c94213e0d434a72c21ef5f2e029c28d
    }
  }
 +
++// 探测 Python 环境：执行 Python 代码获取版本、路径和 conda 环境信息
++// 探测 Python 环境：执行 sys.version、sys.executable 等命令
++// 探测活动内核真实 runtime；saved metadata 不能代替 active kernel
++// 对活动内核 executeCode 探测真实 Python/conda，失败则降级无 python 字段
++// 对活动内核 executeCode 探测真实 Python/conda；失败则省略 python 字段
 +async function probePythonRuntime(kernel: KernelLike): Promise<ActiveRuntime["python"]> {
 +  const code = `
 +import os, sys, json, platform
@@ -881,6 +1475,11 @@ index 2d2329586e5f4e57c261cac7cad2b88c377d8669..9c94213e0d434a72c21ef5f2e029c28d
 +  return JSON.parse(extractProbeJson(chunks.join("\n")))
 +}
 +
++// 读取保存的元数据：从 .ipynb 文件中读取 kernelspec 和 language_info
++// 读取保存的元数据：从 .ipynb 文件的 metadata 字段读取
++// 仅读盘 metadata：与 probe 分离，文件声明≠在线内核
++// 仅读 .ipynb metadata.kernelspec/language_info，不代表当前 runtime
++// 仅读 .ipynb kernelspec/language_info，不代表当前 runtime
 +async function readSavedNotebookMetadata(uri: vscode.Uri): Promise<SavedMetadata | null> {
 +  try {
 +    if (uri.scheme !== "file") return null
@@ -954,10 +1553,10 @@ index 2d2329586e5f4e57c261cac7cad2b88c377d8669..9c94213e0d434a72c21ef5f2e029c28d
 +}
 \ No newline at end of file
 diff --git a/sdks/vscode/src/notebook/format.ts b/sdks/vscode/src/notebook/format.ts
-index 0a32be47bd06e01c4c4a003b32415fe1fdab2946..c2a4fbd1bdfd97253cdb58df03982398057366ed 100644
+index 72deb96aa8..eb0a21a0d4 100644
 --- a/sdks/vscode/src/notebook/format.ts
 +++ b/sdks/vscode/src/notebook/format.ts
-@@ -2,10 +2,12 @@
+@@ -2,85 +2,69 @@
   * Notebook cell formatting, metadata extraction, and summary serialization.
   *
   * Provides compact cell representations, execution state text, MIME helpers,
@@ -968,30 +1567,102 @@ index 0a32be47bd06e01c4c4a003b32415fe1fdab2946..c2a4fbd1bdfd97253cdb58df03982398
 + * Shared across all notebook handler modules.
   */
  import * as vscode from "vscode"
+-// 执行逻辑步骤
 +import * as crypto from "node:crypto"
  import {
    isRecord,
    stringProp,
-@@ -42,7 +44,12 @@ export function extensionForMime(mime: string) {
+   numberProp,
+   nestedStringAt,
+-  // 执行逻辑步骤
+   firstString,
+   previewText,
+   formatBytes,
+   quoteForSummary,
+ } from "../util"
+-// 执行逻辑步骤
+ 
+ // ---------------------------------------------------------------------------
+ // MIME type helpers
+ // ---------------------------------------------------------------------------
+ 
+ /** Abbreviates a full MIME type into a short label for summary display. */
++// 简化 MIME 类型：image/png→png、text/plain→text
+ export function shortMime(mime: string) {
+-// 将完整 MIME 类型缩写为短标签
+   if (mime === "application/vnd.code.notebook.stdout") return "stdout"
+-  // stdout MIME 缩写
+   if (mime === "application/vnd.code.notebook.stderr") return "stderr"
+-  // stderr MIME 缩写
+   if (mime === "application/vnd.code.notebook.error") return "error"
+-  // error MIME 缩写
+   if (mime === "image/png") return "png"
+-  // 条件分支：精确匹配检查确保类型和值安全
+   if (mime === "image/jpeg") return "jpeg"
+-  // 条件分支：精确匹配检查确保类型和值安全
+   if (mime === "text/plain") return "text"
+-  // 条件分支：精确匹配检查确保类型和值安全
+   if (mime === "text/html") return "html"
+-  // 条件分支：精确匹配检查确保类型和值安全
+   if (mime === "text/markdown") return "markdown"
+-  // 条件分支：精确匹配检查确保类型和值安全
+   if (mime === "application/json") return "json"
+-  // 条件分支：精确匹配检查确保类型和值安全
+   if (mime.includes("datawrangler")) return "datawrangler"
+-  // 条件分支：按业务逻辑分流处理
+   return mime.split("/").pop() ?? mime
+-  // 返回结果给调用方
+ }
+ 
+ /** Maps a MIME type to an appropriate file extension for artifact output files. */
++// 文件扩展名：根据 MIME 类型返回文件后缀
+ export function extensionForMime(mime: string) {
+-// MIME 到文件扩展名映射
+   if (mime === "image/png") return ".png"
+-  // 条件分支：精确匹配检查确保类型和值安全
    if (mime === "image/jpeg") return ".jpg"
+-  // 条件分支：精确匹配检查确保类型和值安全
    if (mime === "image/svg+xml") return ".svg"
+-  // 条件分支：精确匹配检查确保类型和值安全
    if (mime === "text/html") return ".html"
+-  // 条件分支：精确匹配检查确保类型和值安全
 +  if (mime === "text/plain") return ".txt"
    if (mime === "application/json") return ".json"
+-  // 条件分支：精确匹配检查确保类型和值安全
 +  if (mime.includes("datawrangler")) return ".json"
 +  if (mime === "application/vnd.code.notebook.error") return ".json"
 +  if (mime === "application/vnd.code.notebook.stdout") return ".txt"
 +  if (mime === "application/vnd.code.notebook.stderr") return ".txt"
    if (mime.startsWith("text/")) return ".txt"
+-  // 条件分支：按业务逻辑分流处理
    return ".bin"
+-  // 返回结果给调用方
  }
-@@ -63,14 +70,30 @@ export function isTextLikeMime(mime: string) {
+ 
+ /** Returns true if the MIME type carries text content that can be inlined in summaries. */
++// 判断文本类型：text/*、application/json 等
+ export function isTextLikeMime(mime: string) {
+-// 判断 MIME 是否为文本类
+   return (
+-  // 返回结果给调用方
+     mime.startsWith("text/") ||
+     mime === "application/json" ||
+     mime === "application/vnd.code.notebook.stdout" ||
+     mime === "application/vnd.code.notebook.stderr" ||
+     mime === "application/vnd.code.notebook.error" ||
+-    // 执行逻辑步骤
+     shortMime(mime) === "datawrangler"
+   )
+ }
+@@ -89,39 +73,62 @@ export function isTextLikeMime(mime: string) {
  // Cell identity & metadata
  // ---------------------------------------------------------------------------
  
 -/** Truncates a cell identifier to its first 8 chars, stripping the `#VSC-` / `#` prefix. */
 -export function shortId(id: string) {
+-// 截取标识符前 8 字符
 -  return id.replace(/^#?VSC-/, "").replace(/^#/, "").slice(0, 8)
+-  // 返回结果给调用方
 +/**
 + * Generates a Copilot-compatible stable cell identifier: `#VSC-` + first 8 hex chars
 + * of SHA1(cell.document.uri.toString()). This is the same algorithm Copilot uses
@@ -1001,6 +1672,12 @@ index 0a32be47bd06e01c4c4a003b32415fe1fdab2946..c2a4fbd1bdfd97253cdb58df03982398
 + * ≠ cell.index (which shifts on insert/delete)
 + * ≠ cell.metadata.id (the .ipynb id field)
 + */
++// Copilot 风格 cell ID：SHA1 前 8 位，用于命令面板和编辑操作中的稳定标识
++// Copilot 风格 cell ID：使用 SHA1 前 8 位作为稳定标识符
++// 稳定 cellId：#VSC- + SHA1(cell document URI)，避免 index 漂移
++// 稳定 cellId：#VSC- + SHA1(cell document URI)，跨 index 重排仍可寻址
++// 稳定 id：#VSC- + SHA1(cell URI)，插入删除后仍可回指同一 cell
++// 显示序号 cN 会漂移，禁止当作存储或工具主定位键
 +export function copilotLikeCellId(cell: vscode.NotebookCell) {
 +  return (
 +    "#VSC-" +
@@ -1014,27 +1691,81 @@ index 0a32be47bd06e01c4c4a003b32415fe1fdab2946..c2a4fbd1bdfd97253cdb58df03982398
  
 -/** Gathers all possible identifiers for a notebook cell (fragment, metadata id, etc.). */
 +/** Gathers all possible identifiers for a notebook cell, with Copilot-style ID first. */
++// cell 标识符列表：包含 #VSC-xxxxxxxx 和索引格式
  export function cellIdentifiers(cell: vscode.NotebookCell) {
+-// 收集单元格全部标识符
    return [
+-  // 返回结果给调用方
 +    copilotLikeCellId(cell),
      cell.document.uri.fragment,
      stringProp(cell.metadata, "id"),
      stringProp(cell.metadata, "cellId"),
-@@ -79,8 +102,11 @@ export function cellIdentifiers(cell: vscode.NotebookCell) {
+     nestedStringAt(cell.metadata, "vscode", "cellId"),
+     nestedStringAt(cell.metadata, "custom", "id"),
+-    // 执行逻辑步骤
    ].filter((value): value is string => !!value)
  }
  
 +/** Returns 1-based display index for summary text. All LLM-facing cN MUST use this. */
++// c1 仅 1-based 显示；解析/编辑主路径永远优先 cellId
 +export const c1 = (cell: vscode.NotebookCell) => cell.index + 1
 +
  /** Returns "markdown" or "code" for a cell kind enum value. */
 -export function cellKindLabel(kind: vscode.NotebookCellKind) {
+-// NotebookCellKind 转可读标签
++// cell 类型标签：Code→code、Markup→markup，用于摘要显示
++// 显示标签与 kind 解耦：避免把 languageId 误当 cell 类型
++// 展示标签对齐 NotebookCellKind，不把 languageId 伪装成 cell 类型
 +export function cellTypeLabel(kind: vscode.NotebookCellKind) {
    return kind === vscode.NotebookCellKind.Markup ? "markdown" : "code"
+-  // 返回结果给调用方
  }
  
-@@ -117,10 +143,6 @@ export function executionText(cell: vscode.NotebookCell) {
+ /** Returns de-duplicated short MIME labels for all output items on a cell. */
++// 现有输出列表：提取 cell 的执行输出文件名
++// 现有输出列表：提取 cell 的执行输出文件名列表
+ export function existingOuts(cell: vscode.NotebookCell) {
+-// 单元格输出 MIME 去重列表
+   return [...new Set(cell.outputs.flatMap((cellOutput) => cellOutput.items.map((item) => shortMime(item.mime))))]
+-  // 返回结果给调用方
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -132,69 +139,47 @@ export function existingOuts(cell: vscode.NotebookCell) {
+  * Builds a compact, human-readable execution status string for a cell.
+  * Format: `<state> #<order> <status> <duration> ended=<ISO timestamp>`
+  */
++// 执行状态文本：success→ok、failure→failed、其他→pending
+ export function executionText(cell: vscode.NotebookCell) {
+-// 构建执行状态文本
+   const summary = cell.executionSummary
+-  // 定义 summary：保存关键中间值或配置
+   if (!summary?.executionOrder && !summary?.timing) {
+-  // 无执行信息判断为未运行
+     if (cell.outputs.length === 0) return "not-run"
+-    // 无输出 = 纯未运行
+     const saved = savedExecution(cell)
+-    // 定义 saved：保存关键中间值或配置
+     return `not-run but-saved-output #${saved.order} ${saved.status}${saved.duration}${saved.ended}`
+-    // 返回结果给调用方
+   }
+   const state = summary.timing ? "current-run" : "session-state"
+-  // 有 timing = 本次会话执行
+   const status =
+     summary.success === false
+       ? "failed"
+       : summary.success === true || cell.outputs.length > 0
+         ? "succeeded"
+-        // 执行逻辑步骤
+         : "unknown-status"
+   const order = summary.executionOrder ?? "?"
+-  // 定义 order：保存关键中间值或配置
+   const duration = summary.timing ? ` ${Math.max(0, summary.timing.endTime - summary.timing.startTime)}ms` : " ?ms"
+-  // 定义 duration：保存关键中间值或配置
+   const ended = summary.timing ? ` ended=${new Date(summary.timing.endTime).toISOString()}` : " ended=?"
+-  // 定义 ended：保存关键中间值或配置
    return `${state} #${order} ${status}${duration}${ended}`
+-  // 返回结果给调用方
  }
  
 -/**
@@ -1042,12 +1773,86 @@ index 0a32be47bd06e01c4c4a003b32415fe1fdab2946..c2a4fbd1bdfd97253cdb58df03982398
 - * Used when `executionSummary` is unavailable but the cell has persisted outputs.
 - */
  function savedExecution(cell: vscode.NotebookCell) {
+-// 从元数据重建执行信息
    const outputMetadata = cell.outputs.map((output) => output.metadata).filter(isRecord)
+-  // 收集输出元数据
    const endedRaw = firstString(
-@@ -178,6 +200,38 @@ export function runtimeLabel(notebook: vscode.NotebookDocument) {
-   return languageName ?? null
+-  // 定义 endedRaw：保存关键中间值或配置
+     stringProp(cell.metadata, "execution_end_time"),
+     stringProp(cell.metadata, "end_time"),
+     ...outputMetadata.flatMap((metadata) => [
+       stringProp(metadata, "execution_end_time"),
+       stringProp(metadata, "end_time"),
+-      // 执行逻辑步骤
+       stringProp(metadata, "timestamp"),
+     ]),
+   )
+   const startedRaw = firstString(
+-  // 定义 startedRaw：保存关键中间值或配置
+     stringProp(cell.metadata, "execution_start_time"),
+     stringProp(cell.metadata, "start_time"),
+     ...outputMetadata.flatMap((metadata) => [
+       stringProp(metadata, "execution_start_time"),
+       stringProp(metadata, "start_time"),
+-      // 执行逻辑步骤
+     ]),
+   )
+   return {
+-  // 返回结果给调用方
+     order: numberProp(cell.metadata, "execution_count") ?? "?",
+     status: existingOuts(cell).includes("error") ? "failed" : "succeeded",
+     duration: durationText(startedRaw, endedRaw),
+@@ -203,25 +188,16 @@ function savedExecution(cell: vscode.NotebookCell) {
  }
  
+ function durationText(startedRaw?: string, endedRaw?: string) {
+-// 计算耗时
+   if (!startedRaw || !endedRaw) return " ?ms"
+-  // 前置校验：排除非法输入或空值情况
+   const started = Date.parse(startedRaw)
+-  // 定义 started：保存关键中间值或配置
+   const ended = Date.parse(endedRaw)
+-  // 定义 ended：保存关键中间值或配置
+   if (!Number.isFinite(started) || !Number.isFinite(ended)) return " ?ms"
+-  // 前置校验：排除非法输入或空值情况
+   return ` ${Math.max(0, ended - started)}ms`
+-  // 返回结果给调用方
+ }
+ 
+ function formatDate(input: string) {
+-// 格式化时间戳为 ISO 字符串
+   const value = Date.parse(input)
+-  // 定义 value：保存关键中间值或配置
+   return Number.isFinite(value) ? new Date(value).toISOString() : input
+-  // 返回结果给调用方
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -230,25 +206,53 @@ function formatDate(input: string) {
+ 
+ /** Extracts a kernel/runtime display label from notebook-level metadata. */
+ export function runtimeLabel(notebook: vscode.NotebookDocument) {
+-// 从元数据提取内核/语言标签
+   const kernelspec = isRecord(notebook.metadata.kernelspec) ? notebook.metadata.kernelspec : undefined
+-  // 安全提取 kernelspec
+   const language = isRecord(notebook.metadata.language_info) ? notebook.metadata.language_info : undefined
+-  // 定义 language：保存关键中间值或配置
+   const kernelName = stringProp(kernelspec ?? {}, "display_name") ?? stringProp(kernelspec ?? {}, "name")
+-  // 定义 kernelName：保存关键中间值或配置
+   const languageName = stringProp(language ?? {}, "name")
+-  // 定义 languageName：保存关键中间值或配置
+   const languageVersion = stringProp(language ?? {}, "version")
+-  // 定义 languageVersion：保存关键中间值或配置
+   if (kernelName && languageName && languageVersion) return `${kernelName} (${languageName} ${languageVersion})`
+-  // 条件分支：按业务逻辑分流处理
+   if (kernelName) return kernelName
+-  // 条件分支：按业务逻辑分流处理
+   if (languageName && languageVersion) return `${languageName} ${languageVersion}`
+-  // 条件分支：按业务逻辑分流处理
+   return languageName ?? null
+-  // 返回结果给调用方
++}
++
 +// ---------------------------------------------------------------------------
 +// Virtual document line ranges
 +// ---------------------------------------------------------------------------
@@ -1065,6 +1870,12 @@ index 0a32be47bd06e01c4c4a003b32415fe1fdab2946..c2a4fbd1bdfd97253cdb58df03982398
 + *
 + * Returns a Map from cell index to `{ start, end }` where both are 1-based inclusive.
 + */
++// 计算虚拟行号范围：为每个 cell 分配连续的虚拟行号区间，用于源码视图
++// 虚拟行号范围：为折叠视图分配连续行号
++// 虚拟行号：header 不占号，source/edit/summary 共用同一坐标系
++// 虚拟全局行号：header 不占号，source/edit/summary 共用坐标系
++// 虚拟行号：header 不占号，source/edit/summary 必须共用同一坐标系
++// range 边界语义固定，禁止各工具各自重算导致 off-by-one
 +export function computeVirtualRanges(notebook: vscode.NotebookDocument) {
 +  const ranges = new Map<number, { start: number; end: number }>()
 +  let next = 1
@@ -1078,15 +1889,18 @@ index 0a32be47bd06e01c4c4a003b32415fe1fdab2946..c2a4fbd1bdfd97253cdb58df03982398
 +    next += count + 1 // source lines + blank separator
 +  }
 +  return ranges
-+}
-+
+ }
+ 
  // ---------------------------------------------------------------------------
- // Compact cell representation
+@@ -256,19 +260,17 @@ export function runtimeLabel(notebook: vscode.NotebookDocument) {
  // ---------------------------------------------------------------------------
-@@ -185,14 +239,14 @@ export function runtimeLabel(notebook: vscode.NotebookDocument) {
+ 
  /** Builds a compact summary object for a single cell (used in summary / run / output responses). */
++// 压缩 cell 信息：只保留 ID、类型和输出摘要
  export function compactCell(cell: vscode.NotebookCell) {
+-// 构建单元格摘要对象
    return {
+-  // 返回结果给调用方
 -    i: cell.index,
 -    id: shortId(cellIdentifiers(cell)[0] ?? `cell-${cell.index}`),
 +    i: c1(cell),                                 // 1-based display index
@@ -1094,6 +1908,7 @@ index 0a32be47bd06e01c4c4a003b32415fe1fdab2946..c2a4fbd1bdfd97253cdb58df03982398
      kind: cell.kind === vscode.NotebookCellKind.Code ? "code" : "markdown",
      lang: cell.document.languageId,
      lines: cell.document.lineCount,
+-    // 执行逻辑步骤
      exec: executionText(cell),
      existing_outs: existingOuts(cell),
 -    first: previewText((cell.document.getText().split("\n")[0] ?? "").trim()).slice(0, 120),
@@ -1101,7 +1916,15 @@ index 0a32be47bd06e01c4c4a003b32415fe1fdab2946..c2a4fbd1bdfd97253cdb58df03982398
    }
  }
  
-@@ -208,25 +262,22 @@ function artifactName(p: string) {
+@@ -278,44 +280,29 @@ export function compactCell(cell: vscode.NotebookCell) {
+ 
+ /** Extracts just the filename from a full artifact path. */
+ function artifactName(p: string) {
+-// 从路径提取文件名
+   return p.replace(/\\/g, "/").split("/").pop() ?? p
+-  // 返回结果给调用方
+ }
+ 
  /**
   * Formats a single output artifact for inclusion in the LLM summary text.
   *
@@ -1112,34 +1935,46 @@ index 0a32be47bd06e01c4c4a003b32415fe1fdab2946..c2a4fbd1bdfd97253cdb58df03982398
 + * - Larger text / binary shows only the artifact path + a short preview; full content is in the artifact file.
 + * - All entries include the `-> filename` path for model awareness.
   */
++// artifact 摘要：格式化输出文件路径和 MIME 类型
  export function formatArtifactSummary(a: any, cellIndex?: number) {
+-// 格式化 artifact 摘要
    const prefix = cellIndex !== undefined ? `c${cellIndex} ` : ""
+-  // 定义 prefix：保存关键中间值或配置
 -  const baseInfo = `${prefix}output=${a.output} item=${a.item} ${shortMime(a.mime)} ${formatBytes(a.bytes)}`
+-  // 定义 baseInfo：保存关键中间值或配置
 +  const filename = artifactName(a.artifactPath)
 +  const baseInfo = `${prefix}output=${a.output} item=${a.item} ${shortMime(a.mime)} ${formatBytes(a.bytes)} -> ${filename}`
  
    if (isTextLikeMime(a.mime) && a.text !== undefined && a.text.length <= 1024) {
+-  // 短文本内联展示
      if (a.text.includes("\n")) {
+-    // 条件分支：按业务逻辑分流处理
 -      return `${baseInfo}\n<content>\n${a.text}\n</content>`
+-      // 返回结果给调用方
 +      return `${baseInfo}\n<full_content>\n${a.text}\n</full_content>`
      }
      return `${baseInfo} ${JSON.stringify(a.text)}`
-   }
- 
--  if (isTextLikeMime(a.mime)) {
--    const content = a.text !== undefined ? a.text.slice(0, 1024) : a.preview
--    return `${baseInfo} -> ${artifactName(a.artifactPath)}\n<content>\n${content}\n... (truncated, full output in the file)\n</content>`
+-    // 返回结果给调用方
 -  }
 -
+-  if (isTextLikeMime(a.mime)) {
+-  // 长文本截断并指向 artifact
+-    const content = a.text !== undefined ? a.text.slice(0, 1024) : a.preview
+-    // 定义 content：保存关键中间值或配置
+-    return `${baseInfo} -> ${artifactName(a.artifactPath)}\n<content>\n${content}\n... (truncated, full output in the file)\n</content>`
+-    // 返回结果给调用方
+   }
+ 
 -  return `${baseInfo} -> ${artifactName(a.artifactPath)}${a.preview ? ` ${quoteForSummary(a.preview)}` : ""}`
+-  // 返回结果给调用方
 +  // Large text or binary — only preview, no inline content
 +  return `${baseInfo}${a.preview ? ` ${quoteForSummary(a.preview)}` : ""}`
  }
 diff --git a/sdks/vscode/src/notebook/output.ts b/sdks/vscode/src/notebook/output.ts
-index 4f9373acd6c728a10ed7ba6b0ce2b88f3a80746d..c05f03defda1155c782796630fb2642687eaba74 100644
+index f2cad776fa..21e8b706ba 100644
 --- a/sdks/vscode/src/notebook/output.ts
 +++ b/sdks/vscode/src/notebook/output.ts
-@@ -2,15 +2,17 @@
+@@ -2,21 +2,20 @@
   * `vscode_notebook_output` — reads cell outputs, writes them to artifact files
   * under `.opencode/cache/notebook-outputs/`, and returns a summary pointing
   * to the artifact paths. Short text outputs are inlined in the summary.
@@ -1147,6 +1982,7 @@ index 4f9373acd6c728a10ed7ba6b0ce2b88f3a80746d..c05f03defda1155c782796630fb26426
 + * Primary input: `cellId` (Copilot-style #VSC-xxxxxxxx).
   */
  import * as vscode from "vscode"
+-// 执行逻辑步骤
  import * as path from "node:path"
 -import { previewText } from "../util"
  import {
@@ -1154,23 +1990,83 @@ index 4f9373acd6c728a10ed7ba6b0ce2b88f3a80746d..c05f03defda1155c782796630fb26426
 +  copilotLikeCellId,
    existingOuts,
    compactCell,
+-  // 执行逻辑步骤
    runtimeLabel,
 -  shortMime,
    isTextLikeMime,
    extensionForMime,
    formatArtifactSummary,
-@@ -43,8 +45,9 @@ async function serializeNotebookCellOutput(notebook: vscode.NotebookDocument, ce
+-  // 执行逻辑步骤
+ } from "./format"
+ import { resolveNotebook, resolveNotebookCell } from "./resolve"
+ 
+@@ -25,53 +24,49 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
+ // ---------------------------------------------------------------------------
+ 
+ /** Bridge endpoint handler: reads and serializes all outputs for a specific cell. */
++// 读取 cell 输出：返回指定 cell 的执行输出和 artifact 文件路径
++// 输出标签优先 cellId，避免 cellIndex 在插入删除后错位
++// 输出读取优先 cellId，避免 insert/delete 后 cellIndex 错位
+ export async function readNotebookCellOutput(filePath?: string, cellIndex?: number, cellId?: string) {
+-// notebook 输出处理器：读取并序列化单元格输出
+-  const notebook = await resolveNotebook(filePath)
+-  // 定义 notebook：保存关键中间值或配置
+-  const cell = resolveNotebookCell(notebook, cellIndex, cellId)
+-  // 定义 cell：保存关键中间值或配置
+-  return await serializeNotebookCellOutput(notebook, cell)
+-  // 返回结果给调用方
++  // 解析 notebook：通过文件路径查找已打开的文档
++const notebook = await resolveNotebook(filePath)
++  // 解析 cell：优先用 cellId 查找
++const cell = resolveNotebookCell(notebook, cellIndex, cellId)
++  // 序列化输出：将原始字节数据转换为可读文本
++return await serializeNotebookCellOutput(notebook, cell)
+ }
+ 
+ // ---------------------------------------------------------------------------
+ // Output serialization
+ // ---------------------------------------------------------------------------
+ 
++// 序列化 cell 输出：将执行结果转为可读格式
+ async function serializeNotebookCellOutput(notebook: vscode.NotebookDocument, cell: vscode.NotebookCell) {
+-// 序列化全部输出为 artifact 列表
+   const artifacts = (
+-  // 并行序列化所有输出 item
+     await Promise.all(
+-    // 并行等待全部异步操作完成
+       cell.outputs.flatMap((cellOutput, outputIndex) =>
+         cellOutput.items.map((item, itemIndex) =>
+           serializeNotebookOutputItem(notebook, cell, item, outputIndex, itemIndex),
+         ),
+       ),
+-      // 执行逻辑步骤
      )
    ).flat()
  
 +  const cellId = copilotLikeCellId(cell)
    const summaryLines = [
+-  // 定义 summaryLines：保存关键中间值或配置
 -    `Cell ${cell.index} existing outputs: ${existingOuts(cell).join(", ") || "none"}.`,
 +    `Cell c${c1(cell)} id=${cellId} existing outputs: ${existingOuts(cell).join(", ") || "none"}.`,
      `ArtifactsRoot: .opencode/cache/notebook-outputs/`,
      "",
      "Artifacts:",
-@@ -68,11 +71,6 @@ async function serializeNotebookCellOutput(notebook: vscode.NotebookDocument, ce
+     ...artifacts.map((a) => formatArtifactSummary(a)),
+-    // 执行逻辑步骤
+   ].join("\n")
+ 
+   return {
+-  // 返回结果给调用方
+     ran: false,
+     summary: summaryLines,
+     data: {
+       path: notebook.uri.fsPath || notebook.uri.toString(),
+       dirty: notebook.isDirty,
+-      // 执行逻辑步骤
+       runtime: runtimeLabel(notebook),
+       cell: compactCell(cell),
+       artifacts,
+@@ -83,93 +78,62 @@ async function serializeNotebookCellOutput(notebook: vscode.NotebookDocument, ce
  // Single output item
  // ---------------------------------------------------------------------------
  
@@ -1179,14 +2075,28 @@ index 4f9373acd6c728a10ed7ba6b0ce2b88f3a80746d..c05f03defda1155c782796630fb26426
 - * and returns metadata + optional text content for inline display.
 - * Exported so that `run.ts` can reuse it for per-cell run results.
 - */
++// 序列化输出项：将原始字节数据转换为可读文本或 base64
  export async function serializeNotebookOutputItem(
+-// 序列化单个输出 item
    notebook: vscode.NotebookDocument,
    cell: vscode.NotebookCell,
-@@ -87,13 +85,12 @@ export async function serializeNotebookOutputItem(
+   item: vscode.NotebookCellOutputItem,
+   outputIndex: number,
+   itemIndex: number,
+-  // 执行逻辑步骤
+ ) {
+   const text = outputItemText(item)
+-  // 文本类 MIME 尝试解码
+   const artifact = await writeArtifact(notebook, cell, item, outputIndex, itemIndex)
+-  // 定义 artifact：保存关键中间值或配置
+   return {
+-  // 返回结果给调用方
+     output: outputIndex,
      item: itemIndex,
      mime: item.mime,
      bytes: item.data.byteLength,
 -    preview: previewText(text ?? `<${item.mime} ${item.data.byteLength} bytes>`),
+-    // 执行逻辑步骤
 +    preview: text !== undefined ? text.slice(0, 500) : `<${item.mime} ${item.data.byteLength} bytes>`,
      text: text && item.data.byteLength <= 8_192 ? text : undefined,
      artifactPath: artifact.fsPath,
@@ -1195,9 +2105,17 @@ index 4f9373acd6c728a10ed7ba6b0ce2b88f3a80746d..c05f03defda1155c782796630fb26426
  
 -/** Attempts to decode an output item as UTF-8 text for text-like MIME types. */
  function outputItemText(item: vscode.NotebookCellOutputItem) {
+-// 文本类 MIME UTF-8 解码
    if (isTextLikeMime(item.mime)) {
+-  // 条件分支：按业务逻辑分流处理
      return Buffer.from(item.data).toString("utf8")
-@@ -105,10 +102,6 @@ function outputItemText(item: vscode.NotebookCellOutputItem) {
+-    // 返回结果给调用方
+   }
+   return undefined
+-  // 返回 undefined 表示无结果或用户取消
+ }
+ 
+ // ---------------------------------------------------------------------------
  // Artifact writing
  // ---------------------------------------------------------------------------
  
@@ -1205,14 +2123,95 @@ index 4f9373acd6c728a10ed7ba6b0ce2b88f3a80746d..c05f03defda1155c782796630fb26426
 - * Writes a single output item's raw data to a file under
 - * `.opencode/cache/notebook-outputs/` in the workspace folder.
 - */
++// 写入 artifact 文件：将输出保存到缓存目录
  async function writeArtifact(
+-// 写入 artifact 文件
    notebook: vscode.NotebookDocument,
    cell: vscode.NotebookCell,
+   item: vscode.NotebookCellOutputItem,
+   outputIndex: number,
+   itemIndex: number,
+-  // 执行逻辑步骤
+ ) {
+   const root = artifactRoot(notebook)
+-  // 获取 artifact 根目录
+   await vscode.workspace.fs.createDirectory(root)
+-  // 异步调用 VS Code API
+   const filename =
+-  // 构造 artifact 文件名
+     [
+       path.basename(notebook.uri.fsPath || "untitled", path.extname(notebook.uri.fsPath || "untitled")),
+       `cell-${cell.index}`,
+       `output-${outputIndex}`,
+       `item-${itemIndex}`,
+-      // 执行逻辑步骤
+     ].join("-") + extensionForMime(item.mime)
+   const uri = vscode.Uri.joinPath(root, filename)
+-  // 定义 uri：保存关键中间值或配置
+   await vscode.workspace.fs.writeFile(uri, item.data)
+-  // 异步调用 VS Code API
+   return { uri, fsPath: uri.fsPath || uri.toString() }
+-  // 返回结果给调用方
+ }
+ 
+ function artifactRoot(notebook: vscode.NotebookDocument) {
+-// artifact 根目录：.opencode/cache/notebook-outputs/
+   const folder = vscode.workspace.getWorkspaceFolder(notebook.uri) ?? vscode.workspace.workspaceFolders?.[0]
+-  // 定义 folder：保存关键中间值或配置
+   if (!folder) throw new Error("Notebook output artifacts require an open workspace folder")
+-  // 无工作区文件夹时无法写 artifact
+   return vscode.Uri.joinPath(folder.uri, ".opencode", "cache", "notebook-outputs")
+-  // 返回结果给调用方
+ }
 diff --git a/sdks/vscode/src/notebook/resolve.ts b/sdks/vscode/src/notebook/resolve.ts
-index d79059e6e31d8b7f4b0f5522026cbeb83a44df07..619ba9682b4cc5e6b098b22251e8d1c4b45246bb 100644
+index 140591f8b9..0959cf1da2 100644
 --- a/sdks/vscode/src/notebook/resolve.ts
 +++ b/sdks/vscode/src/notebook/resolve.ts
-@@ -34,12 +34,10 @@ export async function resolveNotebook(filePath?: string) {
+@@ -3,7 +3,6 @@
+  */
+ import * as vscode from "vscode"
+ import { stringProp, numberProp, uriFromInput } from "../util"
+-// 执行逻辑步骤
+ import { cellIdentifiers } from "./format"
+ 
+ // ---------------------------------------------------------------------------
+@@ -14,29 +13,24 @@ import { cellIdentifiers } from "./format"
+  * Resolves a notebook document from a file path, URI string, or falls back
+  * to the active/first-open notebook. Throws if nothing can be found.
+  */
++// 解析 notebook：通过文件路径查找已打开的 notebook 文档
++// 解析 notebook：通过文件路径匹配已打开的 notebook 文档
+ export async function resolveNotebook(filePath?: string) {
+-// 解析 notebook：按路径匹配或回退到活动文档
+   if (!filePath) {
+-  // 无 filePath 时回退到活动或首个 notebook
+     const active = vscode.window.activeNotebookEditor?.notebook
+-    // 定义 active：保存关键中间值或配置
+     if (active) return active
+-    // 条件分支：按业务逻辑分流处理
+     if (vscode.workspace.notebookDocuments.length > 0) return vscode.workspace.notebookDocuments[0]
+-    // 条件分支：按业务逻辑分流处理
+     throw new Error("No active or open notebook document")
+-    // 抛出异常：中断执行并让调用方处理错误
+   }
+ 
+-  const existing = vscode.workspace.notebookDocuments.find(
+-  // 按 fsPath 或 toString 匹配
++  // 查找已打开的 notebook：按 fsPath 或 URI 字符串匹配
++const existing = vscode.workspace.notebookDocuments.find(
+     (notebook) => notebook.uri.fsPath === filePath || notebook.uri.toString() === filePath,
+   )
+   if (existing) return existing
+-  // 条件分支：按业务逻辑分流处理
+ 
+-  return await vscode.workspace.openNotebookDocument(uriFromInput(filePath))
+-  // 返回结果给调用方
++  // 打开 notebook 文档：如果未打开则通过 URI 打开
++return await vscode.workspace.openNotebookDocument(uriFromInput(filePath))
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -44,40 +38,33 @@ export async function resolveNotebook(filePath?: string) {
  // ---------------------------------------------------------------------------
  
  /**
@@ -1221,26 +2220,84 @@ index d79059e6e31d8b7f4b0f5522026cbeb83a44df07..619ba9682b4cc5e6b098b22251e8d1c4
 + * Resolves a single cell inside a notebook by cell ID (primary) or index (fallback).
 + * Falls back to the active editor's selection / cell 0.
   */
++// 解析 cell：优先用 cellId 查找，回退到 cellIndex 和活动选择
++// cellId 主解析：#VSC-/cN/短 id 多形态兼容，失败显式报错
++// cellId 主解析：#VSC-/cN/短 id 兼容；失败必须 throw
++// notebook 文档解析失败不得静默落到错误文件
  export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex?: number, cellId?: string) {
+-// 解析单元格：index > id > 活动选区 > 首个
 -  if (cellIndex !== undefined) return notebook.cellAt(cellIndex)
+-  // 有 index 直接取
 -
    if (cellId) {
-     const normalized = cellId.replace(/^#/, "")
+-  // 有 id 按稳定标识符匹配
+-    const normalized = cellId.replace(/^#/, "")
+-    // 定义 normalized：保存关键中间值或配置
++    // 规范化 cellId：去除 # 前缀
++const normalized = cellId.replace(/^#/, "")
      const cell = notebook
-@@ -49,6 +47,8 @@ export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex
+-    // 定义 cell：保存关键中间值或配置
+       .getCells()
+       .find((candidate) => cellIdentifiers(candidate).some((id) => id.replace(/^#/, "") === normalized))
+     if (cell) return cell
+-    // 条件分支：按业务逻辑分流处理
      throw new Error(`Notebook cell not found: ${cellId}`)
+-    // 抛出异常：中断执行并让调用方处理错误
    }
  
 +  if (cellIndex !== undefined) return notebook.cellAt(cellIndex)
 +
    const active = vscode.window.activeNotebookEditor
+-  // 定义 active：保存关键中间值或配置
    if (active?.notebook.uri.toString() === notebook.uri.toString()) {
+-  // 条件分支：精确匹配检查确保类型和值安全
      const range = active.selection
+-    // 定义 range：保存关键中间值或配置
+     if (range && !range.isEmpty) return notebook.cellAt(range.start)
+-    // 前置校验：排除非法输入或空值情况
+   }
+ 
+   return notebook.cellAt(0)
+-  // 返回结果给调用方
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -88,23 +75,18 @@ export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex
+  * Converts a target descriptor (`{ type: "all"|"range"|"cell", ... }`) into
+  * a `vscode.NotebookRange`. Used by `runNotebook` to select which cells to execute.
+  */
++// 构建 NotebookRange：将目标描述符转为 VS Code 范围对象
+ export function notebookRange(notebook: vscode.NotebookDocument, target: Record<string, unknown>, fallbackCellIndex?: number) {
+-// 目标描述符转 NotebookRange
+   const type = stringProp(target, "type") ?? "cell"
+-  // 定义 type：保存关键中间值或配置
+-  if (type === "all") return new vscode.NotebookRange(0, notebook.cellCount)
+-  // all 模式覆盖全部
+-  if (type === "range") {
+-  // range 模式按 start/end
++  // all 模式：覆盖全部 cell
++if (type === "all") return new vscode.NotebookRange(0, notebook.cellCount)
++  // range 模式：按 start/end 指定范围
++if (type === "range") {
+     const start = Math.max(0, numberProp(target, "start") ?? 0)
+-    // 定义 start：保存关键中间值或配置
+     const end = Math.min(notebook.cellCount, numberProp(target, "end") ?? start + 1)
+-    // 定义 end：保存关键中间值或配置
+     return new vscode.NotebookRange(start, Math.max(start + 1, end))
+-    // 返回结果给调用方
+   }
+-  const index = Math.max(0, Math.min(notebook.cellCount - 1, numberProp(target, "cellIndex") ?? fallbackCellIndex ?? 0))
+-  // 定义 index：保存关键中间值或配置
++  // cell 模式：单个 cell，索引边界保护
++const index = Math.max(0, Math.min(notebook.cellCount - 1, numberProp(target, "cellIndex") ?? fallbackCellIndex ?? 0))
+   return new vscode.NotebookRange(index, index + 1)
+-  // 返回结果给调用方
+ }
 diff --git a/sdks/vscode/src/notebook/run.ts b/sdks/vscode/src/notebook/run.ts
-index ef54dbca6434620e62280184ce1208bfd5c249bd..bc0a139064e49af2612d04efa4415d294355ff4c 100644
+index 5915511f54..6c82667b4a 100644
 --- a/sdks/vscode/src/notebook/run.ts
 +++ b/sdks/vscode/src/notebook/run.ts
-@@ -1,20 +1,24 @@
+@@ -1,23 +1,24 @@
  /**
 - * `vscode_notebook_run` — executes one cell, a range of cells, or all cells
 - * via the native VS Code `notebook.cell.execute` command, waits for completion,
@@ -1255,12 +2312,14 @@ index ef54dbca6434620e62280184ce1208bfd5c249bd..bc0a139064e49af2612d04efa4415d29
 + * Primary input: `cellId` (Copilot-style #VSC-xxxxxxxx).
   */
  import * as vscode from "vscode"
+-// 执行逻辑步骤
 -import { isRecord, stringProp, numberProp, toPosixPath, quoteForSummary, formatBytes } from "../util"
 +import { isRecord, stringProp, numberProp, toPosixPath, quoteForSummary } from "../util"
  import {
 -  shortId,
 -  cellIdentifiers,
 -  shortMime,
+-  // 执行逻辑步骤
 +  c1,
 +  copilotLikeCellId,
    existingOuts,
@@ -1268,60 +2327,84 @@ index ef54dbca6434620e62280184ce1208bfd5c249bd..bc0a139064e49af2612d04efa4415d29
    runtimeLabel,
    formatArtifactSummary,
  } from "./format"
+-// 执行逻辑步骤
 -import { resolveNotebook, notebookRange } from "./resolve"
 +import { resolveNotebook, resolveNotebookCell } from "./resolve"
  import { serializeNotebookOutputItem } from "./output"
  
  // ---------------------------------------------------------------------------
-@@ -23,51 +27,119 @@ import { serializeNotebookOutputItem } from "./output"
+@@ -26,80 +27,148 @@ import { serializeNotebookOutputItem } from "./output"
  
  /**
   * Bridge endpoint handler: runs notebook cells and returns execution results.
 - * Accepts `target: { type: "all"|"range"|"cell", ... }` and optional `timeoutMs`.
 + * Accepts `target: { type: "all" | "range" | "cell", cellId?, start?, end? }`.
++ // 单 cell 超时上限防止内核假死拖死会话
 + * Default timeout: 300 000 ms (5 minutes).
   */
++// 运行 notebook：执行 cell 或 cell 范围，返回每个 cell 的执行结果和输出
++// 顺序执行：任一 cell 失败立即停止，避免污染后续内核状态
  export async function runNotebook(input: Record<string, unknown>) {
+-// notebook 执行处理器：运行单元格并等待完成
    const notebook = await resolveNotebook(stringProp(input, "filePath"))
+-  // 定义 notebook：保存关键中间值或配置
 -  const target = isRecord(input.target) ? input.target : {}
+-  // target 必须是对象
 -  const range = notebookRange(notebook, target, typeof input.cellIndex === "number" ? input.cellIndex : undefined)
+-  // 转 NotebookRange
 -  const editor = await vscode.window.showNotebookDocument(notebook, { selections: [range] })
+-  // 定义 editor：保存关键中间值或配置
 -  editor.selection = range
 -  editor.revealRange(range)
 -
    const commands = await vscode.commands.getCommands(true)
+-  // 定义 commands：保存关键中间值或配置
    if (!commands.includes("notebook.cell.execute")) {
+-  // 检查原生执行命令可用性
      throw new Error("VS Code command notebook.cell.execute is not available")
+-    // 抛出异常：中断执行并让调用方处理错误
    }
  
 -  const startedAt = Date.now()
+-  // 记录开始时间用于轮询
 -  await vscode.commands.executeCommand("notebook.cell.execute")
+-  // 异步调用 VS Code API
 -  const completed = await waitForExecution(notebook, range, startedAt, numberProp(input, "timeoutMs") ?? 60_000)
+-  // 等待执行完成或超时
 -  return await compactRunResult(notebook, range, completed)
+-  // 返回结果给调用方
 -}
-+  const timeoutMs = numberProp(input, "timeoutMs") ?? 300_000
++  // 默认超时 5 分钟：平衡长时间执行和用户体验
++const timeoutMs = numberProp(input, "timeoutMs") ?? 300_000
 +  const target = isRecord(input.target) ? input.target : {}
  
 -// ---------------------------------------------------------------------------
 -// Result builders
 -// ---------------------------------------------------------------------------
 +  // Resolve target cells via cellId (only stable identifier; no cellIndex in schema)
-+  const cells = resolveRunTarget(notebook, target, stringProp(input, "cellId"))
++  // 解析执行目标：将 cellId 转换为 cell 列表
++const cells = resolveRunTarget(notebook, target, stringProp(input, "cellId"))
 +
 +  // Open notebook and reveal first cell
-+  const editor = await vscode.window.showNotebookDocument(notebook, {
++  // 打开 notebook 编辑器：确保用户能看到执行过程
++const editor = await vscode.window.showNotebookDocument(notebook, {
 +    selections: [new vscode.NotebookRange(cells[0].index, cells[0].index + 1)],
 +  })
  
 -async function compactRunResult(notebook: vscode.NotebookDocument, range: vscode.NotebookRange, completed: boolean) {
+-// 构建执行结果响应
 -  const cells = await Promise.all(notebook.getCells(range).map((cell) => compactRunCell(notebook, cell)))
+-  // 定义 cells：保存关键中间值或配置
 +  // Execute sequentially, stop on first error
 +  const results: Array<Awaited<ReturnType<typeof compactRunCell>>> = []
 +  let stopped = false
++  // 记录首个失败 index，后续 cell 标记 skipped 而不再 execute
 +  let failedIndex: number | undefined
 +
-+  for (const cell of cells) {
-+    if (cell.kind !== vscode.NotebookCellKind.Code) {
++  // 顺序执行：逐个 cell 执行，前一个失败则停止
++for (const cell of cells) {
++    // 跳过非代码 cell：Markup cell 不需要执行
++if (cell.kind !== vscode.NotebookCellKind.Code) {
 +      results.push({ i: c1(cell), id: copilotLikeCellId(cell), exec: "skipped (not code)", existing_outs: [], artifacts: [] })
 +      continue
 +    }
@@ -1331,12 +2414,14 @@ index ef54dbca6434620e62280184ce1208bfd5c249bd..bc0a139064e49af2612d04efa4415d29
 +      continue
 +    }
 +
-+    editor.selection = new vscode.NotebookRange(cell.index, cell.index + 1)
++    // 选中当前 cell：确保执行命令作用于正确的 cell
++editor.selection = new vscode.NotebookRange(cell.index, cell.index + 1)
 +    editor.revealRange(new vscode.NotebookRange(cell.index, cell.index + 1))
 +
 +    const startedAt = Date.now()
 +    await vscode.commands.executeCommand("notebook.cell.execute")
-+    const completed = await waitForSingleCell(notebook, cell.index, startedAt, timeoutMs)
++    // 等待执行完成：监听 cell 变更事件
++const completed = await waitForSingleCell(notebook, cell.index, startedAt, timeoutMs)
 +
 +    if (!completed) {
 +      stopped = true
@@ -1349,17 +2434,21 @@ index ef54dbca6434620e62280184ce1208bfd5c249bd..bc0a139064e49af2612d04efa4415d29
 +      }
 +    }
 +
-+    results.push(await compactRunCell(notebook, cell))
++    // 收集执行结果：包含输出和 artifact 信息
++results.push(await compactRunCell(notebook, cell))
 +  }
 +
-+  const targetDesc = describeRunTarget(cells, notebook.cellCount)
++  // 生成目标描述：人类可读的执行范围说明
++const targetDesc = describeRunTarget(cells, notebook.cellCount)
    return {
+-  // 返回结果给调用方
      ran: true,
 -    summary: runSummaryText(notebook, range, completed, cells),
 +    summary: runSummaryText(notebook, targetDesc, !stopped, results),
      data: {
        path: notebook.uri.fsPath || notebook.uri.toString(),
        dirty: notebook.isDirty,
+-      // 执行逻辑步骤
        runtime: runtimeLabel(notebook),
 -      target: runTarget(range, notebook.cellCount),
 -      completed,
@@ -1369,6 +2458,7 @@ index ef54dbca6434620e62280184ce1208bfd5c249bd..bc0a139064e49af2612d04efa4415d29
 +      stoppedAt: failedIndex,
 +      cells: results,
      },
+-    // 执行逻辑步骤
    }
  }
  
@@ -1376,6 +2466,9 @@ index ef54dbca6434620e62280184ce1208bfd5c249bd..bc0a139064e49af2612d04efa4415d29
 +// Target resolution
 +// ---------------------------------------------------------------------------
 +
++// 解析运行目标：根据 cellId 和 endCellId 确定要执行的 cell 列表
++// 解析执行目标：将 cellId 转为 cell 列表
++// 优先 cellId 解析目标；index 仅作内部回退不得进 schema
 +function resolveRunTarget(
 +  notebook: vscode.NotebookDocument,
 +  target: Record<string, unknown>,
@@ -1396,6 +2489,8 @@ index ef54dbca6434620e62280184ce1208bfd5c249bd..bc0a139064e49af2612d04efa4415d29
 +  return [resolved]
 +}
 +
++// 描述运行目标：生成人类可读的执行范围描述
++// 描述运行目标：cell 范围和总数
 +function describeRunTarget(cells: vscode.NotebookCell[], cellCount: number) {
 +  if (cells.length === cellCount) return "all"
 +  if (cells.length === 1) return `cell ${c1(cells[0])}`
@@ -1407,8 +2502,13 @@ index ef54dbca6434620e62280184ce1208bfd5c249bd..bc0a139064e49af2612d04efa4415d29
 +// Result builders
 +// ---------------------------------------------------------------------------
 +
++// 压缩 cell 执行结果：提取输出摘要和 artifact 路径
++// 压缩 cell 结果：提取输出和 artifact
++// 运行摘要压缩输出，失败 cell 之后标记 skipped 而非继续执行
  async function compactRunCell(notebook: vscode.NotebookDocument, cell: vscode.NotebookCell) {
+-// 构建单个单元格执行结果
    return {
+-  // 返回结果给调用方
 -    i: cell.index,
 -    id: shortId(cellIdentifiers(cell)[0] ?? `cell-${cell.index}`),
 +    i: c1(cell),
@@ -1416,31 +2516,61 @@ index ef54dbca6434620e62280184ce1208bfd5c249bd..bc0a139064e49af2612d04efa4415d29
      exec: executionText(cell),
      existing_outs: existingOuts(cell),
      artifacts: await Promise.all(
-@@ -86,14 +158,14 @@ async function compactRunCell(notebook: vscode.NotebookDocument, cell: vscode.No
+-    // 执行逻辑步骤
+       cell.outputs.flatMap((cellOutput, outputIndex) =>
+         cellOutput.items.map((item, itemIndex) =>
+           serializeNotebookOutputItem(notebook, cell, item, outputIndex, itemIndex),
+         ),
+       ),
+-      // 执行逻辑步骤
+     ),
+   }
+ }
+@@ -108,89 +177,67 @@ async function compactRunCell(notebook: vscode.NotebookDocument, cell: vscode.No
+ // Summary text
+ // ---------------------------------------------------------------------------
  
++// 生成运行摘要文本：包含成功/失败状态和执行统计
++// 运行摘要文本：包含成功/失败和执行统计
  function runSummaryText(
+-// 生成执行摘要文本
    notebook: vscode.NotebookDocument,
 -  range: vscode.NotebookRange,
 +  target: string,
    completed: boolean,
    cells: Array<Awaited<ReturnType<typeof compactRunCell>>>,
  ) {
+-// 执行逻辑步骤
    const artifactRoot = ".opencode/cache/notebook-outputs/"
+-  // 定义 artifactRoot：保存关键中间值或配置
    return [
+-  // 返回结果给调用方
      `Notebook: ${toPosixPath(notebook.uri.fsPath || notebook.uri.toString())}`,
 -    `Run: target=${runTarget(range, notebook.cellCount)} completed=${completed} dirty=${notebook.isDirty} runtime=${runtimeLabel(notebook) ?? "unknown"}`,
 +    `Run: target=${target} completed=${completed} dirty=${notebook.isDirty} runtime=${runtimeLabel(notebook) ?? "unknown"}`,
      `ArtifactsRoot: ${artifactRoot}`,
      "",
      "Cells:",
-@@ -107,34 +179,27 @@ function runSummaryText(
+-    // 执行逻辑步骤
+     ...cells.map(
+       (c) =>
+         `c${c.i} id=${c.id} exec=${quoteForSummary(c.exec)} outs=${quoteForSummary(c.existing_outs.join(",") || "none")}`,
+     ),
+     "",
+-    // 执行逻辑步骤
+     "Artifacts:",
+     ...cells.flatMap((c) => c.artifacts.map((a) => formatArtifactSummary(a, c.i))),
    ].join("\n")
  }
  
 -function runTarget(range: vscode.NotebookRange, cellCount: number) {
+-// NotebookRange 转可读目标描述
 -  if (range.start === 0 && range.end === cellCount) return "all"
+-  // 条件分支：精确匹配检查确保类型和值安全
 -  if (range.end === range.start + 1) return `cell ${range.start}`
+-  // 条件分支：精确匹配检查确保类型和值安全
 -  return `range ${range.start}-${range.end - 1}`
+-  // 返回结果给调用方
 -}
 -
  // ---------------------------------------------------------------------------
@@ -1455,6 +2585,11 @@ index ef54dbca6434620e62280184ce1208bfd5c249bd..bc0a139064e49af2612d04efa4415d29
 + * `executionSummary.timing.endTime`. Returns `false` on timeout.
   */
 -async function waitForExecution(
+-// 轮询等待执行完成
++// 等待单个 cell 执行完成：监听 cell 变更事件
++// 单 cell 等待：失败即停止后续 cell，避免污染内核状态
++// 等待单 cell 执行结束：timeout 与状态订阅统一在此收敛
++// 单 cell 等待收敛 timeout 与状态订阅，防止无限挂起
 +async function waitForSingleCell(
    notebook: vscode.NotebookDocument,
 -  range: vscode.NotebookRange,
@@ -1462,13 +2597,17 @@ index ef54dbca6434620e62280184ce1208bfd5c249bd..bc0a139064e49af2612d04efa4415d29
    startedAt: number,
    timeoutMs: number,
  ) {
+-// 执行逻辑步骤
 -  const done = () =>
+-  // 完成判定：所有 code 单元格有新 endTime
 -    notebook
 -      .getCells(range)
 -      .filter((cell) => cell.kind === vscode.NotebookCellKind.Code)
 -      .every((cell) => {
 -        const timing = cell.executionSummary?.timing
+-        // 定义 timing：保存关键中间值或配置
 -        return timing?.endTime !== undefined && timing.endTime >= startedAt
+-        // 返回 undefined 表示无结果或用户取消
 -      })
 +  const cell = notebook.cellAt(cellIndex)
 +  if (cell.kind !== vscode.NotebookCellKind.Code) return true
@@ -1479,12 +2618,29 @@ index ef54dbca6434620e62280184ce1208bfd5c249bd..bc0a139064e49af2612d04efa4415d29
 +  }
  
    if (done()) return true
+-  // 首次检查即完成
  
+   return await new Promise<boolean>((resolve) => {
+-  // 返回结果给调用方
+     const timer = setTimeout(() => {
+-    // 超时定时器
+       subscription.dispose()
+       resolve(false)
+     }, timeoutMs)
+     const subscription = vscode.workspace.onDidChangeNotebookDocument((event) => {
+-    // 监听 notebook 变化
+       if (event.notebook.uri.toString() !== notebook.uri.toString()) return
+-      // 条件分支：精确匹配检查确保类型和值安全
+       if (!done()) return
+-      // 前置校验：排除非法输入或空值情况
+       clearTimeout(timer)
+       subscription.dispose()
+       resolve(true)
 diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/source.ts
-index a5560d1ad560c2e112a9f77acd56e574fbf71daf..7aa895653f8fc348fed2f11a002bb487182b455a 100644
+index e57a21b113..b4e39015e8 100644
 --- a/sdks/vscode/src/notebook/source.ts
 +++ b/sdks/vscode/src/notebook/source.ts
-@@ -2,12 +2,19 @@
+@@ -2,13 +2,21 @@
   * `vscode_notebook_source` — reads cell source code as a flat virtual text document
   * with 1-based global line numbering and offset/limit pagination.
   *
@@ -1498,16 +2654,19 @@ index a5560d1ad560c2e112a9f77acd56e574fbf71daf..7aa895653f8fc348fed2f11a002bb487
 + *   B+1: (blank line)
 + *
 + * Cell headers do NOT consume line numbers. Line ranges in headers are
++ // 无 cellId 时返回全本；有 cellId 时只导出目标 cell 虚拟切片
 + * 1-based inclusive. Target a cell with `cellId` (Copilot-style #VSC-xxxxxxxx).
   */
  import * as vscode from "vscode"
+-// 执行逻辑步骤
  import { stringProp, numberProp } from "../util"
 -import { shortId, cellIdentifiers, cellKindLabel } from "./format"
++// source header 的 range 必须来自统一虚拟坐标
 +import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges } from "./format"
  import { resolveNotebook } from "./resolve"
  
  // ---------------------------------------------------------------------------
-@@ -16,85 +23,146 @@ import { resolveNotebook } from "./resolve"
+@@ -17,168 +25,185 @@ import { resolveNotebook } from "./resolve"
  
  /**
   * Bridge endpoint handler: returns notebook source code with global line numbering.
@@ -1515,14 +2674,26 @@ index a5560d1ad560c2e112a9f77acd56e574fbf71daf..7aa895653f8fc348fed2f11a002bb487
 - * Output is capped at 12 KB and 1000 lines per request.
 + * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 12 KB.
   */
++// 获取 notebook 源码：返回所有 cell 的代码、类型和虚拟行号范围
++// 获取 notebook 源码：返回所有 cell 的代码和虚拟行号范围
++// 虚拟源码视图：按 computeVirtualRanges 输出带 range 的 header
++// 虚拟源码视图：header 带 range，正文行号与 computeVirtualRanges 对齐
  export async function notebookSource(input: Record<string, unknown>) {
+-// notebook 源码处理器：返回虚拟行号文本
    const notebook = await resolveNotebook(stringProp(input, "filePath"))
+-  // 定义 notebook：保存关键中间值或配置
 -  const limit = Math.max(1, Math.min(numberProp(input, "limit") ?? 1000, 1000))
+-  // limit 限制 1–1000 行
++  // 默认 limit 400：与 read 工具 DEFAULT_READ_LIMIT 对齐，压低上下文
++  // 默认 limit 400：与 read 工具 DEFAULT_READ_LIMIT 对齐压低上下文
 +  const limit = Math.max(1, numberProp(input, "limit") ?? 400)
    const offset = Math.max(1, numberProp(input, "offset") ?? 1)
+-  // 定义 offset：保存关键中间值或配置
  
 -  const { lines, cellRanges } = buildVirtualLines(notebook)
+-  // 构建虚拟行和单元格范围
 -  const targetCellIndex = typeof input.cellIndex === "number" ? input.cellIndex : undefined
+-  // 定义 targetCellIndex：保存关键中间值或配置
 +  const ranges = computeVirtualRanges(notebook)
 +
 +  // Resolve target cell via cellId (only stable identifier; no cellIndex in schema)
@@ -1539,26 +2710,33 @@ index a5560d1ad560c2e112a9f77acd56e574fbf71daf..7aa895653f8fc348fed2f11a002bb487
  
 -  // When a specific cell is targeted, constrain the window to that cell's range
 -  if (targetCellIndex !== undefined && cellRanges.has(targetCellIndex)) {
+-  // 指定单元格时约束窗口
 -    const range = cellRanges.get(targetCellIndex)!
+-    // 定义 range：保存关键中间值或配置
 +  if (targetCellIndex !== undefined && ranges.has(targetCellIndex)) {
 +    const range = ranges.get(targetCellIndex)!
      if (input.offset !== undefined) {
+-    // 有 offset 时校验
        if (offset >= range.start && offset <= range.end) {
+-      // offset 在范围内直接用
          globalStart = offset
 -      } else if (range.start + offset - 1 >= range.start && range.start + offset - 1 <= range.end) {
 -        globalStart = range.start + offset - 1
        } else {
          globalStart = range.start
+-        // 执行逻辑步骤
          warning =
 -          "WARNING: Offset out of bounds for the specified cell! ALWAYS use GLOBAL document line numbers. Offset reset to default."
 +          "WARNING: Offset out of bounds for the specified cell! ALWAYS use GLOBAL document line numbers (1-based). Offset reset to default."
        }
      } else {
        globalStart = range.start
+-      // 执行逻辑步骤
      }
      globalEnd = range.end
 -  } else {
 -    if (input.offset !== undefined) {
+-    // 有 offset 时校验
 -      globalStart = offset
 -    }
 +  } else if (input.offset !== undefined) {
@@ -1566,16 +2744,27 @@ index a5560d1ad560c2e112a9f77acd56e574fbf71daf..7aa895653f8fc348fed2f11a002bb487
    }
  
 -  globalStart = Math.max(1, Math.min(globalStart, lines.length > 0 ? lines.length : 1))
+-  // 执行逻辑步骤
 +  globalStart = Math.max(1, Math.min(globalStart, totalLines > 0 ? totalLines : 1))
  
 -  // Stream lines until the byte budget (12 KB) or line limit is reached
 +  // Render cells one by one, emitting headers + in-range source lines
    const maxBytes = 12 * 1024
+-  // 字节上限 12 KB
    let bytes = 0
 +  let rendered = 0
    let cut = false
 -  const returnedLines: string[] = []
 -  let currentLineIndex = globalStart - 1
+-
+-  while (currentLineIndex < globalEnd && currentLineIndex < lines.length && returnedLines.length < limit) {
+-  // 逐行收集到上限
+-    const line = lines[currentLineIndex]
+-    // 定义 line：保存关键中间值或配置
+-    const lineBytes = Buffer.byteLength(line, "utf8")
+-    // 定义 lineBytes：保存关键中间值或配置
+-    if (bytes + lineBytes > maxBytes && returnedLines.length > 0) {
+-    // 超字节上限截断
 +  let globalLineNum = 0
 +  let lastRenderedLine = 0
 +  const outputCells: string[] = []
@@ -1583,11 +2772,7 @@ index a5560d1ad560c2e112a9f77acd56e574fbf71daf..7aa895653f8fc348fed2f11a002bb487
 +  for (const cell of notebook.getCells()) {
 +    const cellRange = ranges.get(cell.index)
 +    if (!cellRange) continue
- 
--  while (currentLineIndex < globalEnd && currentLineIndex < lines.length && returnedLines.length < limit) {
--    const line = lines[currentLineIndex]
--    const lineBytes = Buffer.byteLength(line, "utf8")
--    if (bytes + lineBytes > maxBytes && returnedLines.length > 0) {
++
 +    // Determine which source lines of this cell fall in [globalStart, globalEnd]
 +    const srcStart = Math.max(globalStart, cellRange.start)
 +    const srcEnd = Math.min(globalEnd, cellRange.end)
@@ -1600,18 +2785,19 @@ index a5560d1ad560c2e112a9f77acd56e574fbf71daf..7aa895653f8fc348fed2f11a002bb487
 +
 +    // Render header
 +    if (rendered >= limit) {
++      cut = true
++      break
++    }
++    const headerLine = buildHeader(cell, cellRange)
++    const hdrBytes = Buffer.byteLength(headerLine, "utf8") + 4 // "--: "
++    if (bytes + hdrBytes > maxBytes && outputCells.length > 0) {
        cut = true
        break
      }
 -    returnedLines.push(`${currentLineIndex + 1}: ${line}`)
+-    // 返回结果给调用方
 -    bytes += lineBytes
 -    currentLineIndex++
-+    const headerLine = buildHeader(cell, cellRange)
-+    const hdrBytes = Buffer.byteLength(headerLine, "utf8") + 4 // "--: "
-+    if (bytes + hdrBytes > maxBytes && outputCells.length > 0) {
-+      cut = true
-+      break
-+    }
 +    outputCells.push(headerLine)
 +    bytes += hdrBytes
 +    rendered++
@@ -1663,6 +2849,7 @@ index a5560d1ad560c2e112a9f77acd56e574fbf71daf..7aa895653f8fc348fed2f11a002bb487
    }
  
 -  const more = currentLineIndex < globalEnd && currentLineIndex < lines.length
+-  // 判断是否还有更多行
 +  if (!cut) lastRenderedLine = Math.min(globalEnd, globalLineNum)
 +  const more = lastRenderedLine < globalEnd
  
@@ -1670,12 +2857,14 @@ index a5560d1ad560c2e112a9f77acd56e574fbf71daf..7aa895653f8fc348fed2f11a002bb487
    let output = warning ? `${warning}\n\n` : ""
    output +=
      [`<path>${notebook.uri.fsPath || notebook.uri.toString()}</path>`, `<type>notebook</type>`, "<content>"].join(
+-    // 执行逻辑步骤
        "\n",
      ) + "\n"
 -  output += returnedLines.join("\n")
 +  output += outputCells.join("\n")
  
    if (cut) {
+-  // 条件分支：按业务逻辑分流处理
 -    output += `\n\n(Output capped at 12 KB. Showing lines ${globalStart}-${currentLineIndex}. Use offset=${currentLineIndex + 1} to continue.)`
 +    output += `\n\n(Output capped at 12 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
    } else if (more) {
@@ -1683,6 +2872,7 @@ index a5560d1ad560c2e112a9f77acd56e574fbf71daf..7aa895653f8fc348fed2f11a002bb487
 +    output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
    } else {
 -    if (targetCellIndex !== undefined) {
+-    // 条件分支：精确匹配检查确保类型和值安全
 -      output += `\n\n(End of cell ${targetCellIndex})`
 -    } else {
 -      output += `\n\n(End of file - total ${lines.length} lines)`
@@ -1690,16 +2880,22 @@ index a5560d1ad560c2e112a9f77acd56e574fbf71daf..7aa895653f8fc348fed2f11a002bb487
 +    output += `\n\n(End of file — total ${totalLines} lines)`
    }
    output += "\n</content>"
+-  // 执行逻辑步骤
  
-@@ -104,43 +172,29 @@ export async function notebookSource(input: Record<string, unknown>) {
+   return {
+-  // 返回结果给调用方
+     ran: false,
+     summary: output,
      data: {
        path: notebook.uri.fsPath || notebook.uri.toString(),
        target: targetCellIndex !== undefined ? `cell ${targetCellIndex}` : "all",
+-      // 执行逻辑步骤
 -      offset: globalStart,
 +      cellId: cellId ?? (targetCellIndex !== undefined ? copilotLikeCellId(notebook.cellAt(targetCellIndex)) : undefined),
 +      globalStart,
        limit,
 -      returned: returnedLines.length,
+-      // 返回结果给调用方
 -      totalLines: lines.length,
 +      returned: outputCells.length,
 +      totalLines,
@@ -1719,26 +2915,35 @@ index a5560d1ad560c2e112a9f77acd56e574fbf71daf..7aa895653f8fc348fed2f11a002bb487
 - * cell index to its 1-based global line range for offset targeting.
 - */
 -function buildVirtualLines(notebook: vscode.NotebookDocument) {
+-// 展平 notebook 为虚拟行列表
 -  const lines: string[] = []
 -  const cellRanges = new Map<number, { start: number; end: number }>()
+-  // 定义 cellRanges：保存关键中间值或配置
++// header 行不占虚拟行号，仅标注 cell 元数据与 range
 +function buildHeader(cell: vscode.NotebookCell, range: { start: number; end: number }) {
 +  const id = copilotLikeCellId(cell)
 +  return `--: --- c${c1(cell)} ${cellTypeLabel(cell.kind)}/${cell.document.languageId} id=${id} lines=${cell.document.lineCount} range=[${range.start},${range.end}] ---`
 +}
  
 -  for (const cell of notebook.getCells()) {
+-  // 遍历单元格构建虚拟行
 -    const start = lines.length + 1
+-    // 定义 start：保存关键中间值或配置
 -    const id = shortId(cellIdentifiers(cell)[0] ?? `cell-${cell.index}`)
+-    // 定义 id：保存关键中间值或配置
 -    lines.push(
 -      `--- c${cell.index} ${cellKindLabel(cell.kind)}/${cell.document.languageId} id=${id} lines=${cell.document.lineCount} ---`,
 -    )
 -    const sourceLines = cell.document
+-    // 定义 sourceLines：保存关键中间值或配置
 -      .getText()
 -      .split(/\r?\n/)
 -      .map((line) => (line.length > 2000 ? line.substring(0, 2000) + "... (line truncated to 2000 chars)" : line))
 -    lines.push(...sourceLines)
 -    lines.push("")
+-    // 执行逻辑步骤
 -    const end = lines.length
+-    // 定义 end：保存关键中间值或配置
 -    cellRanges.set(cell.index, { start, end })
 +function lastRangeEnd(ranges: Map<number, { start: number; end: number }>) {
 +  let max = 0
@@ -1747,22 +2952,42 @@ index a5560d1ad560c2e112a9f77acd56e574fbf71daf..7aa895653f8fc348fed2f11a002bb487
    }
 -
 -  return { lines, cellRanges }
+-  // 返回结果给调用方
 +  return max > 0 ? max : undefined
  }
 diff --git a/sdks/vscode/src/notebook/summary.ts b/sdks/vscode/src/notebook/summary.ts
-index 03e269f99ede924c15acc6154f5ea9d0a6b6d48c..1726607d0b127a02639f08bf5d516f1d769af28b 100644
+index 7b39c53d3d..4159155ede 100644
 --- a/sdks/vscode/src/notebook/summary.ts
 +++ b/sdks/vscode/src/notebook/summary.ts
-@@ -4,7 +4,7 @@
+@@ -3,9 +3,8 @@
+  * execution state, and output MIME types as a compact LLM-friendly summary.
   */
  import * as vscode from "vscode"
+-// 执行逻辑步骤
  import { toPosixPath, quoteForSummary } from "../util"
 -import { compactCell, runtimeLabel } from "./format"
 +import { compactCell, runtimeLabel, computeVirtualRanges } from "./format"
  import { resolveNotebook } from "./resolve"
  
  // ---------------------------------------------------------------------------
-@@ -21,10 +21,7 @@ export async function notebookSummary(filePath?: string) {
+@@ -13,34 +12,31 @@ import { resolveNotebook } from "./resolve"
+ // ---------------------------------------------------------------------------
+ 
+ /** Bridge endpoint handler: builds a compact notebook summary for LLM consumption. */
++// 生成 notebook 摘要：cell 列表、执行状态和输出概要
++// 摘要统一 cellId/cN/range 约定，供 agent 快速选型
++// 摘要统一 cellId/cN/range 约定，供 agent 选型而无需拉全量 source
+ export async function notebookSummary(filePath?: string) {
+-// notebook 摘要处理器
+-  const notebook = await resolveNotebook(filePath)
+-  // 定义 notebook：保存关键中间值或配置
++  // 解析 notebook：通过文件路径查找已打开的文档
++const notebook = await resolveNotebook(filePath)
+   return compactNotebookResult(notebook, false)
+-  // 返回结果给调用方
+ }
+ 
+ // ---------------------------------------------------------------------------
  // Result builders
  // ---------------------------------------------------------------------------
  
@@ -1771,10 +2996,26 @@ index 03e269f99ede924c15acc6154f5ea9d0a6b6d48c..1726607d0b127a02639f08bf5d516f1d
 - * Also reused by run results when a full notebook view is needed.
 - */
 +/** Builds the dual-layer response (summary + data) for a notebook snapshot. */
++// 压缩 notebook 结果：提取关键统计信息，减少返回数据量
++// 压缩 notebook 工具统一返回形状，降低序列化体积
  export function compactNotebookResult(notebook: vscode.NotebookDocument, ran: boolean, extra?: Record<string, unknown>) {
-   const cells = notebook.getCells().map(compactCell)
+-// 构建 notebook 摘要响应
+-  const cells = notebook.getCells().map(compactCell)
+-  // 定义 cells：保存关键中间值或配置
++  // 获取所有 cell：按顺序遍历
++const cells = notebook.getCells().map(compactCell)
    return {
-@@ -44,30 +41,30 @@ export function compactNotebookResult(notebook: vscode.NotebookDocument, ran: bo
+-  // 返回结果给调用方
+     ran,
+     summary: notebookSummaryText(notebook, cells),
+     data: {
+       path: notebook.uri.fsPath || notebook.uri.toString(),
+       dirty: notebook.isDirty,
+-      // 执行逻辑步骤
+       runtime: runtimeLabel(notebook),
+       cells,
+       ...extra,
+@@ -52,38 +48,30 @@ export function compactNotebookResult(notebook: vscode.NotebookDocument, ran: bo
  // Summary text
  // ---------------------------------------------------------------------------
  
@@ -1783,11 +3024,16 @@ index 03e269f99ede924c15acc6154f5ea9d0a6b6d48c..1726607d0b127a02639f08bf5d516f1d
 - * Includes overall notebook stats (type, dirty, cell count, execution status).
 - */
  function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnType<typeof compactCell>[]) {
+-// 生成 LLM 友好的摘要文本
 +  const virtualRanges = computeVirtualRanges(notebook)
    const code = cells.filter((cell) => cell.kind === "code")
+-  // 筛选 code 单元格
    const executed = code.filter((cell) => cell.exec !== "not-run")
+-  // 定义 executed：保存关键中间值或配置
    const failed = code.filter((cell) => cell.exec.startsWith("fail"))
+-  // 统计失败数
    const status = failed.length
+-  // 执行状态汇总
      ? `${failed.length} failed`
      : executed.length === code.length && code.length > 0
 -      ? "All code cells executed successfully."
@@ -1795,6 +3041,7 @@ index 03e269f99ede924c15acc6154f5ea9d0a6b6d48c..1726607d0b127a02639f08bf5d516f1d
        : `${executed.length}/${code.length} code cells executed`
  
    return [
+-  // 返回结果给调用方
      `Notebook: ${toPosixPath(notebook.uri.fsPath || notebook.uri.toString())}`,
 -    `Type: ${notebook.notebookType}, dirty=${notebook.isDirty}, cells=${notebook.cellCount}, runtime=${runtimeLabel(notebook) ?? "unknown"}. ${status}`,
 +    `Type: ${notebook.notebookType}, dirty=${notebook.isDirty}, num_cells=${notebook.cellCount}, runtime=${runtimeLabel(notebook) ?? "unknown"}. ${status}`,
@@ -1803,6 +3050,7 @@ index 03e269f99ede924c15acc6154f5ea9d0a6b6d48c..1726607d0b127a02639f08bf5d516f1d
      "",
 -    'Cells (format: i id=<stable short cell id> <kind>/<lang> lines=<line count> exec="<run state: current-run/saved-output/not-run, order, status, duration, end time>" existing_outs="<current saved output MIME summary>" first="<first source line>"):',
 -    ...cells.map(
+-    // 执行逻辑步骤
 -      (cell) =>
 -        `${cell.i} id=${cell.id} ${cell.kind}/${cell.lang} lines=${cell.lines} exec=${quoteForSummary(cell.exec)} existing_outs=${quoteForSummary(cell.existing_outs.join(",") || "none")} first=${JSON.stringify(cell.first)}`,
 -    ),
@@ -1814,23 +3062,222 @@ index 03e269f99ede924c15acc6154f5ea9d0a6b6d48c..1726607d0b127a02639f08bf5d516f1d
 +    }),
      "",
 -    "Next: use vscode_notebook_source with cellIndex=N, offset=1, limit=120 for source; use vscode_notebook_output for outputs.",
+-    // 执行逻辑步骤
 +    "Next: use vscode_notebook_source with cellId=#VSC-xxx, offset=1, limit=120 for source; use vscode_notebook_run to execute; use vscode_notebook_output for outputs; use vscode_notebook_edit to modify.",
    ].join("\n")
  }
 diff --git a/sdks/vscode/src/util.ts b/sdks/vscode/src/util.ts
-index 980f1a731d5f311b8952fb300616736979543bf3..5faf71c7b3b1c94fd76964299e0eb1b28b03cccf 100644
+index b206bfd1b5..e16fb8e714 100644
 --- a/sdks/vscode/src/util.ts
 +++ b/sdks/vscode/src/util.ts
-@@ -93,9 +93,9 @@ export function quoteForSummary(s: string) {
+@@ -5,65 +5,51 @@
+  * and formatting primitives used by bridge, notebook, and commands.
+  */
+ import * as vscode from "vscode"
+-// 执行逻辑步骤
+ 
+ // ---------------------------------------------------------------------------
+ // Type guards & record accessors
+ // ---------------------------------------------------------------------------
+ 
+ /** Checks whether a value is a non-null, non-array plain object. */
++// 类型守卫：检查值是否为 record（非数组的对象）
++// 类型守卫：检查值是否为非数组的对象
+ export function isRecord(value: unknown): value is Record<string, unknown> {
+-// 类型守卫：非 null 非数组的普通对象
+   return typeof value === "object" && value !== null && !Array.isArray(value)
+-  // 返回结果给调用方
+ }
+ 
+ /** Extracts a string property from a record, returning `undefined` if missing or wrong type. */
++// 类型安全属性获取：从 record 中提取字符串值，返回 string | undefined
+ export function stringProp(record: Record<string, unknown>, key: string) {
+-// 安全读取字符串属性
+   const value = record[key]
+-  // 定义 value：保存关键中间值或配置
+   return typeof value === "string" ? value : undefined
+-  // 返回 undefined 表示无结果或用户取消
+ }
+ 
+ /** Extracts a finite number property from a record. */
++// 类型安全属性获取：从 record 中提取数值，返回 number | undefined
+ export function numberProp(record: Record<string, unknown>, key: string) {
+-// 安全读取有限数字属性
+   const value = record[key]
+-  // 定义 value：保存关键中间值或配置
+   return typeof value === "number" && Number.isFinite(value) ? value : undefined
+-  // 返回 undefined 表示无结果或用户取消
+ }
+ 
+ /** Shorthand for `stringProp` when reading notebook metadata dictionaries. */
+ export function stringAt(record: Record<string, unknown>, key: string) {
+-// 读取元数据字符串属性的简写
+   return stringProp(record, key)
+-  // 返回结果给调用方
+ }
+ 
+ /** Reads `record[key][nestedKey]` as a string, safely. */
+ export function nestedStringAt(record: Record<string, unknown>, key: string, nestedKey: string) {
+-// 安全读取嵌套属性
+   const value = record[key]
+-  // 定义 value：保存关键中间值或配置
+   return isRecord(value) ? stringAt(value, nestedKey) : undefined
+-  // 返回 undefined 表示无结果或用户取消
+ }
+ 
+ /** Shorthand for `numberProp` when reading notebook metadata. */
+ export function numberAt(record: Record<string, unknown>, key: string) {
+-// 读取元数据数字属性的简写
+   return numberProp(record, key)
+-  // 返回结果给调用方
+ }
+ 
+ /** Returns the first non-empty string from a list of candidates. */
+ export function firstString(...values: Array<string | undefined>) {
+-// 返回第一个非空字符串
+   return values.find((value) => value && value.trim())
+-  // 返回结果给调用方
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -74,35 +60,26 @@ export function firstString(...values: Array<string | undefined>) {
+  * Reads `record[key]` as a string, or joins an array of strings with `eol`.
+  * Used to accept either `"source": "line1\nline2"` or `"source": ["line1","line2"]`.
+  */
++// 源码属性读取统一 EOL 规范化，避免 CRLF 匹配失败
+ export function sourceProp(record: Record<string, unknown>, key: string, eol = "\n") {
+-// 读取 source：字符串或数组拼接
+   const value = record[key]
+-  // 定义 value：保存关键中间值或配置
+   if (typeof value === "string") return value
+-  // 条件分支：精确匹配检查确保类型和值安全
+   if (Array.isArray(value) && value.every((item) => typeof item === "string")) {
+-  // 条件分支：精确匹配检查确保类型和值安全
+     return value.join(eol)
+-    // 返回结果给调用方
+   }
+   return undefined
+-  // 返回 undefined 表示无结果或用户取消
+ }
+ 
+ /**
+  * Converts a user-supplied file path or URI string into a `vscode.Uri`.
+  * Handles Windows drive-letter paths, absolute Unix paths, and scheme-based URIs.
+  */
++// 从输入创建 URI：支持文件路径和 URI 字符串
+ export function uriFromInput(input: string) {
+-// 用户输入转 Uri：Windows 盘符、Unix 绝对、scheme URI
+   if (/^[a-zA-Z]:[\\/]/.test(input)) return vscode.Uri.file(input)
+-  // Windows 盘符路径检测
+   if (input.startsWith("/")) return vscode.Uri.file(input)
+-  // Unix 绝对路径检测
+   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(input)) return vscode.Uri.parse(input)
+-  // 带 scheme 的 URI 检测
+   return vscode.Uri.file(input)
+-  // 返回结果给调用方
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -110,54 +87,45 @@ export function uriFromInput(input: string) {
+ // ---------------------------------------------------------------------------
+ 
+ /** Converts a Windows path to forward-slash POSIX style to reduce `\\` token bloat in LLM context. */
++// 转换为 POSIX 路径：统一路径分隔符为 /
+ export function toPosixPath(p: string) {
+-// Windows 路径转 POSIX 风格
+   return p.replace(/\\/g, "/")
+-  // 返回结果给调用方
+ }
+ 
+ /**
+  * Wraps a metadata string in double quotes, escaping embedded newlines.
+  * Only used for short structural labels (exec state, MIME lists) — NOT for raw source content.
+  */
++// 为摘要添加引号：长文本截断并添加省略号
+ export function quoteForSummary(s: string) {
+-// 双引号包裹并转义换行
    return `"${s.replace(/\n/g, "\\n")}"`
+-  // 返回结果给调用方
  }
  
 -/** Truncates text to 500 chars with `...` suffix for preview display. */
 -export function previewText(text: string) {
+-// 截断到 500 字符加省略号
 -  return text.length > 500 ? `${text.slice(0, 500)}...` : text
+-  // 返回结果给调用方
 +/** Truncates text to `max` chars with `...` suffix. Default max = 500. */
++// 预览文本：截取前 max 个字符并添加省略号
++// 预览截断默认 max，防止工具结果拖入整 cell 源码
++// 预览截断默认 max，阻止工具结果拖入整段 cell 源码
 +export function previewText(text: string, max = 500) {
 +  return text.length > max ? `${text.slice(0, max)}...` : text
  }
  
  /** Human-readable byte size: B / KB / MB. */
++// 格式化字节数：1024→1KB、1048576→1MB，用于输出摘要
+ export function formatBytes(n: number) {
+-// 人类可读字节大小
+   if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}MB`
+-  // 条件分支：按业务逻辑分流处理
+   if (n >= 1024) return `${(n / 1024).toFixed(1)}KB`
+-  // 条件分支：按业务逻辑分流处理
+   return `${n}B`
+-  // 返回结果给调用方
+ }
+ 
+ /** Returns the full document range covering all lines (for replace edits). */
+ export function fullDocumentRange(document: vscode.TextDocument) {
+-// 覆盖文档全部行的 Range
+   if (document.lineCount === 0) return new vscode.Range(0, 0, 0, 0)
+-  // 条件分支：精确匹配检查确保类型和值安全
+   return new vscode.Range(new vscode.Position(0, 0), document.lineAt(document.lineCount - 1).range.end)
+-  // 返回结果给调用方
+ }
+ 
+ /** Returns the line separator for a document (`\r\n` or `\n`). */
+ export function documentEol(document: vscode.TextDocument) {
+-// 返回文档行尾分隔符
+   return document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n"
+-  // 返回结果给调用方
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -165,35 +133,28 @@ export function documentEol(document: vscode.TextDocument) {
+ // ---------------------------------------------------------------------------
+ 
+ /** Returns human-readable activation state of a VS Code extension. */
++// 扩展状态：存储 VS Code 扩展的持久化状态
++// 扩展状态管理：封装 VS Code globalState 的读写
+ export function extensionState(id: string) {
+-// 扩展激活状态：missing/active/installed
+   const extension = vscode.extensions.getExtension(id)
+-  // 定义 extension：保存关键中间值或配置
+   if (!extension) return "missing"
+-  // 前置校验：排除非法输入或空值情况
+   return extension.isActive ? "active" : "installed"
+-  // 返回结果给调用方
+ }
+ 
+ /** Returns id, isActive, version for a VS Code extension, or `undefined` if not installed. */
++// 扩展信息：版本号和安装路径，用于日志和诊断
+ export function extensionInfo(id: string) {
+-// 扩展 id/激活/版本信息
+   const extension = vscode.extensions.getExtension(id)
+-  // 定义 extension：保存关键中间值或配置
+   return extension
+-  // 返回结果给调用方
+     ? { id: extension.id, isActive: extension.isActive, version: extension.packageJSON?.version }
+     : undefined
+ }
+ 
+ /** Opens a JSON document in a new editor tab for inspection. */
+ export async function openJsonDocument(value: unknown) {
+-// 在编辑器中打开 JSON 文档
+   const document = await vscode.workspace.openTextDocument({
+-  // 定义 document：保存关键中间值或配置
+     content: JSON.stringify(value, null, 2),
+     language: "json",
+   })
+   await vscode.window.showTextDocument(document, { preview: false })
+-  // 异步调用 VS Code API
+ }

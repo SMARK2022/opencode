@@ -1,27 +1,53 @@
-From d95dc89b856dd480e6a74c5445d22d75a3a009f4 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Mon, 4 May 2026 02:15:12 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E5=BC=95=E5=85=A5=E7=BD=91=E7=BB=9C?=
- =?UTF-8?q?=E4=BB=A3=E7=90=86=E5=8A=9F=E8=83=BD=EF=BC=8C=E4=BC=98=E5=8C=96?=
- =?UTF-8?q?npm=E9=85=8D=E7=BD=AE=E5=92=8C=E8=AF=B7=E6=B1=82=E5=A4=84?=
- =?UTF-8?q?=E7=90=86?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
+diff --git a/packages/core/src/models-dev.ts b/packages/core/src/models-dev.ts
+--- a/packages/core/src/models-dev.ts
++++ b/packages/core/src/models-dev.ts
+@@ -11,6 +11,9 @@
+ import { EventV2 } from "./event"
+ import { makeGlobalNode } from "./effect/app-node"
+ import { httpClient } from "./effect/app-node-platform"
++import { NetworkProxy } from "./network-proxy"
++// 代理路由：models.dev 请求通过 NetworkProxy.routedFetch 路由，遵循系统代理设置
++// purpose="infrastructure" 区分基础设施请求，便于代理路由策略
+ 
+ export const CatalogModelStatus = Schema.Literals(["alpha", "beta", "deprecated"])
+ export type CatalogModelStatus = typeof CatalogModelStatus.Type
+@@ -167,12 +170,16 @@
+     })
+ 
+     const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* () {
+-      return yield* HttpClientRequest.get(`${source}/api.json`).pipe(
+-        HttpClientRequest.setHeader("User-Agent", USER_AGENT),
+-        http.execute,
+-        Effect.flatMap((res) => res.text),
+-        Effect.timeout("10 seconds"),
+-      )
++      // infrastructure 用途走 NetworkProxy.routedFetch，真正应用系统代理（非仅 resolve）
++      const text = yield* Effect.promise(async () => {
++        const res = await NetworkProxy.routedFetch(`${source}/api.json`, {
++          purpose: "infrastructure",
++          headers: { "User-Agent": USER_AGENT },
++        })
++        if (!res.ok) throw new Error(`models.dev fetch failed: ${res.status}`)
++        return await res.text()
++      }).pipe(Effect.timeout("10 seconds"))
++      return text
+     })
+ 
+     const loadFromDisk = fs.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).pipe(
 diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-proxy.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a17227f075f58
 --- /dev/null
 +++ b/packages/core/src/network-proxy.ts
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,198 @@
 +export * as NetworkProxy from "./network-proxy"
 +
++// 请求用途分类：区分本地、provider、基础设施、npm 等不同场景的代理路由
 +export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin" | "unknown"
 +
++// 代理路由结果：直连或经由指定代理服务器
 +export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
 +
++// 系统代理缓存 TTL：120 秒内复用上次检测结果，避免频繁调用 scutil/reg
 +const TTL = 120_000
 +const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"])
 +
@@ -38,6 +64,7 @@ index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a1722
 +type FetchInput = Request | string | URL
 +type FetchFn = (input: FetchInput, init?: any) => Promise<Response>
 +
++// 生成 NO_PROXY 字符串：合并本地回环地址和额外条目
 +export function noProxyString(extra: string[] = []) {
 +  return Array.from(new Set([...LOCAL, ...extra])).join(",")
 +}
@@ -50,6 +77,7 @@ index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a1722
 +  return LOCAL.has(normalizeHost(url.hostname))
 +}
 +
++// 规范化代理地址：确保带协议前缀
 +function normalizeProxy(value: string | undefined) {
 +  if (!value) return
 +  const next = value.trim()
@@ -58,6 +86,7 @@ index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a1722
 +  return `http://${next}`
 +}
 +
++// 检查 URL 是否匹配 bypass 列表中的任意条目
 +function bypass(url: URL, list: string[]) {
 +  const host = normalizeHost(url.hostname)
 +  for (const raw of list) {
@@ -74,6 +103,7 @@ index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a1722
 +  return false
 +}
 +
++// 从环境变量读取代理配置
 +function envProxy(url: URL): SystemProxy | undefined {
 +  const proxy =
 +    url.protocol === "https:"
@@ -85,6 +115,7 @@ index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a1722
 +  return { http: picked, https: picked, bypass: (process.env.NO_PROXY || process.env.no_proxy || "").split(",") }
 +}
 +
++// 执行系统命令并返回 stdout 文本，超时返回空字符串
 +async function execText(command: string, args: string[], timeout = 1500) {
 +  const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore" })
 +  const timer = setTimeout(() => proc.kill(), timeout)
@@ -99,6 +130,7 @@ index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a1722
 +  }
 +}
 +
++// 解析 Windows 注册表中的代理服务器配置
 +function parseWindowsProxyServer(value: string, protocol: string) {
 +  if (!value.includes("=")) return normalizeProxy(value)
 +  const entries = Object.fromEntries(
@@ -111,6 +143,7 @@ index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a1722
 +  return normalizeProxy(entries[protocol.replace(":", "")] || entries.http || entries.https || entries.socks)
 +}
 +
++// 从 Windows 注册表读取系统代理设置
 +async function windowsProxy(): Promise<SystemProxy | undefined> {
 +  const text = await execText("reg", ["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"])
 +  if (!text) return
@@ -126,6 +159,7 @@ index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a1722
 +  return { http: proxy, https: proxy, bypass: bypassList }
 +}
 +
++// 从 macOS scutil --proxy 读取系统代理设置
 +async function macProxy(): Promise<SystemProxy | undefined> {
 +  const text = await execText("scutil", ["--proxy"])
 +  if (!text) return
@@ -140,6 +174,7 @@ index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a1722
 +  return { http, https, socks, bypass: [] }
 +}
 +
++// 获取当前系统代理（带 TTL 缓存），仅 Windows 和 macOS 支持系统级检测
 +async function currentSystemProxy() {
 +  if (process.platform !== "win32" && process.platform !== "darwin") return undefined
 +  if (!cache || cache.expires < Date.now()) {
@@ -151,6 +186,7 @@ index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a1722
 +  return cache.value
 +}
 +
++// 解析目标 URL 应使用的代理：优先系统代理，回退到环境变量
 +async function configuredProxy(url: URL) {
 +  if (process.platform === "win32" || process.platform === "darwin") {
 +    const sys = await currentSystemProxy()
@@ -162,6 +198,7 @@ index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a1722
 +  return url.protocol === "https:" ? env.https || env.http || env.socks : env.http || env.https || env.socks
 +}
 +
++// 解析代理路由：本地直连，其他根据系统/环境代理配置决定
 +export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown"): Promise<Route> {
 +  const url = input instanceof URL ? input : new URL(input)
 +  if (purpose === "local" || isLocal(url)) return { type: "direct", reason: "local" }
@@ -170,10 +207,12 @@ index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a1722
 +  return { type: "direct", reason: "no-proxy" }
 +}
 +
++// 使用代理路由执行 fetch 请求
 +export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
 +  return fetchWithRoute(fetch, input, init)
 +}
 +
++// 使用指定 fetchFn 和代理路由执行请求：代理失败时回退直连
 +export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
 +  const url = new URL(input instanceof Request ? input.url : input.toString())
 +  const { purpose = "unknown", ...rest } = (init ?? {}) as RoutedInit
@@ -188,6 +227,7 @@ index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a1722
 +  }
 +}
 +
++// 生成 npm 安装时的代理选项
 +export async function npmProxyOptions(registry: string) {
 +  const route = await resolveProxyRoute(registry, "npm")
 +  if (route.type === "direct") return {}
@@ -198,16 +238,17 @@ index 0000000000000000000000000000000000000000..08090553e50bb54bd6c94a1e0e1a1722
 +  }
 +}
 diff --git a/packages/core/src/npm-config.ts b/packages/core/src/npm-config.ts
-index 896bb84872c1ffce95a81d6562214468769dcab3..56418a000e72ff62210e7d039aa3ee4c6c9a645c 100644
 --- a/packages/core/src/npm-config.ts
 +++ b/packages/core/src/npm-config.ts
-@@ -6,8 +6,48 @@ import Config from "@npmcli/config"
+@@ -6,8 +6,55 @@
  // @ts-expect-error npm does not publish types for this internal config API.
  import { definitions, flatten, nerfDarts, shorthands } from "@npmcli/config/lib/definitions/index.js"
  import { Effect } from "effect"
 +import { NetworkProxy } from "./network-proxy"
  
  const npmPath = fileURLToPath(new URL("..", import.meta.url))
++// 默认 npm registry 和国内镜像 registry
++// 自动检测可用性选择更快的源，避免网络问题导致安装超时
 +const defaultRegistry = "https://registry.npmjs.org"
 +const mirrorRegistry = "https://registry.npmmirror.com"
 +let selectedRegistry: { expires: number; value: Promise<string> } | undefined
@@ -216,10 +257,12 @@ index 896bb84872c1ffce95a81d6562214468769dcab3..56418a000e72ff62210e7d039aa3ee4c
 +  return value.endsWith("/") ? value.slice(0, -1) : value
 +}
 +
++// 从环境变量读取 registry 覆盖配置
 +function envRegistry() {
 +  return process.env.OPENCODE_NPM_REGISTRY || process.env.npm_config_registry || process.env.NPM_CONFIG_REGISTRY
 +}
 +
++// ping registry 检测可用性，通过代理路由发起请求
 +async function pingRegistry(registry: string) {
 +  try {
 +    const response = await NetworkProxy.routedFetch(`${normalizeRegistry(registry)}/-/ping?write=false`, {
@@ -233,6 +276,7 @@ index 896bb84872c1ffce95a81d6562214468769dcab3..56418a000e72ff62210e7d039aa3ee4c
 +  }
 +}
 +
++// 按顺序检测候选 registry，返回第一个可用的
 +async function selectRegistry() {
 +  const candidates = [defaultRegistry, mirrorRegistry]
 +  for (const candidate of candidates) {
@@ -241,6 +285,8 @@ index 896bb84872c1ffce95a81d6562214468769dcab3..56418a000e72ff62210e7d039aa3ee4c
 +  return defaultRegistry
 +}
 +
++// 带缓存的默认 registry 选择：60 秒内复用上次结果
++// 缓存避免每次安装都发起 ping 请求，减少启动延迟
 +function defaultRegistryForNetwork() {
 +  if (!selectedRegistry || selectedRegistry.expires < Date.now()) {
 +    selectedRegistry = { expires: Date.now() + 60_000, value: selectRegistry() }
@@ -250,7 +296,7 @@ index 896bb84872c1ffce95a81d6562214468769dcab3..56418a000e72ff62210e7d039aa3ee4c
  
  export const load = (dir: string) =>
    Effect.tryPromise({
-@@ -26,7 +66,13 @@ export const load = (dir: string) =>
+@@ -26,7 +73,13 @@
          warn: false,
        })
        await config.load()
@@ -265,7 +311,7 @@ index 896bb84872c1ffce95a81d6562214468769dcab3..56418a000e72ff62210e7d039aa3ee4c
      },
      catch: (cause) => cause,
    }).pipe(Effect.orElseSucceed(() => ({}) as Record<string, unknown>))
-@@ -34,7 +80,7 @@ export const load = (dir: string) =>
+@@ -34,7 +87,7 @@
  export const registry = (dir: string) =>
    load(dir).pipe(
      Effect.map((config) => {
@@ -276,37 +322,38 @@ index 896bb84872c1ffce95a81d6562214468769dcab3..56418a000e72ff62210e7d039aa3ee4c
      }),
    )
 diff --git a/packages/core/src/npm.ts b/packages/core/src/npm.ts
-index 92e40427681b3090ca1b0cb5e8937b4337c15249..00e0a7062d2d39c7c1b8dfea92e879f1345c05ea 100644
 --- a/packages/core/src/npm.ts
 +++ b/packages/core/src/npm.ts
-@@ -9,6 +9,7 @@ import { Global } from "./global"
- import { EffectFlock } from "./util/effect-flock"
+@@ -12,6 +12,7 @@
+ import { LayerNode } from "./effect/layer-node"
  import { makeRuntime } from "./effect/runtime"
  import { NpmConfig } from "./npm-config"
 +import { NetworkProxy } from "./network-proxy"
  
  export class InstallFailedError extends Schema.TaggedErrorClass<InstallFailedError>()("NpmInstallFailedError", {
    add: Schema.Array(Schema.String).pipe(Schema.optional),
-@@ -80,7 +81,13 @@ export const layer = Layer.effect(
+@@ -82,7 +83,16 @@
          yield* flock.acquire(`npm-install:${input.dir}`)
          const { Arborist } = yield* Effect.promise(() => import("@npmcli/arborist"))
          const add = input.add ?? []
 -        const npmOptions = yield* NpmConfig.load(input.dir)
 +        const loadedOptions = yield* NpmConfig.load(input.dir)
++        // 合并代理选项和超时配置：fetchRetries=0 避免代理切换时重复重试
 +        const npmOptions = {
 +          ...loadedOptions,
 +          ...(yield* Effect.promise(() => NetworkProxy.npmProxyOptions(String(loadedOptions.registry ?? "https://registry.npmjs.org")))),
++          // fetchRetries=0：代理失败时由 routedFetch 回退直连，npm 不再重试
 +          fetchRetries: 0,
++          // fetchTimeout=10s：避免单个包下载无限等待
 +          fetchTimeout: 10_000,
 +        }
          const arborist = new Arborist({
            ...npmOptions,
            path: input.dir,
 diff --git a/packages/core/test/npm-config.test.ts b/packages/core/test/npm-config.test.ts
-index 895b35db5409a1dbc10fb0068356e42a79a4a31f..3651a578de5224d680d93eb1a93b5f0defd40943 100644
 --- a/packages/core/test/npm-config.test.ts
 +++ b/packages/core/test/npm-config.test.ts
-@@ -48,4 +48,16 @@ describe("NpmConfig.registry", () => {
+@@ -48,4 +48,16 @@
  
      await expect(Effect.runPromise(NpmConfig.registry(tmp.path))).resolves.toBe("https://registry.example.test")
    })
@@ -323,261 +370,204 @@ index 895b35db5409a1dbc10fb0068356e42a79a4a31f..3651a578de5224d680d93eb1a93b5f0d
 +    }
 +  })
  })
-diff --git a/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts b/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts
-index 2ef5333245454713cc8b5df50f91fd5cca3fbab3..5768bbccb5621443b25407df9f1c1f6f80b169c7 100644
---- a/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts
-+++ b/packages/opencode/src/cli/cmd/tui/plugin/runtime.ts
-@@ -1008,9 +1008,6 @@ async function load(input: { api: Api; config: TuiConfig.Info }) {
-           })
-         }
- 
--        const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
--        await addExternalPluginEntries(next, ready)
--
-         applyInitialPluginEnabledState(next, config)
-         for (const plugin of next.plugins) {
-           if (!plugin.enabled) continue
-@@ -1020,6 +1017,18 @@ async function load(input: { api: Api; config: TuiConfig.Info }) {
-           // and hook chains rely on stable plugin ordering.
-           await activatePluginEntry(next, plugin, false)
-         }
-+
-+        void (async () => {
-+          const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
-+          const added = await addExternalPluginEntries(next, ready)
-+          applyInitialPluginEnabledState(next, config)
-+          for (const plugin of added.plugins) {
-+            if (!plugin.enabled) continue
-+            await activatePluginEntry(next, plugin, false)
-+          }
-+        })().catch((error) => {
-+          fail("failed to load external tui plugins", { directory: cwd, error })
-+        })
-       },
-     })
-   } catch (error) {
-diff --git a/packages/opencode/src/cli/cmd/tui/thread.ts b/packages/opencode/src/cli/cmd/tui/thread.ts
-index 41f78cebb37fb0a56c20e4cafb32f92944a632e8..c180b3c10643cee7eb41ab166a7078670a7332a6 100644
---- a/packages/opencode/src/cli/cmd/tui/thread.ts
-+++ b/packages/opencode/src/cli/cmd/tui/thread.ts
-@@ -23,6 +23,7 @@ import { validateSession } from "./validate-session"
- import { ServerLock } from "@/cli/cmd/tui/server-lock"
+diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
+--- a/packages/opencode/src/cli/cmd/tui.ts
++++ b/packages/opencode/src/cli/cmd/tui.ts
+@@ -1,6 +1,7 @@
+ import { cmd } from "@/cli/cmd/cmd"
+ import { ServerLock } from "@/cli/tui/server-lock"
  import { Flock } from "@opencode-ai/core/util/flock"
- import { Global } from "@opencode-ai/core/global"
 +import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { Global } from "@opencode-ai/core/global"
+ import path from "path"
+ import { fileURLToPath } from "url"
+@@ -59,6 +60,39 @@
  
- declare global {
-   const OPENCODE_WORKER_PATH: string
-@@ -51,21 +52,28 @@ async function input(value?: string) {
-   return piped + "\n" + value
- }
- 
--function proxyEnv() {
--  const http = process.env.HTTP_PROXY ?? process.env.http_proxy
--  const https = process.env.HTTPS_PROXY ?? process.env.https_proxy ?? http
--  const all = process.env.ALL_PROXY ?? process.env.all_proxy
--  const no = process.env.NO_PROXY ?? process.env.no_proxy
+ // 生产默认依赖：真实 ServerLock/Flock/Bun.sleep
+ // #49 收紧选举/陈旧/轮询默认值（10s/5s/200ms）
++
++// 守护进程环境：NO_PROXY 强制含回环；win/mac 剥离 shell 代理让 NetworkProxy 按请求路由；linux 规范化双大小写
 +function applyProxyEnv(env: Record<string, string>) {
-+  // Merge loopback addresses into NO_PROXY so the daemon never proxies its own server.
-+  const parts = (env.NO_PROXY ?? env.no_proxy ?? "").split(",").map((s) => s.trim()).filter(Boolean)
-+  const no = NetworkProxy.noProxyString(parts)
-+  env.NO_PROXY = no
-+  env.no_proxy = no
- 
--  return {
--    ...(http ? { HTTP_PROXY: http, http_proxy: http } : {}),
--    ...(https ? { HTTPS_PROXY: https, https_proxy: https } : {}),
--    ...(all ? { ALL_PROXY: all, all_proxy: all } : {}),
--    ...(no ? { NO_PROXY: no, no_proxy: no } : {}),
--    ...(process.env.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS } : {}),
--    ...(process.env.SSL_CERT_FILE ? { SSL_CERT_FILE: process.env.SSL_CERT_FILE } : {}),
--    ...(process.env.SSL_CERT_DIR ? { SSL_CERT_DIR: process.env.SSL_CERT_DIR } : {}),
++  const noProxy = env.NO_PROXY ?? env.no_proxy ?? ""
++  const merged = ["127.0.0.1", "localhost", "::1", noProxy].filter(Boolean).join(",")
++  env.NO_PROXY = merged
++  env.no_proxy = merged
 +  if (process.platform === "win32" || process.platform === "darwin") {
-+    // NetworkProxy reads system proxy per-request; strip inherited shell
-+    // proxy env so Bun never routes fetch through a stale/dead proxy.
-+    for (const key of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])
-+      delete env[key]
-+    return
-   }
++    for (const k of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]) {
++      delete env[k]
++    }
++  } else {
++    // linux：双大小写补齐，HTTPS 可回落 HTTP
++    for (const [up, low] of [
++      ["HTTP_PROXY", "http_proxy"],
++      ["HTTPS_PROXY", "https_proxy"],
++      ["ALL_PROXY", "all_proxy"],
++    ] as const) {
++      const v = env[up] ?? env[low]
++      if (v) {
++        env[up] = v
++        env[low] = v
++      }
++    }
++    if (!env.HTTPS_PROXY && !env.https_proxy && (env.HTTP_PROXY || env.http_proxy)) {
++      const v = env.HTTP_PROXY ?? env.http_proxy!
++      env.HTTPS_PROXY = v
++      env.https_proxy = v
++    }
++  }
++  return env
++}
 +
-+  // Linux: normalize proxy env — ensure both casings, HTTPS falls back to HTTP.
-+  const http = env.HTTP_PROXY ?? env.http_proxy
-+  const https = env.HTTPS_PROXY ?? env.https_proxy ?? http
-+  const all = env.ALL_PROXY ?? env.all_proxy
-+  if (http) { env.HTTP_PROXY = http; env.http_proxy = http }
-+  if (https) { env.HTTPS_PROXY = https; env.https_proxy = https }
-+  if (all) { env.ALL_PROXY = all; env.all_proxy = all }
- }
- 
- export function resolveThreadDirectory(project?: string, envPWD = process.env.PWD, cwd = process.cwd()) {
-@@ -137,13 +145,13 @@ export const TuiThreadCommand = cmd({
-         return
+ const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
+   read: ServerLock.read,
+   alive: ServerLock.alive,
+@@ -152,6 +186,8 @@
+         // identity assign：键已在 env 中则覆写为同值，强调代理键不得被省略
+         if (value !== undefined) env[key] = value
        }
-       const cwd = Filesystem.resolve(process.cwd())
--      const env = {
--        ...sanitizedProcessEnv({
--          [OPENCODE_PROCESS_ROLE]: "worker",
--          [OPENCODE_RUN_ID]: ensureRunID(),
--        }),
--        ...proxyEnv(),
--      }
-+      const env = sanitizedProcessEnv({
-+        [OPENCODE_PROCESS_ROLE]: "worker",
-+        [OPENCODE_RUN_ID]: ensureRunID(),
-+      })
++      // #71：规范化/剥离 shell 代理后由 NetworkProxy 按请求路由（覆盖 #52 仅转发）
 +      applyProxyEnv(env)
-+      process.env.NO_PROXY = env.NO_PROXY
-+      process.env.no_proxy = env.no_proxy
+       // 以 worker 角色 spawn 守护进程，index 入口旁路 yargs
+       const proc = deps.spawn([process.execPath, daemonFile], {
+         env: {
+diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
+--- a/packages/opencode/src/cli/tui/worker.ts
++++ b/packages/opencode/src/cli/tui/worker.ts
+@@ -131,8 +131,7 @@
+ // 处理与空闲超时。Worker 线程模式跳过此块，仅使用 RPC 通信。
+ if (isDaemon) {
+   // 先启动内部回环 HTTP 服务器（端口 0 表示由系统分配随机可用端口）
+-  // 先预热外部插件再监听/写锁，避免 TUI 在冷编译窗口误杀
+-  await warmupExternalPlugins()
++  // #71：锁可见后再预热，避免 npm/代理冷启动拖死 TUI 60s 健康等待（覆盖 #56 预监听预热）
+   const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })
  
-       const prompt = await input(args.prompt)
-       const config = await TuiConfig.get()
-diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
-index 4fd02f1f29f77e7ea126e113b44f0b8893905d13..e3d540a1bcc9a9ab3f85a648d56e27be9ca191ef 100644
---- a/packages/opencode/src/cli/cmd/tui/worker.ts
-+++ b/packages/opencode/src/cli/cmd/tui/worker.ts
-@@ -44,16 +44,9 @@ process.on("uncaughtException", (e) => {
-   })
- })
+   // 当启动方 TUI 请求时，额外启动一个外部可访问的 HTTP 服务器
+@@ -153,6 +152,8 @@
+   // daemon 启动后写锁，token 用于优雅退出清锁
+   
+   const lockToken = await ServerLock.write(internalServer.port, externalUrl)
++  // 延迟预热外部插件：不阻塞锁/健康检查，失败仅 best-effort
++  setTimeout(() => void warmupExternalPlugins(), 0).unref?.()
  
--// Pre-warm external plugin imports BEFORE the HTTP server goes live.
--//
--// Bun synchronously transpiles the entire dependency graph on the first
--// `import()` of an unbundled TypeScript plugin (e.g. opencode-gemini-auth)
--// which can stall the event loop for 20-30 seconds.  Doing this here means
--// the stall is over before the lock file is written, so by the time the
--// launching TUI starts polling the server is already fully responsive.
--//
--// This is a best-effort warm-up: every error is swallowed so a missing or
--// incompatible plugin cannot prevent the server from starting.
-+// Pre-warm external plugin imports without making daemon health depend on
-+// package installation or network access.  This is purely a latency
-+// optimization: the real plugin loader still owns correctness and errors.
- async function warmupExternalPlugins() {
-   if (Flag.OPENCODE_PURE) return
-   try {
-@@ -78,8 +71,6 @@ async function warmupExternalPlugins() {
-   } catch {}
- }
- 
--await warmupExternalPlugins()
--
- // Always start the internal loopback HTTP server first.
- const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })
- 
-@@ -100,6 +91,10 @@ if (externalPort !== undefined) {
- // Write the lock file atomically (internal port + optional external URL).
- const lockToken = await ServerLock.write(internalServer.port, externalUrl)
- 
-+// Start the best-effort warm-up only after the lock is visible so a slow npm
-+// registry or proxy cannot keep the launcher stuck waiting for daemon health.
-+setTimeout(() => void warmupExternalPlugins(), 0).unref?.()
-+
- // ── Graceful shutdown ──────────────────────────────────────────────────────
- let shutdownInProgress = false
- 
+   // ── 优雅关闭 ───────────────────────────────────────────────────────────
+   let shutdownInProgress = false
 diff --git a/packages/opencode/src/effect/runner.ts b/packages/opencode/src/effect/runner.ts
-index 1e7d4c2966c7d7d71f08f62875f87c574c5da285..cf922d1e43b93118e20600d8d7c87f25034389cb 100644
 --- a/packages/opencode/src/effect/runner.ts
 +++ b/packages/opencode/src/effect/runner.ts
-@@ -109,7 +109,7 @@ export const make = <A, E = never>(
+@@ -109,7 +109,9 @@
      Effect.gen(function* () {
        if (shell.ready) yield* shell.ready.await.pipe(Effect.exit, Effect.asVoid)
        yield* Deferred.succeed(shell.cancelled, undefined).pipe(Effect.asVoid)
 -      yield* Fiber.interrupt(shell.fiber)
++      // 非阻塞中断：fork 到 scope 中执行，避免等待 fiber 终止
++      // Effect.exit 确保中断不抛出异常到调用链，forkIn 将其隔离到 scope
 +      yield* Fiber.interrupt(shell.fiber).pipe(Effect.exit, Effect.forkIn(scope), Effect.asVoid)
      })
  
    const ensureRunning = (work: Effect.Effect<A, E>) =>
-@@ -180,8 +180,8 @@ export const make = <A, E = never>(
+@@ -175,8 +177,9 @@
        case "Running":
          return [
            Effect.gen(function* () {
 -            yield* Fiber.interrupt(st.run.fiber)
--            yield* Deferred.await(st.run.done).pipe(Effect.exit, Effect.asVoid)
+-            yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.asVoid)
++            // 先 fail done 唤醒等待者，再非阻塞中断 fiber
 +            yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.exit, Effect.asVoid)
 +            yield* Fiber.interrupt(st.run.fiber).pipe(Effect.exit, Effect.forkIn(scope), Effect.asVoid)
              yield* idleIfCurrent()
            }),
            { _tag: "Idle" } as const,
-diff --git a/packages/opencode/src/provider/models.ts b/packages/opencode/src/provider/models.ts
-index 170fe516c97c64ac8b5f8bbf64f1ce96f3dbc4ca..279aae51645948bd319242ff45e321ba1ed32d8b 100644
---- a/packages/opencode/src/provider/models.ts
-+++ b/packages/opencode/src/provider/models.ts
-@@ -8,6 +8,7 @@ import { lazy } from "@/util/lazy"
- import { Filesystem } from "@/util/filesystem"
- import { Flock } from "@opencode-ai/core/util/flock"
- import { Hash } from "@opencode-ai/core/util/hash"
-+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+diff --git a/packages/opencode/src/plugin/tui/runtime.ts b/packages/opencode/src/plugin/tui/runtime.ts
+--- a/packages/opencode/src/plugin/tui/runtime.ts
++++ b/packages/opencode/src/plugin/tui/runtime.ts
+@@ -1103,18 +1103,26 @@
+       })
+     }
  
- // Try to import bundled snapshot (generated at build time)
- // Falls back to undefined in dev mode when snapshot doesn't exist
-@@ -114,7 +115,8 @@ function skip(force: boolean) {
- }
- 
- const fetchApi = async () => {
--  const result = await fetch(`${url()}/api.json`, {
-+  const result = await NetworkProxy.routedFetch(`${url()}/api.json`, {
-+    purpose: "infrastructure",
-     headers: { "User-Agent": Installation.USER_AGENT },
-     signal: AbortSignal.timeout(10000),
-   })
-@@ -164,7 +166,7 @@ export async function refresh(force = false) {
- }
- 
- if (!Flag.OPENCODE_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-completions")) {
--  void refresh()
-+  setTimeout(() => void refresh(), ttl).unref?.()
-   setInterval(
-     async () => {
-       await refresh()
+-    const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
+-    await addExternalPluginEntries(next, ready)
+-
+     applyInitialPluginEnabledState(next, config)
+     for (const plugin of next.plugins) {
+       if (!plugin.enabled) continue
+-      // Keep plugin execution sequential for deterministic side effects:
+-      // command registration order affects keybind/command precedence,
+-      // route registration is last-wins when ids collide,
+-      // and hook chains rely on stable plugin ordering.
++      // 保持插件顺序执行：命令注册顺序影响快捷键优先级，
++      // 路由注册为后覆盖前，hook 链依赖稳定的插件顺序
+       await activatePluginEntry(next, plugin, false)
+     }
++
++    // 延迟加载外部插件：避免 npm 解析阻塞 TUI 启动
++    void (async () => {
++      const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
++      const added = await addExternalPluginEntries(next, ready)
++      applyInitialPluginEnabledState(next, config)
++      for (const plugin of added.plugins) {
++        if (!plugin.enabled) continue
++        await activatePluginEntry(next, plugin, false)
++      }
++    })().catch((error) => {
++      fail("failed to load external tui plugins", { directory: cwd, error })
++    })
+     next.view.update({ status: listPluginStatus(next) })
+   } catch (error) {
+     fail("failed to load tui plugins", { directory: cwd, error })
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
-index ab6c83796d316e5cc24080567cfc906a270c49b8..e103c019c8bf7506066c6c3f67a46cd9bdcfd23d 100644
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -23,6 +23,7 @@ import { Effect, Layer, Context, Schema, Types } from "effect"
- import { EffectBridge } from "@/effect/bridge"
+@@ -23,6 +23,7 @@
  import { InstanceState } from "@/effect/instance-state"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
+ import { EffectPromise } from "@/effect/promise"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
 +import { NetworkProxy } from "@opencode-ai/core/network-proxy"
  import { isRecord } from "@/util/record"
- import { optionalOmitUndefined, withStatics } from "@/util/schema"
- 
-@@ -1548,8 +1549,9 @@ const layer: Layer.Layer<
-             }
-           }
+ import { optional } from "@opencode-ai/core/schema"
+ import { ProviderTransform } from "./transform"
+@@ -1785,8 +1786,11 @@
+           const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
+           if (combined) opts.signal = combined
  
 -          const res = await fetchFn(input, {
++          // 通过 NetworkProxy.fetchWithRoute 包装请求：按 purpose 路由代理
++          // provider 请求走 provider 用途，区别于基础设施和 npm 请求
 +          const res = await NetworkProxy.fetchWithRoute(fetchFn, input, {
              ...opts,
 +            purpose: "provider",
              // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
              timeout: false,
-           })
+           }).finally(() => headerTimeoutCtl?.clear())
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index a7de59c0b62133c671e7a5d59759ea9c88351f17..d3f113fc8be16460f35adca20a6d12708c9f6b34 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -123,6 +123,44 @@ export const layer = Layer.effect(
+@@ -153,6 +153,49 @@
      const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
-       yield* elog.info("cancel", { sessionID })
+       yield* Effect.logInfo("cancel", { "session.id": sessionID })
        yield* state.cancel(sessionID)
-+      yield* abortPendingAssistant(sessionID)
++      // 中止待处理的 assistant 消息：标记 AbortedError 并完成 pending/running 工具部件
++      // Effect.ignore 确保 cancel 不会因子消息中止失败而失败
++      yield* abortPendingAssistant(sessionID).pipe(Effect.ignore)
 +    })
 +
 +    const abortPendingAssistant = Effect.fn("SessionPrompt.abortPendingAssistant")(function* (sessionID: SessionID) {
++      // findMessage 可能抛出 NotFound（session 不存在），catchAll 转为 None
 +      const match = yield* sessions.findMessage(
 +        sessionID,
 +        (msg) => msg.info.role === "assistant" && !msg.info.time.completed,
-+      )
++      ).pipe(Effect.catch(() => Effect.succeed(Option.none())))
 +      if (Option.isNone(match)) return
 +
 +      const now = Date.now()
 +      const assistant = match.value.info
 +      if (assistant.role !== "assistant" || assistant.time.completed) return
 +      assistant.time.completed = now
-+      assistant.error ??= new MessageV2.AbortedError({ message: "Aborted" }).toObject()
++      assistant.error ??= new SessionV1.AbortedError({ message: "Aborted" }).toObject()
 +      yield* sessions.updateMessage(assistant)
 +
++      // 将 pending/running 状态的工具部件标记为 error
++      // running 工具记录 interrupted 元数据，便于后续诊断中断原因
 +      yield* Effect.forEach(
 +        match.value.parts,
 +        (part) => {
@@ -595,7 +585,7 @@ index a7de59c0b62133c671e7a5d59759ea9c88351f17..d3f113fc8be16460f35adca20a6d1270
 +                end: now,
 +              },
 +            },
-+          } satisfies MessageV2.ToolPart).pipe(Effect.asVoid)
++          } satisfies SessionV1.ToolPart).pipe(Effect.asVoid)
 +        },
 +        { discard: true },
 +      )

@@ -1,73 +1,77 @@
-From 841752f540b7c49254012b2692d386f97a2b661e Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Wed, 29 Apr 2026 23:20:40 +0800
-Subject: [PATCH] =?UTF-8?q?fix:=20=E6=9B=B4=E6=96=B0=E6=9E=84=E5=BB=BA?=
- =?UTF-8?q?=E8=B4=A6=E5=8D=95=E5=A4=B4=E5=9D=97=E7=9A=84=E6=B3=A8=E9=87=8A?=
- =?UTF-8?q?=EF=BC=8C=E4=BC=98=E5=8C=96=E5=8D=A0=E4=BD=8D=E7=AC=A6=E6=9B=BF?=
- =?UTF-8?q?=E6=8D=A2=E6=9C=BA=E5=88=B6=EF=BC=8C=E8=B0=83=E6=95=B4=E5=B7=A5?=
- =?UTF-8?q?=E5=85=B7=E4=BD=BF=E7=94=A8=E9=83=A8=E5=88=86=E7=9A=84=E8=BE=93?=
- =?UTF-8?q?=E5=87=BA=E9=A1=BA=E5=BA=8F?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
-index 4c88ecb775129a0ccb785d94bfb7c848ce6b2cad..87c08e288f9da9721242bdb169e0ceb1d74ad019 100644
 --- a/packages/opencode/src/provider/claudecode.ts
 +++ b/packages/opencode/src/provider/claudecode.ts
-@@ -69,8 +69,9 @@ export function computeFingerprint(messageText: string, version: string): string
+@@ -67,7 +67,7 @@
+   return createHash("sha256").update(input, "utf8").digest("hex").slice(0, 3)
+ }
  
- /**
-  * 构造 Billing Header 占位块
-- * 发包前需要依赖这里的 cch=00000 作为标记，用于后续 xxHash 替换
-+ * cch 保持 00000，避免完整 body hash 污染最早 system 前缀
-  */
-+//  * 发包前需要依赖这里的 cch=00000 作为标记，用于后续 xxHash 替换
+-// 构建计费头块，包含版本、入口和 cch 占位符
++// 构建计费头块：cch 保持 00000，避免完整 body hash 污染最早 system 前缀
  export function buildBillingHeaderBlock(fp: string) {
    return {
      type: "text" as const,
-@@ -320,11 +321,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
-     if (originalThinking?.type === "disabled") {
-       // 用户明确禁用 thinking，尊重它
-       thinking = originalThinking
--    } else if (
--      modelId.includes("opus-4-7") ||
--      modelId.includes("opus-4-6") ||
--      modelId.includes("sonnet-4-6")
--    ) {
-+    } else if (modelId.includes("opus-4-7") || modelId.includes("opus-4-6") || modelId.includes("sonnet-4-6")) {
-       // 新模型走 adaptive
-       thinking = { type: "adaptive" }
-     } else if (modelId.includes("haiku")) {
-@@ -360,9 +357,12 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
+@@ -362,9 +362,8 @@
        ...(originalBody.output_config ? { output_config: originalBody.output_config } : {}),
      }
  
 -    // 6. 占位符替换机制
 -    const bodyWithPlaceholder = JSON.stringify(patchedBody)
 -    const finalBodyStr = patchCch(bodyWithPlaceholder)
-+    // // 6. 占位符替换机制
-+    // const bodyWithPlaceholder = JSON.stringify(patchedBody)
-+    // const finalBodyStr = patchCch(bodyWithPlaceholder)
-+
 +    // 6. 保留 cch=00000 占位，避免每轮重写最早 system 前缀
 +    const finalBodyStr = JSON.stringify(patchedBody)
  
      // 7. 处理请求头与鉴权
      const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId })
+
 diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
-index 7d1348f5005fe69511699810bda29d8238b1fd54..a8083db6ec6e97179ac27fa309ad065e2f180de9 100644
 --- a/packages/opencode/src/session/system.ts
 +++ b/packages/opencode/src/session/system.ts
-@@ -309,9 +309,9 @@ export const layer = Layer.effect(
-           `</env>`,
-         ]
+@@ -225,22 +225,7 @@
+           return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
+         }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
          return [
--          envLines.join("\n"),
-           toolUsageSection(toolIds),
-           ...staticSections(),
-+          envLines.join("\n"),
-         ]
+-          [
+-            `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
+-            `Here is some useful information about the environment you are running in:`,
+-            `<env>`,
+-            `  Working directory: ${ctx.directory}`,
+-            `  Workspace root folder: ${ctx.worktree}`,
+-            // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致
+-            ...gitContext.split("\n").map((line: string) => `  ${line}`),
+-            ...shellNotes.map((line) => `  ${line}`),
+-            `  OS Version: ${osVersion}`,
+-            ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
+-            `  Platform: ${process.platform}`,
+-            `  Today's date: ${new Date().toDateString()}`,
+-            ...(isWorktree ? [`This is a git worktree — run ALL commands from this directory.`, `Do NOT cd to the original repository root.`] : []),
+-            `</env>`,
+-          ].join("\n"),
++          
+           references.length === 0
+             ? undefined
+             : [
+@@ -268,6 +253,23 @@
+         `# Verification\n\nBefore reporting a coding task complete, verify the change when feasible.\nStart with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.\nIf you cannot verify, state that plainly and explain the blocker.`,
+         `# Context continuity\n\nThe conversation may be compacted or resumed from a summary when context gets long.\nAfter compaction, resume from the summary and current messages rather than restarting from scratch.\nCompaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.\nBefore your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.`,
+           `# Output efficiency\nGo straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.\n\nFocus text output on:\n- Decisions that need the user\x27s input\n- High-level status updates at key milestones (e.g. "build passing", "all tests green")\n- Errors or blockers that change the plan\n\nIf you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`,
++          [
++          // 环境信息块移到末尾：避免 env 内容影响 system prompt 前缀
++                      `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
++            `Here is some useful information about the environment you are running in:`,
++            `<env>`,
++            `  Working directory: ${ctx.directory}`,
++            `  Workspace root folder: ${ctx.worktree}`,
++            // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致
++            ...gitContext.split("\n").map((line: string) => `  ${line}`),
++            ...shellNotes.map((line) => `  ${line}`),
++            `  OS Version: ${osVersion}`,
++            ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
++            `  Platform: ${process.platform}`,
++            `  Today's date: ${new Date().toDateString()}`,
++            ...(isWorktree ? [`This is a git worktree — run ALL commands from this directory.`, `Do NOT cd to the original repository root.`] : []),
++            `</env>`,
++          ].join("\n"),
+         ].filter((part): part is string => part !== undefined)
        }),
  
+

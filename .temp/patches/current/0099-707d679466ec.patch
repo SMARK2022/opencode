@@ -4,29 +4,23 @@ Date: Thu, 7 May 2026 13:13:46 +0800
 Subject: [PATCH] =?UTF-8?q?feat(agent):=20=E6=B7=BB=E5=8A=A0=20VSCode=20?=
  =?UTF-8?q?=E7=AC=94=E8=AE=B0=E6=9C=AC=E7=9B=B8=E5=85=B3=E6=9D=83=E9=99=90?=
  =?UTF-8?q?=E9=80=89=E9=A1=B9=EF=BC=8C=E6=9B=B4=E6=96=B0=E8=AE=A1=E5=88=92?=
- =?UTF-8?q?=E6=A8=A1=E5=BC=8F=E6=8F=8F=E8=BF=B0=EF=BC=8C=E4=BC=98=E5=8C=96?=
- =?UTF-8?q?=E6=B6=88=E6=81=AF=E4=BD=BF=E7=94=A8=E7=BB=9F=E8=AE=A1=E9=80=BB?=
- =?UTF-8?q?=E8=BE=91?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
 
 diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
-index b9ab01934019a0de7a4c408e7c4da415866c084f..cca50f3a4b99ef966e2689cedb77fcf8da64a9d0 100644
+index 8530e46ee3..b8cb349e65 100644
 --- a/packages/opencode/src/agent/agent.ts
 +++ b/packages/opencode/src/agent/agent.ts
-@@ -153,6 +153,9 @@ export const layer = Layer.effect(
+@@ -188,6 +188,10 @@ const layer = Layer.effect(
                  edit: "ask",
                  write: "ask",
                  apply_patch: "ask",
++                // #99：build 对 notebook 变更类工具默认 ask
 +                vscode_notebook_run: "ask",
 +                vscode_notebook_edit: "ask",
 +                vscode_notebook_env: "ask",
                }),
                user,
              ),
-@@ -161,7 +164,7 @@ export const layer = Layer.effect(
+@@ -197,7 +201,7 @@ const layer = Layer.effect(
            },
            plan: {
              name: "plan",
@@ -35,82 +29,43 @@ index b9ab01934019a0de7a4c408e7c4da415866c084f..cca50f3a4b99ef966e2689cedb77fcf8
              options: {},
              permission: Permission.merge(
                defaults,
-@@ -176,6 +179,9 @@ export const layer = Layer.effect(
+@@ -215,6 +219,10 @@ const layer = Layer.effect(
                    [path.join(".opencode", "plans", "*.md")]: "allow",
                    [path.relative(ctx.worktree, path.join(Global.Path.data, path.join("plans", "*.md")))]: "allow",
                  },
++                // #99：plan 禁止 notebook run/edit/env 变异
 +                vscode_notebook_run: "deny",
 +                vscode_notebook_edit: "deny",
 +                vscode_notebook_env: "deny",
                }),
                user,
              ),
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 9a8353f6a6efa34e63fde7fa7f5d708632d0527f..890dee3ccb2046a514a278bc2a28d788c6be95fa 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -1548,19 +1548,26 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
-           setExpanded((prev) => !prev)
-         }}
-       >
--        {/* 使用 markdownEmph 还原旧版斜体黄字主题键，配合 ITALIC 属性重现斜体语义 */}
--        <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>Thinking ({renderedContent().length.toLocaleString()} chars):</text>
--        <code
--          filetype="markdown"
--          drawUnstyledText={false}
--          streaming={true}
--          syntaxStyle={subtleSyntax()}
--          content={preview()}
--          conceal={ctx.conceal()}
--          fg={theme.textMuted}
--        />
-+        {/* Wrap elements in separate boxes to isolate rendering bounds during fast streaming, preventing overlap */}
-+        <box>
-+          {/* 使用 markdownEmph 还原旧版斜体黄字主题键，配合 ITALIC 属性重现斜体语义 */}
-+          <text fg={theme.markdownEmph} attributes={TextAttributes.ITALIC}>Thinking ({renderedContent().length.toLocaleString()} chars):</text>
-+        </box>
-+        <box>
-+          <code
-+            filetype="markdown"
-+            drawUnstyledText={false}
-+            streaming={true}
-+            syntaxStyle={subtleSyntax()}
-+            content={preview()}
-+            conceal={ctx.conceal()}
-+            fg={theme.textMuted}
-+          />
-+        </box>
-         <Show when={overflow()}>
--          <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
-+          <box>
-+            <text fg={theme.textMuted}>{expanded() ? "▲ collapse" : "▼ expand"}</text>
-+          </box>
-         </Show>
-       </box>
-     </Show>
-diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-index 06d6bf8e92e44a0bc04c98a51366a71d7d58743d..f8d3698a008baac96223192ffb5edfd06a928d78 100644
---- a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-@@ -295,7 +295,7 @@ function messageTokens(messages: WithParts[], ratio: number) {
-   }
+diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
+index 6bb53c03d4..f05b1970d3 100644
+--- a/packages/tui/src/util/context-usage.ts
++++ b/packages/tui/src/util/context-usage.ts
+@@ -485,7 +485,8 @@ function messageTokens(messages: WithParts[], ratio = 4) {
  }
  
+ // 汇总已确认用量：优先从 step-finish 部件提取，无确认时回退到助手消息自身的 token 字段
 -function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"] {
++// ratio 用于流式字符估 token（未完成 assistant 增量）
 +function usageTotals(messages: WithParts[], ratio: number): ContextUsageData["details"]["usage"] {
    const usage: ContextUsageData["details"]["usage"] = {
      input: 0,
      output: 0,
-@@ -305,23 +305,19 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
+@@ -495,27 +496,21 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
      total: 0,
      cost: 0,
    }
 -  let confirmed = false
++  // 每条消息优先用 step-finish 精确账本；无则回退 assistant tokens
    for (const msg of messages) {
 -    for (const part of msg.parts) {
 -      if (part.type !== "step-finish") continue
 -      confirmed = true
 -      usage.input += part.tokens.input
+-      // output 不含 reasoning：推理 token 单独累计到 usage.reasoning 避免重复计算
 -      usage.output += part.tokens.output
 -      usage.reasoning += part.tokens.reasoning
 -      usage.cacheRead += part.tokens.cache.read
@@ -119,6 +74,7 @@ index 06d6bf8e92e44a0bc04c98a51366a71d7d58743d..f8d3698a008baac96223192ffb5edfd0
 -    }
 -  }
 -
+-  // 无 step-finish 确认时，回退到助手消息自身的 token 累计
 -  if (!confirmed) {
 -    for (const msg of messages) {
 -      if (msg.info.role !== "assistant") continue
@@ -135,13 +91,17 @@ index 06d6bf8e92e44a0bc04c98a51366a71d7d58743d..f8d3698a008baac96223192ffb5edfd0
 +      }
 +    } else if (msg.info.role === "assistant") {
        usage.input += msg.info.tokens.input
+-      // 同上：output 不含 reasoning
        usage.output += msg.info.tokens.output
        usage.reasoning += msg.info.tokens.reasoning
-@@ -330,6 +326,27 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
+       usage.cacheRead += msg.info.tokens.cache.read
+@@ -523,7 +518,28 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
        usage.cost += msg.info.cost
      }
    }
+-  // total 不含 cost 但含 reasoning：reasoning 单独累计避免与 output 重复
 +
++  // 未完成 assistant：把 step-finish 之后的流式增量按字符估 token
 +  const lastMsg = messages.findLast((m) => m.info.role === "assistant" && !m.info.time.completed)
 +  if (lastMsg) {
 +    const lastParts = lastMsg.parts
@@ -165,12 +125,14 @@ index 06d6bf8e92e44a0bc04c98a51366a71d7d58743d..f8d3698a008baac96223192ffb5edfd0
    usage.total = usage.input + usage.output + usage.reasoning + usage.cacheRead + usage.cacheWrite
    return usage
  }
-@@ -862,7 +879,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+@@ -1190,8 +1206,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+   const bd = latestBreakdown(raw)
  
-   // 消息部分始终用 TUI 实时迭代（messages 内容随每轮变化）
    const msg = messageTokens(compacted, ratio)
+-    // 使用 raw 而非 compacted：统计全部消息的用量，不仅压缩后的尾部
 -  const usage = usageTotals(raw)
++  // #99：usage 用 raw 全量消息 + ratio 估流式增量
 +  const usage = usageTotals(raw, ratio)
- 
-   // ── 各组件 token 估算 ──
-   let envTokens: number
+   const instructions = await gatherInstructionFiles(input)
+   let instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
+   const messageText = msg.text.join("\n")

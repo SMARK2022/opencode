@@ -1,94 +1,154 @@
-From 4d55a2c0f4a3a71a1791b3b5356372e16e6e0c47 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Mon, 4 May 2026 06:26:27 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=8A=A0=E5=B7=A5=E5=85=B7?=
- =?UTF-8?q?=E8=B0=83=E7=94=A8=E5=92=8C=E5=B7=A5=E5=85=B7=E7=BB=93=E6=9E=9C?=
- =?UTF-8?q?=E7=9A=84=E7=8B=AC=E7=AB=8B=E5=88=86=E7=B1=BB=EF=BC=8C=E4=BC=98?=
- =?UTF-8?q?=E5=8C=96=E4=B8=8A=E4=B8=8B=E6=96=87=E4=BD=BF=E7=94=A8=E6=95=B0?=
- =?UTF-8?q?=E6=8D=AE=E8=AE=A1=E7=AE=97?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
-index 710e450f47df7cf1d68d16c95623113978728bb6..a0c188902137eaaf34cadf112f85b776424f1d24 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
-@@ -40,7 +40,9 @@ function categoryMarker(name: string) {
+diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
+--- a/packages/tui/src/util/context-usage.ts
++++ b/packages/tui/src/util/context-usage.ts
+@@ -1219,6 +1219,9 @@
+   let toolDefTokens: number
+   let inputMessageTokens: number
+   let outputMessageTokens: number
++  // 工具调用与工具结果独立分桶，会话 used 代数保持不变
++  let toolCallTokens: number
++  let toolResultTokens: number
+   if (bd) {
+     envTokens = Math.round(bd.system / ratio)
+     skillTokens = Math.round(bd.skills / ratio)
+@@ -1228,9 +1231,11 @@
+       tokens: estimate(skillsSection(skillInfo([skill])), ratio),
+     }))
+     toolDefTokens = Math.round(bd.tools / ratio)
+-    // 消息细分：user/toolOutput → 输入；assistant/reasoning/toolInput → 输出
+-    inputMessageTokens = Math.round((bd.messages.userText + bd.messages.toolOutput + bd.messages.attachments) / ratio)
+-    outputMessageTokens = Math.round((bd.messages.assistantText + bd.messages.reasoning + bd.messages.toolInput) / ratio)
++    // 服务端细分：toolInput 记调用，toolOutput 记结果
++    toolCallTokens = Math.round(bd.messages.toolInput / ratio)
++    toolResultTokens = Math.round(bd.messages.toolOutput / ratio)
++    inputMessageTokens = Math.round((bd.messages.userText + bd.messages.attachments) / ratio)
++    outputMessageTokens = Math.round((bd.messages.assistantText + bd.messages.reasoning) / ratio)
+   } else {
+     skillTokens = estimate(skillListing, ratio)
+     skillDetails = skills.map((skill) => ({
+@@ -1240,11 +1245,11 @@
+     }))
+     envTokens = estimate(systemText, ratio)
+     toolDefTokens = toolDefs.reduce((sum, item) => sum + item.tokens, 0)
+-    // 输入消息 = 用户文本 + 工具结果 + 附件
+-    inputMessageTokens = msg.details.userText + msg.details.toolResults + msg.details.attachments
+-    // 输出消息 = 助手文本 + 推理 + 工具调用 + 压缩摘要
+-    outputMessageTokens =
+-      msg.details.assistantText + msg.details.reasoning + msg.details.toolCalls + msg.details.compactionSummary
++    toolCallTokens = msg.details.toolCalls
++    toolResultTokens = msg.details.toolResults
++    // 本地重建：工具结果/调用从输入输出中拆出
++    inputMessageTokens = msg.details.userText + msg.details.attachments
++    outputMessageTokens = msg.details.assistantText + msg.details.reasoning + msg.details.compactionSummary
+   }
+   // bd 路径：instructions 直接用服务端细分字符/ratio，禁止再与 system 双计
+   // 无 bd 时回落本地 instruction 文件估算
+@@ -1252,17 +1257,16 @@
+     ? Math.round(bd.instructions / ratio)
+     : instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
+   const loadedInstructionTokens = bd ? 0 : loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
+-  // bd 路径：detail 列表按字符占比映射到 daemon 总量，禁止本地 estimate 与分类分叉
+-  // 列表展示权保留，token 权重锁到 daemon 总量，消除第二套估计
+-if (bd) {
+-    const instructionCharsTotal = instructionDetails.reduce((s, item) => s + Math.max(item.tokens, 0), 0)
+-    // instructionDetails 此时仍是本地 estimate；用其相对权重映射到 instructionTokens
+-    if (instructionCharsTotal > 0 && instructionTokens > 0) {
++  // bd 路径：detail 列表按权重映射 daemon 总量；零权重/均分边沿与 #72 完全一致
++  if (bd) {
++    const instructionWeight = instructionDetails.reduce((s, item) => s + Math.max(item.tokens, 0), 0)
++    if (instructionWeight > 0 && instructionTokens > 0) {
+       instructionDetails = instructionDetails.map((item) => ({
+         path: item.path,
+-        tokens: Math.round((item.tokens / instructionCharsTotal) * instructionTokens),
++        tokens: Math.round((item.tokens / instructionWeight) * instructionTokens),
+       }))
+     } else {
++      // 无法映射时明细清零，避免与分类总量分叉
+       instructionDetails = instructionDetails.map((item) => ({ path: item.path, tokens: 0 }))
+     }
+     if (skillDetails.length > 0 && skillTokens > 0) {
+@@ -1271,17 +1275,22 @@
+         tokens: Math.round(skillTokens / skillDetails.length),
+       }))
+     }
+-    const toolCharsTotal = toolDefs.reduce((s, t) => s + Math.max(t.tokens, 0), 0)
+-    if (toolCharsTotal > 0 && toolDefTokens > 0) {
++    const toolWeight = toolDefs.reduce((s, t) => s + Math.max(t.tokens, 0), 0)
++    if (toolWeight > 0 && toolDefTokens > 0) {
+       toolDefs = toolDefs.map((t) => ({
+         name: t.name,
+-        tokens: Math.round((t.tokens / toolCharsTotal) * toolDefTokens),
++        tokens: Math.round((t.tokens / toolWeight) * toolDefTokens),
+       }))
+     } else if (toolDefs.length > 0 && toolDefTokens > 0) {
+-      toolDefs = toolDefs.map((t) => ({ name: t.name, tokens: Math.round(toolDefTokens / toolDefs.length) }))
+-    }
+-  }
+-  const messageTotal = inputMessageTokens + outputMessageTokens
++      // 本地权重全 0 时均分 daemon 工具总量
++      toolDefs = toolDefs.map((t) => ({
++        name: t.name,
++        tokens: Math.round(toolDefTokens / toolDefs.length),
++      }))
++    }
++  }
++  // used 代数：输入 + 工具结果 + 输出 + 工具调用
++  const messageTotal = inputMessageTokens + toolResultTokens + outputMessageTokens + toolCallTokens
+   const window = windowDetails(input, modelInfo.model)
+   // 已用 token = 系统提示 + 指令 + 加载指令 + 技能 + 工具定义 + 消息
+   const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens + messageTotal
+@@ -1294,7 +1303,10 @@
+     { name: "Skills", tokens: skillTokens, color: "success" },
+     { name: "Tool definitions", tokens: toolDefTokens, color: "warning" },
+     { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
++    // Conversation 组细分为四桶：工具结果/调用单独可见
++    { name: "Tool results", tokens: toolResultTokens, color: "warning" },
+     { name: "Output Messages", tokens: outputMessageTokens, color: "accent" },
++    { name: "Tool calls", tokens: toolCallTokens, color: "accent" },
+     // 自由空间和缓冲区标记为延迟计算，网格中按比例填充
+     { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
+     ...(window.providerReserve > 0
+diff --git a/packages/tui/src/routes/session/context-usage.tsx b/packages/tui/src/routes/session/context-usage.tsx
+--- a/packages/tui/src/routes/session/context-usage.tsx
++++ b/packages/tui/src/routes/session/context-usage.tsx
+@@ -46,7 +46,10 @@
    if (name === "Skills") return "●"
    if (name === "Tool definitions") return "◦"
    if (name === "Input Messages") return "▰"
++  // ▾/▴ 区分工具结果与工具调用，便于扫读 Conversation 组
 +  if (name === "Tool results") return "▾"
    if (name === "Output Messages") return "▱"
 +  if (name === "Tool calls") return "▴"
    if (name === "Free space") return "·"
    return "×"
  }
-@@ -116,7 +118,9 @@ function CategoryList(props: { data: ContextUsageData }) {
+@@ -135,7 +138,10 @@
      },
      {
        title: "Conversation",
 -      categories: props.data.categories.filter((item) => ["Input Messages", "Output Messages"].includes(item.name)),
++      // Conversation 组锁定四类名称，与 computeContextData 分桶一致
 +      categories: props.data.categories.filter((item) =>
 +        ["Input Messages", "Tool results", "Output Messages", "Tool calls"].includes(item.name),
 +      ),
      },
      {
        title: "Window",
-diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-index 4721b8106e3ea7d54bf6ec6aa4b34ec4f243d667..e600dc98fef3cf166d410cf9a52df652cc9f1abc 100644
---- a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-@@ -957,9 +957,18 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-     outputMessageTokens = msg.details.assistantText + msg.details.reasoning + msg.details.toolCalls + msg.details.compactionSummary
-   }
- 
--  const messageTotal = inputMessageTokens + outputMessageTokens
-+  // 从 messages 拆出 tool call input 和 tool result output 作为独立 category
-+  const toolCallTokens = bd
-+    ? Math.round(bd.messages.toolInput / ratio)
-+    : msg.details.toolCalls
-+  const toolResultTokens = bd
-+    ? Math.round(bd.messages.toolOutput / ratio)
-+    : msg.details.toolResults
-+  const userMessageTokens = inputMessageTokens - toolResultTokens
-+  const assistantMessageTokens = outputMessageTokens - toolCallTokens
-   const window = windowDetails(input, modelInfo.model)
--  const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens + messageTotal
-+  const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens
-+    + userMessageTokens + assistantMessageTokens + toolCallTokens + toolResultTokens
-   const free = maxTokens ? Math.max(0, window.usableInput - used) : 0
- 
-   const categories: ContextCategory[] = [
-@@ -967,8 +976,10 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-     { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
-     { name: "Skills", tokens: skillTokens, color: "success" },
-     { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
--    { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
--    { name: "Output Messages", tokens: outputMessageTokens, color: "accent" },
-+    { name: "Input Messages", tokens: userMessageTokens, color: "warning" },
-+    { name: "Tool results", tokens: toolResultTokens, color: "warning" },
-+    { name: "Output Messages", tokens: assistantMessageTokens, color: "accent" },
-+    { name: "Tool calls", tokens: toolCallTokens, color: "accent" },
-     { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
-     ...(window.providerReserve > 0
-       ? [{ name: "Model reserve", tokens: window.providerReserve, color: "textMuted" as const, isDeferred: true }]
-diff --git a/packages/opencode/test/cli/tui/context-usage.test.ts b/packages/opencode/test/cli/tui/context-usage.test.ts
-index 67057bf6636872e6fee397dae923e3f014dac257..11589357ec4724c3a344b72f665946b4d2dd9295 100644
---- a/packages/opencode/test/cli/tui/context-usage.test.ts
-+++ b/packages/opencode/test/cli/tui/context-usage.test.ts
-@@ -121,8 +121,11 @@ describe("context usage", () => {
-     expect(data.details.instructions[0]?.tokens).toBe(2)
-     expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBe(4)
+diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
+--- a/packages/tui/test/context-usage.test.ts
++++ b/packages/tui/test/context-usage.test.ts
+@@ -156,9 +156,12 @@
+     // 系统提示词含环境信息 + 静态段落，token > 100
      expect(data.categories.find((item) => item.name === "System prompt")?.tokens).toBeGreaterThan(100)
+     // 输入消息 = 用户文本 2 + 工具结果 4 = 6
 -    expect(data.categories.find((item) => item.name === "Input Messages")?.tokens).toBe(6)
--    expect(data.categories.find((item) => item.name === "Output Messages")?.tokens).toBe(7)
-+    // tool input/output 独立 category: userText(2) / toolResults(4) / assistantText(3) / toolCalls(4)
++    // 四桶锁值：原 Input6/Output7 拆成 2+4 与 3+4
 +    expect(data.categories.find((item) => item.name === "Input Messages")?.tokens).toBe(2)
 +    expect(data.categories.find((item) => item.name === "Tool results")?.tokens).toBe(4)
+     // 输出消息 = 助手文本 3 + 工具调用 3 + 推理 0 + 摘要 0 = 6... 实际 7（含工具调用 input 估算）
+-    expect(data.categories.find((item) => item.name === "Output Messages")?.tokens).toBe(7)
 +    expect(data.categories.find((item) => item.name === "Output Messages")?.tokens).toBe(3)
 +    expect(data.categories.find((item) => item.name === "Tool calls")?.tokens).toBe(4)
+     // 压缩缓冲区 = 输入限制 19900 - 可用输入 19800 = 100
      expect(data.categories.find((item) => item.name === "Autocompact buffer")?.tokens).toBe(100)
-     expect(data.categories.find((item) => item.name === "Model reserve")?.tokens).toBe(100)
-     expect(data.details.window).toMatchObject({ inputLimit: 19_900, usableInput: 19_800, compactionBuffer: 100 })
+     // 模型预留 = 上下文限制 20000 - 输入限制 19900 = 100

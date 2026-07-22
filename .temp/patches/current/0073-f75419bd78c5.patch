@@ -1,47 +1,35 @@
-From f75419bd78c55ac3984fec6d762c929391d0ba02 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Mon, 4 May 2026 05:03:38 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E7=BD=91=E7=BB=9C?=
- =?UTF-8?q?=E4=BB=A3=E7=90=86=E5=8A=9F=E8=83=BD=EF=BC=8C=E5=AE=89=E8=A3=85?=
- =?UTF-8?q?=E5=85=A8=E5=B1=80fetch=E5=B9=B6=E4=BC=98=E5=8C=96npm=E9=85=8D?=
- =?UTF-8?q?=E7=BD=AE=E4=B8=AD=E7=9A=84=E8=B6=85=E6=97=B6=E8=AE=BE=E7=BD=AE?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-proxy.ts
-index 08090553e50bb54bd6c94a1e0e1a17227f075f58..c3296d5dd01c4e536b299ad62526fafe6415db3a 100644
 --- a/packages/core/src/network-proxy.ts
 +++ b/packages/core/src/network-proxy.ts
-@@ -4,10 +4,11 @@ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin"
- 
+@@ -6,8 +6,11 @@
+ // 代理路由结果：直连或经由指定代理服务器
  export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
  
+-// 系统代理缓存 TTL：120 秒内复用上次检测结果，避免频繁调用 scutil/reg
 -const TTL = 120_000
++// 系统代理缓存 TTL：15 秒内复用上次检测结果，平衡检测开销和代理变更响应
 +const TTL = 15_000
++// 全局 fetch 包装是否已安装：避免重复包装导致无限递归
++let globalFetchInstalled = false
++
  const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"])
  
  let cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined
-+let globalFetchInstalled = false
- 
- type SystemProxy = {
-   http?: string
-@@ -122,8 +123,9 @@ async function macProxy(): Promise<SystemProxy | undefined> {
-   return { http, https, socks, bypass: [] }
+@@ -134,7 +137,9 @@
  }
  
+ // 获取当前系统代理（带 TTL 缓存），仅 Windows 和 macOS 支持系统级检测
 -async function currentSystemProxy() {
 +async function currentSystemProxy(refresh = false) {
-   if (process.platform !== "win32" && process.platform !== "darwin") return undefined
++  // refresh=true 时强制刷新缓存，绕过 TTL
 +  if (refresh) cache = undefined
+   if (process.platform !== "win32" && process.platform !== "darwin") return undefined
    if (!cache || cache.expires < Date.now()) {
      cache = {
-       expires: Date.now() + TTL,
-@@ -133,9 +135,9 @@ async function currentSystemProxy() {
-   return cache.value
+@@ -146,9 +151,9 @@
  }
  
+ // 解析目标 URL 应使用的代理：优先系统代理，回退到环境变量
 -async function configuredProxy(url: URL) {
 +async function configuredProxy(url: URL, refresh = false) {
    if (process.platform === "win32" || process.platform === "darwin") {
@@ -50,179 +38,203 @@ index 08090553e50bb54bd6c94a1e0e1a17227f075f58..c3296d5dd01c4e536b299ad62526fafe
      if (!sys || bypass(url, sys.bypass)) return
      return url.protocol === "https:" ? sys.https || sys.http || sys.socks : sys.http || sys.https || sys.socks
    }
-@@ -144,12 +146,12 @@ async function configuredProxy(url: URL) {
-   return url.protocol === "https:" ? env.https || env.http || env.socks : env.http || env.https || env.socks
+@@ -158,10 +163,10 @@
  }
  
+ // 解析代理路由：本地直连，其他根据系统/环境代理配置决定
 -export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown"): Promise<Route> {
 +export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown", refresh = false): Promise<Route> {
    const url = input instanceof URL ? input : new URL(input)
    if (purpose === "local" || isLocal(url)) return { type: "direct", reason: "local" }
 -  const proxy = await configuredProxy(url)
--  if (proxy) return { type: "proxy", proxy, reason: "system" }
--  return { type: "direct", reason: "no-proxy" }
 +  const proxy = await configuredProxy(url, refresh)
-+  if (proxy) return { type: "proxy", proxy, reason: refresh ? "system-refresh" : "system" }
-+  return { type: "direct", reason: refresh ? "refresh-no-proxy" : "no-proxy" }
+   if (proxy) return { type: "proxy", proxy, reason: "system" }
+   return { type: "direct", reason: "no-proxy" }
  }
- 
- export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
-@@ -158,20 +160,46 @@ export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise
- 
+@@ -174,21 +179,61 @@
+ // 使用指定 fetchFn 和代理路由执行请求：代理失败时回退直连
  export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
    const url = new URL(input instanceof Request ? input.url : input.toString())
 -  const { purpose = "unknown", ...rest } = (init ?? {}) as RoutedInit
 -  const route = await resolveProxyRoute(url, purpose)
 -  if (route.type === "direct") return fetchFn(input, rest)
-+  const { purpose = "unknown", signal, ...rest } = (init ?? {}) as RoutedInit
-+  const route = await resolveProxyRoute(url, purpose, purpose === "provider" || purpose === "npm")
-+  const direct = () => fetchFn(input, signal ? { ...rest, signal } : rest)
-+  const proxy = (value: string) => fetchFn(input, { ...rest, signal, proxy: value })
-+
++  // signal 单独解构：proxy 消耗 abort 后可对 rest 无 signal 直连回落（SMARK）
++  const { purpose = "unknown", signal, ...rest } = (init ?? {}) as RoutedInit & { signal?: AbortSignal }
++  const forceRefresh = purpose === "provider" || purpose === "npm"
++  const route = await resolveProxyRoute(url, purpose, forceRefresh)
++  const withSignal = signal ? { ...rest, signal } : rest
 +  if (route.type === "direct") {
 +    try {
-+      return await direct()
++      return await fetchFn(input, withSignal)
 +    } catch (error) {
 +      if (signal?.aborted) throw error
 +      const refreshed = await resolveProxyRoute(url, purpose, true)
-+      if (refreshed.type === "proxy") return proxy(refreshed.proxy).catch(() => { throw error })
++      if (refreshed.type === "proxy") {
++        try {
++          return await fetchFn(input, { ...withSignal, proxy: refreshed.proxy })
++        } catch {
++          throw error
++        }
++      }
 +      throw error
 +    }
 +  }
-+
    try {
 -    return await fetchFn(input, { ...rest, proxy: route.proxy })
-+    return await proxy(route.proxy)
++    return await fetchFn(input, { ...withSignal, proxy: route.proxy })
    } catch (error) {
 -    return fetchFn(input, rest).catch(() => {
--      throw error
--    })
-+    const refreshed = signal?.aborted ? undefined : await resolveProxyRoute(url, purpose, true)
-+    if (refreshed?.type === "proxy" && refreshed.proxy !== route.proxy) {
-+      return proxy(refreshed.proxy).catch(() => { throw error })
++    // proxy 已消耗 abort：无 signal 再试 direct
++    if (signal?.aborted) return fetchFn(input, rest)
++    const refreshed = await resolveProxyRoute(url, purpose, true)
++    if (refreshed.type === "proxy" && refreshed.proxy !== route.proxy) {
++      try {
++        return await fetchFn(input, { ...withSignal, proxy: refreshed.proxy })
++      } catch {
++        // fall through
++      }
 +    }
-+    // When the proxy attempt consumed the abort signal, retry direct without it
-+    // so the fallback has a chance to succeed.
-+    if (signal?.aborted) return fetchFn(input, rest).catch(() => { throw error })
-+    return direct().catch(() => { throw error })
++    return fetchFn(input, withSignal).catch(() => {
+       throw error
+     })
    }
  }
  
+-// 生成 npm 安装时的代理选项
++// 安装全局 fetch 包装：所有 globalThis.fetch 调用自动通过代理路由
++// 使用捕获的 originalFetch 避免无限递归：包装后的 globalThis.fetch 会调用
++// fetchWithRoute(originalFetch, ...)，而 originalFetch 是包装前的原始 fetch
 +export function installGlobalFetch(defaultPurpose: Purpose = "unknown") {
 +  if (globalFetchInstalled) return
-+  const original = globalThis.fetch.bind(globalThis) as FetchFn
-+  globalThis.fetch = ((input: FetchInput, init?: RoutedInit) =>
-+    fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as typeof fetch
 +  globalFetchInstalled = true
++  const originalFetch = globalThis.fetch.bind(globalThis)
++  globalThis.fetch = ((input: FetchInput, init?: any) => {
++    return fetchWithRoute(originalFetch, input, { ...init, purpose: init?.purpose ?? defaultPurpose })
++  }) as typeof fetch
 +}
 +
  export async function npmProxyOptions(registry: string) {
 -  const route = await resolveProxyRoute(registry, "npm")
++  // npm 请求强制刷新代理缓存，确保使用最新的代理配置
 +  const route = await resolveProxyRoute(registry, "npm", true)
    if (route.type === "direct") return {}
    return {
      proxy: route.proxy,
 diff --git a/packages/core/src/npm-config.ts b/packages/core/src/npm-config.ts
-index 56418a000e72ff62210e7d039aa3ee4c6c9a645c..849219bfebaf32928163425196a0e4bc58c25332 100644
 --- a/packages/core/src/npm-config.ts
 +++ b/packages/core/src/npm-config.ts
-@@ -26,7 +26,7 @@ async function pingRegistry(registry: string) {
+@@ -30,7 +30,8 @@
      const response = await NetworkProxy.routedFetch(`${normalizeRegistry(registry)}/-/ping?write=false`, {
        purpose: "npm",
        method: "GET",
 -      signal: AbortSignal.timeout(1500),
-+      signal: AbortSignal.timeout(3000),
++      // ping 超时 3 秒：兼容高延迟网络环境
++    signal: AbortSignal.timeout(3000),
      })
      return response.ok
    } catch {
-@@ -36,10 +36,13 @@ async function pingRegistry(registry: string) {
+@@ -40,11 +41,11 @@
  
+ // 按顺序检测候选 registry，返回第一个可用的
  async function selectRegistry() {
++  // 并行 ping 所有候选 registry，返回第一个可用的
    const candidates = [defaultRegistry, mirrorRegistry]
 -  for (const candidate of candidates) {
 -    if (await pingRegistry(candidate)) return candidate
 -  }
 -  return defaultRegistry
-+  const results = await Promise.all(
-+    candidates.map(async (candidate) => {
-+      const ok = await pingRegistry(candidate)
-+      return ok ? candidate : undefined
-+    }),
-+  )
-+  return results.find((r): r is string => r !== undefined) ?? defaultRegistry
++  const results = await Promise.all(candidates.map(async (c) => ({ registry: c, ok: await pingRegistry(c) })))
++  const first = results.find((r) => r.ok)
++  return first?.registry ?? defaultRegistry
  }
  
- function defaultRegistryForNetwork() {
-diff --git a/packages/opencode/src/cli/cmd/tui/thread.ts b/packages/opencode/src/cli/cmd/tui/thread.ts
-index c180b3c10643cee7eb41ab166a7078670a7332a6..ab1232172a92efcdf201048c1965388250809087 100644
---- a/packages/opencode/src/cli/cmd/tui/thread.ts
-+++ b/packages/opencode/src/cli/cmd/tui/thread.ts
-@@ -60,8 +60,9 @@ function applyProxyEnv(env: Record<string, string>) {
-   env.no_proxy = no
- 
-   if (process.platform === "win32" || process.platform === "darwin") {
--    // NetworkProxy reads system proxy per-request; strip inherited shell
--    // proxy env so Bun never routes fetch through a stale/dead proxy.
-+    // The daemon installs a global fetch wrapper that resolves system proxy
-+    // dynamically per request. Strip inherited shell proxy env so Bun doesn't
-+    // freeze routing to stale variables captured before the proxy app started.
-     for (const key of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])
-       delete env[key]
-     return
-diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
-index e3d540a1bcc9a9ab3f85a648d56e27be9ca191ef..a4eb09130be3e0c44ec4f758dda2b4ace90f3551 100644
---- a/packages/opencode/src/cli/cmd/tui/worker.ts
-+++ b/packages/opencode/src/cli/cmd/tui/worker.ts
-@@ -18,8 +18,10 @@ import { onSseClientCountChange } from "@/server/routes/global"
- import path from "path"
+ // 带缓存的默认 registry 选择：60 秒内复用上次结果
+diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
+--- a/packages/opencode/src/cli/tui/worker.ts
++++ b/packages/opencode/src/cli/tui/worker.ts
+@@ -2,6 +2,7 @@
  import { Global } from "@opencode-ai/core/global"
- import { resolvePluginTarget, createPluginEntry } from "@/plugin/shared"
+ import path from "path"
+ import { Server } from "@/server/server"
 +import { NetworkProxy } from "@opencode-ai/core/network-proxy"
- 
- ensureProcessMetadata("worker")
-+NetworkProxy.installGlobalFetch()
- 
- await Log.init({
-   print: process.argv.includes("--print-logs") || process.env.OPENCODE_PRINT_LOGS === "1",
+ import { InstanceRuntime } from "@/project/instance-runtime"
+ import { Rpc } from "@/util/rpc"
+ import { upgrade } from "@/cli/upgrade"
+@@ -130,6 +131,8 @@
+ // 仅在守护进程模式下运行：启动内部回环 HTTP 服务器、写入锁文件、注册信号
+ // 处理与空闲超时。Worker 线程模式跳过此块，仅使用 RPC 通信。
+ if (isDaemon) {
++  // 安装全局 fetch 代理路由，使 daemon 内未显式 routedFetch 的请求也走系统代理
++  NetworkProxy.installGlobalFetch()
+   // 先启动内部回环 HTTP 服务器（端口 0 表示由系统分配随机可用端口）
+   // #71：锁可见后再预热，避免 npm/代理冷启动拖死 TUI 60s 健康等待（覆盖 #56 预监听预热）
+   const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })
 diff --git a/packages/opencode/src/config/config.ts b/packages/opencode/src/config/config.ts
-index 9938a848470400e92177da981eec47c45a15e6ab..f089eea2dbfac8ae91f59f7ad12869f97b1362b1 100644
 --- a/packages/opencode/src/config/config.ts
 +++ b/packages/opencode/src/config/config.ts
-@@ -5,6 +5,7 @@ import os from "os"
- import z from "zod"
- import { mergeDeep } from "remeda"
- import { Global } from "@opencode-ai/core/global"
+@@ -1,3 +1,4 @@
 +import { NetworkProxy } from "@opencode-ai/core/network-proxy"
- import fsNode from "fs/promises"
- import { NamedError } from "@opencode-ai/core/util/error"
- import { Flag } from "@opencode-ai/core/flag/flag"
-@@ -498,7 +499,9 @@ export const layer = Layer.effect(
-             const url = key.replace(/\/+$/, "")
-             process.env[value.key] = value.token
-             log.debug("fetching remote config", { url: `${url}/.well-known/opencode` })
--            const response = yield* Effect.promise(() => fetch(`${url}/.well-known/opencode`))
-+            const response = yield* Effect.promise(() =>
-+              NetworkProxy.routedFetch(`${url}/.well-known/opencode`, { purpose: "infrastructure" }),
-+            )
-             if (!response.ok) {
-               throw new Error(`failed to fetch remote config from ${url}: ${response.status}`)
-             }
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
+ import { serviceUse } from "@opencode-ai/core/effect/service-use"
+@@ -190,18 +191,30 @@
+       schema: S,
+       loginOrigin: string,
+     ) {
+-      const response = yield* HttpClient.filterStatusOk(withTransientReadRetry(http))
+-        .execute(
+-          HttpClientRequest.get(url).pipe(HttpClientRequest.acceptJson, HttpClientRequest.setHeaders(headers ?? {})),
+-        )
+-        .pipe(
+-          Effect.catch((error) => Effect.die(new Error(`failed to fetch remote config from ${url}: ${String(error)}`))),
+-        )
+-      const body = yield* response.text.pipe(
+-        Effect.catch((error) => Effect.die(new Error(`failed to read remote config from ${url}: ${String(error)}`))),
++      // NetworkProxy 系统代理 + 手动 transient 重试（对齐 withTransientReadRetry 2 次退避）
++      const fetched = yield* Effect.promise(async () => {
++        let last: unknown
++        for (let attempt = 0; attempt < 3; attempt++) {
++          try {
++            const res = await NetworkProxy.routedFetch(url, {
++              purpose: "infrastructure",
++              headers: { Accept: "application/json", ...(headers ?? {}) },
++            })
++            if (!res.ok) throw new Error(`failed to fetch remote config from ${url}: ${res.status}`)
++            const body = await res.text()
++            return { body, contentType: (res.headers.get("content-type") ?? "").toLowerCase() }
++          } catch (error) {
++            last = error
++            if (attempt < 2) await new Promise((r) => setTimeout(r, 200 * 2 ** attempt))
++          }
++        }
++        throw last
++      }).pipe(
++        Effect.catch((error) => Effect.die(new Error(`failed to fetch remote config from ${url}: ${String(error)}`))),
+       )
+-      // An auth proxy can answer with an HTML login page at HTTP 200 (passes filterStatusOk); treat it as a re-auth error, not a decode failure.
+-      const contentType = (response.headers["content-type"] ?? "").toLowerCase()
++      const body = fetched.body
++      // An auth proxy can answer with an HTML login page at HTTP 200; treat it as a re-auth error, not a decode failure.
++      const contentType = fetched.contentType
+       if (contentType.includes("html") || /^\s*<!doctype|^\s*<html/i.test(body)) {
+         return yield* Effect.die(new RemoteAuthError({ url: loginOrigin, remote: url }))
+       }
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
-index e103c019c8bf7506066c6c3f67a46cd9bdcfd23d..f3d40a1346fefc1f0f949d2061ea7221e29d067f 100644
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -31,6 +31,7 @@ import * as ProviderTransform from "./transform"
- import { ModelID, ProviderID } from "./schema"
+@@ -34,6 +34,8 @@
+ import { ProviderError } from "./error"
  
- const log = Log.create({ service: "provider" })
+ const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
++// 请求默认超时 5 分钟：覆盖无显式 timeout 的 provider 请求
 +const DEFAULT_TIMEOUT_MS = 300_000
  
- function shouldUseCopilotResponsesApi(modelID: string): boolean {
-   const match = /^gpt-(\d+)/.exec(modelID)
-@@ -1525,8 +1526,8 @@ const layer: Layer.Layer<
- 
+ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
+   if (typeof ms !== "number" || ms <= 0) return res
+@@ -1780,8 +1782,8 @@
            if (opts.signal) signals.push(opts.signal)
            if (chunkAbortCtl) signals.push(chunkAbortCtl.signal)
+           if (headerTimeoutCtl) signals.push(headerTimeoutCtl.signal)
 -          if (options["timeout"] !== undefined && options["timeout"] !== null && options["timeout"] !== false)
 -            signals.push(AbortSignal.timeout(options["timeout"]))
 +          if (options["timeout"] !== false)

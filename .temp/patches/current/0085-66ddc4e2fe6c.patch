@@ -6,107 +6,58 @@ Subject: [PATCH] =?UTF-8?q?feat(token-estimate):=20=E4=BC=98=E5=8C=96?=
  =?UTF-8?q?=E8=80=83=E8=99=91=E9=99=84=E4=BB=B6=E5=AF=B9=E8=BE=93=E5=85=A5?=
  =?UTF-8?q?=E5=AD=97=E7=AC=A6=E7=9A=84=E5=BD=B1=E5=93=8D?=
 MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-index e600dc98fef3cf166d410cf9a52df652cc9f1abc..06d6bf8e92e44a0bc04c98a51366a71d7d58743d 100644
---- a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-@@ -47,7 +47,7 @@ import {
-   toolUsageSection as systemToolUsageSection,
- } from "@/session/system"
- import { usable as overflowUsable } from "@/session/overflow"
--import { estimateDataUrlInputTokens } from "./token-estimate"
-+import { charsPerTokenFromHistory, estimateDataUrlInputTokens } from "./token-estimate"
- 
- type WithParts = {
-   info: Message
-@@ -145,25 +145,13 @@ function estimate(input: unknown, ratio = DEFAULT_CHARS_PER_TOKEN) {
-   return Math.max(0, Math.round((text || "").length / ratio))
- }
- 
--/** 从 session 历史 step-finish 的 inputChars/inputTokens 计算输入侧 chars-per-token。 */
-+/** 从 session 历史 step-finish 的 inputChars/inputTokens 计算输入侧 chars-per-token。
-+ *  委托给 token-estimate 的 charsPerTokenFromHistory，避免重复实现。 */
- function computeInputRatio(messages: WithParts[]): number {
--  let totalChars = 0
--  let totalTokens = 0
--  for (let i = messages.length - 1; i >= 0 && totalChars < 100_000; i--) {
--    const msg = messages[i]
--    if (msg.info.role !== "assistant") continue
--    for (const p of msg.parts) {
--      if (p.type !== "step-finish") continue
--      const chars = (p as any).inputChars as number | undefined
--      if (!chars || chars < 100) continue
--      const tokens = (p as any).tokens?.input + (p as any).tokens?.cache?.read + (p as any).tokens?.cache?.write
--      if (!tokens || tokens <= 0) continue
--      totalChars += chars
--      totalTokens += tokens
--    }
--  }
--  if (totalTokens > 0 && totalChars > 500) return totalChars / totalTokens
--  return DEFAULT_CHARS_PER_TOKEN
-+  return charsPerTokenFromHistory(
-+    messages.map((m) => ({ role: m.info.role, id: m.info.id })),
-+    (id) => messages.find((m) => m.info.id === id)?.parts ?? [],
-+  )
- }
- 
- type InputBreakdown = {
-@@ -897,7 +885,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-     toolDefTokens = Math.round(bd.tools / ratio)
- 
-     // 消息子组件也使用 daemon 的真实 char 数（而非 TUI 自行从 parts 估算）
--    inputMessageTokens = Math.round((bd.messages.userText + bd.messages.toolOutput + bd.messages.attachments) / ratio)
-+    inputMessageTokens = Math.round((bd.messages.userText + bd.messages.toolOutput) / ratio) + msg.details.attachments
-     outputMessageTokens = Math.round((bd.messages.assistantText + bd.messages.reasoning + bd.messages.toolInput) / ratio)
- 
-     // detail 列表仍需文件内容（用于展示），但 token 用 breakdown 等比分配
-@@ -1006,7 +994,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-             reasoning: Math.round(bd.messages.reasoning / ratio),
-             toolCalls: Math.round(bd.messages.toolInput / ratio),
-             toolResults: Math.round(bd.messages.toolOutput / ratio),
--            attachments: Math.round(bd.messages.attachments / ratio),
-+            attachments: msg.details.attachments,
-             compactionSummary: 0,
-           }
-         : msg.details,
-diff --git a/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts b/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts
-index 626a44312fcdd1295f79b8180c9060784e095690..1ec1446d71a07abc457a2d085c00b816e6d83ac7 100644
---- a/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts
-@@ -43,7 +43,8 @@ export function charsPerTokenFromHistory(
-       if (!chars || chars < 100) continue
-       const tokens = (p.tokens?.input ?? 0) + (p.tokens?.cache?.read ?? 0) + (p.tokens?.cache?.write ?? 0)
-       if (tokens <= 0) continue
--      totalChars += chars
-+      const bd = p.inputBreakdown as { messages?: { attachments?: number } } | undefined
-+      totalChars += Math.max(0, chars - (bd?.messages?.attachments ?? 0))
-       totalTokens += tokens
-     }
-   }
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 6d91eb72ca0fa0333e2b05545f67e9e39398c7b2..833b9f15b26f312730c3f241d25b96e1263feb69 100644
+index 57efcffb9c..aa1f9a7b53 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -1614,7 +1614,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-             // 使用 *输入* 侧数据（而非输出侧），因为输入含 JSON/schema/code，密度与自然语言输出截然不同。
-             let historyInputTokens = 0
-             let historyInputChars = 0
--            for (let i = msgs.length - 1; i >= 0 && historyInputChars < 50000; i--) {
-+            for (let i = msgs.length - 1; i >= 0 && historyInputChars < 100000; i--) {
-               const m = msgs[i]
-               if (m.info.role !== "assistant") continue
-               for (let j = m.parts.length - 1; j >= 0; j--) {
-@@ -1624,7 +1624,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-                 if (!chars || chars < 100) continue
-                 const tokens = p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
-                 if (tokens <= 0) continue
+@@ -1402,7 +1402,9 @@ const layer = Layer.effect(
+               if (!chars || chars < 100) continue
+               const tokens = (sf.tokens.input ?? 0) + (sf.tokens.cache?.read ?? 0) + (sf.tokens.cache?.write ?? 0)
+               if (typeof chars === "number" && chars > 0 && tokens > 0) {
 -                historyInputChars += chars
-+                const bd = (p as any).inputBreakdown
++                // 附件不参与输入侧 chars/token 密度校准
++                const bd = (sf as any).inputBreakdown
 +                historyInputChars += Math.max(0, chars - (bd?.messages?.attachments ?? 0))
                  historyInputTokens += tokens
                }
              }
+diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
+index 81cb73914c..6bb53c03d4 100644
+--- a/packages/tui/src/util/context-usage.ts
++++ b/packages/tui/src/util/context-usage.ts
+@@ -1234,7 +1234,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+     // 服务端细分：toolInput 记调用，toolOutput 记结果
+     toolCallTokens = Math.round(bd.messages.toolInput / ratio)
+     toolResultTokens = Math.round(bd.messages.toolOutput / ratio)
+-    inputMessageTokens = Math.round((bd.messages.userText + bd.messages.attachments) / ratio)
++    // 附件用视觉估算 tokens，不混入文本 chars/ratio 桶
++    inputMessageTokens = Math.round(bd.messages.userText / ratio) + msg.details.attachments
+     outputMessageTokens = Math.round((bd.messages.assistantText + bd.messages.reasoning) / ratio)
+   } else {
+     skillTokens = estimate(skillListing, ratio)
+@@ -1337,7 +1338,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+             reasoning: Math.round(bd.messages.reasoning / ratio),
+             toolCalls: Math.round(bd.messages.toolInput / ratio),
+             toolResults: Math.round(bd.messages.toolOutput / ratio),
+-            attachments: Math.round(bd.messages.attachments / ratio),
++            // 与 inputMessageTokens 同源：附件用 details 视觉估算
++            attachments: msg.details.attachments,
+             compactionSummary: 0,
+           }
+         : msg.details,
+diff --git a/packages/tui/src/util/token-estimate.ts b/packages/tui/src/util/token-estimate.ts
+index 3a0365db4b..0c05837149 100644
+--- a/packages/tui/src/util/token-estimate.ts
++++ b/packages/tui/src/util/token-estimate.ts
+@@ -52,7 +52,9 @@ export function charsPerTokenFromHistory(
+         (p.tokens?.input ?? 0) + (p.tokens?.cache?.read ?? 0) + (p.tokens?.cache?.write ?? 0)
+       // 样本不足 100 字符忽略，避免早期噪声主导密度
+       if (typeof inputChars !== "number" || inputChars < 100 || inputTokens <= 0) continue
+-      totalChars += inputChars
++      // 附件字符不参与文本密度校准：视觉/base64 与自然语言密度不同
++      const bd = p.inputBreakdown as { messages?: { attachments?: number } } | undefined
++      totalChars += Math.max(0, inputChars - (bd?.messages?.attachments ?? 0))
+       totalTokens += inputTokens
+     }
+   }

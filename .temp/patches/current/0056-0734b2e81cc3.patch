@@ -1,164 +1,136 @@
-From 0734b2e81cc31e8d2e7494b6d1f0621918ca1442 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Thu, 30 Apr 2026 14:05:19 +0800
-Subject: [PATCH] =?UTF-8?q?fix:=20=E6=9B=B4=E6=96=B0=E7=89=88=E6=9C=AC?=
- =?UTF-8?q?=E5=8F=B7=E8=87=B3=201.14.29=EF=BC=8C=E4=BC=98=E5=8C=96?=
- =?UTF-8?q?=E7=8E=AF=E5=A2=83=E5=8F=98=E9=87=8F=E5=A4=84=E7=90=86=E9=80=BB?=
- =?UTF-8?q?=E8=BE=91=EF=BC=8C=E5=A2=9E=E5=BC=BA=E6=8F=92=E4=BB=B6=E9=A2=84?=
- =?UTF-8?q?=E7=83=AD=E5=8A=9F=E8=83=BD?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/bun.lock b/bun.lock
-index a607b4e5c8f52b3673f8414c2b0b851cae6555ce..62e56924cbb301a63b950ddb8e8d5f8107c9398d 100644
---- a/bun.lock
-+++ b/bun.lock
-@@ -349,7 +349,7 @@
-     },
-     "packages/opencode": {
-       "name": "opencode",
--      "version": "1.14.28-smark",
-+      "version": "1.14.29-smark",
-       "bin": {
-         "opencode": "./bin/opencode",
-       },
-diff --git a/packages/core/src/util/opencode-process.ts b/packages/core/src/util/opencode-process.ts
-index f59270ad2d5d599c6ad5265a111226a7b34e0bec..5a104886bd7d00b4b03d5d3385413d295adaf850 100644
---- a/packages/core/src/util/opencode-process.ts
-+++ b/packages/core/src/util/opencode-process.ts
-@@ -20,5 +20,7 @@ export function sanitizedProcessEnv(overrides?: Record<string, string>) {
-   const env = Object.fromEntries(
-     Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
-   )
-+  delete env[OPENCODE_RUN_ID]
-+  delete env[OPENCODE_PROCESS_ROLE]
-   return overrides ? Object.assign(env, overrides) : env
- }
-diff --git a/packages/opencode/src/cli/cmd/tui/thread.ts b/packages/opencode/src/cli/cmd/tui/thread.ts
-index 6c38d5b62373b8a261127023283d0a65d63e24c4..f3332bd76c00ef2103e2b2df050424fd87939e1d 100644
---- a/packages/opencode/src/cli/cmd/tui/thread.ts
-+++ b/packages/opencode/src/cli/cmd/tui/thread.ts
-@@ -207,7 +207,9 @@ export const TuiThreadCommand = cmd({
-           await Bun.sleep(1000)
+diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
+--- a/packages/opencode/src/cli/cmd/tui.ts
++++ b/packages/opencode/src/cli/cmd/tui.ts
+@@ -72,7 +72,8 @@
+   // 轮询间隔 200ms
  
-           // Wait for the daemon to write the lock and for its server to respond.
--          const deadline = Date.now() + 30_000
-+          // The daemon pre-warms external plugins before writing the lock, which
-+          // can take up to ~30 s on the first run.  Give it 60 s to be safe.
-+          const deadline = Date.now() + 60_000
-           while (Date.now() < deadline) {
-             const daemonLock = await ServerLock.read()
-             if (daemonLock && daemonLock.pid === proc.pid && ServerLock.alive(daemonLock.pid)) {
-@@ -229,7 +231,7 @@ export const TuiThreadCommand = cmd({
-           electionLease = undefined
- 
-           if (!existingUrl) {
--            UI.error("opencode daemon failed to start within 30 seconds")
-+            UI.error("opencode daemon failed to start within 60 seconds")
-             proc.kill()
-             return
-           }
-diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
-index 4d536a4c604eeb2057a9b15c763cbeb1c81a1924..4fd02f1f29f77e7ea126e113b44f0b8893905d13 100644
---- a/packages/opencode/src/cli/cmd/tui/worker.ts
-+++ b/packages/opencode/src/cli/cmd/tui/worker.ts
-@@ -15,6 +15,9 @@ import * as Database from "@/storage/db"
- import { ServerLock } from "@/cli/cmd/tui/server-lock"
- import { Heap } from "@/cli/heap"
- import { onSseClientCountChange } from "@/server/routes/global"
-+import path from "path"
-+import { Global } from "@opencode-ai/core/global"
-+import { resolvePluginTarget, createPluginEntry } from "@/plugin/shared"
- 
- ensureProcessMetadata("worker")
- 
-@@ -41,6 +44,42 @@ process.on("uncaughtException", (e) => {
-   })
+   pollMs: 200,
+-  waitMs: 30_000,
++  // 多插件冷编译可能各 ~30s；并行预热后以最慢者为墙钟，生产等待 60s 覆盖
++  waitMs: 60_000,
  })
  
-+// Pre-warm external plugin imports BEFORE the HTTP server goes live.
-+//
-+// Bun synchronously transpiles the entire dependency graph on the first
-+// `import()` of an unbundled TypeScript plugin (e.g. opencode-gemini-auth)
-+// which can stall the event loop for 20-30 seconds.  Doing this here means
-+// the stall is over before the lock file is written, so by the time the
-+// launching TUI starts polling the server is already fully responsive.
-+//
-+// This is a best-effort warm-up: every error is swallowed so a missing or
-+// incompatible plugin cannot prevent the server from starting.
+ // 单服务器发现主路径：快速复用存活守护进程，或在选举锁下拉起新 daemon
+@@ -190,9 +191,9 @@
+ 
+       if (!existingUrl) {
+         // 超时失败：杀死半拉起的进程并向上抛错
+-        UI.error("opencode daemon failed to start within 30 seconds")
++        UI.error("opencode daemon failed to start within 60 seconds")
+         proc.kill()
+-        throw new Error("opencode daemon failed to start within 30 seconds")
++        throw new Error("opencode daemon failed to start within 60 seconds")
+       }
+     }
+   }
+diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
+--- a/packages/opencode/src/cli/tui/worker.ts
++++ b/packages/opencode/src/cli/tui/worker.ts
+@@ -1,3 +1,6 @@
++import { Flag } from "@opencode-ai/core/flag/flag"
++import { Global } from "@opencode-ai/core/global"
++import path from "path"
+ import { Server } from "@/server/server"
+ import { InstanceRuntime } from "@/project/instance-runtime"
+ import { Rpc } from "@/util/rpc"
+@@ -25,6 +28,38 @@
+ 
+ // 守护进程模式：由 index.ts 旁路启动
+ // worker 角色：RPC 旁路或 daemon 生命周期二选一
++
++// 预热外部插件：在写锁/监听前动态 import，避免 TUI 在冷编译时等死
 +async function warmupExternalPlugins() {
++  // pure 安装面不加载用户插件，预热会浪费启动预算且与 pure 契约冲突
 +  if (Flag.OPENCODE_PURE) return
 +  try {
-+    const configFile = path.join(Global.Path.config, "opencode.json")
-+    const raw: unknown = await Bun.file(configFile).json().catch(() => ({}))
-+    if (!raw || typeof raw !== "object") return
-+    const pluginField = (raw as Record<string, unknown>).plugin
-+    if (!Array.isArray(pluginField)) return
-+    const specs: string[] = pluginField.flatMap((p: unknown) =>
-+      Array.isArray(p) ? (typeof p[0] === "string" ? [p[0] as string] : []) : typeof p === "string" ? [p] : [],
-+    )
++    const configPath = path.join(Global.Path.config, "opencode.json")
++    const raw = await Bun.file(configPath).text().catch(() => null)
++    if (!raw) return
++    const config = JSON.parse(raw) as { plugin?: unknown }
++    const plugins = Array.isArray(config.plugin) ? config.plugin : []
++    // 并行 import：墙钟取最慢插件，与 60s waitMs 配套；串行求和会误杀多插件冷启动
 +    await Promise.all(
-+      specs.map(async (spec) => {
++      plugins.map(async (spec) => {
 +        try {
-+          const target = await resolvePluginTarget(spec)
-+          if (!target) return
-+          const entry = await createPluginEntry(spec, target, "server")
-+          if (entry.entry) await import(entry.entry)
-+        } catch {}
++          const name = typeof spec === "string" ? spec : Array.isArray(spec) ? spec[0] : (spec as { package?: string })?.package
++          if (typeof name !== "string" || !name) return
++          const { resolvePluginTarget, createPluginEntry } = await import("@/plugin/shared")
++          const target = await resolvePluginTarget(name)
++          // kind=server：守护进程侧入口，与 TUI 客户端插件面分离
++          const entry = await createPluginEntry(name, target, "server")
++          if (entry?.entry) await import(entry.entry)
++        } catch {
++          // best-effort：单个插件失败不阻塞守护进程启动
++        }
 +      }),
 +    )
-+  } catch {}
++  } catch {
++    // best-effort：配置缺失或解析失败忽略
++  }
 +}
 +
-+await warmupExternalPlugins()
-+
- // Always start the internal loopback HTTP server first.
- const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })
+ const isDaemon = process.env.OPENCODE_PROCESS_ROLE === "worker"
  
+ // Worker 线程模式：通过 RPC 转发事件
+@@ -96,6 +131,8 @@
+ // 处理与空闲超时。Worker 线程模式跳过此块，仅使用 RPC 通信。
+ if (isDaemon) {
+   // 先启动内部回环 HTTP 服务器（端口 0 表示由系统分配随机可用端口）
++  // 先预热外部插件再监听/写锁，避免 TUI 在冷编译窗口误杀
++  await warmupExternalPlugins()
+   const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })
+ 
+   // 当启动方 TUI 请求时，额外启动一个外部可访问的 HTTP 服务器
 diff --git a/packages/opencode/src/installation/index.ts b/packages/opencode/src/installation/index.ts
-index be3bc47693a3e01d9a077e3510b707d599683a4d..a3253fc1d9bdc38760fe0b2fa6ef0652c9c347de 100644
 --- a/packages/opencode/src/installation/index.ts
 +++ b/packages/opencode/src/installation/index.ts
-@@ -12,6 +12,7 @@ import { makeRuntime } from "@opencode-ai/core/effect/runtime"
- import semver from "semver"
- import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/installation/version"
+@@ -15,6 +15,16 @@
  import { NpmConfig } from "@opencode-ai/core/npm-config"
-+import { sanitizedProcessEnv } from "@opencode-ai/core/util/opencode-process"
+ import { InstallationEvent } from "@opencode-ai/schema/installation-event"
  
- const log = Log.create({ service: "installation" })
++
++function installChildEnv(extra: Record<string, string | undefined> = {}) {
++  // 安装/升级子进程：合并 env 但剥离守护进程身份，避免子进程继承 worker 角色
++  return Object.fromEntries(
++    Object.entries({ ...process.env, ...extra }).filter(
++      ([k, v]) => v !== undefined && k !== "OPENCODE_PROCESS_ROLE" && k !== "OPENCODE_RUN_ID",
++    ),
++  ) as Record<string, string>
++}
++
+ export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop" | "choco" | "unknown"
  
-@@ -102,8 +103,8 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | ChildPro
-         function* (cmd: string[], opts?: { cwd?: string; env?: Record<string, string> }) {
-           const proc = ChildProcess.make(cmd[0], cmd.slice(1), {
+ export type ReleaseType = "patch" | "minor" | "major"
+@@ -95,8 +105,8 @@
+         const result = yield* appProcess.run(
+           ChildProcess.make(cmd[0], cmd.slice(1), {
              cwd: opts?.cwd,
 -            env: opts?.env,
 -            extendEnv: true,
-+            env: sanitizedProcessEnv(opts?.env),
++            env: installChildEnv(opts?.env),
 +            extendEnv: false,
-           })
-           const handle = yield* spawner.spawn(proc)
-           const out = yield* Stream.mkString(Stream.decodeText(handle.stdout))
-@@ -118,8 +119,8 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | ChildPro
-         function* (cmd: string[], opts?: { cwd?: string; env?: Record<string, string> }) {
-           const proc = ChildProcess.make(cmd[0], cmd.slice(1), {
+           }),
+         )
+         return result.stdout.toString("utf8")
+@@ -109,8 +119,8 @@
+         const result = yield* appProcess.run(
+           ChildProcess.make(cmd[0], cmd.slice(1), {
              cwd: opts?.cwd,
 -            env: opts?.env,
 -            extendEnv: true,
-+            env: sanitizedProcessEnv(opts?.env),
++            env: installChildEnv(opts?.env),
 +            extendEnv: false,
-           })
-           const handle = yield* spawner.spawn(proc)
-           const [stdout, stderr] = yield* Effect.all(
-@@ -148,8 +149,8 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | ChildPro
-           const bodyBytes = new TextEncoder().encode(body)
-           const proc = ChildProcess.make("bash", [], {
+           }),
+         )
+         return {
+@@ -151,8 +161,8 @@
+         const result = yield* appProcess.run(
+           ChildProcess.make(shell, [], {
              stdin: Stream.make(bodyBytes),
 -            env: { VERSION: target },
 -            extendEnv: true,
-+            env: sanitizedProcessEnv({ VERSION: target }),
++            env: installChildEnv({ VERSION: target } as any),
 +            extendEnv: false,
-           })
-           const handle = yield* spawner.spawn(proc)
-           const [stdout, stderr] = yield* Effect.all(
+           }),
+         )
+         return {

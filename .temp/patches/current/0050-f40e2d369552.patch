@@ -1,99 +1,92 @@
-From f40e2d36955293ae69ffe25f5bd7e447a089c9cf Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Wed, 29 Apr 2026 23:01:27 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E6=9B=B4=E6=96=B0=E6=91=98=E8=A6=81?=
- =?UTF-8?q?=E6=A8=A1=E6=9D=BF=EF=BC=8C=E5=A2=9E=E5=BC=BA=E7=94=A8=E6=88=B7?=
- =?UTF-8?q?=E7=9B=AE=E6=A0=87=E5=92=8C=E7=BA=A6=E6=9D=9F=E7=9A=84=E6=8F=8F?=
- =?UTF-8?q?=E8=BF=B0=EF=BC=8C=E4=BC=98=E5=8C=96=E8=BE=93=E5=87=BA=E7=BB=93?=
- =?UTF-8?q?=E6=9E=84=E5=92=8C=E5=86=85=E5=AE=B9=E8=A6=81=E6=B1=82?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/agent/prompt/compaction.txt b/packages/opencode/src/agent/prompt/compaction.txt
-index c7cb838bbaa0e38cbef58be5e72d537b7aab6a19..c9b16945e067ab67c01a5acbae4d6f262273912f 100644
---- a/packages/opencode/src/agent/prompt/compaction.txt
-+++ b/packages/opencode/src/agent/prompt/compaction.txt
-@@ -1,9 +1,15 @@
- You are an anchored context summarization assistant for coding sessions.
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -11,8 +11,11 @@
  
--Summarize only the conversation history you are given. The newest turns may be kept verbatim outside your summary, so focus on the older context that still matters for continuing the work.
-+CRITICAL: Respond with TEXT ONLY. Do NOT call tools. You already have the conversation history needed for this compaction step.
+ const DEFAULT_BUFFER = 20_000
+ const DEFAULT_KEEP_TOKENS = 8_000
++// 工具输出截断限制：避免单个工具输出占用过多摘要空间
+ const TOOL_OUTPUT_MAX_CHARS = 2_000
++// 摘要输出 token 上限：控制摘要长度避免占用过多上下文
+ const SUMMARY_OUTPUT_TOKENS = 4_096
++// 摘要模板：恢复快照而非转录，包含文件/代码/错误/修复等关键信息
+ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
+ <template>
+ ## Objective
+@@ -35,14 +38,21 @@
+ 1. [immediate concrete action, or "(none)"]
+ 2. [next action if known, or "(none)"]
  
--If the prompt includes a <previous-summary> block, treat it as the current anchored summary. Update it with the new history by preserving still-true details, removing stale details, and merging in new facts.
-+Summarize only the conversation history you are given. The newest turns may be kept verbatim outside your summary, so focus on older context that still matters for continuing the work.
- 
--Always follow the exact output structure requested by the user prompt. Keep every section, preserve exact file paths and identifiers when known, and prefer terse bullets over paragraphs.
-+If the prompt includes a <previous-summary> block, treat it as the current anchored summary. Preserve still-true details, remove stale or resolved details, and merge in new facts.
-+
-+Your output is a recovery snapshot, not a transcript. Capture the current unfinished work, user constraints and feedback, key decisions, relevant files/code, exact errors and fixes, and the next actionable steps needed to resume accurately.
-+
-+Always follow the exact output structure requested by the user prompt. Keep every section, preserve exact file paths, commands, error strings, symbols, API names, identifiers, and line numbers when known, and prefer terse bullets over paragraphs.
-+
-+Avoid noise: do not include raw long file contents, long command output, routine tool chatter, redundant observations, or generic advice. Include only the exact snippets, signatures, paths, errors, or results needed to continue without re-reading everything.
- 
- Do not answer the conversation itself. Do not mention that you are summarizing, compacting, or merging context. Respond in the same language as the conversation.
-diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
-index 306899684297d414d66600770fdae9e7a60935b3..27d53773ad3307406be2b7e5083a063b931da1eb 100644
---- a/packages/opencode/src/session/compaction.ts
-+++ b/packages/opencode/src/session/compaction.ts
-@@ -41,38 +41,45 @@ const MAX_PRESERVE_RECENT_TOKENS = 8_000
- const SUMMARY_TEMPLATE = `Output exactly this Markdown structure and keep the section order unchanged:
- ---
- ## Goal
--- [single-sentence task summary]
-+- [single-sentence current user goal]
- 
--## Constraints & Preferences
--- [user constraints, preferences, specs, or "(none)"]
-+## User Constraints & Preferences
-+- [durable user instructions, preferences, specs, or "(none)"]
- 
- ## Progress
- ### Done
--- [completed work or "(none)"]
-+- [completed work, verified findings, or "(none)"]
- 
- ### In Progress
--- [current work or "(none)"]
-+- [current unfinished work and where it stopped, or "(none)"]
- 
- ### Blocked
--- [blockers or "(none)"]
-+- [blockers, missing info, failed commands, or "(none)"]
-+
+-## Relevant Files
+-- [file or directory path: why it matters, or "(none)"]
 +## Files & Code
 +- [path: relevant symbols/sections and why they matter, or "(none)"]
 +
 +## Errors & Fixes
-+- [exact error/output and fix/status, or "(none)"]
- 
- ## Key Decisions
--- [decision and why, or "(none)"]
-+- [decision and reason, or "(none)"]
- 
- ## Next Steps
--- [ordered next actions or "(none)"]
-+- [ordered next actions directly tied to the latest user request, or "(none)"]
- 
- ## Critical Context
--- [important technical facts, errors, open questions, or "(none)"]
--
--## Relevant Files
--- [file or directory path: why it matters, or "(none)"]
-+- [non-obvious technical facts, tool results, command outputs, open questions, or "(none)"]
- ---
++- [exact error/output and fix or current status, or "(none)"]
+ </template>
  
  Rules:
  - Keep every section, even when empty.
  - Use terse bullets, not prose paragraphs.
--- Preserve exact file paths, commands, error strings, and identifiers when known.
-+- Preserve exact file paths, commands, error strings, identifiers, symbols, and line numbers when known.
-+- Prefer facts needed to continue work; remove stale or resolved details.
-+- For files, include why they matter and the relevant symbol/section when known.
-+- For errors, include the fix/status so the next model does not repeat dead ends.
-+- Do not include long file contents or large command outputs; summarize them by path, symbol, and result.
+-- Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
++- Preserve exact file paths, symbols, commands, error strings, URLs, identifiers, and line numbers when known.
++- Prefer facts over speculation; remove stale or resolved details to keep the snapshot accurate.
++- Files entries must include why they matter and relevant symbols.
++- Errors entries must include the fix or current status so the next model does not repeat dead ends.
++- No long file contents or large command outputs — reference them, do not reproduce them.
  - Do not mention the summary process or that context was compacted.`
- type Turn = {
-   start: number
+ 
+ type Entry = {
+@@ -158,10 +168,11 @@
+   }
+ }
+ 
++// 构建摘要提示词：合并前次摘要、模板和上下文，确保恢复快照的完整性
+ export const buildPrompt = (input: { readonly previousSummary?: string; readonly context: readonly string[] }) =>
+   [
+     input.previousSummary
+-      ? `Update the anchored summary below using the conversation history above.\nPreserve still-true details, remove stale details, and merge in the new facts.\n<previous-summary>\n${input.previousSummary}\n</previous-summary>`
++      ? `Update the anchored summary below using the conversation history above.\nPreserve still-true details, remove stale **or resolved** details, and merge in the new facts.\n<previous-summary>\n${input.previousSummary}\n</previous-summary>`
+       : "Create a new anchored summary from the conversation history.",
+     SUMMARY_TEMPLATE,
+     ...input.context,
+diff --git a/packages/opencode/src/agent/prompt/compaction.txt b/packages/opencode/src/agent/prompt/compaction.txt
+--- a/packages/opencode/src/agent/prompt/compaction.txt
++++ b/packages/opencode/src/agent/prompt/compaction.txt
+@@ -1,9 +1,20 @@
++CRITICAL: Respond with TEXT ONLY. Do NOT call tools.
++
+ You are an anchored context summarization assistant for coding sessions.
+ 
+ Summarize only the conversation history you are given. The newest turns may be kept verbatim outside your summary, so focus on the older context that still matters for continuing the work.
+ 
+-If the prompt includes a <previous-summary> block, treat it as the current anchored summary. Update it with the new history by preserving still-true details, removing stale details, and merging in new facts.
++If the prompt includes a <previous-summary> block, treat it as the current anchored summary. Update it with the new history by preserving still-true details, removing stale **or resolved** details, and merging in new facts.
+ 
+-Always follow the exact output structure requested by the user prompt. Keep every section, preserve exact file paths and identifiers when known, and prefer terse bullets over paragraphs.
++Produce a recovery snapshot, not a transcript. Capture:
++- Unfinished work and where it stopped
++- Constraints, feedback, and decisions
++- Files, code, and symbols that matter
++- Errors and their fixes
++- Next steps tied to the latest user request
+ 
++Always follow the exact output structure requested by the user prompt. Keep every section, preserve exact file paths, commands, error strings, symbols, API names, identifiers, and line numbers when known, and prefer terse bullets over paragraphs.
++
++Avoid noise: no raw long file contents, no command output dumps, no tool chatter, no generic advice.
++
+ Do not answer the conversation itself. Do not mention that you are summarizing, compacting, or merging context. Respond in the same language as the conversation.
+diff --git a/packages/core/test/session-compaction.test.ts b/packages/core/test/session-compaction.test.ts
+--- a/packages/core/test/session-compaction.test.ts
++++ b/packages/core/test/session-compaction.test.ts
+@@ -7,7 +7,8 @@
+   expect(prompt).toContain("## Work State\n### Completed")
+   expect(prompt).toContain("### Active")
+   expect(prompt).toContain("### Blocked")
+-  expect(prompt).toContain("## Relevant Files")
++  expect(prompt).toContain("## Files & Code")
++  expect(prompt).toContain("## Errors & Fixes")
+ })
+ 
+ test("compaction describes tool media without embedding base64", () => {
