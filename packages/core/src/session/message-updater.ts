@@ -338,6 +338,9 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
             match.state.structured = { ...event.data.structured,
               ...(event.data.structured.autoReview === undefined && match.state.structured.autoReview !== undefined
                 ? { autoReview: match.state.structured.autoReview } : {}),
+              // 通用取消进度没有Task身份，须保留leaf在创建后写入的真实恢复ID。
+              ...(match.name === "task" && typeof match.state.structured.task_id === "string" && event.data.structured.task_id === undefined
+                ? { task_id: match.state.structured.task_id } : {}),
             }
             match.state.content = [...event.data.content]
           }

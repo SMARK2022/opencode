@@ -49,7 +49,7 @@ import * as SessionRunnerLLM from "@opencode-ai/core/session/runner/llm"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
 import { Catalog } from "@opencode-ai/core/catalog"
 import { SessionCompaction } from "@opencode-ai/core/session/compaction"
-import { toDecideMessages } from "../src/session/runner/to-llm-message"
+import { toDecideMessages, toLLMMessages } from "../src/session/runner/to-llm-message"
 import { SessionHistory } from "@opencode-ai/core/session/history"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ApplicationTools } from "@opencode-ai/core/tool/application-tools"
@@ -1683,7 +1683,14 @@ describe("SessionRunnerLLM", () => {
       streamGate = firstGate
       streamStarted = firstStarted
       responses = [blank, answer]
-      const waiting = yield* invoke(childID, "research", "none").pipe(Effect.forkChild)
+      const callID = `call-task-interrupted-${round}`
+      // 真实父工具先进入running，再让leaf分配恢复身份；取消回调复用registry的限幅结果。
+      yield* parentEvents.publish(SessionEvent.Tool.Input.Started, { ...parentRead, callID, name: "task" })
+      yield* parentEvents.publish(SessionEvent.Tool.Called, { ...parentRead, callID, tool: "task", input: {}, provider: { executed: false } })
+      const waiting = yield* registry.materialize().pipe(Effect.flatMap(tools => tools.settle({
+        sessionID, agent: AgentV2.ID.make("plan"), assistantMessageID: parentRead.assistantMessageID,
+        call: { type: "tool-call", id: callID, name: "task", input: { description: "Research scoped implementation", prompt: "Inspect the requested module", subagent_type: "research", task_id: childID, inspected_files: "none" } },
+      }, bounded => parentEvents.publish(SessionEvent.Tool.Progress, { ...parentRead, callID, structured: {}, content: bounded.output.content }, { finalizer: true }).pipe(Effect.asVoid))), Effect.forkChild)
       yield* Deferred.await(firstStarted)
       if (round === 1) {
         streamGate = secondGate
@@ -1695,6 +1702,16 @@ describe("SessionRunnerLLM", () => {
       const exit = yield* Fiber.await(waiting)
       expect(Exit.isFailure(exit)).toBe(true)
       if (Exit.isFailure(exit)) expect(Cause.hasInterrupts(exit.cause)).toBe(true)
+      const projected = () => sessions.context(sessionID).pipe(Effect.map(messages => JSON.stringify(toLLMMessages(messages, model).flatMap(message => message.content.filter(part => part.type === "tool-result" && part.id === callID)))))
+      expect(yield* projected()).toContain(`task_id: ${childID} (for resuming to continue this task if needed)`)
+      expect(yield* projected()).toContain("user_abort")
+      // 终态化后仍交付同一ID一次；structured与取消正文都来自真实进度事件。
+      yield* parentEvents.publish(SessionEvent.Tool.Failed, { ...parentRead, callID, error: { type: "unknown", message: "Tool execution interrupted" }, provider: { executed: false } })
+      const failedProjection = yield* projected()
+      expect(failedProjection).toContain("Tool execution interrupted")
+      expect(failedProjection.split(`task_id: ${childID}`).length - 1).toBe(1)
+      const parentTools = (yield* sessions.context(sessionID)).flatMap(message => message.type === "assistant" ? message.content.filter(part => part.type === "tool" && part.id === callID) : [])
+      expect(parentTools).toMatchObject([{ state: { status: "error", structured: { task_id: childID } } }])
       yield* Deferred.succeed(firstGate, undefined)
       yield* Deferred.succeed(secondGate, undefined)
       const background = yield* BackgroundJob.Service

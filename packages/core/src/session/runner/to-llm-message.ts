@@ -13,6 +13,7 @@ import type { FileAttachment } from "../prompt"
 import { Token } from "../../util/token"
 import { SessionMemento } from "../compaction-memento"
 import { SessionOverflowV1 } from "../../v1/session/overflow"
+import { ensureTaskResumeVisible } from "../../util/output-notice"
 
 const media = (file: FileAttachment): ContentPart => ({
   type: "media",
@@ -57,13 +58,27 @@ const toolResult = (tool: SessionMessage.AssistantTool, providerMetadata: Provid
     })
   }
   if (tool.state.status === "error") {
+    // Failed沿用既有structured快照；只向Task错误添加真实恢复行，不改partial或错误类型。
+    const taskID = tool.name === "task" && typeof tool.state.structured.task_id === "string" ? tool.state.structured.task_id : undefined
+    const error = taskID ? { ...tool.state.error, message: ensureTaskResumeVisible(tool.state.error.message, taskID) } : tool.state.error
     return ToolResultPart.make({
       id: tool.id,
       name: tool.name,
       result:
         tool.provider?.executed === true && tool.state.result !== undefined
           ? tool.state.result
-          : { error: tool.state.error, content: tool.state.content, structured: tool.state.structured },
+          : { error, content: tool.state.content, structured: tool.state.structured },
+      resultType: "error",
+      providerExecuted: tool.provider?.executed,
+      providerMetadata,
+    })
+  }
+  // 未终态化的Task也必须闭合tool-result；没有已分配身份时仍保持原投影。
+  if (tool.name === "task" && tool.state.status === "running" && typeof tool.state.structured.task_id === "string") {
+    return ToolResultPart.make({
+      id: tool.id,
+      name: tool.name,
+      result: { error: { type: "unknown", message: ensureTaskResumeVisible("Tool execution interrupted", tool.state.structured.task_id) }, content: tool.state.content, structured: tool.state.structured },
       resultType: "error",
       providerExecuted: tool.provider?.executed,
       providerMetadata,
