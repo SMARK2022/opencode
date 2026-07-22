@@ -98,6 +98,30 @@ async function runDaemonStop(lockPath: string, env: Record<string, string> = {})
   return { exitCode, stderr }
 }
 
+async function runDaemonMachine(
+  lockPath: string,
+  command: "status" | "start",
+  env: Record<string, string> = {},
+) {
+  await prepareCliData(lockPath)
+  const args = [process.execPath, INDEX_TS, "daemon", command, "--json"]
+  if (command === "start") args.push("--launcher-pid", String(process.pid))
+  // 机器接口从真实 argv 入口执行，确保 yargs 参数、stdout 协议和 daemon owner 语义一起受测。
+  // stdout 只允许一个 JSON value；日志和迁移信息必须留在 stderr，调用方无需解析人类文案。
+  const proc = Bun.spawn(args, {
+    env: isolatedDaemonEnv(lockPath, env),
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [exitCode, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ])
+  return { exitCode, stdout, stderr }
+}
+
 /**
  * Spawn the daemon with an isolated lock file in `tmp`, then poll until the
  * lock appears and the HTTP server responds.  Returns the running proc and the
@@ -229,6 +253,87 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
 }
 
 describe("daemon lifecycle", () => {
+  test("daemon status JSON reports no owner without spawning", async () => {
+    // 独立lock/XDG/DB保证该查询不可能观察或停止开发者真实daemon。
+    // running=false是公开expected literal，测试不读取private lock parser返回类型。
+    // lock仍不存在证明status没有把read操作偷偷升级为ensure。
+    // 真实CLI入口同时覆盖yargs注册与stdout协议，不使用内部helper得到假绿。
+    await using tmp = await tmpdir()
+    const lockPath = path.join(tmp.path, "tui-server.json")
+
+    const result = await runDaemonMachine(lockPath, "status")
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual({ running: false })
+    // status 是纯观察操作；没有 owner 时不得创建 lock 或用 ensure 把查询变成启动。
+    expect(await Bun.file(lockPath).exists()).toBe(false)
+  })
+
+  test(
+    "daemon status JSON reports the current owner without private lock fields",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
+
+      try {
+        const result = await runDaemonMachine(lockPath, "status")
+        expect(result.exitCode).toBe(0)
+        expect(JSON.parse(result.stdout)).toEqual({
+          running: true,
+          pid: lock.pid,
+          url: `http://127.0.0.1:${lock.port}`,
+          responsive: true,
+        })
+        // machine contract 只公开连接所需的 PID/URL；token、control port 和 DB 路径仍属于 lock owner。
+        expect(result.stdout).not.toContain(lock.token)
+        expect(result.stdout).not.toContain("controlPort")
+        expect(result.stdout).not.toContain("dbPath")
+      } finally {
+        await runDaemonStop(lockPath).catch(() => undefined)
+        if (ServerLockModule.alive(proc.pid)) proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS,
+  )
+
+  test(
+    "daemon start JSON creates one owner protected by the external launcher PID and reuses it",
+    async () => {
+      // 250ms startup idle刻意短于750ms观察窗，使错误launcher PID稳定暴露。
+      // 测试进程保持存活代表bot，首次SSE尚未建立，隔离两个liveness阶段。
+      // 第二次start比较同一PID/URL，证明复用而非仅有另一个健康owner。
+      // finally通过safe stop清理真实worker，失败case也不遗留实验进程。
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const env = {
+        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000",
+        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
+      }
+
+      const first = await runDaemonMachine(lockPath, "start", env)
+      expect(first.exitCode).toBe(0)
+      const owner = JSON.parse(first.stdout) as { running: boolean; pid: number; url: string; responsive: boolean }
+      expect(owner.running).toBe(true)
+      expect(owner.responsive).toBe(true)
+
+      try {
+        // CLI 已退出且没有 SSE；worker 仍须观察测试进程这个外部 launcher，不能观察短命 CLI PID。
+        await Bun.sleep(750)
+        expect(ServerLockModule.alive(owner.pid)).toBe(true)
+
+        const second = await runDaemonMachine(lockPath, "start", env)
+        expect(second.exitCode).toBe(0)
+        expect(JSON.parse(second.stdout)).toEqual(owner)
+        // 重复 start 必须复用同一 PID/URL，最终选主权仍由现有 Daemon.ensure 持有。
+      } finally {
+        await runDaemonStop(lockPath).catch(() => undefined)
+        if (ServerLockModule.alive(owner.pid)) process.kill(owner.pid)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS,
+  )
+
   test(
     "worker deadline terminates a hanging instance disposer",
     async () => {

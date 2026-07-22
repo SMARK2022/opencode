@@ -28,6 +28,7 @@ target
 # Local dev files
 opencode-dev
 /thirdparty/opencode-v1.17.18-smark/
+/thirdparty/opencode-telegram-bot/
 UPCOMING_CHANGELOG.md
 logs/
 *.bun-build

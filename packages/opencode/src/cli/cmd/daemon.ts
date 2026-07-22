@@ -2,6 +2,7 @@ import { cmd } from "./cmd"
 import { UI } from "../ui"
 import { errorMessage } from "@/util/error"
 import { ServerLock, type ServerLock as ServerLockInfo } from "./tui/server-lock"
+import { Daemon } from "./tui/daemon"
 
 // graceful 预算保持 10 秒；超时后的 force 只针对重新确认的同一 lock owner。
 // 重新读取 lock 是必要的，因为等待期间旧 PID 可能已经退出。
@@ -15,8 +16,64 @@ export const DaemonCommand = cmd({
   // 这里只注册本机 TUI 共享 daemon 的管理入口；不复用 `serve`，避免把 headless server 生命周期混入。
   command: "daemon",
   describe: "manage the shared opencode daemon",
-  builder: (yargs) => yargs.command(DaemonStopCommand).demandCommand(),
+  builder: (yargs) => yargs.command(DaemonStatusCommand).command(DaemonStartCommand).command(DaemonStopCommand).demandCommand(),
   async handler() {},
+})
+
+const DaemonStatusCommand = cmd({
+  // status是观察接口，缺少owner时返回running=false且不得进入ensure选主。
+  // JSON不包含token/controlPort/dbPath，外部client只获得连接所需最小authority。
+  // stdout保持单值协议，日志继续走stderr，避免Node调用方猜测人类输出。
+  // responsive=false仍报告同一存活owner，调用方不得据此创建第二个daemon。
+  command: "status",
+  describe: "report the shared opencode daemon connection",
+  builder: (yargs) =>
+    yargs.option("json", {
+      type: "boolean",
+      demandOption: true,
+      describe: "write one machine-readable JSON result to stdout",
+    }),
+  async handler() {
+    // stdout是外部client的协议通道；UI logo、日志和人类诊断必须继续留在stderr。
+    process.stdout.write(JSON.stringify(await Daemon.connectionInfo()) + "\n")
+  },
+})
+
+const DaemonStartCommand = cmd({
+  // start只把跨进程请求交给现有ensure，CLI自身不解析lock或选择端口。
+  // launcher PID来自长期client，保护首个SSE前窗口而不是绑定短命CLI。
+  // ensure返回后重新查询同一owner identity，避免输出spawn wrapper或旧lock PID。
+  // 参数错误直接失败，不使用默认PID掩盖调用方协议缺陷。
+  command: "start",
+  describe: "ensure the shared opencode daemon is running",
+  builder: (yargs) =>
+    yargs
+      .option("json", {
+        type: "boolean",
+        demandOption: true,
+        describe: "write one machine-readable JSON result to stdout",
+      })
+      .option("launcher-pid", {
+        type: "number",
+        demandOption: true,
+        describe: "client process that protects startup until the first global SSE connection",
+      }),
+  async handler(args) {
+    // 正整数门禁属于CLI trust seam；无效PID不能进入worker环境并改变startup idle语义。
+    if (!Number.isSafeInteger(args.launcherPid) || args.launcherPid <= 0) throw new Error("launcher-pid must be a positive integer")
+    await Daemon.ensure({
+      launcherPid: args.launcherPid,
+      port: 0,
+      hostname: "127.0.0.1",
+      mdns: false,
+      "mdns-domain": "opencode.local",
+      cors: [],
+    })
+    const info = await Daemon.connectionInfo()
+    if (!info.running) throw new Error("opencode daemon owner disappeared after startup")
+    // ensure与快照共用OpenCode owner分类，不向调用方泄漏或要求解析ServerLock。
+    process.stdout.write(JSON.stringify(info) + "\n")
+  },
 })
 
 const DaemonStopCommand = cmd({

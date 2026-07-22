@@ -25,9 +25,12 @@ export const SERVER_ELECTION_TIMEOUT_MS = DAEMON_START_TIMEOUT_MS + 15_000
 const SERVER_ELECTION_STALE_MS = 5_000
 const SERVER_POLL_INTERVAL_MS = 200
 
-type Args = NetworkOptions
+type Args = NetworkOptions & { launcherPid?: number }
 type DaemonExit = { exitCode: number } | { error: unknown }
 export type Status = { tuiClients: number; sessionActivity: number }
+export type ConnectionInfo =
+  | { running: false }
+  | { running: true; pid: number; url: string; responsive: boolean }
 // adapter只暴露ensure实际依赖的四项authority，wrapper细节不能泄漏给选主和健康检查调用方。
 type DaemonProcess = Pick<ReturnType<typeof Bun.spawn>, "pid" | "exited" | "unref" | "kill">
 // Promise返回允许Windows先完成worker PID握手，Unix测试注入仍可保持同步Bun.spawn形状。
@@ -350,7 +353,8 @@ export async function ensure(args: Args) {
       env: {
         ...env,
         ...(printLogs ? { OPENCODE_PRINT_LOGS: "1" } : {}),
-        OPENCODE_DAEMON_LAUNCHER_PID: String(process.pid),
+        // 外部client会先退出短命CLI再建立SSE；首连前必须观察真实client PID，TUI缺省仍观察自身。
+        OPENCODE_DAEMON_LAUNCHER_PID: String(args.launcherPid ?? process.pid),
         ...(external
           ? {
               OPENCODE_EXTERNAL_PORT: String(network.port),
@@ -404,6 +408,27 @@ export async function ensure(args: Args) {
     )
   } finally {
     await electionLease?.release().catch(() => undefined)
+  }
+}
+
+export async function connectionInfo(): Promise<ConnectionInfo> {
+  // connection query复用existingOwnerUrl分类，不能再实现一套alive/ping判断。
+  // dead lock只表现为running=false；纯查询不清理状态或触发election副作用。
+  // stopping owner仍占有single-owner位置，因此报告running但不可响应。
+  // internal URL由OpenCode生成，bot不获得lock文件位置或认证控制面信息。
+  const owner = await existingOwnerUrl(false)
+  // 查询不能调用ensure或清理lock；missing/dead都表示当前没有可复用的存活owner。
+  if (owner.type === "missing" || owner.type === "dead") return { running: false }
+  if (owner.type === "stopping") {
+    // stopping仍是当前唯一owner；报告存活但不可用，调用方不能据此启动第二个daemon。
+    return { running: true, pid: owner.lock.pid, url: lockUrl(owner.lock, false), responsive: false }
+  }
+  // machine contract只暴露连接和身份复用所需字段，lock token/control/db永远留在OpenCode内部。
+  return {
+    running: true,
+    pid: owner.lock.pid,
+    url: owner.url,
+    responsive: owner.type === "responsive",
   }
 }
 
