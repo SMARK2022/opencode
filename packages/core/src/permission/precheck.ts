@@ -71,7 +71,8 @@ const RE_D_CURL_PIPE_INTERPRETER = /\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|
 const RE_D_PS_DOWNLOAD_EXEC = /\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|;]*\|\s*(?:iex|Invoke-Expression)\b/i
 const RE_D_DECODE_PIPE_INTERPRETER = /\b(?:base64|openssl|xxd|gunzip|bunzip2|unxz|zcat)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|dash|fish|ksh|python|python3|node|ruby|perl|pwsh|powershell)\b/i
 const RE_D_WINDOWS_FORMAT = /\bformat\b\s+[A-Za-z]:/i
-const RE_D_WINDOWS_PROTECTED_DELETE = /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"\x60]|$)|[A-Za-z]:[\\/](?:Users|Windows|Program Files|Documents and Settings)(?:[\\/][^\s)'"\x60]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"\x60]|$))/i
+// #530：旧 RE_D_WINDOWS_PROTECTED_DELETE 整串正则已删——跨段 .* 共现把 python heredoc（del + tree-sitter 的 -s + if not m: 盘符形）
+// 误报 dangerous；改由 windowsProtectedDeleteInCommand 同段 token 谓词承载（见 protectedDeleteTarget 附近）。
 const RE_D_CREDENTIAL_PIPE_NETWORK = new RegExp(String.raw`\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})[^|;]*\|\s*(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b`,"i",)
 const RE_D_CREDENTIAL_UPLOAD_FLAG = new RegExp(String.raw`\b(?:curl|wget)\b(?=.*(?:--data(?:-binary|-raw|-urlencode)?|-d|--form|-F|--upload-file|--form-string|-T)(?:\s+|=)(?:[^\s|;=@]+(?:=|@)@?)?@?${SENSITIVE_PATH_ARGUMENT_PATTERN})`,"i",)
 const RE_D_CREDENTIAL_REMOTE_TRANSFER = new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`,"i",)
@@ -787,7 +788,8 @@ function dangerousRaw(command: string): string | undefined {
   if (RE_D_DECODE_PIPE_INTERPRETER.test(normalized))
     return "decoded/decompressed payload piped to interpreter"
   if (RE_D_WINDOWS_FORMAT.test(normalized)) return "Windows drive format"
-  if (RE_D_WINDOWS_PROTECTED_DELETE.test(normalized)) return "Windows protected directory delete"
+  // #530：Windows 保护递归删除：同段 token 谓词（禁整串子串共现误报）
+  if (windowsProtectedDeleteInCommand(normalized)) return "Windows protected directory delete"
   // #220：凭据外传——敏感文件读取管道到网络传输是 dangerous
   if (RE_D_CREDENTIAL_PIPE_NETWORK.test(normalized)) return "credential read piped to network transfer"
   if (RE_D_CREDENTIAL_UPLOAD_FLAG.test(normalized)) return "credential file sent with network transfer"
@@ -931,6 +933,9 @@ function classifyTokens(tokens: string[]): Decision | undefined {
       return { level: "dangerous", reason: "critical PowerShell recursive delete" }
     return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
   }
+  // #530：与 rm 对称：del/erase/rd/rmdir 保护根递归删除走同一 Windows 谓词，不降到 cautious
+  if (windowsProtectedRecursiveDelete(tokens))
+    return { level: "dangerous", reason: "Windows protected directory delete" }
   if (FILE_DELETE_COMMANDS.has(cmd) && tokens.length > 1)
     return { level: "cautious", reason: "file deletion requires explicit approval" }
   // #222：find -delete / -exec rm 也属于文件删除——argv 语义判断
@@ -1176,6 +1181,52 @@ function hasRecursiveDeleteFlags(tokens: string[]) {
   return tokens.some((item) => item === "--recursive" || /^-[^-]*[rR]/.test(item))
 }
 
+// #530：cmd del/rd/rmdir 可合并的单字母开关；s=递归。禁止 tree-sitter、/setup 等非开关词。
+const WINDOWS_CMD_SWITCH_LETTERS = new Set(["a", "f", "p", "q", "s", "u"])
+
+function hasWindowsRecursiveDeleteFlag(tokens: string[]) {
+  return tokens.some(isWindowsRecursiveDeleteFlagToken)
+}
+
+function isWindowsRecursiveDeleteFlagToken(token: string) {
+  const t = token.toLowerCase()
+  if (t === "/s" || t === "-s" || t === "--recursive") return true
+  // #530：仅整 token 纯开关 cluster：/s/q、/s/p、/sq；不得裸子串匹配 -sitter
+  if (!(t.startsWith("/") || (t.startsWith("-") && !t.startsWith("--")))) return false
+  const body = t.slice(1)
+  if (!body) return false
+  if (body.includes("/")) {
+    const parts = body.split("/")
+    return parts.every((part) => part.length === 1 && WINDOWS_CMD_SWITCH_LETTERS.has(part)) && parts.includes("s")
+  }
+  if (body.length < 1 || body.length > 4) return false
+  return [...body].every((ch) => WINDOWS_CMD_SWITCH_LETTERS.has(ch)) && body.includes("s")
+}
+
+function windowsProtectedRecursiveDelete(tokens: string[]) {
+  // #530：三元组同时成立才 dangerous：命令名 + 递归开关 + 保护根（与 rm 语义对称）
+  if (tokens.length < 2) return false
+  const cmd = normalizeCommandName(tokens[0])
+  if (cmd !== "del" && cmd !== "erase" && cmd !== "rd" && cmd !== "rmdir") return false
+  const rest = tokens.slice(1)
+  return hasWindowsRecursiveDeleteFlag(rest) && rest.some(protectedDeleteTarget)
+}
+
+// #530：仅空白切分并保留 \。POSIX tokenize 把 \ 当转义吞掉，C:\Users 会变成 C:Users 导致保护根 FN。
+function windowsCmdTokens(segment: string) {
+  return segment.trim().split(/\s+/).filter(Boolean)
+}
+
+// #530：normalize 后按段扫描；sole windowsCmdTokens，禁止再顺序 tokenize（R5 impl audit B-01）
+function windowsProtectedDeleteInCommand(normalized: string) {
+  for (const segment of normalized.split(/[;|&]+/)) {
+    const trimmed = segment.trim()
+    if (!trimmed) continue
+    if (windowsProtectedRecursiveDelete(windowsCmdTokens(trimmed))) return true
+  }
+  return false
+}
+
 // #220：protectedDeleteTarget——保护根目录覆盖 POSIX 根、家目录、Windows 盘符、系统目录和 macOS 特有目录
 function protectedDeleteTarget(input: string) {
   // 折叠多斜杠并解析 .. 穿越，保证 /home//user、/home/../etc 等形式正确判定
@@ -1187,6 +1238,8 @@ function protectedDeleteTarget(input: string) {
   if (normalized === "~" || normalized === "$HOME") return true
   // #220: Windows 环境变量家目录
   if (normalized === "$env:USERPROFILE" || normalized === "$env:SystemDrive") return true
+  // #530：Windows 环境变量家目录（%USERPROFILE% 大小写不敏感，对齐旧 raw i 旗）
+  if (normalized.toLowerCase() === "%userprofile%") return true
   if (/^\w:\/?$/.test(normalized)) return true
   // #220: POSIX 系统根目录（扩展版）
   const posixRoots = new Set([
