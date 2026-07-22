@@ -1,34 +1,23 @@
-From f13fd00acfde5be5f76eadee36f16bd053f81397 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Tue, 28 Apr 2026 16:23:33 +0800
-Subject: [PATCH] =?UTF-8?q?fix:=20=E4=BF=AE=E6=AD=A3=E4=B8=8A=E4=B8=8B?=
- =?UTF-8?q?=E6=96=87=E4=BD=BF=E7=94=A8=E7=BB=9F=E8=AE=A1=E4=B8=AD=E7=9A=84?=
- =?UTF-8?q?=E8=BE=93=E5=87=BA=E8=AE=A1=E7=AE=97=E9=80=BB=E8=BE=91=EF=BC=8C?=
- =?UTF-8?q?=E6=9B=B4=E6=96=B0=E6=B5=8B=E8=AF=95=E7=94=A8=E4=BE=8B=E4=BB=A5?=
- =?UTF-8?q?=E5=8F=8D=E6=98=A0=E6=9B=B4=E6=94=B9?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-index a6d051000bc9863418c51dffe81b99393adc8dc2..14a588762a047ed6e508775caf48cece32737f9f 100644
---- a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-@@ -235,7 +235,7 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
+diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
+--- a/packages/tui/src/util/context-usage.ts
++++ b/packages/tui/src/util/context-usage.ts
+@@ -438,8 +438,8 @@
        if (part.type !== "step-finish") continue
        confirmed = true
        usage.input += part.tokens.input
+-      // output 包含 reasoning，因为推理 token 也计入输出
 -      usage.output += part.tokens.output + part.tokens.reasoning
++      // output 不含 reasoning：推理 token 单独累计到 usage.reasoning 避免重复计算
 +      usage.output += part.tokens.output
        usage.reasoning += part.tokens.reasoning
        usage.cacheRead += part.tokens.cache.read
        usage.cacheWrite += part.tokens.cache.write
-@@ -247,14 +247,14 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
+@@ -452,15 +452,16 @@
      for (const msg of messages) {
        if (msg.info.role !== "assistant") continue
        usage.input += msg.info.tokens.input
 -      usage.output += msg.info.tokens.output + msg.info.tokens.reasoning
++      // 同上：output 不含 reasoning
 +      usage.output += msg.info.tokens.output
        usage.reasoning += msg.info.tokens.reasoning
        usage.cacheRead += msg.info.tokens.cache.read
@@ -36,33 +25,42 @@ index a6d051000bc9863418c51dffe81b99393adc8dc2..14a588762a047ed6e508775caf48cece
        usage.cost += msg.info.cost
      }
    }
+-  // total 不含 cost：cost 是金额而非 token，单独累计避免单位混淆
 -  usage.total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite
++  // total 不含 cost 但含 reasoning：reasoning 单独累计避免与 output 重复
 +  usage.total = usage.input + usage.output + usage.reasoning + usage.cacheRead + usage.cacheWrite
    return usage
  }
  
-@@ -666,7 +666,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+@@ -921,7 +922,8 @@
    const maxTokens = modelInfo.model?.limit.context ?? 0
  
    const msg = messageTokens(compacted)
 -  const usage = usageTotals(compacted)
++    // 使用 raw 而非 compacted：统计全部消息的用量，不仅压缩后的尾部
 +  const usage = usageTotals(raw)
    const instructions = await gatherInstructionFiles(input)
    const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content) }))
    const messageText = msg.text.join("\n")
-diff --git a/packages/opencode/test/cli/tui/context-usage.test.ts b/packages/opencode/test/cli/tui/context-usage.test.ts
-index 29ba3d8559e338bc0a7729fa6086ea1fb6f61204..6d0ad5ef410cdbef7e9a9e859f8d1cb72bda287b 100644
---- a/packages/opencode/test/cli/tui/context-usage.test.ts
-+++ b/packages/opencode/test/cli/tui/context-usage.test.ts
-@@ -257,9 +257,9 @@ describe("context usage", () => {
+
+diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
+--- a/packages/tui/test/context-usage.test.ts
++++ b/packages/tui/test/context-usage.test.ts
+@@ -303,12 +303,12 @@
        toolDefinitions: [],
      })
  
+-    // input=100, output=40+10=50, reasoning=10, cacheRead=20, cacheWrite=5
 -    expect(data.details.usage).toMatchObject({ input: 100, output: 50, reasoning: 10, cacheRead: 20, cacheWrite: 5 })
++    // input=100, output=40（不含 reasoning）, reasoning=10, cacheRead=20, cacheWrite=5
 +    expect(data.details.usage).toMatchObject({ input: 100, output: 40, reasoning: 10, cacheRead: 20, cacheWrite: 5 })
+     // 有确认用量时显示 Session Totals
      expect(contextUsageFooter(data, 100)).toContain("Session Totals")
+-    // 输出含推理：Output 50
 -    expect(contextUsageFooter(data, 100)).toContain("Output 50")
++    // 输出不含推理：Output 40
 +    expect(contextUsageFooter(data, 100)).toContain("Output 40")
+     // 缓存读/写：Cache W/R 5/20
      expect(contextUsageFooter(data, 100)).toContain("Cache W/R 5/20")
-     expect(contextUsageFooter(data, 100).length).toBe(82)
-   })
+     // 底部行宽度 = max(36, 100-18) = 82
+

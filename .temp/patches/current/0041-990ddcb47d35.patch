@@ -1,30 +1,17 @@
-From 990ddcb47d3593a59ef7f01b4b9a647453a3e4e6 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Mon, 27 Apr 2026 17:35:15 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E5=B0=86=E4=BC=9A=E8=AF=9D=E5=8E=8B?=
- =?UTF-8?q?=E7=BC=A9=E5=8A=9F=E8=83=BD=E7=9A=84=E9=80=89=E6=8B=A9=E5=A4=84?=
- =?UTF-8?q?=E7=90=86=E6=94=B9=E4=B8=BA=E5=BC=82=E6=AD=A5=EF=BC=8C=E6=B7=BB?=
- =?UTF-8?q?=E5=8A=A0=E5=8A=A0=E8=BD=BD=E6=8F=90=E7=A4=BA=E5=92=8C=E9=94=99?=
- =?UTF-8?q?=E8=AF=AF=E5=A4=84=E7=90=86?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 8aeaf53eab9ca1d836ae208e4342b2f723b6079f..c06af892912acd485ad653b8c5146b9cd1163d72 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -503,7 +503,7 @@ export function Session() {
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -569,7 +569,8 @@
          name: "compact",
          aliases: ["summarize"],
        },
--      onSelect: (dialog) => {
-+      onSelect: async (dialog) => {
+-      run: () => {
++      // 异步压缩：先清空对话框，显示加载提示，失败时显示错误信息
++      run: async () => {
          const selectedModel = local.model.current()
          if (!selectedModel) {
            toast.show({
-@@ -513,12 +513,28 @@ export function Session() {
+@@ -579,12 +580,32 @@
            })
            return
          }
@@ -33,13 +20,16 @@ index 8aeaf53eab9ca1d836ae208e4342b2f723b6079f..c06af892912acd485ad653b8c5146b9c
 -          modelID: selectedModel.modelID,
 -          providerID: selectedModel.providerID,
 -        })
++        // 先清空命令面板，避免压缩期间用户再次触发
          dialog.clear()
++        // 加载提示：3s 内告知用户压缩已启动
 +        toast.show({
 +          variant: "info",
 +          message: "Starting session compaction...",
 +          duration: 3000,
 +        })
 +        try {
++          // throwOnError 使 SDK 在 HTTP 错误时抛出，由 catch 捕获并展示给用户
 +          await sdk.client.session.summarize(
 +            {
 +              sessionID: route.sessionID,
@@ -49,6 +39,7 @@ index 8aeaf53eab9ca1d836ae208e4342b2f723b6079f..c06af892912acd485ad653b8c5146b9c
 +            { throwOnError: true },
 +          )
 +        } catch (error) {
++          // 错误处理：压缩失败时显示错误提示，duration 8s 确保用户能看到
 +          toast.show({
 +            variant: "error",
 +            message: errorMessage(error),
@@ -58,3 +49,4 @@ index 8aeaf53eab9ca1d836ae208e4342b2f723b6079f..c06af892912acd485ad653b8c5146b9c
        },
      },
      {
+

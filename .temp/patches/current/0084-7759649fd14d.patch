@@ -3,108 +3,20 @@ From: SMARK <3222301373@qq.com>
 Date: Tue, 5 May 2026 20:47:00 +0800
 Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E5=A2=9E=E5=BC=BA=E7=AC=94?=
  =?UTF-8?q?=E8=AE=B0=E6=9C=AC=E8=AF=B7=E6=B1=82=E5=A4=84=E7=90=86=EF=BC=8C?=
- =?UTF-8?q?=E6=B7=BB=E5=8A=A0=E6=96=87=E4=BB=B6=E9=94=81=E6=9C=BA=E5=88=B6?=
- =?UTF-8?q?=E4=BB=A5=E5=BA=8F=E5=88=97=E5=8C=96=E8=AF=B7=E6=B1=82=EF=BC=8C?=
- =?UTF-8?q?=E4=BC=98=E5=8C=96=E8=BF=90=E8=A1=8C=E9=80=BB=E8=BE=91?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/ide/vscode-bridge.ts
-index 4d913fb040accfb1299c73eb12d0dd2162d4877f..1d9dd1e2ca49846016b50463c5a122fadb9c2281 100644
---- a/packages/opencode/src/ide/vscode-bridge.ts
-+++ b/packages/opencode/src/ide/vscode-bridge.ts
-@@ -4,8 +4,9 @@ import path from "path"
- import { fileURLToPath } from "url"
- import { Global } from "@opencode-ai/core/global"
- 
--const DEFAULT_HEALTH_TIMEOUT = 500
--const DEFAULT_STALE_MS = 15_000
-+const DEFAULT_HEALTH_TIMEOUT = 2_000
-+const DEFAULT_HEARTBEAT_TRUST_MS = 10_000
-+const DEFAULT_STALE_MS = 60_000
- const RESOLVE_CACHE_MS = 5_000
- 
- export type BridgeEntry = {
-@@ -64,6 +65,8 @@ let cachedRegistryBridge:
-     }
-   | undefined
- 
-+let bridgeRequestQueue = Promise.resolve()
-+
- export function registryDir() {
-   return process.env.OPENCODE_IDE_REGISTRY_DIR ?? path.join(Global.Path.state, "ide")
- }
-@@ -85,16 +88,20 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
-         const filepath = path.join(dir, file)
-         const entry = await readEntry(filepath)
-         if (!entry) return
--        if (now - entry.updatedAt > staleMs) {
-+        if (pidDead(entry.pid)) {
-           await removeStale(filepath)
-           return
-         }
--        if (pidDead(entry.pid)) {
--          await removeStale(filepath)
-+        const age = now - entry.updatedAt
-+        if (age <= DEFAULT_HEARTBEAT_TRUST_MS) {
-+          live.push(entry)
-           return
-         }
--        if (!(await healthCheck(entry, input.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT))) return
--        live.push(entry)
-+        if (await healthCheck(entry, input.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT)) {
-+          live.push(entry)
-+          return
-+        }
-+        if (age > staleMs) await removeStale(filepath)
-       }),
-   )
-   return live
-@@ -152,6 +159,10 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
- }
- 
- export async function callBridge(input: CallInput): Promise<unknown> {
-+  return await enqueueBridgeRequest(() => callBridgeOnce(input))
-+}
-+
-+async function callBridgeOnce(input: CallInput): Promise<unknown> {
-   await assertExistingLocalFilePath(input.filePath)
-   const bridge = await resolveBridge({ cwd: input.cwd, filePath: input.filePath })
-   let response: Response
-@@ -191,6 +202,20 @@ export async function callBridge(input: CallInput): Promise<unknown> {
-   return value
- }
- 
-+async function enqueueBridgeRequest<T>(operation: () => Promise<T>) {
-+  const previous = bridgeRequestQueue
-+  let release!: () => void
-+  bridgeRequestQueue = new Promise<void>((resolve) => {
-+    release = resolve
-+  })
-+  await previous
-+  try {
-+    return await operation()
-+  } finally {
-+    release()
-+  }
-+}
-+
- export function summaryOnly(value: unknown) {
-   if (value && typeof value === "object" && "summary" in value && typeof value.summary === "string") {
-     return value.summary
 diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
-index b716e104c47e5212ae4fa71458130294c2a1bc8a..a6bc30fe792f134f524b02e85dff030005561467 100644
+index fb36634193..fb162b4200 100644
 --- a/sdks/vscode/src/bridge.ts
 +++ b/sdks/vscode/src/bridge.ts
-@@ -34,6 +34,22 @@ export type BridgeInfo = { port: number; token: string }
+@@ -39,6 +39,25 @@ export type BridgeInfo = { port: number; token: string }
  let server: http.Server | undefined
  let registry: RegistryHandle | undefined
  
-+/** Per-filePath mutex: serializes notebook requests that target the same document. */
++// 每 notebook filePath 一把锁：串行化同文档并发 POST
 +const fileLocks = new Map<string, Promise<void>>()
-+
++// 锁表键为 notebook filePath，跨 handler 共享
++/** Per-filePath mutex: serializes notebook requests that target the same document. */
++// FIFO 互斥：prev.then(fn)，finally 释放槽位
 +function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
 +  const prev = fileLocks.get(key) ?? Promise.resolve()
 +  let release!: () => void
@@ -118,18 +30,20 @@ index b716e104c47e5212ae4fa71458130294c2a1bc8a..a6bc30fe792f134f524b02e85dff0300
 +  })
 +}
 +
++
+ // 关闭桥接服务器：停止 HTTP 服务器并清理资源
+ // 先 dispose registry 再 close server，避免半开状态
  export async function closeBridge() {
-   await registry?.dispose()
-   registry = undefined
-@@ -77,10 +93,13 @@ export async function startBridge(output: { appendLine(value: string): void }):
-         return writeJson(response, 200, manifest({ id, port: addressPort(httpServer), token: "<redacted>" }))
+@@ -105,10 +124,14 @@ export async function startBridge(output: { appendLine(value: string): void }):
+         )
        }
  
 -      // Route to notebook handlers
 -      const result = await routeRequest(request.method ?? "", url.pathname, request, output)
 -      if (result !== undefined) {
 -        return writeJson(response, 200, result)
-+      // Route to notebook handlers — serialized per notebook filePath
++      // POST 读 body 后按 filePath 加锁再分发；body 只读一次
++      // Route to notebook handlers — 同 filePath 串行化
 +      if (request.method === "POST") {
 +        const body = await readJson(request)
 +        if (!body || !isRecord(body)) throw new Error("Expected JSON object body")
@@ -139,9 +53,9 @@ index b716e104c47e5212ae4fa71458130294c2a1bc8a..a6bc30fe792f134f524b02e85dff0300
        }
  
        writeJson(response, 404, { ok: false, error: "Not found" })
-@@ -123,17 +142,10 @@ export async function startBridge(output: { appendLine(value: string): void }):
- // ---------------------------------------------------------------------------
- 
+@@ -161,19 +184,11 @@ export async function startBridge(output: { appendLine(value: string): void }):
+ // 路由请求：根据路径分发到对应的 notebook 处理函数
+ // 请求路由：根据 URL 路径分发到 notebook 处理函数
  async function routeRequest(
 -  method: string,
    pathname: string,
@@ -151,68 +65,21 @@ index b716e104c47e5212ae4fa71458130294c2a1bc8a..a6bc30fe792f134f524b02e85dff0300
  ) {
 -  if (method !== "POST") return undefined
 -
--  const body = await readJson(request)
+-// 读取 JSON 请求体：解析工具参数
+-const body = await readJson(request)
 -  if (!isRecord(body)) {
 -    throw new Error("Expected JSON object body")
 -  }
- 
+-
++  // body 已在锁内读入：此处只做路径分发，禁止二次 readJson
    switch (pathname) {
-     case "/notebook/summary": {
-diff --git a/sdks/vscode/src/notebook/run.ts b/sdks/vscode/src/notebook/run.ts
-index 675163c93c58c0c80335966ead9a144f4b694b0d..3e9a0d1bd8ebaa15eab7253ad0171e9ca50d268a 100644
---- a/sdks/vscode/src/notebook/run.ts
-+++ b/sdks/vscode/src/notebook/run.ts
-@@ -37,6 +37,10 @@ export async function runNotebook(input: Record<string, unknown>) {
-   if (type !== undefined && type !== "cell" && type !== "range") throw new Error("type must be one of: cell, range")
-   const cellId = stringProp(input, "cellId")
-   if (!cellId) throw new Error("cellId is required")
-+  const endCellId = stringProp(input, "endCellId")
-+  if (type === "cell" && endCellId && endCellId.replace(/^#/, "") !== cellId.replace(/^#/, "")) {
-+    throw new Error("endCellId must not be set when type is cell unless it equals cellId")
-+  }
- 
-   const notebook = await resolveNotebook(filePath)
-   const commands = await vscode.commands.getCommands(true)
-@@ -47,7 +51,7 @@ export async function runNotebook(input: Record<string, unknown>) {
-   const timeoutMs = numberProp(input, "timeoutMs") ?? 300_000
- 
-   // Resolve target cells via stable cell IDs. No cellIndex or "all" mode is accepted.
--  const cells = resolveRunTarget(notebook, cellId, stringProp(input, "endCellId"))
-+  const cells = resolveRunTarget(notebook, cellId, endCellId)
- 
-   // Open notebook and reveal first cell
-   const editor = await vscode.window.showNotebookDocument(notebook, {
-@@ -91,7 +95,7 @@ export async function runNotebook(input: Record<string, unknown>) {
-       failedIndex = cell.index
-     }
- 
--    const result = await compactRunCell(notebook, cell)
-+    const result = await compactRunCell(notebook, notebook.cellAt(cell.index))
-     if (!executionSummary) result.exec = "timed out (may still be running, waiting for kernel selection, or failed to start)"
-     results.push(result)
-   }
-@@ -190,6 +194,7 @@ function runSummaryText(
-  * VS Code/Copilot pattern so fast executions are not missed.
-  */
- function waitForSingleCell(cell: vscode.NotebookCell, timeoutMs: number) {
-+  const targetUri = cell.document.uri.toString()
-   let subscription: vscode.Disposable | undefined
-   let timer: ReturnType<typeof setTimeout> | undefined
-   const promise = new Promise<vscode.NotebookCellExecutionSummary | undefined>((resolve) => {
-@@ -200,7 +205,7 @@ function waitForSingleCell(cell: vscode.NotebookCell, timeoutMs: number) {
-     subscription = vscode.workspace.onDidChangeNotebookDocument((event) => {
-       if (event.notebook.uri.toString() !== cell.notebook.uri.toString()) return
-       for (const change of event.cellChanges) {
--        if (change.cell !== cell || typeof change.executionSummary?.success !== "boolean") continue
-+        if (change.cell.document.uri.toString() !== targetUri || typeof change.executionSummary?.success !== "boolean") continue
-         const summary = change.executionSummary
-         clearTimeout(timer)
-         subscription?.dispose()
+     case "/notebook/summary":
+       return await notebookSummary(stringProp(body, "filePath"))
 diff --git a/sdks/vscode/src/notebook/summary.ts b/sdks/vscode/src/notebook/summary.ts
-index 8ae1efdf0320e2138a6116a2d8530ce3f86cfa5a..819d4251f9eca508aa5481ec621c09a9923b73a4 100644
+index 83e4649be5..40def0ef42 100644
 --- a/sdks/vscode/src/notebook/summary.ts
 +++ b/sdks/vscode/src/notebook/summary.ts
-@@ -49,7 +49,7 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
+@@ -58,7 +58,7 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
    const status = failed.length
      ? `${failed.length} failed`
      : executed.length === code.length && code.length > 0

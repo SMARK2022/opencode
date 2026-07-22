@@ -1,14 +1,13 @@
-diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -65,17 +65,19 @@
+@@ -64,18 +64,18 @@
+           # chmod 755：确保二进制对所有用户可执行，符合 deb 包权限规范
            chmod 755 "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
  
-           # heredoc 写入 control 文件：dpkg 要求字段顶格无缩进，EOF 标记结束
+-          # heredoc 写入 control 文件：dpkg 要求字段顶格无缩进，EOF 标记结束
 -          # control 内容必须顶格（column 0），否则 dpkg 解析字段时前导空格会导致格式错误
-+          # heredoc 终止符缩进与 cat 行一致确保正确解析
-+          # DEB 控制文件：恢复缩进以确保 YAML 块标量正确解析
-+          # YAML literal block scalar 需要一致的缩进
++          # YAML run:| 会剥离公共缩进，故源文件 10 空格写入后 shell 侧字段仍为列 0，dpkg 可解析
++          # Description 续行比字段多 1 空格，剥离后保留 debian 扩展描述必需的前导空格
            cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
 -Package: opencode
 -Version: ${VERSION}
@@ -31,4 +30,3 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
  
            dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
  
-

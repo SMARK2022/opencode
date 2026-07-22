@@ -1,45 +1,24 @@
-From 2e51523e5589cf87a0746956b3731d2dcc2834f5 Mon Sep 17 00:00:00 2001
-From: SMARK2022 <3222301373@qq.com>
-Date: Thu, 30 Apr 2026 19:34:58 +0800
-Subject: [PATCH] =?UTF-8?q?fix:=20=E5=BC=BA=E5=88=B6=E4=BD=BF=E7=94=A8=20U?=
- =?UTF-8?q?nicode=20=E5=AE=BD=E5=BA=A6=E8=A1=A8=E5=B9=B6=E4=BC=98=E5=8C=96?=
- =?UTF-8?q?=20macOS=20=E4=B8=8A=E7=BB=88=E7=AB=AF=E5=B0=BA=E5=AF=B8?=
- =?UTF-8?q?=E5=88=9D=E5=A7=8B=E5=8C=96=E9=80=BB=E8=BE=91?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/app.tsx b/packages/opencode/src/cli/cmd/tui/app.tsx
-index bc9cbf2480ad08bc38aa4c50b631cb0564c42f5e..e6b288dd1f604b4693db35a6a6ab370ae4bdf223 100644
---- a/packages/opencode/src/cli/cmd/tui/app.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/app.tsx
-@@ -138,8 +138,16 @@ export function tui(input: {
-     // differ from the shell, causing wcwidth() to return -1 for CJK characters
-     // and rendering them as empty cells. Force the built-in Unicode width tables
-     // (mode 2026) instead, which is locale-independent and always correct.
-+    //
-+    // Also wait up to 100 ms for the macOS PTY to report terminal dimensions:
-+    // stdout.columns may be 0 immediately after process start if the PTY has not
-+    // finished initialising. Reading it too early causes createCliRenderer() to
-+    // fall back to 80×24, producing a garbled first frame that only a SIGWINCH
-+    // (e.g. dragging the window) would otherwise correct.
-     if (process.platform === "darwin") {
-       process.env.OPENTUI_FORCE_UNICODE = "1"
-+      for (let i = 0; i < 10 && !process.stdout.columns; i++)
-+        await new Promise<void>((r) => setTimeout(r, 10))
-     }
- 
-     const renderer = await createCliRenderer(rendererConfig(input.config))
-@@ -209,6 +217,11 @@ export function tui(input: {
-         </ErrorBoundary>
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -194,6 +194,10 @@
+             // macOS 上编译的 Bun 二进制可能使用 wcwidth 模式，对 CJK 字符渲染异常
+             if (process.platform === "darwin") {
+               process.env.OPENTUI_FORCE_UNICODE = "1"
++              // PTY 初始化竞争可能导致 stdout.columns 为 0，等待最多 100ms
++              for (let i = 0; i < 10 && !process.stdout.columns; i++) {
++                await new Promise<void>((r) => setTimeout(r, 10))
++              }
+             }
+             // 转为 async block body 以支持环境变量设置后再创建渲染器
+             return createCliRenderer({
+@@ -218,6 +222,8 @@
+           }),
        )
-     }, renderer)
-+    // Safety net for the stale-but-nonzero case: emit SIGWINCH after the first
-+    // frame so the renderer re-reads stdout.columns/rows with their current
-+    // values. processResize() is a no-op when dimensions match, so this only
-+    // produces an extra repaint when the initial frame used stale dimensions.
-+    if (process.platform !== "win32") process.kill(process.pid, "SIGWINCH")
-   })
- }
- 
+       win32DisableProcessedInput()
++      // 非 Windows 平台发送 SIGWINCH 强制重绘，防止初始尺寸过期
++      if (process.platform !== "win32") process.kill(process.pid, "SIGWINCH")
+       const keymap = createDefaultOpenTuiKeymap(renderer)
+       yield* Effect.acquireRelease(
+         Effect.sync(() => registerOpencodeKeymap(keymap, renderer, input.config)),
+

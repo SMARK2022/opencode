@@ -6,9 +6,6 @@ Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E6=9B=B4=E6=96=B0OpenCode=20VS?=
  =?UTF-8?q?=E5=B1=95ID=E5=B9=B6=E6=B7=BB=E5=8A=A0=E8=AE=B8=E5=8F=AF?=
  =?UTF-8?q?=E8=AF=81=E6=96=87=E4=BB=B6?=
 MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
 
 diff --git a/packages/identity/mark-192x192.png b/packages/identity/mark-192x192.png
 index 071d18fe0c26fc8e8649c5b820fb28288767d548..d84af12300062333eb9af94fb43779027314be6d 100644
@@ -179,15 +176,16 @@ literal 0
 HcmV?d00001
 
 diff --git a/packages/identity/mark-light.svg b/packages/identity/mark-light.svg
-index ac619f1b2ff2ea872e6aae35f4301a68a8c06df8..b21936b23a1b3662a648f2641354d26e26509993 100644
+index ac619f1b2f..d270ad9c01 100644
 --- a/packages/identity/mark-light.svg
 +++ b/packages/identity/mark-light.svg
-@@ -1,5 +1,14 @@
+@@ -1,5 +1,15 @@
  <svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
 -<rect width="512" height="512" fill="#FDFCFC"/>
 -<path d="M320 224V352H192V224H320Z" fill="#E6E5E6"/>
 -<path fill-rule="evenodd" clip-rule="evenodd" d="M384 416H128V96H384V416ZM320 160H192V352H320V160Z" fill="#17181C"/>
 -</svg>
++<!-- SMARK 品牌浅色标识：替换原始 opencode 浅色 logo -->
 +    <rect width="512" height="512" fill="#EDE8E1" />
 +    <path
 +        fill-rule="evenodd"
@@ -229,10 +227,10 @@ literal 0
 HcmV?d00001
 
 diff --git a/packages/identity/mark.svg b/packages/identity/mark.svg
-index 157edc4d7522f38d3d34aff1317d304cb7958752..bcfaf4a56ec5060feeb28eca08f3bbda5a877e7f 100644
+index 157edc4d75..619223222d 100644
 --- a/packages/identity/mark.svg
 +++ b/packages/identity/mark.svg
-@@ -1,7 +1,14 @@
+@@ -1,7 +1,15 @@
 -<svg xmlns="http://www.w3.org/2000/svg" version="1.1" xmlns:xlink="http://www.w3.org/1999/xlink" width="512" height="512"><svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
 -<rect width="512" height="512" fill="#131010"></rect>
 -<path d="M320 224V352H192V224H320Z" fill="#5A5858"></path>
@@ -241,6 +239,7 @@ index 157edc4d7522f38d3d34aff1317d304cb7958752..bcfaf4a56ec5060feeb28eca08f3bbda
 -@media (prefers-color-scheme: dark) { :root { filter: none; } }
 -</style></svg>
 \ No newline at end of file
++<!-- SMARK 品牌标识：替换原始 opencode logo -->
 +<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
 +    <rect width="512" height="512" fill="#191C2A" />
 +    <path
@@ -257,39 +256,79 @@ index 157edc4d7522f38d3d34aff1317d304cb7958752..bcfaf4a56ec5060feeb28eca08f3bbda
 +</svg>
 \ No newline at end of file
 diff --git a/packages/opencode/src/ide/index.ts b/packages/opencode/src/ide/index.ts
-index 2df293f1638a83e9d4ac2afb7bd1c82a0a7b5c0d..9252dc46305f3e7a004bde3815aa3f715d10b979 100644
+index 31b3add14b..1481cc13d6 100644
 --- a/packages/opencode/src/ide/index.ts
 +++ b/packages/opencode/src/ide/index.ts
-@@ -51,7 +51,7 @@ export async function install(ide: (typeof SUPPORTED_IDES)[number]["name"]) {
+@@ -3,6 +3,26 @@ import { NamedError } from "@opencode-ai/core/util/error"
+ import { Process } from "@/util/process"
+ import { IdeEvent } from "@opencode-ai/schema/ide-event"
+ 
++
++
++// 扩展完整 ID 必须等于 package.json 的 publisher + "." + name
++// publisher=SMARK2022：SMARK 分支发布者，避免与上游 sst 扩展冲突
++// name=opencode-ide-bridge：notebook/bridge 工具宿主扩展名
++// CLI --install-extension 只允许此常量，禁止散落字面量
++// 与 registry 发现解耦：安装身份不等于运行时 token 传递
++// #87 已删除 OPENCODE_VSCODE_BRIDGE_*，此处不得恢复 env 注入
++// LICENSE(MIT) 随扩展分发，声明 SMARK 分支维护权
++// README 安装说明必须引用同一 ID，避免用户装错扩展
++// .vscodeignore 排除 env/log/临时 vsix，降低打包泄漏面
++// packages/identity 品牌 mark 与扩展市场图标一致
++// 预置 vsix 供离线安装；文件名可保留历史版本号
++// package.json version 跟随 monorepo 目标版本线
++// 改 ID 的唯一合法入口：本常量与 package.json 同步修改
++// alreadyInstalled 探测宿主注入，不解析显示名
++// 安装失败抛 InstallFailedError 并携带宿主 stderr
++// Process.run 走宿主 CLI，不内嵌 marketplace HTTP 客户端
++const VSCODE_BRIDGE_EXTENSION_ID = "SMARK2022.opencode-ide-bridge" as const
++
+ const SUPPORTED_IDES = [
+   { name: "Windsurf" as const, cmd: "windsurf" },
+   { name: "Visual Studio Code - Insiders" as const, cmd: "code-insiders" },
+@@ -21,7 +41,7 @@ export const InstallFailedError = NamedError.create("InstallFailedError", {
+ 
+ export function ide() {
+   if (process.env["TERM_PROGRAM"] === "vscode") {
+-    const v = process.env["GIT_ASKPASS"]
++  const v = process.env["GIT_ASKPASS"]
+     for (const ide of SUPPORTED_IDES) {
+       if (v?.includes(ide.name)) return ide.name
+     }
+@@ -37,7 +57,7 @@ export async function install(ide: (typeof SUPPORTED_IDES)[number]["name"]) {
    const cmd = SUPPORTED_IDES.find((i) => i.name === ide)?.cmd
    if (!cmd) throw new Error(`Unknown IDE: ${ide}`)
  
 -  const p = await Process.run([cmd, "--install-extension", "sst-dev.opencode"], {
-+  const p = await Process.run([cmd, "--install-extension", "SMARK2022.opencode-ide-bridge"], {
++  const p = await Process.run([cmd, "--install-extension", VSCODE_BRIDGE_EXTENSION_ID], {
      nothrow: true,
    })
    const stdout = p.stdout.toString()
 diff --git a/sdks/vscode/.vscodeignore b/sdks/vscode/.vscodeignore
-index 3e4b35c0743e952c7d2169e6783fe0ca69211f3f..f353a6e19879a01638f8e7571652d9fede2aa94f 100644
+index 3e4b35c074..633c9f5332 100644
 --- a/sdks/vscode/.vscodeignore
 +++ b/sdks/vscode/.vscodeignore
-@@ -6,6 +6,10 @@ src/**
+@@ -6,6 +6,13 @@ src/**
  script/**
  .gitignore
  .yarnrc
++# 环境文件忽略：防止敏感信息泄露到 VSIX 包
 +.env
 +.env.*
++# 日志文件忽略：防止调试信息泄露
 +*.log
++# VSIX 构建产物忽略：不在发布包中包含
 +*.vsix
  bun.lock
  esbuild.js
  vsc-extension-quickstart.md
 diff --git a/sdks/vscode/LICENSE b/sdks/vscode/LICENSE
 new file mode 100644
-index 0000000000000000000000000000000000000000..6439474beed8e0271df9862eff97ffd70ec2464c
+index 0000000000..ad89799836
 --- /dev/null
 +++ b/sdks/vscode/LICENSE
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,22 @@
++<!-- MIT 许可证：SMARK 分支使用的开源许可证 -->
 +MIT License
 +
 +Copyright (c) 2025 opencode
@@ -312,7 +351,7 @@ index 0000000000000000000000000000000000000000..6439474beed8e0271df9862eff97ffd7
 +OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 +SOFTWARE.
 diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
-index 0114045429c3a0a087946d60f994a19a1690b9fe..e96f3c5b1461c41bdfab721151642ea75f09f479 100644
+index 0114045429..e96f3c5b14 100644
 --- a/sdks/vscode/README.md
 +++ b/sdks/vscode/README.md
 @@ -1,34 +1,50 @@
@@ -756,7 +795,7 @@ literal 0
 HcmV?d00001
 
 diff --git a/sdks/vscode/package.json b/sdks/vscode/package.json
-index f9fc7b8336e306ff5bf266db50027118be56f453..05a2b991ec86482d54830e0e3df035e3e089b65d 100644
+index 603db41ea8..4c3c000c9b 100644
 --- a/sdks/vscode/package.json
 +++ b/sdks/vscode/package.json
 @@ -1,9 +1,9 @@
@@ -767,7 +806,7 @@ index f9fc7b8336e306ff5bf266db50027118be56f453..05a2b991ec86482d54830e0e3df035e3
 +  "name": "opencode-ide-bridge",
 +  "displayName": "OpenCode VS Code Bridge",
 +  "description": "VS Code bridge for OpenCode IDE integration, notebook tools, and workspace context.",
-   "version": "1.14.31",
+   "version": "1.17.20",
 -  "publisher": "sst-dev",
 +  "publisher": "SMARK2022",
    "repository": {

@@ -1,391 +1,334 @@
-From 90c84e172f41649fcb46016f68a569dbf29e4eb6 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Wed, 29 Apr 2026 21:23:27 +0800
-Subject: [PATCH] =?UTF-8?q?fix:=20=E8=B0=83=E6=95=B4=E5=B7=A5=E5=85=B7?=
- =?UTF-8?q?=E8=B6=85=E6=97=B6=E5=92=8C=E8=BF=87=E6=9C=9F=E8=AE=BE=E7=BD=AE?=
- =?UTF-8?q?=EF=BC=8C=E4=BC=98=E5=8C=96=E5=B7=A5=E5=85=B7=E5=AE=9A=E4=B9=89?=
- =?UTF-8?q?=E5=A4=84=E7=90=86=E9=80=BB=E8=BE=91=EF=BC=8C=E5=A2=9E=E5=BC=BA?=
- =?UTF-8?q?=E9=94=99=E8=AF=AF=E5=A4=84=E7=90=86?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
-diff --git a/packages/opencode/src/cli/cmd/tui/server-lock.ts b/packages/opencode/src/cli/cmd/tui/server-lock.ts
-index 6777cf00dfe8b546e025f61ee87d4d0b885f48d3..5684807dd881c6098af691b6ca3c4dbae5b7ab4e 100644
---- a/packages/opencode/src/cli/cmd/tui/server-lock.ts
-+++ b/packages/opencode/src/cli/cmd/tui/server-lock.ts
-@@ -82,7 +82,7 @@ export function alive(pid: number) {
+diff --git a/packages/opencode/src/cli/tui/server-lock.ts b/packages/opencode/src/cli/tui/server-lock.ts
+--- a/packages/opencode/src/cli/tui/server-lock.ts
++++ b/packages/opencode/src/cli/tui/server-lock.ts
+@@ -87,7 +87,9 @@
  export async function ping(port: number) {
    try {
      const resp = await fetch(`http://127.0.0.1:${port}/global/health`, {
 -      signal: AbortSignal.timeout(2000),
-+      signal: AbortSignal.timeout(500),
++      signal: // 健康 ping 超时收紧到 500ms
++      // #49 将健康探测超时从 2s 收紧为 500ms
++      AbortSignal.timeout(500),
      })
      return resp.ok
    } catch {
-diff --git a/packages/opencode/src/cli/cmd/tui/thread.ts b/packages/opencode/src/cli/cmd/tui/thread.ts
-index aaa4d81f7bf21b28341303d6e22ebe525fb930a1..46a26dec932b6a89f5aac42aa55061a442461db0 100644
---- a/packages/opencode/src/cli/cmd/tui/thread.ts
-+++ b/packages/opencode/src/cli/cmd/tui/thread.ts
-@@ -129,8 +129,8 @@ export const TuiThreadCommand = cmd({
-         // spawn a daemon at the same time (e.g. opening 4 tabs simultaneously).
-         electionLease = await Flock.acquire("opencode.server", {
-           dir: path.join(Global.Path.state, "locks"),
--          timeoutMs: 30_000,
--          staleMs: 10_000,
-+          timeoutMs: 10_000,
-+          staleMs: 5_000,
-         })
-         // Re-check under lock: another process may have won the race between
-         // the fast-check and the lock acquisition.
-@@ -179,6 +179,10 @@ export const TuiThreadCommand = cmd({
-           )
-           proc.unref()
+diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
+--- a/packages/opencode/src/cli/tui/worker.ts
++++ b/packages/opencode/src/cli/tui/worker.ts
+@@ -16,9 +16,9 @@
  
-+          // The daemon cannot possibly be ready within 1 s — skip the first
-+          // poll iterations to avoid pointless lock reads.
-+          await Bun.sleep(1000)
+ Heap.start()
+ 
+-const onUnhandledRejection = (_error: unknown) => {}
++let onUnhandledRejection: (error: unknown) => void = (_error: unknown) => {}
+ 
+-const onUncaughtException = (_error: Error) => {}
++let onUncaughtException: (error: Error) => void = (_error: Error) => {}
+ 
+ process.on("unhandledRejection", onUnhandledRejection)
+ process.on("uncaughtException", onUncaughtException)
+@@ -138,6 +138,16 @@
+   // SIGTERM 触发优雅关闭
+   process.on("SIGTERM", () => void gracefulShutdown())
+ 
++  // daemon 致命路径：覆盖空实现并 prepend，确保清锁
++  onUnhandledRejection = (_error: unknown) => {
++    void gracefulShutdown()
++  }
++  onUncaughtException = (_error: Error) => {
++    void gracefulShutdown()
++  }
++  process.prependListener("unhandledRejection", onUnhandledRejection)
++  process.prependListener("uncaughtException", onUncaughtException)
 +
-           // Wait for the daemon to write the lock and for its server to respond.
-           const deadline = Date.now() + 30_000
-           while (Date.now() < deadline) {
-@@ -194,7 +198,7 @@ export const TuiThreadCommand = cmd({
-                 break
-               }
-             }
--            await Bun.sleep(100)
-+            await Bun.sleep(200)
-           }
- 
-           // Release election lease: daemon is live (or we are about to error).
-diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-index 8f106b4b908b278af9fcdde8acae149f72c0d65b..5f73f8c3e0b108d8c78fa2dedbe938c3aa797892 100644
---- a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-@@ -1,7 +1,6 @@
- import fs from "fs/promises"
- import os from "os"
- import path from "path"
--import { fileURLToPath, pathToFileURL } from "url"
- import matter from "gray-matter"
- import type { Agent, Config, Message, Part, Provider, VcsInfo } from "@opencode-ai/sdk/v2"
- import { Flag } from "@opencode-ai/core/flag/flag"
-@@ -10,6 +9,40 @@ import { toJsonSchema } from "@/util/effect-zod"
- import { Schema } from "effect"
- import { Shell } from "@/shell/shell"
- import { Skill } from "@/skill"
-+import { Wildcard } from "@/util"
-+import APPLY_PATCH_DESCRIPTION from "@/tool/apply_patch.txt"
-+import BASH_DESCRIPTION from "@/tool/bash.txt"
-+import CODESEARCH_DESCRIPTION from "@/tool/codesearch.txt"
-+import EDIT_DESCRIPTION from "@/tool/edit.txt"
-+import GLOB_DESCRIPTION from "@/tool/glob.txt"
-+import GREP_DESCRIPTION from "@/tool/grep.txt"
-+import LSP_DESCRIPTION from "@/tool/lsp.txt"
-+import PLAN_EXIT_DESCRIPTION from "@/tool/plan-exit.txt"
-+import QUESTION_DESCRIPTION from "@/tool/question.txt"
-+import READ_DESCRIPTION from "@/tool/read.txt"
-+import SKILL_DESCRIPTION from "@/tool/skill.txt"
-+import TASK_DESCRIPTION from "@/tool/task.txt"
-+import TODOWRITE_DESCRIPTION from "@/tool/todowrite.txt"
-+import WEBFETCH_DESCRIPTION from "@/tool/webfetch.txt"
-+import WEBSEARCH_DESCRIPTION from "@/tool/websearch.txt"
-+import WRITE_DESCRIPTION from "@/tool/write.txt"
-+import { ApplyPatchTool, Parameters as ApplyPatchParameters } from "@/tool/apply_patch"
-+import { BashTool, Parameters as BashParameters } from "@/tool/bash"
-+import { CodeSearchTool, Parameters as CodeSearchParameters } from "@/tool/codesearch"
-+import { EditTool, Parameters as EditParameters } from "@/tool/edit"
-+import { GlobTool, Parameters as GlobParameters } from "@/tool/glob"
-+import { GrepTool, Parameters as GrepParameters } from "@/tool/grep"
-+import { InvalidTool, Parameters as InvalidParameters } from "@/tool/invalid"
-+import { LspTool, Parameters as LspParameters } from "@/tool/lsp"
-+import { PlanExitTool, Parameters as PlanExitParameters } from "@/tool/plan"
-+import { QuestionTool, Parameters as QuestionParameters } from "@/tool/question"
-+import { ReadTool, Parameters as ReadParameters } from "@/tool/read"
-+import { SkillTool, Parameters as SkillParameters } from "@/tool/skill"
-+import { TaskTool, Parameters as TaskParameters } from "@/tool/task"
-+import { TodoWriteTool, Parameters as TodoWriteParameters } from "@/tool/todo"
-+import { WebFetchTool, Parameters as WebFetchParameters } from "@/tool/webfetch"
-+import { WebSearchTool, Parameters as WebSearchParameters } from "@/tool/websearch"
-+import { WriteTool, Parameters as WriteParameters } from "@/tool/write"
- import {
-   provider as systemProviderPrompt,
-   skillsSection as systemSkillsSection,
-@@ -430,7 +463,55 @@ async function gatherSkills(input: ComputeContextDataInput) {
-   return skills
+   // SIGUSR2 触发配置重载（仅 Unix；Windows 不支持此信号）
+   if (process.platform !== "win32") {
+     process.on("SIGUSR2", () => {
+diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
+--- a/packages/opencode/src/cli/cmd/tui.ts
++++ b/packages/opencode/src/cli/cmd/tui.ts
+@@ -50,6 +50,7 @@
  }
  
--const TOOL_DIR = fileURLToPath(new URL("../../../../tool/", import.meta.url))
+ // 生产默认依赖：真实 ServerLock/Flock/Bun.sleep
++// #49 收紧选举/陈旧/轮询默认值（10s/5s/200ms）
+ const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
+   read: ServerLock.read,
+   alive: ServerLock.alive,
+@@ -60,11 +61,17 @@
+   sleep: (ms) => Bun.sleep(ms),
+   resolveDaemonFile: target,
+   // 选举租约 30s：与 SMARK 原值一致（#49 再收紧）
+-  electionTimeoutMs: 30_000,
++  // 选举超时收紧到 10s
 +
++  electionTimeoutMs: 10_000,
+   // 陈旧租约 10s（#49 再收紧到 5s）
+-  electionStaleMs: 10_000,
++  // 陈旧租约收紧到 5s
 +
-+type PermissionRuleLike = {
-+  permission: string
-+  pattern: string
-+  action: string
++  electionStaleMs: 5_000,
+   // 轮询间隔 100ms（#49 再收紧到 200ms）
+-  pollMs: 100,
++  // 轮询间隔 200ms
++
++  pollMs: 200,
+   waitMs: 30_000,
+ })
+ 
+@@ -139,6 +146,9 @@
+       fwdPid = proc.pid
+ 
+       const deadline = Date.now() + deps.waitMs
++      // 启动后等待 1s 再轮询，避免过早健康检查失败
++      // #49 启动后先 sleep 1s 再进入健康轮询
++      await deps.sleep(1000)
+       // 轮询锁文件直到 pid 匹配且健康检查通过
+       while (Date.now() < deadline) {
+         const daemonLock = await deps.read()
+diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
+--- a/packages/tui/src/util/context-usage.ts
++++ b/packages/tui/src/util/context-usage.ts
+@@ -684,29 +684,152 @@
+ }
+ 
+ 
+-// 收集活跃工具名：从最后一条用户消息的 tools 映射和历史工具调用部件中提取
+-function activeToolNames(messages: WithParts[], lastUser: Message | undefined) {
+-  const names = new Set<string>()
++
++// 动态工具文本：task 工具输出可用子代理列表，skill 工具输出技能列表
++
++// 与 runtime-flags 一致：专属 key 未设置时回落 OPENCODE_EXPERIMENTAL 伞
++function enabledByExperimental(key: string) {
++  return process.env[key] === undefined ? truthy("OPENCODE_EXPERIMENTAL") : truthy(key)
 +}
-+
-+const EDIT_TOOL_NAMES = new Set<string>([EditTool.id, WriteTool.id, ApplyPatchTool.id])
-+
++// EXA 启停与 core 一致：伞/ENABLE/legacy 任一为真即启用
++function enableExa() {
++  return truthy("OPENCODE_EXPERIMENTAL") || truthy("OPENCODE_ENABLE_EXA") || truthy("OPENCODE_EXPERIMENTAL_EXA")
++}
++type PermissionRuleLike = { permission: string; pattern: string; action: string }
++const EDIT_TOOL_NAMES = new Set(["edit", "write", "apply_patch"])
++// 简单通配：仅支持 * 为任意子串
++function matchWild(value: string, pattern: string) {
++  if (pattern === "*") return true
++  if (!pattern.includes("*")) return value === pattern
++  const chunks = pattern.split("*")
++  let idx = 0
++  for (let i = 0; i < chunks.length; i++) {
++    const chunk = chunks[i]
++    if (chunk.length === 0) continue
++    const found = value.indexOf(chunk, idx)
++    if (found < 0) return false
++    if (i === 0 && found !== 0) return false
++    idx = found + chunk.length
++  }
++  if (!pattern.endsWith("*") && idx !== value.length) return false
++  return true
++}
++// 自后向前匹配权限规则，后写覆盖先写
 +function evaluateRule(permission: string, pattern: string, ruleset: readonly PermissionRuleLike[] = []) {
-+  return ruleset.findLast((rule) => Wildcard.match(permission, rule.permission) && Wildcard.match(pattern, rule.pattern))
++  for (let i = ruleset.length - 1; i >= 0; i--) {
++    const rule = ruleset[i]
++    if (matchWild(permission, rule.permission) && matchWild(pattern, rule.pattern)) return rule
++  }
++  return undefined
 +}
-+
++// 仅 pattern=* 且 action=deny 计入 disabled 集合
 +function disabledTools(names: string[], ruleset: readonly PermissionRuleLike[] = []) {
 +  return new Set(
 +    names.filter((name) => {
-+      const permission = EDIT_TOOL_NAMES.has(name) ? EditTool.id : name
++      const permission = EDIT_TOOL_NAMES.has(name) ? "edit" : name
 +      const rule = evaluateRule(permission, "*", ruleset)
 +      return rule?.pattern === "*" && rule.action === "deny"
 +    }),
 +  )
 +}
-+
-+type ToolDefinitionTemplate = {
-+  name: string
-+  description: string
-+  parameters: Schema.Top
-+}
-+
-+const STATIC_TOOL_DEFINITIONS: ToolDefinitionTemplate[] = [
-+  { name: InvalidTool.id, description: "Do not use", parameters: InvalidParameters },
-+  { name: QuestionTool.id, description: QUESTION_DESCRIPTION, parameters: QuestionParameters },
-+  { name: BashTool.id, description: BASH_DESCRIPTION, parameters: BashParameters },
-+  { name: ReadTool.id, description: READ_DESCRIPTION, parameters: ReadParameters },
-+  { name: GlobTool.id, description: GLOB_DESCRIPTION, parameters: GlobParameters },
-+  { name: GrepTool.id, description: GREP_DESCRIPTION, parameters: GrepParameters },
-+  { name: EditTool.id, description: EDIT_DESCRIPTION, parameters: EditParameters },
-+  { name: WriteTool.id, description: WRITE_DESCRIPTION, parameters: WriteParameters },
-+  { name: TaskTool.id, description: TASK_DESCRIPTION, parameters: TaskParameters },
-+  { name: WebFetchTool.id, description: WEBFETCH_DESCRIPTION, parameters: WebFetchParameters },
-+  { name: TodoWriteTool.id, description: TODOWRITE_DESCRIPTION, parameters: TodoWriteParameters },
-+  { name: WebSearchTool.id, description: WEBSEARCH_DESCRIPTION, parameters: WebSearchParameters },
-+  { name: CodeSearchTool.id, description: CODESEARCH_DESCRIPTION, parameters: CodeSearchParameters },
-+  { name: SkillTool.id, description: SKILL_DESCRIPTION, parameters: SkillParameters },
-+  { name: ApplyPatchTool.id, description: APPLY_PATCH_DESCRIPTION, parameters: ApplyPatchParameters },
-+  { name: LspTool.id, description: LSP_DESCRIPTION, parameters: LspParameters },
-+  { name: PlanExitTool.id, description: PLAN_EXIT_DESCRIPTION, parameters: PlanExitParameters },
-+]
- 
- function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
-   if (!text.includes("${")) return text
-@@ -500,112 +581,84 @@ function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
-     .replaceAll("${compressionGuidance}", "")
- }
- 
--async function resolveToolDescriptions(paths: ContextUsagePaths) {
--  const result = [] as Array<{ name: string; text: string }>
--  let entries: string[]
--  try {
--    entries = await fs.readdir(TOOL_DIR)
--  } catch {
--    return result
--  }
-+function baseToolDefinitions(input: ComputeContextDataInput, modelInfo: ReturnType<typeof currentModel>, lastUser: Message | undefined) {
++// #49 在嵌入 catalog 上叠加 flag/model/permission 过滤
++function baseToolDefinitions(
++  input: ComputeContextDataInput,
++  modelInfo: { modelID: string; providerID: string },
++  lastUser: Message | undefined,
++) {
++  // 测试可注入 toolDefinitions，跳过 flag 过滤以稳定断言
 +  if (input.toolDefinitions) return input.toolDefinitions
- 
--  for (const entry of entries) {
--    if (!entry.endsWith(".ts")) continue
--    const baseName = entry.slice(0, -3)
--    const filepath = path.join(TOOL_DIR, entry)
--
--    // Extract tool ID from source (single regex, very reliable)
--    const source = await readText(filepath)
--    const id = source.match(/Tool\.define(?:<[^>]+>)?\(\s*["']([^"']+)["']/)?.[1]
--    if (!id) continue
--
--    // Find the .txt import path
--    const txtImport = source.match(/import\s\w+\s+from\s+["']\.\/([^"']+\.txt)["']/)
--    const txtPath = txtImport ? path.join(TOOL_DIR, txtImport[1]) : path.join(TOOL_DIR, `${baseName}.txt`)
++  // gpt 非 oss/非 gpt-4 走 apply_patch，隐藏 edit/write
 +  const usePatch =
 +    modelInfo.modelID.includes("gpt-") && !modelInfo.modelID.includes("oss") && !modelInfo.modelID.includes("gpt-4")
 +  const agent = lastUser?.role === "user" ? input.agents?.find((item) => item.name === lastUser.agent) : undefined
-+  const disabled = agent ? disabledTools(STATIC_TOOL_DEFINITIONS.map((item) => item.name), agent.permission as PermissionRuleLike[]) : new Set<string>()
- 
--    // Load .txt content via dynamic import (proper module loading)
--    let description = ""
--    try {
--      if (await exists(txtPath)) {
--        const txtModule = await import(pathToFileURL(txtPath).href)
--        description = txtModule.default ?? ""
-+  return STATIC_TOOL_DEFINITIONS
++  const rules = (agent?.permission ?? []) as PermissionRuleLike[]
++  const resolved = resolveToolDescriptions(input.paths)
++  const disabled = agent ? disabledTools(resolved.map((i) => i.name), rules) : new Set<string>()
++  return resolved
 +    .filter((item) => {
-+      if (item.name === QuestionTool.id) {
-+        return ["app", "cli", "desktop"].includes(Flag.OPENCODE_CLIENT) || Flag.OPENCODE_ENABLE_QUESTION_TOOL
-       }
--    } catch {
--      description = await readText(txtPath)
--    }
--
--    // Resolve template variables in description
--    description = resolveTemplateVars(description, paths)
--
--    // Get parameters via dynamic import of the tool module
--    let parametersText = ""
--    try {
--      const mod = await import(pathToFileURL(filepath).href)
--      const parameters = (mod as Record<string, unknown>).Parameters
--      if (parameters) {
--        parametersText = JSON.stringify(toJsonSchema(parameters as Schema.Top))
-+      if (item.name === LspTool.id) return Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL
-+      if (item.name === PlanExitTool.id) return Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli"
-+      if (item.name === CodeSearchTool.id || item.name === WebSearchTool.id) {
-+        return modelInfo.providerID === "opencode" || Flag.OPENCODE_ENABLE_EXA
-       }
--    } catch {
--      // Fall back to source extraction
--    }
--    if (!parametersText) {
--      const paramStart = source.search(/(?:export\s+)?const\s+Parameters\s*=/)
--      const paramEnd = source.search(/export\s+const\s+\w+Tool\s*=\s*Tool\.define/)
--      parametersText = paramStart >= 0
--        ? source.slice(paramStart, paramEnd > paramStart ? paramEnd : undefined)
--        : ""
--    }
--
--    const text = [`Tool: ${id}`, description, parametersText].filter(Boolean).join("\n")
--    result.push({ name: id, text })
--  }
--  return result
--}
--
--function activeToolNames(messages: WithParts[], lastUser: Message | undefined) {
--  const names = new Set<string>()
-+      if (item.name === ApplyPatchTool.id) return usePatch
-+      if (item.name === EditTool.id || item.name === WriteTool.id) return !usePatch
-+      return true
++      if (item.name === "question") {
++        const client = process.env["OPENCODE_CLIENT"] ?? "cli"
++        return ["app", "cli", "desktop"].includes(client) || truthy("OPENCODE_ENABLE_QUESTION_TOOL")
++      }
++      // LSP 工具：OPENCODE_EXPERIMENTAL 伞或专用 LSP_TOOL 开关
++      if (item.name === "lsp") return enabledByExperimental("OPENCODE_EXPERIMENTAL_LSP_TOOL")
++      // plan_exit：实验 plan 模式且仅 cli 客户端
++      if (item.name === "plan_exit") {
++        const client = process.env["OPENCODE_CLIENT"] ?? "cli"
++        return enabledByExperimental("OPENCODE_EXPERIMENTAL_PLAN_MODE") && client === "cli"
++      }
++      // websearch 与 core enableExa 对齐；目标无 codesearch owner 不占位
++      if (item.name === "websearch") return modelInfo.providerID === "opencode" || enableExa()
++      if (usePatch) return item.name !== "edit" && item.name !== "write"
++      return item.name !== "apply_patch"
 +    })
 +    .filter((item) => !disabled.has(item.name))
-+    .map((item) => ({
-+      name: item.name,
-+      text: [
-+        `Tool: ${item.name}`,
-+        resolveTemplateVars(item.description, input.paths),
-+        stableJson(toJsonSchema(item.parameters)),
-+      ].join("\n"),
-+    }))
++    .filter((item) => {
++      // task 工具：agent 规则 deny 时从定义列表移除
++      if (item.name !== "task" || !agent) return true
++      const rule = evaluateRule("task", "*", rules)
++      return !(rule?.pattern === "*" && rule.action === "deny")
++    })
 +}
 +
-+function activeToolNames(definitions: Array<{ name: string; text: string }>, lastUser: Message | undefined) {
-+  const disabled = new Set<string>()
++// 活跃集合以定义列表为基线，避免历史 tool parts 折叠
++function activeToolNames(definitions: Array<{ name: string }>, lastUser: Message | undefined) {
++  const names = new Set(definitions.map((item) => item.name))
    if (lastUser?.role === "user" && lastUser.tools) {
      for (const [name, enabled] of Object.entries(lastUser.tools)) {
 -      if (enabled) names.add(name)
-+      if (enabled) continue
-+      disabled.add(name)
-+      if (name === "edit") {
-+        disabled.add(EditTool.id)
-+        disabled.add(WriteTool.id)
-+        disabled.add(ApplyPatchTool.id)
++      if (enabled === false) {
++        names.delete(name)
++        // edit:false 时同步禁用 write/apply_patch
++        if (name === "edit") {
++          names.delete("write")
++          names.delete("apply_patch")
++        }
 +      }
      }
    }
 -  for (const msg of messages) {
 -    for (const part of msg.parts) if (part.type === "tool") names.add(part.tool)
 -  }
--  return names
-+  return definitions.map((item) => item.name).filter((name) => !disabled.has(name))
+   return names
  }
  
+-// 动态工具文本：task 工具输出可用子代理列表，skill 工具输出技能列表
 -function dynamicToolText(name: string, input: ComputeContextDataInput, skills: Array<{ name: string; description: string; path: string }>) {
--  if (name === "task") {
-+function dynamicToolText(name: string, input: ComputeContextDataInput, skills: Array<{ name: string; description: string; path: string }>, lastUser: Message | undefined) {
-+  if (name === TaskTool.id) {
-+    const current = lastUser?.role === "user" ? input.agents?.find((agent) => agent.name === lastUser.agent) : undefined
++// 工具定义 token：#48 catalog + #49 过滤，modelInfo 来自 currentModel
++async function toolDefinitionTokens(
++  input: ComputeContextDataInput,
++  messages: WithParts[],
++  skills: Array<{ name: string; description: string; path: string }>,
++  lastUser: Message | undefined,
++  modelInfo: { modelID: string; providerID: string },
++) {
++  // 与 computeContextData/currentModel 同一模型真相源
++  const scanned = baseToolDefinitions(input, modelInfo, lastUser)
++  const active = activeToolNames(scanned, lastUser)
++  const byName = new Map(scanned.map((item) => [item.name, item.text]))
++  const details = [] as Array<{ name: string; tokens: number }>
++  for (const name of active) {
++    const parts = [byName.get(name), dynamicToolText(name, input, skills, lastUser)].filter(Boolean)
++    const joined = parts.join(String.fromCharCode(10))
++    const text = resolveTemplateVars(joined, input.paths)
++    details.push({ name, tokens: estimate(text || name) })
++  }
++  return details.toSorted((a, b) => a.name.localeCompare(b.name))
++}
++
++function dynamicToolText(name: string, input: ComputeContextDataInput, skills: Array<{ name: string; description: string; path: string }>, lastUser?: Message) {
+   if (name === "task") {
++    // 仅列出当前 agent 权限未 deny 的子代理
++    const agent = lastUser?.role === "user" ? input.agents?.find((item) => item.name === lastUser.agent) : undefined
++    const rules = (agent?.permission ?? []) as PermissionRuleLike[]
      const description = (input.agents ?? [])
-       .filter((agent) => agent.mode !== "primary")
-+      .filter((agent) => !current || evaluateRule(TaskTool.id, agent.name, current.permission as PermissionRuleLike[])?.action !== "deny")
+-      .filter((agent) => agent.mode !== "primary")
++      .filter((item) => item.mode !== "primary")
++      .filter((item) => {
++        if (!agent) return true
++        const rule = evaluateRule("task", item.name, rules)
++        return !(rule && rule.action === "deny")
++      })
        .toSorted((a, b) => a.name.localeCompare(b.name))
-       .map((agent) => `- ${agent.name}: ${agent.description ?? "This subagent should only be called manually by the user."}`)
-       .join("\n")
-     return ["Available agent types and the tools they have access to:", description].join("\n")
+-      .map((agent) => `- ${agent.name}: ${agent.description ?? "This subagent should only be called manually by the user."}`)
+-      .join("\n")
+-    return ["Available agent types and the tools they have access to:", description].join("\n")
++      .map((item) => "- " + item.name + ": " + (item.description ?? "This subagent should only be called manually by the user."))
++      .join(String.fromCharCode(10))
++    return ["Available agent types and the tools they have access to:", description].join(String.fromCharCode(10))
    }
--  if (name === "skill") return Skill.fmt(skillInfo(skills), { verbose: false })
-+  if (name === SkillTool.id) return skills.length === 0 ? "No skills are currently available." : Skill.fmt(skillInfo(skills), { verbose: false })
+   if (name === "skill") return skillFmt(skillInfo(skills), { verbose: false })
    return ""
+@@ -843,30 +966,6 @@
+     .replaceAll("${compressionGuidance}", "")
  }
  
- async function toolDefinitionTokens(
-   input: ComputeContextDataInput,
+-function toolDefinitionTokens(
+-  input: ComputeContextDataInput,
 -  messages: WithParts[],
-   skills: Array<{ name: string; description: string; path: string }>,
-   lastUser: Message | undefined,
-+  modelInfo: ReturnType<typeof currentModel>,
- ) {
--  const scanned = input.toolDefinitions ?? await resolveToolDescriptions(input.paths)
+-  skills: Array<{ name: string; description: string; path: string }>,
+-  lastUser: Message | undefined,
+-) {
+-  // 无测试注入时走 catalog 解析，禁止扫 monorepo tool 目录
+-  
+-  const scanned = input.toolDefinitions ?? resolveToolDescriptions(input.paths)
 -  const active = activeToolNames(messages, lastUser)
+-  // 用户未显式禁用工具且无活跃工具时，默认全部内置工具活跃
 -  if (lastUser?.role === "user" && lastUser.tools === undefined && active.size === 0) {
 -    for (const item of scanned) active.add(item.name)
 -  }
 -  const byName = new Map(scanned.map((item) => [item.name, item.text]))
 -  const details = [] as Array<{ name: string; tokens: number }>
 -  for (const name of active) {
--    const text = [byName.get(name), dynamicToolText(name, input, skills)].filter(Boolean).join("\n")
+-    const text = [byName.get(name), dynamicToolText(name, input, skills)]
+-      .filter(Boolean)
+-      .join("\n")
 -    details.push({ name, tokens: estimate(text || name) })
 -  }
 -  return details.toSorted((a, b) => a.name.localeCompare(b.name))
-+  const definitions = baseToolDefinitions(input, modelInfo, lastUser)
-+  const byName = new Map(definitions.map((item) => [item.name, item.text]))
-+  return activeToolNames(definitions, lastUser)
-+    .map((name) => ({
-+      name,
-+      tokens: estimate([byName.get(name), dynamicToolText(name, input, skills, lastUser)].filter(Boolean).join("\n")),
-+    }))
-+    .toSorted((a, b) => a.name.localeCompare(b.name))
+-}
+ 
+ // 基础系统提示词：优先用 agent 自定义 prompt，无 agent prompt 时回退到模型默认提示
+ function baseSystemPrompt(
+@@ -1032,12 +1131,13 @@
+   const provider = input.providers.find((item) => item.id === selected?.providerID)
+   const model = selected?.modelID ? provider?.models[selected.modelID] : undefined
+   return {
+-    providerID: selected?.providerID ?? provider?.id ?? "",
+-    modelID: selected?.modelID ?? "",
+     model,
++    modelID: selected?.modelID ?? "",
++    providerID: selected?.providerID ?? provider?.id ?? "",
+   }
  }
  
- function baseSystemPrompt(
-@@ -781,7 +834,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
++
+ export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
+   // 消息按时间倒序过滤压缩历史，再反转回正序
+   const raw = input.messages.map((msg) => ({ info: msg, parts: input.parts[msg.id] ?? [] }))
+@@ -1068,7 +1168,7 @@
      path: skill.path,
-     tokens: estimate(systemSkillsSection(skillInfo([skill]))),
+     tokens: estimate(skillsSection(skillInfo([skill]))),
    }))
 -  const toolDefs = await toolDefinitionTokens(input, compacted, skills, lastUser)
-+  const toolDefs = await toolDefinitionTokens(input, skills, lastUser, modelInfo)
++  const toolDefs = await toolDefinitionTokens(input, compacted, skills, lastUser, { modelID: modelInfo.modelID, providerID: modelInfo.providerID })
+   // 系统提示词 = 基础提示 + 环境信息 + 用户自定义 system 覆盖
    const systemText = [
      baseSystemPrompt(input, lastUser, modelInfo.model),
-     environmentText(input, modelInfo.modelID, modelInfo.providerID, toolDefs.map((item) => item.name)),
-@@ -803,7 +856,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-     { name: "System prompt", tokens: envTokens, color: "primary" },
-     { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
-     { name: "Skills", tokens: skillTokens, color: "success" },
--    { name: "Tool definitions", tokens: toolDefTokens, color: "warning" },
-+    { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
-     { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
-     { name: "Output Messages", tokens: outputMessageTokens, color: "accent" },
-     { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
-diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
-index 5b7656c6df4d123ba3f98e170dc6d83dd7d18742..d7f1b9ff3be5f34fc0792f637600fc9162a719f2 100644
---- a/packages/opencode/src/cli/cmd/tui/worker.ts
-+++ b/packages/opencode/src/cli/cmd/tui/worker.ts
-@@ -81,6 +81,11 @@ if (process.platform !== "win32") {
-   })
- }
- 
-+// Ensure lock is cleaned up even when the daemon crashes or receives a fatal
-+// signal.  Placed after gracefulShutdown is defined so the closure is valid.
-+process.prependListener("unhandledRejection", () => void gracefulShutdown())
-+process.prependListener("uncaughtException", () => void gracefulShutdown())
-+
- // ── Idle timeout ───────────────────────────────────────────────────────────
- // Exit 30 s after the last SSE client disconnects.  The timer only starts
- // after the first connection, so a slow-starting TUI does not race the daemon.
-diff --git a/packages/opencode/test/cli/tui/context-usage.test.ts b/packages/opencode/test/cli/tui/context-usage.test.ts
-index 6d0ad5ef410cdbef7e9a9e859f8d1cb72bda287b..fd31a26150c485d84fdb8848356cc7c141c5e33b 100644
---- a/packages/opencode/test/cli/tui/context-usage.test.ts
-+++ b/packages/opencode/test/cli/tui/context-usage.test.ts
-@@ -119,7 +119,7 @@ describe("context usage", () => {
-     expect(data.details.messages.assistantText).toBe(3)
-     expect(data.details.messages.toolResults).toBe(4)
+diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
+--- a/packages/tui/test/context-usage.test.ts
++++ b/packages/tui/test/context-usage.test.ts
+@@ -151,7 +151,8 @@
+     // 指令文件 8 字符 → 2 token
      expect(data.details.instructions[0]?.tokens).toBe(2)
+     // 工具定义包含 schema + 观察到的输入，token > 4
 -    expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBeGreaterThan(4)
++    // 注入 16 字符 bash 定义固定为 4 token；保持 SMARK 精确锁
 +    expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBe(4)
+     // 系统提示词含环境信息 + 静态段落，token > 100
      expect(data.categories.find((item) => item.name === "System prompt")?.tokens).toBeGreaterThan(100)
-     expect(data.categories.find((item) => item.name === "Input Messages")?.tokens).toBe(6)
-     expect(data.categories.find((item) => item.name === "Output Messages")?.tokens).toBe(7)
-@@ -197,6 +197,71 @@ describe("context usage", () => {
-     expect(data.categories.find((item) => item.name === "Tool definitions")?.tokens).toBeGreaterThan(0)
+     // 输入消息 = 用户文本 2 + 工具结果 4 = 6
+@@ -250,6 +251,76 @@
    })
  
+   // 验证明细行按终端宽度截断，不溢出到网格区域
++
 +  test("does not collapse tool definitions to historical tool calls", async () => {
 +    const messages = [user("1"), assistant("2", "1")]
 +    const parts: Record<string, Part[]> = {
@@ -422,6 +365,7 @@ index 6d0ad5ef410cdbef7e9a9e859f8d1cb72bda287b..fd31a26150c485d84fdb8848356cc7c1
 +      skills: [],
 +    })
 +
++    // non-collapse：历史仅调用 task 时仍应列出完整内置工具定义
 +    expect(data.details.toolDefs.length).toBeGreaterThan(10)
 +    expect(data.details.toolDefs.find((item) => item.name === "task")?.tokens).toBeGreaterThan(20)
 +    expect(data.categories.find((item) => item.name === "Tool definitions")?.tokens).toBeGreaterThan(1000)
@@ -448,8 +392,11 @@ index 6d0ad5ef410cdbef7e9a9e859f8d1cb72bda287b..fd31a26150c485d84fdb8848356cc7c1
 +      ],
 +    })
 +
++    // bash:false 移除 bash；read:true 不把集合收成仅 true 子集
++    // 注入 toolDefinitions 时仍应尊重 tools 映射中的 false
 +    expect(data.details.toolDefs.map((item) => item.name)).toEqual(["grep", "read"])
 +  })
++
 +
    test("context usage detail lines are bounded so they do not push into the grid", async () => {
      const data = await computeContextData({

@@ -1,150 +1,26 @@
-From 4dec9d15826f5e9d32ecc3850cc25e829802ac7e Mon Sep 17 00:00:00 2001
+From 4dec9d15826f Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Thu, 7 May 2026 02:16:08 +0800
-Subject: [PATCH] =?UTF-8?q?feat(tools):=20=E6=B7=BB=E5=8A=A0=E5=B7=A5?=
- =?UTF-8?q?=E5=85=B7=E7=AE=A1=E7=90=86=E5=8A=9F=E8=83=BD=EF=BC=8C=E4=BC=98?=
- =?UTF-8?q?=E5=8C=96=E6=9D=83=E9=99=90=E5=90=88=E5=B9=B6=E9=80=BB=E8=BE=91?=
- =?UTF-8?q?=EF=BC=8C=E6=9B=B4=E6=96=B0=E5=B7=A5=E5=85=B7=E5=8F=AF=E7=94=A8?=
- =?UTF-8?q?=E6=80=A7=E6=A3=80=E6=9F=A5?=
+Subject: [PATCH] feat(tools): 添加工具管理功能，优化权限合并逻辑，更新工具可用性检查
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/app.tsx b/packages/opencode/src/cli/cmd/tui/app.tsx
-index e6b288dd1f604b4693db35a6a6ab370ae4bdf223..4b6b6afe71b0db9f3ce941259bc80f76c54a15c8 100644
---- a/packages/opencode/src/cli/cmd/tui/app.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/app.tsx
-@@ -39,6 +39,7 @@ import { CommandProvider, useCommandDialog } from "@tui/component/dialog-command
- import { DialogAgent } from "@tui/component/dialog-agent"
- import { DialogSessionList } from "@tui/component/dialog-session-list"
- import { DialogConsoleOrg } from "@tui/component/dialog-console-org"
-+import { DialogTool } from "@tui/component/dialog-tool"
- import { KeybindProvider, useKeybind } from "@tui/context/keybind"
- import { ThemeProvider, useTheme } from "@tui/context/theme"
- import { Home } from "@tui/routes/home"
-@@ -711,6 +712,20 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
-       },
-       category: "System",
-     },
-+    {
-+      title: "Manage tools",
-+      value: "tools.manage",
-+      slash: {
-+        name: "tools",
-+      },
-+      onSelect: () => {
-+        const current = route.data
-+        if (current.type !== "session") return
-+        dialog.replace(() => <DialogTool sessionID={current.sessionID} />)
-+      },
-+      enabled: route.data.type === "session",
-+      category: "System",
-+    },
-     {
-       title: "Open docs",
-       value: "docs.open",
-diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-tool.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-tool.tsx
-new file mode 100644
-index 0000000000000000000000000000000000000000..2e0ebebf3f6c9d45d63fd20eb200544d9b1a8540
---- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/component/dialog-tool.tsx
-@@ -0,0 +1,81 @@
-+import { TextAttributes } from "@opentui/core"
-+import { useProject } from "@tui/context/project"
-+import { useSDK } from "@tui/context/sdk"
-+import { useSync } from "@tui/context/sync"
-+import { useTheme } from "@tui/context/theme"
-+import { DialogSelect, type DialogSelectOption } from "@tui/ui/dialog-select"
-+import { useToast } from "@tui/ui/toast"
-+import { ToolSelection } from "@/tool/selection"
-+import { Keybind } from "@/util/keybind"
-+import { createMemo, createResource, createSignal } from "solid-js"
-+
-+function Status(props: { enabled: boolean; loading: boolean }) {
-+  const { theme } = useTheme()
-+  if (props.loading) return <span style={{ fg: theme.textMuted }}>⋯ Saving</span>
-+  if (props.enabled) return <span style={{ fg: theme.success, attributes: TextAttributes.BOLD }}>✓ Enabled</span>
-+  return <span style={{ fg: theme.textMuted }}>○ Disabled</span>
-+}
-+
-+export function DialogTool(props: { sessionID: string }) {
-+  const project = useProject()
-+  const sdk = useSDK()
-+  const sync = useSync()
-+  const toast = useToast()
-+  const { theme } = useTheme()
-+  const [loading, setLoading] = createSignal<string>()
-+
-+  const [tools] = createResource(async () => {
-+    const result = await sdk.client.tool.ids({ workspace: project.workspace.current() }, { throwOnError: true })
-+    return result.data.filter(ToolSelection.isUserConfigurable)
-+  })
-+
-+  const session = () => sync.session.get(props.sessionID)
-+  const enabled = (id: string) => ToolSelection.enabled(id, session()?.permission)
-+
-+  async function toggle(id: string) {
-+    if (loading()) return
-+    const next = !enabled(id)
-+    setLoading(id)
-+    const workspace = project.workspace.current()
-+    const result = await sdk.client.session.update(
-+      {
-+        workspace,
-+        sessionID: props.sessionID,
-+        // Session.update merges rules server-side; the matching exact rule is
-+        // compacted there so repeated toggles do not accumulate stale entries.
-+        permission: [{ permission: id, pattern: "*", action: next ? "allow" : "deny" }],
-+      },
-+      { throwOnError: false },
-+    )
-+    if (result.error) {
-+      toast.show({ variant: "error", message: "Failed to update tool settings", duration: 5000 })
-+      setLoading(undefined)
-+      return
-+    }
-+    await sync.session.refresh().catch(() => undefined)
-+    setLoading(undefined)
-+  }
-+
-+  const options = createMemo<DialogSelectOption<string>[]>(() =>
-+    (tools() ?? []).toSorted().map((id) => {
-+      const active = enabled(id)
-+      return {
-+        value: id,
-+        title: id,
-+        category: active ? "Enabled" : "Disabled",
-+        footer: <Status enabled={active} loading={loading() === id} />,
-+        gutter: () => <text fg={active ? theme.success : theme.textMuted}>{active ? "✓" : "○"}</text>,
-+      }
-+    }),
-+  )
-+
-+  return (
-+    <DialogSelect
-+      title="Tools"
-+      placeholder="Search tools..."
-+      options={options()}
-+      keybind={[{ keybind: Keybind.parse("space")[0], title: "toggle", onTrigger: (option) => void toggle(option.value) }]}
-+      onSelect={(option) => void toggle(option.value)}
-+    />
-+  )
-+}
 diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/permission/index.ts
-index 3fedd41d2cea98380de0a21de16fe2efbc71cbfb..80e2562e15c9209cad6ddc396c3dcc42fb32d1f6 100644
+index 2e27ff2424dbb000ea9ed7f73471769716ba40a1..e5d3a6ab82511869316f9e29bf00929082f1c064 100644
 --- a/packages/opencode/src/permission/index.ts
 +++ b/packages/opencode/src/permission/index.ts
-@@ -307,6 +307,21 @@ export function merge(...rulesets: Ruleset[]): Ruleset {
+@@ -201,6 +201,22 @@ export function merge(...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule[]
    return rulesets.flat()
  }
  
-+export function compact(ruleset: Ruleset): Ruleset {
++export function compact(ruleset: PermissionV1.Ruleset): PermissionV1.Rule[] {
 +  const seen = new Set<string>()
-+  // Permission evaluation is last-match-wins. Keep that behavior while pruning
-+  // older exact duplicates so repeated UI toggles do not grow session state.
++  // 权限评估为 last-match-wins，在剪枝旧重复项的同时保持该语义
++  // 避免 UI 重复切换导致 session 权限状态累积过期条目
 +  return ruleset
 +    .toReversed()
++    // 按 permission+pattern 组合去重，保留最近一次切换的结果
 +    .filter((rule) => {
 +      const key = `${rule.permission}\0${rule.pattern}`
 +      if (seen.has(key)) return false
@@ -154,115 +30,92 @@ index 3fedd41d2cea98380de0a21de16fe2efbc71cbfb..80e2562e15c9209cad6ddc396c3dcc42
 +    .toReversed()
 +}
 +
- const EDIT_TOOLS = ["edit", "write", "apply_patch"]
- 
- export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
+ export function disabled(tools: string[], ruleset: PermissionV1.Ruleset): Set<string> {
+   const edits = ["edit", "write", "apply_patch"]
+   const reads = ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/experimental.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/experimental.ts
-index cc958da3037987912664742672771d30b5bfa858..57cfbc981442b02889cffe62d49dfa061d85a5eb 100644
+index b218c6040d1ebe4eee58e940b1dddf9069afcc07..1f00d758aae4826e9b3fa1276da8258b58a36bd7 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/experimental.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/experimental.ts
-@@ -83,7 +83,8 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
+@@ -105,7 +105,10 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
      })
  
      const toolIDs = Effect.fn("ExperimentalHttpApi.toolIDs")(function* () {
 -      return yield* registry.ids()
++      // 合并 registry 和 MCP 工具 ID，去重后排序返回
++      // 并发拉取避免串行等待，concurrency unbounded 因两个请求均无副作用
 +      const [registryIDs, mcpTools] = yield* Effect.all([registry.ids(), mcp.tools()], { concurrency: "unbounded" })
 +      return [...new Set([...registryIDs, ...Object.keys(mcpTools)])].toSorted()
      })
  
      const worktree = Effect.fn("ExperimentalHttpApi.worktree")(function* () {
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-index 0e37566c00ea07241938713215a9a6a042cd350a..67f41702bc8c4247a67f3e651aa8d6f65a3d7b37 100644
+index 8842fe8739d3b713b4613ea97de0ac5f41744252..52063639f36763a7a0a1d315fd1bbb7b84067a8d 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -213,7 +213,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+@@ -197,7 +197,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
        if (ctx.payload.permission !== undefined) {
          yield* session.setPermission({
            sessionID: ctx.params.sessionID,
 -          permission: Permission.merge(current.permission ?? [], ctx.payload.permission),
++          // 合并后压缩重复规则，避免重复切换累积过期条目
 +          permission: Permission.compact(Permission.merge(current.permission ?? [], ctx.payload.permission)),
          })
        }
        if (ctx.payload.time?.archived !== undefined) {
-diff --git a/packages/opencode/src/server/routes/instance/session.ts b/packages/opencode/src/server/routes/instance/session.ts
-index 932c940f96ab4e4efb2418663ee371359048fbde..a3196cf1aced75f7999083b66ecbf9855ca5a7f4 100644
---- a/packages/opencode/src/server/routes/instance/session.ts
-+++ b/packages/opencode/src/server/routes/instance/session.ts
-@@ -443,7 +443,7 @@ export const SessionRoutes = lazy(() =>
-           if (updates.permission !== undefined) {
-             yield* session.setPermission({
-               sessionID,
--              permission: Permission.merge(current.permission ?? [], updates.permission),
-+              permission: Permission.compact(Permission.merge(current.permission ?? [], updates.permission)),
-             })
-           }
-           if (updates.time?.archived !== undefined) {
-diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
-index e76583f2d347957b7feb5c44ef3700e439513806..0a54bfc0fe8fc16d4e3096adb3bbd57510c94e62 100644
---- a/packages/opencode/src/session/llm.ts
-+++ b/packages/opencode/src/session/llm.ts
-@@ -17,6 +17,7 @@ import { Permission } from "@/permission"
- import { PermissionID } from "@/permission/schema"
- import { Bus } from "@/bus"
- import { Wildcard } from "@/util/wildcard"
+diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/src/session/llm/request.ts
+index 4f93411107df56e4bab9d153899f756d729f3d38..6eae747cf5c7b1000fbcacb339c7d7bd8a5dfc7b 100644
+--- a/packages/opencode/src/session/llm/request.ts
++++ b/packages/opencode/src/session/llm/request.ts
+@@ -4,6 +4,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
+ import type { RuntimeFlags } from "@/effect/runtime-flags"
+ import { InstanceState } from "@/effect/instance-state"
+ import { Permission } from "@/permission"
 +import { ToolSelection } from "@/tool/selection"
- import { SessionID } from "@/session/schema"
- import { Auth } from "@/auth"
- import { Installation } from "@/installation"
-@@ -451,7 +452,10 @@ function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "permission"
+ import type { Agent } from "@/agent/agent"
+ import type { MessageV2 } from "../message-v2"
+ import type { Provider } from "@/provider/provider"
+@@ -210,7 +211,12 @@ function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission"
      Object.keys(input.tools),
      Permission.merge(input.agent.permission, input.permission ?? []),
    )
 -  return Record.filter(input.tools, (_, k) => input.user.tools?.[k] !== false && !disabled.has(k))
 +  return Record.filter(
 +    input.tools,
++    // ToolSelection.enabled 过滤被 UI 禁用的工具，控制模型可见性
++    // 三层过滤：用户显式禁用、权限分组禁用、UI 工具选择禁用，任一命中即排除
 +    (_, k) => input.user.tools?.[k] !== false && !disabled.has(k) && ToolSelection.enabled(k, input.permission),
 +  )
  }
  
- // Check if messages contain any tool-call content
+ export function hasToolCalls(messages: ModelMessage[]): boolean {
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 833b9f15b26f312730c3f241d25b96e1263feb69..e33e8764c9dead0b3891159b6160d62bea8d1b75 100644
+index b8a7a2ffbf923133acae851ed511a5ffcd556b7b..4e67d7f0b88a9a9587fb288c62c70a6668f1f5f6 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -22,6 +22,7 @@ import PROMPT_PLAN from "../session/prompt/plan.txt"
- import BUILD_SWITCH from "../session/prompt/build-switch.txt"
- import MAX_STEPS from "../session/prompt/max-steps.txt"
+@@ -19,6 +19,7 @@ import { Instruction } from "./instruction"
+ import { Plugin } from "../plugin"
+ import { MAX_STEPS_PROMPT } from "@opencode-ai/core/session/runner/max-steps"
  import { ToolRegistry } from "@/tool/registry"
 +import { ToolSelection } from "@/tool/selection"
  import { MCP } from "../mcp"
  import { LSP } from "@/lsp/lsp"
- import { Flag } from "@opencode-ai/core/flag/flag"
-@@ -448,6 +449,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-         providerID: input.model.providerID,
-         agent: input.agent,
-       })) {
-+        if (!ToolSelection.enabled(item.id, input.session.permission)) continue
-         const schema = ProviderTransform.schema(input.model, EffectZod.toJsonSchema(item.parameters))
-         tools[item.id] = tool({
-           description: item.description,
-@@ -487,6 +489,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-       }
- 
-       for (const [key, item] of Object.entries(yield* mcp.tools())) {
-+        if (!ToolSelection.enabled(key, input.session.permission)) continue
-         const execute = item.execute
-         if (!execute) continue
- 
-@@ -1527,9 +1530,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+ import { ulid } from "ulid"
+@@ -1322,9 +1323,11 @@ const layer = Layer.effect(
  
              yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
  
++            // 仅用户可配置工具计入 system prompt 的工具使用指引
 +            const registeredTools = Object.keys(tools).filter(ToolSelection.isUserConfigurable)
-             const [skills, env, instructions, mcpInstr, modelMsgs] = yield* Effect.all([
+             const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
                sys.skills(agent),
 -              sys.environment(model),
 +              sys.environment(model, registeredTools),
                instruction.system().pipe(Effect.orDie),
-               sys.mcpInstructions(),
+               sys.mcp(agent, session.permission),
                MessageV2.toModelMessagesEffect(msgs, model),
-@@ -1549,7 +1553,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-             const messagesText = JSON.stringify(messages)
+@@ -1351,7 +1354,13 @@ const layer = Layer.effect(
+             // 合并 agent 与 session 权限，仅估算实际发送的工具定义
              const disabledTools = Permission.disabled(Object.keys(tools), Permission.merge(agent.permission, session.permission ?? []))
              const toolsText = Object.entries(tools)
 -              .filter(([name]) => lastUser.tools?.[name] !== false && !disabledTools.has(name))
@@ -270,6 +123,7 @@ index 833b9f15b26f312730c3f241d25b96e1263feb69..e33e8764c9dead0b3891159b6160d62b
 +                ([name]) =>
 +                  lastUser.tools?.[name] !== false &&
 +                  !disabledTools.has(name) &&
++                  // toolsText 与 resolveTools 保持一致的过滤，确保模型看到的工具与实际可用一致
 +                  ToolSelection.enabled(name, session.permission),
 +              )
                .map(([name, tool]) => {
@@ -287,105 +141,291 @@ index 3737b74d895124ae950cb1ba5d34a2752e2a3c22..32f5466de4f23903ca8c3b23909dddc8
 +You may proceed with implementation according to the tools and permissions currently available for this request.
  </system-reminder>
 diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
-index d83c78ac77b9a73266e356401a02c85c2da75254..19eaf154c94d7644b7ab0c39c1378bedffaeb431 100644
+index 537ced41346683e3f4295f9953548f805c2cd452..13029a363ca31601ed440764ae678bad6e048cc3 100644
 --- a/packages/opencode/src/session/system.ts
 +++ b/packages/opencode/src/session/system.ts
-@@ -21,8 +21,6 @@ import { Permission } from "@/permission"
- import { Skill } from "@/skill"
+@@ -28,7 +28,6 @@ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
  import { Git } from "@/git"
- import { Flag } from "@opencode-ai/core/flag/flag"
--import { MCP } from "@/mcp"
--import { ToolRegistry } from "@/tool"
- import { Shell } from "@/shell/shell"
- 
- // 将 git 状态上下文限制在固定长度，避免提示词膨胀。
-@@ -49,6 +47,13 @@ export function provider(model: Provider.Model) {
- }
- 
- export function toolUsageSection(registeredTools: string[]) {
-+  if (registeredTools.length === 0) {
-+    return [
-+      "# WITHOUT any tools",
-+      "NOTICE: Now, NO tools are currently available for this request. DO NOT claim to call ANY tools or perform tool-backed filesystem, shell, web, or notebook operations; IGNORE any generic tool instructions from other prompts.",
-+    ].join("\n")
-+  }
-+
-   const has = (name: string) => registeredTools.includes(name)
- 
-   const items: string[] = [
-@@ -160,7 +165,7 @@ export function skillsSection(list: Skill.Info[]) {
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { type as osType, release as osRelease } from "os"
+-import { ToolRegistry } from "@/tool/registry"
+ import { Shell } from "@opencode-ai/core/shell"
+ // Flag 模块已在上游重构中迁移为 RuntimeFlags，导入路径已更新
+ // 原始 SMARK patch 31 的 Flag→@opencode-ai/core/flag 迁移已由上游完成
+@@ -56,7 +55,7 @@ export function provider(model: Provider.Model) {
  }
  
  export interface Interface {
 -  readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
 +  readonly environment: (model: Provider.Model, registeredTools: string[]) => Effect.Effect<string[]>
    readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
-   readonly mcpInstructions: () => Effect.Effect<string | undefined>
+   readonly mcp: (agent: Agent.Info, permission?: PermissionV1.Ruleset) => Effect.Effect<string | undefined>
  }
-@@ -172,7 +177,6 @@ export const layer = Layer.effect(
-   Effect.gen(function* () {
-     const skill = yield* Skill.Service
+@@ -95,7 +94,14 @@ const getKnowledgeCutoff = (modelApiId: string): string | undefined => {
+ 
+ // 构建工具使用指引文本：按已注册工具生成 per-tool 替代指引
+ const getToolUsageSection = (toolIds: string[]) => {
+-  if (toolIds.length === 0) return undefined
++  // 无可用工具时显式通知模型，避免其声称调用不存在的工具
++  if (toolIds.length === 0) {
++    return [
++      // 强语气 NOTICE 防止模型在无工具时仍声称执行工具操作
++      "# WITHOUT any tools",
++      "NOTICE: Now, NO tools are currently available for this request. DO NOT claim to call ANY tools or perform tool-backed filesystem, shell, web, or notebook operations; IGNORE any generic tool instructions from other prompts.",
++    ].join("\n")
++  }
+   const has = (name: string) => toolIds.includes(name)
+   const items: string[] = [
+     `Do NOT use the bash tool when a dedicated tool is available.`,
+@@ -141,7 +146,6 @@ const layer = Layer.effect(
+     const locations = yield* LocationServiceMap.Service
      const git = yield* Git.Service
+     const flags = yield* RuntimeFlags.Service
 -    const registry = yield* ToolRegistry.Service
  
      // 该缓存是会话级快照，按 cwd 作为键。
      // 为保持“快照语义”，会话内不主动失效。
-@@ -283,13 +287,12 @@ export const layer = Layer.effect(
+@@ -209,7 +213,7 @@ const layer = Layer.effect(
      })
  
      return Service.of({
 -      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
 +      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model, registeredTools: string[]) {
          const ctx = yield* InstanceState.context
-         const gitContext = yield* getGitContext(ctx)
-         const { shellNotes, osVersion } = yield* getEnvExtras()
+         // getGitContext 是 Effect.fn，返回的是函数而非 Effect，必须调用以获取 Effect
+         const gitContext = yield* getGitContext()
+@@ -219,8 +223,6 @@ const layer = Layer.effect(
+         // 根据模型估算知识截止日期
          const isWorktree = ctx.worktree !== ctx.directory
          const cutoff = getKnowledgeCutoff(model.api.id)
--        const toolIds = yield* registry.ids()
-         const envLines: string[] = [
-           `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
-           `Here is some useful information about the environment you are running in:`,
-@@ -310,7 +313,7 @@ export const layer = Layer.effect(
-           `</env>`,
-         ]
-         return [
--          toolUsageSection(toolIds),
-+          toolUsageSection(registeredTools),
-           ...staticSections(),
-           envLines.join("\n"),
-         ]
-@@ -333,8 +336,6 @@ export const layer = Layer.effect(
- export const defaultLayer = layer.pipe(
-   Layer.provide(Skill.defaultLayer),
-   Layer.provide(Git.defaultLayer),
--  Layer.provide(MCP.defaultLayer),
--  Layer.provide(ToolRegistry.defaultLayer)
- )
+-        // 使用 layer 中捕获的 registry 获取已注册工具列表
+-        const toolIds = yield* registry.ids().pipe(Effect.orDie)
+         const references = yield* Effect.gen(function* () {
+           return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
+         }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
+@@ -244,8 +246,8 @@ const layer = Layer.effect(
+                   ]),
+                 "</available_references>",
+               ].join("\n"),
+-          // 工具使用指引：根据已注册工具列表生成
+-          getToolUsageSection(toolIds),
++          // 工具使用指引：根据传入的已注册工具列表生成
++          getToolUsageSection(registeredTools),
+           // 执行操作时的安全指引：提醒模型在执行破坏性操作前需要确认
+           `# Executing actions with care\nCarefully consider the reversibility and blast radius of actions before proceeding:\n- Local, reversible actions (editing files, running tests, reading code): proceed freely.\n- Actions that are hard to reverse or affect shared state: confirm with the user first.\n\n\nActions that typically require user confirmation before proceeding:\n- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes\n- Force-pushing, git reset --hard, amending published commits\n- Pushing code, creating or closing PRs, commenting on issues\n- Sending messages to external services (Slack, email, webhooks)\n- Modifying CI/CD pipelines or shared infrastructure\n\nWhen you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user\x27s in-progress work.`,
+           // 输出效率指引：提醒模型保持简洁高效的输出
+@@ -318,7 +320,7 @@ export const node = LayerNode.make({
+   service: Service,
+   layer: layer,
+   // 依赖 Git 服务采集 git 上下文，依赖 RuntimeFlags 读取 OPENCODE_DISABLE_GIT 开关
+-  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node, ToolRegistry.node],
++  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node],
+ })
  
  export * as SystemPrompt from "./system"
+diff --git a/packages/opencode/src/session/tools.ts b/packages/opencode/src/session/tools.ts
+index 0f401c7562fa07076afd539990ca12fa207ceee0..022a518ee5c2e5254590b6db797f3157a8d5207e 100644
+--- a/packages/opencode/src/session/tools.ts
++++ b/packages/opencode/src/session/tools.ts
+@@ -8,6 +8,7 @@ import { Permission } from "@/permission"
+ import { Tool } from "@/tool/tool"
+ import { ToolJsonSchema } from "@/tool/json-schema"
+ import { ToolRegistry } from "@/tool/registry"
++import { ToolSelection } from "@/tool/selection"
+ import { Truncate } from "@/tool/truncate"
+ 
+ import { Plugin } from "@/plugin"
+@@ -95,6 +96,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
+     agent: input.agent,
+     permission: input.session.permission,
+   })) {
++    // 跳过被 UI 禁用的工具，控制模型可见性
++    if (!ToolSelection.enabled(item.id, input.session.permission)) continue
+     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
+     tools[item.id] = tool({
+       description: item.description,
+@@ -388,6 +391,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
+   if (flags.experimentalCodeMode) return tools
+ 
+   for (const [key, entry] of Object.entries(yield* mcp.tools())) {
++    // 跳过被 UI 禁用的 MCP 工具
++    if (!ToolSelection.enabled(key, input.session.permission)) continue
+     const item = McpCatalog.convertTool(entry.def, entry.client, entry.timeout)
+     const execute = item.execute
+     if (!execute) continue
 diff --git a/packages/opencode/src/tool/selection.ts b/packages/opencode/src/tool/selection.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ad2ef7abe333a9f9d0f171023de7f067654c8ada
+index 0000000000000000000000000000000000000000..0594b5d80fb2be0bea05fa01c6bfa3c2044b68dc
 --- /dev/null
 +++ b/packages/opencode/src/tool/selection.ts
-@@ -0,0 +1,20 @@
-+import type { Permission } from "@/permission"
+@@ -0,0 +1,21 @@
++
 +import { Wildcard } from "@/util/wildcard"
 +
++// 内部支持工具不暴露给模型的活跃工具列表
 +const INTERNAL = new Set(["invalid", "_noop", "StructuredOutput"])
 +
 +export function isUserConfigurable(id: string) {
 +  return !INTERNAL.has(id)
 +}
 +
-+export function enabled(id: string, ruleset?: Permission.Ruleset) {
-+  // Internal support tools are not exposed to the model's active tool list, but
-+  // some provider repair paths still need their definitions to stay registered.
++export function enabled(id: string, ruleset?: ReadonlyArray<{ permission: string; pattern: string; action: string }>) {
++  // 内部支持工具不暴露给模型，但部分 provider 修复路径仍需其定义保持注册
 +  if (!isUserConfigurable(id)) return true
-+  // This is intentionally exact-tool matching, separate from permission's
-+  // edit/write/apply_patch grouping, because this controls model exposure only.
++  // 此处使用精确工具匹配，与权限的 edit/write/apply_patch 分组分离
++  // 因为该检查仅控制模型可见性
++  // findLast 实现 last-match-wins：多条规则匹配时取最后一条决定可见性
 +  const rule = ruleset?.findLast((rule) => Wildcard.match(id, rule.permission) && rule.pattern === "*")
 +  return rule?.action !== "deny"
 +}
 +
 +export * as ToolSelection from "./selection"
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+index b94ec922aa6fda8bf36d817819d9b3e6e62dc393..586751567e73b28b0aafc30daba55cf6a5f80eba 100644
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -42,6 +42,7 @@ import { PermissionProvider } from "./context/permission"
+ import { DialogModel } from "./component/dialog-model"
+ import { useConnected } from "./component/use-connected"
+ import { DialogMcp } from "./component/dialog-mcp"
++import { DialogTool } from "./component/dialog-tool"
+ import { DialogStatus } from "./component/dialog-status"
+ import { DialogDebug } from "./component/dialog-debug"
+ import { DialogThemeList } from "./component/dialog-theme-list"
+@@ -854,6 +855,18 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
+         },
+         category: "System",
+       },
++      {
++        name: "tools.manage",
++        title: "Manage tools",
++        slashName: "tools",
++        run: () => {
++          const current = route.data
++          if (current.type !== "session") return
++          dialog.replace(() => <DialogTool sessionID={current.sessionID} />)
++        },
++        enabled: () => route.data.type === "session",
++        category: "System",
++      },
+       {
+         name: "docs.open",
+         title: "Open docs",
+diff --git a/packages/tui/src/component/dialog-tool.tsx b/packages/tui/src/component/dialog-tool.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..212c1006922dcfa62cdc8c3c16944a3a24fedd25
+--- /dev/null
++++ b/packages/tui/src/component/dialog-tool.tsx
+@@ -0,0 +1,100 @@
++import { TextAttributes } from "@opentui/core"
++import { useProject } from "../context/project"
++import { useSDK } from "../context/sdk"
++import { useSync } from "../context/sync"
++import { useTheme } from "../context/theme"
++import { DialogSelect, type DialogSelectOption } from "../ui/dialog-select"
++import { useToast } from "../ui/toast"
++import { Wildcard } from "@opencode-ai/core/util/wildcard"
++import { createMemo, createResource, createSignal } from "solid-js"
++
++// 内部支持工具不暴露给用户配置
++const INTERNAL = new Set(["invalid", "_noop", "StructuredOutput"])
++
++function isUserConfigurable(id: string) {
++  return !INTERNAL.has(id)
++}
++
++// 检查工具是否被 session 权限规则启用（精确工具匹配，控制模型可见性）
++function enabled(id: string, ruleset?: ReadonlyArray<{ permission: string; pattern: string; action: string }>) {
++  if (!isUserConfigurable(id)) return true
++  const rule = ruleset?.findLast((rule) => Wildcard.match(id, rule.permission) && rule.pattern === "*")
++  return rule?.action !== "deny"
++}
++
++function Status(props: { enabled: boolean; loading: boolean }) {
++  const { theme } = useTheme()
++  if (props.loading) return <span style={{ fg: theme.textMuted }}>⋯ Saving</span>
++  if (props.enabled) return <span style={{ fg: theme.success, attributes: TextAttributes.BOLD }}>✓ Enabled</span>
++  return <span style={{ fg: theme.textMuted }}>○ Disabled</span>
++}
++
++export function DialogTool(props: { sessionID: string }) {
++  const project = useProject()
++  const sdk = useSDK()
++  const sync = useSync()
++  const toast = useToast()
++  const { theme } = useTheme()
++  const [loading, setLoading] = createSignal<string | undefined>()
++
++  const [tools] = createResource(async () => {
++    const result = await sdk.client.tool.ids({ workspace: project.workspace.current() }, { throwOnError: true })
++    return result.data.filter(isUserConfigurable)
++  })
++
++  const session = () => sync.session.get(props.sessionID)
++  const isEnabled = (id: string) => enabled(id, session()?.permission)
++
++  async function toggle(id: string) {
++    if (loading()) return
++    const next = !isEnabled(id)
++    setLoading(id)
++    const workspace = project.workspace.current()
++    // Session.update 在服务端合并规则并压缩重复项，避免重复切换累积过期条目
++    const result = await sdk.client.session.update(
++      {
++        workspace,
++        sessionID: props.sessionID,
++        // pattern:"*" 限定规则仅作用于指定工具，不波及 edit/write 等权限分组
++        permission: [{ permission: id, pattern: "*", action: next ? "allow" : "deny" }],
++      },
++      { throwOnError: false },
++    )
++    if (result.error) {
++      toast.show({ variant: "error", message: "Failed to update tool settings", duration: 5000 })
++      setLoading(undefined)
++      return
++    }
++    await sync.session.refresh().catch(() => undefined)
++    setLoading(undefined)
++  }
++
++  const options = createMemo<DialogSelectOption<string>[]>(() =>
++    (tools() ?? []).toSorted().map((id) => {
++      const active = isEnabled(id)
++      return {
++        value: id,
++        title: id,
++        category: active ? "Enabled" : "Disabled",
++        footer: <Status enabled={active} loading={loading() === id} />,
++        gutter: () => <text fg={active ? theme.success : theme.textMuted}>{active ? "✓" : "○"}</text>,
++      }
++    }),
++  )
++
++  return (
++    <DialogSelect
++      title="Tools"
++      placeholder="Search tools..."
++      options={options()}
++      actions={[
++        {
++          command: "dialog.tool.toggle",
++          title: "toggle",
++          onTrigger: (option) => void toggle(option.value),
++        },
++      ]}
++      onSelect={(option) => void toggle(option.value)}
++    />
++  )
++}
+diff --git a/packages/tui/src/config/keybind.ts b/packages/tui/src/config/keybind.ts
+index 5dd7e4b5aafe91a13d033839025b3be836f5e448..84a1c58033f0c8b5459cb1b5e4c80530157a950b 100644
+--- a/packages/tui/src/config/keybind.ts
++++ b/packages/tui/src/config/keybind.ts
+@@ -208,6 +208,7 @@ export const Definitions = {
+   "dialog.select.submit": keybind("return", "Submit selected dialog item"),
+   "dialog.prompt.submit": keybind("return", "Submit dialog prompt"),
+   "dialog.mcp.toggle": keybind("space", "Toggle MCP in MCP dialog"),
++  "dialog.tool.toggle": keybind("space", "Toggle tool in tool dialog"),
+   "dialog.move_session.new": keybind("ctrl+m", "New project copy"),
+   "dialog.move_session.delete": keybind("ctrl+d", "Delete project copy"),
+   "dialog.move_session.refresh": keybind("ctrl+r", "Refresh project copies"),
