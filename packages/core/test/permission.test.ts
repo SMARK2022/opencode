@@ -762,7 +762,8 @@ describe("PermissionV2", () => {
       expect.objectContaining({ type: "reasoning", text: "Actual reviewer reasoning before decision." }),
       expect.objectContaining({ type: "text", text: "Checking the requested change." }),
     ]))
-    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "running", structured: { autoReview: { status: "reviewing", sessionID: child.id } } } }] })
+    // Native先固定Tool.Called输入再审核；等待裁决的中间窗口也必须可展示真实command。
+    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "running", input: { command: "git add ." }, structured: { autoReview: { status: "reviewing", sessionID: child.id } } } }] })
     // 中途普通工具进度和最终结果都不得擦除审批，审批本身不等于工具执行结果。
     yield* Deferred.succeed(reviewGate, undefined)
     expect(yield* Fiber.join(fiber)).toMatchObject({ effect: "allow" })
@@ -782,7 +783,7 @@ describe("PermissionV2", () => {
       sessionID: request.sessionID, assistantMessageID, callID: "parent", timestamp: yield* DateTime.now,
       structured: { progress: "after-review" }, content: [],
     })
-    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { structured: { autoReview: { status: "allowed", result: assessment } } } }] })
+    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { input: { command: "git add ." }, structured: { autoReview: { status: "allowed", result: assessment } } } }] })
     yield* publisher.publish(LLMEvent.toolResult({
       id: "parent", name: "bash", result: { type: "text", value: "completed" },
       output: { structured: { actualOutput: true }, content: [{ type: "text", text: "completed" }] },
