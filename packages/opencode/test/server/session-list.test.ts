@@ -793,6 +793,48 @@ describe("session.list", () => {
     { git: true },
   )
 
+  // #529：多关键词空格分词后取交集：每 token 各自 title∨内容命中，而不是整串 "A B" 子串。
+  // 跨字段命中（title 含 alpha、body 含 beta）也必须保留——AND 是 token 级不是字段级。
+  it.instance(
+    "intersects whitespace-separated search tokens across title and content",
+    () =>
+      Effect.gen(function* () {
+        const both = yield* withSession({ title: "alpha-holder" })
+        const onlyTitle = yield* withSession({ title: "alpha-only-title" })
+        const onlyBody = yield* withSession({ title: "body-holder" })
+        const neither = yield* withSession({ title: "unrelated-holder" })
+
+        const bothMsg = yield* createSearchUserMessage(both.id)
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: both.id,
+            messageID: bothMsg,
+            type: "text",
+            text: "contains-beta-token",
+          }),
+        )
+
+        const bodyMsg = yield* createSearchUserMessage(onlyBody.id)
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: onlyBody.id,
+            messageID: bodyMsg,
+            type: "text",
+            text: "alpha and beta together",
+          }),
+        )
+
+        const ids = yield* searchIDs("alpha beta")
+        expect(ids).toContain(both.id)
+        expect(ids).toContain(onlyBody.id)
+        expect(ids).not.toContain(onlyTitle.id)
+        expect(ids).not.toContain(neither.id)
+      }),
+    { git: true },
+  )
+
   // #265：标题命中走 searchCondition 的第一路——锚定 textMatches 改造后标题语义不回退
   it.instance(
     "searches session title",

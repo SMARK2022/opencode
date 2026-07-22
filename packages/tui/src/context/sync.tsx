@@ -37,6 +37,8 @@ import { SessionPath } from "@opencode-ai/core/session/path"
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
 import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
+// #529：浏览窗口/上限常量与 dialog 搜索同源，避免两处窗口再次分叉
+import { SESSION_LIST_BROWSE_LIMIT, SESSION_LIST_LOOKBACK_MS } from "../util/session-list-params"
 
 // #364：goal 类型定义（SDK 未重新生成前使用内联类型）
 // 字段与 src/session/goal.ts 的 Goal schema 对齐
@@ -462,7 +464,7 @@ export const {
     function listSessions() {
       const tracker = new Map<string, SessionTrace>()
       listingSessions.add(tracker)
-      const query = { start: Date.now() - 90 * 24 * 60 * 60 * 1000, limit: 1200, ...sessionListQuery() }
+      const query = { start: Date.now() - SESSION_LIST_LOOKBACK_MS, limit: SESSION_LIST_BROWSE_LIMIT, ...sessionListQuery() }
       // project ID 固定到请求发起时的实例；全局事件本身不做项目筛选。
       const projectID = project.project()
       const directory = query.directory

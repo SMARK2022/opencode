@@ -7,13 +7,27 @@ import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./sq
 // thinking/reasoning、tool result、shell output、metadata、token/snapshot 等字段不是 session 搜索的契约。
 // 使用 instr(lower(...)) 做大小写不敏感的精确子串匹配，避免 SQLite LIKE 把 % / _ 当作通配符。
 // 空白搜索返回 undefined，避免 instr(text, "") 把所有行都当作命中。
+// #529：多关键词：按空白切成 token，每个 token 仍是 title∨可见内容命中，
+// token 之间 AND（交集），而不是把 "A B" 当整串子串检索。
 export function searchCondition(search: string): SQL | undefined {
-  const needle = search.trim().toLowerCase()
+  const tokens = search
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length > 0)
+  // #265：返回 undefined 而非恒真 SQL——上层跳过整个搜索分支，避免空串全表命中
+  if (tokens.length === 0) return undefined
+
+  // #529：单 token 与历史语义逐字一致；多 token 逐个 AND，等价于「先 A 再 B 再 C」
+  // #529：每个 token 的三路 union 自带括号，AND 拼接不会漏进 union 内部的 or 链
+  const parts = tokens.map((needle) => tokenCondition(needle))
+  if (parts.length === 1) return parts[0]
+  return sql`(${sql.join(parts, sql` and `)})`
+}
+
+function tokenCondition(needle: string) {
   // #265：三路 union——标题、v1 part 白名单、v2 session_message 白名单；hidden 门仅存在于 v1 part 侧 exists，
   // #265：v2 侧由 sessionMessageMatches 的类型等值判定承担同等排除（等值不命中即不可搜索）
-  // #265：返回 undefined 而非恒真 SQL——上层跳过整个搜索分支，避免空串全表命中
-  if (!needle) return undefined
-
   return sql`(
     ${textMatches(sql`${SessionTable.title}`, needle)}
     or exists (
