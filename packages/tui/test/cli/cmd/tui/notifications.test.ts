@@ -117,25 +117,25 @@ function permission(id: string, sessionID = "session"): PermissionRequest {
 }
 
 describe("internal notifications TUI plugin", () => {
-  test("question and permission are visual-only without sound", async () => {
+  test("question and permission play their semantic sounds", async () => {
     const harness = await setup()
 
     harness.emit({ id: "event-1", type: "question.asked", properties: question("question-1") })
     harness.emit({ id: "event-2", type: "permission.asked", properties: permission("permission-1") })
 
-    // question/permission 保留视觉通知但静音，避免频繁触发时太吵
+    // question/permission 需要用户输入：视觉通知 + 语义音效
     expect(harness.notifications).toEqual([
       {
         title: "Demo session",
         message: "Question needs input",
         notification: { when: "blurred" },
-        sound: false,
+        sound: { name: "question", when: "always" },
       },
       {
         title: "Demo session",
         message: "Permission needs input",
         notification: { when: "blurred" },
-        sound: false,
+        sound: { name: "permission", when: "always" },
       },
     ])
   })
@@ -162,8 +162,41 @@ describe("internal notifications TUI plugin", () => {
     harness.emit({ id: "event-8", type: "permission.asked", properties: permission("permission-1") })
 
     expect(harness.notifications).toHaveLength(4)
-    // 所有 question/permission 通知都应该是 sound: false
-    expect(harness.notifications.every((n) => n.sound === false)).toBe(true)
+    expect(harness.notifications.map((n) => n.sound)).toEqual([
+      { name: "question", when: "always" },
+      { name: "question", when: "always" },
+      { name: "permission", when: "always" },
+      { name: "permission", when: "always" },
+    ])
+  })
+
+  test("Native input requests share semantic sounds and pending identity", async () => {
+    const harness = await setup()
+    const q = { id: "que_native", sessionID: "session", questions: [] }
+    const p = { id: "per_native", sessionID: "session", action: "edit", resources: [] }
+    // 去重看真实request ID；重投SSE或同一请求的兼容事件不能制造第二次提醒。
+    harness.emit({ id: "native-q1", type: "question.v2.asked", properties: q })
+    harness.emit({ id: "native-q2", type: "question.v2.asked", properties: q })
+    harness.emit({ id: "compat-q", type: "question.asked", properties: q })
+    // 回复与拒绝都释放同一pending键，之后相同请求身份才允许再次通知。
+    harness.emit({ id: "native-qr", type: "question.v2.replied", properties: { sessionID: "session", requestID: q.id, answers: [] } })
+    harness.emit({ id: "native-q3", type: "question.v2.asked", properties: q })
+    harness.emit({ id: "native-qx", type: "question.v2.rejected", properties: { sessionID: "session", requestID: q.id } })
+    harness.emit({ id: "native-q4", type: "question.v2.asked", properties: q })
+    harness.emit({ id: "native-p1", type: "permission.v2.asked", properties: p })
+    harness.emit({ id: "native-p2", type: "permission.v2.asked", properties: p })
+    // Native拒绝也是replied终态，不能让去重残留吞掉后续权限请求。
+    harness.emit({ id: "native-pr", type: "permission.v2.replied", properties: { sessionID: "session", requestID: p.id, reply: "reject" } })
+    harness.emit({ id: "native-p3", type: "permission.v2.asked", properties: p })
+    expect(harness.notifications).toHaveLength(5)
+    expect(harness.notifications.map(item => item.sound)).toEqual([
+      { name: "question", when: "always" },
+      { name: "question", when: "always" },
+      { name: "question", when: "always" },
+      { name: "permission", when: "always" },
+      { name: "permission", when: "always" },
+    ])
+    expect(harness.notifications.every(item => item.title === "Demo session")).toBe(true)
   })
 
   test("notifies done when an active session completes with a finished assistant", async () => {

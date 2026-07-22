@@ -6,7 +6,7 @@ const id = "internal:notifications"
 
 type SessionError = Extract<Event, { type: "session.error" }>["properties"]["error"]
 
-// sound 参数支持 false：question/permission 只保留视觉通知不播放音效
+// sound 参数支持 false：单次调用静音（如 abort）；其余传入语义音效名
 function notify(api: TuiPluginApi, sessionID: string | undefined, message: string, sound: TuiAttentionSoundName | false) {
   const session = sessionID ? api.state.session.get(sessionID) : undefined
   const isSubagent = session?.parentID !== undefined
@@ -14,7 +14,7 @@ function notify(api: TuiPluginApi, sessionID: string | undefined, message: strin
     title: session?.title,
     message,
     notification: isSubagent ? false : { when: "blurred" },
-    // false 表示静音；attention.ts 的 soundVolume 在 input.sound === false 时返回 undefined
+    // false → soundVolume 返回 undefined，不播放；具名音效 when: always（失焦/聚焦都播）
     sound: sound === false ? false : { name: sound, when: "always" },
   })
 }
@@ -47,11 +47,11 @@ const tui: TuiPlugin = async (api) => {
   const questions = new Set<string>()
   const permissions = new Set<string>()
 
-  // question/permission 静音：只保留视觉通知，避免频繁触发时太吵
+  // question/permission 需要用户输入：视觉通知 + 对应语义音效
   api.event.on("question.asked", (event) => {
     if (questions.has(event.properties.id)) return
     questions.add(event.properties.id)
-    notify(api, event.properties.sessionID, "Question needs input", false)
+    notify(api, event.properties.sessionID, "Question needs input", "question")
   })
 
   api.event.on("question.replied", (event) => {
@@ -65,12 +65,28 @@ const tui: TuiPlugin = async (api) => {
   api.event.on("permission.asked", (event) => {
     if (permissions.has(event.properties.id)) return
     permissions.add(event.properties.id)
-    notify(api, event.properties.sessionID, "Permission needs input", false)
+    notify(api, event.properties.sessionID, "Permission needs input", "permission")
   })
 
   api.event.on("permission.replied", (event) => {
     permissions.delete(event.properties.requestID)
   })
+
+  // Native事件沿原名投递，与V1共享request去重和唯一notify，不在总线增加别名或第二音效路径。
+  api.event.on("question.v2.asked", (event) => {
+    if (questions.has(event.properties.id)) return
+    questions.add(event.properties.id)
+    notify(api, event.properties.sessionID, "Question needs input", "question")
+  })
+  for (const type of ["question.v2.replied", "question.v2.rejected"] as const) {
+    api.event.on(type, (event) => questions.delete(event.properties.requestID))
+  }
+  api.event.on("permission.v2.asked", (event) => {
+    if (permissions.has(event.properties.id)) return
+    permissions.add(event.properties.id)
+    notify(api, event.properties.sessionID, "Permission needs input", "permission")
+  })
+  api.event.on("permission.v2.replied", (event) => permissions.delete(event.properties.requestID))
 
   api.event.on("session.status", (event) => {
     const sessionID = event.properties.sessionID
