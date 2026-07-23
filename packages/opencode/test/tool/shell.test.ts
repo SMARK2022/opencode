@@ -1917,6 +1917,9 @@ describe("tool.shell abort", () => {
         expect(result.output).toContain(
           '<opencode_notice type="execution" source="shell" severity="info" reason="exit" exit_code="0"',
         )
+        // #536：exit notice 只进模型面板；空成功的用户面板是精确占位符且无 notice。
+        expect(result.metadata.output).toBe("(no output)")
+        expect(result.metadata.output).not.toContain("opencode_notice")
       }),
     ),
   )
@@ -1937,6 +1940,9 @@ describe("tool.shell abort", () => {
         expect(result.output).toContain(
           '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="42"',
         )
+        // #536：失败 notice 同样只进模型面板；用户面板不携带退出码散文。
+        expect(result.metadata.output).toBe("(no output)")
+        expect(result.metadata.output).not.toContain("opencode_notice")
       }),
     ),
   )
@@ -2444,6 +2450,11 @@ describe("tool.shell windows PS stderr and progress", () => {
             // [local-smark] 诊断提示应包含 block-buffering 说明
             expect(result.output).toContain("block-buffering")
             expect(result.output).toContain("--verbose")
+            // #536：timeout notice 与 block-buffering 诊断都只进模型面板；
+            // #536：空输出超时的用户面板是精确占位符，不含任何诊断散文。
+            expect(result.metadata.output).toBe("(no output)")
+            expect(result.metadata.output).not.toContain("opencode_notice")
+            expect(result.metadata.output).not.toContain("block-buffering")
           }),
         ),
       15_000,
