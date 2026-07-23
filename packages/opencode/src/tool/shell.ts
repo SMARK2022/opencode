@@ -522,7 +522,6 @@ export const ShellTool = Tool.define(
       let full = ""
       // #215：屏幕独立于原始环形缓冲和写盘，先渲染再交给 Tool.wrap 消毒。
       const display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
-      let displayed = false
       const list: Chunk[] = []
       let used = 0
       // total描述恢复路径中的完整原始归档，统计不能重新载入已淘汰的输出。
@@ -591,7 +590,6 @@ export const ShellTool = Tool.define(
           const onChunk = (chunk: string) => {
             if (!chunk) return Effect.void
             const visible = preview(display.push(chunk))
-            displayed = true
             const size = Buffer.byteLength(chunk, "utf-8")
             total.bytes += size
             for (const char of chunk) if (char === "\n") total.lines++
@@ -765,6 +763,9 @@ export const ShellTool = Tool.define(
       if (shellNotice) {
         output += "\n\n" + shellNotice
       }
+      // 用户面板只取最终终端画面，不能用模型notice或诊断回填空屏幕。
+      const displayText = display.value()
+      const userOutput = displayText.length > 0 ? preview(displayText) : "(no output)"
 
       // [local-smark] typecheck error flag：对已知验证命令（typecheck/tsc/test/lint），
       // 检测 error pattern 并设置 hasErrors flag，帮助模型识别验证失败。
@@ -782,8 +783,8 @@ export const ShellTool = Tool.define(
       return {
         title: input.command,
         metadata: {
-          // #215：清屏后的空字符串也是有效快照，仅无输出命令沿用原回退。
-          output: displayed ? preview(display.value()) : preview(output),
+          // #536：metadata.output 是用户面板唯一事实——终端屏幕或精确占位符，不携带模型侧 notice。
+          output: userOutput,
           exit: code,
           truncated: cut,
           // [local-smark] 规范化生效时记录 adaptation tag，便于数据库度量和后续诊断

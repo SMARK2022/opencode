@@ -3586,6 +3586,29 @@ unixNoLLMServer(
       expect(tool.state.output).toContain("err")
       expect(tool.state.metadata.output).toContain("out")
       expect(tool.state.metadata.output).toContain("err")
+      // #536：用户面板不携带模型侧 notice/诊断散文——两侧只共享真实命令字节。
+      expect(tool.state.metadata.output).not.toContain("opencode_notice")
+      yield* run.assertNotBusy(chat.id)
+    }),
+  { config: cfg },
+)
+
+// #536：空成功的用户面板是精确占位符——不是空串，也不携带任何 exit notice。
+unixNoLLMServer(
+  "shell empty success keeps user panel placeholder free of notices",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, run, chat } = yield* boot()
+      const result = yield* prompt.shell({
+        sessionID: chat.id,
+        agent: "build",
+        command: "true",
+      })
+
+      const tool = completedTool(result.parts)
+      if (!tool) return
+      expect(tool.state.metadata.output).toBe("(no output)")
+      expect(tool.state.metadata.output).not.toContain("opencode_notice")
       yield* run.assertNotBusy(chat.id)
     }),
   { config: cfg },
@@ -3928,6 +3951,9 @@ unixNoLLMServer(
           const tool = completedTool(exit.value.parts)
           if (tool) {
             expect(tool.state.output).toContain('reason="user_abort"')
+            // #536：取消路径的 notice 只进模型面板；用户面板保持 raw（空输出为精确占位）。
+            expect(tool.state.metadata.output).not.toContain("opencode_notice")
+            expect(tool.state.metadata.output).toBe("(no output)")
           }
         }
       }),

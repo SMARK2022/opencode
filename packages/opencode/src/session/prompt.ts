@@ -839,16 +839,21 @@ const layer = Layer.effect(
               // [local-smark] direct shell 终态 elapsed；cancel 可能已把 status 改为 error，
               // 但 time.start 被保留——只要 time 存在就回溯原始开始时间
               const shellElapsedMs = Date.now() - ("time" in part.state ? part.state.time.start : Date.now())
+              // #536：双面板分离——raw 是流式累计的原始输出，notice/诊断只进模型面板。
+              const raw = output
+              let modelOutput = raw
               if (aborted) {
                 // #282：prompt.shell 不经过 ShellTool 的收尾格式化；这里必须直接写入
                 // 同一种 notice，保证取消路径不会重新引入旧的 <metadata> 包裹。
-                output += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: shellElapsedMs })
+                modelOutput += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: shellElapsedMs })
               } else {
                 // [local-smark] direct shell 长成功：非 abort 且达到阈值时追加 completed Notice，
                 // 与 Bash 工具的 formatShellExecutionNotice 阈值/措辞保持一致
                 const notice = formatLongExecutionNotice("shell", shellElapsedMs)
-                if (notice) output += "\n\n" + notice
+                if (notice) modelOutput += "\n\n" + notice
               }
+              // #536：空输出的用户面板是精确占位符，不是空串也不是 notice 散文。
+              const userOutput = raw.length > 0 ? raw : "(no output)"
               const completed = Date.now()
               if (!msg.time.completed) {
                 msg.time.completed = completed
@@ -860,8 +865,9 @@ const layer = Layer.effect(
                   time: { ...part.state.time, end: completed },
                   input: part.state.input,
                   title: "",
-                  metadata: { output },
-                  output,
+                  // #536：metadata.output 只承载用户面板；模型 harness 文本在 state.output。
+                  metadata: { output: userOutput },
+                  output: modelOutput,
                 }
                 yield* sessions.updatePart(part)
               }
