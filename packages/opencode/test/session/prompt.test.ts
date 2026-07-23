@@ -3127,6 +3127,29 @@ unix(
       expect(tool.state.output).toContain("err")
       expect(tool.state.metadata.output).toContain("out")
       expect(tool.state.metadata.output).toContain("err")
+      // 有输出时用户面板仍是 raw 终端正文，不得混入 opencode_notice
+      expect(tool.state.metadata.output).not.toContain("opencode_notice")
+      yield* run.assertNotBusy(chat.id)
+    }),
+  { git: true, config: cfg },
+)
+
+unix(
+  "shell empty success keeps user panel placeholder without model harness",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, run, chat } = yield* boot()
+      // true 无 stdout/stderr，验证空用户面板必须是 (no output) 而不是空白
+      const result = yield* prompt.shell({
+        sessionID: chat.id,
+        agent: "build",
+        command: "true",
+      })
+
+      const tool = completedTool(result.parts)
+      if (!tool) return
+      expect(tool.state.metadata.output).toBe("(no output)")
+      expect(tool.state.metadata.output).not.toContain("opencode_notice")
       yield* run.assertNotBusy(chat.id)
     }),
   { git: true, config: cfg },
@@ -3470,6 +3493,9 @@ unix(
           const tool = completedTool(exit.value.parts)
           if (tool) {
             expect(tool.state.output).toContain('reason="user_abort"')
+            // 取消 notice 只进模型侧；用户面板不得回灌 harness
+            expect(tool.state.metadata.output).not.toContain("opencode_notice")
+            expect(tool.state.metadata.output).toBe("(no output)")
           }
         }
       }),

@@ -2015,6 +2015,9 @@ describe("tool.shell abort", () => {
         expect(result.output).toContain(
           '<opencode_notice type="execution" source="shell" severity="info" reason="exit" exit_code="0"',
         )
+        // 用户面板只展示终端占位，不得回灌模型 execution notice
+        expect(result.metadata.output).toBe("(no output)")
+        expect(result.metadata.output).not.toContain("opencode_notice")
       }),
     ),
   )
@@ -2034,6 +2037,9 @@ describe("tool.shell abort", () => {
         expect(result.output).toContain(
           '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="42"',
         )
+        // 空失败同样：exit notice 仅模型可见，用户侧仍是 (no output)
+        expect(result.metadata.output).toBe("(no output)")
+        expect(result.metadata.output).not.toContain("opencode_notice")
       }),
     ),
   )
@@ -2323,10 +2329,14 @@ describe("tool.shell truncation", () => {
             })
 
             expect(result.output).toContain("(no output)")
-            expect(result.output).toContain("reason=\"timeout\"")
+            expect(result.output).toContain('reason="timeout"')
             // [local-smark] 诊断提示应包含 block-buffering 说明
             expect(result.output).toContain("block-buffering")
             expect(result.output).toContain("--verbose")
+            // 用户面板保持空输出占位，不展示 timeout 诊断散文或 notice
+            expect(result.metadata.output).toBe("(no output)")
+            expect(result.metadata.output).not.toContain("opencode_notice")
+            expect(result.metadata.output).not.toContain("block-buffering")
           }),
         ),
       15_000,

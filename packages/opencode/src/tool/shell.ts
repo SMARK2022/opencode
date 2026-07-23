@@ -1106,7 +1106,6 @@ export const ShellTool = Tool.define(
 
       const decoder = createAutoTextDecoder({ encoding: input.encoding })
       const display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
-      let displayed = false
       let lastVisible = ""
 
       const code: number | null = yield* Effect.scoped(
@@ -1120,7 +1119,6 @@ export const ShellTool = Tool.define(
           const onChunk = (chunk: string) => {
             if (!chunk) return Effect.void
             const visible = preview(display.push(chunk))
-            displayed = true
             const size = Buffer.byteLength(chunk, "utf-8")
             list.push({ text: chunk, size })
             used += size
@@ -1319,7 +1317,9 @@ export const ShellTool = Tool.define(
         output += "\n\n" + shellNotice
       }
       const durationMs = Date.now() - started
-      const displayOutput = preview(display.value())
+      // 用户面板只反映终端画面；空画面固定 "(no output)"，不得回灌模型 harness（notice/诊断散文）。
+      const displayText = display.value()
+      const userOutput = displayText.length > 0 ? preview(displayText) : "(no output)"
 
       // [local-smark] typecheck error flag：对已知验证命令（typecheck/tsc/test/lint），
       // 检测 error pattern 并设置 hasErrors flag，帮助模型识别验证失败。
@@ -1337,7 +1337,7 @@ export const ShellTool = Tool.define(
       return {
         title: input.description,
         metadata: {
-          output: displayed ? displayOutput : preview(output),
+          output: userOutput,
           exit: code,
           description: input.description,
           truncated: cut,

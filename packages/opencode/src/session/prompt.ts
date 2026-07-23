@@ -1703,22 +1703,28 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               // 这里用 part.state.time.start 获取原始开始时间（status 可能已被 cancel 改为 error）
               const shellStart = "time" in part.state ? part.state.time.start : Date.now()
               const shellElapsedMs = Date.now() - shellStart
+              // 终态先保留 raw 再拼 notice；metadata.output 仅 raw/"(no output)"，model output 保留 harness。
+              const raw = output
+              let modelOutput = raw
               if (aborted) {
                 // prompt.shell 不经过 ShellTool 的收尾格式化；这里必须直接写入
                 // 同一种 notice，保证取消路径不会重新引入旧的 <metadata> 包裹。
-                output += "\n\n" + formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: shellElapsedMs })
+                modelOutput +=
+                  "\n\n" +
+                  formatExecutionNotice({ severity: "warning", reason: "user_abort", elapsed_ms: shellElapsedMs })
               } else {
                 // [local-smark] direct shell 长成功：非 abort 且达到阈值时追加 completed Notice
                 const notice = formatLongExecutionNotice("shell", shellElapsedMs)
-                if (notice) output += "\n\n" + notice
+                if (notice) modelOutput += "\n\n" + notice
               }
+              const userOutput = raw.length > 0 ? raw : "(no output)"
               const completed = Date.now()
               if (flags.experimentalEventSystem) {
                 yield* events.publish(SessionEvent.Shell.Ended, {
                   sessionID: input.sessionID,
                   timestamp: DateTime.makeUnsafe(completed),
                   callID: part.callID,
-                  output,
+                  output: modelOutput,
                 })
               }
               if (!msg.time.completed) {
@@ -1731,8 +1737,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   time: { ...part.state.time, end: completed },
                   input: part.state.input,
                   title: "",
-                  metadata: { output, description: "" },
-                  output,
+                  metadata: { output: userOutput, description: "" },
+                  output: modelOutput,
                 }
                 yield* sessions.updatePart(part)
               }
