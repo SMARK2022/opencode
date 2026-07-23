@@ -34,6 +34,8 @@ let activeMaintenance:
   | undefined
 let maintenanceRecoveryPromise: Promise<void> | undefined
 let maintenanceShutdownRequested = false
+// #535：pending 覆盖 accepted request 到 activeMaintenance 发布之间的 await 窗口；active 单独覆盖 runner 生命周期。
+let maintenanceTransitionPending = 0
 
 // control 错误映射只决定本机 HTTP status，不改写 task terminal 状态或吞掉 ColdStorage failure。
 // busy 与 lease-lost 分开反馈，CLI 可区分"已有任务"与"当前 owner 已失效"的恢复动作。
@@ -139,6 +141,15 @@ if (isDaemon) {
   // immediate read-only request 不创建 task；vacuum 虽 immediate write，仍使用同一 maintenance lease。
   // 新 task 在 lease owner 可见后写 queued record，消除 status 把启动中任务误判 interrupted 的窗口。
   async function startMaintenance(input: unknown) {
+    // #535：shutdown 后拒绝新维护——pending 在首个 await 前发布，与 conditional shutdown 形成互斥顺序。
+    if (shutdownInProgress) throw new ServerLock.MaintenanceBusyError("Daemon shutdown is in progress")
+    maintenanceTransitionPending++
+    // finally 绑定完整准备 promise，解析、冲突检查或 lease 失败都不能泄漏 pending 计数。
+    return startMaintenanceBody(input).finally(() => maintenanceTransitionPending--)
+  }
+
+  // body 只在 pending 已发布后运行，因此其首个 await 不会向 conditional shutdown 暴露假 idle 窗口。
+  async function startMaintenanceBody(input: unknown) {
     const request = ColdStorage.parseMaintenanceRequest(input)
     const prepared = ColdStorage.prepareMaintenance(request)
     if (prepared.type === "immediate") {
@@ -174,6 +185,15 @@ if (isDaemon) {
   // prepared 的随机新 task 仅验证 schema，实际 maintain 注入原 task，因此 cursor/计数/taskID 保持连续。
   // 返回 running 只表示 daemon 已登记 active；最终结果由持久 task record 查询，不阻塞 control request。
   async function resumeMaintenance(taskID: string) {
+    // #535：resume 有独立 reconcile/lease await，同样必须在整个过渡期阻止 maintenance-idle shutdown。
+    if (shutdownInProgress) throw new ServerLock.MaintenanceBusyError("Daemon shutdown is in progress")
+    maintenanceTransitionPending++
+    return resumeMaintenanceBody(taskID).finally(() => maintenanceTransitionPending--)
+  }
+
+  // resume body 与 start 分开恢复原 task identity，但二者共享同一个过渡期计数所有者。
+  async function resumeMaintenanceBody(taskID: string) {
+    // reconcile 结果先决定恢复资格，再创建 lease；未知 task 不能通过 resume 进入维护状态。
     const task = await ServerLock.reconcileMaintenanceTask(taskID)
     if (!task) return { status: 404 as const, body: { error: `Maintenance task not found: ${taskID}` } }
     if (task.status !== "interrupted") {
@@ -510,7 +530,20 @@ if (isDaemon) {
         const taskID = url.searchParams.get("task")
         if (!taskID) return Response.json({ error: "task query is required" }, { status: 400 })
         return ServerLock.reconcileMaintenanceTask(taskID)
-          .then((task) => (task ? Response.json(task) : Response.json({ error: "task not found" }, { status: 404 })))
+          .then(async (task) => {
+            if (!task) return Response.json({ error: "task not found" }, { status: 404 })
+            const terminal = task.status === "completed" || task.status === "failed" || task.status === "interrupted"
+            // capture exact promise 后再 await，后续 activeMaintenance 清空不会让本请求错等另一个任务。
+            const active = activeMaintenance?.taskID === taskID ? activeMaintenance.promise : undefined
+            // #535：terminal checkpoint 早于 lease release；只有等待同一 promise 后返回，CLI 才能安全衔接 vacuum。
+            if (terminal && active) {
+              await active
+              const settled = await ServerLock.reconcileMaintenanceTask(taskID)
+              if (!settled) return Response.json({ error: "task not found" }, { status: 404 })
+              return Response.json(settled)
+            }
+            return Response.json(task)
+          })
           .catch((error) => {
             const mapped = maintenanceError(error)
             return Response.json({ error: mapped.message }, { status: mapped.status })
@@ -540,20 +573,27 @@ if (isDaemon) {
           return Response.json({ tuiClients: sseClients, sessionActivity: SessionActivity.count(), stopping: shutdownInProgress })
         if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
           return new Response("not found", { status: 404 })
-        // 先返回停止响应，再进入既有关闭闭包，避免在 handler 内中断响应。
-        setTimeout(() => void gracefulShutdown(0, DisposedReason.DaemonStop), 0).unref?.()
+        // DB preflight没有中断其他维护的授权；普通stop保留既有abort与退出责任。
+        if (
+          url.searchParams.get("maintenance-idle") === "1" &&
+          (maintenanceTransitionPending > 0 || activeMaintenance !== undefined)
+        ) {
+          return Response.json({ error: "database maintenance is active" }, { status: 409 })
+        }
+        // conditional通过后立即进入同一闭包置位shutdownInProgress，不能暴露接收新维护的窗口。
+        if (url.searchParams.get("maintenance-idle") === "1") void gracefulShutdown(0, DisposedReason.DaemonStop)
+        else setTimeout(() => void gracefulShutdown(0, DisposedReason.DaemonStop), 0).unref?.()
         return Response.json({ ok: true })
       },
     })
     // 内部认证监听就绪后才发布发现锁，外部 URL 不代替内部健康通道。
+    // recovery先于owner发布；失败交给既有启动清理，不把未知恢复状态当成idle。
+    await AppRuntime.runPromise(Database.Service)
+    maintenanceRecoveryPromise = recoverInterruptedMaintenance()
+    await maintenanceRecoveryPromise
     lockToken = await ServerLock.write(internalServer.port, externalUrl, network, controlServer.port)
     log.info("daemon lock written", { pid: process.pid, port: internalServer.port, controlPort: controlServer.port, externalUrl, launcherPID: LAUNCHER_PID })
     // 锁发布后才启用启动期保护，首个订阅到达后转由运行期空闲路径负责。
-    // 先恢复持久任务并登记 activeMaintenance，再让既有 idle/launcher 判定观察它。
-    maintenanceRecoveryPromise = recoverInterruptedMaintenance().catch((error) => {
-      log.error("maintenance recovery failed", { error: String(error) })
-    })
-    await maintenanceRecoveryPromise
     maybeScheduleStartupIdleShutdown()
     startLauncherWatcher()
     // #71：锁可见后再做 best-effort 外部插件预热，避免 npm/代理阻塞 TUI 健康等待。

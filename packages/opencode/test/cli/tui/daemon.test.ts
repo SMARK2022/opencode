@@ -22,6 +22,10 @@ import { ServerLock } from "../../../src/cli/tui/server-lock"
 // #493：maintenance task record 类型来自 core ColdStorage——三用例覆盖 lease 抢占/reclaim、control 协议与 startup recovery。
 import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
 import { win32DetachConsole } from "@opencode-ai/tui/terminal-win32"
+// #535：Bun 宿主复用 Core 的实际 PTY 后端；control 断言用同 token 的公开 endpoint。
+import stripAnsi from "strip-ansi"
+import { spawn } from "@opencode-ai/core/pty/pty.bun"
+import { Flock } from "@opencode-ai/core/util/flock"
 
 const WORKER_TS = fileURLToPath(new URL("../../../src/cli/tui/worker.ts", import.meta.url))
 
@@ -77,6 +81,24 @@ async function prepareCliData(lockPath: string) {
   await Bun.write(path.join(dataDir, "opencode.db"), "")
 }
 
+// #535：POST body 与 token 在同一个 request envelope 中，测试不会绕过 daemon control 的鉴权边界。
+function controlRequest(
+  lock: ServerLock.ServerLock,
+  pathname: string,
+  method: "GET" | "POST" = "GET",
+  body?: unknown,
+) {
+  // control helper 始终绑定受测 owner token；fixture 不能绕过生产鉴权直接调用 worker 内部函数。
+  return fetch(`http://127.0.0.1:${lock.controlPort}${pathname}`, {
+    method,
+    headers: {
+      [ServerLock.CONTROL_TOKEN_HEADER]: lock.token,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  })
+}
+
 async function runDaemonStop(lockPath: string, env: Record<string, string> = {}) {
   await prepareCliData(lockPath)
   // 用 argv 数组保留路径和密码中的空格，并从真实入口验证命令注册。
@@ -88,6 +110,52 @@ async function runDaemonStop(lockPath: string, env: Record<string, string> = {})
   })
   const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
   return { exitCode, stderr }
+}
+
+// #535：PTY 驱动真实 db 命令——prompt 应答、owner replacement hook 和 terminal 观察都在同一进程 seam。
+async function runInteractiveDb(
+  lockPath: string,
+  args: readonly string[],
+  answer: "y" | "n",
+  beforeAnswer: () => Promise<unknown> = async () => {},
+  observe: (chunk: string) => void = () => {},
+) {
+  const proc = spawn(process.execPath, [INDEX_TS, "db", ...args], {
+    name: "xterm-256color",
+    cols: 100,
+    rows: 30,
+    cwd: path.dirname(INDEX_TS),
+    env: isolatedDaemonEnv(lockPath),
+  })
+  // 累积完整 PTY scrollback 后再去 ANSI，断言不依赖单个 onData chunk 的切分。
+  let output = ""
+  let answered = false
+  let reclaimAnswered = false
+  proc.onData((data) => {
+    output += data
+    const text = stripAnsi(output)
+    observe(stripAnsi(data))
+    if (!answered && text.includes("Stop daemon and continue?")) {
+      answered = true
+      // hook 在 prompt 已可见而答案尚未提交时运行，覆盖用户思考期间的 owner replacement。
+      void beforeAnswer().then(() => proc.write(`${answer}\r`))
+    }
+    if (answered && !reclaimAnswered && text.includes("? Reclaim")) {
+      reclaimAnswered = true
+      // 后续 reclaim prompt 一律自动拒绝；用例焦点是首次停机决策，不让第二层授权模糊断言。
+      proc.write("n\r")
+    }
+  })
+  const exited = new Promise<number>((resolve) => proc.onExit((event) => resolve(event.exitCode)))
+  // prompt 和 task terminal 都来自真实进程；期限只保护测试，不替代产品 status readiness。
+  const result = await Promise.race([exited, Bun.sleep(30_000).then(() => "timeout" as const)])
+  if (result === "timeout") {
+    proc.kill()
+    // 超时错误携带完整 scrollback，失败现场可直接从测试输出定位到具体 prompt 阶段。
+    throw new Error(`interactive database command exceeded 30 seconds:\n${stripAnsi(output)}`)
+  }
+  // CRLF 归一化交给调用方断言；这里只保证 answered 反映首次 prompt 是否真的出现过。
+  return { exitCode: result, output: stripAnsi(output).replaceAll("\r", ""), answered }
 }
 
 // #532：机器接口从真实 argv 入口执行，确保 yargs 参数、stdout 协议和 daemon owner 语义一起受测。
@@ -288,6 +356,8 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
 }
 
 describe("daemon lifecycle", () => {
+  // #535：ConPTY 下 Bun 子进程 stdin 不可回写（平台缺陷，探针见 record），runInteractiveDb 用例仅 POSIX 执行。
+  const ptyInteractive = process.platform === "win32" ? test.skip : test
   test("observes injected connection owners without process or network access", async () => {
     const forbidden = () => { throw new Error("observation must not start, elect, clear, or wait") }
     const lock: ServerLock.ServerLock = { pid: 71, port: 3101, token: "private-token", dbPath: path.resolve("observer-only.db"), channel: "test", startedAt: "2026-10-28" }
@@ -1589,6 +1659,168 @@ test(
 
 
 
+  // #535：N 的权威含义覆盖普通与 --vacuum 变体；Y 验证 election 覆盖完整 offline sequence，replacement owner 必须被拒绝。
+  ptyInteractive(
+    "db compress variants keep the daemon and skip reclaim after the user declines shutdown",
+    async () => {
+      const variants = [[], ["--vacuum"]]
+      for (const flags of variants) {
+        await using tmp = await tmpdir()
+        const lockPath = path.join(tmp.path, "tui-server.json")
+        const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
+        // 每个 variant 使用独立 owner，避免前一次 task/lock 状态掩盖第二次 N 行为。
+        // flags 只改变用户可见的 vacuum 选择，daemon owner 和 compression route 必须保持一致。
+        try {
+          const result = await runInteractiveDb(
+            lockPath,
+            ["compress", ...flags, "--older-than", "0ms", "--batch-size", "1"],
+            "n",
+          )
+          expect(result.exitCode, result.output).toBe(0)
+          // answered=true 证明 N 是对真实停机 prompt 的应答，不是超时或解析缺失的假成功。
+          expect(result.answered).toBe(true)
+          // N 的语义覆盖普通与 --vacuum：保留 daemon 完成 compression，且不再取得 vacuum 授权。
+          expect(result.output).toMatch(new RegExp(`OpenCode daemon is running \\(pid ${lock.pid}\\)[\\s\\S]*Continuing through the running daemon[\\s\\S]*Compression completed`))
+          // N 之后不能再出现 reclaim 文案；首次拒绝已耗尽本命令的全部停机授权。
+          expect(result.output).not.toContain("Reclaim")
+          // 同一 PID 存活证明 CLI 没有先停 daemon 再偷偷转向 offline writer。
+          expect(ServerLock.alive(proc.pid)).toBe(true)
+        } finally {
+          if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
+          await proc.exited.catch(() => undefined)
+        }
+      }
+      // Y 场景使用新 owner 与数据库，确保前两个 N variant 的 task/lease 不会提供偶然成功条件。
+      await using yesTmp = await tmpdir()
+      const yesLockPath = path.join(yesTmp.path, "tui-server.json")
+      const yesDaemon = await spawnDaemon(yesLockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
+      try {
+        // 未替换 owner 的 Y 必须安全停掉同一 PID，再由当前 CLI 完成 offline compression。
+        let acquired = false
+        let acquiredAtTerminal = false
+        let contender = Promise.resolve()
+        // reconnect 竞争者在旧 PID 退出后争用同一 election lock；terminal renderer 执行时它仍不得进入。
+        const result = await runInteractiveDb(
+          yesLockPath,
+          ["compress", "--older-than", "0ms", "--batch-size", "1"],
+          "y",
+          async () => {
+            const db = new Database(yesDaemon.lock.dbPath)
+            db.exec("PRAGMA foreign_keys = OFF")
+            const insert = db.prepare(
+              `INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, 'msg_election', 'ses_election', 1, 1, ?)`,
+            )
+            const data = JSON.stringify({ type: "reasoning", text: "election-".repeat(1_024), time: { start: 1 } })
+            // 大 payload 让 Y 的 offline sequence 足够长，contender 的成功时机只能由 election release 决定。
+            db.transaction(() => {
+              for (let index = 0; index < 100; index++) {
+                insert.run(`prt_election_${index}`, data)
+              }
+            })()
+            db.close()
+            // contender 与旧 daemon 退出绑定：停机完成即开始争锁，成功时序揭示 release 位置。
+            contender = yesDaemon.proc.exited.then(async () => {
+              await using _ = await Flock.acquire(`opencode.server:${yesLockPath}`, {
+                dir: path.join(yesTmp.path, "state", "opencode", "locks"),
+                timeoutMs: 30_000,
+              })
+              acquired = true
+            })
+          },
+          (chunk) => {
+            if (chunk.includes("Compression completed")) {
+              acquiredAtTerminal = acquired
+            }
+          },
+        )
+        expect(result.exitCode, result.output).toBe(0)
+        // 组合顺序断言要求 stop、活动行换行和 terminal 依次出现，不能由三个独立子串偶然满足。
+        expect(result.output).toMatch(/Daemon stopped[\s\S]*elapsed \d+\.\ds[^\n]*\n✓ Compression completed/)
+        // terminal 渲染时 contender 仍未拿到锁：election 覆盖到输出层而不是在 checkpoint 后提前释放。
+        expect(acquiredAtTerminal).toBe(false)
+        await contender
+        expect(acquired).toBe(true)
+        // Y 路径的旧 daemon 必须遇出：offline handoff 的前提是唯一 writer。
+        expect(ServerLock.alive(yesDaemon.proc.pid)).toBe(false)
+      } finally {
+        if (ServerLock.alive(yesDaemon.proc.pid)) yesDaemon.proc.kill("SIGTERM")
+        await yesDaemon.proc.exited.catch(() => undefined)
+      }
+      // replacement 场景独立启动 control server，任何 prompt 后请求都会改变公开错误并使测试失败。
+      await using replacementTmp = await tmpdir()
+      const replacementLockPath = path.join(replacementTmp.path, "tui-server.json")
+      const { proc, lock } = await spawnDaemon(replacementLockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
+      // 独立 control server 作为哨兵：CLI 若误连 replacement 端口会得到 500 而非预期响应。
+      const replacementControl = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch: () => new Response("unexpected control request", { status: 500 }),
+      })
+      try {
+        // replacement server 只作为意外 control request 的失败信号，不承担维护或成功响应。
+        // prompt 显示后替换完整 identity；Y 必须在首次 control request 前拒绝该 replacement。
+        const replacement = { ...lock }
+        // token 换成哨兵端口对应的假 owner：sameOwner 四重比较任一失配都必须拒绝。
+        replacement.token = "replacement-owner"
+        replacement.controlPort = replacementControl.port
+        const result = await runInteractiveDb(replacementLockPath, ["compress", "--older-than", "0ms"], "y", () =>
+          Bun.write(replacementLockPath, JSON.stringify(replacement)),
+        )
+        // replacement 后的 Y 必须以非零退出失败；expected-owner 校验先于任何 control 请求。
+        expect(result.exitCode).not.toBe(0)
+        expect(result.output).toContain("owner changed")
+        // 原 daemon 不受影响：拒绝路径不能附带停机或锁清理副作用。
+        expect(ServerLock.alive(proc.pid)).toBe(true)
+      } finally {
+        replacementControl.stop(true)
+        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS * 2 + 60_000,
+  )
+
+  // #535：此切片同时验证 query-selected shutdown 与普通 stop，防止 DB preflight 改写共享 endpoint 默认语义。
+  test(
+    "maintenance-idle shutdown refuses active work without changing daemon stop",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
+      // 普通 stop 与 maintenance-idle 共用 endpoint，但只有后者在 active work 时返回 busy。
+      try {
+        if (!lock.controlPort) throw new Error("missing control port")
+        // 先用公开 status 请求完成数据库初始化，后续插入的行才能进入真实 eligibility 扫描。
+        const initialized = await controlRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, "POST", { operation: "status" })
+        expect(initialized.status).toBe(200)
+        const db = new Database(lock.dbPath)
+        db.exec("PRAGMA foreign_keys = OFF")
+        // 500 行 batchSize 1 的任务足够长：409 请求落在任务 still running 的窗口内。
+        db.exec(`WITH RECURSIVE rows(index_value) AS (SELECT 0 UNION ALL SELECT index_value + 1 FROM rows WHERE index_value < 499) INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) SELECT 'prt_gate_' || index_value, 'msg_gate', 'ses_gate', 1, 1, '{"type":"reasoning","text":"x"}' FROM rows`)
+        db.close()
+        // 202 证明 worker 已接受真实 task；后续 409 不能由测试伪造的内存 flag 提供。
+        const start = await controlRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, "POST", { operation: "compress", olderThanMs: 0, batchSize: 1 })
+        expect(start.status).toBe(202)
+        // 只有公开 202 之后发出的 conditional request 才能证明 gate 覆盖已接受任务，而非预请求占位。
+        // query mode 的授权只属于 DB preflight；它不能继承显式 daemon stop 的“中断后关闭”语义。
+        const conditional = await controlRequest(lock, `${ServerLock.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
+        expect(conditional.status).toBe(409)
+        // 409 是业务拒绝：daemon 必须继续存活，不得把 busy 错误升级成进程退出。
+        expect(ServerLock.alive(proc.pid)).toBe(true)
+        // 不带 query 的公开 stop 仍须成功，防止 DB preflight 收紧既有用户控制面。
+        const stopped = await runDaemonStop(lockPath)
+        expect(stopped.exitCode, stopped.stderr).toBe(0)
+        // 普通 stop 文案保持 #259 契约；maintenance-idle 不得改写共享 endpoint 的默认语义。
+        expect(stopped.stderr).toContain("Stopped opencode daemon.")
+        expect(ServerLock.alive(proc.pid)).toBe(false)
+      } finally {
+        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS,
+  )
+
   // status 报告没有可轮询 task，真实 CLI 必须等到同一请求的完整结果。
   test(
     "db status waits for the daemon's complete report beyond the control acknowledgement deadline",
@@ -1622,6 +1854,8 @@ test(
           for (let i = 0; i < 400_000; i++)
             insert.run(`prt_status_${i}`, "msg_status", "ses_status", '{"type":"reasoning","text":"x"}')
         })()
+        // #535：machine JSON 已与提示共用 stderr；truncate WAL 避免 CLI 打开库时的恢复日志把首个 "{" 前移进夹具文本。
+        db.exec("PRAGMA wal_checkpoint(TRUNCATE)")
         db.close()
 
         // #524：真实 CLI 读取同一 lock/token；旧两秒 deadline 会在 daemon 完成精确报告前退出。
@@ -1661,7 +1895,6 @@ test(
     "daemon startup resumes an interrupted maintenance task from its persisted record",
     async () => {
       // interrupted record 在 worker 启动前落盘，覆盖 startup timer 尚未登记 activeMaintenance 的竞争窗口。
-      // startup idle 小于常规任务窗口，completed 断言证明 recovery 阻止 daemon 提前退出。
       // operation/args/cursor 全部来自 record，测试不通过 control resume 人工触发恢复。
       // 独立 dbPath/lock/XDG 目录保证不会读取开发者实际 daemon 或 maintenance tasks。
       await using tmp = await tmpdir()
@@ -1684,26 +1917,157 @@ test(
         updatedAt: Date.now(),
       }
       await ServerLock.writeMaintenanceTask(task)
-      const { proc } = await spawnDaemon(lockPath, {
-        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
-        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
-      })
-
-      try {
-        const deadline = Date.now() + 10_000
-        let recovered: MaintenanceTask | undefined
-        while (Date.now() < deadline) {
-          recovered = await ServerLock.readMaintenanceTask(task.taskID, dbPath)
-          if (recovered?.status === "completed" || recovered?.status === "failed") break
-          await Bun.sleep(50)
+      // #535：dead owner 强制 recovery 经过真实 stale-rename 边界，而不是直接调用 worker 私有状态。
+      const leaseDir = path.join(`${dbPath}.maintenance`, "lock")
+      const staleLease = async (taskID: string) => {
+        // pid 取 int32 上限：必然不存在于任何活进程表，reconcile 必走 dead-owner 分支。
+        await mkdir(leaseDir, { recursive: true })
+        await Bun.write(
+          path.join(leaseDir, "owner.json"),
+          JSON.stringify({ pid: 2_147_483_647, token: `dead-${taskID}`, taskID, dbPath, startedAt: 1 }),
+        )
+      }
+      await staleLease(task.taskID)
+      // #535：marker-gated wrapper 分阶段阻塞 rename/rm，完全避免依赖调度速度的等待断言。
+      const wrapper = `
+        import { mock } from "bun:test"
+        import * as fs from "node:fs/promises"
+        // 先绑定原生函数再安装 mock，避免 mock namespace 的 live binding 递归调用自身。
+        const input = Bun.stdin.stream().getReader()
+        const realRename = fs.rename.bind(fs)
+        const realRm = fs.rm.bind(fs)
+        let buffered = ""
+        let renameIndex = 0
+        let release = true
+        const gate = async (name) => {
+          console.log(name)
+          // gate token 从 stdin 逐行消费；每行只放行一个阻塞点，顺序完全由测试驱动。
+          while (!buffered.includes("\\n")) {
+            const next = await input.read()
+            if (next.done) return
+            buffered += new TextDecoder().decode(next.value)
+          }
+          buffered = buffered.slice(buffered.indexOf("\\n") + 1)
         }
-        if (recovered?.status === "failed") throw new Error(`startup recovery failed: ${recovered.error ?? "unknown"}`)
-        expect(recovered?.status).toBe("completed")
+        mock.module("fs/promises", () => ({
+          ...fs,
+          rename: async (from, to) => {
+            // 只阻塞 lease 目录本身的 rename；task checkpoint 的原子写不受影响。
+            if (String(from) === ${JSON.stringify(leaseDir)}) {
+              await gate("rename-blocked-" + (++renameIndex))
+            }
+            return realRename(from, to)
+          },
+          rm: async (target, options) => {
+            // release 标志保证只有首次 lease 释放被阻塞；后续清理走原生路径。
+            if (
+              release &&
+              options?.recursive &&
+              String(target).includes(".maintenance") &&
+              String(target).endsWith("lock")
+            ) {
+              release = false
+              await gate("lease-release-blocked")
+            }
+            return realRm(target, options)
+          },
+        }))
+        await import(${JSON.stringify(pathToFileURL(WORKER_TS).href)})
+      `
+      const proc = Bun.spawn([process.execPath, "-e", wrapper], {
+        env: {
+          ...isolatedDaemonEnv(lockPath),
+          OPENCODE_PROCESS_ROLE: "worker",
+          // 启动期 idle 拉长到 180s：断言不依赖空闲退出窗口，生命周期完全由 marker 驱动。
+          OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "180000",
+        },
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const reader = proc.stdout.pipeThrough(new TextDecoderStream()).getReader()
+      // 两个 marker 分别控制“注册前”和“terminal 后释放前”，完全避免依赖调度速度。
+      try {
+        expect(await readUntil(reader, "rename-blocked-1")).toContain("rename-blocked-1")
+        // recovery 尚未取得 lease 时不得先发布可接受 shutdown/start 的 daemon owner。
+        expect(await Bun.file(lockPath).exists()).toBe(false)
+        // 第一个 gate 放行后 recovery 才能拿 lease；终态 checkpoint 先于 lease release 到达。
+        await proc.stdin.write("continue\n")
+        expect(await readUntil(reader, "lease-release-blocked")).toContain("lease-release-blocked")
+        // lock 只在 recovery 已取得 lease 并登记 activeMaintenance 后才允许对外发布。
+        let lock: ServerLock.ServerLock | undefined
+        const lockDeadline = Date.now() + DAEMON_START_TIMEOUT_MS
+        while (!lock && Date.now() < lockDeadline) {
+          lock = await Bun.file(lockPath).json().catch(() => undefined)
+          if (!lock) await Bun.sleep(POLL_INTERVAL_MS)
+        }
+        if (!lock?.controlPort) throw new Error("recovered daemon did not publish its control lock")
+        // token 来自 recovery 完成注册后发布的真实 daemon lock，后续请求都验证同一 owner。
+        let settled = false
+        const terminal = controlRequest(lock, `${ServerLock.CONTROL_MAINTENANCE_STATUS_PATH}?task=${task.taskID}`)
+          .then(async (response) => ({ status: response.status, body: await response.json() }))
+        void terminal.then(() => (settled = true))
+        await Bun.sleep(100)
+        // 固定等待只观察 marker 已建立的 pending 状态，不用于猜测 worker 是否进入该状态。
+        expect(settled).toBe(false)
+        // lease cleanup 被 marker 挡住时，其他 control 请求仍可响应，证明不是整个 server 被阻塞。
+        const statusReport = await controlRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, "POST", { operation: "status" })
+        expect(statusReport.status).toBe(200)
+        // terminal-but-active 窗口内 conditional shutdown 必须拒绝；lease release 尚未完成。
+        const busy = await controlRequest(lock, `${ServerLock.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
+        expect(busy.status).toBe(409)
+        // 释放 lease 后 terminal 与 conditional shutdown 才能依次成功，禁止 CLI retry workaround。
+        await proc.stdin.write("release\n")
+        expect(await terminal).toMatchObject({ status: 200, body: { status: "completed" } })
+        const conditional = () => controlRequest(lock, `${ServerLock.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
+        const waitIdle = async (taskID: string) => {
+          const deadline = Date.now() + 10_000
+          while (Date.now() < deadline) {
+            const response = await controlRequest(lock, `${ServerLock.CONTROL_MAINTENANCE_STATUS_PATH}?task=${taskID}`)
+            const body = (await response.json()) as { status?: string }
+            if (response.ok && ["completed", "failed", "interrupted"].includes(body.status ?? "")) {
+              return
+            }
+            await Bun.sleep(25)
+          }
+          throw new Error("maintenance transition did not settle")
+        }
+        // start gate 使用独立 stale lease marker，不能借 recovery 已登记的 active promise 获得假阳性。
+        // start 在 stale-lease rename await 中尚未发布 active；pending gate 必须独立返回 busy。
+        await staleLease("dbm_start_gate")
+        const starting = controlRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, "POST", { operation: "compress", olderThanMs: 0, batchSize: 1 })
+        // rename-blocked-2 证明 start 已进入 lease 等待；此后的 409 来自 pending 计数而非 active。
+        expect(await readUntil(reader, "rename-blocked-2")).toContain("rename-blocked-2")
+        expect((await conditional()).status).toBe(409)
+        // 同一 chunk 预置 start/resume 两个 gate token，避免 Windows pipe 的第三次小写入延迟。
+        await proc.stdin.write("continue\ncontinue\n")
+        const startResponse = await starting
+        // pending 期拒绝不消耗 start 请求；放行后同一请求仍须返回 202。
+        expect(startResponse.status).toBe(202)
+        await waitIdle(((await startResponse.json()) as { taskID: string }).taskID)
+        // resume gate 重新写 interrupted record，验证另一 producer 也在首个 await 前发布 pending。
+        // resume 经过独立 reconcile/lease producer；它不能只依赖 start 路径偶然设置的 active 状态。
+        const resumeTask = { ...task, taskID: "dbm_resume_gate", status: "interrupted" as const, updatedAt: Date.now() }
+        await ServerLock.writeMaintenanceTask(resumeTask)
+        await staleLease(resumeTask.taskID)
+        const resuming = controlRequest(lock, ServerLock.CONTROL_MAINTENANCE_RESUME_PATH, "POST", { taskID: resumeTask.taskID })
+        // rename-blocked-3 锁定 resume 也在 lease await 阶段；409 覆盖它的过渡期。
+        expect(await readUntil(reader, "rename-blocked-3")).toContain("rename-blocked-3")
+        expect((await conditional()).status).toBe(409)
+        const resumeResponse = await resuming
+        expect(resumeResponse.status).toBe(202)
+        await waitIdle(((await resumeResponse.json()) as { taskID: string }).taskID)
+        // 两个过渡期都 terminal 后才允许 conditional stop，证明 pending 与 active 没有残留计数。
+        const stopped = await controlRequest(lock, `${ServerLock.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
+        expect(stopped.status).toBe(200)
+        // conditional 200 后 daemon 必须真实退出；否则门控只是返回值而不是生命周期语义。
+        expect(await Promise.race([proc.exited, Bun.sleep(10_000).then(() => "timeout")])).not.toBe("timeout")
       } finally {
+        reader.releaseLock()
         if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
         await proc.exited.catch(() => undefined)
       }
     },
-    DAEMON_START_TIMEOUT_MS + 20_000,
+    DAEMON_START_TIMEOUT_MS + 90_000,
   )
 })
