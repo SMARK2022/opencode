@@ -81,80 +81,94 @@ const DaemonStopCommand = cmd({
   command: "stop",
   describe: "stop the shared opencode daemon",
   async handler() {
-    await stopDaemon()
+    try {
+      const result = await stopDaemon({ progress: (message) => UI.println(message) })
+      if (result.type === "absent") UI.println("No opencode daemon is running.")
+      if (result.type === "stale") UI.println("Removed stale opencode daemon lock.")
+      if (result.type === "stopped") UI.println(result.forced ? "Force-stopped opencode daemon." : "Stopped opencode daemon.")
+    } catch (error) {
+      UI.error(errorMessage(error))
+      process.exitCode = 1
+    }
   },
 })
 
-async function stopDaemon() {
+export async function stopDaemon(input: { expected?: ServerLockInfo; maintenanceIdle?: boolean; progress?: (message: string) => void } = {}) {
   // stop 的第一阶段仍然只发送现有 authenticated shutdown 请求。
   // 只有该请求成功且 owner 在窗口内没有退出，才允许进入第二阶段。
-  const lock = await ServerLock.read()
+  // expected 来自用户看到的 prompt；首次 control request 前就必须校验，不能只保护超时后的 force 阶段。
+  const observed = await ServerLock.read()
+  if (input.expected && observed && !sameOwner(input.expected, observed)) {
+    throw new Error(`Refused to stop opencode daemon pid=${input.expected.pid}: daemon owner changed.`)
+  }
+  // expected 将用户看到的 PID/token 绑定到首次 shutdown；无新 owner 时旧进程自然退出可视为已停止。
+  if (input.expected && !observed) {
+    if (!ServerLock.alive(input.expected.pid)) return finishStop(input.expected, false)
+    throw new Error(`Refused to stop opencode daemon pid=${input.expected.pid}: daemon lock disappeared.`)
+  }
+  const lock = input.expected ?? observed
 
   if (!lock) {
     // 没有 lock 表示当前 CLI 管辖范围内没有 TUI daemon；保持 0 退出码，便于脚本重复调用。
-    UI.println("No opencode daemon is running.")
-    return
+    return { type: "absent" as const }
   }
 
   if (!ServerLock.alive(lock.pid)) {
     // pid 已不存在时只清理同 token lock；这样不会误删刚重启 daemon 写入的新 lock。
+    if (input.expected) return finishStop(lock, false)
     await ServerLock.clearIfOwner(lock.token)
-    UI.println("Removed stale opencode daemon lock.")
-    return
+    return { type: "stale" as const }
   }
 
   const controlPort = lock.controlPort
   if (!controlPort) {
     // 旧 lock 没有私有 control port 时无法证明 pid 与 HTTP daemon 的所有权关系；
     // 为了避免退化成误杀风险，这里拒绝 fallback 到 process.kill。
-    UI.error(`opencode daemon pid=${lock.pid} does not support safe stop; restart the TUI or wait for idle shutdown.`)
-    process.exitCode = 1
-    return
+    throw new Error(`opencode daemon pid=${lock.pid} does not support safe stop; restart the TUI or wait for idle shutdown.`)
   }
 
-  const requestError = await requestStop(lock, controlPort)
+  // maintenance-idle 的 409 是业务拒绝，不得降级成普通 shutdown 或 process.kill。
+  const requestError = await requestStop(lock, controlPort, input.maintenanceIdle === true)
   if (requestError) {
-    UI.error(`Failed to request opencode daemon shutdown pid=${lock.pid}: ${requestError}`)
-    process.exitCode = 1
-    return
+    throw new Error(`Failed to request opencode daemon shutdown pid=${lock.pid}: ${requestError}`)
   }
 
-  UI.println(`Stopping opencode daemon pid=${lock.pid}...`)
+  input.progress?.(`Stopping opencode daemon pid=${lock.pid}...`)
 
   if (await waitForStop(lock)) {
-    await ServerLock.clearIfOwner(lock.token)
-    UI.println("Stopped opencode daemon.")
-    return
+    return finishStop(lock, false)
   }
 
   const current = await ServerLock.read()
   if (!current || !sameOwner(lock, current)) {
     // lock 改变意味着当前命令的观察结果已经过期，宁可失败也不误杀新 owner。
-    UI.error(`Refused to force-stop opencode daemon pid=${lock.pid}: daemon owner changed.`)
-    process.exitCode = 1
-    return
+    throw new Error(`Refused to force-stop opencode daemon pid=${lock.pid}: daemon owner changed.`)
   }
   if (!ServerLock.alive(current.pid)) {
-    await ServerLock.clearIfOwner(current.token)
-    UI.println("Stopped opencode daemon.")
-    return
+    return finishStop(current, false)
   }
 
-  UI.println(`Graceful stop timed out; force-stopping opencode daemon pid=${current.pid}...`)
+  input.progress?.(`Graceful stop timed out; force-stopping opencode daemon pid=${current.pid}...`)
   const forceError = await forceStop(current)
   if (forceError) {
-    UI.error(`Failed to force-stop opencode daemon pid=${current.pid}: ${forceError}`)
-    process.exitCode = 1
-    return
+    throw new Error(`Failed to force-stop opencode daemon pid=${current.pid}: ${forceError}`)
   }
-  await ServerLock.clearIfOwner(current.token)
-  // 只有确认 PID 已经消失后才清理同 token lock，保留其他 owner 的现场。
-  UI.println("Force-stopped opencode daemon.")
+  return finishStop(current, true)
+}
+// 所有成功 stop 都在这里完成最后一次 owner 校验，调用方拿到 stopped 时才真正获得 offline handoff。
+async function finishStop(lock: ServerLockInfo, forced: boolean) {
+  // PID 退出到 offline 授权之间再次读取 lock；replacement 出现时 token-safe clear 本身不足以证明数据库无人持有。
+  const replacement = await ServerLock.read()
+  if (replacement && !sameOwner(lock, replacement)) throw new Error(`Refused offline handoff: daemon owner changed.`)
+  await ServerLock.clearIfOwner(lock.token)
+  return { type: "stopped" as const, forced }
 }
 
-async function requestStop(lock: ServerLockInfo, controlPort: number) {
+async function requestStop(lock: ServerLockInfo, controlPort: number, maintenanceIdle: boolean) {
   try {
-    const response = await fetch(`http://127.0.0.1:${controlPort}${ServerLock.CONTROL_SHUTDOWN_PATH}`, {
+    const url = new URL(`http://127.0.0.1:${controlPort}${ServerLock.CONTROL_SHUTDOWN_PATH}`)
+    if (maintenanceIdle) url.searchParams.set("maintenance-idle", "1")
+    const response = await fetch(url, {
       method: "POST",
       // control token 复用 lock token：端口证明“本机私有控制面”，token 证明“当前 lock owner”。
       headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token },
@@ -179,7 +193,8 @@ async function waitForStop(lock: ServerLockInfo, timeoutMs = STOP_TIMEOUT_MS) {
 }
 
 function sameOwner(left: ServerLockInfo, right: ServerLockInfo) {
-  return left.pid === right.pid && left.token === right.token && left.controlPort === right.controlPort
+  // dbPath 参与 identity，防止共享 lock 位置异常时把另一数据库的 daemon 当成原 owner。
+  return left.pid === right.pid && left.token === right.token && left.controlPort === right.controlPort && left.dbPath === right.dbPath
 }
 
 async function forceStop(lock: ServerLockInfo) {

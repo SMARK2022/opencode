@@ -15,11 +15,14 @@ import { mkdir, rename } from "fs/promises"
 import path from "path"
 import { fileURLToPath, pathToFileURL } from "url"
 import { Database as SQLite } from "bun:sqlite"
+import stripAnsi from "strip-ansi"
+import { spawn as spawnPty } from "#pty"
 import { tmpdir } from "../../fixture/fixture"
 import * as DaemonModule from "../../../src/cli/cmd/tui/daemon"
 import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
 import * as Win32Module from "../../../src/cli/cmd/tui/win32"
 import type { MaintenanceTask } from "../../../src/storage/cold"
+import { Flock } from "@opencode-ai/core/util/flock"
 
 const WORKER_TS = fileURLToPath(new URL("../../../src/cli/cmd/tui/worker.ts", import.meta.url))
 // `daemon stop` 是用户可见的 CLI 行为，测试必须从真实入口验证，而不是直接调用内部 helper；
@@ -84,6 +87,23 @@ function authHeaders(env: Record<string, string>) {
   }
 }
 
+function controlRequest(
+  lock: ServerLockModule.ServerLock,
+  pathname: string,
+  method: "GET" | "POST" = "GET",
+  body?: unknown,
+) {
+  // POST body 与 token 在同一个 request envelope 中，测试不会绕过 daemon control 的鉴权边界。
+  return fetch(`http://127.0.0.1:${lock.controlPort}${pathname}`, {
+    method,
+    headers: {
+      [ServerLockModule.CONTROL_TOKEN_HEADER]: lock.token,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  })
+}
+// control helper 始终绑定受测 owner token，fixture 不能绕过生产鉴权路径直接调用 worker 内部函数。
 async function runDaemonStop(lockPath: string, env: Record<string, string> = {}) {
   await prepareCliData(lockPath)
   // 使用 argv 数组直接调用真实 CLI，避免 shell 引号、空格路径、管道或重定向参与解析；
@@ -98,11 +118,49 @@ async function runDaemonStop(lockPath: string, env: Record<string, string> = {})
   return { exitCode, stderr }
 }
 
-async function runDaemonMachine(
+async function runInteractiveDb(
   lockPath: string,
-  command: "status" | "start",
-  env: Record<string, string> = {},
+  args: readonly string[],
+  answer: "y" | "n",
+  beforeAnswer: () => Promise<unknown> = async () => {},
+  observe: (chunk: string) => void = () => {},
 ) {
+  const proc = spawnPty(process.execPath, [INDEX_TS, "db", ...args], {
+    name: "xterm-256color",
+    cols: 100,
+    rows: 30,
+    cwd: path.dirname(INDEX_TS),
+    env: isolatedDaemonEnv(lockPath),
+  })
+  // 累积完整 PTY scrollback 后再去 ANSI，断言不会依赖单个 onData chunk 的切分。
+  let output = ""
+  let answered = false
+  let reclaimAnswered = false
+  proc.onData((data) => {
+    output += data
+    const text = stripAnsi(output)
+    observe(stripAnsi(data))
+    if (!answered && text.includes("Stop daemon and continue?")) {
+      answered = true
+      // hook 在 prompt 已可见而答案尚未提交时运行，专门覆盖用户思考期间的 owner replacement。
+      void beforeAnswer().then(() => proc.write(`${answer}\r`))
+    }
+    if (answered && !reclaimAnswered && text.includes("? Reclaim")) {
+      reclaimAnswered = true
+      proc.write("n\r")
+    }
+  })
+  const exited = new Promise<number>((resolve) => proc.onExit((event) => resolve(event.exitCode)))
+  // prompt 和 task terminal 都来自真实进程；期限只保护测试，不替代产品 status readiness。
+  const result = await Promise.race([exited, Bun.sleep(30_000).then(() => "timeout" as const)])
+  if (result === "timeout") {
+    proc.kill()
+    throw new Error(`interactive database command exceeded 30 seconds:\n${stripAnsi(output)}`)
+  }
+  return { exitCode: result, output: stripAnsi(output).replaceAll("\r", ""), answered }
+}
+// machine helper 保留 stdout/stderr 分离，daemon JSON 不能借 UI stream 混入提示文本。
+async function runDaemonMachine(lockPath: string, command: "status" | "start", env: Record<string, string> = {}) {
   await prepareCliData(lockPath)
   const args = [process.execPath, INDEX_TS, "daemon", command, "--json"]
   if (command === "start") args.push("--launcher-pid", String(process.pid))
@@ -1089,6 +1147,153 @@ describe("daemon lifecycle", () => {
   )
 
   test(
+    "db compress variants keep the daemon and skip reclaim after the user declines shutdown",
+    async () => {
+      const variants = [[], ["--vacuum"]]
+      for (const flags of variants) {
+        await using tmp = await tmpdir()
+        const lockPath = path.join(tmp.path, "tui-server.json")
+        const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
+        // 每个 variant 使用独立 owner，避免前一次 task/lock 状态掩盖第二次 N 行为。
+        // flags 只改变用户可见的 vacuum 选择，daemon owner 和 compression route 必须保持一致。
+        try {
+          const result = await runInteractiveDb(
+            lockPath,
+            ["compress", ...flags, "--older-than", "0ms", "--batch-size", "1"],
+            "n",
+          )
+          expect(result.exitCode, result.output).toBe(0)
+          expect(result.answered).toBe(true)
+          // N 的权威含义覆盖普通与 --vacuum：保留 daemon 完成 compression，且不再取得 vacuum 授权。
+          expect(result.output).toMatch(new RegExp(`OpenCode daemon is running \\(pid ${lock.pid}\\)[\\s\\S]*Continuing through the running daemon[\\s\\S]*Compression completed`))
+          expect(result.output).not.toContain("Reclaim")
+          // 同一 PID 存活证明 CLI 没有先停 daemon 再偷偷转向 offline writer。
+          expect(ServerLockModule.alive(proc.pid)).toBe(true)
+        } finally {
+          if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
+          await proc.exited.catch(() => undefined)
+        }
+      }
+      // Y 场景使用新 owner 与数据库，确保前两个 N variant 的 task/lease 不会提供偶然成功条件。
+      await using yesTmp = await tmpdir()
+      const yesLockPath = path.join(yesTmp.path, "tui-server.json")
+      const yesDaemon = await spawnDaemon(yesLockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
+      try {
+        // 未替换 owner 的 Y 必须安全停掉同一 PID，再由当前 CLI 完成 offline compression。
+        let acquired = false
+        let acquiredAtTerminal = false
+        let contender = Promise.resolve()
+        // reconnect 竞争者在旧 PID 退出后争用同一 election lock；terminal renderer 执行时它仍不得进入。
+        const result = await runInteractiveDb(
+          yesLockPath,
+          ["compress", "--older-than", "0ms", "--batch-size", "1"],
+          "y",
+          async () => {
+          const db = new SQLite(yesDaemon.lock.dbPath)
+          db.exec("PRAGMA foreign_keys = OFF")
+          const insert = db.prepare(
+            `INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, 'msg_election', 'ses_election', 1, 1, ?)`,
+          )
+          const data = JSON.stringify({ type: "reasoning", text: "election-".repeat(1_024), time: { start: 1 } })
+          // 大 payload 让 Y 的 offline sequence 足够长，contender 的成功时机只能由 election release 决定。
+          db.transaction(() => {
+            for (let index = 0; index < 100; index++) {
+              insert.run(`prt_election_${index}`, data)
+            }
+          })()
+          db.close()
+          contender = yesDaemon.proc.exited.then(async () => {
+            await using _ = await Flock.acquire("opencode.server", {
+              dir: path.join(yesTmp.path, "state", "opencode", "locks"),
+              timeoutMs: 30_000,
+            })
+            acquired = true
+          })
+          },
+          (chunk) => {
+            if (chunk.includes("Compression completed")) {
+              acquiredAtTerminal = acquired
+            }
+          },
+        )
+        expect(result.exitCode, result.output).toBe(0)
+        // 组合顺序断言要求 stop、活动行换行和 terminal 依次出现，不能由三个独立子串偶然满足。
+        expect(result.output).toMatch(/Daemon stopped[\s\S]*elapsed \d+\.\ds[^\n]*\n✓ Compression completed/)
+        expect(acquiredAtTerminal).toBe(false)
+        await contender
+        expect(acquired).toBe(true)
+        expect(ServerLockModule.alive(yesDaemon.proc.pid)).toBe(false)
+      } finally {
+        if (ServerLockModule.alive(yesDaemon.proc.pid)) yesDaemon.proc.kill("SIGTERM")
+        await yesDaemon.proc.exited.catch(() => undefined)
+      }
+      // replacement 场景独立启动 control server，任何 prompt 后请求都会改变公开错误并使测试失败。
+      await using replacementTmp = await tmpdir()
+      const replacementLockPath = path.join(replacementTmp.path, "tui-server.json")
+      const { proc, lock } = await spawnDaemon(replacementLockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
+      const replacementControl = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch: () => new Response("unexpected control request", { status: 500 }),
+      })
+      try {
+        // replacement server 只作为意外 control request 的失败信号，不承担维护或成功响应。
+        // prompt 显示后替换完整 identity；Y 必须在首次 control request 前拒绝该 replacement。
+        const replacement = { ...lock }
+        replacement.token = "replacement-owner"
+        replacement.controlPort = replacementControl.port
+        const result = await runInteractiveDb(replacementLockPath, ["compress", "--older-than", "0ms"], "y", () =>
+          Bun.write(replacementLockPath, JSON.stringify(replacement)),
+        )
+        expect(result.exitCode).not.toBe(0)
+        expect(result.output).toContain("owner changed")
+        expect(ServerLockModule.alive(proc.pid)).toBe(true)
+      } finally {
+        replacementControl.stop(true)
+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS * 2 + 60_000,
+  )
+  // 此切片同时验证 query-selected shutdown 与普通 stop，防止 DB preflight 改写共享 endpoint 默认语义。
+  test(
+    "maintenance-idle shutdown refuses active work without changing daemon stop",
+    async () => {
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000" })
+      // 普通 stop 与 maintenance-idle 共用 endpoint，但只有后者在 active work 时返回 busy。
+      try {
+        if (!lock.controlPort) throw new Error("missing control port")
+        const initialized = await controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_PATH, "POST", { operation: "status" })
+        expect(initialized.status).toBe(200)
+        const db = new SQLite(lock.dbPath)
+        db.exec("PRAGMA foreign_keys = OFF")
+        db.exec(`WITH RECURSIVE rows(index_value) AS (SELECT 0 UNION ALL SELECT index_value + 1 FROM rows WHERE index_value < 499) INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) SELECT 'prt_gate_' || index_value, 'msg_gate', 'ses_gate', 1, 1, '{"type":"reasoning","text":"x"}' FROM rows`)
+        db.close()
+        // 202 证明 worker 已接受真实 task；后续 409 不能由测试伪造的内存 flag 提供。
+        const start = await controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_PATH, "POST", { operation: "compress", olderThanMs: 0, batchSize: 1 })
+        expect(start.status).toBe(202)
+        // 只有公开 202 之后发出的 conditional request 才能证明 gate 覆盖已接受任务，而非预请求占位。
+        // query mode 的授权只属于 DB preflight；它不能继承显式 daemon stop 的“中断后关闭”语义。
+        const conditional = await controlRequest(lock, `${ServerLockModule.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
+        expect(conditional.status).toBe(409)
+        expect(ServerLockModule.alive(proc.pid)).toBe(true)
+        // 不带 query 的公开 stop 仍须成功，防止 DB preflight 收紧既有用户控制面。
+        const stopped = await runDaemonStop(lockPath)
+        expect(stopped.exitCode, stopped.stderr).toBe(0)
+        expect(stopped.stderr).toContain("Stopped opencode daemon.")
+        expect(ServerLockModule.alive(proc.pid)).toBe(false)
+      } finally {
+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS,
+  )
+  // 长 status 使用真实延迟报告证明 control acknowledgement timeout 不能截断完整统计读取。
+  test(
     "db status waits for the daemon's complete report beyond the control acknowledgement deadline",
     async () => {
       await using tmp = await tmpdir()
@@ -1182,27 +1387,148 @@ describe("daemon lifecycle", () => {
         updatedAt: Date.now(),
       }
       await ServerLockModule.writeMaintenanceTask(task)
-      const { proc } = await spawnDaemon(lockPath, {
-        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
-        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
-      })
-
-      try {
-        const deadline = Date.now() + 10_000
-        let recovered: MaintenanceTask | undefined
-        while (Date.now() < deadline) {
-          recovered = await ServerLockModule.readMaintenanceTask(task.taskID, dbPath)
-          if (recovered?.status === "completed" || recovered?.status === "failed") break
-          await Bun.sleep(50)
+      // dead owner 强制 recovery 经过真实 stale-rename 边界，而不是直接调用 worker 私有状态。
+      const leaseDir = path.join(`${dbPath}.maintenance`, "lock")
+      const staleLease = async (taskID: string) => {
+        await mkdir(leaseDir, { recursive: true })
+        await Bun.write(
+          path.join(leaseDir, "owner.json"),
+          JSON.stringify({ pid: 2_147_483_647, token: `dead-${taskID}`, taskID, dbPath, startedAt: 1 }),
+        )
+      }
+      await staleLease(task.taskID)
+      // stale owner 只用于触发真实 recovery rename；测试不直接设置 worker 的 active 状态。
+      const wrapper = `
+        import { mock } from "bun:test"
+        import * as fs from "node:fs/promises"
+        // 先绑定原生函数再安装 mock，避免 mock namespace 的 live binding 递归调用自身。
+        const input = Bun.stdin.stream().getReader()
+        const realRename = fs.rename.bind(fs)
+        const realRm = fs.rm.bind(fs)
+        // captured native delegates keep the mock focused on the two published synchronization markers.
+        let buffered = ""
+        let renameIndex = 0
+        let release = true
+        const gate = async (name) => {
+          console.log(name)
+          while (!buffered.includes("\\n")) {
+            const next = await input.read()
+            if (next.done) return
+            buffered += new TextDecoder().decode(next.value)
+          }
+          buffered = buffered.slice(buffered.indexOf("\\n") + 1)
         }
-        if (recovered?.status === "failed") throw new Error(`startup recovery failed: ${recovered.error ?? "unknown"}`)
-        expect(recovered?.status).toBe("completed")
+        mock.module("fs/promises", () => ({
+          ...fs,
+          rename: async (from, to) => {
+            if (String(from) === ${JSON.stringify(leaseDir)}) {
+              await gate("rename-blocked-" + (++renameIndex))
+            }
+            return realRename(from, to)
+          },
+          rm: async (target, options) => {
+            if (
+              release &&
+              options?.recursive &&
+              String(target).includes(".maintenance") &&
+              String(target).endsWith("lock")
+            ) {
+              release = false
+              await gate("lease-release-blocked")
+            }
+            return realRm(target, options)
+          },
+        }))
+        await import(${JSON.stringify(pathToFileURL(WORKER_TS).href)})
+      `
+      const proc = Bun.spawn([process.execPath, "-e", wrapper], {
+        env: {
+          ...isolatedDaemonEnv(lockPath),
+          OPENCODE_PROCESS_ROLE: "worker",
+          OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "180000",
+        },
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const reader = proc.stdout.pipeThrough(new TextDecoderStream()).getReader()
+      // 两个 marker 分别控制“注册前”和“terminal 后释放前”，完全避免依赖调度速度。
+      try {
+        expect(await readUntil(reader, "rename-blocked-1")).toContain("rename-blocked-1")
+        // recovery 尚未取得 lease 时不得先发布可接受 shutdown/start 的 daemon owner。
+        expect(await Bun.file(lockPath).exists()).toBe(false)
+        await proc.stdin.write("continue\n")
+        expect(await readUntil(reader, "lease-release-blocked")).toContain("lease-release-blocked")
+        // lock 只在 recovery 已取得 lease 并登记 activeMaintenance 后才允许对外发布。
+        let lock: ServerLockModule.ServerLock | undefined
+        const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
+        while (!lock && Date.now() < deadline) {
+          lock = await Bun.file(lockPath).json().catch(() => undefined)
+          if (!lock) await Bun.sleep(POLL_INTERVAL_MS)
+        }
+        if (!lock?.controlPort) throw new Error("recovered daemon did not publish its control lock")
+        // token 来自 recovery 完成注册后发布的真实 daemon lock，所有后续请求都验证同一 owner。
+        let settled = false
+        const terminal = controlRequest(lock, `${ServerLockModule.CONTROL_MAINTENANCE_STATUS_PATH}?task=${task.taskID}`)
+          .then(async (response) => ({ status: response.status, body: await response.json() }))
+        void terminal.then(() => (settled = true))
+        await Bun.sleep(100)
+        // 固定等待只观察 marker 已建立的 pending 状态，不用于猜测 worker 是否进入该状态。
+        expect(settled).toBe(false)
+        // lease cleanup 被 marker 挡住时，其他 control 请求仍可响应，证明不是整个 server 被阻塞。
+        const status = await controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_PATH, "POST", { operation: "status" })
+        expect(status.status).toBe(200)
+        const busy = await controlRequest(lock, `${ServerLockModule.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
+        expect(busy.status).toBe(409)
+        // 释放 lease 后 terminal 与 conditional shutdown 才能依次成功，禁止 CLI retry workaround。
+        await proc.stdin.write("release\n")
+        expect(await terminal).toMatchObject({ status: 200, body: { status: "completed" } })
+        const conditional = () => controlRequest(lock, `${ServerLockModule.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
+        const waitIdle = async (taskID: string) => {
+          const deadline = Date.now() + 10_000
+          while (Date.now() < deadline) {
+            const response = await controlRequest(lock, `${ServerLockModule.CONTROL_MAINTENANCE_STATUS_PATH}?task=${taskID}`)
+            const body = await response.json() as { status?: string }
+            if (response.ok && ["completed", "failed", "interrupted"].includes(body.status ?? "")) {
+              return
+            }
+            await Bun.sleep(25)
+          }
+          throw new Error("maintenance transition did not settle")
+        }
+        // start gate 使用独立 stale lease marker，不能借 recovery 已登记的 active promise 获得假阳性。
+        // start 在 stale-lease rename await 中尚未发布 active；pending gate 必须独立返回 busy。
+        await staleLease("dbm_start_gate")
+        const starting = controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_PATH, "POST", { operation: "compress", olderThanMs: 0, batchSize: 1 })
+        expect(await readUntil(reader, "rename-blocked-2")).toContain("rename-blocked-2")
+        expect((await conditional()).status).toBe(409)
+        // 同一 chunk 预置 start/resume 两个 gate token，避免 Windows pipe 的第三次小写入延迟。
+        await proc.stdin.write("continue\ncontinue\n")
+        const startResponse = await starting
+        expect(startResponse.status).toBe(202)
+        await waitIdle((await startResponse.json() as { taskID: string }).taskID)
+        // resume gate 重新写 interrupted record，验证另一 producer 也在首个 await 前发布 pending。
+        // resume 经过独立 reconcile/lease producer；它不能只依赖 start 路径偶然设置的 active 状态。
+        const resumeTask = { ...task, taskID: "dbm_resume_gate", status: "interrupted" as const, updatedAt: Date.now() }
+        await ServerLockModule.writeMaintenanceTask(resumeTask)
+        await staleLease(resumeTask.taskID)
+        const resuming = controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_RESUME_PATH, "POST", { taskID: resumeTask.taskID })
+        expect(await readUntil(reader, "rename-blocked-3")).toContain("rename-blocked-3")
+        expect((await conditional()).status).toBe(409)
+        const resumeResponse = await resuming
+        expect(resumeResponse.status).toBe(202)
+        await waitIdle((await resumeResponse.json() as { taskID: string }).taskID)
+        // 两个过渡期都 terminal 后才允许 conditional stop，证明 pending 与 active 没有残留计数。
+        const stopped = await controlRequest(lock, `${ServerLockModule.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
+        expect(stopped.status).toBe(200)
+        expect(await Promise.race([proc.exited, Bun.sleep(10_000).then(() => "timeout")])).not.toBe("timeout")
       } finally {
+        reader.releaseLock()
         if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
         await proc.exited.catch(() => undefined)
       }
     },
-    DAEMON_START_TIMEOUT_MS + 20_000,
+    DAEMON_START_TIMEOUT_MS + 90_000,
   )
 
   test(

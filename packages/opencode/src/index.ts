@@ -66,6 +66,15 @@ process.on("uncaughtException", (e) => {
 })
 
 const args = hideBin(process.argv)
+// machine DB 命令必须由 handler 产出唯一 JSON document；首次迁移仍执行，只抑制更早的提示文字与光标控制。
+// --log-level 是唯一会消费下一 argv 的全局字符串选项；跳过其值后，第一个非 option 才是根命令。
+const rootCommandIndex = args.findIndex((arg, index) => !arg.startsWith("-") && args[index - 1] !== "--log-level")
+const rootCommand = args[rootCommandIndex]
+// positional 中后续出现的 db/status 属于上层命令数据，绝不能反向改变 migration presentation。
+const dbOperation = rootCommand === "db" ? args[rootCommandIndex + 1] : undefined
+const quietDbMigration =
+  ["status", "compress", "vacuum"].includes(dbOperation ?? "") &&
+  (args.includes("--json") || !process.stdin.isTTY || !process.stderr.isTTY)
 
 function show(out: string) {
   const text = out.trimStart()
@@ -128,8 +137,9 @@ const cli = yargs(args)
 
     const marker = path.join(Global.Path.data, "opencode.db")
     if (!(await Filesystem.exists(marker))) {
-      const tty = process.stderr.isTTY
-      process.stderr.write("Performing one time database migration, may take a few minutes..." + EOL)
+      const tty = !quietDbMigration && process.stderr.isTTY
+      if (!quietDbMigration)
+        process.stderr.write("Performing one time database migration, may take a few minutes..." + EOL)
       const width = 36
       const orange = "\x1b[38;5;214m"
       const muted = "\x1b[0;2m"
@@ -139,6 +149,7 @@ const cli = yargs(args)
       try {
         await JsonMigration.run(drizzle({ client: Database.Client().$client }), {
           progress: (event) => {
+            if (quietDbMigration) return
             const percent = Math.floor((event.current / event.total) * 100)
             if (percent === last && event.current !== event.total) return
             last = percent
@@ -156,11 +167,11 @@ const cli = yargs(args)
         })
       } finally {
         if (tty) process.stderr.write("\x1b[?25h")
-        else {
+        else if (!quietDbMigration) {
           process.stderr.write(`sqlite-migration:done${EOL}`)
         }
       }
-      process.stderr.write("Database migration complete." + EOL)
+      if (!quietDbMigration) process.stderr.write("Database migration complete." + EOL)
     }
   })
   .usage("")
