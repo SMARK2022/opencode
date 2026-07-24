@@ -488,6 +488,13 @@ async function writeDeadLease(leaseDir: string, taskID: string, dbPath: string, 
   )
 }
 
+// spawnStageWorker 固定 stdin:"pipe"，收窄 FileSink 供 gate token 写入。
+function stageWorkerStdin(proc: ReturnType<typeof Bun.spawn>) {
+  const stdin = proc.stdin
+  if (!stdin || typeof stdin === "number") throw new Error("stage worker stdin pipe is required")
+  return stdin
+}
+
 // recovery 段：blocked-1 → continue → lease-release → release → completed；返回可发 start 的 lock。
 // 与主 lifecycle 用例共享同一握手，避免 Force A/B 复制第三套 recovery 时序。
 async function recoverStageWorkerToIdle(
@@ -497,7 +504,7 @@ async function recoverStageWorkerToIdle(
   taskID: string,
 ) {
   expect(await readUntil(reader, "rename-blocked-1", 30_000)).toContain("rename-blocked-1")
-  await proc.stdin.write("continue\n")
+  await stageWorkerStdin(proc).write("continue\n")
   expect(await readUntil(reader, "lease-release-blocked", 30_000)).toContain("lease-release-blocked")
   let lock: ServerLockModule.ServerLock | undefined
   const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
@@ -507,7 +514,7 @@ async function recoverStageWorkerToIdle(
   }
   if (!lock?.controlPort) throw new Error("daemon lock missing")
   const terminal = controlRequest(lock, `${ServerLockModule.CONTROL_MAINTENANCE_STATUS_PATH}?task=${taskID}`)
-  await proc.stdin.write("release\n")
+  await stageWorkerStdin(proc).write("release\n")
   expect((await terminal).status).toBe(200)
   return lock
 }
