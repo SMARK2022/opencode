@@ -49,11 +49,19 @@ function OpenPrompt() {
 }
 
 test("DialogPrompt renders the JSX returned by its description factory", async () => {
-  const app = await testRender(() => (
-    <box width={80} height={24}>
-      <Harness />
-    </box>
-  ), { width: 80, height: 24 })
+  const app = await testRender(
+    () => (
+      <box width={80} height={24}>
+        <Harness />
+      </box>
+    ),
+    {
+      width: 80,
+      height: 24,
+      // 该用例只验证 Solid 最终字符帧，不把 Windows native renderer 线程生命周期混入行为边界。
+      useThread: false,
+    },
+  )
   try {
     // 轮询最终frame而非断言JSX对象，证明Solid reconciler确实完成了factory返回值的渲染。
     const timeout = Date.now() + 1_000
