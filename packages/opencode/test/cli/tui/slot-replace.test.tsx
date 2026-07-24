@@ -41,7 +41,11 @@ test("replace slot mounts plugin content once", async () => {
     )
   }
 
-  await testRender(() => <App />)
-
-  expect(mounts).toBe(1)
+  const app = await testRender(() => <App />)
+  try {
+    expect(mounts).toBe(1)
+  } finally {
+    // testRender 分配真实 native renderer；即使断言失败也必须释放，避免资源跨文件进入后续 TUI 用例。
+    app.renderer.destroy()
+  }
 })
