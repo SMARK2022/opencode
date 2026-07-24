@@ -6,9 +6,10 @@ import { upgrade } from "@/cli/upgrade"
 import { Config } from "@/config/config"
 import { Heap } from "@/cli/heap"
 import { AppRuntime } from "@/effect/app-runtime"
-import { Effect } from "effect"
+import { Effect, Layer, Scope } from "effect"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 import { Database } from "@opencode-ai/core/database/database"
+import { SessionStaleTurn } from "@/session/stale-turn"
 import { ServerLock } from "@/cli/tui/server-lock"
 // #493：daemon maintenance 全部 SQL 位于 core ColdStorage；worker 只装配生命周期。
 import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
@@ -232,9 +233,13 @@ if (isDaemon) {
     await runMaintenance(prepared, task)
   }
 
+  let reconcileStale: ((scope: SessionStaleTurn.Scope, options?: { budgetMs?: number }) => Promise<void>) | undefined
+
   async function gracefulShutdown(exitCode = 0, reason = "unknown") {
     if (shutdownInProgress) return
     shutdownInProgress = true
+    // #547：residual 与 process.exit 硬截止必须同一 t0——maintenance abort 也吃墙钟，不能只从 dispose 起算。
+    const shutdownStartedAt = Date.now()
     // 五秒总预算从入口开始，maintenance 等待也受保护；超时不提前清锁。
     const shutdownTimer = setTimeout(() => {
       log.error("daemon shutdown deadline exceeded", { reason, pid: process.pid })
@@ -272,6 +277,12 @@ if (isDaemon) {
     })])
     // 每个资源独立清理；dispose 失败不能跳过停监听或关闭 runtime 的数据库 scope。
     const disposed = await Promise.allSettled([InstanceRuntime.disposeAllInstances()])
+    // 清理失败仍保留原退出码，但不能把仍可能运行的实例当成stale；五秒总截止保持原样。
+    const remaining = 5_000 - (Date.now() - shutdownStartedAt) - SessionStaleTurn.SAFETY_MARGIN_MS
+    if (disposed.every((item) => item.status === "fulfilled") && remaining > 0 && reconcileStale) {
+      await reconcileStale({ kind: "exit-full" }, { budgetMs: remaining }).catch((error) => log.error("stale-turn exit-full failed", { error: String(error) }))
+    } else log.info("stale-turn exit-full skipped: services unavailable or no cleanup budget")
+
     // 监听资源归 daemon 所有，共享它的 TUI 退出只释放自己的连接。
     const stopped = await Promise.allSettled([
       Promise.resolve().then(() => controlServer?.stop(true)),
@@ -483,6 +494,13 @@ if (isDaemon) {
     // 监听与健康路由保留 ServerAuth，客户端计数由两个 listener 共用。
     // 内部监听必须真正绑定 0，不能消费公开零端口偏好的 4096。
     internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1", ephemeral: true, eventClients, sharedServices })
+    // 借用listener已构建的同一服务图；临时scope只持有引用，不新建数据库或native coordinator。
+    reconcileStale = (scope, options) => Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const owner = yield* Scope.Scope
+      const services = yield* Layer.buildWithMemoMap(sharedServices.layer, sharedServices.memoMap, owner)
+      yield* SessionStaleTurn.reconcile(scope, options).pipe(Effect.provide(services))
+    })))
+
     const network = process.env.OPENCODE_EXTERNAL_NETWORK
       ? JSON.parse(process.env.OPENCODE_EXTERNAL_NETWORK) as NonNullable<ServerLock.ServerLock["network"]>
       : undefined
@@ -591,6 +609,8 @@ if (isDaemon) {
     await AppRuntime.runPromise(Database.Service)
     maintenanceRecoveryPromise = recoverInterruptedMaintenance()
     await maintenanceRecoveryPromise
+    // L1先写入中断终态再发布发现锁，失败仍沿source约定记录并允许启动。
+    await reconcileStale({ kind: "recent", limit: SessionStaleTurn.RECENT_ACTIVE_SESSION_LIMIT }).catch((error) => log.error("stale-turn recent L1 failed", { error: String(error) }))
     lockToken = await ServerLock.write(internalServer.port, externalUrl, network, controlServer.port)
     log.info("daemon lock written", { pid: process.pid, port: internalServer.port, controlPort: controlServer.port, externalUrl, launcherPID: LAUNCHER_PID })
     // 锁发布后才启用启动期保护，首个订阅到达后转由运行期空闲路径负责。
