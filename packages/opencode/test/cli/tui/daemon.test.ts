@@ -472,7 +472,8 @@ function maintenanceStageWorkerSource(leaseDir: string) {
 
 // stderr ignore 对齐 spawnDaemon：长生命周期 worker 禁止未读 pipe 卫生风险；非 hang 根因声明。
 function spawnStageWorker(lockPath: string, leaseDir: string) {
-  const proc = spawnBackground([process.execPath, "-e", maintenanceStageWorkerSource(leaseDir)], {
+  // 专用 pipe overload 保留 stdin/stdout 静态类型；windowsHide 直接落在同一真实 spawn。
+  const proc = Bun.spawn([process.execPath, "-e", maintenanceStageWorkerSource(leaseDir)], {
     env: {
       ...isolatedDaemonEnv(lockPath),
       OPENCODE_PROCESS_ROLE: "worker",
@@ -481,6 +482,7 @@ function spawnStageWorker(lockPath: string, leaseDir: string) {
     stdin: "pipe",
     stdout: "pipe",
     stderr: "ignore",
+    windowsHide: process.platform === "win32",
   })
   return { proc, reader: proc.stdout.pipeThrough(new TextDecoderStream()).getReader() }
 }
