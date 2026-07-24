@@ -747,7 +747,10 @@ const layer = Layer.effect(
       return result
     }, Effect.scoped)
 
-    const create = Effect.fn("SessionCompaction.create")(function* (input: {
+    // #538：私有 seam 接受 run 预分配的 ID，覆盖 create 尚未返回就被取消的窗口；
+    // 公开 create wrapper 仍自行分配 ID，不扩大原有调用接口。
+    const createMarker = Effect.fn("SessionCompaction.createMarker")(function* (input: {
+      id: MessageID
       sessionID: SessionID
       agent: string
       model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
@@ -762,7 +765,7 @@ const layer = Layer.effect(
       yield* session.findMessage(input.sessionID, (info) => info.role === "user").pipe(Effect.orDie),
       )
       const msg = yield* session.updateMessage({
-        id: MessageID.ascending(),
+        id: input.id,
         role: "user",
         model: input.model,
         sessionID: input.sessionID,
@@ -785,30 +788,43 @@ const layer = Layer.effect(
       return msg
     })
 
+    // #538：外部调用保持自分配 ID 形态，语义与旧 create 完全一致。
+    const create = Effect.fn("SessionCompaction.create")(function* (input: {
+      sessionID: SessionID
+      agent: string
+      model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
+      auto: boolean
+      overflow?: boolean
+    }) {
+      return yield* createMarker({ ...input, id: MessageID.ascending() })
+    })
+
     // #242：中断清理的唯一入口——只处理可见的未完成 compaction 对，不动已完成边界
     const hideIncomplete = Effect.fn("SessionCompaction.hideIncomplete")(function* (input: {
       sessionID: SessionID
       parentID: MessageID
     }) {
-      // 中断可能发生在 scratch 标记可见后、摘要请求开始前。只隐藏这对 compaction，
-      // 且仅当无成功摘要存在——完成的边界继续锚定历史
-      const messages = yield* session
-        .messages({ sessionID: input.sessionID })
-        .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([] as SessionV1.WithParts[])))
-      const completed = messages.some(
-        (msg) =>
-          msg.info.role === "assistant" &&
-          msg.info.parentID === input.parentID &&
-          msg.info.summary &&
-          msg.info.finish &&
-          !msg.info.error,
+      // #538：cleanup 只定位本次最新 marker/summary，不再为失败终态 hydrate 整个长 Session。
+      const find = (predicate: (info: MessageV2.HotInfo) => boolean) =>
+        session
+          .findMessage(input.sessionID, predicate)
+          // Session 尚不存在时与 NotFound 同义：无可隐藏对象，返回 none 让调用方自然跳过。
+          .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(Option.none<SessionV1.WithParts>())))
+      // #538：summary 查询仍先执行：finished/no-error boundary 已经成功，后续可选动作失败
+      // 不能反向隐藏该边界或撤销它承载的 retained context。
+      const summary = Option.getOrUndefined(
+        yield* find(
+          (info) => info.role === "assistant" && info.parentID === input.parentID && info.summary === true,
+        ),
       )
-      if (completed) return
+      if (summary?.info.role === "assistant" && summary.info.finish && !summary.info.error) return
+      // marker 按 ID 定位：预分配 parentID 保证即使 create 中途回写未完成也能找到本次 scratch。
+      const marker = Option.getOrUndefined(yield* find((info) => info.id === input.parentID))
       const now = Date.now()
-      for (const msg of messages) {
-        const marker = msg.info.id === input.parentID && msg.parts.some((part) => part.type === "compaction")
-        const summary = msg.info.role === "assistant" && msg.info.parentID === input.parentID && msg.info.summary
-        if (!marker && !summary) continue
+      // #538：只隐藏 marker+summary 这一对（同时间戳）；展开原 info 只附加可见性终态，
+      // 已记录的 tokens/cost/lineage 原值保留；未 completed 的 summary 才补 AbortedError。
+      for (const msg of [marker, summary]) {
+        if (!msg) continue
         const next = {
           ...msg.info,
           // #242：compaction-cancelled 与 undo 语义分离——维护操作取消不得冒充用户回滚
@@ -831,10 +847,11 @@ const layer = Layer.effect(
       auto: boolean
       overflow?: boolean
     }) {
-      let parentID: MessageID | undefined
+      // #538：ID 必须先于 marker 的首次 durable write 归属 run；create 中任一 yield
+      // 被中断时，finalizer 仍能精确定位本次 scratch，而不会扫描或猜测 latest。
+      const parentID = MessageID.ascending()
       return yield* Effect.gen(function* () {
-        const msg = yield* create(input)
-        parentID = msg.id
+        const msg = yield* createMarker({ ...input, id: parentID })
         return yield* processCompaction({
           parentID: msg.id,
           messages: yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie),
@@ -844,10 +861,11 @@ const layer = Layer.effect(
         })
       }).pipe(
         Effect.onExit((exit) => {
-          // compact 标记在成功摘要 assistant 出现前都是 scratch 状态。中断清理保持
-          // 可见历史整洁（Ctrl-C/abort），而 MessageV2.filterCompacted 仍是硬退出时
-          // finalizer 无法运行场景下的正确性护栏
-          if (Exit.isSuccess(exit) || !parentID) return Effect.void
+          // compact 标记在成功摘要 assistant 出现前都是 scratch 状态。
+          // #538：Effect success 只说明 processor 正常返回；业务结果 stop 仍表示
+          // 本次 Compaction 未提交，必须和 interrupt/defect 进入同一 hidden 终态。
+          // hard process exit 无法运行 finalizer，继续由 filterCompacted 守住 replay。
+          if (Exit.isSuccess(exit) && exit.value === "continue") return Effect.void
           return hideIncomplete({ sessionID: input.sessionID, parentID })
         }),
       )
