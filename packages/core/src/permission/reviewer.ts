@@ -163,14 +163,17 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
           Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(timedOut) }),
           Effect.onExit((exit) => Effect.gen(function* () {
             const finalizer = exit._tag === "Failure"
-            yield* publisher.flush(finalizer)
-            // 成功裁决或文本回退也可能遗留其它call的输入，attempt退出必须一并闭合。
-            if (exit._tag === "Success")
-              yield* publisher.failUnsettledTools("Tool execution did not complete before stream ended", false, finalizer)
+            const failure = exit._tag === "Failure" ? Cause.squash(exit.cause) : undefined
+            const reason = exit._tag === "Success" ? "Tool execution did not complete before stream ended" : failure instanceof Error ? failure.message : "Review cancelled"
+            const closeTools = publisher.failUnsettledTools(reason, false, finalizer)
+            // 首次工具提交失败仍在助手完成前复扫同一身份；flush或再次清理失败仅记录，保留原退出原因。
+            yield* publisher.flush(finalizer).pipe(
+              Effect.ensuring(closeTools.pipe(
+                Effect.catchCause(cause => Effect.logWarning("reviewer tool finalization failed", { cause }).pipe(Effect.andThen(closeTools))),
+              )),
+              Effect.catchCause(cause => Effect.logWarning("reviewer attempt finalization failed", { cause })),
+            )
             if (exit._tag === "Failure") {
-              const failure = Cause.squash(exit.cause)
-              const reason = failure instanceof Error ? failure.message : "Review cancelled"
-              yield* publisher.failUnsettledTools(reason, false, true)
               yield* publisher.failAssistant(reason, Cause.hasInterrupts(exit.cause), true)
             }
             const settlement = publisher.stepSettlement()

@@ -26,6 +26,12 @@ import { Assessment, ReviewerRequest } from "./schema"
 import { PermissionReviewerTranscript } from "./transcript"
 import type { PermissionAuto } from "../auto"
 
+// #546：错误文案与 SessionProcessor.TOOL_ABORTED_ERROR 字面量对齐（跨模块合同：aborted 与
+// incomplete 必须区分，防 Provider replay 把协议失败误判成用户取消）；故意不 import
+// processor——reviewer 失败路径不得把 session 模块拉进加载图。
+const TOOL_ABORTED_ERROR = "Tool execution aborted"
+const TOOL_INCOMPLETE_ERROR = "Tool execution did not complete before stream ended"
+
 // #198：reviewer 不可用——服务已禁用，回退到用户审批
 // #280：Disabled 仅表示显式 approvals_reviewer=user，auto.ts 将其转为 ask
 export class ReviewerDisabled extends Schema.TaggedErrorClass<ReviewerDisabled>()("PermissionReviewerDisabled", {}) {
@@ -442,6 +448,20 @@ export const layer = Layer.effect(
           time: { created: Date.now() },
         }
         yield* session.updateMessage(message)
+        // #546：message 终态写入前先闭协议 tool（tool→message 顺序，INV-02）——Aborted
+        // message + pending tool 的僵尸形态会逃过 abortPendingToolParts（其只扫未 completed 的 assistant）。
+        // finalize 失败只可观测，不产生第二个业务错误（INV-04）。
+        const closeMessageTools = (error: string, interrupted: boolean) =>
+          closeOpenReviewerTools(session, {
+            sessionID: sessionInfo!.id,
+            messageID: message.id,
+            error,
+            interrupted,
+          }).pipe(
+            Effect.provideService(Database.Service, database),
+            Effect.catch((cause) => Effect.logWarning("reviewer closeMessageTools failed", { cause, sessionID: sessionInfo.id, messageID: message.id })),
+            Effect.catchDefect((cause) => Effect.logWarning("reviewer closeMessageTools defect", { cause, sessionID: sessionInfo.id, messageID: message.id })),
+          )
         const assessment = yield* runReviewerStream(input.messages, input.model, {
           sessionID: sessionInfo.id,
           messageID: message.id,
@@ -451,18 +471,20 @@ export const layer = Layer.effect(
           message,
         }).pipe(
           // #209：流式错误时仍持久化 assistant 消息的 error 字段——审计可见失败原因，而非丢失在内存中
+          // #546：先闭 tool 再写 message——顺序颠倒会重现「error message + pending tool」僵尸（INV-02）。
           Effect.tapError((error) =>
             Effect.gen(function* () {
+              yield* closeMessageTools(TOOL_INCOMPLETE_ERROR, false)
               message.error = MessageV2.fromError(error, { providerID: input.model.providerID })
               message.time.completed = Date.now()
               yield* session.updateMessage(message)
             }),
           ),
-          // 超时中断不会触发 tapError（中断不是 failure）；onInterrupt 确保子会话
-          // assistant 消息始终写入终态，避免 repair-empty-dangling-assistant 延迟修复。
-          // 复用 prompt.ts finalizeInterruptedAssistant 的相同模式。
+          // #546：超时中断不会触发 tapError（中断不是 failure）；onInterrupt 先闭 tool 再确保子会话
+          // assistant 消息写入终态，避免 repair-empty-dangling-assistant 延迟修复（对齐 prompt.ts 模式）。
           Effect.onInterrupt(() =>
             Effect.gen(function* () {
+              yield* closeMessageTools(TOOL_ABORTED_ERROR, true)
               if (message.time.completed) return
               message.error ??= MessageV2.fromError(
                 new DOMException("Aborted", "AbortError"),
@@ -641,40 +663,26 @@ export const layer = Layer.effect(
             // durable state 的单一真相留在 Session.Service，避免发布窗口产生双重 winner。
             const toolParts = new Map<string, PartID>()
             const toolInput = new Map<string, string>()
+            // #546：stream 退出方式标志——onInterrupt 置位，ensuring 兜底据此选择终态文案。
+            let streamInterrupted = false
+            // #546：safeFinalize——cleanup 失败降级为可观测日志，绝不让 finalize 错误覆盖
+            // provider 原始错误或伪装 reviewer 成功（INV-04）。
+            const safeFinalize = (error: string, interrupted: boolean) =>
+              finalizeOpenToolParts(error, interrupted).pipe(
+                Effect.catch((cause) => Effect.logWarning("reviewer finalizeOpenToolParts failed", { cause, sessionID: persist?.sessionID, messageID: persist?.messageID })),
+                Effect.catchDefect((cause) => Effect.logWarning("reviewer finalizeOpenToolParts defect", { cause, sessionID: persist?.sessionID, messageID: persist?.messageID })),
+              )
             const finalizeOpenToolParts = Effect.fnUntraced(function* (error: string, interrupted: boolean) {
               if (!persist) return
-              const end = Date.now()
-              yield* Effect.forEach(
-                toolParts.values(),
-                Effect.fnUntraced(function* (partID) {
-                  // #497：registry 只保存首次 durable write 前分配的稳定 identity；退出时必须
-                  // 重读存储，才能同时覆盖 commit 后 return 前中断并尊重 completed winner。
-                  const part = yield* session.getPart({
-                    sessionID: persist.sessionID,
-                    messageID: persist.messageID,
-                    partID,
-                  })
-                  if (!part || part.type !== "tool") return
-                  if (part.state.status !== "pending" && part.state.status !== "running") return
-                  const start = part.state.status === "running" ? part.state.time.start : end
-                  const metadata = part.state.status === "running" ? part.state.metadata : undefined
-                  yield* session.updatePart({
-                    ...part,
-                    state: {
-                      status: "error",
-                      input: part.state.input,
-                      error,
-                      // #497：interrupted marker 属于真实 user/timeout abort；普通 incomplete stream
-                      // 保持原错误语义，不能让 Provider replay 把协议失败误判成用户取消。
-                      metadata: interrupted
-                        ? { ...metadata, interrupted: true, executionElapsedMs: Math.floor(end - start) }
-                        : metadata,
-                      time: { start, end },
-                    },
-                  } satisfies ToolPart)
-                }),
-                { discard: true },
-              )
+              // #546：委托 map∪durable 双扫描（closeOpenReviewerTools）——只扫内存 Map 会漏
+              // commit 后 return 前中断的 part；#497 的 getPart 重读语义在委托内完整保留。
+              yield* closeOpenReviewerTools(session, {
+                sessionID: persist.sessionID,
+                messageID: persist.messageID,
+                knownPartIDs: toolParts.values(),
+                error,
+                interrupted,
+              }).pipe(Effect.provideService(Database.Service, database))
             })
 
             const iterator = result.fullStream[Symbol.asyncIterator]()
@@ -896,24 +904,27 @@ export const layer = Layer.effect(
               }),
             ).pipe(
               Effect.onInterrupt(() =>
-                // #497：真实 abort 的 open tool part 闭合为 error+interrupted marker。
-                finalizeOpenToolParts("Tool execution aborted", true).pipe(
-                  Effect.catch(() => Effect.void),
-                  Effect.catchDefect(() => Effect.void),
-                ),
+                Effect.suspend(() => {
+                  // #546：同步标志在 onInterrupt 第一时间置位——ensuring 兜底据此区分 aborted/incomplete。
+                  streamInterrupted = true
+                  // #497：真实 abort 的 open tool part 闭合为 error+interrupted marker。
+                  return safeFinalize(TOOL_ABORTED_ERROR, true)
+                }),
               ),
               // #497：Provider failure 的原始 shape 仍交给 SessionRetry；cleanup 失败不能把
               // status/header 等诊断替换成第二个错误，也不能伪造 reviewer 成功结果。
-              Effect.tapError(() =>
-                finalizeOpenToolParts("Tool execution did not complete before stream ended", false).pipe(
-                  Effect.catch(() => Effect.void),
-                  Effect.catchDefect(() => Effect.void),
+              Effect.tapError(() => safeFinalize(TOOL_INCOMPLETE_ERROR, false)),
+              // #546：ensuring 兜底——interrupt/error/success 全部退出路径至少再扫一次
+              // （对齐 SessionProcessor 的 Effect.ensuring(cleanup())；幂等由非 open 跳过保证）。
+              Effect.ensuring(
+                Effect.suspend(() =>
+                  safeFinalize(streamInterrupted ? TOOL_ABORTED_ERROR : TOOL_INCOMPLETE_ERROR, streamInterrupted),
                 ),
               ),
             )
             // #497：正常 drain 仍可能只有 tool-input-start 而没有合法 tool-call；在协议
             // retry/fallback 接管前先闭合本 attempt，防止每次重试累积 pending Part。
-            yield* finalizeOpenToolParts("Tool execution did not complete before stream ended", false)
+            yield* safeFinalize(TOOL_INCOMPLETE_ERROR, false)
 
             // #209：流结束后收尾未关闭的 text/reasoning part——provider 可能不发 *-end 事件，避免 part 残留无结束时间
             if (textPart)
@@ -1224,6 +1235,57 @@ function assessmentFromUnknown(input: unknown) {
   } catch {
     return
   }
+}
+
+// map∪durable闭合同一message的协议tool；按message精确读取，避免历史窗口截断漏掉未登记Part。
+// getPart逐个重读并跳过终态，尊重completed winner；cleanup失败只记录，不产生授权结果。
+function closeOpenReviewerTools(
+  session: Session.Interface,
+  input: {
+    sessionID: SessionID
+    messageID: MessageID
+    knownPartIDs?: Iterable<PartID>
+    error: string
+    interrupted: boolean
+  },
+) {
+  return Effect.gen(function* () {
+    const end = Date.now()
+    const known = new Set(input.knownPartIDs ?? [])
+    const durable = yield* MessageV2.parts(input.messageID).pipe(
+      Effect.catchDefect((cause) => Effect.logWarning("reviewer durable tool scan failed", { cause, sessionID: input.sessionID, messageID: input.messageID }).pipe(Effect.as([]))),
+    )
+    // durable 只补 tool 类型——text/reasoning 的收尾走既有 drain 路径，不在闭合范围
+    for (const part of durable) {
+      if (part.type === "tool") known.add(part.id)
+    }
+    for (const partID of known) {
+      // #497：重读而非读缓存——退出时刻的 durable state 才是唯一真相
+      const part = yield* session.getPart({
+        sessionID: input.sessionID,
+        messageID: input.messageID,
+        partID,
+      })
+      if (!part || part.type !== "tool") continue
+      if (part.state.status !== "pending" && part.state.status !== "running") continue
+      const start = part.state.status === "running" ? part.state.time.start : end
+      const metadata = part.state.status === "running" ? part.state.metadata : undefined
+      yield* session.updatePart({
+        ...part,
+        state: {
+          status: "error",
+          input: part.state.input,
+          error: input.error,
+          // #497：interrupted marker 属于真实 user/timeout abort；普通 incomplete stream
+          // 保持原错误语义，不能让 Provider replay 把协议失败误判成用户取消。
+          metadata: input.interrupted
+            ? { ...metadata, interrupted: true, executionElapsedMs: Math.floor(end - start) }
+            : metadata,
+          time: { start, end },
+        },
+      } satisfies ToolPart)
+    }
+  })
 }
 
 function hideReviewerProtocolAttempt(sessions: Session.Interface, sessionID: SessionID, requestID: MessageID): Effect.Effect<void, ReviewerRunError, never> {

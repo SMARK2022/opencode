@@ -49,6 +49,8 @@ let reviewScript: Stream.Stream<LLMEvent>[] | undefined
 let reviewOAuth = false
 let reviewOpenTool = false
 const reviewBodies: unknown[] = []
+let reviewTerminalWriteFailures = 0
+const reviewTerminals: string[] = []
 const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
   prepare: () => Effect.die("unused"),
   generate: () => Effect.die("reviewer must consume the actual provider stream"),
@@ -102,6 +104,24 @@ const reviewModel = Layer.succeed(SessionRunnerModel.Service, SessionRunnerModel
 } }))
 const reviewConfig = Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: reviewSettings })]) }))
 
+// 只在提交边界注入一次故障；所有成功发布仍经过同一真实DB和投影，顺序记录在提交之后。
+const reviewEvents = Layer.effect(EventV2.Service, Effect.gen(function* () {
+  const events = yield* EventV2.Service
+  return EventV2.Service.of({
+    ...events,
+    publish: (definition, data, options) => Effect.gen(function* () {
+      if (definition.type === SessionEvent.Tool.Failed.type && reviewTerminalWriteFailures > 0) {
+        reviewTerminalWriteFailures--
+        return yield* Effect.die("simulated terminal tool write failure")
+      }
+      const result = yield* events.publish(definition, data, options)
+      if (definition.type === SessionEvent.Tool.Failed.type) reviewTerminals.push("tool")
+      if (definition.type === SessionEvent.Step.Failed.type) reviewTerminals.push("assistant")
+      return result
+    }),
+  })
+})).pipe(Layer.provide(EventV2.layerWith()))
+
 const current = Layer.succeed(
   Location.Service,
   Location.Service.of(location({ directory: AbsolutePath.make("/project") })),
@@ -117,6 +137,7 @@ const it = testEffect(
       PermissionV2.node,
     ]),
     [[Location.node, current], [Config.node, reviewConfig],
+      [EventV2.node, reviewEvents],
       // 只替换模型与运输边界；Permission、reviewer、Schema 和事件仍使用真实实现。
       [SessionRunnerModel.node, reviewModel], [LayerNodePlatform.llmClient, reviewClient],
     ],
@@ -989,8 +1010,10 @@ describe("PermissionV2", () => {
     reviewRequests.length = 0
     reviewGate = undefined
     reviewStarted = undefined
+    reviewTerminalWriteFailures = 1
+    reviewTerminals.length = 0
     let interrupted = 0
-    yield* Effect.addFinalizer(() => Effect.sync(() => { reviewScript = undefined; reviewSettings = new Config.Info({}); reviewStarted = undefined; reviewGate = undefined }))
+    yield* Effect.addFinalizer(() => Effect.sync(() => { reviewScript = undefined; reviewSettings = new Config.Info({}); reviewStarted = undefined; reviewGate = undefined; reviewTerminalWriteFailures = 0; reviewTerminals.length = 0 }))
     const service = yield* PermissionV2.Service
     const sessions = yield* SessionStore.Service
     const database = yield* Database.Service
@@ -998,6 +1021,8 @@ describe("PermissionV2", () => {
     const request = (diff: string) => assertion({ action: "edit", resources: ["src/retry.ts"], metadata: { filepath: "/project/src/retry.ts", diff } })
     // 就绪信号在真实reasoning写入后发布，TestClock只推进已有单次期限。
     const hang = (ready: Deferred.Deferred<void>) => Stream.make(
+      LLMEvent.toolInputStart({ id: "retry-incomplete", name: "permission_review_decision" }),
+      LLMEvent.toolInputDelta({ id: "retry-incomplete", name: "permission_review_decision", text: "{" }),
       LLMEvent.reasoningStart({ id: "retry" }),
       LLMEvent.reasoningDelta({ id: "retry", text: "partial review before deadline" }),
     ).pipe(
@@ -1021,6 +1046,8 @@ describe("PermissionV2", () => {
     expect(interrupted).toBe(1)
     expect(reviewRequests).toHaveLength(2)
     expect(reviewRequests[1]?.messages).toEqual(reviewRequests[0]?.messages)
+    expect(reviewTerminalWriteFailures).toBe(0)
+    expect(reviewTerminals).toEqual(["tool", "assistant"])
     const child = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test"))).get().pipe(Effect.orDie)
     expect(child).toBeDefined()
     if (!child) return yield* Effect.die("Expected reviewer child")
@@ -1028,6 +1055,8 @@ describe("PermissionV2", () => {
     const traces = yield* sessions.context(childID)
     expect(traces.find(message => message.type === "assistant" && message.finish === "error")).toMatchObject({ time: { completed: DateTime.makeUnsafe(1000) } })
     expect(JSON.stringify(traces)).toContain("partial review before deadline")
+    // completed winner保留，首次清理半写不留下open工具，也不能使原超时跳过下一次审查。
+    expect(traces.flatMap(message => message.type === "assistant" ? message.content : []).filter(part => part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"))).toEqual([])
     // 每次各自耗尽1000ms后再启动下一次，三次都必须先中断和关闭原流。
     const starts = yield* Effect.forEach([0, 1, 2], () => Deferred.make<void>())
     reviewRequests.length = 0
@@ -1052,5 +1081,7 @@ describe("PermissionV2", () => {
     expect(interrupted).toBe(1)
     expect(reviewRequests).toHaveLength(1)
     expect(yield* service.list()).toEqual([])
+    const messages = yield* sessions.context(childID)
+    expect(messages.flatMap(message => message.type === "assistant" ? message.content : []).filter(part => part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"))).toEqual([])
   }))
 })
