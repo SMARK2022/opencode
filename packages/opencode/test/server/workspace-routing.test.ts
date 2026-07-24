@@ -15,8 +15,10 @@ describe("isLocalWorkspaceRoute", () => {
     expect(isLocalWorkspaceRoute("GET", "/session/ses_abc")).toBe(true)
   })
 
-  test("POST /session is not local (method mismatch)", () => {
+  test("POST list scan is local without changing session creation routing", () => {
     expect(isLocalWorkspaceRoute("POST", "/session")).toBe(false)
+    // 仅豁免新列表扫描端点，不能把其他Session写入变成本地操作。
+    expect(isLocalWorkspaceRoute("POST", "/session/search/scan")).toBe(true)
   })
 
   test("/session/status is forwarded regardless of method", () => {
@@ -46,9 +48,11 @@ describe("getWorkspaceRouteSessionID", () => {
     expect(getWorkspaceRouteSessionID(url)).toBe(SessionID.make("ses_bg"))
   })
 
-  test("returns null for /session/status", () => {
+  test("returns null for list endpoints without a session ID", () => {
     const url = new URL("http://localhost/session/status")
     expect(getWorkspaceRouteSessionID(url)).toBeNull()
+    // 不把search交给SessionID.make，覆盖真实middleware调用前的解析边界。
+    expect(getWorkspaceRouteSessionID(new URL("http://localhost/session/search/scan"))).toBeNull()
   })
 
   test("returns null for non-session paths", () => {

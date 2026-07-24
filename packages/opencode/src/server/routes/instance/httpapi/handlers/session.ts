@@ -37,6 +37,7 @@ import {
   MessagesQuery,
   PermissionResponsePayload,
   PreviewPayload,
+  SearchScanPayload,
   PromptPayload,
   RevertPayload,
   ShellPayload,
@@ -82,6 +83,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         return yield* store.provide({ directory: info.directory }, effect)
       })
 
+    // #544：searchMode 原样透传——缺省/all 保持旧全量搜索；title 供 progressive 首屏
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
       const directory = ctx.query.directory ? yield* InstanceState.directory : undefined
       return yield* session.list({
@@ -91,7 +93,28 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         roots: ctx.query.roots,
         start: ctx.query.start,
         search: ctx.query.search,
+        searchMode: ctx.query.searchMode,
         limit: ctx.query.limit,
+      })
+    })
+
+    // #544 progressive B2 HTTP：payload 带 scope 字段，directory 与 list 一样受 scope=project 影响
+    const searchScan = Effect.fn("SessionHttpApi.searchScan")(function* (ctx: {
+      payload: typeof SearchScanPayload.Type
+      query: { directory?: string }
+    }) {
+      const payload = ctx.payload
+      const directory = payload.directory ?? (ctx.query.directory ? yield* InstanceState.directory : undefined)
+      return yield* session.searchScan({
+        search: payload.search,
+        cursor: payload.cursor,
+        batch: payload.batch,
+        scope: payload.scope,
+        path: payload.path,
+        roots: payload.roots,
+        start: payload.start,
+        // scope=project 时忽略 directory，与 SessionHttpApi.list 一致
+        directory: payload.scope === "project" ? undefined : directory,
       })
     })
 
@@ -637,5 +660,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     .handle("goalSet", goalSet)
     .handle("goalClear", goalClear)
     .handle("preview", preview)
+    .handle("searchScan", searchScan)
   }),
 )

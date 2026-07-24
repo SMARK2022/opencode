@@ -36,7 +36,39 @@ export const ListQuery = Schema.Struct({
   roots: Schema.optional(QueryBoolean),
   start: Schema.optional(Schema.NumberFromString),
   search: Schema.optional(Schema.String),
+  // #544：title：progressive 首屏子集；缺省或 all：完整 title∨content（兼容旧客户端与 SDK）
+  // 不得把 title 模式的结果当作 complete 权威集合
+  searchMode: Schema.optional(Schema.Literals(["title", "all"] as const)),
   limit: Schema.optional(Schema.NumberFromString),
+})
+// #544 progressive B2 载荷：cursor 为候选页末行 keyset，batch 是候选窗不是命中数
+// batch clamp 在 schema（1-100）与服务层双保险：wire 层先拒明显滥用值。
+export const SearchScanPayload = Schema.Struct({
+  search: Schema.String,
+  // cursor 二元组与 orderBy(time_updated DESC, id DESC) 同序——乱序游标会漏行/重复。
+  cursor: Schema.optional(
+    Schema.Struct({
+      time_updated: Schema.Number,
+      id: Schema.String,
+    }),
+  ),
+  batch: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(100))),
+  scope: Schema.optional(Schema.Literals(["project"])),
+  path: Schema.optional(Schema.String),
+  roots: Schema.optional(Schema.Boolean),
+  start: Schema.optional(Schema.Number),
+  directory: Schema.optional(Schema.String),
+})
+// nextCursor 为 null 即宇宙耗尽；sessions 只含 full-condition 命中，不含 title-only 命中。
+export const SearchScanResponse = Schema.Struct({
+  sessions: Schema.Array(Session.Info),
+  nextCursor: Schema.NullOr(
+    Schema.Struct({
+      time_updated: Schema.Number,
+      id: Schema.String,
+    }),
+  ),
+  done: Schema.Boolean,
 })
 export const DiffQuery = Schema.Struct({
   ...WorkspaceRoutingQueryFields,
@@ -152,6 +184,9 @@ export const SessionPaths = {
   // POST 语义而非 GET——sessionID 列表作为 payload 传输，规避 URL 长度限制
   // 路径不含 :sessionID，需要 workspace-routing 添加例外避免品牌校验
   preview: `${root}/preview`,
+  // #544 progressive search B2：同 list 宇宙 keyset 候选批 + full-condition 命中
+  // TUI 用手写 sdk.fetch 调用，避免 gen SDK 缺字段
+  searchScan: `${root}/search/scan`,
 } as const
 
 export const SessionApi = HttpApi.make("session")
@@ -579,6 +614,20 @@ export const SessionApi = HttpApi.make("session")
             summary: "Batch session preview",
             description:
               "Retrieve the most recent user message text for multiple sessions in a single request.",
+          }),
+        ),
+        // #544：与 preview 同组——实例路由 + workspace middleware，body 带 search/cursor/batch
+        HttpApiEndpoint.post("searchScan", SessionPaths.searchScan, {
+          query: WorkspaceRoutingQuery,
+          payload: SearchScanPayload,
+          success: described(SearchScanResponse, "Progressive session search scan page"),
+          error: [HttpApiError.BadRequest],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.search.scan",
+            summary: "Progressive session search scan",
+            description:
+              "Scan the next candidate window in list universe order and return full searchCondition matches.",
           }),
         ),
       )
