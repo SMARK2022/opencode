@@ -5,6 +5,8 @@ import type { TextareaRenderable } from "@opentui/core"
 import { selectedForeground, tint, useTheme } from "../../context/theme"
 import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
 import { useSDK } from "../../context/sdk"
+import { useProject } from "../../context/project"
+import { useSync } from "../../context/sync"
 import { SplitBorder } from "../../ui/border"
 import { useTuiConfig } from "../../config"
 import { useBindings, useOpencodeModeStack, useCommandShortcut } from "../../keymap"
@@ -18,6 +20,10 @@ const QUESTION_MODE = "question"
 
 export function QuestionPrompt(props: { request: QuestionRequest; directory?: string }) {
   const sdk = useSDK()
+  const project = useProject()
+  const sync = useSync()
+  // 与directory使用同一请求的Session，避免项目当前workspace覆盖跨目录问答的归属。
+  const workspace = () => sync.session.get(props.request.sessionID)?.workspaceID ?? project.workspace.current()
   const { theme } = useTheme()
   const renderer = useRenderer()
   const tuiConfig = useTuiConfig()
@@ -106,6 +112,7 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
     void sdk.client.question.reply({
       requestID: props.request.id,
       directory: props.directory,
+      workspace: workspace(),
       answers,
     })
   }
@@ -114,6 +121,7 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
     void sdk.client.question.reject({
       requestID: props.request.id,
       directory: props.directory,
+      workspace: workspace(),
     })
   }
 
@@ -130,6 +138,7 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
       void sdk.client.question.reply({
         requestID: props.request.id,
         directory: props.directory,
+        workspace: workspace(),
         answers: [[answer]],
       })
       return

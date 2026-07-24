@@ -119,6 +119,8 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
   const pathFormatter = usePathFormatter()
 
   const session = createMemo(() => sync.data.session.find((s) => s.id === props.request.sessionID))
+  // project范围的请求可能属于另一workspace；回复必须优先命中该Session的owner。
+  const workspace = () => session()?.workspaceID ?? project.workspace.current()
 
   const input = createMemo(() => {
     const tool = props.request.tool
@@ -170,7 +172,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
               reply: "always",
               requestID: props.request.id,
               directory: props.directory,
-              workspace: project.workspace.current(),
+              workspace: workspace(),
             })
           }}
         />
@@ -183,7 +185,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
               requestID: props.request.id,
               directory: props.directory,
               message: message || undefined,
-              workspace: project.workspace.current(),
+              workspace: workspace(),
             })
           }}
           onCancel={() => {
@@ -420,7 +422,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                     reply: "reject",
                     requestID: props.request.id,
                     directory: props.directory,
-                    workspace: project.workspace.current(),
+                    workspace: workspace(),
                   })
                   return
                 }
@@ -428,7 +430,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                   reply: "once",
                   requestID: props.request.id,
                   directory: props.directory,
-                  workspace: project.workspace.current(),
+                  workspace: workspace(),
                 })
               }}
             />
