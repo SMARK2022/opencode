@@ -85,6 +85,41 @@ describe("SessionProjector", () => {
       expect(yield* search(" \t ")).toEqual(ids.toSorted())
     }),
   )
+  previewIt.effect("checks Native root and child idle clocks at exact boundaries", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const day = 24 * 60 * 60 * 1000
+      const now = Date.now()
+      const parent = SessionV2.ID.make("ses_native_idle_parent")
+      // 相反的Session/消息时钟排除误用；边缘前后1ms与合法0不依赖调度等待。
+      const fixtures = [
+        { key: "root_old", child: false, updated: now - 7 * day - 1, last: now, eligible: true },
+        { key: "root_hot", child: false, updated: now - 7 * day + 1, last: 0, eligible: false },
+        { key: "child_old", child: true, updated: now, last: now - day - 1, eligible: true },
+        { key: "child_hot", child: true, updated: 0, last: now - day + 1, eligible: false },
+        { key: "child_zero", child: true, updated: now, last: 0, eligible: true },
+      ].map(entry => ({ ...entry, id: SessionV2.ID.make(`ses_idle_${entry.key}`), messageID: SessionMessage.ID.make(`msg_idle_${entry.key}`) }))
+      yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
+      yield* db.insert(SessionTable).values({ id: parent, project_id: Project.ID.global, slug: parent, directory: "/project", title: "idle parent", version: "test", time_updated: now }).run()
+      yield* db.insert(SessionTable).values(fixtures.map(entry => ({ id: entry.id, project_id: Project.ID.global,
+        slug: entry.id, directory: "/project", title: entry.key, version: "test", parent_id: entry.child ? parent : null, time_updated: entry.updated,
+      }))).run()
+      yield* db.insert(SessionMessageTable).values(fixtures.map(entry => {
+        const message = assistantRow(entry.messageID, 1, { created: DateTime.makeUnsafe(entry.last) })
+        return { ...message, session_id: entry.id, data: { ...message.data, content: [{ type: "reasoning", id: "reason", text: "Native idle field ".repeat(200) }] } }
+      })).run()
+      yield* Database.withSync({ db, sync: db.sync }, sync => {
+        for (const entry of fixtures) {
+          const input = { type: "session_message" as const, id: entry.messageID, now }
+          expect(ColdStorage.isEligibleOwner(sync, input)).toBe(entry.eligible)
+          // 同一override只强制root年龄，不能把尚不足24h的child误冻。
+          expect(ColdStorage.isEligibleOwner(sync, { ...input, olderThanMs: 0 })).toBe(entry.child ? entry.eligible : true)
+        }
+        expect(ColdStorage.parseMaintenanceRequest({ operation: "compress" })).toMatchObject({ olderThanMs: 7 * day })
+      })
+    }),
+  )
+
   previewIt.effect("maintains Native cold owners by seq and rolls back corrupted reads", () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db

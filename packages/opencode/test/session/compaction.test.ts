@@ -36,7 +36,7 @@ import { TestConfig } from "../fixture/config"
 // #493：compact eligibility 直测 ColdStorage——四象限经由真实 compaction 结构验证双门禁；
 // Database 沿用文件既有 import（L4），此处只补 ColdStorage/SessionTable/eq。
 import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
-import { SessionTable } from "@opencode-ai/core/session/sql"
+import { MessageTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { eq } from "drizzle-orm"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { LLMEvent, Usage } from "@opencode-ai/llm"
@@ -3139,6 +3139,87 @@ describe("ColdStorage compact eligibility", () => {
       })
       expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: recentPart.id })).toBe(false)
       yield* ssn.remove(recentSession.id)
+
+      // #543：root 闲置默认 7 天——time_updated 8d 前 eligible，1d 前 ineligible（无 compact boundary）。
+      const rootAge = yield* ssn.create({ title: "root-7d-age" })
+      const rootUser = yield* createUserMessage(rootAge.id, "root-age")
+      const rootPart = yield* addCompletedToolPart({
+        sessionID: rootAge.id,
+        messageID: rootUser.id,
+        tool: "read",
+        output: "root-age-output-".repeat(512),
+      })
+      // 时钟夹具直改 time_updated（#493 sync 直查形态），不复制 production 查询。
+      sync
+        .update(SessionTable)
+        .set({ time_updated: Date.now() - 8 * 24 * 60 * 60 * 1000 })
+        .where(eq(SessionTable.id, rootAge.id))
+        .run()
+      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: rootPart.id })).toBe(true)
+      sync
+        .update(SessionTable)
+        .set({ time_updated: Date.now() - 1 * 24 * 60 * 60 * 1000 })
+        .where(eq(SessionTable.id, rootAge.id))
+        .run()
+      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: rootPart.id })).toBe(false)
+      // root 不得因 last message 变老而走 subagent 时钟：消息 25h 前但 session 仍热时必须 ineligible。
+      sync
+        .update(SessionTable)
+        .set({ time_updated: Date.now() })
+        .where(eq(SessionTable.id, rootAge.id))
+        .run()
+      sync
+        .update(MessageTable)
+        .set({ time_created: Date.now() - 25 * 60 * 60 * 1000 })
+        .where(eq(MessageTable.session_id, rootAge.id))
+        .run()
+      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: rootPart.id })).toBe(false)
+      yield* ssn.remove(rootAge.id)
+
+      // #543：subagent（parent_id 非空）用 last message≥24h；session.time_updated 再新也不挡 age。
+      const parent = yield* ssn.create({ title: "parent-for-subagent-idle" })
+      const child = yield* ssn.create({ title: "subagent-idle-child", parentID: parent.id })
+      const childUser = yield* createUserMessage(child.id, "child")
+      const childPart = yield* addCompletedToolPart({
+        sessionID: child.id,
+        messageID: childUser.id,
+        tool: "read",
+        output: "child-idle-output-".repeat(512),
+      })
+      sync
+        .update(SessionTable)
+        .set({ time_updated: Date.now() })
+        .where(eq(SessionTable.id, child.id))
+        .run()
+      sync
+        .update(MessageTable)
+        .set({ time_created: Date.now() - 25 * 60 * 60 * 1000 })
+        .where(eq(MessageTable.session_id, child.id))
+        .run()
+      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: childPart.id })).toBe(true)
+      // last message 仍新时，即便 time_updated 很老也不得误冻 subagent。
+      sync
+        .update(SessionTable)
+        .set({ time_updated: Date.now() - 30 * 24 * 60 * 60 * 1000 })
+        .where(eq(SessionTable.id, child.id))
+        .run()
+      sync
+        .update(MessageTable)
+        .set({ time_created: Date.now() - 1 * 60 * 60 * 1000 })
+        .where(eq(MessageTable.session_id, child.id))
+        .run()
+      expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: childPart.id })).toBe(false)
+      // olderThanMs:0 只强制 root age；subagent 仍看 last message，不能被 root 标志误伤。
+      expect(
+        ColdStorage.isEligibleOwner(sync, {
+          type: "part",
+          id: childPart.id,
+          olderThanMs: 0,
+        }),
+      ).toBe(false)
+      yield* ssn.remove(child.id)
+      // #543：parent 夹具同样清理，保持与 source 逐行对应（无冷数据，纯卫生）。
+      yield* ssn.remove(parent.id)
     }),
   )
 })
