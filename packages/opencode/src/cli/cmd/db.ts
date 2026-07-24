@@ -533,15 +533,16 @@ async function executeResume(taskID: string) {
   }
 }
 
-// compress 默认只改变满足 30 天或 compact boundary 的白名单字段；--session 只是缩小 owner scope。
-// batch 默认值来自本机 2.2 GB 实测，不在 CLI 复制魔法数字，daemon JSON 缺省也使用同一常量。
+// compress：completed compact head OR root idle（--older-than，默认 7d，session.time_updated）OR subagent idle（固定 24h last message）。
+// --older-than 只调 root 阈值；subagent 24h 由 ColdStorage 常量固定，不在 CLI 复制第二套规则。
+// batch 默认值来自本机 2.2 GB 实测，daemon JSON 缺省也使用同一常量。
 const CompressCommand = cmd({
   command: "compress",
   describe: "freeze eligible cold fields into the database cold store",
   builder: (yargs: Argv) =>
     yargs
       .option("session", { type: "string" })
-      .option("older-than", { type: "string", default: "30d" })
+      .option("older-than", { type: "string", default: "7d" })
       .option("batch-size", { type: "number", default: ColdStorage.DEFAULT_BATCH_SIZE })
       .option("vacuum", { type: "boolean", default: false })
       .option("yes", { type: "boolean", default: false })

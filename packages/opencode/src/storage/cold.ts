@@ -13,8 +13,10 @@ import { CompactionBoundary } from "@/session/compaction-boundary"
 import { Snapshot } from "@/snapshot"
 import type { MessageV2 } from "@/session/message-v2"
 
-// 30 天 age 与 completed compaction boundary 是并列 eligibility，任一成立即可安全进入冷存储。
-const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
+// root 7 天 session.time_updated、subagent 24 小时 last message、completed compact head 三者 OR；任一成立即可进冷存储。
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
+// subagent 固定 24h last-message 阈值；CLI olderThanMs 只调 root，不覆盖该常量。
+const SUBAGENT_IDLE_MS = 24 * 60 * 60 * 1000
 // 1 MiB 是普通 pack 的目标而非硬上限；单个超大 entry 必须独立保留完整信息而不能截断。
 const PACK_TARGET_BYTES = 1024 * 1024
 export const DEFAULT_BATCH_SIZE = 2000
@@ -895,20 +897,38 @@ function restorePackedPart(data: (typeof PartTable.$inferSelect)["data"], fields
   return restorePart(data, { version: 1, owner: "part", fields }, hash)
 }
 
-// eligibility 同时读取 session age 与最新 completed compaction boundary，两条规则在一个 owner 判断中合并。
-// session.time_updated 是 age 的唯一时钟；Message/Part 自身时间不能代表会话是否仍在活跃使用。
-// olderThanMs 由准备后的 request 固定，resume 不允许用新 CLI 参数改变同一 task 的判定集合。
-// boundary 查询结果可按 session.updated 缓存，但业务写入改变 session 时间后必须重新计算以避免冻住新 tail。
-function eligibility(db: TxOrDb, sessionID: SessionID, now: number, olderThanMs = THIRTY_DAYS_MS) {
+// eligibility 合并 root/subagent 闲置时钟与最新 completed compaction boundary，三条规则 OR。
+// root 用 session.time_updated；subagent（parent_id 非空）用 max(message.time_created)，不用 SessionStatus。
+// olderThanMs 只作为 root 闲置阈值由 prepare 后的 request 固定；subagent 24h 常量不可被 CLI 改写。
+// boundary 结果可按 session 缓存，但写入改变时间后必须重算，避免冻住新 tail。
+function lastMessageCreated(db: TxOrDb, sessionID: SessionID) {
+  // 空会话 max 为 null：无法证明 last-message idle，subagent age 分支必须为 false。
+  return (
+    db
+      .select({ value: sql<number | null>`max(${MessageTable.time_created})` })
+      .from(MessageTable)
+      .where(eq(MessageTable.session_id, sessionID))
+      .get()?.value ?? null
+  )
+}
+
+function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderThanMs = SEVEN_DAYS_MS) {
   const session = db
-    .select({ updated: SessionTable.time_updated })
+    .select({ updated: SessionTable.time_updated, parentID: SessionTable.parent_id })
     .from(SessionTable)
     .where(eq(SessionTable.id, sessionID))
     .get()
   if (!session) return
   const boundary = CompactionBoundary.latest(sessionID)
+  // parent_id 是 task/subagent 权威分类；fork 无 parent，走 root 时钟，禁止用标题匹配。
+  const aged = session.parentID
+    ? (() => {
+        const last = lastMessageCreated(db, sessionID)
+        return last !== null && last <= now - SUBAGENT_IDLE_MS
+      })()
+    : session.updated <= now - rootOlderThanMs
   return {
-    aged: session.updated <= now - olderThanMs,
+    aged,
     boundary: boundary ? (boundary.tailStartID ?? boundary.markerID) : undefined,
     markerID: boundary?.markerID,
     summaryID: boundary?.summaryID,
@@ -2254,11 +2274,11 @@ function freeze(
 }
 
 // 公开 freezeOwner 是测试、精确 session 操作和未来内部调用的最小 seam，不暴露 codec 或 projection 细节。
-// olderThanMs 可由已规范化 maintenance request 传入，缺省保持产品合同的 30 天。
+// olderThanMs 可由已规范化 maintenance request 传入，缺省 root 7 天；subagent 仍用固定 24h last-message。
 // 返回 skipped reason 便于 task 计数，但不会把 ineligible/no-fields 当作错误或改写 owner。
 export function freezeOwner(input: Owner & { now?: number; olderThanMs?: number }): FreezeResult {
   const now = input.now ?? Date.now()
-  return Database.transaction((db) => freeze(db, { ...input, now, olderThanMs: input.olderThanMs ?? THIRTY_DAYS_MS }), {
+  return Database.transaction((db) => freeze(db, { ...input, now, olderThanMs: input.olderThanMs ?? SEVEN_DAYS_MS }), {
     behavior: "immediate",
   })
 }
@@ -2574,7 +2594,7 @@ function partCandidate() {
 export function isEligibleOwner(input: Owner & { now?: number; olderThanMs?: number }) {
   return Database.use((db) => {
     const now = input.now ?? Date.now()
-    const olderThanMs = input.olderThanMs ?? THIRTY_DAYS_MS
+    const olderThanMs = input.olderThanMs ?? SEVEN_DAYS_MS
     if (input.type === "message") {
       const row = db.select().from(MessageTable).where(eq(MessageTable.id, input.id)).get()
       if (!row || row.cold_key) return false
@@ -2922,7 +2942,7 @@ export function parseMaintenanceRequest(input: unknown): MaintenanceRequest {
       return {
         operation: "compress",
         ...(sessionID ? { sessionID } : {}),
-        olderThanMs: input.olderThanMs === undefined ? THIRTY_DAYS_MS : Number(input.olderThanMs),
+        olderThanMs: input.olderThanMs === undefined ? SEVEN_DAYS_MS : Number(input.olderThanMs),
         batchSize,
       }
     case "expand":
@@ -3499,9 +3519,9 @@ export function status(): StatusReport {
       activeBytes: Math.max(0, pages - freelistPages) * pageSize,
       // 物理门槛使用批准的 decimal 1.5 GB，避免与 GiB 换算混淆。
       targetBytes: 1_500_000_000,
-      // 候选扫描不调用 freeze，也不更新 time_updated 或预先创建 payload。
-      // 频繁 TUI status 因此不会反过来改变 30 天 age eligibility。
-      eligibleOwners: eligibleOwnerCount(db, Date.now(), THIRTY_DAYS_MS),
+      // 候选扫描不调用 freeze；status 使用与默认 compress 相同的 root 7d / subagent 24h 阈值。
+      // 频繁 TUI status 因此不会反过来改变 root time_updated 或 last-message 时钟。
+      eligibleOwners: eligibleOwnerCount(db, Date.now(), SEVEN_DAYS_MS),
       coldOwners,
       summaryOwners,
       summaryPayloads: summaryPayloads.length,
