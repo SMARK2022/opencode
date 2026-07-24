@@ -974,9 +974,11 @@ it.instance(
             db.exec("COMMIT")
             db.close()
           `
+          // 并发 writer 子进程在 Windows 上隐藏 console，锁竞争验证不弹窗。
           const worker = Bun.spawn([process.execPath, "-e", script, dbPath, session.id], {
             stdout: "pipe",
             stderr: "pipe",
+            windowsHide: process.platform === "win32",
           })
           const ready = yield* Effect.promise(async () => {
             const chunk = await worker.stdout.getReader().read()

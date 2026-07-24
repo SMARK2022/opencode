@@ -13,10 +13,12 @@ async function runChild(script: string, env: Record<string, string>) {
   const inherited = Object.fromEntries(
     Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
   )
+  // 干净 Bun 子进程在 Windows 上隐藏 console，idle timeout 隔离测不弹窗。
   const child = Bun.spawn(["bun", "-e", script], {
     env: { ...inherited, ...env },
     stdout: "pipe",
     stderr: "pipe",
+    windowsHide: process.platform === "win32",
   })
   // 同时读取 stdout/stderr，避免 child 在失败时因 pipe 背压而掩盖真正的 timeout 结果。
   const [exit, stdout, stderr] = await Promise.all([
