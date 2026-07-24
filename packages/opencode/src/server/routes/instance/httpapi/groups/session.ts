@@ -33,7 +33,36 @@ export const ListQuery = Schema.Struct({
   roots: Schema.optional(QueryBoolean),
   start: Schema.optional(Schema.NumberFromString),
   search: Schema.optional(Schema.String),
+  // title：progressive 首屏子集；缺省或 all：完整 title∨content（兼容旧客户端与 SDK）
+  // 不得把 title 模式的结果当作 complete 权威集合
+  searchMode: Schema.optional(Schema.Literals(["title", "all"] as const)),
   limit: Schema.optional(Schema.NumberFromString),
+})
+// progressive B2 载荷：cursor 为候选页末行 keyset，batch 是候选窗不是命中数
+export const SearchScanPayload = Schema.Struct({
+  search: Schema.String,
+  cursor: Schema.optional(
+    Schema.Struct({
+      time_updated: Schema.Number,
+      id: Schema.String,
+    }),
+  ),
+  batch: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(100))),
+  scope: Schema.optional(Schema.Literals(["project"])),
+  path: Schema.optional(Schema.String),
+  roots: Schema.optional(Schema.Boolean),
+  start: Schema.optional(Schema.Number),
+  directory: Schema.optional(Schema.String),
+})
+export const SearchScanResponse = Schema.Struct({
+  sessions: Schema.Array(Session.Info),
+  nextCursor: Schema.NullOr(
+    Schema.Struct({
+      time_updated: Schema.Number,
+      id: Schema.String,
+    }),
+  ),
+  done: Schema.Boolean,
 })
 export const DiffQuery = Schema.Struct({
   ...WorkspaceRoutingQueryFields,
@@ -212,6 +241,9 @@ export const SessionPaths = {
   goal: `${root}/:sessionID/goal`,
   // [local-smark] 预览端点：POST /session/preview，批量返回 session 预览文本
   preview: `${root}/preview`,
+  // progressive search B2：同 list 宇宙 keyset 候选批 + full-condition 命中
+  // TUI 用手写 sdk.fetch 调用，避免 gen SDK 缺字段
+  searchScan: `${root}/search/scan`,
 } as const
 
 export const SessionApi = HttpApi.make("session")
@@ -640,6 +672,20 @@ export const SessionApi = HttpApi.make("session")
             summary: "Batch session preview",
             description:
               "Retrieve the most recent user message text for multiple sessions in a single request.",
+          }),
+        ),
+        // 与 preview 同组：实例路由 + workspace middleware，body 带 search/cursor/batch
+        HttpApiEndpoint.post("searchScan", SessionPaths.searchScan, {
+          query: WorkspaceRoutingQuery,
+          payload: SearchScanPayload,
+          success: described(SearchScanResponse, "Progressive session search scan page"),
+          error: [HttpApiError.BadRequest],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.search.scan",
+            summary: "Progressive session search scan",
+            description:
+              "Scan the next candidate window in list universe order and return full searchCondition matches.",
           }),
         ),
       )

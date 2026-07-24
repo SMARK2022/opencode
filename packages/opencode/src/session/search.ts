@@ -19,7 +19,11 @@ import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./se
  * 多关键词：按空白切成 token，每个 token 仍是 title∨可见内容命中，
  * token 之间 AND（交集），而不是把 "A B" 当整串子串检索。
  */
-export function searchCondition(search: string): SQL | undefined {
+// title = progressive 首屏子集；all = 今日完整合同（每 token title∨content）
+// complete 路径与 searchScan 必须使用 all，禁止用 title 定义最终召回
+export type SearchMode = "title" | "all"
+
+export function searchCondition(search: string, options?: { mode?: SearchMode }): SQL | undefined {
   const tokens = search
     .trim()
     .toLowerCase()
@@ -27,10 +31,17 @@ export function searchCondition(search: string): SQL | undefined {
     .filter((token) => token.length > 0)
   if (tokens.length === 0) return undefined
 
+  // title 模式故意不扫 part，才能把首屏压到毫秒级；complete 仍走 all/scan
+  const mode = options?.mode ?? "all"
   // 单 token 与历史语义一致；多 token 逐个 AND，等价于「先 A 再 B 再 C」
-  const parts = tokens.map((needle) => tokenCondition(needle))
+  const parts = tokens.map((needle) => (mode === "title" ? titleTokenCondition(needle) : tokenCondition(needle)))
   if (parts.length === 1) return parts[0]
   return sql`(${sql.join(parts, sql` and `)})`
+}
+
+// 仅标题子串：不能单独定义 multi-token 跨字段命中（title 含 A、正文含 B 会漏）
+function titleTokenCondition(needle: string) {
+  return textMatches(sql`${SessionTable.title}`, needle)
 }
 
 function tokenCondition(needle: string) {
