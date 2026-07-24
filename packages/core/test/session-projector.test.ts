@@ -134,6 +134,8 @@ describe("SessionProjector", () => {
       const payload = yield* db.select().from(ColdStorageTable).get()
       if (!payload) return yield* Effect.die("Missing shared Native payload")
       expect(payload.ref_count).toBe(2)
+      // 相同entry的真实共享仍计两份逻辑Raw，不能把所有pack简单按blob计一次。
+      expect(new Set(cold.map(row => row.cold_key?.toString("hex"))).size).toBe(1)
       // 破坏真实payload后整段读取必须回滚，不能交回空reasoning或消耗引用。
       yield* db.update(ColdStorageTable).set({ payload: Buffer.from([0]) }).where(eq(ColdStorageTable.hash, payload.hash)).run()
       // Native已打包owner的status只读metadata；坏body不能被此报告解压或被悄悄修复。
@@ -185,6 +187,12 @@ describe("SessionProjector", () => {
       const packed = yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, [oldID, hiddenID])).orderBy(SessionMessageTable.seq).all()
       expect(new Set(packed.map(row => row.cold_ref)).size).toBe(1)
       expect(new Set(packed.map(row => row.cold_key?.toString("hex"))).size).toBe(2)
+      const packPayload = yield* db.select().from(ColdStorageTable).get()
+      if (!packPayload) return yield* Effect.die("Missing multi-key Native pack")
+      // 两个不同entry已包含在一包中；独立期望来自真实metadata，不复制F4公式。
+      yield* Database.withSync({ db, sync: db.sync }, sync => {
+        expect(ColdStorage.status(sync)).toMatchObject({ rawBytes: packPayload.raw_bytes, compressedBytes: packPayload.compressed_bytes, sharedBytes: 0 })
+      })
       const bad = packed.find(row => row.id === hiddenID)
       if (!bad?.cold_key) return yield* Effect.die("Native pack key is missing")
       const key = Buffer.from(bad.cold_key)
