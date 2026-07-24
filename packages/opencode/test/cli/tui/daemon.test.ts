@@ -300,17 +300,325 @@ async function spawnEnsureLauncher(lockPath: string) {
   return { proc, lock }
 }
 
-async function readUntil(reader: ReadableStreamDefaultReader<string>, text: string) {
-  let seen = ""
+// 同一 reader 上的 stdout 必须跨 wait 累积：同 chunk 内先匹配 A 后的 B 不能在第二次 wait 中丢失。
+// WeakMap 按 reader 实例隔离缓冲，禁止跨用例/跨流泄漏状态。
+// 本泵只服务 daemon lifecycle 的 marker 合同；不得用于替代生产 control 超时语义。
+const stdoutPumpBuffers = new WeakMap<ReadableStreamDefaultReader<string>, string>()
+
+async function readUntil(
+  reader: ReadableStreamDefaultReader<string>,
+  text: string,
+  // 有界等待把 marker 缺失变成可诊断失败；默认对齐本文件最长 daemon 安全窗，避免 120s 静默 hang。
+  // Force A/B 必须显式传入 2–5s，禁止误用默认窗掩盖分类失败。
+  timeoutMs = DAEMON_START_TIMEOUT_MS + 90_000,
+) {
+  let seen = stdoutPumpBuffers.get(reader) ?? ""
+  const deadline = Date.now() + timeoutMs
   while (!seen.includes(text)) {
-    const next = await reader.read()
-    if (next.done) break
-    seen += next.value
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      // dump 已读缓冲用于区分 IPC 漏 marker 与生产路径挂起；不把 harness 超时伪装成 CI hang 根因已修。
+      throw new Error(`timed out waiting for ${JSON.stringify(text)} after ${timeoutMs}ms; seen=${JSON.stringify(seen)}`)
+    }
+    // 超时分支返回 sentinel，避免与 ReadableStream 的 done 结果混淆。
+    const next = await Promise.race([
+      reader.read().then((value) => ({ kind: "chunk" as const, value })),
+      Bun.sleep(remaining).then(() => ({ kind: "timeout" as const })),
+    ])
+    if (next.kind === "timeout") {
+      throw new Error(`timed out waiting for ${JSON.stringify(text)} after ${timeoutMs}ms; seen=${JSON.stringify(seen)}`)
+    }
+    if (next.value.done) break
+    seen += next.value.value
+    // 每 chunk 回写，保证并发 waitStartGate 与 readUntil 共享同一已读前缀。
+    stdoutPumpBuffers.set(reader, seen)
   }
+  stdoutPumpBuffers.set(reader, seen)
   return seen
 }
 
+// 只读缓冲快照，不推进 stream；供 waitStartGate 在 HTTP settle 时复查 marker。
+function stdoutSeen(reader: ReadableStreamDefaultReader<string>) {
+  return stdoutPumpBuffers.get(reader) ?? ""
+}
+
+// 仅用于 blocked-2：start 的 continue 尚未预缓冲，HTTP 先完成且缓冲无 marker 才可分类为异常。
+// blocked-3 禁止使用本竞态（double-continue 预缓冲会使 rename 立即结束并 202）。
+// 只观察 Response 对象是否 settled，不消费 body，调用方仍可 await 同一 Promise。
+// 25ms 二次泵给 marker 与 HTTP 同窗到达留出缓冲刷新时间，避免假阳性 classify。
+async function waitStartGate(
+  reader: ReadableStreamDefaultReader<string>,
+  marker: string,
+  http: Promise<Response>,
+  timeoutMs: number,
+) {
+  let settled: Response | undefined
+  void http.then((response) => {
+    settled = response
+  })
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (stdoutSeen(reader).includes(marker)) return stdoutSeen(reader)
+    if (settled) {
+      try {
+        await readUntil(reader, marker, 25)
+        return stdoutSeen(reader)
+      } catch {
+        // HTTP 已决且缓冲仍无 marker：对应 outcome B/D 分类，不是 suite 静默 hang。
+        throw new Error(
+          `start gate HTTP settled without ${JSON.stringify(marker)}: status=${settled.status} seen=${JSON.stringify(stdoutSeen(reader))}`,
+        )
+      }
+    }
+    try {
+      await readUntil(reader, marker, Math.min(50, Math.max(1, deadline - Date.now())))
+      return stdoutSeen(reader)
+    } catch {
+      // 短窗未命中则继续与 HTTP 竞态。
+    }
+  }
+  // 超时 dump 必须带 stages，供 OD-1 区分 A（有 rename）与 C（无 mkdir-attempt）。
+  throw new Error(
+    `timed out waiting for start gate ${JSON.stringify(marker)} after ${timeoutMs}ms; seen=${JSON.stringify(stdoutSeen(reader))}`,
+  )
+}
+
+// 空库 compress 夹具：仅服务 recovery/start gate 诊断，不扩展 ColdStorage 产品语义。
+// olderThanMs=0 + batchSize=1 保证 maintain 在空库上快速 completed，避免诊断被业务耗时淹没。
+function interruptedCompressTask(taskID: string, dbPath: string): MaintenanceTask {
+  return {
+    version: 1,
+    taskID,
+    dbPath,
+    operation: "compress",
+    args: { operation: "compress", olderThanMs: 0, batchSize: 1 },
+    status: "interrupted",
+    cursor: { owner: "message", lastID: "" },
+    processed: 0,
+    skipped: 0,
+    failed: 0,
+    rawBytes: 0,
+    compressedBytes: 0,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  }
+}
+
+// 统一 stage worker 源码：mkdir/rename/rm 诊断序与 Track H write-gate 合同只维护一处。
+// stage:mkdir-attempt 在 real mkdir 前发出；mkdir-ok 仅成功路径；失败 EEXIST 不发 ok（对齐 stale reclaim）。
+// stage:stale-rename 与 rename-blocked-N 同序，表示进入 dead-owner rename gate，非 pre-FS acquire-enter。
+// pid 哨兵 2147483647 在 Windows/Unix 上均 dead，强制走 rename reclaim 而非 live busy。
+function maintenanceStageWorkerSource(leaseDir: string) {
+  return `
+    import { mock } from "bun:test"
+    import * as fs from "node:fs/promises"
+    import path from "node:path"
+    const input = Bun.stdin.stream().getReader()
+    const realRename = fs.rename.bind(fs)
+    const realRm = fs.rm.bind(fs)
+    const realMkdir = fs.mkdir.bind(fs)
+    const leaseLock = path.resolve(${JSON.stringify(leaseDir)})
+    let buffered = ""
+    let renameIndex = 0
+    let release = true
+    const gate = async (name) => {
+      process.stdout.write(name + "\\n")
+      while (!buffered.includes("\\n")) {
+        const next = await input.read()
+        if (next.done) return
+        buffered += new TextDecoder().decode(next.value)
+      }
+      buffered = buffered.slice(buffered.indexOf("\\n") + 1)
+    }
+    mock.module("fs/promises", () => ({
+      ...fs,
+      mkdir: async (target, options) => {
+        if (path.resolve(String(target)) === leaseLock) {
+          process.stdout.write("stage:mkdir-attempt\\n")
+          try {
+            const out = await realMkdir(target, options)
+            process.stdout.write("stage:mkdir-ok\\n")
+            return out
+          } catch (error) {
+            throw error
+          }
+        }
+        return realMkdir(target, options)
+      },
+      rename: async (from, to) => {
+        if (path.resolve(String(from)) === leaseLock) {
+          process.stdout.write("stage:stale-rename\\n")
+          await gate("rename-blocked-" + (++renameIndex))
+        }
+        return realRename(from, to)
+      },
+      rm: async (target, options) => {
+        if (release && options?.recursive && path.resolve(String(target)) === leaseLock) {
+          release = false
+          await gate("lease-release-blocked")
+        }
+        return realRm(target, options)
+      },
+    }))
+    await import(${JSON.stringify(pathToFileURL(WORKER_TS).href)})
+  `
+}
+
+// stderr ignore 对齐 spawnDaemon：长生命周期 worker 禁止未读 pipe 卫生风险；非 hang 根因声明。
+function spawnStageWorker(lockPath: string, leaseDir: string) {
+  const proc = Bun.spawn([process.execPath, "-e", maintenanceStageWorkerSource(leaseDir)], {
+    env: {
+      ...isolatedDaemonEnv(lockPath),
+      OPENCODE_PROCESS_ROLE: "worker",
+      OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "180000",
+    },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "ignore",
+  })
+  return { proc, reader: proc.stdout.pipeThrough(new TextDecoderStream()).getReader() }
+}
+
+// dead owner.json 触发 acquire 的 stale rename 分支；token 按调用区分 tombstone 目标名。
+async function writeDeadLease(leaseDir: string, taskID: string, dbPath: string, token: string) {
+  await mkdir(leaseDir, { recursive: true })
+  await Bun.write(
+    path.join(leaseDir, "owner.json"),
+    JSON.stringify({ pid: 2_147_483_647, token, taskID, dbPath, startedAt: 1 }),
+  )
+}
+
+// recovery 段：blocked-1 → continue → lease-release → release → completed；返回可发 start 的 lock。
+// 与主 lifecycle 用例共享同一握手，避免 Force A/B 复制第三套 recovery 时序。
+async function recoverStageWorkerToIdle(
+  proc: ReturnType<typeof Bun.spawn>,
+  reader: ReadableStreamDefaultReader<string>,
+  lockPath: string,
+  taskID: string,
+) {
+  expect(await readUntil(reader, "rename-blocked-1", 30_000)).toContain("rename-blocked-1")
+  await proc.stdin.write("continue\n")
+  expect(await readUntil(reader, "lease-release-blocked", 30_000)).toContain("lease-release-blocked")
+  let lock: ServerLockModule.ServerLock | undefined
+  const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
+  while (!lock && Date.now() < deadline) {
+    lock = await Bun.file(lockPath).json().catch(() => undefined)
+    if (!lock) await Bun.sleep(POLL_INTERVAL_MS)
+  }
+  if (!lock?.controlPort) throw new Error("daemon lock missing")
+  const terminal = controlRequest(lock, `${ServerLockModule.CONTROL_MAINTENANCE_STATUS_PATH}?task=${taskID}`)
+  await proc.stdin.write("release\n")
+  expect((await terminal).status).toBe(200)
+  return lock
+}
+
 describe("daemon lifecycle", () => {
+  test("readUntil keeps trailing markers from the same stdout chunk", async () => {
+    // INV-H1 红绿：同 chunk 先命中 A 后的 B 必须仍可读；非累积 seen 会在第二次 wait 中永久丢 B。
+    const stream = new ReadableStream<string>({
+      start(controller) {
+        controller.enqueue("rename-blocked-1\nlease-release-blocked\n")
+        controller.close()
+      },
+    })
+    const reader = stream.getReader()
+    try {
+      expect(await readUntil(reader, "rename-blocked-1", 1_000)).toContain("rename-blocked-1")
+      expect(await readUntil(reader, "lease-release-blocked", 1_000)).toContain("lease-release-blocked")
+    } finally {
+      reader.releaseLock()
+    }
+  })
+
+  test("readUntil timeout dumps the accumulated stdout buffer", async () => {
+    // INV-H3 红绿：有界失败必须带已读缓冲，禁止 marker 缺失时吞掉整段 suite timeout。
+    const stream = new ReadableStream<string>({
+      start(controller) {
+        controller.enqueue("partial-marker\n")
+      },
+    })
+    const reader = stream.getReader()
+    try {
+      await expect(readUntil(reader, "missing-marker", 50)).rejects.toThrow(/timed out waiting for "missing-marker".*partial-marker/s)
+    } finally {
+      reader.releaseLock()
+    }
+  })
+
+  test(
+    "start gate Force A dump includes rename-blocked-2 when continue is withheld",
+    async () => {
+      // OD-1 Force A：marker 已写但不 continue → 短超时 dump 含 rename 阶段，诊断可红。
+      // 不 await start Response：gate 阻塞时 fetch 可能 ECONNRESET，与 dump 断言无关。
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const dbPath = path.join(tmp.path, "opencode.db")
+      const task = interruptedCompressTask("dbm_force_a", dbPath)
+      await ServerLockModule.writeMaintenanceTask(task)
+      const leaseDir = path.join(`${dbPath}.maintenance`, "lock")
+      await writeDeadLease(leaseDir, task.taskID, dbPath, "dead-force-a")
+      const { proc, reader } = spawnStageWorker(lockPath, leaseDir)
+      try {
+        const lock = await recoverStageWorkerToIdle(proc, reader, lockPath, task.taskID)
+        // 第二枚 dead lease 专供 start rename-blocked-2，与 recovery taskID 隔离。
+        await writeDeadLease(leaseDir, "dbm_start_gate", dbPath, "dead-start")
+        void controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_PATH, "POST", {
+          operation: "compress",
+          olderThanMs: 0,
+          batchSize: 1,
+        }).catch(() => undefined)
+        const gated = await readUntil(reader, "rename-blocked-2", 30_000)
+        expect(gated).toContain("stage:stale-rename")
+        // 3s 故意失败窗：dump 须同时含 stage:stale-rename 与 rename-blocked-2（outcome A）。
+        await expect(readUntil(reader, "force-a-missing-marker", 3_000)).rejects.toThrow(
+          /timed out waiting for "force-a-missing-marker"[\s\S]*stage:stale-rename[\s\S]*rename-blocked-2/,
+        )
+      } finally {
+        reader.releaseLock()
+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 60_000,
+  )
+
+  test(
+    "start without stale lease fails fast without rename-blocked-2",
+    async () => {
+      // OD-1 Force B：无 dead lock → mkdir-ok、无 rename-blocked-2；5s 内分类失败，禁 120s 静默。
+      // 与 Force A 的差异仅在 start 前是否 writeDeadLease；共享 recover helper 保证对照干净。
+      await using tmp = await tmpdir()
+      const lockPath = path.join(tmp.path, "tui-server.json")
+      const dbPath = path.join(tmp.path, "opencode.db")
+      const task = interruptedCompressTask("dbm_force_b", dbPath)
+      await ServerLockModule.writeMaintenanceTask(task)
+      const leaseDir = path.join(`${dbPath}.maintenance`, "lock")
+      await writeDeadLease(leaseDir, task.taskID, dbPath, "dead-force-b")
+      const { proc, reader } = spawnStageWorker(lockPath, leaseDir)
+      try {
+        const lock = await recoverStageWorkerToIdle(proc, reader, lockPath, task.taskID)
+        // 故意不装 start 用 stale lease：acquire 应 mkdir 成功路径，不进 rename gate。
+        const starting = controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_PATH, "POST", {
+          operation: "compress",
+          olderThanMs: 0,
+          batchSize: 1,
+        })
+        await expect(waitStartGate(reader, "rename-blocked-2", starting, 5_000)).rejects.toThrow(
+          /start gate HTTP settled without "rename-blocked-2"|timed out waiting for start gate "rename-blocked-2"/,
+        )
+        // outcome B：无 rename-blocked-2；至少见 mkdir-attempt/ok 之一，证明 start 触达 lease FS。
+        const dump = stdoutSeen(reader)
+        expect(dump).not.toContain("rename-blocked-2")
+        expect(dump.includes("stage:mkdir-ok") || dump.includes("stage:mkdir-attempt")).toBe(true)
+      } finally {
+        reader.releaseLock()
+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    DAEMON_START_TIMEOUT_MS + 60_000,
+  )
+
   test("daemon status JSON reports no owner without spawning", async () => {
     // 独立lock/XDG/DB保证该查询不可能观察或停止开发者真实daemon。
     // running=false是公开expected literal，测试不读取private lock parser返回类型。
@@ -1397,61 +1705,9 @@ describe("daemon lifecycle", () => {
         )
       }
       await staleLease(task.taskID)
-      // stale owner 只用于触发真实 recovery rename；测试不直接设置 worker 的 active 状态。
-      const wrapper = `
-        import { mock } from "bun:test"
-        import * as fs from "node:fs/promises"
-        // 先绑定原生函数再安装 mock，避免 mock namespace 的 live binding 递归调用自身。
-        const input = Bun.stdin.stream().getReader()
-        const realRename = fs.rename.bind(fs)
-        const realRm = fs.rm.bind(fs)
-        // captured native delegates keep the mock focused on the two published synchronization markers.
-        let buffered = ""
-        let renameIndex = 0
-        let release = true
-        const gate = async (name) => {
-          console.log(name)
-          while (!buffered.includes("\\n")) {
-            const next = await input.read()
-            if (next.done) return
-            buffered += new TextDecoder().decode(next.value)
-          }
-          buffered = buffered.slice(buffered.indexOf("\\n") + 1)
-        }
-        mock.module("fs/promises", () => ({
-          ...fs,
-          rename: async (from, to) => {
-            if (String(from) === ${JSON.stringify(leaseDir)}) {
-              await gate("rename-blocked-" + (++renameIndex))
-            }
-            return realRename(from, to)
-          },
-          rm: async (target, options) => {
-            if (
-              release &&
-              options?.recursive &&
-              String(target).includes(".maintenance") &&
-              String(target).endsWith("lock")
-            ) {
-              release = false
-              await gate("lease-release-blocked")
-            }
-            return realRm(target, options)
-          },
-        }))
-        await import(${JSON.stringify(pathToFileURL(WORKER_TS).href)})
-      `
-      const proc = Bun.spawn([process.execPath, "-e", wrapper], {
-        env: {
-          ...isolatedDaemonEnv(lockPath),
-          OPENCODE_PROCESS_ROLE: "worker",
-          OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "180000",
-        },
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-      })
-      const reader = proc.stdout.pipeThrough(new TextDecoderStream()).getReader()
+      // Track H+D：共享 stage worker；write-gate + OD-1 stages；不声称关闭 CI hang。
+      // 主 lifecycle 仍走完整 start/resume/409/idle 合同；Force A/B 只验证诊断可红。
+      const { proc, reader } = spawnStageWorker(lockPath, leaseDir)
       // 两个 marker 分别控制“注册前”和“terminal 后释放前”，完全避免依赖调度速度。
       try {
         expect(await readUntil(reader, "rename-blocked-1")).toContain("rename-blocked-1")
@@ -1500,9 +1756,14 @@ describe("daemon lifecycle", () => {
         // start 在 stale-lease rename await 中尚未发布 active；pending gate 必须独立返回 busy。
         await staleLease("dbm_start_gate")
         const starting = controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_PATH, "POST", { operation: "compress", olderThanMs: 0, batchSize: 1 })
-        expect(await readUntil(reader, "rename-blocked-2")).toContain("rename-blocked-2")
+        // blocked-2 用 waitStartGate：continue 未预缓冲，HTTP 无 marker 可分类；blocked-3 仍 marker-first。
+        // 30s 仅覆盖正常 gate 出现；Force A 的 3s 是故意失败窗，二者不可互换。
+        const startGate = await waitStartGate(reader, "rename-blocked-2", starting, 30_000)
+        expect(startGate).toContain("rename-blocked-2")
+        expect(startGate).toContain("stage:stale-rename")
         expect((await conditional()).status).toBe(409)
         // 同一 chunk 预置 start/resume 两个 gate token，避免 Windows pipe 的第三次小写入延迟。
+        // 预缓冲使 blocked-3 的 gate 在 marker 写出后立即放行，故禁止对 blocked-3 做 HTTP-without-marker 竞态。
         await proc.stdin.write("continue\ncontinue\n")
         const startResponse = await starting
         expect(startResponse.status).toBe(202)
@@ -1513,6 +1774,7 @@ describe("daemon lifecycle", () => {
         await ServerLockModule.writeMaintenanceTask(resumeTask)
         await staleLease(resumeTask.taskID)
         const resuming = controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_RESUME_PATH, "POST", { taskID: resumeTask.taskID })
+        // blocked-3：marker-first 顺序；HTTP 202 可在 marker 之后任意时刻返回，不得误分类。
         expect(await readUntil(reader, "rename-blocked-3")).toContain("rename-blocked-3")
         expect((await conditional()).status).toBe(409)
         const resumeResponse = await resuming
