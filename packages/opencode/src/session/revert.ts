@@ -92,11 +92,10 @@ export const layer = Layer.effect(
 
             if (!rev) return session
 
-            // 按工具触碰文件过滤 patch：同目录多 session 场景下，snapshot.patch() 列出的
-            // 变更文件包含其他 session 的改动。通过 computeDiff（仅工具流）提取本 session
-            // 工具实际触碰的文件，过滤 patch.files 以避免 revert 覆盖其他 session 的文件。
-            // 安全网：当 session 无工具 part（如纯 bash turn 或旧数据）时 toolFiles 为空，
-            // 此时不过滤，保持原始行为——避免误丢弃非工具 session 的全部 revert 能力。
+            // 只认工具流声明的文件（edit/write/apply_patch metadata）。
+            // snapshot.patch() 的时间窗会混入同目录其他 session/外部改动；
+            // 与 toolFiles 取交集后只 checkout 本 session 工具认领的文件。
+            // toolFiles 为空（只读/bash/无 declared 元数据）时交集为空：消息可 undo，磁盘不撤。
             const range = all.filter((msg) => msg.info.id >= rev.messageID)
             const toolDiffs = yield* summary.computeDiff({ messages: range })
             const ictx = yield* InstanceState.context
@@ -106,9 +105,10 @@ export const layer = Layer.effect(
                 .filter((f): f is string => Boolean(f))
                 .map((f) => path.join(ictx.worktree, f).replaceAll("\\", "/")),
             )
-            const filteredPatches = toolFiles.size > 0
-              ? patches.map((p) => ({ ...p, files: p.files.filter((f) => toolFiles.has(f)) }))
-              : patches
+            const filteredPatches = patches.map((p) => ({
+              ...p,
+              files: p.files.filter((f) => toolFiles.has(f)),
+            }))
             // 记录被 revert 的文件列表，供后续 unrevert/二次 revert 的 restore 精确恢复
             const revertedFiles = Array.from(new Set(filteredPatches.flatMap((p) => p.files)))
 

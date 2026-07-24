@@ -90,6 +90,37 @@ const tool = Effect.fn("test.tool")(function* (sessionID: SessionID, messageID: 
   })
 })
 
+// edit 完成态 metadata：与真实 edit 工具一致，供 computeDiff/toolFiles 归因。
+const editTool = Effect.fn("test.editTool")(function* (
+  sessionID: SessionID,
+  messageID: MessageID,
+  absFile: string,
+  oldText: string,
+  newText: string,
+) {
+  const session = yield* Session.Service
+  const patch = `--- a\n+++ b\n@@ -1 +1 @@\n-${oldText}\n+${newText}\n`
+  return yield* session.updatePart({
+    id: PartID.ascending(),
+    messageID,
+    sessionID,
+    type: "tool" as const,
+    tool: "edit",
+    callID: "edit-" + Math.random().toString(36).slice(2),
+    state: {
+      status: "completed" as const,
+      input: { filePath: absFile },
+      output: "ok",
+      title: path.basename(absFile),
+      metadata: {
+        diff: patch,
+        filediff: { file: absFile, patch, additions: 1, deletions: 1 },
+      },
+      time: { start: 0, end: 1 },
+    },
+  })
+})
+
 const read = (file: string) => Effect.promise(() => fs.readFile(file, "utf-8"))
 const write = (file: string, text: string) => Effect.promise(() => fs.writeFile(file, text))
 
@@ -556,13 +587,15 @@ describe("revert + compact workflow", () => {
           const info = yield* session.create({})
           const sid = info.id
 
-          const turn = Effect.fn("test.turn")(function* (file: string, next: string) {
+          const turn = Effect.fn("test.turn")(function* (file: string, prev: string, next: string) {
             const u = yield* user(sid)
             yield* text(sid, u.id, `${file}:${next}`)
             const a = yield* assistant(sid, u.id, dir)
             const before = yield* snapshot.track()
             if (!before) throw new Error("expected snapshot")
-            yield* write(path.join(dir, file), next)
+            const abs = path.join(dir, file)
+            yield* write(abs, next)
+            yield* editTool(sid, a.id, abs, prev, next)
             const after = yield* snapshot.track()
             if (!after) throw new Error("expected snapshot")
             const patch = yield* snapshot.patch(before)
@@ -594,9 +627,9 @@ describe("revert + compact workflow", () => {
             return u.id
           })
 
-          const first = yield* turn("a.txt", "a1")
-          const second = yield* turn("b.txt", "b2")
-          const third = yield* turn("c.txt", "c3")
+          const first = yield* turn("a.txt", "a0", "a1")
+          const second = yield* turn("b.txt", "b0", "b2")
+          const third = yield* turn("c.txt", "c0", "c3")
 
           yield* revert.revert({
             sessionID: sid,
@@ -651,13 +684,15 @@ describe("revert + compact workflow", () => {
           const info = yield* session.create({})
           const sid = info.id
 
-          const turn = Effect.fn("test.turnSame")(function* (next: string) {
+          const turn = Effect.fn("test.turnSame")(function* (prev: string, next: string) {
             const u = yield* user(sid)
             yield* text(sid, u.id, `a.txt:${next}`)
             const a = yield* assistant(sid, u.id, dir)
             const before = yield* snapshot.track()
             if (!before) throw new Error("expected snapshot")
-            yield* write(path.join(dir, "a.txt"), next)
+            const abs = path.join(dir, "a.txt")
+            yield* write(abs, next)
+            yield* editTool(sid, a.id, abs, prev, next)
             const after = yield* snapshot.track()
             if (!after) throw new Error("expected snapshot")
             const patch = yield* snapshot.patch(before)
@@ -689,9 +724,9 @@ describe("revert + compact workflow", () => {
             return u.id
           })
 
-          const first = yield* turn("a1")
-          const second = yield* turn("a2")
-          const third = yield* turn("a3")
+          const first = yield* turn("a0", "a1")
+          const second = yield* turn("a1", "a2")
+          const third = yield* turn("a2", "a3")
           expect(yield* read(path.join(dir, "a.txt"))).toBe("a3")
 
           yield* revert.revert({
@@ -784,13 +819,15 @@ describe("revert + compact workflow", () => {
           const info = yield* session.create({})
           const sid = info.id
 
-          const turn = Effect.fn("test.concurrentTurn")(function* (next: string) {
+          const turn = Effect.fn("test.concurrentTurn")(function* (prev: string, next: string) {
             const u = yield* user(sid)
             yield* text(sid, u.id, `a.txt:${next}`)
             const a = yield* assistant(sid, u.id, dir)
             const before = yield* snapshot.track()
             if (!before) throw new Error("expected snapshot")
-            yield* write(path.join(dir, "a.txt"), next)
+            const abs = path.join(dir, "a.txt")
+            yield* write(abs, next)
+            yield* editTool(sid, a.id, abs, prev, next)
             const after = yield* snapshot.track()
             if (!after) throw new Error("expected snapshot")
             const patch = yield* snapshot.patch(before)
@@ -822,8 +859,8 @@ describe("revert + compact workflow", () => {
             return u.id
           })
 
-          yield* turn("a1")
-          yield* turn("a2")
+          yield* turn("a0", "a1")
+          yield* turn("a1", "a2")
 
           // 获取两个 user messageID 作为 revert 目标
           const msgs = yield* session.messages({ sessionID: sid })
@@ -911,8 +948,13 @@ describe("revert + compact workflow", () => {
           // 这样两个文件的 patch 共享同一个 before hash → A1 批量路径
           const before = yield* snapshot.track()
           if (!before) throw new Error("expected before snapshot")
-          yield* write(path.join(dir, "x.txt"), "x1")
-          yield* write(path.join(dir, "y.txt"), "y1")
+          const xAbs = path.join(dir, "x.txt")
+          const yAbs = path.join(dir, "y.txt")
+          yield* write(xAbs, "x1")
+          yield* write(yAbs, "y1")
+          // 两个 edit 工具各自声明文件，toolFiles 才能与 patch.files 取交集
+          yield* editTool(sid, a.id, xAbs, "x0", "x1")
+          yield* editTool(sid, a.id, yAbs, "y0", "y1")
           const after = yield* snapshot.track()
           if (!after) throw new Error("expected after snapshot")
           const patch = yield* snapshot.patch(before)
@@ -986,6 +1028,142 @@ describe("revert + compact workflow", () => {
           expect(tailIds).toContain(u2.id)
           expect(tailIds).toContain(u3.id)
           expect(tailIds).not.toContain(u1.id)
+
+          yield* session.remove(sid)
+        }),
+      { git: true },
+    ),
+  )
+
+  // ── 工具流过滤：空 toolFiles 不撤磁盘；有声明时只撤交集 ──────────
+
+  it.live(
+    "ambient patch without tool metadata does not restore files",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+          const snapshot = yield* Snapshot.Service
+
+          yield* write(path.join(dir, "plan.md"), "baseline\n")
+          const info = yield* session.create({})
+          const sid = info.id
+          const u = yield* user(sid)
+          yield* text(sid, u.id, "read only")
+          const a = yield* assistant(sid, u.id, dir)
+
+          // 模拟只读 turn 期间外部改动：只有 PatchPart，无 edit/write metadata
+          const before = yield* snapshot.track()
+          if (!before) throw new Error("expected before snapshot")
+          yield* write(path.join(dir, "plan.md"), "external edit\n")
+          const after = yield* snapshot.track()
+          if (!after) throw new Error("expected after snapshot")
+          const patch = yield* snapshot.patch(before)
+          expect(patch.files.length).toBeGreaterThan(0)
+
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: sid,
+            type: "step-start",
+            snapshot: before,
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: sid,
+            type: "step-finish",
+            reason: "stop",
+            snapshot: after,
+            cost: 0,
+            tokens,
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: sid,
+            type: "patch",
+            hash: patch.hash,
+            files: patch.files,
+          })
+
+          yield* revert.revert({ sessionID: sid, messageID: u.id })
+          // toolFiles 为空：消息可 undo，磁盘保持外部改动
+          expect(yield* read(path.join(dir, "plan.md"))).toBe("external edit\n")
+          const state = yield* session.get(sid)
+          expect(state.revert?.messageID).toBe(u.id)
+          expect(state.revert?.files).toBeUndefined()
+
+          yield* session.remove(sid)
+        }),
+      { git: true },
+    ),
+  )
+
+  it.live(
+    "revert intersects patch files with edit tool metadata only",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const session = yield* Session.Service
+          const revert = yield* SessionRevert.Service
+          const snapshot = yield* Snapshot.Service
+
+          yield* write(path.join(dir, "owned.ts"), "owned0\n")
+          yield* write(path.join(dir, "other.md"), "other0\n")
+          const info = yield* session.create({})
+          const sid = info.id
+          const u = yield* user(sid)
+          yield* text(sid, u.id, "edit owned only")
+          const a = yield* assistant(sid, u.id, dir)
+
+          const before = yield* snapshot.track()
+          if (!before) throw new Error("expected before snapshot")
+          const ownedAbs = path.join(dir, "owned.ts")
+          const otherAbs = path.join(dir, "other.md")
+          yield* write(ownedAbs, "owned1\n")
+          yield* write(otherAbs, "other1\n")
+          // 工具只声明 owned.ts；other.md 是 ambient 噪声
+          yield* editTool(sid, a.id, ownedAbs, "owned0\n", "owned1\n")
+          const after = yield* snapshot.track()
+          if (!after) throw new Error("expected after snapshot")
+          const patch = yield* snapshot.patch(before)
+          expect(patch.files.some((f) => f.endsWith("owned.ts"))).toBe(true)
+          expect(patch.files.some((f) => f.endsWith("other.md"))).toBe(true)
+
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: sid,
+            type: "step-start",
+            snapshot: before,
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: sid,
+            type: "step-finish",
+            reason: "stop",
+            snapshot: after,
+            cost: 0,
+            tokens,
+          })
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: a.id,
+            sessionID: sid,
+            type: "patch",
+            hash: patch.hash,
+            files: patch.files,
+          })
+
+          yield* revert.revert({ sessionID: sid, messageID: u.id })
+          expect(yield* read(ownedAbs)).toBe("owned0\n")
+          expect(yield* read(otherAbs)).toBe("other1\n")
+          const state = yield* session.get(sid)
+          expect(state.revert?.files?.length).toBe(1)
+          expect(state.revert?.files?.[0]?.endsWith("owned.ts")).toBe(true)
 
           yield* session.remove(sid)
         }),
