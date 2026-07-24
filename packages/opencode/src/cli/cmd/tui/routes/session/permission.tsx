@@ -123,6 +123,13 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
   const pathFormatter = usePathFormatter()
 
   const session = createMemo(() => sync.data.session.find((s) => s.id === props.request.sessionID))
+  // pending Permission 按 InstanceState.directory 隔离；SSE 可按 project 跨目录展示 asked，
+  // reply 必须打回 request 所属 session.directory，否则服务端静默 no-op、窗口关不掉。
+  // workspace 优先 session.workspaceID，避免 session warp 后仍打到 project.current 的旧值。
+  const replyRoute = () => ({
+    directory: session()?.directory,
+    workspace: session()?.workspaceID ?? project.workspace.current(),
+  })
 
   const input = createMemo(() => {
     const tool = props.request.tool
@@ -173,7 +180,7 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
             void sdk.client.permission.reply({
               reply: "always",
               requestID: props.request.id,
-              workspace: project.workspace.current(),
+              ...replyRoute(),
             })
           }}
         />
@@ -185,7 +192,7 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
               reply: "reject",
               requestID: props.request.id,
               message: message || undefined,
-              workspace: project.workspace.current(),
+              ...replyRoute(),
             })
           }}
           onCancel={() => {
@@ -423,14 +430,14 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
                   void sdk.client.permission.reply({
                     reply: "reject",
                     requestID: props.request.id,
-                    workspace: project.workspace.current(),
+                    ...replyRoute(),
                   })
                   return
                 }
                 void sdk.client.permission.reply({
                   reply: "once",
                   requestID: props.request.id,
-                  workspace: project.workspace.current(),
+                  ...replyRoute(),
                 })
               }}
             />

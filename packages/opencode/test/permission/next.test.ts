@@ -1575,6 +1575,45 @@ it.live("permission requests stay isolated by directory", () =>
   }),
 )
 
+// 错 directory 的 reply 模拟 TUI 启动目录 ≠ session.directory：pending 必须仍挂起，
+// 正确 directory 的 once 才 resolve，防止 HITL 窗口因 Instance 路由静默 no-op 关不掉。
+it.live("reply on wrong directory leaves the original pending ask unresolved", () =>
+  Effect.gen(function* () {
+    const owner = yield* tmpdirScoped({ git: true })
+    const other = yield* tmpdirScoped({ git: true })
+    const store = yield* InstanceStore.Service
+    const requestID = PermissionID.make("per_wrong_dir")
+
+    const fiber = yield* store
+      .provide(
+        { directory: owner },
+        ask({
+          id: requestID,
+          sessionID: SessionID.make("session_wrong_dir"),
+          permission: "external_directory",
+          patterns: ["/tmp/*"],
+          metadata: { filepath: "/tmp", parentDir: "/tmp" },
+          always: ["/tmp/*"],
+          ruleset: [],
+        }),
+      )
+      .pipe(Effect.forkScoped)
+
+    yield* store.provide({ directory: owner }, waitForPending(1))
+
+    yield* store.provide({ directory: other }, reply({ requestID, reply: "once" }))
+
+    const stillPending = yield* store.provide({ directory: owner }, list())
+    // 错 instance 的 once 不得清空 owner pending，对应 TUI 按了无反应。
+    expect(stillPending.map((item) => item.id)).toEqual([requestID])
+
+    yield* store.provide({ directory: owner }, reply({ requestID, reply: "once" }))
+    yield* Fiber.join(fiber)
+    // 正确 directory 的 once 必须清空 list 并结束 ask fiber。
+    expect(yield* store.provide({ directory: owner }, list())).toEqual([])
+  }),
+)
+
 it.instance(
   "pending permission rejects on instance dispose",
   () =>

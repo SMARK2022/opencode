@@ -5,6 +5,8 @@ import type { TextareaRenderable } from "@opentui/core"
 import { selectedForeground, tint, useTheme } from "../../context/theme"
 import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
 import { useSDK } from "../../context/sdk"
+import { useProject } from "../../context/project"
+import { useSync } from "../../context/sync"
 import { useToast } from "../../ui/toast"
 import { SplitBorder } from "../../component/border"
 import { useDialog } from "../../ui/dialog"
@@ -17,10 +19,18 @@ import { createRefreshClock } from "../../util/signal"
 
 export function QuestionPrompt(props: { request: QuestionRequest }) {
   const sdk = useSDK()
+  const project = useProject()
+  const sync = useSync()
   const { theme } = useTheme()
   const renderer = useRenderer()
   const tuiConfig = useTuiConfig()
   const toast = useToast()
+  // Question pending 与 Permission 同属 InstanceState.directory；reply/reject 必须带 session.directory。
+  const session = createMemo(() => sync.data.session.find((s) => s.id === props.request.sessionID))
+  const replyRoute = () => ({
+    directory: session()?.directory,
+    workspace: session()?.workspaceID ?? project.workspace.current(),
+  })
 
   const questions = createMemo(() => props.request.questions)
   const single = createMemo(() => questions().length === 1 && questions()[0]?.multiple !== true)
@@ -105,12 +115,14 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
     void sdk.client.question.reply({
       requestID: props.request.id,
       answers,
+      ...replyRoute(),
     })
   }
 
   function reject() {
     void sdk.client.question.reject({
       requestID: props.request.id,
+      ...replyRoute(),
     })
   }
 
@@ -127,6 +139,7 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
       void sdk.client.question.reply({
         requestID: props.request.id,
         answers: [[answer]],
+        ...replyRoute(),
       })
       return
     }
