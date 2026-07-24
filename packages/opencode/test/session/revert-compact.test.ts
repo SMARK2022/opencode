@@ -103,6 +103,37 @@ const tool = Effect.fn("test.tool")(function* (sessionID: SessionID, messageID: 
   })
 })
 
+// #545：edit 完成态 metadata——filediff 与真实 edit 工具同形状，供 computeDiff/toolFiles 归因。
+const editTool = Effect.fn("test.editTool")(function* (
+  sessionID: SessionID,
+  messageID: MessageID,
+  absFile: string,
+  oldText: string,
+  newText: string,
+) {
+  const session = yield* Session.Service
+  const patch = `--- a\n+++ b\n@@ -1 +1 @@\n-${oldText}\n+${newText}\n`
+  return yield* session.updatePart({
+    id: PartID.ascending(),
+    messageID,
+    sessionID,
+    type: "tool" as const,
+    tool: "edit",
+    callID: "edit-" + Math.random().toString(36).slice(2),
+    state: {
+      status: "completed" as const,
+      input: { filePath: absFile },
+      output: "ok",
+      title: path.basename(absFile),
+      metadata: {
+        diff: patch,
+        filediff: { file: absFile, patch, additions: 1, deletions: 1 },
+      },
+      time: { start: 0, end: 1 },
+    },
+  })
+})
+
 const read = (file: string) => Effect.promise(() => fs.readFile(file, "utf-8"))
 const write = (file: string, text: string) => Effect.promise(() => fs.writeFile(file, text))
 
@@ -822,13 +853,17 @@ describe("revert + compact workflow", () => {
           const info = yield* session.create({})
           const sid = info.id
 
-          const turn = Effect.fn("test.turn")(function* (file: string, next: string) {
+          // #545：turn 补 prev 参数并在写盘后声明 editTool——交集语义下未声明的文件不撤。
+          // prev 参与 editTool patch 文本仅作 metadata 证据；磁盘状态由 write 决定。
+          const turn = Effect.fn("test.turn")(function* (file: string, prev: string, next: string) {
             const u = yield* user(sid)
             yield* text(sid, u.id, `${file}:${next}`)
             const a = yield* assistant(sid, u.id, dir)
             const before = yield* snapshot.track()
             if (!before) throw new Error("expected snapshot")
-            yield* write(path.join(dir, file), next)
+            const abs = path.join(dir, file)
+            yield* write(abs, next)
+            yield* editTool(sid, a.id, abs, prev, next)
             const after = yield* snapshot.track()
             if (!after) throw new Error("expected snapshot")
             const patch = yield* snapshot.patch(before)
@@ -860,9 +895,9 @@ describe("revert + compact workflow", () => {
             return u.id
           })
 
-          const first = yield* turn("a.txt", "a1")
-          const second = yield* turn("b.txt", "b2")
-          const third = yield* turn("c.txt", "c3")
+          const first = yield* turn("a.txt", "a0", "a1")
+          const second = yield* turn("b.txt", "b0", "b2")
+          const third = yield* turn("c.txt", "c0", "c3")
 
           yield* revert.revert({
             sessionID: sid,
@@ -917,13 +952,17 @@ describe("revert + compact workflow", () => {
           const info = yield* session.create({})
           const sid = info.id
 
-          const turn = Effect.fn("test.turnSame")(function* (next: string) {
+          // #545：同文件连写场景同样需要 editTool 声明——prev/next 随迭代链传递。
+          // 迭代链（a0→a1→a2）使每次 revert 的目标版本即上一次 editTool 的 prev。
+          const turn = Effect.fn("test.turnSame")(function* (prev: string, next: string) {
             const u = yield* user(sid)
             yield* text(sid, u.id, `a.txt:${next}`)
             const a = yield* assistant(sid, u.id, dir)
             const before = yield* snapshot.track()
             if (!before) throw new Error("expected snapshot")
-            yield* write(path.join(dir, "a.txt"), next)
+            const abs = path.join(dir, "a.txt")
+            yield* write(abs, next)
+            yield* editTool(sid, a.id, abs, prev, next)
             const after = yield* snapshot.track()
             if (!after) throw new Error("expected snapshot")
             const patch = yield* snapshot.patch(before)
@@ -955,9 +994,9 @@ describe("revert + compact workflow", () => {
             return u.id
           })
 
-          const first = yield* turn("a1")
-          const second = yield* turn("a2")
-          const third = yield* turn("a3")
+          const first = yield* turn("a0", "a1")
+          const second = yield* turn("a1", "a2")
+          const third = yield* turn("a2", "a3")
           expect(yield* read(path.join(dir, "a.txt"))).toBe("a3")
 
           yield* revert.revert({
@@ -1010,13 +1049,17 @@ describe("revert + compact workflow", () => {
           const info = yield* session.create({})
           const sid = info.id
 
-          const turn = Effect.fn("test.concurrentTurn")(function* (next: string) {
+          // #545：并发 revert 场景的 turn 同样声明 editTool，保持夹具语义一致。
+          // BusyError 语义与本 patch 无关——此测试只需在新夹具形状下保持可跑。
+          const turn = Effect.fn("test.concurrentTurn")(function* (prev: string, next: string) {
             const u = yield* user(sid)
             yield* text(sid, u.id, `a.txt:${next}`)
             const a = yield* assistant(sid, u.id, dir)
             const before = yield* snapshot.track()
             if (!before) throw new Error("expected snapshot")
-            yield* write(path.join(dir, "a.txt"), next)
+            const abs = path.join(dir, "a.txt")
+            yield* write(abs, next)
+            yield* editTool(sid, a.id, abs, prev, next)
             const after = yield* snapshot.track()
             if (!after) throw new Error("expected snapshot")
             const patch = yield* snapshot.patch(before)
@@ -1048,8 +1091,8 @@ describe("revert + compact workflow", () => {
             return u.id
           })
 
-          yield* turn("a1")
-          yield* turn("a2")
+          yield* turn("a0", "a1")
+          yield* turn("a1", "a2")
 
           // 获取两个 user messageID 作为 revert 目标
           const msgs = yield* session.messages({ sessionID: sid })
@@ -1111,6 +1154,160 @@ describe("revert + compact workflow", () => {
     ),
   )
 
+// ── #545 工具流过滤：空 toolFiles 不撤磁盘；有声明时只撤交集 ──────────
+
+// #545 红绿锚点：本用例在旧安全网（空 toolFiles 回退全量）下会把 external edit 撤回 baseline 而失败。
+it.live(
+  "ambient patch without tool metadata does not restore files",
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const session = yield* Session.Service
+        const revert = yield* SessionRevert.Service
+        const snapshot = yield* Snapshot.Service
+
+        yield* write(path.join(dir, "plan.md"), "baseline\n")
+        const info = yield* session.create({})
+        const sid = info.id
+        const u = yield* user(sid)
+        // 只读 turn：不声明任何 edit/write 工具，toolFiles 必然为空。
+        yield* text(sid, u.id, "read only")
+        const a = yield* assistant(sid, u.id, dir)
+
+        // #545：模拟只读 turn 期间外部改动——只有 PatchPart，无 edit/write metadata。
+        const before = yield* snapshot.track()
+        if (!before) throw new Error("expected before snapshot")
+        // 外部改动直接写盘（无工具声明）——模拟 IDE/其他 session 的 ambient 变更。
+        yield* write(path.join(dir, "plan.md"), "external edit\n")
+        const after = yield* snapshot.track()
+        if (!after) throw new Error("expected after snapshot")
+        const patch = yield* snapshot.patch(before)
+        // patch 必须非空：否则「磁盘不撤」断言无法区分交集为空与根本没有变更。
+        expect(patch.files.length).toBeGreaterThan(0)
+
+        // step-start/finish 携带前后 snapshot，patch part 携带 hash+files——三件套
+        // 与真实 turn 的 part 形状一致，revert 的 boundary/patch 收集路径才会走全。
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: a.id,
+          sessionID: sid,
+          type: "step-start",
+          snapshot: before,
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: a.id,
+          sessionID: sid,
+          type: "step-finish",
+          reason: "stop",
+          snapshot: after,
+          cost: 0,
+          tokens,
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: a.id,
+          sessionID: sid,
+          type: "patch",
+          hash: patch.hash,
+          files: patch.files,
+        })
+
+        yield* revert.revert({ sessionID: sid, messageID: u.id })
+        // #545：toolFiles 为空——消息可 undo，磁盘保持外部改动（不回退全量 revert）。
+        expect(yield* read(path.join(dir, "plan.md"))).toBe("external edit\n")
+        const state = yield* session.get(sid)
+        expect(state.revert?.messageID).toBe(u.id)
+        // 目标键名为 revertedPaths（0478 分键）：无交集时保持 undefined。
+        // messageID 已记录证明消息级 undo 成功——空交集只清空磁盘恢复面，不阻塞 undo。
+        expect(state.revert?.revertedPaths).toBeUndefined()
+
+        yield* session.remove(sid)
+      }),
+    { git: true },
+  ),
+  // #545：Windows 宿主 git fixture 冷启动慢于 5s 默认超时，与 session-list 用例同族显式放宽。
+  30_000,
+)
+
+// #545 红绿锚点：旧三元在 toolFiles 非空时行为相同；本用例锁交集不含 ambient 的边界。
+it.live(
+  "revert intersects patch files with edit tool metadata only",
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const session = yield* Session.Service
+        const revert = yield* SessionRevert.Service
+        const snapshot = yield* Snapshot.Service
+
+        yield* write(path.join(dir, "owned.ts"), "owned0\n")
+        yield* write(path.join(dir, "other.md"), "other0\n")
+        const info = yield* session.create({})
+        const sid = info.id
+        const u = yield* user(sid)
+        yield* text(sid, u.id, "edit owned only")
+        const a = yield* assistant(sid, u.id, dir)
+
+        const before = yield* snapshot.track()
+        if (!before) throw new Error("expected before snapshot")
+        // owned/other 双写后只声明单一 editTool：patch 窗含两文件而 toolFiles 只含其一。
+        const ownedAbs = path.join(dir, "owned.ts")
+        const otherAbs = path.join(dir, "other.md")
+        // 两文件同窗变更：patch.files 同时含 owned/other，交集只放行 owned。
+        yield* write(ownedAbs, "owned1\n")
+        yield* write(otherAbs, "other1\n")
+        // #545：工具只声明 owned.ts；other.md 是同窗 ambient 噪声，必须被交集过滤。
+        yield* editTool(sid, a.id, ownedAbs, "owned0\n", "owned1\n")
+        const after = yield* snapshot.track()
+        if (!after) throw new Error("expected after snapshot")
+        const patch = yield* snapshot.patch(before)
+        // 先证明 patch.files 确实同时含两文件，否则「过滤 other」断言无区分力。
+        expect(patch.files.some((f) => f.endsWith("owned.ts"))).toBe(true)
+        expect(patch.files.some((f) => f.endsWith("other.md"))).toBe(true)
+
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: a.id,
+          sessionID: sid,
+          type: "step-start",
+          snapshot: before,
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: a.id,
+          sessionID: sid,
+          type: "step-finish",
+          reason: "stop",
+          snapshot: after,
+          cost: 0,
+          tokens,
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: a.id,
+          sessionID: sid,
+          type: "patch",
+          hash: patch.hash,
+          files: patch.files,
+        })
+
+        yield* revert.revert({ sessionID: sid, messageID: u.id })
+        // 只恢复工具声明的 owned.ts；ambient other.md 保持改后内容。
+        expect(yield* read(ownedAbs)).toBe("owned0\n")
+        expect(yield* read(otherAbs)).toBe("other1\n")
+        // owned 恢复到 editTool 的 prev 内容；other 保持写盘值——交集语义的双向证据。
+        const state = yield* session.get(sid)
+        // revertedPaths 只含交集结果，供 unrevert 精确恢复同一文件集。
+        // 长度 1（而非 2）直接证明 other.md 被 toolFiles 交集排除。
+        expect(state.revert?.revertedPaths?.length).toBe(1)
+        expect(state.revert?.revertedPaths?.[0]?.endsWith("owned.ts")).toBe(true)
+
+        yield* session.remove(sid)
+      }),
+    { git: true },
+  ),
+  30_000,
+)
   // ── A1: 合并 git checkout ────────────────────────────────────
   // 验证同一 hash 的多文件批量 revert 能正确恢复全部文件。
   // 当前测试中每个 turn 只改一个文件且 hash 不同，走 single() 路径。
@@ -1140,8 +1337,15 @@ describe("revert + compact workflow", () => {
           // 这样两个文件的 patch 共享同一个 before hash → A1 批量路径
           const before = yield* snapshot.track()
           if (!before) throw new Error("expected before snapshot")
-          yield* write(path.join(dir, "x.txt"), "x1")
-          yield* write(path.join(dir, "y.txt"), "y1")
+          // A1 批量路径：两 patch 同 before hash 合并 checkout，交集后仍需两文件都恢复。
+          const xAbs = path.join(dir, "x.txt")
+          const yAbs = path.join(dir, "y.txt")
+          yield* write(xAbs, "x1")
+          yield* write(yAbs, "y1")
+          // #545：两个 edit 工具各自声明文件，toolFiles 才能与 patch.files 取交集。
+          // 若任一文件缺声明，无条件交集会把该文件从恢复面剔除、破坏既有断言。
+          yield* editTool(sid, a.id, xAbs, "x0", "x1")
+          yield* editTool(sid, a.id, yAbs, "y0", "y1")
           const after = yield* snapshot.track()
           if (!after) throw new Error("expected after snapshot")
           const patch = yield* snapshot.patch(before)

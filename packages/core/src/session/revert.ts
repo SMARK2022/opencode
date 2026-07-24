@@ -64,8 +64,8 @@ const plan = Effect.fn("SessionRevert.plan")(function* (input: BoundaryInput) {
   const location = yield* Location.Service
   // Snapshot恢复键相对项目根，工具相对项属于当前Location，必须沿共享聚合器统一基准。
   const touched = new Set(ToolDiffs.collect(records, location.project.directory, location.directory).map(item => item.file))
-  // 无工具证据的历史/纯Shell保留原快照恢复；有证据时不能撤回同目录其他会话的文件。
-  return touched.size ? new Map([...files].filter(([file]) => touched.has(file))) : files
+  // 空声明只撤消息，不恢复快照窗口中的ambient文件；归属仍由两代共用的工具结果合同决定。
+  return new Map([...files].filter(([file]) => touched.has(file)))
 })
 
 export const stage = Effect.fn("SessionRevert.stage")(function* (input: {

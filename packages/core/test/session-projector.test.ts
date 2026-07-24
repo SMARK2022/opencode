@@ -849,7 +849,7 @@ describe("SessionProjector", () => {
     }),
   )
 
-  it.effect("stages tool-owned native revert paths and preserves metadata-free history", () => {
+  it.effect("stages tool-owned native revert paths and keeps metadata-free history message-only", () => {
     const restores: [RelativePath, Snapshot.ID][][] = []
     const directory = AbsolutePath.make("/project/app")
     return Effect.gen(function* () {
@@ -890,12 +890,14 @@ describe("SessionProjector", () => {
       yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID: legacy, timestamp: created, agent: "build", model, snapshot: "tree_legacy" })
       yield* events.publish(SessionEvent.Step.Ended, { ...settlement, assistantMessageID: legacy, files: [RelativePath.make("app/legacy.ts")] })
       const legacyRevert = yield* SessionRevert.stage({ session, messageID: later.id })
-      expect(restores[3]).toEqual([[RelativePath.make("app/legacy.ts"), Snapshot.ID.make("tree_legacy")]])
-      expect(legacyRevert.files?.map(file => file.path)).toEqual([RelativePath.make("app/legacy.ts")])
+      // 无声明时仍成功记录消息撤回，但不能恢复该时间窗混入的其他文件。
+      expect(restores).toHaveLength(3)
+      expect(legacyRevert.files).toEqual([])
+      expect(legacyRevert.messageID).toBe(later.id)
       // 显式仅撤消息时不进行文件恢复；未知边界保持原typed错误，而非成功空结果。
       const messageOnly = yield* SessionRevert.stage({ session, messageID: later.id, files: false })
       expect(messageOnly.files).toEqual([])
-      expect(restores).toHaveLength(4)
+      expect(restores).toHaveLength(3)
       expect(yield* SessionRevert.stage({ session, messageID: SessionMessage.ID.make("msg_missing") }).pipe(Effect.flip)).toBeInstanceOf(SessionRevert.MessageNotFoundError)
       yield* db.delete(SessionTable).where(eq(SessionTable.id, sessionID)).run()
     }).pipe(
