@@ -5,7 +5,8 @@ import { tmpdir } from "../fixture/fixture"
 const FIXTURES_DIR = path.join(import.meta.dir, "../tool/fixtures")
 const MIGRATION_SCRIPT = path.join(import.meta.dir, "../../script/migrate-image-attachment.ts")
 async function migrateImageAttachment(args: string[]) {
-  const child = Bun.spawn([process.execPath, MIGRATION_SCRIPT, ...args], { cwd: path.join(import.meta.dir, "../.."), stdout: "pipe", stderr: "pipe" })
+  // 迁移 CLI 子进程在 Windows 上隐藏 console，覆盖真实入口时不弹 conhost。
+  const child = Bun.spawn([process.execPath, MIGRATION_SCRIPT, ...args], { cwd: path.join(import.meta.dir, "../.."), stdout: "pipe", stderr: "pipe", windowsHide: process.platform === "win32" })
   const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
   return { exitCode, stdout, stderr }
 }
