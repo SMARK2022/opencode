@@ -985,6 +985,41 @@ function ownerCounts(db: TxOrDb, hashes: string[]) {
   return result
 }
 
+// status 的 F4 raw 需要每个 pack 的 distinct cold_key 数；owners/keys 才是 entry 共享倍率。
+// 只扫 message/part：session-summary 无 entry key，仍用 ownerCounts 的 raw×owners。
+// 返回值只含 keys：owner 数继续由 ownerCounts 反算，避免两套计数口径分叉。
+function packKeyStats(db: TxOrDb, hashes: string[]) {
+  const result = new Map<string, number>()
+  if (hashes.length === 0) return result
+  for (let offset = 0; offset < hashes.length; offset += DEFAULT_BATCH_SIZE) {
+    const batch = hashes.slice(offset, offset + DEFAULT_BATCH_SIZE)
+    for (const row of db
+      .select({
+        hash: MessageTable.cold_ref,
+        keys: sql<number>`count(distinct ${MessageTable.cold_key})`,
+      })
+      .from(MessageTable)
+      .where(inArray(MessageTable.cold_ref, batch))
+      .groupBy(MessageTable.cold_ref)
+      .all()) {
+      if (row.hash) result.set(row.hash, row.keys)
+    }
+    for (const row of db
+      .select({
+        hash: PartTable.cold_ref,
+        keys: sql<number>`count(distinct ${PartTable.cold_key})`,
+      })
+      .from(PartTable)
+      .where(inArray(PartTable.cold_ref, batch))
+      .groupBy(PartTable.cold_ref)
+      .all()) {
+      // 正常 kind 下同一 hash 只会出现在 message 或 part 一侧；相加仅防御异常双引用。
+      if (row.hash) result.set(row.hash, (result.get(row.hash) ?? 0) + row.keys)
+    }
+  }
+  return result
+}
+
 function requireReferenceMetadata(db: TxOrDb, hashes: string[], kind: "part-pack" | "session-summary") {
   // unique hash 去重只减少 SQL 工作量，不改变每个真实 owner 对 ref_count 的贡献。
   const unique = [...new Set(hashes)]
@@ -3425,8 +3460,29 @@ export function status(): StatusReport {
     // logical raw 使用 owner 反算数；当 persisted ref_count 损坏时，status 仍给出真实共享量并单独报告 mismatch。
     // orphan payload 计入物理 compressedBytes，但不参与 referencedRaw/sharedBytes，避免无 owner blob 扭曲去重收益。
     // verify/cleanup 才拥有修复或删除权限，status 的真实计数不能顺带改写 persisted ref_count。
-    // raw 按真实 owner 展开，compressed 按 unique payload；二者差额不是已释放的文件 bytes。
-    const rawBytes = payloads.reduce((total, row) => total + row.raw_bytes * (counts.get(row.hash) ?? 0), 0)
+    // v2 pack 的 raw_bytes 是整包 envelope：F0=raw×owners 会把同一 entry 集合重复计 N 次。
+    // F4=raw×(owners/keys) 在等分 entry 近似下表示「每个 owner 各持一份字段」的逻辑 raw；pure pack 退化为 unique raw。
+    // session-summary 无 cold_key，整 blob 仍按 raw×owners 展开。禁止为算 F4 去 materialize payload body。
+    // packKeyStats 与 ownerCounts 分查：前者只补 distinct key，后者继续服务 mismatch/orphan。
+    const keyCounts = packKeyStats(
+      db,
+      payloads.map((row) => row.hash),
+    )
+    const rawBytes = payloads.reduce((total, row) => {
+      const owners = counts.get(row.hash) ?? 0
+      // orphan 的 unique raw 只进 referencedRaw/compressed，不进逻辑 Raw 展开。
+      if (owners === 0) return total
+      if (row.kind === "message-pack" || row.kind === "part-pack") {
+        const distinctKeys = keyCounts.get(row.hash) ?? 0
+        // keys==0 的 v2 损坏行不回退 F0，避免再次把整包按 owner 连乘放大。
+        if (distinctKeys <= 0) return total
+        // owners 用全表反算 n；keys 只服务 entry 共享倍率（等分 entry 近似）。
+        // 除法保持 number：StatusReport 与 CLI 十进制展示均按浮点字节计数。
+        return total + (row.raw_bytes * owners) / distinctKeys
+      }
+      // session-summary 等整 blob kind：一份 payload 即完整逻辑内容，仍 raw×owners。
+      return total + row.raw_bytes * owners
+    }, 0)
     // unique compressed 包含 orphan 的真实占用，cleanup 前仍须显示可回收空间。
     const compressedBytes = payloads.reduce((total, row) => total + row.compressed_bytes, 0)
     const referencedRawBytes = payloads.reduce(
@@ -3454,7 +3510,7 @@ export function status(): StatusReport {
       payloads: payloads.length,
       rawBytes,
       compressedBytes,
-      // sharedBytes 是内容寻址的逻辑收益，不能被误读为 SQLite 文件已释放空间。
+      // sharedBytes 在 F4 下是真 entry 共享溢价（F4−unique），不能被误读为 SQLite 已释放空间。
       sharedBytes: Math.max(0, rawBytes - referencedRawBytes),
       refCountMismatches,
       orphans,
