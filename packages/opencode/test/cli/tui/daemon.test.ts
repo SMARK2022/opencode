@@ -548,6 +548,16 @@ async function writeDeadLease(leaseDir: string, taskID: string, dbPath: string, 
   )
 }
 
+// #540：spawnStageWorker 固定 stdin:"pipe"，收窄 FileSink 供 gate token 写入；
+// 宽化的 ReturnType<typeof Bun.spawn> 联合（number|undefined）在严格模式下无法直接 write。
+function stageWorkerStdin(proc: ReturnType<typeof Bun.spawn>) {
+  const stdin = proc.stdin
+  // #540：运行时断言而非 as-cast：spawn 配置漂移时立即失败，不把坏 stdin 静默写成 0 字节。
+  if (!stdin || typeof stdin === "number") {
+    throw new Error("stage worker stdin is not a writable FileSink")
+  }
+  return stdin
+}
 
 // #539：recovery 段：blocked-1 → continue → lease-release → release → completed；返回可发 start 的 lock。
 // 与主 lifecycle 用例共享同一握手，避免 Force A/B 复制第三套 recovery 时序。
@@ -558,7 +568,7 @@ async function recoverStageWorkerToIdle(
   taskID: string,
 ) {
   expect(await readUntil(reader, "rename-blocked-1", 30_000)).toContain("rename-blocked-1")
-  await proc.stdin.write("continue\n")
+  await stageWorkerStdin(proc).write("continue\n")
   expect(await readUntil(reader, "lease-release-blocked", 30_000)).toContain("lease-release-blocked")
   let lock: ServerLock.ServerLock | undefined
   const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
@@ -568,7 +578,7 @@ async function recoverStageWorkerToIdle(
   }
   if (!lock?.controlPort) throw new Error("daemon lock missing")
   const terminal = controlRequest(lock, `${ServerLock.CONTROL_MAINTENANCE_STATUS_PATH}?task=${taskID}`)
-  await proc.stdin.write("release\n")
+  await stageWorkerStdin(proc).write("release\n")
   expect((await terminal).status).toBe(200)
   return lock
 }
@@ -2266,7 +2276,7 @@ test(
         // recovery 尚未取得 lease 时不得先发布可接受 shutdown/start 的 daemon owner。
         expect(await Bun.file(lockPath).exists()).toBe(false)
         // 第一个 gate 放行后 recovery 才能拿 lease；终态 checkpoint 先于 lease release 到达。
-        await proc.stdin.write("continue\n")
+        await stageWorkerStdin(proc).write("continue\n")
         expect(await readUntil(reader, "lease-release-blocked")).toContain("lease-release-blocked")
         // lock 只在 recovery 已取得 lease 并登记 activeMaintenance 后才允许对外发布。
         let lock: ServerLock.ServerLock | undefined
@@ -2291,7 +2301,7 @@ test(
         const busy = await controlRequest(lock, `${ServerLock.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
         expect(busy.status).toBe(409)
         // 释放 lease 后 terminal 与 conditional shutdown 才能依次成功，禁止 CLI retry workaround。
-        await proc.stdin.write("release\n")
+        await stageWorkerStdin(proc).write("release\n")
         expect(await terminal).toMatchObject({ status: 200, body: { status: "completed" } })
         const conditional = () => controlRequest(lock, `${ServerLock.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
         const waitIdle = async (taskID: string) => {
@@ -2318,7 +2328,7 @@ test(
         expect((await conditional()).status).toBe(409)
         // 同一 chunk 预置 start/resume 两个 gate token，避免 Windows pipe 的第三次小写入延迟。
         // #539：预缓冲使 blocked-3 的 gate 在 marker 写出后立即放行，故禁止对 blocked-3 做 HTTP-without-marker 竞态。
-        await proc.stdin.write("continue\ncontinue\n")
+        await stageWorkerStdin(proc).write("continue\ncontinue\n")
         const startResponse = await starting
         // pending 期拒绝不消耗 start 请求；放行后同一请求仍须返回 202。
         expect(startResponse.status).toBe(202)
