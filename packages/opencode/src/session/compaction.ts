@@ -1188,7 +1188,10 @@ export const layer = Layer.effect(
       return result
     })
 
-    const create = Effect.fn("SessionCompaction.create")(function* (input: {
+    // 私有 seam 接受 run 预分配的 ID，覆盖 create 尚未返回就被取消的窗口；
+    // 公开 create wrapper 仍自行分配 ID，不扩大原有调用接口。
+    const createMarker = Effect.fn("SessionCompaction.createMarker")(function* (input: {
+      id: MessageID
       sessionID: SessionID
       agent: string
       model: { providerID: ProviderID; modelID: ModelID }
@@ -1207,7 +1210,7 @@ export const layer = Layer.effect(
       // scratch state until processCompaction writes a successful summary; prompt
       // consumers deliberately ignore incomplete markers.
       const msg = yield* session.updateMessage({
-        id: MessageID.ascending(),
+        id: input.id,
         role: "user",
         model: input.model,
         sessionID: input.sessionID,
@@ -1235,30 +1238,41 @@ export const layer = Layer.effect(
       return msg
     })
 
+    const create = Effect.fn("SessionCompaction.create")(function* (input: {
+      sessionID: SessionID
+      agent: string
+      model: { providerID: ProviderID; modelID: ModelID }
+      auto: boolean
+      overflow?: boolean
+    }) {
+      return yield* createMarker({ ...input, id: MessageID.ascending() })
+    })
+
     const hideIncomplete = Effect.fn("SessionCompaction.hideIncomplete")(function* (input: {
       sessionID: SessionID
       parentID: MessageID
     }) {
-      // Interrupts can happen after the scratch marker is visible but before the
-      // summary request starts. Hide only this compaction pair, and only if no
-      // successful summary exists, so completed boundaries keep anchoring history.
-      const messages = yield* session
-        .messages({ sessionID: input.sessionID })
-        .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([] as MessageV2.WithParts[])))
-      const completed = messages.some(
-        (msg) =>
-          msg.info.role === "assistant" &&
-          msg.info.parentID === input.parentID &&
-          msg.info.summary &&
-          msg.info.finish &&
-          !msg.info.error,
+      const find = (predicate: (info: MessageV2.HotInfo) => boolean) =>
+        session
+          .findMessage(input.sessionID, predicate)
+          .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(Option.none<MessageV2.WithParts>())))
+      // cleanup 只定位本次最新 marker/summary，不再为失败终态 hydrate 整个长 Session。
+      // summary 查询仍先执行：finished/no-error boundary 已经成功，后续可选动作失败
+      // 不能反向隐藏该边界或撤销它承载的 retained context。
+      const summary = Option.getOrUndefined(
+        yield* find(
+          (info) =>
+            info.role === "assistant" && info.parentID === input.parentID && info.summary === true,
+        ),
       )
-      if (completed) return
+      if (summary?.info.role === "assistant" && summary.info.finish && !summary.info.error) return
+      const marker = Option.getOrUndefined(yield* find((info) => info.id === input.parentID))
       const now = Date.now()
-      for (const msg of messages) {
-        const marker = msg.info.id === input.parentID && msg.parts.some((part) => part.type === "compaction")
-        const summary = msg.info.role === "assistant" && msg.info.parentID === input.parentID && msg.info.summary
-        if (!marker && !summary) continue
+      for (const msg of [marker, summary]) {
+        if (!msg) continue
+        // 展开原 info 只附加可见性终态，已经记录的 tokens、cost 和 lineage 必须原值保留；
+        // 只有尚未 completed 的 summary 才补 AbortedError，已有 Provider error 不能被覆盖；
+        // marker 与 summary 共用同一时间戳，明确表示它们属于同一次失败 Compaction。
         const next = {
           ...msg.info,
           hidden: { time: now, reason: "compaction-cancelled" as const },
@@ -1278,10 +1292,11 @@ export const layer = Layer.effect(
       auto: boolean
       overflow?: boolean
     }) {
-      let parentID: MessageID | undefined
+      // ID 必须先于 marker 的首次 durable write 归属 run；create 中任一 yield
+      // 被中断时，finalizer 仍能精确定位本次 scratch，而不会扫描或猜测 latest。
+      const parentID = MessageID.ascending()
       return yield* Effect.gen(function* () {
-        const msg = yield* create(input)
-        parentID = msg.id
+        const msg = yield* createMarker({ ...input, id: parentID })
         return yield* processCompaction({
           parentID: msg.id,
           messages: yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie),
@@ -1292,10 +1307,10 @@ export const layer = Layer.effect(
       }).pipe(
         Effect.onExit((exit) => {
           // Compact markers are scratch state until a successful summary assistant
-          // exists. Interrupt cleanup keeps visible history tidy for Ctrl-C/abort,
-          // while MessageV2.filterCompacted remains the correctness guard for hard
-          // process exits where finalizers cannot run.
-          if (Exit.isSuccess(exit) || !parentID) return Effect.void
+          // exists. Effect success 只说明 processor 正常返回；业务结果 stop 仍表示
+          // 本次 Compaction 未提交，必须和 interrupt/defect 进入同一 hidden 终态。
+          // hard process exit 无法运行 finalizer，继续由 filterCompacted 守住 replay。
+          if (Exit.isSuccess(exit) && exit.value === "continue") return Effect.void
           return hideIncomplete({ sessionID: input.sessionID, parentID })
         }),
       )

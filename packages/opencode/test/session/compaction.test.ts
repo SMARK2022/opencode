@@ -21,6 +21,7 @@ import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
+import { SessionRequestUsage } from "../../src/session/request-usage"
 import { Todo } from "../../src/session/todo"
 import { SessionV2 } from "../../src/v2/session"
 import { ModelID, ProviderID } from "../../src/provider/schema"
@@ -269,8 +270,10 @@ const itCompaction = testEffect(compactionEnv)
 
 type CompactionProcessOptions = {
   result?: "continue" | "compact"
+  processor?: Layer.Layer<SessionProcessorModule.SessionProcessor.Service>
   llm?: Layer.Layer<LLM.Service>
   plugin?: Layer.Layer<Plugin.Service>
+  events?: Layer.Layer<EventV2Bridge.Service>
   provider?: ReturnType<typeof ProviderTest.fake>
   config?: Layer.Layer<Config.Service>
 }
@@ -283,14 +286,16 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
   const bus = Bus.layer
   const status = SessionStatus.layer.pipe(Layer.provide(bus))
   const todo = Todo.layer.pipe(Layer.provide(bus))
-  const processor = options?.llm
-    ? SessionProcessorModule.SessionProcessor.layer.pipe(
-        Layer.provide(summary),
-        Layer.provide(Image.defaultLayer),
-        Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
-        Layer.provide(status),
-      )
-    : layer(options?.result ?? "continue")
+  const processor =
+    options?.processor ??
+    (options?.llm
+      ? SessionProcessorModule.SessionProcessor.layer.pipe(
+          Layer.provide(summary),
+          Layer.provide(Image.defaultLayer),
+          Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
+          Layer.provide(status),
+        )
+      : layer(options?.result ?? "continue"))
   return Layer.mergeAll(SessionCompaction.layer.pipe(Layer.provide(processor)), processor, bus, status, todo).pipe(
     Layer.provide(SessionNs.defaultLayer),
     Layer.provide((options?.provider ?? wide()).layer),
@@ -304,7 +309,7 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
     Layer.provide(options?.config ?? Config.defaultLayer),
     Layer.provide(SyncEvent.defaultLayer),
     Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true })),
-    Layer.provide(EventV2Bridge.defaultLayer),
+    Layer.provide(options?.events ?? EventV2Bridge.defaultLayer),
   )
 }
 
@@ -1488,6 +1493,268 @@ describe("session.compaction.process", () => {
         }).pipe(withCompaction({ plugin: plugin(ready) }))
       }),
     { git: true },
+  )
+
+  itCompaction.instance(
+    "hides failed compaction state after a non-retryable provider error",
+    () => {
+      const stub = llm()
+      // 先发出真实 stream start 再抛 non-retry 400，确保测试穿过 Processor.halt；
+      // 直接让 LLM Effect 失败会绕开 assistant error 持久化，无法复现用户看到的残留；
+      // 两份独立 stream 分别供 manual 与 auto 使用，避免共享已消费 iterator。
+      const failure = () =>
+        Stream.fromAsyncIterable(
+          {
+            async *[Symbol.asyncIterator]() {
+              yield { type: "start" } as LLM.Event
+              throw new APICallError({
+                message:
+                  "Bad Request: Invalid request content: A tool_choice was set on the request but no tools were specified.",
+                url: "https://example.com/v1/chat/completions",
+                requestBodyValues: {},
+                statusCode: 400,
+                responseHeaders: {},
+                responseBody:
+                  '{"error":{"message":"A tool_choice was set on the request but no tools were specified."}}',
+                isRetryable: false,
+              })
+            },
+          },
+          (error) => error,
+        )
+      stub.push(failure())
+      stub.push(failure())
+
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        // auto/manual 共享同一个 run lifecycle；同一断言矩阵防止只修一个入口后
+        // 另一个入口继续把 Provider error 的 scratch Message 暴露给用户。
+        for (const auto of [false, true]) {
+          const session = yield* ssn.create({})
+          const user = yield* createUserMessage(session.id, `compact with auto=${auto}`)
+
+          const result = yield* SessionCompaction.use.run({
+            sessionID: session.id,
+            agent: "build",
+            model: ref,
+            auto,
+          })
+          const visible = yield* ssn.messages({ sessionID: session.id })
+          const persisted = (yield* MessageV2.page({ sessionID: session.id, limit: 20, includeHidden: true })).items
+
+          expect(result).toBe("stop")
+          // 可见历史只保留真实 user；失败 marker/summary 仍以 hidden 形式持久化，
+          // 既保留审计证据，也不会被 UI 或后续正常 Message 读取当成有效 Compaction。
+          expect(visible.map((message) => message.info.id)).toEqual([user.id])
+          const failed = persisted.filter((message) => message.info.id !== user.id)
+          expect(failed).toHaveLength(2)
+          expect(failed.every((message) => message.info.hidden?.reason === "compaction-cancelled")).toBe(true)
+        }
+      }).pipe(withCompaction({ llm: stub.layer }))
+    },
+    { git: true },
+    20_000,
+  )
+
+  itCompaction.instance(
+    "hides failed compaction state when the summary exceeds its context",
+    Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      const session = yield* ssn.create({})
+      const user = yield* createUserMessage(session.id, "summary overflow")
+
+      const result = yield* SessionCompaction.use.run({
+        sessionID: session.id,
+        agent: "build",
+        model: ref,
+        auto: false,
+      })
+      const visible = yield* ssn.messages({ sessionID: session.id })
+      const persisted = (yield* MessageV2.page({ sessionID: session.id, limit: 20, includeHidden: true })).items
+
+      expect(result).toBe("stop")
+      expect(visible.map((message) => message.info.id)).toEqual([user.id])
+      // summary overflow 与 Provider 400 都归一到同一个 unsuccessful lifecycle；
+      // 此断言防止未来为 compact result 再造一条不隐藏的特殊退出路径。
+      const failed = persisted.filter((message) => message.info.id !== user.id)
+      expect(failed).toHaveLength(2)
+      expect(failed.every((message) => message.info.hidden?.reason === "compaction-cancelled")).toBe(true)
+      const summary = failed.find((message) => message.info.role === "assistant")
+      expect(summary?.info.role).toBe("assistant")
+      if (summary?.info.role !== "assistant") return
+      expect(summary.info.error && JSON.stringify(summary.info.error)).toContain("Session too large to compact")
+    }).pipe(withCompaction({ result: "compact" })),
+  )
+
+  itCompaction.instance(
+    "hides the marker when interrupted while publishing compaction start",
+    () =>
+      Effect.gen(function* () {
+        const ready = yield* Deferred.make<void>()
+        // mock 只冻结 Started publish；此时 marker 与 Part 已 durable，但 create 尚未返回，
+        // 因而测试能证明 cleanup identity 来自预分配，而不是发布后的返回值。
+        const events = Layer.mock(EventV2Bridge.Service)({
+          publish: () =>
+            Effect.sync(() => Deferred.doneUnsafe(ready, Effect.void)).pipe(
+              Effect.andThen(Effect.never),
+            ),
+        })
+
+        return yield* Effect.gen(function* () {
+          const ssn = yield* SessionNs.Service
+          const session = yield* ssn.create({})
+          const user = yield* createUserMessage(session.id, "interrupt during start publication")
+          const fiber = yield* SessionCompaction.use
+            .run({ sessionID: session.id, agent: "build", model: ref, auto: false })
+            .pipe(Effect.forkChild)
+
+          // readiness 位于 marker/Part 已持久化但 create 尚未返回的真实窗口；
+          // 这能捕获 cleanup identity 取得过晚，而不是依赖 scheduler sleep 猜时序。
+          yield* Deferred.await(ready).pipe(Effect.timeout("1 second"))
+          yield* Fiber.interrupt(fiber)
+          const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("250 millis"))
+          const visible = yield* ssn.messages({ sessionID: session.id })
+          const persisted = (yield* MessageV2.page({ sessionID: session.id, limit: 20, includeHidden: true })).items
+
+          expect(Exit.isFailure(exit)).toBe(true)
+          expect(visible.map((message) => message.info.id)).toEqual([user.id])
+          const marker = persisted.find((message) => message.info.id !== user.id)
+          expect(marker?.info.hidden?.reason).toBe("compaction-cancelled")
+        }).pipe(withCompaction({ events }))
+      }),
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "terminalizes a persisted summary when processor creation is interrupted",
+    () => {
+      const ready = Deferred.makeUnsafe<void>()
+      // create 在 summary updateMessage 之后才调用；冻结这里可精确区分“只有 marker”
+      // 与“summary 已存在但 Processor handle 尚未建立”两个不同的中断窗口。
+      const processor = Layer.mock(SessionProcessorModule.SessionProcessor.Service)({
+        create: () =>
+          Effect.sync(() => Deferred.doneUnsafe(ready, Effect.void)).pipe(
+            Effect.andThen(Effect.never),
+          ),
+      })
+
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const user = yield* createUserMessage(session.id, "interrupt after summary persistence")
+        const fiber = yield* SessionCompaction.use
+          .run({ sessionID: session.id, agent: "build", model: ref, auto: false })
+          .pipe(Effect.forkChild)
+        yield* Effect.addFinalizer(() => Fiber.interrupt(fiber))
+
+        // create readiness 只能在 summary Message 已持久化后发生；此窗口证明 cleanup
+        // 不仅隐藏 pair，还为尚未交给 Processor 的 summary 补齐 aborted terminal。
+        yield* Deferred.await(ready).pipe(Effect.timeout("5 seconds"))
+        yield* Fiber.interrupt(fiber)
+        const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("250 millis"))
+        const persisted = (yield* MessageV2.page({ sessionID: session.id, limit: 20, includeHidden: true })).items
+        const failed = persisted.filter((message) => message.info.id !== user.id)
+        const summary = failed.find((message) => message.info.role === "assistant")
+
+        expect(Exit.isFailure(exit)).toBe(true)
+        expect(failed).toHaveLength(2)
+        expect(failed.every((message) => message.info.hidden?.reason === "compaction-cancelled")).toBe(true)
+        expect(summary?.info.role).toBe("assistant")
+        if (summary?.info.role !== "assistant") return
+        expect(summary.info.time.completed).toBeNumber()
+        expect(summary.info.error?.name).toBe("MessageAbortedError")
+      }).pipe(withCompaction({ processor }))
+    },
+    { git: true },
+    20_000,
+  )
+
+  itCompaction.instance(
+    "preserves recorded accounting when a failed summary is hidden",
+    () => {
+      const expectedTokens = { input: 123, output: 45, reasoning: 6, cache: { read: 7, write: 8 } }
+      const expectedCost = 1.25
+      return Effect.gen(function* () {
+        const usage = yield* SessionRequestUsage.Service
+        let before: SessionRequestUsage.Request | undefined
+        const processor = Layer.succeed(
+          SessionProcessorModule.SessionProcessor.Service,
+          SessionProcessorModule.SessionProcessor.Service.of({
+            create: Effect.fn("AccountingSessionProcessor.create")((input) => {
+              const msg = input.assistantMessage
+              return Effect.succeed({
+                get message() {
+                  return msg
+                },
+                inputChars: undefined,
+                inputBreakdown: undefined,
+                updateToolCall: Effect.fn("AccountingSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
+                completeToolCall: Effect.fn("AccountingSessionProcessor.completeToolCall")(() => Effect.void),
+                process: Effect.fn("AccountingSessionProcessor.process")(() =>
+                  Effect.gen(function* () {
+                    // 这些非零值模拟 Provider 已确认并由 Processor 持久化的 accounting；
+                    // 先 recordAssistant 再返回 compact，使 hidden cleanup 发生在计费之后；
+                    // 测试不复制费用算法，只使用独立字面量验证 cleanup 没有改写结果；
+                    // semantic compact 随后生成 error summary，但既有 usage owner 保持不变。
+                    msg.tokens = expectedTokens
+                    msg.cost = expectedCost
+                    msg.time.completed = Date.now()
+                    yield* usage.recordAssistant({ sessionID: msg.sessionID, requestID: msg.parentID, assistant: msg })
+                    before = yield* usage.get({ sessionID: msg.sessionID, requestID: msg.parentID })
+                    return "compact" as const
+                  }),
+                ),
+              } satisfies SessionProcessorModule.SessionProcessor.Handle)
+            }),
+          }),
+        )
+
+        return yield* Effect.gen(function* () {
+          const ssn = yield* SessionNs.Service
+          const session = yield* ssn.create({})
+          const user = yield* createUserMessage(session.id, "preserve billed compaction work")
+          yield* usage.begin({
+            sessionID: session.id,
+            requestID: user.id,
+            source: "system_compaction",
+            agent: "build",
+            providerID: ref.providerID,
+            modelID: ref.modelID,
+          })
+          const requestBefore = yield* usage.get({ sessionID: session.id, requestID: user.id })
+
+          const result = yield* SessionCompaction.use.run({
+            sessionID: session.id,
+            agent: "build",
+            model: ref,
+            auto: false,
+          })
+          const persisted = (yield* MessageV2.page({ sessionID: session.id, limit: 20, includeHidden: true })).items
+          const summary = persisted.find((message) => message.info.role === "assistant" && message.info.summary)
+          const requestAfter = yield* usage.get({ sessionID: session.id, requestID: user.id })
+          // 原 user request 与 technical marker 各有独立 usage key，不能混为一条比较；
+          // 两个 snapshot 分别前后等值，才证明 cleanup 没有触碰任一 accounting 记录。
+          // usage 是独立投影，不能仅凭 hidden Message 字段未变就推断它也未被更新。
+          const summaryAfter =
+            summary?.info.role === "assistant"
+              ? yield* usage.get({ sessionID: session.id, requestID: summary.info.parentID })
+              : undefined
+
+          // hidden 是可见性终态，不是 accounting rollback；Provider 已确认的 Message
+          // 数值和独立 RequestUsage snapshot 都必须逐值保持，cleanup 不得重新计算。
+          expect(result).toBe("stop")
+          expect(summary?.info.hidden?.reason).toBe("compaction-cancelled")
+          if (summary?.info.role !== "assistant") return
+          expect(summary.info.tokens).toEqual(expectedTokens)
+          expect(summary.info.cost).toBe(expectedCost)
+          expect(before).toBeDefined()
+          expect(summaryAfter).toEqual(before)
+          expect(requestAfter).toEqual(requestBefore)
+        }).pipe(withCompaction({ processor }))
+      }).pipe(Effect.provide(SessionRequestUsage.defaultLayer))
+    },
+    { git: true },
+    20_000,
   )
 
   it.instance(
