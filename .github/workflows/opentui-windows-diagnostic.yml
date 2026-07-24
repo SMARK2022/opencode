@@ -1,0 +1,51 @@
+name: OpenTUI Windows diagnostic
+
+on:
+  push:
+    branches:
+      - diag/opentui-windows-crash
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  OPENCODE_DISABLE_LSP_DOWNLOAD: "true"
+  OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: "true"
+
+jobs:
+  baseline:
+    name: Windows full-suite baseline ${{ matrix.attempt }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [1, 2, 3]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Run opencode package tests
+        run: bun turbo test:ci --filter=opencode --continue=dependencies-successful
+
+      - name: Upload unit report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opentui-windows-baseline-${{ matrix.attempt }}
+          path: packages/opencode/.artifacts/unit/junit.xml
+          if-no-files-found: ignore
+          retention-days: 3
