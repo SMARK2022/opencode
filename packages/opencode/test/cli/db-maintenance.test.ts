@@ -76,9 +76,11 @@ async function waitForExit(proc: Proc, exited: Promise<number>) {
 }
 // 非 PTY helper 分开读取 stdout/stderr，确保 machine JSON 不被人类提示污染。
 async function runCli(root: string, args: string[]) {
+  // 后台 CLI 子进程在 Windows 上隐藏 console，避免维护命令验证时弹出 conhost。
   const proc = Bun.spawn([process.execPath, INDEX_TS, ...args], {
     env: isolatedEnv(root),
     ...PIPE_OPTIONS,
+    windowsHide: process.platform === "win32",
   })
   const [exitCode, stdout, stderr] = await Promise.all([
     // 三个 stream 分别消费，保证 machine JSON 的合法性不会被 stdout/stderr 竞争掩盖。

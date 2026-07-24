@@ -22,7 +22,8 @@ afterEach(async () => {
 
 const exec = (cwd: string, command: string[]) =>
   Effect.promise(async () => {
-    const proc = Bun.spawn(command, { cwd, stdout: "ignore", stderr: "pipe" })
+    // 后台 git helper 在 Windows 上隐藏 console，snapshot fixture 准备不弹窗。
+    const proc = Bun.spawn(command, { cwd, stdout: "ignore", stderr: "pipe", windowsHide: process.platform === "win32" })
     const code = await proc.exited
     if (code !== 0) throw new Error(`${command.join(" ")} failed: ${await new Response(proc.stderr).text()}`)
   })

@@ -813,7 +813,14 @@ describe("prompt voice input", () => {
           daemonObserved = typeof daemon?.pid === "number"
           // stop走真实CLI ownership：shared CDP只disconnect，owned browser才关闭自身窗口。
           // 退出码只证明stop请求被接受；必须继续观察精确PID，才能证明profile锁和浏览器进程已释放。
-          const stop = Bun.spawn(["node", script, "--stop"], { cwd: agent, env: process.env, stdout: "ignore", stderr: "ignore" })
+          // stop CLI 隐藏 console（Windows 生效；本测仅 darwin 可达，true 在其它平台为 no-op）。
+          const stop = Bun.spawn(["node", script, "--stop"], {
+            cwd: agent,
+            env: process.env,
+            stdout: "ignore",
+            stderr: "ignore",
+            windowsHide: true,
+          })
           stopExitCode = await stop.exited
           if (stopExitCode !== 0) throw new Error("voice E2E could not stop its isolated daemon")
           // 不能只相信stop退出码；精确旧PID仍存活时profile锁尚未安全释放。
