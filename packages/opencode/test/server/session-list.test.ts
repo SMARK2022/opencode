@@ -793,6 +793,115 @@ describe("session.list", () => {
     { git: true },
   )
 
+  // #544 progressive B1：title 模式只验证标题子串，正文命中必须留给 all/scan
+  // 防止把 title 子集误当成 complete 全量语义；all 分支同时回归旧三路 union 合同
+  it.instance(
+    "searchMode title matches title only",
+    () =>
+      Effect.gen(function* () {
+        const titled = yield* withSession({ title: "cjk-title-only-session" })
+        const bodyOnly = yield* withSession({ title: "plain-holder" })
+        const bodyMsg = yield* createSearchUserMessage(bodyOnly.id)
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: bodyOnly.id,
+            messageID: bodyMsg,
+            type: "text",
+            text: "body has cjk token here",
+          }),
+        )
+
+        // title 模式经 list 公开入口：覆盖 ListInput.searchMode 到 searchCondition 的全链路。
+        const titleIDs = (
+          yield* SessionNs.Service.use((session) => session.list({ search: "cjk", searchMode: "title" }))
+        ).map((session) => session.id)
+        expect(titleIDs).toContain(titled.id)
+        expect(titleIDs).not.toContain(bodyOnly.id)
+
+        const allIDs = (yield* SessionNs.Service.use((session) => session.list({ search: "cjk" }))).map(
+          (session) => session.id,
+        )
+        expect(allIDs).toContain(titled.id)
+        expect(allIDs).toContain(bodyOnly.id)
+      }),
+    { git: true },
+    // #544：Windows 宿主 git fixture 冷启动慢于 5s 默认超时，显式 30s 与 daemon 用例同族
+    30_000,
+  )
+
+  // #544 INV-08：token A 在 title、token B 在正文时，title 模式漏、scan 全条件命中
+  // 这是 progressive 拆阶段后最容易回归的召回合同
+  it.instance(
+    "searchScan full condition finds cross-field multi-token matches",
+    () =>
+      Effect.gen(function* () {
+        const cross = yield* withSession({ title: "alpha-in-title" })
+        const child = yield* withSession({ parentID: cross.id, title: "alpha beta child" })
+        const msg = yield* createSearchUserMessage(cross.id)
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: cross.id,
+            messageID: msg,
+            type: "text",
+            text: "beta-in-body",
+          }),
+        )
+
+        // title AND 逐 token 命中标题——alpha/beta 分居两字段时必须整体漏掉。
+        const titleIDs = (
+          yield* SessionNs.Service.use((session) => session.list({ search: "alpha beta", searchMode: "title", roots: true }))
+        ).map((session) => session.id)
+        expect(titleIDs).not.toContain(cross.id)
+        expect(titleIDs).not.toContain(child.id)
+
+        // scan 固定 mode=all：候选窗过滤用完整三路 union，跨字段 AND 召回必须可见。
+        const scan = yield* SessionNs.Service.use((session) =>
+          session.searchScan({ search: "alpha beta", batch: 50, roots: true }),
+        )
+        expect(scan.sessions.map((session) => session.id)).toContain(cross.id)
+        // scan和普通list必须保留同一请求身份，不能因改成原始Session行而丢失投影。
+        expect(scan.sessions.map((session) => session.id)).not.toContain(child.id)
+        expect(scan.sessions.find((session) => session.id === cross.id)?.request?.messageID).toBe(msg)
+        const listed = yield* SessionNs.Service.use((session) => session.list({ search: "alpha beta", roots: true }))
+        expect(listed.find((session) => session.id === cross.id)?.request?.messageID).toBe(msg)
+      }),
+    { git: true },
+    30_000,
+  )
+
+  // #544：keyset 翻页——nextCursor 指向候选窗末行，done 表示宇宙耗尽而非命中耗尽
+  it.instance(
+    "searchScan pages candidates with keyset until done",
+    () =>
+      Effect.gen(function* () {
+        for (let i = 0; i < 3; i++) {
+          yield* withSession({ title: `scan-page-holder-${i}` })
+        }
+        // batch=2且存在3个holder，第一页必须填满候选窗并继续，不能提前返回绕过分页断言。
+        const first = yield* SessionNs.Service.use((session) => session.searchScan({ search: "scan-page", batch: 2 }))
+        expect(first.sessions.length).toBeGreaterThan(0)
+        expect(first.done).toBe(false)
+        expect(first.nextCursor).not.toBeNull()
+        const second = yield* SessionNs.Service.use((session) =>
+          session.searchScan({
+            search: "scan-page",
+            batch: 2,
+            cursor: first.nextCursor!,
+          }),
+        )
+        // 两页合集无重复（Set 大小不缩水）——keyset 游标与 orderBy 同序的直接证据。
+        const ids = new Set([...first.sessions, ...second.sessions].map((session) => session.id))
+        expect(ids.size).toBe(first.sessions.length + second.sessions.length)
+        // 满候选页即使命中为空也不能标记done，否则后续正文命中会被截断。
+        const empty = yield* SessionNs.Service.use((session) => session.searchScan({ search: "absent-token", batch: 2 }))
+        expect([empty.sessions.length, empty.done, empty.nextCursor !== null]).toEqual([0, false, true])
+      }),
+    { git: true },
+    30_000,
+  )
+
   // #529：多关键词空格分词后取交集：每 token 各自 title∨内容命中，而不是整串 "A B" 子串。
   // 跨字段命中（title 含 alpha、body 含 beta）也必须保留——AND 是 token 级不是字段级。
   it.instance(

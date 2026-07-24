@@ -22,6 +22,7 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionInput } from "@opencode-ai/core/session/input"
 import { ColdStorageTable, SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { searchCondition } from "@opencode-ai/core/session/search"
 import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { RequestUsageTable, RequestUsageAssistantTable } from "@opencode-ai/core/session/request-usage.sql"
@@ -83,6 +84,11 @@ describe("SessionProjector", () => {
       expect(yield* search("beta")).toEqual([ids[0], ids[2]].toSorted())
       expect(yield* search("alpha absent")).toEqual([])
       expect(yield* search(" \t ")).toEqual(ids.toSorted())
+      // 首屏仅标题是刻意子集；真实Native正文继续由同一all谓词完整召回，不构建第二搜索器。
+      const title = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(searchCondition("alpha", { mode: "title" })).all().pipe(Effect.orDie)
+      expect(title.map(row => row.id).toSorted()).toEqual(ids.slice(0, 2).toSorted())
+      const cross = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(searchCondition("alpha beta", { mode: "title" })).all().pipe(Effect.orDie)
+      expect(cross).toEqual([])
     }),
   )
   previewIt.effect("checks Native root and child idle clocks at exact boundaries", () =>

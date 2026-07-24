@@ -52,7 +52,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionMessage } from "@opencode-ai/schema/session-message"
 import { createDefaultTitle, isDefaultTitle } from "./title"
-import { searchCondition } from "./search"
+import { searchCondition, type SearchMode } from "./search"
 // #113：兼容 Session.isDefaultTitle 导出名
 export { isDefaultTitle }
 
@@ -259,7 +259,22 @@ export type ListInput = {
   roots?: boolean
   start?: number
   search?: string
+  /** title：首屏子集；all（默认）：完整 title∨content，兼容旧客户端 */
+  searchMode?: SearchMode
   limit?: number
+}
+
+export type SearchScanInput = ListInput & {
+  search: string
+  cursor?: { time_updated: number; id: string }
+  /** 候选窗口大小，默认 50 */
+  batch?: number
+}
+
+export type SearchScanResult = {
+  sessions: Info[]
+  nextCursor: { time_updated: number; id: string } | null
+  done: boolean
 }
 
 export type GlobalListInput = {
@@ -365,6 +380,8 @@ export type NotFound = NotFoundError
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<Info[]>
+  /** progressive B2：同 list 宇宙 keyset 扫候选，完整 searchCondition 过滤命中 */
+  readonly searchScan: (input: SearchScanInput) => Effect.Effect<SearchScanResult>
   readonly listGlobal: (input?: GlobalListInput) => Effect.Effect<GlobalInfo[]>
   readonly create: (input?: {
     parentID?: SessionID
@@ -508,6 +525,18 @@ const layer: Layer.Layer<
         projectID: ctx.project.id,
         experimentalWorkspaces: flags.experimentalWorkspaces,
         // #143：worktree 供 directoryMatchesPath
+        worktree: ctx.worktree,
+        ...input,
+      })
+    })
+
+    // B2 服务入口：与 list 同 Instance project/worktree，复用 listUniverseConditions
+    // ctx.worktree 参与 directoryMatchesPath 判定——scan 候选宇宙与 list 逐字一致。
+    const searchScan = Effect.fn("Session.searchScan")(function* (input: SearchScanInput) {
+      const ctx = yield* InstanceState.context
+      return yield* searchScanByProject(db, {
+        projectID: ctx.project.id,
+        experimentalWorkspaces: flags.experimentalWorkspaces,
         worktree: ctx.worktree,
         ...input,
       })
@@ -856,6 +885,7 @@ const layer: Layer.Layer<
 
     return Service.of({
       list,
+      searchScan,
       listGlobal,
       create,
       fork,
@@ -913,6 +943,126 @@ function listByProject(
     worktree: string
   },
 ) {
+  // #544：scope/start 谓词与 searchScan 共用 listUniverseConditions，避免 path 语义分叉
+  // searchMode 只作用于 list——缺省 all 与历史行为逐字一致，旧客户端零感知。
+  const conditions = listUniverseConditions(input)
+  // #121：项目列表——空白 search 不注入条件
+  if (input.search) {
+    const condition = searchCondition(input.search, { mode: input.searchMode ?? "all" })
+    if (condition) conditions.push(condition)
+  }
+
+  const limit = input.limit ?? 100
+
+  return db
+    // 继续使用前项的请求投影，搜索结果不能丢失已落盘的token与费用字段。
+    .select(selection)
+    .from(SessionTable)
+    // #228：home 切换查询故意无 project/path 谓词——undefined 表示无 WHERE，只保留 start/search/roots 过滤
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    // 与scan的keyset完全同序，同毫秒更新的top-400也保持一致。
+    .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
+    .limit(limit)
+    .all()
+    .pipe(
+      Effect.orDie,
+      Effect.map((rows) => rows.map(fromRow)),
+    )
+}
+
+/**
+ * #544 progressive B2 核心实现。
+ * - 候选窗固定 batch 行，推进 recency 宇宙（非 browse 缓存）
+ * - 命中用完整 searchCondition(mode=all)，保证 multi-token 跨字段 AND
+ * - nextCursor 落在候选页最后一行，即使该行未命中也要推进，避免死循环
+ * - done=true 当候选页不足 batch，表示宇宙耗尽
+ */
+function* searchScanByProject(
+  db: Database.Interface["db"],
+  input: SearchScanInput & {
+    projectID: ProjectV2.ID
+    experimentalWorkspaces: boolean
+    worktree: string
+  },
+) {
+  // batch 上限 100 防止单次扫过大 JSON；默认 50 对齐 TUI CONTENT_BATCH
+  // clamp 而非拒绝：payload schema 已限 1-100，这里兜底服务内直调的越界值。
+  const batch = Math.min(Math.max(input.batch ?? 50, 1), 100)
+  // 候选页：与 list 同 scope/start，故意不含 search，保证每批固定扫 N 行候选
+  // 候选宇宙显式重建而非复用调用方 conditions：scan 不得携带 search 谓词。
+  const universe = listUniverseConditions({
+    projectID: input.projectID,
+    experimentalWorkspaces: input.experimentalWorkspaces,
+    worktree: input.worktree,
+    directory: input.directory,
+    scope: input.scope,
+    path: input.path,
+    workspaceID: input.workspaceID,
+    roots: input.roots,
+    start: input.start,
+  })
+  if (input.cursor) {
+    // keyset：time_updated DESC, id DESC 的下一页（id 用 sql 比较避免 brand 与 string 过载冲突）
+    // 二元组比较与 orderBy 严格同序——错序会让翻页漏行或重复。
+    universe.push(
+      or(
+        lt(SessionTable.time_updated, input.cursor.time_updated),
+        and(
+          eq(SessionTable.time_updated, input.cursor.time_updated),
+          sql`${SessionTable.id} < ${input.cursor.id}`,
+        ),
+      )!,
+    )
+  }
+
+  const page = yield* db
+    .select()
+    .from(SessionTable)
+    .where(universe.length > 0 ? and(...universe) : undefined)
+    .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
+    .limit(batch)
+    .all()
+    .pipe(Effect.orDie)
+  // 空页即宇宙耗尽：nextCursor=null 让 TUI 端的 done 短路，不再发起下一批。
+  if (page.length === 0) return { sessions: [], nextCursor: null, done: true }
+
+  // 第二段 SQL：在候选 id 集合上施加完整 searchCondition（title∨content AND）
+  // 与「先 search 再 limit 50 命中」不同：这里保证每页固定推进 50 候选
+  // 固定 all：complete 召回不得被首屏 title 子集口径污染（INV-09 的服务端锚点）。
+  const full = searchCondition(input.search, { mode: "all" })
+  const ids = page.map((row) => row.id)
+  // 命中集合走第二段 SQL 而非在内存过滤——候选窗语义要求 SQL 只按 id 收窄。
+  const matched = yield* db
+    .select(selection)
+    .from(SessionTable)
+    .where(and(inArray(SessionTable.id, ids), full))
+    .all()
+    .pipe(Effect.orDie)
+  // 命中行保留同一请求投影，输出仍按候选页排序而非第二次SQL的返回顺序。
+  const byID = new Map(matched.map((row) => [row.id, row]))
+  const sessions = page.flatMap((row) => {
+    const match = byID.get(row.id)
+    return match ? [fromRow(match)] : []
+  })
+  const last = page[page.length - 1]!
+  // done 判定只看候选页是否填满：命中为 0 的满页仍要继续翻，直到宇宙耗尽。
+  const done = page.length < batch
+  const nextCursor = done ? null : { time_updated: last.time_updated, id: last.id }
+  return { sessions, nextCursor, done }
+}
+
+/**
+ * #544：list / searchScan 共用的 scope+start 谓词（不含 search）。
+ * 故意与 listByProject 历史 path 语义逐字对齐（#143/#228 注释原样保留）：home 切换放宽、
+ * directory fallback、global path 并集。searchScan 必须复用此函数，禁止另写 browse 缓存宇宙。
+ */
+function listUniverseConditions(
+  input: ListInput & {
+    projectID: ProjectV2.ID
+    experimentalWorkspaces: boolean
+    worktree: string
+  },
+): SQL[] {
   const conditions: ReturnType<typeof eq>[] = []
 
   if (input.workspaceID) {
@@ -932,28 +1082,9 @@ function listByProject(
   if (input.start) {
     conditions.push(gte(SessionTable.time_updated, input.start))
   }
-  // #121：项目列表——空白 search 不注入条件
-  if (input.search) {
-    const condition = searchCondition(input.search)
-    if (condition) conditions.push(condition)
-  }
 
-  const limit = input.limit ?? 100
-
-  return db
-    // 项目列表仍复用原筛选，公开请求字段只随已有 Session 行读取。
-    .select(selection)
-    .from(SessionTable)
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(desc(SessionTable.time_updated))
-    .limit(limit)
-    .all()
-    .pipe(
-      Effect.orDie,
-      Effect.map((rows) => rows.map(fromRow)),
-    )
+  return conditions
 }
-
 export const node = LayerNode.make({
   service: Service,
   layer: layer,

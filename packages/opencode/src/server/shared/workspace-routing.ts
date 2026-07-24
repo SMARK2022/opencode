@@ -6,6 +6,8 @@ const RULES: Array<Rule> = [
   { path: "/experimental/workspace", action: "local" },
   { path: "/session/status", action: "forward" },
   { method: "GET", path: "/session", action: "local" },
+  // scan与列表查询同一控制平面候选集，不应因POST而被转发到另一个workspace。
+  { method: "POST", path: "/session/search/scan", exact: true, action: "local" },
 ]
 
 export function isLocalWorkspaceRoute(method: string, path: string) {
@@ -22,6 +24,8 @@ export function getWorkspaceRouteSessionID(url: URL) {
   // [local-smark] /session/preview 是批量预览端点，路径中无 :sessionID，
   // 不能让 SessionID.make("preview") 触发品牌校验异常
   if (url.pathname === "/session/preview") return null
+  // search是列表端点路径而非Session ID，必须在品牌解析前排除。
+  if (url.pathname === "/session/search/scan") return null
 
   const id =
     url.pathname.match(/^\/session\/([^/]+)(?:\/|$)/)?.[1] ??

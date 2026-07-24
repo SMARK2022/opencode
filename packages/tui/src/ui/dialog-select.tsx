@@ -56,6 +56,8 @@ export interface DialogSelectProps<T> {
   currentKey?: string
   // 可选头部：渲染在 title/filter 和 scrollbox 之间，增加对话框有效高度
   header?: JSX.Element
+  // #544：搜索框右侧附属（如 progressive 搜索 Spinner）
+  filterAccessory?: JSX.Element
 }
 
 export interface DialogSelectOption<T = any> {
@@ -652,31 +654,40 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
           </text>
         </box>
         <Show when={props.renderFilter !== false}>
-          <box paddingTop={1}>
-            <input
-              onInput={(e) => {
-                if (props.locked) return
-                batch(() => {
-                  setStore("filter", e)
-                  props.onFilter?.(e)
-                })
-              }}
-              focusedBackgroundColor={theme.backgroundPanel}
-              cursorColor={theme.primary}
-              cursorStyle={tuiConfig.cursor}
-              focusedTextColor={theme.textMuted}
-              ref={(r) => {
-                input = r
-                input.traits = { status: "FILTER" }
-                setTimeout(() => {
-                  if (!input) return
-                  if (input.isDestroyed) return
-                  input.focus()
-                }, 1)
-              }}
-              placeholder={props.placeholder ?? "Search"}
-              placeholderColor={theme.textMuted}
-            />
+          <box paddingTop={1} flexDirection="row" gap={1}>
+            <box flexGrow={1}>
+              <input
+                onInput={(e) => {
+                  if (props.locked) return
+                  batch(() => {
+                    setStore("filter", e)
+                    props.onFilter?.(e)
+                  })
+                }}
+                focusedBackgroundColor={theme.backgroundPanel}
+                cursorColor={theme.primary}
+                cursorStyle={tuiConfig.cursor}
+                focusedTextColor={theme.textMuted}
+                ref={(r) => {
+                  input = r
+                  input.traits = { status: "FILTER" }
+                  setTimeout(() => {
+                    if (!input) return
+                    if (input.isDestroyed) return
+                    input.focus()
+                  }, 1)
+                }}
+                placeholder={props.placeholder ?? "Search"}
+                placeholderColor={theme.textMuted}
+              />
+            </box>
+            {/* #544：可选右侧槽——Session list progressive 搜索把 Spinner 挂在这里；
+                flexGrow 包输入框保证窄终端下输入区优先占宽，附属只取固有宽度。*/}
+            <Show when={props.filterAccessory}>
+              <box flexShrink={0} justifyContent="center">
+                {props.filterAccessory}
+              </box>
+            </Show>
           </box>
         </Show>
       </box>
