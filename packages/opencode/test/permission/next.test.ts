@@ -1682,6 +1682,52 @@ it.live("permission requests stay isolated by directory", () =>
   }),
 )
 
+// #537：错 directory 的 reply 模拟 TUI 启动目录 ≠ session.directory——目标服务 seam 对 unknown
+// request 返回 NotFoundError（比 source 时代的静默 no-op 更可观测）；pending 必须仍挂起，
+// 正确 directory 的 once 才 resolve，防止 HITL 窗口因 Instance 路由错误而关不掉。
+it.live("reply on wrong directory leaves the original pending ask unresolved", () =>
+  Effect.gen(function* () {
+    const owner = yield* tmpdirScoped({ git: true })
+    const other = yield* tmpdirScoped({ git: true })
+    const store = yield* InstanceStore.Service
+    const requestID = PermissionV1.ID.make("per_wrong_dir")
+
+    const fiber = yield* store
+      .provide(
+        { directory: owner },
+        ask({
+          id: requestID,
+          sessionID: SessionID.make("session_wrong_dir"),
+          permission: "external_directory",
+          patterns: ["/tmp/*"],
+          metadata: { filepath: "/tmp", parentDir: "/tmp" },
+          always: ["/tmp/*"],
+          ruleset: [],
+        }),
+      )
+      .pipe(Effect.forkScoped)
+
+    yield* store.provide({ directory: owner }, waitForPending(1))
+
+    // 错 instance 的 reply 失败为 NotFoundError——不静默、也不误清 owner pending。
+    const wrong = yield* Effect.exit(store.provide({ directory: other }, reply({ requestID, reply: "once" })))
+    expect(Exit.isSuccess(wrong)).toBe(false)
+    if (Exit.isFailure(wrong)) {
+      expect(Cause.squash(wrong.cause)).toBeInstanceOf(PermissionV1.NotFoundError)
+    }
+
+    const stillPending = yield* store.provide({ directory: owner }, list())
+    // 错 instance 的 once 不得清空 owner pending，对应 TUI 按了无反应。
+    expect(stillPending.map((item) => item.id)).toEqual([requestID])
+
+    yield* store.provide({ directory: owner }, reply({ requestID, reply: "once" }))
+    yield* Fiber.join(fiber)
+    // 正确 directory 的 once 必须清空 list 并结束 ask fiber。
+    // join 不带超时：owner reply 已在同一 store 中挂起等待，死锁会以测试超时暴露而非假绿。
+    expect(yield* store.provide({ directory: owner }, list())).toEqual([])
+  }),
+)
+
 it.instance(
   "pending permission rejects on instance dispose",
   () =>
