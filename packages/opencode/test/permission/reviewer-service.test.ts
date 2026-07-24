@@ -81,6 +81,12 @@ describe("permission reviewer service", () => {
   const pendingClosure = testEffect(closureFixtures.get("pending")!.layer)
   const completedClosure = testEffect(closureFixtures.get("completed")!.layer)
   const drainedClosure = testEffect(closureFixtures.get("drain")!.layer)
+  // #546：timeout 共终态夹具——短 timeout_ms + 挂起 SSE（tool-input-start 后不关流）。
+  // 覆盖生产路径：timeoutOrElse 中断 attempt，而非 drain incomplete。
+  // 回归锁：decision tool 必须 error，assistant 必须 time.completed（INV-01/02）。
+  // 不断言私有 toolParts map；只读 fixture 持久化 parts/messages 快照。
+  const timeoutClosureFixture = reviewerTimeoutClosureFixture()
+  const timeoutClosure = testEffect(timeoutClosureFixture.layer)
   const oauthFixture = reviewerFixture(oauthAuth(), { requireInstructions: true })
   const apiKeyFixture = reviewerFixture({ type: "api", key: "test-key" }, { requireInstructions: false })
   // OAuth 凭据本身不是 Codex 契约；这个 fixture 防止未来把条件误放宽成
@@ -402,6 +408,64 @@ describe("permission reviewer service", () => {
       expect(decisions.length).toBeGreaterThan(0)
       expect(decisions.filter((part) => part.state.status === "pending" || part.state.status === "running")).toEqual([])
       expect(decisions.every((part) => part.state.status === "error")).toBe(true)
+    }),
+  )
+
+  // #546：用户症状——timeout 后 message 已 Aborted/completed，permission_review_decision 不得仍 pending。
+  // 独立期望：error 文案与 SessionProcessor.TOOL_ABORTED_ERROR 一致；不依赖私有 map。
+  timeoutClosure.live("timeout after tool-input-start closes decision Tools before message completes", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      yield* Effect.exit(
+        reviewer.review(reviewInput("review_timeout_closure", undefined, SessionID.make("session_parent_closure"))),
+      )
+
+      const decisions = [...timeoutClosureFixture.parts.values()].filter(
+        (part): part is MessageV2.ToolPart => part.type === "tool",
+      )
+      expect(decisions.length).toBeGreaterThan(0)
+      expect(decisions.filter((part) => part.state.status === "pending" || part.state.status === "running")).toEqual([])
+      expect(decisions.every((part) => part.state.status === "error")).toBe(true)
+      expect(
+        decisions.every((part) => part.state.status === "error" && part.state.error === "Tool execution aborted"),
+      ).toBe(true)
+
+      const assistants = [...timeoutClosureFixture.messages.values()].filter(
+        (message): message is MessageV2.Assistant => message.role === "assistant",
+      )
+      expect(assistants.length).toBeGreaterThan(0)
+      // INV-02：message 终态与 tool 终态同收；生产僵尸是 completed + pending 的分裂。
+      expect(assistants.every((message) => message.time.completed !== undefined)).toBe(true)
+    }),
+  )
+
+  // #546：复现生产半写——stream finalize 写 error 首次失败时，不得只留下 completed message + pending tool。
+  // 旧路径：单次 finalize + catch void → message 仍 completed、tool 仍 pending。
+  // 修复后：ensuring / 外层 finalize-before-message 再扫一次，第二次写成功即共终态。
+  // 期望字面量独立于实现：status=error 且 error==="Tool execution aborted"。
+  const timeoutWriteFailFixture = reviewerTimeoutClosureFixture({ failErrorWrites: true })
+  const timeoutWriteFail = testEffect(timeoutWriteFailFixture.layer)
+  timeoutWriteFail.live("timeout still closes decision Tools when first error write fails", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      yield* Effect.exit(
+        reviewer.review(reviewInput("review_timeout_write_fail", undefined, SessionID.make("session_parent_closure"))),
+      )
+
+      const decisions = [...timeoutWriteFailFixture.parts.values()].filter(
+        (part): part is MessageV2.ToolPart => part.type === "tool",
+      )
+      expect(decisions.length).toBeGreaterThan(0)
+      expect(decisions.filter((part) => part.state.status === "pending" || part.state.status === "running")).toEqual([])
+      expect(
+        decisions.every((part) => part.state.status === "error" && part.state.error === "Tool execution aborted"),
+      ).toBe(true)
+
+      const assistants = [...timeoutWriteFailFixture.messages.values()].filter(
+        (message): message is MessageV2.Assistant => message.role === "assistant",
+      )
+      expect(assistants.length).toBeGreaterThan(0)
+      expect(assistants.every((message) => message.time.completed !== undefined)).toBe(true)
     }),
   )
 
@@ -1079,6 +1143,126 @@ function openAIReviewDecisionStream(usage?: { input: number; output: number; cac
     .join("")
 }
 
+
+// #546：timeout 共终态夹具——SSE 发出 tool-input-start 后永不关流，per-attempt timeout_ms=80
+// 触发 timeoutOrElse 中断（而非 drain incomplete）；messages/parts 内存快照供终态断言。
+function reviewerTimeoutClosureFixture(options: { failErrorWrites?: boolean } = {}) {
+  const parts = new Map<string, MessageV2.Part>()
+  const messages = new Map<string, MessageV2.Assistant>()
+  let errorWriteFailures = 0
+  const model = reviewerModel(OPENAI_PROVIDER_ID)
+  // 挂起 body 命中中断路径：与「有限 Response 立刻 drain」不同，保持连接挂起才对应
+  // 生产僵尸 lag≈90s 的 timeout 窗口（timeoutOrElse interrupt 而非 incomplete finalize）。
+  const fetch = Object.assign(
+    async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      const encoder = new TextEncoder()
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          // 只发工具开始和未完成参数；不能复用含response.completed的drain夹具来伪装timeout。
+          const events = [
+            { type: "response.created", response: { id: "resp_timeout", created_at: 0, model: "gpt-5", service_tier: null } },
+            { type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "fc_timeout", call_id: "call_timeout", name: "permission_review_decision", arguments: "" } },
+            { type: "response.function_call_arguments.delta", item_id: "fc_timeout", output_index: 0, delta: "{" },
+          ]
+          controller.enqueue(encoder.encode(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")))
+        },
+        cancel() {},
+      })
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })
+    },
+    { preconnect: () => {} },
+  )
+  const provider = ProviderTest.fake({
+    model,
+    info: ProviderTest.info({ id: model.providerID, options: {} }, model),
+    getLanguage: Effect.fn("ReviewerTimeoutClosureTest.getLanguage")(() =>
+      Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5")),
+    ),
+  })
+  const parentSession: Session.Info = {
+    id: SessionID.make("session_parent_closure"),
+    slug: "parent-closure",
+    projectID: ProjectV2.ID.make("project_reviewer_closure"),
+    directory: "/tmp",
+    title: "Parent closure",
+    model: { id: model.id, providerID: model.providerID },
+    version: "test",
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 1, updated: 1 },
+  }
+  const childSession: Session.Info = {
+    ...parentSession,
+    id: SessionID.make("session_reviewer_closure"),
+    parentID: parentSession.id,
+    agent: "permission-reviewer",
+    title: "Auto permission review",
+  }
+  const sessionLayer = Layer.mock(Session.Service)({
+    get: () => Effect.succeed(parentSession),
+    // 父级transcript读取不伪造消息；durable补扫走精确Part读取，不借用最近消息窗口。
+    messages: () => Effect.succeed([]),
+    children: () => Effect.succeed([]),
+    create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
+    updateMessage: (message) =>
+      Effect.sync(() => {
+        // 在写入完成消息的当刻检查tool，不能仅凭最终快照证明先tool后message。
+        if (message.role === "assistant" && message.time.completed !== undefined) expect([...parts.values()].filter((part) => part.messageID === message.id && part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"))).toEqual([])
+        messages.set(message.id, structuredClone(message) as MessageV2.Assistant)
+        return message
+      }),
+    findMessage: () => Effect.succeed(Option.none()),
+    getPart: (input) => Effect.succeed(parts.get(input.partID)),
+    // #546：failErrorWrites——首次 error 终态写以 defect 失败，对应旧实现 catch void 后
+    // message 仍 completed、tool 仍 pending 的半写；计数器只失败一次，验证二次 finalize 写成功。
+    updatePart: (part) =>
+      Effect.sync(() => {
+        if (
+          options.failErrorWrites &&
+          part.type === "tool" &&
+          part.state.status === "error" &&
+          errorWriteFailures < 1
+        ) {
+          errorWriteFailures += 1
+          throw new Error("simulated terminal tool write failure")
+        }
+        parts.set(part.id, structuredClone(part))
+        return part
+      }),
+  })
+  return {
+    parts,
+    messages,
+    layer: PermissionReviewer.layer.pipe(
+      Layer.provide(
+        TestConfig.layer({
+          get: () =>
+            Effect.succeed(
+              config(model.providerID, {
+                approvals_reviewer: "auto_review",
+                auto_review: {
+                  model: `${model.providerID}/gpt-5`,
+                  // 三次 attempt × 80ms 仍远小于默认 90s；测的是退出共终态，不是重试策略本身。
+                  // 重试次数保持生产默认，避免为测速改写 MAX_REVIEWER_ATTEMPTS。
+                  timeout_ms: 80,
+                  policy: "Reviewer service test policy: allow only the bounded fixture command.",
+                },
+              }),
+            ),
+        }),
+      ),
+      Layer.provide(provider.layer),
+      Layer.provide(authLayer({ type: "api", key: "test-key" })),
+      Layer.provide(pluginLayer()),
+      Layer.provide(sessionLayer),
+      // #497：reviewer layer 依赖 Database（#206 谱系）——空链 mock 闭合 R。
+      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
+    ),
+  }
+}
 
 function reviewerClosureFixture(block: "pending" | "completed" | "drain") {
   const parts = new Map<string, MessageV2.Part>()
