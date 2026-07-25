@@ -1,6 +1,5 @@
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, test } from "bun:test"
-import { engine } from "@opentui/core"
 import { testRender } from "@opentui/solid"
 import type { Event, GlobalEvent } from "@opencode-ai/sdk/v2"
 import { onMount } from "solid-js"
@@ -97,15 +96,6 @@ async function mount() {
       </ProjectProvider>
     </SDKProvider>
   ))
-  const destroy = app.renderer.destroy.bind(app.renderer)
-  app.renderer.destroy = () => {
-    try {
-      destroy()
-    } finally {
-      // renderer 销毁后立即解除全局 timeline owner，避免下个 testRender 对已销毁对象执行延迟 detach。
-      engine.detach()
-    }
-  }
 
   await ready
   return { app, emit: source.emit, project, seen, workspaces }

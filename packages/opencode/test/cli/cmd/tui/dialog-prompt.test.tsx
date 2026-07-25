@@ -1,5 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { expect, test } from "bun:test"
+import { Global } from "@opencode-ai/core/global"
+import { mkdir } from "fs/promises"
 import path from "path"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { testRender, useRenderer } from "@opentui/solid"
@@ -49,6 +51,9 @@ function OpenPrompt() {
 }
 
 test("DialogPrompt renders the JSX returned by its description factory", async () => {
+  await mkdir(Global.Path.state, { recursive: true })
+  // KVProvider 读取真实空快照，避免把首次挂载的缺失文件分支与 native renderer 行为混为同一变量。
+  await Bun.write(path.join(Global.Path.state, "kv.json"), "{}")
   const app = await testRender(() => (
     <box width={80} height={24}>
       <Harness />
