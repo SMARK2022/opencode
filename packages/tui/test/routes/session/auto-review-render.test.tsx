@@ -606,6 +606,73 @@ async function waitForReviewFrame(app: Awaited<ReturnType<typeof testRender>>, p
   throw new Error(`Expected session frame did not appear after ${Date.now() - start}ms (${passes} passes, prior budget ${options.maxPasses}):\n${frame}`)
 }
 
+// 两个source场景共用现有真实Session夹具：有回答定位旧返回，无回答定位请求正文。
+test.each(["pending", "completed"] as const)("auto review deep link keeps the matching region: %s", async (scenario) => {
+  const childID = "ses_reviewer_child"
+  const reviewID = "review_old_deep"
+  const request: UserMessage = {
+    id: "msg_anchor_request", sessionID: childID, role: "user", time: { created: 10 },
+    agent: "permission-reviewer", model: { providerID: "provider", modelID: "model" },
+  }
+  const answer: AssistantMessage = {
+    id: "msg_anchor_answer", sessionID: childID, role: "assistant", parentID: request.id,
+    time: { created: 11, completed: 12 }, modelID: "model", providerID: "provider",
+    mode: "permission-reviewer", agent: "permission-reviewer", finish: "stop",
+    path: { cwd: directory, root: directory }, cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+  const text = (info: AssistantMessage | UserMessage, value: string): Extract<Part, { type: "text" }> => ({
+    id: `part_${info.id}`, sessionID: childID, messageID: info.id, type: "text", text: value,
+  })
+  const child: { info: AssistantMessage | UserMessage; parts: Part[] }[] = [
+    { info: request, parts: [{ ...text(request, "REVIEWING_REQUEST_MARKER_xyz"), metadata: { permissionReviewerRequest: true, reviewID } }] },
+    ...(scenario === "completed" ? [{ info: answer, parts: [text(answer, "OLD_REVIEW_RETURN_MARKER_xyz")] }] : []),
+  ]
+  // 每个padding回答有自己的parent，避免伪造多条同parent回答干扰真实join方向。
+  for (let index = 0; index < 18; index++) {
+    const user = { ...request, id: `msg_fill_user_${index}`, time: { created: 20 + index * 2 } }
+    const assistant = { ...answer, id: `msg_fill_answer_${index}`, parentID: user.id, time: { created: 21 + index * 2, completed: 22 + index * 2 } }
+    child.push({ info: user, parts: [text(user, "filler request")] }, { info: assistant, parts: [text(assistant, `FILLER_${index}_LONG_ENOUGH_TO_HIDE_OLD_REVIEW_WHEN_STUCK_TO_BOTTOM`)] })
+  }
+  const latestRequest = { ...request, id: "msg_latest_request", time: { created: 200 } }
+  const latestAnswer = { ...answer, id: "msg_latest_answer", parentID: latestRequest.id, time: { created: 201, completed: 202 } }
+  child.push({ info: latestRequest, parts: [text(latestRequest, "latest request")] }, { info: latestAnswer, parts: [text(latestAnswer, "LATEST_REVIEW_RETURN_MARKER_xyz")] })
+  const parent = { ...answer, id: "msg_deep_link_parent", sessionID, parentID: "msg_parent_request" }
+  const review = {
+    reviewID, sessionID: childID, status: scenario === "completed" ? "allowed" : "reviewing",
+    precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
+    result: { risk_level: "high", user_authorization: "high", rationale: "requested exact file" },
+  }
+  const part: Part = {
+    id: "part_deep_link_parent", sessionID, messageID: parent.id, type: "tool", callID: "call_deep_link", tool: "read",
+    state: scenario === "completed"
+      ? { status: "completed", input: { filePath: "external folder/secret.txt" }, title: "secret.txt", output: "read", metadata: { autoReview: review }, time: { start: 1, end: 2 } }
+      : { status: "running", input: { filePath: "external folder/secret.txt" }, metadata: { autoReview: review }, time: { start: 1 } },
+  }
+  await withRenderedReview([{ info: parent, parts: [part] }], async (app, route) => {
+    const label = scenario === "completed" ? "✓ auto review · allowed · auth high" : "◌ auto review · cautious"
+    await waitForReviewFrame(app, async (value) => { if (value.includes(label)) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
+    await app.renderOnce()
+    await app.renderOnce()
+    // 点击公开状态行而非直接导航；request/answer marker均为独立字面量。
+    await clickVisibleText(app, label)
+    expect(route.data).toMatchObject({ type: "session", sessionID: childID, reviewID })
+    const marker = scenario === "completed" ? "OLD_REVIEW_RETURN_MARKER_xyz" : "REVIEWING_REQUEST_MARKER_xyz"
+    await waitForReviewFrame(app, async (value) => { if (value.includes(marker)) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
+    // 两个50ms入口都完成后仍必须停在锚点，不能以瞬间出现掩盖旧贴底timer覆盖。
+    await Bun.sleep(130)
+    await app.renderOnce()
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain(marker)
+    expect(app.captureCharFrame()).not.toContain("LATEST_REVIEW_RETURN_MARKER_xyz")
+    // 普通导航省略reviewID后仍按既有语义贴底，并清除同Session的旧锚点。
+    route.navigate({ type: "session", sessionID: childID })
+    expect(route.data).not.toHaveProperty("reviewID")
+    await waitForReviewFrame(app, async (value) => { if (value.includes("LATEST_REVIEW_RETURN_MARKER_xyz")) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
+    expect(app.captureCharFrame()).toContain("LATEST_REVIEW_RETURN_MARKER_xyz")
+  }, { height: 14 }, { [childID]: () => child })
+})
+
 async function withRenderedReview(
   messages: { info: AssistantMessage | UserMessage; parts: Part[] }[],
   run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"]) => Promise<void>,
