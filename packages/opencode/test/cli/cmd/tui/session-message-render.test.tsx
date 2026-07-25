@@ -257,6 +257,140 @@ test("subagent footer shows compact step flow without request cumulative parenth
   )
 })
 
+// child 底部只有 SubagentFooter（无 Prompt）；retry 红字必须挂在同一行，并覆盖 auto reviewer 等所有 parentID 子会话。
+// 本测用 permission-reviewer title：既锁 task 入口，也锁 auto reviewer 共用 footer 路径。
+test("child subagent footer shows red retry summary before usage", async () => {
+  const childID = "ses_child_retry_footer"
+  await withRenderedSession(
+    [assistantMessage("msg_task_retry_footer", 1)],
+    {
+      msg_task_retry_footer: [
+        completedToolPart(
+          "part_task_retry_footer",
+          "msg_task_retry_footer",
+          "task",
+          { description: "retry footer child", subagent_type: "permission-reviewer" },
+          { sessionId: childID },
+        ),
+      ],
+    },
+    async (app, emit) => {
+      await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("Permission-Reviewer Task") && line.includes("retry footer child")),
+      )
+      const raw = app.captureCharFrame().split("\n")
+      const y = raw.findIndex(
+        (line) => line.includes("Permission-Reviewer Task") && line.includes("retry footer child"),
+      )
+      expect(y).toBeGreaterThanOrEqual(0)
+      // 点击 task 行导航 child：与生产 Task tool onMouse 入口一致，不直接 route.navigate 绕过。
+      await app.mockMouse.click(35, y + 1)
+
+      await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("retry footer visible")) &&
+          lines.some((line) => line.includes("Permission-Reviewer")),
+      )
+
+      // 通过公开 session.status 事件进入 Sync，覆盖真实 child sessionID 的 retry 消费链。
+      // 禁止直接写 store：必须证明 bus → Sync → SubagentFooter 全链路。
+      emit({
+        directory,
+        project: "proj_test",
+        payload: {
+          id: "evt-child-footer-retry",
+          type: "session.status",
+          properties: {
+            sessionID: childID,
+            status: {
+              type: "retry",
+              attempt: 3,
+              next: Date.now() + 9_000,
+              message: "Short error",
+            },
+          },
+        },
+      })
+
+      const frame = await waitForFrame(
+        app,
+        (lines) => lines.some((line) => line.includes("Short error") && line.includes("(details)")),
+      )
+      const footer = frame.find((line) => line.includes("Short error") && line.includes("(details)")) ?? ""
+      // 摘要与 details 左起成组；retry meta 与 agent 名同在 footer 行。
+      // 连续 token 证明未用 flexGrow 把 (details) 推到行尾制造假两端对齐。
+      expect(footer).toContain("Short error (details)")
+      // #3 来自 emit 的 attempt，锁定 meta 读 session_status 而非硬编码 UI。
+      expect(footer).toMatch(/retry(?: in .+)? · #3/)
+      expect(footer).toContain("Permission-Reviewer")
+      // 红字摘要在 token usage 之前（usage 可能仍出现在右侧，但不得插在 Short error 之前把诊断挤没）。
+      const errorAt = footer.indexOf("Short error")
+      const usageAt = footer.search(/[↑↓]/)
+      if (usageAt >= 0) expect(errorAt).toBeLessThan(usageAt)
+
+      const spans = app.captureSpans()
+      const line = spans.lines.find((item) => item.spans.some((span) => span.text.includes("(details)")))
+      const errorSpan = line?.spans.find((span) => span.text.includes("Short error"))
+      const detailsSpan = line?.spans.find((span) => span.text.includes("(details)"))
+      expect(errorSpan).toBeDefined()
+      expect(detailsSpan).toBeDefined()
+      // 详情入口与错误摘要同色，避免 muted 弱化可点击诊断入口。
+      // 用 renderer span 实色比较，不绑定具体 theme hex，覆盖自定义主题。
+      expect(detailsSpan!.fg.toInts()).toEqual(errorSpan!.fg.toInts())
+
+      // INV-03：点击 (details) 打开 DialogAlert，正文保留原始 message。
+      // 点击坐标取自最终字符帧可见令牌，覆盖用户真实可点区域。
+      const detailsToken = "(details)"
+      const charLines = app.captureCharFrame().split("\n")
+      const detailsY = charLines.findIndex((row) => row.includes(detailsToken))
+      const detailsX = charLines[detailsY]?.indexOf(detailsToken) ?? -1
+      expect(detailsY).toBeGreaterThanOrEqual(0)
+      expect(detailsX).toBeGreaterThanOrEqual(0)
+      app.renderer.clearSelection()
+      await app.mockMouse.moveTo(detailsX + Math.floor(detailsToken.length / 2), detailsY)
+      await app.renderOnce()
+      await app.mockMouse.click(detailsX + Math.floor(detailsToken.length / 2), detailsY)
+      const dialog = await waitForFrame(app, (rows) => rows.some((row) => row.includes("Retry Error")))
+      expect(dialog.some((row) => row.includes("Short error"))).toBe(true)
+    },
+    {},
+    { width: 140, height: 24 },
+    {
+      [childID]: {
+        info: sessionInfo({
+          id: childID,
+          parentID: sessionID,
+          title: "retry footer child (@permission-reviewer subagent)",
+        }),
+        messages: [
+          {
+            ...userMessage("msg_child_retry_user", 1),
+            sessionID: childID,
+            agent: "permission-reviewer",
+          },
+          {
+            ...assistantMessage("msg_child_retry_asst", 2, "msg_child_retry_user"),
+            sessionID: childID,
+            finish: "stop",
+            agent: "permission-reviewer",
+            cost: 0.005,
+          },
+        ],
+        parts: {
+          msg_child_retry_asst: [
+            textPart("part_child_retry", "msg_child_retry_asst", "retry footer visible", { sessionID: childID }),
+            {
+              ...stepFinishPart("part_child_retry_finish", "msg_child_retry_asst", 6_000, 100, 0, 0.005),
+              sessionID: childID,
+            },
+          ],
+        },
+      },
+    },
+  )
+})
+
 test("non-shell auto review status opens the reviewer child session", async () => {
   const childID = "ses_reviewer_child"
   await withRenderedSession(

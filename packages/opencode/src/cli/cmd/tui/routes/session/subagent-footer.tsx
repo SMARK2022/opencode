@@ -2,12 +2,13 @@ import { createEffect, createMemo, createSignal, Show } from "solid-js"
 import { useRouteData } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
 import { useTheme } from "@tui/context/theme"
+import { useDialog } from "@tui/ui/dialog"
+import { DialogAlert } from "@tui/ui/dialog-alert"
 import { SplitBorder } from "@tui/component/border"
-// [local-smark] UserMessage type needed for token accounting
-import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "@/util/locale"
+import { formatDuration } from "@/util/format"
 import { tokenAccounting } from "@/token/accounting"
-import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+import { createRefreshClock, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
 import { activeTurnPair } from "../../util/session-pending"
 import { useCommandPalette } from "../../context/command-palette"
 import { useCommandShortcut } from "../../keymap"
@@ -15,6 +16,7 @@ import { useCommandShortcut } from "../../keymap"
 export function SubagentFooter() {
   const route = useRouteData("session")
   const sync = useSync()
+  const dialog = useDialog()
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
   const session = createMemo(() => sync.session.get(route.sessionID))
 
@@ -37,6 +39,17 @@ export function SubagentFooter() {
   })
 
   const status = createMemo(() => sync.data.session_status?.[route.sessionID])
+  // child 无 Prompt；retry 诊断必须挂在本 footer，不能依赖主会话输入栏。
+  // task / general / permission-reviewer（auto reviewer）共用此栏，禁止再挂第二套 chrome。
+  // 只认当前 route.sessionID 的 status，禁止回读 parent 的 retry 以免串会话。
+  const retry = createMemo(() => {
+    const s = status()
+    if (s?.type !== "retry") return
+    return s
+  })
+  // countdown 只驱动 UI 重算“现在”；attempt/next 边界仍来自 session_status。
+  // 不在此模块持有业务计时起点，避免重挂载后与 processor 倒计时分叉。
+  const now = createRefreshClock(() => !!retry())
 
   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
 
@@ -91,6 +104,30 @@ export function SubagentFooter() {
   const nextShortcut = useCommandShortcut("session.child.next")
   const [hover, setHover] = createSignal<"parent" | "prev" | "next" | null>(null)
 
+  // 展示层压平空白；DialogAlert 仍拿 status.message 原文。
+  // gemini quota 特例与主 Prompt footer 同条件，避免两处摘要语义漂移。
+  const retrySummary = createMemo(() => {
+    const r = retry()
+    if (!r) return
+    if (r.message.includes("exceeded your current quota") && r.message.includes("gemini"))
+      return "gemini is way too hot right now"
+    return r.message.replace(/\s+/g, " ").trim()
+  })
+  // attempt/next 来自 SessionStatus.retry；formatDuration 与 Prompt 共用 util。
+  const retryMeta = createMemo(() => {
+    const r = retry()
+    if (!r) return ""
+    const seconds = Math.round((r.next - now()) / 1000)
+    const duration = formatDuration(seconds)
+    return duration ? `retry in ${duration} · #${r.attempt}` : `retry · #${r.attempt}`
+  })
+  // details 必须走 DialogAlert 原文路径，禁止把压平后的摘要写回 status。
+  const openRetryDetails = () => {
+    const r = retry()
+    if (!r) return
+    void DialogAlert.show(dialog, "Retry Error", r.message)
+  }
+
   return (
     <box flexShrink={0}>
       <box
@@ -104,28 +141,66 @@ export function SubagentFooter() {
         flexShrink={0}
         backgroundColor={theme.backgroundPanel}
       >
-        <box flexDirection="row" justifyContent="space-between" gap={1}>
-          <box flexDirection="row" gap={1}>
-            <text fg={theme.text}>
+        {/* 单行 chrome：label → retry 红字 → usage → 导航；与用户截图同一 footer 行。 */}
+        <box flexDirection="row" justifyContent="space-between" gap={1} minWidth={0} overflow="hidden">
+          <box flexDirection="row" gap={1} minWidth={0} flexGrow={1} flexShrink={1} overflow="hidden">
+            <text fg={theme.text} flexShrink={0}>
               <b>{subagentInfo().label}</b>
             </text>
             <Show when={subagentInfo().total > 0}>
-              <text style={{ fg: theme.textMuted }}>
+              <text style={{ fg: theme.textMuted }} flexShrink={0}>
                 ({subagentInfo().index} of {subagentInfo().total})
               </text>
             </Show>
+            {/* 红字诊断优先于 usage：宽度不足时先挤 usage，不能把 error 簇挤没。 */}
+            {/* theme.error + truncate：对齐主 Prompt retry 契约，摘要可缩 details/meta 不缩。 */}
+            <Show when={retry()}>
+              <box minWidth={0} flexShrink={1} flexDirection="row" gap={1} overflow="hidden">
+                <box
+                  minWidth={0}
+                  flexShrink={1}
+                  flexDirection="row"
+                  gap={1}
+                  overflow="hidden"
+                  onMouseUp={openRetryDetails}
+                >
+                  <text
+                    minWidth={0}
+                    flexShrink={1}
+                    fg={theme.error}
+                    wrapMode="none"
+                    truncate
+                    onMouseUp={openRetryDetails}
+                  >
+                    {retrySummary()}
+                  </text>
+                  {/* (details) 与摘要同色且不 truncate，保证窄宽下入口仍可点。 */}
+                  <text flexShrink={0} fg={theme.error} wrapMode="none" onMouseUp={openRetryDetails}>
+                    (details)
+                  </text>
+                </box>
+                {/* retry meta 固定展示 attempt；倒计时文案可随 now 刷新。 */}
+                <text flexShrink={0} fg={theme.error} wrapMode="none">
+                  {retryMeta()}
+                </text>
+              </box>
+            </Show>
+            {/* usage 在 error 之后：retry 时仍可显示，但不得抢在诊断前占用左簇。 */}
             <Show when={usage()}>
               {(item) => (
-                <text fg={theme.textMuted} wrapMode="none">
-                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{" "}
-                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
+                <text fg={theme.textMuted} wrapMode="none" flexShrink={1} minWidth={0} truncate>
+                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span>{" "}
+                  {Locale.number(item().input)}{" "}
+                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span>{" "}
+                  {Locale.number(item().output)}
                   {item().context ? ` · ${item().context}` : ""}
                   {item().cost ? ` · ${item().cost}` : ""}
                 </text>
               )}
             </Show>
           </box>
-          <box flexDirection="row" gap={2}>
+          {/* 导航固定不收缩，避免长错误把 Parent/Prev/Next 挤出视口。 */}
+          <box flexDirection="row" gap={2} flexShrink={0}>
             <box
               onMouseOver={() => setHover("parent")}
               onMouseOut={() => setHover(null)}
