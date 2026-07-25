@@ -11,6 +11,8 @@ export type SessionRoute = {
   type: "session"
   sessionID: string
   prompt?: PromptInfo
+  // auto review 深链：父工具 autoReview.reviewID，进页后定位子会话对应返回区
+  reviewID?: string
 }
 
 export type PluginRoute = {

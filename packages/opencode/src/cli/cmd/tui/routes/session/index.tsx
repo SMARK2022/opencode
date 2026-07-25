@@ -363,7 +363,8 @@ export function Session() {
       }
       editor.reconnect(result.data.directory)
       await sync.session.sync(sessionID)
-      if (route.sessionID === sessionID && scroll) scroll.scrollBy(100_000)
+      // sync 后 parts 就绪：与 sessionID→toBottom 共用 applySessionOpenScroll，避免只修贴底路径 A
+      if (route.sessionID === sessionID) scheduleSessionOpenScroll()
     })().catch((error) => {
       if (route.sessionID !== sessionID) return
       toast.show({
@@ -541,6 +542,37 @@ export function Session() {
       if (!scroll || scroll.isDestroyed) return
       scroll.scrollTo(scroll.scrollHeight)
     }, 50)
+  }
+
+  // session-open 唯一滚动语义：有 reviewID 则锚到返回区，否则贴底（覆盖路径 A/B）。
+  // INV-02：auto review 深链必须停在对应返回区；INV-03/04：无锚点或解析失败时保持今日贴底。
+  // 禁止在此之外再挂无条件贴底成功路径，否则 50ms toBottom 会覆盖已完成的 anchor。
+  function applySessionOpenScroll() {
+    if (!scroll || scroll.isDestroyed) return
+    const reviewID = route.reviewID
+    if (reviewID) {
+      const target = resolveReviewAnchorMessageID(
+        sync.data.message[route.sessionID] ?? [],
+        (messageID) => sync.data.part[messageID] ?? [],
+        reviewID,
+      )
+      if (target) {
+        // message 节点 id 即 scroll child id；与 timeline onMove 同一滚动 API
+        const child = scroll.getChildren().find((item) => item.id === target)
+        if (child) {
+          scroll.scrollBy(child.y - scroll.y - 1)
+          return
+        }
+      }
+    }
+    // residual / 普通打开：贴底（不是 try-anchor-then-other-algorithm 的 fallback）
+    scroll.scrollTo(scroll.scrollHeight)
+  }
+
+  // 与历史 toBottom 同 50ms defer，对齐 OpenTUI layout；非轮询重试框架。
+  // path A（sync 完成）与 path B（sessionID 变化）都只 schedule 本函数，语义单一。
+  function scheduleSessionOpenScroll() {
+    setTimeout(() => applySessionOpenScroll(), 50)
   }
 
   function moveFirstChild() {
@@ -1227,8 +1259,13 @@ export function Session() {
     }
   })
 
-  // snap to bottom when session changes
-  createEffect(on(() => route.sessionID, toBottom))
+  // session 切换贴底路径 B：有 reviewID 时不得无条件 toBottom，统一走 applySessionOpenScroll
+  createEffect(
+    on(
+      () => ({ sessionID: route.sessionID, reviewID: route.reviewID }),
+      () => scheduleSessionOpenScroll(),
+    ),
+  )
 
   return (
     <PathFormatterProvider path={session()?.directory}>
@@ -2477,8 +2514,47 @@ function openAutoReviewSession(
   // review 行不是 transcript 正文，并且内部 text 已关闭 selection。前序 TUI
   // 测试或真实用户留下的旧 selection 不能让这次明确点击只消费事件不导航。
   renderer.clearSelection()
-  navigate({ type: "session", sessionID: review.sessionID })
+  // 携带 reviewID：子会话进页滚动定位到该次返回区，而非一律贴底
+  navigate({ type: "session", sessionID: review.sessionID, reviewID: review.reviewID })
   return true
+}
+
+// 用父工具 autoReview.reviewID 在子会话可见消息中解析滚动锚点（优先 assistant 返回区）。
+// join 真相在 part metadata：request 用顶层 metadata，decision 用 tool state.metadata。
+// 不引入后端 by-reviewID API；hidden 协议失败轮已由 Sync 删除，此处只见可见最终轮。
+function resolveReviewAnchorMessageID(
+  messages: ReadonlyArray<{ id: string; role: string; parentID?: string }>,
+  partsOf: (messageID: string) => readonly Part[],
+  reviewID: string,
+) {
+  let requestID: string | undefined
+  let decisionMessageID: string | undefined
+  for (const message of messages) {
+    for (const part of partsOf(message.id)) {
+      if (
+        part.type === "text" &&
+        part.metadata?.permissionReviewerRequest === true &&
+        part.metadata?.reviewID === reviewID
+      ) {
+        // 多匹配取最后：协议重试 hide 后可见的是最终 request 轮
+        requestID = message.id
+      }
+      if (part.type === "tool") {
+        // decision 的 reviewID 在 state.metadata，不是顶层 part.metadata
+        const meta = part.state && "metadata" in part.state ? part.state.metadata : undefined
+        if (meta && typeof meta === "object" && !Array.isArray(meta) && meta.reviewID === reviewID) {
+          decisionMessageID = message.id
+        }
+      }
+    }
+  }
+  if (requestID) {
+    const answer = [...messages].reverse().find((message) => message.role === "assistant" && message.parentID === requestID)
+    // 用户需求“返回区域”= assistant 决策消息；reviewing 尚无回答时退到 request（同 join）
+    return answer?.id ?? requestID
+  }
+  // 次选：仅有 decision tool 元数据时的残缺 transcript
+  return decisionMessageID
 }
 
 function openAutoReviewFromToolChrome(

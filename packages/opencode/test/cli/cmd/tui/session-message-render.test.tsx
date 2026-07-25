@@ -257,6 +257,202 @@ test("subagent footer shows compact step flow without request cumulative parenth
   )
 })
 
+test("auto review deep link scrolls to reviewing request when answer is missing", async () => {
+  // reviewing 尚无 assistant：锚点应落到 request 文案，而不是贴到底部最新 filler。
+  // INV-02 域内分支：父行 status=reviewing 时子会话只有 permissionReviewerRequest，无决策 tool。
+  // height=14 + 长 filler 保证贴底路径看不到 requestMarker，防止假绿。
+  const childID = "ses_reviewer_deep_link_pending"
+  const requestMarker = "REVIEWING_REQUEST_MARKER_xyz"
+  const filler = Array.from(
+    { length: 16 },
+    (_, index) => `PENDING_FILLER_LINE_${index}_LONG_ENOUGH_TO_HIDE_REQUEST_WHEN_STUCK_TO_BOTTOM`,
+  )
+  const req = { ...userMessage("msg_rev_pending_req", 10), sessionID: childID }
+  const fillerMsgs = filler.map((text, index) => {
+    const user = { ...userMessage(`msg_rev_pending_u_${index}`, 20 + index * 2), sessionID: childID }
+    const asst = {
+      ...assistantMessage(`msg_rev_pending_a_${index}`, 21 + index * 2, user.id),
+      sessionID: childID,
+      agent: "permission-reviewer",
+      mode: "permission-reviewer",
+    }
+    return { user, asst, text }
+  })
+  const childMessages = [req, ...fillerMsgs.flatMap((item) => [item.user, item.asst])]
+  const childParts: Record<string, Part[]> = {
+    [req.id]: [
+      textPart("part_rev_pending_req", req.id, requestMarker, {
+        sessionID: childID,
+        metadata: { permissionReviewerRequest: true, reviewID: "review_pending_deep" },
+      }),
+    ],
+  }
+  for (const item of fillerMsgs) {
+    childParts[item.user.id] = [textPart(`part_${item.user.id}`, item.user.id, "filler request", { sessionID: childID })]
+    childParts[item.asst.id] = [textPart(`part_${item.asst.id}`, item.asst.id, item.text, { sessionID: childID })]
+  }
+
+  await withRenderedSession(
+    [assistantMessage("msg_read_review_pending", 1)],
+    {
+      msg_read_review_pending: [
+        runningToolPart("part_read_review_pending", "msg_read_review_pending", "read", {
+          filePath: "external folder/secret key.txt",
+          metadata: {
+            autoReview: {
+              reviewID: "review_pending_deep",
+              sessionID: childID,
+              status: "reviewing",
+              precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
+            },
+          },
+        }),
+      ],
+    },
+    async (app) => {
+      // reviewing 行文案含 precheck level；点击后 route 必须带 review_pending_deep。
+      await waitForFrame(app, (lines) =>
+        lines.some((line) => line.includes("◌ auto review · cautious · @permission-reviewer")),
+      )
+      await clickVisibleText(app, "◌ auto review · cautious · @permission-reviewer")
+      // requestMarker 只出现在子会话 request part；父会话 frame 不含该字面量。
+      // 若 resolve 只找 decision tool 会 miss，贴底后本断言 timeout。
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes(requestMarker)))
+      expect(frame.some((line) => line.includes(requestMarker))).toBe(true)
+    },
+    {},
+    { height: 14 },
+    {
+      [childID]: {
+        info: sessionInfo({
+          id: childID,
+          parentID: sessionID,
+          title: "Auto permission review (@permission-reviewer subagent)",
+        }),
+        // 子会话仅 request + filler：无 assistant 决策，锁定 reviewing 域分支
+        messages: childMessages,
+        parts: childParts,
+      },
+    },
+  )
+})
+
+test("auto review deep link scrolls to the matching review return", async () => {
+  // 多 turn reviewer 子会话：贴底只见最新返回；深链必须把视口带到旧 review 的返回文案。
+  // 父工具 autoReview.reviewID=review_old_deep 必须 join 到子会话旧 assistant 正文，而非 session 底部。
+  // 旧/新 marker 为独立字面量，禁止从 production helper 派生期望值。
+  // 路径 A（sync 后滚动）与路径 B（sessionID→50ms）任一仍无条件贴底都会使本测 timeout。
+  const childID = "ses_reviewer_deep_link"
+  const oldReturn = "OLD_REVIEW_RETURN_MARKER_xyz"
+  const newReturn = "NEW_REVIEW_RETURN_MARKER_xyz"
+  const filler = Array.from(
+    { length: 18 },
+    (_, index) => `FILLER_PADDING_LINE_${index}_LONG_ENOUGH_TO_PUSH_OLD_REVIEW_OFF_VIEWPORT`,
+  )
+
+  const reqOld = { ...userMessage("msg_rev_req_old", 10), sessionID: childID }
+  const ansOld = {
+    ...assistantMessage("msg_rev_ans_old", 11, reqOld.id),
+    sessionID: childID,
+    agent: "permission-reviewer",
+    mode: "permission-reviewer",
+  }
+  const fillerMsgs = filler.map((text, index) => {
+    const user = { ...userMessage(`msg_rev_fill_u_${index}`, 20 + index * 2), sessionID: childID }
+    const asst = {
+      ...assistantMessage(`msg_rev_fill_a_${index}`, 21 + index * 2, user.id),
+      sessionID: childID,
+      agent: "permission-reviewer",
+      mode: "permission-reviewer",
+    }
+    return { user, asst, text }
+  })
+  const reqNew = { ...userMessage("msg_rev_req_new", 200), sessionID: childID }
+  const ansNew = {
+    ...assistantMessage("msg_rev_ans_new", 201, reqNew.id),
+    sessionID: childID,
+    agent: "permission-reviewer",
+    mode: "permission-reviewer",
+  }
+
+  const childMessages = [
+    reqOld,
+    ansOld,
+    ...fillerMsgs.flatMap((item) => [item.user, item.asst]),
+    reqNew,
+    ansNew,
+  ]
+  // parts.metadata.reviewID 是生产 join 字段；fixture 必须与 recordReviewerRequest 合同一致。
+  const childParts: Record<string, Part[]> = {
+    [reqOld.id]: [
+      textPart("part_rev_req_old", reqOld.id, "old review request body", {
+        sessionID: childID,
+        metadata: { permissionReviewerRequest: true, reviewID: "review_old_deep" },
+      }),
+    ],
+    // 返回区正文：scroll 目标应是 ansOld 消息节点，使 oldReturn 进入视口
+    [ansOld.id]: [textPart("part_rev_ans_old", ansOld.id, oldReturn, { sessionID: childID })],
+    [reqNew.id]: [
+      textPart("part_rev_req_new", reqNew.id, "new review request body", {
+        sessionID: childID,
+        metadata: { permissionReviewerRequest: true, reviewID: "review_new_deep" },
+      }),
+    ],
+    // 最新返回：贴底时可见；深链成功时不应作为唯一可见 marker
+    [ansNew.id]: [textPart("part_rev_ans_new", ansNew.id, newReturn, { sessionID: childID })],
+  }
+  for (const item of fillerMsgs) {
+    childParts[item.user.id] = [textPart(`part_${item.user.id}`, item.user.id, "filler request", { sessionID: childID })]
+    childParts[item.asst.id] = [textPart(`part_${item.asst.id}`, item.asst.id, item.text, { sessionID: childID })]
+  }
+
+  await withRenderedSession(
+    [assistantMessage("msg_read_review_deep", 1)],
+    {
+      msg_read_review_deep: [
+        completedToolPart(
+          "part_read_review_deep",
+          "msg_read_review_deep",
+          "read",
+          { filePath: "external folder/secret key.txt" },
+          {
+            autoReview: {
+              reviewID: "review_old_deep",
+              sessionID: childID,
+              status: "allowed",
+              precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
+              result: { risk_level: "high", user_authorization: "high", rationale: "user asked for the exact file" },
+            },
+          },
+        ),
+      ],
+    },
+    async (app) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
+      // 点击公开 auto review 状态行：与生产 AutoReviewLine 入口一致，不直接 navigate 绕过。
+      await clickVisibleText(app, "✓ auto review · allowed · auth high · @permission-reviewer")
+
+      // 期望滚到旧返回区：独立字面量必须可见。贴底路径只会露出最新 NEW marker。
+      // 若只修 path A 而 path B 仍 toBottom，50ms 后视口会被拉回底部导致本断言失败。
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes(oldReturn)))
+      expect(frame.some((line) => line.includes(oldReturn))).toBe(true)
+    },
+    {},
+    { height: 14 },
+    {
+      [childID]: {
+        info: sessionInfo({
+          id: childID,
+          parentID: sessionID,
+          title: "Auto permission review (@permission-reviewer subagent)",
+        }),
+        messages: childMessages,
+        parts: childParts,
+      },
+    },
+  )
+})
+
 // child 底部只有 SubagentFooter（无 Prompt）；retry 红字必须挂在同一行，并覆盖 auto reviewer 等所有 parentID 子会话。
 // 本测用 permission-reviewer title：既锁 task 入口，也锁 auto reviewer 共用 footer 路径。
 test("child subagent footer shows red retry summary before usage", async () => {
