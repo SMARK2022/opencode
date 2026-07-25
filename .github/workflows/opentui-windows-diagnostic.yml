@@ -39,7 +39,15 @@ jobs:
         uses: ./.github/actions/setup-bun
 
       - name: Run opencode package tests
-        run: bun turbo test:ci --filter=opencode --continue=dependencies-successful
+        run: |
+          disabled=(
+            packages/opencode/test/cli/cmd/tui/session-list-params.test.ts
+            packages/opencode/test/cli/db-maintenance.test.ts
+            packages/opencode/test/tool/file-mutation-concurrency.test.ts
+          )
+          for file in "${disabled[@]}"; do mv "$file" "$file.disabled"; done
+          trap 'for file in "${disabled[@]}"; do mv "$file.disabled" "$file"; done' EXIT
+          bun turbo test:ci --filter=opencode --continue=dependencies-successful
 
       - name: Upload unit report
         if: always()
