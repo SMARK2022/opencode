@@ -53,7 +53,7 @@ const SENSITIVE_PATH_LOCAL_ARGUMENT_PATTERN = String.raw`["']?${SENSITIVE_PATH_C
 // #217：捕获不透明 shell（重定向、命令替换、SSH/WSL 载荷、不支持分隔符）中的可见文件变更
 const RAW_COMMAND_START = "(?:^|[;&|{(]\\s*|[\\r\\n]\\s*|\\$\\(\\s*|`\\s*)"
 const RAW_COMMAND_PATH = String.raw`(?:[^\s|;&(){}'"]+[\\/])*`
-const RAW_FILE_DELETE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:rm|unlink|rmdir|del|erase|rd|Remove-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
+const RAW_FILE_DELETE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:rm|unlink|rmdir|del|erase|rd|Remove-Item|ri)\b\s+(?!--?(?:h|help|v|version)\b)\S`
 const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:mv|move|ren|rename|Move-Item|Rename-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
 
 // #220：预编译正则常量——dangerous raw 层，模块加载时编译一次。
@@ -76,7 +76,8 @@ const RE_D_WINDOWS_FORMAT = /\bformat\b\s+[A-Za-z]:/i
 const RE_D_CREDENTIAL_PIPE_NETWORK = new RegExp(String.raw`\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})[^|;]*\|\s*(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b`,"i",)
 const RE_D_CREDENTIAL_UPLOAD_FLAG = new RegExp(String.raw`\b(?:curl|wget)\b(?=.*(?:--data(?:-binary|-raw|-urlencode)?|-d|--form|-F|--upload-file|--form-string|-T)(?:\s+|=)(?:[^\s|;=@]+(?:=|@)@?)?@?${SENSITIVE_PATH_ARGUMENT_PATTERN})`,"i",)
 const RE_D_CREDENTIAL_REMOTE_TRANSFER = new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`,"i",)
-const RE_D_PS_RECURSIVE_DELETE_ROOT = /\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"\x60]|$))/i
+// #556：ri 必须与 Remove-Item 同级——若只写 Remove-Item，generic RAW_FILE_DELETE 会先把 ri 标成 cautious。
+const RE_D_PS_RECURSIVE_DELETE_ROOT = /\b(?:Remove-Item|ri)\b(?=.*\s-Recurse\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"\x60]|$))/i
 const RE_D_PYTHON_RMTREE = /\bshutil\.rmtree\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
 const RE_D_PYTHON_REMOVE = /\bos\.(?:remove|unlink|rmdir)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
 const RE_D_NODE_REMOVE = /(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
@@ -106,8 +107,10 @@ const RE_C_SENSITIVE_READ = new RegExp(String.raw`\b(?:cat|type|Get-Content|gc|G
 const RAW_FIND_OR_PYTHON_COMMAND_PATTERN = String.raw`${RAW_COMMAND_START}(${RAW_COMMAND_PATH}\b(?:find|python|python3|py)\b)`
 const RE_C_PYTHON_FILE_REMOVE_CALL = /\bos\.(?:remove|unlink|rmdir)\(\s*["'][^"']+["']/
 // #217：token 级文件删除/移动集合——与 raw 层模式镜像，路径限定的二进制（如 /bin/rm）在 token 化成功后也无法绕过审查
-const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item", "trash-put"]) // #222：trash-put 是 trash-cli 的删除命令
+const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item", "ri", "trash-put"]) // #222：trash-put 是 trash-cli 的删除命令；#556：ri 是 Remove-Item 官方别名，须与 remove-item 同级（含保护根 -Recurse dangerous）
 const FILE_MOVE_COMMANDS = new Set(["mv", "move", "ren", "rename", "move-item", "rename-item"])
+// #556：PowerShell 工作树覆写/截断（Clear-Content/Set-Content/Out-File）——与删除不同族，但同样不可 auto 直过。
+const FILE_WRITE_COMMANDS = new Set(["clear-content", "set-content", "out-file"])
 // #220：系统级破坏性命令——执行即不可逆，直接 dangerous
 const SYSTEM_DESTRUCTIVE_COMMANDS = new Set([
   "mkfs", "mkfs.ext4", "mkfs.xfs", "mkfs.btrfs",
@@ -613,7 +616,8 @@ function unwrap(tokens: string[]): UnwrapResult {
     const index = tokens.findIndex((item, i) => i > 0 && ["-command", "-c"].includes(item.toLowerCase()))
     if (index >= 0 && tokens[index + 1]) {
       // #197：提取 -Command 后的脚本用于递归检测——PowerShell 命令字符串可包含管道和别名
-      return { action: "script", script: tokens[index + 1], reason: "PowerShell wrapper requires explicit approval" }
+      // #556：与 cmd /c 对齐：-Command 后全部剩余 token 拼成载荷；旧单 token 取法会丢掉 `Remove-Item file.txt` 的路径参数。
+      return { action: "script", script: tokens.slice(index + 1).join(" "), reason: "PowerShell wrapper requires explicit approval" }
     }
     // #197：无命令参数的 PowerShell wrapper 可能进入交互式会话——载荷不透明
     return { action: "ask", reason: "PowerShell wrapper without a plain script requires explicit approval" }
@@ -640,7 +644,14 @@ function unwrap(tokens: string[]): UnwrapResult {
   }
   // #220：bun x 移至 classifyTokens 中处理为 cautious，不再在 unwrap 中损害为 ask
   // #197：env 可修改环境变量后执行命令——修改后的环境可改变程序行为和安全边界
-  if (cmd === "env") return { action: "ask", reason: "env wrapper requires explicit approval" }
+  // #556：env 是包装器而非读 .env 文件——剥 KEY=val 与常见 flag 后对内层命令递归分类，
+  // 旧 always-ask 会让 `env rm` / `env git reset --hard` 在 auto 下 general 直过。
+  if (cmd === "env") {
+    const rest = pierceEnvTokens(tokens.slice(1))
+    if (rest.length > 0)
+      return { action: "script", script: joinShellTokens(rest), reason: "env wrapper requires explicit approval" }
+    return { action: "ask", reason: "env wrapper requires explicit approval" }
+  }
   // #197：提权 wrapper 放大命令影响范围——sudo/doas/su/pkexec 后的命令以更高权限执行
   if (["sudo", "doas", "su", "pkexec"].includes(cmd)) {
     // 特权包装器：提取内层命令递归评估，而非短路为 ask。
@@ -935,7 +946,8 @@ function classifyTokens(tokens: string[]): Decision | undefined {
       return { level: "dangerous", reason: "critical recursive delete" }
     return { level: "cautious", reason: "recursive delete requires explicit approval" }
   }
-  if (cmd === "remove-item" && tokens.some((item) => item.toLowerCase() === "-recurse")) {
+  // #556：ri 与 remove-item 共用递归保护根判定——别名不得稀释 dangerous 层级。
+  if ((cmd === "remove-item" || cmd === "ri") && tokens.some((item) => item.toLowerCase() === "-recurse")) {
     if (tokens.slice(1).some(protectedDeleteTarget))
       return { level: "dangerous", reason: "critical PowerShell recursive delete" }
     return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
@@ -951,6 +963,12 @@ function classifyTokens(tokens: string[]): Decision | undefined {
   // #220: 文件移动/重命名
   if (FILE_MOVE_COMMANDS.has(cmd) && tokens.length > 1)
     return { level: "cautious", reason: "file move or rename requires explicit approval" }
+  // #556：PowerShell 内容覆写/截断——Clear-Content/Set-Content/Out-File 可清空或覆盖工作树文件；help-only 不抬升。
+  if (FILE_WRITE_COMMANDS.has(cmd)) {
+    const args = tokens.slice(1)
+    if (args.some((item) => !["--help", "-h", "--version", "-v"].includes(item.toLowerCase())))
+      return { level: "cautious", reason: "PowerShell file content write requires explicit approval" }
+  }
   // #220: 原始磁盘写入
   if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/")))
     return { level: "dangerous", reason: "raw disk write" }
@@ -1172,6 +1190,24 @@ function readsSensitivePath(tokens: string[]) {
     return false
   }
   return hasSensitivePath(tokens)
+}
+
+function pierceEnvTokens(args: string[]) {
+  // #556：剥掉 env 的 KEY=value 与常见 flag，露出内层可执行命令 argv（token 语义，非正则扫全文）。
+  const out: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const item = args[i]
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(item)) continue
+    const lower = item.toLowerCase()
+    if (lower === "-i" || lower === "-0" || lower === "--null" || lower === "--ignore-environment") continue
+    if (lower === "-u" || lower === "--unset") {
+      i++
+      continue
+    }
+    out.push(...args.slice(i))
+    break
+  }
+  return out
 }
 
 function joinShellTokens(tokens: string[]) {
