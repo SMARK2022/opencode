@@ -37,7 +37,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { ColdStorage } from "@/storage/cold"
 import { Database } from "@/storage/db"
-import { SessionTable } from "@/session/session.sql"
+import { MessageTable, SessionTable } from "@/session/session.sql"
 
 void Log.init({ print: false })
 
@@ -2959,6 +2959,89 @@ describe("ColdStorage compact eligibility", () => {
       })
       expect(ColdStorage.isEligibleOwner({ type: "part", id: recentPart.id })).toBe(false)
       yield* ssn.remove(recentSession.id)
+
+      // root 闲置默认 7 天：time_updated 8d 前 eligible，1d 前 ineligible（无 compact）。
+      const rootAge = yield* ssn.create({ title: "root-7d-age" })
+      const rootUser = yield* createUserMessage(rootAge.id, "root-age")
+      const rootPart = yield* addCompletedToolPart({
+        sessionID: rootAge.id,
+        messageID: rootUser.id,
+        tool: "read",
+        output: "root-age-output-".repeat(512),
+      })
+      Database.use((db) =>
+        db
+          .update(SessionTable)
+          .set({ time_updated: Date.now() - 8 * 24 * 60 * 60 * 1000 })
+          .where(Database.eq(SessionTable.id, rootAge.id))
+          .run(),
+      )
+      expect(ColdStorage.isEligibleOwner({ type: "part", id: rootPart.id })).toBe(true)
+      Database.use((db) =>
+        db
+          .update(SessionTable)
+          .set({ time_updated: Date.now() - 1 * 24 * 60 * 60 * 1000 })
+          .where(Database.eq(SessionTable.id, rootAge.id))
+          .run(),
+      )
+      expect(ColdStorage.isEligibleOwner({ type: "part", id: rootPart.id })).toBe(false)
+      // root 不得因 last message 变老而走 subagent 时钟：消息 25h 前但 session 仍热时必须 ineligible。
+      Database.use((db) => {
+        db.update(SessionTable)
+          .set({ time_updated: Date.now() })
+          .where(Database.eq(SessionTable.id, rootAge.id))
+          .run()
+        db.update(MessageTable)
+          .set({ time_created: Date.now() - 25 * 60 * 60 * 1000 })
+          .where(Database.eq(MessageTable.session_id, rootAge.id))
+          .run()
+      })
+      expect(ColdStorage.isEligibleOwner({ type: "part", id: rootPart.id })).toBe(false)
+      yield* ssn.remove(rootAge.id)
+
+      // subagent：parent_id 非空时用 last message≥24h；session.time_updated 再新也不挡 age。
+      const parent = yield* ssn.create({ title: "parent-for-subagent-idle" })
+      const child = yield* ssn.create({ title: "subagent-idle-child", parentID: parent.id })
+      const childUser = yield* createUserMessage(child.id, "child")
+      const childPart = yield* addCompletedToolPart({
+        sessionID: child.id,
+        messageID: childUser.id,
+        tool: "read",
+        output: "child-idle-output-".repeat(512),
+      })
+      Database.use((db) => {
+        db.update(SessionTable)
+          .set({ time_updated: Date.now() })
+          .where(Database.eq(SessionTable.id, child.id))
+          .run()
+        db.update(MessageTable)
+          .set({ time_created: Date.now() - 25 * 60 * 60 * 1000 })
+          .where(Database.eq(MessageTable.session_id, child.id))
+          .run()
+      })
+      expect(ColdStorage.isEligibleOwner({ type: "part", id: childPart.id })).toBe(true)
+      // last message 仍新时，即便 time_updated 很老也不得误冻 subagent。
+      Database.use((db) => {
+        db.update(SessionTable)
+          .set({ time_updated: Date.now() - 30 * 24 * 60 * 60 * 1000 })
+          .where(Database.eq(SessionTable.id, child.id))
+          .run()
+        db.update(MessageTable)
+          .set({ time_created: Date.now() - 1 * 60 * 60 * 1000 })
+          .where(Database.eq(MessageTable.session_id, child.id))
+          .run()
+      })
+      expect(ColdStorage.isEligibleOwner({ type: "part", id: childPart.id })).toBe(false)
+      // olderThanMs:0 只强制 root age；subagent 仍看 last message，不能被 root 标志误伤。
+      expect(
+        ColdStorage.isEligibleOwner({
+          type: "part",
+          id: childPart.id,
+          olderThanMs: 0,
+        }),
+      ).toBe(false)
+      yield* ssn.remove(child.id)
+      yield* ssn.remove(parent.id)
     }),
   )
 })

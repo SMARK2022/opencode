@@ -37,6 +37,12 @@ const DAEMON_STOP_TIMEOUT_MS = 60_000
 const POLL_INTERVAL_MS = 100
 const SIGNAL_TEST_TIMEOUT_MS = 10_000
 
+// 测试后台非交互子进程在 Windows 上必须隐藏 console，与生产 Process/NetworkProxy hide 合同一致；PTY 不走此 helper。
+// 返回 any：Bun.spawn 在合并 windowsHide 后会丢失 stdin/stdout 字面量重载，测试侧保留原 pipe 访问写法。
+function spawnBackground(cmd: string[], opts: Parameters<typeof Bun.spawn>[1] = {}): any {
+  return Bun.spawn(cmd, { ...opts, windowsHide: process.platform === "win32" })
+}
+
 afterEach(() => {
   // 每个case恢复默认spawn与lock owner，测试注入不能泄漏到后续真实进程生命周期场景。
   DaemonModule._setSpawn(undefined)
@@ -108,7 +114,7 @@ async function runDaemonStop(lockPath: string, env: Record<string, string> = {})
   await prepareCliData(lockPath)
   // 使用 argv 数组直接调用真实 CLI，避免 shell 引号、空格路径、管道或重定向参与解析；
   // 这样测试覆盖的是 opencode 命令契约，而不是当前 shell 的字符串拆分行为。
-  const proc = Bun.spawn([process.execPath, INDEX_TS, "daemon", "stop"], {
+  const proc = spawnBackground([process.execPath, INDEX_TS, "daemon", "stop"], {
     env: isolatedDaemonEnv(lockPath, env),
     stdin: "ignore",
     stdout: "ignore",
@@ -166,7 +172,7 @@ async function runDaemonMachine(lockPath: string, command: "status" | "start", e
   if (command === "start") args.push("--launcher-pid", String(process.pid))
   // 机器接口从真实 argv 入口执行，确保 yargs 参数、stdout 协议和 daemon owner 语义一起受测。
   // stdout 只允许一个 JSON value；日志和迁移信息必须留在 stderr，调用方无需解析人类文案。
-  const proc = Bun.spawn(args, {
+  const proc = spawnBackground(args, {
     env: isolatedDaemonEnv(lockPath, env),
     stdin: "ignore",
     stdout: "pipe",
@@ -186,7 +192,7 @@ async function runDaemonMachine(lockPath: string, command: "status" | "start", e
  * live lock contents.
  */
 async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
-  const proc = Bun.spawn([process.execPath, WORKER_TS], {
+  const proc = spawnBackground([process.execPath, WORKER_TS], {
     env: {
       ...isolatedDaemonEnv(lockPath, env),
       OPENCODE_PROCESS_ROLE: "worker",
@@ -227,7 +233,7 @@ async function spawnHangingDisposerDaemon(lockPath: string) {
     `registerDisposer(async () => new Promise(() => {}))`,
     `process.stdout.write("disposer-ready\\n")`,
   ].join("\n")
-  const proc = Bun.spawn([process.execPath, "-e", wrapper], {
+  const proc = spawnBackground([process.execPath, "-e", wrapper], {
     env: {
       ...isolatedDaemonEnv(lockPath),
       OPENCODE_PROCESS_ROLE: "worker",
@@ -286,7 +292,7 @@ async function spawnEnsureLauncher(lockPath: string) {
     process.stdout.write(JSON.stringify(lock) + "\\n")
     setInterval(() => {}, 1_000)
   `
-  const proc = Bun.spawn([process.execPath, "-e", launcherCode], {
+  const proc = spawnBackground([process.execPath, "-e", launcherCode], {
     env: isolatedDaemonEnv(lockPath, {
       OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "60000",
       OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "60000",
@@ -466,6 +472,7 @@ function maintenanceStageWorkerSource(leaseDir: string) {
 
 // stderr ignore 对齐 spawnDaemon：长生命周期 worker 禁止未读 pipe 卫生风险；非 hang 根因声明。
 function spawnStageWorker(lockPath: string, leaseDir: string) {
+  // 专用 pipe overload 保留 stdin/stdout 静态类型；windowsHide 直接落在同一真实 spawn。
   const proc = Bun.spawn([process.execPath, "-e", maintenanceStageWorkerSource(leaseDir)], {
     env: {
       ...isolatedDaemonEnv(lockPath),
@@ -475,6 +482,7 @@ function spawnStageWorker(lockPath: string, leaseDir: string) {
     stdin: "pipe",
     stdout: "pipe",
     stderr: "ignore",
+    windowsHide: process.platform === "win32",
   })
   return { proc, reader: proc.stdout.pipeThrough(new TextDecoderStream()).getReader() }
 }
@@ -767,7 +775,7 @@ describe("daemon lifecycle", () => {
         }))
         setInterval(() => {}, 1_000)
       `
-      const proc = Bun.spawn([process.execPath, "-e", fakeOwner], {
+      const proc = spawnBackground([process.execPath, "-e", fakeOwner], {
         env: isolatedDaemonEnv(lockPath),
         stdin: "ignore",
         stdout: "ignore",
@@ -825,7 +833,8 @@ describe("daemon lifecycle", () => {
           fetch(request) {
             if (request.headers.get("x-opencode-daemon-token") !== token) return new Response("unauthorized", { status: 401 })
             if (new URL(request.url).pathname === "/shutdown") {
-              Bun.spawn([process.execPath, "-e", ${JSON.stringify(replacementCode)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" })
+              // 嵌套 -e 子进程同样隐藏 Windows console，不能依赖外层 spawnBackground。
+              Bun.spawn([process.execPath, "-e", ${JSON.stringify(replacementCode)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore", windowsHide: process.platform === "win32" })
               return Response.json({ ok: true })
             }
             return Response.json({ stopping: true })
@@ -834,7 +843,7 @@ describe("daemon lifecycle", () => {
         await Bun.write(${JSON.stringify(lockPath)}, JSON.stringify({ pid: process.pid, port: publicServer.port, token, dbPath: "original", channel: "local", startedAt: new Date().toISOString(), controlPort: controlServer.port }))
         setInterval(() => {}, 1_000)
       `
-      const original = Bun.spawn([process.execPath, "-e", fakeOwner], {
+      const original = spawnBackground([process.execPath, "-e", fakeOwner], {
         env: isolatedDaemonEnv(lockPath),
         stdin: "ignore",
         stdout: "ignore",
@@ -915,7 +924,7 @@ describe("daemon lifecycle", () => {
       }))
       setTimeout(() => process.exit(0), 300)
     `
-    const owner = Bun.spawn([process.execPath, "-e", fakeOwner], {
+    const owner = spawnBackground([process.execPath, "-e", fakeOwner], {
       env: isolatedDaemonEnv(lockPath),
       stdin: "ignore",
       stdout: "ignore",
@@ -1066,7 +1075,7 @@ describe("daemon lifecycle", () => {
   test("daemon stop command removes a stale lock without signalling a missing process", async () => {
     await using tmp = await tmpdir()
     const lockPath = path.join(tmp.path, "tui-server.json")
-    const exited = Bun.spawn([process.execPath, "-e", ""], {
+    const exited = spawnBackground([process.execPath, "-e", ""], {
       stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",
@@ -1098,7 +1107,7 @@ describe("daemon lifecycle", () => {
   test("daemon stop command refuses a live lock without a safe control port", async () => {
     await using tmp = await tmpdir()
     const lockPath = path.join(tmp.path, "tui-server.json")
-    const nonDaemon = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
+    const nonDaemon = spawnBackground([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
       stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",
@@ -1140,7 +1149,7 @@ describe("daemon lifecycle", () => {
       await using tmp = await tmpdir()
       const lockPath = path.join(tmp.path, "tui-server.json")
       const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000" })
-      const nonDaemon = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
+      const nonDaemon = spawnBackground([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
         stdin: "ignore",
         stdout: "ignore",
         stderr: "ignore",
@@ -1319,7 +1328,7 @@ describe("daemon lifecycle", () => {
       )
       // FileShare.Read拒绝delete/rename，复现CI全量负载下scanner或延迟reader留下的真实NT sharing boundary。
       // holder用stdin作为释放协议，测试控制真实handle时序而非依赖PowerShell timer精度。
-      const holder = Bun.spawn(
+      const holder = spawnBackground(
         [
           "pwsh",
           "-NoProfile",
@@ -1351,7 +1360,7 @@ describe("daemon lifecycle", () => {
   test("maintenance lease retries after a published transient rename conflict", async () => {
     await using tmp = await tmpdir()
     const dbPath = path.join(tmp.path, "lease-injected.db")
-    const worker = Bun.spawn([process.execPath, MAINTENANCE_RETRY_WORKER], {
+    const worker = spawnBackground([process.execPath, MAINTENANCE_RETRY_WORKER], {
       env: { ...process.env, OPENCODE_TEST_MAINTENANCE_DB: dbPath },
       stdin: "pipe",
       stdout: "pipe",
@@ -1378,7 +1387,7 @@ describe("daemon lifecycle", () => {
     // 与 stale lock directory rename 共用 renameWithTransientRetry 合同。
     await using tmp = await tmpdir()
     const dbPath = path.join(tmp.path, "task-write-injected.db")
-    const worker = Bun.spawn([process.execPath, TASK_WRITE_RETRY_WORKER], {
+    const worker = spawnBackground([process.execPath, TASK_WRITE_RETRY_WORKER], {
       env: { ...process.env, OPENCODE_TEST_MAINTENANCE_DB: dbPath },
       stdin: "pipe",
       stdout: "pipe",
@@ -1533,7 +1542,8 @@ describe("daemon lifecycle", () => {
         )
         expect(result.exitCode, result.output).toBe(0)
         // 组合顺序断言要求 stop、活动行换行和 terminal 依次出现，不能由三个独立子串偶然满足。
-        expect(result.output).toMatch(/Daemon stopped[\s\S]*elapsed \d+\.\ds[^\n]*\n✓ Compression completed/)
+        // elapsed 字段定宽 pad 后允许空白；\r 进度帧 strip 后可能粘连。
+        expect(result.output).toMatch(/Daemon stopped[\s\S]*elapsed\s+\d+\.\ds[\s\S]*✓ Compression completed/)
         expect(acquiredAtTerminal).toBe(false)
         await contender
         expect(acquired).toBe(true)
@@ -1643,7 +1653,7 @@ describe("daemon lifecycle", () => {
         db.close()
 
         // 真实 CLI 读取同一 lock/token；旧两秒 deadline 会在 daemon 完成精确报告前退出。
-        const status = Bun.spawn([process.execPath, INDEX_TS, "db", "status"], {
+        const status = spawnBackground([process.execPath, INDEX_TS, "db", "status"], {
           env: isolatedDaemonEnv(lockPath),
           stdin: "ignore",
           stdout: "pipe",
@@ -2017,7 +2027,7 @@ describe("daemon lifecycle", () => {
       await using tmp = await tmpdir()
       const lockPath = path.join(tmp.path, "tui-server.json")
 
-      const proc = Bun.spawn([process.execPath, INDEX_TS, "src/cli/cmd/tui/worker.ts"], {
+      const proc = spawnBackground([process.execPath, INDEX_TS, "src/cli/cmd/tui/worker.ts"], {
         env: {
           ...isolatedDaemonEnv(lockPath),
           OPENCODE_PROCESS_ROLE: "worker",
@@ -2055,6 +2065,56 @@ describe("daemon lifecycle", () => {
     // 这是跨平台安全边界：worker.ts 无条件 import win32 模块，函数内自检平台。
     expect(() => Win32Module.win32DetachConsole()).not.toThrow()
   })
+
+  test.skipIf(process.platform !== "win32")(
+    "Windows daemon PowerShell wrapper hides its console window",
+    async () => {
+      // INV-01：必须拦截真实 Bun.spawn 上的 powershell wrapper 选项；_setSpawn 会替换整个 spawnImpl，进不了 wrapper 构造。
+      await using tmp = await tmpdir()
+      const original = Bun.spawn
+      let wrapperHide: boolean | undefined
+      Bun.spawn = ((cmd: string[], opts?: Parameters<typeof Bun.spawn>[1]) => {
+        const exe = Array.isArray(cmd) ? cmd[0] : cmd
+        if (typeof exe === "string" && exe.toLowerCase().includes("powershell.exe")) {
+          wrapperHide = opts?.windowsHide === true
+        }
+        return original(cmd as never, opts as never)
+      }) as typeof Bun.spawn
+
+      const marker = path.join(tmp.path, "daemon-hide-marker.json")
+      // 最小 worker：只写 marker 后挂起，足够触发 wrapper 启动与 PID 握手。
+      const worker = path.join(tmp.path, "hide-worker.ts")
+      await Bun.write(
+        worker,
+        `await Bun.write(process.env.DAEMON_HIDE_MARKER!, JSON.stringify({ pid: process.pid }))\nsetInterval(() => {}, 1000)\n`,
+      )
+
+      try {
+        const proc = await DaemonModule._spawn([process.execPath, worker], {
+          env: { ...process.env, DAEMON_HIDE_MARKER: marker },
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+          detached: false,
+        })
+        try {
+          const deadline = Date.now() + 10_000
+          while (Date.now() < deadline) {
+            if (await Bun.file(marker).exists()) break
+            await Bun.sleep(25)
+          }
+          expect(await Bun.file(marker).exists()).toBe(true)
+          expect(wrapperHide).toBe(true)
+        } finally {
+          proc.kill()
+          await proc.exited.catch(() => undefined)
+        }
+      } finally {
+        Bun.spawn = original
+      }
+    },
+    20_000,
+  )
 
   test.skipIf(process.platform !== "win32")(
     "Windows daemon wrapper preserves a worker target path containing spaces",
@@ -2123,7 +2183,7 @@ describe("daemon lifecycle", () => {
         await reader.cancel().catch(() => undefined)
         process.exit(0)
       `
-      const launcher = Bun.spawn([process.execPath, "-e", parentCode], {
+      const launcher = spawnBackground([process.execPath, "-e", parentCode], {
         cwd: project,
         env: {
           ...isolatedDaemonEnv(lockPath),
@@ -2213,12 +2273,13 @@ describe("daemon lifecycle", () => {
           stdout: "ignore",
           stderr: "ignore",
           detached: true,
+          windowsHide: process.platform === "win32",
         })
         child.unref()
         console.log(child.pid)
         setInterval(() => {}, 1000)
       `
-      const parent = Bun.spawn([process.execPath, "-e", parentCode], {
+      const parent = spawnBackground([process.execPath, "-e", parentCode], {
         stdin: "ignore",
         stdout: "pipe",
         stderr: "inherit",

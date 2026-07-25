@@ -626,6 +626,96 @@ describe("session.list", () => {
     { git: true },
   )
 
+  // progressive B1：title 模式只验证标题子串，正文命中必须留给 all/scan
+  // 防止把 title 子集误当成 complete 全量语义
+  it.instance(
+    "searchMode title matches title only",
+    () =>
+      Effect.gen(function* () {
+        const titled = yield* withSession({ title: "cjk-title-only-session" })
+        const bodyOnly = yield* withSession({ title: "plain-holder" })
+        const bodyMsg = yield* createSearchUserMessage(bodyOnly.id)
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: bodyOnly.id,
+            messageID: bodyMsg,
+            type: "text",
+            text: "body has cjk token here",
+          }),
+        )
+
+        const titleIDs = (
+          yield* SessionNs.Service.use((session) => session.list({ search: "cjk", searchMode: "title" }))
+        ).map((session) => session.id)
+        expect(titleIDs).toContain(titled.id)
+        expect(titleIDs).not.toContain(bodyOnly.id)
+
+        const allIDs = (yield* SessionNs.Service.use((session) => session.list({ search: "cjk" }))).map(
+          (session) => session.id,
+        )
+        expect(allIDs).toContain(titled.id)
+        expect(allIDs).toContain(bodyOnly.id)
+      }),
+    { git: true },
+  )
+
+  // INV-08：token A 在 title、token B 在正文时，title 模式漏、scan 全条件命中
+  // 这是 progressive 拆阶段后最容易回归的召回合同
+  it.instance(
+    "searchScan full condition finds cross-field multi-token matches",
+    () =>
+      Effect.gen(function* () {
+        const cross = yield* withSession({ title: "alpha-in-title" })
+        const msg = yield* createSearchUserMessage(cross.id)
+        yield* SessionNs.Service.use((session) =>
+          session.updatePart({
+            id: PartID.ascending(),
+            sessionID: cross.id,
+            messageID: msg,
+            type: "text",
+            text: "beta-in-body",
+          }),
+        )
+
+        const titleIDs = (
+          yield* SessionNs.Service.use((session) => session.list({ search: "alpha beta", searchMode: "title" }))
+        ).map((session) => session.id)
+        expect(titleIDs).not.toContain(cross.id)
+
+        const scan = yield* SessionNs.Service.use((session) =>
+          session.searchScan({ search: "alpha beta", batch: 50 }),
+        )
+        expect(scan.sessions.map((session) => session.id)).toContain(cross.id)
+      }),
+    { git: true },
+  )
+
+  // keyset 翻页：nextCursor 指向候选窗末行，done 表示宇宙耗尽而非命中耗尽
+  it.instance(
+    "searchScan pages candidates with keyset until done",
+    () =>
+      Effect.gen(function* () {
+        for (let i = 0; i < 3; i++) {
+          yield* withSession({ title: `scan-page-holder-${i}` })
+        }
+        const first = yield* SessionNs.Service.use((session) => session.searchScan({ search: "scan-page", batch: 2 }))
+        expect(first.sessions.length).toBeGreaterThan(0)
+        if (first.done) return
+        expect(first.nextCursor).not.toBeNull()
+        const second = yield* SessionNs.Service.use((session) =>
+          session.searchScan({
+            search: "scan-page",
+            batch: 2,
+            cursor: first.nextCursor!,
+          }),
+        )
+        const ids = new Set([...first.sessions, ...second.sessions].map((session) => session.id))
+        expect(ids.size).toBeGreaterThanOrEqual(first.sessions.length)
+      }),
+    { git: true },
+  )
+
   // 多关键词空格分词后取交集：每 token 各自 title∨内容命中，而不是整串 "A B" 子串
   it.instance(
     "intersects whitespace-separated search tokens across title and content",

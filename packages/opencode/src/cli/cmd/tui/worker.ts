@@ -7,6 +7,7 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 import { AppRuntime } from "@/effect/app-runtime"
 import { ensureProcessMetadata } from "@opencode-ai/core/util/opencode-process"
 import * as Database from "@/storage/db"
+import { SessionStaleTurn } from "@/session/stale-turn"
 import { ServerLock } from "@/cli/cmd/tui/server-lock"
 import { Heap } from "@/cli/heap"
 import { onSseClientCountChange } from "@/server/routes/instance/httpapi/handlers/global"
@@ -268,6 +269,8 @@ async function recoverInterruptedMaintenance() {
 async function gracefulShutdown(reason = "unknown") {
   if (shutdownInProgress) return
   shutdownInProgress = true
+  // residual 与 process.exit 硬截止必须同一 t0：maintenance abort 也吃墙钟，不能只从 dispose 起算。
+  const shutdownStartedAt = Date.now()
   shutdownDeadlineTimer = setTimeout(() => {
     // deadline 到达时不能继续等待 disposer；进程退出后由下一次 owner 选举清理 stale lock。
     // 不在这里清理 lock，避免另一个进程误以为 SQLite 已经释放。
@@ -298,6 +301,17 @@ async function gracefulShutdown(reason = "unknown") {
   })
   if (reason === DisposedReason.DaemonStop) notifyDaemonStop()
   await InstanceRuntime.disposeAllInstances()
+  // 残余预算 = 5s 硬截止 − 已用墙钟 − SAFETY_MARGIN（stop/close/clear lock）。
+  const remaining =
+    SHUTDOWN_TIMEOUT_MS - (Date.now() - shutdownStartedAt) - SessionStaleTurn.SAFETY_MARGIN_MS
+  if (remaining > 0) {
+    await SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: remaining }).catch((error) => {
+      log.error("stale-turn exit-full failed", { error: String(error) })
+    })
+  } else {
+    // maintenance/dispose 已占满 5s 窗口：跳过 transcript 清扫，残留由下次 pre-lock L1 覆盖 top-16。
+    log.info("stale-turn exit-full skipped: no residual budget")
+  }
   controlServer?.stop(true)
   if (externalServer) await externalServer.stop(true)
   await internalServer.stop(true)
@@ -477,6 +491,13 @@ controlServer = Bun.serve({
 maintenanceRecoveryPromise = recoverInterruptedMaintenance()
 // 这里只等待 recovery 完成“无需恢复或已发布 active”判定，不等待后台 maintenance 跑到 terminal。
 await maintenanceRecoveryPromise
+// L1 必须在 lock 对外可见前完成：ensure 以 lock+health 放行，publish:false 不会推 bus，首份 snapshot 只能依赖预写终态。
+// L1 失败不阻止 lock 发布：宁可带脏数据启动，也不让 ensure 永久卡住无法选主。
+await SessionStaleTurn.reconcile({ kind: "recent", limit: SessionStaleTurn.RECENT_ACTIVE_SESSION_LIMIT }).catch(
+  (error) => {
+    log.error("stale-turn recent L1 failed", { error: String(error) })
+  },
+)
 lockToken = await ServerLock.write(internalServer.port, externalUrl, controlServer.port)
 log.info("daemon lock written", {
   pid: process.pid,

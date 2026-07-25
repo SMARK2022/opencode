@@ -43,7 +43,7 @@ import { zod } from "@/util/effect-zod"
 import { NonNegativeInt, optionalOmitUndefined } from "@opencode-ai/core/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 // [local-smark] session path management
-import { searchCondition } from "./search"
+import { searchCondition, type SearchMode } from "./search"
 import { SessionPath } from "./path"
 import { createDefaultTitle, isDefaultTitle } from "./title"
 
@@ -345,7 +345,22 @@ export type ListInput = {
   roots?: boolean
   start?: number
   search?: string
+  /** title：首屏子集；all（默认）：完整 title∨content，兼容旧客户端 */
+  searchMode?: SearchMode
   limit?: number
+}
+
+export type SearchScanInput = ListInput & {
+  search: string
+  cursor?: { time_updated: number; id: string }
+  /** 候选窗口大小，默认 50 */
+  batch?: number
+}
+
+export type SearchScanResult = {
+  sessions: Info[]
+  nextCursor: { time_updated: number; id: string } | null
+  done: boolean
 }
 
 const CreatedEventSchema = Schema.Struct({
@@ -535,6 +550,8 @@ export type NotFound = NotFoundError
 
 export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<Info[]>
+  /** progressive B2：同 list 宇宙 keyset 扫候选，完整 searchCondition 过滤命中 */
+  readonly searchScan: (input: SearchScanInput) => Effect.Effect<SearchScanResult>
   readonly create: (input?: {
     parentID?: SessionID
     title?: string
@@ -664,6 +681,16 @@ export const layer: Layer.Layer<
       return Array.from(
         listByProject({ projectID: ctx.project.id, experimentalWorkspaces: flags.experimentalWorkspaces, ...input }),
       )
+    })
+
+    // B2 服务入口：与 list 同 Instance project，复用 listUniverseConditions
+    const searchScan = Effect.fn("Session.searchScan")(function* (input: SearchScanInput) {
+      const ctx = yield* InstanceState.context
+      return searchScanByProject({
+        projectID: ctx.project.id,
+        experimentalWorkspaces: flags.experimentalWorkspaces,
+        ...input,
+      })
     })
 
     const children = Effect.fn("Session.children")(function* (parentID: SessionID) {
@@ -914,6 +941,7 @@ export const layer: Layer.Layer<
 
     return Service.of({
       list,
+      searchScan,
       create,
       fork,
       touch,
@@ -972,6 +1000,117 @@ function* listByProject(
     experimentalWorkspaces: boolean
   },
 ) {
+  // scope/start 与 searchScan 共用 listUniverseConditions，避免 path 语义分叉
+  const conditions = listUniverseConditions(input)
+  if (input.search) {
+    const condition = searchCondition(input.search, { mode: input.searchMode ?? "all" })
+    if (condition) conditions.push(condition)
+  }
+
+  const limit = input.limit ?? 100
+
+  const rows = Database.use((db) =>
+    db
+      .select()
+      .from(SessionTable)
+      // A home path-scoped switch query intentionally has no project/path
+      // predicate; `undefined` means "no WHERE" so start/search/roots remain the
+      // only filters instead of inventing a dummy true condition.
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
+      .limit(limit)
+      .all(),
+  )
+  for (const row of rows) {
+    yield fromRow(row)
+  }
+}
+
+/**
+ * progressive B2 核心实现。
+ * - 候选窗固定 batch 行，推进 recency 宇宙（非 browse 缓存）
+ * - 命中用完整 searchCondition(mode=all)，保证 multi-token 跨字段 AND
+ * - nextCursor 落在候选页最后一行，即使该行未命中也要推进，避免死循环
+ * - done=true 当候选页不足 batch，表示宇宙耗尽
+ */
+function searchScanByProject(
+  input: SearchScanInput & {
+    projectID: ProjectID
+    experimentalWorkspaces: boolean
+  },
+): SearchScanResult {
+  // batch 上限 100 防止单次扫过大 JSON；默认 50 对齐 TUI CONTENT_BATCH
+  const batch = Math.min(Math.max(input.batch ?? 50, 1), 100)
+  // 候选页：与 list 同 scope/start，故意不含 search，保证每批固定扫 N 行
+  const universe = listUniverseConditions({
+    projectID: input.projectID,
+    experimentalWorkspaces: input.experimentalWorkspaces,
+    directory: input.directory,
+    scope: input.scope,
+    path: input.path,
+    workspaceID: input.workspaceID,
+    roots: input.roots,
+    start: input.start,
+  })
+  if (input.cursor) {
+    // keyset：time_updated DESC, id DESC 的下一页（id 用 sql 比较避免 brand 与 string 过载冲突）
+    universe.push(
+      or(
+        lt(SessionTable.time_updated, input.cursor.time_updated),
+        and(
+          eq(SessionTable.time_updated, input.cursor.time_updated),
+          sql`${SessionTable.id} < ${input.cursor.id}`,
+        ),
+      )!,
+    )
+  }
+
+  const page = Database.use((db) =>
+    db
+      .select()
+      .from(SessionTable)
+      .where(universe.length > 0 ? and(...universe) : undefined)
+      .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
+      .limit(batch)
+      .all(),
+  )
+  if (page.length === 0) return { sessions: [], nextCursor: null, done: true }
+
+  // 第二段 SQL：在候选 id 集合上施加完整 searchCondition（title∨content AND）
+  // 与「先 search 再 limit 50 命中」不同：这里保证每页固定推进 50 候选
+  const full = searchCondition(input.search, { mode: "all" })
+  const ids = page.map((row) => row.id)
+  const matchedIds = full
+    ? new Set(
+        Database.use((db) =>
+          db
+            .select({ id: SessionTable.id })
+            .from(SessionTable)
+            .where(and(inArray(SessionTable.id, ids), full))
+            .all(),
+        ).map((row) => row.id),
+      )
+    : new Set(ids)
+
+  // 保持候选页 recency 顺序，只输出 full-condition 命中
+  const sessions = page.filter((row) => matchedIds.has(row.id)).map(fromRow)
+  const last = page[page.length - 1]!
+  const done = page.length < batch
+  const nextCursor = done ? null : { time_updated: last.time_updated, id: last.id }
+  return { sessions, nextCursor, done }
+}
+
+/**
+ * list / searchScan 共用的 scope+start 谓词（不含 search）。
+ * 故意与 listByProject 历史 path 语义对齐：home 切换放宽、directory fallback、global path 并集。
+ * searchScan 必须复用此函数，禁止另写 browse 缓存宇宙。
+ */
+function listUniverseConditions(
+  input: ListInput & {
+    projectID: ProjectID
+    experimentalWorkspaces: boolean
+  },
+): SQL[] {
   const conditions: SQL[] = []
 
   if (input.workspaceID) {
@@ -979,16 +1118,9 @@ function* listByProject(
   }
   if (input.path !== undefined) {
     const includeHomeSwitchScope = input.scope !== "project" && input.directory !== undefined
-    // The TUI session switcher uses `directory + path` queries to show the
-    // existing current/parent/child path range. Treat `~` as the user's global
-    // switching hub: when the request itself is home, do not add any project or
-    // path predicate so search/start/limit apply across all sessions; otherwise
-    // union in only the exact home-directory sessions. Directory-only calls stay
-    // below in the legacy branch, preserving reset/delete/archive-style exact
-    // directory behavior.
+    // The TUI session switcher uses directory+path；~ 为全局切换枢纽时不加 project/path 谓词
     if (includeHomeSwitchScope && isHomeDirectory(input.directory)) {
-      // The surrounding workspace/start/search/roots/limit predicates remain in
-      // force. Only the path/project boundary is widened for `~` switching.
+      // home switch：不收窄 path/project，start/search/roots 仍生效
     } else {
       const projectPath = or(
         ...relatedPathConditions({
@@ -1003,18 +1135,20 @@ function* listByProject(
         path: input.path,
         projectID: input.projectID,
       })
-      const globalPath = useDirectoryFallback && input.directory
-        ? or(
-            ...relatedPathConditions({
-              path: SessionPath.relative("/", input.directory),
-              directory: input.directory,
-              global: true,
-            }),
-          )
+      const globalPath =
+        useDirectoryFallback && input.directory
+          ? or(
+              ...relatedPathConditions({
+                path: SessionPath.relative("/", input.directory),
+                directory: input.directory,
+                global: true,
+              }),
+            )
+          : undefined
+      const nullPath = input.directory
+        ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory))
         : undefined
-      const nullPath = input.directory ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory)) : undefined
 
-      // [local-smark] 增强的 session 路径查询逻辑（支持全局路径和目录回退）
       conditions.push(
         or(
           and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath)! : projectPath),
@@ -1040,28 +1174,7 @@ function* listByProject(
   if (input.start) {
     conditions.push(gte(SessionTable.time_updated, input.start))
   }
-  if (input.search) {
-    const condition = searchCondition(input.search)
-    if (condition) conditions.push(condition)
-  }
-
-  const limit = input.limit ?? 100
-
-  const rows = Database.use((db) =>
-    db
-      .select()
-      .from(SessionTable)
-      // A home path-scoped switch query intentionally has no project/path
-      // predicate; `undefined` means "no WHERE" so start/search/roots remain the
-      // only filters instead of inventing a dummy true condition.
-      .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(SessionTable.time_updated))
-      .limit(limit)
-      .all(),
-  )
-  for (const row of rows) {
-    yield fromRow(row)
-  }
+  return conditions
 }
 
 export function* listGlobal(input?: {

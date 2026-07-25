@@ -262,11 +262,13 @@ const promptAsyncWorkerPath = path.join(import.meta.dir, "httpapi-promptasync-wo
 async function runPromptAsyncWorker(serverPath: ServerPath) {
   const dbPath = path.join(os.tmpdir(), `opencode-promptasync-${crypto.randomUUID()}`, "opencode.db")
   // 每个 route realization 都拥有独立 DB 根目录，parent cleanup 不会再触碰 child 的活跃 fiber。
+  // 后台 promptAsync worker 在 Windows 上隐藏 console，与 daemon/Process hide 合同一致。
   const worker = Bun.spawn([process.execPath, promptAsyncWorkerPath, serverPath, dbPath], {
     cwd: path.join(import.meta.dir, "../.."),
     env: process.env,
     stdout: "pipe",
     stderr: "pipe",
+    windowsHide: process.platform === "win32",
   })
   const [code, stdout, stderr] = await Promise.all([
     worker.exited,

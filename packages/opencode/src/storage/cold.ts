@@ -13,8 +13,10 @@ import { CompactionBoundary } from "@/session/compaction-boundary"
 import { Snapshot } from "@/snapshot"
 import type { MessageV2 } from "@/session/message-v2"
 
-// 30 天 age 与 completed compaction boundary 是并列 eligibility，任一成立即可安全进入冷存储。
-const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
+// root 7 天 session.time_updated、subagent 24 小时 last message、completed compact head 三者 OR；任一成立即可进冷存储。
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
+// subagent 固定 24h last-message 阈值；CLI olderThanMs 只调 root，不覆盖该常量。
+const SUBAGENT_IDLE_MS = 24 * 60 * 60 * 1000
 // 1 MiB 是普通 pack 的目标而非硬上限；单个超大 entry 必须独立保留完整信息而不能截断。
 const PACK_TARGET_BYTES = 1024 * 1024
 export const DEFAULT_BATCH_SIZE = 2000
@@ -895,20 +897,38 @@ function restorePackedPart(data: (typeof PartTable.$inferSelect)["data"], fields
   return restorePart(data, { version: 1, owner: "part", fields }, hash)
 }
 
-// eligibility 同时读取 session age 与最新 completed compaction boundary，两条规则在一个 owner 判断中合并。
-// session.time_updated 是 age 的唯一时钟；Message/Part 自身时间不能代表会话是否仍在活跃使用。
-// olderThanMs 由准备后的 request 固定，resume 不允许用新 CLI 参数改变同一 task 的判定集合。
-// boundary 查询结果可按 session.updated 缓存，但业务写入改变 session 时间后必须重新计算以避免冻住新 tail。
-function eligibility(db: TxOrDb, sessionID: SessionID, now: number, olderThanMs = THIRTY_DAYS_MS) {
+// eligibility 合并 root/subagent 闲置时钟与最新 completed compaction boundary，三条规则 OR。
+// root 用 session.time_updated；subagent（parent_id 非空）用 max(message.time_created)，不用 SessionStatus。
+// olderThanMs 只作为 root 闲置阈值由 prepare 后的 request 固定；subagent 24h 常量不可被 CLI 改写。
+// boundary 结果可按 session 缓存，但写入改变时间后必须重算，避免冻住新 tail。
+function lastMessageCreated(db: TxOrDb, sessionID: SessionID) {
+  // 空会话 max 为 null：无法证明 last-message idle，subagent age 分支必须为 false。
+  return (
+    db
+      .select({ value: sql<number | null>`max(${MessageTable.time_created})` })
+      .from(MessageTable)
+      .where(eq(MessageTable.session_id, sessionID))
+      .get()?.value ?? null
+  )
+}
+
+function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderThanMs = SEVEN_DAYS_MS) {
   const session = db
-    .select({ updated: SessionTable.time_updated })
+    .select({ updated: SessionTable.time_updated, parentID: SessionTable.parent_id })
     .from(SessionTable)
     .where(eq(SessionTable.id, sessionID))
     .get()
   if (!session) return
   const boundary = CompactionBoundary.latest(sessionID)
+  // parent_id 是 task/subagent 权威分类；fork 无 parent，走 root 时钟，禁止用标题匹配。
+  const aged = session.parentID
+    ? (() => {
+        const last = lastMessageCreated(db, sessionID)
+        return last !== null && last <= now - SUBAGENT_IDLE_MS
+      })()
+    : session.updated <= now - rootOlderThanMs
   return {
-    aged: session.updated <= now - olderThanMs,
+    aged,
     boundary: boundary ? (boundary.tailStartID ?? boundary.markerID) : undefined,
     markerID: boundary?.markerID,
     summaryID: boundary?.summaryID,
@@ -980,6 +1000,41 @@ function ownerCounts(db: TxOrDb, hashes: string[]) {
       .groupBy(SessionTable.summary_ref)
       .all()) {
       if (row.hash) result.set(row.hash, (result.get(row.hash) ?? 0) + row.value)
+    }
+  }
+  return result
+}
+
+// status 的 F4 raw 需要每个 pack 的 distinct cold_key 数；owners/keys 才是 entry 共享倍率。
+// 只扫 message/part：session-summary 无 entry key，仍用 ownerCounts 的 raw×owners。
+// 返回值只含 keys：owner 数继续由 ownerCounts 反算，避免两套计数口径分叉。
+function packKeyStats(db: TxOrDb, hashes: string[]) {
+  const result = new Map<string, number>()
+  if (hashes.length === 0) return result
+  for (let offset = 0; offset < hashes.length; offset += DEFAULT_BATCH_SIZE) {
+    const batch = hashes.slice(offset, offset + DEFAULT_BATCH_SIZE)
+    for (const row of db
+      .select({
+        hash: MessageTable.cold_ref,
+        keys: sql<number>`count(distinct ${MessageTable.cold_key})`,
+      })
+      .from(MessageTable)
+      .where(inArray(MessageTable.cold_ref, batch))
+      .groupBy(MessageTable.cold_ref)
+      .all()) {
+      if (row.hash) result.set(row.hash, row.keys)
+    }
+    for (const row of db
+      .select({
+        hash: PartTable.cold_ref,
+        keys: sql<number>`count(distinct ${PartTable.cold_key})`,
+      })
+      .from(PartTable)
+      .where(inArray(PartTable.cold_ref, batch))
+      .groupBy(PartTable.cold_ref)
+      .all()) {
+      // 正常 kind 下同一 hash 只会出现在 message 或 part 一侧；相加仅防御异常双引用。
+      if (row.hash) result.set(row.hash, (result.get(row.hash) ?? 0) + row.keys)
     }
   }
   return result
@@ -2219,11 +2274,11 @@ function freeze(
 }
 
 // 公开 freezeOwner 是测试、精确 session 操作和未来内部调用的最小 seam，不暴露 codec 或 projection 细节。
-// olderThanMs 可由已规范化 maintenance request 传入，缺省保持产品合同的 30 天。
+// olderThanMs 可由已规范化 maintenance request 传入，缺省 root 7 天；subagent 仍用固定 24h last-message。
 // 返回 skipped reason 便于 task 计数，但不会把 ineligible/no-fields 当作错误或改写 owner。
 export function freezeOwner(input: Owner & { now?: number; olderThanMs?: number }): FreezeResult {
   const now = input.now ?? Date.now()
-  return Database.transaction((db) => freeze(db, { ...input, now, olderThanMs: input.olderThanMs ?? THIRTY_DAYS_MS }), {
+  return Database.transaction((db) => freeze(db, { ...input, now, olderThanMs: input.olderThanMs ?? SEVEN_DAYS_MS }), {
     behavior: "immediate",
   })
 }
@@ -2539,7 +2594,7 @@ function partCandidate() {
 export function isEligibleOwner(input: Owner & { now?: number; olderThanMs?: number }) {
   return Database.use((db) => {
     const now = input.now ?? Date.now()
-    const olderThanMs = input.olderThanMs ?? THIRTY_DAYS_MS
+    const olderThanMs = input.olderThanMs ?? SEVEN_DAYS_MS
     if (input.type === "message") {
       const row = db.select().from(MessageTable).where(eq(MessageTable.id, input.id)).get()
       if (!row || row.cold_key) return false
@@ -2887,7 +2942,7 @@ export function parseMaintenanceRequest(input: unknown): MaintenanceRequest {
       return {
         operation: "compress",
         ...(sessionID ? { sessionID } : {}),
-        olderThanMs: input.olderThanMs === undefined ? THIRTY_DAYS_MS : Number(input.olderThanMs),
+        olderThanMs: input.olderThanMs === undefined ? SEVEN_DAYS_MS : Number(input.olderThanMs),
         batchSize,
       }
     case "expand":
@@ -3425,8 +3480,29 @@ export function status(): StatusReport {
     // logical raw 使用 owner 反算数；当 persisted ref_count 损坏时，status 仍给出真实共享量并单独报告 mismatch。
     // orphan payload 计入物理 compressedBytes，但不参与 referencedRaw/sharedBytes，避免无 owner blob 扭曲去重收益。
     // verify/cleanup 才拥有修复或删除权限，status 的真实计数不能顺带改写 persisted ref_count。
-    // raw 按真实 owner 展开，compressed 按 unique payload；二者差额不是已释放的文件 bytes。
-    const rawBytes = payloads.reduce((total, row) => total + row.raw_bytes * (counts.get(row.hash) ?? 0), 0)
+    // v2 pack 的 raw_bytes 是整包 envelope：F0=raw×owners 会把同一 entry 集合重复计 N 次。
+    // F4=raw×(owners/keys) 在等分 entry 近似下表示「每个 owner 各持一份字段」的逻辑 raw；pure pack 退化为 unique raw。
+    // session-summary 无 cold_key，整 blob 仍按 raw×owners 展开。禁止为算 F4 去 materialize payload body。
+    // packKeyStats 与 ownerCounts 分查：前者只补 distinct key，后者继续服务 mismatch/orphan。
+    const keyCounts = packKeyStats(
+      db,
+      payloads.map((row) => row.hash),
+    )
+    const rawBytes = payloads.reduce((total, row) => {
+      const owners = counts.get(row.hash) ?? 0
+      // orphan 的 unique raw 只进 referencedRaw/compressed，不进逻辑 Raw 展开。
+      if (owners === 0) return total
+      if (row.kind === "message-pack" || row.kind === "part-pack") {
+        const distinctKeys = keyCounts.get(row.hash) ?? 0
+        // keys==0 的 v2 损坏行不回退 F0，避免再次把整包按 owner 连乘放大。
+        if (distinctKeys <= 0) return total
+        // owners 用全表反算 n；keys 只服务 entry 共享倍率（等分 entry 近似）。
+        // 除法保持 number：StatusReport 与 CLI 十进制展示均按浮点字节计数。
+        return total + (row.raw_bytes * owners) / distinctKeys
+      }
+      // session-summary 等整 blob kind：一份 payload 即完整逻辑内容，仍 raw×owners。
+      return total + row.raw_bytes * owners
+    }, 0)
     // unique compressed 包含 orphan 的真实占用，cleanup 前仍须显示可回收空间。
     const compressedBytes = payloads.reduce((total, row) => total + row.compressed_bytes, 0)
     const referencedRawBytes = payloads.reduce(
@@ -3443,9 +3519,9 @@ export function status(): StatusReport {
       activeBytes: Math.max(0, pages - freelistPages) * pageSize,
       // 物理门槛使用批准的 decimal 1.5 GB，避免与 GiB 换算混淆。
       targetBytes: 1_500_000_000,
-      // 候选扫描不调用 freeze，也不更新 time_updated 或预先创建 payload。
-      // 频繁 TUI status 因此不会反过来改变 30 天 age eligibility。
-      eligibleOwners: eligibleOwnerCount(db, Date.now(), THIRTY_DAYS_MS),
+      // 候选扫描不调用 freeze；status 使用与默认 compress 相同的 root 7d / subagent 24h 阈值。
+      // 频繁 TUI status 因此不会反过来改变 root time_updated 或 last-message 时钟。
+      eligibleOwners: eligibleOwnerCount(db, Date.now(), SEVEN_DAYS_MS),
       coldOwners,
       summaryOwners,
       summaryPayloads: summaryPayloads.length,
@@ -3454,7 +3530,7 @@ export function status(): StatusReport {
       payloads: payloads.length,
       rawBytes,
       compressedBytes,
-      // sharedBytes 是内容寻址的逻辑收益，不能被误读为 SQLite 文件已释放空间。
+      // sharedBytes 在 F4 下是真 entry 共享溢价（F4−unique），不能被误读为 SQLite 已释放空间。
       sharedBytes: Math.max(0, rawBytes - referencedRawBytes),
       refCountMismatches,
       orphans,

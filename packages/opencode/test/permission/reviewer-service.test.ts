@@ -89,6 +89,12 @@ describe("permission reviewer service", () => {
   const completedClosure = testEffect(completedClosureFixture.layer)
   const drainedClosureFixture = reviewerClosureFixture("drain")
   const drainedClosure = testEffect(drainedClosureFixture.layer)
+  // timeout 共终态夹具：短 timeout_ms + 挂起 SSE（tool-input-start 后不关流）。
+  // 覆盖生产路径：timeoutOrElse 中断 attempt，而非 drain incomplete。
+  // 回归锁：decision tool 必须 error，assistant 必须 time.completed（INV-01/02）。
+  // 不断言私有 toolParts map；只读 fixture 持久化 parts/messages 快照。
+  const timeoutClosureFixture = reviewerTimeoutClosureFixture()
+  const timeoutClosure = testEffect(timeoutClosureFixture.layer)
 
   oauth.effect("sends reviewer policy as OpenAI OAuth instructions while keeping action evidence in user input", () =>
     Effect.gen(function* () {
@@ -368,6 +374,64 @@ describe("permission reviewer service", () => {
     }),
   )
 
+  // 用户症状：timeout 后 message 已 Aborted/completed，permission_review_decision 不得仍 pending。
+  // 独立期望：error 文案与 SessionProcessor.TOOL_ABORTED_ERROR 一致；不依赖私有 map。
+  timeoutClosure.live("timeout after tool-input-start closes decision Tools before message completes", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      yield* Effect.exit(
+        reviewer.review(reviewInput("review_timeout_closure", undefined, SessionID.make("session_parent_closure"))),
+      )
+
+      const decisions = [...timeoutClosureFixture.parts.values()].filter(
+        (part): part is MessageV2.ToolPart => part.type === "tool",
+      )
+      expect(decisions.length).toBeGreaterThan(0)
+      expect(decisions.filter((part) => part.state.status === "pending" || part.state.status === "running")).toEqual([])
+      expect(decisions.every((part) => part.state.status === "error")).toBe(true)
+      expect(
+        decisions.every((part) => part.state.status === "error" && part.state.error === "Tool execution aborted"),
+      ).toBe(true)
+
+      const assistants = [...timeoutClosureFixture.messages.values()].filter(
+        (message): message is MessageV2.Assistant => message.role === "assistant",
+      )
+      expect(assistants.length).toBeGreaterThan(0)
+      // INV-02：message 终态与 tool 终态同收；生产僵尸是 completed + pending 的分裂。
+      expect(assistants.every((message) => message.time.completed !== undefined)).toBe(true)
+    }),
+  )
+
+  // 复现生产半写：stream finalize 写 error 首次失败时，不得只留下 completed message + pending tool。
+  // 旧路径：单次 finalize + catch void → message 仍 completed、tool 仍 pending（库内 3 僵尸同形）。
+  // 修复后：ensuring / 外层 finalize-before-message 再扫一次，第二次写成功即共终态。
+  // 期望字面量独立于实现：status=error 且 error==="Tool execution aborted"。
+  const timeoutWriteFailFixture = reviewerTimeoutClosureFixture({ failErrorWrites: true })
+  const timeoutWriteFail = testEffect(timeoutWriteFailFixture.layer)
+  timeoutWriteFail.live("timeout still closes decision Tools when first error write fails", () =>
+    Effect.gen(function* () {
+      const reviewer = yield* PermissionReviewer.Service
+      yield* Effect.exit(
+        reviewer.review(reviewInput("review_timeout_write_fail", undefined, SessionID.make("session_parent_closure"))),
+      )
+
+      const decisions = [...timeoutWriteFailFixture.parts.values()].filter(
+        (part): part is MessageV2.ToolPart => part.type === "tool",
+      )
+      expect(decisions.length).toBeGreaterThan(0)
+      expect(decisions.filter((part) => part.state.status === "pending" || part.state.status === "running")).toEqual([])
+      expect(
+        decisions.every((part) => part.state.status === "error" && part.state.error === "Tool execution aborted"),
+      ).toBe(true)
+
+      const assistants = [...timeoutWriteFailFixture.messages.values()].filter(
+        (message): message is MessageV2.Assistant => message.role === "assistant",
+      )
+      expect(assistants.length).toBeGreaterThan(0)
+      expect(assistants.every((message) => message.time.completed !== undefined)).toBe(true)
+    }),
+  )
+
   // durable 必红夹具：MessageV2.get 读到仍为 pending 的父 ToolPart 时，promote 必须用
   // metadata.command 写出可渲染的 input.command，不能停在历史 { raw } 形状。
   // 常见 tool-call-first 路径上 SessionPrompt 集成断言往往已绿，故此 fixture 才是 owner 级红测。
@@ -529,6 +593,112 @@ function parentToolPartReviewFixture() {
         Layer.provide(pluginLayer()),
         Layer.provide(sessionLayer),
       ),
+    ),
+  }
+}
+
+function reviewerTimeoutClosureFixture(options: { failErrorWrites?: boolean } = {}) {
+  const parts = new Map<string, MessageV2.Part>()
+  const messages = new Map<string, MessageV2.Info>()
+  let errorWriteFailures = 0
+  const model = reviewerModel(OPENAI_PROVIDER_ID)
+  // SSE 发出 tool-input-start 后故意不结束 body。
+  // 与「有限 Response 立刻 drain」不同：保持连接挂起才能命中 timeoutOrElse 中断路径，
+  // 而不是 drain 后的 incomplete finalize（生产僵尸 lag≈90s 对应前者）。
+  const fetch = Object.assign(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+    const encoder = new TextEncoder()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(openAIReviewPendingStream()))
+      },
+      cancel() {},
+    })
+    return new Response(body, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    })
+  }, { preconnect: () => {} })
+  const parentSession: Session.Info = {
+    id: SessionID.make("session_parent_closure"),
+    slug: "parent-closure",
+    projectID: ProjectID.make("project_reviewer_closure"),
+    directory: "/tmp",
+    title: "Parent closure",
+    model: { id: model.id, providerID: model.providerID },
+    version: "test",
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 1, updated: 1 },
+  }
+  const childSession: Session.Info = {
+    ...parentSession,
+    id: SessionID.make("session_reviewer_closure"),
+    parentID: parentSession.id,
+    agent: "permission-reviewer",
+    title: "Auto permission review",
+  }
+  const sessionLayer = Layer.mock(Session.Service)({
+    get: () => Effect.succeed(parentSession),
+    children: () => Effect.succeed([]),
+    create: (input) => Effect.succeed({ ...childSession, ...input }),
+    updateMessage: (message) =>
+      Effect.sync(() => {
+        messages.set(message.id, structuredClone(message))
+        return message
+      }),
+    getPart: (input) => Effect.succeed(parts.get(input.partID)),
+    // 正常返回：pending 必须已 commit 且 attempt 仍挂在 open stream 上，才能命中 timeout 窗口。
+    // failErrorWrites：首次 error 终态写以 defect 失败。
+    // 对应旧实现 catch void：stream finalize 失败后外层仍写 message.completed，tool 留 pending。
+    // 计数器只失败一次：验证 ensuring/外层二次 finalize 能写成功（不是无限重试）。
+    updatePart: (part) =>
+      Effect.sync(() => {
+        if (
+          options.failErrorWrites &&
+          part.type === "tool" &&
+          part.state.status === "error" &&
+          errorWriteFailures < 1
+        ) {
+          errorWriteFailures += 1
+          throw new Error("simulated terminal tool write failure")
+        }
+        parts.set(part.id, structuredClone(part))
+        return part
+      }),
+  })
+  return {
+    parts,
+    messages,
+    layer: PermissionReviewer.layer.pipe(
+      Layer.provide(
+        TestConfig.layer({
+          get: () =>
+            Effect.succeed(
+              config(model.providerID, {
+                approvals_reviewer: "auto_review",
+                auto_review: {
+                  model: `${model.providerID}/gpt-5`,
+                  // 三次 attempt × 80ms 仍远小于默认 90s；测的是退出共终态，不是重试策略本身。
+                  // 重试次数保持生产默认，避免为测速改写 MAX_REVIEWER_ATTEMPTS。
+                  timeout_ms: 80,
+                  policy: "Reviewer service test policy: allow only the bounded fixture command.",
+                },
+              }),
+            ),
+        }),
+      ),
+      Layer.provide(
+        ProviderTest.fake({
+          model,
+          info: ProviderTest.info({ id: model.providerID, options: {} }, model),
+          getLanguage: Effect.fn("ReviewerTimeoutClosureTest.getLanguage")(() =>
+            Effect.succeed(createOpenAI({ apiKey: "test", fetch }).responses("gpt-5")),
+          ),
+        }).layer,
+      ),
+      Layer.provide(authLayer({ type: "api", key: "test-key" })),
+      Layer.provide(pluginLayer()),
+      Layer.provide(sessionLayer),
     ),
   }
 }

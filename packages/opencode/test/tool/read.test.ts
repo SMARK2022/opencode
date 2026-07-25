@@ -31,10 +31,12 @@ const MIGRATION_SCRIPT = path.join(import.meta.dir, "../../script/migrate-image-
 
 async function migrateImageAttachment(args: string[]) {
   // 子进程覆盖用户实际调用的CLI边界，避免测试绕过参数校验、只读模式或进程退出码。
+  // 迁移 CLI 子进程在 Windows 上隐藏 console，覆盖真实入口时不弹 conhost。
   const child = Bun.spawn([process.execPath, MIGRATION_SCRIPT, ...args], {
     cwd: path.join(import.meta.dir, "../.."),
     stdout: "pipe",
     stderr: "pipe",
+    windowsHide: process.platform === "win32",
   })
   const [exitCode, stdout, stderr] = await Promise.all([
     child.exited,

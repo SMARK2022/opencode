@@ -1077,12 +1077,14 @@ describe.serial("ColdStorage", () => {
       `
       const result = yield* Effect.promise(async () => {
         // hard_heap_limit 必须位于子进程，避免 SQLite 全局上限污染同 runner 的后续测试。
+        // 隔离 heap 的子进程在 Windows 上隐藏 console，避免 status 投影验证弹窗。
         const proc = Bun.spawn([process.execPath, "-e", script], {
           cwd: path.dirname(fileURLToPath(new URL("../../package.json", import.meta.url))),
           env: { ...process.env, OPENCODE_PROCESS_ROLE: "main" },
           stdin: "ignore",
           stdout: "pipe",
           stderr: "pipe",
+          windowsHide: process.platform === "win32",
         })
         const [exitCode, stdout, stderr] = await Promise.all([
           proc.exited,
@@ -1634,6 +1636,100 @@ describe.serial("Packed ColdStorage V2", () => {
       ).toEqual(original)
       // fixture DB 随 Instance scope 清理，断言不依赖其他测试的全局 payload 数量。
       expect(Database.use((db) => db.select().from(ColdStorageTable).all())).toEqual([])
+    }),
+  )
+
+  // status.rawBytes 必须按 v2 pack 的 entry 共享口径（F4），不能把整包 raw 再乘以 owner 数。
+  // 夹具构造 owners==keys 的纯打包：独立期望是 unique Σ raw_bytes，而不是 Σ raw×owners。
+  // 这锁住用户可见症状：db status 的 Raw 不得因一包多 owner 膨胀到 N 倍整包体积。
+  it.instance("reports pack-logical status rawBytes for multi-key packs", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({ title: "status raw F4 pack" })
+      // 两个不同 patch 强制不同 entry key，排除「碰巧同 key 共享」把 pure pack 变成 entry_shared。
+      yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/status-a.ts",
+        patch: "+status-a\n",
+      })
+      yield* addCompletedSummaryEdit(sessions, {
+        sessionID: session.id,
+        directory: test.directory,
+        file: "src/status-b.ts",
+        patch: "+status-b\n",
+      })
+      const result = yield* Effect.promise(() =>
+        ColdStorage.maintain(
+          ColdStorage.prepareMaintenance({
+            operation: "compress",
+            olderThanMs: 0,
+            batchSize: ColdStorage.DEFAULT_BATCH_SIZE,
+          }),
+          { lease: { assertOwned() {} }, checkpoint: async () => {} },
+        ),
+      )
+      expect(result.type === "task" ? result.task.status : undefined).toBe("completed")
+
+      // 期望值只来自 cold_storage 元数据列，不解码 payload，也不复制 status 内部分支。
+      const payloads = Database.use((db) =>
+        db
+          .select({
+            hash: ColdStorageTable.hash,
+            kind: ColdStorageTable.kind,
+            raw: ColdStorageTable.raw_bytes,
+            compressed: ColdStorageTable.compressed_bytes,
+            refs: ColdStorageTable.ref_count,
+          })
+          .from(ColdStorageTable)
+          .all(),
+      )
+      expect(payloads.length).toBeGreaterThan(0)
+      // 至少有一个多 owner 的 pack，否则无法证明 F0 与 F4 分叉。
+      expect(payloads.some((row) => row.refs > 1)).toBe(true)
+
+      const partKeys = Database.use((db) =>
+        db
+          .select({
+            hash: PartTable.cold_ref,
+            owners: Database.sql<number>`count(*)`,
+            keys: Database.sql<number>`count(distinct ${PartTable.cold_key})`,
+          })
+          .from(PartTable)
+          .where(Database.isNotNull(PartTable.cold_ref))
+          .groupBy(PartTable.cold_ref)
+          .all(),
+      )
+      const messageKeys = Database.use((db) =>
+        db
+          .select({
+            hash: MessageTable.cold_ref,
+            owners: Database.sql<number>`count(*)`,
+            keys: Database.sql<number>`count(distinct ${MessageTable.cold_key})`,
+          })
+          .from(MessageTable)
+          .where(Database.isNotNull(MessageTable.cold_ref))
+          .groupBy(MessageTable.cold_ref)
+          .all(),
+      )
+      // 本夹具应只有纯打包（owners==keys）；若出现 entry 共享则测试夹具本身漂移。
+      // pure pack 下 F4 退化为 unique raw，才能用 Σ raw_bytes 作独立 expected。
+      for (const row of [...partKeys, ...messageKeys]) {
+        expect(row.owners).toBe(row.keys)
+      }
+
+      const uniqueRaw = payloads.reduce((total, row) => total + row.raw, 0)
+      // ownerInflatedRaw 复现旧 F0 症状，仅作分叉探针，不是 status 的期望值来源。
+      const ownerInflatedRaw = payloads.reduce((total, row) => total + row.raw * row.refs, 0)
+      expect(ownerInflatedRaw).toBeGreaterThan(uniqueRaw)
+
+      const report = ColdStorage.status()
+      // F4 在 pure pack 上等于 unique raw；F0 会等于 ownerInflatedRaw。
+      // sharedBytes 在 pure pack 上应为 0：真共享溢价只来自 owners>keys。
+      expect(report.rawBytes).toBe(uniqueRaw)
+      expect(report.compressedBytes).toBe(payloads.reduce((total, row) => total + row.compressed, 0))
+      expect(report.sharedBytes).toBe(0)
     }),
   )
 

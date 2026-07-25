@@ -2,7 +2,7 @@ import { useDialog } from "@tui/ui/dialog"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { useRoute } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
-import { createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount, type JSX } from "solid-js"
+import { createEffect, createMemo, createSignal, on, onCleanup, onMount, type JSX } from "solid-js"
 import { Locale } from "@/util/locale"
 import { useProject } from "@tui/context/project"
 import { useTheme } from "../context/theme"
@@ -19,10 +19,17 @@ import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
 import { WorkspaceLabel } from "./workspace-label"
 import { useCommandShortcut } from "../keymap"
 import {
-  resolveSessionListSource,
+  appendScanHits,
+  isSessionSearchLoading,
+  resolveDisplayHits,
+  resolveProgressiveSessionListSource,
   sessionListEmptyLabel,
+  shouldStopSearchScan,
+  SESSION_LIST_CONTENT_BATCH,
+  SESSION_LIST_CONTENT_DELAY_MS,
   SESSION_LIST_LOOKBACK_MS,
   SESSION_LIST_SEARCH_LIMIT,
+  type SearchPhase,
 } from "@tui/util/session-list-params"
 
 type WorkspaceStatus = "connected" | "connecting" | "disconnected" | "error"
@@ -43,11 +50,164 @@ export function DialogSessionList() {
   const [search, setSearch] = createDebouncedSignal("", 150)
   // [local-smark] Session list preview functionality
   const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
+  // progressive search 状态：generation 与 Abort 绑定 committed query
+  const [searchPhase, setSearchPhase] = createSignal<SearchPhase | undefined>()
+  // success complete 只信 scan；error complete 保留 title∪scan（INV-12 已展示 hits）
+  const [searchTerminal, setSearchTerminal] = createSignal<"success" | "error" | undefined>()
+  const [titleHits, setTitleHits] = createSignal<NonNullable<typeof sync.data.session>>([])
+  const [scanFullHits, setScanFullHits] = createSignal<NonNullable<typeof sync.data.session>>([])
+  let searchGeneration = 0
+  let searchController: AbortController | undefined
+
+  type SessionHit = (typeof sync.data.session)[number]
+
+  // 与 Path A browse 相同 start/scope，保证 progressive 候选宇宙一致
+  function sessionListScopeParams() {
+    return {
+      start: Date.now() - SESSION_LIST_LOOKBACK_MS,
+      ...sync.session.query(),
+    }
+  }
+
+  // POST/手写 GET 都需 directory query，workspace routing 才能定位实例
+  function directoryQuery(url: URL) {
+    const dir = sync.path.directory || sdk.directory
+    if (dir) url.searchParams.set("directory", dir)
+  }
+
+  /**
+   * progressive Path B 主路径（R3）：
+   * 1) title-only GET 首屏（子集，可漏跨字段 multi-token）
+   * 2) contentDelay 后再串行 POST /session/search/scan
+   * 3) complete 权威集合 = scanFullHits，与 list 全条件 top-400 对齐
+   * generation+Abort 保证改词/清空时丢弃过期响应。
+   */
+  async function runProgressiveSearch(query: string, generation: number, signal: AbortSignal) {
+    const scope = sessionListScopeParams()
+    setSearchPhase("awaiting_first")
+    setSearchTerminal(undefined)
+    setTitleHits([])
+    setScanFullHits([])
+
+    try {
+      // B1：手写 GET，gen SDK 无 searchMode 字段（INV-11）
+      const titleUrl = new URL("/session", sdk.url)
+      directoryQuery(titleUrl)
+      titleUrl.searchParams.set("search", query)
+      titleUrl.searchParams.set("searchMode", "title")
+      titleUrl.searchParams.set("start", String(scope.start))
+      titleUrl.searchParams.set("limit", String(SESSION_LIST_SEARCH_LIMIT))
+      if (scope.scope) titleUrl.searchParams.set("scope", scope.scope)
+      if (scope.path) titleUrl.searchParams.set("path", scope.path)
+      if ("directory" in scope && scope.directory) titleUrl.searchParams.set("directory", scope.directory)
+
+      const titleRes = await sdk.fetch(titleUrl, { method: "GET", signal })
+      if (signal.aborted || generation !== searchGeneration) return
+      if (titleRes.ok) {
+        const titleData = (await titleRes.json()) as SessionHit[]
+        if (signal.aborted || generation !== searchGeneration) return
+        setTitleHits(Array.isArray(titleData) ? titleData : [])
+      }
+      setSearchPhase("partial")
+
+      // contentDelay：输入 debounce 之后再等一截，慢打时少发过期 scan
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, SESSION_LIST_CONTENT_DELAY_MS)
+        const onAbort = () => {
+          clearTimeout(timer)
+          reject(new DOMException("Aborted", "AbortError"))
+        }
+        if (signal.aborted) return onAbort()
+        signal.addEventListener("abort", onAbort, { once: true })
+      })
+      if (signal.aborted || generation !== searchGeneration) return
+
+      // B2：串行 keyset scan；early-stop 只数 scanFullHits
+      let cursor: { time_updated: number; id: string } | null = null
+      let scanHits: SessionHit[] = []
+      for (;;) {
+        if (signal.aborted || generation !== searchGeneration) return
+        if (shouldStopSearchScan(scanHits.length)) break
+
+        const scanUrl = new URL("/session/search/scan", sdk.url)
+        directoryQuery(scanUrl)
+        const body = {
+          search: query,
+          cursor: cursor ?? undefined,
+          batch: SESSION_LIST_CONTENT_BATCH,
+          start: scope.start,
+          scope: scope.scope,
+          path: scope.path,
+          directory: "directory" in scope ? scope.directory : undefined,
+        }
+        const scanRes = await sdk.fetch(scanUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal,
+        })
+        // 每批结束后再检查 generation，防止慢响应写回已过期 query
+        if (signal.aborted || generation !== searchGeneration) return
+        // 非 2xx：标记 error 终态并退出；保留已展示 title/scan hits
+        if (!scanRes.ok) {
+          if (signal.aborted || generation !== searchGeneration) return
+          setSearchTerminal("error")
+          setSearchPhase("complete")
+          return
+        }
+        const page = (await scanRes.json()) as {
+          sessions: SessionHit[]
+          nextCursor: { time_updated: number; id: string } | null
+          done: boolean
+        }
+        if (signal.aborted || generation !== searchGeneration) return
+        // 只累积 full-condition 命中；title overlay 不在此写入
+        scanHits = appendScanHits(scanHits, page.sessions ?? [])
+        setScanFullHits(scanHits)
+        setSearchPhase("partial")
+        // done 或无 nextCursor：候选宇宙扫尽
+        if (page.done || !page.nextCursor) break
+        cursor = page.nextCursor
+      }
+
+      if (signal.aborted || generation !== searchGeneration) return
+      // 成功 complete：权威集合仅为 scanFullHits（INV-09）
+      setSearchTerminal("success")
+      setSearchPhase("complete")
+    } catch {
+      // abort 不改 UI；网络失败则 complete+error，保留 title∪scan，禁止 fallback all
+      if (signal.aborted || generation !== searchGeneration) return
+      setSearchTerminal("error")
+      setSearchPhase("complete")
+    }
+  }
+
+  // committed query 变化：清空/改词都 abort 上一代；空串回到 browse 且无 Spinner
+  createEffect(
+    on(
+      () => search(),
+      (query) => {
+        searchController?.abort()
+        if (!query) {
+          searchGeneration += 1
+          searchController = undefined
+          setSearchPhase(undefined)
+          setSearchTerminal(undefined)
+          setTitleHits([])
+          setScanFullHits([])
+          return
+        }
+        // 新 generation 立即丢弃旧 hits，避免 C→CJ 串味
+        const generation = ++searchGeneration
+        const controller = new AbortController()
+        searchController = controller
+        onCleanup(() => controller.abort())
+        void runProgressiveSearch(query, generation, controller.signal)
+      },
+    ),
+  )
 
   // [local-smark] session list preview: 批量获取预览文本
-  // 单次 POST /session/preview 替代原来 N×M 次 session.messages 分页调用。
-  // AbortController 保证 dialog 关闭或搜索切换时取消 in-flight 请求；
-  // signal.aborted 守卫防止已取消的响应覆盖新数据（竞态防护）
   createEffect(
     on(
       () => sessions(),
@@ -59,17 +219,13 @@ export function DialogSessionList() {
           .map((s) => s.id)
         if (ids.length === 0) return
 
-        // 每次 sessions 变化创建新 controller；onCleanup 在下次触发或卸载时 abort
         const controller = new AbortController()
         onCleanup(() => controller.abort())
 
         void (async () => {
           try {
-            // POST 请求需手动设置 directory query param（sdk.fetch 的 rewrite
-            // 仅处理 GET/HEAD），确保 workspace routing 中间件正确定位实例
             const url = new URL("/session/preview", sdk.url)
-            const dir = sync.path.directory || sdk.directory
-            if (dir) url.searchParams.set("directory", dir)
+            directoryQuery(url)
 
             const res = await sdk.fetch(url, {
               method: "POST",
@@ -79,8 +235,6 @@ export function DialogSessionList() {
             })
             if (!res.ok) return
             const data = (await res.json()) as Record<string, string[]>
-            // 竞态守卫：若请求完成时已被 abort，不覆盖新数据
-            // 无条件 setPreviews(data)：空响应也需覆盖，避免搜索切换后残留过期预览
             if (!controller.signal.aborted) {
               setPreviews(data)
             }
@@ -96,30 +250,36 @@ export function DialogSessionList() {
   const quickSwitch1 = useCommandShortcut("session.quick_switch.1")
   const quickSwitch9 = useCommandShortcut("session.quick_switch.9")
 
-  const [searchResults, { refetch }] = createResource(
-    () => ({ query: search(), filter: sync.session.query() }),
-    async (input) => {
-      if (!input.query) return undefined
-      const result = await sdk.client.session.list({
-        search: input.query,
-        start: Date.now() - SESSION_LIST_LOOKBACK_MS,
-        limit: SESSION_LIST_SEARCH_LIMIT,
-        ...input.filter,
-      })
-      return result.data ?? []
-    },
-  )
+  // 删除后重跑当前 query 的 progressive generation，等价旧 createResource.refetch
+  function refetchSearch() {
+    const query = search()
+    if (!query) return
+    searchController?.abort()
+    const generation = ++searchGeneration
+    const controller = new AbortController()
+    searchController = controller
+    void runProgressiveSearch(query, generation, controller.signal)
+  }
 
   const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
-  // 以 debounced query 门闩合流：空串回 Path A；活跃搜索只用 searchResults（含 []）
+  const displayHits = createMemo(() =>
+    resolveDisplayHits({
+      phase: searchPhase(),
+      terminal: searchTerminal(),
+      titleHits: titleHits(),
+      scanFullHits: scanFullHits(),
+    }),
+  )
   const listSource = createMemo(() =>
-    resolveSessionListSource({
+    resolveProgressiveSessionListSource({
       query: search(),
-      searchResults: searchResults(),
+      phase: searchPhase(),
+      hits: displayHits(),
       browse: sync.data.session,
     }),
   )
   const sessions = createMemo(() => listSource().sessions)
+  const searching = createMemo(() => isSessionSearchLoading(search(), searchPhase()))
 
   function recover(session: NonNullable<ReturnType<typeof sessions>[number]>) {
     const workspace = project.workspace.get(session.workspaceID!)
@@ -175,7 +335,7 @@ export function DialogSessionList() {
           }
           await project.workspace.sync()
           await sync.session.refresh()
-          if (search()) await refetch()
+          if (search()) refetchSearch()
           if (info?.workspaceID === session.workspaceID) {
             route.navigate({ type: "home" })
           }
@@ -298,7 +458,9 @@ export function DialogSessionList() {
       title="Sessions"
       options={options()}
       skipFilter={true}
-      empty={sessionListEmptyLabel(search())}
+      empty={sessionListEmptyLabel(search(), searchPhase())}
+      // loading（含 partial）时搜索栏右侧转圈，直至 complete
+      filterAccessory={searching() ? <Spinner /> : undefined}
       current={currentSessionID()}
       onFilter={setSearch}
       onMove={() => {
@@ -360,7 +522,7 @@ export function DialogSessionList() {
               if (status && status !== "connected") {
                 await sync.session.refresh()
               }
-              if (search()) await refetch()
+              if (search()) refetchSearch()
               setToDelete(undefined)
               return
             }

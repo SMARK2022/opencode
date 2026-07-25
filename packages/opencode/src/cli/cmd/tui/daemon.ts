@@ -110,6 +110,8 @@ exit $worker.ExitCode
       },
       stdout: "pipe",
       detached: false,
+      // wrapper 在 ...opts 之后强制 hide：防止 conhost/PowerShell 闪窗，且调用方 opts 不能改回可见。
+      windowsHide: true,
     },
   )
   const stdout = wrapper.stdout

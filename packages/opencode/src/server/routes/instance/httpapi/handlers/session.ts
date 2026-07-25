@@ -37,6 +37,7 @@ import {
   PermissionResponsePayload,
   // [local-smark] session preview payload schema
   PreviewPayload,
+  SearchScanPayload,
   PromptPayload,
   RevertPayload,
   ShellPayload,
@@ -67,6 +68,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const bus = yield* Bus.Service
     const scope = yield* Scope.Scope
 
+    // searchMode 原样透传：缺省/all 保持旧全量搜索；title 供 progressive 首屏
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
       return yield* session.list({
         directory: ctx.query.scope === "project" ? undefined : ctx.query.directory,
@@ -75,7 +77,28 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         roots: ctx.query.roots,
         start: ctx.query.start,
         search: ctx.query.search,
+        searchMode: ctx.query.searchMode,
         limit: ctx.query.limit,
+      })
+    })
+
+    // progressive B2 HTTP：payload 带 scope 字段，directory 与 list 一样受 scope=project 影响
+    // query.directory 作缺省，避免 TUI 只在 URL 上带 directory 时丢 scope
+    const searchScan = Effect.fn("SessionHttpApi.searchScan")(function* (ctx: {
+      payload: typeof SearchScanPayload.Type
+      query: { directory?: string }
+    }) {
+      const payload = ctx.payload
+      return yield* session.searchScan({
+        search: payload.search,
+        cursor: payload.cursor,
+        batch: payload.batch,
+        scope: payload.scope,
+        path: payload.path,
+        roots: payload.roots,
+        start: payload.start,
+        // scope=project 时忽略 directory，与 SessionHttpApi.list 一致
+        directory: payload.scope === "project" ? undefined : (payload.directory ?? ctx.query.directory),
       })
     })
 
@@ -637,5 +660,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("goalClear", goalClear)
       // [local-smark] session preview handler 注册
       .handle("preview", preview as any)
+      .handle("searchScan", searchScan as any)
   }),
 )

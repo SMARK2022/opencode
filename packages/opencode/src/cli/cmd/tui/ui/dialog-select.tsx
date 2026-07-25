@@ -33,6 +33,8 @@ export interface DialogSelectProps<T> {
   renderFilter?: boolean
   /** 列表为空时的文案；默认 No results found（Session list 搜索无命中可注入 Not Found …） */
   empty?: string
+  /** 搜索框右侧附属（如 progressive 搜索 Spinner） */
+  filterAccessory?: JSX.Element
   actions?: {
     command: string
     title: string
@@ -421,29 +423,37 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
           </text>
         </box>
         <Show when={props.renderFilter !== false}>
-          <box paddingTop={1}>
-            <input
-              onInput={(e) => {
-                batch(() => {
-                  setStore("filter", e)
-                  props.onFilter?.(e)
-                })
-              }}
-              focusedBackgroundColor={theme.backgroundPanel}
-              cursorColor={theme.primary}
-              focusedTextColor={theme.textMuted}
-              ref={(r) => {
-                input = r
-                input.traits = { status: "FILTER" }
-                setTimeout(() => {
-                  if (!input) return
-                  if (input.isDestroyed) return
-                  input.focus()
-                }, 1)
-              }}
-              placeholder={props.placeholder ?? "Search"}
-              placeholderColor={theme.textMuted}
-            />
+          <box paddingTop={1} flexDirection="row" gap={1}>
+            <box flexGrow={1}>
+              <input
+                onInput={(e) => {
+                  batch(() => {
+                    setStore("filter", e)
+                    props.onFilter?.(e)
+                  })
+                }}
+                focusedBackgroundColor={theme.backgroundPanel}
+                cursorColor={theme.primary}
+                focusedTextColor={theme.textMuted}
+                ref={(r) => {
+                  input = r
+                  input.traits = { status: "FILTER" }
+                  setTimeout(() => {
+                    if (!input) return
+                    if (input.isDestroyed) return
+                    input.focus()
+                  }, 1)
+                }}
+                placeholder={props.placeholder ?? "Search"}
+                placeholderColor={theme.textMuted}
+              />
+            </box>
+            {/* 可选右侧槽：Session list progressive 搜索把 Spinner 挂在这里 */}
+            <Show when={props.filterAccessory}>
+              <box flexShrink={0} justifyContent="center">
+                {props.filterAccessory}
+              </box>
+            </Show>
           </box>
         </Show>
       </box>
