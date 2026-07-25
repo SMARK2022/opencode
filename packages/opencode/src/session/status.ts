@@ -1,6 +1,5 @@
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
-import { InstanceState } from "@/effect/instance-state"
 import { SessionID } from "./schema"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { Effect, Layer, Context, Schema } from "effect"
@@ -60,25 +59,22 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const bus = yield* Bus.Service
-
-    const state = yield* InstanceState.make(
-      Effect.fn("SessionStatus.state")(() => Effect.succeed(new Map<SessionID, Info>())),
-    )
+    // SessionID 是 daemon 内全局唯一的运行身份；directory 只负责 Runner 资源归属，不能切分观察状态。
+    const data = new Map<SessionID, Info>()
 
     const get = Effect.fn("SessionStatus.get")(function* (sessionID: SessionID) {
-      const data = yield* InstanceState.get(state)
       return data.get(sessionID) ?? { type: "idle" as const }
     })
 
     const list = Effect.fn("SessionStatus.list")(function* () {
-      return new Map(yield* InstanceState.get(state))
+      return new Map(data)
     })
 
     const set = Effect.fn("SessionStatus.set")(function* (sessionID: SessionID, status: Info) {
-      const data = yield* InstanceState.get(state)
       yield* bus.publish(Event.Status, { sessionID, status })
       if (status.type === "idle") {
         yield* bus.publish(Event.Idle, { sessionID })
+        // idle 不留在快照中，使 list 的成本和内存都只随当前活跃 Session 数量增长。
         data.delete(sessionID)
         return
       }
