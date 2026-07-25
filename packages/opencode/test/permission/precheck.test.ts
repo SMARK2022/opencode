@@ -1182,4 +1182,43 @@ describe("permission precheck bash classifier", () => {
     // $ 展开整段 opaque → general（回归守卫，:205 不退化）
     expect(bash("echo $HOME")).toMatchObject({ level: "general" })
   })
+
+  // ============================================================
+  // opaque salvage：空重定向 / 双引号 $var 不得抹掉 token 可见的 git 变更
+  // （general 在 auto 下是直过 allow，不是 ask）
+  // ============================================================
+  test("keeps git mutations cautious through benign null redirects", () => {
+    expect(bash("git reset HEAD --quiet 2>/dev/null")).toMatchObject({ level: "cautious" })
+    expect(bash("git reset --hard >/dev/null")).toMatchObject({ level: "cautious" })
+    // 只读 + 空重定向仍 safe（与 2>&1 守卫同层）
+    expect(bash("git status 2>/dev/null").level).toBe("safe")
+    // 真写文件重定向仍 general（不得被空重定向修复带宽）
+    expect(bash("echo hello > out.txt")).toMatchObject({ level: "general" })
+  })
+
+  test("keeps git mutations cautious when argv carries double-quoted expansions", () => {
+    expect(bash('git -C "$REPO" apply --index file.patch')).toMatchObject({ level: "cautious" })
+    expect(bash('git -C "$REPO" reset --hard')).toMatchObject({ level: "cautious" })
+    expect(bash('git -C "$REPO" checkout main')).toMatchObject({ level: "cautious" })
+    // 动态展开仍禁止整条升 safe
+    expect(bash("echo $HOME")).toMatchObject({ level: "general" })
+    expect(bash('echo "$HOME"')).toMatchObject({ level: "general" })
+  })
+
+  test("marks git filter-repo cautious as history rewrite", () => {
+    expect(bash("git filter-repo --path docs --invert-paths")).toMatchObject({ level: "cautious" })
+    expect(bash("git filter-branch --tree-filter 'rm f' HEAD")).toMatchObject({ level: "cautious" })
+  })
+
+  test("marks system patch apply forms cautious without help-only noise", () => {
+    expect(bash("patch -p1 -i changes.patch")).toMatchObject({ level: "cautious" })
+    expect(bash("patch -p0 file.patch")).toMatchObject({ level: "cautious" })
+    expect(bash("patch --help").level).toBe("general")
+    expect(bash("patch").level).toBe("general")
+  })
+
+  test("pipe composition still maxes segment risk without forcing all pipes cautious", () => {
+    expect(bash("git status | head -5").level).toBe("safe")
+    expect(bash("git status | git checkout main")).toMatchObject({ level: "cautious" })
+  })
 })
