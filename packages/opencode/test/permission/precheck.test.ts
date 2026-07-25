@@ -1220,4 +1220,49 @@ describe("permission precheck bash classifier", () => {
     expect(bash("git status | head -5").level).toBe("safe")
     expect(bash("git status | git checkout main")).toMatchObject({ level: "cautious" })
   })
+
+  // ============================================================
+  // #556：PS 覆写 / ri 删除同级 / pwsh -Command join / env 穿透
+  // ============================================================
+  test("marks PowerShell content write cmdlets cautious", () => {
+    expect(bash("Clear-Content file.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("clear-content file.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("Set-Content file.txt x")).toMatchObject({ level: "cautious" })
+    expect(bash("set-content -Path f -Value x")).toMatchObject({ level: "cautious" })
+    expect(bash("Out-File file.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("out-file -FilePath f")).toMatchObject({ level: "cautious" })
+    expect(bash("Clear-Content --help").level).toBe("general")
+    expect(bash("Clear-Content").level).toBe("general")
+  })
+
+  test("marks ri as Remove-Item-equivalent delete including protected recursive", () => {
+    expect(bash("ri file.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("ri -Force file.txt")).toMatchObject({ level: "cautious" })
+    // 与 Remove-Item -Recurse 保护根同级：deterministic dangerous，非 generic delete cautious
+    expect(bash("ri -Recurse /")).toMatchObject({ level: "dangerous" })
+    expect(bash("Remove-Item -Recurse /")).toMatchObject({ level: "dangerous" })
+    expect(bash("Remove-Item -Force file.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("ri -Recurse docs")).toMatchObject({ level: "cautious" })
+  })
+
+  test("joins PowerShell -Command remaining tokens like cmd /c", () => {
+    // #556：-Command 载荷是全部剩余 token 的拼接（join-all）——单参数提取会丢失路径等尾部 argv。
+    expect(bash("pwsh -Command Remove-Item file.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("powershell -Command Remove-Item -Force file.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("pwsh -Command Clear-Content file.txt")).toMatchObject({ level: "cautious" })
+  })
+
+  test("pierces env wrapper for inner delete move and git mutations", () => {
+    // #556：穿透语义与 sudo 同型——剥包装 flag 后按内层命令原级分类，剥空仍 ask。
+    expect(bash("env rm file.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("env FOO=1 rm file.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("env git reset --hard")).toMatchObject({ level: "cautious" })
+    expect(bash("env git apply p.diff")).toMatchObject({ level: "cautious" })
+    expect(bash("env -i FOO=1 mv old.txt new.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("env -u HOME git reset --hard")).toMatchObject({ level: "cautious" })
+    expect(bash("env --unset HOME rm file.txt")).toMatchObject({ level: "cautious" })
+    expect(bash("env")).toMatchObject({ level: "general" })
+    // 与既有 env git status 守卫一致：wrapper 不得把内层 safe 升成 safe
+    expect(bash("env git status")).toMatchObject({ level: "general" })
+  })
 })
