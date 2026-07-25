@@ -41,8 +41,6 @@ jobs:
       - name: Run opencode package tests
         run: |
           disabled=(
-            packages/opencode/test/cli/cmd/tui/session-list-params.test.ts
-            packages/opencode/test/cli/db-maintenance.test.ts
             packages/opencode/test/tool/file-mutation-concurrency.test.ts
           )
           for file in "${disabled[@]}"; do mv "$file" "$file.disabled"; done
