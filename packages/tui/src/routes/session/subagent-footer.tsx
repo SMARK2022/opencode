@@ -8,12 +8,18 @@ import { Locale } from "../../util/locale"
 import { getContextLimit } from "../../util/token-estimate"
 import { tokenAccounting } from "../../util/token-accounting"
 // #122：subagent footer 共用 accounting
-import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+// #550：retry 门控刷新时钟——只在 retry 态驱动 now 重算，非 retry 不持 interval。
+import { createRefreshClock, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+import { useDialog } from "../../ui/dialog"
+import { DialogAlert } from "../../ui/dialog-alert"
+import { formatDuration } from "../../util/format"
 import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 
 export function SubagentFooter() {
   const route = useRouteData("session")
   const sync = useSync()
+  // #550：DialogAlert 经全局 dialog 上下文展示 retry 原文。
+  const dialog = useDialog()
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
   const session = createMemo(() => sync.session.get(route.sessionID))
 
@@ -38,6 +44,14 @@ export function SubagentFooter() {
   // 获取会话状态，用于判断是否正在运行
   // 子代理有独立 sessionID，必须读取其自身状态而非父请求的运行状态。
   const status = createMemo(() => sync.data.session_status?.[route.sessionID])
+  // #550：仅认当前 child 的 retry 态——禁止回读 parent 的 status 造成跨会话串味。
+  const retry = createMemo(() => {
+    const s = status()
+    if (s?.type !== "retry") return
+    return s
+  })
+  // #550：countdown 只驱动 UI 重算；attempt/next 边界来自 session_status 的 durable 事件。
+  const now = createRefreshClock(() => !!retry())
 
   // 将 money 提升到组件作用域，避免每次 memo 求值时重建
   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
@@ -118,6 +132,30 @@ export function SubagentFooter() {
   const nextShortcut = useCommandShortcut("session.child.next")
   const [hover, setHover] = createSignal<"parent" | "prev" | "next" | null>(null)
 
+  // #550：压平摘要——与主 Prompt footer 同款（含 gemini quota 特例），原文只进详情对话框。
+  const retrySummary = createMemo(() => {
+    const r = retry()
+    if (!r) return
+    if (r.message.includes("exceeded your current quota") && r.message.includes("gemini"))
+      return "gemini is way too hot right now"
+    return r.message.replace(/\s+/g, " ").trim()
+  })
+  // #550：倒计时元数据——next 差值不足 1s 显示 0，不向上取整（与 Prompt seconds 同口径）。
+  // attempt/next 均来自 durable session_status；本组件不猜测重试调度。
+  const retryMeta = createMemo(() => {
+    const r = retry()
+    if (!r) return ""
+    const seconds = r.next ? Math.round((r.next - now()) / 1000) : 0
+    const duration = formatDuration(seconds)
+    return duration ? `retry in ${duration} · #${r.attempt}` : `retry · #${r.attempt}`
+  })
+  // details 对所有 retry 稳定可用——与 #491 的无阈值合同一致。
+  const openRetryDetails = () => {
+    const r = retry()
+    if (!r) return
+    void DialogAlert.show(dialog, "Retry Error", r.message)
+  }
+
   return (
     <box flexShrink={0}>
       <box
@@ -131,19 +169,34 @@ export function SubagentFooter() {
         flexShrink={0}
         backgroundColor={theme.backgroundPanel}
       >
-        <box flexDirection="row" justifyContent="space-between" gap={1}>
-          <box flexDirection="row" gap={1}>
-            <text fg={theme.text}>
+        <box flexDirection="row" justifyContent="space-between" gap={1} minWidth={0} overflow="hidden">
+          <box flexDirection="row" gap={1} minWidth={0} flexGrow={1} flexShrink={1} overflow="hidden">
+            <text fg={theme.text} flexShrink={0}>
               <b>{subagentInfo().label}</b>
             </text>
+            {/* 计数标签不参与收缩——它是身份信息而非诊断数据。 */}
             <Show when={subagentInfo().total > 0}>
-              <text style={{ fg: theme.textMuted }}>
+              <text style={{ fg: theme.textMuted }} flexShrink={0}>
                 ({subagentInfo().index} of {subagentInfo().total})
               </text>
             </Show>
+            {/* #550：retry 红字簇优先于 usage——宽度不足先挤 usage 不挤诊断。 */}
+            <Show when={retry()}>
+              <box minWidth={0} flexShrink={1} flexDirection="row" gap={1} overflow="hidden" onMouseUp={openRetryDetails}>
+                <text minWidth={0} flexShrink={1} fg={theme.error} wrapMode="none" truncate onMouseUp={openRetryDetails}>
+                  {retrySummary()}
+                </text>
+                <text flexShrink={0} fg={theme.error} wrapMode="none" onMouseUp={openRetryDetails}>
+                  (details)
+                </text>
+                <text flexShrink={0} fg={theme.error} wrapMode="none">
+                  {retryMeta()}
+                </text>
+              </box>
+            </Show>
             <Show when={usage()}>
               {(item) => (
-                <text fg={theme.textMuted} wrapMode="none">
+                <text fg={theme.textMuted} wrapMode="none" flexShrink={1} minWidth={0} truncate>
                   {/* Show 提供有效 item 后才格式化计数，undefined 的清空快照不进入这段文本。 */}
                   {/* 两方向用空格内聚并保留独立脉冲；context/cost 仍以中点分组。 */}
                   <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{" "}
@@ -154,7 +207,8 @@ export function SubagentFooter() {
               )}
             </Show>
           </box>
-          <box flexDirection="row" gap={2}>
+          {/* #550：nav 不被挤出视口——先由 usage/retry 收缩。 */}
+          <box flexDirection="row" gap={2} flexShrink={0}>
             <box
               onMouseOver={() => setHover("parent")}
               onMouseOut={() => setHover(null)}
