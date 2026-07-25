@@ -41,13 +41,13 @@ jobs:
             os_label: Linux
             runner: ubuntu-latest
             command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
-            junit: packages/opencode/.artifacts/unit/junit.xml
+            junit: packages/opencode/.artifacts/unit/*.xml
           - id: opencode-windows
             label: packages/opencode
             os_label: Windows
             runner: windows-latest
             command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
-            junit: packages/opencode/.artifacts/unit/junit.xml
+            junit: packages/opencode/.artifacts/unit/*.xml
           - id: core-linux
             label: packages/core
             os_label: Linux
@@ -80,7 +80,7 @@ jobs:
             os_label: macOS
             runner: macos-latest
             command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
-            junit: packages/opencode/.artifacts/unit/junit.xml
+            junit: packages/opencode/.artifacts/unit/*.xml
           - id: core-macos
             label: packages/core
             os_label: macOS
@@ -119,7 +119,8 @@ jobs:
         id: junit
         if: always()
         run: |
-          if [ -f "${{ matrix.junit }}" ]; then
+          # opencode 产出两个 shard 报告；literal package 路径也由同一 glob 检查兼容。
+          if compgen -G "${{ matrix.junit }}" > /dev/null; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -357,10 +358,10 @@ jobs:
         run: echo "::warning title=上游单元兼容性::${{ matrix.os_label }} 上游全量单元测试存在失败；此结果只作为兼容性警告，不阻断 fork 核心测试。"
 
       - name: Publish upstream unit reports
-        if: always() && hashFiles('packages/**/.artifacts/unit/junit.xml') != ''
+        if: always() && hashFiles('packages/**/.artifacts/unit/*.xml') != ''
         uses: mikepenz/action-junit-report@bccf2e31636835cf0874589931c4116687171386 # v6.4.0
         with:
-          report_paths: packages/**/.artifacts/unit/junit.xml
+          report_paths: packages/**/.artifacts/unit/*.xml
           check_name: "警告 上游单元兼容性 / ${{ matrix.os_label }}"
           detailed_summary: true
           include_time_in_summary: true
@@ -374,7 +375,7 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
-          path: packages/**/.artifacts/unit/junit.xml
+          path: packages/**/.artifacts/unit/*.xml
 
       - name: Write upstream unit summary
         if: always()
