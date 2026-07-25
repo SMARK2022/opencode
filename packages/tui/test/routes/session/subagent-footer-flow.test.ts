@@ -25,3 +25,37 @@ describe("SubagentFooter usage flow template", () => {
     expect(source).not.toContain("item().totalOutput")
   })
 })
+
+// #550：retry 红字簇合同——摘要压平 + (details) 独立入口 + retry in/attempt 元数据 + 优先级。
+describe("SubagentFooter retry display contract", () => {
+  test("flattens retry message for the inline summary only", () => {
+    // 摘要压平空白；gemini quota 特例与主 Prompt footer 同文案，避免两个 footer 分叉。
+    expect(source).toContain('r.message.replace(/\\s+/g, " ").trim()')
+    expect(source).toContain('"gemini is way too hot right now"')
+  })
+  test("renders details entry and retry meta with error color", () => {
+    // (details) 与摘要/meta 同 theme.error；两层 onMouseUp 与 Prompt 同款（子 text 冒泡不可靠）。
+    expect(source).toContain('<text flexShrink={0} fg={theme.error} wrapMode="none" onMouseUp={openRetryDetails}>')
+    expect(source).toContain("(details)")
+    // 元数据模板与 prompt/index.tsx retryInfo 逐字对齐（retry in X · #n / retry · #n）。
+    expect(source).toContain("`retry in ${duration} · #${r.attempt}`")
+    expect(source).toContain("`retry · #${r.attempt}`")
+  })
+  test("opens the original message in a Retry Error dialog", () => {
+    expect(source).toContain('DialogAlert.show(dialog, "Retry Error", r.message)')
+  })
+  test("scopes retry to the child session status only", () => {
+    // retry memo 只读当前 route.sessionID 的 status——禁止串到 parent 的 retry 态。
+    expect(source).toContain("const s = status()")
+    expect(source).toContain('if (s?.type !== "retry") return')
+  })
+  test("usage yields width before the retry cluster", () => {
+    // usage text 可收缩（flexShrink/minWidth/truncate）；nav 外层不收缩。
+    expect(source).toContain('<text fg={theme.textMuted} wrapMode="none" flexShrink={1} minWidth={0} truncate>')
+    expect(source).toContain('flexDirection="row" gap={2} flexShrink={0}')
+  })
+  test("counts down via a retry-gated refresh clock", () => {
+    // createRefreshClock 以 retry 态门控——非 retry 不持 interval（组件首个计时器）。
+    expect(source).toContain("createRefreshClock(() => !!retry())")
+  })
+})
