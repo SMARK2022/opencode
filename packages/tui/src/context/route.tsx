@@ -12,6 +12,8 @@ export type SessionRoute = {
   type: "session"
   sessionID: string
   prompt?: PromptInfo
+  // #551：auto review 深链锚点——随 route 携带，navigate reconcile 时无此字段即清除（INV-04）。
+  reviewID?: string
 }
 
 export type PluginRoute = {

@@ -381,8 +381,9 @@ describe("TUI inline tool wrapping", () => {
       reviewID: "review_click", sessionID: "ses_reviewer_child", status: "allowed",
       result: { risk_level: "high", user_authorization: "high", rationale: "user requested this action" },
     } as const
-    const navigation: { type: string; sessionID: string }[] = []
-    const navigate = (route: { type: string; sessionID: string }) => navigation.push(route)
+    // 导航夹具保留可选锚点，普通 Session 导航仍可省略。
+    const navigation: { type: string; sessionID: string; reviewID?: string }[] = []
+    const navigate = (route: { type: string; sessionID: string; reviewID?: string }) => navigation.push(route)
     const [expanded, setExpanded] = createSignal(false)
     let parentClicks = 0
     const ToolAutoReview = createContext(() => review)
@@ -457,13 +458,14 @@ describe("TUI inline tool wrapping", () => {
     await app.mockMouse.moveTo(point!.x + Math.floor(label.length / 2), point!.y)
     await app.renderOnce()
     await app.mockMouse.click(point!.x + Math.floor(label.length / 2), point!.y)
-    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
+    // 状态行点击必须携带精确审查锚点，不能退回子会话末尾。
+    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child", reviewID: "review_click" }])
     expect(parentClicks).toBe(0)
     expect(expanded()).toBe(false)
     if (kind === "edit") expect(app.captureCharFrame()).toContain("Click to expand")
     navigation.length = 0
     await app.mockMouse.click(reviewTarget!.screenX + reviewTarget!.width - 1, reviewTarget!.screenY)
-    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
+    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child", reviewID: "review_click" }])
     expect(parentClicks).toBe(0)
     expect(expanded()).toBe(false)
     navigation.length = 0
@@ -473,19 +475,19 @@ describe("TUI inline tool wrapping", () => {
     const selected = { getSelection: () => ({ getSelectedText: () => "selected review" }), clearSelection: () => effects.push("clear") }
     expect(production.openAutoReviewSession(review, navigate, selected, evt)).toBe(true)
     expect(effects).toEqual(["default", "bubble", "clear"])
-    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
+    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child", reviewID: "review_click" }])
     navigation.length = 0
     expect(production.openAutoReviewSession({ ...review, sessionID: undefined }, navigate, app.renderer, evt)).toBe(false)
     expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, evt)).toBe(false)
     expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, undefined)).toBe(false)
     expect(navigation).toEqual([])
     expect(production.openAutoReviewSession(review, navigate, app.renderer)).toBe(true)
-    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
+    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child", reviewID: "review_click" }])
     navigation.length = 0
     const rowEvent = { ...evt, y: reviewTarget!.screenY }
     for (const target of [reviewTarget!, reviewTarget!.getChildren()[0], reviewTarget!.parent!]) {
       expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, { ...rowEvent, target })).toBe(true)
-      expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
+      expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child", reviewID: "review_click" }])
       navigation.length = 0
     }
     // 相邻行仍属于标题或正文，不能把零基坐标再减一。

@@ -468,7 +468,8 @@ export function Session() {
       }
       editor.reconnect(result.data.directory)
       await sync.session.sync(sessionID)
-      if (route.sessionID === sessionID && scroll) scroll.scrollBy(100_000)
+      // #551：会话打开滚动统一入口——锚点优先，否则贴底。
+      if (route.sessionID === sessionID) scheduleSessionOpenScroll()
     })().catch((error) => {
       if (route.sessionID !== sessionID) return
       toast.show({
@@ -605,6 +606,37 @@ export function Session() {
     setTimeout(() => {
       if (!scroll || scroll.isDestroyed) return
       scroll.scrollTo(scroll.scrollHeight)
+    }, 50)
+  }
+
+  // #551：会话打开的唯一滚动语义——reviewID 锚点定位到对应 reviewer 返回消息，
+  // 无锚点才贴底；defer 50ms 与 toBottom 同拍，防止旧 toBottom 定时器覆盖锚点。
+  function applySessionOpenScroll() {
+    if (!scroll || scroll.isDestroyed) return
+    const reviewID = route.reviewID
+    if (!reviewID) {
+      scroll.scrollTo(scroll.scrollHeight)
+      return
+    }
+    const target = resolveReviewAnchorMessageID(
+      sync.data.message[route.sessionID] ?? [],
+      (messageID) => sync.data.part[messageID] ?? [],
+      reviewID,
+    )
+    if (!target) {
+      // 锚点 miss（300 条窗口裁剪或消息尚未同步）退化为贴底，不阻断导航。
+      scroll.scrollTo(scroll.scrollHeight)
+      return
+    }
+    const child = scroll.getChildren().find((c) => c.id === target)
+    if (child) scroll.scrollBy(child.y - scroll.y - 1)
+    else scroll.scrollTo(scroll.scrollHeight)
+  }
+
+  function scheduleSessionOpenScroll() {
+    setTimeout(() => {
+      if (!scroll || scroll.isDestroyed) return
+      applySessionOpenScroll()
     }, 50)
   }
 
@@ -1305,7 +1337,8 @@ export function Session() {
   })
 
   // snap to bottom when session changes
-  createEffect(on(() => route.sessionID, toBottom))
+  // #551：会话/reviewID 变化统一走 session-open 滚动——reviewID 存在时锚点优先于贴底。
+  createEffect(on(() => ({ sessionID: route.sessionID, reviewID: route.reviewID }), scheduleSessionOpenScroll))
 
   return (
     <LocationProvider location={location()}>
@@ -2374,8 +2407,54 @@ function openAutoReviewSession(
   // review 行不是 transcript 正文，并且内部 text 已关闭 selection。前序 TUI
   // 测试或真实用户留下的旧 selection 不能让这次明确点击只消费事件不导航。
   renderer.clearSelection()
-  navigate({ type: "session", sessionID: review.sessionID })
+  // #551：navigate 携带 reviewID——SessionRoute 深链锚点（无此字段的 navigate 会清除旧锚点）。
+  navigate({ type: "session", sessionID: review.sessionID, reviewID: review.reviewID })
   return true
+}
+
+// #551：resolve reviewID → 锚点消息 ID（纯函数，按 autoReviewMetadata 先例导出供测试）。
+// 主路径：request 顶层 part metadata（permissionReviewerRequest+reviewID）命中的 user 消息，
+// assistant.parentID 指向该 request；优先定位返回区，多匹配取最后可见 request。
+// 次选：tool part state.metadata.reviewID 命中的 assistant（decision 所在消息）。
+// hidden 消息/part 已从 store 删除——"取最后可见匹配"天然成立。
+export function resolveReviewAnchorMessageID(
+  messages: Array<{ id: string; role: string; parentID?: string }>,
+  // SDK Part 的 metadata/state 是具名 schema union（tool state 仅部分分支带 metadata）——
+  // 签名用 unknown[] 承载，读取点经 metaOf 局部收窄，避免 any 且不复制 SDK 类型。
+  partsOf: (messageID: string) => ReadonlyArray<unknown>,
+  reviewID: string,
+): string | undefined {
+  const metaOf = (part: unknown) => {
+    const p = part as { type?: unknown; metadata?: unknown; state?: { metadata?: unknown } } | undefined
+    return {
+      type: p?.type,
+      request: p?.metadata as { permissionReviewerRequest?: unknown; reviewID?: unknown } | undefined,
+      tool: p?.state?.metadata as { reviewID?: unknown } | undefined,
+    }
+  }
+  // #551：request（text part + 顶层 metadata）与 decision（tool part 的 state.metadata）单趟同扫；
+  // 多匹配取最后——协议重试 hide 后可见的是最终 request 轮。
+  let requestID: string | undefined
+  let decisionMessageID: string | undefined
+  for (const m of messages) {
+    for (const part of partsOf(m.id)) {
+      const meta = metaOf(part)
+      if (meta.type === "text" && meta.request?.permissionReviewerRequest === true && meta.request?.reviewID === reviewID) {
+        requestID = m.id
+      }
+      if (meta.type === "tool" && meta.tool?.reviewID === reviewID) {
+        decisionMessageID = m.id
+      }
+    }
+  }
+  if (requestID) {
+    // #551：生产链方向是 reviewer assistant 壳挂 request 下（assistant.parentID === requestID），
+    // request 自身不写 parentID；reviewing 尚无决策时退到 request 本身，深链不得贴底。
+    const answer = [...messages].reverse().find((message) => message.role === "assistant" && message.parentID === requestID)
+    return answer?.id ?? requestID
+  }
+  // 次选：仅有 decision tool 元数据时的残缺 transcript。
+  return decisionMessageID
 }
 
 function openAutoReviewFromToolChrome(
