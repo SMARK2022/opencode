@@ -477,12 +477,9 @@ function splitCommands(command: string): { segments: string[]; opaque: boolean }
     }
     if (quote) {
       if (char === quote) quote = ""
-      // #355：双引号内 $/` 仍可能展开/替换——当前段 opaque 且 tainted，从下一字符起重开
-      else if (quote !== "'" && (char === "$" || char === "`")) {
-        opaque = true
-        tainted = true
-        start = i + 1
-      }
+      // #555：双引号内 $/` 仍可能展开：整条不得升 safe（opaque→general），但不可 taint-restart。
+      // #555：taint-restart 会丢掉前缀 `git …` argv，使 classifyGit 不可达，auto 把 general 直过 allow。
+      else if (quote !== "'" && (char === "$" || char === "`")) opaque = true
       continue
     }
     if (char === "'" || char === '"') {
@@ -503,6 +500,10 @@ function splitCommands(command: string): { segments: string[]; opaque: boolean }
       continue
     }
 
+    // #555：空重定向到 /dev/null（含 2>/dev/null）：丢弃流、不写普通文件，与 fd-merge 同属良性。
+    // #555：若按普通 `>` bail，会 taint 掉 `git reset … 2>/dev/null` 的前缀 token 分类。
+    if ((char === ">" || char === "<") && command.startsWith("/dev/null", i + 1)) continue
+
     const two = command.slice(i, i + 2)
     if (two === "&&" || two === "||") {
       pushSegment(i)
@@ -520,8 +521,14 @@ function splitCommands(command: string): { segments: string[]; opaque: boolean }
     // #355：不再 return 整条，避免一个 bail 字符毒化已切出的干净 cautious 段。
     // #355：单 `&`（后台）与换行在此 opaque 而非切分——保 `git status & rg`/`git status\nrg`
     // #355：为 general，不能 split 否则会变 safe。
+    // #555：`$`/反引号只标 opaque、不 taint-restart，保留前缀 argv 给 classifyTokens/classifyGit；
+    // #555：max(safe, general)=general，max(cautious, general)=cautious，堵住 auto 直过洞。
+    if (char === "$" || char === "`") {
+      opaque = true
+      continue
+    }
     if (
-      char === "$" || char === "`" || char === "(" || char === ")" ||
+      char === "(" || char === ")" ||
       char === "{" || char === "}" || char === "*" || char === "?" || char === "[" ||
       char === ">" || char === "<" || char === "&" || char === "\n" || char === "\r"
     ) {
@@ -952,6 +959,12 @@ function classifyTokens(tokens: string[]): Decision | undefined {
     return { level: "dangerous", reason: "system destructive command" }
   // #220: Git 操作委托专项分类器
   if (cmd === "git") return classifyGit(tokens)
+  // #555: GNU/BSD patch 改工作树；仅 help/version/裸命令保持 general，避免无载荷噪声。
+  if (cmd === "patch") {
+    const args = tokens.slice(1)
+    if (args.some((item) => !["--help", "-h", "--version", "-v"].includes(item)))
+      return { level: "cautious", reason: "patch apply modifies working tree" }
+  }
   // #220: 权限变更——setuid/setgid dangerous，777/-R cautious
   if (cmd === "chmod") {
     if (tokens.some((item) => /[ug]\+s/.test(item)))
@@ -1115,11 +1128,12 @@ function classifyGit(tokens: string[]): Decision | undefined {
   // #365：补充 checkout/switch/restore/apply/am/filter-branch/update-ref/
   // bisect/symbolic-ref/worktree/submodule 等遗漏子命令——它们修改索引、
   // 历史、引用、工作树或远端状态，落入 general 会被自动放行。
+  // #555：filter-repo 与 filter-branch 同属历史重写；仅列 filter-branch 时 filter-repo 会 general 直过 auto。
   if (
     ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull",
      "reset", "clean", "mv", "rm",
      "checkout", "switch", "restore", "apply", "am",
-     "filter-branch", "update-ref", "bisect", "symbolic-ref",
+     "filter-branch", "filter-repo", "update-ref", "bisect", "symbolic-ref",
      "worktree", "submodule"].includes(sub)
   )
     return { level: "cautious", reason: "git state-changing command requires explicit approval" }
