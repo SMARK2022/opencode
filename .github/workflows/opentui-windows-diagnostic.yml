@@ -16,7 +16,7 @@ env:
 
 jobs:
   baseline:
-    name: Windows focused TUI ${{ matrix.attempt }}
+    name: Windows two-process full suite ${{ matrix.attempt }}
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -38,19 +38,42 @@ jobs:
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
 
-      - name: Run focused TUI tests
+      - name: Run two-process full suite
         run: |
           mkdir -p packages/opencode/.artifacts/unit
-          bun --cwd packages/opencode test test/cli/run test/cli/tui test/cli/cmd/tui \
+          files=()
+          while IFS= read -r file; do
+            files+=("${file#packages/opencode/}")
+          done < <(git ls-files packages/opencode/test | grep -E '\.test\.tsx?$')
+
+          core=()
+          tui=()
+          for file in "${files[@]}"; do
+            case "$file" in
+              test/cli/run/*|test/cli/tui/*|test/cli/cmd/tui/*) tui+=("$file") ;;
+              *) core+=("$file") ;;
+            esac
+          done
+          printf 'test shard coverage: total=%d core=%d tui=%d\n' "${#files[@]}" "${#core[@]}" "${#tui[@]}"
+
+          core_status=0
+          tui_status=0
+          bun --cwd packages/opencode test "${core[@]}" \
             --timeout 30000 \
             --reporter=junit \
-            --reporter-outfile=.artifacts/unit/junit.xml
+            --reporter-outfile=.artifacts/unit/core.xml || core_status=$?
+          bun --cwd packages/opencode test "${tui[@]}" \
+            --timeout 30000 \
+            --reporter=junit \
+            --reporter-outfile=.artifacts/unit/tui.xml || tui_status=$?
+          printf 'test shard status: core=%d tui=%d\n' "$core_status" "$tui_status"
+          if (( core_status != 0 || tui_status != 0 )); then exit 1; fi
 
       - name: Upload unit report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: opentui-windows-focused-${{ matrix.attempt }}
-          path: packages/opencode/.artifacts/unit/junit.xml
+          name: opentui-windows-two-process-${{ matrix.attempt }}
+          path: packages/opencode/.artifacts/unit/*.xml
           if-no-files-found: ignore
           retention-days: 3
