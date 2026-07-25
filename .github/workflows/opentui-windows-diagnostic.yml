@@ -49,3 +49,48 @@ jobs:
           path: packages/opencode/.artifacts/unit/*.xml
           if-no-files-found: ignore
           retention-days: 3
+
+  cross-platform:
+    name: ${{ matrix.label }} implemented package suite
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux
+            runner: ubuntu-latest
+          - label: macOS
+            runner: macos-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: "false"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Typecheck opencode package
+        working-directory: packages/opencode
+        run: bun typecheck
+
+      - name: Run implemented package suite
+        run: bun turbo test:ci --filter=opencode --continue=dependencies-successful
+
+      - name: Upload unit report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opentui-${{ matrix.label }}-implemented
+          path: packages/opencode/.artifacts/unit/*.xml
+          if-no-files-found: ignore
+          retention-days: 3
