@@ -6,6 +6,8 @@ import stripAnsi from "strip-ansi"
 import { spawn, type Proc } from "@opencode-ai/core/pty/pty.bun" // Bun 宿主沿 source 的 #pty 使用原生后端。
 import { Database as SQLite } from "bun:sqlite"
 import { Flock } from "@opencode-ai/core/util/flock"
+// #549：status --task / hung-control 用例消费 reconcile 与 control 协议常量（目标 owner 在 cli/tui）。
+import { ServerLock } from "../../src/cli/tui/server-lock"
 import { tmpdir } from "../fixture/fixture"
 // 测试只走公开 CLI/PTY seam；不导入 renderer 或调用维护私有函数，避免实现重构产生假绿。
 const INDEX_TS = fileURLToPath(new URL("../../src/index.ts", import.meta.url))
@@ -47,6 +49,23 @@ function runPty(args: string[], env: Record<string, string | undefined>) {
   return { proc, exited, output: () => stripAnsi(output).replaceAll("\r", "") }
 }
 // 大文本 reasoning 只用于制造真实可压缩页；压缩 eligibility 和 payload 仍由 ColdStorage 判定。
+// #549：通过插入再删除大行制造 freelist，使 PROMPT 门槛（16MB 或占比）在小 fixture 上也可达。
+function inflateFreelist(root: string, targetBytes = 20_000_000) {
+  const db = new SQLite(path.join(root, "opencode.db"))
+  db.exec("CREATE TABLE IF NOT EXISTS freelist_pad (id INTEGER PRIMARY KEY, blob BLOB)")
+  const chunk = 256_000
+  // 256KB 分块避免单语句过长；目标体积足以跨过 PROMPT/HINT 的绝对阈值。
+  const insert = db.query("INSERT INTO freelist_pad (blob) VALUES (?)")
+  const payload = Buffer.alloc(chunk, 0x61)
+  db.transaction(() => {
+    for (let filled = 0; filled < targetBytes; filled += chunk) insert.run(payload)
+  })()
+  db.exec("DELETE FROM freelist_pad")
+  // DELETE+DROP 把整表页归还 freelist；单文件页级回收由 SQLite 自动完成。
+  db.exec("DROP TABLE freelist_pad")
+  db.close()
+}
+
 async function seedColdParts(root: string, count = 40) {
   await markMigrated(root)
   // 先经真实 CLI status 完成建库与迁移；夹具只在合法 schema 上追加行。
@@ -170,34 +189,53 @@ describe("database maintenance CLI", () => {
     // trigger 消息必须来自 durable task record，证明错误在 checkpoint 后才进入 UI。
     expect(output).toMatch(/Compressing cold data[\s\S]*owners[\s\S]*fixture maintenance failure/)
     // 进度行换行先于错误文本：finish() 必须在错误传播前把活动行终结。
-    expect(output).toMatch(/elapsed \d+\.\ds[^\n]*\n.*fixture maintenance failure/s)
+    // #549：elapsed 字段定宽填充后允许空白；进度行 \r 被 strip 后可能粘连多帧。
+    expect(output).toMatch(/elapsed\s+\d+\.\ds[\s\S]*fixture maintenance failure/)
     // 失败后不得出现完成或回收文案，防止把 failed task 伪装成成功序列。
     expect(output).not.toMatch(/Compression completed|Reclaim/)
   }, 30_000)
   ptyInteractive("holds the daemon election while initially offline compression runs", async () => {
-    await using tmp = await tmpdir({ init: (root) => seedColdParts(root, 80) })
+    await using tmp = await tmpdir({
+      init: async (root) => {
+        await seedColdParts(root, 80)
+        // #549：保持 reclaim prompt 出现，election 覆盖到用户决策结束，避免无 prompt 时过早释放。
+        inflateFreelist(root, 20_000_000)
+      },
+    })
     const electionDir = path.join(tmp.path, "state", "opencode", "locks")
+    // acquired 只在 contender 真正拿到锁后置位；acquiredAtTerminal 锁 terminal 时刻采样。
+    let acquired = false
+    let acquiredAtTerminal = false
     const cli = runPty(["db", "compress", "--older-than", "0ms", "--batch-size", "1"], isolatedEnv(tmp.path))
+    // #549：Compression completed 出现时 election 仍应持有；contender 只能在 process 退出后进入。
+    cli.proc.onData((data) => {
+      if (data.includes("Compression completed")) acquiredAtTerminal = acquired
+    })
     answerPrompt(cli.proc, "Reclaim", "n")
-    // 等待真实 lock 文件发布后再启动 contender，避免用 PTY 批量刷出时机推断 election 已经持有。
     while (!(await readdir(electionDir).catch(() => [])).some((file) => file.endsWith(".lock"))) {
       await Bun.sleep(10)
     }
     const contender = (async () => {
       // contender 只拿同 key 选主锁；30s 等待窗口内任何提前成功都是发布边界波漏。
       await using _ = await Flock.acquire(`opencode.server:${path.join(tmp.path, "tui-server.json")}`, { dir: electionDir, timeoutMs: 30_000 })
+      acquired = true
       return "acquired" as const
     })()
-    const exited = waitForExit(cli.proc, cli.exited)
-    // terminal 必须先于 contender acquisition；该顺序直接验证 election 覆盖完整 offline sequence。
-    expect(await Promise.race([contender, exited.then(() => "finished" as const)])).toBe("finished")
-    expect(await exited).toBe(0)
+    expect(await waitForExit(cli.proc, cli.exited)).toBe(0)
+    // terminal 时刻 election 必须仍持有：#549 采样点取代原 race 断言（更强且不依赖调度）。
+    expect(acquiredAtTerminal).toBe(false)
     // CLI 退出后 contender 才拿到锁：release 发生在全部 checkpoint 与输出之后。
     expect(await contender).toBe("acquired")
   }, 60_000)
   // Y 序列验证 logical compression 之后才取得 physical reclaim 授权，并复用现有 vacuum owner。
   ptyInteractive("reclaims SQLite pages after interactive compression approval", async () => {
-    await using tmp = await tmpdir({ init: (root) => seedColdParts(root, 60) })
+    await using tmp = await tmpdir({
+      init: async (root) => {
+        await seedColdParts(root, 60)
+        // #549：压缩本身 freelist 可能低于 PROMPT；垫高 freelist 以验证 reclaim 授权路径。
+        inflateFreelist(root, 20_000_000)
+      },
+    })
     const cli = runPty(["db", "compress", "--older-than", "0ms", "--batch-size", "5"], isolatedEnv(tmp.path))
     answerPrompt(cli.proc, "Reclaim", "y")
     // 页面收益使用 pre-status pageSize 与 vacuum page counts，禁止把它伪装成主文件 stat。
@@ -211,13 +249,279 @@ describe("database maintenance CLI", () => {
     const standalone = runPty(["db", "vacuum", "--yes"], isolatedEnv(tmp.path))
     expect(await waitForExit(standalone.proc, standalone.exited)).toBe(0)
     const standaloneOutput = standalone.output()
-    // 同一 tmp 复用已压缩数据库：standalone vacuum 的可回收页来自上一轮残留。
-    expect(standaloneOutput).toContain("Reclaiming SQLite pages")
-    expect(standaloneOutput).toMatch(/Physical reclaim completed in (?:\d+\.\ds|\d+m \d+s)/)
+    // #549：reclaim 后 freelist 已空；human vacuum 软跳过，不再假装 Reclaiming。
+    expect(standaloneOutput).toContain("No reusable pages to reclaim")
+    expect(standaloneOutput).not.toContain("Reclaiming SQLite pages")
     // 人类域不得泄漏 machine 字段名。
     expect(standaloneOutput).not.toContain('"pagesBefore"')
   }, 30_000)
   // 显式 machine 组合必须等两阶段完成后一次性序列化，不能泄漏中间 human/progress 输出。
+  // #549：PROMPT 门槛过滤几 KB freelist——小 fixture 压缩后不应出现 reclaim 交互。
+  ptyInteractive("skips reclaim prompt when freelist is only noise", async () => {
+    await using tmp = await tmpdir({
+      init: async (root) => {
+        await seedColdParts(root, 4)
+        // 约 100KB freelist：旧 gate reusable>0 会 prompt；PROMPT/HINT 必须跳过。
+        inflateFreelist(root, 100_000)
+      },
+    })
+    const cli = runPty(["db", "compress", "--older-than", "0ms", "--batch-size", "2"], isolatedEnv(tmp.path))
+    expect(await waitForExit(cli.proc, cli.exited)).toBe(0)
+    const output = cli.output()
+    expect(output).toMatch(/Compression completed/)
+    expect(output).not.toContain("of physical database space now? [Y/n]")
+    expect(output).not.toContain("Logical compression is complete")
+  }, 30_000)
+
+  // #549：status Recommendation 与 reclaim 共用 HINT 门槛，噪声 freelist 不黄字建议 vacuum。
+  test("omits vacuum recommendation when reusable freelist is below hint", async () => {
+    await using tmp = await tmpdir({
+      init: async (root) => {
+        await markMigrated(root)
+        await runCli(root, ["db", "status", "--json"])
+        // 非零但低于 HINT：旧 Recommendation 会亮；新门槛必须保持沉默。
+        inflateFreelist(root, 100_000)
+      },
+    })
+    const cli = runPty(["db", "status"], isolatedEnv(tmp.path))
+    expect(await waitForExit(cli.proc, cli.exited)).toBe(0)
+    const output = cli.output()
+    expect(output).toMatch(/OpenCode database[\s\S]*Cold storage[\s\S]*Health/)
+    expect(output).not.toContain("Recommendation")
+    expect(output).not.toContain("opencode db vacuum --yes")
+  }, 30_000)
+
+  // #549：定宽进度行——吞吐从非零回到 0 时不应残留上一帧更长的 rate 文本（\x1b[K 清行）。
+  ptyInteractive("progress line clears previous wider rate text", async () => {
+    await using tmp = await tmpdir({ init: (root) => seedColdParts(root, 30) })
+    const proc = spawn(process.execPath, [INDEX_TS, "db", "compress", "--older-than", "0ms", "--batch-size", "1"], {
+      ...PTY_OPTIONS,
+      cwd: path.dirname(INDEX_TS),
+      env: Object.fromEntries(Object.entries(isolatedEnv(tmp.path)).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    })
+    let raw = ""
+    proc.onData((data) => (raw += data))
+    answerPrompt(proc, "Reclaim", "n")
+    expect(await waitForExit(proc, new Promise<number>((resolve) => proc.onExit((event) => resolve(event.exitCode))))).toBe(0)
+    // 保留 \r 分帧；取进度帧检查无残影混入 0 B/s 帧。
+    // \\r 分帧保留原始帧边界；strip-ansi 后仍可按 owners+elapsed 识别进度帧。
+    const frames = raw.split("\r").filter((frame) => frame.includes("owners") && frame.includes("elapsed"))
+    expect(frames.length).toBeGreaterThan(1)
+    const last = frames[frames.length - 1]
+    expect(last).toMatch(/owners/)
+    expect(last).toMatch(/elapsed/)
+    // 清行序列应出现在进度写入中。
+    expect(raw).toContain("\x1b[K")
+  }, 30_000)
+
+  // #549：machine 复合结果在 NOISE 下不得触发物理 VACUUM，pageCount 应保持。
+  test("skips SQL vacuum in compress-vacuum JSON when freelist is below noise", async () => {
+    await using tmp = await tmpdir({
+      init: async (root) => {
+        await seedColdParts(root, 6)
+        // 100KB 远低于 1MB NOISE，旧实现仍会 vacuum。
+        inflateFreelist(root, 100_000)
+      },
+    })
+    // pageCount 前后对比是"物理页未动"的直接证据；JSON shape 断言只证明协议不破。
+    const before = await runCli(tmp.path, ["db", "status", "--json"])
+    const beforeReport = JSON.parse(before.stderr)
+    const result = await runCli(tmp.path, [
+      "db",
+      "compress",
+      "--older-than",
+      "0ms",
+      "--batch-size",
+      "3",
+      "--vacuum",
+      "--yes",
+      "--json",
+    ])
+    expect(result.exitCode, result.stderr).toBe(0)
+    const body = JSON.parse(result.stderr)
+    expect(body).toMatchObject({
+      type: "compress-vacuum",
+      compress: { operation: "compress", status: "completed" },
+      vacuum: { type: "vacuum" },
+    })
+    // NOISE 跳过：pageCount 不变，不是 vacuum 失败。
+    expect(body.vacuum.pagesBefore).toBe(body.vacuum.pagesAfter)
+    const after = await runCli(tmp.path, ["db", "status", "--json"])
+    const afterReport = JSON.parse(after.stderr)
+    expect(afterReport.pageCount).toBe(beforeReport.pageCount)
+  }, 30_000)
+
+  // #549：若恢复 2s HTTP status 轮询，挂起的 control GET 会 TimeoutError；reconcile 观察则仍应完成。
+  // 本用例伪造 live daemon control：POST 只登记 task，进度只写 durable JSON。
+  ptyInteractive("online observe completes while control status hangs during nonterminal work", async () => {
+    await using tmp = await tmpdir({ init: (root) => seedColdParts(root, 8) })
+    await runCli(tmp.path, ["db", "status", "--json"])
+    const { realpath } = await import("fs/promises")
+    // realpath 与 CLI Database.getPath 对齐，避免 task.dbPath mismatch 拒读。
+    const dbPath = await realpath(path.join(tmp.path, "opencode.db"))
+    const token = "hung-status-token"
+    const lockPath = path.join(tmp.path, "tui-server.json")
+    // taskID 由 POST 分配；terminal 标记 durable 终态已写入（settlement 解锁）。
+    let taskID = ""
+    let terminal = false
+    // 假 control 与真 daemon 同协议：token 鉴权 + maintenance POST/GET 路径。
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        if (request.headers.get(ServerLock.CONTROL_TOKEN_HEADER) !== token) {
+          return new Response("unauthorized", { status: 401 })
+        }
+        const url = new URL(request.url)
+        if (request.method === "POST" && url.pathname === ServerLock.CONTROL_MAINTENANCE_PATH) {
+          // 202 后 CLI 进入 observe；此处不执行 ColdStorage，只推进 task 文件。
+          taskID = `dbm_hung_${crypto.randomUUID()}`
+          const root = `${dbPath}.maintenance`
+          await mkdir(path.join(root, "tasks"), { recursive: true })
+          const base = {
+            version: 1,
+            taskID,
+            dbPath,
+            operation: "compress",
+            args: { operation: "compress", olderThanMs: 0, batchSize: 1 },
+            status: "running",
+            cursor: { owner: "part", lastID: "" },
+            processed: 0,
+            skipped: 0,
+            failed: 0,
+            rawBytes: 0,
+            compressedBytes: 0,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          }
+          await Bun.write(path.join(root, "tasks", `${taskID}.json`), JSON.stringify(base, null, 2))
+          // live owner 必须与 task 同时存在，否则首帧 reconcile 会直接降为 interrupted。
+          await mkdir(path.join(root, "lock"), { recursive: true })
+          await Bun.write(
+            path.join(root, "lock", "owner.json"),
+            JSON.stringify(
+              {
+                taskID,
+                dbPath,
+                pid: process.pid,
+                token: "hung-owner-token",
+                startedAt: Date.now(),
+              },
+              null,
+              2,
+            ),
+          )
+          // 后台推进 durable counters，不经 control 进度通道。
+          // 间隔 > PROGRESS_FRAME_MS，确保至少多帧 reconcile 读到 running。
+          void (async () => {
+            for (const processed of [2, 5, 8]) {
+              await Bun.sleep(120)
+              base.processed = processed
+              base.rawBytes = processed * 1000
+              base.updatedAt = Date.now()
+              await Bun.write(path.join(root, "tasks", `${taskID}.json`), JSON.stringify(base, null, 2))
+            }
+            base.status = "completed"
+            base.updatedAt = Date.now()
+            await Bun.write(path.join(root, "tasks", `${taskID}.json`), JSON.stringify(base, null, 2))
+            // 终态后撤掉 owner，模拟 worker finally 释放 lease，settlement GET 可立即返回。
+            await import("fs/promises").then((fs) => fs.rm(path.join(root, "lock"), { recursive: true, force: true }))
+            terminal = true
+          })()
+          return Response.json({ taskID, operation: "compress", status: "running", createdAt: base.createdAt }, { status: 202 })
+        }
+        if (request.method === "GET" && url.pathname === ServerLock.CONTROL_MAINTENANCE_STATUS_PATH) {
+          // 非终态故意挂起 >2s：旧 HTTP 轮询必 TimeoutError；新路径只在 settlement 时打一次。
+          // settlement 时 terminal=true，必须立即返回 completed 以免误伤 ensureSettled。
+          if (!terminal) await Bun.sleep(5_000)
+          const id = url.searchParams.get("task") ?? taskID
+          const raw = await Bun.file(`${dbPath}.maintenance/tasks/${id}.json`).text()
+          return Response.json(JSON.parse(raw))
+        }
+        return Response.json({ error: "unexpected" }, { status: 404 })
+      },
+    })
+    try {
+      // pid=本测试进程：liveDaemon() 认为 daemon 仍活，从而走 online observe。
+      await Bun.write(
+        lockPath,
+        JSON.stringify({
+          pid: process.pid,
+          port: 1,
+          token,
+          dbPath,
+          channel: "test",
+          startedAt: new Date().toISOString(),
+          controlPort: server.port,
+        }),
+      )
+      const env = { ...isolatedEnv(tmp.path), OPENCODE_LOCK_PATH: lockPath }
+      const cli = runPty(["db", "compress", "--older-than", "0ms", "--batch-size", "1"], env)
+      // N 保留"daemon"，强制 online 路径而非 offline lease。
+      answerPrompt(cli.proc, "Stop daemon", "n")
+      expect(await waitForExit(cli.proc, cli.exited)).toBe(0)
+      const output = cli.output()
+      expect(output).toMatch(/Continuing through the running daemon[\s\S]*Compression completed/)
+      expect(output).not.toMatch(/timed out|TimeoutError/i)
+    } finally {
+      server.stop(true)
+    }
+  }, 30_000)
+
+  // #549：dead-owner 经 status --task 公开 seam 触发 reconcile，不得永久 running。
+  // reconcile 契约：running + 死 owner 必须变成 interrupted 并给出 resume 提示。
+  test("status --task demotes a running task with a dead lease owner to interrupted", async () => {
+    await using tmp = await tmpdir({ init: markMigrated })
+    await runCli(tmp.path, ["db", "status", "--json"])
+    const dbPath = await Bun.file(path.join(tmp.path, "opencode.db")).exists().then(async () => {
+      const { realpath } = await import("fs/promises")
+      return realpath(path.join(tmp.path, "opencode.db"))
+    })
+    const taskID = "dbm_dead_owner_status_task"
+    const root = `${dbPath}.maintenance`
+    await mkdir(path.join(root, "tasks"), { recursive: true })
+    await mkdir(path.join(root, "lock"), { recursive: true })
+    const task = {
+      version: 1,
+      taskID,
+      dbPath,
+      operation: "compress",
+      args: { operation: "compress", olderThanMs: 0, batchSize: 1 },
+      status: "running",
+      cursor: { owner: "message", lastID: "" },
+      processed: 3,
+      skipped: 0,
+      failed: 0,
+      rawBytes: 0,
+      compressedBytes: 0,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    await Bun.write(path.join(root, "tasks", `${taskID}.json`), JSON.stringify(task, null, 2))
+    // 不存在的 pid：alive() 为 false，reconcile 必须降为 interrupted。
+    await Bun.write(
+      path.join(root, "lock", "owner.json"),
+      JSON.stringify(
+        {
+          taskID,
+          dbPath,
+          pid: 2_147_000_000,
+          token: "dead-token",
+          startedAt: Date.now(),
+        },
+        null,
+        2,
+      ),
+    )
+    // status --task 是公开 seam：render 前先经 reconcile（dead-owner 降级在此发生）。
+    const cli = runPty(["db", "status", "--task", taskID], isolatedEnv(tmp.path))
+    expect(await waitForExit(cli.proc, cli.exited)).toBe(0)
+    const output = cli.output()
+    expect(output).toMatch(/interrupted|Maintenance interrupted/i)
+    expect(output).toContain(taskID)
+    expect(output).toContain("opencode db resume")
+  }, 30_000)
+
   test("emits one JSON document for an approved non-interactive compression and vacuum", async () => {
     // 此测试使用 non-TTY 与显式 --json 双重 machine 信号，防止任一路径重新引入 readline。
     await using tmp = await tmpdir({ init: (root) => seedColdParts(root, 20) })

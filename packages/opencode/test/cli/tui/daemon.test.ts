@@ -2135,7 +2135,8 @@ test(
         )
         expect(result.exitCode, result.output).toBe(0)
         // 组合顺序断言要求 stop、活动行换行和 terminal 依次出现，不能由三个独立子串偶然满足。
-        expect(result.output).toMatch(/Daemon stopped[\s\S]*elapsed \d+\.\ds[^\n]*\n✓ Compression completed/)
+        // #549：elapsed 字段定宽 pad 后允许空白；\r 进度帧 strip 后可能粘连。
+        expect(result.output).toMatch(/Daemon stopped[\s\S]*elapsed\s+\d+\.\ds[\s\S]*✓ Compression completed/)
         // terminal 渲染时 contender 仍未拿到锁：election 覆盖到输出层而不是在 checkpoint 后提前释放。
         expect(acquiredAtTerminal).toBe(false)
         await contender
