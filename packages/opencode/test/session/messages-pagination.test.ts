@@ -53,6 +53,7 @@ const fill = Effect.fn("Test.fill")(function* (
   sessionID: SessionID,
   count: number,
   time = (i: number) => Date.now() + i,
+  partsPerMessage = 1,
 ) {
   const session = yield* SessionNs.Service
   const ids = [] as MessageID[]
@@ -69,13 +70,16 @@ const fill = Effect.fn("Test.fill")(function* (
       tools: {},
       mode: "",
     } as unknown as MessageV2.Info)
-    yield* session.updatePart({
-      id: PartID.ascending(),
-      sessionID,
-      messageID: id,
-      type: "text",
-      text: `m${i}`,
-    })
+    // 多 Part cohort 让旧 locator 的 payload 扫描成本可见；固定形状仍只服务 Goal eligibility。
+    for (let part = 0; part < partsPerMessage; part++) {
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID,
+        messageID: id,
+        type: "text",
+        text: part === 0 ? `m${i}` : `m${i}-${part}`,
+      })
+    }
   }
   return ids
 })
@@ -247,41 +251,73 @@ describe("MessageV2.page", () => {
   )
 
   it.instance(
-    "visibility performance uses the production page and chronology seams",
-    withSession(({ session, sessionID }) =>
+    "bounded Goal query cost does not grow with old history",
+    () =>
       Effect.gen(function* () {
-        // 固定 6326/364 cohort 让 page refill 与 chronology projection 在真实 production seam 上可复测。
-        const ids = yield* fill(sessionID, 6326)
-        for (const id of ids.filter((_, index) => index % 17 === 0).slice(0, 364)) {
-          const message = yield* MessageV2.get({ sessionID, messageID: id })
-          yield* session.updateMessage({ ...message.info, hidden: { time: Date.now(), reason: "undo" } })
+        const sessions = yield* SessionNs.Service
+        const smallSession = yield* sessions.create({})
+        const largeSession = yield* sessions.create({})
+        const smallIDs = yield* fill(smallSession.id, 256, (i: number) => Date.now() + i, 4)
+        const largeIDs = yield* fill(largeSession.id, 6326, (i: number) => Date.now() + i, 4)
+
+        const measure = (sessionID: SessionID) => {
+          const p95s = Array.from({ length: 3 }, () => {
+            for (let i = 0; i < 5; i++) MessageV2.goalChronology(sessionID)
+            const samples = Array.from({ length: 20 }, () => {
+              const started = performance.now()
+              MessageV2.goalChronology(sessionID)
+              return performance.now() - started
+            }).sort((a, b) => a - b)
+            return samples[18] ?? 0
+          })
+          return { p95s, p95: [...p95s].sort((a, b) => a - b)[1] ?? 0 }
         }
 
-        const p95 = (run: () => unknown) => {
-          for (let i = 0; i < 5; i++) run()
-          const samples = Array.from({ length: 20 }, () => {
-            const started = performance.now()
-            run()
-            return performance.now() - started
-          }).sort((a, b) => a - b)
-          // 20 个样本的 nearest-rank p95 是第 19 个值；取最大值会把单次离群当成 p95。
-          const [nearestRank] = samples.slice(-2)
-          return nearestRank ?? 0
-        }
-        const medianP95 = (run: () => unknown) => {
-          const [, median] = [p95(run), p95(run), p95(run)].sort((a, b) => a - b)
-          return median ?? 0
-        }
-        const rawPage = medianP95(() => Effect.runSync(MessageV2.page({ sessionID, limit: 301, includeHidden: true })))
-        const visiblePage = medianP95(() => Effect.runSync(MessageV2.page({ sessionID, limit: 301 })))
-        const page = yield* MessageV2.page({ sessionID, limit: 301 })
-        expect(page.items).toHaveLength(301)
-        expect(visiblePage).toBeLessThanOrEqual(rawPage + Math.max(5, rawPage * 0.25))
-        const chronologyBaseline = 51.831
-        expect(medianP95(() => MessageV2.chronology(sessionID))).toBeLessThanOrEqual(chronologyBaseline * 1.25)
+        const small = measure(smallSession.id)
+        const large = measure(largeSession.id)
+        small.p95s.forEach((value, index) => {
+          const largeValue = large.p95s[index] ?? 0
+          console.log(
+            `goal-query-scale repetition=${index + 1} small_p95_ms=${value.toFixed(2)} large_p95_ms=${largeValue.toFixed(2)} delta_ms=${(
+              largeValue - value
+            ).toFixed(2)}`,
+          )
+        })
+        console.log(
+          `goal-query-scale median small_p95_ms=${small.p95.toFixed(2)} large_p95_ms=${large.p95.toFixed(2)} delta_ms=${(
+            large.p95 - small.p95
+          ).toFixed(2)}`,
+        )
+
+        expect(smallIDs.slice(-2)).toEqual(MessageV2.goalChronology(smallSession.id).map((message) => message.info.id))
+        expect(largeIDs.slice(-2)).toEqual(MessageV2.goalChronology(largeSession.id).map((message) => message.info.id))
+        expect(large.p95 - small.p95).toBeLessThanOrEqual(45)
+        expect(large.p95).toBeLessThanOrEqual(100)
+      }),
+    90_000,
+  )
+
+  it.instance("Goal query excludes hidden and technical user rows before classification", () =>
+    withSession(({ session, sessionID }) =>
+      Effect.gen(function* () {
+        const previous = yield* addUser(sessionID, "previous")
+        const hiddenPartUser = yield* addUser(sessionID, "hidden part")
+        const hiddenPartMessage = yield* MessageV2.get({ sessionID, messageID: hiddenPartUser })
+        const hiddenText = hiddenPartMessage.parts.find((part) => part.type === "text")
+        if (!hiddenText) throw new Error("hidden-part fixture did not create text")
+        yield* session.updatePart({ ...hiddenText, hidden: { time: Date.now(), reason: "undo" } })
+
+        const hiddenMessageUser = yield* addUser(sessionID, "hidden message")
+        const hiddenMessage = yield* MessageV2.get({ sessionID, messageID: hiddenMessageUser })
+        yield* session.updateMessage({ ...hiddenMessage.info, hidden: { time: Date.now(), reason: "undo" } })
+
+        const technical = yield* addUser(sessionID)
+        yield* addCompactionPart(sessionID, technical)
+        const current = yield* addUser(sessionID, "current")
+
+        expect(MessageV2.goalChronology(sessionID).map((message) => message.info.id)).toEqual([previous, current])
       }),
     ),
-    90_000,
   )
 
   it.instance("hydrates multiple parts per message", () =>

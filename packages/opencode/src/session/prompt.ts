@@ -9,7 +9,7 @@ import * as Session from "./session"
 import { Agent } from "../agent/agent"
 import { Provider } from "@/provider/provider"
 import { ModelID, ProviderID } from "../provider/schema"
-import { type Tool as AITool, tool, jsonSchema, type ToolExecutionOptions, asSchema } from "ai"
+import { type ModelMessage, type Tool as AITool, tool, jsonSchema, type ToolExecutionOptions, asSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionCompaction } from "./compaction"
 import { SessionGoal } from "./goal"
@@ -141,7 +141,9 @@ function isDecideAgent(agent: Agent.Info) {
   return agent.name === "decide"
 }
 
-function deriveGoalTurn(messages: Iterable<MessageV2.ChronologyMessage>): GoalTurnContext | undefined {
+function deriveGoalTurn(
+  messages: Iterable<MessageV2.ChronologyMessage | MessageV2.WithParts>,
+): GoalTurnContext | undefined {
   const turns = Array.from(messages)
     .flatMap((message) => {
       // technical wrapper 的 goalTurnID 只表达 lineage，不是新的 canonical source；
@@ -696,6 +698,18 @@ export const layer = Layer.effect(
     // Deferred<Exit>，而非各自独立执行 state.cancel。这消除了排队 cancel 在旧操作
     // 完成后重新读取 Runner 并误伤 replacement loop 的时序窗口。
     const cancelOps = new Map<SessionID, Deferred.Deferred<Exit.Exit<void>>>()
+    // InstanceState 生命周期内只保留一个 entry；切换 Session 会直接替换而不是累积 Map。
+    // entry 不跨 Project，因为 Service 本身由 InstanceState scope 隔离。
+    // retained 保存 canonical DB view，request-only decoration 永不回写。
+    let retainedMessages:
+      | {
+          sessionID: SessionID
+          model: string
+          proof: MessageV2.PromptWindowProof
+          canonical: MessageV2.WithParts[]
+          chunks: Map<MessageID, ModelMessage[]>
+        }
+      | undefined
     const runner = Effect.fn("SessionPrompt.runner")(function* () {
       return yield* EffectBridge.make()
     })
@@ -1150,6 +1164,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       // [local-smark] 当前 eligible Goal turn 的受信上下文，
       // 由 runLoop 创建并注入，GoalTool get 写入 read snapshot，transition 读取校验
       goalTurn?: GoalTurnContext
+      loadGoalTurn?: Effect.Effect<GoalTurnContext | undefined>
     }) {
       using _ = log.time("resolveTools")
       const tools: Record<string, AITool> = {}
@@ -1217,6 +1232,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           execute(args, options) {
             return run.promise(
               Effect.gen(function* () {
+                if (item.id === "goal" && input.loadGoalTurn) input.goalTurn = yield* input.loadGoalTurn
                 const ctx = context(args, options)
                 // [local-smark] 记录 Adapter 入口时间，用于计算完整 elapsed
                 const adapterStartedAt = Date.now()
@@ -1227,6 +1243,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   messageID: ctx.messageID,
                   callID: ctx.callID,
                 }
+                // 这是本地 Tool 的真实执行屏障；事件回调只能登记 Part，不能证明 mutation 尚未开始。
+                // registry 每 step fresh resolve，control-panel 与 Permission 选择不进入 Message cache。
+                yield* input.processor.updateToolCall(options.toolCallId, (part) => part, "durable", item.worktree ?? "none")
                 yield* plugin.trigger(
                   "tool.execute.before",
                   { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
@@ -1296,6 +1315,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 messageID: ctx.messageID,
                 callID: opts.toolCallId,
               }
+              // 未知 MCP 的副作用不透明，必须在 plugin、Permission 与 client call 前建立 ambient baseline。
+              // MCP 连接态和 schema 仍每 step fresh resolve，只复用 Message 转换结果。
+              yield* input.processor.updateToolCall(opts.toolCallId, (part) => part, "durable", "ambient")
               yield* plugin.trigger(
                 "tool.execute.before",
                 { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
@@ -2572,23 +2594,76 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // 同一 eligible user 下的 assistant/provider steps 共享同一个 context 和 read snapshot。
         // 新 eligible user turn 时重建，确保 blocked streak 不被同一 user 的多个 step 伪造。
         let goalTurn: GoalTurnContext | undefined
-        const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
           yield* slog.info("loop", { step })
+          // busy期间queued prompt可更新Permission；每step必须在resolveTools前重读control-panel状态。
+          const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
-          let msgs = yield* MessageV2.filterCompactedEffect(sessionID)
+          const proof = MessageV2.promptWindowProof(sessionID)
+          // boundary 不同直接丢弃旧窗口，禁止 cache 复制 Compaction 规则。
+          const cached = retainedMessages?.sessionID === sessionID && retainedMessages.proof.boundary === proof.boundary
+            ? retainedMessages
+            : undefined
+          const common = cached
+            ? proof.messages.findIndex((item, index) => item.key !== cached.proof.messages[index]?.key)
+            : 0
+          // findIndex=-1 表示当前 proof 全部匹配；当前更短时自然得到 contraction hit。
+          const matched = cached ? (common < 0 ? proof.messages.length : common) : 0
+          // common prefix 可以覆盖 full hit、append、原地 mutation 与 A-G→A-E contraction。
+          // 首个 key 不同即停止，后续相同 ID 不能越过 mutation 被拼回。
+          const matchedIDs = new Set(proof.messages.slice(0, matched).map((item) => item.id))
+          const suffixID = proof.messages[matched]?.id
+          // full hit 没有 suffix I/O；miss=0 则从首条 Message 走同一 inclusive loader。
+          const canonical = cached
+            ? MessageV2.filterCompacted([
+                // retained prefix 只按 exact proof ID admission；suffix 从 mismatch inclusive 重载。
+                ...cached.canonical.filter((message) => matchedIDs.has(message.info.id)),
+                ...(suffixID ? MessageV2.promptWindowSuffix(sessionID, suffixID) : []),
+              ])
+            : yield* MessageV2.filterCompactedEffect(sessionID)
+          let msgs = canonical
 
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+          const modelKey = `${lastUser.model.providerID}/${lastUser.model.modelID}/${lastUser.model.variant ?? ""}`
+          // model identity 改变 reasoning/media conversion，raw canonical 仍可复用但 chunks 必须清空。
+          retainedMessages = {
+            sessionID,
+            model: modelKey,
+            proof,
+            canonical,
+            chunks:
+              cached?.model === modelKey
+                // 只保留 exact matched IDs 的 chunks，mutation suffix 不得沿用旧转换。
+                ? new Map([...cached.chunks].filter(([id]) => matchedIDs.has(id)))
+                : new Map(),
+          }
+          const messageEntry = retainedMessages
 
-          // Goal continuity 来自未裁剪的持久化 Message chronology；provider window 会因 Compaction
-          // 重排，late technical wrapper 也可能晚于新用户落盘，两者都不能改变 current/previous turn。
-          const nextGoalTurn = deriveGoalTurn(MessageV2.chronology(sessionID))
-          if (!nextGoalTurn) goalTurn = undefined
-          if (nextGoalTurn && (!goalTurn || goalTurn.id !== nextGoalTurn.id)) goalTurn = nextGoalTurn
+          const currentUserMessage = msgs.find((message) => message.info.id === lastUser.id)
+          if (!currentUserMessage || currentUserMessage.info.role !== "user")
+            throw new Error(`Current user message missing from prompt window: ${lastUser.id}`)
+          if (goalTurn?.id !== lastUser.id) goalTurn = undefined
+          const loadGoalTurn = yield* Effect.cached(
+            Effect.gen(function* () {
+              // Goal chronology 延迟到真实 goal Tool adapter，普通对话不支付这次历史查询。
+              // 同一 Provider step 内 read/transition 共享 loader 结果。
+              const current = yield* goalSvc.get(sessionID).pipe(Effect.orDie)
+              const next =
+                current._tag === "Some" && current.value.status === "active"
+                  ? deriveGoalTurn(MessageV2.goalChronology(sessionID))
+                  : current._tag === "Some" && ["complete", "blocked"].includes(current.value.status)
+                    ? deriveGoalTurn([currentUserMessage])
+                    : undefined
+              if (!next) return
+              // 同一 eligible user 的多次 Goal 调用共享 read snapshot；新 user 才替换受信对象。
+              if (!goalTurn || goalTurn.id !== next.id) goalTurn = next
+              return goalTurn
+            }),
+          )
 
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
@@ -2783,7 +2858,21 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           }
           const maxSteps = agent.steps ?? Infinity
           const isLastStep = step >= maxSteps
+          const currentUserIndex = msgs.findIndex((message) => message.info.id === lastUser.id)
+          if (currentUserIndex < 0) throw new Error(`Current user message missing from prompt window: ${lastUser.id}`)
+          const hasMessageTransform = (yield* plugin.list()).some(
+            (hooks) => hooks["experimental.chat.messages.transform"] !== undefined,
+          )
+          msgs = hasMessageTransform
+            // arbitrary transform 可改写任意历史，兼容 seam 必须取得完整 clone 并 dirty=0。
+            ? structuredClone(msgs)
+            // 普通 reminder/queued wrapper 只会接触 current-user 起的 mutable tail。
+            : [...msgs.slice(0, currentUserIndex), ...structuredClone(msgs.slice(currentUserIndex))]
+          let conversionDirty = msgs.length
+          const currentUserParts = msgs[currentUserIndex]?.parts.length ?? 0
           msgs = yield* insertReminders({ messages: msgs, agent, session })
+          // reminder 通过 Part 数变化声明 dirty boundary，不扫描或序列化稳定 prefix。
+          if ((msgs[currentUserIndex]?.parts.length ?? 0) !== currentUserParts) conversionDirty = currentUserIndex
 
           const msg: MessageV2.Assistant = {
             id: MessageID.ascending(),
@@ -2800,15 +2889,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             time: { created: Date.now() },
             sessionID,
           }
-          yield* sessions.updateMessage(msg)
+          let assistantPersisted = false
 
-          const finalizeInterruptedAssistant = Effect.gen(function* () {
-            if (msg.time.completed) return
-            msg.error ??= MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
+          const finalizePreDispatchAssistant = (error: unknown, aborted: boolean) => Effect.gen(function* () {
+            // persisted guard 表示 lifecycle publication，不以 token 是否为零判断是否已发布。
+            // typed error 与 completed 同次 durable write，TUI 不会留下 dangling Assistant。
+            if (assistantPersisted || msg.time.completed) return
+            msg.error ??= MessageV2.fromError(error, {
               providerID: msg.providerID,
-              aborted: true,
+              aborted,
             })
             msg.time.completed = Date.now()
+            // 先置 guard 再 await DB，防止 interrupt finalizer 重入发布第二条 lifecycle event。
+            assistantPersisted = true
             yield* sessions.updateMessage(msg)
           })
 
@@ -2818,7 +2911,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               sessionID,
               model,
             })
-            .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
+            .pipe(
+              Effect.onInterrupt(() =>
+                finalizePreDispatchAssistant(new DOMException("Aborted", "AbortError"), true),
+              ),
+            )
 
           // [local-smark] outcome 增加 "terminal-error"：仅 eligible 错误返回此值
           const outcome: "break" | "continue" | "terminal-error" = yield* Effect.gen(function* () {
@@ -2838,6 +2935,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   messages: msgs,
                   // [local-smark] 注入当前 Goal turn context，使 GoalTool 能校验 read snapshot
                   goalTurn,
+                  loadGoalTurn,
                 })
 
             if (!decide && lastUser.format?.type === "json_schema") {
@@ -2853,8 +2951,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
 
             if (step > 1 && lastFinished) {
-              for (const m of msgs) {
-                if (m.info.role !== "user" || m.info.id <= lastFinished.id) continue
+              for (const [index, m] of msgs.entries()) {
+                if (m.info.role !== "user" || MessageV2.compareChronology(m.info, lastFinished) <= 0) continue
                 for (const p of m.parts) {
                   if (p.type !== "text" || p.ignored || p.synthetic) continue
                   if (!p.text.trim()) continue
@@ -2866,12 +2964,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                     "Please address this message and continue with your tasks.",
                     "</system-reminder>",
                   ].join("\n")
+                  conversionDirty = Math.min(conversionDirty, index)
                 }
               }
             }
 
-            if (!decide) yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-            // plugin 是第二个 Message producer；先收敛到同一 visible projection，避免 wire、usage 和 overflow 分叉。
+            if (!decide) {
+              yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+              if (hasMessageTransform) conversionDirty = 0
+            }
+            // plugin 可能改写任意历史；先失效 retained chunks，再统一排除 hidden Message/Part。
             msgs = MessageV2.visible(msgs)
 
             const registeredTools = decide ? [] : Object.keys(tools).filter(ToolSelection.isUserConfigurable)
@@ -2891,7 +2993,26 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             const mcpText = mcpInstr ?? ""
             const systemText = [baseSystemText, envText, instructionsText, skillsText, mcpText].filter(Boolean).join("\n")
             const requestMsgs = decide ? yield* selectDecideMessages({ messages: msgs, model, systemText }) : msgs
-            const modelMsgs = yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
+            const modelMsgs = decide
+              ? yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
+              : yield* Effect.gen(function* () {
+                  const stable = requestMsgs.slice(0, conversionDirty)
+                  // stable chunks 只来自本轮 admitted canonical IDs，不从 working clone 写回。
+                  const missing = stable.filter((message) => !messageEntry.chunks.has(message.info.id))
+                  const converted = yield* MessageV2.toModelMessageChunksEffect(missing, model)
+                  // missing 与 converted 保持 index 对齐，Map 只写 canonical Message ID。
+                  for (const [index, message] of missing.entries()) {
+                    messageEntry.chunks.set(message.info.id, converted[index] ?? [])
+                  }
+                  // working rewrite 只能使 suffix 变脏；canonical prefix 继续复用唯一 entry 的已转换块。
+                  return [
+                    // prefix flatten 保持 canonical Message 顺序；suffix 仍走原完整 converter。
+                    ...stable.flatMap((message) => messageEntry.chunks.get(message.info.id) ?? []),
+                    ...(conversionDirty < requestMsgs.length
+                      ? yield* MessageV2.toModelMessagesEffect(requestMsgs.slice(conversionDirty), model)
+                      : []),
+                  ]
+                })
             const messages = [
               ...modelMsgs,
               ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : []),
@@ -3043,6 +3164,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             // Also set on the handle so the processor can copy to step-start/step-finish parts.
             handle.inputChars = inputChars
             handle.inputBreakdown = inputBreakdown
+            // guard 在 await 前置位，避免 interrupt finalizer 与同一 durable write 竞争重复发布。
+            assistantPersisted = true
             yield* sessions.updateMessage(handle.message)
             // [local-smark] 在 provider dispatch 前捕获 active Goal 的 {goalID, generation}，
             // 用于后续 accountUsage 的原子归属校验。objective edit 后 generation 不匹配，
@@ -3136,7 +3259,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             return "continue" as const
           }).pipe(
             Effect.ensuring(instruction.clear(handle.message.id)),
-            Effect.onInterrupt(() => finalizeInterruptedAssistant),
+            Effect.onExit((exit) => {
+              // successful preflight Compaction 不产生未 dispatch Assistant；只有 failure 进入 finalizer。
+              if (Exit.isSuccess(exit) || assistantPersisted) return Effect.void
+              return finalizePreDispatchAssistant(Cause.squash(exit.cause), Cause.hasInterruptsOnly(exit.cause))
+            }),
           )
           if (outcome === "break") break
           // [local-smark] terminal-error：设置一次性 marker 并重新进入 loop。

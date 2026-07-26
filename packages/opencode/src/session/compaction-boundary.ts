@@ -28,8 +28,8 @@ export function latest(sessionID: SessionID): Info | undefined {
           sql`coalesce(json_type(${MessageTable.data}, '$.error'), 'null') = 'null'`,
         ),
       )
-      // 单调 MessageID newest-first，不依赖 wall-clock 精度或平台 timestamp 舍入。
-      .orderBy(desc(MessageTable.id))
+      // caller 可自选 ID；持久化时间是主序，ID 只处理同毫秒平局。
+      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
       .all()
 
     // 最新失败候选不会遮挡更早仍合法的 completed boundary。

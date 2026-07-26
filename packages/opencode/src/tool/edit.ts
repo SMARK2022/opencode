@@ -100,6 +100,8 @@ export const EditTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      // edit result 已声明 filepath/diff，Revert 不需要扩大到 ambient Patch。
+      worktree: "declared",
       prepareArguments: prepareEditArguments,
       execute: (params: Parameters, ctx: Tool.Context) =>
         Effect.gen(function* () {

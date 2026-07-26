@@ -67,7 +67,7 @@ export const layer = Layer.effect(
             const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
 
             let rev: Session.Info["revert"]
-            const patches: Snapshot.Patch[] = []
+            const patches: MessageV2.PatchPart[] = []
             for (const msg of all) {
               if (msg.info.role === "user") lastUser = msg.info
               const remaining = []
@@ -96,18 +96,32 @@ export const layer = Layer.effect(
             // snapshot.patch() 的时间窗会混入同目录其他 session/外部改动；
             // 与 toolFiles 取交集后只 checkout 本 session 工具认领的文件。
             // toolFiles 为空（只读/bash/无 declared 元数据）时交集为空：消息可 undo，磁盘不撤。
-            const range = all.filter((msg) => msg.info.id >= rev.messageID)
-            const toolDiffs = yield* summary.computeDiff({ messages: range })
+            const boundary = all.find((msg) => msg.info.id === rev.messageID)
+            // Revert range 与 Prompt 使用同一个 persisted comparator，不能恢复 lexical-low 后继之外的行。
+            if (!boundary) throw new Error(`Revert boundary missing from Session history: ${rev.messageID}`)
+            const range = all.filter((msg) => MessageV2.compareChronology(msg.info, boundary.info) >= 0)
+            // range 可包含 hidden audit rows；真正文件 admission 仍由各 Tool policy 决定。
             const ictx = yield* InstanceState.context
-            const toolFiles = new Set(
-              toolDiffs
-                .map((d) => d.file)
-                .filter((f): f is string => Boolean(f))
-                .map((f) => path.join(ictx.worktree, f).replaceAll("\\", "/")),
+            const ownership = yield* Effect.forEach(range, (msg) =>
+              Effect.gen(function* () {
+                // declared diff按Assistant单独计算，禁止后续Tool把文件authority回传给早期Patch。
+                const diffs = yield* summary.computeDiff({
+                  messages: [{ ...msg, parts: msg.parts.filter((part) => part.type !== "tool" || part.metadata?.worktree === "declared") }],
+                })
+                const files = new Set(diffs.flatMap((d) => d.file ? [path.join(ictx.worktree, d.file).replaceAll("\\", "/")] : []))
+                // authority必须停留在所属Assistant；后续ambient不能反向授权更早Patch。
+                if (msg.parts.some((part) => part.type === "tool" && part.metadata?.worktree === "ambient"))
+                  msg.parts.filter((part) => part.type === "patch").flatMap((part) => part.files).forEach((file) => files.add(file))
+                return { id: msg.info.id, diffs, files }
+              }),
             )
+            const toolDiffs = ownership.flatMap((item) => item.diffs)
+            // messageID是Patch与authority的稳定关联键，不能退化为range级文件并集。
+            const toolFiles = new Map(ownership.map((item) => [item.id, item.files]))
             const filteredPatches = patches.map((p) => ({
               ...p,
-              files: p.files.filter((f) => toolFiles.has(f)),
+              // Patch 未被 declared 或 ambient owner 接纳时保留空 files，hash 顺序不改写。
+              files: p.files.filter((f) => toolFiles.get(p.messageID)?.has(f)),
             }))
             // 记录被 revert 的文件列表，供后续 unrevert/二次 revert 的 restore 精确恢复
             const revertedFiles = Array.from(new Set(filteredPatches.flatMap((p) => p.files)))
@@ -162,11 +176,15 @@ export const layer = Layer.effect(
       const boundary = session.revert
       const msgs = yield* sessions.messages({ sessionID }).pipe(Effect.orDie)
       const messageID = boundary.messageID
+      const boundaryMessage = msgs.find((msg) => msg.info.id === messageID)
+      // cleanup 与首次 revert 共用同一 boundary tuple，hidden/删除不能重新解释范围。
+      if (!boundaryMessage) throw new Error(`Revert cleanup boundary missing from Session history: ${messageID}`)
       const remove = [] as MessageV2.WithParts[]
       let target: MessageV2.WithParts | undefined
       for (const msg of msgs) {
-        if (msg.info.id < messageID) continue
-        if (msg.info.id > messageID) {
+        const order = MessageV2.compareChronology(msg.info, boundaryMessage.info)
+        if (order < 0) continue
+        if (order > 0) {
           remove.push(msg)
           continue
         }

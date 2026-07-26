@@ -110,6 +110,7 @@ export interface Handle {
     toolCallID: string,
     update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
     delivery?: "durable" | "ephemeral",
+    worktree?: "none" | "declared" | "ambient",
   ) => Effect.Effect<MessageV2.ToolPart | undefined>
   readonly completeToolCall: (
     toolCallID: string,
@@ -143,8 +144,12 @@ type ToolCall = {
 interface ProcessorContext extends Input {
   toolcalls: Record<string, ToolCall>
   toolInputBuffer: Record<string, string>
+  // registry 只活在当前 process；持久 authority 随后写入 ToolPart.metadata。
+  toolWorktree: Record<string, "declared" | "ambient">
   shouldBreak: boolean
   snapshot: string | undefined
+  // active 区分“已有可复用 baseline”与“本 step 真实执行了副作用 Tool”。
+  snapshotActive: boolean
   blocked: boolean
   needsCompaction: boolean
   currentText: MessageV2.TextPart | undefined
@@ -187,18 +192,16 @@ export const layer = Layer.effect(
     const flags = yield* RuntimeFlags.Service
 
     const create = Effect.fn("SessionProcessor.create")(function* (input: Input) {
-      // Pre-capture snapshot before the LLM stream starts. The AI SDK
-      // may execute tools internally before emitting start-step events,
-      // so capturing inside the event handler can be too late.
-      const initialSnapshot = yield* snapshot.track()
       const ctx: ProcessorContext = {
         assistantMessage: input.assistantMessage,
         sessionID: input.sessionID,
         model: input.model,
         toolcalls: {},
         toolInputBuffer: {},
+        toolWorktree: {},
         shouldBreak: false,
-        snapshot: initialSnapshot,
+        snapshot: undefined,
+        snapshotActive: false,
         blocked: false,
         needsCompaction: false,
         currentText: undefined,
@@ -215,6 +218,11 @@ export const layer = Layer.effect(
       // cleanup 的 read-check-write，确保 ToolPart terminal state 有唯一 winner。
       // 不在 permit 内 await Tool Deferred——settleToolCall 的 Deferred.succeed 是同步的。
       const toolPermit = Semaphore.makeUnsafe(1)
+      // cached gate 让并发 Tool calls 共享同一 in-flight baseline。
+      // failure 同样共享，不能让第二个 Tool 绕过首次 Snapshot 失败。
+      const captureToolSnapshot = yield* Effect.cached(
+        snapshot.track().pipe(Effect.tap((hash) => Effect.sync(() => (ctx.snapshot = hash)))),
+      )
       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
       let timing:
         | { startedAt: number; firstStreamEvent: boolean; firstDelta: Set<string> }
@@ -276,22 +284,38 @@ export const layer = Layer.effect(
         toolCallID: string,
         update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
         delivery: "durable" | "ephemeral" = "durable",
+        worktree: "none" | "declared" | "ambient" = "none",
       ) {
-        const match = yield* readToolCall(toolCallID)
-        if (!match) return
-        const next = update(match.part)
-        // delivery 只选择同一 next snapshot 的传输合同，不能重新执行 updater；
-        // 否则有副作用的 metadata merge 会在 live/durable 分支产生不同 Part。
-        // 缺省 durable 保持所有既有 Tool 调用语义；只有显式 ephemeral 的
-        // shell progress 绕过 SQLite，并且仍复用同一个 Part updater。
-        const part = yield* delivery === "ephemeral" ? session.publishPartProgress(next) : session.updatePart(next)
-        ctx.toolcalls[toolCallID] = {
-          ...match.call,
-          partID: part.id,
-          messageID: part.messageID,
-          sessionID: part.sessionID,
+        if (worktree !== "none") {
+          // execute 可能早于 tool-input-start；同步登记让事件创建路径也能持久化同一 policy。
+          // none 不进入 gate，纯读取 Tool 因而不启动 git 子进程。
+          // policy 在 plugin/Permission 前登记，拒绝执行也保留准确归因边界。
+          ctx.toolWorktree[toolCallID] = worktree
+          yield* captureToolSnapshot
+          ctx.snapshotActive = true
         }
-        return part
+        return yield* toolPermit.withPermits(1)(
+          Effect.gen(function* () {
+            // permit 包住 read-update-write，progress 不能用 stale Part 擦除 policy。
+            // updater 只执行一次，durable/live 分支不会产生不同 metadata。
+            const match = yield* readToolCall(toolCallID)
+            if (!match) return
+            const next = update(match.part)
+            const marked =
+              worktree === "none"
+                ? next
+                : { ...next, metadata: { ...next.metadata, worktree } }
+            // durable 与 live progress 必须从同一 latest Part 派生，不能覆盖并发写入的 server marker。
+            const part = yield* delivery === "ephemeral" ? session.publishPartProgress(marked) : session.updatePart(marked)
+            ctx.toolcalls[toolCallID] = {
+              ...match.call,
+              partID: part.id,
+              messageID: part.messageID,
+              sessionID: part.sessionID,
+            }
+            return part
+          }),
+        )
       })
 
       const prepareToolOutput = Effect.fn("SessionProcessor.prepareToolOutput")(function* (output: {
@@ -502,16 +526,23 @@ export const layer = Layer.effect(
             }
             // [local-smark] 标记本轮已产生 tool 调用，用于 finish-step 空完成检测
             ctx.hasToolCall = true
-            const part = yield* session.updatePart({
-              id: ctx.toolcalls[value.id]?.partID ?? PartID.ascending(),
-              messageID: ctx.assistantMessage.id,
-              sessionID: ctx.assistantMessage.sessionID,
-              type: "tool",
-              tool: value.toolName,
-              callID: value.id,
-              state: { status: "pending", input: {}, raw: "" },
-              metadata: value.providerExecuted ? { providerExecuted: true } : undefined,
-            } satisfies MessageV2.ToolPart)
+            const part = yield* toolPermit.withPermits(1)(
+              // event 创建路径读取同步 registry；execute 先到时 marker 已经可用。
+              session.updatePart({
+                id: ctx.toolcalls[value.id]?.partID ?? PartID.ascending(),
+                messageID: ctx.assistantMessage.id,
+                sessionID: ctx.assistantMessage.sessionID,
+                type: "tool",
+                tool: value.toolName,
+                callID: value.id,
+                state: { status: "pending", input: {}, raw: "" },
+                metadata: {
+                  // 空 metadata object 合法且不会进入 Provider schema；后续 lifecycle 统一 merge。
+                  ...(value.providerExecuted ? { providerExecuted: true } : {}),
+                  ...(ctx.toolWorktree[value.id] ? { worktree: ctx.toolWorktree[value.id] } : {}),
+                },
+              } satisfies MessageV2.ToolPart),
+            )
             ctx.toolcalls[value.id] = {
               done: yield* Deferred.make<void>(),
               partID: part.id,
@@ -591,9 +622,13 @@ export const layer = Layer.effect(
                 input: value.input,
                 time: { start: Date.now() },
               },
-              metadata: match.metadata?.providerExecuted
-                ? { ...value.providerMetadata, providerExecuted: true }
-                : value.providerMetadata,
+              metadata: {
+                // Provider metadata 可整体替换，但 server-owned primitive 必须显式回填。
+                // providerExecuted 仍独立，远端 Tool 不能伪装成本地 worktree owner。
+                ...value.providerMetadata,
+                ...(match.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+                ...(match.metadata?.worktree ? { worktree: match.metadata.worktree } : {}),
+              },
             }))
             // doom_loop 仅在 tool-error 上做「同 tool + 同 input + 全 error」AND 判定。
             // tool-call 阶段结果未知：相同输入的成功重试是合法行为，不得在此预拦截。
@@ -711,7 +746,6 @@ export const layer = Layer.effect(
             throw value.error
 
           case "start-step":
-            if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
             if (!ctx.assistantMessage.summary) {
               // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
               if (flags.experimentalEventSystem) {
@@ -747,7 +781,9 @@ export const layer = Layer.effect(
             return
 
           case "finish-step": {
-            const completedSnapshot = yield* snapshot.track()
+            // 未执行 non-none Tool 时没有 baseline，也不应为了空 Patch 再启动一次 git 扫描。
+            // snapshotActive 只描述当前 step，不改变跨 step 保存的 completed baseline。
+            const completedSnapshot = ctx.snapshotActive ? yield* snapshot.track() : undefined
             const usage = Session.getUsage({
               model: ctx.model,
               usage: value.usage,
@@ -804,7 +840,9 @@ export const layer = Layer.effect(
                 requestID: ctx.assistantMessage.parentID,
                 assistant: ctx.assistantMessage,
               })
-            if (ctx.snapshot) {
+            if (ctx.snapshot && completedSnapshot) {
+              // 一个 step 内多个副作用 Tool 共用 before/after，Patch 只生成一次。
+              // Patch 为空仍推进 baseline，下一 step 不重复比较旧窗口。
               const patch = yield* snapshot.patch(ctx.snapshot)
               if (patch.files.length) {
                 yield* session.updatePart({
@@ -816,7 +854,9 @@ export const layer = Layer.effect(
                   files: patch.files,
                 })
               }
-              ctx.snapshot = undefined
+              // 下一 side-effect step 复用完成态 baseline；纯 Provider step 不触发 post-track。
+              ctx.snapshot = completedSnapshot
+              ctx.snapshotActive = false
             }
             yield* summary
               .summarize({
@@ -916,7 +956,9 @@ export const layer = Layer.effect(
       })
 
       const cleanup = Effect.fn("SessionProcessor.cleanup")(function* () {
-        if (ctx.snapshot && !aborted) {
+        // stream error 可能跳过 finish-step；仅 active side-effect step 需要 rescue Patch。
+        // abort 优先快速终止，沿用现有合同不等待 git teardown。
+        if (ctx.snapshot && ctx.snapshotActive && !aborted) {
           const patch = yield* snapshot.patch(ctx.snapshot)
           if (patch.files.length) {
             yield* session.updatePart({
@@ -933,6 +975,7 @@ export const layer = Layer.effect(
         // boundary.  Snapshot patching can involve slow git subprocess teardown,
         // so skip it for aborted turns rather than delaying cancellation.
         ctx.snapshot = undefined
+        ctx.snapshotActive = false
 
         if (ctx.currentText) {
           const end = Date.now()

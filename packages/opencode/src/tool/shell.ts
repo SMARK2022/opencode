@@ -1380,6 +1380,8 @@ export const ShellTool = Tool.define(
         return {
           description,
           parameters: prompt.parameters,
+          // shell 命令副作用不透明，只能使用短窗口 Patch best-effort 归因。
+          worktree: "ambient",
           execute: (params: Parameters, ctx: Tool.Context) =>
             Effect.gen(function* () {
               const instanceCtx = yield* InstanceState.context

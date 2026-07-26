@@ -35,6 +35,8 @@ export const WriteTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      // write 的单一 filePath 是精确归属，不认领并发 worktree 变化。
+      worktree: "declared",
       execute: (params: { content: string; filePath: string }, ctx: Tool.Context) =>
         Effect.gen(function* () {
           const instance = yield* InstanceState.context

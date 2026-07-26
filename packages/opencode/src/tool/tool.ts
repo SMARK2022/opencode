@@ -70,6 +70,9 @@ export interface Def<
   description: string
   parameters: Parameters
   jsonSchema?: JSONSchema7
+  /** 只控制本地 Snapshot/Revert 归因，不能进入 Provider Tool schema。 */
+  /** 缺失等价于 none，旧 Tool 不需要显式声明只读策略。 */
+  worktree?: "none" | "declared" | "ambient"
   /** 在 Schema.decode 之前折叠兼容入参（如 edit 的 legacy oldString → edits[]）。 */
   prepareArguments?(args: unknown): unknown
   execute(args: Schema.Schema.Type<Parameters>, ctx: Context): Effect.Effect<ExecuteResult<M>>

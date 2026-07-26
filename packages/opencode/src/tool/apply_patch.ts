@@ -441,6 +441,8 @@ export const ApplyPatchTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      // apply_patch metadata.files 是多文件 declared authority。
+      worktree: "declared",
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         run(params, ctx).pipe(Effect.orDie),
     }
