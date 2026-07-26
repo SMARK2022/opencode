@@ -37,6 +37,28 @@ if (process.env.OPENCODE_PROCESS_ROLE === "worker") {
   // listener 拥有事件循环；悬置入口防止继续启动 TUI，退出仍由 worker 的资源清理决定。
   await new Promise<never>(() => {})
 }
+// 独立诊断角色复用生产地址解析，不能进入CLI或native录音路径。
+if (process.env.OPENCODE_PROCESS_ROLE === "voice-smoke") {
+  const { voiceWorkerPath } = await import("../../tui/src/prompt-voice-recorder")
+  const worker = new Worker(voiceWorkerPath(), { ref: true })
+  const acknowledged = Promise.withResolvers<void>()
+  const closed = Promise.withResolvers<void>()
+  const timeout = Bun.sleep(10_000).then(() => {
+    throw new Error("Compiled voice Worker probe timed out")
+  })
+  worker.onmessage = (event) => { if (event.data?.type === "probe") acknowledged.resolve() }
+  worker.onerror = (event) => acknowledged.reject(new Error(event.message || "Compiled voice Worker failed"))
+  worker.addEventListener("close", () => closed.resolve(), { once: true })
+  worker.postMessage({ type: "probe" })
+  try {
+    // ack证明入口运行，close证明线程退出；两者完成才允许报告成功。
+    await Promise.race([Promise.all([acknowledged.promise, closed.promise]), timeout])
+    process.stdout.write("voice-worker-probe-ok\n")
+  } finally {
+    worker.terminate()
+  }
+  process.exit(0)
+}
 
 const args = hideBin(process.argv)
 

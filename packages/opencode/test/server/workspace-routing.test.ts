@@ -53,6 +53,7 @@ describe("getWorkspaceRouteSessionID", () => {
     expect(getWorkspaceRouteSessionID(url)).toBeNull()
     // 不把search交给SessionID.make，覆盖真实middleware调用前的解析边界。
     expect(getWorkspaceRouteSessionID(new URL("http://localhost/session/search/scan"))).toBeNull()
+    expect(getWorkspaceRouteSessionID(new URL("http://localhost/session/search/next"))).toBeNull()
   })
 
   test("returns null for non-session paths", () => {

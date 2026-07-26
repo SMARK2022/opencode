@@ -249,6 +249,8 @@ for (const item of targets) {
   await $`mkdir -p dist/${name}/bin`
 
   const workerPath = "./src/cli/tui/worker.ts"
+  // 编译资源使用稳定的虚拟入口名；跨包源码路径不能拼入bunfs根，否则..会越出资源目录。
+  const voiceWorkerPath = "opencode-voice-recorder-worker.ts"
   const treeSitterWorkerPath = "opentui-tree-sitter-worker.js"
   const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
   const sharpFiles = await createSharpNativeFileMap(item)
@@ -273,6 +275,8 @@ for (const item of targets) {
       windows: {},
     },
     files: {
+      // 复用已有虚拟模块机制，源码仍由tui owner维护；编译后无需访问checkout。
+      [voiceWorkerPath]: await Bun.file(path.resolve(dir, "../tui/src/prompt-voice-recorder-worker.ts")).text(),
       [treeSitterWorkerPath]: treeSitterWorker,
       ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
       // 生成模块只保存“目标平台可用的 native 资源表”，避免所有平台二进制都被塞进每个 release exe。
@@ -282,6 +286,8 @@ for (const item of targets) {
     entrypoints: [
       "./src/index.ts",
       workerPath,
+      // #558：voice Worker 必须同批编译，compiled 运行时才不会回退 checkout 源码文件。
+      voiceWorkerPath,
       treeSitterWorkerPath,
       ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
       // 虚拟模块必须作为 entrypoint 交给 Bun.build，否则 dynamic import 在 compiled exe 内找不到资源映射。
@@ -293,6 +299,8 @@ for (const item of targets) {
       OPENCODE_VERSION: `'${Script.version}'`,
       OPENCODE_MODELS_DEV: generated.modelsData,
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + treeSitterWorkerPath,
+      // #558：compiled 只走 bunfs entrypoint；运行时缺失该 define 即安装损坏。
+      OPENCODE_VOICE_WORKER_PATH: bunfsRoot + voiceWorkerPath,
       OPENCODE_WORKER_PATH: workerPath,
       OPENCODE_CHANNEL: `'${Script.channel}'`,
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
@@ -338,6 +346,22 @@ for (const item of targets) {
         throw new Error(stderr.trim() || `version smoke exited ${exitCode} without output`)
       }
       console.log(`Smoke test passed: ${versionOutput}`)
+      // #558：voice Worker compiled smoke——以独立角色 spawn，stdout 须恰为固定 marker；stderr 优先透传。
+      const voiceSmoke = Bun.spawn([binaryPath], {
+        env: { ...smokeEnv, OPENCODE_PROCESS_ROLE: "voice-smoke" },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [voiceExit, voiceStdout, voiceStderr] = await Promise.all([
+        voiceSmoke.exited,
+        new Response(voiceSmoke.stdout).text(),
+        new Response(voiceSmoke.stderr).text(),
+      ])
+      // marker 必须逐字匹配，多余stdout也不能冒充Worker入口成功。
+      if (voiceExit !== 0 || voiceStdout.trim() !== "voice-worker-probe-ok") {
+        throw new Error(voiceStderr.trim() || `voice worker smoke exited ${voiceExit} without marker`)
+      }
+      console.log("Voice worker smoke test passed")
     } catch (e) {
       console.error(`Smoke test failed for ${name}:`, e)
       process.exit(1)
