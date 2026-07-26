@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import yargs from "yargs"
+import { RunCommand } from "../../src/cli/cmd/run"
 import { mkdir, readdir } from "fs/promises"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -161,6 +163,16 @@ describe("database maintenance CLI", () => {
       }
     }
   }, 90_000)
+
+  // 目标已移除旧首跑迁移提示；直接使用实际命令定义验证正文归属，不进入Agent handler。
+  test("does not classify a run message containing db status as a database command", () => {
+    const selected: string[] = []
+    const parsed = yargs(["run", "db", "status"])
+      .command({ ...RunCommand, handler: () => { selected.push("run") } })
+      .parseSync()
+    expect(selected).toEqual(["run"])
+    expect(parsed.message).toEqual(["db", "status"])
+  })
   // progress 只观察已提交 checkpoint，测试不预设总量、百分比或内部 batch 次数。
   ptyInteractive("reports committed compression progress in an interactive terminal", async () => {
     await using tmp = await tmpdir({ init: seedColdParts })

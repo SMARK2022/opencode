@@ -24,8 +24,8 @@ export function getWorkspaceRouteSessionID(url: URL) {
   // [local-smark] /session/preview 是批量预览端点，路径中无 :sessionID，
   // 不能让 SessionID.make("preview") 触发品牌校验异常
   if (url.pathname === "/session/preview") return null
-  // search是列表端点路径而非Session ID，必须在品牌解析前排除。
-  if (url.pathname === "/session/search/scan") return null
+  // 整个search子树均是集合路由，不能把search解析成带品牌的Session ID。
+  if (url.pathname.startsWith("/session/search/")) return null
 
   const id =
     url.pathname.match(/^\/session\/([^/]+)(?:\/|$)/)?.[1] ??

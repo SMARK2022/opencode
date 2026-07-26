@@ -64,10 +64,16 @@ for (const item of targets) {
     .join("-")
   const name = target.replace(binary, "cli")
   console.log(`building ${name}`)
+  const voiceWorkerPath = "opencode-voice-recorder-worker.ts"
+  const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
   const result = await Bun.build({
     // Native与旧入口嵌入同一资源表，不复制录音器或引入源码包路径回退。
-    files: { "opencode-pvrecorder.gen.ts": PromptVoiceAssets.createPvRecorderNativeFileMap(item, dir) },
-    entrypoints: ["./src/index.ts", "opencode-pvrecorder.gen.ts"],
+    files: {
+      "opencode-pvrecorder.gen.ts": PromptVoiceAssets.createPvRecorderNativeFileMap(item, dir),
+      // 与legacy使用同一虚拟入口，编译后不依赖checkout或构建机的源码路径。
+      [voiceWorkerPath]: await Bun.file(path.resolve(dir, "../tui/src/prompt-voice-recorder-worker.ts")).text(),
+    },
+    entrypoints: ["./src/index.ts", "opencode-pvrecorder.gen.ts", voiceWorkerPath],
     tsconfig: "./tsconfig.json",
     plugins: [plugin],
     external: ["node-gyp"],
@@ -88,6 +94,8 @@ for (const item of targets) {
     define: {
       OPENCODE_VERSION: `'${Script.version}'`,
       OPENCODE_COMPILED: "true",
+      // 同一共享录音器消费compiled地址；缺失资源仍明确失败，不回落到源码态。
+      OPENCODE_VOICE_WORKER_PATH: bunfsRoot + voiceWorkerPath,
       OPENCODE_CLI_NAME: `'${binary}'`,
       OPENCODE_MODELS_DEV: modelsData,
       OPENCODE_CHANNEL: `'${Script.channel}'`,
@@ -101,6 +109,19 @@ for (const item of targets) {
   if (!result.success) {
     for (const log of result.logs) console.error(log)
     process.exit(1)
+  }
+
+  // 两代都保留真实compiled入口probe；仅匹配当前平台，ack与close由同一生产角色验证。
+  if (item.os === process.platform && item.arch === process.arch && !item.abi) {
+    const smoke = Bun.spawn([path.resolve(dir, `dist/${name}/bin/${binary}`)], {
+      env: { ...process.env, OPENCODE_PROCESS_ROLE: "voice-smoke" },
+      stdout: "pipe", stderr: "pipe", windowsHide: true,
+    })
+    const [exit, stdout, stderr] = await Promise.all([
+      smoke.exited, new Response(smoke.stdout).text(), new Response(smoke.stderr).text(),
+    ])
+    if (exit !== 0 || stdout.trim() !== "voice-worker-probe-ok")
+      throw new Error(stderr.trim() || `voice worker smoke exited ${exit} without marker`)
   }
 
   await Bun.write(
