@@ -106,6 +106,38 @@ async function runCli(root: string, args: string[]) {
   ])
   return { exitCode, stdout, stderr }
 }
+
+async function runCliUntilStderr(root: string, args: string[], marker: string) {
+  const proc = Bun.spawn([process.execPath, INDEX_TS, ...args], {
+    env: isolatedEnv(root),
+    ...PIPE_OPTIONS,
+    windowsHide: process.platform === "win32",
+  })
+  const stdout = new Response(proc.stdout).text()
+  const reader = proc.stderr.pipeThrough(new TextDecoderStream()).getReader()
+  let stderr = ""
+  const observed = (async () => {
+    // 流式观察 owned marker，不等待后续 Agent run 或整个 stderr EOF。
+    while (true) {
+      const chunk = await reader.read()
+      if (chunk.done) return false
+      stderr += chunk.value
+      if (stderr.includes(marker)) return true
+    }
+  })()
+
+  try {
+    const result = await Promise.race([observed, Bun.sleep(20_000).then(() => false)])
+    if (!result) throw new Error(`CLI did not emit stderr marker: ${marker}`)
+  } finally {
+    proc.kill()
+    await Promise.allSettled([proc.exited, stdout, observed])
+    reader.releaseLock()
+  }
+
+  return stderr
+}
+
 function answerPrompt(proc: Proc, prompt: string, answer: "y" | "n") {
   let answered = false
   proc.onData((data) => {
@@ -143,9 +175,9 @@ describe("database maintenance CLI", () => {
   }, 90_000)
   test("does not classify a run message containing db status as a database command", async () => {
     await using tmp = await tmpdir()
-    const result = await runCli(tmp.path, ["run", "db", "status"])
+    const stderr = await runCliUntilStderr(tmp.path, ["run", "db", "status"], "Performing one time database migration")
     // 该反例锁定非 DB 命令的既有迁移提示，防止 quiet policy 泄漏到 run message。
-    expect(result.stderr).toContain("Performing one time database migration")
+    expect(stderr).toContain("Performing one time database migration")
   }, 30_000)
   // progress 只观察已提交 checkpoint，测试不预设总量、百分比或内部 batch 次数。
   test("reports committed compression progress in an interactive terminal", async () => {

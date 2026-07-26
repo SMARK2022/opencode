@@ -52,6 +52,27 @@ if (processMetadata.processRole === "worker") {
   await import("./cli/cmd/tui/worker")
   await new Promise<never>(() => {})
 }
+if (processMetadata.processRole === "voice-smoke") {
+  const { voiceWorkerPath } = await import("./cli/cmd/tui/prompt-voice-recorder")
+  const worker = new Worker(voiceWorkerPath(), { ref: true }) // diagnostic role shares the production Worker address resolver.
+  const acknowledged = Promise.withResolvers<void>()
+  const closed = Promise.withResolvers<void>()
+  const timeout = Bun.sleep(10_000).then(() => {
+    throw new Error("Compiled voice Worker probe timed out")
+  })
+  worker.onmessage = () => acknowledged.resolve()
+  worker.onerror = (event) => acknowledged.reject(new Error(event.message || "Compiled voice Worker failed"))
+  worker.addEventListener("close", () => closed.resolve(), { once: true })
+  worker.postMessage({ type: "probe" })
+  try {
+    // ack 证明真实 bunfs entrypoint 已执行，close 证明 diagnostic Worker 没有遗留线程或触碰 native 录音路径。
+    await Promise.race([Promise.all([acknowledged.promise, closed.promise]), timeout])
+    process.stdout.write("voice-worker-probe-ok\n")
+  } finally {
+    worker.terminate()
+  }
+  process.exit(0)
+}
 
 process.on("unhandledRejection", (e) => {
   Log.Default.error("rejection", {

@@ -19,9 +19,10 @@ export function isLocalWorkspaceRoute(method: string, path: string) {
 
 export function getWorkspaceRouteSessionID(url: URL) {
   if (url.pathname === "/session/status") return null
-  // [local-smark] /session/preview 是批量预览端点，路径中无 :sessionID，
-  // 不能让 SessionID.make("preview") 触发品牌校验异常
+  // [local-smark] /session/preview、/session/search/* 是集合端点，路径中无 :sessionID，
+  // 不能让 SessionID.make("preview"|"search") 触发品牌校验 die → 500
   if (url.pathname === "/session/preview") return null
+  if (url.pathname.startsWith("/session/search/")) return null // search is a collection route, not a branded SessionID.
 
   const id = url.pathname.match(/^\/session\/([^/]+)(?:\/|$)/)?.[1]
   if (!id) return null

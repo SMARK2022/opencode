@@ -9,47 +9,22 @@ import type { VoiceRecorderHandle } from "./prompt-voice-input"
 declare const OPENCODE_COMPILED: boolean | undefined
 // 版本号参与 native cache 路径，避免升级后复用旧 `.node`，也让旧版本目录可以被安全识别并延迟清理。
 declare const OPENCODE_VERSION: string | undefined
+// build.ts 把 voice Worker 作为独立 entrypoint；compiled 运行时必须使用 bunfs 路径，不能回退到源码位置。
+declare const OPENCODE_VOICE_WORKER_PATH: string | undefined
 
-type NativePvRecorder = {
-  // 这些签名来自 Picovoice native addon；compiled 模式直接 require `.node`，不能复用包里的 JS class 类型。
-  init(frameLength: number, deviceIndex: number, bufferedFramesCount: number): { status: number; handle: bigint }
-  read(handle: bigint, pcm: Int16Array): number
-  start(handle: bigint): number
-  stop(handle: bigint): number
-  delete(handle: bigint): void
-}
-
-type PvRecorderConstructor = {
-  new (frameLength: number, deviceIndex?: number, bufferedFramesCount?: number): PvRecorderInstance
-  _pvRecorder: NativePvRecorder
-}
-
-type PvRecorderInstance = {
-  _handle: bigint
-  readonly frameLength: number
-  start(): void
-  stop(): void
-  release(): void
-}
-
+type VoiceWorkerMessage =
+  | { type: "started" }
+  | { type: "frame"; frame: Int16Array }
+  | { type: "stopped" }
+  | { type: "error"; message: string } // 只允许 Worker 宣布一个终态；主线程据此决定是否落盘。
 // PvRecorder 固定输出 16kHz 单声道 16-bit PCM；WAV 头必须保持这个常量，否则 browser-agent 侧的转写入口会拒绝文件。
 const VOICE_RECORDER_SAMPLE_RATE = 16_000
 const VOICE_RECORDER_CHANNELS = 1
 // 512 是 Picovoice Node 示例和当前录音 helper 使用的帧长；继续沿用它以避免改变延迟和缓冲行为。
 const VOICE_RECORDER_FRAME_LENGTH = 512
-// 帧周期只用于 stop drain 判断“立即返回的 backlog”和“正在录 stop 后新音频的 live read”。
-const VOICE_RECORDER_FRAME_INTERVAL_MS = Math.max(1, Math.round((VOICE_RECORDER_FRAME_LENGTH / VOICE_RECORDER_SAMPLE_RATE) * 1_000))
 // -1 表示系统默认输入设备；这是跨平台录音库的约定，不额外暴露 TUI 配置，避免扩大配置面。
-const VOICE_RECORDER_DEVICE_INDEX = -1
 // 250 帧约等于 8 秒 native 缓冲；实测 TUI/JS 线程阻塞 3 秒会让 50 帧默认缓冲短录约 1-2 秒。
 const VOICE_RECORDER_BUFFERED_FRAMES = 250
-// queued backlog 的 read 应该很快返回；接近一个 live 帧周期说明缓冲已空，不能继续把 stop 后环境音写进 WAV。
-// 生产环境中 queued read 是亚毫秒级 memcpy，live read 阻塞约一个帧周期（32ms）。
-// 0.9 系数给出 28ms 阈值：queued read（亚毫秒）有充足余量，live read（~32ms）仍可正确区分。
-// 调度抖动只会膨胀 wall-clock 测量值、不会缩短，因此 live read 不会被误判为 queued。
-// drainBufferedFrames 对首次慢读做二次确认（再读一帧），防止单次抢占膨胀的 queued read
-// 被误判为 live 而丢失全部尾部帧；只有连续两帧都慢才认定缓冲耗尽。
-const VOICE_RECORDER_DRAIN_BLOCKED_READ_MS = Math.max(8, Math.floor(VOICE_RECORDER_FRAME_INTERVAL_MS * 0.9))
 // 只清理 24 小时以前的崩溃残留；更短窗口可能误删仍在转写或另一个进程刚释放的临时文件。
 const VOICE_RECORDER_STALE_FILE_MS = 24 * 60 * 60 * 1_000
 
@@ -64,47 +39,62 @@ export async function startPromptVoiceRecorder(): Promise<VoiceRecorderHandle> {
   cleanupPromptVoiceFilesPromise ??= cleanupStalePromptVoiceFiles(dir).catch(() => {})
   // 文件名包含时间戳和 UUID，避免连续录音或并发 Prompt 实例写到同一个临时 WAV。
   const file = path.join(dir, `prompt-${Date.now()}-${randomUUID()}.wav`)
-  // native addon 延迟到真正录音时加载，未使用语音的 TUI 启动路径不受 optional 依赖影响。
-  const PvRecorder = await loadPvRecorder()
-  const recorder = new PvRecorder(VOICE_RECORDER_FRAME_LENGTH, VOICE_RECORDER_DEVICE_INDEX, VOICE_RECORDER_BUFFERED_FRAMES)
-  const frames: Int16Array[] = []
-  const state = { active: true, closed: false }
+  // 同步 native read 由独立 Worker 持有，TUI 渲染或输入阻塞时录音仍会持续消费 native buffer。
+  const worker = new Worker(voiceWorkerPath()) // 主线程只管理消息和 WAV，不同步调用 native。
+  const control = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT) // 单个 atomic cell 足以表达 stop boundary。
+  const frames: Int16Array[] = [] // frame 消息按 Worker message order 进入，terminal 前全部可落盘。
+  const started = Promise.withResolvers<void>()
+  const terminal = Promise.withResolvers<Error | undefined>()
   let closePromise: Promise<void> | undefined
+  // closePromise 把 stop 与 abort 合并到一个边界，防止两个调用同时发布不同的 stop 顺序。
+  const fail = (error: Error) => {
+    started.reject(error) // startup failure 直接拒绝 start，不让调用方拿到半初始化 recorder。
+    terminal.resolve(error) // stop 仍能观察同一个 primary failure。
+  }
 
+  worker.onmessage = (event: MessageEvent<VoiceWorkerMessage>) => {
+    const message = event.data
+    if (message.type === "frame") {
+      frames.push(message.frame) // 只接收经过 Int16Array 校验的跨线程 payload。
+      return
+    }
+    if (message.type === "started") {
+      started.resolve() // started 是公开 recorder handle 的 readiness signal。
+      return
+    }
+    if (message.type === "error") {
+      fail(new Error(message.message)) // Worker 的阶段错误保留给既有 TUI error surface。
+      return
+    }
+    started.reject(new Error("Voice recorder Worker stopped before startup"))
+    terminal.resolve(undefined)
+  }
+  worker.onerror = (event) => fail(new Error(event.message || "Voice recorder Worker failed"))
+  // native 路径先解析再发送给 Worker，避免 Worker 收到无法拥有的半初始化资源。
   try {
-    recorder.start()
+    worker.postMessage({
+      type: "start",
+      native: await pvRecorderNativePath(), // 路径解析完成后才把 native owner 交给 Worker。
+      frameLength: VOICE_RECORDER_FRAME_LENGTH,
+      bufferedFrames: VOICE_RECORDER_BUFFERED_FRAMES,
+      control,
+    })
+    await started.promise // 等 Worker 明确 ready，禁止用固定 sleep 猜测启动完成。
   } catch (error) {
-    // start 失败时 controller 还拿不到 handle；这里必须释放 native 资源并删除目标文件，避免麦克风句柄残留。
-    try {
-      recorder.release()
-    } catch {}
+    worker.terminate()
     await fs.rm(file, { force: true })
     throw error
   }
-  // 后台录音循环的错误不能成为未处理 rejection；统一延迟到 stop() 边界抛出，TUI 才能按既有错误路径展示失败信息。
-  const recording = recordFrames(PvRecorder, recorder, frames, state).then(
-    () => undefined,
-    (error: unknown) => error,
-  )
-
+  // startup 成功后所有 native 生命周期都转移给 Worker；主线程只累计有序消息。
   const close = async (writeFile: boolean) => {
     closePromise ??= (async () => {
-      // active=false 只阻止下一轮读取；正在进行的 native read 会先返回，确保最后一帧不被中断。
-      state.active = false
-      const recordingError = await recording
+      // stop flag 是 Worker 接受 frame 的唯一边界；terminal 之前的消息有序入队，之后才可以写 WAV。
+      Atomics.store(new Int32Array(control), 0, 1) // 发布 stop 后，Worker 仍会完成当前 read 但不会发送该帧。
+      const recordingError = await terminal.promise
       try {
-        // stop 需要把录音错误反馈给用户；abort 是 cleanup 边界，必须尽力释放资源和删临时文件，不能因旧错误阻塞清理。
         if (writeFile && recordingError) throw recordingError
-        if (writeFile) drainBufferedFrames(PvRecorder, recorder, frames)
       } finally {
-        state.closed = true
-        // stop/release 必须在同一个 close 边界内执行一次；重复释放 native handle 会触发底层库错误。
-        try {
-          recorder.stop()
-        } catch {}
-        try {
-          recorder.release()
-        } catch {}
+        worker.terminate()
       }
       if (!writeFile) return
       // 只有 stop 路径写 WAV；abort 路径绝不把取消中的隐私语音落盘。
@@ -121,57 +111,35 @@ export async function startPromptVoiceRecorder(): Promise<VoiceRecorderHandle> {
       if (!(await Bun.file(file).exists())) throw new Error("Voice recorder did not write a WAV file")
     },
     abort: async () => {
-      if (!state.closed) await close(false)
+      if (!closePromise) await close(false)
       await fs.rm(file, { force: true })
     },
   }
 }
-
-async function recordFrames(
-  PvRecorder: PvRecorderConstructor,
-  recorder: PvRecorderInstance,
-  frames: Int16Array[],
-  state: { active: boolean },
-) {
-  while (state.active) {
-    // native read 本身会等到下一帧可用；这里不能再额外按帧 sleep，否则 TUI 卡顿后会永久落后于 PvRecorder 内部缓冲并在 stop 时丢尾。
-    // 读取结果立即追加到内存 frames，stop 写文件时不会再碰 native handle，降低释放顺序风险。
-    frames.push(readFrame(PvRecorder, recorder))
-    // 读完一帧后只让出一次事件循环，保证快捷键和渲染能被处理，同时允许有 backlog 时尽快追平缓冲。
-    // setTimeout(0) 是调度让步，不是录音节流；帧节奏由 PvRecorder.read 自己控制。
-    await new Promise((resolve) => setTimeout(resolve, 0))
-  }
-}
-
-async function loadPvRecorder() {
-  // recorder 是 optional native 依赖；只有用户实际启动语音录制时才加载，避免未使用语音的 TUI 启动路径被 native 安装问题拖垮。
-  const bundled = await loadBundledPvRecorder()
-  if (bundled) return bundled
-  if (typeof OPENCODE_COMPILED !== "undefined" && OPENCODE_COMPILED) {
-    // compiled exe 不应再落回 @picovoice 的 __dirname 路径，否则会重新访问 CI 构建机上的 node_modules 绝对路径。
-    throw new Error("Voice recorder native addon is missing from this opencode installation")
-  }
-  const mod = (await import("@picovoice/pvrecorder-node")) as unknown as { PvRecorder: PvRecorderConstructor }
-  return mod.PvRecorder
-}
-
-async function loadBundledPvRecorder() {
+async function pvRecorderNativePath() { // 源码和 compiled 只改变资源地址，录音协议保持相同。
   // libraryPath 使用包内相对路径作为 key；build.ts 生成的资源表和运行时选择逻辑必须保持同一套字符串。
   const libraryPath = await pvRecorderLibraryPath()
-  const nativePath = libraryPath ? await embeddedPvRecorderNativePath(libraryPath) : undefined
-  if (!nativePath) return
-  let native: NativePvRecorder
-  try {
-    // createRequire 让 Bun 走 Node addon 加载分支；动态 import 无法加载 `.node` 原生模块。
-    native = createRequire(import.meta.url)(nativePath) as NativePvRecorder
-  } catch (error) {
-    throw new Error(
-      `Failed to load bundled PvRecorder native addon from ${nativePath}: ${error instanceof Error ? error.message : String(error)}`,
-    )
+  if (!libraryPath) throw new Error(`Voice recorder does not support ${process.platform}/${process.arch}`)
+  const nativePath = await embeddedPvRecorderNativePath(libraryPath)
+  if (nativePath) return nativePath
+  if (typeof OPENCODE_COMPILED !== "undefined" && OPENCODE_COMPILED) {
+    // compiled exe 不能回退到构建机 node_modules；资源缺失必须在 Worker 启动前明确失败。
+    throw new Error("Voice recorder native addon is missing from this opencode installation")
   }
-  return createBundledPvRecorderConstructor(native)
+  const packageRoot = path.dirname(createRequire(import.meta.url).resolve("@picovoice/pvrecorder-node/package.json"))
+  const sourcePath = path.join(packageRoot, "lib", ...libraryPath.split("/"))
+  if (!(await Bun.file(sourcePath).exists())) throw new Error(`Voice recorder native addon is missing: ${sourcePath}`)
+  return sourcePath
 }
 
+export function voiceWorkerPath() {
+  if (typeof OPENCODE_COMPILED !== "undefined" && OPENCODE_COMPILED) {
+    if (typeof OPENCODE_VOICE_WORKER_PATH === "undefined") throw new Error("Voice recorder Worker is missing from this installation")
+    return OPENCODE_VOICE_WORKER_PATH
+  }
+  return new URL("./prompt-voice-recorder-worker.ts", import.meta.url).href
+}
+// compiled Worker 必须使用 build.ts 注入的 bunfs 地址，缺失时直接暴露安装损坏。
 async function embeddedPvRecorderNativePath(libraryPath: string) {
   if (!(typeof OPENCODE_COMPILED !== "undefined" && OPENCODE_COMPILED)) return
   const embedded = await importEmbeddedPvRecorderFiles()
@@ -323,75 +291,6 @@ async function linuxPvRecorderMachine(arch: NodeJS.Architecture) {
   if (part === "0xd03") return `cortex-a53${suffix}`
   if (part === "0xd08") return `cortex-a72${suffix}`
   if (part === "0xd0b") return `cortex-a76${suffix}`
-}
-
-function createBundledPvRecorderConstructor(native: NativePvRecorder): PvRecorderConstructor {
-  // 这个轻量 class 只补齐本文件实际用到的 PvRecorder API，避免引入 @picovoice 包内会触发错误 __dirname 的 JS wrapper。
-  class BundledPvRecorder implements PvRecorderInstance {
-    static _pvRecorder = native
-    _handle: bigint
-    readonly frameLength: number
-
-    constructor(frameLength: number, deviceIndex = -1, bufferedFramesCount = 50) {
-      // status=0 是 Picovoice SUCCESS；保持数字判断，避免再加载包内枚举模块导致 compiled 路径回退。
-      const result = native.init(frameLength, deviceIndex, bufferedFramesCount)
-      if (result.status !== 0) throw new Error(`PvRecorder initialize failed with status ${result.status}`)
-      // native handle 是后续 start/read/stop/delete 的唯一资源标识，必须和包内 JS wrapper 的字段名保持一致。
-      this._handle = result.handle
-      this.frameLength = frameLength
-    }
-
-    start() {
-      // start 是用户可见的启动边界，权限或设备占用错误必须透传给 controller 展示。
-      requirePvRecorderSuccess(native.start(this._handle), "start")
-    }
-
-    stop() {
-      // stop 保持包内 wrapper 的 status 检查语义；外层 close 把它作为 best-effort 释放边界处理。
-      requirePvRecorderSuccess(native.stop(this._handle), "stop")
-    }
-
-    release() {
-      // delete 对应 Picovoice native 资源释放；重复调用由外层 closePromise 保证不会发生。
-      native.delete(this._handle)
-    }
-  }
-  return BundledPvRecorder
-}
-
-function requirePvRecorderSuccess(status: number, action: string) {
-  if (status !== 0) throw new Error(`PvRecorder ${action} failed with status ${status}`)
-}
-
-function readFrame(PvRecorder: PvRecorderConstructor, recorder: PvRecorderInstance) {
-  // 不能调用 PvRecorder.read()/readSync()：Bun 1.3.x 与该 native addon 的 N-API TypedArray 写回存在兼容差异。
-  // 显式创建 ArrayBuffer backing store 后再传入 native read，是当前已验证的 Bun 源码态和 compile exe 态共同可用路径。
-  const pcm = new Int16Array(new ArrayBuffer(recorder.frameLength * Int16Array.BYTES_PER_ELEMENT))
-  const status = PvRecorder._pvRecorder.read(recorder._handle, pcm)
-  if (status !== 0) throw new Error(`PvRecorder read failed with status ${status}`)
-  return pcm
-}
-
-function drainBufferedFrames(PvRecorder: PvRecorderConstructor, recorder: PvRecorderInstance, frames: Int16Array[]) {
-  // 帧数上限等于 native circular buffer 容量；这样即使 addon 行为异常，也不会无限延长 stop。
-  for (let index = 0; index < VOICE_RECORDER_BUFFERED_FRAMES; index++) {
-    const startedAt = performance.now()
-    const frame = readFrame(PvRecorder, recorder)
-    // 快返回的 read 是 queued backlog，直接保留。
-    if (performance.now() - startedAt < VOICE_RECORDER_DRAIN_BLOCKED_READ_MS) {
-      frames.push(frame)
-      continue
-    }
-    // 单次慢读可能是缓冲耗尽进入 live read，也可能是 OS 调度抢占导致的 wall-clock 膨胀。
-    // 再读一帧确认：连续两帧都慢才认定为 live read，避免单次抢占导致尾部 queued 帧全部丢失。
-    // 确认帧会额外消耗一个 native 帧周期（~32ms），但仅在首次遇到慢读时触发一次，对 stop 延迟可忽略。
-    const confirmStartedAt = performance.now()
-    const confirmFrame = readFrame(PvRecorder, recorder)
-    if (performance.now() - confirmStartedAt >= VOICE_RECORDER_DRAIN_BLOCKED_READ_MS) return
-    // 确认帧快返回：前一帧是抢占膨胀的 queued 帧，两帧都是有效 backlog 数据，一并保留。
-    frames.push(frame)
-    frames.push(confirmFrame)
-  }
 }
 
 function flattenFrames(frames: Int16Array[]) {

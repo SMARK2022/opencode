@@ -1383,6 +1383,20 @@ const scenarios: Scenario[] = [
       // 空 sessionIDs 返回空对象
       check(Object.keys(body).length === 0, "empty sessionIDs should return empty object")
     }),
+  // gate 差集登记：progressive searchScan 路由烟测（域正确性由 session-list 覆盖）
+  http.protected
+    .post("/session/search/scan", "session.search.scan")
+    .at((ctx) => ({
+      path: route("/session/search/scan", {}),
+      headers: ctx.headers(),
+      body: { search: "httpapi-exercise-scan" },
+    }))
+    .json(200, (body) => {
+      object(body)
+      check(Array.isArray(body.sessions), "search scan should return sessions array")
+      check(typeof body.done === "boolean", "search scan should return done boolean")
+      check("nextCursor" in body, "search scan should return nextCursor")
+    }),
   http.protected
     .post("/tui/append-prompt", "tui.appendPrompt")
     .at((ctx) => ({ path: "/tui/append-prompt", headers: ctx.headers(), body: { text: "hello" } }))

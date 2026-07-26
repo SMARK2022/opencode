@@ -473,6 +473,7 @@ for (const item of targets) {
   const rootPath = path.resolve(dir, "../../node_modules/@opentui/core/parser.worker.js")
   const parserWorker = fs.realpathSync(fs.existsSync(localPath) ? localPath : rootPath)
   const workerPath = "./src/cli/cmd/tui/worker.ts"
+  const voiceWorkerPath = "./src/cli/cmd/tui/prompt-voice-recorder-worker.ts" // keep source and compiled entrypoint ownership identical.
   const sharpFiles = (await createSharpNativeFileMap(item)).source
 
   // Use platform-specific bunfs root path based on target OS
@@ -509,6 +510,7 @@ for (const item of targets) {
       "./src/index.ts",
       parserWorker,
       workerPath,
+      voiceWorkerPath, // bundling this entrypoint prevents compiled runtime fallback to checkout files.
       ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
       // 虚拟模块必须作为 entrypoint 交给 Bun.build，否则 dynamic import 在 compiled exe 内找不到资源映射。
       "opencode-pvrecorder.gen.ts",
@@ -519,6 +521,7 @@ for (const item of targets) {
       OPENCODE_MIGRATIONS: JSON.stringify(migrations),
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
       OPENCODE_WORKER_PATH: workerPath,
+      OPENCODE_VOICE_WORKER_PATH: voiceWorkerPath, // compiled 运行时只走 bunfs entrypoint，不回退 checkout 源码。
       OPENCODE_CHANNEL: `'${Script.channel}'`,
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
       // 运行时用该常量禁止回退到 @picovoice 的 node_modules 相对路径，防止重新暴露 CI 绝对路径 bug。
@@ -559,6 +562,21 @@ for (const item of targets) {
         throw new Error(stderr.trim() || `version smoke exited ${exitCode} without output`)
       }
       console.log(`Smoke test passed: ${versionOutput}`)
+
+      const voice = Bun.spawn([binaryPath], { // 通过真实 compiled binary 验证 Worker 消息协议和 clean close。
+        env: { ...smokeEnv, OPENCODE_PROCESS_ROLE: "voice-smoke" },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [voiceExit, voiceStdout, voiceStderr] = await Promise.all([
+        voice.exited,
+        new Response(voice.stdout).text(),
+        new Response(voice.stderr).text(),
+      ])
+      if (voiceExit !== 0 || voiceStdout.trim() !== "voice-worker-probe-ok") {
+        throw new Error(voiceStderr.trim() || `voice Worker smoke exited ${voiceExit}: ${voiceStdout.trim()}`)
+      }
+      console.log("Compiled voice Worker smoke passed")
     } catch (e) {
       console.error(`Smoke test failed for ${name}:`, e)
       process.exit(1)
