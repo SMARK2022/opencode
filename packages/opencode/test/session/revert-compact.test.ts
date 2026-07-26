@@ -92,6 +92,8 @@ const tool = Effect.fn("test.tool")(function* (sessionID: SessionID, messageID: 
     type: "tool" as const,
     tool: "bash",
     callID: "call-1",
+    // #557：bash 归因 ambient——Revert 只接纳其自身 Patch 文件。
+    metadata: { worktree: "ambient" },
     state: {
       status: "completed" as const,
       input: {},
@@ -120,6 +122,8 @@ const editTool = Effect.fn("test.editTool")(function* (
     type: "tool" as const,
     tool: "edit",
     callID: "edit-" + Math.random().toString(36).slice(2),
+    // #557：edit 归因 declared——精确文件 authority。
+    metadata: { worktree: "declared" },
     state: {
       status: "completed" as const,
       input: { filePath: absFile },

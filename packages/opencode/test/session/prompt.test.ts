@@ -21,6 +21,10 @@ import { Agent as AgentSvc } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { Command } from "../../src/command"
 import { Config } from "@/config/config"
+// #557：observedSnapshot decorator 的 Snapshot 基础层依赖（AppProcess）。
+import { AppProcess } from "@opencode-ai/core/process"
+import { llmClient } from "@opencode-ai/core/effect/app-node-platform"
+import { Auth } from "@/auth"
 import { LSP } from "@/lsp/lsp"
 import { MCP } from "../../src/mcp"
 import { Permission } from "../../src/permission"
@@ -37,7 +41,7 @@ import { Image } from "../../src/image/image"
 import { Question } from "../../src/question"
 import { Todo } from "../../src/session/todo"
 import { Session } from "@/session/session"
-import { SessionMessageTable } from "@opencode-ai/core/session/sql"
+import { MessageTable, PartTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -67,17 +71,29 @@ import { provideTmpdirInstance, TestInstance, tmpdirScoped } from "../fixture/fi
 import { InstanceRef } from "@/effect/instance-ref"
 import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 import { httpError, reply, TestLLMServer } from "../lib/llm-server"
+// 原生事件fixture复用目标已导入的Schema/Stream，不重复引入旧AI SDK流类型。
+import { LLMEvent } from "@opencode-ai/llm"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/location-services"
+// #557：summary stub 的 computeDiff 使用真实纯计算。
+import { SummaryCache } from "../../src/session/summary-cache"
 
 const summary = Layer.succeed(
   SessionSummary.Service,
   SessionSummary.Service.of({
     summarize: () => Effect.void,
     diff: () => Effect.succeed([]),
-    computeDiff: () => Effect.succeed([]),
+    // #557：computeDiff 走真实纯计算（SummaryCache）——Revert ownership 依赖 tool metadata 派生文件。
+    computeDiff: (input) =>
+      InstanceRef.pipe(
+        Effect.map((ctx) => {
+          if (!ctx) throw new Error("Missing prompt fixture Instance")
+          const base = ctx.worktree && ctx.worktree !== "/" ? ctx.worktree : ctx.directory
+          return SummaryCache.collectToolDiffs(SummaryCache.toToolDiffMessages(input.messages), base)
+        }),
+      ),
   }),
 )
 
@@ -161,6 +177,116 @@ function makeMcp(instructions: MCP.ServerInstructions[] = []) {
   )
 }
 
+// #557：MCP 开关模拟同 daemon 内连接态变化，Message cache 不得冻结其 Tool surface。
+// 目标 MCP seam 是原生 McpTool {def, client}——fake client 的 callTool 落盘 mutation 文件。
+let mcpMutationFile = ""
+let mcpEnabled = true
+const mutatingMcpTools = (): ReturnType<MCP.Interface["tools"]> => Effect.succeed(
+  mcpEnabled ? {
+    mcp_mutate: {
+      def: { name: "mcp_mutate", description: "mutate one test file", inputSchema: { type: "object" as const, properties: {}, additionalProperties: false } },
+      client: { callTool: () => Bun.write(mcpMutationFile, "mcp").then(() => ({ content: [{ type: "text", text: "mutated" }] })) } as never,
+    },
+  } : ({} as Record<string, never>),
+)
+const mutatingMcp = Layer.succeed(
+  MCP.Service,
+  MCP.Service.of({
+    status: () => Effect.succeed({}),
+    native: () => Effect.die("unexpected Native MCP connection in prompt-effect tests"),
+    // 同一fake工具快照服务两条既有读取入口，不创建真实连接或另一份动态工具数据。
+    snapshot: () => mutatingMcpTools().pipe(Effect.map(tools => ({ tools, clients: {}, instructions: [] }))),
+    clients: () => Effect.succeed({}),
+    instructions: () => Effect.succeed([]),
+    tools: mutatingMcpTools,
+    prompts: () => Effect.succeed({}),
+    resources: () => Effect.succeed({}),
+    resourceTemplates: () => Effect.succeed({}),
+    add: () => Effect.succeed({ status: { status: "disabled" as const } }),
+    connect: () => Effect.void,
+    disconnect: () => Effect.void,
+    getPrompt: () => Effect.succeed(undefined),
+    readResource: () => Effect.succeed(undefined),
+    startAuth: () => Effect.die("unexpected MCP auth in prompt-effect tests"),
+    authenticate: () => Effect.die("unexpected MCP auth in prompt-effect tests"),
+    finishAuth: () => Effect.die("unexpected MCP auth in prompt-effect tests"),
+    removeAuth: () => Effect.void,
+    supportsOAuth: () => Effect.succeed(false),
+    hasStoredTokens: () => Effect.succeed(false),
+    getAuthStatus: () => Effect.succeed("not_authenticated" as const),
+  }),
+)
+
+// #557：observer 包装真实 Snapshot node——计数含 before/after，不用伪造成功值。
+// decorator 的基础层经 Layer.provide 内联（同标签 dep 会形成 node 图自环）。
+const snapshotTracks = new Map<string, number>()
+// #557：observer node——track 计数含 before/after 两次真实 git 扫描。
+const observedSnapshot = LayerNode.make({
+  service: Snapshot.Service,
+  layer: Layer.effect(
+    Snapshot.Service,
+    Effect.gen(function* () {
+      const base = yield* Snapshot.Service
+      return Snapshot.Service.of({
+        ...base,
+        // track 计数发生在真实调用之前，晚 capture 和重复 capture 都能被断言观察。
+        track: () =>
+          InstanceRef.pipe(
+            Effect.map(ctx => { if (!ctx) throw new Error("Missing prompt fixture Instance"); return ctx.directory }),
+            Effect.tap((dir) => Effect.sync(() => snapshotTracks.set(dir, (snapshotTracks.get(dir) ?? 0) + 1))),
+            Effect.andThen(base.track()),
+          ),
+      })
+    }),
+  ).pipe(Layer.provide(Snapshot.node.implementation as Layer.Layer<Snapshot.Service>)),
+  deps: [FSUtil.node, AppProcess.node, Config.node],
+})
+// 观察公开LLM调用入口，准备预算不混入目标新增的wire估算与持久账本结算。
+const llmDispatchTimes = new Map<string, number>()
+const measuredLLM = LayerNode.make({
+  service: LLM.Service,
+  layer: Layer.effect(
+    LLM.Service,
+    Effect.gen(function* () {
+      const base = yield* LLM.Service
+      return LLM.Service.of({
+        stream: (input) => {
+          // 小模型后台任务不属于被测用户请求，仍原样转交真实实现。
+          if (!input.small) llmDispatchTimes.set(input.sessionID, performance.now())
+          return base.stream(input)
+        },
+      })
+    }),
+  ).pipe(Layer.provide(LLM.node.implementation as Layer.Layer<LLM.Service>)),
+  deps: [Auth.node, Config.node, ProviderSvc.node, Plugin.node, Permission.node, EventV2Bridge.node, llmClient, RuntimeFlags.node],
+})
+
+const providerUsage = {
+  inputTokens: 1,
+  outputTokens: 1,
+  totalTokens: 2,
+  inputTokenDetails: { noCacheTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  outputTokenDetails: { textTokens: 1, reasoningTokens: 0 },
+} as const
+// #557：providerExecuted 事件绕过本地 Tool adapter，专门保护「远端 Tool 不建本地 baseline」。
+// #557：providerExecuted 流——远端 Tool 无本地 execute，零 track 是正确归因。
+const providerExecutedLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: (input) =>
+      Stream.unwrap(
+        // fixture也履行prepared交接，不能让工具Part早于父Message而测到无关的外键失败。
+        (input.onRequestPrepared?.({ messages: input.messages }) ?? Effect.void).pipe(Effect.as(Stream.make(
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.toolInputStart({ id: "provider-call", name: "provider_search" }),
+        LLMEvent.toolCall({ id: "provider-call", name: "provider_search", input: {}, providerExecuted: true }),
+        LLMEvent.stepFinish({ index: 0, reason: "stop", usage: providerUsage }),
+        LLMEvent.finish({ reason: "stop", usage: providerUsage }),
+        ))),
+      ),
+  }),
+)
+
 const lsp = Layer.succeed(
   LSP.Service,
   LSP.Service.of({
@@ -181,6 +307,56 @@ const lsp = Layer.succeed(
   }),
 )
 
+// #557：pre-dispatch transform defect——验证 typed Assistant 单次持久化与 0 次 Provider 调用。
+const failingMessageTransform = Layer.succeed(
+  Plugin.Service,
+  Plugin.Service.of({
+    trigger: (name, _input, output) =>
+      name === "experimental.chat.messages.transform"
+        ? Effect.die(new Error("pre-dispatch transform failed"))
+        : Effect.succeed(output),
+    list: () => Effect.succeed([{ "experimental.chat.messages.transform": () => Promise.resolve() }]),
+    init: () => Effect.void,
+  }),
+)
+let transformedHistoryText = ""
+let toolDefinitionVersion = ""
+const transformingHistory = Layer.succeed(
+  Plugin.Service,
+  Plugin.Service.of({
+    trigger: (name, _input, output) =>
+      Effect.sync(() => {
+        if (name === "tool.definition" && typeof output === "object" && output !== null) {
+          // description 和 schema 使用同一版本，第二 step 可同时检测 definition 两种输出是否 fresh。
+          Reflect.set(output, "description", `dynamic tool ${toolDefinitionVersion}`)
+          Reflect.set(output, "jsonSchema", { type: "object", properties: { version: { const: toolDefinitionVersion } } })
+          return output
+        }
+        if (name !== "experimental.chat.messages.transform") return output
+        if (typeof output !== "object" || output === null) return output
+        const messages = Reflect.get(output, "messages")
+        if (!Array.isArray(messages)) return output
+        // 改写最早历史 Part 可检测错误的 converted-prefix 复用，改 latest 不足以区分 suffix 路径。
+        const text = messages
+          .flatMap((message) => Reflect.get(message, "parts") ?? [])
+          .find((part) => Reflect.get(part, "type") === "text")
+        if (text) Reflect.set(text, "text", transformedHistoryText)
+        return output
+      }),
+    list: () => Effect.succeed([{ "experimental.chat.messages.transform": () => Promise.resolve() }]),
+    init: () => Effect.void,
+  }),
+)
+const failingToolPlugin = Layer.succeed(
+  Plugin.Service,
+  Plugin.Service.of({
+    // hook 在真实 Tool implementation 之前失败，用于验证 baseline 已先建立且文件未写入。
+    trigger: (name, _input, output) =>
+      name === "tool.execute.before" ? Effect.die(new Error("Tool rejected before implementation")) : Effect.succeed(output),
+    list: () => Effect.succeed([]),
+    init: () => Effect.void,
+  }),
+)
 const processorCreateStarted: Array<() => void> = []
 const blockingProcessor = Layer.succeed(
   SessionProcessor.Service,
@@ -262,7 +438,10 @@ function makeHttp(input?: {
   mcpInstructions?: MCP.ServerInstructions[]
   processor?: "blocking"
   image?: "unavailable" | "counting"
-  plugin?: "mutate"
+  plugin?: "mutate" | "fail-transform" | "transform-history" | "fail-tool"
+  snapshot?: "observe"
+  mcp?: "mutating"
+  llm?: "provider-executed" | "measure-preflight"
 }) {
   const root = LayerNode.group([promptRoot, testLLMServerNode])
   // #485：resizer 不可用注入——normalize 必然失败，验证 prompt 在持久化前 fail-closed
@@ -315,6 +494,15 @@ function makeHttp(input?: {
     ...(input?.image === "unavailable" ? [[Image.node, unavailableImage] as const] : []),
     ...(input?.image === "counting" ? [[Image.node, countingImage] as const] : []),
     ...(input?.plugin === "mutate" ? [[Plugin.node, mutatingPlugin] as const] : []),
+    // #557：动态面 fixtures——transform 失败/版本化 transform/拒绝 hook 三种 plugin 形态。
+    ...(input?.plugin === "fail-transform" ? [[Plugin.node, failingMessageTransform] as const] : []),
+    ...(input?.plugin === "transform-history" ? [[Plugin.node, transformingHistory] as const] : []),
+    ...(input?.plugin === "fail-tool" ? [[Plugin.node, failingToolPlugin] as const] : []),
+    // #557：Snapshot 计数 observer 与 providerExecuted LLM 流。
+    ...(input?.snapshot === "observe" ? [[Snapshot.node, observedSnapshot] as const] : []),
+    ...(input?.llm === "provider-executed" ? [[LLM.node, providerExecutedLLM] as const] : []),
+    ...(input?.llm === "measure-preflight" ? [[LLM.node, measuredLLM] as const] : []),
+    ...(input?.mcp === "mutating" ? [[MCP.node, mutatingMcp] as const] : []),
   ] as const
   if (input?.processor === "blocking") {
     return LayerNode.compile(root, [...replacements, [SessionProcessor.node, blockingProcessor]])
@@ -342,6 +530,14 @@ const withMcpInstructions = testEffect(
 )
 const unix = process.platform !== "win32" ? it.instance : it.instance.skip
 const unixNoLLMServer = process.platform !== "win32" ? noLLMServer.instance : noLLMServer.instance.skip
+// #557：动态面/observer 环境。
+// #557：fail-transform 环境——pre-dispatch 失败路径的独立 fixture 组合。
+const failingTransform = testEffect(makeHttp({ plugin: "fail-transform" }))
+const dynamicSurfaces = testEffect(makeHttp({ plugin: "transform-history", mcp: "mutating" }))
+const observed = testEffect(makeHttp({ snapshot: "observe" }))
+const observedProvider = testEffect(makeHttp({ snapshot: "observe", llm: "provider-executed" }))
+const observedDenied = testEffect(makeHttp({ snapshot: "observe", plugin: "fail-tool" }))
+const measuredPreflight = testEffect(makeHttp({ llm: "measure-preflight" }))
 // #534：resizer 不可用环境——坏图片降级为 synthetic omission text，消息仍原子落库
 const unavailable = testEffect(makeHttp({ image: "unavailable" }))
 // #534：counting 环境——记录每次 normalize URL，锁定单次 decode 与 proof 消费/失效。
@@ -707,6 +903,25 @@ function defer<T>() {
   return { promise, resolve }
 }
 
+// #557：同一 response 的并发 Tool 必须拥有独立 OpenAI stream index，否则 AI SDK 把后调用覆盖到 index 0。
+// #557：并发 Tool fixture——独立 stream index 防止 AI SDK 覆盖到 index 0。
+function concurrentToolReply(calls: Array<{ name: string; input: unknown }>) {
+  const item = calls.reduce((value, call) => value.tool(call.name, call.input), reply()).item()
+  if (item.type !== "sse") throw new Error("Expected SSE Tool reply")
+  let index = -1
+  // 每个 Tool 的参数 delta 必须沿用其 start delta index；这里只修 fixture 协议索引，不改 Tool 参数/时序/并发模型。
+  for (const line of [
+    ...item.head,
+    ...item.tail,
+  ] as Array<{ choices?: Array<{ delta?: { tool_calls?: Array<{ index: number; function?: { name?: string } }> } }> }>) {
+    const call = line.choices?.[0]?.delta?.tool_calls?.[0]
+    if (!call) continue
+    if (call.function?.name) index++
+    call.index = index
+  }
+  return item
+}
+
 const succeedVoid = (deferred: Deferred.Deferred<void>) => {
   Effect.runSync(Deferred.succeed(deferred, void 0).pipe(Effect.ignore))
 }
@@ -786,6 +1001,22 @@ const seed = Effect.fn("test.seed")(function* (sessionID: SessionID, opts?: { fi
     text: "hi there",
   })
   return { user: msg, assistant }
+})
+
+// #557：text turn——真实 prompt.loop + provider 往返的最小完整轮。
+// #557：textTurn 封装完整 provider 往返——cache 测试的最小 admitted 轮次单元。
+const textTurn = Effect.fn("test.textTurn")(function* (sessionID: SessionID, input: string, output: string) {
+  const llm = yield* TestLLMServer
+  const prompt = yield* SessionPrompt.Service
+  const userMessage = yield* user(sessionID, input)
+  yield* llm.text(output)
+  return { user: userMessage, result: yield* prompt.loop({ sessionID }) }
+})
+
+// #557：断言面是 Provider 实际请求体，不是 cache 内部状态。
+const lastProviderInput = Effect.fn("test.lastProviderInput")(function* () {
+  const llm = yield* TestLLMServer
+  return (yield* llm.inputs).at(-1)
 })
 
 const addCompletedTool = (sessionID: SessionID, messageID: MessageID) =>
@@ -1479,10 +1710,10 @@ it.instance("loop surfaces content-filter finishes as session errors", () =>
       if (!Exit.isFailure(exit)) return yield* Effect.die("Expected preprocess defect")
       expect(Cause.squash(exit.cause)).toBe(transformFailure)
       expect(transformCalls).toBe(1)
-      const assistant = (yield* sessions.messages({ sessionID: chat.id })).find(message => message.info.role === "assistant")
-      if (!assistant || assistant.info.role !== "assistant") return yield* Effect.die("Missing owned assistant")
-      expect(assistant.info).toMatchObject({ parentID: id, error: { name: "UnknownError", data: { message: transformFailure.message } }, time: { completed: expect.any(Number) } })
-      expect(yield* usage.get({ sessionID: chat.id, requestID: id })).toMatchObject({ rootRequestID: id, status: "error", assistantCount: 1, stepCount: 0, cost: 0, tokens: zero, error: transformFailure.message })
+      // prepared之前失败只结算已admit的请求；原cause与零消费不能靠空助手占位证明。
+      expect((yield* sessions.messages({ sessionID: chat.id })).filter(message => message.info.role === "assistant")).toHaveLength(0)
+      expect(yield* usage.get({ sessionID: chat.id, requestID: id })).toMatchObject({ rootRequestID: id, status: "error", assistantCount: 0, stepCount: 0, cost: 0, tokens: zero, error: transformFailure.message, time: { completed: expect.any(Number) } })
+      expect(yield* usage.assistants({ sessionID: chat.id, requestID: id })).toEqual([])
       const status = yield* SessionStatus.Service
       expect((yield* status.get(chat.id)).type).toBe("idle")
     }).pipe(Effect.provide(Layer.fresh(makePrompt({ database: Layer.succeed(Database.Service, database), plugin: Layer.mock(Plugin.Service)({
@@ -3113,7 +3344,7 @@ it.instance("cancel records MessageAbortedError on interrupted process", () =>
 )
 
 raceNoLLMServer.instance(
-  "finalizes assistant when cancelled before processor creation completes",
+  "settles admitted requests without an assistant when cancelled before processor creation completes",
   () =>
     Effect.gen(function* () {
       processorCreateStarted.length = 0
@@ -3126,75 +3357,32 @@ raceNoLLMServer.instance(
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const chat = yield* sessions.create({ title: "Processor creation race" })
-
-      yield* prompt.prompt({
-        sessionID: chat.id,
-        agent: "build",
-        noReply: true,
-        parts: [{ type: "text", text: "first" }],
-      })
-
-      const firstCreate = defer<void>()
-      processorCreateStarted.push(firstCreate.resolve)
-      const first = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-      yield* Effect.promise(() => firstCreate.promise)
-
-      yield* prompt.cancel(chat.id)
-      const firstExit = yield* Fiber.await(first)
-      expect(Exit.isSuccess(firstExit)).toBe(true)
-
-      let messages = yield* sessions.messages({ sessionID: chat.id })
-      const firstInterrupted = messages.at(-1)
-      expect(firstInterrupted?.info.role).toBe("assistant")
-      expect(firstInterrupted?.parts).toHaveLength(0)
-      if (firstInterrupted?.info.role === "assistant") {
-        expect(firstInterrupted.info.finish).toBeUndefined()
-        expect(firstInterrupted.info.time.completed).toBeNumber()
-        expect(firstInterrupted.info.error?.name).toBe("MessageAbortedError")
-      }
-
-      yield* prompt.prompt({
-        sessionID: chat.id,
-        agent: "build",
-        noReply: true,
-        parts: [{ type: "text", text: "second" }],
-      })
-
-      const secondCreate = defer<void>()
-      processorCreateStarted.push(secondCreate.resolve)
-      const second = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-      yield* Effect.promise(() => secondCreate.promise)
-
-      yield* prompt.cancel(chat.id)
-      const secondExit = yield* Fiber.await(second)
-      expect(Exit.isSuccess(secondExit)).toBe(true)
-
-      messages = yield* sessions.messages({ sessionID: chat.id })
-      const poisonMessages = messages.filter(
-        (message) =>
-          message.info.role === "assistant" &&
-          message.parts.length === 0 &&
-          !message.info.finish &&
-          !message.info.time.completed &&
-          !message.info.error,
-      )
-      expect(poisonMessages).toHaveLength(0)
-
-      const interruptedMessages = messages.filter(
-        (message) =>
-          message.info.role === "assistant" &&
-          message.parts.length === 0 &&
-          message.info.time.completed &&
-          message.info.error?.name === "MessageAbortedError",
-      )
-      expect(interruptedMessages).toHaveLength(2)
-
-      const lastUser = messages.at(-2)
-      const lastAssistant = messages.at(-1)
-      expect(lastUser?.info.role).toBe("user")
-      expect(lastAssistant?.info.role).toBe("assistant")
-      if (lastUser?.info.role === "user" && lastAssistant?.info.role === "assistant") {
-        expect(lastAssistant.info.parentID).toBe(lastUser?.info.id)
+      const usage = yield* SessionRequestUsage.Service
+      const status = yield* SessionStatus.Service
+      const ids = [MessageID.ascending(), MessageID.ascending()]
+      // 两次真实admission分别进入阻塞create；不复用已被noReply结算的请求冒充取消。
+      for (const [index, messageID] of ids.entries()) {
+        const ready = defer<void>()
+        processorCreateStarted.push(ready.resolve)
+        const run = yield* prompt.prompt({
+          sessionID: chat.id, messageID, agent: "build", parts: [{ type: "text", text: index === 0 ? "first" : "second" }],
+        }).pipe(Effect.forkChild)
+        yield* Effect.promise(() => ready.promise)
+        // create始终不返回，因此尚未进入LLM；取消由真实请求owner闭合，而不是构造助手。
+        yield* prompt.cancel(chat.id)
+        const exit = yield* Fiber.await(run)
+        expect(Exit.isSuccess(exit)).toBe(true)
+        if (Exit.isSuccess(exit)) expect(exit.value.info).toMatchObject({ id: messageID, role: "user" })
+        const messages = yield* sessions.messages({ sessionID: chat.id })
+        expect(messages.filter(message => message.info.role === "assistant")).toHaveLength(0)
+        expect(messages.filter(message => message.info.role === "user").map(message => message.info.id)).toEqual(ids.slice(0, index + 1))
+        expect(yield* usage.get({ sessionID: chat.id, requestID: messageID })).toMatchObject({
+          rootRequestID: messageID, status: "aborted", assistantCount: 0, stepCount: 0, cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 },
+          error: expect.stringMatching(/interrupt|abort/i), time: { completed: expect.any(Number) },
+        })
+        expect(yield* usage.assistants({ sessionID: chat.id, requestID: messageID })).toEqual([])
+        expect((yield* status.get(chat.id)).type).toBe("idle")
       }
     }),
   { config: cfg },
@@ -5591,6 +5779,499 @@ it.instance(
     }),
   { git: true },
   60_000,
+)
+
+// ============================================================
+// #557：零 token 首写移除 + 懒快照 + 前缀缓存 + worktree 归因矩阵
+// ============================================================
+
+it.instance(
+  "publishes the estimated Assistant as the first durable attempt state",
+  () =>
+    Effect.gen(function* () {
+      yield* useServerConfig(providerCfg)
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      const events = yield* EventV2Bridge.Service
+      const seen: SessionV1.Assistant[] = []
+      const off = yield* events.listen(event => {
+        if (event.type !== MessageV2.Event.Updated.type) return Effect.void
+        const data = event.data as typeof MessageV2.Event.Updated.data.Type
+        if (data.info.sessionID === chat.id && data.info.role === "assistant") seen.push(structuredClone(data.info))
+        return Effect.void
+      })
+      yield* textTurn(chat.id, "estimate this request", "estimated")
+      yield* off
+      // EventV2在commit后通知；保存独立快照，不能让后续usage更新伪装成首次估算。
+      expect(seen.length).toBeGreaterThan(0)
+      expect(seen[0]?.inputEstimate?.input).toBeGreaterThan(0)
+      expect(seen[0]?.inputEstimate?.bodyChars).toBeGreaterThan(0)
+      expect(seen[0]?.inputEstimate?.inputBreakdown?.messages.userText).toBeGreaterThan(0)
+      expect(seen[0]?.inputEstimate?.confirmed).not.toBe(true)
+      const assistants = (yield* sessions.messages({ sessionID: chat.id })).filter(
+        (message) => message.info.role === "assistant",
+      )
+      expect(assistants).toHaveLength(1)
+      const first = assistants[0]?.info
+      if (first?.role !== "assistant") throw new Error("Expected assistant")
+      expect(first.inputEstimate?.input).toBeGreaterThan(0)
+      expect(first.inputEstimate?.inputBreakdown?.messages.userText).toBeGreaterThan(0)
+    }),
+  { git: true },
+)
+
+failingTransform.instance(
+  "settles pre-dispatch failure without publishing a zero-estimate Assistant",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+      const usage = yield* SessionRequestUsage.Service
+      const requestID = MessageID.ascending()
+      const exit = yield* prompt.prompt({
+        sessionID: chat.id, messageID: requestID, agent: "build", parts: [{ type: "text", text: "fail before dispatch" }],
+      }).pipe(Effect.exit)
+
+      // transform defect 位于 estimate publication 前，Provider 绝不能收到请求。
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(yield* llm.calls).toBe(0)
+      const assistants = (yield* sessions.messages({ sessionID: chat.id })).filter(
+        (message) => message.info.role === "assistant",
+      )
+      // 目标已有零助手请求终态；保留错误和完成语义，不为兼容旧测试制造幽灵助手。
+      expect(assistants).toHaveLength(0)
+      const request = yield* usage.get({ sessionID: chat.id, requestID })
+      expect(request?.status).toBe("error")
+      expect(request?.error).toContain("pre-dispatch transform failed")
+      expect(request?.assistantCount).toBe(0)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "contracts a retained suffix after public Revert cleanup",
+  () =>
+    Effect.gen(function* () {
+      yield* useServerConfig(providerCfg)
+      const sessions = yield* Session.Service
+      const revert = yield* SessionRevert.Service
+      const chat = yield* sessions.create({ title: "Deleted suffix" })
+      // 第一次 loop 必须先形成 full hit 候选，删除前不能只测试 cold rebuild。
+      const removed = yield* textTurn(chat.id, "delete cached user", "delete cached assistant")
+      // 真实 cleanup 写 hidden mutation，不依赖直接删除提供不同的 proof 形状。
+      yield* revert.revert({ sessionID: chat.id, messageID: removed.user.id })
+      yield* revert.cleanup(yield* sessions.get(chat.id))
+      // replacement 保证当前 proof 仍有合法 suffix，cache 不能因删除返回空窗口。
+      const replacement = yield* textTurn(chat.id, "surviving replacement", "replacement")
+      const body = JSON.stringify((yield* lastProviderInput())?.messages)
+      // Provider body 而非 cache 内部长度证明 deleted rows 没有被重播。
+      expect(body).toContain("surviving replacement")
+      expect(body).not.toContain("delete cached assistant")
+      const part = (yield* sessions.messages({ sessionID: chat.id }))
+        .find((message) => message.info.id === replacement.user.id)
+        ?.parts.find((item): item is SessionV1.TextPart => item.type === "text")
+      if (!part) throw new Error("Expected replacement text Part")
+      // 同 Message ID 原位增长必须从 mismatch inclusive 重载，不能只比较 ID 前缀。
+      yield* sessions.updatePart({ ...part, text: "grown part text" })
+      yield* textTurn(chat.id, "continue after growth", "done")
+      expect(JSON.stringify((yield* lastProviderInput())?.messages)).toContain("grown part text")
+    }),
+  { git: true },
+)
+
+dynamicSurfaces.instance(
+  "refreshes queued Permission, Tool definition and MCP in one continuation",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Queued cache",
+        permission: [
+          { permission: "*", pattern: "*", action: "allow" },
+          { permission: "bash", pattern: "*", action: "deny" },
+        ],
+      })
+      const file = path.join(dir, "queued-read.txt")
+      const bashFile = path.join(dir, "queued-bash.txt")
+      yield* Effect.promise(() => Bun.write(file, "queued"))
+      transformedHistoryText = "message transform v1"
+      toolDefinitionVersion = "v1"
+      mcpEnabled = true
+      // 三个动态 producer 在 step1 共享同一可观察版本，避免跨 runLoop 刷新伪通过。
+      mcpMutationFile = path.join(dir, "unused-mcp.txt")
+      yield* Effect.addFinalizer(() => Effect.sync(() => (mcpEnabled = true)))
+      yield* textTurn(chat.id, "establish cache", "first")
+      const gate = defer<void>()
+      // Provider gate 让 queued user 确定落在 step 1 已 admit 之后、step 2 proof 之前。
+      yield* user(chat.id, "start tool step")
+      yield* llm.push(
+        reply().wait(gate.promise).tool("read", { filePath: file }).item(),
+        reply()
+          .tool("bash", { command: `echo allowed > ${JSON.stringify(bashFile)}`, description: "fresh permission" })
+          .item(),
+        reply().text("after queue").stop().item(),
+      )
+      const run = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* llm.wait(2)
+      const firstTools = JSON.stringify((yield* lastProviderInput())?.tools)
+      // step1 body 固定变更前基线，后续「不含 v1」断言才有独立 expected value。
+      expect(firstTools).toContain("dynamic tool v1")
+      expect(firstTools).toContain("mcp_mutate")
+      // 新 user row 只追加到 canonical suffix，wrapper 本身仍必须是 request-only 改写。
+      // readiness 来自真实 HTTP call 计数，不使用固定 sleep 制造时序。
+      transformedHistoryText = "message transform v2"
+      toolDefinitionVersion = "v2"
+      mcpEnabled = false
+      // 状态切换发生在同一 runLoop 尚未释放 Provider gate 时，不允许重建 runLoop 规避刷新。
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        tools: { bash: true },
+        parts: [{ type: "text", text: "queued during provider call" }],
+      })
+      gate.resolve()
+      yield* Fiber.join(run)
+      const latest = (yield* llm.inputs).at(-2)
+      const body = JSON.stringify(latest?.messages)
+      const tools = JSON.stringify(latest?.tools)
+      // transform v2 命中证明 definition/messages 两个动态面都在 continuation 内刷新。
+      expect(body).toContain("queued during provider call")
+      expect(body).toContain("message transform v2")
+      expect(body).not.toContain("message transform v1")
+      expect(tools).toContain("dynamic tool v2")
+      expect(tools).not.toContain("dynamic tool v1")
+      expect(tools).not.toContain("mcp_mutate")
+      // #557：文件落盘证明 bash 不仅重新出现在 schema，还通过最新 Permission 进入真实 implementation。
+      const bashPart = (yield* sessions.messages({ sessionID: chat.id })).flatMap((m) => m.parts).find((p): p is SessionV1.ToolPart => p.type === "tool" && p.tool === "bash")
+      expect(bashPart?.state.status).toBe("completed")
+      expect(bashPart && bashPart.state.status === "completed" && "error" in bashPart.state ? bashPart.state.error : undefined).toBeUndefined()
+      expect(yield* Effect.promise(() => Bun.file(bashFile).exists())).toBe(true)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "invalidates a retained window after successful Compaction",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const compaction = yield* SessionCompaction.Service
+      const chat = yield* sessions.create({ title: "Compaction cache" })
+      yield* textTurn(chat.id, "history before compaction", "first response")
+      yield* llm.text("canonical compacted summary")
+      // compaction.run 写入真实 marker/summary/tail boundary，不直接操纵 cache entry。
+      expect(yield* compaction.run({ sessionID: chat.id, agent: "build", model: ref, auto: true })).toBe("continue")
+      // tools:false 与新 user 一起落盘，但不改变 summary boundary 的 admission 结果。
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        tools: { bash: false },
+        parts: [{ type: "text", text: "after compaction" }],
+      })
+      yield* llm.text("final response")
+      yield* prompt.loop({ sessionID: chat.id })
+      // summary 进入 body 证明 boundary identity 变化触发 full window rebuild。
+      expect(JSON.stringify((yield* llm.inputs).at(-1)?.messages)).toContain("canonical compacted summary")
+      // 同次 warm 请求的 Tool 开关证明 Tool surface 未进入 Message cache。
+      expect(JSON.stringify((yield* llm.inputs).at(-1)?.tools)).not.toContain('"bash"')
+    }),
+  { git: true },
+)
+
+it.instance(
+  "sanitizes cached Tool history for a decide request",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Decide cache",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const file = path.join(dir, "decide-cache.txt")
+      yield* user(chat.id, "build history")
+      yield* llm.tool("write", { filePath: file, content: "tool output" })
+      // build 请求先让 raw Tool Part 进入 retained history，decide 随后必须重新 sanitise。
+      yield* llm.text("built")
+      yield* prompt.loop({ sessionID: chat.id })
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "decide",
+        noReply: true,
+        parts: [{ type: "text", text: "make the decision" }],
+      })
+      // decide mode 强制 tools 为空，旧 build Tool schema 也不能从 warm entry 复现。
+      yield* llm.text("decision")
+      yield* prompt.loop({ sessionID: chat.id })
+      const body = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+      // synthetic tool-context 证明 decide 走完整 selected history conversion，而非普通 cached chunk。
+      // body 是 JSON.stringify 产物——引号以转义形式出现。
+      expect(body).toContain('tool-context tool=' + String.raw`\"write\"`)
+      // 原 AI tool role 缺失防止 unsanitized Tool protocol 泄漏给 decide 模型。
+      expect(body).not.toContain('"role":"tool"')
+    }),
+  { git: true },
+)
+
+measuredPreflight.instance(
+  "reuses a 2048-turn prefix before Provider dispatch",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Large retained prefix" })
+      // 计时对象是读取及转换；造数不经逐条事件fanout，避免把账本维护成本当成缓存回归。
+      const database = yield* Database.Service
+      // 历史早于后续真实输入，保持2048个闭合turn的创建顺序而不依赖ID比较。
+      const created = Date.now() - 4_096
+      const rows = Array.from({ length: 2_048 }, (_, index) => {
+        const id = MessageID.ascending()
+        const assistantID = MessageID.ascending()
+        return [
+          { id, session_id: chat.id, time_created: created + index * 2,
+            data: { role: "user" as const, agent: "build", model: ref,
+              time: { created: created + index * 2 } } },
+          // 与seed保持同一stop、父消息及零usage形状；本fixture不伪造确认样本。
+          { id: assistantID, session_id: chat.id, time_created: created + index * 2 + 1,
+            data: { role: "assistant" as const, parentID: id, mode: "build", agent: "build", cost: 0, finish: "stop",
+              path: { cwd: "/tmp", root: "/tmp" },
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+              modelID: ref.modelID, providerID: ref.providerID, time: { created: created + index * 2 + 1 } } },
+        ]
+      }).flat()
+      // 分批限制SQLite参数数量，单事务只负责建立本次hot历史，不改变产品写入owner。
+      yield* Database.withSync(database, (sync) => sync.transaction((tx) => {
+        for (let offset = 0; offset < rows.length; offset += 250) {
+          const batch = rows.slice(offset, offset + 250)
+          tx.insert(MessageTable).values(batch).run()
+          // 每条Message保留与原seed一致的单个文本Part，后续混合样本仍独立比较真实converter。
+          tx.insert(PartTable).values(batch.map((row) => ({
+            id: PartID.ascending(), session_id: chat.id, message_id: row.id,
+            data: { type: "text" as const, text: row.data.role === "user" ? "hello" : "hi there" },
+          }))).run()
+        }
+      }))
+      const providers = yield* ProviderSvc.Service
+      const model = yield* providers.getModel(ref.providerID, ref.modelID)
+      const history = yield* MessageV2.filterCompactedEffect(chat.id)
+      const full = yield* MessageV2.toModelMessagesEffect(history, model)
+      const chunks = yield* MessageV2.toModelMessageChunksEffect(history, model)
+      // cache 只改变转换分块，不允许改变 Provider body 的 role/content/tool 顺序。
+      expect(chunks.flat()).toEqual(full)
+      const shaped = structuredClone(history.slice(0, 2))
+      // 不改持久性能样本；混合Part必须与完整converter保持同一字面结果。
+      const shapeUser = shaped.find((message) => message.info.role === "user")
+      const shapeAssistant = shaped.find((message) => message.info.role === "assistant")
+      if (!shapeUser || !shapeAssistant) throw new Error("Expected shape pair")
+      shapeUser.parts.push(
+        { id: PartID.ascending(), messageID: shapeUser.info.id, sessionID: chat.id, type: "file", mime: "image/png", url: `data:image/png;base64,${tinyPng}` },
+        { id: PartID.ascending(), messageID: shapeUser.info.id, sessionID: chat.id, type: "compaction", auto: true },
+      )
+      shapeAssistant.parts.push(
+        { id: PartID.ascending(), messageID: shapeAssistant.info.id, sessionID: chat.id, type: "tool", tool: "shape", callID: "completed", state: { status: "completed", input: {}, output: "tool output", title: "", metadata: {}, time: { start: 0, end: 1 } } },
+        { id: PartID.ascending(), messageID: shapeAssistant.info.id, sessionID: chat.id, type: "tool", tool: "shape", callID: "error", state: { status: "error", input: {}, error: "tool error", metadata: {}, time: { start: 0, end: 1 } } },
+      )
+      // 覆盖completed/error、媒体和压缩标记，不复制转换算法构造expected。
+      // 每条Message的工具调用及结果不得因分块改变角色或顺序。
+      const shapeFull = yield* MessageV2.toModelMessagesEffect(shaped, model)
+      expect((yield* MessageV2.toModelMessageChunksEffect(shaped, model)).flat()).toEqual(shapeFull)
+
+      yield* user(chat.id, "cold suffix")
+      yield* llm.text("cold response")
+      const coldStarted = performance.now()
+      yield* prompt.loop({ sessionID: chat.id })
+      // cold 样本包含首次 hydrate 与 chunk construction，是原始回归基线。
+      const cold = performance.now() - coldStarted
+
+      yield* user(chat.id, "warm suffix")
+      yield* llm.text("warm response")
+      const warmStarted = performance.now()
+      yield* prompt.loop({ sessionID: chat.id })
+      // warm 仍包含 Provider HTTP 与 durable Assistant 写入，不是 private helper 计时。
+      const warm = performance.now() - warmStarted
+      const dispatchedAt = llmDispatchTimes.get(chat.id)
+      if (dispatchedAt === undefined) throw new Error("Expected public LLM dispatch")
+      // 整轮保持冷暖对比；1秒约束消息准备至公开入口，prepared估算和确认账本仍走真实路径。
+      expect(warm).toBeLessThan(cold)
+      expect(dispatchedAt).toBeGreaterThanOrEqual(warmStarted)
+      expect(dispatchedAt - warmStarted).toBeLessThan(1_000)
+
+      // 首次无新消息调用先 admit 刚完成的 Assistant；第二次才是 proof 完全不变的 exact full hit。
+      yield* prompt.loop({ sessionID: chat.id })
+      const hitStarted = performance.now()
+      yield* prompt.loop({ sessionID: chat.id })
+      const fullHit = performance.now() - hitStarted
+      const other = yield* sessions.create({ title: "Evict sole Message entry" })
+      yield* seed(other.id, { finish: "stop" })
+      yield* prompt.loop({ sessionID: other.id })
+      // 另一 Session 只负责替换唯一 entry，不修改原 2048-turn proof 或可见历史。
+      const rebuildStarted = performance.now()
+      yield* prompt.loop({ sessionID: chat.id })
+      const rebuild = performance.now() - rebuildStarted
+      // 两条路径均不 dispatch Provider，时间差只来自 admission/hydration/conversion。
+      // 沿用本轮起点既有120ms跨架构余量；无缓存整段重载仍会违反0.65比例。
+      expect(fullHit).toBeLessThan(rebuild * 0.65 + 120)
+      expect(yield* llm.calls).toBe(2)
+    }),
+  { git: true },
+  120_000,
+)
+
+observedDenied.instance(
+  "captures before a non-none Tool rejected by a pre-execution hook",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(providerCfg)
+      snapshotTracks.delete(dir)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Rejected Tool",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const file = path.join(dir, "rejected-tool.txt")
+      // bash 是 ambient；hook 拒绝后仍应留下 policy marker 而无文件副作用。
+      yield* user(chat.id, "reject before implementation")
+      yield* llm.tool("bash", { command: `printf rejected > ${JSON.stringify(file)}`, description: "reject" })
+      yield* llm.text("done")
+      yield* prompt.loop({ sessionID: chat.id })
+      const part = (yield* sessions.messages({ sessionID: chat.id }))
+        .flatMap((message) => message.parts)
+        .find((item): item is SessionV1.ToolPart => item.type === "tool" && item.tool === "bash")
+      // before+after 各一次证明 capture 位于 hook 前，error step 仍完成 Snapshot 边界。
+      expect(snapshotTracks.get(dir)).toBe(2)
+      expect(part?.state.status).toBe("error")
+      // error replacement 不能擦除 prepare 阶段写入的 top-level authority。
+      expect(part?.metadata?.worktree).toBe("ambient")
+      expect(yield* Effect.promise(() => Bun.file(file).exists())).toBe(false)
+    }),
+  { git: true },
+)
+
+observedProvider.instance(
+  "does not snapshot a Provider-executed Tool",
+  () =>
+    Effect.gen(function* () {
+      const { dir } = yield* useServerConfig(providerCfg)
+      snapshotTracks.delete(dir)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Provider Tool" })
+      // providerExecuted stream 没有本地 execute callback，任何 track 都属于错误归因。
+      yield* user(chat.id, "provider executes remotely")
+      yield* prompt.loop({ sessionID: chat.id })
+      const part = (yield* sessions.messages({ sessionID: chat.id }))
+        .flatMap((message) => message.parts)
+        .find((item): item is SessionV1.ToolPart => item.type === "tool")
+      expect(snapshotTracks.get(dir) ?? 0).toBe(0)
+      // provider marker 保留用于展示，但不得被映射成 ambient 或 declared。
+      expect(part?.metadata?.providerExecuted).toBe(true)
+      expect(part?.metadata?.worktree).toBeUndefined()
+    }),
+  { git: true },
+)
+
+observed.instance(
+  "enforces Snapshot and Revert worktree authority matrix",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const snapshots = yield* Snapshot.Service
+      const revert = yield* SessionRevert.Service
+      snapshotTracks.delete(dir)
+      const readChat = yield* sessions.create({ title: "None policy", permission: [{ permission: "*", pattern: "*", action: "allow" }] })
+      const readFile = path.join(dir, "read-only.txt")
+      yield* Effect.promise(() => Bun.write(readFile, "read only"))
+      yield* user(readChat.id, "read without side effects")
+      // Read 经过真实 local adapter 和 terminal lifecycle，0 计数不能由「没有 Tool」偶然满足。
+      yield* llm.tool("read", { filePath: readFile })
+      yield* llm.text("done")
+      yield* prompt.loop({ sessionID: readChat.id })
+      expect(snapshotTracks.get(dir) ?? 0).toBe(0)
+
+      const shared = yield* sessions.create({ title: "Shared Snapshot", permission: [{ permission: "*", pattern: "*", action: "allow" }] })
+      yield* user(shared.id, "run both tools")
+      yield* llm.push(
+        concurrentToolReply([
+          { name: "write", input: { filePath: path.join(dir, "declared-concurrent.txt"), content: "declared" } },
+          { name: "bash", input: { command: `printf ambient > ${JSON.stringify(path.join(dir, "ambient-concurrent.txt"))}`, description: "ambient write" } },
+        ]),
+        reply().tool("bash", { command: `printf next > ${JSON.stringify(path.join(dir, "ambient-next-step.txt"))}`, description: "next step" }).item(),
+        reply().text("done").stop().item(),
+      )
+      yield* prompt.loop({ sessionID: shared.id })
+      const policies = (yield* sessions.messages({ sessionID: shared.id })).flatMap((message) => message.parts)
+        .filter((part): part is SessionV1.ToolPart => part.type === "tool").map((part) => part.metadata?.worktree).sort()
+      // 首轮并发共享 before/after；新 Assistant 续轮建立另一组，重复 capture 会使总数超过 4。
+      expect(snapshotTracks.get(dir)).toBe(4)
+      expect(policies).toEqual(["ambient", "ambient", "declared"])
+
+      const chat = yield* sessions.create({ title: "Revert authority" })
+      const turn = yield* seed(chat.id, { finish: "stop" })
+      const before = yield* snapshots.track()
+      // baseline 早于两个文件写入，使一个 Patch 同时覆盖 declared 和 none 候选。
+      if (!before) throw new Error("Expected Snapshot baseline")
+      const noneFile = path.join(dir, "none-owned.txt")
+      const declaredFile = path.join(dir, "declared-owned.txt")
+      yield* Effect.promise(() => Promise.all([Bun.write(noneFile, "none"), Bun.write(declaredFile, "declared")]))
+      const patch = yield* snapshots.patch(before)
+      // result metadata 形状刻意相同，唯一 authority 差异是 top-level policy。
+      // #557：computeDiff 以 worktree 相对路径拼接——fixture 供 basename，与 #545 口径一致。
+      const completed = (filepath: string) => ({
+        status: "completed" as const,
+        input: {},
+        output: "done",
+        title: path.basename(filepath),
+        metadata: { filepath: path.basename(filepath), diff: "changed" },
+        time: { start: 0, end: 1 },
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(), messageID: turn.assistant.id, sessionID: chat.id, type: "tool",
+        tool: "custom_none", callID: "none", state: completed(noneFile),
+      } as never)
+      yield* sessions.updatePart({
+        id: PartID.ascending(), messageID: turn.assistant.id, sessionID: chat.id, type: "tool",
+        tool: "edit", callID: "declared", metadata: { worktree: "declared" }, state: completed(declaredFile),
+      } as never)
+      yield* sessions.updatePart({
+        id: PartID.ascending(), messageID: turn.assistant.id, sessionID: chat.id, type: "patch",
+        hash: patch.hash, files: patch.files,
+      })
+      const ambientTurn = yield* seed(chat.id, { finish: "stop" })
+      // 第二 Assistant 修改同一 none 文件，专门复现 range 级全局 Set 的反向授权缺陷。
+      const ambientBefore = yield* snapshots.track()
+      if (!ambientBefore) throw new Error("Expected ambient baseline")
+      yield* Effect.promise(() => Bun.write(noneFile, "ambient"))
+      const ambientPatch = yield* snapshots.patch(ambientBefore)
+      yield* sessions.updatePart({
+        id: PartID.ascending(), messageID: ambientTurn.assistant.id, sessionID: chat.id, type: "tool",
+        tool: "bash", callID: "ambient", metadata: { worktree: "ambient" }, state: completed(noneFile),
+      } as never)
+      yield* sessions.updatePart({
+        id: PartID.ascending(), messageID: ambientTurn.assistant.id, sessionID: chat.id, type: "patch",
+        hash: ambientPatch.hash, files: ambientPatch.files,
+      })
+
+      yield* revert.revert({ sessionID: chat.id, messageID: turn.user.id })
+      // 后 Assistant 的 ambient 只能恢复到 none 写入后的状态，不能反向授权更早 Patch。
+      expect(yield* Effect.promise(() => Bun.file(noneFile).text())).toBe("none")
+      // declared 文件撤回证明修复没有关闭既有精确归因路径。
+      expect(yield* Effect.promise(() => Bun.file(declaredFile).exists())).toBe(false)
+    }),
+  { git: true },
+  120_000,
 )
 
 // #517：replan 中 exploration（read）不能退出 replan；advancement（write）才能回到 ordinary。

@@ -17,6 +17,7 @@ import { SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { testEffect } from "./lib/effect"
+import { SessionHistory } from "../src/session/history"
 
 const projects = Layer.succeed(
   ProjectV2.Service,
@@ -185,6 +186,30 @@ describe("SessionV2.history", () => {
       // raw Store仍服务审计/结构恢复；公开读取既不删除记录，也不重写元数据。
       expect((yield* store.message(ids[3], created.id))?.message).toMatchObject({ id: ids[3], metadata: { hidden: { reason: "permission-reviewer-protocol-retry" } } })
       expect(yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, created.id)).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)).toEqual(before)
+      // 同毫秒原位修改必须让后缀重载；稳定前缀保留同一解码对象，而非只比较最终文本。
+      const cache = SessionHistory.makeCache()
+      const cold = yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
+      const warm = yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
+      expect(warm.map(entry => entry.message.id)).toEqual([ids[0], ids[2]])
+      expect(warm[0]?.message).toBe(cold[0]?.message)
+      expect(warm[1]?.message).toBe(cold[1]?.message)
+      yield* db.update(SessionMessageTable).set({ data: Schema.encodeSync(SessionMessage.Synthetic)(SessionMessage.Synthetic.make({
+        id: ids[2], sessionID: created.id, type: "synthetic", text: "changed", time: { created: DateTime.makeUnsafe(2) },
+      })) }).where(eq(SessionMessageTable.id, ids[2])).run().pipe(Effect.orDie)
+      const changed = yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
+      expect(changed[0]?.message).toBe(cold[0]?.message)
+      expect(changed[1]?.message).not.toBe(cold[1]?.message)
+      expect(changed[1]?.message).toMatchObject({ text: "changed" })
+      // 最新隐藏用户不得消耗limit(2)；普通技术Synthetic也不产生Goal turn。
+      const turns = Array.from({ length: 3 }, () => SessionMessage.ID.create())
+      for (const [index, id] of turns.entries()) yield* db.insert(SessionMessageTable).values({
+        id, session_id: created.id, type: "user", seq: 100 + index,
+        data: Schema.encodeSync(SessionMessage.User)(SessionMessage.User.make({
+          id, type: "user", text: "goal", files: [], agents: [], time: { created: DateTime.makeUnsafe(5) },
+          ...(index === 2 ? { metadata: { hidden: { time: 0, reason: "permission-reviewer-protocol-retry" } } } : {}),
+        })),
+      }).run().pipe(Effect.orDie)
+      expect(yield* SessionHistory.goalTurn(db, created.id)).toEqual({ id: turns[1], previousID: turns[0], userInitiated: true })
     }),
   )
 

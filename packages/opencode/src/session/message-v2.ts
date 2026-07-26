@@ -103,6 +103,14 @@ const Cursor = Schema.Struct({
 })
 type Cursor = typeof Cursor.Type
 
+// #557：time.created 来自持久 row，不借助进程内事件到达顺序；ID 只解决同毫秒冲突。
+export function compareChronology(
+  a: { id: MessageID; time: { created: number } },
+  b: { id: MessageID; time: { created: number } },
+) {
+  return a.time.created - b.time.created || a.id.localeCompare(b.id)
+}
+
 const decodeCursor = Schema.decodeUnknownSync(Cursor)
 
 export const cursor = {
@@ -228,44 +236,76 @@ function hotInfo(row: typeof MessageTable.$inferSelect): HotInfo {
 
 // #0500：Goal chronology 只读取 Message hot info 与三个 Part locator 字段；Tool output、Reasoning、附件和 summary.diffs
 // 不会进入 JS，也不会触发持久 thaw。排序继续使用 persisted time，再以 MessageID 处理同毫秒 tie。
-export const chronology = Effect.fn("MessageV2.chronology")(function* (sessionID: SessionID) {
+// #557：Goal Tool 只消费 current/previous；technical user 不应迫使普通 Provider step 扫描整段历史。
+// 只查 user 行（goalTurnID 空、非 hidden），16/页反向分页，跳过 compaction-only 技术 user，凑 2 即停。
+export const goalChronology = Effect.fn("MessageV2.goalChronology")(function* (sessionID: SessionID) {
   const { db } = yield* Database.Service
-  const messages = yield* db
-    .select()
-    .from(MessageTable)
-    .where(eq(MessageTable.session_id, sessionID))
-    .orderBy(MessageTable.time_created, MessageTable.id)
-    .all()
-    .pipe(Effect.orDie)
-  const parts = yield* db
-    .select({
-      messageID: PartTable.message_id,
-      type: sql<string>`json_extract(${PartTable.data}, '$.type')`,
-      synthetic: sql<number | null>`json_extract(${PartTable.data}, '$.synthetic')`,
-      goalContinuation: sql<number | null>`json_extract(${PartTable.data}, '$.metadata.goal_continuation')`,
-      hidden: sql<string | null>`json_type(${PartTable.data}, '$.hidden')`,
-    })
-    .from(PartTable)
-    .where(eq(PartTable.session_id, sessionID))
-    .orderBy(PartTable.message_id, PartTable.id)
-    .all()
-    .pipe(Effect.orDie)
-  const byMessage = new Map<string, ChronologyPart[]>()
-  // #553：只在 narrow locator projection 过滤 hidden Part，避免为 Goal chronology thaw 完整 payload。
-  for (const part of parts) {
-    if (part.hidden !== null) continue
-    const value: ChronologyPart = {
-      type: part.type,
-      ...(part.synthetic === 1 ? { synthetic: true as const } : {}),
-      ...(part.goalContinuation === 1 ? { metadata: { goal_continuation: true as const } } : {}),
+  const result: ChronologyMessage[] = []
+  let before: Cursor | undefined
+  const size = 16
+  while (result.length < 2) {
+    // #557：用户行限定 + hidden 排除在 SQL 层完成，Goal classifier 不读 tombstone 旧资格。
+    const base = and(
+      eq(MessageTable.session_id, sessionID),
+      sql`json_extract(${MessageTable.data}, '$.role') = 'user'`,
+      sql`json_extract(${MessageTable.data}, '$.goalTurnID') is null`,
+      sql`json_type(${MessageTable.data}, '$.hidden') is null`,
+    )
+    const rows = yield* db
+      .select()
+      .from(MessageTable)
+      .where(before ? and(base, older(before)) : base)
+      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+      .limit(size)
+      .all()
+      .pipe(Effect.orDie)
+    if (!rows.length) break
+
+    const parts = yield* db
+      .select({
+        messageID: PartTable.message_id,
+        type: sql<string>`json_extract(${PartTable.data}, '$.type')`,
+        synthetic: sql<number | null>`json_extract(${PartTable.data}, '$.synthetic')`,
+        goalContinuation: sql<number | null>`json_extract(${PartTable.data}, '$.metadata.goal_continuation')`,
+        hidden: sql<string | null>`json_type(${PartTable.data}, '$.hidden')`,
+      })
+      .from(PartTable)
+      .where(inArray(PartTable.message_id, rows.map((row) => row.id)))
+      .orderBy(PartTable.message_id, PartTable.id)
+      .all()
+      .pipe(Effect.orDie)
+    const byMessage = new Map<MessageID, ChronologyPart[]>()
+    for (const item of parts) {
+      if (item.hidden !== null) continue
+      const value: ChronologyPart = {
+        type: item.type,
+        ...(item.synthetic === 1 ? { synthetic: true } : {}),
+        ...(item.goalContinuation === 1 ? { metadata: { goal_continuation: true as const } } : {}),
+      }
+      const list = byMessage.get(item.messageID)
+      if (list) list.push(value)
+      else byMessage.set(item.messageID, [value])
     }
-    const list = byMessage.get(part.messageID)
-    if (list) list.push(value)
-    else byMessage.set(part.messageID, [value])
+
+    for (const row of rows) {
+      const message = { info: hotInfo(row), parts: byMessage.get(row.id) ?? [] }
+      const continuation = message.parts.some(
+        (part) => part.type === "text" && part.synthetic && part.metadata?.goal_continuation === true,
+      )
+      const userInitiated = message.parts.some(
+        (part) => part.type !== "compaction" && part.synthetic !== true,
+      )
+      // compaction-only user rows 是技术标记，不消耗 Goal slot。
+      if (continuation || userInitiated) result.push(message)
+      if (result.length === 2) break
+    }
+
+    const last = rows.at(-1)
+    if (!last || rows.length < size) break
+    // persisted tuple 保持同毫秒行的稳定扫描窗口。
+    before = { id: last.id, time: last.time_created }
   }
-  return messages
-    .filter((message) => !message.data.hidden)
-    .map((message) => ({ info: hotInfo(message), parts: byMessage.get(message.id) ?? [] }))
+  return result.toSorted((a, b) => compareChronology(a.info, b.info))
 })
 
 // #0500：cancel ownership 只依赖 Message parent/time hot fields。Parts 由 caller 仅为选中的 incomplete assistant
@@ -298,6 +338,10 @@ export const decodePartRow = part
 
 const older = (row: Cursor) =>
   or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
+// #557：older 的补——inclusive suffix 起点解析用，包含后来写入的 lexical-low ID。
+// #557：inclusive suffix 谓词——later-written lexical-low ID 仍属同一窗口。
+const atOrNewer = (row: Cursor) =>
+  or(gt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), gte(MessageTable.id, row.id)))
 
 function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"], rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
   // #0500：hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
@@ -694,6 +738,16 @@ export function toModelMessages(
 ): Promise<ModelMessage[]> {
   return Effect.runPromise(toModelMessagesEffect(input, model, options))
 }
+// #557：每个 persisted Message 自成转换块，prefix contraction 才能截断到任意命中点；
+// concurrency 只并行纯转换，拼接仍服从 input 顺序。
+export const toModelMessageChunksEffect = Effect.fnUntraced(function* (
+  input: WithParts[],
+  model: Provider.Model,
+) {
+  return yield* Effect.forEach(input, (message) => toModelMessagesEffect([message], model), {
+    concurrency: "unbounded",
+  })
+})
 
 export const page = Effect.fn("MessageV2.page")(function* (input: {
   sessionID: SessionID
@@ -720,7 +774,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   // 导入及回绕ID不保证时间单调，范围必须与现有(time_created,id)分页顺序一致。
   const lower = input.fromMessageID
     ? anchor
-      ? or(gt(MessageTable.time_created, anchor.time), and(eq(MessageTable.time_created, anchor.time), gte(MessageTable.id, anchor.id)))
+      ? atOrNewer(anchor)
       : sql`0`
     : undefined
   const where = and(eq(MessageTable.session_id, input.sessionID), lower, before ? older(before) : undefined)
@@ -1004,7 +1058,7 @@ export function visible(messages: Iterable<WithParts>) {
 export function filterCompacted(msgs: Iterable<WithParts>) {
   // #204：压缩标记须按 newest→oldest 扫描——summary assistant 先于 parent compaction user 出现，才能停止遍历并恢复 retained tail
   // #204：沿用分页的时间/ID顺序；导入消息的ID未必单调，不能覆盖它们真实的创建顺序。
-  const ordered = Array.from(msgs).toSorted((a, b) => b.info.time.created - a.info.time.created || b.info.id.localeCompare(a.info.id))
+  const ordered = Array.from(msgs).toSorted((a, b) => compareChronology(b.info, a.info))
   const result = [] as WithParts[]
   const completed = new Map<MessageID, boolean>()
   let retain: MessageID | undefined
@@ -1120,10 +1174,105 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
   return filterCompacted(yield* stream(sessionID, { includeHidden: true, fromMessageID: cutoff }))
 })
 
-// filterCompacted reorders messages for model consumption
-// ([compaction-user, summary, ...retained tail..., continue-user]), so array
-// position is not chronological. IDs are only a deterministic tie-breaker
-// because imported messages do not necessarily have monotonic IDs.
+// #557：Prompt window 结构 proof——只读 SQLite 原始文本与 cold locator，不 thaw/hydrate；
+// boundary identity 是 Provider window 的结构版本，成功 Compaction 改写 boundary 后必须完整 miss。
+export type PromptWindowProof = {
+  boundary: string
+  messages: Array<{ id: MessageID; key: string }>
+}
+
+  // #557：proof 是 cache 唯一 admission 依据——不读 thaw 后的业务对象，避免自身成为预热源。
+export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(function* (sessionID: SessionID) {
+  const { db, sync } = yield* Database.Service
+  const boundary = yield* Database.withSync({ db, sync }, () => CompactionBoundary.latest(sync, sessionID))
+  const cutoffID = boundary?.tailStartID ?? boundary?.markerID
+  const cutoff = cutoffID
+    ? yield* db
+        .select({ id: MessageTable.id, time: MessageTable.time_created })
+        .from(MessageTable)
+        .where(and(eq(MessageTable.session_id, sessionID), eq(MessageTable.id, cutoffID)))
+        .get()
+        .pipe(Effect.orDie)
+    : undefined
+  // cutoff row 缺失时不猜测半个 Compaction window，boundary key 已迫使 caller miss。
+  const messageRows = yield* db
+    .select({
+      id: MessageTable.id,
+      timeCreated: MessageTable.time_created,
+      timeUpdated: MessageTable.time_updated,
+      data: sql<string>`cast(${MessageTable.data} as text)`,
+      coldRef: MessageTable.cold_ref,
+      coldKey: sql<string>`hex(${MessageTable.cold_key})`,
+    })
+    .from(MessageTable)
+    .where(
+      cutoff
+        ? and(eq(MessageTable.session_id, sessionID), atOrNewer(cutoff))
+        : eq(MessageTable.session_id, sessionID),
+    )
+    .orderBy(MessageTable.time_created, MessageTable.id)
+    .all()
+    .pipe(Effect.orDie)
+  // time_updated 覆盖同一 Message ID 的原位更新；time_created 决定 common-prefix 的 persisted 顺序。
+  const partRows = yield* db
+    .select({
+      messageID: PartTable.message_id,
+      id: PartTable.id,
+      timeCreated: PartTable.time_created,
+      timeUpdated: PartTable.time_updated,
+      data: sql<string>`cast(${PartTable.data} as text)`,
+      coldRef: PartTable.cold_ref,
+      coldKey: sql<string>`hex(${PartTable.cold_key})`,
+      coldStats: sql<string>`cast(${PartTable.cold_stats} as text)`,
+    })
+    .from(PartTable)
+    .innerJoin(MessageTable, eq(PartTable.message_id, MessageTable.id))
+    // 同一 join 同时承载完整历史与 cutoff 窗口，避免两个 proof 查询形状漂移。
+    .where(
+      and(
+        eq(PartTable.session_id, sessionID),
+        eq(MessageTable.session_id, sessionID),
+        ...(cutoff ? [atOrNewer(cutoff)] : []),
+      ),
+    )
+    .orderBy(MessageTable.time_created, MessageTable.id, PartTable.id)
+    .all()
+    .pipe(Effect.orDie)
+  const parts = new Map<MessageID, unknown[]>()
+  for (const row of partRows) {
+    // Part ID 顺序覆盖 pending→running→terminal 的同 row replacement；primitive worktree marker 变化也必须让对应 Message proof miss。
+    const list = parts.get(row.messageID) ?? []
+    list.push([row.id, row.timeCreated, row.timeUpdated, row.data, row.coldRef, row.coldKey, row.coldStats])
+    parts.set(row.messageID, list)
+  }
+  return {
+    // boundary 单独比较，row prefix 相同也不能跨 summary/tail 重排复用。
+    boundary: JSON.stringify(boundary ?? null),
+    // key 保存完整 tuple 而非 hash，避免 collision 成为错误 admission。
+    messages: messageRows.map((row) => ({
+      id: row.id,
+      key: JSON.stringify([
+        row.id,
+        row.timeCreated,
+        row.timeUpdated,
+        row.data,
+        row.coldRef,
+        row.coldKey,
+        parts.get(row.id) ?? [],
+      ]),
+    })),
+  }
+})
+
+// #557：首个 mismatch 必须 inclusive hydrate，同一 Assistant 新增 Part 才会替换旧版本；
+// hidden row 也进入 suffix，最终可见性仍由唯一 filterCompacted owner 决定。
+  // #557：suffix loader 与 proof 同源——mismatch 点 inclusive，保证同 Message 原位更新可重载。
+export function promptWindowSuffix(sessionID: SessionID, fromMessageID: MessageID) {
+  return stream(sessionID, { fromMessageID, includeHidden: true })
+}
+
+// filterCompacted 会重排 Provider window，因此 latest 仍须比较每条 Message 的持久 chronology。
+// #557：compareChronology 是唯一 comparator——time.created 主序，ID 只作同毫秒平局。
 // #242：compaction 不再是可重放任务——生产者直接执行，消费端只保留已完成边界，
 // 这防止旧 compact 标记重启压缩。tasks 因此只剩 subtask
 export function latest(msgs: WithParts[]) {
@@ -1132,22 +1281,17 @@ export function latest(msgs: WithParts[]) {
   let finished: Assistant | undefined
   for (const msg of msgs) {
     const info = msg.info
-    if (info.role === "user" && isAfter(info, user)) user = info
-    if (info.role === "assistant" && isAfter(info, assistant)) assistant = info
-    if (info.role === "assistant" && info.finish && isAfter(info, finished)) finished = info
+    if (info.role === "user" && (!user || compareChronology(info, user) > 0)) user = info
+    if (info.role === "assistant" && (!assistant || compareChronology(info, assistant) > 0)) assistant = info
+    if (info.role === "assistant" && info.finish && (!finished || compareChronology(info, finished) > 0)) finished = info
   }
+  // #557：tasks 只属于最新 completed Assistant 之后的 persisted chronology；Provider window 的重排位置不能改变这个消费边界。
   const tasks = msgs.flatMap((m) =>
-    finished && !isAfter(m.info, finished)
+    finished && compareChronology(m.info, finished) <= 0
       ? []
       : m.parts.filter((p): p is SubtaskPart => p.type === "subtask"),
   )
   return { user, assistant, finished, tasks }
-}
-
-function isAfter(info: Info, other?: Info) {
-  if (!other) return true
-  if (info.time.created !== other.time.created) return info.time.created > other.time.created
-  return info.id > other.id
 }
 
 export function fromError(

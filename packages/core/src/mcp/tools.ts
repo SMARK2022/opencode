@@ -89,6 +89,8 @@ function adapt(name: string, entry: McpConnection.McpTool, permission: Permissio
   const client = entry.client
   const timeout = entry.timeout
   return Tool.make({
+    // 仅远端Tool调用视为ambient；下面的resource list/read仍是只读none。
+    worktree: "ambient",
     description: def.description ?? "",
     // 对象参数保留原样，完整MCP schema直接用于广告，不经不完整的schema反向转换。
     input: Schema.Record(Schema.String, Schema.Unknown),

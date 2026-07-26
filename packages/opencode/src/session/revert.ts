@@ -61,7 +61,7 @@ const layer = Layer.effect(
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
 
       let rev: Session.Info["revert"]
-      const patches: Snapshot.Patch[] = []
+      const patches: SessionV1.PatchPart[] = []
       for (const msg of all) {
         if (msg.info.role === "user") lastUser = msg.info
         const remaining = []
@@ -86,24 +86,45 @@ const layer = Layer.effect(
 
       if (!rev) return session
 
-      // #545：只认工具流声明的文件（edit/write/apply_patch metadata）。
-      // snapshot.patch() 的时间窗会混入同目录其他 session/外部改动；
-      // 与 toolFiles 取交集后只 checkout 本 session 工具认领的文件。
-      // toolFiles 为空（只读/bash/无 declared 元数据）时交集为空：消息可 undo，磁盘不撤。
-      const toolIndex = all.findIndex((msg) => msg.info.id === rev.messageID)
-      const toolRange = toolIndex < 0 ? [] : all.slice(toolIndex)
-      const toolDiffs = yield* summary.computeDiff({ messages: toolRange })
+      // #557：Revert range 与 Prompt 使用同一个 persisted comparator，不能恢复 lexical-low 后继之外的行。
+      const boundaryRow = all.find((msg) => msg.info.id === rev.messageID)
+      if (!boundaryRow) throw new Error(`Revert boundary missing from Session history: ${rev.messageID}`)
+      const range = all.filter((msg) => MessageV2.compareChronology(msg.info, boundaryRow.info) >= 0)
+      // range 可包含 hidden audit rows；真正文件 admission 仍由各 Tool policy 决定。
       const ictx = yield* InstanceState.context
-      const toolFiles = new Set(
-        toolDiffs
-          .map((d) => d.file)
-          .filter((f): f is string => Boolean(f))
-          .map((f) => path.join(ictx.worktree, f).replaceAll("\\", "/")),
+      // #557：declared diff 按 Assistant 单独计算，禁止后续 Tool 把文件 authority 回传给早期 Patch。
+      // #557：per-Assistant ownership——文件 authority 不跨 Assistant 传递。
+      const ownership = yield* Effect.forEach(range, (msg) =>
+        Effect.gen(function* () {
+          const diffs = yield* summary.computeDiff({
+            messages: [
+              {
+                ...msg,
+                parts: msg.parts.filter((part) => part.type !== "tool" || part.metadata?.worktree === "declared"),
+              },
+            ],
+          })
+          const files = new Set(
+            diffs.flatMap((d) => (d.file ? [path.join(ictx.worktree, d.file).replaceAll("\\", "/")] : [])),
+          )
+          // authority 必须停留在所属 Assistant；后续 ambient 不能反向授权更早 Patch。
+          if (msg.parts.some((part) => part.type === "tool" && part.metadata?.worktree === "ambient"))
+            msg.parts
+              .filter((part) => part.type === "patch")
+              .flatMap((part) => part.files)
+              .forEach((file) => files.add(file))
+          return { id: msg.info.id, diffs, files }
+        }),
       )
+      const toolDiffs = ownership.flatMap((item) => item.diffs)
+      // #557：messageID 是 Patch 与 authority 的稳定关联键，不能退化为 range 级文件并集。
+      // #557：ownership 键是 messageID——Patch 文件 admission 不退化为 range 并集。
+      const toolFiles = new Map<string, Set<string>>(ownership.map((item) => [item.id, item.files]))
       // #545：无条件交集——空 toolFiles 不再回退全量 revert，避免只读 turn 误撤 ambient 改动。
+      // Patch 未被 declared 或 ambient owner 接纳时保留空 files，hash 顺序不改写。
       const filteredPatches = patches.map((p) => ({
         ...p,
-        files: p.files.filter((f) => toolFiles.has(f)),
+        files: p.files.filter((f) => toolFiles.get(p.messageID)?.has(f)),
       }))
       // 记录被 revert 的文件列表（revertedPaths），供 unrevert/二次 revert 精确恢复
       const revertedFiles = Array.from(new Set(filteredPatches.flatMap((p) => p.files)))
@@ -160,9 +181,24 @@ const layer = Layer.effect(
       const boundary = session.revert
       const msgs = yield* sessions.messages({ sessionID }).pipe(Effect.orDie)
       const messageID = boundary.messageID
-      const index = msgs.findIndex((msg) => msg.info.id === messageID)
-      const target = index < 0 ? undefined : msgs[index]
-      const remove = index < 0 ? [] : msgs.slice(index + (boundary.partID ? 1 : 0))
+      const boundaryMessage = msgs.find((msg) => msg.info.id === messageID)
+      // #557：cleanup 与首次 revert 共用同一 boundary tuple，hidden/删除不能重新解释范围。
+      if (!boundaryMessage) throw new Error(`Revert cleanup boundary missing from Session history: ${messageID}`)
+      const remove = [] as MessageV2.WithParts[]
+      let target: MessageV2.WithParts | undefined
+      for (const msg of msgs) {
+        // #557：compareChronology 替代字符串比较——持久化时间主序，ID 只作同毫秒平局。
+        const order = MessageV2.compareChronology(msg.info, boundaryMessage.info)
+        // partID 部分撤回保留 boundary 行；messageID 撤回连 boundary 一起 hide（旧 slice(index) 语义）。
+        if (order < 0) continue
+        if (order === 0) {
+          target = msg
+          if (boundary.partID) continue
+          remove.push(msg)
+          continue
+        }
+        remove.push(msg)
+      }
       for (const msg of remove) {
         // #98：软隐藏而非物理删除，保留 DB 行
         // #153：undo 时未完成 assistant 先终态化再 soft-hide

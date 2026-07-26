@@ -237,6 +237,11 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           )
         })
       },
+      "session.next.step.snapshot.updated": (event) =>
+        updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          // 只修订已存在的同一助手，不创建零token首写，也不改变失败或消费状态。
+          draft.snapshot = { ...draft.snapshot, ...castDraft(event.data.snapshot) }
+        }),
       "session.next.step.ended": (event) => {
         return Effect.gen(function* () {
           yield* updateOwnedAssistant(event.data.assistantMessageID, (draft) => {

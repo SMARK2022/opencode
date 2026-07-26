@@ -354,6 +354,8 @@ const layer = Layer.effect(
               .join("\n"),
             parameters: output.parameters,
             jsonSchema,
+            // #557：plugin 只能改 Provider definition；server policy 始终取原 Tool.Def。
+            worktree: tool.worktree,
             execute: tool.execute,
             // #514：透传 prepareArguments，使 edit 等工具的 legacy 折叠在 registry 包装后仍生效
             prepareArguments: tool.prepareArguments,

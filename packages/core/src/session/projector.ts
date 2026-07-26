@@ -625,6 +625,7 @@ const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.Shell.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Shell.Ended, (event) => run(db, event))
     yield* events.project(SessionEvent.Step.Started, (event) => run(db, event))
+    yield* events.project(SessionEvent.Step.SnapshotUpdated, (event) => run(db, event))
     yield* events.project(SessionEvent.Step.Ended, (event) =>
       Effect.gen(function* () {
         // 只读取此结算拥有的助手；缺失消息仍沿用 updater 的无操作语义，不制造孤立用量。

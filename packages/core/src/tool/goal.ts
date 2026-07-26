@@ -44,7 +44,8 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
         blockedAttempt: Schema.optional(Schema.Struct({ attempt: Schema.Number, required: Schema.Number })),
       })),
       execute: (input, context) => Effect.gen(function* () {
-        const turn = context.goalTurn
+        // 真正使用Goal时才加载有界lineage，现有直接调用仍可提供同一可信对象。
+        const turn = context.loadGoalTurn ? yield* context.loadGoalTurn() : context.goalTurn
         if (input.operate === "read") {
           const goal = Option.getOrNull(yield* goals.get(context.sessionID))
           if (goal && turn) turn.read = { goalID: goal.id, generation: goal.generation, status: goal.status }

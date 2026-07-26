@@ -99,6 +99,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   // [local-smark] goalTurn 由 prompt 层注入：GoalTool 依赖它校验 trusted read snapshot，
   // 不能由工具参数伪造
   goalTurn?: GoalTurnContext
+  // #557：Goal chronology 惰性加载——真实 goal Tool 启动才查询，同 step 共享 loader 结果。
+  loadGoalTurn?: Effect.Effect<GoalTurnContext | undefined>
 }) {
   const tools: Record<string, AITool> = {}
   const run = yield* EffectBridge.make()
@@ -166,6 +168,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       execute(args, options) {
         return run.promise(
           Effect.gen(function* () {
+            // 普通对话不读取Goal历史；真实goal adapter共享本轮受信上下文。
+            if (item.id === "goal" && input.loadGoalTurn) input.goalTurn = yield* input.loadGoalTurn
             const ctx = context(args, options)
             const adapterStartedAt = Date.now()
             const timing = {
@@ -174,6 +178,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               sessionID: ctx.sessionID,
               callID: ctx.callID,
             }
+            // #557：本地 Tool 的真实执行屏障先于 plugin/Permission——事件回调只能登记 Part，
+            // 不能证明 mutation 尚未开始；worktree 声明在拒继行时也保留归因边界。
+            yield* input.processor.updateToolCall(options.toolCallId, (part) => part, "durable", item.worktree ?? "none")
             yield* plugin.trigger(
               "tool.execute.before",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
@@ -489,6 +496,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             sessionID: ctx.sessionID,
             callID: opts.toolCallId,
           }
+          // #557：未知 MCP 的副作用不透明，必须在 plugin、Permission 与 client call 前建立 ambient baseline。
+          yield* input.processor.updateToolCall(opts.toolCallId, (part) => part, "durable", "ambient")
           yield* plugin.trigger(
             "tool.execute.before",
             { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },

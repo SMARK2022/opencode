@@ -186,13 +186,35 @@ ${message.recent}
   }
 }
 
+// 每块保留转换后的Read覆盖状态；稳定前缀复用时不能丢掉跨消息的去重证明。
+export const makeMessageCache = () => ({
+  model: "", entries: [] as Array<{
+    message: SessionMessage.Message; output: Message[]; reads: ReadPresentation.ReadRangeMeta[]
+  }>,
+})
+
 /** Translate projected V2 Session history into canonical @opencode-ai/llm context. */
-export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model) => {
+export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model, cache = makeMessageCache()) => {
   // 证明仅存在于本次选出的历史；下一 Session/compaction 投影重新开始，不持久缓存。
-  const reads: ReadPresentation.ReadRangeMeta[] = []
-  return messages.flatMap((message) => {
-    if (message.type === "compaction") reads.length = 0
-    if (message.type !== "assistant") return toLLMMessage(message, model)
+  let reads: ReadPresentation.ReadRangeMeta[] = []
+  const previous = cache.model === `${model.provider}/${model.id}` ? cache.entries : []
+  const entries: typeof cache.entries = []
+  let reusable = true
+  const output = messages.flatMap((message, index) => {
+    const cached = reusable ? previous[index] : undefined
+    if (cached?.message === message) {
+      reads = cached.reads
+      entries.push(cached)
+      return cached.output
+    }
+    reusable = false
+    // 覆盖状态只作不可变替换，后缀追加不能污染已缓存前缀或收缩后的窗口。
+    if (message.type === "compaction") reads = []
+    const retain = (output: Message[]) => {
+      entries.push({ message, output, reads })
+      return output
+    }
+    if (message.type !== "assistant") return retain(toLLMMessage(message, model))
     const content = message.content.map((item): SessionMessage.AssistantContent => {
       // provider 托管、被裁剪或带媒体的结果不具备本地完整文本 Read 的证明。
       if (item.type !== "tool" || item.name !== "read" || item.provider?.executed === true ||
@@ -211,7 +233,7 @@ export const toLLMMessages = (messages: readonly SessionMessage.Message[], model
           part.type === "text" && part.text === body)) return item
       const stub = ReadPresentation.findReadStub(reads, page.read, page.content.length)
       const overlap = ReadPresentation.findOverlapNote(reads, page.read)
-      if (!stub) reads.push(page.read)
+      if (!stub) reads = [...reads, page.read]
       if (!stub && !overlap) return item
       // 与 V1 共用覆盖源的导航；只改本次模型投影，不修改 durable Read。
       const owner = stub?.status === "stub_covered_range_visible" ? stub.covering : page.read
@@ -226,8 +248,11 @@ export const toLLMMessages = (messages: readonly SessionMessage.Message[], model
           part.type === "text" && part.text === body ? replacement : part),
       } }
     })
-    return toLLMMessage({ ...message, content }, model)
+    return retain(toLLMMessage({ ...message, content }, model))
   })
+  cache.model = `${model.provider}/${model.id}`
+  cache.entries = entries
+  return output
 }
 
 export const DECIDE_PROMPT = `Decide mode is active. Do not execute, modify files, call tools, or ask for tool-based confirmation.

@@ -50,7 +50,7 @@ import { SessionStore } from "../store"
 import { type RunError, Service } from "./index"
 import { SessionRunnerModel } from "./model"
 import { createLLMEventPublisher } from "./publish-llm-event"
-import { DECIDE_PROMPT, toDecideMessages, toLLMMessages } from "./to-llm-message"
+import { DECIDE_PROMPT, makeMessageCache, toDecideMessages, toLLMMessages } from "./to-llm-message"
 import { MAX_STEPS_PROMPT } from "./max-steps"
 import { Snapshot } from "../../snapshot"
 import { makeLocationNode } from "../../effect/app-node"
@@ -138,6 +138,12 @@ const layer = Layer.effect(
     const fileSystem = yield* FSUtil.Service
     const todos = yield* SessionTodo.Service
     const compaction = SessionCompaction.make({ events, llm, db, todos: todos.get, config: configuration, fs: fileSystem, worktree: location.project.directory, directory: location.directory })
+    // Location内只保留可替换entry，跨独立请求复用；执行与Goal状态不进入缓存。
+    let retainedMessages: {
+      sessionID: SessionSchema.ID
+      history: ReturnType<typeof SessionHistory.makeCache>
+      messages: ReturnType<typeof makeMessageCache>
+    } | undefined
     const getSession = Effect.fn("SessionRunner.getSession")(function* (sessionID: SessionSchema.ID) {
       const session = yield* store.get(sessionID)
       if (!session) return yield* Effect.die(`Session not found: ${sessionID}`)
@@ -319,11 +325,19 @@ const layer = Layer.effect(
         initialized ?? (yield* SessionContextEpoch.prepare(db, events, prepared.context, session.id))
       const selection = yield* models.resolve(session)
       const model = selection.model
-      const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
+      const retained = retainedMessages?.sessionID === session.id ? retainedMessages : {
+        sessionID: session.id, history: SessionHistory.makeCache(), messages: makeMessageCache(),
+      }
+      // await前捕获entry，另一Session替换唯一指针不能混入本次在途历史或转换。
+      retainedMessages = retained
+      const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq, retained.history)
       const context = entries.map((entry) => entry.message)
-      // 只有实际提升的User或已发布的Goal Synthetic换turn，pending inbox和技术重入不换。
-      const lineage = yield* SessionHistory.goalTurn(db, session.id)
-      if (lineage?.id !== continuation.goalTurn?.id) continuation.goalTurn = lineage
+      // 普通Provider turn不查Goal lineage；同一步并发调用共享查询，同eligible turn保留read身份。
+      const loadGoalTurn = yield* Effect.cached(Effect.gen(function* () {
+        const lineage = yield* SessionHistory.goalTurn(db, session.id)
+        if (lineage?.id !== continuation.goalTurn?.id) continuation.goalTurn = lineage
+        return continuation.goalTurn
+      }))
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
       const decide = agent.id === "decide"
       // 与最大步数共用原禁用路径，不构建第二套执行器或只依赖权限过滤。
@@ -359,7 +373,7 @@ const layer = Layer.effect(
       if (nearOverflow) nearOverflowNotified.add(session.id)
       const overflowReminder = nearOverflow ? [Message.user("Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.")] : []
       // 正常请求和压缩共用准备后的消息；不把坏图交给provider，也不改写持久历史。
-      const messages = yield* normalizeImages([...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...reminders.map(text => Message.user(text)), ...overflowReminder, ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])], image)
+      const messages = yield* normalizeImages([...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model, retained.messages)), ...reminders.map(text => Message.user(text)), ...overflowReminder, ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])], image)
       const request = LLM.request({
         model,
         http: {
@@ -389,7 +403,9 @@ const layer = Layer.effect(
         nearOverflowNotified.delete(session.id)
         return yield* Effect.die(continueAfterCompaction(currentStep))
       }
-      const startSnapshot = yield* snapshots.capture()
+      // 基线只在校验后的non-none本地调用启动；同助手共享一次in-flight捕获及失败。
+      let startSnapshot: Snapshot.ID | undefined
+      let snapshotAuthority: "declared" | "ambient" | undefined
       const startedAt = Date.now()
       let firstStreamEvent = true
       // 只记录本轮身份和里程碑，不把实际请求、工具参数或提供者元数据带进日志。
@@ -413,12 +429,26 @@ const layer = Layer.effect(
           providerID: ProviderV2.ID.make(model.provider),
           ...(session.model?.variant === undefined ? {} : { variant: session.model.variant }),
         },
-        snapshot: startSnapshot,
         // compile 回调晚于 publisher 创建，真实 Started 时才读取该轮估算。
         inputEstimate: () => inputEstimate,
       })
       hasAssistantStarted = publisher.hasAssistantStarted
       const withPublication = Semaphore.makeUnsafe(1).withPermit
+      const captureSnapshot = yield* Effect.cached(snapshots.capture())
+      const captureWorktree = (authority: "declared" | "ambient") => withPublication(Effect.gen(function* () {
+        const baseline = yield* captureSnapshot
+        if (!baseline || snapshotAuthority === "ambient" || snapshotAuthority === authority) return
+        const next = authority === "ambient" ? "ambient" : snapshotAuthority ?? "declared"
+        // Started早于工具校验，晚到的baseline必须走durable更新，而非只保存在局部getter。
+        yield* events.publish(SessionEvent.Step.SnapshotUpdated, {
+          sessionID: session.id,
+          assistantMessageID: yield* publisher.startAssistant(),
+          timestamp: yield* DateTime.now,
+          snapshot: { start: baseline, worktree: next },
+        })
+        startSnapshot = baseline
+        snapshotAuthority = next
+      }))
       const publish = (event: LLMEvent, outputPaths: ReadonlyArray<string> = []) =>
         withPublication(Effect.gen(function* () {
           // publisher只为已接受的终态返回凭证，重复/忽略事件不能虚增错误。
@@ -510,7 +540,8 @@ const layer = Layer.effect(
                   agent: agent.id,
                   assistantMessageID,
                   call: event,
-                  goalTurn: continuation.goalTurn,
+                   loadGoalTurn: () => loadGoalTurn,
+                   captureWorktree,
                 // 与普通工具结果共用 publication 串行器；回调只交接已限幅的取消证据。
                 }, (bounded) => withPublication(publisher.interruptedOutput(event.id, bounded.output)))
                 }),
@@ -604,15 +635,20 @@ const layer = Layer.effect(
             yield* withPublication(publisher.failUnsettledTools(`Tool execution failed: ${message}`, false, finalizer))
           }
           const stepSettlement = publisher.stepSettlement()
+          // 文件收尾不依赖确认用量；失败仍可保留已完成副作用，中断按source跳过慢Git扫描。
+          const aborted = stream._tag === "Failure" && Cause.hasInterrupts(stream.cause) || settled._tag === "Failure" && Cause.hasInterrupts(settled.cause)
+          if (startSnapshot && !aborted) {
+            const end = yield* snapshots.capture()
+            const files = end ? yield* snapshots.files({ from: startSnapshot, to: end })
+              .pipe(Effect.catch(() => Effect.succeed(undefined))) : undefined
+            yield* withPublication(events.publish(SessionEvent.Step.SnapshotUpdated, {
+              sessionID: session.id, timestamp: yield* DateTime.now,
+              assistantMessageID: yield* publisher.startAssistant(finalizer),
+              snapshot: { start: startSnapshot, ...(end ? { end } : {}), ...(files ? { files } : {}), ...(snapshotAuthority ? { worktree: snapshotAuthority } : {}) },
+            }, { finalizer }))
+          }
           // step-finish 已确认的消耗不因随后失败退款；消息和账本保留此前失败身份。
           if (stepSettlement) {
-            const endSnapshot = yield* snapshots.capture()
-            const files =
-              startSnapshot && endSnapshot
-                ? yield* snapshots
-                    .files({ from: startSnapshot, to: endSnapshot })
-                    .pipe(Effect.catch(() => Effect.succeed(undefined)))
-                : undefined
             // 工具fibers已结算并持久化；按Started冻结的请求读取，不受新steer或压缩窗口影响。
             const summary = yield* ToolDiffs.summarize(db, {
               sessionID: session.id, assistantMessageID: yield* publisher.startAssistant(finalizer),
@@ -626,8 +662,6 @@ const layer = Layer.effect(
                 finish: stepSettlement.finish,
                 cost: SessionRunnerModel.cost(selection.pricing, stepSettlement.tokens),
                 tokens: stepSettlement.tokens,
-                snapshot: endSnapshot,
-                files,
                 ...(summary ? { summary } : {}),
               // 失败退出仍结算同一确认 step，模式只影响通知，不改变 cost/tokens。
               }, { finalizer }),

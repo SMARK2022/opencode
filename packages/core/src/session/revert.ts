@@ -51,21 +51,21 @@ const plan = Effect.fn("SessionRevert.plan")(function* (input: BoundaryInput) {
     .pipe(Effect.orDie)
   const decode = Schema.decodeUnknownEffect(SessionMessage.Message)
   const files = new Map<RelativePath, Snapshot.ID>()
-  const records: Record<string, unknown>[] = []
+  const location = yield* Location.Service
   const restored = yield* ColdStorage.readSessionMessageRows(db, rows.filter(row => !Schema.is(SessionMessage.Hidden)(row.data.metadata?.hidden)))
   for (const row of restored) {
     const message = yield* decode({ ...row.data, id: row.id, type: row.type }).pipe(Effect.orDie)
     if (message.type !== "assistant" || Schema.is(SessionMessage.Hidden)(message.metadata?.hidden)) continue
-    records.push(...message.content.flatMap(part => part.type === "tool" && part.state.status === "completed" ? [part.state.structured] : []))
     if (!message.snapshot?.start) continue
+    // 只用本助手的已完成声明；后一个助手不能授权恢复前一个快照中的旁观文件。
+    const records = message.content.flatMap(part => part.type === "tool" && part.provider?.executed !== true && part.state.status === "completed" ? [part.state.structured] : [])
+    const touched = new Set(ToolDiffs.collect(records, location.project.directory, location.directory).map(item => item.file))
     for (const file of message.snapshot.files ?? [])
-      if (!files.has(file)) files.set(file, Snapshot.ID.make(message.snapshot.start))
+      // 旧行保持545的声明交集；只有显式ambient助手可认领自己的完整变化集。
+      if ((message.snapshot.worktree === "ambient" || touched.has(file)) && !files.has(file))
+        files.set(file, Snapshot.ID.make(message.snapshot.start))
   }
-  const location = yield* Location.Service
-  // Snapshot恢复键相对项目根，工具相对项属于当前Location，必须沿共享聚合器统一基准。
-  const touched = new Set(ToolDiffs.collect(records, location.project.directory, location.directory).map(item => item.file))
-  // 空声明只撤消息，不恢复快照窗口中的ambient文件；归属仍由两代共用的工具结果合同决定。
-  return new Map([...files].filter(([file]) => touched.has(file)))
+  return files
 })
 
 export const stage = Effect.fn("SessionRevert.stage")(function* (input: {

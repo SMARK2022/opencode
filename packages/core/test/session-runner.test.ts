@@ -26,7 +26,7 @@ import { EventTable } from "@opencode-ai/core/event/sql"
 import { Project } from "@opencode-ai/core/project"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { QuestionV2 } from "@opencode-ai/core/question"
-import { AbsolutePath } from "@opencode-ai/core/schema"
+import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Snapshot } from "@opencode-ai/core/snapshot"
@@ -49,7 +49,7 @@ import * as SessionRunnerLLM from "@opencode-ai/core/session/runner/llm"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
 import { Catalog } from "@opencode-ai/core/catalog"
 import { SessionCompaction } from "@opencode-ai/core/session/compaction"
-import { toDecideMessages, toLLMMessages } from "../src/session/runner/to-llm-message"
+import { makeMessageCache, toDecideMessages, toLLMMessages } from "../src/session/runner/to-llm-message"
 import { SessionHistory } from "@opencode-ai/core/session/history"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ApplicationTools } from "@opencode-ai/core/tool/application-tools"
@@ -290,9 +290,20 @@ const mcp = Layer.succeed(McpTools.Service, McpTools.Service.of({
   prepare: () => Effect.succeed(() => SystemContext.empty),
 }))
 
+// 内外两张图使用同一计数fake；不启动Git，仍检查durable快照和真实工具边界。
+let snapshotCaptures = 0
+let snapshotEnabled = false
+const nativeSnapshots = Layer.mock(Snapshot.Service, {
+  capture: () => Effect.sync(() => {
+    snapshotCaptures++
+    return snapshotEnabled ? Snapshot.ID.make(`tree-${snapshotCaptures}`) : undefined
+  }),
+  files: () => Effect.succeed([RelativePath.make("owned.txt")]),
+})
+
 let runnerMcp: McpTools.Interface | undefined
 const runnerLayer = (configuration = config) => AppNodeBuilder.build(LayerNode.group([SessionRunnerLLM.node, McpTools.node]), [
-  [Snapshot.node, Snapshot.noopLayer],
+  [Snapshot.node, nativeSnapshots],
   [LayerNodePlatform.llmClient, client],
   [SessionRunnerModel.node, models],
   [SystemContextRegistry.node, systemContext],
@@ -355,7 +366,7 @@ const testLayer = (configuration = config) =>
       [Location.node, Location.boundNode({ directory: AbsolutePath.make("/project") })],
       [SkillGuidance.node, skillGuidance],
       [ReferenceGuidance.node, referenceGuidance],
-      [Snapshot.node, Snapshot.noopLayer],
+      [Snapshot.node, nativeSnapshots],
       [McpTools.node, mcp],
       [SessionExecution.node, execution(configuration)],
       [Config.node, configuration],
@@ -386,6 +397,8 @@ const insertSession = (id: SessionV2.ID) =>
 const setup = Effect.gen(function* () {
   const { db } = yield* Database.Service
   response = []
+  snapshotCaptures = 0
+  snapshotEnabled = false
   doomAssertions.length = 0
   environment.OPENCODE_EXPERIMENTAL_PLAN_MODE = "false"
   systemBaseline = "Initial context"
@@ -1235,10 +1248,18 @@ describe("SessionRunnerLLM", () => {
           agent: AgentV2.ID.make("build"),
           assistantMessageID: expect.stringMatching(/^msg_/),
           // 应用工具仍使用同一标准上下文；新增turn引用不替换既有身份字段。
-          goalTurn: { id: expect.stringMatching(/^msg_/), previousID: undefined, userInitiated: true },
+          goalTurn: undefined,
+          loadGoalTurn: expect.any(Function),
+          captureWorktree: expect.any(Function),
           toolCallID: "call-application",
         },
       ])
+      // loader仍返回同一可信对象；惰性化不削弱应用工具能读取的身份与跨调用引用。
+      const loadTurn = contexts[0]?.loadGoalTurn
+      if (!loadTurn) throw new Error("Missing Native Goal loader")
+      const turn = yield* loadTurn()
+      expect(turn).toEqual({ id: expect.stringMatching(/^msg_/), previousID: undefined, userInitiated: true })
+      expect(yield* loadTurn()).toBe(turn)
       expect(yield* session.context(sessionID)).toMatchObject([
         { type: "user", text: "Use application context" },
         {
@@ -1252,6 +1273,97 @@ describe("SessionRunnerLLM", () => {
           ],
         },
       ])
+    }),
+  )
+
+  it.effect("lazily captures Native worktree authority and replays failed-step snapshots", () =>
+    Effect.gen(function* () {
+      yield* setup
+      snapshotEnabled = true
+      const applicationTools = yield* ApplicationTools.Service
+      const session = yield* SessionV2.Service
+      const performed: string[] = []
+      const converter = yield* Effect.promise(() => import("../src/session/runner/to-llm-message"))
+      const convert = converter.toLLMMessages
+      const projected: Array<{ input: SessionMessage.Message | undefined; output: Message | undefined }> = []
+      const observer = spyOn(converter, "toLLMMessages").mockImplementation((...args) => {
+        const output = convert(...args)
+        projected.push({ input: args[0][0], output: output[0] })
+        return output
+      })
+      yield* Effect.addFinalizer(() => Effect.sync(() => observer.mockRestore()))
+      yield* applicationTools.register(Object.fromEntries((["declared", "ambient"] as const).map(worktree => [worktree, Tool.make({
+        description: "Fake local mutation", worktree,
+        input: Schema.Struct({ text: Schema.String }), output: Schema.String,
+        execute: () => Effect.sync(() => {
+          // baseline必须先于所有实际执行，并发调用只捕获一次。
+          expect(snapshotCaptures).toBe(1)
+          performed.push(worktree)
+          return "done"
+        }),
+      })])))
+      const toolEvents = (calls: LLMEvent[]) => [LLMEvent.stepStart({ index: 0 }), ...calls,
+        LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })]
+      const done = fragmentFixture("text", "done", ["Done"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Read only" }), resume: false })
+      responses = [toolEvents([
+        LLMEvent.toolCall({ id: "read", name: "echo", input: { text: "read" } }),
+        LLMEvent.toolCall({ id: "invalid", name: "declared", input: { text: 17 } }),
+        LLMEvent.toolCall({ id: "unknown", name: "missing", input: {} }),
+      ]), done]
+      yield* session.resume(sessionID)
+      expect(snapshotCaptures).toBe(0)
+      expect(performed).toEqual([])
+      expect((yield* session.context(sessionID)).filter(message => message.type === "assistant").every(message => !message.snapshot)).toBe(true)
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Mutate" }), resume: false })
+      responses = [toolEvents([
+        LLMEvent.toolCall({ id: "declared-one", name: "declared", input: { text: "a" } }),
+        LLMEvent.toolCall({ id: "ambient", name: "ambient", input: { text: "b" } }),
+        LLMEvent.toolCall({ id: "declared-two", name: "declared", input: { text: "c" } }),
+      ]), done]
+      yield* session.resume(sessionID)
+      expect(snapshotCaptures).toBe(2)
+      expect(performed.toSorted()).toEqual(["ambient", "declared", "declared"])
+      const history = yield* session.context(sessionID)
+      const mutated = history.findLast(message => message.type === "assistant" && message.snapshot)
+      expect(mutated).toMatchObject({ snapshot: { start: "tree-1", end: "tree-2", files: ["owned.txt"], worktree: "ambient" } })
+      // 观察真实转换器的输入/输出；后续Schema消息规范化可复制包装，不能据其对象身份误判缓存。
+      const stable = projected.at(-1)
+      if (!stable?.input || !stable.output) throw new Error("Missing stable Native request prefix")
+      // 转换复用必须信息等价；收缩和模型切换同样经原转换器，未缓存任何提醒或工具广告。
+      const cache = makeMessageCache()
+      const cold = toLLMMessages(history, model, cache)
+      expect(toLLMMessages(history, model, cache)[0]).toBe(cold[0])
+      expect(toLLMMessages(history.slice(0, -1), model, cache)).toEqual(toLLMMessages(history.slice(0, -1), model))
+      expect(toLLMMessages(history, replacementModel, cache)).toEqual(toLLMMessages(history, replacementModel))
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Fail after mutation" }), resume: false })
+      responses = undefined
+      const failure = providerUnavailable()
+      responseStream = Stream.concat(Stream.fromIterable([
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.toolCall({ id: "before-failure", name: "declared", input: { text: "d" } }),
+      ]), Stream.fail(failure))
+      // 失败轮沿同一fake取得基线；没有step-finish时不能伪造确认用量。
+      snapshotCaptures = 0
+      expect(yield* session.resume(sessionID).pipe(Effect.exit)).toMatchObject({ _tag: "Failure" })
+      expect(snapshotCaptures).toBe(2)
+      expect(projected.at(-1)?.input).toBe(stable.input)
+      expect(projected.at(-1)?.output).toBe(stable.output)
+      expect(requests.at(-1)?.messages[0]?.content[0]).toEqual({ type: "text", text: "Read only" })
+      const failed = (yield* session.context(sessionID)).findLast(message => message.type === "assistant")
+      expect(failed).toMatchObject({ finish: "error", snapshot: { start: "tree-1", end: "tree-2", worktree: "declared" } })
+      expect(failed?.tokens).toBeUndefined()
+      yield* replaySessionProjection(sessionID)
+      expect((yield* session.context(sessionID)).find(message => message.id === failed?.id)).toEqual(failed)
+      expect((yield* session.context(sessionID)).find(message => message.id === mutated?.id)).toEqual(mutated)
+      // 切换Session替换单entry，不能把前一个Session的用户原话或Goal状态带入新请求。
+      yield* insertSession(otherSessionID)
+      yield* session.prompt({ sessionID: otherSessionID, prompt: Prompt.make({ text: "Different Session" }), resume: false })
+      responses = [done]
+      yield* session.resume(otherSessionID)
+      const other = requests.at(-1)
+      if (!other) throw new Error("Missing other Native request")
+      expect(userTexts(other)).toEqual(["Different Session"])
     }),
   )
 
