@@ -197,6 +197,8 @@ export class Subscription {
 
   private async handlePartUpdated(event: EventMessagePartUpdated | EventMessagePartProgress) {
     const part = event.properties.part
+    // #553：ACP client 只能追加 lifecycle 帧，不能把 tombstone 当作新的 Tool 状态。
+    if ("hidden" in part && part.hidden) return
     const sessionId = part.sessionID || event.properties.sessionID
     const session = await Effect.runPromise(this.input.session.tryGet(sessionId))
     if (!session) return

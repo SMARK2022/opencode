@@ -537,7 +537,10 @@ const layer = Layer.effect(
       )
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-      const conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
+      // #553：Compaction plugin 与普通 prompt 共用 visible head，序列化 conversation 不能消费已隐藏的 transformed history。
+      // transformed clone 是唯一上传历史；raw history 仍仅服务审计和 bounded memento。
+      const visibleMsgs = MessageV2.visible(msgs)
+      const conversation = visibleMsgs.map(serialize).filter(Boolean).join("\n\n")
       const nextPrompt =
         compacting.prompt ??
         [

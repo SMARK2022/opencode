@@ -283,7 +283,18 @@ function makeHttp(input?: {
     Plugin.Service.of({
       trigger: (name, _input, output) =>
         Effect.sync(() => {
-          if (name !== "chat.message" || typeof output !== "object" || output === null) return output
+          if (typeof output !== "object" || output === null) return output
+          // #553：plugin-hidden history——transform 是第二个 producer，验证 prompt wire 的 visible 收敛。
+          if (name === "experimental.chat.messages.transform") {
+            const messages = Reflect.get(output, "messages")
+            if (!Array.isArray(messages)) return output
+            const target = messages.find((message) =>
+              message.parts.some((part: MessageV2.Part) => part.type === "text" && part.text.includes("plugin-hidden-history")),
+            )
+            if (target) Reflect.set(target.info, "hidden", { time: Date.now(), reason: "plugin" })
+            return output
+          }
+          if (name !== "chat.message") return output
           const parts = Reflect.get(output, "parts")
           if (!Array.isArray(parts)) return output
           const file = parts.find(
@@ -462,7 +473,7 @@ oneShotImage.instance(
   () =>
     Effect.gen(function* () {
       imageNormalizations.length = 0
-      const { dir } = yield* useServerConfig(providerCfg)
+      const { dir, llm } = yield* useServerConfig(providerCfg)
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const chat = yield* sessions.create({
@@ -505,7 +516,7 @@ mutatedImage.instance(
   () =>
     Effect.gen(function* () {
       imageNormalizations.length = 0
-      const { dir } = yield* useServerConfig(providerCfg)
+      const { dir, llm } = yield* useServerConfig(providerCfg)
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const chat = yield* sessions.create({ title: "Changed image" })
@@ -534,6 +545,19 @@ mutatedImage.instance(
         .filter((part) => part.type === "file")
       expect(files).toHaveLength(1)
       expect(Object.getOwnPropertySymbols(files[0] ?? {})).toHaveLength(0)
+      yield* user(chat.id, `plugin-hidden-history ${"x".repeat(120_000)}`)
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: "current" }] })
+      yield* llm.text("reply")
+      yield* prompt.loop({ sessionID: chat.id })
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      const assistant = messages.findLast((message) => message.info.role === "assistant")
+      if (assistant?.info.role !== "assistant") throw new Error("Expected assistant snapshot")
+      // #553：persisted snapshot 与 wire 一起排除 plugin-hidden history；userText 以显式上界锁死 120K 原文不进入估算，
+      // 且 raw 120K 文本也不能触发 Compaction（无 summary 落盘）。
+      const wireExcludes = JSON.stringify((yield* llm.inputs).at(-1)?.messages).includes("plugin-hidden-history")
+      expect(wireExcludes).toBe(false)
+      expect(assistant.info.inputEstimate?.inputBreakdown?.messages.userText).toBeLessThan(1_000)
+      expect(messages.some((message) => message.info.summary)).toBe(false)
     }),
   { git: true },
 )
@@ -5213,6 +5237,8 @@ it.instance(
       yield* llm.push(reply().tool("goal", { operate: "blocked", reason: "persistent blocker" }).stop())
       yield* llm.text("pending recorded")
       yield* prompt.loop({ sessionID: chat.id })
+      // #553：B 被 undo 隐藏——hidden user 不能回灌 chronology 参与 Goal 排序。
+      yield* sessions.updateMessage({ ...b, hidden: { time: Date.now(), reason: "undo" } })
 
       // C 刻意不调用 blocked：它必须打断 B 的 pending adjacency；
       // 后落盘的 S 虽指向 B，也只能传递 lineage，不能把 B 移回 current。

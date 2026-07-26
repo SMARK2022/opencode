@@ -828,6 +828,15 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
     }
 
     const info = event.properties.info
+    // #553：SDK wire 类型未声明 hidden——运行时对象携带 tombstone，以 in 判定后整体静默。
+    if ("hidden" in info && info.hidden) {
+      // Message tombstone 需要先丢弃尚未 flush 的 Part，避免延迟 delta 复活已隐藏的输出。
+      for (const [partID, messageID] of data.msg) {
+        if (messageID === info.id) drop(data, partID)
+      }
+      data.role.delete(info.id)
+      return out(data, commits)
+    }
     if (typeof info.id === "string") {
       data.role.set(info.id, info.role)
       replay(data, commits, info.id, info.role, input.thinking)
@@ -918,6 +927,13 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
   if (event.type === "message.part.updated") {
     const part = event.properties.part
     if (part.sessionID !== input.sessionID) {
+      return out(data, commits)
+    }
+
+    // #553：Part tombstone 不产生空的 final commit；删除 buffer 才能阻止后续 delta 重放。
+    if ("hidden" in part && part.hidden) {
+      data.tools.delete(part.id)
+      drop(data, part.id)
       return out(data, commits)
     }
 

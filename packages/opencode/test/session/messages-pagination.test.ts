@@ -232,17 +232,89 @@ describe("MessageV2.page", () => {
     ),
   )
 
-  it.instance("limit of 1 returns single newest message", () =>
-    withSession(({ sessionID }) =>
+  it.instance("visible limit skips hidden Messages and thaws no hidden Parts", () =>
+    withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
-        const ids = yield* fill(sessionID, 5)
-
+        const { sync } = yield* Database.Service
+        const ids = yield* fill(sessionID, 4)
+        const hidden = yield* MessageV2.get({ sessionID, messageID: ids[3] })
+        yield* session.updateMessage({ ...hidden.info, hidden: { time: Date.now(), reason: "undo" } })
+        const visible = yield* MessageV2.get({ sessionID, messageID: ids[2] })
+        const part = Option.getOrThrow(Option.fromNullishOr(visible.parts.find((item) => item.type === "text")))
+        yield* session.updatePart({ ...part, type: "reasoning", text: "cold".repeat(512), time: { start: Date.now() }, hidden: { time: Date.now(), reason: "undo" } })
+        expect(ColdStorage.freezeOwner(sync, { type: "part", id: part.id, now: Date.now() + 1, olderThanMs: 0 }).type).toBe("frozen")
         const result = yield* MessageV2.page({ sessionID, limit: 1 })
-        expect(result.items).toHaveLength(1)
-        expect(result.items[0].info.id).toBe(ids[ids.length - 1])
+        // #553：hidden Message 不消耗 limit；被隐藏 part 的冷 payload 不得因 page 读取被 thaw。
+        expect([result.items[0].info.id, result.items[0].parts, sessionColdOwners(sync, sessionID)]).toEqual([ids[2], [], 1])
         expect(result.more).toBe(true)
       }),
     ),
+  )
+  it.instance(
+    "visibility performance uses the production page and chronology seams",
+    withSession(({ session, sessionID }) =>
+      Effect.gen(function* () {
+        // 此处测量读取而非事件生产；批量建立同一6326/364持久cohort，保留真实page/chronology及全部时限。
+        const database = yield* Database.Service
+        const ids = Array.from({ length: 6326 }, () => MessageID.ascending())
+        const hidden = new Set(ids.filter((_, index) => index % 17 === 0).slice(0, 364))
+        yield* Database.withSync(database, (sync) => sync.transaction((tx) => {
+          for (let offset = 0; offset < ids.length; offset += 250) {
+            const batch = ids.slice(offset, offset + 250)
+            tx.insert(MessageTable).values(batch.map((id, index) => ({
+              id, session_id: sessionID,
+              time_created: offset + index,
+              data: {
+                role: "user" as const,
+                time: { created: offset + index },
+                agent: "test",
+                model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
+                ...(hidden.has(id) ? { hidden: { time: 1, reason: "undo" as const } } : {}),
+              },
+            }))).run()
+            tx.insert(PartTable).values(batch.map((id, index) => ({
+              id: PartID.ascending(), session_id: sessionID, message_id: id,
+              data: { type: "text" as const, text: `m${offset + index}` },
+            }))).run()
+          }
+        }))
+
+        // page/chronology 都是需服务上下文的 Effect——计时在 generator 内以 yield* 采样，保持 production seam。
+        const timed = function* <A, E, R>(run: Effect.Effect<A, E, R>) {
+          const samples: number[] = []
+          for (let i = 0; i < 20; i++) {
+            const started = performance.now()
+            yield* run
+            samples.push(performance.now() - started)
+          }
+          samples.sort((a, b) => a - b)
+          // 20 个样本的 nearest-rank p95 是第 19 个值；取最大值会把单次离群当成 p95。
+          return samples[samples.length - 2] ?? 0
+        }
+        const medianOf = (values: number[]) => values.sort((a, b) => a - b)[1] ?? 0
+        const rawRuns: number[] = []
+        const visibleRuns: number[] = []
+        const chronologyRuns: number[] = []
+        for (let round = 0; round < 3; round++) {
+          rawRuns.push(yield* timed(MessageV2.page({ sessionID, limit: 301, includeHidden: true })))
+          visibleRuns.push(yield* timed(MessageV2.page({ sessionID, limit: 301 })))
+          // #553：chronology 走 Effect 化 seam——hidden 过滤在 SQL locator 层完成，不引入额外 thaw。
+          chronologyRuns.push(yield* timed(MessageV2.chronology(sessionID)))
+        }
+        const rawPage = medianOf(rawRuns)
+        const visiblePage = medianOf(visibleRuns)
+        const page = yield* MessageV2.page({ sessionID, limit: 301 })
+        expect(page.items).toHaveLength(301)
+        expect(visiblePage).toBeLessThanOrEqual(rawPage + Math.max(5, rawPage * 0.25))
+        const chronologyBaseline = 51.831
+        expect(medianOf(chronologyRuns)).toBeLessThanOrEqual(chronologyBaseline * 1.25)
+      }).pipe(Effect.ensuring(Database.Service.use((database) => Database.withSync(database, (sync) => {
+        // 与批量建数对称清理本fixture的热行；读基准不把数千行Session级删除延迟混进时限。
+        sync.delete(PartTable).where(eq(PartTable.session_id, sessionID)).run()
+        sync.delete(MessageTable).where(eq(MessageTable.session_id, sessionID)).run()
+      })))),
+    ),
+    90_000,
   )
 
   it.instance("hydrates multiple parts per message", () =>
@@ -826,6 +898,7 @@ describe("MessageV2.filterCompacted", () => {
   it.instance("stops at compaction boundary and returns chronological order", () =>
     withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
+        const old = yield* addUser(sessionID, "old question")
         // Chronological: u1(+compaction part), a1(summary, parentID=u1), u2, a2
         // Stream (newest first): a2, u2, a1(adds u1 to completed), u1(in completed + compaction) -> break
         const u1 = yield* addUser(sessionID, "first question")
@@ -837,6 +910,9 @@ describe("MessageV2.filterCompacted", () => {
           type: "text",
           text: "summary",
         })
+        // #553：隐藏 summary——marker/summary hidden 不一致时不得构成可重放边界。
+        const summary = yield* MessageV2.get({ sessionID, messageID: a1 })
+        yield* session.updateMessage({ ...summary.info, hidden: { time: Date.now(), reason: "undo" } })
         yield* addCompactionPart(sessionID, u1)
 
         const u2 = yield* addUser(sessionID, "new question")
@@ -849,10 +925,14 @@ describe("MessageV2.filterCompacted", () => {
           text: "new response",
         })
 
-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
-        // Includes compaction boundary: u1, a1, u2, a2
-        expect(result[0].info.id).toBe(u1)
-        expect(result.length).toBe(4)
+        const result = yield* MessageV2.filterCompactedEffect(sessionID)
+        // #553：hidden summary 使配对不成立——marker 失去 completed 资格被剔除，hidden summary 亦不返回。
+        expect(result.map((item) => item.info.id)).toEqual([old, u2, a2])
+        // 反向部分隐藏同样不能留下无marker的可见summary或裁掉旧head。
+        const marker = yield* MessageV2.get({ sessionID, messageID: u1 })
+        yield* session.updateMessage({ ...marker.info, hidden: { time: Date.now(), reason: "undo" } })
+        yield* session.updateMessage(summary.info)
+        expect((yield* MessageV2.filterCompactedEffect(sessionID)).map((item) => item.info.id)).toEqual([old, u2, a2])
       }),
     ),
   )
@@ -864,14 +944,20 @@ describe("MessageV2.filterCompacted", () => {
     }),
   )
 
-  it.instance("drops compaction marker without matching summary", () =>
-    withSession(({ sessionID }) =>
+  it.instance("drops compaction marker with a hidden Compaction Part", () =>
+    withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
         const u1 = yield* addUser(sessionID, "hello")
         yield* addCompactionPart(sessionID, u1)
+        yield* addAssistant(sessionID, u1, { summary: true, finish: "end_turn" })
+        const marker = yield* MessageV2.get({ sessionID, messageID: u1 })
+        const part = marker.parts.find((item) => item.type === "compaction")
+        if (!part) throw new Error("Expected Compaction Part")
+        yield* session.updatePart({ ...part, hidden: { time: Date.now(), reason: "undo" } })
         const u2 = yield* addUser(sessionID, "world")
 
-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
+        const result = yield* MessageV2.filterCompactedEffect(sessionID)
+        // #553：hidden Compaction Part 不构成可见边界——marker/summary 从 prompt 窗口剔除。
         expect(result.map((item) => item.info.id)).toEqual([u2])
       }),
     ),
@@ -880,6 +966,11 @@ describe("MessageV2.filterCompacted", () => {
   it.instance("drops compaction marker with errored summary", () =>
     withSession(({ sessionID }) =>
       Effect.gen(function* () {
+        // #553：先建立一对合法已完成边界——errored 重试只应剔除失败 pair，不能吞掉更早的合法边界。
+        const old = yield* addUser(sessionID, "old")
+        const completed = yield* addUser(sessionID)
+        yield* addCompactionPart(sessionID, completed, old)
+        const completedSummary = yield* addAssistant(sessionID, completed, { summary: true, finish: "end_turn" })
         const u1 = yield* addUser(sessionID, "hello")
         yield* addCompactionPart(sessionID, u1)
 
@@ -890,8 +981,9 @@ describe("MessageV2.filterCompacted", () => {
         yield* addAssistant(sessionID, u1, { summary: true, finish: "end_turn", error })
         const retry = yield* addUser(sessionID, "retry")
 
-        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
-        expect(result.map((item) => item.info.id)).toEqual([retry])
+        const result = yield* MessageV2.filterCompactedEffect(sessionID)
+        // #553：合法 pair 保留（含其 tail old），errored pair 与 marker 剔除。
+        expect(result.map((item) => item.info.id)).toEqual([completed, completedSummary, old, retry])
       }),
     ),
   )
@@ -1017,11 +1109,16 @@ describe("MessageV2.filterCompacted", () => {
         })
         const next = yield* addUser(sessionID, "next request")
 
-        // #205：真实恢复入口负责读取hidden锚点，测试不替生产代码预先提供隐藏消息。
+        // #553：marker/summary 成对隐藏后，边界仍参与结构遍历但从返回窗口剔除。
+        for (const id of [compact, summary]) {
+          const message = yield* MessageV2.get({ sessionID, messageID: id })
+          yield* session.updateMessage({ ...message.info, hidden: { time: Date.now(), reason: "undo" } })
+        }
+
         const result = yield* MessageV2.filterCompactedEffect(sessionID)
 
-        // #205：anchor 被 visible() 剔除，结果仅 compact/summary/next
-        expect(result.map((item) => item.info.id)).toEqual([compact, summary, next])
+        // #553：hidden pair 不进入 prompt 窗口，仅保留 next；raw 结构遍历仍能看到它们。
+        expect(result.map((item) => item.info.id)).toEqual([next])
       }),
     ),
   )

@@ -669,6 +669,46 @@ describe("HttpApi SDK", () => {
           }),
         )
         const updated = yield* capture(() => sdk.session.message({ sessionID, messageID: seeded.message.id }))
+        // #553：ordinary SDK 的 GET 与 PATCH 必须共享 hidden parent 的 public not-found 合同。
+        yield* capture(() =>
+          sdk.part.update({
+            sessionID,
+            messageID: seeded.message.id,
+            partID: seeded.part.id,
+            part: { ...seeded.part, text: "updated message", hidden: { time: Date.now(), reason: "undo" } } as NonNullable<
+              Parameters<Sdk["part"]["update"]>[0]["part"]
+            >,
+          }),
+        )
+        const hiddenPart = yield* capture(() => sdk.session.message({ sessionID, messageID: seeded.message.id }))
+        yield* InstanceStore.Service.use((store) =>
+          store.provide(
+            { directory },
+            SessionNs.Service.use((svc) => svc.updateMessage({ ...seeded.message, hidden: { time: Date.now(), reason: "undo" } })),
+          ),
+        )
+        const hiddenMessage = yield* capture(() => sdk.session.message({ sessionID, messageID: seeded.message.id }))
+        const hiddenParentPatch = yield* capture(() =>
+          sdk.part.update({
+            sessionID,
+            messageID: seeded.message.id,
+            partID: seeded.part.id,
+            part: { ...seeded.part, text: "resurrected message" } as NonNullable<
+              Parameters<Sdk["part"]["update"]>[0]["part"]
+            >,
+          }),
+        )
+        // raw 读取走 Session.getPart（实例域内定点 seam）——hidden part 在 raw storage 保留原文。
+        const rawPart = yield* InstanceStore.Service.use((store) =>
+          store.provide(
+            { directory },
+            SessionNs.Service.use((svc) => svc.getPart({ sessionID: SessionID.make(sessionID), messageID: seeded.message.id, partID: seeded.part.id })),
+          ),
+        )
+        expect([
+          hiddenPart.status, array(record(hiddenPart.data).parts).length,
+          hiddenMessage.status, hiddenParentPatch.status, record(rawPart).text,
+        ]).toEqual([200, 0, 404, 404, "updated message"])
         const partDelete = yield* capture(() =>
           sdk.part.delete({ sessionID, messageID: seeded.message.id, partID: seeded.part.id }),
         )

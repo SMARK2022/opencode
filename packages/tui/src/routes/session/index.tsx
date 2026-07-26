@@ -491,6 +491,8 @@ export function Session() {
   event.on("message.part.updated", (evt) => {
     const part = evt.properties.part
     if (part.type !== "tool") return
+    // #553：plan transition 是 visible Tool 语义，hidden completion 不得切换当前 Agent。
+    if ("hidden" in part && part.hidden) return
     if (part.sessionID !== route.sessionID) return
     if (part.state.status !== "completed") return
     if (part.id === lastSwitch) return

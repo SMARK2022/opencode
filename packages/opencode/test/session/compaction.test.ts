@@ -391,9 +391,19 @@ function plugin(ready: Deferred.Deferred<void>) {
   })
 }
 
-function autocontinue(enabled: boolean) {
+function autocontinue(enabled: boolean, hideHistory = false) {
   return Layer.mock(Plugin.Service)({
     trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
+      // #553：plugin 是第二个 Message producer——transform 后隐藏指定 history，验证 visible 收敛。
+      if (hideHistory && name === "experimental.chat.messages.transform" && typeof output === "object" && output) {
+        const messages = Reflect.get(output, "messages")
+        if (Array.isArray(messages)) {
+          const target = messages.find((message) =>
+            message.parts.some((part: MessageV2.Part) => part.type === "text" && part.text.includes("plugin-hidden-compaction-history")),
+          )
+          if (target) Reflect.set(target.info, "hidden", { time: Date.now(), reason: "plugin" })
+        }
+      }
       if (name !== "experimental.compaction.autocontinue") return Effect.succeed(output)
       return Effect.sync(() => {
         ;(output as { enabled: boolean }).enabled = enabled
@@ -1372,6 +1382,8 @@ describe("session.compaction.process", () => {
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
+      // 插件隐藏长history后，准备屏障同时检验wire与同源估算，不放松原账本及step交接断言。
+      yield* createUserMessage(session.id, `plugin-hidden-compaction-history ${"x".repeat(120_000)}`)
       const msg = yield* createUserMessage(session.id, "hello")
       const msgs = yield* ssn.messages({ sessionID: session.id })
       const prepared = yield* Deferred.make<void>()
@@ -1379,9 +1391,11 @@ describe("session.compaction.process", () => {
       const fiber = yield* SessionCompaction.use.process({ parentID: msg.id, messages: msgs, sessionID: session.id, auto: false })
         .pipe(
           withCompaction({
+            plugin: autocontinue(true, true),
             llm: Layer.succeed(LLM.Service, LLM.Service.of({
               stream: (input) => Stream.unwrap(
                 (input.onRequestPrepared?.({ messages: input.messages }) ?? Effect.void).pipe(
+                  Effect.tap(() => Effect.sync(() => expect(JSON.stringify(input.messages)).not.toContain("plugin-hidden-compaction-history"))),
                   Effect.andThen(Deferred.succeed(prepared, undefined)),
                   Effect.andThen(Deferred.await(release)),
                   Effect.as(Stream.concat(
@@ -1403,6 +1417,8 @@ describe("session.compaction.process", () => {
         expect(estimate.input).toBeGreaterThan(0)
         expect(estimate.bodyChars).toBeGreaterThan(0)
         expect(estimate.inputBreakdown?.messages.total).toBeGreaterThan(0)
+        // 字符上限必须低于隐藏的120K正文，不能用200K上限让泄漏也通过。
+        expect(estimate.bodyChars).toBeLessThan(120_000)
         // provisional 快照只供展示；确认 tokens 和账本不能提前计入估算。
         expect(pending.info.tokens.input).toBe(0)
         expect(estimate.confirmed).toBe(false)

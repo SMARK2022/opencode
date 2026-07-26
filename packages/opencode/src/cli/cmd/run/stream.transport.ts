@@ -214,7 +214,8 @@ function active(event: Event, sessionID: string): boolean {
   }
 
   if (event.type === "message.updated") {
-    return event.properties.info.role === "assistant"
+    // #553：hidden assistant 仍可作为 raw tombstone 传输，但不能延长当前 run 的 live gate。
+    return event.properties.info.role === "assistant" && !("hidden" in event.properties.info && event.properties.info.hidden)
   }
 
   if (event.type === "message.part.delta" || event.type === "message.part.updated") {

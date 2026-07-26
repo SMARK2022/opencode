@@ -835,6 +835,8 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
           if (data.part.sessionID !== session.id) return Effect.void
           //if (evt.properties.part.messageID === messageID) return
           const part = data.part
+          // #553：GitHub transcript 是 append-only；hidden Part 不得再次触发评论输出。
+          if (part.hidden) return Effect.void
 
           if (part.type === "tool" && part.state.status === "completed") {
             const [tool, color] = TOOL[part.tool] ?? [part.tool, UI.Style.TEXT_INFO_BOLD]
