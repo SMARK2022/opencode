@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
-import { Effect, Layer, Schema } from "effect"
+import { DateTime, Effect, Layer, Schema } from "effect"
+import { asc, eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -12,7 +13,9 @@ import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionStore } from "@opencode-ai/core/session/store"
-import { SessionTable } from "@opencode-ai/core/session/sql"
+import { SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { SessionEvent } from "@opencode-ai/core/session/event"
+import { SessionMessage } from "@opencode-ai/core/session/message"
 import { testEffect } from "./lib/effect"
 
 const projects = Layer.succeed(
@@ -151,6 +154,37 @@ describe("SessionV2.history", () => {
       expect(oneMore.hasMore).toBe(true)
       expect(exhausted.events).toHaveLength(1)
       expect(exhausted.hasMore).toBe(false)
+    }),
+  )
+
+  it.effect("keeps hidden Native messages out of public pages and point reads while retaining raw history", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const session = yield* SessionV2.Service
+      const store = yield* SessionStore.Service
+      const events = yield* EventV2.Service
+      const created = yield* session.create({ location })
+      const ids = Array.from({ length: 4 }, () => SessionMessage.ID.create())
+      for (const [index, id] of ids.entries())
+        yield* events.publish(SessionEvent.Synthetic, {
+          sessionID: created.id, messageID: id, timestamp: DateTime.makeUnsafe(index), text: `visible-${index}`,
+          ...(index === 2 ? { metadata: { hidden: { time: 0, reason: "unrelated" } } } : {}),
+        })
+      // 仅合法Native tombstone隐藏记录；其他metadata不误判，隐藏行不占正反向分页容量。
+      yield* events.publish(SessionEvent.MessagesHidden, {
+        sessionID: created.id, messageIDs: [ids[1], ids[3]], timestamp: DateTime.makeUnsafe(4),
+        hidden: { time: 4, reason: "permission-reviewer-protocol-retry" },
+      })
+      const before = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, created.id)).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
+      expect((yield* session.messages({ sessionID: created.id, limit: 1 })).map(message => message.id)).toEqual([ids[2]])
+      expect((yield* session.messages({ sessionID: created.id, limit: 1, cursor: { id: ids[2], direction: "next" } })).map(message => message.id)).toEqual([ids[0]])
+      expect((yield* session.messages({ sessionID: created.id, limit: 1, cursor: { id: ids[0], direction: "previous" } })).map(message => message.id)).toEqual([ids[2]])
+      expect((yield* session.messages({ sessionID: created.id, order: "asc", limit: 2 })).map(message => message.id)).toEqual([ids[0], ids[2]])
+      expect(yield* session.message({ sessionID: created.id, messageID: ids[3] })).toBeUndefined()
+      expect(yield* session.message({ sessionID: created.id, messageID: ids[2] })).toMatchObject({ id: ids[2] })
+      // raw Store仍服务审计/结构恢复；公开读取既不删除记录，也不重写元数据。
+      expect((yield* store.message(ids[3], created.id))?.message).toMatchObject({ id: ids[3], metadata: { hidden: { reason: "permission-reviewer-protocol-retry" } } })
+      expect(yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, created.id)).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)).toEqual(before)
     }),
   )
 

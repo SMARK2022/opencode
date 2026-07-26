@@ -124,6 +124,15 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
 
     function handleEvent(event: V2Event) {
       switch (event.type) {
+        case "session.next.messages.hidden": {
+          // 队列先提交前序delta；隐藏事件按ID删除当前缓存，后续delta找不到消息就不能复活它。
+          const hidden = new Set(event.data.messageIDs)
+          message.update(event.data.sessionID, (draft) => {
+            for (let index = draft.length - 1; index >= 0; index--)
+              if (hidden.has(draft[index].id)) draft.splice(index, 1)
+          })
+          break
+        }
         case "catalog.updated": {
           // 广播只更新已加载的目录，不能为无人消费的模型表触发首次读取。
           const location = store.location[locationKey(event.location ?? defaultLocation())]

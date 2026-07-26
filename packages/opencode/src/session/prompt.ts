@@ -1905,6 +1905,8 @@ const layer = Layer.effect(
 
             // decide 跳过插件 transform，避免外部改写只读上下文
             if (!decide) yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+            // #553：plugin 是第二个 Message producer；先收敛到同一 visible projection，避免 wire、usage 和 overflow 分叉。
+            msgs = MessageV2.visible(msgs)
 
             // decide 跳过 skills/MCP 指令，只保留 env + instructions
             const [skills, env, instructions, mcpInstructions] = yield* Effect.all([

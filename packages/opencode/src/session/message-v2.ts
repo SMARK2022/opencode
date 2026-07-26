@@ -243,6 +243,7 @@ export const chronology = Effect.fn("MessageV2.chronology")(function* (sessionID
       type: sql<string>`json_extract(${PartTable.data}, '$.type')`,
       synthetic: sql<number | null>`json_extract(${PartTable.data}, '$.synthetic')`,
       goalContinuation: sql<number | null>`json_extract(${PartTable.data}, '$.metadata.goal_continuation')`,
+      hidden: sql<string | null>`json_type(${PartTable.data}, '$.hidden')`,
     })
     .from(PartTable)
     .where(eq(PartTable.session_id, sessionID))
@@ -250,7 +251,9 @@ export const chronology = Effect.fn("MessageV2.chronology")(function* (sessionID
     .all()
     .pipe(Effect.orDie)
   const byMessage = new Map<string, ChronologyPart[]>()
+  // #553：只在 narrow locator projection 过滤 hidden Part，避免为 Goal chronology thaw 完整 payload。
   for (const part of parts) {
+    if (part.hidden !== null) continue
     const value: ChronologyPart = {
       type: part.type,
       ...(part.synthetic === 1 ? { synthetic: true as const } : {}),
@@ -260,7 +263,9 @@ export const chronology = Effect.fn("MessageV2.chronology")(function* (sessionID
     if (list) list.push(value)
     else byMessage.set(part.messageID, [value])
   }
-  return messages.map((message) => ({ info: hotInfo(message), parts: byMessage.get(message.id) ?? [] }))
+  return messages
+    .filter((message) => !message.data.hidden)
+    .map((message) => ({ info: hotInfo(message), parts: byMessage.get(message.id) ?? [] }))
 })
 
 // #0500：cancel ownership 只依赖 Message parent/time hot fields。Parts 由 caller 仅为选中的 incomplete assistant
@@ -294,7 +299,7 @@ export const decodePartRow = part
 const older = (row: Cursor) =>
   or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
 
-function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"], rows: (typeof MessageTable.$inferSelect)[]) {
+function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"], rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
   // #0500：hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
   // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
   // #493：page 先批量 thaw Message，再只查询该 page 的 Parts；范围外历史不因一个 UI 请求被预热。
@@ -313,7 +318,8 @@ function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"],
         .pipe(Effect.orDie)
       // #0500：grouped thaw 让 shared pack 在本范围最多解压一次，同时保留原 Part 顺序。
       // 任一 Part payload 损坏都抛错，禁止同一 page 混入占位对象。
-      const restoredParts = yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, partRows))
+      // #553：visible read 在 thaw 前排除 tombstone，hidden cold payload 不得产生解压或持久预热副作用。
+      const restoredParts = yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, includeHidden ? partRows : partRows.filter((row) => !row.data.hidden)))
       for (const row of restoredParts) {
         const next = partFromRestored(row)
         const list = partByMessage.get(row.message_id)
@@ -345,6 +351,8 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
   model: Provider.Model,
   options?: { stripMedia?: boolean; toolOutputTruncation?: { head: number; tail: number } },
 ) {
+  // #553：直接 Provider caller 不能假设上游已经完成 projection；这里是最终 wire trust seam。
+  input = visible(input)
   const result: UIMessage[] = []
   const toolNames = new Set<string>()
   // Track media from tool results that need to be injected as user messages
@@ -744,9 +752,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   const slice = more ? rows.slice(0, input.limit) : rows
   // #98：普通列表过滤隐藏部件，审计读取保留完整内容。
   // 协议重试隐藏畸形审查轮次，和撤回、空助手修复一样保留审计记录但不进入普通历史。
-  const items = (yield* hydrate(db, sync, slice)).map((item) =>
-    input.includeHidden ? item : { ...item, parts: item.parts.filter((part) => !part.hidden) },
-  )
+  const items = yield* hydrate(db, sync, slice, Boolean(input.includeHidden))
   items.reverse()
   const tail = slice.at(-1)
   return {
@@ -757,7 +763,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
 })
 
 // #493：findHot 的 page 扫描只构造 HotInfo，不查 Parts、不调用 thaw；首个匹配 row 才 hydrate。
-// hidden Message 在 SQL 阶段排除；hidden Part 只在最终一条 hydrate 后过滤。
+// hidden Message 在SQL阶段排除，hidden Part在选中一条的thaw前过滤，避免预热不可见正文。
 export const findHot = Effect.fn("MessageV2.findHot")(function* (input: {
   sessionID: SessionID
   predicate: (info: HotInfo) => boolean
@@ -786,9 +792,8 @@ export const findHot = Effect.fn("MessageV2.findHot")(function* (input: {
     // predicate 只接收 HotInfo：扫描阶段不能意外读取 summary.diffs 或 Parts。
     for (const row of slice) {
       if (!input.predicate(hotInfo(row))) continue
-      const found = (yield* hydrate(db, sync, [row]))[0]
+      const found = (yield* hydrate(db, sync, [row], false))[0]
       if (!found) throw new Error(`Message row disappeared during find: ${row.id}`)
-      found.parts = found.parts.filter((part) => !part.hidden)
       return Option.some(found)
     }
     if (!more) return Option.none<WithParts>()
@@ -988,23 +993,28 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
   }
 })
 
+// #553：visible 是 normal business projection；raw persistence、audit、fork 和 accounting 不经过这里。
+// Message 与 Part 必须原子地过滤，避免 hidden 父记录或 tombstone 重新进入 Provider/output。
+export function visible(messages: Iterable<WithParts>) {
+  return Array.from(messages).flatMap((message) =>
+    message.info.hidden ? [] : [{ ...message, parts: message.parts.filter((part) => !part.hidden) }],
+  )
+}
+
 export function filterCompacted(msgs: Iterable<WithParts>) {
   // #204：压缩标记须按 newest→oldest 扫描——summary assistant 先于 parent compaction user 出现，才能停止遍历并恢复 retained tail
   // #204：沿用分页的时间/ID顺序；导入消息的ID未必单调，不能覆盖它们真实的创建顺序。
   const ordered = Array.from(msgs).toSorted((a, b) => b.info.time.created - a.info.time.created || b.info.id.localeCompare(a.info.id))
   const result = [] as WithParts[]
-  const completed = new Set<string>()
+  const completed = new Map<MessageID, boolean>()
   let retain: MessageID | undefined
   // #205：hidden 消息仍可作结构压缩锚点，但 undo/repair 后绝不能重放给 provider
   // #205：边界遍历时保留它们，仅从返回的 prompt 窗口剔除
   // #242：悬挂 compaction 清理链在 #205 hidden 剔除之后执行——hidden 锚点参与边界遍历、
 // 但与被取消的压缩标记一样绝不能出现在返回的 prompt 窗口
-const visible = (items: SessionV1.WithParts[]) =>
-  visibleCompactions(
-    items
-      .filter((msg) => !msg.info.hidden)
-      .map((msg) => ({ ...msg, parts: msg.parts.filter((part) => !part.hidden) })),
-  )
+// 配对证明必须先看原始Message/Part；提前移除隐藏marker会遗留其可见summary。
+// 证明完成后统一visible投影，部分隐藏和失败配对均不能裁掉旧head。
+const visibleWindow = (items: SessionV1.WithParts[]) => visible(visibleCompactions(items))
   // #204：遍历 newest-first 序列，发现 summary→compaction 边界并锁定 retained tail
   for (const msg of ordered) {
     result.push(msg)
@@ -1012,22 +1022,30 @@ const visible = (items: SessionV1.WithParts[]) =>
       if (msg.info.id === retain) break
       continue
     }
-    if (msg.info.role === "user" && completed.has(msg.info.id)) {
-      const part = msg.parts.find((item): item is CompactionPart => item.type === "compaction")
-      if (!part) continue
+    if (msg.info.role === "user") {
+      // #553：summary 的 hidden 态必须与 marker 配对一致；hidden Compaction Part 不再构成可见边界。
+      const summaryHidden = completed.get(msg.info.id)
+      if (summaryHidden === undefined) continue
+      const part = msg.parts.find((item): item is CompactionPart => item.type === "compaction" && !item.hidden)
+      if (!part || Boolean(msg.info.hidden) !== summaryHidden) {
+        completed.delete(msg.info.id)
+        continue
+      }
       if (!part.tail_start_id) break
       retain = part.tail_start_id
       if (msg.info.id === retain) break
       continue
     }
     if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error) {
-      completed.add(msg.info.parentID)
+      // #553：completed 记录 summary 的 hidden 态，供 marker 配对时校验 XOR 一致性。
+      completed.set(msg.info.parentID, Boolean(msg.info.hidden))
     }
   }
   result.reverse()
   const compactionIndex = result.findLastIndex(
     (msg) =>
       msg.info.role === "user" &&
+      completed.has(msg.info.id) &&
       msg.parts.some((item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined),
   )
   const compaction = result[compactionIndex]
@@ -1040,34 +1058,41 @@ const visible = (items: SessionV1.WithParts[]) =>
           index > compactionIndex &&
           msg.info.role === "assistant" &&
           msg.info.summary &&
+          msg.info.finish &&
+          !msg.info.error &&
+          // #553：summary 与 marker 的 hidden 态必须成对，partial Revert 不能构成可重放边界。
+          Boolean(msg.info.hidden) === Boolean(compaction.info.hidden) &&
           msg.info.parentID === compaction.info.id,
       )
     : -1
   const tailIndex = part?.tail_start_id ? result.findIndex((msg) => msg.info.id === part.tail_start_id) : -1
   if (tailIndex >= 0 && tailIndex < compactionIndex && summaryIndex > compactionIndex) {
-    return visible([
+    return visibleWindow([
       ...result.slice(compactionIndex, summaryIndex + 1),
       ...result.slice(tailIndex, compactionIndex),
       ...result.slice(summaryIndex + 1),
     ])
   }
-  return visible(result)
+  return visibleWindow(result)
 }
 
 function visibleCompactions(items: SessionV1.WithParts[]) {
   // #242：只有 user(compaction) 与已完成且无错的摘要 assistant 配对才是持久边界；
   // 悬挂标记/摘要是本地维护残渣——在 prompt 重放与 latest 任务检测看到它们之前剔除，
   // 否则会复活旧 compact 或把「What did we do so far?」注入后续 user prompt
-  const compactions = new Set(
+  // #553：Map 携带 marker 本体——completed 配对时校验 hidden 一致与可见 Compaction Part。
+  const compactions = new Map(
     items
       .filter((msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction"))
-      .map((msg) => msg.info.id),
+      .map((msg) => [msg.info.id, msg]),
   )
   const completed = new Set(
     items.flatMap((msg): MessageID[] => {
       if (msg.info.role !== "assistant") return []
       if (!msg.info.summary || !msg.info.finish || msg.info.error) return []
-      if (!compactions.has(msg.info.parentID)) return []
+      const marker = compactions.get(msg.info.parentID)
+      // #553：marker/summary XOR hidden 是 partial pair；hidden Compaction Part 也不构成持久边界。
+      if (!marker || !marker.parts.some((part) => part.type === "compaction" && !part.hidden) || Boolean(marker.info.hidden) !== Boolean(msg.info.hidden)) return []
       return [msg.info.parentID]
     }),
   )

@@ -3,7 +3,7 @@ export * from "./session/schema"
 
 import { DateTime, Effect, Layer, Schema, Context, Stream } from "effect"
 import { ListAnchor } from "@opencode-ai/schema/session"
-import { and, asc, desc, eq, gt, gte, like, lt, or, type SQL } from "drizzle-orm"
+import { and, asc, desc, eq, gt, gte, like, lt, or, sql, type SQL } from "drizzle-orm"
 import { ProjectV2 } from "./project"
 import { WorkspaceV2 } from "./workspace"
 import { ModelV2 } from "./model"
@@ -208,6 +208,12 @@ const layer = Layer.effect(
     const locations = yield* LocationServiceMap.Service
     const decodeMessage = Schema.decodeUnknownEffect(SessionMessage.Message)
     const isDurableSessionEvent = Schema.is(SessionEvent.Durable)
+    // 与Native Hidden的reason/time合同一致；可见性在limit和冷恢复之前判定，不影响内部raw读取。
+    const visibleMessage = sql`not coalesce(
+      json_extract(${SessionMessageTable.data}, '$.metadata.hidden.reason') = 'permission-reviewer-protocol-retry'
+      and json_type(${SessionMessageTable.data}, '$.metadata.hidden.time') = 'integer'
+      and json_extract(${SessionMessageTable.data}, '$.metadata.hidden.time') >= 0, 0
+    )`
     const decode = (row: typeof SessionMessageTable.$inferSelect) =>
       decodeMessage({ ...row.data, id: row.id, type: row.type }).pipe(
         Effect.mapError(
@@ -388,9 +394,8 @@ const layer = Layer.effect(
             ? gt(SessionMessageTable.seq, anchor.seq)
             : lt(SessionMessageTable.seq, anchor.seq)
           : undefined
-        const where = boundary
-          ? and(eq(SessionMessageTable.session_id, input.sessionID), boundary)
-          : eq(SessionMessageTable.session_id, input.sessionID)
+        // 隐藏行不占公开页容量，cursor仍按原durable seq定位且不预热边界外记录。
+        const where = and(eq(SessionMessageTable.session_id, input.sessionID), boundary, visibleMessage)
         const query = db
           .select()
           .from(SessionMessageTable)
@@ -404,8 +409,11 @@ const layer = Layer.effect(
         return yield* Effect.forEach(direction === "previous" ? restored.toReversed() : restored, decode)
       }),
       message: Effect.fn("V2Session.message")(function* (input) {
-        const stored = yield* store.message(input.messageID, input.sessionID)
-        return stored?.sessionID === input.sessionID ? stored.message : undefined
+        // 定点公开读取沿原undefined/not-found合同；不能先调用raw Store把隐藏cold消息解包。
+        const row = yield* db.select().from(SessionMessageTable).where(and(eq(SessionMessageTable.session_id, input.sessionID), eq(SessionMessageTable.id, input.messageID), visibleMessage)).get().pipe(Effect.orDie)
+        if (!row) return undefined
+        const restored = (yield* ColdStorage.readSessionMessageRows(db, [row]))[0]!
+        return yield* decode(restored).pipe(Effect.orDie)
       }),
       context: Effect.fn("V2Session.context")(function* (sessionID) {
         yield* result.get(sessionID)

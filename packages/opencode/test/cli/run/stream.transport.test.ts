@@ -101,6 +101,12 @@ function assistant(id: string) {
 
 const StreamClosed = undefined as never
 
+function hiddenAssistant(id: string) {
+  // #553：SDK wire 类型未声明 hidden——运行时对象携带；内层 info 以原类型收窄后再组装事件。
+  const event = assistant(id)
+  const info = { ...event.properties.info, hidden: { time: 1, reason: "undo" as const } } as unknown as typeof event.properties.info
+  return { ...event, properties: { ...event.properties, info } }
+}
 function feed<T, R = never>(returnValue: R = StreamClosed) {
   const list: T[] = []
   let done = false
@@ -2071,18 +2077,21 @@ describe("run stream transport", () => {
   test("falls back to session status polling when idle events are missing", async () => {
     const src = eventFeed()
     const ui = footer()
-    let busy = true
+    let statusCalls = 0
     const transport = await createSessionTransport({
       sdk: sdk({
         stream: src.stream,
         promptAsync: async () => {
           queueMicrotask(() => {
-            src.push(assistant("msg-1"))
-            busy = false
+            // #553：hidden assistant 不延长 live gate——turn 只能由 status polling 或 visible 消息收口。
+            src.push(hiddenAssistant("msg-hidden"))
           })
           return ok(undefined)
         },
-        status: async () => ok(statusMap(busy)),
+        status: async () => {
+          if (++statusCalls === 2) src.push(assistant("msg-visible"))
+          return ok(statusMap(false))
+        },
       }),
       sessionID: "session-1",
       thinking: true,
@@ -2102,6 +2111,8 @@ describe("run stream transport", () => {
         }),
         new Promise((_, reject) => setTimeout(() => reject(new Error("turn timed out")), 1_000)),
       ])
+      // #553：hidden tombstone 不能关闭 turn——必须有第二次 status 轮询接手。
+      expect(statusCalls).toBeGreaterThanOrEqual(2)
     } finally {
       src.close()
       await transport.close()

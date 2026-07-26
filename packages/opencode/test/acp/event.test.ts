@@ -591,6 +591,19 @@ describe("acp event routing", () => {
     expect(harness.updates[1]?.update).toMatchObject({ status: "in_progress", toolCallId: "call_1" })
   })
 
+  it("ignores hidden Part updates instead of emitting a tool lifecycle", async () => {
+    const harness = createHarness()
+    await Effect.runPromise(harness.session.create({ id: "ses_hidden", cwd: "/workspace" }))
+
+    // #553：hidden Tool 只传播 tombstone，ACP 不得创建 pending/running lifecycle 帧。
+    await harness.subscription.handle(
+      // SDK wire 类型未声明 hidden——运行时携带，此处展开注入并以 ToolPart 视图收窄。
+      toolUpdated({ ...runningTool("ses_hidden", "call_hidden", "hello"), hidden: { time: Date.now(), reason: "undo" } } as ToolPart),
+    )
+
+    expect(toolUpdates(harness.updates)).toEqual([])
+  })
+
   it("includes available input in the synthetic pending tool call", async () => {
     const harness = createHarness()
     await Effect.runPromise(harness.session.create({ id: "ses_pending_input", cwd: "/workspace" }))
