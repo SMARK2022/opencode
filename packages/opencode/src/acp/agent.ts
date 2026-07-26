@@ -282,6 +282,8 @@ export class Agent implements ACPAgent {
         if (event.type === "message.part.updated") log.info("message part updated", { event: event.properties })
         const props = event.properties
         const part = props.part
+        // ACP client 只能追加 lifecycle 帧，不能把 tombstone 当作新的 Tool 状态。
+        if (part.hidden) return
         const session = this.sessionManager.tryGet(part.sessionID)
         if (!session) return
         const sessionId = session.id

@@ -155,6 +155,14 @@ describe("session.message-v2.toModelMessage", () => {
     expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([])
   })
 
+  test("direct Provider conversion excludes hidden messages and parts", async () => {
+    // converter 是独立 wire seam，不能依赖 Prompt 已经做过 projection。
+    const hiddenMessage = userInfo("m-hidden")
+    hiddenMessage.hidden = { time: 1, reason: "undo" }
+    const input = [{ info: hiddenMessage, parts: [{ ...basePart("m-hidden", "p"), type: "text", text: "hidden" }] }, { info: userInfo("m-visible"), parts: [{ ...basePart("m-visible", "p1"), type: "text", text: "hidden", hidden: { time: 1, reason: "undo" } }, { ...basePart("m-visible", "p2"), type: "text", text: "visible" }] }] as MessageV2.WithParts[]
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([{ role: "user", content: [{ type: "text", text: "visible" }] }])
+  })
+
   test("filters out user messages with only empty text parts", async () => {
     const messageID = "m-user"
 

@@ -483,9 +483,18 @@ function plugin(ready: Deferred.Deferred<void>) {
   })
 }
 
-function autocontinue(enabled: boolean) {
+function autocontinue(enabled: boolean, hideHistory = false) {
   return Layer.mock(Plugin.Service)({
     trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
+      if (hideHistory && name === "experimental.chat.messages.transform" && typeof output === "object" && output) {
+        const messages = Reflect.get(output, "messages")
+        if (Array.isArray(messages)) {
+          const target = messages.find((message) =>
+            message.parts.some((part: MessageV2.Part) => part.type === "text" && part.text.includes("plugin-hidden-compaction-history")),
+          )
+          if (target) Reflect.set(target.info, "hidden", { time: Date.now(), reason: "plugin" })
+        }
+      }
       if (name !== "experimental.compaction.autocontinue") return Effect.succeed(output)
       return Effect.sync(() => {
         ;(output as { enabled: boolean }).enabled = enabled
@@ -1817,11 +1826,16 @@ describe("session.compaction.process", () => {
     }),
   )
 
-  it.instance(
+  itCompaction.instance(
     "stores pending input estimate on summary assistant before streaming",
-    Effect.gen(function* () {
+    () => {
+      const stub = llm()
+      let captured: LLM.StreamInput | undefined
+      stub.push(reply("summary", (input) => (captured = input)))
+      return Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
+      yield* createUserMessage(session.id, `plugin-hidden-compaction-history ${"x".repeat(120_000)}`)
       const msg = yield* createUserMessage(session.id, "hello")
       const msgs = yield* ssn.messages({ sessionID: session.id })
 
@@ -1840,8 +1854,11 @@ describe("session.compaction.process", () => {
       if (summary?.info.role !== "assistant") return
       expect(summary.info.inputTokens).toBeGreaterThan(0)
       expect(summary.info.inputChars).toBeGreaterThan(0)
-      expect(summary.info.inputBreakdown?.messages.total).toBeGreaterThan(0)
-    }),
+      // Provider wire 与 persisted upload snapshot 均排除 plugin-hidden 的 120K history。
+      expect(JSON.stringify(captured?.messages)).not.toContain("plugin-hidden-compaction-history")
+      expect(summary.info.inputBreakdown?.messages.total).toBeLessThan(20_000)
+      }).pipe(withCompaction({ llm: stub.layer, plugin: autocontinue(true, true) }))
+    },
   )
 
   it.instance(

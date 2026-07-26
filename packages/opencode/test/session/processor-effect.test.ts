@@ -1172,6 +1172,59 @@ it.live("doom_loop AND: cross-turn different-input errors do not trigger", () =>
   ),
 )
 
+// 两个 visible failure 加一个 hidden current Tool 仍不足三次；tombstone 不能触发 doom-loop。
+// 使用真实 Processor seam，避免只测试筛选 helper 而漏掉 current-message 合并顺序。
+it.live("doom_loop AND: hidden current Tool does not satisfy the threshold", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+
+        yield* llm.push(reply().tool("read", { path: "same" }), reply().tool("read", { path: "same" }))
+
+        for (let turn = 0; turn < 2; turn++) {
+          const parent = yield* user(chat.id, `same ${turn}`)
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const handle = yield* processors.create({
+            assistantMessage: msg,
+            sessionID: chat.id,
+            model: mdl,
+          })
+          if (turn === 1) {
+            yield* session.updatePart({
+              id: PartID.ascending(), messageID: msg.id, sessionID: chat.id,
+              type: "tool", callID: "hidden", tool: "read", hidden: { time: Date.now(), reason: "undo" },
+              state: { status: "error", input: { path: "same" }, error: "hidden", time: { start: 0, end: 1 } },
+            })
+          }
+
+          const result = yield* handle.process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies MessageV2.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "same" }],
+            tools: { read: failingRead },
+          })
+
+          expect(result).toBe("continue")
+          expect(handle.message.error).toBeUndefined()
+        }
+      }),
+    { git: true, config: (url) => denyDoomLoopConfig(url) },
+  ),
+)
+
 // 核心：生产默认每 step 新 assistant、每 turn 1 tool；同 path 三次 error 必须在第 3 次 stop。
 // 覆盖 multi-assistant tail 深度；禁止用「单 assistant 堆 3 条 tool」冒充此形状。
 it.live("doom_loop AND: cross-turn same-input errors trigger", () =>

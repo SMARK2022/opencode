@@ -453,4 +453,22 @@ describe("run subagent data", () => {
       expect.objectContaining({ sessionID: "child-2", status: "running" }),
     ])
   })
+
+  test("clears a task tab when its parent Message becomes hidden", () => {
+    // 该测试故意只发送 Message tombstone，覆盖 Revert 不重复发送 Part hidden update 的路径。
+    const data = createSubagentData()
+    reduce(data, { type: "message.part.updated", properties: { part: taskMessage("child-1", "running").parts[0] } })
+    expect(snapshotSubagentData(data).tabs).toEqual([expect.objectContaining({ sessionID: "child-1" })])
+    reduce(data, {
+      type: "message.updated",
+      properties: { sessionID: "parent-1", info: { id: "msg-child-1", role: "assistant", hidden: { time: 2, reason: "undo" } } },
+    })
+    expect(snapshotSubagentData(data)).toEqual({ tabs: [], details: {}, permissions: [], questions: [] })
+    // 同一 reducer 还必须把 hidden task Part 当删除事件，且无 tab 时不能创建。
+    const part = { ...taskMessage("child-1", "running").parts[0], hidden: { time: 2, reason: "undo" } }
+    expect(reduce(data, { type: "message.part.updated", properties: { part } })).toBe(false)
+    reduce(data, { type: "message.part.updated", properties: { part: taskMessage("child-1", "running").parts[0] } })
+    expect(reduce(data, { type: "message.part.updated", properties: { part } })).toBe(true)
+    expect(snapshotSubagentData(data).tabs).toEqual([])
+  })
 })

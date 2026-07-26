@@ -2871,6 +2871,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             }
 
             if (!decide) yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+            // plugin 是第二个 Message producer；先收敛到同一 visible projection，避免 wire、usage 和 overflow 分叉。
+            msgs = MessageV2.visible(msgs)
 
             const registeredTools = decide ? [] : Object.keys(tools).filter(ToolSelection.isUserConfigurable)
             const [skills, env, instructions, mcpInstr] = yield* Effect.all([

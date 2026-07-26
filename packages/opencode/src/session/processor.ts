@@ -673,7 +673,8 @@ export const layer = Layer.effect(
             const failedInput = toolCall?.part.state.input
             // 当前 message 只取 tool 终态，避免 step-finish/text 挤占 slice 尾部导致漏检。
             const currentTools = MessageV2.parts(ctx.assistantMessage.id).filter(
-              (part) => part.type === "tool" && part.state.status !== "pending",
+              // current Tool 与历史 Tool 使用同一 visible contract，hidden error 不计入阈值。
+              (part) => part.type === "tool" && !part.hidden && part.state.status !== "pending",
             )
             const preceding = MessageV2.previousAssistantToolTail({
               sessionID: ctx.sessionID,

@@ -78,6 +78,7 @@ export function sameSubagentTab(a: FooterSubagentTab | undefined, b: FooterSubag
 
   return (
     a.sessionID === b.sessionID &&
+    a.messageID === b.messageID &&
     a.partID === b.partID &&
     a.callID === b.callID &&
     a.label === b.label &&
@@ -298,6 +299,8 @@ function taskTab(part: ToolPart, sessionID: string): FooterSubagentTab {
 
   return {
     sessionID,
+    // 父 Message 是 Revert 的最小 tombstone 单位，tab 不能只依赖 child SessionID。
+    messageID: part.messageID,
     partID: part.id,
     callID: part.callID,
     label,
@@ -757,11 +760,26 @@ export function reduceSubagentData(input: {
 }) {
   const event = input.event
 
+  if (event.type === "message.updated" && event.properties.info.hidden) {
+    // Message-level Revert 不一定另发 Part updates，因此必须从 tab identity 直接撤销 detail。
+    const sessions = [...input.data.tabs].filter(([, tab]) => tab.messageID === event.properties.info.id).map(([sessionID]) => sessionID)
+    sessions.forEach((sessionID) => input.data.tabs.delete(sessionID) && input.data.details.delete(sessionID))
+    if (sessions.length) return true
+  }
+
   if (event.type === "message.part.updated") {
     const part = event.properties.part
     if (part.sessionID === input.sessionID) {
       if (part.type !== "tool") {
         return false
+      }
+
+      if (part.hidden) {
+        const sessionID = taskSessionID(part)
+        if (!sessionID) return false
+        // hidden task Part 是 tab tombstone；即使 tab 不存在也不能进入 ordinary create path。
+        input.data.details.delete(sessionID)
+        return input.data.tabs.delete(sessionID)
       }
 
       return syncTaskTab(input.data, part)

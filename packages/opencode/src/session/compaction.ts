@@ -932,7 +932,10 @@ export const layer = Layer.effect(
       const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-      const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
+      // Compaction plugin 与普通 prompt 共用 visible head，upload ratio 不能消费已隐藏的 transformed history。
+      // transformed clone 是唯一上传历史；raw history 仍仅服务审计和 bounded memento。
+      const visibleMsgs = MessageV2.visible(msgs)
+      const modelMessages = yield* MessageV2.toModelMessagesEffect(visibleMsgs, model, {
         stripMedia: true,
         toolOutputTruncation: { head: TOOL_OUTPUT_HEAD_CHARS, tail: TOOL_OUTPUT_TAIL_CHARS },
       })
@@ -953,7 +956,7 @@ export const layer = Layer.effect(
       const estimatedInput = TokenEstimate.estimateUploadInput({
         text: messageEstimate.text,
         attachments: messageEstimate.attachments,
-        history,
+        history: visibleMsgs,
         model,
       }).inputTokens
       const inputBreakdown = {

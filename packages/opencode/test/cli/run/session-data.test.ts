@@ -111,6 +111,14 @@ function tool(input: { id: string; messageID: string; tool: string; state: Recor
 }
 
 describe("run session data", () => {
+  test("treats hidden Message and Part updates as tombstones", () => {
+    // 先验证 Message tombstone 不会写 footer，再验证 delayed Part 也不会制造补偿输出。
+    const hiddenMessage = reduce(createSessionData(), assistant("msg-hidden", { hidden: { time: 1, reason: "undo" } }))
+    expect({ commits: hiddenMessage.commits, footer: hiddenMessage.footer }).toEqual({ commits: [], footer: undefined })
+    const visible = text({ id: "part-hidden", messageID: "msg-hidden", text: "secret", time: { end: 2 } })
+    expect(reduce(hiddenMessage.data, { ...visible, properties: { part: { ...visible.properties.part, hidden: { time: 2, reason: "undo" } } } }).commits).toEqual([])
+  })
+
   test("buffers delayed assistant text until the role is known", () => {
     let data = createSessionData()
     data = reduce(data, delta("msg-1", "txt-1", "hello")).data

@@ -58,6 +58,12 @@ export function latest(sessionID: SessionID): Info | undefined {
         .get()
       // 损坏或缺失配对继续寻找更早合法边界，不让一次失败尝试导致全部历史回热。
       if (!part || part.data.type !== "compaction") continue
+      // structural cutoff 只有在 Message visibility 成对一致、且 Compaction Part 本身可见时成立。
+      // partial Revert 不能先裁掉旧 head，再由下游过滤尝试恢复已丢失的上下文。
+      const summaryHidden = Boolean(summary.data.hidden)
+      // marker/summary XOR 是 partial pair，不具备裁剪旧 head 的结构证明。
+      if (summaryHidden !== Boolean(marker.data.hidden)) continue
+      if (part.data.hidden) continue
       // routine prompt/Goal/eligibility 只经过 hot 投影查询，不会为边界判断持久 thaw。
       // 只返回 ID，调用方不能借 boundary seam 读取 transcript 或冷 memento 内容。
       return {

@@ -75,6 +75,7 @@ function toolEvent(
     callID: string
     tool: string
     input: Record<string, unknown>
+    hidden?: boolean
   } & (
     | { status: "running"; metadata?: Record<string, unknown> }
     | { status: "pending"; raw: string }
@@ -120,6 +121,7 @@ function toolEvent(
       },
     },
   }
+  if (opts.hidden) payload.properties.part.hidden = { time: Date.now(), reason: "undo" }
   return { directory: cwd, payload }
 }
 
@@ -866,6 +868,8 @@ describe("acp.agent event subscription", () => {
             tool: "read",
             status: "running",
             input: { filePath: "/tmp/example.txt" },
+            // hidden Tool 只传播 tombstone，ACP 不应创建 pending/running lifecycle。
+            hidden: true,
           }),
         )
         // provider callID 只在 Session 内唯一；A 的较高版本不能压掉 B 的首帧，
@@ -880,7 +884,7 @@ describe("acp.agent event subscription", () => {
         )
         await pollUntil(
           () =>
-            sessionUpdates.filter((u) => u.sessionId === sessionA).length >= 4 &&
+            sessionUpdates.filter((u) => u.sessionId === sessionA).length >= 2 &&
             sessionUpdates.filter((u) => u.sessionId === sessionB).length >= 2,
           "per-session tool lifecycle updates never arrived",
         )
@@ -891,7 +895,7 @@ describe("acp.agent event subscription", () => {
             .map((u) => u.update)
             .filter((u) => u.sessionUpdate === "tool_call" || isToolCallUpdate(u))
             .map((u) => (isToolCallUpdate(u) ? inProgressText(u) : u.status))
-        expect(updates(sessionA)).toEqual(["pending", "session-a", "pending", undefined])
+        expect(updates(sessionA)).toEqual(["pending", "session-a"])
         expect(updates(sessionB)).toEqual(["pending", "session-b"])
         stop()
       },

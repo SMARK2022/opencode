@@ -229,17 +229,59 @@ describe("MessageV2.page", () => {
     ),
   )
 
-  it.instance("limit of 1 returns single newest message", () =>
-    withSession(({ sessionID }) =>
+  it.instance("visible limit skips hidden Messages and thaws no hidden Parts", () =>
+    withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
-        const ids = yield* fill(sessionID, 5)
-
+        const ids = yield* fill(sessionID, 4)
+        const hidden = yield* MessageV2.get({ sessionID, messageID: ids[3] })
+        yield* session.updateMessage({ ...hidden.info, hidden: { time: Date.now(), reason: "undo" } })
+        const visible = yield* MessageV2.get({ sessionID, messageID: ids[2] })
+        const part = Option.getOrThrow(Option.fromNullishOr(visible.parts.find((item) => item.type === "text")))
+        yield* session.updatePart({ ...part, type: "reasoning", text: "cold".repeat(512), time: { start: Date.now() }, hidden: { time: Date.now(), reason: "undo" } })
+        expect(ColdStorage.freezeOwner({ type: "part", id: part.id, now: Date.now() + 1, olderThanMs: 0 }).type).toBe("frozen")
         const result = yield* MessageV2.page({ sessionID, limit: 1 })
-        expect(result.items).toHaveLength(1)
-        expect(result.items[0].info.id).toBe(ids[ids.length - 1])
+        expect([result.items[0].info.id, result.items[0].parts, sessionColdOwners(sessionID)]).toEqual([ids[2], [], 1])
         expect(result.more).toBe(true)
       }),
     ),
+  )
+
+  it.instance(
+    "visibility performance uses the production page and chronology seams",
+    withSession(({ session, sessionID }) =>
+      Effect.gen(function* () {
+        // 固定 6326/364 cohort 让 page refill 与 chronology projection 在真实 production seam 上可复测。
+        const ids = yield* fill(sessionID, 6326)
+        for (const id of ids.filter((_, index) => index % 17 === 0).slice(0, 364)) {
+          const message = yield* MessageV2.get({ sessionID, messageID: id })
+          yield* session.updateMessage({ ...message.info, hidden: { time: Date.now(), reason: "undo" } })
+        }
+
+        const p95 = (run: () => unknown) => {
+          for (let i = 0; i < 5; i++) run()
+          const samples = Array.from({ length: 20 }, () => {
+            const started = performance.now()
+            run()
+            return performance.now() - started
+          }).sort((a, b) => a - b)
+          // 20 个样本的 nearest-rank p95 是第 19 个值；取最大值会把单次离群当成 p95。
+          const [nearestRank] = samples.slice(-2)
+          return nearestRank ?? 0
+        }
+        const medianP95 = (run: () => unknown) => {
+          const [, median] = [p95(run), p95(run), p95(run)].sort((a, b) => a - b)
+          return median ?? 0
+        }
+        const rawPage = medianP95(() => Effect.runSync(MessageV2.page({ sessionID, limit: 301, includeHidden: true })))
+        const visiblePage = medianP95(() => Effect.runSync(MessageV2.page({ sessionID, limit: 301 })))
+        const page = yield* MessageV2.page({ sessionID, limit: 301 })
+        expect(page.items).toHaveLength(301)
+        expect(visiblePage).toBeLessThanOrEqual(rawPage + Math.max(5, rawPage * 0.25))
+        const chronologyBaseline = 51.831
+        expect(medianP95(() => MessageV2.chronology(sessionID))).toBeLessThanOrEqual(chronologyBaseline * 1.25)
+      }),
+    ),
+    90_000,
   )
 
   it.instance("hydrates multiple parts per message", () =>
@@ -828,6 +870,7 @@ describe("MessageV2.filterCompacted", () => {
   it.instance("stops at compaction boundary and returns chronological order", () =>
     withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
+        const old = yield* addUser(sessionID, "old question")
         // Chronological: u1(+compaction part), a1(summary, parentID=u1), u2, a2
         // Stream (newest first): a2, u2, a1(adds u1 to completed), u1(in completed + compaction) -> break
         const u1 = yield* addUser(sessionID, "first question")
@@ -839,6 +882,8 @@ describe("MessageV2.filterCompacted", () => {
           type: "text",
           text: "summary",
         })
+        const summary = yield* MessageV2.get({ sessionID, messageID: a1 })
+        yield* session.updateMessage({ ...summary.info, hidden: { time: Date.now(), reason: "undo" } })
         yield* addCompactionPart(sessionID, u1)
 
         const u2 = yield* addUser(sessionID, "new question")
@@ -851,10 +896,8 @@ describe("MessageV2.filterCompacted", () => {
           text: "new response",
         })
 
-        const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
-        // Includes compaction boundary: u1, a1, u2, a2
-        expect(result[0].info.id).toBe(u1)
-        expect(result.length).toBe(4)
+        const result = yield* MessageV2.filterCompactedEffect(sessionID)
+        expect(result.map((item) => item.info.id)).toEqual([old, u2, a2])
       }),
     ),
   )
@@ -866,14 +909,19 @@ describe("MessageV2.filterCompacted", () => {
     }),
   )
 
-  it.instance("drops compaction marker without matching summary", () =>
-    withSession(({ sessionID }) =>
+  it.instance("drops compaction marker with a hidden Compaction Part", () =>
+    withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
         const u1 = yield* addUser(sessionID, "hello")
         yield* addCompactionPart(sessionID, u1)
+        yield* addAssistant(sessionID, u1, { summary: true, finish: "end_turn" })
+        const marker = yield* MessageV2.get({ sessionID, messageID: u1 })
+        const part = marker.parts.find((item) => item.type === "compaction")
+        if (!part) throw new Error("Expected Compaction Part")
+        yield* session.updatePart({ ...part, hidden: { time: Date.now(), reason: "undo" } })
         const u2 = yield* addUser(sessionID, "world")
 
-        const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
+        const result = yield* MessageV2.filterCompactedEffect(sessionID)
         expect(result.map((item) => item.info.id)).toEqual([u2])
       }),
     ),
@@ -882,6 +930,10 @@ describe("MessageV2.filterCompacted", () => {
   it.instance("drops compaction marker with errored summary", () =>
     withSession(({ sessionID }) =>
       Effect.gen(function* () {
+        const old = yield* addUser(sessionID, "old")
+        const completed = yield* addUser(sessionID)
+        yield* addCompactionPart(sessionID, completed, old)
+        const completedSummary = yield* addAssistant(sessionID, completed, { summary: true, finish: "end_turn" })
         const u1 = yield* addUser(sessionID, "hello")
         yield* addCompactionPart(sessionID, u1)
 
@@ -892,8 +944,8 @@ describe("MessageV2.filterCompacted", () => {
         yield* addAssistant(sessionID, u1, { summary: true, finish: "end_turn", error })
         const retry = yield* addUser(sessionID, "retry")
 
-        const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
-        expect(result.map((item) => item.info.id)).toEqual([retry])
+        const result = yield* MessageV2.filterCompactedEffect(sessionID)
+        expect(result.map((item) => item.info.id)).toEqual([completed, completedSummary, old, retry])
       }),
     ),
   )
@@ -1013,11 +1065,15 @@ describe("MessageV2.filterCompacted", () => {
           type: "text",
           text: "summary",
         })
+        for (const id of [compact, summary]) {
+          const message = yield* MessageV2.get({ sessionID, messageID: id })
+          yield* session.updateMessage({ ...message.info, hidden: { time: Date.now(), reason: "undo" } })
+        }
         const next = yield* addUser(sessionID, "next request")
 
-        const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
+        const result = yield* MessageV2.filterCompactedEffect(sessionID)
 
-        expect(result.map((item) => item.info.id)).toEqual([compact, summary, next])
+        expect(result.map((item) => item.info.id)).toEqual([next])
       }),
     ),
   )

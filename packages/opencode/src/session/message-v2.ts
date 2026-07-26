@@ -751,6 +751,14 @@ export type WithParts = {
   parts: Part[]
 }
 
+// visible 是 normal business projection；raw persistence、audit、fork 和 accounting 不经过这里。
+// Message 与 Part 必须原子地过滤，避免 hidden 父记录或 tombstone 重新进入 Provider/output。
+export function visible(messages: Iterable<WithParts>) {
+  return Array.from(messages).flatMap((message) =>
+    message.info.hidden ? [] : [{ ...message, parts: message.parts.filter((part) => !part.hidden) }],
+  )
+}
+
 const RECENT_USER_MEMENTO_INTRO =
   "Recent user instructions preserved verbatim for continuity. They may overlap with the retained transcript tail."
 
@@ -867,13 +875,16 @@ export function chronology(sessionID: SessionID): ChronologyMessage[] {
         type: sql<string>`json_extract(${PartTable.data}, '$.type')`,
         synthetic: sql<number | null>`json_extract(${PartTable.data}, '$.synthetic')`,
         goalContinuation: sql<number | null>`json_extract(${PartTable.data}, '$.metadata.goal_continuation')`,
+        hidden: sql<string | null>`json_type(${PartTable.data}, '$.hidden')`,
       })
       .from(PartTable)
       .where(eq(PartTable.session_id, sessionID))
       .orderBy(PartTable.message_id, PartTable.id)
       .all()
     const byMessage = new Map<string, ChronologyPart[]>()
+    // 只在 narrow locator projection 过滤 hidden Part，避免为 Goal chronology thaw 完整 payload。
     for (const part of parts) {
+      if (part.hidden !== null) continue
       const value: ChronologyPart = {
         type: part.type,
         ...(part.synthetic === 1 ? { synthetic: true as const } : {}),
@@ -883,7 +894,9 @@ export function chronology(sessionID: SessionID): ChronologyMessage[] {
       if (list) list.push(value)
       else byMessage.set(part.messageID, [value])
     }
-    return messages.map((message) => ({ info: hotInfo(message), parts: byMessage.get(message.id) ?? [] }))
+    return messages
+      .filter((message) => !message.data.hidden)
+      .map((message) => ({ info: hotInfo(message), parts: byMessage.get(message.id) ?? [] }))
   })
 }
 
@@ -933,7 +946,7 @@ const older = (row: Cursor) =>
 
 // hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
 // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
-function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
+function hydrate(rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
   // 任一 Message corruption 让整个范围失败，不能返回半完整、半 skeleton 的 transcript。
   // Message refs 在单次批量 seam 中 thaw，避免逐 owner 重复打开共享 pack。
   const restoredRows = ColdStorage.thawMessageRows(rows)
@@ -952,7 +965,8 @@ function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
     )
     // grouped thaw 让 shared pack 在本范围最多解压一次，同时保留原 Part 顺序。
     // 任一 Part payload 损坏都抛错，禁止同一 page 混入占位对象。
-    const restoredParts = ColdStorage.thawPartRows(partRows)
+    // visible read 在 thaw 前排除 tombstone，hidden cold payload 不得产生解压或持久预热副作用。
+    const restoredParts = ColdStorage.thawPartRows(includeHidden ? partRows : partRows.filter((row) => !row.data.hidden))
     for (const row of restoredParts) {
       const next = partFromRestored(row)
       const list = partByMessage.get(row.message_id)
@@ -991,6 +1005,8 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
   model: Provider.Model,
   options?: { stripMedia?: boolean; toolOutputTruncation?: { head: number; tail: number } },
 ) {
+  // 直接 Provider caller 不能假设上游已经完成 projection；这里是最终 wire trust seam。
+  input = visible(input)
   const result: UIMessage[] = []
   const toolNames = new Set<string>()
   // Track media from tool results that need to be injected as user messages
@@ -1324,9 +1340,9 @@ export function toModelMessages(
   return Effect.runPromise(toModelMessagesEffect(input, model, options).pipe(Effect.provide(EffectLogger.layer)))
 }
 
-// page 的 SQL 先只取 limit+1 个 Message rows，hydrate 只查询该 slice 的 Parts；next-page 探针不会被 thaw。
+// raw page 保留 indexed limit 与 structural caller 合同；visible page 在相同 physical cursor 上 refill，
+// 直到业务 capacity 成立后才 hydrate，避免 hidden rows 消耗 limit 或触发无意义 Part thaw。
 // cursor 由 time_created+id 组成，fractional 历史 timestamp 仍可分页，冷存储不能借机收紧旧数据合同。
-// includeHidden 过滤发生在选定 page hydrate 后，保证 structural recovery caller 与可见 transcript 共用同一边界。
 // 该函数是所有业务 Message 范围读取的 cold-aware seam；raw SQL 诊断命令明确不具备透明展开承诺。
 export const page = Effect.fn("MessageV2.page")(function* (input: {
   sessionID: SessionID
@@ -1352,15 +1368,32 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
     ? and(eq(MessageTable.session_id, input.sessionID), gte(MessageTable.id, input.fromMessageID))
     : eq(MessageTable.session_id, input.sessionID)
   const where = before ? and(base, older(before)) : base
-  const rows = Database.use((db) =>
+  const scanLimit = input.includeHidden ? input.limit + 1 : input.limit + Math.min(input.limit, 10) + 1
+  let chunk = Database.use((db) =>
     db
       .select()
       .from(MessageTable)
       .where(where)
       .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
-      .limit(input.limit + 1)
+      .limit(scanLimit)
       .all(),
   )
+  let rows = chunk
+  if (!input.includeHidden) {
+    // refill 只沿最后一条 physical row 前进；hidden row 只驱动扫描，永不成为公开 cursor。
+    // 小额 overfetch 控制常见页成本，聚集 tombstone 仍由同一 indexed range 循环补足 capacity。
+    const visibleRows = chunk.filter((row) => !row.data.hidden)
+    while (visibleRows.length <= input.limit && chunk.length === scanLimit) {
+      const physicalCursor = chunk.at(-1)
+      if (!physicalCursor) break
+      chunk = Database.use((db) =>
+        db.select().from(MessageTable).where(and(base, older({ id: physicalCursor.id, time: physicalCursor.time_created })))
+          .orderBy(desc(MessageTable.time_created), desc(MessageTable.id)).limit(scanLimit).all(),
+      )
+      visibleRows.push(...chunk.filter((row) => !row.data.hidden))
+    }
+    rows = visibleRows
+  }
   if (rows.length === 0) {
     const row = Database.use((db) =>
       db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get(),
@@ -1374,7 +1407,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
 
   const more = rows.length > input.limit
   const slice = more ? rows.slice(0, input.limit) : rows
-  const items = hydrate(slice)
+  const items = hydrate(slice, Boolean(input.includeHidden))
   items.reverse()
   if (!input.includeHidden) {
     for (let i = items.length - 1; i >= 0; i--) {
@@ -1631,7 +1664,7 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
   // history and inflate the next compaction request past the model limit.
   const ordered = Array.from(msgs).toSorted((a, b) => b.info.id.localeCompare(a.info.id))
   const result = [] as WithParts[]
-  const completed = new Set<string>()
+  const completed = new Map<MessageID, boolean>()
   let retain: MessageID | undefined
   // Hidden messages can still be structural compaction anchors, but they must
   // never be replayed to providers after undo/repair. Keep them during the
@@ -1652,22 +1685,28 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
       if (msg.info.id === retain) break
       continue
     }
-    if (msg.info.role === "user" && completed.has(msg.info.id)) {
-      const part = msg.parts.find((item): item is CompactionPart => item.type === "compaction")
-      if (!part) continue
+    if (msg.info.role === "user") {
+      const summaryHidden = completed.get(msg.info.id)
+      if (summaryHidden === undefined) continue
+      const part = msg.parts.find((item): item is CompactionPart => item.type === "compaction" && !item.hidden)
+      if (!part || Boolean(msg.info.hidden) !== summaryHidden) {
+        completed.delete(msg.info.id)
+        continue
+      }
       if (!part.tail_start_id) break
       retain = part.tail_start_id
       if (msg.info.id === retain) break
       continue
     }
     if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error) {
-      completed.add(msg.info.parentID)
+      completed.set(msg.info.parentID, Boolean(msg.info.hidden))
     }
   }
   result.reverse()
   const compactionIndex = result.findLastIndex(
     (msg) =>
       msg.info.role === "user" &&
+      completed.has(msg.info.id) &&
       msg.parts.some((item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined),
   )
   const compaction = result[compactionIndex]
@@ -1680,7 +1719,10 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
           index > compactionIndex &&
           msg.info.role === "assistant" &&
           msg.info.summary &&
-          msg.info.parentID === compaction.info.id,
+          msg.info.parentID === compaction.info.id &&
+          msg.info.finish &&
+          !msg.info.error &&
+          Boolean(msg.info.hidden) === Boolean(compaction.info.hidden),
       )
     : -1
   const tailIndex = part?.tail_start_id ? result.findIndex((msg) => msg.info.id === part.tail_start_id) : -1
@@ -1699,26 +1741,23 @@ function visibleCompactions(items: WithParts[]) {
   // is a durable boundary. Failed or abandoned markers are local maintenance
   // debris: keep unrelated messages, but remove the marker/summary pair before
   // prompt replay and latest-task detection see it.
-  const compactions = new Set(
+  const compactions = new Map(
     items
       .filter((msg) => msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction"))
-      .map((msg) => msg.info.id),
+      .map((msg) => [msg.info.id, msg]),
   )
   const completed = new Set(
     items.flatMap((msg): MessageID[] => {
       if (msg.info.role !== "assistant") return []
       if (!msg.info.summary || !msg.info.finish || msg.info.error) return []
-      if (!compactions.has(msg.info.parentID)) return []
+      const marker = compactions.get(msg.info.parentID)
+      if (!marker || !marker.parts.some((part) => part.type === "compaction" && !part.hidden) || Boolean(marker.info.hidden) !== Boolean(msg.info.hidden)) return []
       return [msg.info.parentID]
     }),
   )
   return items.filter((msg) => {
-    if (msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction")) {
-      return completed.has(msg.info.id)
-    }
-    if (msg.info.role === "assistant" && msg.info.summary && compactions.has(msg.info.parentID)) {
-      return completed.has(msg.info.parentID)
-    }
+    if (msg.info.role === "user" && msg.parts.some((part) => part.type === "compaction")) return completed.has(msg.info.id)
+    if (msg.info.role === "assistant" && msg.info.summary && compactions.has(msg.info.parentID)) return completed.has(msg.info.parentID)
     return true
   })
 }

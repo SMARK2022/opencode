@@ -620,6 +620,8 @@ export const RunCommand = effectCmd({
               args.format !== "json" &&
               toggles.get("start") !== true
             ) {
+              // append-only stdout 无法撤回已写入文本；hidden Message 只能在首次输出前静默。
+              if (event.properties.info.hidden) continue
               UI.empty()
               UI.println(`> ${event.properties.info.agent} · ${event.properties.info.modelID}`)
               UI.empty()
@@ -629,6 +631,8 @@ export const RunCommand = effectCmd({
             if (event.type === "message.part.updated") {
               const part = event.properties.part
               if (part.sessionID !== sessionID) continue
+              // raw event 仍需传播给可删除状态的 consumer，此 append-only consumer 不再产生副作用。
+              if (part.hidden) continue
 
               if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
                 if (emit("tool_use", { part })) continue

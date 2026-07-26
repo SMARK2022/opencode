@@ -901,6 +901,8 @@ export const GithubRunCommand = effectCmd({
             if (evt.properties.part.sessionID !== session.id) return
             //if (evt.properties.part.messageID === messageID) return
             const part = evt.properties.part
+            // GitHub transcript 是 append-only；hidden Part 不得再次触发评论输出。
+            if (part.hidden) return
 
             if (part.type === "tool" && part.state.status === "completed") {
               const [tool, color] = TOOL[part.tool] ?? [part.tool, UI.Style.TEXT_INFO_BOLD]

@@ -195,7 +195,17 @@ const mutatingPlugin = Layer.succeed(
   Plugin.Service.of({
     trigger: (name, _input, output) =>
       Effect.sync(() => {
-        if (name !== "chat.message" || typeof output !== "object" || output === null) return output
+        if (typeof output !== "object" || output === null) return output
+        if (name === "experimental.chat.messages.transform") {
+          const messages = Reflect.get(output, "messages")
+          if (!Array.isArray(messages)) return output
+          const target = messages.find((message) =>
+            message.parts.some((part: MessageV2.Part) => part.type === "text" && part.text.includes("plugin-hidden-history")),
+          )
+          if (target) Reflect.set(target.info, "hidden", { time: Date.now(), reason: "plugin" })
+          return output
+        }
+        if (name !== "chat.message") return output
         const parts = Reflect.get(output, "parts")
         if (!Array.isArray(parts)) return output
         const file = parts.find((part) => typeof part === "object" && part !== null && Reflect.get(part, "type") === "file")
@@ -453,7 +463,7 @@ mutatedImage.instance(
   () =>
     Effect.gen(function* () {
       imageNormalizations.length = 0
-      const { dir } = yield* useServerConfig(providerCfg)
+      const { dir, llm } = yield* useServerConfig(providerCfg)
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const chat = yield* sessions.create({ title: "Changed image" })
@@ -478,6 +488,15 @@ mutatedImage.instance(
         .filter((item): item is MessageV2.FilePart => item.type === "file")
       expect(files).toHaveLength(1)
       expect(Object.getOwnPropertySymbols(files[0] ?? {})).toHaveLength(0)
+      yield* user(chat.id, `plugin-hidden-history ${"x".repeat(120_000)}`)
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: "current" }] })
+      yield* llm.text("reply")
+      yield* prompt.loop({ sessionID: chat.id })
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      const assistant = messages.findLast((message) => message.info.role === "assistant")
+      if (assistant?.info.role !== "assistant") throw new Error("Expected assistant snapshot")
+      // persisted snapshot 与 wire 一起排除 plugin-hidden history，raw 120K 文本也不能触发 Compaction。
+      expect([JSON.stringify((yield* llm.inputs)[0]?.messages).includes("plugin-hidden-history"), assistant.info.inputBreakdown?.messages.userText, messages.some((message) => message.info.summary)]).toEqual([false, "current".length, false])
     }),
   { git: true },
 )
@@ -4352,6 +4371,7 @@ it.instance(
         reply().text("pending recorded").stop(),
       )
       yield* prompt.loop({ sessionID: chat.id })
+      yield* sessions.updateMessage({ ...b, hidden: { time: Date.now(), reason: "undo" } })
 
       // C 刻意不调用 blocked：它必须打断 B 的 pending adjacency；
       // 后落盘的 S 虽指向 B，也只能传递 lineage，不能把 B 移回 current。

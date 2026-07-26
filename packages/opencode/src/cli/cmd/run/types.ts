@@ -167,6 +167,7 @@ export type FooterPromptRoute =
 
 export type FooterSubagentTab = {
   sessionID: string
+  messageID?: string
   partID: string
   callID: string
   label: string

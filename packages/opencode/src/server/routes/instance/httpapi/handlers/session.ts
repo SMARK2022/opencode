@@ -25,6 +25,7 @@ import * as Stream from "effect/Stream"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder, HttpApiError, HttpApiSchema } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
+import * as ApiError from "../errors"
 import {
   CommandPayload,
   DiffQuery,
@@ -175,9 +176,13 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const message = Effect.fn("SessionHttpApi.message")(function* (ctx: {
       params: { sessionID: SessionID; messageID: MessageID }
     }) {
-      return yield* SessionError.mapStorageNotFound(
+      const result = yield* SessionError.mapStorageNotFound(
         MessageV2.get({ sessionID: ctx.params.sessionID, messageID: ctx.params.messageID }),
       )
+      // internal get 保持 raw 给 repair/reviewer；这里只有普通 SDK wire 才应用 not-found visibility。
+      if (result.info.hidden) return yield* ApiError.notFound(`Message not found: ${ctx.params.messageID}`)
+      // visible parent 的 hidden Part 仍作为 tombstone producer 保留在 raw storage，但不进入 SDK response。
+      return { ...result, parts: result.parts.filter((part) => !part.hidden) }
     })
 
     const create = Effect.fn("SessionHttpApi.create")(function* (ctx: { payload?: Session.CreateInput }) {
@@ -426,6 +431,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       ) {
         return yield* new HttpApiError.BadRequest({})
       }
+      const parent = yield* SessionError.mapStorageNotFound(
+        MessageV2.get({ sessionID: ctx.params.sessionID, messageID: ctx.params.messageID }),
+      )
+      // parent visibility 必须在 updatePart 前判定，否则已知 Part ID 会重新产生普通事件。
+      if (parent.info.hidden) return yield* ApiError.notFound(`Message not found: ${ctx.params.messageID}`)
       return yield* session.updatePart(payload)
     })
 

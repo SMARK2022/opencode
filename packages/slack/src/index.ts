@@ -25,6 +25,8 @@ void (async () => {
   for await (const event of events.stream) {
     if (event.type === "message.part.updated") {
       const part = event.properties.part
+      // Slack 消息已经外发，tombstone 只能阻止新的外部通知而不能回收旧消息。
+      if ("hidden" in part && part.hidden) continue
       if (part.type === "tool") {
         // Find the session for this tool update
         for (const [_sessionKey, session] of sessions.entries()) {

@@ -82,6 +82,11 @@ function assistant(id: string) {
   } satisfies SdkEvent
 }
 
+function hiddenAssistant(id: string) {
+  const event = assistant(id)
+  return { ...event, properties: { ...event.properties, info: { ...event.properties.info, hidden: { time: 1, reason: "undo" as const } } } } satisfies SdkEvent
+}
+
 function feed<T>() {
   const list: T[] = []
   let done = false
@@ -1126,18 +1131,20 @@ describe("run stream transport", () => {
   test("falls back to session status polling when idle events are missing", async () => {
     const src = eventFeed()
     const ui = footer()
-    let busy = true
+    let statusCalls = 0
     const transport = await createSessionTransport({
       sdk: sdk({
         stream: src.stream,
         promptAsync: async () => {
           queueMicrotask(() => {
-            src.push(assistant("msg-1"))
-            busy = false
+            src.push(hiddenAssistant("msg-hidden"))
           })
           return ok(undefined)
         },
-        status: async () => ok(statusMap(busy)),
+        status: async () => {
+          if (++statusCalls === 2) src.push(assistant("msg-visible"))
+          return ok(statusMap(false))
+        },
       }),
       sessionID: "session-1",
       thinking: true,
@@ -1157,6 +1164,7 @@ describe("run stream transport", () => {
         }),
         new Promise((_, reject) => setTimeout(() => reject(new Error("turn timed out")), 1_000)),
       ])
+      expect(statusCalls).toBeGreaterThanOrEqual(2)
     } finally {
       src.close()
       await transport.close()
