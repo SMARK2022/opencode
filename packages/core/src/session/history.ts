@@ -29,6 +29,7 @@ const messageRows = Effect.fnUntraced(function* (
   sessionID: SessionSchema.ID,
   compaction: { readonly seq: number } | undefined,
   baselineSeq?: number,
+  restore = true,
 ) {
   const rows = yield* db
     .select()
@@ -53,7 +54,9 @@ const messageRows = Effect.fnUntraced(function* (
     .all()
     .pipe(Effect.orDie)
   // 已选定compaction/epoch范围；合法隐藏行不为普通模型上下文预热。
-  return yield* ColdStorage.readSessionMessageRows(db, rows.filter(row => !hidden(row.data.metadata?.hidden)))
+  const visible = rows.filter(row => !hidden(row.data.metadata?.hidden))
+  // runner先核对raw前缀，只有变化后缀才恢复冷payload；其他消费者保持原读取路径。
+  return restore ? yield* ColdStorage.readSessionMessageRows(db, visible) : visible
 })
 
 const decodeMessageRow = (row: typeof SessionMessageTable.$inferSelect) =>
@@ -92,15 +95,38 @@ export const loadForRunner = Effect.fn("SessionHistory.loadForRunner")(function*
   return (yield* entriesForRunner(db, sessionID, baselineSeq)).map((entry) => entry.message)
 })
 
+// 单entry只保存当前Session；寿命由runner scope持有，proof用完整row而非毫秒revision或额外hash。
+export const makeCache = () => ({
+  boundary: "", proof: [] as string[],
+  entries: [] as Array<{ seq: number; message: SessionMessage.Message }>,
+})
+
 export const entriesForRunner = Effect.fn("SessionHistory.entriesForRunner")(function* (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
   baselineSeq: number,
+  cache?: ReturnType<typeof makeCache>,
 ) {
-  const rows = yield* messageRows(db, sessionID, yield* latestCompaction(db, sessionID), baselineSeq)
-  return (yield* Effect.forEach(rows, (row) =>
+  const compaction = yield* latestCompaction(db, sessionID)
+  const rows = yield* messageRows(db, sessionID, compaction, baselineSeq, false)
+  const boundary = JSON.stringify([sessionID, baselineSeq, compaction?.seq])
+  // 包含data、seq和cold key/ref/stats，原位修改、隐藏和冷热迁移都会在首个分歧处失效。
+  const proof = rows.map(row => JSON.stringify(row))
+  const mismatch = cache?.boundary === boundary
+    ? proof.findIndex((key, index) => key !== cache.proof[index]) : 0
+  const matched = cache?.boundary === boundary ? mismatch < 0 ? rows.length : mismatch : 0
+  const suffix = yield* ColdStorage.readSessionMessageRows(db, rows.slice(matched))
+  const decoded = yield* Effect.forEach(suffix, (row) =>
     decodeMessageRow(row).pipe(Effect.map((message) => ({ seq: row.seq, message }))),
-  )).filter((entry) => !hidden(entry.message.metadata?.hidden))
+  )
+  const entries = [...(cache?.entries.slice(0, matched) ?? []), ...decoded]
+    .filter(entry => !hidden(entry.message.metadata?.hidden))
+  if (cache) {
+    cache.boundary = boundary
+    cache.proof = proof
+    cache.entries = entries
+  }
+  return entries
 })
 
 // memento只读本次边界内的原始user行，不经过latestCompaction，也不从旧摘要反推原话。
@@ -170,6 +196,10 @@ export const goalTurn = Effect.fn("SessionHistory.goalTurn")(function* (db: Data
   const rows = yield* db.select({ id: SessionMessageTable.id, type: SessionMessageTable.type })
     .from(SessionMessageTable)
     .where(and(eq(SessionMessageTable.session_id, sessionID),
+      // 在limit之前排除合法hidden，不能让最近的隐藏行挤掉真正的前一Goal turn。
+      sql`not coalesce((json_extract(${SessionMessageTable.data}, '$.metadata.hidden.reason') = 'permission-reviewer-protocol-retry'
+        and json_type(${SessionMessageTable.data}, '$.metadata.hidden.time') = 'integer'
+        and json_extract(${SessionMessageTable.data}, '$.metadata.hidden.time') >= 0), 0)`,
       or(eq(SessionMessageTable.type, "user"), and(
         eq(SessionMessageTable.type, "synthetic"),
         sql`json_extract(${SessionMessageTable.data}, '$.text') LIKE ${"<session-goal-continuation>%"}`,

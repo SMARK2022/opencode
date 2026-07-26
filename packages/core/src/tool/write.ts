@@ -68,6 +68,8 @@ const layer = Layer.effectDiscard(
       .register({
         [name]: Tool.withPermission(
           Tool.make({
+            // 单文件归属仍由成功结果中的target/diff声明。
+            worktree: "declared",
             description:
               "Write content to one file. Relative paths resolve within the active Location. Absolute paths inside the Location are accepted. Explicit external absolute paths require external_directory approval before edit approval.",
             input: Input,

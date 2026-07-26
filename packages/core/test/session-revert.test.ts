@@ -34,10 +34,11 @@ it.effect("native undo intersects snapshot files with completed tool declaration
       id: session.id, project_id: projectID, slug: "undo", title: "undo", version: "test", directory,
     }).run().pipe(Effect.orDie)
     const restored: string[][] = []
+    const baselines: string[][] = []
     const snapshots = Layer.mock(Snapshot.Service, {
       capture: () => Effect.succeed(Snapshot.ID.make("original")),
       diff: () => Effect.succeed([]),
-      restore: ({ files }) => Effect.sync(() => { restored.push([...files.keys()]) }),
+      restore: ({ files }) => Effect.sync(() => { restored.push([...files.keys()]); baselines.push([...files.values()]) }),
     })
     const location = Layer.mock(Location.Service, { directory, project: { id: projectID, directory: root } })
     const cases = [
@@ -46,25 +47,36 @@ it.effect("native undo intersects snapshot files with completed tool declaration
       { name: "edit", output: { files: [{ file: "owned.txt" }] } },
       { name: "apply_patch", output: { files: [{ file: "owned.txt" }] } },
       { name: "read", output: {} },
+      { name: "bash", output: {}, worktree: "ambient" as const },
     ]
     for (const [index, item] of cases.entries()) {
       const boundary = SessionMessage.ID.create()
       yield* db.insert(SessionMessageTable).values({
-        id: boundary, session_id: session.id, type: "user", seq: index * 2,
+        id: boundary, session_id: session.id, type: "user", seq: index * 3,
         data: Schema.encodeSync(SessionMessage.User)(Schema.decodeUnknownSync(SessionMessage.User)({
           id: boundary, type: "user", text: "undo", files: [], agents: [], time: { created: 0 },
+        })),
+      }).run().pipe(Effect.orDie)
+      // 前一个助手没有声明，后续工具即使认领同名文件也不能借它的baseline恢复。
+      const unrelated = SessionMessage.ID.create()
+      yield* db.insert(SessionMessageTable).values({
+        id: unrelated, session_id: session.id, type: "assistant", seq: index * 3 + 1,
+        data: Schema.encodeSync(SessionMessage.Assistant)(Schema.decodeUnknownSync(SessionMessage.Assistant)({
+          id: unrelated, type: "assistant", agent: "default", model: { id: "test", providerID: "test" },
+          time: { created: 0 }, snapshot: { start: "unrelated", files: ["scope/owned.txt"] }, content: [],
         })),
       }).run().pipe(Effect.orDie)
       const assistant = SessionMessage.ID.create()
       // 每个边界后的快照同时包含工具文件与ambient；不能靠空快照通过排除断言。
       const data = Schema.encodeSync(SessionMessage.Assistant)(Schema.decodeUnknownSync(SessionMessage.Assistant)({
         id: assistant, type: "assistant", agent: "default", model: { id: "test", providerID: "test" },
-        time: { created: 0 }, snapshot: { start: "before", end: "after", files: ["scope/owned.txt", "scope/ambient.md"] },
+        time: { created: 0 }, snapshot: { start: "before", end: "after", files: ["scope/owned.txt", "scope/ambient.md"],
+          ...("worktree" in item ? { worktree: item.worktree } : {}) },
         content: [{ type: "tool", id: "call", name: item.name, time: { created: 0 },
           state: { status: "completed", input: {}, structured: item.output, content: [] } }],
       }))
       yield* db.insert(SessionMessageTable).values({
-        id: assistant, session_id: session.id, type: "assistant", seq: index * 2 + 1, data,
+        id: assistant, session_id: session.id, type: "assistant", seq: index * 3 + 2, data,
       }).run().pipe(Effect.orDie)
       const before = restored.length
       const result = yield* SessionRevert.stage({ session, messageID: boundary }).pipe(
@@ -73,7 +85,11 @@ it.effect("native undo intersects snapshot files with completed tool declaration
       expect(result.messageID).toBe(boundary)
       // 空声明不触盘；声明只放行交集，不恢复同轮ambient，也不借用更早turn的声明。
       expect(restored.length - before).toBe(item.name === "read" ? 0 : 1)
-      if (item.name !== "read") expect(restored.at(-1)).toEqual(["scope/owned.txt"])
+      if (item.name !== "read") {
+        const paths = item.name === "bash" ? ["scope/owned.txt", "scope/ambient.md"] : ["scope/owned.txt"]
+        expect(restored.at(-1)).toEqual(paths)
+        expect(baselines.at(-1)).toEqual(paths.map(() => "before"))
+      }
     }
   }),
 )

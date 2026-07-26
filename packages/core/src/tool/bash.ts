@@ -169,6 +169,8 @@ const layer = Layer.effectDiscard(
     yield* tools
       .register({
         [name]: Tool.make({
+          // Shell副作用无法由参数穷举，按source显式声明ambient而非名称猜测。
+          worktree: "ambient",
           // 专用工具存在性由 request.toolUsage 广告，本 description 不伪造固定工具列表。
           description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the acceptable shell shown in system context, selected from configuration or the platform default. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output supports UTF-8, UTF-16 and legacy codepage decoding; a bounded rolling preview keeps the latest output, including output observed before timeout. Observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
           input: Input,

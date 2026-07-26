@@ -1,5 +1,6 @@
 import { afterEach, describe, expect } from "bun:test"
 import { Effect, Layer, Queue, Schema, Stream } from "effect"
+import { Sse } from "effect/unstable/encoding"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -22,7 +23,7 @@ const EventData = Schema.Struct({
   properties: Schema.Record(Schema.String, Schema.Any),
 })
 
-const readEvent = (reader: Queue.Dequeue<Uint8Array>) =>
+const readEvent = (reader: Queue.Dequeue<typeof EventData.Type>) =>
   Effect.gen(function* () {
     const value = yield* Queue.take(reader).pipe(
       Effect.timeoutOrElse({
@@ -30,15 +31,18 @@ const readEvent = (reader: Queue.Dequeue<Uint8Array>) =>
         orElse: () => Effect.fail(new Error("timed out waiting for event")),
       }),
     )
-    return Schema.decodeUnknownSync(EventData)(JSON.parse(new TextDecoder().decode(value).replace(/^data: /, "")))
+    return value
   })
 
 const openEventStream = (directory: string) =>
   Effect.gen(function* () {
     const response = yield* requestInDirectory(EventPaths.event, directory)
-    const reader = yield* Queue.unbounded<Uint8Array>()
+    const reader = yield* Queue.unbounded<typeof EventData.Type>()
+    // 网络chunk可以合并或拆分事件；使用实际SSE分帧后才逐条解码请求快照。
     yield* response.stream.pipe(
-      Stream.runForEach((value) => Queue.offer(reader, value)),
+      Stream.decodeText(),
+      Stream.pipeThroughChannel(Sse.decodeDataSchema(EventData)),
+      Stream.runForEach((event) => Queue.offer(reader, event.data)),
       Effect.forkScoped,
     )
     return { response, reader }
@@ -111,7 +115,14 @@ describe("event HttpApi", () => {
         }
         const events = yield* EventV2Bridge.Service
         yield* Effect.addFinalizer(() => events.publish(MessageV2.Event.Updated, { sessionID: info.id, info: terminal }, { finalizer: true }).pipe(Effect.asVoid)).pipe(Effect.scoped)
-        expect(yield* readEvent(reader)).toMatchObject({
+        // Session读投影可与原message事件交错，但不能替代原终态及其错误内容。
+        const terminalEvent = yield* Effect.gen(function* () {
+          while (true) {
+            const event = yield* readEvent(reader)
+            if (event.type !== "session.updated") return event
+          }
+        })
+        expect(terminalEvent).toMatchObject({
           type: MessageV2.Event.Updated.type,
           properties: { sessionID: info.id, info: { id: terminal.id, error: terminal.error, time: { completed: 2 } } },
         })

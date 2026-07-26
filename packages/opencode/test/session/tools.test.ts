@@ -169,7 +169,8 @@ it.effect("preserves running tool start time across metadata updates", () =>
       ),
     )
 
-    expect(updates).toEqual([100, 100])
+    // durable执行屏障和两次metadata更新都必须保留最初开始时间。
+    expect(updates).toEqual([100, 100, 100])
     expect(state.state.status).toBe("running")
     if (state.state.status === "running") {
       expect(state.state.time.start).toBe(100)

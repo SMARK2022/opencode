@@ -218,6 +218,15 @@ export const InputEstimate = Schema.Struct({
   contextLimit: Schema.Finite.pipe(optional),
 }).annotate({ identifier: "Session.Message.InputEstimate" })
 
+// 懒基线可晚于Started到达；归属随助手持久化，恢复不能借用其他助手的工具声明。
+export interface Snapshot extends Schema.Schema.Type<typeof Snapshot> {}
+export const Snapshot = Schema.Struct({
+  start: Schema.String.pipe(optional),
+  end: Schema.String.pipe(optional),
+  files: Schema.Array(RelativePath).pipe(optional),
+  worktree: Schema.Literals(["declared", "ambient"]).pipe(optional),
+}).annotate({ identifier: "Session.Message.Snapshot" })
+
 export interface Assistant extends Schema.Schema.Type<typeof Assistant> {}
 export const Assistant = Schema.Struct({
   ...Base,
@@ -226,11 +235,7 @@ export const Assistant = Schema.Struct({
   model: Model.Ref,
   inputEstimate: InputEstimate.pipe(optional),
   content: AssistantContent.pipe(Schema.Array),
-  snapshot: Schema.Struct({
-    start: Schema.String.pipe(optional),
-    end: Schema.String.pipe(optional),
-    files: Schema.Array(RelativePath).pipe(optional),
-  }).pipe(optional),
+  snapshot: Snapshot.pipe(optional),
   finish: Schema.String.pipe(optional),
   cost: Schema.Finite.pipe(optional),
   tokens: Schema.Struct({

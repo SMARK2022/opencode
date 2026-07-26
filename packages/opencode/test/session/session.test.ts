@@ -248,6 +248,18 @@ describe("step-finish token propagation via event", () => {
       expect((yield* session.get(created.id)).tokens?.input).toBe(200)
       expect(snapshots.at(-1)?.request?.messageID).toBe(userID)
       expect(snapshots.at(-1)?.request?.cost).toBe(1)
+      const latest = yield* session.findMessage(created.id, (info) => info.role === "assistant")
+      if (latest._tag !== "Some" || latest.value.info.role !== "assistant") throw new Error("Expected latest assistant")
+      const saved = latest.value.info
+      // 父行缺失或不是用户时，仍按原语义投影最新用户；不能把任意已有ID当作请求。
+      for (const parentID of [MessageID.ascending(), saved.id]) {
+        yield* session.updateMessage({ ...saved, parentID })
+        expect((yield* session.get(created.id)).request?.messageID).toBe(nextUserID)
+      }
+      // 恢复原父用户后重新显示完整请求，确认点与Session累计均保留。
+      yield* session.updateMessage(saved)
+      expect((yield* session.get(created.id)).request).toMatchObject({ messageID: userID, input: 1400, output: 400, cost: 1 })
+      expect((yield* session.get(created.id)).tokens?.input).toBe(200)
       // 退订不影响持久请求；没有消费者时无需为兼容快照扫描完整历史。
       GlobalBus.off("event", listener)
       const observed = snapshots.length

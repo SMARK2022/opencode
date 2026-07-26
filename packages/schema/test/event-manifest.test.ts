@@ -9,8 +9,9 @@ import { WorkspaceEvent } from "../src/workspace-event"
 
 describe("public event manifest", () => {
   test("owns the complete public event surface", () => {
-    expect(EventManifest.ServerDefinitions.length).toBe(69)
-    expect(EventManifest.Definitions.length).toBe(101)
+    // 本项新增可公开的Native快照事件，兼容集合也增加同一个定义。
+    expect(EventManifest.ServerDefinitions.length).toBe(70)
+    expect(EventManifest.Definitions.length).toBe(102)
     expect(SessionV1.Event.Definitions).toEqual([
       SessionV1.Event.Created,
       SessionV1.Event.Forked,
@@ -25,8 +26,8 @@ describe("public event manifest", () => {
       SessionV1.Event.Diff,
       SessionV1.Event.Error,
     ])
-    expect(EventManifest.Latest.size).toBe(101)
-    expect(EventManifest.Durable.size).toBe(41)
+    expect(EventManifest.Latest.size).toBe(102)
+    expect(EventManifest.Durable.size).toBe(42)
     // V1 展示事件只扩展兼容通道，不能进入当前协议或变成逐 tick 的持久事件。
     expect(EventManifest.ServerDefinitions.some((event) => event.type === "message.part.progress")).toBe(false)
     expect(EventManifest.Durable.has("message.part.progress")).toBe(false)
@@ -50,7 +51,7 @@ describe("public event manifest", () => {
     expect(Reference.Event.Definitions).toEqual([Reference.Event.Updated])
     expect(EventManifest.Latest.has("ide.installed")).toBe(false)
     expect(IdeEvent.Definitions).toEqual([IdeEvent.Installed])
-    expect(EventManifest.Definitions.slice(49, 53)).toEqual([
+    expect(EventManifest.Definitions.slice(50, 54)).toEqual([
       SessionV1.Event.PartDelta,
       SessionV1.Event.PartProgress,
       SessionV1.Event.Diff,
@@ -59,5 +60,7 @@ describe("public event manifest", () => {
     expect(EventManifest.Durable.has("session.next.step.ended.1")).toBe(false)
     expect(EventManifest.Durable.get("session.next.step.ended.2")).toBe(SessionEvent.Step.Ended)
     expect(EventManifest.Durable.get("session.next.messages.hidden.1")).toBe(SessionEvent.MessagesHidden)
+    // 快照更新必须沿同一持久定义重放，而不是仅增加一个计数。
+    expect(EventManifest.Durable.get("session.next.step.snapshot.updated.1")).toBe(SessionEvent.Step.SnapshotUpdated)
   })
 })

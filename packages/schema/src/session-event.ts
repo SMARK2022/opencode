@@ -188,6 +188,18 @@ export namespace Step {
   })
   export type Started = typeof Started.Type
 
+  // 快照更新独立于用量确认；工具失败或无step-finish时也能重放真实的文件归属。
+  export const SnapshotUpdated = Event.define({
+    type: "session.next.step.snapshot.updated",
+    ...options,
+    schema: {
+      ...Base,
+      assistantMessageID: SessionMessage.ID,
+      snapshot: SessionMessage.Snapshot,
+    },
+  })
+  export type SnapshotUpdated = typeof SnapshotUpdated.Type
+
   export const Ended = Event.define({
     type: "session.next.step.ended",
     ...stepSettlementOptions,
@@ -526,6 +538,7 @@ export const DurableDefinitions = Event.inventory(
   Shell.Started,
   Shell.Ended,
   Step.Started,
+  Step.SnapshotUpdated,
   Step.Ended,
   Step.Failed,
   Text.Started,
@@ -562,6 +575,7 @@ export const Definitions = Event.inventory(
   Shell.Started,
   Shell.Ended,
   Step.Started,
+  Step.SnapshotUpdated,
   Step.Ended,
   Step.Failed,
   Text.Started,

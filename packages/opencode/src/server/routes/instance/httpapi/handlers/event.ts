@@ -41,25 +41,30 @@ function eventResponse(events: EventV2.Interface, clients: EventClients.Interfac
       ),
       Stream.map((event) => ({ id: event.id, type: event.type, properties: event.data })),
     )
-    const disposed = Stream.callback<{ id: string; type: string; properties: unknown }>((queue) => {
-      const listener = (event: {
-        directory?: string
-        payload: { id?: string; type?: string; properties?: unknown }
-      }) => {
-        if (event.directory !== instance.directory || event.payload.type !== "server.instance.disposed") return
-        Queue.offerUnsafe(queue, {
-          id: event.payload.id ?? eventID(),
-          type: "server.instance.disposed",
-          properties: event.payload.properties ?? {},
-        })
-      }
-      return Effect.acquireRelease(
-        Effect.sync(() => GlobalBus.on("event", listener)),
-        () => Effect.sync(() => GlobalBus.off("event", listener)),
-      )
-    })
+    const compatibility = yield* Queue.unbounded<{ id: string; type: string; properties: unknown }>()
+    const listener = (event: {
+      directory?: string
+      workspace?: string
+      payload: { id?: string; type?: string; properties?: unknown; metadata?: { projection?: boolean } }
+    }) => {
+      if (event.directory !== instance.directory) return
+      // 普通事件已由EventV2送达；这里只补转bridge的读投影与原有销毁通知，避免双重投递。
+      const snapshot = event.payload.type === "session.updated" && event.payload.metadata?.projection === true
+      if (!snapshot && event.payload.type !== "server.instance.disposed") return
+      if (snapshot && event.workspace !== undefined && event.workspace !== workspaceID) return
+      Queue.offerUnsafe(compatibility, {
+        id: event.payload.id ?? eventID(),
+        type: snapshot ? "session.updated" : "server.instance.disposed",
+        properties: event.payload.properties ?? {},
+      })
+    }
+    // 与Core listener一样在响应前注册；退出随同一Scope退订，不丢首包前的请求投影。
+    yield* Effect.acquireRelease(
+      Effect.sync(() => GlobalBus.on("event", listener)),
+      () => Effect.sync(() => GlobalBus.off("event", listener)),
+    )
     const output = stream.pipe(
-      Stream.merge(disposed, { haltStrategy: "left" }),
+      Stream.merge(Stream.fromQueue(compatibility), { haltStrategy: "left" }),
       Stream.takeUntil((event) => event.type === "server.instance.disposed"),
     )
     const heartbeat = Stream.tick("10 seconds").pipe(

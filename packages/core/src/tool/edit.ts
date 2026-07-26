@@ -106,6 +106,8 @@ const layer = Layer.effectDiscard(
       .register({
         [name]: Tool.withPermission(
           Tool.make({
+            // 恢复只认本助手实际成功声明的文件，不接纳整个快照窗口。
+            worktree: "declared",
             description: [
               "Performs string replacements in files. Supports one or more disjoint edits in a single call. Relative paths resolve within the active Location; external absolute paths require external_directory approval before edit approval.",
               "",

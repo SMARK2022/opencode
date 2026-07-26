@@ -21,13 +21,22 @@ export const selection = {
     -- 单表 SELECT 会剥离 Column 限定名；关联外层必须固定使用 "session"."id"。
     WITH v1_request AS (
       -- 优先最新助手的父用户，跳过无回复输入；首次输入仍有独立零值投影。
+      -- 按父ID点查后再取最新用户，避免为每个用户排序重查同一助手；保留缺失父行时的原投影。
       SELECT m.id, m.time_created, NULL AS promoted_seq, 'v1' AS kind
       FROM message m WHERE m.session_id = "session"."id" AND json_extract(m.data, '$.role') = 'user'
-      ORDER BY (m.id = (
-        SELECT json_extract(a.data, '$.parentID') FROM message a
-        WHERE a.session_id = "session"."id" AND json_extract(a.data, '$.role') = 'assistant'
-        ORDER BY a.time_created DESC, a.id DESC LIMIT 1
-      )) DESC, m.time_created DESC, m.id DESC LIMIT 1
+      AND m.id = coalesce((
+        SELECT u.id FROM message u
+        WHERE u.session_id = "session"."id" AND json_extract(u.data, '$.role') = 'user'
+          AND u.id = (
+            SELECT json_extract(a.data, '$.parentID') FROM message a
+            WHERE a.session_id = "session"."id" AND json_extract(a.data, '$.role') = 'assistant'
+            ORDER BY a.time_created DESC, a.id DESC LIMIT 1
+          )
+      ), (
+        SELECT u.id FROM message u
+        WHERE u.session_id = "session"."id" AND json_extract(u.data, '$.role') = 'user'
+        ORDER BY u.time_created DESC, u.id DESC LIMIT 1
+      ))
     ), native_request AS (
       -- native 身份取持久化 admission，不依赖显示窗口。
       -- 两种序号同属 Session durable 序列；旧 queue 后提升要覆盖较新 steer 的 admission。

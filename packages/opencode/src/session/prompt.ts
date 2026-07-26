@@ -12,7 +12,7 @@ import { Session } from "./session"
 import { Agent } from "../agent/agent"
 import { Provider } from "@/provider/provider"
 
-import { type Tool as AITool, tool, jsonSchema } from "ai"
+import { type ModelMessage, type Tool as AITool, tool, jsonSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionCompaction } from "./compaction"
 import { SessionGoal } from "./goal"
@@ -85,7 +85,9 @@ function isDecideAgent(agent: Agent.Info) {
 // 过长 thinking 只保留首尾，避免 decide 上下文被推理占满
 // 阈值 400：中段用省略号替换，保留语义锚点
 // #0500：Goal continuity 只需要 hot 定位字段——chronology 不触 payload，也未裁剪的持久化顺序保持不变。
-function deriveGoalTurn(messages: Iterable<MessageV2.ChronologyMessage>): GoalTurnContext | undefined {
+function deriveGoalTurn(
+  messages: Iterable<MessageV2.ChronologyMessage | MessageV2.WithParts>,
+): GoalTurnContext | undefined {
   const turns = Array.from(messages)
     .flatMap((message) => {
       // technical wrapper 的 goalTurnID 只表达 lineage，不是新的 canonical source；
@@ -312,6 +314,17 @@ const layer = Layer.effect(
     const goalSvc = yield* SessionGoal.Service
     // 重叠取消共享同一Exit，不能排队后重新读取replacement runner。
     const cancelFlights = new Map<SessionID, Deferred.Deferred<Exit.Exit<void>>>()
+    // 只保留一个可替换entry，使后续loop复用前缀而不为每个Session累积缓存。
+    // admission仍核对Session、模型及持久proof，控制面与请求装饰不进入缓存。
+    let retainedMessages:
+      | {
+          sessionID: SessionID
+          model: string
+          proof: MessageV2.PromptWindowProof
+          canonical: MessageV2.WithParts[]
+          chunks: Map<MessageID, ModelMessage[]>
+        }
+      | undefined
     const database = yield* Database.Service
     const { db } = database
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
@@ -1590,28 +1603,91 @@ const layer = Layer.effect(
         // 同一 eligible user 下的 assistant/provider steps 共享同一个 context 和 read snapshot。
         // 新 eligible user turn 时重建，确保 blocked streak 不被同一 user 的多个 step 伪造。
         let goalTurn: GoalTurnContext | undefined
-        const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
           yield* Effect.logInfo("loop", { "session.id": sessionID, step })
 
-          let msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
+          // #557：busy 期间 queued prompt 可更新 Permission；每 step 必须在 resolveTools 前重读 control-plane 状态。
+          const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+
+          // #557：proof 只读原始 tuple（不 thaw）；boundary 不同直接丢弃旧窗口，禁止 cache 复制 Compaction 规则。
+          // #557：proof 命中前不触碰 hydrate——cache miss 的代价被限制在 raw tuple 读取。
+          const proof = yield* MessageV2.promptWindowProof(sessionID).pipe(
             Effect.provideService(Database.Service, database),
           )
+          const cached =
+            retainedMessages?.sessionID === sessionID && retainedMessages.proof.boundary === proof.boundary
+              ? retainedMessages
+              : undefined
+          // common prefix 覆盖 full hit、append、原地 mutation 与 A-G→A-E contraction；首个 key 不同即停。
+          const common = cached
+            ? proof.messages.findIndex((item, index) => item.key !== cached.proof.messages[index]?.key)
+            : 0
+          const matched = cached ? (common < 0 ? proof.messages.length : common) : 0
+          const matchedIDs = new Set(proof.messages.slice(0, matched).map((item) => item.id))
+          const suffixID = proof.messages[matched]?.id
+          // full hit 没有 suffix I/O；miss=0 则从首条 Message 走同一 inclusive loader。
+          const canonical = cached
+            ? MessageV2.filterCompacted([
+                // retained prefix 只按 exact proof ID admission；suffix 从 mismatch inclusive 重载。
+                ...cached.canonical.filter((message) => matchedIDs.has(message.info.id)),
+                ...(suffixID
+                  ? yield* MessageV2.promptWindowSuffix(sessionID, suffixID).pipe(
+                      Effect.provideService(Database.Service, database),
+                    )
+                  : []),
+              ])
+            : yield* MessageV2.filterCompactedEffect(sessionID).pipe(
+                Effect.provideService(Database.Service, database),
+              )
+          let msgs = canonical
 
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+          const modelKey = `${lastUser.model.providerID}/${lastUser.model.modelID}/${lastUser.model.variant ?? ""}`
+          // #557：model identity 改变 reasoning/media conversion，raw canonical 仍可复用但 chunks 必须清空。
+          retainedMessages = {
+            sessionID,
+            model: modelKey,
+            proof,
+            canonical,
+            chunks:
+              cached?.model === modelKey
+                // 只保留 exact matched IDs 的 chunks，mutation suffix 不得沿用旧转换。
+                ? new Map([...cached.chunks].filter(([id]) => matchedIDs.has(id)))
+                : new Map(),
+          }
+          // #557：chunks 与 canonical 同生命周期——request-only decoration 永不回写 DB。
+          const messageEntry = retainedMessages
 
-          // Goal continuity 来自未裁剪的持久化 Message chronology；provider window 会因 Compaction
-          // 重排，late technical wrapper 也可能晚于新用户落盘，两者都不能改变 current/previous turn。
-          // #0500：chronology 只读 hot 定位字段——冷 Tool history 不进入 Goal continuity 扫描。
-          const nextGoalTurn = deriveGoalTurn(
-            yield* MessageV2.chronology(sessionID).pipe(Effect.provideService(Database.Service, database)),
+          // #557：Goal chronology 延迟到真实 goal Tool adapter，普通对话不支付这次历史查询；
+          // 同一 Provider step 内 read/transition 共享 loader 结果。
+          const currentUserMessage = msgs.find((message) => message.info.id === lastUser.id)
+          if (!currentUserMessage || currentUserMessage.info.role !== "user")
+            throw new Error(`Current user message missing from prompt window: ${lastUser.id}`)
+          // #557：Goal 受信上下文随 eligible user 更换——late technical wrapper 不得复活旧 turn。
+          if (goalTurn?.id !== lastUser.id) goalTurn = undefined
+          const loadGoalTurn = yield* Effect.cached(
+            Effect.gen(function* () {
+              const current = yield* goalSvc.get(sessionID).pipe(Effect.orDie)
+              const next =
+                current._tag === "Some" && current.value.status === "active"
+                  ? deriveGoalTurn(
+                      yield* MessageV2.goalChronology(sessionID).pipe(
+                        Effect.provideService(Database.Service, database),
+                      ),
+                    )
+                  : current._tag === "Some" && ["complete", "blocked"].includes(current.value.status)
+                    ? deriveGoalTurn([currentUserMessage])
+                    : undefined
+              if (!next) return
+              // 同一 eligible user 的多次 Goal 调用共享 read snapshot；新 user 才替换受信对象。
+              if (!goalTurn || goalTurn.id !== next.id) goalTurn = next
+              return goalTurn
+            }),
           )
-          if (!nextGoalTurn) goalTurn = undefined
-          if (nextGoalTurn && (!goalTurn || goalTurn.id !== nextGoalTurn.id)) goalTurn = nextGoalTurn
 
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
@@ -1812,11 +1888,26 @@ const layer = Layer.effect(
           }
           const maxSteps = agent.steps ?? Infinity
           const isLastStep = step >= maxSteps
+          // #557：current-user 起的 mutable tail；plugin transform 存在时全量 clone 且 dirty=0。
+          const currentUserIndex = msgs.findIndex((message) => message.info.id === lastUser.id)
+          if (currentUserIndex < 0) throw new Error(`Current user message missing from prompt window: ${lastUser.id}`)
+          const hasMessageTransform = (yield* plugin.list()).some(
+            (hooks) => hooks["experimental.chat.messages.transform"] !== undefined,
+          )
+          // #557：mutable tail 边界——plugin transform 存在时必须全量 clone（dirty=0）。
+          msgs = hasMessageTransform
+            ? structuredClone(msgs)
+            : [...msgs.slice(0, currentUserIndex), ...structuredClone(msgs.slice(currentUserIndex))]
+          // #557：conversionDirty 标记稳定前缀长度；reminder/queued wrapper 只接触 current-user 起的 tail。
+          let conversionDirty = msgs.length
+          const currentUserParts = msgs[currentUserIndex]?.parts.length ?? 0
           msgs = yield* SessionReminders.apply({ messages: msgs, agent, session }).pipe(
             Effect.provideService(RuntimeFlags.Service, flags),
             Effect.provideService(FSUtil.Service, fsys),
             Effect.provideService(Session.Service, sessions),
           )
+          // reminder 通过 Part 数变化声明 dirty boundary，不扫描或序列化稳定 prefix。
+          if ((msgs[currentUserIndex]?.parts.length ?? 0) !== currentUserParts) conversionDirty = currentUserIndex
 
           const msg: SessionV1.Assistant = {
             id: MessageID.ascending(),
@@ -1835,7 +1926,7 @@ const layer = Layer.effect(
           }
           const own = yield* SessionProcessor.ownAssistant({ sessionID, requestID: msg.parentID }, { events, db })
           own(msg)
-          yield* SessionProcessor.publishAssistant(msg, events)
+          // 首笔快照由真实prepared回调原子提交；更早的失败沿已有owner闭合账本，不制造零用量助手。
 
           const handle = yield* processor
             .create({
@@ -1853,6 +1944,8 @@ const layer = Layer.effect(
             // 该工具不可用及替代方案。所有 agent 模式共用此循环，注入覆盖全路径。
             const notice = disabledToolNotice(msgs, agent.permission, session.permission ?? [])
             if (notice && lastUserMsg) {
+              // 此producer晚于reminder，必须独立失效请求装饰，不能缓存旧权限提示。
+              conversionDirty = Math.min(conversionDirty, msgs.indexOf(lastUserMsg))
               lastUserMsg.parts.push({
                 id: PartID.ascending(),
                 messageID: lastUserMsg.info.id,
@@ -1881,6 +1974,8 @@ const layer = Layer.effect(
                   goalSvc,
                   // [local-smark] 注入当前 Goal turn context，使 GoalTool 能校验 read snapshot
                   goalTurn,
+                  // #557：Goal chronology 延迟到真实 goal Tool adapter 才查询；同 step 共享 loader。
+                  loadGoalTurn,
                 }).pipe(
                   Effect.provideService(Plugin.Service, plugin),
                   Effect.provideService(Permission.Service, permission),
@@ -1904,7 +1999,11 @@ const layer = Layer.effect(
               yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
 
             // decide 跳过插件 transform，避免外部改写只读上下文
-            if (!decide) yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+            if (!decide) {
+              yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+              // #557：arbitrary transform 可改写任意历史，兼容 seam 必须全量重转（dirty=0）。
+              if (hasMessageTransform) conversionDirty = 0
+            }
             // #553：plugin 是第二个 Message producer；先收敛到同一 visible projection，避免 wire、usage 和 overflow 分叉。
             msgs = MessageV2.visible(msgs)
 
@@ -1928,7 +2027,26 @@ const layer = Layer.effect(
             const requestMsgs = decide
               ? yield* selectDecideMessages({ messages: msgs, model, systemText })
               : msgs
-            const modelMsgs = yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
+            const modelMsgs = decide
+              ? yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
+              : yield* Effect.gen(function* () {
+                  // #557：stable prefix 只用本轮 admitted canonical IDs 的已转换块，不从 working clone 写回。
+                  const stable = requestMsgs.slice(0, conversionDirty)
+                  const missing = stable.filter((message) => !messageEntry.chunks.has(message.info.id))
+                  // #557：只转换 missing 块——matched prefix 复用唯一 entry 的已转换结果。
+                  const converted = yield* MessageV2.toModelMessageChunksEffect(missing, model)
+                  // missing 与 converted 保持 index 对齐，Map 只写 canonical Message ID。
+                  for (const [index, message] of missing.entries()) {
+                    messageEntry.chunks.set(message.info.id, converted[index] ?? [])
+                  }
+                  // working rewrite 只能使 suffix 变脏；canonical prefix 继续复用唯一 entry 的已转换块。
+                  return [
+                    ...stable.flatMap((message) => messageEntry.chunks.get(message.info.id) ?? []),
+                    ...(conversionDirty < requestMsgs.length
+                      ? yield* MessageV2.toModelMessagesEffect(requestMsgs.slice(conversionDirty), model)
+                      : []),
+                  ]
+                })
             // 复用上一轮真实 prepared 快照作轻量预警；本轮硬溢出仍由 processor 的唯一准备入口判断。
             if (!isLastStep) {
               const prior = msgs.findLast(message => message.info.role === "assistant" && message.info.inputEstimate)?.info

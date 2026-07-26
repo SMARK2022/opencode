@@ -56,6 +56,8 @@ const fill = Effect.fn("Test.fill")(function* (
   sessionID: SessionID,
   count: number,
   time = (i: number) => Date.now() + i,
+  // #557：多 Part cohort 参数——Goal 有界查询的 payload 扫描成本可见化。
+  partsPerMessage = 1,
 ) {
   const session = yield* SessionNs.Service
   const ids = [] as MessageID[]
@@ -72,13 +74,16 @@ const fill = Effect.fn("Test.fill")(function* (
       tools: {},
       mode: "",
     } as unknown as SessionV1.Info)
-    yield* session.updatePart({
-      id: PartID.ascending(),
-      sessionID,
-      messageID: id,
-      type: "text",
-      text: `m${i}`,
-    })
+    // #557：多 Part cohort 让旧 locator 的 payload 扫描成本可见；固定形状仍只服务 Goal eligibility。
+    for (let part = 0; part < partsPerMessage; part++) {
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        sessionID,
+        messageID: id,
+        type: "text",
+        text: part === 0 ? `m${i}` : `m${i}-${part}`,
+      })
+    }
   }
   return ids
 })
@@ -251,70 +256,103 @@ describe("MessageV2.page", () => {
     ),
   )
   it.instance(
-    "visibility performance uses the production page and chronology seams",
+    "bounded Goal query cost does not grow with old history",
+    () =>
+      Effect.gen(function* () {
+        // #557：256 vs 6326×4 cohort——goalChronology 有界扫描，旧历史不指数化 Goal 查询成本。
+        const sessions = yield* SessionNs.Service
+        const smallSession = yield* sessions.create({})
+        const largeSession = yield* sessions.create({})
+        // 本基准只读Goal locator；两个cohort批量建数，不计逐条事件通知成本。
+        const database = yield* Database.Service
+        const fillCohort = (sessionID: SessionID, count: number) =>
+          Database.withSync(database, (sync) => sync.transaction((tx) => {
+            const now = Date.now()
+            const ids = Array.from({ length: count }, () => MessageID.ascending())
+            for (let offset = 0; offset < ids.length; offset += 250) {
+              const batch = ids.slice(offset, offset + 250)
+              tx.insert(MessageTable).values(batch.map((id, index) => ({
+                id, session_id: sessionID, time_created: now + offset + index,
+                data: { role: "user" as const, agent: "test", model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
+                  time: { created: now + offset + index } },
+              }))).run()
+              // 保留每条消息四个独立Part及原文本大小，不能用减少payload伪造有界查询收益。
+              tx.insert(PartTable).values(batch.flatMap((id, index) =>
+                Array.from({ length: 4 }, (_, part) => ({
+                  id: PartID.ascending(), message_id: id, session_id: sessionID,
+                  data: { type: "text" as const, text: part === 0 ? `m${offset + index}` : `m${offset + index}-${part}` },
+                })),
+              )).run()
+            }
+            return ids
+          }))
+        const smallIDs = yield* fillCohort(smallSession.id, 256)
+        const largeIDs = yield* fillCohort(largeSession.id, 6326)
+
+        const measure = function* (sessionID: SessionID) {
+          const p95s: number[] = []
+          for (let repetition = 0; repetition < 3; repetition++) {
+            for (let i = 0; i < 5; i++) yield* MessageV2.goalChronology(sessionID)
+            const samples: number[] = []
+            for (let i = 0; i < 20; i++) {
+              const started = performance.now()
+              yield* MessageV2.goalChronology(sessionID)
+              samples.push(performance.now() - started)
+            }
+            samples.sort((a, b) => a - b)
+            p95s.push(samples[18] ?? 0)
+          }
+          return { p95s, p95: [...p95s].sort((a, b) => a - b)[1] ?? 0 }
+        }
+
+        const small = yield* measure(smallSession.id)
+        const large = yield* measure(largeSession.id)
+        small.p95s.forEach((value, index) => {
+          const largeValue = large.p95s[index] ?? 0
+          console.log(
+            `goal-query-scale repetition=${index + 1} small_p95_ms=${value.toFixed(2)} large_p95_ms=${largeValue.toFixed(2)} delta_ms=${(
+              largeValue - value
+            ).toFixed(2)}`,
+          )
+        })
+        console.log(
+          `goal-query-scale median small_p95_ms=${small.p95.toFixed(2)} large_p95_ms=${large.p95.toFixed(2)} delta_ms=${(
+            large.p95 - small.p95
+          ).toFixed(2)}`,
+        )
+
+        // 等价断言：有界查询返回最后两条 user（跳过技术/hidden 行）。
+        expect(smallIDs.slice(-2)).toEqual((yield* MessageV2.goalChronology(smallSession.id)).map((message) => message.info.id))
+        expect(largeIDs.slice(-2)).toEqual((yield* MessageV2.goalChronology(largeSession.id)).map((message) => message.info.id))
+        expect(large.p95 - small.p95).toBeLessThanOrEqual(45)
+        expect(large.p95).toBeLessThanOrEqual(100)
+      }),
+    90_000,
+  )
+
+  // #557：hidden Part/Message 与 compaction-only 技术行都不消耗 Goal slot——SQL 层前置排除。
+  // #557：SQL 层前置排除的回归守卫——hidden/技术行不得消耗 Goal slot。
+  it.instance("Goal query excludes hidden and technical user rows before classification", () =>
     withSession(({ session, sessionID }) =>
       Effect.gen(function* () {
-        // 此处测量读取而非事件生产；批量建立同一6326/364持久cohort，保留真实page/chronology及全部时限。
-        const database = yield* Database.Service
-        const ids = Array.from({ length: 6326 }, () => MessageID.ascending())
-        const hidden = new Set(ids.filter((_, index) => index % 17 === 0).slice(0, 364))
-        yield* Database.withSync(database, (sync) => sync.transaction((tx) => {
-          for (let offset = 0; offset < ids.length; offset += 250) {
-            const batch = ids.slice(offset, offset + 250)
-            tx.insert(MessageTable).values(batch.map((id, index) => ({
-              id, session_id: sessionID,
-              time_created: offset + index,
-              data: {
-                role: "user" as const,
-                time: { created: offset + index },
-                agent: "test",
-                model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
-                ...(hidden.has(id) ? { hidden: { time: 1, reason: "undo" as const } } : {}),
-              },
-            }))).run()
-            tx.insert(PartTable).values(batch.map((id, index) => ({
-              id: PartID.ascending(), session_id: sessionID, message_id: id,
-              data: { type: "text" as const, text: `m${offset + index}` },
-            }))).run()
-          }
-        }))
+        const previous = yield* addUser(sessionID, "previous")
+        const hiddenPartUser = yield* addUser(sessionID, "hidden part")
+        const hiddenPartMessage = yield* MessageV2.get({ sessionID, messageID: hiddenPartUser })
+        const hiddenText = hiddenPartMessage.parts.find((part) => part.type === "text")
+        if (!hiddenText) throw new Error("hidden-part fixture did not create text")
+        yield* session.updatePart({ ...hiddenText, hidden: { time: Date.now(), reason: "undo" } })
 
-        // page/chronology 都是需服务上下文的 Effect——计时在 generator 内以 yield* 采样，保持 production seam。
-        const timed = function* <A, E, R>(run: Effect.Effect<A, E, R>) {
-          const samples: number[] = []
-          for (let i = 0; i < 20; i++) {
-            const started = performance.now()
-            yield* run
-            samples.push(performance.now() - started)
-          }
-          samples.sort((a, b) => a - b)
-          // 20 个样本的 nearest-rank p95 是第 19 个值；取最大值会把单次离群当成 p95。
-          return samples[samples.length - 2] ?? 0
-        }
-        const medianOf = (values: number[]) => values.sort((a, b) => a - b)[1] ?? 0
-        const rawRuns: number[] = []
-        const visibleRuns: number[] = []
-        const chronologyRuns: number[] = []
-        for (let round = 0; round < 3; round++) {
-          rawRuns.push(yield* timed(MessageV2.page({ sessionID, limit: 301, includeHidden: true })))
-          visibleRuns.push(yield* timed(MessageV2.page({ sessionID, limit: 301 })))
-          // #553：chronology 走 Effect 化 seam——hidden 过滤在 SQL locator 层完成，不引入额外 thaw。
-          chronologyRuns.push(yield* timed(MessageV2.chronology(sessionID)))
-        }
-        const rawPage = medianOf(rawRuns)
-        const visiblePage = medianOf(visibleRuns)
-        const page = yield* MessageV2.page({ sessionID, limit: 301 })
-        expect(page.items).toHaveLength(301)
-        expect(visiblePage).toBeLessThanOrEqual(rawPage + Math.max(5, rawPage * 0.25))
-        const chronologyBaseline = 51.831
-        expect(medianOf(chronologyRuns)).toBeLessThanOrEqual(chronologyBaseline * 1.25)
-      }).pipe(Effect.ensuring(Database.Service.use((database) => Database.withSync(database, (sync) => {
-        // 与批量建数对称清理本fixture的热行；读基准不把数千行Session级删除延迟混进时限。
-        sync.delete(PartTable).where(eq(PartTable.session_id, sessionID)).run()
-        sync.delete(MessageTable).where(eq(MessageTable.session_id, sessionID)).run()
-      })))),
+        const hiddenMessageUser = yield* addUser(sessionID, "hidden message")
+        const hiddenMessage = yield* MessageV2.get({ sessionID, messageID: hiddenMessageUser })
+        yield* session.updateMessage({ ...hiddenMessage.info, hidden: { time: Date.now(), reason: "undo" } })
+
+        const technical = yield* addUser(sessionID)
+        yield* addCompactionPart(sessionID, technical)
+        const current = yield* addUser(sessionID, "current")
+
+        expect((yield* MessageV2.goalChronology(sessionID)).map((message) => message.info.id)).toEqual([previous, current])
+      }),
     ),
-    90_000,
   )
 
   it.instance("hydrates multiple parts per message", () =>

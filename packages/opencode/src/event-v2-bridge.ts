@@ -88,7 +88,8 @@ const layer = Layer.effect(
               directory: event.location?.directory ?? ctx?.directory,
               project: ctx?.project.id,
               workspace: workspaceID,
-              payload: { type: "session.updated", properties: { sessionID: row.id, info } },
+              // 元数据只标识已提交行的非持久化投影，供兼容SSE补转，不能再次执行projector。
+              payload: { type: "session.updated", metadata: { projection: true }, properties: { sessionID: row.id, info } },
             })
           }
         }

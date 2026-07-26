@@ -14,6 +14,9 @@ export interface Context {
   readonly toolCallID: string
   // runner提供可信turn引用，模型输入无法伪造或替换读快照。
   readonly goalTurn?: SessionGoal.GoalTurnContext
+  readonly loadGoalTurn?: () => Effect.Effect<SessionGoal.GoalTurnContext | undefined>
+  // runner提供快照门，叶子仍独占权限和执行；模型输入不能声明工作树权限。
+  readonly captureWorktree?: (authority: "declared" | "ambient") => Effect.Effect<void>
 }
 
 export type SchemaType<A> = Schema.Codec<A, any, never, never>
@@ -46,6 +49,8 @@ type Config<
   Structured extends SchemaType<any> = Output,
 > = {
   readonly description: string
+  // 未声明工具与只读工具保持none；不根据公开名字推断副作用。
+  readonly worktree?: "none" | "declared" | "ambient"
   readonly input: Input
   // 外部MCP保留原始schema广告；普通工具仍由自身codec生成定义和校验输入。
   readonly inputSchema?: ToolDefinition["inputSchema"]
@@ -97,7 +102,11 @@ export function make<
       Schema.decodeUnknownEffect(config.input)(call.input).pipe(
         Effect.mapError((error) => new ToolFailure({ message: `Invalid tool input: ${error.message}` })),
         Effect.flatMap((input) =>
-          config.execute(input, context).pipe(
+          (config.worktree && config.worktree !== "none" && context.captureWorktree
+            ? context.captureWorktree(config.worktree)
+            : Effect.void).pipe(
+            // 输入校验成功后、插件/权限和真实执行前才支付baseline成本。
+            Effect.andThen(() => config.execute(input, context)),
             Effect.flatMap((output) =>
               Schema.encodeEffect(config.output)(output).pipe(
                 Effect.flatMap((output) => {

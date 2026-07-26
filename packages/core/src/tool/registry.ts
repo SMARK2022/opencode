@@ -22,6 +22,8 @@ export type ExecuteInput = {
   readonly assistantMessageID: SessionMessage.ID
   readonly call: ToolCall
   readonly goalTurn?: SessionGoal.GoalTurnContext
+  readonly loadGoalTurn?: () => Effect.Effect<SessionGoal.GoalTurnContext | undefined>
+  readonly captureWorktree?: (authority: "declared" | "ambient") => Effect.Effect<void>
 }
 
 export interface Interface {
@@ -77,6 +79,8 @@ const registryLayer = Layer.effect(
         toolCallID: input.call.id,
         // 保留对象身份，使get的快照可被同turn后续provider step中的mark消费。
         goalTurn: input.goalTurn,
+        loadGoalTurn: input.loadGoalTurn,
+        captureWorktree: input.captureWorktree,
       }).pipe(
         Effect.map((output) => ({ output })),
         Effect.catchTag("LLM.ToolFailure", (failure) =>
