@@ -3,12 +3,33 @@ From: SMARK <3222301373@qq.com>
 Date: Fri, 22 May 2026 23:42:03 +0800
 Subject: [PATCH] feat(permission): wire auto review into permission flow
 
-
+diff --git a/packages/core/src/v1/permission.ts b/packages/core/src/v1/permission.ts
+index c289196c18..664b6cd16f 100644
+--- a/packages/core/src/v1/permission.ts
++++ b/packages/core/src/v1/permission.ts
+@@ -30,4 +30,16 @@ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("Per
+   requestID: ID,
+ }) {}
+ 
+-export type Error = DeniedError | RejectedError | CorrectedError
++// #199：AutoDeniedError 不提供可绕过的拒绝信息，防止 agent 通过 shell 包装、
++// #199：生成脚本、MCP 工具或其他策略旁路重试同一危险操作。
++export class AutoDeniedError extends Schema.TaggedErrorClass<AutoDeniedError>()("PermissionAutoDeniedError", {
++  reason: Schema.String,
++}) {
++  override get message() {
++    return `Auto permission preflight rejected this tool call: ${this.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds. Use a materially safer approach, or ask the user for explicit confirmation before attempting a risky operation.`
++  }
++}
++
++// #199：Error 联合类型纳入 AutoDeniedError，使 caller 通过 Pattern.match 捕获
++// #199：确定性拒绝时与 DeniedError 区分——前者不可由用户即时审批撤销。
++export type Error = DeniedError | AutoDeniedError | RejectedError | CorrectedError
 diff --git a/packages/opencode/src/effect/app-runtime.ts b/packages/opencode/src/effect/app-runtime.ts
-index d03c68c42d0b543b62e01d9381f5fd90e196be3e..6016af0a2797e627fe2c24ac26197363acb36791 100644
+index 52d58e4caa..144761acb8 100644
 --- a/packages/opencode/src/effect/app-runtime.ts
 +++ b/packages/opencode/src/effect/app-runtime.ts
-@@ -22,6 +22,7 @@ import { Skill } from "@/skill"
+@@ -20,6 +20,7 @@ import { Skill } from "@/skill"
  import { Discovery } from "@/skill/discovery"
  import { Question } from "@/question"
  import { Permission } from "@/permission"
@@ -16,108 +37,55 @@ index d03c68c42d0b543b62e01d9381f5fd90e196be3e..6016af0a2797e627fe2c24ac26197363
  import { Todo } from "@/session/todo"
  import { Session } from "@/session/session"
  import { SessionStatus } from "@/session/status"
-@@ -81,6 +82,10 @@ export const AppLayer = Layer.mergeAll(
-   Skill.defaultLayer,
-   Discovery.defaultLayer,
-   Question.defaultLayer,
-+  // The reviewer needs Session only to read a bounded transcript projection. We
-+  // provide that dependency at AppLayer instead of inside reviewer.defaultLayer
-+  // to avoid a module initialization cycle with Session importing Permission.
-+  PermissionReviewer.defaultLayer.pipe(Layer.provide(Session.defaultLayer)),
-   Permission.defaultLayer,
-   Todo.defaultLayer,
-   Session.defaultLayer,
+@@ -75,6 +76,9 @@ export const AppLayer = AppNodeBuilderV1.build(
+     Skill.node,
+     Discovery.node,
+     Question.node,
++    // #199：reviewer 在 Permission 之前声明，builder 按 dep 拓扑排序而非数组顺序。
++    // #199：reviewer 依赖 Config/Provider/Session，这些 node 已在 group 中。
++    PermissionReviewer.node,
+     Permission.node,
+     Todo.node,
+     Session.node,
 diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/permission/index.ts
-index b04933e4b5f5936d9b20ef155526c0cbfb141826..fdf05f3eaa9d613fce991569f877e09068a602bd 100644
+index 46283379a3..867f26d3cd 100644
 --- a/packages/opencode/src/permission/index.ts
 +++ b/packages/opencode/src/permission/index.ts
-@@ -1,5 +1,6 @@
- import { Bus } from "@/bus"
- import { BusEvent } from "@/bus/bus-event"
+@@ -1,11 +1,17 @@
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
 +import { Config } from "@/config/config"
- import { ConfigPermission } from "@/config/permission"
  import { InstanceState } from "@/effect/instance-state"
- import { ProjectID } from "@/project/schema"
-@@ -13,10 +14,15 @@ import { Deferred, Effect, Layer, Schema, Context } from "effect"
+ import { Wildcard } from "@opencode-ai/core/util/wildcard"
+ import { Deferred, Effect, Layer, Context } from "effect"
  import os from "os"
- import { evaluate as evalRule } from "./evaluate"
- import { PermissionID } from "./schema"
+ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+ import { EventV2Bridge } from "@/event-v2-bridge"
 +import { PermissionAuto } from "./auto"
 +import { PermissionReviewer } from "./reviewer/service"
 +import { PermissionSessionCache } from "./cache/session-cache"
 +import { PermissionCircuitBreaker } from "./reviewer/circuit-breaker"
 +import * as Option from "effect/Option"
  
- const log = Log.create({ service: "permission" })
+ export const Event = PermissionV1.Event
  
--export const Action = Schema.Literals(["allow", "deny", "ask"]).annotate({ identifier: "PermissionAction" })
-+export const Action = Schema.Literals(["allow", "deny", "ask", "auto"]).annotate({ identifier: "PermissionAction" })
- export type Action = Schema.Schema.Type<typeof Action>
- 
- export const Rule = Schema.Struct({
-@@ -70,6 +76,26 @@ export const Event = {
-       reply: Reply,
-     }),
-   ),
-+  // Review events are observational only. Permission decisions still resolve via
-+  // `ask`/errors below so existing callers do not need to subscribe to these new
-+  // event types to preserve behavior.
-+  ReviewCompleted: BusEvent.define(
-+    "permission.review.completed",
-+    Schema.Struct({
-+      sessionID: SessionID,
-+      reviewID: Schema.String,
-+      outcome: Schema.Literals(["allow", "deny"]),
-+      rationale: Schema.String,
-+    }),
-+  ),
-+  ReviewFailed: BusEvent.define(
-+    "permission.review.failed",
-+    Schema.Struct({ sessionID: SessionID, reviewID: Schema.String, reason: Schema.String }),
-+  ),
-+  CircuitBroken: BusEvent.define(
-+    "permission.review.circuit_broken",
-+    Schema.Struct({ sessionID: SessionID, consecutive: Schema.Number, recent: Schema.Number }),
-+  ),
- }
- 
- export class RejectedError extends Schema.TaggedErrorClass<RejectedError>()("PermissionRejectedError", {}) {
-@@ -94,7 +120,19 @@ export class DeniedError extends Schema.TaggedErrorClass<DeniedError>()("Permiss
-   }
- }
- 
--export type Error = DeniedError | RejectedError | CorrectedError
-+export class AutoDeniedError extends Schema.TaggedErrorClass<AutoDeniedError>()("PermissionAutoDeniedError", {
-+  reason: Schema.String,
-+}) {
-+  override get message() {
-+    // Keep denial feedback non-actionable from a bypass perspective. The agent
-+    // may choose a safer implementation or ask the user for explicit approval,
-+    // but the message must not encourage shell wrappers, generated scripts, MCP
-+    // detours, or alternate tools for the same rejected outcome.
-+    return `Auto permission preflight rejected this tool call: ${this.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds. Use a materially safer approach, or ask the user for explicit confirmation before attempting a risky operation.`
-+  }
-+}
-+
-+export type Error = DeniedError | AutoDeniedError | RejectedError | CorrectedError
- 
- export const AskInput = Schema.Struct({
-   ...Request.fields,
-@@ -162,7 +200,13 @@ export const layer = Layer.effect(
+@@ -68,7 +74,15 @@ const layer = Layer.effect(
        const { approved, pending } = yield* InstanceState.get(state)
        const { ruleset, ...request } = input
        let needsAsk = false
++      // #199：needsAuto 与 needsAsk 是两个独立门控。混合请求中 auto 可独立拒绝
++      // #199：关键载荷，但 reviewer allow 不能撤销另一个 pattern 仍需的用户审批，
++      // #199：因此两个门控必须同时保留到流程末尾再决定是否提前返回。
 +      let needsAuto = false
 +      const autoPatterns: string[] = []
  
-+      // Evaluate every requested pattern before taking action. Static deny keeps
-+      // highest precedence, while mixed auto/ask requests preserve both gates:
-+      // auto can reject critical payloads, but reviewer allow cannot bypass a
-+      // separate user approval requirement.
++      // #199：逐 pattern 评估规则。静态 deny 立即 fail-closed；auto 收集后统一交由
++      // #199：precheck+reviewer 决定；ask 累积到 needsAsk 等待用户审批。三者优先级
++      // #199：由 evaluate 的 last-match-wins 决定，此处只分流不复核规则语义。
        for (const pattern of request.patterns) {
          const rule = evaluate(request.permission, pattern, ruleset, approved)
-         log.info("evaluated", { permission: request.permission, pattern, action: rule })
-@@ -172,9 +216,92 @@ export const layer = Layer.effect(
+         yield* Effect.logInfo("evaluated", { permission: request.permission, pattern, action: rule })
+@@ -78,9 +92,104 @@ const layer = Layer.effect(
            })
          }
          if (rule.action === "allow") continue
@@ -129,39 +97,44 @@ index b04933e4b5f5936d9b20ef155526c0cbfb141826..fdf05f3eaa9d613fce991569f877e090
          needsAsk = true
        }
  
++      // #199：auto 分支只在有 pattern 命中 auto 规则时进入。所有协作者通过
++      // #199：serviceOption 可选注入，使旧测试和小运行时缺少 reviewer 时仍能
++      // #199：退回正常 ask 路径而非崩溃。
 +      if (needsAuto) {
-+        // All auto-review collaborators are optional at this layer. That keeps
-+        // older tests/runtimes using Permission.layer working; missing reviewer
-+        // or explicit fallback returns to the normal pending permission path.
 +        const reviewer = Option.getOrUndefined(yield* Effect.serviceOption(PermissionReviewer.Service))
++        // #199：会话级缓存避免对同一 auto 请求重复调用 reviewer，但缓存键包含
++        // #199：command/cwd/shell/filepath/diff 上下文，上下文变化即失效。
 +        const cache = Option.getOrUndefined(yield* Effect.serviceOption(PermissionSessionCache.Service))
++        // #199：熔断器跟踪连续拒绝密度；触发后该 session 的 auto 审批永久中断，
++        // #199：但当前调用的 deny 结果不依赖熔断状态，熔断仅作为咨询性信号。
 +        const circuit = Option.getOrUndefined(yield* Effect.serviceOption(PermissionCircuitBreaker.Service))
 +        const config = Option.getOrUndefined(yield* Effect.serviceOption(Config.Service))
++        // #199：strict 模式禁用 precheck fast-path allow，强制所有 auto 请求经过
++        // #199：reviewer；但 deny 仍由 precheck 保留，防止危险操作因 reviewer 缺失而放行。
 +        const strict = config ? (yield* config.get()).permission?.auto_review?.strict === true : false
-+        // Auto review/cache must operate only on the patterns that matched an
-+        // `auto` rule. The original request may also contain ask-controlled
-+        // patterns; caching those before the user replies would turn a rejected
-+        // mixed request into a future silent allow if rules change later.
++        // #199：autoRequest 只包含 auto 控制的 pattern。若缓存 ask 控制的 pattern，
++        // #199：用户回复前规则变更会使原本被拒绝的混合请求变成静默 allow。
 +        const autoRequest = { ...request, patterns: autoPatterns }
 +        if (cache && (yield* cache.has(autoRequest))) {
-+          // Session cache only satisfies the auto-controlled portion. If another
-+          // pattern still needs ask, continue into the user prompt below instead
-+          // of returning early. A cache hit is still an auto non-denial, so reset
-+          // the advisory denial circuit just like a fresh precheck/reviewer allow.
++          // #199：缓存命中只满足 auto 部分。若另一个 pattern 仍需 ask，不能提前
++          // #199：返回；但缓存命中是 auto 非拒绝，需像全新 allow 一样重置熔断连续计数。
 +          if (circuit) yield* circuit.recordNonDenial(request.sessionID)
 +          if (!needsAsk) return
 +        } else {
++          // #199：PermissionAuto.evaluate 按 precheck → fast-path allow → deny →
++          // #199：reviewer → fail-closed 顺序裁决；strict 模式禁用 fast-path 但保留 deny。
 +          const decision = yield* PermissionAuto.evaluate({ ...autoRequest, strict }, reviewer)
-+          log.info("auto evaluated", { permission: request.permission, action: decision.action, reason: decision.reason })
++          yield* Effect.logInfo("auto evaluated", { permission: request.permission, action: decision.action, reason: decision.reason })
 +          if (decision.action === "allow") {
 +            if (circuit) yield* circuit.recordNonDenial(request.sessionID)
++            // #199：只有 reviewer allow 才缓存和发布事件——precheck fast-path allow 是
++            // #199：确定性的只读裁决，无需审计追溯，也不应污染会话缓存。
 +            if (decision.source === "reviewer") {
 +              const reviewID = "reviewID" in decision ? decision.reviewID : undefined
 +              if (reviewID) {
-+                // Reviewer allow is auditable and cacheable, but it is not a user
-+                // approval. Record it before any fast return so the pure-auto path
-+                // has the same cache/circuit/audit behavior as mixed auto+ask.
-+                yield* bus.publish(Event.ReviewCompleted, {
++                // #199：reviewer allow 可审计且可缓存，但不是用户审批。在快速返回前
++                // #199：发布事件，使纯 auto 路径与混合 auto+ask 有相同的审计行为。
++                yield* events.publish(Event.ReviewCompleted, {
 +                  sessionID: request.sessionID,
 +                  reviewID,
 +                  outcome: "allow",
@@ -173,17 +146,21 @@ index b04933e4b5f5936d9b20ef155526c0cbfb141826..fdf05f3eaa9d613fce991569f877e090
 +            if (!needsAsk) return
 +          }
 +          if (decision.action === "deny") {
++            // #199：熔断器只跟踪 reviewer deny——precheck deny 是确定性的静态规则，
++            // #199：反复触发不应累积为熔断信号，否则正常危险操作会误触发中断。
 +            if (decision.source === "reviewer" && circuit) {
 +              const reviewID = "reviewID" in decision ? decision.reviewID : undefined
 +              if (reviewID) {
-+                yield* bus.publish(Event.ReviewCompleted, {
++                // #199：reviewer deny 同样发布 ReviewCompleted 供审计；缺失 reviewID
++                // #199：说明 reviewer 未正常返回，改发 ReviewFailed 记录失败原因。
++                yield* events.publish(Event.ReviewCompleted, {
 +                  sessionID: request.sessionID,
 +                  reviewID,
 +                  outcome: "deny",
 +                  rationale: decision.reason,
 +                })
 +              } else {
-+                yield* bus.publish(Event.ReviewFailed, {
++                yield* events.publish(Event.ReviewFailed, {
 +                  sessionID: request.sessionID,
 +                  reviewID: "unknown",
 +                  reason: decision.reason,
@@ -191,44 +168,45 @@ index b04933e4b5f5936d9b20ef155526c0cbfb141826..fdf05f3eaa9d613fce991569f877e090
 +              }
 +              const action = yield* circuit.recordDenial(request.sessionID)
 +              if (action.kind === "interrupt") {
-+                // Circuit state is advisory for now: the event gives the UI a
-+                // chance to interrupt or explain repeated denials without
-+                // changing this call's fail-closed outcome.
-+                yield* bus.publish(Event.CircuitBroken, {
++                // #199：熔断触发是咨询性的：CircuitBroken 给 UI 中断或解释重复拒绝
++                // #199：的机会，但不改变本次调用的 fail-closed deny 结果。
++                yield* events.publish(Event.CircuitBroken, {
 +                  sessionID: request.sessionID,
 +                  consecutive: action.consecutive,
 +                  recent: action.recent,
 +                })
 +              }
 +            }
-+            return yield* new AutoDeniedError({ reason: decision.reason })
++            // #199：auto 拒绝是确定性的：抛出 AutoDeniedError 而非转入 ask，防止
++            // #199：agent 通过用户审批旁路 precheck/reviewer 已拒绝的危险操作。
++            return yield* new PermissionV1.AutoDeniedError({ reason: decision.reason })
 +          }
++          // #199：reviewer 不可用或返回 ask 时回退到用户审批，保持 fail-open 语义
++          // #199：而非 fail-closed——未配置 reviewer 不应阻断正常工作流。
 +          if (decision.action === "ask") needsAsk = true
 +        }
 +      }
 +
        if (!needsAsk) return
  
-       const id = request.id ?? PermissionID.ascending()
-@@ -263,6 +390,9 @@ export const layer = Layer.effect(
+       const id = request.id ?? PermissionV1.ID.ascending()
+@@ -176,6 +285,8 @@ const layer = Layer.effect(
  )
  
  function expand(pattern: string): string {
-+  // Permission config historically accepts home-relative patterns. Keep this
-+  // expansion local to config-to-rules conversion so runtime command patterns
-+  // are not rewritten after the user has already approved them.
++  // #199：permission config 历史上接受 home-relative pattern。将此扩展保持在
++  // #199：config-to-rules 转换本地，使运行时 command pattern 在用户已批准后不被重写。
    if (pattern.startsWith("~/")) return os.homedir() + pattern.slice(1)
    if (pattern === "~") return os.homedir()
    if (pattern.startsWith("$HOME/")) return os.homedir() + pattern.slice(5)
-@@ -273,17 +403,38 @@ function expand(pattern: string): string {
- export function fromConfig(permission: ConfigPermission.Info) {
-   const ruleset: Ruleset = []
+@@ -186,17 +297,36 @@ function expand(pattern: string): string {
+ export function fromConfig(permission: ConfigPermissionV1.Info) {
+   const ruleset: PermissionV1.Rule[] = []
    for (const [key, value] of Object.entries(permission)) {
 -    if (typeof value === "string") {
-+    // `approvals_reviewer` and `auto_review` are controls for the auto pipeline,
-+    // not permission names. Treating them as rules would leak config metadata
-+    // into the evaluator and could accidentally authorize a tool named after a
-+    // config key.
++    // #199：`approvals_reviewer` 和 `auto_review` 是 auto pipeline 的控制字段，
++    // #199：不是 permission name。将它们视为 rule 会将配置元数据泄漏到评估器中，
++    // #199：可能意外授权一个以配置键命名的工具。
 +    if (key === "approvals_reviewer" || key === "auto_review") continue
 +    if (isAction(value)) {
        ruleset.push({ permission: key, action: value, pattern: "*" })
@@ -245,102 +223,103 @@ index b04933e4b5f5936d9b20ef155526c0cbfb141826..fdf05f3eaa9d613fce991569f877e090
    return ruleset
  }
  
-+function isAction(input: unknown): input is Action {
-+  // Guard dynamically parsed config before flattening. The schema is permissive
-+  // enough to hold auto-review control objects, so runtime conversion must only
-+  // emit actual permission actions.
++// #199：在扁平化前 guard 动态解析的配置。schema 足够宽松以容纳 auto-review
++// #199：控制对象，所以运行时转换必须只发出实际的 permission action。
++function isAction(input: unknown): input is PermissionV1.Action {
 +  return input === "ask" || input === "allow" || input === "deny" || input === "auto"
 +}
 +
-+function isPermissionObject(input: unknown): input is Record<string, Action> {
-+  // Arrays and auto_review objects are not permission pattern maps. Each nested
-+  // value is checked by isAction before a rule is emitted.
++// #199：数组和 auto_review 对象不是 permission pattern map。每个嵌套值在发出
++// #199：rule 前由 isAction 检查，防止配置结构漂移产生无效规则。
++function isPermissionObject(input: unknown): input is Record<string, PermissionV1.Action> {
 +  return Boolean(input && typeof input === "object" && !Array.isArray(input))
 +}
 +
- export function merge(...rulesets: Ruleset[]): Ruleset {
+ export function merge(...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule[] {
    return rulesets.flat()
  }
-@@ -316,6 +467,13 @@ export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
-   return result
+@@ -234,6 +364,9 @@ export function visibleTools<T>(tools: Record<string, T>, ruleset: PermissionV1.
+   return Object.fromEntries(Object.entries(tools).filter(([name]) => !hidden.has(name)))
  }
  
--export const defaultLayer = layer.pipe(Layer.provide(Bus.layer))
-+export const defaultLayer = layer.pipe(
-+  Layer.provide(Bus.layer),
-+  // Cache/circuit are local permission concerns, so the default layer can provide
-+  // them without requiring the provider-backed reviewer. The reviewer stays
-+  // optional to avoid a dependency cycle in unit tests and small runtimes.
-+  Layer.provide(PermissionSessionCache.defaultLayer),
-+  Layer.provide(PermissionCircuitBreaker.defaultLayer),
-+)
+-export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2Bridge.node] })
++// #199：Permission.node 声明对 session cache 和 circuit breaker 的依赖，使
++// #199：builder 在构建 Permission 层时自动提供这些服务。reviewer 不在此声明——
++// #199：它是可选协作者，通过 serviceOption 访问，缺失时退回 ask 路径。
++export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2Bridge.node, PermissionSessionCache.node, PermissionCircuitBreaker.node] })
  
  export * as Permission from "."
 diff --git a/packages/opencode/test/permission/next.test.ts b/packages/opencode/test/permission/next.test.ts
-index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f5e68d6e0 100644
+index 2f2ce98efb..41c583f962 100644
 --- a/packages/opencode/test/permission/next.test.ts
 +++ b/packages/opencode/test/permission/next.test.ts
-@@ -2,8 +2,12 @@ import { test, expect } from "bun:test"
- import os from "os"
- import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
- import { Bus } from "../../src/bus"
-+import { Config } from "../../src/config/config"
+@@ -5,6 +5,10 @@ import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
+ import { EventV2Bridge } from "../../src/event-v2-bridge"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
  import { Permission } from "../../src/permission"
 +import { PermissionSessionCache } from "../../src/permission/cache/session-cache"
 +import { PermissionCircuitBreaker } from "../../src/permission/reviewer/circuit-breaker"
 +import { PermissionReviewer } from "../../src/permission/reviewer/service"
- import { PermissionID } from "../../src/permission/schema"
- import { InstanceBootstrap } from "../../src/project/bootstrap-service"
++import { Config } from "../../src/config/config"
+ import { InstanceBootstrap } from "../../src/project/bootstrap"
  import { InstanceStore } from "../../src/project/instance-store"
-@@ -19,7 +23,54 @@ const env = Layer.mergeAll(
-   CrossSpawnSpawner.defaultLayer,
-   InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
+ import { TestInstance, tmpdirScoped } from "../fixture/fixture"
+@@ -18,7 +22,62 @@ const env = AppNodeBuilder.build(
+   LayerNode.group([Permission.node, EventV2Bridge.node, CrossSpawnSpawner.node, InstanceStore.node]),
+   [[InstanceStore.bootstrapNode, noopBootstrap]],
  )
-+// Separate layer with a deterministic reviewer and real session cache exercises
-+// the auto integration path through Permission.ask without a live provider model.
++// #199：带确定性 reviewer 和真实 session cache 的独立 env，在不启动 provider model 的情况下
++// #199：通过 Permission.ask 测试 auto 集成路径。
 +let reviewedCalls = 0
 +let nonDenialCalls = 0
-+const reviewedEnv = Layer.mergeAll(
-+  Permission.layer.pipe(Layer.provide(bus)),
-+  PermissionSessionCache.layer,
-+  bus,
-+  Layer.succeed(
-+    PermissionReviewer.Service,
-+    PermissionReviewer.Service.of({
-+      review: () =>
-+        Effect.sync(() => {
-+          reviewedCalls++
-+          return {
-+            action: "allow" as const,
-+            reason: "reviewer approved the auto-controlled part",
-+            reviewID: "review_mixed",
-+            risk_level: "medium" as const,
-+            user_authorization: "medium" as const,
-+          }
++const reviewedEnv = AppNodeBuilder.build(
++  LayerNode.group([
++    Permission.node,
++    PermissionReviewer.node,
++    EventV2Bridge.node,
++    CrossSpawnSpawner.node,
++    InstanceStore.node,
++  ]),
++  [
++    [InstanceStore.bootstrapNode, noopBootstrap],
++    [
++      PermissionReviewer.node,
++      Layer.succeed(
++        PermissionReviewer.Service,
++        PermissionReviewer.Service.of({
++          review: () =>
++            Effect.sync(() => {
++              reviewedCalls++
++              return {
++                action: "allow" as const,
++                reason: "reviewer approved the auto-controlled part",
++                reviewID: "review_mixed",
++                risk_level: "medium" as const,
++                user_authorization: "medium" as const,
++              }
++            }),
 +        }),
-+    }),
-+  ),
-+  Layer.succeed(
-+    PermissionCircuitBreaker.Service,
-+    PermissionCircuitBreaker.Service.of({
-+      recordDenial: () => Effect.succeed({ kind: "continue" as const, consecutive: 1, recent: 1 }),
-+      recordNonDenial: () =>
-+        Effect.sync(() => {
-+          nonDenialCalls++
++      ),
++    ],
++    [
++      PermissionCircuitBreaker.node,
++      Layer.succeed(
++        PermissionCircuitBreaker.Service,
++        PermissionCircuitBreaker.Service.of({
++          recordDenial: () => Effect.succeed({ kind: "continue" as const, consecutive: 1, recent: 1 }),
++          recordNonDenial: () =>
++            Effect.sync(() => {
++              nonDenialCalls++
++            }),
 +        }),
-+    }),
-+  ),
-+  CrossSpawnSpawner.defaultLayer,
-+  InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
++      ),
++    ],
++  ],
 +)
-+// Circuit tests need Config.defaultLayer because thresholds are read at decision
-+// time from the active project config, not captured when the service is created.
-+const circuitEnv = Layer.mergeAll(
-+  PermissionCircuitBreaker.layer,
-+  Config.defaultLayer,
-+  CrossSpawnSpawner.defaultLayer,
-+  InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
++// #199：circuit 测试需要 Config.node，因为阈值在决策时从活动项目配置读取。
++const circuitEnv = AppNodeBuilder.build(
++  LayerNode.group([PermissionCircuitBreaker.node, Config.node, CrossSpawnSpawner.node, InstanceStore.node]),
++  [[InstanceStore.bootstrapNode, noopBootstrap]],
 +)
  const it = testEffect(env)
 +const reviewed = testEffect(reviewedEnv)
@@ -348,15 +327,18 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
  
  const rejectAll = (message?: string) =>
    Effect.gen(function* () {
-@@ -104,6 +155,24 @@ test("fromConfig - mixed string and object values", () => {
+@@ -103,6 +162,27 @@ test("fromConfig - mixed string and object values", () => {
    ])
  })
  
++// #199：验证 auto 作为第四种 action 被 fromConfig 接受并生成 wildcard rule。
 +test("fromConfig - supports auto action", () => {
 +  const result = Permission.fromConfig({ bash: "auto" })
 +  expect(result).toEqual([{ permission: "bash", pattern: "*", action: "auto" }])
 +})
 +
++// #199：验证 approvals_reviewer 和 auto_review 控制字段不被误认为 permission name，
++// #199：防止配置元数据泄漏为可授权规则。
 +test("fromConfig - ignores auto review configuration fields", () => {
 +  const result = Permission.fromConfig({
 +    bash: "auto",
@@ -373,13 +355,14 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
  test("fromConfig - empty object", () => {
    const result = Permission.fromConfig({})
    expect(result).toEqual([])
-@@ -276,6 +345,14 @@ test("merge - config ask overrides default allow", () => {
+@@ -275,6 +355,15 @@ test("merge - config ask overrides default allow", () => {
    expect(Permission.evaluate("bash", "ls", merged).action).toBe("ask")
  })
  
++// #199：验证 auto 在 last-match-wins 中覆盖 allow，使 config 层可将工具切换到 auto 管控。
 +test("merge - config auto overrides default allow", () => {
-+  const defaults: Permission.Ruleset = [{ permission: "bash", pattern: "*", action: "allow" }]
-+  const config: Permission.Ruleset = [{ permission: "bash", pattern: "*", action: "auto" }]
++  const defaults: PermissionV1.Ruleset = [{ permission: "bash", pattern: "*", action: "allow" }]
++  const config: PermissionV1.Ruleset = [{ permission: "bash", pattern: "*", action: "auto" }]
 +  const merged = Permission.merge(defaults, config)
 +
 +  expect(Permission.evaluate("bash", "git status", merged).action).toBe("auto")
@@ -388,7 +371,7 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
  // evaluate tests
  
  test("evaluate - exact pattern match", () => {
-@@ -342,6 +419,14 @@ test("evaluate - no matching pattern returns ask", () => {
+@@ -341,6 +430,14 @@ test("evaluate - no matching pattern returns ask", () => {
    expect(result.action).toBe("ask")
  })
  
@@ -403,10 +386,11 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
  test("evaluate - empty rules array returns ask", () => {
    const result = Permission.evaluate("bash", "rm", [])
    expect(result.action).toBe("ask")
-@@ -498,6 +583,11 @@ test("disabled - does not disable when action is ask", () => {
+@@ -497,6 +594,12 @@ test("disabled - does not disable when action is ask", () => {
    expect(result.size).toBe(0)
  })
  
++// #199：验证 auto 不触发工具禁用——auto 仍需运行时评估，不应像 deny 那样隐藏工具。
 +test("disabled - does not disable when action is auto", () => {
 +  const result = Permission.disabled(["bash", "edit"], [{ permission: "*", pattern: "*", action: "auto" }])
 +  expect(result.size).toBe(0)
@@ -415,10 +399,12 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
  test("disabled - does not disable when specific allow after wildcard deny", () => {
    const result = Permission.disabled(
      ["bash"],
-@@ -592,6 +682,333 @@ it.instance(
+@@ -591,6 +694,357 @@ it.instance(
    { git: true },
  )
  
++// #199：验证 precheck fast-path 对只读 git 命令直接 allow，不进入用户审批。
++// #199：fast-path allow 不产生 pending 请求，验证 list() 为空。
 +it.instance(
 +  "ask - auto resolves known safe bash commands without pending user approval",
 +  () =>
@@ -437,6 +423,7 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
 +  { git: true },
 +)
 +
++// #199：验证 precheck 对非只读命令回退到 ask，不静默放行未知风险。
 +it.instance(
 +  "ask - auto falls back to user approval for opaque bash commands",
 +  () =>
@@ -457,6 +444,8 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
 +  { git: true },
 +)
 +
++// #199：验证 precheck 对 rm -rf / 等不可逆操作直接 deny 并抛出 AutoDeniedError。
++// #199：错误消息包含不可旁路重试的明确指示，防止 agent 换工具绕过。
 +it.instance(
 +  "ask - auto denies dangerous bash commands without pending user approval",
 +  () =>
@@ -472,13 +461,15 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
 +        }),
 +      )
 +
-+      expect(err).toBeInstanceOf(Permission.AutoDeniedError)
++      expect(err).toBeInstanceOf(PermissionV1.AutoDeniedError)
 +      expect(err instanceof Error ? err.message : "").toContain("Do not retry the same outcome through shell indirection")
 +      expect(yield* list()).toHaveLength(0)
 +    }),
 +  { git: true },
 +)
 +
++// #199：验证混合载荷中 deny 优先——安全命令与危险命令组合时整体 fail-closed。
++// #199：验证 precheck 对组合命令的 deny-wins 聚合策略，不因部分安全而放行。
 +it.instance(
 +  "ask - auto denies dangerous commands hidden behind safe shell commands",
 +  () =>
@@ -494,12 +485,14 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
 +        }),
 +      )
 +
-+      expect(err).toBeInstanceOf(Permission.AutoDeniedError)
++      expect(err).toBeInstanceOf(PermissionV1.AutoDeniedError)
 +      expect(yield* list()).toHaveLength(0)
 +    }),
 +  { git: true },
 +)
 +
++// #199：验证 wrapper 解包和凭证外泄检测覆盖 ssh/python/curl|sh/reverse shell 等变体。
++// #199：8 种危险载荷均被 deny，验证跨信任边界和脚本注入的检测完整性。
 +it.instance(
 +  "ask - auto denies critical wrapper and exfiltration payloads without pending user approval",
 +  () =>
@@ -528,7 +521,7 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
 +              }),
 +            )
 +
-+            expect(err).toBeInstanceOf(Permission.AutoDeniedError)
++            expect(err).toBeInstanceOf(PermissionV1.AutoDeniedError)
 +            expect(yield* list()).toHaveLength(0)
 +          }),
 +        { concurrency: 1 },
@@ -537,6 +530,7 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
 +  { git: true },
 +)
 +
++// #199：验证敏感路径读取回退到 ask 而非 deny——凭证访问需用户确认但不一定是攻击。
 +it.instance(
 +  "ask - auto falls back to user approval for direct credential reads",
 +  () =>
@@ -557,6 +551,8 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
 +  { git: true },
 +)
 +
++// #199：验证混合 auto+ask 请求中 deny 优先：auto 的危险载荷不被 ask 门控延迟。
++// #199：验证 auto deny 不被同请求中 ask pattern 的用户审批流程阻断。
 +it.instance(
 +  "ask - auto still fail-closes critical payloads when another pattern requires approval",
 +  () =>
@@ -575,12 +571,14 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
 +        }),
 +      )
 +
-+      expect(err).toBeInstanceOf(Permission.AutoDeniedError)
++      expect(err).toBeInstanceOf(PermissionV1.AutoDeniedError)
 +      expect(yield* list()).toHaveLength(0)
 +    }),
 +  { git: true },
 +)
 +
++// #199：验证 reviewer allow 只满足 auto 部分，不撤销另一个 pattern 的 ask 门控。
++// #199：验证 auto+ask 混合请求中两个门控独立运作，reviewer 不能替代用户。
 +reviewed.instance(
 +  "ask - reviewer allow does not bypass another pattern that still requires approval",
 +  () =>
@@ -606,6 +604,8 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
 +  { git: true },
 +)
 +
++// #199：验证缓存键不含 ask pattern——规则变更后重新评估，防止旧审批污染新决策。
++// #199：验证规则从 auto+ask 变为纯 auto 后缓存不命中，reviewer 被重新调用。
 +reviewed.instance(
 +  "ask - reviewer cache only stores the auto-controlled patterns",
 +  () =>
@@ -636,6 +636,7 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
 +  { git: true },
 +)
 +
++// #199：验证相同 auto 请求命中缓存跳过 reviewer，减少 provider 调用。
 +reviewed.instance(
 +  "ask - reviewer allow is cached for the same auto request",
 +  () =>
@@ -658,6 +659,8 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
 +  { git: true },
 +)
 +
++// #199：验证 command 变化使缓存失效——不同命令的风险不同，不能复用旧裁决。
++// #199：验证 command 字段参与缓存键规范化，cwd/shell 相同但命令不同仍失效。
 +reviewed.instance(
 +  "ask - reviewer cache key includes command context",
 +  () =>
@@ -679,6 +682,7 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
 +  { git: true },
 +)
 +
++// #199：验证 edit 的 diff 内容参与缓存键——相同路径不同 diff 需独立评估。
 +reviewed.instance(
 +  "ask - reviewer cache key includes edit diff context",
 +  () =>
@@ -700,6 +704,8 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
 +  { git: true },
 +)
 +
++// #199：验证 allow 路径重置熔断连续计数，使正常操作不积累虚假拒绝密度。
++// #199：验证缓存命中和 precheck allow 都计入非拒绝，3 次调用只产生 1 次 reviewer。
 +reviewed.instance(
 +  "ask - auto allow paths record circuit non-denials",
 +  () =>
@@ -723,6 +729,8 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
 +  { git: true },
 +)
 +
++// #199：验证 max_consecutive_denials 从活动配置读取，阈值=1 时首次拒绝即触发中断。
++// #199：验证阈值在决策时从活动项目 config 读取而非启动时固定。
 +circuit.instance(
 +  "circuit breaker uses configured denial thresholds",
 +  () =>
@@ -749,3 +757,40 @@ index 1b09c36afdf3142ccfe0dd5c82f7fb06490f61f5..d98888a6dcdba8419771196c158d489f
  it.instance(
    "ask - stays pending when action is ask",
    () =>
+diff --git a/packages/schema/src/v1/permission.ts b/packages/schema/src/v1/permission.ts
+index c1df7a2936..10869eeb5e 100644
+--- a/packages/schema/src/v1/permission.ts
++++ b/packages/schema/src/v1/permission.ts
+@@ -65,4 +65,31 @@ const Replied = define({
+   type: "permission.replied",
+   schema: { sessionID: SessionID, requestID: ID, reply: Reply },
+ })
+-export const Event = { Asked, Replied, Definitions: inventory(Asked, Replied) }
++// #199：以下三个事件仅用于观察/审计，不影响 permission 决议本身。ask 与 error
++// #199：仍通过原有 Asked/Replied 路径返回，订阅者无需监听这些新事件即可保持行为不变。
++// #199：ReviewCompleted 在 reviewer 给出 allow/deny 时发布，绑定 reviewID 供审计
++// #199：追溯；outcome 与 reviewer 决议一致，但 permission 层仍独立执行 cache/circuit。
++const ReviewCompleted = define({
++  type: "permission.review.completed",
++  schema: { sessionID: SessionID, reviewID: Schema.String, outcome: Schema.Literals(["allow", "deny"]), rationale: Schema.String },
++})
++// #199：ReviewFailed 在 reviewer 异常退出（超时/provider 错误）时发布，reviewID 缺失
++// #199：时记为 unknown；permission 层据此 fail-closed 而非静默放行。
++const ReviewFailed = define({
++  type: "permission.review.failed",
++  schema: { sessionID: SessionID, reviewID: Schema.String, reason: Schema.String },
++})
++// #199：CircuitBroken 在连续拒绝触发阈值时发布，是咨询性信号——UI 可据此提示
++// #199：用户，但 permission 层的 deny 结果不依赖此事件。
++const CircuitBroken = define({
++  type: "permission.review.circuit_broken",
++  schema: { sessionID: SessionID, consecutive: Schema.Number, recent: Schema.Number },
++})
++export const Event = {
++  Asked,
++  Replied,
++  ReviewCompleted,
++  ReviewFailed,
++  CircuitBroken,
++  Definitions: inventory(Asked, Replied, ReviewCompleted, ReviewFailed, CircuitBroken),
++}

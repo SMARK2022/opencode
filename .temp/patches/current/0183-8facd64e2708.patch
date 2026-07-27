@@ -2,385 +2,132 @@ From 8facd64e27088dc67ca3a586a04563d53f02443c Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Thu, 21 May 2026 05:04:25 +0800
 Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=E4=BA=BA=E6=80=A7?=
- =?UTF-8?q?=E5=8C=96=E7=9A=84=E6=97=A5=E6=9C=9F=E6=A0=87=E7=AD=BE=E5=92=8C?=
- =?UTF-8?q?=E5=9B=BE=E8=A1=A8=E5=88=BB=E5=BA=A6=EF=BC=8C=E4=BC=98=E5=8C=96?=
- =?UTF-8?q?=E7=BB=9F=E8=AE=A1=E6=95=B0=E6=8D=AE=E7=9A=84=E5=8F=AF=E8=AF=BB?=
- =?UTF-8?q?=E6=80=A7?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/stats/charts.ts b/packages/opencode/src/cli/cmd/stats/charts.ts
-index c6640d6bd9ce8d85f6b0cb32235e0e7021a36f0b..6369e5d69ad622a0d3aac77b29d90881b8a6f4cd 100644
---- a/packages/opencode/src/cli/cmd/stats/charts.ts
-+++ b/packages/opencode/src/cli/cmd/stats/charts.ts
-@@ -226,6 +226,28 @@ const niceMax = (value: number) => {
-   return step * base
+diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src/cli/cmd/stats-data.ts
+--- a/packages/opencode/src/cli/cmd/stats-data.ts
++++ b/packages/opencode/src/cli/cmd/stats-data.ts
+@@ -345,8 +345,14 @@ const dayStart = (time: number) => {
  }
  
-+/** Round a rough step to a human-friendly interval: 1/2/5 × 10^n */
-+const niceStep = (rough: number): number => {
-+  if (rough <= 0) return 1
-+  const exp = Math.floor(Math.log10(rough))
-+  const f = rough / Math.pow(10, exp)
-+  if (f < 1.5) return Math.pow(10, exp)
-+  if (f < 3) return 2 * Math.pow(10, exp)
-+  if (f < 7) return 5 * Math.pow(10, exp)
-+  return Math.pow(10, exp + 1)
-+}
-+
-+/** Compute nice Y-axis tick values for a given data range */
-+const niceTicks = (min: number, max: number, targetCount = 5): number[] => {
-+  if (max <= min) return [min, min + 1]
-+  const step = niceStep((max - min) / Math.max(1, targetCount - 1))
-+  const niceMin = Math.floor(min / step) * step
-+  const niceMaxVal = Math.ceil(max / step) * step
-+  const ticks: number[] = []
-+  for (let v = niceMin; v <= niceMaxVal + step / 2; v += step) ticks.push(v)
-+  return ticks.length >= 2 ? ticks : [min, max]
-+}
-+
- const range = (count: number) => Array.from({ length: Math.max(0, count) }, (_, index) => index)
- 
- const evenlySpaced = (count: number, max: number) => {
-@@ -233,13 +255,17 @@ const evenlySpaced = (count: number, max: number) => {
-   return range(count).map((index) => Math.round((index / (count - 1)) * max))
- }
- 
--const dateLabel = (time: number) => new Date(time).toLocaleDateString(undefined, { month: "short", day: "numeric" })
-+const dateLabel = (time: number) => {
-+  const date = new Date(time)
-+  return `${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`
+ // #174：dateLabel 供轴标签
+-const dateLabel = (time: number) =>
+-  new Date(time).toLocaleDateString(undefined, { month: "short", day: "numeric" })
++// #183：与 dayStart 同用本地日界，MM-DD 避免 locale 月名撑列
++export const dateLabel = (time: number) => {
++  // #183：本地月日两位零填充（禁止 getUTC*，否则非 UTC 时区日前移）
++  const d = new Date(time)
++  const mm = String(d.getMonth() + 1).padStart(2, "0")
++  const dd = String(d.getDate()).padStart(2, "0")
++  return `${mm}-${dd}`
 +}
  
+ // #174：getDaily 按日懒建
+ const getDaily = (map: Map<number, DailyUsage>, time: number) => {
+diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/src/cli/cmd/stats-render.ts
+--- a/packages/opencode/src/cli/cmd/stats-render.ts
++++ b/packages/opencode/src/cli/cmd/stats-render.ts
+@@ -139,7 +139,9 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
+ // #181：金额短格式
+ // #181：仪表盘顶表金额短显示
  const money = (value: number) => {
--  if (!Number.isFinite(value)) return "$0"
--  if (value >= 100) return `$${value.toFixed(0)}`
--  if (value >= 10) return `$${value.toFixed(1)}`
--  return `$${value.toFixed(3)}`
-+  if (!Number.isFinite(value) || value <= 0) return "$0"
++  // #183：紧凑金额，拒绝噪声小数
+   if (!Number.isFinite(value) || value <= 0) return "$0"
 +  if (value >= 1000) return `$${(value / 1000).toFixed(1)}K`
-+  if (value >= 10) return `$${Math.round(value)}`
-+  if (value >= 1) return `$${value.toFixed(1)}`
-+  return `$${value.toFixed(2)}`
- }
- 
- class ChartCanvas {
-@@ -532,21 +558,39 @@ export function renderRoundedLineChart(input: {
-   const plotWidth = Math.max(1, width - plotLeft)
-   const plotHeight = Math.max(1, height - 1)
-   const canvas = new ChartCanvas(width, height)
-+  // The grid stays low-priority so axes and data paths overwrite it cleanly.
-   canvas.grid(5, 4)
-   canvas.vertical(0, 0, height - 1, "│", axisStyle)
-   canvas.horizontal(0, width - 1, height - 1, "─", axisStyle)
--  canvas.put(0, height - 1, "╰", axisStyle)
-+  canvas.put(0, height - 1, "└", axisStyle)
-   nonEmpty.forEach((item, index) => {
-     const style: ChartStyle = { color: item.color, priority: 30 + index }
-     const mapped = item.points.map((point) => ({ x: plotLeft + xMap(point.x, bounds, plotWidth), y: yMap(point.y, bounds, plotHeight) }))
-     drawOrthogonalPolyline(canvas, mapped, style, input.points === false ? "─" : "●")
-     if (input.points !== false) mapped.forEach((point) => canvas.put(point.x, point.y, item.mark ?? chartMarks[index % chartMarks.length], style, style.priority + 5))
-   })
--  const labels = nonEmpty[0]?.points.map((point) => point.label ?? dateLabel(point.x)) ?? []
-+  // X-axis labels come from timestamps, not locale/user labels, so dashboard
-+  // charts stay stable across CJK and English terminals.
-+  const labels = nonEmpty[0]?.points.map((point) => dateLabel(point.x)) ?? []
-+  // Build Y-axis using nice ticks so labels are human-friendly round numbers
-+  const ticks = niceTicks(bounds.minY, bounds.maxY, Math.max(3, Math.min(6, plotHeight)))
-+  const tickNiceMax = ticks[ticks.length - 1] ?? bounds.maxY
-+  const tickNiceMin = ticks[0] ?? bounds.minY
-+  const yAxisLines = canvas.render(ctx).map((line, rowIndex) => {
-+    // Map row index back to a data value, then find the nearest tick
-+    const rowValue = tickNiceMax - (tickNiceMax - tickNiceMin) * (rowIndex / Math.max(1, plotHeight - 1))
-+    const nearestTick = ticks.reduce((best, t) => Math.abs(t - rowValue) < Math.abs(best - rowValue) ? t : best, ticks[0] ?? 0)
-+    const rowFrac = (tickNiceMax - rowValue) / Math.max(1, tickNiceMax - tickNiceMin)
-+    const tickFrac = (tickNiceMax - nearestTick) / Math.max(1, tickNiceMax - tickNiceMin)
-+    const label = Math.abs(rowFrac - tickFrac) < 0.5 / plotHeight ? formatter(nearestTick) : ""
-+    return label
-+  })
-+  const yAxisWidth = Math.max(5, ...yAxisLines.map(visibleLength))
-+  const renderedLines = canvas.render(ctx).map((line, index) => `${paint(padStartVisible(yAxisLines[index] ?? "", yAxisWidth), "muted", ctx)} ${line}`)
-   return [
-     paint(input.title, "title", ctx, true),
--    ...withYAxisRange(canvas.render(ctx), bounds, formatter, ctx),
--    `${" ".repeat(7)}${paint(labelTicks(labels, width), "muted", ctx)}`,
-+    ...renderedLines,
-+    `${" ".repeat(yAxisWidth + 1)}${paint(labelTicks(labels, width), "muted", ctx)}`,
-     ...(input.legend === false ? [] : [legend(nonEmpty, ctx)]),
-   ]
- }
-diff --git a/packages/opencode/src/cli/cmd/stats/render.ts b/packages/opencode/src/cli/cmd/stats/render.ts
-index fc1627fcdde71db378db5cee2e0e4ad03e38d9d3..ec3ae391cff3d0db297b8e9c34e57151a3316656 100644
---- a/packages/opencode/src/cli/cmd/stats/render.ts
-+++ b/packages/opencode/src/cli/cmd/stats/render.ts
-@@ -98,6 +98,11 @@ const dateRange = (report: StatsReport) => {
-   return `${new Date(report.dateRange.earliest).toLocaleDateString()} - ${new Date(report.dateRange.latest).toLocaleDateString()}`
- }
- 
-+const shortDate = (time: number) => {
-+  const date = new Date(time)
-+  return `${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`
-+}
-+
- const money = (value: number) => {
-   if (!Number.isFinite(value) || value <= 0) return "—"
-   if (value >= 100) return `$${value.toFixed(0)}`
-@@ -135,19 +140,19 @@ const terminalContentWidth = () => statsContentWidth()
- const layoutModeFor = (width: number) => width >= 130 ? "wide" : "medium"
- const chartPlotWidth = (availableWidth: number) => Math.max(12, availableWidth - 8)
- 
--const dailyLabels = (daily: DailyUsage[]) => daily.map((item) => item.label)
-+const dailyLabels = (daily: DailyUsage[]) => daily.map((item) => shortDate(item.day))
- 
- const dailyTokenPoints = (report: StatsReport) =>
--  report.daily.map((item) => ({ day: item.day, label: item.label, value: item.tokens.total }))
-+  report.daily.map((item) => ({ day: item.day, label: shortDate(item.day), value: item.tokens.total }))
- 
- const dailyCostPoints = (report: StatsReport) =>
--  report.daily.map((item) => ({ day: item.day, label: item.label, value: item.cost }))
-+  report.daily.map((item) => ({ day: item.day, label: shortDate(item.day), value: item.cost }))
- 
- const dailyCacheHitPoints = (report: StatsReport) =>
--  report.daily.map((item) => ({ day: item.day, label: item.label, value: item.tokens.total > 0 ? (item.tokens.cache.read / item.tokens.total) * 100 : 0 }))
-+  report.daily.map((item) => ({ day: item.day, label: shortDate(item.day), value: item.tokens.total > 0 ? (item.tokens.cache.read / item.tokens.total) * 100 : 0 }))
- 
- const dailyErrorRatePoints = (report: StatsReport) =>
--  report.daily.map((item) => ({ day: item.day, label: item.label, value: item.requests > 0 ? ((item.errors + item.aborted) / item.requests) * 100 : 0 }))
-+  report.daily.map((item) => ({ day: item.day, label: shortDate(item.day), value: item.requests > 0 ? ((item.errors + item.aborted) / item.requests) * 100 : 0 }))
- 
- const groupRows = (groups: UsageGroup[], metric: "tokens" | "cost", limit: number) =>
-   groups.slice(0, limit).map((group, index) => ({
-@@ -427,9 +432,11 @@ const topGroups = (groups: UsageGroup[], options: StatsRenderOptions) =>
- // Dashboard helpers stay local to this file because they compose existing chart
- // primitives rather than adding new public chart types. The public surface stays
- // `renderDashboard(report, options)`, which is what the tests exercise.
--const renderSectionDivider = (label: string, enabled: boolean, width: number) => {
--  const head = `━━━ ${clipVisible(label, Math.max(8, width - 8))} `
--  return color(`${head}${"━".repeat(Math.max(3, width - visibleLength(head)))}`, "border", enabled)
-+const renderSectionDivider = (label: string, enabled: boolean, width: number, subtitle?: string) => {
-+  const maxLabel = Math.min(visibleLength(label), 40)
-+  const head = `━━━ ${clipVisible(label, maxLabel)} `
-+  const divider = color(`${head}${"─".repeat(Math.max(3, width - visibleLength(head)))}`, "border", enabled)
-+  return subtitle ? [divider, muted(`  ${subtitle}`, enabled)] : [divider]
- }
- 
- const tokenIntensity = (value: number): { char: string; color: keyof typeof theme } => {
-@@ -473,21 +480,22 @@ const dayOfWeekTokens = (report: StatsReport) =>
- 
- const renderHourOfDayStrip = (report: StatsReport, width: number) => {
-   const buckets = hourActivity(report)
--  const paired = Array.from({ length: 12 }, (_, index) => (buckets[index * 2] ?? 0) + (buckets[index * 2 + 1] ?? 0))
-   const nonZero = buckets.map((value, hour) => ({ value, hour })).filter((item) => item.value > 0)
--  const peak = nonZero.sort((a, b) => b.value - a.value)[0]
--  const quiet = nonZero.sort((a, b) => a.value - b.value)[0]
--  const legend = ["legend  · =0    ░ <50    ▒ <150", "        ▓ <300    █ ≥300"]
-+  const peak = [...nonZero].sort((a, b) => b.value - a.value)[0]
-+  const quiet = [...nonZero].sort((a, b) => a.value - b.value)[0]
-+  // 24 chars, one per hour — no compression
-+  const dataLine = buckets.map((value) => plainIntensityGlyph(requestIntensity(value))).join("")
-+  const legendLine = "· =0  ░ <50  ▒ <150  ▓ <300  █ ≥300"
-   return [
-     "Hour-of-day · avg requests per hour",
-     "",
--    rangeLabels(0, 22, 2).join(" "),
--    paired.map((value) => plainIntensityGlyph(requestIntensity(value))).join("  "),
-+    "00  04  08  12  16  20",
-+    dataLine,
-     "",
-     peak ? `peak  ${String(peak.hour).padStart(2, "0")}:00 — ${formatNumber(peak.value)} req` : "no hourly activity",
-     quiet ? `quiet ${String(quiet.hour).padStart(2, "0")}:00 — ${formatNumber(quiet.value)} req` : "",
-     "",
--    ...(width < 60 ? legend : [legend.join("    ")]),
-+    `legend  ${legendLine}`,
-   ]
- }
- 
-@@ -508,23 +516,23 @@ const renderCalendarActivity = (report: StatsReport, width: number) => {
-   const last = report.daily.at(-1)?.day ?? first
-   const start = first - ((new Date(first).getUTCDay() + 6) % 7) * 86_400_000
-   const weeks = Math.max(1, Math.ceil((last - start + 86_400_000) / (7 * 86_400_000)))
--  const legend = [
--    `${plainIntensityGlyph(tokenIntensity(1), 2)} <50M`,
--    `${plainIntensityGlyph(tokenIntensity(50_000_000), 2)} 50-150M`,
--    `${plainIntensityGlyph(tokenIntensity(150_000_000), 2)} 150-250M`,
--    `${plainIntensityGlyph(tokenIntensity(250_000_000), 2)} >250M`,
--  ]
-+  // Calendar cells remain adaptive: narrow columns use one glyph, wider columns
-+  // use two glyphs while keeping weekday headers on the same fixed grid.
-+  const glyphWidth = width >= 42 ? 2 : 1
-+  const cellWidth = glyphWidth + 2
-+  const cell = (tokens: number) => fitPlain(` ${plainIntensityGlyph(tokenIntensity(tokens), glyphWidth)}`, cellWidth)
-+  const legendLine = `░ <50M   ▒ 50-150M   ▓ 150-250M   █ >250M`
-   return [
-     "Calendar · cell intensity = daily tokens",
-     "",
--    `      ${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((label) => fitPlain(label, 3)).join(" ")}`,
-+    `     ${["M", "T", "W", "T", "F", "S", "S"].map((d) => fitPlain(` ${d}`, cellWidth)).join("")}`,
-     ...Array.from({ length: weeks }, (_, week) => {
-       const weekStart = start + week * 7 * 86_400_000
--      const cells = Array.from({ length: 7 }, (_, day) => padEndVisible(plainIntensityGlyph(tokenIntensity(byDay.get(weekStart + day * 86_400_000) ?? 0), 2), 3)).join(" ")
--      return `${padStartVisible(String(isoWeek(weekStart)), 4)}  ${cells}`
-+      const cells = Array.from({ length: 7 }, (_, day) => cell(byDay.get(weekStart + day * 86_400_000) ?? 0)).join("")
-+      return `${padStartVisible(String(isoWeek(weekStart)), 4)} ${cells}`
-     }),
-     "",
--    ...(width < 54 ? [`${legend[0]}     ${legend[1]}`, `${legend[2]}     ${legend[3]}`] : [legend.join("     ")]),
-+    legendLine,
-   ]
- }
- 
-@@ -615,10 +623,10 @@ const renderCostHealthSection = (report: StatsReport, options: StatsRenderOption
-   const errorPeak = dailyErrorRatePoints(report).sort((a, b) => b.value - a.value)[0]
-   const errorAvg = safeDivide(report.total.errors + report.total.aborted, report.total.requests) * 100
-   const pairWidth = width < 100 ? Math.max(38, width - 4) : mode === "wide" ? thirdWidth : halfWidth
--  const dailyCost = renderCostHealthSubchart("Daily cost ($/day)", "cost", "pink", dailyCostPoints(report), pairWidth, "cost", options, costPeak ? `peak ${money(costPeak.cost)} on ${costPeak.label} · median ${money(median(report.daily.map((day) => day.cost)))}` : "no cost activity")
-+  const dailyCost = renderCostHealthSubchart("Daily cost ($/day)", "cost", "pink", dailyCostPoints(report), pairWidth, "cost", options, costPeak ? `peak ${money(costPeak.cost)} on ${shortDate(costPeak.day)} · median ${money(median(report.daily.map((day) => day.cost)))}` : "no cost activity")
-   const cacheRange = cacheRates.length ? { min: Math.max(0, Math.floor(Math.min(...cacheRates) / 10) * 10), max: Math.min(100, Math.ceil(Math.max(...cacheRates) / 10) * 10) } : undefined
-   const cacheHit = renderCostHealthSubchart("Cache hit rate (%)", "cache", "yellow", dailyCacheHitPoints(report), mode === "wide" ? thirdWidth : Math.max(38, width - 4), "tokens", options, cacheRates.length ? `range ${Math.min(...cacheRates).toFixed(1)}% → ${Math.max(...cacheRates).toFixed(1)}% · ${Math.max(...cacheRates) - Math.min(...cacheRates) < 10 ? "stable" : "variable"}` : "no cache activity", cacheRange)
--  const errorRate = renderCostHealthSubchart("Error rate (errors per 100 req)", "errors", "red", dailyErrorRatePoints(report), pairWidth, "tokens", options, errorPeak && errorPeak.value > 0 ? `spike ${errorPeak.value.toFixed(1)}% on ${errorPeak.label} · avg ${errorAvg.toFixed(1)}%` : "no errors recorded")
-+  const errorRate = renderCostHealthSubchart("Abort & error rate (%)", "errors", "red", dailyErrorRatePoints(report), pairWidth, "tokens", options, errorPeak && errorPeak.value > 0 ? `spike ${errorPeak.value.toFixed(1)}% on ${shortDate(errorPeak.day)} · avg ${errorAvg.toFixed(1)}%` : "no errors recorded")
-   if (mode === "wide") return renderThreeColumn(dailyCost, cacheHit, errorRate, 5, width)
-   if (width < 100) return [...dailyCost, "", ...errorRate, "", ...cacheHit]
-   return [...renderTwoColumn(dailyCost, errorRate, 5, width, 0.5), "", ...cacheHit]
-@@ -630,12 +638,14 @@ const renderTopModelsLollipop = (report: StatsReport, options: StatsRenderOption
-   if (models.length === 0) return [muted("No model data in range", enabled)]
-   const max = Math.max(0, ...models.map((model) => model.tokens.total))
-   const labelWidth = Math.max(16, Math.min(30, Math.max(...models.map((model) => visibleLength(model.label))) + 1))
--  const barWidth = Math.max(12, width - labelWidth - 43)
-+  const perCallWidth = 9
-+  const barWidth = Math.max(12, width - labelWidth - 43 - perCallWidth - 3)
-   return [
--    muted(`${" ".repeat(labelWidth)} │ tokens${" ".repeat(Math.max(1, barWidth - 6))} │ share  │ cost`, enabled),
-+    muted(`${" ".repeat(labelWidth)} │ tokens${" ".repeat(Math.max(1, barWidth - 6))} │ share  │ cost     │ per-call`, enabled),
-     ...models.map((model, index) => {
-       const filled = Math.max(1, Math.round(safeDivide(model.tokens.total, max) * Math.max(1, barWidth - 10)))
--      return fitPlain(`${padEndVisible(clipVisible(model.label, labelWidth), labelWidth)} │${color("●" + "━".repeat(Math.max(0, filled - 1)), activityColors[index % activityColors.length], enabled)} ${padEndVisible(formatNumber(model.tokens.total), Math.max(1, barWidth - filled))} │ ${padStartVisible(percent(model.tokens.total, report.total.tokens.total), 6)} │ ${padStartVisible(money(model.cost), 8)}`, width)
-+      const perCall = `${formatNumber(safeDivide(model.tokens.total, model.assistantCalls))}/c`
-+      return fitPlain(`${padEndVisible(clipVisible(model.label, labelWidth), labelWidth)} │${color("●" + "━".repeat(Math.max(0, filled - 1)), activityColors[index % activityColors.length], enabled)} ${padEndVisible(formatNumber(model.tokens.total), Math.max(1, barWidth - filled))} │ ${padStartVisible(percent(model.tokens.total, report.total.tokens.total), 6)} │ ${padStartVisible(money(model.cost), 8)} │ ${padStartVisible(perCall, perCallWidth)}`, width)
-     }),
-   ]
- }
-@@ -760,33 +770,33 @@ export function renderDashboard(report: StatsReport, options: StatsRenderOptions
-   // while timeline/breakdown/sessions keep their existing detailed renderers.
-   const lines = [
-     ...renderDashboardHeader(report, options, totalWidth),
--    renderSectionDivider("Daily activity", enabled, totalWidth),
-+    ...renderSectionDivider("Daily activity", enabled, totalWidth),
-     "",
-     ...renderDailyActivitySection(report, options, mode, totalWidth),
-     "",
--    renderSectionDivider("Token components · small multiples, each chart auto-normalized to its own peak", enabled, totalWidth),
-+    ...renderSectionDivider("Token components", enabled, totalWidth, "Each panel auto-normalizes to its own peak."),
-     "",
-     ...renderTokenComponentsSmallMultiples(report, options, halfWidth, totalWidth),
-     "",
--    renderSectionDivider("Cost & health trends", enabled, totalWidth),
-+    ...renderSectionDivider("Cost & health trends", enabled, totalWidth),
-     "",
-     ...renderCostHealthSection(report, options, mode, totalWidth, halfWidth, thirdWidth),
-     "",
--    renderSectionDivider("Top models · by token volume", enabled, totalWidth),
-+    ...renderSectionDivider("Top models · by token volume", enabled, totalWidth),
-     "",
-     ...renderTopModelsLollipop(report, options, totalWidth),
-     "",
--    renderSectionDivider("Top providers · share of total tokens", enabled, totalWidth),
-+    ...renderSectionDivider("Top providers · share of total tokens", enabled, totalWidth),
-     "",
-     ...renderTopProvidersStack(report, options, totalWidth),
-     "",
--    renderSectionDivider("Sessions", enabled, totalWidth),
-+    ...renderSectionDivider("Sessions", enabled, totalWidth),
-     "",
-     ...(mode === "wide"
-       ? renderTwoColumn(renderSessionDistribution(report, options, sessionLeftWidth), renderTopSessionsList(report, options, sessionRightWidth), gap, totalWidth, sessionLeftWidth / Math.max(1, totalWidth - gap))
-       : [...renderSessionDistribution(report, options, totalWidth - 4), "", ...renderTopSessionsList(report, options, totalWidth - 4)]),
-     "",
--    renderSectionDivider("Insights", enabled, totalWidth),
-+    ...renderSectionDivider("Insights", enabled, totalWidth),
-     "",
-     ...renderInsightsCallout(report, options),
-   ]
+   if (value >= 10) return `$${value.toFixed(0)}`
+   if (value >= 1) return `$${value.toFixed(2)}`
+   return `$${value.toFixed(4)}`
+@@ -180,7 +182,8 @@ const dashboardTopTable = (
+   const labelCap = kind === "model" ? 28 : 26
+   // metrics 形如 " $12  1.2M  3  40% " 约 28 列预算
+   // #181：右侧指标列预算，剩余给 label/trend
+-  const metricsBudget = 28
++  // #183：含 per-call 时指标槽更宽
++  const metricsBudget = kind === "model" ? 36 : 28
+     // #181：先扣指标与 gutter 再谈 trend
+   const trendRoom = content - metricsBudget - 15 - labelFloor
+   // #181：小于 6 列不画 trend，避免碎裂
+@@ -190,24 +193,39 @@ const dashboardTopTable = (
+   const labelWidth = Math.max(labelFloor, Math.min(labelCap, content - metricsBudget - 15 - trendWidth))
+   const lines = [`▸ ${title}`]
+     // #181：宽屏表头带 share│trend，窄屏去掉 trend
+-  const head =
+-    trendWidth > 0
+-      ? `  ${fitVisible("name", labelWidth)} ${fitVisible("cost", 8)} ${fitVisible("tokens", 8)} ${fitVisible("calls", 5)} share │ trend`
+-      : `  ${fitVisible("name", labelWidth)} ${fitVisible("cost", 8)} ${fitVisible("tokens", 8)} ${fitVisible("calls", 5)} share`
++  // #183：model 顶表增加 per-call 列（tokens/calls）
++  const headCols = [
++    fitVisible("name", labelWidth),
++    fitVisible("cost", 8),
++    fitVisible("tokens", 8),
++    fitVisible("calls", 5),
++  ]
++  if (kind === "model") headCols.push(fitVisible("per-call", 8))
++  headCols.push("share")
++  const head = `  ${headCols.join(" ")}${trendWidth > 0 ? " │ trend" : ""}`
+   lines.push(head)
+   for (const row of rows) {
+-    // #181：share 相对本表 tokens 合计
++    // #181：share 用全局 total.tokens.total
+     const share = `${Math.round((row.tokens / totalTokens) * 100)}%`
+     // #181：按 id 对齐 series 点列
+     const seriesPoints = series.find((s) => s.id === row.id)?.points ?? []
+     const values = seriesPoints.map((p) => p.tokens.total)
+-        // #181：无点列时 sparkline 返回空串
++    // #181：无点列时 sparkline 返回空串
+     const trend = trendWidth > 0 ? sparkline(values, trendWidth) : ""
+-        // #181：标签按显示列截断，保留 CJK 语义
++    // #181：标签按显示列截断，保留 CJK 语义
+     const label = truncateVisible(row.label, labelWidth)
+-        // #181：行体固定指标槽位，便于扫读对齐
+-    const base = `  ${fitVisible(label, labelWidth)} ${fitVisible(money(row.cost), 8)} ${fitVisible(String(row.tokens), 8)} ${fitVisible(String(row.calls), 5)} ${fitVisible(share, 5)}`
+-        // #181：trend 用 │ 与 share 分隔
++    // #183：per-call = tokens/assistantCalls，便于单次调用效率扫读
++    const perCall = row.calls > 0 ? Math.round(row.tokens / row.calls) : 0
++    const cols = [
++      fitVisible(label, labelWidth),
++      fitVisible(money(row.cost), 8),
++      fitVisible(String(row.tokens), 8),
++      fitVisible(String(row.calls), 5),
++    ]
++    if (kind === "model") cols.push(fitVisible(String(perCall), 8))
++    cols.push(fitVisible(share, 5))
++    const base = `  ${cols.join(" ")}`
++    // #181：trend 用 │ 与 share 分隔
+     lines.push(trendWidth > 0 ? `${base} │ ${trend}` : base)
+   }
+   // #181：禁止再单独挂 Model/Provider activity rows
 diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/opencode/test/cli/stats-render-width.test.ts
-index 7ad19e87f961b10b4a85650a5425668dbe1538be..e4a734032c04e54b551515613d795d9801c98fea 100644
 --- a/packages/opencode/test/cli/stats-render-width.test.ts
 +++ b/packages/opencode/test/cli/stats-render-width.test.ts
-@@ -196,6 +196,12 @@ const withColumns = (columns: number, run: () => void) => {
-   }
- }
- 
-+const calendarRows = (output: string) =>
-+  output
-+    .split("\n")
-+    .map(stripAnsi)
-+    .filter((line) => /^\s+\d{1,2}\s+[·░▒▓█]/.test(line))
-+
- describe("stats render width", () => {
-   test("counts CJK text by terminal display columns", () => {
-     expect(visibleLength("中文abc")).toBe(7)
-@@ -219,15 +225,17 @@ describe("stats render width", () => {
-       const output = renderDashboard(report(), { color: "never" })
-       expect(output).toContain("━━━ Daily activity")
-       expect(output).toContain("Calendar · cell intensity = daily tokens")
--      expect(output).toContain("Mon Tue Wed Thu Fri Sat Sun")
-+      expect(output).toMatch(/M\s+T\s+W\s+T\s+F\s+S\s+S/)
-       expect(output).toContain("legend  · =0")
--      expect(output).toContain("Token components · small multiples")
-+      expect(output).toContain("Token components")
-+      expect(output).toContain("Each panel auto-normalizes")
-       expect(output).toContain("Cost & health trends")
-       expect(output).toContain("Top models · by token volume")
-       expect(output).toContain("Top providers · share of total tokens")
-       expect(output).toContain("━━━ Sessions")
-       expect(output).toContain("━━━ Insights")
--      expect(output.indexOf("Error rate (errors per 100 req)")).toBeLessThan(output.indexOf("Cache hit rate (%)"))
-+      expect(output.indexOf("Abort & error rate")).toBeLessThan(output.indexOf("Cache hit rate (%)"))
-+      expect(output).not.toContain("Error rate (errors per 100 req)")
-       expect(output).not.toContain("Cumulative spend")
-       expect(output).not.toContain("Why small multiples")
-       expect(output).not.toContain("Model mix over time")
-@@ -242,7 +250,8 @@ describe("stats render width", () => {
-       expect(output).toContain("Input")
-       expect(output).toContain("Cache Write")
-       expect(output).toContain("Output")
--      expect(output.indexOf("Cache hit rate (%)")).toBeLessThan(output.indexOf("Error rate (errors per 100 req)"))
-+      expect(output.indexOf("Cache hit rate (%)")).toBeLessThan(output.indexOf("Abort & error rate"))
-+      expect(output).toContain("per-call")
-       expect(output).not.toContain("■ Cache Read · ■ Input · ■ Cache Write · ■ Output")
-       expect(output).not.toContain("● cost")
-       expect(output).not.toContain("● cache")
-@@ -260,6 +269,32 @@ describe("stats render width", () => {
-     }
+@@ -348,3 +348,31 @@ describe("stats dashboard sectioned overview (#182)", () => {
+     expect(text).toMatch(/Failed\/aborted requests: 3 \(30%\)/)
    })
- 
-+  test("keeps chart grids and stable date labels", () => {
-+    withColumns(160, () => {
-+      const output = renderDashboard(report(), { color: "never" })
-+      expect(output).toContain("┄")
-+      expect(output).toContain("04-27")
-+      expect(output).not.toContain("5月")
-+      expect(output).not.toContain("$0.000")
-+    })
+ })
++
++describe("stats humanized labels (#183)", () => {
++  test("production dateLabel uses local MM-DD without locale month glyphs", async () => {
++    // #183：必须 import 生产 dateLabel，禁止测试内克隆实现
++    const { dateLabel } = await import("../../src/cli/cmd/stats-data")
++    const localMidnight = new Date(2026, 3, 27, 0, 0, 0, 0).getTime()
++    expect(dateLabel(localMidnight)).toBe("04-27")
++    expect(dateLabel(localMidnight)).not.toMatch(/月/)
++    // #183：与 dayStart 本地日界一致：当日 15:00 仍标 04-27
++    const afternoon = new Date(2026, 3, 27, 15, 0, 0, 0).getTime()
++    expect(dateLabel(afternoon)).toBe("04-27")
 +  })
 +
-+  test("keeps calendar cells adaptive and hour strip uncompressed", () => {
-+    withColumns(160, () => {
-+      expect(calendarRows(renderDashboard(report(), { color: "never" })).join("\n")).toMatch(/[░▒▓█]{2}/)
-+    })
-+
-+    withColumns(40, () => {
-+      expect(calendarRows(renderDashboard(report(), { color: "never" })).join("\n")).not.toMatch(/[░▒▓█]{2}/)
-+    })
-+
-+    withColumns(80, () => {
-+      const lines = renderDashboard(report(), { color: "never" }).split("\n").map(stripAnsi)
-+      const header = lines.findIndex((line) => line.includes("00  04  08  12  16  20"))
-+      expect(lines[header + 1].trim()).toHaveLength(24)
-+    })
++  test("top models table includes per-call column", () => {
++    // #183：人性化顶表含 per-call
++    const report = {
++      totalSessions: 1, sessionsWithUsage: 1, totalMessages: 1, totalTools: 0, days: 1,
++      dateRange: { earliest: 0, latest: 1 },
++      total: { tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0 },
++      models: [{ id: "m1", label: "model-one", tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0, sessions: 1, providers: [], models: [] }],
++      providers: [], agents: [], sources: [], statuses: [], projects: [],
++      daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
++      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],
++      tokensPerSession: 25, medianTokensPerSession: 25,
++    } as unknown as StatsReport
++    expect(renderDashboard(report as any, { limit: 5 })).toContain("per-call")
 +  })
-+
-   test("keeps calendar monochrome while spacing provider legend columns", () => {
-     withColumns(80, () => {
-       const lines = renderDashboard(report(), { color: "always" }).split("\n")
++})

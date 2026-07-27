@@ -1,172 +1,187 @@
 From 704fe80257797401210454dfded5f3f161a6ca6b Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Mon, 18 May 2026 23:20:35 +0800
-Subject: [PATCH] =?UTF-8?q?feat(codex):=20=E6=B7=BB=E5=8A=A0=E6=94=AF?=
- =?UTF-8?q?=E6=8C=81=E8=87=AA=E5=AE=9A=E4=B9=89=20HTTP=20=E5=A4=B4?=
- =?UTF-8?q?=E5=92=8C=20User-Agent=20=E5=A4=84=E7=90=86=EF=BC=8C=E6=9B=B4?=
- =?UTF-8?q?=E6=96=B0=E7=9B=B8=E5=85=B3=E6=B5=8B=E8=AF=95?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH] feat(codex): Codex TUI headers + unconditional configured UA (#169 tip)
 
-
-diff --git a/packages/opencode/src/plugin/codex.ts b/packages/opencode/src/plugin/codex.ts
-index 1b03067972d1e95d44689c67099a03cd9d0121be..6629ca6f474ec9f3f70dd7818fa0273c9d3f8b21 100644
---- a/packages/opencode/src/plugin/codex.ts
-+++ b/packages/opencode/src/plugin/codex.ts
-@@ -2,9 +2,7 @@ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
- import * as Log from "@opencode-ai/core/util/log"
- import { NetworkProxy } from "@opencode-ai/core/network-proxy"
- import { Installation } from "../installation"
+diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/src/plugin/openai/codex.ts
+--- a/packages/opencode/src/plugin/openai/codex.ts
++++ b/packages/opencode/src/plugin/openai/codex.ts
+@@ -1,9 +1,7 @@
+ import { // #83：codex 请求经 NetworkProxy
+ NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 -import { InstallationVersion } from "@opencode-ai/core/installation/version"
- import { OAUTH_DUMMY_KEY } from "../auth"
+ import { OAUTH_DUMMY_KEY } from "../../auth"
 -import os from "os"
  import { setTimeout as sleep } from "node:timers/promises"
  import { createServer } from "http"
- 
-@@ -15,6 +13,17 @@ const ISSUER = "https://auth.openai.com"
+ import { OpenAIWebSocketPool } from "./ws-pool"
+@@ -14,6 +12,23 @@ const ISSUER = "https://auth.openai.com"
  const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
  const OAUTH_PORT = 1455
  const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
++// #169：固定 Codex TUI 指纹，后端按 originator/UA 识别官方客户端
++// #169：版本字符串故意钉死，不跟 opencode 发行版漂移
 +export const CODEX_USER_AGENT = "codex-tui/0.130.0 (Mac OS 15.7.2; arm64) Apple_Terminal/455.1 (codex-tui; 0.130.0)"
++// #169：JSON 请求默认头；chat/oauth/API 共用
++// #169：Content-Type 固定 json，避免调用方漏设
 +export const CODEX_HEADERS = {
 +  "Content-Type": "application/json",
 +  originator: "codex-tui",
 +  "User-Agent": CODEX_USER_AGENT,
 +}
++// #169：form token 交换头，originator/UA 与 JSON 路径一致
++// #169：form 路径不得回落成仅 Content-Type，否则丢 originator
 +const CODEX_FORM_HEADERS = {
 +  "Content-Type": "application/x-www-form-urlencoded",
 +  originator: CODEX_HEADERS.originator,
 +  "User-Agent": CODEX_USER_AGENT,
 +}
- const ALLOWED_MODELS = new Set([
-   "gpt-5.5",
-   "gpt-5.2",
-@@ -123,7 +132,7 @@ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: Pk
-   const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
+ const ALLOWED_MODELS = new Set(["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"])
+ const DISALLOWED_MODELS = new Set(["gpt-5.5-pro"])
+ 
+@@ -109,7 +124,7 @@ interface CodexAuthPluginOptions {
+ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: PkceCodes): Promise<TokenResponse> {
+   const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, { purpose: "plugin", 
      method: "POST",
-     purpose: "plugin",
 -    headers: { "Content-Type": "application/x-www-form-urlencoded" },
 +    headers: CODEX_FORM_HEADERS,
      body: new URLSearchParams({
        grant_type: "authorization_code",
        code,
-@@ -142,7 +151,7 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResponse>
-   const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
+@@ -127,7 +142,7 @@ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: Pk
+ async function refreshAccessToken(refreshToken: string, issuer = ISSUER): Promise<TokenResponse> {
+   const response = await NetworkProxy.fetch(`${issuer}/oauth/token`, { purpose: "plugin", 
      method: "POST",
-     purpose: "plugin",
 -    headers: { "Content-Type": "application/x-www-form-urlencoded" },
 +    headers: CODEX_FORM_HEADERS,
      body: new URLSearchParams({
        grant_type: "refresh_token",
        refresh_token: refreshToken,
-@@ -410,6 +419,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
+@@ -341,6 +356,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
  
          return {
            apiKey: OAUTH_DUMMY_KEY,
++          // #169：SDK 默认头即 Codex TUI 指纹
++          // #169：与 chat.headers 同源，避免 loader/chat 指纹分裂
 +          headers: CODEX_HEADERS,
            async fetch(requestInput: RequestInfo | URL, init?: RequestInit) {
-             // Remove dummy API key authorization header
              if (init?.headers) {
-@@ -483,6 +493,10 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
-                 ? new URL(CODEX_API_ENDPOINT)
+               if (init.headers instanceof Headers) {
+@@ -418,6 +436,11 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+                 ? new URL(codexApiEndpoint)
                  : parsed
  
-+            if (url.href === CODEX_API_ENDPOINT) {
++            // #169：改写到 Codex API 后强制官方头（含可配置 codexApiEndpoint）
++            if (url.href === new URL(codexApiEndpoint).href) {
 +              Object.entries(CODEX_HEADERS).forEach(([key, value]) => headers.set(key, value))
 +            }
 +
-             return NetworkProxy.fetch(url, {
+             const requestInit = {
                ...init,
-               purpose: "provider",
-@@ -529,10 +543,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
-             const deviceResponse = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
+               body: init?.body,
+@@ -465,10 +488,8 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+           authorize: async () => {
+             const deviceResponse = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, { purpose: "plugin", 
                method: "POST",
-               purpose: "plugin",
 -              headers: {
 -                "Content-Type": "application/json",
 -                "User-Agent": `opencode/${InstallationVersion}`,
 -              },
++              // #169：deviceauth usercode 使用 Codex TUI 头
 +              headers: CODEX_HEADERS,
                body: JSON.stringify({ client_id: CLIENT_ID }),
              })
  
-@@ -554,10 +565,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
-                   const response = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
+@@ -489,10 +510,8 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+                 while (true) {
+                   const response = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/token`, { purpose: "plugin", 
                      method: "POST",
-                     purpose: "plugin",
 -                    headers: {
 -                      "Content-Type": "application/json",
 -                      "User-Agent": `opencode/${InstallationVersion}`,
 -                    },
++                    // #169：deviceauth token 轮询同样使用 Codex TUI 头
 +                    headers: CODEX_HEADERS,
                      body: JSON.stringify({
                        device_auth_id: deviceData.device_auth_id,
                        user_code: deviceData.user_code,
-@@ -573,7 +581,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
-                     const tokenResponse = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
+@@ -507,7 +526,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+ 
+                     const tokenResponse = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, { purpose: "plugin", 
                        method: "POST",
-                       purpose: "plugin",
 -                      headers: { "Content-Type": "application/x-www-form-urlencoded" },
 +                      headers: CODEX_FORM_HEADERS,
                        body: new URLSearchParams({
                          grant_type: "authorization_code",
                          code: data.authorization_code,
-@@ -616,8 +624,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
+@@ -550,8 +569,8 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
      },
      "chat.headers": async (input, output) => {
        if (input.model.providerID !== "openai") return
 -      output.headers.originator = "opencode"
 -      output.headers["User-Agent"] = `opencode/${InstallationVersion} (${os.platform()} ${os.release()}; ${os.arch()})`
++      // #169：openai oauth 会话对外伪装 Codex TUI，保留 tip session-id / title 头
 +      Object.assign(output.headers, CODEX_HEADERS)
-       output.headers.session_id = input.sessionID
-     },
-     "chat.params": async (input, output) => {
+       output.headers["session-id"] = input.sessionID
+       // Temporary fetch-layer hack: title generation currently shares the conversation
+       // session ID, so the OpenAI plugin marks it for HTTP fallback until transport
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
-index b32e5a8ff2e1fcfa2f5972a37f6b4400fac67a83..fafeb9c572a642209e6f70aefa81caeec07bb9fa 100644
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -1775,8 +1775,7 @@ export const layer = Layer.effect(
+@@ -1982,15 +1982,11 @@ for (const [id, provider] of configProviders) {
+           const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
+           if (combined) opts.signal = combined
  
+-          // #168：仅当当前 UA 为空或仍以配置 UA 为前缀时回写，避免误伤无关 UA
+-          // #168：SDK 可能追加后缀（ai-sdk/...），startsWith 仍允许刷新为配置值
++          // #169：配置 UA 无条件覆盖；AI SDK 常追加后缀导致 startsWith 失败
++          // #169：#168 前缀守卫在 openai 别名路径不可用，本 commit 收紧为 always-set
            if (configuredUserAgent) {
              const headers = new Headers(opts.headers)
 -            const currentUserAgent = headers.get("user-agent") ?? ""
--            if (!currentUserAgent || currentUserAgent.startsWith(configuredUserAgent)) headers.set("User-Agent", configuredUserAgent)
+-            // #168：空 UA 或配置前缀才覆盖；完全无关 UA 保持不动
+-            if (!currentUserAgent || currentUserAgent.startsWith(configuredUserAgent)) {
+-              headers.set("User-Agent", configuredUserAgent)
+-            }
 +            headers.set("User-Agent", configuredUserAgent)
              opts.headers = headers
            }
  
 diff --git a/packages/opencode/test/plugin/codex.test.ts b/packages/opencode/test/plugin/codex.test.ts
-index 74d28ac9dcc3140be07523ef2b4ec62111e37560..9d763deeb241637991ce2cc8dfc7f535f085defc 100644
 --- a/packages/opencode/test/plugin/codex.test.ts
 +++ b/packages/opencode/test/plugin/codex.test.ts
-@@ -1,5 +1,8 @@
+@@ -1,5 +1,7 @@
  import { describe, expect, test } from "bun:test"
  import {
 +  CODEX_HEADERS,
 +  CODEX_USER_AGENT,
-+  CodexAuthPlugin,
+   CodexAuthPlugin,
    parseJwtClaims,
    extractAccountIdFromClaims,
-   extractAccountId,
-@@ -13,6 +16,38 @@ function createTestJwt(payload: object): string {
+@@ -15,6 +17,43 @@ function createTestJwt(payload: object): string {
  }
  
  describe("plugin.codex", () => {
++  // #169：oauth loader 必须暴露 CODEX_HEADERS 给 SDK
++  // #169：loader 返回值是 SDK 默认头唯一来源
 +  test("uses Codex TUI User-Agent for OAuth model requests", async () => {
 +    const hooks = await CodexAuthPlugin({} as never)
-+    const options = await hooks.auth!.loader!(() =>
-+      Promise.resolve({
-+        type: "oauth" as const,
-+        refresh: "refresh-token",
-+        access: "access-token",
-+        expires: Date.now() + 60_000,
-+      }),
++    const options = await hooks.auth!.loader!(
++      () =>
++        Promise.resolve({
++          type: "oauth" as const,
++          refresh: "refresh-token",
++          access: "access-token",
++          expires: Date.now() + 60_000,
++        }),
 +      {} as never,
 +    )
 +    expect(options.headers).toEqual(CODEX_HEADERS)
 +  })
 +
++  // #169：chat.headers 对 openai provider 写入 Codex 指纹
++  // #169：非 openai provider 必须 no-op（由实现 if 守卫）
 +  test("sets Codex TUI User-Agent in chat headers", async () => {
 +    const hooks = await CodexAuthPlugin({} as never)
 +    const output = { headers: {} as Record<string, string> }
@@ -185,104 +200,32 @@ index 74d28ac9dcc3140be07523ef2b4ec62111e37560..9d763deeb241637991ce2cc8dfc7f535
 +    expect(output.headers["User-Agent"]).toBe(CODEX_USER_AGENT)
 +  })
 +
-   describe("parseJwtClaims", () => {
-     test("parses valid JWT with claims", () => {
-       const payload = { email: "test@example.com", chatgpt_account_id: "acc-123" }
+   test("escapes provider errors in callback HTML", () => {
+     const error = `</div><script>alert("xss" & 'more')</script>`
+     const html = renderOAuthError(error)
 diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
-index 130d31ae8c066945c93d743142122d52b3c109ef..aac12e9adc3430e2fe88eb398398ec3e754f51db 100644
 --- a/packages/opencode/test/session/llm.test.ts
 +++ b/packages/opencode/test/session/llm.test.ts
-@@ -414,6 +414,126 @@ describe("session.llm.stream", () => {
-     })
+@@ -828,6 +828,75 @@ describe("session.llm.stream", () => {
+     )
    }
  
-+  test("uses configured provider User-Agent for OpenAI alias providers", async () => {
-+    const server = state.server
-+    if (!server) throw new Error("Server not initialized")
-+
-+    const providerID = "daxiao-codex-openai"
-+    const request = waitRequest(
-+      "/responses",
-+      createEventResponse(
-+        [
-+          {
-+            type: "response.created",
-+            response: {
-+              id: "resp-1",
-+              created_at: Math.floor(Date.now() / 1000),
-+              model: "gpt-5.5",
-+              service_tier: null,
-+            },
-+          },
-+          {
-+            type: "response.output_text.delta",
-+            item_id: "item-1",
-+            delta: "Hello",
-+            logprobs: null,
-+          },
-+          {
-+            type: "response.completed",
-+            response: {
-+              incomplete_details: null,
-+              usage: {
-+                input_tokens: 1,
-+                input_tokens_details: null,
-+                output_tokens: 1,
-+                output_tokens_details: null,
-+              },
-+              service_tier: null,
-+            },
-+          },
-+        ],
-+        true,
-+      ),
-+    )
-+
-+    await using tmp = await tmpdir({
-+      init: async (dir) => {
-+        await Bun.write(
-+          path.join(dir, "opencode.json"),
-+          JSON.stringify({
-+            $schema: "https://opencode.ai/config.json",
-+            enabled_providers: [providerID],
-+            provider: {
-+              [providerID]: {
-+                extends: "openai",
-+                npm: "@ai-sdk/openai",
-+                name: "DaXiao Codex",
-+                options: {
-+                  apiKey: "test-key",
-+                  baseURL: `${server.url.origin}/v1`,
-+                  headers: {
-+                    "User-Agent": "codex_cli_rs/0.2333",
-+                  },
-+                },
-+                models: {
-+                  "gpt-5.5": {
-+                    name: "GPT-5.5",
-+                    limit: {
-+                      context: 400000,
-+                      input: 272000,
-+                      output: 128000,
-+                    },
-+                    modalities: {
-+                      input: ["text", "image"],
-+                      output: ["text"],
-+                    },
-+                  },
-+                },
-+              },
-+            },
-+          }),
++  // #169：openai 别名 provider 上配置 UA 必须无条件到达线上（验证 #169 去掉 startsWith 守卫）
++  it.instance(
++    "uses configured provider User-Agent for OpenAI alias providers",
++    () =>
++      Effect.gen(function* () {
++        const request = waitRequest(
++          "/responses",
++          // #169：createEventResponse 已返回 Response，勿再 new Response 包装
++          createEventResponse([{ type: "response.completed" }], true),
 +        )
-+      },
-+    })
 +
-+    await withTestInstance({
-+      directory: tmp.path,
-+      fn: async (ctx) => {
-+        const resolved = await getModel(ProviderID.make(providerID), ModelID.make("gpt-5.5"), ctx)
-+        const sessionID = SessionID.make("session-test-daxiao-codex-openai")
++        const resolved = yield* Provider.use.getModel(
++          ProviderV2.ID.make("openai-alias-ua"),
++          ModelV2.ID.make("gpt-5.4"),
++        )
++        const sessionID = SessionID.make("session-test-openai-alias-ua")
 +        const agent = {
 +          name: "test",
 +          mode: "primary",
@@ -290,32 +233,52 @@ index 130d31ae8c066945c93d743142122d52b3c109ef..aac12e9adc3430e2fe88eb398398ec3e
 +          permission: [{ permission: "*", pattern: "*", action: "allow" }],
 +        } satisfies Agent.Info
 +        const user = {
-+          id: MessageID.make("msg_user-daxiao-codex-openai"),
++          id: MessageID.make("msg_user-openai-alias-ua"),
 +          sessionID,
 +          role: "user",
 +          time: { created: Date.now() },
 +          agent: agent.name,
-+          model: { providerID: ProviderID.make(providerID), modelID: resolved.id },
-+        } satisfies MessageV2.User
++          model: { providerID: ProviderV2.ID.make("openai-alias-ua"), modelID: resolved.id },
++        } satisfies SessionV1.User
 +
-+        await drain(
-+          {
-+            user,
-+            sessionID,
-+            model: resolved,
-+            agent,
-+            system: ["You are a helpful assistant."],
-+            messages: [{ role: "user", content: "Hello" }],
-+            tools: {},
++        yield* drain({
++          user,
++          sessionID,
++          model: resolved,
++          agent,
++          system: ["You are a helpful assistant."],
++          messages: [{ role: "user", content: "Hello" }],
++          tools: {},
++        })
++
++        const capture = yield* Effect.promise(() => request)
++        // #169：别名路径常附加 ai-sdk 后缀；配置 UA 仍必须完整等于期望值
++        expect(capture.headers.get("user-agent")).toBe("codex_cli_rs/0.2333")
++      }),
++    {
++      config: () => ({
++        enabled_providers: ["openai-alias-ua"],
++        provider: {
++          "openai-alias-ua": {
++            npm: "@ai-sdk/openai",
++            name: "OpenAI Alias UA",
++            options: {
++              apiKey: "test-key",
++              baseURL: `${state.server!.url.origin}/v1`,
++              headers: { "User-Agent": "codex_cli_rs/0.2333" },
++            },
++            models: {
++              "gpt-5.4": {
++                name: "GPT-5.4",
++                limit: { context: 400000, input: 272000, output: 128000 },
++              },
++            },
 +          },
-+          ctx,
-+        )
++        },
++      }),
++    },
++  )
 +
-+        expect((await request).headers.get("user-agent")).toBe("codex_cli_rs/0.2333")
-+      },
-+    })
-+  })
-+
-   test("sends temperature, tokens, and reasoning options for openai-compatible models", async () => {
-     const server = state.server
-     if (!server) {
+   const vivgridFixture = { providerID: "vivgrid", modelID: "gemini-3.1-pro-preview" }
+   it.instance(
+     "sends temperature, tokens, and reasoning options for openai-compatible models",

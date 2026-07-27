@@ -1,97 +1,79 @@
 From 8627ea829ffd7b66c6bbeb2096f03e0b42a3f853 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Mon, 25 May 2026 03:21:59 +0800
-Subject: [PATCH] =?UTF-8?q?feat(precheck):=20=E5=A2=9E=E5=BC=BA=E6=96=87?=
- =?UTF-8?q?=E4=BB=B6=E5=88=A0=E9=99=A4=E5=92=8C=E7=A7=BB=E5=8A=A8=E5=91=BD?=
- =?UTF-8?q?=E4=BB=A4=E7=9A=84=E5=AE=A1=E6=9F=A5=E9=80=BB=E8=BE=91=EF=BC=8C?=
- =?UTF-8?q?=E6=B7=BB=E5=8A=A0=E5=AF=B9=20find=20=E5=92=8C=20Python=20?=
- =?UTF-8?q?=E5=88=A0=E9=99=A4=E6=93=8D=E4=BD=9C=E7=9A=84=E6=94=AF=E6=8C=81?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
+Subject: [PATCH] feat(precheck): 增强文件删除和移动命令的审查逻辑，添加对 find 和 Python 删除操作的支持
 
 diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
-index 43e787404572bffcc35d456cfeee855825b3fa44..0070e57a5ccf3c2702014e703898603b06d09817 100644
+index c4d0572a51..f72e53eefd 100644
 --- a/packages/opencode/src/permission/precheck.ts
 +++ b/packages/opencode/src/permission/precheck.ts
-@@ -69,7 +69,7 @@ const INTERPRETER_FLAGS = new Map([
- 
- // token 级文件删除/移动集合：与 raw 层的破坏性模式镜像，这样路径限定的
- // 二进制文件（如 /bin/rm）在 token 化成功后也无法绕过审查。
--const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item"])
-+const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item", "trash-put"])
- const FILE_MOVE_COMMANDS = new Set(["mv", "move", "ren", "rename", "move-item", "rename-item"])
- 
- // 系统级破坏性命令：执行即造成不可逆损害，直接判定 dangerous。
-@@ -194,8 +194,9 @@ const RE_D_REVERSE_SHELL = /\/dev\/tcp\/|\b(?:nc|ncat|netcat)\b[^|;]*(?:\s-e\s|\
- // 解码/解压载荷管道到解释器（内容不可见，必须阻止）
- const RE_D_DECODE_PIPE_INTERPRETER = /\b(?:base64|openssl|xxd|gunzip|bunzip2|unxz|zcat)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|dash|fish|ksh|python|python3|node|ruby|perl|pwsh|powershell)\b/i
- 
--// SSH authorized_keys 写入（后门持久化访问）
+@@ -73,7 +73,9 @@ const RE_D_PYTHON_REMOVE = /\bos\.(?:remove|unlink|rmdir)\(\s*["'](?:\/|~|\$HOME
+ const RE_D_NODE_REMOVE = /(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
+ const RE_D_SUBPROCESS_RM = /\bsubprocess\.(?:run|call|Popen)\([^)]*["']rm["'][^)]*["']-[^"']*[rf][^"']*["'][^)]*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/
+ const RE_D_REVERSE_SHELL = /\/dev\/tcp\/|\b(?:nc|ncat|netcat)\b[^|;]*(?:\s-e\s|\s--exec\s|\s--sh-exec\s)|\bsocat\b[^|;]*EXEC:|bash\s+(?:-i\s+)?[>&]+\s*\/dev\/tcp\/|\bmkfifo\b[^|;]*\b(?:sh|bash)\b|\bNew-Object\s+System\.Net\.Sockets\.TCPClient\b/i
 -const RE_D_AUTHORIZED_KEYS_WRITE = />>?\s*["']?(?:~|\$HOME)?[\\/]?\.ssh[\\/]authorized_keys/i
-+// SSH authorized_keys 写入（后门持久化访问）。除 ~/$HOME 外，也覆盖常见
-+// 绝对家目录；重定向会让结构解析降级，因此必须在 raw 层捕获。
-+const RE_D_AUTHORIZED_KEYS_WRITE = />>?\s*["']?(?:(?:~|\$HOME)[\\/]|\/(?:home\/[^\/|;]+|root|Users\/[^\/|;]+)[\\/]|[A-Za-z]:[\\/]Users[\\/][^\\/|;]+[\\/])?\.ssh[\\/]authorized_keys/i
- 
- // sudoers 直写（特权升级）
++// #222：SSH authorized_keys 写入（后门持久化访问）。除 ~/$HOME 外，也覆盖常见
++// #222：绝对家目录；重定向会让结构解析降级，因此必须在 raw 层捕获。
++const RE_D_AUTHORIZED_KEYS_WRITE = />>?\s*["']?(?:(?:~|\$HOME)[\\/]|\/(?:home\/[^\/|;]+|root|Users\/[^\/|;]+)[\\/]|[A-Za-z]:[\\/]Users[\\/][^\/|;]+[\\/])?\.ssh[\\/]authorized_keys/i
  const RE_D_SUDOERS_WRITE = /(?:>>?\s*["']?\/etc\/sudoers|\bvisudo\b)/i
-@@ -241,6 +242,12 @@ const RE_C_SENSITIVE_READ = new RegExp(
-   "i",
- )
- 
-+// find/Python 删除规则按可执行命令切出 token 后判断，避免第一个 safe `find`
-+// 看穿到后续 quoted search 文本，也保留 `"-delete"`/`'rm'` 这类 shell
-+// 引号移除后仍会执行的参数形态。
+ const RE_D_CHMOD_SETUID = /\bchmod\b[^|;]*\b[ug]\+s\b/i
+ const RE_D_IPTABLES_FLUSH = /\b(?:iptables|ip6tables)\b[^|;]*(?:\s-F\b|\s-X\b|\s--flush\b|\s--delete-chain\b)/i
+@@ -89,8 +91,13 @@ const RE_C_CRON_WRITE = />>?\s*["']?\/(?:etc\/cron|var\/spool\/cron)/i
+ const RE_C_SYSTEMD_WRITE = />>?\s*["']?(?:\/etc\/systemd|~\/\.config\/systemd)[\\/]/i
+ const RE_C_ECHO_PIPE_INTERPRETER = /\b(?:echo|printf)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|dash|fish|ksh|python|python3|node|ruby|perl|pwsh|powershell)\b/i
+ const RE_C_SENSITIVE_READ = new RegExp(String.raw`\b(?:cat|type|Get-Content|gc|Get-ChildItem|gci|ls|dir|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_LOCAL_ARGUMENT_PATTERN})`,"i",)
++// #222：find/Python 删除规则按可执行命令切出 token 后判断，避免第一个 safe `find`
++// #222：看穿到后续 quoted search 文本，也保留 `"-delete"`/`'rm'` 这类 shell
++// #222：引号移除后仍会执行的参数形态。
 +const RAW_FIND_OR_PYTHON_COMMAND_PATTERN = String.raw`${RAW_COMMAND_START}(${RAW_COMMAND_PATH}\b(?:find|python|python3|py)\b)`
 +const RE_C_PYTHON_FILE_REMOVE_CALL = /\bos\.(?:remove|unlink|rmdir)\(\s*["'][^"']+["']/
-+
- // ============================================================
- // 第七部分：禁止自动允许前缀
- // ============================================================
-@@ -442,19 +449,12 @@ function dangerousRaw(command: string): string | undefined {
-   // ---- 反弹 shell ----
+ // #217：token 级文件删除/移动集合——与 raw 层模式镜像，路径限定的二进制（如 /bin/rm）在 token 化成功后也无法绕过审查
+-const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item"])
++const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item", "trash-put"]) // #222：trash-put 是 trash-cli 的删除命令
+ const FILE_MOVE_COMMANDS = new Set(["mv", "move", "ren", "rename", "move-item", "rename-item"])
+ // #220：系统级破坏性命令——执行即不可逆，直接 dangerous
+ const SYSTEM_DESTRUCTIVE_COMMANDS = new Set([
+@@ -593,14 +600,10 @@ function dangerousRaw(command: string): string | undefined {
+   if (RE_D_SUBPROCESS_RM.test(normalized)) return "critical recursive delete through interpreter"
+   // #220：反弹 shell——含扩展变体（/dev/tcp、nc -e、socat、bash >&/dev/tcp、mkfifo、PowerShell TCPClient）
    if (RE_D_REVERSE_SHELL.test(normalized)) return "reverse shell pattern"
- 
--  // ---- 持久化后门 ----
--  // SSH authorized_keys 写入是最常见的持久化攻击向量
+-  // #220：持久化后门——SSH authorized_keys 写入是最常见的持久化攻击向量
 -  if (RE_D_AUTHORIZED_KEYS_WRITE.test(normalized)) return "SSH authorized_keys modification enables persistent backdoor"
-   // sudoers 修改授予特权升级
++  // #222：authorized_keys 和防火墙保护移除降级到 cautiousRaw——常见于用户明确的运维任务
    if (RE_D_SUDOERS_WRITE.test(normalized)) return "sudoers modification grants privilege escalation"
- 
-   // ---- 特权升级 ----
+   // #220：特权升级——setuid/setgid 位创建特权升级面
    if (RE_D_CHMOD_SETUID.test(normalized)) return "setuid/setgid bit creates privilege escalation surface"
- 
--  // ---- 防火墙/网络保护移除 ----
+-  // #220：防火墙/网络保护移除
 -  if (RE_D_IPTABLES_FLUSH.test(normalized)) return "firewall rule flush removes network protection"
 -  if (RE_D_UFW_DISABLE.test(normalized)) return "disabling firewall removes network protection"
--
-   // ---- 全进程终止 ----
+   // #220：全进程终止
    if (RE_D_KILL_ALL.test(normalized)) return "mass process kill"
  }
-@@ -485,6 +485,15 @@ function cautiousRaw(command: string): string | undefined {
-   // 导致 token 级敏感读取看不到真实路径。dangerousRaw 已先处理外传；这里仅把
-   // 本地敏感读取提升到 cautious。使用不含 .pem/.key 的窄版模式减少误报。
+@@ -621,6 +624,16 @@ function cautiousRaw(command: string): string | undefined {
+   if (RE_C_ECHO_PIPE_INTERPRETER.test(normalized)) return "visible payload piped to interpreter requires review"
+   // #220：本地敏感路径读取——使用不含 .pem/.key 的窄版模式减少误报
    if (RE_C_SENSITIVE_READ.test(normalized)) return "sensitive file read requires explicit approval"
-+  // authorized_keys 和防火墙保护移除风险很高，但常见于用户明确的运维任务；
-+  // 保持 cautious 让 reviewer 判断授权与上下文，根目录删除等不可逆破坏仍在
-+  // dangerousRaw 中 fail-closed。
++  // #222：authorized_keys 和防火墙保护移除风险很高，但常见于用户明确的运维任务；
++  // #222：保持 cautious 让 reviewer 判断授权与上下文，根目录删除等不可逆破坏仍在
++  // #222：dangerousRaw 中 fail-closed。
 +  if (RE_D_AUTHORIZED_KEYS_WRITE.test(normalized)) return "SSH authorized_keys modification requires explicit approval"
 +  if (RE_D_IPTABLES_FLUSH.test(normalized) || RE_D_UFW_DISABLE.test(normalized))
 +    return "firewall protection removal requires explicit approval"
++  // #222：find/Python 删除在 raw 层也需要捕获——重定向和命令替换会让 tokenizer 降级
 +  const rawTokens = rawFindOrPythonTokens(command)
 +  if (rawTokens.some(findDeletesFile)) return "find file deletion requires explicit approval"
 +  if (rawTokens.some(pythonRemovesFile)) return "Python file deletion requires explicit approval"
  }
  
- // ============================================================
-@@ -503,6 +512,41 @@ function rawExecutableMatch(command: string, pattern: string) {
-   return false
+ // #220：rawExecutableMatch——引号感知的文件删除/移动匹配，委托 isShellActive 判断可执行上下文
+@@ -640,6 +653,43 @@ function isShellActive(quote: string, command: string, index: number) {
+   return command.startsWith("$(", index) || command[index] === "`" || command[index] === "$"
  }
  
++// #222：rawFindOrPythonTokens——定位 find/Python 可执行命令起点，交给 tokenizer 判断删除语义
 +function rawFindOrPythonTokens(command: string) {
-+  // raw 正则只定位可执行命令起点，实际删除语义交给 tokenizer 判断；这样同一
-+  // 命令段内的 quoted data 不会被 lookahead 误当作 find/Python 删除参数。
++  // #222：raw 正则只定位可执行命令起点，实际删除语义交给 tokenizer 判断；这样同一
++  // #222：命令段内的 quoted data 不会被 lookahead 误当作 find/Python 删除参数。
 +  const quotes = quoteOffsets(command)
 +  return Array.from(command.matchAll(new RegExp(RAW_FIND_OR_PYTHON_COMMAND_PATTERN, "gi"))).flatMap((match) => {
 +    const matchIndex = match.index ?? 0
@@ -103,9 +85,10 @@ index 43e787404572bffcc35d456cfeee855825b3fa44..0070e57a5ccf3c2702014e703898603b
 +  })
 +}
 +
++// #222：rawExecutableSegmentEnd——确定 find/Python 命令段的右边界
 +function rawExecutableSegmentEnd(command: string, start: number, matchIndex: number, quotes: string[]) {
-+  // 对 $()/反引号中的命令，右边界是替换结束符；普通命令则到未引用的 shell
-+  // 分隔符为止。反斜杠转义的 `\;` 是 find -exec 的普通参数，不能截断。
++  // #222：对 $()/反引号中的命令，右边界是替换结束符；普通命令则到未引用的 shell
++  // #222：分隔符为止。反斜杠转义的 `\;` 是 find -exec 的普通参数，不能截断。
 +  const substitutionEnd = command.startsWith("$(", matchIndex) ? ")" : command[matchIndex] === "`" ? "`" : ""
 +  let escaped = false
 +  for (let i = start; i < command.length; i++) {
@@ -124,45 +107,51 @@ index 43e787404572bffcc35d456cfeee855825b3fa44..0070e57a5ccf3c2702014e703898603b
 +  return command.length
 +}
 +
- function isShellActive(quote: string, command: string, index: number) {
-   // 判断给定位置是否处于 shell 可执行上下文：
-   //   - 无引号：总是可执行
-@@ -839,6 +883,8 @@ function classifyTokens(tokens: string[]): Decision | undefined {
+ // #217：quoteOffsets——为命令中每个字符位置记录其所在的引号状态。
+ // #217：POSIX 单引号内反斜材为字面量文本，不应开启转义状态，避免错误地在格式错误单引号数据后隐藏可见删除
+ function quoteOffsets(command: string) {
+@@ -684,6 +734,9 @@ function classifyTokens(tokens: string[]): Decision | undefined {
    }
    if (FILE_DELETE_COMMANDS.has(cmd) && tokens.length > 1)
      return { level: "cautious", reason: "file deletion requires explicit approval" }
++  // #222：find -delete / -exec rm 也属于文件删除——argv 语义判断
 +  if (findDeletesFile(tokens))
 +    return { level: "cautious", reason: "find file deletion requires explicit approval" }
- 
-   // ---- 文件移动/重命名 ----
+   // #220: 文件移动/重命名
    if (FILE_MOVE_COMMANDS.has(cmd) && tokens.length > 1)
-@@ -881,16 +927,16 @@ function classifyTokens(tokens: string[]): Decision | undefined {
-   // ---- 防火墙与网络安全 ----
+     return { level: "cautious", reason: "file move or rename requires explicit approval" }
+@@ -714,17 +767,20 @@ function classifyTokens(tokens: string[]): Decision | undefined {
+     return { level: "cautious", reason: "user/group account management requires explicit approval" }
+   // #220: 防火墙与网络安全——flush/disable dangerous，修改 cautious
    if (cmd === "iptables" || cmd === "ip6tables") {
++    // #222：防火墙 flush 降级为 cautious——reviewer 可判断是否为合法运维操作
      if (tokens.some((item) => ["-F", "-X", "--flush", "--delete-chain"].includes(item)))
 -      return { level: "dangerous", reason: "firewall rule flush removes network protection" }
 +      return { level: "cautious", reason: "firewall protection removal requires explicit approval" }
      return { level: "cautious", reason: "firewall rule modification requires explicit approval" }
    }
    if (cmd === "ufw") {
++    // #222：ufw disable 降级为 cautious
      if (tokens[1] === "disable")
 -      return { level: "dangerous", reason: "disabling firewall removes network protection" }
 +      return { level: "cautious", reason: "firewall protection removal requires explicit approval" }
      return { level: "cautious", reason: "firewall configuration change requires explicit approval" }
    }
++  // #222：nft flush 降级为 cautious
    if (cmd === "nft" && tokens.some((item) => item === "flush"))
 -    return { level: "dangerous", reason: "nftables rule flush removes network protection" }
 +    return { level: "cautious", reason: "firewall protection removal requires explicit approval" }
- 
-   // ---- 服务管理 ----
+   // #220: 服务管理——mask dangerous，其他 cautious
    if (cmd === "systemctl") {
-@@ -981,6 +1027,24 @@ function classifyTokens(tokens: string[]): Decision | undefined {
+     if (tokens[1] === "mask")
+@@ -798,6 +854,25 @@ function classifyTokens(tokens: string[]): Decision | undefined {
      return { level: "cautious", reason: "remote file transfer requires explicit approval" }
  }
  
++// #222：findDeletesFile——find 的删除语义来自 argv，而不是源码字符串
 +function findDeletesFile(tokens: string[]) {
-+  // find 的删除语义来自 argv，而不是源码字符串：`"-delete"` 和 `'-exec' 'rm'`
-+  // 经 shell 去引号后仍是真实删除参数；quoted search 文本不会以 find 命令起头。
++  // #222：`"-delete"` 和 `'-exec' 'rm'` 经 shell 去引号后仍是真实删除参数；
++  // #222：quoted search 文本不会以 find 命令起头。
 +  if (normalizeCommandName(tokens[0]) !== "find") return false
 +  return tokens.some(
 +    (item, index) =>
@@ -171,77 +160,85 @@ index 43e787404572bffcc35d456cfeee855825b3fa44..0070e57a5ccf3c2702014e703898603b
 +  )
 +}
 +
++// #222：pythonRemovesFile——只处理显式 `python -c` 里的可见单文件删除
 +function pythonRemovesFile(tokens: string[]) {
-+  // 只处理显式 `python -c` 里的可见单文件删除；更宽的解释器行为仍保持
-+  // general，由用户/后续 sandbox 处理。
++  // #222：更宽的解释器行为仍保持 general，由用户/后续 sandbox 处理。
 +  if (!["python", "python3", "py"].includes(normalizeCommandName(tokens[0]))) return false
 +  return RE_C_PYTHON_FILE_REMOVE_CALL.test(tokens[tokens.findIndex((item) => item === "-c") + 1] ?? "")
 +}
 +
- // ---- Git 子命令专项分类器 ----
- // Git 操作复杂且有多个风险层级，需要细化的启发式判断。
+ // #220：classifyGit——Git 子命令专项分类器，替代 cautiousGitSubcommand
  function classifyGit(tokens: string[]): Decision | undefined {
-@@ -999,7 +1063,7 @@ function classifyGit(tokens: string[]): Decision | undefined {
-   // git add/commit/merge/rebase 等均视为 cautious，因为这些操作修改
-   // 仓库状态且通常难以自动恢复。
-   if (
--    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean", "mv"].includes(sub)
-+    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean", "mv", "rm"].includes(sub)
-   )
+   const sub = tokens[1]
+@@ -810,7 +885,8 @@ function classifyGit(tokens: string[]): Decision | undefined {
+   if (sub === "push" && tokens.some((item) => item === "--force" || item === "-f"))
+     return { level: "cautious", reason: "force push requires explicit approval" }
+   // #220: 通用状态变更命令
+-  if (["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean", "mv"].includes(sub))
++  // #222：git rm 也加入 cautious——删除跟踪文件，改变仓库状态
++  if (["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean", "mv", "rm"].includes(sub))
      return { level: "cautious", reason: "git state-changing command requires explicit approval" }
- 
+   if (sub === "branch" && !gitBranchSafe(tokens.slice(2)))
+     return { level: "cautious", reason: "git branch mutation requires explicit approval" }
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
-index 75f359109e63d181cc096941f630ca21d3bbb500..a01ae7eaace7fe87aab955c92d6dc57f6f6bd1fc 100644
+index 60e9f89dad..cf2d12c9f1 100644
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -17,6 +17,10 @@ describe("permission precheck bash classifier", () => {
+@@ -19,6 +19,11 @@ describe("permission precheck bash classifier", () => {
      expect(bash("rg \"(rm stale.tmp)\" src").level).toBe("safe")
      expect(bash("rg '$(rm stale.tmp)' src").level).toBe("safe")
      expect(bash("rg '`rm stale.tmp`' src").level).toBe("safe")
++    // #222：find/Python 删除模式出现在 rg 搜索文本中不应被误判为删除命令
 +    expect(bash("rg \"find . -name stale.tmp -delete\" src").level).toBe("safe")
 +    expect(bash("rg \"python -c import os; os.remove('stale.tmp')\" src").level).toBe("safe")
 +    expect(bash("find src -type f -print; rg \"find . -name stale.tmp -delete\" src").level).toBe("safe")
 +    expect(bash("python --version; rg \"python -c import os; os.remove('stale.tmp')\" src").level).toBe("safe")
    })
  
-   test("does not mark read commands safe when they can invoke external programs", () => {
-@@ -83,6 +87,15 @@ describe("permission precheck bash classifier", () => {
-     expect(bash("git status & /bin/rm stale.tmp")).toMatchObject({ level: "cautious" })
+   // #202：read-looking 但可执行外部程序的命令不能进入 safe——rg --pre/git --ext-diff 等
+@@ -95,6 +100,19 @@ describe("permission precheck bash classifier", () => {
      expect(bash("git status\nrm -f stale.tmp")).toMatchObject({ level: "cautious" })
+     // #217：POSIX 单引号内反斜杠为字面量——格式错误的单引号后的可见删除仍需 cautious
      expect(bash("echo 'x\\' ; rm stale.tmp")).toMatchObject({ level: "cautious" })
++    // #222：git rm 删除跟踪文件——与 add/commit 同级 cautious
 +    expect(bash("git rm stale.tmp")).toMatchObject({ level: "cautious" })
 +    expect(bash("git rm \"path with spaces/stale.tmp\"")).toMatchObject({ level: "cautious" })
++    // #222：find -delete / -exec rm 在 token 层和 raw 层都需要捕获
 +    expect(bash("find . -name stale.tmp -delete")).toMatchObject({ level: "cautious" })
 +    expect(bash("find . -name stale.tmp \"-delete\"")).toMatchObject({ level: "cautious" })
 +    expect(bash("find . -name stale.tmp -exec rm {} \\;")).toMatchObject({ level: "cautious" })
 +    expect(bash("find . -name stale.tmp -exec 'rm' {} \\;")).toMatchObject({ level: "cautious" })
++    // #222：python -c os.remove 在 token 层和 raw 层都需要捕获
 +    expect(bash("python -c 'import os; os.remove(\"stale.tmp\")'")).toMatchObject({ level: "cautious" })
 +    expect(bash(`python -c "import os; os.remove('stale.tmp')"`)).toMatchObject({ level: "cautious" })
++    // #222：trash-put 是 trash-cli 的删除命令
 +    expect(bash("trash-put stale.tmp")).toMatchObject({ level: "cautious" })
      expect(bash("git add src/index.ts")).toMatchObject({ level: "cautious" })
      expect(bash("git commit -m 'safe message with spaces'")).toMatchObject({ level: "cautious" })
      expect(bash("git merge feature/review")).toMatchObject({ level: "cautious" })
-@@ -270,10 +283,12 @@ describe("permission precheck bash classifier", () => {
-   // ============================================================
-   // 新增测试：持久化后门写入
-   // ============================================================
+@@ -286,10 +304,14 @@ describe("permission precheck bash classifier", () => {
+   })
+ 
+   // #220：持久化后门写入
 -  test("marks SSH authorized_keys writes dangerous as backdoor persistence", () => {
 -    expect(bash("echo 'ssh-rsa AAAA...' >> ~/.ssh/authorized_keys")).toMatchObject({ level: "dangerous" })
 -    expect(bash("echo 'ssh-rsa AAAA...' >> $HOME/.ssh/authorized_keys")).toMatchObject({ level: "dangerous" })
 -    expect(bash("cat id_rsa.pub > ~/.ssh/authorized_keys")).toMatchObject({ level: "dangerous" })
++  // #222：authorized_keys 写入降级为 cautious——reviewer 可判断是否为合法 SSH 密钥设置
 +  test("marks SSH authorized_keys writes cautious so reviewer can judge legitimate access setup", () => {
 +    expect(bash("echo 'ssh-rsa AAAA...' >> ~/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
 +    expect(bash("echo 'ssh-rsa AAAA...' >> $HOME/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
++    // #222：扩展正则覆盖绝对家目录路径
 +    expect(bash("echo 'ssh-rsa AAAA...' >> /home/alice/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
 +    expect(bash("echo 'ssh-rsa AAAA...' >> /root/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
 +    expect(bash("cat id_rsa.pub > ~/.ssh/authorized_keys")).toMatchObject({ level: "cautious" })
    })
  
    test("marks sudoers modification dangerous as privilege escalation", () => {
-@@ -334,13 +349,13 @@ describe("permission precheck bash classifier", () => {
-   // ============================================================
-   // 新增测试：防火墙规则
-   // ============================================================
+@@ -344,13 +366,14 @@ describe("permission precheck bash classifier", () => {
+   })
+ 
+   // #220：防火墙规则——flush/disable dangerous，修改 cautious
 -  test("marks firewall rule flush dangerous as network protection removal", () => {
 -    expect(bash("iptables -F")).toMatchObject({ level: "dangerous" })
 -    expect(bash("iptables -X")).toMatchObject({ level: "dangerous" })
@@ -249,6 +246,7 @@ index 75f359109e63d181cc096941f630ca21d3bbb500..a01ae7eaace7fe87aab955c92d6dc57f
 -    expect(bash("iptables --delete-chain")).toMatchObject({ level: "dangerous" })
 -    expect(bash("ufw disable")).toMatchObject({ level: "dangerous" })
 -    expect(bash("nft flush ruleset")).toMatchObject({ level: "dangerous" })
++  // #222：防火墙保护移除降级为 cautious——reviewer 可判断是否为合法运维操作
 +  test("marks firewall protection removal cautious for reviewer approval", () => {
 +    expect(bash("iptables -F")).toMatchObject({ level: "cautious" })
 +    expect(bash("iptables -X")).toMatchObject({ level: "cautious" })
@@ -259,8 +257,3 @@ index 75f359109e63d181cc096941f630ca21d3bbb500..a01ae7eaace7fe87aab955c92d6dc57f
    })
  
    test("marks non-flush firewall modifications cautious", () => {
-@@ -566,4 +581,3 @@ describe("permission precheck bash classifier", () => {
-     expect(bash("git revert HEAD")).toMatchObject({ level: "cautious" })
-   })
- })
--

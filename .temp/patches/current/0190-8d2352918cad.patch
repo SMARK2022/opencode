@@ -2,20 +2,17 @@ From 8d2352918cad9023fdefc40c422c4a5e2dba29ed Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Fri, 22 May 2026 12:15:34 +0800
 Subject: [PATCH] =?UTF-8?q?feat:=20=E6=96=B0=E5=A2=9E=20TDD=20=E5=AE=9E?=
- =?UTF-8?q?=E7=8E=B0=E6=8C=87=E5=8D=97=EF=BC=8C=E6=98=8E=E7=A1=AE=E4=BB=A3?=
- =?UTF-8?q?=E7=A0=81=E4=BF=AE=E6=94=B9=E5=92=8C=E6=B5=8B=E8=AF=95=E8=A6=81?=
- =?UTF-8?q?=E6=B1=82?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
 
 diff --git a/prompts.md b/prompts.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..72f83f676568710ad6cc4aaf4f6fa006e234c4c0
 --- /dev/null
 +++ b/prompts.md
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,40 @@
++<!-- #190：TDD 手术级实现与独立复核工作流提示词 -->
++<!-- #190：先测后码，禁止为绿而削弱断言 -->
++<!-- #190：最小修改面，拒绝无关重构与新依赖 -->
++<!-- #190：注释必须解释为什么与不变量 -->
++<!-- #190：收尾前独立 subagent 复核，不泄露实现方案 -->
 +请按当前仓库的原始代码风格进行一次手术级实现。目标是在不扩大修改面的前提下，完整实现本次需求，并确保后续重构不会破坏既有行为。
 +
 +工作方式必须遵循 TDD：
@@ -51,4 +48,3 @@ index 0000000000000000000000000000000000000000..72f83f676568710ad6cc4aaf4f6fa006
 +- 运行了哪些验证命令及结果；
 +- 仍然存在的风险或无法验证项；
 +- 为什么当前实现是最小且必要的修改。
-\ No newline at end of file

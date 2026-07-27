@@ -4,24 +4,22 @@ Date: Tue, 12 May 2026 18:23:16 +0800
 Subject: [PATCH] =?UTF-8?q?feat(powerShell):=20=E6=B7=BB=E5=8A=A0=E5=AF=B9?=
  =?UTF-8?q?PowerShell=20CLIXML=E8=BE=93=E5=87=BA=E7=9A=84=E8=A7=A3?=
  =?UTF-8?q?=E7=A0=81=E5=92=8C=E8=A7=84=E8=8C=83=E5=8C=96=E5=8A=9F=E8=83=BD?=
- =?UTF-8?q?=EF=BC=8C=E7=A1=AE=E4=BF=9D=E8=BE=93=E5=87=BA=E4=B8=BA=E7=BA=AF?=
- =?UTF-8?q?=E6=96=87=E6=9C=AC?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
 
 diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
-index 89349561596fc39638a7b60a3db4450901d3f883..d23ce54a082e624e9dbaf7f0f660e95a3efd469f 100644
+index 3eadf40afa..475a5a3e44 100644
 --- a/packages/opencode/src/tool/bash-compress.ts
 +++ b/packages/opencode/src/tool/bash-compress.ts
-@@ -1359,30 +1359,59 @@ export function shouldCompressOutput(text: string) {
-   return text.length >= DEFAULT_COMPRESSION_CONFIG.minInlineRunBytes
- }
- 
+@@ -1370,25 +1370,71 @@ export function shouldCompressOutput(text: string) {
+ // CLIXML 解码器：将 PowerShell 的 CLIXML XML 格式解码为纯文本
+ // CLIXML 是 PowerShell 的 XML 错误序列化格式，将终端彩色文本包装在 <Objs><S S="...">_xHHHH_</S></Objs> 中
+ // 返回解码后的多行文本（包装在 <high-entropy powershell-clixml> 标签中），非 CLIXML 输入返回 null
++// #129：CLIXML 标准头与 <Objs> 块匹配
 +const POWER_SHELL_CLIXML_HEADER_RE = /^\s*#<\s*CLIXML(?:\r?\n|$)/i
++// #129：匹配可选头 + 完整 <Objs>…</Objs>
 +const POWER_SHELL_CLIXML_BLOCK_RE = /(?:#<\s*CLIXML(?:\r?\n)?)?<Objs\b[\s\S]*?<\/Objs>/gi
++// #129：S 与 ToString 节点正文捕获
 +const POWER_SHELL_CLIXML_TEXT_NODE_RE = /<(S|ToString)\b([^>]*)>([\s\S]*?)<\/\1>/gi
++// #129：优先抽取有业务含义的 S 节点名，避免颜色/源等元数据淹没正文
 +const POWER_SHELL_CLIXML_MEANINGFUL_NAMES = new Set([
 +  "message",
 +  "tostring",
@@ -40,59 +38,68 @@ index 89349561596fc39638a7b60a3db4450901d3f883..d23ce54a082e624e9dbaf7f0f660e95a
 +  "categoryinfo",
 +])
 +
- /**
-  * Detects and decodes PowerShell CLIXML output back to plain text.
-- * CLIXML is PowerShell's XML-based error serialization format that wraps
-- * terminal-colored text into `<Objs><S S="...">_xHHHH_</S></Objs>`.
++/**
++ * Detects and decodes PowerShell CLIXML output back to plain text.
 + * CLIXML is PowerShell's XML-based error/info serialization format that usually
 + * starts with `#< CLIXML` and wraps visible text inside `<Objs>...<S ...>...`.
-  *
-  * Returns decoded multi-line text wrapped in `<high-entropy powershell-clixml>`
-  * if the input is recognized CLIXML, or null otherwise.
-  */
++ *
++ * Returns decoded multi-line text wrapped in `<high-entropy powershell-clixml>`
++ * if the input is recognized CLIXML, or null otherwise.
++ */
  function transformPowerShellClixml(text: string): string | null {
 -  const trimmed = text.trimStart()
+-  // CLIXML 前缀检查：必须以 <Objs 开头才是 CLIXML 格式
 -  if (!trimmed.startsWith("<Objs") && !/^[\s\S]*<Objs\b/.test(trimmed)) return null
++  // #129：按块替换纯 CLIXML，混合 stdout 块保持原样
++  // #129：整段扫描所有 CLIXML 块并替换
 +  let changed = false
 +  const next = text.replace(POWER_SHELL_CLIXML_BLOCK_RE, (block) => {
 +    const decoded = decodePowerShellClixmlBlock(block)
++    // #129：非纯块返回原文
 +    if (!decoded) return block
 +    changed = true
 +    return decoded
 +  })
  
+-  // 提取 <S S="...">text</S> 节点中的文本内容
 -  const decoded = /<S\s+S="[^"]*">([^<]*)<\/S>/gi
 -  const parts: string[] = []
 -  let match: RegExpExecArray | null
 -  while ((match = decoded.exec(text)) !== null) {
 -    parts.push(clixmlDecodeHexEscapes(match[1]))
 -  }
++  // #129：无变更返回 null 让压缩走默认路径
 +  return changed ? next : null
 +}
 +
++// #129：单块 CLIXML → high-entropy 包装纯文本
 +function decodePowerShellClixmlBlock(block: string): string | null {
 +  if (!isPurePowerShellClixmlBlock(block)) return null
 +
++  // #129：去掉可选 #< CLIXML 头
 +  const body = block.replace(POWER_SHELL_CLIXML_HEADER_RE, "")
 +
 +  const parts = extractPowerShellClixmlText(body)
++  // #129：无可见节点则不认作 CLIXML
    if (parts.length === 0) return null
  
 -  let plain = parts.join("")
+-  // 清除 ANSI 控制序列：CLIXML 解码后可能残留终端颜色码
 +  let plain = parts.join("\n")
++  // #129：清 ANSI 颜色残留
    plain = plain.replace(ANSI_GLOBAL_RE, "")
-   // Collapse any \r\n → \n left over from the decode
+-  // 统一换行符：将 \r\n 转换为 \n
 -  plain = plain.replace(/\r\n/g, "\n")
++  // #129：统一 \r\n / \r 为 \n
 +  plain = plain.replace(/\r\n?/g, "\n")
    plain = plain.trimEnd()
  
    if (!plain) return null
-@@ -1390,6 +1419,66 @@ function transformPowerShellClixml(text: string): string | null {
+@@ -1396,6 +1442,73 @@ function transformPowerShellClixml(text: string): string | null {
    return `<high-entropy powershell-clixml>${plain}</high-entropy>`
  }
  
-+// Only decode CLIXML blocks that are structurally pure XML-ish payloads.
-+// Mixed blocks with plain stdout inside them are left untouched so we never swallow real command output.
++// #129：仅解码结构纯净的 XML 块，避免吞掉夹杂的真实命令输出
 +function isPurePowerShellClixmlBlock(block: string) {
 +  const body = block.replace(POWER_SHELL_CLIXML_HEADER_RE, "")
 +  const lines = body.split(/\r?\n/)
@@ -101,20 +108,25 @@ index 89349561596fc39638a7b60a3db4450901d3f883..d23ce54a082e624e9dbaf7f0f660e95a
 +  for (const line of lines) {
 +    const trimmed = line.trim()
 +    if (!trimmed) continue
++    // #129：XML 起止标签视为合法
 +    if (trimmed.startsWith("<Objs") || trimmed.startsWith("</Objs>")) {
 +      sawXml = true
 +      continue
 +    }
++    // #129：其它以 < 开头的 XML 行也合法
 +    if (trimmed.startsWith("<")) {
 +      sawXml = true
 +      continue
 +    }
++    // #129：出现非 XML 纯文本则判定混合块
 +    return false
 +  }
 +
++  // #129：至少见过 XML 才算纯块
 +  return sawXml
 +}
 +
++// #129：抽取 S/ToString 可见正文
 +function extractPowerShellClixmlText(text: string) {
 +  const collect = (fallback: boolean) => {
 +    POWER_SHELL_CLIXML_TEXT_NODE_RE.lastIndex = 0
@@ -126,6 +138,7 @@ index 89349561596fc39638a7b60a3db4450901d3f883..d23ce54a082e624e9dbaf7f0f660e95a
 +      const attrs = match[2]
 +      const raw = match[3]
 +      const name = /(?:^|\s)(?:N|S)="([^"]+)"/i.exec(attrs)?.[1]?.toLowerCase()
++      // #129：非 fallback 时跳过无意义 S 节点名
 +      if (nodeType === "S" && !fallback && (!name || !POWER_SHELL_CLIXML_MEANINGFUL_NAMES.has(name))) continue
 +
 +      const decoded = clixmlDecodeHexEscapes(decodeXmlEntities(raw)).trimEnd()
@@ -136,11 +149,13 @@ index 89349561596fc39638a7b60a3db4450901d3f883..d23ce54a082e624e9dbaf7f0f660e95a
 +    return parts
 +  }
 +
++  // #129：先取有名节点，空再 fallback 全部 S/ToString
 +  const parts = collect(false)
 +  if (parts.length > 0) return parts
 +  return collect(true)
 +}
 +
++// #129：XML 实体还原，CLIXML 文本节点可能含 &lt; 等
 +function decodeXmlEntities(value: string) {
 +  return value.replace(/&(lt|gt|amp|quot|apos);/g, (_, entity) => {
 +    if (entity === "lt") return "<"
@@ -151,16 +166,16 @@ index 89349561596fc39638a7b60a3db4450901d3f883..d23ce54a082e624e9dbaf7f0f660e95a
 +  })
 +}
 +
- /** Decodes PowerShell _xHHHH_ hex escape sequences in CLIXML text nodes. */
+ // 十六进制转义解码：PowerShell CLIXML 使用 _xHHHH_ 格式编码 Unicode 字符
  function clixmlDecodeHexEscapes(value: string): string {
    return value.replace(/_x([0-9A-Fa-f]{4,})_/g, (_, hex) => {
-@@ -1903,6 +1992,22 @@ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options:
-   return parts.join("\n\n")
- }
- 
+@@ -1851,6 +1964,22 @@ function renderDiagnosticContexts(contexts: DiagnosticContext[], config: Compres
+  * 只返回当前可见输出中没有出现的高信号错误上下文。
+  * 优化：只在命令失败或有致命错误时才输出诊断信息，避免成功时的 token 浪费。
+  */
 +/**
-+ * Normalize PowerShell CLIXML back to plain text while preserving surrounding stdout.
-+ * Pure CLIXML blocks are decoded; mixed blocks are left untouched to avoid losing real output.
++ * #129：把纯 CLIXML 块还原为可见纯文本，保留周围 stdout。
++ * 混合块不碰，避免丢失真实命令输出。
 + */
 +export function normalizePowerShellOutput(text: string) {
 +  let changed = false
@@ -174,23 +189,49 @@ index 89349561596fc39638a7b60a3db4450901d3f883..d23ce54a082e624e9dbaf7f0f660e95a
 +  return changed ? next : text
 +}
 +
- /**
-  * 组装压缩相关的数据统计用于返回在最终命令的工具元数据内
-  */
+ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options: RenderAppendixOptions) {
+   const config = configOf(options.config)
+ 
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 1ca7bf5012719c329b62cc173054f8456b965b65..9ca50b05c17346c5871e3268ff295e6b1a97ab49 100644
+index 96775a61af..f37611786d 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -322,12 +322,24 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan)
+@@ -347,12 +347,23 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
+ 
+ // PowerShell UTF-8 包装：强制 Console I/O 为 UTF-8（无 BOM），并把退出码透传给外层
+ // 使用 UTF8Encoding($false) 避免 BOM；$OutputEncoding 与 Console 输出一致
++// #129：UTF-8 控制台 + 信息流并入 stdout（*>&1），减少 CLIXML 噪声
+ function psUtf8(command: string) {
+   return [
+     "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
+     "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+     "$OutputEncoding = [Console]::OutputEncoding",
++    // #129：关掉进度条噪声
++    "$ProgressPreference = 'SilentlyContinue'",
++    // #129：信息/警告/调试流继续输出
++    "$InformationPreference = 'Continue'",
++    "$WarningPreference = 'Continue'",
++    "$VerbosePreference = 'Continue'",
++    "$DebugPreference = 'Continue'",
++    "& {",
+     command,
++    // #129：*&1 合并全部流到 stdout（#130 将收窄 stderr）
++    "} *>&1",
+     "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
+   ].join(String.fromCharCode(10))
+ }
+@@ -377,13 +388,26 @@ function psEncoded(command: string) {
  
  function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
    if (process.platform === "win32" && Shell.ps(shell)) {
--    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", psEncoded(command)], {
+-    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", // 使用 -EncodedCommand 传递 UTF-16LE base64 编码，确保中文正确输出
+-    "-EncodedCommand", psEncoded(command)], {
 -      cwd,
 -      env,
 -      stdin: "ignore",
 -      detached: false,
 -    })
++    // #129：-OutputFormat Text 降低 CLIXML 序列化概率
 +    return ChildProcess.make(
 +      shell,
 +      [
@@ -199,6 +240,7 @@ index 1ca7bf5012719c329b62cc173054f8456b965b65..9ca50b05c17346c5871e3268ff295e6b
 +        "-NonInteractive",
 +        "-OutputFormat",
 +        "Text",
++        // 使用 -EncodedCommand 传递 UTF-16LE base64 编码，确保中文正确输出
 +        "-EncodedCommand",
 +        psEncoded(command),
 +      ],
@@ -212,45 +254,23 @@ index 1ca7bf5012719c329b62cc173054f8456b965b65..9ca50b05c17346c5871e3268ff295e6b
    }
  
    return ChildProcess.make(command, [], {
-@@ -339,14 +351,22 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
-   })
- }
- 
--// PowerShell expects -EncodedCommand input as UTF-16LE and this wrapper normalizes its pipe encoding to UTF-8.
-+// PowerShell expects -EncodedCommand input as UTF-16LE.
-+// The wrapper also forces UTF-8 console encoding and collapses the information stream into stdout so shell output stays plain text.
- function psEncoded(command: string) {
-   return Buffer.from(
-     [
-       "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
-       "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
-       "$OutputEncoding = [Console]::OutputEncoding",
-+      "$ProgressPreference = 'SilentlyContinue'",
-+      "$InformationPreference = 'Continue'",
-+      "$WarningPreference = 'Continue'",
-+      "$VerbosePreference = 'Continue'",
-+      "$DebugPreference = 'Continue'",
-+      "& {",
-       command,
-+      "} *>&1",
-       "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
-     ].join("\n"),
-     "utf16le",
 diff --git a/packages/opencode/test/tool/bash-compress.test.ts b/packages/opencode/test/tool/bash-compress.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9bfcab5412043852f23d3e42b1dbaf0d881f5764
+index 0000000000..25be38545e
 --- /dev/null
 +++ b/packages/opencode/test/tool/bash-compress.test.ts
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,93 @@
 +import { describe, expect, test } from "bun:test"
 +import { compressVisibleOutput, normalizePowerShellOutput } from "../../src/tool/bash-compress"
 +
++// #129：CLIXML 纯块解码与混合块保留
 +describe("tool.bash-compress", () => {
++  // #129：标准 #< CLIXML 头 + Message 节点
 +  test("decodes PowerShell CLIXML with the standard header", () => {
 +    const clixml = [
 +      "#< CLIXML",
 +      '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">',
-+      "  <Obj RefId=\"0\">",
++      '  <Obj RefId="0">',
 +      "    <MS>",
 +      '      <S N="Message">Saved b64_raw.txt (2664 chars)</S>',
 +      '      <S N="Source">Write-Host</S>',
@@ -268,11 +288,19 @@ index 0000000000000000000000000000000000000000..9bfcab5412043852f23d3e42b1dbaf0d
 +    expect(result.text).not.toContain("omitted")
 +  })
 +
++  // #129：ToString / Message 信息记录夹在 stdout 分隔线之间
 +  test("decodes inline PowerShell information records", () => {
 +    const clixml = [
 +      "============================================================",
++      "#< CLIXML",
++      '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">',
++      '<Obj S="information" RefId="1"><TNRef RefId="0" />',
++      "<ToString>  1/4  BUILD</ToString>",
++      '<Props><S N="Message">  1/4  BUILD</S>',
++      '<S N="Source">H:\\FRCheck\\scripts\\deploy.ps1</S>',
++      '<S N="ForegroundColor">Gray</S></Props></Obj>',
++      "</Objs>",
 +      "============================================================",
-+      '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="information" RefId="0"><ToString>============================================================</ToString><Props><Obj N="MessageData" RefId="1"><ToString>============================================================</ToString><Props><S N="Message">============================================================</S><B N="NoNewLine">false</B><S N="ForegroundColor">Gray</S><S N="BackgroundColor">Black</S></Props></Obj><S N="Source">H:\\FRCheck\\scripts\\deploy.ps1</S></Props></Obj><Obj S="information" RefId="3"><ToString>  1/4  BUILD</ToString><Props><Obj N="MessageData" RefId="4"><ToString>  1/4  BUILD</ToString><Props><S N="Message">  1/4  BUILD</S><B N="NoNewLine">false</B><S N="ForegroundColor">Gray</S><S N="BackgroundColor">Black</S></Props></Obj><S N="Source">H:\\FRCheck\\scripts\\deploy.ps1</S></Props></Obj><Obj S="information" RefId="6"><ToString>============================================================</ToString><Props><Obj N="MessageData" RefId="7"><ToString>============================================================</ToString><Props><S N="Message">============================================================</S><B N="NoNewLine">false</B><S N="ForegroundColor">Gray</S><S N="BackgroundColor">Black</S></Props></Obj><S N="Source">H:\\FRCheck\\scripts\\deploy.ps1</S></Props></Obj></Objs>',
 +    ].join("\n")
 +
 +    const result = compressVisibleOutput(clixml)
@@ -284,25 +312,30 @@ index 0000000000000000000000000000000000000000..9bfcab5412043852f23d3e42b1dbaf0d
 +    expect(result.text.match(/============================================================/g)?.length).toBeGreaterThanOrEqual(2)
 +  })
 +
++  // #129：未闭合/混合 <Objs> 内夹 stdout 时 pure 判定失败，不得吞路径
 +  test("preserves raw stdout interleaved inside an incomplete CLIXML block", () => {
 +    const mixed = [
-+      '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="information" RefId="0"><ToString>  3/4  TRANSFER</ToString><Props><S N="Message">  3/4  TRANSFER</S>',
++      // #129：故意不完整：开头有 <Objs 与 TRANSFER，中间夹真实 stdout，末尾才闭合
++      '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="information" RefId="0"><ToString>  3/4  TRANSFER</ToString><Props>',
 +      "============================================================",
 +      "  4/4  RUN",
 +      "============================================================",
 +      "  /opt/incons/cs-tomcat8-28083/webapps/webroot/WEB-INF/embed/finedb",
 +      "  /opt/incons/cs-tomcat8-28083/webapps/webroot/WEB-INF/embed/finedb/db.script",
 +      "  DONE",
-+      '</Props></Obj></Objs>',
++      "</Props></Obj></Objs>",
 +    ].join("\n")
 +
 +    const result = compressVisibleOutput(mixed)
 +
 +    expect(result.text).toContain("  /opt/incons/cs-tomcat8-28083/webapps/webroot/WEB-INF/embed/finedb")
 +    expect(result.text).toContain("  DONE")
++    // #129：若 pure 失效会把块收成仅 TRANSFER 的 high-entropy
 +    expect(result.text).not.toBe("<high-entropy powershell-clixml>  3/4  TRANSFER</high-entropy>")
++    expect(result.text).toContain("  4/4  RUN")
 +  })
 +
++  // #129：normalize 把纯 CLIXML 还原为可见文本（非 high-entropy 入参）
 +  test("normalizes plain PowerShell CLIXML to visible text", () => {
 +    const raw = `#< CLIXML
 +<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">
@@ -321,40 +354,45 @@ index 0000000000000000000000000000000000000000..9bfcab5412043852f23d3e42b1dbaf0d
 +  })
 +})
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index e64fd36c390a9455f2684ebff674a80ed0df80f3..4fad26920207c1ef006d20edbf5975d2cc9baa62 100644
+index 4a60311f27..c0716cdd5b 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1269,6 +1269,33 @@ describe("tool.shell abort", () => {
-       }),
-     )
+@@ -1329,3 +1329,38 @@ describe("tool.shell windows multi-encoding", () => {
    }
-+
-+  for (const item of ps) {
-+    test(
-+      `keeps PowerShell output as plain text [${item.label}]`,
-+      withShell(item, async () => {
-+        await WithInstance.provide({
-+          directory: projectRoot,
-+          fn: async () => {
-+            const bash = await initShell()
-+            const result = await Effect.runPromise(
-+              bash.execute(
-+                {
-+                  command: "Write-Host '1/4 BUILD'; Write-Information '2/4 EXPORT'; Write-Host '3/4 TRANSFER'; Write-Host '4/4 RUN'",
-+                  description: "Write staged plain text",
-+                },
-+                ctx,
-+              ),
-+            )
-+            expect(result.output).toContain("1/4 BUILD")
-+            expect(result.output).toContain("2/4 EXPORT")
-+            expect(result.output).toContain("3/4 TRANSFER")
-+            expect(result.output).toContain("4/4 RUN")
-+          },
-+        })
-+      }),
-+    )
-+  }
  })
  
- describe("tool.shell truncation", () => {
++// #129：PowerShell 输出保持纯文本（Information 流可见、无 CLIXML 噪声）
++describe("tool.shell windows plain text", () => {
++  if (process.platform !== "win32") return
++
++  for (const item of ps) {
++    it.live(
++      `keeps PowerShell output as plain text [${item.label}]`,
++      () =>
++        withShell(
++          item,
++          Effect.gen(function* () {
++            const tmp = yield* tmpdirScoped()
++            yield* runIn(
++              tmp,
++              Effect.gen(function* () {
++                const bash = yield* initBash()
++                // #129：Write-Host + Write-Information 应保持纯文本
++                const result = yield* bash.execute(
++                  {
++                    command: `Write-Host '1/4 BUILD'; Write-Information '2/4 EXPORT'; Write-Host '3/4 TRANSFER'`,
++                  },
++                  ctx,
++                )
++                expect(result.output).toContain("1/4 BUILD")
++                expect(result.output).toContain("2/4 EXPORT")
++                expect(result.output).toContain("3/4 TRANSFER")
++                expect(result.output).not.toMatch(/<Obj\b|<Objs\b|CLIXML/)
++              }),
++            )
++          }),
++        ),
++    )
++  }
++})
++

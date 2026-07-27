@@ -4,32 +4,30 @@ Date: Tue, 12 May 2026 23:14:15 +0800
 Subject: [PATCH] =?UTF-8?q?feat(shell):=20=E6=9B=B4=E6=96=B0PowerShell?=
  =?UTF-8?q?=E8=BE=93=E5=87=BA=E5=A4=84=E7=90=86=EF=BC=8C=E7=A1=AE=E4=BF=9D?=
  =?UTF-8?q?=E5=8E=9F=E7=94=9Fstderr=E5=AD=97=E8=8A=82=E4=BF=9D=E6=8C=81?=
- =?UTF-8?q?=E4=B8=8D=E5=8F=98=E5=B9=B6=E8=BF=9B=E8=A1=8C=E8=A7=84=E8=8C=83?=
- =?UTF-8?q?=E5=8C=96?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
 
 diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
-index d23ce54a082e624e9dbaf7f0f660e95a3efd469f..abd4ff098b110b36ef33f2e2e1f288cd35eae554 100644
+index 475a5a3e44..144f16e046 100644
 --- a/packages/opencode/src/tool/bash-compress.ts
 +++ b/packages/opencode/src/tool/bash-compress.ts
-@@ -1401,6 +1401,13 @@ function transformPowerShellClixml(text: string): string | null {
+@@ -1420,7 +1420,17 @@ function transformPowerShellClixml(text: string): string | null {
  }
  
+ // #129：单块 CLIXML → high-entropy 包装纯文本
++// #130：compress 仍走包装，normalize 走 plain
  function decodePowerShellClixmlBlock(block: string): string | null {
++  // #130：压缩路径包装；normalize 走 plain
 +  const plain = decodePowerShellClixmlPlain(block)
 +  if (!plain) return null
-+
 +  return `<high-entropy powershell-clixml>${plain}</high-entropy>`
 +}
 +
++// #130：纯文本 CLIXML 解码（无 high-entropy 包装）
++// #130：plain 返回值不含 high-entropy 标签
 +function decodePowerShellClixmlPlain(block: string): string | null {
    if (!isPurePowerShellClixmlBlock(block)) return null
  
-   const body = block.replace(POWER_SHELL_CLIXML_HEADER_RE, "")
-@@ -1416,7 +1423,7 @@ function decodePowerShellClixmlBlock(block: string): string | null {
+   // #129：去掉可选 #< CLIXML 头
+@@ -1439,9 +1449,10 @@ function decodePowerShellClixmlBlock(block: string): string | null {
  
    if (!plain) return null
  
@@ -37,169 +35,184 @@ index d23ce54a082e624e9dbaf7f0f660e95a3efd469f..abd4ff098b110b36ef33f2e2e1f288cd
 +  return plain
  }
  
- // Only decode CLIXML blocks that are structurally pure XML-ish payloads.
-@@ -1999,7 +2006,7 @@ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options:
++
+ // #129：仅解码结构纯净的 XML 块，避免吞掉夹杂的真实命令输出
+ function isPurePowerShellClixmlBlock(block: string) {
+   const body = block.replace(POWER_SHELL_CLIXML_HEADER_RE, "")
+@@ -1971,7 +1982,8 @@ function renderDiagnosticContexts(contexts: DiagnosticContext[], config: Compres
  export function normalizePowerShellOutput(text: string) {
    let changed = false
    const next = text.replace(POWER_SHELL_CLIXML_BLOCK_RE, (block) => {
 -    const decoded = decodePowerShellClixmlBlock(block)
++    // #130：normalize 输出纯文本，不套 high-entropy 标签
 +    const decoded = decodePowerShellClixmlPlain(block)
      if (!decoded) return block
      changed = true
      return decoded
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 9ca50b05c17346c5871e3268ff295e6b1a97ab49..c76c567f32997e8eb4282ca0f7aad12b55e1130c 100644
+index f37611786d..079ca5915a 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -28,6 +28,7 @@ import {
-   BashDiagnosticCollector,
-   bashCompressionMetadata,
-   compressVisibleOutput,
-+  normalizePowerShellOutput,
-   renderDiagnosticAppendix,
- } from "./bash-compress"
+@@ -14,7 +14,7 @@ import { Config } from "@/config/config"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { Shell } from "@opencode-ai/core/shell"
+ import { ShellID } from "./shell/id"
+-import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "./bash-compress"
++import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
  
-@@ -351,8 +352,8 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
-   })
+ import * as Truncate from "./truncate"
+ import { Plugin } from "@/plugin"
+@@ -363,7 +363,8 @@ function psUtf8(command: string) {
+     "& {",
+     command,
+     // #129：*&1 合并全部流到 stdout（#130 将收窄 stderr）
+-    "} *>&1",
++    // #130：stderr 保持原生，避免 PS 先按错误代码页解码
++    "} 3>&1 4>&1 5>&1 6>&1",
+     "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
+   ].join(String.fromCharCode(10))
  }
- 
--// PowerShell expects -EncodedCommand input as UTF-16LE.
--// The wrapper also forces UTF-8 console encoding and collapses the information stream into stdout so shell output stays plain text.
-+// PowerShell expects -EncodedCommand input as UTF-16LE. Keep native stderr as raw bytes:
-+// redirecting stream 2 here makes PowerShell decode legacy tools (javac/GBK) before our decoder can.
- function psEncoded(command: string) {
-   return Buffer.from(
-     [
-@@ -366,7 +367,7 @@ function psEncoded(command: string) {
-       "$DebugPreference = 'Continue'",
-       "& {",
-       command,
--      "} *>&1",
-+      "} 3>&1 4>&1 5>&1 6>&1",
-       "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
-     ].join("\n"),
-     "utf16le",
-@@ -700,18 +701,19 @@ export const ShellTool = Tool.define(
+@@ -801,13 +802,19 @@ export const ShellTool = Tool.define(
        }
        if (aborted) meta.push("User aborted the command")
        const raw = list.map((item) => item.text).join("")
-+      const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
++      // #130：Windows PowerShell 先 normalize CLIXML 为纯文本
++      // #130：仅 Win+PS 做 CLIXML plain normalize
++      const normalized =
++        process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
+       // 压缩可见输出：启用时移除冗余行，保留关键诊断信息
+-      const compressed = compressVisibleOutput(raw, { enabled: input.compressOutput })
++      // #130：压缩输入为 normalize 后文本
++      const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput })
        diag.end()
-       const diagnosticSnapshot = diag.snapshot()
- 
-       // Compress output if enabled
-       const compressed = input.compressOutput
--        ? compressVisibleOutput(raw)
--        : { text: raw, stats: undefined as ReturnType<typeof compressVisibleOutput>["stats"] | undefined }
-+        ? compressVisibleOutput(normalized)
-+        : { text: normalized, stats: undefined as ReturnType<typeof compressVisibleOutput>["stats"] | undefined }
- 
--      const end = tail(input.compressOutput ? compressed.text : raw, limits.maxLines, limits.maxBytes)
-+      const end = tail(input.compressOutput ? compressed.text : normalized, limits.maxLines, limits.maxBytes)
+       const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
        if (end.cut) cut = true
-       if (!file && end.cut) {
+       if (!file && (end.cut || compressed.stats.applied)) {
 -        file = yield* trunc.write(raw)
++        // #130：落盘使用 normalize 后的全文
 +        file = yield* trunc.write(normalized)
        }
  
        let output = end.text
-diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index 4fad26920207c1ef006d20edbf5975d2cc9baa62..49ed6df110df458808bda5adc7227acf08e1eea4 100644
---- a/packages/opencode/test/tool/shell.test.ts
-+++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1270,6 +1270,32 @@ describe("tool.shell abort", () => {
-     )
-   }
- 
-+  for (const item of ps) {
-+    test(
-+      `preserves native CP936 stderr bytes from PowerShell wrapper [${item.label}]`,
-+      withShell(item, async () => {
-+        await WithInstance.provide({
-+          directory: projectRoot,
-+          fn: async () => {
-+            const bash = await initShell()
-+            const result = await Effect.runPromise(
-+              bash.execute(
-+                {
-+                  command:
-+                    "$bytes = [byte[]](0xBE,0xAF,0xB8,0xE6,0x3A,0x20,0x44,0x4F,0x4D,0xCA,0xC7,0xC4,0xDA,0xB2,0xBF,0xD7,0xA8,0xD3,0xC3,0x20,0x41,0x50,0x49,0x0A); [Console]::OpenStandardError().Write($bytes, 0, $bytes.Length)",
-+                  description: "Write CP936 stderr bytes",
-+                },
-+                ctx,
-+              ),
-+            )
-+            expect(result.output).toContain("警告: DOM是内部专用 API")
-+            expect(result.output).not.toContain("����")
-+          },
-+        })
-+      }),
-+    )
-+  }
-+
-   for (const item of ps) {
-     test(
-       `keeps PowerShell output as plain text [${item.label}]`,
-@@ -1281,7 +1307,8 @@ describe("tool.shell abort", () => {
-             const result = await Effect.runPromise(
-               bash.execute(
-                 {
--                  command: "Write-Host '1/4 BUILD'; Write-Information '2/4 EXPORT'; Write-Host '3/4 TRANSFER'; Write-Host '4/4 RUN'",
-+                  command:
-+                    "Write-Progress -Activity '部署' -Status '传输中' -PercentComplete 50; Write-Host '1/4 BUILD'; Write-Information '2/4 EXPORT'; Write-Host '3/4 TRANSFER'; Write-Host '4/4 RUN'",
-                   description: "Write staged plain text",
-                 },
-                 ctx,
-@@ -1291,6 +1318,9 @@ describe("tool.shell abort", () => {
-             expect(result.output).toContain("2/4 EXPORT")
-             expect(result.output).toContain("3/4 TRANSFER")
-             expect(result.output).toContain("4/4 RUN")
-+            expect(result.output).not.toMatch(/<Obj\b|<Objs\b|CLIXML/)
-+            expect(result.output).not.toContain("部署")
-+            expect(result.output).not.toContain("传输中")
-           },
-         })
-       }),
 diff --git a/packages/opencode/test/util/text-decoding.test.ts b/packages/opencode/test/util/text-decoding.test.ts
-index ac5f43a2790c009941ee4c2df573e17451453e4c..56ba2156da94bdd92e08b81ff792295e452ffacf 100644
+index de3bc73e94..ba4cc07cf7 100644
 --- a/packages/opencode/test/util/text-decoding.test.ts
 +++ b/packages/opencode/test/util/text-decoding.test.ts
-@@ -44,6 +44,38 @@ describe("text-decoding", () => {
-     expect(decodeText(input).text).toBe("中文")
+@@ -130,4 +130,15 @@ describe("text-decoding", () => {
+     expect(decoder.encoding()).not.toBe("gb18030")
    })
  
++  // #130：javac 风格 CP936 诊断字节应落 gb18030
 +  test("decodes javac-style CP936 diagnostics", () => {
-+    const input = bytes([
-+      ...utf8("H:\\FRCheck\\src\\verifycmd\\VerifyCommand.java:3: "),
-+      0xbe,
-+      0xaf,
-+      0xb8,
-+      0xe6,
-+      0x3a,
-+      0x20,
-+      0x44,
-+      0x4f,
-+      0x4d,
-+      0xca,
-+      0xc7,
-+      0xc4,
-+      0xda,
-+      0xb2,
-+      0xbf,
-+      0xd7,
-+      0xa8,
-+      0xd3,
-+      0xc3,
-+      0x20,
-+      0x41,
-+      0x50,
-+      0x49,
-+      0x0a,
++    const input = new Uint8Array([
++      ...new TextEncoder().encode("H:\\FRCheck\\src\\verifycmd\\VerifyCommand.java:3: "),
++      0xbe, 0xaf, 0xb8, 0xe6, 0x3a, 0x20,
++      0x44, 0x4f, 0x4d, 0xca, 0xc7, 0xc4, 0xda, 0xb2, 0xbf, 0xd7, 0xa8, 0xd3, 0xc3, 0x20,
++      0x41, 0x50, 0x49, 0x0a,
 +    ])
-+
 +    expect(decodeText(input).text).toContain("警告: DOM是内部专用 API")
 +  })
 +
-   test("honors explicit utf-8 without legacy fallback", () => {
-     const input = bytes([0xd6, 0xd0, 0xce, 0xc4])
-     expect(decodeText(input, { encoding: "utf-8" }).text).toContain("�")
+ })
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index c0716cdd5b..61510aa362 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -1364,3 +1364,97 @@ describe("tool.shell windows plain text", () => {
+   }
+ })
+ 
++
++// #130：javac CP936 诊断经 shell 字节路径应可读
++describe("tool.shell CP936 diagnostics", () => {
++  it.live(
++    "decodes javac-style CP936 bytes through shell stdout",
++    () =>
++      withShell(
++        { label: "default", shell: process.env.SHELL || "bash" },
++        Effect.gen(function* () {
++          const tmp = yield* tmpdirScoped()
++          yield* runIn(
++            tmp,
++            Effect.gen(function* () {
++              const bash = yield* initBash()
++              const result = yield* bash.execute(
++                {
++                  command: `python3 -c 'import sys; sys.stdout.buffer.write(bytes([0x48,0x3a,0x5c,0x46,0x52,0x43,0x68,0x65,0x63,0x6b,0x5c,0x73,0x72,0x63,0x5c,0x76,0x65,0x72,0x69,0x66,0x79,0x63,0x6d,0x64,0x5c,0x56,0x65,0x72,0x69,0x66,0x79,0x43,0x6f,0x6d,0x6d,0x61,0x6e,0x64,0x2e,0x6a,0x61,0x76,0x61,0x3a,0x33,0x3a,0x20,0xbe,0xaf,0xb8,0xe6,0x3a,0x20,0x44,0x4f,0x4d,0xca,0xc7,0xc4,0xda,0xb2,0xbf,0xd7,0xa8,0xd3,0xc3,0x20,0x41,0x50,0x49,0x0a]))'`,
++                },
++                ctx,
++              )
++              expect(result.output).toContain("警告: DOM是内部专用 API")
++            }),
++          )
++        }),
++      ),
++  )
++})
++
++// #130：保留 PS stderr 原生字节；Progress 不污染纯文本路径
++describe("tool.shell windows PS stderr and progress", () => {
++  if (process.platform !== "win32") return
++
++  for (const item of ps) {
++    it.live(
++      // #130：PS stderr 必须仍是原始代码页字节
++      `preserves native CP936 stderr bytes from PowerShell wrapper [${item.label}]`,
++      () =>
++        withShell(
++          item,
++          Effect.gen(function* () {
++            const tmp = yield* tmpdirScoped()
++            yield* runIn(
++              tmp,
++              Effect.gen(function* () {
++                const bash = yield* initBash()
++                // #130：经 OpenStandardError 写 CP936，验证 3-6>&1 不预解码
++                const result = yield* bash.execute(
++                  {
++                    command: `$bytes = [byte[]](0xBE,0xAF,0xB8,0xE6,0x3A,0x20,0x44,0x4F,0x4D,0xCA,0xC7,0xC4,0xDA,0xB2,0xBF,0xD7,0xA8,0xD3,0xC3,0x20,0x41,0x50,0x49,0x0A); [Console]::OpenStandardError().Write($bytes,0,$bytes.Length)`,
++                  },
++                  ctx,
++                )
++                expect(result.output).toContain("警告: DOM是内部专用 API")
++                expect(result.output).not.toContain("\uFFFD")
++              }),
++            )
++          }),
++        ),
++    )
++  }
++
++  for (const item of ps) {
++    it.live(
++      // #130：Progress 不得泄漏到主输出
++      `keeps PowerShell output as plain text with Progress silenced [${item.label}]`,
++      () =>
++        withShell(
++          item,
++          Effect.gen(function* () {
++            const tmp = yield* tmpdirScoped()
++            yield* runIn(
++              tmp,
++              Effect.gen(function* () {
++                const bash = yield* initBash()
++                // #130：Progress 静默 + Information 纯文本
++                const result = yield* bash.execute(
++                  {
++                    command: `Write-Progress -Activity '部署' -Status '传输中' -PercentComplete 50; Write-Host '1/4 BUILD'; Write-Information '2/4 EXPORT'; Write-Host '3/4 TRANSFER'`,
++                  },
++                  ctx,
++                )
++                expect(result.output).toContain("1/4 BUILD")
++                expect(result.output).toContain("2/4 EXPORT")
++                expect(result.output).toContain("3/4 TRANSFER")
++                expect(result.output).not.toMatch(/<Obj\b|<Objs\b|CLIXML/)
++                expect(result.output).not.toContain("部署")
++                expect(result.output).not.toContain("传输中")
++              }),
++            )
++          }),
++        ),
++    )
++  }
++})

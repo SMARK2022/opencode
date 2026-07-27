@@ -14,680 +14,38 @@ Content-Transfer-Encoding: 8bit
 - Refactor test utilities to support user messages and improve readability.
 - Ensure that the permission reviewer prompt correctly displays the rationale and decision before the decision tool is invoked.
 
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 264399990fb4f4acd1d1c86fdfcbb4b2e67ef15a..eec38cbac533d321396f316fac681eea2c80b4b9 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -281,7 +281,11 @@ export function Session() {
-   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
-   const local = useLocal()
-   const userMessageAgentColors = createMemo(() => {
--    return new Map(messages().filter((m) => m.role === "user").map((m) => [m.id, local.agent.color(m.agent)]))
-+    return new Map(
-+      messages()
-+        .filter((m) => m.role === "user")
-+        .map((m) => [m.id, local.agent.color(m.agent)]),
-+    )
-   })
-   function drawSessionScrollbar(this: unknown, buffer: OptimizedBuffer) {
-     const s = scroll
-@@ -1886,6 +1890,9 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
-         <Match when={props.part.tool === "question"}>
-           <Question {...toolprops} />
-         </Match>
-+        <Match when={props.part.tool === "permission_review_decision"}>
-+          <PermissionReviewDecision {...toolprops} />
-+        </Match>
-         <Match when={props.part.tool === "skill"}>
-           <Skill {...toolprops} />
-         </Match>
-@@ -1991,21 +1998,88 @@ function GenericTool(props: ToolProps<any>) {
-         </InlineTool>
-       }
-     >
--        <BlockTool
--          title={`# ${props.tool} ${input(props.input)}`}
--          part={props.part}
--          maxLines={10}
--          threshold={20}
--          totalLines={output().split("\n").length}
--          totalChars={output().length}
--          preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
--        >
-+      <BlockTool
-+        title={`# ${props.tool} ${input(props.input)}`}
-+        part={props.part}
-+        maxLines={10}
-+        threshold={20}
-+        totalLines={output().split("\n").length}
-+        totalChars={output().length}
-+        preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
-+      >
-         <text fg={theme.text}>{output()}</text>
--        </BlockTool>
-+      </BlockTool>
-     </Show>
-   )
- }
- 
-+type AutoReviewMetadata = {
-+  reviewID: string
-+  sessionID?: string
-+  status?: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user"
-+  precheck?: { level: string; reason: string }
-+  result?: { risk_level: string; user_authorization: string; rationale: string }
-+}
-+
-+function autoReviewMetadata(metadata: Partial<Tool.InferMetadata<any>>): AutoReviewMetadata | undefined {
-+  const value = (metadata as Record<string, unknown>).autoReview
-+  if (!value || typeof value !== "object" || Array.isArray(value)) return
-+  const review = value as Record<string, unknown>
-+  if (typeof review.reviewID !== "string") return
-+  return review as AutoReviewMetadata
-+}
-+
-+function autoReviewLabel(review: AutoReviewMetadata) {
-+  const agent = "@permission-reviewer"
-+  // Keep the main shell card to the agreed two-line contract: command first,
-+  // then one compact review status line. The three glyphs are stable UI states:
-+  // ◌ means the hidden reviewer agent is running, ✓ means the reviewer allowed
-+  // execution, and ! covers all non-allow terminal outcomes.
-+  switch (review.status) {
-+    case "allowed":
-+      return `✓ auto review · allowed · auth ${review.result?.user_authorization ?? "unknown"} · ${agent}`
-+    case "denied":
-+      return `! auto review · denied · ${review.result?.risk_level ?? "unknown"} risk · auth ${review.result?.user_authorization ?? "unknown"} · ${agent}`
-+    case "timed_out":
-+      return `! auto review · timed out · failed closed · ${agent}`
-+    case "failed":
-+      return `! auto review · failed · failed closed · ${agent}`
-+    case "fallback_user":
-+      return `! auto review · unavailable · asking user · ${agent}`
-+    default:
-+      return `◌ auto review · ${review.precheck?.level ?? "reviewing"} · ${agent}`
-+  }
-+}
-+
-+function autoReviewColor(review: AutoReviewMetadata, theme: ReturnType<typeof useTheme>["theme"]) {
-+  if (review.status === "allowed") return theme.success
-+  if (review.status && review.status !== "reviewing") return theme.warning
-+  return theme.info
-+}
-+
-+function AutoReviewLine(props: { review: AutoReviewMetadata }) {
-+  const { theme } = useTheme()
-+  const { navigate } = useRoute()
-+  const renderer = useRenderer()
-+  const [hover, setHover] = createSignal(false)
-+  const clickable = createMemo(() => Boolean(props.review.sessionID))
-+  return (
-+    <box
-+      onMouseOver={() => clickable() && setHover(true)}
-+      onMouseOut={() => setHover(false)}
-+      onMouseUp={() => {
-+        if (!props.review.sessionID) return
-+        if (renderer.getSelection()?.getSelectedText()) return
-+        navigate({ type: "session", sessionID: props.review.sessionID })
-+      }}
-+    >
-+      <text fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none">
-+        {autoReviewLabel(props.review)}
-+      </text>
-+    </box>
-+  )
-+}
-+
- function InlineTool(props: {
-   icon: string
-   iconColor?: RGBA
-@@ -2085,7 +2159,12 @@ function InlineTool(props: {
-           <Spinner color={fg()} children={props.children} />
-         </Match>
-         <Match when={true}>
--          <text paddingLeft={3} fg={fg()} wrapMode="none" attributes={denied() ? TextAttributes.STRIKETHROUGH : undefined}>
-+          <text
-+            paddingLeft={3}
-+            fg={fg()}
-+            wrapMode="none"
-+            attributes={denied() ? TextAttributes.STRIKETHROUGH : undefined}
-+          >
-             <Show fallback={<>~ {props.pending}</>} when={props.complete}>
-               <span style={{ fg: props.iconColor }}>{props.icon}</span> {props.children}
-             </Show>
-@@ -2207,8 +2286,10 @@ function BlockTool(props: {
- 
- function Shell(props: ToolProps<typeof ShellTool>) {
-   const { theme } = useTheme()
-+  const { navigate } = useRoute()
-   const pathFormatter = usePathFormatter()
-   const isRunning = createMemo(() => props.part.state.status === "running")
-+  const autoReview = createMemo(() => autoReviewMetadata(props.metadata))
-   const [showContextOutput, setShowContextOutput] = createSignal(false)
-   const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
-   const output = createMemo(() => {
-@@ -2216,8 +2297,13 @@ function Shell(props: ToolProps<typeof ShellTool>) {
-     return stripAnsi(text?.trim() ?? "")
-   })
-   const shellPreviewText = createMemo(() => {
--    if (!output()) return `$ ${props.input.command ?? ""}`
--    return [`$ ${props.input.command ?? ""}`, "", output()].join("\n")
-+    const review = autoReview()
-+    const header = [`$ ${props.input.command ?? ""}`, review ? autoReviewLabel(review) : undefined].filter(Boolean)
-+    // Collapsed shell previews must keep the same two-line review contract as
-+    // the expanded body; otherwise long outputs hide the allow/deny reviewer
-+    // result until the user expands the command card.
-+    if (!output()) return header.join("\n")
-+    return [...header, "", output()].join("\n")
-   })
- 
-   const workdirDisplay = createMemo(() => {
-@@ -2255,8 +2341,9 @@ function Shell(props: ToolProps<typeof ShellTool>) {
-           contextLabel="returned to model"
-           preview={<text fg={theme.text}>{previewText(shellPreviewText(), 10)}</text>}
-         >
--          <box gap={1}>
-+          <box>
-             <text fg={theme.text}>$ {props.input.command}</text>
-+            <Show when={autoReview()}>{(review) => <AutoReviewLine review={review()} />}</Show>
-             <Show when={showContextOutput()}>
-               <text fg={theme.info}>Model context output</text>
-             </Show>
-@@ -2267,14 +2354,59 @@ function Shell(props: ToolProps<typeof ShellTool>) {
-         </BlockTool>
-       </Match>
-       <Match when={true}>
--        <InlineTool icon="$" pending="Writing command..." complete={props.input.command} part={props.part}>
--          {props.input.command}
-+        <InlineTool
-+          icon="$"
-+          pending="Writing command..."
-+          complete={props.input.command}
-+          part={props.part}
-+          onClick={() => {
-+            const sessionID = autoReview()?.sessionID
-+            if (sessionID) navigate({ type: "session", sessionID })
-+          }}
-+        >
-+          {[props.input.command, autoReview() ? `  ${autoReviewLabel(autoReview()!)}` : undefined]
-+            .filter(Boolean)
-+            .join("\n")}
-         </InlineTool>
-       </Match>
-     </Switch>
-   )
- }
- 
-+function PermissionReviewDecision(props: ToolProps<any>) {
-+  const { theme } = useTheme()
-+  const decision = createMemo(() => ({ ...props.input, ...props.metadata }) as Record<string, unknown>)
-+  const outcome = createMemo(() => (decision().outcome === "allow" ? "allowed" : "denied"))
-+  const risk = createMemo(() => String(decision().risk_level ?? "unknown"))
-+  const auth = createMemo(() => String(decision().user_authorization ?? "unknown"))
-+  const rationale = createMemo(() => (typeof decision().rationale === "string" ? decision().rationale : ""))
-+  return (
-+    <BlockTool title={`Permission review decision`} part={props.part} maxLines={0}>
-+      <box flexDirection="column" gap={1}>
-+        {/* Keep the structured decision evidence in the tool cell: the assistant text may debate alternatives, but this metadata is the audited final reviewer output. */}
-+        <box gap={1}>
-+          <text fg={theme.textMuted}>outcome</text>
-+          <text fg={theme.text}>{outcome()}</text>
-+        </box>
-+        <box gap={1}>
-+          <text fg={theme.textMuted}>risk</text>
-+          <text fg={theme.text}>{risk()}</text>
-+        </box>
-+        <box gap={1}>
-+          <text fg={theme.textMuted}>auth</text>
-+          <text fg={theme.text}>{auth()}</text>
-+        </box>
-+        <Show when={rationale()}>
-+          <box flexDirection="column">
-+            <text fg={theme.textMuted}>rationale</text>
-+            <text fg={theme.text}>{rationale()}</text>
-+          </box>
-+        </Show>
-+      </box>
-+    </BlockTool>
-+  )
-+}
-+
- function DiffView(props: { diff: string; filePath?: string; view: "split" | "unified"; syncScroll?: boolean }) {
-   const ctx = use()
-   const { theme, syntax } = useTheme()
-@@ -2356,7 +2488,9 @@ function Write(props: ToolProps<typeof WriteTool>) {
-           threshold={20}
-           totalLines={diffStats().total}
-           totalChars={diff()!.length}
--          preview={<DiffPreview diff={previewDiff(diff()!, 10)} filePath={props.input.filePath} view={view()} maxLines={10} />}
-+          preview={
-+            <DiffPreview diff={previewDiff(diff()!, 10)} filePath={props.input.filePath} view={view()} maxLines={10} />
-+          }
-         >
-           <box gap={1} flexDirection="column">
-             <DiffView diff={diff()!} filePath={props.input.filePath} view={view()} />
-@@ -2600,7 +2734,14 @@ function Edit(props: ToolProps<typeof EditTool>) {
-           threshold={20}
-           totalLines={stats().total}
-           totalChars={diffContent().length}
--          preview={<DiffPreview diff={previewDiff(diffContent(), 10)} filePath={props.input.filePath} view={view()} maxLines={10} />}
-+          preview={
-+            <DiffPreview
-+              diff={previewDiff(diffContent(), 10)}
-+              filePath={props.input.filePath}
-+              view={view()}
-+              maxLines={10}
-+            />
-+          }
-         >
-           <box gap={1} flexDirection="column">
-             <DiffView diff={diffContent()} filePath={props.input.filePath} view={view()} />
-@@ -2628,7 +2769,8 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
-     const filePath = pendingPath(pathFormatter, stats.filePath)
-     return (
-       <>
--        Patch <Show when={filePath} fallback={`${stats.fileCount} file${stats.fileCount === 1 ? "" : "s"}`}>
-+        Patch{" "}
-+        <Show when={filePath} fallback={`${stats.fileCount} file${stats.fileCount === 1 ? "" : "s"}`}>
-           {filePath}
-         </Show>
-         <PendingStats stats={stats} />
-@@ -2660,45 +2802,50 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
- 
-   return (
-     <Switch>
--        <Match when={files().length > 0}>
--          <For each={files()}>
--            {(file) => (
--              <BlockTool
--                title={title(file)}
--                part={props.part}
--                maxLines={10}
--                threshold={20}
--                totalLines={(file.patch ?? "").split("\n").length}
--                totalChars={(file.patch ?? "").length}
--                preview={
--                  <Show
--                    when={file.type !== "delete"}
--                    fallback={
--                      <text fg={theme.diffRemoved} paddingLeft={1}>
--                        -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
--                      </text>
--                    }
--                  >
--                    <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} />
--                  </Show>
--                }
--              >
--                <box gap={1} flexDirection="column">
--                  <Show
--                    when={file.type !== "delete"}
--                    fallback={
--                      <text fg={theme.diffRemoved} paddingLeft={1}>
--                        -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
--                      </text>
--                    }
--                  >
--                    <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
--                  </Show>
--                  <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
--                </box>
--              </BlockTool>
--            )}
--          </For>
-+      <Match when={files().length > 0}>
-+        <For each={files()}>
-+          {(file) => (
-+            <BlockTool
-+              title={title(file)}
-+              part={props.part}
-+              maxLines={10}
-+              threshold={20}
-+              totalLines={(file.patch ?? "").split("\n").length}
-+              totalChars={(file.patch ?? "").length}
-+              preview={
-+                <Show
-+                  when={file.type !== "delete"}
-+                  fallback={
-+                    <text fg={theme.diffRemoved} paddingLeft={1}>
-+                      -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
-+                    </text>
-+                  }
-+                >
-+                  <DiffPreview
-+                    diff={previewDiff(file.patch || "", 10)}
-+                    filePath={file.filePath}
-+                    view={view()}
-+                    maxLines={10}
-+                  />
-+                </Show>
-+              }
-+            >
-+              <box gap={1} flexDirection="column">
-+                <Show
-+                  when={file.type !== "delete"}
-+                  fallback={
-+                    <text fg={theme.diffRemoved} paddingLeft={1}>
-+                      -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
-+                    </text>
-+                  }
-+                >
-+                  <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
-+                </Show>
-+                <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
-+              </box>
-+            </BlockTool>
-+          )}
-+        </For>
-       </Match>
-       <Match when={true}>
-         <InlineTool icon="%" pending={pending()} complete={false} part={props.part}>
 diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
-index 57e247666c64f0a3e35245507e40984fd7c983ff..3ec2c26a96d3598df02ee59061d263c9fdd63eb5 100644
+index dcb5102a66..b6b3688ffd 100644
 --- a/packages/opencode/src/permission/precheck.ts
 +++ b/packages/opencode/src/permission/precheck.ts
-@@ -6,7 +6,10 @@ export type Decision = { level: Level; reason: string }
- // an explicit `ask` result when the wrapper is too open-ended to inspect. These
- // helper result types intentionally do not include `allow`: wrapper execution is
- // never safe enough for deterministic approval by itself.
--type UnwrapResult = { action: "script"; script: string; reason: string } | { action: "ask"; reason: string } | { action: "none" }
-+type UnwrapResult =
-+  | { action: "script"; script: string; reason: string }
-+  | { action: "ask"; reason: string }
-+  | { action: "none" }
- type RemoteResult = { action: "remote"; script?: string; reason: string } | { action: "none" }
- 
- // [local-smark] 四级预审分层开始
-@@ -168,10 +171,16 @@ export function evaluate(input: {
-     // shell 发起的 external_directory 不是独立工具动作，它只是 bash 命令执行前
-     // 的项目外路径门禁。复用同一条命令的预审结果，避免项目外路径先触发普通
-     // ask，从而绕开 Auto agent 的 bash auto 路由。
--    return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
-+    return evaluateShell(
-+      typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
-+      0,
-+    )
-   }
-   if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
--  return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
-+  return evaluateShell(
-+    typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "),
-+    0,
-+  )
- }
- 
- export function canAlwaysAllowPrefix(tokens: string[]) {
-@@ -207,7 +216,8 @@ function evaluateShell(command: string, depth: number): Decision {
-   if (dangerous) return dangerous
-   const cautious = decisions.find((item) => item.level === "cautious")
-   if (cautious) return cautious
--  if (decisions.every((item) => item.level === "safe")) return { level: "safe", reason: "known read-only shell command" }
-+  if (decisions.every((item) => item.level === "safe"))
-+    return { level: "safe", reason: "known read-only shell command" }
-   return decisions.find((item) => item.level === "general") ?? { level: "general", reason: "unknown shell command" }
- }
- 
-@@ -388,7 +398,11 @@ function unwrap(tokens: string[]): UnwrapResult {
-   if (cmd === "cmd") {
-     const index = tokens.findIndex((item, i) => i > 0 && ["/c", "/k"].includes(item.toLowerCase()))
-     if (index >= 0 && tokens[index + 1]) {
--      return { action: "script", script: joinShellTokens(tokens.slice(index + 1)), reason: "cmd wrapper requires explicit approval" }
-+      return {
-+        action: "script",
-+        script: joinShellTokens(tokens.slice(index + 1)),
-+        reason: "cmd wrapper requires explicit approval",
-+      }
-     }
-     return { action: "ask", reason: "cmd wrapper without a plain script requires explicit approval" }
-   }
-@@ -400,7 +414,8 @@ function unwrap(tokens: string[]): UnwrapResult {
-   if (["pythonw", "pyw", "pypy", "pypy3", "deno", "osascript"].includes(cmd)) {
-     return { action: "ask", reason: "script interpreter requires explicit approval" }
-   }
--  if (cmd === "bun" && tokens[1] === "x") return { action: "ask", reason: "package executor requires explicit approval" }
-+  if (cmd === "bun" && tokens[1] === "x")
-+    return { action: "ask", reason: "package executor requires explicit approval" }
-   if (cmd === "env") return { action: "ask", reason: "env wrapper requires explicit approval" }
-   if (["sudo", "doas", "su", "pkexec"].includes(cmd)) {
-     return { action: "ask", reason: "privilege wrapper requires explicit approval" }
-@@ -472,7 +487,11 @@ function dangerousRaw(command: string) {
-   // Remote downloads piped directly to interpreters execute unreviewed network
-   // bytes as code. Privilege/env wrappers are included because they are common
-   // install-script indirections and should not downgrade to prompt.
--  if (/\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|python|node|ruby|perl|pwsh|powershell|cmd|iex|invoke-expression)\b/i.test(normalized)) {
-+  if (
-+    /\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|python|node|ruby|perl|pwsh|powershell|cmd|iex|invoke-expression)\b/i.test(
-+      normalized,
-+    )
-+  ) {
-     return "remote download piped to interpreter; review the script locally before running safe commands"
-   }
-   // PowerShell aliases for web download plus `iex` are equivalent to curl|sh.
-@@ -514,23 +533,43 @@ function dangerousRaw(command: string) {
-     return "credential file sent with network transfer"
-   }
-   // `scp`, `sftp`, and `rsync` use `host:path` syntax rather than pipes/flags.
--  if (new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`, "i").test(normalized)) {
-+  if (
-+    new RegExp(String.raw`\b(?:scp|rsync|sftp)\b(?=.*${SENSITIVE_PATH_ARGUMENT_PATTERN})(?=.*:)`, "i").test(normalized)
-+  ) {
-     return "credential file sent with remote transfer"
-   }
-   // Common interpreter APIs and reverse shell idioms are scanned as raw text
-   // because their dangerous target may be inside strings rather than tokens.
--  if (/\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|[A-Za-z]:[\\/]?)(?=[\s)'"]|$))/i.test(normalized)) {
-+  if (
-+    /\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|[A-Za-z]:[\\/]?)(?=[\s)'"]|$))/i.test(
-+      normalized,
-+    )
-+  ) {
-     return "critical PowerShell recursive delete"
-   }
--  if (/\bshutil\.rmtree\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) return "critical Python recursive delete"
--  if (/\bos\.(?:remove|unlink|rmdir)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) return "critical Python file removal"
--  if (/(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) {
-+  if (/\bshutil\.rmtree\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized))
-+    return "critical Python recursive delete"
-+  if (/\bos\.(?:remove|unlink|rmdir)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized))
-+    return "critical Python file removal"
-+  if (
-+    /(?:\bfs\.|\brequire\(["']fs["']\)\.)(?:rmSync|rmdirSync|unlinkSync)\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(
-+      normalized,
-+    )
-+  ) {
-     return "critical Node.js file removal"
-   }
--  if (/\bsubprocess\.(?:run|call|Popen)\([^)]*["']rm["'][^)]*["']-[^"']*[rf][^"']*["'][^)]*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) {
-+  if (
-+    /\bsubprocess\.(?:run|call|Popen)\([^)]*["']rm["'][^)]*["']-[^"']*[rf][^"']*["'][^)]*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(
-+      normalized,
-+    )
-+  ) {
-     return "critical recursive delete through interpreter"
-   }
--  if (/\/dev\/tcp\/|\b(?:nc|ncat|netcat)\b[^|;]*(?:\s-e\s|\s--exec\s|\s--sh-exec\s)|\bsocat\b[^|;]*EXEC:|bash\s+-i\s+>&\s+\/dev\/tcp\//i.test(normalized)) {
-+  if (
-+    /\/dev\/tcp\/|\b(?:nc|ncat|netcat)\b[^|;]*(?:\s-e\s|\s--exec\s|\s--sh-exec\s)|\bsocat\b[^|;]*EXEC:|bash\s+-i\s+>&\s+\/dev\/tcp\//i.test(
-+      normalized,
-+    )
-+  ) {
-     return "reverse shell pattern"
-   }
- }
-@@ -543,7 +582,7 @@ function cautiousRaw(command: string) {
-   // 本地敏感读取提升到 cautious，避免 safe 绕过，同时不把普通 `$HOME` 查询送审。
+@@ -523,7 +523,10 @@ function cautiousRaw(command: string) {
+   const normalized = command.replace(/\s+/g, " ").trim()
    if (
      new RegExp(
 -      String.raw`(?:^|[;&|]\s*)\b(?:cat|type|Get-Content|gc|Get-ChildItem|gci|ls|dir|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
++      // #209：去掉 (?:^|[;&|]\s*) 锚点——if(Test-Path){Get-Content} 内的 Get-Content 不紧跟行首/分隔符，锚点导致漏审
++      // #209：\b 词边界单独足以匹配块内读取命令——Get-Content 前的 { 或 ( 不构成词字符，\b 仍能在标识符边界命中
 +      String.raw`\b(?:cat|type|Get-Content|gc|Get-ChildItem|gci|ls|dir|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
++      // #209：[^|;]* 前瞻仍把匹配限定在同一管道段内——去掉锚点不会让跨管道的读取命令误判为敏感读取
        "i",
      ).test(normalized)
    ) {
-@@ -564,14 +603,19 @@ function riskyTokens(tokens: string[]): Decision | undefined {
-     }
-     return { level: "cautious", reason: "recursive force delete requires explicit approval" }
-   }
--  if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/"))) return { level: "dangerous", reason: "raw disk write" }
-+  if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/")))
-+    return { level: "dangerous", reason: "raw disk write" }
-   if (["mkfs", "mkfs.ext4", "fdisk", "parted", "wipefs", "shutdown", "reboot", "halt", "poweroff"].includes(cmd)) {
-     return { level: "dangerous", reason: "system destructive command" }
-   }
-   if (cmd === "git" && tokens[1] === "reset" && tokens.includes("--hard")) {
-     return { level: "cautious", reason: "destructive git reset requires explicit approval" }
-   }
--  if (cmd === "git" && tokens[1] === "clean" && tokens.some((item) => item.startsWith("-") && item.includes("f") && item.includes("d"))) {
-+  if (
-+    cmd === "git" &&
-+    tokens[1] === "clean" &&
-+    tokens.some((item) => item.startsWith("-") && item.includes("f") && item.includes("d"))
-+  ) {
-     return { level: "cautious", reason: "destructive git clean requires explicit approval" }
-   }
-   if (cmd === "git" && tokens[1] === "push" && tokens.some((item) => item === "--force" || item === "-f")) {
-@@ -592,7 +636,8 @@ function riskyTokens(tokens: string[]): Decision | undefined {
-     }
-     return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
-   }
--  if (["scp", "sftp", "rsync"].includes(cmd)) return { level: "cautious", reason: "remote file transfer requires explicit approval" }
-+  if (["scp", "sftp", "rsync"].includes(cmd))
-+    return { level: "cautious", reason: "remote file transfer requires explicit approval" }
- }
- 
- function cautiousGitSubcommand(tokens: string[]) {
-@@ -602,7 +647,10 @@ function cautiousGitSubcommand(tokens: string[]) {
-   // cautious 后仅 auto 分支的 reviewer/user 会判断是否符合用户意图。
-   const subcommand = tokens[1]
-   if (!subcommand) return false
--  if (["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean"].includes(subcommand)) return true
-+  if (
-+    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean"].includes(subcommand)
-+  )
-+    return true
-   return subcommand === "branch" && !gitBranchSafe(tokens.slice(2))
-   // [local-smark] Git 谨慎子命令识别结束
- }
-@@ -613,7 +661,26 @@ function readsSensitivePath(tokens: string[]) {
-   // dangerous；但它会把密钥内容或密钥存在性暴露给 shell 输出和模型上下文，
-   // 所以从 safe/general 提升为 cautious，交给 reviewer 判断是否确有授权。
-   const cmd = normalizeCommandName(tokens[0])
--  if (!["cat", "type", "get-content", "gc", "get-childitem", "gci", "ls", "dir", "grep", "rg", "head", "tail", "less", "more", "sed", "awk"].includes(cmd)) {
-+  if (
-+    ![
-+      "cat",
-+      "type",
-+      "get-content",
-+      "gc",
-+      "get-childitem",
-+      "gci",
-+      "ls",
-+      "dir",
-+      "grep",
-+      "rg",
-+      "head",
-+      "tail",
-+      "less",
-+      "more",
-+      "sed",
-+      "awk",
-+    ].includes(cmd)
-+  ) {
-     return false
-   }
-   return hasSensitivePath(tokens)
-@@ -624,7 +691,9 @@ function joinShellTokens(tokens: string[]) {
-   // Reconstruct cmd/WSL payloads for recursive raw scanning without reusing the
-   // original command text. Quoting keeps spaces intact and avoids inventing new
-   // separators while still surfacing dangerous substrings to `dangerousRaw`.
--  return tokens.map((item) => (/^[A-Za-z0-9_./:=@%+-]+$/.test(item) ? item : `'${item.replaceAll("'", "'\\''")}'`)).join(" ")
-+  return tokens
-+    .map((item) => (/^[A-Za-z0-9_./:=@%+-]+$/.test(item) ? item : `'${item.replaceAll("'", "'\\''")}'`))
-+    .join(" ")
- }
- 
- function decodePowerShell(input: string) {
-@@ -632,7 +701,9 @@ function decodePowerShell(input: string) {
-   // rather than deny because opaque encoded text is risky but not evidence of a
-   // specific critical payload.
-   try {
--    return Buffer.from(input, "base64").toString("utf16le").replace(/^\uFEFF/, "")
-+    return Buffer.from(input, "base64")
-+      .toString("utf16le")
-+      .replace(/^\uFEFF/, "")
-   } catch {
-     return
-   }
-@@ -643,7 +714,10 @@ function hasRecursiveForceDeleteFlags(tokens: string[]) {
-   // short flags (`-r -f`, `-R -f`), or long flags. Treat the pair as equivalent
-   // before checking protected targets so option spelling cannot downgrade a root
-   // delete from deny to prompt.
--  return tokens.some((item) => item === "--recursive" || /^-[^-]*[rR]/.test(item)) && tokens.some((item) => item === "--force" || /^-[^-]*f/.test(item))
-+  return (
-+    tokens.some((item) => item === "--recursive" || /^-[^-]*[rR]/.test(item)) &&
-+    tokens.some((item) => item === "--force" || /^-[^-]*f/.test(item))
-+  )
- }
- 
- function protectedDeleteTarget(input: string) {
-@@ -673,13 +747,16 @@ function safeTokens(tokens: string[]) {
-   // `cat README.md` is otherwise a safe file read.
-   const cmd = normalizeCommandName(tokens[0])
-   if (hasSensitivePath(tokens)) return false
--  if (["pwd", "whoami", "id", "uname", "which", "ls", "cat", "head", "wc", "file", "stat", "grep"].includes(cmd)) return true
-+  if (["pwd", "whoami", "id", "uname", "which", "ls", "cat", "head", "wc", "file", "stat", "grep"].includes(cmd))
-+    return true
-   if (cmd === "tail") return !tokens.some((item) => item === "-f" || item === "--follow")
-   if (cmd === "rg") return !tokens.some(unsafeRipgrepFlag)
--  if (cmd === "find") return !tokens.some((item) => ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint"].includes(item))
-+  if (cmd === "find")
-+    return !tokens.some((item) => ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint"].includes(item))
-   if (cmd === "sed") return tokens.length <= 4 && tokens[1] === "-n" && /^\d+(?:,\d+)?p$/.test(tokens[2] ?? "")
-   if (cmd === "git") return gitSafe(tokens)
--  if (["npm", "pnpm", "yarn"].includes(cmd)) return ["ls", "list", "view", "info", "why", "outdated"].includes(tokens[1])
-+  if (["npm", "pnpm", "yarn"].includes(cmd))
-+    return ["ls", "list", "view", "info", "why", "outdated"].includes(tokens[1])
-   return versionSafe(tokens)
- }
- 
-@@ -692,7 +769,8 @@ function gitSafe(tokens: string[]) {
-   const safe = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame"])
-   let subcommand: string | undefined
-   for (let i = 1; i < tokens.length; i++) {
--    if (unsafeGlobal.has(tokens[i]) || Array.from(unsafeGlobal).some((item) => tokens[i].startsWith(item + "="))) return false
-+    if (unsafeGlobal.has(tokens[i]) || Array.from(unsafeGlobal).some((item) => tokens[i].startsWith(item + "=")))
-+      return false
-     if (unsafeReadFlag.has(tokens[i])) return false
-     if (tokens[i] === "remote") return tokens[i + 1] === "-v"
-     if (tokens[i] === "config") return tokens[i + 1] === "--get" || tokens[i + 1] === "--list"
-@@ -706,7 +784,15 @@ function unsafeRipgrepFlag(item: string) {
-   // [local-smark] rg 外部命令 flag 保护开始
-   // `rg --pre=cmd` 和 `--hostname-bin=cmd` 会执行外部程序；native shell backend
-   // 没有 sandbox，因此这些 read-looking 命令不能进入 safe 直通路径。
--  return item === "-z" || item === "--pre" || item.startsWith("--pre=") || item === "--hostname-bin" || item.startsWith("--hostname-bin=") || item === "--search-zip" || item.startsWith("--search-zip=")
-+  return (
-+    item === "-z" ||
-+    item === "--pre" ||
-+    item.startsWith("--pre=") ||
-+    item === "--hostname-bin" ||
-+    item.startsWith("--hostname-bin=") ||
-+    item === "--search-zip" ||
-+    item.startsWith("--search-zip=")
-+  )
-   // [local-smark] rg 外部命令 flag 保护结束
- }
- 
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa2af00ac5 100644
+index c3e9320652..86f3a64c20 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -1,10 +1,14 @@
+@@ -2,11 +2,16 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
  import { Config } from "@/config/config"
  import { Provider } from "@/provider/provider"
 +import { ProviderTransform } from "@/provider/transform"
  import { Session } from "@/session/session"
- import { MessageV2 } from "@/session/message-v2"
++import { MessageV2 } from "@/session/message-v2"
  import { MessageID, PartID, SessionID } from "@/session/schema"
+-import type { ToolPart, User, Assistant, TextPart } from "@opencode-ai/core/v1/session"
 -import { generateObject, type ModelMessage } from "ai"
-+import { toJsonSchema } from "@/util/effect-zod"
++import { ToolJsonSchema } from "@/tool/json-schema"
++import type { ToolPart, User, Assistant, TextPart, ReasoningPart } from "@opencode-ai/core/v1/session"
 +import { jsonSchema, streamText, tool, wrapLanguageModel, type ModelMessage } from "ai"
  import { Context, Effect, Layer, Schema, Semaphore } from "effect"
 +import * as Stream from "effect/Stream"
@@ -695,23 +53,25 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
  import { PermissionReviewerPrompt } from "./prompt"
  import { Assessment, ReviewerRequest } from "./schema"
  import { PermissionReviewerTranscript } from "./transcript"
-@@ -47,6 +51,9 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pe
- 
+@@ -58,6 +63,10 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pe
+ // #206：拉取比最终 reviewer prompt 更宽的最近窗口——transcript 选择再保留用户锚点并限制条目/字符，避免在权限路径遍历过旧会话
  const REVIEWER_MESSAGE_FETCH_LIMIT = 120
  
++// #209：合并 provider options 与 model.options——reviewer stream 需与正常 SessionPrompt 一致的 provider 适配
 +const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
 +  mergeDeep(target, source ?? {}) as Record<string, any>
 +
- // The reviewer layer is provider-backed but intentionally receives only a bounded
- // transcript projection plus the planned action JSON. It never reuses the main
- // agent's model messages, tools, or scratchpad as reviewer context.
-@@ -58,123 +65,134 @@ export const layer = Layer.effect(
-     const sessions = yield* Session.Service
+ export const layer = Layer.effect(
+   Service,
+   Effect.gen(function* () {
+@@ -68,107 +77,119 @@ export const layer = Layer.effect(
+     // #208：每父会话一个 Semaphore——并发工具审查复用同一 reviewer transcript
      const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
  
 -    const review: Interface["review"] = (input) => Effect.gen(function* () {
 -      const cfg = yield* config.get()
 -      const permission = cfg.permission
+-      // #203：reviewerEnabled 统一判定——显式 user 禁用，显式 auto_review 启用，无配置时原生 Auto 隐式启用
 -      if (!reviewerEnabled(permission, input.metadata)) return yield* new ReviewerDisabled()
 -      const autoReview = permission?.auto_review
 -
@@ -723,18 +83,22 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 -          precheck: input.precheck,
 -        })
 -        const tenantPolicy = yield* loadTenantPolicy(autoReview)
--        // Transcript collection is best-effort and bounded twice: fetch a wider
--        // recent window than the final reviewer prompt, then let transcript
--        // selection preserve user anchors and cap entries/chars. This avoids
--        // walking very old sessions on the permission path while still keeping
--        // substantially more authorization context than the final prompt size.
+-        // #206：transcript 收集双重有界——先拉 120 条宽窗口再由 transcript 选择保留用户锚点和截短条目
+-        // #206：session.messages 内部调用 MessageV2.page 并 provideService(Database)——避免 Database.Service 泄漏到 review 类型
+-        // #206：fromMessages 的 truncated 已覆盖 page.more 语义——ENTRY_LIMIT(40) < fetch limit(120) 时 selectEntries 必定截短
 -        const transcript = input.sessionID
--          ? yield* MessageV2.page({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT })
+-          ? yield* session
+-              .messages({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT })
 -              .pipe(
+-                Effect.map(PermissionReviewerTranscript.fromMessages),
+-                // #206：失败时返回空 transcript 含 entryTruncated:false——保持 TranscriptDelta 新字段类型完整
+-                Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
 +    const review: Interface["review"] = (input) =>
++      // #209：streaming refactor——generateObject 替换为 streamText + permission_review_decision tool，让 reviewer 子会话留下可审计的推理与文本轨迹
 +      Effect.gen(function* () {
 +        const cfg = yield* config.get()
 +        const permission = cfg.permission
++        // #203：reviewerEnabled 统一判定——显式 user 禁用，显式 auto_review 启用，无配置时原生 Auto 隐式启用
 +        if (!reviewerEnabled(permission, input.metadata)) return yield* new ReviewerDisabled()
 +        const autoReview = permission?.auto_review
 +
@@ -745,46 +109,20 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +            metadata: { ...input.metadata },
 +            precheck: input.precheck,
 +          })
++          // #209：模型解析提前到 transcript 之前——streamText 需要具体 model 对象而非仅在 generateObject 调用点解析
 +          const model = autoReview?.model
-+            ? // User-specified reviewer models use the same provider/model parser as
-+              // normal agent config so aliases and provider validation stay in one
-+              // place. A bad model fails closed unless fallback=user is configured.
-+              yield* provider.getModel(
++            ? yield* provider.getModel(
 +                Provider.parseModel(autoReview.model).providerID,
 +                Provider.parseModel(autoReview.model).modelID,
-+              )
-+            : yield* Effect.gen(function* () {
-+                const current = yield* provider.defaultModel()
-+                return (
-+                  (yield* provider.getSmallModel(current.providerID)) ??
-+                  (yield* provider.getModel(current.providerID, current.modelID))
-+                )
-+              })
-+          const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
-+          yield* markToolReviewing(input, reviewerSession?.id)
-+          const tenantPolicy = yield* loadTenantPolicy(autoReview)
-+          // Transcript collection is best-effort and bounded twice: fetch a wider
-+          // recent window than the final reviewer prompt, then let transcript
-+          // selection preserve user anchors and cap entries/chars. This avoids
-+          // walking very old sessions on the permission path while still keeping
-+          // substantially more authorization context than the final prompt size.
-+          const transcript = input.sessionID
-+            ? yield* MessageV2.page({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT }).pipe(
-                 Effect.map((page) => {
-                   const transcript = PermissionReviewerTranscript.fromMessages(page.items)
-                   return { ...transcript, truncated: transcript.truncated || page.more }
-                 }),
-                 Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
                )
 -          : { entries: [], truncated: false, entryTruncated: false }
 -        const messages = buildMessages({
 -          system: PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy),
 -          userItems: PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason),
 -        })
+-        // #198：模型解析——配置了 auto_review.model 时用指定模型，否则用 default + small model 组合
+-        // #198：优先使用 small model——reviewer 不需高创造力，小模型更快更省成本且足以做安全判定
 -        const model = autoReview?.model
--          // User-specified reviewer models use the same provider/model parser as
--          // normal agent config so aliases and provider validation stay in one
--          // place. A bad model fails closed unless fallback=user is configured.
 -          ? yield* provider.getModel(
 -              Provider.parseModel(autoReview.model).providerID,
 -              Provider.parseModel(autoReview.model).modelID,
@@ -794,8 +132,12 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 -              return (yield* provider.getSmallModel(current.providerID)) ?? (yield* provider.getModel(current.providerID, current.modelID))
 -            })
 -        const language = yield* provider.getLanguage(model)
+-        // #208：获取或创建 reviewer 子会话——复用同一 transcript 追加请求/决策轮次
 -        const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
+-        // #208：标记工具状态为 reviewing——UI 展示确定性 precheck 到模型审查的进度
+-        // #208：markToolReviewing best-effort 标记——过期工具引用不影响有效决策
 -        yield* markToolReviewing(input)
+-        // #208：在子会话中记录 reviewer 请求——synthetic 文本不作为用户授权证据
 -        const reviewerUser = reviewerSession
 -          ? yield* recordReviewerRequest({
 -              session: reviewerSession,
@@ -803,17 +145,40 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 -              text: messages.map((message) => `${message.role}: ${message.content}`).join("\n\n"),
 -            })
 -          : undefined
--        // Use structured generation instead of free-form text parsing. The schema
--        // enforces the JSON shape; PermissionAuto still performs semantic checks
--        // for contradictory allows after the object is returned.
+-        // #198：generateObject 结构化输出——schema 同时提供 StandardSchemaV1 和 StandardJSONSchemaV1 确保 provider 兼容
+-        // #198：双重 schema 提供者——StandardSchemaV1 用于运行时验证，StandardJSONSchemaV1 用于 provider API 请求格式
 -        const assessment = yield* Effect.promise(() =>
 -          generateObject({
 -            model: language,
++            : yield* Effect.gen(function* () {
++                const current = yield* provider.defaultModel()
++                return (
++                  (yield* provider.getSmallModel(current.providerID)) ??
++                  (yield* provider.getModel(current.providerID, current.modelID))
++                )
++              })
++          // #208：获取或创建 reviewer 子会话——复用同一 transcript 追加请求/决策轮次
++          const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
++          // #209：标记工具状态为 reviewing 并附带 reviewer 子会话 ID——UI 可导航到 reviewer 子会话查看完整推理
++          yield* markToolReviewing(input, reviewerSession?.id)
++          const tenantPolicy = yield* loadTenantPolicy(autoReview)
++          // #206：transcript 收集双重有界——先拉 120 条宽窗口再由 transcript 选择保留用户锚点和截短条目
++          // #206：session.messages 内部调用 MessageV2.page 并 provideService(Database)——避免 Database.Service 泄漏到 review 类型
++          // #206：fromMessages 的 truncated 已覆盖 page.more 语义——ENTRY_LIMIT(40) < fetch limit(120) 时 selectEntries 必定截短
++          const transcript = input.sessionID
++            ? yield* session
++                .messages({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT })
++                .pipe(
++                  Effect.map(PermissionReviewerTranscript.fromMessages),
++                  // #206：失败时返回空 transcript 含 entryTruncated:false——保持 TranscriptDelta 新字段类型完整
++                  Effect.catch(() => Effect.succeed({ entries: [], truncated: false, entryTruncated: false })),
++                )
 +            : { entries: [], truncated: false, entryTruncated: false }
 +          const messages = buildMessages({
 +            system: PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy),
 +            userItems: PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason),
 +          })
++          // #209：在子会话中记录 reviewer 请求——metadata 标记防止被误认为人类授权，但保留可检查性
 +          const reviewerUser = reviewerSession
 +            ? yield* recordReviewerRequest({
 +                session: reviewerSession,
@@ -821,6 +186,7 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +                text: renderReviewerPrompt(messages),
 +              })
 +            : undefined
++          // #209：streamText + permission_review_decision tool——流式持久化 reasoning/text/tool part，替代一次性 generateObject 黑盒
 +          const assessment = yield* runReviewerAgent({
 +            session: reviewerSession,
 +            model,
@@ -829,35 +195,37 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 -            schema: Object.assign(Schema.toStandardSchemaV1(Assessment), Schema.toStandardJSONSchemaV1(Assessment)),
 -          }).then((result) => result.object),
 -        ).pipe(
+-          // #198：超时控制——默认 90 秒，超时后返回 ReviewerTimedOut 而非等待不确定的 provider 响应
+-          // #198：90 秒上限覆盖大多数 provider 响应——超过此时间通常表示 provider 故障而非正常审查
 -          Effect.timeoutOrElse({
--            // Timeout is a security boundary: if the reviewer cannot complete in
--            // time, the tool call must not execute unless explicit user fallback
--            // is configured below.
 -            duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
 -            orElse: () => Effect.fail(new ReviewerTimedOut()),
 -          }),
+-          // #198：mapError 将非 reviewer 错误包装为 RunError——provider/schema 错误统一为可处理的 fail-closed 信号
 -          Effect.mapError((error) => (isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))),
 -        )
 +          }).pipe(
++            // #198：超时控制——默认 90 秒，超时后返回 ReviewerTimedOut 而非等待不确定的 provider 响应
 +            Effect.timeoutOrElse({
-+              // Timeout is a security boundary: if the reviewer cannot complete in
-+              // time, the tool call must not execute unless explicit user fallback
-+              // is configured below.
 +              duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
 +              orElse: () => Effect.fail(new ReviewerTimedOut()),
 +            }),
++            // #198：mapError 将非 reviewer 错误包装为 RunError——provider/schema 错误统一为可处理的 fail-closed 信号
 +            Effect.mapError((error) =>
 +              isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }),
 +            ),
 +          )
++          // #209：标记工具审查结果——allowed/denied 状态和 reviewer 评估详情写入工具 metadata 供 UI 渲染
 +          yield* markToolReviewed(input, assessment)
  
+-        // #208：在子会话中记录 reviewer 决策——供未来 transcript delta 审计追溯
 -        if (reviewerSession && reviewerUser) {
 -          yield* recordReviewerDecision({ session: reviewerSession, model, parentID: reviewerUser.id, assessment })
 -        }
 +          return {
 +            action: assessment.outcome,
 +            reason: assessment.rationale,
++            // #208：reviewID 由 auto.ts mint 后传入——不再在此处随机生成
 +            reviewID: input.reviewID,
 +            risk_level: assessment.risk_level,
 +            user_authorization: assessment.user_authorization,
@@ -867,10 +235,12 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 -        return {
 -          action: assessment.outcome,
 -          reason: assessment.rationale,
+-          // #208：reviewID 由 auto.ts mint 后传入——不再在此处随机生成
 -          reviewID: input.reviewID,
 -          risk_level: assessment.risk_level,
 -          user_authorization: assessment.user_authorization,
 -        } satisfies PermissionAuto.ReviewDecision
++        // #209：错误时标记工具审查失败——fallback=user 标记 fallback_user，超时标记 timed_out，其他标记 failed，使 UI 能展示失败原因
 +        return yield* run.pipe(
 +          Effect.catch((error: unknown) =>
 +            Effect.gen(function* () {
@@ -895,11 +265,10 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +        )
        })
  
+-      // #198：fallback=user 时，非 Disabled 错误转为 FallbackToUser 回退到用户审批；Disabled 不转换因为它是显式禁用信号
+-      // #198：Disabled 保持原样——服务禁用是配置决策，不应被 fallback 策略覆盖为其他错误类型
 -      return yield* run.pipe(
 -        Effect.catch((error: unknown) =>
--          // `fallback: "user"` is deliberately narrow: disabled reviewer already
--          // means normal user routing, while all other failures become an explicit
--          // fallback signal for PermissionAuto. Default behavior is fail-closed.
 -          autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)
 -            ? Effect.fail(new ReviewerFallbackToUser({ reason: errorMessage(error) }))
 -            : Effect.fail(error),
@@ -909,63 +278,34 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 -
      return Service.of({ review })
  
-     function getReviewerSession(parentID: SessionID, model: Provider.Model) {
--      return reviewerSessionLock(parentID).withPermits(1)(Effect.gen(function* () {
--        const existing = (yield* sessions.children(parentID)).find((item) => item.agent === "permission-reviewer")
--        if (existing) return existing
--        // A single child session per parent mirrors Codex's reusable guardian
--        // trunk: later reviews append new request/decision turns instead of
--        // creating detached one-off records, enabling future transcript deltas by
--        // child session id without changing the permission API again.
--        return yield* sessions.create({
--          parentID,
--          title: "Auto permission review (@permission-reviewer subagent)",
--          agent: "permission-reviewer",
--          model: { providerID: model.providerID, id: model.id },
--        })
--      }))
-+      return reviewerSessionLock(parentID).withPermits(1)(
-+        Effect.gen(function* () {
-+          const existing = (yield* sessions.children(parentID)).find((item) => item.agent === "permission-reviewer")
-+          if (existing) return existing
-+          // A single child session per parent mirrors Codex's reusable guardian
-+          // trunk: later reviews append new request/decision turns instead of
-+          // creating detached one-off records, enabling future transcript deltas by
-+          // child session id without changing the permission API again.
-+          return yield* sessions.create({
-+            parentID,
-+            title: "Auto permission review (@permission-reviewer subagent)",
-+            agent: "permission-reviewer",
-+            model: { providerID: model.providerID, id: model.id },
-+          })
-+        }),
-+      )
+     // #208：获取或创建 reviewer 子会话——每父会话一个可复用的 permission-reviewer 子会话
+@@ -196,7 +217,7 @@ export const layer = Layer.effect(
+       return next
      }
  
-     function reviewerSessionLock(parentID: SessionID) {
-@@ -203,58 +221,300 @@ export const layer = Layer.effect(
+-    // #208：记录 reviewer 请求为 synthetic 用户消息——可检查但不作为人类授权证据
++    // #209：记录 reviewer 请求为可见用户消息——metadata 标记防止被误认为人类授权
+     function recordReviewerRequest(input: { session: Session.Info; model: Provider.Model; text: string }) {
+       return Effect.gen(function* () {
+         const message = yield* session.updateMessage({
+@@ -212,60 +233,327 @@ export const layer = Layer.effect(
            sessionID: input.session.id,
            messageID: message.id,
            type: "text",
--          // The text is synthetic protocol input: it should be inspectable in the
--          // hidden reviewer child session, but must not later count as human
--          // authorization evidence if that child transcript is projected again.
+-          // #208：synthetic=true 防止此文本在子会话 transcript 投影时被误认为人类授权
 -          synthetic: true,
-+          // This visible child-session message is the audit-friendly reviewer
-+          // request cell. It mirrors the exact bounded system/user prompt sent to
-+          // the reviewer model so the hidden child agent feels like a normal
-+          // subagent run instead of an opaque audit summary. The metadata marker
-+          // keeps this generated protocol cell out of future authorization
-+          // evidence if reviewer child transcripts are ever projected again.
++          // #209：metadata 标记替代 synthetic——reviewer 子会话请求 cell 可见但不可作为授权证据，transcript 投影据此排除
 +          metadata: { permissionReviewerRequest: true },
            text: input.text,
-         } satisfies MessageV2.TextPart)
+         } satisfies TextPart)
          return message
        })
      }
  
+-    // #208：记录 reviewer 决策为助手消息+tool part——供未来 transcript delta 审计追溯
 -    function recordReviewerDecision(input: {
 -      session: Session.Info
++    // #209：runReviewerAgent——有子会话时持久化流式 part，无子会话时仅提取 assessment
 +    function runReviewerAgent(input: {
 +      session: Session.Info | undefined
        model: Provider.Model
@@ -974,12 +314,14 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +      parentID: MessageID | undefined
 +      messages: readonly ModelMessage[]
      }) {
-+      const session = input.session
++      const sessionInfo = input.session
 +      const parentID = input.parentID
-+      if (!session || !parentID) return runReviewerStream(input.messages, input.model)
++      // #209：无子会话或无 parentID 时走纯流式提取——不持久化中间 part，仅从 tool-call 事件取出 assessment
++      if (!sessionInfo || !parentID) return runReviewerStream(input.messages, input.model)
        return Effect.gen(function* () {
--        const message = yield* sessions.updateMessage({
-+        const message: MessageV2.Assistant = {
+-        const message = yield* session.updateMessage({
++        // #209：先创建 assistant 消息壳——流式 part 挂载到该消息，错误时也能回填 error 字段
++        const message: Assistant = {
            id: MessageID.ascending(),
 -          parentID: input.parentID,
 +          parentID,
@@ -987,7 +329,7 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
            mode: "permission-reviewer",
            agent: "permission-reviewer",
 -          path: { cwd: input.session.directory, root: input.session.directory },
-+          path: { cwd: session.directory, root: session.directory },
++          path: { cwd: sessionInfo.directory, root: sessionInfo.directory },
            cost: 0,
            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
            modelID: input.model.id,
@@ -995,18 +337,19 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 -          sessionID: input.session.id,
 -          time: { created: Date.now(), completed: Date.now() },
 -          finish: "tool-calls",
--        } satisfies MessageV2.Assistant)
--        yield* sessions.updatePart({
+-        } satisfies Assistant)
+-        yield* session.updatePart({
 -          id: PartID.ascending(),
 -          sessionID: input.session.id,
-+          sessionID: session.id,
++          sessionID: sessionInfo.id,
 +          time: { created: Date.now() },
 +        }
-+        yield* sessions.updateMessage(message)
++        yield* session.updateMessage(message)
 +        const assessment = yield* runReviewerStream(input.messages, input.model, {
-+          sessionID: session.id,
++          sessionID: sessionInfo.id,
            messageID: message.id,
 -          type: "tool",
+-          // #208：callID 由 parentID 确定性生成——同一请求的决策轮次可追溯，避免随机 ID 在 transcript 重放时漂移
 -          callID: `permission-review-${input.parentID}`,
 -          tool: "permission_review_decision",
 -          state: {
@@ -1017,39 +360,49 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 -            metadata: input.assessment,
 -            time: { start: message.time.created, end: message.time.completed ?? Date.now() },
 -          },
--        } satisfies MessageV2.ToolPart)
+-        } satisfies ToolPart)
 +        }).pipe(
++          // #209：流式错误时仍持久化 assistant 消息的 error 字段——审计可见失败原因，而非丢失在内存中
 +          Effect.tapError((error) =>
 +            Effect.gen(function* () {
 +              message.error = MessageV2.fromError(error, { providerID: input.model.providerID })
 +              message.time.completed = Date.now()
-+              yield* sessions.updateMessage(message)
++              yield* session.updateMessage(message)
 +            }),
 +          ),
 +        )
++        // #209：流结束后补全 finish 与 completed——tool-calls 标记决策工具已被调用
 +        message.finish = "tool-calls"
 +        message.time.completed = Date.now()
-+        yield* sessions.updateMessage(message)
++        yield* session.updateMessage(message)
 +        return assessment
-+      })
-+    }
-+
+       })
+     }
+ 
+-    // #208：标记工具状态为 reviewing——UI 展示 precheck 到 reviewer 的进度
+-    function markToolReviewing(input: PermissionAuto.ReviewInput) {
+-      // #208：无 sessionID 或 tool 绑定时跳过标记——非工具触发的审查无需 UI 进度展示
++    // #209：runReviewerStream——streamText + permission_review_decision tool，流式消费 fullStream 事件并逐 part 持久化
 +    function runReviewerStream(
 +      messages: readonly ModelMessage[],
 +      model: Provider.Model,
 +      persist?: { sessionID: SessionID; messageID: MessageID },
 +    ) {
 +      return Effect.acquireUseRelease(
++        // #209：AbortController 在 release 时中止 streamText——Effect 取消/超时能立即停止 provider 流
 +        Effect.sync(() => new AbortController()),
 +        (abort) =>
 +          Effect.gen(function* () {
 +            const language = yield* provider.getLanguage(model)
 +            const providerInfo = yield* provider.getProvider(model.providerID)
++            // #209：无 persist 时用固定标识——ProviderTransform.options 需要一个 sessionID 做 provider 适配键，无子会话时用常量避免空值
 +            const sessionID = persist?.sessionID ?? "permission-reviewer"
++            // #209：合并 provider options 与 model.options——与 SessionPrompt 保持一致的 provider 适配，避免 reviewer 流缺少必要选项
 +            const options = mergeOptions(
 +              ProviderTransform.options({ model, sessionID, providerOptions: providerInfo.options }),
 +              model.options,
 +            )
++            // #209：wrapLanguageModel 注入 message 归一化中间件——reviewer 流与 SessionPrompt 共享同一 provider 适配层
 +            const result = streamText({
 +              model: wrapLanguageModel({
 +                model: language,
@@ -1058,9 +411,7 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +                    specificationVersion: "v3" as const,
 +                    async transformParams(args) {
 +                      if (args.type === "stream") {
-+                        // Match normal SessionPrompt requests: provider adapters
-+                        // expect opencode's message normalization before seeing
-+                        // reasoning/tool-call payloads.
++                        // #209：Match normal SessionPrompt requests——provider adapters expect opencode's message normalization
 +                        // @ts-expect-error AI SDK's internal prompt type is narrower than ModelMessage here.
 +                        args.params.prompt = ProviderTransform.message(args.params.prompt, model, options)
 +                      }
@@ -1073,7 +424,9 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +              tools: {
 +                permission_review_decision: tool({
 +                  description: "Submit the structured allow/deny decision for this permission review.",
-+                  inputSchema: jsonSchema(toJsonSchema(Assessment) as Parameters<typeof jsonSchema>[0]),
++                  // #209：ToolJsonSchema.fromSchema 将 Effect Assessment schema 转为 AI SDK jsonSchema——替代原 generateObject 的双重 schema
++                  inputSchema: jsonSchema(ToolJsonSchema.fromSchema(Assessment) as Parameters<typeof jsonSchema>[0]),
++                  // #209：execute 返回 title/metadata/output——SDK 调用此函数但真正持久化在 tool-call 事件处理器中完成
 +                  execute: async (assessment) => ({
 +                    title: assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
 +                    metadata: assessment,
@@ -1081,23 +434,27 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +                  }),
 +                }),
 +              },
-+              // Some OpenAI-compatible providers reject forced tool_choice even
-+              // though they can emit tool calls. The reviewer prompt requires this
-+              // tool, and absence of the call still fails closed below.
++              // #209：Some OpenAI-compatible providers reject forced tool_choice——absence of the call still fails closed below
 +              maxRetries: 0,
 +              providerOptions: ProviderTransform.providerOptions(model, options),
 +              maxOutputTokens: ProviderTransform.maxOutputTokens(model),
 +              abortSignal: abort.signal,
 +            })
++            // #209：assessment 可变——由 tool-call 事件设置，流结束时检查是否为空决定 fail-closed
 +            let assessment: Schema.Schema.Type<typeof Assessment> | undefined
-+            let textPart: MessageV2.TextPart | undefined
-+            let reasoningPart: MessageV2.ReasoningPart | undefined
-+            const toolParts = new Map<string, MessageV2.ToolPart>()
++            // #209：textPart/reasoningPart 可变——跨 start/delta/end 事件保持引用以增量更新同一 part
++            let textPart: TextPart | undefined
++            let reasoningPart: ReasoningPart | undefined
++            // #209：toolParts/toolInput 按 callID 索引——一个 tool-call 的 input-start/delta/end/call 共享同一 callID
++            const toolParts = new Map<string, ToolPart>()
 +            const toolInput = new Map<string, string>()
 +
 +            yield* Stream.runForEach(
++              // #209：fullStream 聚合 reasoning/text/tool 全部事件——逐事件持久化使子会话 transcript 实时可审计
 +              Stream.fromAsyncIterable(result.fullStream, (error) => error),
++              // #209：fnUntraced 避免每个 stream 事件创建 span——fullStream 事件高频，tracing 噪声远大于诊断价值
 +              Effect.fnUntraced(function* (event) {
++                // #209：无 persist 时仅提取 assessment——不持久化中间 part，用于无子会话的纯判定路径
 +                if (!persist) {
 +                  if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
 +                    assessment = Schema.decodeUnknownSync(Assessment)(event.input)
@@ -1105,7 +462,8 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +                  return
 +                }
 +                if (event.type === "reasoning-start") {
-+                  reasoningPart = yield* sessions.updatePart({
++                  // #209：reasoning part 先建空壳——delta 事件增量更新 text，end 事件收尾时间
++                  reasoningPart = yield* session.updatePart({
 +                    id: PartID.ascending(),
 +                    sessionID: persist.sessionID,
 +                    messageID: persist.messageID,
@@ -1113,24 +471,26 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +                    text: "",
 +                    time: { start: Date.now() },
 +                    metadata: event.providerMetadata,
-+                  } satisfies MessageV2.ReasoningPart)
++                  } satisfies ReasoningPart)
 +                  return
 +                }
 +                if (event.type === "reasoning-delta" && reasoningPart) {
++                  // #209：增量追加 reasoning 文本——每次 delta 都 updatePart 使 UI 实时显示推理进度
 +                  reasoningPart.text += event.text
 +                  if (event.providerMetadata) reasoningPart.metadata = event.providerMetadata
-+                  yield* sessions.updatePart(reasoningPart)
++                  yield* session.updatePart(reasoningPart)
 +                  return
 +                }
 +                if (event.type === "reasoning-end" && reasoningPart) {
 +                  reasoningPart.time = { ...reasoningPart.time, end: Date.now() }
 +                  if (event.providerMetadata) reasoningPart.metadata = event.providerMetadata
-+                  yield* sessions.updatePart(reasoningPart)
++                  yield* session.updatePart(reasoningPart)
 +                  reasoningPart = undefined
 +                  return
 +                }
 +                if (event.type === "text-start") {
-+                  textPart = yield* sessions.updatePart({
++                  // #209：text part 与 reasoning 同样的 start/delta/end 三段式——保持与正常 assistant 消息一致的持久化形状
++                  textPart = yield* session.updatePart({
 +                    id: PartID.ascending(),
 +                    sessionID: persist.sessionID,
 +                    messageID: persist.messageID,
@@ -1138,24 +498,25 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +                    text: "",
 +                    time: { start: Date.now() },
 +                    metadata: event.providerMetadata,
-+                  } satisfies MessageV2.TextPart)
++                  } satisfies TextPart)
 +                  return
 +                }
 +                if (event.type === "text-delta" && textPart) {
 +                  textPart.text += event.text
 +                  if (event.providerMetadata) textPart.metadata = event.providerMetadata
-+                  yield* sessions.updatePart(textPart)
++                  yield* session.updatePart(textPart)
 +                  return
 +                }
 +                if (event.type === "text-end" && textPart) {
 +                  textPart.time = { start: textPart.time?.start ?? Date.now(), end: Date.now() }
 +                  if (event.providerMetadata) textPart.metadata = event.providerMetadata
-+                  yield* sessions.updatePart(textPart)
++                  yield* session.updatePart(textPart)
 +                  textPart = undefined
 +                  return
 +                }
 +                if (event.type === "tool-input-start") {
-+                  const part = yield* sessions.updatePart({
++                  // #209：工具输入先建 pending 壳——delta 缓冲到 toolInput Map，end 时回填 raw
++                  const part = yield* session.updatePart({
 +                    id: PartID.ascending(),
 +                    sessionID: persist.sessionID,
 +                    messageID: persist.messageID,
@@ -1163,28 +524,32 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +                    callID: event.id,
 +                    tool: event.toolName,
 +                    state: { status: "pending", input: {}, raw: "" },
-+                  } satisfies MessageV2.ToolPart)
++                  } satisfies ToolPart)
 +                  toolParts.set(event.id, part)
 +                  return
 +                }
 +                if (event.type === "tool-input-delta") {
++                  // #209：缓冲工具输入 delta——不在每个 delta 持久化，避免高频写入，end 时一次性回填 raw
 +                  toolInput.set(event.id, (toolInput.get(event.id) ?? "") + event.delta)
 +                  return
 +                }
 +                if (event.type === "tool-input-end") {
 +                  const part = toolParts.get(event.id)
++                  // #209：part 不存在或已非 pending 时跳过——tool-call 可能先于 tool-input-end 到达导致状态已 completed
 +                  if (!part || part.state.status !== "pending") return
 +                  const next = {
 +                    ...part,
 +                    state: { ...part.state, raw: toolInput.get(event.id) ?? "" },
-+                  } satisfies MessageV2.ToolPart
-+                  toolParts.set(event.id, yield* sessions.updatePart(next))
++                  } satisfies ToolPart
++                  toolParts.set(event.id, yield* session.updatePart(next))
 +                  return
 +                }
 +                if (event.type === "tool-call" && event.toolName === "permission_review_decision") {
++                  // #209：tool-call 携带最终 input——Schema.decode 验证并提取 assessment，同时把 tool part 标记 completed
 +                  assessment = Schema.decodeUnknownSync(Assessment)(event.input)
++                  // #209：toolCallId 可能与 tool-input-start 的 event.id 不同——无 existing 时新建 part 壳
 +                  const existing = toolParts.get(event.toolCallId)
-+                  const part = yield* sessions.updatePart({
++                  const part = yield* session.updatePart({
 +                    ...(existing ?? {
 +                      id: PartID.ascending(),
 +                      sessionID: persist.sessionID,
@@ -1201,45 +566,51 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +                      output: JSON.stringify(assessment),
 +                      time: { start: Date.now(), end: Date.now() },
 +                    },
-+                  } satisfies MessageV2.ToolPart)
++                  } satisfies ToolPart)
 +                  toolParts.set(event.toolCallId, part)
 +                  return
 +                }
 +                if (event.type === "tool-error") {
++                  // #209：工具执行错误转为 RunError——fail closed，不应让 provider 工具错误静默为 allow
 +                  return yield* new ReviewerRunError({ reason: errorMessage(event.error) })
 +                }
 +                if (event.type === "error") {
++                  // #209：stream 级错误同样转为 RunError——保持单一 fail-closed 错误出口
 +                  return yield* new ReviewerRunError({ reason: errorMessage(event.error) })
 +                }
 +              }),
 +            )
 +
++            // #209：流结束后收尾未关闭的 text/reasoning part——provider 可能不发 *-end 事件，避免 part 残留无结束时间
 +            if (textPart)
-+              yield* sessions.updatePart({
++              yield* session.updatePart({
 +                ...textPart,
 +                time: { start: textPart.time?.start ?? Date.now(), end: Date.now() },
 +              })
 +            if (reasoningPart)
-+              yield* sessions.updatePart({
++              yield* session.updatePart({
 +                ...reasoningPart,
 +                time: { start: reasoningPart.time.start, end: Date.now() },
 +              })
++            // #209：模型未调用 permission_review_decision——fail closed，未给出明确 allow 即拒绝
 +            if (!assessment)
 +              return yield* new ReviewerRunError({ reason: "reviewer did not call permission_review_decision" })
 +            return assessment
 +          }),
++        // #209：release 时中止 AbortController——确保 Effect 取消时 streamText 立即停止，不再消耗 provider 配额
 +        (abort) => Effect.sync(() => abort.abort()),
 +      )
 +    }
 +
++    // #209：标记工具状态为 reviewing——附带 reviewer 子会话 ID 供 UI 导航
 +    function markToolReviewing(input: PermissionAuto.ReviewInput, reviewerSessionID: SessionID | undefined) {
 +      return updateToolAutoReview(input, {
 +        status: "reviewing",
 +        ...(reviewerSessionID ? { sessionID: reviewerSessionID } : {}),
-       })
-     }
- 
--    function markToolReviewing(input: PermissionAuto.ReviewInput) {
++      })
++    }
++
++    // #209：标记工具审查完成——allowed/denied 状态和 reviewer 评估详情
 +    function markToolReviewed(input: PermissionAuto.ReviewInput, assessment: Schema.Schema.Type<typeof Assessment>) {
 +      return updateToolAutoReview(input, {
 +        status: assessment.outcome === "allow" ? "allowed" : "denied",
@@ -1251,6 +622,7 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +      })
 +    }
 +
++    // #209：标记工具审查失败——timed_out/failed/fallback_user 状态和错误原因
 +    function markToolReviewFailed(
 +      input: PermissionAuto.ReviewInput,
 +      status: "timed_out" | "failed" | "fallback_user",
@@ -1259,6 +631,7 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +      return updateToolAutoReview(input, { status, error: reason })
 +    }
 +
++    // #209：统一更新工具 autoReview metadata——合并现有 metadata 与新 patch，保留 reviewID/precheck 等渐进字段
 +    function updateToolAutoReview(
 +      input: PermissionAuto.ReviewInput,
 +      patch: {
@@ -1272,33 +645,33 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +        }
 +      },
 +    ) {
++      // #209：无 sessionID 或 tool 绑定时跳过标记——非工具触发的审查无需 UI 进度展示
        if (!input.sessionID || !input.tool) return Effect.void
        return Effect.gen(function* () {
-         const message = yield* MessageV2.get({ sessionID: input.sessionID!, messageID: input.tool!.messageID })
-@@ -262,21 +522,29 @@ export const layer = Layer.effect(
-           (item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === input.tool!.callID,
+         // #208：用 session.messages 替代 MessageV2.get——避免 Database.Service 泄漏到 review 类型
+@@ -276,18 +564,28 @@ export const layer = Layer.effect(
+           (item): item is ToolPart => item.type === "tool" && item.callID === input.tool!.callID,
          )
          if (!part || (part.state.status !== "pending" && part.state.status !== "running")) return
++        // #209：保留现有 autoReview metadata——reviewing → allowed/denied 渐进更新不覆盖已写入的 reviewID/precheck
 +        const metadata = part.state.status === "running" ? part.state.metadata : {}
 +        const current =
 +          metadata?.autoReview && typeof metadata.autoReview === "object" && !Array.isArray(metadata.autoReview)
 +            ? metadata.autoReview
 +            : {}
-         yield* sessions.updatePart({
+         yield* session.updatePart({
            ...part,
            state: {
              status: "running",
              input: part.state.status === "pending" ? { raw: part.state.raw } : part.state.input,
 -            title: `Auto review: ${input.precheck.level}`,
++            // #209：title 随状态变化——reviewing 显示 precheck level，其余显示具体状态供 UI 区分
 +            title:
 +              patch.status === "reviewing" ? `Auto review: ${input.precheck.level}` : `Auto review: ${patch.status}`,
              metadata: {
 -              ...(part.state.status === "running" ? part.state.metadata : {}),
 +              ...metadata,
-               // This metadata is intentionally small and stable: clients can show
-               // that deterministic precheck handed the tool to the reviewer
-               // without rendering the hidden reviewer prompt or trusting it as a
-               // permission result.
+               // #208：metadata 小而稳定——客户端可展示 precheck 交接而不渲染隐藏 reviewer prompt
                autoReview: {
 +                ...current,
                  reviewID: input.reviewID,
@@ -1307,10 +680,11 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
                },
              },
              time: { start: part.state.status === "running" ? part.state.time.start : Date.now() },
-@@ -302,8 +570,19 @@ function buildMessages(input: { system: string; userItems: readonly PermissionRe
+@@ -310,8 +608,20 @@ function buildMessages(input: { system: string; userItems: readonly PermissionRe
    ] satisfies ModelMessage[]
  }
  
++// #209：渲染 reviewer prompt 为可检查文本——子会话用户消息可见但不可作为授权证据
 +function renderReviewerPrompt(messages: readonly ModelMessage[]) {
 +  return messages
 +    .map((message) =>
@@ -1322,14 +696,14 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
 +    .join("\n\n")
 +}
 +
+ // #198：判断是否为 reviewer 自身错误——TimedOut 和 RunError 是可预期的运行时错误，其他错误向上传播
+-// #198：区分错误类型——reviewer 自身错误已有 _tag 标识，provider 错误需包装为 RunError
++// #209：streaming refactor 后错误来源变为 streamText 的 fullStream 事件，但 RunError 仍是唯一可预期包装
  function isReviewerError(error: unknown): error is Error {
--  // Preserve typed reviewer failures through the generateObject error mapping;
-+  // Preserve typed reviewer failures through provider stream error mapping;
-   // everything else is wrapped as ReviewerRunError for one fail-closed path.
    return error instanceof ReviewerTimedOut || error instanceof ReviewerRunError
  }
-@@ -319,7 +598,8 @@ function reviewerEnabled(permission: Config.Info["permission"], metadata: Readon
- 
+@@ -327,7 +637,8 @@ function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, metada
+ // #198：提取错误消息——provider/model 错误在 reason 中暴露用于诊断，但 AutoDeniedError 仍阻止鼓励绕过策略的重试建议
  function errorMessage(error: unknown) {
    if (error instanceof Error) return error.message
 -  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message
@@ -1338,535 +712,63 @@ index 4f8dd8b37e5e92f1a4a898b716003e0d8c451537..2d6c838dfde3d2bde638b31cf2527cfa
    return String(error)
  }
  
-@@ -330,8 +610,8 @@ function loadTenantPolicy(autoReview: { policy?: string; policy_path?: string }
-     // the baseline critical-deny taxonomy.
-     const pathPolicy = autoReview?.policy_path
-       ? yield* Effect.promise(() => Bun.file(autoReview.policy_path!).text()).pipe(
--          Effect.mapError((error) =>
--            new ReviewerRunError({ reason: `failed to load auto_review.policy_path: ${String(error)}` }),
-+          Effect.mapError(
-+            (error) => new ReviewerRunError({ reason: `failed to load auto_review.policy_path: ${String(error)}` }),
-           ),
-         )
-       : ""
-@@ -341,10 +621,7 @@ function loadTenantPolicy(autoReview: { policy?: string; policy_path?: string }
-   })
- }
- 
--export const defaultLayer = layer.pipe(
--  Layer.provide(Config.defaultLayer),
--  Layer.provide(Provider.defaultLayer),
--)
-+export const defaultLayer = layer.pipe(Layer.provide(Config.defaultLayer), Layer.provide(Provider.defaultLayer))
- 
- // Permission.defaultLayer consumes this bundled reviewer layer before building
- // Permission.Service. `Layer.suspend` preserves the historical cycle boundary:
 diff --git a/packages/opencode/src/permission/reviewer/transcript.ts b/packages/opencode/src/permission/reviewer/transcript.ts
-index 12f579d202d3a3372d729aa6b632e35aed2b1342..599016108b39880d47205ba40a0caf50b717afd9 100644
+index bc38f17344..19e4efa4ac 100644
 --- a/packages/opencode/src/permission/reviewer/transcript.ts
 +++ b/packages/opencode/src/permission/reviewer/transcript.ts
-@@ -57,6 +57,11 @@ function renderPart(part: MessageV2.Part) {
-   // reviewer over-trust the agent's own rationale.
+@@ -61,6 +61,10 @@ function renderPart(part: Part) {
    if (part.hidden) return ""
+   // #206：synthetic 文本不是用户输入——协议生成的上下文不应被误认为用户授权
    if (part.type === "text" && part.synthetic) return ""
-+  // Reviewer child-session request cells are visible for audit/navigation, but
-+  // they are protocol records generated by opencode, not fresh user approval.
-+  // Exclude them if a future incremental review ever projects the reviewer
-+  // child transcript back into another review request.
++  // #209：reviewer 子会话请求 cell 是协议记录而非人类授权——排除以免被误认为授权证据
++  // #209：用 metadata 而非 synthetic 标记——请求 cell 需在子会话中可见可审计，仅在 transcript 投影给 reviewer 时排除
++  // #209：此排除防止增量审查把上一轮 reviewer 自身请求当作新的用户授权——否则 reviewer 会自我批准
 +  if (part.type === "text" && part.metadata?.permissionReviewerRequest === true) return ""
+   // #206：reasoning 是模型内部思考——不应作为授权证据，否则 reviewer 可能过度信任 agent 自身理由
    if (part.type === "reasoning") return ""
    if (part.type === "text") return truncate(part.text)
-   if (part.type === "tool") return renderTool(part)
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index f299cd6e44e284ce5765d39ac6ba1805ed3b1890..8a8cf647db2d242a07a22010e9cdb426b2dd109b 100644
+index 2edf42c1e6..6a0c692bd3 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -200,7 +200,13 @@ export const layer = Layer.effect(
+@@ -194,7 +194,12 @@ const layer = Layer.effect(
              status: "completed",
              input: match.part.state.input,
              output: output.output,
 -            metadata: output.metadata,
-+            // Permission auto-review annotates the running tool part before the
-+            // reviewed command executes. Tool completion replaces metadata with
-+            // the tool's own result, so preserve that small review envelope here
-+            // to keep the final shell card linked to the reviewer subagent.
++            // #209：auto-review 注解在 running 状态附加——completion 替换 metadata 时保留 autoReview 信封
++            // #209：completion 用工具自身 output.metadata 覆盖——autoReview 是 reviewer 写入的外部注解，不属于工具输出，必须显式回填
++            // #209：无 autoReview 时直接用 output.metadata——非自动审查的工具不携带 reviewer 信封，无需额外合并
 +            metadata: match.part.state.metadata?.autoReview
 +              ? { ...output.metadata, autoReview: match.part.state.metadata.autoReview }
 +              : output.metadata,
              title: output.title,
              time: { start: match.part.state.time.start, end: Date.now() },
              attachments: output.attachments,
-@@ -222,6 +228,10 @@ export const layer = Layer.effect(
-             status: "error",
+@@ -218,7 +223,11 @@ const layer = Layer.effect(
              input: match.part.state.input,
              error: errorMessage(error),
-+            // Denied/failed auto reviews terminalize the shell as an error, but
-+            // the UI still needs the review result line and reviewer-session link
-+            // that were attached while the tool was running.
-+            metadata: match.part.state.metadata?.autoReview ? { autoReview: match.part.state.metadata.autoReview } : undefined,
+             // Keep metadata streamed while running so failures retain progress detail (e.g. execute's child calls).
+-            metadata: match.part.state.metadata,
++            // #209：denied/failed auto-review 终态化为 error——UI 仍需 review 结果行和 reviewer 子会话链接
++            // #209：error 分支不合并 output.metadata——失败时无工具输出，仅保留 autoReview 注解使 UI 能渲染审查结论与导航链接
++            metadata: match.part.state.metadata?.autoReview
++              ? { autoReview: match.part.state.metadata.autoReview }
++              : match.part.state.metadata,
              time: { start: match.part.state.time.start, end: Date.now() },
            },
          })
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index b095d719d40f36774df4141b4121a6a7c77ef244..44dba32b3dbe1440504ee21a9884c25a8853ef10 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -3,7 +3,13 @@ import { expect, test } from "bun:test"
- import { Global } from "@opencode-ai/core/global"
- import { testRender, useRenderer } from "@opentui/solid"
- import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
--import type { AssistantMessage, GlobalEvent, Part, Session as SessionInfo } from "@opencode-ai/sdk/v2"
-+import type {
-+  AssistantMessage,
-+  GlobalEvent,
-+  Part,
-+  Session as SessionInfo,
-+  UserMessage as SDKUserMessage,
-+} from "@opencode-ai/sdk/v2"
- import { onCleanup } from "solid-js"
- import { tmpdir } from "../../../fixture/fixture"
- import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
-@@ -39,7 +45,7 @@ test("assistant inline tool messages are separated outside the message border",
-       msg_two: [completedToolPart("part_grep", "msg_two", "grep", { pattern: "needle" })],
-     },
-     async (app) => {
--      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Grep \"needle\"")))
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes('Grep "needle"')))
-       const read = findRow(frame, "Read alpha.ts")
- 
-       expect(frame[read]).toMatch(/^┃\s+→ Read alpha\.ts/)
-@@ -61,7 +67,8 @@ test("assistant internal part spacing keeps the same message border continuous",
-     async (app) => {
-       const frame = await waitForFrame(
-         app,
--        (lines) => lines.some((line) => line.includes("Thinking")) && lines.some((line) => line.includes("Read alpha.ts")),
-+        (lines) =>
-+          lines.some((line) => line.includes("Thinking")) && lines.some((line) => line.includes("Read alpha.ts")),
-       )
-       const thinking = findRow(frame, "Thinking")
- 
-@@ -76,7 +83,10 @@ test("assistant first visible part does not inherit top spacing from hidden part
-   await withRenderedSession(
-     [assistantMessage("msg_hidden", 1)],
-     {
--      msg_hidden: [textPart("part_empty", "msg_hidden", "   "), textPart("part_visible", "msg_hidden", "First visible")],
-+      msg_hidden: [
-+        textPart("part_empty", "msg_hidden", "   "),
-+        textPart("part_visible", "msg_hidden", "First visible"),
-+      ],
-     },
-     async (app) => {
-       const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("First visible")))
-@@ -127,7 +137,9 @@ test("pending edit tool shows streamed deletion and addition counts", async () =
-       ],
-     },
-     async (app) => {
--      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/space file.ts +1 -2")))
-+      const frame = await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("Edit src/space file.ts +1 -2")),
-+      )
-       expect(frame[findRow(frame, "Edit src/space file.ts")]).toContain("+1 -2")
-     },
-   )
-@@ -236,11 +248,240 @@ test("pending tool line counts update from streamed raw deltas", async () => {
-   )
- })
- 
-+test("shell tool renders auto review as a second status line", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_auto_review", 1)],
-+    {
-+      msg_auto_review: [
-+        runningToolPart("part_shell_review", "msg_auto_review", "bash", {
-+          command: 'Get-Content -Path "$env:USERPROFILE\\.ssh\\id_rsa"',
-+          metadata: {
-+            autoReview: {
-+              reviewID: "review_shell",
-+              sessionID: "ses_reviewer_child",
-+              status: "reviewing",
-+              precheck: { level: "cautious", reason: "private key access requires reviewer approval" },
-+            },
-+          },
-+        }),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("◌ auto review · cautious · @permission-reviewer")),
-+      )
-+      const command = findRow(frame, 'Get-Content -Path "$env:USERPROFILE\\.ssh\\id_rsa"')
-+      expect(frame[command + 1]).toContain("◌ auto review · cautious · @permission-reviewer")
-+    },
-+  )
-+})
-+
-+test("completed shell tool keeps the auto review result line", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_auto_review_done", 1)],
-+    {
-+      msg_auto_review_done: [
-+        completedToolPart(
-+          "part_shell_review_done",
-+          "msg_auto_review_done",
-+          "bash",
-+          { command: "git push origin main" },
-+          {
-+            output: "pushed",
-+            autoReview: {
-+              reviewID: "review_shell_done",
-+              sessionID: "ses_reviewer_child",
-+              status: "allowed",
-+              precheck: { level: "cautious", reason: "git push requires reviewer approval" },
-+              result: { risk_level: "high", user_authorization: "high", rationale: "user explicitly requested push" },
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer")),
-+      )
-+      const command = findRow(frame, "$ git push origin main")
-+      expect(frame[command + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
-+    },
-+  )
-+})
-+
-+test("collapsed completed shell preview keeps the auto review result line", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_auto_review_collapsed", 1)],
-+    {
-+      msg_auto_review_collapsed: [
-+        completedToolPart(
-+          "part_shell_review_collapsed",
-+          "msg_auto_review_collapsed",
-+          "bash",
-+          { command: "git push origin main" },
-+          {
-+            output: Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n"),
-+            autoReview: {
-+              reviewID: "review_shell_collapsed",
-+              sessionID: "ses_reviewer_child",
-+              status: "allowed",
-+              precheck: { level: "cautious", reason: "git push requires reviewer approval" },
-+              result: { risk_level: "high", user_authorization: "high", rationale: "user explicitly requested push" },
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
-+      expect(frame.some((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))).toBe(
-+        true,
-+      )
-+    },
-+  )
-+})
-+
-+test("errored shell tool keeps the denied auto review result line", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_auto_review_error", 1)],
-+    {
-+      msg_auto_review_error: [
-+        errorToolPart(
-+          "part_shell_review_error",
-+          "msg_auto_review_error",
-+          "bash",
-+          { command: "git push origin main" },
-+          "auto reviewer denied",
-+          {
-+            autoReview: {
-+              reviewID: "review_shell_error",
-+              sessionID: "ses_reviewer_child",
-+              status: "denied",
-+              precheck: { level: "cautious", reason: "git push requires reviewer approval" },
-+              result: { risk_level: "high", user_authorization: "unknown", rationale: "push was not authorized" },
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("! auto review · denied · high risk · auth unknown")),
-+      )
-+      const command = findRow(frame, "git push origin main")
-+      expect(frame[command + 1]).toContain("! auto review · denied · high risk · auth unknown")
-+    },
-+  )
-+})
-+
-+test("permission review decision renders as a reviewer cell", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_review_decision", 1)],
-+    {
-+      msg_review_decision: [
-+        completedToolPart(
-+          "part_review_decision",
-+          "msg_review_decision",
-+          "permission_review_decision",
-+          {
-+            outcome: "deny",
-+            risk_level: "high",
-+            user_authorization: "unknown",
-+            rationale: "private key read was not explicitly authorized",
-+          },
-+          {
-+            outcome: "deny",
-+            risk_level: "high",
-+            user_authorization: "unknown",
-+            rationale: "private key read was not explicitly authorized",
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("denied")) &&
-+          lines.some((line) => line.includes("high")) &&
-+          lines.some((line) => line.includes("unknown")) &&
-+          lines.some((line) => line.includes("rationale")) &&
-+          lines.some((line) => line.includes("private key read was not explicitly authorized")),
-+      )
-+      expect(frame.some((line) => line.includes("! Permission review decision"))).toBe(false)
-+    },
-+  )
-+})
-+
-+test("reviewer child session shows full reviewer prompt and assistant rationale before decision tool", async () => {
-+  await withRenderedSession(
-+    [userMessage("msg_review_request", 1), assistantMessage("msg_review_answer", 2, "msg_review_request")],
-+    {
-+      msg_review_request: [
-+        textPart(
-+          "part_review_request",
-+          "msg_review_request",
-+          [
-+            "system:",
-+            "You are opencode's isolated permission reviewer.",
-+            "",
-+            "user:",
-+            ">>> TRANSCRIPT START",
-+            "[1] user: please inspect the exact key file",
-+            ">>> TRANSCRIPT END",
-+            ">>> APPROVAL REQUEST START",
-+            '{"permission":"bash"}',
-+            ">>> APPROVAL REQUEST END",
-+          ].join("\n"),
-+          { metadata: { permissionReviewerRequest: true } },
-+        ),
-+      ],
-+      msg_review_answer: [
-+        textPart(
-+          "part_review_text",
-+          "msg_review_answer",
-+          "The requested private key read is not explicitly authorized.",
-+        ),
-+        completedToolPart(
-+          "part_review_decision_flow",
-+          "msg_review_answer",
-+          "permission_review_decision",
-+          {
-+            outcome: "deny",
-+            risk_level: "high",
-+            user_authorization: "unknown",
-+            rationale: "private key read was not explicitly authorized",
-+          },
-+          {
-+            outcome: "deny",
-+            risk_level: "high",
-+            user_authorization: "unknown",
-+            rationale: "private key read was not explicitly authorized",
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes(">>> TRANSCRIPT START")) &&
-+          lines.some((line) => line.includes(">>> APPROVAL REQUEST START")) &&
-+          lines.some((line) => line.includes("rationale")) &&
-+          lines.some((line) => line.includes("private key read")),
-+      )
-+    },
-+    {},
-+    { height: 42 },
-+  )
-+})
-+
- async function withRenderedSession(
--  messages: AssistantMessage[],
-+  messages: Array<AssistantMessage | SDKUserMessage>,
-   parts: Record<string, Part[]>,
-   run: (app: Awaited<ReturnType<typeof testRender>>, emit: (event: GlobalEvent) => void) => Promise<void>,
-   kv: Record<string, unknown> = {},
-+  dimensions: { width?: number; height?: number } = {},
- ) {
-   const previous = Global.Path.state
-   await using tmp = await tmpdir()
-@@ -261,8 +502,8 @@ async function withRenderedSession(
- 
-   const events = createEventSource()
-   const app = await testRender(() => <SessionHarness fetch={calls.fetch} events={events.source} />, {
--    width: 80,
--    height: 16,
-+    width: dimensions.width ?? 80,
-+    height: dimensions.height ?? 16,
-     footerHeight: 0,
-   })
- 
-@@ -274,7 +515,10 @@ async function withRenderedSession(
-   }
- }
- 
--function SessionHarness(props: { fetch: typeof globalThis.fetch; events: ReturnType<typeof createEventSource>["source"] }) {
-+function SessionHarness(props: {
-+  fetch: typeof globalThis.fetch
-+  events: ReturnType<typeof createEventSource>["source"]
-+}) {
-   const renderer = useRenderer()
-   const config = createTuiResolvedConfig()
-   const keymap = createDefaultOpenTuiKeymap(renderer)
-@@ -361,13 +605,24 @@ function sessionInfo() {
-   } satisfies SessionInfo
- }
- 
--function assistantMessage(id: string, created: number) {
-+function userMessage(id: string, created: number) {
-+  return {
-+    id,
-+    sessionID,
-+    role: "user",
-+    time: { created },
-+    agent: "permission-reviewer",
-+    model: { providerID: "provider", modelID: "model" },
-+  } satisfies SDKUserMessage
-+}
-+
-+function assistantMessage(id: string, created: number, parentID = "msg_user") {
-   return {
-     id,
-     sessionID,
-     role: "assistant",
-     time: { created, completed: created + 1 },
--    parentID: "msg_user",
-+    parentID,
-     modelID: "model",
-     providerID: "provider",
-     mode: "build",
-@@ -378,17 +633,24 @@ function assistantMessage(id: string, created: number) {
-   } satisfies AssistantMessage
- }
- 
--function textPart(id: string, messageID: string, text: string) {
-+function textPart(id: string, messageID: string, text: string, extra: Partial<Extract<Part, { type: "text" }>> = {}) {
-   return {
-     id,
-     sessionID,
-     messageID,
-     type: "text",
-     text,
-+    ...extra,
-   } satisfies Extract<Part, { type: "text" }>
- }
- 
--function completedToolPart(id: string, messageID: string, tool: string, input: Record<string, unknown>) {
-+function completedToolPart(
-+  id: string,
-+  messageID: string,
-+  tool: string,
-+  input: Record<string, unknown>,
-+  metadata: Record<string, unknown> = {},
-+) {
-   return {
-     id,
-     sessionID,
-@@ -401,7 +663,56 @@ function completedToolPart(id: string, messageID: string, tool: string, input: R
-       input,
-       output: "",
-       title: tool,
--      metadata: {},
-+      metadata,
-+      time: { start: 1, end: 2 },
-+    },
-+  } satisfies Extract<Part, { type: "tool" }>
-+}
-+
-+function runningToolPart(
-+  id: string,
-+  messageID: string,
-+  tool: string,
-+  input: Record<string, unknown> & { metadata?: Record<string, unknown> },
-+) {
-+  const metadata = input.metadata ?? {}
-+  return {
-+    id,
-+    sessionID,
-+    messageID,
-+    type: "tool",
-+    callID: id,
-+    tool,
-+    state: {
-+      status: "running",
-+      input: Object.fromEntries(Object.entries(input).filter(([key]) => key !== "metadata")),
-+      title: tool,
-+      metadata,
-+      time: { start: 1 },
-+    },
-+  } satisfies Extract<Part, { type: "tool" }>
-+}
-+
-+function errorToolPart(
-+  id: string,
-+  messageID: string,
-+  tool: string,
-+  input: Record<string, unknown>,
-+  error: string,
-+  metadata: Record<string, unknown> = {},
-+) {
-+  return {
-+    id,
-+    sessionID,
-+    messageID,
-+    type: "tool",
-+    callID: id,
-+    tool,
-+    state: {
-+      status: "error",
-+      input,
-+      error,
-+      metadata,
-       time: { start: 1, end: 2 },
-     },
-   } satisfies Extract<Part, { type: "tool" }>
 diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
-index 0ee134d83985b40e0158c8a32654a653c6c2fea7..3d6e97a09e39286f24d690eb06b3059a6ff654a7 100644
+index 29b09e2bcc..9604d3d6c4 100644
 --- a/packages/opencode/test/permission/auto.test.ts
 +++ b/packages/opencode/test/permission/auto.test.ts
-@@ -20,7 +20,12 @@ const shellExternalDirectory = (command: string, reviewer?: PermissionAuto.Revie
-       {
-         permission: "external_directory",
-         patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
--        metadata: { action_kind: "shell", command, cwd: process.cwd(), shell: process.platform === "win32" ? "powershell" : "bash" },
-+        metadata: {
-+          action_kind: "shell",
-+          command,
-+          cwd: process.cwd(),
-+          shell: process.platform === "win32" ? "powershell" : "bash",
-+        },
-       },
-       reviewer,
-     ),
-@@ -161,11 +166,20 @@ describe("permission auto routing", () => {
+@@ -172,6 +172,15 @@ describe("permission auto routing", () => {
      await expect(
        bash(String.raw`Get-ChildItem -Path "$env:USERPROFILE\.ssh" -Force -ErrorAction SilentlyContinue`, reviewer),
      ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
++    // #209：if(Test-Path){Get-Content} 内的 Get-Content 不紧跟行首/分隔符——去掉锚点后才能被 cautiousRaw 捕获
++    // #209：验证 PowerShell 条件块内的敏感读取不再因锚点漏审——deny + reviewer 证明 cautiousRaw 命中并送审
++    // #209：Test-Path 与 Get-Content 在同一行但被 { } 分隔——旧锚点 (?:^|[;&|]\s*) 无法匹配 { 后的 Get-Content
 +    await expect(
 +      bash(
 +        String.raw`if (Test-Path -LiteralPath "$env:USERPROFILE\.ssh\id_rsa") { Get-Content -LiteralPath "$env:USERPROFILE\.ssh\id_rsa" } else { "id_rsa not found" }`,
@@ -1876,39 +778,22 @@ index 0ee134d83985b40e0158c8a32654a653c6c2fea7..3d6e97a09e39286f24d690eb06b3059a
      expect(called).toBe(true)
    })
  
-   test("uses shell evidence for external directory auto routing", async () => {
--    await expect(shellExternalDirectory("git status --porcelain")).resolves.toMatchObject({ action: "allow", source: "precheck" })
-+    await expect(shellExternalDirectory("git status --porcelain")).resolves.toMatchObject({
-+      action: "allow",
-+      source: "precheck",
-+    })
- 
-     let called = false
-     await expect(
-@@ -196,7 +210,9 @@ describe("permission auto routing", () => {
-           {
-             permission: "external_directory",
-             patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
--            metadata: { filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa" },
-+            metadata: {
-+              filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa",
-+            },
-           },
-           {
-             review: () =>
 diff --git a/packages/opencode/test/permission/reviewer-prompt.test.ts b/packages/opencode/test/permission/reviewer-prompt.test.ts
-index 864c9107765b5384350469614e078103b661e922..4f0e00535226eaafcbc644448bed37af3e844322 100644
+index 9a1280e663..118b5c4cd9 100644
 --- a/packages/opencode/test/permission/reviewer-prompt.test.ts
 +++ b/packages/opencode/test/permission/reviewer-prompt.test.ts
-@@ -150,6 +150,22 @@ describe("permission reviewer prompt", () => {
+@@ -165,6 +165,26 @@ describe("permission reviewer prompt", () => {
      expect(transcript.emptyEntries).toBe(true)
    })
  
++  // #209：reviewer 子会话请求 cell 带有 permissionReviewerRequest metadata——不应被误认为人类授权
++  // #209：验证 transcript 投影排除协议请求 cell——entries 为空证明 renderPart 提前返回空串
 +  test("transcript excludes reviewer protocol request cells as authorization evidence", () => {
 +    const transcript = PermissionReviewerTranscript.fromMessages([
 +      {
 +        info: userInfo("msg_reviewer_protocol"),
 +        parts: [
++          // #209：metadata.permissionReviewerRequest=true 标记此文本为协议生成——与 synthetic 不同，cell 在子会话中仍可见
 +          textPart("msg_reviewer_protocol", "prt_reviewer_protocol", "Auto permission review request", {
 +            metadata: { permissionReviewerRequest: true },
 +          }),
@@ -1916,32 +801,24 @@ index 864c9107765b5384350469614e078103b661e922..4f0e00535226eaafcbc644448bed37af
 +      },
 +    ])
 +
++    // #209：排除后 entries 为空且 emptyEntries=true——证明协议 cell 未被计入可授权 transcript
 +    expect(transcript.entries).toEqual([])
 +    expect(transcript.emptyEntries).toBe(true)
 +  })
 +
+   // #206：验证单条消息多 part 时 ENTRY_CHAR_LIMIT 截短并标记 entryTruncated
    test("transcript bounds a single retained entry with many visible parts", () => {
      const transcript = PermissionReviewerTranscript.fromMessages([
-       {
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index ae16af6a8172b375869706955359752bfad22782..e96bf41c70446d14349a0061893d622e1182561d 100644
+index f34cae5350..dbc8646ca4 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -507,7 +507,9 @@ it.instance(
-         permission: [{ permission: "*", pattern: "*", action: "allow" }],
-       })
-       const payload = Buffer.from(
--        yield* Effect.promise(() => Bun.file(path.join(import.meta.dir, "../tool/fixtures/large-image.png")).arrayBuffer()),
-+        yield* Effect.promise(() =>
-+          Bun.file(path.join(import.meta.dir, "../tool/fixtures/large-image.png")).arrayBuffer(),
-+        ),
-       ).toString("base64")
- 
-       yield* prompt.prompt({
-@@ -752,6 +754,82 @@ it.instance(
-   { git: true },
+@@ -1266,6 +1266,96 @@ it.instance("loop continues when finish is stop but assistant has tool parts", (
+   }),
  )
  
++// #209：验证 reviewer streaming 持久化真实 reasoning 和 decision tool part
++// #209：端到端测试——mock LLM 返回 reasoning + permission_review_decision tool call，验证子会话持久化了各 part
 +it.instance(
 +  "auto permission reviewer persists real reasoning and decision tool parts",
 +  () =>
@@ -1951,6 +828,7 @@ index ae16af6a8172b375869706955359752bfad22782..e96bf41c70446d14349a0061893d622e
 +      const sessions = yield* Session.Service
 +      const chat = yield* sessions.create({ title: "Reviewer stream" })
 +      const command = String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa"`
++      // #209：mock LLM 响应先发 reasoning 再调用 decision tool——模拟真实 reviewer 的推理-决策两阶段流
 +      yield* llm.push(
 +        reply()
 +          .reason("Checking whether the user explicitly authorized private key disclosure.")
@@ -1963,6 +841,8 @@ index ae16af6a8172b375869706955359752bfad22782..e96bf41c70446d14349a0061893d622e
 +          .item(),
 +      )
 +
++      // #209：触发 auto 权限审查——ruleset 设为 auto 使敏感读取进入 reviewer 流程
++      // #209：Effect.flip 因为 reviewer deny 会使 ask 失败——flip 把失败转为成功值以继续断言持久化结果
 +      yield* permissions
 +        .ask({
 +          sessionID: chat.id,
@@ -1974,12 +854,16 @@ index ae16af6a8172b375869706955359752bfad22782..e96bf41c70446d14349a0061893d622e
 +        })
 +        .pipe(Effect.flip)
 +
++      // #209：reviewer 子会话作为父会话的 child 创建——find by agent 验证子会话已建立
 +      const reviewer = (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
 +      expect(reviewer).toBeDefined()
 +      if (!reviewer) return
 +
++      // #209：从 reviewer 子会话拉取持久化消息——streamText 的 part 应已写入数据库
 +      const msgs = yield* MessageV2.filterCompactedEffect(reviewer.id)
++      // #209：inputs 捕获发送给 provider 的请求——验证 tool_choice、tools、max_tokens 等 streamText 参数
 +      const inputs = yield* llm.inputs
++      // #209：streamText 不强制 tool_choice=required——部分 provider 拒绝 forced tool_choice
 +      expect(inputs[0].tool_choice).not.toBe("required")
 +      expect(JSON.stringify(inputs[0].tools)).toContain("permission_review_decision")
 +      expect(inputs[0].tools).toEqual(
@@ -1992,17 +876,22 @@ index ae16af6a8172b375869706955359752bfad22782..e96bf41c70446d14349a0061893d622e
 +          }),
 +        ]),
 +      )
++      // #209：maxOutputTokens 返回 model.limit.output=10000
 +      expect(inputs[0].max_tokens).toBe(10000)
++      // #209：reviewer 请求 cell 带 permissionReviewerRequest metadata
 +      expect(
 +        msgs.some((msg) =>
 +          msg.parts.some((part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true),
 +        ),
 +      ).toBe(true)
++      // #209：streaming 持久化 reasoning part
 +      expect(
 +        msgs.some((msg) =>
 +          msg.parts.some((part) => part.type === "reasoning" && part.text.includes("explicitly authorized")),
 +        ),
 +      ).toBe(true)
++      // #209：streaming 持久化 decision tool part——验证 tool-call 事件把 assessment 写入 completed tool part
++      // #209：tool part 的 metadata.rationale 必须与 mock LLM 返回的一致——证明 Schema.decode 未丢失字段
 +      expect(
 +        msgs.some((msg) =>
 +          msg.parts.some(
@@ -2018,6 +907,319 @@ index ae16af6a8172b375869706955359752bfad22782..e96bf41c70446d14349a0061893d622e
 +  { git: true },
 +)
 +
- it.instance(
-   "failed subtask preserves metadata on error tool state",
-   () =>
+ it.instance("failed subtask preserves metadata on error tool state", () =>
+   Effect.gen(function* () {
+     const { llm } = yield* useServerConfig((url) => ({
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index 0869a3de22..58ec5022bd 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -2040,6 +2040,10 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
+         <Match when={display() === "question"}>
+           <Question {...toolprops} />
+         </Match>
++        {/* #209：permission_review_decision 渲染为 reviewer 决策 cell */}
++        <Match when={display() === "permission_review_decision"}>
++          <PermissionReviewDecision {...toolprops} />
++        </Match>
+         <Match when={display() === "skill"}>
+           <Skill {...toolprops} />
+         </Match>
+@@ -2121,8 +2125,122 @@ function GenericTool(props: ToolProps) {
+   )
+ }
+ 
++// #209：auto-review metadata 类型——reviewID/sessionID/status/precheck/result 描述 reviewer 状态
++// #209：AutoReviewMetadata 由 service.ts updateToolAutoReview 写入工具 part 的 state.metadata.autoReview
++type AutoReviewMetadata = {
++  reviewID: string
++  sessionID?: string
++  status?: "reviewing" | "allowed" | "denied" | "timed_out" | "failed" | "fallback_user"
++  precheck?: { level: string; reason: string }
++  result?: { risk_level: string; user_authorization: string; rationale: string }
++}
++
++// #209：从工具 metadata 提取 autoReview——非对象或缺少 reviewID 返回 undefined
++export function autoReviewMetadata(metadata: Record<string, unknown>): AutoReviewMetadata | undefined {
++  const value = metadata.autoReview
++  // #209：非对象或数组直接拒绝——防止 string/number 等 metadata 被强转为 review 结构
++  if (!value || typeof value !== "object" || Array.isArray(value)) return
++  const review = value as Record<string, unknown>
++  // #209：reviewID 是 reviewer 写入的必填锚点——缺少则非有效 auto-review 注解，避免渲染空壳状态行
++  if (typeof review.reviewID !== "string") return
++  return review as AutoReviewMetadata
++}
++
++// #209：auto-review 状态标签——两行合约：命令 + 一行紧凑审查状态
++export function autoReviewLabel(review: AutoReviewMetadata) {
++  const agent = "@permission-reviewer"
++  // #209：◌/✓/! 三态字形——reviewing 进行中、allowed 通过、其余终态均为 ! 提示用户注意
++  // ◌ reviewing, ✓ allowed, ! all non-allow terminal outcomes
++  switch (review.status) {
++    case "allowed":
++      return `✓ auto review · allowed · auth ${review.result?.user_authorization ?? "unknown"} · ${agent}`
++    case "denied":
++      return `! auto review · denied · ${review.result?.risk_level ?? "unknown"} risk · auth ${review.result?.user_authorization ?? "unknown"} · ${agent}`
++    case "timed_out":
++      return `! auto review · timed out · failed closed · ${agent}`
++    case "failed":
++      return `! auto review · failed · failed closed · ${agent}`
++    case "fallback_user":
++      return `! auto review · unavailable · asking user · ${agent}`
++    default:
++      return `◌ auto review · ${review.precheck?.level ?? "reviewing"} · ${agent}`
++  }
++}
++
++// #209：auto-review 颜色——allowed 绿色，非 reviewing 非 allowed 橙色，其他蓝色
++// #209：颜色与字形分工——字形区分通过/失败，颜色补充严重度：终态失败橙色比 reviewing 蓝色更醒目
++function autoReviewColor(review: AutoReviewMetadata, theme: ReturnType<typeof useTheme>["theme"]) {
++  if (review.status === "allowed") return theme.success
++  if (review.status && review.status !== "reviewing") return theme.warning
++  return theme.info
++}
++
++// #209：AutoReviewLine——可点击导航到 reviewer 子会话的审查状态行
++function AutoReviewLine(props: { review: AutoReviewMetadata }) {
++  const { theme } = useTheme()
++  const { navigate } = useRoute()
++  const renderer = useRenderer()
++  const [hover, setHover] = createSignal(false)
++  // #209：仅当有 sessionID 时可点击——无子会话的审查不可导航，hover 也不高亮
++  const clickable = createMemo(() => Boolean(props.review.sessionID))
++  return (
++    <box
++      onMouseOver={() => clickable() && setHover(true)}
++      onMouseOut={() => setHover(false)}
++      onMouseUp={() => {
++        // #209：无 sessionID 不可导航——无子会话的纯流式审查不产生可跳转目标
++        if (!props.review.sessionID) return
++        // #209：用户选中文本时不导航——避免复制审查结论时误触发跳转
++        if (renderer.getSelection()?.getSelectedText()) return
++        navigate({ type: "session", sessionID: props.review.sessionID })
++      }}
++    >
++      <text fg={hover() ? theme.text : autoReviewColor(props.review, theme)} wrapMode="none">
++        {autoReviewLabel(props.review)}
++      </text>
++    </box>
++  )
++}
++
++// #209：PermissionReviewDecision——reviewer 决策 tool cell，展示 outcome/risk/auth/rationale
++function PermissionReviewDecision(props: ToolProps) {
++  const { theme } = useTheme()
++  // #209：合并 input 与 metadata——tool-call 事件把 assessment 同时写入 input 和 metadata，合并确保字段完整
++  const decision = createMemo(() => ({ ...props.input, ...props.metadata }) as Record<string, unknown>)
++  const outcome = createMemo(() => (decision().outcome === "allow" ? "allowed" : "denied"))
++  const risk = createMemo(() => String(decision().risk_level ?? "unknown"))
++  const auth = createMemo(() => String(decision().user_authorization ?? "unknown"))
++  const rationale = createMemo(() => {
++    const value = decision().rationale
++    return typeof value === "string" ? value : ""
++  })
++  return (
++    <BlockTool title={`Permission review decision`} part={props.part} maxLines={0}>
++      <box flexDirection="column" gap={1}>
++        {/* #209：结构化决策证据——assistant text 可能辩论替代方案，此 metadata 是审计的最终 reviewer 输出 */}
++        <box gap={1}>
++          <text fg={theme.textMuted}>outcome</text>
++          <text fg={theme.text}>{outcome()}</text>
++        </box>
++        <box gap={1}>
++          <text fg={theme.textMuted}>risk</text>
++          <text fg={theme.text}>{risk()}</text>
++        </box>
++        <box gap={1}>
++          <text fg={theme.textMuted}>auth</text>
++          <text fg={theme.text}>{auth()}</text>
++        </box>
++        <Show when={rationale()}>
++          <box flexDirection="column">
++            <text fg={theme.textMuted}>rationale</text>
++            <text fg={theme.text}>{rationale()}</text>
++          </box>
++        </Show>
++      </box>
++    </BlockTool>
++  )
++}
+ 
+-// #187：从 part.state.raw 增量喂 parser，200ms 节流出 stats
+ function createPendingToolInputStats(part: () => ToolPart) {
+   const [stats, setStats] = createSignal<PendingToolInputStats>()
+   let parser = createPendingToolInputParser(part().tool)
+@@ -2505,7 +2623,12 @@ function Shell(props: ToolProps) {
+   const { theme } = useTheme()
+   const pathFormatter = usePathFormatter()
+   const ctx = use()
++  // #209：navigate 用于点击 auto-review 行导航到 reviewer 子会话
++  const { navigate } = useRoute()
+   const isRunning = createMemo(() => props.part.state.status === "running")
++  // #209：autoReview 从工具 metadata 提取——reviewing/allowed/denied 状态驱动 UI
++  // #209：createMemo 缓存提取结果——metadata 仅在 part 更新时变化，避免每帧重复解析
++  const autoReview = createMemo(() => autoReviewMetadata(props.metadata))
+   // 上下文输出信号：右键切换显示返回给模型的内容
+   const [showContextOutput, setShowContextOutput] = createSignal(false)
+   const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
+@@ -2574,8 +2697,8 @@ function Shell(props: ToolProps) {
+           // #144：Shell 折叠预览前 10 行
+           preview={
+             shellCanCollapse() && !showContextOutput() ? (
+-              // #144：Shell 预览带命令前缀
+-              <text fg={theme.text}>{`$ ${stringValue(props.input.command) ?? ""}${String.fromCharCode(10)}${previewText(output(), 10)}`}</text>
++              // #209：Shell 预览带命令前缀和 auto-review 状态行——折叠时也保留两行审查合约
++              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, autoReview() ? autoReviewLabel(autoReview()!) : undefined, previewText(output(), 10)].filter(Boolean).join(String.fromCharCode(10))}</text>
+             ) : undefined
+           }
+         >
+@@ -2586,6 +2709,8 @@ function Shell(props: ToolProps) {
+             </Show>
+               <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
+             </Show>
++            {/* #209：auto-review 状态行——可点击导航到 reviewer 子会话 */}
++            <Show when={autoReview()}>{(review) => <AutoReviewLine review={review()} />}</Show>
+             <Show when={output()}>
+               <text fg={theme.text}>{limited()}</text>
+             </Show>
+@@ -2596,8 +2721,20 @@ function Shell(props: ToolProps) {
+         </BlockTool>
+       </Match>
+       <Match when={true}>
+-        <InlineTool icon="$" pending="Writing command..." complete={stringValue(props.input.command)} part={props.part}>
+-          {stringValue(props.input.command)}
++        {/* #209：InlineTool 支持点击导航到 reviewer 子会话，children 附加 auto-review 状态行 */}
++        <InlineTool
++          icon="$"
++          pending="Writing command..."
++          complete={stringValue(props.input.command)}
++          part={props.part}
++          onClick={() => {
++            const sessionID = autoReview()?.sessionID
++            if (sessionID) navigate({ type: "session", sessionID })
++          }}
++        >
++          {[stringValue(props.input.command), autoReview() ? `  ${autoReviewLabel(autoReview()!)}` : undefined]
++            .filter(Boolean)
++            .join("\n")}
+         </InlineTool>
+       </Match>
+     </Switch>
+@@ -3333,6 +3470,7 @@ const toolDisplays = new Set([
+   "question",
+   "skill",
+   "execute",
++  "permission_review_decision",
+ ])
+ 
+ export function toolDisplay(tool: string) {
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.ts b/packages/tui/test/routes/session/auto-review-render.test.ts
+new file mode 100644
+index 0000000000..acce6c4e55
+--- /dev/null
++++ b/packages/tui/test/routes/session/auto-review-render.test.ts
+@@ -0,0 +1,104 @@
++// #209：auto-review 渲染逻辑单元测试
++import { describe, expect, test } from "bun:test"
++import { autoReviewLabel, autoReviewMetadata, toolDisplay } from "../../../src/routes/session"
++
++describe("auto review rendering (#209)", () => {
++  test("autoReviewMetadata returns undefined for missing autoReview", () => {
++    // #209：无 autoReview 字段时返回 undefined
++    // #209：覆盖 null/string/array 四种非法类型——确保 type guard 不被 falsy 或非对象值欺骗
++    expect(autoReviewMetadata({})).toBeUndefined()
++    expect(autoReviewMetadata({ autoReview: null })).toBeUndefined()
++    expect(autoReviewMetadata({ autoReview: "string" })).toBeUndefined()
++    expect(autoReviewMetadata({ autoReview: [] })).toBeUndefined()
++  })
++
++  test("autoReviewMetadata returns undefined when reviewID is missing", () => {
++    // #209：缺少 reviewID 字段时返回 undefined——防止部分写入的 metadata 被误用
++    expect(autoReviewMetadata({ autoReview: { status: "reviewing" } })).toBeUndefined()
++  })
++
++  test("autoReviewMetadata extracts valid autoReview metadata", () => {
++    // #209：有效 autoReview metadata 提取 reviewID/sessionID/status/precheck/result
++    // #209：验证全字段透传——service.ts updateToolAutoReview 写入的所有渐进字段都能被 UI 读取
++    const metadata = {
++      autoReview: {
++        reviewID: "review_1",
++        sessionID: "ses_reviewer",
++        status: "allowed",
++        precheck: { level: "cautious", reason: "sensitive read" },
++        result: { risk_level: "high", user_authorization: "high", rationale: "authorized" },
++      },
++    }
++    const review = autoReviewMetadata(metadata)
++    expect(review).toBeDefined()
++    expect(review?.reviewID).toBe("review_1")
++    expect(review?.sessionID).toBe("ses_reviewer")
++    expect(review?.status).toBe("allowed")
++    expect(review?.precheck?.level).toBe("cautious")
++    expect(review?.result?.risk_level).toBe("high")
++  })
++
++  test("autoReviewLabel shows reviewing state with precheck level", () => {
++    // #209：reviewing 状态展示 ◌ + precheck level + @permission-reviewer
++    const label = autoReviewLabel({
++      reviewID: "review_2",
++      status: "reviewing",
++      precheck: { level: "cautious", reason: "sensitive read" },
++    })
++    expect(label).toBe("◌ auto review · cautious · @permission-reviewer")
++  })
++
++  test("autoReviewLabel shows allowed state with auth level", () => {
++    // #209：allowed 状态展示 ✓ + auth level + @permission-reviewer
++    const label = autoReviewLabel({
++      reviewID: "review_3",
++      status: "allowed",
++      result: { risk_level: "high", user_authorization: "high", rationale: "authorized" },
++    })
++    expect(label).toBe("✓ auto review · allowed · auth high · @permission-reviewer")
++  })
++
++  test("autoReviewLabel shows denied state with risk and auth", () => {
++    // #209：denied 状态展示 ! + risk + auth + @permission-reviewer
++    const label = autoReviewLabel({
++      reviewID: "review_4",
++      status: "denied",
++      result: { risk_level: "high", user_authorization: "unknown", rationale: "not authorized" },
++    })
++    expect(label).toBe("! auto review · denied · high risk · auth unknown · @permission-reviewer")
++  })
++
++  test("autoReviewLabel shows timed_out state as failed closed", () => {
++    // #209：timed_out 状态展示 ! + timed out + failed closed
++    const label = autoReviewLabel({ reviewID: "review_5", status: "timed_out" })
++    expect(label).toBe("! auto review · timed out · failed closed · @permission-reviewer")
++  })
++
++  test("autoReviewLabel shows failed state as failed closed", () => {
++    // #209：failed 状态展示 ! + failed + failed closed
++    const label = autoReviewLabel({ reviewID: "review_6", status: "failed" })
++    expect(label).toBe("! auto review · failed · failed closed · @permission-reviewer")
++  })
++
++  test("autoReviewLabel shows fallback_user state as asking user", () => {
++    // #209：fallback_user 状态展示 ! + unavailable + asking user
++    const label = autoReviewLabel({ reviewID: "review_7", status: "fallback_user" })
++    expect(label).toBe("! auto review · unavailable · asking user · @permission-reviewer")
++  })
++
++  test("autoReviewLabel defaults to reviewing when status is undefined", () => {
++    // #209：无 status 时默认展示 reviewing + precheck level
++    // #209：默认 reviewing 是安全假设——metadata 写入与状态更新非原子，读取时可能尚未标记终态
++    const label = autoReviewLabel({
++      reviewID: "review_8",
++      precheck: { level: "general", reason: "unknown" },
++    })
++    expect(label).toBe("◌ auto review · general · @permission-reviewer")
++  })
++
++  test("toolDisplay routes permission_review_decision to dedicated renderer", () => {
++    // #209：permission_review_decision 有专属渲染器——不走 generic 回退
++    // #209：toolDisplay 返回工具名本身——ToolPart switch 据此路由到 PermissionReviewDecision 组件
++    expect(toolDisplay("permission_review_decision")).toBe("permission_review_decision")
++  })
++})

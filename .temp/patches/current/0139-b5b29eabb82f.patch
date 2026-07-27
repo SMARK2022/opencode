@@ -4,60 +4,116 @@ Date: Wed, 13 May 2026 23:37:30 +0800
 Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BATUI=E4=B8=AD=E7=9A=84?=
  =?UTF-8?q?=E4=BC=9A=E8=AF=9D=E5=A4=84=E7=90=86=E5=92=8C=E9=94=99=E8=AF=AF?=
  =?UTF-8?q?=E6=81=A2=E5=A4=8D?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-- Introduced ConnectionError utility to classify connection-related errors.
-- Updated Session component to handle recoverable connection errors without navigating away.
-- Refactored thread management to improve daemon spawning and recovery logic.
-- Added tests for SDKProvider to ensure proper URL rebinding and SSE stream handling.
-- Enhanced session processor to handle tool call states more robustly.
-- Improved error handling in prompt processing, ensuring agents are validated before execution.
-- Updated daemon tests to ensure proper isolation and signal handling.
-- Added tests for concurrent daemon recovery to ensure single replacement worker is elected.
-
-diff --git a/packages/opencode/src/cli/cmd/tui/app.tsx b/packages/opencode/src/cli/cmd/tui/app.tsx
-index 1d3693e9643be48ea6bdad68c0abb3bfd50d4eed..a3c7f94d117ab9f23c5452c97cf29f618f654432 100644
---- a/packages/opencode/src/cli/cmd/tui/app.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/app.tsx
-@@ -118,6 +118,7 @@ export function tui(input: {
-   fetch?: typeof fetch
-   headers?: RequestInit["headers"]
-   events?: EventSource
-+  reconnect?: () => Promise<string>
- }) {
-   // promise to prevent immediate exit
-   // oxlint-disable-next-line no-async-promise-executor -- intentional: async executor used for sequential setup before resolve
-@@ -195,6 +196,7 @@ export function tui(input: {
-                         fetch={input.fetch}
-                         headers={input.headers}
-                         events={input.events}
-+                        reconnect={input.reconnect}
-                       >
-                         <ProjectProvider>
-                           <SyncProvider>
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sdk.tsx b/packages/opencode/src/cli/cmd/tui/context/sdk.tsx
-index 96fa544875814f8f009d5c9a7134e3cf00eb5dd3..0637fcce9990b36b9a5aec0347e32991a2f6d7a3 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sdk.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sdk.tsx
-@@ -4,6 +4,7 @@ import { createSimpleContext } from "./helper"
- import { createGlobalEmitter } from "@solid-primitives/event-bus"
+diff --git a/packages/tui/src/util/connection-error.ts b/packages/tui/src/util/connection-error.ts
+new file mode 100644
+index 0000000000..9ae361655b
+--- /dev/null
++++ b/packages/tui/src/util/connection-error.ts
+@@ -0,0 +1,46 @@
++// #139：识别可恢复的网络/连接错误，供 SSE 重连静默吞掉
++export namespace ConnectionError {
++  export function isConnectionError(error: unknown): boolean {
++    if (error == null) return false
++    if (typeof error === "string") return matchMessage(error)
++    if (typeof error !== "object") return false
++    const err = error as { name?: string; message?: string; code?: string; cause?: unknown }
++    // #139：中止视为可恢复连接中断
++    if (err.name === "AbortError") return true
++    if (typeof err.code === "string" && matchCode(err.code)) return true
++    if (typeof err.message === "string" && matchMessage(err.message)) return true
++    // #139：递归 cause 链
++    if (err.cause) return isConnectionError(err.cause)
++    return false
++  }
++}
++
++function matchCode(code: string) {
++  const c = code.toUpperCase()
++  return (
++    c === "ECONNRESET" ||
++    c === "ECONNREFUSED" ||
++    c === "ECONNABORTED" ||
++    c === "ETIMEDOUT" ||
++    c === "ENOTFOUND" ||
++    c === "EAI_AGAIN" ||
++    c === "EPIPE" ||
++    c === "UND_ERR_CONNECT_TIMEOUT" ||
++    c === "UND_ERR_SOCKET"
++  )
++}
++
++function matchMessage(message: string) {
++  const m = message.toLowerCase()
++  // #139：message 关键字启发式
++  return (
++    m.includes("fetch failed") ||
++    m.includes("network") ||
++    m.includes("econnreset") ||
++    m.includes("econnrefused") ||
++    m.includes("etimedout") ||
++    m.includes("socket hang up") ||
++    m.includes("aborted") ||
++    m.includes("connection")
++  )
++}
+diff --git a/packages/tui/test/util/connection-error.test.ts b/packages/tui/test/util/connection-error.test.ts
+new file mode 100644
+index 0000000000..e304375e4e
+--- /dev/null
++++ b/packages/tui/test/util/connection-error.test.ts
+@@ -0,0 +1,27 @@
++import { describe, expect, test } from "bun:test"
++import { ConnectionError } from "../../src/util/connection-error"
++
++describe("ConnectionError.isConnectionError", () => {
++  // #139：AbortError 可恢复
++  test("detects AbortError", () => {
++    expect(ConnectionError.isConnectionError(Object.assign(new Error("aborted"), { name: "AbortError" }))).toBe(true)
++  })
++  // #139：fetch failed 可恢复
++  test("detects fetch failed message", () => {
++    expect(ConnectionError.isConnectionError(new Error("fetch failed"))).toBe(true)
++  })
++  // #139：ECONNRESET code
++  test("detects ECONNRESET code", () => {
++    expect(ConnectionError.isConnectionError(Object.assign(new Error("x"), { code: "ECONNRESET" }))).toBe(true)
++  })
++  // #139：cause 链
++  test("walks cause chain", () => {
++    const root = Object.assign(new Error("wrap"), {
++      cause: Object.assign(new Error("inner"), { code: "ECONNREFUSED" }),
++    })
++    expect(ConnectionError.isConnectionError(root)).toBe(true)
++  })
++  test("rejects ordinary errors", () => {
++    expect(ConnectionError.isConnectionError(new Error("validation failed"))).toBe(false)
++  })
++})
+diff --git a/packages/tui/src/context/sdk.tsx b/packages/tui/src/context/sdk.tsx
+index 93180c6e21..ddf8810d0f 100644
+--- a/packages/tui/src/context/sdk.tsx
++++ b/packages/tui/src/context/sdk.tsx
+@@ -3,6 +3,7 @@ import type { GlobalEvent } from "@opencode-ai/sdk/v2"
  import { Flag } from "@opencode-ai/core/flag/flag"
+ import { createSimpleContext } from "./helper"
  import { batch, onCleanup, onMount } from "solid-js"
 +import { ConnectionError } from "../util/connection-error"
  
  export type EventSource = {
    subscribe: (handler: (event: GlobalEvent) => void) => Promise<() => void>
-@@ -17,13 +18,16 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+@@ -16,13 +17,19 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
      fetch?: typeof fetch
      headers?: RequestInit["headers"]
      events?: EventSource
++    // #139：守护进程死后重解析 URL 并重建 client
 +    reconnect?: () => Promise<string>
++    // #139：无事件心跳超时，默认 15s（服务端 ~10s 心跳）
 +    heartbeatTimeout?: number
    }) => {
      const abort = new AbortController()
      let sse: AbortController | undefined
++    // #139：可变 base URL，重连后指向新端口
 +    let url = props.url
  
      function createSDK() {
@@ -67,25 +123,42 @@ index 96fa544875814f8f009d5c9a7134e3cf00eb5dd3..0637fcce9990b36b9a5aec0347e32991
          signal: abort.signal,
          directory: props.directory,
          fetch: props.fetch,
-@@ -42,6 +46,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+@@ -50,6 +57,8 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
      let last = 0
      const retryDelay = 1000
      const maxRetryDelay = 30000
++    // #139：默认 15s，与 source 服务端 10s 心跳匹配
 +    const heartbeatTimeout = props.heartbeatTimeout ?? 15000
  
      const flush = () => {
        if (queue.length === 0) return
-@@ -71,37 +76,80 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+@@ -57,7 +66,6 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+       queue = []
+       timer = undefined
+       last = Date.now()
+-      // Batch all event emissions so all store updates result in a single render
+       batch(() => {
+         for (const event of events) {
+           emitter.emit("event", event)
+@@ -70,8 +78,6 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+       const elapsed = Date.now() - last
+ 
+       if (timer) return
+-      // If we just flushed recently (within 16ms), batch this with future events
+-      // Otherwise, process immediately to avoid latency
+       if (elapsed < 16) {
+         timer = setTimeout(flush, 16)
+         return
+@@ -79,37 +85,71 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
        flush()
      }
  
++    // #139：daemon 恢复后 rebind URL + 重建 SDK client
 +    async function reconnectDaemon() {
 +      if (!props.reconnect) return
 +      const next = await props.reconnect()
 +      if (next === url) return
-+      // All normal SDK calls read through the getter below.  Rebuilding this
-+      // single client after daemon recovery is enough to move session reads,
-+      // writes, and the next SSE attempt away from the dead port.
++      // #139：会话读写与下一次 SSE 都离开死端口
 +      url = next
 +      sdk = createSDK()
 +    }
@@ -116,9 +189,7 @@ index 96fa544875814f8f009d5c9a7134e3cf00eb5dd3..0637fcce9990b36b9a5aec0347e32991
 +          let heartbeat: Timer | undefined
 +          const resetHeartbeat = () => {
 +            if (heartbeat) clearTimeout(heartbeat)
-+            // A dead TCP/proxy stream can stay open without yielding or ending.
-+            // The server emits heartbeat events every 10s, so 15s without any
-+            // event means this attempt should be aborted and rebuilt.
++            // #139：无心跳/事件超时则中止当前 SSE 并重建
 +            heartbeat = setTimeout(() => run.abort(), heartbeatTimeout)
            }
  
@@ -132,8 +203,6 @@ index 96fa544875814f8f009d5c9a7134e3cf00eb5dd3..0637fcce9990b36b9a5aec0347e32991
 +            })
 +
 +            if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
-+              // Start syncing workspaces after the event stream exists; otherwise
-+              // workspace writes can race ahead of the listener that observes them.
 +              await sdk.sync.start().catch(() => {})
 +            }
 +
@@ -145,13 +214,9 @@ index 96fa544875814f8f009d5c9a7134e3cf00eb5dd3..0637fcce9990b36b9a5aec0347e32991
 +              handleEvent(event)
 +            }
 +          } catch (error) {
-+            // Network errors are expected while a shared daemon is being killed
-+            // and replaced.  Non-connection errors are also swallowed here to
-+            // match the previous fire-and-forget SSE behavior; regular SDK calls
-+            // still surface real API errors at their call sites.
++            // #139：连接错误静默；API 调用点仍暴露真实错误
 +            if (!run.signal.aborted && !ConnectionError.isConnectionError(error)) {
-+              // Intentionally no log spam: this loop can run while the user is
-+              // deliberately stopping/restarting the daemon from another TUI.
++              // intentional quiet for recovery loops
 +            }
 +          } finally {
 +            abort.signal.removeEventListener("abort", stop)
@@ -166,14 +231,24 @@ index 96fa544875814f8f009d5c9a7134e3cf00eb5dd3..0637fcce9990b36b9a5aec0347e32991
 -          attempt += 1
            if (abort.signal.aborted || ctrl.signal.aborted) break
  
+-          // Exponential backoff
++          // #139：流结束后先 rebind daemon URL
 +          await reconnectDaemon().catch(() => undefined)
 +
-           // Exponential backoff
 +          attempt += 1
            const backoff = Math.min(retryDelay * 2 ** (attempt - 1), maxRetryDelay)
            await new Promise((resolve) => setTimeout(resolve, backoff))
          }
-@@ -136,7 +184,9 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+@@ -122,8 +162,6 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
+         onCleanup(unsub)
+ 
+         if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
+-          // Start syncing workspaces, it's important to do this after
+-          // we've started listening to events
+           await sdk.sync.start().catch(() => {})
+         }
+       } else {
+@@ -145,7 +183,9 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
        directory: props.directory,
        event: emitter,
        fetch: props.fetch ?? fetch,
@@ -184,564 +259,118 @@ index 96fa544875814f8f009d5c9a7134e3cf00eb5dd3..0637fcce9990b36b9a5aec0347e32991
      }
    },
  })
-diff --git a/packages/opencode/src/cli/cmd/tui/daemon.ts b/packages/opencode/src/cli/cmd/tui/daemon.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..3b95facc777320943ffc36646356e505903ffcc0
---- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/daemon.ts
-@@ -0,0 +1,197 @@
-+export * as Daemon from "./daemon"
-+
-+import { resolveNetworkOptionsNoConfig, type NetworkOptions } from "@/cli/network"
-+import { Filesystem } from "@/util/filesystem"
-+import { ServerLock } from "@/cli/cmd/tui/server-lock"
-+import { Flock } from "@opencode-ai/core/util/flock"
-+import { Global } from "@opencode-ai/core/global"
-+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
-+import {
-+  OPENCODE_PROCESS_ROLE,
-+  OPENCODE_RUN_ID,
-+  ensureRunID,
-+  sanitizedProcessEnv,
-+} from "@opencode-ai/core/util/opencode-process"
-+import path from "path"
-+import { fileURLToPath } from "url"
-+
-+declare global {
-+  const OPENCODE_WORKER_PATH: string
-+}
-+
-+export const DAEMON_START_TIMEOUT_MS = 60_000
-+export const SERVER_ELECTION_TIMEOUT_MS = DAEMON_START_TIMEOUT_MS + 15_000
-+const SERVER_ELECTION_STALE_MS = 5_000
-+const SERVER_POLL_INTERVAL_MS = 200
-+
-+type Args = NetworkOptions
-+
-+// Exposed for tests only.  Keep the daemon spawn path injectable without
-+// forcing production code through a heavier process abstraction.
-+let spawnImpl = (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) => Bun.spawn(cmd, opts)
-+export const _spawn = (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) => spawnImpl(cmd, opts)
-+export function _setSpawn(fn: typeof spawnImpl | undefined) {
-+  spawnImpl = fn ?? ((cmd, opts) => Bun.spawn(cmd, opts))
-+}
-+
-+let reloadTarget: ReturnType<typeof Bun.spawn> | undefined
-+let reloadForwarderInstalled = false
-+
-+function forwardReload(proc: ReturnType<typeof Bun.spawn>) {
-+  if (process.platform === "win32") return
-+  reloadTarget = proc
-+  if (reloadForwarderInstalled) return
-+  reloadForwarderInstalled = true
-+  process.on("SIGUSR2", () => {
-+    try {
-+      reloadTarget?.kill("SIGUSR2")
-+    } catch {}
-+  })
-+}
-+
-+async function target() {
-+  if (typeof OPENCODE_WORKER_PATH !== "undefined") return OPENCODE_WORKER_PATH
-+  const dist = new URL("./cli/cmd/tui/worker.js", import.meta.url)
-+  if (await Filesystem.exists(fileURLToPath(dist))) return fileURLToPath(dist)
-+  return fileURLToPath(new URL("./worker.ts", import.meta.url))
-+}
-+
-+function applyProxyEnv(env: Record<string, string>) {
-+  // Merge loopback addresses into NO_PROXY so the daemon never proxies its own
-+  // server.  This must run for every respawn because reconnect can create a new
-+  // worker long after the original launcher setup finished.
-+  const parts = (env.NO_PROXY ?? env.no_proxy ?? "").split(",").map((s) => s.trim()).filter(Boolean)
-+  const no = NetworkProxy.noProxyString(parts)
-+  env.NO_PROXY = no
-+  env.no_proxy = no
-+
-+  if (process.platform === "win32" || process.platform === "darwin") {
-+    // The daemon installs a global fetch wrapper that resolves system proxy
-+    // dynamically per request. Strip inherited shell proxy env so Bun doesn't
-+    // freeze routing to stale variables captured before the proxy app started.
-+    for (const key of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])
-+      delete env[key]
-+    return
-+  }
-+
-+  // Linux: normalize proxy env — ensure both casings, HTTPS falls back to HTTP.
-+  const http = env.HTTP_PROXY ?? env.http_proxy
-+  const https = env.HTTPS_PROXY ?? env.https_proxy ?? http
-+  const all = env.ALL_PROXY ?? env.all_proxy
-+  if (http) {
-+    env.HTTP_PROXY = http
-+    env.http_proxy = http
-+  }
-+  if (https) {
-+    env.HTTPS_PROXY = https
-+    env.https_proxy = https
-+  }
-+  if (all) {
-+    env.ALL_PROXY = all
-+    env.all_proxy = all
-+  }
-+}
-+
-+function internalUrl(port: number) {
-+  return `http://127.0.0.1:${port}`
-+}
-+
-+async function liveUrl(external: boolean) {
-+  const lock = await ServerLock.read()
-+  if (!lock || !ServerLock.alive(lock.pid) || !(await ServerLock.ping(lock.port))) return
-+  if (external && lock.externalUrl) return lock.externalUrl
-+  return internalUrl(lock.port)
-+}
-+
-+function wantsExternal(args: Args) {
-+  const network = resolveNetworkOptionsNoConfig(args)
-+  return {
-+    network,
-+    external:
-+      process.argv.includes("--port") ||
-+      process.argv.includes("--hostname") ||
-+      process.argv.includes("--mdns") ||
-+      network.mdns ||
-+      network.port !== 0 ||
-+      network.hostname !== "127.0.0.1",
-+  }
-+}
-+
-+export async function ensure(args: Args) {
-+  const { network, external } = wantsExternal(args)
-+  const env = sanitizedProcessEnv({
-+    [OPENCODE_PROCESS_ROLE]: "worker",
-+    [OPENCODE_RUN_ID]: ensureRunID(),
-+  })
-+  applyProxyEnv(env)
-+  // Preserve the original TUI launcher behavior: the UI process itself must
-+  // also bypass proxies for loopback SDK calls, even when an existing daemon is
-+  // reused and no child process is spawned.
-+  process.env.NO_PROXY = env.NO_PROXY
-+  process.env.no_proxy = env.no_proxy
-+
-+  const quick = await liveUrl(external)
-+  if (quick) return quick
-+
-+  let electionLease: Awaited<ReturnType<typeof Flock.acquire>> | undefined
-+  try {
-+    // A shared election lock is required both on initial TUI startup and during
-+    // later reconnect recovery; otherwise two surviving TUIs can race and spawn
-+    // duplicate daemon workers after the original process dies.
-+    electionLease = await Flock.acquire("opencode.server", {
-+      dir: path.join(Global.Path.state, "locks"),
-+      timeoutMs: SERVER_ELECTION_TIMEOUT_MS,
-+      staleMs: SERVER_ELECTION_STALE_MS,
-+    })
-+
-+    const existing = await liveUrl(external)
-+    if (existing) return existing
-+    if (await ServerLock.read()) await ServerLock.clear()
-+
-+    const printLogs = process.argv.includes("--print-logs")
-+    const proc = spawnImpl([process.execPath, await target()], {
-+      env: {
-+        ...env,
-+        ...(printLogs ? { OPENCODE_PRINT_LOGS: "1" } : {}),
-+        ...(external
-+          ? {
-+              OPENCODE_EXTERNAL_PORT: String(network.port),
-+              OPENCODE_EXTERNAL_HOSTNAME: network.hostname,
-+              OPENCODE_EXTERNAL_MDNS: network.mdns ? "1" : "",
-+            }
-+          : {}),
-+      },
-+      stdin: "ignore",
-+      stdout: printLogs ? "inherit" : "ignore",
-+      stderr: printLogs ? "inherit" : "ignore",
-+      // Unix Ctrl+C is delivered to the foreground process group.  Detaching the
-+      // worker gives it its own group so TUI exits do not accidentally take down
-+      // the shared daemon.  Windows keeps the existing console-mode guard path.
-+      detached: process.platform !== "win32",
-+    })
-+    proc.unref()
-+    forwardReload(proc)
-+
-+    // The daemon cannot be ready immediately: worker startup has to load the
-+    // server, bind a port, and write the lock atomically before health can pass.
-+    await Bun.sleep(1000)
-+
-+    const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
-+    while (Date.now() < deadline) {
-+      const lock = await ServerLock.read()
-+      if (lock && ServerLock.alive(lock.pid)) {
-+        if (external) {
-+          if (lock.externalUrl) return lock.externalUrl
-+        } else if (await ServerLock.ping(lock.port)) {
-+          return internalUrl(lock.port)
-+        }
-+      }
-+      await Bun.sleep(SERVER_POLL_INTERVAL_MS)
-+    }
-+
-+    proc.kill()
-+    throw new Error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
-+  } finally {
-+    await electionLease?.release().catch(() => undefined)
-+  }
-+}
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 140bb61a50289f99ae3894efffda4cdec61e78cf..126e8c57bd1d0ae00034e46a65dd3c9462d2e39f 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -102,6 +102,7 @@ import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
- import { DialogGoUpsell } from "../../component/dialog-go-upsell"
- import { GO_UPSELL_MESSAGE } from "@/session/retry-constants"
- import { getRevertDiffFiles } from "../../util/revert-diff"
+diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
+index a17dec9d55..c5687737f8 100644
+--- a/packages/tui/src/app.tsx
++++ b/packages/tui/src/app.tsx
+@@ -149,6 +149,10 @@ export type TuiInput = {
+   fetch?: typeof fetch
+   headers?: RequestInit["headers"]
+   events?: EventSource
++  // #139：运行时 daemon 恢复回调，返回新 base URL
++  reconnect?: () => Promise<string>
++  // #139：可测心跳超时
++  heartbeatTimeout?: number
+   pluginHost: TuiPluginHost
+ }
+ 
+@@ -320,6 +324,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
+                                           fetch={input.fetch}
+                                           headers={input.headers}
+                                           events={input.events}
++                                          reconnect={input.reconnect}
++                                          heartbeatTimeout={input.heartbeatTimeout}
+                                         >
+                                           <PermissionProvider>
+                                             <ProjectProvider>
+diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
+index 171705962f..6eba89b86e 100644
+--- a/packages/opencode/src/cli/cmd/tui.ts
++++ b/packages/opencode/src/cli/cmd/tui.ts
+@@ -190,6 +190,8 @@ export async function discoverOrSpawnDaemon(
+       applyProxyEnv(env)
+       // 以 worker 角色 spawn 守护进程，index 入口旁路 yargs
+       const proc = deps.spawn([process.execPath, daemonFile], {
++        // #139：Unix 下 detached，避免 TUI 进程组 SIGINT 带走共享 daemon
++        detached: process.platform !== "win32",
+         env: {
+           ...env,
+           OPENCODE_PROCESS_ROLE: "worker",
+@@ -461,6 +463,28 @@ export const TuiThreadCommand = cmd({
+             pluginHost: createLegacyTuiPluginHost(),
+             directory: cwd,
+             headers,
++            // #139：SSE/API 失败时重新 discoverOrSpawn，重绑定 live URL
++            reconnect: async () => {
++              const discovered = await discoverOrSpawnDaemon(args)
++              existingUrl = discovered.url
++              // #139：每次 respawn 必须重绑 SIGUSR2 转发到新 daemon PID
++              if (process.platform !== "win32") {
++                if (fwdReload) {
++                  process.off("SIGUSR2", fwdReload)
++                  fwdReload = undefined
++                }
++                if (discovered.fwdPid !== undefined) {
++                  const pid = discovered.fwdPid
++                  fwdReload = () => {
++                    try {
++                      process.kill(pid, "SIGUSR2")
++                    } catch {}
++                  }
++                  process.on("SIGUSR2", fwdReload)
++                }
++              }
++              return discovered.url
++            },
+             args: {
+               continue: args.continue,
+               sessionID: args.session,
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index 8aeeb413a7..297ba0f914 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -37,6 +37,7 @@ import {
+ } from "@opentui/core"
+ import { Prompt, type PromptRef } from "../../component/prompt"
+ import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "../../util/smooth-scrollbar"
 +import { ConnectionError } from "../../util/connection-error"
- 
- addDefaultParsers(parsers.parsers)
- 
-@@ -267,6 +268,10 @@ export function Session() {
+ import type {
+   AssistantMessage,
+   Part,
+@@ -362,6 +363,8 @@ export function Session() {
          variant: "error",
          duration: 5000,
        })
-+      // A dead shared daemon is recoverable: SDKProvider will elect/spawn a new
-+      // worker, then server.connected below force-refreshes this same session.
-+      // Only real session errors should navigate away from the user's context.
++      // #139：可恢复连接错误留在会话；server.connected 会强制刷新
 +      if (ConnectionError.isConnectionError(error)) return
        navigate({ type: "home" })
      })
    })
-diff --git a/packages/opencode/src/cli/cmd/tui/thread.ts b/packages/opencode/src/cli/cmd/tui/thread.ts
-index ab1232172a92efcdf201048c1965388250809087..69188b304fdb2d0613e642998ce27319b3712752 100644
---- a/packages/opencode/src/cli/cmd/tui/thread.ts
-+++ b/packages/opencode/src/cli/cmd/tui/thread.ts
-@@ -1,49 +1,20 @@
- import { cmd } from "@/cli/cmd/cmd"
- import { tui } from "./app"
--import { Rpc } from "@/util/rpc"
- import path from "path"
--import { fileURLToPath } from "url"
- import { UI } from "@/cli/ui"
--import * as Log from "@opencode-ai/core/util/log"
- import { errorMessage } from "@/util/error"
--import { withNetworkOptions, resolveNetworkOptionsNoConfig } from "@/cli/network"
-+import { withNetworkOptions } from "@/cli/network"
- import { Filesystem } from "@/util/filesystem"
--import type { GlobalEvent } from "@opencode-ai/sdk/v2"
--import type { EventSource } from "./context/sdk"
- import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
- import { writeHeapSnapshot } from "v8"
- import { TuiConfig } from "./config/tui"
--import {
--  OPENCODE_PROCESS_ROLE,
--  OPENCODE_RUN_ID,
--  ensureRunID,
--  sanitizedProcessEnv,
--} from "@opencode-ai/core/util/opencode-process"
- import { validateSession } from "./validate-session"
--import { ServerLock } from "@/cli/cmd/tui/server-lock"
--import { Flock } from "@opencode-ai/core/util/flock"
--import { Global } from "@opencode-ai/core/global"
--import { NetworkProxy } from "@opencode-ai/core/network-proxy"
-+import { Daemon } from "./daemon"
- 
--declare global {
--  const OPENCODE_WORKER_PATH: string
--}
--
--export const DAEMON_START_TIMEOUT_MS = 60_000
--export const SERVER_ELECTION_TIMEOUT_MS = DAEMON_START_TIMEOUT_MS + 15_000
--const SERVER_ELECTION_STALE_MS = 5_000
--const SERVER_POLL_INTERVAL_MS = 200
--
--// Exposed for testing only – do not call outside this module.
--export const _spawn = (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) =>
--  Bun.spawn(cmd, opts)
--
--async function target() {
--  if (typeof OPENCODE_WORKER_PATH !== "undefined") return OPENCODE_WORKER_PATH
--  const dist = new URL("./cli/cmd/tui/worker.js", import.meta.url)
--  if (await Filesystem.exists(fileURLToPath(dist))) return fileURLToPath(dist)
--  return fileURLToPath(new URL("./worker.ts", import.meta.url))
--}
-+export const DAEMON_START_TIMEOUT_MS = Daemon.DAEMON_START_TIMEOUT_MS
-+export const SERVER_ELECTION_TIMEOUT_MS = Daemon.SERVER_ELECTION_TIMEOUT_MS
-+export const _spawn = Daemon._spawn
-+export const _setSpawn = Daemon._setSpawn
- 
- async function input(value?: string) {
-   const piped = process.stdin.isTTY ? undefined : await Bun.stdin.text()
-@@ -52,31 +23,6 @@ async function input(value?: string) {
-   return piped + "\n" + value
- }
- 
--function applyProxyEnv(env: Record<string, string>) {
--  // Merge loopback addresses into NO_PROXY so the daemon never proxies its own server.
--  const parts = (env.NO_PROXY ?? env.no_proxy ?? "").split(",").map((s) => s.trim()).filter(Boolean)
--  const no = NetworkProxy.noProxyString(parts)
--  env.NO_PROXY = no
--  env.no_proxy = no
--
--  if (process.platform === "win32" || process.platform === "darwin") {
--    // The daemon installs a global fetch wrapper that resolves system proxy
--    // dynamically per request. Strip inherited shell proxy env so Bun doesn't
--    // freeze routing to stale variables captured before the proxy app started.
--    for (const key of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"])
--      delete env[key]
--    return
--  }
--
--  // Linux: normalize proxy env — ensure both casings, HTTPS falls back to HTTP.
--  const http = env.HTTP_PROXY ?? env.http_proxy
--  const https = env.HTTPS_PROXY ?? env.https_proxy ?? http
--  const all = env.ALL_PROXY ?? env.all_proxy
--  if (http) { env.HTTP_PROXY = http; env.http_proxy = http }
--  if (https) { env.HTTPS_PROXY = https; env.https_proxy = https }
--  if (all) { env.ALL_PROXY = all; env.all_proxy = all }
--}
--
- export function resolveThreadDirectory(project?: string, envPWD = process.env.PWD, cwd = process.cwd()) {
-   const root = Filesystem.resolve(envPWD ?? cwd)
-   if (project) return Filesystem.resolve(path.isAbsolute(project) ? project : path.join(root, project))
-@@ -123,8 +69,6 @@ export const TuiThreadCommand = cmd({
-     // Keep ENABLE_PROCESSED_INPUT cleared even if other code flips it.
-     // (Important when running under `bun run` wrappers on Windows.)
-     const unguard = win32InstallCtrlCGuard()
--    let electionLease: Awaited<ReturnType<typeof Flock.acquire>> | undefined
--    let fwdReload: (() => void) | undefined
-     try {
-       // Must be the very first thing — disables CTRL_C_EVENT before any Worker
-       // spawn or async work so the OS cannot kill the process group.
-@@ -146,123 +90,10 @@ export const TuiThreadCommand = cmd({
-         return
-       }
-       const cwd = Filesystem.resolve(process.cwd())
--      const env = sanitizedProcessEnv({
--        [OPENCODE_PROCESS_ROLE]: "worker",
--        [OPENCODE_RUN_ID]: ensureRunID(),
--      })
--      applyProxyEnv(env)
--      process.env.NO_PROXY = env.NO_PROXY
--      process.env.no_proxy = env.no_proxy
- 
-       const prompt = await input(args.prompt)
-       const config = await TuiConfig.get()
--
--      // ── Server discovery ──────────────────────────────────────────────────
--      // Fast path: no election lock needed when a server is clearly alive.
--      const quickCheck = await ServerLock.read()
--      const quickAlive =
--        quickCheck && ServerLock.alive(quickCheck.pid) && (await ServerLock.ping(quickCheck.port))
--      let existingUrl: string | null = quickAlive ? `http://127.0.0.1:${quickCheck!.port}` : null
--
--      if (!existingUrl) {
--        // Acquire an election lock so that concurrent TUI startups do not all
--        // spawn a daemon at the same time (e.g. opening 4 tabs simultaneously).
--        electionLease = await Flock.acquire("opencode.server", {
--          dir: path.join(Global.Path.state, "locks"),
--          timeoutMs: SERVER_ELECTION_TIMEOUT_MS,
--          staleMs: SERVER_ELECTION_STALE_MS,
--        })
--        // Re-check under lock: another process may have won the race between
--        // the fast-check and the lock acquisition.
--        const lock = await ServerLock.read()
--        existingUrl =
--          lock && ServerLock.alive(lock.pid) && (await ServerLock.ping(lock.port))
--            ? `http://127.0.0.1:${lock.port}`
--            : null
--        if (!existingUrl && lock) await ServerLock.clear()
--
--        if (existingUrl) {
--          // Slave path found under lock: release lease immediately.
--          await electionLease.release()
--          electionLease = undefined
--        } else {
--          // ── Spawn the daemon ──────────────────────────────────────────────
--          const network = resolveNetworkOptionsNoConfig(args)
--          const external =
--            process.argv.includes("--port") ||
--            process.argv.includes("--hostname") ||
--            process.argv.includes("--mdns") ||
--            network.mdns ||
--            network.port !== 0 ||
--            network.hostname !== "127.0.0.1"
--
--          const daemonFile = await target()
--          const printLogs = process.argv.includes("--print-logs")
--          const proc = _spawn(
--            [process.execPath, daemonFile],
--            {
--              env: {
--                ...env,
--                ...(printLogs ? { OPENCODE_PRINT_LOGS: "1" } : {}),
--                ...(external
--                  ? {
--                      OPENCODE_EXTERNAL_PORT: String(network.port),
--                      OPENCODE_EXTERNAL_HOSTNAME: network.hostname,
--                      OPENCODE_EXTERNAL_MDNS: network.mdns ? "1" : "",
--                    }
--                  : {}),
--              },
--              stdin: "ignore",
--              stdout: printLogs ? "inherit" : "ignore",
--              stderr: printLogs ? "inherit" : "ignore",
--            },
--          )
--          proc.unref()
--
--          // The daemon cannot possibly be ready within 1 s — skip the first
--          // poll iterations to avoid pointless lock reads.
--          await Bun.sleep(1000)
--
--          // Wait for the daemon to write the lock and for its server to respond.
--          // The daemon pre-warms external plugins before writing the lock, which
--          // can take up to ~30 s on the first run. Give it 60 s to be safe.
--          // Do not require the lock PID to equal Bun.spawn()'s PID: on Windows,
--          // process.execPath can be a shim/launcher that starts the real daemon
--          // process, and the real process is what writes the lock.
--          const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
--          while (Date.now() < deadline) {
--            const daemonLock = await ServerLock.read()
--            if (daemonLock && ServerLock.alive(daemonLock.pid)) {
--              if (external) {
--                if (daemonLock.externalUrl) {
--                  existingUrl = daemonLock.externalUrl
--                  break
--                }
--              } else if (await ServerLock.ping(daemonLock.port)) {
--                existingUrl = `http://127.0.0.1:${daemonLock.port}`
--                break
--              }
--            }
--            await Bun.sleep(SERVER_POLL_INTERVAL_MS)
--          }
--
--          // Release election lease: daemon is live (or we are about to error).
--          await electionLease.release()
--          electionLease = undefined
--
--          if (!existingUrl) {
--            UI.error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
--            proc.kill()
--            return
--          }
--
--          // Forward SIGUSR2 (config reload) to the daemon (Unix only).
--          if (process.platform !== "win32") {
--            fwdReload = () => { try { proc.kill("SIGUSR2") } catch {} }
--            process.on("SIGUSR2", fwdReload)
--          }
--        }
--      }
-+      const existingUrl = await Daemon.ensure(args)
- 
-       // ── Common path: validate session then start TUI ──────────────────────
-       try {
-@@ -277,37 +108,24 @@ export const TuiThreadCommand = cmd({
-         return
-       }
- 
--      // Release election lease if still held from the slave path.
--      if (electionLease) {
--        await electionLease.release()
--        electionLease = undefined
--      }
--
--      try {
--        await tui({
--          url: existingUrl!,
--          async onSnapshot() {
--            return [writeHeapSnapshot("tui.heapsnapshot")]
--          },
--          config,
--          directory: cwd,
--          args: {
--            continue: args.continue,
--            sessionID: args.session,
--            agent: args.agent,
--            model: args.model,
--            prompt,
--            fork: args.fork,
--          },
--        })
--      } finally {
--        if (fwdReload) {
--          process.off("SIGUSR2", fwdReload)
--          fwdReload = undefined
--        }
--      }
-+      await tui({
-+        url: existingUrl,
-+        async onSnapshot() {
-+          return [writeHeapSnapshot("tui.heapsnapshot")]
-+        },
-+        config,
-+        directory: cwd,
-+        reconnect: () => Daemon.ensure(args),
-+        args: {
-+          continue: args.continue,
-+          sessionID: args.session,
-+          agent: args.agent,
-+          model: args.model,
-+          prompt,
-+          fork: args.fork,
-+        },
-+      })
-     } finally {
--      await electionLease?.release().catch(() => undefined)
-       unguard?.()
-     }
-     process.exit(0)
-diff --git a/packages/opencode/src/cli/cmd/tui/util/connection-error.ts b/packages/opencode/src/cli/cmd/tui/util/connection-error.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..5a5303c3103602ca37a54c93050fd6ac47d9edd9
---- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/util/connection-error.ts
-@@ -0,0 +1,19 @@
-+export function isConnectionError(error: unknown) {
-+  if (error instanceof DOMException && error.name === "AbortError") return true
-+  if (!(error instanceof Error)) return false
-+
-+  // Different runtimes surface the same dead-daemon condition with different
-+  // strings.  Keep the classifier intentionally small and local to the TUI: it
-+  // is only used to decide whether to wait for daemon recovery instead of
-+  // treating a transient connection loss as a fatal application error.
-+  return [
-+    "network error",
-+    "fetch failed",
-+    "Unable to connect",
-+    "Could not connect",
-+    "ECONNREFUSED",
-+    "ECONNRESET",
-+  ].some((item) => error.message.includes(item))
-+}
-+
-+export * as ConnectionError from "./connection-error"
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 725e6348f121a07679a77b310f9072284b8ee8f1..62520810c464b10e8ee09149a5904d5272141803 100644
+index f361084936..8588258363 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -191,7 +191,14 @@ export const layer: Layer.Layer<
+@@ -179,7 +179,12 @@ const layer = Layer.effect(
          },
        ) {
          const match = yield* readToolCall(toolCallID)
 -        if (!match || match.part.state.status !== "running") return
 +        if (!match) return
++        // #139：DB 已终态时仍 settle deferred，避免 LLM 死等
 +        if (match.part.state.status !== "running") {
-+          // Another cleanup path may already have terminalized the persisted
-+          // part.  Still settle the in-memory deferred so the LLM loop cannot
-+          // wait forever on a tool call whose DB state is already final.
 +          yield* settleToolCall(toolCallID)
 +          return
 +        }
          yield* session.updatePart({
            ...match.part,
            state: {
-@@ -209,7 +216,11 @@ export const layer: Layer.Layer<
+@@ -197,7 +202,12 @@ const layer = Layer.effect(
  
        const failToolCall = Effect.fn("SessionProcessor.failToolCall")(function* (toolCallID: string, error: unknown) {
          const match = yield* readToolCall(toolCallID)
 -        if (!match || match.part.state.status !== "running") return false
 +        if (!match) return false
++        // #139：非 running 也 settle，防止卡死
 +        if (match.part.state.status !== "running") {
 +          yield* settleToolCall(toolCallID)
 +          return false
@@ -749,48 +378,67 @@ index 725e6348f121a07679a77b310f9072284b8ee8f1..62520810c464b10e8ee09149a5904d52
          yield* session.updatePart({
            ...match.part,
            state: {
-@@ -632,7 +643,7 @@ export const layer: Layer.Layer<
+@@ -510,7 +520,9 @@ const layer = Layer.effect(
+                 requestID: ctx.assistantMessage.parentID,
+                 assistant: ctx.assistantMessage,
+               }) as any as Effect.Effect<void, never, never>)
+-            if (ctx.snapshot) {
++            if (ctx.snapshot && !aborted) {
++          // #139：中断时跳过慢 git snapshot，优先完成终端态清理
++          // #139：aborted 后 snapshot 非关键路径
+               const patch = yield* snapshot.patch(ctx.snapshot)
+               if (patch.files.length) {
+                 yield* session.updatePart({
+@@ -593,7 +605,8 @@ const layer = Layer.effect(
        })
  
        const cleanup = Effect.fn("SessionProcessor.cleanup")(function* () {
 -        if (ctx.snapshot) {
++        // #139：中断时跳过慢 git snapshot，优先完成终端态清理
 +        if (ctx.snapshot && !aborted) {
            const patch = yield* snapshot.patch(ctx.snapshot)
            if (patch.files.length) {
              yield* session.updatePart({
-@@ -644,8 +655,11 @@ export const layer: Layer.Layer<
+@@ -605,8 +618,9 @@ const layer = Layer.effect(
                files: patch.files,
              })
            }
 -          ctx.snapshot = undefined
          }
-+        // On interrupt, terminal assistant/tool state is the important cleanup
-+        // boundary.  Snapshot patching can involve slow git subprocess teardown,
-+        // so skip it for aborted turns rather than delaying cancellation.
++        // #139：aborted 也必须清空 snapshot 句柄，避免后续误用
 +        ctx.snapshot = undefined
  
          if (ctx.currentText) {
            const end = Date.now()
+@@ -742,6 +756,7 @@ const layer = Layer.effect(
+               }),
+             ),
+             Effect.catch(halt),
++            // #139：ensuring cleanup 必须尊重 aborted，跳过慢 snapshot
+             Effect.ensuring(cleanup()),
+           )
+ 
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index db6d2d68c09eeebfac6dfad6deb69693432f702e..4980d577ac19e3f9e2c00fb0147491d6a021e9e0 100644
+index aa83a95cb5..fa48cc7ed4 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -601,6 +601,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+@@ -310,6 +310,15 @@ const layer = Layer.effect(
        const promptOps = yield* ops()
        const { task: taskTool } = yield* registry.named()
        const taskModel = task.model ? yield* getModel(task.model.providerID, task.model.modelID, sessionID) : model
++      // #139：agent 校验在创建 running part 之前，避免未知 agent 留下粘滞 running 工具
 +      const taskAgent = yield* agents.get(task.agent)
 +      if (!taskAgent) {
 +        const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
 +        const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
 +        const error = new NamedError.Unknown({ message: `Agent not found: "${task.agent}".${hint}` })
-+        yield* bus.publish(Session.Event.Error, { sessionID, error: error.toObject() })
++        yield* events.publish(Session.Event.Error, { sessionID, error: error.toObject() })
 +        throw error
 +      }
-       const assistantMessage: MessageV2.Assistant = yield* sessions.updateMessage({
+       const assistantMessage: SessionV1.Assistant = yield* sessions.updateMessage({
          id: MessageID.ascending(),
          role: "assistant",
-@@ -640,25 +648,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+@@ -349,25 +358,17 @@ const layer = Layer.effect(
          subagent_type: task.agent,
          command: task.command,
        }
@@ -805,18 +453,16 @@ index db6d2d68c09eeebfac6dfad6deb69693432f702e..4980d577ac19e3f9e2c00fb0147491d6
 -        const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
 -        const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
 -        const error = new NamedError.Unknown({ message: `Agent not found: "${task.agent}".${hint}` })
--        yield* bus.publish(Session.Event.Error, { sessionID, error: error.toObject() })
+-        yield* events.publish(Session.Event.Error, { sessionID, error: error.toObject() })
 -        throw error
 -      }
--
+ 
        let error: Error | undefined
        const taskAbort = new AbortController()
 -      const result = yield* taskTool
 -        .execute(taskArgs, {
++      // #139：running 后 before+execute 统一保护，setup 失败也终端化可见 tool part
 +      const result = yield* Effect.gen(function* () {
-+        // The Task tool part is already visible as running.  Protect every
-+        // following step, including plugin hooks, so setup failures terminalize
-+        // the visible part instead of leaving a permanent running tool.
 +        yield* plugin.trigger(
 +          "tool.execute.before",
 +          { tool: TaskTool.id, sessionID, callID: part.id },
@@ -826,7 +472,7 @@ index db6d2d68c09eeebfac6dfad6deb69693432f702e..4980d577ac19e3f9e2c00fb0147491d6
            agent: task.agent,
            messageID: assistantMessage.id,
            sessionID,
-@@ -683,6 +684,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+@@ -392,10 +393,12 @@ const layer = Layer.effect(
                })
                .pipe(Effect.orDie),
          })
@@ -834,7 +480,12 @@ index db6d2d68c09eeebfac6dfad6deb69693432f702e..4980d577ac19e3f9e2c00fb0147491d6
          .pipe(
            Effect.catchCause((cause) => {
              const defect = Cause.squash(cause)
-@@ -719,12 +721,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+             error = defect instanceof Error ? defect : new Error(String(defect))
++            // #139：setup/execute 失败路径写入 error，供后续 terminalize
+             return Effect.logError("subtask execution failed", {
+               error,
+               agent: task.agent,
+@@ -431,12 +434,6 @@ const layer = Layer.effect(
          messageID: assistantMessage.id,
        }))
  
@@ -847,57 +498,32 @@ index db6d2d68c09eeebfac6dfad6deb69693432f702e..4980d577ac19e3f9e2c00fb0147491d6
        assistantMessage.finish = "tool-calls"
        assistantMessage.time.completed = Date.now()
        yield* sessions.updateMessage(assistantMessage)
-@@ -760,6 +756,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-         } satisfies MessageV2.ToolPart)
+@@ -472,6 +469,11 @@ const layer = Layer.effect(
+         } satisfies SessionV1.ToolPart)
        }
  
-+      // Post hooks are best-effort side effects.  A plugin failure here must not
-+      // roll back the terminal message/tool state we just persisted.
++      // #139：先落库终态，再 best-effort after；失败不得回滚
 +      yield* plugin
 +        .trigger("tool.execute.after", { tool: TaskTool.id, sessionID, callID: part.id, args: taskArgs }, result)
-+        .pipe(Effect.catchCause((cause) => elog.error("tool.execute.after failed", { cause })))
++        .pipe(Effect.catch(() => Effect.void))
 +
        if (!task.command) return
  
-       const summaryUserMsg: MessageV2.User = {
-@@ -938,15 +940,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-           if (Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause) && !Cause.hasDies(exit.cause)) {
-             aborted = true
-           }
-+          yield* finish
-           const requestUsageShellComplete = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
-           if (requestUsageShellComplete)
--            yield* requestUsageShellComplete.complete({
--              sessionID: input.sessionID,
--              requestID: userMsg.id,
--              status: aborted ? "aborted" : "completed",
--              timeCompleted: Date.now(),
--            })
--          yield* finish
-+            yield* requestUsageShellComplete
-+              .complete({
-+                sessionID: input.sessionID,
-+                requestID: userMsg.id,
-+                status: aborted ? "aborted" : "completed",
-+                timeCompleted: Date.now(),
-+              })
-+              .pipe(Effect.catchCause((cause) => elog.error("request usage shell complete failed", { cause })))
- 
-           if (Exit.isFailure(exit) && !aborted && !Cause.hasInterruptsOnly(exit.cause)) {
-             return yield* Effect.failCause(exit.cause)
-diff --git a/packages/opencode/test/cli/cmd/tui/sdk.test.tsx b/packages/opencode/test/cli/cmd/tui/sdk.test.tsx
+       const summaryUserMsg: SessionV1.User = {
+diff --git a/packages/tui/test/context/sdk-reconnect.test.tsx b/packages/tui/test/context/sdk-reconnect.test.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..de79a269bfb6b906ae443d47a2f2941c8cc2b727
+index 0000000000..59886e80b6
 --- /dev/null
-+++ b/packages/opencode/test/cli/cmd/tui/sdk.test.tsx
-@@ -0,0 +1,110 @@
++++ b/packages/tui/test/context/sdk-reconnect.test.tsx
+@@ -0,0 +1,127 @@
 +/** @jsxImportSource @opentui/solid */
 +import { describe, expect, test } from "bun:test"
 +import { testRender } from "@opentui/solid"
 +import { onMount } from "solid-js"
-+import { SDKProvider, useSDK } from "../../../../src/cli/cmd/tui/context/sdk"
++import { SDKProvider, useSDK } from "../../src/context/sdk"
 +
-+async function wait(fn: () => boolean, timeout = 2000) {
++// #139：等待生产 SSE rebind 完成
++async function wait(fn: () => boolean, timeout = 4000) {
 +  const start = Date.now()
 +  while (!fn()) {
 +    if (Date.now() - start > timeout) throw new Error("timed out waiting for condition")
@@ -911,6 +537,7 @@ index 0000000000000000000000000000000000000000..de79a269bfb6b906ae443d47a2f2941c
 +  })
 +}
 +
++// #139：首包后挂起，依赖 heartbeatTimeout 中止并触发 cancel
 +function stalledSse(data: unknown, onCancel: () => void) {
 +  const encoder = new TextEncoder()
 +  return new Response(
@@ -932,8 +559,10 @@ index 0000000000000000000000000000000000000000..de79a269bfb6b906ae443d47a2f2941c
 +  return <box />
 +}
 +
-+describe("SDKProvider", () => {
++describe("SDKProvider reconnect", () => {
++  // #139：死端口失败后 rebind 到新 URL 并重建 client/SSE
 +  test("rebinds client URL after daemon reconnect", async () => {
++    // #139：记录生产 client 实际请求的 origin+path
 +    const requests: string[] = []
 +    let ready!: (sdk: ReturnType<typeof useSDK>) => void
 +    const mounted = new Promise<ReturnType<typeof useSDK>>((resolve) => {
@@ -942,6 +571,7 @@ index 0000000000000000000000000000000000000000..de79a269bfb6b906ae443d47a2f2941c
 +    const fetch = (async (input: RequestInfo | URL) => {
 +      const url = new URL(input instanceof Request ? input.url : String(input))
 +      requests.push(url.origin + url.pathname)
++      // #139：旧守护进程端口失败，触发 reconnectDaemon
 +      if (url.origin === "http://old") throw new Error("fetch failed")
 +      if (url.origin === "http://new" && url.pathname === "/global/event") {
 +        return sse({ directory: "global", payload: { id: "evt_connected", type: "server.connected", properties: {} } })
@@ -949,6 +579,7 @@ index 0000000000000000000000000000000000000000..de79a269bfb6b906ae443d47a2f2941c
 +      return new Response("{}", { headers: { "content-type": "application/json" } })
 +    }) as typeof globalThis.fetch
 +
++    // #139：挂载真实 SDKProvider，而非本地伪实现
 +    const app = await testRender(() => (
 +      <SDKProvider url="http://old" fetch={fetch} reconnect={async () => "http://new"}>
 +        <Probe onReady={ready} />
@@ -957,6 +588,7 @@ index 0000000000000000000000000000000000000000..de79a269bfb6b906ae443d47a2f2941c
 +
 +    try {
 +      const sdk = await mounted
++      // #139：断言生产 sdk.url getter 与新 SSE 请求
 +      await wait(() => sdk.url === "http://new" && requests.includes("http://new/global/event"))
 +      expect(requests).toContain("http://old/global/event")
 +      expect(requests).toContain("http://new/global/event")
@@ -965,14 +597,19 @@ index 0000000000000000000000000000000000000000..de79a269bfb6b906ae443d47a2f2941c
 +    }
 +  })
 +
++  // #139：无心跳挂起流在 heartbeatTimeout 后中止并 rebind
 +  test("reconnects when an SSE stream stalls without heartbeat", async () => {
 +    const requests: string[] = []
++    // #139：stalled stream cancel 证明 heartbeat 中止了旧 attempt
 +    let cancelled = false
 +    let ready!: (sdk: ReturnType<typeof useSDK>) => void
 +    const mounted = new Promise<ReturnType<typeof useSDK>>((resolve) => {
 +      ready = resolve
 +    })
-+    const connected = { directory: "global", payload: { id: "evt_connected", type: "server.connected", properties: {} } }
++    const connected = {
++      directory: "global",
++      payload: { id: "evt_connected", type: "server.connected", properties: {} },
++    }
 +    const fetch = (async (input: RequestInfo | URL) => {
 +      const url = new URL(input instanceof Request ? input.url : String(input))
 +      requests.push(url.origin + url.pathname)
@@ -986,7 +623,12 @@ index 0000000000000000000000000000000000000000..de79a269bfb6b906ae443d47a2f2941c
 +    }) as typeof globalThis.fetch
 +
 +    const app = await testRender(() => (
-+      <SDKProvider url="http://old" fetch={fetch} reconnect={async () => "http://new"} heartbeatTimeout={50}>
++      <SDKProvider
++        url="http://old"
++        fetch={fetch}
++        reconnect={async () => "http://new"}
++        heartbeatTimeout={50}
++      >
 +        <Probe onReady={ready} />
 +      </SDKProvider>
 +    ))
@@ -1001,451 +643,23 @@ index 0000000000000000000000000000000000000000..de79a269bfb6b906ae443d47a2f2941c
 +    }
 +  })
 +})
-diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
-index bf195640cb4710013861fe8052e27bc25875e5b6..7fb3eb8d279d68c69412111590a0c92f2a2deb0a 100644
---- a/packages/opencode/test/cli/tui/daemon.test.ts
-+++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -7,8 +7,8 @@
-  * Bun.spawn([opencode.exe, "worker.ts"]) ran the TUI CLI instead of the
-  * daemon, causing a 30-second timeout.
-  *
-- * Isolation: OPENCODE_LOCK_PATH is set to a temp directory so the test never
-- * touches the real XDG state directory.
-+ * Isolation: OPENCODE_LOCK_PATH plus XDG_* and OPENCODE_DB are set to a temp
-+ * directory so tests never touch a developer's live daemon lock or database.
-  */
- import { afterEach, describe, expect, test } from "bun:test"
- import path from "path"
-@@ -20,6 +20,7 @@ const WORKER_TS = fileURLToPath(new URL("../../../src/cli/cmd/tui/worker.ts", im
- 
- const DAEMON_START_TIMEOUT_MS = 15_000
- const POLL_INTERVAL_MS = 100
-+const SIGNAL_TEST_TIMEOUT_MS = 10_000
- 
- afterEach(() => {
-   ServerLockModule._setLockPath(undefined)
-@@ -31,11 +32,18 @@ afterEach(() => {
-  * live lock contents.
-  */
- async function spawnDaemon(lockPath: string) {
-+  const root = path.dirname(lockPath)
-   const proc = Bun.spawn([process.execPath, WORKER_TS], {
-     env: {
-       ...process.env,
-       OPENCODE_PROCESS_ROLE: "worker",
-       OPENCODE_LOCK_PATH: lockPath,
-+      OPENCODE_DB: path.join(root, "opencode.db"),
-+      OPENCODE_TEST_HOME: path.join(root, "home"),
-+      XDG_DATA_HOME: path.join(root, "share"),
-+      XDG_CACHE_HOME: path.join(root, "cache"),
-+      XDG_CONFIG_HOME: path.join(root, "config"),
-+      XDG_STATE_HOME: path.join(root, "state"),
-     },
-     stdin: "ignore",
-     stdout: "ignore",
-@@ -61,6 +69,26 @@ async function spawnDaemon(lockPath: string) {
-   throw new Error(`Daemon did not start within ${DAEMON_START_TIMEOUT_MS} ms`)
- }
- 
-+async function readFirstLine(stream: ReadableStream<Uint8Array> | null) {
-+  if (!stream) throw new Error("missing stdout stream")
-+  const reader = stream.getReader()
-+  const decoder = new TextDecoder()
-+  let text = ""
-+  const deadline = Date.now() + 5_000
-+  try {
-+    while (Date.now() < deadline) {
-+      const { done, value } = await reader.read()
-+      if (done) break
-+      text += decoder.decode(value, { stream: true })
-+      const line = text.split(/\r?\n/)[0]
-+      if (line) return line
-+    }
-+  } finally {
-+    reader.releaseLock()
-+  }
-+  throw new Error("timed out waiting for child pid")
-+}
+diff --git a/packages/opencode/test/cli/tui/daemon-detach.test.ts b/packages/opencode/test/cli/tui/daemon-detach.test.ts
+new file mode 100644
+index 0000000000..2fb058bd55
+--- /dev/null
++++ b/packages/opencode/test/cli/tui/daemon-detach.test.ts
+@@ -0,0 +1,14 @@
++import { expect, test } from "bun:test"
++import path from "path"
++import { fileURLToPath } from "url"
 +
- describe("daemon lifecycle", () => {
-   test(
-     "daemon writes lock file and responds to HTTP health check",
-@@ -152,6 +180,12 @@ describe("daemon lifecycle", () => {
-           ...process.env,
-           OPENCODE_PROCESS_ROLE: "worker",
-           OPENCODE_LOCK_PATH: lockPath,
-+          OPENCODE_DB: path.join(tmp.path, "opencode.db"),
-+          OPENCODE_TEST_HOME: path.join(tmp.path, "home"),
-+          XDG_DATA_HOME: path.join(tmp.path, "share"),
-+          XDG_CACHE_HOME: path.join(tmp.path, "cache"),
-+          XDG_CONFIG_HOME: path.join(tmp.path, "config"),
-+          XDG_STATE_HOME: path.join(tmp.path, "state"),
-         },
-         stdin: "ignore",
-         stdout: "ignore",
-@@ -180,4 +214,47 @@ describe("daemon lifecycle", () => {
-     },
-     DAEMON_START_TIMEOUT_MS + 5_000,
-   )
-+
-+  test(
-+    "Unix detached child survives SIGINT sent to the launcher process group",
-+    async () => {
-+      if (process.platform === "win32") return
-+
-+      const childCode = `process.on("SIGTERM", () => process.exit(0)); setInterval(() => {}, 1000)`
-+      const parentCode = `
-+        const child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(childCode)}], {
-+          stdin: "ignore",
-+          stdout: "ignore",
-+          stderr: "ignore",
-+          detached: true,
-+        })
-+        child.unref()
-+        console.log(child.pid)
-+        setInterval(() => {}, 1000)
-+      `
-+      const parent = Bun.spawn([process.execPath, "-e", parentCode], {
-+        stdin: "ignore",
-+        stdout: "pipe",
-+        stderr: "inherit",
-+        detached: true,
-+      })
-+      const childPid = Number(await readFirstLine(parent.stdout))
-+
-+      try {
-+        expect(ServerLockModule.alive(childPid)).toBe(true)
-+        process.kill(-parent.pid, "SIGINT")
-+        await Promise.race([parent.exited, Bun.sleep(2_000)])
-+        expect(ServerLockModule.alive(childPid)).toBe(true)
-+      } finally {
-+        try {
-+          process.kill(childPid, "SIGTERM")
-+        } catch {}
-+        try {
-+          parent.kill("SIGTERM")
-+        } catch {}
-+        await parent.exited.catch(() => undefined)
-+      }
-+    },
-+    SIGNAL_TEST_TIMEOUT_MS,
-+  )
- })
-diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/test/cli/tui/thread.test.ts
-index 6820c17077479b31292dabc2ab221530916cfc60..8308895ca2e2ee1e7b87831b4e4b4954f7190556 100644
---- a/packages/opencode/test/cli/tui/thread.test.ts
-+++ b/packages/opencode/test/cli/tui/thread.test.ts
-@@ -7,6 +7,7 @@ import { UI } from "../../../src/cli/ui"
- import * as Win32 from "../../../src/cli/cmd/tui/win32"
- import * as ServerLockModule from "../../../src/cli/cmd/tui/server-lock"
- import * as ThreadModule from "../../../src/cli/cmd/tui/thread"
-+import * as DaemonModule from "../../../src/cli/cmd/tui/daemon"
- import { Flock } from "@opencode-ai/core/util/flock"
- 
- const stop = new Error("stop")
-@@ -14,6 +15,7 @@ const seen = {
-   tui: [] as string[],
-   tuiUrls: [] as string[],
- }
-+type ThreadArgs = Parameters<NonNullable<typeof ThreadModule.TuiThreadCommand.handler>>[0]
- 
- function setup() {
-   // Intentionally avoid mock.module() here: Bun keeps module overrides in cache
-@@ -33,13 +35,14 @@ function setup() {
- 
- describe("tui thread", () => {
-   afterEach(() => {
-+    ThreadModule._setSpawn(undefined)
-     mock.restore()
-     ServerLockModule._setLockPath(undefined)
-   })
- 
--  async function call(project?: string) {
-+  async function call(project?: string, overrides?: Partial<ThreadArgs>) {
-     const { TuiThreadCommand } = await import("../../../src/cli/cmd/tui/thread")
--    const args: Parameters<NonNullable<typeof TuiThreadCommand.handler>>[0] = {
-+    const args: ThreadArgs = {
-       _: [],
-       $0: "opencode",
-       project,
-@@ -55,6 +58,7 @@ describe("tui thread", () => {
-       "mdns-domain": "opencode.local",
-       mdnsDomain: "opencode.local",
-       cors: [],
-+      ...overrides,
-     }
-     return TuiThreadCommand.handler(args)
-   }
-@@ -92,7 +96,7 @@ describe("tui thread", () => {
-       startedAt: new Date().toISOString(),
-     }
- 
--    async function callWithDaemonSpy(existingUrl: string | null) {
-+    async function callWithDaemonSpy(existingUrl: string | null, overrides?: Partial<ThreadArgs>) {
-       setup()
-       await using tmp = await tmpdir()
-       ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
-@@ -103,7 +107,7 @@ describe("tui thread", () => {
-       Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
- 
-       let daemonSpawnCount = 0
--      spyOn(ThreadModule, "_spawn").mockImplementation(() => {
-+      ThreadModule._setSpawn(() => {
-         daemonSpawnCount++
-         return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-       })
-@@ -133,7 +137,7 @@ describe("tui thread", () => {
- 
-       const cwd = process.cwd()
-       try {
--        await expect(call()).rejects.toBe(stop)
-+        await expect(call(undefined, overrides)).rejects.toBe(stop)
-         return { daemonSpawnCount, tuiUrls: [...seen.tuiUrls] }
-       } finally {
-         process.chdir(cwd)
-@@ -148,11 +152,218 @@ describe("tui thread", () => {
-       expect(tuiUrls[0]).toBe("http://127.0.0.1:9999")
-     })
- 
-+    test("reuses existing server while keeping loopback out of proxy env", async () => {
-+      const prevNoProxy = process.env.NO_PROXY
-+      const prevNoProxyLower = process.env.no_proxy
-+      process.env.NO_PROXY = "example.com"
-+      delete process.env.no_proxy
-+
-+      try {
-+        const { daemonSpawnCount } = await callWithDaemonSpy("http://127.0.0.1:9999")
-+        const noProxy = process.env.NO_PROXY ?? ""
-+        const noProxyLower = process.env["no_proxy"] ?? ""
-+        expect(daemonSpawnCount).toBe(0)
-+        expect(noProxy).toContain("127.0.0.1")
-+        expect(noProxyLower).toBe(noProxy)
-+      } finally {
-+        if (prevNoProxy === undefined) delete process.env.NO_PROXY
-+        else process.env.NO_PROXY = prevNoProxy
-+        if (prevNoProxyLower === undefined) delete process.env["no_proxy"]
-+        else process.env["no_proxy"] = prevNoProxyLower
-+      }
-+    })
-+
-+    test("external request reuses healthy loopback daemon when lock has no external URL", async () => {
-+      const { daemonSpawnCount, tuiUrls } = await callWithDaemonSpy("http://127.0.0.1:9999", { port: 8080 })
-+      expect(daemonSpawnCount).toBe(0)
-+      expect(tuiUrls[0]).toBe("http://127.0.0.1:9999")
-+    })
-+
-     test("no existing server: daemon is spawned", async () => {
-       const { daemonSpawnCount } = await callWithDaemonSpy(null)
-       expect(daemonSpawnCount).toBe(1)
-     })
- 
-+    test("spawned daemon is detached on Unix and not detached on Windows", async () => {
-+      setup()
-+      await using tmp = await tmpdir()
-+      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
-+
-+      const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
-+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
-+
-+      let spawnOptions: Parameters<typeof Bun.spawn>[1] | undefined
-+      ThreadModule._setSpawn((_cmd, opts) => {
-+        spawnOptions = opts
-+        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+      })
-+
-+      let readCount = 0
-+      spyOn(ServerLockModule, "read").mockImplementation(async () => {
-+        readCount++
-+        if (readCount <= 2) return undefined
-+        return fakeLock
-+      })
-+      spyOn(ServerLockModule, "alive").mockReturnValue(true)
-+      spyOn(ServerLockModule, "ping").mockResolvedValue(true)
-+      spyOn(ServerLockModule, "clear").mockResolvedValue(undefined)
-+
-+      const cwd = process.cwd()
-+      try {
-+        await expect(call()).rejects.toBe(stop)
-+        expect(spawnOptions?.detached).toBe(process.platform !== "win32")
-+      } finally {
-+        process.chdir(cwd)
-+        if (tty) Object.defineProperty(process.stdin, "isTTY", tty)
-+        else delete (process.stdin as { isTTY?: boolean }).isTTY
-+      }
-+    })
-+
-+    test("thread installs and releases the Windows Ctrl+C guard around TUI lifetime", async () => {
-+      let released = false
-+      const order: string[] = []
-+      setup()
-+      mock.restore()
-+      spyOn(App, "tui").mockImplementation(async () => {
-+        order.push("tui")
-+        throw stop
-+      })
-+      spyOn(UI, "error").mockImplementation(() => {})
-+      spyOn(Win32, "win32DisableProcessedInput").mockImplementation(() => {
-+        order.push("disable")
-+      })
-+      const guard = spyOn(Win32, "win32InstallCtrlCGuard").mockReturnValue(() => {
-+        order.push("release")
-+        released = true
-+      })
-+
-+      await using tmp = await tmpdir()
-+      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
-+      spyOn(ServerLockModule, "read").mockResolvedValue({
-+        pid: process.pid,
-+        port: 9999,
-+        token: "test-token",
-+        dbPath: "/tmp/test.db",
-+        channel: "local" as const,
-+        startedAt: new Date().toISOString(),
-+      })
-+      spyOn(ServerLockModule, "alive").mockReturnValue(true)
-+      spyOn(ServerLockModule, "ping").mockResolvedValue(true)
-+      ThreadModule._setSpawn(() => {
-+        order.push("spawn")
-+        return { pid: 99999, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+      })
-+
-+      const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
-+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
-+      const cwd = process.cwd()
-+      try {
-+        await expect(call()).rejects.toBe(stop)
-+        expect(guard).toHaveBeenCalledTimes(1)
-+        expect(released).toBe(true)
-+        expect(order).toEqual(["disable", "tui", "release"])
-+      } finally {
-+        process.chdir(cwd)
-+        if (tty) Object.defineProperty(process.stdin, "isTTY", tty)
-+        else delete (process.stdin as { isTTY?: boolean }).isTTY
-+      }
-+    })
-+
-+    test("Windows Ctrl+C guard is active before any daemon spawn attempt", async () => {
-+      const order: string[] = []
-+      setup()
-+      mock.restore()
-+      spyOn(App, "tui").mockImplementation(async () => {
-+        order.push("tui")
-+        throw stop
-+      })
-+      spyOn(UI, "error").mockImplementation(() => {})
-+      spyOn(Win32, "win32InstallCtrlCGuard").mockImplementation(() => {
-+        order.push("guard")
-+        return () => order.push("release")
-+      })
-+      spyOn(Win32, "win32DisableProcessedInput").mockImplementation(() => {
-+        order.push("disable")
-+      })
-+
-+      await using tmp = await tmpdir()
-+      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
-+      let readCount = 0
-+      spyOn(ServerLockModule, "read").mockImplementation(async () => {
-+        readCount++
-+        if (readCount <= 2) return undefined
-+        return fakeLock
-+      })
-+      spyOn(ServerLockModule, "alive").mockReturnValue(true)
-+      spyOn(ServerLockModule, "ping").mockResolvedValue(true)
-+      spyOn(ServerLockModule, "clear").mockResolvedValue(undefined)
-+      ThreadModule._setSpawn(() => {
-+        order.push("spawn")
-+        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+      })
-+
-+      const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
-+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
-+      const cwd = process.cwd()
-+      try {
-+        await expect(call()).rejects.toBe(stop)
-+        expect(order).toEqual(["guard", "disable", "spawn", "tui", "release"])
-+      } finally {
-+        process.chdir(cwd)
-+        if (tty) Object.defineProperty(process.stdin, "isTTY", tty)
-+        else delete (process.stdin as { isTTY?: boolean }).isTTY
-+      }
-+    })
-+
-+    test("concurrent daemon recovery elects a single replacement worker", async () => {
-+      await using tmp = await tmpdir()
-+      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
-+
-+      let spawned = false
-+      let spawnCount = 0
-+      const fakeLock = {
-+        pid: FAKE_DAEMON_PID,
-+        port: 9999,
-+        token: "test-token",
-+        dbPath: "/tmp/test.db",
-+        channel: "local" as const,
-+        startedAt: new Date().toISOString(),
-+      }
-+
-+      DaemonModule._setSpawn(() => {
-+        spawnCount++
-+        spawned = true
-+        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+      })
-+      spyOn(ServerLockModule, "read").mockImplementation(async () => (spawned ? fakeLock : undefined))
-+      spyOn(ServerLockModule, "alive").mockReturnValue(true)
-+      spyOn(ServerLockModule, "ping").mockResolvedValue(true)
-+      spyOn(ServerLockModule, "clear").mockResolvedValue(undefined)
-+
-+      const args: ThreadArgs = {
-+        _: [],
-+        $0: "opencode",
-+        project: undefined,
-+        prompt: "hi",
-+        model: undefined,
-+        agent: undefined,
-+        session: undefined,
-+        continue: false,
-+        fork: false,
-+        port: 0,
-+        hostname: "127.0.0.1",
-+        mdns: false,
-+        "mdns-domain": "opencode.local",
-+        mdnsDomain: "opencode.local",
-+        cors: [],
-+      }
-+
-+      const [first, second] = await Promise.all([DaemonModule.ensure(args), DaemonModule.ensure(args)])
-+      expect(first).toBe("http://127.0.0.1:9999")
-+      expect(second).toBe("http://127.0.0.1:9999")
-+      expect(spawnCount).toBe(1)
-+    })
-+
-     test("accepts lock from real daemon when spawned pid is only a Windows launcher", async () => {
-       setup()
-       await using tmp = await tmpdir()
-@@ -166,7 +377,7 @@ describe("tui thread", () => {
-       const launcherPid = 99998
-       const realDaemonPid = 99999
-       let daemonSpawnCount = 0
--      spyOn(ThreadModule, "_spawn").mockImplementation(() => {
-+      ThreadModule._setSpawn(() => {
-         daemonSpawnCount++
-         return { pid: launcherPid, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-       })
-@@ -231,7 +442,7 @@ describe("tui thread", () => {
-       Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
- 
-       let daemonSpawnCount = 0
--      spyOn(ThreadModule, "_spawn").mockImplementation(() => {
-+      ThreadModule._setSpawn(() => {
-         daemonSpawnCount++
-         return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-       })
-@@ -277,7 +488,7 @@ describe("tui thread", () => {
-       Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true })
- 
-       let daemonSpawnCount = 0
--      spyOn(ThreadModule, "_spawn").mockImplementation(() => {
-+      ThreadModule._setSpawn(() => {
-         daemonSpawnCount++
-         return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-       })
++// #139：锁定 discoverOrSpawn spawn detached 与 reconnect SIGUSR2 重绑
++test("tui daemon spawn is detached on Unix and reconnect rebinds SIGUSR2", async () => {
++  const here = path.dirname(fileURLToPath(import.meta.url))
++  const src = await Bun.file(path.join(here, "../../../src/cli/cmd/tui.ts")).text()
++  // #139：Unix detached 防进程组 SIGINT 杀掉共享 daemon
++  expect(src).toContain('detached: process.platform !== "win32"')
++  // #139：reconnect 必须使用新 fwdPid 并 off 旧 handler
++  expect(src).toContain("discovered.fwdPid")
++  expect(src).toContain('process.off("SIGUSR2"')
++})

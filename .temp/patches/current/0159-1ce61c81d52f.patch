@@ -12,52 +12,262 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
-diff --git a/packages/opencode/migration/20260517000000_migrate_review_agent/migration.sql b/packages/opencode/migration/20260517000000_migrate_review_agent/migration.sql
+diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/database/migration.gen.ts
+index ca21fb7159391e00ffa022902bfa5747d1cfd2ad..8b15632c334cc182ffddc62d1ea684ea5140bd33 100644
+--- a/packages/core/src/database/migration.gen.ts
++++ b/packages/core/src/database/migration.gen.ts
+@@ -42,5 +42,6 @@ export const migrations = (
+     import("./migration/20260622202450_simplify_session_input"),
+     import("./migration/20260422130633_request_usage_tracking"),
+     import("./migration/20260723100000_normalize_global_session_path"),
++    import("./migration/20260725100000_migrate_review_agent"),
+   ])
+ ).map((module) => module.default) satisfies DatabaseMigration.Migration[]
+diff --git a/packages/core/src/database/migration/20260725100000_migrate_review_agent.ts b/packages/core/src/database/migration/20260725100000_migrate_review_agent.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3d4c270d3605f3aaef4b1578c1021511f872783d
+index 0000000000000000000000000000000000000000..243ff405edaa1576b5923bf2876a745588f2408b
 --- /dev/null
-+++ b/packages/opencode/migration/20260517000000_migrate_review_agent/migration.sql
-@@ -0,0 +1,23 @@
-+UPDATE `session`
-+SET `agent` = 'interactive'
-+WHERE `agent` = 'review';
-+--> statement-breakpoint
-+UPDATE `request_usage`
-+SET `agent` = 'interactive'
-+WHERE `agent` = 'review';
-+--> statement-breakpoint
-+UPDATE `message`
-+SET `data` = json_set(`data`, '$.agent', 'interactive')
-+WHERE json_extract(`data`, '$.agent') = 'review';
-+--> statement-breakpoint
-+UPDATE `message`
-+SET `data` = json_set(`data`, '$.mode', 'interactive')
-+WHERE json_extract(`data`, '$.mode') = 'review';
-+--> statement-breakpoint
-+UPDATE `session_message`
-+SET `data` = json_set(`data`, '$.agent', 'interactive')
-+WHERE json_extract(`data`, '$.agent') = 'review';
-+--> statement-breakpoint
-+UPDATE `event`
-+SET `data` = json_set(`data`, '$.agent', 'interactive')
-+WHERE json_extract(`data`, '$.agent') = 'review';
++++ b/packages/core/src/database/migration/20260725100000_migrate_review_agent.ts
+@@ -0,0 +1,43 @@
++import { Effect } from "effect"
++import type { DatabaseMigration } from "../migration"
++
++// #159：历史 review 代理重写为 interactive（不是 decide）
++// decide 是新原生无工具模式；旧 review 会话应落到可执行的 interactive
++// 六处 UPDATE 覆盖列字段与 JSON 载荷，避免 UI/统计/事件残留 review
++export default {
++  id: "20260725100000_migrate_review_agent",
++  up(tx) {
++    return Effect.gen(function* () {
++      // session.agent 列：会话级当前代理
++      // 列级字符串，非 JSON
++      yield* tx.run(`UPDATE \`session\`
++SET \`agent\` = 'interactive'
++WHERE \`agent\` = 'review';`)
++      // request_usage.agent：用量统计维度，避免 review 孤儿值
++      // 与 session 同步，保证按 agent 聚合一致
++      yield* tx.run(`UPDATE \`request_usage\`
++SET \`agent\` = 'interactive'
++WHERE \`agent\` = 'review';`)
++      // message.data.agent：V1 消息 JSON 载荷
++      // user/assistant 消息均可能带 agent
++      yield* tx.run(`UPDATE \`message\`
++SET \`data\` = json_set(\`data\`, '$.agent', 'interactive')
++WHERE json_extract(\`data\`, '$.agent') = 'review';`)
++      // message.data.mode：助手消息 mode 与 agent 同步
++      // mode 历史与 agent 同值，需单独改写
++      yield* tx.run(`UPDATE \`message\`
++SET \`data\` = json_set(\`data\`, '$.mode', 'interactive')
++WHERE json_extract(\`data\`, '$.mode') = 'review';`)
++      // session_message.data.agent：投影/事件消息
++      // agent-switched 等类型依赖此字段
++      yield* tx.run(`UPDATE \`session_message\`
++SET \`data\` = json_set(\`data\`, '$.agent', 'interactive')
++WHERE json_extract(\`data\`, '$.agent') = 'review';`)
++      // event.data.agent：事件溯源载荷
++      // 不改 type，只改 data.agent 字符串
++      yield* tx.run(`UPDATE \`event\`
++SET \`data\` = json_set(\`data\`, '$.agent', 'interactive')
++WHERE json_extract(\`data\`, '$.agent') = 'review';`)
++    })
++  },
++} satisfies DatabaseMigration.Migration
+diff --git a/packages/core/test/migrate-review-agent.test.ts b/packages/core/test/migrate-review-agent.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..95a776e366fed054e11461809476e203d17903b0
+--- /dev/null
++++ b/packages/core/test/migrate-review-agent.test.ts
+@@ -0,0 +1,166 @@
++import { expect, test } from "bun:test"
++import { SqliteClient } from "@effect/sql-sqlite-bun"
++import { EffectDrizzleSqlite } from "@opencode-ai/effect-drizzle-sqlite"
++import { Effect } from "effect"
++import { sql } from "drizzle-orm"
++import { DatabaseMigration } from "@opencode-ai/core/database/migration"
++import migrateReviewAgent from "@opencode-ai/core/database/migration/20260725100000_migrate_review_agent"
++import type { SqlClient as SqlClientService } from "effect/unstable/sql/SqlClient"
++
++const run = <A, E>(effect: Effect.Effect<A, E, SqlClientService>) =>
++  Effect.runPromise(
++    effect.pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:", disableWAL: true })), Effect.scoped),
++  )
++
++const makeDb = EffectDrizzleSqlite.makeWithDefaults()
++
++// #159：review → interactive 数据迁移（目标不是 decide）
++test("migrates persisted review agents to interactive", async () => {
++  await run(
++    Effect.gen(function* () {
++      const db = yield* makeDb
++      // 最小表结构，仅覆盖 migration 触及的列
++      yield* db.run(sql`
++        CREATE TABLE project (
++          id text PRIMARY KEY,
++          worktree text NOT NULL,
++          vcs text,
++          name text,
++          time_created integer NOT NULL,
++          time_updated integer NOT NULL,
++          sandboxes text
++        );
++      `)
++      yield* db.run(sql`
++        CREATE TABLE session (
++          id text PRIMARY KEY,
++          project_id text NOT NULL,
++          slug text NOT NULL,
++          directory text NOT NULL,
++          title text NOT NULL,
++          version text NOT NULL,
++          agent text,
++          time_created integer NOT NULL,
++          time_updated integer NOT NULL
++        );
++      `)
++      yield* db.run(sql`
++        CREATE TABLE message (
++          id text PRIMARY KEY,
++          session_id text NOT NULL,
++          time_created integer NOT NULL,
++          time_updated integer NOT NULL,
++          data text NOT NULL
++        );
++      `)
++      yield* db.run(sql`
++        CREATE TABLE session_message (
++          id text PRIMARY KEY,
++          session_id text NOT NULL,
++          type text NOT NULL,
++          time_created integer NOT NULL,
++          time_updated integer NOT NULL,
++          data text NOT NULL
++        );
++      `)
++      yield* db.run(sql`
++        CREATE TABLE event_sequence (
++          aggregate_id text PRIMARY KEY,
++          seq integer NOT NULL
++        );
++      `)
++      yield* db.run(sql`
++        CREATE TABLE event (
++          id text PRIMARY KEY,
++          aggregate_id text NOT NULL,
++          seq integer NOT NULL,
++          type text NOT NULL,
++          data text NOT NULL
++        );
++      `)
++      yield* db.run(sql`
++        CREATE TABLE request_usage (
++          session_id text NOT NULL,
++          request_id text NOT NULL,
++          root_request_id text NOT NULL,
++          source text NOT NULL,
++          status text NOT NULL,
++          agent text NOT NULL,
++          provider_id text NOT NULL,
++          model_id text NOT NULL,
++          time_created integer NOT NULL,
++          time_updated integer NOT NULL,
++          PRIMARY KEY (session_id, request_id)
++        );
++      `)
++
++      yield* db.run(sql`
++        INSERT INTO project (id, worktree, vcs, name, time_created, time_updated, sandboxes)
++        VALUES ('proj_review', '/tmp/review', 'git', 'Review Project', 1, 1, '[]');
++      `)
++      yield* db.run(sql`
++        INSERT INTO session (id, project_id, slug, directory, title, version, agent, time_created, time_updated)
++        VALUES ('ses_review', 'proj_review', 'review', '/tmp/review', 'Review', '1.0.0', 'review', 1, 1);
++      `)
++      yield* db.run(sql`
++        INSERT INTO message (id, session_id, time_created, time_updated, data)
++        VALUES (
++          'msg_user_review',
++          'ses_review',
++          1,
++          1,
++          '{"role":"user","time":{"created":1},"agent":"review","model":{"providerID":"test","modelID":"test-model"}}'
++        );
++      `)
++      yield* db.run(sql`
++        INSERT INTO message (id, session_id, time_created, time_updated, data)
++        VALUES (
++          'msg_assistant_review',
++          'ses_review',
++          2,
++          2,
++          '{"role":"assistant","time":{"created":2},"parentID":"msg_user_review","mode":"review","agent":"review","path":{"cwd":"/tmp/review","root":"/tmp/review"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"modelID":"test-model","providerID":"test"}'
++        );
++      `)
++      yield* db.run(sql`
++        INSERT INTO session_message (id, session_id, type, time_created, time_updated, data)
++        VALUES ('sm_review', 'ses_review', 'agent-switched', 1, 1, '{"agent":"review"}');
++      `)
++      yield* db.run(sql`INSERT INTO event_sequence (aggregate_id, seq) VALUES ('ses_review', 1);`)
++      yield* db.run(sql`
++        INSERT INTO event (id, aggregate_id, seq, type, data)
++        VALUES ('evt_review', 'ses_review', 1, 'session.next.agent.switched', '{"agent":"review"}');
++      `)
++      yield* db.run(sql`
++        INSERT INTO request_usage (
++          session_id, request_id, root_request_id, source, status, agent, provider_id, model_id, time_created, time_updated
++        ) VALUES ('ses_review', 'msg_user_review', 'msg_user_review', 'prompt', 'completed', 'review', 'test', 'test-model', 1, 1);
++      `)
++
++      yield* DatabaseMigration.applyOnly(db, [migrateReviewAgent])
++
++      // 全部应落到 interactive，而非 decide
++      expect(yield* db.get(sql`SELECT agent AS value FROM session WHERE id = 'ses_review'`)).toEqual({
++        value: "interactive",
++      })
++      expect(
++        yield* db.get(sql`SELECT agent AS value FROM request_usage WHERE request_id = 'msg_user_review'`),
++      ).toEqual({ value: "interactive" })
++      expect(
++        yield* db.get(sql`SELECT json_extract(data, '$.agent') AS value FROM message WHERE id = 'msg_user_review'`),
++      ).toEqual({ value: "interactive" })
++      expect(
++        yield* db.get(sql`SELECT json_extract(data, '$.agent') AS value FROM message WHERE id = 'msg_assistant_review'`),
++      ).toEqual({ value: "interactive" })
++      expect(
++        yield* db.get(sql`SELECT json_extract(data, '$.mode') AS value FROM message WHERE id = 'msg_assistant_review'`),
++      ).toEqual({ value: "interactive" })
++      expect(
++        yield* db.get(sql`SELECT json_extract(data, '$.agent') AS value FROM session_message WHERE id = 'sm_review'`),
++      ).toEqual({ value: "interactive" })
++      expect(yield* db.get(sql`SELECT json_extract(data, '$.agent') AS value FROM event WHERE id = 'evt_review'`)).toEqual(
++        { value: "interactive" },
++      )
++    }),
++  )
++})
 diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
-index 69005db5dffbfdc9371d0bcd0ec2b4597289d0c0..b075d0ccfcaec2dbb990915ef9f71152e0ff27fd 100644
+index 5a1c1332aea35c85b0d0436366379245b621c0c7..f0f4a01534a95cb3df8a504d4883d92d250c3a24 100644
 --- a/packages/opencode/src/agent/agent.ts
 +++ b/packages/opencode/src/agent/agent.ts
-@@ -143,25 +143,11 @@ export const layer = Layer.effect(
+@@ -176,30 +176,18 @@ const layer = Layer.effect(
              mode: "primary",
              native: true,
            },
+-          // 审查代理：编辑类工具和 bash 均需确认，适合 code review 场景
 -          review: {
 -            name: "review",
 -            description: "The default agent. Executes tools based on configured permissions.",
++          // #159：decide 取代 review——只产出决断计划，禁止一切工具
++          // 权限末尾 "*": deny 盖过 defaults/user，保证无工具执行面
++          // 数据迁移把旧 review 会话落到 interactive，不落到 decide
 +          decide: {
 +            name: "decide",
++            // 描述强调 bounded context + no tools，供 UI/默认 agent 列表展示
 +            description: "Decide mode. Produces a decisive plan with bounded recent context and no tools.",
              options: {},
 -            permission: Permission.merge(
 -              defaults,
+-              // edit/write/apply_patch 设为 ask：审查模式下文件修改需用户逐次确认
+-              // bash 设为 ask：命令执行同样需要确认
 -              Permission.fromConfig({
 -                question: "allow",
 -                plan_enter: "allow",
@@ -65,61 +275,76 @@ index 69005db5dffbfdc9371d0bcd0ec2b4597289d0c0..b075d0ccfcaec2dbb990915ef9f71152
 -                edit: "ask",
 -                write: "ask",
 -                apply_patch: "ask",
+-                // #99：build 对 notebook 变更类工具默认 ask
 -                vscode_notebook_run: "ask",
 -                vscode_notebook_edit: "ask",
 -                vscode_notebook_env: "ask",
 -              }),
 -              user,
 -            ),
+-            // 审查代理同样作为内置主代理注册，权限比交互代理更严格
++            // merge 顺序：defaults + user 先合并，最后 deny 全部，防止用户放宽工具权限
++            // 与 compaction 全 deny 同构，但 decide 是 primary 可见主代理
 +            permission: Permission.merge(defaults, user, Permission.fromConfig({ "*": "deny" })),
++            // primary + native：可被用户直接选择，非 hidden 子代理
              mode: "primary",
              native: true,
            },
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 9bf0ede88fc2490374e8dcc88c21c862ed6cdc72..3f370624c1de205906c9c6da9d7426fa5e71042e 100644
+index ec1443499bd2e70786a70ca5921ec4465a05d31a..2b80c1185abe1bad159119f4a7d391e8a2db8415 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -64,6 +64,7 @@ import { eq } from "@/storage/db"
- import * as Database from "@/storage/db"
- import { SessionTable } from "./session.sql"
- import { Token } from "@/util/token"
+@@ -60,6 +60,8 @@ import { SessionTools } from "./tools"
+ import { LLMEvent } from "@opencode-ai/llm"
+ // #140：无历史样本时回退 Token.estimate（chars/4）
+ import { estimate as tokenEstimate } from "@/util/token"
++// #159：decide 窗口裁剪用 usable 上限（与 overflow 同一口径）
 +import { usable } from "./overflow"
  
- 
- // @ts-ignore
-@@ -84,6 +85,65 @@ const elog = EffectLogger.create({ service: "session.prompt" })
+ // #140：输入侧 chars/token 样本窗口与夹紧范围
  const INPUT_CHARS_HISTORY_LIMIT = 100_000
- const MIN_CHARS_PER_TOKEN = 3
- const MAX_CHARS_PER_TOKEN = 4
-+const DECIDE_PROMPT = `<system-reminder>
-+Decide mode is active. Do not execute, modify files, call tools, or ask for tool-based confirmation.
-+Use the available conversation context to produce a decisive recommendation or implementation plan.
-+Prefer a concrete decision over broad option lists. If critical information is missing, state the smallest set of blocking questions in plain text.
-+</system-reminder>`
+@@ -70,6 +72,80 @@ function clampCharsPerToken(value: number) {
+   return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value))
+ }
+ 
++// #159：decide 最近轮目标占用区间（相对 usable）
++// LATEST_MIN：最新一轮已≥60% 则不再向历史扩展
++// CONTINUE_BELOW：最新一轮<50% 才继续扩
++// TARGET：扩到≥70% 即停
++// MAX：≥100% 视为溢出，回退 fallback
 +const DECIDE_LATEST_MIN = 0.6
 +const DECIDE_CONTINUE_BELOW = 0.5
 +const DECIDE_TARGET = 0.7
 +const DECIDE_MAX = 1
 +
++// 仅按 agent 名判定，不读 mode/config 别名
 +function isDecideAgent(agent: Agent.Info) {
 +  return agent.name === "decide"
 +}
 +
++// 过长 thinking 只保留首尾，避免 decide 上下文被推理占满
++// 阈值 400：中段用省略号替换，保留语义锚点
 +function truncateThinking(text: string) {
 +  if (text.length <= 400) return text
 +  return `${text.slice(0, 200)}...${text.slice(-200)}`
 +}
 +
-+function formatDecideToolPart(part: MessageV2.ToolPart) {
++// 把历史 tool part 压成文本，避免 decide 路径出现 tool-call/tool role
++// 按 status 分支输出，保证 completed/error/pending/running 均可读
++function formatDecideToolPart(part: SessionV1.ToolPart) {
 +  const body = (() => {
 +    switch (part.state.status) {
 +      case "completed":
++        // 完成态：保留 output 供决断参考
 +        return ["output:", part.state.output]
 +      case "error":
++        // 错误态：保留 error 字符串
 +        return ["error:", part.state.error]
 +      case "pending":
++        // 挂起态：用 raw 输入串，避免半结构化 input
 +        return ["raw_input:", part.state.raw]
 +      case "running":
++        // 运行中：仅标题/状态，无完整输出
 +        return ["status:", part.state.title ?? "running"]
 +    }
 +  })()
@@ -131,11 +356,15 @@ index 9bf0ede88fc2490374e8dcc88c21c862ed6cdc72..3f370624c1de205906c9c6da9d7426fa
 +  ].join("\n")
 +}
 +
-+function sanitizeDecideMessages(messages: MessageV2.WithParts[]) {
++// 消毒：reasoning 截断 + tool→synthetic text，供 decide 只读上下文
++// 不改写 info，仅映射 parts；synthetic 标记避免 UI 当用户原文
++function sanitizeDecideMessages(messages: SessionV1.WithParts[]) {
 +  return messages.map((msg) => ({
 +    info: msg.info,
-+    parts: msg.parts.map((part): MessageV2.Part => {
++    parts: msg.parts.map((part): SessionV1.Part => {
++      // reasoning：截断后仍保留 type=reasoning
 +      if (part.type === "reasoning") return { ...part, text: truncateThinking(part.text) }
++      // tool：降级为 text，阻断模型侧 tool role 重建
 +      if (part.type === "tool") {
 +        return {
 +          id: part.id,
@@ -146,45 +375,31 @@ index 9bf0ede88fc2490374e8dcc88c21c862ed6cdc72..3f370624c1de205906c9c6da9d7426fa
 +          synthetic: true,
 +        }
 +      }
++      // 其余 part 原样透传
 +      return part
 +    }),
 +  }))
 +}
- 
- function clampCharsPerToken(value: number) {
-   return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value))
-@@ -312,6 +372,18 @@ export const layer = Layer.effect(
-       const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
-       if (!userMessage) return input.messages
- 
-+      if (isDecideAgent(input.agent)) {
-+        userMessage.parts.push({
-+          id: PartID.ascending(),
-+          messageID: userMessage.info.id,
-+          sessionID: userMessage.info.sessionID,
-+          type: "text",
-+          text: DECIDE_PROMPT,
-+          synthetic: true,
-+        })
-+        return input.messages
-+      }
 +
-       if (!Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE) {
-         if (input.agent.name === "plan") {
-           userMessage.parts.push({
-@@ -1523,6 +1595,38 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+ // @ts-ignore
+ globalThis.AI_SDK_LOG_WARNINGS = false
+ 
+@@ -1163,6 +1239,48 @@ const layer = Layer.effect(
        throw new Error("Impossible")
      })
  
++    // #159：从最近 user 起点向后试窗口；ratio 相对 usable，估量用 tip #140 tokenEstimate
 +    const selectDecideMessages = Effect.fn("SessionPrompt.selectDecideMessages")(function* (input: {
-+      messages: MessageV2.WithParts[]
++      messages: SessionV1.WithParts[]
 +      model: Provider.Model
 +      systemText: string
 +    }) {
 +      const sanitized = sanitizeDecideMessages(input.messages)
 +      const limit = usable({ cfg: yield* config.get(), model: input.model })
++      // limit<=0：无上下文预算时原样返回消毒后全量
 +      if (limit <= 0) return sanitized
 +
++      // 仅从非 compaction 的 user 消息作为窗口起点，自新到旧
 +      const starts = sanitized
 +        .map((msg, index) => ({ msg, index }))
 +        .filter((item) => item.msg.info.role === "user")
@@ -192,195 +407,255 @@ index 9bf0ede88fc2490374e8dcc88c21c862ed6cdc72..3f370624c1de205906c9c6da9d7426fa
 +        .map((item) => item.index)
 +        .toReversed()
 +
-+      let fallback: MessageV2.WithParts[] | undefined
++      let fallback: SessionV1.WithParts[] | undefined
 +      for (const [position, start] of starts.entries()) {
 +        const candidate = sanitized.slice(start)
 +        const modelMessages = yield* MessageV2.toModelMessagesEffect(candidate, input.model)
-+        const ratio = estimateInputTokens([input.systemText, JSON.stringify(modelMessages)].join("\n"), candidate) / limit
++        // 不用 estimateInputTokens：tip 已历史校准，decide 窗口统一 Token.estimate
++        const ratio =
++          tokenEstimate([input.systemText, JSON.stringify(modelMessages)].join("\n")) / limit
++        // 超满：退回上一个可容纳窗口
 +        if (ratio >= DECIDE_MAX) return fallback ?? candidate
 +
 +        fallback = candidate
++        // 最新一轮已够用：直接采用，避免无谓扩历史
 +        if (position === 0 && ratio >= DECIDE_LATEST_MIN) return candidate
++        // 最新一轮过小：继续向历史扩展以补上下文
 +        if (position === 0 && ratio < DECIDE_CONTINUE_BELOW) continue
++        // 达到目标占用：停扩，防止再吞旧轮
 +        if (ratio >= DECIDE_TARGET) return candidate
 +      }
 +
++      // 历史全扫后仍无命中阈值：用最大可容纳或全量消毒
 +      return fallback ?? sanitized
 +    })
 +
-     const runLoop: (sessionID: SessionID) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.run")(
+     const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
        function* (sessionID: SessionID) {
          const ctx = yield* InstanceState.context
-@@ -1647,18 +1751,21 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-           const outcome: "break" | "continue" = yield* Effect.gen(function* () {
+@@ -1303,25 +1421,32 @@ const layer = Layer.effect(
              const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
              const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
--
--            const tools = yield* resolveTools({
--              agent,
--              session,
--              model,
--              tools: lastUser.tools,
--              processor: handle,
--              bypassAgentCheck,
--              messages: msgs,
--            })
--
--            if (lastUser.format?.type === "json_schema") {
+             const promptOps = yield* ops()
++            // #159：decide 路径工具表恒为空，不 resolve 注册表
++            // 空表同时驱动 system 的 WITHOUT any tools 文案
 +            const decide = isDecideAgent(agent)
 +
++            // 非 decide：沿用 SessionTools.resolve 完整权限/插件管线
 +            const tools: Record<string, AITool> = decide
 +              ? {}
-+              : yield* resolveTools({
++              : yield* SessionTools.resolve({
 +                  agent,
 +                  session,
 +                  model,
-+                  tools: lastUser.tools,
 +                  processor: handle,
 +                  bypassAgentCheck,
 +                  messages: msgs,
-+                })
-+
++                  promptOps,
++                }).pipe(
++                  Effect.provideService(Plugin.Service, plugin),
++                  Effect.provideService(Permission.Service, permission),
++                  Effect.provideService(ToolRegistry.Service, registry),
++                  Effect.provideService(MCP.Service, mcp),
++                  Effect.provideService(Truncate.Service, truncate),
++                  Effect.provideService(RuntimeFlags.Service, flags),
++                )
+ 
+-            const tools = yield* SessionTools.resolve({
+-              agent,
+-              session,
+-              model,
+-              processor: handle,
+-              bypassAgentCheck,
+-              messages: msgs,
+-              promptOps,
+-            }).pipe(
+-              Effect.provideService(Plugin.Service, plugin),
+-              Effect.provideService(Permission.Service, permission),
+-              Effect.provideService(ToolRegistry.Service, registry),
+-              Effect.provideService(MCP.Service, mcp),
+-              Effect.provideService(Truncate.Service, truncate),
+-              Effect.provideService(RuntimeFlags.Service, flags),
+-            )
+-
+-            if (lastUser.format?.type === "json_schema") {
++            // decide 不挂 StructuredOutput 工具；json_schema 仅非 decide
 +            if (!decide && lastUser.format?.type === "json_schema") {
                tools["StructuredOutput"] = createStructuredOutputTool({
                  schema: lastUser.format.schema,
                  onSuccess(output) {
-@@ -1688,28 +1795,29 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-               }
-             }
+@@ -1333,16 +1458,17 @@ const layer = Layer.effect(
+             if (step === 1)
+               yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
  
 -            yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
++            // decide 跳过插件 transform，避免外部改写只读上下文
 +            if (!decide) yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
  
+-            // 仅用户可配置工具计入 system prompt 的工具使用指引
 -            const registeredTools = Object.keys(tools).filter(ToolSelection.isUserConfigurable)
--            const [skills, env, instructions, mcpInstr, modelMsgs] = yield* Effect.all([
+-            const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
 -              sys.skills(agent),
++            // 仅用户可配置工具计入 system prompt 的工具使用指引；decide 无工具
 +            const registeredTools = decide ? [] : Object.keys(tools).filter(ToolSelection.isUserConfigurable)
-+            const [skills, env, instructions, mcpInstr] = yield* Effect.all([
++            // decide 跳过 skills/MCP 指令，只保留 env + instructions
++            const [skills, env, instructions, mcpInstructions] = yield* Effect.all([
 +              decide ? Effect.succeed(undefined) : sys.skills(agent),
                sys.environment(model, registeredTools),
                instruction.system().pipe(Effect.orDie),
--              sys.mcpInstructions(),
+-              sys.mcp(agent, session.permission),
 -              MessageV2.toModelMessagesEffect(msgs, model),
-+              decide ? Effect.succeed(undefined) : sys.mcpInstructions(),
++              decide ? Effect.succeed(undefined) : sys.mcp(agent, session.permission),
              ])
-             const system = [...env, ...instructions, ...(skills ? [skills] : []), ...(mcpInstr ? [mcpInstr] : [])]
+             const system = [
+               ...env,
+@@ -1352,8 +1478,6 @@ const layer = Layer.effect(
+             ]
              const format = lastUser.format ?? { type: "text" as const }
              if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
--            const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])]
--            // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
--            // 分别记录各组件的字符数，供 TUI 的 /context 面板直接使用（避免 TUI 自行重建 prompt 导致偏差）。
-             const baseSystemText = (agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)).join("\n")
-             const envText = env.join("\n")
-             const instructionsText = [...instructions, ...(lastUser.system ? [lastUser.system] : [])].join("\n")
-             const skillsText = skills ?? ""
-             const mcpText = mcpInstr ?? ""
-             const systemText = [baseSystemText, envText, instructionsText, skillsText, mcpText].filter(Boolean).join("\n")
-+            const requestMsgs = decide ? yield* selectDecideMessages({ messages: msgs, model, systemText }) : msgs
+-            // 提前组装 messages 复用：token 估算与 handle.process 共用同一份，保证口径一致
+-            const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : [])]
+             // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
+             // 从本 session 历史 assistant 的 output text/reasoning 推算真实 chars-per-token 比值，
+             // 按累积字符量停止（≥16000），不按轮数，代替固定 /4
+@@ -1362,6 +1486,13 @@ const layer = Layer.effect(
+               ...system,
+               ...(lastUser.system ? [lastUser.system] : []),
+             ].join("\n")
++            // decide：消毒+窗口后再 toModelMessages；非 decide 用全量 msgs
++            const requestMsgs = decide
++              ? yield* selectDecideMessages({ messages: msgs, model, systemText })
++              : msgs
 +            const modelMsgs = yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
-+            const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])]
-+            // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
-+            // 分别记录各组件的字符数，供 TUI 的 /context 面板直接使用（避免 TUI 自行重建 prompt 导致偏差）。
++            // 提前组装 messages 复用：token 估算与 handle.process 共用同一份，保证口径一致
++            const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : [])]
              const messagesText = JSON.stringify(messages)
+             // 合并 agent 与 session 权限，仅估算实际发送的工具定义
              const disabledTools = Permission.disabled(Object.keys(tools), Permission.merge(agent.permission, session.permission ?? []))
-             const toolsText = Object.entries(tools)
-@@ -1733,7 +1841,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-             let msgToolInputChars = 0
-             let msgToolOutputChars = 0
-             let msgAttachmentChars = 0
+@@ -1380,10 +1511,10 @@ const layer = Layer.effect(
+               .join("\n")
+             // 三段字符总量近似请求体，除以 chars-per-token 得 token 估算
+             const inputChars = [systemText, messagesText, toolsText].join("\n").length
+-            // 输入字符细分：遍历消息部件计算每类字符数，供 TUI 精确分类显示
++            // 输入字符细分：遍历实际请求消息（requestMsgs）计算每类字符数
+             let msgUserChars = 0, msgAssistantChars = 0, msgReasoningChars = 0
+             let msgToolInputChars = 0, msgToolOutputChars = 0, msgAttachmentChars = 0
 -            for (const m of msgs) {
 +            for (const m of requestMsgs) {
-               for (const p of m.parts) {
-                 switch (p.type) {
-                   case "text":
-@@ -1780,7 +1888,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-                 total: messagesText.length,
-               },
-             }
--            const estimatedInput = estimateInputTokens(inputText, msgs)
-+            const estimatedInput = estimateInputTokens(inputText, requestMsgs)
-             // Preflight compaction must judge the request we are about to send,
-             // not the last finished assistant's historical usage.  After compaction,
-             // retained tail messages can carry huge pre-compaction token counts even
+               for (const p of m.parts as any[]) {
+                 if (p.type === "text" && m.info.role === "user") msgUserChars += p.text?.length ?? 0
+                 else if (p.type === "text" && m.info.role === "assistant") msgAssistantChars += p.text?.length ?? 0
+diff --git a/packages/opencode/src/session/reminders.ts b/packages/opencode/src/session/reminders.ts
+index f5484b8e9ba455edd3808c8b8823ac9298c77f13..63710999598bb9b631bfc5fc0fe9ebf74525d5c8 100644
+--- a/packages/opencode/src/session/reminders.ts
++++ b/packages/opencode/src/session/reminders.ts
+@@ -23,6 +23,29 @@ export const apply = Effect.fn("SessionReminders.apply")(function* (input: {
+   const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
+   if (!userMessage) return input.messages
+ 
++  // #159：decide 优先于 plan 提醒——仅注入 DECIDE_PROMPT，不进入 plan/build 切换分支
++  // 早返回：避免 experimentalPlanMode 分支误注入 plan 文件路径
++  if (input.agent.name === "decide") {
++    // 挂到最新 user message，与其它 mode 提醒一致
++    userMessage.parts.push({
++      id: PartID.ascending(),
++      messageID: userMessage.info.id,
++      sessionID: userMessage.info.sessionID,
++      type: "text",
++      // 合成提醒：禁止工具/改文件，要求给出可执行决断
++      // 英文正文：模型侧 system-reminder 约定语言
++      text: `<system-reminder>
++Decide mode is active. Do not execute, modify files, call tools, or ask for tool-based confirmation.
++Use the available conversation context to produce a decisive recommendation or implementation plan.
++Prefer a concrete decision over broad option lists. If critical information is missing, state the smallest set of blocking questions in plain text.
++</system-reminder>`,
++      // synthetic：不计入用户原话，TUI 可折叠
++      synthetic: true,
++    })
++    // 立即返回：decide 不与 plan/build 切换提示叠加
++    return input.messages
++  }
++
+   if (!flags.experimentalPlanMode) {
+     if (input.agent.name === "plan") {
+       userMessage.parts.push({
 diff --git a/packages/opencode/test/agent/agent.test.ts b/packages/opencode/test/agent/agent.test.ts
-index 24effa3d24d04234b95ce98d8dde833bd4cb5fcb..f6e35826dd05eb8487d0cf268235ff495047d627 100644
+index 9f650279f3aa2ddceefc76c33dbcbf4c8f455534..8edff772a984faa2dc37c919b431fdd75a29caa8 100644
 --- a/packages/opencode/test/agent/agent.test.ts
 +++ b/packages/opencode/test/agent/agent.test.ts
-@@ -30,12 +30,15 @@ test("returns default native agents when no config", async () => {
-       const agents = await load(tmp.path, (svc) => svc.list())
-       const names = agents.map((a) => a.name)
-       expect(names).toContain("build")
-+      expect(names).toContain("interactive")
-       expect(names).toContain("plan")
-+      expect(names).toContain("decide")
-       expect(names).toContain("general")
-       expect(names).toContain("explore")
-       expect(names).toContain("compaction")
-       expect(names).toContain("title")
-       expect(names).toContain("summary")
-+      expect(names).not.toContain("review")
-     },
-   })
- })
-@@ -55,6 +58,17 @@ test("build agent has correct default properties", async () => {
-   })
- })
+@@ -49,12 +49,18 @@ it.instance("returns default native agents when no config", () =>
+     const agents = yield* load((svc) => svc.list())
+     const names = agents.map((a) => a.name)
+     expect(names).toContain("build")
++    // interactive 仍保留：旧 review 迁移目标
++    expect(names).toContain("interactive")
+     expect(names).toContain("plan")
++    // decide 为新原生 primary
++    expect(names).toContain("decide")
+     expect(names).toContain("general")
+     expect(names).toContain("explore")
+     expect(names).toContain("compaction")
+     expect(names).toContain("title")
+     expect(names).toContain("summary")
++    // #159：review 已由 decide 取代
++    expect(names).not.toContain("review")
+   }),
+ )
  
-+test("review agent id is not built in", async () => {
-+  await using tmp = await tmpdir()
-+  await WithInstance.provide({
-+    directory: tmp.path,
-+    fn: async () => {
-+      const review = await load(tmp.path, (svc) => svc.get("review"))
-+      expect(review).toBeUndefined()
-+    },
-+  })
-+})
-+
- test("plan agent denies edits except .opencode/plans/*", async () => {
-   await using tmp = await tmpdir()
-   await WithInstance.provide({
-@@ -116,6 +130,23 @@ test("general agent denies todo tools", async () => {
-   })
- })
+@@ -69,6 +75,13 @@ it.instance("build agent has correct default properties", () =>
+   }),
+ )
  
-+test("decide agent denies tool permissions", async () => {
-+  await using tmp = await tmpdir()
-+  await WithInstance.provide({
-+    directory: tmp.path,
-+    fn: async () => {
-+      const decide = await load(tmp.path, (svc) => svc.get("decide"))
-+      expect(decide).toBeDefined()
-+      expect(decide?.mode).toBe("primary")
-+      expect(evalPerm(decide, "bash")).toBe("deny")
-+      expect(evalPerm(decide, "read")).toBe("deny")
-+      expect(evalPerm(decide, "task")).toBe("deny")
-+      expect(evalPerm(decide, "skill")).toBe("deny")
-+      expect(evalPerm(decide, "edit")).toBe("deny")
-+    },
-+  })
-+})
++it.instance("review agent id is not built in", () =>
++  Effect.gen(function* () {
++    const review = yield* load((svc) => svc.get("review"))
++    expect(review).toBeUndefined()
++  }),
++)
 +
- test("compaction agent denies all permissions", async () => {
-   await using tmp = await tmpdir()
-   await WithInstance.provide({
-@@ -731,7 +762,7 @@ test("defaultAgent throws when all primary agents are disabled", async () => {
+ it.instance("plan agent denies edits except .opencode/plans/*", () =>
+   Effect.gen(function* () {
+     const plan = yield* load((svc) => svc.get("plan"))
+@@ -741,6 +754,20 @@ it.instance(
+   },
+ )
+ 
++it.instance("decide agent denies tool permissions", () =>
++  Effect.gen(function* () {
++    const decide = yield* load((svc) => svc.get("decide"))
++    expect(decide).toBeDefined()
++    expect(decide?.mode).toBe("primary")
++    // #159：decide 全工具 deny
++    expect(evalPerm(decide, "bash")).toBe("deny")
++    expect(evalPerm(decide, "read")).toBe("deny")
++    expect(evalPerm(decide, "task")).toBe("deny")
++    expect(evalPerm(decide, "skill")).toBe("deny")
++    expect(evalPerm(decide, "edit")).toBe("deny")
++  }),
++)
++
+ it.instance(
+   "defaultAgent throws when all primary agents are disabled",
+   () => expectDefaultAgentError("no primary visible agent found"),
+@@ -750,7 +777,8 @@ it.instance(
+         // 禁用所有 primary agent 以触发 "no primary visible agent found" 错误
          build: { disable: true },
-         plan: { disable: true },
          interactive: { disable: true },
 -        review: { disable: true },
++        // #159：disable decide 而非已移除的 review
 +        decide: { disable: true },
+         plan: { disable: true },
        },
      },
-   })
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 8e0cf20a361e9b34cadf5465b33813ab4d9548b0..768e6a61f4adbe14388f9f09039bea43ebab6935 100644
+index bd519f41f483c36bf8fedb20508a16641af1758b..c54db3b17515c267142de19f0224e74b74009fcf 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -269,6 +269,26 @@ function providerCfg(url: string) {
+@@ -303,6 +303,27 @@ function providerCfg(url: string) {
    }
  }
  
++// #159：收紧 context/input，迫使 decide 窗口裁掉超大历史轮
 +function limitedDecideProviderCfg(url: string) {
 +  const base = providerCfg(url)
 +  return {
@@ -401,13 +676,14 @@ index 8e0cf20a361e9b34cadf5465b33813ab4d9548b0..768e6a61f4adbe14388f9f09039bea43
 +  }
 +}
 +
- const user = Effect.fn("test.user")(function* (sessionID: SessionID, text: string) {
-   const session = yield* Session.Service
-   const msg = yield* session.updateMessage({
-@@ -369,6 +389,19 @@ const addCompletedTool = (sessionID: SessionID, messageID: MessageID) =>
+ const writeText = Effect.fn("test.writeText")(function* (file: string, text: string) {
+   const fs = yield* FSUtil.Service
+   yield* fs.writeWithDirs(file, text)
+@@ -439,6 +460,20 @@ const addCompletedTool = (sessionID: SessionID, messageID: MessageID) =>
      })
    })
  
++// #159：写入 reasoning 供 decide 截断首尾校验
 +const addReasoning = (sessionID: SessionID, messageID: MessageID, text: string) =>
 +  Effect.gen(function* () {
 +    const session = yield* Session.Service
@@ -421,207 +697,111 @@ index 8e0cf20a361e9b34cadf5465b33813ab4d9548b0..768e6a61f4adbe14388f9f09039bea43
 +    })
 +  })
 +
- const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
-   const config = yield* Config.Service
-   const prompt = yield* SessionPrompt.Service
-@@ -425,6 +458,101 @@ it.live("loop calls LLM and returns assistant message", () =>
-   ),
+ const addStepFinish = (sessionID: SessionID, messageID: MessageID, inputChars: number, inputTokens: number) =>
+   Effect.gen(function* () {
+     const session = yield* Session.Service
+@@ -552,6 +587,104 @@ it.instance("loop calls LLM and returns assistant message", () =>
+   }),
  )
  
-+it.live("decide sends no tools and sanitizes historical tool and reasoning context", () =>
-+  provideTmpdirServer(
-+    Effect.fnUntraced(function* ({ llm }) {
-+      const prompt = yield* SessionPrompt.Service
-+      const sessions = yield* Session.Service
-+      const session = yield* sessions.create({ title: "Decide" })
-+      const previous = yield* seed(session.id, { finish: "stop" })
-+      const keepHead = "prefix-" + "a".repeat(193)
-+      const keepTail = "z".repeat(193) + "-suffix"
++// #159：decide 无工具 + 历史 tool/reasoning 消毒
++// 断言：WITHOUT tools、无 tool role、reasoning 中段被截断
++it.instance("decide sends no tools and sanitizes historical tool and reasoning context", () =>
++  Effect.gen(function* () {
++    const { llm } = yield* useServerConfig(providerCfg)
++    const prompt = yield* SessionPrompt.Service
++    const sessions = yield* Session.Service
++    const session = yield* sessions.create({ title: "Decide" })
++    // 上一轮 stop 后追加 tool/reasoning，供消毒路径消费
++    const previous = yield* seed(session.id, { finish: "stop" })
++    // 首尾各 200 字符锚点，中段应被 truncateThinking 去掉
++    const keepHead = "prefix-" + "a".repeat(193)
++    const keepTail = "z".repeat(193) + "-suffix"
 +
-+      yield* addCompletedTool(session.id, previous.assistant.id)
-+      yield* addReasoning(session.id, previous.assistant.id, keepHead + "-middle-" + "m".repeat(80) + keepTail)
-+      yield* prompt.prompt({
-+        sessionID: session.id,
-+        agent: "decide",
-+        noReply: true,
-+        parts: [{ type: "text", text: "decide now" }],
-+      })
-+      yield* llm.text("decision")
++    yield* addCompletedTool(session.id, previous.assistant.id)
++    yield* addReasoning(session.id, previous.assistant.id, keepHead + "-middle-" + "m".repeat(80) + keepTail)
++    yield* prompt.prompt({
++      sessionID: session.id,
++      agent: "decide",
++      noReply: true,
++      parts: [{ type: "text", text: "decide now" }],
++    })
++    yield* llm.text("decision")
 +
-+      const result = yield* prompt.loop({ sessionID: session.id })
-+      expect(result.info.role).toBe("assistant")
++    const result = yield* prompt.loop({ sessionID: session.id })
++    expect(result.info.role).toBe("assistant")
 +
-+      const inputs = yield* llm.inputs
-+      const body = inputs.at(-1)
-+      expect(body).toBeDefined()
-+      if (!body) return
++    const inputs = yield* llm.inputs
++    const body = inputs.at(-1)
++    expect(body).toBeDefined()
++    if (!body) return
 +
-+      const serialized = JSON.stringify(body)
-+      expect(serialized).toContain("# WITHOUT any tools")
-+      expect(serialized).not.toContain("# Using your tools")
-+      expect(body.tools).toBeUndefined()
-+      expect(JSON.stringify(body.messages)).not.toContain('"role":"tool"')
-+      expect(JSON.stringify(body.messages)).not.toContain("tool-call")
-+      expect(JSON.stringify(body.messages)).toContain("tail output")
-+      expect(serialized).toContain(keepHead)
-+      expect(serialized).toContain(keepTail)
-+      expect(serialized).not.toContain("-middle-")
-+    }),
-+    { git: true, config: providerCfg },
-+  ),
++    const serialized = JSON.stringify(body)
++    expect(serialized).toContain("# WITHOUT any tools")
++    expect(serialized).not.toContain("# Using your tools")
++    // 空工具表：未定义或空对象均可
++    expect(body.tools === undefined || Object.keys(body.tools as object).length === 0).toBe(true)
++    expect(JSON.stringify(body.messages)).not.toContain('"role":"tool"')
++    expect(JSON.stringify(body.messages)).not.toContain("tool-call")
++    expect(JSON.stringify(body.messages)).toContain("tail output")
++    expect(serialized).toContain(keepHead)
++    expect(serialized).toContain(keepTail)
++    expect(serialized).not.toContain("-middle-")
++  }),
 +)
 +
-+it.live("decide starts context at latest user prompt when older turn would overflow", () =>
-+  provideTmpdirServer(
-+    Effect.fnUntraced(function* ({ llm }) {
-+      const prompt = yield* SessionPrompt.Service
-+      const sessions = yield* Session.Service
-+      const session = yield* sessions.create({ title: "Decide context" })
-+      const old = yield* user(session.id, "old-marker " + "x".repeat(80_000))
-+      const assistant: MessageV2.Assistant = {
-+        id: MessageID.ascending(),
-+        role: "assistant",
-+        parentID: old.id,
-+        sessionID: session.id,
-+        mode: "build",
-+        agent: "build",
-+        cost: 0,
-+        path: { cwd: "/tmp", root: "/tmp" },
-+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+        modelID: ref.modelID,
-+        providerID: ref.providerID,
-+        time: { created: Date.now() },
-+        finish: "stop",
-+      }
-+      yield* sessions.updateMessage(assistant)
-+      yield* sessions.updatePart({
-+        id: PartID.ascending(),
-+        messageID: assistant.id,
-+        sessionID: session.id,
-+        type: "text",
-+        text: "old answer",
-+      })
++// #159：旧轮过大时 decide 窗口从最新 user 起
++// limitedDecideProviderCfg 压低 input limit，迫使 selectDecideMessages 裁剪
++it.instance("decide starts context at latest user prompt when older turn would overflow", () =>
++  Effect.gen(function* () {
++    const { llm } = yield* useServerConfig(limitedDecideProviderCfg)
++    const prompt = yield* SessionPrompt.Service
++    const sessions = yield* Session.Service
++    const session = yield* sessions.create({ title: "Decide context" })
++    // 超大旧 user：tokenEstimate 后必超 usable
++    const old = yield* user(session.id, "old-marker " + "x".repeat(80_000))
++    const assistant: SessionV1.Assistant = {
++      id: MessageID.ascending(),
++      role: "assistant",
++      parentID: old.id,
++      sessionID: session.id,
++      mode: "build",
++      agent: "build",
++      cost: 0,
++      path: { cwd: "/tmp", root: "/tmp" },
++      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++      modelID: ref.modelID,
++      providerID: ref.providerID,
++      time: { created: Date.now() },
++      finish: "stop",
++    }
++    yield* sessions.updateMessage(assistant)
++    yield* sessions.updatePart({
++      id: PartID.ascending(),
++      messageID: assistant.id,
++      sessionID: session.id,
++      type: "text",
++      text: "old answer",
++    })
 +
-+      yield* prompt.prompt({
-+        sessionID: session.id,
-+        agent: "decide",
-+        noReply: true,
-+        parts: [{ type: "text", text: "current-marker decide now" }],
-+      })
-+      yield* llm.text("decision")
-+      yield* prompt.loop({ sessionID: session.id })
++    yield* prompt.prompt({
++      sessionID: session.id,
++      agent: "decide",
++      noReply: true,
++      parts: [{ type: "text", text: "current-marker decide now" }],
++    })
++    yield* llm.text("decision")
++    yield* prompt.loop({ sessionID: session.id })
 +
-+      const inputs = yield* llm.inputs
-+      expect(inputs).toHaveLength(1)
-+      const body = inputs.at(-1)
-+      expect(body).toBeDefined()
-+      if (!body) return
-+      expect(JSON.stringify(body.messages)).toContain("current-marker")
-+      expect(JSON.stringify(body.messages)).not.toContain("old-marker")
-+    }),
-+    { git: true, config: limitedDecideProviderCfg },
-+  ),
++    const inputs = yield* llm.inputs
++    const body = inputs.at(-1)
++    expect(body).toBeDefined()
++    if (!body) return
++    expect(JSON.stringify(body.messages)).toContain("current-marker")
++    expect(JSON.stringify(body.messages)).not.toContain("old-marker")
++  }),
 +)
 +
- it.live("prompt emits v2 prompted and synthetic events", () =>
-   provideTmpdirServer(
-     Effect.fnUntraced(function* () {
-diff --git a/packages/opencode/test/storage/json-migration.test.ts b/packages/opencode/test/storage/json-migration.test.ts
-index 598a635cd4abf0df5c6473a357d1e875c209e8fc..21031435373ae3d31b37364f91882138176ebe11 100644
---- a/packages/opencode/test/storage/json-migration.test.ts
-+++ b/packages/opencode/test/storage/json-migration.test.ts
-@@ -96,6 +96,14 @@ function createTestDb() {
-   return [sqlite, db] as const
- }
- 
-+function runMigration(sqlite: Database, name: string) {
-+  sqlite.exec(readFileSync(path.join(import.meta.dirname, "../../migration", name, "migration.sql"), "utf-8"))
-+}
-+
-+function getText(sqlite: Database, sql: string) {
-+  return sqlite.query(sql).get() as { value: string }
-+}
-+
- describe("JSON to SQLite migration", () => {
-   let storageDir: string
-   let sqlite: Database
-@@ -830,3 +838,79 @@ describe("JSON to SQLite migration", () => {
-     expect(db.select().from(SessionShareTable).all().length).toBe(1)
-   })
- })
-+
-+describe("SQLite data migrations", () => {
-+  let sqlite: Database
-+
-+  beforeEach(() => {
-+    ;[sqlite] = createTestDb()
-+  })
-+
-+  afterEach(() => {
-+    sqlite.close()
-+  })
-+
-+  test("migrates persisted review agents to interactive", () => {
-+    sqlite.exec(`
-+      INSERT INTO project (id, worktree, vcs, name, time_created, time_updated, sandboxes)
-+      VALUES ('proj_review', '/tmp/review', 'git', 'Review Project', 1, 1, '[]');
-+      INSERT INTO session (id, project_id, slug, directory, title, version, agent, time_created, time_updated)
-+      VALUES ('ses_review', 'proj_review', 'review', '/tmp/review', 'Review', '1.0.0', 'review', 1, 1);
-+      INSERT INTO message (id, session_id, time_created, time_updated, data)
-+      VALUES (
-+        'msg_user_review',
-+        'ses_review',
-+        1,
-+        1,
-+        '{"role":"user","time":{"created":1},"agent":"review","model":{"providerID":"test","modelID":"test-model"}}'
-+      );
-+      INSERT INTO message (id, session_id, time_created, time_updated, data)
-+      VALUES (
-+        'msg_assistant_review',
-+        'ses_review',
-+        2,
-+        2,
-+        '{"role":"assistant","time":{"created":2},"parentID":"msg_user_review","mode":"review","agent":"review","path":{"cwd":"/tmp/review","root":"/tmp/review"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"modelID":"test-model","providerID":"test"}'
-+      );
-+      INSERT INTO session_message (id, session_id, type, time_created, time_updated, data)
-+      VALUES ('sm_review', 'ses_review', 'agent-switched', 1, 1, '{"agent":"review"}');
-+      INSERT INTO event_sequence (aggregate_id, seq) VALUES ('ses_review', 1);
-+      INSERT INTO event (id, aggregate_id, seq, type, data)
-+      VALUES ('evt_review', 'ses_review', 1, 'session.next.agent.switched', '{"agent":"review"}');
-+      INSERT INTO request_usage (
-+        session_id,
-+        request_id,
-+        root_request_id,
-+        source,
-+        status,
-+        agent,
-+        provider_id,
-+        model_id,
-+        time_created,
-+        time_updated
-+      ) VALUES ('ses_review', 'msg_user_review', 'msg_user_review', 'prompt', 'completed', 'review', 'test', 'test-model', 1, 1);
-+    `)
-+
-+    runMigration(sqlite, "20260517000000_migrate_review_agent")
-+
-+    expect(getText(sqlite, "SELECT agent AS value FROM session WHERE id = 'ses_review'").value).toBe("interactive")
-+    expect(getText(sqlite, "SELECT agent AS value FROM request_usage WHERE request_id = 'msg_user_review'").value).toBe(
-+      "interactive",
-+    )
-+    expect(getText(sqlite, "SELECT json_extract(data, '$.agent') AS value FROM message WHERE id = 'msg_user_review'").value).toBe(
-+      "interactive",
-+    )
-+    expect(
-+      getText(sqlite, "SELECT json_extract(data, '$.agent') AS value FROM message WHERE id = 'msg_assistant_review'").value,
-+    ).toBe("interactive")
-+    expect(
-+      getText(sqlite, "SELECT json_extract(data, '$.mode') AS value FROM message WHERE id = 'msg_assistant_review'").value,
-+    ).toBe("interactive")
-+    expect(getText(sqlite, "SELECT json_extract(data, '$.agent') AS value FROM session_message WHERE id = 'sm_review'").value).toBe(
-+      "interactive",
-+    )
-+    expect(getText(sqlite, "SELECT json_extract(data, '$.agent') AS value FROM event WHERE id = 'evt_review'").value).toBe(
-+      "interactive",
-+    )
-+  })
-+})
+ withMcpInstructions.instance(
+   "loop includes MCP instructions in model system context",
+   () =>

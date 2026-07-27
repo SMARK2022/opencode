@@ -1,78 +1,68 @@
 From 5aff2e10e3e92b52b48691d02fa98fd12f5bdc5c Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Mon, 25 May 2026 01:13:41 +0800
-Subject: [PATCH] =?UTF-8?q?feat(precheck):=20=E5=A2=9E=E5=BC=BA=E5=91=BD?=
- =?UTF-8?q?=E4=BB=A4=E8=AF=84=E4=BC=B0=E9=80=BB=E8=BE=91=EF=BC=8C=E6=B7=BB?=
- =?UTF-8?q?=E5=8A=A0=E5=AF=B9=E6=96=87=E4=BB=B6=E5=88=A0=E9=99=A4=E5=92=8C?=
- =?UTF-8?q?=E7=A7=BB=E5=8A=A8=E6=93=8D=E4=BD=9C=E7=9A=84=E5=AE=A1=E6=9F=A5?=
- =?UTF-8?q?=EF=BC=8C=E7=A1=AE=E4=BF=9D=E5=AE=89=E5=85=A8=E6=80=A7?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
+Subject: [PATCH] feat(precheck): 增强命令评估逻辑，添加对文件删除和移动操作的审查，确保安全性
 
 diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
-index 3ec2c26a96d3598df02ee59061d263c9fdd63eb5..1b591beabe4373a3c3f24b20cc3f094cd73a1731 100644
+index b6b3688ffd..62f1407d83 100644
 --- a/packages/opencode/src/permission/precheck.ts
 +++ b/packages/opencode/src/permission/precheck.ts
-@@ -59,6 +59,20 @@ const INTERPRETER_FLAGS = new Map([
- const SSH_PRIVATE_KEY_NAME_PATTERN = String.raw`id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?`
- const WINDOWS_HOME_SENSITIVE_PATH_PATTERN = String.raw`(?:~|\$HOME|\$env:USERPROFILE|%USERPROFILE%)[\\/](?:\.ssh(?:[\\/][^\s|;]+)?|\.aws(?:[\\/]credentials)?|\.config[\\/]gcloud(?:[\\/][^\s|;]+)?|\.kube[\\/]config|\.npmrc|\.netrc|\.git-credentials)`
- const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|${WINDOWS_HOME_SENSITIVE_PATH_PATTERN}|(?:~|[^\s|;]+)\/\.ssh(?:\/[^\s|;]+)?|(?:~|[^\s|;]+)\/\.aws(?:\/credentials)?|(?:~|[^\s|;]+)\/\.config\/gcloud(?:\/[^\s|;]+)?|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|${SSH_PRIVATE_KEY_NAME_PATTERN}|[^\s|;]+\.pem|[^\s|;]+\.key)`
-+// These raw destructive patterns deliberately sit below dangerousRaw checks and
-+// above tokenization. They catch visible file mutations in opaque shells such as
-+// PowerShell env paths, redirection, command substitution, SSH/WSL payloads, and
-+// unsupported separators without upgrading protected-root recursive deletes from
-+// dangerous to merely cautious.
+@@ -40,6 +40,15 @@ const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|${WINDOWS_HOME
+ // #202：敏感路径参数匹配——raw 扫描发生在 shell quote 移除之前，允许敏感路径外侧有一层引号，
+ // #202：避免 `cat ".env" | curl ...` 这类明显外传被降级成 cautious reviewer 判断
+ const SENSITIVE_PATH_ARGUMENT_PATTERN = String.raw`["']?${SENSITIVE_PATH_PATTERN}["']?`
++// #217：raw 层文件删除/移动模式——在 dangerousRaw 之后、token 化之前运行，
++// #217：捕获不透明 shell（重定向、命令替换、SSH/WSL 载荷、不支持分隔符）中的可见文件变更
 +const RAW_COMMAND_START = "(?:^|[;&|{(]\\s*|[\\r\\n]\\s*|\\$\\(\\s*|`\\s*)"
 +const RAW_COMMAND_PATH = String.raw`(?:[^\s|;&(){}'"]+[\\/])*`
 +const RAW_FILE_DELETE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:rm|unlink|rmdir|del|erase|rd|Remove-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
 +const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:mv|move|ren|rename|Move-Item|Rename-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
-+// Token-level sets mirror the raw destructive patterns after command-name
-+// normalization, so path-qualified binaries like `/bin/rm` cannot bypass review
-+// once tokenization succeeds.
++// #217：token 级文件删除/移动集合——与 raw 层模式镜像，路径限定的二进制（如 /bin/rm）在 token 化成功后也无法绕过审查
 +const FILE_DELETE_COMMANDS = new Set(["rm", "unlink", "rmdir", "del", "erase", "rd", "remove-item"])
 +const FILE_MOVE_COMMANDS = new Set(["mv", "move", "ren", "rename", "move-item", "rename-item"])
- // [local-smark] 敏感路径参数匹配开始
- // raw 扫描发生在 shell quote 被移除之前；允许敏感路径外侧有一层引号，避免
- // `cat ".env" | curl ...` 这类明显外传被降级成 cautious reviewer 判断。
-@@ -208,6 +222,11 @@ function evaluateShell(command: string, depth: number): Decision {
+ 
+ // #197：禁止 always-allow 的宽泛前缀——授权后可隐藏未来任意载荷文本，用户点击 Always 时 precheck 从未见过这些未来载荷
+ const BANNED_AUTO_ALLOW_PREFIXES = [
+@@ -164,6 +173,13 @@ function evaluateShell(command: string, depth: number): Decision {
    const caution = cautiousRaw(command)
    if (caution) return { level: "cautious", reason: caution }
  
++  // #217：包装器载荷递归——重定向或不支持分隔符会让整条命令不透明，
++  // #217：扫描未引用段以发现可见的包装器载荷，破坏性脚本体保留 cautious/dangerous 层级
 +  for (const wrapped of rawWrapperScripts(command)) {
 +    const decision = evaluateShell(wrapped, depth + 1)
 +    if (decision.level === "dangerous" || decision.level === "cautious") return decision
 +  }
 +
    const commands = splitCommands(command)
+   // #197：分词失败意味着命令包含预检器无法理解的 shell 特性——不透明命令归为 general
    if (!commands) return { level: "general", reason: "opaque shell command requires explicit approval" }
- 
-@@ -400,7 +419,7 @@ function unwrap(tokens: string[]): UnwrapResult {
+@@ -361,7 +377,8 @@ function unwrap(tokens: string[]): UnwrapResult {
+     const index = tokens.findIndex((item, i) => i > 0 && ["/c", "/k"].includes(item.toLowerCase()))
      if (index >= 0 && tokens[index + 1]) {
-       return {
-         action: "script",
--        script: joinShellTokens(tokens.slice(index + 1)),
-+        script: tokens[index + 1].includes(" ") ? tokens[index + 1] : joinShellTokens(tokens.slice(index + 1)),
-         reason: "cmd wrapper requires explicit approval",
-       }
+       // #197：重组 /c 后的载荷用于递归原始扫描——cmd 语法与 POSIX shell 不同但仍可隐藏危险命令
+-      return { action: "script", script: joinShellTokens(tokens.slice(index + 1)), reason: "cmd wrapper requires explicit approval" }
++      // #217：cmd /c 载荷可能含空格的引号段——保留原始 token 避免 joinShellTokens 重组后改变语义
++      return { action: "script", script: tokens[index + 1].includes(" ") ? tokens[index + 1] : joinShellTokens(tokens.slice(index + 1)), reason: "cmd wrapper requires explicit approval" }
      }
-@@ -423,6 +442,59 @@ function unwrap(tokens: string[]): UnwrapResult {
+     // #197：无载荷的 cmd 可能进入交互式命令解释器——无法预检后续输入
+     return { action: "ask", reason: "cmd wrapper without a plain script requires explicit approval" }
+@@ -388,6 +405,63 @@ function unwrap(tokens: string[]): UnwrapResult {
    return { action: "none" }
  }
  
++// #217：rawWrapperScripts——顶层重定向或不支持分隔符可在逐命令解包前让整条命令不透明。
++// #217：扫描未引用命令段以发现可见的包装器载荷，使得破坏性脚本体仍保留 cautious/dangerous 层级
 +function rawWrapperScripts(command: string) {
-+  // Top-level redirection or unsupported separators can make the full command
-+  // opaque before normal per-command unwrapping runs. Scan unquoted command
-+  // segments for visible wrapper payloads so destructive script bodies still keep
-+  // their cautious/dangerous layer; harmless payloads fall through to general.
 +  return rawCommandSegments(command).flatMap((segment) => {
 +    const script = rawWrapperScript(segment)
 +    return script ? [script] : []
 +  })
 +}
 +
++// #217：rawWrapperScript——对单个命令段调用 unwrap/remoteWrapper 提取脚本载荷
 +function rawWrapperScript(command: string) {
++  // #217：先尝试本地 wrapper 解包，再尝试远程 wrapper——两种路径都可能暴露可检查的脚本载荷
 +  const tokens = tokenize(command)
 +  if (!tokens) return
 +  const unwrapped = unwrap(tokens)
@@ -81,6 +71,8 @@ index 3ec2c26a96d3598df02ee59061d263c9fdd63eb5..1b591beabe4373a3c3f24b20cc3f094c
 +  return remote.action === "remote" ? remote.script : undefined
 +}
 +
++// #217：rawCommandSegments——按 shell 分隔符切分命令为独立段，跳过引号内的分隔符。
++// #217：POSIX 单引号内反斜材为字面量，不开启转义状态，避免错误地在格式错误的单引号数据后隐藏可见删除
 +function rawCommandSegments(command: string) {
 +  const out: string[] = []
 +  let start = 0
@@ -105,8 +97,10 @@ index 3ec2c26a96d3598df02ee59061d263c9fdd63eb5..1b591beabe4373a3c3f24b20cc3f094c
 +      continue
 +    }
 +    if (char !== ";" && char !== "&" && char !== "|" && char !== "\n" && char !== "\r") continue
++    // #217：切分出当前段——分颞粒度足以让 rawWrapperScript 对每个段独立解包
 +    const segment = command.slice(start, i).trim()
 +    if (segment) out.push(segment)
++    // #217：&& 和 || 是双字符分隔符——跳过第二个字符避免误切
 +    if ((char === "&" || char === "|") && command[i + 1] === char) i++
 +    start = i + 1
 +  }
@@ -115,60 +109,64 @@ index 3ec2c26a96d3598df02ee59061d263c9fdd63eb5..1b591beabe4373a3c3f24b20cc3f094c
 +}
 +
  function remoteWrapper(tokens: string[]): RemoteResult {
-   // Remote wrappers are separated from local unwraps so their reason remains a
-   // trust-boundary prompt even when no script payload is available to inspect.
-@@ -479,7 +551,7 @@ function dangerousRaw(command: string) {
-   // `$HOME`, `~/`, `/*`, and wrapper-quoted forms cannot bypass the deny path.
+   // #197：远程 wrapper 与本地解包分离——即使无可检脚本载荷，原因仍为信任边界 general
+   const cmd = normalizeCommandName(tokens[0])
+@@ -440,7 +514,7 @@ function dangerousRaw(command: string) {
    if (
      new RegExp(
+       // #197：rm 同时带 -r/-R/--recursive 和 -f/--force 且目标为根/home/etc——递归强制删除保护目录不可恢复
 -      String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))(?=[^|;]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?(?=[\s)'"]|$)|~\/?(?=[\s)'"]|$)|\$HOME\/?(?=[\s)'"]|$)|\/etc(?:\/|(?=[\s)'"]|$)))`,
 +      String.raw`\brm\b(?=[^|;]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))(?=[^|;]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)(?=\s|$))[^|;]*\s(?:\/(?:\*|\.)?(?=[\s)'"\x60]|$)|~\/?(?=[\s)'"\x60]|$)|\$HOME\/?(?=[\s)'"\x60]|$)|\/etc(?:\/|(?=[\s)'"\x60]|$)))`,
      ).test(normalized)
    ) {
-     return "critical recursive delete"
-@@ -504,7 +576,7 @@ function dangerousRaw(command: string) {
-   // 删除降级成 general 或 cautious。
+     // #197：递归强制删除根文件系统或 home 目录——系统不可恢复，直接 dangerous 防止重试绕过
+@@ -459,7 +533,7 @@ function dangerousRaw(command: string) {
+   // #202：在 raw 层先拦截，避免 token 解析差异把整盘/用户目录删除降级成 general 或 cautious
    if (/\bformat\b\s+[A-Za-z]:/i.test(normalized)) return "Windows drive format"
    if (
 -    /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"]|$)|[A-Za-z]:[\\/](?:Users|Documents and Settings)(?:[\\/][^\s)'"]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"]|$))/i.test(
-+    /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"\x60]|$)|[A-Za-z]:[\\/](?:Users|Documents and Settings)(?:[\\/][^\s)'"\x60]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"\x60]|$))/i.test(
++    /\b(?:rd|rmdir|del)\b(?=.*(?:\/s|-s|--recursive))(?=.*(?:[A-Za-z]:[\\/]?(?=[\s)'"\x60]|$)|[A-Za-z]:[\\/](?:Users|Documents and Settings)(?:[\\/][^\s)'"]*)?|%USERPROFILE%|\$env:USERPROFILE|~[\\/]?)(?=[\s)'"\x60]|$))/i.test(
        normalized,
      )
    ) {
-@@ -541,7 +613,7 @@ function dangerousRaw(command: string) {
-   // Common interpreter APIs and reverse shell idioms are scanned as raw text
-   // because their dangerous target may be inside strings rather than tokens.
-   if (
--    /\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|[A-Za-z]:[\\/]?)(?=[\s)'"]|$))/i.test(
-+    /\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"\x60]|$))/i.test(
-       normalized,
-     )
-   ) {
-@@ -576,6 +648,8 @@ function dangerousRaw(command: string) {
- 
+@@ -491,7 +565,7 @@ function dangerousRaw(command: string) {
+     return "credential file sent with remote transfer"
+   }
+   // #197：解释器 API 和反向 shell 惯用法作为原始文本扫描——危险目标可能在字符串内而非 token 中
+-  if (/\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|[A-Za-z]:[\\/]?)(?=[\s)'"]|$))/i.test(normalized)) {
++  if (/\bRemove-Item\b(?=.*\s-Recurse\b)(?=.*\s-Force\b)(?=.*\s(?:\/|~\/?|\$HOME\/?|\$env:USERPROFILE[\\/]?|\$env:SystemDrive[\\/]?|[A-Za-z]:[\\/]?)(?=[\s)'"\x60]|$))/i.test(normalized)) {
+     return "critical PowerShell recursive delete"
+   }
+   if (/\bshutil\.rmtree\(\s*["'](?:\/|~|\$HOME|\/etc(?:\/|["']))/.test(normalized)) {
+@@ -521,6 +595,9 @@ function dangerousRaw(command: string) {
+ // #202：读取提升到 cautious，避免 safe 绕过，同时不把普通 `$HOME` 查询送审
  function cautiousRaw(command: string) {
    const normalized = command.replace(/\s+/g, " ").trim()
++  // #217：raw 层文件删除/移动扫描——引号感知匹配确保只在 shell 可执行上下文中命中
 +  if (rawExecutableMatch(command, RAW_FILE_DELETE_PATTERN)) return "file deletion requires explicit approval"
 +  if (rawExecutableMatch(command, RAW_FILE_MOVE_PATTERN)) return "file move or rename requires explicit approval"
-   // [local-smark] raw 敏感读取谨慎扫描开始
-   // `$HOME/.aws/credentials` 这类 env-expanded 路径会让 splitter 降级为 opaque，
-   // 导致 token 级敏感读取看不到真实路径。dangerousRaw 已先处理外传；这里仅把
-@@ -591,6 +665,45 @@ function cautiousRaw(command: string) {
-   // [local-smark] raw 敏感读取谨慎扫描结束
+   if (
+     new RegExp(
+       // #209：去掉 (?:^|[;&|]\s*) 锚点——if(Test-Path){Get-Content} 内的 Get-Content 不紧跟行首/分隔符，锚点导致漏审
+@@ -534,6 +611,45 @@ function cautiousRaw(command: string) {
+   }
  }
  
++// #217：rawExecutableMatch——引号感知的文件删除/移动匹配。shell 语法上下文中分隔符在引号内是数据，
++// #217：$() 和反引号在未引用或双引号文本中执行，但在 POSIX 单引号中保持字面量
 +function rawExecutableMatch(command: string, pattern: string) {
-+  // Raw delete/move scans need shell-syntax context: separators inside quoted
-+  // read-only search text are data. `$()` and backticks execute in unquoted or
-+  // double-quoted shell text, but remain literal inside POSIX single quotes.
 +  const quotes = quoteOffsets(command)
++  // #217：matchAll 遍历所有匹配——仅当匹配位置处于 shell 可执行上下文时才返回 true
 +  for (const match of command.matchAll(new RegExp(pattern, "gi"))) {
 +    const index = match.index ?? 0
++    // #217：未引用或双引号内的 $()、反引号启动命令替换——单引号内为字面量，不计为可执行
 +    if (!quotes[index] || (quotes[index] === '"' && (command.startsWith("$(", index) || command[index] === "`"))) return true
 +  }
 +  return false
 +}
 +
++// #217：quoteOffsets——为命令中每个字符位置记录其所在的引号状态。
++// #217：POSIX 单引号内反斜材为字面量文本，不应开启转义状态，避免错误地在格式错误单引号数据后隐藏可见删除
 +function quoteOffsets(command: string) {
 +  const quotes = Array.from({ length: command.length }, () => "")
 +  let quote = ""
@@ -180,9 +178,6 @@ index 3ec2c26a96d3598df02ee59061d263c9fdd63eb5..1b591beabe4373a3c3f24b20cc3f094c
 +      continue
 +    }
 +    if (command[i] === "\\") {
-+      // POSIX single quotes treat backslash as literal text; marking it as an
-+      // escape would incorrectly keep a following separator quoted and hide a
-+      // visible delete after malformed single-quoted data.
 +      if (quote === "'") continue
 +      escaped = true
 +      continue
@@ -197,49 +192,54 @@ index 3ec2c26a96d3598df02ee59061d263c9fdd63eb5..1b591beabe4373a3c3f24b20cc3f094c
 +}
 +
  function riskyTokens(tokens: string[]): Decision | undefined {
-   // Token-level risks are visible commands with known side effects. Critical
-   // protected targets are dangerous; destructive-but-bounded operations are
-@@ -636,6 +749,10 @@ function riskyTokens(tokens: string[]): Decision | undefined {
-     }
+   // #202：token 级风险——critical 保护目标 dangerous；破坏性但有限操作 cautious，仅该层到达 reviewer
+   const cmd = normalizeCommandName(tokens[0])
+@@ -588,6 +704,12 @@ function riskyTokens(tokens: string[]): Decision | undefined {
+     // #202：PowerShell 递归删除非保护目录——cautious，危险但可能有意
      return { level: "cautious", reason: "recursive PowerShell delete requires explicit approval" }
    }
++  // #217：token 级文件删除——已知删除命令名但未达 dangerous 阈值，需 reviewer 确认是否为预期清理
 +  if (FILE_DELETE_COMMANDS.has(cmd) && tokens.length > 1)
 +    return { level: "cautious", reason: "file deletion requires explicit approval" }
++  // #217：token 级文件移动/重命名——可绕过删除审查，需 reviewer 确认目标路径
 +  if (FILE_MOVE_COMMANDS.has(cmd) && tokens.length > 1)
 +    return { level: "cautious", reason: "file move or rename requires explicit approval" }
-   if (["scp", "sftp", "rsync"].includes(cmd))
-     return { level: "cautious", reason: "remote file transfer requires explicit approval" }
+   // #202：远程文件传输可移动凭证到外部主机——cautious，安全读取应用专用 read/glob/grep 工具
+   if (["scp", "sftp", "rsync"].includes(cmd)) return { level: "cautious", reason: "remote file transfer requires explicit approval" }
  }
-@@ -648,7 +765,7 @@ function cautiousGitSubcommand(tokens: string[]) {
+@@ -597,7 +719,8 @@ function riskyTokens(tokens: string[]): Decision | undefined {
+ function cautiousGitSubcommand(tokens: string[]) {
    const subcommand = tokens[1]
    if (!subcommand) return false
-   if (
--    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean"].includes(subcommand)
-+    ["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean", "mv"].includes(subcommand)
-   )
-     return true
+-  if (["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean"].includes(subcommand)) return true
++  // #217：git mv 改变跟踪状态并可绕过删除审查——加入 cautious 子命令列表
++  if (["add", "commit", "merge", "rebase", "cherry-pick", "revert", "push", "pull", "reset", "clean", "mv"].includes(subcommand)) return true
    return subcommand === "branch" && !gitBranchSafe(tokens.slice(2))
-@@ -735,6 +852,8 @@ function protectedDeleteTarget(input: string) {
+ }
+ 
+@@ -644,6 +767,9 @@ function protectedDeleteTarget(input: string) {
      normalized === "$HOME/" ||
      normalized === "$env:USERPROFILE" ||
      normalized === "$env:USERPROFILE/" ||
++    // #217：$env:SystemDrive 是 Windows 系统盘根——递归删除等同于格式化系统盘
 +    normalized === "$env:SystemDrive" ||
 +    normalized === "$env:SystemDrive/" ||
      /^\w:\/?$/.test(normalized) ||
      normalized === "/etc" ||
      normalized.startsWith("/etc/")
 diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
-index 575d0c93ef1c833eb15d97cb64717bdfe37c0464..a69bed99e463677566ad429d8e909794ca7754ac 100644
+index 5a5c70d629..d980acda16 100644
 --- a/packages/opencode/test/permission/auto.test.ts
 +++ b/packages/opencode/test/permission/auto.test.ts
-@@ -68,6 +68,26 @@ describe("permission auto routing", () => {
+@@ -67,6 +67,27 @@ describe("permission auto routing", () => {
      ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
    })
  
++  // #217：bounded file deletion 路由到 reviewer 而非 shell general allow——precheck cautious 层确保删除操作不自动放行
 +  test("routes bounded file deletion to reviewer instead of shell general allow", async () => {
 +    let called = false
 +    await expect(
-+      bash(String.raw`Remove-Item -LiteralPath "H:\DumpStack.log.tmp" -Force -ErrorAction SilentlyContinue`, {
++      bash(String.raw`Remove-Item -LiteralPath "H:\\DumpStack.log.tmp" -Force -ErrorAction SilentlyContinue`, {
 +        review: () =>
 +          Effect.sync(() => {
 +            called = true
@@ -256,36 +256,40 @@ index 575d0c93ef1c833eb15d97cb64717bdfe37c0464..a69bed99e463677566ad429d8e909794
 +    expect(called).toBe(true)
 +  })
 +
+   // #208：验证 onReviewStart 在 reviewer 完成前报告确定性 precheck 边界
    test("reports the deterministic precheck boundary before reviewer completion", async () => {
      const starts: { reviewID: string; precheck: { level: string; reason: string } }[] = []
- 
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
-index 55969d232203fb652d728c7842f22dc3f8b30fe3..1f43d0821603a86c1ee4d62005924e72642d748d 100644
+index 21f3636f64..15d104bd70 100644
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -13,6 +13,10 @@ describe("permission precheck bash classifier", () => {
+@@ -14,6 +14,11 @@ describe("permission precheck bash classifier", () => {
      expect(bash("git status --porcelain").level).toBe("safe")
      expect(bash("git branch --show-current").level).toBe("safe")
      expect(bash("rg \"path with spaces\" src").level).toBe("safe")
++    // #217：rg 搜索文本中的 rm/delete 片段是搜索内容而非命令——splitter 不被搜索文本欺骗
 +    expect(bash("rg \"; rm stale.tmp\" src").level).toBe("safe")
 +    expect(bash("rg \"(rm stale.tmp)\" src").level).toBe("safe")
 +    expect(bash("rg '$(rm stale.tmp)' src").level).toBe("safe")
 +    expect(bash("rg '`rm stale.tmp`' src").level).toBe("safe")
    })
  
-   test("does not mark read commands safe when they can invoke external programs", () => {
-@@ -58,12 +62,27 @@ describe("permission precheck bash classifier", () => {
-   })
+   // #202：read-looking 但可执行外部程序的命令不能进入 safe——rg --pre/git --ext-diff 等
+@@ -63,13 +68,32 @@ describe("permission precheck bash classifier", () => {
  
+   // #202：未建模分隔符（单个 &、换行）整体降级为 general，防止切错成 safe
    test("marks unsupported shell separators general instead of safe", () => {
 -    expect(bash("git status & rm -rf node_modules")).toMatchObject({ level: "general" })
 -    expect(bash("git status\nrm -rf node_modules")).toMatchObject({ level: "general" })
++    // #217：非破坏性命令用未建模分隔符仍 general——但破坏性命令通过 rawWrapperScripts 传播为 cautious
 +    expect(bash("git status & rg TODO src")).toMatchObject({ level: "general" })
 +    expect(bash("git status\nrg TODO src")).toMatchObject({ level: "general" })
    })
  
+   // #202：破坏性但有限操作 cautious——仅该层到达 reviewer/user
    test("marks destructive but bounded commands cautious for reviewer/user approval", () => {
      expect(bash("rm -rf node_modules")).toMatchObject({ level: "cautious" })
++    // #217：文件删除/移动操作 cautious——bounded 但不可逆，需 reviewer 确认目标路径
 +    expect(bash("rm file.txt")).toMatchObject({ level: "cautious" })
 +    expect(bash("/bin/rm file.txt")).toMatchObject({ level: "cautious" })
 +    expect(bash("rm -f 'path with spaces/file.txt'")).toMatchObject({ level: "cautious" })
@@ -297,17 +301,20 @@ index 55969d232203fb652d728c7842f22dc3f8b30fe3..1f43d0821603a86c1ee4d62005924e72
 +    expect(bash("Remove-Item -LiteralPath \"H:\\DumpStack.log.tmp\" -Force -ErrorAction SilentlyContinue")).toMatchObject({ level: "cautious" })
 +    expect(bash(String.raw`Remove-Item -Path "$env:TEMP\old.log" -Force`)).toMatchObject({ level: "cautious" })
 +    expect(bash("Remove-Item \"path with spaces\\old.log\" > deleted.log")).toMatchObject({ level: "cautious" })
++    // #217：未建模分隔符后的破坏性命令通过 rawWrapperScripts 传播——不会被降级为 general
 +    expect(bash("git status & rm -f stale.tmp")).toMatchObject({ level: "cautious" })
 +    expect(bash("git status & /bin/rm stale.tmp")).toMatchObject({ level: "cautious" })
 +    expect(bash("git status\nrm -f stale.tmp")).toMatchObject({ level: "cautious" })
++    // #217：POSIX 单引号内反斜杠为字面量——格式错误的单引号后的可见删除仍需 cautious
 +    expect(bash("echo 'x\\' ; rm stale.tmp")).toMatchObject({ level: "cautious" })
      expect(bash("git add src/index.ts")).toMatchObject({ level: "cautious" })
      expect(bash("git commit -m 'safe message with spaces'")).toMatchObject({ level: "cautious" })
      expect(bash("git merge feature/review")).toMatchObject({ level: "cautious" })
-@@ -75,6 +94,31 @@ describe("permission precheck bash classifier", () => {
+@@ -81,6 +105,34 @@ describe("permission precheck bash classifier", () => {
      expect(bash("git branch -m old-name new-name")).toMatchObject({ level: "cautious" })
    })
  
++  // #217：文件移动/重命名 cautious——可绕过删除审查，移动到归档等价于删除原路径
 +  test("marks move and rename file mutations cautious because they can bypass delete review", () => {
 +    expect(bash("mv old.txt archive/old.txt")).toMatchObject({ level: "cautious" })
 +    expect(bash("/bin/mv old.txt archive/old.txt")).toMatchObject({ level: "cautious" })
@@ -315,10 +322,12 @@ index 55969d232203fb652d728c7842f22dc3f8b30fe3..1f43d0821603a86c1ee4d62005924e72
 +    expect(bash("move C:\\Temp\\old.log C:\\Temp\\archive\\old.log")).toMatchObject({ level: "cautious" })
 +    expect(bash("ren old.log older.log")).toMatchObject({ level: "cautious" })
 +    expect(bash("Rename-Item \"path with spaces\\old.log\" \"older.log\"")).toMatchObject({ level: "cautious" })
-+    expect(bash(String.raw`Move-Item -LiteralPath "H:\DumpStack.log.tmp" -Destination "$env:TEMP\DumpStack.to_delete" -Force -ErrorAction Stop`)).toMatchObject({ level: "cautious" })
++    expect(bash(String.raw`Move-Item -LiteralPath "H:\\DumpStack.log.tmp" -Destination "$env:TEMP\\DumpStack.to_delete" -Force -ErrorAction Stop`)).toMatchObject({ level: "cautious" })
++    // #217：git mv 改变跟踪状态——加入 cautious 子命令列表
 +    expect(bash("git mv old.txt new.txt")).toMatchObject({ level: "cautious" })
 +  })
 +
++  // #217：包装器载荷递归传播——ssh/wsl/cmd/pwsh/命令替换/反引号内的 bounded delete 保持 cautious
 +  test("propagates bounded delete risks through shell, remote, and alternate OS wrappers", () => {
 +    expect(bash("ssh example.com 'rm stale.tmp'")).toMatchObject({ level: "cautious" })
 +    expect(bash("ssh -p 22 example.com rm -f 'path with spaces/stale.tmp'")).toMatchObject({ level: "cautious" })
@@ -333,13 +342,14 @@ index 55969d232203fb652d728c7842f22dc3f8b30fe3..1f43d0821603a86c1ee4d62005924e72
 +    expect(bash("echo `rm stale.tmp`")).toMatchObject({ level: "cautious" })
 +  })
 +
+   // #202：保护根/盘符/用户目录删除 dangerous——含 Windows format/rd/del
    test("marks protected-root deletes dangerous instead of treating them as opaque", () => {
      expect(bash("rm -rf /*")).toMatchObject({ level: "dangerous" })
-     expect(bash("rm -r -f /")).toMatchObject({ level: "dangerous" })
-@@ -85,6 +129,11 @@ describe("permission precheck bash classifier", () => {
+@@ -92,6 +144,12 @@ describe("permission precheck bash classifier", () => {
      expect(bash("format C:")).toMatchObject({ level: "dangerous" })
      expect(bash("rmdir /s /q C:\\Users\\Alice")).toMatchObject({ level: "dangerous" })
      expect(bash("del /s /q %USERPROFILE%")).toMatchObject({ level: "dangerous" })
++    // #217：$env:USERPROFILE/$env:SystemDrive 递归删除 dangerous——反引号闭合也命中
 +    expect(bash(String.raw`Remove-Item -Recurse -Force $env:USERPROFILE`)).toMatchObject({ level: "dangerous" })
 +    expect(bash("Remove-Item -Recurse -Force $env:SystemDrive\\")).toMatchObject({ level: "dangerous" })
 +    expect(bash("powershell -Command \"Remove-Item -Recurse -Force $env:USERPROFILE\" 2>&1")).toMatchObject({ level: "dangerous" })

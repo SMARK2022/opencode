@@ -3,16 +3,67 @@ From: SMARK2022 <3222301373@qq.com>
 Date: Fri, 22 May 2026 18:09:37 +0800
 Subject: [PATCH] refactor: move token helpers into token domain
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/util/token-accounting.ts b/packages/opencode/src/token/accounting.ts
-similarity index 100%
-rename from packages/opencode/src/cli/cmd/tui/util/token-accounting.ts
-rename to packages/opencode/src/token/accounting.ts
-diff --git a/packages/opencode/src/util/attachment-token.ts b/packages/opencode/src/token/estimate.ts
-similarity index 100%
-rename from packages/opencode/src/util/attachment-token.ts
-rename to packages/opencode/src/token/estimate.ts
-diff --git a/packages/opencode/test/util/attachment-token.test.ts b/packages/opencode/test/token/estimate.test.ts
-similarity index 100%
-rename from packages/opencode/test/util/attachment-token.test.ts
-rename to packages/opencode/test/token/estimate.test.ts
+diff --git a/packages/opencode/src/token/accounting.ts b/packages/opencode/src/token/accounting.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/token/accounting.ts
+@@ -0,0 +1,3 @@
++// #193：token 域统一统计入口；#194 将填充完整实现
++// #193：从 TUI 包 re-export，保持现有消费端不中断
++export * from "@opencode-ai/tui/util/token-accounting"
+diff --git a/packages/opencode/src/token/estimate.ts b/packages/opencode/src/token/estimate.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/token/estimate.ts
+@@ -0,0 +1,3 @@
++// #193：token 域估算入口；#194 将填充完整实现
++// #193：从 core 包 re-export，保持现有消费端不中断
++export * from "@opencode-ai/core/util/attachment-token"
+diff --git a/packages/opencode/test/token/estimate.test.ts b/packages/opencode/test/token/estimate.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/test/token/estimate.test.ts
+@@ -0,0 +1,43 @@
++// #193：从 test/util/attachment-token.test.ts 迁移到 test/token/estimate.test.ts
++// #175：单测锁定消毒、远程跳过与分项 token
++import { describe, expect, test } from "bun:test"
++// #193：测试随 estimate 迁移到 token 域
++import { AttachmentToken } from "@/token/estimate"
++
++describe("AttachmentToken", () => {
++  test("estimates image data URLs separately from sanitized text", () => {
++    const payload = "a".repeat(7500)
++    const estimate = AttachmentToken.sanitizeModelMessagesForTokenEstimate([
++      {
++        role: "user",
++        content: [
++          { type: "text", text: "look at this" },
++          { type: "file", mediaType: "image/png", url: `data:image/png;base64,${payload}`, filename: "chart.png" },
++          { type: "file", url: `data:application/pdf;base64,${payload}` },
++        ],
++      },
++    ])
++
++    expect(estimate.attachments.tokens).toBe(17)
++    expect(estimate.attachments.rawChars).toBe(`data:image/png;base64,${payload}`.length + `data:application/pdf;base64,${payload}`.length)
++    expect(estimate.text).not.toContain(payload)
++    expect(estimate.text).toContain("[Attached image/png: chart.png]")
++    expect(estimate.text).toContain("[Attached application/pdf: file]")
++  })
++
++  test("does not treat remote file URLs as uploaded media payloads", () => {
++    const estimate = AttachmentToken.sanitizeModelMessagesForTokenEstimate([
++      {
++        role: "user",
++        content: [
++          { type: "file", mediaType: "image/png", data: "https://example.com/image.png" },
++          { type: "file", mediaType: "image/png", data: "//example.com/image.png" },
++        ],
++      },
++    ])
++
++    expect(estimate.attachments.tokens).toBe(0)
++    expect(estimate.text).toContain("https://example.com/image.png")
++    expect(estimate.text).toContain("//example.com/image.png")
++  })
++})

@@ -4,127 +4,103 @@ Date: Fri, 8 May 2026 16:33:34 +0800
 Subject: [PATCH] =?UTF-8?q?feat(session):=20=E9=87=8D=E6=9E=84=E4=BC=9A?=
  =?UTF-8?q?=E8=AF=9D=E6=A0=87=E9=A2=98=E9=80=BB=E8=BE=91=EF=BC=8C=E6=B7=BB?=
  =?UTF-8?q?=E5=8A=A0=E9=BB=98=E8=AE=A4=E6=A0=87=E9=A2=98=E5=88=9B=E5=BB=BA?=
- =?UTF-8?q?=E5=92=8C=E9=AA=8C=E8=AF=81=E5=8A=9F=E8=83=BD?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/app.tsx b/packages/opencode/src/cli/cmd/tui/app.tsx
-index e126f85bc3e80764c7904685347f213a3cb1b84e..d22e1fc0e5efd9b29dba3f35b4950806e2254543 100644
---- a/packages/opencode/src/cli/cmd/tui/app.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/app.tsx
-@@ -51,7 +51,7 @@ import { DialogAlert } from "./ui/dialog-alert"
- import { DialogConfirm } from "./ui/dialog-confirm"
- import { ToastProvider, useToast } from "./ui/toast"
- import { ExitProvider, useExit } from "./context/exit"
--import { Session as SessionApi } from "@/session/session"
-+import { isDefaultTitle } from "@/session/title"
- import { TuiEvent } from "./event"
- import { KVProvider, useKV } from "./context/kv"
- import { Provider } from "@/provider/provider"
-@@ -351,7 +351,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
- 
-     if (route.data.type === "session") {
-       const session = sync.session.get(route.data.sessionID)
--      if (!session || SessionApi.isDefaultTitle(session.title)) {
-+      if (!session || isDefaultTitle(session.title)) {
-         renderer.setTerminalTitle("OpenCode")
-         return
-       }
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 429b8fdd427f33d4363e9e4a913fef4b05597bc3..62068d8a8d2ec1e21e745f8e92cee539566b3f25 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -99,7 +99,7 @@ import { getScrollAcceleration } from "../../util/scroll"
- import { createThrottledSignal } from "../../util/signal"
- import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
- import { DialogGoUpsell } from "../../component/dialog-go-upsell"
--import { SessionRetry } from "@/session/retry"
-+import { GO_UPSELL_MESSAGE } from "@/session/retry-constants"
- import { getRevertDiffFiles } from "../../util/revert-diff"
- 
- addDefaultParsers(parsers.parsers)
-@@ -298,7 +298,7 @@ export function Session() {
-   event.on("session.status", (evt) => {
-     if (evt.properties.sessionID !== route.sessionID) return
-     if (evt.properties.status.type !== "retry") return
--    if (evt.properties.status.message !== SessionRetry.GO_UPSELL_MESSAGE) return
-+    if (evt.properties.status.message !== GO_UPSELL_MESSAGE) return
-     if (dialog.stack.length > 0) return
- 
-     const seen = kv.get(GO_UPSELL_LAST_SEEN_AT)
-diff --git a/packages/opencode/src/session/retry-constants.ts b/packages/opencode/src/session/retry-constants.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..b9e3668c121f519e4879383f7a61de573a79576d
---- /dev/null
-+++ b/packages/opencode/src/session/retry-constants.ts
-@@ -0,0 +1 @@
-+export const GO_UPSELL_MESSAGE = "Free usage exceeded, subscribe to Go https://opencode.ai/go"
-diff --git a/packages/opencode/src/session/retry.ts b/packages/opencode/src/session/retry.ts
-index f0229b7989d88ceecc91be45189208552a3ac544..0dc3a8abc120c24f36694cb7ff0a8f3e2f542457 100644
---- a/packages/opencode/src/session/retry.ts
-+++ b/packages/opencode/src/session/retry.ts
-@@ -1,13 +1,12 @@
- import type { NamedError } from "@opencode-ai/core/util/error"
- import { Cause, Clock, Duration, Effect, Schedule } from "effect"
- import { MessageV2 } from "./message-v2"
-+import { GO_UPSELL_MESSAGE } from "./retry-constants"
- import { iife } from "@/util/iife"
- 
--export type Err = ReturnType<NamedError["toObject"]>
-+export { GO_UPSELL_MESSAGE }
- 
--// This exported message is shared with the TUI upsell detector. Matching on a
--// literal error string kind of sucks, but it is the simplest for now.
--export const GO_UPSELL_MESSAGE = "Free usage exceeded, subscribe to Go https://opencode.ai/go"
-+export type Err = ReturnType<NamedError["toObject"]>
- 
- export const RETRY_INITIAL_DELAY = 2000
- export const RETRY_BACKOFF_FACTOR = 2
-diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
-index 5593efc9714b7280debedee9abc704f4e3549048..cfe85b5578a081845b6f343212135ec3d4fcded6 100644
---- a/packages/opencode/src/session/session.ts
-+++ b/packages/opencode/src/session/session.ts
-@@ -40,20 +40,11 @@ import { Effect, Layer, Option, Context, Schema, Types } from "effect"
- import { zod } from "@/util/effect-zod"
- import { NonNegativeInt, optionalOmitUndefined, withStatics } from "@/util/schema"
- 
--const log = Log.create({ service: "session" })
--
--const parentTitlePrefix = "New session - "
--const childTitlePrefix = "Child session - "
-+import { createDefaultTitle, isDefaultTitle } from "./title"
- 
--function createDefaultTitle(isChild = false) {
--  return (isChild ? childTitlePrefix : parentTitlePrefix) + new Date().toISOString()
--}
-+const log = Log.create({ service: "session" })
- 
--export function isDefaultTitle(title: string) {
--  return new RegExp(
--    `^(${parentTitlePrefix}|${childTitlePrefix})\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$`,
--  ).test(title)
--}
-+export { isDefaultTitle }
- 
- type SessionRow = typeof SessionTable.$inferSelect
- 
 diff --git a/packages/opencode/src/session/title.ts b/packages/opencode/src/session/title.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2893e401230c1cea142e3e2cb7e93ba9de52a6d8
+index 0000000000..1fbcfff859
 --- /dev/null
 +++ b/packages/opencode/src/session/title.ts
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,16 @@
++// #113：会话默认标题生成与判定（从 session.ts 抽出为服务端事实源）
 +const parentTitlePrefix = "New session - "
 +const childTitlePrefix = "Child session - "
 +
++// #113：父/子会话默认标题 = 前缀 + ISO 时间
 +export function createDefaultTitle(isChild = false) {
 +  return (isChild ? childTitlePrefix : parentTitlePrefix) + new Date().toISOString()
 +}
 +
++// #113：是否仍为自动生成的默认标题（未人工改名）
++// 注意：模板字面量中 \d 必须落到 RegExp 源串为数字类
 +export function isDefaultTitle(title: string) {
 +  return new RegExp(
 +    `^(${parentTitlePrefix}|${childTitlePrefix})\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$`,
 +  ).test(title)
 +}
+diff --git a/packages/opencode/src/session/retry-constants.ts b/packages/opencode/src/session/retry-constants.ts
+new file mode 100644
+index 0000000000..4ab6a2fb3e
+--- /dev/null
++++ b/packages/opencode/src/session/retry-constants.ts
+@@ -0,0 +1,4 @@
++// #113：Go upsell 短文案（tip 基线：不把 URL 塞进 message）
++export const GO_UPSELL_MESSAGE = "Free usage exceeded, subscribe to Go"
++// #113：订阅链接独立导出，供 action.link / 结构化 upsell
++export const GO_UPSELL_URL = "https://opencode.ai/go"
+diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
+index 4d0d61ddf2..5539ea6064 100644
+--- a/packages/opencode/src/session/session.ts
++++ b/packages/opencode/src/session/session.ts
+@@ -44,15 +44,9 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { ProviderV2 } from "@opencode-ai/core/provider"
+ import { ModelV2 } from "@opencode-ai/core/model"
+ import { SessionMessage } from "@opencode-ai/schema/session-message"
+-
+-const parentTitlePrefix = "New session - "
+-const childTitlePrefix = "Child session - "
+-
+-export function isDefaultTitle(title: string) {
+-  return new RegExp(
+-    `^(${parentTitlePrefix}|${childTitlePrefix})\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$`,
+-  ).test(title)
+-}
++import { createDefaultTitle, isDefaultTitle } from "./title"
++// #113：兼容 Session.isDefaultTitle 导出名
++export { isDefaultTitle }
+ 
+ type SessionRow = typeof SessionTable.$inferSelect
+ 
+@@ -520,7 +514,7 @@ const layer: Layer.Layer<
+         path: input.path,
+         workspaceID: input.workspaceID,
+         parentID: input.parentID,
+-        title: input.title ?? (input.parentID ? childTitlePrefix : parentTitlePrefix) + new Date().toISOString(),
++        title: input.title ?? createDefaultTitle(!!input.parentID),
+         agent: input.agent,
+         model: input.model,
+         metadata: input.metadata,
+diff --git a/packages/opencode/src/session/retry.ts b/packages/opencode/src/session/retry.ts
+index dec13f0f2e..fc51a7f45a 100644
+--- a/packages/opencode/src/session/retry.ts
++++ b/packages/opencode/src/session/retry.ts
+@@ -4,11 +4,11 @@ import { Cause, Clock, Duration, Effect, Schedule } from "effect"
+ import { MessageV2 } from "./message-v2"
+ import { iife } from "@/util/iife"
+ import { isRecord } from "@/util/record"
++import { GO_UPSELL_MESSAGE, GO_UPSELL_URL } from "./retry-constants"
++export { GO_UPSELL_MESSAGE, GO_UPSELL_URL }
+ 
+ export type Err = ReturnType<NamedError["toObject"]>
+ 
+-export const GO_UPSELL_MESSAGE = "Free usage exceeded, subscribe to Go"
+-export const GO_UPSELL_URL = "https://opencode.ai/go"
+ export type RetryReason = "free_tier_limit" | "account_rate_limit" | (string & {})
+ 
+ export type Retryable = {
+diff --git a/packages/tui/src/util/session.ts b/packages/tui/src/util/session.ts
+index 94ccad22d0..68cd50b25f 100644
+--- a/packages/tui/src/util/session.ts
++++ b/packages/tui/src/util/session.ts
+@@ -1,3 +1,11 @@
++// #113：与 packages/opencode/src/session/title.ts 同构默认标题判定
++// TUI 包不直接依赖 opencode 源路径，因此在此保持同一前缀/ISO 正则
++const parentTitlePrefix = "New session - "
++const childTitlePrefix = "Child session - "
++
++// #113：终端标题栏：仍为默认标题时显示 OpenCode 而非会话名
+ export function isDefaultTitle(title: string) {
+-  return /^(New session - |Child session - )\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(title)
++  return new RegExp(
++    `^(${parentTitlePrefix}|${childTitlePrefix})\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$`,
++  ).test(title)
+ }

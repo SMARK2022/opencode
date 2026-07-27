@@ -2,294 +2,300 @@ From 6283df82e6f66a40a5a54048be9d15427a6f1556 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Tue, 19 May 2026 22:05:35 +0800
 Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E5=AE=88=E6=8A=A4?=
- =?UTF-8?q?=E8=BF=9B=E7=A8=8B=E5=90=AF=E5=8A=A8=E9=80=BB=E8=BE=91=EF=BC=8C?=
- =?UTF-8?q?=E5=A4=84=E7=90=86=E9=80=80=E5=87=BA=E7=8A=B6=E6=80=81=E5=B9=B6?=
- =?UTF-8?q?=E6=9B=B4=E6=96=B0=E9=94=99=E8=AF=AF=E6=B6=88=E6=81=AF=EF=BC=9B?=
- =?UTF-8?q?=E6=94=B9=E8=BF=9B=E6=B5=8B=E8=AF=95=E7=94=A8=E4=BE=8B=E4=BB=A5?=
- =?UTF-8?q?=E9=AA=8C=E8=AF=81=E5=AE=88=E6=8A=A4=E8=BF=9B=E7=A8=8B=E8=A1=8C?=
- =?UTF-8?q?=E4=B8=BA?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/daemon.ts b/packages/opencode/src/cli/cmd/tui/daemon.ts
-index c3f26b1a86a27932ce605c9b49cef36885838f3e..7fbd46b6f3c3bac98ca6ea9f891c2bac2adaa97b 100644
---- a/packages/opencode/src/cli/cmd/tui/daemon.ts
-+++ b/packages/opencode/src/cli/cmd/tui/daemon.ts
-@@ -25,6 +25,7 @@ const SERVER_ELECTION_STALE_MS = 5_000
- const SERVER_POLL_INTERVAL_MS = 200
+diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
+--- a/packages/opencode/src/cli/cmd/tui.ts
++++ b/packages/opencode/src/cli/cmd/tui.ts
+@@ -215,10 +215,40 @@ export async function discoverOrSpawnDaemon(
+       proc.unref()
+       fwdPid = proc.pid
  
- type Args = NetworkOptions
-+type DaemonExit = { exitCode: number } | { error: unknown }
- 
- // Exposed for tests only.  Keep the daemon spawn path injectable without
- // forcing production code through a heavier process abstraction.
-@@ -204,10 +205,15 @@ export async function ensure(args: Args) {
-     })
-     proc.unref()
-     forwardReload(proc)
-+    const exited = proc.exited.then(
-+      (exitCode): DaemonExit => ({ exitCode }),
-+      (error): DaemonExit => ({ error }),
-+    )
- 
-     // The daemon cannot be ready immediately: worker startup has to load the
-     // server, bind a port, and write the lock atomically before health can pass.
--    await Bun.sleep(1000)
-+    const initialExit = await Promise.race([exited, Bun.sleep(1000).then(() => undefined)])
-+    if (initialExit) throw new Error(daemonExitMessage(initialExit))
- 
-     const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
-     while (Date.now() < deadline) {
-@@ -219,12 +225,24 @@ export async function ensure(args: Args) {
-           return internalUrl(lock.port)
-         }
-       }
--      await Bun.sleep(SERVER_POLL_INTERVAL_MS)
-+      const exit = await Promise.race([
-+        exited,
-+        Bun.sleep(Math.min(SERVER_POLL_INTERVAL_MS, Math.max(0, deadline - Date.now()))).then(() => undefined),
-+      ])
-+      if (exit) throw new Error(daemonExitMessage(exit))
-     }
- 
-     proc.kill()
--    throw new Error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
-+    throw new Error(
-+      `opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`,
-+    )
-   } finally {
-     await electionLease?.release().catch(() => undefined)
-   }
- }
++      // #179：启动等待与 worker exited 竞态，崩溃则带 exit code 快速失败
++      // #179：兼容无 exited 的 spawn mock，缺失则永不完成
++      const exited =
++        "exited" in proc && (proc as { exited?: PromiseLike<number> | number }).exited !== undefined
++          ? // #179：统一 thenable/number exited 形态
++          Promise.resolve((proc as { exited: PromiseLike<number> | number }).exited).then(
++              (code) => ({ kind: "code" as const, code: Number(code) }),
++              () => ({ kind: "error" as const }),
++            )
++          : // #179：无 exited 时不完成，保持轮询语义
++          new Promise<{ kind: "code"; code: number }>(() => {})
 +
-+function daemonExitMessage(exit: DaemonExit) {
-+  if ("exitCode" in exit)
-+    return `opencode daemon exited before startup with exit code ${exit.exitCode}. Re-run with --print-logs to show daemon startup logs.`
-+  return `opencode daemon exited before startup. Re-run with --print-logs to show daemon startup logs.`
-+}
++      // #179：将 sleep 与 exited 合并为可中断等待
++      const raceSleep = async (ms: number) => {
++        const sleepP = deps.sleep(ms).then(() => ({ kind: "sleep" as const }))
++        const result = await Promise.race([sleepP, exited])
++        // #179：仅 sleep 胜出才继续等待
++        if (result.kind === "sleep") return
++        // #179：失败文案引导 --print-logs，避免空等超时
++        const msg =
++          // #179：带 code 的文案便于对照日志
++          result.kind === "code"
++            ? `opencode daemon exited before startup with exit code ${result.code}. Re-run with --print-logs to show daemon startup logs.`
++            : `opencode daemon exited before startup. Re-run with --print-logs to show daemon startup logs.`
++        // #179：UI 与 throw 同步同一失败文案
++        UI.error(msg)
++        throw new Error(msg)
++      }
++
+       const deadline = Date.now() + deps.waitMs
+       // 启动后等待 1s 再轮询，避免过早健康检查失败
+       // #49 启动后先 sleep 1s 再进入健康轮询
+-      await deps.sleep(1000)
++      // #179：首等 1s 同样可被崩溃打断
++      await raceSleep(1000)
+       // 轮询锁文件直到守护进程存活且健康检查通过（不校验 spawn PID）
+       while (Date.now() < deadline) {
+         const daemonLock = await deps.read()
+@@ -234,7 +264,8 @@ export async function discoverOrSpawnDaemon(
+             break
+           }
+         }
+-        await deps.sleep(deps.pollMs)
++        // #179：轮询间隔同样可被崩溃打断
++        await raceSleep(Math.min(deps.pollMs, Math.max(0, deadline - Date.now())))
+       }
+ 
+       await electionLease.release()
+@@ -242,10 +273,16 @@ export async function discoverOrSpawnDaemon(
+ 
+       if (!existingUrl) {
+         // 超时失败：杀死半拉起的进程并向上抛错
+-        UI.error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
++        // #179：超时同样提示 --print-logs
++        UI.error(
++          `opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`,
++        )
++        // #179：仅超时路径 kill，崩溃路径不杀已退出进程
+         proc.kill()
+         // 超时文案与常量同源，避免 60 字面量与 waitMs 再次漂移
+-        throw new Error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
++        throw new Error(
++          `opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`,
++        )
+       }
+     }
+   }
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index e26bf15b46f34871591231b3ae250a6fef6c8944..c1411d08ee73c10f831418b1f5857d8aac5ee595 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -490,6 +490,9 @@ function localCommands(root: Node) {
-   return commands(root).filter((node) => {
-     let parent = node.parent
-     while (parent && parent.id !== root.id) {
-+      // tree-sitter-powershell can recover POSIX fragments inside quoted WSL/ssh
-+      // arguments as commands under ERROR nodes; those are not local shell commands.
-+      if (parent.type === "ERROR") return false
-       if (parent.type.includes("string")) return false
-       parent = parent.parent
+@@ -498,6 +498,10 @@ function localCommands(root: Node) {
+     let cur: Node | null = node
+     while (cur) {
+       // #158：string/raw_string 等类型包含 string 即视为载荷边界
++      // #179：ERROR 恢复节点中的 POSIX 碎片不算本地命令
++      // #179：与 string 载荷过滤叠加，避免 WSL/ssh 引号内误判
++      // #179：tree-sitter ERROR 节点上的 grep/cat 碎片不是本地命令意图
++      if (cur.type === "ERROR") return false
+       if (cur.type.includes("string")) return false
+       cur = cur.parent
      }
 diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/test/cli/tui/thread.test.ts
-index 0fa9d686bdde5b805b8251f5ed35b83ba3fa72d0..eaf438f7b3ff9e415578d3956d1b04736e3f92aa 100644
 --- a/packages/opencode/test/cli/tui/thread.test.ts
 +++ b/packages/opencode/test/cli/tui/thread.test.ts
-@@ -102,6 +102,16 @@ describe("tui thread", () => {
-       startedAt: new Date().toISOString(),
-     }
+@@ -15,6 +15,11 @@ import type { DiscoverDaemonDeps } from "../../../src/cli/cmd/tui"
+ import { cliIt } from "../../lib/cli-process"
  
-+    function spawnedDaemon(pid = FAKE_DAEMON_PID, overrides: Partial<ReturnType<typeof Bun.spawn>> = {}) {
-+      return {
-+        pid,
-+        exited: new Promise<number>(() => {}),
-+        unref() {},
-+        kill() {},
-+        ...overrides,
-+      } as ReturnType<typeof Bun.spawn>
-+    }
+ // 注入 deps 验证单服务器复用与 spawn 主路径
++// #179：幸福路径 mock 使用永不 resolve 的 exited
++function hangingExited() {
++  return new Promise<number>(() => {})
++}
 +
-     async function callWithDaemonSpy(existingUrl: string | null, overrides?: Partial<ThreadArgs>) {
-       setup()
-       await using tmp = await tmpdir()
-@@ -115,7 +125,7 @@ describe("tui thread", () => {
-       let daemonSpawnCount = 0
-       ThreadModule._setSpawn(() => {
-         daemonSpawnCount++
--        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+        return spawnedDaemon()
-       })
- 
-       if (existingUrl) {
-@@ -224,7 +234,7 @@ describe("tui thread", () => {
-       let spawnOptions: Parameters<typeof Bun.spawn>[1] | undefined
-       ThreadModule._setSpawn((_cmd, opts) => {
-         spawnOptions = opts
--        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+        return spawnedDaemon()
-       })
- 
-       let readCount = 0
-@@ -248,6 +258,35 @@ describe("tui thread", () => {
-       }
+ describe("tui thread", () => {
+   test("loads the TUI integration lazily", async () => {
+     const source = await Bun.file(new URL("../../../src/cli/cmd/tui.ts", import.meta.url)).text()
+@@ -147,7 +152,9 @@ describe("tui thread", () => {
+         }),
+         spawn: ((_cmd, _opts) => {
+           daemonSpawnCount++
+-          return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++          return { pid: FAKE_DAEMON_PID,
++          exited: hangingExited(),
++          unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+         }) as DiscoverDaemonDeps["spawn"],
+       }))
+       expect(daemonSpawnCount).toBe(0)
+@@ -165,7 +172,9 @@ describe("tui thread", () => {
+         },
+         spawn: ((_cmd, _opts) => {
+           daemonSpawnCount++
+-          return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++          return { pid: FAKE_DAEMON_PID,
++          exited: hangingExited(),
++          unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+         }) as DiscoverDaemonDeps["spawn"],
+       }))
+       expect(daemonSpawnCount).toBe(1)
+@@ -191,7 +200,9 @@ describe("tui thread", () => {
+         },
+         spawn: ((_cmd, _opts) => {
+           daemonSpawnCount++
+-          return { pid: 12345, unref() {}, kill() {} } as never
++          return { pid: 12345,
++          exited: hangingExited(),
++          unref() {}, kill() {} } as never
+         }) as DiscoverDaemonDeps["spawn"],
+       }))
+       expect(result.url).toBe("http://127.0.0.1:9999")
+@@ -224,7 +235,9 @@ describe("tui thread", () => {
+         },
+         spawn: ((_cmd, _opts) => {
+           daemonSpawnCount++
+-          return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++          return { pid: FAKE_DAEMON_PID,
++          exited: hangingExited(),
++          unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+         }) as DiscoverDaemonDeps["spawn"],
+       }))
+       expect(daemonSpawnCount).toBe(1)
+@@ -277,7 +290,9 @@ describe("tui thread", () => {
+         ping: async () => true,
+         clear: async () => {},
+         acquire: async () => ({ release: async () => {} }) as never,
+-        spawn: () => ({ pid: SPAWN_PID, unref() {}, kill() {} }) as ReturnType<typeof Bun.spawn>,
++        spawn: () => ({ pid: SPAWN_PID,
++          exited: hangingExited(),
++          unref() {}, kill() {} }) as ReturnType<typeof Bun.spawn>,
+         sleep: async () => {},
+         resolveDaemonFile: async () => "/tmp/daemon.ts",
+         electionTimeoutMs: SERVER_ELECTION_TIMEOUT_MS,
+@@ -289,3 +304,44 @@ describe("tui thread", () => {
      })
- 
-+    test("reports daemon worker exit before startup instead of waiting for timeout", async () => {
-+      await using tmp = await tmpdir()
-+      ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
+   })
+ })
 +
-+      let killed = false
-+      DaemonModule._setSpawn(() =>
-+        spawnedDaemon(FAKE_DAEMON_PID, {
-+          exited: Promise.resolve(132),
-+          kill() {
-+            killed = true
-+          },
-+        }),
-+      )
-+      spyOn(ServerLockModule, "read").mockResolvedValue(undefined)
 +
-+      const started = Date.now()
-+      await expect(
-+        DaemonModule.ensure({
-+          port: 0,
-+          hostname: "127.0.0.1",
-+          mdns: false,
-+          "mdns-domain": "opencode.local",
-+          cors: [],
-+        }),
-+      ).rejects.toThrow("opencode daemon exited before startup with exit code 132")
-+      expect(Date.now() - started).toBeLessThan(5_000)
-+      expect(killed).toBe(false)
-+    })
-+
-     test("thread installs and releases the Windows Ctrl+C guard around TUI lifetime", async () => {
-       let released = false
-       const order: string[] = []
-@@ -280,7 +319,7 @@ describe("tui thread", () => {
-       spyOn(ServerLockModule, "ping").mockResolvedValue(true)
-       ThreadModule._setSpawn(() => {
-         order.push("spawn")
--        return { pid: 99999, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+        return spawnedDaemon(99999)
-       })
- 
-       const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
-@@ -328,7 +367,7 @@ describe("tui thread", () => {
-       spyOn(ServerLockModule, "clear").mockResolvedValue(undefined)
-       ThreadModule._setSpawn(() => {
-         order.push("spawn")
--        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+        return spawnedDaemon()
-       })
- 
-       const tty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY")
-@@ -362,7 +401,7 @@ describe("tui thread", () => {
-       DaemonModule._setSpawn(() => {
-         spawnCount++
-         spawned = true
--        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+        return spawnedDaemon()
-       })
-       spyOn(ServerLockModule, "read").mockImplementation(async () => (spawned ? fakeLock : undefined))
-       spyOn(ServerLockModule, "alive").mockReturnValue(true)
-@@ -408,7 +447,7 @@ describe("tui thread", () => {
-       let daemonSpawnCount = 0
-       ThreadModule._setSpawn(() => {
-         daemonSpawnCount++
--        return { pid: launcherPid, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+        return spawnedDaemon(launcherPid)
-       })
- 
-       let readCount = 0
-@@ -473,7 +512,7 @@ describe("tui thread", () => {
-       let daemonSpawnCount = 0
-       ThreadModule._setSpawn(() => {
-         daemonSpawnCount++
--        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+        return spawnedDaemon()
-       })
- 
-       let clearCalled = false
-@@ -520,7 +559,7 @@ describe("tui thread", () => {
-       let daemonSpawnCount = 0
-       ThreadModule._setSpawn(() => {
-         daemonSpawnCount++
--        return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+        return spawnedDaemon()
-       })
- 
-       let clearCalled = false
++// #179：单元覆盖启动前崩溃的快速失败路径
++describe("daemon startup exit (#179)", () => {
++  test("reports daemon worker exit before startup instead of waiting for timeout", async () => {
++    const started = Date.now()
++    let killed = false
++    await expect(
++      discoverOrSpawnDaemon({} as never, {
++                // #179：超时故意很长，证明快速失败不是靠缩短 waitMs
++        waitMs: 60_000,
++        pollMs: 50,
++        electionTimeoutMs: 1000,
++        electionStaleMs: 1000,
++        read: async () => undefined,
++        alive: () => false,
++        ping: async () => false,
++        acquire: async () => ({ release: async () => undefined }),
++        clear: async () => undefined,
++        resolveDaemonFile: async () => "/tmp/fake-daemon.js",
++        spawn: () =>
++          ({
++            pid: 4242,
++                        // #179：模拟启动前崩溃 exit 132
++            exited: Promise.resolve(132),
++            unref() {},
++            kill() {
++              killed = true
++            },
++          }) as never,
++        sleep: async (ms: number) => {
++          await new Promise((r) => setTimeout(r, Math.min(ms, 15)))
++        },
++      } as never),
++    ).rejects.toThrow(/exited before startup with exit code 132/)
++    expect(Date.now() - started).    // #179：必须远快于 60s 超时
++    toBeLessThan(5_000)
++    // #179：进程已退出，不应再 kill
++    expect(killed).toBe(false)
++  })
++})
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index fe4f5a483468e2fd1f37d1484c981b244056f7a8..7f2233bc3390c40f2bd8702d0c12cb00a527cc83 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -719,6 +719,76 @@ describe("tool.shell permissions", () => {
-         ),
-       )
-     }
-+
-+    for (const item of ps) {
-+      it.live(`rejects local Unix text utilities in PowerShell pipelines [${item.label}]`, () =>
-+        withShell(
-+          item,
-+          runIn(
-+            projectRoot,
-+            Effect.gen(function* () {
-+              expect(
-+                yield* fail({
-+                  command: "Write-Output ok | grep ok",
-+                  description: "Search local pipeline output",
-+                }),
-+              ).toMatchObject({
-+                message: expect.stringContaining(`The current shell is ${item.label}`),
-+              })
-+            }),
-+          ),
-+        ),
-+      )
-+    }
-+
-+    for (const item of ps) {
-+      it.live(`allows Unix text utilities inside WSL bash scripts [${item.label}]`, () =>
-+        withShell(
-+          item,
-+          runIn(
-+            projectRoot,
-+            Effect.gen(function* () {
-+              const err = new Error("stop after permission")
-+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
-+              expect(
-+                yield* fail(
-+                  {
-+                    command:
-+                      "Write-Host before; wsl.exe -d Ubuntu-22.04 -- bash -lc 'set -euo pipefail; echo \"WSL $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2-)\"'",
-+                    description: "Run WSL shell script",
-+                  },
-+                  capture(requests, err),
-+                ),
-+              ).toMatchObject({ message: err.message })
-+            }),
-+          ),
-+        ),
-+      )
-+    }
-+
-+    for (const item of ps) {
-+      it.live(`allows Unix text utilities inside SSH remote commands [${item.label}]`, () =>
-+        withShell(
-+          item,
-+          runIn(
-+            projectRoot,
-+            Effect.gen(function* () {
-+              const err = new Error("stop after permission")
-+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
-+              expect(
-+                yield* fail(
-+                  {
-+                    command: "ssh example.com 'cat /etc/os-release | grep PRETTY_NAME'",
-+                    description: "Run SSH remote shell command",
-+                  },
-+                  capture(requests, err),
-+                ),
-+              ).toMatchObject({ message: err.message })
-+            }),
-+          ),
-+        ),
-+      )
-+    }
-   }
+@@ -126,6 +126,7 @@ const glob = (p: string) =>
+   process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p.replaceAll("\\", "/")
  
-   if (process.platform === "win32" && cmdShell) {
+ const forms = (dir: string) => {
++    // #179：ERROR 节点用例主要覆盖 Windows PS
+   if (process.platform !== "win32") return [dir]
+   const full = Filesystem.normalizePath(dir)
+   const slash = full.replaceAll("\\", "/")
+@@ -1553,3 +1554,81 @@ describe("tool.shell windows PS stderr and progress", () => {
+     )
+   }
+ })
++
++// #179：PowerShell ERROR 恢复节点上的本地 Unix 工具拒绝/放行
++describe("tool.shell local command ERROR nodes (#179)", () => {
++  // #179：ERROR 节点用例主要覆盖 Windows PS
++  if (process.platform !== "win32") return
++  // #179：无 PS 则跳过
++  if (ps.length === 0) return
++
++  for (const item of ps) {
++    it.live(`rejects local Unix text utilities in PowerShell pipelines [${item.label}]`, () =>
++      withShell(
++        item,
++        runIn(
++          projectRoot,
++          Effect.gen(function* () {
++            // #179：本地管道应拒绝 grep
++            expect(
++              yield* fail({
++                command: "Write-Output ok | grep ok",
++              }),
++            ).toMatchObject({
++              message: expect.stringContaining(`The current shell is ${item.label}`),
++            })
++          }),
++        ),
++      ),
++    )
++  }
++
++  for (const item of ps) {
++    it.live(`allows Unix text utilities inside WSL bash scripts [${item.label}]`, () =>
++      withShell(
++        item,
++        runIn(
++          projectRoot,
++          Effect.gen(function* () {
++            const err = new Error("stop after permission")
++            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
++            // #179：WSL 包装内允许 Unix 工具
++            expect(
++              yield* fail(
++                {
++                  command:
++                    "Write-Host before; wsl.exe -d Ubuntu-22.04 -- bash -lc 'set -euo pipefail; echo \"WSL $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2-)\"'",
++                },
++                capture(requests, err),
++              ),
++            ).toMatchObject({ message: err.message })
++          }),
++        ),
++      ),
++    )
++  }
++
++  for (const item of ps) {
++    it.live(`allows Unix text utilities inside SSH remote commands [${item.label}]`, () =>
++      withShell(
++        item,
++        runIn(
++          projectRoot,
++          Effect.gen(function* () {
++            const err = new Error("stop after permission")
++            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
++            // #179：SSH 远程串内允许 Unix 工具
++            expect(
++              yield* fail(
++                {
++                  command: "ssh example.com 'cat /etc/os-release | grep PRETTY_NAME'",
++                },
++                capture(requests, err),
++              ),
++            ).toMatchObject({ message: err.message })
++          }),
++        ),
++      ),
++    )
++  }
++})

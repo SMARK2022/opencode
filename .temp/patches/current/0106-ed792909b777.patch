@@ -4,28 +4,35 @@ Date: Fri, 8 May 2026 01:09:08 +0800
 Subject: [PATCH] =?UTF-8?q?feat(session):=20=E6=B7=BB=E5=8A=A0=20includeHi?=
  =?UTF-8?q?dden=20=E5=8F=82=E6=95=B0=E4=BB=A5=E6=94=AF=E6=8C=81=E9=9A=90?=
  =?UTF-8?q?=E8=97=8F=E6=B6=88=E6=81=AF=E7=9A=84=E8=BF=87=E6=BB=A4?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
 
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index 6683b67d6dda8b9a6335fd70c77074dec8b1c8cc..9b4199e62bae16c8a5a2bccf804af47acb6f6c17 100644
+index 2f039a2ea0..a2dd0bfddd 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -1026,7 +1026,7 @@ export function toModelMessages(
-   return Effect.runPromise(toModelMessagesEffect(input, model, options).pipe(Effect.provide(EffectLogger.layer)))
- }
- 
--export function page(input: { sessionID: SessionID; limit: number; before?: string }) {
-+export function page(input: { sessionID: SessionID; limit: number; before?: string; includeHidden?: boolean }) {
+@@ -427,6 +427,8 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
+   sessionID: SessionID
+   limit: number
+   before?: string
++  // #106：includeHidden 默认 false，page 层过滤隐藏消息/part
++  includeHidden?: boolean
+ }) {
+   const { db } = yield* Database.Service
    const before = input.before ? cursor.decode(input.before) : undefined
-   const where = before
-     ? and(eq(MessageTable.session_id, input.sessionID), older(before))
-@@ -1055,6 +1055,15 @@ export function page(input: { sessionID: SessionID; limit: number; before?: stri
+@@ -448,7 +450,8 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
+       .where(eq(SessionTable.id, input.sessionID))
+       .get()
+       .pipe(Effect.orDie)
+-    if (!row) return yield* new NotFoundError({ message: `Session not found: ${input.sessionID}` })
++    // #106：与 Session.get 一致用 Effect.fail，确保 Effect.flip 得到 NotFoundError 实例
++    if (!row) return yield* Effect.fail(new NotFoundError({ message: `Session not found: ${input.sessionID}` }))
+     return {
+       items: [] as WithParts[],
+       more: false,
+@@ -459,6 +462,16 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
    const slice = more ? rows.slice(0, input.limit) : rows
-   const items = hydrate(slice)
+   const items = yield* hydrate(db, slice)
    items.reverse()
++  // #106：默认剔除 hidden 消息与 part；includeHidden=true 时原样返回
 +  if (!input.includeHidden) {
 +    for (let i = items.length - 1; i >= 0; i--) {
 +      if (items[i].info.hidden) {
@@ -38,27 +45,47 @@ index 6683b67d6dda8b9a6335fd70c77074dec8b1c8cc..9b4199e62bae16c8a5a2bccf804af47a
    const tail = slice.at(-1)
    return {
      items,
-@@ -1067,7 +1076,7 @@ export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean }
-   const size = 50
-   let before: string | undefined
-   while (true) {
--    const next = page({ sessionID, limit: size, before })
-+    const next = page({ sessionID, limit: size, before, includeHidden: true })
-     if (next.items.length === 0) break
-     for (let i = next.items.length - 1; i >= 0; i--) {
-       const msg = next.items[i]
+@@ -475,7 +488,8 @@ export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean })
+     const result = [] as WithParts[]
+     let before: string | undefined
+     while (true) {
+-      const next = yield* page({ sessionID, limit: size, before }).pipe(
++      // #106：page 全量拉页，由 stream 的 opts.includeHidden 决定过滤
++      const next = yield* page({ sessionID, limit: size, before, includeHidden: true }).pipe(
+         Effect.catchIf(NotFoundError.isInstance, () =>
+           Effect.succeed({ items: [] as WithParts[], more: false, cursor: undefined }),
+         ),
+@@ -519,7 +533,8 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
+     .where(and(eq(MessageTable.id, input.messageID), eq(MessageTable.session_id, input.sessionID)))
+     .get()
+     .pipe(Effect.orDie)
+-  if (!row) return yield* new NotFoundError({ message: `Message not found: ${input.messageID}` })
++  // #106：message 缺失同样 Effect.fail
++  if (!row) return yield* Effect.fail(new NotFoundError({ message: `Message not found: ${input.messageID}` }))
+   return {
+     info: info(row),
+     parts: yield* parts(input.messageID),
 diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
-index 1278089b909591f03331b002c037f05981d704aa..5593efc9714b7280debedee9abc704f4e3549048 100644
+index e1bdddf8b6..d3b095e8b2 100644
 --- a/packages/opencode/src/session/session.ts
 +++ b/packages/opencode/src/session/session.ts
-@@ -696,9 +696,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service |
+@@ -829,14 +829,15 @@ const layer: Layer.Layer<
  
-     const messages = Effect.fn("Session.messages")(function* (input: { sessionID: SessionID; limit?: number }) {
+     const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
        if (input.limit) {
--        return MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).items.filter(
++        // #106：过滤下沉到 MessageV2.page，避免 limit 路径双重 filter
+         return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).pipe(
+           Effect.provideService(Database.Service, database),
+-        )).items.filter(
+-          // 隐藏消息不返回给调用方，但仍在数据库中保留
 -          (m) => !m.info.hidden,
 -        )
-+        return MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).items
++        )).items
        }
-       return Array.from(MessageV2.stream(input.sessionID)).reverse()
-     })
+ 
++      // #106：stream 会吞掉 page 的 NotFound；无 limit 路径先 get 校验 session 存在
++      yield* get(input.sessionID)
++
+       // 无 limit：走 MessageV2.stream 默认过滤 hidden
+       // #98：无 limit 列表必须过滤 hidden，禁止 page 全量回放
+       const newestFirst = yield* MessageV2.stream(input.sessionID).pipe(

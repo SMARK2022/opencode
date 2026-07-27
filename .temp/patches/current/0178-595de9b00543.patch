@@ -2,108 +2,38 @@ From 595de9b0054346decab858d794bcf4d32ed126ce Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Tue, 19 May 2026 17:54:28 +0800
 Subject: [PATCH] =?UTF-8?q?feat:=20=E8=B0=83=E6=95=B4=E8=BE=93=E5=87=BA?=
- =?UTF-8?q?=E5=AD=97=E8=8A=82=E9=99=90=E5=88=B6=E8=87=B316=20KB=EF=BC=8C?=
- =?UTF-8?q?=E6=9B=B4=E6=96=B0=E7=9B=B8=E5=85=B3=E6=96=87=E6=A1=A3=E4=B8=8E?=
- =?UTF-8?q?=E6=8F=8F=E8=BF=B0?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-index 7490b473eb811c28f4aaaf82235d41243765bfdf..b1a9ebb583197d6ac1d30bc9772c04059052b99e 100644
---- a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-@@ -460,7 +460,7 @@ function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
-     .replaceAll("${shellGuidance}", shellGuidance)
-     .replaceAll("${listCommand}", listCommand)
-     .replaceAll("${maxLines}", "2000")
--    .replaceAll("${maxBytes}", "24576")
-+    .replaceAll("${maxBytes}", "16384")
-     .replaceAll("${compressionGuidance}", "")
- }
- 
-diff --git a/packages/opencode/src/config/config.ts b/packages/opencode/src/config/config.ts
-index 2d50694cbc8f296a858cbe94f3b3b33cb607c5c5..0c169493224d77240a7136a5dc9e14785ec259e3 100644
---- a/packages/opencode/src/config/config.ts
-+++ b/packages/opencode/src/config/config.ts
-@@ -251,7 +251,7 @@ export const Info = Schema.Struct({
-         description: "Maximum lines of tool output before it is truncated and saved to disk (default: 1000)",
-       }),
-       max_bytes: Schema.optional(PositiveInt).annotate({
--        description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)",
-+        description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 16384)",
-       }),
-       bash_compression: Schema.optional(Schema.Boolean).annotate({
-         description:
-diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-index 774b12b523d707715849bf2aa76e874beec003f6..28b317741d80fa6a0d11b57db530e2419abc8b97 100644
---- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-+++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-@@ -10,6 +10,7 @@ export const VscodeNotebookDescriptions = {
-   source: [
-     "Read notebook source as a paginated virtual text document with 1-based global line numbers.",
-     "Use this instead of reading raw .ipynb JSON when source content is needed. filePath is required. Pass cellId=#VSC-xxx to focus one cell; use offset/limit to page through large notebooks.",
-+    "Returned source is capped at 16 KB; use offset/limit to continue.",
-     "Line numbers are global virtual source lines across notebook cell sources. Headers and visual separators are unnumbered; line ranges are not per-cell local line numbers.",
-     "Use the source text copied from this tool as oldCode when making precise string-match edits.",
-   ].join("\n"),
-diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
-index 5060dbf79211b9b3119ac7a7d8343ac0237f5e85..f07836710eab917b368d93ed38b13f6d244b5102 100644
---- a/packages/opencode/src/plugin/vscode-bridge.ts
-+++ b/packages/opencode/src/plugin/vscode-bridge.ts
-@@ -40,7 +40,7 @@ const sourceArgs = {
-     .positive()
-     .max(1000)
-     .optional()
--    .describe("Maximum rendered source lines to return, capped at 1000."),
-+    .describe("Maximum rendered source lines to return, capped at 1000. Output is also capped at 16 KB."),
- }
- 
- const runArgs = {
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 74a469721a53a52c83bde4f4ea2b2db55b480219..0a8e9691c6e520c901dc0e4c9ba67bf6d68f8689 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -17,7 +17,7 @@ import { readOutline, type Outline } from "./read-outline"
- import { Reference } from "@/reference/reference"
- 
+@@ -17,8 +17,8 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
+ // #142：默认 200 行与 source 对齐
  const DEFAULT_READ_LIMIT = 200
+ // 不再按行截断：超长行完整保留，仅用 MAX_BYTES 控制总输出
+-// 默认最大读取字节 24KB：压低单次工具输出内存与上下文占用
 -const MAX_BYTES = 24 * 1024
-+const MAX_BYTES = 16 * 1024
++// 默认最大读取字节 16KB：压低单次工具输出内存与上下文占用
++const MAX_BYTES = 16 * 1024 // #178：默认输出上限 24KiB→16KiB
+ const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
  const SAMPLE_BYTES = 4096
- const MAX_CONTENT_TOKENS = 16000
- const MAX_LINE_LENGTH = 2000
-diff --git a/packages/opencode/src/tool/read.txt b/packages/opencode/src/tool/read.txt
-index 2fa7794ccd91a69ce6adee0c77184292c6230e37..b021a735d431a7bf9125cd989a8e9378d58de481 100644
---- a/packages/opencode/src/tool/read.txt
-+++ b/packages/opencode/src/tool/read.txt
-@@ -3,6 +3,7 @@ Read a file or directory from the local filesystem. If the path does not exist,
- Usage:
- - The filePath parameter should be an absolute path.
- - By default, this tool returns up to 200 lines from the start of the file.
-+- Text file content is capped at 16 KB per read; use offset/limit to page large files.
- - The offset parameter is the line number to start from (1-indexed).
- - To read later sections, call this tool again with a larger offset.
- - Use the grep tool to find specific content in large files or files with long lines.
+ const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
 diff --git a/packages/opencode/src/tool/truncate.ts b/packages/opencode/src/tool/truncate.ts
-index aa2842392f4a4404c7445ec036252f58451443fe..51a50da28edf4743ff525395cce177aef5bef2a8 100644
 --- a/packages/opencode/src/tool/truncate.ts
 +++ b/packages/opencode/src/tool/truncate.ts
-@@ -14,7 +14,7 @@ const log = Log.create({ service: "truncation" })
- const RETENTION = Duration.days(7)
- 
+@@ -15,7 +15,8 @@ const RETENTION = Duration.days(7)
+ // 工具输出默认最大行数 1000，与 DEFAULT_READ_LIMIT 锁步
  export const MAX_LINES = 1000
+ // 截断管道默认字节上限与 read MAX_BYTES 对齐，避免双口径
 -export const MAX_BYTES = 24 * 1024
++// #178：默认输出上限 24KiB→16KiB
 +export const MAX_BYTES = 16 * 1024
  export const DIR = TRUNCATION_DIR
  export const GLOB = path.join(TRUNCATION_DIR, "*")
  
 diff --git a/packages/opencode/test/tool/truncation.test.ts b/packages/opencode/test/tool/truncation.test.ts
-index c9092167532c24293574bd556ce08548f2cd0d2a..152cc66ba45ce0ed3aee98c2b7657288b53d0576 100644
 --- a/packages/opencode/test/tool/truncation.test.ts
 +++ b/packages/opencode/test/tool/truncation.test.ts
-@@ -103,7 +103,7 @@ describe("Truncate", () => {
+@@ -102,7 +102,7 @@ describe("Truncate", () => {
  
      test("uses default MAX_LINES and MAX_BYTES", () => {
        expect(Truncate.MAX_LINES).toBe(1000)
@@ -112,21 +42,86 @@ index c9092167532c24293574bd556ce08548f2cd0d2a..152cc66ba45ce0ed3aee98c2b7657288
      })
  
      it.live("limits() falls back to MAX_LINES/MAX_BYTES when Config is not provided", () =>
-diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
-index 64b2781bd05ad675a4ea82d191c1840f023796dd..35c542da363dbce5cd2d238ce8ff7db296678254 100644
---- a/packages/sdk/js/src/v2/gen/types.gen.ts
-+++ b/packages/sdk/js/src/v2/gen/types.gen.ts
-@@ -1276,7 +1276,7 @@ export type Config = {
-   tool_output?: {
-     max_lines?: number
-     /**
--     * Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)
-+     * Maximum bytes of tool output before it is truncated and saved to disk (default: 16384)
-      */
-     max_bytes?: number
-     /**
+diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config/config.ts
+--- a/packages/core/src/v1/config/config.ts
++++ b/packages/core/src/v1/config/config.ts
+@@ -136,7 +136,7 @@ export const Info = Schema.Struct({
+         description: "Maximum lines of tool output before it is truncated and saved to disk (default: 1000)",
+       }),
+       max_bytes: Schema.optional(PositiveInt).annotate({
+-        description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)",
++        description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 16384)",
+       }),
+       // 启用 Bash 输出压缩，减少 token 用量
+       bash_compression: Schema.optional(Schema.Boolean).annotate({
+diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
+--- a/packages/tui/src/util/context-usage.ts
++++ b/packages/tui/src/util/context-usage.ts
+@@ -1016,7 +1016,7 @@ function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
+     .replaceAll("${shellGuidance}", shellGuidance)
+     .replaceAll("${listCommand}", listCommand)
+     .replaceAll("${maxLines}", "1000")
+-    .replaceAll("${maxBytes}", "24576")
++    .replaceAll("${maxBytes}", "16384")
+     .replaceAll("${compressionGuidance}", "")
+ }
+ 
+diff --git a/packages/opencode/src/tool/read.txt b/packages/opencode/src/tool/read.txt
+--- a/packages/opencode/src/tool/read.txt
++++ b/packages/opencode/src/tool/read.txt
+@@ -3,6 +3,7 @@ Read a file or directory from the local filesystem. If the path does not exist,
+ Usage:
+ - The filePath parameter should be an absolute path.
+ - By default, this tool returns up to 200 lines from the start of the file.
++- Text file content is capped at 16 KB per read; use offset/limit to continue.
+ - The offset parameter is the line number to start from (1-indexed).
+ - To read later sections, call this tool again with a larger offset.
+ - Use the grep tool to find specific content in large files or files with long lines.
+diff --git a/packages/core/src/tool-output-store.ts b/packages/core/src/tool-output-store.ts
+--- a/packages/core/src/tool-output-store.ts
++++ b/packages/core/src/tool-output-store.ts
+@@ -12,8 +12,9 @@ import type { ToolOutput } from "@opencode-ai/llm"
+ 
+ // V2 主路径工具输出默认行数与 SMARK Truncate 对齐 1000
+ export const MAX_LINES = 1_000
+-// V2 主路径工具输出默认字节与 SMARK Truncate 对齐 24KB
+-export const MAX_BYTES = 24 * 1024
++// V2 主路径工具输出默认字节与 SMARK Truncate 对齐 16KB
++// #178：默认输出上限 24KiB→16KiB
++export const MAX_BYTES = 16 * 1024
+ export const RETENTION = Duration.days(7)
+ 
+ export const MANAGED_DIRECTORY = "tool-output"
+diff --git a/packages/core/src/tool/read-filesystem.ts b/packages/core/src/tool/read-filesystem.ts
+--- a/packages/core/src/tool/read-filesystem.ts
++++ b/packages/core/src/tool/read-filesystem.ts
+@@ -10,8 +10,9 @@ import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
+ 
+ // V2 read 默认行上限与 SMARK DEFAULT_READ_LIMIT 对齐 1000
+ export const MAX_READ_LINES = 1_000
+-// V2 read 默认字节上限与 SMARK read MAX_BYTES 对齐 24KB
+-export const MAX_READ_BYTES = 24 * 1024
++// V2 read 默认字节上限与 SMARK read MAX_BYTES 对齐 16KB
++// #178：V2 读路径对齐 16KiB
++export const MAX_READ_BYTES = 16 * 1024
+ export const MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024
+ // #90：禁止行中 2000 字截断；仅行数+总字节预算分页
+ 
+diff --git a/packages/core/test/tool-output-store.test.ts b/packages/core/test/tool-output-store.test.ts
+--- a/packages/core/test/tool-output-store.test.ts
++++ b/packages/core/test/tool-output-store.test.ts
+@@ -134,8 +134,8 @@ describe("ToolOutputStore", () => {
+   it.live("does not double-count structured data duplicated in projected text", () =>
+     withStore(({ store }) =>
+       Effect.gen(function* () {
+-        // #65：MAX_BYTES=24KB 后单份须低于上限（双计会超限）
+-        // #65：MAX_BYTES=24KB；单份文本取 10KB 确保低于上限（双计会超限）
++        // #65：MAX_BYTES=16KB 后单份须低于上限（双计会超限）
++        // #65：MAX_BYTES=16KB；单份文本取 10KB 确保低于上限（双计会超限）
+         const text = "x".repeat(10_000)
+         const output = { structured: { output: text }, content: [{ type: "text" as const, text }] }
+         expect(yield* store.bound({ sessionID, toolCallID: "call-duplicated", output })).toEqual({
 diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/source.ts
-index 57eba38ae3987ba96dc70473fd8ddf17e3004bc7..2f3ea39549665ac93fc035968ccbf6ed16091c9f 100644
 --- a/sdks/vscode/src/notebook/source.ts
 +++ b/sdks/vscode/src/notebook/source.ts
 @@ -23,7 +23,7 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
@@ -136,23 +131,67 @@ index 57eba38ae3987ba96dc70473fd8ddf17e3004bc7..2f3ea39549665ac93fc035968ccbf6ed
 - * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 24 KB.
 + * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 16 KB.
   */
+ // #94：renderedLines 与 bytesCut 分离；header 不占行预算
  export async function notebookSource(input: Record<string, unknown>) {
-   const filePath = stringProp(input, "filePath")
-@@ -70,7 +70,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+@@ -75,8 +75,8 @@ export async function notebookSource(input: Record<string, unknown>) {
    globalStart = Math.max(1, Math.min(globalStart, totalLines > 0 ? totalLines : 1))
  
    // Render cells one by one, emitting headers + in-range source lines
+-  // 24KB 字节预算；满额后设 bytesCut 并 break 外层
 -  const maxBytes = 24 * 1024
++  // 16KB 字节预算；满额后设 bytesCut 并 break 外层
 +  const maxBytes = 16 * 1024
    let bytes = 0
-   // `limit` applies to numbered virtual source lines only; headers are context and
-   // must not consume the same budget because they do not have real line numbers.
-@@ -139,7 +139,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+   // renderedLines：仅计数带全局行号的源码行，header 不计
+   let renderedLines = 0
+@@ -151,7 +151,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+   }
+ 
+   if (!bytesCut && !lineLimited) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
+-  // more：窗口内仍有未返回行，且不是因为 24KB 截断
++  // more：窗口内仍有未返回行，且不是因为 16KB 截断
+   const more = !bytesCut && lastRenderedLine < globalEnd
+ 
+   let output = warning ? `${warning}\n\n` : ""
+@@ -161,9 +161,9 @@ export async function notebookSource(input: Record<string, unknown>) {
+     ) + "\n"
    output += outputCells.join("\n")
  
+-  // 页脚仅在 bytesCut 时提示 24KB；行限走 more 分页文案
++  // 页脚仅在 bytesCut 时提示 16KB；行限走 more 分页文案
    if (bytesCut) {
 -    output += `\n\n(Output capped at 24 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
 +    output += `\n\n(Output capped at 16 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
-   } else if (more) {
+   } else if (more || lineLimited) {
      output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
    }
+diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+--- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
++++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+@@ -10,6 +10,9 @@ export const VscodeNotebookDescriptions = {
+   ].join("\n"),
+ 
+   source: [
++    // #178：与 notebook source 默认 16KiB 对齐
++    "Returned source is capped at 16 KB; use offset/limit for larger cells.",
++    
+     "Read notebook source as a paginated virtual text document with 1-based global line numbers.",
+     "Use this instead of reading raw .ipynb JSON when source content is needed. filePath is required. Pass cellId=#VSC-xxx to focus one cell; use offset/limit to page through large notebooks.",
+     "Line numbers are global virtual source lines across notebook cell sources. Headers and visual separators are unnumbered; line ranges are not per-cell local line numbers.",
+diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
+--- a/packages/opencode/src/plugin/vscode-bridge.ts
++++ b/packages/opencode/src/plugin/vscode-bridge.ts
+@@ -1,3 +1,4 @@
++// #178：桥接描述与工具默认 16KiB 对齐
+ // Plugin 入口：注册 notebook bridge 工具并转发到 ide/vscode-bridge 客户端
+ import { Effect } from "effect"
+ import { tool, type ToolContext, type PluginInput, type Hooks } from "@opencode-ai/plugin"
+@@ -41,7 +42,7 @@ const sourceArgs = {
+     .positive()
+     .max(1000)
+     .optional()
+-    .describe("Maximum rendered source lines to return, capped at 1000."),
++    .describe("Maximum rendered source lines to return, capped at 1000 lines / 16 KB."),
+ }
+ 
+ const runArgs = {

@@ -10,118 +10,89 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-
 diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
-index f1153181915d7a279dcebeb254a2f58659da25dc..918796fcbd354f773e86d819a3b6eb117ca12036 100644
 --- a/packages/opencode/src/permission/auto.ts
 +++ b/packages/opencode/src/permission/auto.ts
-@@ -1,6 +1,6 @@
- import { Effect } from "effect"
- import { PermissionPrecheck } from "./precheck"
--import type { SessionID } from "@/session/schema"
-+import type { MessageID, SessionID } from "@/session/schema"
- 
- export type Decision =
-   | { action: "allow"; reason: string; source: "precheck" | "reviewer"; reviewID?: string }
-@@ -28,10 +28,12 @@ export type ReviewDecision =
+@@ -27,10 +27,15 @@ export type ReviewDecision =
      }
  
  export interface ReviewInput {
++  // #208：reviewID 在 auto.ts mint 后传递给 reviewer——UI 和审计事件可引用同一逻辑审查即使模型超时
 +  readonly reviewID: string
    readonly sessionID?: SessionID
    readonly permission: string
    readonly patterns: readonly string[]
    readonly metadata: Readonly<Record<string, unknown>>
-+  readonly tool?: { readonly messageID: MessageID; readonly callID: string }
++  // #208：tool 可选绑定——reviewer 标记工具状态为 reviewing 供 UI 展示进度
++  // #208：messageID 用 string 而非 MessageID brand——PermissionV1.Request.tool 用 Schema.String
++  readonly tool?: { readonly messageID: string; readonly callID: string }
+   // #202：precheck 以 level（safe/general/cautious/dangerous）而非 action 传递给 reviewer，避免把确定性风险分层误解成最终执行决策
    readonly precheck: { readonly level: PermissionPrecheck.Level; readonly reason: string }
  }
- 
-@@ -47,10 +49,15 @@ export function evaluate(
+@@ -45,10 +50,16 @@ export function evaluate(
      permission: string
      patterns: readonly string[]
      metadata: Readonly<Record<string, unknown>>
-+    tool?: { readonly messageID: MessageID; readonly callID: string }
++    tool?: { readonly messageID: string; readonly callID: string }
      strict?: boolean
      reviewerDisabled?: boolean
    },
    reviewer?: Reviewer,
++  // #208：onReviewStart 在 reviewer 调用前回调——发布 ReviewStarted 事件供 UI 展示进度
 +  onReviewStart?: (input: {
 +    readonly reviewID: string
 +    readonly precheck: { readonly level: PermissionPrecheck.Level; readonly reason: string }
 +  }) => Effect.Effect<void>,
  ) {
    return Effect.gen(function* () {
-     const precheck = PermissionPrecheck.evaluate(input)
-@@ -101,8 +108,17 @@ export function evaluate(
+     // #203：路由顺序：precheck 先于 reviewer——确定性层按四级分层拦截
+@@ -91,9 +102,17 @@ export function evaluate(
        return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
      }
  
++    // #208：reviewID 在模型调用前 mint——进度 UI 和最终审计事件可引用同一逻辑审查即使模型超时或失败
 +    const reviewID = crypto.randomUUID()
++    // #208：onReviewStart 在 reviewer 调用前回调——发布 ReviewStarted 事件供 UI 展示进度
 +    if (onReviewStart) {
-+      // The review id is minted before the model call so progress UIs and final
-+      // audit events can refer to the same logical review even if the model
-+      // times out or fails before returning an assessment.
 +      yield* onReviewStart({ reviewID, precheck })
 +    }
 +
+     // #202：reviewer 调用——precheck.level 传递实际层级使 reviewer 契约一致，strict 模式在 reason 中标注以供审计
      return yield* reviewer.review({
        ...input,
 +      reviewID,
        precheck: {
          level: precheck.level,
-         // Strict mode preserves why the request crossed the reviewer boundary, so
-@@ -120,7 +136,7 @@ export function evaluate(
-           if (tag === "PermissionReviewerDisabled" || tag === "PermissionReviewerFallbackToUser") {
+         // #202：strict 模式保留穿越边界的原因——safe/general 经 strict 送审时标注，cautious 保持原 reason
+@@ -109,7 +128,7 @@ export function evaluate(
              return { action: "ask", reason: errorMessage(error), source: "reviewer_unavailable" } satisfies Decision
            }
+           // #198：其他失败 fail closed——超时/provider 错误/schema 错误时拒绝而非放行，防止不透明的 reviewer 故障打开安全缺口
 -          return { action: "deny", reason: reviewerFailureMessage(error), source: "reviewer" } satisfies Decision
 +          return { action: "deny", reason: reviewerFailureMessage(error), source: "reviewer", reviewID } satisfies Decision
          },
          onSuccess: (reviewed) => {
-           // The prompt is policy, but this is the hard guardrail. Contradictory
+           // #198：硬护栏——矛盾模型输出转为 deny，防止 malformed allow 削弱确定性 precheck 或租户策略
 diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/permission/index.ts
-index 7e1f87a86af553c9fd0cb9a785b26850481f58a7..f03940be7cc803dbb8e0adb643365209ab196e42 100644
 --- a/packages/opencode/src/permission/index.ts
 +++ b/packages/opencode/src/permission/index.ts
-@@ -15,6 +15,7 @@ import os from "os"
- import { evaluate as evalRule } from "./evaluate"
- import { PermissionID } from "./schema"
+@@ -8,6 +8,7 @@ import os from "os"
+ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+ import { EventV2Bridge } from "@/event-v2-bridge"
  import { PermissionAuto } from "./auto"
 +import { PermissionPrecheck } from "./precheck"
  import { PermissionReviewer } from "./reviewer/service"
  import { PermissionSessionCache } from "./cache/session-cache"
  import { PermissionCircuitBreaker } from "./reviewer/circuit-breaker"
-@@ -88,6 +89,19 @@ export const Event = {
-       rationale: Schema.String,
-     }),
-   ),
-+  ReviewStarted: BusEvent.define(
-+    "permission.review.started",
-+    Schema.Struct({
-+      sessionID: SessionID,
-+      reviewID: Schema.String,
-+      permission: Schema.String,
-+      patterns: Schema.Array(Schema.String),
-+      precheck: Schema.Struct({
-+        level: Schema.Literals(PermissionPrecheck.LEVELS),
-+        reason: Schema.String,
-+      }),
-+    }),
-+  ),
-   ReviewFailed: BusEvent.define(
-     "permission.review.failed",
-     Schema.Struct({ sessionID: SessionID, reviewID: Schema.String, reason: Schema.String }),
-@@ -254,6 +268,19 @@ export const layer = Layer.effect(
+@@ -132,6 +133,17 @@ const layer = Layer.effect(
            const decision = yield* PermissionAuto.evaluate(
              { ...autoRequest, strict, reviewerDisabled: permissionConfig?.approvals_reviewer === "user" },
              reviewer,
++            // #208：onReviewStart 发布 ReviewStarted 事件——确定性 precheck 到模型审查的可见边界
++            // #208：events.publish 而非 bus.publish——复用 EventV2Bridge 统一事件发布路径
++            // #208：事件仅携带 auto patterns 和 precheck rationale——不泄露隐藏 reviewer prompt
 +            (review) =>
-+              // This event is the user's visible boundary between deterministic
-+              // precheck and model review. It intentionally carries only the
-+              // matched auto patterns and precheck rationale, not raw hidden
-+              // prompt text, so UIs can show progress without leaking synthetic
-+              // reviewer context or duplicating the pending tool arguments.
-+              bus.publish(Event.ReviewStarted, {
++              events.publish(Event.ReviewStarted, {
 +                sessionID: request.sessionID,
 +                reviewID: review.reviewID,
 +                permission: autoRequest.permission,
@@ -129,38 +100,44 @@ index 7e1f87a86af553c9fd0cb9a785b26850481f58a7..f03940be7cc803dbb8e0adb643365209
 +                precheck: review.precheck,
 +              }),
            )
-           log.info("auto evaluated", { permission: request.permission, action: decision.action, reason: decision.reason })
+           yield* Effect.logInfo("auto evaluated", { permission: request.permission, action: decision.action, reason: decision.reason })
            if (decision.action === "allow") {
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index ebf8a45d5fe70fb2b82d05b8dcd6527a6fa76cf3..4f8dd8b37e5e92f1a4a898b716003e0d8c451537 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -2,8 +2,9 @@ import { Config } from "@/config/config"
+@@ -3,8 +3,10 @@ import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
+ import { Config } from "@/config/config"
  import { Provider } from "@/provider/provider"
  import { Session } from "@/session/session"
- import { MessageV2 } from "@/session/message-v2"
 +import { MessageID, PartID, SessionID } from "@/session/schema"
++import type { ToolPart, User, Assistant, TextPart } from "@opencode-ai/core/v1/session"
  import { generateObject, type ModelMessage } from "ai"
 -import { Context, Effect, Layer, Schema } from "effect"
 +import { Context, Effect, Layer, Schema, Semaphore } from "effect"
  import { PermissionReviewerPrompt } from "./prompt"
  import { Assessment, ReviewerRequest } from "./schema"
  import { PermissionReviewerTranscript } from "./transcript"
-@@ -54,6 +55,8 @@ export const layer = Layer.effect(
+@@ -61,7 +63,10 @@ export const layer = Layer.effect(
    Effect.gen(function* () {
      const config = yield* Config.Service
      const provider = yield* Provider.Service
-+    const sessions = yield* Session.Service
++    // #208：Session.Service 已在 patch 206 保留——复用为 session 变量避免 Database.Service 泄漏
+     const session = yield* Session.Service
++    // #208：每父会话一个 Semaphore——并发工具审查复用同一 reviewer transcript
 +    const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
  
      const review: Interface["review"] = (input) => Effect.gen(function* () {
        const cfg = yield* config.get()
-@@ -101,6 +104,15 @@ export const layer = Layer.effect(
+@@ -106,6 +111,19 @@ export const layer = Layer.effect(
                return (yield* provider.getSmallModel(current.providerID)) ?? (yield* provider.getModel(current.providerID, current.modelID))
              })
          const language = yield* provider.getLanguage(model)
++        // #208：获取或创建 reviewer 子会话——复用同一 transcript 追加请求/决策轮次
 +        const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
++        // #208：标记工具状态为 reviewing——UI 展示确定性 precheck 到模型审查的进度
++        // #208：markToolReviewing best-effort 标记——过期工具引用不影响有效决策
 +        yield* markToolReviewing(input)
++        // #208：在子会话中记录 reviewer 请求——synthetic 文本不作为用户授权证据
 +        const reviewerUser = reviewerSession
 +          ? yield* recordReviewerRequest({
 +              session: reviewerSession,
@@ -168,13 +145,14 @@ index ebf8a45d5fe70fb2b82d05b8dcd6527a6fa76cf3..4f8dd8b37e5e92f1a4a898b716003e0d
 +              text: messages.map((message) => `${message.role}: ${message.content}`).join("\n\n"),
 +            })
 +          : undefined
-         // Use structured generation instead of free-form text parsing. The schema
-         // enforces the JSON shape; PermissionAuto still performs semantic checks
-         // for contradictory allows after the object is returned.
-@@ -121,10 +133,14 @@ export const layer = Layer.effect(
+         // #198：generateObject 结构化输出——schema 同时提供 StandardSchemaV1 和 StandardJSONSchemaV1 确保 provider 兼容
+         // #198：双重 schema 提供者——StandardSchemaV1 用于运行时验证，StandardJSONSchemaV1 用于 provider API 请求格式
+         const assessment = yield* Effect.promise(() =>
+@@ -125,10 +143,16 @@ export const layer = Layer.effect(
            Effect.mapError((error) => (isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))),
          )
  
++        // #208：在子会话中记录 reviewer 决策——供未来 transcript delta 审计追溯
 +        if (reviewerSession && reviewerUser) {
 +          yield* recordReviewerDecision({ session: reviewerSession, model, parentID: reviewerUser.id, assessment })
 +        }
@@ -183,24 +161,24 @@ index ebf8a45d5fe70fb2b82d05b8dcd6527a6fa76cf3..4f8dd8b37e5e92f1a4a898b716003e0d
            action: assessment.outcome,
            reason: assessment.rationale,
 -          reviewID: crypto.randomUUID(),
++          // #208：reviewID 由 auto.ts mint 后传入——不再在此处随机生成
 +          reviewID: input.reviewID,
            risk_level: assessment.risk_level,
            user_authorization: assessment.user_authorization,
          } satisfies PermissionAuto.ReviewDecision
-@@ -143,6 +159,136 @@ export const layer = Layer.effect(
+@@ -146,6 +170,134 @@ export const layer = Layer.effect(
      })
  
      return Service.of({ review })
 +
++    // #208：获取或创建 reviewer 子会话——每父会话一个可复用的 permission-reviewer 子会话
 +    function getReviewerSession(parentID: SessionID, model: Provider.Model) {
 +      return reviewerSessionLock(parentID).withPermits(1)(Effect.gen(function* () {
-+        const existing = (yield* sessions.children(parentID)).find((item) => item.agent === "permission-reviewer")
++        // #208：优先复用已有 permission-reviewer 子会话——每次审查创建新 transcript 会丢失前序请求/决策上下文
++        const existing = (yield* session.children(parentID)).find((item) => item.agent === "permission-reviewer")
 +        if (existing) return existing
-+        // A single child session per parent mirrors Codex's reusable guardian
-+        // trunk: later reviews append new request/decision turns instead of
-+        // creating detached one-off records, enabling future transcript deltas by
-+        // child session id without changing the permission API again.
-+        return yield* sessions.create({
++        // #208：单个子会话镜像 Codex guardian trunk——后续审查追加新请求/决策轮次
++        return yield* session.create({
 +          parentID,
 +          title: "Auto permission review (@permission-reviewer subagent)",
 +          agent: "permission-reviewer",
@@ -212,39 +190,37 @@ index ebf8a45d5fe70fb2b82d05b8dcd6527a6fa76cf3..4f8dd8b37e5e92f1a4a898b716003e0d
 +    function reviewerSessionLock(parentID: SessionID) {
 +      const existing = reviewerSessionLocks.get(parentID)
 +      if (existing) return existing
-+      // Child-session creation is read-then-create because Session.Service does
-+      // not expose an atomic get-or-create child primitive. A per-parent lock
-+      // keeps concurrent tool reviews in one reusable reviewer transcript.
++      // #208：get-or-create 非原子——每父会话锁保持并发工具审查复用同一 reviewer transcript
 +      const next = Semaphore.makeUnsafe(1)
 +      reviewerSessionLocks.set(parentID, next)
 +      return next
 +    }
 +
++    // #208：记录 reviewer 请求为 synthetic 用户消息——可检查但不作为人类授权证据
 +    function recordReviewerRequest(input: { session: Session.Info; model: Provider.Model; text: string }) {
 +      return Effect.gen(function* () {
-+        const message = yield* sessions.updateMessage({
++        const message = yield* session.updateMessage({
 +          id: MessageID.ascending(),
 +          role: "user",
 +          sessionID: input.session.id,
 +          time: { created: Date.now() },
 +          agent: "permission-reviewer",
 +          model: { providerID: input.model.providerID, modelID: input.model.id },
-+        } satisfies MessageV2.User)
-+        yield* sessions.updatePart({
++        } satisfies User)
++        yield* session.updatePart({
 +          id: PartID.ascending(),
 +          sessionID: input.session.id,
 +          messageID: message.id,
 +          type: "text",
-+          // The text is synthetic protocol input: it should be inspectable in the
-+          // hidden reviewer child session, but must not later count as human
-+          // authorization evidence if that child transcript is projected again.
++          // #208：synthetic=true 防止此文本在子会话 transcript 投影时被误认为人类授权
 +          synthetic: true,
 +          text: input.text,
-+        } satisfies MessageV2.TextPart)
++        } satisfies TextPart)
 +        return message
 +      })
 +    }
 +
++    // #208：记录 reviewer 决策为助手消息+tool part——供未来 transcript delta 审计追溯
 +    function recordReviewerDecision(input: {
 +      session: Session.Info
 +      model: Provider.Model
@@ -252,7 +228,7 @@ index ebf8a45d5fe70fb2b82d05b8dcd6527a6fa76cf3..4f8dd8b37e5e92f1a4a898b716003e0d
 +      assessment: Schema.Schema.Type<typeof Assessment>
 +    }) {
 +      return Effect.gen(function* () {
-+        const message = yield* sessions.updateMessage({
++        const message = yield* session.updateMessage({
 +          id: MessageID.ascending(),
 +          parentID: input.parentID,
 +          role: "assistant",
@@ -266,12 +242,13 @@ index ebf8a45d5fe70fb2b82d05b8dcd6527a6fa76cf3..4f8dd8b37e5e92f1a4a898b716003e0d
 +          sessionID: input.session.id,
 +          time: { created: Date.now(), completed: Date.now() },
 +          finish: "tool-calls",
-+        } satisfies MessageV2.Assistant)
-+        yield* sessions.updatePart({
++        } satisfies Assistant)
++        yield* session.updatePart({
 +          id: PartID.ascending(),
 +          sessionID: input.session.id,
 +          messageID: message.id,
 +          type: "tool",
++          // #208：callID 由 parentID 确定性生成——同一请求的决策轮次可追溯，避免随机 ID 在 transcript 重放时漂移
 +          callID: `permission-review-${input.parentID}`,
 +          tool: "permission_review_decision",
 +          state: {
@@ -282,19 +259,24 @@ index ebf8a45d5fe70fb2b82d05b8dcd6527a6fa76cf3..4f8dd8b37e5e92f1a4a898b716003e0d
 +            metadata: input.assessment,
 +            time: { start: message.time.created, end: message.time.completed ?? Date.now() },
 +          },
-+        } satisfies MessageV2.ToolPart)
++        } satisfies ToolPart)
 +      })
 +    }
 +
++    // #208：标记工具状态为 reviewing——UI 展示 precheck 到 reviewer 的进度
 +    function markToolReviewing(input: PermissionAuto.ReviewInput) {
++      // #208：无 sessionID 或 tool 绑定时跳过标记——非工具触发的审查无需 UI 进度展示
 +      if (!input.sessionID || !input.tool) return Effect.void
 +      return Effect.gen(function* () {
-+        const message = yield* MessageV2.get({ sessionID: input.sessionID!, messageID: input.tool!.messageID })
++        // #208：用 session.messages 替代 MessageV2.get——避免 Database.Service 泄漏到 review 类型
++        const messages = yield* session.messages({ sessionID: input.sessionID!, limit: 50 })
++        const message = messages.find((m) => m.info.id === input.tool!.messageID)
++        if (!message) return
 +        const part = message.parts.find(
-+          (item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === input.tool!.callID,
++          (item): item is ToolPart => item.type === "tool" && item.callID === input.tool!.callID,
 +        )
 +        if (!part || (part.state.status !== "pending" && part.state.status !== "running")) return
-+        yield* sessions.updatePart({
++        yield* session.updatePart({
 +          ...part,
 +          state: {
 +            status: "running",
@@ -302,10 +284,7 @@ index ebf8a45d5fe70fb2b82d05b8dcd6527a6fa76cf3..4f8dd8b37e5e92f1a4a898b716003e0d
 +            title: `Auto review: ${input.precheck.level}`,
 +            metadata: {
 +              ...(part.state.status === "running" ? part.state.metadata : {}),
-+              // This metadata is intentionally small and stable: clients can show
-+              // that deterministic precheck handed the tool to the reviewer
-+              // without rendering the hidden reviewer prompt or trusting it as a
-+              // permission result.
++              // #208：metadata 小而稳定——客户端可展示 precheck 交接而不渲染隐藏 reviewer prompt
 +              autoReview: {
 +                reviewID: input.reviewID,
 +                precheck: input.precheck,
@@ -313,11 +292,9 @@ index ebf8a45d5fe70fb2b82d05b8dcd6527a6fa76cf3..4f8dd8b37e5e92f1a4a898b716003e0d
 +            },
 +            time: { start: part.state.status === "running" ? part.state.time.start : Date.now() },
 +          },
-+        } satisfies MessageV2.ToolPart)
++        } satisfies ToolPart)
 +      }).pipe(
-+        // Review display is best-effort: stale tool references can happen after
-+        // cancellation, repair, or compaction, but losing that UI update must not
-+        // convert an otherwise valid reviewer decision into a fail-closed deny.
++        // #208：review 展示是 best-effort——过期工具引用不应将有效 reviewer 决策转为 fail-closed deny
 +        Effect.catch(() => Effect.void),
 +      )
 +    }
@@ -325,13 +302,13 @@ index ebf8a45d5fe70fb2b82d05b8dcd6527a6fa76cf3..4f8dd8b37e5e92f1a4a898b716003e0d
  )
  
 diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
-index 7ef3caa6aa87dd908b8baf6698de78b1de5c6614..0ee134d83985b40e0158c8a32654a653c6c2fea7 100644
 --- a/packages/opencode/test/permission/auto.test.ts
 +++ b/packages/opencode/test/permission/auto.test.ts
-@@ -63,6 +63,59 @@ describe("permission auto routing", () => {
+@@ -67,6 +67,64 @@ describe("permission auto routing", () => {
      ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
    })
  
++  // #208：验证 onReviewStart 在 reviewer 完成前报告确定性 precheck 边界
 +  test("reports the deterministic precheck boundary before reviewer completion", async () => {
 +    const starts: { reviewID: string; precheck: { level: string; reason: string } }[] = []
 +
@@ -345,6 +322,7 @@ index 7ef3caa6aa87dd908b8baf6698de78b1de5c6614..0ee134d83985b40e0158c8a32654a653
 +          },
 +          {
 +            review: (input) =>
++              // #208：reviewer 返回的 reviewID 应与 onReviewStart 收到的一致
 +              Effect.succeed({
 +                action: "allow",
 +                reason: "reviewer approved explicit push",
@@ -361,9 +339,11 @@ index 7ef3caa6aa87dd908b8baf6698de78b1de5c6614..0ee134d83985b40e0158c8a32654a653
 +      ),
 +    ).resolves.toMatchObject({ action: "allow", source: "reviewer", reviewID: starts[0]?.reviewID })
 +    expect(starts).toHaveLength(1)
++    // #208：precheck level 为 cautious——git push 属于 cautious 路由到 reviewer
 +    expect(starts[0].precheck).toMatchObject({ level: "cautious" })
 +  })
 +
++  // #208：验证 reviewer 失败时保留已 minted 的 reviewID
 +  test("keeps the started review id when reviewer execution fails closed", async () => {
 +    let started: string | undefined
 +
@@ -377,6 +357,7 @@ index 7ef3caa6aa87dd908b8baf6698de78b1de5c6614..0ee134d83985b40e0158c8a32654a653
 +          },
 +          { review: () => Effect.fail(new Error("provider unavailable")) },
 +          (input) =>
++            // #208：onReviewStart 回调记录 minted reviewID——deny 仍携带此 ID 供审计
 +            Effect.sync(() => {
 +              started = input.reviewID
 +            }),
@@ -385,6 +366,42 @@ index 7ef3caa6aa87dd908b8baf6698de78b1de5c6614..0ee134d83985b40e0158c8a32654a653
 +    ).resolves.toMatchObject({ action: "deny", source: "reviewer", reviewID: started })
 +  })
 +
+   // #203：PowerShell 用户目录凭据读取走 cautious → reviewer，防止 $env:USERPROFILE 展开绕过敏感路径检测
    test("routes PowerShell user-profile credential reads to reviewer", async () => {
      let called = false
-     await expect(
+diff --git a/packages/schema/src/v1/permission.ts b/packages/schema/src/v1/permission.ts
+--- a/packages/schema/src/v1/permission.ts
++++ b/packages/schema/src/v1/permission.ts
+@@ -69,6 +69,21 @@ const Replied = define({
+ // #199：仍通过原有 Asked/Replied 路径返回，订阅者无需监听这些新事件即可保持行为不变。
+ // #199：ReviewCompleted 在 reviewer 给出 allow/deny 时发布，绑定 reviewID 供审计
+ // #199：追溯；outcome 与 reviewer 决议一致，但 permission 层仍独立执行 cache/circuit。
++// #208：ReviewStarted 在 reviewer 调用前发布——UI 可展示确定性 precheck 到模型审查的边界，不泄露隐藏 prompt
++const ReviewStarted = define({
++  type: "permission.review.started",
++  // #208：内联 Schema.Literals 而非引用 PermissionPrecheck.LEVELS——schema 包不依赖 opencode 包
++  schema: {
++    sessionID: SessionID,
++    reviewID: Schema.String,
++    permission: Schema.String,
++    patterns: Schema.Array(Schema.String),
++    precheck: Schema.Struct({
++      level: Schema.Literals(["safe", "general", "cautious", "dangerous"]),
++      reason: Schema.String,
++    }),
++  },
++})
+ const ReviewCompleted = define({
+   type: "permission.review.completed",
+   schema: { sessionID: SessionID, reviewID: Schema.String, outcome: Schema.Literals(["allow", "deny"]), rationale: Schema.String },
+@@ -88,8 +103,9 @@ const CircuitBroken = define({
+ export const Event = {
+   Asked,
+   Replied,
++  ReviewStarted,
+   ReviewCompleted,
+   ReviewFailed,
+   CircuitBroken,
+-  Definitions: inventory(Asked, Replied, ReviewCompleted, ReviewFailed, CircuitBroken),
++  Definitions: inventory(Asked, Replied, ReviewStarted, ReviewCompleted, ReviewFailed, CircuitBroken),
+ }

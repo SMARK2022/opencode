@@ -1,44 +1,32 @@
 From 773ad40748faae9a76d1b24f9304558c1c24a33e Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Sat, 23 May 2026 06:26:48 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E4=B8=B2=E8=81=94=E4=BF=AE=E6=AD=A3aut?=
- =?UTF-8?q?o=E8=B7=AF=E7=94=B1=E9=80=BB=E8=BE=91=20Enhance=20permission=20?=
- =?UTF-8?q?handling=20for=20shell=20commands=20and=20external=20directory?=
- =?UTF-8?q?=20access?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH] feat: 串联修正 auto 路由逻辑
 
-- Capture optional collaborators during Permission.Service construction to improve context resolution.
-- Refactor permission evaluation logic to streamline auto-review processes, ensuring sensitive operations are routed correctly.
-- Introduce deterministic precheck for external directory access initiated by shell commands, preventing unnecessary user prompts.
-- Update reviewer policies to explicitly deny direct reads of sensitive files and improve handling of PowerShell commands.
-- Add comprehensive tests for new permission routing behaviors, including handling of SSH keys and user profile credential reads.
-- Ensure that non-shell commands maintain existing user approval paths while allowing shell commands to leverage auto-review capabilities.
 
 diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
-index 7a3f295f59f037e4386a186a5dc76fcd44bb2d2c..9c7bfd854c2e90bb9e3f29a05cd5d198dc335411 100644
+index 003dd71..2055531 100644
 --- a/packages/opencode/src/agent/agent.ts
 +++ b/packages/opencode/src/agent/agent.ts
-@@ -171,11 +171,9 @@ export const layer = Layer.effect(
+@@ -184,9 +184,9 @@ const layer = Layer.effect(
+             mode: "primary",
              native: true,
            },
-           // [local-smark] Auto 原生 Agent 开始
--          // `Auto` 复用 build 的权限形状，仅把 `bash` 改为 `auto`。这样 shell
--          // 命令会进入本分支新增的 deterministic precheck / reviewer / user
--          // fallback 链路，而 edit、task、read 等其他权限继续保持 build 的
--          // allow 风格；repo_clone、repo_overview、外部目录等既有安全默认值也
--          // 不被放宽，避免为了启用 auto shell 而降低原有边界。
-+          // `Auto` 复用 build 的权限形状，但只把 shell 命令接入 auto。edit
-+          // 等非 shell 写入仍沿用 build 的 allow，避免本轮 shell sandbox 修复
-+          // 扩大到新的工具审批面。
+-          // #201：Auto 原生 Agent——复用 build 权限形状，仅把 bash 改为 auto，shell 命令进入
+-          // #201：deterministic precheck / reviewer / user fallback 链路；edit/task/read 等其他权限
+-          // #201：保持 build 的 allow 风格，外部目录等既有安全默认值不被放宽
++          // #203：Auto 复用 build 权限形状，但只把 shell 命令接入 auto。edit
++          // #203：等非 shell 写入仍沿用 build 的 allow，避免本轮 shell sandbox 修复
++          // #203：扩大到新的工具审批面
            Auto: {
              name: "Auto",
              description: "Build-like agent that routes shell commands through auto permission review.",
-@@ -186,6 +184,10 @@ export const layer = Layer.effect(
+@@ -197,6 +197,12 @@ const layer = Layer.effect(
                  question: "allow",
                  plan_enter: "allow",
                  bash: "auto",
++                // #203：external_directory:auto 让 shell 项目外路径门禁进入 auto 路由，
++                // #203：复用同一条命令的预审证据；白名单目录保持 allow 不被放宽
 +                external_directory: {
 +                  "*": "auto",
 +                  ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
@@ -47,10 +35,10 @@ index 7a3f295f59f037e4386a186a5dc76fcd44bb2d2c..9c7bfd854c2e90bb9e3f29a05cd5d198
                user,
              ),
 diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
-index 92b0b20f615168904441aa6d2f46ca72a460a0f3..f1153181915d7a279dcebeb254a2f58659da25dc 100644
+index d547a46..2d3a740 100644
 --- a/packages/opencode/src/permission/auto.ts
 +++ b/packages/opencode/src/permission/auto.ts
-@@ -43,30 +43,63 @@ export interface Reviewer {
+@@ -41,28 +41,55 @@ export interface Reviewer {
  }
  
  export function evaluate(
@@ -65,57 +53,51 @@ index 92b0b20f615168904441aa6d2f46ca72a460a0f3..f1153181915d7a279dcebeb254a2f586
    reviewer?: Reviewer,
  ) {
    return Effect.gen(function* () {
+-    // #202：路由顺序：precheck 先于 reviewer——确定性层按四级分层拦截，仅 cautious 才消耗 reviewer 配额
++    // #203：路由顺序：precheck 先于 reviewer——确定性层按四级分层拦截
      const precheck = PermissionPrecheck.evaluate(input)
+-    // #202：四级预审路由——safe 直接允许；general 回到用户审批但不调用 reviewer；cautious 进入 reviewer/user fallback；dangerous 直接拒绝
+-    // #202：strict 是用户显式配置的例外，保留原本"低风险也审"的能力，但默认路径不会让 general 占用 LLM
+-    if (precheck.level === "safe" && !input.strict) {
+-      // #202：precheck safe 直接放行——这些命令已通过只读不变量验证，无需 reviewer 审查
 +    const isShell = input.permission === "bash"
 +    const isShellExternalDirectory = input.permission === "external_directory" && input.metadata.action_kind === "shell"
-     // [local-smark] auto 四级预审路由开始
--    // safe/general/cautious/dangerous 是 LLM 负载边界：safe 直接允许，general
--    // 回到既有用户审批但不调用 reviewer，cautious 才进入 reviewer/user fallback，
--    // dangerous 直接拒绝。strict 是用户显式配置的例外，用来保留原本“低风险也审”
--    // 的能力，但默认路径不会让 general 占用 LLM。
--    if (precheck.level === "safe" && !input.strict) {
-+    // safe/general/cautious/dangerous 是 LLM 负载边界：safe 直接允许；开发期
-+    // shell general 也直接允许，避免 Auto shell 回到人工确认；非 shell general
-+    // 和 cautious 进入 reviewer/user fallback；dangerous 直接拒绝。strict 是用户
-+    // 显式配置的例外，用来保留原本“低风险也审”的能力。
++    // #203：四级预审路由——safe 直接允许；开发期 shell general 也直接允许，避免 Auto shell
++    // #203：回到人工确认；非 shell general 和 cautious 进入 reviewer/user fallback；dangerous 直接拒绝
++    // #203：strict 是用户显式配置的例外，保留原本"低风险也审"的能力
 +    if (precheck.level === "dangerous") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
 +    if (isShellExternalDirectory) {
-+      // shell-origin external_directory 只负责让项目外路径参与同一条命令的确定性
-+      // 预审，不能再单独调用 reviewer；否则一次 bash 操作会在 external_directory
-+      // 和 bash 两个权限点重复消耗 LLM。非 dangerous 情况放行给后续 bash auto。
++      // #203：shell-origin external_directory 只负责让项目外路径参与同一条命令的确定性预审，
++      // #203：不能再单独调用 reviewer；否则一次 bash 会在 external_directory 和 bash 两个权限点
++      // #203：重复消耗 LLM。非 dangerous 情况放行给后续 bash auto
        return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
      }
+-    // #202：precheck dangerous 直接拒绝——危险载荷在 reviewer 前拦截，防止模型被说服放行已知危险命令
 -    if (precheck.level === "dangerous") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
+-    // #202：general 在非 strict 下回到用户审批——未知/动态/包装器命令不占用 LLM，保持既有 ask 路径
 -    if (precheck.level === "general" && !input.strict) {
 +    if (input.permission === "external_directory") {
-+      // Auto agent 的 external_directory:auto 只是为了 shell 路径门禁能进入上面的
-+      // shell-origin 分支。普通读写工具的项目外路径缺少 shell 命令证据，仍走既有
-+      // 人工审批，避免把本轮 shell sandbox 修复扩大成全工具 reviewer 审批面。
++      // #203：Auto 的 external_directory:auto 只为 shell 路径门禁进入上面的 shell-origin 分支。
++      // #203：普通读写工具的项目外路径缺少 shell 命令证据，仍走既有人工审批
        return { action: "ask", reason: precheck.reason, source: "precheck" } satisfies Decision
      }
 +    if (precheck.level === "safe" && !input.strict) {
 +      return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
 +    }
 +    if (precheck.level === "general" && isShell && !input.strict) {
-+      // 当前开发测试期要求 Auto shell 不弹人工确认：无法精确判定但未命中
-+      // dangerous/cautious 的命令先放行；非 shell general 继续走 reviewer。
++      // #203：开发测试期要求 Auto shell 不弹人工确认：未命中 dangerous/cautious 的命令先放行；
++      // #203：非 shell general 继续走 reviewer
 +      return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
 +    }
-     // [local-smark] auto 四级预审路由结束
  
-     // Cautious is the default auto review boundary: deterministic precheck found
-     // a visible risk that is neither harmless nor immediately forbidden, so a
--    // reviewer must explicitly return allow/deny. When no reviewer is wired yet,
--    // fall back to the existing user approval path.
+-    // #202：cautious 是 review 边界——确定性 precheck 发现可见风险但非立即禁止，reviewer 必须显式返回 allow/deny
+-    // #202：无 reviewer 注入时回退到 ask——保持原有用户审批路径，不因缺少 reviewer 而阻断
 -    if (!reviewer) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
-+    // reviewer must explicitly return allow/deny. Native Auto must not degrade
-+    // back to a clickable user ask if reviewer wiring is missing; fail closed so
-+    // sensitive shell output cannot be exposed by pressing Allow.
++    // #203：cautious 是 review 边界——确定性 precheck 发现可见风险但非立即禁止，reviewer 必须显式返回 allow/deny
++    // #203：原生 Auto 不能在 reviewer 缺失时降级回可点击的用户 ask；fail closed 防止敏感 shell 输出因点 Allow 暴露
 +    if (!reviewer) {
-+      // Explicit user-review configuration is stronger than the native Auto
-+      // fail-closed default. This preserves small/custom runtimes that construct
-+      // Permission.layer without a reviewer service but intentionally keep user
-+      // approval as the review boundary.
++      // #203：显式 user reviewer 配置强于原生 Auto fail-closed 默认——保留小型/自定义运行时
++      // #203：无 reviewer service 但有意保留用户审批作为 review 边界的场景
 +      if (input.reviewerDisabled) return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
 +      if (input.metadata.agent === "Auto") {
 +        return { action: "deny", reason: `auto reviewer unavailable: ${precheck.reason}`, source: "reviewer" } satisfies Decision
@@ -123,125 +105,77 @@ index 92b0b20f615168904441aa6d2f46ca72a460a0f3..f1153181915d7a279dcebeb254a2f586
 +      return { action: "ask", reason: precheck.reason, source: "reviewer_unavailable" } satisfies Decision
 +    }
  
+     // #202：reviewer 调用——precheck.level 传递实际层级使 reviewer 契约一致，strict 模式在 reason 中标注以供审计
      return yield* reviewer.review({
-       ...input,
 diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/permission/index.ts
-index fdf05f3eaa9d613fce991569f877e09068a602bd..7e1f87a86af553c9fd0cb9a785b26850481f58a7 100644
+index 867f26d..d41e275 100644
 --- a/packages/opencode/src/permission/index.ts
 +++ b/packages/opencode/src/permission/index.ts
-@@ -173,6 +173,14 @@ export const layer = Layer.effect(
-   Service,
-   Effect.gen(function* () {
-     const bus = yield* Bus.Service
-+    // Capture optional collaborators when Permission.Service is constructed.
-+    // Tool execution later re-enters Effect through EffectBridge with a captured
-+    // context; resolving these services inside `ask` can miss reviewer layers
-+    // that were privately provided to Permission.defaultLayer.
-+    const reviewer = Option.getOrUndefined(yield* Effect.serviceOption(PermissionReviewer.Service))
-+    const cache = Option.getOrUndefined(yield* Effect.serviceOption(PermissionSessionCache.Service))
-+    const circuit = Option.getOrUndefined(yield* Effect.serviceOption(PermissionCircuitBreaker.Service))
-+    const config = Option.getOrUndefined(yield* Effect.serviceOption(Config.Service))
-     const state = yield* InstanceState.make<State>(
-       Effect.fn("Permission.state")(function* (ctx) {
-         const row = Database.use((db) =>
-@@ -228,11 +236,8 @@ export const layer = Layer.effect(
-         // All auto-review collaborators are optional at this layer. That keeps
-         // older tests/runtimes using Permission.layer working; missing reviewer
-         // or explicit fallback returns to the normal pending permission path.
--        const reviewer = Option.getOrUndefined(yield* Effect.serviceOption(PermissionReviewer.Service))
--        const cache = Option.getOrUndefined(yield* Effect.serviceOption(PermissionSessionCache.Service))
--        const circuit = Option.getOrUndefined(yield* Effect.serviceOption(PermissionCircuitBreaker.Service))
--        const config = Option.getOrUndefined(yield* Effect.serviceOption(Config.Service))
--        const strict = config ? (yield* config.get()).permission?.auto_review?.strict === true : false
+@@ -104,6 +104,8 @@ const layer = Layer.effect(
+       // #199：serviceOption 可选注入，使旧测试和小运行时缺少 reviewer 时仍能
+       // #199：退回正常 ask 路径而非崩溃。
+       if (needsAuto) {
++        // #203：协作者在 ask 时从运行时上下文解析——AppNodeBuilder 下 Permission.node 仅声明
++        // #203：cache/circuit 依赖，reviewer 与 config 作为可选协作者经 serviceOption 获取
+         const reviewer = Option.getOrUndefined(yield* Effect.serviceOption(PermissionReviewer.Service))
+         // #199：会话级缓存避免对同一 auto 请求重复调用 reviewer，但缓存键包含
+         // #199：command/cwd/shell/filepath/diff 上下文，上下文变化即失效。
+@@ -112,9 +114,10 @@ const layer = Layer.effect(
+         // #199：但当前调用的 deny 结果不依赖熔断状态，熔断仅作为咨询性信号。
+         const circuit = Option.getOrUndefined(yield* Effect.serviceOption(PermissionCircuitBreaker.Service))
+         const config = Option.getOrUndefined(yield* Effect.serviceOption(Config.Service))
 +        const permissionConfig = config ? (yield* config.get()).permission : undefined
+         // #199：strict 模式禁用 precheck fast-path allow，强制所有 auto 请求经过
+         // #199：reviewer；但 deny 仍由 precheck 保留，防止危险操作因 reviewer 缺失而放行。
+-        const strict = config ? (yield* config.get()).permission?.auto_review?.strict === true : false
 +        const strict = permissionConfig?.auto_review?.strict === true
-         // Auto review/cache must operate only on the patterns that matched an
-         // `auto` rule. The original request may also contain ask-controlled
-         // patterns; caching those before the user replies would turn a rejected
-@@ -246,7 +251,10 @@ export const layer = Layer.effect(
-           if (circuit) yield* circuit.recordNonDenial(request.sessionID)
-           if (!needsAsk) return
+         // #199：autoRequest 只包含 auto 控制的 pattern。若缓存 ask 控制的 pattern，
+         // #199：用户回复前规则变更会使原本被拒绝的混合请求变成静默 allow。
+         const autoRequest = { ...request, patterns: autoPatterns }
+@@ -126,7 +129,10 @@ const layer = Layer.effect(
          } else {
+           // #199：PermissionAuto.evaluate 按 precheck → fast-path allow → deny →
+           // #199：reviewer → fail-closed 顺序裁决；strict 模式禁用 fast-path 但保留 deny。
 -          const decision = yield* PermissionAuto.evaluate({ ...autoRequest, strict }, reviewer)
 +          const decision = yield* PermissionAuto.evaluate(
 +            { ...autoRequest, strict, reviewerDisabled: permissionConfig?.approvals_reviewer === "user" },
 +            reviewer,
 +          )
-           log.info("auto evaluated", { permission: request.permission, action: decision.action, reason: decision.reason })
+           yield* Effect.logInfo("auto evaluated", { permission: request.permission, action: decision.action, reason: decision.reason })
            if (decision.action === "allow") {
              if (circuit) yield* circuit.recordNonDenial(request.sessionID)
-@@ -469,9 +477,12 @@ export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
- 
- export const defaultLayer = layer.pipe(
-   Layer.provide(Bus.layer),
--  // Cache/circuit are local permission concerns, so the default layer can provide
--  // them without requiring the provider-backed reviewer. The reviewer stays
--  // optional to avoid a dependency cycle in unit tests and small runtimes.
-+  // Permission.Service captures optional auto-review collaborators at layer
-+  // construction time. Keep the production default fully wired here so nested
-+  // session/runtime layers cannot accidentally construct a reviewer-less
-+  // permission service and downgrade Auto shell decisions to plain ask.
-+  Layer.provide(Config.defaultLayer),
-+  Layer.provide(PermissionReviewer.defaultLayerWithSession),
-   Layer.provide(PermissionSessionCache.defaultLayer),
-   Layer.provide(PermissionCircuitBreaker.defaultLayer),
- )
 diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
-index 86f4cbd434e809b0f0b61c569210b0ae40970095..57e247666c64f0a3e35245507e40984fd7c983ff 100644
+index 9b9f84f..dcb5102 100644
 --- a/packages/opencode/src/permission/precheck.ts
 +++ b/packages/opencode/src/permission/precheck.ts
-@@ -12,11 +12,10 @@ type RemoteResult = { action: "remote"; script?: string; reason: string } | { ac
- // [local-smark] 四级预审分层开始
- // Permission precheck 是 reviewer 之前的确定性分类器。这里不用 allow/prompt/deny
- // 表达执行结果，而是先给 shell 命令分层：safe 表示直接、只读、无敏感路径的
--// 无害命令；general 表示未知、动态、包装器或普通副作用，回到用户审批但不占用
--// LLM；cautious 表示删除、git 状态变更、远程传输、敏感读取等需要 reviewer 或
--// 用户明确判断的操作；dangerous 表示全盘/根目录删除、远程脚本直管道执行、凭据
--// 外传、反连 shell 等直接拒绝的操作。这个分层是降低 LLM 负载的边界：默认只有
--// cautious 才进入 auto reviewer，safe/general/dangerous 都不触发 LLM。
-+// 无害命令；general 表示未知、动态、包装器或普通副作用，开发测试期 shell
-+// general 会直接 allow，非 shell general 交给 reviewer；cautious 表示删除、
-+// git 状态变更、远程传输、敏感读取等需要 reviewer 判断的操作；dangerous 表示
-+// 全盘/根目录删除、远程脚本直管道执行、凭据外传、反连 shell 等直接拒绝的操作。
- // [local-smark] 四级预审分层结束
- 
- // POSIX shell wrappers are treated as containers for another script. We inspect
-@@ -54,7 +53,9 @@ const INTERPRETER_FLAGS = new Map([
- // path is visibly piped/uploaded to a network or remote target. This regex is a
- // guardrail, not a secret scanner: keep it specific enough to avoid blocking
- // ordinary project files while still catching common credentials and key names.
--const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|(?:~|[^\s|;]+)\/\.ssh\/[^\s|;]+|(?:~|[^\s|;]+)\/\.aws\/credentials|(?:~|[^\s|;]+)\/\.config\/gcloud\/[^\s|;]+|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|id_rsa|id_ed25519|[^\s|;]+\.pem|[^\s|;]+\.key)`
+@@ -31,9 +31,12 @@ const INTERPRETER_FLAGS = new Map([
+   ["php", new Set(["-r"])],
+   ["lua", new Set(["-e"])],
+ ])
++// #203：拆分 SSH 私钥名/Windows home 模式，覆盖 id_dsa/id_ecdsa/*_sk 及 $env:USERPROFILE/%USERPROFILE% 路径
 +const SSH_PRIVATE_KEY_NAME_PATTERN = String.raw`id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?`
 +const WINDOWS_HOME_SENSITIVE_PATH_PATTERN = String.raw`(?:~|\$HOME|\$env:USERPROFILE|%USERPROFILE%)[\\/](?:\.ssh(?:[\\/][^\s|;]+)?|\.aws(?:[\\/]credentials)?|\.config[\\/]gcloud(?:[\\/][^\s|;]+)?|\.kube[\\/]config|\.npmrc|\.netrc|\.git-credentials)`
-+const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|${WINDOWS_HOME_SENSITIVE_PATH_PATTERN}|(?:~|[^\s|;]+)\/\.ssh(?:\/[^\s|;]+)?|(?:~|[^\s|;]+)\/\.aws(?:\/credentials)?|(?:~|[^\s|;]+)\/\.config\/gcloud(?:\/[^\s|;]+)?|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|${SSH_PRIVATE_KEY_NAME_PATTERN}|[^\s|;]+\.pem|[^\s|;]+\.key)`
- // [local-smark] 敏感路径参数匹配开始
- // raw 扫描发生在 shell quote 被移除之前；允许敏感路径外侧有一层引号，避免
- // `cat ".env" | curl ...` 这类明显外传被降级成 cautious reviewer 判断。
-@@ -163,6 +164,12 @@ export function evaluate(input: {
-   // Only bash permission currently has enough syntactic evidence for precheck.
-   // Other tools intentionally fall through to user approval instead of
-   // guessing about unrelated argument schemas.
+ // #202：敏感路径正则放宽——允许 ~ 之外的非空白前缀路径，使 /home/alice/.aws/credentials、$HOME 展开后的
+ // #202：绝对路径也能被 raw 扫描命中；护栏而非密钥扫描器，需足够精确避免拦截普通项目文件
+-const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|(?:~|[^\s|;]+)\/\.ssh\/[^\s|;]+|(?:~|[^\s|;]+)\/\.aws\/credentials|(?:~|[^\s|;]+)\/\.config\/gcloud\/[^\s|;]+|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|id_rsa|id_ed25519|[^\s|;]+\.pem|[^\s|;]+\.key)`
++const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|${WINDOWS_HOME_SENSITIVE_PATH_PATTERN}|(?:~|[^\s|;]+)\/\.ssh(?:\/?[^\s|;]+)?|(?:~|[^\s|;]+)\/\.aws(?:\/credentials)?|(?:~|[^\s|;]+)\/\.config\/gcloud(?:\/?[^\s|;]+)?|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|${SSH_PRIVATE_KEY_NAME_PATTERN}|[^\s|;]+\.pem|[^\s|;]+\.key)`
+ // #202：敏感路径参数匹配——raw 扫描发生在 shell quote 移除之前，允许敏感路径外侧有一层引号，
+ // #202：避免 `cat ".env" | curl ...` 这类明显外传被降级成 cautious reviewer 判断
+ const SENSITIVE_PATH_ARGUMENT_PATTERN = String.raw`["']?${SENSITIVE_PATH_PATTERN}["']?`
+@@ -129,6 +132,11 @@ export function evaluate(input: {
+ }): Decision {
+   // #197：目前仅 bash 有足够语法证据支持确定性预检——其他工具直接回退到用户审批而非猜测无关参数模式
+   // #202：非 bash 工具缺乏 shell 级语义证据，归为 general 而非 prompt，保持既有用户审批路径
++  // #203：shell 发起的 external_directory 不是独立工具动作，复用同一条命令的预审结果，
++  // #203：避免项目外路径先触发普通 ask 从而绕开 Auto agent 的 bash auto 路由
 +  if (input.permission === "external_directory" && input.metadata.action_kind === "shell") {
-+    // shell 发起的 external_directory 不是独立工具动作，它只是 bash 命令执行前
-+    // 的项目外路径门禁。复用同一条命令的预审结果，避免项目外路径先触发普通
-+    // ask，从而绕开 Auto agent 的 bash auto 路由。
 +    return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
 +  }
    if (input.permission !== "bash") return { level: "general", reason: "precheck only has bash coverage" }
    return evaluateShell(typeof input.metadata.command === "string" ? input.metadata.command : input.patterns.join(" && "), 0)
  }
-@@ -486,7 +493,8 @@ function dangerousRaw(command: string) {
-   }
-   // [local-smark] Windows 保护目标危险扫描结束
-   // Credential exfiltration is critical only when a sensitive read is visibly
--  // connected to a network transfer. Direct reads stay prompt-only in safeTokens.
-+  // connected to a network transfer. Direct sensitive reads are handled below as
-+  // cautious so Auto can route them to reviewer without treating them as exfil.
-   if (
-     new RegExp(
-       String.raw`\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})[^|;]*\|\s*(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b`,
-@@ -535,7 +543,7 @@ function cautiousRaw(command: string) {
-   // 本地敏感读取提升到 cautious，避免 safe 绕过，同时不把普通 `$HOME` 查询送审。
+@@ -515,7 +523,7 @@ function cautiousRaw(command: string) {
+   const normalized = command.replace(/\s+/g, " ").trim()
    if (
      new RegExp(
 -      String.raw`(?:^|[;&|]\s*)\b(?:cat|type|Get-Content|gc|rg|grep|head|tail|sed|awk)\b(?=[^|;]*${SENSITIVE_PATH_ARGUMENT_PATTERN})`,
@@ -249,23 +183,23 @@ index 86f4cbd434e809b0f0b61c569210b0ae40970095..57e247666c64f0a3e35245507e40984f
        "i",
      ).test(normalized)
    ) {
-@@ -601,11 +609,11 @@ function cautiousGitSubcommand(tokens: string[]) {
+@@ -590,11 +598,12 @@ function cautiousGitSubcommand(tokens: string[]) {
+   return subcommand === "branch" && !gitBranchSafe(tokens.slice(2))
+ }
  
+-// #202：readsSensitivePath——读取或列出敏感文件不是立即外传（非 dangerous），但会把密钥内容暴露给 shell
+-// #202：输出和模型上下文，所以从 safe/general 提升为 cautious，交 reviewer 判断是否确有授权
++// #203：读取或列出 .env、SSH key、云凭据等本地敏感位置不是立即外传，因此不是
++// #203：dangerous；但它会把密钥内容或密钥存在性暴露给 shell 输出和模型上下文，
++// #203：所以从 safe/general 提升为 cautious，交给 reviewer 判断是否确有授权
  function readsSensitivePath(tokens: string[]) {
-   // [local-smark] 敏感读取谨慎分层开始
--  // 读取 .env、SSH key、云凭据等本地敏感文件不是立即外传，因此不是 dangerous；
--  // 但它会把密钥内容暴露给 shell 输出和模型上下文，所以从 safe 提升为 cautious，
--  // 交给 reviewer/user 判断是否确有用户授权。
-+  // 读取或列出 .env、SSH key、云凭据等本地敏感位置不是立即外传，因此不是
-+  // dangerous；但它会把密钥内容或密钥存在性暴露给 shell 输出和模型上下文，
-+  // 所以从 safe/general 提升为 cautious，交给 reviewer 判断是否确有授权。
    const cmd = normalizeCommandName(tokens[0])
 -  if (!["cat", "type", "get-content", "gc", "grep", "rg", "head", "tail", "less", "more", "sed", "awk"].includes(cmd)) {
 +  if (!["cat", "type", "get-content", "gc", "get-childitem", "gci", "ls", "dir", "grep", "rg", "head", "tail", "less", "more", "sed", "awk"].includes(cmd)) {
      return false
    }
    return hasSensitivePath(tokens)
-@@ -728,8 +736,11 @@ function hasSensitivePath(tokens: string[]) {
+@@ -714,8 +723,11 @@ function hasSensitivePath(tokens: string[]) {
        normalized === ".env" ||
        normalized.startsWith(".env.") ||
        normalized.includes("/.env") ||
@@ -277,7 +211,7 @@ index 86f4cbd434e809b0f0b61c569210b0ae40970095..57e247666c64f0a3e35245507e40984f
        normalized.endsWith("/.aws/credentials") ||
        normalized.startsWith("~/.config/gcloud/") ||
        normalized.includes("/.config/gcloud/") ||
-@@ -745,8 +756,16 @@ function hasSensitivePath(tokens: string[]) {
+@@ -731,8 +743,16 @@ function hasSensitivePath(tokens: string[]) {
        normalized.endsWith("/credentials.json") ||
        normalized === "id_rsa" ||
        normalized.endsWith("/id_rsa") ||
@@ -295,7 +229,7 @@ index 86f4cbd434e809b0f0b61c569210b0ae40970095..57e247666c64f0a3e35245507e40984f
        normalized.endsWith(".key")
      )
 diff --git a/packages/opencode/src/permission/reviewer/policy/policy.md b/packages/opencode/src/permission/reviewer/policy/policy.md
-index 29069960fed7df49567896c4a252f57806133ad1..1e7e4d7c528aacad85c1e2d46fc117d8fbc12837 100644
+index 2906996..1e7e4d7 100644
 --- a/packages/opencode/src/permission/reviewer/policy/policy.md
 +++ b/packages/opencode/src/permission/reviewer/policy/policy.md
 @@ -1,6 +1,6 @@
@@ -307,40 +241,42 @@ index 29069960fed7df49567896c4a252f57806133ad1..1e7e4d7c528aacad85c1e2d46fc117d8
  - Require explicit user authorization for irreversible VCS operations such as `git commit`, `git push`, force push, hard reset, clean, branch deletion, or history rewrite.
  - Require explicit user authorization for deleting files or directories, package installation, changing permissions/ownership, privileged execution, remote transfer, and network publishing.
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index 6e4793281e64df55e273c72f5814856ae0ce5762..f35f26437c5cbae18c9c3d7c16fa47b3c571a256 100644
+index bf88b02..e93a35a 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -56,10 +56,8 @@ export const layer = Layer.effect(
+@@ -1,3 +1,4 @@
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
+ import { Config } from "@/config/config"
+ import { Provider } from "@/provider/provider"
+@@ -62,9 +63,9 @@ export const layer = Layer.effect(
      const review: Interface["review"] = (input) => Effect.gen(function* () {
        const cfg = yield* config.get()
        const permission = cfg.permission
--      // The reviewer is opt-in. When the config still names the user as reviewer,
--      // surface a typed disabled signal so PermissionAuto can route to the normal
--      // user prompt instead of treating the absence as an execution failure.
+-      // #198：approvals_reviewer 非 auto_review 时 reviewer 已禁用——回退到用户审批
+-      // #198：禁用检查在构建请求前——避免不必要地加载策略和 transcript
 -      if (permission?.approvals_reviewer !== "auto_review") return yield* new ReviewerDisabled()
++      // #203：reviewerEnabled 统一判定——显式 user 禁用，显式 auto_review 启用，无配置时原生 Auto 隐式启用
 +      if (!reviewerEnabled(permission, input.metadata)) return yield* new ReviewerDisabled()
 +      const autoReview = permission?.auto_review
  
        const run = Effect.gen(function* () {
          const request = new ReviewerRequest({
-@@ -68,7 +66,7 @@ export const layer = Layer.effect(
+@@ -73,7 +74,7 @@ export const layer = Layer.effect(
            metadata: { ...input.metadata },
            precheck: input.precheck,
          })
 -        const tenantPolicy = yield* loadTenantPolicy(permission.auto_review)
 +        const tenantPolicy = yield* loadTenantPolicy(autoReview)
-         // Transcript collection is best-effort and bounded. Missing sessions or
-         // storage issues should not block the permission path; the reviewer can
-         // still decide from the planned action and policy, or deny via policy.
-@@ -84,13 +82,13 @@ export const layer = Layer.effect(
-           system: PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy),
-           userItems: PermissionReviewerPrompt.buildUserPromptItems(transcript, request, input.precheck.reason),
+         // #198：transcript 从 session 消息提取——有 sessionID 时取最近 40 条，失败时返回空 transcript 而非中断
+         // #198：transcript 失败不阻断审查——空 transcript 仍允许 reviewer 基于 planned action 和策略做决策
+         const transcript = input.sessionID
+@@ -90,10 +91,10 @@ export const layer = Layer.effect(
          })
+         // #198：模型解析——配置了 auto_review.model 时用指定模型，否则用 default + small model 组合
+         // #198：优先使用 small model——reviewer 不需高创造力，小模型更快更省成本且足以做安全判定
 -        const model = permission.auto_review?.model
 +        const model = autoReview?.model
-           // User-specified reviewer models use the same provider/model parser as
-           // normal agent config so aliases and provider validation stay in one
-           // place. A bad model fails closed unless fallback=user is configured.
            ? yield* provider.getModel(
 -              Provider.parseModel(permission.auto_review.model).providerID,
 -              Provider.parseModel(permission.auto_review.model).modelID,
@@ -349,139 +285,133 @@ index 6e4793281e64df55e273c72f5814856ae0ce5762..f35f26437c5cbae18c9c3d7c16fa47b3
              )
            : yield* Effect.gen(function* () {
                const current = yield* provider.defaultModel()
-@@ -111,7 +109,7 @@ export const layer = Layer.effect(
-             // Timeout is a security boundary: if the reviewer cannot complete in
-             // time, the tool call must not execute unless explicit user fallback
-             // is configured below.
+@@ -112,7 +113,7 @@ export const layer = Layer.effect(
+           // #198：超时控制——默认 90 秒，超时后返回 ReviewerTimedOut 而非等待不确定的 provider 响应
+           // #198：90 秒上限覆盖大多数 provider 响应——超过此时间通常表示 provider 故障而非正常审查
+           Effect.timeoutOrElse({
 -            duration: `${permission.auto_review?.timeout_ms ?? 90_000} millis`,
 +            duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
              orElse: () => Effect.fail(new ReviewerTimedOut()),
            }),
-           Effect.mapError((error) => (isReviewerError(error) ? error : new ReviewerRunError({ reason: errorMessage(error) }))),
-@@ -131,7 +129,7 @@ export const layer = Layer.effect(
-           // `fallback: "user"` is deliberately narrow: disabled reviewer already
-           // means normal user routing, while all other failures become an explicit
-           // fallback signal for PermissionAuto. Default behavior is fail-closed.
+           // #198：mapError 将非 reviewer 错误包装为 RunError——provider/schema 错误统一为可处理的 fail-closed 信号
+@@ -132,7 +133,7 @@ export const layer = Layer.effect(
+       // #198：Disabled 保持原样——服务禁用是配置决策，不应被 fallback 策略覆盖为其他错误类型
+       return yield* run.pipe(
+         Effect.catch((error: unknown) =>
 -          permission.auto_review?.fallback === "user" && !(error instanceof ReviewerDisabled)
 +          autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)
              ? Effect.fail(new ReviewerFallbackToUser({ reason: errorMessage(error) }))
              : Effect.fail(error),
          ),
-@@ -158,6 +156,15 @@ function isReviewerError(error: unknown): error is Error {
+@@ -158,6 +159,14 @@ function isReviewerError(error: unknown): error is Error {
    return error instanceof ReviewerTimedOut || error instanceof ReviewerRunError
  }
  
-+function reviewerEnabled(permission: Config.Info["permission"], metadata: Readonly<Record<string, unknown>>) {
-+  // 显式配置优先：`user` 保留人工审批，`auto_review` 对所有 auto 规则启用 reviewer。
-+  // 没有全局配置时，原生 Auto agent 仍应隐式启用 reviewer；否则选择 Auto
-+  // 只会把 cautious 命令降级成普通 ask，用户点允许后敏感 shell 仍会执行。
++// #203：reviewer 启用判定——显式配置优先：user 保留人工审批，auto_review 对所有 auto 规则启用。
++// #203：无全局配置时原生 Auto agent 隐式启用 reviewer；否则选 Auto 只会把 cautious 降级成普通 ask
++function reviewerEnabled(permission: ConfigPermissionV1.Info | undefined, metadata: Readonly<Record<string, unknown>>) {
 +  if (permission?.approvals_reviewer === "user") return false
 +  if (permission?.approvals_reviewer === "auto_review") return true
 +  return metadata.agent === "Auto"
 +}
 +
+ // #198：提取错误消息——provider/model 错误在 reason 中暴露用于诊断，但 AutoDeniedError 仍阻止鼓励绕过策略的重试建议
  function errorMessage(error: unknown) {
    if (error instanceof Error) return error.message
-   if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message
-@@ -187,4 +194,10 @@ export const defaultLayer = layer.pipe(
-   Layer.provide(Provider.defaultLayer),
+@@ -189,6 +198,11 @@ export const defaultLayer = layer.pipe(
+   Layer.provide(LayerNode.compile(Provider.node)),
  )
  
-+// Permission.defaultLayer consumes this bundled reviewer layer before building
-+// Permission.Service. `Layer.suspend` preserves the historical cycle boundary:
-+// Session imports Permission types, so Session.defaultLayer must not be
-+// dereferenced while this module is initializing.
-+export const defaultLayerWithSession = Layer.suspend(() => defaultLayer.pipe(Layer.provide(Session.defaultLayer)))
++// #203：Permission.defaultLayer 消费此 bundled reviewer 层来构建 Permission.Service。
++// #203：Layer.suspend 保留历史循环边界：Session 导入 Permission 类型，故 Session.defaultLayer
++// #203：不能在本模块初始化期间被解引用
++export const defaultLayerWithSession = Layer.suspend(() => defaultLayer.pipe(Layer.provide(LayerNode.compile(Session.node))))
 +
- export * as PermissionReviewer from "./service"
+ // #198：node deps 包含 Config/Provider/Session——reviewer layer yield 三个 service，Session 不导入 Permission 故无循环依赖
+ export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node] })
+ 
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 6a27f925e4b115f75c35380c4f8a3ad47be8d22e..d60bc3f651bf316f21402b8f6abeb36bdbcd79f1 100644
+index d6dc3ee..fe8f982 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -47,10 +47,12 @@ const FILES = new Set([
+@@ -92,10 +92,11 @@ const FILES = new Set([
    "chmod",
    "chown",
    "cat",
 -  // Leave PowerShell aliases out for now. Common ones like cat/cp/mv/rm/mkdir
 -  // already hit the entries above, and alias normalization should happen in one
 -  // place later so we do not risk double-prompting.
-+  // Only include PowerShell names that expose new path effects. Aliases already
-+  // covered above stay there, while gci is needed so .ssh listings hit the same
-+  // external-directory and bash gates as Get-ChildItem.
++  // #203：仅纳入暴露新路径效果的 PowerShell 名称——已覆盖的别名留在上面，gci 需单独纳入
++  // #203：使 .ssh 列举与 Get-ChildItem 走相同的 external-directory/bash 门禁
    "get-content",
 +  "get-childitem",
 +  "gci",
    "set-content",
    "add-content",
    "copy-item",
-@@ -312,7 +314,16 @@ const ask = Effect.fn("ShellTool.ask")(function* (
-       permission: "external_directory",
-       patterns: globs,
-       always: globs,
--      metadata: {},
-+      // Auto 模式下，项目外路径访问不能先退回普通 ask；把同一次 shell
-+      // 命令证据传给 permission 层，让 external_directory 能做 deterministic
-+      // 预审，真正的 reviewer/user 决策仍由后续 bash 权限单点处理。
-+      metadata: {
-+        action_kind: "shell",
-+        command: metadata.command,
-+        cwd: metadata.cwd,
-+        shell: metadata.shell,
-+        agent: ctx.agent,
-+      },
-     })
-   }
- 
-@@ -330,6 +341,7 @@ const ask = Effect.fn("ShellTool.ask")(function* (
-       command: metadata.command,
-       cwd: metadata.cwd,
-       shell: metadata.shell,
+@@ -332,6 +333,7 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
+       command: input.command,
+       cwd: input.cwd,
+       shell: input.shell,
++      agent: ctx.agent,
+         directories,
+         patterns: globs,
+       },
+@@ -344,7 +346,11 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
+     patterns: Array.from(scan.patterns),
+     always: Array.from(scan.always),
+     metadata: {
++      action_kind: "shell",
+       command: input.command,
++      cwd: input.cwd,
++      shell: input.shell,
 +      agent: ctx.agent,
      },
    })
  })
 diff --git a/packages/opencode/test/agent/agent.test.ts b/packages/opencode/test/agent/agent.test.ts
-index 85555cc96ddba2b137698c810e73dc4708071a7f..6fb14d020f4fb081243c14de10724e0116d77b36 100644
+index 7d5b704..ba711ff 100644
 --- a/packages/opencode/test/agent/agent.test.ts
 +++ b/packages/opencode/test/agent/agent.test.ts
-@@ -96,7 +96,7 @@ it.instance("interactive agent keeps existing ask gates for command execution",
+@@ -90,7 +90,7 @@ it.instance("interactive agent keeps existing ask gates for command execution",
+ )
  
- // [local-smark] Auto Agent 行为测试开始
- // 这个行为级测试只固定 Auto 的公开权限结果，不检查内部规则顺序或 helper 名。
--// 后续可以重构 auto 分支实现，但必须维持“build-like + bash:auto”的用户契约。
-+// 后续可以重构 auto 分支实现，但必须维持“build-like + shell:auto”的用户契约。
+ // #201：Auto 行为级测试——只固定公开权限结果，不检查内部规则顺序或 helper 名
+-// #201：后续可重构 auto 分支实现，但必须维持 "build-like + bash:auto" 的用户契约
++// #203：后续可重构 auto 分支实现，但必须维持 "build-like + shell:auto" 的用户契约
  it.instance("Auto agent routes shell through auto while preserving build-like permissions", () =>
    Effect.gen(function* () {
      const auto = yield* load((svc) => svc.get("Auto"))
-@@ -104,9 +104,10 @@ it.instance("Auto agent routes shell through auto while preserving build-like pe
+@@ -98,8 +98,10 @@ it.instance("Auto agent routes shell through auto while preserving build-like pe
      expect(auto?.mode).toBe("primary")
      expect(auto?.native).toBe(true)
  
--    // Auto 只改变 shell 权限；其余权限保持 build-like 行为，避免把 edit、task
-+    // Auto 开发期只接管 shell；edit 仍继承 build 的 allow，避免把 task、edit
-     // 或 notebook 执行也引入 auto 分支从而扩大本次切入面。
+-    // #201：Auto 只改变 shell 权限；其余权限保持 build-like，避免把 edit/task/notebook 引入 auto
++    // #203：Auto 开发期只接管 shell；edit 仍继承 build 的 allow，避免把 task、edit
++    // #203：或 notebook 执行也引入 auto 分支从而扩大本次切入面
      expect(evalPerm(auto, "bash")).toBe("auto")
 +    expect(evalPerm(auto, "external_directory")).toBe("auto")
      expect(evalPerm(auto, "edit")).toBe("allow")
      expect(evalPerm(auto, "task")).toBe("allow")
      expect(evalPerm(auto, "vscode_notebook_run")).toBe("allow")
-@@ -118,7 +119,7 @@ it.instance("Auto agent routes shell through auto while preserving build-like pe
+@@ -111,7 +113,7 @@ it.instance("Auto agent routes shell through auto while preserving build-like pe
      expect(evalPerm(auto, "plan_enter")).toBe("allow")
-     expect(evalPerm(auto, "repo_clone")).toBe("deny")
-     expect(evalPerm(auto, "repo_overview")).toBe("deny")
+     expect(evalPerm(auto, "repo_clone")).toBe("allow")
+     expect(evalPerm(auto, "repo_overview")).toBe("allow")
 -    expect(Permission.evaluate("external_directory", "/some/other/path", auto!.permission).action).toBe("ask")
 +    expect(Permission.evaluate("external_directory", "/some/other/path", auto!.permission).action).toBe("auto")
      expect(Permission.evaluate("external_directory", Truncate.GLOB, auto!.permission).action).toBe("allow")
    }),
  )
 diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
-index 993032c607a8f20ee3db8885a04bb15a30bbf8dc..7ef3caa6aa87dd908b8baf6698de78b1de5c6614 100644
+index 4c97382..7a7db9e 100644
 --- a/packages/opencode/test/permission/auto.test.ts
 +++ b/packages/opencode/test/permission/auto.test.ts
-@@ -14,6 +14,18 @@ const bash = (command: string, reviewer?: PermissionAuto.Reviewer) =>
+@@ -14,6 +14,19 @@ const bash = (command: string, reviewer?: PermissionAuto.Reviewer) =>
      ),
    )
  
++// #203：shell-origin external_directory 辅助——复用同一条 shell 命令证据做确定性预审
 +const shellExternalDirectory = (command: string, reviewer?: PermissionAuto.Reviewer) =>
 +  Effect.runPromise(
 +    PermissionAuto.evaluate(
@@ -495,13 +425,15 @@ index 993032c607a8f20ee3db8885a04bb15a30bbf8dc..7ef3caa6aa87dd908b8baf6698de78b1
 +  )
 +
  describe("permission auto routing", () => {
+   // #202：验证 precheck safe 路径——只读命令不经过 reviewer，source 标记为 precheck
    test("allows safe commands after precheck without reviewer load", async () => {
-     await expect(bash("git status --porcelain")).resolves.toMatchObject({ action: "allow", source: "precheck" })
-@@ -51,7 +63,108 @@ describe("permission auto routing", () => {
+@@ -54,8 +67,113 @@ describe("permission auto routing", () => {
      ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
    })
  
+-  // #202：验证 general 层级路由——未知命令在非 strict 下回退用户审批，不占用 reviewer 配额
 -  test("routes general decisions to user approval without reviewer load", async () => {
++  // #203：PowerShell 用户目录凭据读取走 cautious → reviewer，防止 $env:USERPROFILE 展开绕过敏感路径检测
 +  test("routes PowerShell user-profile credential reads to reviewer", async () => {
 +    let called = false
 +    await expect(
@@ -522,6 +454,7 @@ index 993032c607a8f20ee3db8885a04bb15a30bbf8dc..7ef3caa6aa87dd908b8baf6698de78b1
 +    expect(called).toBe(true)
 +  })
 +
++  // #203：PowerShell SSH 私钥读取/列举走 cautious → reviewer，覆盖 id_rsa/id_ed25519/id_ecdsa 与目录列举
 +  test("routes PowerShell SSH private key access to reviewer", async () => {
 +    let called = false
 +    const reviewer = {
@@ -550,6 +483,7 @@ index 993032c607a8f20ee3db8885a04bb15a30bbf8dc..7ef3caa6aa87dd908b8baf6698de78b1
 +    expect(called).toBe(true)
 +  })
 +
++  // #203：shell-origin external_directory 复用命令证据——safe 放行，cautious 也放行给 bash auto，dangerous 拒绝
 +  test("uses shell evidence for external directory auto routing", async () => {
 +    await expect(shellExternalDirectory("git status --porcelain")).resolves.toMatchObject({ action: "allow", source: "precheck" })
 +
@@ -574,6 +508,7 @@ index 993032c607a8f20ee3db8885a04bb15a30bbf8dc..7ef3caa6aa87dd908b8baf6698de78b1
 +    await expect(shellExternalDirectory("rm -rf /")).resolves.toMatchObject({ action: "deny", source: "precheck" })
 +  })
 +
++  // #203：非 shell external_directory 缺少命令证据，走既有人工审批，不进入 reviewer
 +  test("keeps non-shell external directory auto on the user approval path", async () => {
 +    let called = false
 +    await expect(
@@ -603,11 +538,12 @@ index 993032c607a8f20ee3db8885a04bb15a30bbf8dc..7ef3caa6aa87dd908b8baf6698de78b1
 +    expect(called).toBe(false)
 +  })
 +
++  // #203：开发期 shell general 直接 allow——Auto shell 不弹人工确认；未命中 dangerous/cautious 的命令先放行
 +  test("allows shell general decisions during development without reviewer load", async () => {
      let called = false
      await expect(
        bash("unknown-tool --maybe-read", {
-@@ -67,7 +180,7 @@ describe("permission auto routing", () => {
+@@ -71,7 +189,7 @@ describe("permission auto routing", () => {
              }
            }),
        }),
@@ -616,10 +552,11 @@ index 993032c607a8f20ee3db8885a04bb15a30bbf8dc..7ef3caa6aa87dd908b8baf6698de78b1
      expect(called).toBe(false)
    })
  
-@@ -75,6 +188,31 @@ describe("permission auto routing", () => {
+@@ -80,6 +198,33 @@ describe("permission auto routing", () => {
      await expect(bash("git add .")).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
    })
  
++  // #203：原生 Auto reviewer 缺失时 fail closed——cautious 不降级为可点击 ask，防止点 Allow 暴露敏感 shell 输出
 +  test("fails closed for native Auto when reviewer is not wired", async () => {
 +    await expect(
 +      Effect.runPromise(
@@ -632,6 +569,7 @@ index 993032c607a8f20ee3db8885a04bb15a30bbf8dc..7ef3caa6aa87dd908b8baf6698de78b1
 +    ).resolves.toMatchObject({ action: "deny", source: "reviewer" })
 +  })
 +
++  // #203：显式 user reviewer 配置强于原生 Auto fail-closed——保留用户审批作为 review 边界
 +  test("honors explicit user reviewer configuration for native Auto", async () => {
 +    await expect(
 +      Effect.runPromise(
@@ -645,89 +583,19 @@ index 993032c607a8f20ee3db8885a04bb15a30bbf8dc..7ef3caa6aa87dd908b8baf6698de78b1
 +    ).resolves.toMatchObject({ action: "ask", source: "reviewer_unavailable" })
 +  })
 +
+   // #202：验证 strict 模式——precheck safe 仍路由到 reviewer，level 透传为 safe，reason 标注 strict auto review required
    test("strict mode remains an explicit reviewer override for safe commands", async () => {
      let called = false
-     await expect(
 diff --git a/packages/opencode/test/permission/next.test.ts b/packages/opencode/test/permission/next.test.ts
-index 2512cf667bdce3744644ffc6537251f48059c148..7cc371ac34b7a3fb038f251cd1bb362af811a8f5 100644
+index d973b5d..33288d0 100644
 --- a/packages/opencode/test/permission/next.test.ts
 +++ b/packages/opencode/test/permission/next.test.ts
-@@ -23,40 +23,42 @@ const env = Layer.mergeAll(
-   CrossSpawnSpawner.defaultLayer,
-   InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
- )
--// Separate layer with a deterministic reviewer and real session cache exercises
--// the auto integration path through Permission.ask without a live provider model.
- let reviewedCalls = 0
- let nonDenialCalls = 0
-+const reviewerLayer = Layer.succeed(
-+  PermissionReviewer.Service,
-+  PermissionReviewer.Service.of({
-+    review: () =>
-+      Effect.sync(() => {
-+        reviewedCalls++
-+        return {
-+          action: "allow" as const,
-+          reason: "reviewer approved the auto-controlled part",
-+          reviewID: "review_mixed",
-+          risk_level: "medium" as const,
-+          user_authorization: "medium" as const,
-+        }
-+      }),
-+  }),
-+)
-+const circuitLayer = Layer.succeed(
-+  PermissionCircuitBreaker.Service,
-+  PermissionCircuitBreaker.Service.of({
-+    recordDenial: () => Effect.succeed({ kind: "continue" as const, consecutive: 1, recent: 1 }),
-+    recordNonDenial: () =>
-+      Effect.sync(() => {
-+        nonDenialCalls++
-+      }),
-+  }),
-+)
- const reviewedEnv = Layer.mergeAll(
--  Permission.layer.pipe(Layer.provide(bus)),
--  PermissionSessionCache.layer,
--  bus,
--  Layer.succeed(
--    PermissionReviewer.Service,
--    PermissionReviewer.Service.of({
--      review: () =>
--        Effect.sync(() => {
--          reviewedCalls++
--          return {
--            action: "allow" as const,
--            reason: "reviewer approved the auto-controlled part",
--            reviewID: "review_mixed",
--            risk_level: "medium" as const,
--            user_authorization: "medium" as const,
--          }
--        }),
--    }),
--  ),
--  Layer.succeed(
--    PermissionCircuitBreaker.Service,
--    PermissionCircuitBreaker.Service.of({
--      recordDenial: () => Effect.succeed({ kind: "continue" as const, consecutive: 1, recent: 1 }),
--      recordNonDenial: () =>
--        Effect.sync(() => {
--          nonDenialCalls++
--        }),
--    }),
-+  Permission.layer.pipe(
-+    Layer.provide(bus),
-+    Layer.provide(PermissionSessionCache.layer),
-+    Layer.provide(reviewerLayer),
-+    Layer.provide(circuitLayer),
-   ),
-+  bus,
-   CrossSpawnSpawner.defaultLayer,
-   InstanceStore.defaultLayer.pipe(Layer.provide(noopBootstrap)),
- )
-@@ -701,21 +703,19 @@ it.instance(
+@@ -714,23 +714,21 @@ it.instance(
+   { git: true },
  )
  
+-// #199：验证 precheck 对非只读命令回退到 ask，不静默放行未知风险。
++// #203：开发期 shell general 直接 allow——echo $HOME 不再弹人工确认，无 pending 请求
  it.instance(
 -  "ask - auto falls back to user approval for opaque bash commands",
 +  "ask - auto allows opaque bash commands during development without pending user approval",
@@ -751,9 +619,12 @@ index 2512cf667bdce3744644ffc6537251f48059c148..7cc371ac34b7a3fb038f251cd1bb362a
      }),
    { git: true },
  )
-@@ -943,28 +943,25 @@ reviewed.instance(
+@@ -973,27 +971,25 @@ reviewed.instance(
+   { git: true },
  )
  
+-// #202：edit/apply_patch 等非 shell auto 请求预审层级为 general，非 strict 下回退用户审批不调用 reviewer
++// #203：edit/apply_patch 等非 shell auto 请求预审层级为 general，开发期交给 reviewer 单点判断
  reviewed.instance(
 -  "ask - auto routes non-shell general tools to user approval without reviewer load",
 +  "ask - auto routes non-shell general tools to reviewer without pending user approval",
@@ -771,80 +642,29 @@ index 2512cf667bdce3744644ffc6537251f48059c148..7cc371ac34b7a3fb038f251cd1bb362a
 -      }).pipe(Effect.forkScoped)
 +      })
  
-       // [local-smark] general 非 shell auto 路由回归开始
--      // 当前阶段只让 cautious 请求进入 LLM reviewer。edit/apply_patch 这类非 shell
--      // auto 请求没有 bash 级语义证据，预审层级是 general，因此应保持既有用户
--      // 审批路径，不能为了缓存 diff 上下文而提前消耗 reviewer 调用。
+-      // #202：当前阶段只让 cautious 请求进入 LLM reviewer。edit 这类非 shell auto 请求
+-      // #202：没有 bash 级语义证据，预审层级是 general，应保持用户审批路径，不消耗 reviewer 调用
 -      expect(yield* waitForPending(1)).toHaveLength(1)
 -      expect(reviewedCalls).toBe(0)
-+      // 开发期要求 edit/apply_patch 这类非 shell auto 请求不要回到普通 ask；
-+      // 它们没有 bash 级语义证据，预审层级是 general，因此交给 reviewer 单点判断。
-+      expect(reviewedCalls).toBe(1)
-+      expect(yield* list()).toHaveLength(0)
-       // [local-smark] general 非 shell auto 路由回归结束
 -      yield* rejectAll()
 -      yield* Fiber.await(fiber)
++      // #203：开发期要求 edit 这类非 shell auto 请求不回到普通 ask；预审层级 general，
++      // #203：交给 reviewer 单点判断，不产生 pending 用户审批
++      expect(reviewedCalls).toBe(1)
++      expect(yield* list()).toHaveLength(0)
      }),
    { git: true },
  )
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index 753240dae502f1d98d821861218ffbf3a52cec37..5a7dd4342d08fe645bef3d52e4af3bdb6a89ad49 100644
+index 0040f99..2d1f8c2 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -3,6 +3,8 @@ import { Cause, Effect, Exit, Layer } from "effect"
- import type * as Scope from "effect/Scope"
- import os from "os"
- import path from "path"
-+import * as fs from "node:fs/promises"
-+import { Bus } from "@/bus"
- import { Config } from "@/config/config"
- import { Shell } from "../../src/shell/shell"
- import { ShellTool } from "../../src/tool/shell"
-@@ -18,6 +20,8 @@ import { Plugin } from "../../src/plugin"
- import { testEffect } from "../lib/effect"
- import { Tool } from "@/tool/tool"
- import { RuntimeFlags } from "@/effect/runtime-flags"
-+import { PermissionReviewer } from "@/permission/reviewer/service"
-+import { Permission as PermissionService } from "@/permission"
- 
- const shellLayer = Layer.mergeAll(
-   CrossSpawnSpawner.defaultLayer,
-@@ -28,7 +32,29 @@ const shellLayer = Layer.mergeAll(
-   Agent.defaultLayer,
-   RuntimeFlags.defaultLayer,
- )
-+let reviewedCalls = 0
-+const shellReviewerLayer = Layer.succeed(
-+  PermissionReviewer.Service,
-+  PermissionReviewer.Service.of({
-+    review: () =>
-+      Effect.sync(() => {
-+        reviewedCalls++
-+        return {
-+          action: "deny" as const,
-+          reason: "reviewer rejected sensitive shell access",
-+          reviewID: "review_shell_sensitive",
-+          risk_level: "high" as const,
-+          user_authorization: "unknown" as const,
-+        }
-+      }),
-+  }),
-+)
-+const permissionShellLayer = Layer.mergeAll(
-+  shellLayer,
-+  PermissionService.layer.pipe(Layer.provide(Bus.layer), Layer.provide(shellReviewerLayer)),
-+)
- const it = testEffect(shellLayer)
-+const reviewed = testEffect(permissionShellLayer)
- type ShellTestServices =
-   | (typeof shellLayer extends Layer.Layer<infer ROut, infer _E, infer _RIn> ? ROut : never)
-   | Scope.Scope
-@@ -413,6 +439,15 @@ describe("tool.shell permissions", () => {
+@@ -506,6 +506,15 @@ each("asks for external_directory permission for wildcard external paths", () =>
          const extDirReq = requests.find((r) => r.permission === "external_directory")
          expect(extDirReq).toBeDefined()
          expect(extDirReq!.patterns).toContain(want)
-+        // Auto 模式下 external_directory 需要使用同一次 shell 命令的证据进行
-+        // deterministic precheck；否则项目外路径会先退回普通 ask，绕开 bash auto。
++        // #203：Auto 模式下 external_directory 需使用同一次 shell 命令证据做 deterministic
++        // #203：预审；否则项目外路径会先退回普通 ask，绕开 bash auto 路由
 +        expect(extDirReq!.metadata).toMatchObject({
 +          action_kind: "shell",
 +          command: `cat ${file}`,
@@ -855,150 +675,3 @@ index 753240dae502f1d98d821861218ffbf3a52cec37..5a7dd4342d08fe645bef3d52e4af3bdb
        }),
      ),
    )
-@@ -562,6 +597,146 @@ describe("tool.shell permissions", () => {
-       )
-     }
- 
-+    for (const item of ps) {
-+      it.live(`asks for bash permission after PowerShell SSH private key path gate [${item.label}]`, () =>
-+        withShell(
-+          item,
-+          Effect.gen(function* () {
-+            const fakeHome = yield* tmpdirScoped()
-+            yield* Effect.promise(() => fs.mkdir(path.join(fakeHome, ".ssh"), { recursive: true }))
-+            yield* Effect.promise(() => Bun.write(path.join(fakeHome, ".ssh", "id_rsa"), "fake private key"))
-+            yield* Effect.promise(() => Bun.write(path.join(fakeHome, ".ssh", "id_ed25519"), "fake private key"))
-+            yield* Effect.promise(() => Bun.write(path.join(fakeHome, ".ssh", "id_ecdsa"), "fake private key"))
-+            yield* Effect.acquireUseRelease(
-+              Effect.sync(() => {
-+                const prev = process.env.USERPROFILE
-+                process.env.USERPROFILE = fakeHome
-+                return prev
-+              }),
-+              () =>
-+                runIn(
-+                  projectRoot,
-+                  Effect.gen(function* () {
-+                    const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
-+                    yield* run(
-+                      {
-+                        command: String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa" -ErrorAction SilentlyContinue; Get-Content -Path "$env:USERPROFILE\.ssh\id_ed25519" -ErrorAction SilentlyContinue; Get-Content -Path "$env:USERPROFILE\.ssh\id_ecdsa" -ErrorAction SilentlyContinue`,
-+                        description: "Read SSH private keys",
-+                      },
-+                      capture(requests),
-+                    )
-+
-+                    const extDirReq = requests.find((r) => r.permission === "external_directory")
-+                    const bashReq = requests.find((r) => r.permission === "bash")
-+                    expect(extDirReq).toBeDefined()
-+                    expect(extDirReq!.metadata).toMatchObject({ action_kind: "shell", agent: "build" })
-+                    expect(extDirReq!.patterns).toContain(glob(path.join(fakeHome, ".ssh", "*")))
-+                    expect(bashReq).toBeDefined()
-+                    expect(bashReq!.metadata).toMatchObject({ action_kind: "shell", agent: "build" })
-+                    expect(bashReq!.patterns.some((pattern) => pattern.includes("id_rsa"))).toBe(true)
-+                  }),
-+                ),
-+              (prev) =>
-+                Effect.sync(() => {
-+                  if (prev === undefined) delete process.env.USERPROFILE
-+                  else process.env.USERPROFILE = prev
-+                }),
-+            )
-+          }),
-+        ),
-+      )
-+    }
-+
-+    for (const item of ps) {
-+      it.live(`asks for bash permission for PowerShell SSH directory listing [${item.label}]`, () =>
-+        withShell(
-+          item,
-+          runIn(
-+            projectRoot,
-+            Effect.gen(function* () {
-+              const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
-+              yield* run(
-+                {
-+                  command: String.raw`Get-ChildItem -Path "$env:USERPROFILE\.ssh" -Force -ErrorAction SilentlyContinue`,
-+                  description: "List SSH directory contents",
-+                },
-+                capture(requests),
-+              )
-+              const extDirReq = requests.find((r) => r.permission === "external_directory")
-+              const bashReq = requests.find((r) => r.permission === "bash")
-+              expect(extDirReq).toBeDefined()
-+              expect(bashReq).toBeDefined()
-+              expect(bashReq!.patterns.some((pattern) => pattern.includes("Get-ChildItem"))).toBe(true)
-+            }),
-+          ),
-+        ),
-+      )
-+    }
-+
-+    for (const item of ps) {
-+      reviewed.live(`routes Auto PowerShell SSH private key access through reviewer [${item.label}]`, () =>
-+        withShell(
-+          item,
-+          Effect.gen(function* () {
-+            const fakeHome = yield* tmpdirScoped()
-+            yield* Effect.promise(() => fs.mkdir(path.join(fakeHome, ".ssh"), { recursive: true }))
-+            yield* Effect.promise(() => Bun.write(path.join(fakeHome, ".ssh", "id_rsa"), "fake private key"))
-+            const permission = yield* PermissionService.Service
-+            const ruleset: PermissionService.Ruleset = [
-+              { permission: "external_directory", pattern: "*", action: "auto" },
-+              { permission: "bash", pattern: "*", action: "auto" },
-+            ]
-+
-+            yield* Effect.acquireUseRelease(
-+              Effect.sync(() => {
-+                const prev = process.env.USERPROFILE
-+                process.env.USERPROFILE = fakeHome
-+                reviewedCalls = 0
-+                return prev
-+              }),
-+              () =>
-+                runIn(
-+                  projectRoot,
-+                  Effect.gen(function* () {
-+                    const err = yield* fail(
-+                      {
-+                        command: String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa" -ErrorAction SilentlyContinue`,
-+                        description: "Read SSH private key",
-+                      },
-+                      {
-+                        ...ctx,
-+                        agent: "Auto",
-+                        ask: (req) =>
-+                          permission.ask({
-+                            ...req,
-+                            sessionID: ctx.sessionID,
-+                            metadata: { ...req.metadata, agent: "Auto" },
-+                            ruleset,
-+                          }).pipe(Effect.orDie),
-+                      },
-+                    ).pipe(
-+                      Effect.timeoutOrElse({
-+                        duration: "2 seconds",
-+                        orElse: () => Effect.fail(new Error("timed out waiting for reviewer denial")),
-+                      }),
-+                    )
-+
-+                    expect(err).toBeInstanceOf(PermissionService.AutoDeniedError)
-+                    expect(reviewedCalls).toBe(1)
-+                    expect(yield* permission.list()).toHaveLength(0)
-+                  }),
-+                ),
-+              (prev) =>
-+                Effect.sync(() => {
-+                  if (prev === undefined) delete process.env.USERPROFILE
-+                  else process.env.USERPROFILE = prev
-+                }),
-+            )
-+          }),
-+        ),
-+      )
-+    }
-+
-     for (const item of ps) {
-       it.live(`asks for external_directory permission for $PWD PowerShell paths [${item.label}]`, () =>
-         withShell(

@@ -4,52 +4,24 @@ Date: Sat, 9 May 2026 18:21:26 +0800
 Subject: [PATCH] =?UTF-8?q?feat(search):=20=E6=B7=BB=E5=8A=A0=E6=90=9C?=
  =?UTF-8?q?=E7=B4=A2=E6=9D=A1=E4=BB=B6=E5=8A=9F=E8=83=BD=EF=BC=8C=E6=94=AF?=
  =?UTF-8?q?=E6=8C=81=E9=80=9A=E8=BF=87=E6=A0=87=E9=A2=98=E6=88=96=E6=B6=88?=
- =?UTF-8?q?=E6=81=AF=E5=86=85=E5=AE=B9=E8=BF=87=E6=BB=A4=E4=BC=9A=E8=AF=9D?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/server/routes/instance/session.ts b/packages/opencode/src/server/routes/instance/session.ts
-index a3196cf1aced75f7999083b66ecbf9855ca5a7f4..4cf393b259f2df8874af90a0d2582cf3bdec370e 100644
---- a/packages/opencode/src/server/routes/instance/session.ts
-+++ b/packages/opencode/src/server/routes/instance/session.ts
-@@ -74,7 +74,7 @@ export const SessionRoutes = lazy(() =>
-             .number()
-             .optional()
-             .meta({ description: "Filter sessions updated on or after this timestamp (milliseconds since epoch)" }),
--          search: z.string().optional().meta({ description: "Filter sessions by title (case-insensitive)" }),
-+          search: z.string().optional().meta({ description: "Filter sessions by title or message content (case-insensitive)" }),
-           limit: z.coerce.number().optional().meta({ description: "Maximum number of sessions to return" }),
-         }),
-       ),
-diff --git a/packages/opencode/src/session/search.ts b/packages/opencode/src/session/search.ts
+diff --git a/packages/core/src/session/search.ts b/packages/core/src/session/search.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..22b5652f86a55f554904cf5dbec0d572fd61e069
+index 0000000000..56f85aa333
 --- /dev/null
-+++ b/packages/opencode/src/session/search.ts
-@@ -0,0 +1,44 @@
++++ b/packages/core/src/session/search.ts
+@@ -0,0 +1,34 @@
 +import { sql, type SQL } from "drizzle-orm"
-+import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./session.sql"
++import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./sql"
 +
-+/**
-+ * Build a SQL condition that searches sessions by title or message content.
-+ *
-+ * Search scope:
-+ * - session.title
-+ * - MessageV2 part data (PartTable.data), excluding hidden messages/parts
-+ * - V2 session message data (SessionMessageTable.data)
-+ *
-+ * Uses `instr(lower(...))` for case-insensitive exact substring matching,
-+ * avoiding SQLite LIKE's % / _ wildcard semantics.
-+ *
-+ * Returns undefined when search string is blank, preventing `instr(text, "")`
-+ * from matching every row.
-+ */
++// #121：会话搜索条件——标题或消息正文（非 LIKE 通配）
++// 范围：SessionTable.title + Part/Message JSON + SessionMessageTable.data
++// 空白 search 返回 undefined，避免 instr(text,"") 匹配全表
 +export function searchCondition(search: string): SQL | undefined {
 +  const needle = search.trim().toLowerCase()
 +  if (!needle) return
 +
++  // #121：instr(lower(...)) 做大小写无关子串匹配，规避 SQLite LIKE 的 %/_ 语义
 +  return sql`(
 +    instr(lower(${SessionTable.title}), ${needle}) > 0
 +    or exists (
@@ -73,21 +45,44 @@ index 0000000000000000000000000000000000000000..22b5652f86a55f554904cf5dbec0d572
 +    )
 +  )`
 +}
+diff --git a/packages/opencode/src/session/search.ts b/packages/opencode/src/session/search.ts
+new file mode 100644
+index 0000000000..c3fdcef430
+--- /dev/null
++++ b/packages/opencode/src/session/search.ts
+@@ -0,0 +1,2 @@
++// #121：实现位于 core，opencode 保留同名入口供本地 import
++export { searchCondition } from "@opencode-ai/core/session/search"
 diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
-index cd0bf70c0055e969c9d711de8322ed7a0dfce348..41087bb4a2a3aed5884fc4be7106f3468c012fe4 100644
+index 5539ea6064..7a4866fb85 100644
 --- a/packages/opencode/src/session/session.ts
 +++ b/packages/opencode/src/session/session.ts
-@@ -39,6 +39,7 @@ import { Global } from "@opencode-ai/core/global"
- import { Effect, Layer, Option, Context, Schema, Types } from "effect"
- import { zod } from "@/util/effect-zod"
- import { NonNegativeInt, optionalOmitUndefined, withStatics } from "@/util/schema"
-+import { searchCondition } from "./search"
- 
+@@ -45,6 +45,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
+ import { ModelV2 } from "@opencode-ai/core/model"
+ import { SessionMessage } from "@opencode-ai/schema/session-message"
  import { createDefaultTitle, isDefaultTitle } from "./title"
++import { searchCondition } from "./search"
+ // #113：兼容 Session.isDefaultTitle 导出名
+ export { isDefaultTitle }
  
-@@ -836,7 +837,8 @@ function* listByProject(
+@@ -554,7 +555,11 @@ const layer: Layer.Layer<
+       if (input?.roots) conditions.push(isNull(SessionTable.parent_id))
+       if (input?.start) conditions.push(gte(SessionTable.time_updated, input.start))
+       if (input?.cursor) conditions.push(lt(SessionTable.time_updated, input.cursor))
+-      if (input?.search) conditions.push(like(SessionTable.title, `%${input.search}%`))
++      // #121：全局列表——标题或消息内容
++      if (input?.search) {
++        const condition = searchCondition(input.search)
++        if (condition) conditions.push(condition)
++      }
+       if (!input?.archived) conditions.push(isNull(SessionTable.time_archived))
+ 
+       const query =
+@@ -976,8 +981,10 @@ function listByProject(
+   if (input.start) {
      conditions.push(gte(SessionTable.time_updated, input.start))
    }
++  // #121：项目列表——空白 search 不注入条件
    if (input.search) {
 -    conditions.push(like(SessionTable.title, `%${input.search}%`))
 +    const condition = searchCondition(input.search)
@@ -95,37 +90,28 @@ index cd0bf70c0055e969c9d711de8322ed7a0dfce348..41087bb4a2a3aed5884fc4be7106f346
    }
  
    const limit = input.limit ?? 100
-@@ -879,7 +881,8 @@ export function* listGlobal(input?: {
-     conditions.push(lt(SessionTable.time_updated, input.cursor))
-   }
-   if (input?.search) {
--    conditions.push(like(SessionTable.title, `%${input.search}%`))
-+    const condition = searchCondition(input.search)
-+    if (condition) conditions.push(condition)
-   }
-   if (!input?.archived) {
-     conditions.push(isNull(SessionTable.time_archived))
-diff --git a/packages/opencode/src/v2/session.ts b/packages/opencode/src/v2/session.ts
-index bb86f039b23090edd7b547a6aee934531c420d42..e23e296324885866e77defd1ce7f699999aa79b3 100644
---- a/packages/opencode/src/v2/session.ts
-+++ b/packages/opencode/src/v2/session.ts
-@@ -12,6 +12,7 @@ import { SessionEvent } from "./session-event"
- import { V2Schema } from "./schema"
- import { optionalOmitUndefined } from "@/util/schema"
- import { Modelv2 } from "./model"
-+import { searchCondition } from "@/session/search"
- 
- export const Delivery = Schema.Literals(["immediate", "deferred"]).annotate({
-   identifier: "Session.Delivery",
-@@ -164,7 +165,10 @@ export const layer = Layer.effect(
+diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
+index 2dabfb2d6f..a151154d1f 100644
+--- a/packages/core/src/session.ts
++++ b/packages/core/src/session.ts
+@@ -15,6 +15,7 @@ import { EventV2 } from "./event"
+ import { Database } from "./database/database"
+ import { SessionProjector } from "./session/projector"
+ import { SessionMessageTable, SessionTable } from "./session/sql"
++import { searchCondition } from "./session/search"
+ import { SessionSchema } from "./session/schema"
+ import { AbsolutePath, PositiveInt, RelativePath } from "./schema"
+ import { AgentV2 } from "./agent"
+@@ -274,7 +275,11 @@ const layer = Layer.effect(
+         if ("directory" in input) conditions.push(eq(SessionTable.directory, input.directory))
          if (input.workspaceID) conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
-         if (input.roots) conditions.push(isNull(SessionTable.parent_id))
-         if (input.start) conditions.push(gte(SessionTable.time_created, input.start))
+         if ("project" in input) conditions.push(eq(SessionTable.project_id, input.project))
 -        if (input.search) conditions.push(like(SessionTable.title, `%${input.search}%`))
++        // #121：V2 list 与 opencode 共用 searchCondition
 +        if (input.search) {
 +          const condition = searchCondition(input.search)
 +          if (condition) conditions.push(condition)
 +        }
-         if (input.cursor) {
+         if (input.anchor) {
            conditions.push(
              order === "asc"
