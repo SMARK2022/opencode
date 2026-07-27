@@ -4,136 +4,226 @@ Date: Mon, 11 May 2026 12:49:22 +0800
 Subject: [PATCH] =?UTF-8?q?feat(text-decoding):=20=E6=B7=BB=E5=8A=A0?=
  =?UTF-8?q?=E8=87=AA=E5=8A=A8=E6=96=87=E6=9C=AC=E8=A7=A3=E7=A0=81=E5=99=A8?=
  =?UTF-8?q?=EF=BC=8C=E6=94=AF=E6=8C=81UTF-8=E5=92=8CUTF-16LE=E7=BC=96?=
- =?UTF-8?q?=E7=A0=81=E7=9A=84=E6=A3=80=E6=B5=8B=E4=B8=8E=E8=A7=A3=E7=A0=81?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
+diff --git a/packages/opencode/src/util/text-decoding.ts b/packages/opencode/src/util/text-decoding.ts
+new file mode 100644
+index 0000000000..b1e14aba7f
+--- /dev/null
++++ b/packages/opencode/src/util/text-decoding.ts
+@@ -0,0 +1,139 @@
++// #126：自动文本解码支持的编码集合
++export type TextEncoding = "utf-8" | "utf-16le" | "utf-16be" | "gb18030"
++
++type Options = {
++  fallback?: TextEncoding
++}
++
++const SAMPLE_BYTES = 64
++const UTF16_NULL_RATIO = 0.2
++
++// Windows legacy console output is usually GBK-compatible; gb18030 is the widest native decoder label.
++// #126：无 BOM/高位特征时回落编码（Windows 默认 gb18030）
++function fallback(options?: Options): TextEncoding {
++  return options?.fallback ?? (process.platform === "win32" ? "gb18030" : "utf-8")
++}
++
++// BOMs are authoritative and avoid all heuristic guessing.
++// #126：优先读 BOM 判定编码
++function bom(bytes: Uint8Array): TextEncoding | undefined {
++  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return "utf-8"
++  if (bytes[0] === 0xff && bytes[1] === 0xfe) return "utf-16le"
++  if (bytes[0] === 0xfe && bytes[1] === 0xff) return "utf-16be"
++}
++
++// UTF-16 text without a BOM often exposes NUL bytes on every ASCII code unit.
++// #126：无 BOM 的 UTF-16 常有周期性 NUL 字节
++function utf16ByNulls(bytes: Uint8Array): TextEncoding | undefined {
++  const sample = bytes.subarray(0, Math.min(bytes.length, 4096))
++  let even = 0
++  let odd = 0
++  for (let i = 0; i < sample.length; i++) {
++    if (sample[i] !== 0) continue
++    if (i % 2 === 0) even++
++    else odd++
++  }
++  // #126：偶数位 NUL 比例偏高 → UTF-16BE 倾向
++  const evenSlots = Math.ceil(sample.length / 2)
++  // #126：奇数位 NUL 比例偏高 → UTF-16LE 倾向
++  const oddSlots = Math.floor(sample.length / 2)
++  // #126：奇数位主导且远强于偶数位
++  if (odd >= 2 && odd / oddSlots > UTF16_NULL_RATIO && odd > even * 3) return "utf-16le"
++  // #126：偶数位主导且远强于奇数位
++  if (even >= 2 && even / evenSlots > UTF16_NULL_RATIO && even > odd * 3) return "utf-16be"
++}
++
++// Strict UTF-8 differentiates real UTF-8 from Windows codepage bytes without replacement characters.
++// #126：fatal UTF-8 解码区分真 UTF-8 与 codepage 字节
++function isUtf8(bytes: Uint8Array, stream = false) {
++  try {
++    new TextDecoder("utf-8", { fatal: true }).decode(bytes, { stream })
++    return true
++  } catch {
++    return false
++  }
++}
++
++// #126：是否含非 ASCII 高位字节
++function hasHighBit(bytes: Uint8Array) {
++  return bytes.some((byte) => byte >= 0x80)
++}
++
++// #126：纯 ASCII 可安全按 UTF-8 透传而不提交编码
++function isAsciiText(bytes: Uint8Array) {
++  return bytes.every((byte) => byte > 0 && byte < 0x80)
++}
++
++// #126：合并缓冲块供探测
++function concat(chunks: Uint8Array[], size: number) {
++  const out = new Uint8Array(size)
++  let offset = 0
++  for (const chunk of chunks) {
++    out.set(chunk, offset)
++    offset += chunk.length
++  }
++  return out
++}
++
++// #126：综合 BOM/NUL/UTF-8/高位字节选择编码
++function choose(bytes: Uint8Array, options: Options | undefined, final: boolean): TextEncoding | undefined {
++  if (bytes.length === 0) return "utf-8"
++  const certain = bom(bytes) ?? utf16ByNulls(bytes)
++  if (certain) return certain
++  if (isUtf8(bytes, !final)) return !hasHighBit(bytes) || final || bytes.length >= SAMPLE_BYTES ? "utf-8" : undefined
++  return final || bytes.length >= SAMPLE_BYTES ? fallback(options) : undefined
++}
++
++// #126：一次性探测最终编码
++// #126：探测失败时回落 fallback（Windows 常用 gb18030）
++export function detectTextEncoding(bytes: Uint8Array, options?: Options): TextEncoding {
++  return choose(bytes, options, true) ?? "utf-8"
++}
++
++// #126：整段解码并返回文本与选用编码
++export function decodeText(bytes: Uint8Array, options?: Options) {
++  const encoding = detectTextEncoding(bytes, options)
++  return {
++    encoding,
++    text: new TextDecoder(encoding).decode(bytes),
++  }
++}
++
++// #126：流式解码器：先缓冲再提交编码，避免把 ASCII 前缀锁死
++export function createAutoTextDecoder(options?: Options) {
++  let encoding: TextEncoding | undefined
++  // #126：编码确定前 decoder 为空
++  let decoder: TextDecoder | undefined
++  let size = 0
++  const pending: Uint8Array[] = []
++
++  const flush = (final: boolean) => {
++    if (decoder) return decoder.decode(undefined, { stream: !final })
++    const bytes = concat(pending, size)
++    encoding = choose(bytes, options, final)
++    if (!encoding) return ""
++    decoder = new TextDecoder(encoding)
++    pending.length = 0
++    size = 0
++    return decoder.decode(bytes, { stream: !final })
++  }
++
++  return {
++    write(chunk: Uint8Array) {
++      if (decoder) return decoder.decode(chunk, { stream: true })
++      // #126：ASCII 在 UTF-8 与 codepage 中相同，可暂不提交 decoder
++      // ASCII bytes are identical in UTF-8 and Windows codepages, so emit them without committing the decoder.
++      // #126：纯 ASCII 先 UTF-8 透传，不锁死最终编码
++    if (pending.length === 0 && isAsciiText(chunk)) return new TextDecoder("utf-8").decode(chunk)
++      pending.push(chunk)
++      size += chunk.length
++      return flush(false)
++    },
++    end() {
++      return flush(true)
++    },
++    encoding() {
++      return encoding
++    },
++  }
++}
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 893d337b4a844106b644cfff6c0757a8f4c48f64..e711925c345d50a4ca68f4886c67a52c74e74c63 100644
+index c7cea5405f..c7d1c15e4f 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -23,6 +23,7 @@ import { ChildProcess } from "effect/unstable/process"
+@@ -22,6 +22,8 @@ import { ChildProcess } from "effect/unstable/process"
  import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
  import { ShellPrompt, type Parameters } from "./shell/prompt"
  import { BashArity } from "@/permission/arity"
 +import { createAutoTextDecoder } from "@/util/text-decoding"
- import {
-   BashDiagnosticCollector,
-   bashCompressionMetadata,
-@@ -317,7 +318,7 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan)
++// #126：自动检测 UTF-8/UTF-16/GB18030 的流式解码
  
- function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
-   if (process.platform === "win32" && Shell.ps(shell)) {
--    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
-+    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", psEncoded(command)], {
-       cwd,
-       env,
-       stdin: "ignore",
-@@ -333,6 +334,20 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
-     detached: process.platform !== "win32",
-   })
- }
-+
-+// PowerShell expects -EncodedCommand input as UTF-16LE and this wrapper normalizes its pipe encoding to UTF-8.
-+function psEncoded(command: string) {
-+  return Buffer.from(
-+    [
-+      "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
-+      "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
-+      "$OutputEncoding = [Console]::OutputEncoding",
-+      command,
-+      "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
-+    ].join("\n"),
-+    "utf16le",
-+  ).toString("base64")
-+}
- const parser = lazy(async () => {
-   const { Parser } = await import("web-tree-sitter")
-   const { default: treeWasm } = await import("web-tree-sitter/tree-sitter.wasm" as string, {
-@@ -523,8 +538,10 @@ export const ShellTool = Tool.define(
-         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
-         { env: {} },
-       )
-+      const utf8Env = process.platform === "win32" ? { PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" } : {}
-       return {
-         ...process.env,
-+        ...utf8Env,
-         ...extra.env,
-       }
-     })
-@@ -562,58 +579,64 @@ export const ShellTool = Tool.define(
-         },
-       })
- 
-+      const decoder = createAutoTextDecoder()
-+      const onChunk = (chunk: string) => {
-+        if (!chunk) return Effect.void
-+        diag.push(chunk)
-+        const size = Buffer.byteLength(chunk, "utf-8")
-+        list.push({ text: chunk, size })
-+        used += size
-+        while (used > keep && list.length > 1) {
-+          const item = list.shift()
-+          if (!item) break
-+          used -= item.size
-+          cut = true
-+        }
-+
-+        last = preview(last + chunk)
-+
-+        if (file) {
-+          sink?.write(chunk)
-+        } else {
-+          full += chunk
-+          if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
-+            return trunc.write(full).pipe(
-+              Effect.andThen((next) =>
-+                Effect.sync(() => {
-+                  file = next
-+                  cut = true
-+                  sink = createWriteStream(next, { flags: "a" })
-+                  full = ""
-+                }),
-+              ),
-+              Effect.andThen(
-+                ctx.metadata({
-+                  metadata: {
-+                    output: last,
-+                    description: input.description,
-+                  },
-+                }),
-+              ),
-+            )
-+          }
-+        }
-+
-+        return ctx.metadata({
-+          metadata: {
-+            output: last,
-+            description: input.description,
-+          },
-+        })
-+      }
-+
-       const code: number | null = yield* Effect.scoped(
-         Effect.gen(function* () {
+ // Git 写操作的子命令集合：这些命令会修改仓库状态，需要用户明确授权
+ // Git 写操作集合：修改 refs/index/工作树，须最新用户明确授权
+@@ -665,53 +667,63 @@ export const ShellTool = Tool.define(
+           yield* Effect.addFinalizer(closeSink)
            const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
  
-           yield* Effect.forkScoped(
+-          yield* Effect.forkScoped(
 -            Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
--              diag.push(chunk)
 -              const size = Buffer.byteLength(chunk, "utf-8")
 -              list.push({ text: chunk, size })
+-              // 收集诊断信息用于压缩后的附录生成
+-              diag.push(chunk)
 -              used += size
 -              while (used > keep && list.length > 1) {
 -                const item = list.shift()
 -                if (!item) break
 -                used -= item.size
 -                cut = true
--              }
--
++          // #126：按字节喂给自动解码器，避免 UTF-16 被 decodeText 当 UTF-8 破坏
++          // #126：按字节喂解码器，解决 PowerShell/重定向 UTF-16 输出
++          const decoder = createAutoTextDecoder()
++          // #126：字符串 chunk 写入环形缓冲与截断/落盘逻辑
++          const onChunk = (chunk: string) => {
++            if (!chunk) return Effect.void
++            // 收集诊断信息用于压缩后的附录生成
++            diag.push(chunk)
++            const size = Buffer.byteLength(chunk, "utf-8")
++            list.push({ text: chunk, size })
++            used += size
++            while (used > keep && list.length > 1) {
++              const item = list.shift()
++              if (!item) break
++              used -= item.size
++              cut = true
++            }
++
++            last = preview(last + chunk)
++
++            if (file) {
++              sink?.write(chunk)
++            } else {
++              full += chunk
++              if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
++                return trunc.write(full).pipe(
++                  Effect.andThen((next) =>
++                    Effect.sync(() => {
++                      file = next
++                      cut = true
++                      sink = createWriteStream(next, { flags: "a" })
++                      full = ""
++                    }),
++                  ),
++                  Effect.andThen(
++                    ctx.metadata({
++                      metadata: {
++                        output: last,
++                      },
++                    }),
++                  ),
++                )
+               }
++            }
+ 
 -              last = preview(last + chunk)
 -
 -              if (file) {
@@ -154,214 +244,61 @@ index 893d337b4a844106b644cfff6c0757a8f4c48f64..e711925c345d50a4ca68f4886c67a52c
 -                      ctx.metadata({
 -                        metadata: {
 -                          output: last,
--                          description: input.description,
 -                        },
 -                      }),
 -                    ),
 -                  )
 -                }
 -              }
--
++            return ctx.metadata({
++              metadata: {
++                output: last,
++              },
++            })
++          }
+ 
 -              return ctx.metadata({
 -                metadata: {
 -                  output: last,
--                  description: input.description,
 -                },
 -              })
 -            }),
++          yield* Effect.forkScoped(
++            // #126：end 时 flush decoder 尾部不完整码点
 +            Stream.runForEach(handle.all, (bytes) => onChunk(decoder.write(bytes))).pipe(
 +              Effect.ensuring(Effect.suspend(() => onChunk(decoder.end()))),
 +            ),
            )
  
            const abort = Effect.callback<void>((resume) => {
-diff --git a/packages/opencode/src/util/text-decoding.ts b/packages/opencode/src/util/text-decoding.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..023fc7f6d8a6446d62ba9450b740b209edbf936f
---- /dev/null
-+++ b/packages/opencode/src/util/text-decoding.ts
-@@ -0,0 +1,119 @@
-+export type TextEncoding = "utf-8" | "utf-16le" | "utf-16be" | "gb18030"
-+
-+type Options = {
-+  fallback?: TextEncoding
-+}
-+
-+const SAMPLE_BYTES = 64
-+const UTF16_NULL_RATIO = 0.2
-+
-+// Windows legacy console output is usually GBK-compatible; gb18030 is the widest native decoder label.
-+function fallback(options?: Options): TextEncoding {
-+  return options?.fallback ?? (process.platform === "win32" ? "gb18030" : "utf-8")
-+}
-+
-+// BOMs are authoritative and avoid all heuristic guessing.
-+function bom(bytes: Uint8Array): TextEncoding | undefined {
-+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return "utf-8"
-+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return "utf-16le"
-+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return "utf-16be"
-+}
-+
-+// UTF-16 text without a BOM often exposes NUL bytes on every ASCII code unit.
-+function utf16ByNulls(bytes: Uint8Array): TextEncoding | undefined {
-+  const sample = bytes.subarray(0, Math.min(bytes.length, 4096))
-+  let even = 0
-+  let odd = 0
-+  for (let i = 0; i < sample.length; i++) {
-+    if (sample[i] !== 0) continue
-+    if (i % 2 === 0) even++
-+    else odd++
-+  }
-+  const evenSlots = Math.ceil(sample.length / 2)
-+  const oddSlots = Math.floor(sample.length / 2)
-+  if (odd >= 2 && odd / oddSlots > UTF16_NULL_RATIO && odd > even * 3) return "utf-16le"
-+  if (even >= 2 && even / evenSlots > UTF16_NULL_RATIO && even > odd * 3) return "utf-16be"
-+}
-+
-+// Strict UTF-8 differentiates real UTF-8 from Windows codepage bytes without replacement characters.
-+function isUtf8(bytes: Uint8Array, stream = false) {
-+  try {
-+    new TextDecoder("utf-8", { fatal: true }).decode(bytes, { stream })
-+    return true
-+  } catch {
-+    return false
-+  }
-+}
-+
-+function hasHighBit(bytes: Uint8Array) {
-+  return bytes.some((byte) => byte >= 0x80)
-+}
-+
-+function isAsciiText(bytes: Uint8Array) {
-+  return bytes.every((byte) => byte > 0 && byte < 0x80)
-+}
-+
-+function concat(chunks: Uint8Array[], size: number) {
-+  const out = new Uint8Array(size)
-+  let offset = 0
-+  for (const chunk of chunks) {
-+    out.set(chunk, offset)
-+    offset += chunk.length
-+  }
-+  return out
-+}
-+
-+function choose(bytes: Uint8Array, options: Options | undefined, final: boolean): TextEncoding | undefined {
-+  if (bytes.length === 0) return "utf-8"
-+  const certain = bom(bytes) ?? utf16ByNulls(bytes)
-+  if (certain) return certain
-+  if (isUtf8(bytes, !final)) return !hasHighBit(bytes) || final || bytes.length >= SAMPLE_BYTES ? "utf-8" : undefined
-+  return final || bytes.length >= SAMPLE_BYTES ? fallback(options) : undefined
-+}
-+
-+export function detectTextEncoding(bytes: Uint8Array, options?: Options): TextEncoding {
-+  return choose(bytes, options, true) ?? "utf-8"
-+}
-+
-+export function decodeText(bytes: Uint8Array, options?: Options) {
-+  const encoding = detectTextEncoding(bytes, options)
-+  return {
-+    encoding,
-+    text: new TextDecoder(encoding).decode(bytes),
-+  }
-+}
-+
-+export function createAutoTextDecoder(options?: Options) {
-+  let encoding: TextEncoding | undefined
-+  let decoder: TextDecoder | undefined
-+  let size = 0
-+  const pending: Uint8Array[] = []
-+
-+  const flush = (final: boolean) => {
-+    if (decoder) return decoder.decode(undefined, { stream: !final })
-+    const bytes = concat(pending, size)
-+    encoding = choose(bytes, options, final)
-+    if (!encoding) return ""
-+    decoder = new TextDecoder(encoding)
-+    pending.length = 0
-+    size = 0
-+    return decoder.decode(bytes, { stream: !final })
-+  }
-+
-+  return {
-+    write(chunk: Uint8Array) {
-+      if (decoder) return decoder.decode(chunk, { stream: true })
-+      // ASCII bytes are identical in UTF-8 and Windows codepages, so emit them without committing the decoder.
-+      if (pending.length === 0 && isAsciiText(chunk)) return new TextDecoder("utf-8").decode(chunk)
-+      pending.push(chunk)
-+      size += chunk.length
-+      return flush(false)
-+    },
-+    end() {
-+      return flush(true)
-+    },
-+    encoding() {
-+      return encoding
-+    },
-+  }
-+}
-diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index 9b5c17c2224e895f5941fa21be5e9f3ede5fd1fe..96e63a5fcaba1e9549f65896c29fb36a1dcbe3f5 100644
---- a/packages/opencode/test/tool/shell.test.ts
-+++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1189,6 +1189,33 @@ describe("tool.shell abort", () => {
-       },
-     })
-   })
-+
-+  for (const item of ps) {
-+    test(
-+      `decodes raw UTF-16LE output from Windows commands [${item.label}]`,
-+      withShell(item, async () => {
-+        await WithInstance.provide({
-+          directory: projectRoot,
-+          fn: async () => {
-+            const bash = await initShell()
-+            const result = await Effect.runPromise(
-+              bash.execute(
-+                {
-+                  command:
-+                    '$bytes = [System.Text.Encoding]::Unicode.GetBytes("默认分发: Ubuntu-22.04"); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)',
-+                  description: "Write UTF-16LE bytes",
-+                },
-+                ctx,
-+              ),
-+            )
-+            expect(result.output).toContain("默认分发: Ubuntu-22.04")
-+            expect(result.output).not.toContain("\u0000")
-+            expect(result.output).not.toContain("�")
-+          },
-+        })
-+      }),
-+    )
-+  }
- })
- 
- describe("tool.shell truncation", () => {
 diff --git a/packages/opencode/test/util/text-decoding.test.ts b/packages/opencode/test/util/text-decoding.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3ce07a944c6fb111f2b9468a5ca9c798bdeb6cf8
+index 0000000000..0f66869a0f
 --- /dev/null
 +++ b/packages/opencode/test/util/text-decoding.test.ts
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,65 @@
 +import { describe, expect, test } from "bun:test"
 +import { createAutoTextDecoder, decodeText, detectTextEncoding } from "@/util/text-decoding"
++// #126：编码检测与流式解码单测
 +
 +const bytes = (items: number[]) => new Uint8Array(items)
 +
 +describe("text-decoding", () => {
++  // #126：中文 UTF-8 往返
 +  test("detects UTF-8", () => {
 +    const input = new TextEncoder().encode("默认分发")
 +    expect(detectTextEncoding(input)).toBe("utf-8")
 +    expect(decodeText(input).text).toBe("默认分发")
 +  })
 +
++  // #126：BOM 优先于内容探测
 +  test("detects UTF-8 BOM", () => {
 +    const input = bytes([0xef, 0xbb, 0xbf, ...new TextEncoder().encode("hello")])
 +    expect(detectTextEncoding(input)).toBe("utf-8")
 +    expect(decodeText(input).text).toBe("hello")
 +  })
 +
++  // #126：无 BOM 的 UTF-16LE 靠 NUL 模式
 +  test("detects UTF-16LE without BOM", () => {
 +    const input = Buffer.from("默认分发: Ubuntu-22.04\r\n", "utf16le")
 +    expect(detectTextEncoding(input)).toBe("utf-16le")
@@ -380,6 +317,7 @@ index 0000000000000000000000000000000000000000..3ce07a944c6fb111f2b9468a5ca9c798
 +    expect(decodeText(input, { fallback: "gb18030" }).text).toBe("中文")
 +  })
 +
++  // #126：多字节 UTF-8 跨 chunk 不能截断
 +  test("streams UTF-8 across split multibyte chunks", () => {
 +    const input = new TextEncoder().encode("默认分发")
 +    const decoder = createAutoTextDecoder()
@@ -388,6 +326,7 @@ index 0000000000000000000000000000000000000000..3ce07a944c6fb111f2b9468a5ca9c798
 +    expect(decoder.encoding()).toBe("utf-8")
 +  })
 +
++  // #126：UTF-16LE 跨奇数边界仍可恢复
 +  test("streams UTF-16LE across split chunks", () => {
 +    const input = Buffer.from("默认分发: Ubuntu-22.04\r\n", "utf16le")
 +    const decoder = createAutoTextDecoder()
@@ -403,3 +342,44 @@ index 0000000000000000000000000000000000000000..3ce07a944c6fb111f2b9468a5ca9c798
 +    expect(decoder.encoding()).toBe("gb18030")
 +  })
 +})
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index 56fe38fbea..c04bc45cc7 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -1239,3 +1239,36 @@ describe("tool.shell windows encoding", () => {
+     )
+   }
+ })
++
++
++// #126：非 Windows 也可用的 UTF-16LE 字节输出解码路径
++describe("tool.shell text decoding", () => {
++  it.live(
++    "decodes raw UTF-16LE output from Windows-style byte streams",
++    () =>
++      withShell(
++        { label: "default", shell: process.env.SHELL || "bash" },
++        Effect.gen(function* () {
++          const tmp = yield* tmpdirScoped()
++          yield* runIn(
++            tmp,
++            Effect.gen(function* () {
++              const bash = yield* initBash()
++              // 写出 UTF-16LE 中文再读回，验证 createAutoTextDecoder 路径
++              const result = yield* bash.execute(
++                {
++                  // #126：混入 ASCII 以触发无 BOM UTF-16LE 的 NUL 启发式（纯中文无 NUL）
++                  command: `python3 -c 'import sys; sys.stdout.buffer.write("默认分发: Ubuntu-22.04".encode("utf-16le"))'`,
++                },
++                ctx,
++              )
++              expect(result.output).toContain("默认分发: Ubuntu-22.04")
++              expect(result.output).not.toContain("\u0000")
++              expect(result.output).not.toContain("\uFFFD")
++            }),
++          )
++        }),
++      ),
++  )
++})
++

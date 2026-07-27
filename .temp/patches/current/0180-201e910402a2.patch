@@ -2,238 +2,117 @@ From 201e910402a2f1249a19c7c34a2d8a2d8c09238e Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Wed, 20 May 2026 02:14:45 +0800
 Subject: [PATCH] =?UTF-8?q?feat:=20=E9=87=8D=E6=9E=84=E4=BC=9A=E8=AF=9D?=
- =?UTF-8?q?=E8=8E=B7=E5=8F=96=E9=80=BB=E8=BE=91=EF=BC=8C=E4=BC=98=E5=8C=96?=
- =?UTF-8?q?=E5=B7=A5=E5=85=B7=E4=BA=8B=E4=BB=B6=E5=A4=84=E7=90=86=EF=BC=8C?=
- =?UTF-8?q?=E5=A2=9E=E5=BC=BA=E7=BB=9F=E8=AE=A1=E6=95=B0=E6=8D=AE=E7=9A=84?=
- =?UTF-8?q?=E5=87=86=E7=A1=AE=E6=80=A7?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/stats/data.ts b/packages/opencode/src/cli/cmd/stats/data.ts
-index 006d803d5af057b99ec1f411afec185698faae88..3ced4fa62944bc6ee741c015784dcd4a4e57a4ee 100644
---- a/packages/opencode/src/cli/cmd/stats/data.ts
-+++ b/packages/opencode/src/cli/cmd/stats/data.ts
-@@ -3,7 +3,7 @@ import { Session } from "@/session/session"
- import type { MessageV2 } from "@/session/message-v2"
- import { RequestUsageAssistantTable, RequestUsageTable } from "@/session/request-usage.sql"
+diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src/cli/cmd/stats-data.ts
+--- a/packages/opencode/src/cli/cmd/stats-data.ts
++++ b/packages/opencode/src/cli/cmd/stats-data.ts
+@@ -10,7 +10,7 @@ import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core
+ // #174：单会话缺失降级为空，不中断整批
  import { NotFoundError } from "@/storage/storage"
--import { Database, eq } from "@/storage/db"
-+import { Database, eq, gte } from "@/storage/db"
- import { SessionTable } from "@/session/session.sql"
+ import { Database } from "@opencode-ai/core/database/database"
+-import { eq, sql } from "drizzle-orm"
++import { eq, sql, gte } from "drizzle-orm"
+ // #174：SessionTable 只用于枚举，不在此写用量
+ import { SessionTable } from "@opencode-ai/core/session/sql"
  import type { Project } from "@/project/project"
- import type { SessionID } from "@/session/schema"
-@@ -175,6 +175,12 @@ type ToolUsageEvent = {
-   contextTokens: number
- }
- 
-+type ToolEventSeed = {
-+  message: MessageV2.WithParts | undefined
-+  components: InputComponentTotals
-+  event: Omit<UsageEvent, "tokens" | "components" | "cost" | "requests" | "assistantCalls" | "errors" | "aborted" | "durationMs">
-+}
+@@ -409,9 +409,27 @@ const tokenPartSeries = (daily: DailyUsage[]): TokenPartSeries[] =>
+ // #174：必须调用 Effect.fn 枚举会话
+ // #174：getAllSessions 通过 Database.Service 拉取会话列表
+ // #180：按 cutoff 下推 SQL，减少全表 session 扫描
+-const getAllSessions = Effect.fnUntraced(function* () {
++const getSessions = Effect.fnUntraced(function* (cutoff: number) {
++  // #180：按 cutoff 下推 SQL，减少全表 session 扫描
+   const { db } = yield* Database.Service
+-  return (yield* db.select().from(SessionTable).all().pipe(Effect.orDie)).map((row) => Session.fromRow(row))
++  // #180：cutoff=0 表示全历史，仍走全表扫描
++  const rows =
++    cutoff > 0
++      ? yield* db
++          .select()
++          .from(SessionTable)
++          // #180：time_updated 与 days 窗口同口径
++          .where(gte(SessionTable.time_updated, cutoff))
++          .all()
++          .pipe(Effect.orDie)
++      : yield* db.select().from(SessionTable).all().pipe(Effect.orDie)
++  return rows.map((row) => Session.fromRow(row))
++})
 +
- type UsageGroupAccumulator = UsageGroup & {
-   sessionIDs: Set<SessionID>
-   providerTotals: Map<string, number>
-@@ -491,9 +497,15 @@ const tokenPartSeries = (daily: DailyUsage[]): TokenPartSeries[] =>
-     total: daily.reduce((acc, day) => acc + part.pick(day.tokens), 0),
-   }))
++// #180：无 cutoff 的兼容封装，内部委托 getSessions(0)
++const getAllSessions = Effect.fnUntraced(function* () {
++  // #180：全历史兼容路径
++  return yield* getSessions(0)
+ })
  
--const getAllSessions = Effect.sync(() =>
--  Database.use((db) => db.select().from(SessionTable).all()).map((row) => Session.fromRow(row)),
--)
-+const getSessions = (cutoff: number) =>
-+  Effect.sync(() =>
-+    Database.use((db) => {
-+      const rows = cutoff > 0
-+        ? db.select().from(SessionTable).where(gte(SessionTable.time_updated, cutoff)).all()
-+        : db.select().from(SessionTable).all()
-+      return rows.map((row) => Session.fromRow(row))
-+    }),
-+  )
- 
- const cutoffFromDays = (days?: number) => {
-   if (days === undefined) return 0
-@@ -565,47 +577,66 @@ const toolOutputChars = (part: MessageV2.ToolPart) => {
-   return 0
- }
- 
--const toolCharsByName = (messages: MessageV2.WithParts[], time: number) => {
--  const result = new Map<string, { inputChars: number; outputChars: number }>()
--  for (const message of messages) {
--    if (message.info.time.created > time) continue
--    for (const part of message.parts) {
--      if (part.type !== "tool") continue
--      const item = result.get(part.tool) ?? { inputChars: 0, outputChars: 0 }
--      item.inputChars += toolInputChars(part)
--      item.outputChars += toolOutputChars(part)
--      result.set(part.tool, item)
-+// Preserve the old attribution formula, but scan each session once instead of once per assistant turn.
-+const toolEventsFromAssistants = (visibleMessages: MessageV2.WithParts[], seeds: ToolEventSeed[]) => {
-+  const tasks = seeds
-+    .filter((seed): seed is ToolEventSeed & { message: MessageV2.WithParts } => seed.message !== undefined)
-+    .sort((a, b) => a.message.info.time.created - b.message.info.time.created)
-+  if (tasks.length === 0) return []
-+
-+  const deltas = visibleMessages
-+    .flatMap((message) =>
-+      message.parts
-+        .filter((part): part is MessageV2.ToolPart => part.type === "tool")
-+        .map((part) => ({
-+          time: message.info.time.created,
-+          toolID: part.tool,
-+          inputChars: toolInputChars(part),
-+          outputChars: toolOutputChars(part),
-+        })),
-+    )
-+    .sort((a, b) => a.time - b.time)
-+
-+  const result: ToolUsageEvent[] = []
-+  const chars = new Map<string, { inputChars: number; outputChars: number }>()
-+  let inputTotal = 0
-+  let outputTotal = 0
-+  let deltaIndex = 0
-+
-+  for (const task of tasks) {
-+    // Current attribution includes every tool message created at or before the assistant turn.
-+    while (deltaIndex < deltas.length && deltas[deltaIndex].time <= task.message.info.time.created) {
-+      const delta = deltas[deltaIndex]
-+      const item = chars.get(delta.toolID) ?? { inputChars: 0, outputChars: 0 }
-+      item.inputChars += delta.inputChars
-+      item.outputChars += delta.outputChars
-+      inputTotal += delta.inputChars
-+      outputTotal += delta.outputChars
-+      chars.set(delta.toolID, item)
-+      deltaIndex++
+ // #174：cutoffFromDays 解释 0/缺省/正数
+@@ -693,13 +711,57 @@ const toolEventsFromAssistant = (input: {
+ // #180：单遍扫描 assistants，避免每条消息重复 toolCharsByName
+ // #180：批量种子入口，语义同逐条但可扩展单遍优化
+ const toolEventsFromAssistants = (
+-  assistants: Array<{ message: any; event: any }>,
++  assistants: Array<{
++    message: any
++    event: {
++      time: number
++      sessionID: SessionID
++      projectID: string
++      providerID: string
++      modelID: string
++      source: string
++      agent: string
++      status: string
 +    }
-+
-+    for (const [toolID, item] of chars) {
++  }>,
+   visibleMessages: any[],
+ ) => {
+-  // #176：批量入口复用归因公式
++  // #180：按时间排序以便复用同刻 toolChars 缓存
++  const sorted = [...assistants].sort((a, b) => a.event.time - b.event.time)
+   const events: ToolUsageEvent[] = []
+-  for (const item of assistants) {
+-    events.push(...toolEventsFromAssistant({ message: item.message, visibleMessages, event: item.event }))
++  // #180：缓存键为 message 创建时间
++  let cachedTime = -1
++  let cachedChars: Map<string, { inputChars: number; outputChars: number }> | undefined
++  for (const item of sorted) {
++    if (!item.message) continue
++    const time = item.message.info?.time?.created ?? item.event.time
++    if (cachedTime !== time || !cachedChars) {
++      // #180：同 timestamp 只扫一次 visibleMessages
++      cachedChars = toolCharsByName(visibleMessages, time)
++      cachedTime = time
++    }
++    // #180：组件归因仍走 step-finish.inputBreakdown
++    const components = componentsFromAssistant(item.message)
++    const inputTotal = Array.from(cachedChars.values()).reduce((sum, row) => sum + row.inputChars, 0)
++    const outputTotal = Array.from(cachedChars.values()).reduce((sum, row) => sum + row.outputChars, 0)
++    for (const [toolID, row] of cachedChars.entries()) {
 +      const contextTokens =
-+        (inputTotal > 0 ? Math.round((task.components.toolCalls * item.inputChars) / inputTotal) : 0) +
-+        (outputTotal > 0 ? Math.round((task.components.toolResults * item.outputChars) / outputTotal) : 0)
-+      if (contextTokens === 0) continue
-+      result.push({
-+        time: task.event.time,
-+        sessionID: task.event.sessionID,
-+        projectID: task.event.projectID,
-+        providerID: task.event.providerID,
-+        modelID: task.event.modelID,
-+        source: task.event.source,
-+        agent: task.event.agent,
-+        status: task.event.status,
++        (inputTotal > 0 ? Math.round((components.toolCalls * row.inputChars) / inputTotal) : 0) +
++        (outputTotal > 0 ? Math.round((components.toolResults * row.outputChars) / outputTotal) : 0)
++      if (contextTokens <= 0) continue
++      events.push({
++        time: item.event.time,
++        sessionID: item.event.sessionID,
++        projectID: item.event.projectID,
++        providerID: item.event.providerID,
++        modelID: item.event.modelID,
++        source: item.event.source,
++        agent: item.event.agent,
++        status: item.event.status,
 +        toolID,
 +        contextTokens,
 +      })
-     }
++    }
    }
--  return result
--}
- 
--const toolEventsFromAssistant = (input: {
--  message: MessageV2.WithParts | undefined
--  visibleMessages: MessageV2.WithParts[]
--  event: Omit<UsageEvent, "tokens" | "components" | "cost" | "requests" | "assistantCalls" | "errors" | "aborted" | "durationMs">
--}) => {
--  if (!input.message) return []
--  const components = componentsFromAssistant(input.message)
--  const chars = toolCharsByName(input.visibleMessages, input.message.info.time.created)
--  const inputTotal = Array.from(chars.values()).reduce((sum, item) => sum + item.inputChars, 0)
--  const outputTotal = Array.from(chars.values()).reduce((sum, item) => sum + item.outputChars, 0)
--  return Array.from(chars.entries())
--    .map(([toolID, item]) => ({
--      time: input.event.time,
--      sessionID: input.event.sessionID,
--      projectID: input.event.projectID,
--      providerID: input.event.providerID,
--      modelID: input.event.modelID,
--      source: input.event.source,
--      agent: input.event.agent,
--      status: input.event.status,
--      toolID,
--      contextTokens:
--        (inputTotal > 0 ? Math.round((components.toolCalls * item.inputChars) / inputTotal) : 0) +
--        (outputTotal > 0 ? Math.round((components.toolResults * item.outputChars) / outputTotal) : 0),
--    }))
--    .filter((event) => event.contextTokens > 0)
-+  return result
+   return events
  }
- 
- const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (session: Session.Info, cutoff: number) {
-@@ -632,9 +663,11 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
- 
-     if (assistantRows.length > 0) {
-       const assistantRequests = new Set(assistantRows.map((row) => row.request_id))
-+      const assistantToolEvents: ToolEventSeed[] = []
-       const assistantEvents = assistantRows.map((row) => {
-         const request = requestsByID.get(row.request_id)
-         const message = messagesByID.get(row.assistant_message_id)
-+        const components = componentsFromAssistant(message)
-         const event = {
-           time: row.time_created,
-           sessionID: session.id,
-@@ -645,7 +678,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
-           agent: request?.agent ?? session.agent ?? "unknown",
-           status: row.status,
-           tokens: rowTokens(row),
--          components: componentsFromAssistant(message),
-+          components,
-           cost: row.cost_micros / MICROS,
-           requests: 0,
-           assistantCalls: 1,
-@@ -653,9 +686,10 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
-           aborted: 0,
-           durationMs: 0,
-         }
--        toolEvents.push(...toolEventsFromAssistant({ message, visibleMessages, event }))
-+        assistantToolEvents.push({ message, components, event })
-         return event
-       })
-+      toolEvents.push(...toolEventsFromAssistants(visibleMessages, assistantToolEvents))
-       const fallbackRequestEvents = requestRows
-         .filter((row) => !assistantRequests.has(row.request_id))
-         .map((row) => ({
-@@ -720,9 +754,11 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
-       breakdownEvents.push(...requestEvents)
-     }
-   } else {
-+    const legacyToolEvents: ToolEventSeed[] = []
-     for (const message of visibleMessages) {
-       if (message.info.role !== "assistant") continue
-       const tokens = normalizeTokens(message.info.tokens ?? emptyTokens())
-+      const components = componentsFromAssistant(message)
-       const event = {
-         time: message.info.time.created,
-         sessionID: session.id,
-@@ -733,7 +769,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
-         agent: session.agent ?? "unknown",
-         status: "completed",
-         tokens,
--        components: componentsFromAssistant(message),
-+        components,
-         cost: message.info.cost ?? 0,
-         requests: 0,
-         assistantCalls: 1,
-@@ -741,10 +777,11 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
-         aborted: 0,
-         durationMs: 0,
-       }
--      toolEvents.push(...toolEventsFromAssistant({ message, visibleMessages, event }))
-+      legacyToolEvents.push({ message, components, event })
-       totalEvents.push(event)
-       breakdownEvents.push(event)
-     }
-+    toolEvents.push(...toolEventsFromAssistants(visibleMessages, legacyToolEvents))
-   }
- 
-   const toolUsage: Record<string, ToolUsage> = {}
-@@ -763,7 +800,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
- 
+@@ -895,7 +957,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
  export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input: StatsFilter = {}) {
    const cutoff = cutoffFromDays(input.days)
--  const sessions = yield* getAllSessions
-+  const sessions = yield* getSessions(cutoff)
+   const sessions =   // #180：聚合入口改用 SQL 预过滤会话
+-  yield* getAllSessions()
++  yield* getSessions(cutoff)
    const filteredSessions = sessions
+ // #174：time.updated 过滤会话
      .filter((session) => includeTime(cutoff, session.time.updated))
-     .filter((session) => sessionMatches(session, input))

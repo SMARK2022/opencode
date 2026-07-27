@@ -4,37 +4,33 @@ Date: Sun, 10 May 2026 03:09:29 +0800
 Subject: [PATCH] =?UTF-8?q?feat(token-accounting):=20=E5=A2=9E=E5=BC=BA?=
  =?UTF-8?q?=E8=BE=93=E5=85=A5=E5=AD=97=E7=AC=A6=E7=BB=9F=E8=AE=A1=EF=BC=8C?=
  =?UTF-8?q?=E6=94=AF=E6=8C=81=E5=9C=A8=E6=B5=81=E5=BC=8F=E5=A4=84=E7=90=86?=
- =?UTF-8?q?=E6=9C=9F=E9=97=B4=E4=BB=8E=20step-start=20=E6=8F=90=E4=BE=9B?=
- =?UTF-8?q?=20breakdown=20=E4=BF=A1=E6=81=AF?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/util/token-accounting.ts b/packages/opencode/src/cli/cmd/tui/util/token-accounting.ts
-index e1b2700cdd8c69057b4e98f08a77b09607592962..e8a6c537021b68d85d0ac0a99f0d20e73ebbae3a 100644
---- a/packages/opencode/src/cli/cmd/tui/util/token-accounting.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/token-accounting.ts
-@@ -242,21 +242,31 @@ export function tokenAccounting(
+diff --git a/packages/tui/src/util/token-accounting.ts b/packages/tui/src/util/token-accounting.ts
+index 2c0a60a43c..de3bb321e8 100644
+--- a/packages/tui/src/util/token-accounting.ts
++++ b/packages/tui/src/util/token-accounting.ts
+@@ -263,21 +263,30 @@ export function tokenAccounting(
    stepInput += pendingToolResultTokens + pendingAttachTokens
  
    // ── 6. request totals（confirmed + in-flight）─────────
 -  const stepDelta = stepConfirmed ? 0 : stepInput + stepOutput
 -  const totalInput = confirmedRequest.input + stepDelta
-+  // input 和 output 必须分开，stepOutput 不能混进 totalInput
++  // #124：input 与 output 必须分开，stepOutput 不能混进 totalInput
 +  const totalInput = confirmedRequest.input + (stepConfirmed ? 0 : stepInput)
    const totalOutput = confirmedRequest.output + (stepConfirmed ? 0 : stepOutput)
  
 -  // ── 7. breakdown（来自 latest assistant 的 step-finish）───────
-+  // ── 7. breakdown（优先 step-finish confirmed，fallback step-start daemon estimate）───────
+-  // #122：有 inputBreakdown 时按字符占比分配确认 input 总量
++  // ── 7. breakdown（优先 step-finish confirmed，fallback step-start）───────
++  // #124：streaming 期间可用 step-start 的 daemon 字符快照
    let breakdown: TokenAccounting["breakdown"] = null
 -  if (stepSF && stepSF.inputBreakdown && stepSF.inputChars) {
 -    const bd = stepSF.inputBreakdown as {
-+  // step-start 携带 deamon 在请求发出前记录的各组件字符数；streaming 期间即可展示 input 分类
++  // #124：定位最近的 step-start 字符快照
 +  const ssIdx = lastParts.findLastIndex((p) => p.type === "step-start" && p.inputBreakdown)
++  // #124：无 step-start 时 breakdown 仅能等 step-finish
 +  const stepSS = ssIdx >= 0 ? lastParts[ssIdx] : undefined
 +  const breakdownSrc = stepSF?.inputBreakdown ? stepSF : stepSS
-+
 +  if (breakdownSrc?.inputBreakdown && breakdownSrc.inputChars) {
 +    const bd = breakdownSrc.inputBreakdown as {
        system: number; instructions: number; skills: number; tools: number
@@ -42,178 +38,132 @@ index e1b2700cdd8c69057b4e98f08a77b09607592962..e8a6c537021b68d85d0ac0a99f0d20e7
      }
 -    const confirmedInput = stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
 -    const denom = stepSF.inputChars as number
-+    const isConfirmed = breakdownSrc.type === "step-finish" && stepConfirmed
-+    // input 总量：confirmed 从 provider tokens，estimate 从 daemon estimate 或 chars/ratio
-+    // 当 isConfirmed 时 stepSF 一定存在（由 stepConfirmed 保证），下同
-+    const allocInput = isConfirmed
-+      ? stepSF!.tokens.input + stepSF!.tokens.cache.read + stepSF!.tokens.cache.write
-+      : (stepSS?.inputTokens ?? Math.round((stepSS?.inputChars ?? 0) / inputRatio))
-+    const denom = breakdownSrc.inputChars as number
++    // #124：确认量用 provider tokens；否则用 daemon inputTokens/chars
++    const confirmedInput = stepSF?.tokens
++      ? stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
++      : (Number(stepSS?.inputTokens) || Math.round((Number(stepSS?.inputChars) || 0) / inputRatio))
++    const denom = Number(breakdownSrc.inputChars)
  
--    const alloc = (chars: number) => denom > 0 ? Math.round((chars / denom) * confirmedInput) : 0
-+    const alloc = (chars: number) => denom > 0 ? Math.round((chars / denom) * allocInput) : 0
++    // #124：按字符占比把确认/估算 input 分到各分类
+     const alloc = (chars: number) => denom > 0 ? Math.round((chars / denom) * confirmedInput) : 0
      const system = alloc(bd.system)
      const instructions = alloc(bd.instructions)
-     const skills = alloc(bd.skills)
-@@ -266,17 +276,21 @@ export function tokenAccounting(
+@@ -288,7 +297,8 @@ export function tokenAccounting(
      const attachments = alloc(bd.messages.attachments)
  
      let assistantText: number; let reasoning: number; let toolCalls: number
 -    if (stepConfirmed) {
--      reasoning = stepSF.tokens.reasoning
--      const visibleOutput = stepSF.tokens.output
-+    if (isConfirmed) {
-+      // confirmed output → 精确分配：reasoning 独立，text vs toolCalls 按字符比
-+      reasoning = stepSF!.tokens.reasoning
-+      const visibleOutput = stepSF!.tokens.output
++    if (stepConfirmed && stepSF?.tokens) {
++      // #124：仅 confirmed step-finish 拆 output/reasoning
+       reasoning = stepSF.tokens.reasoning
+       const visibleOutput = stepSF.tokens.output
        const textChars = bd.messages.assistantText
-       const toolCallChars = bd.messages.toolInput
-       const totalOutChars = textChars + toolCallChars
-       assistantText = totalOutChars > 0 ? Math.round((visibleOutput * textChars) / totalOutChars) : visibleOutput
-       toolCalls = Math.max(0, visibleOutput - assistantText)
-     } else {
-+      // estimate（streaming 或无确认数据）→ chars / outputRatio
-       let textC = 0, reasonC = 0, toolC = 0
--      for (let i = sfIdx + 1; i < lastParts.length; i++) {
-+      // 从 breakdown source 之后扫 output parts
-+      const markerIdx = breakdownSrc.type === "step-finish" ? sfIdx : ssIdx
-+      for (let i = markerIdx + 1; i < lastParts.length; i++) {
-         const p = lastParts[i]
-         if (p.type === "text" && !p.ignored) textC += (p.text?.length ?? 0)
-         if (p.type === "reasoning") reasonC += (p.text?.length ?? 0)
-diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index 2fd1fb910b33af871700d5310cc4d7bd421a5569..5b87d6dc1fcd6863255713a7a1f67347a805721f 100644
---- a/packages/opencode/src/session/message-v2.ts
-+++ b/packages/opencode/src/session/message-v2.ts
-@@ -260,10 +260,45 @@ export type RetryPart = Omit<Types.DeepMutable<Schema.Schema.Type<typeof RetryPa
-   error: APIError
- }
- 
-+/** Per-component character counts of the request body as assembled by the daemon.
-+ *  Used by TUI to show accurate per-category context usage without reconstructing prompt text.
-+ *  Shared between step-start (live estimate) and step-finish (confirmed). */
-+const InputBreakdownSchema = Schema.Struct({
-+  system: NonNegativeInt,
-+  instructions: NonNegativeInt,
-+  skills: NonNegativeInt,
-+  tools: NonNegativeInt,
-+  messages: Schema.Struct({
-+    /** User message text (part text from user role messages) */
-+    userText: NonNegativeInt,
-+    /** Assistant message text (part text from assistant role messages) */
-+    assistantText: NonNegativeInt,
-+    /** Reasoning/thinking content character count */
-+    reasoning: NonNegativeInt,
-+    /** Tool call input (JSON arguments) character count */
-+    toolInput: NonNegativeInt,
-+    /** Tool call output (result text) character count */
-+    toolOutput: NonNegativeInt,
-+    /** File/image attachment URLs (data: or path) character count */
-+    attachments: NonNegativeInt,
-+    /** Total serialized JSON character count — must equal the wire-format length */
-+    total: NonNegativeInt,
-+  }),
-+})
+diff --git a/packages/tui/test/util/token-accounting.test.ts b/packages/tui/test/util/token-accounting.test.ts
+index cc35077c1a..e8927a98ca 100644
+--- a/packages/tui/test/util/token-accounting.test.ts
++++ b/packages/tui/test/util/token-accounting.test.ts
+@@ -63,3 +63,47 @@ describe("tokenAccounting", () => {
+     expect(acc.ratio.input).toBeGreaterThan(1)
+   })
+ })
 +
- export const StepStartPart = Schema.Struct({
++  // #124：streaming 期间 step-start breakdown 可用
++  test("breakdown available from step-start during streaming (before step-finish)", () => {
++    const msgs = [
++      { id: "u1", role: "user", time: { created: 0 } },
++      {
++        id: "a1",
++        role: "assistant",
++        parentID: "u1",
++        cost: 0,
++        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++        time: { created: 1 },
++      },
++    ]
++    const parts: Record<string, any[]> = {
++      a1: [
++        {
++          id: "ss",
++          type: "step-start",
++          inputChars: 1000,
++          inputTokens: 400,
++          inputBreakdown: {
++            system: 200,
++            instructions: 100,
++            skills: 50,
++            tools: 50,
++            messages: {
++              userText: 100,
++              assistantText: 80,
++              reasoning: 0,
++              toolInput: 40,
++              toolOutput: 80,
++              attachments: 100,
++              total: 400,
++            },
++          },
++        },
++      ],
++    }
++    const acc = tokenAccounting(msgs as any, (id) => parts[id] ?? [])
++    expect(acc.breakdown).not.toBeNull()
++    // #124：200/1000 * 400 = 80
++    expect(acc.breakdown!.system).toBe(80)
++  })
+diff --git a/packages/schema/src/v1/session.ts b/packages/schema/src/v1/session.ts
+index f0eb8df148..fe549dcdc0 100644
+--- a/packages/schema/src/v1/session.ts
++++ b/packages/schema/src/v1/session.ts
+@@ -244,6 +244,27 @@ export const StepStartPart = Schema.Struct({
    ...partBase,
    type: Schema.Literal("step-start"),
    snapshot: Schema.optional(Schema.String),
-+  /** Character count of the request body sent to the provider at step-start.
-+   *  The TUI uses this as an early input snapshot before step-finish confirms tokens. */
++  // #124：请求发出前的字符/token 快照，供 streaming 展示
++  // #124：inputTokens 为 upload 时估算，非 provider 最终值
 +  inputChars: Schema.optional(NonNegativeInt),
-+  /** Estimated input tokens at upload time (inputChars / historical ratio).
-+   *  Confirmed input/cache split arrives later on the matching step-finish part. */
 +  inputTokens: Schema.optional(NonNegativeInt),
-+  /** Per-component request-body character counts captured by the daemon.
-+   *  Live during assistant running; step-finish carries the same snapshot with confirmed totals. */
-+  inputBreakdown: Schema.optional(InputBreakdownSchema),
- })
-   .annotate({ identifier: "StepStartPart" })
-   .pipe(withStatics((s) => ({ zod: zod(s) })))
-@@ -288,31 +323,8 @@ export const StepFinishPart = Schema.Struct({
-   /** Character count of the full request body (system + messages + tools) sent to the provider.
-    *  Used together with confirmed tokens to compute a session-specific chars-per-token ratio. */
-   inputChars: Schema.optional(NonNegativeInt),
--  /** Per-component character counts of the request body as assembled by the daemon.
--   *  The TUI reads these to show accurate per-category context usage instead of
--   *  re-constructing prompt text independently. */
--  inputBreakdown: Schema.optional(Schema.Struct({
--    system: NonNegativeInt,
--    instructions: NonNegativeInt,
--    skills: NonNegativeInt,
--    tools: NonNegativeInt,
--    messages: Schema.Struct({
--      /** User message text (part text from user role messages) */
--      userText: NonNegativeInt,
--      /** Assistant message text (part text from assistant role messages) */
--      assistantText: NonNegativeInt,
--      /** Reasoning/thinking content character count */
--      reasoning: NonNegativeInt,
--      /** Tool call input (JSON arguments) character count */
--      toolInput: NonNegativeInt,
--      /** Tool call output (result text) character count */
--      toolOutput: NonNegativeInt,
--      /** File/image attachment URLs (data: or path) character count */
--      attachments: NonNegativeInt,
--      /** Total serialized JSON character count — must equal the wire-format length */
--      total: NonNegativeInt,
--    }),
--  })),
-+  /** Per-component character counts — same snapshot as step-start, persisted with confirmed token totals. */
-+  inputBreakdown: Schema.optional(InputBreakdownSchema),
- })
-   .annotate({ identifier: "StepFinishPart" })
-   .pipe(withStatics((s) => ({ zod: zod(s) })))
++  inputBreakdown: Schema.optional(
++    Schema.Struct({
++      system: NonNegativeInt,
++      instructions: NonNegativeInt,
++      skills: NonNegativeInt,
++      tools: NonNegativeInt,
++      messages: Schema.Struct({
++        userText: NonNegativeInt,
++        assistantText: NonNegativeInt,
++        reasoning: NonNegativeInt,
++        toolInput: NonNegativeInt,
++        toolOutput: NonNegativeInt,
++        attachments: NonNegativeInt,
++        total: NonNegativeInt,
++      }),
++    }),
++  ),
+ }).annotate({ identifier: "StepStartPart" })
+ export type StepStartPart = Types.DeepMutable<Schema.Schema.Type<typeof StepStartPart>>
+ 
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 9d44899dc9444ecbcb518340acc1c49cec2a7e02..725e6348f121a07679a77b310f9072284b8ee8f1 100644
+index 48711aba4e..f361084936 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -480,6 +480,12 @@ export const layer: Layer.Layer<
+@@ -461,12 +461,20 @@ const layer = Layer.effect(
+ 
+           case "step-start":
+             if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
++            // #124：把 daemon 请求前快照写入 step-start，供 streaming 展示分类
+             yield* session.updatePart({
+               id: PartID.ascending(),
+               messageID: ctx.assistantMessage.id,
                sessionID: ctx.sessionID,
                snapshot: ctx.snapshot,
                type: "step-start",
-+              // Expose the daemon's pre-request input snapshot so the TUI can
-+              // show per-category context usage immediately during streaming,
-+              // before the provider confirms token totals via step-finish.
++              // #124：TUI tokenAccounting 读这些字段做 step-start breakdown
 +              inputChars: ctx.inputChars,
-+              inputTokens: ctx.assistantMessage.tokens.input + ctx.assistantMessage.tokens.cache.read + ctx.assistantMessage.tokens.cache.write,
++              inputTokens:
++                ctx.assistantMessage.tokens.input +
++                ctx.assistantMessage.tokens.cache.read +
++                ctx.assistantMessage.tokens.cache.write,
 +              inputBreakdown: ctx.inputBreakdown,
              })
              return
  
-diff --git a/packages/opencode/test/cli/tui/token-estimate.test.ts b/packages/opencode/test/cli/tui/token-estimate.test.ts
-index 5fb50de3f2b6b1bfc89b5c654b37f6b42d040293..dbde4a61030ed737cc6c81616c347928ff0b6c75 100644
---- a/packages/opencode/test/cli/tui/token-estimate.test.ts
-+++ b/packages/opencode/test/cli/tui/token-estimate.test.ts
-@@ -123,4 +123,30 @@ describe("tokenAccounting", () => {
-     expect(bd.assistantText).toBe(120)
-     expect(bd.toolCalls).toBe(80)
-   })
-+
-+  test("breakdown available from step-start during streaming (before step-finish)", () => {
-+    // 模拟 daemon 写入的 step-start input snapshot；assistant 正在 streaming 中
-+    const msgs = [userMsg("1"), assistantMsg("2", "1", { input: 400, output: 0, reasoning: 0, cache: { read: 0, write: 0 } })]
-+    const getParts = (_id: string) => [
-+      {
-+        id: "ss", type: "step-start",
-+        inputChars: 1000,
-+        inputTokens: 400,
-+        inputBreakdown: {
-+          system: 300, instructions: 200, skills: 0, tools: 100,
-+          messages: { userText: 100, assistantText: 80, reasoning: 0, toolInput: 40, toolOutput: 80, attachments: 100, total: 400 },
-+        },
-+      },
-+      textPart("p1", "hello world"),
-+    ]
-+    const acc = tokenAccounting(msgs, getParts)
-+    expect(acc.breakdown).not.toBeNull()
-+    expect(acc.step.confirmed).toBe(false)
-+    // daemon inputTokens=400, inputChars=1000 → alloc = round(chars * 400/1000)
-+    expect(acc.breakdown!.system).toBe(120)
-+    expect(acc.breakdown!.instructions).toBe(80)
-+    expect(acc.breakdown!.tools).toBe(40)
-+    // output streaming estimate: "hello world" 11 chars / outputRatio=4 → 3
-+    expect(acc.breakdown!.assistantText).toBe(3)
-+  })
- })

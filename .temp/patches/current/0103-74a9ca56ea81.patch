@@ -4,44 +4,30 @@ Date: Thu, 7 May 2026 14:11:16 +0800
 Subject: [PATCH] =?UTF-8?q?feat(build):=20=E6=B7=BB=E5=8A=A0=E5=AF=B9=20Wi?=
  =?UTF-8?q?ndows=20=E6=9E=84=E5=BB=BA=E7=9A=84=E6=9E=B6=E6=9E=84=E6=94=AF?=
  =?UTF-8?q?=E6=8C=81=EF=BC=8C=E4=BC=98=E5=8C=96=E6=89=93=E5=8C=85=E9=80=BB?=
- =?UTF-8?q?=E8=BE=91?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
 
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
-index 7cec5a8a2b2f914d2688ac86dd731c1b02b0dfb9..cd368bd04abf9640104097de06cafc08f1e1e889 100644
+index 783b3eddb0..1f0f5b196e 100644
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -35,7 +35,7 @@ jobs:
-       - name: Package Linux tar.gz
+@@ -46,7 +46,7 @@ jobs:
          run: |
            cd packages/opencode/dist/opencode-linux-x64/bin
+           # tar.gz 打包：保留单文件二进制，解压即用
 -          tar -czf ../../../opencode-linux-x64-${{ inputs.version || env.DEFAULT_VERSION }}.tar.gz opencode
 +          tar -czf ../../opencode-linux-x64-${{ inputs.version || env.DEFAULT_VERSION }}.tar.gz opencode
  
        - name: Package Linux .deb
          run: |
-@@ -58,7 +58,7 @@ jobs:
-           Architecture: amd64
-           Maintainer: smark <smark@local>
-           Description: opencode AI-powered development tool (smark build)
--          A standalone AI coding assistant with TUI, version ${VERSION}.
-+           A standalone AI coding assistant with TUI, version ${VERSION}.
-           EOF
- 
-           dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
-@@ -69,6 +69,7 @@ jobs:
+@@ -87,6 +87,7 @@ jobs:
            path: |
              packages/opencode/dist/opencode-linux-x64-*.tar.gz
              packages/opencode/dist/opencode_*_amd64.deb
 +          if-no-files-found: error
  
+   # macOS 构建：arm64 (Apple Silicon) 和 x64 (Intel) 双架构
    build-macos:
-     runs-on: macos-latest
-@@ -86,9 +87,9 @@ jobs:
-         run: |
+@@ -107,9 +108,9 @@ jobs:
+           # VERSION shell 变量：统一两架构的命名，避免重复展开 GitHub 表达式
            VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
            cd packages/opencode/dist/opencode-darwin-arm64/bin
 -          tar -czf ../../../opencode-darwin-arm64-${VERSION}.tar.gz opencode
@@ -52,29 +38,33 @@ index 7cec5a8a2b2f914d2688ac86dd731c1b02b0dfb9..cd368bd04abf9640104097de06cafc08
  
        - uses: actions/upload-artifact@v4
          with:
-@@ -96,6 +97,7 @@ jobs:
+@@ -117,6 +118,7 @@ jobs:
            path: |
              packages/opencode/dist/opencode-darwin-arm64-*.tar.gz
              packages/opencode/dist/opencode-darwin-x64-*.tar.gz
 +          if-no-files-found: error
  
+   # Windows 构建：x64 和 arm64 双架构，使用 pwsh 执行 PowerShell 脚本
    build-windows:
-     runs-on: windows-latest
-@@ -118,20 +120,18 @@ jobs:
+@@ -144,7 +146,8 @@ jobs:
          shell: pwsh
          run: |
            cd packages/opencode
 -          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=win32 --skip-embed-web-ui
++          # #103：显式 --arch=x64，避免 Windows 默认双架构产物膨胀
 +          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=win32 --arch=x64 --skip-embed-web-ui
  
        - name: Package Windows zip
          shell: pwsh
-         run: |
+@@ -152,14 +155,12 @@ jobs:
+           # PowerShell 变量语法 $VERSION：与 bash 不同，pwsh 用 $ 前缀引用变量
            $VERSION = "${{ inputs.version || env.DEFAULT_VERSION }}"
            cd packages/opencode/dist/opencode-windows-x64/bin
+-          # Compress-Archive 为 Windows 标准压缩格式，用户无需额外工具解压
 -          Compress-Archive -Path "opencode.exe" -DestinationPath "../../../opencode-windows-x64-$VERSION.zip"
 -          cd ../../opencode-windows-arm64/bin
 -          Compress-Archive -Path "opencode.exe" -DestinationPath "../../../opencode-windows-arm64-$VERSION.zip"
++          # #103：产物落在 dist/ 下（../../ 相对 bin），仅打包 x64
 +          Compress-Archive -Path "opencode.exe" -DestinationPath "../../opencode-windows-x64-$VERSION.zip"
  
        - uses: actions/upload-artifact@v4
@@ -85,18 +75,19 @@ index 7cec5a8a2b2f914d2688ac86dd731c1b02b0dfb9..cd368bd04abf9640104097de06cafc08
 -            packages/opencode/dist/opencode-windows-arm64-*.zip
 +          if-no-files-found: error
 diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
-index 5bb756f1f601e2b94409e1f771c8140b30cac929..4f6a4229392a5400451c682ec6ad99f87812264f 100755
+index 47ccd21a55..4f44c2f6fe 100644
 --- a/packages/opencode/script/build.ts
 +++ b/packages/opencode/script/build.ts
-@@ -62,6 +62,7 @@ const sourcemapsFlag = process.argv.includes("--sourcemaps")
- const plugin = createSolidTransformPlugin()
+@@ -29,6 +29,8 @@ const plugin = createSolidTransformPlugin()
  const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
+ // 按操作系统过滤构建目标，仅保留指定 OS 的原生（非 musl、非 baseline）二进制
  const osFilter = process.argv.find((a) => a.startsWith("--os="))?.replace("--os=", "")
++// #103：允许 CI 用 --arch=x64 只打 Windows x64，避免默认双架构
 +const archFilter = process.argv.find((a) => a.startsWith("--arch="))?.replace("--arch=", "")
  
  const createEmbeddedWebUIBundle = async () => {
    console.log(`Building Web UI to embed in the binary`)
-@@ -171,7 +172,7 @@ const targets = singleFlag
+@@ -139,7 +141,7 @@ const targets = singleFlag
        return true
      })
    : osFilter

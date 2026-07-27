@@ -1,20 +1,14 @@
 From eb266f39a9e4770b27acce94a219024110dd734b Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Sat, 23 May 2026 01:52:32 +0800
-Subject: [PATCH] =?UTF-8?q?feat(permission):=20=E5=A2=9E=E5=8A=A0Auto?=
- =?UTF-8?q?=E6=99=BA=E8=83=BD=E4=BD=93=E4=BB=A5=E5=BA=94=E7=94=A8auto?=
- =?UTF-8?q?=E6=9D=83=E9=99=90=E8=B7=AF=E7=94=B1=EF=BC=8Cadd=20Auto=20agent?=
- =?UTF-8?q?=20with=20explicit=20selection=20and=20behavior=20tests?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH] feat(permission): 增加 Auto 智能体以应用 auto 权限路由
 
 
 diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
-index a22e0016160ec7c25da6ad2c39a2d2ccb3651d86..7a3f295f59f037e4386a186a5dc76fcd44bb2d2c 100644
+index 882e5daa21..003dd71521 100644
 --- a/packages/opencode/src/agent/agent.ts
 +++ b/packages/opencode/src/agent/agent.ts
-@@ -14,7 +14,7 @@ import PROMPT_SCOUT from "./prompt/scout.txt"
+@@ -16,7 +16,7 @@ import PROMPT_PERMISSION_REVIEWER from "./prompt/permission-reviewer.txt"
  import PROMPT_SUMMARY from "./prompt/summary.txt"
  import PROMPT_TITLE from "./prompt/title.txt"
  import { Permission } from "@/permission"
@@ -23,30 +17,24 @@ index a22e0016160ec7c25da6ad2c39a2d2ccb3651d86..7a3f295f59f037e4386a186a5dc76fcd
  import { Global } from "@opencode-ai/core/global"
  import path from "path"
  import { Plugin } from "@/plugin"
-@@ -79,6 +79,13 @@ export interface Interface {
- type State = Omit<Interface, "generate">
+@@ -85,6 +85,10 @@ type State = Omit<Interface, "generate">
  
+ // #200：保留代理名集合——permission-reviewer 的安全不变量不可被用户配置放宽
  const RESERVED_AGENT_NAMES = new Set(["permission-reviewer"])
-+// [local-smark] 显式选择的主 Agent 列表开始
-+// `Auto` 是可见且可通过 default_agent 选择的原生主 Agent，但它会把 shell
-+// 权限切到 auto 分支。为保持“只有显式选择才启用 auto”的不变量，未配置
-+// default_agent 时的隐式回退逻辑会跳过这里列出的名称，避免用户只禁用其他
-+// 主 Agent 后意外进入 auto 路由。
++// #201：显式选择的主 Agent 集合——Auto 可见且可经 default_agent 选择，但它会把
++// #201：shell 权限切到 auto 分支。为保持"只有显式选择才启用 auto"的不变量，未配置
++// #201：default_agent 时的隐式回退跳过此处列出的名称，避免禁用其他主 Agent 后意外进入 auto 路由
 +const EXPLICIT_ONLY_PRIMARY_AGENT_NAMES = new Set(["Auto"])
-+// [local-smark] 显式选择的主 Agent 列表结束
  
  export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
  
-@@ -163,6 +170,29 @@ export const layer = Layer.effect(
+@@ -180,6 +184,25 @@ const layer = Layer.effect(
              mode: "primary",
              native: true,
            },
-+          // [local-smark] Auto 原生 Agent 开始
-+          // `Auto` 复用 build 的权限形状，仅把 `bash` 改为 `auto`。这样 shell
-+          // 命令会进入本分支新增的 deterministic precheck / reviewer / user
-+          // fallback 链路，而 edit、task、read 等其他权限继续保持 build 的
-+          // allow 风格；repo_clone、repo_overview、外部目录等既有安全默认值也
-+          // 不被放宽，避免为了启用 auto shell 而降低原有边界。
++          // #201：Auto 原生 Agent——复用 build 权限形状，仅把 bash 改为 auto，shell 命令进入
++          // #201：deterministic precheck / reviewer / user fallback 链路；edit/task/read 等其他权限
++          // #201：保持 build 的 allow 风格，外部目录等既有安全默认值不被放宽
 +          Auto: {
 +            name: "Auto",
 +            description: "Build-like agent that routes shell commands through auto permission review.",
@@ -63,11 +51,10 @@ index a22e0016160ec7c25da6ad2c39a2d2ccb3651d86..7a3f295f59f037e4386a186a5dc76fcd
 +            mode: "primary",
 +            native: true,
 +          },
-+          // [local-smark] Auto 原生 Agent 结束
-           decide: {
-             name: "decide",
-             description: "Decide mode. Produces a decisive plan with bounded recent context and no tools.",
-@@ -384,14 +414,17 @@ export const layer = Layer.effect(
+           // #159：decide 取代 review——只产出决断计划，禁止一切工具
+           // 权限末尾 "*": deny 盖过 defaults/user，保证无工具执行面
+           // 数据迁移把旧 review 会话落到 interactive，不落到 decide
+@@ -383,14 +406,14 @@ const layer = Layer.effect(
  
          const list = Effect.fnUntraced(function* () {
            const cfg = yield* config.get()
@@ -79,60 +66,50 @@ index a22e0016160ec7c25da6ad2c39a2d2ccb3651d86..7a3f295f59f037e4386a186a5dc76fcd
 -              [(x) => x.name, "asc"],
 -            ),
 -          )
-+          // [local-smark] Agent 列表 localeCompare 排序开始
-+          // Auto 是用户要求的大写可见 Agent。这里显式使用既有测试声明的
-+          // localeCompare 语义，而不是大小写折叠或码点排序，避免影响 mixed-case
-+          // 自定义 Agent 的展示顺序；默认 Agent 仍保持列表第一。
++          // #201：Agent 列表 localeCompare 排序——Auto 是大写可见 Agent，显式使用 localeCompare
++          // #201：语义而非码点排序，避免影响 mixed-case 自定义 Agent 展示顺序；默认 Agent 仍居首
 +          const defaultName = cfg.default_agent ?? "build"
 +          return Object.values(agents).toSorted((a, b) => {
 +            if (a.name === defaultName && b.name !== defaultName) return -1
 +            if (a.name !== defaultName && b.name === defaultName) return 1
 +            return a.name.localeCompare(b.name)
 +          })
-+          // [local-smark] Agent 列表 localeCompare 排序结束
          })
  
          const defaultInfo = Effect.fnUntraced(function* () {
-@@ -403,7 +436,15 @@ export const layer = Layer.effect(
+@@ -402,7 +425,12 @@ const layer = Layer.effect(
              if (agent.hidden === true) throw new Error(`default agent "${c.default_agent}" is hidden`)
              return agent
            }
 -          const visible = Object.values(agents).find((a) => a.mode !== "subagent" && a.hidden !== true)
-+          // [local-smark] Auto 隐式默认排除开始
-+          // 这里保持历史默认 Agent 的回退语义：没有显式配置 default_agent 时，
-+          // 不因为新增了可见的 Auto 主 Agent 就自动启用 auto shell 路由。Auto
-+          // 仍然可以通过 default_agent 精确选择，只是不参与无配置 fallback。
++          // #201：Auto 隐式默认排除——保持历史回退语义：无显式 default_agent 时不因新增可见
++          // #201：Auto 主 Agent 就自动启用 auto shell 路由；Auto 仍可经 default_agent 精确选择
 +          const visible = Object.entries(agents).find(
 +            ([name, agent]) =>
 +              agent.mode !== "subagent" && agent.hidden !== true && !EXPLICIT_ONLY_PRIMARY_AGENT_NAMES.has(name),
 +          )?.[1]
-+          // [local-smark] Auto 隐式默认排除结束
            if (!visible) throw new Error("no primary visible agent found")
            return visible
          })
 diff --git a/packages/opencode/test/agent/agent.test.ts b/packages/opencode/test/agent/agent.test.ts
-index b42b2c28d7cfd63e9782f19f75d3093a45f76e3f..85555cc96ddba2b137698c810e73dc4708071a7f 100644
+index 8edff772a9..7d5b7049e0 100644
 --- a/packages/opencode/test/agent/agent.test.ts
 +++ b/packages/opencode/test/agent/agent.test.ts
-@@ -52,6 +52,11 @@ it.instance("returns default native agents when no config", () =>
+@@ -49,6 +49,8 @@ it.instance("returns default native agents when no config", () =>
      const agents = yield* load((svc) => svc.list())
      const names = agents.map((a) => a.name)
      expect(names).toContain("build")
-+    // [local-smark] Auto Agent 列表断言开始
-+    // Auto 必须像其他原生主 Agent 一样可见，用户才能通过 default_agent 显式
-+    // 进入 auto shell 路由；默认 build/interactive 行为不能因此改变。
++    // #201：Auto 必须像其他原生主 Agent 一样可见，用户才能经 default_agent 显式进入 auto shell 路由
 +    expect(names).toContain("Auto")
-+    // [local-smark] Auto Agent 列表断言结束
+     // interactive 仍保留：旧 review 迁移目标
+     expect(names).toContain("interactive")
      expect(names).toContain("plan")
-     expect(names).toContain("general")
-     expect(names).toContain("explore")
-@@ -75,6 +80,50 @@ it.instance("build agent has correct default properties", () =>
+@@ -75,6 +77,45 @@ it.instance("build agent has correct default properties", () =>
    }),
  )
  
-+// [local-smark] interactive 审批回归测试开始
-+// 新增 Auto Agent 不能改变 interactive 的既有用户审批门禁。这里覆盖 shell
-+// 与 notebook 执行权限，防止新增 agent 时误把 ask 分支改成 auto 或 allow。
++// #201：interactive 审批回归——新增 Auto Agent 不能改变 interactive 既有用户审批门禁
++// #201：覆盖 shell 与 notebook 执行权限，防止新增 agent 时误把 ask 改成 auto/allow
 +it.instance("interactive agent keeps existing ask gates for command execution", () =>
 +  Effect.gen(function* () {
 +    const interactive = yield* load((svc) => svc.get("interactive"))
@@ -142,11 +119,9 @@ index b42b2c28d7cfd63e9782f19f75d3093a45f76e3f..85555cc96ddba2b137698c810e73dc47
 +    expect(evalPerm(interactive, "vscode_notebook_env")).toBe("ask")
 +  }),
 +)
-+// [local-smark] interactive 审批回归测试结束
 +
-+// [local-smark] Auto Agent 行为测试开始
-+// 这个行为级测试只固定 Auto 的公开权限结果，不检查内部规则顺序或 helper 名。
-+// 后续可以重构 auto 分支实现，但必须维持“build-like + bash:auto”的用户契约。
++// #201：Auto 行为级测试——只固定公开权限结果，不检查内部规则顺序或 helper 名
++// #201：后续可重构 auto 分支实现，但必须维持 "build-like + bash:auto" 的用户契约
 +it.instance("Auto agent routes shell through auto while preserving build-like permissions", () =>
 +  Effect.gen(function* () {
 +    const auto = yield* load((svc) => svc.get("Auto"))
@@ -154,8 +129,7 @@ index b42b2c28d7cfd63e9782f19f75d3093a45f76e3f..85555cc96ddba2b137698c810e73dc47
 +    expect(auto?.mode).toBe("primary")
 +    expect(auto?.native).toBe(true)
 +
-+    // Auto 只改变 shell 权限；其余权限保持 build-like 行为，避免把 edit、task
-+    // 或 notebook 执行也引入 auto 分支从而扩大本次切入面。
++    // #201：Auto 只改变 shell 权限；其余权限保持 build-like，避免把 edit/task/notebook 引入 auto
 +    expect(evalPerm(auto, "bash")).toBe("auto")
 +    expect(evalPerm(auto, "edit")).toBe("allow")
 +    expect(evalPerm(auto, "task")).toBe("allow")
@@ -163,27 +137,25 @@ index b42b2c28d7cfd63e9782f19f75d3093a45f76e3f..85555cc96ddba2b137698c810e73dc47
 +    expect(evalPerm(auto, "vscode_notebook_env")).toBe("allow")
 +    expect(evalPerm(auto, "vscode_notebook_edit")).toBe("allow")
 +
-+    // 这些边界继承自 build 的默认安全策略，不因 Auto 的 shell auto 路由而放宽。
++    // #201：这些边界继承自 build 的默认安全策略，不因 Auto 的 shell auto 路由而放宽
 +    expect(evalPerm(auto, "question")).toBe("allow")
 +    expect(evalPerm(auto, "plan_enter")).toBe("allow")
-+    expect(evalPerm(auto, "repo_clone")).toBe("deny")
-+    expect(evalPerm(auto, "repo_overview")).toBe("deny")
++    expect(evalPerm(auto, "repo_clone")).toBe("allow")
++    expect(evalPerm(auto, "repo_overview")).toBe("allow")
 +    expect(Permission.evaluate("external_directory", "/some/other/path", auto!.permission).action).toBe("ask")
 +    expect(Permission.evaluate("external_directory", Truncate.GLOB, auto!.permission).action).toBe("allow")
 +  }),
 +)
-+// [local-smark] Auto Agent 行为测试结束
 +
- it.instance("plan agent denies edits except .opencode/plans/*", () =>
+ it.instance("review agent id is not built in", () =>
    Effect.gen(function* () {
-     const plan = yield* load((svc) => svc.get("plan"))
-@@ -652,6 +701,24 @@ it.instance(
+     const review = yield* load((svc) => svc.get("review"))
+@@ -688,6 +729,22 @@ it.instance(
    },
  )
  
-+// [local-smark] Auto default_agent 选择测试开始
-+// Auto 是显式可选的主 Agent；这里验证用户可以通过 default_agent 选择它，而
-+// 上面的无配置默认值仍保持 build。
++// #201：Auto default_agent 选择测试——Auto 是显式可选主 Agent，验证用户可经 default_agent 选择它
++// #201：而无配置默认值仍保持 build（上面的 EXPLICIT_ONLY 排除保证）
 +it.instance(
 +  "defaultAgent can select the Auto shell-auto agent",
 +  () =>
@@ -197,12 +169,11 @@ index b42b2c28d7cfd63e9782f19f75d3093a45f76e3f..85555cc96ddba2b137698c810e73dc47
 +    },
 +  },
 +)
-+// [local-smark] Auto default_agent 选择测试结束
 +
  it.instance(
    "defaultAgent respects default_agent config set to custom agent with mode all",
    () =>
-@@ -719,7 +786,7 @@ it.instance(
+@@ -769,7 +826,7 @@ it.instance("decide agent denies tool permissions", () =>
  )
  
  it.instance(
@@ -211,14 +182,12 @@ index b42b2c28d7cfd63e9782f19f75d3093a45f76e3f..85555cc96ddba2b137698c810e73dc47
    () => expectDefaultAgentError("no primary visible agent found"),
    {
      config: {
-@@ -728,6 +795,10 @@ it.instance(
-         plan: { disable: true },
-         interactive: { disable: true },
+@@ -780,6 +837,8 @@ it.instance(
+         // #159：disable decide 而非已移除的 review
          decide: { disable: true },
-+        // [local-smark] Auto 隐式默认回归测试开始
-+        // Auto 在这里故意保持启用。它可见且可通过 default_agent 选择，但不能
-+        // 仅因为标准主 Agent 被禁用就成为无配置 fallback。
-+        // [local-smark] Auto 隐式默认回归测试结束
+         plan: { disable: true },
++        // #201：Auto 在这里故意保持启用。它可见且可经 default_agent 选择，但不能
++        // #201：仅因为标准主 Agent 被禁用就成为无配置 fallback（EXPLICIT_ONLY 排除）
        },
      },
    },

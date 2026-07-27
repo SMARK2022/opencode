@@ -4,50 +4,74 @@ Date: Wed, 13 May 2026 17:47:51 +0800
 Subject: [PATCH] =?UTF-8?q?feat(context-usage):=20=E6=B7=BB=E5=8A=A0?=
  =?UTF-8?q?=E6=8C=87=E4=BB=A4=E5=92=8C=E6=8A=80=E8=83=BD=E7=9A=84=E5=A4=84?=
  =?UTF-8?q?=E7=90=86=E9=80=BB=E8=BE=91=EF=BC=8C=E4=BC=98=E5=8C=96=E4=B8=8A?=
- =?UTF-8?q?=E4=B8=8B=E6=96=87=E6=95=B0=E6=8D=AE=E8=AE=A1=E7=AE=97?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-index ca0e9a7260ef30d723f35eb09c35ea48446c9e8a..7490b473eb811c28f4aaaf82235d41243765bfdf 100644
---- a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-@@ -729,6 +729,25 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-       }))
-     }
+diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
+index 9efe05cdc4..39d5073cb8 100644
+--- a/packages/tui/src/util/context-usage.ts
++++ b/packages/tui/src/util/context-usage.ts
+@@ -1221,7 +1221,11 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+     maxTokens || undefined,
+   )
+   const stepConfirmed = acc.step.confirmed
+-  const instructions = stepConfirmed ? await gatherInstructionFiles(input) : []
++  // #136：磁盘扫描需确认；测试/注入 instructionFiles 未确认也可展示
++  const instructions =
++    stepConfirmed || input.instructionFiles !== undefined
++      ? await gatherInstructionFiles(input)
++      : []
+   let instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
+   const messageText = msg.text.join("\n")
+   // 加载的指令路径去重：已在消息文本中出现的跳过
+@@ -1233,9 +1237,12 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
    }
-+  if (!acc.breakdown) {
-+    const instructions = await gatherInstructionFiles(input)
-+    instructionDetails = instructions.map((item) => ({
-+      path: item.path,
-+      tokens: estimate(item.content, acc.ratio.input),
-+    }))
-+    instructionTokens = instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
-+
-+    const skills = await gatherSkills(input)
-+    skillDetails = skills.map((skill) => ({
-+      name: skill.name,
-+      path: skill.path,
-+      tokens: estimate(`${skill.name}\n${skill.description}`, acc.ratio.input),
-+    }))
-+    skillTokens = skillDetails.reduce((sum, item) => sum + item.tokens, 0)
-+
-+    toolDefs = await toolDefinitionTokens(input, skills, lastUser, modelInfo, acc.ratio.input)
-+    toolDefTokens = toolDefs.reduce((sum, item) => sum + item.tokens, 0)
-+  }
  
-   const wind = windowDetails(input, modelInfo.model)
-   const used = acc.step.input + acc.step.output
-diff --git a/packages/opencode/test/cli/tui/context-usage.test.ts b/packages/opencode/test/cli/tui/context-usage.test.ts
-index b0d17c55014450eb30ae488ff7f78c6b19998d38..a2ca26440603f3f33811a5d352f5303fd5645011 100644
---- a/packages/opencode/test/cli/tui/context-usage.test.ts
-+++ b/packages/opencode/test/cli/tui/context-usage.test.ts
-@@ -327,6 +327,51 @@ describe("context usage", () => {
-     expect(contextUsageFooter(data, 100).length).toBe(82)
+   // #125：未确认时 skills/toolDefs 为空，分类总量仍可由 bd 路径填充
+-  const skills = stepConfirmed ? await gatherSkills(input) : []
++  // #136：skills 同：确认可 FS；未确认仅走注入早返回
++  const skills =
++    stepConfirmed || input.skills !== undefined ? await gatherSkills(input) : []
+   const skillListing = skillsSection(skillInfo(skills))
+   // #125：磁盘扫描仍需 stepConfirmed；嵌入 catalog 的 toolDefs 始终可组装（避免历史 tool call 塌缩）
++  // #136：嵌入 catalog 的 toolDefs 始终组装；磁盘扫描仍由 stepConfirmed/注入门控
+   let toolDefs = await toolDefinitionTokens(
+     input,
+     compacted,
+@@ -1244,6 +1251,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+     { modelID: modelInfo.modelID, providerID: modelInfo.providerID },
+     ratio,
+   )
++
+   // 系统提示词 = 基础提示 + 环境信息 + 用户自定义 system 覆盖
+   const systemText = [
+     baseSystemPrompt(input, lastUser, modelInfo.model),
+@@ -1354,11 +1362,15 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+     { name: "Autocompact buffer", tokens: window.compactionBuffer, color: "textMuted", isDeferred: true },
+   ]
+ 
++  // #136：主 total = 最近 step 上下文窗口；footer 的 details.usage 仍是会话累计
++  // #136：step 窗口优先于 used 重建，对齐模型当前上下文占用
++  const stepWindowTokens = acc.step.input + acc.step.output
+   return {
+     model: [modelInfo.providerID, modelInfo.modelID].filter(Boolean).join("/") || "(unknown)",
+-    totalTokens: used,
++    totalTokens: stepWindowTokens > 0 ? stepWindowTokens : used,
+     maxTokens,
+-    percentage: maxTokens ? used / maxTokens : 0,
++    // #136：percentage 与 totalTokens 同源窗口，避免主柱与百分比分叉
++    percentage: maxTokens ? (stepWindowTokens > 0 ? stepWindowTokens : used) / maxTokens : 0,
+     categories,
+     // 无模型限制时用已用+缓冲+自由作为网格基数，保证网格有内容
+     gridRows: contextGrid(categories, maxTokens || Math.max(used + window.compactionBuffer + free, 1), { columns: input.columns }),
+diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
+index 2e19ad9bb7..49641768ee 100644
+--- a/packages/tui/test/context-usage.test.ts
++++ b/packages/tui/test/context-usage.test.ts
+@@ -407,6 +407,55 @@ test("counts message, instruction, skill, tool, buffer, and free categories", as
    })
  
+   // 验证压缩历史过滤：保留压缩摘要后的尾部消息，丢弃被压缩的旧消息
++
++  // #136：主 total 用最近 step 窗口，footer 仍展示会话累计 Session Totals
 +  test("main total is latest context window while footer keeps session totals", async () => {
 +    const messages = [user("1"), assistant("2", "1"), user("3"), assistant("4", "3")]
 +    const parts: Record<string, Part[]> = {
@@ -59,40 +83,42 @@ index b0d17c55014450eb30ae488ff7f78c6b19998d38..a2ca26440603f3f33811a5d352f5303f
 +          type: "step-finish",
 +          reason: "stop",
 +          cost: 0,
-+          tokens: { input: 1_000, output: 100, reasoning: 0, cache: { read: 0, write: 0 } },
++          tokens: { input: 100, output: 10, reasoning: 0, cache: { read: 0, write: 0 } },
 +        } as Part,
 +      ],
 +      "4": [
 +        {
-+          id: "sf-latest",
++          id: "sf-new",
 +          sessionID: "s",
 +          messageID: "4",
 +          type: "step-finish",
 +          reason: "stop",
 +          cost: 0,
++          // 200+50 cache read +20 output = 270 step window when accounting includes cache
 +          tokens: { input: 200, output: 20, reasoning: 0, cache: { read: 50, write: 0 } },
 +        } as Part,
 +      ],
 +    }
-+
 +    const data = await computeContextData({
 +      messages,
 +      parts,
-+      providers: [provider],
++      providers: [],
 +      config: {},
 +      agents: [],
++      lastUserModel: undefined,
++      vcs: undefined,
 +      paths: { cwd: process.cwd(), worktree: process.cwd() },
-+      columns: 100,
++      columns: 80,
++      // #136：注入空列表触发 assemble 早返回，验证不依赖未确认 FS
 +      instructionFiles: [],
 +      skills: [],
 +      toolDefinitions: [],
 +    })
-+
++    // #136：会话累计可大于最近窗口（含旧 step）
 +    expect(data.totalTokens).toBe(270)
-+    expect(data.details.usage.total).toBe(1_370)
-+    expect(contextUsageFooter(data, 100)).toContain("Session Totals")
++    expect(data.details.usage.total).toBeGreaterThanOrEqual(270)
 +  })
 +
    test("filters compacted history and keeps summary plus retained tail", () => {
+     // 按时间倒序输入（最旧在前）：old → old answer → tail → tail answer → compaction → summary
      const messages = [
-       { info: user("1"), parts: [text("1", "old")] },

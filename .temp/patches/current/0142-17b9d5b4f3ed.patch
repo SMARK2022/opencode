@@ -4,37 +4,537 @@ Date: Thu, 14 May 2026 02:50:00 +0800
 Subject: [PATCH] =?UTF-8?q?feat(read):=20=E5=AE=8C=E6=95=B4=E9=87=8D?=
  =?UTF-8?q?=E6=9E=84read=E5=B7=A5=E5=85=B7=E3=80=81=E9=80=9A=E8=BF=87?=
  =?UTF-8?q?=E5=85=83=E6=95=B0=E6=8D=AE=E5=A4=84=E7=90=86=E5=92=8C=E5=AD=98?=
- =?UTF-8?q?=E6=A0=B9=E9=80=BB=E8=BE=91=E5=A2=9E=E5=BC=BA=E8=AF=BB=E5=8F=96?=
- =?UTF-8?q?=E5=B7=A5=E5=85=B7=EF=BC=8C=E6=8F=90=E9=AB=98=E4=B8=8A=E4=B8=8B?=
- =?UTF-8?q?=E6=96=87=E7=AE=A1=E7=90=86=E5=81=A5=E5=A3=AE=E6=80=A7=20enhanc?=
- =?UTF-8?q?e=20read=20tool=20with=20metadata=20handling=20and=20stub=20log?=
- =?UTF-8?q?ic?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-- Introduced structured metadata for read operations, including file size, modification time, and read range.
-- Implemented logic to return stubs for unchanged file ranges already visible in context, improving efficiency.
-- Added XML escaping for file content to prevent parsing issues.
-- Enhanced output formatting to include range and overlap notes for better user guidance.
-- Updated tests to cover new metadata structure and stub behavior, ensuring robust functionality.
-
+diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
+index c6000c109b..b70f7bce5b 100644
+--- a/packages/opencode/src/tool/read.ts
++++ b/packages/opencode/src/tool/read.ts
+@@ -5,6 +5,7 @@ import * as Tool from "./tool"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { LSP } from "@/lsp/lsp"
+ import DESCRIPTION from "./read.txt"
++import { readOutline, type Outline } from "./read-outline"
+ import { InstanceState } from "@/effect/instance-state"
+ import { assertExternalDirectoryEffect } from "./external-directory"
+ import { Instruction } from "../session/instruction"
+@@ -12,7 +13,9 @@ import { isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, form
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
+ 
+ // 默认 400 行：与 notebook source limit 对齐，压低单次工具输出
+-const DEFAULT_READ_LIMIT = 400
++// #142：默认 200 行，配合 range/outline 做定点读取
++// #142：默认 200 行与 source 对齐
++const DEFAULT_READ_LIMIT = 200
+ // 不再按行截断：超长行完整保留，仅用 MAX_BYTES 控制总输出
+ // 默认最大读取字节 24KB：压低单次工具输出内存与上下文占用
+ const MAX_BYTES = 24 * 1024
+@@ -21,6 +24,15 @@ const SAMPLE_BYTES = 4096
+ const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
+ 
+ const MAX_CONTENT_TOKENS = 16000
++// #142：单行展示上限
++// #142：单行展示截断阈值
++const MAX_LINE_LENGTH = 2000
++// #142：重叠提示阈值
++// #142：重叠提示最少行数
++const OVERLAP_MIN_LINES = 20
++// #142：重叠占比阈值
++const OVERLAP_MIN_RATIO = 0.3
++
+ 
+ // 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
+ const BLOCKED_DEVICE_PATHS = new Set([
+@@ -110,7 +122,8 @@ function findUnexpandedFileInContext(
+   limit: number | undefined,
+ ): boolean {
+   for (let i = messages.length - 1; i >= 0; i--) {
+-    const msg = messages[i]
++    // #142：stub 文案引导复用上下文而非重读
++  const msg = messages[i]
+     if (msg.info.role !== "assistant") continue
+     for (const part of msg.parts) {
+       if (part.type !== "tool") continue
+@@ -143,13 +156,231 @@ class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
+ // purpose in the LLM tool-call path (the model emits typed JSON). The JSON
+ // Schema output is identical (`type: "number"`), so the LLM view is
+ // unchanged; purely CLI-facing uses must now send numbers rather than strings.
++
++// #142：可见上下文 stub 状态
++// #142：stub 两种语义：同区间已见 / 被更大区间覆盖
++type ReadStubStatus = "stub_same_range_visible" | "stub_covered_range_visible"
++
++// #142：区间元数据写入 metadata.read，供后续 stub 比对
++type ReadRangeMeta = {
++  path: string
++  canonicalPath: string
++  type: "file"
++  size: number
++  modified: string
++  modifiedMs: number
++  start: number
++  end: number
++  total: number
++  returned: number
++  stub: boolean
++  stubStatus?: ReadStubStatus
++  coveredBy?: string
++}
++
++// #142：统一 metadata 形状，保证 read 字段可选
++// #142：统一返回 Metadata，避免 Tool.define 推断分裂
++function readToolMetadata(input: Metadata) {
++  return input
++}
++
++// #142：结构标签转义，防止 path/content 破坏 XML 外壳
++// #142：结构字段 escape
++function escapeXmlText(input: string) {
++  return input.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
++}
++
++// #142：属性值额外转义引号
++// #142：属性引号 escape
++function escapeXmlAttr(input: string) {
++  return escapeXmlText(input).replaceAll('"', "&quot;").replaceAll("'", "&apos;")
++}
++
++// #142：mtime 稳定字符串，供 stub 版本比对
++// #142：mtime 显示串
++function formatModified(ms: number) {
++  const date = new Date(ms)
++  const pad = (n: number) => String(n).padStart(2, "0")
++  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
++    date.getMinutes(),
++  )}:${pad(date.getSeconds())}`
++}
++
++// #142：兼容 bigint/number size
++// #142：size 统一 number
++function fileSizeOf(stat: { size: unknown }) {
++  return typeof stat.size === "bigint" ? Number(stat.size) : Number(stat.size)
++}
++
++// #142：Windows 规范化后小写，保证同路径可见集合
++// #142：路径规范化键
++function canonicalReadPath(filepath: string) {
++  return process.platform === "win32" ? FSUtil.normalizePath(filepath).toLowerCase() : filepath
++}
++
++// #142：Option<Date> 解包为 ms
++// #142：Option mtime 解包
++function modifiedMsOf(stat: { mtime: Option.Option<Date> }) {
++  return Math.floor(Option.getOrElse(stat.mtime, () => new Date(0)).getTime())
++}
++
++// #142：metadata.read 运行时守卫
++// #142：read 元数据 type guard
++function isReadRangeMeta(input: unknown): input is ReadRangeMeta {
++  if (!input || typeof input !== "object") return false
++  const item = input as Record<string, unknown>
++  return (
++    typeof item.path === "string" &&
++    typeof item.canonicalPath === "string" &&
++    item.type === "file" &&
++    typeof item.size === "number" &&
++    typeof item.modified === "string" &&
++    typeof item.modifiedMs === "number" &&
++    typeof item.start === "number" &&
++    typeof item.end === "number" &&
++    typeof item.total === "number" &&
++    typeof item.returned === "number" &&
++    typeof item.stub === "boolean"
++  )
++}
++
++// #142：从会话历史收集同文件、未 stub 的可见读取
++// #142：扫描 assistant 已完成 read
++function collectVisibleReads(messages: Array<{ info: { role: string }; parts: any[] }>, canonicalPath: string) {
++  const reads: ReadRangeMeta[] = []
++  for (let i = messages.length - 1; i >= 0; i--) {
++    const msg = messages[i]
++    if (msg.info.role !== "assistant") continue
++    for (const part of msg.parts) {
++      if (part.type !== "tool" || part.tool !== "read") continue
++      if (part.state.status !== "completed" || part.state.time.compacted) continue
++      const meta = (part.state.metadata as { read?: unknown } | undefined)?.read
++      if (!isReadRangeMeta(meta) || meta.stub) continue
++      if (meta.canonicalPath !== canonicalPath) continue
++      reads.push(meta)
++    }
++  }
++  return reads
++}
++
++// #142：决定是否 stub
++function findReadStub(visibleReads: ReadRangeMeta[], current: ReadRangeMeta) {
++  // #142：仅当同文件版本已在上下文可见时抑制输出
++  // #142：仅同 size+mtime 视为同文件版本
++  const sameVersion = visibleReads.filter((item) => item.modifiedMs === current.modifiedMs && item.size === current.size)
++  // #142：完全相同 start-end 优先 stub_same_range
++  const sameRange = sameVersion.find((item) => item.start === current.start && item.end === current.end)
++  if (sameRange) return { status: "stub_same_range_visible" as const }
++  // #142：完全覆盖子区间也可 stub
++  const covering = sameVersion.find((item) => item.start <= current.start && item.end >= current.end)
++  // #142：子区间被已见区间覆盖
++  if (covering) return { status: "stub_covered_range_visible" as const, coveredBy: `${covering.start}-${covering.end}` }
++  return undefined
++}
++
++// #142：计算 overlap note
++function findOverlapNote(visibleReads: ReadRangeMeta[], current: ReadRangeMeta) {
++  const overlaps = visibleReads
++    .filter((item) => item.modifiedMs === current.modifiedMs && item.size === current.size)
++    .map((item) => {
++      const start = Math.max(item.start, current.start)
++      const end = Math.min(item.end, current.end)
++      return end >= start ? { start, end, lines: end - start + 1 } : undefined
++    })
++    .filter((item): item is { start: number; end: number; lines: number } => !!item)
++  if (!overlaps.length) return undefined
++  const lines = overlaps.reduce((sum, item) => sum + item.lines, 0)
++  const span = Math.max(1, current.end - current.start + 1)
++  // #142：小重叠不提示，避免噪音
++  if (lines < OVERLAP_MIN_LINES && lines / span < OVERLAP_MIN_RATIO) return undefined
++  return overlaps.map((item) => `${item.start}-${item.end}`).join(",")
++}
++
++// #142：渲染 content 行
++function renderContentLines(raw: string[], offset: number) {
++  return raw
++    .map((line, i) => {
++      // #142：结构化包装字段转义；内容行 escape 防破坏 XML 结构（#145 改为原文）
++      if (line.length <= MAX_LINE_LENGTH) return `${i + offset}: ${escapeXmlText(line)}`
++      return `${i + offset}: ${escapeXmlText(line.slice(0, MAX_LINE_LENGTH))} (line truncated to ${MAX_LINE_LENGTH} chars)`
++    })
++    .join("\n")
++}
++
++// #142：完整结构化输出
++function renderReadOutput(input: {
++  path: string
++  size: number
++  modified: string
++  start: number
++  end: number
++  total: number
++  returned: number
++  raw: string[]
++  cut: boolean
++  more: boolean
++  outline?: Outline
++  overlap?: string
++}) {
++  // #142：结构外壳 path/type/file/range 固定顺序
++  const output: string[] = [
++    `<path>${escapeXmlText(input.path)}</path>`,
++    `<type>file</type>`,
++    `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
++    `<range start="${input.start}" end="${input.end}" total="${input.total}" returned="${input.returned}" />`,
++  ]
++  // #142：outline 仅插入结构提示区
++  if (input.outline?.items.length) {
++    output.push(`<outline truncated="${input.outline.truncated ? "true" : "false"}">`)
++    output.push(input.outline.items.map(escapeXmlText).join("\n"))
++    output.push("</outline>")
++  }
++  // #142：部分重叠仍返回内容，附加 note
++  if (input.overlap) output.push(`<note type="overlap" ranges="${escapeXmlAttr(input.overlap)}" />`)
++  // #142：content 包裹可见行（#145 决定是否 escape 行文本）
++  output.push("<content>")
++  output.push(renderContentLines(input.raw, input.start))
++  output.push("</content>")
++  // #142：字节截断与行截断用不同 reason
++  if (input.cut) output.push(`<more offset="${input.end + 1}" reason="byte_limit" />`)
++  else if (input.more) output.push(`<more offset="${input.end + 1}" reason="line_limit" />`)
++  return output.join("\n")
++}
++
++// #142：stub 结构化输出
++function renderReadStub(input: {
++  path: string
++  size: number
++  modified: string
++  start: number
++  end: number
++  total: number
++  status: ReadStubStatus
++  coveredBy?: string
++}) {
++  const msg =
++    input.status === "stub_same_range_visible"
++      ? "Requested range is already visible in the current context."
++      : `Requested range is covered by already visible range ${input.coveredBy}.`
++  return [
++    `<path>${escapeXmlText(input.path)}</path>`,
++    `<type>file</type>`,
++    `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
++    `<range start="${input.start}" end="${input.end}" total="${input.total}" returned="0" />`,
++    `<stub status="${input.status}"${input.coveredBy ? ` covered_by="${escapeXmlAttr(input.coveredBy)}"` : ""}>`,
++    msg,
++    "</stub>",
++  ].join("\n")
++}
++
++
+ export const Parameters = Schema.Struct({
+   filePath: Schema.String.annotate({ description: "The absolute path to the file or directory to read" }),
+   offset: Schema.optional(NonNegativeInt).annotate({
+     description: "The line number to start reading from (1-indexed)",
+   }),
+   limit: Schema.optional(NonNegativeInt).annotate({
+-    description: "The maximum number of lines to read (defaults to 400)",
++    description: "The maximum number of lines to read (defaults to 200)",
+   }),
+ })
+ 
+@@ -176,6 +407,9 @@ type Metadata = {
+   preview: string
+   truncated: boolean
+   loaded: string[]
++  // #142：可选区间元数据，供 stub/重叠
++  // #142：可选 read 元数据
++  read?: ReadRangeMeta
+   display?: Display
+ }
+ 
+@@ -426,25 +660,11 @@ export const ReadTool = Tool.define<
+         cacheSeeded = true
+       }
+ 
+-      // 文件去重检查 - 使用复合键查找同范围的缓存
++      // #142：重复可见读由 collectVisibleReads/findReadStub 处理，不在此提前 FILE_UNCHANGED 成功返回
++      // #142：SMARK 以 structured stub 为唯一重复读成功语义，禁用 FILE_UNCHANGED 旁路
++      // #142：mtime 缓存仍可 seed，但不得在有可见内容时提前成功返回纯文本
+       const requestOffset = params.offset ?? 1
+       const requestLimit = params.limit
+-      const existingState = readFileState.get(cacheKey(filepath, requestOffset, requestLimit))
+-      if (existingState) {
+-        // stat.mtime 在目标中是 Option<Date>，需要 unwrap 后取毫秒时间戳
+-        const mtimeMs = Math.floor(Option.getOrElse(stat.mtime, () => new Date(0)).getTime())
+-        if (mtimeMs === existingState.timestamp) {
+-          // 额外检查：当前上下文中是否有该文件同范围的未压缩读取结果
+-          const hasUnexpandedContent = findUnexpandedFileInContext(ctx.messages, filepath, requestOffset, requestLimit)
+-          if (hasUnexpandedContent) {
+-            return {
+-              title,
+-              output: FILE_UNCHANGED_STUB,
+-              metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] as string[] },
+-            }
+-          }
+-        }
+-      }
+ 
+       if (stat.type === "Directory") {
+         const items = yield* list(filepath)
+@@ -453,20 +673,25 @@ export const ReadTool = Tool.define<
+         const start = offset - 1
+         const sliced = items.slice(start, start + limit)
+         const truncated = start + sliced.length < items.length
++        // #142：目录条目原文输出，结构标签保持稳定
++        const output = [
++          `<path>${escapeXmlText(filepath)}</path>`,
++          `<type>directory</type>`,
++          `<directory entries="${items.length}" />`,
++          `<content>`,
++          // #142：目录条目也 escape，结构一致
++          sliced.map(escapeXmlText).join("\n"),
++          `</content>`,
++          // #142：目录超限用 entry_limit
++          truncated ? `<more offset="${offset + sliced.length}" reason="entry_limit" />` : undefined,
++        ]
++          .filter(Boolean)
++          .join("\n")
+ 
+         return {
+           title,
+-          output: [
+-            `<path>${filepath}</path>`,
+-            `<type>directory</type>`,
+-            `<entries>`,
+-            sliced.join("\n"),
+-            truncated
+-              ? `\n(Showing ${sliced.length} of ${items.length} entries. Use 'offset' parameter to read beyond entry ${offset + sliced.length})`
+-              : `\n(${items.length} entries)`,
+-            `</entries>`,
+-          ].join("\n"),
+-          metadata: {
++          output,
++          metadata: readToolMetadata({
+             preview: sliced.slice(0, 20).join("\n"),
+             truncated,
+             loaded: [] as string[],
+@@ -478,7 +703,7 @@ export const ReadTool = Tool.define<
+               totalEntries: items.length,
+               truncated,
+             },
+-          },
++          }),
+         }
+       }
+ 
+@@ -561,26 +786,98 @@ export const ReadTool = Tool.define<
+         )
+       }
+ 
++      // #142：构造当前读区间元数据供 stub/overlap
++      // #142：当前文件 size
++const size = fileSizeOf(stat)
++      // #142：当前 mtime
++const mtimeMs = modifiedMsOf(stat)
++      // #142：展示用 modified
++const modified = formatModified(mtimeMs)
++      // #142：区间起点
++const start = file.offset
++      // #142：空区间 end 规则
++const end = file.raw.length === 0 ? Math.max(0, file.offset - 1) : file.offset + file.raw.length - 1
++      // #142：实际返回行数
++const returned = file.raw.length
++      // #142：truncated 元数据
++const truncated = file.more || file.cut
++      // #142：构造当前 read 元数据
++const current: ReadRangeMeta = {
++        path: filepath,
++        canonicalPath: canonicalReadPath(filepath),
++        type: "file",
++        size,
++        modified,
++        modifiedMs: mtimeMs,
++        start,
++        end,
++        total: file.count,
++        returned,
++        stub: false,
++      }
++      // #142：可见上下文驱动 stub，优先于 mtime 缓存
++      // #142：加载可见 reads
++const visibleReads = collectVisibleReads(ctx.messages, current.canonicalPath)
++      // #142：stub 判定
++const stub = findReadStub(visibleReads, current)
++      if (stub) {
++        // #142：可见范围 stub，避免重复灌入相同内容
++        const read = {
++          ...current,
++          returned: 0,
++          stub: true as const,
++          stubStatus: stub.status,
++          coveredBy: "coveredBy" in stub ? stub.coveredBy : undefined,
++        }
++        const output = renderReadStub({
++          path: filepath,
++          size,
++          modified,
++          start,
++          end,
++          total: file.count,
++          status: stub.status,
++          coveredBy: "coveredBy" in stub ? stub.coveredBy : undefined,
++        })
++        return {
++          title,
++          output,
++          metadata: readToolMetadata({
++            preview: output,
++            truncated: false,
++            loaded: loaded.map((item) => item.filepath),
++            read,
++          }),
++        }
++      }
++
+       // 写入去重缓存 — 使用复合键，不同范围分别缓存
+       readFileState.set(cacheKey(filepath, params.offset ?? 1, params.limit), {
+         content,
+-        timestamp: Math.floor(Option.getOrElse(stat.mtime, () => new Date(0)).getTime()),
++        timestamp: mtimeMs,
+       })
+ 
+-      let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
+-      output += file.raw.map((line, i) => `${i + file.offset}: ${line}`).join("\n")
+-
+-      const last = file.offset + file.raw.length - 1
+-      const next = last + 1
+-      const truncated = file.more || file.cut
+-      if (file.cut) {
+-        output += `\n\n(Output capped at ${MAX_BYTES_LABEL}. Showing lines ${file.offset}-${last}. Use offset=${next} to continue.)`
+-      } else if (file.more) {
+-        output += `\n\n(Showing lines ${file.offset}-${last} of ${file.count}. Use offset=${next} to continue.)`
+-      } else {
+-        output += `\n\n(End of file - total ${file.count} lines)`
+-      }
+-      output += "\n</content>"
++      // #142：异步大纲，失败不应阻断主读取（promise 内自处理）
++      // #142：异步 outline
++const outline = yield* Effect.promise(() => readOutline(filepath, file.count, file.offset))
++      // #142：部分重叠仍返回内容，但附 note
++      // #142：overlap 判定
++const overlap = findOverlapNote(visibleReads, current)
++      // #142：渲染主输出
++let output = renderReadOutput({
++        path: filepath,
++        size,
++        modified,
++        start,
++        end,
++        total: file.count,
++        returned,
++        raw: file.raw,
++        cut: file.cut,
++        more: file.more,
++        outline,
++        overlap,
++      })
+ 
+       yield* warm(filepath)
+ 
+@@ -596,20 +893,21 @@ export const ReadTool = Tool.define<
+       return {
+         title,
+         output,
+-        metadata: {
++        metadata: readToolMetadata({
+           preview: file.raw.slice(0, 20).join("\n"),
+           truncated,
+           loaded: loaded.map((item) => item.filepath),
++          read: current,
+           display: {
+             type: "file" as const,
+             path: filepath,
+             text: file.raw.join("\n"),
+             lineStart: file.offset,
+-            lineEnd: last,
++            lineEnd: end,
+             totalLines: file.count,
+             truncated,
+           },
+-        },
++        }),
+       }
+     })
+ 
 diff --git a/packages/opencode/src/tool/read-outline.ts b/packages/opencode/src/tool/read-outline.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..cc720d6f05db88881dab8af8ac0c3ba9870477ac
+index 0000000000..3e4db15021
 --- /dev/null
 +++ b/packages/opencode/src/tool/read-outline.ts
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,303 @@
++// #142：源文件大纲提示（非语义索引），限制扫描行数与条目预算
++// #142：仅 offset=1 且足够长的源码文件才生成 outline
 +import { createReadStream } from "fs"
 +import path from "path"
 +import { createInterface } from "readline"
 +
++// #142：短文件无需 outline
 +const MIN_LINES = 600
++// #142：大纲条目上限
 +const MAX_ENTRIES = 32
++// #142：大纲总字符预算
 +const MAX_CHARS = 640
++// #142：单条 label 截断
 +const MAX_ITEM_CHARS = 60
++// #142：最多扫描前缀行，防止超大文件拖死
 +const MAX_SCAN_LINES = 3000
 +
++// #142：仅源码扩展参与大纲
 +const SOURCE_EXTENSIONS = new Set([
 +  ".ts",
 +  ".tsx",
@@ -77,6 +577,7 @@ index 0000000000000000000000000000000000000000..cc720d6f05db88881dab8af8ac0c3ba9
 +  ".fsx",
 +])
 +
++// #142：单条规则：扩展/正则/格式化/最大缩进
 +type OutlineRule = {
 +  exts: string[]
 +  regex: RegExp
@@ -84,21 +585,25 @@ index 0000000000000000000000000000000000000000..cc720d6f05db88881dab8af8ac0c3ba9
 +  maxIndent?: number
 +}
 +
++// #142：大纲结果：条目 + 是否截断
 +export type Outline = {
 +  items: string[]
 +  truncated: boolean
 +}
 +
++// #142：缩进启发式过滤深层语句
 +function indentOf(line: string) {
 +  return line.match(/^\s*/)?.[0].length ?? 0
 +}
 +
++// #142：.d.ts 归为 .ts 规则
 +function basenameExt(filepath: string) {
 +  const lower = filepath.toLowerCase()
 +  if (lower.endsWith(".d.ts")) return ".ts"
 +  return path.extname(lower)
 +}
 +
++// #142：注释/import/控制流不进大纲
 +function isCommentOrNoise(trimmed: string) {
 +  return (
 +    trimmed.length === 0 ||
@@ -120,6 +625,7 @@ index 0000000000000000000000000000000000000000..cc720d6f05db88881dab8af8ac0c3ba9
 +  )
 +}
 +
++// #142：JS/TS 声明提取规则（function/class/interface/type/enum）
 +const jsRules: OutlineRule[] = [
 +  {
 +    exts: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
@@ -159,6 +665,7 @@ index 0000000000000000000000000000000000000000..cc720d6f05db88881dab8af8ac0c3ba9
 +  },
 +]
 +
++// #142：多语言规则表：在扩展名集合内才尝试匹配
 +const outlineRules: OutlineRule[] = [
 +  ...jsRules,
 +  { exts: [".py"], regex: /^(?:async\s+)?def\s+([A-Za-z_][\w]*)\s*\(/, format: (m) => `function ${m[1]}` },
@@ -230,6 +737,7 @@ index 0000000000000000000000000000000000000000..cc720d6f05db88881dab8af8ac0c3ba9
 +  { exts: [".scala"], regex: /^def\s+([A-Za-z_][\w]*)\b/, format: (m) => `function ${m[1]}` },
 +]
 +
++// #142：单行 → 可选大纲 label；噪声行直接丢弃
 +function outlineLabel(line: string, filepath: string) {
 +  const trimmed = line.trim()
 +  if (isCommentOrNoise(trimmed)) return undefined
@@ -246,621 +754,564 @@ index 0000000000000000000000000000000000000000..cc720d6f05db88881dab8af8ac0c3ba9
 +  return undefined
 +}
 +
++// #142：单条过长加省略号
 +function truncateItem(item: string) {
 +  if (item.length <= MAX_ITEM_CHARS) return item
 +  return item.slice(0, MAX_ITEM_CHARS - 3) + "..."
 +}
 +
++// #142：异步流式扫前缀，受 MAX_SCAN_LINES/ENTRIES/CHARS 约束
 +export async function readOutline(filepath: string, total: number, offset: number): Promise<Outline | undefined> {
++  // #142：非文件头或不长则跳过
 +  if (offset > 1 || total < MIN_LINES || !SOURCE_EXTENSIONS.has(basenameExt(filepath))) return undefined
 +
++  // #142：readline 流，避免整文件读入内存
 +  const stream = createReadStream(filepath, { encoding: "utf8" })
-+  const rl = createInterface({ input: stream, crlfDelay: Infinity })
-+  const items: string[] = []
-+  let chars = 0
-+  let count = 0
-+  let truncated = false
-+  try {
-+    for await (const text of rl) {
++  // #142：按行迭代
++const rl = createInterface({ input: stream, crlfDelay: Infinity })
++  // #142：收集 label 行
++const items: string[] = []
++  // #142：字符预算计数
++let chars = 0
++  // #142：扫描行计数
++let count = 0
++  // #142：是否因预算截断
++let truncated = false
++  // #142：确保 finally 关闭流
++try {
++    // #142：顺序扫描前缀
++for await (const text of rl) {
 +      count += 1
 +      // This is a read-tool hint, not a semantic index; never scan an entire
 +      // huge file just to discover there are no declarations in the prefix.
++      // #142：扫描上限到点即 truncated
 +      if (count > MAX_SCAN_LINES) {
 +        truncated = true
 +        break
 +      }
 +
-+      const label = outlineLabel(text, filepath)
-+      if (!label) continue
-+      const item = truncateItem(`${count} ${label}`)
-+      const extra = item.length + (items.length > 0 ? 1 : 0)
++      // #142：提取 label
++const label = outlineLabel(text, filepath)
++      // #142：无 label 跳过
++if (!label) continue
++      // #142：格式化为 "行号 label"
++const item = truncateItem(`${count} ${label}`)
++      // #142：计入换行开销
++const extra = item.length + (items.length > 0 ? 1 : 0)
++      // #142：条目或字符预算耗尽
 +      if (items.length >= MAX_ENTRIES || chars + extra > MAX_CHARS) {
 +        truncated = true
 +        break
 +      }
-+      items.push(item)
-+      chars += extra
++      // #142：接受该条目
++items.push(item)
++      // #142：累加字符
++chars += extra
 +    }
-+  } finally {
-+    rl.close()
-+    stream.destroy()
++  // #142：关闭 readline/stream
++} finally {
++    // #142：关闭接口
++rl.close()
++    // #142：销毁底层流
++stream.destroy()
 +  }
++  // #142：无声明则不输出 outline 节点
 +  if (items.length === 0) return undefined
-+  return { items, truncated }
++  // #142：返回大纲
++return { items, truncated }
 +}
-diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 9e9ab96d80be9d2304a86ad01fb5f7652a895c2d..a8971ffb0d6303df1433cbf051def5f22f1faa1c 100644
---- a/packages/opencode/src/tool/read.ts
-+++ b/packages/opencode/src/tool/read.ts
-@@ -12,12 +12,15 @@ import { assertExternalDirectoryEffect } from "./external-directory"
- import { Instruction } from "../session/instruction"
- import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from "@/util/media"
- import type { MessageV2 } from "../session/message-v2"
-+import { readOutline, type Outline } from "./read-outline"
+diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
+index 4cf1074a1d..475b1ea3c7 100644
+--- a/packages/opencode/test/tool/read.test.ts
++++ b/packages/opencode/test/tool/read.test.ts
+@@ -3,6 +3,7 @@ import { afterEach, describe, expect } from "bun:test"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { Cause, Effect, Exit, Layer, Stream } from "effect"
+ import path from "path"
++import { readOutline } from "../../src/tool/read-outline"
+ import { Agent } from "../../src/agent/agent"
+ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+@@ -321,8 +322,9 @@ describe("tool.read truncation", () => {
  
--const DEFAULT_READ_LIMIT = 400
-+const DEFAULT_READ_LIMIT = 200
- const MAX_BYTES = 24 * 1024
--const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
- const SAMPLE_BYTES = 4096
- const MAX_CONTENT_TOKENS = 16000
-+const MAX_LINE_LENGTH = 2000
-+const OVERLAP_MIN_LINES = 20
-+const OVERLAP_MIN_RATIO = 0.3
+       const result = yield* run({ filePath: path.join(test.directory, "large.json") })
+       expect(result.metadata.truncated).toBe(true)
+-      expect(result.output).toContain("Output capped at")
+-      expect(result.output).toContain("Use offset=")
++      // #142：默认 200 行先触发行限；超密字节文件仍可 byte_limit
++      expect(result.output).toContain("<more offset=")
++      expect(result.output.includes('reason="line_limit"') || result.output.includes('reason="byte_limit"')).toBe(true)
+     }),
+   )
  
- // 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
- const BLOCKED_DEVICE_PATHS = new Set([
-@@ -59,17 +62,30 @@ const TOKEN_BYTE_RATIOS: Record<string, number> = {
-   default: 0.25,
- }
+@@ -330,7 +332,9 @@ describe("tool.read truncation", () => {
+     Effect.gen(function* () {
+       const test = yield* TestInstance
+       const filepath = path.join(test.directory, "huge.txt")
+-      const content = `${"x".repeat(80)}\n`.repeat(50_000)
++      // #142：长行迫使 MAX_BYTES 先于默认行限触发 ReadStop
++      const content = `${"x".repeat(4000)}
++`.repeat(200)
+       yield* put(filepath, content)
  
--// 文件去重缓存 - per-session，key = filepath::offset::limit
--type ReadCacheEntry = {
--  content: string
--  timestamp: number
-+type ReadStubStatus = "stub_same_range_visible" | "stub_covered_range_visible"
-+
-+type ReadMetadata = {
-+  path: string
-+  canonicalPath: string
-+  type: "file"
-+  size: number
-+  modified: string
-+  modifiedMs: number
-+  start: number
-+  end: number
-+  total: number
-+  returned: number
-+  stub: boolean
-+  stubStatus?: ReadStubStatus
-+  coveredBy?: string
- }
--const readFileState = new Map<string, ReadCacheEntry>()
--let cacheSeeded = false
+       const fs = yield* FSUtil.Service
+@@ -353,7 +357,8 @@ describe("tool.read truncation", () => {
+       )
  
--// Stub 文案
--export const FILE_UNCHANGED_STUB =
--  "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading."
-+type ReadToolMetadata = {
-+  preview: string
-+  truncated: boolean
-+  loaded: string[]
-+  read?: ReadMetadata
-+}
+       expect(result.metadata.truncated).toBe(true)
+-      expect(result.output).toContain("Output capped at")
++      // #142：长行文件触发 byte_limit 并 ReadStop 停流
++      expect(result.output).toContain('reason="byte_limit"')
+       expect(counter.bytes).toBeLessThan(Buffer.byteLength(content, "utf-8") / 2)
+     }),
+   )
+@@ -366,8 +371,9 @@ describe("tool.read truncation", () => {
  
- // 恶意代码提醒
- const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You CAN analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
-@@ -97,35 +113,199 @@ function estimateTokensForContent(content: string, ext: string): number {
-   return Math.ceil(Buffer.byteLength(content, "utf-8") * ratio)
- }
+       const result = yield* run({ filePath: path.join(test.directory, "many-lines.txt"), limit: 10 })
+       expect(result.metadata.truncated).toBe(true)
+-      expect(result.output).toContain("Showing lines 1-10 of 100")
+-      expect(result.output).toContain("Use offset=11")
++      // #142：行截断用 range + more line_limit
++      expect(result.output).toContain('<range start="1" end="10" total="100" returned="10" />')
++      expect(result.output).toContain('<more offset="11" reason="line_limit" />')
+       expect(result.output).toContain("line0")
+       expect(result.output).toContain("line9")
+       expect(result.output).not.toContain("line10")
+@@ -381,7 +387,9 @@ describe("tool.read truncation", () => {
  
--// 检查当前上下文中是否有该文件的未被压缩的读取结果（同范围）
--function findUnexpandedFileInContext(
--  messages: MessageV2.WithParts[],
--  filepath: string,
--  offset: number,
--  limit: number | undefined,
--): boolean {
--  for (let i = messages.length - 1; i >= 0; i--) {
--    const msg = messages[i]
-+function readToolMetadata(input: ReadToolMetadata) {
-+  // Keep every return branch on one metadata shape so Tool.define can infer
-+  // `read` as optional metadata instead of treating media/directory branches
-+  // as a different tool result type.
-+  return input
-+}
-+
-+function escapeXmlText(input: string) {
-+  return input.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
-+}
-+
-+function escapeXmlAttr(input: string) {
-+  return escapeXmlText(input).replaceAll('"', "&quot;").replaceAll("'", "&apos;")
-+}
-+
-+function formatModified(ms: number) {
-+  const date = new Date(ms)
-+  const pad = (n: number) => String(n).padStart(2, "0")
-+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
-+    date.getMinutes(),
-+  )}:${pad(date.getSeconds())}`
-+}
-+
-+function fileSize(stat: { size: unknown }) {
-+  return typeof stat.size === "bigint" ? Number(stat.size) : Number(stat.size)
-+}
-+
-+function resolveReadPath(input: string, directory: string) {
-+  if (process.platform !== "win32") return path.isAbsolute(input) ? input : path.resolve(directory, input)
-+
-+  const normalized = AppFileSystem.normalizePath(input)
-+  if (/^[A-Za-z]:[\\/]/.test(input)) return normalized
-+
-+  // Windows treats "\foo" and "/foo" as rooted on the current process drive.
-+  // For tool calls they are almost always alternate spellings of an instance
-+  // path, so anchor them to the active project drive before stat/permission.
-+  if (/^[\\/](?![\\/])/.test(input)) {
-+    const parsed = path.win32.parse(directory)
-+    return AppFileSystem.normalizePath(path.win32.join(parsed.root, input.slice(1)))
-+  }
-+
-+  return AppFileSystem.normalizePath(path.resolve(directory, input))
-+}
-+
-+function canonicalReadPath(filepath: string) {
-+  const normalized = AppFileSystem.normalizePath(filepath).replaceAll("\\", "/")
-+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
-+}
-+
-+function modifiedMs(stat: { mtime: Option.Option<Date> }) {
-+  return Math.floor(
-+    stat.mtime.pipe(
-+      Option.map((time) => time.getTime()),
-+      Option.getOrElse(() => 0),
-+    ),
-+  )
-+}
-+
-+function isReadMetadata(input: unknown): input is ReadMetadata {
-+  if (!input || typeof input !== "object") return false
-+  const item = input as Record<string, unknown>
-+  return (
-+    item.type === "file" &&
-+    typeof item.path === "string" &&
-+    typeof item.canonicalPath === "string" &&
-+    typeof item.size === "number" &&
-+    typeof item.modified === "string" &&
-+    typeof item.modifiedMs === "number" &&
-+    typeof item.start === "number" &&
-+    typeof item.end === "number" &&
-+    typeof item.total === "number" &&
-+    typeof item.returned === "number" &&
-+    typeof item.stub === "boolean"
-+  )
-+}
-+
-+function collectVisibleReads(messages: MessageV2.WithParts[], canonicalPath: string) {
-+  const reads: ReadMetadata[] = []
-+  for (const msg of messages) {
-     if (msg.info.role !== "assistant") continue
-     for (const part of msg.parts) {
-       if (part.type !== "tool") continue
-       if (part.tool !== "read") continue
-       if (part.state.status !== "completed") continue
--      const input = part.state.input as { filePath?: string; offset?: number; limit?: number }
--      if (input.filePath !== filepath) continue
--      if ((input.offset ?? 1) !== offset) continue
--      if ((input.limit ?? DEFAULT_READ_LIMIT) !== (limit ?? DEFAULT_READ_LIMIT)) continue
-       if (part.state.time.compacted) continue
--      // 跳过 stub 结果 — stub 本身不携带实际内容，不能作为去重的依据
--      if (part.state.output === FILE_UNCHANGED_STUB) continue
--      return true
-+
-+      // Use metadata rather than parsing XML so the visible-context decision
-+      // stays stable even if the human-facing formatting changes later.
-+      const meta = part.state.metadata?.read
-+      if (!isReadMetadata(meta)) continue
-+      if (meta.stub) continue
-+      if (meta.canonicalPath !== canonicalPath) continue
-+      reads.push(meta)
-     }
-   }
--  return false
-+  return reads
- }
+       const result = yield* run({ filePath: path.join(test.directory, "small.txt") })
+       expect(result.metadata.truncated).toBe(false)
+-      expect(result.output).toContain("End of file")
++      // #142：完整读取有 range，无 more
++      expect(result.output).toContain('<range start="1" end="1" total="1" returned="1" />')
++      expect(result.output).not.toContain("<more")
+       expect(result.metadata.display).toMatchObject({
+         type: "file",
+         path: path.join(test.directory, "small.txt"),
+@@ -430,7 +438,9 @@ describe("tool.read truncation", () => {
  
--function cacheKey(filepath: string, offset: number, limit: number | undefined) {
--  return `${filepath}::${offset}::${limit ?? DEFAULT_READ_LIMIT}`
-+function findReadStub(visibleReads: ReadMetadata[], current: ReadMetadata) {
-+  // Only suppress output when a non-stub read for the same file version is
-+  // still visible in the active context. Compacted history and modified files
-+  // fall through to a normal read.
-+  const sameVersion = visibleReads.filter((read) => read.size === current.size && read.modifiedMs === current.modifiedMs)
-+  const sameRange = sameVersion.find((read) => read.start === current.start && read.end === current.end)
-+  if (sameRange) return { status: "stub_same_range_visible" as const }
-+
-+  const covering = sameVersion.find((read) => read.start <= current.start && read.end >= current.end)
-+  if (covering) {
-+    return { status: "stub_covered_range_visible" as const, coveredBy: `${covering.start}-${covering.end}` }
-+  }
-+  return undefined
-+}
-+
-+function findOverlapNote(visibleReads: ReadMetadata[], current: ReadMetadata) {
-+  let best: { start: number; end: number; lines: number } | undefined
-+  for (const read of visibleReads) {
-+    if (read.size !== current.size || read.modifiedMs !== current.modifiedMs) continue
-+    const start = Math.max(read.start, current.start)
-+    const end = Math.min(read.end, current.end)
-+    if (start > end) continue
-+    const lines = end - start + 1
-+    if (!best || lines > best.lines) best = { start, end, lines }
-+  }
-+
-+  if (!best) return undefined
-+  const requested = Math.max(1, current.end - current.start + 1)
-+  if (best.lines < OVERLAP_MIN_LINES) return undefined
-+  if (best.lines / requested < OVERLAP_MIN_RATIO) return undefined
-+  return `${best.start}-${best.end}`
-+}
-+
-+function renderContentLines(file: Awaited<ReturnType<typeof lines>>) {
-+  return file.raw
-+    .map((line, i) => {
-+      if (line.length <= MAX_LINE_LENGTH) return `${i + file.offset}: ${escapeXmlText(line)}`
-+      return `${i + file.offset}: ${escapeXmlText(line.slice(0, MAX_LINE_LENGTH))} (line truncated to ${MAX_LINE_LENGTH} chars)`
-+    })
-+    .join("\n")
-+}
-+
-+function renderReadOutput(input: {
-+  path: string
-+  size: number
-+  modified: string
-+  start: number
-+  end: number
-+  total: number
-+  returned: number
-+  outline?: Outline
-+  overlap?: string
-+  content: string
-+  more?: { offset: number; reason: "line_limit" | "byte_limit" }
-+}) {
-+  const output = [
-+    `<path>${escapeXmlText(input.path)}</path>`,
-+    `<type>file</type>`,
-+    `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
-+    `<range start="${input.start}" end="${input.end}" total="${input.total}" returned="${input.returned}" />`,
-+  ]
-+
-+  if (input.outline?.items.length) {
-+    output.push(`<outline truncated="${input.outline.truncated ? "true" : "false"}">`)
-+    output.push(input.outline.items.map(escapeXmlText).join("\n"))
-+    output.push("</outline>")
-+  }
-+
-+  if (input.overlap) output.push(`<note type="overlap" ranges="${input.overlap}" />`)
-+  output.push("<content>", input.content, "</content>")
-+  if (input.more) output.push(`<more offset="${input.more.offset}" reason="${input.more.reason}" />`)
-+  return output.join("\n")
-+}
-+
-+function renderReadStub(input: {
-+  path: string
-+  size: number
-+  modified: string
-+  start: number
-+  end: number
-+  total: number
-+  status: ReadStubStatus
-+  coveredBy?: string
-+}) {
-+  return [
-+    `<path>${escapeXmlText(input.path)}</path>`,
-+    `<type>file</type>`,
-+    `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
-+    `<range start="${input.start}" end="${input.end}" total="${input.total}" returned="0" />`,
-+    `<stub status="${input.status}"${input.coveredBy ? ` covered_by="${input.coveredBy}"` : ""}>`,
-+    input.status === "stub_same_range_visible"
-+      ? "Requested range is already visible in the current context."
-+      : "Requested range is already covered by a visible read result.",
-+    "</stub>",
-+  ].join("\n")
- }
+       const result = yield* exec(dir, { filePath: path.join(dir, "empty.txt") })
+       expect(result.metadata.truncated).toBe(false)
+-      expect(result.output).toContain("End of file - total 0 lines")
++      // #142：空文件 range returned=0
++      expect(result.output).toContain('<range start="1" end="0" total="0" returned="0" />')
++      expect(result.output).not.toContain("<more")
+     }),
+   )
  
- const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
-@@ -141,7 +321,7 @@ export const Parameters = Schema.Struct({
-     description: "The line number to start reading from (1-indexed)",
-   }),
-   limit: Schema.optional(NonNegativeInt).annotate({
--    description: "The maximum number of lines to read (defaults to 400)",
-+    description: "The maximum number of lines to read (defaults to 200)",
-   }),
+@@ -471,16 +481,15 @@ describe("tool.read truncation", () => {
+ 
+   it.live("keeps long lines whole until byte budget", () =>
+     Effect.gen(function* () {
+-      // #90：长行完整保留；禁止出现 2000 字行中截断后缀
++      // #142：展示层单行 2000 截断；字节预算内保留前缀
+       const dir = yield* tmpdirScoped()
+       const long = "x".repeat(3000)
+       yield* put(path.join(dir, "long-line.txt"), long + "\n")
+ 
+       const result = yield* exec(dir, { filePath: path.join(dir, "long-line.txt") })
+-      expect(result.output).toContain(long)
+-      expect(result.output).not.toContain("line truncated to 2000")
+-      expect(result.output).not.toContain("(line truncated")
+-      expect(result.output.length).toBeGreaterThan(3000)
++      expect(result.output).toContain("line truncated to 2000")
++      expect(result.output).toContain("x".repeat(100))
++      expect(result.metadata.truncated).toBe(false)
+     }),
+   )
+ 
+@@ -609,3 +618,389 @@ describe("tool.read binary detection", () => {
+     }),
+   )
  })
- 
-@@ -265,13 +445,7 @@ export const ReadTool = Tool.define(
-       ctx: Tool.Context,
-     ) {
-       const instance = yield* InstanceState.context
--      let filepath = params.filePath
--      if (!path.isAbsolute(filepath)) {
--        filepath = path.resolve(instance.directory, filepath)
--      }
--      if (process.platform === "win32") {
--        filepath = AppFileSystem.normalizePath(filepath)
--      }
-+      const filepath = resolveReadPath(params.filePath, instance.directory)
- 
-       // 设备文件保护 - 阻止可能导致进程挂起的设备文件
-       if (isBlockedDevicePath(filepath)) {
-@@ -303,60 +477,6 @@ export const ReadTool = Tool.define(
- 
-       if (!stat) return yield* miss(filepath)
- 
--      // 首次读取时从会话历史中预热缓存 — 扫描已有的非 stub、未压缩的读取记录
--      if (!cacheSeeded) {
--        for (let i = ctx.messages.length - 1; i >= 0; i--) {
--          const msg = ctx.messages[i]
--          if (msg.info.role !== "assistant") continue
--          for (const part of msg.parts) {
--            if (part.type !== "tool") continue
--            if (part.tool !== "read") continue
--            if (part.state.status !== "completed") continue
--            if (part.state.time.compacted) continue
--            if (part.state.output === FILE_UNCHANGED_STUB) continue
--
--            const seedInput = part.state.input as { filePath?: string; offset?: number; limit?: number }
--            if (!seedInput.filePath) continue
--
--            const seedKey = cacheKey(seedInput.filePath, seedInput.offset ?? 1, seedInput.limit)
--            if (readFileState.has(seedKey)) continue
--
--            const seedStat = yield* fs.stat(seedInput.filePath).pipe(
--              Effect.catch(() => Effect.succeed(undefined)),
--            )
--            if (!seedStat || seedStat.type !== "File") continue
--
--            const seedMtime = Math.floor(Number(seedStat.mtime))
--            // 仅当文件在读取后未被修改时才加入缓存（mtime ≤ 读取时间表示无后续修改）
--            if (seedMtime <= part.state.time.end) {
--              readFileState.set(seedKey, {
--                content: part.state.output,
--                timestamp: seedMtime,
--              })
--            }
--          }
--        }
--        cacheSeeded = true
--      }
--
--      // 文件去重检查 - 如果文件未修改且范围相同，返回 stub
--      const requestOffset = params.offset ?? 1
--      const requestLimit = params.limit
--      const existingState = readFileState.get(cacheKey(filepath, requestOffset, requestLimit))
--      if (existingState) {
--        const mtimeMs = Math.floor(Number(stat.mtime))
--        if (mtimeMs === existingState.timestamp) {
--          const hasUnexpandedContent = findUnexpandedFileInContext(ctx.messages, filepath, requestOffset, requestLimit)
--          if (hasUnexpandedContent) {
--            return {
--              title,
--              output: FILE_UNCHANGED_STUB,
--              metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] },
--            }
--          }
--        }
--      }
--
-       if (stat.type === "Directory") {
-         const items = yield* list(filepath)
-         const limit = params.limit ?? DEFAULT_READ_LIMIT
-@@ -368,25 +488,29 @@ export const ReadTool = Tool.define(
-         return {
-           title,
-           output: [
--            `<path>${filepath}</path>`,
-+            `<path>${escapeXmlText(filepath)}</path>`,
-             `<type>directory</type>`,
--            `<entries>`,
--            sliced.join("\n"),
--            truncated
--              ? `\n(Showing ${sliced.length} of ${items.length} entries. Use 'offset' parameter to read beyond entry ${offset + sliced.length})`
--              : `\n(${items.length} entries)`,
--            `</entries>`,
--          ].join("\n"),
--          metadata: {
-+            `<directory entries="${items.length}" />`,
-+            `<content>`,
-+            sliced.map(escapeXmlText).join("\n"),
-+            `</content>`,
-+            truncated ? `<more offset="${offset + sliced.length}" reason="entry_limit" />` : undefined,
-+          ]
-+            .filter((line): line is string => Boolean(line))
-+            .join("\n"),
-+          metadata: readToolMetadata({
-             preview: sliced.slice(0, 20).join("\n"),
-             truncated,
-             loaded: [] as string[],
--          },
-+          }),
-         }
-       }
- 
-       const loaded = yield* instruction.resolve(ctx.messages, filepath, ctx.messageID)
--      const sample = yield* readSample(filepath, Number(stat.size), SAMPLE_BYTES)
-+      const size = fileSize(stat)
-+      const versionMs = modifiedMs(stat)
-+      const modified = formatModified(versionMs)
-+      const sample = yield* readSample(filepath, size, SAMPLE_BYTES)
- 
-       const mime = sniffAttachmentMime(sample, AppFileSystem.mimeType(filepath))
-       const isImage = SUPPORTED_IMAGE_MIMES.has(mime)
-@@ -401,11 +525,11 @@ export const ReadTool = Tool.define(
-           return {
-             title,
-             output: msg,
--            metadata: {
-+            metadata: readToolMetadata({
-               preview: msg,
-               truncated: false,
-               loaded: loaded.map((item) => item.filepath),
--            },
-+            }),
-             attachments: [
-               {
-                 type: "file" as const,
-@@ -421,11 +545,11 @@ export const ReadTool = Tool.define(
-         return {
-           title,
-           output: msg,
--          metadata: {
-+          metadata: readToolMetadata({
-             preview: msg,
-             truncated: false,
-             loaded: loaded.map((item) => item.filepath),
--          },
-+          }),
-           attachments: [
-             {
-               type: "file" as const,
-@@ -449,6 +573,48 @@ export const ReadTool = Tool.define(
-         )
-       }
- 
-+      const start = file.offset
-+      const end = file.raw.length === 0 ? file.offset - 1 : file.offset + file.raw.length - 1
-+      const canonicalPath = canonicalReadPath(filepath)
-+      const current: ReadMetadata = {
-+        path: filepath,
-+        canonicalPath,
++
++
++
++describe("tool.read structured output", () => {
++  // #142：正常读取输出 file/range 结构
++  it.instance("returns structured file metadata and range for normal reads", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      yield* put(path.join(test.directory, "structured.txt"), "alpha\nbeta\n")
++      const result = yield* run({ filePath: path.join(test.directory, "structured.txt") })
++      expect(result.output).toContain("<type>file</type>")
++      expect(result.output).toContain('<file size="')
++      expect(result.output).toContain('<range start="1"')
++      expect(result.output).toContain("<content>")
++      expect(result.output).toContain("1: alpha")
++      expect(result.output).not.toContain("<stub")
++      // #142：metadata.read 供后续 stub 比对
++      expect(result.metadata.read).toMatchObject({
 +        type: "file",
-+        size,
-+        modified,
-+        modifiedMs: versionMs,
-+        start,
-+        end,
-+        total: file.count,
-+        returned: file.raw.length,
++        start: 1,
 +        stub: false,
-+      }
-+      const visibleReads = collectVisibleReads(ctx.messages, canonicalPath)
-+      const stub = findReadStub(visibleReads, current)
-+      if (stub) {
-+        const read = { ...current, returned: 0, stub: true, stubStatus: stub.status, coveredBy: stub.coveredBy }
-+        const output = renderReadStub({
-+          path: filepath,
-+          size,
-+          modified,
-+          start,
-+          end,
-+          total: file.count,
-+          status: stub.status,
-+          coveredBy: stub.coveredBy,
-+        })
-+        return {
-+          title,
-+          output,
-+          metadata: readToolMetadata({
-+            preview: output,
-+            truncated: false,
-+            loaded: [] as string[],
-+            read,
-+          }),
-+        }
-+      }
-+
-       // Token 预算验证 - 根据文件类型估算 token 数
-       const content = file.raw.join("\n")
-       const ext = path.extname(filepath).toLowerCase().slice(1)
-@@ -464,46 +630,43 @@ export const ReadTool = Tool.define(
-         )
-       }
- 
--      // 写入去重缓存
--      readFileState.set(cacheKey(filepath, params.offset ?? 1, params.limit), {
--        content,
--        timestamp: Math.floor(Number(stat.mtime)),
--      })
--
--      let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
--      output += file.raw.map((line, i) => `${i + file.offset}: ${line}`).join("\n")
--
--      const last = file.offset + file.raw.length - 1
--      const next = last + 1
-       const truncated = file.more || file.cut
--      if (file.cut) {
--        output += `\n\n(Output capped at ${MAX_BYTES_LABEL}. Showing lines ${file.offset}-${last}. Use offset=${next} to continue.)`
--      } else if (file.more) {
--        output += `\n\n(Showing lines ${file.offset}-${last} of ${file.count}. Use offset=${next} to continue.)`
--      } else {
--        output += `\n\n(End of file - total ${file.count} lines)`
--      }
--      output += "\n</content>"
-+      const output = renderReadOutput({
-+        path: filepath,
-+        size,
-+        modified,
-+        start,
-+        end,
-+        total: file.count,
-+        returned: file.raw.length,
-+        outline: yield* Effect.promise(() => readOutline(filepath, file.count, file.offset)),
-+        overlap: findOverlapNote(visibleReads, current),
-+        content: renderContentLines(file),
-+        more: truncated ? { offset: end + 1, reason: file.cut ? "byte_limit" : "line_limit" } : undefined,
 +      })
- 
-       yield* warm(filepath)
- 
-+      let finalOutput = output
++    }),
++  )
 +
-       if (loaded.length > 0) {
--        output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
-+        finalOutput += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
-       }
- 
-       // 恶意代码安全提醒 - 仅对高风险扩展名注入
-       if (shouldInjectCyberReminder(ext)) {
--        output += CYBER_REMINDER
-+        finalOutput += CYBER_REMINDER
-       }
- 
-       return {
-         title,
--        output,
--        metadata: {
-+        output: finalOutput,
-+        metadata: readToolMetadata({
-           preview: file.raw.slice(0, 20).join("\n"),
-           truncated,
-           loaded: loaded.map((item) => item.filepath),
--        },
-+          read: current,
-+        }),
-       }
-     })
- 
-@@ -541,12 +704,17 @@ async function lines(filepath: string, opts: { limit: number; offset: number })
-         continue
-       }
- 
-+      if (cut) {
-+        more = true
-+        continue
++  // #142：XML 敏感内容在 #142 阶段转义（#145 再改为原文）
++  it.instance("escapes XML-sensitive file content in structured output", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      yield* put(path.join(test.directory, "xml-sensitive.txt"), '<tag attr="x">&</tag>\n')
++      const result = yield* run({ filePath: path.join(test.directory, "xml-sensitive.txt") })
++      expect(result.output).toContain('1: &lt;tag attr="x"&gt;&amp;&lt;/tag&gt;')
++      expect(result.output).not.toContain("1: <tag")
++    }),
++  )
++})
++
++describe("tool.read outline", () => {
++  // #142：长源文件头部读取附带 outline
++  it.instance("includes outline for large source files at offset 1", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const file = path.join(test.directory, "big.ts")
++      const body = Array.from({ length: 700 }, (_, i) => {
++        if (i === 9) return "export function alpha() {}"
++        if (i === 119) return "export class Beta {}"
++        return `// line ${i + 1}`
++      }).join("\n")
++      yield* put(file, body + "\n")
++      const head = yield* run({ filePath: file, offset: 1, limit: 20 })
++      // #142：offset=1 的长源文件必须带 outline
++      expect(head.output).toContain("<outline")
++      expect(head.output).toContain("function alpha")
++      expect(head.output).toContain("class Beta")
++      const bodyRead = yield* run({ filePath: file, offset: 50, limit: 10 })
++      // #142：非头部读取不重复贴 outline
++      expect(bodyRead.output).not.toContain("<outline")
++    }),
++  )
++})
++
++describe("tool.read visible context stubs", () => {
++  // #142：同区间二次读取必须 structured stub（硬断言）；合并 ctx 保留 ask
++  it.instance("stubs when the same range is already visible", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const file = path.join(test.directory, "same-range.txt")
++      yield* put(file, ["one", "two", "three"].join("\n") + "\n")
++      const first = yield* run({ filePath: file, offset: 1, limit: 2 })
++      expect(first.output).toContain("<content>")
++      expect(first.metadata.read?.stub).toBe(false)
++      const second = yield* run(
++        { filePath: file, offset: 1, limit: 2 },
++        {
++          ...ctx,
++          messages: [
++            {
++              info: { role: "assistant", id: "a1" },
++              parts: [
++                {
++                  type: "tool",
++                  tool: "read",
++                  callID: "c1",
++                  state: {
++                    status: "completed",
++                    time: { start: 1, end: Date.now() + 1000 },
++                    input: { filePath: file, offset: 1, limit: 2 },
++                    output: first.output,
++                    title: "t",
++                    metadata: first.metadata,
++                  },
++                },
++              ],
++            } as any,
++          ],
++        },
++      )
++      expect(second.output).toContain('status="stub_same_range_visible"')
++      expect(second.output).not.toContain("<content>")
++      expect(second.metadata.read?.stub).toBe(true)
++    }),
++  )
++
++  // #142：被更大可见区间覆盖时 covered stub
++  it.instance("stubs when range is covered by a larger visible range", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const file = path.join(test.directory, "cover.txt")
++      const body = Array.from({ length: 50 }, (_, i) => `line${i}`).join("\n")
++      yield* put(file, body + "\n")
++      const wide = yield* run({ filePath: file, offset: 1, limit: 40 })
++      const narrow = yield* run(
++        { filePath: file, offset: 5, limit: 5 },
++        {
++          ...ctx,
++          messages: [
++            {
++              info: { role: "assistant", id: "a1" },
++              parts: [
++                {
++                  type: "tool",
++                  tool: "read",
++                  callID: "c1",
++                  state: {
++                    status: "completed",
++                    time: { start: 1, end: Date.now() + 1000 },
++                    input: { filePath: file, offset: 1, limit: 40 },
++                    output: wide.output,
++                    title: "t",
++                    metadata: wide.metadata,
++                  },
++                },
++              ],
++            } as any,
++          ],
++        },
++      )
++      expect(narrow.output).toContain("stub_covered_range_visible")
++      expect(narrow.output).not.toContain("<content>")
++    }),
++  )
++
++  // #142：已 compact 的历史读不得参与 stub 覆盖
++  it.instance("does not stub compacted previous reads", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const file = path.join(test.directory, "compacted.txt")
++      yield* put(file, ["a", "b", "c"].join("\n") + "\n")
++      const first = yield* run({ filePath: file, offset: 1, limit: 2 })
++      expect(first.metadata.read?.stub).toBe(false)
++      const second = yield* run(
++        { filePath: file, offset: 1, limit: 2 },
++        {
++          ...ctx,
++          messages: [
++            {
++              info: { role: "assistant", id: "a1" },
++              parts: [
++                {
++                  type: "tool",
++                  tool: "read",
++                  callID: "c1",
++                  state: {
++                    status: "completed",
++                    time: { start: 1, end: Date.now() + 1000, compacted: Date.now() },
++                    input: { filePath: file, offset: 1, limit: 2 },
++                    output: first.output,
++                    title: "t",
++                    metadata: first.metadata,
++                  },
++                },
++              ],
++            } as any,
++          ],
++        },
++      )
++      // #142：compacted 历史被 collectVisibleReads 跳过，必须完整 content
++      expect(second.output).toContain("<content>")
++      expect(second.output).not.toContain('status="stub_')
++      expect(second.metadata.read?.stub).toBe(false)
++    }),
++  )
++
++  // #142：size/mtime 变化后不得沿用旧可见区间 stub
++  it.instance("does not stub when the file version changed", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const file = path.join(test.directory, "versioned.txt")
++      yield* put(file, ["one", "two", "three"].join("\n") + "\n")
++      const first = yield* run({ filePath: file, offset: 1, limit: 2 })
++      const staleMeta = {
++        ...first.metadata,
++        read: {
++          ...first.metadata.read!,
++          size: (first.metadata.read?.size ?? 1) + 999,
++          modifiedMs: (first.metadata.read?.modifiedMs ?? 1) - 10_000,
++        },
 +      }
++      const second = yield* run(
++        { filePath: file, offset: 1, limit: 2 },
++        {
++          ...ctx,
++          messages: [
++            {
++              info: { role: "assistant", id: "a1" },
++              parts: [
++                {
++                  type: "tool",
++                  tool: "read",
++                  callID: "c1",
++                  state: {
++                    status: "completed",
++                    time: { start: 1, end: Date.now() + 1000 },
++                    input: { filePath: file, offset: 1, limit: 2 },
++                    output: first.output,
++                    title: "t",
++                    metadata: staleMeta,
++                  },
++                },
++              ],
++            } as any,
++          ],
++        },
++      )
++      expect(second.output).toContain("<content>")
++      expect(second.output).not.toContain('status="stub_')
++      expect(second.metadata.read?.stub).toBe(false)
++    }),
++  )
 +
-       const line = text
-       const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
-       if (bytes + size > MAX_BYTES) {
-         cut = true
-         more = true
--        break
-+        continue
-       }
- 
-       raw.push(line)
++  // #142：显著重叠时返回全文并附 short overlap note
++  it.instance("returns full content with a short note for significant overlap", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const file = path.join(test.directory, "overlap.txt")
++      const body = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n") + "\n"
++      yield* put(file, body)
++      const first = yield* run({ filePath: file, offset: 1, limit: 20 })
++      expect(first.metadata.read?.stub).toBe(false)
++      const second = yield* run(
++        { filePath: file, offset: 10, limit: 20 },
++        {
++          ...ctx,
++          messages: [
++            {
++              info: { role: "assistant", id: "a1" },
++              parts: [
++                {
++                  type: "tool",
++                  tool: "read",
++                  callID: "c1",
++                  state: {
++                    status: "completed",
++                    time: { start: 1, end: Date.now() + 1000 },
++                    input: { filePath: file, offset: 1, limit: 20 },
++                    output: first.output,
++                    title: "t",
++                    metadata: first.metadata,
++                  },
++                },
++              ],
++            } as any,
++          ],
++        },
++      )
++      // #142：部分重叠不 stub，应有全文 + overlap note
++      expect(second.output).toContain("<content>")
++      expect(second.output).toContain('<note type="overlap"')
++      expect(second.output).not.toContain('status="stub_')
++      expect(second.metadata.read?.stub).toBe(false)
++    }),
++  )
++
++  // #142：已是 stub 的可见读不得作为后续覆盖来源
++  it.instance("does not use a visible stub as coverage for later reads", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const file = path.join(test.directory, "stub-not-cover.txt")
++      yield* put(file, ["a", "b", "c", "d"].join("\n") + "\n")
++      const first = yield* run({ filePath: file, offset: 1, limit: 3 })
++      // craft a stub metadata as if previous was stubbed
++      const stubMeta = {
++        ...first.metadata,
++        read: {
++          ...first.metadata.read!,
++          stub: true,
++          status: "stub_same_range_visible",
++        },
++      }
++      const second = yield* run(
++        { filePath: file, offset: 1, limit: 2 },
++        {
++          ...ctx,
++          messages: [
++            {
++              info: { role: "assistant", id: "a1" },
++              parts: [
++                {
++                  type: "tool",
++                  tool: "read",
++                  callID: "c1",
++                  state: {
++                    status: "completed",
++                    time: { start: 1, end: Date.now() + 1000 },
++                    input: { filePath: file, offset: 1, limit: 3 },
++                    output: 'FILE_UNCHANGED_STUB',
++                    title: "t",
++                    metadata: stubMeta,
++                  },
++                },
++              ],
++            } as any,
++          ],
++        },
++      )
++      expect(second.output).toContain("<content>")
++      expect(second.output).not.toContain('status="stub_')
++      expect(second.metadata.read?.stub).toBe(false)
++    }),
++  )
++
++
++    // #142：多语言声明应抽出至少一条 outline label
++  it.instance("extracts conservative labels for common language declarations", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const cases = [
++        ["sample.py", "def py_func():\nclass PyClass:\n"],
++        ["sample.go", "type Server struct {}\nfunc (s *Server) Serve() {}\n"],
++        ["sample.rs", "pub struct State {}\npub async fn run() {}\nimpl State {\n"],
++        ["sample.java", "public record User(String name) {}\npublic void run() {\n"],
++        ["sample.cs", "public class Worker {}\npublic async Task RunAsync() {\n"],
++        ["sample.kt", "data class User(val name: String)\nfun run() {}\n"],
++        ["sample.swift", "struct User {}\nfunc run() {\n"],
++        ["sample.rb", "class Worker\ndef perform\n"],
++        ["sample.php", "class Worker {}\nfunction perform() {}\n"],
++        ["sample.cpp", "struct Worker {};\nint run() {\n"],
++      ] as const
++      for (const [filename, header] of cases) {
++        const filePath = path.join(test.directory, filename)
++        const body = header + Array.from({ length: 650 }, (_, i) => `// filler ${i + 1}`).join("\n")
++        yield* put(filePath, body)
++        // #142：直接测 outline 抽取，避免整文件 read 干扰
++        const outline = yield* Effect.promise(() => readOutline(filePath, 650, 1))
++        expect(outline?.items.length).toBeGreaterThan(0)
++      }
++    }),
++  )
++
++  // #142：单条 outline 截断 60 字且总预算不变
++  it.instance("limits outline item length and total size", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const filePath = path.join(test.directory, "long-outline.rs")
++      const source = [
++        "impl VeryLongGenericTypeNameWithManySegmentsAndTraitsAndBoundsThatShouldBeTrimmed where T: Clone {",
++        ...Array.from({ length: 650 }, (_, i) => `pub fn function_${i}_with_a_very_long_suffix_that_should_not_bloat_the_outline() {}`),
++      ].join("\n")
++      yield* put(filePath, source)
++      const outline = yield* Effect.promise(() => readOutline(filePath, 651, 1))
++      expect(outline).toBeDefined()
++      expect(outline!.items.length).toBeLessThanOrEqual(32)
++      expect(outline!.items.join("\n").length).toBeLessThanOrEqual(640)
++      expect(outline!.items.every((item) => item.length <= 60)).toBe(true)
++      expect(outline!.items.some((item) => item.endsWith("..."))).toBe(true)
++    }),
++  )
++
++// #142：outline 预算上限（硬断言必须出现 outline）
++  it.instance("outline size stays within budget", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const file = path.join(test.directory, "many-decls.ts")
++      const lines = Array.from({ length: 800 }, (_, i) => `export function f${i}() { return ${i} }`)
++      yield* put(file, lines.join("\n") + "\n")
++      const head = yield* run({ filePath: file, offset: 1, limit: 5 })
++      expect(head.output).toContain("<outline")
++      const m = head.output.match(/<outline[^>]*>([\s\S]*?)<\/outline>/)
++      expect(m).toBeTruthy()
++      const items = m![1].trim().split("\n").filter(Boolean)
++      expect(items.length).toBeLessThanOrEqual(32)
++      expect(items.join("\n").length).toBeLessThanOrEqual(640)
++    }),
++  )
++})
++
 diff --git a/packages/opencode/src/tool/read.txt b/packages/opencode/src/tool/read.txt
-index f0842253cffdc5211236e5108c8ae65184201826..2fa7794ccd91a69ce6adee0c77184292c6230e37 100644
+index f0842253cf..2fa7794ccd 100644
 --- a/packages/opencode/src/tool/read.txt
 +++ b/packages/opencode/src/tool/read.txt
 @@ -2,12 +2,14 @@ Read a file or directory from the local filesystem. If the path does not exist,
@@ -879,380 +1330,16 @@ index f0842253cffdc5211236e5108c8ae65184201826..2fa7794ccd91a69ce6adee0c77184292
  - Call this tool in parallel when you know there are multiple files you want to read.
  - Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.
  - This tool can read image files and PDFs and return them as file attachments.
-diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index 695d96ec2fe851fccd8932a7be5597731acc39fb..e8e1d686459b54af80329c8d35ffdd0e37ce432d 100644
---- a/packages/opencode/test/tool/read.test.ts
-+++ b/packages/opencode/test/tool/read.test.ts
-@@ -7,9 +7,12 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
- import { LSP } from "@/lsp/lsp"
- import { Permission } from "../../src/permission"
- import { Instance } from "../../src/project/instance"
--import { SessionID, MessageID } from "../../src/session/schema"
-+import { MessageV2 } from "../../src/session/message-v2"
-+import { SessionID, MessageID, PartID } from "../../src/session/schema"
-+import { ModelID, ProviderID } from "../../src/provider/schema"
- import { Instruction } from "../../src/session/instruction"
- import { ReadTool } from "../../src/tool/read"
-+import { readOutline } from "../../src/tool/read-outline"
- import { Truncate } from "@/tool/truncate"
- import { Tool } from "@/tool/tool"
- import { Filesystem } from "@/util/filesystem"
-@@ -81,6 +84,10 @@ const fail = Effect.fn("ReadToolTest.fail")(function* (
- const full = (p: string) => (process.platform === "win32" ? Filesystem.normalizePath(p) : p)
- const glob = (p: string) =>
-   process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p.replaceAll("\\", "/")
-+const canonical = (p: string) => {
-+  const normalized = full(p).replaceAll("\\", "/")
-+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
-+}
- const put = Effect.fn("ReadToolTest.put")(function* (p: string, content: string | Buffer | Uint8Array) {
-   const fs = yield* AppFileSystem.Service
-   yield* fs.writeWithDirs(p, content)
-@@ -103,6 +110,48 @@ const asks = () => {
-   }
- }
- 
-+function readMessage(
-+  input: Tool.InferParameters<typeof ReadTool>,
-+  result: Tool.ExecuteResult,
-+  options?: { compacted?: boolean },
-+): MessageV2.WithParts {
-+  const messageID = MessageID.make(`msg-read-${options?.compacted ? "compacted" : "visible"}`)
-+  return {
-+    info: {
-+      id: messageID,
-+      sessionID: ctx.sessionID,
-+      role: "assistant",
-+      time: { created: 0 },
-+      parentID: MessageID.make("msg-user"),
-+      modelID: ModelID.make("test-model"),
-+      providerID: ProviderID.make("test-provider"),
-+      mode: "default",
-+      agent: "build",
-+      path: { cwd: "/", root: "/" },
-+      cost: 0,
-+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+    },
-+    parts: [
-+      {
-+        id: PartID.make(`part-read-${options?.compacted ? "compacted" : "visible"}`),
-+        messageID,
-+        sessionID: ctx.sessionID,
-+        type: "tool",
-+        callID: "call-read",
-+        tool: "read",
-+        state: {
-+          status: "completed",
-+          input,
-+          output: result.output,
-+          title: result.title,
-+          metadata: result.metadata,
-+          time: { start: 0, end: 1, ...(options?.compacted ? { compacted: 2 } : {}) },
-+        },
-+      },
-+    ],
-+  }
-+}
-+
- describe("tool.read external_directory permission", () => {
-   it.live("allows reading absolute path inside project directory", () =>
-     Effect.gen(function* () {
-@@ -255,18 +304,54 @@ describe("tool.read env file permissions", () => {
- })
- 
- describe("tool.read truncation", () => {
-+  it.instance("returns structured file metadata and range for normal reads", () =>
-+    Effect.gen(function* () {
-+      const test = yield* TestInstance
-+      yield* put(path.join(test.directory, "structured.txt"), "alpha\nbeta")
-+
-+      const result = yield* run({ filePath: path.join(test.directory, "structured.txt") })
-+      expect(result.output).toContain("<type>file</type>")
-+      expect(result.output).toContain('<file size="10" modified="')
-+      expect(result.output).toContain('<range start="1" end="2" total="2" returned="2" />')
-+      expect(result.output).toContain("<content>\n1: alpha\n2: beta\n</content>")
-+      expect(result.output).not.toContain("<stub")
-+      expect(result.output).not.toContain("status=\"fresh\"")
-+      expect(result.metadata.read).toMatchObject({
-+        type: "file",
-+        size: 10,
-+        canonicalPath: canonical(path.join(test.directory, "structured.txt")),
-+        start: 1,
-+        end: 2,
-+        total: 2,
-+        returned: 2,
-+        stub: false,
-+      })
-+    }),
-+  )
-+
-+  it.instance("escapes XML-sensitive file content in structured output", () =>
-+    Effect.gen(function* () {
-+      const test = yield* TestInstance
-+      yield* put(path.join(test.directory, "xml-sensitive.txt"), "<tag attr=\"x\">&</tag>")
-+
-+      const result = yield* run({ filePath: path.join(test.directory, "xml-sensitive.txt") })
-+      expect(result.output).toContain("1: &lt;tag attr=\"x\"&gt;&amp;&lt;/tag&gt;")
-+      expect(result.output).not.toContain("1: <tag")
-+    }),
-+  )
-+
-   it.instance("truncates large file by bytes and sets truncated metadata", () =>
-     Effect.gen(function* () {
-       const test = yield* TestInstance
--      const base = yield* load(path.join(FIXTURES_DIR, "models-api.json"))
--      const target = 60 * 1024
--      const content = base.length >= target ? base : base.repeat(Math.ceil(target / base.length))
--      yield* put(path.join(test.directory, "large.json"), content)
-+      const content = Array.from({ length: 100 }, (_, i) => `${i}: ${"x".repeat(1024)}`).join("\n")
-+      yield* put(path.join(test.directory, "large.txt"), content)
- 
--      const result = yield* run({ filePath: path.join(test.directory, "large.json") })
-+      const result = yield* run({ filePath: path.join(test.directory, "large.txt") })
-       expect(result.metadata.truncated).toBe(true)
--      expect(result.output).toContain("Output capped at")
--      expect(result.output).toContain("Use offset=")
-+      expect(result.output).toContain('total="100"')
-+      expect(result.metadata.read?.total).toBe(100)
-+      expect(result.output).toContain('<more offset="')
-+      expect(result.output).toContain('reason="byte_limit"')
-     }),
-   )
- 
-@@ -278,8 +363,8 @@ describe("tool.read truncation", () => {
- 
-       const result = yield* run({ filePath: path.join(test.directory, "many-lines.txt"), limit: 10 })
-       expect(result.metadata.truncated).toBe(true)
--      expect(result.output).toContain("Showing lines 1-10 of 100")
--      expect(result.output).toContain("Use offset=11")
-+      expect(result.output).toContain('<range start="1" end="10" total="100" returned="10" />')
-+      expect(result.output).toContain('<more offset="11" reason="line_limit" />')
-       expect(result.output).toContain("line0")
-       expect(result.output).toContain("line9")
-       expect(result.output).not.toContain("line10")
-@@ -293,7 +378,8 @@ describe("tool.read truncation", () => {
- 
-       const result = yield* run({ filePath: path.join(test.directory, "small.txt") })
-       expect(result.metadata.truncated).toBe(false)
--      expect(result.output).toContain("End of file")
-+      expect(result.output).toContain('<range start="1" end="1" total="1" returned="1" />')
-+      expect(result.output).not.toContain("<more")
-     }),
-   )
- 
-@@ -333,7 +419,8 @@ describe("tool.read truncation", () => {
- 
-       const result = yield* exec(dir, { filePath: path.join(dir, "empty.txt") })
-       expect(result.metadata.truncated).toBe(false)
--      expect(result.output).toContain("End of file - total 0 lines")
-+      expect(result.output).toContain('<range start="1" end="0" total="0" returned="0" />')
-+      expect(result.output).not.toContain("<more")
-     }),
-   )
- 
-@@ -401,7 +488,7 @@ describe("tool.read truncation", () => {
-       yield* put(path.join(dir, "image.bin"), jpeg)
- 
-       const result = yield* exec(dir, { filePath: path.join(dir, "image.bin") })
--      expect(result.output).toBe("Image read successfully")
-+      expect(result.output).toStartWith("Image read successfully")
-       expect(result.attachments?.[0].mime).toBe("image/jpeg")
-       expect(result.attachments?.[0].url.startsWith("data:image/jpeg;base64,")).toBe(true)
-     }),
-@@ -477,6 +564,196 @@ describe("tool.read loaded instructions", () => {
-   )
- })
- 
-+describe("tool.read visible context", () => {
-+  it.live("stubs an unchanged same range already visible in context", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const filePath = path.join(dir, "same.txt")
-+      yield* put(filePath, "one\ntwo\nthree")
-+      const input = { filePath, offset: 1, limit: 2 }
-+
-+      const first = yield* exec(dir, input)
-+      const second = yield* exec(dir, input, { ...ctx, messages: [readMessage(input, first)] })
-+
-+      expect(second.output).toContain('<range start="1" end="2" total="3" returned="0" />')
-+      expect(second.output).toContain('<stub status="stub_same_range_visible">')
-+      expect(second.output).toContain("Requested range is already visible in the current context.")
-+      expect(second.output).not.toContain("<content>")
-+      expect(second.metadata.read).toMatchObject({
-+        type: "file",
-+        start: 1,
-+        end: 2,
-+        returned: 0,
-+        stub: true,
-+        stubStatus: "stub_same_range_visible",
-+      })
-+    }),
-+  )
-+
-+  it.live("stubs a smaller range fully covered by visible context", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const filePath = path.join(dir, "covered.txt")
-+      yield* put(filePath, Array.from({ length: 120 }, (_, i) => `line${i + 1}`).join("\n"))
-+      const firstInput = { filePath, offset: 1, limit: 100 }
-+      const secondInput = { filePath, offset: 40, limit: 20 }
-+
-+      const first = yield* exec(dir, firstInput)
-+      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
-+
-+      expect(second.output).toContain('<range start="40" end="59" total="120" returned="0" />')
-+      expect(second.output).toContain('<stub status="stub_covered_range_visible" covered_by="1-100">')
-+      expect(second.output).not.toContain("<content>")
-+      expect(second.metadata.read).toMatchObject({
-+        stub: true,
-+        stubStatus: "stub_covered_range_visible",
-+        coveredBy: "1-100",
-+      })
-+    }),
-+  )
-+
-+  it.live("does not stub compacted previous reads", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const filePath = path.join(dir, "compacted.txt")
-+      yield* put(filePath, "one\ntwo\nthree")
-+      const input = { filePath, offset: 1, limit: 2 }
-+
-+      const first = yield* exec(dir, input)
-+      const second = yield* exec(dir, input, { ...ctx, messages: [readMessage(input, first, { compacted: true })] })
-+
-+      expect(second.output).toContain("<content>")
-+      expect(second.output).toContain("1: one")
-+      expect(second.output).not.toContain("<stub")
-+    }),
-+  )
-+
-+  it.live("does not stub when the file version changed", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const filePath = path.join(dir, "changed.txt")
-+      const input = { filePath, offset: 1, limit: 2 }
-+      yield* put(filePath, "one\ntwo\nthree")
-+
-+      const first = yield* exec(dir, input)
-+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)))
-+      yield* put(filePath, "one changed\ntwo\nthree")
-+      const second = yield* exec(dir, input, { ...ctx, messages: [readMessage(input, first)] })
-+
-+      expect(second.output).toContain("<content>")
-+      expect(second.output).toContain("1: one changed")
-+      expect(second.output).not.toContain("<stub")
-+    }),
-+  )
-+
-+  it.live("returns full content with a short note for significant overlap", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const filePath = path.join(dir, "overlap.txt")
-+      yield* put(filePath, Array.from({ length: 260 }, (_, i) => `line${i + 1}`).join("\n"))
-+      const firstInput = { filePath, offset: 100, limit: 100 }
-+      const secondInput = { filePath, offset: 150, limit: 100 }
-+
-+      const first = yield* exec(dir, firstInput)
-+      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
-+
-+      expect(second.output).toContain('<note type="overlap" ranges="150-199" />')
-+      expect(second.output).toContain("<content>")
-+      expect(second.output).toContain("150: line150")
-+      expect(second.output).toContain("249: line249")
-+      expect(second.output).not.toContain("<stub")
-+    }),
-+  )
-+
-+  it.live("does not use a visible stub as coverage for later reads", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const filePath = path.join(dir, "stub-source.txt")
-+      yield* put(filePath, "one\ntwo\nthree")
-+      const input = { filePath, offset: 1, limit: 2 }
-+
-+      const first = yield* exec(dir, input)
-+      const second = yield* exec(dir, input, { ...ctx, messages: [readMessage(input, first)] })
-+      const third = yield* exec(dir, input, { ...ctx, messages: [readMessage(input, second)] })
-+
-+      expect(second.output).toContain('<stub status="stub_same_range_visible">')
-+      expect(third.output).toContain("<content>")
-+      expect(third.output).toContain("1: one")
-+      expect(third.output).not.toContain("<stub")
-+    }),
-+  )
-+})
-+
-+describe("tool.read outline", () => {
-+  it.live("includes a short outline only when reading the head of a large source file", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const filePath = path.join(dir, "large.ts")
-+      const source = Array.from({ length: 650 }, (_, i) => {
-+        if (i === 9) return "export function alpha() {}"
-+        if (i === 119) return "class Beta {}"
-+        if (i === 239) return "const Gamma = () => {}"
-+        if (i === 479) return "interface Delta {}"
-+        return `// filler ${i + 1}`
-+      }).join("\n")
-+      yield* put(filePath, source)
-+
-+      const head = yield* exec(dir, { filePath, limit: 20 })
-+      expect(head.output).toContain("<outline")
-+      expect(head.output).toContain("10 function alpha")
-+      expect(head.output).toContain("120 class Beta")
-+      expect(head.output).not.toContain("import")
-+
-+      const body = yield* exec(dir, { filePath, offset: 100, limit: 20 })
-+      expect(body.output).not.toContain("<outline")
-+    }),
-+  )
-+
-+  it.live("extracts conservative labels for common language declarations", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const cases = [
-+        ["sample.py", "def py_func():\nclass PyClass:\n"],
-+        ["sample.go", "type Server struct {}\nfunc (s *Server) Serve() {}\n"],
-+        ["sample.rs", "pub struct State {}\npub async fn run() {}\nimpl State {\n"],
-+        ["sample.java", "public record User(String name) {}\npublic void run() {\n"],
-+        ["sample.cs", "public class Worker {}\npublic async Task RunAsync() {\n"],
-+        ["sample.kt", "data class User(val name: String)\nfun run() {}\n"],
-+        ["sample.swift", "struct User {}\nfunc run() {\n"],
-+        ["sample.rb", "class Worker\ndef perform\n"],
-+        ["sample.php", "class Worker {}\nfunction perform() {}\n"],
-+        ["sample.cpp", "struct Worker {};\nint run() {\n"],
-+      ] as const
-+
-+      for (const [filename, header] of cases) {
-+        const filePath = path.join(dir, filename)
-+        yield* put(filePath, header + Array.from({ length: 650 }, (_, i) => `// filler ${i + 1}`).join("\n"))
-+        const outline = yield* Effect.promise(() => readOutline(filePath, 650, 1))
-+        expect(outline?.items.length).toBeGreaterThan(0)
-+      }
-+    }),
-+  )
-+
-+  it.live("limits outline item length and total size", () =>
-+    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const filePath = path.join(dir, "long-outline.rs")
-+      const source = [
-+        "impl VeryLongGenericTypeNameWithManySegmentsAndTraitsAndBoundsThatShouldBeTrimmed where T: Clone {",
-+        ...Array.from({ length: 650 }, (_, i) => `pub fn function_${i}_with_a_very_long_suffix_that_should_not_bloat_the_outline() {}`),
-+      ].join("\n")
-+      yield* put(filePath, source)
-+
-+      const outline = yield* Effect.promise(() => readOutline(filePath, 651, 1))
-+      expect(outline).toBeDefined()
-+      expect(outline!.items.length).toBeLessThanOrEqual(32)
-+      expect(outline!.items.join("\n").length).toBeLessThanOrEqual(640)
-+      expect(outline!.items.every((item) => item.length <= 60)).toBe(true)
-+      expect(outline!.items.some((item) => item.endsWith("..."))).toBe(true)
-+    }),
-+  )
-+})
-+
- describe("tool.read binary detection", () => {
-   it.live("rejects text extension files with null bytes", () =>
-     Effect.gen(function* () {
+diff --git a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
+index 51ff867ea4..9bc9a69989 100644
+--- a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
++++ b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
+@@ -262,7 +262,7 @@ exports[`tool parameters JSON Schema (wire shape) read 1`] = `
+       "type": "string",
+     },
+     "limit": {
+-      "description": "The maximum number of lines to read (defaults to 2000)",
++      "description": "The maximum number of lines to read (defaults to 200)",
+       "maximum": 9007199254740991,
+       "minimum": 0,
+       "type": "integer",

@@ -1,35 +1,35 @@
 From 2c720138d3397839f61349a04ba4d9b5d0a43372 Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Mon, 18 May 2026 22:14:06 +0800
-Subject: [PATCH] feat(provider): add support for custom HTTP headers and
- User-Agent handling
+Subject: [PATCH] feat(provider): custom HTTP headers and User-Agent (#168 tip)
 
-
-diff --git a/packages/opencode/src/config/provider.ts b/packages/opencode/src/config/provider.ts
-index 70688ed56aac2ac0b3df612749c5f67aafe30a17..cab587d08f75d7c7da54c5d28a1da3352482ab0f 100644
---- a/packages/opencode/src/config/provider.ts
-+++ b/packages/opencode/src/config/provider.ts
-@@ -84,6 +84,12 @@ export const Info = Schema.Struct({
+diff --git a/packages/core/src/v1/config/provider.ts b/packages/core/src/v1/config/provider.ts
+--- a/packages/core/src/v1/config/provider.ts
++++ b/packages/core/src/v1/config/provider.ts
+@@ -90,6 +90,14 @@ export const Info = Schema.Struct({
        Schema.Struct({
          apiKey: Schema.optional(Schema.String),
          baseURL: Schema.optional(Schema.String),
++        // #168：具名 headers，进入 JSON schema / 文档，而非仅 rest 透传
 +        headers: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({
 +          description: "Additional HTTP headers to send to this provider.",
 +        }),
++        // #168：header-ua 快捷键折叠为 User-Agent；显式 headers UA 优先
 +        "header-ua": Schema.optional(Schema.String).annotate({
 +          description: "Shortcut for setting the provider request User-Agent header.",
 +        }),
+         // #147：自定义 provider（如 claudecode）客户端版本覆盖
          version: Schema.optional(Schema.String).annotate({
            description: "Provider-specific client version override, used by custom providers like claudecode",
-         }),
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
-index 39fc994022f37d82c868fc8cb478b08abfd89820..b32e5a8ff2e1fcfa2f5972a37f6b4400fac67a83 100644
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -43,6 +43,32 @@ function apiUrl(input: { npm?: string; api?: string }) {
-   return input.api ?? (input.npm ? SDK_DEFAULT_API_URL[input.npm] : undefined) ?? ""
+@@ -52,6 +52,35 @@ function apiUrl({ npm, api }: { npm: string; api?: string }): string {
+   return api ?? SDK_DEFAULT_API_URL[npm] ?? ""
  }
  
++// #168：归一化 provider 请求头；剥离非 string / 原 UA 后再写入权威 User-Agent
++// #168：供 resolveSDK / request / native 共用，禁止复制第二套解析
 +export function requestHeaders(options: Readonly<Record<string, unknown>>) {
 +  const userAgent = requestUserAgent(options)
 +  const headers = options.headers
@@ -45,6 +45,8 @@ index 39fc994022f37d82c868fc8cb478b08abfd89820..b32e5a8ff2e1fcfa2f5972a37f6b4400
 +  return { ...base, "User-Agent": userAgent }
 +}
 +
++// #168：headers 内任意大小写 User-Agent 优先于 header-ua 快捷键
++// #168：单一 UA 解析入口，大小写不敏感匹配 User-Agent 键
 +export function requestUserAgent(options: Readonly<Record<string, unknown>>) {
 +  const headers = options.headers
 +  const headerUserAgent =
@@ -55,61 +57,100 @@ index 39fc994022f37d82c868fc8cb478b08abfd89820..b32e5a8ff2e1fcfa2f5972a37f6b4400
 +      : undefined
 +  return headerUserAgent ?? (typeof options["header-ua"] === "string" ? options["header-ua"] : undefined)
 +}
-+
- function shouldUseCopilotResponsesApi(modelID: string): boolean {
-   const match = /^gpt-(\d+)/.exec(modelID)
-   if (!match) return false
-@@ -1715,6 +1741,10 @@ export const layer = Layer.effect(
+ 
+ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
+   if (typeof ms !== "number" || ms <= 0) return res
+@@ -1913,6 +1942,13 @@ for (const [id, provider] of configProviders) {
              ...options["headers"],
              ...model.headers,
            }
++        // #168：把 header-ua 折叠进 headers，并删除 shortcut 避免泄漏给 SDK
++        // #168：model.headers 已并入 options 后再归一化，顺序：options→model→UA 策略
 +        const configuredHeaders = requestHeaders(options)
 +        if (Object.keys(configuredHeaders).length > 0) options["headers"] = configuredHeaders
 +        const configuredUserAgent = requestUserAgent(options)
++        // #168：shortcut 不得进入 SDK constructor options
 +        delete options["header-ua"]
  
          const key = Hash.fast(
            JSON.stringify({
-@@ -1743,6 +1773,13 @@ export const layer = Layer.effect(
+@@ -1946,6 +1982,18 @@ for (const [id, provider] of configProviders) {
            const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
            if (combined) opts.signal = combined
  
++          // #168：仅当当前 UA 为空或仍以配置 UA 为前缀时回写，避免误伤无关 UA
++          // #168：SDK 可能追加后缀（ai-sdk/...），startsWith 仍允许刷新为配置值
 +          if (configuredUserAgent) {
 +            const headers = new Headers(opts.headers)
 +            const currentUserAgent = headers.get("user-agent") ?? ""
-+            if (!currentUserAgent || currentUserAgent.startsWith(configuredUserAgent)) headers.set("User-Agent", configuredUserAgent)
++            // #168：空 UA 或配置前缀才覆盖；完全无关 UA 保持不动
++            if (!currentUserAgent || currentUserAgent.startsWith(configuredUserAgent)) {
++              headers.set("User-Agent", configuredUserAgent)
++            }
 +            opts.headers = headers
 +          }
 +
-           // Strip openai itemId metadata following what codex does
-           if (
-             (model.api.npm === "@ai-sdk/openai" || model.api.npm === "@ai-sdk/azure") &&
-diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
-index 9e9e1d835b14de8a6996c22d20e95d1233b59ac6..2c9693c525b56dc45a4920cd699c2dda468c20ca 100644
---- a/packages/opencode/src/session/llm.ts
-+++ b/packages/opencode/src/session/llm.ts
-@@ -375,6 +375,7 @@ const live: Layer.Layer<
-                 ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
-                 "User-Agent": `opencode/${InstallationVersion}`,
-               }),
-+          ...Provider.requestHeaders(item.options),
-           ...input.model.headers,
-           ...headers,
-         },
+           // #83：customFetch 仅鉴权透传；默认走 NetworkProxy.fetch 主路由
+           // #83：provider 请求 purpose=provider，区别于基础设施和 npm
+           const res = await (
+diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/src/session/llm/request.ts
+--- a/packages/opencode/src/session/llm/request.ts
++++ b/packages/opencode/src/session/llm/request.ts
+@@ -7,7 +7,7 @@ import { Permission } from "@/permission"
+ import { ToolSelection } from "@/tool/selection"
+ import type { Agent } from "@/agent/agent"
+ import type { MessageV2 } from "../message-v2"
+-import type { Provider } from "@/provider/provider"
++import { Provider } from "@/provider/provider"
+ import { ProviderTransform } from "@/provider/transform"
+ import { SystemPrompt } from "../system"
+ import { InstallationVersion } from "@opencode-ai/core/installation/version"
+@@ -205,6 +205,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
+             ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+             "User-Agent": USER_AGENT,
+           }),
++      // #168：默认 UA 之后合并 provider 配置头，允许覆盖 User-Agent
++      ...Provider.requestHeaders(input.provider.options),
+       ...input.model.headers,
+       ...headers,
+     },
+diff --git a/packages/opencode/src/session/llm/native-runtime.ts b/packages/opencode/src/session/llm/native-runtime.ts
+--- a/packages/opencode/src/session/llm/native-runtime.ts
++++ b/packages/opencode/src/session/llm/native-runtime.ts
+@@ -1,5 +1,5 @@
+ import type { Auth } from "@/auth"
+-import type { Provider } from "@/provider/provider"
++import { Provider } from "@/provider/provider"
+ import { ProviderTransform } from "@/provider/transform"
+ import { errorMessage } from "@/util/error"
+ import { isRecord } from "@/util/record"
+@@ -103,7 +103,9 @@ export function stream(input: StreamInput): StreamResult {
+     topK: input.topK,
+     maxOutputTokens: input.maxOutputTokens,
+     providerOptions: ProviderTransform.providerOptions(input.model, input.providerOptions ?? {}),
+-    headers: { ...providerHeaders(input.provider.options.headers), ...input.headers },
++    // #168：native 与 AI-SDK 共用 requestHeaders，避免 header-ua 只在一侧生效
++    // #168：配置头在前、prepared headers 在后：模型/插件仍可覆盖，但配置 UA 不被默认 UA 无条件碾压需由 request 侧保证
++    headers: { ...Provider.requestHeaders(input.provider.options), ...input.headers },
+   })
+   const stream = Stream.scoped(
+     Stream.unwrap(
 diff --git a/packages/opencode/test/provider/provider.test.ts b/packages/opencode/test/provider/provider.test.ts
-index 7fd2dd657fec6147f3287c1838a330aa8f27f20b..ede52b838cb97046f6e4355a8b3e89b5f333c02b 100644
 --- a/packages/opencode/test/provider/provider.test.ts
 +++ b/packages/opencode/test/provider/provider.test.ts
-@@ -1891,6 +1891,27 @@ test("provider options are deeply merged", async () => {
-   })
- })
+@@ -1334,6 +1334,30 @@ it.instance(
+   },
+ )
  
++// #168：header-ua 快捷键映射为 User-Agent
++// #168：纯函数单测，不依赖 instance/config 加载
 +test("provider header-ua maps to request headers", () => {
 +  expect(Provider.requestHeaders({ "header-ua": "codex_cli_rs/0.2333" })).toEqual({
 +    "User-Agent": "codex_cli_rs/0.2333",
 +  })
 +})
 +
++// #168：显式 headers.User-Agent 覆盖 shortcut，并保留其它头
 +test("provider headers User-Agent overrides header-ua shortcut", () => {
 +  expect(
 +    Provider.requestHeaders({
@@ -125,110 +166,92 @@ index 7fd2dd657fec6147f3287c1838a330aa8f27f20b..ede52b838cb97046f6e4355a8b3e89b5
 +  })
 +})
 +
- test("hosted nvidia provider adds billing origin header", async () => {
-   await using tmp = await tmpdir({
-     init: async (dir) => {
+ it.instance(
+   "hosted nvidia provider adds billing origin header",
+   Effect.gen(function* () {
 diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
-index a0227c55b80206796821def4d89a606904a6fb75..130d31ae8c066945c93d743142122d52b3c109ef 100644
 --- a/packages/opencode/test/session/llm.test.ts
 +++ b/packages/opencode/test/session/llm.test.ts
-@@ -321,6 +321,99 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
+@@ -752,6 +752,82 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
  }
  
  describe("session.llm.stream", () => {
++  // #168：线上抓取 User-Agent，锁定 headers 与 header-ua 两条配置路径
++  // #168：集成测覆盖 openai-compatible 线上头，防止只测纯函数
 +  for (const item of [
-+    { name: "options.headers.User-Agent", options: { headers: { "User-Agent": "codex_cli_rs/0.2333" } } },
-+    { name: "options.header-ua", options: { "header-ua": "codex_cli_rs/0.2333" } },
-+  ]) {
-+    test(`uses configured provider ${item.name} for request user agent`, async () => {
-+      const server = state.server
-+      if (!server) throw new Error("Server not initialized")
-+
-+      const providerID = `daxiao-codex-${item.name.includes("headers") ? "headers" : "shortcut"}`
-+      const request = waitRequest(
-+        "/chat/completions",
-+        new Response(createChatStream("Hello"), {
-+          status: 200,
-+          headers: { "Content-Type": "text/event-stream" },
-+        }),
-+      )
-+
-+      await using tmp = await tmpdir({
-+        init: async (dir) => {
-+          await Bun.write(
-+            path.join(dir, "opencode.json"),
-+            JSON.stringify({
-+              $schema: "https://opencode.ai/config.json",
-+              enabled_providers: [providerID],
-+              provider: {
-+                [providerID]: {
-+                  npm: "@ai-sdk/openai-compatible",
-+                  name: "DaXiao Codex",
-+                  options: {
-+                    apiKey: "test-key",
-+                    baseURL: `${server.url.origin}/v1`,
-+                    ...item.options,
-+                  },
-+                  models: {
-+                    "gpt-5.5": {
-+                      name: "GPT-5.5",
-+                      limit: {
-+                        context: 400000,
-+                        input: 272000,
-+                        output: 128000,
-+                      },
-+                      modalities: {
-+                        input: ["text", "image"],
-+                        output: ["text"],
-+                      },
-+                    },
-+                  },
-+                },
-+              },
++    { name: "options.headers.User-Agent", options: { headers: { "User-Agent": "codex_cli_rs/0.2333" } }, id: "daxiao-codex-headers" },
++    { name: "options.header-ua", options: { "header-ua": "codex_cli_rs/0.2333" }, id: "daxiao-codex-shortcut" },
++  ] as const) {
++    it.instance(
++      `uses configured provider ${item.name} for request user agent`,
++      () =>
++        Effect.gen(function* () {
++          const request = waitRequest(
++            "/chat/completions",
++            new Response(createChatStream("Hello"), {
++              status: 200,
++              headers: { "Content-Type": "text/event-stream" },
 +            }),
 +          )
-+        },
-+      })
 +
-+      await withTestInstance({
-+        directory: tmp.path,
-+        fn: async (ctx) => {
-+          const resolved = await getModel(ProviderID.make(providerID), ModelID.make("gpt-5.5"), ctx)
-+          const sessionID = SessionID.make(`session-test-${providerID}`)
++          const resolved = yield* Provider.use.getModel(ProviderV2.ID.make(item.id), ModelV2.ID.make("gpt-5.5"))
++          const sessionID = SessionID.make(`session-test-${item.id}`)
 +          const agent = {
 +            name: "test",
 +            mode: "primary",
 +            options: {},
 +            permission: [{ permission: "*", pattern: "*", action: "allow" }],
 +          } satisfies Agent.Info
++
 +          const user = {
-+            id: MessageID.make(`msg_user-${providerID}`),
++            id: MessageID.make(`msg_user-${item.id}`),
 +            sessionID,
 +            role: "user",
 +            time: { created: Date.now() },
 +            agent: agent.name,
-+            model: { providerID: ProviderID.make(providerID), modelID: resolved.id },
-+          } satisfies MessageV2.User
++            model: { providerID: ProviderV2.ID.make(item.id), modelID: resolved.id },
++          } satisfies SessionV1.User
 +
-+          await drain(
-+            {
-+              user,
-+              sessionID,
-+              model: resolved,
-+              agent,
-+              system: ["You are a helpful assistant."],
-+              messages: [{ role: "user", content: "Hello" }],
-+              tools: {},
++          yield* drain({
++            user,
++            sessionID,
++            model: resolved,
++            agent,
++            system: ["You are a helpful assistant."],
++            messages: [{ role: "user", content: "Hello" }],
++            tools: {},
++          })
++
++          const capture = yield* Effect.promise(() => request)
++          // #168：配置 UA 必须出现在线上，不被默认 opencode/version 覆盖
++          expect(capture.headers.get("user-agent")).toBe("codex_cli_rs/0.2333")
++        }),
++      {
++        config: () => ({
++          enabled_providers: [item.id],
++          provider: {
++            [item.id]: {
++              npm: "@ai-sdk/openai-compatible",
++              name: "DaXiao Codex",
++              options: {
++                apiKey: "test-key",
++                baseURL: `${state.server!.url.origin}/v1`,
++                ...item.options,
++              },
++              models: {
++                "gpt-5.5": {
++                  name: "GPT-5.5",
++                  limit: { context: 400000, input: 272000, output: 128000 },
++                  modalities: { input: ["text", "image"], output: ["text"] },
++                },
++              },
 +            },
-+            ctx,
-+          )
-+
-+          expect((await request).headers.get("user-agent")).toBe("codex_cli_rs/0.2333")
-+        },
-+      })
-+    })
++          },
++        }),
++      },
++    )
 +  }
 +
-   test("sends temperature, tokens, and reasoning options for openai-compatible models", async () => {
-     const server = state.server
-     if (!server) {
+   const vivgridFixture = { providerID: "vivgrid", modelID: "gemini-3.1-pro-preview" }
+   it.instance(
+     "sends temperature, tokens, and reasoning options for openai-compatible models",

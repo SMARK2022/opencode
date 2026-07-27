@@ -4,44 +4,85 @@ Date: Fri, 8 May 2026 16:24:38 +0800
 Subject: [PATCH] =?UTF-8?q?feat(dialog):=20=E6=B7=BB=E5=8A=A0=E9=A2=84?=
  =?UTF-8?q?=E8=A7=88=E8=A1=8C=E6=94=AF=E6=8C=81=E8=87=B3=20DialogSelect=20?=
  =?UTF-8?q?=E7=BB=84=E4=BB=B6=EF=BC=8C=E4=BC=98=E5=8C=96=E9=80=89=E9=A1=B9?=
- =?UTF-8?q?=E5=B1=95=E7=A4=BA=E9=80=BB=E8=BE=91?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-index 04c6b9945c8f03c36223142e97c30e1445cbe7a9..c9d29c9149ad5d2e2fc60047a99aa3b1479b466a 100644
---- a/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/dialog-session-list.tsx
-@@ -2,7 +2,7 @@ import { useDialog } from "@tui/ui/dialog"
- import { DialogSelect } from "@tui/ui/dialog-select"
- import { useRoute } from "@tui/context/route"
- import { useSync } from "@tui/context/sync"
--import { createMemo, createResource, createSignal, onMount } from "solid-js"
-+import { createEffect, createMemo, createResource, createSignal, on, onMount } from "solid-js"
- import { Locale } from "@/util/locale"
- import { useProject } from "@tui/context/project"
- import { useKeybind } from "../context/keybind"
-@@ -17,9 +17,14 @@ import { DialogWorkspaceCreate, openWorkspaceSession, restoreWorkspaceSession }
- import { Spinner } from "./spinner"
- import { errorMessage } from "@/util/error"
- import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
+diff --git a/packages/tui/src/ui/dialog-select.tsx b/packages/tui/src/ui/dialog-select.tsx
+index dab9103d24..5b2c76e3c7 100644
+--- a/packages/tui/src/ui/dialog-select.tsx
++++ b/packages/tui/src/ui/dialog-select.tsx
+@@ -68,6 +68,8 @@ export interface DialogSelectOption<T = any> {
+   bg?: RGBA
+   gutter?: () => JSX.Element
+   margin?: JSX.Element
++  // #112：会话列表最近用户消息预览行
++  previewLines?: string[]
+   onSelect?: (ctx: DialogContext) => void
+ }
+ 
+@@ -206,7 +208,11 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+       if (!category) return acc
+       return acc + (i > 0 ? 2 : 1)
+     }, 0)
+-    return flat().reduce((acc, option) => acc + 1 + (option.details?.length ?? 0), headers)
++    // #112：details + previewLines 计入虚拟高度，避免滚动裁切
++    return flat().reduce(
++      (acc, option) => acc + 1 + (option.details?.length ?? 0) + (option.previewLines?.length ?? 0),
++      headers,
++    )
+   })
+ 
+   const dimensions = useTerminalDimensions()
+@@ -703,6 +709,17 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+                               </box>
+                             )}
+                           </For>
++                          {/* #112：previewLines 与 details 同为外层 column 子项，勿塞进 title row */}
++                          <For each={option.previewLines}>
++                            {(line, index) => (
++                              <box paddingLeft={3} paddingRight={3}>
++                                <text fg={theme.textMuted} wrapMode="none">
++                                  {(index() === (option.previewLines?.length ?? 0) - 1 ? "└─ " : "├─ ") +
++                                    Locale.truncateMiddle(line, Math.max(1, Math.min(72, dimensions().width - 16)))}
++                                </text>
++                              </box>
++                            )}
++                          </For>
+                         </box>
+                       )
+                     }}
+diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/src/component/dialog-session-list.tsx
+index c508fc6b7b..849904a1a1 100644
+--- a/packages/tui/src/component/dialog-session-list.tsx
++++ b/packages/tui/src/component/dialog-session-list.tsx
+@@ -1,8 +1,9 @@
 +import type { TextPart } from "@opencode-ai/sdk/v2"
+ import { useDialog } from "../ui/dialog"
+ import { DialogSelect } from "../ui/dialog-select"
+ import { useRoute } from "../context/route"
+ import { useSync } from "../context/sync"
+-import { createMemo, createResource, createSignal, onCleanup, onMount } from "solid-js"
++import { createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from "solid-js"
+ import path from "path"
+ import { Locale } from "../util/locale"
+ import { useProject } from "../context/project"
+@@ -42,6 +43,13 @@ export function loadDialogSessionList<T>(input: {
+   )
+ }
  
- type WorkspaceStatus = "connected" | "connecting" | "disconnected" | "error"
- 
++// #112：默认预览 1 行（#115 改为 2）
 +const SESSION_LIST_PREVIEW_LINES = 1
++// #112：最近用户消息拉取条数上限
 +const SESSION_LIST_PREVIEW_MESSAGE_LIMIT = 20
++// #112：并发预加载会话数上限
 +const SESSION_LIST_PREVIEW_SESSION_LIMIT = 50
 +
  export function DialogSessionList() {
    const dialog = useDialog()
    const route = useRoute()
-@@ -31,6 +36,43 @@ export function DialogSessionList() {
-   const toast = useToast()
+@@ -55,6 +63,46 @@ export function DialogSessionList() {
    const [toDelete, setToDelete] = createSignal<string>()
+   const [deleted, setDeleted] = createSignal(new Set<string>())
    const [search, setSearch] = createDebouncedSignal("", 150)
++  // #112：sessionID -> 预览纯文本
 +  const [previews, setPreviews] = createSignal<Record<string, string>>({})
 +
 +  createEffect(
@@ -49,12 +90,11 @@ index 04c6b9945c8f03c36223142e97c30e1445cbe7a9..c9d29c9149ad5d2e2fc60047a99aa3b1
 +      () => sessions(),
 +      (sessions) => {
 +        if (SESSION_LIST_PREVIEW_LINES <= 0) return
++        // #112：跳过已加载预览的会话
 +        const unloaded = sessions
 +          .slice(0, SESSION_LIST_PREVIEW_SESSION_LIMIT)
 +          .filter((s) => !(s.id in (previews() ?? {})))
-+
 +        if (unloaded.length === 0) return
-+
 +        void Promise.all(
 +          unloaded.map(async (session) => {
 +            try {
@@ -62,169 +102,52 @@ index 04c6b9945c8f03c36223142e97c30e1445cbe7a9..c9d29c9149ad5d2e2fc60047a99aa3b1
 +                sessionID: session.id,
 +                limit: SESSION_LIST_PREVIEW_MESSAGE_LIMIT,
 +              })
-+              const userMsg = result.data?.findLast((x) => x.info.role === "user")
++              // #112：与 tip sync 一致，只认 result.data 契约形态
++              const list = Array.isArray((result as any)?.data) ? ((result as any).data as any[]) : []
++              // #112：最近一条用户消息；role 只读 info.role
++              const userMsg = [...list].reverse().find((x: any) => x.info?.role === "user")
 +              if (!userMsg) return
-+              const text = (userMsg.parts
-+                .filter((p) => p.type === "text" && !p.synthetic && !p.ignored) as TextPart[])
++              const text = ((userMsg.parts ?? []) as TextPart[])
++                .filter((p) => p.type === "text" && !(p as any).synthetic && !(p as any).ignored)
 +                .map((p) => p.text)
 +                .join(" ")
 +                .replace(/\s+/g, " ")
 +                .trim()
-+              if (text) {
-+                setPreviews((prev) => ({ ...prev, [session.id]: text }))
-+              }
-+            } catch {}
++              if (text) setPreviews((prev) => ({ ...prev, [session.id]: text }))
++            } catch {
++              // #112：预览失败不阻断列表
++            }
 +          }),
 +        )
 +      },
 +    ),
 +  )
+   const deleteHint = useCommandShortcut("session.delete")
+   const quickSwitch1 = useCommandShortcut("session.quick_switch.1")
+   const quickSwitch9 = useCommandShortcut("session.quick_switch.9")
+@@ -249,6 +297,25 @@ export function DialogSessionList() {
+         category,
+         footer,
+         gutter,
++        // #112：按词折成最多 N 行，交给 DialogSelect.Option
++        previewLines:
++          SESSION_LIST_PREVIEW_LINES > 0 && previews()[x.id]
++            ? previews()[x.id]
++                .split(" ")
++                .reduce((lines: string[], word: string) => {
++                  // #112：超宽换行；超出行数则并入末行
++                  const cur = lines[lines.length - 1] ?? ""
++                  if (!cur) return [word]
++                  if (lines.length >= SESSION_LIST_PREVIEW_LINES) {
++                    lines[lines.length - 1] = (cur + " " + word).trim()
++                    return lines
++                  }
++                  if ((cur + " " + word).length > 72) return [...lines, word]
++                  lines[lines.length - 1] = (cur + " " + word).trim()
++                  return lines
++                }, [] as string[])
++                .slice(0, SESSION_LIST_PREVIEW_LINES)
++            : undefined,
+       }
+     }
  
-   const [searchResults, { refetch }] = createResource(
-     () => ({ query: search(), filter: sync.session.query() }),
-@@ -119,7 +161,7 @@ export function DialogSessionList() {
-       .toSorted((a, b) => {
-         const updatedDay = new Date(b.time.updated).setHours(0, 0, 0, 0) - new Date(a.time.updated).setHours(0, 0, 0, 0)
-         if (updatedDay !== 0) return updatedDay
--        return b.time.created - a.time.created
-+        return b.time.updated - a.time.updated
-       })
-       .map((x) => {
-         const workspace = x.workspaceID ? project.workspace.get(x.workspaceID) : undefined
-@@ -162,6 +204,8 @@ export function DialogSessionList() {
-         const isDeleting = toDelete() === x.id
-         const status = sync.data.session_status?.[x.id]
-         const isWorking = status?.type === "busy"
-+        const previewText = previews()[x.id]
-+        const previewLines = SESSION_LIST_PREVIEW_LINES > 0 && previewText ? [previewText] : undefined
-         return {
-           title: isDeleting ? `Press ${keybind.print("session_delete")} again to confirm` : x.title,
-           bg: isDeleting ? theme.error : undefined,
-@@ -169,6 +213,7 @@ export function DialogSessionList() {
-           category,
-           footer,
-           gutter: isWorking ? () => <Spinner /> : undefined,
-+          previewLines,
-         }
-       })
-   })
-diff --git a/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx b/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
-index 4d68c4430891c5945a162c2aba133def58abb6d1..5b19b2991d40619a3928e4fce7feb1826b5d2eeb 100644
---- a/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/ui/dialog-select.tsx
-@@ -44,6 +44,7 @@ export interface DialogSelectOption<T = any> {
-   bg?: RGBA
-   gutter?: () => JSX.Element
-   margin?: JSX.Element
-+  previewLines?: string[]
-   onSelect?: (ctx: DialogContext) => void
- }
- 
-@@ -134,7 +135,8 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
-       if (!category) return acc
-       return acc + (i > 0 ? 2 : 1)
-     }, 0)
--    return flat().length + headers
-+    const previewLines = flat().reduce((acc, option) => acc + (option.previewLines?.length ?? 0), 0)
-+    return flat().length + headers + previewLines
-   })
- 
-   const dimensions = useTerminalDimensions()
-@@ -352,6 +354,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
-                           active={active()}
-                           current={current()}
-                           gutter={option.gutter}
-+                          previewLines={option.previewLines}
-                         />
-                       </box>
-                     )
-@@ -408,41 +411,62 @@ function Option(props: {
-   current?: boolean
-   footer?: JSX.Element | string
-   gutter?: () => JSX.Element
-+  previewLines?: string[]
-   onMouseOver?: () => void
- }) {
-   const { theme } = useTheme()
-   const fg = selectedForeground(theme)
- 
-   return (
--    <>
--      <Show when={props.current}>
--        <text flexShrink={0} fg={props.active ? fg : props.current ? theme.primary : theme.text} marginRight={0}>
--          ●
-+    <box flexGrow={1} flexDirection="column">
-+      <box flexDirection="row">
-+        <Show when={props.current}>
-+          <text flexShrink={0} fg={props.active ? fg : props.current ? theme.primary : theme.text} marginRight={0}>
-+            ●
-+          </text>
-+        </Show>
-+        <Show when={!props.current && props.gutter}>
-+          <box flexShrink={0} marginRight={0}>
-+            {props.gutter?.()}
-+          </box>
-+        </Show>
-+        <text
-+          flexGrow={1}
-+          fg={props.active ? fg : props.current ? theme.primary : theme.text}
-+          attributes={props.active ? TextAttributes.BOLD : undefined}
-+          overflow="hidden"
-+          wrapMode="none"
-+          paddingLeft={3}
-+        >
-+          {Locale.truncate(props.title, 61)}
-+          <Show when={props.description}>
-+            <span style={{ fg: props.active ? fg : theme.textMuted }}> {props.description}</span>
-+          </Show>
-         </text>
--      </Show>
--      <Show when={!props.current && props.gutter}>
--        <box flexShrink={0} marginRight={0}>
--          {props.gutter?.()}
--        </box>
--      </Show>
--      <text
--        flexGrow={1}
--        fg={props.active ? fg : props.current ? theme.primary : theme.text}
--        attributes={props.active ? TextAttributes.BOLD : undefined}
--        overflow="hidden"
--        wrapMode="none"
--        paddingLeft={3}
--      >
--        {Locale.truncate(props.title, 61)}
--        <Show when={props.description}>
--          <span style={{ fg: props.active ? fg : theme.textMuted }}> {props.description}</span>
-+        <Show when={props.footer}>
-+          <box flexShrink={0}>
-+            <text fg={props.active ? fg : theme.textMuted}>{props.footer}</text>
-+          </box>
-         </Show>
--      </text>
--      <Show when={props.footer}>
--        <box flexShrink={0}>
--          <text fg={props.active ? fg : theme.textMuted}>{props.footer}</text>
--        </box>
-+      </box>
-+      <Show when={props.previewLines}>
-+        <For each={props.previewLines}>
-+          {(line, index) => {
-+            const isLast = () => index() === (props.previewLines?.length ?? 0) - 1
-+            const prefix = isLast() ? "  └─ " : "  ├─ "
-+            return (
-+              <text
-+                fg={props.active ? fg : theme.textMuted}
-+                overflow="hidden"
-+                wrapMode="none"
-+                paddingLeft={3}
-+              >
-+                {prefix}{line}
-+              </text>
-+            )
-+          }}
-+        </For>
-       </Show>
--    </>
-+    </box>
-   )
- }

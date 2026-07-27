@@ -1,7 +1,15 @@
+From a6b9a6a56d923b157ef8ffdcd034db20c8e92f51 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sun, 3 May 2026 05:18:54 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=E7=88=B6=E4=BB=A3?=
+ =?UTF-8?q?=E7=90=86=E6=9D=83=E9=99=90=E8=BF=87=E6=BB=A4=E9=80=BB=E8=BE=91?=
+ =?UTF-8?q?=EF=BC=8C=E4=BB=A5=E5=A2=9E=E5=BC=BA=E4=BB=BB=E5=8A=A1=E4=BC=9A?=
+
 diff --git a/packages/opencode/src/agent/subagent-permissions.ts b/packages/opencode/src/agent/subagent-permissions.ts
+index b1b99b484e..36ab2d4a75 100644
 --- a/packages/opencode/src/agent/subagent-permissions.ts
 +++ b/packages/opencode/src/agent/subagent-permissions.ts
-@@ -11,16 +11,23 @@
+@@ -11,13 +11,21 @@ import type { Agent } from "./agent"
   * 2. Default `todowrite` and `task` denies if the subagent's own ruleset
   *    doesn't already permit them.
   */
@@ -19,20 +27,19 @@ diff --git a/packages/opencode/src/agent/subagent-permissions.ts b/packages/open
 +): PermissionV1.Ruleset {
    const canTask = input.subagent.permission.some((rule) => rule.permission === "task")
    const canTodo = input.subagent.permission.some((rule) => rule.permission === "todowrite")
-+  // 顺序对齐 SMARK：先 session 过滤，再 parent-agent non-allow，配合 findLast 后写胜出
++  // #67：parent-agent non-allow 在前，session external_directory/deny 在后
++  // findLast 后写胜出：会话级 external_directory allow 不被 agent 默认 "* ask" 覆盖
 +  const parentDenyRules = parentAgentPermission.filter((rule) => rule.action !== "allow")
    return [
++    ...parentDenyRules,
      ...input.parentSessionPermission.filter(
        (rule) => rule.permission === "external_directory" || rule.action === "deny",
      ),
-+    ...parentDenyRules,
-     ...(canTodo ? [] : [{ permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const }]),
-     ...(canTask ? [] : [{ permission: "task" as const, pattern: "*" as const, action: "deny" as const }]),
-   ]
 diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
+index b0a866c90e..55bec3289f 100644
 --- a/packages/opencode/src/tool/task.ts
 +++ b/packages/opencode/src/tool/task.ts
-@@ -122,10 +122,15 @@
+@@ -122,10 +122,15 @@ export const TaskTool = Tool.define(
          ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
          : undefined
        const parent = yield* sessions.get(ctx.sessionID)

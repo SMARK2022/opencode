@@ -3,44 +3,17 @@ From: SMARK <3222301373@qq.com>
 Date: Fri, 22 May 2026 23:39:51 +0800
 Subject: [PATCH] feat(permission): add auto review config schema
 
-
-diff --git a/packages/opencode/src/config/agent.ts b/packages/opencode/src/config/agent.ts
-index a6719e86743a447b2180b1626d7dc30f418ac337..c8200fe7009b877c4820af69a877a2f05e341cf1 100644
---- a/packages/opencode/src/config/agent.ts
-+++ b/packages/opencode/src/config/agent.ts
-@@ -45,6 +45,10 @@ const AgentSchema = Schema.StructWithRest(
-       description: "Maximum number of agentic iterations before forcing text-only response",
-     }),
-     maxSteps: Schema.optional(PositiveInt).annotate({ description: "@deprecated Use 'steps' field instead." }),
-+    // Agent permissions are tool rules only. Auto-review controls are global
-+    // permission-pipeline settings today; if they appear in agent frontmatter,
-+    // StructWithRest preserves them under options instead of pretending the
-+    // runtime reviewer honors per-agent policy/model overrides.
-     permission: Schema.optional(ConfigPermission.Info),
-   }),
-   [Schema.Record(Schema.String, Schema.Any)],
-@@ -93,7 +97,7 @@ const normalize = (agent: Schema.Schema.Type<typeof AgentSchema>): Schema.Schema
-   globalThis.Object.assign(permission, agent.permission)
+diff --git a/packages/core/src/v1/config/permission.ts b/packages/core/src/v1/config/permission.ts
+--- a/packages/core/src/v1/config/permission.ts
++++ b/packages/core/src/v1/config/permission.ts
+@@ -2,18 +2,63 @@ export * as ConfigPermissionV1 from "./permission"
  
-   const steps = agent.steps ?? agent.maxSteps
--  return { ...agent, options, permission, ...(steps !== undefined ? { steps } : {}) }
-+  return { ...agent, options, permission: permission as Schema.Schema.Type<typeof ConfigPermission.Info>, ...(steps !== undefined ? { steps } : {}) }
- }
- 
- export const Info = AgentSchema.pipe(
-diff --git a/packages/opencode/src/config/permission.ts b/packages/opencode/src/config/permission.ts
-index 1092ae2b7e14dea2ec7f040adbab17d825311288..c851be06af3314000b4099255db48618437978f7 100644
---- a/packages/opencode/src/config/permission.ts
-+++ b/packages/opencode/src/config/permission.ts
-@@ -1,18 +1,63 @@
- export * as ConfigPermission from "./permission"
  import { Schema, SchemaGetter } from "effect"
  
 -export const Action = Schema.Literals(["ask", "allow", "deny"]).annotate({ identifier: "PermissionActionConfig" })
-+// `auto` is a permission action, not an approval policy. It means the request
-+// enters deterministic precheck and, when needed, the configured reviewer before
-+// falling back to user approval. Keep it in the same union as allow/ask/deny so
-+// existing permission maps and generated SDK types use one action vocabulary.
++// #196：`auto` 是 permission action 而非审批策略，表示请求进入确定性 precheck
++// #196：并在需要时交给配置的 reviewer，最后才回退到用户审批。与 allow/ask/deny 共用
++// #196：同一 union，确保 permission map 和 SDK 类型使用统一的 action 词汇表。
 +export const Action = Schema.Literals(["ask", "allow", "deny", "auto"]).annotate({ identifier: "PermissionActionConfig" })
  export type Action = Schema.Schema.Type<typeof Action>
  
@@ -51,17 +24,21 @@ index 1092ae2b7e14dea2ec7f040adbab17d825311288..c851be06af3314000b4099255db48618
 +export type ApprovalsReviewer = Schema.Schema.Type<typeof ApprovalsReviewer>
 +
 +export const AutoReview = Schema.Struct({
-+  // Reviewer configuration lives beside permission rules because it controls how
-+  // `action: "auto"` is resolved, but these fields are not themselves rules and
-+  // are skipped by Permission.fromConfig.
++  // #196：reviewer 配置与 permission rules 并列，控制 `action: "auto"` 的解析方式，
++  // #196：但这些字段本身不是 rules，Permission.fromConfig 会跳过它们。
++  // #196：model 指定 reviewer 使用的模型；timeout_ms 默认 90 秒。
 +  model: Schema.optional(Schema.String).annotate({ description: "Reviewer model in provider/model form." }),
 +  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Reviewer timeout in milliseconds. Defaults to 90000." }),
++  // #196：policy_path 和 policy 追加到默认 tenant policy 之后。
 +  policy_path: Schema.optional(Schema.String).annotate({ description: "Markdown policy file appended to the default tenant policy." }),
 +  policy: Schema.optional(Schema.String).annotate({ description: "Inline markdown policy appended to the reviewer policy prompt." }),
++  // #196：fallback 控制 reviewer 失败时的行为：deny（默认）或回退到用户审批。
 +  fallback: Schema.optional(Schema.Literals(["deny", "user"])).annotate({
 +    description: "On reviewer failure, either fail closed or fall back to user approval. Defaults to deny.",
 +  }),
++  // #196：strict 为 true 时即使 precheck 判定 allow 也强制经过 reviewer。
 +  strict: Schema.optional(Schema.Boolean).annotate({ description: "Route even low-risk precheck allows through reviewer." }),
++  // #196：熔断器阈值，连续或滑动窗口内拒绝次数超限后中断 reviewer。
 +  max_consecutive_denials: Schema.optional(Schema.Number).annotate({ description: "Circuit breaker consecutive denial threshold." }),
 +  max_recent_denials: Schema.optional(Schema.Number).annotate({ description: "Circuit breaker recent denial threshold." }),
 +  recent_denial_window: Schema.optional(Schema.Number).annotate({ description: "Circuit breaker recent decision window." }),
@@ -74,10 +51,12 @@ index 1092ae2b7e14dea2ec7f040adbab17d825311288..c851be06af3314000b4099255db48618
  export const Rule = Schema.Union([Action, Object]).annotate({ identifier: "PermissionRuleConfig" })
  export type Rule = Schema.Schema.Type<typeof Rule>
  
-+// StructWithRest validates control fields through the rest schema too, so the
-+// rest value union must be wide enough for the explicit controls below. The
-+// filter after InputObject narrows that back down: only named control fields can
-+// use control-shaped values, while arbitrary permission names must be rules.
+-// Known permission keys get explicit types in the Effect schema for generated
+-// docs/types. Runtime config parsing uses Effect's `propertyOrder: "original"`
+-// parse option so user key order is preserved for permission precedence.
++// #196：StructWithRest 会通过 rest schema 校验 control 字段，所以 rest value union
++// #196：必须足够宽以容纳下面的显式 control 字段。InputObject 之后的 filter 再将其收窄：
++// #196：只有命名的 control 字段可以使用 control 形态的值，而任意 permission name 必须是 rule。
 +const InputValue = Schema.Union([Rule, ApprovalsReviewer, AutoReview])
 +
 +const controlsOnlyOnControlKeys = Schema.makeFilter<Record<string, unknown>>((data) => {
@@ -88,18 +67,14 @@ index 1092ae2b7e14dea2ec7f040adbab17d825311288..c851be06af3314000b4099255db48618
 +  }
 +})
 +
- // Known permission keys get explicit types in the Effect schema for generated
--// docs/types. Runtime config parsing uses Effect's `propertyOrder: "original"`
--// parse option so user key order is preserved for permission precedence.
-+// docs/types, while only the explicit `approvals_reviewer` and `auto_review`
-+// fields accept control values. Unknown keys are treated as ordinary permission
-+// names and must be rules, so typoed/unsupported controls do not parse and then
-+// disappear during Permission.fromConfig. Runtime parsing uses Effect's
-+// `propertyOrder: "original"` option so user key order is preserved.
++// #196：已知 permission key 在 schema 中有显式类型，用于生成文档/类型；只有显式的
++// #196：`approvals_reviewer` 和 `auto_review` 字段接受 control 值。未知 key 被视为普通
++// #196：permission name 且必须是 rule，这样拼错的 control 不会先解析再在
++// #196：Permission.fromConfig 中消失。运行时解析使用 `propertyOrder: "original"` 保留用户顺序。
  const InputObject = Schema.StructWithRest(
    Schema.Struct({
      read: Schema.optional(Rule),
-@@ -32,9 +77,11 @@ const InputObject = Schema.StructWithRest(
+@@ -31,20 +76,56 @@ const InputObject = Schema.StructWithRest(
      lsp: Schema.optional(Rule),
      doom_loop: Schema.optional(Action),
      skill: Schema.optional(Rule),
@@ -111,18 +86,20 @@ index 1092ae2b7e14dea2ec7f040adbab17d825311288..c851be06af3314000b4099255db48618
 +  [Schema.Record(Schema.String, InputValue)],
 +).check(controlsOnlyOnControlKeys)
  
- // Input the user writes in config: either a single Action (shorthand for "*")
- // or an object of per-target rules.
-@@ -45,6 +92,16 @@ const InputSchema = Schema.Union([Action, InputObject])
+ const InputSchema = Schema.Union([Action, InputObject])
+ 
  const normalizeInput = (input: Schema.Schema.Type<typeof InputSchema>): Schema.Schema.Type<typeof InputObject> =>
    typeof input === "string" ? { "*": input } : input
  
++// #196：isRuleValue 判断值是否为合法 permission rule——单个 action 字符串或
++// #196：全部值都是 action 字符串的对象。controlsOnlyOnControlKeys 用此过滤。
 +function isRuleValue(value: unknown): value is Rule {
 +  if (isActionValue(value)) return true
 +  if (!value || typeof value !== "object" || Array.isArray(value)) return false
 +  return globalThis.Object.values(value).every(isActionValue)
 +}
 +
++// #196：isActionValue 覆盖四种 action，包括新增的 auto。
 +function isActionValue(value: unknown): value is Action {
 +  return value === "ask" || value === "allow" || value === "deny" || value === "auto"
 +}
@@ -130,17 +107,15 @@ index 1092ae2b7e14dea2ec7f040adbab17d825311288..c851be06af3314000b4099255db48618
  export const Info = InputSchema.pipe(
    Schema.decodeTo(InputObject, {
      decode: SchemaGetter.transform(normalizeInput),
-@@ -54,5 +111,29 @@ export const Info = InputSchema.pipe(
      encode: SchemaGetter.passthrough({ strict: false }),
    }),
  ).annotate({ identifier: "PermissionConfig" })
 -type _Info = Schema.Schema.Type<typeof InputObject>
 -export type Info = { -readonly [K in keyof _Info]: _Info[K] }
 +export type Info = {
-+  // The schema above preserves user key order for permission precedence, but the
-+  // generated TypeScript type from StructWithRest is too narrow once control
-+  // fields are mixed with arbitrary permission names. Keep this hand-written
-+  // structural type aligned with InputObject and fromConfig's runtime guards.
++  // #196：schema 保留了用户 key 顺序以维持 permission 优先级，但 StructWithRest 生成的
++  // #196：TypeScript 类型在 control 字段与任意 permission name 混合时过于狭窄。保持此手写
++  // #196：结构类型与 InputObject 和 fromConfig 的运行时 guard 对齐。
 +  read?: Rule
 +  edit?: Rule
 +  glob?: Rule
@@ -153,8 +128,6 @@ index 1092ae2b7e14dea2ec7f040adbab17d825311288..c851be06af3314000b4099255db48618
 +  question?: Action
 +  webfetch?: Action
 +  websearch?: Action
-+  repo_clone?: Rule
-+  repo_overview?: Rule
 +  lsp?: Rule
 +  doom_loop?: Action
 +  skill?: Rule
@@ -162,30 +135,50 @@ index 1092ae2b7e14dea2ec7f040adbab17d825311288..c851be06af3314000b4099255db48618
 +  auto_review?: AutoReview
 +  [key: string]: Rule | Action | ApprovalsReviewer | AutoReview | undefined
 +}
-diff --git a/packages/opencode/src/permission/evaluate.ts b/packages/opencode/src/permission/evaluate.ts
-index 2b0604f4baccbe12aaff31a33595d6be81ec18dc..74c991ed9ec278e4b6235e56dd09a67e34c5bf58 100644
---- a/packages/opencode/src/permission/evaluate.ts
-+++ b/packages/opencode/src/permission/evaluate.ts
-@@ -3,7 +3,10 @@ import { Wildcard } from "@/util/wildcard"
- type Rule = {
-   permission: string
-   pattern: string
--  action: "allow" | "deny" | "ask"
-+  // `auto` participates in the same last-match-wins evaluator as allow/ask/deny;
-+  // the Permission service decides later whether precheck, reviewer, or user
-+  // approval handles the matching request.
-+  action: "allow" | "deny" | "ask" | "auto"
+diff --git a/packages/core/src/v1/config/agent.ts b/packages/core/src/v1/config/agent.ts
+--- a/packages/core/src/v1/config/agent.ts
++++ b/packages/core/src/v1/config/agent.ts
+@@ -35,6 +35,10 @@ const AgentSchema = Schema.StructWithRest(
+       description: "Maximum number of agentic iterations before forcing text-only response",
+     }),
+     maxSteps: Schema.optional(PositiveInt).annotate({ description: "@deprecated Use 'steps' field instead." }),
++    // #196：Agent permissions 仅是 tool rules。Auto-review 控制是全局
++    // #196：permission-pipeline 设置；如果它们出现在 agent frontmatter 中，
++    // #196：StructWithRest 会将其保留在 options 下，而不是假装运行时 reviewer
++    // #196：会遵守 per-agent policy/model 覆盖。
+     permission: Schema.optional(ConfigPermissionV1.Info),
+   }),
+   [Schema.Record(Schema.String, Schema.Any)],
+@@ -77,7 +81,7 @@ const normalize = (agent: Schema.Schema.Type<typeof AgentSchema>): Schema.Schema
+   globalThis.Object.assign(permission, agent.permission)
+ 
+   const steps = agent.steps ?? agent.maxSteps
+-  return { ...agent, options, permission, ...(steps !== undefined ? { steps } : {}) }
++  return { ...agent, options, permission: permission as Schema.Schema.Type<typeof ConfigPermissionV1.Info>, ...(steps !== undefined ? { steps } : {}) }
  }
  
- export function evaluate(permission: string, pattern: string, ...rulesets: Rule[][]): Rule {
+ export const Info = AgentSchema.pipe(
+diff --git a/packages/schema/src/v1/permission.ts b/packages/schema/src/v1/permission.ts
+--- a/packages/schema/src/v1/permission.ts
++++ b/packages/schema/src/v1/permission.ts
+@@ -13,7 +13,9 @@ export const ID = Schema.String.check(Schema.isStartsWith("per")).pipe(
+ )
+ export type ID = typeof ID.Type
+ 
+-export const Action = Schema.Literals(["allow", "deny", "ask"]).annotate({ identifier: "PermissionAction" })
++// #196：`auto` 参与 allow/ask/deny 的 last-match-wins 评估器；Permission service
++// #196：之后决定由 precheck、reviewer 还是用户审批处理匹配的请求。
++export const Action = Schema.Literals(["allow", "deny", "ask", "auto"]).annotate({ identifier: "PermissionAction" })
+ export type Action = typeof Action.Type
+ 
+ export const Rule = Schema.Struct({ permission: Schema.String, pattern: Schema.String, action: Action }).annotate({
 diff --git a/packages/opencode/test/config/config.test.ts b/packages/opencode/test/config/config.test.ts
-index 7cacafc39fec4e2330e215f818d5c20a4308ba36..ef1f5336e4566ea315f2ffab52519e4436a61d72 100644
 --- a/packages/opencode/test/config/config.test.ts
 +++ b/packages/opencode/test/config/config.test.ts
-@@ -862,6 +862,38 @@ Ordered permissions`,
-   })
- })
- 
+@@ -854,6 +854,38 @@ Ordered permissions`,
+     expect(Object.keys(config.agent?.ordered?.permission ?? {})).toEqual(["bash", "*", "edit"])
+   }),
+ )
 +test("agent markdown auto-review controls stay options instead of permission rules", async () => {
 +  await using tmp = await tmpdir({
 +    init: async (dir) => {
@@ -218,19 +211,18 @@ index 7cacafc39fec4e2330e215f818d5c20a4308ba36..ef1f5336e4566ea315f2ffab52519e44
 +  })
 +})
 +
- test("loads agents from .opencode/agents (plural)", async () => {
-   await using tmp = await tmpdir({
-     init: async (dir) => {
-@@ -1782,6 +1814,51 @@ test("config parser preserves permission order while rejecting unknown top-level
+ 
+ it.instance("loads agents from .opencode/agents (plural)", () =>
+   Effect.gen(function* () {
+@@ -1424,6 +1456,53 @@ test("config parser preserves permission order while rejecting unknown top-level
    }
  })
  
 +test("config parser accepts permission auto review controls", () => {
-+  // This covers the schema boundary rather than Permission.fromConfig: the
-+  // auto_review object contains numbers/booleans that must not be parsed as
-+  // arbitrary permission action values.
++  // #196：覆盖 schema 边界而非 Permission.fromConfig：auto_review 对象包含
++  // #196：number/boolean，不应被解析为任意 permission action 值。
 +  const config = ConfigParse.schema(
-+    Config.Info,
++    ConfigV1.Info,
 +    {
 +      permission: {
 +        bash: "auto",
@@ -254,10 +246,12 @@ index 7cacafc39fec4e2330e215f818d5c20a4308ba36..ef1f5336e4566ea315f2ffab52519e44
 +})
 +
 +test("config parser rejects unsupported approval_policy control", () => {
++  // #196：未声明的 control key（如 approval_policy）必须被 schema 拒绝，
++  // #196：而非静默接受后丢失。object 形态同样不应通过 rule 校验。
 +  for (const approval_policy of ["on_request", { fallback: "user" }]) {
 +    expect(() =>
 +      ConfigParse.schema(
-+        Config.Info,
++        ConfigV1.Info,
 +        {
 +          permission: {
 +            bash: "auto",
@@ -270,11 +264,11 @@ index 7cacafc39fec4e2330e215f818d5c20a4308ba36..ef1f5336e4566ea315f2ffab52519e44
 +  }
 +})
 +
++
  // MCP config merging tests
  
- test("project config can override MCP server enabled status", async () => {
+ it.instance("project config can override MCP server enabled status", () =>
 diff --git a/packages/sdk/js/src/gen/types.gen.ts b/packages/sdk/js/src/gen/types.gen.ts
-index 5e4fd8906155b9c88d29cda1c44adafcb09b4aaf..be30f101ed0de78db7a02702cd818fe5489dd459 100644
 --- a/packages/sdk/js/src/gen/types.gen.ts
 +++ b/packages/sdk/js/src/gen/types.gen.ts
 @@ -972,6 +972,41 @@ export type KeybindsConfig = {
@@ -396,20 +390,19 @@ index 5e4fd8906155b9c88d29cda1c44adafcb09b4aaf..be30f101ed0de78db7a02702cd818fe5
    model?: {
      modelID: string
 diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
-index 35c542da363dbce5cd2d238ce8ff7db296678254..48000f8f18af0f8a7879c34fbedc8d2591113a8d 100644
 --- a/packages/sdk/js/src/v2/gen/types.gen.ts
 +++ b/packages/sdk/js/src/v2/gen/types.gen.ts
-@@ -718,7 +718,7 @@ export type Part =
-   | RetryPart
-   | CompactionPart
+@@ -157,7 +157,7 @@ export type SnapshotFileDiff = {
+   status?: "added" | "deleted" | "modified"
+ }
  
 -export type PermissionAction = "allow" | "deny" | "ask"
 +export type PermissionAction = "allow" | "deny" | "ask" | "auto"
  
  export type PermissionRule = {
    permission: string
-@@ -934,7 +934,21 @@ export type ReferenceConfig = {
-   [key: string]: ReferenceConfigEntry
+@@ -1654,7 +1654,21 @@ export type ServerConfig = {
+   cors?: Array<string>
  }
  
 -export type PermissionActionConfig = "ask" | "allow" | "deny"
@@ -431,7 +424,7 @@ index 35c542da363dbce5cd2d238ce8ff7db296678254..48000f8f18af0f8a7879c34fbedc8d25
  
  export type PermissionObjectConfig = {
    [key: string]: PermissionActionConfig
-@@ -962,7 +976,9 @@ export type PermissionConfig =
+@@ -1680,7 +1694,9 @@ export type PermissionConfig =
        lsp?: PermissionRuleConfig
        doom_loop?: PermissionActionConfig
        skill?: PermissionRuleConfig
@@ -442,3 +435,45 @@ index 35c542da363dbce5cd2d238ce8ff7db296678254..48000f8f18af0f8a7879c34fbedc8d25
      }
  
  export type AgentConfig = {
+diff --git a/packages/core/src/v1/config/migrate.ts b/packages/core/src/v1/config/migrate.ts
+--- a/packages/core/src/v1/config/migrate.ts
++++ b/packages/core/src/v1/config/migrate.ts
+@@ -80,12 +80,17 @@ function permissions(info?: ConfigPermissionV1.Info, tools?: Readonly<Record<str
+     effect: enabled ? ("allow" as const) : ("deny" as const),
+   }))
+   for (const [action, rule] of Object.entries(info ?? {})) {
++    // #196：跳过非 rule 的 control 字段（approvals_reviewer/auto_review），
++    // #196：它们是 reviewer 配置而非 permission rule，不应进入迁移规则。
++    if (action === "approvals_reviewer" || action === "auto_review") continue
+     if (!rule) continue
+     if (typeof rule === "string") {
+-      rules.push({ action, resource: "*", effect: rule })
++      // #196：skip check 后 rule 只可能是 Action 字符串，但 TS 无法从 key 过滤收窄
++      rules.push({ action, resource: "*", effect: rule as ConfigPermissionV1.Action })
+       continue
+     }
+-    rules.push(...Object.entries(rule).map(([resource, effect]) => ({ action, resource, effect })))
++    // #196：object 的 value 也只可能是 Action，同样需要断言收窄
++    rules.push(...Object.entries(rule).map(([resource, effect]) => ({ action, resource, effect: effect as ConfigPermissionV1.Action })))
+   }
+   return rules.length ? rules : undefined
+ }
+diff --git a/packages/core/src/config/plugin/agent.ts b/packages/core/src/config/plugin/agent.ts
+--- a/packages/core/src/config/plugin/agent.ts
++++ b/packages/core/src/config/plugin/agent.ts
+@@ -161,12 +161,13 @@ function decode(file: { directory: string; filepath: string; primary: boolean },
+   const body = markdown.content.trim()
+   const legacy = Object.keys(markdown.data).some((key) => !agentKeys.has(key))
+   const agent = Option.getOrUndefined(
+-    legacy
++    // #196：两个分支返回的 Option 类型因 permission Info 变更而不同，断言统一
++    (legacy
+       ? Option.map(
+           decodeLegacyAgent({ name, ...markdown.data, prompt: body }, { errors: "all", propertyOrder: "original" }),
+           ConfigMigrateV1.migrateAgent,
+         )
+-      : decodeAgent({ ...markdown.data, system: body }, { errors: "all", propertyOrder: "original" }),
++      : decodeAgent({ ...markdown.data, system: body }, { errors: "all", propertyOrder: "original" })) as Option.Option<ConfigAgentV1.Info>,
+   )
+   if (!agent) return
+   const info = Option.getOrUndefined(

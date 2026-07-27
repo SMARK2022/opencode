@@ -1,140 +1,73 @@
 From 442fd61eabf4783c60ea29b17d1a3aaaaee2ca21 Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Mon, 18 May 2026 20:22:21 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E4=BF=AE=E5=A4=8D=E5=89=A9=E4=BD=99=20?=
- =?UTF-8?q?typecheck=20=E9=94=99=E8=AF=AF=EF=BC=8C=E8=BF=81=E7=A7=BB=20TUI?=
- =?UTF-8?q?=20keymap/API=EF=BC=8C=E6=89=A9=E5=B1=95=20daemon=20lock=20?=
- =?UTF-8?q?=E6=8E=A5=E5=8F=A3?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH] feat: residual TUI keymap session.context.close (tip adapt #166)
 
-
-diff --git a/docs/merge-upstream-log.md b/docs/merge-upstream-log.md
-index e7ed07fd35c4dee462e8259e663893a340546dbb..fbd47274bb45899b670634493451970ef008b147 100644
---- a/docs/merge-upstream-log.md
-+++ b/docs/merge-upstream-log.md
-@@ -30,6 +30,36 @@
- 
- ---
- 
-+## Phase 20: 剩余 typecheck 错误根因修复
-+
-+### 操作 20.1: TUI keymap/API 迁移修复
-+
-+- `packages/opencode/src/cli/cmd/tui/component/dialog-tool.tsx`: 将旧 `DialogSelect keybind` prop 迁移到新 `actions` API。
-+- `packages/opencode/src/cli/cmd/tui/config/keybind.ts`: 新增 `dialog.tool.toggle` 默认 `space` 绑定，并映射到 `dialog_tool_toggle`，让工具开关继续纳入统一 keymap/which-key 体系。
-+- `packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx`: 移除旧 `keybind.match` 调用，新增 `session.context.close` command，通过 `useBindings` 与新 keymap API 绑定关闭行为。
-+- `packages/opencode/src/cli/cmd/tui/config/keybind.ts`: 新增 `session.context.close` 默认 `escape,ctrl+c` 绑定，并映射到 `session_context_close`。
-+
-+### 操作 20.2: daemon lock 与接口扩展同步
-+
-+- `packages/opencode/src/cli/cmd/tui/server-lock.ts`: `dbPath` 写入从函数引用 `DatabasePath` 修正为真实路径 `DatabasePath()`。
-+- `packages/opencode/test/session/compaction.test.ts`: fake `SessionProcessor.Handle` 补齐本地 token accounting 新增的 `inputChars` 与 `inputBreakdown` 字段。
-+- `packages/opencode/test/session/system.test.ts`: fake `Git.Service` 补齐当前 `Git.Interface` 新增的 `applyPatch` 方法。
-+
-+### 操作 20.3: Effect API 调用同步
-+
-+- `packages/opencode/test/session/revert-compact.test.ts`: `MessageV2.get` 已随上游 Effect 迁移变成 Effect-returning API；测试中的同步调用改为 `yield* MessageV2.get(...)`。
-+
-+### 验证
-+
-+- 命令: `bun typecheck`（目录: `packages/opencode`）。
-+- 结果: 通过，无输出错误。
-+- 命令: `bun test --timeout 30000 ./test/session/compaction.test.ts ./test/session/revert-compact.test.ts ./test/session/system.test.ts ./test/cli/cmd/tui/session-integration.test.ts`。
-+- 结果: `96 pass, 0 fail, 274 expect() calls`。
-+- 命令: `bun test --timeout 30000 ./test/cli/cmd/tui/sdk.test.tsx ./test/cli/tui/use-event.test.tsx ./test/cli/cmd/tui/session-integration.test.ts ./test/cli/cmd/tui/diff-line-stats.test.ts ./test/cli/cmd/tui/flag-tui-fields.test.ts ./test/cli/cmd/tui/smooth-scrollbar.test.ts`。
-+- 结果: `55 pass, 0 fail, 87 expect() calls`。
-+
-+---
-+
- ## Phase 14: 聚焦测试失败修复（agent/compaction/session/config/runner）
- 
- ### 操作 14.1: agent 默认 agent 语义恢复
-diff --git a/packages/opencode/src/cli/cmd/tui/component/dialog-tool.tsx b/packages/opencode/src/cli/cmd/tui/component/dialog-tool.tsx
-index 2e0ebebf3f6c9d45d63fd20eb200544d9b1a8540..15e426eabb1920efdda8c85c1303a8f5eddff169 100644
---- a/packages/opencode/src/cli/cmd/tui/component/dialog-tool.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/dialog-tool.tsx
-@@ -6,7 +6,6 @@ import { useTheme } from "@tui/context/theme"
- import { DialogSelect, type DialogSelectOption } from "@tui/ui/dialog-select"
- import { useToast } from "@tui/ui/toast"
- import { ToolSelection } from "@/tool/selection"
--import { Keybind } from "@/util/keybind"
- import { createMemo, createResource, createSignal } from "solid-js"
- 
- function Status(props: { enabled: boolean; loading: boolean }) {
-@@ -74,7 +73,7 @@ export function DialogTool(props: { sessionID: string }) {
-       title="Tools"
-       placeholder="Search tools..."
-       options={options()}
--      keybind={[{ keybind: Keybind.parse("space")[0], title: "toggle", onTrigger: (option) => void toggle(option.value) }]}
-+      actions={[{ command: "dialog.tool.toggle", title: "toggle", onTrigger: (option) => void toggle(option.value) }]}
-       onSelect={(option) => void toggle(option.value)}
-     />
-   )
-diff --git a/packages/opencode/src/cli/cmd/tui/config/keybind.ts b/packages/opencode/src/cli/cmd/tui/config/keybind.ts
-index bd26cd5d95e4b45ceab3a1c43b87d17c355aae38..9635906b76ae081adbd47914e7609ff32ae6240f 100644
---- a/packages/opencode/src/cli/cmd/tui/config/keybind.ts
-+++ b/packages/opencode/src/cli/cmd/tui/config/keybind.ts
-@@ -188,7 +188,9 @@ export const Definitions = {
-   "dialog.select.home": keybind("home", "Move to first dialog item"),
-   "dialog.select.end": keybind("end", "Move to last dialog item"),
-   "dialog.select.submit": keybind("return", "Submit selected dialog item"),
-+  "dialog.tool.toggle": keybind("space", "Toggle selected tool in tool dialog"),
+diff --git a/packages/tui/src/config/keybind.ts b/packages/tui/src/config/keybind.ts
+--- a/packages/tui/src/config/keybind.ts
++++ b/packages/tui/src/config/keybind.ts
+@@ -209,6 +209,8 @@ export const Definitions = {
+   "dialog.prompt.submit": keybind("return", "Submit dialog prompt"),
    "dialog.mcp.toggle": keybind("space", "Toggle MCP in MCP dialog"),
+   "dialog.tool.toggle": keybind("space", "Toggle tool in tool dialog"),
++  // #166：上下文面板关闭纳入统一 keymap（可覆盖 / which-key），禁止 raw useKeyboard
 +  "session.context.close": keybind("escape,ctrl+c", "Close context usage panel"),
-   "prompt.autocomplete.prev": keybind("up,ctrl+p", "Move to previous autocomplete item"),
-   "prompt.autocomplete.next": keybind("down,ctrl+n", "Move to next autocomplete item"),
-   "prompt.autocomplete.hide": keybind("escape", "Hide autocomplete"),
-@@ -312,6 +314,8 @@ export const CommandMap = {
+   "dialog.move_session.new": keybind("ctrl+m", "New project copy"),
+   "dialog.move_session.delete": keybind("ctrl+d", "Delete project copy"),
+   "dialog.move_session.refresh": keybind("ctrl+r", "Refresh project copies"),
+@@ -355,6 +357,9 @@ export const CommandMap = {
    messages_toggle_conceal: "session.toggle.conceal",
    tool_details: "session.toggle.actions",
    display_thinking: "session.toggle.thinking",
++  // #166：旧 underscore 配置名映射到 tip 点分 command
 +  dialog_tool_toggle: "dialog.tool.toggle",
 +  session_context_close: "session.context.close",
    prompt_submit: "prompt.submit",
    prompt_editor_context_clear: "prompt.editor_context.clear",
    prompt_skills: "prompt.skills",
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
-index 366b8dfbb0f0bb1e7be564e037d1722533a5a71d..04bee69392e572cfb4175803dc199b174bda188a 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx
-@@ -1,11 +1,12 @@
+diff --git a/packages/tui/src/routes/session/context-usage.tsx b/packages/tui/src/routes/session/context-usage.tsx
+--- a/packages/tui/src/routes/session/context-usage.tsx
++++ b/packages/tui/src/routes/session/context-usage.tsx
+@@ -1,11 +1,13 @@
  import { createEffect, createMemo, createResource, For, Show } from "solid-js"
 -import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 +import { useRenderer, useTerminalDimensions } from "@opentui/solid"
- import { useDialog } from "@tui/ui/dialog"
--import { useOpencodeKeymap } from "../../keymap"
+ import { useDialog } from "../../ui/dialog"
 +import { useBindings } from "../../keymap"
- import { useLocal } from "@tui/context/local"
- import { useProject } from "@tui/context/project"
- import { useSync } from "@tui/context/sync"
- import { useTheme } from "@tui/context/theme"
-+import { useTuiConfig } from "@tui/context/tui-config"
+ import { useLocal } from "../../context/local"
+ import { useProject } from "../../context/project"
+ import { useSync } from "../../context/sync"
+ import { createThrottledSignal } from "../../util/signal"
+ import { useTheme } from "../../context/theme"
++import { useTuiConfig } from "../../config"
  import { TextAttributes } from "@opentui/core"
- import type { Message, Part } from "@opencode-ai/sdk/v2"
- import { Locale } from "@/util"
-@@ -228,7 +229,7 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
+ import { Locale } from "../../util/locale"
+ import {
+@@ -261,6 +263,8 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
    const project = useProject()
    const dimensions = useTerminalDimensions()
    const dialog = useDialog()
--  const keybind = useOpencodeKeymap()
++  // #166：关闭键从 tuiConfig.keybinds 读取，支持用户覆盖
 +  const tuiConfig = useTuiConfig()
    const { theme } = useTheme()
    useRenderer()
  
-@@ -258,14 +259,20 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
- 
+@@ -296,17 +300,22 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
+   // #125：双参 createResource 让 input 成为响应式 source
    const [data] = createResource(input, computeContextData)
  
+-  // 键盘处理：escape 或 Ctrl+C 关闭面板；对话框打开时不拦截按键
 -  useKeyboard((evt) => {
 -    if (dialog.stack.length > 0) return
--    if (evt.name === "escape" || (evt.ctrl && evt.name === "c") || keybind.match("app_exit", evt)) {
+-    // V2 TUI 由 keymap 统一管理应用级退出键绑定，此处仅响应 escape 和 Ctrl+C
+-    if (evt.name === "escape" || (evt.ctrl && evt.name === "c")) {
 -      props.onClose()
+-      // 阻止冒泡：防止退出键被上层 keymap 二次处理导致重复关闭
 -      evt.preventDefault()
 -      evt.stopPropagation()
 -    }
 -  })
++  // #166：命名 command + useBindings，避免 raw keyboard 与全局 keymap 双路径
 +  useBindings(() => ({
 +    commands: [
 +      {
@@ -142,6 +75,7 @@ index 366b8dfbb0f0bb1e7be564e037d1722533a5a71d..04bee69392e572cfb4175803dc199b17
 +        title: "Close context usage",
 +        category: "Session",
 +        run: () => {
++          // #166：上层 dialog 打开时不关闭面板，避免抢 escape
 +          if (dialog.stack.length > 0) return
 +          props.onClose()
 +        },
@@ -152,68 +86,3 @@ index 366b8dfbb0f0bb1e7be564e037d1722533a5a71d..04bee69392e572cfb4175803dc199b17
  
    return (
      <box
-diff --git a/packages/opencode/src/cli/cmd/tui/server-lock.ts b/packages/opencode/src/cli/cmd/tui/server-lock.ts
-index 7149f0be30598f721549eceee166746144fec575..5f5b84935b29e25cf205f6b693fbc7ef169451d1 100644
---- a/packages/opencode/src/cli/cmd/tui/server-lock.ts
-+++ b/packages/opencode/src/cli/cmd/tui/server-lock.ts
-@@ -48,7 +48,7 @@ export async function write(port: number, externalUrl?: string): Promise<string>
-     pid: process.pid,
-     port,
-     token,
--    dbPath: DatabasePath,
-+    dbPath: DatabasePath(),
-     channel: InstallationChannel,
-     startedAt: new Date().toISOString(),
-     ...(externalUrl ? { externalUrl } : {}),
-diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
-index 42fd9bdc9504e933d43d8d37a9c418422253382e..ac1f7afc18c60d5430847ef684a4226f4bf9104a 100644
---- a/packages/opencode/test/session/compaction.test.ts
-+++ b/packages/opencode/test/session/compaction.test.ts
-@@ -197,6 +197,8 @@ function fake(
-     get message() {
-       return msg
-     },
-+    inputChars: undefined,
-+    inputBreakdown: undefined,
-     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
-     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
-     process: Effect.fn("TestSessionProcessor.process")(() => Effect.succeed(result)),
-diff --git a/packages/opencode/test/session/revert-compact.test.ts b/packages/opencode/test/session/revert-compact.test.ts
-index db36499cc2d470cab41dbfe206d50979f68fe8af..0ad20a78136a8dea6a5ebb0379ef7a44012d5047 100644
---- a/packages/opencode/test/session/revert-compact.test.ts
-+++ b/packages/opencode/test/session/revert-compact.test.ts
-@@ -462,7 +462,7 @@ describe("revert + compact workflow", () => {
-           })
-           yield* revert.cleanup(yield* session.get(sid))
- 
--          const stored = MessageV2.get({ sessionID: sid, messageID: a1.id })
-+          const stored = yield* MessageV2.get({ sessionID: sid, messageID: a1.id })
-           const request = yield* usage.get({ sessionID: sid, requestID: u1.id })
-           const assistants = yield* usage.assistants({ sessionID: sid, requestID: u1.id })
- 
-@@ -716,11 +716,11 @@ describe("revert + compact workflow", () => {
-           const visible = yield* session.messages({ sessionID: sid })
-           expect(visible.length).toBe(0)
- 
--          const hidden = MessageV2.get({ sessionID: sid, messageID: u1.id })
-+          const hidden = yield* MessageV2.get({ sessionID: sid, messageID: u1.id })
-           expect(hidden.info.hidden).toBeDefined()
-           expect(hidden.info.hidden!.reason).toBe("undo")
- 
--          const u1raw = MessageV2.get({ sessionID: sid, messageID: u1.id })
-+          const u1raw = yield* MessageV2.get({ sessionID: sid, messageID: u1.id })
-           expect(u1raw.info.id).toBe(u1.id)
-           expect(u1raw.info.hidden?.reason).toBe("undo")
- 
-diff --git a/packages/opencode/test/session/system.test.ts b/packages/opencode/test/session/system.test.ts
-index 954e7d106a69b9db9339e1bcb0f228ddd6d8f076..c15a7911a04893916a0bce5ed70941918d1c6756 100644
---- a/packages/opencode/test/session/system.test.ts
-+++ b/packages/opencode/test/session/system.test.ts
-@@ -72,6 +72,7 @@ const it = testEffect(
-             patchAll: () => Effect.die("unused"),
-             patchUntracked: () => Effect.die("unused"),
-             statUntracked: () => Effect.die("unused"),
-+            applyPatch: () => Effect.die("unused"),
-           }),
-         ),
-         Layer.succeed(

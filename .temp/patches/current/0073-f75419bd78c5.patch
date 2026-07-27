@@ -1,35 +1,74 @@
+From f75419bd78c55ac3984fec6d762c929391d0ba02 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 4 May 2026 05:03:38 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E7=BD=91=E7=BB=9C?=
+ =?UTF-8?q?=E4=BB=A3=E7=90=86=E5=8A=9F=E8=83=BD=EF=BC=8C=E5=AE=89=E8=A3=85?=
+ =?UTF-8?q?=E5=85=A8=E5=B1=80fetch=E5=B9=B6=E4=BC=98=E5=8C=96npm=E9=85=8D?=
+
 diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-proxy.ts
+index 309989b091..0ca0eff2bc 100644
 --- a/packages/core/src/network-proxy.ts
 +++ b/packages/core/src/network-proxy.ts
-@@ -6,8 +6,11 @@
- // 代理路由结果：直连或经由指定代理服务器
+@@ -5,11 +5,13 @@ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin"
+ 
  export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
  
--// 系统代理缓存 TTL：120 秒内复用上次检测结果，避免频繁调用 scutil/reg
 -const TTL = 120_000
-+// 系统代理缓存 TTL：15 秒内复用上次检测结果，平衡检测开销和代理变更响应
-+const TTL = 15_000
-+// 全局 fetch 包装是否已安装：避免重复包装导致无限递归
-+let globalFetchInstalled = false
-+
+-// #71：本地地址强制直连，避免环回走代理
++// #73：系统代理缓存 15s，平衡探测开销与变更响应
++const TTL = 15_000 // #73：缩短系统代理缓存，更快响应代理变更
  const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"])
  
  let cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined
-@@ -134,7 +137,9 @@
++// #73：全局 fetch 包装是否已安装，避免重复包装递归
++let globalFetchInstalled = false
+ 
+ type SystemProxy = {
+   http?: string
+@@ -26,17 +28,14 @@ export function noProxyString(extra: string[] = []) {
+   return Array.from(new Set([...LOCAL, ...extra])).join(",")
  }
  
- // 获取当前系统代理（带 TTL 缓存），仅 Windows 和 macOS 支持系统级检测
+-// #71：主机名小写归一
+ function normalizeHost(hostname: string) {
+   return hostname.replace(/^\[|\]$/g, "").toLowerCase()
+ }
+ 
+-// #71：判定 localhost/127.0.0.1/::1
+ function isLocal(url: URL) {
+   return LOCAL.has(normalizeHost(url.hostname))
+ }
+ 
+-// #71：补全协议并把 localhost 归一到 127.0.0.1
+ function normalizeProxy(value: string | undefined) {
+   if (!value) return
+   const next = value.trim()
+@@ -69,8 +68,7 @@ function envProxy(url: URL): SystemProxy | undefined {
+   const all = process.env.ALL_PROXY || process.env.all_proxy
+   const picked = normalizeProxy(proxy || all)
+   if (!picked) return
+-  return { http: picked, https: picked, bypass: (// #71：Bun 缓存代理 env：NO_PROXY=* 迫使无 proxy 参数直连
+-process.env.NO_PROXY || process.env.no_proxy || "").split(",") }
++  return { http: picked, https: picked, bypass: (process.env.NO_PROXY || process.env.no_proxy || "").split(",") }
+ }
+ 
+ async function execText(command: string, args: string[], timeout = 1500) {
+@@ -128,8 +126,10 @@ async function macProxy(): Promise<SystemProxy | undefined> {
+   return { http, https, socks, bypass: [] }
+ }
+ 
 -async function currentSystemProxy() {
++// #73：支持 force refresh 绕过 TTL
 +async function currentSystemProxy(refresh = false) {
-+  // refresh=true 时强制刷新缓存，绕过 TTL
-+  if (refresh) cache = undefined
    if (process.platform !== "win32" && process.platform !== "darwin") return undefined
++  if (refresh) cache = undefined
    if (!cache || cache.expires < Date.now()) {
      cache = {
-@@ -146,9 +151,9 @@
+       expires: Date.now() + TTL,
+@@ -139,9 +139,9 @@ async function currentSystemProxy() {
+   return cache.value
  }
  
- // 解析目标 URL 应使用的代理：优先系统代理，回退到环境变量
 -async function configuredProxy(url: URL) {
 +async function configuredProxy(url: URL, refresh = false) {
    if (process.platform === "win32" || process.platform === "darwin") {
@@ -38,92 +77,91 @@ diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-prox
      if (!sys || bypass(url, sys.bypass)) return
      return url.protocol === "https:" ? sys.https || sys.http || sys.socks : sys.http || sys.https || sys.socks
    }
-@@ -158,10 +163,10 @@
+@@ -150,38 +150,62 @@ async function configuredProxy(url: URL) {
+   return url.protocol === "https:" ? env.https || env.http || env.socks : env.http || env.https || env.socks
  }
  
- // 解析代理路由：本地直连，其他根据系统/环境代理配置决定
+-// #71：解析直连/代理路由，支持 force 刷新缓存
 -export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown"): Promise<Route> {
 +export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown", refresh = false): Promise<Route> {
    const url = input instanceof URL ? input : new URL(input)
    if (purpose === "local" || isLocal(url)) return { type: "direct", reason: "local" }
 -  const proxy = await configuredProxy(url)
+-  if (proxy) return { type: "proxy", proxy, reason: "system" }
+-  return { type: "direct", reason: "no-proxy" }
 +  const proxy = await configuredProxy(url, refresh)
-   if (proxy) return { type: "proxy", proxy, reason: "system" }
-   return { type: "direct", reason: "no-proxy" }
++  if (proxy) return { type: "proxy", proxy, reason: refresh ? "system-refresh" : "system" }
++  return { type: "direct", reason: refresh ? "refresh-no-proxy" : "no-proxy" }
  }
-@@ -174,21 +179,61 @@
- // 使用指定 fetchFn 和代理路由执行请求：代理失败时回退直连
- export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
+ 
+-// #71：主入口：按 purpose 解析代理后用原生 fetch 发出
+ export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
+   return fetchWithRoute(fetch, input, init)
+ }
+ 
+-export // #71：适配器透传，禁止二次注入代理
+-async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
++export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
    const url = new URL(input instanceof Request ? input.url : input.toString())
 -  const { purpose = "unknown", ...rest } = (init ?? {}) as RoutedInit
 -  const route = await resolveProxyRoute(url, purpose)
--  if (route.type === "direct") return fetchFn(input, rest)
-+  // signal 单独解构：proxy 消耗 abort 后可对 rest 无 signal 直连回落（SMARK）
-+  const { purpose = "unknown", signal, ...rest } = (init ?? {}) as RoutedInit & { signal?: AbortSignal }
-+  const forceRefresh = purpose === "provider" || purpose === "npm"
-+  const route = await resolveProxyRoute(url, purpose, forceRefresh)
-+  const withSignal = signal ? { ...rest, signal } : rest
+-  // #71：直连路径：失败不重试代理
+-if (route.type === "direct") return fetchFn(input, rest)
++  const { purpose = "unknown", signal, ...rest } = (init ?? {}) as RoutedInit
++  const route = await resolveProxyRoute(url, purpose, purpose === "provider" || purpose === "npm")
++  const direct = () => fetchFn(input, signal ? { ...rest, signal } : rest)
++  const proxy = (value: string) => fetchFn(input, { ...rest, signal, proxy: value })
++
 +  if (route.type === "direct") {
 +    try {
-+      return await fetchFn(input, withSignal)
++      return await direct()
 +    } catch (error) {
 +      if (signal?.aborted) throw error
 +      const refreshed = await resolveProxyRoute(url, purpose, true)
-+      if (refreshed.type === "proxy") {
-+        try {
-+          return await fetchFn(input, { ...withSignal, proxy: refreshed.proxy })
-+        } catch {
-+          throw error
-+        }
-+      }
++      if (refreshed.type === "proxy") return proxy(refreshed.proxy).catch(() => { throw error })
 +      throw error
 +    }
 +  }
++
    try {
 -    return await fetchFn(input, { ...rest, proxy: route.proxy })
-+    return await fetchFn(input, { ...withSignal, proxy: route.proxy })
++    return await proxy(route.proxy)
    } catch (error) {
 -    return fetchFn(input, rest).catch(() => {
-+    // proxy 已消耗 abort：无 signal 再试 direct
-+    if (signal?.aborted) return fetchFn(input, rest)
-+    const refreshed = await resolveProxyRoute(url, purpose, true)
-+    if (refreshed.type === "proxy" && refreshed.proxy !== route.proxy) {
-+      try {
-+        return await fetchFn(input, { ...withSignal, proxy: refreshed.proxy })
-+      } catch {
-+        // fall through
-+      }
+-      throw error
+-    })
++    const refreshed = signal?.aborted ? undefined : await resolveProxyRoute(url, purpose, true)
++    if (refreshed?.type === "proxy" && refreshed.proxy !== route.proxy) {
++      return proxy(refreshed.proxy).catch(() => { throw error })
 +    }
-+    return fetchFn(input, withSignal).catch(() => {
-       throw error
-     })
++    // When the proxy attempt consumed the abort signal, retry direct without it
++    // so the fallback has a chance to succeed.
++    if (signal?.aborted) return fetchFn(input, rest).catch(() => { throw error })
++    return direct().catch(() => { throw error })
    }
  }
  
--// 生成 npm 安装时的代理选项
-+// 安装全局 fetch 包装：所有 globalThis.fetch 调用自动通过代理路由
-+// 使用捕获的 originalFetch 避免无限递归：包装后的 globalThis.fetch 会调用
-+// fetchWithRoute(originalFetch, ...)，而 originalFetch 是包装前的原始 fetch
++// #73：包装 globalThis.fetch，使未改调用方也走代理
 +export function installGlobalFetch(defaultPurpose: Purpose = "unknown") {
-+  if (globalFetchInstalled) return
++  // #73：幂等安装，禁止重复包裹
++if (globalFetchInstalled) return
++  const original = globalThis.fetch.bind(globalThis) as FetchFn
++  globalThis.fetch = ((input: FetchInput, init?: RoutedInit) =>
++    fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as typeof fetch
 +  globalFetchInstalled = true
-+  const originalFetch = globalThis.fetch.bind(globalThis)
-+  globalThis.fetch = ((input: FetchInput, init?: any) => {
-+    return fetchWithRoute(originalFetch, input, { ...init, purpose: init?.purpose ?? defaultPurpose })
-+  }) as typeof fetch
 +}
 +
  export async function npmProxyOptions(registry: string) {
 -  const route = await resolveProxyRoute(registry, "npm")
-+  // npm 请求强制刷新代理缓存，确保使用最新的代理配置
 +  const route = await resolveProxyRoute(registry, "npm", true)
    if (route.type === "direct") return {}
    return {
      proxy: route.proxy,
 diff --git a/packages/core/src/npm-config.ts b/packages/core/src/npm-config.ts
+index 04536982c2..884deb8381 100644
 --- a/packages/core/src/npm-config.ts
 +++ b/packages/core/src/npm-config.ts
-@@ -30,7 +30,8 @@
+@@ -31,7 +31,8 @@ async function pingRegistry(registry: string) {
      const response = await NetworkProxy.routedFetch(`${normalizeRegistry(registry)}/-/ping?write=false`, {
        purpose: "npm",
        method: "GET",
@@ -133,7 +171,7 @@ diff --git a/packages/core/src/npm-config.ts b/packages/core/src/npm-config.ts
      })
      return response.ok
    } catch {
-@@ -40,11 +41,11 @@
+@@ -41,11 +42,11 @@ async function pingRegistry(registry: string) {
  
  // 按顺序检测候选 registry，返回第一个可用的
  async function selectRegistry() {
@@ -150,9 +188,10 @@ diff --git a/packages/core/src/npm-config.ts b/packages/core/src/npm-config.ts
  
  // 带缓存的默认 registry 选择：60 秒内复用上次结果
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
+index 0c4b6f8aed..ab8046ebcc 100644
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -2,6 +2,7 @@
+@@ -2,6 +2,7 @@ import { Flag } from "@opencode-ai/core/flag/flag"
  import { Global } from "@opencode-ai/core/global"
  import path from "path"
  import { Server } from "@/server/server"
@@ -160,7 +199,7 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
  import { InstanceRuntime } from "@/project/instance-runtime"
  import { Rpc } from "@/util/rpc"
  import { upgrade } from "@/cli/upgrade"
-@@ -130,6 +131,8 @@
+@@ -130,6 +131,8 @@ Rpc.listen(rpc)
  // 仅在守护进程模式下运行：启动内部回环 HTTP 服务器、写入锁文件、注册信号
  // 处理与空闲超时。Worker 线程模式跳过此块，仅使用 RPC 通信。
  if (isDaemon) {
@@ -170,6 +209,7 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
    // #71：锁可见后再预热，避免 npm/代理冷启动拖死 TUI 60s 健康等待（覆盖 #56 预监听预热）
    const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })
 diff --git a/packages/opencode/src/config/config.ts b/packages/opencode/src/config/config.ts
+index 86238f1a84..84a8df123a 100644
 --- a/packages/opencode/src/config/config.ts
 +++ b/packages/opencode/src/config/config.ts
 @@ -1,3 +1,4 @@
@@ -177,7 +217,7 @@ diff --git a/packages/opencode/src/config/config.ts b/packages/opencode/src/conf
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
  import { serviceUse } from "@opencode-ai/core/effect/service-use"
-@@ -190,18 +191,30 @@
+@@ -190,18 +191,32 @@ const layer = Layer.effect(
        schema: S,
        loginOrigin: string,
      ) {
@@ -195,6 +235,8 @@ diff --git a/packages/opencode/src/config/config.ts b/packages/opencode/src/conf
 +        let last: unknown
 +        for (let attempt = 0; attempt < 3; attempt++) {
 +          try {
++            // #73：well-known/remote config 走系统代理路由，避免 HttpClient mock 漏拦
++            // #73：well-known/remote 配置走系统代理路由
 +            const res = await NetworkProxy.routedFetch(url, {
 +              purpose: "infrastructure",
 +              headers: { Accept: "application/json", ...(headers ?? {}) },
@@ -220,9 +262,10 @@ diff --git a/packages/opencode/src/config/config.ts b/packages/opencode/src/conf
          return yield* Effect.die(new RemoteAuthError({ url: loginOrigin, remote: url }))
        }
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index 5faaa18dc7..a5eda68d76 100644
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -34,6 +34,8 @@
+@@ -34,6 +34,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
  import { ProviderError } from "./error"
  
  const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
@@ -231,7 +274,7 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
  
  function wrapSSE(res: Response, ms: number, ctl: AbortController) {
    if (typeof ms !== "number" || ms <= 0) return res
-@@ -1780,8 +1782,8 @@
+@@ -1780,8 +1782,8 @@ const layer = Layer.effect(
            if (opts.signal) signals.push(opts.signal)
            if (chunkAbortCtl) signals.push(chunkAbortCtl.signal)
            if (headerTimeoutCtl) signals.push(headerTimeoutCtl.signal)
@@ -242,3 +285,113 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
  
            const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
            if (combined) opts.signal = combined
+diff --git a/packages/opencode/test/config/config.test.ts b/packages/opencode/test/config/config.test.ts
+index e281831ddf..489f366219 100644
+--- a/packages/opencode/test/config/config.test.ts
++++ b/packages/opencode/test/config/config.test.ts
+@@ -9,6 +9,7 @@ import { Config } from "@/config/config"
+ import { ConfigManaged } from "@/config/managed"
+ import { ConfigParse } from "../../src/config/parse"
+ import { Npm } from "@opencode-ai/core/npm"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ 
+ import { InstanceRef } from "../../src/effect/instance-ref"
+ import type { InstanceContext } from "../../src/project/instance-context"
+@@ -209,6 +210,54 @@ const withConfigTree = <A, E, R>(
+     return yield* withGlobalConfigDir(global, withInstanceDir(directory, effect))
+   })
+ 
++// #73：单一 routedFetch spy + 当前 active payload，避免多次 spyOn/afterEach restore 互相踩踏
++type WellKnownRoutedPayload = {
++  seen: { wellKnown?: string; remote?: string; authorization?: string }
++  wellKnown: unknown
++  remote?: unknown
++  remoteHtml?: string
++}
++let activeWellKnownRouted: WellKnownRoutedPayload | undefined
++let wellKnownRoutedFetchInstalled = false
++afterEach(() => {
++  // #73：用例结束后清空 active payload，避免污染真实网络用例
++  activeWellKnownRouted = undefined
++})
++// #73：只安装一次 spy，避免 last-spy 被 restore 后漏拦
++function ensureWellKnownRoutedFetchSpy() {
++  if (wellKnownRoutedFetchInstalled) return
++  wellKnownRoutedFetchInstalled = true
++  // #73：保留原 routedFetch，无 active fixture 时透传给真实/FetchHttpClient 用例
++  const original = NetworkProxy.routedFetch.bind(NetworkProxy)
++  // #73：拦截 well-known/remote_config 的 routedFetch，避免真实访问 example.com
++  spyOn(NetworkProxy, "routedFetch").mockImplementation(async (inputUrl, init) => {
++    const payload = activeWellKnownRouted
++    const url = typeof inputUrl === "string" ? inputUrl : inputUrl instanceof URL ? inputUrl.toString() : inputUrl.url
++    if (!payload) {
++      return original(inputUrl as any, init as any)
++    }
++    if (url.includes(".well-known/opencode")) {
++      payload.seen.wellKnown = url
++      return new Response(JSON.stringify(payload.wellKnown), {
++        status: 200,
++        headers: { "content-type": "application/json" },
++      })
++    }
++    if (url.includes("config.example.com") && (payload.remote !== undefined || payload.remoteHtml !== undefined)) {
++      payload.seen.remote = url
++      payload.seen.authorization = new Headers(init?.headers).get("authorization") ?? undefined
++      if (payload.remoteHtml !== undefined) {
++        return new Response(payload.remoteHtml, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } })
++      }
++      return new Response(JSON.stringify(payload.remote), {
++        status: 200,
++        headers: { "content-type": "application/json" },
++      })
++    }
++    return new Response(JSON.stringify({}), { status: 404, headers: { "content-type": "application/json" } })
++  })
++}
++
+ const wellKnown = (input: {
+   authUrl?: string
+   config?: unknown
+@@ -218,7 +267,7 @@ const wellKnown = (input: {
+   wellKnown?: unknown
+ }) => {
+   const seen: { wellKnown?: string; remote?: string; authorization?: string } = {}
+-  const client = remoteConfigClient({
++  const payload: WellKnownRoutedPayload = {
+     seen,
+     wellKnown: input.wellKnown ?? {
+       ...(input.config !== undefined ? { config: input.config } : {}),
+@@ -226,10 +275,31 @@ const wellKnown = (input: {
+     },
+     remote: input.remote,
+     remoteHtml: input.remoteHtml,
+-  })
++  }
++  const client = remoteConfigClient(payload)
++  // #73：与 HttpClient mock 并存，覆盖生产主路径 NetworkProxy.routedFetch
++  ensureWellKnownRoutedFetchSpy()
++  const base = configIt({ auth: wellKnownAuth(input.authUrl ?? "https://example.com"), client })
++  // #73：每个用例开始时激活本 fixture 的 payload，杜绝模块加载顺序导致的 last-spy 覆盖
++  const activate = <A, E, R>(fn: () => Effect.Effect<A, E, R>) => {
++    return () => {
++      // #73：用例期间绑定 fixture，结束后清空以免劫持真实 FetchHttpClient 用例
++      // #73：绑定本 fixture 的 seen/响应体
++      activeWellKnownRouted = payload
++      return fn().pipe(
++        Effect.ensuring(
++          Effect.sync(() => {
++            if (activeWellKnownRouted === payload) activeWellKnownRouted = undefined
++          }),
++        ),
++      )
++    }
++  }
++  const instance = ((name: string, fn: any, opts?: any) => base.instance(name, activate(fn), opts)) as typeof base.instance
++  instance.skip = ((name: string, fn: any, opts?: any) => base.instance.skip(name, activate(fn), opts)) as typeof base.instance.skip
+   return {
+     seen,
+-    it: configIt({ auth: wellKnownAuth(input.authUrl ?? "https://example.com"), client }),
++    it: { instance },
+   }
+ }
+ 
