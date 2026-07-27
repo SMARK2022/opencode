@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-20T09:50:00.642Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 95,
+  "passed": 93,
+  "reusedPrefix": 93,
+  "baseState": "0093-3ae1d112f256",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 95,
+  "sourceRepoHeadBefore": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintBefore": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintBefore": "c20c1f71ae1dd0356c3da4e6655c605eef8acbecc589d4720976ce2cefc3522a",
+  "outcomes": [
+    {
+      "index": 94,
+      "sha": "81efcbb1d8cbe426e69801803e5aa33180485ca1",
+      "subject": "feat(notebook): 优化单元源代码渲染逻辑，调整字节限制和行数限制处理",
+      "patch": "current/0094-81efcbb1d8cb.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/cli/cmd/tui/routes/session/index.tsx...\nerror: packages/opencode/src/cli/cmd/tui/routes/session/index.tsx: does not exist in index\nChecking patch sdks/vscode/src/notebook/source.ts...\nerror: while searching for:\n  // Render cells one by one, emitting headers + in-range source lines\n  const maxBytes = 24 * 1024\n  let bytes = 0\n  let rendered = 0\n  let cut = false\n  let lastRenderedLine = 0\n  const outputCells: string[] = []\n\n\nerror: patch failed: sdks/vscode/src/notebook/source.ts:68\nerror: sdks/vscode/src/notebook/source.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "70f539ff34bf34f3c94d4275f1a018e745758270985fec88ab2bc0589964ed71",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "3a722c441cd004dad9caf2861d0edc41909fd42d7643e104371e91a968cb6dba"
+  },
+  "stoppedAt": 94,
+  "finishedAt": "2026-07-20T09:50:12.533Z",
+  "sourceRepoHeadAfter": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintAfter": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintAfter": "c20c1f71ae1dd0356c3da4e6655c605eef8acbecc589d4720976ce2cefc3522a",
+  "retainedStates": [
+    "0093-3ae1d112f256",
+    "0092-2f1ab5812e3b",
+    "0091-124adc90ec7c",
+    "0090-56bce83a059b",
+    "0086-3c72d78b8cb1"
+  ]
+}

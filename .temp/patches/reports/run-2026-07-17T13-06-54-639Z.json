@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "startedAt": "2026-07-17T13:06:54.639Z",
+  "sourceRef": "dev-smark",
+  "targetBaseline": "b1fc8113948b518835c2a39ece49553cffe9b30c",
+  "patchCount": 452,
+  "passed": 0,
+  "outcomes": [
+    {
+      "index": 1,
+      "sha": "9f117055c5a8a09f5cc7080786accf853bdb25fe",
+      "subject": "feat(session): 添加同ClaudeCode一样的git上下文处理和配置选项逻辑",
+      "patch": "current/0001-9f117055c5a8.patch",
+      "changedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/flag/flag.ts...\nerror: packages/opencode/src/flag/flag.ts: does not exist in index\nChecking patch packages/opencode/src/session/prompt.ts...\nerror: while searching for:\n\n            const [skills, env, instructions, modelMsgs] = yield* Effect.all([\n              sys.skills(agent),\n              Effect.sync(() => sys.environment(model)),\n              instruction.system().pipe(Effect.orDie),\n              MessageV2.toModelMessagesEffect(msgs, model),\n            ])\n\nerror: patch failed: packages/opencode/src/session/prompt.ts:1472\nerror: packages/opencode/src/session/prompt.ts: patch does not apply\nChecking patch packages/opencode/src/session/system.ts...\nerror: while searching for:\nimport type { Agent } from \"@/agent/agent\"\nimport { Permission } from \"@/permission\"\nimport { Skill } from \"@/skill\"\n\nexport function provider(model: Provider.Model) {\n  if (model.api.id.includes(\"gpt-4\") || model.api.id.includes(\"o1\") || model.api.id.includes(\"o3\"))\n\nerror: patch failed: packages/opencode/src/session/system.ts:15\nerror: packages/opencode/src/session/system.ts: patch does not apply\n"
+    }
+  ],
+  "stoppedAt": 1,
+  "finishedAt": "2026-07-17T13:07:12.664Z",
+  "temporaryRepo": "/var/folders/x9/wyq90jb50kxf62wvbs505q4nn7ltx4/T/smark-patch-dry-run-7Py2m7/repo"
+}

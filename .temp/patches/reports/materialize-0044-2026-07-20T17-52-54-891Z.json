@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-20T17:52:54.891Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 44,
+  "passed": 43,
+  "reusedPrefix": 43,
+  "baseState": "0043-630dd666663c",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 44,
+  "sourceRepoHeadBefore": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintBefore": "4a5f95013a0c0a60e196d462291d8235aa2bfd6028681cd720c28b076cabe8bc",
+  "targetRepoFingerprintBefore": "cc39cd3fb22dfa3b6055eac423f0438f7f86ad4f92b771c26d8de29f9fbca40f",
+  "outcomes": [
+    {
+      "index": 44,
+      "sha": "d653e1fc1bd1ba65be4e5e335ec250a6d6b8ce06",
+      "subject": "feat: enhance tool usage guidance and add context usage tests",
+      "patch": "current/0044-d653e1fc1bd1.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/tui/src/util/context-usage.ts...\nerror: packages/tui/src/util/context-usage.ts: does not exist in index\nChecking patch packages/tui/src/routes/session/context-usage.tsx...\nerror: packages/tui/src/routes/session/context-usage.tsx: does not exist in index\nChecking patch packages/tui/test/context-usage.test.ts...\nerror: packages/tui/test/context-usage.test.ts: does not exist in index\nChecking patch packages/tui/src/routes/session/index.tsx...\nChecking patch packages/opencode/src/session/system.ts...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "52ba25b1eb9fcd6b9c83332f95a35f091648f0c326ca66863613364aaaf9c4cf",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "bfe32811d87b799d0de05d81c027ba6d86868e9a88e56eb60ce2fee6a05bd3c2"
+  },
+  "stoppedAt": 44,
+  "finishedAt": "2026-07-20T17:53:01.516Z",
+  "sourceRepoHeadAfter": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintAfter": "4a5f95013a0c0a60e196d462291d8235aa2bfd6028681cd720c28b076cabe8bc",
+  "targetRepoFingerprintAfter": "cc39cd3fb22dfa3b6055eac423f0438f7f86ad4f92b771c26d8de29f9fbca40f",
+  "retainedStates": [
+    "0043-630dd666663c",
+    "0039-0e50e973aad3"
+  ]
+}

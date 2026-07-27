@@ -1,0 +1,159 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-26T21:49:52.008Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 200,
+  "passed": 200,
+  "reusedPrefix": 200,
+  "baseState": "0200-d4f24d4434a4",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 200,
+  "sourceRepoHeadBefore": "7c114657bf8d46c4eff60145ee78dce8ea2cdc36",
+  "sourceRepoFingerprintBefore": "f0384740cca24672a76affe120b0248822ac7a25da675f3b89b88c983eecc348",
+  "targetRepoFingerprintBefore": "fd16fe07da381b0cf3cdccabe3f08f381e6cca75bedf4681f12ceb8d575a52c7",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0200-d4f24d4434a4",
+  "retainedStates": [
+    "0200-d4f24d4434a4",
+    "0195-bb5a2b41f258"
+  ],
+  "test": {
+    "index": 200,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/effect/app-runtime.ts(83,24): error TS2339: Property 'node' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/permission/reviewer/service\")'.\nsrc/permission/index.ts(370,70): error TS2322: Type '[Node<Service, never, undefined>, any, any]' is not assignable to type 'readonly [Node<Service, never, undefined>, any, any] & { readonly \"Missing dependencies\": any; }'.\n  Property '\"Missing dependencies\"' is missing in type '[Node<Service, never, undefined>, any, any]' but required in type '{ readonly \"Missing dependencies\": any; }'.\nsrc/permission/index.ts(370,120): error TS2339: Property 'node' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/permission/cache/session-cache\")'.\nsrc/permission/index.ts(370,151): error TS2339: Property 'node' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/permission/reviewer/circuit-breaker\")'.\nsrc/permission/reviewer/service.ts(186,24): error TS2339: Property 'defaultLayer' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/config/config\")'.\nsrc/permission/reviewer/service.ts(187,26): error TS2339: Property 'defaultLayer' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/provider/provider\")'.\nsrc/permission/reviewer/transcript.ts(7,59): error TS2694: Namespace '\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\"' has no exported member 'WithParts'.\nsrc/permission/reviewer/transcript.ts(21,37): error TS2724: '\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\"' has no exported member named 'Part'. Did you mean 'parts'?\nsrc/permission/reviewer/transcript.ts(36,37): error TS2694: Namespace '\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\"' has no exported member 'ToolPart'.\nsrc/tool/shell.ts(333,18): error TS2339: Property 'cwd' does not exist on type '{ command: string; }'.\nsrc/tool/shell.ts(334,20): error TS2339: Property 'shell' does not exist on type '{ command: string; }'.\nsrc/tool/shell.ts(942,68): error TS2353: Object literal may only specify known properties, and 'cwd' does not exist in type '{ command: string; }'.\ntest/permission/next.test.ts(34,24): error TS2339: Property 'node' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/permission/reviewer/service\")'.\ntest/permission/next.test.ts(43,26): error TS2339: Property 'node' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/permission/reviewer/service\")'.\ntest/permission/next.test.ts(63,32): error TS2339: Property 'node' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/permission/reviewer/circuit-breaker\")'.\ntest/permission/next.test.ts(80,45): error TS2339: Property 'node' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/permission/reviewer/circuit-breaker\")'.\ntest/server/httpapi-exercise/index.ts(1796,19): error TS2345: Argument of type 'Effect<undefined, Error | ServeError, any>' is not assignable to parameter of type 'Effect<undefined, Error | ServeError, never>'.\n  Type 'any' is not assignable to type 'never'.\ntest/server/httpapi-exercise/runner.ts(137,13): error TS2322: Type 'Effect<{ id: string & Brand<\"SessionID\">; slug: string; projectID: string & Brand<\"Project.ID\">; workspaceID?: (string & Brand<\"WorkspaceV2.ID\">) | undefined; ... 14 more ...; revert?: { ...; } | undefined; }, never, any>' is not assignable to type 'Effect<SessionInfo, never, never>'.\n  Type 'any' is not assignable to type 'never'.\ntest/server/httpapi-exercise/runner.ts(139,13): error TS2322: Type 'Effect<{ id: string & Brand<\"SessionID\">; slug: string; projectID: string & Brand<\"Project.ID\">; workspaceID?: (string & Brand<\"WorkspaceV2.ID\">) | undefined; ... 14 more ...; revert?: { ...; } | undefined; } | undefined, never, any>' is not assignable to type 'Effect<SessionInfo | undefined, never, never>'.\n  Type 'any' is not assignable to type 'never'.\ntest/server/httpapi-exercise/runner.ts(148,13): error TS2322: Type 'Effect<{ info: { id: string & Brand<\"MessageID\">; sessionID: string & Brand<\"SessionID\">; hidden?: { time: number; reason: \"repair-empty-dangling-assistant\" | \"undo\"; } | undefined; ... 7 more ...; tools?: { ...; } | undefined; }; part: { ...; }; }, never, any>' is not assignable to type 'Effect<MessageSeed, never, never>'.\n  Type 'any' is not assignable to type 'never'.\ntest/server/httpapi-exercise/runner.ts(178,13): error TS2322: Type 'Effect<WithParts[], never, any>' is not assignable to type 'Effect<WithParts[], never, never>'.\n  Type 'any' is not assignable to type 'never'.\ntest/server/httpapi-exercise/runner.ts(179,40): error TS2322: Type 'Effect<void, never, any>' is not assignable to type 'Effect<void, never, never>'.\n  Type 'any' is not assignable to type 'never'.\ntest/server/httpapi-exercise/runner.ts(180,32): error TS2322: Type 'Effect<{ readonly name: string; readonly branch?: string | undefined; readonly directory: string; }, never, any>' is not assignable to type 'Effect<{ readonly name: string; readonly branch?: string | undefined; readonly directory: string; }, never, never>'.\n  Type 'any' is not assignable to type 'never'.\ntest/server/httpapi-exercise/runner.ts(182,13): error TS2322: Type 'Effect<void, never, any>' is not assignable to type 'Effect<void, never, never>'.\n  Type 'any' is not assignable to type 'never'.\ntest/session/llm.test.ts(1351,11): error TS2345: Argument of type 'Layer<Service, any, never>' is not assignable to parameter of type 'Layer<Service, never, never>'.\n  Type 'any' is not assignable to type 'never'.\ntest/session/llm.test.ts(1417,26): error TS2345: Argument of type 'Layer<Service, any, never>' is not assignable to parameter of type 'Layer<Service, never, never>'.\n  Type 'any' is not assignable to type 'never'.\ntest/session/llm.test.ts(1500,26): error TS2345: Argument of type 'Layer<Service, any, never>' is not assignable to parameter of type 'Layer<Service, never, never>'.\n  Type 'any' is not assignable to type 'never'.\ntest/session/llm.test.ts(1589,26): error TS2345: Argument of type 'Layer<Service, any, never>' is not assignable to parameter of type 'Layer<Service, never, never>'.\n  Type 'any' is not assignable to type 'never'.\ntest/tool/shell.test.ts(421,49): error TS2694: Namespace '\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/permission/index\"' has no exported member 'Request'.\ntest/tool/shell.test.ts(426,17): error TS2353: Object literal may only specify known properties, and 'description' does not exist in type '{ readonly command: string; readonly timeout?: number | undefined; readonly workdir?: string | undefined; readonly compress_output?: boolean | undefined; }'.\ntest/tool/shell.test.ts(446,49): error TS2694: Namespace '\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/permission/index\"' has no exported member 'Request'.\ntest/tool/shell.test.ts(451,17): error TS2353: Object literal may only specify known properties, and 'description' does not exist in type '{ readonly command: string; readonly timeout?: number | undefined; readonly workdir?: string | undefined; readonly compress_output?: boolean | undefined; }'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-26T21:50:43.638Z",
+  "sourceRepoHeadAfter": "7c114657bf8d46c4eff60145ee78dce8ea2cdc36",
+  "sourceRepoFingerprintAfter": "f0384740cca24672a76affe120b0248822ac7a25da675f3b89b88c983eecc348",
+  "targetRepoFingerprintAfter": "fd16fe07da381b0cf3cdccabe3f08f381e6cca75bedf4681f12ceb8d575a52c7"
+}

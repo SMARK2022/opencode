@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-18T03:51:04.383Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 30,
+  "passed": 28,
+  "reusedPrefix": 28,
+  "baseState": "0028-ab8ce2ad4405",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 30,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "338ce78de76987bfb864c06a0677ae10f05b3601e0f330b02dae79ed2c239985",
+  "targetRepoFingerprintBefore": "6c35a81acf4d3d427cca3ec005ce5c4544201fbc909e4ba5129e1619426aaad5",
+  "outcomes": [
+    {
+      "index": 29,
+      "sha": "06d4a50185e4b9bf1e8c1d77c73c89a162bd91d8",
+      "subject": "feat: Enhance OpenCode with new prompt files and improve tool usage guidelines",
+      "patch": "current/0029-06d4a50185e4.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/provider/transform.ts...\nHunk #1 succeeded at 1113 (offset 295 lines).\nChecking patch packages/opencode/src/session/prompt/anthropic.txt...\nerror: while searching for:\nYou are OpenCode, a coding agent for science and engineering tasks.\n\nYou are an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.\n\nIMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.\n\nIf the user asks for help or wants to give feedback inform them of the following:\n- ctrl+p to list available actions\n- To give feedback, users should report the issue at\n  https://github.com/anomalyco/opencode\n\nWhen the user directly asks about OpenCode (eg. \"can OpenCode do...\", \"does OpenCode have...\"), or asks in second person (eg. \"are you able...\", \"can you do...\"), or asks how to use a specific OpenCode feature (eg. implement a hook, write a slash command, or install an MCP server), use the webfetch tool to gather information to answer the question from OpenCode docs. The list of available docs is available at https://opencode.ai/docs\n\n# Tone and style\n- Only use emojis if the user explicitly requests it. Avoid using emojis in all communication unless asked.\n- Your output will be displayed on a command line interface. Your responses should be short and concise. You can use GitHub-flavored markdown for formatting, and will be rendered in a monospace font using the CommonMark specification.\n- Output text to communicate with the user; all text you output outside of tool use is displayed to the user. Only use tools to complete tasks. Never use tools like Bash or code comments as means to communicate with the user during the session.\n- NEVER create files unless they're absolutely necessary for achieving your goal. ALWAYS prefer editing an existing file to creating a new one. This includes markdown files.\n- When referencing specific functions or pieces of code include the pattern `file_path:line_number` to allow the user to easily navigate to the source code location.\n\n# Professional objectivity\nPrioritize technical accuracy and truthfulness over validating the user's beliefs. Focus on facts and problem-solving, providing direct, objective technical info without any unnecessary superlatives, praise, or emotional validation. It is best for the user if OpenCode honestly applies the same rigorous standards to all ideas and disagrees when necessary, even if it may not be what the user wants to hear. Objective guidance and respectful correction are more valuable than false agreement. Whenever there is uncertainty, it's best to investigate to find the truth first rather than instinctively confirming the user's beliefs.\n\n# Doing tasks\nThe user will primarily request you perform software engineering tasks. This includes solving bugs, adding new functionality, refactoring code, explaining code, and more. For these tasks the following steps are recommended:\n- Read the relevant files and understand the existing code before making changes. Do not propose changes to code you have not read.\n- Use the todowrite tool to plan the task and break it into steps when the scope is non-trivial.\n- Implement the minimal change that satisfies the request. Do not add features, refactor surrounding code, or make \"improvements\" beyond what was asked.\n- Do not add comments, docstrings, or type annotations to code you did not change.\n- Do not add error handling or validation for scenarios that cannot happen given the existing codebase guarantees.\n- Do not create helpers or abstractions for one-time operations. Three similar lines of code is better than a premature abstraction.\n- Be careful not to introduce security vulnerabilities such as command injection, XSS, SQL injection, and other OWASP top 10 vulnerabilities. If you notice that you wrote insecure code, immediately fix it.\n- Before reporting a task complete, verify it actually works: run the test, execute the script, check the output. If you cannot verify, say so explicitly rather than claiming success.\n\nTool results and user me\nerror: patch failed: packages/opencode/src/session/prompt/anthropic.txt:1\nerror: packages/opencode/src/session/prompt/anthropic.txt: patch does not apply\nChecking patch packages/opencode/src/session/prompt/codex.txt...\nChecking patch packages/opencode/src/session/prompt/deepseek.txt...\nChecking patch packages/opencode/src/session/prompt/gpt.txt...\nChecking patch packages/opencode/src/session/prompt/minimax.txt...\nChecking patch packages/opencode/src/session/system.ts...\nerror: while searching for:\nimport PROMPT_GEMINI from \"./prompt/gemini.txt\"\nimport PROMPT_GPT from \"./prompt/gpt.txt\"\nimport PROMPT_KIMI from \"./prompt/kimi.txt\"\n\nimport PROMPT_CODEX from \"./prompt/codex.txt\"\nimport PROMPT_TRINITY from \"./prompt/trinity.txt\"\n\nerror: patch failed: packages/opencode/src/session/system.ts:9\nerror: packages/opencode/src/session/system.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "d593dd5b44f56e6a6b7e3effce64053647e3cc979af4c745b56d87a261d5eaeb",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "2e26b3356c8ceecf601655403b2a42bb38e378881d8d5c9745bf95765a07a825"
+  },
+  "stoppedAt": 29,
+  "finishedAt": "2026-07-18T03:51:11.827Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "338ce78de76987bfb864c06a0677ae10f05b3601e0f330b02dae79ed2c239985",
+  "targetRepoFingerprintAfter": "6c35a81acf4d3d427cca3ec005ce5c4544201fbc909e4ba5129e1619426aaad5",
+  "retainedStates": [
+    "0028-ab8ce2ad4405",
+    "0027-7dc9f1ab534a",
+    "0026-13fd8ab5dcbe",
+    "0025-634fdbefd224",
+    "0024-5a7f139b02d1"
+  ]
+}

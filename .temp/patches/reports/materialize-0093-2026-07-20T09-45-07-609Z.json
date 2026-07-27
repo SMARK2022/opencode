@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-20T09:45:07.609Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 93,
+  "passed": 92,
+  "reusedPrefix": 92,
+  "baseState": "0092-2f1ab5812e3b",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 93,
+  "sourceRepoHeadBefore": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintBefore": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintBefore": "551637b4b3eb8de408a238ca34f51311ec2c7c5ae4b2a549b851fa99ac81b551",
+  "outcomes": [
+    {
+      "index": 93,
+      "sha": "3ae1d112f256b7876f26c0591e64f853a49c3d48",
+      "subject": "feat(vscode): 更新笔记本环境描述，增强内核选择和配置的诊断信息",
+      "patch": "current/0093-3ae1d112f256.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/plugin/vscode-bridge-descriptions.ts...\nHunk #1 succeeded at 22 (offset 1 line).\nerror: while searching for:\n    \"filePath and operation are required. `reason` is an optional brief description shown to the user.\",\n    \"\",\n    \"Operations:\",\n    \"  info      — probe the active kernel/interpreter and report saved .ipynb metadata\",\n    \"  configure — open the notebook and trigger kernel selection (run before first execution)\",\n    \"  restart   — restart the Jupyter kernel, clearing all variables and execution state. Rerun setup cells afterward.\",\n    \"  save      — persist the notebook document to disk on user request only. Do not save unprompted; let the user review changes first.\",\n  ].join(\"\\n\"),\n}\n\nerror: patch failed: packages/opencode/src/plugin/vscode-bridge-descriptions.ts:44\nerror: packages/opencode/src/plugin/vscode-bridge-descriptions.ts: patch does not apply\nChecking patch sdks/vscode/src/notebook/env.ts...\nHunk #2 succeeded at 55 (offset -31 lines).\nHunk #3 succeeded at 125 (offset -31 lines).\nHunk #4 succeeded at 141 (offset -31 lines).\nHunk #5 succeeded at 151 (offset -31 lines).\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "70f539ff34bf34f3c94d4275f1a018e745758270985fec88ab2bc0589964ed71",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "320624b5700900371a035eea78b0408162d8dd136851dff82a1d2cc305f0fc2c"
+  },
+  "stoppedAt": 93,
+  "finishedAt": "2026-07-20T09:45:20.285Z",
+  "sourceRepoHeadAfter": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintAfter": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintAfter": "551637b4b3eb8de408a238ca34f51311ec2c7c5ae4b2a549b851fa99ac81b551",
+  "retainedStates": [
+    "0092-2f1ab5812e3b",
+    "0091-124adc90ec7c",
+    "0090-56bce83a059b",
+    "0086-3c72d78b8cb1",
+    "0085-66ddc4e2fe6c"
+  ]
+}

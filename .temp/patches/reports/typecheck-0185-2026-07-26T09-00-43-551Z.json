@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-26T09:00:43.551Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 185,
+  "passed": 185,
+  "reusedPrefix": 185,
+  "baseState": "0185-a505b9721c87",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 185,
+  "sourceRepoHeadBefore": "762a5b7801761527084f9920d1fe4882dd7d438c",
+  "sourceRepoFingerprintBefore": "b770e2988830f34f868f784df4b9eab0f8c229829ceb218d27fa26308bed3b8c",
+  "targetRepoFingerprintBefore": "cba6c711b7ea505497e9c861d67c42d6c116b5a797fbf47a23ecc5383b0a0b34",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0185-a505b9721c87",
+  "retainedStates": [
+    "0185-a505b9721c87",
+    "0180-201e910402a2",
+    "0175-f0a47a144866",
+    "0174-57eecce76b03",
+    "0173-59aeb3d239f3"
+  ],
+  "test": {
+    "index": 185,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/cli/cmd/stats-data.ts(324,34): error TS2322: Type '{ id: string; label: string; tokens: TokenTotals; cost: number; requests: number; assistantCalls: number; sessions: number; providers: { id: string; tokens: number; }[]; models: { id: string; tokens: number; }[]; }' is not assignable to type 'UsageGroup'.\n  Type '{ id: string; label: string; tokens: TokenTotals; cost: number; requests: number; assistantCalls: number; sessions: number; providers: { id: string; tokens: number; }[]; models: { id: string; tokens: number; }[]; }' is missing the following properties from type 'UsageTotals': errors, aborted\nsrc/cli/cmd/stats-render.ts(98,26): error TS2345: Argument of type '{ id: string; label: string; tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number; }; total: number; }; cost: number; requests: number; assistantCalls: number; sessions: number; providers: never[]; models: never[]; }[] | UsageGroup[]' is not assignable to parameter of type '{ id: string; label: string; tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number; }; total: number; }; cost: number; requests: number; assistantCalls: number; sessions: number; providers: never[]; models: never[]; }[]'.\n  Type 'UsageGroup[]' is not assignable to type '{ id: string; label: string; tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number; }; total: number; }; cost: number; requests: number; assistantCalls: number; sessions: number; providers: never[]; models: never[]; }[]'.\n    Type 'UsageGroup' is not assignable to type '{ id: string; label: string; tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number; }; total: number; }; cost: number; requests: number; assistantCalls: number; sessions: number; providers: never[]; models: never[]; }'.\n      Types of property 'providers' are incompatible.\n        Type '{ id: string; tokens: number; }[]' is not assignable to type 'never[]'.\n          Type '{ id: string; tokens: number; }' is not assignable to type 'never'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-26T09:01:24.203Z",
+  "sourceRepoHeadAfter": "762a5b7801761527084f9920d1fe4882dd7d438c",
+  "sourceRepoFingerprintAfter": "b770e2988830f34f868f784df4b9eab0f8c229829ceb218d27fa26308bed3b8c",
+  "targetRepoFingerprintAfter": "cba6c711b7ea505497e9c861d67c42d6c116b5a797fbf47a23ecc5383b0a0b34"
+}

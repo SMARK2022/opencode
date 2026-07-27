@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-21T05:03:37.119Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 74,
+  "passed": 73,
+  "reusedPrefix": 73,
+  "baseState": "0073-f75419bd78c5",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 74,
+  "sourceRepoHeadBefore": "f2918a5c2257bff5075a993c7196e01ff6d4d0cc",
+  "sourceRepoFingerprintBefore": "98f13a4b6c0a3616af8e55800b6d2a87403c2244608637aff41c3fbff1ac6d61",
+  "targetRepoFingerprintBefore": "8e038ac0aeaffb63e8b0321d67d1a477e89bfdc08236f742c1e5d4a4709a782f",
+  "outcomes": [
+    {
+      "index": 74,
+      "sha": "4d55a2c0f4a3a71a1791b3b5356372e16e6e0c47",
+      "subject": "feat: 增加工具调用和工具结果的独立分类，优化上下文使用数据计算",
+      "patch": "current/0074-4d55a2c0f4a3.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/tui/src/util/context-usage.ts...\nHunk #1 succeeded at 1215 (offset 7 lines).\nerror: while searching for:\n      tokens: estimate(skillsSection(skillInfo([skill])), ratio),\n    }))\n    toolDefTokens = Math.round(bd.tools / ratio)\n    // 消息细分：user/toolOutput → 输入；assistant/reasoning/toolInput → 输出\n    inputMessageTokens = Math.round((bd.messages.userText + bd.messages.toolOutput + bd.messages.files) / ratio)\n    outputMessageTokens = Math.round((bd.messages.assistantText + bd.messages.reasoning + bd.messages.toolInput) / ratio)\n  } else {\n    skillTokens = estimate(skillListing, ratio)\n    skillDetails = skills.map((skill) => ({\n\nerror: patch failed: packages/tui/src/util/context-usage.ts:1217\nerror: packages/tui/src/util/context-usage.ts: patch does not apply\nChecking patch packages/tui/src/routes/session/context-usage.tsx...\nChecking patch packages/tui/test/context-usage.test.ts...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "91f761454f653ed97a7c03d25a523463b5552d1db93dcf9fc1db37f106f5f562",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "54295cf95a15b2852f556ad4137a2aedac151da57411957532f6dad1fc86bf01"
+  },
+  "stoppedAt": 74,
+  "finishedAt": "2026-07-21T05:03:45.913Z",
+  "sourceRepoHeadAfter": "f2918a5c2257bff5075a993c7196e01ff6d4d0cc",
+  "sourceRepoFingerprintAfter": "98f13a4b6c0a3616af8e55800b6d2a87403c2244608637aff41c3fbff1ac6d61",
+  "targetRepoFingerprintAfter": "8e038ac0aeaffb63e8b0321d67d1a477e89bfdc08236f742c1e5d4a4709a782f",
+  "retainedStates": [
+    "0073-f75419bd78c5",
+    "0072-a09787f293c9",
+    "0071-d95dc89b856d",
+    "0070-efae0086f406"
+  ]
+}

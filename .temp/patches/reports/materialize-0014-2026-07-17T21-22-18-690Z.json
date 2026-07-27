@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-17T21:22:18.690Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 14,
+  "passed": 14,
+  "reusedPrefix": 13,
+  "baseState": "0013-bbbf5f1dd94d",
+  "rebuild": false,
+  "appliedThisRun": 1,
+  "materializedIndex": 14,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "c7ce0ba93845e92f8bcec47df6b0de0422174f7c131e1fb1df32a6d1bc5a49e2",
+  "targetRepoFingerprintBefore": "afb0e59178d713d86886b570d4da09f4f66d3665f44ade89ce3bcb4afd3afd2e",
+  "outcomes": [
+    {
+      "index": 14,
+      "sha": "61bcd2aae67c27fd798e3b32f1e22d09f159bcba",
+      "subject": "feat(prompt): 优化请求助手的输入输出统计逻辑，确保在无助手消息时返回零值",
+      "patch": "current/0014-61bcd2aae67c.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/package.json",
+        "M\tpackages/opencode/script/build.ts",
+        "A\tpackages/opencode/script/version-env.ts",
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "A\tpackages/opencode/src/provider/claudecode.ts",
+        "M\tpackages/opencode/src/provider/provider.ts",
+        "M\tpackages/opencode/src/session/processor.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx",
+        "M\tpackages/tui/src/util/signal.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "f535c43b0ae3179064d680536bbc4ac7ac32fcf08dfbab4962bbe3257aefdeb3",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "792c55a83b6371fa4dce0c0c1db7d88b8a5bcf68d3d651908124f8de4b2d745e"
+  },
+  "finishedAt": "2026-07-17T21:22:23.879Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "c7ce0ba93845e92f8bcec47df6b0de0422174f7c131e1fb1df32a6d1bc5a49e2",
+  "targetRepoFingerprintAfter": "afb0e59178d713d86886b570d4da09f4f66d3665f44ade89ce3bcb4afd3afd2e",
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0014-61bcd2aae67c",
+  "retainedStates": [
+    "0014-61bcd2aae67c",
+    "0013-bbbf5f1dd94d",
+    "0012-b1bf9c5a50ce",
+    "0011-589bb20e905f",
+    "0010-fc6394523010"
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-19T12:58:58.732Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 60,
+  "passed": 55,
+  "reusedPrefix": 55,
+  "baseState": "0055-0a0eb2e94edc",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 60,
+  "sourceRepoHeadBefore": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintBefore": "28b47e5fa5989282ae9ee6076de519076bc08a2b064618982bcca0fb0c6818a7",
+  "targetRepoFingerprintBefore": "dec16ae36c8e766618de3073b74ba113dcb30e616442b22a1ccd76f356a1f5ef",
+  "outcomes": [
+    {
+      "index": 56,
+      "sha": "0734b2e81cc31e8d2e7494b6d1f0621918ca1442",
+      "subject": "fix: 更新版本号至 1.14.29，优化环境变量处理逻辑，增强插件预热功能",
+      "patch": "current/0056-0734b2e81cc3.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/cli/cmd/tui.ts...\nerror: while searching for:\n          // 守护进程不可能在 1s 内就绪：跳过首轮轮询避免无意义的锁文件读取\n          await Bun.sleep(1000)\n\n          // 等待守护进程写入锁文件并响应健康检查，最长等待 30 秒\n          const deadline = Date.now() + 30_000\n          while (Date.now() < deadline) {\n            const daemonLock = await ServerLock.read()\n            if (daemonLock && daemonLock.pid === proc.pid && ServerLock.alive(daemonLock.pid)) {\n\nerror: patch failed: packages/opencode/src/cli/cmd/tui.ts:253\nerror: packages/opencode/src/cli/cmd/tui.ts: patch does not apply\nChecking patch packages/opencode/src/cli/tui/worker.ts...\nChecking patch packages/opencode/src/installation/index.ts...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "c8b2b9cfc4f1376b2b4e05958a57a3eb4cee92a966a622f89e0fb0a102c167ad",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "28746b066b89912c304ec1e73e8bd54591477c23ec474a56b16d4643eb9a6411"
+  },
+  "stoppedAt": 56,
+  "finishedAt": "2026-07-19T12:59:08.278Z",
+  "sourceRepoHeadAfter": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintAfter": "28b47e5fa5989282ae9ee6076de519076bc08a2b064618982bcca0fb0c6818a7",
+  "targetRepoFingerprintAfter": "dec16ae36c8e766618de3073b74ba113dcb30e616442b22a1ccd76f356a1f5ef",
+  "retainedStates": [
+    "0055-0a0eb2e94edc",
+    "0050-f40e2d369552",
+    "0046-f13fd00acfde",
+    "0045-6380ed0b8d91",
+    "0040-8f6444e154d0"
+  ]
+}

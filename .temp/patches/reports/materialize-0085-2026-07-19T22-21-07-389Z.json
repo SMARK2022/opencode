@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-19T22:21:07.389Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 85,
+  "passed": 80,
+  "reusedPrefix": 80,
+  "baseState": "0080-0a8361dfa4d3",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 85,
+  "sourceRepoHeadBefore": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintBefore": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintBefore": "9df9654031c29ccac6895a50a6688e4308828de9e7d1e45cd30ce3ab92acd88a",
+  "outcomes": [
+    {
+      "index": 81,
+      "sha": "85442a1f1e6860e3752e75e89353368d53a360d1",
+      "subject": "feat(notebook): 优化虚拟文档行范围计算，修正行号处理逻辑，增强源代码渲染效率",
+      "patch": "current/0081-85442a1f1e68.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch sdks/vscode/src/notebook/format.ts...\nHunk #1 succeeded at 246 (offset 41 lines).\nHunk #2 succeeded at 272 (offset 46 lines).\nChecking patch sdks/vscode/src/notebook/source.ts...\nerror: while searching for:\n  let bytes = 0\n  let rendered = 0\n  let cut = false\n  let globalLineNum = 0\n  let lastRenderedLine = 0\n  const outputCells: string[] = []\n\n\nerror: patch failed: sdks/vscode/src/notebook/source.ts:70\nerror: sdks/vscode/src/notebook/source.ts: patch does not apply\nChecking patch sdks/vscode/src/notebook/summary.ts...\nHunk #1 succeeded at 70 (offset 14 lines).\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "8fe3632d6d29f7cd593f7f51a31ef4bffea70fa702694f647e5b6699b06dbc9f",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "22a31c4b048abce361fd6227ae59ce1e7177f4d5a55eb9373aaf99fca1a759d5"
+  },
+  "stoppedAt": 81,
+  "finishedAt": "2026-07-19T22:21:15.406Z",
+  "sourceRepoHeadAfter": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintAfter": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintAfter": "9df9654031c29ccac6895a50a6688e4308828de9e7d1e45cd30ce3ab92acd88a",
+  "retainedStates": [
+    "0080-0a8361dfa4d3",
+    "0077-9768471cf3fc",
+    "0075-4141d5e979ff"
+  ]
+}

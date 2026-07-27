@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-25T06:21:38.223Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 170,
+  "passed": 165,
+  "reusedPrefix": 165,
+  "baseState": "0165-2e65029d4e34",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 170,
+  "sourceRepoHeadBefore": "71afbee8f47061588f6e1db98aa0f2d0f5634b22",
+  "sourceRepoFingerprintBefore": "318ec9714c59a495fa32171a3af7a31b25b41436e79b7d48596fdddcf56d86b3",
+  "targetRepoFingerprintBefore": "90f1a7666f7f20fc65ddcd5ad93df5c42ac3972ba65e7310a7049f3c6e3aeed2",
+  "outcomes": [
+    {
+      "index": 166,
+      "sha": "442fd61eabf4783c60ea29b17d1a3aaaaee2ca21",
+      "subject": "feat: 修复剩余 typecheck 错误，迁移 TUI keymap/API，扩展 daemon lock 接口",
+      "patch": "current/0166-442fd61eabf4.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch docs/merge-upstream-log.md...\nerror: docs/merge-upstream-log.md: does not exist in index\nChecking patch packages/opencode/src/cli/cmd/tui/component/dialog-tool.tsx...\nerror: packages/opencode/src/cli/cmd/tui/component/dialog-tool.tsx: does not exist in index\nChecking patch packages/opencode/src/cli/cmd/tui/config/keybind.ts...\nerror: packages/opencode/src/cli/cmd/tui/config/keybind.ts: does not exist in index\nChecking patch packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx...\nerror: packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx: does not exist in index\nChecking patch packages/opencode/src/cli/cmd/tui/server-lock.ts...\nerror: packages/opencode/src/cli/cmd/tui/server-lock.ts: does not exist in index\nChecking patch packages/opencode/test/session/compaction.test.ts...\nHunk #1 succeeded at 202 (offset 5 lines).\nChecking patch packages/opencode/test/session/revert-compact.test.ts...\nerror: while searching for:\n          })\n          yield* revert.cleanup(yield* session.get(sid))\n\n          const stored = MessageV2.get({ sessionID: sid, messageID: a1.id })\n          const request = yield* usage.get({ sessionID: sid, requestID: u1.id })\n          const assistants = yield* usage.assistants({ sessionID: sid, requestID: u1.id })\n\n\nerror: patch failed: packages/opencode/test/session/revert-compact.test.ts:462\nerror: packages/opencode/test/session/revert-compact.test.ts: patch does not apply\nChecking patch packages/opencode/test/session/system.test.ts...\nerror: while searching for:\n            patchAll: () => Effect.die(\"unused\"),\n            patchUntracked: () => Effect.die(\"unused\"),\n            statUntracked: () => Effect.die(\"unused\"),\n          }),\n        ),\n        Layer.succeed(\n\nerror: patch failed: packages/opencode/test/session/system.test.ts:72\nerror: packages/opencode/test/session/system.test.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "f362e36c81f692100767d3cb7cd1bc5668ab77ca23fed44889be4e55f2af6915",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "1d927f9f05e57f77c55fcd514215d4db4a3571f6ae9fac30e0ba9e30baf7ac5a"
+  },
+  "stoppedAt": 166,
+  "finishedAt": "2026-07-25T06:21:47.973Z",
+  "sourceRepoHeadAfter": "71afbee8f47061588f6e1db98aa0f2d0f5634b22",
+  "sourceRepoFingerprintAfter": "318ec9714c59a495fa32171a3af7a31b25b41436e79b7d48596fdddcf56d86b3",
+  "targetRepoFingerprintAfter": "90f1a7666f7f20fc65ddcd5ad93df5c42ac3972ba65e7310a7049f3c6e3aeed2",
+  "retainedStates": [
+    "0165-2e65029d4e34",
+    "0164-970ee408ae8c",
+    "0161-7508670afb77",
+    "0160-589d2624d7cc"
+  ]
+}

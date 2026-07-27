@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-25T15:15:38.337Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 174,
+  "passed": 174,
+  "reusedPrefix": 174,
+  "baseState": "0174-57eecce76b03",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 174,
+  "sourceRepoHeadBefore": "11f9877b348f36f52a35e752bfc26a49f909aa8d",
+  "sourceRepoFingerprintBefore": "3a8b610ec064aeb203e2dff6005eb318ec498120920a2e5a2e3e6c6ea21a18d9",
+  "targetRepoFingerprintBefore": "10137fbac1c72a44bc146a7044ccbed722b0d45b15db02724d9e08ce4a6cfab3",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0174-57eecce76b03",
+  "retainedStates": [
+    "0174-57eecce76b03",
+    "0173-59aeb3d239f3",
+    "0172-595b0e8f3ede",
+    "0171-49650e2f95ff"
+  ],
+  "test": {
+    "index": 174,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/cli/cmd/stats.ts(12,3): error TS2305: Module '\"../format\"' has no exported member 'renderCharts'.\nsrc/cli/cmd/stats.ts(13,3): error TS2305: Module '\"../format\"' has no exported member 'renderCosts'.\nsrc/cli/cmd/stats.ts(14,3): error TS2305: Module '\"../format\"' has no exported member 'renderDashboard'.\nsrc/cli/cmd/stats.ts(15,3): error TS2305: Module '\"../format\"' has no exported member 'renderHeatmapPage'.\nsrc/cli/cmd/stats.ts(16,3): error TS2305: Module '\"../format\"' has no exported member 'renderModels'.\nsrc/cli/cmd/stats.ts(17,3): error TS2305: Module '\"../format\"' has no exported member 'renderOverview'.\nsrc/cli/cmd/stats.ts(18,3): error TS2305: Module '\"../format\"' has no exported member 'renderProviders'.\nsrc/cli/cmd/stats.ts(19,3): error TS2305: Module '\"../format\"' has no exported member 'renderSessions'.\nsrc/cli/cmd/stats.ts(20,3): error TS2305: Module '\"../format\"' has no exported member 'renderTimeline'.\nsrc/cli/cmd/stats.ts(21,3): error TS2305: Module '\"../format\"' has no exported member 'renderTokens'.\nsrc/cli/cmd/stats.ts(22,8): error TS2305: Module '\"../format\"' has no exported member 'ColorMode'.\nsrc/cli/cmd/stats.ts(23,8): error TS2305: Module '\"../format\"' has no exported member 'StatsRenderOptions'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-25T15:16:14.325Z",
+  "sourceRepoHeadAfter": "69fb3d7d8d72ad76020c0e4b236a8106caec80a6",
+  "sourceRepoFingerprintAfter": "aeee94424525bbdc97d9d59531f6ba1e5ce7dc3970611e44a3f06cc8b7493311",
+  "targetRepoFingerprintAfter": "10137fbac1c72a44bc146a7044ccbed722b0d45b15db02724d9e08ce4a6cfab3",
+  "integrityFailure": "source repository changed during dry-run"
+}

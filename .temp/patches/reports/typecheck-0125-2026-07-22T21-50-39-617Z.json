@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-22T21:50:39.617Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 125,
+  "passed": 125,
+  "reusedPrefix": 125,
+  "baseState": "0125-0cd54998e45f",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 125,
+  "sourceRepoHeadBefore": "76af8d16b1ba80f2a433315d0dd22327ef9ffbd1",
+  "sourceRepoFingerprintBefore": "ab79257f3cf53f5a276c812acfb3989ddbc95068c39c5293a0c46c3fbed6a8b5",
+  "targetRepoFingerprintBefore": "bbc05fe9195ab721da26f31c14adbcc562b69b7536fa16f3fc24d350501768a3",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0125-0cd54998e45f",
+  "retainedStates": [
+    "0125-0cd54998e45f",
+    "0122-1ca386e353ce",
+    "0121-fdb0447556ad",
+    "0120-ca04b07955c0",
+    "0116-9ab94ccbe257"
+  ],
+  "test": {
+    "index": 125,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "5dcc5a1276df4784155f73c4f623198d7bb5c9171c743afacedcbfe90cc64ea1",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "failed",
+        "stdout": "../tui/src/routes/session/subagent-footer.tsx(97,40): error TS2304: Cannot find name 'usage'.\n../tui/src/routes/session/subagent-footer.tsx(132,25): error TS2304: Cannot find name 'usage'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-22T21:50:45.212Z",
+  "sourceRepoHeadAfter": "76af8d16b1ba80f2a433315d0dd22327ef9ffbd1",
+  "sourceRepoFingerprintAfter": "ab79257f3cf53f5a276c812acfb3989ddbc95068c39c5293a0c46c3fbed6a8b5",
+  "targetRepoFingerprintAfter": "bbc05fe9195ab721da26f31c14adbcc562b69b7536fa16f3fc24d350501768a3"
+}

@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-25T22:32:34.027Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 185,
+  "passed": 185,
+  "reusedPrefix": 185,
+  "baseState": "0185-a505b9721c87",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 185,
+  "sourceRepoHeadBefore": "8356c6fc1ed45de48160036d00a7a179641999a1",
+  "sourceRepoFingerprintBefore": "5aaa57fef264b0cae1e759f7d1a032a45674c9c688c40e5921eacdf2bfa9661d",
+  "targetRepoFingerprintBefore": "a1958fa06b86c8cc26ccd267250885e60b1c472552a1d55ac35723f5d92e4b1e",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0185-a505b9721c87",
+  "retainedStates": [
+    "0185-a505b9721c87",
+    "0180-201e910402a2",
+    "0175-f0a47a144866",
+    "0174-57eecce76b03",
+    "0173-59aeb3d239f3"
+  ],
+  "test": {
+    "index": 185,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "failed",
+        "stdout": "../tui/src/routes/session/index.tsx(2,1): error TS1003: Identifier expected.\n../tui/src/routes/session/index.tsx(2,8): error TS1005: ',' expected.\n../tui/src/routes/session/index.tsx(2,62): error TS1005: ';' expected.\n../tui/src/routes/session/index.tsx(2,67): error TS1127: Invalid character.\n../tui/src/routes/session/index.tsx(2,79): error TS1002: Unterminated string literal.\n../tui/src/routes/session/index.tsx(35,1): error TS1109: Expression expected.\n../tui/src/routes/session/index.tsx(35,3): error TS1434: Unexpected keyword or identifier.\n../tui/src/routes/session/index.tsx(326,9): error TS1389: 'const' is not allowed as a variable declaration name.\n../tui/src/routes/session/sidebar.tsx(2,39): error TS1127: Invalid character.\n../tui/src/routes/session/sidebar.tsx(2,51): error TS1002: Unterminated string literal.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-25T22:32:37.121Z",
+  "sourceRepoHeadAfter": "8356c6fc1ed45de48160036d00a7a179641999a1",
+  "sourceRepoFingerprintAfter": "5aaa57fef264b0cae1e759f7d1a032a45674c9c688c40e5921eacdf2bfa9661d",
+  "targetRepoFingerprintAfter": "a1958fa06b86c8cc26ccd267250885e60b1c472552a1d55ac35723f5d92e4b1e"
+}

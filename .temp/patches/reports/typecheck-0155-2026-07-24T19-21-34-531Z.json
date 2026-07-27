@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-24T19:21:34.531Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 155,
+  "passed": 155,
+  "reusedPrefix": 155,
+  "baseState": "0155-69f32338dd55",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 155,
+  "sourceRepoHeadBefore": "99efce8597bfb06cb80124386b4a035bf688dcca",
+  "sourceRepoFingerprintBefore": "78f5ed74ea5858354aba09bfae56168d4ca892af65eb51d35799639b2869759e",
+  "targetRepoFingerprintBefore": "b78d4b74c045a7fa2faba19dfd1aee371df9b58b22bed7f90b009f21d3b38017",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0155-69f32338dd55",
+  "retainedStates": [
+    "0155-69f32338dd55"
+  ],
+  "test": {
+    "index": 155,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "99a4e0b2b1865cdd3accb71ef57d8f3e8ca0b93415c8e3c4a97d058370484920",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "failed",
+        "stdout": "../tui/src/component/prompt/interrupt.ts(17,1): error TS1005: '}' expected.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-24T19:21:36.810Z",
+  "sourceRepoHeadAfter": "99efce8597bfb06cb80124386b4a035bf688dcca",
+  "sourceRepoFingerprintAfter": "78f5ed74ea5858354aba09bfae56168d4ca892af65eb51d35799639b2869759e",
+  "targetRepoFingerprintAfter": "b78d4b74c045a7fa2faba19dfd1aee371df9b58b22bed7f90b009f21d3b38017"
+}

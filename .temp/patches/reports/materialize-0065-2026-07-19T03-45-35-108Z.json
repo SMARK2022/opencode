@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-19T03:45:35.108Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 65,
+  "passed": 60,
+  "reusedPrefix": 60,
+  "baseState": "0060-2e51523e5589",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 65,
+  "sourceRepoHeadBefore": "43f17817d5be998527e3bad6346762209dfb61f9",
+  "sourceRepoFingerprintBefore": "88f23705c00e8aa00fade360079621448fadcbe31e3cab3bd44ebdcf1fe3a25c",
+  "targetRepoFingerprintBefore": "0925e3efe8ee23d4b73ee87611477e3caeb4bfc34a65c3cc7f67dac18f6a6848",
+  "outcomes": [
+    {
+      "index": 61,
+      "sha": "145dea7da6aed419a05aa676f107aa772871f3f9",
+      "subject": "fix: 优化可用缓冲区计算逻辑，确保更合理的默认值处理",
+      "patch": "current/0061-145dea7da6ae.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/session/overflow.ts...\nerror: while searching for:\nimport type { MessageV2 } from \"./message-v2\"\n\nconst COMPACTION_BUFFER = 20_000\n\nexport function usable(input: { cfg: Config.Info; model: Provider.Model }) {\n  const context = input.model.limit.context\n  if (context === 0) return 0\n\n  const reserved =\n    input.cfg.compaction?.reserved ?? Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model))\n  return input.model.limit.input\n    ? Math.max(0, input.model.limit.input - reserved)\n    : Math.max(0, context - ProviderTransform.maxOutputTokens(input.model))\n\nerror: patch failed: packages/opencode/src/session/overflow.ts:4\nerror: packages/opencode/src/session/overflow.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "79de878dfc6a37a8b8f246e138d171808ada9e3059da69c58846fabe26f10b5b",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "f4b640dd52c1cd254ddf224ccdf7e2db7340f4e65d0f9bddac7f0b4091817319"
+  },
+  "stoppedAt": 61,
+  "finishedAt": "2026-07-19T03:45:41.657Z",
+  "sourceRepoHeadAfter": "43f17817d5be998527e3bad6346762209dfb61f9",
+  "sourceRepoFingerprintAfter": "88f23705c00e8aa00fade360079621448fadcbe31e3cab3bd44ebdcf1fe3a25c",
+  "targetRepoFingerprintAfter": "0925e3efe8ee23d4b73ee87611477e3caeb4bfc34a65c3cc7f67dac18f6a6848",
+  "retainedStates": [
+    "0060-2e51523e5589",
+    "0055-0a0eb2e94edc",
+    "0050-f40e2d369552",
+    "0046-f13fd00acfde"
+  ]
+}

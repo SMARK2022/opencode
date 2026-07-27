@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-24T19:10:46.101Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 153,
+  "passed": 152,
+  "reusedPrefix": 152,
+  "baseState": "0152-a79689db16e7",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 153,
+  "sourceRepoHeadBefore": "99efce8597bfb06cb80124386b4a035bf688dcca",
+  "sourceRepoFingerprintBefore": "78f5ed74ea5858354aba09bfae56168d4ca892af65eb51d35799639b2869759e",
+  "targetRepoFingerprintBefore": "dca9941d093945ddec511d3647828855eade98db35ace409c192f62468945b19",
+  "outcomes": [
+    {
+      "index": 153,
+      "sha": "188cbee1b73a6df418b2f00251e7f68e83085c8c",
+      "subject": "feat: 一堆Bug修改 Enhance session handling and event publishing",
+      "patch": "current/0153-188cbee1b73a.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/effect/runner.ts...\nerror: while searching for:\n    Effect.gen(function* () {\n      if (shell.ready) yield* shell.ready.await.pipe(Effect.exit, Effect.asVoid)\n      yield* Deferred.succeed(shell.cancelled, undefined).pipe(Effect.asVoid)\n      yield* Fiber.interrupt(shell.fiber)\n    })\n\n  const ensureRunning = (work: Effect.Effect<A, E>) =>\n\nerror: patch failed: packages/opencode/src/effect/runner.ts:109\nerror: packages/opencode/src/effect/runner.ts: patch does not apply\nChecking patch packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts...\nerror: while searching for:\nimport { PermissionV1 } from \"@opencode-ai/core/v1/permission\"\nimport { Agent } from \"@/agent/agent\"\nimport { SessionV1 } from \"@opencode-ai/core/v1/session\"\nimport { EventV2Bridge } from \"@/event-v2-bridge\"\n\nerror: patch failed: packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts:1\nerror: packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts: patch does not apply\nChecking patch packages/opencode/src/session/processor.ts...\nerror: while searching for:\nimport { PermissionV1 } from \"@opencode-ai/core/v1/permission\"\nimport { Image } from \"@/image/image\"\nimport { SessionV1 } from \"@opencode-ai/core/v1/session\"\nimport { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Schema } from \"effect\"\nimport * as Stream from \"effect/Stream\"\nimport { Agent } from \"@/agent/agent\"\nimport { Config } from \"@/config/config\"\n\nerror: patch failed: packages/opencode/src/session/processor.ts:2\nerror: packages/opencode/src/session/processor.ts: patch does not apply\nChecking patch packages/opencode/src/session/prompt.ts...\nerror: while searching for:\nimport os from \"os\"\nimport { SessionID, MessageID, PartID } from \"./schema\"\nimport { MessageV2 } from \"./message-v2\"\nimport { SessionRevert } from \"./revert\"\nimport { Session } from \"./session\"\nimport { Agent } from \"../agent/agent\"\n\nerror: patch failed: packages/opencode/src/session/prompt.ts:5\nerror: packages/opencode/src/session/prompt.ts: patch does not apply\nChecking patch packages/opencode/src/session/revert.ts...\nerror: while searching for:\n        remove.push(msg)\n      }\n      for (const msg of remove) {\n        yield* sessions.removeMessage({ sessionID, messageID: msg.info.id })\n      }\n      if (session.revert.partID && target) {\n        const partID = session.revert.partID\n\nerror: patch failed: packages/opencode/src/session/revert.ts:117\nerror: packages/opencode/src/session/revert.ts: patch does not apply\nChecking patch packages/schema/src/v1/session.ts...\nerror: while searching for:\nexport * as SessionV1 from \"./session\"\n\nimport { Effect, Schema, Types } from \"effect\"\nimport { define, inventory } from \"../event\"\nimport { FileDiff } from \"../file-diff\"\nimport { Project } from \"../project\"\n\nerror: patch failed: packages/schema/src/v1/session.ts:1\nerror: packages/schema/src/v1/session.ts: patch does not apply\nChecking patch packages/tui/src/context/sync.tsx...\nerror: while searching for:\nimport { useArgs } from \"./args\"\nimport { batch, onMount } from \"solid-js\"\nimport path from \"path\"\nimport { useKV } from \"./kv\"\nimport { usePermission } from \"./permission\"\n\n\nerror: patch failed: packages/tui/src/context/sync.tsx:30\nerror: packages/tui/src/context/sync.tsx: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "821d13d5bc3e47a71c361a14474c5c7c1055bd16d6f71220130c748f4f3a7634",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "7c28f21d9bd9af5f270815344cb183ff54934e09fa94ed8bd5890504361dbbbb"
+  },
+  "stoppedAt": 153,
+  "finishedAt": "2026-07-24T19:10:53.907Z",
+  "sourceRepoHeadAfter": "99efce8597bfb06cb80124386b4a035bf688dcca",
+  "sourceRepoFingerprintAfter": "78f5ed74ea5858354aba09bfae56168d4ca892af65eb51d35799639b2869759e",
+  "targetRepoFingerprintAfter": "dca9941d093945ddec511d3647828855eade98db35ace409c192f62468945b19",
+  "retainedStates": [
+    "0152-a79689db16e7",
+    "0151-10f01867e270"
+  ]
+}

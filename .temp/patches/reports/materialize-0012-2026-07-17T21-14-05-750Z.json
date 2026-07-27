@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-17T21:14:05.750Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 12,
+  "passed": 12,
+  "reusedPrefix": 11,
+  "baseState": "0011-589bb20e905f",
+  "rebuild": false,
+  "appliedThisRun": 1,
+  "materializedIndex": 12,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "c7ce0ba93845e92f8bcec47df6b0de0422174f7c131e1fb1df32a6d1bc5a49e2",
+  "targetRepoFingerprintBefore": "5c233f0ace52f5625b4a8124323735e765551d388b1c65611a4a493f716b81ef",
+  "outcomes": [
+    {
+      "index": 12,
+      "sha": "b1bf9c5a50cef785d92db184c9bcf5ed2f98af17",
+      "subject": "feat(usage): 添加总输入输出统计，优化助手消息处理逻辑",
+      "patch": "current/0012-b1bf9c5a50ce.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/package.json",
+        "M\tpackages/opencode/script/build.ts",
+        "A\tpackages/opencode/script/version-env.ts",
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "M\tpackages/opencode/src/session/processor.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx",
+        "M\tpackages/tui/src/util/signal.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "42640adfb79de89905ce54c449e6341411ea6f3d0803d04d7d823f5af1f0e05f",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "f92c22da914446b1a48324deb73ca0c356e368031a88fc8b753671769925f5ca"
+  },
+  "finishedAt": "2026-07-17T21:14:18.467Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "c7ce0ba93845e92f8bcec47df6b0de0422174f7c131e1fb1df32a6d1bc5a49e2",
+  "targetRepoFingerprintAfter": "5c233f0ace52f5625b4a8124323735e765551d388b1c65611a4a493f716b81ef",
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0012-b1bf9c5a50ce",
+  "retainedStates": [
+    "0012-b1bf9c5a50ce",
+    "0011-589bb20e905f",
+    "0010-fc6394523010"
+  ]
+}

@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-25T14:54:30.927Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 175,
+  "passed": 175,
+  "reusedPrefix": 175,
+  "baseState": "0175-f0a47a144866",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 175,
+  "sourceRepoHeadBefore": "71afbee8f47061588f6e1db98aa0f2d0f5634b22",
+  "sourceRepoFingerprintBefore": "5ecb6b14075b78fd6ea8634c78308cb27197c343dce86c5e109902a06e0888ca",
+  "targetRepoFingerprintBefore": "ec693b45c99a2a6e5dd6aff1a6f26cb89c8e711fdcd5cc76cfea9c47482eea15",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0175-f0a47a144866",
+  "retainedStates": [
+    "0175-f0a47a144866",
+    "0174-57eecce76b03",
+    "0173-59aeb3d239f3",
+    "0172-595b0e8f3ede",
+    "0171-49650e2f95ff"
+  ],
+  "test": {
+    "index": 175,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/cli/cmd/session.ts(153,15): error TS1161: Unterminated regular expression literal.\nsrc/cli/cmd/session.ts(154,9): error TS1005: ',' expected.\nsrc/cli/cmd/session.ts(296,15): error TS1161: Unterminated regular expression literal.\nsrc/cli/cmd/session.ts(297,3): error TS1005: ',' expected.\nsrc/cli/cmd/session.ts(299,3): error TS1005: ',' expected.\nsrc/cli/cmd/session.ts(302,3): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(184,27): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(184,28): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(184,47): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(184,48): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(184,62): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(184,72): error TS1005: ';' expected.\nsrc/cli/cmd/stats-charts.ts(188,27): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(188,28): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(188,45): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(188,46): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(188,60): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(188,61): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(188,64): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(191,27): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(191,28): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(191,45): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(191,46): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(191,60): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(191,61): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(191,69): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(191,77): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(194,27): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(194,28): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(194,45): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(194,46): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(194,60): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(194,61): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(222,21): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(222,24): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(222,28): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(222,31): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(222,43): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(222,46): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(222,53): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(223,5): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(224,3): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(227,21): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(227,24): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(227,28): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(227,31): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(227,46): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(227,50): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(227,54): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(228,3): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(230,3): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(441,10): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(441,12): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(441,15): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(441,19): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(441,22): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(441,27): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(441,34): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(444,10): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(444,12): error TS1134: Variable declaration expected.\nsrc/cli/cmd/stats-charts.ts(445,9): error TS1005: ';' expected.\nsrc/cli/cmd/stats-charts.ts(445,11): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(445,12): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(445,14): error TS1435: Unknown keyword or identifier. Did you mean 'let'?\nsrc/cli/cmd/stats-charts.ts(445,18): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(445,18): error TS1128: Declaration or statement expected.\nsrc/cli/cmd/stats-charts.ts(445,19): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(445,33): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(445,34): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(865,30): error TS1161: Unterminated regular expression literal.\nsrc/cli/cmd/stats-charts.ts(866,5): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(867,3): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(870,3): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(1275,29): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(1275,30): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(1275,37): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(1275,38): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(1275,52): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(1275,53): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(1275,61): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(1275,69): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(1278,29): error TS1161: Unterminated regular expression literal.\nsrc/cli/cmd/stats-charts.ts(1281,62): error TS1005: ';' expected.\nsrc/cli/cmd/stats-charts.ts(1281,66): error TS1005: ';' expected.\nsrc/cli/cmd/stats-charts.ts(1287,29): error TS1161: Unterminated regular expression literal.\nsrc/cli/cmd/stats-charts.ts(1290,14): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(1290,15): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(1290,21): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(1290,22): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(1290,36): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(1290,37): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(1293,14): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(1293,15): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(1293,21): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(1293,22): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-charts.ts(1293,36): error TS1127: Invalid character.\nsrc/cli/cmd/stats-charts.ts(1293,37): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(418,16): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(418,19): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(418,22): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(418,25): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(418,39): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(418,46): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(419,3): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(422,16): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(422,19): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(422,25): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(422,28): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(422,42): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(422,45): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(422,54): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(423,5): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(426,16): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(426,19): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(426,24): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(426,27): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(426,41): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(426,44): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(427,5): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(430,16): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(430,19): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(430,25): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(430,28): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(430,42): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(430,50): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(431,5): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(445,23): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(445,24): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(445,44): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(445,45): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(445,61): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(445,62): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(445,65): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(448,23): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(448,24): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(448,44): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(448,45): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(448,61): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(448,62): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(448,64): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(451,23): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(451,24): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(451,44): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(451,45): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(451,61): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(451,62): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(454,23): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(454,24): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(454,44): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(454,45): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(454,61): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(457,23): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(457,24): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(457,44): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(457,45): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(457,61): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(460,23): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(460,24): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(460,44): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(460,45): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(460,61): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(460,62): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats-insights.ts(463,27): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(463,30): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(463,48): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(463,51): error TS1005: ',' expected.\nsrc/cli/cmd/stats-insights.ts(463,65): error TS1127: Invalid character.\nsrc/cli/cmd/stats-insights.ts(464,7): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(500,10): error TS1127: Invalid character.\nsrc/cli/cmd/stats-render.ts(500,13): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(500,20): error TS1127: Invalid character.\nsrc/cli/cmd/stats-render.ts(500,23): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(500,35): error TS1127: Invalid character.\nsrc/cli/cmd/stats-render.ts(500,55): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(501,3): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(503,10): error TS1127: Invalid character.\nsrc/cli/cmd/stats-render.ts(503,13): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(503,18): error TS1127: Invalid character.\nsrc/cli/cmd/stats-render.ts(503,21): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(503,33): error TS1127: Invalid character.\nsrc/cli/cmd/stats-render.ts(503,37): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(503,49): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(504,3): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(589,13): error TS1127: Invalid character.\nsrc/cli/cmd/stats-render.ts(589,16): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(589,22): error TS1127: Invalid character.\nsrc/cli/cmd/stats-render.ts(589,25): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(589,30): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(589,37): error TS1127: Invalid character.\nsrc/cli/cmd/stats-render.ts(589,45): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(590,9): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(590,16): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(591,15): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(592,14): error TS1005: ',' expected.\nsrc/cli/cmd/stats-render.ts(593,7): error TS1135: Argument expression expected.\nsrc/cli/cmd/stats-render.ts(593,8): error TS1128: Declaration or statement expected.\nsrc/cli/cmd/stats-render.ts(593,9): error TS1128: Declaration or statement expected.\nsrc/cli/cmd/stats-render.ts(597,7): error TS1109: Expression expected.\nsrc/cli/cmd/stats-render.ts(598,5): error TS1109: Expression expected.\nsrc/cli/cmd/stats-render.ts(598,6): error TS1128: Declaration or statement expected.\nsrc/cli/cmd/stats-render.ts(600,3): error TS1109: Expression expected.\nsrc/cli/cmd/stats-render.ts(601,1): error TS1128: Declaration or statement expected.\nsrc/cli/cmd/stats.ts(92,13): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(92,14): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats.ts(92,16): error TS1435: Unknown keyword or identifier. Did you mean 'with BaseOptions'?\nsrc/cli/cmd/stats.ts(92,31): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(92,31): error TS1128: Declaration or statement expected.\nsrc/cli/cmd/stats.ts(92,32): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats.ts(92,39): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(92,40): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats.ts(112,17): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(112,18): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats.ts(112,20): error TS1435: Unknown keyword or identifier. Did you mean 'with DetailOptions'?\nsrc/cli/cmd/stats.ts(112,37): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(112,37): error TS1128: Declaration or statement expected.\nsrc/cli/cmd/stats.ts(112,38): error TS1434: Unexpected keyword or identifier.\nsrc/cli/cmd/stats.ts(112,45): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(256,15): error TS1161: Unterminated regular expression literal.\nsrc/cli/cmd/stats.ts(258,15): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(258,18): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(258,39): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(258,42): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(258,47): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(258,50): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(258,57): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(259,9): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(259,17): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(260,13): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(261,7): error TS1135: Argument expression expected.\nsrc/cli/cmd/stats.ts(269,21): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(281,1): error TS1109: Expression expected.\nsrc/cli/cmd/stats.ts(281,2): error TS1128: Declaration or statement expected.\nsrc/cli/cmd/stats.ts(368,9): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(368,15): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(368,18): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(368,30): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(368,33): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(368,38): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(368,42): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(368,49): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(368,56): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(369,7): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(375,15): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(375,18): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(375,30): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(375,33): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(375,38): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(382,15): error TS1161: Unterminated regular expression literal.\nsrc/cli/cmd/stats.ts(384,15): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(384,18): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(384,30): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(384,33): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(384,38): error TS1127: Invalid character.\nsrc/cli/cmd/stats.ts(384,42): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(384,46): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(385,9): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(385,17): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(386,13): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(387,7): error TS1135: Argument expression expected.\nsrc/cli/cmd/stats.ts(387,8): error TS1128: Declaration or statement expected.\nsrc/cli/cmd/stats.ts(388,7): error TS1128: Declaration or statement expected.\nsrc/cli/cmd/stats.ts(407,10): error TS1005: ';' expected.\nsrc/cli/cmd/stats.ts(427,1): error TS1109: Expression expected.\nsrc/cli/cmd/stats.ts(427,2): error TS1128: Declaration or statement expected.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-25T14:54:59.215Z",
+  "sourceRepoHeadAfter": "71afbee8f47061588f6e1db98aa0f2d0f5634b22",
+  "sourceRepoFingerprintAfter": "5ecb6b14075b78fd6ea8634c78308cb27197c343dce86c5e109902a06e0888ca",
+  "targetRepoFingerprintAfter": "ec693b45c99a2a6e5dd6aff1a6f26cb89c8e711fdcd5cc76cfea9c47482eea15"
+}

@@ -1,0 +1,160 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-23T10:57:44.295Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 135,
+  "passed": 135,
+  "reusedPrefix": 135,
+  "baseState": "0135-3bed2cfd5377",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 135,
+  "sourceRepoHeadBefore": "76af8d16b1ba80f2a433315d0dd22327ef9ffbd1",
+  "sourceRepoFingerprintBefore": "fe956dc5ad324997eb95211c790ae6c701afeca69ce601d3bb9dadb21c1d91d1",
+  "targetRepoFingerprintBefore": "32a0b7640f47f36b90058255536c9f06359cf9808171ec95c221d35b7c5bc89b",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0135-3bed2cfd5377",
+  "retainedStates": [
+    "0135-3bed2cfd5377",
+    "0134-a5ea69d8ea80",
+    "0131-5baa17d8044d"
+  ],
+  "test": {
+    "index": 135,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "b1965193fab202bc94ddf89ee12a7024f63620bdf86156961857675dddb79977",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/server/routes/instance/httpapi/handlers/session.ts(472,24): error TS2345: Argument of type '(ctx: { params: { sessionID: string & Brand<\"SessionID\">; }; }) => Effect<boolean, ApiNotFoundError, never>' is not assignable to parameter of type 'HandlerWithName<HttpApiEndpoint<\"abort\", \"POST\", \"/session/:sessionID/abort\", StringTree<Struct<{ sessionID: brand<String, \"SessionID\"> & { create: () => string & Brand<\"SessionID\">; descending: (id?: string | undefined) => string & Brand<...>; }; }>>, ... 7 more ..., Service> | ... 17 more ... | HttpApiEndpoint<......'.\n  Type 'Effect<boolean, ApiNotFoundError, never>' is not assignable to type 'Effect<boolean | HttpServerResponse, BadRequest | InvalidRequestError | Unauthorized, never>'.\n    Type 'ApiNotFoundError' is not assignable to type 'BadRequest | InvalidRequestError | Unauthorized'.\n      Type 'ApiNotFoundError' is missing the following properties from type 'Unauthorized': [HttpServerRespondable.symbol], _tag\ntest/tool/edit.test.ts(574,5): error TS2593: Cannot find name 'test'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha` and then add 'jest' or 'mocha' to the types field in your tsconfig.\ntest/tool/edit.test.ts(575,35): error TS2304: Cannot find name 'tmpdir'.\ntest/tool/edit.test.ts(576,23): error TS2304: Cannot find name 'makeCtx'.\ntest/tool/edit.test.ts(579,26): error TS2304: Cannot find name 'initEdit'.\ntest/tool/edit.test.ts(590,14): error TS18046: 'result' is of type 'unknown'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-23T10:58:04.018Z",
+  "sourceRepoHeadAfter": "76af8d16b1ba80f2a433315d0dd22327ef9ffbd1",
+  "sourceRepoFingerprintAfter": "fe956dc5ad324997eb95211c790ae6c701afeca69ce601d3bb9dadb21c1d91d1",
+  "targetRepoFingerprintAfter": "32a0b7640f47f36b90058255536c9f06359cf9808171ec95c221d35b7c5bc89b"
+}

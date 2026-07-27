@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-19T16:10:31.637Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 71,
+  "passed": 71,
+  "reusedPrefix": 71,
+  "baseState": "0071-d95dc89b856d",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 71,
+  "sourceRepoHeadBefore": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintBefore": "25d7ed8150a8c2044e91d840570b9b7cf7d4134f6b0ba7cae58439a48b4b98cc",
+  "targetRepoFingerprintBefore": "29adcda16bee7bda83f333d8c3bb91d4ac80a209af3afd89ccb21502e5530c80",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0071-d95dc89b856d",
+  "retainedStates": [
+    "0071-d95dc89b856d",
+    "0070-efae0086f406",
+    "0065-8304c6752cef",
+    "0061-145dea7da6ae",
+    "0060-2e51523e5589"
+  ],
+  "test": {
+    "index": 71,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "550ca932999a73cc76626eec6fe28a2bc7dcdcb6764cb494d32aee7bff50c9ea",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/session/prompt.ts(147,9): error TS2322: Type '(sessionID: string & Brand<\"SessionID\">) => Effect.Effect<void, NotFoundError, never>' is not assignable to type '(sessionID: string & Brand<\"SessionID\">) => Effect<void, never, never>'.\n  Type 'Effect<void, NotFoundError, never>' is not assignable to type 'Effect<void, never, never>'.\n    Type 'NotFoundError' is not assignable to type 'never'.\nsrc/session/prompt.ts(171,41): error TS2339: Property 'AbortedError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\nsrc/session/prompt.ts(193,33): error TS2694: Namespace '\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\"' has no exported member 'ToolPart'.\nsrc/session/prompt.ts(1299,15): error TS2322: Type '{ cancel: (sessionID: string & Brand<\"SessionID\">) => Effect.Effect<void, NotFoundError, never>; resolvePromptParts: (template: string) => Effect.Effect<({ ...; } | ... 2 more ... | { ...; })[], never, never>; prompt: (input: { ...; }) => Effect.Effect<...>; }' is not assignable to type 'TaskPromptOps'.\n  The types returned by 'cancel(...)' are incompatible between these types.\n    Type 'Effect<void, NotFoundError, never>' is not assignable to type 'Effect<void, never, never>'.\n      Type 'NotFoundError' is not assignable to type 'never'.\nsrc/session/prompt.ts(1595,7): error TS2322: Type '(sessionID: string & Brand<\"SessionID\">) => Effect<void, NotFoundError, never>' is not assignable to type '(sessionID: string & Brand<\"SessionID\">) => Effect<void, never, never>'.\n  Type 'Effect<void, NotFoundError, never>' is not assignable to type 'Effect<void, never, never>'.\n    Type 'NotFoundError' is not assignable to type 'never'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-19T16:11:11.277Z",
+  "sourceRepoHeadAfter": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintAfter": "25d7ed8150a8c2044e91d840570b9b7cf7d4134f6b0ba7cae58439a48b4b98cc",
+  "targetRepoFingerprintAfter": "29adcda16bee7bda83f333d8c3bb91d4ac80a209af3afd89ccb21502e5530c80"
+}

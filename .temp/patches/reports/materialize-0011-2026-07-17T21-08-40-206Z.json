@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-17T21:08:40.206Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 11,
+  "passed": 11,
+  "reusedPrefix": 10,
+  "baseState": "0010-fc6394523010",
+  "rebuild": false,
+  "appliedThisRun": 1,
+  "materializedIndex": 11,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "c7ce0ba93845e92f8bcec47df6b0de0422174f7c131e1fb1df32a6d1bc5a49e2",
+  "targetRepoFingerprintBefore": "4f8c7540ad641e3c5301d95357902c91187759f51dd305a5356d5f33f645c8e4",
+  "outcomes": [
+    {
+      "index": 11,
+      "sha": "589bb20e905fa4a8246af5394283a68e226ed61a",
+      "subject": "feat(version): 优化版本环境加载逻辑，支持通过--version参数设置OPENCODE_VERSION",
+      "patch": "current/0011-589bb20e905f.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/package.json",
+        "M\tpackages/opencode/script/build.ts",
+        "A\tpackages/opencode/script/version-env.ts",
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "M\tpackages/opencode/src/session/processor.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx",
+        "M\tpackages/tui/src/util/signal.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "42640adfb79de89905ce54c449e6341411ea6f3d0803d04d7d823f5af1f0e05f",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "f95987fc5cfad89834bcb4bc115c14254e3526ecb610e2ad619337b26d8d0016"
+  },
+  "finishedAt": "2026-07-17T21:08:48.343Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "c7ce0ba93845e92f8bcec47df6b0de0422174f7c131e1fb1df32a6d1bc5a49e2",
+  "targetRepoFingerprintAfter": "4f8c7540ad641e3c5301d95357902c91187759f51dd305a5356d5f33f645c8e4",
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0011-589bb20e905f",
+  "retainedStates": [
+    "0011-589bb20e905f",
+    "0010-fc6394523010"
+  ]
+}

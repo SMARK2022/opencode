@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-18T22:15:29.229Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 45,
+  "passed": 42,
+  "reusedPrefix": 42,
+  "baseState": "0042-16656033a664",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 45,
+  "sourceRepoHeadBefore": "fe6154a3c7b4b79b8f388f738e801f3f226de6a9",
+  "sourceRepoFingerprintBefore": "12c4178fbb644da9587808b11b814b0f914a54eaa6d7b17ae125658218f5bdc7",
+  "targetRepoFingerprintBefore": "93b562137a2c11a84c64e254a8d2e72689882b1ac83187cd2c0bd97e142157c0",
+  "outcomes": [
+    {
+      "index": 43,
+      "sha": "630dd666663c712e3648751860f5372e192750c0",
+      "subject": "feat: 增加数据集鲁棒性、自动重试机制添加 OPENCODE_DB_DURABLE 标志，更新数据库配置和工具输入缓冲逻辑",
+      "patch": "current/0043-630dd666663c.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/core/src/flag/flag.ts...\nChecking patch packages/opencode/src/cli/tui/worker.ts...\nerror: while searching for:\nimport { Heap } from \"@/cli/heap\"\nimport { AppRuntime } from \"@/effect/app-runtime\"\nimport { ensureProcessMetadata } from \"@opencode-ai/core/util/opencode-process\"\n\nensureProcessMetadata(\"worker\")\n\n\nerror: patch failed: packages/opencode/src/cli/tui/worker.ts:12\nerror: packages/opencode/src/cli/tui/worker.ts: patch does not apply\nChecking patch packages/opencode/src/session/processor.ts...\nHunk #1 succeeded at 67 (offset 1 line).\nHunk #2 succeeded at 107 (offset -10 lines).\nerror: while searching for:\n            return\n\n          case \"tool-input-delta\":\n            yield* updateToolCall(value.id, (match) => {\n              if (match.state.status !== \"pending\") return match\n              return {\n                ...match,\n                state: {\n                  ...match.state,\n                  raw: match.state.raw + value.delta,\n                },\n              }\n            })\n            return\n\n          case \"tool-input-end\":\n            return\n\n          case \"tool-call\": {\n            if (ctx.assistantMessage.summary) {\n              throw new Error(`Tool call not allowed while generating summary: ${value.toolName}`)\n            }\n            yield* updateToolCall(value.toolCallId, (match) => ({\n              ...match,\n              tool: value.toolName,\n\nerror: patch failed: packages/opencode/src/session/processor.ts:280\nerror: packages/opencode/src/session/processor.ts: patch does not apply\nChecking patch packages/opencode/src/session/retry.ts...\nerror: while searching for:\n    const status = error.data.statusCode\n    // 5xx errors are transient server failures and should always be retried,\n    // even when the provider SDK doesn't explicitly mark them as retryable.\n    if (!error.data.isRetryable && !(status !== undefined && status >= 500)) return undefined\n    if (error.data.responseBody?.includes(\"FreeUsageLimitError\")) return GO_UPSELL_MESSAGE\n    return error.data.message.includes(\"Overloaded\") ? \"Provider is overloaded\" : error.data.message\n  }\n\nerror: patch failed: packages/opencode/src/session/retry.ts:58\nerror: packages/opencode/src/session/retry.ts: patch does not apply\nChecking patch packages/opencode/src/storage/db.ts...\nerror: packages/opencode/src/storage/db.ts: does not exist in index\nChecking patch packages/opencode/src/tool/task.txt...\nerror: while searching for:\n- Trust completed agent results by default, but inspect changed files before integrating or reporting final success.\n- Reuse task_id only when continuing the same subagent context is useful.\n- The agent result is returned to you, not directly to the user; summarize relevant results yourself.\nExample usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):\n\n<example_agent_descriptions>\n\nerror: patch failed: packages/opencode/src/tool/task.txt:28\nerror: packages/opencode/src/tool/task.txt: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "6865f8b38051c0d47b3d240888cd94713c78177f0b29a88eddcdd9cab2219387",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "32a4cd4e319d99d294238d3031f1ba11ca65fe72dd00f49f2056a034c0f01bf8"
+  },
+  "stoppedAt": 43,
+  "finishedAt": "2026-07-18T22:15:38.054Z",
+  "sourceRepoHeadAfter": "fe6154a3c7b4b79b8f388f738e801f3f226de6a9",
+  "sourceRepoFingerprintAfter": "12c4178fbb644da9587808b11b814b0f914a54eaa6d7b17ae125658218f5bdc7",
+  "targetRepoFingerprintAfter": "93b562137a2c11a84c64e254a8d2e72689882b1ac83187cd2c0bd97e142157c0",
+  "retainedStates": [
+    "0042-16656033a664",
+    "0041-990ddcb47d35",
+    "0040-8f6444e154d0",
+    "0038-d870520f1284",
+    "0037-20058ecde936"
+  ]
+}

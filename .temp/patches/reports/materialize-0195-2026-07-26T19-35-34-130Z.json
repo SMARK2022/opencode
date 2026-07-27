@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-26T19:35:34.130Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 195,
+  "passed": 191,
+  "reusedPrefix": 191,
+  "baseState": "0191-a8478caff8aa",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 195,
+  "sourceRepoHeadBefore": "7c114657bf8d46c4eff60145ee78dce8ea2cdc36",
+  "sourceRepoFingerprintBefore": "f16b64112bae841dd2c081c32cbb9c74ef42d4f1aec7cb45ca9579fb8342299d",
+  "targetRepoFingerprintBefore": "1ea49e742d1f7df3ef19c9a93bbe4a9eb6aaa36098bc9d8ed8a079b512916840",
+  "outcomes": [
+    {
+      "index": 192,
+      "sha": "b47dd66b83c5f3539d727ed5ac2a45141ca94835",
+      "subject": "fix: 修复重连与提交失败恢复边界",
+      "patch": "current/0192-b47dd66b83c5.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "unknown",
+      "stdout": "",
+      "stderr": "error: corrupt patch at line 224\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "88b97a4cb076eb0290b159811f4c80cc080aa2f852614b9ea46109f1627a2860",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "2b3093933ad35b74b3dade960e18e0a52cb9b4f64c07e329719fd00c897e73ee"
+  },
+  "stoppedAt": 192,
+  "finishedAt": "2026-07-26T19:35:46.665Z",
+  "sourceRepoHeadAfter": "7c114657bf8d46c4eff60145ee78dce8ea2cdc36",
+  "sourceRepoFingerprintAfter": "f16b64112bae841dd2c081c32cbb9c74ef42d4f1aec7cb45ca9579fb8342299d",
+  "targetRepoFingerprintAfter": "1ea49e742d1f7df3ef19c9a93bbe4a9eb6aaa36098bc9d8ed8a079b512916840",
+  "retainedStates": [
+    "0191-a8478caff8aa",
+    "0190-8d2352918cad",
+    "0185-a505b9721c87",
+    "0180-201e910402a2"
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-18T23:58:49.340Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 50,
+  "passed": 47,
+  "reusedPrefix": 47,
+  "baseState": "0047-e6094d52b0a6",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 50,
+  "sourceRepoHeadBefore": "43f17817d5be998527e3bad6346762209dfb61f9",
+  "sourceRepoFingerprintBefore": "88f23705c00e8aa00fade360079621448fadcbe31e3cab3bd44ebdcf1fe3a25c",
+  "targetRepoFingerprintBefore": "da35aec626cf11c6503699b6f7a64ab220dda670e51559cab2593f3cf0b583b1",
+  "outcomes": [
+    {
+      "index": 48,
+      "sha": "f9d2e647d8b25df9d5355d1b08d8303f19b39859",
+      "subject": "feat: 增强工具使用指导，添加 Git 命令安全协议和多工具使用建议",
+      "patch": "current/0048-f9d2e647d8b2.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/cli/cmd/tui/util/context-usage.ts...\nerror: packages/opencode/src/cli/cmd/tui/util/context-usage.ts: does not exist in index\nChecking patch packages/opencode/src/tool/bash.ts...\nerror: packages/opencode/src/tool/bash.ts: does not exist in index\nChecking patch packages/opencode/src/tool/bash.txt...\nerror: packages/opencode/src/tool/bash.txt: does not exist in index\nChecking patch packages/opencode/src/tool/glob.txt...\nerror: while searching for:\n- Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\"\n- Returns matching file paths sorted by modification time\n- Use this tool when you need to find files by name patterns\n- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead\n- You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.\n\nerror: patch failed: packages/opencode/src/tool/glob.txt:2\nerror: packages/opencode/src/tool/glob.txt: patch does not apply\nChecking patch packages/opencode/src/tool/grep.txt...\nerror: while searching for:\n- Returns file paths and line numbers with at least one match sorted by modification time\n- Use this tool when you need to find files containing specific patterns\n- If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.\n- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead\n\nerror: patch failed: packages/opencode/src/tool/grep.txt:5\nerror: packages/opencode/src/tool/grep.txt: patch does not apply\nChecking patch packages/opencode/src/tool/task.txt...\nerror: while searching for:\nExample usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):\n\n<example_agent_descriptions>\n\"code-reviewer\": use this agent after you are done writing a significant piece of code\n\"greeting-responder\": use this agent when to respond to user greetings with a friendly joke\n</example_agent_description>\n\n<example>\nuser: \"Please write a function that checks if a number is prime\"\nassistant: Sure let me write a function that checks if a number is prime\nassistant: First let me use the Write tool to write a function that checks if a number is prime\nassistant: I'm going to use the Write tool to write the following code:\n<code>\nfunction isPrime(n) {\n  if (n <= 1) return false\n  for (let i = 2; i * i <= n; i++) {\n    if (n % i === 0) return false\n  }\n  return true\n}\n</code>\n<commentary>\nSince a significant piece of code was written and the task was completed, now use the code-reviewer agent to review the code\n</commentary>\nassistant: Now let me use the code-reviewer agent to review the code\nassistant: Uses the Task tool to launch the code-reviewer agent\n</example>\n\n<example>\nuser: \"Hello\"\n<commentary>\nSince the user is greeting, use the greeting-responder agent to respond with a friendly joke\n</commentary>\nassistant: \"I'm going to use the Task tool to launch the with the greeting-responder agent\"\n</example>\n\nerror: patch failed: packages/opencode/src/tool/task.txt:32\nerror: packages/opencode/src/tool/task.txt: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "d29971df806fa6ac225706bbafea91ae364dbc5be2cc8c424754becf7b77cd4f",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "ffef0e62ab921131f37ea611afb271f061dc82619793d473fef49721f1129845"
+  },
+  "stoppedAt": 48,
+  "finishedAt": "2026-07-18T23:58:55.759Z",
+  "sourceRepoHeadAfter": "43f17817d5be998527e3bad6346762209dfb61f9",
+  "sourceRepoFingerprintAfter": "88f23705c00e8aa00fade360079621448fadcbe31e3cab3bd44ebdcf1fe3a25c",
+  "targetRepoFingerprintAfter": "da35aec626cf11c6503699b6f7a64ab220dda670e51559cab2593f3cf0b583b1",
+  "retainedStates": [
+    "0047-e6094d52b0a6",
+    "0046-f13fd00acfde",
+    "0045-6380ed0b8d91",
+    "0043-630dd666663c",
+    "0042-16656033a664"
+  ]
+}

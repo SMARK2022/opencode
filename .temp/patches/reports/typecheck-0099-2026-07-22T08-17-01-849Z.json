@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-22T08:17:01.849Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 99,
+  "passed": 99,
+  "reusedPrefix": 99,
+  "baseState": "0099-707d679466ec",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 99,
+  "sourceRepoHeadBefore": "c60bc7f851e06da5c5156ceae2dfae664e84460d",
+  "sourceRepoFingerprintBefore": "b4a3804758624a463fe296ce54ce6eafced907b385bb9430af6459137c43aeaa",
+  "targetRepoFingerprintBefore": "47ce7aa04ccfa283a02dcd0521673f0ececfda6316fb2c774b53c546dd8d214d",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0099-707d679466ec",
+  "retainedStates": [
+    "0099-707d679466ec",
+    "0097-ace5c5841350",
+    "0096-254082aeca0d",
+    "0095-4dec9d15826f",
+    "0094-81efcbb1d8cb"
+  ],
+  "test": {
+    "index": 99,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "32d96724c1330e2d1872515bcd2f190d3562109327884c4e043d3722a05df575",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "test/session/revert-compact.test.ts(432,5): error TS2345: Argument of type 'Effect<void, NotFoundError | PlatformError, ChildProcessSpawner | Scope | Service | Service | Service>' is not assignable to parameter of type 'Body<void, NotFoundError | PlatformError, ChildProcessSpawner | Scope | Service | Service | Service>'.\n  Type 'import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/Effect\").Effect<void, import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-worksp...' is not assignable to type 'import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/Effect\").Effect<void, import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-worksp...'. Two different types with this name exist, but they are unrelated.\n    Type 'import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/unstable/process/ChildProcessSpawner\").ChildProcessSpawner | ... 4 more ... | import(\"/Users/sunbenteng/Project/opencode/thirdparty/o...' is not assignable to type 'import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/unstable/process/ChildProcessSpawner\").ChildProcessSpawner | ... 4 more ... | import(\"/Users/sunbenteng/Project/opencode/thirdparty/o...'. Two different types with this name exist, but they are unrelated.\n      Type 'Service' is not assignable to type 'ChildProcessSpawner | Scope | Service | Service | Service'.\n        Type 'import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/core/src/database/database\").Service' is not assignable to type 'import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/revert\").Service'.\n          Types of property 'Service' are incompatible.\n            Type 'import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/core/src/database/database\").Interface' is missing the following properties from type 'import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/revert\").Interface': revert, unrevert, cleanup\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-22T08:17:27.677Z",
+  "sourceRepoHeadAfter": "c60bc7f851e06da5c5156ceae2dfae664e84460d",
+  "sourceRepoFingerprintAfter": "b4a3804758624a463fe296ce54ce6eafced907b385bb9430af6459137c43aeaa",
+  "targetRepoFingerprintAfter": "47ce7aa04ccfa283a02dcd0521673f0ececfda6316fb2c774b53c546dd8d214d"
+}

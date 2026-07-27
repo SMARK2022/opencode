@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-25T07:26:30.990Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 168,
+  "passed": 167,
+  "reusedPrefix": 167,
+  "baseState": "0167-f2d3d0d44b8a",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 168,
+  "sourceRepoHeadBefore": "71afbee8f47061588f6e1db98aa0f2d0f5634b22",
+  "sourceRepoFingerprintBefore": "318ec9714c59a495fa32171a3af7a31b25b41436e79b7d48596fdddcf56d86b3",
+  "targetRepoFingerprintBefore": "10afd948530796b66b3dfec4013008e93f93a55d0107ca6812fc1ba5166272cb",
+  "outcomes": [
+    {
+      "index": 168,
+      "sha": "2c720138d3397839f61349a04ba4d9b5d0a43372",
+      "subject": "feat(provider): add support for custom HTTP headers and User-Agent handling",
+      "patch": "current/0168-2c720138d339.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "unknown",
+      "stdout": "",
+      "stderr": "error: corrupt patch at line 63\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "a41b38875aaed039e668b92b7edaeedc97fbfb2da48adb28a1bc9d1b01666a99",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "97b68daecda3c6423128a4a41a635c3f90d9d298a024fb409e964e9f7a14df1d"
+  },
+  "stoppedAt": 168,
+  "finishedAt": "2026-07-25T07:26:42.581Z",
+  "sourceRepoHeadAfter": "71afbee8f47061588f6e1db98aa0f2d0f5634b22",
+  "sourceRepoFingerprintAfter": "318ec9714c59a495fa32171a3af7a31b25b41436e79b7d48596fdddcf56d86b3",
+  "targetRepoFingerprintAfter": "10afd948530796b66b3dfec4013008e93f93a55d0107ca6812fc1ba5166272cb",
+  "retainedStates": [
+    "0167-f2d3d0d44b8a",
+    "0166-442fd61eabf4",
+    "0165-2e65029d4e34",
+    "0164-970ee408ae8c",
+    "0161-7508670afb77"
+  ]
+}

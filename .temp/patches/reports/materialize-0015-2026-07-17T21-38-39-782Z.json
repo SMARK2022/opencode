@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-17T21:38:39.782Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 15,
+  "passed": 15,
+  "reusedPrefix": 13,
+  "baseState": "0013-bbbf5f1dd94d",
+  "rebuild": false,
+  "appliedThisRun": 2,
+  "materializedIndex": 15,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "67310c01aed986ae732712ad1a5d8ee6fe96a58a596d410f73ce32d857a600fa",
+  "targetRepoFingerprintBefore": "ea24ae0a5f9ecaff5813e6aeb6bab35d8c29ce864dcce2afe7aebc2e9fd78ffb",
+  "outcomes": [
+    {
+      "index": 14,
+      "sha": "61bcd2aae67c27fd798e3b32f1e22d09f159bcba",
+      "subject": "feat(prompt): 优化请求助手的输入输出统计逻辑，确保在无助手消息时返回零值",
+      "patch": "current/0014-61bcd2aae67c.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/package.json",
+        "M\tpackages/opencode/script/build.ts",
+        "A\tpackages/opencode/script/version-env.ts",
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "A\tpackages/opencode/src/provider/claudecode.ts",
+        "M\tpackages/opencode/src/provider/provider.ts",
+        "M\tpackages/opencode/src/session/processor.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx",
+        "M\tpackages/tui/src/util/signal.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "index": 15,
+      "sha": "d302fa6f05a734b420714024b68f27bb14d82f6e",
+      "subject": "feat(provider): 更新claudecode提供者以支持动态鉴权模式，优化API密钥和基本URL配置",
+      "patch": "current/0015-d302fa6f05a7.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/package.json",
+        "M\tpackages/opencode/script/build.ts",
+        "A\tpackages/opencode/script/version-env.ts",
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "A\tpackages/opencode/src/provider/claudecode.ts",
+        "M\tpackages/opencode/src/provider/provider.ts",
+        "M\tpackages/opencode/src/session/processor.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx",
+        "M\tpackages/tui/src/util/signal.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "f535c43b0ae3179064d680536bbc4ac7ac32fcf08dfbab4962bbe3257aefdeb3",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "792c55a83b6371fa4dce0c0c1db7d88b8a5bcf68d3d651908124f8de4b2d745e"
+  },
+  "finishedAt": "2026-07-17T21:38:52.686Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "67310c01aed986ae732712ad1a5d8ee6fe96a58a596d410f73ce32d857a600fa",
+  "targetRepoFingerprintAfter": "ea24ae0a5f9ecaff5813e6aeb6bab35d8c29ce864dcce2afe7aebc2e9fd78ffb",
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0015-d302fa6f05a7",
+  "retainedStates": [
+    "0015-d302fa6f05a7",
+    "0013-bbbf5f1dd94d",
+    "0012-b1bf9c5a50ce",
+    "0011-589bb20e905f"
+  ]
+}

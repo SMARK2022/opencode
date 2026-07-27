@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-17T22:20:26.789Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 14,
+  "passed": 14,
+  "reusedPrefix": 12,
+  "baseState": "0012-b1bf9c5a50ce",
+  "rebuild": false,
+  "appliedThisRun": 2,
+  "materializedIndex": 14,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "ac486dbc9884405dc77ed8c5775f7ca106996b03e091d8a3a421bd305b10b840",
+  "targetRepoFingerprintBefore": "4471b50395d4b76715efb58ef01fe08c3af5eb2dc331ac8b072496ea5539a92a",
+  "outcomes": [
+    {
+      "index": 13,
+      "sha": "bbbf5f1dd94da64931b95ae8ee236f3509f7b486",
+      "subject": "feat(provider): 添加claudecode提供者支持，集成API密钥和基本URL配置",
+      "patch": "current/0013-bbbf5f1dd94d.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/package.json",
+        "M\tpackages/opencode/script/build.ts",
+        "A\tpackages/opencode/script/version-env.ts",
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "A\tpackages/opencode/src/provider/claudecode.ts",
+        "M\tpackages/opencode/src/provider/provider.ts",
+        "M\tpackages/opencode/src/session/processor.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx",
+        "M\tpackages/tui/src/util/signal.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/current/0013-bbbf5f1dd94d.patch:227: trailing whitespace.\n    \n/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/current/0013-bbbf5f1dd94d.patch:229: trailing whitespace.\n    // Wait, `baseUrl` in custom provider is passed to the SDK. \n/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/current/0013-bbbf5f1dd94d.patch:234: trailing whitespace.\n    \nwarning: 3 lines add whitespace errors.\n"
+    },
+    {
+      "index": 14,
+      "sha": "61bcd2aae67c27fd798e3b32f1e22d09f159bcba",
+      "subject": "feat(prompt): 优化请求助手的输入输出统计逻辑，确保在无助手消息时返回零值",
+      "patch": "current/0014-61bcd2aae67c.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/package.json",
+        "M\tpackages/opencode/script/build.ts",
+        "A\tpackages/opencode/script/version-env.ts",
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "A\tpackages/opencode/src/provider/claudecode.ts",
+        "M\tpackages/opencode/src/provider/provider.ts",
+        "M\tpackages/opencode/src/session/processor.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx",
+        "M\tpackages/tui/src/util/signal.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "42640adfb79de89905ce54c449e6341411ea6f3d0803d04d7d823f5af1f0e05f",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "d13de85f1721a2717da529f8362ae0e6766c42aeab3511bce2fb94a9c8f7577a"
+  },
+  "finishedAt": "2026-07-17T22:20:32.919Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "ac486dbc9884405dc77ed8c5775f7ca106996b03e091d8a3a421bd305b10b840",
+  "targetRepoFingerprintAfter": "4471b50395d4b76715efb58ef01fe08c3af5eb2dc331ac8b072496ea5539a92a",
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0014-61bcd2aae67c",
+  "retainedStates": [
+    "0014-61bcd2aae67c",
+    "0012-b1bf9c5a50ce"
+  ]
+}

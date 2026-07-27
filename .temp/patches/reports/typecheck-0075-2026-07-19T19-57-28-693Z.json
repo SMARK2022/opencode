@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-19T19:57:28.693Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 75,
+  "passed": 75,
+  "reusedPrefix": 75,
+  "baseState": "0075-4141d5e979ff",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 75,
+  "sourceRepoHeadBefore": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintBefore": "3f9ef262e91a83538f63e7ee698186231d294e544723b220786aae9d5660351e",
+  "targetRepoFingerprintBefore": "9b74a97646897af673e6ffc3726a65e464ad47dc9f7f7fb52c55dd1df3d65511",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0075-4141d5e979ff",
+  "retainedStates": [
+    "0075-4141d5e979ff",
+    "0074-4d55a2c0f4a3",
+    "0073-f75419bd78c5",
+    "0071-d95dc89b856d"
+  ],
+  "test": {
+    "index": 75,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "550ca932999a73cc76626eec6fe28a2bc7dcdcb6764cb494d32aee7bff50c9ea",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "failed",
+        "stdout": "../tui/src/util/context-usage.ts(789,11): error TS1005: ';' expected.\n../tui/src/util/context-usage.ts(789,23): error TS1011: An element access expression should take an argument.\n../tui/src/util/context-usage.ts(790,9): error TS1005: ';' expected.\n../tui/src/util/context-usage.ts(791,11): error TS1005: ';' expected.\n../tui/src/util/context-usage.ts(792,1): error TS1109: Expression expected.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-19T19:57:32.106Z",
+  "sourceRepoHeadAfter": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintAfter": "3f9ef262e91a83538f63e7ee698186231d294e544723b220786aae9d5660351e",
+  "targetRepoFingerprintAfter": "9b74a97646897af673e6ffc3726a65e464ad47dc9f7f7fb52c55dd1df3d65511"
+}

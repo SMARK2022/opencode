@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-23T21:51:33.762Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 145,
+  "passed": 140,
+  "reusedPrefix": 140,
+  "baseState": "0140-8acb3fecbfe7",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 145,
+  "sourceRepoHeadBefore": "93fa43b8144a29a74b4ffabbd49cec64bb094a43",
+  "sourceRepoFingerprintBefore": "753f7d04b75172d7770bf4b6af9a10c055086e9721082dd7ff5545b3ea823ab5",
+  "targetRepoFingerprintBefore": "bea721dff5341ef3d9e1e48f99d3579df28a30e23b48b92d34cd8aa8a2d3183a",
+  "outcomes": [
+    {
+      "index": 141,
+      "sha": "190d962e1dd8e32d8cb90a1d5df6cc208ed379e6",
+      "subject": "feat: 更新所有包的版本号至1.14.41，确保一致性和兼容性",
+      "patch": "current/0141-190d962e1dd8.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch docs/VSIX-Packaging.md...\nerror: while searching for:\n| `name` | `opencode-ide-bridge` |\n| `displayName` | `OpenCode IDE Bridge` |\n| `publisher` | `SMARK2022` |\n| `version` | `1.14.40` |\n| `engines.vscode` | `^1.94.0` |\n| `main` | `./dist/extension.js` |\n| `license` | `MIT` |\n\nerror: patch failed: docs/VSIX-Packaging.md:20\nerror: docs/VSIX-Packaging.md: patch does not apply\nChecking patch packages/app/package.json...\nerror: while searching for:\n{\n  \"name\": \"@opencode-ai/app\",\n  \"version\": \"1.14.40\",\n  \"description\": \"\",\n  \"type\": \"module\",\n  \"exports\": {\n\nerror: patch failed: packages/app/package.json:1\nerror: packages/app/package.json: patch does not apply\nChecking patch packages/console/app/package.json...\nerror: while searching for:\n{\n  \"name\": \"@opencode-ai/console-app\",\n  \"version\": \"1.14.40\",\n  \"type\": \"module\",\n  \"license\": \"MIT\",\n  \"scripts\": {\n\nerror: patch failed: packages/console/app/package.json:1\nerror: packages/console/app/package.json: patch does not apply\nChecking patch packages/console/core/package.json...\nerror: while searching for:\n{\n  \"$schema\": \"https://json.schemastore.org/package.json\",\n  \"name\": \"@opencode-ai/console-core\",\n  \"version\": \"1.14.40\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"license\": \"MIT\",\n\nerror: patch failed: packages/console/core/package.json:1\nerror: packages/console/core/package.json: patch does not apply\nChecking patch packages/console/function/package.json...\nerror: while searching for:\n{\n  \"name\": \"@opencode-ai/console-function\",\n  \"version\": \"1.14.40\",\n  \"$schema\": \"https://json.schemastore.org/package.json\",\n  \"private\": true,\n  \"type\": \"module\",\n\nerror: patch failed: packages/console/function/package.json:1\nerror: packages/console/function/package.json: patch does not apply\nChecking patch packages/console/mail/package.json...\nerror: while searching for:\n{\n  \"name\": \"@opencode-ai/console-mail\",\n  \"version\": \"1.14.40\",\n  \"dependencies\": {\n    \"@jsx-email/all\": \"2.2.3\",\n    \"@jsx-email/cli\": \"1.4.3\",\n\nerror: patch failed: packages/console/mail/package.json:1\nerror: packages/console/mail/package.json: patch does not apply\nChecking patch packages/core/package.json...\nerror: while searching for:\n{\n  \"$schema\": \"https://json.schemastore.org/package.json\",\n  \"version\": \"1.14.40\",\n  \"name\": \"@opencode-ai/core\",\n  \"type\": \"module\",\n  \"license\": \"MIT\",\n\nerror: patch failed: packages/core/package.json:1\nerror: packages/core/package.json: patch does not apply\nChecking patch packages/desktop/package.json...\nerror: while searching for:\n{\n  \"name\": \"@opencode-ai/desktop\",\n  \"private\": true,\n  \"version\": \"1.14.40\",\n  \"type\": \"module\",\n  \"license\": \"MIT\",\n  \"homepage\": \"https://opencode.ai\",\n\nerror: patch failed: packages/desktop/package.json:1\nerror: packages/desktop/package.json: patch does not apply\nChecking patch packages/enterprise/package.json...\nerror: while searching for:\n{\n  \"name\": \"@opencode-ai/enterprise\",\n  \"version\": \"1.14.40\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"license\": \"MIT\",\n\nerror: patch failed: packages/enterprise/package.json:1\nerror: packages/enterprise/package.json: patch does not apply\nChecking patch packages/function/package.json...\nerror: while searching for:\n{\n  \"name\": \"@opencode-ai/function\",\n  \"version\": \"1.14.40\",\n  \"$schema\": \"https://json.schemastore.org/package.json\",\n  \"private\": true,\n  \"type\": \"module\",\n\nerror: patch failed: packages/function/package.json:1\nerror: packages/function/package.json: patch does not apply\nChecking patch packages/opencode/package.json...\nerror: while searching for:\n{\n  \"$schema\": \"https://json.schemastore.org/package.json\",\n  \"version\": \"1.14.40-smark\",\n  \"name\": \"opencode\",\n  \"type\": \"module\",\n  \"license\": \"MIT\",\n\nerror: patch failed: packages/opencode/package.json:1\nerror: packages/opencode/package.json: patch does not apply\nChecking patch packages/plugin/package.json...\nerror: while searching for:\n{\n  \"$schema\": \"https://json.schemastore.org/package.json\",\n  \"name\": \"@opencode-ai/plugin\",\n  \"version\": \"1.14.40\",\n  \"type\": \"module\",\n  \"license\": \"MIT\",\n  \"scripts\": {\n\nerror: patch failed: packages/plugin/package.json:1\nerror: packages/plugin/package.json: patch does not apply\nChecking patch packages/sdk/js/package.json...\nerror: while searching for:\n{\n  \"$schema\": \"https://json.schemastore.org/package.json\",\n  \"name\": \"@opencode-ai/sdk\",\n  \"version\": \"1.14.40\",\n  \"type\": \"module\",\n  \"license\": \"MIT\",\n  \"scripts\": {\n\nerror: patch failed: packages/sdk/js/package.json:1\nerror: packages/sdk/js/package.json: patch does not apply\nChecking patch packages/slack/package.json...\nerror: while searching for:\n{\n  \"name\": \"@opencode-ai/slack\",\n  \"version\": \"1.14.40\",\n  \"type\": \"module\",\n  \"license\": \"MIT\",\n  \"scripts\": {\n\nerror: patch failed: packages/slack/package.json:1\nerror: packages/slack/package.json: patch does not apply\nChecking patch packages/ui/package.json...\nerror: while searching for:\n{\n  \"name\": \"@opencode-ai/ui\",\n  \"version\": \"1.14.40\",\n  \"type\": \"module\",\n  \"license\": \"MIT\",\n  \"exports\": {\n\nerror: patch failed: packages/ui/package.json:1\nerror: packages/ui/package.json: patch does not apply\nChecking patch packages/web/package.json...\nerror: while searching for:\n  \"name\": \"@opencode-ai/web\",\n  \"type\": \"module\",\n  \"license\": \"MIT\",\n  \"version\": \"1.14.40\",\n  \"scripts\": {\n    \"dev\": \"astro dev\",\n    \"dev:remote\": \"VITE_API_URL=https://api.opencode.ai astro dev\",\n\nerror: patch failed: packages/web/package.json:2\nerror: packages/web/package.json: patch does not apply\nChecking patch sdks/vscode/README.md...\nerror: while searching for:\nbun run check-types\nbun run lint\nbun run package\nnpm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o \"dist/SMARK2022.opencode-ide-bridge-1.14.40.vsix\"\n```\n\nOr use the bundled shortcut:\n\nerror: patch failed: sdks/vscode/README.md:68\nerror: sdks/vscode/README.md: patch does not apply\nChecking patch sdks/vscode/package.json...\nerror: while searching for:\n  \"name\": \"opencode-ide-bridge\",\n  \"displayName\": \"OpenCode IDE Bridge\",\n  \"description\": \"Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, workspace context sharing, and terminal integration — all on 127.0.0.1 with Bearer-token authentication.\",\n  \"version\": \"1.14.40.0\",\n  \"publisher\": \"SMARK2022\",\n  \"homepage\": \"https://github.com/anomalyco/opencode\",\n  \"repository\": {\n\nerror: patch failed: sdks/vscode/package.json:2\nerror: sdks/vscode/package.json: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "d0dd383b702eb8bcff03f87b49cdcc3faaa7810f672e177f80c9d55f2d74806a",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "db88a84f12334f0ea4ea5bad43d646b11eb03a4f52f2408e487efe4da8ef356f"
+  },
+  "stoppedAt": 141,
+  "finishedAt": "2026-07-23T21:51:39.635Z",
+  "sourceRepoHeadAfter": "93fa43b8144a29a74b4ffabbd49cec64bb094a43",
+  "sourceRepoFingerprintAfter": "753f7d04b75172d7770bf4b6af9a10c055086e9721082dd7ff5545b3ea823ab5",
+  "targetRepoFingerprintAfter": "bea721dff5341ef3d9e1e48f99d3579df28a30e23b48b92d34cd8aa8a2d3183a",
+  "retainedStates": [
+    "0140-8acb3fecbfe7",
+    "0138-563ac8f18e67",
+    "0137-daf41ca522c4",
+    "0136-95a96c38e940"
+  ]
+}

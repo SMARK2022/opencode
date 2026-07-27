@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-18T03:49:14.122Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 30,
+  "passed": 27,
+  "reusedPrefix": 27,
+  "baseState": "0027-7dc9f1ab534a",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 30,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "338ce78de76987bfb864c06a0677ae10f05b3601e0f330b02dae79ed2c239985",
+  "targetRepoFingerprintBefore": "ac076f7a13d52b722a3e518742ea26e7d83124ef5fa016116e986f935d30ef3c",
+  "outcomes": [
+    {
+      "index": 28,
+      "sha": "ab8ce2ad4405bb591fad947692c69c5a41f38441",
+      "subject": "feat: 添加Bash输出压缩功能和相关配置",
+      "patch": "current/0028-ab8ce2ad4405.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/cli/cmd/tui/app.tsx...\nerror: packages/opencode/src/cli/cmd/tui/app.tsx: does not exist in index\nChecking patch packages/opencode/src/cli/cmd/tui/routes/session/index.tsx...\nerror: packages/opencode/src/cli/cmd/tui/routes/session/index.tsx: does not exist in index\nChecking patch packages/opencode/src/config/config.ts...\nerror: while searching for:\n      max_bytes: Schema.optional(PositiveInt).annotate({\n        description: \"Maximum bytes of tool output before it is truncated and saved to disk (default: 51200)\",\n      }),\n    }),\n  ).annotate({\n    description:\n      \"Thresholds for truncating tool output. When output exceeds either limit, the full text is written to the truncation directory and a preview is returned.\",\n  }),\n  compaction: Schema.optional(\n    Schema.Struct({\n\nerror: patch failed: packages/opencode/src/config/config.ts:209\nerror: packages/opencode/src/config/config.ts: patch does not apply\nChecking patch packages/opencode/src/provider/sdk/copilot/responses/openai-responses-language-model.ts...\nerror: packages/opencode/src/provider/sdk/copilot/responses/openai-responses-language-model.ts: does not exist in index\nChecking patch packages/opencode/src/tool/bash-compress.ts...\nChecking patch packages/opencode/src/tool/bash.ts...\nerror: packages/opencode/src/tool/bash.ts: does not exist in index\nChecking patch packages/opencode/src/tool/bash.txt...\nerror: packages/opencode/src/tool/bash.txt: does not exist in index\nChecking patch packages/sdk/js/src/v2/gen/types.gen.ts...\nerror: while searching for:\n     * Maximum bytes of tool output before it is truncated and saved to disk (default: 51200)\n     */\n    max_bytes?: number\n  }\n  compaction?: {\n    /**\n\nerror: patch failed: packages/sdk/js/src/v2/gen/types.gen.ts:1645\nerror: packages/sdk/js/src/v2/gen/types.gen.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "e2668dcf217e737452b5db0ff43200c938a2c7e06854a128af7d6d4fa38d1ce6",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "346dbd7342ea6cf1ba023d2ae796771d93cc4df1cd07e52b9da1d255d525d2f7"
+  },
+  "stoppedAt": 28,
+  "finishedAt": "2026-07-18T03:49:21.828Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "338ce78de76987bfb864c06a0677ae10f05b3601e0f330b02dae79ed2c239985",
+  "targetRepoFingerprintAfter": "ac076f7a13d52b722a3e518742ea26e7d83124ef5fa016116e986f935d30ef3c",
+  "retainedStates": [
+    "0027-7dc9f1ab534a",
+    "0026-13fd8ab5dcbe",
+    "0025-634fdbefd224",
+    "0024-5a7f139b02d1",
+    "0021-b94a79527811"
+  ]
+}

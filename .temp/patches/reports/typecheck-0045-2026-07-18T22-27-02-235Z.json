@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-18T22:27:02.235Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 45,
+  "passed": 42,
+  "reusedPrefix": 42,
+  "baseState": "0042-16656033a664",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 45,
+  "sourceRepoHeadBefore": "43f17817d5be998527e3bad6346762209dfb61f9",
+  "sourceRepoFingerprintBefore": "7ee0c3376012161735eb7a8b6c69bba305b3aba76f0fb86810f90d7f692edaa9",
+  "targetRepoFingerprintBefore": "26a1fbacbb4fd7ecfe34ef2dbade24433051df09cfbe39482e674d89b46a6ea5",
+  "outcomes": [
+    {
+      "index": 43,
+      "sha": "630dd666663c712e3648751860f5372e192750c0",
+      "subject": "feat: 增加数据集鲁棒性、自动重试机制添加 OPENCODE_DB_DURABLE 标志，更新数据库配置和工具输入缓冲逻辑",
+      "patch": "current/0043-630dd666663c.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/core/src/flag/flag.ts...\nChecking patch packages/opencode/src/session/processor.ts...\nerror: while searching for:\n                  raw: match.state.raw + value.text,\n              yield* session.updatePartDelta({\n                sessionID: tcall.sessionID,\n            })\n            return\n\n                partID: tcall.partID, {\n\nerror: patch failed: packages/opencode/src/session/processor.ts:334\nerror: packages/opencode/src/session/processor.ts: patch does not apply\nChecking patch packages/opencode/src/session/retry.ts...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "6865f8b38051c0d47b3d240888cd94713c78177f0b29a88eddcdd9cab2219387",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "32a4cd4e319d99d294238d3031f1ba11ca65fe72dd00f49f2056a034c0f01bf8"
+  },
+  "stoppedAt": 43,
+  "finishedAt": "2026-07-18T22:27:09.343Z",
+  "sourceRepoHeadAfter": "43f17817d5be998527e3bad6346762209dfb61f9",
+  "sourceRepoFingerprintAfter": "7ee0c3376012161735eb7a8b6c69bba305b3aba76f0fb86810f90d7f692edaa9",
+  "targetRepoFingerprintAfter": "26a1fbacbb4fd7ecfe34ef2dbade24433051df09cfbe39482e674d89b46a6ea5",
+  "retainedStates": [
+    "0042-16656033a664",
+    "0041-990ddcb47d35",
+    "0040-8f6444e154d0"
+  ]
+}

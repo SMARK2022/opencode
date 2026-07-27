@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-17T22:23:10.562Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 15,
+  "passed": 15,
+  "reusedPrefix": 14,
+  "baseState": "0014-61bcd2aae67c",
+  "rebuild": false,
+  "appliedThisRun": 1,
+  "materializedIndex": 15,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "ac486dbc9884405dc77ed8c5775f7ca106996b03e091d8a3a421bd305b10b840",
+  "targetRepoFingerprintBefore": "c6efe745270673485f781e099291c51603138d2dea595ef590fea9519f1814a6",
+  "outcomes": [
+    {
+      "index": 15,
+      "sha": "d302fa6f05a734b420714024b68f27bb14d82f6e",
+      "subject": "feat(provider): 更新claudecode提供者以支持动态鉴权模式，优化API密钥和基本URL配置",
+      "patch": "current/0015-d302fa6f05a7.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/package.json",
+        "M\tpackages/opencode/script/build.ts",
+        "A\tpackages/opencode/script/version-env.ts",
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "A\tpackages/opencode/src/provider/claudecode.ts",
+        "M\tpackages/opencode/src/provider/provider.ts",
+        "M\tpackages/opencode/src/session/processor.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx",
+        "M\tpackages/tui/src/util/signal.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "f535c43b0ae3179064d680536bbc4ac7ac32fcf08dfbab4962bbe3257aefdeb3",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "53e917e2574b7530e60a6dfcfd551ed7c22f4deb8fe1c7c18d1f847aecae987a"
+  },
+  "finishedAt": "2026-07-17T22:23:17.356Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "ac486dbc9884405dc77ed8c5775f7ca106996b03e091d8a3a421bd305b10b840",
+  "targetRepoFingerprintAfter": "c6efe745270673485f781e099291c51603138d2dea595ef590fea9519f1814a6",
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0015-d302fa6f05a7",
+  "retainedStates": [
+    "0015-d302fa6f05a7",
+    "0014-61bcd2aae67c",
+    "0012-b1bf9c5a50ce"
+  ],
+  "test": {
+    "index": 15,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "cb1e1e25f0758a0a2285c1b7721261937062ba3060c7d88b2b422836ab2fff09",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/tui",
+        "command": "bun typecheck (packages/tui)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  }
+}

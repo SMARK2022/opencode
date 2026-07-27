@@ -1,0 +1,159 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-26T22:47:48.286Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 200,
+  "passed": 200,
+  "reusedPrefix": 200,
+  "baseState": "0200-d4f24d4434a4",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 200,
+  "sourceRepoHeadBefore": "7c114657bf8d46c4eff60145ee78dce8ea2cdc36",
+  "sourceRepoFingerprintBefore": "52982cc44970e9394960f0b16e440bdadf76c0f1d48c63b7488dc38ec9f5c0eb",
+  "targetRepoFingerprintBefore": "13faa308ddd1be80249e7501cb379cb3d6042e4ae29ea85e8839d93e9f31ebec",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0200-d4f24d4434a4",
+  "retainedStates": [
+    "0200-d4f24d4434a4",
+    "0195-bb5a2b41f258"
+  ],
+  "test": {
+    "index": 200,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/permission/precheck.ts(313,1): error TS1005: ')' expected.\nsrc/permission/precheck.ts(313,57): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(313,65): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(313,76): error TS1002: Unterminated string literal.\nsrc/permission/precheck.ts(328,59): error TS1005: ';' expected.\nsrc/permission/precheck.ts(328,66): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(328,72): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(328,82): error TS1435: Unknown keyword or identifier. Did you mean 'require'?\nsrc/permission/precheck.ts(328,91): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(328,100): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(328,111): error TS1002: Unterminated string literal.\nsrc/permission/precheck.ts(402,71): error TS1011: An element access expression should take an argument.\nsrc/permission/precheck.ts(402,72): error TS1005: ';' expected.\nsrc/permission/precheck.ts(402,73): error TS1005: ',' expected.\nsrc/permission/precheck.ts(402,84): error TS1005: ',' expected.\nsrc/permission/precheck.ts(402,96): error TS1005: ';' expected.\nsrc/permission/precheck.ts(405,3): error TS1005: ')' expected.\nsrc/permission/precheck.ts(407,3): error TS1005: ')' expected.\nsrc/permission/precheck.ts(407,121): error TS1005: ';' expected.\nsrc/permission/precheck.ts(408,137): error TS1109: Expression expected.\nsrc/permission/precheck.ts(408,153): error TS1005: ';' expected.\nsrc/permission/precheck.ts(411,3): error TS1109: Expression expected.\nsrc/permission/precheck.ts(411,107): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(411,112): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(411,123): error TS1002: Unterminated string literal.\nsrc/permission/precheck.ts(432,1): error TS1005: '(' expected.\nsrc/permission/precheck.ts(432,45): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(432,60): error TS1005: ';' expected.\nsrc/permission/precheck.ts(432,67): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(432,72): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(432,81): error TS1435: Unknown keyword or identifier. Did you mean 'require'?\nsrc/permission/precheck.ts(432,90): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(432,99): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(432,110): error TS1002: Unterminated string literal.\nsrc/permission/precheck.ts(436,1): error TS1005: ')' expected.\nsrc/permission/precheck.ts(437,43): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(437,45): error TS1128: Declaration or statement expected.\nsrc/permission/precheck.ts(437,47): error TS1128: Declaration or statement expected.\nsrc/permission/precheck.ts(437,92): error TS1005: ';' expected.\nsrc/permission/precheck.ts(437,93): error TS1128: Declaration or statement expected.\nsrc/permission/precheck.ts(437,94): error TS1128: Declaration or statement expected.\nsrc/permission/precheck.ts(442,10): error TS1005: ',' expected.\nsrc/permission/precheck.ts(442,38): error TS1005: ',' expected.\nsrc/permission/precheck.ts(442,57): error TS1005: '=>' expected.\nsrc/permission/precheck.ts(442,58): error TS1434: Unexpected keyword or identifier.\nsrc/permission/precheck.ts(442,83): error TS1005: ';' expected.\nsrc/permission/precheck.ts(442,85): error TS1002: Unterminated string literal.\nsrc/permission/precheck.ts(443,5): error TS1005: ';' expected.\nsrc/permission/precheck.ts(451,1): error TS1005: ')' expected.\nsrc/permission/precheck.ts(452,1): error TS1005: '(' expected.\nsrc/permission/precheck.ts(454,45): error TS1005: ';' expected.\nsrc/permission/precheck.ts(454,47): error TS1005: ';' expected.\nsrc/permission/precheck.ts(478,1): error TS1005: ',' expected.\nsrc/permission/precheck.ts(487,1): error TS1005: ',' expected.\nsrc/permission/precheck.ts(494,211): error TS1002: Unterminated string literal.\nsrc/permission/precheck.ts(495,1): error TS1005: ')' expected.\nsrc/permission/precheck.ts(495,51): error TS1005: ';' expected.\nsrc/permission/precheck.ts(495,53): error TS1005: ';' expected.\nsrc/permission/precheck.ts(502,104): error TS1002: Unterminated string literal.\nsrc/permission/precheck.ts(503,1): error TS1005: ',' expected.\nsrc/permission/precheck.ts(503,58): error TS1005: ';' expected.\nsrc/permission/precheck.ts(535,4): error TS1128: Declaration or statement expected.\nsrc/permission/precheck.ts(545,1): error TS1005: '}' expected.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-26T22:48:12.373Z",
+  "sourceRepoHeadAfter": "7c114657bf8d46c4eff60145ee78dce8ea2cdc36",
+  "sourceRepoFingerprintAfter": "52982cc44970e9394960f0b16e440bdadf76c0f1d48c63b7488dc38ec9f5c0eb",
+  "targetRepoFingerprintAfter": "13faa308ddd1be80249e7501cb379cb3d6042e4ae29ea85e8839d93e9f31ebec"
+}

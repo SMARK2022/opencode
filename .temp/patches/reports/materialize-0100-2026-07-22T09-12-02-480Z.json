@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-22T09:12:02.480Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 100,
+  "passed": 97,
+  "reusedPrefix": 97,
+  "baseState": "0097-ace5c5841350",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 100,
+  "sourceRepoHeadBefore": "c60bc7f851e06da5c5156ceae2dfae664e84460d",
+  "sourceRepoFingerprintBefore": "dbcafa1975978b2d090be496bf392c499fe14c5fa1799c58a0dc4c7250f22cda",
+  "targetRepoFingerprintBefore": "771bbc42e71bc298ce3f2809956caa509e2aae09fa36a103d39c803cefe154e5",
+  "outcomes": [
+    {
+      "index": 98,
+      "sha": "f4304858229cc5be8cf2729cd6ef4dc1b97e57b0",
+      "subject": "feat(session): 添加隐藏消息处理逻辑，支持撤销操作并在数据库中保留隐藏消息",
+      "patch": "current/0098-f4304858229c.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "unknown",
+      "stdout": "",
+      "stderr": "error: No valid patches in input (allow with \"--allow-empty\")\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "8cf4ab0316365868a8efc7f82a43def08159b4b9732ec5ca1494926ea84b795e",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "4f398a3cf46f736d2d156f28ddfe33f05a23e8e7c51b970c46189ba573788b42"
+  },
+  "stoppedAt": 98,
+  "finishedAt": "2026-07-22T09:12:19.106Z",
+  "sourceRepoHeadAfter": "c60bc7f851e06da5c5156ceae2dfae664e84460d",
+  "sourceRepoFingerprintAfter": "fdb19a029cc5791a2fbf56b23255d179e3c097064be34c082ecaaf4b5c9bbff6",
+  "targetRepoFingerprintAfter": "771bbc42e71bc298ce3f2809956caa509e2aae09fa36a103d39c803cefe154e5",
+  "integrityFailure": "source repository changed during dry-run",
+  "retainedStates": [
+    "0097-ace5c5841350",
+    "0095-4dec9d15826f"
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-22T09:14:01.991Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 100,
+  "passed": 96,
+  "reusedPrefix": 96,
+  "baseState": "0096-254082aeca0d",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 100,
+  "sourceRepoHeadBefore": "c60bc7f851e06da5c5156ceae2dfae664e84460d",
+  "sourceRepoFingerprintBefore": "8d421290337c362b5ebcf0b03e194ca6f4ac32dc8376b068e91246d9bf70c7b8",
+  "targetRepoFingerprintBefore": "bcf4ef165ec3ee06d10b43da260005b2e4e8a6b8cb3b4d7f61aeb82ca972b8b8",
+  "outcomes": [
+    {
+      "index": 97,
+      "sha": "ace5c5841350787e701d44c07946b58deb793c5e",
+      "subject": "feat(docs): 更新 README 和 package.json，修正扩展名称和描述，添加主页链接 feat(bridge): 修改注释以统一 OpenCode 表述，优化 HTTP 端点描述 feat(extension): 更新注释以统一 OpenCode 表述，调整功能描述",
+      "patch": "current/0097-ace5c5841350.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "unknown",
+      "stdout": "",
+      "stderr": "error: No valid patches in input (allow with \"--allow-empty\")\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "8cf4ab0316365868a8efc7f82a43def08159b4b9732ec5ca1494926ea84b795e",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "6a5b34c3d8f4dc44b07e18b076ce71e001dc92a35c42ad705f807e5442a31917"
+  },
+  "stoppedAt": 97,
+  "finishedAt": "2026-07-22T09:14:10.231Z",
+  "sourceRepoHeadAfter": "c60bc7f851e06da5c5156ceae2dfae664e84460d",
+  "sourceRepoFingerprintAfter": "8d421290337c362b5ebcf0b03e194ca6f4ac32dc8376b068e91246d9bf70c7b8",
+  "targetRepoFingerprintAfter": "bcf4ef165ec3ee06d10b43da260005b2e4e8a6b8cb3b4d7f61aeb82ca972b8b8",
+  "retainedStates": [
+    "0096-254082aeca0d",
+    "0095-4dec9d15826f"
+  ]
+}

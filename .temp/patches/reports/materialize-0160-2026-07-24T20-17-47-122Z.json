@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-24T20:17:47.122Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 160,
+  "passed": 155,
+  "reusedPrefix": 155,
+  "baseState": "0155-69f32338dd55",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 160,
+  "sourceRepoHeadBefore": "c1ee3f441badf7d8da1da08d1d67359e12b4e529",
+  "sourceRepoFingerprintBefore": "c571df724e418bb523dfbe561ffb92d23bbea2f7461ee3cd63260973de8db84c",
+  "targetRepoFingerprintBefore": "1d4dffa75280b29672b47073f8fc60d03023b6760cc4d0939da27c4a9633f646",
+  "outcomes": [
+    {
+      "index": 156,
+      "sha": "dacb88948bac857494fd4a09329ab450656e8792",
+      "subject": "feat: 更新安装脚本，支持版本指定和环境变量配置，增强错误处理和输出信息",
+      "patch": "current/0156-dacb88948bac.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch .github/workflows/build-opencode.yml...\nerror: while searching for:\n\non:\n  workflow_dispatch:\n  push:\n    branches:\n      - dev-smark\n\nerror: patch failed: .github/workflows/build-opencode.yml:2\nerror: .github/workflows/build-opencode.yml: patch does not apply\nChecking patch install...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "99ece336f4cfde9abd6d71aaa398b82e0d877bfd24a5bb3f4b53545ad17db542",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "c7b66346cde7f2f6bb11f323f748e436b945237c923d5dfc2361b244157cb000"
+  },
+  "stoppedAt": 156,
+  "finishedAt": "2026-07-24T20:17:58.112Z",
+  "sourceRepoHeadAfter": "c1ee3f441badf7d8da1da08d1d67359e12b4e529",
+  "sourceRepoFingerprintAfter": "c571df724e418bb523dfbe561ffb92d23bbea2f7461ee3cd63260973de8db84c",
+  "targetRepoFingerprintAfter": "1d4dffa75280b29672b47073f8fc60d03023b6760cc4d0939da27c4a9633f646",
+  "retainedStates": [
+    "0155-69f32338dd55",
+    "0153-188cbee1b73a",
+    "0152-a79689db16e7"
+  ]
+}

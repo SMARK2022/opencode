@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-25T15:01:04.529Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 175,
+  "passed": 175,
+  "reusedPrefix": 175,
+  "baseState": "0175-f0a47a144866",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 175,
+  "sourceRepoHeadBefore": "71afbee8f47061588f6e1db98aa0f2d0f5634b22",
+  "sourceRepoFingerprintBefore": "299b9460e3c1b98e5ab22bf700355834afee60e4f2a5cae3ff9490c4995a3472",
+  "targetRepoFingerprintBefore": "c575d2a7ff52a552674999ffde56f60e949f541bde3dc4f0474c977f595a30ab",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0175-f0a47a144866",
+  "retainedStates": [
+    "0175-f0a47a144866",
+    "0173-59aeb3d239f3",
+    "0172-595b0e8f3ede",
+    "0171-49650e2f95ff"
+  ],
+  "test": {
+    "index": 175,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/cli/cmd/stats-charts.ts(437,10): error TS1005: ',' expected.\nsrc/cli/cmd/stats-charts.ts(437,12): error TS1134: Variable declaration expected.\nsrc/cli/cmd/stats-insights.ts(407,3): error TS1137: Expression or comma expected.\nsrc/cli/cmd/stats-insights.ts(410,5): error TS1137: Expression or comma expected.\nsrc/cli/cmd/stats-insights.ts(413,5): error TS1137: Expression or comma expected.\nsrc/cli/cmd/stats-insights.ts(416,5): error TS1137: Expression or comma expected.\nsrc/cli/cmd/stats.ts(245,9): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(254,21): error TS1005: ',' expected.\nsrc/cli/cmd/stats.ts(266,1): error TS1109: Expression expected.\nsrc/cli/cmd/stats.ts(266,2): error TS1128: Declaration or statement expected.\nsrc/cli/cmd/stats.ts(358,13): error TS1005: ';' expected.\nsrc/cli/cmd/stats.ts(359,7): error TS1109: Expression expected.\nsrc/cli/cmd/stats.ts(359,8): error TS1128: Declaration or statement expected.\nsrc/cli/cmd/stats.ts(360,7): error TS1128: Declaration or statement expected.\nsrc/cli/cmd/stats.ts(378,10): error TS1005: ';' expected.\nsrc/cli/cmd/stats.ts(398,1): error TS1109: Expression expected.\nsrc/cli/cmd/stats.ts(398,2): error TS1128: Declaration or statement expected.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-25T15:01:29.669Z",
+  "sourceRepoHeadAfter": "71afbee8f47061588f6e1db98aa0f2d0f5634b22",
+  "sourceRepoFingerprintAfter": "299b9460e3c1b98e5ab22bf700355834afee60e4f2a5cae3ff9490c4995a3472",
+  "targetRepoFingerprintAfter": "c575d2a7ff52a552674999ffde56f60e949f541bde3dc4f0474c977f595a30ab"
+}

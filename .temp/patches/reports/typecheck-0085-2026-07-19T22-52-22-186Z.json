@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-19T22:52:22.186Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 85,
+  "passed": 85,
+  "reusedPrefix": 85,
+  "baseState": "0085-66ddc4e2fe6c",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 85,
+  "sourceRepoHeadBefore": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintBefore": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintBefore": "f10593aa6fb98d82ad1276118c40d704746447381aa01fe3c9c06980c8e1c53c",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0085-66ddc4e2fe6c",
+  "retainedStates": [
+    "0085-66ddc4e2fe6c",
+    "0080-0a8361dfa4d3",
+    "0077-9768471cf3fc",
+    "0075-4141d5e979ff"
+  ],
+  "test": {
+    "index": 85,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "550ca932999a73cc76626eec6fe28a2bc7dcdcb6764cb494d32aee7bff50c9ea",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "failed",
+        "stdout": "../tui/src/util/context-usage.ts(1000,58): error TS2339: Property 'parts' does not exist on type 'string'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-19T22:52:28.209Z",
+  "sourceRepoHeadAfter": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintAfter": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintAfter": "f10593aa6fb98d82ad1276118c40d704746447381aa01fe3c9c06980c8e1c53c"
+}
