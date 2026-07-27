@@ -1,22 +1,28 @@
-# Canonical Implementation Plan: Session Prompt Preflight Latency and Lazy Snapshot
+# Canonical Implementation Plan: Session Visibility Root Integration and Bounded Goal Query
 
-> Status: verified
+> Status: approved
 >
-> Revision: R34
+> Revision: R40
 >
-> Approved revision: R34
+> Approved revision: R40
 >
-> Audit mode: implementation
+> Audit mode: plan
 >
 > Requirement source: Session GOAL and the quoted clarifications below
 >
 > Implementation allowed: yes
 >
-> Last updated: 2026-07-26
+> Last updated: 2026-07-27
 
 This file is the sole implementation specification for this task. Chat summaries,
 superseded revisions, `stash@{0}`, and builder rationale outside this file are
 not implementation authority.
+
+> **R40 active-revision boundary:** Sections 1-24 below record the superseded
+> R34 Session Prompt implementation history and its audit evidence. They remain
+> historical evidence only. The active design, scope, budget, and release route
+> for this task are the R35/R36/R37/R38/R39/R40 sections appended after that record. R40 explicitly
+> removes the unbounded `MessageV2.chronology` export instead of preserving it.
 
 ## 1. Verbatim Requirement
 
@@ -1051,3 +1057,488 @@ No production compatibility fallback is introduced.
 The task may be marked `verified` only after an independent full-scope result of
 `No blocking findings` for the current implementation and approved plan
 revision.
+
+---
+
+# R35 Active Revision: Visibility Root Integration
+
+## R35.1 Verbatim Requirement and Scope Clarification
+
+> 理论上hidden问题应该从上游解决而不是下游众多分支解决
+>
+> 一个根源能解决无数个消费者
+>
+> 也就是最终不会出现chronology，同时相关hidden等等过滤思想完整融入到我们的逻辑中
+>
+> 修改范围不超过300行
+
+This revision also preserves the already-approved Session Prompt behavior from
+R34 as a baseline: no durable zero-token publication, lazy Snapshot at the
+first non-`none` local Tool, one retained Message cache, fresh dynamic Tool
+surfaces, and bounded Goal continuity. R35 changes only the unresolved
+upstream/R34 integration seam; it does not reimplement or widen those features.
+
+The 300-line limit is measured on the R35 correction delta after the existing
+R34 and upstream hidden-message commits are treated as history. The rebase
+must not add an unrelated production or test path to that delta. The final
+R35 correction has at most six code/test files and fewer than 300 changed
+code/test lines; the plan document and pre-existing commits are not counted.
+
+## R35.2 Explicit Non-Goals
+
+- Do not restore `MessageV2.chronology`, an unbounded chronology export, or a
+  compatibility alias that keeps the removed full-scan path reachable.
+- Do not move hidden filtering into run, ACP, GitHub, Slack, TUI, HTTP, or
+  other downstream branches. Normal persisted Message/Provider/Goal reads use
+  the MessageV2 visibility owner.
+- Do not filter raw Sync events, raw accounting, projector input, fork rows,
+  Revert evidence, or structural Compaction reads. Hidden event updates are a
+  contracted tombstone channel; raw consumers are not ordinary transcript
+  readers.
+- Do not change Snapshot, token accounting, RequestUsage, schema, migration,
+  generated SDK, Tool policy, Permission, MCP, or Message cache behavior that
+  R34 already verified.
+- Do not add a second serializer, event protocol, retry, catch-and-success
+  branch, feature flag, compatibility scan, or defensive malformed-row path.
+- Do not modify the upstream hidden-message plan as a second active plan. Its
+  full `chronology` wording is recorded as conflicting upstream history; this
+  R35 plan is the sole authority for the current integration delta.
+
+## R35.3 Repository Context and Evidence Read
+
+| Evidence | Relevance | Evidence class |
+|---|---|---|
+| `CONTEXT.md` | MessageV2 is the persisted part-based Session record; raw event and accounting vocabulary are distinct from visible transcript reads. | contracted |
+| `AGENTS.md`, `packages/opencode/AGENTS.md`, `packages/opencode/test/AGENTS.md` | Package-local verification, Effect/module shape, public behavior seams, no test-from-root rule. | contracted |
+| `.opencode/policy/first-principles-engineering.md` and canonical template | First divergence, one authoritative path, no fallback, full traceability, audit and comment gates. | contracted |
+| `docs/plans/session-prompt-preflight-latency-lazy-snapshot.md` R34 §10.4, §12, §22-24 | The approved R34 design removes the loop-head full chronology call and unbounded export; R9 implementation audit made the remaining export blocking. | contracted |
+| `docs/plans/hidden-message-production-isolation.md` R6 §10, §22-23 | Upstream hidden commit assumes a full `chronology` owner; this is the conflicting history that must be adapted, not silently retained. | observed/contracted |
+| `packages/opencode/src/session/message-v2.ts:745-760, 1340-1526, 1640-1870` | Existing `visible`, page, stream, Provider conversion and Compaction owners. | observed |
+| `packages/opencode/src/session/message-v2.ts` stage 2/3 during rebase | Stage 2 reintroduces `chronology`; stage 3 contains bounded `goalChronology`; this is the exact conflict. | observed |
+| `packages/opencode/src/session/prompt.ts:2588-2665, 2870-3018` | R34 lazy Goal loader/cache and the plugin projection conflict. | observed |
+| `packages/opencode/src/session/session.ts:878-901` | `Session.messages` delegates ordinary reads to `MessageV2.page`. | observed |
+| `packages/opencode/src/session/sync/index.ts:148-189, 361-389` | Sync events persist/project/publish raw lifecycle data; this is not a visible transcript reader. | observed |
+| `packages/opencode/src/session/projectors.ts:155-257` | Hidden updates still preserve raw accounting/projector semantics. | observed |
+| `packages/opencode/test/session/messages-pagination.test.ts:232-281, 800-840` | Existing visible-page and bounded Tool-tail behavior; the chronology benchmark is the stale test seam to replace. | observed |
+| `packages/opencode/test/session/prompt.test.ts:4923-5033` | Real Prompt/Goal public behavior covers persisted chronology, hidden canonical turns, wrappers and compaction markers. | observed |
+| `packages/opencode/test/session/message-v2.test.ts:158-163` | Existing direct Provider conversion test proves hidden Message/Part projection at the central converter. | observed |
+| `git diff --check -- packages/opencode/src/session/message-v2.ts packages/opencode/src/session/prompt.ts` | Current rebase is red with leftover conflict markers, so no implementation continuation is authorized yet. | observed |
+| R35 chronology contract harness | Upstream object reports `upstreamFullChronology=true`; R34 object reports `localBoundedGoalChronology=true`, and exits 1. | observed |
+
+## R35.4 Current Behavior and First Divergence
+
+```text
+persisted Message/Part rows
+  -> MessageV2.page / filterCompacted / Provider conversion
+  -> ordinary visible Session/Provider consumers
+
+persisted rows
+  -> Goal continuity query
+  -> current/previous Goal turns
+```
+
+The ordinary visible path already has one upstream owner: `MessageV2.visible`
+and the visible `page`/conversion seams. `Session.messages` consumes that page,
+and `filterCompacted` and `toModelMessagesEffect` consume the same projection.
+The current rebase conflict is the first divergence for the Goal path:
+
+1. The upstream stage restores `MessageV2.chronology`, a full Message/Part
+   locator scan that the approved R34 route explicitly removed.
+2. The R34 stage has `goalChronology`, a bounded latest-two query, but its
+   conflict side must absorb hidden Message/Part locator filtering.
+3. `prompt.ts` must retain both independent post-plugin obligations: visible
+   projection for all request consumers and cache invalidation for arbitrary
+   Plugin history mutation.
+
+Raw Sync event publication is intentionally a separate path:
+
+```text
+Session.updateMessage/updatePart
+  -> SyncEvent projector and raw event publication
+  -> tombstone-aware event consumers
+```
+
+Filtering that channel at the Message reader would not remove an already
+published visible object. It would also break raw persistence/accounting
+contracts. R35 therefore fixes the common persisted/read root and preserves the
+raw event contract rather than adding scattered downstream filters.
+
+## R35.5 Supported Domain and Reachability
+
+| Input/condition | Producer | Reachable path | Owner | Classification |
+|---|---|---|---|---|
+| Visible `Session.messages` read | Session service/API/TUI | `Session.messages -> MessageV2.page` | MessageV2 page/visible projection | observed |
+| Provider history | Prompt/Compaction | `filterCompacted -> visible -> toModelMessagesEffect` | MessageV2 plus Prompt post-plugin seam | observed |
+| Goal current/previous | Goal Tool execution | `Prompt goal adapter -> loadGoalTurn -> MessageV2.goalChronology` | MessageV2 bounded query | reachable/contracted |
+| Hidden Message/Part in persisted history | Revert, failed lifecycle, plugin transform | normal visible readers and Provider conversion | MessageV2 visibility owner | observed |
+| Hidden raw event/tombstone | Session update producer | Sync projector/event bus | SyncEvent raw contract | contracted |
+| Raw structural Compaction/reviewer/fork read | explicit `includeHidden: true` or raw owner | structural consumer | caller-owned raw path | contracted |
+
+Speculative malformed payloads and hypothetical external consumers do not drive
+R35 production logic.
+
+## R35.6 Required Invariants
+
+| ID | Behavioral invariant | Evidence | Behavior test/evidence |
+|---|---|---|---|
+| R35-INV-01 | No final production code exports or calls the unbounded `MessageV2.chronology`; ordinary steps perform no Goal chronology query. | R34 §10.4 and R9 B-02 | structural `git grep` plus Prompt behavior suite |
+| R35-INV-02 | The only Goal query is bounded, returns at most two visible canonical eligible turns, and excludes hidden Message/Part and technical/compaction-only rows before classification. | user clarification; current R34 classifier; hidden-row producer | `goalChronology` public fixture and real Goal Prompt test |
+| R35-INV-03 | `MessageV2.visible` remains the one normal persisted/Provider projection; hidden Message and hidden Part cannot enter ordinary page, Compaction replay, or direct Provider conversion. | existing upstream implementation and tests | page, Compaction, direct conversion suites |
+| R35-INV-04 | Plugin-hidden working history is projected once before Provider/estimate/overflow consumers, and arbitrary Plugin mutation invalidates retained conversion chunks. | hidden post-plugin producer; R34 cache contract | existing plugin hidden/request-body test and Prompt cache suite |
+| R35-INV-05 | Raw Sync events and accounting retain hidden facts as tombstones; R35 does not duplicate visibility policy in each raw consumer. | Sync/projector contract | existing Sync/projector and hidden adapter regression suites |
+| R35-INV-06 | Persisted `(time_created,id)` ordering remains the only chronology comparator for bounded Goal selection and existing R34 consumers. | low-ID producer and R34 comparator | low-ID Goal/Revert/Compaction tests |
+
+## R35.7 Responsibility and Single Primary Path
+
+| Concern | Owner | Primary responsibility | Why not downstream |
+|---|---|---|---|
+| Normal hidden visibility | `MessageV2.visible` + visible page/conversion seams | one atomic Message/Part projection | downstream readers receive already-visible `WithParts` |
+| Goal hidden visibility and boundedness | `MessageV2.goalChronology` | SQL locator selection and latest-two classification input | Goal service must not scan or filter raw persistence itself |
+| Post-plugin visibility | `SessionPrompt` immediately after transform | one working projection before request consumers split | converter alone is too late for estimate/overflow |
+| Raw tombstone transport | `SyncEvent`/existing event consumers | preserve raw update and event deletion semantics | a visible reader cannot retract an emitted event |
+
+Primary path:
+
+```text
+raw persisted rows
+  -> MessageV2 visible page/filter/converter owner
+  -> bounded MessageV2.goalChronology only at Goal Tool start
+  -> Prompt post-plugin visible projection
+  -> Provider/Goal consumers
+```
+
+There is no second chronology serializer, no full-scan compatibility alias, and
+no downstream filter fan-out added by R35.
+
+## R35.8 Approved Primary-Path Design
+
+1. Resolve the rebase conflict by retaining the R34 bounded `goalChronology`
+   path and deleting the upstream full `chronology` export and its production
+   caller.
+2. Add hidden Message/Part locator state to the bounded query itself. Filter
+   hidden rows at this MessageV2 projection boundary, before the existing
+   canonical-turn classifier counts a turn.
+3. Keep `MessageV2.visible` as the shared normal projection. Do not duplicate
+   hidden predicates in Prompt, Compaction, HTTP, run, ACP, GitHub, Slack or
+   TUI consumers.
+4. In `prompt.ts`, compose the two already-required operations after Plugin
+   transform: set `conversionDirty=0` when arbitrary history transforms exist,
+   then pass the working array through `MessageV2.visible`. All request-only
+   consumers use that result.
+5. Replace the upstream chronology performance test with a bounded Goal/page
+   production-seam test. Keep existing hidden direct-converter and raw event
+   tests; do not add source-text tests as behavioral substitutes.
+
+This repairs the first divergence at MessageV2 and keeps Prompt as the only
+owner of post-plugin working-copy projection. It does not activate after a
+failed path and introduces no fallback.
+
+## R35.9 Secondary Path Inventory
+
+| Path | Classification | Disposition |
+|---|---|---|
+| `MessageV2.visible` normal projection | primary-contract branch | preserve and reuse |
+| bounded `goalChronology` | primary-contract branch | preserve and make hidden-aware |
+| explicit raw structural `includeHidden: true` | contracted pass-through | preserve only at existing raw callers |
+| raw Sync hidden event | contracted tombstone pass-through | preserve; no new downstream branch |
+| full `MessageV2.chronology` | superseded workaround | delete; no alias |
+| per-consumer hidden filters | duplicate responsibility | do not add; existing upstream history is not expanded |
+| alternate serializer/catch-and-success | forbidden fallback | reject |
+
+Alternate success-path ratio: `0%`.
+
+## R35.10 Workaround Deletion
+
+| Superseded logic | Reason | R35 replacement |
+|---|---|---|
+| Loop-head full `MessageV2.chronology` | pays full history cost on ordinary steps and contradicts latest-two Goal contract | lazy bounded `goalChronology` at Goal Tool start |
+| Full chronology export kept for upstream compatibility | leaves the removed path reachable and failed R9 audit B-02 | no export; update the bounded test seam |
+| Hidden predicates repeated in downstream consumers | responsibility leak and six-file/300-line violation | MessageV2 visible projection and bounded locator query |
+
+## R35.11 Forward Traceability
+
+| Requirement/invariant | Production path | File delta | Behavior evidence |
+|---|---|---|---|
+| R35-INV-01 | no loop-head/full chronology path | `message-v2.ts`, `prompt.ts` | current loader boundary plus no-call structural proof; Prompt Goal suite remains green |
+| R35-INV-02 | Goal Tool -> lazy loader -> bounded visible query | `message-v2.ts`, `prompt.ts` | bounded fixture and real Goal hidden-turn test |
+| R35-INV-03 | visible page/filter/converter owner | existing `message-v2.ts` seam | pagination, Compaction, direct conversion tests |
+| R35-INV-04 | post-plugin projection + dirty cache boundary | existing `prompt.ts` seam | plugin-hidden request-body and cache tests |
+| R35-INV-05 | raw Sync/projector unchanged | no R35 production change | existing raw/tombstone/accounting tests |
+| R35-INV-06 | persisted comparator in bounded query | existing `message-v2.ts` comparator | low-ID Goal/Revert/Compaction tests |
+
+## R35.12 Reverse Traceability
+
+| Proposed concept | Requirement | Evidence | Why reuse is insufficient |
+|---|---|---|---|
+| hidden-aware bounded SQL locator | R35-INV-02 | current bounded query omits hidden Part state; hidden producer is reachable | `deriveGoalTurn` sees only its input and cannot recover omitted Part visibility |
+| removal of full chronology export | R35-INV-01 | R34 §10.4 and blocking R9 audit | keeping the symbol leaves the superseded path reachable |
+| composed Prompt `dirty=0` plus `visible` | R35-INV-03/04 | Plugin mutates working history before estimate/conversion | converter-only filtering is too late; dirty-only filtering is incomplete |
+
+No other production concept is authorized by R35.
+
+## R35.13 File-Level Change Plan
+
+| File | Change | Exact responsibility | Expected delta |
+|---|---|---|---:|
+| `packages/opencode/src/session/message-v2.ts` | modify | remove full chronology conflict; make bounded Goal locator hidden-aware; retain central visible/page/converter owner | 35-85 |
+| `packages/opencode/src/session/prompt.ts` | modify | compose Plugin dirty invalidation with the central visible projection | 3-12 |
+| `packages/opencode/test/session/messages-pagination.test.ts` | modify | replace stale full-chronology benchmark with bounded Goal/page fixture and hidden Part qualification case | 25-70 |
+| `packages/opencode/test/session/prompt.test.ts` | modify | extend the existing 2048-turn/TestLLM seam with active-Goal ordinary-step paired timing and actual Goal Tool control; retain existing Goal/plugin assertions | 30-55 |
+
+Exactly four code/test files are planned. No production adapter, sync schema,
+migration, generated file, or new module is authorized. The R35 correction
+delta must remain below 300 changed code/test lines; if the behavior cannot be
+implemented within this list, stop and revise the plan before editing.
+
+## R35.14 TDD Behavior Slices
+
+| Order | Red behavior | Why current path fails | Minimal green behavior | Regression |
+|---|---|---|---|---|
+| 1 | The upstream integration contract reports a full chronology export while R34 requires none. | rebase stage 2 restores the removed export | resolve to the bounded sole owner and remove the stale test seam | no full scan/export regression |
+| 2 | A hidden canonical user or hidden qualifying Part is returned/counts as a Goal turn by the bounded query. | current bounded locator omits hidden Part state | filter hidden Message/Part at the MessageV2 locator owner | Goal current/previous and blocked continuity |
+| 3 | The actual Goal Tool startup performs a full-history locator scan, or the bounded query cost grows with old history. Ordinary Provider steps must retain the existing no-query loader boundary. | the rebase conflict retains the full locator branch in `goalChronology`; the existing Prompt loader boundary already keeps ordinary steps lazy | small/large production-query scaling through the exported Goal seam, real Goal Tool behavior, and structural call-path proof | bounded I/O and lazy Tool-start ownership |
+| 4 | Plugin-hidden history can diverge between Provider wire and request estimate/cache admission. | Plugin runs before multiple request consumers | one Prompt visible projection plus `conversionDirty=0` | Provider body, estimate, overflow and cache |
+| 5 | Visible page and direct Provider conversion remain unchanged for visible data and exclude hidden data. | regression risk while merging upstream projection | reuse existing MessageV2 projection without downstream branches | pagination, conversion, Compaction |
+
+The agreed seams are public `MessageV2.page`, bounded Goal query through the
+real `SessionPrompt`/Goal Tool path, and direct `MessageV2.toModelMessages`.
+Tests use literal expected IDs/body data, not private helpers, source text,
+call counts, or copied production algorithms.
+
+## R35.15 Chinese Comment Budget
+
+| Metric | Estimate | Method |
+|---|---:|---|
+| Effective changed code lines `E` | 180-260 | exclude imports, blank/comment-only, formatter-only and pure conflict moves |
+| Qualifying Chinese comments `C` | 40-52 | `ceil(E * 0.15)` requires at most 39; comments are distributed at the bounded hidden locator, projection boundary, and test intent |
+
+Only non-obvious comments are authorized: why hidden Part locator state is
+needed before Goal classification, why raw Sync remains unfiltered, why the
+full chronology export is deliberately absent, and why Plugin mutation forces
+the working conversion boundary to zero. Comment walls and split-line padding
+are forbidden.
+
+## R35.16 Verification
+
+All commands run after the rebase conflict is resolved, from the listed working
+directory:
+
+| Command | Working directory | Evidence |
+|---|---|---|
+| `bun test --timeout 60000 test/session/messages-pagination.test.ts --test-name-pattern "visible|Goal|bounded"` | `packages/opencode` | visible page and bounded hidden Goal seam |
+| `bun test --timeout 120000 test/session/prompt.test.ts --test-name-pattern "2048-turn|late technical|legacy compaction|plugin-hidden|Goal"` | `packages/opencode` | existing lazy Goal loader boundary, actual Goal Tool control, real classification and post-plugin behavior |
+| `bun test --timeout 60000 test/session/message-v2.test.ts` | `packages/opencode` | direct Provider visibility projection |
+| `bun test --timeout 60000 test/session/prompt.test.ts` | `packages/opencode` | directly affected Prompt regression suite |
+| `bun typecheck` | `packages/opencode` | package type correctness and no stale chronology caller |
+| `git grep -n "MessageV2\.chronology\|export function chronology" -- packages/opencode/src packages/opencode/test` | repository root | structural proof that the removed full path is absent; this is not a behavioral substitute |
+| `bun test --timeout 60000 test/session/compaction.test.ts` | `packages/opencode` | hidden/failed/partial Compaction replay and structural boundary regression |
+| `git diff --check -- <R35 four changed code/test paths>` | repository root | conflict/whitespace integrity |
+| `git diff --stat -- <R35 four changed code/test paths>` | repository root | six-file/300-line budget |
+
+The existing R34 cache/Snapshot/token verification remains baseline evidence;
+R35 must not weaken or reimplement it. The pre-implementation red signals are
+the current `git diff --check` conflict-marker failure and the chronology
+contract harness returning `upstreamFullChronology=true` with exit 1, plus the
+R40 Goal-query scaling mutation described below.
+
+## R35.17 Diff Budget
+
+| Metric | Hard limit | Plan estimate |
+|---|---:|---:|
+| Code/test files | 6 | 4 |
+| Changed code/test lines | <300 | 180-260 |
+| Production changed lines | not separately expanded beyond the total | 40-100 |
+| Generated/migration/schema files | 0 | 0 |
+| New fallback/alternate success path | 0 | 0 |
+
+The budget applies to the R35 integration correction delta. Existing R34 and
+already-landed upstream commits remain immutable history and are not silently
+recounted as new R35 concepts.
+
+## R35.18 Real Risks and Open Decisions
+
+### Real Risks
+
+- The rebase conflict may expose a hidden upstream test that still assumes the
+  removed full chronology API; that test must move to the bounded public seam,
+  not preserve the old export.
+- Raw structural callers must continue explicitly opting into hidden rows;
+  removing that pass-through would break Compaction/reviewer behavior.
+- A Plugin transform can alter arbitrary history; using the visible projection
+  without invalidating chunks would replay stale conversion output.
+- The active worktree has two pre-rebase stashes and unrelated untracked files;
+  they must remain outside the R35 path list and be restored only after tests.
+
+### Open Decisions Requiring the User
+
+Resolved in R36. The user explicitly authorized the six-file/300-line budget to
+apply only to the new R35/R36 integration correction delta; the already
+committed and independently audited R34 implementation is the immutable baseline
+and is not re-counted or reimplemented. This authorization is quoted in R36.1.
+
+The no-`chronology`, upstream hidden projection, and no downstream fan-out
+directions are not open decisions. Any request to preserve the upstream full
+chronology would be a new plan revision, not a conflict-resolution detail.
+
+### Rejected Speculation
+
+- A hypothetical external consumer of the removed `chronology` export cannot
+  authorize preserving it; repository call-site evidence shows no production
+  caller in the R34 path.
+- Filtering raw Sync events is not required for ordinary Message visibility and
+  would violate the observed tombstone/accounting contract.
+- A generic event-protocol rewrite is not justified within R35 because no
+  existing interface promises a typed hidden-to-removed conversion at the
+  Sync layer.
+- Additional defensive parsing for malformed hidden fields is not reachable
+  evidence and is excluded.
+
+## R35.19 Audit Contract
+
+The independent plan auditor must read the original requirement, this exact R35
+revision, the current repository/rebase stages, and the complete affected
+producer/consumer chain. It must specifically verify:
+
+- the full `MessageV2.chronology` export and loop-head call are absent from the
+  approved primary path;
+- hidden Message/Part filtering is owned by MessageV2 rather than duplicated
+  across downstream consumers;
+- raw Sync/tombstone and accounting contracts are not weakened;
+- bounded Goal selection is latest-two, hidden-aware, persisted-order based,
+  and lazy at actual Goal Tool start;
+- the Prompt post-plugin projection and cache invalidation remain one path;
+- all four changed files and the strict <300-line delta are justified;
+- no fallback, alternate serializer, source-coupled test, or comment wall is
+  introduced.
+
+This R35 plan is `audit-required`, with no implementation permission. Any
+blocking finding increments R35, clears approval, and requires a full-scope
+plan re-audit. Only an exact clean plan verdict permits implementation.
+
+## R35.20 Plan Audit Record
+
+| Round | Revision | Full scope | Blocking findings | Result | Reference |
+|---|---|---|---|---|---|
+| 1 | R35 | yes | B-01 R35 excludes the retained R34 13-file/1189-line implementation from the user’s literal 6-file/300-line final-delivery budget | BLOCK | `ses_05ff42370ffeEFgu6MWsZu8F76` |
+
+R34's clean implementation audit remains historical evidence for the baseline;
+it is not an approval of the R36 integration delta. R36 remains
+`audit-required`, with `Approved revision: none` and `Implementation allowed: no`.
+
+## R36.1 Explicit Budget Authorization
+
+The user resolved R35 audit finding B-01 with this decision:
+
+> 仅计算 R35 新增修正（推荐）
+>
+> 保留已提交且已审计的 R34 作为基线；R35 只修 rebase/hidden/无 chronology
+> 整合，新增 delta 严格 <300 行、≤6 文件
+
+This is a path-specific scope authorization, not permission to add any new
+behavior. R36 keeps the exact three-file R35 correction plan, preserves the
+R34 baseline without source changes outside the rebase replay, and measures the
+implementation delta relative to the conflict-free post-R34/upstream baseline.
+Any delta outside the three listed paths or above 300 changed code/test lines
+requires another revision and audit.
+
+## R36.2 Plan Audit Record
+
+| Round | Revision | Full scope | Blocking findings | Result | Reference |
+|---|---|---|---|---|---|
+| 1 | R35 | yes | B-01 budget scope lacked explicit authorization | BLOCK | `ses_05ff42370ffeEFgu6MWsZu8F76` |
+| 2 | R36 | yes | B-01 R35 omitted the affected Compaction consumer from executable verification | BLOCK | `ses_05feb5696ffeciSEBsyPODqVmT` |
+| 3 | R37 | yes | B-01 canonical metadata declared `Audit mode: implementation` while the exact handoff and active contract required plan audit | BLOCK | `ses_05fe707faffenO93Ak4jRNi3Bm` |
+| 4 | R38 | yes | B-01 Goal Tool-start laziness and bounded scan cost lacked behavior-sensitive verification | BLOCK | `ses_05fe31f03ffefg6Rj2EPg5dQvt` |
+| 5 | R39 | yes | B-01 Goal laziness and bounded-scan verification left jitter, absolute, relative, and mutation thresholds to be established after the plan | BLOCK | `ses_05fdb718cffewitLSkjgL9DfIo` |
+| 6 | R40 | yes | none | APPROVE | `ses_05fcae166ffeAiLJLvLmJ1Ugbz` |
+
+## R37.1 Compaction Verification Correction
+
+The independent R36 plan audit identified the existing `SessionCompaction ->
+MessageV2.filterCompacted` consumer as an affected public production seam that
+was missing from the R35 executable verification table. R37 adds the existing
+package-local `test/session/compaction.test.ts` suite only; it adds no production
+concept, no second visibility path, and no new file. The test command must cover
+hidden Message/Part replay, failed/newer Compaction markers, partial visibility,
+and the valid structural boundary behavior already owned by
+`MessageV2.filterCompacted` and `CompactionBoundary`.
+
+R37 otherwise preserves the exact R36 design and the user-authorized R35 delta
+budget. The changed-file count remains three and the hard delta remains below
+300 code/test lines.
+
+## R38.1 Audit-Phase Metadata Correction
+
+The R37 audit identified a canonical metadata mismatch. R38 changes only the
+plan header from `Audit mode: implementation` to `Audit mode: plan`, matching
+the active `Status: audit-required`, `Approved revision: none`,
+`Implementation allowed: no`, and the plan-audit handoff. No behavior, owner,
+file, test, budget, or fallback decision changes in R38.
+
+## R40.1 Goal Query Timing and Lazy-Boundary Verification
+
+R40 fixes the R39 audit blocker by removing the unsupported ordinary-step red
+claim and keeping only an executable red path for behavior that is actually
+wrong in the rebase input: the full-history implementation of
+`MessageV2.goalChronology` at real Goal Tool startup. The existing Prompt
+loader already calls that query only through the Goal Tool adapter; R40 must
+not move it, duplicate it, or add a timing-only production seam.
+
+The recorded production-DB reproduction used a 5,405-Message/20,834-Part
+Session and measured full chronology at `median=70.5 ms` (`min=65.2`,
+`max=437.1`). The same evidence measured raw proof at `13.0 ms` versus
+full-history row decode at `88.9 ms`, a `75.9 ms` old-history-dependent gap.
+These are fixed calibration values, not thresholds chosen after implementation.
+
+1. In `messages-pagination.test.ts`, run the exported Goal query over two fixed
+   cohorts with the same newest two eligible turns: `S=256` older Messages and
+   `L=6,326` older Messages, each with the same fixed Part shape. Warm each
+   cohort, collect 20 samples for each of three repetitions, use nearest-rank
+   p95 (sample 19), and take the median of the three p95 values. The fixed
+   acceptance rule is `p95(L) - p95(S) <= 45 ms` and `p95(L) <= 100 ms`. The
+   recorded 75.9-ms full-history gap fails the first rule even when both paths
+   return the same two IDs; the absolute limit prevents a uniformly slow full
+   scan from hiding behind a noisy small cohort.
+2. In `prompt.test.ts`, retain the existing real Goal Tool transitions and
+   assert current/previous IDs after a Tool `read`. The ordinary Provider path
+   is covered by the production call-path contract: `goalChronology` appears
+   only inside the cached loader passed to `resolveTools`, and the structural
+   no-`MessageV2.chronology` check rejects a loop-head/full export. This is a
+   regression proof for the already-correct lazy boundary, not a fabricated
+   timing red test.
+3. The pre-implementation red command is the existing pagination performance
+   test with the rebase full-scan branch retained; its measured large-minus-
+   small gap must be recorded as `>45 ms`. The green command emits exactly one
+   line in this shape for each repetition and one selected-median line:
+
+   ```text
+   goal-query-scale repetition=1 small_p95_ms=<n> large_p95_ms=<n> delta_ms=<n>
+   goal-query-scale median small_p95_ms=<n> large_p95_ms=<n> delta_ms=<n>
+   ```
+
+   The implementation evidence records those values and the exact red
+   mutation command, so the fixed limits are independently reviewable rather
+   than inferred from a pass/fail result.
+
+Tests do not inspect source beyond the required structural absence check, count
+private-helper calls, add production telemetry, or mock Database internals.
+R40 adds no production concept and no fallback.
+
+## R40.2 Changed-Path Scope Correction
+
+R37's historical “three files” statement predates the affected Prompt behavior
+test being included in the integration correction. R39/R40 formally supersede
+that count: the exact active list is the four paths in R35.13, with
+`prompt.test.ts` required to preserve the real Goal/Plugin consumer contract.
+No fifth or sixth path is authorized, and the `<300` delta still applies only
+to this post-R34 integration correction.
+
+## R40.3 Plan Approval
+
+Round-6 verdict recorded verbatim:
+
+> **APPROVE — exact canonical plan revision R40 only.**
+
+The exact R40 revision is approved for implementation. The approved owner,
+four changed paths, `<300` integration delta, primary path, fixed performance
+limits, and no-fallback boundary are unchanged by this administrative record.
