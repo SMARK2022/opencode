@@ -1,174 +1,316 @@
 From 589d2624d7cc43b6adb0ab307e668f46bada73bd Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Mon, 18 May 2026 00:50:46 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E5=AD=97=E7=AC=A6?=
- =?UTF-8?q?=E4=B8=B2=E6=88=AA=E6=96=AD=E5=8A=9F=E8=83=BD=EF=BC=8C=E9=81=BF?=
- =?UTF-8?q?=E5=85=8D=E5=88=86=E5=89=B2=E4=BB=A3=E7=90=86=E5=AF=B9=EF=BC=8C?=
- =?UTF-8?q?=E6=B7=BB=E5=8A=A0=E7=9B=B8=E5=85=B3=E5=8D=95=E5=85=83=E6=B5=8B?=
- =?UTF-8?q?=E8=AF=95?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH] feat: 代理对安全截断与 GBK 门控，避免乱码中文
 
 
-diff --git a/packages/opencode/src/util/locale.ts b/packages/opencode/src/util/locale.ts
-index 49f60e9311908a547e3577b1b95ba1c7106f8699..a16c5582457014087e7c7248717b00d7218080cc 100644
---- a/packages/opencode/src/util/locale.ts
-+++ b/packages/opencode/src/util/locale.ts
-@@ -60,17 +60,26 @@ export function duration(input: number) {
- 
- export function truncate(str: string, len: number): string {
-   if (str.length <= len) return str
--  return str.slice(0, len - 1) + "…"
-+  let end = len - 1
-+  // Avoid splitting a surrogate pair: if the cut lands on a high surrogate, step back
-+  if (end > 0 && str.charCodeAt(end - 1) >= 0xd800 && str.charCodeAt(end - 1) <= 0xdbff) end--
-+  return str.slice(0, end) + "…"
- }
- 
- export function truncateMiddle(str: string, maxLength: number = 35): string {
-   if (str.length <= maxLength) return str
- 
-   const ellipsis = "…"
--  const keepStart = Math.ceil((maxLength - ellipsis.length) / 2)
--  const keepEnd = Math.floor((maxLength - ellipsis.length) / 2)
-+  let keepStart = Math.ceil((maxLength - ellipsis.length) / 2)
-+  let keepEnd = Math.floor((maxLength - ellipsis.length) / 2)
- 
--  return str.slice(0, keepStart) + ellipsis + str.slice(-keepEnd)
-+  // Avoid splitting a surrogate pair at the start boundary
-+  if (keepStart > 0 && str.charCodeAt(keepStart - 1) >= 0xd800 && str.charCodeAt(keepStart - 1) <= 0xdbff) keepStart--
-+  // Avoid splitting a surrogate pair at the end boundary
-+  const endStart = str.length - keepEnd
-+  if (endStart < str.length && str.charCodeAt(endStart) >= 0xdc00 && str.charCodeAt(endStart) <= 0xdfff) keepEnd--
-+
-+  return str.slice(0, keepStart) + ellipsis + str.slice(-keepEnd || undefined)
- }
- 
- export function pluralize(count: number, singular: string, plural: string): string {
 diff --git a/packages/opencode/src/util/text-decoding.ts b/packages/opencode/src/util/text-decoding.ts
-index f9bfad78b9366127c8a881b130c4eba01f299dae..56d681435c7652e599ba4bbc9d14dca015c2c843 100644
+index 1111111111..2222222222 100644
 --- a/packages/opencode/src/util/text-decoding.ts
 +++ b/packages/opencode/src/util/text-decoding.ts
-@@ -102,6 +102,66 @@ function looksBinary(bytes: Uint8Array) {
+@@ -115,6 +115,99 @@
    return controls >= 4 || controls / bytes.length > 0.05
  }
  
 +/**
-+ * Validate whether non-ASCII bytes form plausible GBK/GB18030 multi-byte sequences.
-+ * GBK lead bytes are 0x81-0xFE, trail bytes are 0x40-0xFE (excluding 0x7F).
-+ * Returns true only if the bytes look like genuine Chinese-encoded text.
++ * #160：校验非 ASCII 是否构成可信 GBK/GB18030 双字节序列。
++ * 引导字节 0x81-0xFE，尾字节 0x40-0xFE（排除 0x7F）；任一离散高位字节即否决。
 + */
 +function looksLikeGBK(bytes: Uint8Array) {
++  // #160：短于双字节无法形成 GBK 对
 +  if (bytes.length < 2) return false
 +  let validPairs = 0
 +  let invalidBytes = 0
-+  let asciiCount = 0
 +  let i = 0
 +  while (i < bytes.length) {
 +    const b = bytes[i]
++    // #160：ASCII 单字节透传，不计入 GBK 对
 +    if (b < 0x80) {
-+      asciiCount++
 +      i++
 +      continue
 +    }
-+    // GBK lead byte range: 0x81-0xFE
++    // #160：GBK 引导字节区间；需成对消费尾字节
 +    if (b >= 0x81 && b <= 0xfe && i + 1 < bytes.length) {
 +      const trail = bytes[i + 1]
-+      // GBK trail byte range: 0x40-0xFE, excluding 0x7F
++      // #160：尾字节合法区间且排除 0x7F 控制空洞
 +      if (trail >= 0x40 && trail <= 0xfe && trail !== 0x7f) {
 +        validPairs++
 +        i += 2
 +        continue
 +      }
 +    }
-+    // Byte doesn't fit GBK pattern
++    // #160：无法落入 GBK 双字节则记为无效，整段不得回落 gb18030
 +    invalidBytes++
 +    i++
 +  }
++  // #160：零合法对说明没有任何中文双字节证据
 +  if (validPairs === 0) return false
-+  // Require ALL non-ASCII bytes to form valid GBK pairs (no stray bytes allowed)
++  // #160：要求全部非 ASCII 均成合法对，禁止夹杂离散高位字节
 +  return invalidBytes === 0
 +}
 +
 +/**
-+ * Check if the majority of the non-ASCII content is valid UTF-8 sequences.
-+ * Used to prefer UTF-8 with replacement over GB18030 when most content is valid UTF-8.
++ * #160：多数非 ASCII 已是合法 UTF-8 多字节时，优先 UTF-8 替换而非乱码中文。
++ * 用于“大体 UTF-8 + 少量坏字节”场景，避免误判为 CP936。
 + */
 +function mostlyUtf8(bytes: Uint8Array) {
++  // #160：分别累计合法/非法 UTF-8 多字节，供多数表决
 +  let validMultibyte = 0
 +  let invalidMultibyte = 0
 +  let i = 0
 +  while (i < bytes.length) {
 +    const b = bytes[i]
-+    if (b < 0x80) { i++; continue }
-+    if ((b & 0xe0) === 0xc0 && i + 1 < bytes.length && (bytes[i + 1] & 0xc0) === 0x80) { validMultibyte++; i += 2; continue }
-+    if ((b & 0xf0) === 0xe0 && i + 2 < bytes.length && (bytes[i + 1] & 0xc0) === 0x80 && (bytes[i + 2] & 0xc0) === 0x80) { validMultibyte++; i += 3; continue }
-+    if ((b & 0xf8) === 0xf0 && i + 3 < bytes.length && (bytes[i + 1] & 0xc0) === 0x80 && (bytes[i + 2] & 0xc0) === 0x80 && (bytes[i + 3] & 0xc0) === 0x80) { validMultibyte++; i += 4; continue }
++    // #160：ASCII 不参与多数表决
++    if (b < 0x80) {
++      i++
++      continue
++    }
++    // #160：2 字节 UTF-8（110xxxxx 10xxxxxx）
++    if ((b & 0xe0) === 0xc0 && i + 1 < bytes.length && (bytes[i + 1] & 0xc0) === 0x80) {
++      validMultibyte++
++      i += 2
++      continue
++    }
++    // #160：3 字节 UTF-8（1110xxxx 10xxxxxx 10xxxxxx）
++    if (
++      (b & 0xf0) === 0xe0 &&
++      i + 2 < bytes.length &&
++      (bytes[i + 1] & 0xc0) === 0x80 &&
++      (bytes[i + 2] & 0xc0) === 0x80
++    ) {
++      validMultibyte++
++      i += 3
++      continue
++    }
++    // #160：4 字节 UTF-8（11110xxx + 三个续字节）
++    if (
++      (b & 0xf8) === 0xf0 &&
++      i + 3 < bytes.length &&
++      (bytes[i + 1] & 0xc0) === 0x80 &&
++      (bytes[i + 2] & 0xc0) === 0x80 &&
++      (bytes[i + 3] & 0xc0) === 0x80
++    ) {
++      validMultibyte++
++      i += 4
++      continue
++    }
++    // #160：无法匹配 2/3/4 字节 UTF-8 形态则计为无效多字节
 +    invalidMultibyte++
 +    i++
 +  }
 +  const total = validMultibyte + invalidMultibyte
++  // #160：全 ASCII 段不适用 mostlyUtf8 偏好
 +  if (total === 0) return false
-+  // If more than half of the multi-byte sequences are valid UTF-8, prefer UTF-8
++  // #160：有效多字节序列多于无效时，判定为“大体 UTF-8”
 +  return validMultibyte > invalidMultibyte
 +}
 +
+ // #128：固定编码解码并返回 {text,encoding}
  function decodeWith(bytes: Uint8Array, encoding: TextEncoding) {
    return {
-     encoding,
-@@ -114,7 +174,9 @@ function decodeAutoSegment(bytes: Uint8Array) {
+@@ -125,11 +218,17 @@
+ 
+ // Decode a single segment: UTF-16 preferred, then UTF-8, then GB18030 legacy fallback, then UTF-8 replacement.
+ // #128：单段自动探测：unicode → utf-8 → gb18030 → utf-8
++// #160：gb18030 回落再与 looksLikeGBK / !mostlyUtf8 合取，保留 #128 魔数与控制密度门
+ function decodeAutoSegment(bytes: Uint8Array) {
++  // #160：BOM/NUL 识别的 unicode 仍最优先
    const detected = unicode(bytes)
    if (detected) return decodeWith(bytes, detected)
++  // #160：严格 UTF-8 通过则锁定 utf-8，跳过 legacy
    if (isUtf8(bytes)) return decodeWith(bytes, "utf-8")
 -  if (!looksBinary(bytes)) return decodeWith(bytes, "gb18030")
-+  // Only fall back to GB18030 if the bytes actually look like valid GBK sequences
-+  // AND the content doesn't look like mostly-valid UTF-8 with a few bad bytes
++  // #160：仅当非二进制、像真 GBK、且不像大体 UTF-8 时才回落 gb18030
++  // #160：!looksBinary 保留 #128 魔数与控制密度启发式，不替换只合取
 +  if (!looksBinary(bytes) && looksLikeGBK(bytes) && !mostlyUtf8(bytes)) return decodeWith(bytes, "gb18030")
++  // #160：默认 UTF-8 替换字符，避免二进制被译成中文
    return decodeWith(bytes, "utf-8")
  }
  
-diff --git a/packages/opencode/test/util/locale.test.ts b/packages/opencode/test/util/locale.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..88e160eaa42b39380d027b0d7fba46be5bfa83eb
---- /dev/null
-+++ b/packages/opencode/test/util/locale.test.ts
-@@ -0,0 +1,96 @@
-+import { describe, expect, test } from "bun:test"
-+import { truncate, truncateMiddle } from "@/util/locale"
+diff --git a/packages/opencode/test/util/text-decoding.test.ts b/packages/opencode/test/util/text-decoding.test.ts
+index 1111111111..2222222222 100644
+--- a/packages/opencode/test/util/text-decoding.test.ts
++++ b/packages/opencode/test/util/text-decoding.test.ts
+@@ -141,4 +141,89 @@
+     expect(decodeText(input).text).toContain("警告: DOM是内部专用 API")
+   })
+ 
++  // #160：无 NUL/魔数的随机高位字节不得回落 gb18030 产生乱码中文
++  test("random high bytes without NUL should not produce garbled Chinese", () => {
++    // Simulate a fragment of binary data that has no NUL bytes and no magic bytes
++    // but is clearly not valid text in any encoding — e.g., random bytes from a
++    // compiled binary or encrypted stream
++    // #160：随机高位字节样例（无 NUL、无已知魔数）
++    const input = bytes([
++      0x80, 0x91, 0xa2, 0xb3, 0xc4, 0xd5, 0xe6, 0xf7,
++      0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
++      0x81, 0x92, 0xa3, 0xb4, 0xc5, 0xd6, 0xe7, 0xf8,
++    ])
++    const result = decodeText(input)
++    // #160：应走 UTF-8 替换，而非 gb18030 乱码中文
++    expect(result.encoding).toBe("utf-8")
++  })
 +
++  // #160：大体 UTF-8 + 少量坏字节仍优先 UTF-8 替换
++  test("mixed UTF-8 text with a few invalid bytes uses UTF-8 with replacement", () => {
++    // Common scenario: mostly valid UTF-8 with a few corrupted bytes
++    const input = new Uint8Array([
++      ...utf8("hello "),
++      0xff, 0xfe, // invalid UTF-8 bytes
++      ...utf8(" world\n"),
++    ])
++    const result = decodeText(input)
++    // #160：期望编码保持 utf-8，文本仍可读
++    expect(result.encoding).toBe("utf-8")
++    expect(result.text).toContain("hello")
++    expect(result.text).toContain("world")
++  })
++
++  // #160：流式随机二进制不得输出乱码中文
++  test("streaming: random binary bytes do not produce garbled Chinese", () => {
++    const decoder = createAutoTextDecoder()
++    const output =
++      decoder.write(
++        bytes([0x80, 0x91, 0xa2, 0xb3, 0xc4, 0xd5, 0xe6, 0xf7, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
++      ) + decoder.end()
++    // Should contain replacement characters, not Chinese
++    expect(output).toContain("�")
++    expect(decoder.encoding()).toBe("utf-8")
++  })
++
++  // #160：UTF-8 文本后接二进制段，前文不得被编码锁定污染
++  test("streaming: UTF-8 text followed by binary does not corrupt text", () => {
++    const decoder = createAutoTextDecoder()
++    const output =
++      decoder.write(utf8("Build succeeded\n")) +
++      decoder.write(bytes([0x80, 0x91, 0xa2, 0xb3, 0xff, 0xfe, 0xfd, 0x0a])) +
++      decoder.write(utf8("Done.\n")) +
++      decoder.end()
++    expect(output).toContain("Build succeeded")
++    expect(output).toContain("Done.")
++    // The binary segment should use replacement chars, not Chinese
++    expect(output).toContain("�")
++  })
++
++  // #160：Java class 魔数（#128 hasMagic）不得当中文解码
++  test("Java class file bytes are detected as binary", () => {
++    // Java class file magic: 0xCA 0xFE 0xBA 0xBE
++    // #160：class 文件魔数 CAFEBABE 走 looksBinary
++    const input = bytes([0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x34])
++    const result = decodeText(input)
++    // Should NOT decode as GB18030 Chinese
++    expect(result.encoding).toBe("utf-8")
++  })
++
++  // #160：合法 GBK 对夹杂离散 0x80 时整体否决 gb18030
++  test("valid GBK with stray byte falls back to UTF-8", () => {
++    // 0xd6 0xd0 is valid GBK for "中", but 0x80 is not a valid GBK lead byte
++    const input = bytes([0xd6, 0xd0, 0x80, 0xce, 0xc4])
++    const result = decodeText(input)
++    // The stray 0x80 means this is not clean GBK
++    expect(result.encoding).toBe("utf-8")
++  })
++
++  // #160：纯合法 GBK 对仍正确回落 gb18030（与 #128/#130 兼容）
++  test("pure valid GBK pairs still decode correctly", () => {
++    // 0xd6 0xd0 = "中", 0xce 0xc4 = "文" — all valid GBK pairs
++    const input = bytes([0xd6, 0xd0, 0xce, 0xc4])
++    const result = decodeText(input)
++    // #160：纯 GBK 中文对必须仍可解码
++    expect(result.encoding).toBe("gb18030")
++    expect(result.text).toBe("中文")
++  })
+ })
+diff --git a/packages/tui/src/util/locale.ts b/packages/tui/src/util/locale.ts
+index 1111111111..2222222222 100644
+--- a/packages/tui/src/util/locale.ts
++++ b/packages/tui/src/util/locale.ts
+@@ -59,8 +59,13 @@
+ }
+ 
+ export function truncate(str: string, len: number): string {
++  // #160：长度未超限则原样返回
+   if (str.length <= len) return str
+-  return str.slice(0, len - 1) + "…"
++  // #160：预留一位给省略号，再按代理对安全调整 end
++  let end = len - 1
++  // #160：截断点落在高代理项上时回退一位，避免孤立半个 emoji/CJK 扩展字
++  if (end > 0 && str.charCodeAt(end - 1) >= 0xd800 && str.charCodeAt(end - 1) <= 0xdbff) end--
++  return str.slice(0, end) + "…"
+ }
+ 
+ export function truncateLeft(str: string, len: number): string {
+@@ -69,13 +74,22 @@
+ }
+ 
+ export function truncateMiddle(str: string, maxLength: number = 35): string {
++  // #160：未超 maxLength 时不改写路径/标题
+   if (str.length <= maxLength) return str
+ 
+   const ellipsis = "…"
+-  const keepStart = Math.ceil((maxLength - ellipsis.length) / 2)
+-  const keepEnd = Math.floor((maxLength - ellipsis.length) / 2)
++  // #160：中间省略时左右保留长度先按半分配，再按代理对微调
++  let keepStart = Math.ceil((maxLength - ellipsis.length) / 2)
++  let keepEnd = Math.floor((maxLength - ellipsis.length) / 2)
+ 
+-  return str.slice(0, keepStart) + ellipsis + str.slice(-keepEnd)
++  // #160：起始边界若切开代理对，缩短 keepStart 保留完整码点
++  if (keepStart > 0 && str.charCodeAt(keepStart - 1) >= 0xd800 && str.charCodeAt(keepStart - 1) <= 0xdbff) keepStart--
++  // #160：末尾边界若从低代理项起切，缩短 keepEnd 避免孤立低代理
++  const endStart = str.length - keepEnd
++  if (endStart < str.length && str.charCodeAt(endStart) >= 0xdc00 && str.charCodeAt(endStart) <= 0xdfff) keepEnd--
++
++  // #160：keepEnd 被减到 0 时 slice(-0) 会整串回退，改用 undefined 表示空尾
++  return str.slice(0, keepStart) + ellipsis + str.slice(-keepEnd || undefined)
+ }
+ 
+ export function pluralize(count: number, singular: string, plural: string): string {
+diff --git a/packages/tui/test/util/locale.test.ts b/packages/tui/test/util/locale.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1111111111111111111111111111111111111111
+--- /dev/null
++++ b/packages/tui/test/util/locale.test.ts
+@@ -0,0 +1,103 @@
++import { describe, expect, test } from "bun:test"
++import { truncate, truncateMiddle } from "../../src/util/locale"
++
++// #160：代理对安全截断单测（emoji / CJK 扩展 B）
 +describe("Locale.truncate", () => {
++  // #160：ASCII 基线：截断长度与省略号
 +  test("truncates ASCII string correctly", () => {
 +    expect(truncate("hello world", 5)).toBe("hell…")
 +    expect(truncate("hi", 5)).toBe("hi")
 +  })
 +
++  // #160：截断不得留下孤立高/低代理项
 +  test("does not split surrogate pairs (emoji)", () => {
 +    // 😀 is U+1F600, encoded as surrogate pair \uD83D\uDE00 in UTF-16
 +    // "a😀b" has .length === 4 (a + high surrogate + low surrogate + b)
 +    // truncate to len=3 should NOT produce an orphan high surrogate
 +    const str = "a😀b"
 +    const result = truncate(str, 3)
-+    // Should not contain an isolated surrogate
 +    for (let i = 0; i < result.length; i++) {
 +      const code = result.charCodeAt(i)
-+      // High surrogate without following low surrogate
 +      if (code >= 0xd800 && code <= 0xdbff) {
 +        const next = result.charCodeAt(i + 1)
 +        expect(next >= 0xdc00 && next <= 0xdfff).toBe(true)
 +      }
-+      // Orphan low surrogate
-+      expect(code >= 0xdc00 && code <= 0xdfff && (i === 0 || !(result.charCodeAt(i - 1) >= 0xd800 && result.charCodeAt(i - 1) <= 0xdbff))).toBe(false)
++      expect(
++        code >= 0xdc00 &&
++          code <= 0xdfff &&
++          (i === 0 || !(result.charCodeAt(i - 1) >= 0xd800 && result.charCodeAt(i - 1) <= 0xdbff)),
++      ).toBe(false)
 +    }
 +  })
 +
++  // #160：CJK 扩展 B 同样是代理对，截断边界须完整
 +  test("does not split surrogate pairs (CJK extension B)", () => {
 +    // 𠀀 is U+20000, a CJK Unified Ideograph Extension B character
 +    // encoded as surrogate pair \uD840\uDC00
 +    const str = "ab𠀀cd"
 +    // str.length === 6: a, b, \uD840, \uDC00, c, d
-+    // truncate to 4 means slice(0, 3) + "…"
-+    // slice(0, 3) = "ab\uD840" — orphan high surrogate!
++    // truncate to 4 means naive slice(0, 3) + "…" would orphan high surrogate
 +    const result = truncate(str, 4)
 +    for (let i = 0; i < result.length; i++) {
 +      const code = result.charCodeAt(i)
@@ -179,11 +321,11 @@ index 0000000000000000000000000000000000000000..88e160eaa42b39380d027b0d7fba46be
 +    }
 +  })
 +
++  // #160：纯 emoji 串截断后仍可迭代码点
 +  test("handles string of only emoji", () => {
 +    const str = "😀😁😂"
 +    // .length === 6
 +    const result = truncate(str, 3)
-+    // Should be valid unicode
 +    for (const char of result) {
 +      expect(char.codePointAt(0)).toBeGreaterThan(0)
 +    }
@@ -191,12 +333,14 @@ index 0000000000000000000000000000000000000000..88e160eaa42b39380d027b0d7fba46be
 +})
 +
 +describe("Locale.truncateMiddle", () => {
++  // #160：ASCII 中段省略长度恒定
 +  test("truncates middle of ASCII string", () => {
 +    const result = truncateMiddle("abcdefghij", 7)
 +    expect(result.length).toBe(7)
 +    expect(result).toContain("…")
 +  })
 +
++  // #160：中段省略的起始边界不得切开代理对
 +  test("does not split surrogate pairs at start boundary", () => {
 +    // "😀😁😂😃😄" — 5 emoji, .length === 10
 +    const str = "😀😁😂😃😄"
@@ -214,6 +358,7 @@ index 0000000000000000000000000000000000000000..88e160eaa42b39380d027b0d7fba46be
 +    }
 +  })
 +
++  // #160：路径中间含 emoji 时，尾部边界同样代理对安全
 +  test("does not split surrogate pairs at end boundary", () => {
 +    const str = "path/to/😀😁😂/file.txt"
 +    const result = truncateMiddle(str, 15)
@@ -230,89 +375,3 @@ index 0000000000000000000000000000000000000000..88e160eaa42b39380d027b0d7fba46be
 +    }
 +  })
 +})
-diff --git a/packages/opencode/test/util/text-decoding.test.ts b/packages/opencode/test/util/text-decoding.test.ts
-index 56ba2156da94bdd92e08b81ff792295e452ffacf..99a6d5eefc46ce09e38c0e44cba5f92161ef32f4 100644
---- a/packages/opencode/test/util/text-decoding.test.ts
-+++ b/packages/opencode/test/util/text-decoding.test.ts
-@@ -146,4 +146,81 @@ describe("text-decoding", () => {
-     expect(output).toContain("�")
-     expect(decoder.encoding()).toBe("utf-8")
-   })
-+
-+  test("random high bytes without NUL should not produce garbled Chinese", () => {
-+    // Simulate a fragment of binary data that has no NUL bytes and no magic bytes
-+    // but is clearly not valid text in any encoding — e.g., random bytes from a
-+    // compiled binary or encrypted stream
-+    const input = bytes([
-+      0x80, 0x91, 0xa2, 0xb3, 0xc4, 0xd5, 0xe6, 0xf7,
-+      0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-+      0x81, 0x92, 0xa3, 0xb4, 0xc5, 0xd6, 0xe7, 0xf8,
-+    ])
-+    const result = decodeText(input)
-+    // Should use UTF-8 with replacement characters, NOT produce random Chinese
-+    // The key assertion: if it falls back to gb18030, it would produce Chinese chars
-+    // like "€\u0091¢³ÄÕæ÷" or similar — we want UTF-8 replacement instead
-+    expect(result.encoding).toBe("utf-8")
-+  })
-+
-+  test("mixed UTF-8 text with a few invalid bytes uses UTF-8 with replacement", () => {
-+    // Common scenario: mostly valid UTF-8 with a few corrupted bytes
-+    const input = new Uint8Array([
-+      ...utf8("hello "),
-+      0xff, 0xfe, // invalid UTF-8 bytes
-+      ...utf8(" world\n"),
-+    ])
-+    const result = decodeText(input)
-+    expect(result.encoding).toBe("utf-8")
-+    expect(result.text).toContain("hello")
-+    expect(result.text).toContain("world")
-+  })
-+
-+  test("streaming: random binary bytes do not produce garbled Chinese", () => {
-+    const decoder = createAutoTextDecoder()
-+    const output = decoder.write(bytes([
-+      0x80, 0x91, 0xa2, 0xb3, 0xc4, 0xd5, 0xe6, 0xf7,
-+      0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-+    ])) + decoder.end()
-+    // Should contain replacement characters, not Chinese
-+    expect(output).toContain("�")
-+    expect(decoder.encoding()).toBe("utf-8")
-+  })
-+
-+  test("streaming: UTF-8 text followed by binary does not corrupt text", () => {
-+    const decoder = createAutoTextDecoder()
-+    const output =
-+      decoder.write(utf8("Build succeeded\n")) +
-+      decoder.write(bytes([0x80, 0x91, 0xa2, 0xb3, 0xff, 0xfe, 0xfd, 0x0a])) +
-+      decoder.write(utf8("Done.\n")) +
-+      decoder.end()
-+    expect(output).toContain("Build succeeded")
-+    expect(output).toContain("Done.")
-+    // The binary segment should use replacement chars, not Chinese
-+    expect(output).toContain("�")
-+  })
-+
-+  test("Java class file bytes are detected as binary", () => {
-+    // Java class file magic: 0xCA 0xFE 0xBA 0xBE
-+    const input = bytes([0xca, 0xfe, 0xba, 0xbe, 0x00, 0x00, 0x00, 0x34])
-+    const result = decodeText(input)
-+    // Should NOT decode as GB18030 Chinese
-+    expect(result.encoding).toBe("utf-8")
-+  })
-+
-+  test("valid GBK with stray byte falls back to UTF-8", () => {
-+    // 0xd6 0xd0 is valid GBK for "中", but 0x80 is not a valid GBK lead byte
-+    const input = bytes([0xd6, 0xd0, 0x80, 0xce, 0xc4])
-+    const result = decodeText(input)
-+    // The stray 0x80 means this is not clean GBK
-+    expect(result.encoding).toBe("utf-8")
-+  })
-+
-+  test("pure valid GBK pairs still decode correctly", () => {
-+    // 0xd6 0xd0 = "中", 0xce 0xc4 = "文" — all valid GBK pairs
-+    const input = bytes([0xd6, 0xd0, 0xce, 0xc4])
-+    const result = decodeText(input)
-+    expect(result.encoding).toBe("gb18030")
-+    expect(result.text).toBe("中文")
-+  })
- })

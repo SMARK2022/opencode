@@ -1,10 +1,12 @@
 From 4141d5e979ff532f2a6eff956a689a9a71b3d6f5 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Mon, 4 May 2026 19:58:19 +0800
-Subject: [PATCH] feat: 延迟测试，增加API URL的默认配置，优化模型API的获取逻辑
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=BB=B6=E8=BF=9F=E6=B5=8B=E8=AF=95?=
+ =?UTF-8?q?=EF=BC=8C=E5=A2=9E=E5=8A=A0API=20URL=E7=9A=84=E9=BB=98=E8=AE=A4?=
+ =?UTF-8?q?=E9=85=8D=E7=BD=AE=EF=BC=8C=E4=BC=98=E5=8C=96=E6=A8=A1=E5=9E=8B?=
 
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
-index d32678bf5f..8941aa9e62 100644
+index d32678bf5f..20ebf61fe4 100644
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
 @@ -37,6 +37,21 @@ const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
@@ -39,17 +41,36 @@ index d32678bf5f..8941aa9e62 100644
        npm: model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible",
      },
      status: model.status ?? "active",
-@@ -1450,7 +1466,8 @@ const layer = Layer.effect(
+@@ -1450,7 +1466,27 @@ const layer = Layer.effect(
            const existing = baseType ? database[baseType] : database[providerID]
            // 克隆现有提供者的模型，覆盖 providerID 和 api 配置
            const inheritedModels = existing
 -            ? Object.fromEntries(Object.entries(existing.models).map(([mid, model]) => [mid, { ...model, providerID: ProviderV2.ID.make(providerID), api: { ...model.api, npm: provider.npm ?? model.api.npm, url: provider.api ?? model.api.url ?? "" } }]))
-+            ? Object.fromEntries(Object.entries(existing.models).map(([mid, model]) => [mid, { ...model, providerID: ProviderV2.ID.make(providerID), api: { ...model.api, npm: provider.npm ?? model.api.npm, // 继承克隆：子 provider 覆盖 npm/api 后仍走默认映射
-+url: apiUrl({ npm: provider.npm ?? model.api.npm, api: provider.api ?? model.api.url }) } }]))
++            ? Object.fromEntries(
++                Object.entries(existing.models).map(([mid, model]) => {
++                  const npm = provider.npm ?? model.api.npm
++                  // #75：继承克隆覆盖 npm 后必须丢掉旧 variants，否则 npm 相等分支会复用 anthropic adaptive
++                  const next = {
++                    ...model,
++                    providerID: ProviderV2.ID.make(providerID),
++                    api: {
++                      ...model.api,
++                      npm,
++                      // 继承克隆：子 provider 覆盖 npm/api 后仍走默认映射
++                      url: apiUrl({ npm, api: provider.api ?? model.api.url }),
++                    },
++                  }
++                  if (npm !== model.api.npm) {
++                    // variants 置 undefined，触发后续 ProviderTransform.variants 按新 npm 重算
++                    ;(next as { variants?: Model["variants"] }).variants = undefined
++                  }
++                  return [mid, next]
++                }),
++              )
              : {}
            const parsed: Info = {
              id: ProviderV2.ID.make(providerID),
-@@ -1483,7 +1500,8 @@ const layer = Layer.effect(
+@@ -1483,7 +1519,8 @@ const layer = Layer.effect(
                api: {
                  id: apiID,
                  npm: apiNpm,

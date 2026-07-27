@@ -4,287 +4,310 @@ Date: Thu, 14 May 2026 01:23:29 +0800
 Subject: [PATCH] =?UTF-8?q?feat:=20=E6=9B=B4=E6=96=B0=E6=89=80=E6=9C=89?=
  =?UTF-8?q?=E5=8C=85=E7=9A=84=E7=89=88=E6=9C=AC=E5=8F=B7=E8=87=B31.14.41?=
  =?UTF-8?q?=EF=BC=8C=E7=A1=AE=E4=BF=9D=E4=B8=80=E8=87=B4=E6=80=A7=E5=92=8C?=
- =?UTF-8?q?=E5=85=BC=E5=AE=B9=E6=80=A7?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
 
 diff --git a/docs/VSIX-Packaging.md b/docs/VSIX-Packaging.md
-index d37c20c5947a8cc672de8206365e096b6f0665fb..dade149be8686c3ec610ec7c69601b9325662809 100644
+index 4b6322ffb1..cf1b3fde3f 100644
 --- a/docs/VSIX-Packaging.md
 +++ b/docs/VSIX-Packaging.md
-@@ -20,7 +20,7 @@ This VS Code extension provides an HTTP bridge server that connects the OpenCode
+@@ -1,3 +1,5 @@
++<!-- #141：本批仅协同升号，禁止回写 1.14.x -->
++<!-- #141：发布元数据 +1 与 install 指纹一致 -->
+ <!-- #96 VSIX打包：可复现手册；注释均域匹配且互不重复 -->
+ # OpenCode IDE Bridge — VSIX Packaging Guide
+ 
+@@ -24,7 +26,7 @@ This VS Code extension provides an HTTP bridge server that connects the OpenCode
  | `name` | `opencode-ide-bridge` |
  | `displayName` | `OpenCode IDE Bridge` |
  | `publisher` | `SMARK2022` |
--| `version` | `1.14.40` |
-+| `version` | `1.14.41` |
+-| `version` | `1.17.23` |
++| `version` | `1.17.24` |
  | `engines.vscode` | `^1.94.0` |
  | `main` | `./dist/extension.js` |
  | `license` | `MIT` |
-@@ -72,7 +72,7 @@ npx @vscode/vsce ls
+@@ -62,7 +64,8 @@ This runs `check-types && lint && node esbuild.js --production`.
+ 
+ <!-- #110：Windows/Bun 下 vsce 嵌套 npm prepublish 会丢 PATH；package.json 已删除该 hook -->
+ <!-- #110：vsix 必须 npm exec + --no-dependencies + dist 输出 -->
+-<!-- #110：扩展版本与 CLI 1.17.23-smark 对齐 -->
++<!-- #110：扩展版本与 CLI 1.17.24-smark 对齐 -->
++<!-- #141：vsix 与 opencode 主版本同号协同升号 -->
+ This project intentionally does not define `vscode:prepublish`. `vsce package` runs that hook through an internal `npm run vscode:prepublish` child process. In some Windows/Bun terminal environments that nested child process can lose `npm` from `PATH`, producing:
+ 
+ ```text
+@@ -87,7 +90,7 @@ npx @vscode/vsce ls
  
  ```powershell
  $env:PATH="C:\Users\Lenovo\.bun\bin;$env:PATH"
--npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.14.40.vsix"
-+npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.14.41.vsix"
+-npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.17.23.vsix"
++npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.17.24.vsix"
  ```
  
  The output file is written under `sdks/vscode/dist/` together with the compiled extension bundle.
-@@ -86,7 +86,7 @@ bun run vsix
- ## VSIX Artifact Structure
+@@ -103,7 +106,7 @@ bun run vsix
+ <!-- 「VSIX Artifact Structure」：回滚：uninstall 后清缓存再装旧包 -->
  
  ```
--dist/SMARK2022.opencode-ide-bridge-1.14.40.vsix
-+dist/SMARK2022.opencode-ide-bridge-1.14.41.vsix
+-dist/SMARK2022.opencode-ide-bridge-1.17.23.vsix
++dist/SMARK2022.opencode-ide-bridge-1.17.24.vsix
  ├─ [Content_Types].xml
  ├─ extension.vsixmanifest
  └─ extension/
-@@ -112,7 +112,7 @@ dist/SMARK2022.opencode-ide-bridge-1.14.40.vsix
- ### Local VSIX Install
+@@ -132,7 +135,7 @@ dist/SMARK2022.opencode-ide-bridge-1.17.23.vsix
+ <!-- 「Local VSIX Install」：scripts.vsix 的 dist 输出是安装契约 -->
  
  ```powershell
--code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.40.vsix --force
-+code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.41.vsix --force
+-code --install-extension .\dist/SMARK2022.opencode-ide-bridge-1.17.23.vsix --force
++code --install-extension .\dist/SMARK2022.opencode-ide-bridge-1.17.24.vsix --force
  ```
  
  ### From VS Code UI
-@@ -154,7 +154,7 @@ npx @vscode/vsce publish
+@@ -179,7 +182,7 @@ npx @vscode/vsce publish
  
  ```powershell
  npx ovsx create-namespace SMARK2022 -p <OPENVSX_TOKEN>
--npx ovsx publish .\dist\SMARK2022.opencode-ide-bridge-1.14.40.vsix -p <OPENVSX_TOKEN>
-+npx ovsx publish .\dist\SMARK2022.opencode-ide-bridge-1.14.41.vsix -p <OPENVSX_TOKEN>
+-npx ovsx publish .\dist/SMARK2022.opencode-ide-bridge-1.17.23.vsix -p <OPENVSX_TOKEN>
++npx ovsx publish .\dist/SMARK2022.opencode-ide-bridge-1.17.24.vsix -p <OPENVSX_TOKEN>
  ```
  
  ## CLI Integration
 diff --git a/packages/app/package.json b/packages/app/package.json
-index 45908e45b843a5192879ead9d9ae75489f55550a..600c011b6b3f3becab946b2fc1bdb601f29d5932 100644
+index f0c138f887..9c4db3f36f 100644
 --- a/packages/app/package.json
 +++ b/packages/app/package.json
 @@ -1,6 +1,6 @@
  {
    "name": "@opencode-ai/app",
--  "version": "1.14.40",
-+  "version": "1.14.41",
+-  "version": "1.17.21",
++  "version": "1.17.22",
    "description": "",
    "type": "module",
    "exports": {
 diff --git a/packages/console/app/package.json b/packages/console/app/package.json
-index 71d37d15538ac431ba46ecd720f27db64b98f9db..7634b4ed8260093fe737dee1a40e8755bc8bf025 100644
+index bed97a115f..a3d33a730c 100644
 --- a/packages/console/app/package.json
 +++ b/packages/console/app/package.json
 @@ -1,6 +1,6 @@
  {
    "name": "@opencode-ai/console-app",
--  "version": "1.14.40",
-+  "version": "1.14.41",
+-  "version": "1.17.21",
++  "version": "1.17.22",
    "type": "module",
    "license": "MIT",
    "scripts": {
 diff --git a/packages/console/core/package.json b/packages/console/core/package.json
-index c1acfab6e0b7bdda024862ab698eaa6c78b588c3..4ca29eb4c7df85ea45fdd47b9c477aa1c41eebb7 100644
+index 03bd1010c9..b39dd7b6dd 100644
 --- a/packages/console/core/package.json
 +++ b/packages/console/core/package.json
 @@ -1,7 +1,7 @@
  {
    "$schema": "https://json.schemastore.org/package.json",
    "name": "@opencode-ai/console-core",
--  "version": "1.14.40",
-+  "version": "1.14.41",
+-  "version": "1.17.21",
++  "version": "1.17.22",
    "private": true,
    "type": "module",
    "license": "MIT",
 diff --git a/packages/console/function/package.json b/packages/console/function/package.json
-index 9c0ce79d74777a9179d83c171069e4bace58c64d..7e1d77d7dc548a7dcc6a4acf25446b8627920389 100644
+index faa434da52..d9037d1d0a 100644
 --- a/packages/console/function/package.json
 +++ b/packages/console/function/package.json
 @@ -1,6 +1,6 @@
  {
    "name": "@opencode-ai/console-function",
--  "version": "1.14.40",
-+  "version": "1.14.41",
+-  "version": "1.17.21",
++  "version": "1.17.22",
    "$schema": "https://json.schemastore.org/package.json",
    "private": true,
    "type": "module",
 diff --git a/packages/console/mail/package.json b/packages/console/mail/package.json
-index d9648b324314fc127f74585295a4cd15e37e79d8..34ddd073f0ecf6b20390c18739dd704a20fd5a33 100644
+index 0b7aedf791..0582e22571 100644
 --- a/packages/console/mail/package.json
 +++ b/packages/console/mail/package.json
 @@ -1,6 +1,6 @@
  {
    "name": "@opencode-ai/console-mail",
--  "version": "1.14.40",
-+  "version": "1.14.41",
+-  "version": "1.17.21",
++  "version": "1.17.22",
    "dependencies": {
      "@jsx-email/all": "2.2.3",
      "@jsx-email/cli": "1.4.3",
 diff --git a/packages/core/package.json b/packages/core/package.json
-index 9d92e96e1d144699a12057c5865c1441bf8e20fa..995ab18ee5333f18790cbf6171651fe99768e5cc 100644
+index 8f0972700d..33cb861903 100644
 --- a/packages/core/package.json
 +++ b/packages/core/package.json
 @@ -1,6 +1,6 @@
  {
    "$schema": "https://json.schemastore.org/package.json",
--  "version": "1.14.40",
-+  "version": "1.14.41",
+-  "version": "1.17.21",
++  "version": "1.17.22",
    "name": "@opencode-ai/core",
    "type": "module",
    "license": "MIT",
 diff --git a/packages/desktop/package.json b/packages/desktop/package.json
-index 431de79bc5529f5f1690e4dea69b9371e7b3df45..49e35c5db8d2d7021e46ccfc829b6cd9ca57a128 100644
+index 389f429438..46196d8840 100644
 --- a/packages/desktop/package.json
 +++ b/packages/desktop/package.json
 @@ -1,7 +1,7 @@
  {
    "name": "@opencode-ai/desktop",
    "private": true,
--  "version": "1.14.40",
-+  "version": "1.14.41",
+-  "version": "1.17.21",
++  "version": "1.17.22",
    "type": "module",
    "license": "MIT",
    "homepage": "https://opencode.ai",
 diff --git a/packages/enterprise/package.json b/packages/enterprise/package.json
-index 867d2155da7f204e8b2e98bbc3303b0068755f21..beccdb6991d40f4ada882aba2e39b271487fb345 100644
+index d8410f3f95..ddab229ae6 100644
 --- a/packages/enterprise/package.json
 +++ b/packages/enterprise/package.json
 @@ -1,6 +1,6 @@
  {
    "name": "@opencode-ai/enterprise",
--  "version": "1.14.40",
-+  "version": "1.14.41",
+-  "version": "1.17.21",
++  "version": "1.17.22",
    "private": true,
    "type": "module",
    "license": "MIT",
 diff --git a/packages/function/package.json b/packages/function/package.json
-index f5bd20d0be8bc78a331c9b5f3cf6a74b569433e9..70812ab10a5f4a04a39be04a723da4347838acce 100644
+index 6224e80a76..dee83e42f1 100644
 --- a/packages/function/package.json
 +++ b/packages/function/package.json
 @@ -1,6 +1,6 @@
  {
    "name": "@opencode-ai/function",
--  "version": "1.14.40",
-+  "version": "1.14.41",
+-  "version": "1.17.21",
++  "version": "1.17.22",
    "$schema": "https://json.schemastore.org/package.json",
    "private": true,
    "type": "module",
 diff --git a/packages/opencode/package.json b/packages/opencode/package.json
-index e04e820eeda12726d9d545ca84780bc81fdb21f2..ed66116440f6e47fee643f09aa7e20df96a78c0b 100644
+index 83a0f75342..022fe568ae 100644
 --- a/packages/opencode/package.json
 +++ b/packages/opencode/package.json
 @@ -1,6 +1,6 @@
  {
    "$schema": "https://json.schemastore.org/package.json",
--  "version": "1.14.40-smark",
-+  "version": "1.14.41-smark",
+-  "version": "1.17.23-smark",
++  "version": "1.17.24-smark",
+   "//version-note": "版本递增至 1.17.22-smark（#118 对齐版本一致性）",
    "name": "opencode",
    "type": "module",
-   "license": "MIT",
 diff --git a/packages/plugin/package.json b/packages/plugin/package.json
-index fa9e4214e8a3a2c732a276998c8a7d286c51ef3b..861208770c33cdb415183ab73511284d4112afc6 100644
+index b119774596..7481b63d29 100644
 --- a/packages/plugin/package.json
 +++ b/packages/plugin/package.json
 @@ -1,7 +1,7 @@
  {
    "$schema": "https://json.schemastore.org/package.json",
    "name": "@opencode-ai/plugin",
--  "version": "1.14.40",
-+  "version": "1.14.41",
+-  "version": "1.17.21",
++  "version": "1.17.22",
    "type": "module",
    "license": "MIT",
    "scripts": {
 diff --git a/packages/sdk/js/package.json b/packages/sdk/js/package.json
-index 8029d2c9ae989bea112134487762f71590e7a0fa..2959cba2dd07858cb312bcd5aaeb2f98a6c84862 100644
+index 83826b0ffa..1c68abc0d4 100644
 --- a/packages/sdk/js/package.json
 +++ b/packages/sdk/js/package.json
 @@ -1,7 +1,7 @@
  {
    "$schema": "https://json.schemastore.org/package.json",
    "name": "@opencode-ai/sdk",
--  "version": "1.14.40",
-+  "version": "1.14.41",
+-  "version": "1.17.21",
++  "version": "1.17.22",
    "type": "module",
    "license": "MIT",
    "scripts": {
 diff --git a/packages/slack/package.json b/packages/slack/package.json
-index 6d2cd71e3040e80abf27ba98168c1a43b3b13cbd..34175d66a22085053d6170f53b8acec417e6bf7c 100644
+index 0afe149026..59ada0a50b 100644
 --- a/packages/slack/package.json
 +++ b/packages/slack/package.json
 @@ -1,6 +1,6 @@
  {
    "name": "@opencode-ai/slack",
--  "version": "1.14.40",
-+  "version": "1.14.41",
+-  "version": "1.17.21",
++  "version": "1.17.22",
    "type": "module",
    "license": "MIT",
    "scripts": {
 diff --git a/packages/ui/package.json b/packages/ui/package.json
-index 3e875f7524c27ff9a1732e343ff9191e84f3e43f..fc065be9effdd3053a4f799691702031352eee57 100644
+index ba5202c030..8a65d74331 100644
 --- a/packages/ui/package.json
 +++ b/packages/ui/package.json
 @@ -1,6 +1,6 @@
  {
    "name": "@opencode-ai/ui",
--  "version": "1.14.40",
-+  "version": "1.14.41",
+-  "version": "1.17.21",
++  "version": "1.17.22",
    "type": "module",
    "license": "MIT",
-   "exports": {
+   "repository": {
 diff --git a/packages/web/package.json b/packages/web/package.json
-index 59390274d5dd2fa603aa86584f5d25102fd92841..252c81a295c4a7cbfeb3f559d8e9e33d263b240d 100644
+index db2e452239..ba18336903 100644
 --- a/packages/web/package.json
 +++ b/packages/web/package.json
 @@ -2,7 +2,7 @@
    "name": "@opencode-ai/web",
    "type": "module",
    "license": "MIT",
--  "version": "1.14.40",
-+  "version": "1.14.41",
+-  "version": "1.17.21",
++  "version": "1.17.22",
    "scripts": {
      "dev": "astro dev",
      "dev:remote": "VITE_API_URL=https://api.opencode.ai astro dev",
 diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
-index 25c7ccb4a362c95f97a9a430fcba941dda6a47c1..38b0dc0cc084913905f4015c4f4e5f14a75fb482 100644
+index 732ce13bb8..098fb2fcb3 100644
 --- a/sdks/vscode/README.md
 +++ b/sdks/vscode/README.md
-@@ -68,7 +68,7 @@ Build and package from the `sdks/vscode` directory:
- bun run check-types
- bun run lint
- bun run package
--npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.14.40.vsix"
-+npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o "dist/SMARK2022.opencode-ide-bridge-1.14.41.vsix"
- ```
+@@ -1,6 +1,8 @@
++<!-- #141：本批仅协同升号，禁止回写 1.14.x -->
+ # OpenCode IDE Bridge
  
- Or use the bundled shortcut:
-@@ -82,7 +82,7 @@ The shortcut builds first, then packages directly into `dist/`. It intentionally
- Install:
+ <!-- #97：品牌升级为 IDE Bridge，与 package displayName 对齐 -->
++<!-- #141：vsix 与 opencode 主版本同号协同升号 -->
+ Local HTTP bridge extension for [OpenCode](https://opencode.ai) IDE. Connects the OpenCode CLI daemon to VS Code's notebook, Jupyter kernel, and editor context APIs so the CLI can inspect and drive notebooks without remote LM tool proxies.
+ 
+ Extension ID: `SMARK2022.opencode-ide-bridge`
+@@ -90,7 +92,7 @@ bun run vsix
+ Install the generated package (path matches `scripts.vsix` output):
  
  ```powershell
--code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.40.vsix --force
-+code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.14.41.vsix --force
+-code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.17.23.vsix --force
++code --install-extension .\dist\SMARK2022.opencode-ide-bridge-1.17.24.vsix --force
  ```
  
- ## Architecture
+ ## Development
 diff --git a/sdks/vscode/package.json b/sdks/vscode/package.json
-index cb17c5df9420aa7a0785128189788138955a795a..30a5ba6906702dba4164c8e9f28b0f22a333a4cd 100644
+index e57d8ed986..8b73954085 100644
 --- a/sdks/vscode/package.json
 +++ b/sdks/vscode/package.json
 @@ -2,7 +2,7 @@
    "name": "opencode-ide-bridge",
    "displayName": "OpenCode IDE Bridge",
-   "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, workspace context sharing, and terminal integration — all on 127.0.0.1 with Bearer-token authentication.",
--  "version": "1.14.40.0",
-+  "version": "1.14.41.0",
-   "publisher": "SMARK2022",
+   "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, and workspace context sharing with the OpenCode CLI daemon.",
+-  "version": "1.17.23",
++  "version": "1.17.24",
    "homepage": "https://github.com/anomalyco/opencode",
+   "publisher": "SMARK2022",
    "repository": {
-@@ -100,7 +100,7 @@
-     ]
+@@ -101,7 +101,7 @@
    },
    "scripts": {
--    "vsix": "bun run package && bun x @vscode/vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.14.40.0.vsix",
-+    "vsix": "bun run package && bun x @vscode/vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.14.41.0.vsix",
+ 
+-    "vsix": "bun run package && npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.17.23.vsix",
++    "vsix": "bun run package && npm exec --yes --package @vscode/vsce -- vsce package --no-dependencies -o dist/SMARK2022.opencode-ide-bridge-1.17.24.vsix",
      "compile": "bun run check-types && bun run lint && node esbuild.js",
      "watch:esbuild": "node esbuild.js --watch",
      "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+diff --git a/packages/core/src/installation/version.ts b/packages/core/src/installation/version.ts
+index d8e2884f48..991251c0e2 100644
+--- a/packages/core/src/installation/version.ts
++++ b/packages/core/src/installation/version.ts
+@@ -1,4 +1,6 @@
+-// #133：版本号以 packages/opencode/package.json 的 1.17.23-smark 为准（文档/VSIX 同步）
++// #141：发布协同升号沿 tip 1.17.x-smark，禁止回写 1.14
++// #141：InstallationVersion 编译期注入，与 packages/opencode version 对齐
++// #133：版本号以 packages/opencode/package.json 的 1.17.24-smark 为准（文档/VSIX 同步）
+ // #133：禁止回写 original 1.14.x 以免与 tip baseline 冲突
+ // #133：scripts.vsix 产物文件名必须与 version 同号
+ // #133：InstallationVersion 读编译期 OPENCODE_VERSION，注释记录期望发布号

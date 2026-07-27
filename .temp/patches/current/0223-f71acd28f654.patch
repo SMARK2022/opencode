@@ -1,109 +1,61 @@
-From f71acd28f6549852fa2c997c5f38f225aaea8dd8 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Mon, 25 May 2026 03:47:51 +0800
-Subject: [PATCH] =?UTF-8?q?feat(vscode-bridge):=20=E5=A2=9E=E5=BC=BA=20VS?=
- =?UTF-8?q?=20Code=20=E6=A1=A5=E6=8E=A5=E6=8F=92=E4=BB=B6=E7=9A=84?=
- =?UTF-8?q?=E6=9D=83=E9=99=90=E6=A3=80=E6=9F=A5=E9=80=BB=E8=BE=91=EF=BC=8C?=
- =?UTF-8?q?=E7=A1=AE=E4=BF=9D=20notebook=20=E7=BC=96=E8=BE=91=E5=92=8C?=
- =?UTF-8?q?=E7=8E=AF=E5=A2=83=E6=93=8D=E4=BD=9C=E7=9A=84=E6=9D=83=E9=99=90?=
- =?UTF-8?q?=E7=AE=A1=E7=90=86=E6=9B=B4=E7=B2=BE=E7=A1=AE?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-
 diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
-index f07836710eab917b368d93ed38b13f6d244b5102..5fd3a25ed64d89cf68f4953f5d65727fdc0af48b 100644
+index f0a84c844c..c5d9253352 100644
 --- a/packages/opencode/src/plugin/vscode-bridge.ts
 +++ b/packages/opencode/src/plugin/vscode-bridge.ts
-@@ -170,6 +170,13 @@ export const VscodeBridgePlugin = async () => ({
+@@ -168,7 +168,13 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
        description: VscodeNotebookDescriptions.edit,
        args: editArgs,
        execute: async (args, context) => {
-+        // notebook 编辑是独立工具能力，必须使用自己的权限 key；否则 plan
+-        // 权限检查：在 V2 中通过 Effect 系统执行
++        // #223：notebook 编辑是独立工具能力，必须使用自己的权限 key；否则 plan
 +        // mode 对 vscode_notebook_edit 的 deny 不会覆盖到这里，只会落到通用
 +        // edit 规则，导致 notebook 写入权限和普通文件编辑权限混在一起。
 +        await ask(context, "vscode_notebook_edit", args)
-+        // 继续保留通用 edit 门禁：既有配置若用 permission.edit 禁止写入，
++        // #223：继续保留通用 edit 门禁：既有配置若用 permission.edit 禁止写入，
 +        // notebook cell 修改也不能绕过。顺序先专属后通用，确保更精确的
 +        // vscode_notebook_edit deny/ask 先表达，再由 edit 维持历史兼容边界。
          await ask(context, "edit", args)
          return {
            output: await call("/notebook/edit", args, context, 30_000),
-@@ -180,10 +187,16 @@ export const VscodeBridgePlugin = async () => ({
-     vscode_notebook_env: tool({
-       description: VscodeNotebookDescriptions.env,
-       args: envArgs,
--      execute: async (args, context) => ({
--        output: await call("/notebook/env", args, context, 120_000),
--        metadata: { endpoint: "/notebook/env" },
--      }),
-+      execute: async (args, context) => {
-+        // env 包含 configure/restart/save 等会改变 VS Code/Jupyter 状态的操作；
-+        // 即使 info 偏只读，也保持工具级权限和 agent 配置中的
-+        // vscode_notebook_env 完全一致，避免新增 operation 级配置面。
+@@ -188,6 +194,10 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
+         reason: z.string().optional().describe("Brief description of why this operation is being performed, shown to the user."),
+       },
+       execute: async (args, context) => {
++        // #223：env 包含 configure/restart/save 等会改变 VS Code/Jupyter 状态的操作；
++        // 即使 info 偏只读，也保持工具级权限和 agent 配置中的 vscode_notebook_env
++        // 完全一致，避免新增 operation 级配置面。
 +        await ask(context, "vscode_notebook_env", args)
-+        return {
-+          output: await call("/notebook/env", args, context, 120_000),
-+          metadata: { endpoint: "/notebook/env" },
-+        }
-+      },
-     }),
-   },
- })
-diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool/registry.ts
-index ecaf772253905d4eae0f988038a8b0def4ce51a3..1a6c81974acfa8b178e84617bb99c364bf431633 100644
---- a/packages/opencode/src/tool/registry.ts
-+++ b/packages/opencode/src/tool/registry.ts
-@@ -54,6 +54,7 @@ import { Reference } from "@/reference/reference"
- import { BackgroundJob } from "@/background/job"
- import { SessionStatus } from "@/session/status"
- import { RuntimeFlags } from "@/effect/runtime-flags"
-+import { EffectBridge } from "@/effect/bridge"
- 
- const log = Log.create({ service: "tool.registry" })
- 
-@@ -140,6 +141,10 @@ export const layer: Layer.Layer<
-     const state = yield* InstanceState.make<State>(
-       Effect.fn("ToolRegistry.state")(function* (ctx) {
-         const custom: Tool.Def[] = []
-+        // 插件工具的 execute 是普通 async 函数，会跨出当前 Effect fiber。
-+        // 这里捕获实例上下文，确保插件内部手动运行 context.ask 时仍使用
-+        // 当前项目的 InstanceRef，而不是落到全局运行时后丢失权限状态。
-+        const bridge = yield* EffectBridge.make()
- 
-         function fromPlugin(id: string, def: ToolDefinition): Tool.Def {
-           // Plugin tools still expose Zod args publicly; keep that compatibility
-@@ -160,7 +165,10 @@ export const layer: Layer.Layer<
-               Effect.gen(function* () {
-                 const pluginCtx: PluginToolContext = {
-                   ...toolCtx,
--                  ask: (req) => toolCtx.ask(req),
-+                  // 保持 @opencode-ai/plugin 的 ask 仍返回 Effect，同时把它绑定到
-+                  // 当前 tool execution 的实例上下文；插件可以继续用
-+                  // Effect.runPromise(context.ask(...))，但不会绕开项目级权限状态。
-+                  ask: (req) => bridge.run(toolCtx.ask(req)),
-                   directory: ctx.directory,
-                   worktree: ctx.worktree,
-                 }
+         // SMARK 统一 120s：configure 选核 UI + restart 不可用短窗
+         const timeout = 120_000
+         return {
 diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..72adfa3c302ca3a301c8ef65c468a50a76526b06
+index 0000000000..7af6e6361f
 --- /dev/null
 +++ b/packages/opencode/test/plugin/vscode-bridge.test.ts
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,141 @@
 +import { describe, expect, test } from "bun:test"
-+import { Effect } from "effect"
-+import type { ToolContext } from "@opencode-ai/plugin"
++import type { ToolContext, PluginInput } from "@opencode-ai/plugin"
 +import { VscodeBridgePlugin } from "@/plugin/vscode-bridge"
 +
++// #223：V2 的 ToolContext.ask 返回 Promise<void>，替代 V1 的 Effect.runPromise。
++// VscodeBridgePlugin 需要 PluginInput 参数，但函数体不使用 input，测试只验证
++// tool 定义和 execute 行为，因此传入最小 mock。
++// #223：插件在模块加载时就初始化 tool map——V2 的 tool() 工厂返回静态定义，
++// 不依赖 Effect runtime，所以顶层 await 安全
++const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)
++
 +describe("vscode bridge plugin", () => {
++  // #223：验证三个 notebook 变更工具在调用 bridge 前都经过各自专属权限 key；
++  // 如果权限层拒绝，execute 必须在本地终止，不能继续发起到 127.0.0.1 的 HTTP 调用。
 +  test("checks notebook mutation permissions before calling the VS Code bridge", async () => {
-+    const plugin = await VscodeBridgePlugin()
 +    const calls: Array<{ permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }> = []
 +    const stop = "stopped after permission check"
 +    const filePath = "F:\\project with spaces\\demo.ipynb"
 +
++    // #223：mock context 的 ask 记录每次权限调用的 key/patterns/always/metadata，
++    // 然后立即抛错阻止 execute 继续执行——这样测试只验证权限顺序，不依赖真实 bridge。
++    // #223：directory/worktree 设为含空格的 Windows 路径，验证 patterns 不被分词
 +    const context = (): ToolContext => ({
 +      sessionID: "ses_test",
 +      messageID: "msg_test",
@@ -112,19 +64,21 @@ index 0000000000000000000000000000000000000000..72adfa3c302ca3a301c8ef65c468a50a
 +      worktree: "F:\\project with spaces",
 +      abort: new AbortController().signal,
 +      metadata: () => undefined,
-+      ask(input) {
++      async ask(input) {
 +        calls.push({
 +          permission: input.permission,
 +          patterns: [...input.patterns],
 +          always: [...input.always],
 +          metadata: input.metadata,
 +        })
-+        // 这个错误是测试哨兵：权限层拒绝后，工具必须停止在本地，
-+        // 不能继续进入真实的 127.0.0.1 VS Code bridge 调用。
-+        return Effect.die(new Error(stop))
++        // #223：权限层拒绝后，工具必须停止在本地，不能继续进入真实的 127.0.0.1 VS Code bridge 调用。
++        throw new Error(stop)
 +      },
 +    })
 +
++    // #223：run 工具先经过 vscode_notebook_run 权限——这是 #178 已有的 ask，
++    // 测试中 ask 立即抛错，所以 execute 不会到达 call("/notebook/run", ...)
++    // #223：timeoutMs 设为 1_000 确保即使 ask 意外放行，bridge 调用也快速超时
 +    await expect(
 +      plugin.tool.vscode_notebook_run.execute(
 +        {
@@ -136,6 +90,8 @@ index 0000000000000000000000000000000000000000..72adfa3c302ca3a301c8ef65c468a50a
 +      ),
 +    ).rejects.toThrow(stop)
 +
++    // #223：edit 工具先经过 vscode_notebook_edit 专属权限，再经过通用 edit 权限；
++    // 专属 ask 抛错后不会到达 edit ask，验证专属门禁的优先级
 +    await expect(
 +      plugin.tool.vscode_notebook_edit.execute(
 +        {
@@ -149,6 +105,8 @@ index 0000000000000000000000000000000000000000..72adfa3c302ca3a301c8ef65c468a50a
 +      ),
 +    ).rejects.toThrow(stop)
 +
++    // #223：env 工具经过 vscode_notebook_env 专属权限——configure/restart/save
++    // 都会改变 Jupyter/VS Code 状态，不能用通用 edit 覆盖
 +    await expect(
 +      plugin.tool.vscode_notebook_env.execute(
 +        {
@@ -160,24 +118,32 @@ index 0000000000000000000000000000000000000000..72adfa3c302ca3a301c8ef65c468a50a
 +      ),
 +    ).rejects.toThrow(stop)
 +
++    // #223：三个工具各自只触发一个 ask（第一个 ask 就抛错），验证专属权限 key 顺序
 +    expect(calls.map((call) => call.permission)).toEqual([
 +      "vscode_notebook_run",
 +      "vscode_notebook_edit",
 +      "vscode_notebook_env",
 +    ])
++    // #223：patterns/always 绑定到 filePath——含空格的 Windows 路径也必须原样传递，
++    // 不能被 shell 分词或 URL 编码破坏
 +    for (const call of calls) {
 +      expect(call.patterns).toEqual([filePath])
 +      expect(call.always).toEqual([filePath])
++      // #223：metadata.args 保留原始参数，供权限 UI 展示操作详情
++      // #223：含空格路径不会被截断——patterns 和 metadata 同时验证
 +      expect(call.metadata.args).toMatchObject({ filePath })
 +    }
 +  })
 +
++  // #223：验证 notebook edit 的双层权限顺序——先 vscode_notebook_edit 后 edit；
++  // 如果 agent 配置只 deny 了 edit 而允许 vscode_notebook_edit，执行仍会在 edit 门禁停止
 +  test("keeps notebook edits covered by the generic edit permission gate", async () => {
-+    const plugin = await VscodeBridgePlugin()
 +    const filePath = "F:\\project with spaces\\demo.ipynb"
 +    const stop = "generic edit denied"
 +    const calls: string[] = []
 +
++    // #223：mock ask 只在 permission === "edit" 时抛错，vscode_notebook_edit 放行；
++    // 这样可以验证两个 ask 都被调用，且顺序是先专属后通用
 +    await expect(
 +      plugin.tool.vscode_notebook_edit.execute(
 +        {
@@ -195,50 +161,52 @@ index 0000000000000000000000000000000000000000..72adfa3c302ca3a301c8ef65c468a50a
 +          worktree: "F:\\project with spaces",
 +          abort: new AbortController().signal,
 +          metadata: () => undefined,
-+          ask(input) {
++          async ask(input) {
 +            calls.push(input.permission)
-+            return input.permission === "edit" ? Effect.die(new Error(stop)) : Effect.void
++            // #223：vscode_notebook_edit 通过后才在 edit 门禁拒绝，验证双层权限顺序
++            if (input.permission === "edit") throw new Error(stop)
 +          },
 +        },
 +      ),
 +    ).rejects.toThrow(stop)
 +
++    // #223：calls 必须精确匹配 ["vscode_notebook_edit", "edit"]——先专属后通用
 +    expect(calls).toEqual(["vscode_notebook_edit", "edit"])
 +  })
 +})
++// #223：文件末尾——两个测试覆盖 notebook 变更工具的权限专属化和双层 edit 门禁顺序
 diff --git a/packages/opencode/test/tool/registry.test.ts b/packages/opencode/test/tool/registry.test.ts
-index d796a8d4a7b83185ad53fd8444091b843d902bf9..35eb31bd1420f3946497cd651d515883c836d355 100644
+index 85445e2b9a..73dcfa8e6b 100644
 --- a/packages/opencode/test/tool/registry.test.ts
 +++ b/packages/opencode/test/tool/registry.test.ts
-@@ -389,6 +389,65 @@ describe("tool.registry", () => {
+@@ -476,6 +476,74 @@ describe("tool.registry", () => {
      }),
    )
  
++  // #223：插件工具的 execute 是普通 async 函数，会跨出当前 Effect fiber。
++  // V2 registry 的 fromPlugin 已通过 EffectBridge 把 ask 绑定到当前实例上下文；
++  // 这个测试验证插件内部 await context.ask(...) 仍使用正确的 InstanceState 目录。
 +  it.instance("preserves instance context when plugin tools run permission asks inside async execute", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
++      // #223：自定义工具写到 .opencode/tools/ask.ts，registry 会发现并加载它
 +      const customTools = path.join(test.directory, ".opencode", "tools")
++      // #223：plugin SDK 的 tool() 工厂从 plugin 包源码导入，保证和运行时一致
 +      const pluginTool = pathToFileURL(path.resolve(import.meta.dir, "../../../plugin/src/tool.ts")).href
-+      const globalWithEffect = globalThis as typeof globalThis & { __opencodeTestEffect?: typeof Effect }
-+      globalWithEffect.__opencodeTestEffect = Effect
-+      yield* Effect.addFinalizer(() =>
-+        Effect.sync(() => {
-+          delete globalWithEffect.__opencodeTestEffect
-+        }),
-+      )
 +      yield* Effect.promise(() => fs.mkdir(customTools, { recursive: true }))
 +      yield* Effect.promise(() =>
 +        Bun.write(
 +          path.join(customTools, "ask.ts"),
 +          [
 +            `import { tool } from ${JSON.stringify(pluginTool)}`,
-+            "const Effect = globalThis.__opencodeTestEffect",
-+            "if (!Effect) throw new Error('missing test Effect')",
 +            "export default tool({",
 +            "  description: 'ask tool',",
 +            "  args: {},",
++            // #223：V2 的 context.ask 返回 Promise<void>，插件直接 await 即可
 +            "  execute: async (_args, context) => {",
-+            "    await Effect.runPromise(context.ask({ permission: 'plugin_ask', patterns: ['*'], always: ['*'], metadata: { reason: 'inside-plugin-promise' } }))",
++            // #223：插件内部调用 ask 时传入 permission/patterns/always/metadata 四件套，
++            // registry 的 EffectBridge 会把它们转发到 V2 的 Tool.Context.ask Effect
++            "    await context.ask({ permission: 'plugin_ask', patterns: ['*'], always: ['*'], metadata: { reason: 'inside-plugin-promise' } })",
 +            "    return 'asked'",
 +            "  },",
 +            "})",
@@ -247,11 +215,17 @@ index d796a8d4a7b83185ad53fd8444091b843d902bf9..35eb31bd1420f3946497cd651d515883
 +        ),
 +      )
 +
++      // #223：加载自定义工具并从 registry 查找 ask 工具定义
++      // #223：registry.all() 会扫描 .opencode/tools/ 并用 V2 的 fromPlugin 加载
 +      const registry = yield* ToolRegistry.Service
 +      const loaded = (yield* registry.all()).find((tool) => tool.id === "ask")
 +      if (!loaded) throw new Error("custom ask tool was not loaded")
 +      const agents = yield* Agent.Service
++      // #223：asked 捕获插件内部 ask 调用时传入的 permission 值
 +      let asked: string | undefined
++      // #223：Tool.Context.ask 返回 Effect——registry 的 EffectBridge 会把它桥接到
++      // 插件的 Promise<void> ask；这里在 Effect 层直接检查 InstanceState.directory
++      // 是否等于当前测试目录，验证上下文没有在 async 边界丢失
 +      const result = yield* loaded.execute({}, {
 +        sessionID: SessionID.make("ses_test"),
 +        messageID: MessageID.make("msg_test"),
@@ -262,12 +236,16 @@ index d796a8d4a7b83185ad53fd8444091b843d902bf9..35eb31bd1420f3946497cd651d515883
 +        ask: (req) =>
 +          InstanceState.directory.pipe(
 +            Effect.map((dir) => {
++              // #223：如果 EffectBridge 丢失了实例上下文，dir 不会等于 test.directory
 +              expect(dir).toBe(test.directory)
 +              asked = req.permission
 +            }),
 +          ),
 +      } satisfies Tool.Context)
 +
++      // #223：插件返回 'asked' 表示 ask 通过后继续执行；permission 精确匹配 'plugin_ask'
++      // #223：如果 EffectBridge 丢失上下文，asked 会是 undefined 或 dir 断言先失败
++      // #223：这个测试不 mock callBridge——它只验证权限上下文传递，不验证 bridge 返回
 +      expect(result.output).toBe("asked")
 +      expect(asked).toBe("plugin_ask")
 +    }),

@@ -1,42 +1,720 @@
-From 1b8b8b9dae13973fba192e5f463d2fc96e051295 Mon Sep 17 00:00:00 2001
-From: SMARK <3222301373@qq.com>
-Date: Mon, 25 May 2026 14:44:49 +0800
-Subject: [PATCH] feat: add notebook editing capabilities and metadata handling
-
-- Introduced new `vscode_notebook_edit` tool to handle notebook edits, including tracking cell IDs and operations.
-- Enhanced `createPendingToolInputParser` to support notebook edit inputs and statistics.
-- Implemented detailed metadata handling for notebook edits, including before and after source tracking.
-- Added functionality to render notebook edit diffs and summaries in the TUI without exposing raw source.
-- Updated VS Code bridge to manage notebook edit calls and responses, ensuring compact metadata without full artifact text.
-- Enhanced tests to cover new notebook edit features, including diff rendering and metadata validation.
-
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index e14517a6f44d8be0899d050e91bbae07db98ed5e..b0101a5c9d51f62b9600695ab681db78230649b0 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -115,6 +115,7 @@ import {
+diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
+index c5d9253352..aa5dd1fe60 100644
+--- a/packages/opencode/src/plugin/vscode-bridge.ts
++++ b/packages/opencode/src/plugin/vscode-bridge.ts
+@@ -2,10 +2,21 @@
+ // Plugin 入口：注册 notebook bridge 工具并转发到 ide/vscode-bridge 客户端
+ import { Effect } from "effect"
+ import { tool, type ToolContext, type PluginInput, type Hooks } from "@opencode-ai/plugin"
++import { createTwoFilesPatch } from "diff"
+ import { z } from "zod"
+ import * as VscodeBridge from "@/ide/vscode-bridge"
+ import { VscodeNotebookDescriptions } from "./vscode-bridge-descriptions"
+ 
++// #224：Notebook 工具是 plugin tool，不能直接复用内置 edit/write 的专用 renderer。
++// 这个 fork-local metadata key 是 TUI 和 VS Code bridge 之间的内部展示契约：
++// 只让 generic renderer 选择性升级展示，不扩大 public plugin API，也不为每个
++// vscode_notebook_* 工具在 session/index.tsx 增加分支。
++const NOTEBOOK_METADATA_KEY = "vscodeNotebook"
++// #224：notebook edit diff 会持久化到 session part metadata；16KB 与现有工具输出
++// 默认内联上限保持同一量级，超过后只保留统计和摘要，避免大 cell/full replace
++// 把 notebook 源码整段复制进会话状态。
++const NOTEBOOK_DIFF_METADATA_MAX_CHARS = 16 * 1024
++
+ const requiredFilePath = {
+   filePath: z
+     .string()
+@@ -91,13 +102,14 @@ const editArgs = {
+     .describe("Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source."),
+ }
+ 
+-async function call(
++async function callRaw(
+   endpoint: string,
+   args: Record<string, unknown>,
+   context: Pick<ToolContext, "directory" | "abort">,
+   timeoutMs?: number,
+ ) {
+-  const value = await VscodeBridge.callBridge({
++  // #224：返回原始 bridge value，notebookResult 从中派生 summary + compact metadata
++  return await VscodeBridge.callBridge({
+     cwd: context.directory,
+     path: endpoint,
+     body: args,
+@@ -105,7 +117,213 @@ async function call(
+     signal: context.abort,
+     timeoutMs,
+   })
+-  return VscodeBridge.summaryOnly(value)
++}
++
++// #224：从 bridge 原始返回值派生 output summary + vscodeNotebook metadata；
++// metadata 只包含 TUI 展示需要的 compact 字段，不复制完整源码/artifact 文本
++function notebookResult(endpoint: string, args: Record<string, unknown>, value: unknown) {
++  const view = notebookView(endpoint, args, value)
++  return {
++    output: VscodeBridge.summaryOnly(value),
++    metadata: {
++      endpoint,
++      ...(view && { [NOTEBOOK_METADATA_KEY]: view }),
++    },
++  }
++}
++
++// #224：按 endpoint 分派到具体的 view 构建函数；每个 view 只保留 TUI 需要的字段
++function notebookView(endpoint: string, args: Record<string, unknown>, value: unknown) {
++  const data = recordValue(recordValue(value).data)
++  const path = stringValue(data.path) ?? stringValue(args.filePath)
++  // #224：summary view——cells 列表 + dirty/runtime 状态
++  if (endpoint === "/notebook/summary") {
++    return { view: "summary", path, dirty: booleanValue(data.dirty), runtime: stringValue(data.runtime), cells: compactCells(data.cells) }
++  }
++  // #224：source view——返回的行数/截断信息，不含源码文本
++  if (endpoint === "/notebook/source") {
++    return {
++      view: "source",
++      path,
++      target: stringValue(data.target),
++      cellId: stringValue(data.cellId) ?? stringValue(args.cellId),
++      returned: numberValue(data.returned),
++      totalLines: numberValue(data.totalLines),
++      truncated: booleanValue(data.truncated),
++    }
++  }
++  // #224：run view——cells 执行结果 + artifacts
++  if (endpoint === "/notebook/run") {
++    return {
++      view: "run",
++      path,
++      dirty: booleanValue(data.dirty),
++      runtime: stringValue(data.runtime),
++      target: stringValue(data.target),
++      completed: booleanValue(data.completed),
++      stoppedAt: numberValue(data.stoppedAt),
++      cells: compactRunCells(data.cells),
++    }
++  }
++  // #224：output view——单个 cell 的 artifacts 列表
++  if (endpoint === "/notebook/output") {
++    return {
++      view: "output",
++      path,
++      dirty: booleanValue(data.dirty),
++      runtime: stringValue(data.runtime),
++      cell: compactCell(data.cell),
++      artifacts: compactArtifacts(data.artifacts),
++    }
++  }
++  // #224：env view——操作状态 + guidance 文案
++  if (endpoint === "/notebook/env") {
++    return notebookEnvView(path, data)
++  }
++  // #224：edit view——从 before/after 源码生成 diff
++  if (endpoint === "/notebook/edit") {
++    return notebookEditView(path, args, data)
++  }
++}
++
++// #224：notebook edit view——从 beforeSource/afterSource 生成 unified diff，
++// #224：超过 16KB 只保留统计和 diffOmitted 标记
++function notebookEditView(path: string | undefined, args: Record<string, unknown>, data: Record<string, unknown>) {
++  const before = stringValue(data.beforeSource)
++  const after = stringValue(data.afterSource)
++  // #224：createTwoFilesPatch 生成 unified diff——两路径用 cell index + language 标记
++  const fullDiff = before !== undefined && after !== undefined && before !== after
++    ? createTwoFilesPatch(notebookDiffPath(path, data, "old"), notebookDiffPath(path, data, "new"), before, after)
++    : undefined
++  const stats = diffStats(fullDiff ?? "")
++  // #224：diff 超过 16KB 只保留统计，diff 设为 undefined，diffOmitted 标记 "too-large"
++  const diff = fullDiff && fullDiff.length <= NOTEBOOK_DIFF_METADATA_MAX_CHARS ? fullDiff : undefined
++  const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
++  return {
++    view: "edit",
++    path,
++    cellLabel: cellIndex === undefined ? undefined : `c${cellIndex + 1}`,
++    cellId: stringValue(args.cellId),
++    editType: stringValue(data.editType) ?? stringValue(args.editType),
++    cellCountBefore: numberValue(data.cellCountBefore),
++    cellCountAfter: numberValue(data.cellCountAfter),
++    dirty: booleanValue(data.dirty),
++    kind: stringValue(data.kind),
++    language: stringValue(data.language),
++    diff,
++    diffOmitted: fullDiff !== undefined && diff === undefined ? "too-large" : undefined,
++    added: stats.added,
++    removed: stats.removed,
++  }
++}
++
++// #224：notebook env view——从 status 派生 guidance 文案，让 agent 知道下一步
++function notebookEnvView(path: string | undefined, data: Record<string, unknown>) {
++  const operation = stringValue(data.operation)
++  const status = stringValue(data.status)
++  // #224：guidance 从 status 派生——让 agent 知道下一步操作
++  const guidance = status === "configured"
++    ? "Notebook is ready for cell execution."
++    : status === "selected"
++      ? "Proceed to run cells — the kernel will start on first execution."
++      : status === "needs-selection"
++        ? "Select a kernel manually from the notebook toolbar, then call configure to verify."
++        : status === "selection-requested"
++          ? "Retry configure or select a kernel manually."
++          : status === "failed"
++            ? "Check Jupyter/Python extensions and workspace trust."
++            : undefined
++  return {
++    view: "env",
++    path,
++    operation,
++    status,
++    guidance,
++    runtime: recordValue(data.runtime),
++    saved: booleanValue(data.saved),
++    beforeDirty: booleanValue(data.beforeDirty),
++    afterDirty: booleanValue(data.afterDirty),
++  }
++}
++
++// #224：diff 路径标签——用 path + cell index + language 组成虚拟文件名，
++// 让 diff component 能选对语法高亮
++function notebookDiffPath(path: string | undefined, data: Record<string, unknown>, fallback: string) {
++  const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
++  const language = stringValue(data.language)
++  return [path ?? "notebook", cellIndex === undefined ? undefined : `#c${cellIndex + 1}`, language ? `.${language}` : undefined]
++    .filter((item): item is string => Boolean(item))
++    .join("") || fallback
++}
++
++// #224：run cells 压缩——每个 cell 追加 artifacts 列表
++function compactRunCells(value: unknown) {
++  return arrayValue(value).map((item) => ({ ...compactCell(item), artifacts: compactArtifacts(recordValue(item).artifacts) }))
++}
++
++// #224：summary cells 压缩——只保留 TUI 需要的字段
++function compactCells(value: unknown) {
++  return arrayValue(value).map(compactCell)
++}
++
++// #224：只保留 TUI 需要的 cell 字段——i/id/kind/lang/lines/exec/existing_outs/first
++function compactCell(value: unknown) {
++  const item = recordValue(value)
++  return {
++    i: numberValue(item.i),
++    id: stringValue(item.id),
++    kind: stringValue(item.kind),
++    lang: stringValue(item.lang),
++    lines: numberValue(item.lines),
++    exec: stringValue(item.exec),
++    existing_outs: arrayValue(item.existing_outs).filter((entry): entry is string => typeof entry === "string"),
++    first: stringValue(item.first),
++  }
++}
++
++// #224：artifact 只保留 mime/bytes/preview/artifactPath——text 字段可能是大 stdout/json/blob，
++// 不复制进 session part metadata，完整内容仍在 bridge 返回的 artifact 文件中
++function compactArtifacts(value: unknown) {
++  return arrayValue(value).map((entry) => {
++    const item = recordValue(entry)
++    return {
++      mime: stringValue(item.mime),
++      bytes: numberValue(item.bytes),
++      preview: stringValue(item.preview),
++      artifactPath: stringValue(item.artifactPath),
++    }
++  })
++}
++
++// #224：从 diff 文本统计 added/removed 行数
++function diffStats(diff: string) {
++  const lines = diff.split("\n")
++  return {
++    added: lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length,
++    removed: lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length,
++  }
++}
++
++function recordValue(value: unknown): Record<string, unknown> {
++  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
++  return value as Record<string, unknown>
++}
++
++// #224：类型安全守卫——非数组返回空数组
++function arrayValue(value: unknown): unknown[] {
++  return Array.isArray(value) ? value : []
++}
++
++function stringValue(value: unknown) {
++  return typeof value === "string" ? value : undefined
++}
++
++function numberValue(value: unknown) {
++  return typeof value === "number" && Number.isFinite(value) ? value : undefined
++}
++
++function booleanValue(value: unknown) {
++  return typeof value === "boolean" ? value : undefined
+ }
+ 
+ // ask 适配：V2 的 ToolContext.ask 返回 Promise<void>，替代 V1 的 Effect.runPromise
+@@ -129,18 +347,12 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
+     vscode_notebook_summary: tool({
+       description: VscodeNotebookDescriptions.summary,
+       args: requiredFilePath,
+-      execute: async (args, context) => ({
+-        output: await call("/notebook/summary", args, context, 10_000),
+-        metadata: { endpoint: "/notebook/summary" },
+-      }),
++      execute: async (args, context) => notebookResult("/notebook/summary", args, await callRaw("/notebook/summary", args, context, 10_000)),
+     }),
+     vscode_notebook_source: tool({
+       description: VscodeNotebookDescriptions.source,
+       args: sourceArgs,
+-      execute: async (args, context) => ({
+-        output: await call("/notebook/source", args, context, 10_000),
+-        metadata: { endpoint: "/notebook/source" },
+-      }),
++      execute: async (args, context) => notebookResult("/notebook/source", args, await callRaw("/notebook/source", args, context, 10_000)),
+     }),
+     vscode_notebook_run: tool({
+       description: VscodeNotebookDescriptions.run,
+@@ -148,21 +360,14 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
+       execute: async (args, context) => {
+         await ask(context, "vscode_notebook_run", args)
+         const timeoutMs = args.timeoutMs ?? 300_000
+-        return {
+-          // run 工具描述：endCellId 为 range 信号，type 仅提示
+-          output: await call("/notebook/run", { ...args, timeoutMs }, context, timeoutMs + 5_000),
+-          metadata: { endpoint: "/notebook/run" },
+-        }
++        const body = { ...args, timeoutMs }
++        return notebookResult("/notebook/run", body, await callRaw("/notebook/run", body, context, timeoutMs + 5_000))
+       },
+     }),
+     vscode_notebook_output: tool({
+       description: VscodeNotebookDescriptions.output,
+       args: outputArgs,
+-      execute: async (args, context) => ({
+-        // 30s 覆盖 activate+restart；短于通用工具会误超时
+-        output: await call("/notebook/output", args, context, 30_000),
+-        metadata: { endpoint: "/notebook/output" },
+-      }),
++      execute: async (args, context) => notebookResult("/notebook/output", args, await callRaw("/notebook/output", args, context, 30_000)),
+     }),
+     vscode_notebook_edit: tool({
+       description: VscodeNotebookDescriptions.edit,
+@@ -176,10 +381,7 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
+         // notebook cell 修改也不能绕过。顺序先专属后通用，确保更精确的
+         // vscode_notebook_edit deny/ask 先表达，再由 edit 维持历史兼容边界。
+         await ask(context, "edit", args)
+-        return {
+-          output: await call("/notebook/edit", args, context, 30_000),
+-          metadata: { endpoint: "/notebook/edit" },
+-        }
++        return notebookResult("/notebook/edit", args, await callRaw("/notebook/edit", args, context, 30_000))
+       },
+     }),
+     vscode_notebook_env: tool({
+@@ -200,11 +402,7 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
+         await ask(context, "vscode_notebook_env", args)
+         // SMARK 统一 120s：configure 选核 UI + restart 不可用短窗
+         const timeout = 120_000
+-        return {
+-          output: await call("/notebook/env", args, context, timeout),
+-          // metadata 带回 operation，便于 agent 对账
+-          metadata: { endpoint: "/notebook/env", operation: args.operation },
+-        }
++        return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, timeout))
+       },
+     }),
+ 
+diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
+index 7af6e6361f..c54a6c10cf 100644
+--- a/packages/opencode/test/plugin/vscode-bridge.test.ts
++++ b/packages/opencode/test/plugin/vscode-bridge.test.ts
+@@ -1,25 +1,23 @@
+-import { describe, expect, test } from "bun:test"
++import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
+ import type { ToolContext, PluginInput } from "@opencode-ai/plugin"
+ import { VscodeBridgePlugin } from "@/plugin/vscode-bridge"
++import * as VscodeBridge from "@/ide/vscode-bridge"
++
++afterEach(() => {
++  mock.restore()
++})
+ 
+ // #223：V2 的 ToolContext.ask 返回 Promise<void>，替代 V1 的 Effect.runPromise。
+ // VscodeBridgePlugin 需要 PluginInput 参数，但函数体不使用 input，测试只验证
+ // tool 定义和 execute 行为，因此传入最小 mock。
+-// #223：插件在模块加载时就初始化 tool map——V2 的 tool() 工厂返回静态定义，
+-// 不依赖 Effect runtime，所以顶层 await 安全
+ const plugin = await VscodeBridgePlugin({} as unknown as PluginInput)
+ 
+ describe("vscode bridge plugin", () => {
+-  // #223：验证三个 notebook 变更工具在调用 bridge 前都经过各自专属权限 key；
+-  // 如果权限层拒绝，execute 必须在本地终止，不能继续发起到 127.0.0.1 的 HTTP 调用。
+   test("checks notebook mutation permissions before calling the VS Code bridge", async () => {
+     const calls: Array<{ permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }> = []
+     const stop = "stopped after permission check"
+     const filePath = "F:\\project with spaces\\demo.ipynb"
+ 
+-    // #223：mock context 的 ask 记录每次权限调用的 key/patterns/always/metadata，
+-    // 然后立即抛错阻止 execute 继续执行——这样测试只验证权限顺序，不依赖真实 bridge。
+-    // #223：directory/worktree 设为含空格的 Windows 路径，验证 patterns 不被分词
+     const context = (): ToolContext => ({
+       sessionID: "ses_test",
+       messageID: "msg_test",
+@@ -40,11 +38,8 @@ describe("vscode bridge plugin", () => {
+       },
+     })
+ 
+-    // #223：run 工具先经过 vscode_notebook_run 权限——这是 #178 已有的 ask，
+-    // 测试中 ask 立即抛错，所以 execute 不会到达 call("/notebook/run", ...)
+-    // #223：timeoutMs 设为 1_000 确保即使 ask 意外放行，bridge 调用也快速超时
+     await expect(
+-      plugin.tool.vscode_notebook_run.execute(
++      plugin.tool!.vscode_notebook_run.execute(
+         {
+           filePath,
+           cellId: "#VSC-12345678",
+@@ -54,10 +49,8 @@ describe("vscode bridge plugin", () => {
+       ),
+     ).rejects.toThrow(stop)
+ 
+-    // #223：edit 工具先经过 vscode_notebook_edit 专属权限，再经过通用 edit 权限；
+-    // 专属 ask 抛错后不会到达 edit ask，验证专属门禁的优先级
+     await expect(
+-      plugin.tool.vscode_notebook_edit.execute(
++      plugin.tool!.vscode_notebook_edit.execute(
+         {
+           filePath,
+           cellId: "#VSC-12345678",
+@@ -69,10 +62,8 @@ describe("vscode bridge plugin", () => {
+       ),
+     ).rejects.toThrow(stop)
+ 
+-    // #223：env 工具经过 vscode_notebook_env 专属权限——configure/restart/save
+-    // 都会改变 Jupyter/VS Code 状态，不能用通用 edit 覆盖
+     await expect(
+-      plugin.tool.vscode_notebook_env.execute(
++      plugin.tool!.vscode_notebook_env.execute(
+         {
+           filePath,
+           operation: "restart",
+@@ -82,34 +73,25 @@ describe("vscode bridge plugin", () => {
+       ),
+     ).rejects.toThrow(stop)
+ 
+-    // #223：三个工具各自只触发一个 ask（第一个 ask 就抛错），验证专属权限 key 顺序
+     expect(calls.map((call) => call.permission)).toEqual([
+       "vscode_notebook_run",
+       "vscode_notebook_edit",
+       "vscode_notebook_env",
+     ])
+-    // #223：patterns/always 绑定到 filePath——含空格的 Windows 路径也必须原样传递，
+-    // 不能被 shell 分词或 URL 编码破坏
+     for (const call of calls) {
+       expect(call.patterns).toEqual([filePath])
+       expect(call.always).toEqual([filePath])
+-      // #223：metadata.args 保留原始参数，供权限 UI 展示操作详情
+-      // #223：含空格路径不会被截断——patterns 和 metadata 同时验证
+       expect(call.metadata.args).toMatchObject({ filePath })
+     }
+   })
+ 
+-  // #223：验证 notebook edit 的双层权限顺序——先 vscode_notebook_edit 后 edit；
+-  // 如果 agent 配置只 deny 了 edit 而允许 vscode_notebook_edit，执行仍会在 edit 门禁停止
+   test("keeps notebook edits covered by the generic edit permission gate", async () => {
+     const filePath = "F:\\project with spaces\\demo.ipynb"
+     const stop = "generic edit denied"
+     const calls: string[] = []
+ 
+-    // #223：mock ask 只在 permission === "edit" 时抛错，vscode_notebook_edit 放行；
+-    // 这样可以验证两个 ask 都被调用，且顺序是先专属后通用
+     await expect(
+-      plugin.tool.vscode_notebook_edit.execute(
++     plugin.tool!.vscode_notebook_edit.execute(
+         {
+           filePath,
+           cellId: "#VSC-12345678",
+@@ -125,7 +107,7 @@ describe("vscode bridge plugin", () => {
+           worktree: "F:\\project with spaces",
+           abort: new AbortController().signal,
+           metadata: () => undefined,
+-          async ask(input) {
++          async ask(input: { permission: string; patterns: string[]; always: string[]; metadata: Record<string, unknown> }) {
+             calls.push(input.permission)
+             // #223：vscode_notebook_edit 通过后才在 edit 门禁拒绝，验证双层权限顺序
+             if (input.permission === "edit") throw new Error(stop)
+@@ -134,8 +116,235 @@ describe("vscode bridge plugin", () => {
+       ),
+     ).rejects.toThrow(stop)
+ 
+-    // #223：calls 必须精确匹配 ["vscode_notebook_edit", "edit"]——先专属后通用
+     expect(calls).toEqual(["vscode_notebook_edit", "edit"])
+   })
++
++  // #224：验证 notebook edit 从 bridge 返回的 beforeSource/afterSource 生成 diff metadata
++  // #224：notebookResult 从 bridge data 的 before/after 生成 unified diff 并写入 metadata
++  test("returns notebook edit diff metadata from bridge before and after source", async () => {
++    const filePath = "F:\\project with spaces\\analysis notebook.ipynb"
++    // #224：mock callBridge 返回包含 beforeSource/afterSource 的 data，notebookResult 从中生成 diff
++    // #224：anchorCellIndex=2 对应 c3（0-based index + 1）
++    const bridge = spyOn(VscodeBridge, "callBridge").mockResolvedValue({
++      ran: false,
++      summary: "Notebook edit: applied=true op=edit at=3 num_cells=4->4 dirty=true.",
++      data: {
++        path: filePath,
++        editType: "edit",
++        cellCountBefore: 4,
++        cellCountAfter: 4,
++        anchorCellIndex: 2,
++        dirty: true,
++        kind: "code",
++        language: "python",
++        beforeSource: "old value\n",
++        afterSource: "new value\nrendered diff line\n",
++      },
++    })
++
++    const result = await plugin.tool!.vscode_notebook_edit.execute(
++      {
++        filePath,
++        cellId: "#VSC-12345678",
++        editType: "edit",
++        newCode: "RAW_ONLY_SHOULD_NOT_RENDER",
++      },
++      allowContext(filePath),
++    )
++
++    // #224：bridge 被调用时路径和 endpoint 正确
++    // #224：summary 从 bridge 返回的 summary 字段提取，不改变
++    // #224：callBridge 的 path 参数是 /notebook/edit，filePath 是含空格的完整路径
++    expect(bridge).toHaveBeenCalledWith(expect.objectContaining({ path: "/notebook/edit", filePath }))
++    expect(result).toMatchObject({
++      output: "Notebook edit: applied=true op=edit at=3 num_cells=4->4 dirty=true.",
++      metadata: {
++        endpoint: "/notebook/edit",
++        vscodeNotebook: {
++          view: "edit",
++          path: filePath,
++          cellLabel: "c3",
++          editType: "edit",
++          cellCountBefore: 4,
++          cellCountAfter: 4,
++          dirty: true,
++          language: "python",
++          added: 2,
++          removed: 1,
++        },
++      },
++    })
++    // #224：diff 内容包含 before/after 的关键行
++    // #224：createTwoFilesPatch 生成 unified diff，- 行是 beforeSource，+ 行是 afterSource
++    if (typeof result === "object" && result && "metadata" in result) {
++      const metadata = result.metadata as Record<string, unknown>
++      const nb = metadata.vscodeNotebook as Record<string, unknown>
++      expect(nb.diff as string).toContain("-old value")
++      expect(nb.diff as string).toContain("+rendered diff line")
++    }
++  })
++
++  // #224：验证 notebook output metadata 不包含完整 artifact text
++  // #224：artifact 的 text 字段可能是大 stdout，不复制进 session part metadata
++  test("keeps notebook output metadata compact by excluding full artifact text", async () => {
++    const filePath = "F:\\project with spaces\\analysis notebook.ipynb"
++    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
++      ran: false,
++      summary: "Cell c3 id=#VSC-12345678 existing outputs: text.",
++      data: {
++        path: filePath,
++        dirty: false,
++        runtime: "Python 3.11",
++        cell: { i: 3, id: "#VSC-12345678", kind: "code", lang: "python", lines: 7, exec: "succeeded", existing_outs: ["text"], first: "df.head()" },
++        artifacts: [
++          {
++            mime: "text/plain",
++            bytes: 2048,
++            preview: "short preview",
++            text: "full text should not be persisted into metadata",
++            artifactPath: ".opencode/cache/notebook-outputs/analysis-cell-2-output-0-item-0.txt",
++          },
++        ],
++      },
++    })
++
++    const result = await plugin.tool!.vscode_notebook_output.execute(
++      { filePath, cellId: "#VSC-12345678" },
++      allowContext(filePath),
++    )
++
++    // #224：artifact 只保留 mime/bytes/preview/artifactPath，不包含 text
++    // #224：compactArtifacts 过滤掉了 text 字段，只保留 TUI 展示需要的元信息
++    // #224：artifactPath 指向 bridge 缓存的 artifact 文件，TUI 只展示路径不读内容
++    expect(result).toMatchObject({
++      metadata: {
++        vscodeNotebook: {
++          view: "output",
++          path: filePath,
++          artifacts: [
++            {
++              mime: "text/plain",
++              bytes: 2048,
++              preview: "short preview",
++              artifactPath: ".opencode/cache/notebook-outputs/analysis-cell-2-output-0-item-0.txt",
++            },
++          ],
++        },
++      },
++    })
++    // #224：序列化后的 metadata 不能包含完整 artifact text
++    // #224：这验证 compactArtifacts 确实排除了 text，不只是 toMatchObject 不检查它
++    // #224：JSON.stringify 会序列化整个 metadata，如果 text 泄漏会在这里被发现
++    expect(JSON.stringify(typeof result === "object" && result ? result.metadata : result)).not.toContain("full text should not be persisted")
++  })
++
++  // #224：验证 notebook insert 的 diff 标签使用插入位置的 cell index
++  // #224：insert 的 affectedCellIndex 从 0 开始，显示为 c4
++  test("labels notebook insert diff with the inserted cell index", async () => {
++    const filePath = "F:\\project with spaces\\analysis notebook.ipynb"
++    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
++      ran: false,
++      summary: "Notebook edit: applied=true op=insert at=4 num_cells=3->4 dirty=true.",
++      data: {
++        path: filePath,
++        editType: "insert",
++        cellCountBefore: 3,
++        cellCountAfter: 4,
++        anchorCellIndex: 2,
++        affectedCellIndex: 3,
++        dirty: true,
++        language: "python",
++        beforeSource: "",
++        afterSource: "print('new cell')\n",
++      },
++    })
++
++    const result = await plugin.tool!.vscode_notebook_edit.execute(
++      { filePath, cellId: "#VSC-anchor", editType: "insert", newCode: "print('new cell')" },
++      allowContext(filePath),
++    )
++
++    // #224：insert 的 cellLabel 使用 affectedCellIndex（从 0 开始），显示为 c4
++    // #224：insert 前 3 cells，插入后 4 cells，affectedCellIndex=3 对应 c4
++    // #224：diff 路径中包含 #c4 标签，供语法高亮使用
++    expect(result).toMatchObject({
++      metadata: {
++        vscodeNotebook: {
++          view: "edit",
++          cellLabel: "c4",
++          added: 1,
++          removed: 0,
++        },
++      },
++    })
++    if (typeof result === "object" && result && "metadata" in result) {
++      const metadata = result.metadata as Record<string, unknown>
++      const nb = metadata.vscodeNotebook as Record<string, unknown>
++      expect(nb.diff as string).toContain("#c4")
++    }
++  })
++
++  // #224：验证超过 16KB 的 diff 不持久化到 metadata，只保留 diffOmitted 标记
++  // #224：NOTEBOOK_DIFF_METADATA_MAX_CHARS=16KB，超过后 diff 设为 undefined
++  test("omits oversized notebook edit diffs from persisted metadata", async () => {
++    const filePath = "F:\\project with spaces\\large notebook.ipynb"
++    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
++      ran: false,
++      summary: "Notebook edit: applied=true op=edit at=1 num_cells=1->1 dirty=true.",
++      data: {
++        path: filePath,
++        editType: "edit",
++        cellCountBefore: 1,
++        cellCountAfter: 1,
++        anchorCellIndex: 0,
++        dirty: true,
++        beforeSource: "old\n",
++        afterSource: `${"new line\n".repeat(3000)}`,
++      },
++    })
++
++    const result = await plugin.tool!.vscode_notebook_edit.execute(
++      { filePath, cellId: "#VSC-large", editType: "edit", newCode: "ignored in mock" },
++      allowContext(filePath),
++    )
++
++    // #224：大 diff 被省略，diffOmitted 标记为 "too-large"
++    // #224：3000 行 newCode 生成的 diff 远超 16KB 限制
++    // #224：cellLabel=c1 因为 anchorCellIndex=0 对应 c1（0-based + 1）
++    expect(result).toMatchObject({
++      metadata: {
++        vscodeNotebook: {
++          view: "edit",
++          cellLabel: "c1",
++          diffOmitted: "too-large",
++        },
++      },
++    })
++    if (typeof result === "object" && result && "metadata" in result) {
++      const metadata = result.metadata as Record<string, unknown>
++      const nb = metadata.vscodeNotebook as Record<string, unknown>
++      expect(nb.diff).toBeUndefined()
++      // #224：序列化后的 metadata 不能包含重复的大段源码
++      // #224：这验证 afterSource 的内容没有被泄漏到 diffOmitted 的 metadata 中
++      expect(JSON.stringify(metadata)).not.toContain("new line\nnew line\nnew line")
++    }
++  })
+ })
+-// #223：文件末尾——两个测试覆盖 notebook 变更工具的权限专属化和双层 edit 门禁顺序
++
++// #224：allowContext 放行所有权限 ask——用于测试 notebookResult 输出而非权限顺序
++// #224：V2 的 Hooks.tool 是可选属性，测试中用 ! 断言 plugin.tool 总是存在
++function allowContext(filePath: string): ToolContext {
++  return {
++    sessionID: "ses_test",
++    messageID: "msg_test",
++    agent: "build",
++    directory: "F:\\project with spaces",
++    worktree: "F:\\project with spaces",
++    abort: new AbortController().signal,
++    metadata: () => undefined,
++    // #224：V2 的 ask 返回 Promise<void>——放行后继续到 callBridge mock
++    async ask(input) {
++      expect(input.patterns).toEqual([filePath])
++    },
++  }
++}
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index 8a24e2adf5..4d4a6ebfdb 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -65,6 +65,8 @@ import {
    PENDING_TOOL_INPUT_PROGRESS_INTERVAL,
    type PendingToolInputStats,
  } from "./pending-tool-input"
++// #224：notebook 工具的 inline/block 视图 seam——把 metadata.vscodeNotebook 翻译成 GenericTool 可消费的描述
 +import { useVscodeNotebookToolView } from "./notebook-tool"
- 
- addDefaultParsers(parsers.parsers)
- 
-@@ -1934,6 +1935,10 @@ type ToolProps<T> = {
+ import {
+   hasStreamingAssistant,
+   pendingAssistantID,
+@@ -2107,6 +2109,11 @@ function previewText(input: string, maxLines: number) {
+   return rows.slice(0, maxLines).join("\n") + "\n…"
  }
  
- const DEFAULT_BLOCK_CHAR_THRESHOLD = 800
-+// 工具标题只承担单行摘要职责，不能承载多行源码。这个阈值只影响
++// #224：工具标题只承担单行摘要职责，不能承载多行源码。这个阈值只影响
 +// generic/plugin tool 的标题参数展示；真实内容仍由完成态的 notebook diff/source
 +// card 或 generic output card 展示，避免 pending 阶段刷屏但不丢失结果可见性。
 +const TOOL_INPUT_VALUE_MAX_LENGTH = 120
- 
- function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD) {
-   const lines = input.split("\n")
-@@ -2008,28 +2013,69 @@ function GenericTool(props: ToolProps<any>) {
++
+ function GenericTool(props: ToolProps) {
    const { theme } = useTheme()
    const ctx = use()
-   const output = createMemo(() => props.output?.trim() ?? "")
+@@ -2121,37 +2128,86 @@ function GenericTool(props: ToolProps) {
+     if (expanded() || !collapsed().overflow) return output()
+     return collapsed().output
+   })
++  // #224：notebook 工具视图 seam——完成态从 metadata.vscodeNotebook 派生 block/inline 描述；
++  // #224：pending 态从 streaming raw parser 派生 inline 摘要。非 notebook 工具返回 undefined。
++  // #224：useVscodeNotebookToolView 是纯 derived memo——不读 VS Code，不产生副作用
 +  const pendingStats = createPendingToolInputStats(() => props.part)
 +  const notebook = useVscodeNotebookToolView({
 +    tool: () => props.tool,
@@ -48,10 +726,12 @@ index e14517a6f44d8be0899d050e91bbae07db98ed5e..b0101a5c9d51f62b9600695ab681db78
 +    width: () => ctx.width,
 +    diffWrapMode: ctx.diffWrapMode,
 +  })
++  // #224：notebookInline 只在 view.mode === "inline" 时有值——控制 Switch 的第一个 Match
 +  const notebookInline = createMemo(() => {
 +    const view = notebook()
 +    return view?.mode === "inline" ? view : undefined
 +  })
++  // #224：notebookBlock 只在 view.mode === "block" 时有值——控制 Switch 的第二个 Match
 +  const notebookBlock = createMemo(() => {
 +    const view = notebook()
 +    return view?.mode === "block" ? view : undefined
@@ -62,6 +742,7 @@ index e14517a6f44d8be0899d050e91bbae07db98ed5e..b0101a5c9d51f62b9600695ab681db78
 -      when={props.output && ctx.showGenericToolOutput()}
 -      fallback={
 +    <Switch>
++      {/* #224：notebook inline 视图——pending 态和完成态的轻量单行摘要 */}
 +      <Match when={notebookInline()}>
 +        {(view) => (
 +          <InlineTool icon={view().icon} pending={view().pending} complete={view().complete} part={props.part}>
@@ -69,6 +750,7 @@ index e14517a6f44d8be0899d050e91bbae07db98ed5e..b0101a5c9d51f62b9600695ab681db78
 +          </InlineTool>
 +        )}
 +      </Match>
++      {/* #224：notebook block 视图——完成态的 diff/source/summary/run/output/env card */}
 +      <Match when={notebookBlock()}>
 +        {(view) => (
 +          <BlockTool
@@ -77,26 +759,36 @@ index e14517a6f44d8be0899d050e91bbae07db98ed5e..b0101a5c9d51f62b9600695ab681db78
 +            maxLines={view().maxLines ?? 10}
 +            threshold={view().threshold ?? 20}
 +            totalLines={view().totalLines}
-+            totalChars={view().totalChars}
 +            preview={view().preview}
 +          >
 +            {view().body}
 +          </BlockTool>
 +        )}
 +      </Match>
++      {/* #94/#144：通用工具输出——保留折叠/展开逻辑，仅当有 output 且 showGenericToolOutput 时进入 */}
 +      <Match when={props.output && ctx.showGenericToolOutput()}>
 +        <BlockTool
 +          title={`# ${props.tool} ${input(props.input)}`}
 +          part={props.part}
++          onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
++          // #144：武装 BlockTool 内置折叠以启用 preview 主路径
 +          maxLines={10}
 +          threshold={20}
-+          totalLines={output().split("\n").length}
-+          totalChars={output().length}
-+          preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
++          totalLines={output().split(String.fromCharCode(10)).length}
++          // #144：通用工具折叠预览
++          preview={
++            collapsed().overflow ? <text fg={theme.text}>{previewText(output(), 10)}</text> : undefined
++          }
 +        >
-+          <text fg={theme.text}>{output()}</text>
++          <box gap={1}>
++            <text fg={theme.text}>{expanded() || !collapsed().overflow ? output() : limited()}</text>
++            <Show when={collapsed().overflow}>
++              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
++            </Show>
++          </box>
 +        </BlockTool>
 +      </Match>
++      {/* #224：无 output 或关闭 generic 输出时回退到 inline 单行摘要 */}
 +      <Match when={true}>
          <InlineTool icon="⚙" pending="Writing command..." complete={true} part={props.part}>
            {props.tool} {input(props.input)}
@@ -106,13 +798,22 @@ index e14517a6f44d8be0899d050e91bbae07db98ed5e..b0101a5c9d51f62b9600695ab681db78
 -      <BlockTool
 -        title={`# ${props.tool} ${input(props.input)}`}
 -        part={props.part}
+-        onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
+-        // #144：武装 BlockTool 内置折叠以启用 preview 主路径
 -        maxLines={10}
 -        threshold={20}
--        totalLines={output().split("\n").length}
--        totalChars={output().length}
--        preview={<text fg={theme.text}>{previewText(output(), 10)}</text>}
+-        totalLines={output().split(String.fromCharCode(10)).length}
+-        // #144：通用工具折叠预览
+-        preview={
+-          collapsed().overflow ? <text fg={theme.text}>{previewText(output(), 10)}</text> : undefined
+-        }
 -      >
--        <text fg={theme.text}>{output()}</text>
+-        <box gap={1}>
+-          <text fg={theme.text}>{expanded() || !collapsed().overflow ? output() : limited()}</text>
+-          <Show when={collapsed().overflow}>
+-            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+-          </Show>
+-        </box>
 -      </BlockTool>
 -    </Show>
 +      </Match>
@@ -120,14 +821,19 @@ index e14517a6f44d8be0899d050e91bbae07db98ed5e..b0101a5c9d51f62b9600695ab681db78
    )
  }
  
-@@ -3005,7 +3051,15 @@ function input(input: Record<string, any>, omit?: string[]): string {
+@@ -3509,7 +3565,20 @@ function input(input: Record<string, unknown>, omit?: string[]): string {
      return typeof value === "string" || typeof value === "number" || typeof value === "boolean"
    })
    if (primitives.length === 0) return ""
 -  return `[${primitives.map(([key, value]) => `${key}=${value}`).join(", ")}]`
-+  return `[${primitives.map(([key, value]) => `${key}=${inputValue(value)}`).join(", ")}]`
++    // #224：多行 string 参数在标题中只显示行数/字符数摘要，不刷屏
++  // #224：inputValue 对多行/超长值做截断，单行短值原样返回
++  return `[${primitives.map(([key, value]) => `${key}=${inputValue(value as string | number | boolean)}`).join(", ")}]`
 +}
 +
++// #224：标题参数值截断——多行 string 显示 <N lines, M chars>，
++// #224：单行超长 string 截断到 TOOL_INPUT_VALUE_MAX_LENGTH 并追加省略号
++// #224：这只影响 generic/plugin tool 的标题，不影响 notebook block card 的完整展示
 +function inputValue(value: string | number | boolean) {
 +  if (typeof value !== "string") return String(value)
 +  const lines = value.split("\n")
@@ -136,22 +842,22 @@ index e14517a6f44d8be0899d050e91bbae07db98ed5e..b0101a5c9d51f62b9600695ab681db78
 +  return value.slice(0, TOOL_INPUT_VALUE_MAX_LENGTH).trimEnd() + "..."
  }
  
- function filetype(input?: string) {
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx
+ function stringValue(value: unknown) {
+diff --git a/packages/tui/src/routes/session/notebook-tool.tsx b/packages/tui/src/routes/session/notebook-tool.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16dab55463bb
+index 0000000000..9d5c814b66
 --- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/notebook-tool.tsx
-@@ -0,0 +1,387 @@
++++ b/packages/tui/src/routes/session/notebook-tool.tsx
+@@ -0,0 +1,422 @@
 +import { createMemo, For, Show, type Accessor } from "solid-js"
 +import type { JSX } from "@opentui/solid"
 +import type { PendingToolInputStats } from "./pending-tool-input"
 +import { useTheme } from "../../context/theme"
 +import { usePathFormatter } from "../../context/path-format"
-+import { previewDiff } from "@tui/util/preview-diff"
-+import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
++import { previewDiff } from "../../util/preview-diff"
++import { filetype } from "../../util/filetype"
 +
-+// 这个文件只负责把 metadata.vscodeNotebook 翻译成 GenericTool 可消费的
++// #224：这个文件只负责把 metadata.vscodeNotebook 翻译成 GenericTool 可消费的
 +// inline/block 描述，不拥有 BlockTool/InlineTool 本身。这样 notebook 的差异化
 +// 展示集中在一个小 seam，同时保持上游 session/index.tsx 的工具 card 框架不被复制。
 +export type VscodeNotebookToolView =
@@ -186,7 +892,7 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +  const { theme, syntax } = useTheme()
 +  const pathFormatter = usePathFormatter()
 +  return createMemo<VscodeNotebookToolView | undefined>(() => {
-+    // 完成态优先使用 plugin 写入的 compact metadata；pending/running 阶段 metadata
++    // #224：完成态优先使用 plugin 写入的 compact metadata；pending/running 阶段 metadata
 +    // 尚不存在，只能用 streaming raw parser 提供的 file/cell/+/- 摘要，避免读 VS Code。
 +    const metadata = notebookMetadata(props.metadata())
 +    if (metadata) return blockView(metadata, props.output())
@@ -196,6 +902,8 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +
 +  function blockView(metadata: Record<string, unknown>, output: string): VscodeNotebookToolView | undefined {
 +    const view = stringValue(metadata.view)
++    // #224：view 字段分派到 edit/summary/source/run/output/env 六种 block 视图
++    // #224：未知 view 值返回 undefined，回退到 generic renderer
 +    if (view === "edit") return editView(metadata)
 +    if (view === "summary") return summaryView(metadata)
 +    if (view === "source") return textView(metadata, output, "Notebook source")
@@ -204,11 +912,14 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +    if (view === "env") return envView(metadata)
 +  }
 +
++  // #224：notebook inline 视图——pending 态从流式参数提取摘要，完成态回退到 inline
 +  function inlineView(tool: string, input: Record<string, unknown>, status: string, stats?: PendingToolInputStats): VscodeNotebookToolView {
 +    const op = stats?.operation ?? stringValue(input.editType) ?? stringValue(input.operation) ?? tool.replace("vscode_notebook_", "")
++    // #224：target 从 filePath 或 stats.filePath 派生——pathFormatter 统一格式化
 +    const target = notebookTarget(stringValue(input.filePath) ?? stats?.filePath)
 +    const cell = stats?.cellId ?? stringValue(input.cellId)
 +    const label = tool === "vscode_notebook_edit" ? notebookEditLabel(op) : notebookToolLabel(tool)
++    // #224：lineStats 是 pending 阶段的 +N/-N 色标，只在有统计时显示
 +    const lineStats = <NotebookPendingStats stats={stats} />
 +    const content = (
 +      <>
@@ -217,6 +928,7 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +    )
 +    return {
 +      mode: "inline",
++    // #224：icon 用 ← 表示 edit（写入），⚙ 表示其他 notebook 工具
 +      icon: tool === "vscode_notebook_edit" ? "←" : "⚙",
 +      complete: status !== "pending",
 +      pending: (
@@ -228,17 +940,20 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +    }
 +  }
 +
++  // #224：notebook edit block 视图——从 metadata.diff 渲染 diff card，无 diff 时显示 summary
 +  function editView(metadata: Record<string, unknown>): VscodeNotebookToolView {
 +    const diff = stringValue(metadata.diff) ?? ""
++    // #224：stats 从 metadata.added/removed 派生——如果 diff 被省略，stats 仍保留行数
 +    const stats = { added: numberValue(metadata.added) ?? 0, removed: numberValue(metadata.removed) ?? 0 }
 +    const title = [
 +      "←",
 +      notebookEditLabel(stringValue(metadata.editType)),
 +      notebookTarget(stringValue(metadata.path)),
 +      stringValue(metadata.cellLabel) ?? stringValue(metadata.cellId),
-+      stats.added > 0 || stats.removed > 0 ? `+${stats.added} -${stats.removed}` : undefined,
++        stats.added > 0 || stats.removed > 0 ? `+${stats.added} -${stats.removed}` : undefined,
 +    ].filter(Boolean).join(" ")
 +    const filePath = notebookDiffPath(metadata)
++    // #224：preview 用 previewDiff 截断到 10 行，body 用完整 diff
 +    return {
 +      mode: "block",
 +      title,
@@ -247,6 +962,7 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +      totalLines: diff.split("\n").length,
 +      totalChars: diff.length,
 +      preview: diff ? <NotebookDiff diff={previewDiff(diff, 10)} filePath={filePath} maxLines={10} /> : undefined,
++      // #224：body 在 diff 和 summary 之间用 Show 切换；diffOmitted 时显示提示
 +      body: (
 +        <box gap={1} flexDirection="column">
 +          <Show when={diff} fallback={<text fg={theme.text}>{summaryLine(metadata)}</text>}>
@@ -261,6 +977,7 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +    }
 +  }
 +
++  // #224：notebook summary block 视图——渲染 cell 列表和 runtime/dirty 状态
 +  function summaryView(metadata: Record<string, unknown>): VscodeNotebookToolView {
 +    const cells = arrayRecords(metadata.cells)
 +    const title = `# Notebook summary ${notebookTarget(stringValue(metadata.path))}${cells.length ? ` · ${cells.length} cells` : ""}`
@@ -277,6 +994,7 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +    }
 +  }
 +
++  // #224：notebook source block 视图——从 output 渲染源码文本
 +  function textView(metadata: Record<string, unknown>, output: string, label: string): VscodeNotebookToolView {
 +    const title = `→ ${label} ${notebookTarget(stringValue(metadata.path))}`
 +    return {
@@ -291,6 +1009,7 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +    }
 +  }
 +
++  // #224：notebook run block 视图——渲染执行结果 cells 和 artifacts
 +  function runView(metadata: Record<string, unknown>): VscodeNotebookToolView {
 +    const cells = arrayRecords(metadata.cells)
 +    const completed = booleanValue(metadata.completed)
@@ -306,6 +1025,7 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +    }
 +  }
 +
++  // #224：notebook output block 视图——渲染 cell artifacts 和 cell 元信息
 +  function outputView(metadata: Record<string, unknown>): VscodeNotebookToolView {
 +    const artifacts = arrayRecords(metadata.artifacts)
 +    const cell = recordValue(metadata.cell)
@@ -326,6 +1046,7 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +    }
 +  }
 +
++  // #224：notebook env block 视图——渲染操作/状态/guidance/dirty 变化
 +  function envView(metadata: Record<string, unknown>): VscodeNotebookToolView {
 +    const status = stringValue(metadata.status) ?? envStatus(metadata)
 +    return {
@@ -348,6 +1069,7 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +    }
 +  }
 +
++  // #224：NotebookDiff 组件——用 opentui diff 渲染 unified/split diff，根据宽度自动选 view
 +  function NotebookDiff(diffProps: { diff: string; filePath?: string; maxLines?: number }) {
 +    return (
 +      <box paddingLeft={1} maxHeight={diffProps.maxLines} overflow={diffProps.maxLines ? "hidden" : undefined}>
@@ -374,6 +1096,7 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +    )
 +  }
 +
++  // #224：pending 阶段的 +N/-N 行数标签
 +  function NotebookPendingStats(statProps: { stats?: PendingToolInputStats }) {
 +    return (
 +      <>
@@ -383,6 +1106,7 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +    )
 +  }
 +
++  // #224：summary/run 的 cell 列表渲染
 +  function NotebookCells(cellProps: { cells: Record<string, unknown>[]; runtime?: string; dirty?: boolean }) {
 +    return (
 +      <box flexDirection="column">
@@ -392,6 +1116,7 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +    )
 +  }
 +
++  // #224：run 结果的 cell + artifacts 渲染
 +  function NotebookRun(runProps: { cells: Record<string, unknown>[] }) {
 +    const artifacts = artifactRows(runProps.cells)
 +    return (
@@ -405,6 +1130,7 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +    )
 +  }
 +
++  // #224：artifact 列表渲染
 +  function NotebookArtifacts(artifactProps: { artifacts: Record<string, unknown>[] }) {
 +    return (
 +      <box flexDirection="column">
@@ -413,16 +1139,19 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +    )
 +  }
 +
++  // #224：路径格式化——用 pathFormatter 统一显示
 +  function notebookTarget(value?: string) {
 +    return value ? pathFormatter.format(value) : "notebook"
 +  }
 +
++  // #224：env 状态颜色——成功绿/失败红/其他默认
 +  function statusColor(status: string) {
 +    if (["configured", "selected", "completed", "saved"].includes(status)) return theme.success
 +    if (["failed", "needs-selection"].includes(status)) return theme.error
 +    return theme.text
 +  }
 +
++  // #224：cell 执行状态颜色——失败红/跳过灰/其他默认
 +  function execColor(exec?: string) {
 +    if (exec?.includes("failed") || exec?.includes("error")) return theme.error
 +    if (exec?.includes("skipped") || exec?.includes("not-run")) return theme.textMuted
@@ -432,26 +1161,32 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +
 +function notebookMetadata(metadata: Record<string, unknown>) {
 +  const value = metadata.vscodeNotebook
++  // #224：非对象或数组的 vscodeNotebook 值不合法，返回 undefined 回退到 generic 渲染
 +  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
 +  return value as Record<string, unknown>
 +}
 +
++// #224：notebook edit 操作标签——insert/delete/edit 三种，与 editType 枚举对齐
 +function notebookEditLabel(operation?: string) {
 +  if (operation === "insert") return "Notebook insert"
 +  if (operation === "delete") return "Notebook delete"
 +  return "Notebook edit"
 +}
 +
++// #224：非 edit 的 notebook 工具标签——从工具名派生可读名称
++// #224：vscode_notebook_run → "Notebook run"，vscode_notebook_source → "Notebook source"
 +function notebookToolLabel(tool: string) {
 +  return tool.replace(/^vscode_notebook_/, "Notebook ").replaceAll("_", " ")
 +}
 +
++// #224：diff 路径标签——path + cellLabel + language 组成虚拟文件名供语法高亮
 +function notebookDiffPath(metadata: Record<string, unknown>) {
 +  return [stringValue(metadata.path), stringValue(metadata.cellLabel), stringValue(metadata.language) ? `.${stringValue(metadata.language)}` : undefined]
 +    .filter((item): item is string => Boolean(item))
 +    .join("")
 +}
 +
++// #224：edit 完成态摘要行——cell 数变化 + dirty 状态 + editType
 +function summaryLine(metadata: Record<string, unknown>) {
 +  const before = numberValue(metadata.cellCountBefore)
 +  const after = numberValue(metadata.cellCountAfter)
@@ -459,6 +1194,7 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +  return [count, `dirty=${String(booleanValue(metadata.dirty) ?? "unknown")}`, stringValue(metadata.editType)].filter(Boolean).join(" · ")
 +}
 +
++// #224：cell 单行摘要——label/id/kind/lang/lines/exec/outs/first 七段拼接
 +function cellLine(cell: Record<string, unknown>) {
 +  return [
 +    cellLabel(cell),
@@ -471,88 +1207,102 @@ index 0000000000000000000000000000000000000000..9fd7c3e00d3c5c86c6afb36131ba16da
 +  ].filter(Boolean).join("  ")
 +}
 +
++// #224：cell 标签——有 index 显示 cN，否则用 id 或默认 'cell'
 +function cellLabel(cell: Record<string, unknown>) {
 +  const index = numberValue(cell.i)
 +  return index === undefined ? stringValue(cell.id) ?? "cell" : `c${index}`
 +}
 +
++// #224：从 run cells 中收集所有 artifacts 供 summary 展示
 +function artifactRows(cells: Record<string, unknown>[]) {
 +  return cells.flatMap((cell) => arrayRecords(cell.artifacts))
 +}
 +
++// #224：artifact 单行摘要——mime/bytes/path/preview 四段
 +function artifactLine(artifact: Record<string, unknown>) {
 +  return [stringValue(artifact.mime), bytesText(numberValue(artifact.bytes)), stringValue(artifact.artifactPath), stringValue(artifact.preview)].filter(Boolean).join("  ")
 +}
 +
++// #224：env 状态从 saved 布尔值派生——save 操作没有显式 status 字段
 +function envStatus(metadata: Record<string, unknown>) {
 +  if (booleanValue(metadata.saved) !== undefined) return booleanValue(metadata.saved) ? "saved" : "save not confirmed"
 +}
 +
++// #224：notebook 内部用的 previewText——截断时用 '…' 省略号行
 +function previewText(input: string, maxLines: number) {
 +  const lines = input.split("\n")
 +  return lines.length > maxLines ? [...lines.slice(0, maxLines), "…"].join("\n") : input
 +}
 +
-+function filetype(input?: string) {
-+  const ext = input?.match(/\.[^.]+$/)?.[0]
-+  const language = ext ? LANGUAGE_EXTENSIONS[ext] : undefined
-+  if (language && ["typescriptreact", "javascriptreact", "javascript"].includes(language)) return "typescript"
-+  return language
-+}
-+
++// #224：bytes 可读化——小于 1KB 显示 B，否则显示 KB
 +function bytesText(value?: number) {
 +  if (value === undefined) return undefined
 +  if (value < 1024) return `${value} B`
 +  return `${(value / 1024).toFixed(1)} KB`
 +}
 +
++// #224：类型安全守卫——非对象返回空 Record，避免后续访问报错
 +function recordValue(value: unknown): Record<string, unknown> {
 +  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
 +  return value as Record<string, unknown>
 +}
 +
++// #224：类型安全守卫——非数组返回空数组
 +function arrayRecords(value: unknown) {
 +  return Array.isArray(value) ? value.flatMap((item) => (item && typeof item === "object" && !Array.isArray(item) ? [item as Record<string, unknown>] : [])) : []
 +}
 +
++// #224：类型安全守卫——过滤出 string 元素
 +function arrayStrings(value: unknown) {
 +  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
 +}
 +
++// #224：类型安全守卫——string 提取，非 string 返回 undefined
 +function stringValue(value: unknown) {
 +  return typeof value === "string" ? value : undefined
 +}
 +
++// #224：类型安全守卫——有限 number 提取
 +function numberValue(value: unknown) {
 +  return typeof value === "number" && Number.isFinite(value) ? value : undefined
 +}
 +
++// #224：类型安全守卫——boolean 提取
 +function booleanValue(value: unknown) {
 +  return typeof value === "boolean" ? value : undefined
 +}
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/pending-tool-input.ts b/packages/opencode/src/cli/cmd/tui/routes/session/pending-tool-input.ts
-index 347b026c5b88b56d7ffa73702b8d52fddaf5eace..ec16a0dd8e000ef9431f30ec4a7adf41135a1c3f 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/pending-tool-input.ts
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/pending-tool-input.ts
-@@ -1,5 +1,7 @@
+diff --git a/packages/tui/src/routes/session/pending-tool-input.ts b/packages/tui/src/routes/session/pending-tool-input.ts
+index afbae2c431..fd3f1b6df3 100644
+--- a/packages/tui/src/routes/session/pending-tool-input.ts
++++ b/packages/tui/src/routes/session/pending-tool-input.ts
+@@ -2,6 +2,10 @@
  export type PendingToolInputStats = {
+   // #187：filePath 可空（多文件 patch 时用 fileCount）
    filePath?: string
++  // #224：notebook edit 的稳定 cell 定位键，pending 阶段从 cellId 参数流式提取
 +  cellId?: string
++  // #224：notebook edit 操作类型（insert/edit/delete）或 env 操作（configure/restart/save）
 +  operation?: string
+   // #187：apply_patch 多文件计数
    fileCount: number
-   added: number
-   removed: number
-@@ -11,12 +13,42 @@ export function createPendingToolInputParser(tool: string) {
+   // #187：新增行（write/content 或 newString 或 +diff）
+@@ -37,6 +41,8 @@ export function createPendingToolInputParser(tool: string) {
    if (tool === "apply_patch") return createApplyPatchInputParser()
    if (tool === "edit") return createEditInputParser()
    if (tool === "write") return createWriteInputParser()
++  // #224：notebook edit 的 pending 统计需要 filePath/cellId/editType + oldCode/newCode 行数
 +  if (tool === "vscode_notebook_edit") return createNotebookEditInputParser()
+   // #187：bash 等无 raw 进度 UI 的工具返回空 parser
    return {
      push(_input: string) {},
-     stats: () => undefined,
+@@ -44,6 +50,39 @@ export function createPendingToolInputParser(tool: string) {
    }
  }
  
++  // #224：notebook edit 的 pending 统计从流式参数提取 filePath/cellId/editType +
++// oldCode/newCode 行数。bridge 的 sourceProp 会用 "\n" 拼接 string[] 数组项，
++// streaming 统计也必须补上这个隐式换行，否则 pending 阶段的 +N/-N 会低估。
++// #224：与 createEditInputParser 不同——notebook edit 还需要 cellId 和 editType
 +function createNotebookEditInputParser() {
 +  let filePath = ""
 +  let cellId = ""
@@ -569,7 +1319,7 @@ index 347b026c5b88b56d7ffa73702b8d52fddaf5eace..ec16a0dd8e000ef9431f30ec4a7adf41
 +  return {
 +    push: scanner.push,
 +    stats: () => {
-+      // notebook edit 的 pending 统计只能来自模型正在流式生成的参数，不能在渲染线程
++      // #224：notebook edit 的 pending 统计只能来自模型正在流式生成的参数，不能在渲染线程
 +      // 读取 VS Code 或 notebook 文件；full-cell replace/delete 的真实删除行数要等完成后的 diff。
 +      const stats = pendingStats(filePath, filePath ? 1 : 0, newCode.count(), oldCode.count())
 +      if (!stats && !cellId && !operation) return undefined
@@ -582,948 +1332,180 @@ index 347b026c5b88b56d7ffa73702b8d52fddaf5eace..ec16a0dd8e000ef9431f30ec4a7adf41
 +  }
 +}
 +
+ // #187：edit 扫 filePath/oldString/newString，added=new 行 removed=old 行
  function createEditInputParser() {
    let filePath = ""
-   const oldString = createLineCounter()
-@@ -90,6 +122,8 @@ function createJsonStringFieldScanner(fields: readonly string[], onValue: (field
-   let pendingKey = ""
+@@ -131,6 +170,10 @@ function createJsonStringFieldScanner(fields: readonly string[], onValue: (field
    let expectingValueFor = ""
+   // #187：当前正在读的 value 字段名；空表示在 key 相位
    let activeField = ""
++  // #224：数组字段状态——oldCode/newCode 可以是 string[]，需要跟踪数组边界
++  // #224：arrayField 记录当前正在遍历的数组字段名，空表示不在数组内
 +  let arrayField = ""
 +  let arrayFieldHasValue = false
    let key = ""
+   // #187：是否位于 JSON 字符串 token 内部
    let inString = false
-   let escaping = false
-@@ -152,7 +186,12 @@ function createJsonStringFieldScanner(fields: readonly string[], onValue: (field
+@@ -188,6 +231,11 @@ function decodeEscaped(char: string) {
+           if (char === '"') {
+             inString = false
+             if (!activeField) pendingKey = key
++            // #224：数组内多 string 项时，每个新 string 前补一个隐式换行，
++            // #224：对齐 bridge sourceProp 用 "\n" 拼接 string[] 的行为
++            // #224：arrayFieldHasValue 确保只在第二个及之后的数组项前补换行
++            if (activeField && arrayField && arrayFieldHasValue) onValue(activeField, "\n")
++            if (activeField && arrayField) arrayFieldHasValue = true
+             activeField = ""
+             key = ""
+             continue
+@@ -198,18 +246,31 @@ function decodeEscaped(char: string) {
  
          if (char === '"') {
            inString = true
 -          activeField = wanted.has(expectingValueFor) ? expectingValueFor : ""
++          // #224：数组内 string 项也激活 wanted 字段；数组外仍用 expectingValueFor
++          // #224：这样 oldCode/newCode 的 string[] 元素也能被 lineCounter 正确计数
 +          activeField = wanted.has(expectingValueFor) ? expectingValueFor : arrayField
-+          // notebook oldCode/newCode 支持 string[]；bridge 的 sourceProp 会用 "\n"
-+          // 拼接数组项，所以 streaming 统计也必须补上这个隐式换行，否则
-+          // pending 阶段的 +N/-N 会低估数组形式源码的行数。
-+          if (activeField && arrayField && arrayFieldHasValue) onValue(activeField, "\n")
-+          if (activeField && arrayField) arrayFieldHasValue = true
            expectingValueFor = ""
            key = ""
            continue
-@@ -162,8 +201,19 @@ function createJsonStringFieldScanner(fields: readonly string[], onValue: (field
-           pendingKey = ""
-           continue
          }
+-        if (char === ":" && pendingKey) {
+-          expectingValueFor = pendingKey
+-          pendingKey = ""
++        // #224：进入数组字段——oldCode/newCode 可以是 string[]
++        // #224：遇到 [ 后切换到数组模式，后续逗号不再重置 pendingKey
 +        if (expectingValueFor && char === "[" && wanted.has(expectingValueFor)) {
 +          arrayField = expectingValueFor
 +          arrayFieldHasValue = false
 +          expectingValueFor = ""
 +          continue
 +        }
++        // #224：退出数组字段——遇到 ] 恢复到普通字段模式
 +        if (arrayField && char === "]") {
 +          arrayField = ""
 +          arrayFieldHasValue = false
-+          continue
-+        }
+           continue
+         }
          if (expectingValueFor && !/\s/.test(char)) expectingValueFor = ""
 -        if (char === "," || char === "{" || char === "}") pendingKey = ""
++        // #224：数组内不重置 pendingKey——逗号是数组项分隔符不是字段分隔符
++        // #224：这确保 string[] 的后续元素仍能被正确识别为同一字段的值
 +        if (!arrayField && (char === "," || char === "{" || char === "}")) pendingKey = ""
        }
      },
    }
-diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
-index 5fd3a25ed64d89cf68f4953f5d65727fdc0af48b..866368879890b73264da85417fdb5dd89a115bda 100644
---- a/packages/opencode/src/plugin/vscode-bridge.ts
-+++ b/packages/opencode/src/plugin/vscode-bridge.ts
-@@ -1,9 +1,20 @@
- import { Effect } from "effect"
- import { tool, type ToolContext } from "@opencode-ai/plugin"
-+import { createTwoFilesPatch } from "diff"
- import { z } from "zod"
- import * as VscodeBridge from "@/ide/vscode-bridge"
- import { VscodeNotebookDescriptions } from "./vscode-bridge-descriptions"
- 
-+// Notebook 工具是 plugin tool，不能直接复用内置 edit/write 的专用 renderer。
-+// 这个 fork-local metadata key 是 TUI 和 VS Code bridge 之间的内部展示契约：
-+// 只让 generic renderer 选择性升级展示，不扩大 public plugin API，也不为每个
-+// vscode_notebook_* 工具在 session/index.tsx 增加分支。
-+const NOTEBOOK_METADATA_KEY = "vscodeNotebook"
-+// notebook edit diff 会持久化到 session part metadata；16KB 与现有工具输出
-+// 默认内联上限保持同一量级，超过后只保留统计和摘要，避免大 cell/full replace
-+// 把 notebook 源码整段复制进会话状态。
-+const NOTEBOOK_DIFF_METADATA_MAX_CHARS = 16 * 1024
-+
- const requiredFilePath = {
-   filePath: z
-     .string()
-@@ -99,13 +110,13 @@ const envArgs = {
-     .describe("Brief description of why this operation is being performed, shown to the user."),
- }
- 
--async function call(
-+async function callRaw(
-   endpoint: string,
-   args: Record<string, unknown>,
-   context: Pick<ToolContext, "directory" | "abort">,
-   timeoutMs?: number,
- ) {
--  const value = await VscodeBridge.callBridge({
-+  return await VscodeBridge.callBridge({
-     cwd: context.directory,
-     path: endpoint,
-     body: args,
-@@ -113,7 +124,192 @@ async function call(
-     signal: context.abort,
-     timeoutMs,
-   })
--  return VscodeBridge.summaryOnly(value)
-+}
-+
-+function notebookResult(endpoint: string, args: Record<string, unknown>, value: unknown) {
-+  const view = notebookView(endpoint, args, value)
-+  return {
-+    output: VscodeBridge.summaryOnly(value),
-+    metadata: {
-+      endpoint,
-+      ...(view && { [NOTEBOOK_METADATA_KEY]: view }),
-+    },
-+  }
-+}
-+
-+function notebookView(endpoint: string, args: Record<string, unknown>, value: unknown) {
-+  const data = recordValue(recordValue(value).data)
-+  const path = stringValue(data.path) ?? stringValue(args.filePath)
-+  if (endpoint === "/notebook/summary") {
-+    return { view: "summary", path, dirty: booleanValue(data.dirty), runtime: stringValue(data.runtime), cells: compactCells(data.cells) }
-+  }
-+  if (endpoint === "/notebook/source") {
-+    return {
-+      view: "source",
-+      path,
-+      target: stringValue(data.target),
-+      cellId: stringValue(data.cellId) ?? stringValue(args.cellId),
-+      returned: numberValue(data.returned),
-+      totalLines: numberValue(data.totalLines),
-+      truncated: booleanValue(data.truncated),
-+    }
-+  }
-+  if (endpoint === "/notebook/run") {
-+    return {
-+      view: "run",
-+      path,
-+      dirty: booleanValue(data.dirty),
-+      runtime: stringValue(data.runtime),
-+      target: stringValue(data.target),
-+      completed: booleanValue(data.completed),
-+      stoppedAt: numberValue(data.stoppedAt),
-+      cells: compactRunCells(data.cells),
-+    }
-+  }
-+  if (endpoint === "/notebook/output") {
-+    return {
-+      view: "output",
-+      path,
-+      dirty: booleanValue(data.dirty),
-+      runtime: stringValue(data.runtime),
-+      cell: compactCell(data.cell),
-+      artifacts: compactArtifacts(data.artifacts),
-+    }
-+  }
-+  if (endpoint === "/notebook/env") {
-+    return notebookEnvView(path, data)
-+  }
-+  if (endpoint === "/notebook/edit") {
-+    return notebookEditView(path, args, data)
-+  }
-+}
-+
-+function notebookEditView(path: string | undefined, args: Record<string, unknown>, data: Record<string, unknown>) {
-+  const before = stringValue(data.beforeSource)
-+  const after = stringValue(data.afterSource)
-+  const fullDiff = before !== undefined && after !== undefined && before !== after
-+    ? createTwoFilesPatch(notebookDiffPath(path, data, "old"), notebookDiffPath(path, data, "new"), before, after)
-+    : undefined
-+  const stats = diffStats(fullDiff ?? "")
-+  const diff = fullDiff && fullDiff.length <= NOTEBOOK_DIFF_METADATA_MAX_CHARS ? fullDiff : undefined
-+  const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
-+  return {
-+    view: "edit",
-+    path,
-+    cellLabel: cellIndex === undefined ? undefined : `c${cellIndex + 1}`,
-+    cellId: stringValue(args.cellId),
-+    editType: stringValue(data.editType) ?? stringValue(args.editType),
-+    cellCountBefore: numberValue(data.cellCountBefore),
-+    cellCountAfter: numberValue(data.cellCountAfter),
-+    dirty: booleanValue(data.dirty),
-+    kind: stringValue(data.kind),
-+    language: stringValue(data.language),
-+    diff,
-+    diffOmitted: fullDiff !== undefined && diff === undefined ? "too-large" : undefined,
-+    added: stats.added,
-+    removed: stats.removed,
-+  }
-+}
-+
-+function notebookEnvView(path: string | undefined, data: Record<string, unknown>) {
-+  const operation = stringValue(data.operation)
-+  const status = stringValue(data.status)
-+  const guidance = status === "configured"
-+    ? "Notebook is ready for cell execution."
-+    : status === "selected"
-+      ? "Proceed to run cells — the kernel will start on first execution."
-+      : status === "needs-selection"
-+        ? "Select a kernel manually from the notebook toolbar, then call configure to verify."
-+        : status === "selection-requested"
-+          ? "Retry configure or select a kernel manually."
-+          : status === "failed"
-+            ? "Check Jupyter/Python extensions and workspace trust."
-+            : undefined
-+  return {
-+    view: "env",
-+    path,
-+    operation,
-+    status,
-+    guidance,
-+    runtime: recordValue(data.runtime),
-+    saved: booleanValue(data.saved),
-+    beforeDirty: booleanValue(data.beforeDirty),
-+    afterDirty: booleanValue(data.afterDirty),
-+  }
-+}
-+
-+function notebookDiffPath(path: string | undefined, data: Record<string, unknown>, fallback: string) {
-+  const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
-+  const language = stringValue(data.language)
-+  return [path ?? "notebook", cellIndex === undefined ? undefined : `#c${cellIndex + 1}`, language ? `.${language}` : undefined]
-+    .filter((item): item is string => Boolean(item))
-+    .join("") || fallback
-+}
-+
-+function compactRunCells(value: unknown) {
-+  return arrayValue(value).map((item) => ({ ...compactCell(item), artifacts: compactArtifacts(recordValue(item).artifacts) }))
-+}
-+
-+function compactCells(value: unknown) {
-+  return arrayValue(value).map(compactCell)
-+}
-+
-+function compactCell(value: unknown) {
-+  const item = recordValue(value)
-+  return {
-+    i: numberValue(item.i),
-+    id: stringValue(item.id),
-+    kind: stringValue(item.kind),
-+    lang: stringValue(item.lang),
-+    lines: numberValue(item.lines),
-+    exec: stringValue(item.exec),
-+    existing_outs: arrayValue(item.existing_outs).filter((entry): entry is string => typeof entry === "string"),
-+    first: stringValue(item.first),
-+  }
-+}
-+
-+function compactArtifacts(value: unknown) {
-+  return arrayValue(value).map((entry) => {
-+    const item = recordValue(entry)
-+    // artifact.text 可能是大 stdout/json/blob；metadata 只保留 preview/path，
-+    // 保证 session part 持久化体积稳定。完整内容仍在 bridge 返回的 artifact 文件中，
-+    // TUI 只展示路径，不把大输出复制进会话状态。
-+    return {
-+      mime: stringValue(item.mime),
-+      bytes: numberValue(item.bytes),
-+      preview: stringValue(item.preview),
-+      artifactPath: stringValue(item.artifactPath),
-+    }
-+  })
-+}
-+
-+function diffStats(diff: string) {
-+  const lines = diff.split("\n")
-+  return {
-+    added: lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length,
-+    removed: lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length,
-+  }
-+}
-+
-+function recordValue(value: unknown): Record<string, unknown> {
-+  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
-+  return value as Record<string, unknown>
-+}
-+
-+function arrayValue(value: unknown): unknown[] {
-+  return Array.isArray(value) ? value : []
-+}
-+
-+function stringValue(value: unknown) {
-+  return typeof value === "string" ? value : undefined
-+}
-+
-+function numberValue(value: unknown) {
-+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
-+}
-+
-+function booleanValue(value: unknown) {
-+  return typeof value === "boolean" ? value : undefined
- }
- 
- async function ask(context: ToolContext, permission: string, args: Record<string, unknown>) {
-@@ -133,18 +329,12 @@ export const VscodeBridgePlugin = async () => ({
-     vscode_notebook_summary: tool({
-       description: VscodeNotebookDescriptions.summary,
-       args: requiredFilePath,
--      execute: async (args, context) => ({
--        output: await call("/notebook/summary", args, context, 10_000),
--        metadata: { endpoint: "/notebook/summary" },
--      }),
-+      execute: async (args, context) => notebookResult("/notebook/summary", args, await callRaw("/notebook/summary", args, context, 10_000)),
-     }),
-     vscode_notebook_source: tool({
-       description: VscodeNotebookDescriptions.source,
-       args: sourceArgs,
--      execute: async (args, context) => ({
--        output: await call("/notebook/source", args, context, 10_000),
--        metadata: { endpoint: "/notebook/source" },
--      }),
-+      execute: async (args, context) => notebookResult("/notebook/source", args, await callRaw("/notebook/source", args, context, 10_000)),
-     }),
-     vscode_notebook_run: tool({
-       description: VscodeNotebookDescriptions.run,
-@@ -152,19 +342,14 @@ export const VscodeBridgePlugin = async () => ({
-       execute: async (args, context) => {
-         await ask(context, "vscode_notebook_run", args)
-         const timeoutMs = args.timeoutMs ?? 300_000
--        return {
--          output: await call("/notebook/run", { ...args, timeoutMs }, context, timeoutMs + 5_000),
--          metadata: { endpoint: "/notebook/run" },
--        }
-+        const body = { ...args, timeoutMs }
-+        return notebookResult("/notebook/run", body, await callRaw("/notebook/run", body, context, timeoutMs + 5_000))
-       },
-     }),
-     vscode_notebook_output: tool({
-       description: VscodeNotebookDescriptions.output,
-       args: outputArgs,
--      execute: async (args, context) => ({
--        output: await call("/notebook/output", args, context, 30_000),
--        metadata: { endpoint: "/notebook/output" },
--      }),
-+      execute: async (args, context) => notebookResult("/notebook/output", args, await callRaw("/notebook/output", args, context, 30_000)),
-     }),
-     vscode_notebook_edit: tool({
-       description: VscodeNotebookDescriptions.edit,
-@@ -178,10 +363,7 @@ export const VscodeBridgePlugin = async () => ({
-         // notebook cell 修改也不能绕过。顺序先专属后通用，确保更精确的
-         // vscode_notebook_edit deny/ask 先表达，再由 edit 维持历史兼容边界。
-         await ask(context, "edit", args)
--        return {
--          output: await call("/notebook/edit", args, context, 30_000),
--          metadata: { endpoint: "/notebook/edit" },
--        }
-+        return notebookResult("/notebook/edit", args, await callRaw("/notebook/edit", args, context, 30_000))
-       },
-     }),
-     vscode_notebook_env: tool({
-@@ -192,10 +374,7 @@ export const VscodeBridgePlugin = async () => ({
-         // 即使 info 偏只读，也保持工具级权限和 agent 配置中的
-         // vscode_notebook_env 完全一致，避免新增 operation 级配置面。
-         await ask(context, "vscode_notebook_env", args)
--        return {
--          output: await call("/notebook/env", args, context, 120_000),
--          metadata: { endpoint: "/notebook/env" },
--        }
-+        return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
-       },
-     }),
-   },
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index e1ea633b0b5591c683f5195553c881d131d2ed78..3c09f17dd5cc38ca975be6429f22dea0c1049e3b 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -387,6 +387,266 @@ test("pending tool line counts update from streamed raw deltas", async () => {
-   )
- })
- 
-+test("pending notebook edit shows throttled line counts without rendering raw source", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_notebook_live_delta", 1)],
-+    {
-+      msg_notebook_live_delta: [pendingToolPart("part_notebook_live_delta", "msg_notebook_live_delta", "vscode_notebook_edit", "")],
-+    },
-+    async (app, emit) => {
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Preparing notebook edit")))
-+
-+      emit(
-+        partDeltaEvent(
-+          "evt_notebook_live_delta",
-+          "msg_notebook_live_delta",
-+          "part_notebook_live_delta",
-+          JSON.stringify({
-+            filePath: "notebooks/analysis notebook.ipynb",
-+            cellId: "#VSC-12345678",
-+            editType: "edit",
-+            oldCode: "old one\nold two",
-+            newCode: ["new one", "new two", "new three"],
-+          }),
-+        ),
-+      )
-+
-+      await Bun.sleep(50)
-+      await app.renderOnce()
-+      expect(rows(app.captureCharFrame()).some((line) => line.includes("Notebook edit") && line.includes("+3 -2"))).toBe(false)
-+
-+      const frame = await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("Notebook edit") && line.includes("analysis notebook.ipynb") && line.includes("+3 -2")),
-+      )
-+      expect(frame.some((line) => line.includes("new two"))).toBe(false)
-+    },
-+  )
-+})
-+
-+test("completed notebook edit renders a diff card instead of raw generic input", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_notebook_edit", 1)],
-+    {
-+      msg_notebook_edit: [
-+        completedToolPart(
-+          "part_notebook_edit",
-+          "msg_notebook_edit",
-+          "vscode_notebook_edit",
-+          {
-+            filePath: "notebooks/analysis.ipynb",
-+            cellId: "#VSC-12345678",
-+            editType: "edit",
-+            newCode: "RAW_ONLY_SHOULD_NOT_RENDER",
-+          },
-+          {
-+            vscodeNotebook: {
-+              view: "edit",
-+              path: "notebooks/analysis.ipynb",
-+              cellLabel: "c3",
-+              editType: "edit",
-+              language: "python",
-+              dirty: true,
-+              cellCountBefore: 4,
-+              cellCountAfter: 4,
-+              diff: ["--- notebooks/analysis.ipynb#c3.py", "+++ notebooks/analysis.ipynb#c3.py", "@@ -1 +1,2 @@", "-old value", "+new value", "+rendered diff line"].join("\n"),
-+              added: 2,
-+              removed: 1,
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Notebook edit") && line.includes("+2 -1")))
-+      expect(frame.some((line) => line.includes("rendered diff line"))).toBe(true)
-+      expect(frame.some((line) => line.includes("RAW_ONLY_SHOULD_NOT_RENDER"))).toBe(false)
-+    },
-+  )
-+})
-+
-+test("notebook tool switches from pending inline summary to completed rich card", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_notebook_transition", 1)],
-+    {
-+      msg_notebook_transition: [pendingToolPart("part_notebook_transition", "msg_notebook_transition", "vscode_notebook_edit", "")],
-+    },
-+    async (app, emit) => {
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Preparing notebook edit")))
-+
-+      emit(
-+        partUpdatedEvent(
-+          "evt_notebook_transition_done",
-+          completedToolPart(
-+            "part_notebook_transition",
-+            "msg_notebook_transition",
-+            "vscode_notebook_edit",
-+            { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-12345678", editType: "edit" },
-+            {
-+              vscodeNotebook: {
-+                view: "edit",
-+                path: "notebooks/analysis.ipynb",
-+                cellLabel: "c3",
-+                editType: "edit",
-+                diff: ["--- notebooks/analysis.ipynb#c3.py", "+++ notebooks/analysis.ipynb#c3.py", "@@ -1 +1 @@", "-before transition", "+after transition"].join("\n"),
-+                added: 1,
-+                removed: 1,
-+              },
-+            },
-+          ),
-+        ),
-+      )
-+
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("after transition")))
-+      expect(frame.some((line) => line.includes("Preparing notebook edit"))).toBe(false)
-+    },
-+  )
-+})
-+
-+test("notebook summary renders cells from notebook metadata without enabling generic output", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_notebook_summary", 1)],
-+    {
-+      msg_notebook_summary: [
-+        completedToolPart(
-+          "part_notebook_summary",
-+          "msg_notebook_summary",
-+          "vscode_notebook_summary",
-+          { filePath: "notebooks/analysis.ipynb" },
-+          {
-+            vscodeNotebook: {
-+              view: "summary",
-+              path: "notebooks/analysis.ipynb",
-+              dirty: false,
-+              runtime: "Python 3.11",
-+              cells: [
-+                { i: 1, id: "#VSC-11111111", kind: "markdown", lang: "markdown", lines: 3, exec: "not-run", existing_outs: [], first: "# Analysis" },
-+                { i: 2, id: "#VSC-22222222", kind: "code", lang: "python", lines: 5, exec: "current-run #1 failed 12ms ended=2026-05-25T00:00:00.000Z", existing_outs: ["error"], first: "raise Error" },
-+              ],
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) =>
-+        lines.some((line) => line.includes("Notebook summary") && line.includes("2 cells")) && lines.some((line) => line.includes("#VSC-22222222") && line.includes("failed")),
-+      )
-+      expect(frame.some((line) => line.includes("Notebook:"))).toBe(false)
-+    },
-+  )
-+})
-+
-+test("notebook env renders operation status from notebook metadata", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_notebook_env", 1)],
-+    {
-+      msg_notebook_env: [
-+        completedToolPart(
-+          "part_notebook_env",
-+          "msg_notebook_env",
-+          "vscode_notebook_env",
-+          { filePath: "notebooks/analysis.ipynb", operation: "configure", reason: "path with spaces | no shell" },
-+          {
-+            vscodeNotebook: {
-+              view: "env",
-+              path: "notebooks/analysis.ipynb",
-+              operation: "configure",
-+              status: "needs-selection",
-+              guidance: "Select a kernel manually from the notebook toolbar, then call configure to verify.",
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Notebook env") && line.includes("needs-selection")))
-+      expect(frame.some((line) => line.includes("Select a kernel manually"))).toBe(true)
-+      expect(frame.some((line) => line.includes("path with spaces | no shell"))).toBe(false)
-+    },
-+  )
-+})
-+
-+test("notebook source, run, and output tools render rich notebook cards", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_notebook_readbacks", 1)],
-+    {
-+      msg_notebook_readbacks: [
-+        completedToolPart(
-+          "part_notebook_source",
-+          "msg_notebook_readbacks",
-+          "vscode_notebook_source",
-+          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-source" },
-+          {
-+            vscodeNotebook: {
-+              view: "source",
-+              path: "notebooks/analysis.ipynb",
-+              target: "cell 3",
-+              cellId: "#VSC-source",
-+              returned: 2,
-+              totalLines: 12,
-+              truncated: false,
-+            },
-+          },
-+        ),
-+        completedToolPart(
-+          "part_notebook_run",
-+          "msg_notebook_readbacks",
-+          "vscode_notebook_run",
-+          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-run" },
-+          {
-+            vscodeNotebook: {
-+              view: "run",
-+              path: "notebooks/analysis.ipynb",
-+              target: "cell 4",
-+              completed: true,
-+              cells: [
-+                {
-+                  i: 4,
-+                  id: "#VSC-run",
-+                  kind: "code",
-+                  lang: "python",
-+                  lines: 3,
-+                  exec: "current-run #4 succeeded 12ms ended=2026-05-25T00:00:00.000Z",
-+                  existing_outs: ["text"],
-+                  artifacts: [{ mime: "text/plain", bytes: 32, preview: "ok", artifactPath: ".opencode/cache/notebook-outputs/run.txt" }],
-+                },
-+              ],
-+            },
-+          },
-+        ),
-+        completedToolPart(
-+          "part_notebook_output",
-+          "msg_notebook_readbacks",
-+          "vscode_notebook_output",
-+          { filePath: "notebooks/analysis.ipynb", cellId: "#VSC-output" },
-+          {
-+            vscodeNotebook: {
-+              view: "output",
-+              path: "notebooks/analysis.ipynb",
-+              cell: { i: 5, id: "#VSC-output", kind: "code", lang: "python", lines: 2, existing_outs: ["png"] },
-+              artifacts: [{ mime: "image/png", bytes: 4096, preview: "<image/png 4096 bytes>", artifactPath: ".opencode/cache/notebook-outputs/plot.png" }],
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(
-+        app,
-+        (lines) =>
-+          lines.some((line) => line.includes("Notebook source")) &&
-+          lines.some((line) => line.includes("Notebook run") && line.includes("completed")) &&
-+          lines.some((line) => line.includes(".opencode/cache/notebook-outputs/run.txt")) &&
-+          lines.some((line) => line.includes("Notebook output") && line.includes("1 artifacts")) &&
-+          lines.some((line) => line.includes(".opencode/cache/notebook-outputs/plot.png")),
-+      )
-+      expect(frame.some((line) => line.includes("vscode_notebook_source ["))).toBe(false)
-+    },
-+    {},
-+    { height: 24 },
-+  )
-+})
-+
- test("shell tool renders auto review as a second status line", async () => {
-   await withRenderedSession(
-     [assistantMessage("msg_auto_review", 1)],
-@@ -1420,3 +1680,15 @@ function partDeltaEvent(id: string, messageID: string, partID: string, delta: st
-     },
-   }
- }
-+
-+function partUpdatedEvent(id: string, part: Extract<Part, { type: "tool" }>): GlobalEvent {
-+  return {
-+    directory,
-+    project: "proj_test",
-+    payload: {
-+      id,
-+      type: "message.part.updated",
-+      properties: { sessionID, part, time: 2 },
-+    },
-+  }
-+}
-diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
-index 72adfa3c302ca3a301c8ef65c468a50a76526b06..ba23cf5cdae959ca5a2e0afbf6fa89faea0347b0 100644
---- a/packages/opencode/test/plugin/vscode-bridge.test.ts
-+++ b/packages/opencode/test/plugin/vscode-bridge.test.ts
-@@ -1,7 +1,12 @@
--import { describe, expect, test } from "bun:test"
-+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
- import { Effect } from "effect"
- import type { ToolContext } from "@opencode-ai/plugin"
- import { VscodeBridgePlugin } from "@/plugin/vscode-bridge"
-+import * as VscodeBridge from "@/ide/vscode-bridge"
-+
-+afterEach(() => {
-+  mock.restore()
-+})
- 
- describe("vscode bridge plugin", () => {
-   test("checks notebook mutation permissions before calling the VS Code bridge", async () => {
-@@ -111,4 +116,198 @@ describe("vscode bridge plugin", () => {
- 
-     expect(calls).toEqual(["vscode_notebook_edit", "edit"])
-   })
-+
-+  test("returns notebook edit diff metadata from bridge before and after source", async () => {
-+    const plugin = await VscodeBridgePlugin()
-+    const filePath = "F:\\project with spaces\\analysis notebook.ipynb"
-+    const bridge = spyOn(VscodeBridge, "callBridge").mockResolvedValue({
-+      ran: false,
-+      summary: "Notebook edit: applied=true op=edit at=3 num_cells=4->4 dirty=true.",
-+      data: {
-+        path: filePath,
-+        editType: "edit",
-+        cellCountBefore: 4,
-+        cellCountAfter: 4,
-+        anchorCellIndex: 2,
-+        dirty: true,
-+        kind: "code",
-+        language: "python",
-+        beforeSource: "old value\n",
-+        afterSource: "new value\nrendered diff line\n",
-+      },
-+    })
-+
-+    const result = await plugin.tool.vscode_notebook_edit.execute(
-+      {
-+        filePath,
-+        cellId: "#VSC-12345678",
-+        editType: "edit",
-+        newCode: "RAW_ONLY_SHOULD_NOT_RENDER",
-+      },
-+      allowContext(filePath),
-+    )
-+
-+    expect(bridge).toHaveBeenCalledWith(expect.objectContaining({ path: "/notebook/edit", filePath }))
-+    expect(result).toMatchObject({
-+      output: "Notebook edit: applied=true op=edit at=3 num_cells=4->4 dirty=true.",
-+      metadata: {
-+        endpoint: "/notebook/edit",
-+        vscodeNotebook: {
-+          view: "edit",
-+          path: filePath,
-+          cellLabel: "c3",
-+          editType: "edit",
-+          cellCountBefore: 4,
-+          cellCountAfter: 4,
-+          dirty: true,
-+          language: "python",
-+          added: 2,
-+          removed: 1,
-+        },
-+      },
-+    })
-+    if (typeof result === "string") throw new Error("expected structured notebook edit result")
-+    const metadata = result.metadata ?? (() => { throw new Error("expected notebook edit metadata") })()
-+    expect((metadata.vscodeNotebook as Record<string, string>).diff).toContain("-old value")
-+    expect((metadata.vscodeNotebook as Record<string, string>).diff).toContain("+rendered diff line")
-+  })
-+
-+  test("keeps notebook output metadata compact by excluding full artifact text", async () => {
-+    const plugin = await VscodeBridgePlugin()
-+    const filePath = "F:\\project with spaces\\analysis notebook.ipynb"
-+    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
-+      ran: false,
-+      summary: "Cell c3 id=#VSC-12345678 existing outputs: text.",
-+      data: {
-+        path: filePath,
-+        dirty: false,
-+        runtime: "Python 3.11",
-+        cell: { i: 3, id: "#VSC-12345678", kind: "code", lang: "python", lines: 7, exec: "succeeded", existing_outs: ["text"], first: "df.head()" },
-+        artifacts: [
-+          {
-+            mime: "text/plain",
-+            bytes: 2048,
-+            preview: "short preview",
-+            text: "full text should not be persisted into metadata",
-+            artifactPath: ".opencode/cache/notebook-outputs/analysis-cell-2-output-0-item-0.txt",
-+          },
-+        ],
-+      },
-+    })
-+
-+    const result = await plugin.tool.vscode_notebook_output.execute(
-+      { filePath, cellId: "#VSC-12345678" },
-+      allowContext(filePath),
-+    )
-+
-+    expect(result).toMatchObject({
-+      metadata: {
-+        vscodeNotebook: {
-+          view: "output",
-+          path: filePath,
-+          artifacts: [
-+            {
-+              mime: "text/plain",
-+              bytes: 2048,
-+              preview: "short preview",
-+              artifactPath: ".opencode/cache/notebook-outputs/analysis-cell-2-output-0-item-0.txt",
-+            },
-+          ],
-+        },
-+      },
-+    })
-+    expect(JSON.stringify(typeof result === "string" ? result : result.metadata)).not.toContain("full text should not be persisted")
-+  })
-+
-+  test("labels notebook insert diff with the inserted cell index", async () => {
-+    const plugin = await VscodeBridgePlugin()
-+    const filePath = "F:\\project with spaces\\analysis notebook.ipynb"
-+    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
-+      ran: false,
-+      summary: "Notebook edit: applied=true op=insert at=4 num_cells=3->4 dirty=true.",
-+      data: {
-+        path: filePath,
-+        editType: "insert",
-+        cellCountBefore: 3,
-+        cellCountAfter: 4,
-+        anchorCellIndex: 2,
-+        affectedCellIndex: 3,
-+        dirty: true,
-+        language: "python",
-+        beforeSource: "",
-+        afterSource: "print('new cell')\n",
-+      },
-+    })
-+
-+    const result = await plugin.tool.vscode_notebook_edit.execute(
-+      { filePath, cellId: "#VSC-anchor", editType: "insert", newCode: "print('new cell')" },
-+      allowContext(filePath),
-+    )
-+
-+    expect(result).toMatchObject({
-+      metadata: {
-+        vscodeNotebook: {
-+          view: "edit",
-+          cellLabel: "c4",
-+          added: 1,
-+          removed: 0,
-+        },
-+      },
-+    })
-+    if (typeof result === "string") throw new Error("expected structured notebook insert result")
-+    expect((result.metadata?.vscodeNotebook as Record<string, string>).diff).toContain("#c4")
-+  })
-+
-+  test("omits oversized notebook edit diffs from persisted metadata", async () => {
-+    const plugin = await VscodeBridgePlugin()
-+    const filePath = "F:\\project with spaces\\large notebook.ipynb"
-+    spyOn(VscodeBridge, "callBridge").mockResolvedValue({
-+      ran: false,
-+      summary: "Notebook edit: applied=true op=edit at=1 num_cells=1->1 dirty=true.",
-+      data: {
-+        path: filePath,
-+        editType: "edit",
-+        cellCountBefore: 1,
-+        cellCountAfter: 1,
-+        anchorCellIndex: 0,
-+        dirty: true,
-+        beforeSource: "old\n",
-+        afterSource: `${"new line\n".repeat(3000)}`,
-+      },
-+    })
-+
-+    const result = await plugin.tool.vscode_notebook_edit.execute(
-+      { filePath, cellId: "#VSC-large", editType: "edit", newCode: "ignored in mock" },
-+      allowContext(filePath),
-+    )
-+
-+    expect(result).toMatchObject({
-+      metadata: {
-+        vscodeNotebook: {
-+          view: "edit",
-+          cellLabel: "c1",
-+          diffOmitted: "too-large",
-+        },
-+      },
-+    })
-+    if (typeof result === "string") throw new Error("expected structured oversized notebook edit result")
-+    expect((result.metadata?.vscodeNotebook as Record<string, unknown>).diff).toBeUndefined()
-+    expect(JSON.stringify(result.metadata)).not.toContain("new line\nnew line\nnew line")
-+  })
- })
-+
-+function allowContext(filePath: string): ToolContext {
-+  return {
-+    sessionID: "ses_test",
-+    messageID: "msg_test",
-+    agent: "build",
-+    directory: "F:\\project with spaces",
-+    worktree: "F:\\project with spaces",
-+    abort: new AbortController().signal,
-+    metadata: () => undefined,
-+    ask(input) {
-+      expect(input.patterns).toEqual([filePath])
-+      return Effect.void
-+    },
-+  }
-+}
 diff --git a/sdks/vscode/src/notebook/edit.ts b/sdks/vscode/src/notebook/edit.ts
-index 88161cb234144ede8e658ef64161e84465b2b18e..b70cf4c7b18546192bb7381dd20f36a9e952cb60 100644
+index dac6c9a7fa..ad6d2393e9 100644
 --- a/sdks/vscode/src/notebook/edit.ts
 +++ b/sdks/vscode/src/notebook/edit.ts
-@@ -85,7 +85,7 @@ async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, b
-     applied, editType: "delete", opIndex: `~~${deletedIndex + 1}~~`, beforeCount, afterCount: notebook.cellCount,
-     anchorCell: targetCell, deletedCellIndex: deletedIndex,
-     deletedKind, deletedLang, deletedId, deletedLineCount, deletedFirst,
--    shiftedCell, shiftedOldIdx, sourcePreview: deletedPreview,
-+    shiftedCell, shiftedOldIdx, sourcePreview: deletedPreview, beforeSource: deletedPreview, afterSource: "",
+@@ -108,6 +108,10 @@ return compactEditResult(notebook, {
+     shiftedCell,
+     shiftedOldIdx,
+     sourcePreview: deletedPreview,
++    // #224：delete 的 before/after——deletedPreview 是删除前源码，after 为空
++    // #224：notebookResult 用 before=deletedPreview, after="" 生成全删除 diff
++    beforeSource: deletedPreview,
++    afterSource: "",
    })
  }
  
-@@ -121,7 +121,7 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
-   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(insertIndex, insertIndex), [newCell])])
+@@ -148,7 +152,9 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
+   // notebook 结构编辑：等待 notebook.version 推进
    const applied = await applyNotebookEditAndWait(notebook, edit)
    const shiftedCell = shiftedOldIdx !== undefined ? notebook.cellAt(shiftedOldIdx + 1) : undefined
 -  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source })
++  // #224：insert 的 beforeSource 为空（插入前无 cell），afterSource 是新 cell 源码
++  // #224：affectedCellIndex=insertIndex 让 notebookResult 能标记插入位置的 cN 标签
 +  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, affectedCellIndex: insertIndex, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source, beforeSource: "", afterSource: source })
  }
  
  // ---------------------------------------------------------------------------
-@@ -171,11 +171,12 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
-   const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
+@@ -199,6 +205,9 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
+     const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
    if (sourceRaw === undefined) throw new Error("newCode is required for edit")
    const source = targetCell.kind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
++  // #224：记录编辑前源码，供 notebookResult 生成 diff
++  // #224：getText 获取编辑前完整 cell 源码
 +  const beforeSource = targetCell.document.getText()
- 
    const edit = new vscode.WorkspaceEdit()
    edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), source)
-   const applied = await applyTextEditAndWait(targetCell.document, edit, source !== targetCell.document.getText())
--  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source })
-+  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source, beforeSource, afterSource: source })
+   // 整 cell 源码替换：与当前文档不同才等文本版本
+@@ -213,6 +222,10 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
+     kind: cellTypeLabel(targetCell.kind),
+     language: targetCell.document.languageId,
+     sourcePreview: source,
++    // #224：before/after 源码供 opencode TUI 生成 diff card
++    // #224：before 是编辑前完整 cell 文本，after 是编辑后完整 cell 文本
++    beforeSource,
++    afterSource: source,
+   })
  }
  
- // ---------------------------------------------------------------------------
-@@ -197,6 +198,7 @@ async function handleTypeChange(
+@@ -236,7 +249,9 @@ async function handleTypeChange(
+   let newSource: string
    let contextSummary: string | undefined
  
    const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
++  // #224：类型变更前源码——beforeSource 用于 diff 生成
 +  const beforeSource = targetCell.document.getText()
  
    if (oldCode) {
-     // string-match on old source, then create new cell with changed type
-@@ -217,7 +219,7 @@ async function handleTypeChange(
-   const targetIndex = targetCell.index
-   const applied = await applyNotebookEditAndWait(notebook, edit)
-   const updatedCell = notebook.cellAt(targetIndex)
--  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(updatedCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: updatedCell, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary })
-+  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(updatedCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: updatedCell, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary, beforeSource, afterSource: newSource })
+     // 类型变更路径：oldCode 可选匹配，再以新 kind 重建 cell
+@@ -273,6 +288,10 @@ async function handleTypeChange(
+     oldLang,
+     sourcePreview: newSource,
+     contextSummary,
++    // #224：类型变更前后的完整源码
++    // #224：beforeSource 是变更前源码，afterSource 是重建后的新 cell 源码
++    beforeSource,
++    afterSource: newSource,
+   })
  }
  
- // ---------------------------------------------------------------------------
-@@ -225,13 +227,14 @@ async function handleTypeChange(
- // ---------------------------------------------------------------------------
+@@ -289,7 +308,9 @@ async function handleTypeChange(
  
+ // string oldCode/newCode 主路径：替代 #78 的 range 编辑
+ // applyEdit 失败时 applied=false 仍返回 compact，禁止吞掉失败状态
  async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, oldCode: string, newCode: string, beforeCount: number) {
++  // #224：字符串编辑前源码——beforeSource 用于 diff 生成
 +  const beforeSource = targetCell.document.getText()
    const result = matchAndReplace(targetCell, oldCode, newCode)
    const contextSummary = buildContext(notebook, targetCell, result, newCode)
  
-   const edit = new vscode.WorkspaceEdit()
-   edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), result.source)
-   const applied = await applyTextEditAndWait(targetCell.document, edit, result.source !== targetCell.document.getText())
--  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary })
-+  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary, beforeSource, afterSource: result.source })
+@@ -309,6 +330,10 @@ async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: v
+     language: targetCell.document.languageId,
+     sourcePreview: newCode,
+     contextSummary,
++    // #224：字符串替换前后的完整源码
++    // #224：result.source 是 matchAndReplace 后的完整替换结果
++    beforeSource,
++    afterSource: result.source,
+   })
  }
  
- // ---------------------------------------------------------------------------
-@@ -494,6 +497,8 @@ function compactEditResult(
+@@ -561,6 +586,9 @@ function compactEditResult(
      shiftedOldIdx?: number
      sourcePreview?: string
      contextSummary?: string
++    // #224：before/after 源码供 opencode TUI 生成 diff card
 +    beforeSource?: string
 +    afterSource?: string
    },
  ) {
    const lines: Array<string | undefined> = [
-@@ -540,10 +545,16 @@ function compactEditResult(
+@@ -612,10 +640,18 @@ async function handleTypeChange(
        cellCountBefore: info.beforeCount,
        cellCountAfter: info.afterCount,
        anchorCellIndex: info.anchorCell?.index,
++      // #224：deletedCellIndex 供 notebookResult 计算删除操作的 cell 标签
++      // #224：beforeSource 是删除前源码，afterSource 为空——diff 显示全删除
 +      deletedCellIndex: info.deletedCellIndex,
        affectedCellIndex: info.affectedCellIndex,
        dirty: notebook.isDirty,
        kind: info.kind,
        language: info.language,
-+      // opencode TUI 只从 data 派生展示 metadata，不改变 bridge 给模型的 summary。
++      // #224：opencode TUI 只从 data 派生展示 metadata，不改变 bridge 给模型的 summary。
 +      // before/after 保持 cell 级源文本，确保 notebook edit 完成态能渲染真实 diff，
 +      // pending 态仍只能显示参数行数估算，不能在 UI 线程重新读 VS Code 文档。
 +      beforeSource: info.beforeSource,

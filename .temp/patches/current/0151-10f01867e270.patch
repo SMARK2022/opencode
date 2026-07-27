@@ -4,38 +4,58 @@ Date: Fri, 15 May 2026 04:01:13 +0800
 Subject: [PATCH] =?UTF-8?q?feat(interrupt):=20=E6=B7=BB=E5=8A=A0=E4=B8=AD?=
  =?UTF-8?q?=E6=96=AD=E5=A4=84=E7=90=86=E5=8A=9F=E8=83=BD=EF=BC=8C=E6=94=AF?=
  =?UTF-8?q?=E6=8C=81=E4=BC=9A=E8=AF=9D=E4=B8=AD=E6=96=AD=E8=AE=A1=E6=95=B0?=
- =?UTF-8?q?=E5=92=8C=E7=A1=AE=E8=AE=A4=E6=97=B6=E9=97=B4?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index 46e0909efd99cb607d331fe9d9b72501925fefd6..e87eded8689ea2015398f66d82126a1392f5d34b 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -19,6 +19,7 @@ import { createStore, produce, unwrap } from "solid-js/store"
- import { useKeybind } from "@tui/context/keybind"
- import { usePromptHistory, type PromptInfo } from "./history"
- import { computePromptTraits } from "./traits"
+diff --git a/packages/tui/src/component/prompt/interrupt.ts b/packages/tui/src/component/prompt/interrupt.ts
+new file mode 100644
+index 0000000000..97705e2384
+--- /dev/null
++++ b/packages/tui/src/component/prompt/interrupt.ts
+@@ -0,0 +1,17 @@
++// #151：双击 Escape 确认窗口（毫秒）
++// #151：5s 内保持 armed，窗口内可再次 abort 而无需重新武装
++export const INTERRUPT_CONFIRMATION_MS = 5000
++
++// #151：第二次 Escape 触发 abort；count 封顶 1，保持 armed 以便窗口内继续 abort
++export function advanceInterruptCount(current: number) {
++  const next = current + 1
++  return {
++    count: Math.min(next, 1),
++    abort: next >= 2,
++  }
++}
++
++// #151：有 sessionID 即可中断（status 可能 stale/idle 仍应可用）
++export function canInterruptSession(sessionID: string | undefined) {
++  return sessionID !== undefined
++}
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+index 9f0362dc88..27fcca52fc 100644
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -59,6 +59,7 @@ import { useTuiConfig } from "../../config"
+ import { usePromptWorkspace } from "./workspace"
+ import { usePromptMove } from "./move"
+ import { readLocalAttachment } from "./local-attachment"
 +import { advanceInterruptCount, canInterruptSession, INTERRUPT_CONFIRMATION_MS } from "./interrupt"
- import { assign } from "./part"
- import { usePromptStash } from "./stash"
- import { DialogStash } from "../dialog-stash"
-@@ -524,7 +525,7 @@ export function Prompt(props: PromptProps) {
-         keybind: "session_interrupt",
+ import { useLocation } from "../../context/location"
+ 
+ registerOpencodeSpinner()
+@@ -474,7 +475,8 @@ export function Prompt(props: PromptProps) {
+         name: "session.interrupt",
          category: "Session",
          hidden: true,
 -        enabled: status().type !== "idle",
++        // #151：sessionID 在场即可中断，不依赖可能过期的 busy status
 +        enabled: canInterruptSession(props.sessionID),
-         onSelect: (dialog) => {
-           if (autocomplete.visible) return
+         run: () => {
+           if (auto()?.visible) return
            if (!input.focused) return
-@@ -535,17 +536,17 @@ export function Prompt(props: PromptProps) {
+@@ -485,17 +487,18 @@ export function Prompt(props: PromptProps) {
            }
            if (!props.sessionID) return
  
 -          setStore("interrupt", store.interrupt + 1)
++          // #151：advance 后 count 封顶 1；abort 后不立即清零，窗口内可重复 abort
 +          const interrupt = advanceInterruptCount(store.interrupt)
 +          setStore("interrupt", interrupt.count)
  
@@ -53,360 +73,37 @@ index 46e0909efd99cb607d331fe9d9b72501925fefd6..e87eded8689ea2015398f66d82126a13
            }
            dialog.clear()
          },
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/interrupt.ts b/packages/opencode/src/cli/cmd/tui/component/prompt/interrupt.ts
+diff --git a/packages/tui/test/prompt/prompt-interrupt.test.ts b/packages/tui/test/prompt/prompt-interrupt.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..85de76e0ffc5c0c33442511b8c7994a90881cf28
+index 0000000000..6a884b2f5b
 --- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/interrupt.ts
-@@ -0,0 +1,13 @@
-+export const INTERRUPT_CONFIRMATION_MS = 5000
-+
-+export function advanceInterruptCount(current: number) {
-+  const next = current + 1
-+  return {
-+    count: Math.min(next, 1),
-+    abort: next >= 2,
-+  }
-+}
-+
-+export function canInterruptSession(sessionID: string | undefined) {
-+  return sessionID !== undefined
-+}
-diff --git a/packages/opencode/test/cli/cmd/tui/prompt-interrupt.test.ts b/packages/opencode/test/cli/cmd/tui/prompt-interrupt.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..fe4601d5bb685ea1f7947e77c55a4593161c7fe0
---- /dev/null
-+++ b/packages/opencode/test/cli/cmd/tui/prompt-interrupt.test.ts
-@@ -0,0 +1,22 @@
++++ b/packages/tui/test/prompt/prompt-interrupt.test.ts
+@@ -0,0 +1,28 @@
 +import { describe, expect, test } from "bun:test"
-+import { advanceInterruptCount, canInterruptSession } from "../../../../src/cli/cmd/tui/component/prompt/interrupt"
++import {
++  advanceInterruptCount,
++  canInterruptSession,
++  INTERRUPT_CONFIRMATION_MS,
++} from "../../src/component/prompt/interrupt"
 +
 +describe("advanceInterruptCount", () => {
-+  test("keeps the prompt armed after abort so repeated escape keeps aborting", () => {
-+    const first = advanceInterruptCount(0)
-+    expect(first).toEqual({ count: 1, abort: false })
-+
-+    const second = advanceInterruptCount(first.count)
-+    expect(second).toEqual({ count: 1, abort: true })
-+
-+    const third = advanceInterruptCount(second.count)
-+    expect(third).toEqual({ count: 1, abort: true })
++  // #151：第一次按键武装，第二次 abort，且 count 保持 1
++  test("keeps the prompt armed after abort", () => {
++    expect(advanceInterruptCount(0)).toEqual({ count: 1, abort: false })
++    expect(advanceInterruptCount(1)).toEqual({ count: 1, abort: true })
++    expect(advanceInterruptCount(1)).toEqual({ count: 1, abort: true })
 +  })
 +})
 +
 +describe("canInterruptSession", () => {
-+  test("keeps interrupt available even when status is stale or already idle", () => {
-+    expect(canInterruptSession("ses_123")).toBe(true)
++  test("allows interrupt when a session id is present", () => {
++    expect(canInterruptSession("ses_1")).toBe(true)
 +    expect(canInterruptSession(undefined)).toBe(false)
 +  })
 +})
-diff --git a/packages/opencode/test/provider/models.test.ts b/packages/opencode/test/provider/models.test.ts
-index 7ccf126a9caac7024db354934608191d09ee0031..2d5cee6c484408ce175838faddb1741f362fd687 100644
---- a/packages/opencode/test/provider/models.test.ts
-+++ b/packages/opencode/test/provider/models.test.ts
-@@ -1,9 +1,9 @@
- import { describe, expect, beforeAll, beforeEach, afterAll } from "bun:test"
--import { Effect, Layer, Ref } from "effect"
--import { HttpClient, HttpClientResponse } from "effect/unstable/http"
-+import { Effect, Layer } from "effect"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
- import { Flag } from "@opencode-ai/core/flag/flag"
- import { Global } from "@opencode-ai/core/global"
-+import { Hash } from "@opencode-ai/core/util/hash"
- import { ModelsDev } from "../../src/provider/models"
- import { it } from "../lib/effect"
- import { rm, writeFile, utimes, mkdir } from "fs/promises"
-@@ -16,6 +16,7 @@ import path from "path"
- // bun process.
- const ORIGINAL_MODELS_PATH = Flag.OPENCODE_MODELS_PATH
- const ORIGINAL_DISABLE_FETCH = Flag.OPENCODE_DISABLE_MODELS_FETCH
-+const ORIGINAL_MODELS_URL = Flag.OPENCODE_MODELS_URL
- beforeAll(() => {
-   Flag.OPENCODE_MODELS_PATH = undefined
-   Flag.OPENCODE_DISABLE_MODELS_FETCH = true
-@@ -23,9 +24,12 @@ beforeAll(() => {
- afterAll(() => {
-   Flag.OPENCODE_MODELS_PATH = ORIGINAL_MODELS_PATH
-   Flag.OPENCODE_DISABLE_MODELS_FETCH = ORIGINAL_DISABLE_FETCH
-+  Flag.OPENCODE_MODELS_URL = ORIGINAL_MODELS_URL
- })
- 
--const cacheFile = path.join(Global.Path.cache, "models.json")
-+const source = () => Flag.OPENCODE_MODELS_URL || "https://models.dev"
-+const cacheFile = () =>
-+  path.join(Global.Path.cache, source() === "https://models.dev" ? "models.json" : `models-${Hash.fast(source())}.json`)
- 
- const fixture: Record<string, ModelsDev.Provider> = {
-   acme: {
-@@ -67,91 +71,97 @@ const fixture2: Record<string, ModelsDev.Provider> = {
-   },
- }
- 
--interface MockState {
-+interface ServerState {
-   body: string
-   status: number
-   calls: Array<{ url: string }>
- }
- 
--const makeMockClient = (state: Ref.Ref<MockState>) =>
--  HttpClient.make((request) =>
--    Effect.gen(function* () {
--      yield* Ref.update(state, (s) => ({ ...s, calls: [...s.calls, { url: request.url }] }))
--      const s = yield* Ref.get(state)
--      return HttpClientResponse.fromWeb(request, new Response(s.body, { status: s.status }))
-+function withModelsServer<A, E, R>(state: ServerState, run: (state: ServerState) => Effect.Effect<A, E, R>) {
-+  return Effect.acquireUseRelease(
-+    Effect.sync(() => {
-+      const previous = Flag.OPENCODE_MODELS_URL
-+      const server = Bun.serve({
-+        port: 0,
-+        hostname: "127.0.0.1",
-+        fetch(request) {
-+          state.calls.push({ url: request.url })
-+          return new Response(state.body, { status: state.status })
-+        },
-+      })
-+      Flag.OPENCODE_MODELS_URL = server.url.origin
-+      return { server, previous, file: cacheFile() }
-     }),
-+    () => run(state),
-+    (value) =>
-+      Effect.promise(async () => {
-+        value.server.stop(true)
-+        await rm(value.file, { force: true })
-+        Flag.OPENCODE_MODELS_URL = value.previous
-+      }),
-   )
-+}
- 
--const buildLayer = (state: Ref.Ref<MockState>) =>
-+const buildLayer = () =>
-   // Layer.fresh is required: ModelsDev.layer is a module-level Layer constant,
-   // and Effect.provide uses a process-global MemoMap by default — without fresh,
-   // every test would reuse the cachedInvalidateWithTTL state from the first run.
--  Layer.fresh(ModelsDev.layer).pipe(
--    Layer.provide(Layer.succeed(HttpClient.HttpClient, makeMockClient(state))),
--    Layer.provide(AppFileSystem.defaultLayer),
--  )
-+  Layer.fresh(ModelsDev.layer).pipe(Layer.provide(AppFileSystem.defaultLayer))
- 
- const writeCache = (data: object, mtimeMs?: number) =>
-   Effect.promise(async () => {
-     await mkdir(Global.Path.cache, { recursive: true })
--    await writeFile(cacheFile, JSON.stringify(data))
-+    await writeFile(cacheFile(), JSON.stringify(data))
-     if (mtimeMs !== undefined) {
-       const t = mtimeMs / 1000
--      await utimes(cacheFile, t, t)
-+      await utimes(cacheFile(), t, t)
-     }
-   })
- 
--const provided = <A, E>(state: Ref.Ref<MockState>, eff: Effect.Effect<A, E, ModelsDev.Service>) =>
--  eff.pipe(Effect.provide(buildLayer(state)))
-+const provided = <A, E>(eff: Effect.Effect<A, E, ModelsDev.Service>) => eff.pipe(Effect.provide(buildLayer()))
- 
- beforeEach(async () => {
--  await rm(cacheFile, { force: true })
-+  await rm(cacheFile(), { force: true })
- })
- 
- afterAll(async () => {
--  await rm(cacheFile, { force: true })
-+  await rm(cacheFile(), { force: true })
- })
- 
--const initialState: MockState = {
-+const initialState: ServerState = {
-   body: JSON.stringify(fixture),
-   status: 200,
-   calls: [],
- }
- 
-+const serverState = (input?: Partial<Omit<ServerState, "calls">>): ServerState => ({
-+  ...initialState,
-+  ...input,
-+  calls: [],
-+})
 +
- describe("ModelsDev Service", () => {
-   it.live("get() returns providers from disk when cache file exists", () =>
-     Effect.gen(function* () {
-       yield* writeCache(fixture)
--      const state = yield* Ref.make(initialState)
--      const result = yield* provided(
--        state,
--        ModelsDev.Service.use((s) => s.get()),
--      )
-+      const result = yield* provided(ModelsDev.Service.use((s) => s.get()))
-       expect(result).toEqual(fixture)
--      const final = yield* Ref.get(state)
--      expect(final.calls).toEqual([])
-     }),
-   )
- 
--  it.live("get() returns {} when disk empty and fetch disabled", () =>
-+  it.live("get() does not fetch when disk empty and fetch disabled", () =>
-     Effect.gen(function* () {
--      const state = yield* Ref.make(initialState)
--      const result = yield* provided(
--        state,
--        ModelsDev.Service.use((s) => s.get()),
--      )
--      expect(result).toEqual({})
--      const final = yield* Ref.get(state)
--      expect(final.calls).toEqual([])
-+      const state = serverState()
-+      const result = yield* withModelsServer(state, () => provided(ModelsDev.Service.use((s) => s.get())))
-+      expect(typeof result).toBe("object")
-+      expect(state.calls).toEqual([])
-     }),
-   )
- 
-   it.live("get() is single-flight under concurrent calls", () =>
-     Effect.gen(function* () {
-       yield* writeCache(fixture)
--      const state = yield* Ref.make(initialState)
-       const results = yield* provided(
--        state,
-         Effect.gen(function* () {
-           const svc = yield* ModelsDev.Service
-           return yield* Effect.all([svc.get(), svc.get(), svc.get(), svc.get(), svc.get()], {
-@@ -166,9 +176,7 @@ describe("ModelsDev Service", () => {
-   it.live("get() caches across calls (later disk writes are ignored until invalidate)", () =>
-     Effect.gen(function* () {
-       yield* writeCache(fixture)
--      const state = yield* Ref.make(initialState)
-       const first = yield* provided(
--        state,
-         Effect.gen(function* () {
-           const svc = yield* ModelsDev.Service
-           const a = yield* svc.get()
-@@ -183,77 +191,79 @@ describe("ModelsDev Service", () => {
-     }),
-   )
- 
--  it.live("refresh(true) fetches via HttpClient and updates the cache", () =>
-+  it.live("refresh(true) fetches through routed fetch and updates the cache", () =>
-     Effect.gen(function* () {
--      yield* writeCache(fixture)
--      const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
--      const result = yield* provided(
--        state,
--        Effect.gen(function* () {
--          const svc = yield* ModelsDev.Service
--          const before = yield* svc.get()
--          yield* svc.refresh(true)
--          const after = yield* svc.get()
--          return { before, after }
--        }),
-+      const state = serverState({ body: JSON.stringify(fixture2) })
-+      const result = yield* withModelsServer(state, () =>
-+        provided(
-+          Effect.gen(function* () {
-+            yield* writeCache(fixture)
-+            const svc = yield* ModelsDev.Service
-+            const before = yield* svc.get()
-+            yield* svc.refresh(true)
-+            const after = yield* svc.get()
-+            return { before, after }
-+          }),
-+        ),
-       )
-       expect(result.before).toEqual(fixture)
-       expect(result.after).toEqual(fixture2)
--      const final = yield* Ref.get(state)
--      expect(final.calls.length).toBe(1)
--      expect(final.calls[0].url).toContain("/api.json")
-+      expect(state.calls.length).toBe(1)
-+      expect(state.calls[0]?.url).toContain("/api.json")
-     }),
-   )
- 
-   it.live("refresh(false) skips fetch when on-disk file is fresh", () =>
-     Effect.gen(function* () {
--      // Fresh: mtime within the 5-minute TTL.
--      yield* writeCache(fixture, Date.now() - 1000)
--      const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
--      yield* provided(
--        state,
--        ModelsDev.Service.use((s) => s.refresh(false)),
-+      const state = serverState({ body: JSON.stringify(fixture2) })
-+      yield* withModelsServer(state, () =>
-+        provided(
-+          Effect.gen(function* () {
-+            // Fresh: mtime within the 5-minute TTL.
-+            yield* writeCache(fixture, Date.now() - 1000)
-+            const svc = yield* ModelsDev.Service
-+            yield* svc.refresh(false)
-+          }),
-+        ),
-       )
--      const final = yield* Ref.get(state)
--      expect(final.calls).toEqual([])
-+      expect(state.calls).toEqual([])
-     }),
-   )
- 
-   it.live("refresh(false) fetches when on-disk file is stale", () =>
-     Effect.gen(function* () {
--      // Stale: mtime 10 minutes ago, beyond the 5-minute TTL.
--      yield* writeCache(fixture, Date.now() - 10 * 60 * 1000)
--      const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
--      const after = yield* provided(
--        state,
--        Effect.gen(function* () {
--          const svc = yield* ModelsDev.Service
--          yield* svc.refresh(false)
--          return yield* svc.get()
--        }),
-+      const state = serverState({ body: JSON.stringify(fixture2) })
-+      const after = yield* withModelsServer(state, () =>
-+        provided(
-+          Effect.gen(function* () {
-+            // Stale: mtime 10 minutes ago, beyond the 5-minute TTL.
-+            yield* writeCache(fixture, Date.now() - 10 * 60 * 1000)
-+            const svc = yield* ModelsDev.Service
-+            yield* svc.refresh(false)
-+            return yield* svc.get()
-+          }),
-+        ),
-       )
--      const final = yield* Ref.get(state)
--      expect(final.calls.length).toBe(1)
-+      expect(state.calls.length).toBe(1)
-       expect(after).toEqual(fixture2)
-     }),
-   )
- 
-   it.live("refresh swallows HTTP errors and leaves cache intact", () =>
-     Effect.gen(function* () {
--      yield* writeCache(fixture)
--      const state = yield* Ref.make({ ...initialState, status: 500, body: "boom" })
--      const result = yield* provided(
--        state,
--        Effect.gen(function* () {
--          const svc = yield* ModelsDev.Service
--          yield* svc.refresh(true)
--          return yield* svc.get()
--        }),
-+      const state = serverState({ status: 500, body: "boom" })
-+      const result = yield* withModelsServer(state, () =>
-+        provided(
-+          Effect.gen(function* () {
-+            yield* writeCache(fixture)
-+            const svc = yield* ModelsDev.Service
-+            yield* svc.refresh(true)
-+            return yield* svc.get()
-+          }),
-+        ),
-       )
-       expect(result).toEqual(fixture)
--      // withTransientReadRetry retries 5xx, so calls may be > 1.
--      const final = yield* Ref.get(state)
--      expect(final.calls.length).toBeGreaterThanOrEqual(1)
-+      expect(state.calls.length).toBe(1)
-     }),
-   )
- })
++describe("INTERRUPT_CONFIRMATION_MS", () => {
++  test("is five seconds", () => {
++    expect(INTERRUPT_CONFIRMATION_MS).toBe(5000)
++  })
++})

@@ -4,67 +4,155 @@ Date: Fri, 8 May 2026 14:54:54 +0800
 Subject: [PATCH] =?UTF-8?q?feat:=20=E4=BC=98=E5=8C=96=20BlockTool=20?=
  =?UTF-8?q?=E7=BB=84=E4=BB=B6=E7=9A=84=E5=8F=AF=E6=8A=98=E5=8F=A0=E9=80=BB?=
  =?UTF-8?q?=E8=BE=91=EF=BC=8C=E4=BD=BF=E7=94=A8=20createMemo=20=E5=92=8C?=
- =?UTF-8?q?=20createSignal=20=E6=8F=90=E5=8D=87=E6=80=A7=E8=83=BD?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index ba5c3acf01cd8f422eb5c02c41b76002c0565028..429b8fdd427f33d4363e9e4a913fef4b05597bc3 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -1884,10 +1884,15 @@ function BlockTool(props: {
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index 433803ed69..cb0c30c970 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -2137,17 +2137,34 @@ function BlockTool(props: {
+   spinner?: boolean
+   contextView?: boolean
+   contextLabel?: string
++  // #111：可选折叠契约；仅当调用方明确传入 totalLines 时激活（勿与外置 collapseToolOutput 叠用）
++  maxLines?: number
++  threshold?: number
++  totalLines?: number
+ }) {
+   const { theme } = useTheme()
+   const renderer = useRenderer()
+   const [hover, setHover] = createSignal(false)
+   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
+-  // 上下文视图时使用 diffContextBg 背景色
+   const background = createMemo(() => {
+     if (props.contextView) return theme.diffContextBg
      if (hover()) return theme.backgroundMenu
      return theme.backgroundPanel
    })
--  const previewLines = props.maxLines ?? 10
--  const threshold = props.threshold ?? 20
--  const contentLines = props.totalLines ?? 0
--  const canCollapse = previewLines > 0 && contentLines > threshold
++  // #111：仅 totalLines 有定义时启用内置折叠，避免与 Shell/Write 外置折叠双主路径
++  const collapseArmed = createMemo(() => props.totalLines !== undefined)
 +  const previewLines = createMemo(() => props.maxLines ?? 10)
 +  const threshold = createMemo(() => props.threshold ?? 20)
++  // #111：canCollapse 只升不降
 +  const [canCollapse, setCanCollapse] = createSignal(false)
 +  createEffect(() => {
++    if (!collapseArmed()) return
 +    if (canCollapse()) return
 +    if (previewLines() > 0 && (props.totalLines ?? 0) > threshold()) {
 +      setCanCollapse(true)
 +    }
 +  })
-   const [expanded, setExpanded] = createSignal(false)
++  const [expanded, setExpanded] = createSignal(false)
    return (
      <box
-@@ -1899,7 +1904,7 @@ function BlockTool(props: {
+       ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
+@@ -2160,11 +2177,10 @@ function BlockTool(props: {
        backgroundColor={background()}
        customBorderChars={SplitBorder.customBorderChars}
        borderColor={props.contextView ? theme.info : theme.background}
--      onMouseOver={() => (props.onClick || props.onRightClick || canCollapse) && setHover(true)}
+-      onMouseOver={() => (props.onClick || props.onRightClick) && setHover(true)}
 +      onMouseOver={() => (props.onClick || props.onRightClick || canCollapse()) && setHover(true)}
        onMouseOut={() => setHover(false)}
        onMouseUp={(evt?: TuiMouseEvent) => {
          if (renderer.getSelection()?.getSelectedText()) return
-@@ -1910,7 +1915,7 @@ function BlockTool(props: {
+-        // 右键触发上下文视图切换
+         if (evt?.button === MouseButton.RIGHT) {
+           if (!props.onRightClick) return
+           evt.preventDefault()
+@@ -2172,6 +2188,8 @@ function BlockTool(props: {
            props.onRightClick()
            return
          }
--        if (canCollapse) setExpanded((prev) => !prev)
++        // #111：仅内置折叠武装时切换 expanded
 +        if (canCollapse()) setExpanded((prev) => !prev)
          props.onClick?.()
        }}
      >
-@@ -1927,12 +1932,12 @@ function BlockTool(props: {
+@@ -2190,7 +2208,19 @@ function BlockTool(props: {
+           </Show>
+         )}
        </Show>
-       <box
-         marginTop={1}
--        maxHeight={canCollapse && !expanded() ? previewLines : undefined}
--        overflow={canCollapse && !expanded() ? "hidden" : undefined}
+-      <box marginTop={1}>{props.children}</box>
++      <box
++        marginTop={1}
++        // #111：仅内置折叠激活时限制高度
 +        maxHeight={canCollapse() && !expanded() ? previewLines() : undefined}
 +        overflow={canCollapse() && !expanded() ? "hidden" : undefined}
-       >
-         {props.children}
-       </box>
--      <Show when={canCollapse}>
++      >
++        {props.children}
++      </box>
 +      <Show when={canCollapse()}>
++        <box marginTop={1}>
++          <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
++        </box>
++      </Show>
+       <Show when={error()}>
          <box marginTop={1}>
-           <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-         </box>
+         <text fg={theme.error}>{error()}</text>
+@@ -2224,8 +2254,14 @@ function Shell(props: ToolProps) {
+     }
+     return collapseToolOutput(output(), maxLines, maxChars(), threshold)
+   })
++  // #111：外置 collapseToolOutput 主路径 sticky（Shell 唯一折叠 owner）
++  const [shellCanCollapse, setShellCanCollapse] = createSignal(false)
++  createEffect(() => {
++    if (shellCanCollapse()) return
++    if (collapsed().overflow) setShellCanCollapse(true)
++  })
+   const limited = createMemo(() => {
+-    if (expanded() || !collapsed().overflow) return output()
++    if (expanded() || !shellCanCollapse()) return output()
+     return collapsed().output
+   })
+ 
+@@ -2256,7 +2292,7 @@ function Shell(props: ToolProps) {
+         <BlockTool
+           title={title()}
+           part={props.part}
+-          onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
++          onClick={shellCanCollapse() ? () => setExpanded((prev) => !prev) : undefined}
+           onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
+           contextView={showContextOutput()}
+           contextLabel="returned to model"
+@@ -2271,7 +2307,7 @@ function Shell(props: ToolProps) {
+             <Show when={output()}>
+               <text fg={theme.text}>{limited()}</text>
+             </Show>
+-            <Show when={collapsed().overflow}>
++            <Show when={shellCanCollapse()}>
+               <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+             </Show>
+           </box>
+@@ -2300,8 +2336,14 @@ function Write(props: ToolProps) {
+   const threshold = 20
+   const maxChars = createMemo(() => threshold * Math.max(20, ctx.width - 6))
+   const collapsed = createMemo(() => collapseToolOutput(code(), maxLines, maxChars(), threshold))
++  // #111：Write 外置折叠 sticky（唯一折叠 owner；勿传 totalLines 给 BlockTool）
++  const [writeCanCollapse, setWriteCanCollapse] = createSignal(false)
++  createEffect(() => {
++    if (writeCanCollapse()) return
++    if (collapsed().overflow) setWriteCanCollapse(true)
++  })
+   const limited = createMemo(() => {
+-    if (expanded() || !collapsed().overflow) return code()
++    if (expanded() || !writeCanCollapse()) return code()
+     return collapsed().output
+   })
+   // 文件覆写 diff：当 write 工具覆写已有文件时，metadata.diff 包含 git diff 格式的变更
+@@ -2368,7 +2410,7 @@ function Write(props: ToolProps) {
+         <BlockTool
+           title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))}
+           part={props.part}
+-          onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
++          onClick={writeCanCollapse() ? () => setExpanded((prev) => !prev) : undefined}
+         >
+           <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
+             <code
+@@ -2379,7 +2421,7 @@ function Write(props: ToolProps) {
+               content={limited()}
+             />
+           </line_number>
+-          <Show when={collapsed().overflow}>
++          <Show when={writeCanCollapse()}>
+             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+           </Show>
+           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />

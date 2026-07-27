@@ -1,6 +1,6 @@
 From 347a9a0057be8e21953b6c2dc4a7b2cc0d8f021b Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
-Date: Sun, 24 May 2026 15:50:16 +0800
+Date: Sat, 24 May 2026 15:50:16 +0800
 Subject: [PATCH] =?UTF-8?q?feat(auto-review):=20=E6=B7=BB=E5=8A=A0?=
  =?UTF-8?q?=E5=B7=A5=E5=85=B7=E8=87=AA=E5=8A=A8=E5=AE=A1=E6=9F=A5=E4=B8=8A?=
  =?UTF-8?q?=E4=B8=8B=E6=96=87=EF=BC=8C=E4=BC=98=E5=8C=96=E5=B7=A5=E5=85=B7?=
@@ -12,428 +12,62 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-- Added reviewID to recordReviewerRequest and runReviewerAgent functions to link requests and decisions.
-- Implemented SessionRetry for transient provider failures in reviewer sessions.
-- Updated metadata handling in session prompts to preserve auto-review information across updates.
-- Enhanced tests to verify auto-review functionality and ensure metadata integrity during session processing.
-- Improved UI feedback for auto-review status in various tool interactions.
 
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 71997fed5a22b5b4dfbc34300afa52d77669f5a2..8e4a31fa832a91f95de1e515e4cd625b62385752 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -1548,6 +1548,11 @@ function UserMessage(props: {
- // from a previous non-tool part", and undefined leaves InlineTool's legacy
- // sibling measurement in charge for consecutive tools and external call sites.
- const ToolPartTopMargin = createContext<() => boolean | undefined>(() => undefined)
-+// Auto review state is attached to every reviewed tool part by the permission
-+// reviewer service. Keep the TUI lookup in a context so BlockTool/InlineTool can
-+// render one shared status row without each concrete tool remembering to pass a
-+// prop; shell and patch can opt out where their layouts need a bespoke position.
-+const ToolAutoReview = createContext<() => AutoReviewMetadata | undefined>(() => undefined)
- 
- function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; last: boolean; index: number }) {
-   const ctx = use()
-@@ -1866,53 +1871,55 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
- 
-   return (
-     <Show when={!shouldHide()}>
--      <Switch>
--        <Match when={props.part.tool === ShellID.ToolID}>
--          <Shell {...toolprops} />
--        </Match>
--        <Match when={props.part.tool === "glob"}>
--          <Glob {...toolprops} />
--        </Match>
--        <Match when={props.part.tool === "read"}>
--          <Read {...toolprops} />
--        </Match>
--        <Match when={props.part.tool === "grep"}>
--          <Grep {...toolprops} />
--        </Match>
--        <Match when={props.part.tool === "webfetch"}>
--          <WebFetch {...toolprops} />
--        </Match>
--        <Match when={props.part.tool === "websearch"}>
--          <WebSearch {...toolprops} />
--        </Match>
--        <Match when={props.part.tool === "write"}>
--          <Write {...toolprops} />
--        </Match>
--        <Match when={props.part.tool === "edit"}>
--          <Edit {...toolprops} />
--        </Match>
--        <Match when={props.part.tool === "task"}>
--          <Task {...toolprops} />
--        </Match>
--        <Match when={props.part.tool === "apply_patch"}>
--          <ApplyPatch {...toolprops} />
--        </Match>
--        <Match when={props.part.tool === "todowrite"}>
--          <TodoWrite {...toolprops} />
--        </Match>
--        <Match when={props.part.tool === "question"}>
--          <Question {...toolprops} />
--        </Match>
--        <Match when={props.part.tool === "permission_review_decision"}>
--          <PermissionReviewDecision {...toolprops} />
--        </Match>
--        <Match when={props.part.tool === "skill"}>
--          <Skill {...toolprops} />
--        </Match>
--        <Match when={true}>
--          <GenericTool {...toolprops} />
--        </Match>
--      </Switch>
-+      <ToolAutoReview.Provider value={() => autoReviewMetadata(toolprops.metadata)}>
-+        <Switch>
-+          <Match when={props.part.tool === ShellID.ToolID}>
-+            <Shell {...toolprops} />
-+          </Match>
-+          <Match when={props.part.tool === "glob"}>
-+            <Glob {...toolprops} />
-+          </Match>
-+          <Match when={props.part.tool === "read"}>
-+            <Read {...toolprops} />
-+          </Match>
-+          <Match when={props.part.tool === "grep"}>
-+            <Grep {...toolprops} />
-+          </Match>
-+          <Match when={props.part.tool === "webfetch"}>
-+            <WebFetch {...toolprops} />
-+          </Match>
-+          <Match when={props.part.tool === "websearch"}>
-+            <WebSearch {...toolprops} />
-+          </Match>
-+          <Match when={props.part.tool === "write"}>
-+            <Write {...toolprops} />
-+          </Match>
-+          <Match when={props.part.tool === "edit"}>
-+            <Edit {...toolprops} />
-+          </Match>
-+          <Match when={props.part.tool === "task"}>
-+            <Task {...toolprops} />
-+          </Match>
-+          <Match when={props.part.tool === "apply_patch"}>
-+            <ApplyPatch {...toolprops} />
-+          </Match>
-+          <Match when={props.part.tool === "todowrite"}>
-+            <TodoWrite {...toolprops} />
-+          </Match>
-+          <Match when={props.part.tool === "question"}>
-+            <Question {...toolprops} />
-+          </Match>
-+          <Match when={props.part.tool === "permission_review_decision"}>
-+            <PermissionReviewDecision {...toolprops} />
-+          </Match>
-+          <Match when={props.part.tool === "skill"}>
-+            <Skill {...toolprops} />
-+          </Match>
-+          <Match when={true}>
-+            <GenericTool {...toolprops} />
-+          </Match>
-+        </Switch>
-+      </ToolAutoReview.Provider>
-     </Show>
-   )
- }
-@@ -2044,10 +2051,11 @@ function autoReviewMetadata(metadata: Partial<Tool.InferMetadata<any>>): AutoRev
- 
- function autoReviewLabel(review: AutoReviewMetadata) {
-   const agent = "@permission-reviewer"
--  // Keep the main shell card to the agreed two-line contract: command first,
--  // then one compact review status line. The three glyphs are stable UI states:
--  // ◌ means the hidden reviewer agent is running, ✓ means the reviewer allowed
--  // execution, and ! covers all non-allow terminal outcomes.
-+  // Keep the row text stable across inline and block tools: placement belongs to
-+  // InlineTool/BlockTool, while this function owns only the compact status copy.
-+  // The three glyphs are protocol states: ◌ means the hidden reviewer agent is
-+  // running, ✓ means it allowed execution, and ! covers every non-allow terminal
-+  // outcome without expanding sensitive reviewer details in the parent session.
-   switch (review.status) {
-     case "allowed":
-       return `✓ auto review · allowed · auth ${review.result?.user_authorization ?? "unknown"} · ${agent}`
-@@ -2080,9 +2088,14 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
-     <box
-       onMouseOver={() => clickable() && setHover(true)}
-       onMouseOut={() => setHover(false)}
--      onMouseUp={() => {
-+      onMouseUp={(evt?: TuiMouseEvent) => {
-         if (!props.review.sessionID) return
-         if (renderer.getSelection()?.getSelectedText()) return
-+        // Review rows can live inside clickable/collapsible tool cards. Stop the
-+        // event here so opening @permission-reviewer does not also toggle the
-+        // parent diff/output card or trigger a tool-specific click handler.
-+        evt?.preventDefault()
-+        evt?.stopPropagation()
-         navigate({ type: "session", sessionID: props.review.sessionID })
-       }}
-     >
-@@ -2093,6 +2106,11 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
-   )
- }
- 
-+function ToolAutoReviewLine() {
-+  const review = useContext(ToolAutoReview)
-+  return <Show when={review()}>{(item) => <AutoReviewLine review={item()} />}</Show>
-+}
-+
- function InlineTool(props: {
-   icon: string
-   iconColor?: RGBA
-@@ -2102,6 +2120,7 @@ function InlineTool(props: {
-   children: JSX.Element
-   part: ToolPart
-   onClick?: () => void
-+  autoReview?: false
- }) {
-   const [margin, setMargin] = createSignal(0)
-   const toolTopMargin = useContext(ToolPartTopMargin)
-@@ -2184,6 +2203,9 @@ function InlineTool(props: {
-           </text>
-         </Match>
-       </Switch>
-+      <Show when={props.autoReview !== false}>
-+        <ToolAutoReviewLine />
-+      </Show>
-       <Show when={error() && !denied()}>
-         <text fg={theme.error}>{error()}</text>
-       </Show>
-@@ -2206,6 +2228,7 @@ function BlockTool(props: {
-   totalChars?: number
-   charThreshold?: number
-   preview?: JSX.Element
-+  autoReview?: false
- }) {
-   const { theme } = useTheme()
-   const renderer = useRenderer()
-@@ -2274,6 +2297,9 @@ function BlockTool(props: {
-       >
-         <Spinner color={theme.textMuted}>{props.title.replace(/^# /, "")}</Spinner>
-       </Show>
-+      <Show when={props.autoReview !== false}>
-+        <ToolAutoReviewLine />
-+      </Show>
-       <box
-         marginTop={1}
-         maxHeight={collapsed() && !props.preview ? previewLines() : undefined}
-@@ -2299,10 +2325,8 @@ function BlockTool(props: {
- 
- function Shell(props: ToolProps<typeof ShellTool>) {
-   const { theme } = useTheme()
--  const { navigate } = useRoute()
-   const pathFormatter = usePathFormatter()
-   const isRunning = createMemo(() => props.part.state.status === "running")
--  const autoReview = createMemo(() => autoReviewMetadata(props.metadata))
-   const [showContextOutput, setShowContextOutput] = createSignal(false)
-   const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
-   const output = createMemo(() => {
-@@ -2310,13 +2334,12 @@ function Shell(props: ToolProps<typeof ShellTool>) {
-     return stripAnsi(text?.trim() ?? "")
-   })
-   const shellPreviewText = createMemo(() => {
--    const review = autoReview()
--    const header = [`$ ${props.input.command ?? ""}`, review ? autoReviewLabel(review) : undefined].filter(Boolean)
--    // Collapsed shell previews must keep the same two-line review contract as
--    // the expanded body; otherwise long outputs hide the allow/deny reviewer
--    // result until the user expands the command card.
--    if (!output()) return header.join("\n")
--    return [...header, "", output()].join("\n")
-+    const header = `$ ${props.input.command ?? ""}`
-+    // Shell now uses BlockTool's default review slot like edit/write cards, so
-+    // the body preview only accounts for command/output text. The review row is
-+    // still visible while collapsed because BlockTool renders it above the body.
-+    if (!output()) return header
-+    return [header, "", output()].join("\n")
-   })
- 
-   const workdirDisplay = createMemo(() => {
-@@ -2356,7 +2379,6 @@ function Shell(props: ToolProps<typeof ShellTool>) {
-         >
-           <box>
-             <text fg={theme.text}>$ {props.input.command}</text>
--            <Show when={autoReview()}>{(review) => <AutoReviewLine review={review()} />}</Show>
-             <Show when={showContextOutput()}>
-               <text fg={theme.info}>Model context output</text>
-             </Show>
-@@ -2372,14 +2394,8 @@ function Shell(props: ToolProps<typeof ShellTool>) {
-           pending="Writing command..."
-           complete={props.input.command}
-           part={props.part}
--          onClick={() => {
--            const sessionID = autoReview()?.sessionID
--            if (sessionID) navigate({ type: "session", sessionID })
--          }}
-         >
--          {[props.input.command, autoReview() ? `  ${autoReviewLabel(autoReview()!)}` : undefined]
--            .filter(Boolean)
--            .join("\n")}
-+          {props.input.command}
-         </InlineTool>
-       </Match>
-     </Switch>
-@@ -2797,6 +2813,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
-   })
- 
-   const files = createMemo(() => props.metadata.files ?? [])
-+  const review = useContext(ToolAutoReview)
- 
-   const view = createMemo(() => {
-     const diffStyle = ctx.tui.diff_style
-@@ -2821,49 +2838,60 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
-   return (
-     <Switch>
-       <Match when={files().length > 0}>
--        <For each={files()}>
--          {(file) => (
--            <BlockTool
--              title={title(file)}
--              part={props.part}
--              maxLines={10}
--              threshold={20}
--              totalLines={(file.patch ?? "").split("\n").length}
--              totalChars={(file.patch ?? "").length}
--              preview={
--                <Show
--                  when={file.type !== "delete"}
--                  fallback={
--                    <text fg={theme.diffRemoved} paddingLeft={1}>
--                      -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
--                    </text>
--                  }
--                >
--                  <DiffPreview
--                    diff={previewDiff(file.patch || "", 10)}
--                    filePath={file.filePath}
--                    view={view()}
--                    maxLines={10}
--                  />
--                </Show>
--              }
--            >
--              <box gap={1} flexDirection="column">
--                <Show
--                  when={file.type !== "delete"}
--                  fallback={
--                    <text fg={theme.diffRemoved} paddingLeft={1}>
--                      -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
--                    </text>
--                  }
--                >
--                  <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
--                </Show>
--                <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
--              </box>
--            </BlockTool>
--          )}
--        </For>
-+        <box>
-+          <Show when={review()}>
-+            <box paddingLeft={3} marginTop={1}>
-+              <text paddingLeft={3} fg={theme.textMuted} wrapMode="none">
-+                % Patch {files().length} file{files().length === 1 ? "" : "s"}
-+              </text>
-+              <ToolAutoReviewLine />
-+            </box>
-+          </Show>
-+          <For each={files()}>
-+            {(file) => (
-+              <BlockTool
-+                title={title(file)}
-+                part={props.part}
-+                maxLines={10}
-+                threshold={20}
-+                totalLines={(file.patch ?? "").split("\n").length}
-+                totalChars={(file.patch ?? "").length}
-+                autoReview={false}
-+                preview={
-+                  <Show
-+                    when={file.type !== "delete"}
-+                    fallback={
-+                      <text fg={theme.diffRemoved} paddingLeft={1}>
-+                        -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
-+                      </text>
-+                    }
-+                  >
-+                    <DiffPreview
-+                      diff={previewDiff(file.patch || "", 10)}
-+                      filePath={file.filePath}
-+                      view={view()}
-+                      maxLines={10}
-+                    />
-+                  </Show>
-+                }
-+              >
-+                <box gap={1} flexDirection="column">
-+                  <Show
-+                    when={file.type !== "delete"}
-+                    fallback={
-+                      <text fg={theme.diffRemoved} paddingLeft={1}>
-+                        -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
-+                      </text>
-+                    }
-+                  >
-+                    <DiffView diff={file.patch || ""} filePath={file.filePath} view={view()} />
-+                  </Show>
-+                  <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
-+                </box>
-+              </BlockTool>
-+            )}
-+          </For>
-+        </box>
-       </Match>
-       <Match when={true}>
-         <InlineTool icon="%" pending={pending()} complete={false} part={props.part}>
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
-index 2d6c838dfde3d2bde638b31cf2527cfa2af00ac5..323ca42d8cb26b48ffb92171e477d658af80850b 100644
+index 86f3a64c20..9fe118d2da 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -3,6 +3,7 @@ import { Provider } from "@/provider/provider"
+@@ -5,6 +5,7 @@ import { Provider } from "@/provider/provider"
  import { ProviderTransform } from "@/provider/transform"
  import { Session } from "@/session/session"
  import { MessageV2 } from "@/session/message-v2"
 +import { SessionRetry } from "@/session/retry"
  import { MessageID, PartID, SessionID } from "@/session/schema"
- import { toJsonSchema } from "@/util/effect-zod"
- import { jsonSchema, streamText, tool, wrapLanguageModel, type ModelMessage } from "ai"
-@@ -119,12 +120,14 @@ export const layer = Layer.effect(
+ import { ToolJsonSchema } from "@/tool/json-schema"
+ import type { ToolPart, User, Assistant, TextPart, ReasoningPart } from "@opencode-ai/core/v1/session"
+@@ -132,6 +133,8 @@ export const layer = Layer.effect(
              ? yield* recordReviewerRequest({
                  session: reviewerSession,
                  model,
++                // #214：reviewID 从父工具 autoReview metadata 传入——稳定 join key
 +                reviewID: input.reviewID,
                  text: renderReviewerPrompt(messages),
                })
              : undefined
+@@ -139,6 +142,8 @@ export const layer = Layer.effect(
            const assessment = yield* runReviewerAgent({
              session: reviewerSession,
              model,
++            // #214：reviewID 透传到 reviewer agent——最终决策 part 需 mirror 此 ID
 +            reviewID: input.reviewID,
              parentID: reviewerUser?.id,
              messages,
            }).pipe(
-@@ -206,7 +209,7 @@ export const layer = Layer.effect(
-       return next
+@@ -218,7 +223,8 @@ export const layer = Layer.effect(
      }
  
+     // #209：记录 reviewer 请求为可见用户消息——metadata 标记防止被误认为人类授权
 -    function recordReviewerRequest(input: { session: Session.Info; model: Provider.Model; text: string }) {
++    // #214：reviewID 写入 metadata——审计/导出代码可按逻辑审查导航，无需解析安全敏感的合成 prompt
 +    function recordReviewerRequest(input: { session: Session.Info; model: Provider.Model; reviewID: string; text: string }) {
        return Effect.gen(function* () {
-         const message = yield* sessions.updateMessage({
+         const message = yield* session.updateMessage({
            id: MessageID.ascending(),
-@@ -227,7 +230,11 @@ export const layer = Layer.effect(
-           // subagent run instead of an opaque audit summary. The metadata marker
-           // keeps this generated protocol cell out of future authorization
-           // evidence if reviewer child transcripts are ever projected again.
+@@ -234,7 +240,8 @@ export const layer = Layer.effect(
+           messageID: message.id,
+           type: "text",
+           // #209：metadata 标记替代 synthetic——reviewer 子会话请求 cell 可见但不可作为授权证据，transcript 投影据此排除
 -          metadata: { permissionReviewerRequest: true },
-+          // `reviewID` is the stable join key from the parent tool's autoReview
-+          // metadata to this visible protocol prompt. Keep it in metadata rather
-+          // than prompt text so audit/export code can navigate without parsing a
-+          // security-sensitive synthetic prompt body.
++          // #214：reviewID 是从父工具 autoReview metadata 到此可见协议 prompt 的稳定 join key
 +          metadata: { permissionReviewerRequest: true, reviewID: input.reviewID },
            text: input.text,
-         } satisfies MessageV2.TextPart)
+         } satisfies TextPart)
          return message
-@@ -237,6 +244,7 @@ export const layer = Layer.effect(
+@@ -242,9 +249,11 @@ export const layer = Layer.effect(
+     }
+ 
+     // #209：runReviewerAgent——有子会话时持久化流式 part，无子会话时仅提取 assessment
++    // #214：reviewID 透传到 runReviewerStream——最终决策 part metadata 需 mirror 此 ID
      function runReviewerAgent(input: {
        session: Session.Info | undefined
        model: Provider.Model
@@ -441,15 +75,21 @@ index 2d6c838dfde3d2bde638b31cf2527cfa2af00ac5..323ca42d8cb26b48ffb92171e477d658
        parentID: MessageID | undefined
        messages: readonly ModelMessage[]
      }) {
-@@ -262,6 +270,7 @@ export const layer = Layer.effect(
+@@ -272,6 +281,8 @@ export const layer = Layer.effect(
          const assessment = yield* runReviewerStream(input.messages, input.model, {
-           sessionID: session.id,
+           sessionID: sessionInfo.id,
            messageID: message.id,
++          // #214：reviewID 透传到 stream——决策 part metadata 需 mirror 此 ID
 +          reviewID: input.reviewID,
          }).pipe(
+           // #209：流式错误时仍持久化 assistant 消息的 error 字段——审计可见失败原因，而非丢失在内存中
            Effect.tapError((error) =>
-             Effect.gen(function* () {
-@@ -281,7 +290,7 @@ export const layer = Layer.effect(
+@@ -291,10 +302,12 @@ export const layer = Layer.effect(
+     }
+ 
+     // #209：runReviewerStream——streamText + permission_review_decision tool，流式消费 fullStream 事件并逐 part 持久化
++    // #214：persist 新增 reviewID——最终决策 part metadata mirror 此 ID，供审计/导出按逻辑审查导航
++    // #214：persist 为 undefined 时（无子会话）不 mirror reviewID——纯流式提取不持久化决策 part
      function runReviewerStream(
        messages: readonly ModelMessage[],
        model: Provider.Model,
@@ -457,56 +97,53 @@ index 2d6c838dfde3d2bde638b31cf2527cfa2af00ac5..323ca42d8cb26b48ffb92171e477d658
 +      persist?: { sessionID: SessionID; messageID: MessageID; reviewID: string },
      ) {
        return Effect.acquireUseRelease(
-         Effect.sync(() => new AbortController()),
-@@ -441,7 +450,11 @@ export const layer = Layer.effect(
+         // #209：AbortController 在 release 时中止 streamText——Effect 取消/超时能立即停止 provider 流
+@@ -470,7 +483,9 @@ export const layer = Layer.effect(
                        status: "completed",
                        input: assessment,
                        title: assessment.outcome === "allow" ? "Permission review allowed" : "Permission review denied",
 -                      metadata: assessment,
-+                      // Mirror reviewID onto the final decision part so the child
-+                      // transcript can be searched or exported by logical review,
-+                      // even though one hidden reviewer session accumulates many
-+                      // request/decision turns over the parent session lifetime.
-+                      metadata: { ...assessment, reviewID: persist.reviewID },
++                      // #214：reviewID mirror 到最终决策 part——子会话可按逻辑审查搜索/导出
++                      // #214：一个隐藏 reviewer 子会话可累积多次审查轮次，每次需带父 autoReview.reviewID
++                      metadata: persist ? { ...assessment, reviewID: persist.reviewID } : assessment,
                        output: JSON.stringify(assessment),
                        time: { start: Date.now(), end: Date.now() },
                      },
-@@ -453,7 +466,11 @@ export const layer = Layer.effect(
+@@ -483,8 +498,9 @@ export const layer = Layer.effect(
                    return yield* new ReviewerRunError({ reason: errorMessage(event.error) })
                  }
                  if (event.type === "error") {
+-                  // #209：stream 级错误同样转为 RunError——保持单一 fail-closed 错误出口
 -                  return yield* new ReviewerRunError({ reason: errorMessage(event.error) })
-+                  // Provider stream errors must keep their original shape until
-+                  // SessionRetry classifies them. Wrapping here would erase
-+                  // APICallError/status/header details and turn transient socket
-+                  // failures into immediate reviewer fallback/user prompts.
++                  // #214：provider stream 错误必须保留原始形状直到 SessionRetry 分类
++                  // #214：此处包装会丢失 APICallError/status/header 细节，将瞬时 socket 故障转为即时 fallback
 +                  return yield* Effect.fail(event.error)
                  }
                }),
              )
-@@ -473,6 +490,17 @@ export const layer = Layer.effect(
-             return assessment
+@@ -507,6 +523,17 @@ export const layer = Layer.effect(
            }),
+         // #209：release 时中止 AbortController——确保 Effect 取消时 streamText 立即停止，不再消耗 provider 配额
          (abort) => Effect.sync(() => abort.abort()),
 +      ).pipe(
++        // #214：SessionRetry.retry 封装——hidden reviewer 子代理流复用同一 provider 安全重试策略
++        // #214：reviewer 子代理流是审计 transcript，非活跃 SessionProcessor run——重试时不更新父工具 autoReview 状态
++        // #214：父工具 autoReview 保持在 reviewing 状态直到最终 allow/deny/fallback 结果确定
++        // #214：set 为 Effect.void——reviewer 无独立 UI 状态合约，重试仅影响 provider 调用
++        // #214：parse 使用 MessageV2.fromError 保留 APICallError/status/header 细节供分类
 +        SessionRetry.retry({
 +          provider: model.providerID,
 +          parse: (error) => MessageV2.fromError(error, { providerID: model.providerID }),
-+          // The hidden reviewer child session is an audit transcript, not an
-+          // active SessionProcessor run with a visible status line. Reuse the
-+          // shared retry policy for provider safety while leaving parent tool
-+          // autoReview metadata in its existing `reviewing` state until a final
-+          // allow/deny/fallback result is known.
 +          set: () => Effect.void,
 +        }),
        )
      }
  
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 8a8cf647db2d242a07a22010e9cdb426b2dd109b..f5a8dda201a119728b35fefd074178e3caa56096 100644
+index 6a0c692bd3..b2b30c49b6 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -843,37 +843,35 @@ export const layer = Layer.effect(
+@@ -763,21 +763,21 @@ const layer = Layer.effect(
                (cause) => !Cause.hasInterruptsOnly(cause),
                (cause) => Effect.fail(Cause.squash(cause)),
              ),
@@ -515,719 +152,103 @@ index 8a8cf647db2d242a07a22010e9cdb426b2dd109b..f5a8dda201a119728b35fefd074178e3
 -                provider: input.model.providerID,
 -                parse,
 -                set: (info) => {
--                  // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
--                  const event = flags.experimentalEventSystem
--                    ? events.publish(SessionEvent.Retried, {
--                        sessionID: ctx.sessionID,
--                        attempt: info.attempt,
--                        error: {
--                          message: info.message,
--                          isRetryable: true,
--                        },
--                        timestamp: DateTime.makeUnsafe(Date.now()),
--                      })
--                    : Effect.void
--                  return event.pipe(
--                    Effect.andThen(
--                      status.set(ctx.sessionID, {
--                        type: "retry",
--                        attempt: info.attempt,
+-                  return status.set(ctx.sessionID, {
+-                    type: "retry",
+-                    attempt: info.attempt,
+-                    message: info.message,
+-                    action: info.action,
+-                    next: info.next,
+-                  })
+-                },
+-              }),
+-            ),
++            // #214：SessionRetry.retry 封装替代 Effect.retry(SessionRetry.policy(...))
++            // #214：processor 和 reviewer 子代理流共享同一重试策略和分类逻辑
 +            SessionRetry.retry({
 +              provider: input.model.providerID,
 +              parse,
 +              set: (info) => {
-+                // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-+                const event = flags.experimentalEventSystem
-+                  ? events.publish(SessionEvent.Retried, {
-+                      sessionID: ctx.sessionID,
-+                      attempt: info.attempt,
-+                      error: {
-                         message: info.message,
--                        action: info.action,
--                        next: info.next,
--                      }),
--                    ),
--                  )
--                },
--              }),
--            ),
-+                        isRetryable: true,
-+                      },
-+                      timestamp: DateTime.makeUnsafe(Date.now()),
-+                    })
-+                  : Effect.void
-+                return event.pipe(
-+                  Effect.andThen(
-+                    status.set(ctx.sessionID, {
-+                      type: "retry",
-+                      attempt: info.attempt,
-+                      message: info.message,
-+                      action: info.action,
-+                      next: info.next,
-+                    }),
-+                  ),
-+                )
++                return status.set(ctx.sessionID, {
++                  type: "retry",
++                  attempt: info.attempt,
++                  message: info.message,
++                  action: info.action,
++                  next: info.next,
++                })
 +              },
 +            }),
              Effect.catch(halt),
+             // #139：ensuring cleanup 必须尊重 aborted，跳过慢 snapshot
              Effect.ensuring(cleanup()),
-           )
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 269e98c8671e9e0b31c959dd808bd27c097e65ee..95f466ade2f9fe8501160974fea6dc377bdadcda 100644
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -696,11 +696,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-         metadata: (val) =>
-           input.processor.updateToolCall(options.toolCallId, (match) => {
-             if (!["running", "pending"].includes(match.state.status)) return match
-+            const autoReview = match.state.status === "running" ? match.state.metadata?.autoReview : undefined
-             return {
-               ...match,
-               state: {
-                 title: val.title,
--                metadata: val.metadata,
-+                // Tool metadata callbacks replace live progress data such as shell
-+                // output previews. Preserve only the permission-review envelope
-+                // across those replacements: it is owned by PermissionReviewer,
-+                // links the parent tool to the hidden child session, and must not
-+                // be dropped by shell/edit/write progress updates.
-+                metadata: autoReview ? { ...(val.metadata ?? {}), autoReview } : val.metadata,
-                 status: "running",
-                 input: args,
-                 time: { start: Date.now() },
 diff --git a/packages/opencode/src/session/retry.ts b/packages/opencode/src/session/retry.ts
-index 463bc27a95db7f313a470026597a12f693863d4d..0d56113423eb01b371a6845b38f4c37a7df270ad 100644
+index d9698aa598..82d121eb81 100644
 --- a/packages/opencode/src/session/retry.ts
 +++ b/packages/opencode/src/session/retry.ts
-@@ -197,4 +197,13 @@ export function policy(opts: {
+@@ -200,4 +200,11 @@ export function policy(opts: {
    )
  }
  
++// #214：retry 封装——将 policy 分类/延迟集中一处，供 processor 和 reviewer 子代理流复用
++// #214：hidden reviewer 子代理流无法进入 processor 而不创建依赖环——复用同一重试策略
++// #214：调用方仍拥有 set 副作用——主会话更新 status，reviewer 子代理流重试时不发明独立 UI 状态
 +export function retry(opts: Parameters<typeof policy>[0]) {
-+  // Keep retry classification/delay in one place for both normal session
-+  // processor streams and internal child-agent streams that cannot enter the
-+  // processor without creating dependency cycles. Callers still own the visible
-+  // side effect in `set`, so primary sessions can update status while hidden
-+  // reviewer streams can retry without inventing a separate UI state contract.
 +  return <A, E, R>(self: Effect.Effect<A, E, R>) => self.pipe(Effect.retry(policy(opts)))
 +}
 +
  export * as SessionRetry from "./retry"
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index 49e4832e5409482e611cdb987a4e26daee8ce7c9..7e10f3e1e585c96ad95c9400fbbbf11cb538a5e8 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -167,9 +167,9 @@ test("pending edit tool shows streamed deletion and addition counts", async () =
-     },
-     async (app) => {
-       const frame = await waitForFrame(app, (lines) =>
--        lines.some((line) => line.includes("Edit src/space file.ts +1 -2")),
-+        lines.some((line) => line.includes("Edit src") && line.includes("space file.ts") && line.includes("+1 -2")),
-       )
--      expect(frame[findRow(frame, "Edit src/space file.ts")]).toContain("+1 -2")
-+      expect(frame[findRow(frame, "space file.ts")]).toContain("+1 -2")
-     },
-   )
- })
-@@ -188,8 +188,8 @@ test("pending edit tool reports deletions before the JSON input is complete", as
-       ],
-     },
-     async (app) => {
--      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/partial.ts -2")))
--      const row = frame[findRow(frame, "Edit src/partial.ts")]
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src") && line.includes("partial.ts") && line.includes("-2")))
-+      const row = frame[findRow(frame, "partial.ts")]
- 
-       expect(row).toContain("-2")
-       expect(row).not.toContain("+1")
-@@ -243,8 +243,8 @@ test("pending write tool shows streamed addition counts", async () => {
-       ],
-     },
-     async (app) => {
--      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Write src/new file.ts +2")))
--      expect(frame[findRow(frame, "Write src/new file.ts")]).toContain("+2")
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Write src") && line.includes("new file.ts") && line.includes("+2")))
-+      expect(frame[findRow(frame, "new file.ts")]).toContain("+2")
-     },
-   )
- })
-@@ -270,7 +270,7 @@ test("task tool click opens its subagent session", async () => {
-       const y = raw.findIndex((line) => line.includes("General Task") && line.includes("inspect files"))
-       expect(y).toBeGreaterThanOrEqual(0)
- 
--      await app.mockMouse.click(11, y + 1)
-+      await app.mockMouse.click(35, y + 1)
- 
-       await waitForFrame(app, (lines) => lines.some((line) => line.includes("child session visible")))
-     },
-@@ -339,7 +339,7 @@ test("task tool click refreshes a stale prefetched subagent session", async () =
-       const y = raw.findIndex((line) => line.includes("inspect stale child"))
-       expect(y).toBeGreaterThanOrEqual(0)
- 
--      await app.mockMouse.click(11, y + 1)
-+      await app.mockMouse.click(35, y + 1)
- 
-       await waitForFrame(app, (lines) => lines.some((line) => line.includes("child session refreshed")))
-       expect(childMessageRequests).toBeGreaterThan(1)
-@@ -379,10 +379,10 @@ test("pending tool line counts update from streamed raw deltas", async () => {
- 
-       await Bun.sleep(50)
-       await app.renderOnce()
--      expect(rows(app.captureCharFrame()).some((line) => line.includes("Edit src/live.ts +1 -2"))).toBe(false)
-+      expect(rows(app.captureCharFrame()).some((line) => line.includes("Edit src") && line.includes("live.ts") && line.includes("+1 -2"))).toBe(false)
- 
--      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/live.ts +1 -2")))
--      expect(frame[findRow(frame, "Edit src/live.ts")]).toContain("+1 -2")
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src") && line.includes("live.ts") && line.includes("+1 -2")))
-+      expect(frame[findRow(frame, "live.ts")]).toContain("+1 -2")
-     },
-   )
- })
-@@ -415,6 +415,59 @@ test("shell tool renders auto review as a second status line", async () => {
-   )
- })
- 
-+test("pending shell auto review navigation is owned by the status line", async () => {
-+  const childID = "ses_reviewer_child"
-+  await withRenderedSession(
-+    [assistantMessage("msg_shell_review_click", 1)],
-+    {
-+      msg_shell_review_click: [
-+        runningToolPart("part_shell_review_click", "msg_shell_review_click", "bash", {
-+          command: "git push origin main",
-+          metadata: {
-+            autoReview: {
-+              reviewID: "review_shell_click",
-+              sessionID: childID,
-+              status: "reviewing",
-+              precheck: { level: "cautious", reason: "git push requires reviewer approval" },
-+            },
-+          },
-+        }),
-+      ],
-+    },
-+    async (app) => {
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("git push origin main")))
-+      let raw = app.captureCharFrame().split("\n")
-+      const commandY = raw.findIndex((line) => line.includes("git push origin main"))
-+      const reviewY = raw.findIndex((line) => line.includes("◌ auto review · cautious"))
-+      expect(commandY).toBeGreaterThanOrEqual(0)
-+      expect(reviewY).toBeGreaterThanOrEqual(0)
-+
-+      await app.mockMouse.click(11, commandY + 1)
-+      await app.renderOnce()
-+      expect(rows(app.captureCharFrame()).some((line) => line.includes("reviewer child visible"))).toBe(false)
-+
-+      await app.mockMouse.click(35, reviewY + 1)
-+
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
-+    },
-+    {},
-+    {},
-+    {
-+      [childID]: {
-+        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
-+        messages: [
-+          {
-+            ...assistantMessage("msg_reviewer_child_shell", 2),
-+            sessionID: childID,
-+            agent: "permission-reviewer",
-+          },
-+        ],
-+        parts: { msg_reviewer_child_shell: [textPart("part_reviewer_child_shell", "msg_reviewer_child_shell", "reviewer child visible", { sessionID: childID })] },
-+      },
-+    },
-+  )
-+})
-+
- test("completed shell tool keeps the auto review result line", async () => {
-   await withRenderedSession(
-     [assistantMessage("msg_auto_review_done", 1)],
-@@ -442,8 +495,9 @@ test("completed shell tool keeps the auto review result line", async () => {
-       const frame = await waitForFrame(app, (lines) =>
-         lines.some((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer")),
-       )
--      const command = findRow(frame, "$ git push origin main")
--      expect(frame[command + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
-+      expect(findRow(frame, "✓ auto review · allowed · auth high · @permission-reviewer")).toBeLessThan(
-+        findRow(frame, "$ git push origin main"),
-+      )
-     },
-   )
- })
-@@ -473,10 +527,10 @@ test("collapsed completed shell preview keeps the auto review result line", asyn
-     },
-     async (app) => {
-       const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
--      expect(frame.some((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))).toBe(
--        true,
--      )
-+      expect(frame.some((line) => line.includes("✓ auto review · allowed · auth high"))).toBe(true)
-     },
-+    {},
-+    { height: 24 },
-   )
- })
- 
-@@ -513,6 +567,427 @@ test("errored shell tool keeps the denied auto review result line", async () =>
-   )
- })
- 
-+test("read tool shows auto review status below its inline row", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_read_auto_review", 1)],
-+    {
-+      msg_read_auto_review: [
-+        completedToolPart(
-+          "part_read_auto_review",
-+          "msg_read_auto_review",
-+          "read",
-+          { filePath: "external folder/secret key.txt" },
-+          {
-+            autoReview: {
-+              reviewID: "review_read_done",
-+              sessionID: "ses_reviewer_child",
-+              status: "allowed",
-+              precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
-+              result: { risk_level: "high", user_authorization: "high", rationale: "user asked for the exact file" },
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
-+      const row = findRow(frame, "Read external folder")
-+      expect(frame[row + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
-+    },
-+  )
-+})
-+
-+test("edit block shows auto review status below its card title", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_edit_auto_review", 1)],
-+    {
-+      msg_edit_auto_review: [
-+        completedToolPart(
-+          "part_edit_auto_review",
-+          "msg_edit_auto_review",
-+          "edit",
-+          { filePath: "external folder/config.json", oldString: "old", newString: "new" },
-+          {
-+            diff: ["--- external folder/config.json", "+++ external folder/config.json", "@@", "-old", "+new"].join("\n"),
-+            diagnostics: {},
-+            autoReview: {
-+              reviewID: "review_edit_done",
-+              sessionID: "ses_reviewer_child",
-+              status: "allowed",
-+              precheck: { level: "cautious", reason: "external edit requires reviewer approval" },
-+              result: { risk_level: "medium", user_authorization: "high", rationale: "user requested this edit" },
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit external folder")))
-+      const row = findRow(frame, "Edit external folder")
-+      expect(frame[row + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
-+    },
-+  )
-+})
-+
-+test("tools without auto review metadata keep their original chrome", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_read_without_review", 1)],
-+    {
-+      msg_read_without_review: [completedToolPart("part_read_without_review", "msg_read_without_review", "read", { filePath: "src/local.ts" })],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read src")))
-+      expect(frame.some((line) => line.includes("auto review"))).toBe(false)
-+    },
-+  )
-+})
-+
-+test("errored non-shell tools keep auto review status below the inline row", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_read_auto_review_error", 1)],
-+    {
-+      msg_read_auto_review_error: [
-+        errorToolPart(
-+          "part_read_auto_review_error",
-+          "msg_read_auto_review_error",
-+          "read",
-+          { filePath: "external folder/secret key.txt" },
-+          "auto reviewer denied",
-+          {
-+            autoReview: {
-+              reviewID: "review_read_error",
-+              sessionID: "ses_reviewer_child",
-+              status: "denied",
-+              precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
-+              result: { risk_level: "high", user_authorization: "unknown", rationale: "private key read was not authorized" },
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
-+      const row = findRow(frame, "Read external folder")
-+      expect(frame[row + 1]).toContain("! auto review · denied · high risk · auth unknown")
-+    },
-+  )
-+})
-+
-+test("generic tools inherit the shared auto review chrome", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_future_tool_review", 1)],
-+    {
-+      msg_future_tool_review: [
-+        completedToolPart(
-+          "part_future_tool_review",
-+          "msg_future_tool_review",
-+          "future_tool",
-+          { path: "external folder/secret key.txt" },
-+          {
-+            autoReview: {
-+              reviewID: "review_future_tool",
-+              sessionID: "ses_reviewer_child",
-+              status: "allowed",
-+              precheck: { level: "cautious", reason: "future tool external access requires reviewer approval" },
-+              result: { risk_level: "medium", user_authorization: "high", rationale: "user approved this external access" },
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("future_tool")))
-+      const row = findRow(frame, "future_tool")
-+      expect(frame[row + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
-+    },
-+  )
-+})
-+
-+test("completed apply_patch without auto review keeps per-file blocks only", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_patch_without_review", 1)],
-+    {
-+      msg_patch_without_review: [
-+        completedToolPart(
-+          "part_patch_without_review",
-+          "msg_patch_without_review",
-+          "apply_patch",
-+          { patchText: "*** Begin Patch\n*** End Patch" },
-+          {
-+            files: [
-+              {
-+                filePath: "src/a.ts",
-+                relativePath: "src/a.ts",
-+                type: "update",
-+                patch: ["--- src/a.ts", "+++ src/a.ts", "@@", "-old", "+new"].join("\n"),
-+                additions: 1,
-+                deletions: 1,
-+              },
-+            ],
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Patched src/a.ts")))
-+      expect(frame.some((line) => line.includes("% Patch"))).toBe(false)
-+      expect(frame.some((line) => line.includes("auto review"))).toBe(false)
-+    },
-+  )
-+})
-+
-+test("shell auto review status is not duplicated by generic tool chrome", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_shell_no_duplicate", 1)],
-+    {
-+      msg_shell_no_duplicate: [
-+        completedToolPart(
-+          "part_shell_no_duplicate",
-+          "msg_shell_no_duplicate",
-+          "bash",
-+          { command: "git push origin main" },
-+          {
-+            output: "pushed",
-+            autoReview: {
-+              reviewID: "review_shell_no_duplicate",
-+              sessionID: "ses_reviewer_child",
-+              status: "allowed",
-+              precheck: { level: "cautious", reason: "git push requires reviewer approval" },
-+              result: { risk_level: "high", user_authorization: "high", rationale: "user explicitly requested push" },
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("git push origin main")))
-+      expect(frame.filter((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))).toHaveLength(1)
-+    },
-+  )
-+})
-+
-+test("shell block uses default review placement above the command", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_shell_default_review", 1)],
-+    {
-+      msg_shell_default_review: [
-+        completedToolPart(
-+          "part_shell_default_review",
-+          "msg_shell_default_review",
-+          "bash",
-+          { command: 'Get-Content "$env:USERPROFILE\\.ssh\\id_rsa" 2>&1', description: "Read id_rsa via shell" },
-+          {
-+            output: "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret",
-+            autoReview: {
-+              reviewID: "review_shell_default",
-+              sessionID: "ses_reviewer_child",
-+              status: "allowed",
-+              precheck: { level: "cautious", reason: "private key access requires reviewer approval" },
-+              result: { risk_level: "high", user_authorization: "high", rationale: "user asked for the exact file" },
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read id_rsa via shell")))
-+      const title = findRow(frame, "Read id_rsa via shell")
-+      expect(frame[title + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
-+      expect(findRow(frame, "Get-Content")).toBeGreaterThan(title + 1)
-+    },
-+  )
-+})
-+
-+test("running shell output card keeps review placement below the title", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_shell_running_review", 1)],
-+    {
-+      msg_shell_running_review: [
-+        runningToolPart("part_shell_running_review", "msg_shell_running_review", "bash", {
-+          command: 'Get-Content "$env:USERPROFILE\\.ssh\\id_rsa" 2>&1',
-+          description: "Read SSH private key via shell",
-+          metadata: {
-+            output: "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret",
-+            description: "Read SSH private key via shell",
-+            autoReview: {
-+              reviewID: "review_shell_running",
-+              sessionID: "ses_reviewer_child",
-+              status: "allowed",
-+              precheck: { level: "cautious", reason: "private key access requires reviewer approval" },
-+              result: { risk_level: "high", user_authorization: "high", rationale: "user asked for the exact file" },
-+            },
-+          },
-+        }),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read SSH private key via shell")))
-+      const title = findRow(frame, "Read SSH private key via shell")
-+      // Running shell cards use the same BlockTool review slot as completed
-+      // cards. This guards the real streaming state where shell output metadata
-+      // already exists but the command has not reached a completed tool result.
-+      expect(frame[title + 1]).toContain("✓ auto review · allowed · auth high · @permission-reviewer")
-+      expect(findRow(frame, "Get-Content")).toBeGreaterThan(title + 1)
-+    },
-+  )
-+})
-+
-+test("multi-file apply_patch renders one auto review status for the whole patch", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_patch_auto_review", 1)],
-+    {
-+      msg_patch_auto_review: [
-+        completedToolPart(
-+          "part_patch_auto_review",
-+          "msg_patch_auto_review",
-+          "apply_patch",
-+          { patchText: "*** Begin Patch\n*** End Patch" },
-+          {
-+            files: [
-+              {
-+                filePath: "external/a.ts",
-+                relativePath: "external/a.ts",
-+                type: "update",
-+                patch: ["--- external/a.ts", "+++ external/a.ts", "@@", "-old", "+new"].join("\n"),
-+                additions: 1,
-+                deletions: 1,
-+              },
-+              {
-+                filePath: "external/b.ts",
-+                relativePath: "external/b.ts",
-+                type: "add",
-+                patch: ["--- external/b.ts", "+++ external/b.ts", "@@", "+created"].join("\n"),
-+                additions: 1,
-+                deletions: 0,
-+              },
-+            ],
-+            autoReview: {
-+              reviewID: "review_patch_done",
-+              sessionID: "ses_reviewer_child",
-+              status: "allowed",
-+              precheck: { level: "cautious", reason: "external patch requires reviewer approval" },
-+              result: { risk_level: "medium", user_authorization: "high", rationale: "user requested this patch" },
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Patched external/a.ts")))
-+      const reviewRows = frame.filter((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))
-+      expect(reviewRows).toHaveLength(1)
-+      expect(findRow(frame, "✓ auto review · allowed · auth high · @permission-reviewer")).toBeLessThan(
-+        findRow(frame, "Patched external/a.ts"),
-+      )
-+    },
-+  )
-+})
-+
-+test("non-shell auto review status opens the reviewer child session", async () => {
-+  const childID = "ses_reviewer_child"
-+  await withRenderedSession(
-+    [assistantMessage("msg_read_review_click", 1)],
-+    {
-+      msg_read_review_click: [
-+        completedToolPart(
-+          "part_read_review_click",
-+          "msg_read_review_click",
-+          "read",
-+          { filePath: "external folder/secret key.txt" },
-+          {
-+            autoReview: {
-+              reviewID: "review_read_click",
-+              sessionID: childID,
-+              status: "allowed",
-+              precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
-+              result: { risk_level: "high", user_authorization: "high", rationale: "user asked for the exact file" },
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Read external folder")))
-+      const raw = app.captureCharFrame().split("\n")
-+      const y = raw.findIndex((line) => line.includes("✓ auto review · allowed · auth high · @permission-reviewer"))
-+      expect(y).toBeGreaterThanOrEqual(0)
-+
-+      await app.mockMouse.click(35, y + 1)
-+
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
-+    },
-+    {},
-+    {},
-+    {
-+      [childID]: {
-+        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
-+        messages: [
-+          {
-+            ...assistantMessage("msg_reviewer_child", 2),
-+            sessionID: childID,
-+            agent: "permission-reviewer",
-+          },
-+        ],
-+        parts: { msg_reviewer_child: [textPart("part_reviewer_child", "msg_reviewer_child", "reviewer child visible", { sessionID: childID })] },
-+      },
-+    },
-+  )
-+})
-+
-+test("block auto review click opens reviewer without toggling the tool card", async () => {
-+  const childID = "ses_reviewer_child"
-+  await withRenderedSession(
-+    [assistantMessage("msg_edit_review_click", 1)],
-+    {
-+      msg_edit_review_click: [
-+        completedToolPart(
-+          "part_edit_review_click",
-+          "msg_edit_review_click",
-+          "edit",
-+          { filePath: "external folder/config.json", oldString: "old", newString: "new" },
-+          {
-+            diff: Array.from({ length: 30 }, (_, index) => `+line ${index}`).join("\n"),
-+            diagnostics: {},
-+            autoReview: {
-+              reviewID: "review_edit_click",
-+              sessionID: childID,
-+              status: "allowed",
-+              precheck: { level: "cautious", reason: "external edit requires reviewer approval" },
-+              result: { risk_level: "medium", user_authorization: "high", rationale: "user requested this edit" },
-+            },
-+          },
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      let frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
-+      const y = app.captureCharFrame().split("\n").findIndex((line) => line.includes("✓ auto review · allowed · auth high"))
-+      expect(y).toBeGreaterThanOrEqual(0)
-+
-+      await app.mockMouse.click(35, y + 1)
-+
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("reviewer child visible")))
-+      frame = rows(app.captureCharFrame())
-+      expect(frame.some((line) => line.includes("Click to collapse"))).toBe(false)
-+    },
-+    {},
-+    {},
-+    {
-+      [childID]: {
-+        info: sessionInfo({ id: childID, parentID: sessionID, title: "Auto permission review (@permission-reviewer subagent)" }),
-+        messages: [
-+          {
-+            ...assistantMessage("msg_reviewer_child_block", 2),
-+            sessionID: childID,
-+            agent: "permission-reviewer",
-+          },
-+        ],
-+        parts: { msg_reviewer_child_block: [textPart("part_reviewer_child_block", "msg_reviewer_child_block", "reviewer child visible", { sessionID: childID })] },
-+      },
-+    },
-+  )
-+})
-+
- test("permission review decision renders as a reviewer cell", async () => {
-   await withRenderedSession(
-     [assistantMessage("msg_review_decision", 1)],
+diff --git a/packages/opencode/src/session/tools.ts b/packages/opencode/src/session/tools.ts
+index 022a518ee5..12e7f11f48 100644
+--- a/packages/opencode/src/session/tools.ts
++++ b/packages/opencode/src/session/tools.ts
+@@ -68,11 +68,15 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
+     metadata: (val) =>
+       input.processor.updateToolCall(options.toolCallId, (match) => {
+         if (!["running", "pending"].includes(match.state.status)) return match
++        // #214：工具 metadata 回调替换实时进度数据（如 shell 输出预览）
++        // #214：仅保留 permission-review 包络——它由 PermissionReviewer 拥有，链接父工具到隐藏子会话
++        // #214：shell/edit/write 进度更新不得丢弃 autoReview 审查状态
++        const autoReview = match.state.status === "running" ? match.state.metadata?.autoReview : undefined
+         return {
+           ...match,
+           state: {
+             title: val.title,
+-            metadata: val.metadata,
++            metadata: autoReview ? { ...(val.metadata ?? {}), autoReview } : val.metadata,
+             status: "running",
+             input: args,
+             time: { start: Date.now() },
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index e96bf41c70446d14349a0061893d622e1182561d..6ab4b63f066aeddb7380637326434f26886bebd1 100644
+index dbc8646ca4..447d77a264 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -805,6 +805,14 @@ it.instance(
-         ]),
+@@ -1327,6 +1327,13 @@ it.instance(
        )
+       // #209：maxOutputTokens 返回 model.limit.output=10000
        expect(inputs[0].max_tokens).toBe(10000)
++      // #214：reviewID 从父工具 autoReview metadata mirror 到 reviewer 子会话 request part
 +      const requestPart = msgs
 +        .flatMap((msg) => msg.parts)
-+        .find((part): part is MessageV2.TextPart => part.type === "text" && part.metadata?.permissionReviewerRequest === true)
-+      const requestID = requestPart?.metadata?.reviewID
-+      // The parent tool already stores the same review id; mirroring it into the
-+      // reviewer child transcript is the observable audit link that lets future
-+      // UI/export code identify the exact request without parsing prompt text.
++        .find((part) => part.type === "text" && (part as { metadata?: Record<string, unknown> }).metadata?.permissionReviewerRequest === true)
++      const requestID = (requestPart as { metadata?: Record<string, unknown> })?.metadata?.reviewID
++      // #214：reviewID 是审计 join key——UI/导出代码可按逻辑审查定位精确请求，无需解析 prompt 文本
 +      expect(typeof requestID).toBe("string")
+       // #209：reviewer 请求 cell 带 permissionReviewerRequest metadata
        expect(
          msgs.some((msg) =>
-           msg.parts.some((part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true),
-@@ -822,6 +830,7 @@ it.instance(
+@@ -1348,6 +1355,8 @@ it.instance(
                part.type === "tool" &&
                part.tool === "permission_review_decision" &&
                part.state.status === "completed" &&
++              // #214：决策 part metadata mirror reviewID——子会话可按逻辑审查搜索/导出
 +              part.state.metadata?.reviewID === requestID &&
                part.state.metadata?.rationale === "private key read was not explicitly authorized",
            ),
          ),
-@@ -830,6 +839,143 @@ it.instance(
+@@ -1356,6 +1365,141 @@ it.instance(
    { git: true },
  )
  
++// #214：reviewer 子代理流重试瞬时 provider 故障后记录决策
 +it.instance(
 +  "auto permission reviewer retries transient provider failures before recording the decision",
 +  () =>
@@ -1237,6 +258,7 @@ index e96bf41c70446d14349a0061893d622e1182561d..6ab4b63f066aeddb7380637326434f26
 +      const sessions = yield* Session.Service
 +      const chat = yield* sessions.create({ title: "Reviewer retry" })
 +      const command = "cat ~/.ssh/id_rsa"
++      // #214：先推一个 503 错误模拟瞬时 reviewer 故障
 +      yield* llm.error(503, { error: "temporary reviewer outage" })
 +      yield* llm.push(
 +        reply()
@@ -1263,6 +285,7 @@ index e96bf41c70446d14349a0061893d622e1182561d..6ab4b63f066aeddb7380637326434f26
 +      if (!reviewer) return
 +
 +      const msgs = yield* MessageV2.filterCompactedEffect(reviewer.id)
++      // #214：重试后 provider 被调用 2 次——第一次 503，第二次成功
 +      expect(yield* llm.calls).toBe(2)
 +      expect(
 +        msgs.some((msg) =>
@@ -1280,6 +303,7 @@ index e96bf41c70446d14349a0061893d622e1182561d..6ab4b63f066aeddb7380637326434f26
 +  10_000,
 +)
 +
++// #214：shell autoReview metadata 在实时输出更新和完成时存活
 +it.instance(
 +  "shell auto review metadata survives live output updates and completion",
 +  () =>
@@ -1294,9 +318,7 @@ index e96bf41c70446d14349a0061893d622e1182561d..6ab4b63f066aeddb7380637326434f26
 +        title: "Shell review metadata",
 +        permission: [
 +          { permission: "bash", pattern: "*", action: "auto" },
-+          // This test targets the bash review envelope. The sensitive path would
-+          // otherwise create a separate external_directory prompt and block the
-+          // shell before the reviewed bash permission can complete.
++          // #214：此测试针对 bash 审查包络——敏感路径会创建单独的 external_directory prompt 并阻止 shell
 +          { permission: "external_directory", pattern: "*", action: "allow" },
 +        ],
 +      })
@@ -1326,12 +348,11 @@ index e96bf41c70446d14349a0061893d622e1182561d..6ab4b63f066aeddb7380637326434f26
 +      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
 +      const shell = msgs
 +        .flatMap((msg) => msg.parts)
-+        .find((part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "bash")
++        .find((part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "bash")
 +      expect(shell?.state.status).toBe("completed")
 +      if (shell?.state.status !== "completed") return
-+      // Shell streams overwrite its own output preview metadata repeatedly; the
-+      // review envelope must survive those updates so the final card still links
-+      // back to the reviewer child session instead of silently losing audit state.
++      // #214：shell 流式输出反复覆盖自身 output 预览 metadata——审查包络必须存活
++      // #214：最终卡片仍链接到 reviewer 子会话而非静默丢失审计状态
 +      expect(shell.state.metadata?.output).toBeDefined()
 +      expect(shell.state.metadata?.autoReview?.status).toBe("allowed")
 +      expect(shell.state.metadata?.autoReview?.result?.rationale).toBe("user explicitly asked for this key read")
@@ -1342,10 +363,7 @@ index e96bf41c70446d14349a0061893d622e1182561d..6ab4b63f066aeddb7380637326434f26
 +      expect(reviewer).toBeDefined()
 +      if (!reviewer) return
 +      const reviewerParts = (yield* MessageV2.filterCompactedEffect(reviewer.id)).flatMap((msg) => msg.parts)
-+      // This asserts the full parent-tool-to-child-transcript join, not just the
-+      // child transcript's internal consistency. One reviewer child session can
-+      // contain many review turns, so every persisted request/decision turn needs
-+      // the exact parent autoReview.reviewID for unambiguous audit navigation.
++      // #214：断言完整 parent-tool-to-child-transcript join——每次审查轮次需带父 autoReview.reviewID
 +      expect(
 +        reviewerParts.some(
 +          (part) => part.type === "text" && part.metadata?.permissionReviewerRequest === true && part.metadata.reviewID === reviewID,
@@ -1365,6 +383,314 @@ index e96bf41c70446d14349a0061893d622e1182561d..6ab4b63f066aeddb7380637326434f26
 +  15_000,
 +)
 +
- it.instance(
-   "failed subtask preserves metadata on error tool state",
-   () =>
+ it.instance("failed subtask preserves metadata on error tool state", () =>
+   Effect.gen(function* () {
+     const { llm } = yield* useServerConfig((url) => ({
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+index 21fa77517b..dfa0e7a627 100644
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -2017,57 +2017,60 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
+ 
+   return (
+     <Show when={!shouldHide()}>
+-      <Switch>
+-        <Match when={display() === "bash"}>
+-          <Shell {...toolprops} />
+-        </Match>
+-        <Match when={display() === "glob"}>
+-          <Glob {...toolprops} />
+-        </Match>
+-        <Match when={display() === "read"}>
+-          <Read {...toolprops} />
+-        </Match>
+-        <Match when={display() === "grep"}>
+-          <Grep {...toolprops} />
+-        </Match>
+-        <Match when={display() === "webfetch"}>
+-          <WebFetch {...toolprops} />
+-        </Match>
+-        <Match when={display() === "websearch"}>
+-          <WebSearch {...toolprops} />
+-        </Match>
+-        <Match when={display() === "write"}>
+-          <Write {...toolprops} />
+-        </Match>
+-        <Match when={display() === "edit"}>
+-          <Edit {...toolprops} />
+-        </Match>
+-        <Match when={display() === "task"}>
+-          <Task {...toolprops} />
+-        </Match>
+-        <Match when={display() === "execute"}>
+-          <Execute {...toolprops} />
+-        </Match>
+-        <Match when={display() === "apply_patch"}>
+-          <ApplyPatch {...toolprops} />
+-        </Match>
+-        <Match when={display() === "todowrite"}>
+-          <TodoWrite {...toolprops} />
+-        </Match>
+-        <Match when={display() === "question"}>
+-          <Question {...toolprops} />
+-        </Match>
+-        {/* #209：permission_review_decision 渲染为 reviewer 决策 cell */}
+-        <Match when={display() === "permission_review_decision"}>
+-          <PermissionReviewDecision {...toolprops} />
+-        </Match>
+-        <Match when={display() === "skill"}>
+-          <Skill {...toolprops} />
+-        </Match>
+-        <Match when={true}>
+-          <GenericTool {...toolprops} />
+-        </Match>
+-      </Switch>
++      {/* #214：ToolAutoReview.Provider 提供 autoReview metadata——InlineTool/BlockTool 从 context 渲染共享审查状态行 */}
++      <ToolAutoReview.Provider value={() => autoReviewMetadata(toolprops.metadata)}>
++        <Switch>
++          <Match when={display() === "bash"}>
++            <Shell {...toolprops} />
++          </Match>
++          <Match when={display() === "glob"}>
++            <Glob {...toolprops} />
++          </Match>
++          <Match when={display() === "read"}>
++            <Read {...toolprops} />
++          </Match>
++          <Match when={display() === "grep"}>
++            <Grep {...toolprops} />
++          </Match>
++          <Match when={display() === "webfetch"}>
++            <WebFetch {...toolprops} />
++          </Match>
++          <Match when={display() === "websearch"}>
++            <WebSearch {...toolprops} />
++          </Match>
++          <Match when={display() === "write"}>
++            <Write {...toolprops} />
++          </Match>
++          <Match when={display() === "edit"}>
++            <Edit {...toolprops} />
++          </Match>
++          <Match when={display() === "task"}>
++            <Task {...toolprops} />
++          </Match>
++          <Match when={display() === "execute"}>
++            <Execute {...toolprops} />
++          </Match>
++          <Match when={display() === "apply_patch"}>
++            <ApplyPatch {...toolprops} />
++          </Match>
++          <Match when={display() === "todowrite"}>
++            <TodoWrite {...toolprops} />
++          </Match>
++          <Match when={display() === "question"}>
++            <Question {...toolprops} />
++          </Match>
++          {/* #209：permission_review_decision 渲染为 reviewer 决策 cell */}
++          <Match when={display() === "permission_review_decision"}>
++            <PermissionReviewDecision {...toolprops} />
++          </Match>
++          <Match when={display() === "skill"}>
++            <Skill {...toolprops} />
++          </Match>
++          <Match when={true}>
++            <GenericTool {...toolprops} />
++          </Match>
++        </Switch>
++      </ToolAutoReview.Provider>
+     </Show>
+   )
+ }
+@@ -2144,6 +2147,8 @@ function GenericTool(props: ToolProps) {
+ 
+ // #209：auto-review metadata 类型——reviewID/sessionID/status/precheck/result 描述 reviewer 状态
+ // #209：AutoReviewMetadata 由 service.ts updateToolAutoReview 写入工具 part 的 state.metadata.autoReview
++// #214：ToolAutoReview context——BlockTool/InlineTool 共享一行审查状态，无需各工具显式传 prop
++const ToolAutoReview = createContext<() => AutoReviewMetadata | undefined>(() => undefined)
+ type AutoReviewMetadata = {
+   reviewID: string
+   sessionID?: string
+@@ -2166,8 +2171,9 @@ export function autoReviewMetadata(metadata: Record<string, unknown>): AutoRevie
+ // #209：auto-review 状态标签——两行合约：命令 + 一行紧凑审查状态
+ export function autoReviewLabel(review: AutoReviewMetadata) {
+   const agent = "@permission-reviewer"
+-  // #209：◌/✓/! 三态字形——reviewing 进行中、allowed 通过、其余终态均为 ! 提示用户注意
+-  // ◌ reviewing, ✓ allowed, ! all non-allow terminal outcomes
++// #214：autoReviewLabel 注释更新——placement 归 InlineTool/BlockTool，此函数仅拥有紧凑状态文案
++// #214：◌/✓/! 三态字形是协议状态——reviewing 进行中、allowed 通过、! 覆盖所有非 allow 终态
++// ◌ reviewing, ✓ allowed, ! all non-allow terminal outcomes
+   switch (review.status) {
+     case "allowed":
+       return `✓ auto review · allowed · auth ${review.result?.user_authorization ?? "unknown"} · ${agent}`
+@@ -2204,11 +2210,14 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
+     <box
+       onMouseOver={() => clickable() && setHover(true)}
+       onMouseOut={() => setHover(false)}
+-      onMouseUp={() => {
++      onMouseUp={(evt?: TuiMouseEvent) => {
+         // #209：无 sessionID 不可导航——无子会话的纯流式审查不产生可跳转目标
+         if (!props.review.sessionID) return
+         // #209：用户选中文本时不导航——避免复制审查结论时误触发跳转
+         if (renderer.getSelection()?.getSelectedText()) return
++        // #214：审查行可能位于可点击/可折叠工具卡片内——stop event 避免打开 reviewer 同时切换父 diff/输出卡片
++        evt?.preventDefault()
++        evt?.stopPropagation()
+         navigate({ type: "session", sessionID: props.review.sessionID })
+       }}
+     >
+@@ -2219,6 +2228,12 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
+   )
+ }
+ 
++// #214：ToolAutoReviewLine——从 context 读取 autoReview 并渲染共享审查状态行
++function ToolAutoReviewLine() {
++  const review = useContext(ToolAutoReview)
++  return <Show when={review()}>{(item) => <AutoReviewLine review={item()} />}</Show>
++}
++
+ // #209：PermissionReviewDecision——reviewer 决策 tool cell，展示 outcome/risk/auth/rationale
+ function PermissionReviewDecision(props: ToolProps) {
+   const { theme } = useTheme()
+@@ -2329,6 +2344,8 @@ function InlineTool(props: {
+   children: JSX.Element
+   part: ToolPart
+   onClick?: () => void
++  // #214：autoReview=false 时跳过共享审查状态行——shell inline 等布局需要 bespoke 位置
++  autoReview?: false
+ }) {
+   const { theme } = useTheme()
+   const ctx = use()
+@@ -2391,6 +2408,10 @@ function InlineTool(props: {
+       }}
+     >
+       {props.children}
++      {/* #214：共享审查状态行——autoReview !== false 时从 context 渲染 */}
++      <Show when={props.autoReview !== false}>
++        <ToolAutoReviewLine />
++      </Show>
+     </InlineToolRow>
+   )
+ }
+@@ -2499,6 +2520,8 @@ function BlockTool(props: {
+   totalLines?: number
+   // #144：可选预览节点；折叠时优先于 maxHeight 裁切 children
+   preview?: JSX.Element
++  // #214：autoReview=false 时跳过共享审查状态行——apply_patch 内部 BlockTool 由外部统一渲染
++  autoReview?: false
+ }) {
+   const { theme } = useTheme()
+   const renderer = useRenderer()
+@@ -2566,6 +2589,10 @@ function BlockTool(props: {
+           </Show>
+         )}
+       </Show>
++      {/* #214：共享审查状态行——autoReview !== false 时从 context 渲染，位于标题与内容之间 */}
++      <Show when={props.autoReview !== false}>
++        <ToolAutoReviewLine />
++      </Show>
+       <box
+         marginTop={1}
+         // #144：有 preview 时不靠 maxHeight 硬裁切；无 preview 仍用 #111 高度限制
+@@ -2640,12 +2667,7 @@ function Shell(props: ToolProps) {
+   const { theme } = useTheme()
+   const pathFormatter = usePathFormatter()
+   const ctx = use()
+-  // #209：navigate 用于点击 auto-review 行导航到 reviewer 子会话
+-  const { navigate } = useRoute()
+   const isRunning = createMemo(() => props.part.state.status === "running")
+-  // #209：autoReview 从工具 metadata 提取——reviewing/allowed/denied 状态驱动 UI
+-  // #209：createMemo 缓存提取结果——metadata 仅在 part 更新时变化，避免每帧重复解析
+-  const autoReview = createMemo(() => autoReviewMetadata(props.metadata))
+   // 上下文输出信号：右键切换显示返回给模型的内容
+   const [showContextOutput, setShowContextOutput] = createSignal(false)
+   const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
+@@ -2714,8 +2736,8 @@ function Shell(props: ToolProps) {
+           // #144：Shell 折叠预览前 10 行
+           preview={
+             shellCanCollapse() && !showContextOutput() ? (
+-              // #209：Shell 预览带命令前缀和 auto-review 状态行——折叠时也保留两行审查合约
+-              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, autoReview() ? autoReviewLabel(autoReview()!) : undefined, previewText(output(), 10)].filter(Boolean).join(String.fromCharCode(10))}</text>
++              // #214：Shell 预览仅含命令和输出——审查状态行由 BlockTool 共享 slot 渲染，折叠时也可见
++              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, previewText(output(), 10)].filter(Boolean).join(String.fromCharCode(10))}</text>
+             ) : undefined
+           }
+         >
+@@ -2726,8 +2748,6 @@ function Shell(props: ToolProps) {
+             </Show>
+               <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
+             </Show>
+-            {/* #209：auto-review 状态行——可点击导航到 reviewer 子会话 */}
+-            <Show when={autoReview()}>{(review) => <AutoReviewLine review={review()} />}</Show>
+             <Show when={output()}>
+               <text fg={theme.text}>{limited()}</text>
+             </Show>
+@@ -2738,20 +2758,14 @@ function Shell(props: ToolProps) {
+         </BlockTool>
+       </Match>
+       <Match when={true}>
+-        {/* #209：InlineTool 支持点击导航到 reviewer 子会话，children 附加 auto-review 状态行 */}
++        {/* #214：InlineTool 共享审查状态行——autoReview 由 context 自动渲染 */}
+         <InlineTool
+           icon="$"
+           pending="Writing command..."
+           complete={stringValue(props.input.command)}
+           part={props.part}
+-          onClick={() => {
+-            const sessionID = autoReview()?.sessionID
+-            if (sessionID) navigate({ type: "session", sessionID })
+-          }}
+         >
+-          {[stringValue(props.input.command), autoReview() ? `  ${autoReviewLabel(autoReview()!)}` : undefined]
+-            .filter(Boolean)
+-            .join("\n")}
++          {stringValue(props.input.command)}
+         </InlineTool>
+       </Match>
+     </Switch>
+@@ -3267,6 +3281,8 @@ function ApplyPatch(props: ToolProps) {
+   })
+ 
+   const files = createMemo(() => parseApplyPatchFiles(props.metadata.files))
++  // #214：从 context 读取 autoReview——多文件 patch 共享一行审查状态
++  const review = useContext(ToolAutoReview)
+ 
+   const view = createMemo(() => {
+     const diffStyle = ctx.tui.diff_style
+@@ -3301,7 +3317,18 @@ function ApplyPatch(props: ToolProps) {
+   return (
+     <Switch>
+       <Match when={files().length > 0}>
+-        <For each={files()}>
++        {/* #214：多文件 patch 审查状态行——位于文件块之上，整 patch 共享一行 */}
++        {/* #214：每个内部 BlockTool 设 autoReview={false}——避免审查状态行在每文件块重复渲染 */}
++        <box>
++          <Show when={review()}>
++            <box paddingLeft={3} marginTop={1}>
++              <text paddingLeft={3} fg={theme.textMuted} wrapMode="none">
++                % Patch {files().length} file{files().length === 1 ? "" : "s"}
++              </text>
++              <ToolAutoReviewLine />
++            </box>
++          </Show>
++          <For each={files()}>
+           {(file) => {
+             // patch 内容展开/收缩：多文件 patch 超过 20 行时收缩，避免长 patch 占满终端
+             const [patchExpanded, setPatchExpanded] = createSignal(false)
+@@ -3311,6 +3338,8 @@ function ApplyPatch(props: ToolProps) {
+             return (
+             <BlockTool
+           // #144：ApplyPatch 按 file.patch 行数武装，delete 走摘要预览
++          // #214：autoReview=false——审查状态行由外层 box 统一渲染，避免每个文件块重复
++          autoReview={false}
+           maxLines={10}
+           threshold={20}
+           totalLines={countLines(file.patch ?? "")}
+@@ -3353,6 +3382,7 @@ function ApplyPatch(props: ToolProps) {
+             )
+           }}
+         </For>
++        </box>
+       </Match>
+       <Match when={true}>
+         <InlineTool icon="%" pending={patchPending()} failure="Patch failed" complete={false} part={props.part}>

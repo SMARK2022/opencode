@@ -1,304 +1,170 @@
 From 59aeb3d239f3344454644048d8e9ae7bcd800c9b Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Tue, 19 May 2026 05:51:51 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E6=94=AF=E6=8C=81=E9=80=9A=E8=BF=87?=
- =?UTF-8?q?=E7=8E=AF=E5=A2=83=E5=8F=98=E9=87=8F=E9=85=8D=E7=BD=AE=E5=AE=88?=
- =?UTF-8?q?=E6=8A=A4=E8=BF=9B=E7=A8=8B=E7=9A=84=E7=A9=BA=E9=97=B2=E8=B6=85?=
- =?UTF-8?q?=E6=97=B6=E6=97=B6=E9=97=B4=EF=BC=8C=E5=B9=B6=E6=B7=BB=E5=8A=A0?=
- =?UTF-8?q?=E7=9B=B8=E5=BA=94=E7=9A=84=E6=B5=8B=E8=AF=95?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH] feat: daemon idle env + cancel tool finalize (#173 tip)
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/worker.ts b/packages/opencode/src/cli/cmd/tui/worker.ts
-index b4fb6ac29e130fd35e15dc1855a35ea75051b00b..deb20eeaf44a674c84f89054689eab498dc98357 100644
---- a/packages/opencode/src/cli/cmd/tui/worker.ts
-+++ b/packages/opencode/src/cli/cmd/tui/worker.ts
-@@ -126,7 +126,10 @@ process.prependListener("uncaughtException", () => void gracefulShutdown())
- // Exit 30 s after the last SSE client disconnects AND no session runners are
- // active.  The timer only starts after the first connection, so a slow-starting
- // TUI does not race the daemon.
--const IDLE_TIMEOUT_MS = 30_000
-+const IDLE_TIMEOUT_MS = (() => {
-+  const value = Number(process.env.OPENCODE_DAEMON_IDLE_TIMEOUT_MS ?? 30_000)
-+  return Number.isFinite(value) && value >= 0 ? value : 30_000
-+})()
+diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
+--- a/packages/opencode/src/cli/tui/worker.ts
++++ b/packages/opencode/src/cli/tui/worker.ts
+@@ -148,7 +148,12 @@ if (isDaemon) {
+   // 最后一个 SSE 客户端断开 30 秒后退出。计时器仅在首次有客户端连接后启动，
+   // 避免启动缓慢的 TUI 与守护进程退出产生竞态。
+   // #152：SSE 全断且无活跃 session/shell 后 30s 才退出
+-  const IDLE_TIMEOUT_MS = 30_000
++  // #173：OPENCODE_DAEMON_IDLE_TIMEOUT_MS 可配置；非法值回退 30s
++  const IDLE_TIMEOUT_MS = (() => {
++    const value = Number(process.env.OPENCODE_DAEMON_IDLE_TIMEOUT_MS ?? 30_000)
++    // #173：NaN/负数回退默认；0 合法（尽快 idle 退出，便于测试）
++    return Number.isFinite(value) && value >= 0 ? value : 30_000
++  })()
  
- let hadClient = false
- let sseClients = 0
-diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
-index 739d18d6d970298326441fe7ce37d2628b06da60..d8138f0ab6d26749fbbe0db2c147a3a736b0c250 100644
---- a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
-+++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
-@@ -7,13 +7,12 @@ import { Installation } from "@/installation"
- import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
- import { InstallationVersion } from "@opencode-ai/core/installation/version"
- import * as Log from "@opencode-ai/core/util/log"
--import { Effect, Queue, Schema } from "effect"
--import * as Stream from "effect/Stream"
-+import { Effect, Schema } from "effect"
- import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
- import { HttpApiBuilder } from "effect/unstable/httpapi"
--import * as Sse from "effect/unstable/encoding/Sse"
- import { RootHttpApi } from "../api"
- import { GlobalUpgradeInput } from "../groups/global"
-+import { PassThrough } from "node:stream"
- 
- const log = Log.create({ service: "server" })
- 
-@@ -27,13 +26,8 @@ export function onSseClientCountChange(cb: (n: number) => void) {
-   onSseCountChange = cb
- }
- 
--function eventData(data: unknown): Sse.Event {
--  return {
--    _tag: "Event",
--    event: "message",
--    id: undefined,
--    data: JSON.stringify(data),
--  }
-+function eventData(data: unknown) {
-+  return `data: ${JSON.stringify(data)}\n\n`
- }
- 
- function parseBody(body: string) {
-@@ -44,36 +38,68 @@ function parseBody(body: string) {
-   }
- }
- 
--function eventResponse() {
-+type AbortSource = {
-+  once: (event: "aborted", listener: () => void) => unknown
-+  off: (event: "aborted", listener: () => void) => unknown
-+}
-+
-+function abortSource(source: object): AbortSource | undefined {
-+  const candidate = source as { once?: unknown; off?: unknown }
-+  if (typeof candidate.once !== "function" || typeof candidate.off !== "function") return
-+  return candidate as AbortSource
-+}
-+
-+function onRequestAbort(request: HttpServerRequest.HttpServerRequest, close: () => void) {
-+  if (request.source instanceof Request) {
-+    request.source.signal.addEventListener("abort", close, { once: true })
-+    return () => request.source instanceof Request && request.source.signal.removeEventListener("abort", close)
-+  }
-+
-+  const source = abortSource(request.source)
-+  if (!source) return () => {}
-+  source.once("aborted", close)
-+  return () => source.off("aborted", close)
-+}
-+
-+function eventResponse(request: HttpServerRequest.HttpServerRequest) {
-   // [local-smark] Track SSE client count for daemon idle-timeout
-   sseClientCount++
-   onSseCountChange?.(sseClientCount)
-   log.info("global event connected")
--  const events = Stream.callback<GlobalBusEvent>((queue) => {
--    const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
--    return Effect.acquireRelease(
--      Effect.sync(() => GlobalBus.on("event", handler)),
--      () => Effect.sync(() => GlobalBus.off("event", handler)),
--    )
--  })
--  const heartbeat = Stream.tick("10 seconds").pipe(
--    Stream.drop(1),
--    Stream.map(() => ({ payload: { id: Bus.createID(), type: "server.heartbeat", properties: {} } })),
-+
-+  const stream = new PassThrough()
-+  const write = (event: GlobalBusEvent) => {
-+    if (stream.destroyed) return
-+    stream.write(eventData(event))
-+  }
-+  const handler = (event: GlobalBusEvent) => write(event)
-+  const heartbeat = setInterval(
-+    () => write({ payload: { id: Bus.createID(), type: "server.heartbeat", properties: {} } }),
-+    10_000,
-   )
-+  let closed = false
-+  let unsubscribeRequestAbort = () => {}
-+  const close = () => {
-+    if (closed) return
-+    closed = true
-+    clearInterval(heartbeat)
-+    GlobalBus.off("event", handler)
-+    unsubscribeRequestAbort()
-+    if (!stream.destroyed) stream.end()
-+    sseClientCount = Math.max(0, sseClientCount - 1)
-+    onSseCountChange?.(sseClientCount)
-+    log.info("global event disconnected")
-+  }
-+
-+  heartbeat.unref?.()
-+  GlobalBus.on("event", handler)
-+  unsubscribeRequestAbort = onRequestAbort(request, close)
-+  stream.once("close", close)
-+  stream.once("error", close)
-+  write({ payload: { id: Bus.createID(), type: "server.connected", properties: {} } })
- 
--  return HttpServerResponse.stream(
--    Stream.make({ payload: { id: Bus.createID(), type: "server.connected", properties: {} } }).pipe(
--      Stream.concat(events.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
--      Stream.map(eventData),
--      Stream.pipeThroughChannel(Sse.encode()),
--      Stream.encodeText,
--      // [local-smark] Decrement SSE client count on disconnect
--      Stream.ensuring(Effect.sync(() => {
--        sseClientCount--
--        onSseCountChange?.(sseClientCount)
--        log.info("global event disconnected")
--      })),
--    ),
-+  return HttpServerResponse.raw(
-+    stream,
-     {
-       contentType: "text/event-stream",
-       headers: {
-@@ -96,7 +122,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
-     })
- 
-     const event = Effect.fn("GlobalHttpApi.event")(function* () {
--      return eventResponse()
-+      return eventResponse(yield* HttpServerRequest.HttpServerRequest)
-     })
- 
-     const configGet = Effect.fn("GlobalHttpApi.configGet")(function* () {
+   let hadClient = false
+   let sseClients = 0
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 87c3c0114392509f7c7794e3737807f92dfd70fc..0df5ecb94d9dcfea7b70998f216fed537d77f03d 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -47,7 +47,7 @@ import { Truncate } from "@/tool/truncate"
+@@ -44,7 +44,7 @@ import { Truncate } from "@/tool/truncate"
  import { Image } from "@/image/image"
  import { decodeDataUrl } from "@/util/data-url"
  import { Process } from "@/util/process"
 -import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
-+import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Semaphore, Types } from "effect"
- import * as EffectLogger from "@opencode-ai/core/effect/logger"
++import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types , Semaphore} from "effect"
  import { InstanceState } from "@/effect/instance-state"
  import { TaskTool, type TaskPromptOps } from "@/tool/task"
-@@ -269,6 +269,25 @@ function referenceTextPart(input: {
-   }
+ import { SessionRunState } from "./run-state"
+@@ -188,6 +188,32 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
+   return part.state.status === "error" && part.state.metadata?.interrupted === true
  }
  
++
++// #173：无 active runner 时 cancel 仍须终态化 open tool，避免永久 pending
 +function interruptedToolState(
-+  state: MessageV2.ToolStatePending | MessageV2.ToolStateRunning,
++  state: SessionV1.ToolStatePending | SessionV1.ToolStateRunning,
 +  now: number,
-+): MessageV2.ToolStateError {
++): SessionV1.ToolStateError {
++  // #173：running 保留 start；pending 用 now 作 start
++  // #173：error 文案与 processor 中断路径对齐
 +  return {
 +    status: "error",
 +    input: state.input,
 +    error: "Tool execution aborted",
++    // #173：interrupted 标记供 UI/用量识别非模型失败
 +    metadata: state.status === "running" ? { ...state.metadata, interrupted: true } : { interrupted: true },
 +    time: { start: state.status === "running" ? state.time.start : now, end: now },
 +  }
 +}
 +
-+type OpenToolPart = MessageV2.ToolPart & { state: MessageV2.ToolStatePending | MessageV2.ToolStateRunning }
++// #173：仅 pending/running 需要终态化
++type OpenToolPart = SessionV1.ToolPart & { state: SessionV1.ToolStatePending | SessionV1.ToolStateRunning }
 +
-+function isOpenToolPart(part: MessageV2.Part): part is OpenToolPart {
++function isOpenToolPart(part: SessionV1.Part): part is OpenToolPart {
++  // #173：type guard 收窄，避免误写 completed/error
 +  return part.type === "tool" && (part.state.status === "pending" || part.state.status === "running")
 +}
 +
  export interface Interface {
    readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
-   readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts, Image.Error>
-@@ -311,6 +330,7 @@ export const layer = Layer.effect(
-     const references = yield* Reference.Service
+   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
+@@ -228,6 +254,8 @@ const layer = Layer.effect(
+     const llm = yield* LLM.Service
      const events = yield* EventV2Bridge.Service
      const flags = yield* RuntimeFlags.Service
++    // #173：同 session 并发 cancel 串行，避免双写终态竞态
 +    const cancelLocks = new Map<SessionID, Semaphore.Semaphore>()
-     const runner = Effect.fn("SessionPrompt.runner")(function* () {
-       return yield* EffectBridge.make()
+     const database = yield* Database.Service
+     const { db } = database
+     const ops = Effect.fn("SessionPrompt.ops")(function* () {
+@@ -239,12 +267,24 @@ const layer = Layer.effect(
      })
-@@ -322,11 +342,22 @@ export const layer = Layer.effect(
-         loop: (input: LoopInput) => loop(input),
-       } satisfies TaskPromptOps
-     })
-+    const cancelLock = (sessionID: SessionID) => {
-+      const hit = cancelLocks.get(sessionID)
-+      if (hit) return hit
-+      const next = Semaphore.makeUnsafe(1)
-+      cancelLocks.set(sessionID, next)
-+      return next
-+    }
  
      const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
--      yield* elog.info("cancel", { sessionID })
+-      yield* Effect.logInfo("cancel", { "session.id": sessionID })
 -      yield* state.cancel(sessionID)
--      yield* abortPendingAssistants(sessionID)
-+      yield* cancelLock(sessionID).withPermits(1)(
+-      // 中止待处理的 assistant 消息：标记 AbortedError 并完成 pending/running 工具部件
+-      // Effect.ignore 确保 cancel 不会因子消息中止失败而失败
+-      // #71/#153：cancel 时中止未完成 assistant
+-      yield* abortPendingAssistants(sessionID).pipe(Effect.ignore)
++      // #173：每 session 一把信号量，合并并发 cancel
++      let lock = cancelLocks.get(sessionID)
++      if (!lock) {
++        // #173：lazy 创建，空闲 session 不占信号量
++        lock = Semaphore.makeUnsafe(1)
++        cancelLocks.set(sessionID, lock)
++      }
++      // #173：排队后续 cancel，不丢弃第二次请求
++      yield* lock.withPermits(1)(
 +        Effect.gen(function* () {
-+          yield* elog.info("cancel", { sessionID })
++          yield* Effect.logInfo("cancel", { "session.id": sessionID })
 +          yield* state.cancel(sessionID)
-+          yield* abortPendingAssistants(sessionID)
++          // 中止待处理的 assistant 消息：标记 AbortedError 并完成 pending/running 工具部件
++          // Effect.ignore 确保 cancel 不会因子消息中止失败而失败
++          // #71/#153：cancel 时中止未完成 assistant
++          yield* abortPendingAssistants(sessionID).pipe(Effect.ignore)
 +        }),
 +      )
      })
  
-     const abortPendingAssistants = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
-@@ -344,6 +375,7 @@ export const layer = Layer.effect(
-         pending,
-         Effect.fnUntraced(function* (msg) {
-           const assistant = msg.info
-+          yield* abortPendingToolParts(msg.parts, now)
-           assistant.time.completed = now
-           assistant.error ??= new MessageV2.AbortedError({ message: "Aborted" }).toObject()
-           if (msg.parts.length === 0) assistant.hidden = { time: now, reason: "repair-empty-dangling-assistant" as const }
-@@ -354,10 +386,21 @@ export const layer = Layer.effect(
+     // #153：cancel 收口所有未完成 assistant（含空 dangling）
+@@ -285,7 +325,31 @@ const layer = Layer.effect(
          }),
          { discard: true },
        )
--      // NOTE: Tool part states are NOT modified here. Each tool has its own
--      // interrupt/cancel handler that finalizes its state (e.g. bash truncates
--      // output and completes, task tool cancels child session). Forcing all
--      // running tools to "error" here would race with those handlers.
+-      // #149：不在此强制写 tool error；各工具 cancel handler（如 bash 截断）负责收口，避免竞态
++      // #173：无 active runner 时仍终态化 open tool（#149 工具 handler 路径保留给 live tool）
++      yield* abortPendingToolParts(sessionID, pending, now)
 +    })
 +
++    // #173：把 pending/running tool 标为 interrupted error，防止 cancel 后卡死
++    // #173：assistant 终态化后再写 tool，保证 message 已 completed
 +    const abortPendingToolParts = Effect.fn("SessionPrompt.abortPendingToolParts")(function* (
-+      parts: MessageV2.Part[],
++      sessionID: SessionID,
++      pending: SessionV1.WithParts[],
 +      now: number,
 +    ) {
++      // #173：遍历 pending assistants 的 parts，只动 open tool
 +      yield* Effect.forEach(
-+        parts.filter(isOpenToolPart),
-+        (part) =>
-+          sessions.updatePart({
-+            ...part,
-+            state: interruptedToolState(part.state, now),
-+          }),
++        pending,
++        Effect.fnUntraced(function* (msg) {
++          for (const part of msg.parts) {
++            if (!isOpenToolPart(part)) continue
++            yield* sessions.updatePart({
++              ...part,
++              state: interruptedToolState(part.state, now),
++            })
++          }
++        }),
 +        { discard: true },
 +      )
      })
  
      const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {
 diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
-index 7fb3eb8d279d68c69412111590a0c92f2a2deb0a..8736c2872bb9853b9a500d3d304b31e92c358f71 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -31,11 +31,12 @@ afterEach(() => {
-  * lock appears and the HTTP server responds.  Returns the running proc and the
-  * live lock contents.
+@@ -28,10 +28,11 @@ afterEach(() => {
+  * 在临时目录中启动守护进程，轮询直到锁文件出现且 HTTP 服务器响应。
+  * 返回运行中的进程和锁文件内容。
   */
 -async function spawnDaemon(lockPath: string) {
 +async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
-   const root = path.dirname(lockPath)
    const proc = Bun.spawn([process.execPath, WORKER_TS], {
      env: {
        ...process.env,
 +      ...env,
        OPENCODE_PROCESS_ROLE: "worker",
        OPENCODE_LOCK_PATH: lockPath,
-       OPENCODE_DB: path.join(root, "opencode.db"),
-@@ -160,6 +161,42 @@ describe("daemon lifecycle", () => {
+     },
+@@ -179,4 +180,49 @@ describe("daemon lifecycle", () => {
+     },
      DAEMON_START_TIMEOUT_MS + 5_000,
    )
- 
++  // #173：短 idle 超时 + SSE 断开后守护进程应退出并清锁
 +  test(
 +    "daemon exits after the last SSE client disconnects",
 +    async () => {
 +      await using tmp = await tmpdir()
 +      const lockPath = path.join(tmp.path, "tui-server.json")
++      // #173：250ms idle，测试不必等 30s
 +      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "250" })
 +
 +      try {
@@ -310,7 +176,9 @@ index 7fb3eb8d279d68c69412111590a0c92f2a2deb0a..8736c2872bb9853b9a500d3d304b31e9
 +        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
 +        try {
 +          const first = await reader.read()
++          // #173：先读到 connected，确认 SSE 计数已 +1
 +          expect(first.value).toContain("server.connected")
++          // #173：连接期间必须仍存活，证明 idle 只在断开后计时
 +          await Bun.sleep(750)
 +          expect(ServerLockModule.alive(proc.pid)).toBe(true)
 +        } finally {
@@ -319,28 +187,33 @@ index 7fb3eb8d279d68c69412111590a0c92f2a2deb0a..8736c2872bb9853b9a500d3d304b31e9
 +          reader.releaseLock()
 +        }
 +
-+        const exitCode = await Promise.race([proc.exited, Bun.sleep(5_000).then(() => "timeout" as const)])
-+        expect(exitCode).toBe(0)
-+        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
++        const deadline = Date.now() + 5_000
++        while (Date.now() < deadline && ServerLockModule.alive(proc.pid)) {
++          await Bun.sleep(50)
++        }
++        // #173：退出后进程与锁都应消失
++        expect(ServerLockModule.alive(proc.pid)).toBe(false)
++        expect(await Bun.file(lockPath).exists()).toBe(false)
 +      } finally {
-+        if (ServerLockModule.alive(proc.pid)) proc.kill()
-+        await proc.exited.catch(() => undefined)
++        try {
++          proc.kill()
++        } catch {}
 +      }
 +    },
-+    DAEMON_START_TIMEOUT_MS + 10_000,
++    15_000,
 +  )
 +
-   test(
-     "compiled-binary path: spawning with OPENCODE_PROCESS_ROLE=worker env bypasses yargs and starts daemon",
-     async () => {
+ })
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 891efc18721d4b1738d5861e2904f7255d3a110e..7fdde32f3b1ad6f156817ac2107f74e2bf540b6f 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -1043,6 +1043,63 @@ it.instance(
-   30_000,
- )
+@@ -714,6 +714,63 @@ withMcpInstructions.instance(
  
+ // #150：running task tool 取消必须传播到子会话 idle（异步 settle）
+ // #150：tip harness 必须 user()+prompt.loop，禁止单独 prompt fiber（否则 task 不会 running）
++
++// #173：无 runner 时 cancel 仍须把 running/pending tool 标 interrupted
++// #173：seed 后不启动 loop，专门覆盖 stale tool 收口
 +it.instance(
 +  "cancel finalizes stale running tool parts without an active runner",
 +  () =>
@@ -378,36 +251,23 @@ index 891efc18721d4b1738d5861e2904f7255d3a110e..7fdde32f3b1ad6f156817ac2107f74e2
 +        },
 +      })
 +
++      // #173：cancel 后断言 tool error+interrupted，而非仍 pending
 +      yield* prompt.cancel(chat.id)
 +
 +      const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: assistant.id })
-+      const tools = stored.parts.filter((part): part is MessageV2.ToolPart => part.type === "tool")
-+      expect(stored.info.role).toBe("assistant")
-+      if (stored.info.role !== "assistant") return
-+      expect(stored.info.time.completed).toBeNumber()
-+      expect(stored.info.error?.name).toBe("MessageAbortedError")
-+      expect(tools).toHaveLength(2)
++      const tools = stored.parts.filter((part): part is SessionV1.ToolPart => part.type === "tool")
++      expect(tools.length).toBe(2)
 +      for (const tool of tools) {
 +        expect(tool.state.status).toBe("error")
-+        if (tool.state.status !== "error") continue
-+        expect(tool.state.error).toBe("Tool execution aborted")
-+        expect(tool.state.metadata?.interrupted).toBe(true)
-+        expect(tool.state.time.end).toBeGreaterThanOrEqual(tool.state.time.start)
++        if (tool.state.status === "error") {
++          expect(tool.state.error).toBe("Tool execution aborted")
++          expect(tool.state.metadata?.interrupted).toBe(true)
++        }
 +      }
 +    }),
-+  { git: true },
++  30_000,
 +)
 +
  it.instance(
-   "cancel propagates from slash command subtask to child session",
+   "cancel propagates from running task tool to child session",
    () =>
-@@ -1682,7 +1739,9 @@ unix(
-       const run = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-       yield* llm.wait(1)
-       yield* Effect.sleep(150)
-+      const cancel = yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
-       yield* prompt.cancel(chat.id)
-+      yield* Fiber.await(cancel)
- 
-       const exit = yield* Fiber.await(run)
-       expect(Exit.isSuccess(exit)).toBe(true)

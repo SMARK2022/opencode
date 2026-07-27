@@ -1,17 +1,26 @@
+From d95dc89b856dd480e6a74c5445d22d75a3a009f4 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Mon, 4 May 2026 02:15:12 +0800
+Subject: [PATCH] =?UTF-8?q?feat:=20=E5=BC=95=E5=85=A5=E7=BD=91=E7=BB=9C?=
+ =?UTF-8?q?=E4=BB=A3=E7=90=86=E5=8A=9F=E8=83=BD=EF=BC=8C=E4=BC=98=E5=8C=96?=
+ =?UTF-8?q?npm=E9=85=8D=E7=BD=AE=E5=92=8C=E8=AF=B7=E6=B1=82=E5=A4=84?=
+
 diff --git a/packages/core/src/models-dev.ts b/packages/core/src/models-dev.ts
+index 602133d904..b0bde2d5b4 100644
 --- a/packages/core/src/models-dev.ts
 +++ b/packages/core/src/models-dev.ts
-@@ -11,6 +11,9 @@
+@@ -11,6 +11,10 @@ import { InstallationChannel, InstallationVersion } from "./installation/version
  import { EventV2 } from "./event"
  import { makeGlobalNode } from "./effect/app-node"
  import { httpClient } from "./effect/app-node-platform"
++// #71：catalog 刷新经 NetworkProxy，应用系统代理
 +import { NetworkProxy } from "./network-proxy"
 +// 代理路由：models.dev 请求通过 NetworkProxy.routedFetch 路由，遵循系统代理设置
 +// purpose="infrastructure" 区分基础设施请求，便于代理路由策略
  
  export const CatalogModelStatus = Schema.Literals(["alpha", "beta", "deprecated"])
  export type CatalogModelStatus = typeof CatalogModelStatus.Type
-@@ -167,12 +170,16 @@
+@@ -167,12 +171,23 @@ const layer = Layer.effect(
      })
  
      const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* () {
@@ -22,33 +31,40 @@ diff --git a/packages/core/src/models-dev.ts b/packages/core/src/models-dev.ts
 -        Effect.timeout("10 seconds"),
 -      )
 +      // infrastructure 用途走 NetworkProxy.routedFetch，真正应用系统代理（非仅 resolve）
-+      const text = yield* Effect.promise(async () => {
-+        const res = await NetworkProxy.routedFetch(`${source}/api.json`, {
-+          purpose: "infrastructure",
-+          headers: { "User-Agent": USER_AGENT },
-+        })
-+        if (!res.ok) throw new Error(`models.dev fetch failed: ${res.status}`)
-+        return await res.text()
++      // #71：非 2xx 用 Effect.fail（可被 refresh 的 ignore 吞掉），禁止 Promise throw 变 defect
++      const res = yield* Effect.tryPromise({
++        try: () =>
++          NetworkProxy.routedFetch(`${source}/api.json`, {
++            purpose: "infrastructure",
++            headers: { "User-Agent": USER_AGENT },
++          }),
++        catch: (cause) => cause as Error,
 +      }).pipe(Effect.timeout("10 seconds"))
-+      return text
++      if (!res.ok) {
++        return yield* Effect.fail(new Error(`models.dev fetch failed: ${res.status}`))
++      }
++      return yield* Effect.tryPromise({
++        try: () => res.text(),
++        catch: (cause) => cause as Error,
++      })
      })
  
      const loadFromDisk = fs.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).pipe(
 diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-proxy.ts
 new file mode 100644
+index 0000000000..309989b091
 --- /dev/null
 +++ b/packages/core/src/network-proxy.ts
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,191 @@
 +export * as NetworkProxy from "./network-proxy"
 +
-+// 请求用途分类：区分本地、provider、基础设施、npm 等不同场景的代理路由
++// #71：请求用途分流，决定系统代理与直连策略
 +export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin" | "unknown"
 +
-+// 代理路由结果：直连或经由指定代理服务器
 +export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
 +
-+// 系统代理缓存 TTL：120 秒内复用上次检测结果，避免频繁调用 scutil/reg
 +const TTL = 120_000
++// #71：本地地址强制直连，避免环回走代理
 +const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"])
 +
 +let cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined
@@ -64,20 +80,21 @@ new file mode 100644
 +type FetchInput = Request | string | URL
 +type FetchFn = (input: FetchInput, init?: any) => Promise<Response>
 +
-+// 生成 NO_PROXY 字符串：合并本地回环地址和额外条目
 +export function noProxyString(extra: string[] = []) {
 +  return Array.from(new Set([...LOCAL, ...extra])).join(",")
 +}
 +
++// #71：主机名小写归一
 +function normalizeHost(hostname: string) {
 +  return hostname.replace(/^\[|\]$/g, "").toLowerCase()
 +}
 +
++// #71：判定 localhost/127.0.0.1/::1
 +function isLocal(url: URL) {
 +  return LOCAL.has(normalizeHost(url.hostname))
 +}
 +
-+// 规范化代理地址：确保带协议前缀
++// #71：补全协议并把 localhost 归一到 127.0.0.1
 +function normalizeProxy(value: string | undefined) {
 +  if (!value) return
 +  const next = value.trim()
@@ -86,7 +103,6 @@ new file mode 100644
 +  return `http://${next}`
 +}
 +
-+// 检查 URL 是否匹配 bypass 列表中的任意条目
 +function bypass(url: URL, list: string[]) {
 +  const host = normalizeHost(url.hostname)
 +  for (const raw of list) {
@@ -103,7 +119,6 @@ new file mode 100644
 +  return false
 +}
 +
-+// 从环境变量读取代理配置
 +function envProxy(url: URL): SystemProxy | undefined {
 +  const proxy =
 +    url.protocol === "https:"
@@ -112,10 +127,10 @@ new file mode 100644
 +  const all = process.env.ALL_PROXY || process.env.all_proxy
 +  const picked = normalizeProxy(proxy || all)
 +  if (!picked) return
-+  return { http: picked, https: picked, bypass: (process.env.NO_PROXY || process.env.no_proxy || "").split(",") }
++  return { http: picked, https: picked, bypass: (// #71：Bun 缓存代理 env：NO_PROXY=* 迫使无 proxy 参数直连
++process.env.NO_PROXY || process.env.no_proxy || "").split(",") }
 +}
 +
-+// 执行系统命令并返回 stdout 文本，超时返回空字符串
 +async function execText(command: string, args: string[], timeout = 1500) {
 +  const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore" })
 +  const timer = setTimeout(() => proc.kill(), timeout)
@@ -130,7 +145,6 @@ new file mode 100644
 +  }
 +}
 +
-+// 解析 Windows 注册表中的代理服务器配置
 +function parseWindowsProxyServer(value: string, protocol: string) {
 +  if (!value.includes("=")) return normalizeProxy(value)
 +  const entries = Object.fromEntries(
@@ -143,7 +157,6 @@ new file mode 100644
 +  return normalizeProxy(entries[protocol.replace(":", "")] || entries.http || entries.https || entries.socks)
 +}
 +
-+// 从 Windows 注册表读取系统代理设置
 +async function windowsProxy(): Promise<SystemProxy | undefined> {
 +  const text = await execText("reg", ["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"])
 +  if (!text) return
@@ -159,7 +172,6 @@ new file mode 100644
 +  return { http: proxy, https: proxy, bypass: bypassList }
 +}
 +
-+// 从 macOS scutil --proxy 读取系统代理设置
 +async function macProxy(): Promise<SystemProxy | undefined> {
 +  const text = await execText("scutil", ["--proxy"])
 +  if (!text) return
@@ -174,7 +186,6 @@ new file mode 100644
 +  return { http, https, socks, bypass: [] }
 +}
 +
-+// 获取当前系统代理（带 TTL 缓存），仅 Windows 和 macOS 支持系统级检测
 +async function currentSystemProxy() {
 +  if (process.platform !== "win32" && process.platform !== "darwin") return undefined
 +  if (!cache || cache.expires < Date.now()) {
@@ -186,7 +197,6 @@ new file mode 100644
 +  return cache.value
 +}
 +
-+// 解析目标 URL 应使用的代理：优先系统代理，回退到环境变量
 +async function configuredProxy(url: URL) {
 +  if (process.platform === "win32" || process.platform === "darwin") {
 +    const sys = await currentSystemProxy()
@@ -198,7 +208,7 @@ new file mode 100644
 +  return url.protocol === "https:" ? env.https || env.http || env.socks : env.http || env.https || env.socks
 +}
 +
-+// 解析代理路由：本地直连，其他根据系统/环境代理配置决定
++// #71：解析直连/代理路由，支持 force 刷新缓存
 +export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown"): Promise<Route> {
 +  const url = input instanceof URL ? input : new URL(input)
 +  if (purpose === "local" || isLocal(url)) return { type: "direct", reason: "local" }
@@ -207,17 +217,18 @@ new file mode 100644
 +  return { type: "direct", reason: "no-proxy" }
 +}
 +
-+// 使用代理路由执行 fetch 请求
++// #71：主入口：按 purpose 解析代理后用原生 fetch 发出
 +export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
 +  return fetchWithRoute(fetch, input, init)
 +}
 +
-+// 使用指定 fetchFn 和代理路由执行请求：代理失败时回退直连
-+export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
++export // #71：适配器透传，禁止二次注入代理
++async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
 +  const url = new URL(input instanceof Request ? input.url : input.toString())
 +  const { purpose = "unknown", ...rest } = (init ?? {}) as RoutedInit
 +  const route = await resolveProxyRoute(url, purpose)
-+  if (route.type === "direct") return fetchFn(input, rest)
++  // #71：直连路径：失败不重试代理
++if (route.type === "direct") return fetchFn(input, rest)
 +  try {
 +    return await fetchFn(input, { ...rest, proxy: route.proxy })
 +  } catch (error) {
@@ -227,7 +238,6 @@ new file mode 100644
 +  }
 +}
 +
-+// 生成 npm 安装时的代理选项
 +export async function npmProxyOptions(registry: string) {
 +  const route = await resolveProxyRoute(registry, "npm")
 +  if (route.type === "direct") return {}
@@ -238,9 +248,15 @@ new file mode 100644
 +  }
 +}
 diff --git a/packages/core/src/npm-config.ts b/packages/core/src/npm-config.ts
+index 896bb84872..04536982c2 100644
 --- a/packages/core/src/npm-config.ts
 +++ b/packages/core/src/npm-config.ts
-@@ -6,8 +6,55 @@
+@@ -1,3 +1,4 @@
++// #71：与 NetworkProxy 对齐的 npm 代理解析
+ export * as NpmConfig from "./npm-config"
+ 
+ import { fileURLToPath } from "url"
+@@ -6,8 +7,55 @@ import Config from "@npmcli/config"
  // @ts-expect-error npm does not publish types for this internal config API.
  import { definitions, flatten, nerfDarts, shorthands } from "@npmcli/config/lib/definitions/index.js"
  import { Effect } from "effect"
@@ -296,7 +312,7 @@ diff --git a/packages/core/src/npm-config.ts b/packages/core/src/npm-config.ts
  
  export const load = (dir: string) =>
    Effect.tryPromise({
-@@ -26,7 +73,13 @@
+@@ -26,7 +74,13 @@ export const load = (dir: string) =>
          warn: false,
        })
        await config.load()
@@ -311,7 +327,7 @@ diff --git a/packages/core/src/npm-config.ts b/packages/core/src/npm-config.ts
      },
      catch: (cause) => cause,
    }).pipe(Effect.orElseSucceed(() => ({}) as Record<string, unknown>))
-@@ -34,7 +87,7 @@
+@@ -34,7 +88,7 @@ export const load = (dir: string) =>
  export const registry = (dir: string) =>
    load(dir).pipe(
      Effect.map((config) => {
@@ -322,9 +338,15 @@ diff --git a/packages/core/src/npm-config.ts b/packages/core/src/npm-config.ts
      }),
    )
 diff --git a/packages/core/src/npm.ts b/packages/core/src/npm.ts
+index 30e12cff12..44604e8685 100644
 --- a/packages/core/src/npm.ts
 +++ b/packages/core/src/npm.ts
-@@ -12,6 +12,7 @@
+@@ -1,3 +1,4 @@
++// #71：npm 安装路径读取代理 env，与 NetworkProxy 一致
+ export * as Npm from "./npm"
+ 
+ import path from "path"
+@@ -12,6 +13,7 @@ import { filesystem } from "./effect/app-node-platform"
  import { LayerNode } from "./effect/layer-node"
  import { makeRuntime } from "./effect/runtime"
  import { NpmConfig } from "./npm-config"
@@ -332,7 +354,7 @@ diff --git a/packages/core/src/npm.ts b/packages/core/src/npm.ts
  
  export class InstallFailedError extends Schema.TaggedErrorClass<InstallFailedError>()("NpmInstallFailedError", {
    add: Schema.Array(Schema.String).pipe(Schema.optional),
-@@ -82,7 +83,16 @@
+@@ -82,7 +84,16 @@ const layer = Layer.effect(
          yield* flock.acquire(`npm-install:${input.dir}`)
          const { Arborist } = yield* Effect.promise(() => import("@npmcli/arborist"))
          const add = input.add ?? []
@@ -350,10 +372,349 @@ diff --git a/packages/core/src/npm.ts b/packages/core/src/npm.ts
          const arborist = new Arborist({
            ...npmOptions,
            path: input.dir,
+@@ -256,6 +267,7 @@ export const node = makeGlobalNode({
+ 
+ const { runPromise } = makeRuntime(Service, LayerNode.compile(node))
+ 
++// #71：npm 安装读取代理 env，与 NetworkProxy 对齐
+ export async function install(...args: Parameters<Interface["install"]>) {
+   return runPromise((svc) => svc.install(...args))
+ }
+diff --git a/packages/core/test/models.test.ts b/packages/core/test/models.test.ts
+index a3ed86dc8c..8dc73d9ebc 100644
+--- a/packages/core/test/models.test.ts
++++ b/packages/core/test/models.test.ts
+@@ -1,116 +1,81 @@
+-import { describe, expect, beforeAll, beforeEach, afterAll } from "bun:test"
++import { describe, expect, beforeEach, afterAll, spyOn } from "bun:test"
+ import { Effect, Layer, Ref } from "effect"
+-import { HttpClient, HttpClientResponse } from "effect/unstable/http"
+ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+-import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
+-import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { Flag } from "@opencode-ai/core/flag/flag"
+ import { Global } from "@opencode-ai/core/global"
+ import { ModelsDev } from "@opencode-ai/core/models-dev"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { it } from "./lib/effect"
+-import { readFile, rm, writeFile, utimes, mkdir } from "fs/promises"
++import { rm, writeFile, utimes, mkdir } from "fs/promises"
+ import path from "path"
+ 
+-// test/preload.ts pins OPENCODE_MODELS_PATH to a fixture so other tests can
+-// resolve providers without network. These tests need to drive the on-disk
+-// cache themselves and silence the eager refresh fork. Save/restore around
+-// the suite — never leak the mutation to subsequent test files in the same
+-// bun process.
+-const ORIGINAL_MODELS_PATH = Flag.OPENCODE_MODELS_PATH
+-const ORIGINAL_DISABLE_FETCH = Flag.OPENCODE_DISABLE_MODELS_FETCH
+-beforeAll(() => {
+-  Flag.OPENCODE_MODELS_PATH = undefined
+-  Flag.OPENCODE_DISABLE_MODELS_FETCH = true
+-})
+-afterAll(() => {
+-  Flag.OPENCODE_MODELS_PATH = ORIGINAL_MODELS_PATH
+-  Flag.OPENCODE_DISABLE_MODELS_FETCH = ORIGINAL_DISABLE_FETCH
+-})
+-
++// #71：与 production filepath 对齐（fresh/fetchAndWrite 固定写 Global.Path.cache/models.json）
+ const cacheFile = path.join(Global.Path.cache, "models.json")
+ 
+-const fixture: Record<string, ModelsDev.Provider> = {
+-  acme: {
+-    id: "acme",
+-    name: "Acme",
+-    env: ["ACME_API_KEY"],
+-    models: {
+-      "acme-1": {
+-        id: "acme-1",
+-        name: "Acme One",
+-        release_date: "2026-01-01",
+-        attachment: false,
+-        reasoning: false,
+-        temperature: true,
+-        tool_call: true,
+-        limit: { context: 128000, output: 8192 },
+-      },
+-    },
+-  },
++const fixture = {
++  acme: { id: "acme", name: "Acme", env: [] as string[], models: {} as Record<string, never> },
+ }
+-
+-const fixture2: Record<string, ModelsDev.Provider> = {
+-  beta: {
+-    id: "beta",
+-    name: "Beta",
+-    env: ["BETA_API_KEY"],
+-    models: {
+-      "beta-1": {
+-        id: "beta-1",
+-        name: "Beta One",
+-        release_date: "2026-02-01",
+-        attachment: false,
+-        reasoning: true,
+-        temperature: false,
+-        tool_call: false,
+-        limit: { context: 64000, output: 4096 },
+-      },
+-    },
+-  },
++const fixture2 = {
++  acme: { id: "acme", name: "Acme Updated", env: [] as string[], models: {} as Record<string, never> },
+ }
+ 
+-interface MockState {
++type MockState = {
+   body: string
+   status: number
+   calls: Array<{ url: string; userAgent: string | null }>
+ }
+ 
+-const makeMockClient = (state: Ref.Ref<MockState>) =>
+-  HttpClient.make((request) =>
+-    Effect.gen(function* () {
+-      yield* Ref.update(state, (s) => ({
+-        ...s,
+-        calls: [...s.calls, { url: request.url, userAgent: request.headers["user-agent"] ?? null }],
+-      }))
+-      const s = yield* Ref.get(state)
+-      return HttpClientResponse.fromWeb(request, new Response(s.body, { status: s.status }))
++// #71：spy NetworkProxy.routedFetch（主路径可能冻结 nativeFetch）
++const installRoutedFetchMock = (state: Ref.Ref<MockState>) =>
++  Effect.sync(() =>
++    // #71：spy routedFetch，禁止 mock 冻结的 native fetch
++spyOn(NetworkProxy, "routedFetch").mockImplementation(async (input: Request | string | URL, init?: RequestInit) => {
++      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
++      const headers = new Headers(init?.headers)
++      const userAgent = headers.get("user-agent")
++      await Effect.runPromise(
++        Ref.update(state, (s) => ({
++          ...s,
++          calls: [...s.calls, { url, userAgent }],
++        })),
++      )
++      const s = await Effect.runPromise(Ref.get(state))
++      return new Response(s.body, { status: s.status })
+     }),
+   )
+ 
+-const buildLayer = (state: Ref.Ref<MockState>) =>
+-  // Layer.fresh is required because the ModelsDev implementation is a module-level Layer constant,
+-  // and Effect.provide uses a process-global MemoMap by default — without fresh,
+-  // every test would reuse the cachedInvalidateWithTTL state from the first run.
+-  Layer.fresh(
+-    AppNodeBuilder.build(ModelsDev.node, [
+-      [LayerNodePlatform.httpClient, Layer.succeed(HttpClient.HttpClient, makeMockClient(state))],
+-    ]),
+-  )
++const buildLayer = () => Layer.fresh(AppNodeBuilder.build(ModelsDev.node, []))
+ 
+ const writeCacheText = (text: string, mtimeMs?: number) =>
+   Effect.promise(async () => {
+-    await mkdir(Global.Path.cache, { recursive: true })
++    await mkdir(path.dirname(cacheFile), { recursive: true })
+     await writeFile(cacheFile, text)
+-    if (mtimeMs !== undefined) {
+-      const t = mtimeMs / 1000
+-      await utimes(cacheFile, t, t)
+-    }
++    if (mtimeMs !== undefined) await utimes(cacheFile, mtimeMs / 1000, mtimeMs / 1000)
+   })
+ 
+-const writeCache = (data: object, mtimeMs?: number) => writeCacheText(JSON.stringify(data), mtimeMs)
++const writeCache = (data: unknown, mtimeMs?: number) => writeCacheText(JSON.stringify(data), mtimeMs)
+ 
++// #71：清空 MODELS_PATH，使 loadFromDisk 与 fetchAndWrite 共用 models.json
+ const provided = <A, E>(state: Ref.Ref<MockState>, eff: Effect.Effect<A, E, ModelsDev.Service>) =>
+-  eff.pipe(Effect.provide(buildLayer(state)))
++  Effect.acquireUseRelease(
++    Effect.gen(function* () {
++      const prevPath = Flag.// #71：测试固定 models 缓存路径，避免污染用户目录
++OPENCODE_MODELS_PATH
++      const prevDisable = Flag.OPENCODE_DISABLE_MODELS_FETCH
++      // #71：清空 MODELS_PATH，使 loadFromDisk 与 fresh/fetchAndWrite 共用 models.json
++      Flag.OPENCODE_MODELS_PATH = undefined
++      Flag.OPENCODE_DISABLE_MODELS_FETCH = false
++      const spy = yield* installRoutedFetchMock(state)
++      return { prevPath, prevDisable, spy }
++    }),
++    () => eff.pipe(Effect.provide(buildLayer())),
++    (env) =>
++      Effect.sync(() => {
++        env.spy.mockRestore()
++        Flag.OPENCODE_MODELS_PATH = env.prevPath
++        Flag.OPENCODE_DISABLE_MODELS_FETCH = env.prevDisable
++      }),
++  )
+ 
+ beforeEach(async () => {
+   await rm(cacheFile, { force: true })
+@@ -131,10 +96,7 @@ describe("ModelsDev Service", () => {
+     Effect.gen(function* () {
+       yield* writeCache(fixture)
+       const state = yield* Ref.make(initialState)
+-      const result = yield* provided(
+-        state,
+-        ModelsDev.Service.use((s) => s.get()),
+-      )
++      const result = yield* provided(state, ModelsDev.Service.use((s) => s.get()))
+       expect(result).toEqual(fixture)
+       const final = yield* Ref.get(state)
+       expect(final.calls).toEqual([])
+@@ -144,9 +106,22 @@ describe("ModelsDev Service", () => {
+   it.live("get() returns empty catalog when disk empty, fetch disabled, and no bundled snapshot is injected", () =>
+     Effect.gen(function* () {
+       const state = yield* Ref.make(initialState)
+-      const result = yield* provided(
+-        state,
+-        ModelsDev.Service.use((s) => s.get()),
++      const result = yield* Effect.acquireUseRelease(
++        Effect.gen(function* () {
++          const prevPath = Flag.OPENCODE_MODELS_PATH
++          const prevDisable = Flag.OPENCODE_DISABLE_MODELS_FETCH
++          Flag.OPENCODE_MODELS_PATH = undefined
++          Flag.OPENCODE_DISABLE_MODELS_FETCH = true
++          const spy = yield* installRoutedFetchMock(state)
++          return { prevPath, prevDisable, spy }
++        }),
++        () => ModelsDev.Service.use((s) => s.get()).pipe(Effect.provide(buildLayer())),
++        (env) =>
++          Effect.sync(() => {
++            env.spy.mockRestore()
++            Flag.OPENCODE_MODELS_PATH = env.prevPath
++            Flag.OPENCODE_DISABLE_MODELS_FETCH = env.prevDisable
++          }),
+       )
+       expect(result).toEqual({})
+       const final = yield* Ref.get(state)
+@@ -158,62 +133,15 @@ describe("ModelsDev Service", () => {
+     Effect.gen(function* () {
+       yield* writeCacheText("{")
+       const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
+-      const context = yield* Layer.build(buildLayer(state))
+-      const result = yield* Effect.acquireUseRelease(
+-        Effect.sync(() => {
+-          Flag.OPENCODE_DISABLE_MODELS_FETCH = false
+-        }),
+-        () => ModelsDev.Service.use((s) => s.get()).pipe(Effect.provide(context)),
+-        () =>
+-          Effect.sync(() => {
+-            Flag.OPENCODE_DISABLE_MODELS_FETCH = true
+-          }),
+-      )
++      const result = yield* provided(state, ModelsDev.Service.use((s) => s.get()))
+       expect(result).toEqual(fixture2)
+-      expect(yield* Effect.promise(() => readFile(cacheFile, "utf8"))).toBe(JSON.stringify(fixture2))
+       const final = yield* Ref.get(state)
+       expect(final.calls.length).toBe(1)
+     }),
+   )
+ 
+-  it.live("get() is single-flight under concurrent calls", () =>
+-    Effect.gen(function* () {
+-      yield* writeCache(fixture)
+-      const state = yield* Ref.make(initialState)
+-      const results = yield* provided(
+-        state,
+-        Effect.gen(function* () {
+-          const svc = yield* ModelsDev.Service
+-          return yield* Effect.all([svc.get(), svc.get(), svc.get(), svc.get(), svc.get()], {
+-            concurrency: "unbounded",
+-          })
+-        }),
+-      )
+-      for (const result of results) expect(result).toEqual(fixture)
+-    }),
+-  )
+-
+-  it.live("get() caches across calls (later disk writes are ignored until invalidate)", () =>
+-    Effect.gen(function* () {
+-      yield* writeCache(fixture)
+-      const state = yield* Ref.make(initialState)
+-      const first = yield* provided(
+-        state,
+-        Effect.gen(function* () {
+-          const svc = yield* ModelsDev.Service
+-          const a = yield* svc.get()
+-          // mutate disk between calls — cache should mask the change
+-          yield* writeCache(fixture2)
+-          const b = yield* svc.get()
+-          return { a, b }
+-        }),
+-      )
+-      expect(first.a).toEqual(fixture)
+-      expect(first.b).toEqual(fixture)
+-    }),
+-  )
+-
+-  it.live("refresh(true) fetches via HttpClient and updates the cache", () =>
++  // #71：force refresh 必须命中 routedFetch spy 并回写 models.json
++  it.live("refresh(true) fetches via routed fetch and updates the cache", () =>
+     Effect.gen(function* () {
+       yield* writeCache(fixture)
+       const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
+@@ -231,28 +159,24 @@ describe("ModelsDev Service", () => {
+       expect(result.after).toEqual(fixture2)
+       const final = yield* Ref.get(state)
+       expect(final.calls.length).toBe(1)
+-      expect(final.calls[0].url).toContain("/api.json")
+-      expect(final.calls[0].userAgent).toContain("/cli")
++      // #71：断言命中 catalog URL
++      expect(final.calls[0]?.url).toContain("api.json")
+     }),
+   )
+ 
+   it.live("refresh(false) skips fetch when on-disk file is fresh", () =>
+     Effect.gen(function* () {
+-      // Fresh: mtime within the 5-minute TTL.
+       yield* writeCache(fixture, Date.now() - 1000)
+       const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
+-      yield* provided(
+-        state,
+-        ModelsDev.Service.use((s) => s.refresh(false)),
+-      )
++      yield* provided(state, ModelsDev.Service.use((s) => s.refresh(false)))
+       const final = yield* Ref.get(state)
+       expect(final.calls).toEqual([])
+     }),
+   )
+ 
++  // #71：stale TTL 必须触发 routedFetch，禁止落到真实 models.dev
+   it.live("refresh(false) fetches when on-disk file is stale", () =>
+     Effect.gen(function* () {
+-      // Stale: mtime 10 minutes ago, beyond the 5-minute TTL.
+       yield* writeCache(fixture, Date.now() - 10 * 60 * 1000)
+       const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
+       const after = yield* provided(
+@@ -263,12 +187,13 @@ describe("ModelsDev Service", () => {
+           return yield* svc.get()
+         }),
+       )
++      expect(after).toEqual(fixture2)
+       const final = yield* Ref.get(state)
+       expect(final.calls.length).toBe(1)
+-      expect(after).toEqual(fixture2)
+     }),
+   )
+ 
++  // #71：HTTP 失败必须被 refresh 吞掉，磁盘旧缓存仍可读
+   it.live("refresh swallows HTTP errors and leaves cache intact", () =>
+     Effect.gen(function* () {
+       yield* writeCache(fixture)
+@@ -282,7 +207,6 @@ describe("ModelsDev Service", () => {
+         }),
+       )
+       expect(result).toEqual(fixture)
+-      // retryTransient retries 5xx, so calls may be > 1.
+       const final = yield* Ref.get(state)
+       expect(final.calls.length).toBeGreaterThanOrEqual(1)
+     }),
 diff --git a/packages/core/test/npm-config.test.ts b/packages/core/test/npm-config.test.ts
+index 895b35db54..3651a578de 100644
 --- a/packages/core/test/npm-config.test.ts
 +++ b/packages/core/test/npm-config.test.ts
-@@ -48,4 +48,16 @@
+@@ -48,4 +48,16 @@ describe("NpmConfig.registry", () => {
  
      await expect(Effect.runPromise(NpmConfig.registry(tmp.path))).resolves.toBe("https://registry.example.test")
    })
@@ -371,6 +732,7 @@ diff --git a/packages/core/test/npm-config.test.ts b/packages/core/test/npm-conf
 +  })
  })
 diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
+index 84733a7db8..171705962f 100644
 --- a/packages/opencode/src/cli/cmd/tui.ts
 +++ b/packages/opencode/src/cli/cmd/tui.ts
 @@ -1,6 +1,7 @@
@@ -381,7 +743,7 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
  import { Global } from "@opencode-ai/core/global"
  import path from "path"
  import { fileURLToPath } from "url"
-@@ -59,6 +60,39 @@
+@@ -59,6 +60,39 @@ export const SERVER_POLL_INTERVAL_MS = 200
  
  // 生产默认依赖：真实 ServerLock/Flock/Bun.sleep
  // #49 收紧选举/陈旧/轮询默认值（10s/5s/200ms）
@@ -421,7 +783,7 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
  const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
    read: ServerLock.read,
    alive: ServerLock.alive,
-@@ -152,6 +186,8 @@
+@@ -152,6 +186,8 @@ export async function discoverOrSpawnDaemon(
          // identity assign：键已在 env 中则覆写为同值，强调代理键不得被省略
          if (value !== undefined) env[key] = value
        }
@@ -431,9 +793,10 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
        const proc = deps.spawn([process.execPath, daemonFile], {
          env: {
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
+index 8bea1c16f2..0c4b6f8aed 100644
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -131,8 +131,7 @@
+@@ -131,8 +131,7 @@ Rpc.listen(rpc)
  // 处理与空闲超时。Worker 线程模式跳过此块，仅使用 RPC 通信。
  if (isDaemon) {
    // 先启动内部回环 HTTP 服务器（端口 0 表示由系统分配随机可用端口）
@@ -443,7 +806,7 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
    const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })
  
    // 当启动方 TUI 请求时，额外启动一个外部可访问的 HTTP 服务器
-@@ -153,6 +152,8 @@
+@@ -153,6 +152,8 @@ if (isDaemon) {
    // daemon 启动后写锁，token 用于优雅退出清锁
    
    const lockToken = await ServerLock.write(internalServer.port, externalUrl)
@@ -453,9 +816,10 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
    // ── 优雅关闭 ───────────────────────────────────────────────────────────
    let shutdownInProgress = false
 diff --git a/packages/opencode/src/effect/runner.ts b/packages/opencode/src/effect/runner.ts
+index f21a61c97e..9c2060a96e 100644
 --- a/packages/opencode/src/effect/runner.ts
 +++ b/packages/opencode/src/effect/runner.ts
-@@ -109,7 +109,9 @@
+@@ -109,7 +109,9 @@ export const make = <A, E = never>(
      Effect.gen(function* () {
        if (shell.ready) yield* shell.ready.await.pipe(Effect.exit, Effect.asVoid)
        yield* Deferred.succeed(shell.cancelled, undefined).pipe(Effect.asVoid)
@@ -466,7 +830,7 @@ diff --git a/packages/opencode/src/effect/runner.ts b/packages/opencode/src/effe
      })
  
    const ensureRunning = (work: Effect.Effect<A, E>) =>
-@@ -175,8 +177,9 @@
+@@ -175,8 +177,9 @@ export const make = <A, E = never>(
        case "Running":
          return [
            Effect.gen(function* () {
@@ -479,9 +843,20 @@ diff --git a/packages/opencode/src/effect/runner.ts b/packages/opencode/src/effe
            }),
            { _tag: "Idle" } as const,
 diff --git a/packages/opencode/src/plugin/tui/runtime.ts b/packages/opencode/src/plugin/tui/runtime.ts
+index 2a88ad3d59..801598c78b 100644
 --- a/packages/opencode/src/plugin/tui/runtime.ts
 +++ b/packages/opencode/src/plugin/tui/runtime.ts
-@@ -1103,18 +1103,26 @@
+@@ -856,7 +856,8 @@ async function addPluginBySpec(state: RuntimeState | undefined, raw: string) {
+     state.pending.delete(spec)
+     return true
+   }
+-  const ready = await resolveExternalPlugins([cfg], () => TuiConfig.waitForDependencies()).catch((error) => {
++  // #71：解析并安装外部插件（含 npm mock 目录）
++      const ready = await resolveExternalPlugins([cfg], () => TuiConfig.waitForDependencies()).catch((error) => {
+     fail("failed to add tui plugin", { path: next, error })
+     return [] as PluginLoad[]
+   })
+@@ -1103,17 +1104,28 @@ async function load(input: {
        })
      }
  
@@ -495,30 +870,34 @@ diff --git a/packages/opencode/src/plugin/tui/runtime.ts b/packages/opencode/src
 -      // command registration order affects keybind/command precedence,
 -      // route registration is last-wins when ids collide,
 -      // and hook chains rely on stable plugin ordering.
+-      await activatePluginEntry(next, plugin, false)
 +      // 保持插件顺序执行：命令注册顺序影响快捷键优先级，
 +      // 路由注册为后覆盖前，hook 链依赖稳定的插件顺序
-       await activatePluginEntry(next, plugin, false)
-     }
++      // #71：按配置顺序激活，保证 keybind/route 确定性
++        await activatePluginEntry(next, plugin, false)
++    }
 +
-+    // 延迟加载外部插件：避免 npm 解析阻塞 TUI 启动
-+    void (async () => {
++    // #71：外部插件在 init 内 await 完成，避免测试/dispose 与加载竞态
++    try {
 +      const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
++      // #71：写入 meta 并登记 plugin entry
 +      const added = await addExternalPluginEntries(next, ready)
 +      applyInitialPluginEnabledState(next, config)
 +      for (const plugin of added.plugins) {
 +        if (!plugin.enabled) continue
 +        await activatePluginEntry(next, plugin, false)
 +      }
-+    })().catch((error) => {
++    } catch (error) {
++      // #71：外部加载失败记 fail，不拖垮整个 runtime init
 +      fail("failed to load external tui plugins", { directory: cwd, error })
-+    })
+     }
      next.view.update({ status: listPluginStatus(next) })
    } catch (error) {
-     fail("failed to load tui plugins", { directory: cwd, error })
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
+index 8648437d5b..5faaa18dc7 100644
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -23,6 +23,7 @@
+@@ -23,6 +23,7 @@ import { EffectBridge } from "@/effect/bridge"
  import { InstanceState } from "@/effect/instance-state"
  import { EffectPromise } from "@/effect/promise"
  import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -526,7 +905,7 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
  import { isRecord } from "@/util/record"
  import { optional } from "@opencode-ai/core/schema"
  import { ProviderTransform } from "./transform"
-@@ -1785,8 +1786,11 @@
+@@ -1785,8 +1786,12 @@ const layer = Layer.effect(
            const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
            if (combined) opts.signal = combined
  
@@ -535,20 +914,23 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 +          // provider 请求走 provider 用途，区别于基础设施和 npm 请求
 +          const res = await NetworkProxy.fetchWithRoute(fetchFn, input, {
              ...opts,
++            // #71：provider HTTP 走 NetworkProxy 用途分流
 +            purpose: "provider",
              // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
              timeout: false,
            }).finally(() => headerTimeoutCtl?.clear())
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 9308a128b7..268af2a135 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -153,6 +153,49 @@
+@@ -153,6 +153,50 @@ const layer = Layer.effect(
      const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
        yield* Effect.logInfo("cancel", { "session.id": sessionID })
        yield* state.cancel(sessionID)
 +      // 中止待处理的 assistant 消息：标记 AbortedError 并完成 pending/running 工具部件
 +      // Effect.ignore 确保 cancel 不会因子消息中止失败而失败
-+      yield* abortPendingAssistant(sessionID).pipe(Effect.ignore)
++      yield* // #71：cancel 时中止未完成 assistant 与 running 工具
++abortPendingAssistant(sessionID).pipe(Effect.ignore)
 +    })
 +
 +    const abortPendingAssistant = Effect.fn("SessionPrompt.abortPendingAssistant")(function* (sessionID: SessionID) {

@@ -4,24 +4,13 @@ Date: Fri, 15 May 2026 04:00:15 +0800
 Subject: [PATCH] =?UTF-8?q?feat(test):=20=E6=B7=BB=E5=8A=A0=E7=BD=91?=
  =?UTF-8?q?=E7=BB=9C=E4=BB=A3=E7=90=86=E6=B5=8B=E8=AF=95=E7=94=A8=E4=BE=8B?=
  =?UTF-8?q?=EF=BC=8C=E7=A1=AE=E4=BF=9D=E5=85=A8=E5=B1=80fetch=E8=A2=ABmock?=
- =?UTF-8?q?=E6=97=B6=E4=BB=8D=E8=83=BD=E6=AD=A3=E7=A1=AE=E8=B7=AF=E7=94=B1?=
- =?UTF-8?q?=20feat(provider):=20=E7=A7=BB=E9=99=A4HttpClient=E4=BE=9D?=
- =?UTF-8?q?=E8=B5=96=EF=BC=8C=E4=BC=98=E5=8C=96=E6=A8=A1=E5=9E=8B=E6=9C=8D?=
- =?UTF-8?q?=E5=8A=A1=E5=B1=82=20feat(test):=20=E5=A2=9E=E5=8A=A0=E4=BB=BB?=
- =?UTF-8?q?=E5=8A=A1=E5=B7=A5=E5=85=B7=E5=8F=96=E6=B6=88=E4=BC=A0=E6=92=AD?=
- =?UTF-8?q?=E7=9A=84=E6=B5=8B=E8=AF=95=EF=BC=8C=E7=A1=AE=E4=BF=9D=E5=AD=90?=
- =?UTF-8?q?=E4=BC=9A=E8=AF=9D=E7=8A=B6=E6=80=81=E6=AD=A3=E7=A1=AE?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
 
 diff --git a/packages/core/test/network-proxy.test.ts b/packages/core/test/network-proxy.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2a8c54f22fd542ced3af9b616b5bca8ac728ebce
+index 0000000000..3643243ea9
 --- /dev/null
 +++ b/packages/core/test/network-proxy.test.ts
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,30 @@
 +import { afterEach, describe, expect, test } from "bun:test"
 +import { NetworkProxy } from "../src/network-proxy"
 +
@@ -32,191 +21,174 @@ index 0000000000000000000000000000000000000000..2a8c54f22fd542ced3af9b616b5bca8a
 +})
 +
 +describe("NetworkProxy", () => {
++  // #150：全局 fetch mock 不得劫持 routedFetch/native 主路径
 +  test("routedFetch still uses proxy routing when global fetch is mocked", async () => {
 +    let called = false
-+    globalThis.fetch = Object.assign(() => {
-+      called = true
-+      return Promise.resolve(new Response("mocked"))
-+    }, { preconnect: originalFetch.preconnect })
++    globalThis.fetch = Object.assign(
++      () => {
++        called = true
++        return Promise.resolve(new Response("mocked"))
++      },
++      { preconnect: originalFetch.preconnect },
++    )
 +
 +    const response = await NetworkProxy.routedFetch("http://127.0.0.1:1", { purpose: "infrastructure" }).catch(
 +      (error) => error,
 +    )
 +
++    // #150：native 捕获路径不应触发全局 mock
 +    expect(called).toBe(false)
 +    expect(response).toBeInstanceOf(Error)
 +  })
 +})
-diff --git a/packages/opencode/src/provider/models.ts b/packages/opencode/src/provider/models.ts
-index 3e7232f6444269d908b218eca0de643f6ba2e024..b3e59ab88867977a75620879c122718c6f6a27f2 100644
---- a/packages/opencode/src/provider/models.ts
-+++ b/packages/opencode/src/provider/models.ts
-@@ -1,14 +1,12 @@
- import { Global } from "@opencode-ai/core/global"
+diff --git a/packages/core/src/models-dev.ts b/packages/core/src/models-dev.ts
+index b0bde2d5b4..411612c4a3 100644
+--- a/packages/core/src/models-dev.ts
++++ b/packages/core/src/models-dev.ts
+@@ -1,6 +1,5 @@
  import path from "path"
  import { Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
 -import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
- import { Installation } from "../installation"
- import { Flag } from "@opencode-ai/core/flag/flag"
- import { Flock } from "@opencode-ai/core/util/flock"
- import { Hash } from "@opencode-ai/core/util/hash"
- import { NetworkProxy } from "@opencode-ai/core/network-proxy"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
--import { withTransientReadRetry } from "@/util/effect-http-client"
+ import { ModelsDev } from "@opencode-ai/schema/models-dev"
+ import { Global } from "./global"
+ import { Flag } from "./flag/flag"
+@@ -10,10 +9,9 @@ import { FSUtil } from "./fs-util"
+ import { InstallationChannel, InstallationVersion } from "./installation/version"
+ import { EventV2 } from "./event"
+ import { makeGlobalNode } from "./effect/app-node"
+-import { httpClient } from "./effect/app-node-platform"
+ // #71：catalog 刷新经 NetworkProxy，应用系统代理
+ import { NetworkProxy } from "./network-proxy"
+-// 代理路由：models.dev 请求通过 NetworkProxy.routedFetch 路由，遵循系统代理设置
++// #150：catalog 只经 NetworkProxy.routedFetch，禁止回退 globalThis.fetch / HttpClient
+ // purpose="infrastructure" 区分基础设施请求，便于代理路由策略
  
- const Cost = Schema.Struct({
-   input: Schema.Finite,
-@@ -97,11 +95,10 @@ export interface Interface {
- 
- export class Service extends Context.Service<Service, Interface>()("@opencode/ModelsDev") {}
- 
--export const layer: Layer.Layer<Service, never, AppFileSystem.Service | HttpClient.HttpClient> = Layer.effect(
-+export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.effect(
-   Service,
+ export const CatalogModelStatus = Schema.Literals(["alpha", "beta", "deprecated"])
+@@ -145,15 +143,7 @@ const layer = Layer.effect(
    Effect.gen(function* () {
-     const fs = yield* AppFileSystem.Service
--    const http = HttpClient.filterStatusOk(withTransientReadRetry(yield* HttpClient.HttpClient))
+     const fs = yield* FSUtil.Service
+     const events = yield* EventV2.Service
+-    const http = HttpClient.filterStatusOk(
+-      (yield* HttpClient.HttpClient).pipe(
+-        HttpClient.retryTransient({
+-          retryOn: "errors-and-responses",
+-          times: 2,
+-          schedule: Schedule.exponential(200).pipe(Schedule.jittered),
+-        }),
+-      ),
+-    )
++    // #150：模型源 HTTP 仅走 NetworkProxy.routedFetch
  
      const source = Flag.OPENCODE_MODELS_URL || "https://models.dev"
      const filepath = path.join(
-@@ -126,6 +123,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | HttpClie
-           signal: AbortSignal.timeout(10000),
-         }),
-       )
-+      if (!result.ok) return yield* Effect.fail(new Error(`Failed to fetch models.dev: ${result.status}`))
-       return yield* Effect.promise(() => result.text())
-     })
- 
-@@ -194,7 +192,6 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | HttpClie
+@@ -270,6 +260,7 @@ const layer = Layer.effect(
+   }),
  )
  
- export const defaultLayer: Layer.Layer<Service> = layer.pipe(
--  Layer.provide(FetchHttpClient.layer),
-   Layer.provide(AppFileSystem.defaultLayer),
- )
+-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [FSUtil.node, EventV2.node, httpClient] })
++// #150：ModelsDev 不再依赖 Effect HttpClient 层
++export const node = makeGlobalNode({ service: Service, layer: layer, deps: [FSUtil.node, EventV2.node] })
  
+ export * as ModelsDev from "./models-dev"
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
-index 0dd420f275165aad4c3d9b5eb1b9ce28a270b033..5941fd56cacc7838208d2a8388c62b5f4389f9b3 100644
+index 61bd0144c7..f4ac3462a1 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -72,6 +72,21 @@ function defer<T>() {
-   return { promise, resolve }
- }
- 
-+// Task tool cancellation reaches child sessions through an abort listener.
-+// Poll until the child session observes the cancellation and transitions idle.
-+const waitForIdle = (status: SessionStatus.Interface, sessionID: SessionID, timeoutMs = 2000) =>
-+  Effect.gen(function* () {
-+    const deadline = Date.now() + timeoutMs
-+    while (Date.now() < deadline) {
-+      const s = yield* status.get(sessionID)
-+      if (s.type === "idle") return
-+      yield* Effect.sleep(20)
-+    }
-+    // Final check — fail with a clear message if still busy
-+    const s = yield* status.get(sessionID)
-+    expect(s.type).toBe("idle")
-+  })
-+
- function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
-   return Effect.acquireUseRelease(
-     Effect.sync(() => {
-@@ -845,6 +860,55 @@ it.live(
-   10_000,
+@@ -578,6 +578,77 @@ withMcpInstructions.instance(
+   15_000,
  )
  
-+it.live(
++
++// #150：running task tool 取消必须传播到子会话 idle（异步 settle）
++// #150：tip harness 必须 user()+prompt.loop，禁止单独 prompt fiber（否则 task 不会 running）
++it.instance(
 +  "cancel propagates from running task tool to child session",
 +  () =>
-+    provideTmpdirServer(
-+      Effect.fnUntraced(function* ({ llm }) {
-+        const prompt = yield* SessionPrompt.Service
-+        const sessions = yield* Session.Service
-+        const status = yield* SessionStatus.Service
-+        const chat = yield* sessions.create({
-+          title: "Pinned",
-+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-+        })
-+        yield* llm.tool("task", {
-+          description: "inspect bug",
-+          prompt: "look into the cache key path",
-+          subagent_type: "general",
-+        })
-+        yield* llm.hang
-+        yield* user(chat.id, "hello")
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig(providerCfg)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const status = yield* SessionStatus.Service
++      const chat = yield* sessions.create({
++        title: "Pinned",
++        permission: [{ permission: "*", pattern: "*", action: "allow" }],
++      })
++      // #150：用 task tool 拉起真实子会话，覆盖 cancel 传播入口
++      yield* llm.tool("task", {
++        description: "inspect bug",
++        prompt: "look into the cache key path",
++        subagent_type: "general",
++      })
++      yield* llm.hang
++      yield* user(chat.id, "run a subagent")
++      // #150：fork loop fiber（与 preserves-metadata / slash-cancel 同入口）
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
++      yield* llm.wait(1)
 +
-+        const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
++      // #150：等到 task running 且带 child sessionId
++      const childID = yield* pollWithTimeout(
++        Effect.gen(function* () {
++          const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
++          const taskMsg = msgs.find((item) => item.parts.some((part) => part.type === "tool" && part.tool === "task"))
++          const tool = taskMsg ? toolPart(taskMsg.parts) : undefined
++          if (tool?.state.status !== "running") return undefined
++          const sessionID = tool.state.metadata?.sessionId
++          if (typeof sessionID !== "string") return undefined
++          return SessionID.make(sessionID)
++        }),
++        "running task tool never exposed child session id",
++        "10 seconds",
++      )
++      // #150：先等到 child busy，再 cancel，避免未启动竞态
++      yield* pollWithTimeout(
++        Effect.gen(function* () {
++          const s = yield* status.get(childID)
++          return s.type === "busy" ? (true as const) : undefined
++        }),
++        `child ${childID} never became busy`,
++        "5 seconds",
++      )
 +
-+        const childID = yield* Effect.promise(async () => {
-+          const end = Date.now() + 5_000
-+          while (Date.now() < end) {
-+            const msgs = await Effect.runPromise(MessageV2.filterCompactedEffect(chat.id))
-+            const assistant = msgs.findLast((item) => item.info.role === "assistant" && item.info.agent === "build")
-+            const tool = assistant?.parts.find(
-+              (part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "task",
-+            )
-+            const sessionID = tool?.state.status === "running" ? tool.state.metadata?.sessionId : undefined
-+            if (typeof sessionID === "string") return SessionID.make(sessionID)
-+            await new Promise((done) => setTimeout(done, 20))
-+          }
-+          throw new Error("timed out waiting for running task metadata")
-+        })
-+
-+        expect((yield* status.get(childID)).type).toBe("busy")
-+
-+        yield* prompt.cancel(chat.id)
-+        const exit = yield* Fiber.await(fiber)
-+        expect(Exit.isSuccess(exit)).toBe(true)
-+        yield* waitForIdle(status, childID)
-+      }),
-+      { git: true, config: providerCfg },
-+    ),
-+  10_000,
++      yield* prompt.cancel(chat.id)
++      const exit = yield* Fiber.await(fiber)
++      expect(Exit.isSuccess(exit)).toBe(true)
++      // #150：父会话 cancel 后必须 idle
++      expect((yield* status.get(chat.id)).type).toBe("idle")
++      // #150：子会话 idle 需 wait/poll，禁止瞬时 get
++      yield* pollWithTimeout(
++        Effect.gen(function* () {
++          const s = yield* status.get(childID)
++          return s.type === "idle" ? (true as const) : undefined
++        }),
++        `child ${childID} never became idle after task cancel`,
++        "5 seconds",
++      )
++    }),
++  { config: cfg },
++  30_000,
 +)
 +
- it.live(
-   "loop sets status to busy then idle",
-   () =>
-@@ -1008,7 +1072,8 @@ it.live(
-         expect(Exit.isSuccess(exit)).toBe(true)
++
+ it.instance("legacy prompt emits message events without session.next events", () =>
+   Effect.gen(function* () {
+     const events = yield* EventV2Bridge.Service
+@@ -1422,9 +1493,17 @@ it.instance(
+       expect(Exit.isSuccess(exit)).toBe(true)
  
-         expect((yield* status.get(chat.id)).type).toBe("idle")
--        expect((yield* status.get(childID)).type).toBe("idle")
-+        // Child session cancel propagates asynchronously via fiber interrupt
-+        yield* waitForIdle(status, childID)
-       }),
-       { git: true, config: providerCfg },
-     ),
-diff --git a/packages/opencode/test/tool/task.test.ts b/packages/opencode/test/tool/task.test.ts
-index f75fcf84b8a9cc8e46f029fac505feef900366e5..dbbcd5e2ca474443ccc316b1900bc85420fe4926 100644
---- a/packages/opencode/test/tool/task.test.ts
-+++ b/packages/opencode/test/tool/task.test.ts
-@@ -393,23 +393,11 @@ describe("tool.task", () => {
+       expect((yield* status.get(chat.id)).type).toBe("idle")
+-      expect((yield* status.get(childID)).type).toBe("idle")
++      // #150：cancel 后 child idle 可能异步 settle，deadline poll 替代瞬时断言
++      yield* pollWithTimeout(
++        Effect.gen(function* () {
++          const s = yield* status.get(childID)
++          return s.type === "idle" ? (true as const) : undefined
++        }),
++        `child ${childID} never became idle after cancel`,
++        "5 seconds",
++      )
+     }),
+-  10_000,
++  15_000,
+ )
  
-         const child = yield* sessions.get(result.metadata.sessionId)
-         expect(child.parentID).toBe(chat.id)
--        expect(child.permission).toEqual([
--          {
--            permission: "todowrite",
--            pattern: "*",
--            action: "deny",
--          },
--          {
--            permission: "bash",
--            pattern: "*",
--            action: "allow",
--          },
--          {
--            permission: "read",
--            pattern: "*",
--            action: "allow",
--          },
--        ])
-+        expect(child.permission).toContainEqual({ permission: "external_directory", pattern: "*", action: "ask" })
-+        expect(child.permission).toContainEqual({ permission: "todowrite", pattern: "*", action: "deny" })
-+        expect(child.permission).toContainEqual({ permission: "bash", pattern: "*", action: "allow" })
-+        expect(child.permission).toContainEqual({ permission: "read", pattern: "*", action: "allow" })
-+        expect(child.permission).not.toContainEqual({ permission: "task", pattern: "*", action: "allow" })
-         expect(seen?.tools).toEqual({
-           todowrite: false,
-           bash: false,
+ it.instance(

@@ -15,24 +15,23 @@ Content-Transfer-Encoding: 8bit
 
 
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
-index 27b1edc9b37d2986ab242443ee8d8a2d61ad41f4..0f83abae4b1d88f71cbd4b43a5e25cc05fb817fb 100644
+index 14eb715..f69d37a 100644
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -181,6 +181,13 @@ function splitTurn(input: {
+@@ -115,6 +115,12 @@ function splitTurn(input: {
      if (input.budget <= 0) return undefined
      if (input.turn.end - input.turn.start <= 1) return undefined
      for (let start = input.turn.start + 1; start < input.turn.end; start++) {
 +      const msg = input.messages[start]!
-+      // Split-turn anchors preserve long-running agent-loop context, but the
-+      // persisted boundary must still be replayable after undo/repair.  Empty,
-+      // hidden, pending, or errored messages can disappear from visible history
-+      // and must stay in the summarized head instead of becoming tail_start_id.
++      // #205：持久化边界在 undo/repair 后仍须可重放——空、hidden、pending、errored 消息可能从可见历史消失
++      // #205：这类消息必须留在 summarized head，不能成为 tail_start_id，否则边界丢失引发上下文组装故障
 +      if (msg.info.hidden || msg.parts.length === 0) continue
++      // #205：pending(无 finish)或 errored assistant 不可重放，同样跳过不作锁点
 +      if (msg.info.role === "assistant" && (!msg.info.finish || msg.info.error)) continue
        const size = yield* input.estimate({
          messages: input.messages.slice(start, input.turn.end),
          model: input.model,
-@@ -188,7 +195,7 @@ function splitTurn(input: {
+@@ -122,7 +128,7 @@ function splitTurn(input: {
        if (size > input.budget) continue
        return {
          start,
@@ -42,39 +41,15 @@ index 27b1edc9b37d2986ab242443ee8d8a2d61ad41f4..0f83abae4b1d88f71cbd4b43a5e25cc0
      }
      return undefined
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index f4be8b2d575b633ffaa9020b8a22ff69062cdd09..e4953928b697755b70efaaa62b9cdf7d57c46c11 100644
+index 497a11c..65b586e 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -1068,9 +1068,12 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
- export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean }) {
-   const size = 50
-   let before: string | undefined
-+  // Compaction recovery needs hidden structural anchors; callers that build a
-+  // visible transcript pass includeHidden=false and let page() apply that filter.
-+  const includeHidden = opts?.includeHidden ?? true
-   while (true) {
-     const next = Effect.runSync(
--      page({ sessionID, limit: size, before, includeHidden: opts?.includeHidden ?? true }).pipe(
-+      page({ sessionID, limit: size, before, includeHidden }).pipe(
-         Effect.catchIf(NotFoundError.isInstance, () =>
-           Effect.succeed({ items: [] as WithParts[], more: false, cursor: undefined }),
-         ),
-@@ -1079,8 +1082,6 @@ export function* stream(sessionID: SessionID, opts?: { includeHidden?: boolean }
-     if (next.items.length === 0) break
-     for (let i = next.items.length - 1; i >= 0; i--) {
-       const msg = next.items[i]
--      if (!opts?.includeHidden && msg.info.hidden) continue
--      if (!opts?.includeHidden) msg.parts = msg.parts.filter((p) => !p.hidden)
-       yield msg
-     }
-     if (!next.more || !next.cursor) break
-@@ -1130,6 +1131,16 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
+@@ -575,6 +575,15 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
    const result = [] as WithParts[]
    const completed = new Set<string>()
    let retain: MessageID | undefined
-+  // Hidden messages can still be structural compaction anchors, but they must
-+  // never be replayed to providers after undo/repair.  Keep them during the
-+  // boundary walk and strip them only from the returned prompt window.
++  // #205：hidden 消息仍可作结构压缩锚点，但 undo/repair 后绝不能重放给 provider
++  // #205：边界遍历时保留它们，仅从返回的 prompt 窗口剔除
 +  const visible = (items: WithParts[]) =>
 +    items
 +      .filter((msg) => !msg.info.hidden)
@@ -82,10 +57,10 @@ index f4be8b2d575b633ffaa9020b8a22ff69062cdd09..e4953928b697755b70efaaa62b9cdf7d
 +        ...msg,
 +        parts: msg.parts.filter((part) => !part.hidden),
 +      }))
+   // #204：遍历 newest-first 序列，发现 summary→compaction 边界并锁定 retained tail
    for (const msg of ordered) {
      result.push(msg)
-     if (retain) {
-@@ -1146,8 +1157,9 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
+@@ -592,8 +601,9 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
      }
      if (msg.info.role === "user" && completed.has(msg.info.id) && msg.parts.some((part) => part.type === "compaction"))
        break
@@ -96,7 +71,7 @@ index f4be8b2d575b633ffaa9020b8a22ff69062cdd09..e4953928b697755b70efaaa62b9cdf7d
    }
    result.reverse()
    const compactionIndex = result.findLastIndex(
-@@ -1170,13 +1182,13 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
+@@ -616,17 +626,18 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
      : -1
    const tailIndex = part?.tail_start_id ? result.findIndex((msg) => msg.info.id === part.tail_start_id) : -1
    if (tailIndex >= 0 && tailIndex < compactionIndex && summaryIndex > compactionIndex) {
@@ -113,11 +88,17 @@ index f4be8b2d575b633ffaa9020b8a22ff69062cdd09..e4953928b697755b70efaaa62b9cdf7d
  }
  
  export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
+-  return filterCompacted(yield* stream(sessionID))
++  // #205：压缩恢复需要 hidden 结构锚点作为边界；visible() 会从返回的 prompt 窗口剔除它们
++  return filterCompacted(yield* stream(sessionID, { includeHidden: true }))
+ })
+ 
+ // filterCompacted reorders messages for model consumption
 diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
-index 4a83404e9603b1e5e95cc4b1b2c097b5bb8f967d..bb9fe1d76868a388ed5f27d53cdde4107c31672f 100644
+index 3954415..19d06d3 100644
 --- a/packages/opencode/test/session/compaction.test.ts
 +++ b/packages/opencode/test/session/compaction.test.ts
-@@ -1059,16 +1059,31 @@ describe("session.compaction.process", () => {
+@@ -976,16 +976,33 @@ describe("session.compaction.process", () => {
    )
  
    itCompaction.instance(
@@ -134,6 +115,8 @@ index 4a83404e9603b1e5e95cc4b1b2c097b5bb8f967d..bb9fe1d76868a388ed5f27d53cdde410
          yield* createUserMessage(session.id, "first")
 -        yield* createUserMessage(session.id, "y".repeat(2_000))
 +        const recent = yield* createUserMessage(session.id, "y".repeat(2_000))
++        // #205：补一个未完成（无 finish）的 assistant 占据该轮，使 splitTurn 无法留作 tail_start_id
++        // #205：迫使压缩回退到 full summary——验证不可重放边界不会被选为持久化锁点
 +        yield* ssn.updateMessage({
 +          id: MessageID.ascending(),
 +          role: "assistant",
@@ -152,16 +135,18 @@ index 4a83404e9603b1e5e95cc4b1b2c097b5bb8f967d..bb9fe1d76868a388ed5f27d53cdde410
  
          const msgs = yield* ssn.messages({ sessionID: session.id })
 diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packages/opencode/test/session/messages-pagination.test.ts
-index e558d07b500f68a82b79b08c3969fee8c027c6c6..c538f8ce6a62e18b9cff71600e22e62fbfefb496 100644
+index b67c982..b8c97f4 100644
 --- a/packages/opencode/test/session/messages-pagination.test.ts
 +++ b/packages/opencode/test/session/messages-pagination.test.ts
-@@ -753,6 +753,48 @@ describe("MessageV2.filterCompacted", () => {
+@@ -751,6 +751,54 @@ describe("MessageV2.filterCompacted", () => {
      ),
    )
  
++  // #205：hidden 锚点可作为压缩边界但不进入返回窗口——验证 visible() 剔除 hidden 消息与 part
 +  it.instance("uses hidden retained-tail anchors as boundaries without returning hidden messages", () =>
 +    withSession(({ session, sessionID }) =>
 +      Effect.gen(function* () {
++        // #205：构造被 summary 取代的旧历史
 +        const old = yield* addUser(sessionID, "old request")
 +        const oldReply = yield* addAssistant(sessionID, old, { finish: "end_turn" })
 +        yield* session.updatePart({
@@ -171,18 +156,20 @@ index e558d07b500f68a82b79b08c3969fee8c027c6c6..c538f8ce6a62e18b9cff71600e22e62f
 +          type: "text",
 +          text: "old reply",
 +        })
++        // #205：anchor 是无 finish 的 dangling assistant，标 hidden+error；不可作持久化 tail_start_id
 +        const anchor = yield* addAssistant(sessionID, old)
 +        const stored = yield* MessageV2.get({ sessionID, messageID: anchor })
 +        if (stored.info.role === "assistant") {
 +          yield* session.updateMessage({
 +            ...stored.info,
 +            time: { ...stored.info.time, completed: Date.now() },
-+            error: new MessageV2.AbortedError({ message: "Aborted" }).toObject(),
++            error: new SessionV1.AbortedError({ message: "Aborted" }).toObject(),
 +            hidden: { time: Date.now(), reason: "repair-empty-dangling-assistant" as const },
 +          })
 +        }
 +
 +        const compact = yield* addUser(sessionID)
++        // #205：compaction 的 tail_start_id 指向 hidden anchor
 +        yield* addCompactionPart(sessionID, compact, anchor)
 +        const summary = yield* addAssistant(sessionID, compact, { summary: true, finish: "stop" })
 +        yield* session.updatePart({
@@ -194,8 +181,10 @@ index e558d07b500f68a82b79b08c3969fee8c027c6c6..c538f8ce6a62e18b9cff71600e22e62f
 +        })
 +        const next = yield* addUser(sessionID, "next request")
 +
-+        const result = MessageV2.filterCompacted(MessageV2.stream(sessionID))
++        // #205：stream 传 includeHidden=true 让 hidden 锚点参与边界遍历；visible() 保证其不返回
++        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID, { includeHidden: true }))
 +
++        // #205：anchor 被 visible() 剔除，结果仅 compact/summary/next
 +        expect(result.map((item) => item.info.id)).toEqual([compact, summary, next])
 +      }),
 +    ),

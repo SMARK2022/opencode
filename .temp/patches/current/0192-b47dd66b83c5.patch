@@ -15,18 +15,19 @@ Content-Transfer-Encoding: 8bit
 - 补充 TUI prompt、sync、run stream、retry 行为测试
 
 diff --git a/packages/opencode/src/cli/cmd/run/stream.transport.ts b/packages/opencode/src/cli/cmd/run/stream.transport.ts
-index 22240ebf56885ab11e2f884d673517f00054a948..bdc93a037ca02e55be96f4f4513fdf2a1be9c2b5 100644
+index e4817f514d..f9153ab7c1 100644
 --- a/packages/opencode/src/cli/cmd/run/stream.transport.ts
 +++ b/packages/opencode/src/cli/cmd/run/stream.transport.ts
-@@ -76,6 +76,7 @@ type Wait = {
+@@ -84,6 +84,8 @@ type Wait = {
    tick: number
    armed: boolean
    live: boolean
++  // #192：statusBusy 期间也算活跃
 +  statusBusy: boolean
+   onVisibleOutput?: (anchor: LocalReplayAnchor) => void
    done: Deferred.Deferred<void, unknown>
  }
- 
-@@ -404,26 +405,6 @@ function createLayer(input: StreamInput) {
+@@ -423,25 +425,7 @@ function createLayer(input: StreamInput) {
          input.signal?.addEventListener("abort", halt, { once: true })
          yield* Effect.addFinalizer(() => closeScope())
  
@@ -39,21 +40,21 @@ index 22240ebf56885ab11e2f884d673517f00054a948..bdc93a037ca02e55be96f4f4513fdf2a
 -            ),
 -            (events) =>
 -              Effect.sync(() => {
--                void events.stream.return(undefined).catch(() => {})
+-                void events.stream.return(StreamClosed).catch(() => {})
 -              }),
 -          ),
 -        )
 -        closeStream = () => {
--          void events.stream.return(undefined).catch(() => {})
+-          void events.stream.return(StreamClosed).catch(() => {})
 -        }
 -        input.trace?.write("recv.subscribe", {
 -          sessionID: input.sessionID,
 -        })
--
++                // #192：events 订阅移入 watch while 循环
+ 
          const state: State = {
            data: createSessionData(),
-           subagent: createSubagentData(),
-@@ -657,13 +638,22 @@ function createLayer(input: StreamInput) {
+@@ -799,13 +783,17 @@ function createLayer(input: StreamInput) {
            )
          })
  
@@ -63,15 +64,10 @@ index 22240ebf56885ab11e2f884d673517f00054a948..bdc93a037ca02e55be96f4f4513fdf2a
              Effect.map((out) => {
                const item = out.data?.[input.sessionID]
 -              return !item || item.type === "idle"
++              // #192：live 或 statusBusy 都算活跃
 +              const observed = next.live || next.statusBusy
 +              if (!item) return fallback && observed
-+              if (item.type !== "idle") {
-+                next.statusBusy = true
-+                return false
-+              }
-+
-+              // [状态轮询收口] 只有先观察到本轮 busy/活动事件后，idle 才能结束 turn；
-+              // 否则缺失状态或上一轮遗留 idle 会把刚提交的 prompt 提前标记完成。
++              if (item.type !== "idle") { next.statusBusy = true; return false }
 +              return observed
              }),
 -            Effect.orElseSucceed(() => fallback),
@@ -79,23 +75,24 @@ index 22240ebf56885ab11e2f884d673517f00054a948..bdc93a037ca02e55be96f4f4513fdf2a
            ),
          )
  
-@@ -688,15 +678,23 @@ function createLayer(input: StreamInput) {
+@@ -826,19 +814,22 @@ function createLayer(input: StreamInput) {
+ 
+         const touch = (event: Event) => {
+           const next = state.wait
+-          if (!next || !active(event, input.sessionID)) {
++          if (!next || !active(event, input.sessionID)) { return }
++          // #192：session.status 单独处理
++          if (event.type === "session.status") {
++            if (event.properties.status.type !== "idle") { next.statusBusy = true; next.live = true }
              return
            }
- 
-+          if (event.type === "session.status") {
-+            if (event.properties.status.type !== "idle") {
-+              next.statusBusy = true
-+              next.live = true
-+            }
-+            return
-+          }
-+
+-
            next.live = true
          }
  
          const complete = Effect.fn("RunStreamTransport.complete")(function* (next: Wait, fallback: boolean) {
 -          if (state.wait !== next || !next.armed || !next.live) {
++          // #192：移除 !next.live
 +          if (state.wait !== next || !next.armed) {
              return
            }
@@ -105,9 +102,9 @@ index 22240ebf56885ab11e2f884d673517f00054a948..bdc93a037ca02e55be96f4f4513fdf2a
              return
            }
  
-@@ -738,90 +736,122 @@ function createLayer(input: StreamInput) {
-           })
-         }
+@@ -1124,63 +1115,52 @@ function createLayer(input: StreamInput) {
+           return true
+         })
  
 -        const watch = Effect.fn("RunStreamTransport.watch")(() =>
 -          Stream.fromAsyncIterable(events.stream, (error) =>
@@ -133,54 +130,37 @@ index 22240ebf56885ab11e2f884d673517f00054a948..bdc93a037ca02e55be96f4f4513fdf2a
 -                }
 -
 -                const sessionID = sid(event)
--                if (sessionID !== input.sessionID && (!sessionID || !state.subagent.tabs.has(sessionID))) {
+-                if (booting || replaying) {
+-                  if (sessionID) {
+-                    input.trace?.write("recv.event", event)
+-                    buffered.push(event)
+-                  }
+-                  return
+-                }
+-
+-                if (!tracked(sessionID)) {
+-                  if (sessionID) {
+-                    input.trace?.write("recv.event", event)
+-                    buffered.push(event)
+-                  }
 -                  return
 -                }
 -
 -                input.trace?.write("recv.event", event)
--                trackBlocker(event)
--
--                const prev = event.type === "message.part.updated" ? listSubagentTabs(state.subagent) : undefined
--                const next = reduceSessionData({
--                  data: state.data,
--                  event,
--                  sessionID: input.sessionID,
--                  thinking: input.thinking,
--                  limits: input.limits(),
--                })
--                state.data = next.data
--
--                if (
--                  event.type === "message.part.updated" &&
--                  event.properties.part.sessionID === input.sessionID &&
--                  event.properties.part.type === "tool" &&
--                  event.properties.part.tool === "question" &&
--                  event.properties.part.state.status === "running" &&
--                  state.data.questions.length === 0
--                ) {
--                  yield* recoverQuestion(event.properties.part.id).pipe(
--                    Effect.forkIn(scope, { startImmediately: true }),
--                    Effect.asVoid,
--                  )
--                }
--
--                const changed = reduceSubagentData({
--                  data: state.subagent,
--                  event,
--                  sessionID: input.sessionID,
--                  thinking: input.thinking,
--                  limits: input.limits(),
--                })
--                if (changed && prev) {
--                  traceTabs(input.trace, prev, listSubagentTabs(state.subagent))
--                }
--                releaseBlocker(event)
--
--                syncFooter(next.commits, next.footer?.patch, changed ? currentSubagentState() : undefined)
--
--                touch(event)
--                yield* mark(event)
--              }),
+-                yield* applyEvent(event)
+-                yield* drainBuffered()
++        const watch = Effect.fn("RunStreamTransport.watch")(function* () {
++          // #192：while 循环替代单次订阅——SSE clean EOF 时重连而非 fault
++          // #192：SSE 断线重连——clean EOF 重连而非 fault
++          while (!input.footer.isClosed && !abort.signal.aborted && !closed && !state.fault) {
++            const events = yield* Effect.tryPromise({
++              try: () => input.sdk.global.event({ signal: abort.signal }),
++              catch: (error) => (error instanceof Error ? error : new Error(String(error))),
++            }).pipe(
++              Effect.catch((error) => {
++                if (input.footer.isClosed || abort.signal.aborted || closed) return Effect.void
++                return fail(error).pipe(Effect.as(undefined))
+               }),
 -            ),
 -            Effect.catch((error) => (abort.signal.aborted ? Effect.void : fail(error))),
 -            Effect.ensuring(
@@ -189,159 +169,722 @@ index 22240ebf56885ab11e2f884d673517f00054a948..bdc93a037ca02e55be96f4f4513fdf2a
 -                  yield* fail(new Error("global event stream closed"))
 -                }
 -                closeStream()
-+        const watch = Effect.fn("RunStreamTransport.watch")(function* () {
-+          while (!input.footer.isClosed && !abort.signal.aborted && !closed && !state.fault) {
-+            const events = yield* Effect.tryPromise({
-+              try: () =>
-+                input.sdk.global.event({
-+                  signal: abort.signal,
-+                }),
-+              catch: (error) => (error instanceof Error ? error : new Error(String(error))),
-+            }).pipe(
-+              Effect.catch((error) => {
-+                // [重订阅失败] clean EOF 可以恢复，但重新建立 SSE 失败是真故障；
-+                // 直接唤醒 active wait，避免 runPromptTurn 无期限等待。
-+                if (input.footer.isClosed || abort.signal.aborted || closed) return Effect.void
-+                return fail(error).pipe(Effect.as(undefined))
-               }),
+-              }),
 -            ),
 -          ),
 -        )
+-
 +            )
++            // #192：订阅失败时退出（footer/abort/closed）
 +            if (!events) return
-+            const closeCurrentStream = () => {
-+              void events.stream.return(undefined).catch(() => {})
-+            }
++            const closeCurrentStream = () => { void events.stream.return(StreamClosed).catch(() => {}) }
++            // #192：closeStream 指向当前流
++            // #192：closeStream 指向当前流，ensuring 时重置
 +            closeStream = closeCurrentStream
-+            input.trace?.write("recv.subscribe", {
-+              sessionID: input.sessionID,
-+            })
-+
-+            // [SSE clean EOF] daemon 重启或代理抖动会正常关闭流；这不是 turn 失败。
-+            // 只有 thrown stream error 才 fault，普通结束则回到 while 继续订阅。
-+            const ok = yield* Stream.fromAsyncIterable(events.stream, (error) =>
-+              error instanceof Error ? error : new Error(String(error)),
-+            ).pipe(
++            input.trace?.write("recv.subscribe", { sessionID: input.sessionID })
++            const ok = yield* Stream.fromAsyncIterable(events.stream, (error) => error instanceof Error ? error : new Error(String(error))).pipe(
 +              Stream.takeUntil(() => input.footer.isClosed || abort.signal.aborted),
 +              Stream.runForEach(
 +                Effect.fn("RunStreamTransport.event")(function* (item: unknown) {
-+                  if (input.footer.isClosed) {
-+                    abort.abort()
-+                    return
-+                  }
-+
-+                  if (isMatchingDisposeEvent(item, input.directory)) {
-+                    yield* fail(new Error("instance disposed"))
-+                    yield* closeScope()
-+                    return
-+                  }
-+
++                  if (input.footer.isClosed) { abort.abort(); return }
++                  if (isMatchingDisposeEvent(item, input.directory)) { yield* fail(new Error("instance disposed")); yield* closeScope(); return }
 +                  const event = globalPayloadEvent(item)
-+                  if (!event) {
-+                    return
-+                  }
-+
++                  if (!event) return
 +                  const sessionID = sid(event)
-+                  if (sessionID !== input.sessionID && (!sessionID || !state.subagent.tabs.has(sessionID))) {
-+                    return
-+                  }
-+
++                  if (booting || replaying) { if (sessionID) { input.trace?.write("recv.event", event); buffered.push(event) }; return }
++                  if (!tracked(sessionID)) { if (sessionID) { input.trace?.write("recv.event", event); buffered.push(event) }; return }
 +                  input.trace?.write("recv.event", event)
-+                  trackBlocker(event)
-+
-+                  const prev = event.type === "message.part.updated" ? listSubagentTabs(state.subagent) : undefined
-+                  const next = reduceSessionData({
-+                    data: state.data,
-+                    event,
-+                    sessionID: input.sessionID,
-+                    thinking: input.thinking,
-+                    limits: input.limits(),
-+                  })
-+                  state.data = next.data
-+
-+                  if (
-+                    event.type === "message.part.updated" &&
-+                    event.properties.part.sessionID === input.sessionID &&
-+                    event.properties.part.type === "tool" &&
-+                    event.properties.part.tool === "question" &&
-+                    event.properties.part.state.status === "running" &&
-+                    state.data.questions.length === 0
-+                  ) {
-+                    yield* recoverQuestion(event.properties.part.id).pipe(
-+                      Effect.forkIn(scope, { startImmediately: true }),
-+                      Effect.asVoid,
-+                    )
-+                  }
-+
-+                  const changed = reduceSubagentData({
-+                    data: state.subagent,
-+                    event,
-+                    sessionID: input.sessionID,
-+                    thinking: input.thinking,
-+                    limits: input.limits(),
-+                  })
-+                  if (changed && prev) {
-+                    traceTabs(input.trace, prev, listSubagentTabs(state.subagent))
-+                  }
-+                  releaseBlocker(event)
-+
-+                  syncFooter(next.commits, next.footer?.patch, changed ? currentSubagentState() : undefined)
-+
-+                  touch(event)
-+                  yield* mark(event)
++                  yield* applyEvent(event)
++                  yield* drainBuffered()
 +                }),
 +              ),
 +              Effect.as(true),
 +              Effect.catch((error) => (abort.signal.aborted ? Effect.succeed(false) : fail(error).pipe(Effect.as(false)))),
-+              Effect.ensuring(
-+                Effect.sync(() => {
-+                  if (closeStream === closeCurrentStream) closeStream = () => {}
-+                  closeCurrentStream()
-+                }),
-+              ),
++              Effect.ensuring(Effect.sync(() => { if (closeStream === closeCurrentStream) closeStream = () => {}; closeCurrentStream() })),
 +            )
++            // #192：clean EOF 时 ok=false，外层 while 重试
 +            if (!ok) return
-+            if (!input.footer.isClosed && !abort.signal.aborted && !closed && !state.fault) {
-+              // [重连节流] 测试替身、代理或死 daemon 可能立即返回已关闭流；短 sleep
-+              // 防止 CPU tight loop，同时不会影响真实 SSE 的 turn 状态保留。
-+              yield* Effect.sleep("100 millis")
-+            }
++            // #192：重连节流——100ms 避免死 daemon tight loop
++            if (!input.footer.isClosed && !abort.signal.aborted && !closed && !state.fault) yield* Effect.sleep("100 millis")
 +          }
 +        })
- 
-         yield* bootstrap()
          yield* Scope.provide(scope)(watch().pipe(Effect.forkScoped))
-@@ -852,6 +882,7 @@ function createLayer(input: StreamInput) {
+         yield* bootstrap()
+ 
+@@ -1203,6 +1183,8 @@ function createLayer(input: StreamInput) {
              tick: state.tick,
              armed: false,
              live: false,
++            // #192：初始无 statusBusy
 +            statusBusy: false,
+             onVisibleOutput: next.onVisibleOutput,
              done: yield* Deferred.make<void, unknown>(),
            }
-           state.wait = item
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index bf8bff053b5951c932af6b441ea7a8256ee5bf33..a316ea1c5dfd1e78b4989a8bfcbc17fa82606d21 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -761,6 +761,10 @@ export function Prompt(props: PromptProps) {
+diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
+index a99f8acff2..a97e43b15c 100644
+--- a/packages/opencode/src/session/llm.ts
++++ b/packages/opencode/src/session/llm.ts
+@@ -371,7 +371,10 @@ const live: Layer.Layer<
+             // already returns one; AI SDK streams are converted here.
+             const state = LLMAISDK.adapterState()
+             return Stream.fromAsyncIterable(result.result.fullStream, (e) =>
+-              e instanceof Error ? e : new Error(String(e)),
++              e instanceof Error
++                ? e
++                : // #192：保真 stream 错误 cause
++                  new Error(String(e), { cause: e }),
+             ).pipe(
+               Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
+               Stream.flatMap((events) => Stream.fromIterable(events)),
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index 12c7e266f5..9ac84716c5 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -737,29 +737,36 @@ export function fromError(
+         ).toObject()
+       }
+ 
++      // #192：statusless 非重试 APIError 的 cause 可能是 transport
++      if (!parsed.isRetryable && parsed.statusCode === undefined) {
++        const transport = transportError(e.cause)
++        if (transport) return new APIError({ message: transport.message, isRetryable: true, metadata: transport.metadata }, { cause: e }).toObject()
++      }
+       return new APIError(
+-        {
+-          message: parsed.message,
+-          statusCode: parsed.statusCode,
+-          isRetryable: parsed.isRetryable,
+-          responseHeaders: parsed.responseHeaders,
+-          responseBody: parsed.responseBody,
+-          metadata: parsed.metadata,
+-        },
++        { message: parsed.message, statusCode: parsed.statusCode, isRetryable: parsed.isRetryable, responseHeaders: parsed.responseHeaders, responseBody: parsed.responseBody, metadata: parsed.metadata },
+         { cause: e },
+       ).toObject()
+     case !ctx.aborted && !APICallError.isInstance(e) && (() => {
+       // #191：在 catch-all 之前检查 transport 层瞬时故障
+-      // #191：先解包 AI SDK RetryError，取 lastError 再判定
+-      const retried = retryErrorCause(e)
+-      if (retried) return true
+-      // #191：transportError 命中时返回 true 进入本 case
++      // #192：先解包 RetryError，再查 apiCallErrorCause/streamError/transportError
++      if (retryErrorCause(e)) return true
++      // #192：非 APICallError 的 cause 链中可能藏 APICallError，需优先解析
++      if (apiCallErrorCause(e)) return true
++      // #192：structured stream error 优先于 transport，防 context_overflow 被误重试
++      if (streamError(e)) return true
++      // #191：transportError 命中时返回 true
+       return Boolean(transportError(e))
+     })():
+       // #191：RetryError 解包后递归调用 fromError
+       {
+         const retried = retryErrorCause(e)
+         if (retried) return fromError(retried, ctx)
++        // #192：非 APICallError cause 链中藏 APICallError 时递归解析
++        const apiCall = apiCallErrorCause(e)
++        if (apiCall) return fromError(apiCall, ctx)
++        // #192：structured stream error 优先于 transport——防 context_overflow 误重试
++        const stream = streamError(e)
++        if (stream) return fromStreamError(e, stream)
+         // #191：transport 层瞬时故障转为可重试 APIError
+         const transport = transportError(e)
+         if (transport) {
+@@ -890,5 +897,48 @@ function transportError(value: unknown, depth = 0): { message: string; metadata:
+   return transportError(error.cause, depth + 1)
+ }
+ 
+-export * as MessageV2 from "./message-v2"
++// #192：非 APICallError 的 cause 链中查找 APICallError，限制深度防环
++// #192：外层 Error 可能包装了 APICallError——需递归解包才能正确分类
++function apiCallErrorCause(value: unknown, depth = 0) {
++  const error = errorLike(value)
++  if (!error || depth >= 2) return undefined
++  const cause = error.cause
++  if (!cause || cause === value) return undefined
++  if (APICallError.isInstance(cause)) return cause
++  return apiCallErrorCause(cause, depth + 1)
++}
++
++// #192：structured stream error 检查——保留完整 ParsedStreamError（含 responseBody）
++// #192：responseBody 是 provider 返回的诊断体，丢弃会导致 context_overflow/api_error 丢失关键信息
++// #192：递归检查 cause 链——stream error 可能被 fetch wrapper 或 RetryError 包裹
++// #192：返回完整 parsed 对象——fromStreamError 需要 responseBody 构造错误
++function streamError(value: unknown): NonNullable<ReturnType<typeof ProviderError.parseStreamError>> | undefined {
++  const parsed = ProviderError.parseStreamError(value)
++  if (parsed) return parsed
++  // #192：递归检查 cause 链，stream error 可能被 fetch wrapper 包裹
++  const error = errorLike(value)
++  if (error && error.cause !== undefined && error.cause !== value) {
++    const causeParsed = ProviderError.parseStreamError(error.cause)
++    if (causeParsed) return causeParsed
++  }
++  return undefined
++}
++
++// #192：从 stream error 构造——context_overflow 走专用类型，保留 responseBody 供诊断
++// #192：ContextOverflowError 不可重试——与 transport 故障区分
++// #192：APIError 的 isRetryable 来自 ParsedStreamError——仅 api_error 变体有此字段
++function fromStreamError(e: unknown, parsed: NonNullable<ReturnType<typeof ProviderError.parseStreamError>>) {
++  if (parsed.type === "context_overflow") {
++    return new ContextOverflowError(
++      { message: parsed.message, responseBody: parsed.responseBody },
++      { cause: e },
++    ).toObject()
++  }
++  return new APIError(
++    { message: parsed.message, isRetryable: parsed.isRetryable, responseBody: parsed.responseBody },
++    { cause: e },
++  ).toObject()
++}
++
++export * as MessageV2 from "./message-v2" 
+ export const node = LayerNode.group([Database.node])
+diff --git a/packages/opencode/test/cli/run/stream.transport.test.ts b/packages/opencode/test/cli/run/stream.transport.test.ts
+index 5bb578447f..18be2d0306 100644
+--- a/packages/opencode/test/cli/run/stream.transport.test.ts
++++ b/packages/opencode/test/cli/run/stream.transport.test.ts
+@@ -183,7 +183,8 @@ function statusMap(busy: boolean): SessionStatusMap {
+     return { "session-1": { type: "busy" } }
+   }
+ 
+-  return {}
++  // #192：默认返回 idle 而非空——status polling 需要区分 "未知" 和 "idle"
++  return { "session-1": { type: "idle" } }
+ }
+ 
+ function assistantMessage(input: { sessionID: string; id: string; parts: SessionMessage["parts"] }): SessionMessage {
+@@ -2268,6 +2269,326 @@ describe("run stream transport", () => {
+     }
+   })
+ 
++  // #192：clean EOF 重订阅——活动 turn 期间全局 SSE 关闭应重连而非 fault
++  // #192：第一次 subscribe 关闭后第二次 subscribe 必须接替——不应让活动 turn 失败
++  // #192：promptAsync 推送 busy 事件后关闭 first stream——模拟 clean EOF
++  // #192：重连后 second stream 推送 idle 事件——turn 正常完成
++  // #192：subscriptions >= 2 证明重连发生——单次 subscribe 不够
++  test("resubscribes when the global event stream closes cleanly during an active turn", async () => {
++    const first = globalFeed()
++    const second = globalFeed()
++    const ui = footer()
++    let subscriptions = 0
++
++    // #192：globalEvent 第一次返回 first stream，第二次返回 second stream
++    // #192：promptAsync 推送 busy 后关闭 first——触发 clean EOF
++    const transport = await createSessionTransport({
++      sdk: sdk({
++        globalEvent: () => {
++          subscriptions += 1
++          return globalSse(subscriptions === 1 ? first.stream : second.stream)
++        },
++        promptAsync: async () => {
++          first.push(globalEvent(busy()))
++          first.close()
++          return ok(undefined)
++        },
++      }),
++      sessionID: "session-1",
++      thinking: true,
++      limits: () => ({}),
++      footer: ui.api,
++    })
++
++    try {
++      // #192：runPromptTurn 启动活动 turn——SSE 在 turn 期间关闭
++      const turn = transport.runPromptTurn({
++        agent: undefined,
++        model: undefined,
++        variant: undefined,
++        prompt: { text: "hello", parts: [] },
++        files: [],
++        includeFiles: false,
++      })
++
++      // #192：等待重连发生——subscriptions > 1 证明第二次 subscribe
++      await waitFor(() => (subscriptions > 1 ? true : undefined))
++      // #192：重连后推送 idle——turn 正常完成
++      second.push(globalEvent(idle()))
++
++      await expect(turn).resolves.toBeUndefined()
++      // #192：subscriptions >= 2 证明 clean EOF 触发了重连
++      expect(subscriptions).toBeGreaterThanOrEqual(2)
++    } finally {
++      first.close()
++      second.close()
++      await transport.close()
++    }
++  })
++
++  // #192：重连丢失全部 turn 事件时，靠 status polling + statusBusy 完成
++  // #192：重连后 second stream 不推送任何 turn 事件——模拟事件丢失
++  // #192：status polling 第一次返回 busy——确认 turn 仍在执行
++  // #192：status polling 第二次返回 idle——turn 完成
++  // #192：waitFor subscriptions > 1 确保重连完成后才开始 status 检查
++  // #192：超时 2 秒保护——避免 status polling 永远不返回 idle 时挂死
++  test("completes from status polling when reconnect misses all active turn events", async () => {
++    const first = globalFeed()
++    const second = globalFeed()
++    const ui = footer()
++    let subscriptions = 0
++    let statusCallsAfterReconnect = 0
++
++    const transport = await createSessionTransport({
++      sdk: sdk({
++        globalEvent: () => {
++          subscriptions += 1
++          return globalSse(subscriptions === 1 ? first.stream : second.stream)
++        },
++        promptAsync: async () => {
++          first.close()
++          return ok(undefined)
++        },
++        status: async () => {
++          if (subscriptions <= 1) return ok({})
++          statusCallsAfterReconnect += 1
++          return ok({
++            "session-1": {
++              type: statusCallsAfterReconnect === 1 ? "busy" : "idle",
++            },
++          })
++        },
++      }),
++      sessionID: "session-1",
++      thinking: true,
++      limits: () => ({}),
++      footer: ui.api,
++    })
++
++    try {
++      const turn = transport.runPromptTurn({
++        agent: undefined,
++        model: undefined,
++        variant: undefined,
++        prompt: { text: "hello", parts: [] },
++        files: [],
++        includeFiles: false,
++      })
++
++      await waitFor(() => (subscriptions > 1 ? true : undefined))
++
++      const outcome = await Promise.race([
++        turn.then(
++          () => "done" as const,
++          (error) => error,
++        ),
++        Bun.sleep(2_000).then(
++          () =>
++            new Error(
++              `turn did not complete after ${subscriptions} subscriptions and ${statusCallsAfterReconnect} status polls`,
++            ),
++        ),
++      ])
++      if (outcome instanceof Error) throw outcome
++      expect(outcome).toBe("done")
++    } finally {
++      first.close()
++      second.close()
++      await transport.close()
++    }
++  })
++
++  // #192：clean EOF 在 daemon status 出现前发生——turn 保持 pending 直到观察到 busy
++  // #192：promptAsync 延迟完成——模拟 daemon 尚未开始处理
++  // #192：重连后 status 返回空——daemon 未观察到 turn
++  // #192：settled 必须为 false——turn 不应在未观察到 busy 时完成或失败
++  // #192：只有 second stream 推送 busy + idle 后 turn 才完成
++  // #192：accepted promise 控制 promptAsync 完成时机——确保 clean EOF 在 status 之前
++  test("keeps a turn pending when clean EOF happens before daemon status appears", async () => {
++    const first = globalFeed()
++    const second = globalFeed()
++    const ui = footer()
++    const accepted = defer()
++    let subscriptions = 0
++    let postStarted = false
++    let acceptedDone = false
++    let statusAfterAccept = 0
++
++    const transport = await createSessionTransport({
++      sdk: sdk({
++        globalEvent: () => {
++          subscriptions += 1
++          return globalSse(subscriptions === 1 ? first.stream : second.stream)
++        },
++        promptAsync: async () => {
++          postStarted = true
++          first.close()
++          await accepted.promise
++          return ok(undefined)
++        },
++        status: async () => {
++          if (acceptedDone) statusAfterAccept += 1
++          return ok({})
++        },
++      }),
++      sessionID: "session-1",
++      thinking: true,
++      limits: () => ({}),
++      footer: ui.api,
++    })
++
++    try {
++      const turn = transport.runPromptTurn({
++        agent: undefined,
++        model: undefined,
++        variant: undefined,
++        prompt: { text: "hello", parts: [] },
++        files: [],
++        includeFiles: false,
++      })
++      let settled = false
++      turn.then(
++        () => {
++          settled = true
++        },
++        () => {
++          settled = true
++        },
++      )
++
++      await waitFor(() => (postStarted ? true : undefined))
++      await waitFor(() => (subscriptions > 1 ? true : undefined))
++      acceptedDone = true
++      accepted.resolve()
++      await waitFor(() => (statusAfterAccept > 0 ? true : undefined))
++      await Bun.sleep(20)
++
++      expect(settled).toBe(false)
++
++      second.push(globalEvent(busy()))
++      second.push(globalEvent(idle()))
++      await expect(turn).resolves.toBeUndefined()
++    } finally {
++      first.close()
++      second.close()
++      await transport.close()
++    }
++  })
++
++  // #192：孤立的 idle 事件在 daemon 未观察 turn 时不应完成——需先看到 busy
++  // #192：turn.wait 事件表示 transport 正在等待 daemon 响应
++  // #192：status 返回空——daemon 不知道此 turn
++  // #192：idle 事件不应完成 turn——可能是前一个 turn 的残留
++  // #192：settled 必须为 false——孤立 idle 不能错误地完成活动 turn
++  // #192：busy + idle 序列后 turn 才正常完成——需要完整的 busy → idle 生命周期
++  test("ignores a lone idle event when daemon status has not observed the turn", async () => {
++    const src = globalFeed()
++    const ui = footer()
++    let statusCalls = 0
++
++    const transport = await createSessionTransport({
++      sdk: sdk({
++        globalStream: src.stream,
++        status: async () => {
++          statusCalls += 1
++          return ok({})
++        },
++      }),
++      sessionID: "session-1",
++      thinking: true,
++      limits: () => ({}),
++      footer: ui.api,
++    })
++
++    try {
++      const turn = transport.runPromptTurn({
++        agent: undefined,
++        model: undefined,
++        variant: undefined,
++        prompt: { text: "hello", parts: [] },
++        files: [],
++        includeFiles: false,
++      })
++      let settled = false
++      turn.then(
++        () => {
++          settled = true
++        },
++        () => {
++          settled = true
++        },
++      )
++
++      await waitFor(() => (ui.events.some((event) => event.type === "turn.wait") ? true : undefined))
++      src.push(globalEvent(idle()))
++      await waitFor(() => (statusCalls > 0 ? true : undefined))
++      await Bun.sleep(20)
++
++      expect(settled).toBe(false)
++
++      src.push(globalEvent(busy()))
++      src.push(globalEvent(idle()))
++      await expect(turn).resolves.toBeUndefined()
++    } finally {
++      src.close()
++      await transport.close()
++    }
++  })
++
++  // #192：重订阅失败应 reject 活动 turn——不应静默成功
++  // #192：第二次 globalEvent 调用抛异常——模拟重连失败
++  // #192：turn 必须 reject 并携带原始错误——不能隐藏故障
++  // #192：超时 1 秒保护——避免重连失败时 turn 永远 pending
++  // #192：status 返回 busy 但不应阻止 reject——重连失败优先于 status
++  test("rejects the active turn when resubscribing the global event stream fails", async () => {
++    const first = globalFeed()
++    const ui = footer()
++    let subscriptions = 0
++
++    const transport = await createSessionTransport({
++      sdk: sdk({
++        globalEvent: () => {
++          subscriptions += 1
++          if (subscriptions > 1) throw new Error("subscribe boom")
++          return globalSse(first.stream)
++        },
++        promptAsync: async () => {
++          first.push(globalEvent(busy()))
++          first.close()
++          return ok(undefined)
++        },
++        status: async () => ok({ "session-1": { type: "busy" } }),
++      }),
++      sessionID: "session-1",
++      thinking: true,
++      limits: () => ({}),
++      footer: ui.api,
++    })
++
++    try {
++      const turn = transport.runPromptTurn({
++        agent: undefined,
++        model: undefined,
++        variant: undefined,
++        prompt: { text: "hello", parts: [] },
++        files: [],
++        includeFiles: false,
++      })
++
++      await expect(
++        Promise.race([
++          turn,
++          Bun.sleep(1_000).then(() => {
++            throw new Error("turn did not fault")
++          }),
++        ]),
++      ).rejects.toThrow("subscribe boom")
++    } finally {
++      first.close()
++      await transport.close()
++    }
++  })
++
+   test("rejects the active turn when the backing instance is disposed", async () => {
+     const ui = footer()
+     const ready = defer()
+diff --git a/packages/opencode/test/session/retry.test.ts b/packages/opencode/test/session/retry.test.ts
+index 41c9c1727b..e86572b466 100644
+--- a/packages/opencode/test/session/retry.test.ts
++++ b/packages/opencode/test/session/retry.test.ts
+@@ -32,6 +32,12 @@ function wrap(message: unknown): ReturnType<NamedError["toObject"]> {
+   return { name: "", data: { message } }
+ }
+ 
++// #192：withCause——给 Error 附加 cause，兼容 AI SDK 错误包装
++function withCause<T extends Error>(error: T, cause: unknown) {
++  Object.defineProperty(error, "cause", { value: cause })
++  return error
++}
++
+ describe("session.retry.delay", () => {
+   test("caps delay at 30 seconds when headers missing", () => {
+     const error = apiError()
+@@ -528,4 +534,144 @@ describe("session.message-v2.fromError", () => {
+     expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "fetch failed" })
+   })
+ 
++
++
++  // #192：statusless（无 statusCode）APICallError 的 transport cause 应转为可重试
++  // #192：有 statusCode 的 4xx 保持非重试，即使 cause 链中有 transport 故障
++  // #192：无状态码的 APICallError 可能是 provider 包装了 transport 错误——需解包 cause 判定
++  // #192：metadata.code 必须透传 transport 错误码（如 ETIMEDOUT），供日志和诊断使用
++  test("converts statusless APICallError transport causes to retryable APIError", () => {
++    const result = MessageV2.fromError(
++      withCause(
++        new APICallError({
++          message: "provider request failed",
++          url: "https://example.com/v1/chat/completions",
++          requestBodyValues: {},
++          isRetryable: false,
++        }),
++        Object.assign(new Error("socket timed out"), { code: "ETIMEDOUT" }),
++      ),
++      { providerID },
++    )
++
++    // #192：statusless APICallError 应转为可重试 APIError
++    expect(SessionV1.APIError.isInstance(result)).toBe(true)
++    if (!SessionV1.APIError.isInstance(result)) throw new Error("expected APIError")
++    // #192：isRetryable=true——transport cause 使非重试变可重试
++    expect(result.data.isRetryable).toBe(true)
++    // #192：metadata.code 透传 transport 错误码
++    expect(result.data.metadata?.code).toBe("ETIMEDOUT")
++    expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "socket timed out" })
++  })
++
++  // #192：4xx + transport cause——4xx 语义优先，不因 transport 降级而变可重试
++  // #192：statusCode 存在时 APICallError 自身语义决定重试性，transport cause 不覆盖
++  // #192：responseBody 必须保留——4xx 的诊断体不能因 cause 解包而丢失
++  test("keeps explicit APICallError 4xx failures non-retryable even with transport causes", () => {
++    const result = MessageV2.fromError(
++      withCause(
++        new APICallError({
++          message: "bad request",
++          url: "https://example.com/v1/chat/completions",
++          requestBodyValues: {},
++          statusCode: 400,
++          responseHeaders: { "content-type": "application/json" },
++          responseBody: '{"error":"bad request"}',
++          isRetryable: false,
++        }),
++        Object.assign(new Error("socket timed out"), { code: "ETIMEDOUT" }),
++      ),
++      { providerID },
++    )
++
++    // #192：4xx APICallError 保持非重试——即使 cause 有 transport 故障
++    expect(SessionV1.APIError.isInstance(result)).toBe(true)
++    if (!SessionV1.APIError.isInstance(result)) throw new Error("expected APIError")
++    // #192：4xx 语义优先——statusCode 存在时不解包 transport cause
++    expect(result.data.isRetryable).toBe(false)
++    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
++  })
++
++  // #192：外层 Error 包装的 4xx APICallError 也应保持非重试——apiCallErrorCause 递归查找
++  // #192：depth 限制 2 层——防止循环 cause 链导致无限递归
++  // #192：外层 Error 无 statusCode，但 cause 链中的 APICallError 有——需递归发现
++  test("keeps wrapped explicit APICallError 4xx failures non-retryable", () => {
++    const result = MessageV2.fromError(
++      new Error("outer wrapper", {
++        cause: withCause(
++          new APICallError({
++            message: "bad request",
++            url: "https://example.com/v1/chat/completions",
++            requestBodyValues: {},
++            statusCode: 400,
++            responseHeaders: { "content-type": "application/json" },
++            responseBody: '{"error":"bad request"}',
++            isRetryable: false,
++          }),
++          Object.assign(new Error("socket timed out"), { code: "ETIMEDOUT" }),
++        ),
++      }),
++      { providerID },
++    )
++
++    expect(SessionV1.APIError.isInstance(result)).toBe(true)
++    if (!SessionV1.APIError.isInstance(result)) throw new Error("expected APIError")
++    expect(result.data.isRetryable).toBe(false)
++    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
++  })
++
++  // #192：Error.cause 携带 structured stream error 时应解析为可重试 APIError
++  // #192：stream error 结构为 { type:"error", error:{ code, message } }——ProviderError.parseStreamError 解析
++  // #192：server_error 是可重试的 provider 侧故障——与 transport 故障区分
++  // #192：openai provider 的 stream error 格式与其他 provider 可能不同
++  test("converts structured stream errors carried by Error.cause to retryable APIError", () => {
++    const result = MessageV2.fromError(
++      new Error("stream failed", {
++        cause: {
++          type: "error",
++          error: {
++            code: "server_error",
++            message: "The provider stream failed after it started.",
++          },
++        },
++      }),
++      { providerID: ProviderV2.ID.make("openai") },
++    )
++
++    expect(SessionV1.APIError.isInstance(result)).toBe(true)
++    if (!SessionV1.APIError.isInstance(result)) throw new Error("expected APIError")
++    expect(result.data.isRetryable).toBe(true)
++    expect(SessionRetry.retryable(result, retryProvider)).toEqual({
++      message: "The provider stream failed after it started.",
++    })
++  })
++
++  // #192：structured stream error 优先于 transport——防 context_overflow 被 fetch wrapper 遮蔽
++  // #192：responseBody 必须保留到 ContextOverflowError，供诊断和日志使用
++  // #192：TypeError("fetch failed") 的 cause 可能携带 provider 结构化错误——先查 streamError
++  // #192：context_length_exceeded 映射为 ContextOverflowError——不可重试，与 transport 故障区分
++  // #192：parseStreamError 将 context_length_exceeded 映射为统一消息——"Input exceeds context window of this model"
++  // #192：responseBody 从 ParsedStreamError 透传——fromStreamError 必须保留完整诊断体
++  test("prioritizes structured stream errors over generic fetch wrappers", () => {
++    const result = MessageV2.fromError(
++      new TypeError("fetch failed", {
++        cause: {
++          type: "error",
++          error: {
++            code: "context_length_exceeded",
++            message: "Input exceeds the context window.",
++          },
++        },
++      }),
++      { providerID: ProviderV2.ID.make("openai") },
++    )
++
++    expect(SessionV1.ContextOverflowError.isInstance(result)).toBe(true)
++    if (!SessionV1.ContextOverflowError.isInstance(result)) throw new Error("expected ContextOverflowError")
++    expect(result.data.message).toBe("Input exceeds context window of this model")
++    // #192：responseBody 从 ParsedStreamError 透传到 ContextOverflowError
++    expect(result.data.responseBody).toBeDefined()
++    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
++  })
++
+ })
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+index db170d2b62..61be0c4b6f 100644
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -681,6 +681,8 @@ export function Prompt(props: PromptProps) {
      set(prompt) {
        input.setText(prompt.input)
        setStore("prompt", prompt)
-+      if (prompt.mode) {
-+        // [ref 恢复模式] PromptInfo 已携带 mode；同步到 store.mode，保证 shell 草稿走 /shell。
-+        setStore("mode", prompt.mode)
-+      }
++      // #192：恢复 draft 时同步 mode
++      if (prompt.mode) { setStore("mode", prompt.mode) }
        restoreExtmarksFromParts(prompt.parts)
        input.gotoBufferEnd()
      },
-@@ -1247,17 +1251,50 @@ export function Prompt(props: PromptProps) {
-             },
+@@ -1142,17 +1144,43 @@ export function Prompt(props: PromptProps) {
            ]
          : []
+ 
++    // #192：draft 保留——提交失败时恢复输入
++    // #192：新会话跳转可取消——后台失败时不跳转
 +    let newSessionNavigation: ReturnType<typeof setTimeout> | undefined
 +    let cancelNewSessionNavigation = false
- 
--    if (store.mode === "shell") {
++
++    function showSubmitFailureToast() {
++      toast.show({ message: "Sending prompt failed. Your draft was kept.", variant: "error" })
++    }
++    // #192：prompt 提交失败时保留 draft 并恢复 move 状态
++    function keepDraftAfterSubmitFailure() {
++      showSubmitFailureToast()
++      if (finishMoveProgress) move.finishSubmit()
++      return false
++    }
++    // #192：shell/command 后台失败时恢复 draft
++    function restoreDraftAfterBackgroundFailure(prompt: typeof store.prompt, mode: typeof currentMode) {
++      showSubmitFailureToast()
++      cancelNewSessionNavigation = true
++      if (newSessionNavigation) clearTimeout(newSessionNavigation)
++      if (store.prompt.input || store.prompt.parts.length > 0) return
++      setStore("prompt", prompt)
++      setStore("mode", mode)
++    }
++
+     if (store.mode === "shell") {
+       move.startSubmit()
 -      void sdk.client.session.shell({
 -        sessionID,
 -        agent: agent.name,
@@ -350,51 +893,22 @@ index bf8bff053b5951c932af6b441ea7a8256ee5bf33..a316ea1c5dfd1e78b4989a8bfcbc17fa
 -          modelID: selectedModel.modelID,
 -        },
 -        command: inputText,
-+    function showSubmitFailureToast() {
-+      toast.show({
-+        message: "Sending prompt failed. Your draft was kept.",
-+        variant: "error",
-       })
-+    }
-+
-+    function keepDraftAfterSubmitFailure() {
-+      // [同步失败边界] normal prompt 等待 prompt_async 接受；失败说明 daemon 没接到 POST，草稿必须保留。
-+      showSubmitFailureToast()
-+      return false
-+    }
-+
-+    function restoreDraftAfterBackgroundFailure(prompt: typeof store.prompt, mode: typeof currentMode) {
-+      showSubmitFailureToast()
-+      // [提交失败恢复] shell/slash 没有 async acceptance 路由，只能保持原先的
-+      // fire-and-forget 体验；如果后台请求很快失败，需要恢复草稿并取消新会话跳转。
-+      // 迟到错误不能覆盖用户已输入的新内容，所以只在当前草稿仍为空时恢复。
-+      cancelNewSessionNavigation = true
-+      if (newSessionNavigation) clearTimeout(newSessionNavigation)
-+      if (store.prompt.input || store.prompt.parts.length > 0) return
-+      setStore("prompt", prompt)
-+      setStore("mode", mode)
-+    }
-+
-+    if (store.mode === "shell") {
+-      })
++      // #192：快照 draft——后台调用无法 await
 +      const submitted = { input: store.prompt.input, parts: store.prompt.parts }
 +      void sdk.client.session
 +        .shell({
 +          sessionID,
 +          agent: agent.name,
-+          model: {
-+            providerID: selectedModel.providerID,
-+            modelID: selectedModel.modelID,
-+          },
++          model: { providerID: selectedModel.providerID, modelID: selectedModel.modelID },
 +          command: inputText,
 +        })
-+        .then((response) => {
-+          if (response.error) restoreDraftAfterBackgroundFailure(submitted, currentMode)
-+        })
++        .then((response) => { if (response.error) restoreDraftAfterBackgroundFailure(submitted, currentMode) })
 +        .catch(() => restoreDraftAfterBackgroundFailure(submitted, currentMode))
        setStore("mode", "normal")
      } else if (
        inputText.startsWith("/") &&
-@@ -1274,24 +1311,32 @@ export function Prompt(props: PromptProps) {
+@@ -1166,43 +1194,39 @@ export function Prompt(props: PromptProps) {
        const restOfInput = firstLineEnd === -1 ? "" : inputText.slice(firstLineEnd + 1)
        const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
  
@@ -404,15 +918,10 @@ index bf8bff053b5951c932af6b441ea7a8256ee5bf33..a316ea1c5dfd1e78b4989a8bfcbc17fa
 -        arguments: args,
 -        agent: agent.name,
 -        model: `${selectedModel.providerID}/${selectedModel.modelID}`,
--        messageID,
 -        variant,
--        parts: nonTextParts
--          .filter((x) => x.type === "file")
--          .map((x) => ({
--            id: PartID.ascending(),
--            ...x,
--          })),
+-        parts: nonTextParts.filter((x) => x.type === "file"),
 -      })
++      // #192：快照 draft
 +      const submitted = { input: store.prompt.input, parts: store.prompt.parts }
 +      void sdk.client.session
 +        .command({
@@ -421,64 +930,84 @@ index bf8bff053b5951c932af6b441ea7a8256ee5bf33..a316ea1c5dfd1e78b4989a8bfcbc17fa
 +          arguments: args,
 +          agent: agent.name,
 +          model: `${selectedModel.providerID}/${selectedModel.modelID}`,
-+          messageID,
 +          variant,
-+          parts: nonTextParts
-+            .filter((x) => x.type === "file")
-+            .map((x) => ({
-+              id: PartID.ascending(),
-+              ...x,
-+            })),
++          parts: nonTextParts.filter((x) => x.type === "file"),
 +        })
-+        .then((response) => {
-+          if (response.error) restoreDraftAfterBackgroundFailure(submitted, currentMode)
-+        })
++        .then((response) => { if (response.error) restoreDraftAfterBackgroundFailure(submitted, currentMode) })
 +        .catch(() => restoreDraftAfterBackgroundFailure(submitted, currentMode))
      } else {
+       move.startSubmit()
 -      sdk.client.session
--        .prompt({
-+      // [normal 提交边界] prompt_async 在 daemon 接受消息后返回；只在这个边界之后清草稿，
-+      // 避免网络丢包时用户输入消失但 runner 从未收到。
+-        .prompt(
+-          {
+-            sessionID,
+-            ...selectedModel,
+-            agent: agent.name,
+-            model: selectedModel,
+-            variant,
+-            parts: [
+-              ...editorParts,
+-              {
+-                type: "text",
+-                text: inputText,
+-              },
+-              ...nonTextParts,
+-            ],
+-          },
+-          { throwOnError: true },
+-        )
+-        .catch((error) => {
+-          toast.show({
+-            title: "Failed to send prompt",
+-            message: errorMessage(error),
+-            variant: "error",
+-          })
++      // #192：promptAsync 替代 prompt+throwOnError——daemon 确认接收后才清 draft
 +      const response = await sdk.client.session
 +        .promptAsync({
-           sessionID,
-           ...selectedModel,
-           messageID,
-@@ -1308,7 +1353,8 @@ export function Prompt(props: PromptProps) {
-             ...nonTextParts.map(assign),
-           ],
++          sessionID,
++          ...selectedModel,
++          agent: agent.name,
++          model: selectedModel,
++          variant,
++          parts: [
++            ...editorParts,
++            { type: "text", text: inputText },
++            ...nonTextParts,
++          ],
          })
--        .catch(() => {})
 +        .catch((error) => ({ error }))
++      // #192：提交失败时保留 draft
 +      if (response.error) return keepDraftAfterSubmitFailure()
        if (editorParts.length > 0) editor.markSelectionSent()
      }
      history.append({
-@@ -1323,10 +1369,12 @@ export function Prompt(props: PromptProps) {
-     setStore("extmarkToPartIndex", new Map())
-     props.onSubmit?.()
- 
--    // temporary hack to make sure the message is sent
-+    // [新会话跳转边界] 新建会话要延迟跳转以保留既有交互；如果 shell/slash
-+    // 后台 POST 快速失败并恢复草稿，这个跳转会被取消，避免进入空会话。
+@@ -1220,11 +1244,10 @@ export function Prompt(props: PromptProps) {
+     // temporary hack to make sure the message is sent
      if (!props.sessionID) {
        if (editorParts.length > 0) editor.preserveSelectionFromNewSession()
 -      setTimeout(() => {
+-        route.navigate({
+-          type: "session",
+-          sessionID,
+-        })
++      // #192：新会话跳转可取消
 +      newSessionNavigation = setTimeout(() => {
 +        if (cancelNewSessionNavigation) return
-         route.navigate({
-           type: "session",
-           sessionID,
-diff --git a/packages/opencode/src/cli/cmd/tui/context/sync.tsx b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-index 21e4cd98e6eaf9f01336cdc851cdb4e6b1ad510b..c26bb236b0013b67320e3d6a6b0e3fda7a066421 100644
---- a/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/context/sync.tsx
-@@ -118,6 +118,16 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-     // [local-smark] daemon multi-instance workspace tracking
-     let syncedWorkspace = project.workspace.current()
++        route.navigate({ type: "session", sessionID })
+       }, 50)
+     }
+     input.clear()
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+index c0dfc67dc1..865fdaf98b 100644
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -147,6 +147,16 @@ export const {
+     const fullSyncedSessions = new Set<string>()
+     // #132：区分首次 connected 与重连
      let connectedOnce = false
-+    // [重连快照版本] 这些计数只描述 TUI 本地 store，不是 daemon 版本号；
-+    // 用来让重连快照清理 stale blocker，同时保留 list 发出后到达的 SSE 变更。
++    // #192：重连后 permission/question 快照版本
++    // #192：permission/question 版本计数
 +    let permissionVersion = 0
 +    let questionVersion = 0
 +    let permissionRefreshes = 0
@@ -487,175 +1016,88 @@ index 21e4cd98e6eaf9f01336cdc851cdb4e6b1ad510b..c26bb236b0013b67320e3d6a6b0e3fda
 +    let questionRefreshVersion = 0
 +    const permissionChanges = new Map<string, { sessionID: string; requestID: string; version: number }>()
 +    const questionChanges = new Map<string, { sessionID: string; requestID: string; version: number }>()
+     // #186：同一 part/field 的相邻 delta 在 16ms 窗内合并，压低 Solid store 抖动
+     // #186：队列与 timer 均局部于 SyncProvider，不泄漏到 SDK 订阅层
      let pendingPartDeltas: EventMessagePartDelta[] = []
-     let pendingPartDeltaTimer: Timer | undefined
- 
-@@ -215,6 +225,140 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
+@@ -270,6 +280,53 @@ export const {
      }
  
-+    function pendingRequestsBySession<T extends { id: string; sessionID: string }>(requests: T[]) {
-+      // [快照建表] reconnect 会用 daemon list 整体替换 pending map；这里先排序，
-+      // 保持后续 permission/question asked/replied 增量更新依赖的二分查找不变量。
-+      return requests.toSorted((a, b) => a.id.localeCompare(b.id)).reduce<Record<string, T[]>>((result, request) => {
-+        ;(result[request.sessionID] ??= []).push(request)
-+        return result
-+      }, {})
-+    }
-+
-+    function pendingRequestChangeKey(sessionID: string, requestID: string) {
-+      // [本地变更键] 只在内存里区分 session/request；不改变 SDK shape、持久化值或用户可见 id。
-+      return `${sessionID}\0${requestID}`
-+    }
-+
-+    function pendingRequestsWithLiveChanges<T extends { id: string; sessionID: string }>(
-+      snapshot: Record<string, T[]>,
-+      current: Record<string, T[]>,
-+      changes: Map<string, { sessionID: string; requestID: string; version: number }>,
-+      since: number,
-+    ) {
-+      // [快照叠加规则] 整体替换负责丢弃断线期间已解决的 blocker；list 期间新到的
-+      // asked/replied 只按 request id 从当前 store 回放，避免旧快照抹掉或复活新状态。
-+      const result = Object.fromEntries(
-+        Object.entries(snapshot).map(([sessionID, requests]) => [sessionID, [...requests]]),
-+      ) as Record<string, T[]>
+     // #153：集中刷新 session_status，供 force-sync / stale-busy 复用
++    // #192：pending request 按 session 分组
++    function pendingRequestsBySession<T extends { id: string; sessionID: string }>(requests: T[]) { return requests.toSorted((a, b) => a.id.localeCompare(b.id)).reduce<Record<string, T[]>>((result, request) => { ;(result[request.sessionID] ??= []).push(request); return result }, {}) }
++    function pendingRequestChangeKey(sessionID: string, requestID: string) { return `${sessionID}\0${requestID}` }
++    // #192：merge live changes 防 stale 覆盖
++    function pendingRequestsWithLiveChanges<T extends { id: string; sessionID: string }>(snapshot: Record<string, T[]>, current: Record<string, T[]>, changes: Map<string, { sessionID: string; requestID: string; version: number }>, since: number) {
++      const result = Object.fromEntries(Object.entries(snapshot).map(([sessionID, requests]) => [sessionID, [...requests]])) as Record<string, T[]>
 +      for (const change of changes.values()) {
 +        if (change.version <= since) continue
 +        const currentRequests = current[change.sessionID]
-+        if (!currentRequests) {
-+          removePendingRequest(result, change.sessionID, change.requestID)
-+          continue
-+        }
-+        const currentMatch = Binary.search(currentRequests, change.requestID, (request) => request.id)
-+        if (!currentMatch.found) {
-+          removePendingRequest(result, change.sessionID, change.requestID)
-+          continue
-+        }
++        if (!currentRequests) { removePendingRequest(result, change.sessionID, change.requestID); continue }
++        const currentMatch = search(currentRequests, change.requestID, (request) => request.id)
++        if (!currentMatch.found) { removePendingRequest(result, change.sessionID, change.requestID); continue }
 +        const requests = result[change.sessionID] ?? []
-+        const match = Binary.search(requests, change.requestID, (request) => request.id)
-+        if (match.found) {
-+          requests[match.index] = currentRequests[currentMatch.index]
-+        } else {
-+          requests.splice(match.index, 0, currentRequests[currentMatch.index])
-+        }
++        const match = search(requests, change.requestID, (request) => request.id)
++        if (match.found) { requests[match.index] = currentRequests[currentMatch.index] } else { requests.splice(match.index, 0, currentRequests[currentMatch.index]) }
 +        result[change.sessionID] = requests
 +      }
 +      return result
 +    }
-+
 +    function removePendingRequest<T extends { id: string }>(requestsBySession: Record<string, T[]>, sessionID: string, id: string) {
 +      const requests = requestsBySession[sessionID]
 +      if (!requests) return
-+      const match = Binary.search(requests, id, (request) => request.id)
++      const match = search(requests, id, (request) => request.id)
 +      if (!match.found) return
 +      const next = requests.toSpliced(match.index, 1)
-+      if (next.length === 0) {
-+        delete requestsBySession[sessionID]
-+        return
-+      }
++      if (next.length === 0) { delete requestsBySession[sessionID]; return }
 +      requestsBySession[sessionID] = next
 +    }
-+
-+    function markPermissionRequestChange(sessionID: string, requestID: string) {
-+      permissionVersion += 1
-+      if (permissionRefreshes === 0) return
-+      permissionChanges.set(pendingRequestChangeKey(sessionID, requestID), {
-+        sessionID,
-+        requestID,
-+        version: permissionVersion,
-+      })
-+    }
-+
-+    function markQuestionRequestChange(sessionID: string, requestID: string) {
-+      questionVersion += 1
-+      if (questionRefreshes === 0) return
-+      questionChanges.set(pendingRequestChangeKey(sessionID, requestID), {
-+        sessionID,
-+        requestID,
-+        version: questionVersion,
-+      })
-+    }
-+
++    // #192：标记 permission 变更
++    // #192：标记 permission 变更版本
++    function markPermissionRequestChange(sessionID: string, requestID: string) { permissionVersion += 1; if (permissionRefreshes === 0) return; permissionChanges.set(pendingRequestChangeKey(sessionID, requestID), { sessionID, requestID, version: permissionVersion }) }
++    // #192：标记 question 变更
++    // #192：标记 question 变更版本
++    function markQuestionRequestChange(sessionID: string, requestID: string) { questionVersion += 1; if (questionRefreshes === 0) return; questionChanges.set(pendingRequestChangeKey(sessionID, requestID), { sessionID, requestID, version: questionVersion }) }
++    // #192：重连后恢复 permission
++    // #192：重连后恢复 permission——merge live changes
 +    async function refreshPermissionRequests(workspace: string | undefined) {
-+      const version = permissionVersion
-+      const refreshVersion = permissionRefreshVersion + 1
-+      permissionRefreshVersion = refreshVersion
-+      permissionRefreshes += 1
-+      try {
-+        const response = await sdk.client.permission.list({ workspace })
-+        // [竞态保护] 多次 reconnect 的 list 可能乱序返回；只有最新快照能覆盖 store。
-+        if (refreshVersion !== permissionRefreshVersion) return
-+        setStore(
-+          "permission",
-+          reconcile(
-+            pendingRequestsWithLiveChanges(
-+              pendingRequestsBySession(response.data ?? []),
-+              store.permission,
-+              permissionChanges,
-+              version,
-+            ),
-+          ),
-+        )
-+      } finally {
-+        permissionRefreshes -= 1
-+        if (permissionRefreshes === 0) permissionChanges.clear()
-+      }
++      const version = permissionVersion; const refreshVersion = permissionRefreshVersion + 1; permissionRefreshVersion = refreshVersion; permissionRefreshes += 1
++      try { const response = await sdk.client.permission.list({ workspace }); if (refreshVersion !== permissionRefreshVersion) return; setStore("permission", reconcile(pendingRequestsWithLiveChanges(pendingRequestsBySession(response.data ?? []), store.permission, permissionChanges, version))) }
++      finally { permissionRefreshes -= 1; if (permissionRefreshes === 0) permissionChanges.clear() }
 +    }
-+
 +    async function refreshQuestionRequests(workspace: string | undefined) {
-+      const version = questionVersion
-+      const refreshVersion = questionRefreshVersion + 1
-+      questionRefreshVersion = refreshVersion
-+      questionRefreshes += 1
-+      try {
-+        const response = await sdk.client.question.list({ workspace })
-+        // [问题快照规则] 与 permission 一致：最新 reconnect 快照负责整体替换，实时 SSE 另行叠加。
-+        if (refreshVersion !== questionRefreshVersion) return
-+        setStore(
-+          "question",
-+          reconcile(
-+            pendingRequestsWithLiveChanges(
-+              pendingRequestsBySession(response.data ?? []),
-+              store.question,
-+              questionChanges,
-+              version,
-+            ),
-+          ),
-+        )
-+      } finally {
-+        questionRefreshes -= 1
-+        if (questionRefreshes === 0) questionChanges.clear()
-+      }
++      const version = questionVersion; const refreshVersion = questionRefreshVersion + 1; questionRefreshVersion = refreshVersion; questionRefreshes += 1
++      try { const response = await sdk.client.question.list({ workspace }); if (refreshVersion !== questionRefreshVersion) return; setStore("question", reconcile(pendingRequestsWithLiveChanges(pendingRequestsBySession(response.data ?? []), store.question, questionChanges, version))) }
++      finally { questionRefreshes -= 1; if (questionRefreshes === 0) questionChanges.clear() }
 +    }
 +
-     // [local-smark] refreshStatus for daemon session status tracking
      async function refreshStatus() {
-       const x = await sdk.client.session.status({ workspace: project.workspace.current() })
-@@ -238,6 +382,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
-           void bootstrap()
+       const workspace = project.workspace.current()
+       const x = await sdk.client.session.status({ workspace })
+@@ -294,6 +351,7 @@ export const {
+           void bootstrap({ fatal: false }).catch(() => undefined)
            break
          case "permission.replied": {
-+          markPermissionRequestChange(event.properties.sessionID, event.properties.requestID)
++          markPermissionRequestChange((event.properties as { sessionID: string; requestID: string }).sessionID, (event.properties as { sessionID: string; requestID: string }).requestID)
            const requests = store.permission[event.properties.sessionID]
            if (!requests) break
-           const match = Binary.search(requests, event.properties.requestID, (r) => r.id)
-@@ -254,6 +399,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+           const match = search(requests, event.properties.requestID, (r) => r.id)
+@@ -310,6 +368,7 @@ export const {
  
          case "permission.asked": {
            const request = event.properties
 +          markPermissionRequestChange(request.sessionID, request.id)
-           const requests = store.permission[request.sessionID]
-           if (!requests) {
-             setStore("permission", request.sessionID, [request])
-@@ -276,6 +422,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+           if (permission.mode === "auto") {
+             void sdk.client.permission.reply({
+               requestID: request.id,
+@@ -341,6 +400,7 @@ export const {
  
          case "question.replied":
          case "question.rejected": {
-+          markQuestionRequestChange(event.properties.sessionID, event.properties.requestID)
++          markQuestionRequestChange((event.properties as { sessionID: string; requestID: string }).sessionID, (event.properties as { sessionID: string; requestID: string }).requestID)
            const requests = store.question[event.properties.sessionID]
            if (!requests) break
-           const match = Binary.search(requests, event.properties.requestID, (r) => r.id)
-@@ -292,6 +439,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+           const match = search(requests, event.properties.requestID, (r) => r.id)
+@@ -357,6 +417,7 @@ export const {
  
          case "question.asked": {
            const request = event.properties
@@ -663,195 +1105,55 @@ index 21e4cd98e6eaf9f01336cdc851cdb4e6b1ad510b..c26bb236b0013b67320e3d6a6b0e3fda
            const requests = store.question[request.sessionID]
            if (!requests) {
              setStore("question", request.sessionID, [request])
-@@ -581,6 +729,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
+@@ -674,6 +735,9 @@ export const {
+             sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
+             // #153：bootstrap 走 refreshStatus，与 force-sync 同一入口
              refreshStatus(),
-             sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
-             sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
-+            // [pending 恢复入口] permission/question 只在 daemon 内存里，SSE 又不能 replay；
-+            // reconnect bootstrap 必须主动拉快照，才能恢复断线期间仍 pending 的 blocker。
++            // #192：重连后恢复 pending
 +            refreshPermissionRequests(workspace),
 +            refreshQuestionRequests(workspace),
+             sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
+             sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
              project.workspace.sync(),
-           ]).then(() => {
-             setStore("status", "complete")
-diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
-index 2c9693c525b56dc45a4920cd699c2dda468c20ca..bad1f650969d38cf473454e84e47663064c4291a 100644
---- a/packages/opencode/src/session/llm.ts
-+++ b/packages/opencode/src/session/llm.ts
-@@ -419,7 +419,13 @@ const live: Layer.Layer<
- 
-             const result = yield* run({ ...input, abort: ctrl.signal })
- 
--            return Stream.fromAsyncIterable(result.fullStream, (e) => (e instanceof Error ? e : new Error(String(e))))
-+            return Stream.fromAsyncIterable(result.fullStream, (e) =>
-+              e instanceof Error
-+                ? e
-+                : // [stream 错误保真] 部分 provider 会用结构化对象 reject stream；
-+                  // 保留到 Error.cause，让 MessageV2 能按 provider 语义分类。
-+                  new Error(String(e), { cause: e }),
-+            )
-           }),
-         ),
-       )
-diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
-index 54d15fcc9707a3e901976c075b788aefed9187fc..23f5dc8ee0fffa98531ae110f921ee5fd1d43b03 100644
---- a/packages/opencode/src/session/message-v2.ts
-+++ b/packages/opencode/src/session/message-v2.ts
-@@ -1208,8 +1208,16 @@ export function fromError(
-     const retried = retryErrorCause(e)
-     if (retried) return fromError(retried, ctx)
- 
-+    const apiCall = APICallError.isInstance(e) ? undefined : apiCallErrorCause(e)
-+    if (apiCall) return fromError(apiCall, ctx)
-+
-+    const stream = APICallError.isInstance(e) ? undefined : streamError(e)
-+    if (stream) return fromStreamError(e, stream)
-+
-     const transport = APICallError.isInstance(e) ? undefined : transportError(e)
-     if (transport) {
-+      // [错误分类顺序] structured stream error 可能包在 "fetch failed" 里；必须先解析
-+      // provider 语义，再落到通用 transport retry，避免 context overflow 被误重试。
-       return new APIError(
-         {
-           message: transport.message,
-@@ -1282,6 +1290,20 @@ export function fromError(
-         ).toObject()
-       }
- 
-+      const transport = !parsed.isRetryable && parsed.statusCode === undefined ? transportError(e.cause) : undefined
-+      if (transport) {
-+        // [APICallError 例外] AI SDK 可能把 socket/TLS 包成 statusless 非重试 APIError；
-+        // 只有这种无 status 的模糊形态可回看 cause，显式 4xx 仍以 provider 判定为准。
-+        return new APIError(
-+          {
-+            message: transport.message,
-+            isRetryable: true,
-+            metadata: transport.metadata,
-+          },
-+          { cause: e },
-+        ).toObject()
-+      }
-+
-       return new APIError(
-         {
-           message: parsed.message,
-@@ -1298,32 +1320,44 @@ export function fromError(
-     default:
-       try {
-         const parsed = ProviderError.parseStreamError(e)
--        if (parsed) {
--          if (parsed.type === "context_overflow") {
--            return new ContextOverflowError(
--              {
--                message: parsed.message,
--                responseBody: parsed.responseBody,
--              },
--              { cause: e },
--            ).toObject()
--          }
--          return new APIError(
--            {
--              message: parsed.message,
--              isRetryable: parsed.isRetryable,
--              responseBody: parsed.responseBody,
--            },
--            {
--              cause: e,
--            },
--          ).toObject()
--        }
-+        if (parsed) return fromStreamError(e, parsed)
-       } catch {}
-       return new NamedError.Unknown({ message: JSON.stringify(e) }, { cause: e }).toObject()
-   }
- }
- 
-+function streamError(value: unknown) {
-+  const parsed = ProviderError.parseStreamError(value)
-+  if (parsed) return parsed
-+  const error = errorLike(value)
-+  // [stream cause 回看] Effect async-iterable 边界会把 provider chunk 包成 Error；
-+  // 原始结构化对象才是 retry/context 信号，所以要先检查 cause。
-+  if (error?.cause === undefined || error.cause === value) return undefined
-+  return ProviderError.parseStreamError(error.cause)
-+}
-+
-+function fromStreamError(value: unknown, parsed: NonNullable<ReturnType<typeof ProviderError.parseStreamError>>) {
-+  if (parsed.type === "context_overflow") {
-+    return new ContextOverflowError(
-+      {
-+        message: parsed.message,
-+        responseBody: parsed.responseBody,
-+      },
-+      { cause: value },
-+    ).toObject()
-+  }
-+  return new APIError(
-+    {
-+      message: parsed.message,
-+      isRetryable: parsed.isRetryable,
-+      responseBody: parsed.responseBody,
-+    },
-+    {
-+      cause: value,
-+    },
-+  ).toObject()
-+}
-+
- type ErrorLike = {
-   name?: unknown
-   message?: unknown
-@@ -1354,6 +1388,15 @@ function retryErrorCause(value: unknown) {
-   return last === value ? undefined : last
- }
- 
-+function apiCallErrorCause(value: unknown, depth = 0) {
-+  const error = errorLike(value)
-+  if (!error || depth >= 2 || error.cause === undefined || error.cause === value) return undefined
-+  // [外层包装解开] SDK/framework 外层错误可能包住 APICallError；先解析 provider 错误，
-+  // 让显式 4xx/non-retryable 响应优先于更深层的 transport cause。
-+  if (APICallError.isInstance(error.cause)) return error.cause
-+  return apiCallErrorCause(error.cause, depth + 1)
-+}
-+
- function transportError(value: unknown, depth = 0): { message: string; metadata: Record<string, string> } | undefined {
-   const error = errorLike(value)
-   if (!error) return undefined
-diff --git a/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx b/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx
+diff --git a/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx b/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..2b03d8842dc36c10007a015d02ae2a90af948810
+index 0000000000..971e4b2d8e
 --- /dev/null
-+++ b/packages/opencode/test/cli/cmd/tui/prompt-submit-transport.test.tsx
-@@ -0,0 +1,425 @@
++++ b/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
+@@ -0,0 +1,454 @@
 +/** @jsxImportSource @opentui/solid */
++// #192：prompt 提交传输层行为测试——失败保留 draft / 成功清除 / shell 后台 / slash / 新会话
 +import { expect, test } from "bun:test"
-+import { Global } from "@opencode-ai/core/global"
 +import { testRender, useRenderer } from "@opentui/solid"
 +import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 +import { onCleanup } from "solid-js"
 +import type { Agent, Model, Provider } from "@opencode-ai/sdk/v2"
 +import { tmpdir } from "../../../fixture/fixture"
 +import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
-+import { Prompt, type PromptRef } from "../../../../src/cli/cmd/tui/component/prompt"
-+import { FrecencyProvider } from "../../../../src/cli/cmd/tui/component/prompt/frecency"
-+import { PromptHistoryProvider } from "../../../../src/cli/cmd/tui/component/prompt/history"
-+import { PromptStashProvider } from "../../../../src/cli/cmd/tui/component/prompt/stash"
-+import { ArgsProvider } from "../../../../src/cli/cmd/tui/context/args"
-+import { CommandPaletteProvider } from "../../../../src/cli/cmd/tui/context/command-palette"
-+import { EditorContextProvider } from "../../../../src/cli/cmd/tui/context/editor"
-+import { ExitProvider } from "../../../../src/cli/cmd/tui/context/exit"
-+import { KVProvider } from "../../../../src/cli/cmd/tui/context/kv"
-+import { LocalProvider, useLocal } from "../../../../src/cli/cmd/tui/context/local"
-+import { ProjectProvider } from "../../../../src/cli/cmd/tui/context/project"
-+import { PromptRefProvider } from "../../../../src/cli/cmd/tui/context/prompt"
-+import { RouteProvider, useRoute, type Route } from "../../../../src/cli/cmd/tui/context/route"
-+import { SDKProvider } from "../../../../src/cli/cmd/tui/context/sdk"
-+import { SyncProvider, useSync } from "../../../../src/cli/cmd/tui/context/sync"
-+import { ThemeProvider } from "../../../../src/cli/cmd/tui/context/theme"
-+import { TuiConfigProvider } from "../../../../src/cli/cmd/tui/context/tui-config"
-+import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/cli/cmd/tui/keymap"
-+import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
-+import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
++import { TestTuiContexts } from "../../../fixture/tui-environment"
++import { Prompt, type PromptRef } from "../../../../src/component/prompt"
++import { FrecencyProvider } from "../../../../src/component/prompt/frecency"
++import { PromptHistoryProvider } from "../../../../src/component/prompt/history"
++import { PromptStashProvider } from "../../../../src/component/prompt/stash"
++import { ArgsProvider } from "../../../../src/context/args"
++// #192：DataProvider——Autocomplete 组件通过 useData 获取数据
++import { DataProvider } from "../../../../src/context/data"
++import { ExitProvider } from "../../../../src/context/exit"
++import { KVProvider } from "../../../../src/context/kv"
++import { LocalProvider, useLocal } from "../../../../src/context/local"
++import { LocationProvider } from "../../../../src/context/location"
++import { PermissionProvider } from "../../../../src/context/permission"
++import { ProjectProvider } from "../../../../src/context/project"
++import { PromptRefProvider } from "../../../../src/context/prompt"
++import { RouteProvider, useRoute, type Route } from "../../../../src/context/route"
++import { SDKProvider } from "../../../../src/context/sdk"
++import { SyncProvider, useSync } from "../../../../src/context/sync"
++import { ThemeProvider } from "../../../../src/context/theme"
++import { TuiConfigProvider } from "../../../../src/config"
++import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/keymap"
++import { EditorContextProvider } from "../../../../src/context/editor"
++import { DialogProvider } from "../../../../src/ui/dialog"
++import { ToastProvider } from "../../../../src/ui/toast"
 +import { createEventSource, createFetch, directory, json, wait } from "./sync-fixture"
 +
 +const sessionID = "ses_prompt_transport"
@@ -894,14 +1196,15 @@ index 0000000000000000000000000000000000000000..2b03d8842dc36c10007a015d02ae2a90
 +  options: {},
 +} satisfies Agent
 +
++// #192：prompt 提交失败时 draft 必须保留——用户不会丢失输入
 +test("failed TUI prompt submission keeps the draft text", async () => {
-+  const previous = Global.Path.state
 +  await using tmp = await tmpdir()
-+  Global.Path.state = tmp.path
 +  await Bun.write(`${tmp.path}/kv.json`, "{}")
 +  let attempts = 0
-+  let shellPath = ""
 +
++  // #192：/config/providers 和 /provider 返回测试 model——LocalProvider 初始化需要
++  // #192：/agent 返回 general agent——Prompt 组件需要可用 agent 列表
++  // #192：/message 和 /prompt_async 都抛异常——覆盖两种提交路径
 +  await withPrompt(
 +    (url) => {
 +      if (url.pathname === "/config/providers") return json({ providers: [provider], default: { provider: model.id } })
@@ -917,23 +1220,24 @@ index 0000000000000000000000000000000000000000..2b03d8842dc36c10007a015d02ae2a90
 +      }
 +    },
 +    async (prompt) => {
++      // #192：set 设置 draft 文本和空 parts——模拟用户输入
 +      prompt.set({ input: "Keep this draft", parts: [] })
++      // #192：submit 触发 promptAsync——应失败并保留 draft
 +      prompt.submit()
 +
 +      await wait(() => attempts > 0)
 +      await Bun.sleep(20)
 +
++      // #192：失败后 draft 必须保留——用户输入不丢失
 +      expect(prompt.current.input).toBe("Keep this draft")
 +    },
-+  ).finally(() => {
-+    Global.Path.state = previous
-+  })
++    tmp.path,
++  )
 +})
 +
++// #192：shell 提交失败时 draft 必须保留——含空格/引号的复杂命令不丢失
 +test("failed TUI shell submission keeps the draft text", async () => {
-+  const previous = Global.Path.state
 +  await using tmp = await tmpdir()
-+  Global.Path.state = tmp.path
 +  await Bun.write(`${tmp.path}/kv.json`, "{}")
 +  let attempts = 0
 +  const draft = `printf '%s' "$HOME/path with spaces" | cat > "./quoted file.txt" && echo $(pwd) # rm -rf /tmp/nope`
@@ -949,23 +1253,23 @@ index 0000000000000000000000000000000000000000..2b03d8842dc36c10007a015d02ae2a90
 +      }
 +    },
 +    async (prompt) => {
++      // #192：mode: "shell" 切换到 shell 模式——走 /shell 端点
 +      prompt.set({ input: draft, mode: "shell", parts: [] })
 +      prompt.submit()
 +
 +      await wait(() => attempts > 0)
 +      await Bun.sleep(20)
 +
++      // #192：shell 失败后 draft 和 mode 都必须保留
 +      expect(prompt.current.input).toBe(draft)
 +    },
-+  ).finally(() => {
-+    Global.Path.state = previous
-+  })
++    tmp.path,
++  )
 +})
 +
++// #192：shell 提交成功后立即清除——不等后台完成，避免阻塞用户输入
 +test("accepted TUI shell submission clears without waiting for completion", async () => {
-+  const previous = Global.Path.state
 +  await using tmp = await tmpdir()
-+  Global.Path.state = tmp.path
 +  await Bun.write(`${tmp.path}/kv.json`, "{}")
 +  let attempts = 0
 +  const draft = `printf '%s' "$HOME/path with spaces" | cat > "./quoted file.txt" && echo $(pwd) # rm -rf /tmp/nope`
@@ -981,23 +1285,23 @@ index 0000000000000000000000000000000000000000..2b03d8842dc36c10007a015d02ae2a90
 +      }
 +    },
 +    async (prompt) => {
++      // #192：mode: "shell"——成功提交后应立即清除输入
 +      prompt.set({ input: draft, mode: "shell", parts: [] })
 +      prompt.submit()
 +
 +      await wait(() => attempts > 0)
 +      await Bun.sleep(20)
 +
++      // #192：成功后 input 为空——不等 shell 后台完成
 +      expect(prompt.current.input).toBe("")
 +    },
-+  ).finally(() => {
-+    Global.Path.state = previous
-+  })
++    tmp.path,
++  )
 +})
 +
++// #192：新会话 shell 提交失败时留在 home 且 draft 保留——导航可取消
 +test("failed new-session shell submission stays on home with the draft", async () => {
-+  const previous = Global.Path.state
 +  await using tmp = await tmpdir()
-+  Global.Path.state = tmp.path
 +  await Bun.write(`${tmp.path}/kv.json`, "{}")
 +  let attempts = 0
 +  let shellPath = ""
@@ -1005,11 +1309,14 @@ index 0000000000000000000000000000000000000000..2b03d8842dc36c10007a015d02ae2a90
 +  const draft = `printf '%s' "$HOME/path with spaces" | cat > "./quoted file.txt" && echo $(pwd) # rm -rf /tmp/nope`
 +
 +  await withPrompt(
-+    (url, request, init) => {
++    (url) => {
 +      if (url.pathname === "/config/providers") return json({ providers: [provider], default: { provider: model.id } })
 +      if (url.pathname === "/provider") return json({ all: [provider], default: { provider: model.id }, connected: [] })
 +      if (url.pathname === "/agent") return json([agent])
-+      if (url.pathname === "/session" && (request?.method ?? init?.method) === "POST") {
++      // #192：POST /session 创建新会话——FetchHandler 只接收 url，用 search 区分 GET/POST
++      // #192：GET /session?... 返回空列表——避免 sync 上下文 toSorted 报错
++      if (url.pathname === "/session" && url.search) return json([])
++      if (url.pathname === "/session") {
 +        return json({
 +          id: nextSessionID,
 +          slug: nextSessionID,
@@ -1027,26 +1334,29 @@ index 0000000000000000000000000000000000000000..2b03d8842dc36c10007a015d02ae2a90
 +      }
 +    },
 +    async (prompt, route) => {
++      // #192：promptSessionID 为 undefined——触发新会话创建
++      // #192：POST /session 返回新 sessionID——shell 发送到新端点
 +      prompt.set({ input: draft, mode: "shell", parts: [] })
 +      prompt.submit()
 +
 +      await wait(() => attempts > 0)
 +      await Bun.sleep(80)
 +
++      // #192：shell 发送到了新会话端点——不是当前 sessionID
 +      expect(shellPath).toBe(`/session/${nextSessionID}/shell`)
++      // #192：失败后留在 home——导航被取消
 +      expect(route.data.type).toBe("home")
++      // #192：draft 保留——新会话创建失败不丢输入
 +      expect(prompt.current.input).toBe(draft)
 +    },
++    tmp.path,
 +    { initialRoute: { type: "home" }, promptSessionID: undefined },
-+  ).finally(() => {
-+    Global.Path.state = previous
-+  })
++  )
 +})
 +
++// #192：slash 命令提交失败时 draft 必须保留
 +test("failed TUI slash-command submission keeps the draft text", async () => {
-+  const previous = Global.Path.state
 +  await using tmp = await tmpdir()
-+  Global.Path.state = tmp.path
 +  await Bun.write(`${tmp.path}/kv.json`, "{}")
 +  let attempts = 0
 +  const draft = `/review "path with spaces" '$HOME' | cat > out.txt $(pwd) rm -rf /tmp/nope`
@@ -1065,23 +1375,23 @@ index 0000000000000000000000000000000000000000..2b03d8842dc36c10007a015d02ae2a90
 +      }
 +    },
 +    async (prompt) => {
++      // #192：/review 开头的输入识别为 slash 命令
 +      prompt.set({ input: draft, parts: [] })
 +      prompt.submit()
 +
 +      await wait(() => attempts > 0)
 +      await Bun.sleep(20)
 +
++      // #192：slash 命令失败后 draft 保留
 +      expect(prompt.current.input).toBe(draft)
 +    },
-+  ).finally(() => {
-+    Global.Path.state = previous
-+  })
++    tmp.path,
++  )
 +})
 +
++// #192：slash 命令提交成功后立即清除——不等后台完成
 +test("accepted TUI slash-command submission clears without waiting for completion", async () => {
-+  const previous = Global.Path.state
 +  await using tmp = await tmpdir()
-+  Global.Path.state = tmp.path
 +  await Bun.write(`${tmp.path}/kv.json`, "{}")
 +  let attempts = 0
 +  const draft = `/review "path with spaces" '$HOME' | cat > out.txt $(pwd) rm -rf /tmp/nope`
@@ -1100,24 +1410,33 @@ index 0000000000000000000000000000000000000000..2b03d8842dc36c10007a015d02ae2a90
 +      }
 +    },
 +    async (prompt) => {
++      // #192：slash 命令成功——返回 pending Promise 模拟后台
 +      prompt.set({ input: draft, parts: [] })
 +      prompt.submit()
 +
 +      await wait(() => attempts > 0)
 +      await Bun.sleep(20)
 +
++      // #192：成功后 input 为空——不等命令后台完成
 +      expect(prompt.current.input).toBe("")
 +    },
-+  ).finally(() => {
-+    Global.Path.state = previous
-+  })
++    tmp.path,
++  )
 +})
 +
 +type FetchHandler = Parameters<typeof createFetch>[0]
 +
++// #192：withPrompt——挂载完整 TUI Provider 树并暴露 PromptRef
++// #192：override 控制 fetch 行为——模拟 transport 成功/失败
++// #192：run 回调接收 PromptRef 和 route——测试操作 prompt 并验证路由
++// #192：options 控制 initialRoute 和 promptSessionID——新会话测试需要
++// #192：mounted promise 确保 Prompt ref 就绪后再执行测试
++// #192：state 传入 tmp.path——TestTuiContexts 设置路径
++// #192：mounted promise 等待 Prompt ref 就绪——确保测试可以操作
 +async function withPrompt(
 +  override: FetchHandler,
 +  run: (prompt: PromptRef, route: ReturnType<typeof useRoute>) => Promise<void>,
++  state: string,
 +  options: { initialRoute?: Route; promptSessionID?: string } = {},
 +) {
 +  const calls = createFetch(override)
@@ -1134,6 +1453,7 @@ index 0000000000000000000000000000000000000000..2b03d8842dc36c10007a015d02ae2a90
 +  const app = await testRender(
 +    () => (
 +      <PromptHarness
++        state={state}
 +        fetch={calls.fetch}
 +        events={events.source}
 +        initialRoute={options.initialRoute ?? { type: "session", sessionID }}
@@ -1168,6 +1488,7 @@ index 0000000000000000000000000000000000000000..2b03d8842dc36c10007a015d02ae2a90
 +}
 +
 +function PromptHarness(props: {
++  state: string
 +  fetch: typeof globalThis.fetch
 +  events: ReturnType<typeof createEventSource>["source"]
 +  initialRoute: Route
@@ -1182,21 +1503,24 @@ index 0000000000000000000000000000000000000000..2b03d8842dc36c10007a015d02ae2a90
 +  onCleanup(registerOpencodeKeymap(keymap, renderer, config))
 +
 +  return (
-+    <OpencodeKeymapProvider keymap={keymap}>
-+      <ArgsProvider>
-+        <ExitProvider>
-+          <KVProvider>
-+            <ToastProvider>
-+              <RouteProvider initialRoute={props.initialRoute}>
-+                <TuiConfigProvider config={config}>
-+                  <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>
-+                    <ProjectProvider>
-+                      <SyncProvider>
-+                        <ThemeProvider mode="dark">
-+                          <LocalProvider>
-+                            <PromptStashProvider>
-+                              <DialogProvider>
-+                                <CommandPaletteProvider>
++    <TestTuiContexts paths={{ state: props.state }}>
++      <OpencodeKeymapProvider keymap={keymap}>
++        <ArgsProvider>
++          <ExitProvider exit={() => {}}>
++            <KVProvider>
++              <ToastProvider>
++                <RouteProvider initialRoute={props.initialRoute}>
++                  <TuiConfigProvider config={config}>
++                    <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>
++                      <ProjectProvider>
++                        <PermissionProvider>
++                          <LocationProvider>
++                            <DataProvider>
++                            <SyncProvider>
++                          <ThemeProvider mode="dark">
++                            <LocalProvider>
++                              <PromptStashProvider>
++                                <DialogProvider>
 +                                  <FrecencyProvider>
 +                                    <PromptHistoryProvider>
 +                                      <PromptRefProvider>
@@ -1211,21 +1535,24 @@ index 0000000000000000000000000000000000000000..2b03d8842dc36c10007a015d02ae2a90
 +                                      </PromptRefProvider>
 +                                    </PromptHistoryProvider>
 +                                  </FrecencyProvider>
-+                                </CommandPaletteProvider>
-+                              </DialogProvider>
-+                            </PromptStashProvider>
-+                          </LocalProvider>
-+                        </ThemeProvider>
-+                      </SyncProvider>
-+                    </ProjectProvider>
-+                  </SDKProvider>
-+                </TuiConfigProvider>
-+              </RouteProvider>
-+            </ToastProvider>
-+          </KVProvider>
-+        </ExitProvider>
-+      </ArgsProvider>
-+    </OpencodeKeymapProvider>
++                                </DialogProvider>
++                              </PromptStashProvider>
++                            </LocalProvider>
++                          </ThemeProvider>
++                        </SyncProvider>
++                            </DataProvider>
++                          </LocationProvider>
++                        </PermissionProvider>
++                      </ProjectProvider>
++                    </SDKProvider>
++                  </TuiConfigProvider>
++                </RouteProvider>
++              </ToastProvider>
++            </KVProvider>
++          </ExitProvider>
++        </ArgsProvider>
++      </OpencodeKeymapProvider>
++    </TestTuiContexts>
 +  )
 +}
 +
@@ -1248,50 +1575,13 @@ index 0000000000000000000000000000000000000000..2b03d8842dc36c10007a015d02ae2a90
 +    />
 +  )
 +}
-diff --git a/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx b/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
-index 8bfce8f74a608d0c9bb14012b47446649e19463a..02fd2e85c9c0163c257e11f5590cff0df7f8279a 100644
---- a/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/sync-fixture.tsx
-@@ -52,15 +52,16 @@ export function createEventSource() {
-   }
- }
- 
--type FetchHandler = (url: URL) => Response | Promise<Response> | undefined
-+type FetchHandler = (url: URL, request?: Request, init?: RequestInit) => Response | Promise<Response> | undefined
- 
- export function createFetch(override?: FetchHandler) {
-   const session = [] as URL[]
--  const fetch = (async (input: RequestInfo | URL) => {
--    const url = new URL(input instanceof Request ? input.url : String(input))
-+  const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-+    const request = input instanceof Request ? input : undefined
-+    const url = new URL(request?.url ?? String(input))
-     if (url.pathname === "/session") session.push(url)
- 
--    const overridden = await override?.(url)
-+    const overridden = await override?.(url, request, init)
-     if (overridden) return overridden
- 
-     switch (url.pathname) {
-@@ -87,6 +88,11 @@ export function createFetch(override?: FetchHandler) {
-         return json({ id: "proj_test" })
-       case "/provider":
-         return json({ all: [], default: {}, connected: [] })
-+      // Most sync tests do not care about in-memory blockers; default empty
-+      // lists let reconnect/bootstrap recovery run without every test stubbing them.
-+      case "/permission":
-+      case "/question":
-+        return json([])
-       case "/session":
-         return json([])
-       case "/vcs":
-diff --git a/packages/opencode/test/cli/cmd/tui/sync.test.tsx b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-index bf424e2462331425183aafbd4433022d58f54b3e..0cedd4b1470deb71ca1ef546f2e16dd1370a2120 100644
---- a/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/sync.test.tsx
-@@ -2,8 +2,8 @@
+diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+index 8a1829fe50..faf06f1209 100644
+--- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+@@ -1,8 +1,8 @@
+ /** @jsxImportSource @opentui/solid */
  import { describe, expect, test } from "bun:test"
- import { Global } from "@opencode-ai/core/global"
  import { tmpdir } from "../../../fixture/fixture"
 -import { directory, mount, wait, worktree } from "./sync-fixture"
 -import type { AssistantMessage, GlobalEvent, ToolPart } from "@opencode-ai/sdk/v2"
@@ -1300,10 +1590,12 @@ index bf424e2462331425183aafbd4433022d58f54b3e..0cedd4b1470deb71ca1ef546f2e16dd1
  
  function branchEvent(branch: string, workspace?: string): GlobalEvent {
    return {
-@@ -18,6 +18,81 @@ function branchEvent(branch: string, workspace?: string): GlobalEvent {
+@@ -17,7 +17,380 @@ function branchEvent(branch: string, workspace?: string): GlobalEvent {
    }
  }
  
++// #192：sync 重连测试辅助——构造 server.connected / permission / question 事件
++// #192：server.connected 事件——触发 sync 重连和 bootstrap
 +function serverConnectedEvent(id: string): GlobalEvent {
 +  return {
 +    directory: "global",
@@ -1379,17 +1671,13 @@ index bf424e2462331425183aafbd4433022d58f54b3e..0cedd4b1470deb71ca1ef546f2e16dd1
 +  }
 +}
 +
- function assistantMessage(): AssistantMessage {
-   return {
-     id: "msg_1",
-@@ -76,6 +151,284 @@ function deltaEvent(id: string, delta: string, partID = "part_1"): GlobalEvent {
- }
- 
  describe("tui sync", () => {
++  // #192：重连后恢复 pending permission/question 请求——bootstrap refresh 从 API 拉取
++  // #192：reconnected 标志控制 API 返回——初始为空，重连后返回 pending 请求
++  // #192：server.connected 事件触发 bootstrap——第一个是初始连接，后续是重连
++  // #192：permission/question 快照必须与 API 返回一致——不能丢请求
 +  test("recovers pending permission and question requests after reconnect", async () => {
-+    const previous = Global.Path.state
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
 +    let reconnected = false
 +    const permission = permissionRequest("perm_1")
@@ -1397,34 +1685,32 @@ index bf424e2462331425183aafbd4433022d58f54b3e..0cedd4b1470deb71ca1ef546f2e16dd1
 +    const { app, emit, sync } = await mount((url) => {
 +      if (url.pathname === "/permission") return json(reconnected ? [permission] : [])
 +      if (url.pathname === "/question") return json(reconnected ? [question] : [])
-+    })
++    }, tmp.path)
 +
 +    try {
 +      expect(sync.data.permission.ses_1).toBeUndefined()
 +      expect(sync.data.question.ses_1).toBeUndefined()
 +
-+      // The first server.connected marks the initial SSE attachment; only later
-+      // connected events represent reconnects that should force a bootstrap.
 +      emit(serverConnectedEvent("evt_connected_initial"))
 +      await Bun.sleep(30)
 +      reconnected = true
 +      emit(serverConnectedEvent("evt_connected_reconnect"))
 +
++      // #192：等待 sync store 收到重连后的 pending 请求
 +      await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
 +      await wait(() => sync.data.question.ses_1?.[0]?.id === question.id)
 +
++      // #192：permission 和 question 列表必须与 API 返回完全一致
 +      expect(sync.data.permission.ses_1).toEqual([permission])
 +      expect(sync.data.question.ses_1).toEqual([question])
 +    } finally {
 +      app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
 +
++  // #192：重连快照在途时到达的 asked 事件应保留——版本追踪防止快照覆盖
 +  test("keeps asked events that arrive while reconnect snapshots are in flight", async () => {
-+    const previous = Global.Path.state
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
 +    let reconnected = false
 +    const permission = permissionRequest("perm_race")
@@ -1450,7 +1736,7 @@ index bf424e2462331425183aafbd4433022d58f54b3e..0cedd4b1470deb71ca1ef546f2e16dd1
 +          staleQuestionSnapshot = () => resolve(json([]))
 +        })
 +      }
-+    })
++    }, tmp.path)
 +
 +    try {
 +      emit(serverConnectedEvent("evt_connected_initial"))
@@ -1473,18 +1759,19 @@ index bf424e2462331425183aafbd4433022d58f54b3e..0cedd4b1470deb71ca1ef546f2e16dd1
 +      expect(sync.data.question.ses_1).toEqual([question])
 +    } finally {
 +      app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
 +
++  // #192：重连快照中不存在的请求应被清除
++  // #192：初始连接后 asked 事件推送请求——sync store 有 pending 请求
++  // #192：重连后 mount 的默认 fetch 返回空——API 不再有这些请求
++  // #192：sync store 必须清除——不能保留已过期的请求
 +  test("clears requests that are absent from reconnect snapshots", async () => {
-+    const previous = Global.Path.state
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
 +    const permission = permissionRequest("perm_cleared")
 +    const question = questionRequest("question_cleared")
-+    const { app, emit, sync } = await mount()
++    const { app, emit, sync } = await mount(undefined, tmp.path)
 +
 +    try {
 +      emit(serverConnectedEvent("evt_connected_initial"))
@@ -1496,19 +1783,23 @@ index bf424e2462331425183aafbd4433022d58f54b3e..0cedd4b1470deb71ca1ef546f2e16dd1
 +
 +      emit(serverConnectedEvent("evt_connected_reconnect"))
 +
++      // #192：重连快照返回空——sync store 必须清除已有的 pending 请求
 +      await wait(() => sync.data.permission.ses_1 === undefined && sync.data.question.ses_1 === undefined)
++      // #192：permission 和 question 都应 undefined——API 确认无 pending
 +      expect(sync.data.permission.ses_1).toBeUndefined()
 +      expect(sync.data.question.ses_1).toBeUndefined()
 +    } finally {
 +      app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
 +
++  // #192：重连快照在途时到达的 replied 事件应保留——清除优先于快照恢复
++  // #192：第一次快照延迟返回 [permission]——stale 快照仍包含已回复的请求
++  // #192：replied/rejected 事件在 stale 快照到达前推送——应清除请求
++  // #192：stale 快照延迟到达后不应恢复已回复的请求——replied 优先
++  // #192：最终 sync store 必须为空——replied 和 stale 快照都不能恢复请求
 +  test("keeps replied events that arrive while reconnect snapshots are in flight", async () => {
-+    const previous = Global.Path.state
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
 +    let reconnected = false
 +    const permission = permissionRequest("perm_reply_race")
@@ -1534,7 +1825,7 @@ index bf424e2462331425183aafbd4433022d58f54b3e..0cedd4b1470deb71ca1ef546f2e16dd1
 +          staleQuestionSnapshot = () => resolve(json([question]))
 +        })
 +      }
-+    })
++    }, tmp.path)
 +
 +    try {
 +      emit(serverConnectedEvent("evt_connected_initial"))
@@ -1550,25 +1841,32 @@ index bf424e2462331425183aafbd4433022d58f54b3e..0cedd4b1470deb71ca1ef546f2e16dd1
 +
 +      emit(permissionRepliedEvent(permission))
 +      emit(questionRejectedEvent(question))
++      // #192：replied/rejected 事件应立即清除请求——不等快照
 +      await wait(() => (sync.data.permission.ses_1?.length ?? 0) === 0 && (sync.data.question.ses_1?.length ?? 0) === 0)
 +
 +      if (!stalePermissionSnapshot || !staleQuestionSnapshot) throw new Error("reconnect snapshots were not requested")
++      // #192：stale 快照延迟到达——不应恢复已回复的请求
 +      stalePermissionSnapshot()
 +      staleQuestionSnapshot()
 +      await Bun.sleep(30)
 +
++      // #192：最终列表为空——replied 优先于 stale 快照恢复
 +      expect(sync.data.permission.ses_1 ?? []).toEqual([])
 +      expect(sync.data.question.ses_1 ?? []).toEqual([])
 +    } finally {
 +      app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
 +
++  // #192：重连恢复期间清除 stale 请求同时保留快速到达的 asked 事件
++  // #192：stale 请求在重连前 asked——重连后快照不包含它
++  // #192：快照延迟返回——staleSnapshot 控制时机
++  // #192：liveFirst asked 在 stale 快照到达前推送——应保留
++  // #192：stale 快照到达后清除 stale 请求——但不能清除 liveFirst
++  // #192：liveSecond asked 在 stale 快照到达后推送——应保留
++  // #192：最终 sync store 只含 liveFirst + liveSecond——stale 被清除
 +  test("clears stale requests while preserving rapid asked events during reconnect recovery", async () => {
-+    const previous = Global.Path.state
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
 +    let reconnected = false
 +    const stale = permissionRequest("perm_stale")
@@ -1582,7 +1880,7 @@ index bf424e2462331425183aafbd4433022d58f54b3e..0cedd4b1470deb71ca1ef546f2e16dd1
 +      return new Promise<Response>((resolve) => {
 +        staleSnapshot = () => resolve(json([]))
 +      })
-+    })
++    }, tmp.path)
 +
 +    try {
 +      emit(serverConnectedEvent("evt_connected_initial"))
@@ -1601,18 +1899,22 @@ index bf424e2462331425183aafbd4433022d58f54b3e..0cedd4b1470deb71ca1ef546f2e16dd1
 +      emit(permissionAskedEvent(liveSecond))
 +      await wait(() => sync.data.permission.ses_1?.some((request) => request.id === liveSecond.id))
 +
++      // #192：stale 请求应被清除——快照返回空
 +      await wait(() => !sync.data.permission.ses_1?.some((request) => request.id === stale.id))
++      // #192：live 请求保留——asked 事件版本号保护
 +      expect(sync.data.permission.ses_1?.map((request) => request.id)).toEqual([liveFirst.id, liveSecond.id])
 +    } finally {
 +      app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
 +
++  // #192：多次重连快照中最新者胜出——旧快照延迟到达不覆盖新快照
++  // #192：第一次重连快照延迟返回空——stalePermissionSnapshot 控制
++  // #192：第二次重连快照立即返回 [permission]——新快照包含请求
++  // #192：stale 快照延迟到达后不应覆盖新快照——最新版本号优先
++  // #192：最终 sync store 必须与新快照一致——permission 和 question 都在
 +  test("keeps the newest reconnect snapshot when an earlier snapshot resolves last", async () => {
-+    const previous = Global.Path.state
 +    await using tmp = await tmpdir()
-+    Global.Path.state = tmp.path
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
 +    let reconnected = false
 +    let permissionSnapshots = 0
@@ -1638,7 +1940,7 @@ index bf424e2462331425183aafbd4433022d58f54b3e..0cedd4b1470deb71ca1ef546f2e16dd1
 +          staleQuestionSnapshot = () => resolve(json([]))
 +        })
 +      }
-+    })
++    }, tmp.path)
 +
 +    try {
 +      emit(serverConnectedEvent("evt_connected_initial"))
@@ -1648,462 +1950,24 @@ index bf424e2462331425183aafbd4433022d58f54b3e..0cedd4b1470deb71ca1ef546f2e16dd1
 +      await wait(() => Boolean(stalePermissionSnapshot && staleQuestionSnapshot))
 +      emit(serverConnectedEvent("evt_connected_reconnect_2"))
 +
++      // #192：新快照已到达——sync store 有 permission
 +      await wait(() => sync.data.permission.ses_1?.[0]?.id === permission.id)
 +      await wait(() => sync.data.question.ses_1?.[0]?.id === question.id)
 +
 +      if (!stalePermissionSnapshot || !staleQuestionSnapshot) throw new Error("stale reconnect snapshots were not requested")
++      // #192：旧快照延迟到达——不应覆盖新快照
 +      stalePermissionSnapshot()
 +      staleQuestionSnapshot()
 +      await Bun.sleep(30)
 +
++      // #192：最终列表与新快照一致——最新版本号优先
 +      expect(sync.data.permission.ses_1).toEqual([permission])
 +      expect(sync.data.question.ses_1).toEqual([question])
 +    } finally {
 +      app.renderer.destroy()
-+      Global.Path.state = previous
 +    }
 +  })
 +
    test("refresh scopes sessions by default and lists project sessions when disabled", async () => {
-     const previous = Global.Path.state
      await using tmp = await tmpdir()
-diff --git a/packages/opencode/test/cli/run/stream.transport.test.ts b/packages/opencode/test/cli/run/stream.transport.test.ts
-index 3358ae774d0fc2930c6a60a1f757d47e6002330c..aab2f3dc60b098f037a61113149e730d394a21c7 100644
---- a/packages/opencode/test/cli/run/stream.transport.test.ts
-+++ b/packages/opencode/test/cli/run/stream.transport.test.ts
-@@ -162,7 +162,7 @@ function statusMap(busy: boolean): SessionStatusMap {
-     return { "session-1": { type: "busy" } }
-   }
- 
--  return {}
-+  return { "session-1": { type: "idle" } }
- }
- 
- function assistantMessage(input: { sessionID: string; id: string; parts: SessionMessage["parts"] }): SessionMessage {
-@@ -1324,6 +1324,292 @@ describe("run stream transport", () => {
-     }
-   })
- 
-+  test("resubscribes when the global event stream closes cleanly during an active turn", async () => {
-+    const first = globalFeed()
-+    const second = globalFeed()
-+    const ui = footer()
-+    let subscriptions = 0
-+
-+    const transport = await createSessionTransport({
-+      sdk: sdk({
-+        globalEvent: () => {
-+          subscriptions += 1
-+          return globalSse(subscriptions === 1 ? first.stream : second.stream)
-+        },
-+        promptAsync: async () => {
-+          first.push(globalEvent(busy()))
-+          first.close()
-+          return ok(undefined)
-+        },
-+      }),
-+      sessionID: "session-1",
-+      thinking: true,
-+      limits: () => ({}),
-+      footer: ui.api,
-+    })
-+
-+    try {
-+      const turn = transport.runPromptTurn({
-+        agent: undefined,
-+        model: undefined,
-+        variant: undefined,
-+        prompt: { text: "hello", parts: [] },
-+        files: [],
-+        includeFiles: false,
-+      })
-+
-+      await waitFor(() => (subscriptions > 1 ? true : undefined))
-+      second.push(globalEvent(idle()))
-+
-+      await expect(turn).resolves.toBeUndefined()
-+      expect(subscriptions).toBeGreaterThanOrEqual(2)
-+    } finally {
-+      first.close()
-+      second.close()
-+      await transport.close()
-+    }
-+  })
-+
-+  test("completes from status polling when reconnect misses all active turn events", async () => {
-+    const first = globalFeed()
-+    const second = globalFeed()
-+    const ui = footer()
-+    let subscriptions = 0
-+    let statusCallsAfterReconnect = 0
-+
-+    const transport = await createSessionTransport({
-+      sdk: sdk({
-+        globalEvent: () => {
-+          subscriptions += 1
-+          return globalSse(subscriptions === 1 ? first.stream : second.stream)
-+        },
-+        promptAsync: async () => {
-+          first.close()
-+          return ok(undefined)
-+        },
-+        status: async () => {
-+          if (subscriptions <= 1) return ok({})
-+          statusCallsAfterReconnect += 1
-+          return ok({
-+            "session-1": {
-+              type: statusCallsAfterReconnect === 1 ? "busy" : "idle",
-+            },
-+          })
-+        },
-+      }),
-+      sessionID: "session-1",
-+      thinking: true,
-+      limits: () => ({}),
-+      footer: ui.api,
-+    })
-+
-+    try {
-+      const turn = transport.runPromptTurn({
-+        agent: undefined,
-+        model: undefined,
-+        variant: undefined,
-+        prompt: { text: "hello", parts: [] },
-+        files: [],
-+        includeFiles: false,
-+      })
-+
-+      await waitFor(() => (subscriptions > 1 ? true : undefined))
-+
-+      const outcome = await Promise.race([
-+        turn.then(
-+          () => "done" as const,
-+          (error) => error,
-+        ),
-+        Bun.sleep(2_000).then(
-+          () =>
-+            new Error(
-+              `turn did not complete after ${subscriptions} subscriptions and ${statusCallsAfterReconnect} status polls`,
-+            ),
-+        ),
-+      ])
-+      if (outcome instanceof Error) throw outcome
-+      expect(outcome).toBe("done")
-+    } finally {
-+      first.close()
-+      second.close()
-+      await transport.close()
-+    }
-+  })
-+
-+  test("keeps a turn pending when clean EOF happens before daemon status appears", async () => {
-+    const first = globalFeed()
-+    const second = globalFeed()
-+    const ui = footer()
-+    const accepted = defer()
-+    let subscriptions = 0
-+    let postStarted = false
-+    let acceptedDone = false
-+    let statusAfterAccept = 0
-+
-+    const transport = await createSessionTransport({
-+      sdk: sdk({
-+        globalEvent: () => {
-+          subscriptions += 1
-+          return globalSse(subscriptions === 1 ? first.stream : second.stream)
-+        },
-+        promptAsync: async () => {
-+          postStarted = true
-+          first.close()
-+          await accepted.promise
-+          return ok(undefined)
-+        },
-+        status: async () => {
-+          if (acceptedDone) statusAfterAccept += 1
-+          return ok({})
-+        },
-+      }),
-+      sessionID: "session-1",
-+      thinking: true,
-+      limits: () => ({}),
-+      footer: ui.api,
-+    })
-+
-+    try {
-+      const turn = transport.runPromptTurn({
-+        agent: undefined,
-+        model: undefined,
-+        variant: undefined,
-+        prompt: { text: "hello", parts: [] },
-+        files: [],
-+        includeFiles: false,
-+      })
-+      let settled = false
-+      turn.then(
-+        () => {
-+          settled = true
-+        },
-+        () => {
-+          settled = true
-+        },
-+      )
-+
-+      await waitFor(() => (postStarted ? true : undefined))
-+      await waitFor(() => (subscriptions > 1 ? true : undefined))
-+      acceptedDone = true
-+      accepted.resolve()
-+      await waitFor(() => (statusAfterAccept > 0 ? true : undefined))
-+      await Bun.sleep(20)
-+
-+      expect(settled).toBe(false)
-+
-+      second.push(globalEvent(busy()))
-+      second.push(globalEvent(idle()))
-+      await expect(turn).resolves.toBeUndefined()
-+    } finally {
-+      first.close()
-+      second.close()
-+      await transport.close()
-+    }
-+  })
-+
-+  test("ignores a lone idle event when daemon status has not observed the turn", async () => {
-+    const src = globalFeed()
-+    const ui = footer()
-+    let statusCalls = 0
-+
-+    const transport = await createSessionTransport({
-+      sdk: sdk({
-+        globalStream: src.stream,
-+        status: async () => {
-+          statusCalls += 1
-+          return ok({})
-+        },
-+      }),
-+      sessionID: "session-1",
-+      thinking: true,
-+      limits: () => ({}),
-+      footer: ui.api,
-+    })
-+
-+    try {
-+      const turn = transport.runPromptTurn({
-+        agent: undefined,
-+        model: undefined,
-+        variant: undefined,
-+        prompt: { text: "hello", parts: [] },
-+        files: [],
-+        includeFiles: false,
-+      })
-+      let settled = false
-+      turn.then(
-+        () => {
-+          settled = true
-+        },
-+        () => {
-+          settled = true
-+        },
-+      )
-+
-+      await waitFor(() => (ui.events.some((event) => event.type === "turn.wait") ? true : undefined))
-+      src.push(globalEvent(idle()))
-+      await waitFor(() => (statusCalls > 0 ? true : undefined))
-+      await Bun.sleep(20)
-+
-+      expect(settled).toBe(false)
-+
-+      src.push(globalEvent(busy()))
-+      src.push(globalEvent(idle()))
-+      await expect(turn).resolves.toBeUndefined()
-+    } finally {
-+      src.close()
-+      await transport.close()
-+    }
-+  })
-+
-+  test("rejects the active turn when resubscribing the global event stream fails", async () => {
-+    const first = globalFeed()
-+    const ui = footer()
-+    let subscriptions = 0
-+
-+    const transport = await createSessionTransport({
-+      sdk: sdk({
-+        globalEvent: () => {
-+          subscriptions += 1
-+          if (subscriptions > 1) throw new Error("subscribe boom")
-+          return globalSse(first.stream)
-+        },
-+        promptAsync: async () => {
-+          first.push(globalEvent(busy()))
-+          first.close()
-+          return ok(undefined)
-+        },
-+        status: async () => ok({ "session-1": { type: "busy" } }),
-+      }),
-+      sessionID: "session-1",
-+      thinking: true,
-+      limits: () => ({}),
-+      footer: ui.api,
-+    })
-+
-+    try {
-+      const turn = transport.runPromptTurn({
-+        agent: undefined,
-+        model: undefined,
-+        variant: undefined,
-+        prompt: { text: "hello", parts: [] },
-+        files: [],
-+        includeFiles: false,
-+      })
-+
-+      await expect(
-+        Promise.race([
-+          turn,
-+          Bun.sleep(1_000).then(() => {
-+            throw new Error("turn did not fault")
-+          }),
-+        ]),
-+      ).rejects.toThrow("subscribe boom")
-+    } finally {
-+      first.close()
-+      await transport.close()
-+    }
-+  })
-+
-   test("rejects the active turn when the backing instance is disposed", async () => {
-     const ui = footer()
-     const ready = defer()
-diff --git a/packages/opencode/test/session/retry.test.ts b/packages/opencode/test/session/retry.test.ts
-index 5d9ee2f364d23ebdbc0b120fb288a782dd250974..39cdf78069fa4a7934fff1050bfd8999d307d340 100644
---- a/packages/opencode/test/session/retry.test.ts
-+++ b/packages/opencode/test/session/retry.test.ts
-@@ -30,6 +30,11 @@ function wrap(message: unknown): ReturnType<NamedError["toObject"]> {
-   return { name: "", data: { message } }
- }
- 
-+function withCause<T extends Error>(error: T, cause: unknown) {
-+  Object.defineProperty(error, "cause", { value: cause })
-+  return error
-+}
-+
- describe("session.retry.delay", () => {
-   test("caps delay at 30 seconds when headers missing", () => {
-     const error = apiError()
-@@ -430,6 +435,117 @@ describe("session.message-v2.fromError", () => {
-     })
-   })
- 
-+  test("converts statusless APICallError transport causes to retryable APIError", () => {
-+    const result = MessageV2.fromError(
-+      withCause(
-+        new APICallError({
-+          message: "provider request failed",
-+          url: "https://example.com/v1/chat/completions",
-+          requestBodyValues: {},
-+          isRetryable: false,
-+        }),
-+        Object.assign(new Error("socket timed out"), { code: "ETIMEDOUT" }),
-+      ),
-+      { providerID },
-+    )
-+
-+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
-+    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
-+    expect(result.data.isRetryable).toBe(true)
-+    expect(result.data.metadata?.code).toBe("ETIMEDOUT")
-+    expect(SessionRetry.retryable(result, retryProvider)).toEqual({ message: "socket timed out" })
-+  })
-+
-+  test("keeps explicit APICallError 4xx failures non-retryable even with transport causes", () => {
-+    const result = MessageV2.fromError(
-+      withCause(
-+        new APICallError({
-+          message: "bad request",
-+          url: "https://example.com/v1/chat/completions",
-+          requestBodyValues: {},
-+          statusCode: 400,
-+          responseHeaders: { "content-type": "application/json" },
-+          responseBody: '{"error":"bad request"}',
-+          isRetryable: false,
-+        }),
-+        Object.assign(new Error("socket timed out"), { code: "ETIMEDOUT" }),
-+      ),
-+      { providerID },
-+    )
-+
-+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
-+    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
-+    expect(result.data.isRetryable).toBe(false)
-+    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
-+  })
-+
-+  test("keeps wrapped explicit APICallError 4xx failures non-retryable", () => {
-+    const result = MessageV2.fromError(
-+      new Error("outer wrapper", {
-+        cause: withCause(
-+          new APICallError({
-+            message: "bad request",
-+            url: "https://example.com/v1/chat/completions",
-+            requestBodyValues: {},
-+            statusCode: 400,
-+            responseHeaders: { "content-type": "application/json" },
-+            responseBody: '{"error":"bad request"}',
-+            isRetryable: false,
-+          }),
-+          Object.assign(new Error("socket timed out"), { code: "ETIMEDOUT" }),
-+        ),
-+      }),
-+      { providerID },
-+    )
-+
-+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
-+    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
-+    expect(result.data.isRetryable).toBe(false)
-+    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
-+  })
-+
-+  test("converts structured stream errors carried by Error.cause to retryable APIError", () => {
-+    const result = MessageV2.fromError(
-+      new Error("stream failed", {
-+        cause: {
-+          type: "error",
-+          error: {
-+            code: "server_error",
-+            message: "The provider stream failed after it started.",
-+          },
-+        },
-+      }),
-+      { providerID: ProviderID.make("openai") },
-+    )
-+
-+    expect(MessageV2.APIError.isInstance(result)).toBe(true)
-+    if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")
-+    expect(result.data.isRetryable).toBe(true)
-+    expect(SessionRetry.retryable(result, retryProvider)).toEqual({
-+      message: "The provider stream failed after it started.",
-+    })
-+  })
-+
-+  test("prioritizes structured stream errors over generic fetch wrappers", () => {
-+    const result = MessageV2.fromError(
-+      new TypeError("fetch failed", {
-+        cause: {
-+          type: "error",
-+          error: {
-+            code: "context_length_exceeded",
-+            message: "Input exceeds the context window.",
-+          },
-+        },
-+      }),
-+      { providerID: ProviderID.make("openai") },
-+    )
-+
-+    expect(MessageV2.ContextOverflowError.isInstance(result)).toBe(true)
-+    if (!MessageV2.ContextOverflowError.isInstance(result)) throw new Error("expected ContextOverflowError")
-+    expect(result.data.message).toBe("Input exceeds context window of this model")
-+    expect(SessionRetry.retryable(result, retryProvider)).toBeUndefined()
-+  })
-+
-   test("converts SSE read timeouts to retryable APIError", () => {
-     const result = MessageV2.fromError(
-       Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" }),
+     await Bun.write(`${tmp.path}/kv.json`, "{}")

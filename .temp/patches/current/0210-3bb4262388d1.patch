@@ -1,52 +1,46 @@
 From 3bb4262388d1316dd50da55095ee2d66015795e4 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Sun, 24 May 2026 04:34:37 +0800
-Subject: [PATCH] =?UTF-8?q?feat(permission):=20=E5=A2=9E=E5=BC=BA=E5=A4=96?=
- =?UTF-8?q?=E9=83=A8=E7=9B=AE=E5=BD=95=E6=9D=83=E9=99=90=E5=A4=84=E7=90=86?=
- =?UTF-8?q?=EF=BC=8C=E6=94=AF=E6=8C=81=E5=B7=A5=E5=85=B7=E6=9D=A5=E6=BA=90?=
- =?UTF-8?q?=E8=AF=81=E6=8D=AE=E4=BB=A5=E4=BC=98=E5=8C=96=E8=87=AA=E5=8A=A8?=
- =?UTF-8?q?=E5=AE=A1=E6=9F=A5=E5=86=B3=E7=AD=96?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH] feat(permission): 增强外部目录权限处理，支持工具来源证据以优化自动审查决策
 
 
 diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
-index 918796fcbd354f773e86d819a3b6eb117ca12036..b68c7ed3192e11307e5c114d306dba91f103c4c9 100644
+index 2d3a740eb4..44e1224163 100644
 --- a/packages/opencode/src/permission/auto.ts
 +++ b/packages/opencode/src/permission/auto.ts
-@@ -63,6 +63,7 @@ export function evaluate(
+@@ -55,6 +55,8 @@ export function evaluate(
      const precheck = PermissionPrecheck.evaluate(input)
      const isShell = input.permission === "bash"
      const isShellExternalDirectory = input.permission === "external_directory" && input.metadata.action_kind === "shell"
++    // #210：tool-origin external_directory 携带 action_kind/tool/operation 证据——仅凭路径不构成授权上下文
 +    const isToolExternalDirectory = input.permission === "external_directory" && hasToolExternalDirectoryEvidence(input.metadata)
-     // [local-smark] auto 四级预审路由开始
-     // safe/general/cautious/dangerous 是 LLM 负载边界：safe 直接允许；开发期
-     // shell general 也直接允许，避免 Auto shell 回到人工确认；非 shell general
-@@ -75,10 +76,10 @@ export function evaluate(
-       // 和 bash 两个权限点重复消耗 LLM。非 dangerous 情况放行给后续 bash auto。
+     // #203：四级预审路由——safe 直接允许；开发期 shell general 也直接允许，避免 Auto shell
+     // #203：回到人工确认；非 shell general 和 cautious 进入 reviewer/user fallback；dangerous 直接拒绝
+     // #203：strict 是用户显式配置的例外，保留原本"低风险也审"的能力
+@@ -65,9 +67,10 @@ export function evaluate(
+       // #203：重复消耗 LLM。非 dangerous 情况放行给后续 bash auto
        return { action: "allow", reason: precheck.reason, source: "precheck" } satisfies Decision
      }
 -    if (input.permission === "external_directory") {
--      // Auto agent 的 external_directory:auto 只是为了 shell 路径门禁能进入上面的
--      // shell-origin 分支。普通读写工具的项目外路径缺少 shell 命令证据，仍走既有
--      // 人工审批，避免把本轮 shell sandbox 修复扩大成全工具 reviewer 审批面。
+-      // #203：Auto 的 external_directory:auto 只为 shell 路径门禁进入上面的 shell-origin 分支。
+-      // #203：普通读写工具的项目外路径缺少 shell 命令证据，仍走既有人工审批
 +    if (input.permission === "external_directory" && !isToolExternalDirectory) {
-+      // 无来源证据的 external_directory 仍走人工审批。只有 shell/tool gate 能进入
-+      // auto：shell 在上方复用同一条命令预审；tool 必须显式携带 action_kind/tool
-+      // metadata，避免只凭路径就让 reviewer 替后续读写内容作授权判断。
++      // #210：无来源证据的 external_directory 仍走人工审批。只有 shell/tool gate 能进入
++      // #210：auto：shell 在上方复用同一条命令预审；tool 必须显式携带 action_kind/tool
++      // #210：metadata，避免只凭路径就让 reviewer 替后续读写内容作授权判断
        return { action: "ask", reason: precheck.reason, source: "precheck" } satisfies Decision
      }
      if (precheck.level === "safe" && !input.strict) {
-@@ -162,6 +163,28 @@ function errorTag(error: unknown) {
+@@ -134,6 +137,30 @@ function errorTag(error: unknown) {
    return error && typeof error === "object" && "_tag" in error && typeof error._tag === "string" ? error._tag : undefined
  }
  
++// #210：tool-origin 证据校验——action_kind 是 caller 可控 metadata，需同时携带已知 tool 及其 operation/payload，
++// #210：仅凭路径的请求仍回退人工审批，防止 reviewer 替路径授权后续读写内容
 +function hasToolExternalDirectoryEvidence(metadata: Readonly<Record<string, unknown>>) {
-+  // action_kind alone is caller-controlled metadata; require a known tool and
-+  // its operation payload so path-only requests still fall back to user approval.
 +  if (metadata.action_kind !== "tool") return false
 +  if (metadata.tool === "read") return metadata.operation === "read"
++  // #210：write 需 content 字符串证据——空内容写入与路径型请求不可区分时不授权，content 存在才让 reviewer 判断写入意图
 +  if (metadata.tool === "write") return metadata.operation === "write" && typeof metadata.content === "string"
 +  if (metadata.tool === "edit") {
 +    return (
@@ -56,6 +50,7 @@ index 918796fcbd354f773e86d819a3b6eb117ca12036..b68c7ed3192e11307e5c114d306dba91
 +    )
 +  }
 +  if (metadata.tool === "apply_patch") {
++    // #210：apply_patch 需匹配 hunk.type（add/update/delete/move）并携带 patchText 证据
 +    return (
 +      (metadata.operation === "add" || metadata.operation === "update" || metadata.operation === "delete" || metadata.operation === "move") &&
 +      typeof metadata.patchText === "string"
@@ -64,88 +59,95 @@ index 918796fcbd354f773e86d819a3b6eb117ca12036..b68c7ed3192e11307e5c114d306dba91
 +  return false
 +}
 +
+ // #198：提取错误消息——provider/model 错误在 deny reason 中暴露用于诊断，但 AutoDeniedError 仍阻止鼓励绕过策略的重试建议
  function errorMessage(error: unknown) {
-   // Provider/model errors are intentionally surfaced in the deny reason for
-   // diagnostics; the safe user-facing AutoDeniedError still prevents retry
+   if (error instanceof Error) return error.message
 diff --git a/packages/opencode/src/permission/cache/session-cache.ts b/packages/opencode/src/permission/cache/session-cache.ts
-index 2405fc9d6948f95f0631914969e66550d659d74f..b975ae90f70523f4071b0a709fb88e3971cf7050 100644
+index 538a6fe23d..2fe7604a9d 100644
 --- a/packages/opencode/src/permission/cache/session-cache.ts
 +++ b/packages/opencode/src/permission/cache/session-cache.ts
-@@ -29,6 +29,10 @@ export const layer = Layer.effect(
+@@ -30,6 +30,9 @@ export const layer = Layer.effect(
      )
  
      const has = Effect.fn("PermissionSessionCache.has")(function* (request: RequestLike) {
-+      // Tool-origin external directory prompts carry operation/payload evidence
-+      // rather than a final diff; do not reuse a path allow for a later write or
-+      // patch with different content in the same external directory.
++      // #210：tool-origin external_directory 请求携带 operation/payload 证据而非最终 diff，
++      // #210：不复用同一外部目录的路径放行去授权后续不同内容的 write/patch
 +      if (isToolExternalDirectory(request)) return false
-       // Cache hits require every pattern in the current request to have been
-       // approved for this same session. A partial hit must still run review/user
-       // approval for the remaining pattern instead of widening the approval.
-@@ -38,6 +42,7 @@ export const layer = Layer.effect(
+       // #198：缓存命中要求当前请求的每个 pattern 都已被同一 session 放行——部分命中仍需 review/审批剩余 pattern，不得扩大授权范围
+       const session = (yield* InstanceState.get(state)).get(request.sessionID)
+       // #198：无 session 记录时缓存未命中——首次请求或 session 重启后无历史授权
+@@ -39,6 +42,8 @@ export const layer = Layer.effect(
      })
  
      const put = Effect.fn("PermissionSessionCache.put")(function* (request: RequestLike, value: Value) {
++      // #210：tool-origin 请求不写入缓存——放行不可跨内容复用，避免路径命中授权不同写操作
 +      if (isToolExternalDirectory(request)) return
        const all = yield* InstanceState.get(state)
+       // #198：按 sessionID 分组存储——不同 session 的授权互不干扰
        const session = all.get(request.sessionID) ?? new Map<Key, Value>()
-       all.set(request.sessionID, session)
-@@ -69,6 +74,10 @@ function contextValue(value: unknown) {
+@@ -52,6 +57,7 @@ export const layer = Layer.effect(
+ )
+ 
+ // #198：规范化缓存键——包含 permission、pattern、command、cwd、shell、filepath、diff，防止不同上下文的相同 pattern 误命中缓存
++// #210：tool-origin 请求在 has/put 入口短路，canonicalKey 无需纳入 operation/payload
+ function canonicalKey(request: RequestLike, pattern: string) {
+   // #198：JSON.stringify 生成稳定键——数组顺序固定，确保相同输入始终命中同一缓存槽
+   return JSON.stringify([
+@@ -72,6 +78,11 @@ function contextValue(value: unknown) {
    return typeof value === "string" ? value : undefined
  }
  
++// #210：识别 tool-origin external_directory 请求——action_kind=tool 标记来自读写工具的项目外路径门禁
 +function isToolExternalDirectory(request: RequestLike) {
 +  return request.permission === "external_directory" && request.metadata.action_kind === "tool"
 +}
 +
  export const defaultLayer = layer
  
- export * as PermissionSessionCache from "./session-cache"
+ // #198：node 无 deps——InstanceState 基于 scope 而非 node 依赖，session-cache 不依赖 Config/Provider/Session
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index d569dbdb7a704610fcf8046790acf22096e6f0ed..8a6d9aef42f4eeae127b8acd354b0af604bec149 100644
+index 3364683a8a..f67443e449 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
-@@ -72,7 +72,11 @@ export const ApplyPatchTool = Tool.define(
+@@ -73,7 +73,10 @@ export const ApplyPatchTool = Tool.define(
  
        for (const hunk of hunks) {
          const filePath = path.resolve(instance.directory, hunk.path)
 -        yield* assertExternalDirectoryEffect(ctx, filePath)
++        // #210：external_directory 门禁先于最终 edit 权限，携带 patch 意图让 Auto reviewer 判断的不仅是路径
 +        yield* assertExternalDirectoryEffect(ctx, filePath, {
-+          // The external_directory gate runs before the final edit permission;
-+          // carry patch intent so Auto review can judge more than the file path.
 +          metadata: { action_kind: "tool", tool: "apply_patch", operation: hunk.type, patchText: params.patchText },
 +        })
  
          switch (hunk.type) {
            case "add": {
-@@ -145,7 +149,11 @@ export const ApplyPatchTool = Tool.define(
+@@ -148,7 +151,10 @@ export const ApplyPatchTool = Tool.define(
              }
  
              const movePath = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
 -            yield* assertExternalDirectoryEffect(ctx, movePath)
++            // #210：移动到外部目录是独立目标门禁，复用同一 patch 证据但 operation 标记为 move
 +            yield* assertExternalDirectoryEffect(ctx, movePath, {
-+              // Moving to an external directory is a separate target gate; keep
-+              // the same patch evidence but name the operation as the move leg.
 +              metadata: { action_kind: "tool", tool: "apply_patch", operation: "move", patchText: params.patchText },
 +            })
  
              fileChanges.push({
                filePath,
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index 59dd896b9ef83bee839fa4203c0395d3d6176dac..f57ffc51fb33fb3ac7e9eb0cee2e5b9a38305116 100644
+index 922b8a88a5..a13bdc66f8 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -68,7 +68,18 @@ export const EditTool = Tool.define(
+@@ -69,7 +69,18 @@ export const EditTool = Tool.define(
            const filePath = path.isAbsolute(params.filePath)
              ? params.filePath
              : path.join(instance.directory, params.filePath)
 -          yield* assertExternalDirectoryEffect(ctx, filePath)
++          // #210：携带 edit 操作意图让 Auto reviewer 基于工具证据而非仅外部路径 glob 判断
 +          yield* assertExternalDirectoryEffect(ctx, filePath, {
-+            // Include the intended edit operation so Auto reviewer decisions are
-+            // based on tool evidence, not just the external path glob.
 +            metadata: {
 +              action_kind: "tool",
 +              tool: "edit",
++              // #210：oldString 为空表示创建新文件，operation 区分 create/edit
 +              operation: params.oldString === "" ? "create" : "edit",
 +              oldString: params.oldString,
 +              newString: params.newString,
@@ -156,10 +158,10 @@ index 59dd896b9ef83bee839fa4203c0395d3d6176dac..f57ffc51fb33fb3ac7e9eb0cee2e5b9a
            let diff = ""
            let contentOld = ""
 diff --git a/packages/opencode/src/tool/external-directory.ts b/packages/opencode/src/tool/external-directory.ts
-index 23d416b53e031c3612923a0bbf2691a366d6e948..afdee7461139821c19e73514f5408599bff2b4e9 100644
+index 4372db82d8..1edbcfbeed 100644
 --- a/packages/opencode/src/tool/external-directory.ts
 +++ b/packages/opencode/src/tool/external-directory.ts
-@@ -11,6 +11,7 @@ type Kind = "file" | "directory"
+@@ -10,6 +10,7 @@ type Kind = "file" | "directory"
  type Options = {
    bypass?: boolean
    kind?: Kind
@@ -167,69 +169,76 @@ index 23d416b53e031c3612923a0bbf2691a366d6e948..afdee7461139821c19e73514f5408599
  }
  
  export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirectory")(function* (
-@@ -38,6 +39,7 @@ export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirec
+@@ -36,7 +37,9 @@ export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirec
+     permission: "external_directory",
      patterns: [glob],
      always: [glob],
++    // #210：合并 caller 的 tool-origin 证据与门禁计算的 filepath/parentDir
      metadata: {
 +      ...options?.metadata,
        filepath: full,
        parentDir: dir,
      },
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 0a8e9691c6e520c901dc0e4c9ba67bf6d68f8689..8489361821a048603f85df38d8486f8d99ace8d2 100644
+index b703c1d81f..cbd9ce886d 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -473,6 +473,9 @@ export const ReadTool = Tool.define(
+@@ -614,6 +614,8 @@ export const ReadTool = Tool.define<
        yield* assertExternalDirectoryEffect(ctx, filepath, {
-         bypass: Boolean(ctx.extra?.["bypassCwdCheck"]) || (yield* reference.contains(filepath)),
+         bypass: Boolean(ctx.extra?.["bypassCwdCheck"]),
          kind: stat?.type === "Directory" ? "directory" : "file",
-+        // Tool-origin evidence lets Auto review this external_directory gate
-+        // without treating path-only requests as enough authorization context.
++        // #210：tool-origin 证据让 Auto reviewer 基于 read 操作而非仅路径判断 external_directory 门禁
 +        metadata: { action_kind: "tool", tool: "read", operation: "read" },
        })
  
        yield* ctx.ask({
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
-index b5678ecee0b15ba60d97cecea9dada47f704f3b1..cbbad3e3583c89ac9cb892782ddd45244eec6660 100644
+index 10479263d2..11afae3d84 100644
 --- a/packages/opencode/src/tool/write.ts
 +++ b/packages/opencode/src/tool/write.ts
-@@ -42,7 +42,11 @@ export const WriteTool = Tool.define(
+@@ -43,7 +43,10 @@ export const WriteTool = Tool.define(
            const filepath = path.isAbsolute(params.filePath)
              ? params.filePath
              : path.join(instance.directory, params.filePath)
 -          yield* assertExternalDirectoryEffect(ctx, filepath)
++          // #210：write 负载意图先于后续 edit 权限 diff 存在，否则 external_directory 仅凭路径无法授权
 +          yield* assertExternalDirectoryEffect(ctx, filepath, {
-+            // Auto review needs the write payload intent before the later edit
-+            // permission diff exists; otherwise external_directory is path-only.
 +            metadata: { action_kind: "tool", tool: "write", operation: "write", content: params.content },
 +          })
  
            const exists = yield* fs.existsSafe(filepath)
            const source = exists ? yield* Bom.readFile(fs, filepath) : { bom: false, text: "" }
 diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
-index 3d6e97a09e39286f24d690eb06b3059a6ff654a7..575d0c93ef1c833eb15d97cb64717bdfe37c0464 100644
+index 7a7db9ec75..f289a4cf8f 100644
 --- a/packages/opencode/test/permission/auto.test.ts
 +++ b/packages/opencode/test/permission/auto.test.ts
-@@ -202,7 +202,7 @@ describe("permission auto routing", () => {
+@@ -142,8 +142,9 @@ describe("permission auto routing", () => {
      await expect(shellExternalDirectory("rm -rf /")).resolves.toMatchObject({ action: "deny", source: "precheck" })
    })
  
+-  // #203：非 shell external_directory 缺少命令证据，走既有人工审批，不进入 reviewer
 -  test("keeps non-shell external directory auto on the user approval path", async () => {
++  // #210：tool-origin external_directory 携带 action_kind/tool/operation 证据，路由到 reviewer
++  // #210：无来源证据或证据不全的 external_directory 仍走人工审批，不进入 reviewer
 +  test("routes tool-origin external directory auto decisions to reviewer", async () => {
      let called = false
      await expect(
        Effect.runPromise(
-@@ -211,6 +211,9 @@ describe("permission auto routing", () => {
+@@ -151,7 +152,12 @@ describe("permission auto routing", () => {
+           {
              permission: "external_directory",
              patterns: [process.platform === "win32" ? "C:/Users/*" : "/home/*"],
-             metadata: {
+-            metadata: { filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa" },
++            metadata: {
 +              action_kind: "tool",
 +              tool: "read",
 +              operation: "read",
-               filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa",
-             },
++              filepath: process.platform === "win32" ? "C:/Users/Alice/.ssh/id_rsa" : "/home/alice/.ssh/id_rsa",
++            },
            },
-@@ -220,8 +223,71 @@ describe("permission auto routing", () => {
+           {
+             review: () =>
+@@ -159,8 +165,73 @@ describe("permission auto routing", () => {
                  called = true
                  return {
                    action: "deny" as const,
@@ -248,6 +257,7 @@ index 3d6e97a09e39286f24d690eb06b3059a6ff654a7..575d0c93ef1c833eb15d97cb64717bdf
 +    expect(called).toBe(true)
 +  })
 +
++  // #210：仅 filepath 无 tool 证据——回退人工审批，reviewer 不被调用
 +  test("keeps external directory requests without tool evidence on the user approval path", async () => {
 +    let called = false
 +    await expect(
@@ -279,6 +289,7 @@ index 3d6e97a09e39286f24d690eb06b3059a6ff654a7..575d0c93ef1c833eb15d97cb64717bdf
 +    expect(called).toBe(false)
 +  })
 +
++  // #210：action_kind=tool 但缺 tool/operation——证据不全，仍回退人工审批
 +  test("keeps malformed tool-origin external directory requests on the user approval path", async () => {
 +    let called = false
 +    await expect(
@@ -304,22 +315,32 @@ index 3d6e97a09e39286f24d690eb06b3059a6ff654a7..575d0c93ef1c833eb15d97cb64717bdf
                    user_authorization: "unknown" as const,
                  }
 diff --git a/packages/opencode/test/tool/external-directory.test.ts b/packages/opencode/test/tool/external-directory.test.ts
-index e59caaa72087e96f335d2fda9e44f4fbcd8313ab..7d4cc7f9ca205bae9c425e6d33cf3fc45026d109 100644
+index d43accfb70..fcdca6754e 100644
 --- a/packages/opencode/test/tool/external-directory.test.ts
 +++ b/packages/opencode/test/tool/external-directory.test.ts
-@@ -94,6 +94,28 @@ describe("tool.assertExternalDirectory", () => {
+@@ -7,7 +7,7 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+ import type { Tool } from "@/tool/tool"
+ import { assertExternalDirectoryEffect } from "../../src/tool/external-directory"
+ import { Filesystem } from "@/util/filesystem"
+-import { TestInstance, tmpdirScoped } from "../fixture/fixture"
++import { TestInstance, provideInstance, tmpdirScoped } from "../fixture/fixture"
+ import type { Permission } from "../../src/permission"
+ import { SessionID, MessageID } from "../../src/session/schema"
+ import { testEffect } from "../lib/effect"
+@@ -105,6 +105,29 @@ describe("tool.assertExternalDirectory", () => {
      }),
    )
  
-+  it.live("preserves tool-origin metadata on external directory requests", () =>
++  // #210：tool-origin metadata 透传到 external_directory 请求，filepath/parentDir 仍由门禁补全
++  it.instance("preserves tool-origin metadata on external directory requests", () =>
 +    Effect.gen(function* () {
++      const test = yield* TestInstance
 +      const { requests, ctx } = makeCtx()
++      const target = path.join(path.dirname(test.directory), "outside", "file.txt")
 +
-+      yield* provideInstance("/tmp/project")(
-+        assertExternalDirectoryEffect(ctx, "/tmp/outside/file.txt", {
-+          metadata: { action_kind: "tool", tool: "read", operation: "read" },
-+        }),
-+      )
++      yield* assertExternalDirectoryEffect(ctx, target, {
++        metadata: { action_kind: "tool", tool: "read", operation: "read" },
++      })
 +
 +      const req = requests.find((r) => r.permission === "external_directory")
 +      expect(req).toBeDefined()
@@ -327,16 +348,16 @@ index e59caaa72087e96f335d2fda9e44f4fbcd8313ab..7d4cc7f9ca205bae9c425e6d33cf3fc4
 +        action_kind: "tool",
 +        tool: "read",
 +        operation: "read",
-+        filepath: process.platform === "win32" ? "F:\\tmp\\outside\\file.txt" : "/tmp/outside/file.txt",
-+        parentDir: process.platform === "win32" ? "F:\\tmp\\outside" : "/tmp/outside",
++        filepath: target,
++        parentDir: path.dirname(target),
 +      })
 +    }),
 +  )
 +
-   it.live("skips prompting when bypass=true", () =>
-     provideInstance("/tmp/project")(
-       Effect.gen(function* () {
-@@ -113,10 +135,8 @@ describe("tool.assertExternalDirectory", () => {
+   if (process.platform === "win32") {
+     it.instance(
+       "normalizes Windows path variants to one glob",
+@@ -112,10 +135,8 @@ describe("tool.assertExternalDirectory", () => {
          Effect.gen(function* () {
            const { requests, ctx } = makeCtx()
  
@@ -349,7 +370,7 @@ index e59caaa72087e96f335d2fda9e44f4fbcd8313ab..7d4cc7f9ca205bae9c425e6d33cf3fc4
            const alt = target
              .replace(/^[A-Za-z]:/, "")
              .replaceAll("\\", "/")
-@@ -125,7 +145,7 @@ describe("tool.assertExternalDirectory", () => {
+@@ -124,7 +145,7 @@ describe("tool.assertExternalDirectory", () => {
            yield* assertExternalDirectoryEffect(ctx, alt)
  
            const req = requests.find((r) => r.permission === "external_directory")

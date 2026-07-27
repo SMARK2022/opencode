@@ -2,239 +2,82 @@ From 7f397680e3f4aea89ad3e68562af4cbe6464d8b0 Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Fri, 22 May 2026 01:35:29 +0800
 Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=8A=A0=E5=88=A0=E6=94=B9?=
- =?UTF-8?q?=E8=A1=8C=E6=95=B0=E5=AE=9E=E6=97=B6=E6=98=BE=E7=A4=BA=EF=BC=9B?=
- =?UTF-8?q?=E6=B7=BB=E5=8A=A0=E5=BE=85=E5=A4=84=E7=90=86=E5=B7=A5=E5=85=B7?=
- =?UTF-8?q?=E8=BE=93=E5=85=A5=E8=A7=A3=E6=9E=90=E5=99=A8=E5=92=8C=E7=9B=B8?=
- =?UTF-8?q?=E5=85=B3=E7=BB=9F=E8=AE=A1=E5=8A=9F=E8=83=BD=EF=BC=8C=E4=BC=98?=
- =?UTF-8?q?=E5=8C=96=E7=BC=96=E8=BE=91=E5=92=8C=E8=A1=A5=E4=B8=81=E5=B7=A5?=
- =?UTF-8?q?=E5=85=B7=E7=9A=84=E6=B6=88=E6=81=AF=E6=98=BE=E7=A4=BA?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index b16bc8a7ef43320380febcc451e2a2e5c9fb9140..8b4995cb0bb4e0248277c6516776489710340482 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -110,6 +110,11 @@ import { previewDiff } from "@tui/util/preview-diff"
- import { pendingAssistantID, shouldCullSessionViewport, shouldRefreshStaleBusyStatus } from "@tui/util/session-pending"
- import { ConnectionError } from "../../util/connection-error"
- import { ContextUsagePanel } from "./context-usage"
-+import {
-+  createPendingToolInputParser,
-+  PENDING_TOOL_INPUT_PROGRESS_INTERVAL,
-+  type PendingToolInputStats,
-+} from "./pending-tool-input"
- 
- addDefaultParsers(parsers.parsers)
- 
-@@ -1912,6 +1917,66 @@ function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_C
-   const preview = charLimited ? text.slice(0, maxChars).trimEnd() : text
-   return preview ? [preview, "…"].join("\n") : "…"
- }
-+
-+function createPendingToolInputStats(part: () => ToolPart) {
-+  const [stats, setStats] = createSignal<PendingToolInputStats>()
-+  let parser = createPendingToolInputParser(part().tool)
-+  let key = ""
-+  let consumed = 0
-+  let timer: Timer | undefined
-+
-+  function flush() {
-+    timer = undefined
-+    setStats(parser.stats())
-+  }
-+
-+  createEffect(() => {
-+    const current = part()
-+    const raw = current.state.status === "pending" ? current.state.raw : ""
-+    const nextKey = `${current.id}:${current.tool}`
-+    if (nextKey !== key || raw.length < consumed) {
-+      if (timer) clearTimeout(timer)
-+      timer = undefined
-+      parser = createPendingToolInputParser(current.tool)
-+      key = nextKey
-+      consumed = 0
-+      setStats(undefined)
-+    }
-+    const delta = raw.slice(consumed)
-+    consumed = raw.length
-+    if (!delta) return
-+
-+    parser.push(delta)
-+    // This stays behind the TUI render boundary: raw SDK events and persisted
-+    // parts keep their original cadence while large streamed tool inputs only
-+    // refresh the tiny line-count preview at human-visible speed.
-+    if (!timer) timer = setTimeout(flush, PENDING_TOOL_INPUT_PROGRESS_INTERVAL)
-+  })
-+
-+  onCleanup(() => {
-+    if (timer) clearTimeout(timer)
-+  })
-+
-+  return stats
-+}
-+
-+function PendingStats(props: { stats: PendingToolInputStats | undefined }) {
-+  const { theme } = useTheme()
-+  return (
-+    <>
-+      <Show when={props.stats?.removed}>
-+        <span style={{ fg: theme.diffRemoved }}> -{props.stats!.removed}</span>
-+      </Show>
-+      <Show when={props.stats?.added}>
-+        <span style={{ fg: theme.diffAdded }}> +{props.stats!.added}</span>
-+      </Show>
-+    </>
-+  )
-+}
-+
-+function pendingPath(pathFormatter: ReturnType<typeof usePathFormatter>, filePath?: string) {
-+  return filePath ? pathFormatter.format(filePath) : undefined
-+}
- function GenericTool(props: ToolProps<any>) {
-   const { theme } = useTheme()
-   const ctx = use()
-@@ -1945,7 +2010,7 @@ function InlineTool(props: {
-   icon: string
-   iconColor?: RGBA
-   complete: any
--  pending: string
-+  pending: JSX.Element
-   spinner?: boolean
-   children: JSX.Element
-   part: ToolPart
-@@ -2252,6 +2317,18 @@ function Write(props: ToolProps<typeof WriteTool>) {
-   const ctx = use()
-   const { theme, syntax } = useTheme()
-   const pathFormatter = usePathFormatter()
-+  const pendingStats = createPendingToolInputStats(() => props.part)
-+  const pending = createMemo(() => {
-+    const stats = pendingStats()
-+    const filePath = pendingPath(pathFormatter, stats?.filePath)
-+    if (!filePath && !stats?.added) return "Preparing write..."
-+    return (
-+      <>
-+        Write<Show when={filePath}> {filePath}</Show>
-+        <PendingStats stats={stats} />
-+      </>
-+    )
-+  })
-   const code = createMemo(() => {
-     if (!props.input.content) return ""
-     return props.input.content
-@@ -2322,7 +2399,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
-         </BlockTool>
-       </Match>
-       <Match when={true}>
--        <InlineTool icon="←" pending="Preparing write..." complete={props.input.filePath} part={props.part}>
-+        <InlineTool icon="←" pending={pending()} complete={props.input.filePath} part={props.part}>
-           Write {pathFormatter.format(props.input.filePath)}
-         </InlineTool>
-       </Match>
-@@ -2486,6 +2563,18 @@ function Task(props: ToolProps<typeof TaskTool>) {
- function Edit(props: ToolProps<typeof EditTool>) {
-   const ctx = use()
-   const pathFormatter = usePathFormatter()
-+  const pendingStats = createPendingToolInputStats(() => props.part)
-+  const pending = createMemo(() => {
-+    const stats = pendingStats()
-+    const filePath = pendingPath(pathFormatter, stats?.filePath)
-+    if (!filePath && !stats?.added && !stats?.removed) return "Preparing edit..."
-+    return (
-+      <>
-+        Edit<Show when={filePath}> {filePath}</Show>
-+        <PendingStats stats={stats} />
-+      </>
-+    )
-+  })
- 
-   const view = createMemo(() => {
-     const diffStyle = ctx.tui.diff_style
-@@ -2520,7 +2609,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
-         </BlockTool>
-       </Match>
-       <Match when={true}>
--        <InlineTool icon="←" pending="Preparing edit..." complete={props.input.filePath} part={props.part}>
-+        <InlineTool icon="←" pending={pending()} complete={props.input.filePath} part={props.part}>
-           Edit {pathFormatter.format(props.input.filePath)} {input({ replaceAll: props.input.replaceAll })}
-         </InlineTool>
-       </Match>
-@@ -2532,6 +2621,20 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
-   const ctx = use()
-   const { theme } = useTheme()
-   const pathFormatter = usePathFormatter()
-+  const pendingStats = createPendingToolInputStats(() => props.part)
-+  const pending = createMemo(() => {
-+    const stats = pendingStats()
-+    if (!stats) return "Preparing patch..."
-+    const filePath = pendingPath(pathFormatter, stats.filePath)
-+    return (
-+      <>
-+        Patch <Show when={filePath} fallback={`${stats.fileCount} file${stats.fileCount === 1 ? "" : "s"}`}>
-+          {filePath}
-+        </Show>
-+        <PendingStats stats={stats} />
-+      </>
-+    )
-+  })
- 
-   const files = createMemo(() => props.metadata.files ?? [])
- 
-@@ -2598,7 +2701,7 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
-           </For>
-       </Match>
-       <Match when={true}>
--        <InlineTool icon="%" pending="Preparing patch..." complete={false} part={props.part}>
-+        <InlineTool icon="%" pending={pending()} complete={false} part={props.part}>
-           Patch
-         </InlineTool>
-       </Match>
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/pending-tool-input.ts b/packages/opencode/src/cli/cmd/tui/routes/session/pending-tool-input.ts
+diff --git a/packages/tui/src/routes/session/pending-tool-input.ts b/packages/tui/src/routes/session/pending-tool-input.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ab0c959b6e0fdb1ebfd65efc28e253653bf6c7c9
 --- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/pending-tool-input.ts
-@@ -0,0 +1,234 @@
++++ b/packages/tui/src/routes/session/pending-tool-input.ts
+@@ -0,0 +1,289 @@
++// #187：pending 工具输入的可展示统计（路径/文件数/增减行）
 +export type PendingToolInputStats = {
++  // #187：filePath 可空（多文件 patch 时用 fileCount）
 +  filePath?: string
++  // #187：apply_patch 多文件计数
 +  fileCount: number
++  // #187：新增行（write/content 或 newString 或 +diff）
 +  added: number
++  // #187：删除行（oldString 或 -diff）
 +  removed: number
 +}
 +
++// #187：UI 文案纯函数；本 patch 先 - 后 +（#189 再调换为 +N -M）
++export function formatPendingCounts(stats: PendingToolInputStats | undefined) {
++  if (!stats) return ""
++  let out = ""
++  // #187：removed 在前，对齐最初 PendingStats 扫读
++  if (stats.removed) out += ` -${stats.removed}`
++  if (stats.added) out += ` +${stats.added}`
++  return out
++}
++
++// #187：pending 标题路径片段（无路径返回空，交给 Preparing 占位）
++export function formatPendingPathLabel(filePath: string | undefined, fileCount: number) {
++  if (filePath) return filePath
++  if (fileCount > 0) return `${fileCount} file${fileCount === 1 ? "" : "s"}`
++  return ""
++}
++
++// #187：pending 统计刷新间隔；过密会跟手抖，过疏会丢进度感
 +export const PENDING_TOOL_INPUT_PROGRESS_INTERVAL = 200
 +
++// #187：按 tool 名选择流式 JSON 字段扫描器；未知 tool 空实现
 +export function createPendingToolInputParser(tool: string) {
++  // #187：工具名与 session 渲染器三分支对齐
 +  if (tool === "apply_patch") return createApplyPatchInputParser()
 +  if (tool === "edit") return createEditInputParser()
 +  if (tool === "write") return createWriteInputParser()
++  // #187：bash 等无 raw 进度 UI 的工具返回空 parser
 +  return {
 +    push(_input: string) {},
 +    stats: () => undefined,
 +  }
 +}
 +
++// #187：edit 扫 filePath/oldString/newString，added=new 行 removed=old 行
 +function createEditInputParser() {
 +  let filePath = ""
++  // #187：old/new 分开计数，对应 UI -N +M
 +  const oldString = createLineCounter()
 +  const newString = createLineCounter()
 +  const scanner = createJsonStringFieldScanner(["filePath", "oldString", "newString"], (field, value) => {
++    // #187：字段值可能分片到达，路径用 += 拼接
 +    if (field === "filePath") filePath += value
 +    if (field === "oldString") oldString.push(value)
 +    if (field === "newString") newString.push(value)
 +  })
 +  return {
 +    push: scanner.push,
++    // #187：edit 单文件；added=newString 行，removed=oldString 行
 +    stats: () => pendingStats(filePath, filePath ? 1 : 0, newString.count(), oldString.count()),
 +  }
 +}
 +
++// #187：write 扫 filePath/content，added=content 行 removed=0
 +function createWriteInputParser() {
 +  let filePath = ""
 +  const content = createLineCounter()
 +  const scanner = createJsonStringFieldScanner(["filePath", "content"], (field, value) => {
++    // #187：content 分片按字符计行，不缓存全文
 +    if (field === "filePath") filePath += value
 +    if (field === "content") content.push(value)
 +  })
@@ -244,6 +87,7 @@ index 0000000000000000000000000000000000000000..ab0c959b6e0fdb1ebfd65efc28e25365
 +  }
 +}
 +
++// #187：apply_patch 只扫 patchText 字段交给 patch stats
 +function createApplyPatchInputParser() {
 +  const patch = createPatchStatsParser()
 +  const scanner = createJsonStringFieldScanner(["patchText"], (_, value) => patch.push(value))
@@ -253,14 +97,17 @@ index 0000000000000000000000000000000000000000..ab0c959b6e0fdb1ebfd65efc28e25365
 +  }
 +}
 +
++// #187：全空时返回 undefined，UI 显示 Preparing… 占位
 +function pendingStats(filePath: string, fileCount: number, added: number, removed: number) {
 +  if (!filePath && fileCount === 0 && added === 0 && removed === 0) return undefined
 +  return { filePath: filePath || undefined, fileCount, added, removed }
 +}
 +
++// #187：增量计行：用 chars/newlines/tail，不保存全文
 +function createLineCounter() {
 +  let chars = 0
 +  let newlines = 0
++  // #187：tail>0 表示末行无换行也计 1 行
 +  let tail = 0
 +  return {
 +    push(value: string) {
@@ -275,25 +122,31 @@ index 0000000000000000000000000000000000000000..ab0c959b6e0fdb1ebfd65efc28e25365
 +      }
 +    },
 +    count() {
++      // #187：空串 0 行；"a" 1 行；"a\n" 1 行；"a\nb" 2 行
 +      if (chars === 0) return 0
 +      return newlines + (tail > 0 ? 1 : 0)
 +    },
 +  }
 +}
 +
++// #187：最小 JSON 字符串字段状态机（含 escape/unicode）
 +function createJsonStringFieldScanner(fields: readonly string[], onValue: (field: string, value: string) => void) {
-+  // Pending tool arguments are not valid JSON until the model finishes the
-+  // tool call, so the TUI scans only string fields it can display and never
-+  // reparses the accumulated raw buffer on every streamed delta.
++  // #187：pending 参数在收尾前不是合法 JSON，只扫可展示字符串字段
++  // #187：禁止每次 delta 全量 JSON.parse，避免 O(n^2) 与半截转义炸掉
++  // #187：只关心调用方声明的字段名集合
 +  const wanted = new Set(fields)
++  // #187：状态机：inString/escaping/unicode 与 key/value 相位
 +  let pendingKey = ""
 +  let expectingValueFor = ""
++  // #187：当前正在读的 value 字段名；空表示在 key 相位
 +  let activeField = ""
 +  let key = ""
++  // #187：是否位于 JSON 字符串 token 内部
 +  let inString = false
 +  let escaping = false
 +  let unicode: string | undefined
 +
++  // #187：解码后的片段：在 value 相位回调，在 key 相位累加 key
 +  function pushDecoded(value: string) {
 +    if (activeField) {
 +      onValue(activeField, value)
@@ -302,7 +155,8 @@ index 0000000000000000000000000000000000000000..ab0c959b6e0fdb1ebfd65efc28e25365
 +    key += value
 +  }
 +
-+  function decodeEscaped(char: string) {
++  // #187：JSON 转义还原，\\uXXXX 走 unicode 缓冲
++function decodeEscaped(char: string) {
 +    if (char === "n") return "\n"
 +    if (char === "r") return "\r"
 +    if (char === "t") return "\t"
@@ -315,7 +169,8 @@ index 0000000000000000000000000000000000000000..ab0c959b6e0fdb1ebfd65efc28e25365
 +    push(input: string) {
 +      for (const char of input) {
 +        if (inString) {
-+          if (unicode !== undefined) {
++          // #187：收集 unicode 四位 hex
++        if (unicode !== undefined) {
 +            unicode += char
 +            if (unicode.length === 4) {
 +              const code = Number.parseInt(unicode, 16)
@@ -325,7 +180,8 @@ index 0000000000000000000000000000000000000000..ab0c959b6e0fdb1ebfd65efc28e25365
 +            }
 +            continue
 +          }
-+          if (escaping) {
++          // #187：处理转义序列或进入 \\u
++        if (escaping) {
 +            if (char === "u") {
 +              unicode = ""
 +              continue
@@ -368,6 +224,7 @@ index 0000000000000000000000000000000000000000..ab0c959b6e0fdb1ebfd65efc28e25365
 +  }
 +}
 +
++// #187：流式解析 apply_patch 文本，累计 +/- 与文件数
 +function createPatchStatsParser() {
 +  // apply_patch is line-oriented. Counting only complete lines matches the
 +  // parser's eventual view and avoids flickering counts from half-written rows.
@@ -376,7 +233,8 @@ index 0000000000000000000000000000000000000000..ab0c959b6e0fdb1ebfd65efc28e25365
 +  let mode: "idle" | "add" | "delete" | "update" = "idle"
 +  let current: { filePath: string; added: number; removed: number } | undefined
 +
-+  function file(filePath: string) {
++  // #187：登记一个 patch 文件路径并增加 fileCount
++function file(filePath: string) {
 +    const hit = files.get(filePath)
 +    if (hit) return hit
 +    const next = { filePath, added: 0, removed: 0 }
@@ -384,28 +242,36 @@ index 0000000000000000000000000000000000000000..ab0c959b6e0fdb1ebfd65efc28e25365
 +    return next
 +  }
 +
-+  function processLine(input: string) {
++  // #187：按行识别 *** Update/Add/Delete File 与 diff 行
++function processLine(input: string) {
 +    const trimmed = input.trim()
++    // #187：Begin/End 标记本身不计文件
 +    if (trimmed === "*** Begin Patch" || trimmed === "*** End Patch") return
-+    if (trimmed.startsWith("*** Add File: ")) {
++    // #187：新增文件头
++      if (trimmed.startsWith("*** Add File: ")) {
 +      current = file(trimmed.slice("*** Add File: ".length))
 +      mode = "add"
 +      return
 +    }
-+    if (trimmed.startsWith("*** Delete File: ")) {
++    // #187：删除文件头
++      if (trimmed.startsWith("*** Delete File: ")) {
 +      current = file(trimmed.slice("*** Delete File: ".length))
 +      mode = "delete"
 +      return
 +    }
-+    if (trimmed.startsWith("*** Update File: ")) {
++    // #187：更新文件头
++      if (trimmed.startsWith("*** Update File: ")) {
 +      current = file(trimmed.slice("*** Update File: ".length))
 +      mode = "update"
 +      return
 +    }
 +    if (!current) return
-+    if (mode === "add" && input.startsWith("+")) current.added++
-+    if (mode === "update" && input.startsWith("+")) current.added++
-+    if (mode === "update" && input.startsWith("-")) current.removed++
++    // #187：add 模式仅 + 行计入 added
++      if (mode === "add" && input.startsWith("+")) current.added++
++    // #187：update 的 + 行
++      if (mode === "update" && input.startsWith("+")) current.added++
++    // #187：update 的 - 行
++      if (mode === "update" && input.startsWith("-")) current.removed++
 +  }
 +
 +  return {
@@ -431,231 +297,319 @@ index 0000000000000000000000000000000000000000..ab0c959b6e0fdb1ebfd65efc28e25365
 +    },
 +  }
 +}
-diff --git a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-index bee27edbae7d4744bf9a3626ab6f558d185f5c54..bdee6d62a979c01658f5769bc545e33326866014 100644
---- a/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-+++ b/packages/opencode/test/cli/cmd/tui/session-message-render.test.tsx
-@@ -3,7 +3,7 @@ import { expect, test } from "bun:test"
- import { Global } from "@opencode-ai/core/global"
- import { testRender, useRenderer } from "@opentui/solid"
- import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
--import type { AssistantMessage, Part, Session as SessionInfo } from "@opencode-ai/sdk/v2"
-+import type { AssistantMessage, GlobalEvent, Part, Session as SessionInfo } from "@opencode-ai/sdk/v2"
- import { onCleanup } from "solid-js"
- import { tmpdir } from "../../../fixture/fixture"
- import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
-@@ -27,7 +27,7 @@ import { Session } from "../../../../src/cli/cmd/tui/routes/session"
- import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../../src/cli/cmd/tui/keymap"
- import { DialogProvider } from "../../../../src/cli/cmd/tui/ui/dialog"
- import { ToastProvider } from "../../../../src/cli/cmd/tui/ui/toast"
--import { createFetch, directory, eventSource, json } from "./sync-fixture"
-+import { createEventSource, createFetch, directory, json } from "./sync-fixture"
- 
- const sessionID = "ses_render"
- 
-@@ -109,10 +109,137 @@ test("assistant first visible part ignores hidden completed tool parts", async (
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -58,6 +58,13 @@ import { Prompt, type PromptRef } from "../../component/prompt"
+ import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "../../util/smooth-scrollbar"
+ import { ConnectionError } from "../../util/connection-error"
+ import { previewDiff } from "../../util/preview-diff"
++import {
++  createPendingToolInputParser,
++  formatPendingCounts,
++  formatPendingPathLabel,
++  PENDING_TOOL_INPUT_PROGRESS_INTERVAL,
++  type PendingToolInputStats,
++} from "./pending-tool-input"
+ import {
+   hasStreamingAssistant,
+   pendingAssistantID,
+@@ -2114,12 +2121,72 @@ function GenericTool(props: ToolProps) {
    )
- })
+ }
  
-+test("pending edit tool shows streamed deletion and addition counts", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_pending_edit", 1)],
-+    {
-+      msg_pending_edit: [
-+        pendingToolPart(
-+          "part_edit",
-+          "msg_pending_edit",
-+          "edit",
-+          JSON.stringify({
-+            oldString: 'first "quoted" line\nsecond \\ path line\n',
-+            filePath: "src/space file.ts",
-+            newString: 'replacement "quoted" line\n',
-+          }),
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/space file.ts -2 +1")))
-+      expect(frame[findRow(frame, "Edit src/space file.ts")]).toContain("-2 +1")
-+    },
++
++// #187：从 part.state.raw 增量喂 parser，200ms 节流出 stats
++function createPendingToolInputStats(part: () => ToolPart) {
++  const [stats, setStats] = createSignal<PendingToolInputStats>()
++  let parser = createPendingToolInputParser(part().tool)
++  let key = ""
++  let consumed = 0
++  let timer: Timer | undefined
++  function flush() {
++    timer = undefined
++    // #187：只在 tick 边界读 stats，避免每个 delta 触发渲染
++    setStats(parser.stats())
++  }
++  createEffect(() => {
++    const current = part()
++    const raw = current.state.status === "pending" ? current.state.raw : ""
++    const nextKey = `${current.id}:${current.tool}`
++    if (nextKey !== key || raw.length < consumed) {
++      // #187：换 part/tool 或 raw 回退时重置解析器
++      if (timer) clearTimeout(timer)
++      timer = undefined
++      parser = createPendingToolInputParser(current.tool)
++      key = nextKey
++      consumed = 0
++      setStats(undefined)
++    }
++    const delta = raw.slice(consumed)
++    consumed = raw.length
++    if (!delta) return
++    // #187：只 push 增量，不重放全文
++    parser.push(delta)
++    if (!timer) timer = setTimeout(flush, PENDING_TOOL_INPUT_PROGRESS_INTERVAL)
++  })
++  onCleanup(() => {
++    if (timer) clearTimeout(timer)
++  })
++  return stats
++}
++
++function PendingStats(props: { stats: PendingToolInputStats | undefined }) {
++  const { theme } = useTheme()
++  return (
++    <>
++      <Show when={props.stats?.removed}>
++        <span style={{ fg: theme.diffRemoved }}> -{props.stats!.removed}</span>
++      </Show>
++      <Show when={props.stats?.added}>
++        <span style={{ fg: theme.diffAdded }}> +{props.stats!.added}</span>
++      </Show>
++    </>
 +  )
-+})
++}
 +
-+test("pending edit tool reports deletions before the JSON input is complete", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_pending_edit_partial", 1)],
-+    {
-+      msg_pending_edit_partial: [
-+        pendingToolPart(
-+          "part_edit_partial",
-+          "msg_pending_edit_partial",
-+          "edit",
-+          '{"filePath":"src/partial.ts","oldString":"one\\ntwo',
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/partial.ts -2")))
-+      const row = frame[findRow(frame, "Edit src/partial.ts")]
++// #187：有路径则相对化，空路径留给 Preparing 占位
++function pendingPath(pathFormatter: ReturnType<typeof usePathFormatter>, filePath?: string) {
++  if (!filePath) return undefined
++  return pathFormatter.format(filePath)
++}
 +
-+      expect(row).toContain("-2")
-+      expect(row).not.toContain("+1")
-+    },
-+  )
-+})
-+
-+test("pending apply_patch tool summarizes streamed multi-file changes", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_pending_patch", 1)],
-+    {
-+      msg_pending_patch: [
-+        pendingToolPart(
-+          "part_patch",
-+          "msg_pending_patch",
-+          "apply_patch",
-+          JSON.stringify({
-+            patchText: [
-+              "*** Begin Patch",
-+              "*** Update File: src/a.ts",
-+              "@@",
-+              "-old",
-+              "+new",
-+              "*** Add File: src/b.ts",
-+              "+one",
-+              "+two",
-+              "*** End Patch",
-+            ].join("\n"),
-+          }),
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Patch 2 files -1 +3")))
-+      expect(frame[findRow(frame, "Patch 2 files")]).toContain("-1 +3")
-+    },
-+  )
-+})
-+
-+test("pending write tool shows streamed addition counts", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_pending_write", 1)],
-+    {
-+      msg_pending_write: [
-+        pendingToolPart(
-+          "part_write",
-+          "msg_pending_write",
-+          "write",
-+          JSON.stringify({ filePath: "src/new file.ts", content: "one\ntwo\n" }),
-+        ),
-+      ],
-+    },
-+    async (app) => {
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Write src/new file.ts +2")))
-+      expect(frame[findRow(frame, "Write src/new file.ts")]).toContain("+2")
-+    },
-+  )
-+})
-+
-+test("pending tool line counts update from streamed raw deltas", async () => {
-+  await withRenderedSession(
-+    [assistantMessage("msg_live_delta", 1)],
-+    {
-+      msg_live_delta: [pendingToolPart("part_live_delta", "msg_live_delta", "edit", "")],
-+    },
-+    async (app, emit) => {
-+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("Preparing edit...")))
-+
-+      emit(
-+        partDeltaEvent(
-+          "evt_live_delta",
-+          "msg_live_delta",
-+          "part_live_delta",
-+          JSON.stringify({ filePath: "src/live.ts", oldString: "one\ntwo", newString: "three\n" }),
-+        ),
-+      )
-+
-+      await Bun.sleep(50)
-+      await app.renderOnce()
-+      expect(rows(app.captureCharFrame()).some((line) => line.includes("Edit src/live.ts -2 +1"))).toBe(false)
-+
-+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Edit src/live.ts -2 +1")))
-+      expect(frame[findRow(frame, "Edit src/live.ts")]).toContain("-2 +1")
-+    },
-+  )
-+})
-+
- async function withRenderedSession(
-   messages: AssistantMessage[],
-   parts: Record<string, Part[]>,
--  run: (app: Awaited<ReturnType<typeof testRender>>) => Promise<void>,
-+  run: (app: Awaited<ReturnType<typeof testRender>>, emit: (event: GlobalEvent) => void) => Promise<void>,
-   kv: Record<string, unknown> = {},
- ) {
-   const previous = Global.Path.state
-@@ -132,17 +259,22 @@ async function withRenderedSession(
-     return undefined
-   })
+ function InlineTool(props: {
+   icon: string
+   iconColor?: RGBA
+   color?: RGBA
+   complete: unknown
+-  pending: string
++  // #187：pending 支持字符串或流式统计 JSX
++  pending: JSX.Element
+   failure?: string
+   spinner?: boolean
+   separate?: boolean
+@@ -2202,7 +2269,8 @@ export function InlineToolRow(props: {
+   error?: string
+   errorExpanded?: boolean
+   complete: unknown
+-  pending: string
++  // #187：与 InlineTool 同口径，允许 pending 统计片段
++  pending: JSX.Element
+   failure?: string
+   spinner?: boolean
+   separate?: boolean
+@@ -2234,13 +2302,20 @@ export function InlineToolRow(props: {
+         <Match when={true}>
+           <Show
+             fallback={
+-              <text
+-                paddingLeft={3}
+-                fg={props.color}
+-                attributes={props.denied ? TextAttributes.STRIKETHROUGH : undefined}
+-              >
+-                ~ {props.pending}
+-              </text>
++              // #187：pending 可能是带颜色的 +/- 片段，不能塞进单一 text 节点
++              <box flexDirection="row" paddingLeft={3}>
++                <text fg={props.color} attributes={props.denied ? TextAttributes.STRIKETHROUGH : undefined}>
++                  ~{" "}
++                </text>
++                <Show
++                  when={typeof props.pending === "string"}
++                  fallback={props.pending}
++                >
++                  <text fg={props.color} attributes={props.denied ? TextAttributes.STRIKETHROUGH : undefined}>
++                    {props.pending as string}
++                  </text>
++                </Show>
++              </box>
+             }
+             when={props.complete || props.failed}
+           >
+@@ -2532,6 +2607,21 @@ function Write(props: ToolProps) {
+   const { theme, syntax } = useTheme()
+   const pathFormatter = usePathFormatter()
+   const ctx = use()
++  // #187：流式 raw → 路径/+行 统计
++  const writePendingStats = createPendingToolInputStats(() => props.part)
++  // #187：无路径且无 added 时回落 Preparing write...
++  const writePending = createMemo(() => {
++    const stats = writePendingStats()
++    const filePath = pendingPath(pathFormatter, stats?.filePath)
++    if (!filePath && !stats?.added) return "Preparing write..."
++    return (
++      <>
++        Write
++        <Show when={filePath}> {filePath}</Show>
++        <PendingStats stats={stats} />
++      </>
++    )
++  })
+   // 文件内容展开/收缩：超过 10 行时默认收缩，点击展开
+   const [expanded, setExpanded] = createSignal(false)
+   const code = createMemo(() => {
+@@ -2638,7 +2728,7 @@ function Write(props: ToolProps) {
+       <Match when={true}>
+         <InlineTool
+           icon="←"
+-          pending="Preparing write..."
++          pending={writePending()}
+           complete={stringValue(props.input.filePath)}
+           part={props.part}
+         >
+@@ -2906,6 +2996,21 @@ function Edit(props: ToolProps) {
+   const ctx = use()
+   const { theme, syntax } = useTheme()
+   const pathFormatter = usePathFormatter()
++  // #187：流式 raw → 路径/+- 行统计
++  const editPendingStats = createPendingToolInputStats(() => props.part)
++  // #187：无路径且无 +/- 时回落 Preparing edit...
++  const editPending = createMemo(() => {
++    const stats = editPendingStats()
++    const filePath = pendingPath(pathFormatter, stats?.filePath)
++    if (!filePath && !stats?.added && !stats?.removed) return "Preparing edit..."
++    return (
++      <>
++        Edit
++        <Show when={filePath}> {filePath}</Show>
++        <PendingStats stats={stats} />
++      </>
++    )
++  })
+   // diff 内容展开/收缩：超过 20 行时默认收缩，避免长 diff 占满终端
+   const [expanded, setExpanded] = createSignal(false)
  
--  const app = await testRender(() => <SessionHarness fetch={calls.fetch} />, { width: 80, height: 16, footerHeight: 0 })
-+  const events = createEventSource()
-+  const app = await testRender(() => <SessionHarness fetch={calls.fetch} events={events.source} />, {
-+    width: 80,
-+    height: 16,
-+    footerHeight: 0,
+@@ -2972,7 +3077,7 @@ function Edit(props: ToolProps) {
+         </BlockTool>
+       </Match>
+       <Match when={true}>
+-        <InlineTool icon="←" pending="Preparing edit..." complete={stringValue(props.input.filePath)} part={props.part}>
++        <InlineTool icon="←" pending={editPending()} complete={stringValue(props.input.filePath)} part={props.part}>
+           Edit {pathFormatter.format(stringValue(props.input.filePath))} {input({ replaceAll: props.input.replaceAll })}
+         </InlineTool>
+       </Match>
+@@ -2984,6 +3089,23 @@ function ApplyPatch(props: ToolProps) {
+   const ctx = use()
+   const { theme, syntax } = useTheme()
+   const pathFormatter = usePathFormatter()
++  // #187：流式 patchText → 文件数与 +/- 
++  const patchPendingStats = createPendingToolInputStats(() => props.part)
++  // #187：stats 空回落 Preparing patch...；多文件用 fileCount
++  const patchPending = createMemo(() => {
++    const stats = patchPendingStats()
++    if (!stats) return "Preparing patch..."
++    const filePath = pendingPath(pathFormatter, stats.filePath)
++    return (
++      <>
++        Patch{" "}
++        <Show when={filePath} fallback={`${stats.fileCount} file${stats.fileCount === 1 ? "" : "s"}`}>
++          {filePath}
++        </Show>
++        <PendingStats stats={stats} />
++      </>
++    )
 +  })
  
-   try {
--    await run(app)
-+    await run(app, events.emit)
-   } finally {
-     app.renderer.destroy()
-     Global.Path.state = previous
-   }
- }
+   const files = createMemo(() => parseApplyPatchFiles(props.metadata.files))
  
--function SessionHarness(props: { fetch: typeof globalThis.fetch }) {
-+function SessionHarness(props: { fetch: typeof globalThis.fetch; events: ReturnType<typeof createEventSource>["source"] }) {
-   const renderer = useRenderer()
-   const config = createTuiResolvedConfig()
-   const keymap = createDefaultOpenTuiKeymap(renderer)
-@@ -159,7 +291,7 @@ function SessionHarness(props: { fetch: typeof globalThis.fetch }) {
-                   <SDKProvider
-                     url="http://test"
-                     directory={directory}
--                    testTransport={{ fetch: props.fetch, events: eventSource() }}
-+                    testTransport={{ fetch: props.fetch, events: props.events }}
-                   >
-                     <ProjectProvider>
-                       <SyncProvider>
-@@ -274,3 +406,31 @@ function completedToolPart(id: string, messageID: string, tool: string, input: R
-     },
-   } satisfies Extract<Part, { type: "tool" }>
- }
+@@ -3074,7 +3196,7 @@ function ApplyPatch(props: ToolProps) {
+         </For>
+       </Match>
+       <Match when={true}>
+-        <InlineTool icon="%" pending="Preparing patch..." failure="Patch failed" complete={false} part={props.part}>
++        <InlineTool icon="%" pending={patchPending()} failure="Patch failed" complete={false} part={props.part}>
+           Patch
+         </InlineTool>
+       </Match>
+diff --git a/packages/tui/test/routes/session/pending-tool-input.test.ts b/packages/tui/test/routes/session/pending-tool-input.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/test/routes/session/pending-tool-input.test.ts
+@@ -0,0 +1,87 @@
++import { describe, expect, test } from "bun:test"
++import {
++  createPendingToolInputParser,
++  formatPendingCounts,
++  formatPendingPathLabel,
++} from "../../../src/routes/session/pending-tool-input"
 +
-+function pendingToolPart(id: string, messageID: string, tool: string, raw: string) {
-+  return {
-+    id,
-+    sessionID,
-+    messageID,
-+    type: "tool",
-+    callID: id,
-+    tool,
-+    state: {
-+      status: "pending",
-+      input: {},
-+      raw,
-+    },
-+  } satisfies Extract<Part, { type: "tool" }>
-+}
++describe("pending tool input parser (#187)", () => {
++  test("edit parser counts old/new lines from streamed raw JSON", () => {
++    // #187：分段推入仍应得到稳定 added/removed
++    const parser = createPendingToolInputParser("edit")
++    const raw = JSON.stringify({
++      filePath: "src/a.ts",
++      oldString: "one\ntwo\n",
++      newString: "one\ntwo\nthree\n",
++    })
++    // #187：人为切断 JSON，验证跨分片拼接
++    parser.push(raw.slice(0, 20))
++    parser.push(raw.slice(20))
++    const stats = parser.stats()
++    expect(stats?.filePath).toBe("src/a.ts")
++    expect(stats?.removed).toBe(2)
++    expect(stats?.added).toBe(3)
++  })
 +
-+function partDeltaEvent(id: string, messageID: string, partID: string, delta: string): GlobalEvent {
-+  return {
-+    directory,
-+    project: "proj_test",
-+    payload: {
-+      id,
-+      type: "message.part.delta",
-+      properties: { sessionID, messageID, partID, field: "raw", delta },
-+    },
-+  }
-+}
++  test("write parser counts content lines and path", () => {
++    // #187：write 只有 added，removed 为 0
++    const parser = createPendingToolInputParser("write")
++    parser.push(JSON.stringify({ filePath: "b.ts", content: "a\nb\nc" }))
++    const stats = parser.stats()
++    expect(stats?.filePath).toBe("b.ts")
++    expect(stats?.added).toBe(3)
++    expect(stats?.removed).toBe(0)
++  })
++
++  test("apply_patch parser tracks file headers and diff lines", () => {
++    // #187：patchText 流式识别文件与 +/- 行
++    const parser = createPendingToolInputParser("apply_patch")
++    const patch = "*** Begin Patch\n*** Update File: x.ts\n@@\n-old\n+new\n+new2\n*** End Patch\n"
++    parser.push(JSON.stringify({ patchText: patch }))
++    const stats = parser.stats()
++    expect(stats?.fileCount).toBeGreaterThanOrEqual(1)
++    expect((stats?.added ?? 0) + (stats?.removed ?? 0)).toBeGreaterThan(0)
++  })
++
++  test("unknown tool parser stays empty", () => {
++    // #187：未知 tool 不抛错、无统计
++    const parser = createPendingToolInputParser("bash")
++    parser.push('{"command":"ls"}')
++    expect(parser.stats()).toBeUndefined()
++  })
++
++  test("formatPendingCounts uses - then + order for #187 UI", () => {
++    // #187：与 PendingStats 初始顺序一致（#189 会改为 +N -M）
++    expect(formatPendingCounts({ fileCount: 1, added: 1, removed: 2 })).toBe(" -2 +1")
++    expect(formatPendingPathLabel("src/space file.ts", 1)).toBe("src/space file.ts")
++  })
++
++  test("edit path and counts compose the pending headline contract", () => {
++    // #187：path + counts 文案合同，替代 source frame harness
++    const parser = createPendingToolInputParser("edit")
++    parser.push(
++      JSON.stringify({
++        filePath: "src/space file.ts",
++        oldString: "a\nb\n",
++        newString: "a\n",
++      }),
++    )
++    const stats = parser.stats()
++    const headline = `Edit ${formatPendingPathLabel(stats?.filePath, stats?.fileCount ?? 0)}${formatPendingCounts(stats)}`
++    expect(headline).toBe("Edit src/space file.ts -2 +1")
++  })
++
++  test("apply_patch multi-file headline uses fileCount when path absent", () => {
++    // #187：多文件 patch 标题用 N files
++    const parser = createPendingToolInputParser("apply_patch")
++    const patch =
++      "*** Begin Patch\n*** Update File: a.ts\n@@\n-old\n+new\n*** Update File: b.ts\n@@\n+x\n+y\n*** End Patch\n"
++    parser.push(JSON.stringify({ patchText: patch }))
++    const stats = parser.stats()!
++    const label = formatPendingPathLabel(undefined, stats.fileCount)
++    const headline = `Patch ${label}${formatPendingCounts(stats)}`
++    expect(label).toContain("file")
++    expect(headline.startsWith("Patch ")).toBe(true)
++    expect(formatPendingCounts(stats).length).toBeGreaterThan(0)
++  })
++})

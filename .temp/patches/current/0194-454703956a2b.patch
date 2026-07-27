@@ -4,514 +4,266 @@ Date: Fri, 22 May 2026 18:09:51 +0800
 Subject: [PATCH] fix: align upload token estimates with confirmed usage
 
 
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index a316ea1c5dfd1e78b4989a8bfcbc17fa82606d21..d4e1104c704cc7a9cf20490ee88d747e9a449494 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -41,7 +41,7 @@ import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v
- import { TuiEvent } from "../../event"
- import { iife } from "@/util/iife"
- import { Locale } from "@/util/locale"
--import { tokenAccounting } from "../../util/token-accounting"
-+import { tokenAccounting } from "@/token/accounting"
- import { formatDuration, formatDurationCompact } from "@/util/format"
- import { createColors, createFrames } from "../../ui/spinner.ts"
- import { useDialog } from "@tui/ui/dialog"
-diff --git a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-index 03421b3d767ad2fba4fd492b0c3039d0abb38aec..778c24c35be90e4d5e0807d29ea069fa4478992d 100644
---- a/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx
-@@ -5,7 +5,7 @@ import type { InternalTuiPlugin } from "../../plugin/internal"
- import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
- import { leadingAndTrailing, throttle } from "@solid-primitives/scheduled"
- import { createTokenFlowPulse } from "../../util/signal"
--import { tokenAccounting } from "../../util/token-accounting"
-+import { tokenAccounting } from "@/token/accounting"
- import { NetworkProxy } from "@opencode-ai/core/network-proxy"
- import { useLocal } from "@tui/context/local"
- 
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-index 2e7926438102cd2642b3a77fb4c6699aabf8784e..122d12aa0d539df2d81c5a2086b488ca7e4507db 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx
-@@ -6,7 +6,7 @@ import { SplitBorder } from "@tui/component/border"
- // [local-smark] UserMessage type needed for token accounting
- import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
- import { Locale } from "@/util/locale"
--import { tokenAccounting } from "../../util/token-accounting"
-+import { tokenAccounting } from "@/token/accounting"
- import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
- import { useTerminalDimensions } from "@opentui/solid"
- import { useCommandPalette } from "../../context/command-palette"
-diff --git a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-index b1a9ebb583197d6ac1d30bc9772c04059052b99e..c2aabf1ac627ece7d0591eeb1aa5db9dfeab5cde 100644
---- a/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/context-usage.ts
-@@ -42,7 +42,7 @@ import { WebSearchTool, Parameters as WebSearchParameters } from "@/tool/websear
- import { WriteTool, Parameters as WriteParameters } from "@/tool/write"
- import { usable as overflowUsable } from "@/session/overflow"
- import { estimateDataUrlInputTokens } from "./token-estimate"
--import { tokenAccounting } from "./token-accounting"
-+import { tokenAccounting } from "@/token/accounting"
- 
- type WithParts = {
-   info: Message
-diff --git a/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts b/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts
-index d0e1d96a68b596d1873f9e5aaf4506a37d56b670..5053c4b0c44cfefa2a21d899f373ac041cfa66cc 100644
---- a/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts
-+++ b/packages/opencode/src/cli/cmd/tui/util/token-estimate.ts
-@@ -7,7 +7,7 @@
-  * - UsageInfo: 消费端显示用的轻量类型
-  */
- 
--import { AttachmentToken } from "@/util/attachment-token"
-+import { TokenEstimate } from "@/token/estimate"
- 
- /** 消费端（sidebar / prompt footer / subagent footer）显示用的轻量类型 */
- export type UsageInfo = {
-@@ -21,7 +21,7 @@ export type UsageInfo = {
- 
- /** data URL 的 token 估算：图片按像素密度，PDF 按字节密度，其余按通用 tokenizer */
- export function estimateDataUrlInputTokens(url: string, mime: string) {
--  return AttachmentToken.estimateAttachment({ url, mime }).tokens
-+  return TokenEstimate.estimateAttachment({ url, mime }).tokens
- }
- 
- /** 从 provider 列表查 model 的 context window limit */
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
-index ae714bc9b94de7953c2b187caf64b915683049c9..27b1edc9b37d2986ab242443ee8d8a2d61ad41f4 100644
+index a3177275ac..20235fda41 100644
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -4,8 +4,7 @@ import * as Session from "./session"
+@@ -5,7 +5,8 @@ import { Session } from "./session"
  import { SessionID, MessageID, PartID } from "./schema"
  import { Provider } from "@/provider/provider"
  import { MessageV2 } from "./message-v2"
 -import { Token } from "@/util/token"
--import { AttachmentToken } from "@/util/attachment-token"
++// #194：改用 TokenEstimate 统一上传估算
 +import { TokenEstimate } from "@/token/estimate"
- import * as Log from "@opencode-ai/core/util/log"
  import { SessionProcessor } from "./processor"
  import { Agent } from "@/agent/agent"
-@@ -252,7 +251,12 @@ export const layer = Layer.effect(
+ import { Plugin } from "@/plugin"
+@@ -183,7 +184,8 @@ const layer = Layer.effect(
        model: Provider.Model
      }) {
        const msgs = yield* MessageV2.toModelMessagesEffect(input.messages, input.model)
 -      return Token.estimate(JSON.stringify(msgs))
-+      // Tail-retention budgeting intentionally remains a raw-size heuristic:
-+      // existing compaction behaviour treats large media-bearing turns as too
-+      // expensive to keep verbatim even though the final summary upload strips
-+      // media to placeholders. Only the actual request snapshot below uses the
-+      // provider-learned/media-aware estimator.
++      // #194：tail-retention 保持原始大小启发式
 +      return TokenEstimate.estimateText(JSON.stringify(msgs))
      })
  
      const select = Effect.fn("SessionCompaction.select")(function* (input: {
-@@ -334,7 +338,10 @@ export const layer = Layer.effect(
+@@ -267,7 +269,8 @@ const layer = Layer.effect(
            if (part.state.status !== "completed") continue
            if (PRUNE_PROTECTED_TOOLS.includes(part.tool)) continue
            if (part.state.time.compacted) break loop
 -          const estimate = Token.estimate(part.state.output)
-+          // Prune only needs a coarse size proxy for old tool outputs; it still
-+          // uses the token primitive rather than upload history because pruning is
-+          // a local retention heuristic, not a provider request estimate.
++          // #194：prune 用 estimateText 作粗略大小代理
 +          const estimate = TokenEstimate.estimateText(part.state.output)
            total += estimate
            if (total <= PRUNE_PROTECT) continue
            pruned += estimate
-@@ -441,9 +448,18 @@ export const layer = Layer.effect(
-           content: [{ type: "text" as const, text: nextPrompt }],
-         },
-       ]
--      const messageEstimate = AttachmentToken.sanitizeModelMessagesForTokenEstimate(compactionMessages)
-+      const messageEstimate = TokenEstimate.sanitizeModelMessages(compactionMessages)
-       const rawMessagesText = JSON.stringify(compactionMessages)
--      const estimatedInput = Token.estimate(messageEstimate.text) + messageEstimate.attachments.tokens
-+      // Summary assistants bypass prompt.ts, so compaction must seed the same
-+      // daemon-side upload snapshot here. Reusing TokenEstimate keeps media
-+      // handling, legacy-attachment filtering, and learned input density identical
-+      // to normal prompts before TUI or stats consumers read the message.
+@@ -366,6 +369,16 @@ const layer = Layer.effect(
+         stripMedia: true,
+         toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+       })
++      // #194：compaction summary 上传估算——与 prompt.ts 同一 estimateUploadInput 路径
++      // #194：summary 绕过 prompt.ts，需在此处独立 seed pending upload snapshot
++      const compactionMessages = [...modelMessages, { role: "user" as const, content: [{ type: "text" as const, text: nextPrompt }] }]
++      const compactionEstimate = TokenEstimate.sanitizeModelMessages(compactionMessages)
 +      const estimatedInput = TokenEstimate.estimateUploadInput({
-+        text: messageEstimate.text,
-+        attachments: messageEstimate.attachments,
-+        history,
++        text: compactionEstimate.text,
++        attachments: compactionEstimate.attachments,
++        history: selected.head,
 +        model,
 +      }).inputTokens
-       const inputBreakdown = {
-         system: 0,
-         instructions: 0,
+       const ctx = yield* InstanceState.context
+       const msg: SessionV1.Assistant = {
+         id: MessageID.ascending(),
+@@ -381,12 +394,16 @@ const layer = Layer.effect(
+           root: ctx.worktree,
+         },
+         cost: 0,
++        // #194：input 用 estimateUploadInput 估算——TUI/stats 与 daemon 口径一致
+         tokens: {
+           output: 0,
+-          input: 0,
++          input: estimatedInput,
+           reasoning: 0,
+           cache: { read: 0, write: 0 },
+         },
++        // #194：inputChars/inputTokens 供 TUI pending 展示——与 prompt.ts 对齐
++        inputChars: JSON.stringify(compactionMessages).length,
++        inputTokens: estimatedInput,
+         modelID: model.id,
+         providerID: model.providerID,
+         time: {
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 5b1b4065f3fc45f98f4daecca1576538e4aa13e5..269e98c8671e9e0b31c959dd808bd27c097e65ee 100644
+index 16715bba2f..d5d78fb956 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -65,8 +65,7 @@ import * as DateTime from "effect/DateTime"
- import { eq } from "@/storage/db"
- import * as Database from "@/storage/db"
- import { SessionTable } from "./session.sql"
--import { Token } from "@/util/token"
--import { AttachmentToken } from "@/util/attachment-token"
+@@ -43,7 +43,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { Truncate } from "@/tool/truncate"
+ import { Image } from "@/image/image"
+ import { decodeDataUrl } from "@/util/data-url"
+-import { AttachmentToken } from "@opencode-ai/core/util/attachment-token"
++// #194：AttachmentToken 已由 TokenEstimate 替代
+ import { Process } from "@/util/process"
+ import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types , Semaphore} from "effect"
+ import { InstanceState } from "@/effect/instance-state"
+@@ -59,19 +59,11 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
+ import { SessionReminders } from "./reminders"
+ import { SessionTools } from "./tools"
+ import { LLMEvent } from "@opencode-ai/llm"
+-// #140：无历史样本时回退 Token.estimate（chars/4）
+-import { estimate as tokenEstimate } from "@/util/token"
++// #194：改用 TokenEstimate 统一上传估算
 +import { TokenEstimate } from "@/token/estimate"
+ // #159：decide 窗口裁剪用 usable 上限（与 overflow 同一口径）
  import { usable } from "./overflow"
  
- 
-@@ -88,9 +87,6 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
- 
- const log = Log.create({ service: "session.prompt" })
- const elog = EffectLogger.create({ service: "session.prompt" })
+-// #140：输入侧 chars/token 样本窗口与夹紧范围
 -const INPUT_CHARS_HISTORY_LIMIT = 100_000
 -const MIN_CHARS_PER_TOKEN = 3
 -const MAX_CHARS_PER_TOKEN = 4
- const DECIDE_PROMPT = `<system-reminder>
- Decide mode is active. Do not execute, modify files, call tools, or ask for tool-based confirmation.
- Use the available conversation context to produce a decisive recommendation or implementation plan.
-@@ -151,45 +147,6 @@ function sanitizeDecideMessages(messages: MessageV2.WithParts[]) {
-   }))
- }
- 
+-// #140：防止异常样本把 preflight 估得过乐观/过悲观
 -function clampCharsPerToken(value: number) {
 -  return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value))
 -}
--
--function charsPerToken(messages: MessageV2.WithParts[]) {
--  // Estimate against the current session's real provider accounting instead of a
--  // fixed global ratio.  The samples come from prior daemon-built request bodies
--  // (inputChars) paired with provider-confirmed input/cache tokens.  Clamp the
--  // ratio to a conservative natural-language/code range so one provider anomaly
--  // or cache-reporting quirk cannot make future preflight checks wildly optimistic
--  // or pessimistic.
--  let historyInputTokens = 0
--  let historyInputChars = 0
--  for (let i = messages.length - 1; i >= 0 && historyInputChars < INPUT_CHARS_HISTORY_LIMIT; i--) {
--    const msg = messages[i]
--    if (msg.info.role !== "assistant") continue
--    for (let j = msg.parts.length - 1; j >= 0; j--) {
--      const part = msg.parts[j]
--      if (part.type !== "step-finish") continue
--      const chars = part.inputChars
--      if (!chars || chars < 100) continue
--      const tokens = part.tokens.input + part.tokens.cache.read + part.tokens.cache.write
--      if (tokens <= 0) continue
--      historyInputChars += part.inputBreakdown?.media
--        ? Math.max(0, chars - part.inputBreakdown.media.rawChars + part.inputBreakdown.media.textChars)
--        : Math.max(0, chars - (part.inputBreakdown?.messages.attachments ?? 0))
--      historyInputTokens += tokens
--    }
--  }
--
--  if (historyInputTokens <= 0 || historyInputChars <= 500) return undefined
--  return clampCharsPerToken(historyInputChars / historyInputTokens)
--}
--
--function estimateInputTokens(text: string, messages: MessageV2.WithParts[]) {
--  const ratio = charsPerToken(messages)
--  return ratio ? Math.round(text.length / ratio) : Token.estimate(text)
--}
--
- type ReferencePromptMetadata = {
-   name: string
-   kind: "local" | "git" | "invalid"
-@@ -1908,7 +1865,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
+ 
+ // #159：decide 最近轮目标占用区间（相对 usable）
+ // LATEST_MIN：最新一轮已≥60% 则不再向历史扩展
+@@ -1304,7 +1296,7 @@ const layer = Layer.effect(
+       throw new Error("Impossible")
+     })
+ 
+-    // #159：从最近 user 起点向后试窗口；ratio 相对 usable，估量用 tip #140 tokenEstimate
++    // #159：从最近 user 起点向后试窗口；ratio 相对 usable，估量用 #194 TokenEstimate
+     const selectDecideMessages = Effect.fn("SessionPrompt.selectDecideMessages")(function* (input: {
+       messages: SessionV1.WithParts[]
+       model: Provider.Model
+@@ -1327,9 +1319,15 @@ const layer = Layer.effect(
        for (const [position, start] of starts.entries()) {
          const candidate = sanitized.slice(start)
          const modelMessages = yield* MessageV2.toModelMessagesEffect(candidate, input.model)
--        const ratio = estimateInputTokens([input.systemText, JSON.stringify(modelMessages)].join("\n"), candidate) / limit
-+        const messageEstimate = TokenEstimate.sanitizeModelMessages(modelMessages)
-+        // Decide mode trims conversation history before a provider request is
-+        // built, so it must use the same upload estimator as the normal prompt
-+        // path; otherwise long cached/tool-heavy contexts can be selected against
-+        // the legacy /4 fallback and overflow unexpectedly.
-+        const ratio = TokenEstimate.estimateUploadInput({
-+          text: [input.systemText, messageEstimate.text].join("\n"),
-+          attachments: messageEstimate.attachments,
-+          history: candidate,
-+          model: input.model,
-+        }).inputTokens / limit
+-        // 不用 estimateInputTokens：tip 已历史校准，decide 窗口统一 Token.estimate
++        // #194：decide mode 用 estimateUploadInput——与 normal prompt 同一估算路径
++        const decideEstimate = TokenEstimate.sanitizeModelMessages(modelMessages)
+         const ratio =
+-          tokenEstimate([input.systemText, JSON.stringify(modelMessages)].join("\n")) / limit
++          TokenEstimate.estimateUploadInput({
++            text: [input.systemText, decideEstimate.text].join("\n"),
++            attachments: decideEstimate.attachments,
++            history: candidate,
++            model: input.model,
++          }).inputTokens / limit
+         // 超满：退回上一个可容纳窗口
          if (ratio >= DECIDE_MAX) return fallback ?? candidate
  
-         fallback = candidate
-@@ -2113,7 +2080,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-             const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])]
-             // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
-             // 分别记录各组件的字符数，供 TUI 的 /context 面板直接使用（避免 TUI 自行重建 prompt 导致偏差）。
+@@ -1560,7 +1558,7 @@ const layer = Layer.effect(
+             const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : [])]
+             // #175：消毒后文本用于估计；raw 单独保留线长
+             // #175：messagesText 不得再含 base64
 -            const messageEstimate = AttachmentToken.sanitizeModelMessagesForTokenEstimate(messages)
 +            const messageEstimate = TokenEstimate.sanitizeModelMessages(messages)
              const messagesText = messageEstimate.text
+             // #175：raw 仅用于 inputChars，不参与 Token.estimate 文本路径
              const rawMessagesText = JSON.stringify(messages)
-             const disabledTools = Permission.disabled(Object.keys(tools), Permission.merge(agent.permission, session.permission ?? []))
-@@ -2186,7 +2153,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
-               },
+@@ -1612,35 +1610,14 @@ const layer = Layer.effect(
+               // #175：count>0 才写 media，兼容无附件会话
                ...(messageEstimate.attachments.count > 0 ? { media: messageEstimate.attachments } : {}),
-             }
--            const estimatedInput = estimateInputTokens(inputText, requestMsgs) + messageEstimate.attachments.tokens
-+            // Upload estimates are centralized in TokenEstimate so normal prompts
-+            // and compaction requests learn from the same provider-confirmed input
-+            // history. This keeps TUI consumers on a single daemon snapshot instead
-+            // of re-estimating long contexts downstream.
+             } as SessionV1.StepFinishPart["inputBreakdown"]
+-            // #140：输入侧比率校准（历史 step-finish inputChars/tokens），夹紧到 [3,4]
+-            // #140：history 校准样本来自 step-finish.inputChars
+-            let historyInputChars = 0
+-            let historyInputTokens = 0
+-            for (let i = msgs.length - 1; i >= 0 && historyInputChars < INPUT_CHARS_HISTORY_LIMIT; i--) {
+-              const m = msgs[i]
+-              if (m.info.role !== "assistant") continue
+-              const sf = m.parts.findLast((p) => p.type === "step-finish")
+-              if (!sf) continue
+-              const chars = (sf as any).inputChars
+-              // 样本不足 100 字符跳过，与 TUI charsPerTokenFromHistory 对齐
+-              if (!chars || chars < 100) continue
+-              const tokens = (sf.tokens.input ?? 0) + (sf.tokens.cache?.read ?? 0) + (sf.tokens.cache?.write ?? 0)
+-              if (typeof chars === "number" && chars > 0 && tokens > 0) {
+-                // 附件不参与输入侧 chars/token 密度校准
+-                const bd = (sf as any).inputBreakdown
+-                // #175：history 与 live 同一 raw→text 密度公式
+-                historyInputChars += bd?.media
+-                  ? Math.max(0, chars - bd.media.rawChars + bd.media.textChars)
+-                  : Math.max(0, chars - (bd?.messages?.attachments ?? 0))
+-                historyInputTokens += tokens
+-              }
+-            }
+-            // #140：样本不足时回退 Token.estimate；有样本则夹紧比值
+-            // #175：文本估计后加 media.tokens，只加一次
+-            const estimatedInput =
+-              (historyInputTokens > 0 && historyInputChars > 500
+-                ? Math.round(inputChars / clampCharsPerToken(historyInputChars / historyInputTokens))
+-                : tokenEstimate([systemText, messagesText, toolsText].join("\n"))) + messageEstimate.attachments.tokens
++            // #194：输入侧比率校准已由 TokenEstimate.learnInputCharsPerToken 接管
++            // #194：用 estimateUploadInput 对齐 compaction 同一估算路径
 +            const estimatedInput = TokenEstimate.estimateUploadInput({
-+              text: inputText,
++              text: [systemText, messagesText, toolsText].join("\n"),
 +              attachments: messageEstimate.attachments,
 +              history: requestMsgs,
 +              model,
 +            }).inputTokens
-             // Preflight compaction must judge the request we are about to send,
-             // not the last finished assistant's historical usage.  After compaction,
-             // retained tail messages can carry huge pre-compaction token counts even
+             // #140：用即将发送的 estimatedInput 做 overflow，而非 lastFinished 历史巨量
+             // #175：overflow 使用含 media 的 estimatedInput
+             if (
 diff --git a/packages/opencode/src/token/accounting.ts b/packages/opencode/src/token/accounting.ts
-index b246db99e6b6dd6dc51672b2779290485a2f15ed..0614a1e845a9af3a34fdfc017858dc184a81fe24 100644
+index b2c9a8b4bc..3d5d1e85be 100644
 --- a/packages/opencode/src/token/accounting.ts
 +++ b/packages/opencode/src/token/accounting.ts
-@@ -1,5 +1,5 @@
- /**
-- * token-accounting.ts — 统一 token 统计入口
-+ * accounting.ts — 统一 token 统计入口
-  *
-  * 设计原则：
-  * - 一个函数 `tokenAccounting()`，一个类型 `TokenAccounting`
-@@ -13,8 +13,10 @@
-  * 这不是"估计"，是按字符占比精确分配已确认 token 总量。
-  */
- 
--import { AttachmentToken } from "@/util/attachment-token"
-+import { TokenEstimate } from "./estimate"
- 
-+// UI accounting only uses this when neither daemon estimates nor confirmed
-+// provider samples exist yet; source upload estimates live in TokenEstimate.
- const DEFAULT_RATIO = 4
- 
- // ─── 类型 ────────────────────────────────────────────────────────────────────
-@@ -74,6 +76,8 @@ type Msg = {
-   id: string
-   role: string
-   parentID?: string
-+  providerID?: string
-+  modelID?: string
-   cost?: number
-   tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
-   time?: { created?: number; completed?: number }
-@@ -112,8 +116,6 @@ export function tokenAccounting(
-   // ── 2. 一次遍历 ──
-   const session = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
-   const confirmedRequest = { input: 0, output: 0, cost: 0 }
--  let ratioChars = 0
--  let ratioTokens = 0
-   let outputCharsTotal = 0
-   let outputTokensTotal = 0
-   let latestAssistant: Msg | undefined
-@@ -143,19 +145,6 @@ export function tokenAccounting(
-         confirmedRequest.cost += p.cost ?? 0
-       }
- 
--      // input ratio 校准
--      const chars = p.inputChars as number | undefined
--      if (chars && chars >= 100) {
--        const tok = p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
--        if (tok > 0) {
--          const bd = p.inputBreakdown as { messages?: { attachments?: number }, media?: { rawChars: number; textChars: number } } | undefined
--          ratioChars += bd?.media
--            ? Math.max(0, chars - bd.media.rawChars + bd.media.textChars)
--            : Math.max(0, chars - (bd?.messages?.attachments ?? 0))
--          ratioTokens += tok
--        }
--      }
--
-       // output ratio 校准
-       const confirmedOut = p.tokens.output + p.tokens.reasoning
-       if (confirmedOut > 0) {
-@@ -192,7 +181,12 @@ export function tokenAccounting(
-   }
- 
-   // ── 3. ratio ──
--  const inputRatio = ratioTokens > 0 && ratioChars > 500 ? ratioChars / ratioTokens : DEFAULT_RATIO
-+  // Keep TUI fallback math aligned with daemon upload estimates. This is only
-+  // used for pending tool-result/output tails; persisted assistant.inputTokens
-+  // remains the source of truth for full request uploads.
-+  const inputRatio = TokenEstimate.learnInputCharsPerToken({
-+    messages: messages.map((msg) => ({ role: msg.role, providerID: msg.providerID, modelID: msg.modelID, parts: getParts(msg.id) })),
-+  })?.charsPerToken ?? DEFAULT_RATIO
-   const outputRatio = outputTokensTotal > 0 && outputCharsTotal > 100 ? outputCharsTotal / outputTokensTotal : DEFAULT_RATIO
- 
-   // ── 4. step（基于 latest assistant）───────────────────────────────
-@@ -245,7 +239,7 @@ export function tokenAccounting(
-     if (p.state?.status === "completed") {
-       pendingToolResultChars += (p.state.output?.length ?? 0)
-       for (const att of (p.state.attachments ?? []) as Array<{ url: string; mime: string }>) {
--        pendingAttachTokens += AttachmentToken.estimateAttachment(att).tokens
-+        pendingAttachTokens += TokenEstimate.estimateAttachment(att).tokens
-       }
-     }
-     if (p.state?.status === "error") {
-@@ -366,3 +360,5 @@ export function tokenAccounting(
-     ratio: { input: inputRatio, output: outputRatio },
-   }
- }
-+
-+export * as TokenAccounting from "./accounting"
+@@ -1,3 +1,4 @@
+ // #193：token 域统一统计入口；#194 将填充完整实现
+ // #193：从 TUI 包 re-export，保持现有消费端不中断
+-export * from "@opencode-ai/tui/util/token-accounting"
++// #194：相对路径
++export * from "../../../tui/src/util/token-accounting"
 diff --git a/packages/opencode/src/token/estimate.ts b/packages/opencode/src/token/estimate.ts
-index 5745b07f2de02f8739d829642313f66fb616c21b..b32d23d3d8a11d174869ea530a92cab41a56525b 100644
+index 53baa6349f..4cd9fdb3e4 100644
 --- a/packages/opencode/src/token/estimate.ts
 +++ b/packages/opencode/src/token/estimate.ts
-@@ -1,4 +1,54 @@
--import { Token } from "./token"
-+/**
-+ * TokenEstimate is the single upload-estimation boundary. Callers hand it the
-+ * exact text that will be sent to the provider after media sanitization plus the
-+ * historical session messages that contain provider-confirmed step-finish usage;
-+ * UI and stats code should consume the persisted snapshot instead of calling it.
-+ */
+@@ -1,3 +1,111 @@
+ // #193：token 域估算入口；#194 将填充完整实现
+ // #193：从 core 包 re-export，保持现有消费端不中断
+-export * from "@opencode-ai/core/util/attachment-token"
++// #194：re-export 旧 API
++export {
++  estimateAttachment,
++  parseDataUrl,
++  type AttachmentInput,
++  type AttachmentTokenEstimate,
++  type SanitizedTextEstimate,
++} from "@opencode-ai/core/util/attachment-token"
++// #194：别名
++export { sanitizeModelMessagesForTokenEstimate as sanitizeModelMessages } from "@opencode-ai/core/util/attachment-token"
++// #194：本地类型
++import type { AttachmentTokenEstimate } from "@opencode-ai/core/util/attachment-token"
++// #194：源模块未导出，本地定义
++export function emptyAttachmentEstimate(): AttachmentTokenEstimate {
++  return { tokens: 0, rawChars: 0, textChars: 0, count: 0, imageTokens: 0, pdfTokens: 0, otherTokens: 0 }
++}
++
++// #194：默认密度
 +const DEFAULT_CHARS_PER_TOKEN = 4
-+// Bounds are intentionally wider than the legacy 3..4 natural-language range:
-+// upload bodies include JSON wrappers, code, tool output, and cached prefixes.
-+// The upper cap still rejects old image/base64 legacy samples that can appear as
-+// 20+ chars/token when they lack media metadata.
++// #194：密度下限
 +const MIN_CHARS_PER_TOKEN = 2
++// #194：密度上限
 +const MAX_CHARS_PER_TOKEN = 8
-+// Keep the estimator responsive to recent context composition while still using
-+// enough confirmed input text to smooth out a single tiny or anomalous request.
++// #194：学习窗口
 +const INPUT_CHARS_HISTORY_LIMIT = 100_000
 +
 +type HistoryModel = { providerID?: string; id?: string; modelID?: string }
++type HistoryMessage = { info?: { role: string; providerID?: string; modelID?: string }; role?: string; providerID?: string; modelID?: string; parts: ReadonlyArray<HistoryPart> }
++type HistoryPart = { type: string; inputChars?: number; inputBreakdown?: { messages?: { attachments?: number }; media?: AttachmentTokenEstimate }; tokens?: { input: number; cache: { read: number; write: number } } }
++type LearnedInputRatio = { charsPerToken: number; source: "model-history" | "session-history" }
++export type UploadInputEstimate = { inputTokens: number; textTokens: number; attachmentTokens: number; charsPerToken: number; source: "model-history" | "session-history" | "default" }
 +
-+type HistoryMessage = {
-+  info?: { role: string; providerID?: string; modelID?: string }
-+  role?: string
-+  providerID?: string
-+  modelID?: string
-+  parts: ReadonlyArray<HistoryPart>
-+}
++// #194：纯文本估算
++export function estimateText(input: string, charsPerToken = DEFAULT_CHARS_PER_TOKEN) { return Math.max(0, Math.round((input || "").length / charsPerToken)) }
 +
-+type HistoryPart = {
-+  type: string
-+  inputChars?: number
-+  inputBreakdown?: {
-+    messages?: { attachments?: number }
-+    media?: AttachmentTokenEstimate
-+  }
-+  tokens?: { input: number; cache: { read: number; write: number } }
-+}
-+
-+type LearnedInputRatio = {
-+  charsPerToken: number
-+  /** Indicates whether the estimate came from the same provider/model first pass or the broader session fallback. */
-+  source: "model-history" | "session-history"
-+}
-+
-+export type UploadInputEstimate = {
-+  inputTokens: number
-+  textTokens: number
-+  attachmentTokens: number
-+  charsPerToken: number
-+  /** Exposes why a pending estimate changed so callers can debug without re-running the learning logic. */
-+  source: "model-history" | "session-history" | "default"
-+}
- 
- export type AttachmentInput = {
-   type?: "file" | "media" | "image"
-@@ -38,7 +88,11 @@ type PayloadInfo = {
-   mime?: string
- }
- 
--function emptyEstimate(): AttachmentTokenEstimate {
-+export function estimateText(input: string, charsPerToken = DEFAULT_CHARS_PER_TOKEN) {
-+  return Math.max(0, Math.round((input || "").length / charsPerToken))
-+}
-+
-+export function emptyAttachmentEstimate(): AttachmentTokenEstimate {
-   return { tokens: 0, rawChars: 0, textChars: 0, count: 0, imageTokens: 0, pdfTokens: 0, otherTokens: 0 }
- }
- 
-@@ -93,7 +147,7 @@ function placeholder(input: { mime: string; filename?: string }) {
- 
- export function estimateAttachment(input: AttachmentInput): AttachmentTokenEstimate {
-   const payload = payloadInfo(input)
--  if (!payload?.payload) return emptyEstimate()
-+  if (!payload?.payload) return emptyAttachmentEstimate()
- 
-   const mime = input.mime ?? input.mediaType ?? payload.mime ?? "application/octet-stream"
-   const text = placeholder({ mime, filename: input.filename })
-@@ -101,7 +155,7 @@ export function estimateAttachment(input: AttachmentInput): AttachmentTokenEstim
-     ? Math.max(1, Math.min(1600, Math.round(payload.payload.length / 750)))
-     : mime === "application/pdf"
-       ? Math.max(1, Math.round(payload.payload.length / 1100))
--      : Math.max(1, Token.estimate(payload.payload))
-+      : Math.max(1, estimateText(payload.payload))
- 
-   return {
-     tokens,
-@@ -121,11 +175,11 @@ function sanitize(value: unknown): { value: unknown; attachments: AttachmentToke
-         const next = sanitize(item)
-         return { value: [...acc.value, next.value], attachments: addEstimate(acc.attachments, next.attachments) }
-       },
--      { value: [] as unknown[], attachments: emptyEstimate() },
-+      { value: [] as unknown[], attachments: emptyAttachmentEstimate() },
-     )
-   }
- 
--  if (!isRecord(value)) return { value, attachments: emptyEstimate() }
-+  if (!isRecord(value)) return { value, attachments: emptyAttachmentEstimate() }
- 
-   const attachment = attachmentFromRecord(value)
-   if (attachment) {
-@@ -141,7 +195,7 @@ function sanitize(value: unknown): { value: unknown; attachments: AttachmentToke
-         attachments: addEstimate(acc.attachments, next.attachments),
-       }
-     },
--    { value: {} as Record<string, unknown>, attachments: emptyEstimate() },
-+    { value: {} as Record<string, unknown>, attachments: emptyAttachmentEstimate() },
-   )
- }
- 
-@@ -177,7 +231,7 @@ function sanitizeAttachmentRecord(value: Record<string, unknown>, input: Attachm
-   return value
- }
- 
--export function sanitizeModelMessagesForTokenEstimate(messages: unknown): SanitizedTextEstimate {
-+export function sanitizeModelMessages(messages: unknown): SanitizedTextEstimate {
-   const result = sanitize(messages)
-   const text = JSON.stringify(result.value)
-   return {
-@@ -189,4 +243,88 @@ export function sanitizeModelMessagesForTokenEstimate(messages: unknown): Saniti
-   }
- }
- 
--export * as AttachmentToken from "./attachment-token"
-+export function learnInputCharsPerToken(input: {
-+  messages: ReadonlyArray<HistoryMessage>
-+  model?: HistoryModel
-+}): LearnedInputRatio | undefined {
++// #194：从历史学习
++export function learnInputCharsPerToken(input: { messages: ReadonlyArray<HistoryMessage>; model?: HistoryModel }): LearnedInputRatio | undefined {
 +  const modelRatio = collectInputRatio(input.messages, input.model, true)
++  // #194：同 model 优先
 +  if (modelRatio) return { charsPerToken: modelRatio, source: "model-history" }
++  // #194：回退 session
 +  const sessionRatio = collectInputRatio(input.messages, input.model, false)
 +  if (sessionRatio) return { charsPerToken: sessionRatio, source: "session-history" }
 +  return undefined
 +}
 +
-+export function estimateUploadInput(input: {
-+  text: string
-+  attachments: AttachmentTokenEstimate
-+  history: ReadonlyArray<HistoryMessage>
-+  model?: HistoryModel
-+}): UploadInputEstimate {
-+  // Text and media are estimated separately because providers bill uploaded
-+  // images/PDFs by modality-specific rules while the surrounding JSON/text is
-+  // best predicted from prior confirmed input-token usage.
++// #194：上传估算
++export function estimateUploadInput(input: { text: string; attachments: AttachmentTokenEstimate; history: ReadonlyArray<HistoryMessage>; model?: HistoryModel }): UploadInputEstimate {
++  // #194：学习密度
 +  const learned = learnInputCharsPerToken({ messages: input.history, model: input.model })
 +  const charsPerToken = learned?.charsPerToken ?? DEFAULT_CHARS_PER_TOKEN
++  // #194：文本估算
 +  const textTokens = estimateText(input.text, charsPerToken)
-+  return {
-+    inputTokens: textTokens + input.attachments.tokens,
-+    textTokens,
-+    attachmentTokens: input.attachments.tokens,
-+    charsPerToken,
-+    source: learned?.source ?? "default",
-+  }
++  return { inputTokens: textTokens + input.attachments.tokens, textTokens, attachmentTokens: input.attachments.tokens, charsPerToken, source: learned?.source ?? "default" }
 +}
 +
-+function clampCharsPerToken(value: number) {
-+  // Input prompts include JSON envelopes, code, tool results, and provider-specific
-+  // cached prefixes. The wider 2..8 band keeps legacy anomalies from dominating
-+  // while still allowing the estimator to learn the 6+ chars/token density seen in
-+  // real Codex upload contexts.
-+  return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value))
-+}
++// #194：钳制
++function clampCharsPerToken(value: number) { return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value)) }
 +
 +function collectInputRatio(messages: ReadonlyArray<HistoryMessage>, model: HistoryModel | undefined, modelOnly: boolean) {
 +  let historyInputTokens = 0
@@ -531,14 +283,18 @@ index 5745b07f2de02f8739d829642313f66fb616c21b..b32d23d3d8a11d174869ea530a92cab4
 +  return clampCharsPerToken(historyInputChars / historyInputTokens)
 +}
 +
++// #194：同 model 判定
 +function sameModel(message: HistoryMessage, model: HistoryModel | undefined) {
++  // #194：无 provider 不算
 +  if (!model?.providerID) return false
 +  const modelID = model.id ?? model.modelID
 +  if (!modelID) return false
 +  return (message.info?.providerID ?? message.providerID) === model.providerID && (message.info?.modelID ?? message.modelID) === modelID
 +}
 +
++// #194：step-finish 样本
 +function inputRatioSample(part: HistoryPart): { chars: number; tokens: number } | undefined {
++  // #194：只从 step-finish
 +  if (part.type !== "step-finish") return undefined
 +  const chars = part.inputChars
 +  if (!chars || chars < 100) return undefined
@@ -546,181 +302,41 @@ index 5745b07f2de02f8739d829642313f66fb616c21b..b32d23d3d8a11d174869ea530a92cab4
 +  if (confirmedTokens <= 0) return undefined
 +  const media = part.inputBreakdown?.media
 +  if (media) {
++    // #194：media 分开
 +    const textChars = Math.max(0, chars - media.rawChars + media.textChars)
 +    const textTokens = Math.max(0, confirmedTokens - media.tokens)
 +    return textChars > 0 && textTokens > 0 ? { chars: textChars, tokens: textTokens } : undefined
 +  }
-+  // Older snapshots only recorded raw attachment character counts. Treating those
-+  // data URLs as text makes image-heavy turns look like 20+ chars/token and poisons
-+  // future estimates, so they are excluded from ratio learning entirely.
++  // #194：旧快照排除
 +  if ((part.inputBreakdown?.messages?.attachments ?? 0) > 0) return undefined
 +  return { chars, tokens: confirmedTokens }
 +}
 +
++// #194：统一导出
 +export * as TokenEstimate from "./estimate"
-diff --git a/packages/opencode/src/util/index.ts b/packages/opencode/src/util/index.ts
-index c67a3d140b8fca345ffbb098ee59719353fb7c09..a238edbb5228c2f9a15e5bca1635533620acad7e 100644
---- a/packages/opencode/src/util/index.ts
-+++ b/packages/opencode/src/util/index.ts
-@@ -8,5 +8,4 @@ export * as Lock from "./lock"
- export * as Log from "@opencode-ai/core/util/log"
- export * as Process from "./process"
- export * as Rpc from "./rpc"
--export * as Token from "./token"
- export * as Wildcard from "./wildcard"
++
 diff --git a/packages/opencode/src/util/token.ts b/packages/opencode/src/util/token.ts
-deleted file mode 100644
-index fccbcac0d751f32b79504c271841bc845e92db71..0000000000000000000000000000000000000000
+index d45a51346b..0573c7d343 100644
 --- a/packages/opencode/src/util/token.ts
-+++ /dev/null
-@@ -1,7 +0,0 @@
--const CHARS_PER_TOKEN = 4
--
--export function estimate(input: string) {
--  return Math.max(0, Math.round((input || "").length / CHARS_PER_TOKEN))
--}
--
--export * as Token from "./token"
-diff --git a/packages/opencode/test/cli/tui/token-estimate.test.ts b/packages/opencode/test/cli/tui/token-estimate.test.ts
-index a7f8ad4a655ed8bbf534dec5b8bea6527a2f9f9b..d2bc27c515661cabb4398037aa6a2aacac8da716 100644
---- a/packages/opencode/test/cli/tui/token-estimate.test.ts
-+++ b/packages/opencode/test/cli/tui/token-estimate.test.ts
-@@ -1,5 +1,5 @@
- import { describe, expect, test } from "bun:test"
--import { tokenAccounting } from "@/cli/cmd/tui/util/token-accounting"
-+import { tokenAccounting } from "@/token/accounting"
- 
- /** 精简的 part 工厂函数，减少测试噪音 */
- function assistantMsg(id: string, parentID: string, tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }, completed?: number) {
-@@ -90,10 +90,11 @@ describe("tokenAccounting", () => {
-       userMsg("1"),
-       assistantMsg("2", "1", undefined, 10),
-     ]
--    // inputChars=1000, inputTokens=100+5+5=110 → ratio ≈ 1000/110 ≈ 9.09
-+    // Shared input learning clamps unusually high densities so one old sample
-+    // cannot make TUI pending estimates diverge from daemon upload estimates.
-     const getParts = (_id: string) => [stepFinish(100, 200, 0, 5, 5, 1000)]
-     const acc = tokenAccounting(msgs, getParts)
--    expect(acc.ratio.input).toBeCloseTo(9.09, 1)
-+    expect(acc.ratio.input).toBe(8)
-     // output: text part chars / output tokens (200)
-     // If there are text parts between step-start and step-finish
-   })
-diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
-index 247db46c9ac5c7a0bc3a18a80a525410f782cb66..4a83404e9603b1e5e95cc4b1b2c097b5bb8f967d 100644
---- a/packages/opencode/test/session/compaction.test.ts
-+++ b/packages/opencode/test/session/compaction.test.ts
-@@ -8,7 +8,7 @@ import { Image } from "@/image/image"
- import { Agent } from "../../src/agent/agent"
- import { LLM } from "../../src/session/llm"
- import { SessionCompaction } from "../../src/session/compaction"
--import { Token } from "@/util/token"
-+import { TokenEstimate } from "@/token/estimate"
- import * as Log from "@opencode-ai/core/util/log"
- import { Permission } from "../../src/permission"
- import { Plugin } from "../../src/plugin"
-@@ -130,6 +130,21 @@ function createAssistantMessage(sessionID: SessionID, parentID: MessageID, root:
-   )
- }
- 
-+function addStepFinish(sessionID: SessionID, messageID: MessageID, inputChars: number, inputTokens: number) {
-+  return SessionNs.Service.use((ssn) =>
-+    ssn.updatePart({
-+      id: PartID.ascending(),
-+      messageID,
-+      sessionID,
-+      type: "step-finish",
-+      reason: "stop",
-+      cost: 0,
-+      tokens: { input: inputTokens, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+      inputChars,
-+    }),
-+  )
-+}
-+
- function createSummaryAssistantMessage(sessionID: SessionID, parentID: MessageID, root: string, text: string) {
-   return SessionNs.Service.use((ssn) =>
-     Effect.gen(function* () {
-@@ -902,6 +917,36 @@ describe("session.compaction.process", () => {
-     }),
-   )
- 
-+  it.instance(
-+    "summary assistant pending input estimate uses confirmed upload density",
-+    Effect.gen(function* () {
-+      const test = yield* TestInstance
-+      const ssn = yield* SessionNs.Service
-+      const session = yield* ssn.create({})
-+      const historical = yield* createUserMessage(session.id, "historical context")
-+      const historicalReply = yield* createAssistantMessage(session.id, historical.id, test.directory)
-+      yield* addStepFinish(session.id, historicalReply.id, 80_000, 10_000)
-+      const msg = yield* createUserMessage(session.id, "compact this session")
-+      const msgs = yield* ssn.messages({ sessionID: session.id })
-+
-+      yield* SessionCompaction.use.process({
-+        parentID: msg.id,
-+        messages: msgs,
-+        sessionID: session.id,
-+        auto: false,
-+      })
-+
-+      const summary = (yield* ssn.messages({ sessionID: session.id })).find(
-+        (item) => item.info.role === "assistant" && item.info.summary,
-+      )
-+
-+      expect(summary?.info.role).toBe("assistant")
-+      if (summary?.info.role !== "assistant") return
-+      expect(summary.info.inputChars).toBeGreaterThan(0)
-+      expect(summary.info.inputTokens).toBeLessThan(Math.round((summary.info.inputChars ?? 0) / 6))
-+    }),
-+  )
-+
-   itCompaction.instance(
-     "marks summary message as errored on compact result",
-     Effect.gen(function* () {
-@@ -1552,19 +1597,19 @@ describe("session.compaction.process", () => {
-   )
- })
- 
--describe("util.token.estimate", () => {
-+describe("TokenEstimate.estimateText", () => {
-   test("estimates tokens from text (4 chars per token)", () => {
-     const text = "x".repeat(4000)
--    expect(Token.estimate(text)).toBe(1000)
-+    expect(TokenEstimate.estimateText(text)).toBe(1000)
-   })
- 
-   test("estimates tokens from larger text", () => {
-     const text = "y".repeat(20_000)
--    expect(Token.estimate(text)).toBe(5000)
-+    expect(TokenEstimate.estimateText(text)).toBe(5000)
-   })
- 
-   test("returns 0 for empty string", () => {
--    expect(Token.estimate("")).toBe(0)
-+    expect(TokenEstimate.estimateText("")).toBe(0)
-   })
- })
- 
++++ b/packages/opencode/src/util/token.ts
+@@ -1 +1,3 @@
+ export { Token, estimate } from "@opencode-ai/core/util/token"
++// #194：re-export
++export { TokenEstimate } from "@/token/estimate"
 diff --git a/packages/opencode/test/token/estimate.test.ts b/packages/opencode/test/token/estimate.test.ts
-index e7577cf90cef95785301d7076cdac0050a9eb910..65079d2fa7a32baa6fd6387ac0d999abc14126e2 100644
+index f7b6b825c8..310c3197dc 100644
 --- a/packages/opencode/test/token/estimate.test.ts
 +++ b/packages/opencode/test/token/estimate.test.ts
-@@ -1,10 +1,20 @@
+@@ -2,12 +2,15 @@
+ // #175：单测锁定消毒、远程跳过与分项 token
  import { describe, expect, test } from "bun:test"
--import { AttachmentToken } from "@/util/attachment-token"
+ // #193：测试随 estimate 迁移到 token 域
+-import { AttachmentToken } from "@/token/estimate"
++// #194：改用 TokenEstimate
 +import { TokenEstimate } from "@/token/estimate"
  
 -describe("AttachmentToken", () => {
-+const stepFinish = (inputChars: number, inputTokens: number, inputBreakdown?: {
-+  messages?: { attachments?: number }
-+  media?: { rawChars: number; textChars: number; tokens: number; count: number; imageTokens: number; pdfTokens: number; otherTokens: number }
-+}) => ({
-+  type: "step-finish",
-+  inputChars,
-+  inputBreakdown,
-+  tokens: { input: inputTokens, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+})
++const stepFinish = (inputChars: number, inputTokens: number, inputBreakdown?: { messages?: { attachments?: number }; media?: { rawChars: number; textChars: number; tokens: number; count: number; imageTokens: number; pdfTokens: number; otherTokens: number } }) => ({ type: "step-finish", inputChars, inputBreakdown, tokens: { input: inputTokens, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } })
 +
 +describe("TokenEstimate", () => {
    test("estimates image data URLs separately from sanitized text", () => {
@@ -730,7 +346,7 @@ index e7577cf90cef95785301d7076cdac0050a9eb910..65079d2fa7a32baa6fd6387ac0d999ab
        {
          role: "user",
          content: [
-@@ -23,7 +33,7 @@ describe("AttachmentToken", () => {
+@@ -26,7 +29,7 @@ describe("AttachmentToken", () => {
    })
  
    test("does not treat remote file URLs as uploaded media payloads", () => {
@@ -739,68 +355,51 @@ index e7577cf90cef95785301d7076cdac0050a9eb910..65079d2fa7a32baa6fd6387ac0d999ab
        {
          role: "user",
          content: [
-@@ -37,4 +47,64 @@ describe("AttachmentToken", () => {
+@@ -40,4 +43,29 @@ describe("AttachmentToken", () => {
      expect(estimate.text).toContain("https://example.com/image.png")
      expect(estimate.text).toContain("//example.com/image.png")
    })
+-})
 +
++  // #194：学习上传密度
 +  test("learns upload input density above the legacy four-character fallback", () => {
-+    const estimate = TokenEstimate.estimateUploadInput({
-+      text: "x".repeat(827_111),
-+      attachments: TokenEstimate.emptyAttachmentEstimate(),
-+      history: [
-+        {
-+          info: { role: "assistant", providerID: "DaXiao Codex", modelID: "gpt-5.5" },
-+          parts: [stepFinish(827_111, 128_159)],
-+        },
-+      ],
-+      model: { providerID: "DaXiao Codex", id: "gpt-5.5" },
-+    })
-+
++    const estimate = TokenEstimate.estimateUploadInput({ text: "x".repeat(827_111), attachments: TokenEstimate.emptyAttachmentEstimate(), history: [{ info: { role: "assistant", providerID: "p", modelID: "m" }, parts: [stepFinish(827_111, 128_159)] }], model: { providerID: "p", id: "m" } })
 +    expect(estimate.source).toBe("model-history")
 +    expect(estimate.charsPerToken).toBeCloseTo(6.45, 1)
 +    expect(estimate.inputTokens).toBeGreaterThan(120_000)
 +    expect(estimate.inputTokens).toBeLessThan(135_000)
 +  })
 +
++  // #194：旧附件排除
 +  test("ignores legacy attachment samples that lack media token metadata", () => {
-+    const estimate = TokenEstimate.estimateUploadInput({
-+      text: "x".repeat(80_000),
-+      attachments: TokenEstimate.emptyAttachmentEstimate(),
-+      history: [
-+        {
-+          info: { role: "assistant", providerID: "DaXiao Codex", modelID: "gpt-5.5" },
-+          parts: [stepFinish(269_504, 12_886, { messages: { attachments: 210_514 } })],
-+        },
-+      ],
-+      model: { providerID: "DaXiao Codex", id: "gpt-5.5" },
-+    })
-+
++    const estimate = TokenEstimate.estimateUploadInput({ text: "x".repeat(80_000), attachments: TokenEstimate.emptyAttachmentEstimate(), history: [{ info: { role: "assistant", providerID: "p", modelID: "m" }, parts: [stepFinish(269_504, 12_886, { messages: { attachments: 210_514 } })] }], model: { providerID: "p", id: "m" } })
 +    expect(estimate.source).toBe("default")
 +    expect(estimate.inputTokens).toBe(20_000)
 +  })
 +
++  // #194：media 分开
 +  test("uses media metadata as separate tokens when learning text density", () => {
-+    const estimate = TokenEstimate.estimateUploadInput({
-+      text: "x".repeat(65_000),
-+      attachments: TokenEstimate.emptyAttachmentEstimate(),
-+      history: [
-+        {
-+          info: { role: "assistant", providerID: "DaXiao Codex", modelID: "gpt-5.5" },
-+          parts: [
-+            stepFinish(3_989_772, 16_280, {
-+              messages: { attachments: 3_924_846 },
-+              media: { rawChars: 3_924_846, textChars: 31, tokens: 1_600, count: 1, imageTokens: 1_600, pdfTokens: 0, otherTokens: 0 },
-+            }),
-+          ],
-+        },
-+      ],
-+      model: { providerID: "DaXiao Codex", id: "gpt-5.5" },
-+    })
-+
++    const estimate = TokenEstimate.estimateUploadInput({ text: "x".repeat(65_000), attachments: TokenEstimate.emptyAttachmentEstimate(), history: [{ info: { role: "assistant", providerID: "p", modelID: "m" }, parts: [stepFinish(3_989_772, 16_280, { messages: { attachments: 3_924_846 }, media: { rawChars: 3_924_846, textChars: 31, tokens: 1_600, count: 1, imageTokens: 1_600, pdfTokens: 0, otherTokens: 0 } })] }], model: { providerID: "p", id: "m" } })
 +    expect(estimate.source).toBe("model-history")
 +    expect(estimate.charsPerToken).toBeCloseTo(4.42, 1)
 +    expect(estimate.inputTokens).toBeGreaterThan(14_000)
 +    expect(estimate.inputTokens).toBeLessThan(16_000)
 +  })
- })
++})
+\ No newline at end of file
+diff --git a/packages/tui/src/util/token-accounting.ts b/packages/tui/src/util/token-accounting.ts
+index 5f59f52fc4..f364f45730 100644
+--- a/packages/tui/src/util/token-accounting.ts
++++ b/packages/tui/src/util/token-accounting.ts
+@@ -214,8 +214,9 @@ export function tokenAccounting(
+   }
+ 
+   // ── 3. ratio ──
+-  // #122：样本不足时回落 DEFAULT_RATIO，避免小样本失真
+-  const inputRatio = ratioTokens > 0 && ratioChars > 500 ? ratioChars / ratioTokens : DEFAULT_RATIO
++  // #194：clamp 2..8——与 TokenEstimate.learnInputCharsPerToken 同口径，防极端样本失真
++  // #194：TUI 不能直接 import TokenEstimate（包边界），但 ratio 逻辑与 daemon 对齐
++  const inputRatio = ratioTokens > 0 && ratioChars > 500 ? Math.min(8, Math.max(2, ratioChars / ratioTokens)) : DEFAULT_RATIO
+   // #122：输出字符/token 比；样本不足回落 DEFAULT_RATIO
+   const outputRatio = outputTokensTotal > 0 && outputCharsTotal > 100 ? outputCharsTotal / outputTokensTotal : DEFAULT_RATIO
+ 

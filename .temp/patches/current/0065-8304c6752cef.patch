@@ -1,7 +1,15 @@
+From 8304c6752cef943e70fe3a7b091489bd09a8448f Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Sat, 2 May 2026 19:25:40 +0800
+Subject: [PATCH] =?UTF-8?q?fix:=20=E6=9B=B4=E6=96=B0=E6=9C=80=E5=A4=A7?=
+ =?UTF-8?q?=E5=AD=97=E8=8A=82=E6=95=B0=E9=99=90=E5=88=B6=EF=BC=8C=E4=BB=8E?=
+ =?UTF-8?q?=2051200=20=E8=B0=83=E6=95=B4=E4=B8=BA=2024576=EF=BC=8C?=
+
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
+index 74e29a9bfe..491f6bcfdb 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -14,7 +14,8 @@
+@@ -14,7 +14,8 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
  const DEFAULT_READ_LIMIT = 2000
  const MAX_LINE_LENGTH = 2000
  const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
@@ -12,9 +20,10 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
  const SAMPLE_BYTES = 4096
  const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
 diff --git a/packages/opencode/src/tool/truncate.ts b/packages/opencode/src/tool/truncate.ts
+index 3a48c90a98..d78b540068 100644
 --- a/packages/opencode/src/tool/truncate.ts
 +++ b/packages/opencode/src/tool/truncate.ts
-@@ -13,7 +13,8 @@
+@@ -13,7 +13,8 @@ import { TRUNCATION_DIR } from "./truncation-dir"
  const RETENTION = Duration.days(7)
  
  export const MAX_LINES = 2000
@@ -25,9 +34,10 @@ diff --git a/packages/opencode/src/tool/truncate.ts b/packages/opencode/src/tool
  export const GLOB = path.join(TRUNCATION_DIR, "*")
  
 diff --git a/packages/opencode/test/tool/truncation.test.ts b/packages/opencode/test/tool/truncation.test.ts
+index d575a58ffa..6915d34d75 100644
 --- a/packages/opencode/test/tool/truncation.test.ts
 +++ b/packages/opencode/test/tool/truncation.test.ts
-@@ -102,7 +102,7 @@
+@@ -102,7 +102,7 @@ describe("Truncate", () => {
  
      test("uses default MAX_LINES and MAX_BYTES", () => {
        expect(Truncate.MAX_LINES).toBe(2000)
@@ -37,9 +47,10 @@ diff --git a/packages/opencode/test/tool/truncation.test.ts b/packages/opencode/
  
      it.live("limits() falls back to MAX_LINES/MAX_BYTES when Config is not provided", () =>
 diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config/config.ts
+index a90e5c01fc..e74c1a6a6d 100644
 --- a/packages/core/src/v1/config/config.ts
 +++ b/packages/core/src/v1/config/config.ts
-@@ -136,7 +136,7 @@
+@@ -136,7 +136,7 @@ export const Info = Schema.Struct({
          description: "Maximum lines of tool output before it is truncated and saved to disk (default: 2000)",
        }),
        max_bytes: Schema.optional(PositiveInt).annotate({
@@ -49,9 +60,10 @@ diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config
        // 启用 Bash 输出压缩，减少 token 用量
        bash_compression: Schema.optional(Schema.Boolean).annotate({
 diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
+index f8f79e9d28..a6b6a9258f 100644
 --- a/packages/tui/src/util/context-usage.ts
 +++ b/packages/tui/src/util/context-usage.ts
-@@ -962,7 +962,7 @@
+@@ -962,7 +962,7 @@ function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
      .replaceAll("${shellGuidance}", shellGuidance)
      .replaceAll("${listCommand}", listCommand)
      .replaceAll("${maxLines}", "2000")
@@ -61,9 +73,10 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
  }
  
 diff --git a/packages/core/src/tool-output-store.ts b/packages/core/src/tool-output-store.ts
+index 1030ff22ff..67c2e59498 100644
 --- a/packages/core/src/tool-output-store.ts
 +++ b/packages/core/src/tool-output-store.ts
-@@ -11,7 +11,8 @@
+@@ -11,7 +11,8 @@ import { Identifier } from "./util/identifier"
  import type { ToolOutput } from "@opencode-ai/llm"
  
  export const MAX_LINES = 2_000
@@ -74,9 +87,10 @@ diff --git a/packages/core/src/tool-output-store.ts b/packages/core/src/tool-out
  
  export const MANAGED_DIRECTORY = "tool-output"
 diff --git a/packages/core/src/tool/read-filesystem.ts b/packages/core/src/tool/read-filesystem.ts
+index e325a83edd..4832415a79 100644
 --- a/packages/core/src/tool/read-filesystem.ts
 +++ b/packages/core/src/tool/read-filesystem.ts
-@@ -9,7 +9,8 @@
+@@ -9,7 +9,8 @@ import { makeLocationNode } from "../effect/app-node"
  import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
  
  export const MAX_READ_LINES = 2_000
@@ -86,3 +100,18 @@ diff --git a/packages/core/src/tool/read-filesystem.ts b/packages/core/src/tool/
  export const MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024
  const MAX_LINE_LENGTH = 2_000
  const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
+diff --git a/packages/core/test/tool-output-store.test.ts b/packages/core/test/tool-output-store.test.ts
+index a2d132a74b..307a1a01f4 100644
+--- a/packages/core/test/tool-output-store.test.ts
++++ b/packages/core/test/tool-output-store.test.ts
+@@ -134,7 +134,9 @@ describe("ToolOutputStore", () => {
+   it.live("does not double-count structured data duplicated in projected text", () =>
+     withStore(({ store }) =>
+       Effect.gen(function* () {
+-        const text = "x".repeat(30_000)
++        // #65：MAX_BYTES=24KB 后单份须低于上限（双计会超限）
++        // #65：MAX_BYTES=24KB；单份文本取 10KB 确保低于上限（双计会超限）
++        const text = "x".repeat(10_000)
+         const output = { structured: { output: text }, content: [{ type: "text" as const, text }] }
+         expect(yield* store.bound({ sessionID, toolCallID: "call-duplicated", output })).toEqual({
+           output,

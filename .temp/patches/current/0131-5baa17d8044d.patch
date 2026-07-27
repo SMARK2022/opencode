@@ -4,26 +4,51 @@ Date: Tue, 12 May 2026 23:50:36 +0800
 Subject: [PATCH] =?UTF-8?q?feat(line-ending):=20=E6=B7=BB=E5=8A=A0?=
  =?UTF-8?q?=E8=A1=8C=E7=BB=93=E6=9D=9F=E7=AC=A6=E5=A4=84=E7=90=86=E5=8A=9F?=
  =?UTF-8?q?=E8=83=BD=EF=BC=8C=E7=A1=AE=E4=BF=9D=E8=A1=A5=E4=B8=81=E5=BA=94?=
- =?UTF-8?q?=E7=94=A8=E6=97=B6=E4=BF=9D=E7=95=99=E5=8E=9F=E5=A7=8B=E8=A1=8C?=
- =?UTF-8?q?=E7=BB=93=E6=9D=9F=E7=AC=A6?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
+diff --git a/packages/opencode/src/util/line-ending.ts b/packages/opencode/src/util/line-ending.ts
+new file mode 100644
+index 0000000000..5b8ea2fbb0
+--- /dev/null
++++ b/packages/opencode/src/util/line-ending.ts
+@@ -0,0 +1,24 @@
++export type LineEnding = "\n" | "\r\n" | "\r"
++
++// #131：比较前统一成 LF，避免 CRLF/CR 重写变成整文件 diff
++export function normalizeLineEndings(text: string): string {
++  return text.replace(/\r\n?/g, "\n")
++}
++
++// #131：写回时选择文件级行尾；优先 CRLF，再 CR，最后 LF
++export function detectLineEnding(text: string): LineEnding {
++  if (text.includes("\r\n")) return "\r\n"
++  if (text.includes("\r")) return "\r"
++  return "\n"
++}
++
++// #131：逻辑行分割；纯 CR 文件不能整段当一行
++export function splitLines(text: string): string[] {
++  return normalizeLineEndings(text).split("\n")
++}
++
++// #131：把逻辑行还原成目标文件级行尾
++export function convertToLineEnding(text: string, ending: LineEnding): string {
++  if (ending === "\n") return text
++  return splitLines(text).join(ending)
++}
 diff --git a/packages/opencode/src/patch/index.ts b/packages/opencode/src/patch/index.ts
-index fd5fff5625bd35454cb272455bc7c6024c85e2f9..4a4ecb4aef9a83fac8e5b9c4776a0d430cd3e37a 100644
+index 66797d4f89..2800aaab46 100644
 --- a/packages/opencode/src/patch/index.ts
 +++ b/packages/opencode/src/patch/index.ts
-@@ -4,6 +4,7 @@ import * as fs from "fs/promises"
- import { readFileSync } from "fs"
- import * as Log from "@opencode-ai/core/util/log"
+@@ -2,6 +2,8 @@ import { Effect, Schema } from "effect"
+ import * as path from "path"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
  import * as Bom from "../util/bom"
-+import { convertToLineEnding, detectLineEnding, splitLines } from "@/util/line-ending"
++import { convertToLineEnding, detectLineEnding, splitLines } from "../util/line-ending"
++// #131：patch 逻辑行匹配，写回保留原行尾
  
- const log = Log.create({ service: "patch" })
- 
-@@ -189,7 +190,7 @@ function stripHeredoc(input: string): string {
+ export const PatchSchema = Schema.Struct({
+   patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
+@@ -184,7 +186,7 @@ function stripHeredoc(input: string): string {
  
  export function parsePatch(patchText: string): { hunks: Hunk[] } {
    const cleaned = stripHeredoc(patchText.trim())
@@ -32,55 +57,59 @@ index fd5fff5625bd35454cb272455bc7c6024c85e2f9..4a4ecb4aef9a83fac8e5b9c4776a0d43
    const hunks: Hunk[] = []
    let i = 0
  
-@@ -318,7 +319,7 @@ export function deriveNewContentsFromChunks(filePath: string, chunks: UpdateFile
-     throw new Error(`Failed to read file ${filePath}: ${error}`, { cause: error })
-   }
+@@ -311,7 +313,8 @@ export function deriveNewContentsFromChunks(
+ ): ApplyPatchFileUpdate {
+   const originalContent = Bom.split(originalText)
  
 -  let originalLines = originalContent.text.split("\n")
++  // #131：按逻辑行分割（含 CR-only）
 +  let originalLines = splitLines(originalContent.text)
  
    // Drop trailing empty element for consistent line counting
    if (originalLines.length > 0 && originalLines[originalLines.length - 1] === "") {
-@@ -333,7 +334,8 @@ export function deriveNewContentsFromChunks(filePath: string, chunks: UpdateFile
+@@ -326,7 +329,8 @@ export function deriveNewContentsFromChunks(
      newLines.push("")
    }
  
 -  const next = Bom.split(newLines.join("\n"))
-+  // Patch matching works on logical lines; preserve the file's original line ending when writing back.
++  // #131：匹配用逻辑行，写回保留原文件行尾
 +  const next = Bom.split(convertToLineEnding(newLines.join("\n"), detectLineEnding(originalContent.text)))
    const newContent = next.text
  
    // Generate unified diff
-@@ -491,8 +493,8 @@ function seekSequence(lines: string[], pattern: string[], startIndex: number, eo
+@@ -484,8 +488,9 @@ function seekSequence(lines: string[], pattern: string[], startIndex: number, eo
  }
  
  function generateUnifiedDiff(oldContent: string, newContent: string): string {
 -  const oldLines = oldContent.split("\n")
 -  const newLines = newContent.split("\n")
++  // #131：diff 行数组用逻辑行，避免 CRLF 噪声
 +  const oldLines = splitLines(oldContent)
 +  const newLines = splitLines(newContent)
  
    // Simple diff generation - in a real implementation you'd use a proper diff algorithm
    let diff = "@@ -1 +1 @@\n"
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index 916e11f1e3e51b0a519684e187152b6749fa5f93..78697a305b0cb3df9bcadfd51e26e1194486d19c 100644
+index f9201be8a7..3364683a8a 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
-@@ -14,6 +14,7 @@ import DESCRIPTION from "./apply_patch.txt"
- import { File } from "../file"
+@@ -14,6 +14,8 @@ import DESCRIPTION from "./apply_patch.txt"
+ import { FileSystem } from "@opencode-ai/core/filesystem"
  import { Format } from "../format"
  import * as Bom from "@/util/bom"
 +import { normalizeLineEndings } from "@/util/line-ending"
++// #131：diff 展示归一行尾，隐藏纯换行变更
  
  export const Parameters = Schema.Struct({
    patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
-@@ -79,11 +80,13 @@ export const ApplyPatchTool = Tool.define(
+@@ -79,11 +81,14 @@ export const ApplyPatchTool = Tool.define(
              const newContent =
                hunk.contents.length === 0 || hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`
              const next = Bom.split(newContent)
 -            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, oldContent, next.text))
 +            const diffOld = normalizeLineEndings(oldContent)
 +            const diffNew = normalizeLineEndings(next.text)
++            // #131：add 场景 diff 归一行尾
 +            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
  
              let additions = 0
@@ -90,13 +119,14 @@ index 916e11f1e3e51b0a519684e187152b6749fa5f93..78697a305b0cb3df9bcadfd51e26e119
                if (change.added) additions += change.count || 0
                if (change.removed) deletions += change.count || 0
              }
-@@ -126,11 +129,13 @@ export const ApplyPatchTool = Tool.define(
+@@ -130,11 +135,14 @@ export const ApplyPatchTool = Tool.define(
                return yield* Effect.fail(new Error(`apply_patch verification failed: ${error}`))
              }
  
 -            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, oldContent, newContent))
 +            const diffOld = normalizeLineEndings(oldContent)
 +            const diffNew = normalizeLineEndings(newContent)
++            // #131：update 场景 diff 归一行尾
 +            const diff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, diffNew))
  
              let additions = 0
@@ -106,12 +136,13 @@ index 916e11f1e3e51b0a519684e187152b6749fa5f93..78697a305b0cb3df9bcadfd51e26e119
                if (change.added) additions += change.count || 0
                if (change.removed) deletions += change.count || 0
              }
-@@ -165,9 +170,13 @@ export const ApplyPatchTool = Tool.define(
+@@ -169,9 +177,14 @@ export const ApplyPatchTool = Tool.define(
                ),
              )
              const contentToDelete = source.text
 -            const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, contentToDelete, ""))
 +            const diffOld = normalizeLineEndings(contentToDelete)
++            // #131：delete 场景按归一后行统计 deletions
 +            const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, diffOld, ""))
  
 -            const deletions = contentToDelete.split("\n").length
@@ -123,12 +154,12 @@ index 916e11f1e3e51b0a519684e187152b6749fa5f93..78697a305b0cb3df9bcadfd51e26e119
              fileChanges.push({
                filePath,
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index ea3aac34807d743c4dcef801e7a1394c552e9371..59dd896b9ef83bee839fa4203c0395d3d6176dac 100644
+index a92e4720c0..922b8a88a5 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -18,19 +18,7 @@ import { Snapshot } from "@/snapshot"
+@@ -18,19 +18,8 @@ import { Snapshot } from "@/snapshot"
  import { assertExternalDirectoryEffect } from "./external-directory"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
  import * as Bom from "@/util/bom"
 -
 -function normalizeLineEndings(text: string): string {
@@ -144,26 +175,29 @@ index ea3aac34807d743c4dcef801e7a1394c552e9371..59dd896b9ef83bee839fa4203c0395d3
 -  return text.replaceAll("\n", "\r\n")
 -}
 +import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
++// #131：行尾逻辑收敛到 util/line-ending（含 CR-only）
  
  const locks = new Map<string, Semaphore.Semaphore>()
  
-@@ -94,7 +82,9 @@ export const EditTool = Tool.define(
-                 const desiredBom = source.bom || next.bom
-                 contentOld = source.text
+@@ -98,7 +87,10 @@ export const EditTool = Tool.define(
+                 const desiredBom = next.bom
+                 contentOld = ""
                  contentNew = next.text
 -                diff = trimDiff(createTwoFilesPatch(filePath, filePath, contentOld, contentNew))
 +                diff = trimDiff(
++                  // #131：ask 元数据 diff 忽略纯行尾差异
 +                  createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
 +                )
                  yield* ctx.ask({
                    permission: "edit",
                    patterns: [path.relative(instance.worktree, filePath)],
-@@ -168,9 +158,11 @@ export const EditTool = Tool.define(
+@@ -172,9 +164,12 @@ export const EditTool = Tool.define(
              }).pipe(Effect.orDie),
            )
  
 +          const diffOld = normalizeLineEndings(contentOld)
 +          const diffNew = normalizeLineEndings(contentNew)
++          // #131：统计增删行时忽略行尾风格
            let additions = 0
            let deletions = 0
 -          for (const change of diffLines(contentOld, contentNew)) {
@@ -172,285 +206,214 @@ index ea3aac34807d743c4dcef801e7a1394c552e9371..59dd896b9ef83bee839fa4203c0395d3
              if (change.removed) deletions += change.count || 0
            }
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
-index 697daa20ca05d03c592b0e76c41d7a55655ffd85..b5678ecee0b15ba60d97cecea9dada47f704f3b1 100644
+index b6550b320e..10479263d2 100644
 --- a/packages/opencode/src/tool/write.ts
 +++ b/packages/opencode/src/tool/write.ts
-@@ -14,6 +14,7 @@ import { InstanceState } from "@/effect/instance-state"
+@@ -14,6 +14,8 @@ import { InstanceState } from "@/effect/instance-state"
  import { trimDiff } from "./edit"
  import { assertExternalDirectoryEffect } from "./external-directory"
  import * as Bom from "@/util/bom"
 +import { normalizeLineEndings } from "@/util/line-ending"
++// #131：write 元数据 diff 归一行尾
  
  const MAX_PROJECT_DIAGNOSTICS_FILES = 5
  
-@@ -50,7 +51,9 @@ export const WriteTool = Tool.define(
+@@ -50,7 +52,10 @@ export const WriteTool = Tool.define(
            const contentOld = source.text
            const contentNew = next.text
  
 -          const diff = trimDiff(createTwoFilesPatch(filepath, filepath, contentOld, contentNew))
 +          const diff = trimDiff(
++            // #131：permission 元数据忽略纯行尾 diff
 +            createTwoFilesPatch(filepath, filepath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),
 +          )
            yield* ctx.ask({
              permission: "edit",
              patterns: [path.relative(instance.worktree, filepath)],
-@@ -69,7 +72,14 @@ export const WriteTool = Tool.define(
-           let metadataDiff: string | undefined
-           if (exists) {
+@@ -72,7 +77,15 @@ export const WriteTool = Tool.define(
+             // 最终内容读取：格式化后重新读取文件，确保 diff 反映实际落盘内容
              const finalSource = yield* Bom.readFile(fs, filepath)
+             // diff 生成：使用 createTwoFilesPatch 生成 git diff 格式，trimDiff 清理头部
 -            metadataDiff = trimDiff(createTwoFilesPatch(filepath, filepath, contentOld, finalSource.text))
 +            metadataDiff = trimDiff(
 +              createTwoFilesPatch(
 +                filepath,
 +                filepath,
++                // #131：格式化后最终 diff 也归一行尾
 +                normalizeLineEndings(contentOld),
 +                normalizeLineEndings(finalSource.text),
 +              ),
 +            )
            }
-           yield* bus.publish(File.Event.Edited, { file: filepath })
-           yield* bus.publish(FileWatcher.Event.Updated, {
-diff --git a/packages/opencode/src/util/line-ending.ts b/packages/opencode/src/util/line-ending.ts
+           yield* events.publish(FileSystem.Event.Edited, { file: filepath })
+           yield* events.publish(Watcher.Event.Updated, {
+diff --git a/packages/opencode/test/util/line-ending.test.ts b/packages/opencode/test/util/line-ending.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..09da7120daf3479062b9e4ee8d7721902a11bcdb
+index 0000000000..20b3e3e5ff
 --- /dev/null
-+++ b/packages/opencode/src/util/line-ending.ts
-@@ -0,0 +1,24 @@
-+export type LineEnding = "\n" | "\r\n" | "\r"
++++ b/packages/opencode/test/util/line-ending.test.ts
+@@ -0,0 +1,32 @@
++import { describe, expect, test } from "bun:test"
++import {
++  convertToLineEnding,
++  detectLineEnding,
++  normalizeLineEndings,
++  splitLines,
++} from "../../src/util/line-ending"
 +
-+// Use LF for comparisons so CRLF/CR-only rewrites do not become full-file diffs.
-+export function normalizeLineEndings(text: string): string {
-+  return text.replace(/\r\n?/g, "\n")
-+}
-+
-+// Pick one file-level style for write-back paths that rebuild logical lines.
-+export function detectLineEnding(text: string): LineEnding {
-+  if (text.includes("\r\n")) return "\r\n"
-+  if (text.includes("\r")) return "\r"
-+  return "\n"
-+}
-+
-+// Split on logical lines; legacy CR-only files must not collapse into one line.
-+export function splitLines(text: string): string[] {
-+  return normalizeLineEndings(text).split("\n")
-+}
-+
-+// Convert normalized logical lines back to the target file-level line ending.
-+export function convertToLineEnding(text: string, ending: LineEnding): string {
-+  if (ending === "\n") return text
-+  return splitLines(text).join(ending)
-+}
-diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
-index fd24b557b3cae4120faea65fb0f4b2487e6edb64..175f38ee3e785f7a15e17ce7f2499cd21f1e302a 100644
---- a/packages/opencode/test/tool/apply_patch.test.ts
-+++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -225,6 +225,89 @@ describe("tool.apply_patch freeform", () => {
-     })
-   })
- 
-+  test("does not show CRLF-only update fallout as content changes", async () => {
-+    await using fixture = await tmpdir()
-+    const { ctx, calls } = makeCtx()
-+
-+    await WithInstance.provide({
-+      directory: fixture.path,
-+      fn: async () => {
-+        const target = path.join(fixture.path, "crlf.txt")
-+        await fs.writeFile(target, "one\r\ntwo\r\nthree\r\n", "utf-8")
-+
-+        const patchText = "*** Begin Patch\n*** Update File: crlf.txt\n@@\n-two\n+deux\n*** End Patch"
-+
-+        await execute({ patchText }, ctx)
-+
-+        expect(calls.length).toBe(1)
-+        const shown = calls[0].metadata.files[0]?.patch ?? ""
-+        const file = calls[0].metadata.files[0]
-+        expect(shown).toContain("-two")
-+        expect(shown).toContain("+deux")
-+        expect(shown).not.toContain("-one")
-+        expect(shown).not.toContain("+one")
-+        expect(shown).not.toContain("-three")
-+        expect(shown).not.toContain("+three")
-+        expect(file?.additions).toBe(1)
-+        expect(file?.deletions).toBe(1)
-+        expect(await fs.readFile(target, "utf-8")).toBe("one\r\ndeux\r\nthree\r\n")
-+      },
-+    })
++// #131：行尾工具语义单测（CR/CRLF/LF）
++describe("line-ending", () => {
++  test("normalizeLineEndings collapses CRLF and CR to LF", () => {
++    expect(normalizeLineEndings("a\r\nb\rc\n")).toBe("a\nb\nc\n")
 +  })
 +
-+  test("applies patches to CR-only files without showing line-ending fallout", async () => {
-+    await using fixture = await tmpdir()
-+    const { ctx, calls } = makeCtx()
-+
-+    await WithInstance.provide({
-+      directory: fixture.path,
-+      fn: async () => {
-+        const target = path.join(fixture.path, "cr.txt")
-+        await fs.writeFile(target, "one\rtwo\rthree\r", "utf-8")
-+
-+        const patchText = "*** Begin Patch\n*** Update File: cr.txt\n@@\n-two\n+deux\n*** End Patch"
-+
-+        await execute({ patchText }, ctx)
-+
-+        const shown = calls[0].metadata.files[0]?.patch ?? ""
-+        expect(shown).toContain("-two")
-+        expect(shown).toContain("+deux")
-+        expect(shown).not.toContain("-one")
-+        expect(shown).not.toContain("+one")
-+        expect(shown).not.toContain("-three")
-+        expect(shown).not.toContain("+three")
-+        expect(calls[0].metadata.files[0]?.additions).toBe(1)
-+        expect(calls[0].metadata.files[0]?.deletions).toBe(1)
-+        expect(await fs.readFile(target, "utf-8")).toBe("one\rdeux\rthree\r")
-+      },
-+    })
++  test("detectLineEnding prefers CRLF then CR then LF", () => {
++    expect(detectLineEnding("a\r\nb")).toBe("\r\n")
++    expect(detectLineEnding("a\rb")).toBe("\r")
++    expect(detectLineEnding("a\nb")).toBe("\n")
 +  })
 +
-+  test("preserves BOM and CRLF endings when applying patches", async () => {
-+    await using fixture = await tmpdir()
-+    const { ctx, calls } = makeCtx()
-+
-+    await WithInstance.provide({
-+      directory: fixture.path,
-+      fn: async () => {
-+        const bom = String.fromCharCode(0xfeff)
-+        const target = path.join(fixture.path, "bom-crlf.cs")
-+        await fs.writeFile(target, `${bom}using System;\r\nclass Test {}\r\n`, "utf-8")
-+
-+        const patchText = "*** Begin Patch\n*** Update File: bom-crlf.cs\n@@\n-using System;\n+using Up;\n*** End Patch"
-+
-+        await execute({ patchText }, ctx)
-+
-+        const content = await fs.readFile(target, "utf-8")
-+        expect(content.charCodeAt(0)).toBe(0xfeff)
-+        expect(content.slice(1)).toBe("using Up;\r\nclass Test {}\r\n")
-+        expect(calls[0].metadata.files[0]?.patch).toContain("-using System;")
-+        expect(calls[0].metadata.files[0]?.patch).toContain("+using Up;")
-+        expect(calls[0].metadata.files[0]?.patch).not.toContain(bom)
-+      },
-+    })
++  test("splitLines treats CR-only files as multiple logical lines", () => {
++    expect(splitLines("Line 1\rLine 2\r")).toEqual(["Line 1", "Line 2", ""])
 +  })
 +
-   test("inserts lines with insert-only hunk", async () => {
-     await using fixture = await tmpdir()
-     const { ctx } = makeCtx()
++  test("convertToLineEnding restores CR-only writeback", () => {
++    expect(convertToLineEnding("Line 1\nLine 2\n", "\r")).toBe("Line 1\rLine 2\r")
++  })
++
++  test("convertToLineEnding restores CRLF writeback", () => {
++    expect(convertToLineEnding("Line 1\nLine 2\n", "\r\n")).toBe("Line 1\r\nLine 2\r\n")
++  })
++})
 diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
-index 23ae0e9090f5186fba2fd63f5fe5006cec22964d..359ab754ecdf240474f1e6da752f6256d76afc80 100644
+index 46155a5091..39727b2653 100644
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -128,6 +128,67 @@ describe("tool.edit", () => {
-       })
-     })
- 
-+    test("does not show CRLF-only oldString-empty overwrites as content changes", async () => {
-+      await using tmp = await tmpdir()
-+      const filepath = path.join(tmp.path, "existing-crlf.txt")
-+      const content = "Line 1\nLine 2\n"
-+      await fs.writeFile(filepath, content.replaceAll("\n", "\r\n"), "utf-8")
-+
-+      await WithInstance.provide({
-+        directory: tmp.path,
-+        fn: async () => {
-+          const edit = await resolve()
-+          const result = await Effect.runPromise(
-+            edit.execute(
-+              {
-+                filePath: filepath,
-+                oldString: "",
-+                newString: content,
-+              },
-+              ctx,
-+            ),
-+          )
-+
-+          expect(result.metadata.diff).toContain("Index:")
-+          expect(result.metadata.diff).not.toContain("-Line 1")
-+          expect(result.metadata.diff).not.toContain("+Line 1")
-+          expect(result.metadata.filediff.additions).toBe(0)
-+          expect(result.metadata.filediff.deletions).toBe(0)
-+          expect(await fs.readFile(filepath, "utf-8")).toBe(content)
-+        },
-+      })
-+    })
-+
-+    test("does not show CR-only oldString-empty overwrites as content changes", async () => {
-+      await using tmp = await tmpdir()
-+      const filepath = path.join(tmp.path, "existing-cr.txt")
-+      const content = "Line 1\nLine 2\n"
-+      await fs.writeFile(filepath, content.replaceAll("\n", "\r"), "utf-8")
-+
-+      await WithInstance.provide({
-+        directory: tmp.path,
-+        fn: async () => {
-+          const edit = await resolve()
-+          const result = await Effect.runPromise(
-+            edit.execute(
-+              {
-+                filePath: filepath,
-+                oldString: "",
-+                newString: content,
-+              },
-+              ctx,
-+            ),
-+          )
-+
-+          expect(result.metadata.diff).toContain("Index:")
-+          expect(result.metadata.diff).not.toContain("-Line 1")
-+          expect(result.metadata.diff).not.toContain("+Line 1")
-+          expect(result.metadata.filediff.additions).toBe(0)
-+          expect(result.metadata.filediff.deletions).toBe(0)
-+        },
-+      })
-+    })
-+
-     test("creates new file with nested directories", async () => {
-       await using tmp = await tmpdir()
-       const filepath = path.join(tmp.path, "nested", "dir", "file.txt")
-diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
-index 8bba52a4b2c8a11e2904eb0910bd08ac8134a91c..ef69b5a012ea3b5d8c81d2b23367ff7dac1b1f28 100644
---- a/packages/opencode/test/tool/write.test.ts
-+++ b/packages/opencode/test/tool/write.test.ts
-@@ -168,6 +168,43 @@ describe("tool.write", () => {
-         expect(result.metadata).toHaveProperty("exists", true)
+@@ -571,4 +571,43 @@ describe("tool.edit", () => {
        }),
      )
+   })
++  describe("line-ending metadata", () => {
++    // #131：CRLF 文件用 LF oldString 匹配并改内容，写回应保留 CRLF
++    it.instance("preserves CRLF when editing with LF oldString", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "edit-crlf.txt")
++        yield* put(filepath, "Line 1\r\nLine 2\r\n")
++        const result = yield* run({
++          filePath: filepath,
++          oldString: "Line 1\nLine 2\n",
++          newString: "Line 1\nLine X\n",
++        })
++        const raw = yield* loadRaw(filepath)
++        expect(raw).toContain("\r\n")
++        expect(raw.replaceAll("\r\n", "\n")).toBe("Line 1\nLine X\n")
++        expect(result.metadata.diff).toContain("-Line 2")
++        expect(result.metadata.diff).toContain("+Line X")
++      }),
++    )
 +
++    // #131：CR-only 文件可被逻辑行匹配编辑，写回保留 CR
++    it.instance("preserves CR-only endings when editing with LF oldString", () =>
++      Effect.gen(function* () {
++        const test = yield* TestInstance
++        const filepath = path.join(test.directory, "edit-cr.txt")
++        yield* put(filepath, "Line 1\rLine 2\r")
++        yield* run({
++          filePath: filepath,
++          oldString: "Line 1\nLine 2\n",
++          newString: "Line 1\nLine Y\n",
++        })
++        const raw = yield* loadRaw(filepath)
++        expect(raw.includes("\r")).toBe(true)
++        expect(raw.includes("\r\n")).toBe(false)
++        expect(raw.replaceAll("\r", "\n")).toBe("Line 1\nLine Y\n")
++      }),
++    )
++  })
++
+ })
+diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
+index 4f897dc875..d5d4f025aa 100644
+--- a/packages/opencode/test/tool/write.test.ts
++++ b/packages/opencode/test/tool/write.test.ts
+@@ -276,4 +276,34 @@ describe("tool.write", () => {
+       }),
+     )
+   })
++  describe("line-ending metadata", () => {
++    // #131：同逻辑内容覆写 CRLF 文件时 metadata.diff 不应把行尾当内容变更
 +    it.instance("does not show CRLF-only overwrites as content changes", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
-+        const filepath = path.join(test.directory, "crlf-existing.txt")
-+        const content = "Line 1\nLine 2\n"
-+        yield* Effect.promise(() => fs.writeFile(filepath, content.replaceAll("\n", "\r\n"), "utf-8"))
-+
-+        const result = yield* run({ filePath: filepath, content })
-+        const diff = result.metadata.diff ?? ""
-+
-+        expect(diff).toContain("Index:")
++        const filepath = path.join(test.directory, "crlf-meta.txt")
++        const logical = "Line 1\nLine 2\n"
++        yield* Effect.promise(() => fs.writeFile(filepath, logical.replaceAll("\n", "\r\n"), "utf-8"))
++        const result = yield* run({ filePath: filepath, content: logical })
++        const diff = result.metadata?.diff ?? ""
 +        expect(diff).not.toContain("-Line 1")
 +        expect(diff).not.toContain("+Line 1")
-+        expect(diff).not.toContain("-Line 2")
-+        expect(diff).not.toContain("+Line 2")
-+        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(content)
 +      }),
 +    )
 +
++    // #131：CR-only 文件同逻辑覆写同样不应出现假内容 diff
 +    it.instance("does not show CR-only overwrites as content changes", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
-+        const filepath = path.join(test.directory, "cr-existing.txt")
-+        const content = "Line 1\nLine 2\n"
-+        yield* Effect.promise(() => fs.writeFile(filepath, content.replaceAll("\n", "\r"), "utf-8"))
-+
-+        const result = yield* run({ filePath: filepath, content })
-+        const diff = result.metadata.diff ?? ""
-+
-+        expect(diff).toContain("Index:")
++        const filepath = path.join(test.directory, "cr-meta.txt")
++        const logical = "Line 1\nLine 2\n"
++        yield* Effect.promise(() => fs.writeFile(filepath, logical.replaceAll("\n", "\r"), "utf-8"))
++        const result = yield* run({ filePath: filepath, content: logical })
++        const diff = result.metadata?.diff ?? ""
 +        expect(diff).not.toContain("-Line 1")
 +        expect(diff).not.toContain("+Line 1")
-+        expect(diff).not.toContain("-Line 2")
-+        expect(diff).not.toContain("+Line 2")
 +      }),
 +    )
-   })
- 
-   describe("file permissions", () => {
++  })
++
+ })
+diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
+index e394d8084f..072f95b18a 100644
+--- a/packages/opencode/test/tool/apply_patch.test.ts
++++ b/packages/opencode/test/tool/apply_patch.test.ts
+@@ -526,4 +526,40 @@ EOF`
+       expect(yield* readText(target)).toBe(`He said "hi"\nsome${emDash}dash\nend\n`)
+     }),
+   )
++  // #131：对 CRLF 文件 apply 后内容正确且 ask 元数据 diff 归一
++  it.instance("applies patches to CRLF files without line-ending fallout in ask metadata", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const { ctx, calls } = makeCtx()
++      const target = path.join(test.directory, "patch-crlf.txt")
++      yield* writeText(target, "line1\r\nline2\r\n")
++      const patchText =
++        "*** Begin Patch\n*** Update File: patch-crlf.txt\n@@\n-line2\n+changed\n*** End Patch"
++      yield* execute({ patchText }, ctx)
++      const raw = yield* readText(target)
++      expect(raw.replaceAll("\r\n", "\n").replaceAll("\r", "\n")).toContain("changed")
++      // #131：permission ask 的 diff 不应因行尾风格膨胀成整文件替换
++      const asked = calls.find((c) => c.permission === "edit")
++      const diff = String((asked as any)?.metadata?.diff ?? "")
++      if (diff) {
++        expect(diff).not.toMatch(/^-line1$/m)
++      }
++    }),
++  )
++
++  // #131：CR-only 文件可 apply，逻辑行匹配
++  it.instance("applies patches to CR-only files", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const { ctx } = makeCtx()
++      const target = path.join(test.directory, "patch-cr.txt")
++      yield* writeText(target, "line1\rline2\r")
++      const patchText =
++        "*** Begin Patch\n*** Update File: patch-cr.txt\n@@\n-line2\n+changed\n*** End Patch"
++      yield* execute({ patchText }, ctx)
++      const raw = yield* readText(target)
++      expect(raw.replaceAll("\r\n", "\n").replaceAll("\r", "\n")).toContain("changed")
++    }),
++  )
++
+ })

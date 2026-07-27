@@ -1,49 +1,40 @@
 From a686ccf720d66b558e300ec20b4a32d8c1579fee Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Mon, 18 May 2026 23:56:30 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E6=9B=B4=E6=96=B0=20Windows=20?=
- =?UTF-8?q?=E6=9E=84=E5=BB=BA=E6=B5=81=E7=A8=8B=EF=BC=8C=E4=BD=BF=E7=94=A8?=
- =?UTF-8?q?=E6=96=B0=E7=9A=84=20Bun=20=E5=AE=89=E8=A3=85=E6=96=B9=E5=BC=8F?=
- =?UTF-8?q?=E5=B9=B6=E6=B7=BB=E5=8A=A0=E4=BE=9D=E8=B5=96=E5=AE=89=E8=A3=85?=
- =?UTF-8?q?=E6=AD=A5=E9=AA=A4?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
+Subject: [PATCH] feat: Windows build uses direct Bun install (#170 tip)
 
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
-index aa9545b5ed1adc1b333a9d6b1b37dea537d3829f..2678b39041608cc519a02bb1e35b3c5b98d49e43 100644
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -243,7 +243,31 @@ jobs:
+@@ -274,7 +274,31 @@ jobs:
  
        - uses: microsoft/setup-msbuild@v2
  
 -      - uses: ./.github/actions/setup-bun
-+      # Keep macOS/Linux on the shared setup-bun action, but avoid it on Windows:
-+      # restoring/saving the multi-GB Bun package cache is slower than a clean install
-+      # on GitHub-hosted Windows runners.
-+      - uses: oven-sh/setup-bun@v2
++      # #170：Windows 跳过 setup-bun 多 GB cache restore/save，直装更快
++      # #170：mac/linux 仍走共享 composite；仅 Windows 旁路
++      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 +        with:
 +          bun-version-file: package.json
 +
 +      - name: Install Windows dependencies
 +        shell: pwsh
 +        env:
++          # #170：跳过重型可选浏览器/桌面二进制下载
 +          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
 +          ELECTRON_SKIP_DOWNLOAD: "1"
 +          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
 +          PUPPETEER_SKIP_DOWNLOAD: "1"
 +          CYPRESS_INSTALL_BINARY: "0"
++          # #170：非交互 CI 禁止 husky prepare 挂载
 +          HUSKY: "0"
 +        run: |
 +          $ErrorActionPreference = "Stop"
-+
++          # #170：缺 setuptools 时显式安装，失败 fail-closed
 +          python -c "import setuptools" 2>$null
 +          if ($LASTEXITCODE -ne 0) {
-+            python -m pip install setuptools
++            python -m pip install --upgrade setuptools
 +          }
-+
 +          bun install --linker hoisted
  
        - name: Build Windows x64 binary

@@ -1,24 +1,18 @@
 From 9e190548fc7af57e6af4304cf7b3641db69b5b88 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Sun, 24 May 2026 21:13:51 +0800
-Subject: [PATCH] =?UTF-8?q?feat(terminal):=20=E5=A2=9E=E5=BC=BA=E8=99=9A?=
- =?UTF-8?q?=E6=8B=9F=E7=BB=88=E7=AB=AF=E6=98=BE=E7=A4=BA=EF=BC=8C=E6=94=AF?=
- =?UTF-8?q?=E6=8C=81=E9=83=A8=E5=88=86=E6=8E=A7=E5=88=B6=E5=BA=8F=E5=88=97?=
- =?UTF-8?q?=E7=BC=93=E5=86=B2=E5=92=8C=E6=9C=80=E5=A4=A7=E8=A1=8C=E6=95=B0?=
- =?UTF-8?q?/=E5=AD=97=E7=AC=A6=E9=99=90=E5=88=B6?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH] feat(terminal): 增强虚拟终端显示，支持部分控制序列缓冲和最大行数/字符限制
 
 
 diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
-index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee1bb7c04e 100644
+index 144f16e046..9226a82cae 100644
 --- a/packages/opencode/src/tool/bash-compress.ts
 +++ b/packages/opencode/src/tool/bash-compress.ts
-@@ -329,16 +329,27 @@ function redactSecrets(text: string): { text: string; redacted: number } {
+@@ -329,16 +329,29 @@ function redactSecrets(text: string): { text: string; redacted: number } {
   * 虚拟终端渲染器 - 处理 ANSI 控制序列
   * 支持光标移动、清屏、清行等操作，将终端重绘输出转换为稳定的文本
   */
++// #215：虚拟终端显示选项——maxLines/maxChars 限制显示缓冲，bufferPartialControl 缓冲跨块的半截 CSI
 +type VirtualTerminalOptions = {
 +  maxLines?: number
 +  maxChars?: number
@@ -39,23 +33,26 @@ index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee
    
 -  processChunk(chunk: string): void {
 +  processChunk(input: string): void {
++    // #215：先把上一块残留的控制前缀拼回输入头部，使被字节边界切断的 CSI 重新完整后再解析
 +    const chunk = this.pendingControl + input
 +    this.pendingControl = ''
      let pos = 0
      
      while (pos < chunk.length) {
-@@ -348,7 +359,18 @@ class VirtualTerminal {
+@@ -348,7 +361,20 @@ class VirtualTerminal {
        
        if (!match) {
          // 没有更多控制序列，处理剩余文本
 -        this.writeText(chunk.slice(pos))
 +        const rest = chunk.slice(pos)
++        // #215：仅显示路径开启半截缓冲；压缩路径不传 bufferPartialControl，未知/完整序列一律按可见文本处理以保真
 +        const partial = this.options.bufferPartialControl ? this.partialControl(rest) : ''
 +        if (partial) {
 +          // Live shell chunks may split ESC or ESC[2K across arbitrary byte
 +          // boundaries. Buffer only a suffix that can still become one of the CSI
 +          // controls this renderer understands; complete or unknown sequences keep
 +          // following the existing parse path instead of hiding visible text.
++          // #215：半截前缀前的部分立即写为可见文本，仅把可能续成 CSI 的尾缀留到下一块，杜绝吞字
 +          this.writeText(rest.slice(0, rest.length - partial.length))
 +          this.pendingControl = partial
 +        } else {
@@ -64,7 +61,7 @@ index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee
          break
        }
        
-@@ -364,6 +386,55 @@ class VirtualTerminal {
+@@ -364,6 +390,63 @@ class VirtualTerminal {
        
        pos = this.CSI_REGEX.lastIndex
      }
@@ -72,6 +69,7 @@ index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee
 +    this.trimDisplay()
 +  }
 +
++  // #215：只缓冲仍可能续成已知 CSI 的尾缀——孤立 ESC 或 ESC[ 加未终结参数；含终结字母者已定论按文本写出
 +  private partialControl(text: string) {
 +    const esc = text.lastIndexOf('\x1b')
 +    if (esc < 0) return ''
@@ -81,25 +79,31 @@ index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee
 +    return ''
 +  }
 +
++  // #215：显示裁剪保持 preview(last+chunk) 的有界性，长任务不再无界堆积屏幕行
 +  private trimDisplay(): void {
 +    // Live metadata used to be bounded by `preview(last + chunk)`. Keep that
 +    // invariant for the terminal-display path too; otherwise long-running tools
 +    // would trade clean CR rendering for unbounded screen storage and repeated
 +    // whole-buffer joins. Compression uses an unbounded VirtualTerminal by not
 +    // passing these display-only limits.
++    // #215：maxLines 超限时丢弃最旧行并平移光标，保证后续写入落到正确屏幕行而非越界下标
 +    if (this.options.maxLines !== undefined && this.lines.length > this.options.maxLines) {
 +      const drop = this.lines.length - this.options.maxLines
 +      this.lines = this.lines.slice(drop)
 +      this.cursorRow = Math.max(0, this.cursorRow - drop)
 +    }
 +
++    // #215：压缩路径 maxChars 未设或屏幕已空时直接返回，跳过字符预算扫描以保持无界保真
 +    if (this.options.maxChars === undefined || this.lines.length === 0) return
 +
++    // #215：从最新行向前累加字符预算，使预算优先覆盖最近屏幕，与 preview(last) 看尾部的语义一致
 +    let total = 0
 +    let start = this.lines.length
 +    for (let i = this.lines.length - 1; i >= 0; i--) {
 +      const line = this.lines[i]
++      // #215：行间换行符计入预算、首行不计，避免 join 后实际长度超出 maxChars 导致预览溢出
 +      const size = line.length + (start === this.lines.length ? 0 : 1)
++      // #215：累计超预算时停止收纳更旧行；若连最新行都超限则只保留其尾缀并夹紧光标列
 +      if (total + size > this.options.maxChars) {
 +        if (start === this.lines.length) {
 +          const drop = Math.max(0, line.length - this.options.maxChars)
@@ -113,6 +117,7 @@ index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee
 +      start = i
 +    }
 +
++    // #215：仅当找到真实预算边界才丢弃前导行，绝不把屏幕切成空数组而丢失全部可见内容
 +    if (start > 0 && start < this.lines.length) {
 +      this.lines = this.lines.slice(start)
 +      this.cursorRow = Math.max(0, this.cursorRow - start)
@@ -120,11 +125,12 @@ index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee
    }
    
    private handleCSI(params: string, command: string): void {
-@@ -421,31 +492,57 @@ class VirtualTerminal {
+@@ -421,31 +504,62 @@ class VirtualTerminal {
    }
    
    private writeText(text: string): void {
 -    for (const char of text) {
++    // #215：索引循环替代 for-of，以便把连续普通字符批量交给 writeRun，消除兆字节输出下的逐字符热点
 +    for (let pos = 0; pos < text.length;) {
 +      const char = text[pos]
        if (char === '\r') {
@@ -162,12 +168,13 @@ index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee
 -        this.cursorCol++
 +        pos++
 +        continue
-+      }
+       }
 +
++      // #215：批量扫描遇到下一个 CR/LF/BS 即停，保证控制字节仍逐个驱动光标状态而不被批量吞并
 +      let end = pos + 1
 +      while (end < text.length && text[end] !== '\r' && text[end] !== '\n' && text[end] !== '\b') {
 +        end++
-       }
++      }
 +      this.writeRun(text.slice(pos, end))
 +      pos = end
 +    }
@@ -177,9 +184,11 @@ index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee
 +    // Plain output can arrive as very large chunks. Batch normal text and, in
 +    // live-display mode, keep only the suffix that metadata can ever show so the
 +    // terminal renderer stays bounded before the final preview() call.
++    // #215：显示模式下只保留 maxChars 尾缀写入，在渲染前而非渲染后封顶，避免先建超长行再截断
 +    const text = this.options.maxChars === undefined ? input : input.slice(-this.options.maxChars)
 +    this.ensureLine(this.cursorRow)
 +
++    // #215：光标列漂出预算（如巨大 CHA）时清空当前行并夹紧列，防止陈旧超长行被重新拼接
 +    if (this.options.maxChars !== undefined && this.cursorCol > this.options.maxChars) {
 +      this.lines[this.cursorRow] = ''
 +      this.cursorCol = this.options.maxChars
@@ -188,6 +197,7 @@ index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee
 +      this.lines[this.cursorRow] += ' '
      }
 +
++    // #215：原位覆写而非逐字重建，保留写入位置之后的已有内容，覆盖式光标移动语义不丢尾段
 +    const line = this.lines[this.cursorRow]
 +    this.lines[this.cursorRow] = line.slice(0, this.cursorCol) + text + line.slice(this.cursorCol + text.length)
 +    this.cursorCol += text.length
@@ -195,15 +205,17 @@ index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee
    }
    
    private ensureLine(row: number): void {
-@@ -457,12 +554,39 @@ class VirtualTerminal {
+@@ -457,12 +571,44 @@ class VirtualTerminal {
    getStableOutput(): string {
      return this.lines.filter(line => line.trim().length > 0).join('\n')
    }
 +
++  // #215：显示输出保留可见空行，仅裁剪尾部隐式空行
 +  getDisplayOutput(): string {
 +    // Display snapshots model what the user sees in a terminal, not what the
 +    // model receives. Preserve intentional blank rows inside the visible screen,
 +    // but trim the implicit empty rows created only by a trailing newline or clear.
++    // #215：从末尾向前找最后一行非空，保留其间意图空行，仅裁剪由尾随换行或清屏产生的隐式空行
 +    const last = this.lines.findLastIndex(line => line.trim().length > 0)
 +    if (last < 0) return ''
 +    return this.lines.slice(0, last + 1).join('\n')
@@ -214,7 +226,9 @@ index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee
    }
  }
  
++// #215：终端显示工厂——复用压缩渲染器，避免 live 元数据与最终压缩分歧
 +export function createTerminalDisplay(options?: Pick<VirtualTerminalOptions, 'maxLines' | 'maxChars'>) {
++  // #215：工厂强制开启半截缓冲，显示路径必然跨块；压缩路径直接 new VirtualTerminal() 不走此工厂以保持保真
 +  const terminal = new VirtualTerminal({ ...options, bufferPartialControl: true })
 +
 +  return {
@@ -223,6 +237,7 @@ index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee
 +      // final compression cannot diverge on CR redraws, clear-line sequences, or
 +      // cursor movement. This helper intentionally returns only the display view;
 +      // callers that need faithful model output must keep their own raw stream.
++      // #215：push 一次完成渲染加快照，调用方拿到的是显示视图；需忠实模型输出者须自留原始流
 +      terminal.processChunk(chunk)
 +      return terminal.getDisplayOutput()
 +    },
@@ -236,137 +251,170 @@ index abd4ff098b110b36ef33f2e2e1f288cd35eae554..a6c07938cdb966859e0846bb533fd8ee
  function normalizeTerminalOutput(text: string, config: CompressionConfig): { text: string; frames: number } {
    // 如果没有 ANSI 控制字符和回车，直接返回
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
-index 86a6fc3fc3db28e14a6005d41bcbf46bbeac949b..fa960d7d51c9dcd8cdd8600038c4e02de48ad30e 100644
+index 1d71dedf0f..c188fc96bd 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -29,6 +29,7 @@ import {
-   BashDiagnosticCollector,
-   bashCompressionMetadata,
-   compressVisibleOutput,
-+  createTerminalDisplay,
-   normalizePowerShellOutput,
-   renderDiagnosticAppendix,
- } from "./bash-compress"
-@@ -792,7 +793,6 @@ export const ShellTool = Tool.define(
+@@ -14,7 +14,7 @@ import { Config } from "@/config/config"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { Shell } from "@opencode-ai/core/shell"
+ import { ShellID } from "./shell/id"
+-import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
++import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
+ 
+ import * as Truncate from "./truncate"
+ import { Plugin } from "@/plugin"
+@@ -847,7 +847,9 @@ export const ShellTool = Tool.define(
        const limits = yield* trunc.limits()
        const keep = limits.maxBytes * 2
        let full = ""
 -      let last = ""
++      // #215：display/displayed 提升至外层完成作用域，供最终元数据读取终端屏幕与渲染标记
++      let display!: ReturnType<typeof createTerminalDisplay>
++      let displayed = false
        const list: Chunk[] = []
        let used = 0
        let file = ""
-@@ -836,9 +836,13 @@ export const ShellTool = Tool.define(
-       })
+@@ -900,12 +902,20 @@ export const ShellTool = Tool.define(
+           // #126：按字节喂解码器，解决 PowerShell/重定向 UTF-16 输出
+           // #128：按 input.encoding 锁定或自动探测
+           const decoder = createAutoTextDecoder({ encoding: input.encoding })
++          // #215：用 createTerminalDisplay 替代 preview(last+chunk)，CR 进度与清行重绘不泄漏控制字节
++          display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
++          displayed = false
++          // #215：displayed 标记是否曾有 chunk 渲染过，用于区分“静默命令回退压缩输出”与“清屏后空屏”
+           // #126：字符串 chunk 写入环形缓冲与截断/落盘逻辑
+           const onChunk = (chunk: string) => {
+             if (!chunk) return Effect.void
+             // 收集诊断信息用于压缩后的附录生成
+             diag.push(chunk)
++            // #215：display.push 返回终端屏幕快照，preview 仅做最终长度封顶，CR 覆盖与清行已由渲染器吸收
++            const visible = preview(display.push(chunk))
++            displayed = true
+             const size = Buffer.byteLength(chunk, "utf-8")
++            // #215：原始环形缓冲仍独立累积喂给模型输出，显示快照不替代也不截断原始字节流
+             list.push({ text: chunk, size })
+             used += size
+             while (used > keep && list.length > 1) {
+@@ -915,8 +925,6 @@ export const ShellTool = Tool.define(
+               cut = true
+             }
  
-       const decoder = createAutoTextDecoder({ encoding: input.encoding })
-+      const display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
-+      let displayed = false
-       const onChunk = (chunk: string) => {
-         if (!chunk) return Effect.void
-         diag.push(chunk)
-+        const visible = preview(display.push(chunk))
-+        displayed = true
-         const size = Buffer.byteLength(chunk, "utf-8")
-         list.push({ text: chunk, size })
-         used += size
-@@ -848,9 +852,6 @@ export const ShellTool = Tool.define(
-           used -= item.size
-           cut = true
-         }
+-            last = preview(last + chunk)
 -
--        last = preview(last + chunk)
--
-         if (file) {
-           sink?.write(chunk)
-         } else {
-@@ -868,7 +869,11 @@ export const ShellTool = Tool.define(
-               Effect.andThen(
-                 ctx.metadata({
-                   metadata: {
--                    output: last,
-+                    // `metadata.output` is the default live UI surface. Keep it
-+                    // as a terminal display snapshot so CR progress and clear-line
-+                    // redraws do not leak control bytes into TUI/OpenTUI, while the
-+                    // raw chunks below still feed truncation and the model output.
-+                    output: visible,
-                     description: input.description,
-                   },
-                 }),
-@@ -879,7 +884,11 @@ export const ShellTool = Tool.define(
+             if (file) {
+               sink?.write(chunk)
+             } else {
+@@ -934,7 +942,11 @@ export const ShellTool = Tool.define(
+                   Effect.andThen(
+                     ctx.metadata({
+                       metadata: {
+-                        output: last,
++                        // `metadata.output` is the default live UI surface. Keep it
++                        // as a terminal display snapshot so CR progress and clear-line
++                        // redraws do not leak control bytes into TUI/OpenTUI, while the
++                        // raw chunks below still feed truncation and the model output.
++                        output: visible,
+                       },
+                     }),
+                   ),
+@@ -942,9 +954,14 @@ export const ShellTool = Tool.define(
+               }
+             }
  
-         return ctx.metadata({
-           metadata: {
--            output: last,
-+            // Same invariant as the truncated branch above: metadata is the
-+            // default display channel, not the faithful model-return channel. An
-+            // empty terminal screen after a clear-line/clear-screen sequence is a
-+            // valid display state, so never fall back to the raw chunk preview here.
-+            output: visible,
-             description: input.description,
-           },
-         })
-@@ -980,10 +989,15 @@ export const ShellTool = Tool.define(
++            // #215：每个 chunk 都发出流式显示快照作为默认 live UI，而非只在完成时才更新
+             return ctx.metadata({
+               metadata: {
+-                output: last,
++                // Same invariant as the truncated branch above: metadata is the
++                // default display channel, not the faithful model-return channel. An
++                // empty terminal screen after a clear-line/clear-screen sequence is a
++                // valid display state, so never fall back to the raw chunk preview here.
++                output: visible,
+               },
+             })
+           }
+@@ -991,6 +1008,7 @@ export const ShellTool = Tool.define(
+         )
        }
- 
-       const durationMs = Date.now() - started
+       if (aborted) meta.push("User aborted the command")
++      // #215：模型输出由原始环形缓冲拼接，不经显示渲染，保证 result.output 忠实于子进程字节流
+       const raw = list.map((item) => item.text).join("")
+       // #130：Windows PowerShell 先 normalize CLIXML 为纯文本
+       // #130：仅 Win+PS 做 CLIXML plain normalize
+@@ -1020,10 +1038,17 @@ export const ShellTool = Tool.define(
+       if (meta.length > 0) {
+         output += "\n\n<shell_metadata>\n" + meta.join("\n") + "\n</shell_metadata>"
+       }
++      // #215：完成元数据保留最终终端屏幕，output 字段仍走原始压缩/截断路径
 +      const displayOutput = preview(display.value())
        return {
-         title: input.description,
+         title: input.command,
          metadata: {
 -          output: last || preview(output),
 +          // Completion metadata preserves the final terminal screen for default
 +          // UI rendering. The `output` field returned alongside this metadata is
 +          // intentionally left on the existing raw/compressed/truncated path so
 +          // right-click "model context output" and provider input stay unchanged.
++          // #215：仅当从未渲染过 chunk 时回退到压缩输出，避免静默命令丢失与已渲染命令泄漏控制字节冲突
 +          output: displayed ? displayOutput : preview(output),
            exit: code,
-           description: input.description,
            truncated: cut,
+           ...((cut || compressed.stats.applied) && file ? { outputPath: file } : {}),
 diff --git a/packages/opencode/test/tool/bash-compress.test.ts b/packages/opencode/test/tool/bash-compress.test.ts
-index 9bfcab5412043852f23d3e42b1dbaf0d881f5764..85370eb092d0f034127cc8a704351aaf47c1815a 100644
+index 25be38545e..5e8f06915f 100644
 --- a/packages/opencode/test/tool/bash-compress.test.ts
 +++ b/packages/opencode/test/tool/bash-compress.test.ts
-@@ -1,7 +1,31 @@
+@@ -1,8 +1,40 @@
  import { describe, expect, test } from "bun:test"
 -import { compressVisibleOutput, normalizePowerShellOutput } from "../../src/tool/bash-compress"
 +import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput } from "../../src/tool/bash-compress"
  
+ // #129：CLIXML 纯块解码与混合块保留
  describe("tool.bash-compress", () => {
++  // #215：跨块 CSI 缓冲与显示裁剪测试
 +  test("renders split terminal clear-line sequences without leaking partial escapes", () => {
++    // #215：不传 bounds 以隔离测试跨块缓冲路径，排除 maxChars/maxLines 裁剪对断言的干扰
 +    const display = createTerminalDisplay()
 +
 +    display.push("boot\nworking\r\x1b[")
 +    display.push("2Kdone\n")
 +
++    // #215：working 被 ESC[2K 清除、boot/done 保留——半截缓冲不得吞可见文本也不得残留转义
 +    // Child-process chunks can split CSI bytes anywhere. The display renderer
 +    // must buffer the partial ESC[ prefix so the default live tool output never
 +    // shows raw escape fragments while still applying the completed clear-line.
 +    expect(display.value()).toBe("boot\ndone")
 +  })
 +
++  // #215：maxChars 仅约束显示快照，压缩路径未设此值，两路语义在此分叉
 +  test("bounds large single-line display chunks", () => {
++    // #215：maxChars=12 仅约束显示快照，与压缩路径的无界保真在此分叉
 +    const display = createTerminalDisplay({ maxChars: 12 })
 +
++    // #215：单次 push 远超预算的纯文本，触发 writeRun 尾缀保留与 trimDisplay 单行裁剪
 +    display.push("x".repeat(10_000))
++    // #215：第二次 push 覆盖同一行，验证旧行 x 被完全丢弃而非残留于显示快照
 +    display.push("y".repeat(10_000))
 +
 +    // Live shell metadata is a preview surface. Very large plain chunks should
 +    // stay bounded before and after rendering instead of building an unbounded
 +    // virtual terminal line that preview() would immediately truncate.
++    // #215：仅最新内容的 maxChars 尾缀存活，证明渲染前封顶而非渲染后截断
 +    expect(display.value()).toBe("y".repeat(12))
 +  })
 +
+   // #129：标准 #< CLIXML 头 + Message 节点
    test("decodes PowerShell CLIXML with the standard header", () => {
      const clixml = [
-       "#< CLIXML",
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index 9cf7dd21204edd3337adfa32200205b72dd63716..ea6b873173162ff0bf131c29d60999a17245bacf 100644
+index 35252de4e7..8ae250e1a8 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1575,6 +1575,82 @@ describe("tool.shell permissions", () => {
+@@ -1189,6 +1189,90 @@ each("asks for external_directory permission for wildcard external paths", () =>
    )
  })
  
++// #215：CR 进度与清行序列在元数据中的终端渲染
 +describe("tool.shell display output", () => {
 +  it.live(
 +    "renders carriage-return progress in metadata without changing returned output",
@@ -374,6 +422,7 @@ index 9cf7dd21204edd3337adfa32200205b72dd63716..ea6b873173162ff0bf131c29d60999a1
 +      runIn(
 +        projectRoot,
 +        Effect.gen(function* () {
++          // #215：用十进制 ASCII 字节数组构造进度序列，规避各 shell 引号差异，保证 CR 字节原样进入子进程 stdout
 +          // Decimal ASCII bytes keep the Bun snippet quote-free across pwsh,
 +          // Windows cmd, and POSIX shells. They spell "one\rtwo\rthree\nfinal\n",
 +          // the minimal terminal-progress shape where two frames are overwritten.
@@ -381,22 +430,25 @@ index 9cf7dd21204edd3337adfa32200205b72dd63716..ea6b873173162ff0bf131c29d60999a1
 +            111, 110, 101, 13, 116, 119, 111, 13, 116, 104, 114, 101, 101, 10, 102, 105, 110, 97,
 +            108, 10,
 +          ]
++          // #215：经 bin -e 执行脚本写入字节，确保 CR 字节原样进入 stdout 而不被 shell 二次解释
 +          const script = `process.stdout.write(Buffer.from([${progressBytes.join(",")}]))`
 +          const text = `${bin} -e ${evalarg(script)}`
 +          const result = yield* run({
 +            command: PS.has(sh()) ? `& ${text}` : text,
-+            description: "Emit carriage-return progress",
++            // #215：compress_output:false 关闭压缩路径，单独验证显示渲染对 CR 进度的处理
 +            compress_output: false,
 +          })
 +
 +          // Default shell metadata is the live UI surface. It must match terminal
 +          // redraw semantics so OpenTUI does not expose raw CR bytes as `\\x0d`,
 +          // while `result.output` below remains the faithful model-return value.
++          // #215：metadata.output 须含最终帧 three/final 且不得残留 one/two 或裸 \r——证明 CR 覆盖生效
 +          expect(result.metadata.output).toContain("three")
 +          expect(result.metadata.output).toContain("final")
 +          expect(result.metadata.output).not.toContain("one")
 +          expect(result.metadata.output).not.toContain("two")
 +          expect(result.metadata.output).not.toContain("\r")
++          // #215：result.output 走原始路径须保留全部帧，确认显示渲染未污染忠实模型返回值
 +          expect(result.output).toContain("one")
 +          expect(result.output).toContain("two")
 +          expect(result.output).toContain("three")
@@ -414,27 +466,30 @@ index 9cf7dd21204edd3337adfa32200205b72dd63716..ea6b873173162ff0bf131c29d60999a1
 +          // The byte sequence is "boot\nworking\r\x1b[2Kdone\n". 27,91,50,75 is
 +          // ESC[2K, the ANSI clear-line command used by progress renderers before
 +          // repainting the current line; exit 7 covers non-zero tool completion.
++          // #215：字节序列含 ESC[2K 清行后重绘 done，叠加 exit 7 覆盖非零退出，验证失败态下显示快照仍清洁
 +          const clearLineBytes = [
 +            98, 111, 111, 116, 10, 119, 111, 114, 107, 105, 110, 103, 13, 27, 91, 50, 75, 100, 111,
 +            110, 101, 10,
 +          ]
++          // #215：脚本先写清行进度再 exit(7)，确保非零退出码不触发 UI 回退到原始控制序列
 +          const script = `process.stdout.write(Buffer.from([${clearLineBytes.join(",")}])); process.exit(7)`
 +          const text = `${bin} -e ${evalarg(script)}`
 +          const result = yield* run({
 +            command: PS.has(sh()) ? `& ${text}` : text,
-+            description: "Emit clear-line progress then fail",
 +            compress_output: false,
 +          })
 +
 +          // Non-zero exits still render the same default terminal snapshot; the
 +          // failure status belongs to metadata.exit and must not force the UI back
 +          // to raw control sequences or discard the returned model output.
++          // #215：metadata.exit 锁定 7，失败状态独立于显示通道，不得把退出码耦合进 output 渲染
 +          expect(result.metadata.exit).toBe(7)
 +          expect(result.metadata.output).toContain("boot")
 +          expect(result.metadata.output).toContain("done")
 +          expect(result.metadata.output).not.toContain("working")
 +          expect(result.metadata.output).not.toContain("\r")
 +          expect(result.metadata.output).not.toContain("\x1b")
++          // #215：result.output 仍含被清行的 working，证明清行只影响显示快照、不动模型返回的原始字节流
 +          expect(result.output).toContain("working")
 +          expect(result.output).toContain("done")
 +        }),

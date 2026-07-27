@@ -5,48 +5,79 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E6=9B=B4=E6=96=B0=E5=AE=89=E8=A3=85?=
  =?UTF-8?q?=E8=84=9A=E6=9C=AC=EF=BC=8C=E6=94=AF=E6=8C=81=E7=89=88=E6=9C=AC?=
  =?UTF-8?q?=E6=8C=87=E5=AE=9A=E5=92=8C=E7=8E=AF=E5=A2=83=E5=8F=98=E9=87=8F?=
  =?UTF-8?q?=E9=85=8D=E7=BD=AE=EF=BC=8C=E5=A2=9E=E5=BC=BA=E9=94=99=E8=AF=AF?=
- =?UTF-8?q?=E5=A4=84=E7=90=86=E5=92=8C=E8=BE=93=E5=87=BA=E4=BF=A1=E6=81=AF?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
 
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
-index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e13f3e435f 100644
+index 1111111111..2222222222 100644
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -2,6 +2,11 @@ name: Build OpenCode CLI
+@@ -1,107 +1,231 @@
+-# 构建工作流：手动触发或 dev-smark 推送自动触发，编译打包 OpenCode CLI
+-# #104：版本从 packages/opencode/package.json 自动提取；GitHub Release 直传资产
++# #156：SMARK CLI 构建与 GitHub Release 工作流
+ name: Build OpenCode CLI
  
++# #156：push dev-smark 与手动 workflow_dispatch
  on:
+-  # #104：去掉 version input，避免与 package.json 双源
++  # #156：支持手动触发并可选 version 覆盖
    workflow_dispatch:
+-  # push 自动触发：dev-smark + 路径过滤（含 setup-bun 变更）
 +    inputs:
++      # #156：默认版本来自 package.json；inputs.version 仅覆盖
 +      version:
++        # #156：package.json 仍为默认版本单源
 +        description: "Override version, for example 1.14.42-smark. Empty means packages/opencode/package.json version."
 +        required: false
 +        type: string
    push:
      branches:
        - dev-smark
-@@ -11,6 +16,14 @@ on:
+     paths:
+       - ".github/workflows/build-opencode.yml"
++      # #156：保留 tip setup-bun 路径触发，工具链变更必重建
++      - ".github/actions/setup-bun/action.yml"
        - "packages/opencode/**"
        - "package.json"
        - "bun.lock"
+-      # #104：setup-bun 变更必须触发重建，避免工具链静默陈旧
+-      - ".github/actions/setup-bun/action.yml"
+-
++      # #156：install 变更触发重建，保证 release 脚本同步
 +      - "install"
 +
++# #156：顶层 permissions 供 release 写权限
 +permissions:
++  # #156：仅授予发布所需 contents 写权限
 +  contents: write
 +
++# #156：同 ref+version 串行且不 cancel 半成品 release
 +concurrency:
 +  group: build-opencode-${{ github.ref }}-${{ github.event.inputs.version || 'package-json' }}
++  # #156：禁止 cancel 半成品 release
 +  cancel-in-progress: false
- 
++
++# #156：version→build-*→checksums 流水线
  jobs:
+-  # #104：唯一版本源 = packages/opencode/package.json，读失败 fail-closed
    version:
-@@ -24,9 +37,17 @@ jobs:
++    # #156：linux/checksums 使用 ubuntu runner
+     runs-on: ubuntu-latest
+     outputs:
+       version: ${{ steps.pkg.outputs.version }}
+       tag: ${{ steps.pkg.outputs.tag }}
+     steps:
++      # #156：检出源码供构建脚本使用
+       - uses: actions/checkout@v4
++
++      # #156：version job 输出 version 与 tag
        - id: pkg
          shell: bash
          run: |
+-          set -euo pipefail
+-          # #104：node 同步读 package.json.version，禁止默认常量回退
 -          VERSION="$(node -p "require('./packages/opencode/package.json').version")"
+-          # #104：空/undefined 立即失败，避免错误 tag 静默发布
++          # #156：版本读取失败 fail-closed，禁止默认常量
 +          set -euo pipefail
 +
 +          VERSION="${{ github.event.inputs.version || '' }}"
@@ -61,47 +92,79 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +            echo "Failed to resolve packages/opencode/package.json version" >&2
              exit 1
            fi
- 
-@@ -35,69 +56,149 @@ jobs:
+-          TAG="v${VERSION}"
+-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
++
++          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
++          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
            echo "Resolved version: $VERSION"
-           echo "Resolved tag: v$VERSION"
- 
+-
+-  # #104：若不存在对应 tag 的 release 则创建
 -  ensure-release:
-+  build-macos:
-     needs: version
 -    runs-on: ubuntu-latest
+-    needs: [version]
 -    permissions:
 -      contents: write
-+    runs-on: macos-latest
-     steps:
--      - name: Create release if missing
+-    steps:
+-      - name: Ensure GitHub Release
 -        env:
 -          GH_TOKEN: ${{ github.token }}
 -          TAG: ${{ needs.version.outputs.tag }}
 -          VERSION: ${{ needs.version.outputs.version }}
-+      - uses: actions/checkout@v4
-+
-+      - uses: ./.github/actions/setup-bun
-+
-+      - name: Build macOS binaries
-         shell: bash
-         run: |
-           set -euo pipefail
-+          cd packages/opencode
-+          bun run script/build.ts \
-+            --version=${{ needs.version.outputs.version }} \
-+            --os=darwin \
-+            --skip-embed-web-ui
- 
+-        shell: bash
+-        run: |
+-          set -euo pipefail
 -          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
--            echo "Release $TAG already exists; assets will be replaced by build jobs."
+-            echo "Release $TAG already exists"
 -          else
+-            # #104：新建 release 锚定当前 SHA
 -            gh release create "$TAG" \
 -              --repo "$GITHUB_REPOSITORY" \
 -              --target "$GITHUB_SHA" \
 -              --title "$TAG" \
 -              --notes "OpenCode smark build $VERSION"
 -          fi
+-
+-  # Linux：tar.gz + deb → release
+-  build-linux:
+-    runs-on: ubuntu-latest
+-    needs: [version, ensure-release]
+-    permissions:
+-      contents: write
++          echo "Resolved tag: v$VERSION"
++
++  # #156：mac 双架构构建与 codesign
++  build-macos:
++    # #156：job 依赖保证 version 先解析
++    needs: version
++    # #156：mac 双架构构建 arm64+x64
++    runs-on: macos-latest
+     steps:
+       - uses: actions/checkout@v4
++
++      # #156：复用 setup-bun composite action
+       - uses: ./.github/actions/setup-bun
+ 
+-      - name: Build Linux
+-        run: |
++      - name: Build macOS binaries
++        shell: bash
++        run: |
++          set -euo pipefail
+           cd packages/opencode
+-          # #104：--version 仅来自 package.json 解析结果
+-          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=linux --skip-embed-web-ui
+-
+-      - name: Package Linux tar.gz
+-        run: |
++          # #156：调用 opencode 构建脚本产出二进制
++          bun run script/build.ts \
++            --version=${{ needs.version.outputs.version }} \
++            --os=darwin \
++            # #156：CLI 资产跳过 web UI 嵌入以保持精简
++            --skip-embed-web-ui
++
 +      - name: Sign and package macOS assets
 +        shell: bash
 +        run: |
@@ -124,12 +187,14 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +            chmod +x "$bin"
 +
 +            # Ad-hoc signing prevents stale/broken signatures on downloaded CLI binaries.
++            # #156：mac adhoc 签名降低 Gatekeeper 误杀
 +            codesign --force --sign - --timestamp=none "$bin"
 +            codesign --verify --verbose=4 "$bin"
 +
 +            rm -f "$out"
 +            (
 +              cd "${DIST}/${target}/bin"
++              # #156：mac/windows zip 资产
 +              zip -9 -q "${GITHUB_WORKSPACE}/${out}" opencode
 +            )
 +
@@ -142,6 +207,7 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +          ls -lah "$ASSETS"
 +
 +      - name: Upload macOS workflow artifacts
++        # #156：构建产物先 artifact，延迟统一上传
 +        uses: actions/upload-artifact@v4
 +        with:
 +          name: release-assets-macos
@@ -150,52 +216,54 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +          path: |
 +            release-assets/opencode-darwin-arm64.zip
 +            release-assets/opencode-darwin-x64.zip
- 
-   build-linux:
--    needs: [version, ensure-release]
++
++  # #156：Linux 构建与 artifact 上传
++  build-linux:
 +    needs: version
-     runs-on: ubuntu-latest
--    permissions:
--      contents: write
-     steps:
-       - uses: actions/checkout@v4
- 
-       - uses: ./.github/actions/setup-bun
- 
--      - name: Build Linux
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++
++      - uses: ./.github/actions/setup-bun
++
 +      - name: Install Linux packaging tools
-         shell: bash
-         run: |
--          cd packages/opencode
--          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=linux --skip-embed-web-ui
++        shell: bash
++        run: |
 +          set -euo pipefail
 +          sudo apt-get update
 +          sudo apt-get install -y --no-install-recommends dpkg-dev
- 
--      - name: Package Linux tar.gz
++
 +      - name: Build Linux binaries
-         shell: bash
-         run: |
--          VERSION="${{ needs.version.outputs.version }}"
--          cd packages/opencode/dist/opencode-linux-x64/bin
--          tar -czf ../../opencode-linux-x64-${VERSION}.tar.gz opencode
++        shell: bash
++        run: |
 +          set -euo pipefail
 +          cd packages/opencode
 +          bun run script/build.ts \
 +            --version=${{ needs.version.outputs.version }} \
 +            --os=linux \
 +            --skip-embed-web-ui
- 
--      - name: Package Linux .deb
++
 +      - name: Package Linux assets
-         shell: bash
-         run: |
++        shell: bash
++        run: |
 +          set -euo pipefail
 +
            VERSION="${{ needs.version.outputs.version }}"
+-          cd packages/opencode/dist/opencode-linux-x64/bin
+-          # #103：相对 bin 的 ../../ 落到 dist/
+-          tar -czf ../../opencode-linux-x64-${VERSION}.tar.gz opencode
+-
+-      - name: Package Linux .deb
+-        run: |
+-          VERSION="${{ needs.version.outputs.version }}"
 -          DEB_DIR="/tmp/deb_build"
 -          PKG_NAME="opencode_${VERSION}_amd64"
 -          BINARY="packages/opencode/dist/opencode-linux-x64/bin/opencode"
+-          mkdir -p "${DEB_DIR}/${PKG_NAME}/DEBIAN"
+-          mkdir -p "${DEB_DIR}/${PKG_NAME}/usr/local/bin"
+-          cp "$BINARY" "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
+-          chmod 755 "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
+-          cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
 +          DIST="packages/opencode/dist"
 +          ASSETS="release-assets"
 +          mkdir -p "$ASSETS"
@@ -213,6 +281,7 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +            chmod +x "$bin"
 +            (
 +              cd "${DIST}/${target}/bin"
++              # #156：打包 tar.gz 资产名含 os/arch
 +              tar -czf "${GITHUB_WORKSPACE}/${out}" opencode
 +            )
 +
@@ -233,82 +302,33 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +          PKG_DIR="${DEB_ROOT}/opencode_${VERSION}_amd64"
 +          BINARY="${DIST}/opencode-linux-x64/bin/opencode"
 +          DEB_OUT="${ASSETS}/opencode_${VERSION}_amd64.deb"
- 
--          mkdir -p "${DEB_DIR}/${PKG_NAME}/DEBIAN"
--          mkdir -p "${DEB_DIR}/${PKG_NAME}/usr/local/bin"
++
 +          rm -rf "$DEB_ROOT"
 +          mkdir -p "${PKG_DIR}/DEBIAN"
 +          mkdir -p "${PKG_DIR}/usr/local/bin"
- 
--          cp "$BINARY" "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
--          chmod 755 "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
++
 +          install -m 0755 "$BINARY" "${PKG_DIR}/usr/local/bin/opencode"
- 
--          cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
++
 +          cat > "${PKG_DIR}/DEBIAN/control" <<EOF
            Package: opencode
            Version: ${VERSION}
            Section: utils
-@@ -108,64 +209,27 @@ jobs:
+@@ -111,100 +235,209 @@
+           Description: opencode AI-powered development tool (smark build)
             A standalone AI coding assistant with TUI, version ${VERSION}.
            EOF
- 
 -          dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
 -
 -      - name: Upload Linux assets to release
--        env:
--          GH_TOKEN: ${{ github.token }}
--          TAG: ${{ needs.version.outputs.tag }}
--        shell: bash
--        run: |
--          set -euo pipefail
--          gh release upload "$TAG" \
--            packages/opencode/dist/opencode-linux-x64-*.tar.gz \
--            packages/opencode/dist/opencode_*_amd64.deb \
--            --repo "$GITHUB_REPOSITORY" \
--            --clobber
++
 +          # dpkg control files must not contain leading indentation.
 +          sed -i 's/^          //' "${PKG_DIR}/DEBIAN/control"
- 
--  build-macos:
--    needs: [version, ensure-release]
--    runs-on: macos-latest
--    permissions:
--      contents: write
--    steps:
--      - uses: actions/checkout@v4
--
--      - uses: ./.github/actions/setup-bun
--
--      - name: Build macOS
--        shell: bash
--        run: |
--          cd packages/opencode
--          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=darwin --skip-embed-web-ui
++
++          # #156：deb 打包；control 禁止 leading indent
 +          dpkg-deb --build "$PKG_DIR" "$DEB_OUT"
- 
--      - name: Package macOS tar.gz
--        shell: bash
--        run: |
--          VERSION="${{ needs.version.outputs.version }}"
--          cd packages/opencode/dist/opencode-darwin-arm64/bin
--          tar -czf ../../opencode-darwin-arm64-${VERSION}.tar.gz opencode
--          cd ../../opencode-darwin-x64/bin
--          tar -czf ../../opencode-darwin-x64-${VERSION}.tar.gz opencode
++
 +          ls -lah "$ASSETS"
- 
--      - name: Upload macOS assets to release
--        env:
--          GH_TOKEN: ${{ github.token }}
--          TAG: ${{ needs.version.outputs.tag }}
--        shell: bash
--        run: |
--          set -euo pipefail
--          gh release upload "$TAG" \
--            packages/opencode/dist/opencode-darwin-arm64-*.tar.gz \
--            packages/opencode/dist/opencode-darwin-x64-*.tar.gz \
--            --repo "$GITHUB_REPOSITORY" \
--            --clobber
++
 +      - name: Upload Linux workflow artifacts
 +        uses: actions/upload-artifact@v4
 +        with:
@@ -319,38 +339,39 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +            release-assets/opencode-linux-x64.tar.gz
 +            release-assets/opencode-linux-arm64.tar.gz
 +            release-assets/opencode_*_amd64.deb
- 
-   build-windows:
--    needs: [version, ensure-release]
++
++  # #156：Windows x64 构建保留 MSVC 工具链
++  build-windows:
 +    needs: version
-     runs-on: windows-latest
--    permissions:
--      contents: write
-     steps:
-       - uses: actions/checkout@v4
- 
-@@ -181,29 +245,158 @@ jobs:
- 
-       - uses: ./.github/actions/setup-bun
- 
--      - name: Build Windows x64
++    # #156：Windows job 保留 node/python/msbuild 工具链
++    runs-on: windows-latest
++    steps:
++      - uses: actions/checkout@v4
++
++      - uses: actions/setup-node@v4
++        with:
++          node-version: "22"
++
++      - uses: actions/setup-python@v5
++        with:
++          python-version: "3.12"
++
++      - uses: microsoft/setup-msbuild@v2
++
++      - uses: ./.github/actions/setup-bun
++
 +      - name: Build Windows x64 binary
-         shell: pwsh
-         run: |
++        shell: pwsh
++        run: |
 +          $ErrorActionPreference = "Stop"
-           cd packages/opencode
-           bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-embed-web-ui
- 
--      - name: Package Windows x64 exe
++          cd packages/opencode
++          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-embed-web-ui
++
 +      - name: Package Windows assets
-         shell: pwsh
-         run: |
--          $VERSION = "${{ needs.version.outputs.version }}"
--          Copy-Item "packages/opencode/dist/opencode-windows-x64/bin/opencode.exe" "packages/opencode/dist/opencode-windows-x64-$VERSION.exe" -Force
++        shell: pwsh
++        run: |
 +          $ErrorActionPreference = "Stop"
- 
--      - name: Upload Windows assets to release
--        shell: pwsh
++
 +          $Dist = "packages/opencode/dist"
 +          $Source = Join-Path $Dist "opencode-windows-x64/bin/opencode.exe"
 +          $Assets = "release-assets"
@@ -365,6 +386,7 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +          New-Item -ItemType Directory -Force -Path $Assets | Out-Null
 +          New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 +
++          # #156：Windows 复制 exe 到 dist 发布名
 +          Copy-Item $Source (Join-Path $Stage "opencode.exe") -Force
 +          Copy-Item $Source $ExeOut -Force
 +
@@ -386,6 +408,7 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +            release-assets/opencode-windows-x64.zip
 +            release-assets/opencode-windows-x64.exe
 +
++  # #156：artifact 聚合 + checksums.txt + install 入 release
 +  checksums:
 +    needs:
 +      - version
@@ -397,6 +420,7 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +      - uses: actions/checkout@v4
 +
 +      - name: Download release workflow artifacts
++        # #156：checksums job 汇总各平台 artifact
 +        uses: actions/download-artifact@v4
 +        with:
 +          pattern: release-assets-*
@@ -419,6 +443,7 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +          cd release-assets
 +
 +          echo "Release assets before checksums:"
++          # #156：枚举 release-assets 目录全部文件
 +          find . -maxdepth 1 -type f -printf '%f\n' | sort
 +
 +          find . -maxdepth 1 -type f ! -name checksums.txt -printf '%f\0' \
@@ -429,24 +454,19 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +          cat checksums.txt
 +
 +      - name: Create release if missing
-         env:
-           GH_TOKEN: ${{ github.token }}
-           TAG: ${{ needs.version.outputs.tag }}
++        env:
++          # #156：Actions 内置 token 注入 GH_TOKEN
++          GH_TOKEN: ${{ github.token }}
++          TAG: ${{ needs.version.outputs.tag }}
 +          VERSION: ${{ needs.version.outputs.version }}
 +        shell: bash
-         run: |
--          $ErrorActionPreference = "Stop"
--          $files = @(Get-ChildItem "packages/opencode/dist/opencode-windows-x64-*.exe" -ErrorAction Stop)
--          if ($files.Count -eq 0) {
--            throw "No Windows exe assets found"
--          }
--          foreach ($file in $files) {
--            gh release upload $env:TAG $file.FullName --repo $env:GITHUB_REPOSITORY --clobber
++        run: |
 +          set -euo pipefail
 +
 +          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
 +            echo "Release $TAG already exists; assets will be replaced in the next step."
 +          else
++            # #156：release 创建下沉到 checksums，避免空 release
 +            gh release create "$TAG" \
 +              --repo "$GITHUB_REPOSITORY" \
 +              --target "$GITHUB_SHA" \
@@ -455,23 +475,111 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +          fi
 +
 +      - name: Upload release assets with retry
-+        env:
-+          GH_TOKEN: ${{ github.token }}
-+          TAG: ${{ needs.version.outputs.tag }}
-+        shell: bash
-+        run: |
-+          set -euo pipefail
+         env:
+           GH_TOKEN: ${{ github.token }}
+           TAG: ${{ needs.version.outputs.tag }}
+         shell: bash
+         run: |
+           set -euo pipefail
+-          # #104：gh release upload 替代 upload-artifact
+-          gh release upload "$TAG" \
+-            packages/opencode/dist/opencode-linux-x64-*.tar.gz \
+-            packages/opencode/dist/opencode_*_amd64.deb \
+-            --repo "$GITHUB_REPOSITORY" \
+-            --clobber
+-
+-  # #104：macOS 双架构 tar.gz 直传 release
+-  build-macos:
+-    runs-on: macos-latest
+-    needs: [version, ensure-release]
+-    permissions:
+-      contents: write
+-    steps:
+-      - uses: actions/checkout@v4
+-      - uses: ./.github/actions/setup-bun
+-
+-      - name: Build macOS
+-        run: |
+-          cd packages/opencode
+-          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=darwin --skip-embed-web-ui
+-
+-      - name: Package macOS tar.gz
+-        run: |
+-          VERSION="${{ needs.version.outputs.version }}"
+-          cd packages/opencode/dist/opencode-darwin-arm64/bin
+-          tar -czf ../../opencode-darwin-arm64-${VERSION}.tar.gz opencode
+-          cd ../../opencode-darwin-x64/bin
+-          tar -czf ../../opencode-darwin-x64-${VERSION}.tar.gz opencode
+-
+-      - name: Upload macOS assets to release
+-        env:
+-          GH_TOKEN: ${{ github.token }}
+-          TAG: ${{ needs.version.outputs.tag }}
+-        shell: bash
+-        run: |
+-          set -euo pipefail
+-          gh release upload "$TAG" \
+-            packages/opencode/dist/opencode-darwin-arm64-*.tar.gz \
+-            packages/opencode/dist/opencode-darwin-x64-*.tar.gz \
+-            --repo "$GITHUB_REPOSITORY" \
+-            --clobber
+-
+-  # Windows x64：#103 arch；#104 裸 exe 上传 release
+-  build-windows:
+-    runs-on: windows-latest
+-    needs: [version, ensure-release]
+-    permissions:
+-      contents: write
+-    steps:
+-      - uses: actions/checkout@v4
+-      - uses: actions/setup-node@v4
+-        with:
+-          node-version: "22"
+-      - uses: actions/setup-python@v5
+-        with:
+-          python-version: "3.12"
+-      - uses: microsoft/setup-msbuild@v2
+-      - uses: ./.github/actions/setup-bun
+-
+-      - name: Build Windows x64
+-        shell: pwsh
+-        run: |
+-          cd packages/opencode
+-          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-embed-web-ui
+-
+-      - name: Package Windows x64 exe
+-        shell: pwsh
+-        run: |
+-          # #104：发布裸 exe（相对 zip）
+-          $VERSION = "${{ needs.version.outputs.version }}"
+-          Copy-Item "packages/opencode/dist/opencode-windows-x64/bin/opencode.exe" "packages/opencode/dist/opencode-windows-x64-$VERSION.exe" -Force
+-
+-      - name: Upload Windows assets to release
+-        shell: pwsh
+-        env:
+-          GH_TOKEN: ${{ github.token }}
+-          TAG: ${{ needs.version.outputs.tag }}
+-        run: |
+-          $ErrorActionPreference = "Stop"
+-          $files = @(Get-ChildItem "packages/opencode/dist/opencode-windows-x64-*.exe" -ErrorAction Stop)
+-          if ($files.Count -eq 0) {
+-            # #104：无 exe 硬失败，禁止空 release
+-            throw "No Windows exe assets found"
 +
++          # #156：上传重试函数，瞬时 API 失败可恢复
 +          upload_with_retry() {
 +            local file="$1"
++            # #156：上传重试上限，避免无限挂起
 +            local max_attempts=5
 +            local attempt=1
 +
 +            while true; do
 +              echo "Uploading ${file} attempt ${attempt}/${max_attempts}"
 +
++              # #156：统一上传点，配合重试
 +              if gh release upload "$TAG" "$file" \
 +                --repo "$GITHUB_REPOSITORY" \
++                # #156：允许覆盖同名资产以支持重跑
 +                --clobber; then
 +                echo "Uploaded ${file}"
 +                return 0
@@ -482,10 +590,14 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +                return 1
 +              fi
 +
++              # #156：重试退避 sleep，降低 API 限流
 +              sleep $(( attempt * 15 ))
 +              attempt=$(( attempt + 1 ))
 +            done
            }
+-          foreach ($file in $files) {
+-            gh release upload $env:TAG $file.FullName --repo $env:GITHUB_REPOSITORY --clobber
+-          }
 +
 +          cd release-assets
 +
@@ -502,22 +614,32 @@ index 1624a97377dfd53dffeeb890e4cb82fb9aead56c..712f3f8e5e50280fb5e5c9fea58211e1
 +            upload_with_retry "$file"
 +          done
 diff --git a/install b/install
-index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf0b2ac4a0 100755
+index 1111111111..2222222222 100755
 --- a/install
 +++ b/install
-@@ -1,29 +1,69 @@
+@@ -1,29 +1,91 @@
  #!/usr/bin/env bash
++# #156：管道与未定义变量失败即退出，禁止静默半安装
  set -euo pipefail
 +
++# #156：应用名固定 opencode，资产前缀与 APP 绑定
  APP=opencode
+-
++# #156：默认 SMARK2022/opencode，可用 OPENCODE_REPO 覆盖
++# #156：默认仓库指向 SMARK fork
 +REPO=${OPENCODE_REPO:-SMARK2022/opencode}
- 
++
++# #156：颜色仅装饰，不改变控制流
  MUTED='\033[0;2m'
  RED='\033[0;31m'
++# #156：警告色与错误色分流
  ORANGE='\033[38;5;214m'
 -NC='\033[0m' # No Color
+-
++# #156：颜色复位，避免污染后续输出
 +NC='\033[0m'
- 
++
++# #156：帮助文案与 CLI/环境变量契约同步
  usage() {
 -    cat <<EOF
 +    cat <<EOF_USAGE
@@ -527,21 +649,27 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 +Usage: install [options]
  
  Options:
++    # #156：-h/--help 打印 usage 后成功退出
      -h, --help              Display this help message
 -    -v, --version <version> Install a specific version (e.g., 1.0.180)
 +    -v, --version <version> Install a specific version, for example 1.14.41-smark or v1.14.41-smark
++    # #156：支持本地二进制安装旁路下载
      -b, --binary <path>     Install from a local binary instead of downloading
++        # #156：受限环境可跳过 shell rc 改写
          --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
  
 +Environment variables:
 +    OPENCODE_REPO           GitHub repo to download from. Default: SMARK2022/opencode
++    # #156：显式安装目录优先于 XDG 与默认路径
 +    OPENCODE_INSTALL_DIR    Install directory. Default: ~/.opencode/bin
++    # #156：遵循 XDG 时仍次于 OPENCODE_INSTALL_DIR
 +    XDG_BIN_DIR             Used as install directory when OPENCODE_INSTALL_DIR is not set
 +    VERSION                 Same as --version
 +
  Examples:
 -    curl -fsSL https://opencode.ai/install | bash
 -    curl -fsSL https://opencode.ai/install | bash -s -- --version 1.0.180
++    # #156：下载失败（非 2xx）视为错误
 +    curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash
 +    curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash -s -- --version 1.14.41-smark
 +    OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install -o /tmp/opencode-install && sudo env OPENCODE_INSTALL_DIR=/usr/local/bin bash /tmp/opencode-install
@@ -550,6 +678,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 +EOF_USAGE
 +}
 +
++# #156：统一消息通道，避免错误文案格式漂移
 +print_message() {
 +    local level=$1
 +    local message=$2
@@ -564,16 +693,23 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 +    echo -e "${color}${message}${NC}"
 +}
 +
++# #156：必需外部命令缺失 fail-closed
 +need_cmd() {
++    # #156：探测可选工具（sha256sum 等）是否存在
 +    if ! command -v "$1" >/dev/null 2>&1; then
 +        print_message error "Error: '$1' is required but not installed."
++        # #156：不可恢复错误统一非零退出
 +        exit 1
 +    fi
 +}
 +
++# #156：跨平台 sha256，供 checksums 比对
 +sha256_file() {
++    # #156：linux 优先 sha256sum
 +    if command -v sha256sum >/dev/null 2>&1; then
++        # #156：解析校验和字段
 +        sha256sum "$1" | awk '{print $1}'
++    # #156：mac 上 sha256 回退 shasum -a 256
 +    elif command -v shasum >/dev/null 2>&1; then
 +        shasum -a 256 "$1" | awk '{print $1}'
 +    else
@@ -582,7 +718,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
  }
  
  requested_version=${VERSION:-}
-@@ -41,7 +81,7 @@ while [[ $# -gt 0 ]]; do
+@@ -41,7 +103,7 @@
                  requested_version="$2"
                  shift 2
              else
@@ -591,7 +727,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
                  exit 1
              fi
              ;;
-@@ -50,7 +90,7 @@ while [[ $# -gt 0 ]]; do
+@@ -50,7 +112,7 @@
                  binary_path="$2"
                  shift 2
              else
@@ -600,7 +736,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
                  exit 1
              fi
              ;;
-@@ -59,38 +99,63 @@ while [[ $# -gt 0 ]]; do
+@@ -59,38 +121,69 @@
              shift
              ;;
          *)
@@ -612,6 +748,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
  done
  
 -INSTALL_DIR=$HOME/.opencode/bin
++# #156：安装目录 OPENCODE_INSTALL_DIR > XDG_BIN_DIR > 默认
 +resolve_install_dir() {
 +    if [ -n "${OPENCODE_INSTALL_DIR:-}" ]; then
 +        echo "$OPENCODE_INSTALL_DIR"
@@ -623,6 +760,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 +}
 +
 +INSTALL_DIR=$(resolve_install_dir)
++# #156：确保安装目录存在
  mkdir -p "$INSTALL_DIR"
  
 -# If --binary is provided, skip all download/detection logic
@@ -645,6 +783,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
  else
 +    need_cmd curl
 +
++    # #156：OS 探测 fail-closed，未知系统退出
      raw_os=$(uname -s)
 -    os=$(echo "$raw_os" | tr '[:upper:]' '[:lower:]')
      case "$raw_os" in
@@ -657,6 +796,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 +        ;;
      esac
  
++    # #156：CPU 架构探测映射到 release 资产后缀
      arch=$(uname -m)
 -    if [[ "$arch" == "aarch64" ]]; then
 -      arch="arm64"
@@ -665,7 +805,9 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 -      arch="x64"
 -    fi
 +    case "$arch" in
++      # #156：arch 映射 arm64/x64 必须与 workflow 资产名一致
 +      aarch64|arm64) arch="arm64" ;;
++      # #156：x64 命名不用 amd64 后缀，贴合 release 文件名
 +      x86_64|amd64) arch="x64" ;;
 +      *)
 +        print_message error "Unsupported architecture: $arch"
@@ -675,7 +817,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
  
      if [ "$os" = "darwin" ] && [ "$arch" = "x64" ]; then
        rosetta_flag=$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)
-@@ -104,131 +169,110 @@ else
+@@ -104,131 +197,117 @@
        linux-x64|linux-arm64|darwin-x64|darwin-arm64|windows-x64)
          ;;
        *)
@@ -715,19 +857,9 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 -        avx2=$(sysctl -n hw.optional.avx2_0 2>/dev/null || echo 0)
 -        if [ "$avx2" != "1" ]; then
 -          needs_baseline=true
-+    if [ -z "$requested_version" ]; then
-+        base_url="https://github.com/${REPO}/releases/latest/download"
-+        specific_version=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)
-+        if [ -z "$specific_version" ]; then
-+            print_message error "Failed to fetch latest version information from ${REPO}"
-+            exit 1
-         fi
+-        fi
 -      fi
-+    else
-+        requested_version="${requested_version#v}"
-+        base_url="https://github.com/${REPO}/releases/download/v${requested_version}"
-+        specific_version="$requested_version"
- 
+-
 -      if [ "$os" = "windows" ]; then
 -        ps="(Add-Type -MemberDefinition \"[DllImport(\"\"kernel32.dll\"\")] public static extern bool IsProcessorFeaturePresent(int ProcessorFeature);\" -Name Kernel32 -Namespace Win32 -PassThru)::IsProcessorFeaturePresent(40)"
 -        out=""
@@ -739,16 +871,11 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 -        out=$(echo "$out" | tr -d '\r' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
 -        if [ "$out" != "true" ] && [ "$out" != "1" ]; then
 -          needs_baseline=true
-+        http_status=$(curl -sI -L -o /dev/null -w "%{http_code}" "https://github.com/${REPO}/releases/tag/v${requested_version}")
-+        if [ "$http_status" = "404" ]; then
-+            print_message error "Error: Release v${requested_version} not found"
-+            print_message info "${MUTED}Available releases: https://github.com/${REPO}/releases${NC}"
-+            exit 1
-         fi
+-        fi
 -      fi
-     fi
- 
-     target="$os-$arch"
+-    fi
+-
+-    target="$os-$arch"
 -    if [ "$needs_baseline" = "true" ]; then
 -      target="$target-baseline"
 -    fi
@@ -758,41 +885,82 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 -
 -    filename="$APP-$target$archive_ext"
 -
- 
-+    # Keep installer target names exactly aligned with the workflow assets.
-+    # Do not append baseline/musl unless the workflow also publishes those assets.
-+    candidates=()
-     if [ "$os" = "linux" ]; then
+-
+-    if [ "$os" = "linux" ]; then
 -        if ! command -v tar >/dev/null 2>&1; then
 -             echo -e "${RED}Error: 'tar' is required but not installed.${NC}"
 -             exit 1
 -        fi
+-    else
+-        if ! command -v unzip >/dev/null 2>&1; then
+-            echo -e "${RED}Error: 'unzip' is required but not installed.${NC}"
++    if [ -z "$requested_version" ]; then
++        # #156：release 下载 URL 与 tag/version 对齐
++        base_url="https://github.com/${REPO}/releases/latest/download"
++        # #156：latest 经 GitHub API 解析 tag，失败 fail-closed
++        specific_version=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)
++        if [ -z "$specific_version" ]; then
++            print_message error "Failed to fetch latest version information from ${REPO}"
+             exit 1
+         fi
+-    fi
+-
+-    if [ -z "$requested_version" ]; then
+-        url="https://github.com/anomalyco/opencode/releases/latest/download/$filename"
+-        specific_version=$(curl -s https://api.github.com/repos/anomalyco/opencode/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+-
+-        if [[ $? -ne 0 || -z "$specific_version" ]]; then
+-            echo -e "${RED}Failed to fetch version information${NC}"
++    else
++        requested_version="${requested_version#v}"
++        base_url="https://github.com/${REPO}/releases/download/v${requested_version}"
++        specific_version="$requested_version"
++
++        # #156：HTTP 非 2xx / 404 驱动候选切换
++        # #156：捕获 HTTP 状态驱动 404 候选切换
++        http_status=$(curl -sI -L -o /dev/null -w "%{http_code}" "https://github.com/${REPO}/releases/tag/v${requested_version}")
++        if [ "$http_status" = "404" ]; then
++            print_message error "Error: Release v${requested_version} not found"
++            print_message info "${MUTED}Available releases: https://github.com/${REPO}/releases${NC}"
+             exit 1
+         fi
+-    else
+-        # Strip leading 'v' if present
+-        requested_version="${requested_version#v}"
+-        url="https://github.com/anomalyco/opencode/releases/download/v${requested_version}/$filename"
+-        specific_version=$requested_version
+-
+-        # Verify the release exists before downloading
+-        http_status=$(curl -sI -o /dev/null -w "%{http_code}" "https://github.com/anomalyco/opencode/releases/tag/v${requested_version}")
+-        if [ "$http_status" = "404" ]; then
+-            echo -e "${RED}Error: Release v${requested_version} not found${NC}"
+-            echo -e "${MUTED}Available releases: https://github.com/anomalyco/opencode/releases${NC}"
++    fi
++
++    # #156：target 形如 os-arch，驱动资产文件名
++    target="$os-$arch"
++
++    # Keep installer target names exactly aligned with the workflow assets.
++    # Do not append baseline/musl unless the workflow also publishes those assets.
++    # #156：先固定名再 versioned 旧名，避免 404
++    candidates=()
++    if [ "$os" = "linux" ]; then
 +        candidates+=("${APP}-${target}.tar.gz")
 +        candidates+=("${APP}-${target}-${specific_version}.tar.gz")
 +    elif [ "$os" = "darwin" ]; then
 +        candidates+=("${APP}-${target}.zip")
 +        candidates+=("${APP}-${target}-${specific_version}.zip")
 +        candidates+=("${APP}-${target}-${specific_version}.tar.gz")
-     else
--        if ! command -v unzip >/dev/null 2>&1; then
--            echo -e "${RED}Error: 'unzip' is required but not installed.${NC}"
--            exit 1
--        fi
++    else
 +        candidates+=("${APP}-${target}.zip")
 +        candidates+=("${APP}-${target}-${specific_version}.zip")
 +        candidates+=("${APP}-${target}.exe")
 +        candidates+=("${APP}-${target}-${specific_version}.exe")
-     fi
- 
--    if [ -z "$requested_version" ]; then
--        url="https://github.com/anomalyco/opencode/releases/latest/download/$filename"
--        specific_version=$(curl -s https://api.github.com/repos/anomalyco/opencode/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
++    fi
++
 +    tmp_probe="${TMPDIR:-/tmp}/opencode_probe_$$"
 +    mkdir -p "$tmp_probe"
- 
--        if [[ $? -ne 0 || -z "$specific_version" ]]; then
--            echo -e "${RED}Failed to fetch version information${NC}"
--            exit 1
++
 +    filename=""
 +    for candidate in "${candidates[@]}"; do
 +        candidate_url="${base_url}/${candidate}"
@@ -801,29 +969,12 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 +            filename="$candidate"
 +            url="$candidate_url"
 +            break
-         fi
--    else
--        # Strip leading 'v' if present
--        requested_version="${requested_version#v}"
--        url="https://github.com/anomalyco/opencode/releases/download/v${requested_version}/$filename"
--        specific_version=$requested_version
++        fi
 +    done
- 
--        # Verify the release exists before downloading
--        http_status=$(curl -sI -o /dev/null -w "%{http_code}" "https://github.com/anomalyco/opencode/releases/tag/v${requested_version}")
--        if [ "$http_status" = "404" ]; then
--            echo -e "${RED}Error: Release v${requested_version} not found${NC}"
--            echo -e "${MUTED}Available releases: https://github.com/anomalyco/opencode/releases${NC}"
--            exit 1
--        fi
--    fi
--fi
++
++    # #156：清理临时目录，避免残留半下载
 +    rm -rf "$tmp_probe"
- 
--print_message() {
--    local level=$1
--    local message=$2
--    local color=""
++
 +    if [ -z "$filename" ]; then
 +        print_message error "No compatible release asset found for ${combo}. Tried:"
 +        for candidate in "${candidates[@]}"; do
@@ -831,11 +982,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 +        done
 +        exit 1
 +    fi
- 
--    case $level in
--        info) color="${NC}" ;;
--        warning) color="${NC}" ;;
--        error) color="${RED}" ;;
++
 +    case "$filename" in
 +        *.tar.gz)
 +            need_cmd tar
@@ -850,29 +997,43 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 +            ;;
 +        *)
 +            print_message error "Unsupported asset format: $filename"
-+            exit 1
+             exit 1
+-        fi
+-    fi
 +            ;;
-     esac
++    esac
+ fi
+ 
+-print_message() {
+-    local level=$1
+-    local message=$2
+-    local color=""
+-
+-    case $level in
+-        info) color="${NC}" ;;
+-        warning) color="${NC}" ;;
+-        error) color="${RED}" ;;
+-    esac
 -
 -    echo -e "${color}${message}${NC}"
 -}
-+fi
- 
+-
  check_version() {
--    if command -v opencode >/dev/null 2>&1; then
--        opencode_path=$(which opencode)
 +    local installed_version=""
 +    local current_opencode=""
- 
++
+     if command -v opencode >/dev/null 2>&1; then
+-        opencode_path=$(which opencode)
+-
 -        ## Check the installed version
-+    if command -v opencode >/dev/null 2>&1; then
 +        current_opencode=$(command -v opencode)
          installed_version=$(opencode --version 2>/dev/null || echo "")
+-
 +    elif command -v opencode.exe >/dev/null 2>&1; then
 +        current_opencode=$(command -v opencode.exe)
 +        installed_version=$(opencode.exe --version 2>/dev/null || echo "")
 +    fi
- 
++
 +    if [ -n "$current_opencode" ]; then
          if [[ "$installed_version" != "$specific_version" ]]; then
 -            print_message info "${MUTED}Installed version: ${NC}$installed_version."
@@ -883,7 +1044,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
              exit 0
          fi
      fi
-@@ -240,7 +284,8 @@ unbuffered_sed() {
+@@ -240,7 +319,8 @@
      elif echo | sed -l -e "" >/dev/null 2>&1; then
          sed -nl "$@"
      else
@@ -893,7 +1054,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
          sed -ne "s/$/\\${pad}/" "$@"
      fi
  }
-@@ -256,16 +301,18 @@ print_progress() {
+@@ -256,16 +336,18 @@
      local on=$(( percent * width / 100 ))
      local off=$(( width - on ))
  
@@ -915,13 +1076,22 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
      local output="$2"
  
      if [ -t 2 ]; then
-@@ -281,13 +328,12 @@ download_with_progress() {
+@@ -274,6 +356,7 @@
+         exec 4>/dev/null
+     fi
+ 
++    # #156：mktemp 目录隔离每次安装尝试
+     local tmp_dir=${TMPDIR:-/tmp}
+     local basename="${tmp_dir}/opencode_install_$$"
+     local tracefile="${basename}.trace"
+@@ -281,13 +364,13 @@
      rm -f "$tracefile"
      mkfifo "$tracefile"
  
 -    # Hide cursor
      printf "\033[?25l" >&4
  
++    # #156：退出钩子清理临时文件
      trap "trap - RETURN; rm -f \"$tracefile\"; printf '\033[?25h' >&4; exec 4>&-" RETURN
  
      (
@@ -930,10 +1100,11 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
      ) &
      local curl_pid=$!
  
-@@ -324,31 +370,110 @@ download_with_progress() {
+@@ -324,31 +407,119 @@
      return $ret
  }
  
++# #156：有 checksums 则硬校验，缺文件/工具 soft-warn
 +verify_checksum_if_possible() {
 +    local file_path="$1"
 +    local asset_name="$2"
@@ -946,6 +1117,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 +        return 0
 +    fi
 +
++    # #156：checksums 与二进制同 release 批次
 +    local checksums_file="${tmp_dir}/checksums.txt"
 +    if ! curl -fsSL "${base_url}/checksums.txt" -o "$checksums_file"; then
 +        print_message warning "checksums.txt not found; local sha256: $actual"
@@ -953,6 +1125,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 +    fi
 +
 +    local expected
++    # #156：从 checksums.txt 提取对应资产行
 +    expected=$(grep -E "[[:space:]]${asset_name}$" "$checksums_file" | awk '{print $1}' | head -n 1 || true)
 +    if [ -z "$expected" ]; then
 +        print_message warning "No checksum entry for ${asset_name}; local sha256: $actual"
@@ -969,6 +1142,7 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 +    print_message info "${MUTED}Checksum verified: ${NC}$actual"
 +}
 +
++# #156：原子安装并 chmod，避免半写可执行文件
 +install_executable() {
 +    local src="$1"
 +    local dst_name="$2"
@@ -978,10 +1152,12 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 +    chmod 755 "$dst"
 +
 +    if [ "${os:-}" = "darwin" ] && command -v xattr >/dev/null 2>&1; then
++        # #156：清除 mac quarantine，避免 Gatekeeper 拦截
 +        xattr -d com.apple.quarantine "$dst" 2>/dev/null || true
 +    fi
 +}
 +
++# #156：下载→校验→安装串联，任一步失败即停
  download_and_install() {
      print_message info "\n${MUTED}Installing ${NC}opencode ${MUTED}version: ${NC}$specific_version"
 +    print_message info "${MUTED}Repository: ${NC}${REPO}"
@@ -994,17 +1170,26 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 -    if [[ "$os" == "windows" ]] || ! [ -t 2 ] || ! download_with_progress "$url" "$tmp_dir/$filename"; then
 -        # Fallback to standard curl on Windows, non-TTY environments, or if custom progress fails
 -        curl -# -L -o "$tmp_dir/$filename" "$url"
+-    fi
+-
+-    if [ "$os" = "linux" ]; then
+-        tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
+-    else
+-        unzip -q "$tmp_dir/$filename" -d "$tmp_dir"
+-    fi
+-
+-    mv "$tmp_dir/opencode" "$INSTALL_DIR"
+-    chmod 755 "${INSTALL_DIR}/opencode"
 +    local asset_path="$tmp_dir/$filename"
 +
 +    if [[ "$os" == "windows" ]] || ! [ -t 2 ] || ! download_with_progress "$url" "$asset_path"; then
 +        curl -# -L -o "$asset_path" "$url"
-     fi
- 
--    if [ "$os" = "linux" ]; then
--        tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
++    fi
++
 +    verify_checksum_if_possible "$asset_path" "$filename" "$tmp_dir"
 +
 +    if [ "$asset_kind" = "tar.gz" ]; then
++        # #156：tar.gz 解包到临时目录再定位二进制
 +        tar -xzf "$asset_path" -C "$tmp_dir"
 +    elif [ "$asset_kind" = "zip" ]; then
 +        unzip -q "$asset_path" -d "$tmp_dir"
@@ -1012,10 +1197,10 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 +
 +    if [ "$asset_kind" = "exe" ]; then
 +        install_executable "$asset_path" "opencode.exe"
-     else
--        unzip -q "$tmp_dir/$filename" -d "$tmp_dir"
++    else
 +        local extracted=""
 +        if [ "$os" = "windows" ]; then
++            # #156：解压后按名查找 opencode 可执行文件
 +            extracted=$(find "$tmp_dir" -type f -name "opencode.exe" | head -n 1 || true)
 +            exe_name="opencode.exe"
 +        else
@@ -1030,13 +1215,12 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 +        fi
 +
 +        install_executable "$extracted" "$exe_name"
-     fi
- 
--    mv "$tmp_dir/opencode" "$INSTALL_DIR"
--    chmod 755 "${INSTALL_DIR}/opencode"
++    fi
++
      rm -rf "$tmp_dir"
  }
  
++# #156：本地 --binary 旁路网络下载
  install_from_binary() {
      print_message info "\n${MUTED}Installing ${NC}opencode ${MUTED}from: ${NC}$binary_path"
 -    cp "$binary_path" "${INSTALL_DIR}/opencode"
@@ -1051,15 +1235,16 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
  }
  
  if [ -n "$binary_path" ]; then
-@@ -358,7 +483,6 @@ else
+@@ -358,7 +529,7 @@
      download_and_install
  fi
  
 -
++# #156：可选写 shell rc；--no-modify-path 跳过
  add_to_path() {
      local config_file=$1
      local command=$2
-@@ -370,14 +494,14 @@ add_to_path() {
+@@ -370,14 +541,14 @@
          echo "$command" >> "$config_file"
          print_message info "${MUTED}Successfully added ${NC}opencode ${MUTED}to \$PATH in ${NC}$config_file"
      else
@@ -1070,13 +1255,14 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
  }
  
  XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
-+current_shell=$(basename "${SHELL:-sh}")
- 
+-
 -current_shell=$(basename "$SHELL")
++current_shell=$(basename "${SHELL:-sh}")
++
  case $current_shell in
      fish)
          config_files="$HOME/.config/fish/config.fish"
-@@ -395,7 +519,6 @@ case $current_shell in
+@@ -395,7 +566,6 @@
          config_files="$HOME/.ashrc $HOME/.profile /etc/profile"
      ;;
      *)
@@ -1084,13 +1270,14 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
          config_files="$HOME/.bashrc $HOME/.bash_profile $XDG_CONFIG_HOME/bash/.bashrc $XDG_CONFIG_HOME/bash/.bash_profile"
      ;;
  esac
-@@ -417,29 +540,15 @@ if [[ "$no_modify_path" != "true" ]]; then
+@@ -417,29 +587,16 @@
              fish)
                  add_to_path "$config_file" "fish_add_path $INSTALL_DIR"
              ;;
 -            zsh)
--                add_to_path "$config_file" "export PATH=$INSTALL_DIR:\$PATH"
--            ;;
++            *)
+                 add_to_path "$config_file" "export PATH=$INSTALL_DIR:\$PATH"
+             ;;
 -            bash)
 -                add_to_path "$config_file" "export PATH=$INSTALL_DIR:\$PATH"
 -            ;;
@@ -1100,12 +1287,11 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 -            sh)
 -                add_to_path "$config_file" "export PATH=$INSTALL_DIR:\$PATH"
 -            ;;
-             *)
+-            *)
 -                export PATH=$INSTALL_DIR:$PATH
 -                print_message warning "Manually add the directory to $config_file (or similar):"
 -                print_message info "  export PATH=$INSTALL_DIR:\$PATH"
-+                add_to_path "$config_file" "export PATH=$INSTALL_DIR:\$PATH"
-             ;;
+-            ;;
          esac
      fi
  fi
@@ -1113,20 +1299,24 @@ index b0716d532082c6f7a59348fbda53915bacd86db8..adce3c2935faf0ba1f45ebfa60b412bf
 -if [ -n "${GITHUB_ACTIONS-}" ] && [ "${GITHUB_ACTIONS}" == "true" ]; then
 -    echo "$INSTALL_DIR" >> $GITHUB_PATH
 +if [ -n "${GITHUB_ACTIONS-}" ] && [ "${GITHUB_ACTIONS}" = "true" ]; then
++    # #156：CI 写入 GITHUB_PATH 供后续 step 发现二进制
 +    echo "$INSTALL_DIR" >> "$GITHUB_PATH"
      print_message info "Added $INSTALL_DIR to \$GITHUB_PATH"
  fi
  
-@@ -449,7 +558,6 @@ echo -e "${MUTED}█▀▀█ █▀▀█ █▀▀█ █▀▀▄ ${NC}█▀
+@@ -448,7 +605,6 @@
+ echo -e "${MUTED}█▀▀█ █▀▀█ █▀▀█ █▀▀▄ ${NC}█▀▀▀ █▀▀█ █▀▀█ █▀▀█"
  echo -e "${MUTED}█░░█ █░░█ █▀▀▀ █░░█ ${NC}█░░░ █░░█ █░░█ █▀▀▀"
  echo -e "${MUTED}▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀  ▀ ${NC}▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"
- echo -e ""
 -echo -e ""
+ echo -e ""
  echo -e "${MUTED}OpenCode includes free models, to start:${NC}"
  echo -e ""
- echo -e "cd <project>  ${MUTED}# Open directory${NC}"
-@@ -457,4 +565,3 @@ echo -e "opencode      ${MUTED}# Run command${NC}"
+@@ -457,4 +613,3 @@
  echo -e ""
  echo -e "${MUTED}For more information visit ${NC}https://opencode.ai/docs"
  echo -e ""
 -echo -e ""
+--
+2.39.0
+

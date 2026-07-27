@@ -4,107 +4,123 @@ Date: Thu, 14 May 2026 16:06:32 +0800
 Subject: [PATCH] =?UTF-8?q?feat(read):=20=E4=BF=9D=E7=95=99XML=E6=95=8F?=
  =?UTF-8?q?=E6=84=9F=E5=86=85=E5=AE=B9=EF=BC=8C=E4=BC=98=E5=8C=96=E8=BE=93?=
  =?UTF-8?q?=E5=87=BA=E7=BB=93=E6=9E=84=EF=BC=8C=E7=A1=AE=E4=BF=9D=E5=86=85?=
- =?UTF-8?q?=E5=AE=B9=E4=B8=80=E8=87=B4=E6=80=A7?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
 
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index a8971ffb0d6303df1433cbf051def5f22f1faa1c..8e485ebb755a88b686170fa0d2afe7525266d402 100644
+index b70f7bce5b..307442b517 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -247,8 +247,10 @@ function findOverlapNote(visibleReads: ReadMetadata[], current: ReadMetadata) {
- function renderContentLines(file: Awaited<ReturnType<typeof lines>>) {
-   return file.raw
+@@ -300,9 +300,9 @@ function findOverlapNote(visibleReads: ReadRangeMeta[], current: ReadRangeMeta)
+ function renderContentLines(raw: string[], offset: number) {
+   return raw
      .map((line, i) => {
--      if (line.length <= MAX_LINE_LENGTH) return `${i + file.offset}: ${escapeXmlText(line)}`
--      return `${i + file.offset}: ${escapeXmlText(line.slice(0, MAX_LINE_LENGTH))} (line truncated to ${MAX_LINE_LENGTH} chars)`
-+      // Keep source text verbatim. Only structural wrapper fields are escaped;
-+      // content lines must match what edit/write would operate on.
-+      if (line.length <= MAX_LINE_LENGTH) return `${i + file.offset}: ${line}`
-+      return `${i + file.offset}: ${line.slice(0, MAX_LINE_LENGTH)} (line truncated to ${MAX_LINE_LENGTH} chars)`
+-      // #142：结构化包装字段转义；内容行 escape 防破坏 XML 结构（#145 改为原文）
+-      if (line.length <= MAX_LINE_LENGTH) return `${i + offset}: ${escapeXmlText(line)}`
+-      return `${i + offset}: ${escapeXmlText(line.slice(0, MAX_LINE_LENGTH))} (line truncated to ${MAX_LINE_LENGTH} chars)`
++      // #145：内容行保留原文，仅结构包装字段 escape；与 edit/write 操作对象一致
++      if (line.length <= MAX_LINE_LENGTH) return `${i + offset}: ${line}`
++      return `${i + offset}: ${line.slice(0, MAX_LINE_LENGTH)} (line truncated to ${MAX_LINE_LENGTH} chars)`
      })
      .join("\n")
  }
-@@ -275,7 +277,7 @@ function renderReadOutput(input: {
- 
+@@ -332,7 +332,8 @@ function renderReadOutput(input: {
+   // #142：outline 仅插入结构提示区
    if (input.outline?.items.length) {
      output.push(`<outline truncated="${input.outline.truncated ? "true" : "false"}">`)
 -    output.push(input.outline.items.map(escapeXmlText).join("\n"))
++    // #145：outline 条目不转义，保留源码记号
 +    output.push(input.outline.items.join("\n"))
      output.push("</outline>")
    }
- 
-@@ -492,7 +494,7 @@ export const ReadTool = Tool.define(
-             `<type>directory</type>`,
-             `<directory entries="${items.length}" />`,
-             `<content>`,
--            sliced.map(escapeXmlText).join("\n"),
-+            sliced.join("\n"),
-             `</content>`,
-             truncated ? `<more offset="${offset + sliced.length}" reason="entry_limit" />` : undefined,
-           ]
+   // #142：部分重叠仍返回内容，附加 note
+@@ -680,7 +681,8 @@ export const ReadTool = Tool.define<
+           `<directory entries="${items.length}" />`,
+           `<content>`,
+           // #142：目录条目也 escape，结构一致
+-          sliced.map(escapeXmlText).join("\n"),
++          // #145：目录名不转义，保留 & 等字符
++          sliced.join("\n"),
+           `</content>`,
+           // #142：目录超限用 entry_limit
+           truncated ? `<more offset="${offset + sliced.length}" reason="entry_limit" />` : undefined,
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index e8e1d686459b54af80329c8d35ffdd0e37ce432d..c70695e78395b32bc27843c94a70a79f69bec9bb 100644
+index a3365ab67e..4a4c9c96f3 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
-@@ -329,14 +329,14 @@ describe("tool.read truncation", () => {
-     }),
+@@ -643,13 +643,14 @@ describe("tool.read structured output", () => {
    )
  
+   // #142：XML 敏感内容在 #142 阶段转义（#145 再改为原文）
 -  it.instance("escapes XML-sensitive file content in structured output", () =>
 +  it.instance("preserves XML-sensitive file content in structured output", () =>
      Effect.gen(function* () {
        const test = yield* TestInstance
-       yield* put(path.join(test.directory, "xml-sensitive.txt"), "<tag attr=\"x\">&</tag>")
- 
+       yield* put(path.join(test.directory, "xml-sensitive.txt"), '<tag attr="x">&</tag>\n')
        const result = yield* run({ filePath: path.join(test.directory, "xml-sensitive.txt") })
--      expect(result.output).toContain("1: &lt;tag attr=\"x\"&gt;&amp;&lt;/tag&gt;")
+-      expect(result.output).toContain('1: &lt;tag attr="x"&gt;&amp;&lt;/tag&gt;')
 -      expect(result.output).not.toContain("1: <tag")
-+      expect(result.output).toContain("1: <tag attr=\"x\">&</tag>")
++      // #145：内容行不转义
++      expect(result.output).toContain('1: <tag attr="x">&</tag>')
 +      expect(result.output).not.toContain("1: &lt;tag")
      }),
    )
- 
-@@ -451,6 +451,17 @@ describe("tool.read truncation", () => {
+ })
+@@ -668,6 +669,7 @@ describe("tool.read outline", () => {
+       yield* put(file, body + "\n")
+       const head = yield* run({ filePath: file, offset: 1, limit: 20 })
+       // #142：offset=1 的长源文件必须带 outline
++      // #145：硬断言 outline 节点必须出现
+       expect(head.output).toContain("<outline")
+       expect(head.output).toContain("function alpha")
+       expect(head.output).toContain("class Beta")
+@@ -776,4 +778,51 @@ describe("tool.read visible context stubs", () => {
      }),
    )
- 
-+  it.live("preserves XML-sensitive directory entries", () =>
+ })
++describe("tool.read XML preserve channels", () => {
++  // #145：目录条目保留原文
++  it.instance("preserves XML-sensitive directory entries", () =>
 +    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      yield* put(path.join(dir, "dir", "a&b.txt"), "content")
-+
-+      const result = yield* exec(dir, { filePath: path.join(dir, "dir") })
++      const test = yield* TestInstance
++      const dir = path.join(test.directory, "dir-xml")
++      yield* Effect.promise(() => import("fs/promises").then((fs) => fs.mkdir(dir, { recursive: true })))
++      yield* put(path.join(dir, "a&b.txt"), "x\n")
++      const result = yield* run({ filePath: dir })
 +      expect(result.output).toContain("a&b.txt")
 +      expect(result.output).not.toContain("a&amp;b.txt")
 +    }),
 +  )
 +
-   it.live("truncates long lines", () =>
-     Effect.gen(function* () {
-       const dir = yield* tmpdirScoped()
-@@ -709,6 +720,22 @@ describe("tool.read outline", () => {
-     }),
-   )
- 
-+  it.live("preserves XML-sensitive outline labels", () =>
++    // #145：outline 使用含 <> 的 impl 标签，硬断言未转义
++  it.instance("preserves XML-sensitive outline labels", () =>
 +    Effect.gen(function* () {
-+      const dir = yield* tmpdirScoped()
-+      const filePath = path.join(dir, "large.rs")
-+      const source = [
-+        "impl<T> Parser<T> where T: Clone {",
-+        ...Array.from({ length: 650 }, (_, i) => `// filler ${i + 1}`),
-+      ].join("\n")
-+      yield* put(filePath, source)
-+
-+      const result = yield* exec(dir, { filePath, limit: 20 })
-+      expect(result.output).toContain("1 impl Parser<T>")
-+      expect(result.output).not.toContain("Parser&lt;T&gt;")
++      const test = yield* TestInstance
++      const file = path.join(test.directory, "generic.rs")
++      const body = Array.from({ length: 700 }, (_, i) => {
++        if (i === 20) return "impl Parser<T> for Foo {}"
++        return `// line ${i + 1}`
++      }).join("\n")
++      yield* put(file, body + "\n")
++      const head = yield* run({ filePath: file, offset: 1, limit: 30 })
++      expect(head.output).toContain("<outline")
++      // #145：outline 原文应含 <T>，不得变成 &lt;T&gt;
++      expect(head.output).toContain("Parser<T>")
++      expect(head.output).not.toContain("Parser&lt;T&gt;")
 +    }),
 +  )
-+
-   it.live("extracts conservative labels for common language declarations", () =>
-     Effect.gen(function* () {
-       const dir = yield* tmpdirScoped()
+ 
++  it.instance("preserves XML-sensitive outline labels", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const file = path.join(test.directory, "generic.ts")
++      const body = Array.from({ length: 700 }, (_, i) => {
++        if (i === 20) return "export function Parser<T>() { return null as any }"
++        return `// line ${i + 1}`
++      }).join("\n")
++      yield* put(file, body + "\n")
++      const head = yield* run({ filePath: file, offset: 1, limit: 30 })
++      expect(head.output).toContain("<outline")
++      expect(head.output).toContain("Parser")
++      expect(head.output).not.toContain("Parser&lt;T&gt;")
++    }),
++  )
++})

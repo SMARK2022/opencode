@@ -2,34 +2,55 @@ From d7b11daa5ef707cfdf61d606e5d6b982c8a11607 Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Thu, 21 May 2026 16:07:41 +0800
 Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=E4=BC=9A=E8=AF=9D?=
- =?UTF-8?q?=E5=B8=83=E5=B1=80=E7=9B=B8=E5=85=B3=E5=8A=9F=E8=83=BD=EF=BC=8C?=
- =?UTF-8?q?=E4=BC=98=E5=8C=96=E6=B6=88=E6=81=AF=E5=86=85=E5=AE=B9=E5=AE=BD?=
- =?UTF-8?q?=E5=BA=A6=E8=AE=A1=E7=AE=97=E5=8F=8A=E6=B5=8B=E8=AF=95=E7=94=A8?=
- =?UTF-8?q?=E4=BE=8B?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-index 62ad384c505757aeb74264b21c64f2e6d08cc9d1..afdf32add9183d01d2cf8878a8e6303702fe0d1d 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/index.tsx
-@@ -73,6 +73,7 @@ import { DialogTimeline } from "./dialog-timeline"
- import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
- import { DialogSessionRename } from "../../component/dialog-session-rename"
- import { Sidebar } from "./sidebar"
+diff --git a/packages/tui/src/routes/session/layout.ts b/packages/tui/src/routes/session/layout.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/src/routes/session/layout.ts
+@@ -0,0 +1,25 @@
++// #184：常量按 tip Session 主列/滚动条实测 chrome 校准
++// #184：会话消息可读宽度的唯一公式，避免终端估值漂移
++export const SESSION_SIDEBAR_WIDTH = 42
++
++// #184：tip 主列 paddingLeft2+paddingRight1=3
++const SESSION_MAIN_HORIZONTAL_PADDING = 3
++// #184：消息左边框+左 padding（assistant chrome）
++const SESSION_MESSAGE_LEFT_CHROME = 4
++// #184：tip viewport+content 各 paddingRight 1，合计 gutter 2
++const SESSION_SCROLLBAR_GUTTER = 2
++
++export const sessionMessageContentWidth = (input: {
++  terminalWidth: number
++  sidebarInLayout: boolean
++  scrollbarEnabled: boolean
++}) => {
++  // #184：overlay 侧栏不扣宽；仅 docked 时减 SIDEBAR
++  const sidebar = input.sidebarInLayout ? SESSION_SIDEBAR_WIDTH : 0
++  const scroll = input.scrollbarEnabled ? SESSION_SCROLLBAR_GUTTER : 0
++  // #184：至少 1 列，防止 Yoga 负数
++  return Math.max(
++    1,
++    input.terminalWidth - sidebar - SESSION_MAIN_HORIZONTAL_PADDING - SESSION_MESSAGE_LEFT_CHROME - scroll,
++  )
++}
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -15,6 +15,7 @@ import {
+   useContext,
+ } from "solid-js"
+ import { Dynamic } from "solid-js/web"
 +import { sessionMessageContentWidth } from "./layout"
- import { SubagentFooter } from "./subagent-footer.tsx"
- import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
- import parsers from "../../../../../../parsers-config.ts"
-@@ -261,8 +262,15 @@ export function Session() {
-     if (sidebar() === "auto" && wide()) return true
+ import path from "node:path"
+ import { mkdir, writeFile } from "node:fs/promises"
+ import { useRoute, useRouteData } from "../../context/route"
+@@ -311,7 +312,15 @@ setTimeout(() => {
      return false
    })
-+  const sidebarInLayout = createMemo(() => sidebarVisible() && wide())
    const showTimestamps = createMemo(() => timestamps() === "show")
 -  const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 42 : 0) - 4)
++  const sidebarInLayout = createMemo(() => sidebarVisible() && wide())
++  // #184：可读宽按 docked 侧栏与滚动条精确扣减
 +  const messageContentWidth = createMemo(() =>
 +    sessionMessageContentWidth({
 +      terminalWidth: dimensions().width,
@@ -40,7 +61,7 @@ index 62ad384c505757aeb74264b21c64f2e6d08cc9d1..afdf32add9183d01d2cf8878a8e63037
    const providers = createMemo(() => Model.index(sync.data.provider))
  
    const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
-@@ -1180,7 +1188,7 @@ export function Session() {
+@@ -1254,7 +1263,7 @@ setTimeout(() => {
        <context.Provider
          value={{
            get width() {
@@ -49,48 +70,16 @@ index 62ad384c505757aeb74264b21c64f2e6d08cc9d1..afdf32add9183d01d2cf8878a8e63037
            },
            sessionID: route.sessionID,
            conceal,
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/layout.ts b/packages/opencode/src/cli/cmd/tui/routes/session/layout.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..adcbfa672b9e92c078ea993926e5694cecf44d99
---- /dev/null
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/layout.ts
-@@ -0,0 +1,23 @@
-+export const SESSION_SIDEBAR_WIDTH = 42
-+
-+// Keep this aligned with the fixed horizontal chrome in Session's scrollbox
-+// tree. This is the readable content column exposed as ctx.width, so wider
-+// regions such as diff views use the same conservative wrapping threshold.
-+const SESSION_MAIN_HORIZONTAL_PADDING = 4
-+const SESSION_MESSAGE_LEFT_CHROME = 4
-+const SESSION_SCROLLBAR_GUTTER = 2
-+
-+export function sessionMessageContentWidth(input: {
-+  terminalWidth: number
-+  sidebarInLayout: boolean
-+  scrollbarEnabled: boolean
-+}) {
-+  return Math.max(
-+    1,
-+    input.terminalWidth -
-+      (input.sidebarInLayout ? SESSION_SIDEBAR_WIDTH : 0) -
-+      SESSION_MAIN_HORIZONTAL_PADDING -
-+      SESSION_MESSAGE_LEFT_CHROME -
-+      (input.scrollbarEnabled ? SESSION_SCROLLBAR_GUTTER : 0),
-+  )
-+}
-diff --git a/packages/opencode/src/cli/cmd/tui/routes/session/sidebar.tsx b/packages/opencode/src/cli/cmd/tui/routes/session/sidebar.tsx
-index 0f9214092ebac6e320445432ff52f726afa4e4ab..a63956332e002d424dee34d9ab1f6c37946143fa 100644
---- a/packages/opencode/src/cli/cmd/tui/routes/session/sidebar.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/routes/session/sidebar.tsx
-@@ -8,6 +8,7 @@ import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
- 
- import { getScrollAcceleration } from "../../util/scroll"
- import { WorkspaceLabel } from "../../component/workspace-label"
+diff --git a/packages/tui/src/routes/session/sidebar.tsx b/packages/tui/src/routes/session/sidebar.tsx
+--- a/packages/tui/src/routes/session/sidebar.tsx
++++ b/packages/tui/src/routes/session/sidebar.tsx
+@@ -1,4 +1,5 @@
+ import { useProject } from "../../context/project"
 +import { SESSION_SIDEBAR_WIDTH } from "./layout"
- 
- export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
-   const project = useProject()
-@@ -26,7 +27,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
+ import { useSync } from "../../context/sync"
+ import { createMemo, Show } from "solid-js"
+ import { useTheme } from "../../context/theme"
+@@ -27,7 +28,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
      <Show when={session()}>
        <box
          backgroundColor={theme.backgroundPanel}
@@ -99,103 +88,32 @@ index 0f9214092ebac6e320445432ff52f726afa4e4ab..a63956332e002d424dee34d9ab1f6c37
          height="100%"
          paddingTop={1}
          paddingBottom={1}
-diff --git a/packages/opencode/test/cli/cmd/tui/session-layout.test.ts b/packages/opencode/test/cli/cmd/tui/session-layout.test.ts
+diff --git a/packages/tui/test/routes/session/session-layout.test.ts b/packages/tui/test/routes/session/session-layout.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..84d28f935230a0b90a44066d19fdda756d97061a
 --- /dev/null
-+++ b/packages/opencode/test/cli/cmd/tui/session-layout.test.ts
-@@ -0,0 +1,94 @@
++++ b/packages/tui/test/routes/session/session-layout.test.ts
+@@ -0,0 +1,24 @@
 +import { describe, expect, test } from "bun:test"
-+import { BoxRenderable, RGBA, ScrollBoxRenderable, TextRenderable } from "@opentui/core"
-+import { createTestRenderer } from "@opentui/core/testing"
-+import {
-+  SESSION_SIDEBAR_WIDTH,
-+  sessionMessageContentWidth,
-+} from "../../../../src/cli/cmd/tui/routes/session/layout"
++import { sessionMessageContentWidth, SESSION_SIDEBAR_WIDTH } from "../../../src/routes/session/layout"
 +
-+describe("session layout width", () => {
-+  test("matches OpenTUI's actual assistant text column", async () => {
-+    for (const item of [
-+      { terminalWidth: 80, sidebarVisible: false, scrollbarEnabled: true },
-+      { terminalWidth: 80, sidebarVisible: false, scrollbarEnabled: false },
-+      { terminalWidth: 160, sidebarVisible: true, scrollbarEnabled: true },
-+      { terminalWidth: 160, sidebarVisible: true, scrollbarEnabled: false },
-+    ]) {
-+      const measured = await measureAssistantTextWidth(item)
-+      expect(measured).toBe(
-+        sessionMessageContentWidth({
-+          terminalWidth: item.terminalWidth,
-+          sidebarInLayout: item.sidebarVisible,
-+          scrollbarEnabled: item.scrollbarEnabled,
-+        }),
-+      )
-+    }
++// #184：与 tip index 主列 paddingLeft=2 paddingRight=1、scrollbar paddingRight 0/1 对齐
++// #184：纯函数锁定 docked/overlay 与滚动条组合
++describe("sessionMessageContentWidth (#184)", () => {
++  test("does not subtract sidebar when overlay (narrow)", () => {
++    // #184：窄屏侧栏 overlay，消息区应保留全宽扣 chrome
++    const w = sessionMessageContentWidth({ terminalWidth: 80, sidebarInLayout: false, scrollbarEnabled: false })
++    expect(w).toBe(80 - 3 - 4)
++  })
++
++  test("subtracts docked sidebar on wide layout", () => {
++    // #184：宽屏 docked 侧栏必须计入
++    const w = sessionMessageContentWidth({ terminalWidth: 160, sidebarInLayout: true, scrollbarEnabled: false })
++    expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 4)
++  })
++
++  test("subtracts scrollbar gutter when enabled", () => {
++    // #184：滚动条开启再扣 tip 双层 paddingRight 合计 2
++    const w = sessionMessageContentWidth({ terminalWidth: 160, sidebarInLayout: true, scrollbarEnabled: true })
++    expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 4 - 2)
 +  })
 +})
-+
-+async function measureAssistantTextWidth(input: {
-+  terminalWidth: number
-+  sidebarVisible: boolean
-+  scrollbarEnabled: boolean
-+}) {
-+  const setup = await createTestRenderer({
-+    width: input.terminalWidth,
-+    height: 20,
-+    footerHeight: 0,
-+    useThread: false,
-+    consoleMode: "disabled",
-+  })
-+
-+  try {
-+    const root = new BoxRenderable(setup.renderer, {
-+      width: input.terminalWidth,
-+      height: 20,
-+      flexDirection: "row",
-+    })
-+    const main = new BoxRenderable(setup.renderer, {
-+      flexGrow: 1,
-+      minHeight: 0,
-+      paddingLeft: 2,
-+      paddingRight: 2,
-+    })
-+
-+    root.add(main)
-+    if (input.sidebarVisible) {
-+      root.add(new BoxRenderable(setup.renderer, { width: SESSION_SIDEBAR_WIDTH, height: "100%" }))
-+    }
-+
-+    const scroll = new ScrollBoxRenderable(setup.renderer, {
-+      flexGrow: 1,
-+      viewportOptions: { paddingRight: 1 },
-+      contentOptions: { paddingRight: 1 },
-+      verticalScrollbarOptions: {
-+        visible: true,
-+        trackOptions: {
-+          backgroundColor: RGBA.fromInts(20, 20, 20),
-+          foregroundColor: RGBA.fromInts(200, 200, 200),
-+        },
-+      },
-+      stickyScroll: true,
-+      stickyStart: "bottom",
-+    })
-+    main.add(scroll)
-+
-+    const assistant = new BoxRenderable(setup.renderer, { border: ["left"], flexShrink: 0 })
-+    const textPart = new BoxRenderable(setup.renderer, { paddingLeft: 3, flexShrink: 0 })
-+    const text = new TextRenderable(setup.renderer, { content: "x ".repeat(2_000), wrapMode: "word" })
-+    textPart.add(text)
-+    assistant.add(textPart)
-+    scroll.add(assistant)
-+    setup.renderer.root.add(root)
-+
-+    for (let i = 0; i < 3; i++) await setup.renderOnce()
-+    scroll.viewportOptions = { paddingRight: input.scrollbarEnabled ? 1 : 0 }
-+    scroll.contentOptions = { paddingRight: input.scrollbarEnabled ? 1 : 0 }
-+    scroll.verticalScrollbarOptions = { visible: input.scrollbarEnabled }
-+    for (let i = 0; i < 5; i++) await setup.renderOnce()
-+
-+    return text.width
-+  } finally {
-+    setup.renderer.destroy()
-+  }
-+}

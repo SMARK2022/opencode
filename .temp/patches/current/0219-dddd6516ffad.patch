@@ -1,28 +1,22 @@
 From dddd6516ffadfbd68734622a63e09cf94f2df731 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Mon, 25 May 2026 02:37:19 +0800
-Subject: [PATCH] =?UTF-8?q?feat(vscode-bridge):=20=E5=A2=9E=E5=BC=BA?=
- =?UTF-8?q?=E6=A1=A5=E6=8E=A5=E5=8F=91=E7=8E=B0=E9=80=BB=E8=BE=91=EF=BC=8C?=
- =?UTF-8?q?=E5=A4=84=E7=90=86=E6=8D=9F=E5=9D=8F=E7=9A=84=E6=B3=A8=E5=86=8C?=
- =?UTF-8?q?=E8=A1=A8=E6=9D=A1=E7=9B=AE=E5=B9=B6=E4=BC=98=E5=8C=96=E6=96=87?=
- =?UTF-8?q?=E4=BB=B6=E8=AF=BB=E5=8F=96=20feat(bridge-registry):=20?=
- =?UTF-8?q?=E6=94=B9=E8=BF=9B=E6=B3=A8=E5=86=8C=E8=A1=A8=E6=96=87=E4=BB=B6?=
- =?UTF-8?q?=E5=86=99=E5=85=A5=E9=80=BB=E8=BE=91=EF=BC=8C=E4=BD=BF=E7=94=A8?=
- =?UTF-8?q?=E4=B8=B4=E6=97=B6=E6=96=87=E4=BB=B6=E7=A1=AE=E4=BF=9D=E6=95=B0?=
- =?UTF-8?q?=E6=8D=AE=E5=AE=8C=E6=95=B4=E6=80=A7?=
+Subject: [PATCH] feat(vscode-bridge): =?UTF-8?q?=E5=A2=9E=E5=BC=BA?=
+ =?UTF-8?q?=E6=A1=A5=E6=8E=A5=E5=8F=91=E7=8E=B0=E9=80=BB=E8=BE=91?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
 diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/ide/vscode-bridge.ts
-index a1932d6415ba7f01e3c3325d10708ed005332e39..1af6f2688a77d4cdb3fee254a9fc317139ec7cfa 100644
+index 4fd2720357..e924b05e41 100644
 --- a/packages/opencode/src/ide/vscode-bridge.ts
 +++ b/packages/opencode/src/ide/vscode-bridge.ts
-@@ -9,6 +9,21 @@ const DEFAULT_HEARTBEAT_TRUST_MS = 10_000
- const DEFAULT_STALE_MS = 60_000
+@@ -18,6 +18,23 @@ const DEFAULT_HEARTBEAT_TRUST_MS = 10_000
+ // 解析缓存 5 秒：避免频繁扫描锁文件目录
  const RESOLVE_CACHE_MS = 5_000
  
++// #219：损坏注册文件的清理宽限窗口——大于心跳间隔，保留活桥恢复能力同时清理真正废弃的损坏清单
 +// Corrupt registry files are removed only after a grace window longer than one
 +// heartbeat interval: the VS Code writer used to update the final JSON file in
 +// place, so a reader could observe a transient empty/all-NUL file while VS Code
@@ -31,6 +25,7 @@ index a1932d6415ba7f01e3c3325d10708ed005332e39..1af6f2688a77d4cdb3fee254a9fc3171
 +// manifests on the next discovery pass.
 +const CORRUPT_REGISTRY_GRACE_MS = 10_000
 +
++// #219：注册清单文件名匹配 UUID 格式——发现只处理 VS Code 扩展创建的 ${randomUUID()}.json
 +// The VS Code extension creates registry entries as `${randomUUID()}.json`.
 +// Discovery deliberately ignores every other `*.json` name so a misconfigured
 +// OPENCODE_IDE_REGISTRY_DIR cannot make this cleanup path own arbitrary JSON
@@ -38,10 +33,10 @@ index a1932d6415ba7f01e3c3325d10708ed005332e39..1af6f2688a77d4cdb3fee254a9fc3171
 +const REGISTRY_MANIFEST_FILE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i
 +const CORRUPT_REGISTRY_ENTRY = Symbol("corrupt-vscode-bridge-registry-entry")
 +
+ // 桥接条目：包含端口、token、工作区路径和心跳时间
  export type BridgeEntry = {
    schema: 1
-   id: string
-@@ -60,6 +75,7 @@ let cachedRegistryBridge:
+@@ -73,6 +90,7 @@ let cachedRegistryBridge:
    | {
        cwd: string
        filePath?: string
@@ -49,39 +44,50 @@ index a1932d6415ba7f01e3c3325d10708ed005332e39..1af6f2688a77d4cdb3fee254a9fc3171
        expiresAt: number
        bridge: BridgeRef
      }
-@@ -83,13 +99,17 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
-   const live: BridgeEntry[] = []
+@@ -111,20 +129,26 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
+ // 并行检查所有注册文件：Promise.all 确保所有检查完成后才返回
    await Promise.all(
      files
+-      // 过滤 JSON 文件：注册目录可能包含非 JSON 临时文件
 -      .filter((file) => file.endsWith(".json"))
++      // #219：仅匹配 UUID 格式的注册清单——防止误删非 VS Code 扩展创建的 JSON 文件
 +      .filter(isRegistryManifestFile)
        .map(async (file) => {
+         // 注册文件完整路径：每个 VS Code 实例一个 JSON 文件
          const filepath = path.join(dir, file)
+         // 读取注册条目：解析 JSON 并验证 schema 版本
          const entry = await readEntry(filepath)
++        // #219：损坏条目经宽限期后清理——读取失败或 JSON 语法错误返回 CORRUPT_REGISTRY_ENTRY
 +        if (entry === CORRUPT_REGISTRY_ENTRY) {
++          // #219：清理失败不影响发现——坏条目删除是尽力而为，发现须继续返回活桥
 +          await removeRegistryFile(dir, file, { olderThanMs: CORRUPT_REGISTRY_GRACE_MS, now }).catch(() => undefined)
 +          return
 +        }
+         // 无效条目跳过：JSON 解析失败或 schema 不匹配时返回 null
+       // 无效条目：JSON 解析失败或 schema 版本不匹配时 readEntry 返回 null
          if (!entry) return
+         // 先检查进程存活：进程已死则直接移除注册条目，无需进一步检查
          if (pidDead(entry.pid)) {
+ // 移除过期注册文件：PID 已死的 VS Code 实例留下的残留文件
 -          await removeStale(filepath)
 +          await removeRegistryFile(dir, file)
            return
          }
-         const age = now - entry.updatedAt
-@@ -101,7 +121,7 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
-           live.push(entry)
+         // 注册条目年龄：用于判断是否在心跳信任窗口内
+@@ -140,7 +164,7 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
            return
          }
+         // 过期清理：仅在健康检查失败且超过 staleMs 时删除注册文件
 -        if (age > staleMs) await removeStale(filepath)
 +        if (age > staleMs) await removeRegistryFile(dir, file)
        }),
    )
-   return live
-@@ -109,11 +129,17 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
- 
+ // 返回活跃桥接列表：已排除过期、PID 失效和健康检查失败的条目
+@@ -152,11 +176,18 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
+ // 发现仅走 registry/cache/健康探测：env 捷径已删除
  export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
    const now = Date.now()
++  // #219：缓存身份包含 registryDir——测试和自定义部署可更改 OPENCODE_IDE_REGISTRY_DIR 而不改变 cwd/filePath
 +  // Include the resolved registry directory in the cache identity because tests
 +  // and custom deployments can move OPENCODE_IDE_REGISTRY_DIR without changing
 +  // cwd/filePath; returning a bridge from the old directory would cross that
@@ -97,7 +103,7 @@ index a1932d6415ba7f01e3c3325d10708ed005332e39..1af6f2688a77d4cdb3fee254a9fc3171
    ) {
      return cachedRegistryBridge.bridge
    }
-@@ -149,6 +175,7 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
+@@ -200,6 +231,7 @@ export async function resolveBridge(input: ResolveInput): Promise<BridgeRef> {
    cachedRegistryBridge = {
      cwd: input.cwd,
      filePath: input.filePath,
@@ -105,11 +111,12 @@ index a1932d6415ba7f01e3c3325d10708ed005332e39..1af6f2688a77d4cdb3fee254a9fc3171
      expiresAt: Date.now() + RESOLVE_CACHE_MS,
      bridge,
    }
-@@ -255,7 +282,16 @@ function bridgeMatchesFilePath(entry: BridgeEntry, filePath: string) {
- }
+@@ -328,7 +360,17 @@ function bridgeMatchesFilePath(entry: BridgeEntry, filePath: string) {
  
+ // 读取注册条目：解析 JSON，验证 schema 版本和必需字段
  async function readEntry(filepath: string) {
 -  const value = JSON.parse(await fs.readFile(filepath, "utf8")) as unknown
++  // #219：不可读或并发删除的条目视为缺失——单个损坏文件不得阻止发现其他活桥
 +  // Treat unreadable or concurrently-removed entries as absent: one bad direct
 +  // child must not block discovery of another live bridge. Only JSON syntax
 +  // failures return CORRUPT_REGISTRY_ENTRY, because parsed-but-foreign UUID JSON
@@ -123,15 +130,17 @@ index a1932d6415ba7f01e3c3325d10708ed005332e39..1af6f2688a77d4cdb3fee254a9fc3171
    if (!isRecord(value)) return
    if (value.schema !== 1) return
    if (value.transport !== "http" || value.ideKind !== "vscode") return
-@@ -378,7 +414,33 @@ function isMissing(error: unknown) {
-   return isRecord(error) && error.code === "ENOENT"
+@@ -465,7 +507,39 @@ function isMissing(error: unknown) {
  }
  
+ // 移除过期注册文件：catch 忽略文件不存在错误（可能被其他进程删除）
 -function removeStale(filepath: string) {
++// #219：注册清单文件名判定——仅 UUID 格式的 .json 文件由 VS Code 扩展拥有
 +function isRegistryManifestFile(file: string) {
 +  return REGISTRY_MANIFEST_FILE.test(file)
 +}
 +
++// #219：安全 JSON 解析——语法错误返回 CORRUPT_REGISTRY_ENTRY 而非抛出
 +function parseRegistryJson(text: string) {
 +  try {
 +    return JSON.parse(text) as unknown
@@ -140,29 +149,33 @@ index a1932d6415ba7f01e3c3325d10708ed005332e39..1af6f2688a77d4cdb3fee254a9fc3171
 +  }
 +}
 +
++// #219：唯一的注册条目清理路径——仅删除直接子文件且名为 UUID 清单，不删目录树或任意 JSON
++// This is the only cleanup path for bridge registry entries. Keep all guards
++// here so dead processes, stale manifests, and corrupt-manifest recovery share
++// the same safety invariant: unlink only a direct child with the exact UUID
++// manifest name that the VS Code extension owns, never a directory tree and
++// never an arbitrary JSON file selected through glob expansion or shell syntax.
 +async function removeRegistryFile(dir: string, file: string, options?: { olderThanMs?: number; now?: number }) {
-+  // This is the only cleanup path for bridge registry entries. Keep all guards
-+  // here so dead processes, stale manifests, and corrupt-manifest recovery share
-+  // the same safety invariant: unlink only a direct child with the exact UUID
-+  // manifest name that the VS Code extension owns, never a directory tree and
-+  // never an arbitrary JSON file selected through glob expansion or shell syntax.
 +  if (!isRegistryManifestFile(file)) return
 +  const filepath = path.join(dir, file)
 +  const stat = await fs.lstat(filepath).catch((error) => {
 +    if (isMissing(error)) return
 +    throw error
 +  })
++  // #219：文件已不存在时跳过——可能被其他进程删除
 +  if (!stat) return
++  // #219：不删除目录——UUID 命名的目录不是注册清单
 +  if (!stat.isFile()) return
++  // #219：宽限期内不删——避免清理 VS Code 正在重写的瞬态损坏文件
 +  if (options?.olderThanMs !== undefined && (options.now ?? Date.now()) - stat.mtimeMs < options.olderThanMs) return
    return fs.unlink(filepath).catch((error) => {
      if (isMissing(error)) return
      throw error
 diff --git a/packages/opencode/test/ide/vscode-bridge.test.ts b/packages/opencode/test/ide/vscode-bridge.test.ts
-index 661a17787fd49dd79ba0a4b84baad1837ea93ea9..bb475eadad561e8b4863f448dbad3ec1d580ba6b 100644
+index f500ab2a2d..9ea07ec70e 100644
 --- a/packages/opencode/test/ide/vscode-bridge.test.ts
 +++ b/packages/opencode/test/ide/vscode-bridge.test.ts
-@@ -18,38 +18,119 @@ describe("vscode bridge discovery", () => {
+@@ -28,38 +28,131 @@ test("selects registry bridge matching the requested file path", async () => {
      using first = await bridgeServer()
      using second = await bridgeServer()
      const dir = await tempRegistry()
@@ -170,8 +183,7 @@ index 661a17787fd49dd79ba0a4b84baad1837ea93ea9..bb475eadad561e8b4863f448dbad3ec1
 -    await writeEntry(dir, "second", second.port, "/tmp/project-b")
 +    const firstId = "11111111-1111-1111-1111-111111111111"
 +    const secondId = "22222222-2222-2222-2222-222222222222"
-+    // The fixture uses UUID-shaped names because production discovery only owns
-+    // files created by the VS Code extension's randomUUID-based manifest writer.
++    // #219：fixture 使用 UUID 格式名称——生产发现只处理 VS Code 扩展 randomUUID 创建的清单
 +    await writeEntry(dir, firstId, first.port, "/tmp/project-a")
 +    await writeEntry(dir, secondId, second.port, "/tmp/project-b")
  
@@ -184,6 +196,7 @@ index 661a17787fd49dd79ba0a4b84baad1837ea93ea9..bb475eadad561e8b4863f448dbad3ec1
 +    expect(bridge.id).toBe(secondId)
 +  })
 +
++  // #219：缓存隔离——切换 registry 目录后不得返回旧目录的缓存桥接
 +  test("does not reuse a cached bridge after the registry directory changes", async () => {
 +    using first = await bridgeServer()
 +    using second = await bridgeServer()
@@ -196,12 +209,14 @@ index 661a17787fd49dd79ba0a4b84baad1837ea93ea9..bb475eadad561e8b4863f448dbad3ec1
 +    // non-default state locations. Reusing the same cwd/filePath across two
 +    // directories must not return a bridge from the previous registry cache.
 +    await writeEntry(await tempRegistry(), firstId, first.port, cwd)
++    // #219：首次解析后缓存 5 秒——切换目录须使缓存失效而非返回旧桥
 +    expect((await VscodeBridge.resolveBridge({ cwd, filePath })).id).toBe(firstId)
 +
 +    await writeEntry(await tempRegistry(), secondId, second.port, cwd)
 +    expect((await VscodeBridge.resolveBridge({ cwd, filePath })).id).toBe(secondId)
 +  })
 +
++  // #219：损坏条目跳过且经宽限后清理——发现仍选择活桥
 +  test("ignores corrupted registry entries", async () => {
 +    using server = await bridgeServer()
 +    const dir = await tempRegistry()
@@ -209,6 +224,7 @@ index 661a17787fd49dd79ba0a4b84baad1837ea93ea9..bb475eadad561e8b4863f448dbad3ec1
 +    const filePath = "/tmp/corrupted-project/demo.ipynb"
 +    const corrupted = path.join(dir, "00000000-0000-0000-0000-000000000000.json")
 +    const registryId = "22222222-2222-2222-2222-222222222222"
++    // #219：全 NUL 内容模拟 Windows 损坏——发现须跳过坏条目并仍选择活桥
 +    // All-NUL content mirrors the observed Windows corruption while keeping the
 +    // assertion behavioural: discovery must skip the bad entry and still select
 +    // the live bridge, then cleanup only the abandoned corrupt manifest file.
@@ -222,9 +238,11 @@ index 661a17787fd49dd79ba0a4b84baad1837ea93ea9..bb475eadad561e8b4863f448dbad3ec1
 +    })
 +
 +    expect(bridge.id).toBe(registryId)
++    // #219：损坏文件经宽限后删除——仅在超过 CORRUPT_REGISTRY_GRACE_MS 后清理
 +    await expect(fs.stat(corrupted)).rejects.toThrow()
 +  })
 +
++  // #219：安全边界——不删除非清单 JSON、目录、新鲜损坏文件或外来 JSON
 +  test("does not remove non-manifest json files, directories, or recently modified corrupted manifests", async () => {
 +    using server = await bridgeServer()
 +    const dir = await tempRegistry()
@@ -236,6 +254,7 @@ index 661a17787fd49dd79ba0a4b84baad1837ea93ea9..bb475eadad561e8b4863f448dbad3ec1
 +    const recentCorrupted = path.join(dir, "11111111-1111-1111-1111-111111111111.json")
 +    const registryId = "22222222-2222-2222-2222-222222222222"
 +    const foreignJson = path.join(dir, "33333333-3333-3333-3333-333333333333.json")
++    // #219：覆盖删除边界而非实现形态——非 UUID JSON、shell 文件名、UUID 目录、新鲜损坏、外来 JSON 须保留
 +    // These names cover the deletion boundary rather than implementation shape:
 +    // non-UUID JSON, shell-looking filenames with spaces and `$()`, UUID-named
 +    // directories, fresh corrupt files, and valid-but-foreign JSON must remain
@@ -253,17 +272,22 @@ index 661a17787fd49dd79ba0a4b84baad1837ea93ea9..bb475eadad561e8b4863f448dbad3ec1
 +    })
 +
 +    expect(bridge.id).toBe(registryId)
++    // #219：非清单 JSON 不删——isRegistryManifestFile 排除非 UUID 格式
 +    expect((await fs.stat(nonManifest)).isFile()).toBe(true)
 +    expect((await fs.stat(shellLookingNonManifest)).isFile()).toBe(true)
++    // #219：UUID 命名的目录不删——stat.isFile() 守卫阻止删除目录
 +    expect((await fs.stat(manifestDirectory)).isDirectory()).toBe(true)
++    // #219：新鲜损坏文件不删——宽限期内跳过以避免清理 VS Code 正在重写的文件
 +    expect((await fs.stat(recentCorrupted)).isFile()).toBe(true)
++    // #219：外来 JSON 不删——解析成功但 schema 不匹配的条目不得删除
 +    expect((await fs.stat(foreignJson)).isFile()).toBe(true)
    })
  
-   test("rejects file paths that do not match any live VS Code workspace", async () => {
+ test("rejects file paths that do not match any live VS Code workspace", async () => {
      using server = await bridgeServer()
      const dir = await tempRegistry()
 -    await writeEntry(dir, "registry", server.port, "/tmp/project")
++    // #219：fixture ID 改为 UUID 格式——匹配生产发现过滤
 +    await writeEntry(dir, "11111111-1111-1111-1111-111111111111", server.port, "/tmp/mismatch-project")
  
      await expect(
@@ -276,9 +300,10 @@ index 661a17787fd49dd79ba0a4b84baad1837ea93ea9..bb475eadad561e8b4863f448dbad3ec1
      ).rejects.toThrow("No live VS Code bridge workspace matches filePath")
    })
  
-   test("ignores and removes stale registry entries", async () => {
+ test("ignores and removes stale registry entries", async () => {
      const dir = await tempRegistry()
 -    await writeEntry(dir, "stale", 9, "/tmp/project", Date.now() - 60_000)
++    // #219：fixture ID 改为 UUID 格式——过期文件名也须匹配 UUID 清单
 +    const staleId = "11111111-1111-1111-1111-111111111111"
 +    await writeEntry(dir, staleId, 9, "/tmp/stale-project", Date.now() - 60_000)
  
@@ -292,20 +317,22 @@ index 661a17787fd49dd79ba0a4b84baad1837ea93ea9..bb475eadad561e8b4863f448dbad3ec1
  })
  
 diff --git a/sdks/vscode/src/bridge-registry.ts b/sdks/vscode/src/bridge-registry.ts
-index d6efc45865867f7a4515539ac55c24568dc6d161..f224820b64df2ed4507dabfe9cf59a3e68b26e73 100644
+index 00432b4350..4d0fbf231e 100644
 --- a/sdks/vscode/src/bridge-registry.ts
 +++ b/sdks/vscode/src/bridge-registry.ts
-@@ -80,8 +80,21 @@ export function manifest(input: RegistryInput) {
+@@ -93,9 +93,23 @@ export function manifest(input: RegistryInput) {
+   }
  }
  
++// #219：先写临时文件再 rename 发布——崩溃或 VS Code 关闭最多留下 .tmp 孤儿，不会截断正在使用的清单
++// Write into the registry directory first and publish with rename: readers only
++// scan final `${uuid}.json` files, so a crash or VS Code shutdown can leave at
++// worst a `.tmp` orphan instead of truncating the manifest currently used by
++// OpenCode. The suffix parts are only for collision avoidance between the 5s
++// heartbeat and extension reloads; they are not part of the public registry API.
  async function writeRegistryFile(file: string, value: unknown) {
 -  await fs.writeFile(file, JSON.stringify(value, null, 2), { mode: 0o600 })
 -  await chmod(file, 0o600)
-+  // Write into the registry directory first and publish with rename: readers only
-+  // scan final `${uuid}.json` files, so a crash or VS Code shutdown can leave at
-+  // worst a `.tmp` orphan instead of truncating the manifest currently used by
-+  // OpenCode. The suffix parts are only for collision avoidance between the 5s
-+  // heartbeat and extension reloads; they are not part of the public registry API.
 +  const temp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
 +  try {
 +    await fs.writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600 })

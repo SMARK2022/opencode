@@ -4,39 +4,46 @@ Date: Thu, 7 May 2026 14:35:30 +0800
 Subject: [PATCH] =?UTF-8?q?feat(ci):=20=E4=BC=98=E5=8C=96=E6=9E=84?=
  =?UTF-8?q?=E5=BB=BA=E6=B5=81=E7=A8=8B=EF=BC=8C=E6=B7=BB=E5=8A=A0=E7=89=88?=
  =?UTF-8?q?=E6=9C=AC=E8=87=AA=E5=8A=A8=E6=8F=90=E5=8F=96=E5=92=8C=E8=B5=84?=
- =?UTF-8?q?=E4=BA=A7=E4=B8=8A=E4=BC=A0=E5=8A=9F=E8=83=BD?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
 
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
-index cd368bd04abf9640104097de06cafc08f1e1e889..1624a97377dfd53dffeeb890e4cb82fb9aead56c 100644
+index 1f0f5b196e..546da7f88f 100644
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -2,44 +2,91 @@ name: Build OpenCode CLI
+@@ -1,16 +1,11 @@
+ # 构建工作流：手动触发或 dev-smark 推送自动触发，编译打包 OpenCode CLI
+-# 产物包含 Linux(tar.gz/deb)、macOS(tar.gz)、Windows(zip) 多架构包
++# #104：版本从 packages/opencode/package.json 自动提取；GitHub Release 直传资产
+ name: Build OpenCode CLI
  
  on:
+-  # workflow_dispatch 手动触发：版本号可选，缺省时使用 env.DEFAULT_VERSION
++  # #104：去掉 version input，避免与 package.json 双源
    workflow_dispatch:
 -    inputs:
 -      version:
 -        description: 'Version (e.g., 1.14.31-smark)'
 -        required: false
 -        type: string
+-  # push 自动触发：dev-smark 分支推送时自动构建，路径过滤避免无关变更触发 CI
++  # push 自动触发：dev-smark + 路径过滤（含 setup-bun 变更）
    push:
      branches:
        - dev-smark
-     paths:
-       - ".github/workflows/build-opencode.yml"
-+      - ".github/actions/setup-bun/action.yml"
+@@ -19,53 +14,93 @@ on:
        - "packages/opencode/**"
        - "package.json"
        - "bun.lock"
- 
+-
+-# 默认版本号：push 触发时无 inputs.version，回退到此常量保证产物命名一致
 -env:
 -  DEFAULT_VERSION: "1.14.31-smark"
--
++      # #104：setup-bun 变更必须触发重建，避免工具链静默陈旧
++      - ".github/actions/setup-bun/action.yml"
+ 
  jobs:
+-  # 三平台并行构建：Linux/macOS/Windows 互不依赖，提升 CI 吞吐
+-  # Linux 构建：产出 tar.gz 通用包和 deb Debian 系包两种格式
++  # #104：唯一版本源 = packages/opencode/package.json，读失败 fail-closed
 +  version:
 +    runs-on: ubuntu-latest
 +    outputs:
@@ -44,28 +51,30 @@ index cd368bd04abf9640104097de06cafc08f1e1e889..1624a97377dfd53dffeeb890e4cb82fb
 +      tag: ${{ steps.pkg.outputs.tag }}
 +    steps:
 +      - uses: actions/checkout@v4
-+
 +      - id: pkg
 +        shell: bash
 +        run: |
++          set -euo pipefail
++          # #104：node 同步读 package.json.version，禁止默认常量回退
 +          VERSION="$(node -p "require('./packages/opencode/package.json').version")"
++          # #104：空/undefined 立即失败，避免错误 tag 静默发布
 +          if [ -z "$VERSION" ] || [ "$VERSION" = "undefined" ]; then
 +            echo "Failed to read packages/opencode/package.json version" >&2
 +            exit 1
 +          fi
-+
-+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
++          TAG="v${VERSION}"
++          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
++          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 +          echo "Resolved version: $VERSION"
-+          echo "Resolved tag: v$VERSION"
 +
++  # #104：若不存在对应 tag 的 release 则创建
 +  ensure-release:
-+    needs: version
 +    runs-on: ubuntu-latest
++    needs: [version]
 +    permissions:
 +      contents: write
 +    steps:
-+      - name: Create release if missing
++      - name: Ensure GitHub Release
 +        env:
 +          GH_TOKEN: ${{ github.token }}
 +          TAG: ${{ needs.version.outputs.tag }}
@@ -73,10 +82,10 @@ index cd368bd04abf9640104097de06cafc08f1e1e889..1624a97377dfd53dffeeb890e4cb82fb
 +        shell: bash
 +        run: |
 +          set -euo pipefail
-+
 +          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-+            echo "Release $TAG already exists; assets will be replaced by build jobs."
++            echo "Release $TAG already exists"
 +          else
++            # #104：新建 release 锚定当前 SHA
 +            gh release create "$TAG" \
 +              --repo "$GITHUB_REPOSITORY" \
 +              --target "$GITHUB_SHA" \
@@ -84,43 +93,67 @@ index cd368bd04abf9640104097de06cafc08f1e1e889..1624a97377dfd53dffeeb890e4cb82fb
 +              --notes "OpenCode smark build $VERSION"
 +          fi
 +
++  # Linux：tar.gz + deb → release
    build-linux:
-+    needs: [version, ensure-release]
      runs-on: ubuntu-latest
++    needs: [version, ensure-release]
 +    permissions:
 +      contents: write
      steps:
        - uses: actions/checkout@v4
- 
+-
+-      # setup-bun 复用自定义 composite action，统一 Bun 版本和缓存策略
        - uses: ./.github/actions/setup-bun
  
        - name: Build Linux
-+        shell: bash
          run: |
            cd packages/opencode
+-          # --skip-embed-web-ui：跳过内嵌 Web UI 编译，CLI-only 构建减小产物体积
+-          # inputs.version || env.DEFAULT_VERSION：手动触发用输入值，push 触发回退默认值
 -          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=linux --skip-embed-web-ui
++          # #104：--version 仅来自 package.json 解析结果
 +          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=linux --skip-embed-web-ui
  
        - name: Package Linux tar.gz
-+        shell: bash
          run: |
 +          VERSION="${{ needs.version.outputs.version }}"
            cd packages/opencode/dist/opencode-linux-x64/bin
+-          # tar.gz 打包：保留单文件二进制，解压即用
 -          tar -czf ../../opencode-linux-x64-${{ inputs.version || env.DEFAULT_VERSION }}.tar.gz opencode
++          # #103：相对 bin 的 ../../ 落到 dist/
 +          tar -czf ../../opencode-linux-x64-${VERSION}.tar.gz opencode
  
        - name: Package Linux .deb
-+        shell: bash
          run: |
+-          # VERSION shell 变量：避免在 heredoc 中展开 GitHub表达式，deb 元数据需纯 shell 变量
 -          VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
 +          VERSION="${{ needs.version.outputs.version }}"
            DEB_DIR="/tmp/deb_build"
            PKG_NAME="opencode_${VERSION}_amd64"
            BINARY="packages/opencode/dist/opencode-linux-x64/bin/opencode"
-@@ -63,44 +110,62 @@ jobs:
- 
+-
+-          # deb 包结构：DEBIAN/control 存元数据，usr/local/bin 存可执行文件（FHS 规范）
+           mkdir -p "${DEB_DIR}/${PKG_NAME}/DEBIAN"
+           mkdir -p "${DEB_DIR}/${PKG_NAME}/usr/local/bin"
+-
+           cp "$BINARY" "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
+-          # chmod 755：确保二进制对所有用户可执行，符合 deb 包权限规范
+           chmod 755 "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
+-
+-          # YAML run:| 会剥离公共缩进，故源文件 10 空格写入后 shell 侧字段仍为列 0，dpkg 可解析
+-          # Description 续行比字段多 1 空格，剥离后保留 debian 扩展描述必需的前导空格
+           cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
+           Package: opencode
+           Version: ${VERSION}
+@@ -76,91 +111,100 @@ jobs:
+           Description: opencode AI-powered development tool (smark build)
+            A standalone AI coding assistant with TUI, version ${VERSION}.
+           EOF
+-
            dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
  
+-      # upload-artifact 汇总本平台产物，供后续下载或发布
+-      # 通配符路径：避免版本号变化时遗漏产物，自动匹配所有版本包
 -      - uses: actions/upload-artifact@v4
 -        with:
 -          name: opencode-linux
@@ -128,6 +161,8 @@ index cd368bd04abf9640104097de06cafc08f1e1e889..1624a97377dfd53dffeeb890e4cb82fb
 -            packages/opencode/dist/opencode-linux-x64-*.tar.gz
 -            packages/opencode/dist/opencode_*_amd64.deb
 -          if-no-files-found: error
+-
+-  # macOS 构建：arm64 (Apple Silicon) 和 x64 (Intel) 双架构
 +      - name: Upload Linux assets to release
 +        env:
 +          GH_TOKEN: ${{ github.token }}
@@ -135,32 +170,34 @@ index cd368bd04abf9640104097de06cafc08f1e1e889..1624a97377dfd53dffeeb890e4cb82fb
 +        shell: bash
 +        run: |
 +          set -euo pipefail
++          # #104：gh release upload 替代 upload-artifact
 +          gh release upload "$TAG" \
 +            packages/opencode/dist/opencode-linux-x64-*.tar.gz \
 +            packages/opencode/dist/opencode_*_amd64.deb \
 +            --repo "$GITHUB_REPOSITORY" \
 +            --clobber
- 
++
++  # #104：macOS 双架构 tar.gz 直传 release
    build-macos:
-+    needs: [version, ensure-release]
+-    # macOS runner 原生支持跨架构编译，无需交叉编译工具链
      runs-on: macos-latest
++    needs: [version, ensure-release]
 +    permissions:
 +      contents: write
      steps:
        - uses: actions/checkout@v4
- 
+-
        - uses: ./.github/actions/setup-bun
  
        - name: Build macOS
-+        shell: bash
          run: |
            cd packages/opencode
 -          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=darwin --skip-embed-web-ui
 +          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=darwin --skip-embed-web-ui
  
        - name: Package macOS tar.gz
-+        shell: bash
          run: |
+-          # VERSION shell 变量：统一两架构的命名，避免重复展开 GitHub 表达式
 -          VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
 +          VERSION="${{ needs.version.outputs.version }}"
            cd packages/opencode/dist/opencode-darwin-arm64/bin
@@ -175,6 +212,8 @@ index cd368bd04abf9640104097de06cafc08f1e1e889..1624a97377dfd53dffeeb890e4cb82fb
 -            packages/opencode/dist/opencode-darwin-arm64-*.tar.gz
 -            packages/opencode/dist/opencode-darwin-x64-*.tar.gz
 -          if-no-files-found: error
+-
+-  # Windows 构建：x64 和 arm64 双架构，使用 pwsh 执行 PowerShell 脚本
 +      - name: Upload macOS assets to release
 +        env:
 +          GH_TOKEN: ${{ github.token }}
@@ -187,17 +226,30 @@ index cd368bd04abf9640104097de06cafc08f1e1e889..1624a97377dfd53dffeeb890e4cb82fb
 +            packages/opencode/dist/opencode-darwin-x64-*.tar.gz \
 +            --repo "$GITHUB_REPOSITORY" \
 +            --clobber
- 
++
++  # Windows x64：#103 arch；#104 裸 exe 上传 release
    build-windows:
-+    needs: [version, ensure-release]
      runs-on: windows-latest
++    needs: [version, ensure-release]
 +    permissions:
 +      contents: write
      steps:
        - uses: actions/checkout@v4
- 
-@@ -116,22 +181,29 @@ jobs:
- 
+-
+-      # Windows 原生编译工具链：Bun 在 Windows 构建时需编译 native addon
+-      # setup-node 提供 node-gyp 所需的 Node.js 运行时（22 LTS）
+       - uses: actions/setup-node@v4
+         with:
+           node-version: "22"
+-
+-      # setup-python：node-gyp 依赖 Python 构建 native addon，Windows runner 默认不带
+       - uses: actions/setup-python@v5
+         with:
+           python-version: "3.12"
+-
+-      # setup-msbuild：Windows C++ 编译工具链，native addon 的 .node 文件需 MSBuild
+       - uses: microsoft/setup-msbuild@v2
+-
        - uses: ./.github/actions/setup-bun
  
 -      - name: Build Windows
@@ -205,6 +257,7 @@ index cd368bd04abf9640104097de06cafc08f1e1e889..1624a97377dfd53dffeeb890e4cb82fb
          shell: pwsh
          run: |
            cd packages/opencode
+-          # #103：显式 --arch=x64，避免 Windows 默认双架构产物膨胀
 -          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=win32 --arch=x64 --skip-embed-web-ui
 +          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=win32 --arch=x64 --skip-embed-web-ui
  
@@ -212,9 +265,12 @@ index cd368bd04abf9640104097de06cafc08f1e1e889..1624a97377dfd53dffeeb890e4cb82fb
 +      - name: Package Windows x64 exe
          shell: pwsh
          run: |
+-          # PowerShell 变量语法 $VERSION：与 bash 不同，pwsh 用 $ 前缀引用变量
 -          $VERSION = "${{ inputs.version || env.DEFAULT_VERSION }}"
 -          cd packages/opencode/dist/opencode-windows-x64/bin
+-          # #103：产物落在 dist/ 下（../../ 相对 bin），仅打包 x64
 -          Compress-Archive -Path "opencode.exe" -DestinationPath "../../opencode-windows-x64-$VERSION.zip"
++          # #104：发布裸 exe（相对 zip）
 +          $VERSION = "${{ needs.version.outputs.version }}"
 +          Copy-Item "packages/opencode/dist/opencode-windows-x64/bin/opencode.exe" "packages/opencode/dist/opencode-windows-x64-$VERSION.exe" -Force
  
@@ -233,6 +289,7 @@ index cd368bd04abf9640104097de06cafc08f1e1e889..1624a97377dfd53dffeeb890e4cb82fb
 +          $ErrorActionPreference = "Stop"
 +          $files = @(Get-ChildItem "packages/opencode/dist/opencode-windows-x64-*.exe" -ErrorAction Stop)
 +          if ($files.Count -eq 0) {
++            # #104：无 exe 硬失败，禁止空 release
 +            throw "No Windows exe assets found"
 +          }
 +          foreach ($file in $files) {

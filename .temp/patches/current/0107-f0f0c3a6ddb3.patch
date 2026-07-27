@@ -4,29 +4,29 @@ Date: Fri, 8 May 2026 02:53:01 +0800
 Subject: [PATCH] =?UTF-8?q?feat(prompt):=20=E6=B7=BB=E5=8A=A0=20renderBefo?=
  =?UTF-8?q?re=20=E5=B1=9E=E6=80=A7=E4=BB=A5=E4=BC=98=E5=8C=96=20box=20?=
  =?UTF-8?q?=E6=B8=B2=E6=9F=93=E9=80=BB=E8=BE=91?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-index dd9dda28152838fec83505f92a21ba60a556f8d9..979317f47687a07f17fa6432a5cd11ae62d61413 100644
---- a/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-+++ b/packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx
-@@ -1,4 +1,4 @@
--import { BoxRenderable, RGBA, TextareaRenderable, MouseEvent, PasteEvent, decodePasteBytes } from "@opentui/core"
-+import { BoxRenderable, OptimizedBuffer, RGBA, TextareaRenderable, MouseEvent, PasteEvent, decodePasteBytes } from "@opentui/core"
- import { createEffect, createMemo, onMount, createSignal, onCleanup, on, untrack, Show, Switch, Match } from "solid-js"
- import "opentui-spinner/solid"
- import path from "path"
-@@ -1189,7 +1189,15 @@ export function Prompt(props: PromptProps) {
-         agentStyleId={agentStyleId}
-         promptPartTypeId={() => promptPartTypeId}
-       />
--      <box ref={(r) => (anchor = r)} visible={props.visible !== false}>
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+index 37231a3d50..5ec6ef941c 100644
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -1,5 +1,7 @@
+ import {
+   BoxRenderable,
++  // #107：renderBefore 清屏需要 OptimizedBuffer 类型
++  OptimizedBuffer,
+   RGBA,
+   TextareaRenderable,
+   MouseEvent,
+@@ -1441,7 +1443,17 @@ export function Prompt(props: PromptProps) {
+ 
+   return (
+     <>
+-      <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%">
 +      <box
-+        ref={(r) => (anchor = r)}
++        ref={(r: BoxRenderable) => (anchor = r)}
 +        visible={props.visible !== false}
++        width="100%"
++        // #107：清掉 prompt 下方残留像素，避免滚动后 ghost 行
 +        renderBefore={function (this: BoxRenderable, buffer: OptimizedBuffer) {
 +          if (this.screenY && buffer.height > this.screenY) {
 +            buffer.fillRect(this.screenX, this.screenY, 1, buffer.height - this.screenY, RGBA.fromInts(0, 0, 0, 0))
@@ -34,5 +34,5 @@ index dd9dda28152838fec83505f92a21ba60a556f8d9..979317f47687a07f17fa6432a5cd11ae
 +        }}
 +      >
          <box
+           width="100%"
            border={["left"]}
-           borderColor={borderHighlight()}

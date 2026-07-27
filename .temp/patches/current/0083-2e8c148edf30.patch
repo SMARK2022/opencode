@@ -3,27 +3,68 @@ From: SMARK <3222301373@qq.com>
 Date: Tue, 5 May 2026 16:37:25 +0800
 Subject: [PATCH] =?UTF-8?q?feat(network-proxy):=20=E5=BC=95=E5=85=A5Networ?=
  =?UTF-8?q?kProxy=E4=BB=A5=E6=94=AF=E6=8C=81=E6=8F=92=E4=BB=B6=E5=92=8C?=
+ =?UTF-8?q?=E6=8F=90=E4=BE=9B=E8=80=85=E7=9A=84fetch=E8=AF=B7=E6=B1=82?=
 
 diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-proxy.ts
-index 622c08220b..de21a98b31 100644
+index 2295c89c7f..04de50debd 100644
 --- a/packages/core/src/network-proxy.ts
 +++ b/packages/core/src/network-proxy.ts
-@@ -10,8 +10,9 @@ export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy:
- const PROXY_TTL = 10_000
- // 全局 fetch 包装是否已安装：避免重复包装导致无限递归
- let globalFetchInstalled = false
-+// 模块加载时冻结原生 fetch，避免 installGlobalFetch 后递归
-+const nativeFetch = globalThis.fetch.bind(globalThis) as FetchFn
- // 保存包装前的原始 fetch，供 originalFetch() 绕过路由
--let savedOriginal: FetchFn | undefined
+@@ -1,19 +1,26 @@
+ export * as NetworkProxy from "./network-proxy"
  
+-// #71：请求用途分流，决定系统代理与直连策略
++// #83：purpose 分流插件/provider/基础设施流量
+ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin" | "unknown"
+ 
++// #83：路由结果：direct 或 proxy URL
+ export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
+ 
+-// #76：系统代理探测缓存 TTL
+-const PROXY_TTL = 10_000 // #76：代理缓存 10s，加快代理变更感知
++/** Proxy resolution TTL: re-check system proxy settings every 10s */
++const PROXY_TTL = 10_000
++/** Hostnames that should never be routed through a proxy */
  const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"])
  
-@@ -42,12 +43,20 @@ function isLocal(url: URL) {
+ let cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined
+ let globalFetchInstalled = false
+-// #76：保存包装前原始 fetch，供 originalFetch 绕过路由
+-// #76：安装全局包装前保存原生 fetch
+-let savedOriginal: FetchFn | undefined
++/**
++ * Pre-bound native fetch reference.
++ * Captured once at module load before global fetch may be overridden by installGlobalFetch().
++ */
++// #83：模块加载时冻结原生 fetch，避免 installGlobalFetch 后递归
++// #83：冻结 native fetch，禁止被全局包装污染
++// #83：模块加载冻结原生 fetch，避免全局包装递归
++const nativeFetch = globalThis.fetch.bind(globalThis) as FetchFn
+ 
+ type SystemProxy = {
+   http?: string
+@@ -22,6 +29,7 @@ type SystemProxy = {
+   bypass: string[]
  }
  
- // 规范化代理地址：确保带协议前缀
-+// 规范化代理 URL：localhost 主机名统一为 127.0.0.1，避免解析分裂
++// #83：扩展 RequestInit，附带 purpose/proxy
+ type RoutedInit = RequestInit & { purpose?: Purpose }
+ type FetchInput = Request | string | URL
+ type FetchFn = (input: FetchInput, init?: any) => Promise<Response>
+@@ -34,18 +42,35 @@ function normalizeHost(hostname: string) {
+   return hostname.replace(/^\[|\]$/g, "").toLowerCase()
+ }
+ 
++// #83：本地主机强制直连
+ function isLocal(url: URL) {
+   return LOCAL.has(normalizeHost(url.hostname))
+ }
+ 
++/**
++ * Normalize a proxy string into a valid URL.
++ * Converts "localhost" hostnames to 127.0.0.1 for consistent resolution.
++ * Falls back to the raw value if URL parsing fails.
++ */
++// #83：localhost 归一 127.0.0.1，避免 NO_PROXY 分裂
  function normalizeProxy(value: string | undefined) {
    if (!value) return
    const next = value.trim()
@@ -33,7 +74,6 @@ index 622c08220b..de21a98b31 100644
 +  const normalized = /^[a-z][a-z0-9+.-]*:\/\//i.test(next) ? next : `http://${next}`
 +  try {
 +    const url = new URL(normalized)
-+    // localhost→127.0.0.1：与 isLocal/NO_PROXY 判定对齐
 +    if (normalizeHost(url.hostname) === "localhost") url.hostname = "127.0.0.1"
 +    return url.toString()
 +  } catch {
@@ -41,23 +81,108 @@ index 622c08220b..de21a98b31 100644
 +  }
  }
  
- // 检查 URL 是否匹配 bypass 列表中的任意条目
-@@ -173,33 +182,37 @@ export async function resolveProxyRoute(input: string | URL, purpose: Purpose =
-   return { type: "direct", reason: "no-proxy" }
++/**
++ * Check whether the given hostname matches any entry in the bypass list.
++ * Supports exact match, wildcard prefix (*.example.com), and glob patterns.
++ */
+ function bypass(url: URL, list: string[]) {
+   const host = normalizeHost(url.hostname)
+   for (const raw of list) {
+@@ -62,6 +87,11 @@ function bypass(url: URL, list: string[]) {
+   return false
  }
  
--// 使用代理路由执行 fetch 请求
--export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
++/**
++ * Read proxy configuration from environment variables.
++ * Respects HTTPS_PROXY/HTTP_PROXY/ALL_PROXY and NO_PROXY bypass rules.
++ */
++// #83：https 优先 HTTPS_PROXY，否则回退 HTTP_PROXY
+ function envProxy(url: URL): SystemProxy | undefined {
+   const proxy =
+     url.protocol === "https:"
+@@ -73,6 +103,7 @@ function envProxy(url: URL): SystemProxy | undefined {
+   return { http: picked, https: picked, bypass: (process.env.NO_PROXY || process.env.no_proxy || "").split(",") }
+ }
+ 
++/** Execute a shell command and return its stdout text */
+ async function execText(command: string, args: string[], timeout = 1500) {
+   const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore" })
+   const timer = setTimeout(() => proc.kill(), timeout)
+@@ -87,6 +118,10 @@ async function execText(command: string, args: string[], timeout = 1500) {
+   }
+ }
+ 
++/**
++ * Parse a Windows proxy server string which may use protocol=host;port format.
++ * Falls back to normalizing the raw value if no = delimiters are present.
++ */
+ function parseWindowsProxyServer(value: string, protocol: string) {
+   if (!value.includes("=")) return normalizeProxy(value)
+   const entries = Object.fromEntries(
+@@ -128,6 +163,7 @@ async function macProxy(): Promise<SystemProxy | undefined> {
+   return { http, https, socks, bypass: [] }
+ }
+ 
++/** Retrieve system proxy settings with caching (TTL = 10s) */
+ async function currentSystemProxy(refresh = false) {
+   if (process.platform !== "win32" && process.platform !== "darwin") return undefined
+   if (refresh) cache = undefined
+@@ -140,6 +176,11 @@ async function currentSystemProxy(refresh = false) {
+   return cache.value
+ }
+ 
++/**
++ * Determine the effective proxy for a URL.
++ * On Windows/macOS reads system proxy settings; on Linux falls back to env vars.
++ * Respects the bypass/no-proxy list from the same source.
++ */
+ async function configuredProxy(url: URL, refresh = false) {
+   if (process.platform === "win32" || process.platform === "darwin") {
+     const sys = await currentSystemProxy(refresh)
+@@ -151,7 +192,13 @@ async function configuredProxy(url: URL, refresh = false) {
+   return url.protocol === "https:" ? env.https || env.http || env.socks : env.http || env.https || env.socks
+ }
+ 
+-export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown", refresh = false): Promise<Route> {
++/**
++ * Resolve the proxy route for a given URL.
++ * Returns either a `proxy` route (with the proxy URL) or a `direct` route.
++ * Local addresses and `local`-purpose calls always return `direct`.
++ */
++export // #83：解析系统/环境代理并缓存
++async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown", refresh = false): Promise<Route> {
+   const url = input instanceof URL ? input : new URL(input)
+   if (purpose === "local" || isLocal(url)) return { type: "direct", reason: "local" }
+   const proxy = await configuredProxy(url, refresh)
+@@ -159,70 +206,100 @@ export async function resolveProxyRoute(input: string | URL, purpose: Purpose =
+   return { type: "direct", reason: refresh ? "refresh-no-proxy" : "no-proxy" }
+ }
+ 
++/** Compatibility alias — delegates to the unified fetch() entry point */
++// #83：routedFetch 委托主入口 fetch
+ export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
 -  return fetchWithRoute(fetch, input, init)
--}
--
--// 使用指定 fetchFn 和代理路由执行请求：代理失败时回退直连
++  return fetch(input, init)
+ }
+ 
+-// #76：增强 fetchWithRoute：剥离 caller proxy，失败可刷新
 -export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
-+// SMARK 主入口：路由+nativeFetch；内含上游更强失败恢复
++/**
++ * Primary network fetch entry point.
++ *
++ * Resolves the proxy route for the given URL, then dispatches to either
++ * a direct connection or a proxy-backed connection via Bun's native `proxy:`.
++ * The explicit `proxy` parameter ensures Bun routes through the correct proxy
++ * regardless of cached environment variables at process startup.
++ */
++// #83：SMARK 主入口 fetch：路由+nativeFetch，内含失败恢复
++// #83：主入口：路由后走 nativeFetch
++// #83：主入口：路由 + nativeFetch + 失败恢复
++// #83：proxy 失败后刷新系统代理缓存再试
++// #83：剥离 caller 传入的 proxy/dispatcher，避免与路由冲突
 +export async function fetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
    const url = new URL(input instanceof Request ? input.url : input.toString())
-   // 剥离 caller 传入的 proxy：路由结果决定代理，避免与 route 冲突
--  const { purpose = "unknown", signal, proxy: _incomingProxy, ...rest } = (init ?? {}) as RoutedInit & {
+-  const { purpose = "unknown", signal, proxy: _incomingProxy, ...rest } = (init ?? {}) as RoutedInit & { proxy?: string }
 +  const {
 +    purpose = "unknown",
 +    signal,
@@ -65,112 +190,132 @@ index 622c08220b..de21a98b31 100644
 +    dispatcher: _incomingDispatcher,
 +    timeout: _incomingTimeout,
 +    ...rest
-+  } = (init ?? {}) as RoutedInit & {
-     signal?: AbortSignal
-     proxy?: string
-+    dispatcher?: unknown
-+    timeout?: unknown
-   }
--  // 首次解析始终 cache-first；仅在失败后 force refresh（#76 取消 provider/npm 首刷）
-+  // 首次解析始终 cache-first；仅在失败后 force refresh
++  } = (init ?? {}) as RoutedInit & { proxy?: string; dispatcher?: unknown; timeout?: unknown }
    const route = await resolveProxyRoute(url, purpose, false)
- 
--  // Bun 启动时缓存代理 env：设 NO_PROXY=* 一次，使无 proxy 参数的 fetch 走直连；
--  // 显式 proxy 参数仍优先于 NO_PROXY，故不会破坏代理路径
-+  // Bun 启动时缓存代理 env：设 NO_PROXY=* 一次，使无 proxy 参数的 fetch 走直连
-   if (!process.env.__OPENCODE_NO_PROXY_SET) {
-     process.env.NO_PROXY = "*"
-     process.env.__OPENCODE_NO_PROXY_SET = "1"
-   }
- 
--  // fetchDirect 允许覆盖 signal：代理已 abort 时用 10s timeout 再试直连
-+  // 直连/代理均用 nativeFetch，避免全局包装递归
-   const fetchDirect = (overrideSignal?: AbortSignal) =>
+-  
+-  // Bun caches proxy env at startup — explicit `proxy` param overrides it,
+-  // but plain fetch still honours the cached env.  Setting NO_PROXY=* once
+-  // disables that cached env so plain fetch goes direct.  The proxy() helper
+-  // passes an explicit `proxy` param which Bun always respects regardless of
+-  // NO_PROXY, so this is safe.
+-  if (!process.env.__OPENCODE_NO_PROXY_SET) {
+-    process.env.NO_PROXY = "*"
+-    process.env.__OPENCODE_NO_PROXY_SET = "1"
+-  }
+-  
+-  const fetchDirect = (overrideSignal?: AbortSignal) => 
 -    fetchFn(input, { ...rest, signal: overrideSignal ?? signal })
--  const fetchProxy = (value: string) => fetchFn(input, { ...rest, signal, proxy: value })
-+    nativeFetch(input, { ...rest, signal: overrideSignal ?? signal } as RequestInit)
-+  const fetchProxy = (value: string) =>
-+    nativeFetch(input, { ...rest, signal, proxy: value } as RequestInit & { proxy: string })
+-  
+-  const proxy = (value: string) => fetchFn(input, { ...rest, signal, proxy: value })
+-
+-  if (route.type === "direct") {
+-    try {
+-      return await fetchDirect()
+-    } catch (error) {
+-      if (signal?.aborted) throw error
+-      const refreshed = await resolveProxyRoute(url, purpose, true)
+-      if (refreshed.type === "proxy") return proxy(refreshed.proxy).catch(() => { throw error })
+-      throw error
+-    }
+-  }
  
-   if (route.type === "direct") {
-     try {
-@@ -220,6 +233,7 @@ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?:
-   try {
-     return await fetchProxy(route.proxy)
-   } catch (error) {
-+    // 上游更强恢复：刷新代理 / 换代理 / 直连；保留在主入口 fetch 内
-     const refreshed = await resolveProxyRoute(url, purpose, true)
-     if (refreshed.type === "proxy" && refreshed.proxy !== route.proxy) {
-       try {
-@@ -228,7 +242,6 @@ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?:
-         // fall through to direct
-       }
-     }
--    // 代理路径已消耗 abort：用 10s 新 timeout 直连，避免裸 rest 无截止
-     if (signal?.aborted) return fetchDirect(AbortSignal.timeout(10_000)).catch(() => {
-       throw error
-     })
-@@ -238,20 +251,45 @@ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?:
-   }
- }
- 
-+// adapter 透传：不得在此二次注入代理路由；包装器内部应再调 NetworkProxy.fetch
+-  try {
+-    return await proxy(route.proxy)
+-  } catch (error) {
+-    const refreshed = signal?.aborted ? undefined : await resolveProxyRoute(url, purpose, true)
+-    if (refreshed?.type === "proxy" && refreshed.proxy !== route.proxy) {
+-      return proxy(refreshed.proxy).catch(() => { throw error })
+-    }
+-    if (signal?.aborted)
+-      return fetchDirect(AbortSignal.timeout(10_000)).catch(() => { throw error })
+-    return fetchDirect().catch(() => { throw error })
+-  }
++  // #83：直连失败直接抛出
++if (route.type === "direct")
++    return directFetch(input, { ...rest, signal })
++
++  return proxyFetch(input, { ...rest, signal }, route.proxy)
++}
++
++/**
++ * Dispatch a custom fetch function (auth adapter / URL-rewriting wrapper).
++ *
++ * Provider SDKs may supply their own `fetch` implementation that injects
++ * auth headers, rewrites URLs, or transforms request bodies before the
++ * actual network request.  The custom fetcher is responsible for calling
++ * `NetworkProxy.fetch()` internally for the real outbound hop.
++ */
++// #83：adapter 透传，禁止二次路由
++// #83：adapter 透传，禁止二次注入代理
++// #83：信号已 abort 时直连使用新 timeout
++// #83：NO_PROXY 列表与 isLocal 判定对齐
 +export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
 +  const {
-+    purpose: _purpose = "unknown",
++    purpose = "unknown",
 +    signal,
 +    proxy: _incomingProxy,
 +    dispatcher: _incomingDispatcher,
 +    timeout: _incomingTimeout,
 +    ...rest
-+  } = (init ?? {}) as RoutedInit & {
-+    signal?: AbortSignal
-+    proxy?: string
-+    dispatcher?: unknown
-+    timeout?: unknown
-+  }
++  } = (init ?? {}) as RoutedInit & { proxy?: string; dispatcher?: unknown; timeout?: unknown }
 +  return fetchFn(input, { ...rest, signal })
 +}
 +
-+// 兼容别名：统一走主入口 fetch
-+export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
-+  return fetch(input, init)
++/**
++ * Send a fetch request through an explicit HTTP/SOCKS proxy.
++ * Uses Bun's built-in proxy support via the `proxy` option.
++ */
++async function proxyFetch(input: FetchInput, init: RequestInit, proxy: string) {
++  return nativeFetch(input, { ...init, proxy } as RequestInit & { proxy: string })
 +}
 +
-+
-+
- // 安装全局 fetch 包装：所有 globalThis.fetch 调用自动通过代理路由
--// 捕获 original 并写入 savedOriginal，避免无限递归且允许 originalFetch 旁路
-+// 捕获 original 并写入 nativeFetch，避免无限递归且允许 originalFetch 旁路
++/**
++ * Direct network request without proxy interception.
++ * Uses the pre-bound native fetch to avoid recursion when global fetch is overridden.
++ */
++async function directFetch(input: FetchInput, init: RequestInit) {
++  return nativeFetch(input, init)
+ }
+ 
+-// #76：安装全局 fetch 包装入口
++/**
++ * Install a routed fetch as the global `fetch` implementation.
++ * All subsequent `fetch()` calls in the process will be routed through
++ * proxy resolution automatically.
++ *
++ * Idempotent — subsequent calls are no-ops.
++ */
++// #83：可选全局包装；生产插件应直接调 NetworkProxy.fetch
  export function installGlobalFetch(defaultPurpose: Purpose = "unknown") {
    if (globalFetchInstalled) return
 -  const original = globalThis.fetch.bind(globalThis) as FetchFn
 -  savedOriginal = original
-+  // 全局包装走主入口 fetch；as any 满足 preconnect 类型面
    globalThis.fetch = ((input: FetchInput, init?: RoutedInit) =>
 -    fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as typeof fetch
-+    fetch(input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as any
++    fetch(input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as typeof globalThis.fetch
    globalFetchInstalled = true
  }
  
- // 返回包装前的原始 fetch；未安装时回退到当前 globalThis.fetch
- export function originalFetch() {
--  return savedOriginal ?? (globalThis.fetch.bind(globalThis) as FetchFn)
-+  // 始终返回模块加载时冻结的 nativeFetch
-+  return nativeFetch
- }
- 
+-// #76：取回包装前 fetch
+-export function originalFetch() {
+-  return savedOriginal ?? globalThis.fetch.bind(globalThis) as FetchFn
+-}
+-
++/** Return npm-compatible proxy options for the given registry URL */
  export async function npmProxyOptions(registry: string) {
+   const route = await resolveProxyRoute(registry, "npm", true)
+   if (route.type === "direct") return {}
 diff --git a/packages/opencode/src/plugin/github-copilot/copilot.ts b/packages/opencode/src/plugin/github-copilot/copilot.ts
-index 9c744db89b..21a30ab195 100644
+index 9c744db89b..726265c590 100644
 --- a/packages/opencode/src/plugin/github-copilot/copilot.ts
 +++ b/packages/opencode/src/plugin/github-copilot/copilot.ts
-@@ -1,3 +1,4 @@
-+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+@@ -1,3 +1,5 @@
++import { // #83：copilot 鉴权/刷新经 NetworkProxy
++NetworkProxy } from "@opencode-ai/core/network-proxy"
  import type { Hooks, PluginInput } from "@opencode-ai/plugin"
  import type { Model } from "@opencode-ai/sdk/v2"
  import { InstallationVersion } from "@opencode-ai/core/installation/version"
-@@ -101,7 +102,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+@@ -101,7 +103,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
            apiKey: "",
            async fetch(request: RequestInfo | URL, init?: RequestInit) {
              const info = await getAuth()
@@ -179,7 +324,7 @@ index 9c744db89b..21a30ab195 100644
  
              const url = request instanceof URL ? request.href : typeof request === "string" ? request : request.url
              const { isVision, isAgent } = iife(() => {
-@@ -172,7 +173,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+@@ -172,7 +174,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
              delete headers["x-api-key"]
              delete headers["authorization"]
  
@@ -188,7 +333,7 @@ index 9c744db89b..21a30ab195 100644
                ...init,
                headers,
              })
-@@ -231,7 +232,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+@@ -231,7 +233,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
  
              const urls = getUrls(domain)
  
@@ -197,7 +342,7 @@ index 9c744db89b..21a30ab195 100644
                method: "POST",
                headers: {
                  Accept: "application/json",
-@@ -261,7 +262,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
+@@ -261,7 +263,7 @@ export async function CopilotAuthPlugin(input: PluginInput): Promise<Hooks> {
                method: "auto" as const,
                async callback() {
                  while (true) {
@@ -225,15 +370,16 @@ index f3f32a0b0b..23edf99a03 100644
      signal: AbortSignal.timeout(5_000),
    }).then(async (res) => {
 diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/src/plugin/openai/codex.ts
-index d16b749565..7588f7af53 100644
+index d16b749565..e20dbd45f4 100644
 --- a/packages/opencode/src/plugin/openai/codex.ts
 +++ b/packages/opencode/src/plugin/openai/codex.ts
-@@ -1,3 +1,4 @@
-+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+@@ -1,3 +1,5 @@
++import { // #83：codex 请求经 NetworkProxy
++NetworkProxy } from "@opencode-ai/core/network-proxy"
  import type { Hooks, PluginInput } from "@opencode-ai/plugin"
  import { InstallationVersion } from "@opencode-ai/core/installation/version"
  import { OAUTH_DUMMY_KEY } from "../../auth"
-@@ -105,7 +106,7 @@ interface CodexAuthPluginOptions {
+@@ -105,7 +107,7 @@ interface CodexAuthPluginOptions {
  }
  
  async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: PkceCodes): Promise<TokenResponse> {
@@ -242,7 +388,7 @@ index d16b749565..7588f7af53 100644
      method: "POST",
      headers: { "Content-Type": "application/x-www-form-urlencoded" },
      body: new URLSearchParams({
-@@ -123,7 +124,7 @@ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: Pk
+@@ -123,7 +125,7 @@ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: Pk
  }
  
  async function refreshAccessToken(refreshToken: string, issuer = ISSUER): Promise<TokenResponse> {
@@ -251,7 +397,7 @@ index d16b749565..7588f7af53 100644
      method: "POST",
      headers: { "Content-Type": "application/x-www-form-urlencoded" },
      body: new URLSearchParams({
-@@ -354,7 +355,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+@@ -354,7 +356,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
  
              const currentAuth = await getAuth()
              if (currentAuth.type !== "oauth")
@@ -260,7 +406,7 @@ index d16b749565..7588f7af53 100644
  
              const authWithAccount = currentAuth as typeof currentAuth & { accountId?: string }
  
-@@ -422,7 +423,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+@@ -422,7 +424,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                headers,
              }
              if (websocketFetch && parsed.pathname.endsWith("/responses")) return websocketFetch(url, requestInit)
@@ -269,7 +415,7 @@ index d16b749565..7588f7af53 100644
            },
          }
        },
-@@ -461,7 +462,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+@@ -461,7 +463,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
            label: "ChatGPT Pro/Plus (headless)",
            type: "oauth",
            authorize: async () => {
@@ -278,7 +424,7 @@ index d16b749565..7588f7af53 100644
                method: "POST",
                headers: {
                  "Content-Type": "application/json",
-@@ -485,7 +486,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+@@ -485,7 +487,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                method: "auto" as const,
                async callback() {
                  while (true) {
@@ -287,7 +433,7 @@ index d16b749565..7588f7af53 100644
                      method: "POST",
                      headers: {
                        "Content-Type": "application/json",
-@@ -503,7 +504,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+@@ -503,7 +505,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                        code_verifier: string
                      }
  
@@ -297,15 +443,16 @@ index d16b749565..7588f7af53 100644
                        headers: { "Content-Type": "application/x-www-form-urlencoded" },
                        body: new URLSearchParams({
 diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
-index 0a85dd6e0e..6f4c71f5a3 100644
+index 0a85dd6e0e..1b8c6944a5 100644
 --- a/packages/opencode/src/provider/claudecode.ts
 +++ b/packages/opencode/src/provider/claudecode.ts
-@@ -1,3 +1,4 @@
-+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+@@ -1,3 +1,5 @@
++import { // #83：claudecode fetch 经 NetworkProxy
++NetworkProxy } from "@opencode-ai/core/network-proxy"
  import { createHash, randomUUID } from "crypto"
  
  // --- 常量与基础配置 ---
-@@ -269,7 +270,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
+@@ -269,7 +271,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
  
      // 只拦截向 /v1/messages 发送的请求
      if (!url.includes("/v1/messages")) {
@@ -314,7 +461,7 @@ index 0a85dd6e0e..6f4c71f5a3 100644
      }
  
      const originalBody = init?.body
-@@ -383,7 +384,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
+@@ -383,7 +385,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
      }
  
      // 8. 透传所有 init 参数，只覆盖 body 和 headers，避免丢弃 signal/keepalive
@@ -324,10 +471,19 @@ index 0a85dd6e0e..6f4c71f5a3 100644
        headers: requestHeaders,
        body: finalBodyStr,
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
-index 25dbf7fcd8..909cd14a8e 100644
+index 041b522f06..d35b09ebe6 100644
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -1832,7 +1832,6 @@ for (const [id, provider] of configProviders) {
+@@ -600,7 +600,7 @@ const authKey = auth?.type === "api" ? auth.key : undefined
+             const headers = new Headers(init?.headers)
+             headers.set("Authorization", `Bearer ${token.token}`)
+ 
+-            return fetch(input, { ...init, headers })
++            return NetworkProxy.fetch(input, { ...init, headers, purpose: "provider" })
+           },
+         },
+         async getModel(sdk: any, modelID: string) {
+@@ -1851,7 +1851,6 @@ for (const [id, provider] of configProviders) {
          delete options["headerTimeout"]
  
          options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
@@ -335,7 +491,7 @@ index 25dbf7fcd8..909cd14a8e 100644
            const opts = init ?? {}
            const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
            const headerTimeoutMs = headerTimeout === false ? undefined : headerTimeout
-@@ -1848,14 +1847,24 @@ for (const [id, provider] of configProviders) {
+@@ -1867,15 +1866,24 @@ for (const [id, provider] of configProviders) {
            const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
            if (combined) opts.signal = combined
  
@@ -343,13 +499,13 @@ index 25dbf7fcd8..909cd14a8e 100644
 -          // provider 请求走 provider 用途，区别于基础设施和 npm 请求
 -          const res = await NetworkProxy.fetchWithRoute(fetchFn, input, {
 -            ...opts,
+-            // #71：provider HTTP 走 NetworkProxy 用途分流
 -            purpose: "provider",
 -            // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
 -            timeout: false,
 -          }).finally(() => headerTimeoutCtl?.clear())
-+          // customFetch 仅鉴权包装→透传；默认走 NetworkProxy.fetch 主路由
-+          // provider 请求 purpose=provider，区别于基础设施和 npm
-+          // await 在 Promise.finally 之后：分支返回 Promise 而非已解析 Response
++          // #83：customFetch 仅鉴权透传；默认走 NetworkProxy.fetch 主路由
++          // #83：provider 请求 purpose=provider，区别于基础设施和 npm
 +          const res = await (
 +            customFetch
 +              ? NetworkProxy.fetchWithRoute(customFetch, input, {
@@ -365,6 +521,153 @@ index 25dbf7fcd8..909cd14a8e 100644
 +                  timeout: false,
 +                })
 +          ).finally(() => headerTimeoutCtl?.clear())
++
  
            if (!chunkAbortCtl) return res
            return wrapSSE(res, chunkTimeout, chunkAbortCtl)
+diff --git a/packages/opencode/test/plugin/github-copilot-models.test.ts b/packages/opencode/test/plugin/github-copilot-models.test.ts
+index e6d89fe01c..da82bf379e 100644
+--- a/packages/opencode/test/plugin/github-copilot-models.test.ts
++++ b/packages/opencode/test/plugin/github-copilot-models.test.ts
+@@ -1,16 +1,26 @@
+-import { afterEach, expect, mock, test } from "bun:test"
++import { afterEach, expect, mock, spyOn, test } from "bun:test"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { CopilotModels } from "@/plugin/github-copilot/models"
+ import { CopilotAuthPlugin } from "@/plugin/github-copilot/copilot"
+ 
+-const originalFetch = globalThis.fetch
++// #83：生产走 NetworkProxy.fetch(native)，测试必须 spy 该入口而非 globalThis.fetch
++let fetchSpy: ReturnType<typeof spyOn> | undefined
+ 
+ afterEach(() => {
+-  globalThis.fetch = originalFetch
++  // #83：用例结束 restore spy
++fetchSpy?.mockRestore()
++  fetchSpy = undefined
+ })
+ 
++// #83：spy NetworkProxy.fetch，覆盖 copilot catalog
++function mockModelsFetch(impl: () => Promise<Response>) {
++  // #83：拦截 plugin purpose 的 catalog 请求
++  fetchSpy = // #83：禁止 mock globalThis.fetch（native 已冻结）
++spyOn(NetworkProxy, "fetch").mockImplementation(async () => impl())
++}
++
+ test("preserves temperature support from existing provider models", async () => {
+-  globalThis.fetch = mock(() =>
+-    Promise.resolve(
++  mockModelsFetch(() => Promise.resolve(
+       new Response(
+         JSON.stringify({
+           data: [
+@@ -55,9 +65,8 @@ test("preserves temperature support from existing provider models", async () =>
+         { status: 200 },
+       ),
+     ),
+-  ) as unknown as typeof fetch
+-
+-  const result = await CopilotModels.get(
++  )
++const result = await CopilotModels.get(
+     "https://api.githubcopilot.com",
+     {},
+     {
+@@ -119,8 +128,7 @@ test("preserves temperature support from existing provider models", async () =>
+ })
+ 
+ test("converts Copilot AIC token prices to USD per million tokens", async () => {
+-  globalThis.fetch = mock(() =>
+-    Promise.resolve(
++  mockModelsFetch(() => Promise.resolve(
+       new Response(
+         JSON.stringify({
+           data: [
+@@ -171,9 +179,8 @@ test("converts Copilot AIC token prices to USD per million tokens", async () =>
+         { status: 200 },
+       ),
+     ),
+-  ) as unknown as typeof fetch
+-
+-  const models = (await CopilotModels.get("https://api.githubcopilot.com")).models
++  )
++const models = (await CopilotModels.get("https://api.githubcopilot.com")).models
+ 
+   expect(models["gpt-5"].cost).toEqual({
+     input: 10,
+@@ -188,8 +195,7 @@ test("converts Copilot AIC token prices to USD per million tokens", async () =>
+ })
+ 
+ test("uses zero cost when Copilot reports a zero billing batch size", async () => {
+-  globalThis.fetch = mock(() =>
+-    Promise.resolve(
++  mockModelsFetch(() => Promise.resolve(
+       new Response(
+         JSON.stringify({
+           data: [
+@@ -226,9 +232,8 @@ test("uses zero cost when Copilot reports a zero billing batch size", async () =
+         { status: 200 },
+       ),
+     ),
+-  ) as unknown as typeof fetch
+-
+-  const model = (await CopilotModels.get("https://api.githubcopilot.com")).models["mercury-alpha"]
++  )
++const model = (await CopilotModels.get("https://api.githubcopilot.com")).models["mercury-alpha"]
+ 
+   expect(model.cost).toEqual({
+     input: 0,
+@@ -242,8 +247,7 @@ test("uses zero cost when Copilot reports a zero billing batch size", async () =
+ })
+ 
+ test("records Copilot advertised responses endpoint for non-GPT model IDs", async () => {
+-  globalThis.fetch = mock(() =>
+-    Promise.resolve(
++  mockModelsFetch(() => Promise.resolve(
+       new Response(
+         JSON.stringify({
+           data: [
+@@ -272,16 +276,14 @@ test("records Copilot advertised responses endpoint for non-GPT model IDs", asyn
+         { status: 200 },
+       ),
+     ),
+-  ) as unknown as typeof fetch
+-
+-  const model = (await CopilotModels.get("https://api.githubcopilot.com")).models["mai-code-1-flash-picker"]
++  )
++const model = (await CopilotModels.get("https://api.githubcopilot.com")).models["mai-code-1-flash-picker"]
+ 
+   expect("endpoint" in model.api ? model.api.endpoint : undefined).toBe("responses")
+ })
+ 
+ test("clears existing variants so refreshed models calculate provider-specific variants", async () => {
+-  globalThis.fetch = mock(() =>
+-    Promise.resolve(
++  mockModelsFetch(() => Promise.resolve(
+       new Response(
+         JSON.stringify({
+           data: [
+@@ -310,9 +312,8 @@ test("clears existing variants so refreshed models calculate provider-specific v
+         { status: 200 },
+       ),
+     ),
+-  ) as unknown as typeof fetch
+-
+-  const result = await CopilotModels.get(
++  )
++const result = await CopilotModels.get(
+     "https://api.githubcopilot.com",
+     {},
+     {
+@@ -379,9 +380,8 @@ test("clears existing variants so refreshed models calculate provider-specific v
+ })
+ 
+ test("remaps fallback oauth model urls to the enterprise host", async () => {
+-  globalThis.fetch = mock(() => Promise.reject(new Error("timeout"))) as unknown as typeof fetch
+-
+-  const hooks = await CopilotAuthPlugin({
++  mockModelsFetch(() => Promise.reject(new Error("timeout")))
++const hooks = await CopilotAuthPlugin({
+     client: {} as never,
+     project: {} as never,
+     directory: "",

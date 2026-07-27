@@ -4,95 +4,52 @@ Date: Fri, 15 May 2026 02:50:40 +0800
 Subject: [PATCH] =?UTF-8?q?feat:=201.14.42=20=E5=AF=B9macOS=E5=AE=8C?=
  =?UTF-8?q?=E6=95=B4=E8=BF=9B=E8=A1=8Ctest=E9=97=AE=E9=A2=98=E4=BF=AE?=
  =?UTF-8?q?=E6=AD=A3=20=E6=9B=B4=E6=96=B0=E6=B5=8B=E8=AF=95=E7=94=A8?=
- =?UTF-8?q?=E4=BE=8B=E4=BB=A5=E5=A2=9E=E5=BC=BA=E8=B7=A8=E5=B9=B3=E5=8F=B0?=
- =?UTF-8?q?=E8=B7=AF=E5=BE=84=E8=A7=A3=E6=9E=90=E5=92=8C=E5=B7=A5=E5=85=B7?=
- =?UTF-8?q?=E6=89=A7=E8=A1=8C=E7=9A=84=E4=B8=AD=E6=96=AD=E5=A4=84=E7=90=86?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/core/test/effect/cross-spawn-spawner.test.ts b/packages/core/test/effect/cross-spawn-spawner.test.ts
-index 2612b75e464cf50a26c0bab9874827b9aaa9b63a..ebe9930dd56a61beff0c68d05630c0a19e3325c3 100644
---- a/packages/core/test/effect/cross-spawn-spawner.test.ts
-+++ b/packages/core/test/effect/cross-spawn-spawner.test.ts
-@@ -111,7 +111,10 @@ describe("cross-spawn spawner", () => {
-             ChildProcess.make(process.execPath, ["-e", "process.stdout.write(process.cwd())"], { cwd: tmp.path }),
-           ),
-         )
--        expect(out).toBe(tmp.path)
-+        // On macOS, /var is a symlink to /private/var, so the child process
-+        // reports the realpath. Compare resolved paths for cross-platform correctness.
-+        const expected = yield* Effect.promise(() => fs.realpath(tmp.path))
-+        expect(out).toBe(expected)
-       }),
-     )
- 
 diff --git a/packages/opencode/src/effect/runner.ts b/packages/opencode/src/effect/runner.ts
-index cf922d1e43b93118e20600d8d7c87f25034389cb..b66d6c8f127f182790787368850b1874d7c45280 100644
+index 9c2060a96e..8cc506bcea 100644
 --- a/packages/opencode/src/effect/runner.ts
 +++ b/packages/opencode/src/effect/runner.ts
-@@ -109,7 +109,7 @@ export const make = <A, E = never>(
-     Effect.gen(function* () {
-       if (shell.ready) yield* shell.ready.await.pipe(Effect.exit, Effect.asVoid)
+@@ -111,7 +111,8 @@ export const make = <A, E = never>(
        yield* Deferred.succeed(shell.cancelled, undefined).pipe(Effect.asVoid)
+       // 非阻塞中断：fork 到 scope 中执行，避免等待 fiber 终止
+       // Effect.exit 确保中断不抛出异常到调用链，forkIn 将其隔离到 scope
 -      yield* Fiber.interrupt(shell.fiber).pipe(Effect.exit, Effect.forkIn(scope), Effect.asVoid)
++      // #149：await interrupt，避免 shell 取消竞态
 +      yield* Fiber.interrupt(shell.fiber).pipe(Effect.exit, Effect.asVoid)
      })
  
    const ensureRunning = (work: Effect.Effect<A, E>) =>
-@@ -180,8 +180,8 @@ export const make = <A, E = never>(
-       case "Running":
+@@ -178,8 +179,9 @@ export const make = <A, E = never>(
          return [
            Effect.gen(function* () {
+             // 先 fail done 唤醒等待者，再非阻塞中断 fiber
 -            yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.exit, Effect.asVoid)
 -            yield* Fiber.interrupt(st.run.fiber).pipe(Effect.exit, Effect.forkIn(scope), Effect.asVoid)
++            // #149：先中断 fiber 再 fail done，避免未 settle 的工具输出被抢先收口
 +            yield* Fiber.interrupt(st.run.fiber)
 +            yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.asVoid)
              yield* idleIfCurrent()
            }),
            { _tag: "Idle" } as const,
-diff --git a/packages/opencode/src/server/routes/instance/httpapi/public.ts b/packages/opencode/src/server/routes/instance/httpapi/public.ts
-index b2ac719a2ae423b256bf65e382fb3b8ec805a1a3..599da81d06668c18a9272b4250df154edf7c2002 100644
---- a/packages/opencode/src/server/routes/instance/httpapi/public.ts
-+++ b/packages/opencode/src/server/routes/instance/httpapi/public.ts
-@@ -77,6 +77,8 @@ const QueryParameterSchemas = {
-   "GET /find/file limit": { type: "integer", minimum: 1, maximum: 200 },
-   "GET /session/{sessionID}/diff messageID": { type: "string", pattern: "^msg.*" },
-   "GET /session/{sessionID}/message limit": { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
-+  "GET /session/{sessionID}/request_usage before": { type: "number" },
-+  "GET /session/{sessionID}/request_usage rootRequestID": { type: "string", pattern: "^msg.*" },
- } satisfies Record<string, OpenApiSchema>
- 
- const PathParameterSchemas = {
-@@ -532,6 +534,7 @@ function pathParameterSchema(route: string, name: string) {
-   if (name === "id" && route.startsWith("POST /experimental/workspace/")) return { type: "string", pattern: "^wrk.*" }
-   if (name === "requestID" && route.startsWith("POST /permission/")) return { type: "string", pattern: "^per.*" }
-   if (name === "requestID" && route.startsWith("POST /question/")) return { type: "string", pattern: "^que.*" }
-+  if (name === "requestID" && route.includes("/request_usage/")) return { type: "string", pattern: "^msg.*" }
-   return undefined
- }
- 
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
-index 62520810c464b10e8ee09149a5904d5272141803..8331bf9db2298e50ef93934378fa9dbd557eefad 100644
+index 8588258363..17e3cc6342 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -27,6 +27,7 @@ import { Modelv2 } from "@/v2/model"
- import * as DateTime from "effect/DateTime"
+@@ -27,6 +27,9 @@ import { EventV2Bridge } from "@/event-v2-bridge"
+ import { Database } from "@opencode-ai/core/database/database"
+ import { Usage, type LLMEvent } from "@opencode-ai/llm"
  
- const DOOM_LOOP_THRESHOLD = 3
++// #149：取消时给 bash 等工具完成截断/complete 的宽限
 +const ABORTED_TOOL_SETTLE_TIMEOUT = "4 seconds"
- const log = Log.create({ service: "session.processor" })
- 
++
+ const DOOM_LOOP_THRESHOLD = 3
  export type Result = "compact" | "stop" | "continue"
-@@ -677,6 +678,18 @@ export const layer: Layer.Layer<
-         }
-         ctx.reasoningMap = {}
  
-+        // On cancel, tool execution may still be unwinding from its AbortSignal.
-+        // Give tool-specific abort handlers (notably bash output truncation) a
-+        // chance to completeToolCall() before the generic cleanup marks leftovers
-+        // as interrupted errors.
+@@ -605,6 +608,15 @@ const layer = Layer.effect(
+       })
+ 
+       const cleanup = Effect.fn("SessionProcessor.cleanup")(function* () {
++        // #149：取消时先等 tool done（超时后仍走通用 interrupted 清理）
 +        if (aborted) {
 +          yield* Effect.forEach(
 +            Object.values(ctx.toolcalls),
@@ -101,18 +58,19 @@ index 62520810c464b10e8ee09149a5904d5272141803..8331bf9db2298e50ef93934378fa9dbd
 +          )
 +        }
 +
-         for (const call of Object.values(ctx.toolcalls)) {
-           yield* Deferred.succeed(call.done, undefined).pipe(Effect.ignore)
-         }
+         // #139：中断时跳过慢 git snapshot，优先完成终端态清理
+         if (ctx.snapshot && !aborted) {
+           const patch = yield* snapshot.patch(ctx.snapshot)
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 12b3e0458a29c0323732eac3f1e0f18fddb59407..adc9c9625a2aa5b1e831119ada119af40c80fbed 100644
+index b8b2097566..9ae2df11c6 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -190,28 +190,10 @@ export const layer = Layer.effect(
-       assistant.time.completed = now
-       assistant.error ??= new MessageV2.AbortedError({ message: "Aborted" }).toObject()
+@@ -185,29 +185,8 @@ const layer = Layer.effect(
+       assistant.error ??= new SessionV1.AbortedError({ message: "Aborted" }).toObject()
        yield* sessions.updateMessage(assistant)
--
+ 
+-      // 将 pending/running 状态的工具部件标记为 error
+-      // running 工具记录 interrupted 元数据，便于后续诊断中断原因
 -      yield* Effect.forEach(
 -        match.value.parts,
 -        (part) => {
@@ -130,84 +88,39 @@ index 12b3e0458a29c0323732eac3f1e0f18fddb59407..adc9c9625a2aa5b1e831119ada119af4
 -                end: now,
 -              },
 -            },
--          } satisfies MessageV2.ToolPart).pipe(Effect.asVoid)
+-          } satisfies SessionV1.ToolPart).pipe(Effect.asVoid)
 -        },
 -        { discard: true },
 -      )
-+      // NOTE: Tool part states are NOT modified here. Each tool has its own
-+      // interrupt/cancel handler that finalizes its state (e.g. bash truncates
-+      // output and completes, task tool cancels child session). Forcing all
-+      // running tools to "error" here would race with those handlers.
++      // #149：不在此强制写 tool error；各工具 cancel handler（如 bash 截断）负责收口，避免竞态
++
      })
  
      const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {
-diff --git a/packages/opencode/test/server/httpapi-json-parity.test.ts b/packages/opencode/test/server/httpapi-json-parity.test.ts
-index 656541be71c28d26e6af72e771a0fb70f3c3ed89..8db4d268c7c961da468a2eaab1eea643920b02e6 100644
---- a/packages/opencode/test/server/httpapi-json-parity.test.ts
-+++ b/packages/opencode/test/server/httpapi-json-parity.test.ts
-@@ -82,7 +82,16 @@ function expectJsonParity(input: {
-   return Effect.gen(function* () {
-     const legacy = yield* readJson(input.label, input.legacy, input.path, input.headers)
-     const httpapi = yield* readJson(input.label, input.httpapi, input.path, input.headers)
--    expect({ label: input.label, body: httpapi }).toEqual({ label: input.label, body: legacy })
-+    // toolIDs endpoint: httpapi returns sorted, legacy returns registration order.
-+    // Compare as sets to verify content parity without enforcing order.
-+    if (Array.isArray(legacy) && Array.isArray(httpapi) && input.path.includes("/tool/ids")) {
-+      expect({ label: input.label, body: [...httpapi].sort() }).toEqual({
-+        label: input.label,
-+        body: [...legacy].sort(),
-+      })
-+    } else {
-+      expect({ label: input.label, body: httpapi }).toEqual({ label: input.label, body: legacy })
-+    }
-     return httpapi
-   })
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/public.ts b/packages/opencode/src/server/routes/instance/httpapi/public.ts
+index 2a7266c511..e3fbe16e8a 100644
+--- a/packages/opencode/src/server/routes/instance/httpapi/public.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/public.ts
+@@ -71,6 +71,9 @@ const QueryParameterSchemas: Record<string, OpenApiSchema> = {
+   "GET /api/session start": { type: "number" },
+   "GET /api/session roots": QueryBooleanOpenApi,
+   "GET /api/session/{sessionID}/message limit": { type: "number" },
++  // #149：request_usage 查询参数 OpenAPI 形态
++  "GET /session/{sessionID}/request_usage before": { type: "number" },
++  "GET /session/{sessionID}/request_usage rootRequestID": { type: "string", pattern: "^msg.*" },
  }
-diff --git a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
-index 601f07cb3a5503e348a3fa47f0b7feddc2c4f3aa..dae6bd447c3476ebbf7763aa4b1bede455c79bbb 100644
---- a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
-+++ b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
-@@ -24,6 +24,10 @@ exports[`tool parameters JSON Schema (wire shape) bash 1`] = `
-       "description": "The command to execute",
-       "type": "string",
-     },
-+    "compress_output": {
-+      "description": "Whether this shell call may compress repetitive output before returning it. Defaults to the user's shell output compression setting. Set false when exact raw formatting is important.",
-+      "type": "boolean",
-+    },
-     "description": {
-       "description": 
- "Clear, concise description of what this command does in 5-10 words. Examples:
-@@ -281,7 +285,7 @@ exports[`tool parameters JSON Schema (wire shape) read 1`] = `
-       "type": "string",
-     },
-     "limit": {
--      "description": "The maximum number of lines to read (defaults to 2000)",
-+      "description": "The maximum number of lines to read (defaults to 200)",
-       "maximum": 9007199254740991,
-       "minimum": 0,
-       "type": "integer",
-diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/tool/grep.test.ts
-index 5dfa24a9ac72383aa366bb3b797329f775ecc264..959f98b6e5f57f1e258145f0bcb702482cebc52e 100644
---- a/packages/opencode/test/tool/grep.test.ts
-+++ b/packages/opencode/test/tool/grep.test.ts
-@@ -112,6 +112,7 @@ describe("tool.grep", () => {
-   it.instance("caps broad match output", () =>
-     Effect.gen(function* () {
-       const test = yield* TestInstance
-+      // Generate more lines than RESULT_LIMIT (64) to trigger truncation
-       const content = Array.from({ length: 130 }, (_, index) => `needle ${index}`).join("\n")
-       yield* Effect.promise(() => Bun.write(path.join(test.directory, "test.txt"), content))
-       const info = yield* GrepTool
-@@ -123,9 +124,9 @@ describe("tool.grep", () => {
-         },
-         ctx,
-       )
--      expect(result.metadata.matches).toBe(100)
-+      expect(result.metadata.matches).toBe(64)
-       expect(result.metadata.truncated).toBe(true)
--      expect(result.output).toContain("Found 100+ matches")
-+      expect(result.output).toContain("Found 64+ matches")
-       expect(result.output).toContain("Results truncated")
-     }),
-   )
+ 
+ const LegacyComponentDescriptions: Record<string, string> = {
+@@ -512,6 +515,12 @@ function flattenOptions(options: OpenApiSchema[] | undefined): OpenApiSchema[] |
+ }
+ 
+ function normalizeParameter(param: OpenApiParameter, route: string) {
++  // #149：request_usage path requestID 必须是 msg*（就地写入，调用方不接返回值）
++  if (param.in === "path" && (param as { name?: string }).name === "requestID" && route.includes("/request_usage/")) {
++    param.schema = { type: "string", pattern: "^msg.*" }
++    return
++  }
++
+   if (!param.schema || typeof param.schema !== "object") return
+   if (param.in === "path") {
+     param.schema = stripOptionalNull(param.schema)

@@ -4,48 +4,40 @@ Date: Wed, 13 May 2026 02:56:08 +0800
 Subject: [PATCH] =?UTF-8?q?feat(directory-normalization):=20=E6=B7=BB?=
  =?UTF-8?q?=E5=8A=A0=E7=9B=AE=E5=BD=95=E8=A7=84=E8=8C=83=E5=8C=96=E5=8A=9F?=
  =?UTF-8?q?=E8=83=BD=EF=BC=8C=E4=BC=98=E5=8C=96Windows=E8=B7=AF=E5=BE=84?=
- =?UTF-8?q?=E6=AF=94=E8=BE=83?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-
-diff --git a/packages/opencode/src/cli/cmd/tui/context/event.ts b/packages/opencode/src/cli/cmd/tui/context/event.ts
-index d92f1c9be92ba4bfab27957a13cbfd19294f7061..bd098443fa96ec52526ca501e534f9429ec9af0c 100644
---- a/packages/opencode/src/cli/cmd/tui/context/event.ts
-+++ b/packages/opencode/src/cli/cmd/tui/context/event.ts
-@@ -2,16 +2,33 @@ import type { Event } from "@opencode-ai/sdk/v2"
- import { useProject } from "./project"
+diff --git a/packages/tui/src/context/event.ts b/packages/tui/src/context/event.ts
+index 897435406a..3ecc3aeea3 100644
+--- a/packages/tui/src/context/event.ts
++++ b/packages/tui/src/context/event.ts
+@@ -2,13 +2,29 @@ import type { Event } from "@opencode-ai/sdk/v2"
  import { useSDK } from "./sdk"
- import { AppFileSystem } from "@opencode-ai/core/filesystem"
-+import path from "path"
-+
+ import path from "path"
+ 
+-// #132：事件 directory 规范化比较（Win slash/case）
 +const normalizedDirectory = new Map<string, string>()
 +
++// #134：高频事件路径上缓存目录规范化，避免 realpath 阻塞渲染
 +function normalizeDirectory(value: string) {
 +  const cached = normalizedDirectory.get(value)
 +  if (cached) return cached
 +
-+  const resolved = path.resolve(AppFileSystem.windowsPath(value))
++  const resolved = path.resolve(value.replaceAll("/", path.sep))
 +  const root = path.parse(resolved).root
++  // #134：去掉多余尾部分隔，保留盘符根
 +  const trimmed = resolved.length > root.length ? resolved.replace(/[\\/]+$/, "") : resolved
-+  // This runs for every streamed event, so keep it pure and cached. Calling
-+  // AppFileSystem.resolve() here would hit realpathSync on Windows and block
-+  // rendering during high-frequency message updates.
++  // #134：Windows 大小写不敏感；不调用 realpathSync
 +  const result = process.platform === "win32" ? trimmed.toLowerCase() : trimmed
 +  normalizedDirectory.set(value, result)
 +  return result
 +}
- 
- function sameDirectory(a?: string, b?: string) {
++
++// #132/#134：事件 directory 与 TUI instance directory 规范化比较
+ export function sameDirectory(a?: string, b?: string) {
    if (!a || !b) return false
 +  if (a === b) return true
    try {
-     // Server events and TUI state can carry equivalent Windows paths with
-     // different slash/case/realpath spelling. Normalize before filtering so
-     // valid daemon updates are not dropped by a string-form mismatch.
--    const left = AppFileSystem.resolve(a)
--    const right = AppFileSystem.resolve(b)
+-    const left = path.resolve(a).replaceAll("\\", "/")
+-    const right = path.resolve(b).replaceAll("\\", "/")
 -    return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right
 +    return normalizeDirectory(a) === normalizeDirectory(b)
    } catch {
