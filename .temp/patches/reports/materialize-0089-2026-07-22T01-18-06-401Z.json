@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-22T01:18:06.401Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 89,
+  "passed": 84,
+  "reusedPrefix": 84,
+  "baseState": "0084-7759649fd14d",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 89,
+  "sourceRepoHeadBefore": "707e747a5bf2d511ea313d8e99b3cd1af53c3f6e",
+  "sourceRepoFingerprintBefore": "3cf0d874729383cce709da6f503f232591e9c63c2ab3513a8a6a72f902fd0848",
+  "targetRepoFingerprintBefore": "10306552a94bc4c43bb2e3b23b470446190faa5900216b2df48fdc2a976d8f7b",
+  "outcomes": [
+    {
+      "index": 85,
+      "sha": "66ddc4e2fe6cec2be1639d5b86ff1ff87e9aa85c",
+      "subject": "feat(token-estimate): 优化字符与token计算，考虑附件对输入字符的影响",
+      "patch": "current/0085-66ddc4e2fe6c.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/tui/src/util/context-usage.ts...\nerror: while searching for:\nimport type { Agent, Config, Message, Part, Provider, VcsInfo } from \"@opencode-ai/sdk/v2\"\nimport { Flag } from \"@opencode-ai/core/flag/flag\"\nimport { estimate as estimateTokens } from \"@opencode-ai/core/util/token\"\nimport { estimateDataUrlInputTokens } from \"./token-estimate\"\nimport { DEFAULT_CHARS_PER_TOKEN } from \"./token-estimate\"\n\n// 内联 truthy：检查环境变量是否为 truthy 值（\"true\" 或 \"1\"）\n\nerror: patch failed: packages/tui/src/util/context-usage.ts:8\nerror: packages/tui/src/util/context-usage.ts: patch does not apply\nChecking patch packages/tui/src/util/token-estimate.ts...\nerror: while searching for:\n      const inputTokens =\n        (p.tokens?.input ?? 0) + (p.tokens?.cache?.read ?? 0) + (p.tokens?.cache?.write ?? 0)\n      if (typeof inputChars === \"number\" && inputChars > 0 && inputTokens > 0) {\n        totalChars += inputChars\n        totalTokens += inputTokens\n      }\n    }\n\nerror: patch failed: packages/tui/src/util/token-estimate.ts:51\nerror: packages/tui/src/util/token-estimate.ts: patch does not apply\nChecking patch packages/opencode/src/session/prompt.ts...\nHunk #1 succeeded at 1390 (offset 8 lines).\nerror: while searching for:\n              const chars = (sf as any).inputChars\n              const tokens = (sf.tokens.input ?? 0) + (sf.tokens.cache?.read ?? 0) + (sf.tokens.cache?.write ?? 0)\n              if (typeof chars === \"number\" && chars > 0 && tokens > 0) {\n                historyInputChars += chars\n                historyInputTokens += tokens\n              }\n            }\n\nerror: patch failed: packages/opencode/src/session/prompt.ts:1392\nerror: packages/opencode/src/session/prompt.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "61a3706ab6dddc62840dda186224f48639cc5f545fa2f29b02691609db29f9e7",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "e2c47f3ad3ef71557fe5451a0b07a6e45e19a1da1ec6040209aa231928f2f5d7"
+  },
+  "stoppedAt": 85,
+  "finishedAt": "2026-07-22T01:18:12.719Z",
+  "sourceRepoHeadAfter": "707e747a5bf2d511ea313d8e99b3cd1af53c3f6e",
+  "sourceRepoFingerprintAfter": "3cf0d874729383cce709da6f503f232591e9c63c2ab3513a8a6a72f902fd0848",
+  "targetRepoFingerprintAfter": "10306552a94bc4c43bb2e3b23b470446190faa5900216b2df48fdc2a976d8f7b",
+  "retainedStates": [
+    "0084-7759649fd14d",
+    "0082-afccfe84a555",
+    "0081-85442a1f1e68",
+    "0080-0a8361dfa4d3"
+  ]
+}

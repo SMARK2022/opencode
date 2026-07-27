@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-22T11:19:29.083Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 110,
+  "passed": 109,
+  "reusedPrefix": 109,
+  "baseState": "0109-14d55305badb",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 110,
+  "sourceRepoHeadBefore": "4884d93a1eaf0156c3d10aaaadc4104ced1bb3e5",
+  "sourceRepoFingerprintBefore": "7a3b1d3cc409b7f3f0b6aa4d969b597cf67e8f25a7a2a45214a7cfafe2afcbf5",
+  "targetRepoFingerprintBefore": "672dcd64535e224454abefc69ef909d3904aec80c6d7324859825bbc74dc2217",
+  "outcomes": [
+    {
+      "index": 110,
+      "sha": "b6690c2cc8606192469f1a497a196f363c3633b1",
+      "subject": "feat: 更新版本号至 1.14.32，并优化 VSIX 打包逻辑以避免 Windows 环境中的 npm 路径问题",
+      "patch": "current/0110-b6690c2cc860.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "unknown",
+      "stdout": "",
+      "stderr": "error: corrupt patch at line 23\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "91c19565392d2e2de000063b86a21b84fc975b326c6506a9a045e7570cafff4b",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "2481b63b95f51405850bec0cae049b1f458f60cfd2b69981a3759c1de9846fcc"
+  },
+  "stoppedAt": 110,
+  "finishedAt": "2026-07-22T11:19:35.748Z",
+  "sourceRepoHeadAfter": "4884d93a1eaf0156c3d10aaaadc4104ced1bb3e5",
+  "sourceRepoFingerprintAfter": "7a3b1d3cc409b7f3f0b6aa4d969b597cf67e8f25a7a2a45214a7cfafe2afcbf5",
+  "targetRepoFingerprintAfter": "672dcd64535e224454abefc69ef909d3904aec80c6d7324859825bbc74dc2217",
+  "retainedStates": [
+    "0109-14d55305badb",
+    "0108-e863ec34839c",
+    "0107-f0f0c3a6ddb3",
+    "0106-ed792909b777"
+  ]
+}

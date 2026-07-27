@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-20T22:47:32.510Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 49,
+  "passed": 48,
+  "reusedPrefix": 48,
+  "baseState": "0048-f9d2e647d8b2",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 49,
+  "sourceRepoHeadBefore": "bce9a880f05556e486a1f4851a5118c43f0e7cc5",
+  "sourceRepoFingerprintBefore": "c1887c4a5f56650baf2a41f240021bd472241c923b849ca0501108f6912dd9a0",
+  "targetRepoFingerprintBefore": "2f057706381770ce058a706fd570c40a30063a446204d55ab0f47e0f926e2924",
+  "outcomes": [
+    {
+      "index": 49,
+      "sha": "90c84e172f41649fcb46016f68a569dbf29e4eb6",
+      "subject": "fix: 调整工具超时和过期设置，优化工具定义处理逻辑，增强错误处理",
+      "patch": "current/0049-90c84e172f41.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/cli/tui/server-lock.ts...\nHunk #1 succeeded at 87 (offset 3 lines).\nChecking patch packages/opencode/src/cli/tui/worker.ts...\nHunk #2 succeeded at 138 (offset 5 lines).\nChecking patch packages/opencode/src/cli/cmd/tui.ts...\nHunk #3 succeeded at 137 (offset 7 lines).\nChecking patch packages/tui/src/util/context-usage.ts...\nerror: while searching for:\n\n\n// 工具定义 token：合并静态 schema 文本、动态工具文本和观察到的输入样本\n// 嵌入 catalog：TUI 不能 import opencode Schema，生成期抽取 description/parameters\n// 仅列入目标树有 owner 的工具名，禁止空占位\n// 禁止运行时扫 monorepo packages/opencode/src/tool\nconst RESOLVED_TOOL_NAMES = [\n  \"invalid\", \"question\", \"bash\", \"read\", \"glob\", \"grep\", \"edit\", \"write\", \"task\",\n  \"webfetch\", \"todowrite\", \"websearch\", \"skill\", \"apply_patch\", \"lsp\", \"plan_exit\",\n] as const // 名称集合为 const 元组，便于下游字面量联合类型过滤\n\n// resolveToolDescriptions：与 SMARK 静态 import + toJsonSchema 等价的可运输主路径\n// 嵌入 catalog：TUI 不能 import opencode Schema，生成期抽取 description/parameters\n// 仅列入目标树有 owner 的工具名，禁止空占位\n// 禁止运行时扫 monorepo packages/opencode/src/tool\nfunction resolveToolDescriptions(paths: { cwd: string; worktree?: string }) {\n  return RESOLVED_TOOL_NAMES.map((name) => {\n    // 缺失目录项时保持空串而非抛错，避免上下文估算主路径中断\n\nerror: patch failed: packages/tui/src/util/context-usage.ts:714\nerror: packages/tui/src/util/context-usage.ts: patch does not apply\nChecking patch packages/tui/test/context-usage.test.ts...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "2543bf40a87087abd110f42f8cd6875221c1d5f727f31ca581a102a2ca3e7813",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "7429495995e9a19284bc871b1cddd41f2fb6b64b4942a0e75ae4996faedd41d9"
+  },
+  "stoppedAt": 49,
+  "finishedAt": "2026-07-20T22:47:46.874Z",
+  "sourceRepoHeadAfter": "bce9a880f05556e486a1f4851a5118c43f0e7cc5",
+  "sourceRepoFingerprintAfter": "c1887c4a5f56650baf2a41f240021bd472241c923b849ca0501108f6912dd9a0",
+  "targetRepoFingerprintAfter": "2f057706381770ce058a706fd570c40a30063a446204d55ab0f47e0f926e2924",
+  "retainedStates": [
+    "0048-f9d2e647d8b2",
+    "0045-6380ed0b8d91",
+    "0046-f13fd00acfde"
+  ]
+}

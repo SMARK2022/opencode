@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-25T19:43:37.762Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 180,
+  "passed": 175,
+  "reusedPrefix": 175,
+  "baseState": "0175-f0a47a144866",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 180,
+  "sourceRepoHeadBefore": "69fb3d7d8d72ad76020c0e4b236a8106caec80a6",
+  "sourceRepoFingerprintBefore": "436133cf59f9018a6bc0b2494f3be4fb68f44cfe5e95223bc91e7cea4d620953",
+  "targetRepoFingerprintBefore": "51c0210ef3ff91b5572381109b68892ae0068fe92333f55f225b4d4bbd5e49f1",
+  "outcomes": [
+    {
+      "index": 176,
+      "sha": "1a88ba6a6e8cdae4e98288e66224650004a5eb52",
+      "subject": "feat: stats端点信息丰富与重构 add insights and rendering for stats analysis",
+      "patch": "current/0176-1a88ba6a6e8c.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch .gitignore...\nerror: while searching for:\nlogs/\n*.bun-build\ntsconfig.tsbuildinfo\narchived/\nerror: patch failed: .gitignore:30\nerror: .gitignore: patch does not apply\nChecking patch packages/opencode/src/cli/cmd/session.ts...\nerror: while searching for:\n        `${session.id.padEnd(maxIdWidth)}  ${truncatedTitle.padEnd(maxTitleWidth)}  ${timeStr.padEnd(20)} ${costStr.padStart(8)}  ${tokensStr.padStart(7)}`,\n      )\n    }\n  } else {\n    const header = `Session ID${\" \".repeat(maxIdWidth - 10)}  Title${\" \".repeat(maxTitleWidth - 5)}  Updated`\n    lines.push(header)\n\nerror: patch failed: packages/opencode/src/cli/cmd/session.ts:218\nerror: packages/opencode/src/cli/cmd/session.ts: patch does not apply\nChecking patch packages/opencode/src/cli/cmd/stats-render.ts...\nerror: while searching for:\nimport type { DailyUsage, StatsReport, TokenTotals, UsageGroup } from \"./stats-data\"\nimport { Locale } from \"@/util/locale\"\nimport { formatNumber } from \"../format\"\nimport {\n  dailySeries,\n  fitVisible,\n  layersFromTokenParts,\n  metricFormatter,\n  renderCallout,\n  renderComparisonTable,\n  renderCompositionDonut,\n  renderGauge,\n  renderHeatmap,\n  renderHistogram,\n  renderHorizon,\n  renderMatrix,\n  renderMetricRibbon,\n  renderPercentStack,\n  renderRankBars,\n  renderRoundedLineChart,\n  renderSlopeChart,\n  renderSmallMultiples,\n  renderStackedAreaChart,\n  renderStreamStackChart,\n  renderTabs,\n  renderTwoColumn,\n  renderWaterfall,\n  seriesFromUsage,\n  statsContentWidth,\n  type ChartColor,\n} from \"./stats-charts\"\n\nexport { formatNumber } from \"../format\"\n\nconst RESET = \"\\x1b[0m\"\nconst BOLD = \"\\x1b[1m\"\nconst TEXT_RESET = \"\\x1b[22m\\x1b[39m\"\nconst ANSI_RE = /\\x1b\\[[0-9;]*m/g\n\nconst fg = (r: number, g: number, b: number) => `\\x1b[38;2;${r};${g};${b}m`\nconst bg = (r: number, g: number, b: number) => `\\x1b[48;2;${r};${g};${b}m`\n\nconst theme = {\n  bg: bg(25, 8, 28),\n  title: fg(224, 222, 226),\n  subtitle: fg(150, 132, 155),\n  muted: fg(122, 106, 130),\n  border: fg(86, 55, 88),\n  sep: fg(96, 80, 98),\n  blue: fg(78, 199, 224),\n  green: fg(82, 205, 126),\n  yellow: fg(224, 186, 76),\n  purple: fg(190, 120, 225),\n  pink: fg(230, 120, 175),\n  white: fg(226, 226, 226),\n  danger: fg(235, 116, 116),\n}\n\nexport type ColorMode = \"auto\" | \"always\" | \"never\"\nexport type StatsRenderOptions = {\n  color?: ColorMode\n  limit?: number\n  metric?: \"tokens\" | \"cost\"\n  sort?: \"cost\" | \"tokens\" | \"calls\" | \"updated\"\n}\n\nexport const useColor = (mode: ColorMode = \"auto\") => {\n  if (mode === \"always\") return true\n  if (mode === \"never\") return false\n  if (process.env.NO_COLOR) return false\n  return Boolean(process.stdout.isTTY)\n}\n\nconst visibleLength = (text: string) => text.replace(ANSI_RE, \"\").length\n\nconst padEndAnsi = (text: string, width: number) => text + \" \".repeat(Math.max(0, width - visibleLength(text)))\nconst padStartAnsi = (text: string, width: number) => \" \".repeat(Math.max(0, width - visibleLength(text))) + text\n\nconst color = (text: string, name: keyof typeof theme, enabled: boolean, bold = false) => {\n  if (!enabled) return text\n  return `${bold ? BOLD : \"\"}${theme[name]}${text}${TEXT_RESET}`\n}\n\nconst panel = (lines: string[], enabled: boolean) => {\n  const rows = lines.map((line) => `  ${fitVisible(line, statsContentWidth())}  `)\n  if (!enabled) return rows.join(\"\\n\")\n  return rows.map((line) => `${theme.bg}${line}${RESET}`).join(\"\\n\")\n}\n\nconst dateRange = (report: StatsReport) => {\n  if (report.requestedDays === 0) return \"Today\"\n  if (report.requestedDays) return `Last ${report.requestedDays} days`\n  if (report.daily.length === 0) return \"All time\"\n  return `${new Date(report.dateRange.earliest).toLocaleDateString()} - ${new Date(report.dateRange.latest).toLocaleDateString()}`\n}\n\nconst money = (value: number) => {\n  if (!Number.isFinite(value)) return \"$0.00\"\n  if (value >= 100) return `$${value.toFixed(0)}`\n  if (value >= 10) return `$${value.toFixed(1)}`\n  return `$${value.toFixed(4)}`\n}\n\nconst percent = (value: number, total: number) => {\n  if (!total) return \"0.0%\"\n  return `${((value / total) * 100).toFixed(1)}%`\n}\n\nconst tokenParts = (tokens: TokenTotals) => [\n  { label: \"In\", value: tokens.input, color: \"blue\" as const },\n  { label: \"Out\", value: tokens.output + tokens.reasoning, color: \"green\" as const },\n  { label: \"Cache Read\", value: tokens.cache.read, color: \"yellow\" as const },\n  { label: \"Cache Write\", value: tokens.cache.write, color: \"purple\" as const },\n]\n\nconst segmentWidths = (values: number[], width: number) => {\n  const total = values.reduce((acc, value) => acc + value, 0)\n  if (total <= 0) return values.map(() => 0)\n  const raw = values.map((value) => (value / total) * width)\n  const sizes = raw.map((value, index) => (values[index] > 0 ? Math.max(1, Math.floor(value)) : 0))\n  while (sizes.reduce((acc, value) => acc + value, 0) > width) {\n    const index = sizes.reduce((best, value, current) => \nerror: patch failed: packages/opencode/src/cli/cmd/stats-render.ts:1\nerror: packages/opencode/src/cli/cmd/stats-render.ts: patch does not apply\nChecking patch packages/opencode/src/cli/cmd/stats.ts...\nerror: while searching for:\nimport { Effect } from \"effect\"\nimport { effectCmd } from \"../effect-cmd\"\nimport { InstanceRef } from \"@/effect/instance-ref\"\nimport { aggregateStats, type StatsReport } from \"./stats-data\"\nimport { renderForecast, renderInsights } from \"./stats-insights\"\nimport {\n  renderCharts,\n  renderCosts,\n  renderDashboard,\n  renderHeatmapPage,\n  renderModels,\n  renderOverview,\n  renderProviders,\n  renderSessions,\n  renderTimeline,\n  renderTokens,\n  type ColorMode,\n  type StatsRenderOptions,\n} from \"./stats-render\"\n\nexport { formatNumber } from \"./stats-render\"\n\ntype BaseArgs = {\n  days?: number\n  project?: string\n  color?: string\n}\n\ntype DashboardArgs = BaseArgs & {\n\nerror: patch failed: packages/opencode/src/cli/cmd/stats.ts:2\nerror: packages/opencode/src/cli/cmd/stats.ts: patch does not apply\nChecking patch packages/opencode/src/cli/cmd/stats-charts.ts => packages/opencode/src/cli/cmd/stats/charts.ts...\nerror: while searching for:\nimport { formatNumber } from \"../format\"\nimport type { TokenPartSeries, UsageSeries } from \"./stats-data\"\nimport type { ColorMode } from \"./stats-render\"\n\nconst RESET = \"\\x1b[0m\"\nconst BOLD = \"\\x1b[1m\"\n\nerror: patch failed: packages/opencode/src/cli/cmd/stats-charts.ts:1\nerror: packages/opencode/src/cli/cmd/stats-charts.ts: patch does not apply\nChecking patch packages/opencode/src/cli/cmd/stats-data.ts => packages/opencode/src/cli/cmd/stats/data.ts...\nerror: while searching for:\nimport { Effect } from \"effect\"\nimport { Session } from \"@/session/session\"\nimport { RequestUsageAssistantTable, RequestUsageTable } from \"@/session/request-usage.sql\"\nimport { NotFoundError } from \"@/storage/storage\"\nimport { Database, eq } from \"@/storage/db\"\n\nerror: patch failed: packages/opencode/src/cli/cmd/stats-data.ts:1\nerror: packages/opencode/src/cli/cmd/stats-data.ts: patch does not apply\nChecking patch packages/opencode/src/cli/cmd/stats-insights.ts => packages/opencode/src/cli/cmd/stats/insights.ts...\nerror: while searching for:\nimport type { DailyUsage, SessionUsage, StatsReport, UsageGroup } from \"./stats-data\"\nimport type { ColorMode } from \"./stats-render\"\nimport { formatNumber } from \"../format\"\nimport {\n  metricFormatter,\n  renderCallout,\n  renderComparisonTable,\n  renderGauge,\n  renderHistogram,\n  renderRankBars,\n  renderRoundedLineChart,\n\nerror: patch failed: packages/opencode/src/cli/cmd/stats-insights.ts:1\nerror: packages/opencode/src/cli/cmd/stats-insights.ts: patch does not apply\nChecking patch packages/opencode/src/cli/cmd/stats/render.ts...\nChecking patch packages/opencode/test/cli/stats-render-width.test.ts...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "d43b688b19862c00d3be8d258c679ea01a56028d66c348c707cb8f0aa46cf512",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "9df515049a5add1a72bb2950dd6c1593f8b7f5260186c677d00dc5f612d8cb20"
+  },
+  "stoppedAt": 176,
+  "finishedAt": "2026-07-25T19:43:45.877Z",
+  "sourceRepoHeadAfter": "69fb3d7d8d72ad76020c0e4b236a8106caec80a6",
+  "sourceRepoFingerprintAfter": "436133cf59f9018a6bc0b2494f3be4fb68f44cfe5e95223bc91e7cea4d620953",
+  "targetRepoFingerprintAfter": "51c0210ef3ff91b5572381109b68892ae0068fe92333f55f225b4d4bbd5e49f1",
+  "retainedStates": [
+    "0175-f0a47a144866",
+    "0174-57eecce76b03",
+    "0173-59aeb3d239f3",
+    "0172-595b0e8f3ede",
+    "0171-49650e2f95ff"
+  ]
+}

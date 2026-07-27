@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-21T11:23:33.756Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 75,
+  "passed": 74,
+  "reusedPrefix": 74,
+  "baseState": "0074-4d55a2c0f4a3",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 75,
+  "sourceRepoHeadBefore": "4b825d8b81933804bf5af57fda449eecdac29425",
+  "sourceRepoFingerprintBefore": "6f31acfd72666427d20a3d1583a541c68e68cab78b560421cd55ceccaf518299",
+  "targetRepoFingerprintBefore": "3faebf3076d5a041327a7a938da39a48046e96df40ee6a0a436d318fac137ed9",
+  "outcomes": [
+    {
+      "index": 75,
+      "sha": "4141d5e979ff532f2a6eff956a689a9a71b3d6f5",
+      "subject": "feat: 延迟测试，增加API URL的默认配置，优化模型API的获取逻辑",
+      "patch": "current/0075-4141d5e979ff.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "unknown",
+      "stdout": "",
+      "stderr": "error: corrupt patch at line 179\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "e5745da87f523a3a2a7d43c8ee4afbc238258625dc2b0be4bcf09830d15017e1",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "2d27f8a2abce0504f272a821b81d2b72234b9cc4d96c3fc9da49bee99658930f"
+  },
+  "stoppedAt": 75,
+  "finishedAt": "2026-07-21T11:23:43.067Z",
+  "sourceRepoHeadAfter": "4b825d8b81933804bf5af57fda449eecdac29425",
+  "sourceRepoFingerprintAfter": "6f31acfd72666427d20a3d1583a541c68e68cab78b560421cd55ceccaf518299",
+  "targetRepoFingerprintAfter": "3faebf3076d5a041327a7a938da39a48046e96df40ee6a0a436d318fac137ed9",
+  "retainedStates": [
+    "0074-4d55a2c0f4a3",
+    "0073-f75419bd78c5",
+    "0072-a09787f293c9"
+  ]
+}

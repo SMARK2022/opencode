@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-21T04:30:49.910Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 74,
+  "passed": 73,
+  "reusedPrefix": 73,
+  "baseState": "0073-f75419bd78c5",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 74,
+  "sourceRepoHeadBefore": "f2918a5c2257bff5075a993c7196e01ff6d4d0cc",
+  "sourceRepoFingerprintBefore": "98f13a4b6c0a3616af8e55800b6d2a87403c2244608637aff41c3fbff1ac6d61",
+  "targetRepoFingerprintBefore": "305bd4064a9afb30fe7058d3ad9cc7b3e8ad15534c08b0b3909def8a1c21e9e5",
+  "outcomes": [
+    {
+      "index": 74,
+      "sha": "4d55a2c0f4a3a71a1791b3b5356372e16e6e0c47",
+      "subject": "feat: 增加工具调用和工具结果的独立分类，优化上下文使用数据计算",
+      "patch": "current/0074-4d55a2c0f4a3.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/tui/src/routes/session/context-usage.tsx...\nChecking patch packages/tui/src/util/context-usage.ts...\nerror: while searching for:\n  // 输出消息 = 助手文本 + 推理 + 工具调用 + 压缩摘要\n  const outputMessageTokens =\n    msg.details.assistantText + msg.details.reasoning + msg.details.toolCalls + msg.details.compactionSummary\n  const messageTotal = inputMessageTokens + outputMessageTokens\n  const window = windowDetails(input, modelInfo.model)\n  // 已用 token = 系统提示 + 指令 + 加载指令 + 技能 + 工具定义 + 消息\n  const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens + messageTotal\n  // 自由空间 = 可用输入 - 已用（无模型限制时为 0）\n  const free = maxTokens ? Math.max(0, window.usableInput - used) : 0\n\n\nerror: patch failed: packages/tui/src/util/context-usage.ts:1069\nerror: packages/tui/src/util/context-usage.ts: patch does not apply\nChecking patch packages/tui/test/context-usage.test.ts...\nHunk #1 succeeded at 155 (offset 17 lines).\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "91f761454f653ed97a7c03d25a523463b5552d1db93dcf9fc1db37f106f5f562",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "a50146405e86ebe980fcfa9691e6436ec154060cad4c359257763f97a6b12c89"
+  },
+  "stoppedAt": 74,
+  "finishedAt": "2026-07-21T04:30:59.886Z",
+  "sourceRepoHeadAfter": "f2918a5c2257bff5075a993c7196e01ff6d4d0cc",
+  "sourceRepoFingerprintAfter": "98f13a4b6c0a3616af8e55800b6d2a87403c2244608637aff41c3fbff1ac6d61",
+  "targetRepoFingerprintAfter": "305bd4064a9afb30fe7058d3ad9cc7b3e8ad15534c08b0b3909def8a1c21e9e5",
+  "retainedStates": [
+    "0073-f75419bd78c5",
+    "0072-a09787f293c9",
+    "0071-d95dc89b856d",
+    "0070-efae0086f406",
+    "0069-d34ed37bb4c4"
+  ]
+}

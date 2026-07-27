@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-20T14:43:24.463Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 95,
+  "passed": 91,
+  "reusedPrefix": 91,
+  "baseState": "0091-124adc90ec7c",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 95,
+  "sourceRepoHeadBefore": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintBefore": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintBefore": "2b7f4a6bfeaccba8789e1cb0fb32d72acbc1e84bca1f334153f3305165ba13f8",
+  "outcomes": [
+    {
+      "index": 92,
+      "sha": "2f1ab5812e3b2e873ced2a10959d83dd7609de61",
+      "subject": "feat(vscode): 重构笔记本环境操作，合并内核重启功能，增强操作描述与超时设置",
+      "patch": "current/0092-2f1ab5812e3b.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "unknown",
+      "stdout": "",
+      "stderr": "error: corrupt patch at line 112\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "3205f048cf1043666270f22b94550a2da34c11cbf383b45e1e0dc81d00a88aa3",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "e9c680c5143dc1a9eaa3388ce9054a3be5bfa802d15eef44cf8c6e2c5dedb4fe"
+  },
+  "stoppedAt": 92,
+  "finishedAt": "2026-07-20T14:43:35.120Z",
+  "sourceRepoHeadAfter": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintAfter": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintAfter": "2b7f4a6bfeaccba8789e1cb0fb32d72acbc1e84bca1f334153f3305165ba13f8",
+  "retainedStates": [
+    "0091-124adc90ec7c",
+    "0090-56bce83a059b"
+  ]
+}

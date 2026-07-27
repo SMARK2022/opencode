@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-19T19:22:54.492Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 75,
+  "passed": 75,
+  "reusedPrefix": 75,
+  "baseState": "0075-4141d5e979ff",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 75,
+  "sourceRepoHeadBefore": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintBefore": "56188e11b21dd544b6712242e86326e570843504c8fc5a34aab46682b9135edc",
+  "targetRepoFingerprintBefore": "16c206ea48fba06a4f2528b4b6cb6a97fdcba55ceda3109c4eab37e20e5aab16",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0075-4141d5e979ff",
+  "retainedStates": [
+    "0075-4141d5e979ff",
+    "0074-4d55a2c0f4a3",
+    "0073-f75419bd78c5",
+    "0072-a09787f293c9",
+    "0071-d95dc89b856d"
+  ],
+  "test": {
+    "index": 75,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "550ca932999a73cc76626eec6fe28a2bc7dcdcb6764cb494d32aee7bff50c9ea",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "failed",
+        "stdout": "../tui/src/util/context-usage.ts(1053,55): error TS2554: Expected 1 arguments, but got 2.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-19T19:23:00.470Z",
+  "sourceRepoHeadAfter": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintAfter": "56188e11b21dd544b6712242e86326e570843504c8fc5a34aab46682b9135edc",
+  "targetRepoFingerprintAfter": "16c206ea48fba06a4f2528b4b6cb6a97fdcba55ceda3109c4eab37e20e5aab16"
+}

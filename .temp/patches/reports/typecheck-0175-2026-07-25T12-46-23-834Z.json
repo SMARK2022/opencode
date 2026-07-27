@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-25T12:46:23.834Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 175,
+  "passed": 175,
+  "reusedPrefix": 175,
+  "baseState": "0175-f0a47a144866",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 175,
+  "sourceRepoHeadBefore": "71afbee8f47061588f6e1db98aa0f2d0f5634b22",
+  "sourceRepoFingerprintBefore": "88958fbf63c8cb526ecbf9bb7c4333619513183d675b3a6913449d7b403369ee",
+  "targetRepoFingerprintBefore": "248fb13a154d14105bead3488203f15d3d19297587509d8cdd7886805c98de1a",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0175-f0a47a144866",
+  "retainedStates": [
+    "0175-f0a47a144866",
+    "0174-57eecce76b03",
+    "0173-59aeb3d239f3",
+    "0172-595b0e8f3ede",
+    "0171-49650e2f95ff"
+  ],
+  "test": {
+    "index": 175,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/cli/cmd/stats-data.ts(495,27): error TS2488: Type '() => Effect<{ id: string & Brand<\"SessionID\">; slug: string; projectID: string & Brand<\"Project.ID\">; workspaceID?: (string & Brand<\"WorkspaceV2.ID\">) | undefined; ... 14 more ...; revert?: { ...; } | undefined; }[], never, Service>' must have a '[Symbol.iterator]()' method that returns an iterator.\nsrc/cli/cmd/stats-data.ts(497,14): error TS7006: Parameter 'session' implicitly has an 'any' type.\nsrc/cli/cmd/stats-data.ts(498,14): error TS7006: Parameter 'session' implicitly has an 'any' type.\nsrc/cli/cmd/stats-data.ts(508,92): error TS2345: Argument of type 'unknown' is not assignable to parameter of type '{ id: string & Brand<\"SessionID\">; slug: string; projectID: string & Brand<\"Project.ID\">; workspaceID?: (string & Brand<\"WorkspaceV2.ID\">) | undefined; directory: string; ... 13 more ...; revert?: { ...; } | undefined; }'.\nsrc/cli/cmd/stats-data.ts(572,6): error TS7006: Parameter 'earliest' implicitly has an 'any' type.\nsrc/cli/cmd/stats-data.ts(572,16): error TS7006: Parameter 'session' implicitly has an 'any' type.\nsrc/cli/cmd/stats-data.ts(575,51): error TS7006: Parameter 'latest' implicitly has an 'any' type.\nsrc/cli/cmd/stats-data.ts(575,59): error TS7006: Parameter 'session' implicitly has an 'any' type.\nsrc/cli/cmd/stats.ts(176,3): error TS2322: Type '(args: BaseArgs & { limit?: number | undefined; }) => Effect<void, unknown, unknown>' is not assignable to type '(args: WithDoubleDash<{ days: number | undefined; } & { project: string | undefined; } & { color: string; } & { limit: number | undefined; }>) => Effect<void, CliError, Service | ... 47 more ... | Service>'.\n  Type 'Effect<void, unknown, unknown>' is not assignable to type 'Effect<void, CliError, FSUtil.Service | Service | Service | Service | Service | Service | Service | Service | ... 41 more ... | Service>'.\n    Type 'unknown' is not assignable to type 'CliError'.\nsrc/cli/cmd/stats.ts(190,3): error TS2322: Type '(args: DetailArgs) => Effect<void, unknown, unknown>' is not assignable to type '(args: WithDoubleDash<{ days: number | undefined; } & { project: string | undefined; } & { color: string; } & { limit: number | undefined; } & { metric: string; } & { sort: string; }>) => Effect<...>'.\n  Type 'Effect<void, unknown, unknown>' is not assignable to type 'Effect<void, CliError, FSUtil.Service | Service | Service | Service | Service | Service | Service | Service | ... 41 more ... | Service>'.\n    Type 'unknown' is not assignable to type 'CliError'.\nsrc/cli/cmd/stats.ts(204,3): error TS2322: Type '(args: DetailArgs) => Effect<void, unknown, unknown>' is not assignable to type '(args: WithDoubleDash<{ days: number | undefined; } & { project: string | undefined; } & { color: string; } & { limit: number | undefined; } & { metric: string; } & { sort: string; }>) => Effect<...>'.\n  Type 'Effect<void, unknown, unknown>' is not assignable to type 'Effect<void, CliError, FSUtil.Service | Service | Service | Service | Service | Service | Service | Service | ... 41 more ... | Service>'.\n    Type 'unknown' is not assignable to type 'CliError'.\nsrc/cli/cmd/stats.ts(218,3): error TS2322: Type '(args: DetailArgs) => Effect<void, unknown, unknown>' is not assignable to type '(args: WithDoubleDash<{ days: number | undefined; } & { project: string | undefined; } & { color: string; } & { limit: number | undefined; } & { metric: string; } & { sort: string; }>) => Effect<...>'.\n  Type 'Effect<void, unknown, unknown>' is not assignable to type 'Effect<void, CliError, FSUtil.Service | Service | Service | Service | Service | Service | Service | Service | ... 41 more ... | Service>'.\n    Type 'unknown' is not assignable to type 'CliError'.\nsrc/cli/cmd/stats.ts(232,3): error TS2322: Type '(args: DetailArgs) => Effect<void, unknown, unknown>' is not assignable to type '(args: WithDoubleDash<{ days: number | undefined; } & { project: string | undefined; } & { color: string; } & { limit: number | undefined; } & { metric: string; } & { sort: string; }>) => Effect<...>'.\n  Type 'Effect<void, unknown, unknown>' is not assignable to type 'Effect<void, CliError, FSUtil.Service | Service | Service | Service | Service | Service | Service | Service | ... 41 more ... | Service>'.\n    Type 'unknown' is not assignable to type 'CliError'.\nsrc/cli/cmd/stats.ts(258,3): error TS2322: Type '(args: DashboardArgs) => Effect<void, unknown, unknown>' is not assignable to type '(args: WithDoubleDash<{ days: number | undefined; } & { project: string | undefined; } & { color: string; } & { limit: number | undefined; } & { interactive: boolean; }>) => Effect<...>'.\n  Type 'Effect<void, unknown, unknown>' is not assignable to type 'Effect<void, CliError, FSUtil.Service | Service | Service | Service | Service | Service | Service | Service | ... 41 more ... | Service>'.\n    Type 'unknown' is not assignable to type 'CliError'.\nsrc/cli/cmd/stats.ts(277,3): error TS2322: Type '(args: DetailArgs) => Effect<void, unknown, unknown>' is not assignable to type '(args: WithDoubleDash<{ days: number | undefined; } & { project: string | undefined; } & { color: string; } & { limit: number | undefined; } & { metric: string; } & { sort: string; }>) => Effect<...>'.\n  Type 'Effect<void, unknown, unknown>' is not assignable to type 'Effect<void, CliError, FSUtil.Service | Service | Service | Service | Service | Service | Service | Service | ... 41 more ... | Service>'.\n    Type 'unknown' is not assignable to type 'CliError'.\nsrc/cli/cmd/stats.ts(291,3): error TS2322: Type '(args: DetailArgs) => Effect<void, unknown, unknown>' is not assignable to type '(args: WithDoubleDash<{ days: number | undefined; } & { project: string | undefined; } & { color: string; } & { limit: number | undefined; } & { metric: string; } & { sort: string; }>) => Effect<...>'.\n  Type 'Effect<void, unknown, unknown>' is not assignable to type 'Effect<void, CliError, FSUtil.Service | Service | Service | Service | Service | Service | Service | Service | ... 41 more ... | Service>'.\n    Type 'unknown' is not assignable to type 'CliError'.\nsrc/cli/cmd/stats.ts(305,3): error TS2322: Type '(args: DetailArgs) => Effect<void, unknown, unknown>' is not assignable to type '(args: WithDoubleDash<{ days: number | undefined; } & { project: string | undefined; } & { color: string; } & { limit: number | undefined; } & { metric: string; } & { sort: string; }>) => Effect<...>'.\n  Type 'Effect<void, unknown, unknown>' is not assignable to type 'Effect<void, CliError, FSUtil.Service | Service | Service | Service | Service | Service | Service | Service | ... 41 more ... | Service>'.\n    Type 'unknown' is not assignable to type 'CliError'.\nsrc/cli/cmd/stats.ts(319,3): error TS2322: Type '(args: DetailArgs) => Effect<void, unknown, unknown>' is not assignable to type '(args: WithDoubleDash<{ days: number | undefined; } & { project: string | undefined; } & { color: string; } & { limit: number | undefined; } & { metric: string; } & { sort: string; }>) => Effect<...>'.\n  Type 'Effect<void, unknown, unknown>' is not assignable to type 'Effect<void, CliError, FSUtil.Service | Service | Service | Service | Service | Service | Service | Service | ... 41 more ... | Service>'.\n    Type 'unknown' is not assignable to type 'CliError'.\nsrc/cli/cmd/stats.ts(333,3): error TS2322: Type '(args: DetailArgs) => Effect<void, unknown, unknown>' is not assignable to type '(args: WithDoubleDash<{ days: number | undefined; } & { project: string | undefined; } & { color: string; } & { limit: number | undefined; } & { metric: string; } & { sort: string; }>) => Effect<...>'.\n  Type 'Effect<void, unknown, unknown>' is not assignable to type 'Effect<void, CliError, FSUtil.Service | Service | Service | Service | Service | Service | Service | Service | ... 41 more ... | Service>'.\n    Type 'unknown' is not assignable to type 'CliError'.\nsrc/cli/cmd/stats.ts(347,3): error TS2322: Type '(args: DetailArgs) => Effect<void, unknown, unknown>' is not assignable to type '(args: WithDoubleDash<{ days: number | undefined; } & { project: string | undefined; } & { color: string; } & { limit: number | undefined; } & { metric: string; } & { sort: string; }>) => Effect<...>'.\n  Type 'Effect<void, unknown, unknown>' is not assignable to type 'Effect<void, CliError, FSUtil.Service | Service | Service | Service | Service | Service | Service | Service | ... 41 more ... | Service>'.\n    Type 'unknown' is not assignable to type 'CliError'.\nsrc/cli/cmd/stats.ts(391,3): error TS2322: Type '(args: DashboardArgs) => Effect<void, unknown, unknown>' is not assignable to type '(args: WithDoubleDash<{ days: number | undefined; } & { project: string | undefined; } & { color: string; } & { tools: number | undefined; } & { models: unknown; } & { limit: number | undefined; } & { interactive: boolean; }>) => Effect<...>'.\n  Type 'Effect<void, unknown, unknown>' is not assignable to type 'Effect<void, CliError, FSUtil.Service | Service | Service | Service | Service | Service | Service | Service | ... 41 more ... | Service>'.\n    Type 'unknown' is not assignable to type 'CliError'.\nsrc/cli/effect-cmd.ts(93,15): error TS2304: Cannot find name 'instanceContext'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-25T12:46:57.740Z",
+  "sourceRepoHeadAfter": "71afbee8f47061588f6e1db98aa0f2d0f5634b22",
+  "sourceRepoFingerprintAfter": "88958fbf63c8cb526ecbf9bb7c4333619513183d675b3a6913449d7b403369ee",
+  "targetRepoFingerprintAfter": "248fb13a154d14105bead3488203f15d3d19297587509d8cdd7886805c98de1a"
+}

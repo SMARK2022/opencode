@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-20T06:32:19.568Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 90,
+  "passed": 88,
+  "reusedPrefix": 88,
+  "baseState": "0088-284c6bf1663e",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 90,
+  "sourceRepoHeadBefore": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintBefore": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintBefore": "9e14c7bda9ca35410121f5eb48476f081da186d4391d8523a184cc11ad4fddb7",
+  "outcomes": [
+    {
+      "index": 89,
+      "sha": "94eb97b93fad4b2510420b1703e1928bb00050ea",
+      "subject": "feat(vscode): 更新OpenCode VS Code桥接，修改扩展ID并添加许可证文件",
+      "patch": "current/0089-94eb97b93fad.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/identity/mark-192x192.png...\nerror: cannot apply binary patch to 'packages/identity/mark-192x192.png' without full index line\nerror: packages/identity/mark-192x192.png: patch does not apply\nChecking patch packages/identity/mark-512x512-light.png...\nerror: cannot apply binary patch to 'packages/identity/mark-512x512-light.png' without full index line\nerror: packages/identity/mark-512x512-light.png: patch does not apply\nChecking patch packages/identity/mark-512x512.png...\nerror: cannot apply binary patch to 'packages/identity/mark-512x512.png' without full index line\nerror: packages/identity/mark-512x512.png: patch does not apply\nChecking patch packages/identity/mark-96x96.png...\nerror: cannot apply binary patch to 'packages/identity/mark-96x96.png' without full index line\nerror: packages/identity/mark-96x96.png: patch does not apply\nChecking patch packages/identity/mark-light.png...\nerror: cannot apply binary patch to 'packages/identity/mark-light.png' without full index line\nerror: packages/identity/mark-light.png: patch does not apply\nChecking patch packages/identity/mark-light.svg...\nChecking patch packages/identity/mark.png...\nerror: cannot apply binary patch to 'packages/identity/mark.png' without full index line\nerror: packages/identity/mark.png: patch does not apply\nChecking patch packages/identity/mark.svg...\nChecking patch packages/opencode/src/ide/index.ts...\nChecking patch sdks/vscode/.vscodeignore...\nChecking patch sdks/vscode/LICENSE...\nChecking patch sdks/vscode/README.md...\nChecking patch sdks/vscode/SMARK2022.opencode-ide-bridge-1.14.31.vsix...\nerror: cannot apply binary patch to 'sdks/vscode/SMARK2022.opencode-ide-bridge-1.14.31.vsix' without full index line\nerror: sdks/vscode/SMARK2022.opencode-ide-bridge-1.14.31.vsix: patch does not apply\nChecking patch sdks/vscode/package.json...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "3c371735b3890f0485b9a215f977ea8f8f7cf98bb4401b5491dcfa706ff579ef",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "83212489697a759b935300777f013f626d9764801e7a39ebeb4ef5be9e74ca2e"
+  },
+  "stoppedAt": 89,
+  "finishedAt": "2026-07-20T06:32:28.831Z",
+  "sourceRepoHeadAfter": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintAfter": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintAfter": "9e14c7bda9ca35410121f5eb48476f081da186d4391d8523a184cc11ad4fddb7",
+  "retainedStates": [
+    "0088-284c6bf1663e",
+    "0087-930624b8faea",
+    "0086-3c72d78b8cb1",
+    "0085-66ddc4e2fe6c"
+  ]
+}

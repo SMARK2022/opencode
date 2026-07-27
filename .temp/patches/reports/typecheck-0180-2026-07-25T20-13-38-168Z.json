@@ -1,0 +1,163 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-25T20:13:38.168Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 180,
+  "passed": 180,
+  "reusedPrefix": 180,
+  "baseState": "0180-201e910402a2",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 180,
+  "sourceRepoHeadBefore": "69fb3d7d8d72ad76020c0e4b236a8106caec80a6",
+  "sourceRepoFingerprintBefore": "5a7ca732f362ac61e3c316bcea9354119a25e74c7e8d57cbf8200a92ab9c1156",
+  "targetRepoFingerprintBefore": "be79b21139962a929f4a031e361a5338d0dd0177d9d3d0170b5547468f157a9c",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0180-201e910402a2",
+  "retainedStates": [
+    "0180-201e910402a2",
+    "0176-1a88ba6a6e8c",
+    "0175-f0a47a144866",
+    "0174-57eecce76b03",
+    "0173-59aeb3d239f3"
+  ],
+  "test": {
+    "index": 180,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/cli/cmd/stats-data.ts(265,1): error TS1434: Unexpected keyword or identifier.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-25T20:14:02.057Z",
+  "sourceRepoHeadAfter": "69fb3d7d8d72ad76020c0e4b236a8106caec80a6",
+  "sourceRepoFingerprintAfter": "0b9b57f7b4b93c9dcfca1ab76bb2f87c61d2080a32d72f9106f9abca7f5049f3",
+  "targetRepoFingerprintAfter": "be79b21139962a929f4a031e361a5338d0dd0177d9d3d0170b5547468f157a9c",
+  "integrityFailure": "source repository changed during dry-run"
+}

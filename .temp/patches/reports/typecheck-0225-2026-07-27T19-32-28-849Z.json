@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-27T19:32:28.849Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 225,
+  "passed": 223,
+  "reusedPrefix": 223,
+  "baseState": "0223-f71acd28f654",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 225,
+  "sourceRepoHeadBefore": "2a325224ffe806736a92d157561b620b80ad5181",
+  "sourceRepoFingerprintBefore": "c41d5dbd57486c43ff00cd409eeef0f34745f35f67c4937a2f4222735aff4fdc",
+  "targetRepoFingerprintBefore": "9a2753d447fbd878f6d33d4932a329ab2651be73385b5690b8992502a199d1ce",
+  "outcomes": [
+    {
+      "index": 224,
+      "sha": "1b8b8b9dae13973fba192e5f463d2fc96e051295",
+      "subject": "feat: add notebook editing capabilities and metadata handling",
+      "patch": "current/0224-1b8b8b9dae13.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "unknown",
+      "stdout": "",
+      "stderr": "error: corrupt patch at line 1516\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "0437898e1b7d3a09440da0f071afebaed12011c4ede228d563fdf490aa8697bd",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "2bf728abb3332d1363b47999e66d7ed11a0017867b2767ad77455707d68c960d"
+  },
+  "stoppedAt": 224,
+  "finishedAt": "2026-07-27T19:32:45.998Z",
+  "sourceRepoHeadAfter": "2a325224ffe806736a92d157561b620b80ad5181",
+  "sourceRepoFingerprintAfter": "c41d5dbd57486c43ff00cd409eeef0f34745f35f67c4937a2f4222735aff4fdc",
+  "targetRepoFingerprintAfter": "9a2753d447fbd878f6d33d4932a329ab2651be73385b5690b8992502a199d1ce",
+  "retainedStates": [
+    "0223-f71acd28f654",
+    "0222-8627ea829ffd",
+    "0221-aa1d0d27c371"
+  ]
+}

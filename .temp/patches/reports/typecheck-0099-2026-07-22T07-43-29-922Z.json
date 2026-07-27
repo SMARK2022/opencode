@@ -1,0 +1,251 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-22T07:43:29.922Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 99,
+  "passed": 99,
+  "reusedPrefix": 99,
+  "baseState": "0099-707d679466ec",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 99,
+  "sourceRepoHeadBefore": "9a591b3a115e4528612f70aadfc0c7dbce3104a3",
+  "sourceRepoFingerprintBefore": "ab125cbe7abfb1fd9be65ebdb22d082ee038afac43c88b60f15252ed27adbd17",
+  "targetRepoFingerprintBefore": "e7d08edbaee947afd2b7b7de85043143428e9169ccb13cec710db20765a530a3",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0099-707d679466ec",
+  "retainedStates": [
+    "0099-707d679466ec",
+    "0095-4dec9d15826f",
+    "0094-81efcbb1d8cb"
+  ],
+  "test": {
+    "index": 99,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "32d96724c1330e2d1872515bcd2f190d3562109327884c4e043d3722a05df575",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/plugin",
+        "command": "bun typecheck (packages/plugin)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/protocol",
+        "command": "bun typecheck (packages/protocol)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/schema",
+        "command": "bun typecheck (packages/schema)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/sdk-next",
+        "command": "bun typecheck (packages/sdk-next)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/sdk/js",
+        "command": "bun typecheck (packages/sdk/js)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/server",
+        "command": "bun typecheck (packages/server)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/session-ui",
+        "command": "bun typecheck (packages/session-ui)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/slack",
+        "command": "bun typecheck (packages/slack)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/stats/app",
+        "command": "bun typecheck (packages/stats/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/stats/core",
+        "command": "bun typecheck (packages/stats/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/stats/server",
+        "command": "bun typecheck (packages/stats/server)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/tui",
+        "command": "bun typecheck (packages/tui)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/ui",
+        "command": "bun typecheck (packages/ui)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-22T07:44:20.607Z",
+  "sourceRepoHeadAfter": "9a591b3a115e4528612f70aadfc0c7dbce3104a3",
+  "sourceRepoFingerprintAfter": "ab125cbe7abfb1fd9be65ebdb22d082ee038afac43c88b60f15252ed27adbd17",
+  "targetRepoFingerprintAfter": "e7d08edbaee947afd2b7b7de85043143428e9169ccb13cec710db20765a530a3"
+}

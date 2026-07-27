@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-21T23:32:11.882Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 84,
+  "passed": 83,
+  "reusedPrefix": 83,
+  "baseState": "0083-2e8c148edf30",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 84,
+  "sourceRepoHeadBefore": "707e747a5bf2d511ea313d8e99b3cd1af53c3f6e",
+  "sourceRepoFingerprintBefore": "ad526bd976cfa139498aa75a1c71c0e3c4f70ce3593339c048b68db5ffe9b2e8",
+  "targetRepoFingerprintBefore": "c3096b578204a63129fd81e4d46ee41d3f545346a63dca1489bae8d0e913bad6",
+  "outcomes": [
+    {
+      "index": 84,
+      "sha": "7759649fd14dcb2b5e0fb268dc013e2609f9f209",
+      "subject": "feat(vscode): 增强笔记本请求处理，添加文件锁机制以序列化请求，优化运行逻辑",
+      "patch": "current/0084-7759649fd14d.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch sdks/vscode/src/bridge.ts...\nChecking patch sdks/vscode/src/notebook/run.ts...\nerror: while searching for:\n    }\n\n    // 收集执行结果：包含输出和 artifact 信息\nresults.push(await compactRunCell(notebook, cell))\n  }\n\n  // 生成目标描述：人类可读的执行范围说明\n\nerror: patch failed: sdks/vscode/src/notebook/run.ts:102\nerror: sdks/vscode/src/notebook/run.ts: patch does not apply\nChecking patch sdks/vscode/src/notebook/summary.ts...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "61a3706ab6dddc62840dda186224f48639cc5f545fa2f29b02691609db29f9e7",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "23c1f0e25b35a8bb2162af4f2bae1d777cd53c187d7ac69844d9b0102927967b"
+  },
+  "stoppedAt": 84,
+  "finishedAt": "2026-07-21T23:32:19.970Z",
+  "sourceRepoHeadAfter": "707e747a5bf2d511ea313d8e99b3cd1af53c3f6e",
+  "sourceRepoFingerprintAfter": "d0294e4ad5979f6f6215dc9e5ce733f0740ab221e5911dcdef84bc0eaf9948aa",
+  "targetRepoFingerprintAfter": "c3096b578204a63129fd81e4d46ee41d3f545346a63dca1489bae8d0e913bad6",
+  "integrityFailure": "source repository changed during dry-run",
+  "retainedStates": [
+    "0083-2e8c148edf30",
+    "0082-afccfe84a555",
+    "0081-85442a1f1e68",
+    "0080-0a8361dfa4d3",
+    "0079-8812fd3d588b"
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-18T18:04:10.226Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 30,
+  "passed": 25,
+  "reusedPrefix": 25,
+  "baseState": "0025-634fdbefd224",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 30,
+  "sourceRepoHeadBefore": "fe6154a3c7b4b79b8f388f738e801f3f226de6a9",
+  "sourceRepoFingerprintBefore": "12c4178fbb644da9587808b11b814b0f914a54eaa6d7b17ae125658218f5bdc7",
+  "targetRepoFingerprintBefore": "c6a8a7f6fb53f3e7697dd071966ea3d8a165a6e6e279737fdb7bc9f111b7433e",
+  "outcomes": [
+    {
+      "index": 26,
+      "sha": "13fd8ab5dcbef4509b906cd4f8c6df26de393b57",
+      "subject": "fix: 更新完整提示词，以确保工具使用说明的一致性和清晰度，同时增强并行调用",
+      "patch": "current/0026-13fd8ab5dcbe.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "unknown",
+      "stdout": "",
+      "stderr": "error: corrupt patch at line 365\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "ef0ec543ff1cc2c06eb871e49ab79a74a3c82b4e466861fa3b67a8ec0b802231",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "0327de0db817e4651c36ca6efe4eaed0475a4b9edefff94dcefadbf0d44d249d"
+  },
+  "stoppedAt": 26,
+  "finishedAt": "2026-07-18T18:04:19.810Z",
+  "sourceRepoHeadAfter": "fe6154a3c7b4b79b8f388f738e801f3f226de6a9",
+  "sourceRepoFingerprintAfter": "12c4178fbb644da9587808b11b814b0f914a54eaa6d7b17ae125658218f5bdc7",
+  "targetRepoFingerprintAfter": "c6a8a7f6fb53f3e7697dd071966ea3d8a165a6e6e279737fdb7bc9f111b7433e",
+  "retainedStates": [
+    "0025-634fdbefd224",
+    "0020-aa6db0f3264f",
+    "0016-9e14f85c9ad3"
+  ]
+}

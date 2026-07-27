@@ -1,0 +1,159 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-23T22:10:52.799Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 145,
+  "passed": 145,
+  "reusedPrefix": 145,
+  "baseState": "0145-0277deba5044",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 145,
+  "sourceRepoHeadBefore": "93fa43b8144a29a74b4ffabbd49cec64bb094a43",
+  "sourceRepoFingerprintBefore": "753f7d04b75172d7770bf4b6af9a10c055086e9721082dd7ff5545b3ea823ab5",
+  "targetRepoFingerprintBefore": "0039913900ae316a78d8f5efef0d9b1f2e647b383bd9463df30f17c510441fe9",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0145-0277deba5044",
+  "retainedStates": [
+    "0145-0277deba5044",
+    "0140-8acb3fecbfe7"
+  ],
+  "test": {
+    "index": 145,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "installed",
+    "installInputSha256": "0858d40663f7569dbea1ec13385a3a106c07568d988389da38ba142d560f5389",
+    "installStdout": "",
+    "installStderr": "Resolving dependencies\nResolved, downloaded and extracted [41]\nSaved lockfile\n\n$ bun run --cwd packages/core fix-node-pty\n$ bun run script/fix-node-pty.ts\n$ husky\n",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/cli/cmd/github.handler.ts(499,7): error TS2739: Type '{ [x: string]: any; }' is missing the following properties from type '{ id: string & Brand<\"SessionID\">; title: string; version: string; }': id, title, version\nsrc/cli/cmd/import.ts(173,41): error TS2345: Argument of type 'Struct<{ readonly id: brand<String, \"SessionID\"> & { create: () => string & Brand<\"SessionID\">; descending: (id?: string | undefined) => string & Brand<\"SessionID\">; }; ... 17 more ...; readonly revert: decodeTo<...>; }>' is not assignable to parameter of type 'Decoder<unknown, never>'.\n  Types of property '\"DecodingServices\"' are incompatible.\n    Type 'any' is not assignable to type 'never'.\nsrc/session/reminders.ts(54,31): error TS2739: Type '{ [x: string]: any; }' is missing the following properties from type '{ slug: string; time: { created: number; }; }': slug, time\nsrc/session/reminders.ts(73,29): error TS2739: Type '{ [x: string]: any; }' is missing the following properties from type '{ slug: string; time: { created: number; }; }': slug, time\nsrc/session/session.ts(225,14): error TS2693: 'string' only refers to a type, but is being used as a value here.\nsrc/session/session.ts(535,78): error TS2740: Type '{ [x: string]: any; }' is missing the following properties from type '{ readonly id: string & Brand<\"SessionID\">; readonly slug: string; readonly projectID: string & Brand<\"Project.ID\">; readonly workspaceID?: (string & Brand<\"WorkspaceV2.ID\">) | undefined; ... 14 more ...; readonly revert?: { ...; } | undefined; }': id, slug, projectID, directory, and 3 more.\nsrc/session/session.ts(626,69): error TS2740: Type '{ [x: string]: any; }' is missing the following properties from type '{ readonly id: string & Brand<\"SessionID\">; readonly slug: string; readonly projectID: string & Brand<\"Project.ID\">; readonly workspaceID?: (string & Brand<\"WorkspaceV2.ID\">) | undefined; ... 14 more ...; readonly revert?: { ...; } | undefined; }': id, slug, projectID, directory, and 3 more.\nsrc/session/session.ts(750,69): error TS2740: Type '{ [x: string]: any; }' is missing the following properties from type '{ readonly id: string & Brand<\"SessionID\">; readonly slug: string; readonly projectID: string & Brand<\"Project.ID\">; readonly workspaceID?: (string & Brand<\"WorkspaceV2.ID\">) | undefined; ... 14 more ...; readonly revert?: { ...; } | undefined; }': id, slug, projectID, directory, and 3 more.\nsrc/session/session.ts(990,26): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    Argument of type 'SQLiteColumn<{ name: string; tableName: \"session\"; dataType: \"string\"; data: string & Brand<\"Project.ID\">; driverParam: string; notNull: true; hasDefault: false; isPrimaryKey: false; isAutoincrement: false; ... 4 more ...; generated: undefined; }, {}>' is not assignable to parameter of type 'never'.\nsrc/share/share-next.ts(293,28): error TS2322: Type '{ [x: string]: any; }' is not assignable to type 'Model[] | SnapshotFileDiff[] | Session | Message | Part'.\nsrc/tool/plan.ts(29,70): error TS2739: Type '{ [x: string]: any; }' is missing the following properties from type '{ slug: string; time: { created: number; }; }': slug, time\nsrc/tool/read.ts(400,3): error TS2345: Argument of type 'Effect<{ description: string; parameters: Struct<{ readonly filePath: String; readonly offset: optional<Int>; readonly limit: optional<Int>; }>; execute: (params: { ...; }, ctx: Context<...>) => Effect<...>; }, never, Scope | ... 2 more ... | Service>' is not assignable to parameter of type 'Effect<Init<Struct<{ readonly filePath: String; readonly offset: optional<Int>; readonly limit: optional<Int>; }>, Metadata>, never, Scope | ... 2 more ... | Service>'.\n  Type '{ description: string; parameters: Schema.Struct<{ readonly filePath: Schema.String; readonly offset: Schema.optional<Schema.Int>; readonly limit: Schema.optional<Schema.Int>; }>; execute: (params: { ...; }, ctx: Tool.Context<...>) => Effect.Effect<...>; }' is not assignable to type 'Init<Struct<{ readonly filePath: String; readonly offset: optional<Int>; readonly limit: optional<Int>; }>, Metadata>'.\n    Type '{ description: string; parameters: Schema.Struct<{ readonly filePath: Schema.String; readonly offset: Schema.optional<Schema.Int>; readonly limit: Schema.optional<Schema.Int>; }>; execute: (params: { ...; }, ctx: Tool.Context<...>) => Effect.Effect<...>; }' is not assignable to type 'DefWithoutID<Struct<{ readonly filePath: String; readonly offset: optional<Int>; readonly limit: optional<Int>; }>, Metadata>'.\n      The types returned by 'execute(...)' are incompatible between these types.\n        Type 'Effect<{ title: string; output: string; metadata: { preview: string; truncated: boolean; loaded: string[]; read?: ReadRangeMeta | undefined; display?: Record<string, unknown> | undefined; }; attachments?: undefined; } | { ...; }, never, never>' is not assignable to type 'Effect<ExecuteResult<Metadata>, never, never>'.\n          Type '{ title: string; output: string; metadata: { preview: string; truncated: boolean; loaded: string[]; read?: ReadRangeMeta | undefined; display?: Record<string, unknown> | undefined; }; attachments?: undefined; } | { ...; }' is not assignable to type 'ExecuteResult<Metadata>'.\n            Type '{ title: string; output: string; metadata: { preview: string; truncated: boolean; loaded: string[]; read?: ReadRangeMeta | undefined; display?: Record<string, unknown> | undefined; }; attachments?: undefined; }' is not assignable to type 'ExecuteResult<Metadata>'.\n              The types of 'metadata.display' are incompatible between these types.\n                Type 'Record<string, unknown> | undefined' is not assignable to type 'Display | undefined'.\n                  Type 'Record<string, unknown>' is not assignable to type 'Display | undefined'.\n                    Type 'Record<string, unknown>' is missing the following properties from type '{ type: \"file\"; path: string; text: string; lineStart: number; lineEnd: number; totalLines: number; truncated: boolean; }': type, path, text, lineStart, and 3 more.\ntest/server/httpapi-exercise/runner.ts(137,13): error TS2322: Type 'Effect<{ [x: string]: any; }, never, never>' is not assignable to type 'Effect<SessionInfo, never, never>'.\n  Type '{ [x: string]: any; }' is missing the following properties from type 'SessionInfo': id, title\ntest/server/httpapi-exercise/runner.ts(139,13): error TS2322: Type 'Effect<{ [x: string]: any; } | undefined, never, never>' is not assignable to type 'Effect<SessionInfo | undefined, never, never>'.\n  Type '{ [x: string]: any; } | undefined' is not assignable to type 'SessionInfo | undefined'.\n    Type '{ [x: string]: any; }' is missing the following properties from type 'SessionInfo': id, title\ntest/server/session-list.test.ts(307,1): error TS2593: Cannot find name 'test'. Do you need to install type definitions for a test runner? Try `npm i --save-dev @types/jest` or `npm i --save-dev @types/mocha` and then add 'jest' or 'mocha' to the types field in your tsconfig.\ntest/session/session-schema.test.ts(32,46): error TS2345: Argument of type 'Struct<{ readonly id: brand<String, \"SessionID\"> & { create: () => string & Brand<\"SessionID\">; descending: (id?: string | undefined) => string & Brand<\"SessionID\">; }; ... 17 more ...; readonly revert: decodeTo<...>; }>' is not assignable to parameter of type 'Encoder<unknown, never>'.\n  Types of property '\"EncodingServices\"' are incompatible.\n    Type 'any' is not assignable to type 'never'.\ntest/session/session-schema.test.ts(43,46): error TS2345: Argument of type 'Struct<{ readonly id: brand<String, \"SessionID\"> & { create: () => string & Brand<\"SessionID\">; descending: (id?: string | undefined) => string & Brand<\"SessionID\">; }; ... 18 more ...; readonly project: NullOr<...>; }>' is not assignable to parameter of type 'Encoder<unknown, never>'.\n  Types of property '\"EncodingServices\"' are incompatible.\n    Type 'any' is not assignable to type 'never'.\ntest/session/session-schema.test.ts(57,46): error TS2345: Argument of type 'Struct<{ readonly id: brand<String, \"SessionID\"> & { create: () => string & Brand<\"SessionID\">; descending: (id?: string | undefined) => string & Brand<\"SessionID\">; }; ... 17 more ...; readonly revert: decodeTo<...>; }>' is not assignable to parameter of type 'Encoder<unknown, never>'.\n  Types of property '\"EncodingServices\"' are incompatible.\n    Type 'any' is not assignable to type 'never'.\ntest/tool/read.test.ts(629,30): error TS2339: Property 'read' does not exist on type 'Metadata'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-23T22:11:16.586Z",
+  "sourceRepoHeadAfter": "93fa43b8144a29a74b4ffabbd49cec64bb094a43",
+  "sourceRepoFingerprintAfter": "753f7d04b75172d7770bf4b6af9a10c055086e9721082dd7ff5545b3ea823ab5",
+  "targetRepoFingerprintAfter": "0039913900ae316a78d8f5efef0d9b1f2e647b383bd9463df30f17c510441fe9"
+}

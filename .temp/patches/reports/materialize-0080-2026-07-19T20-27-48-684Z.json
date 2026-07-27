@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-19T20:27:48.684Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 80,
+  "passed": 75,
+  "reusedPrefix": 75,
+  "baseState": "0075-4141d5e979ff",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 80,
+  "sourceRepoHeadBefore": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintBefore": "3f9ef262e91a83538f63e7ee698186231d294e544723b220786aae9d5660351e",
+  "targetRepoFingerprintBefore": "7fd474117deb72864a14a4aae1aafe3784b3b9c43e4542319124b849e3750779",
+  "outcomes": [
+    {
+      "index": 76,
+      "sha": "c9d477841b7d9de4e202808138553d83c363e8dc",
+      "subject": "feat: 优化代理路由逻辑，调整TTL常量，增强插件模块的插件导出处理",
+      "patch": "current/0076-c9d477841b7d.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/core/src/network-proxy.ts...\nerror: while searching for:\n\nexport type Route = { type: \"direct\"; reason: string } | { type: \"proxy\"; proxy: string; reason: string }\n\nconst TTL = 15_000\nconst LOCAL = new Set([\"localhost\", \"127.0.0.1\", \"::1\", \"::ffff:127.0.0.1\"])\n\nlet cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined\nlet globalFetchInstalled = false\n\ntype SystemProxy = {\n  http?: string\n\nerror: patch failed: packages/core/src/network-proxy.ts:4\nerror: packages/core/src/network-proxy.ts: patch does not apply\nChecking patch packages/opencode/src/plugin/index.ts...\nHunk #1 succeeded at 93 (offset 16 lines).\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "05234b09a231808ff89403c2c1177696e71275a37e9f3b8cda44894f2732d365",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "2575c97d418674f0a563e2a749551fc03b68864b235172dff9f814d864b37d49"
+  },
+  "stoppedAt": 76,
+  "finishedAt": "2026-07-19T20:27:57.586Z",
+  "sourceRepoHeadAfter": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintAfter": "3f9ef262e91a83538f63e7ee698186231d294e544723b220786aae9d5660351e",
+  "targetRepoFingerprintAfter": "7fd474117deb72864a14a4aae1aafe3784b3b9c43e4542319124b849e3750779",
+  "retainedStates": [
+    "0075-4141d5e979ff",
+    "0074-4d55a2c0f4a3",
+    "0073-f75419bd78c5",
+    "0071-d95dc89b856d"
+  ]
+}

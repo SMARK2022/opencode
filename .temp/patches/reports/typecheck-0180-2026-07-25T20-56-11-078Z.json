@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-25T20:56:11.078Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 180,
+  "passed": 180,
+  "reusedPrefix": 180,
+  "baseState": "0180-201e910402a2",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 180,
+  "sourceRepoHeadBefore": "8356c6fc1ed45de48160036d00a7a179641999a1",
+  "sourceRepoFingerprintBefore": "0f021b2a6e0f94c6625b98d332f9a42a636f74e0c0c65beabc4ff7d6ffe98844",
+  "targetRepoFingerprintBefore": "b976216c5393b424725fc415bb856054a3136001e83cc57e0bf86980bb8e14c7",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0180-201e910402a2",
+  "retainedStates": [
+    "0180-201e910402a2",
+    "0176-1a88ba6a6e8c",
+    "0175-f0a47a144866",
+    "0174-57eecce76b03",
+    "0173-59aeb3d239f3"
+  ],
+  "test": {
+    "index": 180,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "test/tool/shell.test.ts(1574,63): error TS1002: Unterminated string literal.\ntest/tool/shell.test.ts(1575,17): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1575,22): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1575,30): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1575,40): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1575,42): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1575,44): error TS1002: Unterminated string literal.\ntest/tool/shell.test.ts(1576,17): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1576,28): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1577,15): error TS1135: Argument expression expected.\ntest/tool/shell.test.ts(1581,11): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1581,12): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1582,9): error TS1109: Expression expected.\ntest/tool/shell.test.ts(1582,10): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1583,7): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1583,8): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1584,5): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1585,3): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1600,84): error TS1002: Unterminated string literal.\ntest/tool/shell.test.ts(1601,19): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1601,22): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1601,30): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1601,36): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1601,46): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1601,55): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1601,143): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1601,145): error TS1002: Unterminated string literal.\ntest/tool/shell.test.ts(1602,19): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1602,30): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1603,17): error TS1135: Argument expression expected.\ntest/tool/shell.test.ts(1607,11): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1607,12): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1607,13): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1608,9): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1608,10): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1609,7): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1609,8): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1610,5): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1611,3): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1625,73): error TS1002: Unterminated string literal.\ntest/tool/shell.test.ts(1626,19): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1626,23): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1626,30): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1626,35): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1626,75): error TS1005: ':' expected.\ntest/tool/shell.test.ts(1626,77): error TS1002: Unterminated string literal.\ntest/tool/shell.test.ts(1627,19): error TS1005: ',' expected.\ntest/tool/shell.test.ts(1637,1): error TS1128: Declaration or statement expected.\ntest/tool/shell.test.ts(1637,2): error TS1128: Declaration or statement expected.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-25T20:56:29.311Z",
+  "sourceRepoHeadAfter": "8356c6fc1ed45de48160036d00a7a179641999a1",
+  "sourceRepoFingerprintAfter": "0f021b2a6e0f94c6625b98d332f9a42a636f74e0c0c65beabc4ff7d6ffe98844",
+  "targetRepoFingerprintAfter": "b976216c5393b424725fc415bb856054a3136001e83cc57e0bf86980bb8e14c7"
+}

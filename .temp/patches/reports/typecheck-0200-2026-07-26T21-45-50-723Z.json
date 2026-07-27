@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-26T21:45:50.723Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 200,
+  "passed": 200,
+  "reusedPrefix": 200,
+  "baseState": "0200-d4f24d4434a4",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 200,
+  "sourceRepoHeadBefore": "7c114657bf8d46c4eff60145ee78dce8ea2cdc36",
+  "sourceRepoFingerprintBefore": "f0384740cca24672a76affe120b0248822ac7a25da675f3b89b88c983eecc348",
+  "targetRepoFingerprintBefore": "48d390c55f344b0888ec7ec2f5fdbf0312122aca7f09a128c1ea37f81fb85eb6",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0200-d4f24d4434a4",
+  "retainedStates": [
+    "0200-d4f24d4434a4",
+    "0198-09fcecbcdcc7",
+    "0197-38863f98f871",
+    "0196-998d3ca0f789",
+    "0195-bb5a2b41f258"
+  ],
+  "test": {
+    "index": 200,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "failed",
+        "stdout": "../core/src/config/plugin/agent.ts(164,5): error TS2345: Argument of type 'Option<...> | Option<...>' is not assignable to parameter of type 'Option<Info>'.\n  Type 'None<{ model: string | undefined; variant: string | undefined; request: { body: { temperature?: number | undefined; top_p?: number | undefined; }; } | undefined; system: string | undefined; ... 6 more ...; permissions: { ...; }[] | undefined; }>' is not assignable to type 'Option<Info>'.\n    Type 'None<{ model: string | undefined; variant: string | undefined; request: { body: { temperature?: number | undefined; top_p?: number | undefined; }; } | undefined; system: string | undefined; ... 6 more ...; permissions: { ...; }[] | undefined; }>' is not assignable to type 'None<Info>'.\n      Type '{ model: string | undefined; variant: string | undefined; request: { body: { temperature?: number | undefined; top_p?: number | undefined; }; } | undefined; system: string | undefined; ... 6 more ...; permissions: { ...; }[] | undefined; }' is not assignable to type 'Info'.\n        Types of property 'permissions' are incompatible.\n          Type '{ action: string; resource: string; effect: \"allow\" | \"ask\" | \"auto\" | \"deny\"; }[] | undefined' is not assignable to type 'readonly { readonly action: string; readonly resource: string; readonly effect: \"allow\" | \"ask\" | \"deny\"; }[] | undefined'.\n            Type '{ action: string; resource: string; effect: \"allow\" | \"ask\" | \"auto\" | \"deny\"; }[]' is not assignable to type 'readonly { readonly action: string; readonly resource: string; readonly effect: \"allow\" | \"ask\" | \"deny\"; }[]'.\n              Type '{ action: string; resource: string; effect: \"allow\" | \"ask\" | \"auto\" | \"deny\"; }' is not assignable to type '{ readonly action: string; readonly resource: string; readonly effect: \"allow\" | \"ask\" | \"deny\"; }'.\n                Types of property 'effect' are incompatible.\n                  Type '\"allow\" | \"ask\" | \"auto\" | \"deny\"' is not assignable to type '\"allow\" | \"ask\" | \"deny\"'.\n                    Type '\"auto\"' is not assignable to type '\"allow\" | \"ask\" | \"deny\"'.\n../core/src/v1/config/migrate.ts(85,43): error TS2322: Type '\"allow\" | \"ask\" | \"auto\" | \"auto_review\" | \"deny\" | \"user\"' is not assignable to type '\"allow\" | \"ask\" | \"auto\" | \"deny\"'.\n  Type '\"auto_review\"' is not assignable to type '\"allow\" | \"ask\" | \"auto\" | \"deny\"'.\n../core/src/v1/config/migrate.ts(88,16): error TS2345: Argument of type '{ action: string; resource: string; effect: string | number | boolean; }' is not assignable to parameter of type '{ action: string; resource: string; effect: \"allow\" | \"ask\" | \"auto\" | \"deny\"; }'.\n  Types of property 'effect' are incompatible.\n    Type 'string | number | boolean' is not assignable to type '\"allow\" | \"ask\" | \"auto\" | \"deny\"'.\n      Type 'string' is not assignable to type '\"allow\" | \"ask\" | \"auto\" | \"deny\"'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-26T21:45:59.642Z",
+  "sourceRepoHeadAfter": "7c114657bf8d46c4eff60145ee78dce8ea2cdc36",
+  "sourceRepoFingerprintAfter": "f0384740cca24672a76affe120b0248822ac7a25da675f3b89b88c983eecc348",
+  "targetRepoFingerprintAfter": "48d390c55f344b0888ec7ec2f5fdbf0312122aca7f09a128c1ea37f81fb85eb6"
+}

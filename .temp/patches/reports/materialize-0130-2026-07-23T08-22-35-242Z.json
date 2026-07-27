@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-23T08:22:35.242Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 130,
+  "passed": 125,
+  "reusedPrefix": 125,
+  "baseState": "0125-0cd54998e45f",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 130,
+  "sourceRepoHeadBefore": "76af8d16b1ba80f2a433315d0dd22327ef9ffbd1",
+  "sourceRepoFingerprintBefore": "fe956dc5ad324997eb95211c790ae6c701afeca69ce601d3bb9dadb21c1d91d1",
+  "targetRepoFingerprintBefore": "e5684ca77dfe94e6aaee0eaadf99433ea3a349374dd01383d3d24a282c967f65",
+  "outcomes": [
+    {
+      "index": 126,
+      "sha": "f5f094895bf74f356f571fb76bd61bcf5595e782",
+      "subject": "feat(text-decoding): 添加自动文本解码器，支持UTF-8和UTF-16LE编码的检测与解码",
+      "patch": "current/0126-f5f094895bf7.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/tool/shell.ts...\nerror: while searching for:\nimport { ChildProcessSpawner } from \"effect/unstable/process/ChildProcessSpawner\"\nimport { ShellPrompt, type Parameters } from \"./shell/prompt\"\nimport { BashArity } from \"@/permission/arity\"\nimport {\n  BashDiagnosticCollector,\n  bashCompressionMetadata,\n\nerror: patch failed: packages/opencode/src/tool/shell.ts:23\nerror: packages/opencode/src/tool/shell.ts: patch does not apply\nChecking patch packages/opencode/src/util/text-decoding.ts...\nChecking patch packages/opencode/test/tool/shell.test.ts...\nerror: while searching for:\n      },\n    })\n  })\n})\n\ndescribe(\"tool.shell truncation\", () => {\n\nerror: patch failed: packages/opencode/test/tool/shell.test.ts:1189\nerror: packages/opencode/test/tool/shell.test.ts: patch does not apply\nChecking patch packages/opencode/test/util/text-decoding.test.ts...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "a0e9fcd823a53db84ca53b53c880728fa5994887a03d00a97a39eb047510ff6e",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "3073a621d21f654500e90660fad3c766a2d2b07df8ddcf8864a4bdd59eff3ce6"
+  },
+  "stoppedAt": 126,
+  "finishedAt": "2026-07-23T08:22:43.178Z",
+  "sourceRepoHeadAfter": "76af8d16b1ba80f2a433315d0dd22327ef9ffbd1",
+  "sourceRepoFingerprintAfter": "fe956dc5ad324997eb95211c790ae6c701afeca69ce601d3bb9dadb21c1d91d1",
+  "targetRepoFingerprintAfter": "e5684ca77dfe94e6aaee0eaadf99433ea3a349374dd01383d3d24a282c967f65",
+  "retainedStates": [
+    "0125-0cd54998e45f",
+    "0121-fdb0447556ad",
+    "0120-ca04b07955c0",
+    "0116-9ab94ccbe257"
+  ]
+}

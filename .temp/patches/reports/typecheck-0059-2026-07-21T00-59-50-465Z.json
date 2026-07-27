@@ -1,0 +1,360 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-21T00:59:50.465Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 59,
+  "passed": 59,
+  "reusedPrefix": 58,
+  "baseState": "0058-dbfd53e1cd52",
+  "rebuild": true,
+  "appliedThisRun": 1,
+  "materializedIndex": 59,
+  "sourceRepoHeadBefore": "748d3243a45e9452cacd3e2381c38156912a71ed",
+  "sourceRepoFingerprintBefore": "dbaf66fb7bd37368d5b1ac9e52e603be0d6a64ee30eba455a9cae7c392dd3bce",
+  "targetRepoFingerprintBefore": "49bb6d55de3989b034656fb1f234373c90fca6f8a59e6aa609b07396bcc5595c",
+  "outcomes": [
+    {
+      "index": 59,
+      "sha": "1efc5c8a2a1e5aaa1d2dd994c1013f3ffd2a0a1f",
+      "subject": "fix: add sharp as an optional dependency and improve type handling in media.ts",
+      "patch": "current/0059-1efc5c8a2a1e.patch",
+      "cumulativeChangedFiles": [
+        "A\t.github/workflows/build-opencode.yml",
+        "M\tpackage.json",
+        "M\tpackages/core/src/config/tool-output.ts",
+        "M\tpackages/core/src/database/database.ts",
+        "M\tpackages/core/src/database/migration.gen.ts",
+        "A\tpackages/core/src/database/migration/20260422130633_request_usage_tracking.ts",
+        "M\tpackages/core/src/database/schema.gen.ts",
+        "M\tpackages/core/src/flag/flag.ts",
+        "M\tpackages/core/src/github-copilot/responses/openai-responses-language-model.ts",
+        "M\tpackages/core/src/session/compaction.ts",
+        "A\tpackages/core/src/session/request-usage.sql.ts",
+        "M\tpackages/core/src/v1/config/config.ts",
+        "M\tpackages/core/src/v1/config/provider.ts",
+        "M\tpackages/core/test/session-compaction.test.ts",
+        "M\tpackages/opencode/package.json",
+        "M\tpackages/opencode/script/build.ts",
+        "A\tpackages/opencode/script/version-env.ts",
+        "M\tpackages/opencode/src/agent/agent.ts",
+        "M\tpackages/opencode/src/agent/prompt/compaction.txt",
+        "M\tpackages/opencode/src/cli/cmd/session.ts",
+        "M\tpackages/opencode/src/cli/cmd/stats.ts",
+        "M\tpackages/opencode/src/cli/cmd/tui.ts",
+        "A\tpackages/opencode/src/cli/tui/server-lock.ts",
+        "M\tpackages/opencode/src/cli/tui/worker.ts",
+        "M\tpackages/opencode/src/effect/app-runtime.ts",
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "M\tpackages/opencode/src/index.ts",
+        "M\tpackages/opencode/src/installation/index.ts",
+        "A\tpackages/opencode/src/provider/claudecode.ts",
+        "M\tpackages/opencode/src/provider/provider.ts",
+        "M\tpackages/opencode/src/provider/transform.ts",
+        "M\tpackages/opencode/src/server/routes/instance/httpapi/groups/session.ts",
+        "M\tpackages/opencode/src/server/routes/instance/httpapi/handlers/global.ts",
+        "M\tpackages/opencode/src/server/routes/instance/httpapi/handlers/session.ts",
+        "M\tpackages/opencode/src/server/routes/instance/httpapi/server.ts",
+        "M\tpackages/opencode/src/session/compaction.ts",
+        "M\tpackages/opencode/src/session/processor.ts",
+        "M\tpackages/opencode/src/session/prompt.ts",
+        "M\tpackages/opencode/src/session/prompt/anthropic.txt",
+        "M\tpackages/opencode/src/session/prompt/codex.txt",
+        "M\tpackages/opencode/src/session/prompt/copilot-gpt-5.txt",
+        "A\tpackages/opencode/src/session/prompt/deepseek.txt",
+        "M\tpackages/opencode/src/session/prompt/default.txt",
+        "M\tpackages/opencode/src/session/prompt/gemini.txt",
+        "M\tpackages/opencode/src/session/prompt/gpt.txt",
+        "M\tpackages/opencode/src/session/prompt/kimi.txt",
+        "A\tpackages/opencode/src/session/prompt/minimax.txt",
+        "M\tpackages/opencode/src/session/prompt/plan-reminder-anthropic.txt",
+        "M\tpackages/opencode/src/session/prompt/trinity.txt",
+        "A\tpackages/opencode/src/session/request-usage.ts",
+        "M\tpackages/opencode/src/session/retry.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "A\tpackages/opencode/src/tool/bash-compress.ts",
+        "M\tpackages/opencode/src/tool/glob.txt",
+        "M\tpackages/opencode/src/tool/grep.txt",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/tool/shell.ts",
+        "M\tpackages/opencode/src/tool/shell/prompt.ts",
+        "M\tpackages/opencode/src/tool/shell/shell.txt",
+        "M\tpackages/opencode/src/tool/task.txt",
+        "M\tpackages/opencode/src/tool/todowrite.txt",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/opencode/test/agent/agent.test.ts",
+        "A\tpackages/opencode/test/cli/tui/daemon.test.ts",
+        "A\tpackages/opencode/test/cli/tui/server-lock.test.ts",
+        "M\tpackages/opencode/test/cli/tui/thread.test.ts",
+        "M\tpackages/opencode/test/installation/installation.test.ts",
+        "M\tpackages/opencode/test/tool/read.test.ts",
+        "M\tpackages/opencode/test/tool/shell.test.ts",
+        "M\tpackages/sdk/js/src/v2/gen/types.gen.ts",
+        "M\tpackages/session-ui/src/components/message-part.tsx",
+        "M\tpackages/session-ui/src/components/session-turn.css",
+        "M\tpackages/session-ui/src/components/session-turn.tsx",
+        "M\tpackages/tui/src/app.tsx",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "A\tpackages/tui/src/routes/session/context-usage.tsx",
+        "M\tpackages/tui/src/routes/session/index.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx",
+        "A\tpackages/tui/src/util/context-usage.ts",
+        "M\tpackages/tui/src/util/format.ts",
+        "M\tpackages/tui/src/util/signal.ts",
+        "A\tpackages/tui/src/util/token-estimate.ts",
+        "A\tpackages/tui/src/util/tool-definition-catalog.json",
+        "A\tpackages/tui/test/context-usage.test.ts",
+        "M\tpackages/ui/src/components/scroll-view.css",
+        "M\tpackages/ui/src/components/scroll-view.tsx"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "379ab4c169c6b0f612811ed347ccca580aced007b53c17b262095ff8dec6135f",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "cda774605d2ce2577732f2d1f62222563e64f93a828218917b64628fbf73343b"
+  },
+  "finishedAt": "2026-07-21T01:00:01.996Z",
+  "sourceRepoHeadAfter": "748d3243a45e9452cacd3e2381c38156912a71ed",
+  "sourceRepoFingerprintAfter": "dbaf66fb7bd37368d5b1ac9e52e603be0d6a64ee30eba455a9cae7c392dd3bce",
+  "targetRepoFingerprintAfter": "49bb6d55de3989b034656fb1f234373c90fca6f8a59e6aa609b07396bcc5595c",
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0059-1efc5c8a2a1e",
+  "retainedStates": [
+    "0059-1efc5c8a2a1e",
+    "0058-dbfd53e1cd52",
+    "0057-3a94dd4d0991",
+    "0056-0734b2e81cc3",
+    "0055-0a0eb2e94edc"
+  ],
+  "test": {
+    "index": 59,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "2e4f093273929a48714a769e0ef81f0eefdbdb80899f04e7689f684cf1471f9c",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/plugin",
+        "command": "bun typecheck (packages/plugin)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/protocol",
+        "command": "bun typecheck (packages/protocol)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/schema",
+        "command": "bun typecheck (packages/schema)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/sdk-next",
+        "command": "bun typecheck (packages/sdk-next)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/sdk/js",
+        "command": "bun typecheck (packages/sdk/js)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/server",
+        "command": "bun typecheck (packages/server)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/session-ui",
+        "command": "bun typecheck (packages/session-ui)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/slack",
+        "command": "bun typecheck (packages/slack)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/stats/app",
+        "command": "bun typecheck (packages/stats/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/stats/core",
+        "command": "bun typecheck (packages/stats/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/stats/server",
+        "command": "bun typecheck (packages/stats/server)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/tui",
+        "command": "bun typecheck (packages/tui)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/ui",
+        "command": "bun typecheck (packages/ui)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  }
+}

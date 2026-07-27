@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-19T09:18:41.163Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 49,
+  "passed": 48,
+  "reusedPrefix": 48,
+  "baseState": "0048-f9d2e647d8b2",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 49,
+  "sourceRepoHeadBefore": "43f17817d5be998527e3bad6346762209dfb61f9",
+  "sourceRepoFingerprintBefore": "475836561286018e8387925415f028e7e7eadd94705605446ba4faed77c49951",
+  "targetRepoFingerprintBefore": "27d837e142d33a98a89dbb6cdff9ba3e7b62338ab0d63d64cb2c059caa157cea",
+  "outcomes": [
+    {
+      "index": 49,
+      "sha": "90c84e172f41649fcb46016f68a569dbf29e4eb6",
+      "subject": "fix: 调整工具超时和过期设置，优化工具定义处理逻辑，增强错误处理",
+      "patch": "current/0049-90c84e172f41.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "unknown",
+      "stdout": "",
+      "stderr": "error: corrupt patch at line 283\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "9d25d960749fddb49008064801156747d7d3789059384a9399daaf61818009b4",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "ac51b223174c3713b79d3ac5a8dcb2fcf38c1ea85709b996fd33d5e46309151e"
+  },
+  "stoppedAt": 49,
+  "finishedAt": "2026-07-19T09:18:48.997Z",
+  "sourceRepoHeadAfter": "43f17817d5be998527e3bad6346762209dfb61f9",
+  "sourceRepoFingerprintAfter": "475836561286018e8387925415f028e7e7eadd94705605446ba4faed77c49951",
+  "targetRepoFingerprintAfter": "27d837e142d33a98a89dbb6cdff9ba3e7b62338ab0d63d64cb2c059caa157cea",
+  "retainedStates": [
+    "0048-f9d2e647d8b2",
+    "0045-6380ed0b8d91",
+    "0040-8f6444e154d0",
+    "0035-0a3cda97c01a"
+  ]
+}

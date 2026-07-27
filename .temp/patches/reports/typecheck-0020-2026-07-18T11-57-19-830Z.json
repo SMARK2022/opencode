@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-18T11:57:19.830Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 20,
+  "passed": 20,
+  "reusedPrefix": 19,
+  "baseState": "0019-4b7f10eebc35",
+  "rebuild": true,
+  "appliedThisRun": 1,
+  "materializedIndex": 20,
+  "sourceRepoHeadBefore": "fe6154a3c7b4b79b8f388f738e801f3f226de6a9",
+  "sourceRepoFingerprintBefore": "e79a850090e2899243aa7b095d6debcbfa5ac15574f9c4d401f120cac22538ff",
+  "targetRepoFingerprintBefore": "ec3597ec093384e29374efa6e416c4933497c561437c8688ec307e16b734cf6e",
+  "outcomes": [
+    {
+      "index": 20,
+      "sha": "aa6db0f3264f22d5d8ff0dfc11cd6ac2aee11279",
+      "subject": "feat: 上下文提示词增强 enhance system prompt with environment details and tool usage guidelines",
+      "patch": "current/0020-aa6db0f3264f.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/core/src/database/migration.gen.ts",
+        "A\tpackages/core/src/database/migration/20260422130633_request_usage_tracking.ts",
+        "M\tpackages/core/src/database/schema.gen.ts",
+        "A\tpackages/core/src/session/request-usage.sql.ts",
+        "M\tpackages/opencode/package.json",
+        "M\tpackages/opencode/script/build.ts",
+        "A\tpackages/opencode/script/version-env.ts",
+        "M\tpackages/opencode/src/cli/cmd/session.ts",
+        "M\tpackages/opencode/src/cli/cmd/stats.ts",
+        "M\tpackages/opencode/src/effect/app-runtime.ts",
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "A\tpackages/opencode/src/provider/claudecode.ts",
+        "M\tpackages/opencode/src/provider/provider.ts",
+        "M\tpackages/opencode/src/server/routes/instance/httpapi/groups/session.ts",
+        "M\tpackages/opencode/src/session/compaction.ts",
+        "M\tpackages/opencode/src/session/processor.ts",
+        "M\tpackages/opencode/src/session/prompt.ts",
+        "M\tpackages/opencode/src/session/prompt/anthropic.txt",
+        "A\tpackages/opencode/src/session/request-usage.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx",
+        "M\tpackages/tui/src/util/signal.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "497eafed0d19bce76ee6309b45b64019050a845c9712dd248c601c15ed24267b",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "15f33e18a0ce4098b2d46e5878e0eac0fddb74cc0b0bd30e8e44ec36212e6059"
+  },
+  "finishedAt": "2026-07-18T11:57:26.295Z",
+  "sourceRepoHeadAfter": "fe6154a3c7b4b79b8f388f738e801f3f226de6a9",
+  "sourceRepoFingerprintAfter": "e79a850090e2899243aa7b095d6debcbfa5ac15574f9c4d401f120cac22538ff",
+  "targetRepoFingerprintAfter": "ec3597ec093384e29374efa6e416c4933497c561437c8688ec307e16b734cf6e",
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0020-aa6db0f3264f",
+  "retainedStates": [
+    "0020-aa6db0f3264f",
+    "0019-4b7f10eebc35",
+    "0016-9e14f85c9ad3",
+    "0015-d302fa6f05a7"
+  ],
+  "test": {
+    "index": 20,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "f0084b64d44fb33093f3fc7bc99df1bda58be07025687f8e74879a27878319dc",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/tui",
+        "command": "bun typecheck (packages/tui)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-22T16:45:28.384Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 112,
+  "passed": 111,
+  "reusedPrefix": 111,
+  "baseState": "0111-a6a79e01fb18",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 112,
+  "sourceRepoHeadBefore": "0f7287299a2601d81c36e76508d2a1c03dfb4dc6",
+  "sourceRepoFingerprintBefore": "c4980b3d7ac85f9ea4f9368c9ac55f193b8bbfc9fbe8ebc64a9a133a3270f7e1",
+  "targetRepoFingerprintBefore": "7a61cefe09e1ab7dab371ef49880ca3c9aad6328b6e8452ae8d551a2996df3c2",
+  "outcomes": [
+    {
+      "index": 112,
+      "sha": "c3c396034afb69904b648c3e1187ce7960c77d6a",
+      "subject": "feat(dialog): 添加预览行支持至 DialogSelect 组件，优化选项展示逻辑",
+      "patch": "current/0112-c3c396034afb.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "unknown",
+      "stdout": "",
+      "stderr": "error: corrupt patch at line 64\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "81d0f8a79c94f4916070e24760a42c5966464e8e6a5d2efdf4aa2438801ba608",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "9b3ae0dd582137505b74b9a39ebdbf048d4c4606a82d54d42f54146e6667a2fa"
+  },
+  "stoppedAt": 112,
+  "finishedAt": "2026-07-22T16:45:37.147Z",
+  "sourceRepoHeadAfter": "0f7287299a2601d81c36e76508d2a1c03dfb4dc6",
+  "sourceRepoFingerprintAfter": "c4980b3d7ac85f9ea4f9368c9ac55f193b8bbfc9fbe8ebc64a9a133a3270f7e1",
+  "targetRepoFingerprintAfter": "7a61cefe09e1ab7dab371ef49880ca3c9aad6328b6e8452ae8d551a2996df3c2",
+  "retainedStates": [
+    "0111-a6a79e01fb18",
+    "0110-b6690c2cc860",
+    "0108-e863ec34839c",
+    "0107-f0f0c3a6ddb3",
+    "0106-ed792909b777"
+  ]
+}

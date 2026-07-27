@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-19T23:04:13.286Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 85,
+  "passed": 85,
+  "reusedPrefix": 85,
+  "baseState": "0085-66ddc4e2fe6c",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 85,
+  "sourceRepoHeadBefore": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintBefore": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintBefore": "ce0fa016548e806f288aa2f20ffb5c1d20bec82cca348105ec9334e4e65b414e",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0085-66ddc4e2fe6c",
+  "retainedStates": [
+    "0085-66ddc4e2fe6c",
+    "0080-0a8361dfa4d3",
+    "0077-9768471cf3fc",
+    "0075-4141d5e979ff"
+  ],
+  "finishedAt": "2026-07-19T23:04:13.666Z",
+  "sourceRepoHeadAfter": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintAfter": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintAfter": "ce0fa016548e806f288aa2f20ffb5c1d20bec82cca348105ec9334e4e65b414e"
+}

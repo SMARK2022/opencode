@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-17T14:13:31.940Z",
+  "manifestJsonSha256": "33feade10f9cbea2ac003a914de2eed26b0ce80ee6c315e07a3d93acbe7b6f29",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "targetBaseline": "b1fc8113948b518835c2a39ece49553cffe9b30c",
+  "patchCount": 0,
+  "passed": 0,
+  "materializedIndex": 0,
+  "sourceRepoHeadBefore": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "sourceRepoStatusSha256Before": "77903f8bdf7ec03a4c1b5dbeb9d0eb5f370871e240560eded37a6dc830adf41a",
+  "targetRepoStatusSha256Before": "4cfd5f6d5ddb6ebce7a4c3e3b7eb5aacf0c3a469cc21d3dbdcb071652edb6e7d",
+  "outcomes": [],
+  "simulationPreflight": {
+    "head": "b1fc8113948b518835c2a39ece49553cffe9b30c",
+    "statusSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "finishedAt": "2026-07-17T14:13:46.723Z",
+  "sourceRepoHeadAfter": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "sourceRepoStatusSha256After": "77903f8bdf7ec03a4c1b5dbeb9d0eb5f370871e240560eded37a6dc830adf41a",
+  "targetRepoStatusSha256After": "4cfd5f6d5ddb6ebce7a4c3e3b7eb5aacf0c3a469cc21d3dbdcb071652edb6e7d",
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0000-b1fc8113948b",
+  "retainedStates": [
+    "0000-b1fc8113948b"
+  ]
+}

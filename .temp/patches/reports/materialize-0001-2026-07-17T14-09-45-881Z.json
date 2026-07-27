@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-17T14:09:45.881Z",
+  "manifestJsonSha256": "33feade10f9cbea2ac003a914de2eed26b0ce80ee6c315e07a3d93acbe7b6f29",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "targetBaseline": "b1fc8113948b518835c2a39ece49553cffe9b30c",
+  "patchCount": 1,
+  "passed": 0,
+  "materializedIndex": 1,
+  "sourceRepoHeadBefore": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "sourceRepoStatusSha256Before": "77903f8bdf7ec03a4c1b5dbeb9d0eb5f370871e240560eded37a6dc830adf41a",
+  "targetRepoStatusSha256Before": "4cfd5f6d5ddb6ebce7a4c3e3b7eb5aacf0c3a469cc21d3dbdcb071652edb6e7d",
+  "outcomes": [
+    {
+      "index": 1,
+      "sha": "9f117055c5a8a09f5cc7080786accf853bdb25fe",
+      "subject": "feat(session): 添加同ClaudeCode一样的git上下文处理和配置选项逻辑",
+      "patch": "current/0001-9f117055c5a8.patch",
+      "changedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/flag/flag.ts...\nerror: packages/opencode/src/flag/flag.ts: does not exist in index\nChecking patch packages/opencode/src/session/prompt.ts...\nerror: while searching for:\n\n            const [skills, env, instructions, modelMsgs] = yield* Effect.all([\n              sys.skills(agent),\n              Effect.sync(() => sys.environment(model)),\n              instruction.system().pipe(Effect.orDie),\n              MessageV2.toModelMessagesEffect(msgs, model),\n            ])\n\nerror: patch failed: packages/opencode/src/session/prompt.ts:1472\nerror: packages/opencode/src/session/prompt.ts: patch does not apply\nChecking patch packages/opencode/src/session/system.ts...\nerror: while searching for:\nimport type { Agent } from \"@/agent/agent\"\nimport { Permission } from \"@/permission\"\nimport { Skill } from \"@/skill\"\n\nexport function provider(model: Provider.Model) {\n  if (model.api.id.includes(\"gpt-4\") || model.api.id.includes(\"o1\") || model.api.id.includes(\"o3\"))\n\nerror: patch failed: packages/opencode/src/session/system.ts:15\nerror: packages/opencode/src/session/system.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "b1fc8113948b518835c2a39ece49553cffe9b30c",
+    "statusSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stoppedAt": 1,
+  "finishedAt": "2026-07-17T14:10:00.269Z",
+  "sourceRepoHeadAfter": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "sourceRepoStatusSha256After": "77903f8bdf7ec03a4c1b5dbeb9d0eb5f370871e240560eded37a6dc830adf41a",
+  "targetRepoStatusSha256After": "4cfd5f6d5ddb6ebce7a4c3e3b7eb5aacf0c3a469cc21d3dbdcb071652edb6e7d"
+}

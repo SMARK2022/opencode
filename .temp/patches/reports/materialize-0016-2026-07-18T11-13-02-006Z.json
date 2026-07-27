@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-18T11:13:02.006Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 16,
+  "passed": 16,
+  "reusedPrefix": 15,
+  "baseState": "0015-d302fa6f05a7",
+  "rebuild": true,
+  "appliedThisRun": 1,
+  "materializedIndex": 16,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "916fc55fc5c5274e203e41f9914d1804356dca4352e253e52c1ea8e8de04ee22",
+  "targetRepoFingerprintBefore": "0676865195d5b87df6fef8335fdc101dec5937d1e32803471b910cfc3e1e7f28",
+  "outcomes": [
+    {
+      "index": 16,
+      "sha": "9e14f85c9ad3b23958c2f0d60eed74c37ba42625",
+      "subject": "fix: 优化lastStepFinish的计算逻辑，确保在lastSFIdx有效时正确获取step-finish",
+      "patch": "current/0016-9e14f85c9ad3.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/package.json",
+        "M\tpackages/opencode/script/build.ts",
+        "A\tpackages/opencode/script/version-env.ts",
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "A\tpackages/opencode/src/provider/claudecode.ts",
+        "M\tpackages/opencode/src/provider/provider.ts",
+        "M\tpackages/opencode/src/session/processor.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx",
+        "M\tpackages/tui/src/util/signal.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "f535c43b0ae3179064d680536bbc4ac7ac32fcf08dfbab4962bbe3257aefdeb3",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "3a5838dedcd7c45efa7a4bad51ca2938d52263bdcfc823ec4f1a30b598ddca82"
+  },
+  "finishedAt": "2026-07-18T11:13:11.210Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "916fc55fc5c5274e203e41f9914d1804356dca4352e253e52c1ea8e8de04ee22",
+  "targetRepoFingerprintAfter": "0676865195d5b87df6fef8335fdc101dec5937d1e32803471b910cfc3e1e7f28",
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0016-9e14f85c9ad3",
+  "retainedStates": [
+    "0016-9e14f85c9ad3",
+    "0020-aa6db0f3264f",
+    "0015-d302fa6f05a7"
+  ]
+}

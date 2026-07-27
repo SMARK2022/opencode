@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-21T11:28:30.317Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 78,
+  "passed": 77,
+  "reusedPrefix": 77,
+  "baseState": "0077-9768471cf3fc",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 78,
+  "sourceRepoHeadBefore": "4b825d8b81933804bf5af57fda449eecdac29425",
+  "sourceRepoFingerprintBefore": "6f31acfd72666427d20a3d1583a541c68e68cab78b560421cd55ceccaf518299",
+  "targetRepoFingerprintBefore": "ab3d148aa6bd25430c6c73806db755957ef52caddeda30b583f21cefc9ccdbcc",
+  "outcomes": [
+    {
+      "index": 78,
+      "sha": "3bab13f27c2fab5c7257d6f26d3e76d9112cc3bb",
+      "subject": "feat(notebook): 工具逻辑及schema、summary完整重构 enhance cell identification and output handling",
+      "patch": "current/0078-3bab13f27c2f.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/tool/read.ts...\nerror: while searching for:\nimport { SessionV1 } from \"@opencode-ai/core/v1/session\"\n\nconst // 默认读取行数上限：1000 行平衡上下文和输出\nDEFAULT_READ_LIMIT = 1000\nconst MAX_LINE_LENGTH = 2000\nconst MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`\nconst // 最大读取字节数：24KB 平衡内存和上下文需求\nMAX_BYTES = 24 * 1024\nconst MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`\nconst SAMPLE_BYTES = 4096\nconst SUPPORTED_IMAGE_MIMES = new Set([\"image/jpeg\", \"image/png\", \"image/gif\", \"image/webp\"])\n\nconst MAX_CONTENT_TOKENS = 16000\n\n// 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件\n\nerror: patch failed: packages/opencode/src/tool/read.ts:12\nerror: packages/opencode/src/tool/read.ts: patch does not apply\nChecking patch sdks/vscode/src/bridge.ts...\nChecking patch sdks/vscode/src/notebook/commands.ts...\nChecking patch sdks/vscode/src/notebook/edit.ts...\nChecking patch sdks/vscode/src/notebook/env.ts...\nChecking patch sdks/vscode/src/notebook/format.ts...\nChecking patch sdks/vscode/src/notebook/output.ts...\nChecking patch sdks/vscode/src/notebook/resolve.ts...\nChecking patch sdks/vscode/src/notebook/run.ts...\nChecking patch sdks/vscode/src/notebook/source.ts...\nChecking patch sdks/vscode/src/notebook/summary.ts...\nChecking patch sdks/vscode/src/util.ts...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "a165f56fcd2855dadc1b0f8436a8759cbcf75b30740ff92a44ea6b75b8a36afb",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "840f6f7569cd2653700042ddea81493b0ce7ccea26e8b2fe7ec39bdce532c306"
+  },
+  "stoppedAt": 78,
+  "finishedAt": "2026-07-21T11:28:38.318Z",
+  "sourceRepoHeadAfter": "4b825d8b81933804bf5af57fda449eecdac29425",
+  "sourceRepoFingerprintAfter": "6f31acfd72666427d20a3d1583a541c68e68cab78b560421cd55ceccaf518299",
+  "targetRepoFingerprintAfter": "ab3d148aa6bd25430c6c73806db755957ef52caddeda30b583f21cefc9ccdbcc",
+  "retainedStates": [
+    "0077-9768471cf3fc",
+    "0076-c9d477841b7d",
+    "0075-4141d5e979ff",
+    "0074-4d55a2c0f4a3",
+    "0073-f75419bd78c5"
+  ]
+}

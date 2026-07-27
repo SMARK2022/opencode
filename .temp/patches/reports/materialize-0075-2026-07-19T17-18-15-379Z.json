@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-19T17:18:15.379Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 75,
+  "passed": 72,
+  "reusedPrefix": 72,
+  "baseState": "0072-a09787f293c9",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 75,
+  "sourceRepoHeadBefore": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintBefore": "910df09634c73b76b4f75bcc38b69e629d4be656462525cadcd88537601a186c",
+  "targetRepoFingerprintBefore": "2fea464072a0d192fe38635d42dbc8c9a4f2ff1359139ad524b4e9f3cee7af87",
+  "outcomes": [
+    {
+      "index": 73,
+      "sha": "f75419bd78c55ac3984fec6d762c929391d0ba02",
+      "subject": "feat: 增强网络代理功能，安装全局fetch并优化npm配置中的超时设置",
+      "patch": "current/0073-f75419bd78c5.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/core/src/network-proxy.ts...\nChecking patch packages/core/src/npm-config.ts...\nerror: while searching for:\n    const response = await NetworkProxy.routedFetch(`${normalizeRegistry(registry)}/-/ping?write=false`, {\n      purpose: \"npm\",\n      method: \"GET\",\n      signal: AbortSignal.timeout(1500),\n    })\n    return response.ok\n  } catch {\n\nerror: patch failed: packages/core/src/npm-config.ts:30\nerror: packages/core/src/npm-config.ts: patch does not apply\nChecking patch packages/opencode/src/cli/tui/worker.ts...\nChecking patch packages/opencode/src/provider/provider.ts...\nHunk #1 succeeded at 33 (offset -1 lines).\nHunk #2 succeeded at 1781 (offset -1 lines).\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "d1ee7e657b4fc193d988c9cb8110cbb4025647c6bf0f4a6fef6047cb41ec7bfa",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "f9d158d23754b7a306e3f78cb1575b0c69da3c507232b1e25725229ef1eb9a4f"
+  },
+  "stoppedAt": 73,
+  "finishedAt": "2026-07-19T17:18:26.856Z",
+  "sourceRepoHeadAfter": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintAfter": "910df09634c73b76b4f75bcc38b69e629d4be656462525cadcd88537601a186c",
+  "targetRepoFingerprintAfter": "2fea464072a0d192fe38635d42dbc8c9a4f2ff1359139ad524b4e9f3cee7af87",
+  "retainedStates": [
+    "0072-a09787f293c9"
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-22T19:37:53.267Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 120,
+  "passed": 115,
+  "reusedPrefix": 115,
+  "baseState": "0115-6e38594c33fc",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 120,
+  "sourceRepoHeadBefore": "76af8d16b1ba80f2a433315d0dd22327ef9ffbd1",
+  "sourceRepoFingerprintBefore": "6a39e9a44f47688beba35d6053a23559d48e9e3e88f732b5660a0ec06c01d33e",
+  "targetRepoFingerprintBefore": "418533ec3c72c4d2c9635a7fced2099de6fc49cc8c5f272ddd0db5f7868a9c3f",
+  "outcomes": [
+    {
+      "index": 116,
+      "sha": "9ab94ccbe2574dc09f14f4eac65fdc51a484261d",
+      "subject": "feat(shell): 添加输出压缩选项以优化重复输出处理 feat(session): 重构会话信息命令以使用效果处理 fix(stats): 更新导入路径以适应新结构 fix(editor): 优化连接变量命名以提高可读性 fix(context-usage): 更新 Bash 描述文件路径以反映新位置 fix(worker): 修复实例处置逻辑以确保正确关闭",
+      "patch": "current/0116-9ab94ccbe257.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch bun.lock...\nerror: while searching for:\n    },\n    \"packages/app\": {\n      \"name\": \"@opencode-ai/app\",\n      \"version\": \"1.14.31\",\n      \"dependencies\": {\n        \"@kobalte/core\": \"catalog:\",\n        \"@opencode-ai/core\": \"workspace:*\",\n\nerror: patch failed: bun.lock:29\nerror: bun.lock: patch does not apply\nChecking patch packages/opencode/src/cli/cmd/session.ts...\nerror: while searching for:\n  }),\n})\n\nexport const SessionInfoCommand = cmd({\n  command: \"info\",\n  describe: \"show detailed session info with token usage by model\",\n  builder: (yargs: Argv) => {\n\nerror: patch failed: packages/opencode/src/cli/cmd/session.ts:143\nerror: packages/opencode/src/cli/cmd/session.ts: patch does not apply\nChecking patch packages/opencode/src/cli/cmd/stats.ts...\nerror: while searching for:\nimport { SessionTable } from \"../../session/session.sql\"\nimport { Project } from \"@/project/project\"\nimport { Instance } from \"../../project/instance\"\nimport { AppRuntime } from \"@/effect/app-runtime\"\nimport { RequestUsageAssistantTable, RequestUsageTable } from \"@/session/request-usage.sql\"\n\n\nerror: patch failed: packages/opencode/src/cli/cmd/stats.ts:6\nerror: packages/opencode/src/cli/cmd/stats.ts: patch does not apply\nChecking patch packages/opencode/src/cli/cmd/tui/context/editor.ts...\nerror: packages/opencode/src/cli/cmd/tui/context/editor.ts: does not exist in index\nChecking patch packages/opencode/src/cli/cmd/tui/util/context-usage.ts...\nerror: packages/opencode/src/cli/cmd/tui/util/context-usage.ts: does not exist in index\nChecking patch packages/opencode/src/cli/cmd/tui/worker.ts...\nerror: packages/opencode/src/cli/cmd/tui/worker.ts: does not exist in index\nChecking patch packages/opencode/src/tool/shell.ts...\nerror: while searching for:\nconst GIT_STASH_WRITES = new Set([\"push\", \"pop\", \"apply\", \"drop\", \"clear\", \"branch\"])\nconst UNIX_TEXT_COMMANDS = new Set([\"tail\", \"head\", \"sed\", \"awk\", \"grep\"])\n\ntype Part = {\n  type: string\n  text: string\n\nerror: patch failed: packages/opencode/src/tool/shell.ts:91\nerror: packages/opencode/src/tool/shell.ts: patch does not apply\nChecking patch packages/opencode/src/tool/shell/prompt.ts...\nerror: while searching for:\n      description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,\n    }),\n    description: Schema.String.annotate({ description }),\n  })\n}\n\n\nerror: patch failed: packages/opencode/src/tool/shell/prompt.ts:27\nerror: packages/opencode/src/tool/shell/prompt.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "9257cc84759fde98f98ab76cf52e628181c94ba13baec4e83d05f5f63e66d772",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "19cac814efe5d5c208c1fd8ef159424cb2a53d6156d28404cc520e78eb108407"
+  },
+  "stoppedAt": 116,
+  "finishedAt": "2026-07-22T19:38:03.964Z",
+  "sourceRepoHeadAfter": "76af8d16b1ba80f2a433315d0dd22327ef9ffbd1",
+  "sourceRepoFingerprintAfter": "6a39e9a44f47688beba35d6053a23559d48e9e3e88f732b5660a0ec06c01d33e",
+  "targetRepoFingerprintAfter": "418533ec3c72c4d2c9635a7fced2099de6fc49cc8c5f272ddd0db5f7868a9c3f",
+  "retainedStates": [
+    "0115-6e38594c33fc",
+    "0110-b6690c2cc860"
+  ]
+}

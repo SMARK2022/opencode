@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-17T21:19:18.741Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 13,
+  "passed": 13,
+  "reusedPrefix": 12,
+  "baseState": "0012-b1bf9c5a50ce",
+  "rebuild": false,
+  "appliedThisRun": 1,
+  "materializedIndex": 13,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "c7ce0ba93845e92f8bcec47df6b0de0422174f7c131e1fb1df32a6d1bc5a49e2",
+  "targetRepoFingerprintBefore": "08d0924731ed494c99d0491f4a99b9c6a7a362ff355b3458171c135eb40ff235",
+  "outcomes": [
+    {
+      "index": 13,
+      "sha": "bbbf5f1dd94da64931b95ae8ee236f3509f7b486",
+      "subject": "feat(provider): 添加claudecode提供者支持，集成API密钥和基本URL配置",
+      "patch": "current/0013-bbbf5f1dd94d.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/package.json",
+        "M\tpackages/opencode/script/build.ts",
+        "A\tpackages/opencode/script/version-env.ts",
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "A\tpackages/opencode/src/provider/claudecode.ts",
+        "M\tpackages/opencode/src/provider/provider.ts",
+        "M\tpackages/opencode/src/session/processor.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx",
+        "M\tpackages/tui/src/util/signal.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/current/0013-bbbf5f1dd94d.patch:221: trailing whitespace.\n    \n/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/current/0013-bbbf5f1dd94d.patch:223: trailing whitespace.\n    // Wait, `baseUrl` in custom provider is passed to the SDK. \n/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/current/0013-bbbf5f1dd94d.patch:228: trailing whitespace.\n    \nwarning: 3 lines add whitespace errors.\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "42640adfb79de89905ce54c449e6341411ea6f3d0803d04d7d823f5af1f0e05f",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "e4ae06e0ed394a824742980de216b16c3d29c69b45df3f1b3912951c2a6e6598"
+  },
+  "finishedAt": "2026-07-17T21:19:25.361Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "c7ce0ba93845e92f8bcec47df6b0de0422174f7c131e1fb1df32a6d1bc5a49e2",
+  "targetRepoFingerprintAfter": "08d0924731ed494c99d0491f4a99b9c6a7a362ff355b3458171c135eb40ff235",
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0013-bbbf5f1dd94d",
+  "retainedStates": [
+    "0013-bbbf5f1dd94d",
+    "0012-b1bf9c5a50ce",
+    "0011-589bb20e905f",
+    "0010-fc6394523010"
+  ]
+}

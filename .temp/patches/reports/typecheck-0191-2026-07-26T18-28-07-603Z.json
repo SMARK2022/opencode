@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-26T18:28:07.603Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 191,
+  "passed": 191,
+  "reusedPrefix": 191,
+  "baseState": "0191-a8478caff8aa",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 191,
+  "sourceRepoHeadBefore": "7c114657bf8d46c4eff60145ee78dce8ea2cdc36",
+  "sourceRepoFingerprintBefore": "3ff807cb5dbb8b3431ac98831bc5b07739dddebacaafd6c234c01c06fb528f7c",
+  "targetRepoFingerprintBefore": "30cda5cb73e229c733f1b548140d78cd630cf43779341aa57565e0f10e774216",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0191-a8478caff8aa",
+  "retainedStates": [
+    "0191-a8478caff8aa",
+    "0190-8d2352918cad",
+    "0185-a505b9721c87",
+    "0180-201e910402a2",
+    "0175-f0a47a144866"
+  ],
+  "test": {
+    "index": 191,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/session/message-v2.ts(794,20): error TS18048: 'transport' is possibly 'undefined'.\nsrc/session/message-v2.ts(796,21): error TS18048: 'transport' is possibly 'undefined'.\ntest/session/retry.test.ts(351,54): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(352,21): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(460,22): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(461,20): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(462,24): error TS2339: Property 'isRetryable' does not exist on type '{ readonly providerID: string; readonly message: string; } | { readonly message: string; readonly ref?: string | undefined; } | {} | { readonly message: string; } | { readonly message: string; readonly retries: number; } | { ...; } | { ...; } | { ...; }'.\n  Property 'isRetryable' does not exist on type '{ readonly providerID: string; readonly message: string; }'.\ntest/session/retry.test.ts(470,24): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(471,22): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(472,26): error TS2339: Property 'isRetryable' does not exist on type '{ readonly providerID: string; readonly message: string; } | { readonly message: string; readonly ref?: string | undefined; } | {} | { readonly message: string; } | { readonly message: string; readonly retries: number; } | { ...; } | { ...; } | { ...; }'.\n  Property 'isRetryable' does not exist on type '{ readonly providerID: string; readonly message: string; }'.\ntest/session/retry.test.ts(483,22): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(484,20): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(485,24): error TS2339: Property 'isRetryable' does not exist on type '{ readonly providerID: string; readonly message: string; } | { readonly message: string; readonly ref?: string | undefined; } | {} | { readonly message: string; } | { readonly message: string; readonly retries: number; } | { ...; } | { ...; } | { ...; }'.\n  Property 'isRetryable' does not exist on type '{ readonly providerID: string; readonly message: string; }'.\ntest/session/retry.test.ts(492,22): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(493,20): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(494,24): error TS2339: Property 'isRetryable' does not exist on type '{ readonly providerID: string; readonly message: string; } | { readonly message: string; readonly ref?: string | undefined; } | {} | { readonly message: string; } | { readonly message: string; readonly retries: number; } | { ...; } | { ...; } | { ...; }'.\n  Property 'isRetryable' does not exist on type '{ readonly providerID: string; readonly message: string; }'.\ntest/session/retry.test.ts(505,24): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(506,22): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(507,26): error TS2339: Property 'isRetryable' does not exist on type '{ readonly providerID: string; readonly message: string; } | { readonly message: string; readonly ref?: string | undefined; } | {} | { readonly message: string; } | { readonly message: string; readonly retries: number; } | { ...; } | { ...; } | { ...; }'.\n  Property 'isRetryable' does not exist on type '{ readonly providerID: string; readonly message: string; }'.\ntest/session/retry.test.ts(515,22): error TS2339: Property 'AbortedError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(522,22): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(532,22): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(533,20): error TS2339: Property 'APIError' does not exist on type 'typeof import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/opencode/src/session/message-v2\")'.\ntest/session/retry.test.ts(534,24): error TS2339: Property 'isRetryable' does not exist on type '{ readonly providerID: string; readonly message: string; } | { readonly message: string; readonly ref?: string | undefined; } | {} | { readonly message: string; } | { readonly message: string; readonly retries: number; } | { ...; } | { ...; } | { ...; }'.\n  Property 'isRetryable' does not exist on type '{ readonly providerID: string; readonly message: string; }'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-26T18:28:35.472Z",
+  "sourceRepoHeadAfter": "7c114657bf8d46c4eff60145ee78dce8ea2cdc36",
+  "sourceRepoFingerprintAfter": "3ff807cb5dbb8b3431ac98831bc5b07739dddebacaafd6c234c01c06fb528f7c",
+  "targetRepoFingerprintAfter": "30cda5cb73e229c733f1b548140d78cd630cf43779341aa57565e0f10e774216"
+}

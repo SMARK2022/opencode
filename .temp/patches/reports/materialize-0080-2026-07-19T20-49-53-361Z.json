@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-19T20:49:53.361Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 80,
+  "passed": 78,
+  "reusedPrefix": 78,
+  "baseState": "0078-3bab13f27c2f",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 80,
+  "sourceRepoHeadBefore": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintBefore": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintBefore": "c974e1fa4a95bfeefd470b1c29f17337b06e6257086a58ee9c5dad359741ec27",
+  "outcomes": [
+    {
+      "index": 79,
+      "sha": "8812fd3d588b2173f96bb0b636047a479e432efc",
+      "subject": "feat(notebook): 优化编辑操作文档，增强字符串匹配逻辑及上下文构建",
+      "patch": "current/0079-8812fd3d588b.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch sdks/vscode/src/notebook/edit.ts...\nerror: while searching for:\n  edit.set(notebook.uri, [vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(deletedIndex, deletedIndex + 1))])\n  const applied = await vscode.workspace.applyEdit(edit)\n\n  // Capture the cell that shifted into the deleted cell's place (if any)\n  let shiftedOldIdx: number | undefined\n  let shiftedCell: vscode.NotebookCell | undefined\n  if (hasNext) {\n    shiftedOldIdx = deletedIndex + 1\n    shiftedCell = notebook.cellAt(deletedIndex)\n  }\n\n  return compactEditResult(notebook, {\n    applied,\n    editType: \"delete\",\n    opIndex: `~~${deletedIndex + 1}~~`,\n    beforeCount,\n    afterCount: notebook.cellCount,\n    anchorCell: targetCell,\n    deletedCellIndex: deletedIndex,\n    deletedKind,\n    deletedLang,\n    deletedId,\n    deletedLineCount,\n    deletedFirst,\n    shiftedCell,\n    shiftedOldIdx,\n    sourcePreview: deletedPreview,\n  })\n}\n\n\nerror: patch failed: sdks/vscode/src/notebook/edit.ts:73\nerror: sdks/vscode/src/notebook/edit.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "05234b09a231808ff89403c2c1177696e71275a37e9f3b8cda44894f2732d365",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "fec1ccd687869d2f073aaaca6d0579f1df0b11e510181240c0c5879a3d0d794a"
+  },
+  "stoppedAt": 79,
+  "finishedAt": "2026-07-19T20:50:01.621Z",
+  "sourceRepoHeadAfter": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintAfter": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintAfter": "c974e1fa4a95bfeefd470b1c29f17337b06e6257086a58ee9c5dad359741ec27",
+  "retainedStates": [
+    "0078-3bab13f27c2f",
+    "0077-9768471cf3fc",
+    "0076-c9d477841b7d",
+    "0075-4141d5e979ff",
+    "0074-4d55a2c0f4a3"
+  ]
+}

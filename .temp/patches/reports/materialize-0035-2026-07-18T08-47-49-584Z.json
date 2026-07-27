@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-18T08:47:49.584Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 35,
+  "passed": 34,
+  "reusedPrefix": 34,
+  "baseState": "0034-90b112f8bbf3",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 35,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "5a3be0489cbd8c5ad3f7c8f2ec513bbc9acbf3b293aedb7ea31b9eaf5c6da78b",
+  "targetRepoFingerprintBefore": "4439ea2662d8698b01f2a78979c42c73db7537654cd2f5be3c937f5e87d5c564",
+  "outcomes": [
+    {
+      "index": 35,
+      "sha": "0a3cda97c01a91b6da6ed3bca4b64cb4059de9ee",
+      "subject": "feat: 更新滚动视图组件，增强可视化和交互性，支持动态展开和收缩",
+      "patch": "current/0035-0a3cda97c01a.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/cli/cmd/tui/routes/session/index.tsx...\nerror: packages/opencode/src/cli/cmd/tui/routes/session/index.tsx: does not exist in index\nChecking patch packages/ui/src/components/message-part.tsx...\nerror: packages/ui/src/components/message-part.tsx: does not exist in index\nChecking patch packages/ui/src/components/scroll-view.css...\nerror: while searching for:\n.scroll-view {\n  position: relative;\n  overflow: hidden;\n}\n\n.scroll-view__viewport {\n\nerror: patch failed: packages/ui/src/components/scroll-view.css:1\nerror: packages/ui/src/components/scroll-view.css: patch does not apply\nChecking patch packages/ui/src/components/scroll-view.tsx...\nerror: while searching for:\n          ref={thumbRef}\n          onPointerDown={onThumbPointerDown}\n          class=\"scroll-view__thumb\"\n          data-visible={isHovered() || isDragging()}\n          data-dragging={isDragging()}\n          style={{\n            height: `${thumbHeight()}px`,\n            transform: `translateY(${thumbTop()}px)`,\n            \"z-index\": 100, // ensure it displays over content\n          }}\n        />\n      </Show>\n\nerror: patch failed: packages/ui/src/components/scroll-view.tsx:223\nerror: packages/ui/src/components/scroll-view.tsx: patch does not apply\nChecking patch packages/ui/src/components/session-turn.css...\nerror: packages/ui/src/components/session-turn.css: does not exist in index\nChecking patch packages/ui/src/components/session-turn.tsx...\nerror: packages/ui/src/components/session-turn.tsx: does not exist in index\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "21ff8cc0bbad06c71dc7334872a691898b08b35075d014bd96122ada058930ed",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "8ac286d81653f1fde0778baf1469bd42351e77864b6b152ed5ad95ad1b1baa15"
+  },
+  "stoppedAt": 35,
+  "finishedAt": "2026-07-18T08:48:02.228Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "5a3be0489cbd8c5ad3f7c8f2ec513bbc9acbf3b293aedb7ea31b9eaf5c6da78b",
+  "targetRepoFingerprintAfter": "4439ea2662d8698b01f2a78979c42c73db7537654cd2f5be3c937f5e87d5c564",
+  "retainedStates": [
+    "0034-90b112f8bbf3",
+    "0033-6dd9afdea412",
+    "0030-98ebae3df2df",
+    "0027-7dc9f1ab534a",
+    "0026-13fd8ab5dcbe"
+  ]
+}

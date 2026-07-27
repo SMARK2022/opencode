@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-25T09:06:11.626Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 175,
+  "passed": 175,
+  "reusedPrefix": 175,
+  "baseState": "0175-f0a47a144866",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 175,
+  "sourceRepoHeadBefore": "71afbee8f47061588f6e1db98aa0f2d0f5634b22",
+  "sourceRepoFingerprintBefore": "15db4f44a17b890e6773b589cf2177fb0a36114e2be4780fb1431ee84f630eab",
+  "targetRepoFingerprintBefore": "86d240f867527697046be457737e4b887363698942dcc9129d38d73400619731",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0175-f0a47a144866",
+  "retainedStates": [
+    "0175-f0a47a144866",
+    "0174-57eecce76b03",
+    "0173-59aeb3d239f3",
+    "0172-595b0e8f3ede",
+    "0171-49650e2f95ff"
+  ],
+  "test": {
+    "index": 175,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "failed",
+        "stdout": "../schema/src/v1/session.ts(259,1): error TS1136: Property assignment expected.\n../schema/src/v1/session.ts(261,8): error TS1005: ',' expected.\n../schema/src/v1/session.ts(272,1): error TS1135: Argument expression expected.\n../schema/src/v1/session.ts(272,2): error TS1128: Declaration or statement expected.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-25T09:06:14.055Z",
+  "sourceRepoHeadAfter": "71afbee8f47061588f6e1db98aa0f2d0f5634b22",
+  "sourceRepoFingerprintAfter": "15db4f44a17b890e6773b589cf2177fb0a36114e2be4780fb1431ee84f630eab",
+  "targetRepoFingerprintAfter": "86d240f867527697046be457737e4b887363698942dcc9129d38d73400619731"
+}

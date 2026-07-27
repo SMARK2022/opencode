@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-17T21:22:47.739Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 15,
+  "passed": 14,
+  "reusedPrefix": 14,
+  "baseState": "0014-61bcd2aae67c",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 15,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "c7ce0ba93845e92f8bcec47df6b0de0422174f7c131e1fb1df32a6d1bc5a49e2",
+  "targetRepoFingerprintBefore": "2c57a446bae0abb290879cee6a6a7d077480fa312b9019f73058b47118bba966",
+  "outcomes": [
+    {
+      "index": 15,
+      "sha": "d302fa6f05a734b420714024b68f27bb14d82f6e",
+      "subject": "feat(provider): 更新claudecode提供者以支持动态鉴权模式，优化API密钥和基本URL配置",
+      "patch": "current/0015-d302fa6f05a7.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/provider/claudecode.ts...\nerror: while searching for:\nimport { createHash, randomUUID } from \"crypto\"\nimport { xxh64 } from \"@node-rs/xxhash\"\n\n// --- Constants ---\nexport const VERSION = \"2.1.117\"\nconst SALT = \"59cf53e54c78\"\nconst ANTHROPIC_BETAS = [\n  \"claude-code-20250219\",\n  \"interleaved-thinking-2025-05-14\",\n  \"redact-thinking-2026-02-12\",\n  \"context-management-2025-06-27\",\n  \"prompt-caching-scope-2026-01-05\",\n].join(\",\")\n\nexport const CLI_IDENTITY_BLOCK = {\n  type: \"text\" as const,\n  text: \"You are Claude Code, Anthropic's official CLI for Claude.\",\n  cache_control: { type: \"ephemeral\" as const },\n}\n\nexport const MAIN_SYSTEM_BLOCK = {\n  type: \"text\" as const,\n  text: [\n\nerror: patch failed: packages/opencode/src/provider/claudecode.ts:1\nerror: packages/opencode/src/provider/claudecode.ts: patch does not apply\nChecking patch packages/opencode/src/provider/provider.ts...\nHunk #1 succeeded at 171 (offset 28 lines).\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "f535c43b0ae3179064d680536bbc4ac7ac32fcf08dfbab4962bbe3257aefdeb3",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "971dd032f8897fa1d585d579112038ff28939270c935aa92e996bf4ce1446ecc"
+  },
+  "stoppedAt": 15,
+  "finishedAt": "2026-07-17T21:22:55.224Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "c7ce0ba93845e92f8bcec47df6b0de0422174f7c131e1fb1df32a6d1bc5a49e2",
+  "targetRepoFingerprintAfter": "2c57a446bae0abb290879cee6a6a7d077480fa312b9019f73058b47118bba966",
+  "retainedStates": [
+    "0014-61bcd2aae67c",
+    "0013-bbbf5f1dd94d",
+    "0012-b1bf9c5a50ce",
+    "0011-589bb20e905f",
+    "0010-fc6394523010"
+  ]
+}
