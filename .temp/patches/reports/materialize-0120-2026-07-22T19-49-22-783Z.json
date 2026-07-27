@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-22T19:49:22.783Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 120,
+  "passed": 116,
+  "reusedPrefix": 116,
+  "baseState": "0116-9ab94ccbe257",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 120,
+  "sourceRepoHeadBefore": "76af8d16b1ba80f2a433315d0dd22327ef9ffbd1",
+  "sourceRepoFingerprintBefore": "6a39e9a44f47688beba35d6053a23559d48e9e3e88f732b5660a0ec06c01d33e",
+  "targetRepoFingerprintBefore": "eb84757d80f3c43475b4b3487eb1fcbbce6a8b471c0ba631da6bb7e986e9239b",
+  "outcomes": [
+    {
+      "index": 117,
+      "sha": "5cc79572420d334f676ee7480fcf6483b83987d0",
+      "subject": "fix(tests): 更新提供者实例引用为 WithInstance，以确保测试一致性",
+      "patch": "current/0117-5cc79572420d.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/cli/cmd/tui/util/context-usage.ts...\nerror: packages/opencode/src/cli/cmd/tui/util/context-usage.ts: does not exist in index\nChecking patch packages/opencode/test/provider/provider.test.ts...\nerror: while searching for:\n      )\n    },\n  })\n  await Instance.provide({\n    directory: tmp.path,\n    fn: async () => {\n      const providers = await list()\n\nerror: patch failed: packages/opencode/test/provider/provider.test.ts:577\nerror: packages/opencode/test/provider/provider.test.ts: patch does not apply\nChecking patch packages/opencode/test/session/system.test.ts...\nerror: while searching for:\n            status: () => Effect.die(\"unused\"),\n            diff: () => Effect.die(\"unused\"),\n            stats: () => Effect.die(\"unused\"),\n          }),\n        ),\n        Layer.succeed(\n\nerror: patch failed: packages/opencode/test/session/system.test.ts:63\nerror: packages/opencode/test/session/system.test.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "9257cc84759fde98f98ab76cf52e628181c94ba13baec4e83d05f5f63e66d772",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "d845fc51812c0186bac79436c874aadc966bd58ca41bfd9d5dc2c988bb689718"
+  },
+  "stoppedAt": 117,
+  "finishedAt": "2026-07-22T19:49:32.837Z",
+  "sourceRepoHeadAfter": "76af8d16b1ba80f2a433315d0dd22327ef9ffbd1",
+  "sourceRepoFingerprintAfter": "6a39e9a44f47688beba35d6053a23559d48e9e3e88f732b5660a0ec06c01d33e",
+  "targetRepoFingerprintAfter": "eb84757d80f3c43475b4b3487eb1fcbbce6a8b471c0ba631da6bb7e986e9239b",
+  "retainedStates": [
+    "0116-9ab94ccbe257",
+    "0115-6e38594c33fc",
+    "0110-b6690c2cc860"
+  ]
+}

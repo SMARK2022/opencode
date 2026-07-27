@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-26T20:14:26.818Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 195,
+  "passed": 195,
+  "reusedPrefix": 195,
+  "baseState": "0195-bb5a2b41f258",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 195,
+  "sourceRepoHeadBefore": "7c114657bf8d46c4eff60145ee78dce8ea2cdc36",
+  "sourceRepoFingerprintBefore": "f86740a48541c1d42c522e64ecbccd04bda1536316df6869e250b00af6abdbb9",
+  "targetRepoFingerprintBefore": "ae93c3a92e76f92c14d96c535d52b11bae5cfbb3d5c79ce1ea0b74ae867c1ee8",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0195-bb5a2b41f258",
+  "retainedStates": [
+    "0195-bb5a2b41f258",
+    "0191-a8478caff8aa",
+    "0190-8d2352918cad",
+    "0185-a505b9721c87",
+    "0180-201e910402a2"
+  ],
+  "test": {
+    "index": 195,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/session/compaction.ts(187,7): error TS2304: Cannot find name 'TokenEstimate'.\nsrc/session/compaction.ts(216,13): error TS2365: Operator '+' cannot be applied to types 'number' and 'void'.\nsrc/session/compaction.ts(217,11): error TS2365: Operator '+=' cannot be applied to types 'number' and 'void'.\nsrc/session/compaction.ts(227,11): error TS2719: Type '(input: { messages: import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/schema/src/v1/session\").WithParts[]; model: { ...; }; }) => import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-wor...' is not assignable to type '(input: { messages: import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo/packages/schema/src/v1/session\").WithParts[]; model: { ...; }; }) => import(\"/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-wor...'. Two different types with this name exist, but they are unrelated.\n  Type 'Effect<void, never, never>' is not assignable to type 'Effect<number, never, never>'.\n    Type 'void' is not assignable to type 'number'.\nsrc/session/compaction.ts(272,11): error TS2304: Cannot find name 'TokenEstimate'.\nsrc/session/prompt.ts(70,19): error TS2304: Cannot find name 'MAX_CHARS_PER_TOKEN'.\nsrc/session/prompt.ts(70,49): error TS2304: Cannot find name 'MIN_CHARS_PER_TOKEN'.\nsrc/session/prompt.ts(1560,37): error TS2552: Cannot find name 'TokenEstimate'. Did you mean 'tokenEstimate'?\nsrc/session/prompt.ts(1616,73): error TS2304: Cannot find name 'INPUT_CHARS_HISTORY_LIMIT'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-26T20:15:10.149Z",
+  "sourceRepoHeadAfter": "7c114657bf8d46c4eff60145ee78dce8ea2cdc36",
+  "sourceRepoFingerprintAfter": "f86740a48541c1d42c522e64ecbccd04bda1536316df6869e250b00af6abdbb9",
+  "targetRepoFingerprintAfter": "ae93c3a92e76f92c14d96c535d52b11bae5cfbb3d5c79ce1ea0b74ae867c1ee8"
+}

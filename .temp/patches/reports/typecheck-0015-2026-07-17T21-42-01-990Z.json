@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-17T21:42:01.990Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 15,
+  "passed": 15,
+  "reusedPrefix": 15,
+  "baseState": "0015-d302fa6f05a7",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 15,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "cbb92b639c78e9da1dc05ab235abeca4b9a8d3a365028145678e7a23179aad61",
+  "targetRepoFingerprintBefore": "b671902a94868c355184526dc71f53cf0f266a3062121a0f4e69208dece71ae8",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0015-d302fa6f05a7",
+  "retainedStates": [
+    "0015-d302fa6f05a7",
+    "0013-bbbf5f1dd94d",
+    "0012-b1bf9c5a50ce",
+    "0011-589bb20e905f"
+  ],
+  "test": {
+    "index": 15,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "installed",
+    "installInputSha256": "cb1e1e25f0758a0a2285c1b7721261937062ba3060c7d88b2b422836ab2fff09",
+    "installStdout": "",
+    "installStderr": "Resolving dependencies\nResolved, downloaded and extracted [33]\nSaved lockfile\n\n$ bun run --cwd packages/core fix-node-pty\n$ bun run script/fix-node-pty.ts\n$ husky\n",
+    "typechecks": [
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "script/version-env.ts(13,1): error TS1005: '}' expected.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-17T21:42:06.096Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "cbb92b639c78e9da1dc05ab235abeca4b9a8d3a365028145678e7a23179aad61",
+  "targetRepoFingerprintAfter": "b671902a94868c355184526dc71f53cf0f266a3062121a0f4e69208dece71ae8"
+}

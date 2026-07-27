@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-19T16:36:20.880Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 75,
+  "passed": 73,
+  "reusedPrefix": 73,
+  "baseState": "0073-f75419bd78c5",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 75,
+  "sourceRepoHeadBefore": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintBefore": "78fcbc5477ed191af17d4cb5901fa7bd7acf8f4cb41e9d3a07b0f4cd8a6b4526",
+  "targetRepoFingerprintBefore": "4dd12e9bebc631bba1a48383881843a2ae5d8c97521bdab58c01e6cf544ba211",
+  "outcomes": [
+    {
+      "index": 74,
+      "sha": "4d55a2c0f4a3a71a1791b3b5356372e16e6e0c47",
+      "subject": "feat: 增加工具调用和工具结果的独立分类，优化上下文使用数据计算",
+      "patch": "current/0074-4d55a2c0f4a3.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx...\nerror: packages/opencode/src/cli/cmd/tui/routes/session/context-usage.tsx: does not exist in index\nChecking patch packages/opencode/src/cli/cmd/tui/util/context-usage.ts...\nerror: packages/opencode/src/cli/cmd/tui/util/context-usage.ts: does not exist in index\nChecking patch packages/opencode/test/cli/tui/context-usage.test.ts...\nerror: packages/opencode/test/cli/tui/context-usage.test.ts: does not exist in index\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "05234b09a231808ff89403c2c1177696e71275a37e9f3b8cda44894f2732d365",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "a982c0f67c7710f0bfdcce36735a9f14eb3f11f86628fa78ea7f8fad55bccb73"
+  },
+  "stoppedAt": 74,
+  "finishedAt": "2026-07-19T16:36:37.931Z",
+  "sourceRepoHeadAfter": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintAfter": "78fcbc5477ed191af17d4cb5901fa7bd7acf8f4cb41e9d3a07b0f4cd8a6b4526",
+  "targetRepoFingerprintAfter": "4dd12e9bebc631bba1a48383881843a2ae5d8c97521bdab58c01e6cf544ba211",
+  "retainedStates": [
+    "0073-f75419bd78c5",
+    "0072-a09787f293c9",
+    "0071-d95dc89b856d",
+    "0070-efae0086f406",
+    "0065-8304c6752cef"
+  ]
+}

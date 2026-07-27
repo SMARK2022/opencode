@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-19T15:49:04.374Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 75,
+  "passed": 70,
+  "reusedPrefix": 70,
+  "baseState": "0070-efae0086f406",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 75,
+  "sourceRepoHeadBefore": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintBefore": "7046cfd6fd8183887d0074e6a912ff46ca8d895c95090accf4b0b1976e710875",
+  "targetRepoFingerprintBefore": "da8fac3b3e1a4261d2cf192f28ba7b7af3516eb4ec59723c2b03a01aff017cb3",
+  "outcomes": [
+    {
+      "index": 71,
+      "sha": "d95dc89b856dd480e6a74c5445d22d75a3a009f4",
+      "subject": "feat: 引入网络代理功能，优化npm配置和请求处理",
+      "patch": "current/0071-d95dc89b856d.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/core/src/network-proxy.ts...\nChecking patch packages/core/src/npm-config.ts...\nChecking patch packages/core/src/npm.ts...\nerror: while searching for:\nimport { EffectFlock } from \"./util/effect-flock\"\nimport { makeRuntime } from \"./effect/runtime\"\nimport { NpmConfig } from \"./npm-config\"\n\nexport class InstallFailedError extends Schema.TaggedErrorClass<InstallFailedError>()(\"NpmInstallFailedError\", {\n  add: Schema.Array(Schema.String).pipe(Schema.optional),\n\nerror: patch failed: packages/core/src/npm.ts:9\nerror: packages/core/src/npm.ts: patch does not apply\nChecking patch packages/core/test/npm-config.test.ts...\nChecking patch packages/opencode/src/cli/cmd/tui/plugin/runtime.ts...\nerror: packages/opencode/src/cli/cmd/tui/plugin/runtime.ts: does not exist in index\nChecking patch packages/opencode/src/cli/cmd/tui/thread.ts...\nerror: packages/opencode/src/cli/cmd/tui/thread.ts: does not exist in index\nChecking patch packages/opencode/src/cli/cmd/tui/worker.ts...\nerror: packages/opencode/src/cli/cmd/tui/worker.ts: does not exist in index\nChecking patch packages/opencode/src/effect/runner.ts...\nerror: while searching for:\n      case \"Running\":\n        return [\n          Effect.gen(function* () {\n            yield* Fiber.interrupt(st.run.fiber)\n            yield* Deferred.await(st.run.done).pipe(Effect.exit, Effect.asVoid)\n            yield* idleIfCurrent()\n          }),\n          { _tag: \"Idle\" } as const,\n\nerror: patch failed: packages/opencode/src/effect/runner.ts:180\nerror: packages/opencode/src/effect/runner.ts: patch does not apply\nChecking patch packages/opencode/src/provider/models.ts...\nerror: packages/opencode/src/provider/models.ts: does not exist in index\nChecking patch packages/opencode/src/provider/provider.ts...\nerror: while searching for:\nimport { EffectBridge } from \"@/effect/bridge\"\nimport { InstanceState } from \"@/effect/instance-state\"\nimport { AppFileSystem } from \"@opencode-ai/core/filesystem\"\nimport { isRecord } from \"@/util/record\"\nimport { optionalOmitUndefined, withStatics } from \"@/util/schema\"\n\n\nerror: patch failed: packages/opencode/src/provider/provider.ts:23\nerror: packages/opencode/src/provider/provider.ts: patch does not apply\nChecking patch packages/opencode/src/session/prompt.ts...\nerror: while searching for:\n    const cancel = Effect.fn(\"SessionPrompt.cancel\")(function* (sessionID: SessionID) {\n      yield* elog.info(\"cancel\", { sessionID })\n      yield* state.cancel(sessionID)\n    })\n\n    const resolvePromptParts = Effect.fn(\"SessionPrompt.resolvePromptParts\")(function* (template: string) {\n\nerror: patch failed: packages/opencode/src/session/prompt.ts:123\nerror: packages/opencode/src/session/prompt.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "1be3539256398bb1db975bbaa131d74d6c28dfac30b8d6cbd988fec36e6a8d69",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "761eceab6920f335e330c7bd5cf21381f111bea510cd63c0f6ced7886de4f8d1"
+  },
+  "stoppedAt": 71,
+  "finishedAt": "2026-07-19T15:49:15.600Z",
+  "sourceRepoHeadAfter": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintAfter": "7046cfd6fd8183887d0074e6a912ff46ca8d895c95090accf4b0b1976e710875",
+  "targetRepoFingerprintAfter": "da8fac3b3e1a4261d2cf192f28ba7b7af3516eb4ec59723c2b03a01aff017cb3",
+  "retainedStates": [
+    "0070-efae0086f406",
+    "0065-8304c6752cef",
+    "0061-145dea7da6ae",
+    "0060-2e51523e5589"
+  ]
+}

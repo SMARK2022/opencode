@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-25T22:12:57.086Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 185,
+  "passed": 180,
+  "reusedPrefix": 180,
+  "baseState": "0180-201e910402a2",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 185,
+  "sourceRepoHeadBefore": "8356c6fc1ed45de48160036d00a7a179641999a1",
+  "sourceRepoFingerprintBefore": "7d99b3d98d8ee898424c110a49d2eb13f861947bab0ef25a8f9b8c54fb2eac81",
+  "targetRepoFingerprintBefore": "380740d74c234ce09391fef52bdd9e263159894538d57dc500ea4c45e858981b",
+  "outcomes": [
+    {
+      "index": 181,
+      "sha": "27a7a17c5972ad41483161cc453c4e66110d35b3",
+      "subject": "feat: 添加响应式仪表板活动的测试，确保折叠的顶部表格正确显示",
+      "patch": "current/0181-27a7a17c5972.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/cli/cmd/stats/render.ts...\nerror: packages/opencode/src/cli/cmd/stats/render.ts: does not exist in index\nChecking patch packages/opencode/test/cli/stats-render-width.test.ts...\nerror: while searching for:\n    }\n  })\n\n  test(\"keeps breakdown rank bars from being double-truncated\", () => {\n    withColumns(140, () => {\n      const toolOutput = renderBreakdown(report(), { color: \"never\", by: \"tool\" })\n\nerror: patch failed: packages/opencode/test/cli/stats-render-width.test.ts:214\nerror: packages/opencode/test/cli/stats-render-width.test.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "89ee012dbc04d137c8d5b4cedcc1915bae5b87122318659e960be8db3b8c5a4f",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "67ebf262456aa2513455d510233ba88634ef5b5c996bbf2981758812f9538545"
+  },
+  "stoppedAt": 181,
+  "finishedAt": "2026-07-25T22:13:12.649Z",
+  "sourceRepoHeadAfter": "8356c6fc1ed45de48160036d00a7a179641999a1",
+  "sourceRepoFingerprintAfter": "0cda3eda36849481e71c99d05f732d4deddeac666d63ea7c126d57e1dd5c4392",
+  "targetRepoFingerprintAfter": "380740d74c234ce09391fef52bdd9e263159894538d57dc500ea4c45e858981b",
+  "integrityFailure": "source repository changed during dry-run",
+  "retainedStates": [
+    "0180-201e910402a2",
+    "0175-f0a47a144866",
+    "0174-57eecce76b03",
+    "0173-59aeb3d239f3"
+  ]
+}

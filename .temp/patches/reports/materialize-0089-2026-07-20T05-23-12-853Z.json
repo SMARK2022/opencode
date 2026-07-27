@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-20T05:23:12.853Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 89,
+  "passed": 88,
+  "reusedPrefix": 88,
+  "baseState": "0088-284c6bf1663e",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 89,
+  "sourceRepoHeadBefore": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintBefore": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintBefore": "c6a546ea23e3a1a020b2dd877cc854d160904d96b0d8f37cbb05b12889af15c8",
+  "outcomes": [
+    {
+      "index": 89,
+      "sha": "94eb97b93fad4b2510420b1703e1928bb00050ea",
+      "subject": "feat(vscode): 更新OpenCode VS Code桥接，修改扩展ID并添加许可证文件",
+      "patch": "current/0089-94eb97b93fad.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/identity/mark-192x192.png...\nChecking patch packages/identity/mark-512x512-light.png...\nChecking patch packages/identity/mark-512x512.png...\nChecking patch packages/identity/mark-96x96.png...\nChecking patch packages/identity/mark-light.png...\nChecking patch packages/identity/mark-light.svg...\nChecking patch packages/identity/mark.png...\nChecking patch packages/identity/mark.svg...\nChecking patch packages/opencode/src/ide/index.ts...\nHunk #1 succeeded at 37 (offset -14 lines).\nChecking patch sdks/vscode/.vscodeignore...\nChecking patch sdks/vscode/LICENSE...\nChecking patch sdks/vscode/README.md...\nChecking patch sdks/vscode/SMARK2022.opencode-ide-bridge-1.14.31.vsix...\nChecking patch sdks/vscode/package.json...\nerror: while searching for:\n{\n  \"name\": \"opencode\",\n  \"displayName\": \"opencode\",\n  \"description\": \"opencode for VS Code\",\n  \"version\": \"1.14.31\",\n  \"publisher\": \"sst-dev\",\n  \"repository\": {\n    \"type\": \"git\",\n    \"url\": \"https://github.com/anomalyco/opencode\"\n\nerror: patch failed: sdks/vscode/package.json:1\nerror: sdks/vscode/package.json: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "3c371735b3890f0485b9a215f977ea8f8f7cf98bb4401b5491dcfa706ff579ef",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "113ff44f1371eafbf9d77f4322fa727d5b6370d1091d3604b4b6f6489ebea2e1"
+  },
+  "stoppedAt": 89,
+  "finishedAt": "2026-07-20T05:23:21.202Z",
+  "sourceRepoHeadAfter": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintAfter": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintAfter": "c6a546ea23e3a1a020b2dd877cc854d160904d96b0d8f37cbb05b12889af15c8",
+  "retainedStates": [
+    "0088-284c6bf1663e",
+    "0087-930624b8faea",
+    "0086-3c72d78b8cb1",
+    "0085-66ddc4e2fe6c",
+    "0081-85442a1f1e68"
+  ]
+}

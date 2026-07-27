@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-22T12:01:34.972Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 109,
+  "passed": 108,
+  "reusedPrefix": 108,
+  "baseState": "0108-e863ec34839c",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 109,
+  "sourceRepoHeadBefore": "0f7287299a2601d81c36e76508d2a1c03dfb4dc6",
+  "sourceRepoFingerprintBefore": "2c64cc4098a5e73ed9f4ffa89ec14ed46e9c749be9d6934a96670d739d4ee2ad",
+  "targetRepoFingerprintBefore": "f7cb25e9c6b2e7abdf01f952bf367096a3f70a28dc7fe4dc5b12264c46a52184",
+  "outcomes": [
+    {
+      "index": 109,
+      "sha": "14d55305badba1494f2efa5be893ea0d1d7b9c44",
+      "subject": "feat: 更新版本号至 1.14.32-smark，并优化滚动条渲染逻辑",
+      "patch": "current/0109-14d55305badb.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/package.json...\nChecking patch packages/tui/src/component/prompt/index.tsx...\nerror: while searching for:\n\n  return (\n    <>\n      <box\n        ref={(r: BoxRenderable) => (anchor = r)}\n        visible={props.visible !== false}\n        width=\"100%\"\n        // #107：清掉 prompt 下方残留像素，避免滚动后 ghost 行\n        renderBefore={function (this: BoxRenderable, buffer: OptimizedBuffer) {\n          if (this.screenY && buffer.height > this.screenY) {\n            buffer.fillsRect(this.screenX, this.screenY, 1, buffer.height - this.screenY, RGBA.fromInts(0, 0, 0, 0))\n          }\n        }}\n      >\n        <box\n          width=\"100%\"\n          border={[\"left\"]}\n\nerror: patch failed: packages/tui/src/component/prompt/index.tsx:1443\nerror: packages/tui/src/component/prompt/index.tsx: patch does not apply\nChecking patch packages/tui/src/routes/session/subagent-footer.tsx...\nChecking patch packages/tui/src/routes/session/index.tsx...\nChecking patch packages/tui/src/util/smooth-scrollbar.ts...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "2328f35b2b180d8e27ebe973f3653e677e57a3805296110594638fa039066644",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "9b402cf6664139b4910fa38f517cdd3fff0d5db585e647ad59a9058afadec7a4"
+  },
+  "stoppedAt": 109,
+  "finishedAt": "2026-07-22T12:01:42.000Z",
+  "sourceRepoHeadAfter": "0f7287299a2601d81c36e76508d2a1c03dfb4dc6",
+  "sourceRepoFingerprintAfter": "2c64cc4098a5e73ed9f4ffa89ec14ed46e9c749be9d6934a96670d739d4ee2ad",
+  "targetRepoFingerprintAfter": "f7cb25e9c6b2e7abdf01f952bf367096a3f70a28dc7fe4dc5b12264c46a52184",
+  "retainedStates": [
+    "0108-e863ec34839c",
+    "0106-ed792909b777"
+  ]
+}

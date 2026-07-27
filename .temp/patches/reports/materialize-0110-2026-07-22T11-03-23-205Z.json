@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-22T11:03:23.205Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 110,
+  "passed": 105,
+  "reusedPrefix": 105,
+  "baseState": "0105-e8675ce41599",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 110,
+  "sourceRepoHeadBefore": "4884d93a1eaf0156c3d10aaaadc4104ced1bb3e5",
+  "sourceRepoFingerprintBefore": "7a3b1d3cc409b7f3f0b6aa4d969b597cf67e8f25a7a2a45214a7cfafe2afcbf5",
+  "targetRepoFingerprintBefore": "abf42956a7035f6afe8d6162ea406a6c0ac4859ac93c4ef1604b3740449f88df",
+  "outcomes": [
+    {
+      "index": 106,
+      "sha": "ed792909b777eabd724aa2f401ac6367bc3deb33",
+      "subject": "feat(session): 添加 includeHidden 参数以支持隐藏消息的过滤",
+      "patch": "current/0106-ed792909b777.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/session/message-v2.ts...\nerror: while searching for:\n  return Effect.runPromise(toModelMessagesEffect(input, model, options).pipe(Effect.provide(EffectLogger.layer)))\n}\n\nexport function page(input: { sessionID: SessionID; limit: number; before?: string }) {\n  const before = input.before ? cursor.decode(input.before) : undefined\n  const where = before\n    ? and(eq(MessageTable.session_id, input.sessionID), older(before))\n\nerror: patch failed: packages/opencode/src/session/message-v2.ts:1026\nerror: packages/opencode/src/session/message-v2.ts: patch does not apply\nChecking patch packages/opencode/src/session/session.ts...\nerror: while searching for:\n\n    const messages = Effect.fn(\"Session.messages\")(function* (input: { sessionID: SessionID; limit?: number }) {\n      if (input.limit) {\n        return MessageV2.page({ sessionID: input.sessionID, limit: input.limit }).items.filter(\n          (m) => !m.info.hidden,\n        )\n      }\n      return Array.from(MessageV2.stream(input.sessionID)).reverse()\n    })\n\nerror: patch failed: packages/opencode/src/session/session.ts:696\nerror: packages/opencode/src/session/session.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "e4cf6beeab994321525b36d9eff7db3047b244ba0ce772df22d9c5dcd2c1291d",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "352739a06db012bb5f969adbcdcd097e5290c53524e8f0ebdc62dd69970271ba"
+  },
+  "stoppedAt": 106,
+  "finishedAt": "2026-07-22T11:03:30.746Z",
+  "sourceRepoHeadAfter": "4884d93a1eaf0156c3d10aaaadc4104ced1bb3e5",
+  "sourceRepoFingerprintAfter": "7a3b1d3cc409b7f3f0b6aa4d969b597cf67e8f25a7a2a45214a7cfafe2afcbf5",
+  "targetRepoFingerprintAfter": "abf42956a7035f6afe8d6162ea406a6c0ac4859ac93c4ef1604b3740449f88df",
+  "retainedStates": [
+    "0105-e8675ce41599",
+    "0103-74a9ca56ea81",
+    "0101-d2a0ec015c74",
+    "0100-06db750ab9a8"
+  ]
+}

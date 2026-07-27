@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-24T02:12:22.752Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 150,
+  "passed": 145,
+  "reusedPrefix": 145,
+  "baseState": "0145-0277deba5044",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 150,
+  "sourceRepoHeadBefore": "93fa43b8144a29a74b4ffabbd49cec64bb094a43",
+  "sourceRepoFingerprintBefore": "753f7d04b75172d7770bf4b6af9a10c055086e9721082dd7ff5545b3ea823ab5",
+  "targetRepoFingerprintBefore": "d9276915dcece46f790b7d5b8f57b5257f3b366538b9730c2b451ed8adee1857",
+  "outcomes": [
+    {
+      "index": 146,
+      "sha": "77ec24d3c406f9fe24a22c591a1ba54bdecbeed2",
+      "subject": "chore: update package.json to add overrides for @opentui/core and @opentui/solid",
+      "patch": "current/0146-77ec24d3c406.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch bun.lock...\nerror: while searching for:\n    \"@npmcli/agent@4.0.0\": \"patches/@npmcli%2Fagent@4.0.0.patch\",\n  },\n  \"overrides\": {\n    \"@types/bun\": \"catalog:\",\n    \"@types/node\": \"catalog:\",\n    \"poe-oauth\": \"0.0.6\",\n\nerror: patch failed: bun.lock:653\nerror: bun.lock: patch does not apply\nChecking patch package.json...\nerror: while searching for:\n    \"electron\"\n  ],\n  \"overrides\": {\n    \"@types/bun\": \"catalog:\",\n    \"@types/node\": \"catalog:\",\n    \"poe-oauth\": \"0.0.6\"\n\nerror: patch failed: package.json:125\nerror: package.json: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "35999115f10189b363932d227155a904725adcb9f2bdc529bf96deeeb259ff18",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "ff566d0390e5902e3413714c5312ec353baf8176bdb8c95f041798db48cb4c5a"
+  },
+  "stoppedAt": 146,
+  "finishedAt": "2026-07-24T02:12:28.632Z",
+  "sourceRepoHeadAfter": "93fa43b8144a29a74b4ffabbd49cec64bb094a43",
+  "sourceRepoFingerprintAfter": "753f7d04b75172d7770bf4b6af9a10c055086e9721082dd7ff5545b3ea823ab5",
+  "targetRepoFingerprintAfter": "d9276915dcece46f790b7d5b8f57b5257f3b366538b9730c2b451ed8adee1857",
+  "retainedStates": [
+    "0145-0277deba5044",
+    "0141-190d962e1dd8"
+  ]
+}

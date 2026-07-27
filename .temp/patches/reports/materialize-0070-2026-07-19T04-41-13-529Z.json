@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-19T04:41:13.529Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 70,
+  "passed": 65,
+  "reusedPrefix": 65,
+  "baseState": "0065-8304c6752cef",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 70,
+  "sourceRepoHeadBefore": "43f17817d5be998527e3bad6346762209dfb61f9",
+  "sourceRepoFingerprintBefore": "88f23705c00e8aa00fade360079621448fadcbe31e3cab3bd44ebdcf1fe3a25c",
+  "targetRepoFingerprintBefore": "80fb147f57794bf3dfdc459c6f01a77edee1e13994969ee2ce47b8b8e9b54a30",
+  "outcomes": [
+    {
+      "index": 66,
+      "sha": "59b83d40cd60dbd69c1c15bab5cc3456a5c629b9",
+      "subject": "fix: 将最大行数限制从 2000 调整为 1000，以优化工具输出的处理",
+      "patch": "current/0066-59b83d40cd60.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/config/config.ts...\nerror: while searching for:\n  tool_output: Schema.optional(\n    Schema.Struct({\n      max_lines: Schema.optional(PositiveInt).annotate({\n        description: \"Maximum lines of tool output before it is truncated and saved to disk (default: 2000)\",\n      }),\n      max_bytes: Schema.optional(PositiveInt).annotate({\n        description: \"Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)\",\n\nerror: patch failed: packages/opencode/src/config/config.ts:210\nerror: packages/opencode/src/config/config.ts: patch does not apply\nChecking patch packages/opencode/src/tool/read.ts...\nerror: while searching for:\nimport { isImageAttachment, isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from \"@/util/media\"\nimport type { MessageV2 } from \"../session/message-v2\"\n\nconst DEFAULT_READ_LIMIT = 2000\nconst MAX_LINE_LENGTH = 2000\nconst MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`\nconst MAX_BYTES = 24 * 1024\n\nerror: patch failed: packages/opencode/src/tool/read.ts:13\nerror: packages/opencode/src/tool/read.ts: patch does not apply\nChecking patch packages/opencode/src/tool/truncate.ts...\nerror: while searching for:\nconst log = Log.create({ service: \"truncation\" })\nconst RETENTION = Duration.days(7)\n\nexport const MAX_LINES = 2000\nexport const MAX_BYTES = 24 * 1024\nexport const DIR = TRUNCATION_DIR\nexport const GLOB = path.join(TRUNCATION_DIR, \"*\")\n\nerror: patch failed: packages/opencode/src/tool/truncate.ts:13\nerror: packages/opencode/src/tool/truncate.ts: patch does not apply\nChecking patch packages/opencode/test/tool/truncation.test.ts...\nHunk #1 succeeded at 101 (offset 2 lines).\nChecking patch packages/sdk/js/src/v2/gen/types.gen.ts...\nerror: while searching for:\n   */\n  tool_output?: {\n    /**\n     * Maximum lines of tool output before it is truncated and saved to disk (default: 2000)\n     */\n    max_lines?: number\n    /**\n\nerror: patch failed: packages/sdk/js/src/v2/gen/types.gen.ts:1643\nerror: packages/sdk/js/src/v2/gen/types.gen.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "dae8e7e91d26e251ebefbc3cd302d06b39b0e5b522d1be88a2cb115ace6ac794",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "ed9e791a9c3d9c93f3dd8669f2c90a2b49d5816b3513957bf3b34c9d1ab036a3"
+  },
+  "stoppedAt": 66,
+  "finishedAt": "2026-07-19T04:41:20.584Z",
+  "sourceRepoHeadAfter": "43f17817d5be998527e3bad6346762209dfb61f9",
+  "sourceRepoFingerprintAfter": "88f23705c00e8aa00fade360079621448fadcbe31e3cab3bd44ebdcf1fe3a25c",
+  "targetRepoFingerprintAfter": "80fb147f57794bf3dfdc459c6f01a77edee1e13994969ee2ce47b8b8e9b54a30",
+  "retainedStates": [
+    "0065-8304c6752cef",
+    "0060-2e51523e5589",
+    "0055-0a0eb2e94edc",
+    "0050-f40e2d369552"
+  ]
+}

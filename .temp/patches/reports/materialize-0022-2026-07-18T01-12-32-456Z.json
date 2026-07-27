@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-18T01:12:32.456Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 22,
+  "passed": 21,
+  "reusedPrefix": 21,
+  "baseState": "0021-b94a79527811",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 22,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "338ce78de76987bfb864c06a0677ae10f05b3601e0f330b02dae79ed2c239985",
+  "targetRepoFingerprintBefore": "b457d879516b27cb9b052aa90d874e61f1bf74735f0cc1919191ea87b4e7b4fe",
+  "outcomes": [
+    {
+      "index": 22,
+      "sha": "17b46ab162f5c6c6f31a99addc2c8e66dbe59b70",
+      "subject": "feat: 添加 compact 格式化持续时间的功能，优化时间显示",
+      "patch": "current/0022-17b46ab162f5.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/tui/src/component/prompt/index.tsx...\nerror: while searching for:\nimport { iife } from \"@/util/iife\"\nimport { Locale } from \"@/util\"\nimport { estimateUserInputTokens, estimateRequestOverhead, sumConfirmed as sharedSumConfirmed, getContextSize as sharedGetContextSize, getBootstrapInputTokens, computeFinalTokens } from \"../../util/token-estimate\"\nimport { formatDuration } from \"../../util/format\"\nimport { createColors, createFrames } from \"../../ui/spinner.ts\"\nimport { useDialog } from \"@tui/ui/dialog\"\nimport { DialogProvider as DialogProviderConnect } from \"../dialog-provider\"\n\nerror: patch failed: packages/tui/src/component/prompt/index.tsx:30\nerror: packages/tui/src/component/prompt/index.tsx: patch does not apply\nChecking patch packages/tui/src/util/format.ts...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "d689d6937e57735a34eddaa4fea253c20f18f44e4d2bf9d62de274b5e7c41385",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "1abbe8302dbeb2d7a4716e7aefed1c8aad588dc7d08684b8775bcf035d1e510b"
+  },
+  "stoppedAt": 22,
+  "finishedAt": "2026-07-18T01:12:39.406Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "338ce78de76987bfb864c06a0677ae10f05b3601e0f330b02dae79ed2c239985",
+  "targetRepoFingerprintAfter": "b457d879516b27cb9b052aa90d874e61f1bf74735f0cc1919191ea87b4e7b4fe",
+  "retainedStates": [
+    "0021-b94a79527811",
+    "0020-aa6db0f3264f",
+    "0016-9e14f85c9ad3",
+    "0015-d302fa6f05a7"
+  ]
+}

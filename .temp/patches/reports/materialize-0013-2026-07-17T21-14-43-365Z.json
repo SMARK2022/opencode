@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-17T21:14:43.365Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 13,
+  "passed": 12,
+  "reusedPrefix": 12,
+  "baseState": "0012-b1bf9c5a50ce",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 13,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "c7ce0ba93845e92f8bcec47df6b0de0422174f7c131e1fb1df32a6d1bc5a49e2",
+  "targetRepoFingerprintBefore": "b466fff352ff9326bfac94046823211bdb0baedd4c4c6af564b4eb0c36a6bf29",
+  "outcomes": [
+    {
+      "index": 13,
+      "sha": "bbbf5f1dd94da64931b95ae8ee236f3509f7b486",
+      "subject": "feat(provider): 添加claudecode提供者支持，集成API密钥和基本URL配置",
+      "patch": "current/0013-bbbf5f1dd94d.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/package.json...\nerror: while searching for:\n    \"@hono/zod-validator\": \"catalog:\",\n    \"@lydell/node-pty\": \"catalog:\",\n    \"@modelcontextprotocol/sdk\": \"1.27.1\",\n    \"@npmcli/arborist\": \"9.4.0\",\n    \"@npmcli/config\": \"10.8.1\",\n    \"@octokit/graphql\": \"9.0.2\",\n\nerror: patch failed: packages/opencode/package.json:109\nerror: packages/opencode/package.json: patch does not apply\nChecking patch packages/opencode/src/provider/claudecode.ts...\nChecking patch packages/opencode/src/provider/provider.ts...\nHunk #1 succeeded at 167 (offset 27 lines).\nerror: while searching for:\n                  provider.npm ??\n                  existingModel?.api.npm ??\n                  modelsDev[providerID]?.npm ??\n                  \"@ai-sdk/openai-compatible\",\n                url: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[providerID]?.api ?? \"\",\n              },\n              status: model.status ?? existingModel?.status ?? \"active\",\n\nerror: patch failed: packages/opencode/src/provider/provider.ts:1149\nerror: packages/opencode/src/provider/provider.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "42640adfb79de89905ce54c449e6341411ea6f3d0803d04d7d823f5af1f0e05f",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "e4ae06e0ed394a824742980de216b16c3d29c69b45df3f1b3912951c2a6e6598"
+  },
+  "stoppedAt": 13,
+  "finishedAt": "2026-07-17T21:14:51.605Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "c7ce0ba93845e92f8bcec47df6b0de0422174f7c131e1fb1df32a6d1bc5a49e2",
+  "targetRepoFingerprintAfter": "b466fff352ff9326bfac94046823211bdb0baedd4c4c6af564b4eb0c36a6bf29",
+  "retainedStates": [
+    "0012-b1bf9c5a50ce",
+    "0011-589bb20e905f",
+    "0010-fc6394523010"
+  ]
+}

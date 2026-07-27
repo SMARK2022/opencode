@@ -1,0 +1,153 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-17T19:25:44.763Z",
+  "manifestJsonSha256": "3adb59666a57d5be3a7a0c872bfb028fc73128cc2766fee13adacba7a1dc742f",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "b1fc8113948b518835c2a39ece49553cffe9b30c",
+  "patchCount": 6,
+  "passed": 6,
+  "reusedPrefix": 0,
+  "rebuild": true,
+  "appliedThisRun": 6,
+  "materializedIndex": 6,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "e299efc37df99a6ffae62891f85808b7c1493c56e61f5e2a4156918b1e8d79c3",
+  "targetRepoFingerprintBefore": "bdeeca648eb9e0dc946c8cb1b46cd4f20ff3493ece5f73202d613f95dd776fc9",
+  "outcomes": [
+    {
+      "index": 1,
+      "sha": "9f117055c5a8a09f5cc7080786accf853bdb25fe",
+      "subject": "feat(session): 添加同ClaudeCode一样的git上下文处理和配置选项逻辑",
+      "patch": "current/0001-9f117055c5a8.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "M\tpackages/opencode/src/session/system.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "index": 2,
+      "sha": "cebacb4b1518733323a57bb858fd8b4a9c82f0a7",
+      "subject": "feat(read): 增强文件读取功能，添加设备文件保护和恶意代码提醒",
+      "patch": "current/0002-cebacb4b1518.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "index": 3,
+      "sha": "a461c299ff2a104ebdf3a5e94944ce6a80057c70",
+      "subject": "feat(usage): 优化消息使用情况计算，添加输入和输出流量显示",
+      "patch": "current/0003-a461c299ff2a.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "index": 4,
+      "sha": "bc7a6f1778b518523c4c04009a93e940bb22c2eb",
+      "subject": "fix(session): 修复获取 git 上下文的调用方式，确保正确执行",
+      "patch": "current/0004-bc7a6f1778b5.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "index": 5,
+      "sha": "6c994e2db366fa0231cd37279657b9afbcbbf735",
+      "subject": "feat(signal): 添加节流信号创建函数，优化性能和响应速度 feat(subagent-footer): 更新使用情况计算逻辑，添加工具输出字符估算 feat(context): 增强状态计算，支持工具输出字符估算",
+      "patch": "current/0005-6c994e2db366.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx",
+        "M\tpackages/tui/src/util/signal.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "index": 6,
+      "sha": "bb430162951a92c9139ee820da30866a4cdfbc6d",
+      "subject": "feat(usage): 优化使用信息计算，确保在无回复时显示零值",
+      "patch": "current/0006-bb430162951a.patch",
+      "cumulativeChangedFiles": [
+        "M\tpackages/opencode/src/effect/runtime-flags.ts",
+        "M\tpackages/opencode/src/session/system.ts",
+        "M\tpackages/opencode/src/tool/read.ts",
+        "M\tpackages/opencode/src/util/media.ts",
+        "M\tpackages/tui/src/component/prompt/index.tsx",
+        "M\tpackages/tui/src/feature-plugins/sidebar/context.tsx",
+        "M\tpackages/tui/src/routes/session/subagent-footer.tsx",
+        "M\tpackages/tui/src/util/signal.ts"
+      ],
+      "status": "passed",
+      "phase": "apply",
+      "reason": "applied",
+      "stdout": "",
+      "stderr": ""
+    }
+  ],
+  "simulationPreflight": {
+    "head": "b1fc8113948b518835c2a39ece49553cffe9b30c",
+    "statusSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "finishedAt": "2026-07-17T19:25:53.789Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "e299efc37df99a6ffae62891f85808b7c1493c56e61f5e2a4156918b1e8d79c3",
+  "targetRepoFingerprintAfter": "bdeeca648eb9e0dc946c8cb1b46cd4f20ff3493ece5f73202d613f95dd776fc9",
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0006-bb430162951a",
+  "retainedStates": [
+    "0006-bb430162951a",
+    "0007-984de21dfbca",
+    "0010-fc6394523010",
+    "0009-5b4ab2741b27",
+    "0008-4d3c3d4e546a"
+  ]
+}

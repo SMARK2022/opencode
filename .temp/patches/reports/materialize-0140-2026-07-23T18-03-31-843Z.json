@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-23T18:03:31.843Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 140,
+  "passed": 135,
+  "reusedPrefix": 135,
+  "baseState": "0135-3bed2cfd5377",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 140,
+  "sourceRepoHeadBefore": "93fa43b8144a29a74b4ffabbd49cec64bb094a43",
+  "sourceRepoFingerprintBefore": "753f7d04b75172d7770bf4b6af9a10c055086e9721082dd7ff5545b3ea823ab5",
+  "targetRepoFingerprintBefore": "613e7454cbedc23fd55d925934377e6b0f33fa3f19808e68cc5b643a3f490c59",
+  "outcomes": [
+    {
+      "index": 136,
+      "sha": "95a96c38e940b1827995a5840319c93617ea99d4",
+      "subject": "feat(context-usage): 添加指令和技能的处理逻辑，优化上下文数据计算",
+      "patch": "current/0136-95a96c38e940.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/cli/cmd/tui/util/context-usage.ts...\nerror: packages/opencode/src/cli/cmd/tui/util/context-usage.ts: does not exist in index\nChecking patch packages/opencode/test/cli/tui/context-usage.test.ts...\nerror: packages/opencode/test/cli/tui/context-usage.test.ts: does not exist in index\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "756bd00dd3847622a3792caa199ecf915da48b27174f3c057f212e0d01cbaf39",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "e4c64aa1225ee08529256c0f685b56f2a23604b43fc410d393084d816e82318a"
+  },
+  "stoppedAt": 136,
+  "finishedAt": "2026-07-23T18:03:38.228Z",
+  "sourceRepoHeadAfter": "93fa43b8144a29a74b4ffabbd49cec64bb094a43",
+  "sourceRepoFingerprintAfter": "753f7d04b75172d7770bf4b6af9a10c055086e9721082dd7ff5545b3ea823ab5",
+  "targetRepoFingerprintAfter": "613e7454cbedc23fd55d925934377e6b0f33fa3f19808e68cc5b643a3f490c59",
+  "retainedStates": [
+    "0135-3bed2cfd5377",
+    "0130-43948adfded9"
+  ]
+}

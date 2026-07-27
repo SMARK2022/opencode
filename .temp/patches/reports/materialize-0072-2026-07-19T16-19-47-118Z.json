@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-19T16:19:47.118Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 72,
+  "passed": 71,
+  "reusedPrefix": 71,
+  "baseState": "0071-d95dc89b856d",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 72,
+  "sourceRepoHeadBefore": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintBefore": "c657cbd342bbc97955c11e5cfd740b244b1467398bf667ab427083013d80ef11",
+  "targetRepoFingerprintBefore": "bcd89caa4e0ef3e4747400b7ecdf6cf8b6a1fe8b77ee50f4a46d65b7ce5b0a5c",
+  "outcomes": [
+    {
+      "index": 72,
+      "sha": "a09787f293c92914bd9c7170dcdeca99ae96ce15",
+      "subject": "feat: 通过结合输入字符计数和细分来增强token估计",
+      "patch": "current/0072-a09787f293c9.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/tui/src/component/prompt/index.tsx...\nerror: while searching for:\nimport { TuiEvent } from \"../../event\"\nimport { iife } from \"@/util/iife\"\nimport { Locale } from \"@/util/locale\"\nimport { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from \"../../util/token-estimate\"\nimport { formatDuration, formatDurationCompact } from \"@/util/format\"\nimport { createColors, createFrames } from \"../../ui/spinner.ts\"\nimport { useDialog } from \"@tui/ui/dialog\"\n\nerror: patch failed: packages/tui/src/component/prompt/index.tsx:30\nerror: packages/tui/src/component/prompt/index.tsx: patch does not apply\nChecking patch packages/tui/src/feature-plugins/sidebar/context.tsx...\nerror: while searching for:\nimport { createEffect, createMemo, createSignal } from \"solid-js\"\nimport { leadingAndTrailing, throttle } from \"@solid-primitives/scheduled\"\nimport { createTokenFlowPulse } from \"../../util/signal\"\nimport { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from \"../../util/token-estimate\"\n\nconst id = \"internal:sidebar-context\"\n\n\nerror: patch failed: packages/tui/src/feature-plugins/sidebar/context.tsx:3\nerror: packages/tui/src/feature-plugins/sidebar/context.tsx: patch does not apply\nChecking patch packages/tui/src/routes/session/subagent-footer.tsx...\nerror: while searching for:\nimport { useCommandDialog } from \"@tui/component/dialog-command\"\nimport { useKeybind } from \"../../context/keybind\"\nimport { Locale } from \"@/util/locale\"\nimport { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from \"../../util/token-estimate\"\nimport { createThrottledSignal, createTokenFlowPulse } from \"../../util/signal\"\nimport { useTerminalDimensions } from \"@opentui/solid\"\n\n\nerror: patch failed: packages/tui/src/routes/session/subagent-footer.tsx:7\nerror: packages/tui/src/routes/session/subagent-footer.tsx: patch does not apply\nChecking patch packages/tui/src/util/context-usage.ts...\nerror: while searching for:\nimport matter from \"gray-matter\"\nimport type { Agent, Config, Message, Part, Provider, VcsInfo } from \"@opencode-ai/sdk/v2\"\nimport { Flag } from \"@opencode-ai/core/flag/flag\"\nimport { estimate as estimateTokens } from \"@/util/token\"\nimport { toJsonSchema } from \"@/util/effect-zod\"\nimport { Schema } from \"effect\"\nimport { Shell } from \"@/shell/shell\"\n\nerror: patch failed: packages/tui/src/util/context-usage.ts:4\nerror: packages/tui/src/util/context-usage.ts: patch does not apply\nChecking patch packages/tui/src/util/token-estimate.ts...\nerror: while searching for:\nimport type { AssistantMessage } from \"@opencode-ai/sdk/v2\"\nimport { estimate as estimateTokens } from \"@/util/token\"\n\nexport type UsageInfo = {\n  input: number\n  output: number\n\nerror: patch failed: packages/tui/src/util/token-estimate.ts:1\nerror: packages/tui/src/util/token-estimate.ts: patch does not apply\nChecking patch packages/schema/src/v1/session.ts...\nerror: while searching for:\n      write: NonNegativeInt,\n    }),\n  }),\n})\n  .annotate({ identifier: \"StepFinishPart\" })\n  .pipe(withStatics((s) => ({ zod: zod(s) })))\n\nerror: patch failed: packages/schema/src/v1/session.ts:279\nerror: packages/schema/src/v1/session.ts: patch does not apply\nChecking patch packages/opencode/src/session/processor.ts...\nerror: while searching for:\n\nexport interface Handle {\n  readonly message: MessageV2.Assistant\n  readonly updateToolCall: (\n    toolCallID: string,\n    update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,\n\nerror: patch failed: packages/opencode/src/session/processor.ts:31\nerror: packages/opencode/src/session/processor.ts: patch does not apply\nChecking patch packages/opencode/src/session/prompt.ts...\nerror: while searching for:\n            if (format.type === \"json_schema\") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)\n            const messages = [...modelMsgs, ...(isLastStep ? [{ role: \"assistant\" as const, content: MAX_STEPS }] : [])]\n            // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。\n            // 从本 session 历史 assistant 的 output text/reasoning 推算真实 chars-per-token 比值，\n            // 按累积字符量停止（≥16000），不按轮数，代替固定 /4\n            const systemText = [\n              ...(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)),\n              ...system,\n              ...(lastUser.system ? [lastUser.system] : []),\n            ].join(\"\\n\")\n            const messagesText = JSON.stringify(messages)\n            const disabledTools = Permission.disabled(Object.keys(tools), Permission.merge(agent.permission, session.permission ?? []))\n            const toolsText = Object.entries(tools)\n\nerror: patch failed: packages/opencode/src/session/prompt.ts:1539\nerror: packages/opencode/src/session/prompt.ts: patch does not apply\nChecking patch packages/tui/test/context-usage.test.ts...\nHunk #1 succeeded at 114 (offset 8 lines).\nHunk #2 succeeded at 176 (offset 27 lines).\nerror: while searching for:\n    const result = filterCompactedMessages(messages.toReversed()).map((item) => item.info.id)\n    expect(result).toEqual([\"3\", \"4\", \"5\", \"6\"])\n  })\n})\n\nerror: patch failed: packages/tui/test/context-usage.test.ts:345\nerror: packages/tui/test/context-usage.test.ts: patch does not apply\nChecking patch packages/tui/test/util/token-estimate.test.ts...\nerror: while searching for:\nimport { describe, expect, test } from \"bun:test\"\nimport type { AssistantMessage, Part } from \"@opencode-ai/sdk/v2\"\nimport { computeFinalTokens } from \"@/cli/cmd/tui/util/token-estimate\"\n\nfunction assistant(tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read: number; write: number } }, completed?: number): AssistantMessage {\n  return {\n\nerror: patch failed: packages/tui/test/util/token-estimate.test.ts:1\nerror: packages/tui/test/util/token-estimate.test.ts: patch does not apply\nChecking patch packages/opencode/test/session/compaction.test.ts...\nHunk #1 succeeded at 202 (offset 11 lines).\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "ed798be785a1738c2f4be1eb63bf8c6d612423aa451f354b11cb9df5ce51ca59",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "47b2316bc9fe1f2c5f51e2a2216b92ffdff66b278e0c27ef9528744d8c445f5f"
+  },
+  "stoppedAt": 72,
+  "finishedAt": "2026-07-19T16:20:04.453Z",
+  "sourceRepoHeadAfter": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintAfter": "c657cbd342bbc97955c11e5cfd740b244b1467398bf667ab427083013d80ef11",
+  "targetRepoFingerprintAfter": "bcd89caa4e0ef3e4747400b7ecdf6cf8b6a1fe8b77ee50f4a46d65b7ce5b0a5c",
+  "retainedStates": [
+    "0071-d95dc89b856d",
+    "0070-efae0086f406",
+    "0065-8304c6752cef",
+    "0061-145dea7da6ae",
+    "0060-2e51523e5589"
+  ]
+}

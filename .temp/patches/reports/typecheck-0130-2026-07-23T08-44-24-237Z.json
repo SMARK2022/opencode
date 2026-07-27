@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-23T08:44:24.237Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 130,
+  "passed": 130,
+  "reusedPrefix": 130,
+  "baseState": "0130-43948adfded9",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 130,
+  "sourceRepoHeadBefore": "76af8d16b1ba80f2a433315d0dd22327ef9ffbd1",
+  "sourceRepoFingerprintBefore": "fe956dc5ad324997eb95211c790ae6c701afeca69ce601d3bb9dadb21c1d91d1",
+  "targetRepoFingerprintBefore": "f8b1755d51edde5f335eedcc5d8f713731cf007ec9f1e68957b7b60636dcd68f",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0130-43948adfded9",
+  "retainedStates": [
+    "0130-43948adfded9",
+    "0129-3ff2620ec160",
+    "0128-831d4846313a",
+    "0127-2b4a23f05567",
+    "0126-f5f094895bf7"
+  ],
+  "test": {
+    "index": 130,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "5dcc5a1276df4784155f73c4f623198d7bb5c9171c743afacedcbfe90cc64ea1",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "failed",
+        "stdout": "../tui/src/util/token-accounting.ts(280,22): error TS2339: Property 'inputBreakdown' does not exist on type 'Msg'.\n../tui/src/util/token-accounting.ts(280,56): error TS2339: Property 'inputChars' does not exist on type 'Msg'.\n../tui/src/util/token-accounting.ts(282,43): error TS2339: Property 'inputBreakdown' does not exist on type 'Msg'.\n../tui/src/util/token-accounting.ts(283,39): error TS2339: Property 'inputChars' does not exist on type 'Msg'.\n../tui/src/util/token-accounting.ts(284,40): error TS2339: Property 'inputTokens' does not exist on type 'Msg'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-23T08:44:28.990Z",
+  "sourceRepoHeadAfter": "76af8d16b1ba80f2a433315d0dd22327ef9ffbd1",
+  "sourceRepoFingerprintAfter": "fe956dc5ad324997eb95211c790ae6c701afeca69ce601d3bb9dadb21c1d91d1",
+  "targetRepoFingerprintAfter": "f8b1755d51edde5f335eedcc5d8f713731cf007ec9f1e68957b7b60636dcd68f"
+}

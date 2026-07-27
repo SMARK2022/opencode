@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-19T16:41:11.188Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 75,
+  "passed": 74,
+  "reusedPrefix": 74,
+  "baseState": "0074-4d55a2c0f4a3",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 75,
+  "sourceRepoHeadBefore": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintBefore": "78fcbc5477ed191af17d4cb5901fa7bd7acf8f4cb41e9d3a07b0f4cd8a6b4526",
+  "targetRepoFingerprintBefore": "c9c47f081ccecdbfd506f7cf39ec7804e9652b439b1878b2dae692d0f11ed199",
+  "outcomes": [
+    {
+      "index": 75,
+      "sha": "4141d5e979ff532f2a6eff956a689a9a71b3d6f5",
+      "subject": "feat: 延迟测试，增加API URL的默认配置，优化模型API的获取逻辑",
+      "patch": "current/0075-4141d5e979ff.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx...\nerror: packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx: does not exist in index\nChecking patch packages/opencode/src/provider/provider.ts...\nerror: while searching for:\n\nconst log = Log.create({ service: \"provider\" })\nconst DEFAULT_TIMEOUT_MS = 300_000\n\nfunction shouldUseCopilotResponsesApi(modelID: string): boolean {\n  const match = /^gpt-(\\d+)/.exec(modelID)\n\nerror: patch failed: packages/opencode/src/provider/provider.ts:32\nerror: packages/opencode/src/provider/provider.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "05234b09a231808ff89403c2c1177696e71275a37e9f3b8cda44894f2732d365",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "878edc546135734e8367b7bccc217c3e983a42486b8857fb67ca55be5fa61e5f"
+  },
+  "stoppedAt": 75,
+  "finishedAt": "2026-07-19T16:41:20.777Z",
+  "sourceRepoHeadAfter": "c62b990871294affaa9deb6c9fd991a80e4aaf71",
+  "sourceRepoFingerprintAfter": "78fcbc5477ed191af17d4cb5901fa7bd7acf8f4cb41e9d3a07b0f4cd8a6b4526",
+  "targetRepoFingerprintAfter": "c9c47f081ccecdbfd506f7cf39ec7804e9652b439b1878b2dae692d0f11ed199",
+  "retainedStates": [
+    "0074-4d55a2c0f4a3",
+    "0073-f75419bd78c5",
+    "0072-a09787f293c9",
+    "0071-d95dc89b856d",
+    "0070-efae0086f406"
+  ]
+}

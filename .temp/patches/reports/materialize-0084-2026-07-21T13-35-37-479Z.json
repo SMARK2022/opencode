@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-21T13:35:37.479Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 84,
+  "passed": 79,
+  "reusedPrefix": 79,
+  "baseState": "0079-8812fd3d588b",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 84,
+  "sourceRepoHeadBefore": "4b825d8b81933804bf5af57fda449eecdac29425",
+  "sourceRepoFingerprintBefore": "6f31acfd72666427d20a3d1583a541c68e68cab78b560421cd55ceccaf518299",
+  "targetRepoFingerprintBefore": "807bd9b13bf33f40b60197c99bfe1ddd3fcd1a96f98e5d01832b2eecf73c94fa",
+  "outcomes": [
+    {
+      "index": 80,
+      "sha": "0a8361dfa4d3d4b5c7cac3f744743c711fcb8cba",
+      "subject": "feat(notebook): 强化笔记本命令和环境解析，优化错误处理和参数验证",
+      "patch": "current/0080-0a8361dfa4d3.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch sdks/vscode/src/notebook/commands.ts...\nHunk #1 succeeded at 45 (offset -3 lines).\nerror: while searching for:\n        description: \"kernel/environment capability snapshot\",\n        run: async () => {\n          // 常量：notebook\n          const notebook = await selectNotebook(false)\n          return await notebookEnv(notebook?.uri.toString())\n        },\n      },\n    ],\n\nerror: patch failed: sdks/vscode/src/notebook/commands.ts:73\nerror: sdks/vscode/src/notebook/commands.ts: patch does not apply\nChecking patch sdks/vscode/src/notebook/edit.ts...\nerror: while searching for:\n// 编辑操作类型：insert 插入新 cell、edit 修改 cell 内容、delete 删除 cell\n// 编辑类型校验集合：确保只接受 insert/edit/delete 三种合法操作\nconst EDIT_TYPES = new Set([\"insert\", \"edit\", \"delete\"])\n\n// ---------------------------------------------------------------------------\n// Handler\n\nerror: patch failed: sdks/vscode/src/notebook/edit.ts:31\nerror: sdks/vscode/src/notebook/edit.ts: patch does not apply\nChecking patch sdks/vscode/src/notebook/env.ts...\nerror: while searching for:\n\n// 导出异步函数：notebookEnv\n// 环境探测：检测活跃 Jupyter 内核和保存的元数据，不将元数据视为活跃运行时\nexport async function notebookEnv(filePath?: string) {\n  // 常量：notebook\n  const notebook = await resolveNotebook(filePath).catch(() => undefined)\n  // 常量：activeRuntime\n  const activeRuntime = notebook ? await getActiveRuntime(notebook.uri) : null\n  // 常量：savedMetadata\n  const savedMetadata = notebook ? await readSavedNotebookMetadata(notebook.uri) : null\n\n  return {\n    ran: false,\n\nerror: patch failed: sdks/vscode/src/notebook/env.ts:71\nerror: sdks/vscode/src/notebook/env.ts: patch does not apply\nChecking patch sdks/vscode/src/notebook/output.ts...\nerror: while searching for:\n/** Bridge endpoint handler: reads and serializes all outputs for a specific cell. */\n// 导出异步函数：readNotebookCellOutput\n// 读取 cell 输出：返回指定 cell 的执行输出和 artifact 文件路径\nexport async function readNotebookCellOutput(filePath?: string, cellIndex?: number, cellId?: string) {\n  // 常量：notebook\n  // 解析 notebook：通过文件路径查找已打开的文档\nconst notebook = await resolveNotebook(filePath)\n\nerror: patch failed: sdks/vscode/src/notebook/output.ts:26\nerror: sdks/vscode/src/notebook/output.ts: patch does not apply\nChecking patch sdks/vscode/src/notebook/resolve.ts...\nerror: while searching for:\n * Notebook and cell resolution — locating open notebooks and cells by path, index, or ID.\n */\nimport * as vscode from \"vscode\"\nimport { stringProp, numberProp, uriFromInput } from \"../util\"\nimport { cellIdentifiers } from \"./format\"\n\n// ---------------------------------------------------------------------------\n// Notebook resolution\n// ---------------------------------------------------------------------------\n\n/**\n * Resolves a notebook document from a file path, URI string, or falls back\n * to the active/first-open notebook. Throws if nothing can be found.\n */\n// 导出异步函数：resolveNotebook\n// 解析 notebook：通过文件路径查找已打开的 notebook 文档\n// 解析 notebook：通过文件路径匹配已打开的 notebook 文档\nexport async function resolveNotebook(filePath?: string) {\n  if (!filePath) {\n    // 常量：active\n    const active = vscode.window.activeNotebookEditor?.notebook\n    if (active) return active\n    if (vscode.workspace.notebookDocuments.length > 0) return vscode.workspace.notebookDocuments[0]\n    throw new Error(\"No active or open notebook document\")\n  }\n\n  // 常量：existing\n  // 查找已打开的 notebook：按 fsPath 或 URI 字符串匹配\nconst existing = vscode.workspace.notebookDocuments.find(\n\nerror: patch failed: sdks/vscode/src/notebook/resolve.ts:2\nerror: sdks/vscode/src/notebook/resolve.ts: patch does not apply\nChecking patch sdks/vscode/src/notebook/run.ts...\nerror: while searching for:\n\n/**\n * Bridge endpoint handler: runs notebook cells and returns execution results.\n * Accepts `target: { type: \"all\" | \"range\" | \"cell\", cellId?, start?, end? }`.\n * Default timeout: 300 000 ms (5 minutes).\n */\n// 导出异步函数：runNotebook\n// 运行 notebook：执行 cell 或 cell 范围，返回每个 cell 的执行结果和输出\nexport async function runNotebook(input: Record<string, unknown>) {\n  // 常量：notebook\n  const notebook = await resolveNotebook(stringProp(input, \"filePath\"))\n  // 常量：commands\n  const commands = await vscode.commands.getCommands(true)\n  if (!commands.includes(\"notebook.cell.execute\")) {\n\nerror: patch failed: sdks/vscode/src/notebook/run.ts:27\nerror: sdks/vscode/src/notebook/run.ts: patch does not apply\nChecking patch sdks/vscode/src/notebook/source.ts...\nerror: while searching for:\n// 获取 notebook 源码：返回所有 cell 的代码、类型和虚拟行号范围\n// 获取 notebook 源码：返回所有 cell 的代码和虚拟行号范围\nexport async function notebookSource(input: Record<string, unknown>) {\n  // 常量：notebook\n  const notebook = await resolveNotebook(stringProp(input, \"filePath\"))\n  // 常量：limit\n  const limit = Math.max(1, numberProp(input, \"limit\") ?? 400)\n  // 常量：offset\n\nerror: patch failed: sdks/vscode/src/notebook/source.ts:29\nerror: sdks/vscode/src/notebook/source.ts: patch does not apply\nChecking patch sdks/vscode/src/notebook/summary.ts...\nerror: while searching for:\n/** Bridge endpoint handler: builds a compact notebook summary for LLM consumption. */\n// 导出异步函数：notebookSummary\n// 生成 notebook 摘要：cell 列表、执行状态和输出概要\nexport async function notebookSummary(filePath?: string) {\n  // 常量：notebook\n  // 解析 notebook：通过文件路径查找已打开的文档\nconst notebook = await resolveNotebook(filePath)\n\nerror: patch failed: sdks/vscode/src/notebook/summary.ts:14\nerror: sdks/vscode/src/notebook/summary.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "a165f56fcd2855dadc1b0f8436a8759cbcf75b30740ff92a44ea6b75b8a36afb",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "34ba093ab9d9a7920fb49f55096c33abee7acbbf39ae2e9439b93b82241c3929"
+  },
+  "stoppedAt": 80,
+  "finishedAt": "2026-07-21T13:35:44.049Z",
+  "sourceRepoHeadAfter": "4b825d8b81933804bf5af57fda449eecdac29425",
+  "sourceRepoFingerprintAfter": "6f31acfd72666427d20a3d1583a541c68e68cab78b560421cd55ceccaf518299",
+  "targetRepoFingerprintAfter": "807bd9b13bf33f40b60197c99bfe1ddd3fcd1a96f98e5d01832b2eecf73c94fa",
+  "retainedStates": [
+    "0079-8812fd3d588b",
+    "0078-3bab13f27c2f",
+    "0077-9768471cf3fc",
+    "0074-4d55a2c0f4a3"
+  ]
+}

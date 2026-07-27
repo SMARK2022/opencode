@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-17T22:42:42.937Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 20,
+  "passed": 15,
+  "reusedPrefix": 15,
+  "baseState": "0015-d302fa6f05a7",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 20,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "cc00e9bfd44412bbcd228bb3c6504188bd4b7d261397c3ee9dda50f3eab546dc",
+  "targetRepoFingerprintBefore": "6d160a477b4f9c3c049195cef350aea4ff2587224c95eed30b10298640a048ba",
+  "outcomes": [
+    {
+      "index": 16,
+      "sha": "9e14f85c9ad3b23958c2f0d60eed74c37ba42625",
+      "subject": "fix: 优化lastStepFinish的计算逻辑，确保在lastSFIdx有效时正确获取step-finish",
+      "patch": "current/0016-9e14f85c9ad3.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/package.json...\nerror: while searching for:\n    \"@hono/zod-validator\": \"catalog:\",\n    \"@lydell/node-pty\": \"catalog:\",\n    \"@modelcontextprotocol/sdk\": \"1.27.1\",\n    \"@node-rs/xxhash\": \"1.7.6\",\n    \"@npmcli/arborist\": \"9.4.0\",\n    \"@npmcli/config\": \"10.8.1\",\n    \"@octokit/graphql\": \"9.0.2\",\n\nerror: patch failed: packages/opencode/package.json:109\nerror: packages/opencode/package.json: patch does not apply\nChecking patch packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx...\nerror: packages/opencode/src/cli/cmd/tui/component/prompt/index.tsx: does not exist in index\nChecking patch packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx...\nerror: packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/context.tsx: does not exist in index\nChecking patch packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx...\nerror: packages/opencode/src/cli/cmd/tui/routes/session/subagent-footer.tsx: does not exist in index\nChecking patch packages/opencode/src/provider/claudecode.ts...\nerror: while searching for:\nimport { createHash, randomUUID } from \"crypto\"\nimport { xxh64 } from \"@node-rs/xxhash\"\n\n// ============================================================================\n// 常量与基础配置\n\nerror: patch failed: packages/opencode/src/provider/claudecode.ts:1\nerror: packages/opencode/src/provider/claudecode.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "f535c43b0ae3179064d680536bbc4ac7ac32fcf08dfbab4962bbe3257aefdeb3",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "3a5838dedcd7c45efa7a4bad51ca2938d52263bdcfc823ec4f1a30b598ddca82"
+  },
+  "stoppedAt": 16,
+  "finishedAt": "2026-07-17T22:42:54.370Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "543617810bd9e5aed177126296788d4bb0ef0042ac82e978b586d16f262297da",
+  "targetRepoFingerprintAfter": "6d160a477b4f9c3c049195cef350aea4ff2587224c95eed30b10298640a048ba",
+  "integrityFailure": "source repository changed during dry-run",
+  "retainedStates": [
+    "0015-d302fa6f05a7",
+    "0014-61bcd2aae67c",
+    "0012-b1bf9c5a50ce"
+  ]
+}

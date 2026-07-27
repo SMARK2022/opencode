@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-18T23:49:53.317Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 50,
+  "passed": 46,
+  "reusedPrefix": 46,
+  "baseState": "0046-f13fd00acfde",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 50,
+  "sourceRepoHeadBefore": "43f17817d5be998527e3bad6346762209dfb61f9",
+  "sourceRepoFingerprintBefore": "88f23705c00e8aa00fade360079621448fadcbe31e3cab3bd44ebdcf1fe3a25c",
+  "targetRepoFingerprintBefore": "859735a211f247fef0ce19e7f02da4ae6186d766ad019e72a98cd451d5f0ddbd",
+  "outcomes": [
+    {
+      "index": 47,
+      "sha": "e6094d52b0a6fbd70b3ed91e8a2002d6209e9d1d",
+      "subject": "feat: implement daemon lifecycle management and server lock handling",
+      "patch": "current/0047-e6094d52b0a6.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "file-not-found",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/cli/cmd/tui/server-lock.ts...\nChecking patch packages/opencode/src/cli/cmd/tui/thread.ts...\nerror: packages/opencode/src/cli/cmd/tui/thread.ts: does not exist in index\nChecking patch packages/opencode/src/cli/cmd/tui/worker.ts...\nerror: packages/opencode/src/cli/cmd/tui/worker.ts: does not exist in index\nChecking patch packages/opencode/src/index.ts...\nerror: while searching for:\n\nconst processMetadata = ensureProcessMetadata(\"main\")\n\nprocess.on(\"unhandledRejection\", (e) => {\n  Log.Default.error(\"rejection\", {\n    e: errorMessage(e),\n\nerror: patch failed: packages/opencode/src/index.ts:42\nerror: packages/opencode/src/index.ts: patch does not apply\nChecking patch packages/opencode/src/server/routes/global.ts...\nerror: packages/opencode/src/server/routes/global.ts: does not exist in index\nChecking patch packages/opencode/test/cli/tui/daemon.test.ts...\nChecking patch packages/opencode/test/cli/tui/server-lock.test.ts...\nChecking patch packages/opencode/test/cli/tui/thread.test.ts...\nerror: while searching for:\nimport path from \"path\"\nimport { tmpdir } from \"../../fixture/fixture\"\nimport * as App from \"../../../src/cli/cmd/tui/app\"\nimport { Rpc } from \"../../../src/util\"\nimport { UI } from \"../../../src/cli/ui\"\nimport * as Timeout from \"../../../src/util/timeout\"\nimport * as Network from \"../../../src/cli/network\"\nimport * as Win32 from \"../../../src/cli/cmd/tui/win32\"\nimport { TuiConfig } from \"../../../src/cli/cmd/tui/config/tui\"\n\nconst stop = new Error(\"stop\")\nconst seen = {\n  tui: [] as string[],\n}\n\nfunction setup() {\n\nerror: patch failed: packages/opencode/test/cli/tui/thread.test.ts:3\nerror: packages/opencode/test/cli/tui/thread.test.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "b99a0b154474f5fa3e07990aab30f43089a6dc2468ccc93f9959354015784b51",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "f2c433aab9852b984eb0f6af87a507530f024491977994a139132edb9e02016f"
+  },
+  "stoppedAt": 47,
+  "finishedAt": "2026-07-18T23:49:59.503Z",
+  "sourceRepoHeadAfter": "43f17817d5be998527e3bad6346762209dfb61f9",
+  "sourceRepoFingerprintAfter": "88f23705c00e8aa00fade360079621448fadcbe31e3cab3bd44ebdcf1fe3a25c",
+  "targetRepoFingerprintAfter": "859735a211f247fef0ce19e7f02da4ae6186d766ad019e72a98cd451d5f0ddbd",
+  "retainedStates": [
+    "0046-f13fd00acfde",
+    "0045-6380ed0b8d91",
+    "0043-630dd666663c",
+    "0042-16656033a664",
+    "0040-8f6444e154d0"
+  ]
+}

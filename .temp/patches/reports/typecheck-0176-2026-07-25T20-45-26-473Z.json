@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-25T20:45:26.473Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 176,
+  "passed": 176,
+  "reusedPrefix": 176,
+  "baseState": "0176-1a88ba6a6e8c",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 176,
+  "sourceRepoHeadBefore": "8356c6fc1ed45de48160036d00a7a179641999a1",
+  "sourceRepoFingerprintBefore": "a931367191131927d5eab38c8649ec6a9c9818cd2c3655ca682ef5b2257a2d6a",
+  "targetRepoFingerprintBefore": "1e1a8643a6d2c7cc66d71defe04273b9e0af91e0cca781a28d387a2a880b08ab",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0176-1a88ba6a6e8c",
+  "retainedStates": [
+    "0176-1a88ba6a6e8c",
+    "0175-f0a47a144866",
+    "0174-57eecce76b03",
+    "0173-59aeb3d239f3"
+  ],
+  "test": {
+    "index": 176,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "bfd9217687f98d6db47035044c1b3c6a51a6d00496972d6f8f1b5fadee0a426f",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/cli/cmd/stats-data.ts(719,11): error TS2322: Type 'WithParts | undefined' is not assignable to type '{ info: { time: { created: number; }; tokens?: TokenTotals | undefined; }; parts: any[]; } | undefined'.\n  Type 'WithParts' is not assignable to type '{ info: { time: { created: number; }; tokens?: TokenTotals | undefined; }; parts: any[]; }'.\n    Types of property 'info' are incompatible.\n      Type 'Info' is not assignable to type '{ time: { created: number; }; tokens?: TokenTotals | undefined; }'.\n        Type 'Assistant' is not assignable to type '{ time: { created: number; }; tokens?: TokenTotals | undefined; }'.\n          The types of 'tokens.total' are incompatible between these types.\n            Type 'number | undefined' is not assignable to type 'number'.\n              Type 'undefined' is not assignable to type 'number'.\nsrc/cli/cmd/stats-data.ts(739,11): error TS2322: Type 'WithParts' is not assignable to type '{ info: { time: { created: number; }; tokens?: TokenTotals | undefined; }; parts: any[]; }'.\n  Types of property 'info' are incompatible.\n    Type 'Info' is not assignable to type '{ time: { created: number; }; tokens?: TokenTotals | undefined; }'.\n      Type 'Assistant' is not assignable to type '{ time: { created: number; }; tokens?: TokenTotals | undefined; }'.\n        The types of 'tokens.total' are incompatible between these types.\n          Type 'number | undefined' is not assignable to type 'number'.\n            Type 'undefined' is not assignable to type 'number'.\nsrc/cli/cmd/stats.ts(130,25): error TS2339: Property 'session' does not exist on type 'BaseArgs & Partial<DetailArgs>'.\nsrc/cli/cmd/stats.ts(132,23): error TS2339: Property 'model' does not exist on type 'BaseArgs & Partial<DetailArgs>'.\nsrc/cli/cmd/stats.ts(133,26): error TS2339: Property 'provider' does not exist on type 'BaseArgs & Partial<DetailArgs>'.\nsrc/cli/cmd/stats.ts(134,24): error TS2339: Property 'source' does not exist on type 'BaseArgs & Partial<DetailArgs>'.\nsrc/cli/cmd/stats.ts(135,23): error TS2339: Property 'agent' does not exist on type 'BaseArgs & Partial<DetailArgs>'.\nsrc/cli/cmd/stats.ts(136,24): error TS2339: Property 'status' does not exist on type 'BaseArgs & Partial<DetailArgs>'.\nsrc/cli/cmd/stats.ts(138,22): error TS2339: Property 'tool' does not exist on type 'BaseArgs & Partial<DetailArgs>'.\nsrc/cli/cmd/stats.ts(158,59): error TS2304: Cannot find name 'BreakdownArgs'.\nsrc/cli/cmd/stats.ts(164,45): error TS2304: Cannot find name 'breakdownMode'.\nsrc/cli/cmd/stats.ts(164,131): error TS2304: Cannot find name 'BreakdownArgs'.\nsrc/cli/cmd/stats.ts(174,12): error TS2304: Cannot find name 'withBreakdownOptions'.\nsrc/cli/cmd/stats.ts(175,62): error TS2304: Cannot find name 'BreakdownArgs'.\nsrc/cli/cmd/stats.ts(180,13): error TS2304: Cannot find name 'breakdownMode'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-25T20:45:55.283Z",
+  "sourceRepoHeadAfter": "8356c6fc1ed45de48160036d00a7a179641999a1",
+  "sourceRepoFingerprintAfter": "a931367191131927d5eab38c8649ec6a9c9818cd2c3655ca682ef5b2257a2d6a",
+  "targetRepoFingerprintAfter": "1e1a8643a6d2c7cc66d71defe04273b9e0af91e0cca781a28d387a2a880b08ab"
+}

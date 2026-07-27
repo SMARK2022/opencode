@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-18T01:32:08.138Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 25,
+  "passed": 25,
+  "reusedPrefix": 25,
+  "baseState": "0025-634fdbefd224",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 25,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "338ce78de76987bfb864c06a0677ae10f05b3601e0f330b02dae79ed2c239985",
+  "targetRepoFingerprintBefore": "31b4e8618020838fbb2c308f4ffb40a87dab6ec818a1410371b2e7d4ce71ac14",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0025-634fdbefd224",
+  "retainedStates": [
+    "0025-634fdbefd224",
+    "0022-17b46ab162f5",
+    "0021-b94a79527811"
+  ],
+  "test": {
+    "index": 25,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "f0084b64d44fb33093f3fc7bc99df1bda58be07025687f8e74879a27878319dc",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "../tui/src/component/prompt/index.tsx(432,34): error TS2339: Property 'agentLoopStartTime' does not exist on type '{ prompt: PromptInfo; mode: \"normal\" | \"shell\"; extmarkToPartIndex: Map<number, number>; interrupt: number; placeholder: number; }'.\n../tui/src/component/prompt/index.tsx(433,16): error TS2345: Argument of type '\"agentLoopStartTime\"' is not assignable to parameter of type 'Part<{ prompt: PromptInfo; mode: \"normal\" | \"shell\"; extmarkToPartIndex: Map<number, number>; interrupt: number; placeholder: number; }, \"extmarkToPartIndex\" | \"interrupt\" | \"mode\" | \"placeholder\" | \"prompt\">'.\n../tui/src/component/prompt/index.tsx(435,16): error TS2345: Argument of type '\"agentLoopStartTime\"' is not assignable to parameter of type 'Part<{ prompt: PromptInfo; mode: \"normal\" | \"shell\"; extmarkToPartIndex: Map<number, number>; interrupt: number; placeholder: number; }, \"extmarkToPartIndex\" | \"interrupt\" | \"mode\" | \"placeholder\" | \"prompt\">'.\n../tui/src/component/prompt/index.tsx(443,25): error TS2339: Property 'agentLoopStartTime' does not exist on type '{ prompt: PromptInfo; mode: \"normal\" | \"shell\"; extmarkToPartIndex: Map<number, number>; interrupt: number; placeholder: number; }'.\n../tui/src/component/prompt/index.tsx(1740,37): error TS2339: Property 'agentLoopStartTime' does not exist on type '{ prompt: PromptInfo; mode: \"normal\" | \"shell\"; extmarkToPartIndex: Map<number, number>; interrupt: number; placeholder: number; }'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-18T01:32:18.451Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "338ce78de76987bfb864c06a0677ae10f05b3601e0f330b02dae79ed2c239985",
+  "targetRepoFingerprintAfter": "31b4e8618020838fbb2c308f4ffb40a87dab6ec818a1410371b2e7d4ce71ac14"
+}

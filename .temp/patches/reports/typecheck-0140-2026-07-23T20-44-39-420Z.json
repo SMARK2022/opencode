@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-23T20:44:39.420Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 140,
+  "passed": 140,
+  "reusedPrefix": 140,
+  "baseState": "0140-8acb3fecbfe7",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 140,
+  "sourceRepoHeadBefore": "93fa43b8144a29a74b4ffabbd49cec64bb094a43",
+  "sourceRepoFingerprintBefore": "753f7d04b75172d7770bf4b6af9a10c055086e9721082dd7ff5545b3ea823ab5",
+  "targetRepoFingerprintBefore": "eedb7c960169a17b25aac7a8f17ef778be66cd1cf409f3219f50ce1b2c96bc5c",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0140-8acb3fecbfe7",
+  "retainedStates": [
+    "0140-8acb3fecbfe7",
+    "0139-b5b29eabb82f",
+    "0138-563ac8f18e67",
+    "0137-daf41ca522c4",
+    "0136-95a96c38e940"
+  ],
+  "test": {
+    "index": 140,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "b1965193fab202bc94ddf89ee12a7024f63620bdf86156961857675dddb79977",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/app",
+        "command": "bun typecheck (packages/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/cli",
+        "command": "bun typecheck (packages/cli)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/client",
+        "command": "bun typecheck (packages/client)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/codemode",
+        "command": "bun typecheck (packages/codemode)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/app",
+        "command": "bun typecheck (packages/console/app)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/core",
+        "command": "bun typecheck (packages/console/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/function",
+        "command": "bun typecheck (packages/console/function)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/console/support",
+        "command": "bun typecheck (packages/console/support)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/desktop",
+        "command": "bun typecheck (packages/desktop)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo -b\n"
+      },
+      {
+        "workspace": "packages/effect-drizzle-sqlite",
+        "command": "bun typecheck (packages/effect-drizzle-sqlite)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/effect-sqlite-node",
+        "command": "bun typecheck (packages/effect-sqlite-node)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/enterprise",
+        "command": "bun typecheck (packages/enterprise)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/http-recorder",
+        "command": "bun typecheck (packages/http-recorder)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/httpapi-codegen",
+        "command": "bun typecheck (packages/httpapi-codegen)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/llm",
+        "command": "bun typecheck (packages/llm)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/server/routes/instance/httpapi/handlers/file.ts(137,27): error TS2345: Argument of type '(ctx: { query: { pattern: string; }; }) => Effect<{ path: { text: string & Brand<\"RelativePath\">; }; lines: { text: string; }; line_number: number; absolute_offset: number; submatches: { match: { ...; }; start: number; end: number; }[]; }[], BadRequest | ... 1 more ... | InvalidPatternError, never>' is not assignable to parameter of type 'HandlerWithName<HttpApiEndpoint<\"content\", \"GET\", \"/file/content\", StringTree<never>, StringTree<Struct<{ readonly directory: optional<String>; readonly workspace: optional<String>; readonly path: String; }>>, ... 6 more ..., Service> | ... 5 more ... | HttpApiEndpoint<...>, \"findText\", BadRequest | ... 1 more ... |...'.\n  Type 'Effect<{ path: { text: string & Brand<\"RelativePath\">; }; lines: { text: string; }; line_number: number; absolute_offset: number; submatches: { match: { text: string; }; start: number; end: number; }[]; }[], BadRequest | ... 1 more ... | InvalidPatternError, never>' is not assignable to type 'Effect<HttpServerResponse | readonly { readonly path: { readonly text: string; }; readonly lines: { readonly text: string; }; readonly line_number: number; readonly absolute_offset: number; readonly submatches: readonly { ...; }[]; }[], BadRequest | ... 1 more ... | Unauthorized, never>'.\n    Type 'BadRequest | Error | InvalidPatternError' is not assignable to type 'BadRequest | InvalidRequestError | Unauthorized'.\n      Type 'Error' is not assignable to type 'BadRequest | InvalidRequestError | Unauthorized'.\n        Property '[HttpServerRespondable.symbol]' is missing in type 'Error' but required in type 'Unauthorized'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-23T20:45:00.974Z",
+  "sourceRepoHeadAfter": "93fa43b8144a29a74b4ffabbd49cec64bb094a43",
+  "sourceRepoFingerprintAfter": "753f7d04b75172d7770bf4b6af9a10c055086e9721082dd7ff5545b3ea823ab5",
+  "targetRepoFingerprintAfter": "eedb7c960169a17b25aac7a8f17ef778be66cd1cf409f3219f50ce1b2c96bc5c"
+}

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-22T10:02:24.702Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 105,
+  "passed": 100,
+  "reusedPrefix": 100,
+  "baseState": "0100-06db750ab9a8",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 105,
+  "sourceRepoHeadBefore": "beaf62bf652699a8cc21ca59586e6bbb55e2c056",
+  "sourceRepoFingerprintBefore": "905d5f7b7da329ba50c5c3d79f5921d64577b4aa342061945db5e65e25854db0",
+  "targetRepoFingerprintBefore": "11e65537f80f72129e1384575dac06340810f58e5b7a66878f6d371c09429812",
+  "outcomes": [
+    {
+      "index": 101,
+      "sha": "d2a0ec015c745b82afd6ad29d3e9fd3350bbf88f",
+      "subject": "feat(vscode): 添加对 VSCode 笔记本的运行和环境选项支持，优化单元格 ID 解析逻辑",
+      "patch": "current/0101-d2a0ec015c74.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/agent/agent.ts...\nHunk #1 succeeded at 165 (offset 31 lines).\nChecking patch packages/opencode/src/plugin/vscode-bridge.ts...\nHunk #1 succeeded at 50 (offset 1 line).\nChecking patch sdks/vscode/src/notebook/run.ts...\nerror: while searching for:\n// ---------------------------------------------------------------------------\n\nfunction resolveRunTarget(notebook: vscode.NotebookDocument, cellId: string, endCellId?: string) {\n  const startCell = resolveNotebookCell(notebook, undefined, cellId)\n  if (!endCellId) return [startCell]\n\n  const endCell = resolveNotebookCell(notebook, undefined, endCellId)\n  if (endCell.index < startCell.index) {\n    throw new Error(\"endCellId must refer to the same cell or a later cell than cellId\")\n  }\n\nerror: patch failed: sdks/vscode/src/notebook/run.ts:121\nerror: sdks/vscode/src/notebook/run.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "e4cf6beeab994321525b36d9eff7db3047b244ba0ce772df22d9c5dcd2c1291d",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "6016959d97c27bda07f523e533e37eebf311032536c644425324c2abe7fd47f1"
+  },
+  "stoppedAt": 101,
+  "finishedAt": "2026-07-22T10:02:35.496Z",
+  "sourceRepoHeadAfter": "beaf62bf652699a8cc21ca59586e6bbb55e2c056",
+  "sourceRepoFingerprintAfter": "2e23058acd0a30e1426d7dc1966c0a296de815f9d5f7104373c598058ab48ba7",
+  "targetRepoFingerprintAfter": "11e65537f80f72129e1384575dac06340810f58e5b7a66878f6d371c09429812",
+  "integrityFailure": "source repository changed during dry-run",
+  "retainedStates": [
+    "0100-06db750ab9a8",
+    "0096-254082aeca0d",
+    "0095-4dec9d15826f"
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-17T23:16:24.105Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 20,
+  "passed": 20,
+  "reusedPrefix": 20,
+  "baseState": "0020-aa6db0f3264f",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 20,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "c5485b5ef0bd35e355e164fbf555122574f99da332eded37092a5a19e6d755ef",
+  "targetRepoFingerprintBefore": "27035861d6c7c90c771dedeb9f0199d6af732497a124eb7d7c858f38e01b4a68",
+  "outcomes": [],
+  "stateDirectory": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/0020-aa6db0f3264f",
+  "retainedStates": [
+    "0020-aa6db0f3264f",
+    "0016-9e14f85c9ad3",
+    "0015-d302fa6f05a7"
+  ],
+  "test": {
+    "index": 20,
+    "workspace": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark/.temp/patches/states/.test-workspace/repo",
+    "install": "reused",
+    "installInputSha256": "f0084b64d44fb33093f3fc7bc99df1bda58be07025687f8e74879a27878319dc",
+    "installStdout": "",
+    "installStderr": "",
+    "typechecks": [
+      {
+        "workspace": "packages/core",
+        "command": "bun typecheck (packages/core)",
+        "status": "passed",
+        "stdout": "",
+        "stderr": "$ tsgo --noEmit\n"
+      },
+      {
+        "workspace": "packages/opencode",
+        "command": "bun typecheck (packages/opencode)",
+        "status": "failed",
+        "stdout": "src/session/compaction.ts(246,86): error TS2345: Argument of type '<E, R>(self: Effect<unknown, E, R>) => Effect<any, E, R>' is not assignable to parameter of type '(_: Option<Interface>) => Effect<any, unknown, unknown>'.\n  Types of parameters 'self' and '_' are incompatible.\n    Type 'Option<Interface>' is not assignable to type 'Effect<unknown, unknown, unknown>'.\n      Property '[TypeId]' is missing in type 'None<Interface>' but required in type 'Effect<unknown, unknown, unknown>'.\nsrc/session/compaction.ts(246,102): error TS18046: '_' is of type 'unknown'.\nsrc/session/compaction.ts(248,108): error TS2339: Property 'parentID' does not exist on type '{ sessionID: string & Brand<\"SessionID\">; }'.\nsrc/session/compaction.ts(248,190): error TS2339: Property 'id' does not exist on type 'Interface'.\nsrc/session/compaction.ts(248,209): error TS2552: Cannot find name 'model'. Did you mean 'ModelV2'?\nsrc/session/compaction.ts(248,235): error TS2552: Cannot find name 'model'. Did you mean 'ModelV2'?\nsrc/session/compaction.ts(547,7): error TS2322: Type '(input: { sessionID: string & Brand<\"SessionID\">; }) => Effect<void, unknown, unknown>' is not assignable to type '(input: { sessionID: string & Brand<\"SessionID\">; }) => Effect<void, never, never>'.\n  Type 'Effect<void, unknown, unknown>' is not assignable to type 'Effect<void, never, never>'.\n    Type 'unknown' is not assignable to type 'never'.\nsrc/session/processor.ts(471,88): error TS2345: Argument of type '<E, R>(self: Effect<unknown, E, R>) => Effect<any, E, R>' is not assignable to parameter of type '(_: Option<Interface>) => Effect<any, unknown, unknown>'.\n  Types of parameters 'self' and '_' are incompatible.\n    Type 'Option<Interface>' is not assignable to type 'Effect<unknown, unknown, unknown>'.\n      Property '[TypeId]' is missing in type 'None<Interface>' but required in type 'Effect<unknown, unknown, unknown>'.\nsrc/session/processor.ts(471,104): error TS18046: '_' is of type 'unknown'.\nsrc/session/processor.ts(709,9): error TS2322: Type '(streamInput: StreamInput) => Effect<\"compact\" | \"continue\" | \"stop\", never, unknown>' is not assignable to type '(streamInput: StreamInput) => Effect<Result, never, never>'.\n  Type 'Effect<\"compact\" | \"continue\" | \"stop\", never, unknown>' is not assignable to type 'Effect<Result, never, never>'.\n    Type 'unknown' is not assignable to type 'never'.\nsrc/session/processor.ts(713,25): error TS2322: Type '(input: Input) => Effect<{ readonly message: Assistant; updateToolCall: (toolCallID: string, update: (part: ToolPart) => ToolPart) => Effect<ToolPart | undefined, never, never>; completeToolCall: (toolCallID: string, output: { ...; }) => Effect<...>; process: (streamInput: StreamInput) => Effect<...>; }, never, never>' is not assignable to type '(input: Input) => Effect<Handle, never, never>'.\n  Type 'Effect<{ readonly message: Assistant; updateToolCall: (toolCallID: string, update: (part: ToolPart) => ToolPart) => Effect<ToolPart | undefined, never, never>; completeToolCall: (toolCallID: string, output: { ...; }) => Effect<...>; process: (streamInput: StreamInput) => Effect<...>; }, never, never>' is not assignable to type 'Effect<Handle, never, never>'.\n    Type '{ readonly message: SessionV1.Assistant; updateToolCall: (toolCallID: string, update: (part: SessionV1.ToolPart) => SessionV1.ToolPart) => Effect.Effect<...>; completeToolCall: (toolCallID: string, output: { ...; }) => Effect.Effect<...>; process: (streamInput: LLM.StreamInput) => Effect.Effect<...>; }' is not assignable to type 'Handle'.\n      The types returned by 'process(...)' are incompatible between these types.\n        Type 'Effect<\"compact\" | \"continue\" | \"stop\", never, unknown>' is not assignable to type 'Effect<Result, never, never>'.\n          Type 'unknown' is not assignable to type 'never'.\n",
+        "stderr": "$ tsgo --noEmit\n"
+      }
+    ]
+  },
+  "finishedAt": "2026-07-17T23:16:36.918Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "c5485b5ef0bd35e355e164fbf555122574f99da332eded37092a5a19e6d755ef",
+  "targetRepoFingerprintAfter": "27035861d6c7c90c771dedeb9f0199d6af732497a124eb7d7c858f38e01b4a68"
+}

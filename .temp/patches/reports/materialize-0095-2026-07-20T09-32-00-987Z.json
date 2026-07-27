@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-20T09:32:00.987Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 95,
+  "passed": 90,
+  "reusedPrefix": 90,
+  "baseState": "0090-56bce83a059b",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 95,
+  "sourceRepoHeadBefore": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintBefore": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintBefore": "436ad3a57cd779a5034f9f2bb84fe8e14c0133cb01053b4a59ac5c97a6b251a5",
+  "outcomes": [
+    {
+      "index": 91,
+      "sha": "124adc90ec7c1966cdb533ec7496c46889424d8f",
+      "subject": "feat(vscode): 添加重启Jupyter内核功能，支持清除运行状态并记录重启原因",
+      "patch": "current/0091-124adc90ec7c.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/src/plugin/vscode-bridge-descriptions.ts...\nHunk #1 succeeded at 45 (offset 1 line).\nChecking patch packages/opencode/src/plugin/vscode-bridge.ts...\nerror: while searching for:\n        metadata: { endpoint: \"/notebook/env\" },\n      }),\n    }),\n  },\n})\n\nerror: patch failed: packages/opencode/src/plugin/vscode-bridge.ts:174\nerror: packages/opencode/src/plugin/vscode-bridge.ts: patch does not apply\nChecking patch sdks/vscode/src/bridge.ts...\nerror: while searching for:\nimport { editNotebook } from \"./notebook/edit\"\nimport { readNotebookCellOutput } from \"./notebook/output\"\nimport { notebookEnv } from \"./notebook/env\"\nimport { manifest, registerBridge, type RegistryHandle } from \"./bridge-registry\"\n\nconst BRIDGE_HOST = \"127.0.0.1\"\n\nerror: patch failed: sdks/vscode/src/bridge.ts:24\nerror: sdks/vscode/src/bridge.ts: patch does not apply\nChecking patch sdks/vscode/src/notebook/commands.ts...\nHunk #2 succeeded at 78 (offset 9 lines).\nChecking patch sdks/vscode/src/notebook/kernel.ts...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "70f539ff34bf34f3c94d4275f1a018e745758270985fec88ab2bc0589964ed71",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "c1cc5029992bf036493042ee3099837b5abc06ed17e9a2f19d6e36dcf701be7b"
+  },
+  "stoppedAt": 91,
+  "finishedAt": "2026-07-20T09:32:13.375Z",
+  "sourceRepoHeadAfter": "07b7fed1515ef5211118c429fc324918cdf8dc03",
+  "sourceRepoFingerprintAfter": "3aa251966b15035ca09d527b0bd2706962605c69b487f00c238e5e2bf867c1b6",
+  "targetRepoFingerprintAfter": "436ad3a57cd779a5034f9f2bb84fe8e14c0133cb01053b4a59ac5c97a6b251a5",
+  "retainedStates": [
+    "0090-56bce83a059b",
+    "0086-3c72d78b8cb1",
+    "0085-66ddc4e2fe6c"
+  ]
+}

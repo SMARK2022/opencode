@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "typecheck",
+  "startedAt": "2026-07-18T20:00:58.297Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 40,
+  "passed": 35,
+  "reusedPrefix": 35,
+  "baseState": "0035-0a3cda97c01a",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 40,
+  "sourceRepoHeadBefore": "fe6154a3c7b4b79b8f388f738e801f3f226de6a9",
+  "sourceRepoFingerprintBefore": "12c4178fbb644da9587808b11b814b0f914a54eaa6d7b17ae125658218f5bdc7",
+  "targetRepoFingerprintBefore": "6fd82bfb1b83b9d48b214748771c63e7161c22e646adeb091a456ba8a2f3b56a",
+  "outcomes": [
+    {
+      "index": 36,
+      "sha": "1e324d225d2aa0195dec66bcdfa17973f05e7d7d",
+      "subject": "feat: 增强差异视图，添加行统计信息，优化显示逻辑",
+      "patch": "current/0036-1e324d225d2a.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/tui/src/routes/session/index.tsx...\nerror: while searching for:\n  const view = createMemo(() => {\n    const diffStyle = ctx.tui.diff_style\n    if (diffStyle === \"stacked\") return \"unified\"\n    // Default to \"auto\" behavior\n    return ctx.width > 120 ? \"split\" : \"unified\"\n  })\n\n  const ft = createMemo(() => filetype(props.input.filePath))\n\n  const diffContent = createMemo(() => props.metadata.diff || \"\")\n  \n  const lines = createMemo(() => diffContent().split(\"\\n\"))\n  const overflow = createMemo(() => lines().length > 20)\n  const limitedDiff = createMemo(() => {\n    if (expanded() || !overflow()) return diffContent()\n    return [...lines().slice(0, 10), \"…\"].join(\"\\n\")\n  })\n\n  return (\n    <Switch>\n      <Match when={props.metadata.diff !== undefined}>\n        <BlockTool \n          title={\"← Edit \" + normalizePath(props.input.filePath!)} \n          part={props.part}\n          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}\n        >\n          <box gap={1} flexDirection=\"column\">\n            <box paddingLeft={1}>\n              <diff\n                diff={limitedDiff()}\n                view={view()}\n                filetype={ft()}\n                syntaxStyle={syntax()}\n\nerror: patch failed: packages/tui/src/routes/session/index.tsx:2102\nerror: packages/tui/src/routes/session/index.tsx: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "dbb3fe95286a14bcb73f2d674b77f054b65b6b52e6fe815bea50c4c7e387a843",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "893f877c29b2b867b3cb24d5748b3a9676d60e8afe954d288961dd1fe3bfe51d"
+  },
+  "stoppedAt": 36,
+  "finishedAt": "2026-07-18T20:01:06.089Z",
+  "sourceRepoHeadAfter": "fe6154a3c7b4b79b8f388f738e801f3f226de6a9",
+  "sourceRepoFingerprintAfter": "12c4178fbb644da9587808b11b814b0f914a54eaa6d7b17ae125658218f5bdc7",
+  "targetRepoFingerprintAfter": "6fd82bfb1b83b9d48b214748771c63e7161c22e646adeb091a456ba8a2f3b56a",
+  "retainedStates": [
+    "0035-0a3cda97c01a",
+    "0030-98ebae3df2df",
+    "0026-13fd8ab5dcbe",
+    "0025-634fdbefd224",
+    "0020-aa6db0f3264f"
+  ]
+}

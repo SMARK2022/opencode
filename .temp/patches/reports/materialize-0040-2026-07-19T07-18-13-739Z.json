@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-19T07:18:13.739Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 40,
+  "passed": 37,
+  "reusedPrefix": 37,
+  "baseState": "0037-20058ecde936",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 40,
+  "sourceRepoHeadBefore": "43f17817d5be998527e3bad6346762209dfb61f9",
+  "sourceRepoFingerprintBefore": "e2480e971af4403d4b692a6189aeabe307f05a80f2a6a5ec5e75adee95d77bfa",
+  "targetRepoFingerprintBefore": "fd31efe112fb8d60aa5ea3344b93c4a6b07852ece1e4c8e0db2e572f2a849d08",
+  "outcomes": [
+    {
+      "index": 38,
+      "sha": "d870520f12842b16f3fc0df79c13fb26f3bee078",
+      "subject": "feat: add multi-platform build workflow with auto-trigger on dev-smark push",
+      "patch": "current/0038-d870520f1284.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch .github/workflows/build-opencode.yml...\nerror: while searching for:\n    inputs:\n      version:\n        description: 'Version (e.g., 1.14.25-smark)'\n        required: true\n        type: string\n\njobs:\n  build-linux:\n\nerror: patch failed: .github/workflows/build-opencode.yml:5\nerror: .github/workflows/build-opencode.yml: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "0769596291293e0a616bd4da6f301b3e25b65410202bf37e5e3ccb22f8239646",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "fb56acdd1057d6fdb036a673eaa508e83eaa6032bbfc638d759d1c8267ebc77b"
+  },
+  "stoppedAt": 38,
+  "finishedAt": "2026-07-19T07:18:20.102Z",
+  "sourceRepoHeadAfter": "43f17817d5be998527e3bad6346762209dfb61f9",
+  "sourceRepoFingerprintAfter": "e2480e971af4403d4b692a6189aeabe307f05a80f2a6a5ec5e75adee95d77bfa",
+  "targetRepoFingerprintAfter": "fd31efe112fb8d60aa5ea3344b93c4a6b07852ece1e4c8e0db2e572f2a849d08",
+  "retainedStates": [
+    "0037-20058ecde936",
+    "0035-0a3cda97c01a"
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-17T21:01:23.744Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 15,
+  "passed": 10,
+  "reusedPrefix": 10,
+  "baseState": "0010-fc6394523010",
+  "rebuild": false,
+  "appliedThisRun": 0,
+  "materializedIndex": 15,
+  "sourceRepoHeadBefore": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintBefore": "1cc809c58c8ce71b370f3d6ede66441825ada8c405cb3018c515423cd6dbbded",
+  "targetRepoFingerprintBefore": "bbb86ab44e6c7c3bff48d8df847fe116c7931295d2a47cffaa3e7c5a0b1d4603",
+  "outcomes": [
+    {
+      "index": 11,
+      "sha": "589bb20e905fa4a8246af5394283a68e226ed61a",
+      "subject": "feat(version): 优化版本环境加载逻辑，支持通过--version参数设置OPENCODE_VERSION",
+      "patch": "current/0011-589bb20e905f.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/opencode/script/version-env.ts...\nerror: while searching for:\n// MUST be loaded before any other imports (especially @opencode-ai/script)\n// to ensure OPENCODE_VERSION is set at module evaluation time.\n// Usage: bun run build.ts --version=1.14.19-smark\nconst versionArg = process.argv[2]\nif (versionArg?.startsWith(\"--version=\")) {\n  process.env.OPENCODE_VERSION = versionArg.replace(\"--version=\", \"\")\n}\nerror: patch failed: packages/opencode/script/version-env.ts:1\nerror: packages/opencode/script/version-env.ts: patch does not apply\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "42640adfb79de89905ce54c449e6341411ea6f3d0803d04d7d823f5af1f0e05f",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "f95987fc5cfad89834bcb4bc115c14254e3526ecb610e2ad619337b26d8d0016"
+  },
+  "stoppedAt": 11,
+  "finishedAt": "2026-07-17T21:01:32.231Z",
+  "sourceRepoHeadAfter": "1b6bdd0c4400f8dcdd81462ebb6fce7bddb6b2a2",
+  "sourceRepoFingerprintAfter": "1cc809c58c8ce71b370f3d6ede66441825ada8c405cb3018c515423cd6dbbded",
+  "targetRepoFingerprintAfter": "bbb86ab44e6c7c3bff48d8df847fe116c7931295d2a47cffaa3e7c5a0b1d4603",
+  "retainedStates": [
+    "0010-fc6394523010"
+  ]
+}

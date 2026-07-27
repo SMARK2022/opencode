@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "mode": "materialize",
+  "startedAt": "2026-07-21T04:19:30.925Z",
+  "manifestJsonSha256": "6f162934b5a1313c0df474a3c73db05bf0453a337d659cce38243b85dcaf2f5e",
+  "manifestTsvSha256": "788f6cfd9b9b948311c00b7ce96e0c0a94748c56d56db7129daacca7c3325572",
+  "sourceRef": "dev-smark",
+  "sourceTip": "d0ceb469011412b4ac5058a12d5fe4f247bdac79",
+  "targetBaseline": "4473fc3c9055046183990a965d68df3db7ea6f62",
+  "patchCount": 72,
+  "passed": 71,
+  "reusedPrefix": 71,
+  "baseState": "0071-d95dc89b856d",
+  "rebuild": true,
+  "appliedThisRun": 0,
+  "materializedIndex": 72,
+  "sourceRepoHeadBefore": "f2918a5c2257bff5075a993c7196e01ff6d4d0cc",
+  "sourceRepoFingerprintBefore": "98f13a4b6c0a3616af8e55800b6d2a87403c2244608637aff41c3fbff1ac6d61",
+  "targetRepoFingerprintBefore": "cedb7abb5fd3150fc09de6ecfe0380e588bcca78902b239e1f5e85864f8e0820",
+  "outcomes": [
+    {
+      "index": 72,
+      "sha": "a09787f293c92914bd9c7170dcdeca99ae96ce15",
+      "subject": "feat: 通过结合输入字符计数和细分来增强token估计",
+      "patch": "current/0072-a09787f293c9.patch",
+      "cumulativeChangedFiles": [],
+      "status": "failed",
+      "phase": "check",
+      "reason": "conflict",
+      "stdout": "",
+      "stderr": "Checking patch packages/tui/src/component/prompt/index.tsx...\nChecking patch packages/tui/src/feature-plugins/sidebar/context.tsx...\nChecking patch packages/tui/src/routes/session/subagent-footer.tsx...\nChecking patch packages/tui/src/util/context-usage.ts...\nerror: while searching for:\nimport { Flag } from \"@opencode-ai/core/flag/flag\"\nimport { estimate as estimateTokens } from \"@opencode-ai/core/util/token\"\nimport { estimateDataUrlInputTokens } from \"./token-estimate\"\n\n// 内联 truthy：检查环境变量是否为 truthy 值（\"true\" 或 \"1\"）\n// V2 Flag 模块未导出 truthy，此处内联以避免跨包导出解析问题\n\nerror: patch failed: packages/tui/src/util/context-usage.ts:9\nerror: packages/tui/src/util/context-usage.ts: patch does not apply\nChecking patch packages/tui/src/util/token-estimate.ts...\nChecking patch packages/schema/src/v1/session.ts...\nChecking patch packages/opencode/src/session/processor.ts...\nChecking patch packages/opencode/src/session/prompt.ts...\nChecking patch packages/opencode/test/session/compaction.test.ts...\n"
+    }
+  ],
+  "simulationPreflight": {
+    "head": "4473fc3c9055046183990a965d68df3db7ea6f62",
+    "statusSha256": "0e50e4b256a56c07959bb8c707c287a1679345a2113363498f3da761566d3463",
+    "worktreeDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "indexDiffSha256": "1238668e6946654531a8eb2c39b0727bf88cd53cb7c7193ac27e3b4267df654d"
+  },
+  "stoppedAt": 72,
+  "finishedAt": "2026-07-21T04:19:40.877Z",
+  "sourceRepoHeadAfter": "f2918a5c2257bff5075a993c7196e01ff6d4d0cc",
+  "sourceRepoFingerprintAfter": "98f13a4b6c0a3616af8e55800b6d2a87403c2244608637aff41c3fbff1ac6d61",
+  "targetRepoFingerprintAfter": "cedb7abb5fd3150fc09de6ecfe0380e588bcca78902b239e1f5e85864f8e0820",
+  "retainedStates": [
+    "0071-d95dc89b856d",
+    "0070-efae0086f406",
+    "0069-d34ed37bb4c4",
+    "0068-43455e508d78",
+    "0067-a6b9a6a56d92"
+  ]
+}
