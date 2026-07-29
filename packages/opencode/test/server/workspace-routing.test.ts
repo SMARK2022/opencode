@@ -46,6 +46,17 @@ describe("getWorkspaceRouteSessionID", () => {
     expect(getWorkspaceRouteSessionID(url)).toBeNull()
   })
 
+  // /session/preview 与 /session/search/* 均为集合端点，不可当 SessionID
+  test("returns null for /session/preview collection route", () => {
+    const url = new URL("http://localhost/session/preview")
+    expect(getWorkspaceRouteSessionID(url)).toBeNull()
+  })
+
+  test("returns null for /session/search/* collection routes", () => {
+    expect(getWorkspaceRouteSessionID(new URL("http://localhost/session/search/scan"))).toBeNull()
+    expect(getWorkspaceRouteSessionID(new URL("http://localhost/session/search/other"))).toBeNull()
+  })
+
   test("returns null for non-session paths", () => {
     const url = new URL("http://localhost/config")
     expect(getWorkspaceRouteSessionID(url)).toBeNull()

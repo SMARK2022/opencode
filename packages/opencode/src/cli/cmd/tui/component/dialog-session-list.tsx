@@ -50,14 +50,20 @@ export function DialogSessionList() {
   const [search, setSearch] = createDebouncedSignal("", 150)
   // [local-smark] Session list preview functionality
   const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
-  // progressive search 状态：generation 与 Abort 绑定 committed query
+  // progressive search 状态：AbortSignal 绑定 committed query 的唯一过期事实
   const [searchPhase, setSearchPhase] = createSignal<SearchPhase | undefined>()
   // success complete 只信 scan；error complete 保留 title∪scan（INV-12 已展示 hits）
   const [searchTerminal, setSearchTerminal] = createSignal<"success" | "error" | undefined>()
   const [titleHits, setTitleHits] = createSignal<NonNullable<typeof sync.data.session>>([])
   const [scanFullHits, setScanFullHits] = createSignal<NonNullable<typeof sync.data.session>>([])
-  let searchGeneration = 0
+  // disposed 防止 dialog.replace 后旧闭包仍启动 progressive search
+  let disposed = false
   let searchController: AbortController | undefined
+  onCleanup(() => {
+    disposed = true
+    searchController?.abort()
+    searchController = undefined
+  })
 
   type SessionHit = (typeof sync.data.session)[number]
 
@@ -80,9 +86,9 @@ export function DialogSessionList() {
    * 1) title-only GET 首屏（子集，可漏跨字段 multi-token）
    * 2) contentDelay 后再串行 POST /session/search/scan
    * 3) complete 权威集合 = scanFullHits，与 list 全条件 top-400 对齐
-   * generation+Abort 保证改词/清空时丢弃过期响应。
+   * AbortSignal 是唯一过期事实：改词/清空/卸载都 abort 当前 controller。
    */
-  async function runProgressiveSearch(query: string, generation: number, signal: AbortSignal) {
+  async function runProgressiveSearch(query: string, signal: AbortSignal) {
     const scope = sessionListScopeParams()
     setSearchPhase("awaiting_first")
     setSearchTerminal(undefined)
@@ -102,12 +108,16 @@ export function DialogSessionList() {
       if ("directory" in scope && scope.directory) titleUrl.searchParams.set("directory", scope.directory)
 
       const titleRes = await sdk.fetch(titleUrl, { method: "GET", signal })
-      if (signal.aborted || generation !== searchGeneration) return
-      if (titleRes.ok) {
-        const titleData = (await titleRes.json()) as SessionHit[]
-        if (signal.aborted || generation !== searchGeneration) return
-        setTitleHits(Array.isArray(titleData) ? titleData : [])
+      if (signal.aborted) return
+      if (!titleRes.ok) {
+        // title 失败已经结束本代搜索，不能把失败伪装成 partial 再发起 scan。
+        setSearchTerminal("error")
+        setSearchPhase("complete")
+        return
       }
+      const titleData = (await titleRes.json()) as SessionHit[]
+      if (signal.aborted) return
+      setTitleHits(Array.isArray(titleData) ? titleData : [])
       setSearchPhase("partial")
 
       // contentDelay：输入 debounce 之后再等一截，慢打时少发过期 scan
@@ -120,13 +130,13 @@ export function DialogSessionList() {
         if (signal.aborted) return onAbort()
         signal.addEventListener("abort", onAbort, { once: true })
       })
-      if (signal.aborted || generation !== searchGeneration) return
+      if (signal.aborted) return
 
       // B2：串行 keyset scan；early-stop 只数 scanFullHits
       let cursor: { time_updated: number; id: string } | null = null
       let scanHits: SessionHit[] = []
       for (;;) {
-        if (signal.aborted || generation !== searchGeneration) return
+        if (signal.aborted) return
         if (shouldStopSearchScan(scanHits.length)) break
 
         const scanUrl = new URL("/session/search/scan", sdk.url)
@@ -146,11 +156,10 @@ export function DialogSessionList() {
           body: JSON.stringify(body),
           signal,
         })
-        // 每批结束后再检查 generation，防止慢响应写回已过期 query
-        if (signal.aborted || generation !== searchGeneration) return
+        // 每批结束后再检查 abort，防止慢响应写回已过期 query
+        if (signal.aborted) return
         // 非 2xx：标记 error 终态并退出；保留已展示 title/scan hits
         if (!scanRes.ok) {
-          if (signal.aborted || generation !== searchGeneration) return
           setSearchTerminal("error")
           setSearchPhase("complete")
           return
@@ -160,7 +169,7 @@ export function DialogSessionList() {
           nextCursor: { time_updated: number; id: string } | null
           done: boolean
         }
-        if (signal.aborted || generation !== searchGeneration) return
+        if (signal.aborted) return
         // 只累积 full-condition 命中；title overlay 不在此写入
         scanHits = appendScanHits(scanHits, page.sessions ?? [])
         setScanFullHits(scanHits)
@@ -170,16 +179,25 @@ export function DialogSessionList() {
         cursor = page.nextCursor
       }
 
-      if (signal.aborted || generation !== searchGeneration) return
+      if (signal.aborted) return
       // 成功 complete：权威集合仅为 scanFullHits（INV-09）
       setSearchTerminal("success")
       setSearchPhase("complete")
     } catch {
       // abort 不改 UI；网络失败则 complete+error，保留 title∪scan，禁止 fallback all
-      if (signal.aborted || generation !== searchGeneration) return
+      if (signal.aborted) return
       setSearchTerminal("error")
       setSearchPhase("complete")
     }
+  }
+
+  // 唯一启动入口：组件存活期内才创建 controller，旧请求一律 abort
+  function startSearch(query: string) {
+    if (disposed) return
+    searchController?.abort()
+    const controller = new AbortController()
+    searchController = controller
+    void runProgressiveSearch(query, controller.signal)
   }
 
   // committed query 变化：清空/改词都 abort 上一代；空串回到 browse 且无 Spinner
@@ -187,9 +205,8 @@ export function DialogSessionList() {
     on(
       () => search(),
       (query) => {
-        searchController?.abort()
         if (!query) {
-          searchGeneration += 1
+          searchController?.abort()
           searchController = undefined
           setSearchPhase(undefined)
           setSearchTerminal(undefined)
@@ -197,12 +214,8 @@ export function DialogSessionList() {
           setScanFullHits([])
           return
         }
-        // 新 generation 立即丢弃旧 hits，避免 C→CJ 串味
-        const generation = ++searchGeneration
-        const controller = new AbortController()
-        searchController = controller
-        onCleanup(() => controller.abort())
-        void runProgressiveSearch(query, generation, controller.signal)
+        // 新 query 立即丢弃旧 hits，避免 C→CJ 串味
+        startSearch(query)
       },
     ),
   )
@@ -250,15 +263,11 @@ export function DialogSessionList() {
   const quickSwitch1 = useCommandShortcut("session.quick_switch.1")
   const quickSwitch9 = useCommandShortcut("session.quick_switch.9")
 
-  // 删除后重跑当前 query 的 progressive generation，等价旧 createResource.refetch
+  // 删除后重跑当前 query；必须走 startSearch，才能被 dispose/cleanup 约束
   function refetchSearch() {
     const query = search()
     if (!query) return
-    searchController?.abort()
-    const generation = ++searchGeneration
-    const controller = new AbortController()
-    searchController = controller
-    void runProgressiveSearch(query, generation, controller.signal)
+    startSearch(query)
   }
 
   const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))

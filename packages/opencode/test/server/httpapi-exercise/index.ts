@@ -1383,19 +1383,29 @@ const scenarios: Scenario[] = [
       // 空 sessionIDs 返回空对象
       check(Object.keys(body).length === 0, "empty sessionIDs should return empty object")
     }),
-  // gate 差集登记：progressive searchScan 路由烟测（域正确性由 session-list 覆盖）
+  // gate 差集登记 + progressive searchScan 公共端点覆盖（域正确性亦由 session-list 覆盖）。
+  // batch=100 是候选窗口上限；隔离库只有一个 seed Session，应在一页耗尽。
+  // 终态 cursor 必须为空，证明 HTTP 响应走完真实的 done contract。
   http.protected
     .post("/session/search/scan", "session.search.scan")
+    .seeded((ctx) => ctx.session({ title: "Progressive search session" }))
     .at((ctx) => ({
       path: route("/session/search/scan", {}),
       headers: ctx.headers(),
-      body: { search: "httpapi-exercise-scan" },
+      body: { search: "Progressive", batch: 100 },
     }))
-    .json(200, (body) => {
+    .json(200, (body, ctx) => {
       object(body)
-      check(Array.isArray(body.sessions), "search scan should return sessions array")
-      check(typeof body.done === "boolean", "search scan should return done boolean")
-      check("nextCursor" in body, "search scan should return nextCursor")
+      array(body.sessions)
+      check(
+        body.sessions.some(
+          (item) =>
+            isRecord(item) && item.id === ctx.state.id && item.title === "Progressive search session",
+        ),
+        "search scan should return the seeded title match",
+      )
+      check(body.done === true, "single seeded page should complete the scan")
+      check(body.nextCursor === null, "completed scan should not return a cursor")
     }),
   http.protected
     .post("/tui/append-prompt", "tui.appendPrompt")
