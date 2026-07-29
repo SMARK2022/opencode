@@ -1759,15 +1759,21 @@ const scenarios: Scenario[] = [
       object(body)
       check(Object.keys(body).length === 0, "empty native sessionIDs should return empty object")
     }),
-  // #558：session.search.scan gate 差集登记——POST 载荷为全库扫描（非单会话），断言集合返回形态。
+  // #561：session.search.scan seeded progressive 契约——seeded session 必须命中且单批扫尽（done=true、无后续 cursor）。
   http.protected
     .post("/session/search/scan", "session.search.scan")
-    .at((ctx) => ({ path: "/session/search/scan", headers: ctx.headers(), body: { search: "httpapi-exercise-scan" } }))
+    .seeded((ctx) => ctx.session({ title: "Progressive search session" }))
+    .at((ctx) => ({ path: "/session/search/scan", headers: ctx.headers(), body: { search: "Progressive", batch: 100 } }))
     .json(200, (body) => {
-      const result = body as { sessions?: unknown[]; done?: boolean; nextCursor?: unknown }
+      const result = body as { sessions?: { title?: string }[]; done?: boolean; nextCursor?: unknown }
       check(Array.isArray(result.sessions), "search scan should return sessions array")
-      check(typeof result.done === "boolean", "search scan should report done boolean")
-      check(result.nextCursor !== undefined, "search scan should include nextCursor")
+      // seeded 命中是路由到真实 handler 的证据：仅形态断言无法区分代理与实现。
+      check(
+        (result.sessions ?? []).some((s) => s.title === "Progressive search session"),
+        "search scan should hit the seeded session title",
+      )
+      check(result.done === true, "search scan should finish in one batch for the seeded corpus")
+      check(result.nextCursor === null, "search scan should end with a null nextCursor")
     }),
   http.protected
     .post("/tui/append-prompt", "tui.appendPrompt")
