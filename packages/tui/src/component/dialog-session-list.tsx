@@ -115,8 +115,8 @@ export function DialogSessionList() {
   const search = createMemo(() => rawSearch().trim())
   // #120：sessionID -> 多行用户消息预览（非单行再折词）
   const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
-  // #544 progressive search 状态：generation 与 Abort 绑定 committed query。
-  // 单一 generation 计数器拒绝过期写回：每次改词自增，异步回调比对后才可 set 信号。
+  // #544 progressive search 状态：AbortSignal 是 committed query 的唯一过期事实。
+  // #561 单轨收敛：改词/清空/卸载都只 abort 当前 controller，不再维护 generation 双轨。
   const [searchPhase, setSearchPhase] = createSignal<SearchPhase | undefined>()
   // success complete 只信 scan；error complete 保留 title∪scan（已展示 hits 不抹掉）
   // terminal 与 phase 分离：phase 驱动 Spinner/文案，terminal 决定 complete 的展示集合来源。
@@ -124,10 +124,15 @@ export function DialogSessionList() {
   // title 首屏与 scan 权威流分开存：partial 需要 union 展示，complete 需要单选 scan。
   const [titleHits, setTitleHits] = createSignal<NonNullable<typeof sync.data.session>>([])
   const [scanFullHits, setScanFullHits] = createSignal<NonNullable<typeof sync.data.session>>([])
-  let searchGeneration = 0
+  // #561 disposed 防止 dialog.replace 后旧闭包仍启动 progressive search
+  let disposed = false
   let searchController: AbortController | undefined
   // 删除后refetch也会更换controller，卸载必须取消最新请求而非只捕获初次搜索。
-  onCleanup(() => searchController?.abort())
+  onCleanup(() => {
+    disposed = true
+    searchController?.abort()
+    searchController = undefined
+  })
 
   // Hit 形状与 browse 同源（Session.Info）——visibleSessions/options 管道无需分支适配。
   type SessionHit = (typeof sync.data.session)[number]
@@ -140,6 +145,7 @@ export function DialogSessionList() {
   // #544：POST/手写 GET 都需 directory query，workspace routing 才能定位实例
   function directoryQuery(url: URL) {
     // sync.path.directory 优先：workspace 子目录会话必须路由回其所属实例。
+    // title/scan 共用同一 directory 解析：路由不一致会让两阶段命中不同实例。
     const dir = sync.path.directory || sdk.directory
     if (dir) url.searchParams.set("directory", dir)
   }
@@ -149,11 +155,12 @@ export function DialogSessionList() {
    * 1) title-only GET 首屏（子集，可漏跨字段 multi-token）
    * 2) contentDelay 后再串行 POST /session/search/scan
    * 3) complete 权威集合 = scanFullHits，与 list 全条件 top-400 对齐
-   * generation+Abort 保证改词/清空时丢弃过期响应。
+   * #561 AbortSignal 是唯一过期事实：改词/清空/卸载都 abort 当前 controller。
    */
-  async function runProgressiveSearch(query: string, generation: number, signal: AbortSignal) {
+  async function runProgressiveSearch(query: string, signal: AbortSignal) {
     const scope = sessionListScopeParams(query)
     // 起始即 awaiting_first：首个 title 响应到达前列表显示 Searching… 而非 Not Found。
+    // 首行即清空旧代集合：新代不继承任何上代 hits，避免跨代串味。
     setSearchPhase("awaiting_first")
     setSearchTerminal(undefined)
     setTitleHits([])
@@ -174,17 +181,23 @@ export function DialogSessionList() {
 
       // limit 与 Path B 搜索上限同源：title 子集也被 cap 在 400，partial 展示不会超发。
       const titleRes = await sdk.fetch(titleUrl, { method: "GET", signal })
-      if (signal.aborted || generation !== searchGeneration) return
-      if (titleRes.ok) {
-        const titleData = (await titleRes.json()) as SessionHit[]
-        if (signal.aborted || generation !== searchGeneration) return
-        // 非数组响应按空集处理：title 是增强首屏，坏响应不构成失败终态。
-        setTitleHits(Array.isArray(titleData) ? titleData : [])
+      // 唯一过期检查：controller abort 后 transport 可能仍解析响应。
+      if (signal.aborted) return
+      if (!titleRes.ok) {
+        // #561 title 失败已经结束本代搜索，不能把失败伪装成 partial 再发起 scan。
+        setSearchTerminal("error")
+        setSearchPhase("complete")
+        return
       }
+      const titleData = (await titleRes.json()) as SessionHit[]
+      if (signal.aborted) return
+      // 非数组响应按空集处理：title 是增强首屏，坏响应不构成失败终态。
+      setTitleHits(Array.isArray(titleData) ? titleData : [])
+      // partial 阶段开始：title∪scan 并集展示，Spinner 仍在。
       setSearchPhase("partial")
 
       // contentDelay：输入 debounce 之后再等一截，慢打时少发过期 scan
-      // 该等待处于 generation 守卫之下：改词后旧代的 timer 会随 Abort 立即失效。
+      // #561 该等待处于 abort 守卫之下：改词后旧代的 timer 会随 Abort 立即失效。
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(resolve, SESSION_LIST_CONTENT_DELAY_MS)
         const onAbort = () => {
@@ -194,17 +207,20 @@ export function DialogSessionList() {
         if (signal.aborted) return onAbort()
         signal.addEventListener("abort", onAbort, { once: true })
       })
-      if (signal.aborted || generation !== searchGeneration) return
+      // 等待期被 abort 会以 AbortError 出走 catch，不进入 scan。
+      if (signal.aborted) return
 
       // B2：串行 keyset scan——串行而非并发是为了 abort 即停与 SQLite 单写者压力。
       // early-stop 只数 scanFullHits：title 是子集查询，计入会让 complete 偏离 list top-400。
       let cursor: { time_updated: number; id: string } | null = null
       let scanHits: SessionHit[] = []
       for (;;) {
-        if (signal.aborted || generation !== searchGeneration) return
+        // 循环顶也只认 abort：分页继续的唯一条件是当前 controller 仍存活。
+        if (signal.aborted) return
         if (shouldStopSearchScan(scanHits.length)) break
 
         const scanUrl = new URL("/session/search/scan", sdk.url)
+        // scan 端点恒定：分页状态只经 cursor 传递，不再用 URL 携带代次。
         directoryQuery(scanUrl)
         const body = {
           // start/scope/path 与 browse 同宇宙：候选窗不得引入第二套 scope 语义。
@@ -223,22 +239,22 @@ export function DialogSessionList() {
           body: JSON.stringify(body),
           signal,
         })
-        // 每批结束后再检查 generation，防止慢响应写回已过期 query
-        if (signal.aborted || generation !== searchGeneration) return
+        // #561 每批结束后再检查 abort，防止慢响应写回已过期 query
+        if (signal.aborted) return
         // 非 2xx：标记 error 终态并退出；保留已展示 title/scan hits
         if (!scanRes.ok) {
-          if (signal.aborted || generation !== searchGeneration) return
-          // error 终态仍算 complete：Spinner 停转，但已展示 title/scan hits 不清空。
+          // 已展示 hits 不抹掉：error complete 的展示集合仍由 resolveDisplayHits 决定。
           setSearchTerminal("error")
           setSearchPhase("complete")
           return
         }
+        // 页体解析失败会以异常进入 catch——与网络失败同一 error 终态。
         const page = (await scanRes.json()) as {
           sessions: SessionHit[]
           nextCursor: { time_updated: number; id: string } | null
           done: boolean
         }
-        if (signal.aborted || generation !== searchGeneration) return
+        if (signal.aborted) return
         // 只累积 full-condition 命中；title overlay 不在此写入
         // append 去重并保序：scan 页本身按 recency 返回，cap 截断即 early-stop 信号。
         scanHits = appendScanHits(scanHits, page.sessions ?? [])
@@ -249,40 +265,49 @@ export function DialogSessionList() {
         cursor = page.nextCursor
       }
 
-      if (signal.aborted || generation !== searchGeneration) return
+      if (signal.aborted) return
       // 成功 complete：权威集合仅为 scanFullHits——title overlay 从此不再参与展示
       setSearchTerminal("success")
       setSearchPhase("complete")
     } catch {
       // abort 不改 UI；网络失败则 complete+error，保留 title∪scan，禁止 fallback browse
-      if (signal.aborted || generation !== searchGeneration) return
+      if (signal.aborted) return
       setSearchTerminal("error")
       setSearchPhase("complete")
     }
   }
 
+  // #561 唯一启动入口：组件存活期内才创建 controller，旧请求一律 abort
+  function startSearch(query: string) {
+    if (disposed) return
+    // 旧请求立即过期：新 controller 尚未创建即先断旧链。
+    searchController?.abort()
+    const controller = new AbortController()
+    // 单一 controller 引用：任何时刻至多一代搜索在途。
+    searchController = controller
+    // fire-and-forget：终态只经 signal/UI 反映，调用方不 await。
+    void runProgressiveSearch(query, controller.signal)
+  }
+
   // #544：committed query 变化——清空/改词都 abort 上一代；空串回到 browse 且无 Spinner
-  // onCleanup 兜底 abort：组件卸载时进行中的请求不允许写回已销毁的信号图。
+  // #561 卸载兜底 abort 由组件级 onCleanup 承担，effect 内不再重复注册。
   createEffect(
     on(
       () => ({ query: search(), filter: sync.session.query() }),
       ({ query }) => {
-        searchController?.abort()
         if (!query) {
-          // 清空是显式回 browse：自增 generation 使任何 in-flight 写回立即过期。
-          searchGeneration += 1
+          // 清空是显式回 browse：abort 使任何 in-flight 写回立即过期。
+          searchController?.abort()
           searchController = undefined
+          // browse 态无 phase/terminal：清空即回初始列表。
           setSearchPhase(undefined)
           setSearchTerminal(undefined)
           setTitleHits([])
           setScanFullHits([])
           return
         }
-        // 新 generation 立即丢弃旧 hits，避免改词串味
-        const generation = ++searchGeneration
-        const controller = new AbortController()
-        searchController = controller
-        void runProgressiveSearch(query, generation, controller.signal)
+        // #561 新 query 立即丢弃旧 hits，避免改词串味
+        startSearch(query)
       },
     ),
   )
@@ -344,16 +369,13 @@ export function DialogSessionList() {
     () => sync.session.query(),
     (filter) => loadDialogSessionList({ filter, list: (query) => sdk.client.session.list(query) }),
   )
-  // #544：删除后重跑当前 query 的 progressive generation，等价旧 createResource.refetch
+  // #561：删除后重跑当前 query；必须走 startSearch，才能被 dispose/cleanup 约束
   // browse 侧由调用点 refetchBrowse 负责；此处只重建 search 代，避免双拉。
   function refetchSearch() {
     const query = search()
     if (!query) return
-    searchController?.abort()
-    const generation = ++searchGeneration
-    const controller = new AbortController()
-    searchController = controller
-    void runProgressiveSearch(query, generation, controller.signal)
+    // closed-over refetch 与 effect 同一入口，无第二套 controller 构造。
+    startSearch(query)
   }
 
   const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
