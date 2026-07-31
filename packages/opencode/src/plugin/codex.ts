@@ -625,7 +625,8 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
     "chat.headers": async (input, output) => {
       if (input.model.providerID !== "openai") return
       Object.assign(output.headers, CODEX_HEADERS)
-      output.headers.session_id = input.sessionID
+      // Codex-compatible proxies recognize the hyphenated header for session affinity.
+      output.headers["session-id"] = input.sessionID
     },
     "chat.params": async (input, output) => {
       if (input.model.providerID !== "openai") return
