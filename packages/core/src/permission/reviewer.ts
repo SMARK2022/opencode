@@ -119,6 +119,8 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
         let textOutput = ""
         return yield* client.stream(LLM.request({
           model: selected.model, prompt: attemptPrompt,
+          // reviewer直接调用LLM而不经过V1插件，同一OpenAI会话仍需使用相同代理亲和身份。
+          ...(selected.model.provider === "openai" ? { http: { headers: { "session-id": session.id } } } : {}),
           // 逐次移动同一可信原话；证据与协议修复提示始终留在user通道。
           ...(selected.openaiOAuth ? { providerOptions: { openai: { instructions: system } } } : { system }),
           tools: Tool.toDefinitions({ permission_review_decision: Tool.make({

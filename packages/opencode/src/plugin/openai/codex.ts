@@ -580,6 +580,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
       if (input.model.providerID !== "openai") return
       // #169：openai oauth 会话对外伪装 Codex TUI，保留 tip session-id / title 头
       Object.assign(output.headers, CODEX_HEADERS)
+      // 兼容代理识别连字符session-id；保留完整Session身份，不能替换为缩短的正文缓存键。
       output.headers["session-id"] = input.sessionID
       // Temporary fetch-layer hack: title generation currently shares the conversation
       // session ID, so the OpenAI plugin marks it for HTTP fallback until transport

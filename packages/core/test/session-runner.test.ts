@@ -2521,7 +2521,9 @@ describe("SessionRunnerLLM", () => {
   it.live("manual compaction stops after summarizing retained tool tail", () =>
     Effect.gen(function* () {
       yield* setup
-      currentModel = Model.make({ id: model.id, provider: model.provider, route: OpenAIChat.route.with({ limits: { context: 100_000, output: 4_096 } }) })
+      // 使用真实手动压缩入口，运输仍由fixture拦截，验证独立摘要请求也携带代理头。
+      currentModel = Model.make({ id: model.id, provider: "openai", route: OpenAIChat.route.with({ limits: { context: 100_000, output: 4_096 } }) })
+      yield* Effect.addFinalizer(() => Effect.sync(() => { currentModel = model }))
       const session = yield* SessionV2.Service
       response = fragmentFixture("text", "manual-earlier", ["Earlier answer"]).completeEvents
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Earlier question" }), resume: false })
@@ -2552,6 +2554,8 @@ describe("SessionRunnerLLM", () => {
       yield* session.compact({ sessionID })
       expect(requests).toHaveLength(1)
       expect(requests[0].tools).toEqual([])
+      expect(requests[0].http?.headers?.["session-id"]).toBe(sessionID)
+      expect(requests[0].http?.headers?.session_id).toBeUndefined()
       const context = yield* session.context(sessionID)
       expect(context).toHaveLength(1)
       expect(context[0]).toMatchObject({ type: "compaction", summary: "Summary" })
@@ -4451,6 +4455,8 @@ describe("SessionRunnerLLM", () => {
     Effect.gen(function* () {
       yield* setup
       const session = yield* SessionV2.Service
+      currentModel = Model.make({ id: model.id, provider: "openai", route: model.route })
+      yield* Effect.addFinalizer(() => Effect.sync(() => { currentModel = model }))
       const parentID = SessionV2.ID.make("ses_runner_parent")
       const { db } = yield* Database.Service
       yield* db
@@ -4470,6 +4476,7 @@ describe("SessionRunnerLLM", () => {
         "x-session-affinity": sessionID,
         "X-Session-Id": sessionID,
         "x-parent-session-id": parentID,
+        "session-id": sessionID,
       })
     }),
   )
@@ -4477,6 +4484,9 @@ describe("SessionRunnerLLM", () => {
   it.effect("bounds 64-character session prompt cache keys", () =>
     Effect.gen(function* () {
       yield* setup
+      // 正文键保持64字符，而代理header必须区分两个完整的真实Session ID。
+      currentModel = Model.make({ id: model.id, provider: "openai", route: model.route })
+      yield* Effect.addFinalizer(() => Effect.sync(() => { currentModel = model }))
       const longSessionID = SessionV2.ID.make(`ses_${"a".repeat(64)}`)
       const otherLongSessionID = SessionV2.ID.make(`ses_${"b".repeat(64)}`)
       yield* insertSession(longSessionID)
@@ -4501,6 +4511,8 @@ describe("SessionRunnerLLM", () => {
       expect(keys).toEqual([longSessionID.slice(4), otherLongSessionID.slice(4)])
       expect(keys.every((key) => typeof key === "string" && key.length === 64)).toBe(true)
       expect(keys[0]).not.toBe(keys[1])
+      expect(requests.map(request => request.http?.headers?.["session-id"])).toEqual([longSessionID, otherLongSessionID])
+      expect(requests.every(request => request.http?.headers?.session_id === undefined)).toBe(true)
     }),
   )
 

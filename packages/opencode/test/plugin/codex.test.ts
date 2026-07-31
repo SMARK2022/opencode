@@ -65,6 +65,12 @@ describe("plugin.codex", () => {
     expect(output.headers["Content-Type"]).toBe("application/json")
     expect(output.headers.originator).toBe("codex-tui")
     expect(output.headers["User-Agent"]).toBe(CODEX_USER_AGENT)
+    // header命名与非OpenAI早退均由真实hook产生，不以手写运输头自证。
+    expect(output.headers["session-id"]).toBe("session-id")
+    expect(output.headers.session_id).toBeUndefined()
+    const other = { headers: {} as Record<string, string> }
+    await hooks["chat.headers"]!({ sessionID: "other-session", model: { providerID: "anthropic" } } as never, other)
+    expect(other.headers).toEqual({})
   })
 
   test("escapes provider errors in callback HTML", () => {

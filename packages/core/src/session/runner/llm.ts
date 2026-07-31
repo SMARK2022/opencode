@@ -381,6 +381,8 @@ const layer = Layer.effect(
             "x-opencode-session-id": session.id,
             ...(session.parentID ? { "x-opencode-parent-session-id": session.parentID } : {}),
             "x-session-affinity": session.id,
+            // 代理按连字符头识别OpenAI会话；header保留完整身份，不复用缩短的正文缓存键。
+            ...(model.provider === "openai" ? { "session-id": session.id } : {}),
             "X-Session-Id": session.id,
             ...(session.parentID ? { "x-parent-session-id": session.parentID } : {}),
           },
@@ -768,6 +770,8 @@ const layer = Layer.effect(
           ].filter(Boolean).join("\n") } } } : {}),
           http: { headers: {
             "x-session-affinity": session.id,
+            // 手动摘要独立构造请求，也沿用所选OpenAI模型的完整会话亲和身份。
+            ...(selection.model.provider === "openai" ? { "session-id": session.id } : {}),
             "X-Session-Id": session.id,
             ...(session.parentID ? { "x-parent-session-id": session.parentID } : {}),
           } },
