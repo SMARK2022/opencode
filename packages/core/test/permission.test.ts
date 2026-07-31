@@ -97,7 +97,7 @@ const reviewModel = Layer.succeed(SessionRunnerModel.Service, SessionRunnerModel
     providerID: session.model.providerID, modelID: session.model.id,
   }))
   return Effect.succeed({
-    model: Model.make({ id: "review", provider: "test", route: reviewOAuth ? OpenAIResponses.route.with({ auth: Auth.none }) : OpenAIChat.route }),
+    model: Model.make({ id: "review", provider: session.model?.providerID ?? "test", route: reviewOAuth ? OpenAIResponses.route.with({ auth: Auth.none }) : OpenAIChat.route }),
     pricing: [{ input: 1, output: 2, cache: { read: 0.5, write: 1 } }],
     openaiOAuth: reviewOAuth,
   })
@@ -549,6 +549,7 @@ describe("PermissionV2", () => {
     expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
     expect(reviewRequests).toHaveLength(1)
     expect(reviewModels[0]).toMatchObject({ id: "parent-model", providerID: "parent-provider" })
+    expect(reviewRequests[0]?.http?.headers?.["session-id"]).toBeUndefined()
     expect(progress.map((event) => event.type)).toEqual(["permission.review.started", "permission.review.completed"])
     expect(progress[0]?.reviewID).toBeDefined()
     expect(progress[0]?.reviewID).toBe(progress[1]?.reviewID)
@@ -683,6 +684,12 @@ describe("PermissionV2", () => {
     reviewStarted = undefined
     expect(yield* service.list()).toEqual([])
     expect(yield* sessions.context(SessionV2.ID.make("ses_test"))).toEqual(before)
+    // 保留原override验证，再经真实reviewer入口确认OpenAI代理头；fake client不发网络请求。
+    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "openai/reviewer" }) })
+    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/openai"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
+    expect(reviewModels.at(-1)).toMatchObject({ id: "reviewer", providerID: "openai" })
+    expect(reviewRequests.at(-1)?.http?.headers).toEqual({ "session-id": "ses_test" })
+    expect(reviewRequests.at(-1)?.http?.headers?.session_id).toBeUndefined()
     reviewSettings = new Config.Info({})
   }))
 
