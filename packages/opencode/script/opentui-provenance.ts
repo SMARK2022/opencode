@@ -1,7 +1,7 @@
 export interface OpenTuiSourceRevisionManifest {
   schema: 1
   sourceGitlink: string
-  releaseTag: "v0.4.3-smark.4"
+  releaseTag: "v0.4.3-smark.5"
   releaseCommit: string
 }
 

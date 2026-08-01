@@ -5,7 +5,7 @@ import path from "node:path"
 import { verifyRemoteAnnotatedTagCommit, verifySourceRevisionAuthorization, type OpenTuiSourceRevisionManifest } from "./opentui-provenance"
 
 const root = path.resolve(import.meta.dir, "../../..")
-const version = "0.4.3-smark.4"
+const version = "0.4.3-smark.5"
 const tag = `v${version}`
 const repository = "https://github.com/SMARK2022/opentui"
 const release = `${repository}/releases/download/${tag}`
