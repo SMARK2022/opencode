@@ -2,9 +2,12 @@ import { describe, expect, test } from "bun:test"
 import { CodeRenderable, SyntaxStyle } from "@opentui/core"
 import { createTestRenderer } from "@opentui/core/testing"
 
-// 验证实际安装的.4发布包，而非nested checkout；headless行为与根消费闭包保持同一版本。
+// 核对真实消费版本，防止派生安装的旧链接冒充catalog中的新发布包。
 describe("installed OpenTUI streaming runtime", () => {
   test("keeps Markdown tables, fences, formulas, and callbacks coherent across deltas", async () => {
+    const manifest = await Bun.file(new URL("../../../../../../package.json", import.meta.url)).json()
+    const installed = await Bun.file(new URL("./package.json", import.meta.resolve("@opentui/core"))).json()
+    expect(installed.version).toBe(manifest.workspaces.catalog["@opentui/core"])
     // 渲染器禁用控制台/独立线程：测试只关心 highlight 管线本身，不引入终端副作用。
     const setup = await createTestRenderer({
       width: 100,
