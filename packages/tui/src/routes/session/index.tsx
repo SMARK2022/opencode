@@ -2182,8 +2182,8 @@ type ToolProps = {
 const DEFAULT_BLOCK_CHAR_THRESHOLD = 800
 
 function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD) {
-  // #144：复用 Unicode 安全的 collapseToolOutput，宽度变化仍驱动原预算。
-  return collapseToolOutput(input, maxLines, Math.min(maxChars, DEFAULT_BLOCK_CHAR_THRESHOLD)).output
+  // 折叠信号由footer承载，仍保留Unicode安全与随宽度变化的原字符预算。
+  return collapseToolOutput(input, maxLines, Math.min(maxChars, DEFAULT_BLOCK_CHAR_THRESHOLD), false).output
 }
 
 // #224：工具标题只承担单行摘要职责，不能承载多行源码。这个阈值只影响

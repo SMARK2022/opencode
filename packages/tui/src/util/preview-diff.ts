@@ -20,14 +20,10 @@ export function previewDiff(input: string, maxLines: number) {
     if (!oldStart) return
 
     // 计数重写是本函数的核心契约：截断后 @@ 头若沿用原值，parsePatch 会按虚高行数越界读行
-    // #233：计数改为惰性函数——省略号 context 行 push 后行数变化，重复计数必须实时反映
+    // #233：计数改为惰性函数——行数变化时重复计数必须实时反映
     const countMismatch = oldVisible() !== expectedOld || newVisible() !== expectedNew
-    const incomplete = oldVisible() < expectedOld || newVisible() < expectedNew
-    // Match previewText's "N visible rows plus one ellipsis row" contract, but
-    // keep the ellipsis as a legal context line so parsePatch accepts it. The
-    // incomplete branch covers metadata that was already clipped mid-hunk.
-    // 省略号必须是合法 context 行（前缀空格）：带 +/- 前缀会破坏 hunk 行数账目
-    if (cut || incomplete) body.push(" …")
+    // #564：截断预览不注入 ` …` sentinel 行：hunk header 已按 oldVisible()/newVisible()
+    // 重算为实际保留行数，parsePatch 依此即可解析；“还有更多”由 BlockTool footer 承载。
     changed ||= cut || countMismatch
     out.push(
       `@@ -${oldStart},${oldVisible()} +${newStart},${newVisible()} @@${suffix}`,
@@ -103,9 +99,8 @@ export function previewDiff(input: string, maxLines: number) {
         j++
       }
       if (j === i) {
-        // #233：畸形或已裁剪 hunk 对已满足侧再抛一行——flush 加省略号后透传，
-        // #233：防止外层循环对同一行无限重处理。
-        // #233：flush 会把当前 body 写入 out，随后该行按独立内容透传。
+        // #233：畸形或已裁剪 hunk 对已满足侧再抛一行——防止外层循环对同一行无限重处理。
+        // #564：flush 只把当前 body 写入 out（不再补省略号行），随后该行按原文透传。
         flush()
         out.push(line)
         continue
