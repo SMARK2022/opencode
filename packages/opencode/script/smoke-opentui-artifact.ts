@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+// 发布版本由catalog与冻结锁决定，本smoke仅验证产物行为，不替代远端tag或源码授权校验。
 
 import fs from "node:fs/promises"
 import path from "node:path"
