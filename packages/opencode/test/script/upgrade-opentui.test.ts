@@ -3,8 +3,8 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { tmpdir } from "../fixture/fixture"
 
-// 已发布版本沿同一升级路径验证，不为.5另造分支或修改thirdparty源码。
-test.each(["0.4.3-smark.1", "0.4.3-smark.2", "0.4.3-smark.4", "0.4.3-smark.5"])("upgrade-opentui preserves release %s and thirdparty boundary", async (version) => {
+// 新release沿既有11包闭包与退出fork用例验证，避免维护校验仍停留在前一版本。
+test.each(["0.4.3-smark.1", "0.4.3-smark.2", "0.4.3-smark.4", "0.4.3-smark.5", "0.4.3-smark.6"])("upgrade-opentui preserves release %s and thirdparty boundary", async (version) => {
   await using tmp = await tmpdir()
   await Promise.all(["script", "packages/plugin", "thirdparty/opentui"].map((directory) => fs.mkdir(path.join(tmp.path, directory), { recursive: true })))
   await Bun.write(path.join(tmp.path, "package.json"), JSON.stringify({
