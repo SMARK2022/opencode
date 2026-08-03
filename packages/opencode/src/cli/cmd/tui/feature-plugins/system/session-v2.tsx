@@ -222,7 +222,8 @@ function ShellMessage(props: { message: SessionMessageShell }) {
   const overflow = createMemo(() => lines().length > 10)
   const limited = createMemo(() => {
     if (expanded() || !overflow()) return output()
-    return [...lines().slice(0, 10), "…"].join("\n")
+    // 折叠信号由下方 Click to expand/collapse 承载，预览只保留真实截断行，不注入 sentinel（INV-01）。
+    return lines().slice(0, 10).join("\n")
   })
   return (
     <BlockTool
@@ -592,7 +593,8 @@ function GenericTool(props: ToolProps) {
   const overflow = createMemo(() => lines().length > maxLines)
   const limited = createMemo(() => {
     if (expanded() || !overflow()) return output()
-    return [...lines().slice(0, maxLines), "…"].join("\n")
+    // 折叠信号由下方 Click to expand/collapse 承载，预览只保留真实截断行，不注入 sentinel（INV-01）。
+    return lines().slice(0, maxLines).join("\n")
   })
   return (
     <Show
@@ -777,7 +779,8 @@ function Bash(props: ToolProps) {
   const overflow = createMemo(() => lines().length > 10)
   const limited = createMemo(() => {
     if (expanded() || !overflow()) return output()
-    return [...lines().slice(0, 10), "…"].join("\n")
+    // 折叠信号由下方 Click to expand/collapse 承载，预览只保留真实截断行，不注入 sentinel（INV-01）。
+    return lines().slice(0, 10).join("\n")
   })
   return (
     <Switch>

@@ -51,6 +51,7 @@ describe("previewDiff", () => {
     const preview = previewDiff(sample, 5)
     const hunk = parsePatch(preview)[0]?.hunks[0]
 
+    // 截断预览只保留真实正文行；折叠语义由 BlockTool footer 承载，预览不再注入 ` …` sentinel 行。
     expect(hunk?.lines).toEqual([
       " describe(\"ModelsDev Service\", () => {",
       "   it.live(\"get() returns providers from disk when cache file exists\", () =>",
@@ -58,11 +59,10 @@ describe("previewDiff", () => {
       "       yield* writeCache(fixture)",
       "-      const state = yield* Ref.make(initialState)",
       "+      const cache = yield* ModelsDev.get()",
-      " …",
     ])
-    expect(hunk?.oldLines).toBe(6)
-    expect(hunk?.newLines).toBe(6)
-    expect(preview).not.toContain("\n…")
+    expect(hunk?.oldLines).toBe(5)
+    expect(hunk?.newLines).toBe(5)
+    expect(preview).not.toContain(" …")
   })
 
   test("keeps small diffs unchanged", () => {
@@ -158,15 +158,17 @@ Index: /tmp/two.py
 +++ already satisfied side`
     const preview = previewDiff(input, 10)
 
-    expect(preview).toContain(" …")
+    // 不完整 hunk 同样不补 sentinel；already-satisfied 侧的行仍按原样保留在 hunk 之后。
+    expect(preview).not.toContain(" …")
     expect(preview).toContain("+++ already satisfied side")
   })
 
   test("repairs an already-clipped hunk before diff rendering", () => {
     const hunk = parsePatch(previewDiff(partialHunk, 10))[0]?.hunks[0]
 
-    expect(hunk?.lines.at(-1)).toBe(" …")
-    expect(hunk?.oldLines).toBe(11)
-    expect(hunk?.newLines).toBe(5)
+    // 已被截断的 hunk 末行是真实删除行而不是 ` …`；old/new 计数等于实际保留的 10/4。
+    expect(hunk?.lines.at(-1)).toBe("-      title: item.id,")
+    expect(hunk?.oldLines).toBe(10)
+    expect(hunk?.newLines).toBe(4)
   })
 })

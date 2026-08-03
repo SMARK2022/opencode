@@ -17,11 +17,8 @@ export function previewDiff(input: string, maxLines: number) {
     if (!oldStart) return
 
     const countMismatch = oldVisible() !== expectedOld || newVisible() !== expectedNew
-    const incomplete = oldVisible() < expectedOld || newVisible() < expectedNew
-    // Match previewText's "N visible rows plus one ellipsis row" contract, but
-    // keep the ellipsis as a legal context line so parsePatch accepts it. The
-    // incomplete branch covers metadata that was already clipped mid-hunk.
-    if (cut || incomplete) body.push(" …")
+    // 截断预览不注入 ` …` sentinel 行：hunk header 已按 oldVisible()/newVisible()
+    // 重算为实际保留行数，parsePatch 依此即可解析；“还有更多”由 BlockTool footer 承载。
     changed ||= cut || countMismatch
     out.push(
       `@@ -${oldStart},${oldVisible()} +${newStart},${newVisible()} @@${suffix}`,
@@ -96,8 +93,8 @@ export function previewDiff(input: string, maxLines: number) {
       }
       if (j === i) {
         // Malformed or already-clipped hunks can present a row for the side whose
-        // expected count is already satisfied. Flush with an ellipsis instead of
-        // reprocessing the same row forever in the outer loop.
+        // expected count is already satisfied. Flush the pending hunk, then re-emit
+        // the row verbatim instead of reprocessing the same row forever.
         flush()
         out.push(line)
         continue

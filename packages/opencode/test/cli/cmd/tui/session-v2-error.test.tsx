@@ -103,6 +103,99 @@ test("v2 Session route renders a structured error message without object coercio
   }
 })
 
+test("v2 Session route collapses long bash output without an ellipsis sentinel row", async () => {
+  const plugin = internalTuiPlugins({ experimentalEventSystem: true }).find(
+    (candidate) => candidate.id === "internal:session-v2-debug",
+  )
+  if (!plugin) throw new Error("experimental Session v2 plugin was not registered")
+
+  const definitions: TuiRouteDefinition[] = []
+  const api = createTuiPluginApi()
+  // 与上方 error 用例同一公开注册 seam：route definition 只用于调用公开 render 接口。
+  const register = spyOn(api.route, "register").mockImplementation((items) => {
+    definitions.push(...items)
+    return () => {}
+  })
+  await plugin.tui(api, undefined, {
+    id: plugin.id,
+    source: "internal",
+    spec: plugin.id,
+    target: plugin.id,
+    first_time: 0,
+    last_time: 0,
+    time_changed: 0,
+    load_count: 1,
+    fingerprint: plugin.id,
+    state: "first",
+  })
+  register.mockRestore()
+  const definition = definitions.find((candidate) => candidate.name === "session.v2.messages")
+  if (!definition) throw new Error("Session v2 plugin did not register its message route")
+
+  const previous = Global.Path.state
+  await using tmp = await tmpdir()
+  Global.Path.state = tmp.path
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+
+  // 12 行输出超过 v2 Bash 的 10 行折叠阈值；expected 行序列来自 fixture 真实内容，
+  // 不复制生产的截断算法。
+  const output = Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n")
+  const message = {
+    id: "msg_v2_bash",
+    type: "assistant",
+    agent: "build",
+    model: { id: "test-model", providerID: "test", variant: "" },
+    content: [
+      {
+        type: "tool",
+        id: "prt_v2_bash",
+        name: "bash",
+        state: {
+          status: "completed",
+          input: { command: "seq 1 12", description: "List numbers" },
+          content: [{ type: "text", text: output }],
+          structured: {},
+        },
+        time: { created: 1, completed: 2 },
+      },
+    ],
+    time: { created: 1, completed: 2 },
+  } satisfies SessionMessageAssistant
+  const calls = createFetch((url) => {
+    if (url.pathname === `/api/session/${sessionID}/message`) return json({ items: [message], cursor: {} })
+    return undefined
+  })
+  const events = createEventSource()
+  const app = await testRender(
+    () => <Harness definition={definition} fetch={calls.fetch} events={events.source} />,
+    { width: 80, height: 24, footerHeight: 0, useThread: false },
+  )
+
+  try {
+    const deadline = Date.now() + 2_000
+    let frame = ""
+    while (Date.now() < deadline) {
+      await app.renderOnce()
+      frame = app.captureCharFrame()
+      if (frame.includes("Click to expand")) break
+      await Bun.sleep(10)
+    }
+    if (!frame.includes("Click to expand")) throw new Error(`timed out waiting for collapsed bash card:\n${frame}`)
+
+    // INV-01：折叠预览只能有真实内容行；独立的 `…` sentinel 行是“点击展开前后高度不变”的根因，
+    // disclosure（Click to expand）才是“还有更多”的唯一信号。10 行预算内应显示到 line 10、不含 line 11。
+    // frame 行带边框字符（`┃  …`，v2 卡片用 heavy vertical），行级正则只匹配内容为空白/边框加
+    // sentinel 的行，避免断言恒真。
+    expect(frame).toContain("line 10")
+    expect(frame).not.toContain("line 11")
+    expect(frame.split("\n").some((row) => /^[\s│┃]*…[\s│┃]*$/.test(row))).toBe(false)
+  } finally {
+    events.dispose()
+    app.renderer.destroy()
+    Global.Path.state = previous
+  }
+})
+
 function Harness(props: {
   definition: TuiRouteDefinition
   fetch: typeof globalThis.fetch

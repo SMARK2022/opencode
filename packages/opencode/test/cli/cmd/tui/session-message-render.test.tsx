@@ -2843,6 +2843,39 @@ test("expanded shell block does not leak preview first row", async () => {
   )
 })
 
+// 折叠预览不再注入 `…` sentinel 行：折叠语义由 Click to expand 承载，
+// 展开后必须显示比折叠预览更多的真实内容行（30 行输出折叠到 10 行预览）。
+test("collapsed shell preview omits the sentinel ellipsis row and expands to more rows", async () => {
+  const output = Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n")
+  await withRenderedSession(
+    [assistantMessage("msg_shell_no_ellipsis", 1)],
+    {
+      msg_shell_no_ellipsis: [
+        completedToolPart(
+          "part_shell_no_ellipsis",
+          "msg_shell_no_ellipsis",
+          "bash",
+          { command: "seq 30" },
+          { output },
+        ),
+      ],
+    },
+    async (app) => {
+      // 折叠态：不出现 `…` 幻影行，预览不含末尾 line 29，但保留展开入口。
+      let frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to expand")))
+      expect(frame.some((line) => line.includes("…"))).toBe(false)
+      expect(frame.some((line) => line.includes("line 29"))).toBe(false)
+
+      // 展开后：显示折叠预览之外的真实内容（line 29 可见），证明展开确实增高。
+      await clickVisibleText(app, "Click to expand")
+      frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("Click to collapse")))
+      expect(frame.some((line) => line.includes("line 29"))).toBe(true)
+    },
+    {},
+    { height: 45 },
+  )
+})
+
 test("errored shell tool keeps the denied auto review result line", async () => {
   await withRenderedSession(
     [assistantMessage("msg_auto_review_error", 1)],

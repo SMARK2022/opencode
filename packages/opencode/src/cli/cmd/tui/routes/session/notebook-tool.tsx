@@ -431,7 +431,8 @@ function envStatus(metadata: Record<string, unknown>) {
 
 function previewText(input: string, maxLines: number) {
   const lines = input.split("\n")
-  return lines.length > maxLines ? [...lines.slice(0, maxLines), "…"].join("\n") : input
+  // 与主会话 previewText 一致：截断预览不追加 `…` sentinel 行，折叠语义由 BlockTool footer 承载。
+  return lines.length > maxLines ? lines.slice(0, maxLines).join("\n") : input
 }
 
 function filetype(input?: string, language?: string) {

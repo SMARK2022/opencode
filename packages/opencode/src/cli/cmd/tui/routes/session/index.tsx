@@ -2265,8 +2265,8 @@ function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_C
   const text = lineLimited ? lines.slice(0, maxLines).join("\n") : input
   const charLimited = text.length > maxChars
   if (!lineLimited && !charLimited) return input
-  const preview = charLimited ? text.slice(0, maxChars).trimEnd() : text
-  return preview ? [preview, "…"].join("\n") : "…"
+  // 截断预览直接返回真实内容，不追加 `…` sentinel 行；“还有更多”由 BlockTool footer 承载。
+  return charLimited ? text.slice(0, maxChars).trimEnd() : text
 }
 
 function createPendingToolInputStats(part: () => ToolPart) {
