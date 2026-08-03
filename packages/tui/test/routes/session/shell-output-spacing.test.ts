@@ -77,3 +77,30 @@ describe("Session Shell output spacing", () => {
     expect(inlineToolSource).toContain('if (!previous) return 1')
   })
 })
+
+// 主会话保留共享截断入口；真实预览与展开行为另由helper和headless BlockTool用例覆盖。
+describe("Session collapsed preview sentinel removal", () => {
+  test("main previewText returns truncated content without ellipsis row", () => {
+    // sentinel 注入形态（两种旧分支）必须全部消失，直接返回真实截断内容。
+    expect(sessionSource).not.toContain('[preview, "…"].join("\\n")')
+    expect(sessionSource).not.toContain(': "…"')
+    expect(sessionSource).toContain("return collapseToolOutput(input, maxLines, Math.min(maxChars, DEFAULT_BLOCK_CHAR_THRESHOLD), false).output")
+  })
+
+  test("notebook previewText drops the ellipsis sentinel row", () => {
+    const notebookSource = readFileSync(
+      path.join(import.meta.dir, "../../../src/routes/session/notebook-tool.tsx"),
+      "utf8",
+    )
+    expect(notebookSource).not.toContain('[...lines.slice(0, maxLines), "…"].join("\\n")')
+    expect(notebookSource).toContain('lines.slice(0, maxLines).join("\\n")')
+  })
+
+  test("previewDiff no longer pushes a sentinel context row", () => {
+    const previewDiffSource = readFileSync(
+      path.join(import.meta.dir, "../../../src/util/preview-diff.ts"),
+      "utf8",
+    )
+    expect(previewDiffSource).not.toContain('body.push(" …")')
+  })
+})

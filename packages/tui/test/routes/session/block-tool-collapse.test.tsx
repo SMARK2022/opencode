@@ -13,6 +13,7 @@ import { ThemeProvider } from "../../../src/context/theme"
 import { RouteProvider } from "../../../src/context/route"
 import { BlockTool } from "../../../src/routes/session"
 
+import { collapseToolOutput } from "../../../src/util/collapse-tool-output"
 // 回归测试：BlockTool 折叠→展开→再折叠→再展开后内容不能变为空白。
 // 该 bug 由 OpenTUI renderable 销毁后无法重新挂载同一 JSX 对象引起，
 // 修复方式为 preview/body 常驻挂载，隐藏态由 #344 起改用 visible 属性整体
@@ -33,7 +34,8 @@ test("block tool keeps content after collapse and re-expand", async () => {
 
   function Harness() {
     const [expanded, setExpanded] = createSignal(false)
-    const preview = <text>PREVIEW-FRONT preview body PREVIEW-END</text>
+    // 实际共享预览只展示前十行；原展开/再展开断言继续验证完整正文恢复。
+    const preview = <text>{collapseToolOutput(output, 10, 600, false).output}</text>
     return (
       <TuiPathsProvider value={{ cwd: "/work", home: "/home/t", state: stateDir, worktree: "/work" }}>
         <TuiStartupProvider value={{ skipInitialLoading: true }}>
@@ -72,7 +74,9 @@ test("block tool keeps content after collapse and re-expand", async () => {
 
     // 初始折叠态：preview 可见，完整 body 被裁剪隐藏。
     let frame = app.captureCharFrame()
-    expect(frame).toContain("PREVIEW-FRONT")
+    expect(frame).toContain("source line 10")
+    expect(frame).not.toContain("source line 11")
+    expect(frame).not.toContain("…")
     expect(frame).not.toContain("source line 24")
     expect(bodyMounts).toBe(0)
 

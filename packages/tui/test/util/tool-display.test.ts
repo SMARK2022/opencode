@@ -28,6 +28,20 @@ describe("collapseToolOutput previews", () => {
     expect(preview.output.endsWith("…")).toBe(true)
     expect(Array.from(preview.output).slice(0, -1).every((item) => item === String.fromCodePoint(0x1f600))).toBe(true)
   })
+
+  test("disclosure previews keep real rows and Unicode character budgets", () => {
+    const output = Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n")
+    const preview = collapseToolOutput(output, 10, 1000, false)
+    expect(preview.output).toBe(output.split("\n").slice(0, 10).join("\n"))
+    expect(preview.overflow).toBe(true)
+    // 隐藏sentinel不能多留半个surrogate，也不能把真实省略号字符从源内容中抹掉。
+    const unicode = String.fromCodePoint(0x1f600).repeat(201)
+    const clipped = collapseToolOutput(unicode, 10, 200, false)
+    expect(Array.from(clipped.output)).toEqual(Array(200).fill(String.fromCodePoint(0x1f600)))
+    expect(clipped.overflow).toBe(true)
+    expect(collapseToolOutput("真实…内容", 10, 200, false)).toEqual({ output: "真实…内容", overflow: false })
+    expect(collapseToolOutput("tail", 10, 0, false)).toEqual({ output: "", overflow: true })
+  })
 })
 
 describe("webSearchProviderLabel", () => {
