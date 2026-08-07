@@ -27,7 +27,7 @@ target
 
 # Local dev files
 opencode-dev
-/thirdparty/opencode-v1.17.18-smark/
+/thirdparty\opencode-11720/
 /thirdparty/opencode-telegram-bot/
 UPCOMING_CHANGELOG.md
 logs/

@@ -495,8 +495,8 @@ Implementation audit must block when the changed code:
 
 ## Chinese Explanatory Comment Gate
 
-The 15 percent Chinese explanatory-comment requirement is a hard implementation
-and audit gate.
+The 15 percent Chinese explanatory-comment requirement applies to
+implementation.
 
 Define:
 
@@ -537,8 +537,8 @@ break. Examples:
 // 该断言锁定用户可观察行为，不依赖内部 helper 的调用次数。
 ```
 
-Comments must be distributed near the changed decisions they explain. A change
-with insufficient qualifying comments is blocked even when all tests pass.
+Comments must be distributed near the changed decisions they explain and
+satisfy this requirement even when all tests pass.
 
 The canonical plan must commit to the minimum and provide a feasible `E`/`C`
 estimate. Estimate arithmetic or line-scope drift is non-blocking when it does
