@@ -53,6 +53,11 @@
 - 本轮开始时自行加载 `adversarial-audit`、policy 和必要仓库证据。
 - 按自身 skill 独立审计；primary agent 不复述、筛选或预判审计标准。
 
+### Blocker 复议
+
+- 方案或实现审计返回 blocker 后，primary 先判断其是否属于用户需求且确需本次修改；若不确定或认为不需要，不得跳过或撤销，必须复用同一 `task_id` 引用 plan 与仓库证据请 auditor 自主复查。
+- 复议消息只提供事实和引用，不提供期望 verdict、设计辩护、范围收缩或收敛压力；auditor 的复查结果作为本轮最终 verdict。
+
 ### 放行
 
 - 经 policy 证实的 blocking finding 要求修订同一 plan、递增 revision、清空 approval，并按原始需求和完整 affected interface full-scope 重审；non-blocking record correction 不清空 approval 或触发重审。
@@ -69,24 +74,21 @@
 
 ### TDD 和修改边界
 
-- 实施前重读批准范围。interface、producer、consumer、invariant、owner、tests 或 file plan 发生相关漂移时停止，修订 plan 并重新审计；不覆盖、不回退、不夹带无关 worktree 修改。
-- 在批准 seam 逐个执行 `red -> minimal approved behavior -> green -> regression`。expected value 必须独立；不得断言 private helper、源码、调用次数、复制 production algorithm 或 horizontal slicing。
-- 只执行 approved repair/rollback。任何 behavior/scope/interface/ownership/fallback/test seam/file/concept 偏离都必须停止，递增 revision、清空 approval 并 full-scope plan audit。禁止 auditor 事后批准未计划设计。
-- 必要安全增强若在实施中才被发现，必须作为新事实进入 plan 和审计，不能静默加入，也不能仅因未逐字出现在用户需求中而直接删除。
-- 保持仓库命名、分层、类型、错误处理、module shape 和测试组织。禁止无依据的 refactor/dependency/public API/config/migration、类型逃逸、dead/unused/test-only code、弱化测试或安全约束，并删除淘汰 workaround。
+- 实施前重读批准范围；相关 interface、producer/consumer、invariant、owner、tests 或 file plan 漂移时停止并重审，不覆盖、不回退、不夹带无关 worktree 修改。
+- 按批准 seam 执行 `red -> minimal approved behavior -> green -> regression`；只执行 approved repair/rollback，保持既有质量和安全约束并删除淘汰 workaround。
+- 必要安全增强必须进入新 revision；禁止无依据的 refactor、fallback、public API、配置和迁移。
 
 ### 注释和验证
 
-- `E` 排除空行、import-only、formatter-only、generated 和 pure-move 变化。必须满足 `if E = 0: C = 0` 与 `if E > 0: C >= max(1, ceil(E * 0.15))`。
-- `C` 只计算邻近修改点并解释 invariant、真实边界、常量、测试意图、compatibility 或 safety 的中文注释。复述代码、翻译 identifier、重复测试名、显然流程、集中堆放和拆行凑数均不计入。
-- 从最窄测试扩展到 regression、原始 loop、package-local typecheck/lint/build/generation/migration/integration。遵守工作目录，不跳过、隐藏或弱化失败，并记录命令、目录、结果和修正。
+- 记录实际 `E/C`：`E` 排除空行、import-only、formatter-only、generated 和 pure-move，必须满足 `E=0 时 C=0`、否则 `C >= max(1, ceil(E * 0.15))`；`C` 只计邻近修改点并解释 invariant、真实边界、常量、测试意图、compatibility 或 safety，复述代码、翻译 identifier、重复测试名、显然流程、集中堆放和拆行凑数不计。
+- 从最窄测试扩展到适用的 regression、原始 loop 和 package-local checks；遵守工作目录，不跳过或弱化失败，并记录命令、目录、结果和修正。
 
 ## 阶段 4：独立实现审计
 
 - implementation evidence 记录 files/diff、red-green、verification、原始 loop、paths、E/C、排除行、未验证项。设置 `Status: implementation-audit-required`，未经 revision 不再 material change。
 - primary agent 只发送原始需求、plan/approved revision、repository root、`Audit mode: implementation`、changed files/diff，不发送实现辩护、自评、怀疑点或缩减范围。
-- auditor subagent 自行加载审计 skill、policy 和仓库证据，按原始需求和完整 affected interface 审计，禁止只看最近修正。
-- blocker 必须返工并 full-scope 重审，最多 3 轮。连续失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽仍有 blocker 时标记 `blocked`，不得 `complete`。
+- auditor 自行加载 skill、policy 和仓库证据，按原始需求审计全部实际 diff hunk 及其直接行为路径；触碰文件不等于整个文件进入范围，也不得接受 primary 缩小实际 diff。
+- 复议后仍保留的 blocker 必须返工并 full-scope 重审，最多 3 轮。连续失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽仍有 blocker 时标记 `blocked`，不得 `complete`。
 - 只有实际 diff 获得 `No blocking findings` 和 `APPROVE`，且测试、验证、责任边界、workaround 删除和中文注释门禁全部通过，才能原样记录 verdict 并设置 `Status: verified`。
 
 ## 可选 Commit
