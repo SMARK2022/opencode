@@ -30,7 +30,8 @@ target
 # Local dev files
 opencode-dev
 # 隔离迁移专用 clone：与目标工作区解耦，避免递归污染
-/thirdparty/opencode-v1.17.18-smark/
+# 0566：目录名随目标基线 11720 更名；正斜杠才是 gitignore 的目录分隔（源反斜杠是转义不生效）
+/thirdparty/opencode-11720/
 /thirdparty/opencode-telegram-bot/
 UPCOMING_CHANGELOG.md
 logs/
