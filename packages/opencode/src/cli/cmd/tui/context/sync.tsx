@@ -770,6 +770,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           const info = event.properties.info
           if ((info as Record<string, unknown>).hidden) {
             const messages = store.message[info.sessionID]
+            // 同Project事件可能属于未加载Session；本地没有可删除的投影时必须保持消费链继续。
+            if (!messages) break
             const result = Binary.search(messages, info.id, (m) => m.id)
             if (result.found) {
               setStore(
@@ -822,6 +824,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
         case "message.removed": {
           const messages = store.message[event.properties.sessionID]
+          // daemon的删除事实仍有效，但未加载Session的TUI投影只能安全地no-op。
+          if (!messages) break
           const result = Binary.search(messages, event.properties.messageID, (m) => m.id)
           if (result.found) {
             setStore(
@@ -885,6 +889,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
         case "message.part.removed": {
           const parts = store.part[event.properties.messageID]
+          // Part同样可能先于本地bootstrap到达；缺失集合不应中断后续正文事件。
+          if (!parts) break
           const result = Binary.search(parts, event.properties.partID, (p) => p.id)
           if (result.found) {
             setStore(
