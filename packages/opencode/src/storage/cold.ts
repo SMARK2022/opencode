@@ -127,6 +127,8 @@ export type VerifyReport = {
   missingPayloads: number
   corruptPayloads: number
   repaired: number
+  // toolInputFixed 独立计数 Tool input 形状修复，与 refcount repair 互不混淆。
+  toolInputFixed: number
 }
 
 // CleanupReport 的 candidate 与 deleted 分开，保证 dry-run 输出不能被误读为已经释放磁盘内容。
@@ -144,7 +146,7 @@ export type MaintenanceRequest =
   | { operation: "compress"; sessionID?: SessionID; olderThanMs: number; batchSize: number }
   | { operation: "expand"; sessionID?: SessionID; all: boolean; batchSize: number }
   | { operation: "status" }
-  | { operation: "verify"; repair: boolean; batchSize: number }
+  | { operation: "verify"; repair: boolean; repairToolInput?: boolean; batchSize: number }
   | { operation: "cleanup"; delete: boolean; batchSize: number }
   | { operation: "vacuum"; confirm: boolean }
 
@@ -2610,11 +2612,56 @@ export function isEligibleOwner(input: Owner & { now?: number; olderThanMs?: num
   })
 }
 
+// 工具 input 形状修复只针对热 Tool owner：v1/v2 冻结路径在写入前已验证 input，坏行只可能来自 hot row。
+// 谓词与 partCandidate 保持同源，避免维护命令与候选扫描对“坏 input”给出不同判定。
+// 状态谓词限定 completed/error：这是 partCandidate 中唯一可冻结的 tool 状态，
+// 修复范围严格覆盖 corruption 检测实际能看到的历史行。
+// 可解析的 JSON 字符串恢复为 object，其余非 object 值统一置空——原始值本身违反 ToolState
+// 契约，无法重建为合法 Tool input，且对应调用从未成功执行。
+function repairToolInputShape(db: TxOrDb) {
+  const rows = db
+    .select({ id: PartTable.id, data: PartTable.data, time_updated: PartTable.time_updated })
+    .from(PartTable)
+    .where(
+      and(
+        sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
+        sql`json_extract(${PartTable.data}, '$.state.status') in ('completed', 'error')`,
+        sql`json_type(${PartTable.data}, '$.state.input') <> 'object'`,
+      ),
+    )
+    .all()
+  let fixed = 0
+  for (const row of rows) {
+    // SQL 谓词已保证 tool + completed/error；此分支只收窄 union 类型，不复制第二套判定。
+    if (row.data.type !== "tool" || (row.data.state.status !== "completed" && row.data.state.status !== "error")) continue
+    const normalized = typeof row.data.state.input === "string" ? parseToolInputObject(row.data.state.input) : {}
+    db.update(PartTable)
+      .set({ data: { ...row.data, state: { ...row.data.state, input: normalized } }, time_updated: row.time_updated })
+      .where(eq(PartTable.id, row.id))
+      .run()
+    fixed++
+  }
+  return fixed
+}
+
+// 修复函数专用的容错解析：解析失败或结果不是 object 都回退空对象，绝不把非对象值写回。
+function parseToolInputObject(input: string): Record<string, unknown> {
+  try {
+    const value = JSON.parse(input)
+    return isRecord(value) ? value : {}
+  } catch {
+    return {}
+  }
+}
+
 // verifyWith 把 owner 引用一次性 GROUP BY 反算，并逐 payload 校验 codec、size、hash 与 canonical envelope。
 // repair 只修正可证明的 ref_count，不伪造 missing/corrupt payload，也不清除任何 owner cold_ref。
+// repairToolInput 独立修复热 Tool 行的 input 形状，二者在同一事务内执行。
 // report 同时记录 checked owner/payload，使空库成功与未执行扫描在用户输出中可区分。
 // 所有 repair 写入位于 immediate transaction；只读 verify 不获取 maintenance lease 或改变数据库。
-function verifyWith(db: TxOrDb, repair: boolean): VerifyReport {
+function verifyWith(db: TxOrDb, input: { repair: boolean; repairToolInput: boolean }): VerifyReport {
+  // toolInputFixed 先于 payload 校验统计，修复后的行不会影响后续 integrity 判定。
+  const toolInputFixed = input.repairToolInput ? repairToolInputShape(db) : 0
   // verify 同时扫描 ref/key/stats，key-only、stats-only 与半 summary cache 都计入 corruptOwners。
   // repair 仅纠正可证明的 ref_count；坏 key/frame/stats 和 orphan 仍由各自显式操作处理。
   const payloads = db.select().from(ColdStorageTable).all()
@@ -2667,7 +2714,7 @@ function verifyWith(db: TxOrDb, repair: boolean): VerifyReport {
     const actual = counts.get(payload.hash) ?? 0
     if (payload.ref_count !== actual) {
       refCountMismatches++
-      if (repair) {
+      if (input.repair) {
         db.update(ColdStorageTable)
           .set({ ref_count: actual, time_updated: Date.now() })
           .where(eq(ColdStorageTable.hash, payload.hash))
@@ -2763,15 +2810,22 @@ function verifyWith(db: TxOrDb, repair: boolean): VerifyReport {
     missingPayloads,
     corruptPayloads,
     repaired,
+    toolInputFixed,
   }
 }
 
-// verify 的 repair flag 决定事务写权限，调用层不能用“verify 后另行 update”复制修复 SQL。
+// verify 的 repair/repairToolInput flag 决定事务写权限，调用层不能用“verify 后另行 update”复制修复 SQL。
+// 两类修复共享同一 immediate 事务边界：避免崩溃点在半修复状态留下不一致组合。
 // corruption 计入 report 而非在首个坏 blob 终止，便于用户一次看到完整损坏范围。
 // normal delete/fork/thaw 仍 hard-fail；宽容扫描只属于显式维护诊断命令。
-export function verify(input: { repair: boolean }) {
-  if (!input.repair) return Database.use((db) => verifyWith(db, false))
-  return Database.transaction((db) => verifyWith(db, true), { behavior: "immediate" })
+export function verify(input: { repair: boolean; repairToolInput?: boolean }) {
+  if (!input.repair && !input.repairToolInput) {
+    return Database.use((db) => verifyWith(db, { repair: false, repairToolInput: false }))
+  }
+  return Database.transaction(
+    (db) => verifyWith(db, { repair: input.repair, repairToolInput: input.repairToolInput === true }),
+    { behavior: "immediate" },
+  )
 }
 
 // expand 必须有明确 session scope 或 all=true，防止缺省命令意外把整个历史数据库全量回热。
@@ -2874,7 +2928,7 @@ export function prepareMaintenance(request: MaintenanceRequest): PreparedMainten
   const taskBacked =
     request.operation === "compress" ||
     request.operation === "expand" ||
-    (request.operation === "verify" && request.repair) ||
+    (request.operation === "verify" && (request.repair || request.repairToolInput === true)) ||
     (request.operation === "cleanup" && request.delete)
   if (!taskBacked) return { type: "immediate", request }
 
@@ -2950,7 +3004,12 @@ export function parseMaintenanceRequest(input: unknown): MaintenanceRequest {
     case "status":
       return { operation: "status" }
     case "verify":
-      return { operation: "verify", repair: input.repair === true, batchSize }
+      return {
+        operation: "verify",
+        repair: input.repair === true,
+        repairToolInput: input.repairToolInput === true,
+        batchSize,
+      }
     case "cleanup":
       return { operation: "cleanup", delete: input.delete === true, batchSize }
     case "vacuum":
@@ -3033,7 +3092,7 @@ export function parseMaintenanceTask(input: unknown): MaintenanceTask {
   const taskBacked =
     args.operation === "compress" ||
     args.operation === "expand" ||
-    (args.operation === "verify" && args.repair) ||
+    (args.operation === "verify" && (args.repair || args.repairToolInput === true)) ||
     (args.operation === "cleanup" && args.delete)
   if (!taskBacked) throw new ValidationError({ message: "Maintenance task contains an immediate operation" })
   if (
@@ -3239,7 +3298,10 @@ export async function maintain(
   try {
     if (request.operation === "verify") {
       // repair task 复用同步 verify 的完整 owner/payload/state 快照，禁止维护第二套 payload-only verdict。
-      const report = Database.transaction((db) => verifyWith(db, request.repair), { behavior: "immediate" })
+      const report = Database.transaction(
+        (db) => verifyWith(db, { repair: request.repair, repairToolInput: request.repairToolInput === true }),
+        { behavior: "immediate" },
+      )
       // repaired mismatch 不算失败；无法修复的 owner/missing/frame 类别才进入 task.failed。
       const failed = report.corruptOwners + report.missingPayloads + report.corruptPayloads
       task.processed = report.checkedOwners + report.checkedPayloads

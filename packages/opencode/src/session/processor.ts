@@ -39,6 +39,13 @@ const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
 export const TOOL_ABORTED_ERROR = "Tool execution aborted"
 const log = Log.create({ service: "session.processor" })
 
+// AI SDK 对解析失败的调用会在 invalid dynamic tool-call 上保留原始字符串 input；
+// ToolState 契约要求 object，非 object 值统一归一化为空对象——该调用已被 SDK 判 invalid
+// 并伴随 tool-error，不会执行，因此空对象不构成成功路径。
+function normalizeToolInput(input: unknown): Record<string, unknown> {
+  return isRecord(input) ? input : {}
+}
+
 /**
  * 工具完成时的 input 真值回写（INV-16 / write format 同构）。
  * - `_syncInput`：整参数面替换为 { filePath, edits }，丢弃 legacy 顶层替换字段
@@ -619,7 +626,7 @@ export const layer = Layer.effect(
               state: {
                 ...match.state,
                 status: "running",
-                input: value.input,
+                input: normalizeToolInput(value.input),
                 time: { start: Date.now() },
               },
               metadata: {

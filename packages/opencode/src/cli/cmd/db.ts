@@ -206,7 +206,7 @@ function renderTask(task: ColdStorage.MaintenanceTask) {
           ? "!"
           : "●"
   const detail =
-    task.args.operation === "verify" && task.args.repair
+    task.args.operation === "verify" && (task.args.repair || task.args.repairToolInput === true)
       ? "verify (repair)"
       : task.args.operation === "cleanup" && task.args.delete
         ? "cleanup (delete)"
@@ -717,12 +717,22 @@ const ResumeCommand = cmd({
 })
 
 // verify 默认只读完整性报告；--repair 才生成可恢复 task，并且只修正可证明的 ref_count。
+// --repair-tool-input 独立授权热 Tool 行的 input 形状修复，同样进入 task-backed 写事务。
 const VerifyCommand = cmd({
   command: "verify",
   describe: "verify cold payload hashes and reference counts",
-  builder: (yargs: Argv) => yargs.option("repair", { type: "boolean", default: false }).option("batch-size", { type: "number", default: ColdStorage.DEFAULT_BATCH_SIZE }),
-  handler: async (args: { repair: boolean; batchSize: number }) => {
-    await executeMaintenance({ operation: "verify", repair: args.repair, batchSize: args.batchSize })
+  builder: (yargs: Argv) =>
+    yargs
+      .option("repair", { type: "boolean", default: false })
+      .option("repair-tool-input", { type: "boolean", default: false })
+      .option("batch-size", { type: "number", default: ColdStorage.DEFAULT_BATCH_SIZE }),
+  handler: async (args: { repair: boolean; repairToolInput: boolean; batchSize: number }) => {
+    await executeMaintenance({
+      operation: "verify",
+      repair: args.repair,
+      repairToolInput: args.repairToolInput,
+      batchSize: args.batchSize,
+    })
   },
 })
 

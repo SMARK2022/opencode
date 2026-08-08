@@ -212,8 +212,20 @@ const unavailableEnv = Layer.mergeAll(
   ),
 )
 
+// 生产默认是 v1 projector 路径（experimentalEventSystem 关闭时坏行曾真实入库）；
+// 工具 input 形状测试必须在 v1-only env 下观察持久化边界，不能依赖 v2 decoder 拦截。
+const v1Env = Layer.mergeAll(
+  TestLLMServer.layer,
+  SessionProcessor.layer.pipe(
+    Layer.provide(summary),
+    Layer.provide(Image.defaultLayer),
+    Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: false })),
+    Layer.provideMerge(deps),
+  ),
+)
 const it = testEffect(env)
 const unavailable = testEffect(unavailableEnv)
+const v1It = testEffect(v1Env)
 
 const boot = Effect.fn("test.boot")(function* () {
   const processors = yield* SessionProcessor.Service
@@ -259,6 +271,192 @@ unavailable.live("omits an image attachment when normalization is unavailable", 
           // raw AI tool 可不返回 title；completed 终态必须持久化为 string，空串合法，
           // 否则 JSON 省略 title 后 ColdStorage.freeze/status 会在全库扫描时报 corruption。
           expect(part.state.title).toBe("")
+        }
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+// 工具 input 形状守卫：agent 权限 `* deny` + 白名单，AI SDK 对非法 JSON 参数
+// 的解析失败会走 invalid dynamic tool-call 兜底，input 可能是原始字符串。
+// tools 中不注册 invalid 时 repair 必然失败，processor 必须把非 object input
+// 归一化为空对象，否则坏 schema 会进入持久化并在冷存储扫描时抛 corruption。
+// 该测试只断言持久化 Part 的公开状态，不检查内部 helper。
+const denyAgent = (): Agent.Info => ({
+  name: "build",
+  mode: "primary",
+  options: {},
+  permission: [
+    { permission: "*", pattern: "*", action: "deny" },
+    { permission: "bash", pattern: "*", action: "allow" },
+    { permission: "read", pattern: "*", action: "allow" },
+    { permission: "grep", pattern: "*", action: "allow" },
+    { permission: "glob", pattern: "*", action: "allow" },
+  ],
+})
+
+const bashTool = aiTool({
+  description: "bash",
+  inputSchema: z.object({ command: z.string() }),
+  execute: async (): Promise<{ output: string }> => ({ output: "" }),
+})
+
+// 镜像 src/tool/invalid.ts 的 repair 目标：schema 只接受 {tool, error}。
+const invalidRepairTool = aiTool({
+  description: "Do not use",
+  inputSchema: z.object({ tool: z.string(), error: z.string() }),
+  execute: async (): Promise<{ output: string }> => ({
+    output: "The arguments provided to the tool are invalid",
+  }),
+})
+
+// 非法 JSON arguments 必须用 raw SSE 手工构造：reply().tool() 会 stringify 成合法 JSON，
+// 无法触发 AI SDK 的 InvalidToolInputError 修复路径。
+function malformedToolCall(id: string, name: string, args: string) {
+  return raw({
+    head: [
+      { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
+      {
+        id: "chatcmpl-test",
+        object: "chat.completion.chunk",
+        choices: [
+          {
+            delta: {
+              tool_calls: [{ index: 0, id, type: "function", function: { name, arguments: "" } }],
+            },
+          },
+        ],
+      },
+      {
+        id: "chatcmpl-test",
+        object: "chat.completion.chunk",
+        choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: args } }] } }],
+      },
+    ],
+    tail: [
+      { id: "chatcmpl-test", object: "chat.completion.chunk", choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+    ],
+  })
+}
+
+// 修复目标缺失（repair 工具未注册）时，非法调用必须以 error 落库且 input 归一化，
+// 证明 Fix B 的归一化不依赖 invalid 注册这一可选前置。
+v1It.live("normalizes raw-string tool input when the repair tool is unavailable", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        yield* llm.push(malformedToolCall("call_malformed", "bash", '{"command": "ls"'))
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "run bash")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const result = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies MessageV2.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: denyAgent(),
+          system: [],
+          messages: [{ role: "user", content: "run bash" }],
+          tools: { bash: bashTool },
+        })
+        const part = MessageV2.parts(msg.id).find((item): item is MessageV2.ToolPart => item.type === "tool")
+        expect(result).toBe("continue")
+        expect(part?.state.status).toBe("error")
+        // 原始非法参数字符串不得进入持久化 ToolState.input。
+        expect(part?.state.input).toEqual({})
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+// valid JSON array 会被 AI SDK 解析成非 object input；仍需在 processor 持久化边界归一化，
+// 证明 Fix B 保护的是 ToolState schema，而不只是 malformed string 的特殊形态。
+v1It.live("normalizes parsed array tool input when the repair tool is unavailable", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        // `[]` 是合法 JSON 但违反 bash object schema，可区分 safeParseJSON 成功后的 array
+        // 与上一用例的 malformed string 分支，确保两条 SDK 输入路径都经过同一持久化守卫。
+        yield* llm.push(malformedToolCall("call_array", "bash", "[]"))
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "run bash")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const result = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies MessageV2.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: denyAgent(),
+          system: [],
+          messages: [{ role: "user", content: "run bash" }],
+          tools: { bash: bashTool },
+        })
+        const part = MessageV2.parts(msg.id).find((item): item is MessageV2.ToolPart => item.type === "tool")
+        expect(result).toBe("continue")
+        expect(part?.state.status).toBe("error")
+        // 只断言公开 Part 契约，不依赖 normalizeToolInput helper 的实现细节。
+        expect(part?.state.input).toEqual({})
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+// 与上一用例对照：即使 user.tools 显式禁用 invalid，内部 repair 路径仍可达，
+// 调用被修复为合法的 invalid 工具调用并执行，落库 status=completed、input 为 {tool, error} 对象。
+// 修复前（任一用户禁用边界过滤 invalid）该场景只会得到 error 状态，因此是 Fix A 的回归哨兵。
+v1It.live("repairs an unavailable tool call into the invalid tool with object input", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        yield* llm.push(malformedToolCall("call_malformed", "bash", '{"command": "ls"'))
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "run bash")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const result = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+            tools: { invalid: false },
+          } satisfies MessageV2.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: denyAgent(),
+          system: [],
+          messages: [{ role: "user", content: "run bash" }],
+          tools: { bash: bashTool, invalid: invalidRepairTool },
+        })
+        const part = MessageV2.parts(msg.id).find((item): item is MessageV2.ToolPart => item.type === "tool")
+        expect(result).toBe("continue")
+        // invalid repair 目标保留注册时，AI SDK 把非法调用修复为合法 invalid 调用并执行。
+        expect(part?.state.status).toBe("completed")
+        if (part?.state.status === "completed") {
+          expect(part.state.input).toMatchObject({ tool: "bash" })
+          expect(typeof (part.state.input as { error?: unknown }).error).toBe("string")
         }
       }),
     { git: true, config: (url) => providerCfg(url) },
