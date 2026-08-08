@@ -16,7 +16,7 @@ test("resolves an annotated release tag from a remote when the shallow checkout 
   await Bun.write(path.join(source, "source.txt"), "immutable source\n")
   await git(["add", "source.txt"], source)
   await git(["commit", "-m", "release source"], source)
-  await git(["tag", "-a", "v0.4.3-smark.6", "-m", "immutable release"], source)
+  await git(["tag", "-a", "v0.4.3-smark.7", "-m", "immutable release"], source)
   await git(["tag", "v0.4.3-lightweight"], source)
   const commit = (await git(["rev-parse", "HEAD"], source)).stdout.trim()
   // tag后再提交生成同仓库的有效mismatch，避免用伪造hash绕过远端确实包含该commit的现实条件。
@@ -34,7 +34,7 @@ test("resolves an annotated release tag from a remote when the shallow checkout 
   expect(
     await verifyRemoteAnnotatedTagCommit({
       repository,
-      tag: "v0.4.3-smark.6",
+      tag: "v0.4.3-smark.7",
       cwd: shallow,
       expectedCommit: commit,
     }),
@@ -43,7 +43,7 @@ test("resolves an annotated release tag from a remote when the shallow checkout 
   await expect(
     verifyRemoteAnnotatedTagCommit({
       repository,
-      tag: "v0.4.3-smark.6",
+      tag: "v0.4.3-smark.7",
       cwd: shallow,
       expectedCommit: mismatch,
     }),
@@ -75,7 +75,7 @@ test("source-authorized closure rejects a clean source revision outside the mani
   const manifest = {
     schema: 1 as const,
     sourceGitlink: authorized,
-    releaseTag: "v0.4.3-smark.6" as const,
+    releaseTag: "v0.4.3-smark.7" as const,
     releaseCommit: "c".repeat(40),
   }
 
