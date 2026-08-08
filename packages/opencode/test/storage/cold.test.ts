@@ -97,6 +97,54 @@ function useDb<T>(db: ColdStorage.TxOrDb, fn: (db: ColdStorage.TxOrDb) => T): T 
 }
 
 // #493：cold owner/payload 计数 helper——与生产 ColdStorage 共用 TxOrDb 形态直查投影表。
+// #568：三个 input 形状用例共用同一装配：真实 session + assistant message + 直接插入的热坏 Part 行。
+// 直接插入 PartTable 而非 sessions.updatePart：Schema 校验会拒绝非 object input，
+// 只有绕过校验层才能构造与真实损坏行同构的持久化形态（与生产坏行同源的 #568 修复对象）。
+function seedMalformedToolPart(
+  sessions: SessionNs.Interface,
+  session: { id: SessionID; directory: string },
+  input: unknown,
+) {
+  return Effect.gen(function* () {
+    const messageID = MessageID.ascending()
+    yield* sessions.updateMessage({
+      id: messageID,
+      sessionID: session.id,
+      role: "assistant",
+      parentID: MessageID.ascending(),
+      modelID: ModelV2.ID.make("test-model"),
+      providerID: ProviderV2.ID.make("test-provider"),
+      mode: "build",
+      agent: "build",
+      path: { cwd: session.directory, root: session.directory },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      time: { created: Date.now() },
+    })
+    const partID = PartID.ascending()
+    const { sync } = yield* Database.Service
+    useDb(sync, (db) =>
+      db
+        .insert(PartTable)
+        .values({
+          id: partID,
+          message_id: messageID,
+          session_id: session.id,
+          time_created: 1,
+          time_updated: 1,
+          data: {
+            type: "tool",
+            tool: "bash",
+            callID: "call-1",
+            state: { status: "error", input, error: "boom", time: { start: 1, end: 2 } },
+          },
+        })
+        .run(),
+    )
+    return partID
+  })
+}
+// #493：cold owner/payload 计数 helper——与生产 ColdStorage 共用 TxOrDb 形态直查投影表。
 function coldOwnerCount(sync: ColdStorage.TxOrDb, sessionIDs: string[]) {
   const allowed = new Set(sessionIDs)
   return (
@@ -622,6 +670,75 @@ describe.serial("ColdStorage", () => {
           .where(eq(ColdStorageTable.hash, hash))
           .run(),
       )
+      yield* sessions.remove(session.id)
+    }),
+  )
+
+  // #568：工具 input 形状修复用例直接插入 hot Tool 坏行（state.input 为字符串），模拟
+  // AI SDK invalid dynamic tool-call 兜底把原始参数串写入持久化的真实形态。
+  // status() 候选扫描必须仍抛 corruption（只读路径不隐藏损坏），verify --repair-tool-input
+  // 后行被归一化为 object，status 才能继续运行。
+  it.instance("repairs malformed tool input shape and status stops throwing", () =>
+    Effect.gen(function* () {
+      const { sync } = yield* Database.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({ title: "tool input shape" })
+      const partID = yield* seedMalformedToolPart(sessions, session, "{bad json")
+      expect(() => ColdStorage.status(sync)).toThrow("Stored tool input is invalid")
+      const report = ColdStorage.verify(sync, { repair: false, repairToolInput: true })
+      expect(report.toolInputFixed).toBe(1)
+      // 归一化结果是契约占位 {}：SDK 已判 invalid 的调用没有可重建参数，
+      // 空对象保证 status()/compress 扫描可继续，同时不伪造任何执行参数。
+      const row = useDb(sync, (db) => db.select().from(PartTable).where(eq(PartTable.id, partID)).get())
+      expect(row?.data.type === "tool" ? row.data.state.input : undefined).toEqual({})
+      expect(() => ColdStorage.status(sync)).not.toThrow()
+      // 同一坏行经真实task-backed入口再修复，锁定参数持久化与显式写授权。
+      const repairPartID = yield* seedMalformedToolPart(sessions, session, "{another bad json")
+      const prepared = ColdStorage.prepareMaintenance(ColdStorage.parseMaintenanceRequest({ operation: "verify", repairToolInput: true, batchSize: 50 }))
+      if (prepared.type !== "task") throw new Error("Expected tool input repair task")
+      expect(ColdStorage.parseMaintenanceTask(prepared.task).args).toMatchObject({ operation: "verify", repair: false, repairToolInput: true })
+      const database = yield* Database.Service
+      const result = yield* Effect.promise(() => ColdStorage.maintain(sync, prepared, {
+        lease: { assertOwned() {} },
+        checkpoint: async () => {},
+        // 使用现有同连接预约，避免同步测试client掩盖维护事务的实际执行边界。
+        run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),
+      }))
+      expect(result.type === "task" ? result.task.status : undefined).toBe("completed")
+      const repaired = sync.select().from(PartTable).where(eq(PartTable.id, repairPartID)).get()
+      expect(repaired?.data.type === "tool" ? repaired.data.state.input : undefined).toEqual({})
+      expect(repaired?.time_updated).toBe(1)
+      expect(ColdStorage.verify(sync, { repair: false, repairToolInput: true }).toolInputFixed).toBe(0)
+      yield* sessions.remove(session.id)
+    }),
+  )
+
+  // #568：字符串恰好是合法 JSON object 时，修复必须恢复解析后的对象而不是统一置空，
+  // 使可重建的 Tool input 不因维护命令丢失。
+  it.instance("restores parseable JSON object input instead of emptying it", () =>
+    Effect.gen(function* () {
+      const { sync } = yield* Database.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({ title: "tool input parse" })
+      const partID = yield* seedMalformedToolPart(sessions, session, '{"command":"ls"}')
+      ColdStorage.verify(sync, { repair: false, repairToolInput: true })
+      const row = useDb(sync, (db) => db.select().from(PartTable).where(eq(PartTable.id, partID)).get())
+      expect(row?.data.type === "tool" ? row.data.state.input : undefined).toEqual({ command: "ls" })
+      yield* sessions.remove(session.id)
+    }),
+  )
+
+  // #568：只读 verify 不得触碰坏行：toolInputFixed 必须为 0，行保持原状，
+  // status 继续抛 corruption——损坏证据不能被只读报告吞掉。
+  it.instance("read-only verify never rewrites malformed tool input", () =>
+    Effect.gen(function* () {
+      const { sync } = yield* Database.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({ title: "tool input readonly" })
+      yield* seedMalformedToolPart(sessions, session, "{bad json")
+      const report = ColdStorage.verify(sync, { repair: false })
+      expect(report.toolInputFixed).toBe(0)
+      expect(() => ColdStorage.status(sync)).toThrow("Stored tool input is invalid")
       yield* sessions.remove(session.id)
     }),
   )

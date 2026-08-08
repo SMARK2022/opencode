@@ -103,6 +103,30 @@ async function waitForExit(proc: Proc, exited: Promise<number>) {
   proc.kill()
   throw new Error("database maintenance PTY exceeded 20 seconds")
 }
+// #568：插入一条热 Tool 坏行（state.input 为字符串），模拟 AI SDK invalid dynamic 兜底入库形态。
+// 必须直接 SQL 播种：任何经过 processor/import 的写入都会被归一化或校验，
+// 无法制造出历史遗留形态的坏行。
+// foreign_keys 关闭是播种前置：fixture 只写三张表，不维护真实外键图。
+async function seedMalformedToolInput(root: string) {
+  await markMigrated(root)
+  await runCli(root, ["db", "status", "--json"])
+  const db = new SQLite(path.join(root, "opencode.db"))
+  db.exec("PRAGMA foreign_keys = OFF")
+  db.query(
+    "INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) VALUES ('ses_ti_repair', 'global', 'repair', ?, 'repair fixture', 'test', 1, 1)",
+  ).run(root)
+  db.exec("INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES ('msg_ti_repair', 'ses_ti_repair', 1, 1, '{}')")
+  db.query("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES ('prt_ti_repair', 'msg_ti_repair', 'ses_ti_repair', 1, 1, ?)").run(
+    JSON.stringify({
+      type: "tool",
+      tool: "bash",
+      callID: "call-1",
+      state: { status: "error", input: "{bad json", error: "boom", time: { start: 1, end: 2 } },
+    }),
+  )
+  db.close()
+}
+
 // 非 PTY helper 分开读取 stdout/stderr，确保 machine JSON 不被人类提示污染。
 async function runCli(root: string, args: string[]) {
   // 后台 CLI 子进程在 Windows 上隐藏 console，避免维护命令验证时弹出 conhost。
@@ -559,5 +583,26 @@ describe("database maintenance CLI", () => {
     // 同一公开 argv seam 也锁定 --yes 不能脱离 --vacuum 成为隐式 stop/reclaim 授权。
     const invalid = await runCli(tmp.path, ["db", "compress", "--yes", "--json"])
     expect([invalid.exitCode === 0, invalid.stderr.includes("compress --yes requires --vacuum")]).toEqual([false, true])
+  }, 30_000)
+
+  // #568：CLI 层覆盖 --repair-tool-input 的完整往返：yargs flag → task args 持久化 →
+  // daemon maintain 执行 immediate 写事务；只测同步 verify 会漏掉 task-backed 边界。
+  // 行断言直接用 SQL json_type 检查持久化形状，不依赖 task JSON 里的计数。
+  test("db verify --repair-tool-input fixes malformed tool input so status succeeds", async () => {
+    await using tmp = await tmpdir({ init: (root) => seedMalformedToolInput(root) })
+    const before = await runCli(tmp.path, ["db", "status", "--json"])
+    expect(before.exitCode).not.toBe(0)
+    expect(before.stderr).toContain("Stored tool input is invalid")
+    const repaired = await runCli(tmp.path, ["db", "verify", "--repair-tool-input"])
+    expect(repaired.exitCode).toBe(0)
+    expect(JSON.parse(repaired.stderr)).toMatchObject({ operation: "verify", status: "completed" })
+    const db = new SQLite(path.join(tmp.path, "opencode.db"), { readonly: true })
+    const inputType = db.query("SELECT json_type(data, '$.state.input') AS t FROM part WHERE id = 'prt_ti_repair'").get() as
+      | { t?: string }
+      | undefined
+    db.close()
+    expect(inputType?.t).toBe("object")
+    const after = await runCli(tmp.path, ["db", "status", "--json"])
+    expect(after.exitCode).toBe(0)
   }, 30_000)
 })

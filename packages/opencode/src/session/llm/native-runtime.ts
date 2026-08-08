@@ -120,7 +120,8 @@ export function stream(input: StreamInput): StreamResult {
   // 估算和唯一 stream 共享最终工具定义，不重建权限或 Schema。
   const chunkTimeout = input.provider.options.chunkTimeout
   const advertised = LLMRequest.update(request, {
-    tools: [...request.tools, ...toDefinitions(tools)],
+    // 内部repair保留执行注册，但与SDK的activeTools一致，不向模型广告invalid。
+    tools: [...request.tools, ...toDefinitions(tools).filter((tool) => tool.name !== "invalid")],
     // 运输选项留在HTTP合同，原headers/body/query不能因增加期限而被覆盖。
     http: HttpOptions.make({ ...request.http,
       chunkTimeout: chunkTimeout === false || typeof chunkTimeout === "number" ? chunkTimeout : undefined }),
