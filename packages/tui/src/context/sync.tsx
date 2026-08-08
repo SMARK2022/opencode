@@ -848,6 +848,10 @@ export const {
         case "message.removed": {
           touchMessage(event.properties.sessionID, event.properties.messageID)
           const messages = store.message[event.properties.sessionID]
+          // #567：同 Project 事件可能属于未加载 Session——daemon 的删除事实仍有效，
+          // 但本地没有投影可删时必须 no-op 保持消费链，否则 reducer 抛错切断后续事件。
+          // touchMessage 只登记 hydrating ID，不为未加载 Session 创建数组，守卫不可省。
+          if (!messages) break
           const index = messages.findIndex((message) => message.id === event.properties.messageID)
           if (index !== -1) {
             setStore(
@@ -919,6 +923,13 @@ export const {
         case "message.part.removed": {
           touchPart(event.properties.sessionID, event.properties.partID)
           const parts = store.part[event.properties.messageID]
+          // #567：Part 同样可能先于本地 bootstrap 到达；缺失集合不应中断后续正文事件。
+          // 早退前先收敛 #186 缓冲：守护与清理是两个独立责任，不能因 no-op 跳过 Map 收敛。
+          if (!parts) {
+            // 缓冲 delta 的清理不随早退跳过：part 已在 daemon 侧移除，Map 不得无界驻留。
+            orphanPartDeltas.delete(event.properties.partID)
+            break
+          }
           const result = search(parts, event.properties.partID, (part) => part.id)
           if (result.found) {
             setStore(

@@ -145,6 +145,44 @@ test("tool raw deltas update pending state and ignore late running fragments", a
   } finally { app.renderer.destroy() }
 })
 
+test("unloaded deletion events preserve projection absence and later live delivery", async () => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const { app, emit, sync } = await mount(undefined, tmp.path)
+  const info = assistantMessage()
+  const hidden = { ...info, id: "msg_unloaded", sessionID: "ses_unloaded", hidden: { time: 1, reason: "undo" } } satisfies AssistantMessage
+  try {
+    // 合法但未加载的投影事件必须走真实队列，不能因缺席数组击穿后续消费。
+    emit(messageEvent(hidden))
+    emit({
+      directory, project: "proj_test",
+      payload: {
+        id: "evt_unloaded_message_removed", type: "message.removed",
+        properties: { sessionID: hidden.sessionID, messageID: hidden.id },
+      },
+    })
+    emit({
+      directory, project: "proj_test",
+      payload: {
+        id: "evt_unloaded_part_removed", type: "message.part.removed",
+        properties: { sessionID: hidden.sessionID, messageID: hidden.id, partID: "part_unloaded" },
+      },
+    })
+    // 正常消息与part都必须到达；仅无异常或daemon事件存在不足以证明投影存活。
+    emit(messageEvent(info))
+    emit(partEvent(textPart("part_post_remove", "still live")))
+    await wait(() => sync.data.message[info.sessionID]?.[0]?.id === info.id)
+    await wait(() => sync.data.part[info.id]?.[0]?.id === "part_post_remove")
+    // no-op不创建幽灵集合，后续正常内容保持真实文本。
+    expect(sync.data.message[hidden.sessionID]).toBeUndefined()
+    expect(sync.data.part[hidden.id]).toBeUndefined()
+    expect(sync.data.message[info.sessionID][0].id).toBe(info.id)
+    expect(sync.data.part[info.id][0]).toMatchObject({ type: "text", text: "still live" })
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 describe("tui sync", () => {
   // #192：重连后恢复 pending permission/question 请求——bootstrap refresh 从 API 拉取
   // #192：reconnected 标志控制 API 返回——初始为空，重连后返回 pending 请求
