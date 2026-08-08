@@ -7,15 +7,92 @@ import os from "node:os"
 import { Terminal } from "@xterm/headless"
 // 目标谱系 pty owner 在 core；经其 exports 通配子路径消费（./* → src/*.ts）。
 import { spawn, type Proc } from "@opencode-ai/core/pty/pty.bun"
+import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 
 const binaryArg = process.argv[process.argv.indexOf("--binary") + 1]
+const scenarioIndex = process.argv.indexOf("--scenario")
+// #567：scenario 是公开 CLI 约定——normal 保持既有断言面不变，未知值显式拒绝。
+const scenario = scenarioIndex >= 0 ? process.argv[scenarioIndex + 1] : "normal"
 if (!binaryArg || process.argv.indexOf("--binary") === -1) {
   console.error("Usage: bun run script/smoke-opentui-artifact.ts --binary <absolute-path>")
   process.exit(1)
 }
+if (scenario !== "normal" && scenario !== "target-liveness") {
+  console.error(`Unknown smoke scenario: ${scenario}`)
+  process.exit(1)
+}
+const targetLiveness = scenario === "target-liveness"
 
 const binary = path.resolve(binaryArg)
 if (!(await Bun.file(binary).exists())) throw new Error(`Compiled OpenCode binary not found: ${binary}`)
+// #567：preflight 在无 rootReport 的主进程侧执行一次；Windows child 重入时跳过避免双跑。
+if (targetLiveness && !process.env.OPENCODE_SMOKE_ROOT_REPORT) await runSyncProjectionPreflight()
+
+async function runSyncProjectionPreflight() {
+  // #567：TUI 已迁包——fixture 经动态 import 指向 tui 包（mount/emit/wait 是公开 seam），
+  // 避免脚本静态依赖跨包 .tsx 测试源。
+  // mount() 使用 tui 包真实 provider 树——守卫在真实 SyncProvider reducer 内验证。
+  const { mount, wait } = await import("../../tui/test/cli/cmd/tui/sync-fixture")
+  const fixture = await mount()
+  try {
+    const unloadedSession = "ses_unloaded_smoke"
+    const unloadedMessage = "msg_unloaded_smoke"
+    const unloadedPart = "part_unloaded_smoke"
+    const events = [
+      {
+        directory: "/tmp/opencode/packages/opencode",
+        project: "proj_test",
+        payload: {
+          id: "smoke-hidden-message",
+          type: "message.updated",
+          properties: { info: { id: unloadedMessage, sessionID: unloadedSession, hidden: true } },
+        },
+      },
+      {
+        directory: "/tmp/opencode/packages/opencode",
+        project: "proj_test",
+        payload: {
+          id: "smoke-removed-message",
+          type: "message.removed",
+          properties: { sessionID: unloadedSession, messageID: unloadedMessage },
+        },
+      },
+      {
+        directory: "/tmp/opencode/packages/opencode",
+        project: "proj_test",
+        payload: {
+          id: "smoke-removed-part",
+          type: "message.part.removed",
+          properties: { messageID: unloadedMessage, partID: unloadedPart },
+        },
+      },
+    ] as unknown as GlobalEvent[]
+
+    // 三个事件都指向未加载 Session——正是会击穿无守卫 reducer 的事件形状。
+    for (const event of events) fixture.emit(event)
+    fixture.emit({
+      directory: "/tmp/opencode/packages/opencode",
+      project: "proj_test",
+      payload: {
+        id: "smoke-valid-message",
+        type: "message.updated",
+        properties: {
+          info: {
+            id: "msg_loaded_smoke",
+            sessionID: "ses_loaded_smoke",
+            role: "assistant",
+            time: { created: 1 },
+          },
+        },
+      },
+    } as unknown as GlobalEvent)
+    // 合法事件进入 store 才证明消费链存活：这是 INV-01/02 的行为级断言。
+    await wait(() => fixture.sync.data.message.ses_loaded_smoke?.[0]?.id === "msg_loaded_smoke")
+  } finally {
+    // preflight 挂载即销毁——不把 fixture 生命周期泄漏进后续 scenario。
+    fixture.app.renderer.destroy()
+  }
+}
 
 // rootReport同时是scenario-child标记和唯一IPC路径，避免outer误递归启动第二层child。
 const rootReport = process.env.OPENCODE_SMOKE_ROOT_REPORT
@@ -65,7 +142,14 @@ const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-opentui-smoke-"))
 if (rootReport) await Bun.write(rootReport, root)
 const lockPath = path.join(root, "tui-server.json")
 const project = path.join(root, "project")
+// #567：ready 文件由 worker fixture 在隔离 root 内创建——路径本身即 IPC 契约，随 root 删除。
+const highlightReadyPath = path.join(root, "highlight-pending.ready")
+const workerFixturePath = path.join(root, "tree-sitter-smoke-worker.js")
+if (targetLiveness) await Bun.write(workerFixturePath, createPendingWorkerSource(highlightReadyPath))
 let modelRequests = 0
+// target 模式哨兵经真实 SSE 下发；normal 模式保持 ok，不改变既有断言面。
+const thinkingMarker = targetLiveness ? "THINKING-SENTINEL" : ""
+const bodyMarker = targetLiveness ? "BODY-SENTINEL" : "ok"
 // fixture只实现OpenAI-compatible chat completion的必要SSE，不访问外网或真实账号。
 // request计数是独立的readiness信号，比固定sleep更能证明prompt真正到达provider。
 // 响应先保持busy窗口，再发送ok和DONE，覆盖spinner和完成态的顺序不变量。
@@ -78,12 +162,35 @@ const fixture = Bun.serve({
       return new Response("not found", { status: 404 })
     }
     modelRequests += 1
+    // 请求序号只控制fixture是否保持第二次响应打开，不参与TUI成功判定。
+    const requestNumber = modelRequests
     await Bun.sleep(1_000)
     return new Response(
       new ReadableStream({
-        start(controller) {
+        async start(controller) {
           const encoder = new TextEncoder()
-          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'))
+          const firstDelta = targetLiveness && requestNumber > 1
+            ? { content: "```ts\n// CANCEL-HIGHLIGHT-SENTINEL\n```" }
+            : targetLiveness
+              ? { reasoning_content: thinkingMarker }
+              : { content: bodyMarker }
+          const secondDelta = targetLiveness && requestNumber === 1 ? { content: bodyMarker } : {}
+          // 首 delta 已足以驱动 Thinking cell；body 等待窗口后再发，保证两哨兵可分帧断言。
+          // 先发一个真实part delta，再等待abort，才能让Code进入高亮在途窗口。
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: firstDelta }] })}\n\n`))
+          if (targetLiveness && requestNumber > 1) {
+            // 第二次目标请求在首个 delta 后保持打开，Ctrl+C 才会覆盖真实 highlight 在途窗口。
+            // 保持打开的是响应流本身：fixture 不模拟超时，abort 即真实网络层取消。
+            await new Promise<void>((resolve) => {
+              const release = () => resolve()
+              // abort是正常Ctrl+C完成信号，10秒只防止fixture本身阻塞cleanup。
+              request.signal.addEventListener("abort", release, { once: true })
+              setTimeout(release, 10_000)
+            })
+          }
+          if (targetLiveness) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: secondDelta }] })}\n\n`))
+          }
           controller.enqueue(encoder.encode('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'))
           controller.enqueue(encoder.encode("data: [DONE]\n\n"))
           controller.close()
@@ -115,6 +222,13 @@ const env = {
   OPENCODE_DISABLE_LSP_DOWNLOAD: "1",
   OPENCODE_DISABLE_AUTOUPDATE: "1",
   OPENCODE_DISABLE_SHARE: "1",
+  // #567：公开 worker seam 注入 fixture——只有真实 compiled fenced-Code 请求才会发布 ready。
+  ...(targetLiveness
+    ? {
+        OTUI_TREE_SITTER_WORKER_PATH: workerFixturePath,
+        OPENCODE_SMOKE_HIGHLIGHT_READY: highlightReadyPath,
+      }
+    : {}),
   OPENCODE_CONFIG_CONTENT: JSON.stringify({
     $schema: "https://opencode.ai/config.json",
     model: "test/test-model",
@@ -156,6 +270,21 @@ let tuiData: { dispose(): void } | undefined
 // scenario与cleanup错误分槽保存，finally阶段不能通过抛出较晚错误篡改first divergence。
 let scenarioError: unknown
 let cleanupError: unknown
+// 只解引用判定所需字段；完整 envelope 解析由 SDK 层承担，smoke 不重建事件 schema。
+type TargetEvent = {
+  directory?: string
+  project?: string
+  payload?: {
+    type?: string
+    properties?: { sessionID?: string; messageID?: string; partID?: string; field?: string; delta?: string }
+  }
+}
+// targetEvents只保留目标Session的part事件，后续frame断言不接受bootstrap噪声。
+const targetEvents: TargetEvent[] = []
+let targetEventAbort: AbortController | undefined
+let targetEventTask: Promise<void> | undefined
+let targetEventError: unknown
+let targetProjectID: string | undefined
 
 try {
   await Promise.all([
@@ -243,6 +372,52 @@ try {
   const session = await sessionResponse.json()
   if (typeof session?.id !== "string") throw new Error(`Session creation returned no id: ${JSON.stringify(session)}`)
   sessionID = session.id
+  if (targetLiveness) {
+    // Project identity与Session identity分开读取，证明事件过滤没有只靠Session字符串碰巧命中。
+    const projectResponse = await fetch(`http://127.0.0.1:${lock.port}/project/current?directory=${encodeURIComponent(project)}`, {
+      headers,
+      signal: AbortSignal.timeout(10_000),
+    })
+    const currentProject = await projectResponse.json()
+    if (typeof currentProject?.id !== "string") throw new Error("Target Project response did not contain an id")
+    targetProjectID = currentProject.id
+    targetEventAbort = new AbortController()
+    // SSE reader在创建Session后才启动，避免错过目标事件又不订阅全局历史回放。
+    // reader 以独立 promise 运行：scenario 主线不 await，错误经 targetEventError 在断言点 surfaced。
+    targetEventTask = (async () => {
+      const response = await fetch(`http://127.0.0.1:${lock.port}/global/event`, { signal: targetEventAbort!.signal })
+      if (!response.ok || !response.body) throw new Error(`target global event stream failed: ${response.status}`)
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let pending = ""
+      // 读循环只被 abort 或流结束终止；半条记录跨 chunk 保留到下次 read 再解析。
+      while (!targetEventAbort!.signal.aborted) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+        pending += decoder.decode(chunk.value, { stream: true })
+        const records = pending.split("\n\n")
+        // SSE记录按空行分帧，残留半条记录必须保留到下一次read再解析。
+        pending = records.pop() ?? ""
+        for (const record of records) {
+          const line = record.split("\n").find((value) => value.startsWith("data: "))
+          if (!line) continue
+          const event = JSON.parse(line.slice(6)) as TargetEvent
+          // envelope directory/project和payload sessionID必须同时命中，才进入target证据集合。
+          if (
+            event.directory === project &&
+            event.project === targetProjectID &&
+            event.payload?.properties?.sessionID === session.id &&
+            (event.payload?.type === "message.part.delta" || event.payload?.type === "message.part.updated")
+          ) {
+            targetEvents.push(event)
+            // properties后续用于message/part/field级别的SyncProvider日志关联。
+          }
+        }
+      }
+    })().catch((error) => {
+      if (!targetEventAbort?.signal.aborted) targetEventError = error
+    })
+  }
 
   stage = "create Goal"
   console.error(`[opentui-smoke] ${stage}`)
@@ -387,13 +562,127 @@ try {
   if (spinnerGlyphs.some((indicator) => completed.includes(indicator))) {
     throw new Error("compiled TUI retained spinner glyph after model completion")
   }
+  if (targetLiveness) {
+    await waitFor(
+      () => {
+        if (targetEventError) throw targetEventError
+        return targetEvents.length > 0 ? true : undefined
+      },
+      "target Session did not receive a correlated message.part SSE event",
+      10_000,
+    )
+
+    await waitFor(
+      async () => {
+        // persisted Message只证明producer已落库，不能替代随后独立的TUI cell断言。
+        const persistedResponse = await fetch(`http://127.0.0.1:${lock.port}/session/${session.id}/message?limit=100`, {
+          headers,
+          signal: AbortSignal.timeout(2_000),
+        }).catch(() => undefined)
+        if (!persistedResponse?.ok) return
+        const persisted = JSON.stringify(await persistedResponse.json())
+        // reasoning和assistant body必须分别存在，单一Markdown标记不足以证明正文可见。
+        return persisted.includes(thinkingMarker) && persisted.includes(bodyMarker) ? persisted : undefined
+      },
+      "Target Session snapshot did not contain both reasoning and body sentinels",
+      10_000,
+    )
+
+    await waitFor(
+      () => {
+        // Thinking cell从PTY viewport读取，避免scrollback中的历史sentinel伪造当前可见性。
+        const frame = capture(terminal)
+        return frame.includes(thinkingMarker) ? frame : undefined
+      },
+      "target TUI did not render the Thinking sentinel",
+      10_000,
+    )
+    await waitFor(
+      () => {
+        // assistant body单独断言，防止只有reasoning或列表标记被误判为正文渲染。
+        const frame = capture(terminal)
+        return frame.includes(bodyMarker) ? frame : undefined
+      },
+      "target TUI did not render the assistant body sentinel",
+      10_000,
+    )
+
+    // Ctrl+P必须替换目标正文，而不是只改变某个隐藏状态字段。
+    tui.write("\x10")
+    await waitFor(
+      () => {
+        // Commands标题是对话框背景替换的公开cell证据，不接受命令请求返回作为替代。
+        const frame = capture(terminal)
+        return frame.includes("Commands") ? frame : undefined
+      },
+      "target TUI did not replace the body with the command palette",
+      10_000,
+    )
+    // Escape后要求正文回到同一viewport，才能发现对话框残影和背景碎块。
+    tui.write("\x1b")
+    await waitFor(
+      () => {
+        // body恢复与Commands消失必须同时成立，避免残影仍覆盖正文区域。
+        const frame = capture(terminal)
+        if (!frame.includes(bodyMarker) || frame.includes("Commands")) return
+        return frame
+      },
+      "target TUI did not restore the body after closing the command palette",
+      10_000,
+    )
+  }
 
   stage = "stop Session TUI"
   console.error(`[opentui-smoke] ${stage}`)
-  await requestTuiExit(tui, "compiled TUI did not exit after the exit request")
+  // false 时退出路径与既有 normal 场景完全一致——不承担在途取消断言。
+  let shutdownWhileHighlighting = false
+  if (targetLiveness) {
+    const previousEventCount = targetEvents.length
+    // 只接受本次prompt之后的新delta，旧消息不能满足in-flight取消断言。
+    stage = "start in-flight highlight cancellation"
+    console.error(`[opentui-smoke] ${stage}`)
+    // 使用公开 Session prompt seam，避免命令面板关闭后的输入焦点成为第二个不相关变量。
+    const cancelPrompt = await fetch(`http://127.0.0.1:${lock.port}/session/${session.id}/prompt_async`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ parts: [{ type: "text", text: "cancel while highlighting" }] }),
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!cancelPrompt.ok) throw new Error(`target cancellation prompt failed: ${cancelPrompt.status}`)
+    // prompt_async返回只证明producer接受输入，后续target delta才证明它进入TUI consumer链。
+    // 断言取 slice(previousEventCount)：旧消息的 delta 不能充当本次在途证据。
+    await waitFor(
+      () => targetEvents.slice(previousEventCount).find(isPartTimingEvent),
+      "target cancellation request did not publish a delta",
+      10_000,
+    )
+    // waitFor仅以undefined表示未就绪；文件缺席的false必须转换，避免伪造在途高亮证据。
+    await waitFor(
+      async () => (await Bun.file(highlightReadyPath).exists()) ? true : undefined,
+      "target cancellation highlight worker did not publish pending readiness",
+      10_000,
+    )
+    shutdownWhileHighlighting = true
+    // requestTuiExit随后发送真实Ctrl+C，shutdown日志必须覆盖这次在途请求。
+    // ready 文件不是遥测：它是 worker 收到目标请求的唯一可观察事实。
+  }
+  await requestTuiExit(tui, "compiled TUI did not exit after the exit request", shutdownWhileHighlighting)
   tuiData?.dispose()
   tuiData = undefined
   tui = undefined
+  if (targetLiveness) {
+    const shutdownLog = await readIsolatedLogs(root)
+    // 这些字符串只统计预期destroy取消噪声，不把live worker故障伪装成成功。
+    // 零容忍是刻意选择：任何一条都意味着在途请求未被安静收敛。
+    const shutdownPatterns = [
+      "TreeSitter client destroyed",
+      "Code highlighting failed",
+      "Code streaming highlight failed",
+    ]
+    const warningCount = shutdownPatterns.reduce((total, pattern) => total + count(shutdownLog, pattern), 0)
+    // zero是in-flight cancellation的绝对门槛，不能用“少于某个数量”替代。
+    if (warningCount !== 0) throw new Error(`Target TUI shutdown emitted ${warningCount} expected-cancellation warnings`)
+  }
 
   stage = "stop daemon"
   console.error(`[opentui-smoke] ${stage}`)
@@ -412,10 +701,13 @@ try {
   console.log(
     JSON.stringify({
       binary,
+      // scenario/targetEventCount 进入 artifact JSON，CI 可区分两种运行的证据面。
+      scenario,
       sessionID: session.id,
       sourceCount: count(objective, "查"),
       renderedCount: count(initial, "查"),
       modelRequests,
+      targetEventCount: targetEvents.length,
     }),
   )
 } catch (error) {
@@ -481,6 +773,11 @@ try {
 } finally {
   // finally无条件释放terminal、fixture、PTY和daemon；成功路径也不能依赖进程退出时的OS清理。
   // #495：某个资源清理失败后仍继续关闭其余owner；最终只报告首个cleanup错误且不覆盖scenario first divergence。
+  // #567：target SSE reader 先 abort 并等待退出，防止后续 renderer 销毁后 reader 仍在写证据集合。
+  await cleanupStep(async () => {
+    targetEventAbort?.abort()
+    await targetEventTask
+  })
   for (const subscription of [launcherData, launcherExited, tuiData, terminalData]) {
     await cleanupStep(() => subscription?.dispose())
   }
@@ -550,6 +847,80 @@ function count(value: string, needle: string) {
   return value.split(needle).length - 1
 }
 
+// #567：协议完整的 worker fixture——对含哨兵的 STREAMING/ONESHOT 请求写 ready 文件并扣留终态响应，
+// 其余请求正常完成，保证普通高亮路径不被 fixture 自身污染。
+function createPendingWorkerSource(readyPath: string) {
+  return `
+// 哨兵命中后 held 永久置位：一次扣留即可覆盖后续所有目标请求，避免重复写 ready。
+const readyPath = ${JSON.stringify(readyPath)}
+const sentinel = "CANCEL-HIGHLIGHT-SENTINEL"
+let held = false
+
+const post = (message) => globalThis.postMessage(message)
+const successfulHighlights = (message) => ({
+  type: "HIGHLIGHT_RESPONSE",
+  bufferId: message.bufferId,
+  version: message.version,
+  messageId: message.messageId,
+  highlights: [],
+})
+
+globalThis.onmessage = async (event) => {
+  const message = event.data
+  if (message.type === "INIT") return post({ type: "INIT_RESPONSE" })
+  if (message.type === "ADD_FILETYPE_PARSER") return
+  if (message.type === "PRELOAD_PARSER") return post({ type: "PRELOAD_PARSER_RESPONSE", messageId: message.messageId, hasParser: true })
+  if (message.type === "INITIALIZE_PARSER") {
+    return post({ type: "PARSER_INIT_RESPONSE", bufferId: message.bufferId, messageId: message.messageId, hasParser: true })
+  }
+  if (message.type === "HANDLE_EDITS" || message.type === "RESET_BUFFER") return post(successfulHighlights(message))
+  if (message.type === "STREAMING_UPDATE") {
+    if (!held && message.content.includes(sentinel)) {
+      held = true
+      await Bun.write(readyPath, "ready\\n")
+      return
+    }
+    return post({
+      type: "STREAMING_UPDATE_RESPONSE",
+      bufferId: message.bufferId,
+      version: message.version,
+      messageId: message.messageId,
+      changedStart: 0,
+      tailStart: 0,
+      highlights: [],
+    })
+  }
+  if (message.type === "ONESHOT_HIGHLIGHT") {
+    if (!held && message.content.includes(sentinel)) {
+      held = true
+      await Bun.write(readyPath, "ready\\n")
+      return
+    }
+    return post({ type: "ONESHOT_HIGHLIGHT_RESPONSE", messageId: message.messageId, hasParser: true, highlights: [] })
+  }
+  if (message.type === "DISPOSE_BUFFER") return post({ type: "BUFFER_DISPOSED", bufferId: message.bufferId, messageId: message.messageId })
+  if (message.type === "UPDATE_DATA_PATH") return post({ type: "UPDATE_DATA_PATH_RESPONSE", messageId: message.messageId })
+  if (message.type === "CLEAR_CACHE") return post({ type: "CLEAR_CACHE_RESPONSE", messageId: message.messageId })
+  if (message.type === "GET_PERFORMANCE") {
+    return post({ type: "PERFORMANCE_RESPONSE", messageId: message.messageId, performance: { averageParseTime: 0, parseTimes: [], averageQueryTime: 0, queryTimes: [] } })
+  }
+  return post({ type: "ERROR", messageId: message.messageId, error: \`Unknown smoke worker request: \${message.type}\` })
+}
+`
+}
+
+async function readIsolatedLogs(root: string) {
+  // 只扫隔离 root 内的日志文件；宿主全局日志不进入 shutdown 断言语料。
+  const files = await Array.fromAsync(new Bun.Glob("**/*.log").scan({ cwd: root, onlyFiles: true }))
+  return (await Promise.all(files.map((file) => Bun.file(path.join(root, file)).text().catch(() => "")))).join("\n")
+}
+
+function isPartTimingEvent(event: TargetEvent) {
+  const properties = event.payload?.properties
+  // 只有具备完整身份的delta能证明目标prompt已进入当前TUI事件消费者。
+  return Boolean(properties?.sessionID && properties.messageID && properties.partID && properties.field)
+}
+
 async function waitFor<T>(read: () => T | undefined | Promise<T | undefined>, message: string, timeout = 10_000) {
   // 轮询只接受显式非undefined readiness，false或空frame不会被truthy转换误判。
   // 每个调用方提供行为级错误信息，使CI artifact能标识准确失败阶段。
@@ -572,7 +943,7 @@ function alive(pid: number) {
   }
 }
 
-async function requestTuiExit(proc: Proc, message: string) {
+async function requestTuiExit(proc: Proc, message: string, interrupt = false) {
   // 调用方已观察公开input-ready frame，此函数只负责subscribe-before-action和同一进程退出，不补发输入。
   const exited = Promise.withResolvers<void>()
   // 先订阅再触发退出，避免快速renderer cleanup发生在onExit注册前而被误报成超时。
@@ -582,8 +953,8 @@ async function requestTuiExit(proc: Proc, message: string) {
       // Unix直接向真实child PID发送SIGINT，走ExitProvider的production signal handler；adapter.kill会忽略传入signal。
       process.kill(proc.pid, "SIGINT")
     } else {
-      // Ctrl+C会广播给共享console中的daemon；input-ready后使用同步内建命令，只关闭当前TUI且不依赖autocomplete。
-      proc.write("exit\r")
+      // #567：target-liveness 必须覆盖用户现场的 Ctrl+C；普通 smoke 仍用公开 exit 命令避免广播 bootstrap daemon。
+      proc.write(interrupt ? "\x03" : "exit\r")
     }
     await Promise.race([
       exited.promise,
