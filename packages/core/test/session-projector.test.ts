@@ -21,7 +21,7 @@ import { SessionMessageUpdater } from "@opencode-ai/core/session/message-updater
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionInput } from "@opencode-ai/core/session/input"
-import { ColdStorageTable, SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { ColdStorageTable, PartTable, SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { searchCondition } from "@opencode-ai/core/session/search"
 import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
@@ -233,6 +233,46 @@ describe("SessionProjector", () => {
       // 两个不同entry已包含在一包中；独立期望来自真实metadata，不复制F4公式。
       yield* Database.withSync({ db, sync: db.sync }, sync => {
         expect(ColdStorage.status(sync)).toMatchObject({ rawBytes: packPayload.raw_bytes, compressedBytes: packPayload.compressed_bytes, sharedBytes: 0 })
+      })
+      // 同一内存DB同时承载Native冷pack和历史热Tool，修复只经真实显式维护入口。
+      const events = yield* EventV2.Service
+      const legacyID = SessionV1.MessageID.make("msg_568_input")
+      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: {
+        id: legacyID, sessionID, role: "assistant", parentID: SessionV1.MessageID.make("msg_568_parent"), agent: "build", mode: "build", modelID: model.id, providerID: model.providerID,
+        path: { cwd: "/project", root: "/project" }, time: { created: 0, completed: 1 }, cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      } })
+      for (const [index, input] of ["{bad json", '{"command":"ls"}', []].entries()) {
+        yield* db.insert(PartTable).values({
+          id: SessionV1.PartID.make(`prt_568_${index}`), message_id: legacyID, session_id: sessionID,
+          time_created: 1, time_updated: 1,
+          data: { type: "tool", tool: "invalid", callID: `call_568_${index}`,
+            state: index === 1
+              ? { status: "completed", input, output: "", title: "historical input", metadata: {}, time: { start: 0, end: 1 } }
+              : { status: "error", input, error: "Invalid input", time: { start: 0, end: 1 } } },
+        }).run()
+      }
+      const hotBefore = yield* db.select().from(PartTable).where(eq(PartTable.message_id, legacyID)).orderBy(PartTable.id).all()
+      const coldBefore = yield* db.select().from(SessionMessageTable).orderBy(SessionMessageTable.id).all()
+      const payloadBefore = yield* db.select().from(ColdStorageTable).all()
+      // 只读报告不吞损坏；坏行保持原样，默认status仍明确失败。
+      yield* Database.withSync({ db, sync: db.sync }, sync => {
+        expect(ColdStorage.verify(sync, { repair: false }).toolInputFixed).toBe(0)
+        expect(() => ColdStorage.status(sync)).toThrow("Stored tool input is invalid")
+        expect(sync.select().from(PartTable).where(eq(PartTable.message_id, legacyID)).orderBy(PartTable.id).all()).toEqual(hotBefore)
+      })
+      const prepared = ColdStorage.prepareMaintenance(ColdStorage.parseMaintenanceRequest({ operation: "verify", repairToolInput: true, batchSize: 50 }))
+      if (prepared.type !== "task") return yield* Effect.die("Missing explicit input repair task")
+      expect(ColdStorage.parseMaintenanceTask(prepared.task).args).toMatchObject({ operation: "verify", repair: false, repairToolInput: true })
+      expect(yield* Effect.promise(() => ColdStorage.maintain(db.sync, prepared, runtime))).toMatchObject({ type: "task", task: { status: "completed" } })
+      const fixed = yield* db.select().from(PartTable).where(eq(PartTable.message_id, legacyID)).orderBy(PartTable.id).all()
+      expect(fixed.map(row => row.data.type === "tool" ? row.data.state.input : undefined)).toEqual([{}, { command: "ls" }, {}])
+      expect(fixed.map(row => row.time_updated)).toEqual([1, 1, 1])
+      // 写授权不改变Native冷数据或共享payload，再次修复必须幂等。
+      expect(yield* db.select().from(SessionMessageTable).orderBy(SessionMessageTable.id).all()).toEqual(coldBefore)
+      expect(yield* db.select().from(ColdStorageTable).all()).toEqual(payloadBefore)
+      yield* Database.withSync({ db, sync: db.sync }, sync => {
+        expect(ColdStorage.verify(sync, { repair: false, repairToolInput: true }).toolInputFixed).toBe(0)
       })
       const bad = packed.find(row => row.id === hiddenID)
       if (!bad?.cold_key) return yield* Effect.die("Native pack key is missing")

@@ -132,6 +132,15 @@ test("binary failure emits no success event", async () => {
   expect(retryable.published.filter(event => event.type === "session.next.tool.failed.1")).toHaveLength(1)
   await Effect.runPromise(retryable.publisher.failUnsettledTools("repeated cleanup", false, true))
   expect(retryable.published.filter(event => event.type === "session.next.tool.failed.1")).toHaveLength(1)
+  // 真正Native publisher保留坏参数原值，但持久Called事件的input必须仍为对象。
+  for (const input of ["{bad json", []]) {
+    const malformed = capture()
+    await Effect.runPromise(malformed.publisher.publish(LLMEvent.toolCall({ ...call, id: "malformed", input })))
+    await Effect.runPromise(malformed.publisher.publish(LLMEvent.toolResult({ id: "malformed", name: call.name, result: { type: "error", value: "Invalid input" } })))
+    const called = malformed.published.find(event => event.type === "session.next.tool.called.1")
+    expect(called?.data).toMatchObject({ input: { value: input } })
+    expect(malformed.published.some(event => event.type === "session.next.tool.failed.1")).toBe(true)
+  }
 })
 
 test("old success event data containing result still decodes", () => {

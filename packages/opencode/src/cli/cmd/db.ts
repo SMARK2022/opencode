@@ -221,7 +221,8 @@ function renderTask(task: ColdStorage.MaintenanceTask) {
           : UI.Style.TEXT_HIGHLIGHT_BOLD
   const symbol = task.status === "completed" ? "✓" : task.status === "failed" ? "×" : task.status === "interrupted" ? "!" : "●"
   const detail =
-    task.args.operation === "verify" && task.args.repair
+    // #568：tool-input 修复也是写事务，task view 必须与 refcount repair 同样显式标记。
+    task.args.operation === "verify" && (task.args.repair || task.args.repairToolInput === true)
       ? "verify (repair)"
       : task.args.operation === "cleanup" && task.args.delete
         ? "cleanup (delete)"
@@ -795,14 +796,26 @@ const ResumeCommand = effectCmd({
 })
 
 // verify 默认只读完整性报告；--repair 才生成可恢复 task，并且只修正可证明的 ref_count。
+// #568：--repair-tool-input 独立授权热 Tool 行的 input 形状修复，同样进入 task-backed 写事务。
 const VerifyCommand = effectCmd({
   command: "verify",
   describe: "verify cold payload hashes and reference counts",
   instance: false,
-  builder: (yargs: Argv) => yargs.option("repair", { type: "boolean", default: false }).option("batch-size", { type: "number", default: ColdStorage.DEFAULT_BATCH_SIZE }),
+  builder: (yargs: Argv) =>
+    yargs
+      .option("repair", { type: "boolean", default: false })
+      .option("repair-tool-input", { type: "boolean", default: false })
+      .option("batch-size", { type: "number", default: ColdStorage.DEFAULT_BATCH_SIZE }),
   handler: Effect.fn("Cli.db.verify")(function* (args) {
     const db = yield* maintenanceDB()
-    yield* Effect.promise(() => executeMaintenance(db, { operation: "verify", repair: args.repair, batchSize: args["batch-size"] }))
+    yield* Effect.promise(() =>
+      executeMaintenance(db, {
+        operation: "verify",
+        repair: args.repair,
+        repairToolInput: args["repair-tool-input"],
+        batchSize: args["batch-size"],
+      }),
+    )
   }),
 })
 

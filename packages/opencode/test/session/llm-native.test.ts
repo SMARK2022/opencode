@@ -571,6 +571,8 @@ describe("session.llm-native.request", () => {
         stream: (request) => {
           // 实际 native 交付边界不得把配置身份替换为插件预设 UA。
           expect(new Headers(request.model.route.defaults.headers).get("user-agent")).toBe("configured-agent")
+          // 执行表保留内部repair，而广告仅排除invalid，不能连带裁掉其他内部协议工具。
+          expect(request.tools.map((tool) => tool.name)).toEqual(["lookup", "StructuredOutput", "_noop"])
           return Stream.fromIterable([
             LLMEvent.toolCall({ id: "call-1", name: "lookup", input: {} }),
             LLMEvent.toolCall({ id: "call-2", name: "lookup", input: {} }),
@@ -585,7 +587,7 @@ describe("session.llm-native.request", () => {
         auth: undefined,
         llmClient,
         messages: [],
-        tools: { lookup },
+        tools: { lookup, invalid: lookup, StructuredOutput: lookup, _noop: lookup },
         headers: { "user-agent": "codex-tui" },
         abort: new AbortController().signal,
       })
