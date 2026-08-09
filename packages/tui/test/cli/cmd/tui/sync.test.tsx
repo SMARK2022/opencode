@@ -532,6 +532,49 @@ describe("tui sync", () => {
       app.renderer.destroy()
     }
   })
+  // #570：daemon 事件携带 Session 实际 Project（proj_session_owner）、TUI route 固定 ses_1 时，
+  // message.updated/part.updated 必须穿过 useEvent admission 进入同一活动 Session 投影；
+  // 验证渲染数据源（sync.data）而非 callback 到达。route 固定使失败时可区分 admission 与 reducer 问题。
+  test("delivers cross-project session events into the active session projection", async () => {
+    await using tmp = await tmpdir()
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const { app, emit, sync, route } = await mount(
+      () => undefined,
+      tmp.path,
+      { type: "session", sessionID: "ses_1" },
+    )
+    try {
+      const foreignProject = "proj_session_owner"
+      const info = assistantMessage()
+      const part = textPart("part_cross", "cross")
+      emit({
+        directory: "/tmp/other",
+        project: foreignProject,
+        payload: { id: "evt_cross_message", type: "message.updated", properties: { sessionID: info.sessionID, info } },
+      })
+      await wait(() => sync.data.message.ses_1?.[0]?.id === info.id)
+      emit({
+        directory: "/tmp/other",
+        project: foreignProject,
+        payload: { id: "evt_cross_part", type: "message.part.updated", properties: { sessionID: part.sessionID, part, time: 1 } },
+      })
+      await wait(() => sync.data.part[part.messageID]?.[0]?.id === part.id)
+      expect(sync.data.message.ses_1?.[0]).toMatchObject(info)
+      expect(sync.data.part[part.messageID]?.[0]).toMatchObject(part)
+      // route切换必须重新判定Session资格，不能把初始会话缓存进订阅。
+      route.navigate({ type: "session", sessionID: "ses_other" })
+      const other = { ...info, id: "msg_other", sessionID: "ses_other" }
+      emit({ directory, project: foreignProject, payload: { id: "evt_cross_other", type: "message.updated", properties: { sessionID: other.sessionID, info: other } } })
+      await wait(() => sync.data.message.ses_other?.[0]?.id === other.id)
+      const rejected = { ...info, id: "msg_rejected", sessionID: "ses_rejected" }
+      emit({ directory, project: foreignProject, payload: { id: "evt_cross_rejected", type: "message.updated", properties: { sessionID: rejected.sessionID, info: rejected } } })
+      emit(branchEvent("route-switch-processed"))
+      await wait(() => sync.data.vcs?.branch === "route-switch-processed")
+      expect(sync.data.message.ses_rejected).toBeUndefined()
+    } finally {
+      app.renderer.destroy()
+    }
+  })
 })
 
 function assistantMessage(): AssistantMessage {

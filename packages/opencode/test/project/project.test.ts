@@ -5,7 +5,7 @@ import path from "path"
 import { tmpdirScoped } from "../fixture/fixture"
 import { GlobalBus } from "../../src/bus/global"
 import { Database } from "@opencode-ai/core/database/database"
-import { ProjectTable } from "@opencode-ai/core/project/sql"
+import { ProjectDirectoryTable, ProjectTable } from "@opencode-ai/core/project/sql"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { WorkspaceTable } from "@opencode-ai/core/control-plane/workspace.sql"
 import { eq } from "drizzle-orm"
@@ -20,11 +20,93 @@ import { testEffect } from "../lib/effect"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { AppProcess } from "@opencode-ai/core/process"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { AbsolutePath } from "@opencode-ai/core/schema"
 
 const encoder = new TextEncoder()
 
 const projectTestNode = LayerNode.group([Project.node, Database.node, CrossSpawnSpawner.node])
 const it = testEffect(AppNodeBuilder.build(projectTestNode))
+
+const identityState = { remote: false, cache: new Map<string, string>() }
+const identityIt = testEffect(AppNodeBuilder.build(projectTestNode, [
+  [Database.node, Database.layerFromPath(":memory:")],
+  [RuntimeFlags.node, RuntimeFlags.layer({ experimentalIconDiscovery: false })],
+  // 只替换文件/进程边界；Core/Git解析、V1持久化和合法迁移均执行真实实现。
+  [FSUtil.node, Layer.effect(FSUtil.Service, Effect.gen(function* () {
+    const fs = yield* FSUtil.Service
+    return FSUtil.Service.of({ ...fs,
+      up: ({ start }) => Effect.succeed(path.basename(start) === "plain" ? [] : [AbsolutePath.make(path.join(start, ".git"))]),
+      readFileString: file => Effect.succeed(identityState.cache.get(file) ?? ""),
+      writeFileString: (file, value) => Effect.sync(() => { identityState.cache.set(file, value) }),
+      exists: () => Effect.succeed(true),
+    })
+  })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))],
+  [AppProcess.node, Layer.mock(AppProcess.Service, { run: command => Effect.sync(() => {
+    if (command._tag !== "StandardCommand" || command.command !== "git") throw new Error("Expected Git argv")
+    const cwd = String(command.options.cwd)
+    const name = path.basename(cwd)
+    const args = command.args.join(" ")
+    const text = args === "rev-parse --show-toplevel" ? cwd
+      : args === "rev-parse --git-dir" ? ".git"
+      : args === "rev-parse --git-common-dir" ? (name === "linked" ? path.resolve("identity-fixture", "first", ".git") : ".git")
+      : args === "remote get-url origin" ? (identityState.remote ? "git@github.com:owner/repo.git" : "")
+      : args === "rev-list --max-parents=0 HEAD" ? (name === "empty" ? "" : (name === "second" ? "b" : "a").repeat(40))
+      : undefined
+    if (text === undefined) throw new Error(`Unexpected Git command: ${args}`)
+    return { command: "git", exitCode: 0, stdout: Buffer.from(text), stderr: Buffer.alloc(0), stdoutTruncated: false, stderrTruncated: false }
+  }) })],
+]))
+
+identityIt.effect("isolates copied cache corrections while preserving legitimate project migration", () => Effect.gen(function* () {
+  identityState.cache.clear()
+  identityState.remote = false
+  yield* Effect.addFinalizer(() => Effect.sync(() => { identityState.cache.clear(); identityState.remote = false }))
+  const projects = yield* Project.Service
+  const db = (yield* Database.Service).db
+  const resolve = (name: string) => projects.fromDirectory(path.resolve("identity-fixture", name))
+  const first = yield* resolve("first")
+  const firstID = ProjectV2.ID.make("a".repeat(40))
+  expect(first.project.id).toBe(firstID)
+  const sessionID = SessionID.make("ses_570_existing")
+  const workspaceID = WorkspaceV2.ID.ascending()
+  yield* db.insert(SessionTable).values({ id: sessionID, project_id: firstID, slug: "existing",
+    directory: first.sandbox, title: "existing", version: "test", time_created: 1, time_updated: 2 }).run()
+  yield* db.insert(WorkspaceTable).values({ id: workspaceID, type: "local", name: "existing", project_id: firstID }).run()
+  const oldProject = yield* db.select().from(ProjectTable).where(eq(ProjectTable.id, firstID)).get()
+  const oldSession = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get()
+  const oldWorkspace = yield* db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get()
+  const oldDirectories = yield* db.select().from(ProjectDirectoryTable).where(eq(ProjectDirectoryTable.project_id, firstID)).all()
+  // 第二仓库故意复制第一仓库cache；必须创建自己的root身份，原持久行逐字段保持。
+  const secondDirectory = path.resolve("identity-fixture", "second")
+  identityState.cache.set(path.join(secondDirectory, ".git", "opencode"), firstID)
+  const second = yield* resolve("second")
+  expect(second.project.id).toBe(ProjectV2.ID.make("b".repeat(40)))
+  expect(second.project.worktree).toBe(secondDirectory)
+  expect(yield* db.select().from(ProjectTable).where(eq(ProjectTable.id, firstID)).get()).toEqual(oldProject)
+  expect(yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get()).toEqual(oldSession)
+  expect(yield* db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get()).toEqual(oldWorkspace)
+  expect(yield* db.select().from(ProjectDirectoryTable).where(eq(ProjectDirectoryTable.project_id, firstID)).all()).toEqual(oldDirectories)
+  // 空历史与非仓库也不能借cache把原项目迁到global；clone/worktree仍共享真实root。
+  for (const name of ["empty", "plain"]) {
+    identityState.cache.set(path.resolve("identity-fixture", name, ".git", "opencode"), firstID)
+    const resolved = yield* resolve(name)
+    expect(resolved.project.id).toBe(ProjectV2.ID.global)
+    expect(yield* db.select().from(ProjectTable).where(eq(ProjectTable.id, firstID)).get()).toEqual(oldProject)
+  }
+  expect((yield* resolve("clone")).project.id).toBe(firstID)
+  expect((yield* resolve("linked")).project.id).toBe(firstID)
+  // 同一仓库获得remote后的原合法迁移必须继续移动Session/Workspace，而非全面禁用迁移。
+  identityState.remote = true
+  const remoteID = remoteProjectID("github.com/owner/repo")
+  const migrated = yield* resolve("first")
+  expect(migrated.project.id).toBe(remoteID)
+  expect(migrated.project.worktree).toBe(first.project.worktree)
+  expect(yield* db.select().from(ProjectTable).where(eq(ProjectTable.id, firstID)).get()).toBeUndefined()
+  expect((yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get())?.project_id).toBe(remoteID)
+  expect((yield* db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get())?.project_id).toBe(remoteID)
+}))
 
 function remoteProjectID(remote: string) {
   return ProjectV2.ID.make(Hash.fast(`git-remote:${remote}`))

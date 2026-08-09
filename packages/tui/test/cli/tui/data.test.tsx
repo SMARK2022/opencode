@@ -7,10 +7,11 @@ import { createSignal, onMount, Show, type ParentProps } from "solid-js"
 import { ProjectProvider, useProject } from "../../../src/context/project"
 import { SDKProvider } from "../../../src/context/sdk"
 import { DataProvider, useData } from "../../../src/context/data"
+import { RouteProvider, type Route } from "../../../src/context/route"
 import { createEventSource, createFetch, directory, json } from "../../fixture/tui-sdk"
 import { TestTuiContexts } from "../../fixture/tui-environment"
 
-function InitializedDataProvider(props: ParentProps) {
+function InitializedDataProvider(props: ParentProps<{ initialRoute?: Route }>) {
   const project = useProject()
   const [ready, setReady] = createSignal(false)
   onMount(async () => {
@@ -19,7 +20,8 @@ function InitializedDataProvider(props: ParentProps) {
     setReady(true)
   })
   // 在真实 provider 外等待初始化，不放宽 shouldDeliverScopedEvent 的隔离条件。
-  return <Show when={ready()}><DataProvider>{props.children}</DataProvider></Show>
+  // 与生产App顺序一致，Route在Data外层；测试不依赖可选context或生产fallback。
+  return <RouteProvider initialRoute={props.initialRoute}><Show when={ready()}><DataProvider>{props.children}</DataProvider></Show></RouteProvider>
 }
 
 // 目录端点属于 project.sync 的真实依赖，fixture 不能遗漏后再绕过初始化。
@@ -38,8 +40,8 @@ function global(payload: Event): GlobalEvent {
   return { directory, project: "proj_test", payload }
 }
 
-function emitEvent(events: ReturnType<typeof createEventSource>, payload: Event) {
-  events.emit(global(payload))
+function emitEvent(events: ReturnType<typeof createEventSource>, payload: Event, project = "proj_test") {
+  events.emit({ ...global(payload), project })
 }
 
 test("refreshes resources into reactive getters", async () => {
@@ -470,7 +472,7 @@ test("projects live context updates with their message ID", async () => {
     <TestTuiContexts>
       <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
         <ProjectProvider>
-          <InitializedDataProvider>
+          <InitializedDataProvider initialRoute={{ type: "session", sessionID: "session-1" }}>
             <Probe />
           </InitializedDataProvider>
         </ProjectProvider>
@@ -489,7 +491,7 @@ test("projects live context updates with their message ID", async () => {
         timestamp: 1,
         text: "Updated context",
       },
-    })
+    }, "proj_session_owner")
 
     await wait(() => sync.session.message.list("session-1")?.length === 1)
     expect(sync.session.message.list("session-1")?.[0]).toMatchObject({

@@ -13,6 +13,12 @@ describe("shouldDeliverScopedEvent", () => {
     // #165：project 不匹配则丢弃
     expect(shouldDeliverScopedEvent({ directory: "/x", project: "proj-a" }, "proj-a")).toBe(true)
     expect(shouldDeliverScopedEvent({ directory: "/x", project: "proj-b" }, "proj-a")).toBe(false)
+    // 仅活动Session突破Project隔离；切换活动身份后必须重新判定，无Session事件仍隔离。
+    expect(shouldDeliverScopedEvent({ project: "proj-b", sessionID: "ses-a" }, "proj-a", "ses-a")).toBe(true)
+    expect(shouldDeliverScopedEvent({ project: "proj-b", sessionID: "ses-a" }, "proj-a", "ses-b")).toBe(false)
+    expect(shouldDeliverScopedEvent({ project: "proj-b", sessionID: "ses-b" }, "proj-a", "ses-b")).toBe(true)
+    expect(shouldDeliverScopedEvent({ project: "proj-b" }, "proj-a", "ses-a")).toBe(false)
+    expect(shouldDeliverScopedEvent({ project: "proj-b" }, "proj-a", undefined)).toBe(false)
   })
 
   test("delivers unscoped events once (no double-path)", () => {
