@@ -8,6 +8,7 @@ import { KVProvider, useKV } from "../../../../src/context/kv"
 import { ProjectProvider, useProject } from "../../../../src/context/project"
 import { SDKProvider } from "../../../../src/context/sdk"
 import { SyncProvider, useSync } from "../../../../src/context/sync"
+import { RouteProvider, useRoute, type Route } from "../../../../src/context/route"
 import { PermissionProvider } from "../../../../src/context/permission"
 import { ExitProvider } from "../../../../src/context/exit"
 import { createEventSource, createFetch, type FetchHandler, directory } from "../../../fixture/tui-sdk"
@@ -23,25 +24,27 @@ export async function wait(fn: () => boolean, timeout = 2000) {
   }
 }
 
-type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; sync: ReturnType<typeof useSync> }
+type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; sync: ReturnType<typeof useSync>; route: ReturnType<typeof useRoute> }
 
-export async function mount(override?: FetchHandler, state?: string) {
+export async function mount(override?: FetchHandler, state?: string, initialRoute?: Route) {
   const calls = createFetch(override)
   const events = createEventSource()
   let sync!: ReturnType<typeof useSync>
   let project!: ReturnType<typeof useProject>
   let kv!: ReturnType<typeof useKV>
+  let route!: ReturnType<typeof useRoute>
   let done!: () => void
   const ready = new Promise<void>((resolve) => {
     done = resolve
   })
 
   function Probe() {
-    const ctx: Ctx = { kv: useKV(), project: useProject(), sync: useSync() }
+    const ctx: Ctx = { kv: useKV(), project: useProject(), sync: useSync(), route: useRoute() }
     onMount(() => {
       sync = ctx.sync
       project = ctx.project
       kv = ctx.kv
+      route = ctx.route
       done()
     })
     return <box />
@@ -53,15 +56,18 @@ export async function mount(override?: FetchHandler, state?: string) {
       <ArgsProvider>
         <KVProvider>
           <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
-            <PermissionProvider>
-              <ProjectProvider>
-                <ExitProvider exit={() => {}}>
-                  <SyncProvider>
-                    <Probe />
-                  </SyncProvider>
-                </ExitProvider>
-              </ProjectProvider>
-            </PermissionProvider>
+            {/* 活动Session资格由现有Route提供，fixture与生产同序，不添加可选context回退。 */}
+            <RouteProvider initialRoute={initialRoute}>
+              <PermissionProvider>
+                <ProjectProvider>
+                  <ExitProvider exit={() => {}}>
+                    <SyncProvider>
+                      <Probe />
+                    </SyncProvider>
+                  </ExitProvider>
+                </ProjectProvider>
+              </PermissionProvider>
+            </RouteProvider>
           </SDKProvider>
         </KVProvider>
       </ArgsProvider>
@@ -89,6 +95,6 @@ export async function mount(override?: FetchHandler, state?: string) {
 
   await ready
   await wait(() => sync.status === "complete")
-  return { app, emit: events.emit, kv, project, sync, session: calls.session }
+  return { app, emit: events.emit, kv, project, sync, route, session: calls.session }
 }
 

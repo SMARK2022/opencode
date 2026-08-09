@@ -112,9 +112,11 @@ const layer = Layer.effect(
       if (!repo) return { id: ID.global, directory: AbsolutePath.make(path.parse(input).root), vcs: undefined }
 
       const previous = yield* cached(repo.commonDirectory)
-      const id = (yield* remote(repo)) ?? previous ?? (yield* root(repo))
+      // 本地root纠正不授予复制cache迁移权；合法root到remote的上游迁移仍保留previous。
+      const origin = yield* remote(repo)
+      const id = origin ?? (yield* root(repo))
       return {
-        previous,
+        previous: origin ? previous : undefined,
         id: id ?? ID.global,
         directory: repo.worktree,
         vcs: { type: "git" as const, store: repo.commonDirectory },
