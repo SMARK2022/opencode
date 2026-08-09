@@ -231,6 +231,33 @@ function textDeltaEvent(id: string, delta: string, partID = "part_text"): Global
 }
 
 describe("tui sync", () => {
+  test("projects active Session Message and Part events across Projects", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const message = assistantMessage()
+    const part = textPart("part_cross_project", "streamed")
+    const { app, emit, sync } = await mount(undefined, { type: "session", sessionID: "ses_1" })
+
+    try {
+      // daemon 事件携带 Session 实际 Project，而 TUI 可能从另一个启动 Project 打开该 Session。
+      // 两类事件都必须穿过 useEvent 后进入同一个活动 Session projection，不能只验证 callback 到达。
+      // message.updated 验证消息索引，part.updated 验证消息下的 part 索引；两者共同覆盖渲染数据源。
+      // route 固定为 ses_1，故测试失败时可以区分 event admission 与 projection reducer 问题。
+      emit({ ...messageEvent(message), project: "proj_session_owner" })
+      emit({ ...partEvent(part), project: "proj_session_owner" })
+      await wait(() => sync.data.message.ses_1?.some((item) => item.id === message.id))
+      await wait(() => sync.data.part[message.id]?.some((item) => item.id === part.id))
+
+      expect(sync.data.message.ses_1).toContainEqual(message)
+      expect(sync.data.part[message.id]).toContainEqual(part)
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
   test("projects LSP status through the active Session route and rejects a late response", async () => {
     const [sessionA, sessionB] = [{ id: "ses_lsp_a", directory: "/workspace/a", workspaceID: "wrk_a", time: { created: 1, updated: 1 } }, { id: "ses_lsp_b", directory: "/workspace/b", workspaceID: "wrk_b", time: { created: 1, updated: 1 } }]
     const requests: Array<{ directory: string | null; workspace: string | null }> = []

@@ -182,14 +182,6 @@ export const layer: Layer.Layer<
 
     const scope = yield* Scope.Scope
 
-    const readCachedProjectId = Effect.fnUntraced(function* (dir: string) {
-      return yield* fs.readFileString(pathSvc.join(dir, "opencode")).pipe(
-        Effect.map((x) => x.trim()),
-        Effect.map((x) => ProjectID.make(x)),
-        Effect.catch(() => Effect.void),
-      )
-    })
-
     const fromDirectory = Effect.fn("Project.fromDirectory")(function* (directory: string) {
       log.info("fromDirectory", { directory })
 
@@ -211,21 +203,21 @@ export const layer: Layer.Layer<
 
         let sandbox = pathSvc.dirname(dotgit)
         const gitBinary = yield* Effect.sync(() => which("git"))
-        let id = yield* readCachedProjectId(dotgit)
 
         if (!gitBinary) {
           return {
-            id: id ?? ProjectID.global,
+            id: ProjectID.global,
             worktree: sandbox,
             sandbox,
             vcs: fakeVcs,
           }
         }
 
-        const commonDir = yield* git(["rev-parse", "--git-common-dir"], { cwd: sandbox })
+        // 绝对 common-dir 防止 linked worktree 的相对 .git 被解析回 sandbox 自身。
+        const commonDir = yield* git(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: sandbox })
         if (commonDir.code !== 0) {
           return {
-            id: id ?? ProjectID.global,
+            id: ProjectID.global,
             worktree: sandbox,
             sandbox,
             vcs: fakeVcs,
@@ -234,26 +226,19 @@ export const layer: Layer.Layer<
         const common = resolveGitPath(sandbox, commonDir.text.trim())
         const bareCheck = yield* git(["config", "--bool", "core.bare"], { cwd: sandbox })
         const isBareRepo = bareCheck.code === 0 && bareCheck.text.trim() === "true"
+        // common-dir 的父目录是普通仓库 root；bare 仓库则直接以 common-dir 作为 worktree。
         const worktree = common === sandbox ? sandbox : isBareRepo ? common : pathSvc.dirname(common)
 
-        if (id == null) {
-          id = yield* readCachedProjectId(common)
-        }
+        // 当前 Git 历史是 Project identity 的唯一事实源；可复制 cache 不能覆盖目录实际所属仓库。
+        const revList = yield* git(["rev-list", "--max-parents=0", "HEAD"], { cwd: sandbox })
+        const roots = revList.text
+          .split("\n")
+          .filter(Boolean)
+          .map((x) => x.trim())
+          .toSorted()
+        const id = roots[0] ? ProjectID.make(roots[0]) : undefined
 
-        if (!id) {
-          const revList = yield* git(["rev-list", "--max-parents=0", "HEAD"], { cwd: sandbox })
-          const roots = revList.text
-            .split("\n")
-            .filter(Boolean)
-            .map((x) => x.trim())
-            .toSorted()
-
-          id = roots[0] ? ProjectID.make(roots[0]) : undefined
-          if (id) {
-            yield* fs.writeFileString(pathSvc.join(common, "opencode"), id).pipe(Effect.ignore)
-          }
-        }
-
+        // 无 root commit 继续沿用 global 合同，避免 cache removal 改变空仓库和 Git failure 语义。
         if (!id) {
           return { id: ProjectID.global, worktree: sandbox, sandbox, vcs: "git" as const }
         }

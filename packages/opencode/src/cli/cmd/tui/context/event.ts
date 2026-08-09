@@ -3,6 +3,7 @@ import { useProject } from "./project"
 import { useSDK } from "./sdk"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import path from "path"
+import { useRoute } from "./route"
 
 const normalizedDirectory = new Map<string, string>()
 
@@ -41,6 +42,7 @@ type EventMetadata = {
 export function useEvent() {
   const project = useProject()
   const sdk = useSDK()
+  const route = useRoute()
 
   function subscribe(handler: (event: Event, metadata: EventMetadata) => void) {
     return sdk.event.on("event", (event) => {
@@ -67,7 +69,15 @@ export function useEvent() {
       }
 
       if (event.project) {
-        if (event.project === project.project()) handler(event.payload, { workspace: event.workspace })
+        const activeSessionID = route.data.type === "session" ? route.data.sessionID : undefined
+        const eventSessionID =
+          "sessionID" in event.payload.properties ? event.payload.properties.sessionID : undefined
+        // Session route 是当前可见运行的权威 owner；启动 Project 不能吞掉跨路径打开的 Session 事实。
+        // 没有 Session ID 的 VCS/LSP 等事件继续保持原 Project 隔离，禁止把全局流无条件放宽。
+        // 明确排除 undefined 相等，避免 home route 意外接收其他 Project 的非 Session 事件。
+        // 该分支只负责 admission；消息、Part、Prompt 和 Revert 的实际状态仍由各自 projection owner处理。
+        if (event.project === project.project() || (activeSessionID !== undefined && eventSessionID === activeSessionID))
+          handler(event.payload, { workspace: event.workspace })
         return
       }
 

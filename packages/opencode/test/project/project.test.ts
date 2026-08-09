@@ -130,8 +130,32 @@ describe("Project.fromDirectory", () => {
       expect(project.worktree).toBe(tmp)
 
       const opencodeFile = path.join(tmp, ".git", "opencode")
-      expect(yield* Effect.promise(() => Bun.file(opencodeFile).exists())).toBe(true)
+      expect(yield* Effect.promise(() => Bun.file(opencodeFile).exists())).toBe(false)
     }),
+  )
+
+  it.live("ignores copied cache values when deriving committed Project IDs", () =>
+    Effect.gen(function* () {
+      const first = yield* tmpdirScoped({ git: true })
+      const second = yield* tmpdirScoped({ git: true })
+      const stale = "copied-cache-project-id"
+      yield* Effect.promise(() => Bun.write(path.join(first, ".git", "opencode"), stale))
+      yield* Effect.promise(() => Bun.write(path.join(second, ".git", "opencode"), stale))
+
+      const firstRoot = (yield* Effect.promise(() => $`git rev-list --max-parents=0 HEAD`.cwd(first).text())).trim()
+      const secondRoot = (yield* Effect.promise(() => $`git rev-list --max-parents=0 HEAD`.cwd(second).text())).trim()
+      const { project: firstProject } = yield* run((svc) => svc.fromDirectory(first))
+      const { project: secondProject } = yield* run((svc) => svc.fromDirectory(second))
+
+      // Project identity 必须来自当前仓库历史；复制的 mutable cache 不能取得 owner 身份。
+      // 两个仓库故意写入相同 cache，只有 root commit 能保持它们的 identity 独立。
+      // 测试同时观察返回值和仓库间不相等，覆盖错误 owner 与 collision 两个后果。
+      expect(firstProject.id).toBe(ProjectID.make(firstRoot))
+      expect(secondProject.id).toBe(ProjectID.make(secondRoot))
+      expect(firstProject.id).not.toBe(secondProject.id)
+    }),
+    // 两个真实 Git fixture 共享同一 Effect layer，Windows 清理成本不能挤占行为断言时间。
+    30_000,
   )
 
   it.live("returns global for non-git directory", () =>
@@ -222,6 +246,9 @@ describe("Project.fromDirectory with worktrees", () => {
       expect(project.sandboxes).toContain(worktreePath)
       expect(project.sandboxes).not.toContain(tmp)
     }),
+    // linked worktree setup/cleanup 使用真实 Git 子进程，需覆盖 Windows fixture 清理成本。
+    // 这里的 timeout 只延长生命周期预算，不把路径或 identity 断言变成 eventual assertion。
+    30_000,
   )
 
   it.live("worktree should share project ID with main repo", () =>
@@ -245,11 +272,14 @@ describe("Project.fromDirectory with worktrees", () => {
 
       expect(wt.id).toBe(main.id)
 
-      // Cache should live in the common .git dir, not the worktree's .git file
+      // cache 不再参与 identity；linked worktree 只能验证 root-commit 和公共 worktree 合同。
+      // cache 文件不存在是删除竞争 identity source 的直接可观察结果。
       const cache = path.join(tmp, ".git", "opencode")
       const exists = yield* Effect.promise(() => Bun.file(cache).exists())
-      expect(exists).toBe(true)
+      expect(exists).toBe(false)
     }),
+    // linked worktree 的建销使用真实 Git 子进程；延长预算只覆盖进程成本，不放宽确定性断言。
+    30_000,
   )
 
   it.live("separate clones of the same repo should share project ID", () =>
@@ -270,6 +300,9 @@ describe("Project.fromDirectory with worktrees", () => {
 
       expect(b.id).toBe(a.id)
     }),
+    // clone identity 断言保持确定；Windows 子进程清理可能超过 Bun 的默认五秒预算。
+    // clone 仍共享 root commit，而不是依赖任一目录中的可复制状态文件。
+    30_000,
   )
 
   it.live("should accumulate multiple worktrees in sandboxes", () =>
@@ -305,6 +338,9 @@ describe("Project.fromDirectory with worktrees", () => {
       expect(project.sandboxes).toContain(worktree2)
       expect(project.sandboxes).not.toContain(tmp)
     }),
+    // 多个 linked worktree 使用真实 Git 子进程，预算需覆盖 setup/cleanup。
+    // 两次 fromDirectory 必须汇聚到同一 Project row，并分别保留两个 sandbox。
+    30_000,
   )
 })
 
@@ -647,9 +683,10 @@ describe("Project.fromDirectory with bare repos", () => {
       const correctCache = path.join(barePath, "opencode")
       const wrongCache = path.join(parentDir, ".git", "opencode")
 
-      expect(yield* Effect.promise(() => Bun.file(correctCache).exists())).toBe(true)
+      expect(yield* Effect.promise(() => Bun.file(correctCache).exists())).toBe(false)
       expect(yield* Effect.promise(() => Bun.file(wrongCache).exists())).toBe(false)
     }),
+    // bare repo 没有普通 worktree；identity 仍来自 HEAD 的 root commit，且不创建 cache。
   )
 
   it.live("different bare repos under same parent should not share project ID", () =>
@@ -682,10 +719,14 @@ describe("Project.fromDirectory with bare repos", () => {
       const cacheB = path.join(bareB, "opencode")
       const wrongCache = path.join(parentDir, ".git", "opencode")
 
-      expect(yield* Effect.promise(() => Bun.file(cacheA).exists())).toBe(true)
-      expect(yield* Effect.promise(() => Bun.file(cacheB).exists())).toBe(true)
+      expect(yield* Effect.promise(() => Bun.file(cacheA).exists())).toBe(false)
+      expect(yield* Effect.promise(() => Bun.file(cacheB).exists())).toBe(false)
       expect(yield* Effect.promise(() => Bun.file(wrongCache).exists())).toBe(false)
     }),
+    // 两个 bare repository 会启动多组真实 Git 子进程，预算必须覆盖 setup/cleanup 后再判定 identity。
+    // 同父目录不能再通过共享 cache 产生错误的 Project owner。
+    // 两个返回值必须由各自 HEAD 派生，不能由目录位置或父目录 cache 派生。
+    30_000,
   )
 
   it.live("bare repo without .git suffix is still detected via core.bare", () =>
@@ -708,7 +749,7 @@ describe("Project.fromDirectory with bare repos", () => {
       expect(project.worktree).toBe(barePath)
 
       const correctCache = path.join(barePath, "opencode")
-      expect(yield* Effect.promise(() => Bun.file(correctCache).exists())).toBe(true)
+      expect(yield* Effect.promise(() => Bun.file(correctCache).exists())).toBe(false)
     }),
   )
 })

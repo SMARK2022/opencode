@@ -6,6 +6,7 @@ import { onMount } from "solid-js"
 import { ProjectProvider, useProject } from "../../../src/cli/cmd/tui/context/project"
 import { SDKProvider } from "../../../src/cli/cmd/tui/context/sdk"
 import { useEvent } from "../../../src/cli/cmd/tui/context/event"
+import { RouteProvider, type Route } from "../../../src/cli/cmd/tui/context/route"
 
 const projectID = "proj_test"
 
@@ -46,6 +47,14 @@ function update(version: string): Event {
   }
 }
 
+function status(sessionID: string): Event {
+  return {
+    id: `evt_status_${sessionID}`,
+    type: "session.status",
+    properties: { sessionID, status: { type: "idle" } },
+  }
+}
+
 function createSource() {
   let fn: ((event: GlobalEvent) => void) | undefined
 
@@ -65,7 +74,7 @@ function createSource() {
   }
 }
 
-async function mount() {
+async function mount(initialRoute?: Route) {
   const source = createSource()
   const seen: Event[] = []
   const workspaces: Array<string | undefined> = []
@@ -82,19 +91,21 @@ async function mount() {
   })
 
   const app = await testRender(() => (
-    <SDKProvider url="http://test" directory="/tmp/root" testTransport={{ events: source.source, fetch }}>
-      <ProjectProvider>
-        <Probe
-          onReady={async (ctx) => {
-            project = ctx.project
-            await project.sync()
-            done()
-          }}
-          seen={seen}
-          workspaces={workspaces}
-        />
-      </ProjectProvider>
-    </SDKProvider>
+    <RouteProvider initialRoute={initialRoute}>
+      <SDKProvider url="http://test" directory="/tmp/root" testTransport={{ events: source.source, fetch }}>
+        <ProjectProvider>
+          <Probe
+            onReady={async (ctx) => {
+              project = ctx.project
+              await project.sync()
+              done()
+            }}
+            seen={seen}
+            workspaces={workspaces}
+          />
+        </ProjectProvider>
+      </SDKProvider>
+    </RouteProvider>
   ))
 
   await ready
@@ -144,6 +155,23 @@ describe("useEvent", () => {
       await Bun.sleep(30)
 
       expect(seen).toHaveLength(0)
+    } finally {
+      app.renderer.destroy()
+    }
+  })
+
+  test("delivers events for the active Session across Projects", async () => {
+    const sessionID = "ses_active"
+    const { app, emit, seen } = await mount({ type: "session", sessionID })
+
+    try {
+      // 活动 Session ID 是 route 的权威身份；Project 隔离不能吞掉其运行事实。
+      // event.project 故意使用另一个值，隔离测试只改变 daemon owner，不改变 Session owner。
+      // session.status 只携带 required sessionID，避免引入第二个 info.id 身份来源。
+      emit(event(status(sessionID), { directory: "/tmp/session", project: "proj_other" }))
+      await wait(() => seen.length === 1)
+
+      expect(seen).toEqual([status(sessionID)])
     } finally {
       app.renderer.destroy()
     }

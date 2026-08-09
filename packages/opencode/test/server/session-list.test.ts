@@ -544,6 +544,63 @@ describe("session.list", () => {
   )
 
   it.instance(
+    "lists a legacy Session with an old Project ID through its matching directory",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const instance = yield* InstanceRef
+        const legacyProjectID = ProjectID.make("proj_stale_cache")
+        const target = yield* withSession({ title: "legacy-project-owner" })
+
+        // 模拟 Project identity 已由当前 Git root 纠正，但历史 Session 仍保存旧 cache Project ID。
+        // 不迁移 Session row；公开 list 必须沿用现有 directory compatibility owner 找回目标。
+        // path=null 代表升级前持久化形状，确保断言覆盖真实 legacy directory 分支而非当前 Project 命中。
+        // 旧 Project row 只作为持久化历史存在，不应成为当前 Project identity 的第二来源。
+        // 目标 row 保留真实目录，模拟用户从祖路径或孙路径重新打开历史 Session。
+        // 断言通过 session.list，而不是直接读 SQL，确保验证的是 TUI/API 共享的 producer。
+        // 这样可以证明现有数据库在不迁移 project_id 的条件下仍能兼容历史会话。
+        yield* Effect.sync(() =>
+          Database.use((db) => {
+            db.insert(ProjectTable)
+              .values({
+                id: legacyProjectID,
+                worktree: test.directory,
+                vcs: "git",
+                time_created: Date.now(),
+                time_updated: Date.now(),
+                sandboxes: [],
+              })
+              .run()
+            db.update(SessionTable)
+              .set({ project_id: legacyProjectID, directory: test.directory, path: null })
+              .where(eq(SessionTable.id, target.id))
+              .run()
+          }),
+        )
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() =>
+            Database.use((db) => {
+              db.update(SessionTable)
+                .set({ project_id: instance?.project.id ?? ProjectID.global })
+                .where(eq(SessionTable.id, target.id))
+                .run()
+              db.delete(ProjectTable).where(eq(ProjectTable.id, legacyProjectID)).run()
+            }),
+          ),
+        )
+
+        const ids = (yield* SessionNs.Service.use((session) =>
+          session.list({ directory: test.directory, path: SessionPath.relative(test.directory, test.directory) }),
+        )).map((item) => item.id)
+
+        expect(instance?.project.id).not.toBe(legacyProjectID)
+        expect(ids).toContain(target.id)
+      }),
+    { git: true },
+    30_000,
+  )
+
+  it.instance(
     "falls back to directory when filtering legacy sessions without path",
     () =>
       Effect.gen(function* () {
