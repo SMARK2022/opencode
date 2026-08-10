@@ -81,10 +81,8 @@ export function win32FlushInputBuffer() {
  * exactly why Ctrl+C reaches it. SetConsoleMode depends on a stdin handle hence
  * checks isTTY; FreeConsole operates on the process attachment and does not.
  *
- * Side effect: console stdio handles become invalid for the calling process.
- * In the default mode worker logs go to a file (log.ts init print=false uses
- * createWriteStream), so they are unaffected; only --print-logs debug mode writes
- * to stderr, which is why worker.ts gates this call behind !printLogs.
+ * console标准句柄会失效；launcher须在Bun启动前绑定双pipe，使绕过Log的依赖写入也不会命中被复用HANDLE。
+ * --print-logs跳过detach以保留共享console的Ctrl+C传播；两种模式的标准流仍通过同一安全pipe消费。
  */
 export function win32DetachConsole() {
   if (process.platform !== "win32") return

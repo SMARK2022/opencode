@@ -60,14 +60,14 @@ if (isDaemon) {
     // #493：maintenance 失败走结构化 error 日志——与 info 同构，便于 launcher/测试侧统一解析。
     error: (message: string, fields: Record<string, unknown> = {}) => console.log(`[daemon] [ERROR] ${message}`, fields),
   }
-  // printLogs 判定与 daemon.ts launcher 端（argv 决定 stdio + env 透传）保持语义一致：
-  // worker 端再看 argv||env。若仅经 env 注入 OPENCODE_PRINT_LOGS=1 而不带 --print-logs
-  // argv，launcher 的 stdio 仍为 ignore——此时 worker 不调 FreeConsole（保留 console）
-  // 但日志无法输出到 stderr，是 pre-existing 死区，非本次引入。
+  // Windows relay 在 Bun 启动前为两种模式都建立非 console pipe，默认双流连续排到 Null。
+  // print-logs 经双通道转发到 wrapper；argv||env 只决定日志可见性及是否保留 console 关联。
+  // 修复必须由创建 owner 完成，不能靠应用 logger 覆盖依赖直接写 console.error 的路径。
   const printLogs = process.argv.includes("--print-logs") || process.env.OPENCODE_PRINT_LOGS === "1"
   // Windows: 让 daemon worker 脱离共享 console，使 Ctrl+C 的 CTRL_C_EVENT 不再
   // 送达 worker（等价 Unix detached 进程组）。必须在 HTTP server 启动前调用；
-  // --print-logs 调试模式保留 console 以便 stderr 日志输出（有意降级）。
+  // relay 提供的双流 pipe 在 detach 后仍有效，不会暴露可被 SQLite 复用的失效句柄。
+  // print-logs 保留 console 及既有 Ctrl+C 传播，输出分别进入同一组 pipe 的转发通道。
   if (!printLogs) win32DetachConsole()
   // 资源先声明再启动，外部端口绑定或写锁失败也能清理已开的内部监听。
   let internalServer: Awaited<ReturnType<typeof Server.listen>> | undefined
