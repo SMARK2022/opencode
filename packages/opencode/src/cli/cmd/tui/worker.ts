@@ -26,12 +26,9 @@ NetworkProxy.installGlobalFetch()
 
 const log = Log.create({ service: "daemon" })
 
-// printLogs 判定须与 daemon.ts launcher 端的 printLogs（argv 决定 stdio + env 透传）
-// 保持语义一致：launcher 只看 argv 设置 stdio（daemon.ts:187），同时把
-// OPENCODE_PRINT_LOGS="1" 透传到 worker env（daemon.ts:191），worker 端再看
-// argv||env（此处）。注意：若仅经 env 注入 OPENCODE_PRINT_LOGS=1 而不带 --print-logs
-// argv，launcher 的 stdio 仍为 ignore——此时 worker 不调 FreeConsole（保留 console）
-// 但日志无法输出到 stderr，是 pre-existing 死区，非本次引入。
+// Windows launcher 在Bun启动前为两种模式都建立非console pipe；默认drain到Null，
+// --print-logs才经wrapper转发。这里的argv||env只决定日志目标和是否保留console关联，
+// 不能再承担修复失效stdio HANDLE的责任。
 const printLogs = process.argv.includes("--print-logs") || process.env.OPENCODE_PRINT_LOGS === "1"
 
 await Log.init({
@@ -45,8 +42,8 @@ await Log.init({
 
 // Windows: 让 daemon worker 脱离共享 console，使 Ctrl+C 的 CTRL_C_EVENT 不再
 // 送达 worker（等价 Unix detached 进程组）。必须在 HTTP server 启动前、日志
-// 系统初始化后调用：默认模式日志写文件不受影响。--print-logs 调试模式保留
-// console 以便 stderr 日志输出，该模式下 daemon 不保证 Ctrl+C 免疫（有意降级）。
+// 系统初始化后调用；launcher提供的非console pipe在detach后仍保持有效。
+// --print-logs 调试模式保留console及既有Ctrl+C传播，并通过同一组pipe转发日志。
 if (!printLogs) win32DetachConsole()
 
 Heap.start()

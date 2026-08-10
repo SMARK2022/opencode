@@ -81,10 +81,10 @@ export function win32FlushInputBuffer() {
  * exactly why Ctrl+C reaches it. SetConsoleMode depends on a stdin handle hence
  * checks isTTY; FreeConsole operates on the process attachment and does not.
  *
- * Side effect: console stdio handles become invalid for the calling process.
- * In the default mode worker logs go to a file (log.ts init print=false uses
- * createWriteStream), so they are unaffected; only --print-logs debug mode writes
- * to stderr, which is why worker.ts gates this call behind !printLogs.
+ * Console-backed stdio handles become invalid. The Windows daemon launcher must
+ * bind stdout and stderr to non-console pipes before Bun starts; those HANDLEs
+ * survive this detach, including dependency/runtime writes that bypass Log.
+ * --print-logs skips detach to preserve the shared-console Ctrl+C contract.
  */
 export function win32DetachConsole() {
   if (process.platform !== "win32") return

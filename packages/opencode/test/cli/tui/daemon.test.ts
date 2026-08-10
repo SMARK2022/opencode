@@ -2067,6 +2067,150 @@ describe("daemon lifecycle", () => {
   })
 
   test.skipIf(process.platform !== "win32")(
+    "Windows daemon keeps stdout and stderr as pipes after FreeConsole",
+    async () => {
+      await using tmp = await tmpdir()
+      const marker = path.join(tmp.path, "stdio-after-free-console.json")
+      const worker = path.join(tmp.path, "stdio-after-free-console.ts")
+      // 真实 _spawn 必须走 PowerShell adapter；替换 _setSpawn 会绕过本次损坏发生的 HANDLE owner。
+      // AllocConsole 只固定“先有 console、再 detach”的前置条件，不替代 launcher 对 stdio pipe 的责任。
+      await Bun.write(
+        worker,
+        `
+          import { dlopen } from "bun:ffi"
+          const kernel = dlopen("kernel32.dll", {
+            AllocConsole: { args: [], returns: "i32" },
+            FreeConsole: { args: [], returns: "i32" },
+            GetStdHandle: { args: ["i32"], returns: "ptr" },
+            GetFileType: { args: ["ptr"], returns: "u32" },
+          })
+          kernel.symbols.AllocConsole()
+          const detached = kernel.symbols.FreeConsole()
+          const stdout = kernel.symbols.GetStdHandle(-11)
+          const stderr = kernel.symbols.GetStdHandle(-12)
+          await Bun.write(process.env.DAEMON_STDIO_MARKER!, JSON.stringify({
+            detached,
+            stdout: kernel.symbols.GetFileType(stdout),
+            stderr: kernel.symbols.GetFileType(stderr),
+          }))
+          setInterval(() => {}, 1000)
+        `,
+      )
+
+      const proc = await DaemonModule._spawn([process.execPath, worker], {
+        env: { ...process.env, DAEMON_STDIO_MARKER: marker },
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+        detached: false,
+      })
+
+      try {
+        // marker 是 worker 在 detach 后发布的 readiness；轮询它而非固定 sleep，避免慢 CI 时序假红。
+        const deadline = Date.now() + 10_000
+        let result: { detached: number; stdout: number; stderr: number } | undefined
+        while (Date.now() < deadline) {
+          result = await Bun.file(marker)
+            .json()
+            .catch(() => undefined)
+          if (result) break
+          await Bun.sleep(25)
+        }
+        // FILE_TYPE_PIPE=3 来自 Win32 合同；当前失效 HANDLE 返回 0，不能用“未抛错”伪装安全。
+        expect(result).toEqual({ detached: 1, stdout: 3, stderr: 3 })
+      } finally {
+        // 失败断言也必须先终止真实 worker 再等待 wrapper，避免泄漏进程污染后续 daemon owner 测试。
+        proc.kill()
+        await proc.exited.catch(() => undefined)
+      }
+    },
+    20_000,
+  )
+
+  test.skipIf(process.platform !== "win32")(
+    "Windows daemon preserves shared console and forwards pipes in print-log mode",
+    async () => {
+      await using tmp = await tmpdir()
+      const worker = path.join(tmp.path, "print-log-worker.ts")
+      const stdoutMarker = "PRINT_LOG_STDOUT="
+      const stderrMarker = "PRINT_LOG_STDERR"
+      // print-logs 的兼容合同同时包含console成员关系与可见输出；只断言文本会漏掉CreateNoWindow回归。
+      await Bun.write(
+        worker,
+        `
+          import { dlopen } from "bun:ffi"
+          const kernel = dlopen("kernel32.dll", {
+            GetConsoleCP: { args: [], returns: "u32" },
+            GetConsoleProcessList: { args: ["ptr", "u32"], returns: "u32" },
+            GetStdHandle: { args: ["i32"], returns: "ptr" },
+            GetFileType: { args: ["ptr"], returns: "u32" },
+          })
+          // console成员关系与stdio重定向是独立维度；两类信号必须来自同一个真实worker。
+          const processes = new Uint32Array(16)
+          const stdout = kernel.symbols.GetStdHandle(-11)
+          const stderr = kernel.symbols.GetStdHandle(-12)
+          process.stdout.write(${JSON.stringify(stdoutMarker)} + JSON.stringify({
+            consoleCP: kernel.symbols.GetConsoleCP(),
+            consoleProcesses: kernel.symbols.GetConsoleProcessList(processes, processes.length),
+            stdout: kernel.symbols.GetFileType(stdout),
+            stderr: kernel.symbols.GetFileType(stderr),
+          }) + "\\n")
+          process.stderr.write(${JSON.stringify(stderrMarker + "\n")})
+          // 非零23是独立sentinel，证明adapter传播worker code而不是固定返回launcher成功。
+          process.exit(23)
+        `,
+      )
+
+      // 子launcher让测试可以独立捕获inherit输出；生产adapter仍按原协议消费PID首行，不把它混入worker stdout。
+      const launcher = spawnBackground(
+        [
+          process.execPath,
+          "-e",
+          `
+            const { Daemon } = await import(${JSON.stringify(DAEMON_TS_URL)})
+            const proc = await Daemon._spawn([process.execPath, ${JSON.stringify(worker)}], {
+              env: { ...process.env, OPENCODE_PRINT_LOGS: "1" },
+              stdin: "ignore",
+              stdout: "inherit",
+              stderr: "inherit",
+              detached: false,
+            })
+            process.stdout.write("ADAPTER_EXIT=" + await proc.exited + "\\n")
+          `,
+        ],
+        { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+      )
+
+      // 同时读取两条pipe与exit，避免先等进程导致任一缓冲区填满而把测试自身变成死锁源。
+      const [stdout, stderr, exit] = await Promise.all([
+        new Response(launcher.stdout).text(),
+        new Response(launcher.stderr).text(),
+        launcher.exited,
+      ])
+      const line = stdout.split(/\r?\n/).find((item) => item.startsWith(stdoutMarker))
+      if (!line) throw new Error(`missing print-log stdout marker: ${stdout}`)
+      const contract = JSON.parse(line.slice(stdoutMarker.length)) as {
+        consoleCP: number
+        consoleProcesses: number
+        stdout: number
+        stderr: number
+      }
+
+      // 非零console值锁定既有Ctrl+C成员关系；FILE_TYPE_PIPE=3则锁定安全的双流HANDLE。
+      expect(contract.consoleCP).toBeGreaterThan(0)
+      // 共享console内可能还有其他TUI/wrapper，只断言非零，避免把并发进程数量误当产品合同。
+      expect(contract.consoleProcesses).toBeGreaterThan(0)
+      expect(contract.stdout).toBe(3)
+      expect(contract.stderr).toBe(3)
+      expect(stdout).toContain("ADAPTER_EXIT=23")
+      // stderr marker必须留在独立pipe，不能混入承载PID协议与worker stdout的wrapper输出流。
+      expect(stderr).toContain(stderrMarker)
+      expect(exit).toBe(0)
+    },
+    20_000,
+  )
+
+  test.skipIf(process.platform !== "win32")(
     "Windows daemon PowerShell wrapper hides its console window",
     async () => {
       // INV-01：必须拦截真实 Bun.spawn 上的 powershell wrapper 选项；_setSpawn 会替换整个 spawnImpl，进不了 wrapper 构造。

@@ -80,14 +80,34 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $target = $env:OPENCODE_DAEMON_TARGET
 if ([string]::IsNullOrEmpty($target) -or $target.Contains([char]34)) { exit 87 }
-# Start-Process会把ArgumentList重新拼成native command line；显式保留双引号才能让空格路径仍是一个argv。
+# ProcessStartInfo.Arguments接收native command line；显式保留双引号才能让空格路径仍是一个argv。
 $arguments = [char]34 + $target + [char]34
-$start = @{ FilePath = $env:OPENCODE_DAEMON_EXECUTABLE; ArgumentList = $arguments; PassThru = $true }
-if ($env:OPENCODE_PRINT_LOGS -eq '1') { $worker = Start-Process @start -NoNewWindow }
-else { $worker = Start-Process @start -WindowStyle Hidden }
+$start = New-Object System.Diagnostics.ProcessStartInfo
+$start.FileName = $env:OPENCODE_DAEMON_EXECUTABLE
+$start.Arguments = $arguments
+$start.UseShellExecute = $false
+# worker必须继续加入现有console：默认模式随后FreeConsole，print-logs则保留当前Ctrl+C传播合同。
+$start.CreateNoWindow = $false
+# pipe在Bun启动前进入进程表，FreeConsole只解除console关联，不能再留下可复用的失效stdio HANDLE。
+# stdout与stderr都可能被第三方直接写入；只修一条流仍保留同类HANDLE别名入口。
+$start.RedirectStandardOutput = $true
+$start.RedirectStandardError = $true
+$worker = New-Object System.Diagnostics.Process
+$worker.StartInfo = $start
+# Start失败保持原错误出口，不回退旧Start-Process，否则primary path会再次分叉。
+if (-not $worker.Start()) { exit 87 }
+# PID行是wrapper协议边界；任何worker stdout都必须在它发布并flush之后才能进入同一输出流。
 [Console]::Out.WriteLine($worker.Id)
 [Console]::Out.Flush()
+# Null只改变默认输出的可见性而不关闭pipe；print-logs仍按原stdout/stderr通道分别转发。
+$stdout = if ($env:OPENCODE_PRINT_LOGS -eq '1') { [Console]::OpenStandardOutput() } else { [System.IO.Stream]::Null }
+$stderr = if ($env:OPENCODE_PRINT_LOGS -eq '1') { [Console]::OpenStandardError() } else { [System.IO.Stream]::Null }
+# 两条pipe必须在WaitForExit前并发drain；任一缓冲区写满都会反向阻塞worker退出。
+$stdoutTask = $worker.StandardOutput.BaseStream.CopyToAsync($stdout)
+$stderrTask = $worker.StandardError.BaseStream.CopyToAsync($stderr)
 $worker.WaitForExit()
+# 进程退出不代表pipe尾部已消费；wrapper须等双流EOF后再发布同一个worker exit code。
+[System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask))
 exit $worker.ExitCode
 `
   // absolute system wrapper避免Project cwd选择同名程序；encoded source保持动态路径只作为data进入脚本。
