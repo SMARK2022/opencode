@@ -46,13 +46,6 @@ async function spawnDaemon(cmd: string[], opts: Parameters<typeof Bun.spawn>[1])
   // 路径/argv/env 值全部 b64 编码：避免引号/空格/大小写重复键（PS5.1 Json 字典对 NO_PROXY/no_proxy 报重复键）
   const b64u = (s: string) => Buffer.from(s, "utf8").toString("base64")
   // 过滤 undefined 值：Bun env 对象允许 undefined（写入时丢弃），b64 编码前必须剔除
-  await Bun.write(
-    envFile,
-    Object.entries(envRecord)
-      .filter(([, v]) => v !== undefined)
-      .map(([k, v]) => `${k}\t${b64u(v as string)}`)
-      .join("\n"),
-  )
   const relayScript = [
     "$ErrorActionPreference = 'Stop'",
     `$envPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64u(envFile)}'))`,
@@ -67,23 +60,79 @@ async function spawnDaemon(cmd: string[], opts: Parameters<typeof Bun.spawn>[1])
     "    if ($parts.Count -ne 2 -or $parts[0].Length -eq 0) { continue }",
     "    [Environment]::SetEnvironmentVariable($parts[0], [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($parts[1])))",
     "  }",
-    "  $start = @{ FilePath = $exePath; ArgumentList = [char]34 + $targetPath + [char]34; PassThru = $true; WorkingDirectory = $cwdPath }",
-    "  $worker = Start-Process @start -WindowStyle Hidden",
+    // WMI 不继承 wrapper 的输出；仅 print-logs 通过双命名管道跨越该边界，默认 drain 留在 job 外。
+    "  $stdout = [IO.Stream]::Null; $stderr = [IO.Stream]::Null",
+    "  if ($env:OPENCODE_PRINT_LOGS -eq '1') {",
+    // 显式关联 caller console；WMI parent 是服务进程，ATTACH_PARENT_PROCESS 会关联错误的 owner。
+    "    Add-Type 'using System; using System.Runtime.InteropServices; public static class DaemonConsole { [DllImport(\"kernel32.dll\")] public static extern bool FreeConsole(); [DllImport(\"kernel32.dll\")] public static extern bool AttachConsole(uint pid); }'",
+    "    [void][DaemonConsole]::FreeConsole()",
+    "    if (-not [DaemonConsole]::AttachConsole(__OPENCODE_CONSOLE_PID__)) { throw 'Cannot attach print-log console' }",
+    `    $stdout = [IO.Pipes.NamedPipeClientStream]::new('.', 'opencode-daemon-${nonce}-stdout', [IO.Pipes.PipeDirection]::Out)`,
+    `    $stderr = [IO.Pipes.NamedPipeClientStream]::new('.', 'opencode-daemon-${nonce}-stderr', [IO.Pipes.PipeDirection]::Out)`,
+    "    $stdout.Connect(60000); $stderr.Connect(60000)",
+    "  }",
+    "  $start = New-Object System.Diagnostics.ProcessStartInfo",
+    "  $start.FileName = $exePath",
+    // native command line 保留显式双引号，含空格的 worker 路径仍是单个参数。
+    "  $start.Arguments = [char]34 + $targetPath + [char]34",
+    "  $start.WorkingDirectory = $cwdPath",
+    "  $start.UseShellExecute = $false",
+    // pipe 替换标准句柄而不剥离 console 关联；print-logs 保留 Ctrl+C，默认仍由 worker detach。
+    "  $start.CreateNoWindow = $false; $start.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden",
+    // 两流都在 Bun 快照句柄前绑定；运行时直接 console.error 也不能写到后来复用的 SQLite HANDLE。
+    "  $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true",
+    "  $worker = New-Object System.Diagnostics.Process",
+    "  $worker.StartInfo = $start",
+    // Start 失败沿既有 error 握手发布；绝不重新调用继承 console stdio 的旧创建路径。
+    "  if (-not $worker.Start()) { throw 'Cannot start daemon worker' }",
+    // 在等待退出前并发消费两个 pipe；只消费 stdout 仍会被 stderr 背压阻塞。
+    "  $stdoutTask = $worker.StandardOutput.BaseStream.CopyToAsync($stdout)",
+    "  $stderrTask = $worker.StandardError.BaseStream.CopyToAsync($stderr)",
     "  [IO.File]::WriteAllText($pidPath, [string]$worker.Id)",
     "  Remove-Item -LiteralPath $envPath",
+    // relay 保有真实 Process，短命 worker 的退出码不能从稍后已不存在的 PID 重建。
+    "  $worker.WaitForExit()",
+    // EOF join 不设截尾 timeout；尾部输出未消费完时不能把进程退出伪装成 transport 完成。
+    "  [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdoutTask, $stderrTask))",
+    "  $stdout.Dispose(); $stderr.Dispose()",
+    // 原子发布完成码，避免 wrapper 在文件创建与内容写入之间读到空串并误报 exit 0。
+    "  [IO.File]::WriteAllText(($pidPath + '.exit.tmp'), [string]$worker.ExitCode); [IO.File]::Move(($pidPath + '.exit.tmp'), ($pidPath + '.exit'))",
     "} catch {",
     "  # relay 失败可观测：错误落盘在 pid 文件旁，供 launcher 诊断（relay 无 stdout 通道）",
     "  [IO.File]::WriteAllText(($pidPath + '.err'), ($_ | Out-String))",
+    // 创建后的 transport 失败也不得留下无人 drain 的 worker；仅关闭本 relay 自己创建的 Process。
+    "  if ($worker -and -not $worker.HasExited) { $worker.Kill(); $worker.WaitForExit() }",
+    "} finally {",
+    "  if ($stdout) { $stdout.Dispose() }; if ($stderr) { $stderr.Dispose() }",
+    "  if ($worker) { $worker.Dispose() }",
+    "  [IO.File]::Delete($envPath)",
     "}",
   ].join("\n")
+  // 复用一次性 env 握手承载固定 relay source，避免双层 UTF-16 编码超过 Windows 命令行上限。
+  await Bun.write(
+    envFile,
+    // 首行无 tab，只是受控脚本数据；既有 env 恢复循环跳过它，不把代码注入 worker 环境。
+    [b64u(relayScript), ...Object.entries(envRecord)
+      .filter(([, v]) => v !== undefined)
+      .map(([k, v]) => `${k}\t${b64u(v as string)}`)
+    ].join("\n"),
+  )
   const script = `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $target = $env:OPENCODE_DAEMON_TARGET
 if ([string]::IsNullOrEmpty($target) -or $target.Contains([char]34)) { exit 87 }
-# relay 由 WMI 服务进程创建——脱离 CLI 的 job object；其 Start-Process 的 worker 因此在 job 外存活
-$relayEncoded = '${Buffer.from(relayScript, "utf16le").toString("base64")}'
+# WMI placement 不变；非日志模式的双流消费不依赖短命 launcher 的生存期。
+$relaySource = '$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([IO.File]::ReadAllLines([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("${b64u(envFile)}")))[0])); & ([scriptblock]::Create($source.Replace("__OPENCODE_CONSOLE_PID__", "__OPENCODE_WRAPPER_PID__")))'
+$relayEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($relaySource.Replace('__OPENCODE_WRAPPER_PID__', [string]$PID)))
 $relayCmd = [char]34 + (Join-Path $PSHOME 'powershell.exe') + [char]34 + ' -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $relayEncoded
+# 双 server 必须在 WMI 创建前就绪，客户端 Connect 不会竞争尚未存在的 pipe。
+if ($env:OPENCODE_PRINT_LOGS -eq '1') {
+  $stdout = [IO.Pipes.NamedPipeServerStream]::new('opencode-daemon-${nonce}-stdout', [IO.Pipes.PipeDirection]::In, 1, [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous)
+  $stderr = [IO.Pipes.NamedPipeServerStream]::new('opencode-daemon-${nonce}-stderr', [IO.Pipes.PipeDirection]::In, 1, [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous)
+  $stdoutReady = $stdout.WaitForConnectionAsync(); $stderrReady = $stderr.WaitForConnectionAsync()
+}
+try {
 $startup = ([wmiclass]'Win32_ProcessStartup').CreateInstance()
 $startup.ShowWindow = 0
 $result = ([wmiclass]'Win32_Process').Create($relayCmd, (Get-Location).Path, $startup)
@@ -91,16 +140,34 @@ if ($result.ReturnValue -ne 0) { exit 88 }
 $deadline = (Get-Date).AddSeconds(60)
 $workerPid = 0
 while ((Get-Date) -lt $deadline -and $workerPid -le 0) {
+  if (Test-Path -LiteralPath ($env:OPENCODE_DAEMON_PID_FILE + '.err')) { throw [IO.File]::ReadAllText(($env:OPENCODE_DAEMON_PID_FILE + '.err')) }
   if (Test-Path -LiteralPath $env:OPENCODE_DAEMON_PID_FILE) { $workerPid = [int](Get-Content -Raw -LiteralPath $env:OPENCODE_DAEMON_PID_FILE) }
   else { Start-Sleep -Milliseconds 100 }
 }
 if ($workerPid -le 0) { exit 89 }
+# PID 首行及 flush 先于任何 worker 字节，保持现有 readWorkerPID/remainder 协议。
 [Console]::Out.WriteLine($workerPid)
 [Console]::Out.Flush()
-# worker 可能已自行退出（快速失败路径）：Wait-Process 对不存在的 pid 抛终止错误，
-# 会把健康的 startup 失败误报成 wrapper 崩溃（#179 race 检测消费该退出码）
-if (Get-Process -Id $workerPid -ErrorAction SilentlyContinue) { Wait-Process -Id $workerPid -ErrorAction SilentlyContinue }
-exit 0
+if ($env:OPENCODE_PRINT_LOGS -eq '1') {
+  $stdoutReady.GetAwaiter().GetResult(); $stderrReady.GetAwaiter().GetResult()
+  # 独立 stderr 通道不经过 PID/stdout parser，依赖错误不能污染握手或变成普通输出。
+  $stdoutTask = $stdout.CopyToAsync([Console]::OpenStandardOutput())
+  $stderrTask = $stderr.CopyToAsync([Console]::OpenStandardError())
+}
+# completion 由 relay 在 Process.ExitCode 与两流 EOF 已确定后发布，不再固定返回成功。
+while (-not (Test-Path -LiteralPath ($env:OPENCODE_DAEMON_PID_FILE + '.exit'))) {
+  if (Test-Path -LiteralPath ($env:OPENCODE_DAEMON_PID_FILE + '.err')) { throw [IO.File]::ReadAllText(($env:OPENCODE_DAEMON_PID_FILE + '.err')) }
+  Start-Sleep -Milliseconds 25
+}
+if ($env:OPENCODE_PRINT_LOGS -eq '1') { [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdoutTask, $stderrTask)) }
+exit [int][IO.File]::ReadAllText(($env:OPENCODE_DAEMON_PID_FILE + '.exit'))
+} finally {
+  if ($stdout) { $stdout.Dispose() }; if ($stderr) { $stderr.Dispose() }
+  [IO.File]::Delete($env:OPENCODE_DAEMON_PID_FILE)
+  [IO.File]::Delete(($env:OPENCODE_DAEMON_PID_FILE + '.exit'))
+  [IO.File]::Delete(($env:OPENCODE_DAEMON_PID_FILE + '.exit.tmp'))
+  [IO.File]::Delete(($env:OPENCODE_DAEMON_PID_FILE + '.err'))
+}
 `
   // absolute system wrapper 避免 Project cwd 选择同名程序；encoded source 保持动态路径只作为 data 进入脚本。
   const wrapper = Bun.spawn(
@@ -154,12 +221,9 @@ exit 0
     exited: Promise.all([wrapper.exited, output]).then(([code]) => code),
     unref: () => wrapper.unref(),
     kill: (signal?: Parameters<DaemonProcess["kill"]>[0]) => {
-      // 先终止真实 worker 再关闭 supervisor，避免 wrapper 消失后留下无 lock 生命周期观察者的孤儿 worker。
+      // 只终止真实 worker；wrapper 随 relay 的 EOF/退出码结束并清理握手，强杀会丢尾字节和完成文件。
       try {
         process.kill(worker.pid, signal)
-      } catch {}
-      try {
-        wrapper.kill()
       } catch {}
     },
   }
