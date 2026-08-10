@@ -177,14 +177,22 @@ describe("Session route integration points", () => {
   })
 
   describe("event dispatch", () => {
-    test("global and explicit project event matches return before workspace fallback", () => {
+    test("global and explicit project event branches return before workspace fallback", () => {
       const eventSource = readFileSync(path.resolve(import.meta.dir, "../../../../src/cli/cmd/tui/context/event.ts"), "utf-8")
       expect(eventSource).toMatch(
         /if \(event\.directory === "global"\) \{\s*handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}/,
       )
-      expect(eventSource).toMatch(
-        /if \(event\.project\) \{\s*if \(event\.project === project\.project\(\)\) handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}/,
-      )
+      const projectBranchStart = eventSource.indexOf("if (event.project) {")
+      const workspaceFallbackStart = eventSource.indexOf("if (project.workspace.current())")
+      expect(projectBranchStart).toBeGreaterThan(-1)
+      expect(workspaceFallbackStart).toBeGreaterThan(projectBranchStart)
+      const projectBranch = eventSource.slice(projectBranchStart, workspaceFallbackStart)
+      // 源码门禁锁定Project分支的语义边界，不再把合法的active Session admission误判为控制流回归。
+      expect(projectBranch).toContain('route.data.type === "session"')
+      expect(projectBranch).toContain('"sessionID" in event.payload.properties')
+      expect(projectBranch).toContain("event.project === project.project() ||")
+      expect(projectBranch).toContain("activeSessionID !== undefined && eventSessionID === activeSessionID")
+      expect(projectBranch).toMatch(/handler\(event\.payload, \{ workspace: event\.workspace \}\)\s*return\s*\}\s*$/)
     })
   })
 
