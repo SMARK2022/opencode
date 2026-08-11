@@ -92,13 +92,27 @@ test("scan HTTP failure stops later scans and preserves visible title hits", asy
 })
 test("successful empty search still shows Not Found", async () => {
   // 失败路径不得改写成功空结果文案；用户侧 empty 文案必须保持 Not Found。
+  const paths: { title?: string | null; scan?: unknown } = {}
   await withSessionList({
-    title: () => json([]),
-    scan: () => json({ sessions: [], nextCursor: null, done: true }),
+    // 请求目录等于 worktree，真实 Sync query 因而生成有定义的空 path。
+    fetch: (url) => {
+      if (url.pathname === "/path") return json({ home: "", state: "", config: "", worktree: directory, directory })
+      if (url.pathname === "/api/location") return json({ directory, project: { id: "proj_test", directory } })
+    },
+    title: (url) => {
+      paths.title = url.searchParams.get("path")
+      return json([])
+    },
+    scan: (_url, init) => {
+      paths.scan = JSON.parse(String(init?.body)).path
+      return json({ sessions: [], nextCursor: null, done: true })
+    },
     run: async ({ app }) => {
       await enterSearch(app, "needle")
       // 成功空结果走同一文案——失败路径不得污染空态合同（INV-05/10）。
       const frame = await waitForFrame(app, (value) => value.includes("Not Found needle"))
+      // 在组件 catch 之外断言真实 transport，缺参数或未发 scan 都不能以空结果假绿。
+      expect(paths).toEqual({ title: "", scan: "" })
       expect(frame).not.toContain("Search failed")
       expect(frame).not.toMatch(SPINNER)
     },

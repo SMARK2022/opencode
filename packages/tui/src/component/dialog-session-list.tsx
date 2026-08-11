@@ -176,7 +176,8 @@ export function DialogSessionList() {
       titleUrl.searchParams.set("roots", String(scope.roots))
       titleUrl.searchParams.set("limit", String(SESSION_LIST_SEARCH_LIMIT))
       if (scope.scope) titleUrl.searchParams.set("scope", scope.scope)
-      if (scope.path) titleUrl.searchParams.set("path", scope.path)
+      // 空 path 表示当前 worktree 根；省略它会让 title 与 scan 落入不同的会话宇宙。
+      if (scope.path !== undefined) titleUrl.searchParams.set("path", scope.path)
       if ("directory" in scope && scope.directory) titleUrl.searchParams.set("directory", scope.directory)
 
       // limit 与 Path B 搜索上限同源：title 子集也被 cap 在 400，partial 展示不会超发。
