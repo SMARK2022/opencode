@@ -94,6 +94,49 @@ const searchIDs = Effect.fn("SessionListTest.searchIDs")(function* (search: stri
   return (yield* SessionNs.Service.use((session) => session.list({ search }))).map((session) => session.id)
 })
 
+// 该helper专门建立“持久Project worktree A / 请求Instance worktree B”的错配边界。
+// 直接数据库写入与反向清理保持在同一fixture owner，测试主体只观察公开Session service。
+const persistSessionWithMismatchedProjectWorktree = Effect.fn(
+  "SessionListTest.persistSessionWithMismatchedProjectWorktree",
+)(function* (input: {
+  sessionID: SessionID
+  persistedProjectID: ProjectID
+  persistedWorktree: string
+  runtimeProjectID: ProjectID
+}) {
+  yield* Effect.sync(() =>
+    Database.use((db) => {
+      db.insert(ProjectTable)
+        .values({
+          id: input.persistedProjectID,
+          worktree: input.persistedWorktree,
+          vcs: "git",
+          time_created: Date.now(),
+          time_updated: Date.now(),
+          sandboxes: [],
+        })
+        .run()
+      // path=null模拟升级前历史行，确保测试命中directory compatibility而非现代path谓词。
+      db.update(SessionTable)
+        .set({ project_id: input.persistedProjectID, directory: input.persistedWorktree, path: null })
+        .where(eq(SessionTable.id, input.sessionID))
+        .run()
+    }),
+  )
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() =>
+      Database.use((db) => {
+        // 先恢复Session外键再删除fake Project，避免测试清理制造悬空引用。
+        db.update(SessionTable)
+          .set({ project_id: input.runtimeProjectID })
+          .where(eq(SessionTable.id, input.sessionID))
+          .run()
+        db.delete(ProjectTable).where(eq(ProjectTable.id, input.persistedProjectID)).run()
+      }),
+    ),
+  )
+})
+
 const initGitRepo = (directory: string) =>
   Effect.gen(function* () {
     yield* Effect.promise(() => $`git init`.cwd(directory).quiet())
@@ -594,6 +637,66 @@ describe("session.list", () => {
         )).map((item) => item.id)
 
         expect(instance?.project.id).not.toBe(legacyProjectID)
+        expect(ids).toContain(target.id)
+      }),
+    { git: true },
+    30_000,
+  )
+
+  it.instance(
+    "uses the current Instance worktree when one Project ID has multiple worktrees",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const instance = yield* InstanceRef
+        if (!instance) return yield* Effect.die("InstanceRef was not provided")
+        const nested = path.join(test.directory, "nested-clone")
+        const legacyProjectID = ProjectID.make("proj_shared_worktree_legacy")
+        yield* Effect.promise(() => mkdir(nested, { recursive: true }))
+        const target = yield* withSession({ title: "ancestor-from-legacy-project" })
+
+        // 同一 root commit 的 clone 共享 Project ID，但每个请求仍有独立 Instance worktree。
+        // ProjectTable 只能保存其中一个 worktree；故意让表中保留祖先 A，请求上下文使用嵌套 B。
+        // 历史 Session 保留旧 project_id/path=null，只有既有 directory compatibility 能找回它。
+        // B 的 path="" 必须相对 B 自身解释；若错误相对表中的 A 解释，兼容分支会被关闭。
+        // 两个断言只经过 Session service 公共 seam，避免用 SQL 结果替代真实生产查询合同。
+        yield* persistSessionWithMismatchedProjectWorktree({
+          sessionID: target.id,
+          persistedProjectID: legacyProjectID,
+          persistedWorktree: test.directory,
+          runtimeProjectID: instance.project.id,
+        })
+
+        const ids = yield* SessionNs.Service.use((session) =>
+          session.list({ directory: nested, path: SessionPath.relative(nested, nested) }),
+        ).pipe(
+          Effect.provideService(InstanceRef, {
+            directory: nested,
+            worktree: nested,
+            project: { ...instance.project, worktree: nested },
+          }),
+          Effect.map((sessions) => sessions.map((session) => session.id)),
+        )
+        // progressive搜索必须复用同一请求worktree；只锁定list会允许搜索路径继续遗漏同一历史Session。
+        const scanIDs = yield* SessionNs.Service.use((session) =>
+          session.searchScan({
+            search: "ancestor-from-legacy-project",
+            directory: nested,
+            path: SessionPath.relative(nested, nested),
+            // 单页覆盖本fixture全部候选，失败只能来自路径宇宙而非keyset分页。
+            batch: 50,
+          }),
+        ).pipe(
+          Effect.provideService(InstanceRef, {
+            directory: nested,
+            worktree: nested,
+            project: { ...instance.project, worktree: nested },
+          }),
+          Effect.map((result) => result.sessions.map((session) => session.id)),
+        )
+
+        expect(instance.project.worktree).toBe(test.directory)
+        expect(scanIDs).toContain(target.id)
         expect(ids).toContain(target.id)
       }),
     { git: true },

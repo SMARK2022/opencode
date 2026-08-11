@@ -203,13 +203,11 @@ function isHomeDirectory(directory: string | undefined) {
   return comparableDirectoryValue(directory) === comparableDirectoryValue(Global.Path.home)
 }
 
-function directoryMatchesPath(input: { directory?: string; path: string; projectID: ProjectID }) {
+function directoryMatchesPath(input: { directory?: string; path: string; worktree: string }) {
   if (!input.directory) return false
-  const project = Database.use((db) =>
-    db.select({ worktree: ProjectTable.worktree }).from(ProjectTable).where(eq(ProjectTable.id, input.projectID)).get(),
-  )
-  if (!project) return false
-  const left = SessionPath.relative(project.worktree, input.directory)
+  // 同一 root commit 的多个 clone 共享 Project ID，但请求 Instance 各自拥有真实 worktree。
+  // ProjectTable 只能保存一个 worktree；路径兼容必须使用当前请求上下文，不能从共享 ID 反查。
+  const left = SessionPath.relative(input.worktree, input.directory)
   const right = input.path.replaceAll("\\", "/")
   return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right
 }
@@ -679,7 +677,12 @@ export const layer: Layer.Layer<
     const list = Effect.fn("Session.list")(function* (input?: ListInput) {
       const ctx = yield* InstanceState.context
       return Array.from(
-        listByProject({ projectID: ctx.project.id, experimentalWorkspaces: flags.experimentalWorkspaces, ...input }),
+        listByProject({
+          projectID: ctx.project.id,
+          worktree: ctx.worktree,
+          experimentalWorkspaces: flags.experimentalWorkspaces,
+          ...input,
+        }),
       )
     })
 
@@ -688,6 +691,7 @@ export const layer: Layer.Layer<
       const ctx = yield* InstanceState.context
       return searchScanByProject({
         projectID: ctx.project.id,
+        worktree: ctx.worktree,
         experimentalWorkspaces: flags.experimentalWorkspaces,
         ...input,
       })
@@ -997,6 +1001,7 @@ const cancelBackgroundJobs = Effect.fn("Session.cancelBackgroundJobs")(function*
 function* listByProject(
   input: ListInput & {
     projectID: ProjectID
+    worktree: string
     experimentalWorkspaces: boolean
   },
 ) {
@@ -1036,6 +1041,7 @@ function* listByProject(
 function searchScanByProject(
   input: SearchScanInput & {
     projectID: ProjectID
+    worktree: string
     experimentalWorkspaces: boolean
   },
 ): SearchScanResult {
@@ -1044,6 +1050,7 @@ function searchScanByProject(
   // 候选页：与 list 同 scope/start，故意不含 search，保证每批固定扫 N 行
   const universe = listUniverseConditions({
     projectID: input.projectID,
+    worktree: input.worktree,
     experimentalWorkspaces: input.experimentalWorkspaces,
     directory: input.directory,
     scope: input.scope,
@@ -1108,6 +1115,7 @@ function searchScanByProject(
 function listUniverseConditions(
   input: ListInput & {
     projectID: ProjectID
+    worktree: string
     experimentalWorkspaces: boolean
   },
 ): SQL[] {
@@ -1133,7 +1141,7 @@ function listUniverseConditions(
       const useDirectoryFallback = directoryMatchesPath({
         directory: input.directory,
         path: input.path,
-        projectID: input.projectID,
+        worktree: input.worktree,
       })
       const globalPath =
         useDirectoryFallback && input.directory
