@@ -623,6 +623,96 @@ describe("session.list", () => {
     30_000,
   )
   it.instance(
+    "uses the current Instance worktree when one Project ID has multiple worktrees",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const instance = yield* InstanceRef
+        // InstanceRef 缺失说明测试拓扑损坏而非产品缺陷，直接 die 暴露而不是静默跳过。
+        if (!instance) return yield* Effect.die("InstanceRef was not provided")
+        // nested 目录模拟同 root commit 的第二个 clone；不 init git，directory 兼容分支不依赖其 VCS 元数据。
+        const nested = path.join(test.directory, "nested-clone")
+        // 伪造共享 root commit 的 Project 身份：ID 与运行时不同，worktree 指向祖先 A。
+        const legacyProjectID = Project.ID.make("proj_shared_worktree_legacy")
+        yield* Effect.promise(() => mkdir(nested, { recursive: true }))
+        // 目标 Session 先按运行时 A 创建，再被改写成 legacy 形状，断言前状态真实可回滚。
+        const target = yield* withSession({ title: "ancestor-from-legacy-project" })
+
+        // #574：同一 root commit 的 clone 共享 Project ID，但每个请求有独立 Instance worktree。
+        // ProjectTable 只能保存其中一个 worktree；表中保留祖先 A，请求上下文使用嵌套 B。
+        // 历史 Session 保留旧 project_id/path=null，只有既有 directory compatibility 能找回它。
+        // B 的 path 必须相对 B 自身解释；若错误相对表中的 A 解释，兼容分支会被错误关闭。
+        const { db } = yield* Database.Service
+        yield* db
+          .insert(ProjectTable)
+          .values({
+            id: legacyProjectID,
+            worktree: AbsolutePath.make(test.directory),
+            vcs: "git",
+            time_created: Date.now(),
+            time_updated: Date.now(),
+            sandboxes: [],
+          })
+          .run()
+        // path=null 模拟升级前历史行，确保测试命中 directory compatibility 而非现代 path 谓词。
+        yield* db
+          .update(SessionTable)
+          .set({ project_id: legacyProjectID, directory: test.directory, path: null })
+          .where(eq(SessionTable.id, target.id))
+          .run()
+        yield* Effect.addFinalizer(() =>
+          Effect.gen(function* () {
+            // #574：finalizer 与插入同 seam——先恢复 project_id 再删注入的 legacy Project 行，避免悬空引用。
+            yield* db
+              .update(SessionTable)
+              .set({ project_id: instance.project.id })
+              .where(eq(SessionTable.id, target.id))
+              .run()
+              .pipe(Effect.orDie)
+            yield* db.delete(ProjectTable).where(eq(ProjectTable.id, legacyProjectID)).run().pipe(Effect.orDie)
+          }),
+        )
+
+        // #574：断言只经 Session service 公共 seam；InstanceRef 覆写为 B 的请求上下文。
+        const ids = yield* SessionNs.Service.use((session) =>
+          session.list({ directory: nested, path: SessionPath.relative(nested, nested) }),
+        ).pipe(
+          Effect.provideService(InstanceRef, {
+            directory: nested,
+            worktree: nested,
+            project: instance.project,
+          }),
+          Effect.map((sessions) => sessions.map((session) => session.id)),
+        )
+        // #574：progressive 搜索必须复用同一请求 worktree；只锁 list 会允许搜索继续遗漏同一历史 Session。
+        const scanIDs = yield* SessionNs.Service.use((session) =>
+          session.searchScan({
+            // title 关键字即搜索词，避免与其它 fixture 会话标题前缀撞车造成假阳性。
+            search: "ancestor-from-legacy-project",
+            directory: nested,
+            path: SessionPath.relative(nested, nested),
+            // 单页覆盖本 fixture 全部候选，失败只能来自路径宇宙而非 keyset 分页。
+            batch: 50,
+          }),
+        ).pipe(
+          Effect.provideService(InstanceRef, {
+            directory: nested,
+            worktree: nested,
+            project: instance.project,
+          }),
+          Effect.map((result) => result.sessions.map((session) => session.id)),
+        )
+
+        // #574：运行时 Instance 仍是 A——证明兼容判定消费的是请求上下文而非持久 Project 行。
+        expect(instance.worktree).toBe(test.directory)
+        expect(scanIDs).toContain(target.id)
+        expect(ids).toContain(target.id)
+      }),
+    { git: true },
+    30_000,
+  )
+
+  it.instance(
     "falls back to directory when filtering legacy sessions without path",
     () =>
       Effect.gen(function* () {
