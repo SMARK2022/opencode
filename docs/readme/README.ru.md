@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.12-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.13-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **О ветке**: это расширенная ветка OpenCode `dev-smark` (текущая версия `1.15.12`, CLI release tag `v1.15.12-smark`). Она основана на upstream `dev` и сосредоточена на TUI-взаимодействии, управлении сессиями, статистике token, совместимости с Windows/PowerShell, языковых сервисах и интеграции Notebook в VS Code, поддержке сетевых proxy и опыте установки.
+> **О ветке**: это расширенная ветка OpenCode `dev-smark` (текущая версия `1.15.13`, CLI release tag `v1.15.13-smark`). Она основана на upstream `dev` и сосредоточена на TUI-взаимодействии, управлении сессиями, статистике token, совместимости с Windows/PowerShell, языковых сервисах и интеграции Notebook в VS Code, поддержке сетевых proxy и опыте установки.
 
 ---
 
@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.12-smark
+  bash -s -- --version 1.15.13-smark
 ```
 
-Это полная форма: `bash -s --` говорит `bash` читать installer из stdin и передать `--version 1.15.12-smark` как аргументы installer. Версия может быть `1.15.12-smark` или в форме release tag `v1.15.12-smark`.
+Это полная форма: `bash -s --` говорит `bash` читать installer из stdin и передать `--version 1.15.13-smark` как аргументы installer. Версия может быть `1.15.13-smark` или в форме release tag `v1.15.13-smark`.
 
 ### Поведение Installer
 
@@ -240,7 +240,7 @@ Internal stats предпочитает request usage data и откатывае
 
 ### Интеграция Языковых Сервисов И Notebook VS Code
 
-Чтобы использовать языковые сервисы VS Code или Notebook tools, установите [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Версия расширения в репозитории — `1.15.10`, рекомендуемая версия SMARK CLI — `1.15.12-smark`; версии независимы. Расширение создает локальный authenticated bridge для языковых сервисов и VS Code/Jupyter Notebook. Без подключения CLI сохраняет встроенный LSP, но операции VS Code и Notebook tools недоступны.
+Чтобы использовать языковые сервисы VS Code или Notebook tools, установите [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Версия расширения в репозитории — `1.15.10`, рекомендуемая версия SMARK CLI — `1.15.13-smark`; версии независимы. Расширение создает локальный authenticated bridge для языковых сервисов и VS Code/Jupyter Notebook. Без подключения CLI сохраняет встроенный LSP, но операции VS Code и Notebook tools недоступны.
 
 Расширение не включает language server; оно использует providers, зарегистрированные активными языковыми расширениями в текущем окне VS Code, для touch, diagnostics, hover, definition, references и document/workspace symbols. При сбое bridge request используется встроенный LSP; diagnostics также делает fallback при неверной структуре ответа, а другие успешные ответы без ожидаемого поля сейчас могут интерпретироваться как пустые. Implementation и call hierarchy всегда остаются на встроенном LSP, а корректный пустой результат не подтверждает полный project typecheck.
 

@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.12-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.13-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Σχετικά με αυτόν τον κλάδο**: Αυτός είναι ο ενισχυμένος κλάδος `dev-smark` του OpenCode (τρέχουσα έκδοση `1.15.12`, CLI release tag `v1.15.12-smark`). Βασίζεται στον upstream κλάδο `dev` και εστιάζει στην αλληλεπίδραση TUI, στη διαχείριση συνεδριών, στα στατιστικά token, στη συμβατότητα Windows/PowerShell, στις υπηρεσίες γλώσσας και στην ενσωμάτωση Notebook του VS Code, στην υποστήριξη network proxy και στην εμπειρία εγκατάστασης.
+> **Σχετικά με αυτόν τον κλάδο**: Αυτός είναι ο ενισχυμένος κλάδος `dev-smark` του OpenCode (τρέχουσα έκδοση `1.15.13`, CLI release tag `v1.15.13-smark`). Βασίζεται στον upstream κλάδο `dev` και εστιάζει στην αλληλεπίδραση TUI, στη διαχείριση συνεδριών, στα στατιστικά token, στη συμβατότητα Windows/PowerShell, στις υπηρεσίες γλώσσας και στην ενσωμάτωση Notebook του VS Code, στην υποστήριξη network proxy και στην εμπειρία εγκατάστασης.
 
 ---
 
@@ -93,10 +93,10 @@ OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.12-smark
+  bash -s -- --version 1.15.13-smark
 ```
 
-Αυτή είναι η πλήρης μορφή: το `bash -s --` λέει στο `bash` να διαβάσει τον installer από stdin και να περάσει το `--version 1.15.12-smark` ως ορίσματα installer. Η έκδοση μπορεί να είναι `1.15.12-smark` ή η μορφή release tag `v1.15.12-smark`.
+Αυτή είναι η πλήρης μορφή: το `bash -s --` λέει στο `bash` να διαβάσει τον installer από stdin και να περάσει το `--version 1.15.13-smark` ως ορίσματα installer. Η έκδοση μπορεί να είναι `1.15.13-smark` ή η μορφή release tag `v1.15.13-smark`.
 
 ### Συμπεριφορά Installer
 
@@ -240,7 +240,7 @@ opencode
 
 ### Ενσωμάτωση Υπηρεσιών Γλώσσας Και Notebook Του VS Code
 
-Για να χρησιμοποιήσετε υπηρεσίες γλώσσας του VS Code ή Notebook tools, εγκαταστήστε το [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Η έκδοση του extension στο repository είναι `1.15.10` και προτείνεται SMARK CLI `1.15.12-smark`· οι εκδόσεις είναι ανεξάρτητες. Το extension δημιουργεί ένα τοπικό authenticated bridge για υπηρεσίες γλώσσας και VS Code/Jupyter Notebook. Χωρίς σύνδεση, το CLI διατηρεί το ενσωματωμένο LSP, αλλά οι λειτουργίες VS Code και τα Notebook tools δεν είναι διαθέσιμα.
+Για να χρησιμοποιήσετε υπηρεσίες γλώσσας του VS Code ή Notebook tools, εγκαταστήστε το [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). Η έκδοση του extension στο repository είναι `1.15.10` και προτείνεται SMARK CLI `1.15.13-smark`· οι εκδόσεις είναι ανεξάρτητες. Το extension δημιουργεί ένα τοπικό authenticated bridge για υπηρεσίες γλώσσας και VS Code/Jupyter Notebook. Χωρίς σύνδεση, το CLI διατηρεί το ενσωματωμένο LSP, αλλά οι λειτουργίες VS Code και τα Notebook tools δεν είναι διαθέσιμα.
 
 Το extension δεν περιλαμβάνει language server· επαναχρησιμοποιεί providers που έχουν καταχωριστεί από ενεργά language extensions στο τρέχον παράθυρο VS Code για touch, diagnostics, hover, definition, references και document/workspace symbols. Αποτυχία bridge request επιστρέφει στο ενσωματωμένο LSP, ενώ το diagnostics επιστρέφει επίσης όταν η δομή απόκρισης είναι άκυρη· άλλες επιτυχείς αποκρίσεις χωρίς το αναμενόμενο πεδίο μπορεί σήμερα να ερμηνευτούν ως κενές. Implementation και call hierarchy παραμένουν πάντα στο ενσωματωμένο LSP, και ένα έγκυρο κενό αποτέλεσμα δεν αποδεικνύει πλήρες project typecheck.
 

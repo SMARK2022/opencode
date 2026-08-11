@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.12-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.13-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Om denne grenen**: Dette er OpenCodes `dev-smark`-forbedrede gren (gjeldende versjon `1.15.12`, CLI release tag `v1.15.12-smark`). Den er basert på upstream `dev` og fokuserer på TUI-interaksjon, sesjonshåndtering, tokenstatistikk, Windows/PowerShell-kompatibilitet, VS Code-språktjenester og Notebook-integrasjon, nettverksproxy-støtte og installasjonsopplevelse.
+> **Om denne grenen**: Dette er OpenCodes `dev-smark`-forbedrede gren (gjeldende versjon `1.15.13`, CLI release tag `v1.15.13-smark`). Den er basert på upstream `dev` og fokuserer på TUI-interaksjon, sesjonshåndtering, tokenstatistikk, Windows/PowerShell-kompatibilitet, VS Code-språktjenester og Notebook-integrasjon, nettverksproxy-støtte og installasjonsopplevelse.
 
 ---
 
@@ -93,10 +93,10 @@ Det sender bare `OPENCODE_INSTALL_DIR` til `curl`, ikke til `bash`-prosessen som
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.12-smark
+  bash -s -- --version 1.15.13-smark
 ```
 
-Dette er den fullstendige formen: `bash -s --` forteller `bash` at den skal lese installasjonsprogrammet fra stdin og sende `--version 1.15.12-smark` som argumenter til installasjonsprogrammet. Versjonen kan være `1.15.12-smark` eller release tag-formen `v1.15.12-smark`.
+Dette er den fullstendige formen: `bash -s --` forteller `bash` at den skal lese installasjonsprogrammet fra stdin og sende `--version 1.15.13-smark` som argumenter til installasjonsprogrammet. Versjonen kan være `1.15.13-smark` eller release tag-formen `v1.15.13-smark`.
 
 ### Installasjonsprogrammets Atferd
 
@@ -240,7 +240,7 @@ Intern statistikk foretrekker data om forespørselsbruk og faller tilbake til me
 
 ### VS Code-Språktjenester Og Notebook-Integrasjon
 
-Installer [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) for å bruke VS Code-språktjenester eller Notebook-verktøy. Repository-versjonen er `1.15.10`, og anbefalt SMARK CLI er `1.15.12-smark`; versjonene er uavhengige. Utvidelsen oppretter en lokal autentisert bridge for språktjenester og VS Code/Jupyter Notebook. Uten forbindelse beholder CLI sin innebygde LSP, men VS Code-operasjoner og Notebook-verktøy er ikke tilgjengelige.
+Installer [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) for å bruke VS Code-språktjenester eller Notebook-verktøy. Repository-versjonen er `1.15.10`, og anbefalt SMARK CLI er `1.15.13-smark`; versjonene er uavhengige. Utvidelsen oppretter en lokal autentisert bridge for språktjenester og VS Code/Jupyter Notebook. Uten forbindelse beholder CLI sin innebygde LSP, men VS Code-operasjoner og Notebook-verktøy er ikke tilgjengelige.
 
 Utvidelsen inkluderer ikke en language server; den gjenbruker providers registrert av aktive språkutvidelser i det gjeldende VS Code-vinduet for touch, diagnostics, hover, definition, references og document/workspace symbols. Mislykkede bridge-forespørsler faller tilbake til innebygd LSP, og diagnostics gjør det også ved ugyldig svarstruktur; andre vellykkede svar uten forventet resultatfelt kan for tiden tolkes som tomme. Implementation og call hierarchy forblir alltid på innebygd LSP, og et gyldig tomt resultat beviser ikke et fullstendig project typecheck.
 

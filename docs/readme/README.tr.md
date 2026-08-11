@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.12-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.15.13-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 
 ---
 
-> **Bu dal hakkında**: Bu, OpenCode'un `dev-smark` geliştirilmiş dalıdır (geçerli sürüm `1.15.12`, CLI release tag `v1.15.12-smark`). Upstream `dev` temel alınmıştır ve TUI etkileşimi, oturum yönetimi, token istatistikleri, Windows/PowerShell uyumluluğu, VS Code dil servisleri ve Notebook entegrasyonu, ağ proxy desteği ve kurulum deneyimine odaklanır.
+> **Bu dal hakkında**: Bu, OpenCode'un `dev-smark` geliştirilmiş dalıdır (geçerli sürüm `1.15.13`, CLI release tag `v1.15.13-smark`). Upstream `dev` temel alınmıştır ve TUI etkileşimi, oturum yönetimi, token istatistikleri, Windows/PowerShell uyumluluğu, VS Code dil servisleri ve Notebook entegrasyonu, ağ proxy desteği ve kurulum deneyimine odaklanır.
 
 ---
 
@@ -93,10 +93,10 @@ Bu yalnızca `OPENCODE_INSTALL_DIR` değerini `curl` için geçirir; installer'�
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.15.12-smark
+  bash -s -- --version 1.15.13-smark
 ```
 
-Tam biçim budur: `bash -s --`, `bash`'e installer'ı stdin'den okumasını ve `--version 1.15.12-smark` değerini installer argümanları olarak geçirmesini söyler. Sürüm `1.15.12-smark` veya release tag biçimi olan `v1.15.12-smark` olabilir.
+Tam biçim budur: `bash -s --`, `bash`'e installer'ı stdin'den okumasını ve `--version 1.15.13-smark` değerini installer argümanları olarak geçirmesini söyler. Sürüm `1.15.13-smark` veya release tag biçimi olan `v1.15.13-smark` olabilir.
 
 ### Installer Davranışı
 
@@ -240,7 +240,7 @@ Dahili istatistikler request usage verisini tercih eder ve eski oturumlar için 
 
 ### VS Code Dil Servisleri Ve Notebook Entegrasyonu
 
-VS Code dil servislerini veya Notebook tools'u kullanmak için [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) kurun. Repository extension sürümü `1.15.10`, önerilen SMARK CLI sürümü `1.15.12-smark`tır; sürümler bağımsızdır. Extension, dil servisleri ve VS Code/Jupyter Notebook için yerel authenticated bridge oluşturur. Bağlantı olmadığında CLI dahili LSP'yi kullanmaya devam eder, ancak VS Code-backed işlemler ve Notebook tools kullanılamaz.
+VS Code dil servislerini veya Notebook tools'u kullanmak için [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) kurun. Repository extension sürümü `1.15.10`, önerilen SMARK CLI sürümü `1.15.13-smark`tır; sürümler bağımsızdır. Extension, dil servisleri ve VS Code/Jupyter Notebook için yerel authenticated bridge oluşturur. Bağlantı olmadığında CLI dahili LSP'yi kullanmaya devam eder, ancak VS Code-backed işlemler ve Notebook tools kullanılamaz.
 
 Extension bir language server içermez; mevcut VS Code penceresinde etkin language extensions tarafından kaydedilen provider'ları touch, diagnostics, hover, definition, references ve document/workspace symbols için kullanır. Bridge request başarısızsa dahili LSP'ye fallback olur; diagnostics ayrıca response structure geçersizse fallback yapar, diğer başarılı response'larda beklenen result field eksikse sonuç şu anda boş yorumlanabilir. Implementation ve call hierarchy her zaman dahili LSP'de kalır ve geçerli boş sonuç tüm project typecheck'in geçtiğini kanıtlamaz.
 
