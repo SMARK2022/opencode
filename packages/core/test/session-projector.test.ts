@@ -418,6 +418,60 @@ describe("SessionProjector", () => {
     }),
   )
 
+  listingIt.effect("keeps Native viewer summaries cold while restoring visible attachments and tools", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const sessions = yield* SessionV2.Service
+      yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
+      yield* db.insert(SessionTable).values({ id: sessionID, project_id: Project.ID.global, slug: "viewer", directory: "/project", title: "viewer", version: "test", time_updated: 0 }).run()
+      const first = SessionMessage.ID.make("msg_viewer_summary")
+      const second = SessionMessage.ID.make("msg_viewer_attachment")
+      const assistant = SessionMessage.ID.make("msg_viewer_tool")
+      const summary = { diffs: [{ file: "large.ts", patch: "+summary\n".repeat(512), additions: 512, deletions: 0, status: "modified" as const }] }
+      const files = [{ uri: "data:text/plain;base64," + "YQ==".repeat(512), mime: "text/plain", name: "evidence.txt" }]
+      // 同一选集同时放summary-only、冷附件User及冷Tool，不能用统一跳解压换取假优化。
+      const users = [
+        SessionMessage.User.make({ id: first, type: "user", text: "summary-only body", summary, time: { created } }),
+        SessionMessage.User.make({ id: second, type: "user", text: "attachment body", summary, files, time: { created } }),
+      ]
+      yield* db.insert(SessionMessageTable).values(users.map((message, index) => {
+        const { id, type, ...data } = encodeMessage(message)
+        return { id: SessionMessage.ID.make(id), session_id: sessionID, seq: index + 1, time_created: 0, type, data }
+      })).run()
+      const content = [
+        { type: "reasoning", id: "reason", text: "visible reasoning ".repeat(300) },
+        { type: "tool", id: "edit", name: "edit", time: { created: 0, completed: 1 }, state: { status: "completed", input: { path: "large.ts" }, structured: { changed: true }, content: [{ type: "text", text: "visible tool ".repeat(300) }] } },
+      ] satisfies (typeof SessionMessage.Assistant)["Encoded"]["content"]
+      const message = { ...assistantRow(assistant, 3), data: { ...assistantRow(assistant, 3).data, content } }
+      yield* db.insert(SessionMessageTable).values(message).run()
+      yield* Database.withSync({ db, sync: db.sync }, sync => {
+        for (const id of [first, second, assistant]) expect(ColdStorage.freezeOwner(sync, { type: "session_message", id, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
+      })
+      const before = yield* db.select().from(SessionMessageTable).orderBy(asc(SessionMessageTable.seq)).all()
+      expect(before.map(row => Boolean(row.cold_ref))).toEqual([true, true, true])
+      const view = yield* sessions.messages({ sessionID, order: "asc", messageProjection: "viewer" })
+      expect(view.map(message => message.id)).toEqual([first, second, assistant])
+      expect(view[0]).toMatchObject({ type: "user", text: "summary-only body" })
+      expect(view[0]).not.toHaveProperty("summary")
+      expect(view[1]).toMatchObject({ type: "user", text: "attachment body", files })
+      expect(view[1]).not.toHaveProperty("summary")
+      expect(view[2] && encodeMessage(view[2])).toMatchObject({ type: "assistant", content })
+      // 只读省略不能持久删除summary；附件和Tool则必须已真实恢复，而非返回骨架。
+      const after = yield* db.select().from(SessionMessageTable).orderBy(asc(SessionMessageTable.seq)).all()
+      expect(after.map(row => row.cold_ref)).toEqual([before[0]?.cold_ref, null, null])
+      expect(after[0]?.cold_key).toEqual(before[0]?.cold_key)
+      expect(after[1]?.data).toMatchObject({ summary })
+      expect((yield* db.select().from(ColdStorageTable).all()).map(row => row.ref_count)).toEqual([1])
+      // 默认API仍返回完整摘要并释放最后引用；不能让viewer污染SDK/模型历史的后续读取。
+      const complete = yield* sessions.messages({ sessionID, order: "asc" })
+      expect(complete[0]).toMatchObject({ summary })
+      expect(complete[1]).toMatchObject({ files, summary })
+      expect(complete[2] && encodeMessage(complete[2])).toMatchObject({ content })
+      expect((yield* db.select().from(SessionMessageTable).all()).every(row => row.cold_ref === null)).toBe(true)
+      expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
+    }),
+  )
+
   previewIt.effect("persists request-owned tool diffs through the native completion event", () =>
     Effect.gen(function* () {
       const db = (yield* Database.Service).db

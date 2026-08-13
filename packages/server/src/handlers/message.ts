@@ -1,6 +1,7 @@
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { Effect, Schema } from "effect"
+import { HttpServerRequest } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { Api } from "../api"
 import { InvalidCursorError, SessionNotFoundError, UnknownError } from "@opencode-ai/protocol/errors"
@@ -38,10 +39,13 @@ export const MessageHandler = HttpApiBuilder.group(Api, "server.message", (handl
           catch: () => new InvalidCursorError({ message: "Invalid cursor" }),
         })
         const order = decoded?.order ?? ctx.query.order ?? "desc"
+        const request = yield* HttpServerRequest.HttpServerRequest
         const messages = yield* session
           .messages({
             sessionID: ctx.params.sessionID,
             limit: ctx.query.limit ?? DefaultMessagesLimit,
+            // 与兼容TUI使用同一私有信号，公开schema/cursor与默认完整响应保持不变。
+            messageProjection: request.headers["x-opencode-tui-message-projection"] === "viewer" ? "viewer" : undefined,
             order,
             cursor: decoded ? { id: decoded.id, direction: decoded.direction } : undefined,
           })

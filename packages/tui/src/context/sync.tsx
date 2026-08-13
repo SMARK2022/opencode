@@ -40,6 +40,39 @@ import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from 
 // #529：浏览窗口/上限常量与 dialog 搜索同源，避免两处窗口再次分叉
 import { SESSION_LIST_BROWSE_LIMIT, SESSION_LIST_LOOKBACK_MS } from "../util/session-list-params"
 
+// 同一私有 viewer 信号收窄 Message 与 diff；默认 SDK/Web App 请求不带它，完整合同不变。
+// 该常量只属于 TUI transport，不进入 OpenAPI query 或 generated SDK，避免把内部投影固化成公共 API。
+const TUI_VIEWER_HEADER = "x-opencode-tui-message-projection"
+const TUI_VIEWER = "viewer"
+// #570 起 session.updated/session.diff 共享同一 admission；本补丁补齐的是 projection 侧的原子收敛。
+// 100 是所有 TUI Session 共用的结果上限，不根据 Session 大小、耗时或内存走不同生产路径。
+// Files 保持默认展开；上限直接约束网络对象、store 项和 Renderable 基数，而不是延迟同一份无界工作。
+const TUI_DIFF_LIMIT = 100
+// 总量放在私有 response headers，body 继续满足既有 FileDiff[] schema，不引入 sentinel 或 wrapper。
+// legacy Session 即使缺少 hot summary，也能从本次 authoritative diff 获得精确总量而无需第二数据源。
+const TUI_DIFF_TOTAL_FILES = "x-opencode-tui-total-files"
+const TUI_DIFF_TOTAL_ADDITIONS = "x-opencode-tui-total-additions"
+const TUI_DIFF_TOTAL_DELETIONS = "x-opencode-tui-total-deletions"
+
+function projectTuiDiff(diffs: readonly SnapshotFileDiff[]) {
+  // SSE 仍携带共享完整事件；TUI reducer 是不破坏 share consumer 的首个可收窄 owner。
+  // HTTP body 已由 daemon 截断，但再次应用同一投影可保证测试 transport 和未来 caller 都不能灌回 patch。
+  // 与 plugin adapter 共用 file 可见性口径；必须在 totals/cap 前过滤，legacy 项不能占用100行预算。
+  const displayable = diffs.filter((item) => item.file !== undefined)
+  return {
+    items: displayable.slice(0, TUI_DIFF_LIMIT).map((item) => {
+      const { patch: _, ...stats } = item
+      return stats
+    }),
+    summary: {
+      // totals 必须从 displayable 而非 capped items 计算：100 行上限不能被误读为全量。
+      files: displayable.length,
+      additions: displayable.reduce((total, item) => total + item.additions, 0),
+      deletions: displayable.reduce((total, item) => total + item.deletions, 0),
+    },
+  }
+}
+
 // #364：goal 类型定义（SDK 未重新生成前使用内联类型）
 // 字段与 src/session/goal.ts 的 Goal schema 对齐
 type SessionGoalInfo = {
@@ -491,8 +524,15 @@ export const {
     const acceptSession = (info: Session, tracker?: SessionTrace) => {
       // 只有明确 null 才是删除；复制事件快照再入 store，避免另一列表或 reconcile 改写请求证据。
       const current = tracker?.session === undefined ? info : structuredClone(tracker.session)
-      if (!current || !tracker?.moved) return current
-      return { ...current, ...tracker.moved, time: { ...current.time, ...tracker.moved.time } }
+      if (!current) return current
+      const match = search(store.session, current.id, (session) => session.id)
+      // raw trace仍保留完整事件；只有进入viewer store时才保留同一diff投影的本地总量。
+      const summary = match.found && Object.hasOwn(store.session_diff, current.id)
+        ? store.session[match.index].summary
+        : undefined
+      const projected = summary ? { ...current, summary } : current
+      if (!tracker?.moved) return projected
+      return { ...projected, ...tracker.moved, time: { ...projected.time, ...tracker.moved.time } }
     }
     const touchMessage = (sessionID: string, messageID: string) => {
       hydratingSessions.get(sessionID)?.messages.add(messageID)
@@ -722,7 +762,16 @@ export const {
           break
 
         case "session.diff":
-          setStore("session_diff", event.properties.sessionID, event.properties.diff)
+          setStore(
+            produce((draft) => {
+              // diff rows 与 totals 必须在同一 Solid transaction 收敛，否则 Files 会短暂把旧总数解释成新列表截断。
+              // 本地 summary 只是 viewer projection；共享 Session 持久数据仍由 daemon 的 Summary/Revert owner 管理。
+              const projected = projectTuiDiff(event.properties.diff)
+              draft.session_diff[event.properties.sessionID] = projected.items
+              const result = search(draft.session, event.properties.sessionID, (session) => session.id)
+              if (result.found) draft.session[result.index].summary = projected.summary
+            }),
+          )
           break
 
         case "session.deleted": {
@@ -742,15 +791,17 @@ export const {
         }
         case "session.updated": {
           touchSession(event.properties.info.id, event.properties.info)
+          // 与GET/list共用接收边界，防止迟到完整summary覆盖已归一化的viewer总量。
+          const info = acceptSession(event.properties.info)!
           const result = search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
-            setStore("session", result.index, reconcile(event.properties.info))
+            setStore("session", result.index, reconcile(info))
             break
           }
           setStore(
             "session",
             produce((draft) => {
-              draft.splice(result.index, 0, event.properties.info)
+              draft.splice(result.index, 0, info)
             }),
           )
           break
@@ -1190,13 +1241,18 @@ export const {
           const tracker = { messages: new Set<string>(), parts: new Set<string>(), session: undefined }
           hydratingSessions.set(sessionID, tracker)
           const task = (async () => {
-            const [session, messages, todo, diff] = await Promise.all([
+            // diff 不再参与首屏屏障：大 Session 的 patch 聚合不再阻塞 messages/todo 渲染。
+            const [session, messages, todo] = await Promise.all([
               sdk.client.session.get({ sessionID }, { throwOnError: true }),
               // #162：会话消息拉取窗口扩至 200，降低长会话过早截断
               // #290：会话消息拉取窗口同步提升至 300，与本地缓存窗口对齐
-              sdk.client.session.messages({ sessionID, limit: 300 }),
+              // 仅 TUI viewer 请求省略每轮冷 summary；Web App/SDK 的默认完整合同不带此信号。
+              // limit=300 继续锁定现有分页语义；projection 只改变每条 Message 的数据深度，不改变范围或顺序。
+              sdk.client.session.messages(
+                { sessionID, limit: 300 },
+                { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
+              ),
               sdk.client.session.todo({ sessionID }),
-              sdk.client.session.diff({ sessionID }),
               // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
               sdk.client.session.status({ workspace: project.workspace.current() })
                 .then((x) => setStore("session_status", reconcile(x.data ?? {}))),
@@ -1266,7 +1322,6 @@ export const {
                 }
                 for (const message of removed) delete draft.part[message.id]
                 draft.message[sessionID] = visible
-                draft.session_diff[sessionID] = diff.data ?? []
               }),
             )
             // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。
@@ -1277,6 +1332,36 @@ export const {
                 replayOrphanDeltas(part.id, message.info.id)
               }
             }
+            // 可见历史先发布；diff 的 decode/传输失败仍由同一个 sync 直接抛出，但不能再成为首屏屏障。
+            // diff 此时才创建 Promise，因此不存在“早期 rejection 等待其他请求”造成的 unhandled 窗口。
+            // force reconnect 仍 await 同一 authoritative 请求；这里不是 fire-and-forget，也不合成备用成功。
+            const diff = await sdk.client.session.diff(
+              { sessionID },
+              { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
+            )
+            // data??[] 兼容旧 daemon 无 headers 响应；投影后再决定 totals 来源。
+            const projected = projectTuiDiff(diff.data ?? [])
+            const files = diff.response?.headers.get(TUI_DIFF_TOTAL_FILES) ?? null
+            // headers 经 hey-api response 原样暴露；缺组即视为旧 daemon 响应并回退 data 投影。
+            const additions = diff.response?.headers.get(TUI_DIFF_TOTAL_ADDITIONS) ?? null
+            const deletions = diff.response?.headers.get(TUI_DIFF_TOTAL_DELETIONS) ?? null
+            setStore(
+              produce((draft) => {
+                draft.session_diff[sessionID] = projected.items
+                const result = search(draft.session, sessionID, (item) => item.id)
+                // headers 成组存在时是同一viewer response的权威总量；否则采用当前data??[]投影，不能混入旧Session summary。
+                // resolved HTTP error因此原子提交空rows/zero totals；fetch exception仍由optional response access保持既有语义。
+                if (result.found)
+                  draft.session[result.index].summary =
+                    files === null || additions === null || deletions === null
+                      ? projected.summary
+                      : {
+                          files: Number(files),
+                          additions: Number(additions),
+                          deletions: Number(deletions),
+                        }
+              }),
+            )
             fullSyncedSessions.add(sessionID)
           })().finally(() => {
             syncingSessions.delete(sessionID)

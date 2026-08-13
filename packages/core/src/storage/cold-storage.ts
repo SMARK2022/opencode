@@ -1989,11 +1989,25 @@ export function thawSessionMessageRowsInTransaction(db: TxOrDb, rows: (typeof Se
 }
 
 // 普通读取先选定范围，再预约原连接并原子回填；范围外消息和统计热查询不被预热。
-export function readSessionMessageRows(db: Database.Interface["db"], rows: (typeof SessionMessageTable.$inferSelect)[]) {
-  if (!rows.some(row => row.cold_ref)) return Effect.sync(() => inspectSessionMessageRows(db.sync, rows))
-  return Database.withSync({ db, sync: db.sync }, sync => sync.transaction(
-    tx => thawSessionMessageRowsInTransaction(tx, rows), { behavior: "immediate" },
-  ))
+export function readSessionMessageRows(db: Database.Interface["db"], rows: (typeof SessionMessageTable.$inferSelect)[], messageProjection?: "viewer") {
+  // 归档白名单中，冷User除summary仅inline附件需要恢复；不能把Tool或附件占位当成完整消息。
+  const selected = messageProjection === "viewer" ? rows.filter(row => {
+    const data: unknown = row.data
+    return row.type !== "user" || !row.cold_ref || !isRecord(data) || Array.isArray(data.files) && data.files.some(file => isRecord(file) && file.uri === "")
+  }) : rows
+  // 必需内容仍在原同连接事务中整批恢复；summary-only不解压、不清指针、不扣引用。
+  const restored = !selected.some(row => row.cold_ref)
+    ? Effect.sync(() => inspectSessionMessageRows(db.sync, selected))
+    : Database.withSync({ db, sync: db.sync }, sync => sync.transaction(
+      tx => thawSessionMessageRowsInTransaction(tx, selected), { behavior: "immediate" },
+    ))
+  if (messageProjection !== "viewer") return restored
+  return restored.pipe(Effect.map(items => {
+    // DB选集的主键唯一；临时join保留原seq/page顺序，不建立第二份持久状态或恢复路径。
+    const byID = new Map(rows.map(row => [row.id, row]))
+    for (const row of items) byID.set(row.id, row)
+    return [...byID.values()]
+  }))
 }
 
 // Pack ref_count 按 owner 增量而不是按 unique key 增量；相同 entry 被两个 Message 使用时仍需两个生命周期引用。

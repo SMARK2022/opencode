@@ -456,7 +456,11 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           async refresh(sessionID: string) {
             // HTTP 替换前后都结清当前窗，不把旧 delta 追加到包含它的完整快照。
             deltas.flush()
-            const result = await sdk.client.v2.session.messages({ sessionID }, { throwOnError: true })
+            // Native同样请求无逐轮summary的viewer；正文/附件仍完整，默认客户端不受影响。
+            const result = await sdk.client.v2.session.messages(
+              { sessionID },
+              { throwOnError: true, headers: { "x-opencode-tui-message-projection": "viewer" } },
+            )
             deltas.flush()
             setStore("session", "message", sessionID, result.data.data)
           },

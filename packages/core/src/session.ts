@@ -133,6 +133,8 @@ export interface Interface {
     sessionID: SessionSchema.ID
     limit?: number
     order?: "asc" | "desc"
+    // 私有viewer只收窄本次读取深度，默认业务/SDK仍获得完整消息。
+    messageProjection?: "viewer"
     cursor?: {
       id: SessionMessage.ID
       direction: "previous" | "next"
@@ -405,8 +407,13 @@ const layer = Layer.effect(
           Effect.orDie,
         )
         // 只恢复实际返回页，cursor探针与范围外消息仍保持冷态。
-        const restored = yield* ColdStorage.readSessionMessageRows(db, rows)
-        return yield* Effect.forEach(direction === "previous" ? restored.toReversed() : restored, decode)
+        const restored = yield* ColdStorage.readSessionMessageRows(db, rows, input.messageProjection)
+        // 先完整恢复必需正文再正式decode；仅省略合法optional summary，不改写持久行或默认完整API。
+        return yield* Effect.forEach(direction === "previous" ? restored.toReversed() : restored, row => decode(row).pipe(Effect.map(message => {
+          if (input.messageProjection !== "viewer" || message.type !== "user") return message
+          const { summary: _, ...info } = message
+          return info
+        })))
       }),
       message: Effect.fn("V2Session.message")(function* (input) {
         // 定点公开读取沿原undefined/not-found合同；不能先调用raw Store把隐藏cold消息解包。
