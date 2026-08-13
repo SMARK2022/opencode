@@ -160,6 +160,39 @@ describe("EditTool", () => {
         expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("pad  \nsay $& $1 done\n\n")
         expect(formatted.result).toMatchObject({ type: "text", value: expect.stringContaining("+say $& $1 done") })
         expect(formatted.output?.structured).toMatchObject({ syncInput: { edits: [{ oldString: "end", newString: "done" }] } })
+        reset()
+        // 真实结算同时观察归一化跳写字节、warning、替换次数和历史，不只测试孤立 matcher。
+        const mixedEdits = [{ oldString: "x", newString: "y" }, { oldString: "foo - bar", newString: "foo - bar" }]
+        yield* Effect.promise(() => fs.writeFile(target, "x\nfoo \u2013 bar\n"))
+        const mixed = yield* run(mixedEdits)
+        expect(mixed.result).toMatchObject({ type: "text", value: expect.stringContaining("Warning: 1 of 2 edit(s) were no-ops") })
+        expect(mixed.output?.structured).toMatchObject({ replacements: 1, syncInput: { edits: mixedEdits } })
+        expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("y\nfoo \u2013 bar\n")
+        expect(writes).toHaveLength(1)
+        for (const example of [
+          { before: "x\nsame same", edits: [{ oldString: "x", newString: "y" }, { oldString: "same", newString: "same" }], reason: "occurrences" },
+          { before: "x\nsame", edits: [{ oldString: "x", newString: "y" }, { oldString: "missing", newString: "missing" }], reason: "Could not find edits[1]" },
+          { before: "foo \u2013 bar", edits: [{ oldString: "foo - bar", newString: "foo - bar" }], reason: "identical" },
+        ]) {
+          reset()
+          // 无操作条目同样必须定位且唯一；任何失败整批零写入，漂移全 no-op 也不能成功。
+          yield* Effect.promise(() => fs.writeFile(target, example.before))
+          expect((yield* run(example.edits)).result).toMatchObject({ type: "error", value: expect.stringContaining(example.reason) })
+          expect(writes).toEqual([])
+          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(example.before)
+        }
+        reset()
+        yield* Effect.promise(() => fs.writeFile(target, "x\nsame same"))
+        const repeated = yield* run([{ oldString: "x", newString: "y" }, { oldString: "same", newString: "same", replaceAll: true }])
+        expect(repeated.output?.structured).toMatchObject({ replacements: 1 })
+        expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("y\nsame same")
+        // 超过通用默认预算仍必须在实际模型结果尾部看到 warning，原文保留沿用既有 owner。
+        const long = "z".repeat(20000)
+        yield* Effect.promise(() => fs.writeFile(target, `${long}\nkeep`))
+        const bounded = yield* run([{ oldString: long, newString: `${long}q` }, { oldString: "keep", newString: "keep" }])
+        expect(bounded.result).toMatchObject({ type: "text", value: expect.stringContaining("Warning: 1 of 2 edit(s) were no-ops") })
+        expect(bounded.outputPaths?.length).toBeGreaterThan(0)
+        expect(bounded.output?.structured).toMatchObject({ replacements: 1 })
       }),
       tmp => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
@@ -433,7 +466,7 @@ describe("EditTool", () => {
       (tmp) => {
         reset()
         const target = path.join(tmp.path, "matches.txt")
-        return Effect.promise(() => fs.writeFile(target, "same same")).pipe(
+        return Effect.promise(() => fs.writeFile(target, "same")).pipe(
           Effect.andThen(
             withTool(tmp.path, (registry) =>
               Effect.gen(function* () {
@@ -443,6 +476,8 @@ describe("EditTool", () => {
                   type: "error",
                   value: "No changes to apply: oldString and newString are identical.",
                 })
+                // 全 no-op 使用唯一 needle；独立歧义断言仍沿用多候选原文。
+                yield* Effect.promise(() => fs.writeFile(target, "same same"))
                 expect(
                   yield* executeTool(registry, call({ path: "matches.txt", oldString: "", newString: "after" })),
                 ).toEqual({
