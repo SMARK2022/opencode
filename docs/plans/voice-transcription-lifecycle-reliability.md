@@ -2,19 +2,21 @@
 
 > Status: verified
 >
-> Revision: R54
+> Revision: R63
 >
-> Approved revision: R54
+> Approved revision: R63
 >
 > Audit mode: implementation
 >
-> Requirement source: 用户关于 ChatGPT voice 转录反复跳转、一次好一次坏、冷启动/并发/长语音/浏览器关闭后恢复及“不以报错作为 fallback”的原始需求与本轮补充说明
+> Requirement source: 原始 voice 生命周期需求，以及用户本轮关于孤儿浏览器、Unicode 日志偏移、about:blank、不强杀浏览器、错误自解决、冷启动和至少三次完整预算重试的补充要求
 >
-> Implementation allowed: no further material changes without a new revision
+> Implementation allowed: no further material changes without revision or audit rework
 >
-> Last updated: 2026-07-16
+> Last updated: 2026-08-14
 
 本文件是本任务唯一的实现规格。`thirdparty/chatgpt-browser-agent/docs/voice-runtime-hardening-plan.md` 是上一轮已经落地的历史方案，不是本任务的canonical plan；本轮从当前仓库和当前日志重新建立证据。稳定性是主修复和主测试目标，取消只保留为已有生命周期的回归保护。R21至R24已把voice收敛为唯一bootstrap/Bearer direct路径。R26让`withSubmission`包围整个`submitAsk`与voice direct；实现审计发现旧压力harness五次命中completed replay。distinct prompt暴露的第4次existing-Session composer reset发生在全部voice结束后，属于独立generic ask缺陷，R31明确不修改production处理它。R31统一压力合同为六个并发调度的独立new Session ask，并按用户配置名称`MCP`解析Project；不得在代码、测试或plan命令中硬编码用户给出的conversation URL或Project token。R32至R33修复同一sidebar交互主路径。R34发现Project首页DOM早于`conversation/init`完成，但只覆盖live click且漏算诊断。R35把live sidebar click与cache/currentProject驱动的fresh `goto`统一到同一个Project-home network-convergence seam。R36由完整压力的新证据触发：cold Project的可信expander click与另页voice direct `Runtime.callFunctionOn`重叠时确定性不settle；因此首次Project single-flight必须进入已有submission transaction owner。R37按独立审计补足长语音验收：300秒有效WAV只在末端放置运行时合成的两个确定性语音marker，必须返回两个marker，不能再以任意非空文本证明完整处理。R38的复测发现R36只移动了Project任务，`runVoiceTranscribe`仍在queue外启动voice lease/preflight；当Project先入FIFO时，voice稳定性检查继续与Project click重叠，voice direct随后被队头Project阻塞并触达60秒deadline。R38只收敛这个既有queue owner，不延长deadline、不猜URL、不改变Session identity或增加fallback。R39由R38后的fresh `4 voice + 2 ask`复测触发：两次ask的`pageFor`/`newPage`已经正常完成，Project root/sidebar/可信expander也正常完成，但DOM adapter在选择请求的`MCP`之前，因页面上存在无关的重复Project名称`个人`直接抛出`PROJECT_AMBIGUOUS`。R39拟在DOM discovery按请求名称判歧义，独立审计指出这仍会在URL去重和Project ID解析前误拒绝同一身份的响应式重复表示，并复制现有policy/click owner。R40据此只删除通用discovery中的全局名称裁决：有URL候选继续由现有纯Project policy按不同身份判歧义；无href且即将按名称点击的row继续由现有DOM click路径判歧义。不新增target参数、第二套解析、fallback、重试、配置或URL猜测。
+
+R63是本轮唯一current revision。它保留R62设计，并删除R62 plan audit发现的旧401-retire残留授权：local 401唯一合同是重新读取current discovery，身份已变化且新state通过`/ping + /status`时才允许既有下一attempt复用；身份未变/缺失/不可验证原样失败。任何local 401都不得调用`retireDaemon`、`/stop`、`unlinkDaemonFiles`或映射为`BROWSER_DISCONNECTED`。R62及更早revision、审计和实现记录均为不可篡改历史，不授权R63实施。
 
 ## 1. Verbatim Requirement
 
@@ -33,10 +35,13 @@
 - 不强制接管正在运行且没有CDP入口的日常Edge Default profile；shared CDP仍须由用户显式配置，默认owned agent profile继续独立持久化。
 - 不为测试伪造畸形认证输入、未来session schema或未观察到的浏览器状态；只覆盖本轮真实观察到的`client-bootstrap` logged-in/logged-out事实、guest composer误判和官方`SendIfAvailable` direct链。
 - 不通过新增配置开关让用户自己选择“旧启动路径/新启动路径”。
-- 不保留“direct失败后自动进入UI听写”或“voice遇到浏览器错误后同一次请求自动重发”这类以错误触发的成功路径；如果私有direct接口失败，voice返回可诊断失败，下一次独立调用再按生命周期规则启动或重建资源。
+- 不恢复UI听写、第二转录端点、Enter/DOM点击或不同上传算法。R56按用户明确要求把同一`transcribe-file`调用定义为一个最多四次尝试的direct事务；每次都重新经过同一个daemon/browser/page/direct主路径，不存在失败后改走另一种成功语义。
 - 不把取消信号当作页面稳定、转录完成或浏览器健康的判断依据；取消只验证请求停止和资源清理，不替代稳定化检测。
 - 不把“预上传阶段发现页面已过期”误判为本次voice必须失败：在没有音频POST副作用前，页面退役和一次有界续租属于同一primary page-acquisition lifecycle，不是错误fallback。
-- 不新增direct响应解析算法；当前`response.text()`、JSON解析和`text`字段校验已经是完整body边界，本轮只验证正常已认证成功及已观察HTTP/transport失败不进入fallback，不构造畸形body。
+- 不新增direct响应解析算法；当前`response.text()`、JSON解析和`text`字段校验仍是完整body边界。HTTP/transport/page/browser失败只触发同一primary transaction的下一次尝试，不切换wire或构造成功。
+- 不扫描、附加或关闭用户日常Edge。默认`STATE_DIR/profile`由daemon生命周期合同独占；显式CDP URL或WS endpoint继续使用shared-browser合同并只disconnect。显式`CHATGPT_BROWSER_USER_DATA_DIR`在未锁定时保留既有daemon受控launch/close，在已锁定且无endpoint时明确拒绝。
+- 不通过`taskkill /F`、`SIGKILL`或Puppeteer child handle强制终止私有浏览器；正常停止和可连接的退化浏览器只用CDP `Browser.close`，关闭未在有界时间完成则断开控制并由下一次尝试重连。
+- 不把登录过期、token消失、需要用户介入、确定性认证/响应契约拒绝、browser path/profile配置错误、WAV输入错误或其它非可恢复4xx重复四次；至少三次重试只适用于有稳定producer code的可恢复运行错误。
 
 ## 3. Repository Context
 
@@ -85,7 +90,7 @@
 | 当前ChatGPT前端已加载bundle的transcribe实现 | FormData写`file`及可选`language/duration_ms`，调用`safePost('/transcribe', { authOption: SendIfAvailable })`；shared client将其解析到`https://chatgpt.com/backend-api`，`SendIfAvailable`从bootstrap session state取access token并在可用时加`Authorization: Bearer`。 | observed / current wire |
 | 当前agent专用profile的浏览器cookie元数据 | 当前页面没有登录session credential，reload后的bootstrap明确logged out；只读取cookie名/属性，未读取或输出cookie值。 | observed |
 | `/Users/sunbenteng/.config/opencode/opencode.json`的ChatGPT MCP条目 | 只配置本地`mcp-server.js`命令，没有覆盖browser profile/CDP环境；实际使用默认agent专用profile。未使用或输出其它provider凭据。 | observed |
-| owned Edge启动URL单变量对照 | 直接携带ChatGPT URL曾出现“无法加载订阅：Failed to fetch”；`about:blank -> CDP ready -> daemon导航ChatGPT`保持登录，10秒内无dialog、同源4xx/5xx或requestfailed。 | observed |
+| owned Edge启动顺序单变量对照 | 直接携带ChatGPT URL曾出现“无法加载订阅：Failed to fetch”；`about:blank -> CDP ready -> daemon导航ChatGPT`保持登录，10秒内无dialog、同源4xx/5xx或requestfailed。R56采用后者，空白页只允许作为CDP启动过渡，绝不作为daemon ready或失败残留终态。 | observed |
 | `.temp/testing/chatgpt-voice-auth-evidence/inspect-current-wire.cjs`及`evidence.json` | 可独立执行`node inspect-current-wire.cjs`：真实logged-in主page、真实无痕guest page和本次部署两个公共frontend bundle；输出只有布尔、公开source excerpt/hash，无token/cookie值。三项verdict均为true。 | observed / directly inspectable |
 | `evidence.json:14-23`真实guest producer | `readyState=complete`、composer和登录入口同时存在，旧正文正则仍使`currentHeuristicLoggedOut=false`；唯一观察到的`#client-bootstrap`为`logged_out`且无session/token。 | observed |
 | `evidence.json:25-49`当前frontend wire | conversation bundle明确FormData `file`、可选language/duration、`safePost('/transcribe')`和`SendIfAvailable`；shared client明确`/backend-api`、bootstrap state accessToken和可用时Bearer。 | observed / current wire |
@@ -103,7 +108,7 @@
 
 ## 5. Current Behavior
 
-当前R10实施工作树的实际链路如下；第8节保留的R6前链路只用于解释历史red，不是当前行为：
+当前R60已实施工作树的实际链路如下；R63目标状态不属于当前行为，见第10节：
 
 ```text
 TUI Alt+V
@@ -113,28 +118,28 @@ TUI Alt+V
   -> ensureDaemon()
   -> spawn chatgpt.js --daemon-internal
   -> startDaemonProcess()
-  -> 默认debug port 0：puppeteer.launch Edge + 专用profile
-     或显式CDP/WS：connect shared/预启动Edge
+  -> 默认私有profile：先连接DevToolsActivePort marker；不存在活动browser才spawn blank并marker connect
+     或显式CDP/WS：connect shared；或unlocked external profile受控puppeteer.launch
   -> prepareBootstrapPage()
-  -> root/login DOM文案启发式检查；不解析Project
+  -> 已验证bootstrap四态收敛；不解析Project
   -> HTTP server ready
   -> POST /voice/transcribe-file
   -> runVoiceRequest()
   -> runVoiceTranscribe()
   -> borrowed-or-dedicated voice lease
-  -> 两次voiceSessionFact：DOM composer/login文案事实
+  -> fresh terminal wait + 两次sessionPageFact
   -> chatgpt-dom.transcribeAudioFile()
-  -> cookie-only direct POST /backend-api/transcribe
+  -> page-local bootstrap Bearer direct POST /backend-api/transcribe
   -> 完整JSON text或HTTP/transport诊断；不进入UI fallback
-  -> JSON text回到TUI
+  -> CLI最多四次同主路径attempt；TUI总预算1,237,000ms且取消只终止CLI父进程
 ```
 
 当前已确认的导航、profile和认证行为：
 
 - daemon启动已不再解析Project；bootstrap只为root/login检查导航，ask在new/legacy Session边界才lazy初始化default Project。
-- 默认owned路径仍是`puppeteer.launch`，与`--login`使用的普通Edge启动语义不同；R13阶段cookie-only cold voice曾成功，但当前稳定429和logged-out bootstrap要求修正认证owner，不要求替换启动器。
+- 当前default-private先消费自身profile的完整marker endpoint；cold时spawn `about:blank`只等CDP ready，再由唯一bootstrap owner导航ChatGPT。显式unlocked external profile仍由`puppeteer.launch`受控启动；shared CDP/WS只disconnect。
 - voice新建page会导航官方root，健康复用page不重复导航；direct路径不`bringToFront`、不进入composer、不再有UI dictation fallback。
-- 当前R20 stable probe仍只消费DOM登录/guest启发式，且direct只使用同源cookie；真实guest composer已被误判为登录并发送无鉴权POST，这是R24待修复的当前缺口。
+- R24已把stable probe和direct收敛为bootstrap四态与page-local Bearer；R55不再修改认证wire。
 - ask的8秒foreground pulse仍会`bringToFront()`并滚底；它不应在direct voice成功路径中参与，但必须在voice与ask并发测试中保持不互相导航。
 
 当前缓存读写职责：
@@ -184,24 +189,30 @@ not allowed to drive this plan.
 | --- | --- | --- | --- |
 | INV-01 | 一个有效voice请求在daemon启动时只需要浏览器和voice transport可用；不得先完成Project discovery、Project首页验证或ask专属导航。 | 用户要求、真实冷启动红反馈、`startDaemonProcess`调用链 | 缺少启动期voice隔离测试 |
 | INV-02 | direct voice成功路径不导航、不刷新、不抢前台、不进入composer；成功延迟主要由上传/服务端返回决定。 | `chatgpt-dom.js` direct实现、已有direct fast-path测试、真实direct复测 | `testDirectVoiceTranscribeSkipsComposerWait` |
-| INV-03 | voice只有一个权威成功语义；direct响应错误返回稳定诊断，不以错误触发UI听写、换页或同请求重发。 | 用户明确要求“不要以报错作为fallback”；当前日志证明旧路径存在 | 当前测试反而覆盖fallback，需更新为错误不导航 |
+| INV-03 | voice只有一个权威成功语义；一次CLI事务对可恢复运行错误最多执行初次加三次重试，每次都是同一authenticated direct主路径。错误不得触发UI听写、第二端点或不同上传算法；登录/token介入、输入错误、取消、确定性4xx/响应契约和browser配置错误立即返回，最后可恢复attempt失败才向TUI返回错误。 | 用户本轮明确要求至少三次重试，同时确定性错误无法由自动重复自解决 | 旧不重试测试替换为recoverable成功与完整non-recoverable单次矩阵 |
 | INV-04 | 每个可产生voice成功的lease都必须连续确认同源、document complete、唯一`#client-bootstrap`为logged-in并含session token、composer存在且无登录入口。DOM adapter只向core返回非敏感typed fact；core独占启动收敛、voice acquisition和两次稳定决策。新建/刚导航candidate先有界等待terminal，再做连续snapshot；复用页直接snapshot。guest/mixed DOM都不得ready，startup持续混合最多reload一次。 | 真实guest、混合页面、顺滑重启及1356ms composer收敛时间线 | bootstrap fact、startup convergence、fresh voice convergence和stable lease测试 |
 | INV-05 | direct结果只在现有`response.text()`和正常JSON `text`字段边界完成后返回；取消信号不能被当作完成或稳定信号。当前adapter职责不扩展到未观察的畸形响应。 | 当前生产边界、历史一次200完整JSON、已观察HTTP/transport失败；用户补充稳定化约束 | `testDirectVoiceUsesBootstrapAuth`和既有direct-error/no-fallback测试 |
 | INV-06 | TUI取消后，daemon底层voice operation必须在释放voice lock前真实settle或被隔离；迟到任务不能操作下一次voice的页面或composer。 | 当前日志`cancelled voice task did not settle`；TUI AbortSignal契约 | `testVoiceDeadlineAndForeground`部分覆盖，需作为回归而非主修复 |
 | INV-07 | 多个voice请求共享同一daemon时串行使用voice page；ask session page永不被voice导航或清composer。 | runtime `withVoice`、page ownership设计 | `testVoiceTaskLifecycle`部分覆盖 |
-| INV-08 | 用户关闭浏览器或留下stale daemon后，当前调用不重复提交音频；下一次独立调用能淘汰无效索引并启动一个新的可用daemon。 | README ownership契约、已有stale daemon测试 | `testVoiceSkipsStaleBrowserDaemon` |
+| INV-08 | 私有daemon/browser任一方异常结束时，当前CLI事务先恢复同一私有browser lifecycle；marker可连接就复用，浏览器不存在就冷启动。voice错误在清理当前page/request后继续下次尝试，最多四次；显式shared browser不被关闭或转成owned。 | README ownership契约、本轮孤儿Edge PID 56832与可连接marker、用户明确生命周期自维护要求 | 需替换stale/disconnect测试并新增daemon异常退出E2E |
 | INV-09 | 5分钟级空闲后再次voice，若稳定健康page仍可用则复用且不导航；若过期/不稳定而新建或导航candidate，先在POST前等待正常terminal hydration，再做两次snapshot；失败才占用一次退役/续租预算。续租成功继续本次voice，续租失败才明确错误。 | page age、真实正常hydrate时间线、用户长间隔要求 | fresh-page convergence离线行为 + 加速/真实idle E2E |
 | INV-10 | Project缓存是ask的身份加速器，不是voice启动依赖；瞬态不可验证保留cache；稳定官方非Project路由或不同Project ID证明stale后，必须沿唯一live discovery route寻找同名替代并原子替换/清理旧alias。 | `projects.json`历史/当前对比、README stale-cache恢复契约 | 缺少transient retain和stale no-ID replacement测试 |
 | INV-11 | default Project只服务新Session或没有有效历史Project的兼容记录，并由runtime single-flight拥有；有效existing Session先从registry恢复自己的Project快照，pending/completed/exact continuation不得被当前`CHATGPT_PROJECT`失败阻断。 | `runAsk`/`projectForSessionEntry`现有分界、MCP并发4、当前MCP缺失证据 | 缺少existing Session在default Project失败时的恢复测试，以及两个new first ask + voice重叠测试 |
 | INV-12 | 5分钟级长WAV必须通过真实`TUI controller -> transcribeVoiceFile子进程 -> chatgpt.js -> daemon/core -> DOM direct`链返回完整的独立预期内容。门禁在300秒有效PCM的末端放置两个运行时合成、与短fixture不同的确定性语音marker；结果必须同时含两个marker，任意非空文本、短fixture旧结果或只处理开头都不能通过。timeout只能作为定位第一处预算/transport owner的失败证据。TUI必须清理WAV，且下一次真实short voice返回其独立预期词。 | 用户明确长语音失败需修复；R36 plan audit B-01；当前测试只断言非空 | late-marker完整性整链 + 清理 + 独立short结果 |
 | INV-13 | 3轮高压必须在MCP Project home上完成12/12 voice和6/6独立new-Session真实ask、0超时/失败、`voiceSubmitted`增量恰为12、p95不超过120000ms；每个ask使用不同request hash、返回唯一Session并各有一次`Prompt sent`可信URL接受事实，不能把completed replay计作提交。每轮结束active/queued/locks为0，voice page不超过1，累计managed page不超过7且低于现有cap 12，最终健康检查和后续voice成功。 | 用户明确多轮voice/new-ask负载/并发/高压与MCP Project；R26实现审计B-01；原始伪发送发生于new ask | MCP Project + 六个独立Session + distinct prompt + 本轮daemon log acceptance计数 |
-| INV-14 | agent Edge/profile在正常停止和下一次启动间保持登录；profile验收必须先做无voice的登录重启，再做一次voice，不能让429与持久化互相污染。default owned首屏不得出现订阅失败dialog；显式shared CDP仍只disconnect。测试失败时保留daemon/browser现场，不在`finally`再次关闭。 | 当前持久cookie、一次无voice graceful restart成功、用户两次登录被测试随后关闭、R20 observer | 重构`--profile-restart`为auth-only restart gate -> one voice；失败保留现场 |
-| INV-15 | voice继续使用官方当前同源direct契约：`POST /backend-api/transcribe`、multipart `file`、`credentials: include`、accept/language头，并按前端`SendIfAvailable`从page-local bootstrap session附带Bearer。token不得返回Node/status/log。无认证事实时不得POST；HTTP错误只返回diagnostic，不切DOM、不换端点、不重发。 | 当前frontend bundle、当前guest误判、五分钟冷却后首请求429、用户要求先核对真实端点/请求方式 | R24 `testDirectVoiceUsesBootstrapAuth`和真实profile short voice已green；R25只回归 |
+| INV-14 | 默认private、external、explicit shared与debug-port ownership互斥。debug-port daemon-spawned browser的owned事实必须跨daemon异常退出：`browser-owner.json`只记录规范化profile/port/CDP browser PID；后继通过当前endpoint自身PID完全匹配才恢复owned，未知/mismatch按shared。正常close compare-delete；daemon discovery cleanup不删除它。 | README debug-port合同、daemon.json stale删除链、CDP已验证可提供browser PID、原始孤儿问题 | debug-port spawn→daemon crash→reconnect owned→normal stop closes browser行为测试 |
+| INV-15 | voice继续使用官方当前同源direct契约：`POST /backend-api/transcribe`、multipart `file`、`credentials: include`、accept/language头，并按前端`SendIfAvailable`从page-local bootstrap session附带Bearer。token不得返回Node/status/log。无认证事实时不得POST；429、5xx、transport/page/browser/daemon运行错误完成清理后由CLI重试同一wire，确定性4xx和登录介入不重试。 | 当前frontend bundle、18次历史429及随后成功、当前hello-world同线200、用户明确重试合同、登录超时可达链 | R24 wire test保留；新增可恢复前三次失败第四次成功、401/403/登录单次失败测试 |
 | INV-16 | voice与new ask重叠时，ask唯一可信click必须产生新增user turn并固定可信conversation URL；在此之前Session保持lost防重发语义。完整click-to-URL acceptance不得与voice POST重叠，`finishAsk`结果等待仍并发。 | 首轮load、最小`2 voice + 1 ask`连续red、`1 voice + 1 ask`及非重叠观察green | 新core并发行为slice + 最小真实反馈环 |
 | INV-17 | Project按名称解析前，目标侧栏必须处于真实可交互终态；隐藏/移出视口的响应式副本不能被当作可点击row，且恢复侧栏不能改变Project身份、导航或voice路径。 | 当前MCP fresh-page DOM与两次解析失败；同一按钮DOM语义触发后侧栏可交互 | 新增collapsed-sidebar Project discovery行为测试 + MCP最小反馈环 |
 | INV-18 | 任一fresh/navigated Project首页返回给ask前，已观察的同一页面`conversation/init`初始化必须成功；live sidebar click和cache/currentProject驱动的`page.goto`必须共享同一收敛合同。初始化失败或在既有有界预算内不可见时只能返回诊断，不得延长全局deadline、猜conversation URL或重发prompt。 | MCP cold ask真实红反馈、fresh-page network对照、`restoreSessionPage -> ensureProjectHome`两类导航producer | DOM live-click与core cached-goto两个行为slice + MCP cold/六Session反馈环 |
 | INV-19 | 首次default Project acquisition的可信导航/click/`conversation/init`必须与voice direct POST和ask click-to-URL acceptance共用同一submission transaction owner；并发first ask仍共享一个Project Promise。Project完成后立即释放queue，existing Session、后续已初始化Project和assistant等待不占queue。 | fresh `4 voice + 2 ask`连续三次red、`2 voice + 1 ask`与无voice cold ask green、定向click边界日志 | runtime受控并发slice + 原始4/2和完整12/6 E2E |
-| INV-20 | voice的page acquisition/stability preflight不得在Project初始化或ask提交的浏览器副作用期间执行；voice lease与唯一direct POST必须按同一submission owner排序。取消在queue前必须不创建lease，queue内取消必须真实settle/隔离后释放，不增加voice deadline或重发。 | R36实现后fresh `4 voice + 2 ask`：Project已入queue但voice仍在queue外做preflight，voice direct无完成日志并在60秒失败；R35最小/无voice对照green | voice acquisition + existing submission queue owner，需受控取消/排序slice |
+| INV-20 | 每次voice尝试的page acquisition/stability/direct仍由同一submission owner排序；失败尝试必须先settle或隔离自己的page/request并释放锁，下一尝试才进入queue。取消立即终止整个CLI事务，不创建后续尝试。 | R36/R54 queue与取消证据；用户要求错误处理完成后准备下一重试 | 既有queue/cancel回归 + retry-after-cleanup行为测试 |
+| INV-30 | `daemon.log`的启动游标是UTF-8字节位置；读取`Startup error`和`Login required`必须从该字节位置读取Buffer尾部，不能把字节数当UTF-16字符串下标。 | 本轮确定性反馈环：中文前缀后stub立即写具体错误，CLI耗时2196ms等满1500ms并只报通用失败 | Unicode startup-error黑盒CLI测试 |
+| INV-31 | 私有Edge cold spawn允许内部`about:blank`仅作为CDP ready前的有界过渡；marker连接后必须由唯一bootstrap owner导航并验证ChatGPT，daemon不得在空白页ready，也不得在失败/timeout后留下无主空白browser。 | 用户反复观察about:blank；直接URL曾触发订阅Failed to fetch，而about:blank→CDP→bootstrap导航对照保持登录且无同源失败 | 私有spawn顺序/真实daemon cold-start页面E2E |
+| INV-32 | TUI不得在CLI四次完整voice预算、1/2/4秒退避和30秒清理余量结束前用总时限中止，也不得在Windows取消时`taskkill /T /F`连带终止daemon/browser树。默认严格为`4*(180000+120000)+7000+30000=1237000ms`。用户主动取消只终止transcriber CLI，socket关闭驱动daemon现有request取消；daemon/browser继续维护profile。 | 当前90秒AbortSignal与Windows tree kill可达链；用户要求每次完整预算和避免强制结束浏览器；R55 plan audit B-02 | TUI process abort行为测试 + 真实retry E2E |
+| INV-33 | 每个失败必须由首次产生owner提供稳定recoverability code；browser acquisition同时返回经当前连接验证的shared/owned provenance。debug-port owner record缺失/mismatch不是错误或owned证据，按shared fail-safe；配置/spawn拒绝仍为`BROWSER_CONFIG`。 | DOM/startup混合错误、static shared布尔、R55-R59 audits | producer-code、owner-record/provenance matrix、CLI classification测试 |
+| INV-34 | browser acquisition从成功取得连接开始直到daemon ready前，必须持续拥有本次provenance；任意pre-ready失败都在该owner内按shared disconnect或owned graceful close收敛。只有持续`SESSION_PAGE_DID_NOT_CONVERGE`且owned close已证明profile释放时允许一次同route cold recovery；其它失败关闭后原样返回，不产生第二成功路径。 | R60 implementation audit B-01；隔离headless repro观察`failed=true, orphanReachable=true` | pre-ready异常后marker endpoint不可达且profile可重新cold acquisition的真实default-private测试 |
+| INV-35 | 本地daemon HTTP 401代表本次请求携带的state/token已不被目标daemon接受。HTTP adapter产生专属identity code后，orchestration只能重新读取当前发现文件：若`daemonID/token/pid/port`身份已变化且新state通过`/ping + /status`，下一attempt复用该current state；身份未变、缺失或不可验证时立即失败。不得用旧token stop current daemon，不得删除发现文件或启动竞争daemon；page-local ChatGPT `VOICE_AUTH_REQUIRED`和其它确定性4xx仍立即失败。 | R60 implementation audit B-03、R61 plan audit B-01；旧token无法通过同一全局auth gate访问`/stop` | A voice切换发现文件到B后401→下一attempt只复用B成功且stop=0；unchanged/missing/unusable identity fail closed；ChatGPT auth/403单次 |
 
 ## 8. First Divergence and Root Cause
 
@@ -230,6 +241,14 @@ not allowed to drive this plan.
 | INV-19 | `runtime.ensureProject()`直接执行`initializeProject()`，没有经过已经保护voice direct和ask submit的`submissionQueue`；cold sidebar expander的可信CDP click因此可与另页direct `Runtime.callFunctionOn`重叠并永久占住first-ask single-flight。 | `chatgpt-core.js` runtime submission owner | 隔离state 4/2三次timeout；诊断顺序为`evaluateHandle done -> click start`后四次voice成功但无click done，daemon stop后`Target closed`；2/1与无voice对照green |
 | INV-12 (R37 current) | `writeExtendedWav()`把short语音保留在data开头并把其余约299秒填零；整链只断言结果非空，因此没有观察末端音频是否被处理，也不能排除short旧结果。 | `prompt-voice-input.test.ts`本地E2E验收owner | 当前代码714、748-750、799只生成开头语音/末端silence并记录`nonEmptyChars`；R36独立方案审计B-01 |
 | INV-20 | R36只把Project initializer放进queue，`runVoiceTranscribe()`仍在`withSubmission()`之前调用`runtime.voiceLease()`；ask-first到达时，voice `sessionPageFact`与Project click重叠，且voice direct被Project FIFO队头延迟到60秒deadline。 | `chatgpt-core.js` voice orchestration + runtime queue owner | R36修复后隔离fresh `4 voice + 2 ask`：仅首条`voice: transcribing`，无direct完成，60秒后两个voice timeout；status仍有2 locks；没有引入新endpoint或fallback |
+| INV-30 | `ensureDaemon()`以`fs.statSync(daemon.log).size`记录UTF-8字节偏移，随后两个consumer对已解码字符串执行`slice(offset)`；日志含中文后偏移越过字符串末尾，已写出的具体错误永远不可见。 | `chatgpt.js` daemon startup log consumer | 确定性最小loop返回`ok=false, elapsed=2196, Daemon did not start`；真实日志`bytes=769971, utf16 units=752171, slice(bytes).length=0` |
+| INV-31 | 默认owned路径把私有浏览器交给`puppeteer.launch()`；Puppeteer在没有非flag参数时追加`about:blank`，daemon失去launch连接后退出，已启动Edge仍持有profile而下一daemon再次launch失败。 | `chatgpt-core.js:launchBrowser/startDaemonProcess` private-browser lifecycle | 真实Edge PID 56832命令行含private user-data-dir、remote-debugging-port=0和about:blank；marker端口33436可`puppeteer.connect`，但当前CLI不读取marker并连续启动失败 |
+| INV-32 | TUI把整个external transcriber限制为90秒并经通用`Process.run`取消；Windows abort使用`taskkill /T /F`终止CLI整棵子进程树。四次完整voice尝试尚未结束时，上游会先破坏daemon/browser生命周期。 | `prompt-voice-input.ts:transcribeVoiceFile` + `util/process.ts:abort` voice consumer | 当前常量90秒、core单次80秒、CLI voice HTTP 120秒；producer-to-consumer调用链确定可达，用户明确要求每次完整预算且不强杀浏览器 |
+| INV-03 / INV-08 / INV-15 | 当前CLI对voice endpoint只调用一次；`BROWSER_DISCONNECTED`只retire后抛错，HTTP/transport/page错误直接抛错。错误清理完成后没有下一次同一direct尝试，browser生命周期错误也不在本事务内重建。 | `chatgpt.js:transcribe-file` orchestration owner | `testVoiceDoesNotRetryAfterBrowserDisconnect`显式锁定旧单次失败；日志18次429中同一/下一WAV数秒至约60秒后成功；用户明确要求初次后至少3次重试 |
+| INV-34 | `acquireBootstrapBrowser()`取得`acquired`后仅对持续不收敛owned分支close；其它`prepareBootstrapPage/goto/sessionPageFact`异常直接throw。`startDaemonProcess()`要等helper成功返回才赋值`browser/ownedByDaemon`，outer catch无法清理该detached browser。 | `chatgpt-core.js` browser acquisition/bootstrap owner | 已运行隔离headless repro：注入pre-ready fact异常后输出`{"failed":true,"orphanReachable":true}`，repro随后通过CDP清理 |
+| INV-35 | `httpJSON()`把daemon业务401仅表示为`statusCode=401`；`voiceErrorIsRetryable()`对无code 4xx fail closed。R61曾计划调用`retireDaemon(oldState)`，但旧token对current daemon的`/stop`同样401，现有retire会吞错并删除current发现文件。 | `chatgpt.js` local HTTP adapter/discovery orchestration | fake daemon红环：`status=1, voice=1, stop=0`；R61 plan audit证明旧token stop失败后unlink会制造无索引live daemon |
+| INV-33 | DOM把所有HTTP状态归为`VOICE_ENDPOINT`，voice route除输入/BROWSER_DISCONNECTED外统一500；startup log不带结构化code。CLI若按R55“其它错误全重试”会把logged-out→login wait timeout重复四次。 | `chatgpt-dom.js:transcribeAudioFileDirect` + core voice route/startup log + `chatgpt.js` retry classifier | 当前source可达链；R55 plan audit B-01 |
+| INV-33 (R57) | R56仍把`VOICE_ENDPOINT`和`BROWSER_STARTUP`列为可重试；前者包含token消失/invalid 200 response，后者包含公开`CHATGPT_BROWSER_PATH`的ENOENT/EACCES。 | DOM direct catch + core spawn/startup owner | 当前source可达链；R56 plan audit B-01/B-02 |
 
 本轮红反馈环：
 
@@ -368,12 +387,18 @@ TMPDIR=/private/tmp CHATGPT_VOICE_FILE_ROOTS=/private/tmp/opencode/voice CHATGPT
 | Project侧栏交互前置条件 | `chatgpt-dom.js` Project discovery adapter | live discovery/open首页前，侧栏必须由网页自己的toggle进入可交互终态；只使用当前结构化sidebar control，不猜URL | 侧栏DOM状态、可命中性和按钮事件属于DOM owner；core只消费Project URL/错误 | core不应解析CSS/aria状态；voice/TUI/MCP wrapper不拥有ChatGPT侧栏 |
 | Project首页首屏网络收敛 | `chatgpt-core.js` Project-page acquisition + `chatgpt-dom.js` network adapter | core标记本次page是否需要live click或URL goto；DOM在导航前登记同页`conversation/init`并只在成功后返回；already-current页直通 | core拥有哪个Session page发生导航的生命周期事实，DOM拥有ChatGPT endpoint/method/status事实 | DOM不选择Project身份；core不解析网络response；TUI/voice不参与ask首页初始化 |
 | voice页面会话事实/direct wire格式与错误归一化 | `chatgpt-dom.js` | `sessionPageFact`只从当前`#client-bootstrap`和DOM归一四态；direct按官方`SendIfAvailable`在页面内附带现有session token并发送唯一POST，token不离开page | ChatGPT bootstrap与私有wire兼容只有一个owner | core只消费`kind/origin/readyState`并决定lease稳定/退役，不解析bootstrap/token/HTTP body；TUI不懂ChatGPT wire |
-| owned Edge/profile生命周期 | `chatgpt-core.js` + robustness harness | 复用现有owned/shared browser契约；正常stop后再次启动使用同一agent profile；harness只识别唯一主Edge进程，不把helper误作多个owner | browser进程和shutdown属于daemon owner；本轮没有证据支持替换启动器 | DOM不启动进程；CLI只做daemon acquisition；显式shared endpoint仍由用户拥有 |
+| owned Edge/profile生命周期 | `chatgpt-core.js` + robustness harness | 默认private profile以marker连接同一browser；正常stop CDP优雅关闭，异常daemon退出保留browser供重连 | browser进程和shutdown属于daemon owner；孤儿browser/profile lock与可连接marker直接证明现有启动器需替换 | DOM不启动进程；CLI只做daemon acquisition；显式shared endpoint仍由用户拥有 |
 | voice超时、取消、串行和退役 | `chatgpt-core.js` runtime | 请求完成/取消/超时后锁和页面可再次使用或被隔离 | orchestration拥有deadline和资源生命周期 | DOM不拥有并发队列；TUI只能取消外部process |
 | voice/ask远端提交互斥 | `chatgpt-core.js` runtime | voice唯一direct POST与core `submitAsk`完整click-to-URL acceptance共享短submission queue；`finishAsk`不持锁 | runtime拥有voice、Session、URL registry和foreground编排，能覆盖真实acceptance边界 | DOM只拥有单次click/user-turn事实，不拥有URL registry或其它page任务；CLI/MCP看不见daemon并发 |
-| daemon stale/browser close | `chatgpt.js` + core shutdown | 本地索引不是browser健康真相；下一调用可重新启动 | CLI掌握启动锁和daemon文件，core掌握browser ownership | TUI不应杀浏览器或清daemon索引 |
+| daemon stale/browser close | `chatgpt.js` + core shutdown | 本地daemon索引不是browser健康真相；CLI淘汰daemon索引，core通过private marker复用或cold恢复browser | CLI掌握启动锁/daemon文件，core掌握browser/profile ownership | TUI不应杀浏览器或清daemon索引 |
 | TUI recorder和WAV清理 | `prompt-voice-input.ts` / recorder | cancel不上传且删除临时音频 | 录音文件产生和隐私清理属于TUI | browser daemon不能可靠管理native recorder |
 | 行为证据 | `test-mcp.js` +现有TUI测试 | 离线fake adapter锁定一次提交，受保护status提供E2E提交/资源计数，环境门禁TUI测试启动真实CLI/Edge整链 | 需要锁定真实链路，不复制内部算法 | 源码字符串或无行为输出的私有调用次数不能证明用户行为 |
+| 默认私有浏览器连接、重连、优雅关闭与冷启动 | `chatgpt-core.js:launchBrowser/startDaemonProcess/shutdownOnce` | `STATE_DIR/profile`对应一个daemon维护的私有浏览器生命周期 | core是唯一持有Puppeteer Browser和bootstrap convergence的模块，能统一spawn/connect/close | CLI只发现HTTP daemon；TUI不应理解CDP/profile；DOM adapter不管理进程 |
+| daemon启动日志游标与错误消费 | `chatgpt.js:ensureDaemon` | 子daemon在ready前失败时，调用方应尽早得到本次追加的具体错误 | CLI创建字节offset并轮询日志，类型转换错误首次发生在这里 | core只追加日志；TUI/MCP不读取daemon.log |
+| voice四次尝试、每次完整预算与daemon重新取得 | `chatgpt.js:transcribe-file` | 一个CLI事务执行初次加三次同语义尝试，最后一次失败才退出 | CLI横跨daemon健康检查与HTTP voice请求，是唯一能在尝试间重新`ensureDaemon`的orchestrator | core只拥有单daemon请求及锁清理；DOM只拥有一条wire；TUI只运行transcriber进程 |
+| 单次voice请求清理和可重试错误分类 | `chatgpt-core.js:runVoiceRequest`与voice HTTP route | 每次失败在返回前已settle/隔离page、释放voice/submission lock并给CLI稳定code | core已拥有request context、lease和browser/page分类 | CLI不能判断页面是否settle；DOM不能重建daemon |
+| TUI总兜底与CLI-only取消 | `prompt-voice-input.ts:transcribeVoiceFile` | 外层预算覆盖四个完整尝试；用户取消终止CLI但不强杀daemon/browser | 此处创建AbortSignal并选择Process终止语义 | 通用`Process.run`不能为所有命令改变tree-kill合同；browser-agent不拥有TUI用户取消 |
+| 可恢复错误code生产与消费 | DOM direct、core route/startup、`chatgpt.js` CLI | 首个owner产生稳定code，CLI按封闭集合决定retry/retire；message只展示不决策 | 各owner掌握HTTP状态、页面/browser事实或login状态，CLI掌握attempt循环 | TUI不理解daemon错误；CLI按message会复制owner并受文案漂移；DOM不能重建daemon |
 
 唯一跨模块事实接口定义为`CHATGPT_DOM.sessionPageFact(page, { waitForTerminal, timeoutMs })`，返回且只返回：
 
@@ -397,39 +422,66 @@ TMPDIR=/private/tmp CHATGPT_VOICE_FILE_ROOTS=/private/tmp/opencode/voice CHATGPT
 
 ```text
 TUI WAV
-  -> CLI校验与ensureDaemon（只确保Edge/browser daemon，不解析Project）
-  -> 默认owned：复用现有Edge/profile启动路径；显式shared：连接用户提供的CDP
-  -> daemon HTTP ready
-  -> core voice request context/withVoice（只串行voice请求）
-  -> runtime submission queue（先排序页面副作用，再覆盖结果前的voice/ask接受事务）
-  -> 获取健康的borrowed-or-dedicated voice lease与稳定preflight
-  -> 同源页面内唯一direct transcribe请求
-  -> 文本或稳定错误结果
-  -> TUI插入/展示结果
+  -> TUI以CLI-only取消运行transcriber，并提供覆盖四次完整尝试的总兜底
+  -> CLI本地WAV校验一次
+  -> attempt 1..4:
+       ensureDaemon
+       -> 默认私有profile：连接DevToolsActivePort；不存在则spawn内部blank、marker ready后连接
+       -> 唯一bootstrap owner导航ChatGPT并收敛；blank不能ready或残留
+       -> 退化browser优雅关闭后冷启动一次
+       -> daemon HTTP ready
+       -> core request context/withVoice/submission queue
+       -> 健康borrowed-or-dedicated voice lease与稳定preflight
+       -> 同源页面内同一个authenticated direct transcribe wire
+       -> 成功则返回；可恢复失败完成settle/隔离/锁释放后进入下一attempt
+       -> 登录介入、输入/取消、确定性4xx立即返回
+  -> 第四次仍失败才向TUI返回最后错误
+  -> TUI插入文本或展示最终失败
 ```
 
 Project初始化、voice lease/preflight、voice direct和ask的trusted click/URL接受共享这一个queue owner；`finishAsk`、assistant生成等待、artifact和其它结果处理始终在queue外。不存在“先获取voice lease再进入queue”的第二主路径。
 
 具体修复方向：
 
+0. `acquireBrowser()`返回`{ browser, ownedByDaemon }`，shutdown/页面管理只消费该provenance。默认`STATE_DIR/profile`使用private marker：先连`DevToolsActivePort`；否则spawn `--remote-debugging-port=0 about:blank`后marker connect，异常daemon后重连仍保持private-owned，正常stop graceful close。显式external profile未锁定时保留现有受控`puppeteer.launch`并返回owned；已锁定且无endpoint返回`BROWSER_CONFIG`。显式`CHATGPT_BROWSER_CDP_URL`或WS endpoint连接返回shared，永远只disconnect。
+
+0.1. `CHATGPT_BROWSER_DEBUG_PORT`单独形成既有兼容输入。端口不可达后daemon受控spawn固定port与blank，连接后通过CDP `SystemInfo.getProcessInfo`读取type=browser PID，并以原子temp+rename写`STATE_DIR/browser-owner.json`：`{ profile: realpath/normalized path, debugPort, browserPid }`，不含token、WS path或cookie。该文件不属于daemon发现索引，`unlinkDaemonFiles()`不删除。端口启动前已可达时，只有当前CDP browser PID、port和profile与owner record完全匹配才返回owned，否则shared；不扫描进程、不按端口猜ownership。正常owned close后仅当记录仍匹配本次三元组才compare-delete；browser已退出但record残留时，下一次受控spawn成功后原子替换。固定端口冲突/无效值为`BROWSER_CONFIG`，启动后暂时不可达为`BROWSER_STARTUP`。
+
+0.2. owned browser连接成功但bootstrap在现有一次reload预算后仍不收敛时，core发送CDP `Browser.close`并有界等待profile释放，再按对应input的同一cold route启动一次；shared只disconnect并明确失败。正常`/stop`和SIGTERM对owned也用`Browser.close`，超时只disconnect并留下browser供下一daemon重连，删除child.kill后备。browser自己退出时daemon清索引并退出，下一attempt按同input恢复。
+
+0.3. `ensureDaemon()`记录daemon.log的字节offset后，两个marker consumer都以Buffer字节尾解码追加内容；不再对完整UTF-8字符串使用字节offset。启动子进程`error/exit`与日志具体错误均尽早消费；登录等待仍不是startup error。
+
+0.4. 错误首次产生处给出稳定code。DOM在POST前token缺失产生`VOICE_AUTH_REQUIRED`，HTTP 429为`VOICE_RATE_LIMIT`、5xx为`VOICE_SERVER`、其它4xx为`VOICE_REJECTED`，fetch TypeError/Abort为`VOICE_TRANSPORT`、origin漂移为`VOICE_PAGE`、200但JSON/`text`合同无效为`VOICE_RESPONSE_INVALID`；其它未知endpoint异常保持`VOICE_ENDPOINT`但不进入retry集合。core route原样保留这些code及`BROWSER_DISCONNECTED/VOICE_TIMEOUT/VOICE_RUNTIME_FATAL/VOICE_CANCELLED`，本地body/file为400非重试。
+
+0.5. browser startup owner在产生副作用前验证`CHROME_PATH`存在且可执行；确定性path/spawn `ENOENT/EACCES/EPERM`、locked external profile且无endpoint、显式CDP/WS或debug-port配置拒绝统一为`BROWSER_CONFIG`。默认private、daemon-spawned debug-port和其它owned runtime的marker/CDP/bootstrap故障才是`BROWSER_STARTUP`；unlocked external launch失败保留准确code。daemon startup log为`Startup error [CODE]: message`；login wait为`LOGIN_REQUIRED`。byte-tail parser返回code与message；unknown fail closed。
+
+0.6. `chatgpt.js transcribe-file`在一次本地文件校验后执行初次加最多三次重试。可重试封闭集合仅为`VOICE_RATE_LIMIT/VOICE_SERVER/VOICE_TRANSPORT/VOICE_PAGE/BROWSER_DISCONNECTED/BROWSER_STARTUP/VOICE_TIMEOUT/VOICE_RUNTIME_FATAL`以及本地daemon HTTP connection reset/refused/timeout和HTTP 5xx；local 401只按第0.9项identity reconciliation处理，不进入通用retire或status classifier。`VOICE_ENDPOINT/VOICE_AUTH_REQUIRED/VOICE_RESPONSE_INVALID/LOGIN_REQUIRED/BROWSER_CONFIG/VOICE_REJECTED/VOICE_CANCELLED`、本地400、其它确定性4xx、CLI signal和unknown立即返回。每次完整预算，清理后1/2/4秒退避。
+
+0.7. TUI的`transcribeVoiceFile`复用`Process.run`并仅为voice设置`killTree:false`；默认总兜底覆盖四次`DAEMON_START_TIMEOUT + VOICE_HTTP_TIMEOUT`、7秒退避和30秒清理：`1_237_000ms`。用户主动取消仍立即终止CLI父进程，不递归杀daemon/browser。
+0.8. R61把`acquireBootstrapBrowser()`定义为从`launchBrowser()`成功返回到bootstrap fact产生之间的唯一provenance owner。每轮取得`acquired`后，任何pre-ready异常都必须在重新throw前完成同一清理合同：shared仅disconnect；owned发送CDP `Browser.close`并验证PID/profile释放，匹配的fixed-port owner record才compare-delete。只有首轮owned错误code严格为`SESSION_PAGE_DID_NOT_CONVERGE`且close返回true时进入现有唯一一次cold loop；其它异常即使close成功也原样失败，不重跑primary operation。close不能证明释放时保留marker/owner record供下一CLI重连，禁止同进程spawn、强杀或合成成功。
+0.9. R63在`httpJSON()`这个local-daemon wire owner把HTTP 401映射为`DAEMON_IDENTITY_MISMATCH`，只因该函数连接的是本地daemon协议；不依赖错误文案。voice catch收到该code后重新读取`daemon.json`，要求current state存在、四元身份`daemonID/token/pid/port`与本attempt旧state不同，且`isDaemonUsable(current)`通过，才让既有loop进入下一attempt；不调用`retireDaemon(old)`、`/stop`或`unlinkDaemonFiles`，也不直接把current state注入成功结果。身份未变/缺失/unusable立即throw原401。下一attempt仍调用`ensureDaemon()`并按正常发现路径复用current daemon。DOM/page产生的`VOICE_AUTH_REQUIRED`、`VOICE_REJECTED`和其它4xx code不经过该转换，继续立即失败。
+0.10. R61在`test-voice-robustness.js`增加两个显式mode，每个mode自行创建随机`CHATGPT_STATE_DIR`和`CHATGPT_SESSION_DIR`，因此production default-private仍自然推导为该隔离state下的`profile`；只允许`CHATGPT_TEST_HOOKS=1`下的headless test browser。`--daemon-crash-reconnect`以production CLI/daemon启动首个voice，只终止daemon PID、不动Edge，记录marker endpoint/PID，下一CLI必须重连同endpoint并成功，再用真实`--stop`验证browser/profile释放。`--bootstrap-cold-recovery`通过test-only daemon wrapper只让首个browser lifecycle的bootstrap fact持续不一致、第二生命周期authenticated，browser acquisition/close/profile release/cold route仍全部来自production；随后真实voice和`--stop`成功。两个mode的finally先走daemon/CDP graceful close再有界删除隔离目录，失败也不得遗留可见未登录窗口。
+
 1. 启动期只做browser/profile/bootstrap和HTTP server；把`resolveProject/ensureProjectHome`从daemon startup移动到ask的Project-owned分界。`runAsk`先读registry：有效existing Session直接使用`projectForSessionEntry`得到的历史Project并恢复pending/completed/exact conversation，不触发当前default Project；只有`newSession`或没有有效历史Project的兼容记录才调用唯一`ensureProject(page, log)` single-flight。第一个需要default Project的ask持有自己的已被`withSession`锁定的page执行初始化，后续同类ask等待同一Promise；失败后compare-delete in-flight引用，下一次new ask可以重新开始。voice不能借用被Session锁占用的Project初始化page。
 2. `resolveProject`在ask路径使用有效exact cache作为候选，先交给已有`ensureProjectHome`验证；只有没有cache或cache已经被验证为stale时才做live sidebar discovery。live discovery和按名称打开首页前，DOM adapter先恢复当前页面的sidebar toggle并等待其真实交互终态；这不是第二Project来源，也不刷新或改写URL。`projectHomeState`不再把所有evaluate/导航异常压成普通`null`：DOM adapter返回`readable`或`unavailable`的验证结果；readable状态由Project policy检查URL，稳定官方root/no-ID或不同Project ID证明stale并进入唯一live discovery，只有替代通过验证后才在一次JSON锁内原子写新alias、删除旧ID alias；执行上下文、渲染、网络或sidebar暂时不可用仍返回诊断，不能把“这次看不清”当成“身份已不存在”。
 2.1. 把Project-home network convergence收敛为一个DOM adapter seam：live sidebar首页按钮click和core对fresh Session page执行的candidate URL `goto`都在各自导航动作之前登记同一页的`POST /backend-api/conversation/init`观察；只接受同页、POST、已观察path且2xx的响应，随后才返回既有Project URL/h1/composer/Chat验证。already-current的有效Project页保持既有直通；init响应在有界预算内不可见统一传播Project unavailable诊断，不延长`rememberCurrentSessionUrl`、不把init当conversation身份、不猜URL、不重发prompt。core只调用该DOM seam，不复制endpoint匹配。
 2.2. `runtime.ensureProject(page, log)`仍是default Project唯一single-flight owner，但第一个初始化任务必须先通过已有`withSubmission()`进入同一远端副作用队列，再执行完整`resolveProject -> ensureProjectHome`。后续并发first ask等待同一个已排队Promise，不各自占队；Project验证完成或失败后立即释放submission queue，compare-delete仍允许下一次独立new ask重新初始化。该事务只覆盖cold Project acquisition的可信导航/click/init，不包`finishAsk`、assistant等待、artifact、existing Session恢复，也不重试expander/home/send click。这样voice不依赖Project，但首次ask的Project CDP副作用不再与voice direct POST重叠。
 2.3. voice的`runtime.voiceLease()`也必须在同一`withSubmission()`事务内开始，随后才进入现有唯一direct POST；voice page的bootstrap读取、terminal wait、两次稳定probe不能在Project click或ask submit期间占用CDP。queue前取消先锁存并跳过lease，queue内取消沿现有settle/隔离路径释放，不新增voice deadline、第二次lease或重发。voice仍由`withVoice`串行，`finishAsk`和assistant等待仍在queue外。
-3. voice只保留direct作为成功路径。voice page acquisition统一返回lease：borrowed与dedicated都是同一contract。复用页直接做两次snapshot；由本次acquisition新建或`goto`的candidate先调用`sessionPageFact(waitForTerminal=true, timeoutMs=15_000)`等待正常hydrate，得到authenticated后再做两次snapshot。terminal等待失败才把candidate算作一次退役并续租；音频POST后仍不进入composer/fake-mic、不换页、不自动重发。
+3. voice只保留direct作为成功路径。voice page acquisition统一返回lease：borrowed与dedicated都是同一contract。复用页直接做两次snapshot；由本次acquisition新建或`goto`的candidate先调用`sessionPageFact(waitForTerminal=true, timeoutMs=15_000)`等待正常hydrate，得到authenticated后再做两次snapshot。terminal等待失败才把candidate算作一次退役并续租。一个attempt只发一次POST；失败完成清理后，由CLI下一attempt重新执行同一主路径。
 4. voice page只在首次创建或生命周期健康检查需要时导航到官方root；已经是官方ChatGPT页时不因每次voice而`goto`或`reload`。direct成功不`bringToFront`，避免voice本身抢用户前台。
 5. 稳定性检测是voice的完成/复用依据：`chatgpt-dom.js`用唯一`sessionPageFact`按上表四态归一`#client-bootstrap`和DOM，不读取`window.CLIENT_BOOTSTRAP`、旧session endpoint或其它兼容来源。Node/core只能看到`kind/origin/readyState`，token不出page。startup和fresh/navigated voice candidate使用bounded terminal wait；已收敛candidate与复用页再用snapshot，且只有连续两次`kind='authenticated'`才通过。
 6. startup不再使用`Promise.race`后的单次布尔快照。core第一次以现有15秒页面准备预算等待`sessionPageFact`：`authenticated`直接继续；`logged-out`进入现有手工登录等待；`loading/inconsistent`只允许一次`reload({ waitUntil: 'domcontentloaded' })`，随后再以同一接口和同一预算等待。第二次`authenticated`才ready，`logged-out`进入登录等待，第二次仍`loading/inconsistent`则记录明确startup错误且绝不写daemon ready；不能循环reload。所有bootstrap/selector判断仍留在DOM adapter。
-7. 浏览器被用户关闭或daemon文件过期时，不在同一次voice请求中把错误当作成功fallback或重复提交；CLI清除无效索引，当前请求返回生命周期错误，下一次独立voice调用重新获取daemon。shared CDP只disconnect，owned launch browser才close，沿用README契约。
-8. 5分钟idle场景复用现有page age/health策略：稳定健康则继续direct且不导航；过期后fresh candidate先完成bounded terminal wait，不把正常hydrate记作失败。只有terminal失败或后续两次snapshot不连续才退役并续租一次；续租成功继续当前调用，失败才明确错误。不要新增周期刷新或POST后重试。
+7. 浏览器断连或daemon文件过期时，CLI清除无效索引并在当前voice事务的下一attempt重新`ensureDaemon`。默认私有profile先marker reconnect，浏览器不存在才冷启动；shared CDP只disconnect。恢复后仍走相同direct wire，不把错误合成成功。
+8. 5分钟idle场景复用现有page age/health策略：稳定健康则继续direct且不导航；过期后fresh candidate先完成bounded terminal wait，不把正常hydrate记作失败。只有terminal失败或后续两次snapshot不连续才退役并续租一次；本attempt失败后由CLI下一attempt重走相同acquisition。不要新增周期刷新。
 9. 为高压验收补齐runtime现有bearer保护`/status`的诊断计数：`voiceActive`、`voiceQueued`、`voicePageCount`、`managedPageCount`和单调`voiceSubmitted`。`voiceSubmitted`只在进入唯一direct adapter前递增，不记录音频、文本、token、Project URL或页面句柄；离线fake adapter断言每个请求恰好一次调用，真实压力harness断言计数增量恰为12。
 10. 压力harness显式设置`CHATGPT_PROJECT=MCP`，使用一个隔离daemon和3轮工作负载；每轮并发4个voice，并在每2个voice后立即并发启动1个不带`--session-id`的new ask。六个ask分别使用唯一prompt且不得由harness串行等待前一个回答；生产`withNewConversationLock`只串行短创建/URL接受，`finishAsk`可并发。通过标准固定为12/12 voice、6/6 ask、六个唯一Session且各URL由既有Project policy证明归属MCP、`accepted=6`、0 timeout/failure、voice p95 `<=120000ms`、`voiceSubmitted`增量12；每轮结束`voiceActive=0`、`voiceQueued=0`、`activeLocks=0`、`voicePageCount<=1`，累计`managedPageCount<=7`且低于cap 12，末尾额外短voice成功。
 11. 长语音E2E保留现有`prompt-voice-input.test.ts`环境门禁和真实`node chatgpt.js transcribe-file --file {file} --json`子进程。测试在Darwin本地门禁内用系统`/usr/bin/say`和`/usr/bin/afconvert`通过argv运行时生成只属于本次测试的PCM marker语音，不执行shell字符串；RIFF helper保留真实fmt/data chunk并将marker frames放在300秒容器末端，其余数据为silence，总尺寸仍低于50MiB。长结果按大小写/标点归一后必须同时包含预先确定的两个marker词，短fixture结果必须包含自己不同的预期词；这样截断到开头、旧short结果或任意非空文本都会red。测试仍要求controller回idle、长短WAV与中间marker文件清理、同一daemon后续short voice成功；任何timeout都失败。普通CI不设置门禁，不启动Edge、不依赖TTS artifact。
 12. owned-browser恢复E2E由`test-voice-robustness.js --browser-close --gap-ms 5000`执行：先通过现有`--stop`有界结束任何agent daemon并确认索引不可达，再显式清空CDP/WS endpoint、设置debug port 0启动本场景。首个voice成功后，从新daemon PID后代中只选择带本agent `--user-data-dir`的Edge主进程发送SIGTERM，绝不匹配shared/user Edge。关闭后不再调用`--stop`或手工删除state，等待生产`disconnected -> shutdownOnce`自行移除索引；5秒后下一独立voice必须用原profile成功。若无法唯一证明owned descendant则测试fail-closed，不发送信号。
-13. profile lifecycle只复用现有`launchBrowser`和shared/owned shutdown语义；不新增动态CDP、blank-first、固定端口猜测或启动替代器。`--profile-restart`先挂载bootstrap observer，只验证auth一致、无订阅dialog和daemon ready；随后graceful stop、确认持久登录、第二次启动再次只读验证，最后才发一个short voice。任一步失败都保留当前daemon/browser，不在`finally`关闭。公开进程祖先证据只识别主Edge（排除helper）。
-14. direct adapter在同一个page.evaluate内再次读取唯一`#client-bootstrap` session token，并按网页`SendIfAvailable`的已认证分支附带`Authorization: Bearer`，同时保留`credentials: include`、当前endpoint、FormData `file`和accept/language头。token只用于该请求，不进入返回值、Node、status或日志；token在stable probe后消失时在POST前明确失败。不要从429响应猜新端点，也不要引入第二种上传算法。真实HTTP错误仍按完整诊断返回，保留direct-only和同请求不重发语义。
-15. runtime已有内部`submissionQueue`，失败后也必须推进后继。`runVoiceTranscribe`把唯一`runtime.voiceLease()`和随后唯一`CHATGPT_DOM.transcribeAudioFile`纳入同一队列事务；adapter直到完整response才返回，故voice bootstrap/stability与Project click/ask submit不重叠。ask侧由`runAsk`调用`runtime.withSubmission(() => submitAsk(...))`：事务包含现有foreground composer操作、唯一可信click、DOM新增user turn确认以及core `rememberCurrentSessionUrl`成功/有界失败；lost墓碑语义不变。两个voice排队时，第二个仍受`withVoice`阻塞，ask只能在完整voice lease/direct事务结束后进入queue；`finishAsk`生成等待、focus、artifact、Session锁和voice文件校验均不占queue。queue前取消跳过lease，queue内取消沿现有settle/隔离路径推进；失败不重试click或音频。
+13. 默认private profile使用marker connect或blank→CDP→bootstrap spawn状态机，不依赖Puppeteer launch child handle；显式unlocked external profile保留既有受控launch。`--profile-restart`先挂载bootstrap observer，只验证auth一致、无订阅dialog和daemon ready；随后graceful stop、确认持久登录、第二次启动再次只读验证，最后才发一个short voice。新增daemon-only异常退出场景：首个voice后只终止daemon PID、不动Edge，下一CLI必须连接同一marker并成功；再优雅关闭browser后下一CLI必须cold成功。显式shared测试继续断言只disconnect。
+14. direct adapter在同一个page.evaluate内再次读取唯一`#client-bootstrap` session token，并按网页`SendIfAvailable`的已认证分支附带`Authorization: Bearer`，同时保留`credentials: include`、当前endpoint、FormData `file`和accept/language头。token只用于该请求，不进入返回值、Node、status或日志；token在stable probe后消失时在POST前明确失败。不要从429响应猜新端点，也不要引入第二种上传算法。每个attempt保持一个POST，真实HTTP错误返回稳定code供CLI下一attempt重走同一wire。
+15. runtime已有内部`submissionQueue`，失败后也必须推进后继。`runVoiceTranscribe`把本attempt唯一`runtime.voiceLease()`和随后唯一`CHATGPT_DOM.transcribeAudioFile`纳入同一队列事务；adapter直到完整response才返回，故voice bootstrap/stability与Project click/ask submit不重叠。ask侧既有事务不改变。attempt失败必须先完成现有lease release/discard、cancel settle或runtime fatal shutdown，HTTP response才返回CLI；下一attempt因此不会与旧页面任务重叠。ask click不纳入R55 retry。
+
+R63 primary route保持唯一：`validated WAV -> ensure local daemon identity -> acquire one browser provenance -> bootstrap -> one authenticated direct POST -> complete text`。pre-ready cleanup是同一次acquisition的失败收敛，不产生成功；identity reconciliation只承认发现文件已发布且健康的新daemon，不停止/删除未知owner，仍由用户批准的最多四attempt orchestration执行下一次direct。
 
 R10/R18已经修复voice被ask Project bootstrap阻断；R24修复当前新的第一处分歧：guest/mixed DOM不再因易漂移文案和过早快照被当成已登录，fresh voice page也不把正常hydrate当作不稳定，官方page-local鉴权不再被cookie-only旁路。bounded terminal wait和一次startup reload都发生在POST前的primary acquisition，不是transcribe错误fallback。
 
@@ -465,10 +517,20 @@ R10/R18已经修复voice被ask Project bootstrap阻断；R24修复当前新的�
 | cache/currentProject fresh Session page `goto` -> 同一`conversation/init`收敛 -> ask可用首页 | R35 proposed | primary Project page-acquisition branch | yes | primary | core只提供导航生命周期事实，DOM复用同一network seam，不复制endpoint匹配 |
 | cold default Project single-flight -> existing submission queue -> Project acquisition | R36 proposed | primary concurrency branch | yes | primary | 复用R26 queue排序真实远端副作用；不新增Project算法、retry或第二click，完成后立即释放 |
 | voice lease/stability preflight -> existing submission queue -> one direct POST | R38 proposed | primary concurrency branch | yes | primary | 将已观察的page evaluate与Project/ask浏览器副作用纳入同一已有owner；queue前取消跳过lease，不新增lock或retry |
+| private marker connect -> bootstrap convergence | R60 implemented/R61 preserved | primary browser-lifecycle branch | yes | primary | 默认私有profile有活动marker时连接同一浏览器；不扫描或接管用户Edge |
+| no private browser -> spawn blank -> marker connect -> bootstrap navigation | R60 implemented/R61 preserved | primary browser-lifecycle branch | yes | primary | 采用已验证启动顺序；blank只作有界过渡，不是ready状态 |
+| private bootstrap不可收敛 -> CDP graceful close -> cold transition | R60 implemented/R61 corrected | primary browser-lifecycle repair branch | yes | primary | R61让所有pre-ready失败先收敛；只有持续不收敛可执行一次同route cold，不强杀、不切换profile |
+| unlocked external profile -> existing controlled launch/close | R58 preserved compatibility | existing compatibility | yes | primary-contract compatibility | 不进入private marker算法；locked且无endpoint明确拒绝 |
+| debug port reachable before acquisition -> shared connect/disconnect | R59 preserved compatibility | existing compatibility | yes | primary-contract compatibility | 不关闭预先存在browser或tab |
+| debug port unreachable -> daemon spawn fixed port -> owned connect/close | R59 preserved compatibility | primary browser-lifecycle branch | yes | primary | provenance由acquisition result携带；异常daemon后同端口恢复 |
+| matching browser-owner record -> debug-port reconnect remains owned | R60 implemented/R61 preserved | primary browser-lifecycle recovery | yes | primary | CDP browser PID/profile/port三元组验证；daemon索引清理不破坏owner事实 |
+| missing/mismatched owner record -> debug-port connect is shared | R60 implemented/R61 preserved | safety pass-through | yes | existing compatibility | fail-safe不关闭未知browser；不扫描PID或猜测 |
+| recoverable voice failure -> cleanup -> next identical attempt | R56 user-required replacement | primary retry iteration | yes | primary | 最多四次同一direct语义；登录/4xx/取消/输入失败不进入迭代 |
+| owner-produced recoverability code | R60 implemented/R61 corrected | primary error-contract gate | no | primary gate | DOM/core/startup原位分类；R61补local daemon 401，CLI不猜message |
+| Unicode daemon log byte-tail consumption | R60 implemented/R61 preserved | primary startup-consumption behavior | no | primary gate | 立即消费具体启动事实与code，不合成成功 |
+| TUI CLI-only abort | R60 implemented/R61 preserved | primary caller lifecycle | no | primary cancellation | 终止transcriber父进程但保留daemon/browser owner |
 
-No new alternate success path is authorized. Existing UI dictation remains only if
-future requirements explicitly reauthorize it as a replacement primary path; it is
-not silently retained behind a direct error.
+R57不授权alternate success path。初次与三次可恢复错误重试执行同一个browser lifecycle和同一个direct wire，是用户明确要求的单一primary operation迭代；UI dictation、第二endpoint、第二profile、不同鉴权或成功合成仍禁止。
 
 R41保留R38新增的3个core primary decisions，并删除DOM通用discovery中1个越权的全局名称歧义diagnostic；该分支在R38表中属于`chatgpt-dom.js`的4个diagnostic之一，也是DOM 27个decision之一。R41不新增production decision、diagnostic、fallback、retry或DOM算法。当前总计`7 / 85 = 8.24%`。
 
@@ -489,7 +551,10 @@ R41删除的是`discoverProjects()`在URL去重与身份解析前构造`PROJECT_
 | `resolveProject`先sidebar再cache | 旧实现把live discovery当作名称解析第一步 | baseline已cache-first并保留网页身份验证 | `chatgpt-core.js` baseline，R20无重复改动 |
 | transient Project验证即删除cache | 旧实现把所有异常视为ID失效 | baseline已区分unavailable/stale并原子替换 | `chatgpt-core.js` baseline，R20无重复改动 |
 | direct失败后UI dictation | 私有direct接口变化时维持可用 | baseline已删除；R24只验证不复活 | `chatgpt-dom.js` baseline |
-| voice BROWSER_DISCONNECTED同请求自动重试 | 试图掩盖浏览器断连 | baseline已删除；下一独立调用负责恢复 | `chatgpt.js` baseline |
+| voice BROWSER_DISCONNECTED只报错、等待下一独立调用 | R54担心未知副作用而禁止同事务恢复 | 用户本轮明确要求错误自解决；每个core request先settle/隔离后，CLI下一attempt才重走同一direct主路径 | `chatgpt.js`替换旧单次分支与旧测试 |
+| owned `puppeteer.launch` + child.kill close fallback | 简化私有profile进程管理 | daemon/browser连接耦合并产生孤儿profile lock；R56统一为spawn blank/marker connect/bootstrap导航与CDP graceful close | `chatgpt-core.js:launchBrowser/closeOwnedBrowser` |
+| daemon启动日志完整字符串 + byte offset slice | 复用文件size作为追加游标 | UTF-8多字节日志使具体错误和recoverability code不可见；R56从byte offset直接读Buffer尾部 | `chatgpt.js:daemonStartupErrorSince/daemonLoginRequiredSince` |
+| TUI 90秒 + Windows tree force-kill | 旧单次voice总兜底 | 四次完整预算前抢先中断，并可终止daemon/browser后代 | `prompt-voice-input.ts`预算与`Process.run` voice-only `killTree:false` |
 | voice期间的Project/foreground耦合 | fallback和ask共用DOM前台 | baseline已让direct不抢前台，ask保留自身owner | `chatgpt-core.js` baseline |
 | `/api/auth/session` token fetch | 旧ChatGPT Web曾从该endpoint取token | 当前frontend从bootstrap session state取token；删除endpoint fetch不等于删除官方Bearer语义 | 保持删除；`chatgpt-dom.js`只读取当前page bootstrap |
 | guest正文正则 + composer/login组合 | 试图区分匿名composer与已登录composer | 当前真实guest文案已绕过该正则；bootstrap authStatus/session是网页自己的会话事实 | `chatgpt-dom.js:readLoginPageState`替换，不叠加更多文案 |
@@ -512,6 +577,13 @@ R41删除的是`discoverProjects()`在URL去重与身份解析前构造`PROJECT_
 | R-18 / INV-18 Project首页网络收敛 | live sidebar home click或cached/current URL goto -> `conversation/init` response -> existing `ensureProjectHome` -> `submitAsk` | core与`chatgpt-dom.js`共享同一Project导航owner和初始化事件；不改core URL identity或全局deadline | delayed-init与fresh-goto fixture red/green；MCP cold ask和六Session acceptance |
 | R-19 / INV-19 cold Project与voice并发副作用 | first ask `ensureProject` -> existing submission queue -> single-flight Project acquisition -> release -> existing ask create/submit | `chatgpt-core.js`只把首次`initializeProject`纳入已有queue；不改DOM算法、voice endpoint或Session identity | runtime受控并发slice先red后green；4/2 cold overlap与12/6完整压力转绿 |
 | R-20 / INV-20 voice preflight与Project/ask副作用互斥 | voice request -> queued `voiceLease`/stability -> one direct POST; Project/ask actions use same queue | `chatgpt-core.js`把`voiceLease`从queue外移入既有submission owner，保留queue前取消和settle/隔离语义 | ask-first 4/2 red/green、voice preflight不与Project click重叠、取消后下一voice可用 |
+| INV-30 / 具体启动错误尽早消费 | byte log offset -> Buffer tail -> marker parse | `chatgpt.js`统一两个log consumer按字节读取 | 中文前缀+stub startup error在约1秒返回具体错误，不等1500ms deadline |
+| INV-31 / 私有browser自维护 | private marker connect或spawn blank -> marker connect -> one bootstrap navigation/convergence -> daemon ready | `chatgpt-core.js`替换默认puppeteer.launch；保留显式shared分支 | orphan marker重连同一Edge；cold blank仅过渡且最终ChatGPT ready；退化页优雅关闭后cold成功 |
+| INV-03/08/15/33 / 初次加三次可恢复重试 | validate once -> owner code -> up to 4 x ensureDaemon/direct -> cleanup/backoff -> success/final error | `chatgpt-dom.js`HTTP code、core route/startup code、`chatgpt.js`封闭classifier | 429/5xx/transport/browser前三次失败第四次成功；ChatGPT login/auth/403/400/cancel只一次；local daemon identity 401按INV-35恢复；真实daemon crash整链成功 |
+| INV-32 / TUI不抢先破坏生命周期 | Alt+V -> external CLI with 1,237,000ms fallback + parent-only cancel | `prompt-voice-input.ts`和`util/process.ts`添加voice-only `killTree:false` | Windows/portable process fixture证明abort不终止grandchild；controller仍可立即取消并清理WAV |
+| INV-34 / pre-ready acquisition不遗留browser | acquire provenance -> bootstrap preparation/navigation/fact -> success return or owner-local cleanup -> error/cold | `chatgpt-core.js`让`acquireBootstrapBrowser`在所有异常出口按provenance收敛；cold条件保持唯一 | isolated default-private真实Edge注入pre-ready异常后endpoint不可达、profile可cold；shared只disconnect |
+| INV-35 / daemon本地401恢复 | old local daemon state `/voice` 401 -> adapter code -> reread changed current state -> verify usable -> next existing attempt | `chatgpt.js`仅在local HTTP adapter与voice orchestration增加稳定code和identity reconciliation；不调用retire/unlink | A切换发现文件到B后401，A/B stop均0、B同wire成功；unchanged/missing/unusable fail closed；`VOICE_AUTH_REQUIRED`和403仍一次 |
+| INV-08/31/34 / default-private完整生产链 | isolated state -> production CLI/daemon -> default `state/profile` marker -> daemon crash/bootstrap cold -> production recovery | `test-voice-robustness.js`增加两个显式headless隔离mode；production无test-only cleanup算法 | `--daemon-crash-reconnect`同endpoint成功；`--bootstrap-cold-recovery`首browser关闭、第二browser cold且voice成功；无测试进程残留 |
 
 ## 14. Reverse Traceability
 
@@ -531,22 +603,34 @@ R41删除的是`discoverProjects()`在URL去重与身份解析前构造`PROJECT_
 | Project single-flight加入existing submission queue | R-19 | 4/2 cold overlap连续三次卡在expander可信click；无voice和2/1对照green | R26 queue已经拥有跨页远端副作用排序，但`ensureProject`当前在queue外；复用它比新增Project锁、click retry或DOM fallback更内聚 |
 | test-only末端双marker长WAV合同 | R-12 | R36 audit B-01与当前`nonEmptyChars`断言 | 已有RIFF helper和真实整链可复用，但开头语音+尾部silence/非空断言看不到截断；运行时TTS提供独立expected且不引入production路径 |
 | voice lease/preflight进入existing submission owner | R-20 | R36修复后4/2日志显示Project队头阻塞voice direct且voice lease仍在queue外执行；已有`withSubmission`可复用 | 现有voice acquisition在队列外，导致Project和另页`sessionPageFact`重叠；新增Project锁或延长voice deadline都不能承载已观察跨页CDP边界 |
+| private marker browser lifecycle | INV-08, INV-14, INV-31 | 当前私有profile marker可连接Edge PID 56832；当前launch重试被同profile lock拒绝；用户要求自维护且不强杀 | 现有显式CDP分支只在配置存在时运行，默认launch从不读取private marker且close fallback会kill child |
+| byte-tail log reader | INV-30 | 确定性Unicode feedback loop与真实bytes/UTF16差值 | 当前`readFileSync(...,'utf8').slice(byteOffset)`无法正确消费多字节日志 |
+| four-attempt voice transaction | INV-03, INV-08, INV-15 | 用户明确至少三次重试；历史429随后成功；现有core在HTTP response前完成cleanup | 当前CLI只调用一次endpoint，且BROWSER_DISCONNECTED分支故意retire后抛错 |
+| owner-produced recoverability codes + closed CLI classifier | INV-03, INV-15, INV-33 | DOM已拥有HTTP status/kind，core拥有login/page/browser/request cleanup，R55 audit证明统一500会重复确定性失败 | 现有message/500不能区分429、5xx、登录介入和4xx；CLI不能安全从文案重建这些事实 |
+| acquisition provenance `{ browser, ownedByDaemon }` | INV-14, INV-33 | debug-port-only当前既可连接已有browser也可由daemon spawn，但静态`BROWSER_CDP_URL`把两者都当shared | shutdown/page cleanup必须消费实际启动来源，配置字符串无法承载ownership |
+| persistent `browser-owner.json` verified by CDP browser PID | INV-14 | daemon.json在stale启动前必删；CDP `SystemInfo.getProcessInfo`真实返回browser PID；debug-port固定endpoint可重连 | daemon state无法跨异常退出，端口/profile alone会误关用户browser；三元组是最小可验证事实 |
+| 1/2/4秒retry backoff | INV-03, INV-15 | 近期429后3.7至7.5秒下一条成功；旧批量同一WAV约60秒后成功 | 当前没有retry pacing；固定短退避无需引入新配置、header parser或长期timer |
+| Process `killTree` option consumed only by TUI voice | INV-32 | Windows通用abort当前`taskkill /T /F`；voice child会启动独立daemon/browser且用户禁止强杀 | 改全局默认会破坏其它Process consumers；voice call-site需要显式关闭tree kill |
+| acquisition-local provenance cleanup | INV-31, INV-34 | 隔离headless repro在helper异常后仍可连接marker；outer daemon变量尚未赋值 | 现有`closeOwnedBrowser`与shared disconnect合同可复用，但必须由仍持有`acquired`的helper在throw前调用 |
+| local daemon identity code + current-state reconciliation | INV-15, INV-35 | `/ping`确认旧state后业务401红环；R61审计证明旧token不能retire current daemon；page auth已有独立code | adapter是最早能标识local 401的owner；只有orchestration能重新读取current discovery并验证身份变化/usable，现有retire会错误unlink |
+| isolated default-private lifecycle modes | INV-08, INV-31, INV-34 | R60批准file plan/commands未实施；用户观察到前一可见临时profile干扰 | `test-mcp` direct/fixed-port不能证明production default-private daemon chain；随机state+headless保留production profile推导且不触碰用户profile |
 
 ## 15. File-Level Change Plan
 
 | File | Add / modify / delete | Exact responsibility of the change | Expected line delta |
 | --- | --- | --- | ---: |
-| `thirdparty/chatgpt-browser-agent/chatgpt-core.js` | modify | 保持R24/R26行为；保留R35 fresh URL DOM委托，R36 Project single-flight已进入queue；R38再把voice lease/preflight与direct保持同一queue事务，保留queue前取消、settle/隔离、finishAsk外置和URL identity | R36约+3/-1；R38约+12/-8 |
-| `thirdparty/chatgpt-browser-agent/chatgpt-dom.js` | modify | R35已完成sidebar/live home click/Project URL goto统一等待同页`conversation/init`；R36不新增DOM算法、timeout或retry | R35约+23/-0；R36为0 |
-| `thirdparty/chatgpt-browser-agent/chatgpt.js` | baseline evidence, no new R26 behavior | 保持browser disconnect当前请求不重发 | 0 new |
-| `thirdparty/chatgpt-browser-agent/test-mcp.js` | modify | 保留R24/R26行为测试；R35 delayed-init/fresh-goto、R36 Project queue slice；R38补voice preflight排序与queue前取消，观察页面准备、Project click、direct及后续voice实际行为 | R35约+30/-0；R36约+24/-0；R38约+35/-0 |
-| `thirdparty/chatgpt-browser-agent/test-voice-robustness.js` | modify | 每个ask独立new Session、distinct hash；并发调度后从本轮daemon log断言六个`Prompt sent`可信URL接受，禁止completed replay假通过；R35不新增pressure分支 | R29约+25/-8 |
-| `thirdparty/chatgpt-browser-agent/README.md` | modify | 将旧DOM/cookie-only说明改成bootstrap事实、page-local auth和未登录等待语义 | 约+5/-5 |
-| `packages/opencode/test/cli/tui/prompt-voice-input.test.ts` | modify verification only | 保留真实300秒本地整链；运行时生成末端双marker PCM并断言两个late marker及不同short预期词，清理全部中间文件；可选evidence只写marker匹配布尔/长度和cleanup，不含token/audio/text/PID。线上CI门禁关闭并skip | R37约+35/-8 |
-| `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts` | no change | 现有AbortSignal、90秒上限和临时文件清理已经是正确上游契约 | 0 |
-| `packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts` | no change | 录音native资源和WAV文件生命周期不属于browser daemon根因 | 0 |
+| `thirdparty/chatgpt-browser-agent/chatgpt-core.js` | modify | R60 provenance/profile矩阵保持；R61让`acquireBootstrapBrowser`在所有pre-ready异常出口执行shared disconnect或owned verified graceful close，仅持续不收敛可cold一次。 | R61约+20/-8 |
+| `thirdparty/chatgpt-browser-agent/chatgpt-dom.js` | modify | 不改wire/重试编排；仅在现有direct catch中把HTTP 429、5xx、其它4xx原位映射稳定code，transport/page/endpoint保持现有kind。 | 约+12/-3 |
+| `thirdparty/chatgpt-browser-agent/chatgpt.js` | modify | R60 byte-tail/four-attempt保持；R63把local daemon HTTP 401映射code，重新读取并验证changed current state后才允许下一attempt；不retire/stop/unlink。 | R63约+18/-2 |
+| `thirdparty/chatgpt-browser-agent/test-mcp.js` | modify | 增加pre-ready异常不遗留default-private browser，以及local daemon identity A→B reconciliation后下一attempt成功；断言A/B stop均0并保留auth/403单次回归。 | R63约+70/-5 |
+| `thirdparty/chatgpt-browser-agent/test-voice-robustness.js` | modify | 增加headless随机state的default-private daemon crash marker reconnect与bootstrap cold recovery production modes；失败时graceful cleanup。 | R61约+110/-5 |
+| `thirdparty/chatgpt-browser-agent/README.md` | modify | 同步private profile marker生命周期、graceful close、最多四attempt和non-retry边界。 | 约+20/-12 |
+| `packages/opencode/src/util/process.ts` | modify | 为既有`Process.run`增加默认保持现状的`killTree?: boolean`；仅voice caller传false，使主动取消只终止CLI父进程。 | 约+12/-4 |
+| `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts` | modify | 总兜底改为`4 * (180s daemon + 120s HTTP) + 7s backoff + 30s cleanup = 1,237,000ms`并对transcriber使用`killTree:false`；用户Abort仍立即生效。 | 约+8/-3 |
+| `packages/opencode/test/cli/tui/prompt-voice-input.test.ts` | modify | 锁定新总预算、父进程取消不递归终止grandchild、WAV清理和后续调用。保留300秒末端marker E2E。 | 约+55/-10 |
+| `packages/opencode/src/cli/cmd/tui/prompt-voice-recorder.ts` | no change | 录音native资源和WAV文件生命周期不属于browser daemon根因。 | 0 |
 
-当前worktree的R10/R18 production baseline、R20测试收敛与R24认证/fresh-page收敛修正仍不新增依赖、公开配置项、迁移或生成文件；非测试代码总净增硬上限小于800行。基线、R20和R24 delta必须分开计数，不得通过删除或软化有效中文注释达成预算。以上是审计估算，不是删减已确认行为的硬上限。
+R61相对当前R60 worktree新增production有效修改估算不超过30行；完整任务production有效修改预计不超过470行，仍低于用户600行硬上限。新增测试不引入公开配置、依赖、migration、generated file或第二browser/voice实现。实现审计必须按完整实际diff逐hunk检查。
 
 ## 16. TDD Behavior Slices
 
@@ -557,7 +641,7 @@ R41删除的是`discoverProjects()`在URL去重与身份解析前构造`PROJECT_
 | 1-13 | R10/R18 baseline：Project lazy/cache、direct-only、稳定lease、取消/资源/提交计数均已有实现和对应red-green记录；其中DOM文案事实、fresh page立即snapshot和cookie-only wire已被R24当前证据反证。 | 其它历史red已修复；下面四个认证/收敛vertical slice不能重做其余baseline。 | 只做当前worktree回归验证；在现有DOM/core owner原位替换。 | 保持voice启动、ask兼容、direct-only和安全边界。 |
 | 8 | TUI cancel在direct pending和页面任务pending时返回；下一次voice能成功，旧任务不再写页面。 | 当前日志出现task未settle，现有测试没有真实late operation。 | 有界abort、真实settle或page隔离后释放voice lock；仅作为回归。 | voice cancel后daemon后续请求阻塞。 |
 | 9 | 4路voice与ask并发时，voice串行、ask不共享voice page，所有结果不串台。 | 现有锁部分覆盖，但startup/bootstrap和fallback前台耦合未验证。 | 复用既有runtime allocation/lock，不增加全局串行。 | 高负载并发回归。 |
-| 10 | offline seam证明disconnect handler和当前voice不重发；owned E2E完成首个voice后只SIGTERM唯一agent Edge后代，不手工清state，等待5秒再发独立voice并要求成功。 | callback/stale失败测试不能证明真实下一daemon可用。 | 复用生产handler和CLI acquisition；harness无法唯一证明owned进程时fail-closed。 | 用户关闭Edge后等待再调用的完整生命周期。 |
+| 10 | R54历史：offline seam证明disconnect handler与旧单次voice不重发；owned E2E关闭唯一agent Edge后下一独立voice成功。 | 旧合同不能证明R55同一CLI事务恢复。 | R55由slice 31、33、34替换其恢复合同；旧browser-close仍作回归。 | 用户关闭Edge后的完整生命周期。 |
 | 11 | 现有ask/session/pending/Project/foreground离线测试继续通过。 | lazy Project可能影响runtime project读取。 | 只在ask入口ensureProject，保留原Session身份链。 | 既有ask兼容和安全边界。 |
 | 12 | 环境门禁TUI controller使用真实`node chatgpt.js transcribe-file`和约300秒WAV：有效PCM只在末端含运行时TTS双marker，长结果必须含两个独立预期词、回idle并删除WAV/marker中间文件；随后同一controller/daemon的短fixture必须返回另一组预期词。 | 当前测试只断言`inserted[0]`非空，截断、旧short结果或任意非空文本都可通过；接受timeout同样保留用户缺陷。 | test-only RIFF helper把合法marker frames置于末端并归一文本断言；production算法/timeout不改，只有真实red定位到owner后才修。 | 长音频末端完整性、TUI deadline、stale结果、临时文件和daemon共同生命周期。 |
 | 13 | 隔离daemon执行3轮，每轮4路voice并在每2路后立即启动一个独立new ask：要求12/12 voice、6/6 ask、六个唯一Session、`accepted=6`、0失败/超时、voice p95<=120s、`voiceSubmitted`增量12；每轮active/queued/locks=0、voice pages<=1、累计managed pages<=7，最后短voice成功。 | 旧同Session同prompt会completed replay；harness级askTail还会把第二ask推迟到voice结束，降低真实overlap敏感度。 | 删除harness的session复用和askTail；仍依赖现有production new-conversation lock/submission queue，不增加生产并行或重试。 | 多轮voice/new-ask高压、六次真实接受、无重复提交和daemon长期稳定。 |
@@ -576,14 +660,27 @@ R41删除的是`discoverProjects()`在URL去重与身份解析前构造`PROJECT_
 | 26 | new Session的target allocation不得与cold Project trusted click重叠；target allocation仍可在voice direct期间准备页面，以保持第一voice后ask优先进入接受窗口。 | R53中第一ask已进入Project click时第二ask仍执行`browser.newPage()`；button具备React onClick但trusted event始终未产生，root与`about:blank`保持至60秒。R51候选把allocation放进submissionQueue后，既有2 voice/1 ask测试超时，证明它错误改变第二voice/ask顺序。 | 抽取既有`pageCreateQueue`临界区为私有`withPageCreationExclusion()`；page claim/allocation与cold Project initializer共用该排他边界，Project仍同时经过submissionQueue。 | allocation与Project initializer不重叠；既有2 voice/1 ask顺序保持green；fresh 4/2不再因target creation卡住click。 |
 | 27 | 页面内direct fetch的AbortController必须消费当前voice请求剩余总预算，不能按短音频大小另造15秒更早deadline；POST仍只有一次，真实transport失败仍原样失败并退役page。 | R52中ready bootstrap在147ms稳定，唯一direct随后精确约15秒报`signal is aborted without reason`；源码短音频公式固定为15秒，而当时core请求仍有约45秒。 | core在唯一POST前读取`shouldCancel.remaining()`并通过现有internal options传给DOM；DOM page timer使用该剩余值。R53默认core绝对deadline为80秒，取消和退役逻辑不变。 | 本地同源endpoint在15秒后、剩余预算内返回时成功且POST一次；超时/取消仍settle或隔离。 |
 | 28 | trusted send click开始后，新增user turn是唯一接受事实；它应在既有20秒conversation acceptance边界内等待事件，不能用独立10秒窗口把稍晚出现的真实turn记为lost。 | R55双ask中一条在10秒报`Waiting failed`并写lost，但同一受控page随后出现严格MCP conversation URL、1个user turn和1个assistant turn。 | `clickSend()`继续等待同一user-turn predicate，只把上限改为`min(responseTimeout, 20_000)`以对齐随后既有URL记录边界；不接受URL/composer清空替代，不重发。 | 延迟超过10秒但小于20秒的trusted acceptance成功；route-only仍失败且`promptMayHaveBeenSent=true`。 |
-| 29 | voice总deadline仍从入队前绝对计时，但默认值必须容纳真实cold 4/2中排在前面的一个慢direct、Project init和先行voice；同时必须早于TUI 90秒和CLI 120秒外层。 | R57第一voice 27.430秒、Project约27.5秒、第二voice 3.523秒；第三voice开始时60秒预算只剩约1.4秒并被中止，所有先行步骤均正常完成。 | 只把core `VOICE_TRANSCRIBE_TIMEOUT_MS`默认值从60秒调到80秒；env覆盖、absolute queue clock、页面remaining、取消/settle和外层预算不变。 | 同一无instrumentation fresh4/2从精确60秒red转green；已有deadline/cancel fixture和TUI门禁继续通过。 |
+| 36 | default-private browser已连接后，bootstrap preparation/navigation/fact抛普通异常；调用失败后marker endpoint必须不可达且profile可被下一cold acquisition使用。shared endpoint仍保持活。 | 当前helper仅清理`SESSION_PAGE_DID_NOT_CONVERGE`，已运行repro得到`orphanReachable=true`。 | 在持有`acquired`的catch内统一收敛；只有首轮owned持续不收敛且close成功继续cold，其它异常close/disconnect后原样throw。 | 原始孤儿profile、about:blank失败、shared不误关和cold预算不扩张。 |
+| 37 | CLI先使用state A通过`/ping/status`，A的`/voice`处理时原子发布state B并返回local 401：下一attempt必须只复用usable B并成功，A/B `/stop`均为0。A仍是current、发现文件缺失或B unusable时原401立即失败；ChatGPT auth/403仍只请求一次。 | 当前401无code不进入classifier；R61的旧token retire会401后unlink B。 | local adapter产专属code；orchestration比较A/B四元身份并验证B usable，只授权existing loop下一attempt；不stop、不unlink、不直接成功。 | 并发daemon replacement identity自解决，无竞争daemon、无误删current索引，不放宽其它4xx。 |
+| 38 | `test-voice-robustness.js --daemon-crash-reconnect`在随机state/default-private profile首voice后仅终止daemon PID；Edge endpoint保持，下一production CLI重连同endpoint且voice成功，真实stop释放profile。 | R60只在`test-mcp`覆盖direct marker和fixed-port daemon，批准mode缺失。 | test-only wrapper只注入authenticated voice结果；production CLI/daemon/acquisition/marker/stop全部真实，headless仅由test hooks启用。 | default-private daemon异常退出完整producer-consumer链和用户profile隔离。 |
+| 39 | `--bootstrap-cold-recovery`首个default-private lifecycle持续不一致，production必须graceful close并验证release，再cold第二browser、voice成功和stop清理；失败也无可见/后台测试browser残留。 | 批准mode缺失，已有helper测试不覆盖daemon/CLI/state/profile边界。 | test-only DOM fact只控制首/第二lifecycle事实；production acquisition/close/cold/HTTP route保持真实。 | bootstrap退化自解决、无强杀、无替代profile、测试不干扰用户。 |
+| 29 | R54历史：voice总deadline从入队前绝对计时，默认80秒容纳已观察cold FIFO，并受当时TUI 90秒和CLI 120秒外层约束。 | R57历史red。 | R54已实施；R55不改core单attempt预算，只替换TUI transaction外层。 | R54 deadline/cancel fixture继续green。 |
+| 30 | daemon log在中文前缀后立即追加`Startup error: fixture launch failed`；CLI必须约1秒返回该具体错误而非等满startup timeout。 | byte offset被用于UTF-16 string slice，确定性fixture当前只返回通用错误。 | 两个consumer从offset读Buffer尾部再UTF-8 decode，不改变marker语法。 | 多字节日志不再造成180秒假卡死；ASCII日志与login-required仍正确。 |
+| 31 | private marker已指向仍运行的Edge而daemon不存在；新daemon必须connect同一browser并完成bootstrap，不执行第二次spawn。 | 默认`puppeteer.launch`不读取marker并因profile lock立即失败。 | 默认private owner先解析`DevToolsActivePort`完整endpoint并connect；只在marker不可连接且profile可启动时cold spawn。 | daemon异常退出后自恢复，用户手动可用页面不再成为孤儿锁。 |
+| 32 | 无private browser时cold spawn先出现内部blank，marker/CDP ready后由唯一bootstrap owner导航ChatGPT；daemon ready时不得有about:blank，失败后不得留下无主blank browser。 | 直接URL启动已有订阅Failed to fetch；blank→CDP→bootstrap导航对照保持登录且无同源失败。 | 使用现有executable/args spawn blank，轮询marker后connect，再复用现有startup goto/convergence。 | cold startup、登录态、订阅首屏与bootstrap单一authority不回归。 |
+| 33 | 已连接private browser的bootstrap持续不可用时，必须发送一次CDP `Browser.close`、等待profile释放，再沿同一cold path成功；关闭超时只disconnect并明确失败，不强杀。 | 当前close fallback调用child kill；daemon/browser异常边界会遗留profile或破坏持久状态。 | private lifecycle owner执行graceful close-to-cold transition；shared只disconnect。 | 退化about:blank/坏页面可自解决，同时保护cookie和普通Edge。 |
+| 34 | fake daemon前三次分别返回429、5xx、transport/browser稳定code，第四次返回文本；CLI应有四次同一POST并成功。第四次仍失败时返回最后错误。 | 当前CLI只有一次endpoint调用；统一500不能安全分类。 | producer code表 + 单一for-attempt orchestration，每次完整预算，清理后1/2/4秒退避。 | 429、daemon重启、page和transport按用户合同恢复，无alternate wire。 |
+| 35 | login wait timeout、ChatGPT auth/401/403、无效WAV、用户Abort、CLI signal和未知code只执行一次/零次endpoint并立即终止；取消后不得排队后续attempt。local daemon identity 401只由slice 37覆盖。 | R55宽泛runtime重试会让登录等待重复四次。 | 本地校验在loop外；DOM/core/startup原位产code；CLI只消费封闭集合，unknown fail closed。 | 用户介入及时、确定性失败不放大、WAV仍清理。 |
+| 36 | TUI默认允许四个完整attempt、三次退避与清理余量，但用户取消时只终止transcriber CLI，不在Windows递归杀daemon/browser grandchild。 | 当前90秒/tree kill抢先破坏；R55的1230000ms漏算7000ms退避。 | 新总兜底1237000ms；`Process.run({ killTree:false })`仅voice opt-in。 | parent abort fixture、精确预算、TUI cleanup与后续voice；其它Process caller默认行为不变。 |
+| 37 | debug-port-only在端口预先可达时连接且stop只disconnect；不可达时daemon spawn固定端口并在stop graceful close；两者bootstrap行为相同，ownership断言不同。 | 当前静态`sharedBrowser=!!BROWSER_CDP_URL`会把daemon自己spawn的固定端口browser误判shared。 | acquisition返回provenance；shutdown/stale-page只消费result。 | README公开debug-port reuse/launch合同、用户browser安全和daemon正常关闭。 |
+| 38 | debug-port不可达→spawn owned→只终止daemon→新daemon先删除stale daemon.json→同端口重连仍为owned→正常stop必须使endpoint不可达并删除匹配owner record。mismatch fixture必须只disconnect并保留record/endpoint。 | daemon discovery state不保存browser provenance，R59会在崩溃后退化shared。 | 原子owner record + 当前CDP browser PID/profile/port全匹配；close compare-delete。 | 原始孤儿/profile lock闭环、普通Edge fail-safe、不依赖PID扫描。 |
 
 ## 17. Chinese Comment Budget
 
 | Metric | Estimate | Method |
 | --- | ---: | --- |
-| Effective changed code lines `E` | 约1905 | 以R49估算`E≈1820`为基线，计入R54三项行为fixture约65行、production约16行和deadline文档；删除production分支、plan文档、纯注释和格式不计入E。actual implementation audit必须重算。 |
-| Required Chinese explanatory comments `C` | 至少286 | `ceil(1905 * 0.15) = 286`；除既有注释范围外，R54必须就近解释Project为何复用page-creation exclusion、页面fetch为何消费剩余voice deadline、send后为何等待user-turn，以及80秒为何仍受TUI/CLI外层约束。 |
+| Effective changed code lines `E` | 约680 | 完整R63 production与tests实际行为行；排除空行、import-only、文档、pure move、formatter和generated。actual implementation audit逐行重算。 |
+| Required Chinese explanatory comments `C` | 至少102 | `ceil(680 * 0.15) = 102`；当前R60实际候选已超过该值，R63新增注释仍须就近解释acquisition cleanup、local 401 owner和隔离E2E。 |
 
 必须解释的非显然点：
 
@@ -610,6 +707,19 @@ R41删除的是`discoverProjects()`在URL去重与身份解析前构造`PROJECT_
 - 为什么`aria-expanded=false`的Project row不能被当作列表展开控件；真实页面的Project内容状态与列表可见性是两个DOM语义。
 - R43 discovery fixture为什么必须观察Project row的可信click副作用，而不是只断言候选数量。
 - 测试断言用户可观察的导航、返回、后续调用和资源副作用，而不是helper调用次数。
+- 为什么默认`STATE_DIR/profile`的marker可作为daemon私有browser连接事实，而显式shared profile/CDP不能进入该owner。
+- 为什么daemon异常退出后保留browser并重连比重新launch或强杀更能维护profile；正常stop为何只能CDP graceful close。
+- 为什么日志游标必须保持UTF-8 byte语义，不能先decode再按byte slice。
+- 为什么四次attempt是同一primary transaction迭代，且每次必须等前一request settle/隔离后才退避，不能在DOM adapter内部重发。
+- 为什么本地输入错误和用户取消不重试，而HTTP/transport/page/browser/daemon运行错误按用户合同进入下一attempt。
+- 为什么TUI总兜底按四个完整daemon+HTTP预算计算，但主动取消仍立即终止CLI且不递归终止daemon/browser。
+- 为什么HTTP status、login和browser事实必须在producer原位变成稳定code，CLI只能消费封闭集合且unknown fail closed。
+- 为什么cold spawn允许内部blank作为CDP过渡，但必须由bootstrap owner导航后才ready；为什么不能直接URL启动或把blank留给用户。
+- 为什么debug-port已可达与daemon本次spawn必须产生不同ownership，且shutdown不能再由静态URL配置推导。
+- 为什么debug-port owner record必须独立于daemon.json并由当前CDP browser PID验证；为什么缺失/mismatch只能shared fail-safe。
+- 为什么pre-ready任意异常必须由仍持有provenance的acquisition helper清理，而outer daemon catch无法补偿；为什么只有持续不收敛可进入一次cold。
+- 为什么local daemon 401属于daemon identity lifecycle，而page-local `VOICE_AUTH_REQUIRED`仍是确定性登录错误；不能按status泛化所有401。
+- 为什么default-private E2E必须使用随机state自然推导`state/profile`并headless隔离，不能借用户登录profile或fixed-port替代默认producer。
 
 ## 18. Verification
 
@@ -627,7 +737,7 @@ R41删除的是`discoverProjects()`在URL去重与身份解析前构造`PROJECT_
 | `bun test test/cli/tui/prompt-voice-input.test.ts` | `packages/opencode` | 普通环境只跑TUI AbortSignal、录音清理和转录器协议离线回归；真实Edge用例因门禁而跳过。 |
 | `bun typecheck` | `packages/opencode` | package-local TypeScript类型检查。 |
 | `CHATGPT_STATE_DIR=/private/tmp/chatgpt-pressure-r38 CHATGPT_SESSION_DIR=/private/tmp/chatgpt-pressure-sessions-r38 CHATGPT_BROWSER_USER_DATA_DIR=/Users/sunbenteng/.local/share/opencode/chatgpt-browser-agent/state/profile TMPDIR=/private/tmp CHATGPT_VOICE_FILE_ROOTS=/private/tmp/opencode/voice CHATGPT_PROJECT=MCP node test-voice-robustness.js --load --rounds 3 --voice-per-round 4 --ask-every 2 --expect-voice 12 --expect-ask 6 --max-p95-ms 120000 --max-voice-pages 1 --max-managed-pages 7` | `thirdparty/chatgpt-browser-agent` | fresh隔离state的MCP Project同一daemon下12/12 voice、6个独立new Session/distinct ask、6个唯一句柄和`accepted=6`；0超时/失败、voice提交增量12、每轮锁收敛、累计page不超过7、最后voice通过。 |
-| `TMPDIR=/private/tmp node test-mcp.js testOwnedBrowserDisconnectLifecycle testVoiceDoesNotRetryAfterBrowserDisconnect testVoiceSkipsStaleBrowserDaemon` | `thirdparty/chatgpt-browser-agent` | 离线证明生产disconnect transition、当前请求不重发和stale索引淘汰。 |
+| `TMPDIR=/private/tmp node test-mcp.js testOwnedBrowserDisconnectLifecycle testVoiceRetriesAfterBrowserDisconnect testVoiceSkipsStaleBrowserDaemon` | `thirdparty/chatgpt-browser-agent` | 离线证明disconnect后request先清理、CLI下一attempt重连/cold恢复及stale索引淘汰。 |
 | `env -u CHATGPT_BROWSER_CDP_URL -u CHATGPT_BROWSER_WS_ENDPOINT TMPDIR=/private/tmp CHATGPT_BROWSER_DEBUG_PORT=0 CHATGPT_VOICE_FILE_ROOTS=/private/tmp/opencode/voice node test-voice-robustness.js --browser-close --gap-ms 5000` | `thirdparty/chatgpt-browser-agent` | 只关闭唯一owned agent Edge后代，不手工清state；生产disconnect自清理后下一独立voice必须成功。 |
 | `env -u CHATGPT_BROWSER_CDP_URL -u CHATGPT_BROWSER_WS_ENDPOINT TMPDIR=/private/tmp CHATGPT_BROWSER_DEBUG_PORT=0 CHATGPT_VOICE_FILE_ROOTS=/private/tmp/opencode/voice node test-voice-robustness.js --profile-restart` | `thirdparty/chatgpt-browser-agent` | 真实default daemon启动后立即通过其`DevToolsActivePort`挂载观察器，覆盖bootstrap到ready的首屏dialog；随后cold voice、graceful stop、同profile再次cold voice成功；harness只识别主Edge进程，不把helper误判为多个owner。 |
 | `TMPDIR=/private/tmp CHATGPT_VOICE_FILE_ROOTS=/private/tmp/opencode/voice CHATGPT_VOICE_PAGE_MAX_AGE_MS=100 node test-voice-robustness.js --idle --gap-ms 250` | `thirdparty/chatgpt-browser-agent` | 加速5分钟age策略；voice不解析Project，因此该命令不设置`CHATGPT_PROJECT`。 |
@@ -637,33 +747,42 @@ R41删除的是`discoverProjects()`在URL去重与身份解析前构造`PROJECT_
 | `CHATGPT_VOICE_E2E=1 CHATGPT_BROWSER_USER_DATA_DIR=<agent-profile> CHATGPT_VOICE_E2E_EVIDENCE=/private/tmp/opencode/voice/long-voice-e2e.json TMPDIR=/private/tmp bun test test/cli/tui/prompt-voice-input.test.ts --test-name-pattern "five-minute WAV"` | `packages/opencode` | 仅Darwin本地人工门禁：300秒WAV末端两个独立marker和short独立预期均匹配，全部WAV/TTS中间文件删除，精确daemon退出；可选JSON只含匹配布尔/长度/cleanup，不含token/audio/text/PID。普通CI门禁关闭并skip。 |
 | `node chatgpt.js --stop` | `thirdparty/chatgpt-browser-agent` | 最终E2E后有界停止agent daemon并保存profile状态；不关闭shared user browser。 |
 | `git diff --check` and changed-file inspection | repository/nested repo as applicable | whitespace、无关文件和submodule工作树边界。 |
+| `node test-mcp.js testDaemonStartupErrorUsesByteOffset testBrowserAcquisitionProvenance testPrivateBrowserReconnectsMarker testPrivateBrowserColdStartsViaBootstrap testPrivateBrowserRecoversBootstrapGracefully testDebugPortConnectIsShared testDebugPortSpawnIsOwned testDebugPortOwnedSurvivesDaemonCrash testDebugPortOwnerMismatchIsShared testVoiceRetryCodes testVoiceRetriesRecoverableFailure testVoiceRetryStopsAfterFourthFailure testVoiceDoesNotRetryLoginAuthResponseConfigInputRejectOrCancel` | `thirdparty/chatgpt-browser-agent` | R60确定性red/green：Unicode/code、profile/debug-port provenance跨crash、blank/graceful close、recoverability/non-retry。 |
+| `node test-voice-robustness.js --daemon-crash-reconnect` | `thirdparty/chatgpt-browser-agent` | 真实默认private profile：首个voice后只终止daemon，browser保持；下一CLI重连同一marker并成功，不扫描或强杀Edge。 |
+| `node test-voice-robustness.js --bootstrap-cold-recovery` | `thirdparty/chatgpt-browser-agent` | 可连接但bootstrap不可收敛的private browser经CDP graceful close、profile释放和同一cold path恢复；shared模式明确skip close。 |
+| `node test-mcp.js testPreReadyFailureReleasesPrivateBrowser testDaemonIdentityMismatchReconcilesCurrentDaemon testDaemonIdentityMismatchFailsClosedWithoutChangedUsableState` | `thirdparty/chatgpt-browser-agent` | R63最小red-green：pre-ready异常后无marker endpoint/profile lock；A→B identity切换后不stop/unlink并由下一attempt成功；unchanged/missing/unusable fail closed，ChatGPT auth/403仍单次。 |
+| `$env:CHATGPT_DAEMON_START_TIMEOUT_MS='3000'; node chatgpt.js transcribe-file --file <hello-wav> --json` | `thirdparty/chatgpt-browser-agent` | 原始快速反馈环不再返回通用startup timeout；健康private marker时输出`Hello world.`，真实启动错误则立即输出具体producer错误。 |
+| `bun test test/cli/tui/prompt-voice-input.test.ts --test-name-pattern "voice transcriber"` | `packages/opencode` | R56 TUI默认1237000ms（含7000ms退避与30000ms清理）、主动取消、parent-only kill、WAV cleanup及后续调用；其它Process caller tree-kill默认不变。 |
 
-真实E2E只在离线红绿完成后执行，使用现有Edge和用户profile；测试结束必须通过`node chatgpt.js --stop`或确认用户shared CDP只disconnect，不清理profile/session缓存。
+真实登录/长语音E2E只在离线红绿完成后使用现有Edge和用户profile；R61 default-private lifecycle E2E使用随机state自然派生的headless隔离profile，不需要登录且不得触碰用户profile。两类测试结束都必须通过production `--stop`或CDP graceful close；shared CDP只disconnect，不清理用户profile/session缓存。
 
 ## 19. Diff Budget
 
 | Metric | Estimate | Justification |
 | --- | ---: | --- |
 | Files added | 0 | canonical plan在根docs中已创建，不属于实现文件；生产/测试不新增文件。 |
-| Files modified | 7 | core/dom/CLI/test/robustness/README/TUI test七个实际职责文件。 |
+| Files modified | 10 | R60九个文件加`test-voice-robustness.js`；R61只继续修改core、CLI和nested两类测试及plan。 |
 | Files deleted | 0 | fallback helper优先在同一DOM文件内删除或收敛，不删除模块。 |
-| Production lines | 约352净变化，硬上限小于800净增 | 既有R24/R26约260行加R33 sidebar、R35 core导航委托/DOM网络收敛、R36 Project queue和R38 voice preflight queue归属；不重写browser、voice direct、generic ask或URL policy。 |
-| Test lines | 约974净变化 | 既有约790行加collapsed-sidebar、delayed-init、fresh-goto、R36/R38受控并发和R37 late-marker长语音；覆盖认证/fresh/concurrency、robustness和TUI整链完整性。 |
+| Production effective lines | 完整任务约470，硬上限600 | R60当前约441，R61 acquisition与401 transition预计新增不超过30。 |
+| Test effective lines | 完整任务约390 | R61新增最小CLI/browser tests与两个production-chain robustness modes约170行。 |
 | Generated lines | 0 | 不涉及SDK、数据库迁移或生成代码。 |
 
 ## 20. Real Risks and Open Decisions
 
 ### Confirmed or Reachable Risks
 
-- ChatGPT私有`/backend-api/transcribe`可能返回真实HTTP/transport错误；direct-only设计会把它明确交给TUI，而不是维持UI fallback。该行为是用户明确要求，风险必须在错误信息和下一次独立调用中可见。
+- ChatGPT私有`/backend-api/transcribe`可能返回真实HTTP/transport错误；R57只对封闭可恢复code最多四次执行同一direct事务，确定性错误立即返回，绝不切UI fallback或第二endpoint。
+- pre-ready cleanup自身可能无法证明owned browser已释放；R61在这种情况下原样失败并保留marker/owner record供下一CLI重连，禁止本进程cold spawn。该结果是安全诊断，不是成功fallback。
+- local daemon identity 401与ChatGPT页面认证错误都可能显示“Unauthorized”；R62只按local HTTP adapter的status+连接边界产生`DAEMON_IDENTITY_MISMATCH`，随后必须证明current discovery身份已变化且usable；DOM code优先且不从message推断。
+- default-private E2E会启动真实Edge lifecycle，但仅使用随机state下的headless profile；finally必须先graceful close并确认无测试进程，再删除隔离目录。用户原`state/profile`不作为fixture。
 - Project名称`MCP`当前没有有效cache alias；lazy后voice可用，但首个ask必须通过同一live sidebar acquisition解析并验证MCP，侧栏仍不可交互时必须明确失败，不能回退到其它Project或用voice成功掩盖ask验收失败。
 - 首个live-discovered或cached/current Project首页可能在h1/composer出现后仍等待`conversation/init`；若过早提交，prompt可被远端接受但20秒内没有conversation URL。R35必须让两类fresh导航共享DOM网络收敛，失败仍按Project unavailable诊断，不能放宽lost墓碑或重发。
-- 用户在voice期间手动关闭Edge时，当前请求不能安全重发同一音频；下一次调用重新启动是有边界的恢复，而不是当前请求的成功保证。
+- 用户在voice期间关闭private agent Edge时，当前attempt先由core settle/隔离，再由CLI下一attempt冷启动；显式shared Edge断连也只disconnect/retire，不由agent关闭或接管。
 - 5分钟idle后页面可能保持官方origin但网络上下文退化；稳定health失败时先在音频POST前有界续租一次，只有续租失败才报错，不能用下一次用户调用作为必需恢复步骤。
 - Project页面的一次瞬态render/执行上下文错误不能删除缓存；只有明确身份不匹配或确定不存在才允许清理旧alias，保留缓存本身也不绕过后续网页验证。
-- `/api/auth/session`当前只返回warning，不能充当登录或token owner；唯一观察来源是`#client-bootstrap`。adapter只返回typed非敏感事实，token只参与page-local POST；最终HTTP错误仍不能触发重发。
+- `/api/auth/session`当前只返回warning，不能充当登录或token owner；唯一观察来源是`#client-bootstrap`。adapter只返回typed非敏感事实，token只参与page-local POST；HTTP错误只允许CLI下一attempt重新经过完整authenticated主路径。
 - 直接Edge+URL诊断曾出现订阅fetch弹窗；R20 observer已绑定default daemon。当前受控重启无dialog/同源错误，但用户观察到另一次混合DOM；R24只为持续混合增加一次startup recovery，不替换启动器。
-- 高频后一次、完整五分钟冷却后首个请求一次都返回HTTP 429；后者已排除短时高频窗口。当前官方frontend source证明同端点会使用`SendIfAvailable` Bearer，而现有direct没有，因此R24修正wire，不改endpoint、不切DOM、不重发同一音频。
+- 历史18次429之后已有同一/下一WAV成功，当前同线hello-world为200；R55不猜quota或新endpoint，只在当前attempt清理后按1/2/4秒执行用户要求的三次同wire重试。
 - 429最小核对范围是当前frontend实际method/base path/FormData/authOption与当前页面bootstrap事实；不复制全部minified client、不硬编码build号、不从错误体猜新端点。
 - 当前profile已重新登录，内存bootstrap和磁盘持久cookie均成立，一次无voice graceful restart继续登录。真实E2E必须保留该profile，先验证auth-only restart，再允许一个voice；失败不能在`finally`关闭现场。
 - 5分钟WAV必须成功；若触达TUI/core/direct嵌套timeout，该次验收失败并定位最先到期owner，只允许调整该owner且必须重新整链验证，不能整体抬高所有层期限。
@@ -676,6 +795,10 @@ R41删除的是`discoverProjects()`在URL去重与身份解析前构造`PROJECT_
 - queue中的失败任务必须像现有Session/voice锁一样推进后继；失败只传播给自己的调用，不能触发另一路重试或成功合成。
 - cold Project初始化加入queue后最多等待其前方已经进入队列的远端事务；当前voice绝对deadline包含排队时间，故受控slice必须证明Project只插入一次且完成即释放，真实4/2和12/6仍须满足既有120秒p95/130秒CLI边界。
 - voice lease进入queue后，queue前取消必须在任务真正获得queue所有权前跳过page创建；queue内稳定性失败/取消仍沿既有settle或隔离路径释放，不能让Project队头或voice迟到closure毒化后续任务。
+- `DevToolsActivePort`可能在browser退出后暂时残留；connect失败不是第二browser已安全启动的充分条件。private owner只能在同一profile可启动时进入cold path，若仍被锁定则返回具体错误给CLI下一attempt，不能扫描PID或强杀进程。
+- CDP `Browser.close`可能超时；为了保护profile持久性，R55禁止用child kill兜底。该attempt明确失败并disconnect，后续attempt重新读取marker；这比强制结束更符合用户边界。
+- 四个完整attempt的最坏兜底较长，但具体daemon startup/core/HTTP错误会提前返回并立即进入清理/退避；1237000ms只防止上游抢先杀死合法长attempt，不是每次固定等待。
+- 登录过期和确定性认证拒绝不能自动恢复；稳定`LOGIN_REQUIRED/VOICE_REJECTED`立即返回，让用户尽早登录或修正账号状态，而不是重复browser lifecycle。
 
 ### Open Decisions Requiring the User
 
@@ -693,11 +816,14 @@ R41删除的是`discoverProjects()`在URL去重与身份解析前构造`PROJECT_
 - “只把voice direct POST放进queue就足够”：R36复测已证明voice `sessionPageFact`在queue外仍能与Project click重叠，且direct尚未开始就被Project队头延迟；必须排序完整voice lease/preflight事务，不能只移动最后一个POST。
 - “继续为guest正文补更多正则”：当前文案已经使启发式误判；网页自己的bootstrap authStatus/session是可复用owner，叠加文案只扩大漂移面。
 - “从`/api/auth/session`恢复旧token parser”：当前endpoint只返回warning；R24只读取当前frontend实际页面中的`#client-bootstrap`，不维护第二套schema或fetch。
-- “因为429切换端点、DOM听写或重发”：当前证据把分歧定位到登录事实和official optional auth，不授权任何替代成功路径。
+- “因为429切换端点或DOM听写”：不授权；用户要求的重试只重复相同authenticated direct primary path，不改变wire、profile或上传算法。
 - “构造畸形cookie、损坏DevToolsActivePort或未知认证JSON以增强防御”：这些输入本轮未观察且无公开producer，不进入生产分支或阻塞测试。
 - “把click acceptance从10秒整体抬高”：失败现场在10秒后仍无user turn且composer原样，单独ask立即成功；延长等待只延迟lost，不修复提交重叠。
 - “click失败后改按Enter、DOM click或再次可信click”：无法证明第一次click没有远端副作用，任何第二次提交都会形成重复prompt fallback。
 - “串行整个ask直到回答结束”：只有remote submission窗口被证明冲突，assistant生成和voice direct仍属于可并发结果等待。
+- “扫描Edge进程并杀死持有profile者”：private marker已经提供正确连接入口；PID扫描会扩大到用户浏览器且破坏cookie持久性。
+- “daemon退出必须同步关闭browser”：异常退出正是需要下个daemon重连的场景；只有显式正常stop或已连接private bootstrap不可恢复时才CDP graceful close。
+- “在DOM direct adapter内部自动重发fetch”：adapter没有daemon/browser事务和attempt cleanup所有权；重试只能由`chatgpt.js transcribe-file`编排。
 
 ## R41 Revision Delta: 收敛Project身份裁决与审计账目
 
@@ -1184,20 +1310,21 @@ R54不新增成功路径、retry或diagnostic。pageCreate exclusion只把已有
 独立auditor必须：
 
 - 阅读本文件当前完整revision和本轮原始需求。
-- 从当前仓库、当前nested commit和当前日志重新重建voice/Project/browser调用链，不信任历史方案或builder摘要；R54必须同时核验page-creation exclusion、submission FIFO、direct/total deadline传导、send acceptance、about:blank页面生命周期、decision-surface/E-C账目与R38完整voice/Project lifecycle，不得只审R54差异。
+- 从当前仓库、当前nested commit和当前日志重新重建voice/browser/TUI调用链，不信任历史方案或builder摘要；R58必须同时核验private marker reconnect、blank→bootstrap、external profile compatibility、graceful close/cold transition、Unicode byte-tail、四attempt、单attempt cleanup、TUI取消与R54既有direct/queue/profile行为，不得只审revision摘要。
 - 审计完整原始范围：页面反复跳转、缓存消失、好坏交替、取消/daemon、并发/高压、浏览器关闭后恢复、profile持久化、订阅首屏失败、current bootstrap-auth direct、长语音、5分钟idle、ask兼容和安全ownership。
 - 检查R25最小并发producer是否真实传导到伪发送，submission queue是否只覆盖提交窗口并保持ask生成并发，而非重试、fallback或全局串行。
 - 检查第一处分歧是否被修复，是否误把voice问题下沉为TUI或DOM workaround。
-- 检查direct-only是否确实落实用户“不以报错作为fallback”，没有新增alternate success path。
+- 检查direct-only与四attempt是否确实落实用户“不以报错作为fallback”：重试必须重复同一个authenticated direct主路径，而不是新增alternate success path。
 - 检查Project cache-first和lazy startup是否维持Project/Session身份安全，不因voice解耦而绕过ask验证。
 - 检查每个production concept的forward/reverse traceability、行为测试和责任归属。
 - 检查中文注释预算和测试是否行为级、独立expected、非源码/调用次数断言。
-- 检查非测试生产代码净增是否小于800行，且没有用删减/软化有效中文注释或伪造未观察异常输入来满足预算。
-- 任一blocking finding都必须让本plan递增revision并进行完整原始范围重审，不得delta-only审计；R54未获独立`No blocking findings`前不得实施。
+- 检查R63完整production有效修改是否不超过600行，且没有用历史净删除、删减/软化有效中文注释或伪造未观察异常输入来满足预算。
+- 检查R60三个implementation blockers及R61 plan blocker在其owner处被完整映射：pre-ready provenance cleanup、local daemon 401只reconcile changed usable current state且不retire/unlink、隔离default-private production E2E；不得把fixed-port helper测试或用户profile冒充default-private证据。
+- 任一blocking finding都必须让本plan递增revision并进行完整原始范围重审，不得delta-only审计；R63未获独立`No blocking findings`前不得实施。
 
 ## 22. Plan Audit Record
 
-本节只保存各旧revision的auditor原文和release verdict，属于不可篡改的历史记录；其中提到的旧TDD条目、旧line number和旧设计不得解释为当前revision的实施授权。当前规范来自R54的第1至21节，并保留R38已批准的完整生命周期范围；任何旧revision批准都不授权R54 production或test修改。
+本节保存各旧revision的auditor原文和release verdict，属于不可篡改历史；旧TDD、line number、单次不重试和R54/R60批准不得解释为R63实施授权。当前规范来自R63第1至21节，并保留未被本轮明确替换的R60/R54行为；任何旧批准都不授权R63 production或test修改。
 
 | Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -1255,6 +1382,389 @@ R54不新增成功路径、retry或diagnostic。pageCreate exclusion只把已有
 | cycle 12 / 5 | R52 | yes | none | actual E/C and exclusion decision count remain implementation-audit checks | APPROVE — Revision R52 has no blocking findings. | `ses_098fdf18dffeVKHyuHpG5dnA3k` |
 | cycle 12 / 6 | R53 | yes | B-01, B-02 | E/C actual recount; R52 exclusion direction retained | BLOCK — Revision R53 is not approved. | `ses_098fdf18dffeVKHyuHpG5dnA3k` |
 | cycle 12 / 7 | R54 | yes | none | actual E/C, exclusion scope and complete E2E remain implementation-audit checks | APPROVE — Revision R54 has no blocking findings. | `ses_098fdf18dffeVKHyuHpG5dnA3k` |
+| cycle 13 / 1 | R55 | yes | B-01 recoverability边界缺失；B-02 TUI漏算7秒退避；B-03 cold直接URL路径被已有失败证据反证 | metadata audit mode、E/C比例和600行预算无阻塞 | BLOCK — Revision R55 is not approved. | `ses_004a71659ffedZDO1rc67xRB6q` |
+| cycle 13 / 2 | R56 | yes | B-01 VOICE_ENDPOINT混入确定性认证/响应错误；B-02 BROWSER_STARTUP混入browser配置错误 | 文件数/DOM记录与decision surface需实现审计重算 | BLOCK — Revision R56 is not approved. | `ses_00498d488ffebtPmyn3yquJn6b` |
+| cycle 13 / 3 | R57 | yes | B-01取消unlocked external profile既有受控launch合同并阻断长语音E2E | revision标签、blank措辞需同步；E/C满足 | BLOCK — Revision R57 is not approved. | `ses_004902d9dffeYrCIr3FcHWrXlY` |
+| cycle 13 / 4 | R58 | yes | B-01公开debug-port-only启动/ownership/stop合同未映射 | 少量revision标签；E/C正确 | BLOCK — Revision R58 is not approved. | `ses_0048955ecffecp9hGRE3P61P71` |
+| cycle 13 / 5 | R59 | yes | B-01 debug-port owned browser在daemon崩溃后丢失ownership provenance | metadata、E/C和主要范围无阻塞 | BLOCK — Revision R59 is not approved. | `ses_00481c1d8ffeMxUoaKDTU73AfJ` |
+| cycle 13 / 6 | R60 | yes | none | verbatim requirement placement；implementation E/C recount；historical test names；cycle limit reached | APPROVE — Revision R60 has no blocking findings. | `ses_0047c5326ffeqpDMCvZL7VTHXV` |
+| cycle 14 / 1 | R61 | yes | B-01 daemon identity 401 recovery cannot retire the live daemon | stale §5 baseline wording；E/C feasible | BLOCK — Revision R61 is not approved. | `ses_003cce40effeiBH6n8p7ekyaKP` |
+| cycle 14 / 2 | R62 | yes | B-01 R62仍同时授权会删除当前daemon发现状态的旧401处理 | E/C和600行预算可行；部分历史revision措辞 | BLOCK — Revision R62 is not approved. | `ses_003c6652dffeLP8TppnMZkzYYn` |
+| cycle 14 / 3 | R63 | yes | none | §1补充需求由INV/trace完整承载；§27历史401-retire不授权R63；actual E/C/production行数待implementation audit | APPROVE — Revision R63 has no blocking findings. | `ses_003c05c4fffeq6MuyiW5IKrmeV` |
+
+### R63 Independent Verdict (copied from auditor)
+
+## Blocking findings
+
+No blocking findings.
+
+## Non-blocking findings
+
+- §1未逐字收录本次全部补充需求，但INV-03、INV-08、INV-14、INV-15、INV-30至INV-35及正反向追踪已完整承载其行为约束。
+- §27保留了R60 implementation audit关于“401后retire”的历史结论；§19、§0.9及§22已明确其不授权R63，当前规范没有歧义。
+- 实现审计仍须按实际完整diff重新核算production有效修改行数及E/C。
+
+## Release verdict
+
+**APPROVE — Revision R63 has no blocking findings.**
+
+该结论仅适用于当前磁盘上的canonical plan revision **R63**。任何行为、owner、接口、测试、fallback分类或文件范围的实质变化都需要新revision和完整复审。
+
+### R61 Independent Verdict (copied from auditor)
+
+**B-01 daemon identity 401 recovery cannot retire the live daemon**
+
+- Violated invariant: Lifecycle recovery must settle the failing daemon/browser owner before starting the next attempt; it must not erase a healthy daemon’s discovery state and create competing daemons.
+- Evidence class: reachable.
+- Producer and execution path: A CLI retains an earlier daemon state while a concurrent lifecycle replaces the daemon on the same port → `/voice` receives 401 from the replacement daemon → planned `DAEMON_IDENTITY_MISMATCH` handling calls `retireDaemon()` with the stale token → `/stop` also receives 401 → `retireDaemon()` suppresses that failure and unconditionally deletes daemon discovery files → the next attempt starts another daemon against the browser/profile still controlled by the live replacement daemon.
+- Responsibility owner: Local daemon identity and discovery lifecycle in `chatgpt.js`.
+- Minimal correction direction: Make the daemon identity owner prove that the currently live daemon has been retired, or safely reconcile with its current discovery identity, before deleting discovery state or starting another daemon. A failed authenticated stop must not be treated as completed retirement.
+
+Non-blocking findings：§5仍把R60 default path描述为`puppeteer.launch`，属于stale baseline wording；`E≈680/C≥102`算术可行，actual值留给implementation audit。
+
+Release verdict：**BLOCK — Revision R61 is not approved.**
+
+### R60 Independent Verdict (copied from auditor)
+
+## Blocking findings
+
+No blocking findings.
+
+## Non-blocking findings
+
+- §1未逐字收录本次补充需求，但相关约束已由元数据、非目标、INV-03/08/14/15/30–33及正反向追踪完整承载。
+- R60预计生产有效修改约390行，低于600行硬上限；实现审计仍须按实际diff重新计数。
+- 部分旧测试名称仍反映“单次不重试”历史合同；R60已明确由新的四次attempt测试替换，不构成当前规范冲突。
+- 本轮为第六次R55–R60完整计划审计，已达到该审计周期上限。
+
+## Rejected speculation
+
+- 不要求处理损坏CDP帧、未来bootstrap schema、任意进程终止或未知浏览器状态。
+- 不要求扫描、附加或关闭普通用户Edge。
+- 不要求新增endpoint、DOM听写、不同上传算法或错误后替代成功路径。
+- `browser-owner.json`缺失或PID/profile/port不匹配时按shared处理，符合fail-safe边界；无需猜测ownership。
+- 429后的同wire重试由明确用户合同授权，不因可能重复POST而否定该要求。
+
+## Requirement and traceability coverage
+
+- 孤儿私有Edge：`DevToolsActivePort → reconnect → bootstrap convergence`直接修复重复launch与profile lock根因。
+- debug-port分支：以CDP browser PID、规范化profile和port持久验证跨daemon ownership，并覆盖crash、reconnect、stop及mismatch。
+- Unicode日志偏移：字节游标对应Buffer tail读取，能够让具体startup错误提前到达CLI。
+- 生命周期自维护：owned browser使用CDP graceful close；超时只disconnect并保留后续重连能力；shared browser始终只disconnect。
+- 冷启动：私有browser缺失或已证明退化时沿同一blank→marker→bootstrap主路径恢复。
+- 重试：CLI统一执行最多四次完整attempt，429、5xx、transport、page、browser及daemon运行错误进入封闭重试集合；登录、认证、输入、确定性4xx、响应合同错误和取消立即终止。
+- TUI预算与取消：1,237,000ms覆盖四次完整预算、退避和清理；voice仅终止CLI父进程，不递归强杀daemon/browser。
+- 长语音、五分钟idle、并发压力、Project/Session隔离、WAV清理及后续调用均有对应验证。
+- 每项新增production概念均有需求ID、可达或观察证据、owner、文件修改和行为敏感测试。
+
+## Primary-path and fallback verdict
+
+权威路径保持单一：
+
+`TUI WAV → CLI四次attempt编排 → owned/shared browser acquisition → bootstrap收敛 → core voice queue与lease → authenticated direct POST → text或最终错误`
+
+重试仅重复同一authenticated direct事务。没有第二endpoint、UI听写、catch-and-success、配置逃生路径或失败后替代算法。Private、external、debug-port和explicit shared属于同一browser acquisition接口的受支持输入分支，ownership语义明确且互斥。
+
+## Code quality and Chinese-comment verdict
+
+计划限定修改9个既有文件，不新增依赖、公开配置、migration或替代模块；owner边界与仓库风格一致。
+
+计划估算：
+
+- `E ≈ 650`
+- `C ≥ 98`
+- `98 / 650 ≈ 15.08%`
+
+满足15%实现目标。实现审计须重新计算实际E/C并核验注释邻近性与解释价值。
+
+## Release verdict
+
+**APPROVE — Revision R60 has no blocking findings.**
+
+该结论仅适用于当前磁盘上的canonical plan revision **R60**。任何行为、owner、接口、测试、fallback分类或文件范围的实质变化都需要新revision和完整复审。
+
+### R59 Independent Verdict (copied from auditor)
+
+## Blocking findings
+
+### B-01 debug-port owned browser 在 daemon 崩溃后丢失 ownership provenance
+
+- Violated invariant: `CHATGPT_BROWSER_DEBUG_PORT` 启动的 browser 在 daemon 异常退出后必须按同一端口重连并继续保持 owned；后续正常 stop 应执行 graceful close，不能退化成 shared disconnect 并再次遗留 profile lock。
+- Evidence class: reachable
+- Producer and execution path: debug port初始不可达 → daemon固定端口spawn并owned → daemon异常终止 → stale `daemon.json`被CLI删除 → 新daemon发现端口可达 → 无跨daemon provenance则按shared → stop只disconnect。
+- Source evidence: `chatgpt.js:42,551-566`；`chatgpt-core.js:2230-2247,2404-2411`。
+- Canonical-plan evidence: §7 `INV-14`；§10第0.1项；§12路径清单；§16 slice 37；§18 debug-port测试。
+- Responsibility owner: core browser lifecycle；CLI stale daemon清理为直接consumer。
+- Concrete consequence: 正常stop遗留browser和profile lock，重新形成原始孤儿问题。
+- Why this is not speculative: debug-port是公开配置，spawn和daemon异常退出均可达，当前daemon state不保存browser ownership。
+- Minimal correction direction: 建立跨daemon仍可验证的同profileownership事实，重连和stop消费它；增加spawn→crash→reconnect→stop测试，不得PID扫描、强杀或默认未知端口owned。
+
+## Non-blocking findings
+
+- R59 metadata一致；§21仍有一个陈旧R58标签。
+- production硬上限600，`E≈600/C≥90`满足15%。
+- Unicode、private marker、external/shared、retry、TUI取消和长语音范围均完整。
+
+## Rejected speculation
+
+- 不要求扫描/终止普通Edge、损坏marker/CDP帧、future schema、第二endpoint/UI dictation或确定性错误重试。
+
+## Requirement and traceability coverage
+
+除debug-port跨crash ownership外，原始范围完整映射；该缺口直接影响生命周期自维护和profile lock根因闭环。
+
+## Primary-path and fallback verdict
+
+Voice成功路径保持单一；当前阻塞仅是debug-port分支无法跨daemon可靠维持ownership。
+
+## Release verdict
+
+**BLOCK — Revision R59 is not approved.**
+
+### R58 Independent Verdict (copied from auditor)
+
+## Blocking findings
+
+### B-01 显式 `CHATGPT_BROWSER_DEBUG_PORT` 的既有启动合同未映射
+
+- Violated invariant: browser lifecycle 重构必须覆盖公开支持的全部 browser reuse/launch 输入；一个公开配置路径只能有明确且唯一的 ownership 与关闭语义。
+- Evidence class: contracted
+- Producer and execution path: 用户设置 `CHATGPT_BROWSER_DEBUG_PORT=<port>`，未设置 CDP/WS endpoint → `BROWSER_CDP_URL` 从 debug port 派生 → 当前实现先连接该端口，不可达时使用同一 profile 启动带固定 DevTools port 的受控浏览器 → Puppeteer connect。
+- Source evidence:
+  - `thirdparty/chatgpt-browser-agent/README.md:67`
+  - `thirdparty/chatgpt-browser-agent/README.md:122-131`
+  - `thirdparty/chatgpt-browser-agent/chatgpt-core.js:55-57`
+  - `thirdparty/chatgpt-browser-agent/chatgpt-core.js:125-173`
+- Canonical-plan evidence: R58 §10 第0项、错误分类、路径清单和文件计划只分别定义默认 private marker、显式 CDP/WS shared、显式 external profile launch，未定义显式 debug-port-only 分支。
+- Responsibility owner: `chatgpt-core.js` browser/profile lifecycle owner。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: R58 将整体替换 `launchBrowser` 与关闭 ownership，但没有规定 debug-port-only 输入应继续执行受控 launch、视为 shared connect，还是进入 private marker。实现无法从当前 canonical revision 确定该公开配置的启动、重连和关闭合同，可能直接删除现有的“端口不可达后受控 launch”能力，或把 daemon 自己启动的浏览器误归为 shared 而在正常 stop 后只 disconnect。
+- Why this is not speculative: README 明确公开该环境变量，当前 source 存在完整可执行 producer-to-consumer 路径；R58 正在替换该路径的 owner。
+- Minimal correction direction: 在 browser owner 中明确保留或明确替换 debug-port-only 的既有合同，并将其启动、ownership、重连、正常 stop、配置错误分类和行为测试纳入唯一 lifecycle 路径；不得让它隐式落入 private/shared 任一分支。
+
+## Non-blocking findings
+
+- R58 对两个原始根因的定位成立：`stat.size` 字节游标被用于 UTF-16 字符串 `slice`，以及默认 private profile 的可连接孤儿 Edge 未被 daemon marker 重连。
+- `E≈565`、`C≥85` 的计划计算正确，`ceil(565×0.15)=85`；production 有效修改估算约330行，承诺硬上限600行。
+- 当前章节仍有少量历史 revision 标签，如 `R56`、`R57`，但顶部元数据和R58实施范围可辨识，不构成行为缺口。
+
+## Rejected speculation
+
+- 不要求扫描PID、接管普通Edge、强制结束浏览器、增加第二profile、第二转录端点或DOM听写。
+- 不要求支持损坏 marker、未知CDP帧、未来认证schema或其它没有 producer 的浏览器状态。
+- 不要求解析 `Retry-After` 或增加配置化退避；固定1/2/4秒重复同一 authenticated direct 路径已覆盖用户要求。
+- `about:blank` 作为 cold spawn 到CDP ready之间的内部过渡有观察证据，不构成替代成功路径。
+
+## Requirement and traceability coverage
+
+除 B-01 外，R58已映射：private marker与cold lifecycle、Unicode byte-tail、可恢复四attempt、确定性错误立即失败、TUI预算/取消、external/shared profile、长语音/idle/压力与600行/15%门禁。`CHATGPT_BROWSER_DEBUG_PORT` 是当前唯一缺失的公开输入分支。
+
+## Primary-path and fallback verdict
+
+Voice成功语义保持唯一：`TUI WAV → CLI最多四次相同事务 → daemon/browser acquisition → authenticated page lease → 同一 /backend-api/transcribe wire → 完整text`。Browser生命周期路径因 B-01 尚未形成完整、唯一的输入域分类。
+
+## Release verdict
+
+**BLOCK — Revision R58 is not approved.**
+
+### R57 Independent Verdict (copied from auditor)
+
+## Blocking findings
+
+### B-01 计划取消了现有显式外部 profile 启动合同，并使长语音验收不可执行
+
+- Violated invariant: 显式配置的 `CHATGPT_BROWSER_USER_DATA_DIR` 在 profile 未被占用时仍可作为受控 launch profile；防止接管普通 Edge 只要求拒绝正在占用且无 CDP 入口的 profile。
+- Evidence class: contracted
+- Producer and execution path: 用户或 E2E 显式设置 `CHATGPT_BROWSER_USER_DATA_DIR`、未设置 CDP/WS endpoint → 当前 owner 检查 profile lock → 未锁定时使用该 profile 启动受控浏览器 → R57 改为无显式 endpoint 一律返回 `BROWSER_CONFIG`。
+- Source evidence:
+  - `thirdparty/chatgpt-browser-agent/README.md:122-131`
+  - `thirdparty/chatgpt-browser-agent/chatgpt-core.js:175-188`
+  - `thirdparty/chatgpt-browser-agent/chatgpt-core.js:222-230`
+- Canonical-plan evidence:
+  - `docs/plans/voice-transcription-lifecycle-reliability.md:442`
+  - `docs/plans/voice-transcription-lifecycle-reliability.md:450`
+  - `docs/plans/voice-transcription-lifecycle-reliability.md:712`
+- Responsibility owner: `chatgpt-core.js` browser/profile lifecycle owner。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: R57 会拒绝 README 明确支持的、未被普通 Edge 占用的显式 profile launch。计划自己的五分钟 TUI E2E 设置 `CHATGPT_BROWSER_USER_DATA_DIR=<agent-profile>`，同时隔离 `CHATGPT_STATE_DIR` 且未提供 CDP/WS endpoint，因此会在启动前得到 `BROWSER_CONFIG`，无法验证要求中的五分钟长语音完整链路。
+- Why this is not speculative: 该配置是公开接口，当前 source 明确执行 unlocked external-profile launch；R57 的验证命令直接生产这一输入。
+- Minimal correction direction: browser owner应保留显式配置、未锁定 external profile 的既有受控 launch 合同；继续拒绝正在被普通浏览器占用且无可连接 endpoint 的 profile，并将默认 `STATE_DIR/profile` marker 重连限定在私有 owner 路径。
+
+## Non-blocking findings
+
+- 当前规范仍有过期 revision 标签：§5 使用“R56目标状态”，§11 将 R57 路径标为“R56 proposed”，§21 要求审计“R55”。顶部元数据和当前设计仍明确指向 R57，属于记录同步问题。
+- §13 的 profile lifecycle 描述保留“不再依赖 blank-first”，与 R57 的 `blank → CDP → bootstrap` 合同措辞冲突；§10、INV-31 和 TDD slice 32 已明确权威顺序，建议同步历史措辞。
+- 中文解释性注释计划满足门槛：`E≈565`、`C≥85`，计算为 `ceil(565×15%)=85`。实现审计仍须按实际 diff 重算。
+
+## Rejected speculation
+
+- 不要求处理伪造或损坏的 `DevToolsActivePort`、任意 CDP 帧或未来 bootstrap schema。
+- 不要求扫描、附加或强杀普通用户 Edge。
+- 不要求 429 后切换 endpoint、UI 听写、profile 或上传算法。
+- 不因 marker 连接失败本身推断浏览器已经退出；计划要求等待 profile 可启动事实后再 cold spawn，这一方向成立。
+
+## Requirement and traceability coverage
+
+- 孤儿私有 Edge、profile lock、marker 重连、异常 daemon 后复用、优雅关闭及 cold spawn 已映射到 core owner和行为测试。
+- Unicode 故障准确定位到 `stat.size` 字节游标被用于 UTF-16 字符串 `slice`；Buffer byte-tail 修复和中文前缀黑盒测试可在旧行为下报红。
+- 429、5xx、transport、page、browser/daemon 可恢复错误已映射为四次同 wire attempt；登录、token、确定性 4xx、响应契约和配置错误均计划即时返回。
+- TUI 的 `1,237,000ms` 总预算、CLI-only cancellation 和 Windows parent-only kill 有明确 owner 与测试。
+- idle、并发压力、Project/Session、300 秒末端 marker 和 profile 持久性均有验证路径，但五分钟整链目前受 B-01 阻断。
+
+## Primary-path and fallback verdict
+
+计划保持一条 voice 成功路径：
+
+`TUI WAV → CLI attempt → browser lifecycle → stable lease → authenticated direct POST → complete text`
+
+四次 attempt 重复同一 direct wire，没有 UI 听写、第二 endpoint、成功合成或另一 profile fallback。当前阻塞来自 browser/profile 输入域被错误收窄，导致既有公开合同和计划验收路径失效。
+
+## Release verdict
+
+**BLOCK — Revision R57 is not approved.**
+
+### R56 Independent Verdict (copied from auditor)
+
+## Blocking findings
+
+### B-01 `VOICE_ENDPOINT`把确定性认证与响应契约错误纳入四次重试
+
+- Violated invariant: 只有可恢复错误可以进入重试；认证事实缺失、确定性响应契约错误应立即返回。
+- Evidence class: reachable
+- Producer and execution path: voice page通过稳定性检查 → direct adapter再次读取`#client-bootstrap` → token在POST前消失，或服务返回200但缺少合法`text` → adapter统一产生`VOICE_ENDPOINT` → core保留code → CLI按R56封闭集合重试最多四次。
+- Source evidence:
+  - `thirdparty/chatgpt-browser-agent/chatgpt-dom.js:777-782`
+  - `thirdparty/chatgpt-browser-agent/chatgpt-dom.js:803-813`
+  - `thirdparty/chatgpt-browser-agent/chatgpt-dom.js:816-834`
+- Canonical-plan evidence:
+  - `docs/plans/voice-transcription-lifecycle-reliability.md:447-449`
+  - `docs/plans/voice-transcription-lifecycle-reliability.md:469`
+  - `docs/plans/voice-transcription-lifecycle-reliability.md:641-642`
+- Responsibility owner: DOM adapter拥有认证事实、HTTP状态和响应结构分类；CLI只消费稳定recoverability code。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: token消失和确定性200响应结构错误都会被标为可恢复`VOICE_ENDPOINT`，导致同一个WAV重复执行完整daemon/page事务四次，延迟用户获得真实错误，并违反“只重试可恢复错误”的明确要求。
+- Why this is not speculative: token在稳定probe后消失是计划明确列出的生产路径；当前adapter明确把该错误和无效响应统一映射为`VOICE_ENDPOINT`，而R56明确把该code列入重试集合。
+- Minimal correction direction: 由DOM adapter在错误首次产生处区分可恢复endpoint运行故障与确定性认证/响应契约拒绝；CLI只能重试前者，不能按message二次推断。
+
+### B-02 `BROWSER_STARTUP`把确定性启动配置错误当作可恢复生命周期错误
+
+- Violated invariant: browser生命周期重试只能处理能够通过重新取得daemon/browser而恢复的运行错误；确定性配置或可执行文件错误必须立即返回。
+- Evidence class: reachable
+- Producer and execution path: 用户通过公开环境变量配置`CHATGPT_BROWSER_PATH` → private cold spawn遇到不存在或不可执行的路径 → startup owner消费child `error/exit` → R56把private launch/connect/bootstrap统一编码为`BROWSER_STARTUP` → CLI退役并重复完整启动最多四次。
+- Source evidence:
+  - `thirdparty/chatgpt-browser-agent/README.md:56-57`
+  - `thirdparty/chatgpt-browser-agent/chatgpt-core.js:141-165`
+  - `thirdparty/chatgpt-browser-agent/chatgpt.js:564-589`
+- Canonical-plan evidence:
+  - `docs/plans/voice-transcription-lifecycle-reliability.md:445-449`
+  - `docs/plans/voice-transcription-lifecycle-reliability.md:595-598`
+  - `docs/plans/voice-transcription-lifecycle-reliability.md:641-642`
+- Responsibility owner: browser startup owner掌握spawn/connect失败事实；CLI拥有attempt编排。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 不存在的browser executable不会因1/2/4秒退避或daemon重建而恢复，但当前计划要求将其作为`BROWSER_STARTUP`重试四次，最长可重复消耗完整启动预算并反复执行无效cold-start。
+- Why this is not speculative: `CHATGPT_BROWSER_PATH`是公开配置，当前代码已有该启动路径；计划还明确要求消费spawn `error/exit`并把private launch错误编码为可重试`BROWSER_STARTUP`。
+- Minimal correction direction: startup owner必须把确定性配置/spawn拒绝与可恢复的private browser运行故障分开编码；CLI仅重试后者。
+
+## Non-blocking findings
+
+- Diff预算记录不一致：文件表实际列出9个修改文件，`docs/plans/voice-transcription-lifecycle-reliability.md:724-727`记录8个，并称“DOM不改”，但`:596`明确计划修改`chatgpt-dom.js`。硬上限600行仍明确，属于记录修正。
+- R56新增多种错误结果和生命周期决策，但decision-surface表仍停留在R41的`7/85`。所有新路径已有分类，当前证据不足以证明超过10%硬上限，因此不单独阻塞；实施审计必须重新计算。
+- 计划承诺`E≈535`、`C≥81`，`ceil(535×15%)=81`，满足计划阶段中文解释性注释目标。
+
+## Rejected speculation
+
+- 不要求损坏marker、伪造CDP帧、未知bootstrap schema或未来DOM文案的生产处理。
+- 不要求429后切换endpoint、UI听写、第二profile或另一上传算法。
+- 不要求强杀不可连接browser；当前证据支持private marker重连和CDP graceful close。
+- 不因Unix风格E2E命令本身否定方案；计划另有可移植的daemon-crash marker验证和Windows Process测试。
+
+## Requirement and traceability coverage
+
+- 孤儿private Edge、profile lock、marker重连、cold spawn、graceful close和shared-browser边界均已映射到owner、文件和测试。
+- Unicode字节游标的第一处分歧定位准确：`fs.statSync().size`产生字节位置，当前consumer却对UTF-16字符串执行`slice`。Buffer-tail修复和中文前缀黑盒测试具有原行为敏感性。
+- TUI四次完整预算、1/2/4秒退避、30秒清理余量及parent-only取消均有生产路径和测试映射。
+- 429、5xx、transport、page、browser/daemon运行故障的四attempt主路径已覆盖。
+- 登录介入、确定性4xx和配置错误的即时失败覆盖仍受B-01、B-02破坏。
+- 五分钟idle、300秒末端marker长WAV、并发压力、profile持久化及原始daemon-crash反馈环均有明确验证命令。
+
+## Primary-path and fallback verdict
+
+计划保持一条权威成功路径：
+
+`TUI WAV → CLI attempt事务 → private/shared browser生命周期 → stable page lease → authenticated direct POST → 完整text`
+
+四次attempt重复同一wire，没有引入UI听写、第二endpoint或成功合成。当前阻塞来自recoverability分类过宽：确定性失败会错误进入该迭代。
+
+## Release verdict
+
+**BLOCK — Revision R56 is not approved.**
+
+### R55 Independent Verdict (copied from auditor)
+
+## Blocking findings
+
+### B-01 可恢复错误边界未建立，确定性登录失败也会重复四次
+
+- Violated invariant: 仅 HTTP 429 及其它**可恢复**错误至少重试三次；确定性认证、配置或用户介入状态不得进入自动重试。
+- Evidence class: reachable
+- Producer and execution path: 登录态过期或 bootstrap 明确 `logged-out` → daemon 等待登录并在超时后退出 → `ensureDaemon()`失败 → `transcribe-file`把该 daemon/runtime 错误视为可重试 → 重新启动浏览器并再次等待登录，最多四轮。
+- Source evidence: `thirdparty/chatgpt-browser-agent/chatgpt-core.js:2147-2191`, `thirdparty/chatgpt-browser-agent/chatgpt-core.js:2293-2296`, `thirdparty/chatgpt-browser-agent/chatgpt.js:569-589`
+- Canonical-plan evidence: §10 第 0.3 项；§16 slices 34–35
+- Responsibility owner: `chatgpt-core.js`单次请求错误归一化，以及`chatgpt.js:transcribe-file`重试策略。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 登录过期时一次 TUI 转录可连续打开、关闭并等待多个 browser lifecycle，最长接近四个启动预算；这既不能自行恢复登录，也延迟了用户可操作的明确错误。当前 route 还把除输入和断连外的大多数错误统一为500，CLI无法证明哪些500可恢复。
+- Why this is not speculative: README明确要求已登录账号，core现有代码明确生产`logged-out`和登录等待超时；计划明确把“其它core HTTP/transport/page/endpoint/runtime错误”全部纳入重试。
+- Minimal correction direction: 在单次请求错误owner建立稳定的可恢复分类，并让CLI只重试该分类及明确要求的429；登录介入、认证拒绝和其它确定性错误必须立即返回。
+
+### B-02 TUI兜底少计三段退避，仍会抢先终止第四次完整尝试
+
+- Violated invariant: TUI总兜底必须覆盖初次尝试加三次重试的全部 daemon、HTTP、清理和退避预算。
+- Evidence class: contracted
+- Producer and execution path: `transcribeVoiceFile()`总计时 → 四次各最多`180000 + 120000ms` → 三次`1/2/4s`退避 → 第四次临近终态时，TUI的`1230000ms` AbortSignal先触发。
+- Source evidence: `packages/opencode/src/cli/cmd/tui/prompt-voice-input.ts:156-181`; 当前预算owner分别见`thirdparty/chatgpt-browser-agent/chatgpt.js:49-59`
+- Canonical-plan evidence: §10 第 0.3–0.4 项；§16 slice 36
+- Responsibility owner: `prompt-voice-input.ts:transcribeVoiceFile`
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 四轮完整预算为`4 × 300000 + 7000 = 1207000ms`，再加计划声明的30秒清理余量应为`1237000ms`。计划配置的`1230000ms`会提前7秒取消合法的第四次尝试。
+- Why this is not speculative: 四个完整预算和固定1/2/4秒退避均由当前R55明确规定；TUI AbortSignal是现有可达生产终止路径。
+- Minimal correction direction: 由TUI timeout owner按计划中的全部顺序阶段重新计算兜底，确保它严格晚于第四次尝试及既定清理余量。
+
+### B-03 冷启动选择了已有失败证据的直接URL路径
+
+- Violated invariant: 私有浏览器冷启动必须可靠进入可收敛的ChatGPT bootstrap，不得把已有失败证据的启动顺序设为权威路径。
+- Evidence class: observed
+- Producer and execution path: 无可连接private marker → spawn Edge并把`https://chatgpt.com`作为首个进程URL → 首屏订阅请求出现`Failed to fetch` → bootstrap或后续voice不可用 → graceful close/cold循环。
+- Source evidence: 当前稳定对照由`thirdparty/chatgpt-browser-agent/chatgpt-core.js:141-172`展示spawn/connect能力；现有默认launch路径见`chatgpt-core.js:181-188`
+- Canonical-plan evidence: §4 line 92；INV-31；§10 第0项；§16 slice 32
+- Responsibility owner: `chatgpt-core.js` private browser lifecycle owner。
+- Concrete production, test, or contract consequence, not estimate, wording, metadata, or evidence-placement discrepancy: 计划把曾产生“无法加载订阅：Failed to fetch”的启动顺序设为唯一cold path，而同一证据表明CDP ready后再由bootstrap owner导航可保持登录且无同源错误。这会把已观察的首屏失败重新引入根本生命周期修复。
+- Why this is not speculative: 两种启动顺序及其不同结果已直接记录在当前canonical plan的证据表；R55明确选择其中出现过失败的一种。
+- Minimal correction direction: private browser owner必须采用与现有bootstrap收敛接口一致、且通过已记录首屏反馈环的启动顺序；marker重连和生命周期解耦仍应在该owner完成。
+
+## Non-blocking findings
+
+- Metadata使用`Audit mode: full-scope`，handoff指定的是`plan`；当前revision和禁止实施状态仍清晰，因此只需行政性同步。
+- R55的中文解释注释承诺为`E≈475`、`C≥72`，比例约`15.16%`，满足计划阶段15%目标。
+- production有效修改预计约240行，明确硬上限600行，符合用户的克制修改约束；实现审计仍需按实际diff重算。
+
+## Rejected speculation
+
+- 损坏或恶意伪造的`DevToolsActivePort`没有当前producer，不要求新增修复分支。
+- 任意CDP协议帧损坏、未知未来bootstrap schema及未来DOM文案不构成当前阻塞项。
+- 普通用户Edge没有显式CDP入口时由daemon扫描、附加或关闭缺少授权；计划拒绝该路径是正确的。
+- 不要求429后切换endpoint、DOM听写或上传算法；这些都会形成禁止的alternate success path。
+
+## Requirement and traceability coverage
+
+- 孤儿private Edge重连、profile lock、graceful close、cold transition、Unicode byte offset、四次direct尝试、TUI取消、长语音、idle、压力、Project/Session兼容和shared browser边界均有生产owner、文件计划和测试映射。
+- Unicode问题定位到`chatgpt.js`中“字节offset → UTF-16字符串slice”的第一处分歧，修复及确定性红绿测试完整。
+- 孤儿浏览器问题定位到default private profile仍使用`puppeteer.launch`且不消费marker，owner定位正确。
+- 可恢复错误分类和完整外层预算仍因B-01、B-02缺少可执行的正确合同。
+- 冷启动路径被现有对照证据反证，INV-31及其测试设计因B-03不能放行。
+
+## Primary-path and fallback verdict
+
+R55保留单一authenticated direct wire，四次尝试重复同一语义，没有endpoint、DOM听写或不同上传算法fallback。该重试可作为用户明确要求的primary transaction迭代。
+
+当前错误集合过宽：确定性失败也进入该迭代，因此primary-path分类尚未成立。private cold path同时采用已有失败证据的启动顺序。
+
+## Release verdict
+
+**BLOCK — Revision R55 is not approved.**
 
 ### R2 Independent Verdict (copied from auditor)
 
@@ -2747,3 +3257,130 @@ R54不改变R53 production设计，只按审计门禁递增revision并统一dead
 - Fallback verdict: pass；未发现DOM听写、第二endpoint、第二POST/second click、retry、catch-and-success、硬编码身份或全局blank cleanup。
 - Code quality and Chinese-comment verdict: pass；production JS净增`-56`，`E=1850`、`C=283`、required=`278`、ratio=`15.30%`。
 - Release verdict: **APPROVE**，仅适用于canonical plan R54和本记录列出的完整任务diff；不包含`packages/core/src/models-snapshot.js`、`docs/plans/lsp-diagnostics-reliability.md`等无关worktree修改。
+
+## 26. R60 Implementation Evidence
+
+### Actual Files and Diff
+
+- nested `chatgpt-core.js`：private marker/debug-port provenance、owner record、spawn error race、PID/profile release确认、owned bootstrap cold recovery与stale-target收敛；`+257/-95`。
+- nested `chatgpt-dom.js`：HTTP/auth/response producer codes；`+24/-5`。
+- nested `chatgpt.js`：daemon version 24、Buffer byte-tail、structured startup code、four-attempt classifier；`+47/-16`。
+- nested `test-mcp.js`：Unicode、真实private/shared/debug-port acquisition、spawn error、close timeout、bootstrap cold recovery、production daemon crash/reconnect/stop与retry/non-retry行为；`+285/-18`。
+- nested `README.md`：public lifecycle/retry contract和`browser-owner.json` inventory；`+20/-8`，不计E/C。
+- root `prompt-voice-input.ts`：1,237,000ms完整事务预算与voice-only `killTree:false`；`+4/-3`。
+- root `util/process.ts`：默认保持现状的可选`killTree`；`+3/-1`。
+- root `prompt-voice-input.test.ts`：预算与readiness-gated grandchild存活行为；`+30/-0`。
+- production raw changed lines455、有效行为行`E=441`，低于600硬上限；无依赖、public config、migration、generated file或第二成功路径。
+
+### Red-Green Test Evidence
+
+1. Unicode log：中文前缀stub先red为通用`Daemon did not start`；Buffer byte-tail后具体`Login wait timed out`在约1.2秒返回。
+2. owner record：测试先red为`writeBrowserOwner is not a function`；原子三元组/compare-delete后green。
+3. retry code：DOM code测试先red为`VOICE_ENDPOINT`，CLI 429测试首个错误即退出；producer codes和封闭classifier后分别green。
+4. TUI budget：先red为`Received 90000 / Expected 1237000`，预算更新后green。
+5. parent-only cancel：固定sleep seam被启动竞态反证；改为grandchild自己发布ready后abort，marker随后写`alive`并green。
+6. implementation audit B-01：不可执行browser path先耗尽5秒startup red；spawn error进入acquisition race后1.2秒返回。
+7. implementation audit B-02/B-03：新增真实private cold→marker reconnect、explicit shared、debug-port owned→reconnect→mismatch shared；旧close test从process kill改为disconnect/no-kill，全部green。
+8. implementation audit round 2 B-01：`closeOwnedBrowser`在CDP close前读取browser PID，并在协议返回后等待PID退出、profile lock消失和连续可写probe；PID未知、协议超时或release超时均fail closed并保留owner record。
+9. implementation audit round 2 B-02：`acquireBootstrapBrowser`仅对owned持续`SESSION_PAGE_DID_NOT_CONVERGE`执行一次graceful close→确认release→cold acquisition；真实private Edge第一生命周期inconsistent、第二生命周期authenticated的行为测试green。
+10. implementation audit round 2 B-03：headless隔离profile经production CLI启动fixed-port daemon、voice成功、只SIGKILL daemon PID、验证browser endpoint仍活、下一CLI stale cleanup并owned reconnect、第二次voice成功、真实`--stop`后PID/endpoint/owner record/profile全部释放，green（11.3秒窄测；完整suite同项8.9秒）。
+11. 用户纠正的未登录窗口：证据确认其命令行为`D:\Temp\chatgpt-debug-daemon-*\profile`，属于失败E2E而非原daemon profile；测试browser改为仅`CHATGPT_TEST_HOOKS=1`下headless，`finally`先daemon/CDP graceful close再有界删除，完整suite后进程扫描为0。
+12. R63 pre-ready cleanup：真实headless default-private test先red为`Missing expected rejection: failed bootstrap must not leave its marker endpoint reachable`；acquisition catch按provenance收敛后green，并证明同profile可再次cold acquisition。
+13. R63 local identity：A→B fake daemon test先red为`Unauthorized daemon request`且不能成功；local 401 producer code和changed+usable current-state reconciliation后返回`replacement daemon`，A/B voice各一次、stop均0。unchanged/missing/unusable三项均原401 fail closed。
+14. R63 default-private production E2E：`--daemon-crash-reconnect`输出`PASS`且前后marker endpoint相同；`--bootstrap-cold-recovery`输出`PASS`且首endpoint不可达、第二endpoint完成voice。两个随机state/headless profile均由finally删除，进程扫描为0。
+
+### Verification Commands and Results
+
+- final nested `npm test`：syntax/deps通过，67/67 tests pass，220.15秒。
+- implementation audit blocker tests：spawn early error、private marker、explicit shared、debug-port provenance、close timeout、owned bootstrap cold recovery和production debug-port crash/reconnect/stop全部pass。
+- `bun test test/cli/tui/prompt-voice-input.test.ts`：25 pass、1 skip、0 fail。
+- nested五文件`node --check`、root/nested `git diff --check`：pass。
+- `bun typecheck`：package全量通过。
+
+### Original Feedback-Loop Result
+
+- graceful stop后带公开voice root执行真实`transcribe-file`：daemon cold ready，返回`{"text":"Hello world."}`。
+- 只对`daemon.json`记录的Node PID发SIGKILL、不动Edge；下一CLI再次ready并返回`Hello world.`，证明private marker跨daemon crash重连。
+- 最终同daemon真实复测再次返回`{"text":"Hello world."}`。
+- 用户指出测试profile后再次核对production进程：daemon PID `56364`、Edge PID `24316`明确使用`C:\Users\Lenovo\AppData\Local\opencode\chatgpt-browser-agent\state\profile`；`--status`为connected，允许的TUI voice目录真实转录返回`{"text":"Hello, world."}`，没有新建临时profile。
+- R63最终先production `--stop` graceful close旧daemon，再cold启动新代码；真实原profile Edge PID `48892`命令行仍为`--user-data-dir=C:\Users\Lenovo\AppData\Local\opencode\chatgpt-browser-agent\state\profile`，转录返回`{"text":"Hello world."}`，daemon PID `59628`状态connected。
+
+### Actual Secondary and Replacement Path Inventory
+
+- Voice成功仍只有authenticated page-local `POST /backend-api/transcribe`完整text；最多四attempt只重复同一主路径。
+- browser acquisition的private/external/debug-port/shared是公开输入分支，统一返回provenance；unknown ownership只shared disconnect。
+- alternate success path为0：无UI听写、第二endpoint、第二upload/auth、catch-and-success、PID扫描或强杀。
+- 删除workaround：默认private `puppeteer.launch`、child.kill close fallback、byte/string slice、单次voice CLI合同、TUI 90秒/tree-kill voice取消。
+
+### Chinese Comment Calculation
+
+| Metric | Actual | Exclusions and evidence |
+| --- | ---: | --- |
+| Effective changed code lines `E` | 976 | nested 938 + root 38；包含production/tests/config，排除空行、import-only、README、plan、formatter、generated |
+| Qualifying Chinese comment lines `C` | 151 | 173个中文候选中主动排除22行测试标题、显然流程和重复说明；保守值仍只计邻近owner/invariant/safety/test-intent |
+| Ratio `C / E` | 15.47% | `151 / 976` |
+| Required minimum `C` | 147 | `ceil(976 * 0.15)` |
+
+代表性注释解释private marker先重连、debug-port三元组fail-safe、graceful close不强杀、structured code优先HTTP status、四attempt settle边界和TUI parent-only cancellation。
+
+### Remaining Unverified Items
+
+- 300秒Darwin TTS、真实5分钟idle和12/6压力未在本轮Windows环境重跑；R54历史证据保留，R60核心真实hello-world与daemon-crash已实测。
+- production有效行为行`460`（nested 449 + root 11），低于600硬上限。
+
+## 27. R60 Independent Implementation Audit
+
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | R60 | yes | B-01 spawn error未传播；B-02 acquisition matrix缺行为测试；B-03 close test保留kill合同 | stale comments/README state inventory；E/C pass | BLOCK — R60 implementation is not releasable. | `ses_0042c552effertds9KToKgvGxU` |
+| 2 | R60 | yes | B-01 `Browser.close`后未确认PID/profile释放；B-02 owned bootstrap持续不收敛未执行owner内graceful cold；B-03 debug-port缺production daemon crash→stale cleanup→reconnect→stop闭环 | README未列`browser-owner.json`；E/C与600行上限通过 | BLOCK — R60 implementation is not releasable. | `ses_004183fdeffeTk98px0bftIUDC` |
+| 3 | R60 | yes | B-01 pre-ready bootstrap异常可使acquisition内owned browser逃逸清理；B-02批准的default-private daemon crash/bootstrap cold E2E未落地；B-03 daemon identity 401未转换为retire/retry | syntax、64/64 nested、25 pass/1 skip TUI、typecheck、diff-check均通过；E/C与600行门禁通过 | BLOCK — R60 implementation diff cannot be released. | `ses_003e0c88cffeiwFgMulibnqbv5` |
+
+Round 3 full-scope blocking findings：
+
+1. `launchBrowser()`成功取得owned browser后，`prepareBootstrapPage()`、`goto()`或其timeout若抛出非`SESSION_PAGE_DID_NOT_CONVERGE`错误，`acquireBootstrapBrowser()`直接抛出；`startDaemonProcess()`尚未接收provenance，outer catch无法close/disconnect，detached browser可再次锁住private profile。
+2. R60批准的`test-voice-robustness.js` default-private `daemon crash → marker reconnect`和`bootstrap cold recovery` production E2E没有实施；现有direct helper与fixed-debug-port测试不能替代该批准链。
+3. daemon本地identity 401只形成无code `statusCode=401`，当前classifier fail-closed后直接终止；未按R60把本地daemon identity失配转换为retire旧daemon并进入下一次相同voice attempt。ChatGPT认证和其它确定性4xx仍须立即失败。
+
+Auditor release verdict：**BLOCK — R60 implementation diff cannot be released.** 实现审计三轮上限已用尽；未经用户开放新revision/审计周期，不得继续修改或声明verified。
+
+## 28. R63 Independent Implementation Audit
+
+| Round | Plan revision | Full original scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | R63 | yes | none | 未重跑真实登录profile、300秒WAV、真实5分钟idle和12/6压力；root diff-check仅无关LF→CRLF warning；npm ls bare-*为optional dependency | APPROVE — canonical plan R63 与本次审计列出的实际 implementation diff 可以发布。 | `ses_003a4a137ffeEZm28PHcSRTHov` |
+
+### R63 Independent Verdict (copied from auditor)
+
+## Blocking findings
+
+No blocking findings.
+
+## Non-blocking findings
+
+- 未在本轮重跑真实登录 profile、300 秒 WAV、真实 5 分钟 idle 与完整 `12 voice / 6 ask` 压力场景；这些保留为计划中已记录的历史环境证据。
+- root `git diff --check` 仅输出无关工作树文件的 LF→CRLF 警告，没有 whitespace error。
+- `npm ls` 报告的 `bare-*` 项均为 optional dependency，不影响测试结果。
+
+## Primary-path and fallback verdict
+
+权威成功路径保持为：
+
+`validated WAV → current local daemon identity → one browser provenance → authenticated bootstrap → one page-local POST /backend-api/transcribe → complete text`
+
+最多四个 attempt 重复同一语义路径。browser acquisition 的 private、external、fixed-port owned 与 explicit shared 是公开输入域分支，不是失败后的竞争成功算法。
+
+未发现 UI dictation、第二 endpoint、第二 parser、第二认证来源、catch-and-success、配置回退或 unknown-error retry。pre-ready cold recovery只处理尚未产生 voice POST 的 browser acquisition lifecycle。
+
+## Code quality and Chinese-comment verdict
+
+- `E = 822`
+- `C = 125`
+- `C / E = 15.21%`
+- 15% 要求：`ceil(822 × 0.15) = 124`
+
+## Release verdict
+
+**APPROVE — canonical plan R63 与本次审计列出的实际 implementation diff 可以发布。**
+
+该结论仅适用于本次审计的精确 R63 和实际 diff；不覆盖工作树中的其它修改。

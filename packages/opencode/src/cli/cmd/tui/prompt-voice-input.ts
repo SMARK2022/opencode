@@ -3,8 +3,8 @@ import { which } from "@/util/which"
 import path from "path"
 
 export const VOICE_FILE_PLACEHOLDER = "{file}"
-// 90 秒覆盖网页端冷启动、录音上传和 ChatGPT 私有转写接口波动；超时后必须把控制权还给 TUI。
-export const VOICE_TRANSCRIBE_TIMEOUT_MS = 90_000
+// 四次完整daemon/HTTP预算加1/2/4秒退避和30秒清理余量；具体错误仍会提前返回。
+export const VOICE_TRANSCRIBE_TIMEOUT_MS = 1_237_000
 // voice 提示标签(footer "alt+v voice")的显示宽度阈值：promptWidth 超过该值才显示。
 // 比 usage 显示阈值(>90，见 Prompt 组件 showSplitFlow)更晚出现，确保窄终端优先保留 usage/commands 等更高频 chrome。
 // 阈值由 140 下调至 120：usage 阈值由 100 降至 90 后，voice 仍需晚于 usage 出现，但 140 过晚导致中宽终端长期无 voice 引导。
@@ -172,10 +172,11 @@ export async function transcribeVoiceFile(input: {
 
   // 录音路径只替换 argv 项，绝不拼进 shell 字符串；空格、重定向符、管道、变量和分号都保持字面量。
   // 这个边界保证临时录音文件名不能变成命令语法，也不会触发 shell expansion。
-  // AbortSignal.any 合并外部取消信号和兜底超时：用户主动取消 或 90s 超时，任一触发都杀进程。
+  // 用户取消只终止transcriber CLI；daemon/browser独立维护profile，不能被Windows进程树强杀连带结束。
   const timeoutSignal = AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS)
   const result = await Process.run([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, input.file))], {
     abort: input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal,
+    killTree: false,
     nothrow: true,
     timeout: 1_000,
   })

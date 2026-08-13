@@ -15,6 +15,7 @@ export interface Options {
   shell?: Shell
   abort?: AbortSignal
   kill?: NodeJS.Signals | number
+  killTree?: boolean
   timeout?: number
 }
 
@@ -79,7 +80,7 @@ export function spawn(cmd: string[], opts: Options = {}): Child {
     // 必须先同步完成 taskkill /T /F：如果异步启动 taskkill 后立刻 proc.kill()，
     // 父进程可能先退出，taskkill 来不及沿父子关系清理 detached 浏览器/daemon 子进程。
     // 控制台进程忽略 WM_CLOSE，必须带 /F 强杀；与下方 Process.stop 的既有模式对齐。
-    if (process.platform === "win32" && proc.pid) {
+    if (process.platform === "win32" && proc.pid && opts.killTree !== false) {
       launch.sync("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" })
     }
     // proc.kill 在所有平台上都必须调用：触发 Node.js 的 exit 事件并关闭 pipe，
@@ -127,6 +128,7 @@ export async function run(cmd: string[], opts: RunOptions = {}): Promise<Result>
     shell: opts.shell,
     abort: opts.abort,
     kill: opts.kill,
+    killTree: opts.killTree,
     timeout: opts.timeout,
     stdout: "pipe",
     stderr: "pipe",

@@ -6,6 +6,7 @@ import { tmpdir } from "../../fixture/fixture"
 import {
   createVoiceInputController,
   transcribeVoiceFile,
+  VOICE_TRANSCRIBE_TIMEOUT_MS,
   voiceInputStatusText,
   voiceHintVisible,
   type VoiceRecorderHandle,
@@ -50,6 +51,35 @@ async function writeLateMarkerWav(source: string, target: string, seconds: numbe
 }
 
 describe("prompt voice input", () => {
+  // 四次完整daemon+HTTP预算之外还存在1/2/4秒退避；外层必须再留30秒完成CLI/core清理。
+  // 该值独立按产品合同计算，防止TUI在第四次合法attempt结束前抢先中止整个browser生命周期。
+  test("covers every voice attempt, retry delay, and cleanup window", () => {
+    expect(VOICE_TRANSCRIBE_TIMEOUT_MS).toBe(4 * (180_000 + 120_000) + 1_000 + 2_000 + 4_000 + 30_000)
+  })
+
+  // transcriber只是TUI拥有的父进程；它启动的daemon/browser有独立生命周期，取消不能递归强杀后代。
+  // grandchild在父进程被timeout后写marker，测试观察真实OS进程结果而不是Process helper调用次数。
+  test("cancels only the transcriber process and leaves its lifecycle child running", async () => {
+    await using tmp = await tmpdir()
+    const marker = path.join(tmp.path, "grandchild-alive")
+    const ready = path.join(tmp.path, "grandchild-started")
+    const grandchild = path.join(tmp.path, "grandchild.cjs")
+    const parent = path.join(tmp.path, "parent.cjs")
+    const file = path.join(tmp.path, "voice.wav")
+    await Bun.write(file, "RIFF....WAVE")
+    await Bun.write(grandchild, "require('fs').writeFileSync(process.argv[3], 'ready'); setTimeout(() => require('fs').writeFileSync(process.argv[2], 'alive'), 500)")
+    await Bun.write(parent, "require('child_process').spawn(process.execPath, [process.argv[2], process.argv[3], process.argv[4]], { detached: true, stdio: 'ignore' }).unref(); setInterval(() => {}, 1000)")
+
+    const abort = new AbortController()
+    const transcription = transcribeVoiceFile({ file, transcriber: { command: process.execPath, args: [parent, grandchild, marker, ready, "{file}"] }, signal: abort.signal })
+    for (let attempts = 0; attempts < 100 && !(await Bun.file(ready).exists()); attempts++) await Bun.sleep(25)
+    expect(await Bun.file(ready).text()).toBe("ready")
+    abort.abort()
+    await expect(transcription).rejects.toThrow()
+    await Bun.sleep(700)
+    expect(await Bun.file(marker).text()).toBe("alive")
+  })
+
   // 这个用例锁定 argv 传参边界：录音文件路径只能作为一个参数进入转写器。
   // 路径里的空格、分号和变量字符都必须保持字面量，不能被 shell 展开。
   // 这里不检查实现函数名，只观察转写器实际收到的参数值，避免测试和实现耦合。
