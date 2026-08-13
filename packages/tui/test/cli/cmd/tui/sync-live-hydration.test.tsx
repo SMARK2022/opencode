@@ -145,16 +145,18 @@ test.each(["todo", "diff"] as const)("forced hydration waits for pending %s and 
   try {
     const hydrate = sync.session.sync(sessionID)
     const joined = sync.session.sync(sessionID)
-    await wait(() => calls.message === 1 && calls[pending] === 1)
+    await wait(() => calls.message === 1 && calls.todo === 1)
     resolveMessages(stale)
     // #132：messages 已读取但另一 RPC 尚未结束，force 不能复用这轮断线前快照。
     await wait(() => stale.bodyUsed)
+    // diff在历史发布后才发起；todo阻塞时应尚未请求diff，diff阻塞时则等待其真实到达。
+    if (pending === "diff") await wait(() => calls.diff === 1)
     // 一次拥塞中的重复重连只需一轮新快照，不能串行重读十六次正文。
     const forced = Promise.all(Array.from({ length: 16 }, () => sync.session.sync(sessionID, { force: true })))
-    expect(calls).toEqual({ get: 1, message: 1, todo: 1, diff: 1 })
+    expect(calls).toEqual({ get: 1, message: 1, todo: 1, diff: pending === "todo" ? 0 : 1 })
     resolvePending(json([]))
     await Promise.all([hydrate, joined])
-    await wait(() => calls.message === 2 && calls[pending] === 2)
+    await wait(() => calls.message === 2 && calls.todo === 2)
     expect(sync.session.status(sessionID)).toBe("working")
     expect(sync.data.message[sessionID][0].time).not.toHaveProperty("completed")
     emit(global({ id: "evt_reconnect_live_part", type: "message.part.updated", properties: {

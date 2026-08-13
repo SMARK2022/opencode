@@ -234,6 +234,17 @@ function hotInfo(row: typeof MessageTable.$inferSelect): HotInfo {
   }
 }
 
+function viewerInfo(row: typeof MessageTable.$inferSelect): Info {
+  const value = hotInfo(row)
+  // HotInfo 的 user summary 只含 title/body；viewer 直接省略整个字段而非二次收窄。
+  // Assistant 没有被归档的 summary.diffs，直接保留 lifecycle/model/error 字段，避免 viewer 另造 assistant shape。
+  if (value.role === "assistant") return value
+  // TUI 没有 user summary 消费者；省略整个 optional 字段才能保持合法 Info，
+  // 同时阻止 cold diffs 在普通查看路径被解压、持久预热并进入 wire。
+  const { summary: _, ...info } = value
+  return info
+}
+
 // #0500：Goal chronology 只读取 Message hot info 与三个 Part locator 字段；Tool output、Reasoning、附件和 summary.diffs
 // 不会进入 JS，也不会触发持久 thaw。排序继续使用 persisted time，再以 MessageID 处理同毫秒 tie。
 // #557：Goal Tool 只消费 current/previous；technical user 不应迫使普通 Provider step 扫描整段历史。
@@ -343,14 +354,23 @@ const older = (row: Cursor) =>
 const atOrNewer = (row: Cursor) =>
   or(gt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), gte(MessageTable.id, row.id)))
 
-function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"], rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
+function hydrate(
+  db: Database.Interface["db"],
+  sync: Database.Interface["sync"],
+  rows: (typeof MessageTable.$inferSelect)[],
+  includeHidden = true,
+  messageProjection?: "viewer",
+) {
   // #0500：hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
   // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
   // #493：page 先批量 thaw Message，再只查询该 page 的 Parts；范围外历史不因一个 UI 请求被预热。
   // 任一 Message corruption 让整个范围失败，不能返回半完整、半 skeleton 的 transcript。
   return Effect.gen(function* () {
-    const restoredRows = yield* Database.withSync({ db, sync }, () => ColdStorage.thawMessageRows(sync, rows))
-    const ids = restoredRows.map((row) => row.id)
+    // viewer在任何冷Message解压前选热投影；默认完整读取仍预约Effect驱动的同一连接。
+    const infos = messageProjection === "viewer"
+      ? rows.map(viewerInfo)
+      : (yield* Database.withSync({ db, sync }, () => ColdStorage.thawMessageRows(sync, rows))).map(infoFromRestored)
+    const ids = rows.map((row) => row.id)
     const partByMessage = new Map<string, Part[]>()
     if (ids.length > 0) {
       const partRows = yield* db
@@ -373,9 +393,9 @@ function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"],
     }
 
     // 持久 thaw 在返回前完成并保留 page/child 顺序，不对范围外历史产生预热副作用。
-    return restoredRows.map((row) => ({
-      info: infoFromRestored(row),
-      parts: partByMessage.get(row.id) ?? [],
+    return infos.map((info) => ({
+      info,
+      parts: partByMessage.get(info.id) ?? [],
     }))
   })
 }
@@ -756,7 +776,10 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   // 显式审计读取保留隐藏内容，普通分页在 LIMIT 前筛选可见消息。
   includeHidden?: boolean
   fromMessageID?: MessageID
+  messageProjection?: "viewer"
 }) {
+  // page 继续拥有 SQL range/cursor；viewer 只是同一 page 的合法 Info 投影，不能另建分页或备用读取路径。
+  // projection 只由 handler 显式传入；内部 caller（Revert/Provider/export）一律完整 hydrate。
   const { db, sync } = yield* Database.Service
   if (input.limit === 0) {
     // #493：零范围只验证 Session existence，不读取 Message 探针，更不触发任何 thaw。
@@ -806,7 +829,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   const slice = more ? rows.slice(0, input.limit) : rows
   // #98：普通列表过滤隐藏部件，审计读取保留完整内容。
   // 协议重试隐藏畸形审查轮次，和撤回、空助手修复一样保留审计记录但不进入普通历史。
-  const items = yield* hydrate(db, sync, slice, Boolean(input.includeHidden))
+  const items = yield* hydrate(db, sync, slice, Boolean(input.includeHidden), input.messageProjection)
   items.reverse()
   const tail = slice.at(-1)
   return {

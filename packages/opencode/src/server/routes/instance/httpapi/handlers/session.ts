@@ -17,6 +17,7 @@ import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
+import type { Snapshot } from "@/snapshot"
 import { SessionPreview } from "@opencode-ai/core/session/preview"
 import { Database } from "@opencode-ai/core/database/database"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -46,6 +47,11 @@ import {
 } from "../groups/session"
 import { PermissionNotFoundError, notFound } from "../errors"
 import * as SessionError from "./session-errors"
+
+// 私有 header 只选择更浅的 TUI wire projection；缺失时 public Message/diff schema 与完整 payload 原样保留。
+// literal 与 TUI producer 由双端行为测试锁定，避免为四行常量占用用户限定之外的第五个生产文件。
+const TUI_VIEWER_HEADER = "x-opencode-tui-message-projection"
+const TUI_VIEWER = "viewer"
 
 const tryParseJson = (text: string) =>
   Effect.try({
@@ -144,7 +150,35 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       query: typeof DiffQuery.Type
     }) {
-      return yield* summary.diff({ sessionID: ctx.params.sessionID, messageID: ctx.query.messageID })
+      const diffs = yield* summary.diff({ sessionID: ctx.params.sessionID, messageID: ctx.query.messageID })
+      const request = yield* HttpServerRequest.HttpServerRequest
+      // Effect v4 的 headers 是小写字面量 record；与 TUI 端常量逐字锁定，不做大小写归一。
+      if (request.headers[TUI_VIEWER_HEADER] !== TUI_VIEWER) return diffs
+
+      // SummaryCache 当前将 stats 与 patch 存在同一 compressed aggregate；这里是 JSON 序列化前的最早兼容收窄点。
+      // 总量必须从完整 authoritative array 计算后再 slice，标题和末尾省略号才不会把前 100 项误报成全量。
+      // legacy FileDiff 可缺 file；Files 会过滤这类项，因此 totals 必须先采用同一可显示 source。
+      // 默认 response 仍返回 raw aggregate；仅 viewer projection 收窄，不改变 Web App/share/Revert 合同。
+      const displayable = diffs.filter((item) => item.file !== undefined)
+      const files = displayable.length
+      // 三项 totals 均来自同一 displayable 数组：分叉计算会让标题与省略号互相矛盾。
+      const additions = displayable.reduce((total, item) => total + item.additions, 0)
+      const deletions = displayable.reduce((total, item) => total + item.deletions, 0)
+      // TUI 只需要文件统计；在 JSON 序列化前移除 patch，并将总量放进私有 header，避免新增公开响应结构。
+      // 统一 first-100 规则适用于每个 TUI Session，不读取 summary 大小来选择是否执行 diff。
+      return HttpServerResponse.jsonUnsafe(
+        displayable.slice(0, 100).map((item) => {
+          const { patch: _, ...stats } = item
+          return stats
+        }) satisfies Snapshot.FileDiff[],
+        {
+          headers: {
+            "x-opencode-tui-total-files": String(files),
+            "x-opencode-tui-total-additions": String(additions),
+            "x-opencode-tui-total-deletions": String(deletions),
+          },
+        },
+      )
     })
 
     const messages = Effect.fn("SessionHttpApi.messages")(function* (ctx: {
@@ -164,16 +198,20 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         return yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
       }
 
+      const request = yield* HttpServerRequest.HttpServerRequest
       const page = yield* SessionError.mapStorageNotFound(
         MessageV2.page({
           sessionID: ctx.params.sessionID,
           limit: ctx.query.limit,
           before: ctx.query.before,
+          // handler 是 transport caller 身份的 owner；MessageV2 只接收显式 projection，不能自行猜测 TUI。
+          // viewer 仅对有界 page 生效，无 limit 的 export/Revert/Provider 完整历史不会经过该分支。
+          // request 前移到 page 调用之前：projection 决策与 range 查询在同一 handler 作用域完成。
+          messageProjection: request.headers[TUI_VIEWER_HEADER] === TUI_VIEWER ? "viewer" : undefined,
         }),
       )
       if (!page.cursor) return page.items
 
-      const request = yield* HttpServerRequest.HttpServerRequest
       // toURL() honors the Host + x-forwarded-proto headers, so the Link
       // header echoes the real origin instead of a hard-coded localhost.
       const url = Option.getOrElse(HttpServerRequest.toURL(request), () => new URL(request.url, "http://localhost"))
