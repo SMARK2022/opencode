@@ -10,6 +10,7 @@ import { tmpdir } from "../fixture/fixture"
 import {
   createVoiceInputController,
   transcribeVoiceFile,
+  VOICE_TRANSCRIBE_TIMEOUT_MS,
   voiceInputStatusText,
   voiceHintVisible,
   type VoiceRecorderHandle,
@@ -55,6 +56,35 @@ async function writeLateMarkerWav(source: string, target: string, seconds: numbe
 }
 
 describe("prompt voice input", () => {
+  // 四次完整daemon+HTTP预算之外还存在1/2/4秒退避；外层必须再留30秒完成CLI/core清理。
+  // 该值独立按产品合同计算，防止TUI在第四次合法attempt结束前抢先中止整个browser生命周期。
+  test("covers every voice attempt, retry delay, and cleanup window", () => {
+    expect(VOICE_TRANSCRIBE_TIMEOUT_MS).toBe(4 * (180_000 + 120_000) + 1_000 + 2_000 + 4_000 + 30_000)
+  })
+
+  // transcriber只是TUI拥有的父进程；它启动的daemon/browser有独立生命周期，取消不能递归强杀后代。
+  // grandchild在父进程被timeout后写marker，测试观察真实OS进程结果而不是Process helper调用次数。
+  test("cancels only the transcriber process and leaves its lifecycle child running", async () => {
+    await using tmp = await tmpdir()
+    const marker = path.join(tmp.path, "grandchild-alive")
+    const ready = path.join(tmp.path, "grandchild-started")
+    const grandchild = path.join(tmp.path, "grandchild.cjs")
+    const parent = path.join(tmp.path, "parent.cjs")
+    const file = path.join(tmp.path, "voice.wav")
+    await Bun.write(file, "RIFF....WAVE")
+    await Bun.write(grandchild, "require('fs').writeFileSync(process.argv[3], 'ready'); setTimeout(() => require('fs').writeFileSync(process.argv[2], 'alive'), 500)")
+    await Bun.write(parent, "require('child_process').spawn(process.execPath, [process.argv[2], process.argv[3], process.argv[4]], { detached: true, stdio: 'ignore' }).unref(); setInterval(() => {}, 1000)")
+
+    const abort = new AbortController()
+    const transcription = transcribeVoiceFile({ file, transcriber: { command: process.execPath, args: [parent, grandchild, marker, ready, "{file}"] }, signal: abort.signal })
+    for (let attempts = 0; attempts < 100 && !(await Bun.file(ready).exists()); attempts++) await Bun.sleep(25)
+    expect(await Bun.file(ready).text()).toBe("ready")
+    abort.abort()
+    await expect(transcription).rejects.toThrow()
+    await Bun.sleep(700)
+    expect(await Bun.file(marker).text()).toBe("alive")
+  })
+
   // Windows脚本入口及带元字符的录音路径仍须保持逐项argv，不能拼接裸shell字符串。
   test.skipIf(process.platform !== "win32")("transcriber accepts a Windows command shim", async () => {
     await using tmp = await tmpdir()
@@ -647,8 +677,8 @@ describe("prompt voice input", () => {
     expect(controller.status()).toEqual({ type: "idle" })
   })
 
-  // 通过真实cmd入口创建隔离Node后代，取消后必须确认后代退出，而不是只观察UI状态。
-  test.skipIf(process.platform !== "win32" || !Bun.which("node"))("cancels a Windows transcriber process tree", async () => {
+  // cmd入口同样不能连带终止独立后代；有界CLI自退保证夹具不制造遗留父进程。
+  test.skipIf(process.platform !== "win32" || !Bun.which("node"))("cancels a Windows transcriber without killing its lifecycle child", async () => {
     await using tmp = await tmpdir()
     const node = Bun.which("node")!
     const pidFile = path.join(tmp.path, "child.pid")
@@ -656,7 +686,7 @@ describe("prompt voice input", () => {
     const command = path.join(tmp.path, "transcriber.cmd")
     const abort = new AbortController()
     let pid = 0
-    await Bun.write(script, 'const {spawn}=require("child_process"); const fs=require("fs"); const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"}); child.unref(); fs.writeFileSync(process.argv[2],String(child.pid)); setInterval(()=>{},1000)')
+    await Bun.write(script, 'const {spawn}=require("child_process"); const fs=require("fs"); const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"}); child.unref(); fs.writeFileSync(process.argv[2],String(child.pid)); setTimeout(()=>{},500)')
     await Bun.write(command, `@echo off\r\n"${node}" "${script}" "${pidFile}" %*\r\n`)
     const pending = transcribeVoiceFile({ file: "voice.wav", transcriber: { command, args: ["{file}"] }, signal: abort.signal }).catch((error: unknown) => error)
     try {
@@ -669,9 +699,7 @@ describe("prompt voice input", () => {
       const running = () => {
         try { process.kill(pid, 0); return true } catch { return false }
       }
-      const stopped = Date.now() + 2_000
-      while (running() && Date.now() < stopped) await Bun.sleep(20)
-      expect(running()).toBe(false)
+      expect(running()).toBe(true)
     } finally {
       abort.abort()
       await pending

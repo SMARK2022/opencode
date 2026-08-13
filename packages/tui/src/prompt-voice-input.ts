@@ -3,8 +3,8 @@ import { which } from "@opencode-ai/core/util/which"
 import path from "path"
 
 export const VOICE_FILE_PLACEHOLDER = "{file}"
-// 90 秒覆盖网页端冷启动、录音上传和 ChatGPT 私有转写接口波动；超时后必须把控制权还给 TUI。
-export const VOICE_TRANSCRIBE_TIMEOUT_MS = 90_000
+// 四次完整daemon/HTTP预算加1/2/4秒退避和30秒清理余量；具体错误仍会提前返回。
+export const VOICE_TRANSCRIBE_TIMEOUT_MS = 1_237_000
 // voice 提示标签(footer "alt+v voice")的显示宽度阈值：promptWidth 超过该值才显示。
 // 比usage分拆阈值(>90)更晚出现，确保窄终端优先保留usage/commands等更高频信息。
 export const VOICE_HINT_MIN_PROMPT_WIDTH = 120
@@ -171,7 +171,8 @@ export async function transcribeVoiceFile(input: {
 
   // 录音路径只替换 argv 项，绝不拼进 shell 字符串；空格、重定向符、管道、变量和分号都保持字面量。
   // 这个边界保证临时录音文件名不能变成命令语法，也不会触发 shell expansion。
-  // AbortSignal.any 合并外部取消信号和兜底超时：用户主动取消 或 90s 超时，任一触发都杀进程。
+  // AbortSignal.any 合并外部取消信号和兜底超时；任一触发都终止 transcriber CLI。
+  // transcriber拥有的daemon/browser自行维护生命周期，取消不得连带递归终止后代。
   const timeoutSignal = AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS)
   const result = await runProcess([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, input.file))], {
     abort: input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal,
@@ -273,11 +274,9 @@ function runProcess(
     const stderr: Buffer[] = []
     child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
     child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
-    // 脚本转写器可能通过cmd再启动Node；必须在父进程退出前清理本次进程树。
+    // 转写器后代由各自owner维护；只终止本调用拥有的CLI，不递归强杀浏览器生命周期。
     const abort = () => {
       if (child.exitCode !== null || child.signalCode !== null) return
-      if (process.platform === "win32" && child.pid)
-        spawn.sync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" })
       child.kill("SIGTERM")
     }
     options.abort.addEventListener("abort", abort, { once: true })
