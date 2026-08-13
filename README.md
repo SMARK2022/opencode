@@ -39,12 +39,14 @@
   <a href="docs/readme/README.vi.md">Tiếng Việt</a>
 </p>
 
+> [!WARNING]
+> **切换分支前，先备份你的 `opencode.db`。** SMARK 分支带有自定义的数据库 schema 和迁移，从上游 `dev`、主分支或其他原分支切过来之前，请手动备份本地数据库。迁移之后，数据库可能无法再无损迁回上游或原分支；本地数据库上下文信息的 schema 兼容性问题，本项目无法负责。
+
+> [!TIP]
+> 这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.19.17-smark`），基于上游 `dev` 分支，重点打磨 TUI 交互、会话管理、Token 统计、Windows 兼容、VSCode 集成、网络代理与安装体验。
+
 <!-- TODO: 替换为实际的 TUI 主界面截图 -->
 [![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
-
----
-
-> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.19.17-smark`），在上游 `dev` 分支基础上进行了大量功能增强和跨平台适配，涵盖 TUI 交互、会话管理、Token 统计、Windows 兼容、VSCode 集成、网络代理等多个维度。
 
 ---
 

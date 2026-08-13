@@ -39,11 +39,15 @@
   <a href="docs/readme/README.vi.md">Tiếng Việt</a>
 </p>
 
+> [!WARNING]
+> **Back up your `opencode.db` before switching branches.** The SMARK branch carries custom database schema changes and migrations; before coming from upstream `dev`, the main branch, or another original branch, create a manual backup of your local database. After migration, the database may no longer migrate or roll back cleanly to upstream or original branches, and this project is not responsible for schema-format compatibility of your local database context data.
+
+> [!TIP]
+> This is OpenCode's `dev-smark` enhanced branch (current version `1.19.17-smark`), improving TUI interaction, session management, token visibility, Windows compatibility, VS Code integration, networking and installation on top of upstream `dev`.
+
 [![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
 
 ---
-
-> **Database migration notice**: The SMARK branch includes custom database schema changes and migrations. Before switching from upstream `dev`, the main branch, or another original branch, create a manual backup of your local `opencode.db`; after migration, the database may not migrate or roll back cleanly to upstream or original branches. This project is not responsible for schema-format compatibility issues in your local database context data.
 
 ### Installation
 
