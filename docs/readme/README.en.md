@@ -40,56 +40,56 @@
   <a href="README.vi.md">Tiếng Việt</a>
 </p>
 
+> [!WARNING]
+> **Back up your `opencode.db` before switching branches.** The SMARK branch carries custom database schema changes and migrations. Before switching from upstream `dev`, the main branch, or another original branch, create a manual backup of your local database. After migration, the database may not migrate or roll back cleanly to upstream or original branches; this project cannot take responsibility for schema-format compatibility issues in your local database context data.
+
+> [!TIP]
+> This is OpenCode's `dev-smark` enhanced branch (current version `1.15.13`, CLI release tag `v1.15.13-smark`), based on upstream `dev`. It focuses on TUI interaction, session management, token statistics, Windows/PowerShell compatibility, VS Code language intelligence and Notebook integration, network proxy support, and installation experience.
+
 [![OpenCode Terminal UI](../../packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
-
----
-
-> **About this branch**: This is OpenCode's `dev-smark` enhanced branch (current version `1.15.13`, CLI release tag `v1.15.13-smark`). It is based on upstream `dev` and focuses on TUI interaction, session management, token statistics, Windows/PowerShell compatibility, VS Code language intelligence and Notebook integration, network proxy support, and installation experience.
-
-> **Database migration notice**: The SMARK branch includes custom database schema changes and migrations. Before switching from upstream `dev`, the main branch, or another original branch, create a manual backup of your local `opencode.db`; after migration, the database may not migrate or roll back cleanly to upstream or original branches. This project is not responsible for schema-format compatibility issues in your local database context data.
 
 ---
 
 ## Quick Install
 
-Use the installer from the SMARK branch releases page. By default it installs the latest release and writes the install directory to existing shell profiles.
+The easiest way to install is the script from the SMARK releases page — it installs the latest release by default and writes the install directory to your existing shell profiles:
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash
 ```
 
-Verify after installation:
+Verify the installation:
 
 ```bash
 opencode --version
 which opencode
 ```
 
-If the current shell has not refreshed PATH, reopen the terminal or source the profile shown in the install log.
+If PATH has not refreshed yet, reopen the terminal or source the profile shown in the install log.
 
 ### Specify Install Directory
 
-User-level installs are recommended in `~/.local/bin`. The environment variable must be passed to the `bash` process that runs the installer, not only to `curl`.
+User-level installs are recommended in `~/.local/bin`. One common pitfall: the environment variable must reach the `bash` process that actually runs the installer — passing it only to `curl` does nothing.
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
   OPENCODE_INSTALL_DIR="$HOME/.local/bin" bash
 ```
 
-For troubleshooting, download the script first and then run it:
+For troubleshooting, the safer approach is to download the script first and then run it:
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install -o /tmp/opencode-install
 env OPENCODE_INSTALL_DIR="$HOME/.local/bin" bash /tmp/opencode-install
 ```
 
-Do not write it this way:
+This, on the other hand, is wrong:
 
 ```bash
 OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash
 ```
 
-That only passes `OPENCODE_INSTALL_DIR` to `curl`, not to the `bash` process that actually runs the installer.
+It only passes `OPENCODE_INSTALL_DIR` to `curl`; the `bash` process that actually runs the installer never sees it.
 
 ### Specify Version
 
@@ -98,7 +98,7 @@ curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/instal
   bash -s -- --version 1.15.13-smark
 ```
 
-This is the complete form: `bash -s --` tells `bash` to read the installer from stdin and pass `--version 1.15.13-smark` as installer arguments. The version may be `1.15.13-smark` or the release tag form `v1.15.13-smark`.
+`bash -s --` tells `bash` to read the installer from stdin, and everything after it — `--version 1.15.13-smark` here — is passed through as installer arguments. Both `1.15.13-smark` and the release tag form `v1.15.13-smark` work.
 
 ### Installer Behavior
 
@@ -114,7 +114,7 @@ This is the complete form: `bash -s --` tells `bash` to read the installer from 
 
 ### PATH And Shell Profiles
 
-The installer detects and updates existing profiles: `.bashrc`, `.bash_profile`, `.profile`, `.zshrc`, `.zprofile`, `.zshenv`, `~/.config/bash/*`, `~/.config/zsh/*`, and `~/.config/fish/config.fish`.
+The installer detects and updates existing profiles: `.bashrc`, `.bash_profile`, `.profile`, `.zshrc`, `.zprofile`, `.zshenv`, `~/.config/bash/*`, `~/.config/zsh/*`, and `~/.config/fish/config.fish`. Common customization needs:
 
 | Need | Command |
 | --- | --- |
@@ -123,7 +123,7 @@ The installer detects and updates existing profiles: `.bashrc`, `.bash_profile`,
 | Choose profile interactively | `bash /tmp/opencode-install --interactive` |
 | Install to system directory | `sudo env OPENCODE_INSTALL_DIR=/usr/local/bin bash /tmp/opencode-install --allow-sudo --no-modify-path` |
 
-If you want `~/.local/bin/opencode` to take priority over `/usr/local/bin/opencode`, make sure your profile orders PATH like this:
+To make `~/.local/bin/opencode` take priority over `/usr/local/bin/opencode`, make sure your profile orders PATH like this:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -131,7 +131,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ### Other Install Methods
 
-These methods use the upstream package-manager ecosystem. If you need the SMARK branch build, prefer the GitHub release installer above.
+These methods go through the upstream package-manager ecosystem. For the SMARK branch build, prefer the GitHub release installer above.
 
 | Platform | Command | Notes |
 | --- | --- | --- |
@@ -154,7 +154,7 @@ cd <your-project>
 opencode
 ```
 
-After startup, describe a task directly, such as "explain this module architecture", "fix this error", or "add tests for this feature". In the TUI, use `Tab` to switch agents and use built-in tools to read/write files, run commands, inspect diffs, and manage sessions.
+Once it starts, just describe the task — "explain this module architecture", "fix this error", "add tests for this feature" all work. In the TUI, press `Tab` to switch agents; built-in tools read and write files, run commands, show diffs, and manage sessions. Common actions:
 
 | Action | Description |
 | --- | --- |
@@ -168,13 +168,13 @@ After startup, describe a task directly, such as "explain this module architectu
 
 ## Desktop App
 
-The SMARK `dev-smark` branch currently publishes CLI releases only, not desktop app installers. For the desktop app (BETA), use [opencode.ai/download](https://opencode.ai/download) and upstream release notes as the source of truth; do not treat the SMARK CLI release page as a desktop installer source.
+The SMARK `dev-smark` branch currently publishes CLI releases only — no desktop app installers. For the desktop app (BETA), use [opencode.ai/download](https://opencode.ai/download) and the upstream release notes as the source of truth; the SMARK CLI release page does not carry desktop installers.
 
 ---
 
 ## Core Features
 
-This branch is not just a pile of features; it turns common development pain points into observable, recoverable, cross-platform workflows.
+What this branch does, at its core, is turn the pain points you hit every day into workflows that are observable, recoverable, and consistent across platforms. It covers roughly these areas:
 
 | Area | Problem Solved | What You Will See |
 | --- | --- | --- |
@@ -220,7 +220,7 @@ This branch is not just a pile of features; it turns common development pain poi
 | Single-session details | `opencode session info -s <Session_ID>` | Shows `Calls`, `Input`, `Cache Write`, `Cache Read`, `Output`, `Cost` by provider/model |
 | Global stats | `opencode stats --models` | Summarizes total cost, daily average cost, average tokens, tool usage, and model usage |
 
-Internal stats prefer request usage data and fall back to message metadata for older sessions. TUI Context usage also estimates instruction, skills, tool definitions, attachments, tool results, and compaction summary usage in the context window.
+Internal stats prefer request usage data; for older sessions without it, they fall back to message metadata. TUI Context usage additionally estimates how much of the context window goes to instructions, skills, tool definitions, attachments, tool results, and compaction summaries.
 
 ### Tool System
 
@@ -234,13 +234,13 @@ Internal stats prefer request usage data and fall back to message metadata for o
 
 ### Optional MCP Integration
 
-If you need ChatGPT Web assistance, consider connecting [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark). It reuses a logged-in ChatGPT browser session through a local MCP bridge, making it suitable for ChatGPT ask, image generation, and voice transcription from OpenCode. This branch records that project as the `thirdparty/chatgpt-browser-agent` submodule; after a fresh checkout, run `git submodule update --init --recursive thirdparty/chatgpt-browser-agent`, then run `npm ci` inside that directory. Login, authorization, and browser-state handling remain governed by that project's README.
+If you need ChatGPT Web assistance, you can connect [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark): it reuses a logged-in ChatGPT browser session through a local MCP bridge, so you can call ChatGPT ask, image generation, and voice transcription from inside OpenCode. This branch records that project as the `thirdparty/chatgpt-browser-agent` submodule; after a fresh checkout, run `git submodule update --init --recursive thirdparty/chatgpt-browser-agent`, then `npm ci` inside that directory. Login, authorization, and browser-state handling are governed by that project's own README.
 
 ### OpenTUI Source And Release Artifacts
 
-This branch records the public [SMARK2022/opentui](https://github.com/SMARK2022/opentui) fork as the `thirdparty/opentui` submodule. After a fresh checkout, run `git submodule update --init thirdparty/opentui`. The gitlink pins the source commit for `v0.4.3-smark.1`, while the fork's default branch is `smark/main`, so the `0.4.3 + CJK` repair remains inspectable and maintainable.
+This branch records the public [SMARK2022/opentui](https://github.com/SMARK2022/opentui) fork as the `thirdparty/opentui` submodule. After a fresh checkout, run `git submodule update --init thirdparty/opentui`. The gitlink pins the source commit for `v0.4.3-smark.1`, and the fork's default branch is `smark/main`, so the `0.4.3 + CJK` repair stays easy to inspect and maintain.
 
-The submodule provides source discovery and provenance only; normal OpenCode installs and builds do not compile it. OpenCode obtains OpenTUI from the eleven immutable GitHub Release tarballs pinned by the root `package.json` and `bun.lock`, with no source fallback when a release URL fails. After changing the fork, publish a new complete package family first, then update the OpenCode URLs, lock, and gitlink together.
+The submodule only provides source discovery and provenance; it plays no part in normal OpenCode installs or builds. OpenCode actually consumes the eleven immutable GitHub Release tarballs pinned by the root `package.json` and `bun.lock`, with no source fallback when a release URL fails. After changing the fork, publish a new complete package family first, then update the OpenCode URLs, lock, and gitlink together.
 
 ### Provider And Models
 
@@ -253,11 +253,11 @@ The submodule provides source discovery and provenance only; normal OpenCode ins
 
 ### VS Code Language And Notebook Integration
 
-To reuse VS Code language services or use Notebook tools, install [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge). The repository extension version is `1.15.10`, with SMARK CLI `1.15.13-smark` recommended. They are versioned independently, and Marketplace may continue to show `1.15.5` until the new build is published. Without a connected bridge, the CLI continues to use its built-in LSP but cannot use VS Code-backed language operations or Notebook tools.
+To reuse VS Code language services or work with Notebook tools, install the [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) extension. The repository extension version is `1.15.10`, and SMARK CLI `1.15.13-smark` is the recommended pairing. The two are versioned independently, and Marketplace may still show `1.15.5` until the new build is published. The extension sets up a local authenticated bridge between VS Code and the OpenCode CLI; without it installed or connected, the CLI keeps using its built-in LSP, but VS Code-backed language operations and Notebook tools are unavailable.
 
-After startup, the extension opens a local bridge on `127.0.0.1:<random port>` and writes a heartbeat manifest to `~/.local/state/opencode/ide/<uuid>.json`. OpenCode automatically selects the matching VS Code bridge by workspace and notebook path. In remote SSH, WSL, or container setups, the CLI must run on the same side that can access the bridge.
+After startup, the extension opens a local bridge on `127.0.0.1:<random port>` and writes a heartbeat manifest to `~/.local/state/opencode/ide/<uuid>.json`. OpenCode automatically picks the matching VS Code bridge by workspace and notebook path. In remote SSH, WSL, or container setups, the CLI must run on the same side that can reach the bridge.
 
-The extension does not bundle a language server. It reuses providers registered by enabled language extensions in the current VS Code window for touch, diagnostics, hover, definition, references, document symbols, and workspace symbols. Bridge request failures fall back to the built-in LSP, and diagnostics also falls back when its response structure is invalid. For other successful responses, a missing result field may currently be interpreted as empty. Valid empty results do not trigger fallback and are not a replacement for a complete project typecheck. Implementation and call hierarchy remain on the built-in LSP. A strong diagnostics refresh may add a preserve-focus preview tab.
+The extension does not bundle a language server; it reuses the providers that language extensions have already registered in the current VS Code window. The bridge supports file touch, diagnostics, hover, definition, references, document symbols, and workspace symbols. Failed bridge requests fall back to the built-in LSP, and diagnostics also falls back when its response structure is invalid. Other successful responses missing the expected result field may currently be read as empty; a legitimately empty result does not trigger fallback and is no substitute for a full project typecheck. Implementation and call hierarchy stay on the built-in LSP, and a strong diagnostics refresh may open an extra preserve-focus preview tab.
 
 | Tool | Purpose |
 | --- | --- |
@@ -268,7 +268,7 @@ The extension does not bundle a language server. It reuses providers registered 
 | `vscode_notebook_output` | Read text, image, HTML, JSON, and other outputs; large outputs are written to `.opencode/cache/notebook-outputs/` and returned as artifact paths |
 | `vscode_notebook_env` | Inspect kernel/runtime, select, restart, or stop a kernel, and create or save a notebook when explicitly requested by the user |
 
-Recommended flow: use `vscode_notebook_summary` to get the current cell ID, `vscode_notebook_source` to read the target cell, `vscode_notebook_run` to validate after editing, and `vscode_notebook_output` to inspect results. Do not treat display index `cN` as a stable long-term reference; after inserts, deletes, or type switches, use the new `#VSC-*` ID returned by the tool or run summary again.
+The recommended flow: get the current cell ID with `vscode_notebook_summary`, read the target cell with `vscode_notebook_source`, validate your edit with `vscode_notebook_run`, and inspect the result with `vscode_notebook_output`. Do not treat the display index `cN` as a stable long-term reference — after inserts, deletes, or type switches, use the new `#VSC-*` ID returned by the tool, or run summary again.
 
 ### Cross-Platform Support
 
@@ -284,7 +284,7 @@ Recommended flow: use `vscode_notebook_summary` to get the current cell ID, `vsc
 
 ## Agents
 
-OpenCode includes multiple built-in primary agents that can be switched with `Tab`. The default agent can be overridden with `default_agent`; subagents are mainly invoked by task dispatch or `@agent`.
+OpenCode ships with several built-in primary agents, switchable with `Tab`. The default agent can be overridden via `default_agent`; subagents are usually invoked through task dispatch or `@agent`.
 
 | Agent | Type | Permission Model | Best For |
 | --- | --- | --- | --- |
@@ -297,7 +297,7 @@ OpenCode includes multiple built-in primary agents that can be switched with `Ta
 | `explore` | subagent | Allows only search, read, list, web query, and similar exploration tools | Quickly locating files, symbols, call chains, config, and docs |
 | `scout` | subagent, experimental | Targets external docs and dependency source; allows managed repo cache reads | Inspecting third-party library implementation, cloning dependency source, researching external API behavior |
 
-`title`, `summary`, and `compaction` are hidden system agents for title generation, summaries, and compaction flows, not daily manual switching targets. Learn more about [Agents](https://opencode.ai/docs/agents).
+`title`, `summary`, and `compaction` are hidden system agents that handle title generation, summaries, and compaction flows — not something you switch to by hand. See [Agents](https://opencode.ai/docs/agents) for more.
 
 ---
 
@@ -315,19 +315,19 @@ OpenCode includes multiple built-in primary agents that can be switched with `Ta
 
 ### How is this different from Claude Code?
 
-The capability target is similar, but OpenCode focuses on open source, terminal-first usage, provider independence, client/server architecture, and an extensible tool system. The SMARK branch further strengthens Windows/PowerShell, VS Code Notebook, token visibility, network proxy support, and installation experience.
+The capability target is similar, but OpenCode's focus is open source, terminal-first usage, provider independence, a client/server architecture, and an extensible tool system. The SMARK branch builds on that with stronger Windows/PowerShell support, VS Code Notebook integration, token visibility, network proxy handling, and a smoother installation experience.
 
 ### Who is this branch for?
 
-If you often develop in the terminal, need auditable agent behavior, or use AI coding agents in Windows/PowerShell or VS Code Notebook scenarios, this branch provides a more complete experience than upstream defaults.
+If you already develop in the terminal, need auditable agent behavior, or regularly use AI coding agents in Windows/PowerShell or VS Code Notebook scenarios, this branch gives you a more complete experience than upstream defaults.
 
 ### Why does the installer not use sudo by default?
 
-User-level installation is safer and easier to manage. The installer writes to a user directory by default and refuses implicit sudo. Only use `sudo env ... --allow-sudo` when you explicitly install into a system directory such as `/usr/local/bin`; also consider `--no-modify-path` to avoid root modifying user profiles.
+User-level installation is safer and easier to manage. The installer writes to a user directory by default and refuses implicit sudo. Only reach for `sudo env ... --allow-sudo` when you explicitly install into a system directory such as `/usr/local/bin` — and add `--no-modify-path` so root does not rewrite your user profiles.
 
 ### What if an old opencode already exists on the system?
 
-The installer only trusts the target install path. Even if `/usr/local/bin/opencode` already has the same version, specifying `OPENCODE_INSTALL_DIR="$HOME/.local/bin"` still installs to `~/.local/bin/opencode` and will not be blocked by an old binary in PATH.
+The installer only cares about the target install path. Even if `/usr/local/bin/opencode` already has the same version, specifying `OPENCODE_INSTALL_DIR="$HOME/.local/bin"` still installs to `~/.local/bin/opencode` — an old binary in PATH will not get in the way.
 
 ---
 

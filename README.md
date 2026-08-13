@@ -40,56 +40,56 @@
   <a href="docs/readme/README.vi.md">Tiếng Việt</a>
 </p>
 
+> [!WARNING]
+> **切换分支前，先备份你的 `opencode.db`。** SMARK 分支带有自定义的数据库 schema 和迁移，从上游 `dev`、主分支或其他原分支切过来之前，请手动备份本地数据库。迁移之后，数据库可能无法再无损迁回上游或原分支；本地数据库上下文信息的 schema 兼容性问题，本项目无法负责。
+
+> [!TIP]
+> 这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.15.13`，CLI release tag 为 `v1.15.13-smark`），基于上游 `dev`，主要打磨 TUI 交互、会话管理、Token 统计、Windows/PowerShell 兼容、VS Code 语言诊断与 Notebook 集成、网络代理和安装体验。
+
 [![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
-
----
-
-> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.15.13`，CLI release tag 为 `v1.15.13-smark`）。它基于上游 `dev` 分支，重点增强 TUI 交互、会话管理、Token 统计、Windows/PowerShell 兼容、VS Code 语言诊断与 Notebook 集成、网络代理及安装体验。
-
-> **数据库迁移提示**：SMARK 分支包含数据库 schema 自定义与迁移。若你从上游 `dev`、主分支或原分支切换到本分支，请先手动备份本地 `opencode.db`；迁移后的数据库可能无法无损迁移回上游或原分支。本项目不负责您本地数据库上下文信息的 schema 格式兼容性问题。
 
 ---
 
 ## 快速安装
 
-推荐使用 SMARK 分支发布页中的安装脚本。默认会安装最新 release，并把安装目录写入已有的 shell profile。
+最简单的安装方式是用 SMARK 发布页里的脚本——默认装最新 release，并自动把安装目录写进已有的 shell profile：
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash
 ```
 
-安装后验证：
+装完验证一下：
 
 ```bash
 opencode --version
 which opencode
 ```
 
-如果当前 shell 还没有刷新 PATH，可以重新打开终端，或按安装日志提示 source 对应的 profile。
+如果 PATH 还没刷新，重开一个终端，或者按安装日志的提示 source 对应的 profile 即可。
 
 ### 指定安装目录
 
-用户级安装推荐放到 `~/.local/bin`。注意环境变量必须传给右侧执行 installer 的 `bash`，不要只传给 `curl`。
+用户级安装推荐放到 `~/.local/bin`。有一点容易踩坑：环境变量必须传给右侧真正执行 installer 的 `bash`，只传给 `curl` 是没有用的。
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
   OPENCODE_INSTALL_DIR="$HOME/.local/bin" bash
 ```
 
-更适合排查问题的写法是先下载脚本，再执行：
+排查问题时更稳妥的写法是先下载、再执行：
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install -o /tmp/opencode-install
 env OPENCODE_INSTALL_DIR="$HOME/.local/bin" bash /tmp/opencode-install
 ```
 
-不要这样写：
+这样写是错的：
 
 ```bash
 OPENCODE_INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | bash
 ```
 
-这种写法只会把 `OPENCODE_INSTALL_DIR` 传给 `curl`，不会传给真正运行安装脚本的 `bash`。
+它只会把 `OPENCODE_INSTALL_DIR` 传给 `curl`，真正跑安装脚本的 `bash` 拿不到。
 
 ### 指定版本
 
@@ -98,7 +98,7 @@ curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/instal
   bash -s -- --version 1.15.13-smark
 ```
 
-这条命令是完整写法：`bash -s --` 表示让 `bash` 从 stdin 读取 installer，并把后面的 `--version 1.15.13-smark` 作为 installer 参数传入。版本参数可以写 `1.15.13-smark`，也可以写 release tag 形式的 `v1.15.13-smark`。
+`bash -s --` 让 `bash` 从 stdin 读 installer，后面的 `--version 1.15.13-smark` 则作为参数传进去。版本写 `1.15.13-smark` 或 release tag 形式的 `v1.15.13-smark` 都可以。
 
 ### 安装脚本行为
 
@@ -114,7 +114,7 @@ curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/instal
 
 ### PATH 与 shell profile
 
-安装脚本会识别并更新这些已存在的 profile：`.bashrc`、`.bash_profile`、`.profile`、`.zshrc`、`.zprofile`、`.zshenv`、`~/.config/bash/*`、`~/.config/zsh/*`、`~/.config/fish/config.fish`。
+安装脚本会识别并更新这些已存在的 profile：`.bashrc`、`.bash_profile`、`.profile`、`.zshrc`、`.zprofile`、`.zshenv`、`~/.config/bash/*`、`~/.config/zsh/*`、`~/.config/fish/config.fish`。常见的定制需求：
 
 | 需求 | 命令 |
 | --- | --- |
@@ -123,7 +123,7 @@ curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/instal
 | 交互选择 profile | `bash /tmp/opencode-install --interactive` |
 | 系统目录安装 | `sudo env OPENCODE_INSTALL_DIR=/usr/local/bin bash /tmp/opencode-install --allow-sudo --no-modify-path` |
 
-如果你希望 `~/.local/bin/opencode` 优先于 `/usr/local/bin/opencode`，请确保 profile 里的 PATH 顺序类似这样：
+想让 `~/.local/bin/opencode` 优先于 `/usr/local/bin/opencode`，确保 profile 里的 PATH 顺序类似这样：
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -131,7 +131,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ### 其他安装方式
 
-这些方式适合使用上游包管理生态。若你需要 SMARK 分支版本，请优先使用上面的 GitHub release installer。
+这些方式走的是上游包管理生态。要装 SMARK 分支版本，优先用上面的 GitHub release installer。
 
 | 平台 | 命令 | 说明 |
 | --- | --- | --- |
@@ -154,7 +154,7 @@ cd <your-project>
 opencode
 ```
 
-启动后可以直接描述任务，例如“解释这个模块的架构”、“修复这个报错”、“给这个功能补测试”。TUI 内使用 `Tab` 切换 Agent，使用内置工具读写文件、运行命令、查看 diff、管理会话。
+启动后直接描述任务就行——“解释这个模块的架构”、“修复这个报错”、“给这个功能补测试”都可以。TUI 里用 `Tab` 切换 Agent，内置工具可以读写文件、运行命令、查看 diff、管理会话。常用操作：
 
 | 操作 | 说明 |
 | --- | --- |
@@ -168,13 +168,13 @@ opencode
 
 ## 桌面应用程序
 
-SMARK `dev-smark` 分支当前只发布 CLI，不发布桌面应用安装包。需要桌面版（BETA）时，请以 [opencode.ai/download](https://opencode.ai/download) 和上游 release 说明为准；不要把 SMARK CLI release 页面当作 desktop 安装包来源。
+SMARK `dev-smark` 分支目前只发布 CLI，不提供桌面应用安装包。需要桌面版（BETA）的话，以 [opencode.ai/download](https://opencode.ai/download) 和上游 release 说明为准——SMARK 的 CLI release 页面里没有 desktop 安装包。
 
 ---
 
 ## 核心特性
 
-这个分支的重点不是简单堆功能，而是把真实开发中的高频痛点做成可观察、可恢复、可跨平台的工作流。
+这个分支做的事情，说到底就一件：把日常开发里反复遇到的痛点，变成可观察、可恢复、跨平台一致的工作流。大致覆盖这些方向：
 
 | 方向 | 解决的问题 | 你会看到的变化 |
 | --- | --- | --- |
@@ -220,7 +220,7 @@ SMARK `dev-smark` 分支当前只发布 CLI，不发布桌面应用安装包。�
 | 单会话明细 | `opencode session info -s <Session_ID>` | 按 provider/model 展示 `Calls`、`Input`、`Cache Write`、`Cache Read`、`Output`、`Cost` |
 | 全局统计 | `opencode stats --models` | 汇总总成本、日均成本、平均 token、工具使用和模型用量 |
 
-内部统计会优先读取 request usage 数据；较旧会话没有 request usage 时，会回退到消息元数据。TUI 的 Context usage 还会估算 instruction、skills、tool definitions、附件、工具结果和 compaction summary 对上下文窗口的占用。
+内部统计优先读 request usage 数据；较旧的会话没有这部分数据时，回退到消息元数据。TUI 的 Context usage 另外还会估算 instruction、skills、tool definitions、附件、工具结果和 compaction summary 各占了多少上下文窗口。
 
 ### 工具系统
 
@@ -234,13 +234,13 @@ SMARK `dev-smark` 分支当前只发布 CLI，不发布桌面应用安装包。�
 
 ### 可选 MCP 集成
 
-如果需要 ChatGPT Web 辅助能力，可考虑接入 [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark)。它通过本地 MCP bridge 复用已登录的 ChatGPT 浏览器会话，适合在 OpenCode 中调用 ChatGPT ask、图片生成和 voice/语音转录等能力。本分支已把该项目作为 `thirdparty/chatgpt-browser-agent` submodule 记录；首次检出后运行 `git submodule update --init --recursive thirdparty/chatgpt-browser-agent`，再进入该目录运行 `npm ci` 安装依赖。登录、授权与浏览器状态管理仍以该项目 README 为准。
+需要 ChatGPT Web 辅助能力的话，可以接入 [chatgpt-browser-agent-smark](https://github.com/SMARK2022/chatgpt-browser-agent-smark)：它通过本地 MCP bridge 复用已登录的 ChatGPT 浏览器会话，在 OpenCode 里就能调用 ChatGPT ask、图片生成和 voice/语音转录。本分支把该项目记录为 `thirdparty/chatgpt-browser-agent` submodule；首次检出后运行 `git submodule update --init --recursive thirdparty/chatgpt-browser-agent`，再进目录执行 `npm ci`。登录、授权和浏览器状态管理以该项目自己的 README 为准。
 
 ### OpenTUI 源码与发布产物
 
-本分支把公开的 [SMARK2022/opentui](https://github.com/SMARK2022/opentui) 记录为 `thirdparty/opentui` submodule。首次检出后运行 `git submodule update --init thirdparty/opentui`；该 gitlink 固定到 `v0.4.3-smark.1` 的源码 commit，fork 默认分支为 `smark/main`，便于检查和继续维护 `0.4.3 + CJK` 修复。
+本分支把公开的 [SMARK2022/opentui](https://github.com/SMARK2022/opentui) 记录为 `thirdparty/opentui` submodule。首次检出后运行 `git submodule update --init thirdparty/opentui`；gitlink 固定到 `v0.4.3-smark.1` 的源码 commit，fork 默认分支为 `smark/main`，方便随时查看和继续维护 `0.4.3 + CJK` 修复。
 
-submodule 只承载源码发现和 provenance，不参与 OpenCode 正常安装或编译。OpenCode 通过根 `package.json` 和 `bun.lock` 固定的 11 个 immutable GitHub Release tarball 取得 OpenTUI；release 下载失败时不会回退到 `thirdparty/opentui` 源码。修改 fork 后必须先独立发布新的完整 package family，再更新 OpenCode 的 URLs、lock 和 gitlink。
+submodule 只负责源码发现和 provenance，不参与 OpenCode 的正常安装或编译。OpenCode 实际使用的是根 `package.json` 和 `bun.lock` 固定的 11 个 immutable GitHub Release tarball；release 下载失败时不会回退到 `thirdparty/opentui` 源码。改动 fork 之后，必须先独立发布新的完整 package family，再一起更新 OpenCode 的 URLs、lock 和 gitlink。
 
 ### Provider 与模型
 
@@ -253,11 +253,11 @@ submodule 只承载源码发现和 provenance，不参与 OpenCode 正常安装�
 
 ### VS Code 语言服务与 Notebook 集成
 
-需要复用 VS Code 语言服务或使用 Notebook 工具时，请安装扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。仓库内扩展版本为 `1.15.10`，推荐配合 SMARK CLI `1.15.13-smark`；两者独立版本化，Marketplace 在人工发布完成前仍可能显示 `1.15.5`。该扩展在 VS Code 与 OpenCode CLI 之间建立本地鉴权 bridge，扩展未安装或未连接时，CLI 会继续使用内置 LSP，但无法使用 VS Code-backed 语言能力或 Notebook 工具。
+想复用 VS Code 的语言服务、或者直接用 Notebook 工具，装一下 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) 扩展。仓库内扩展版本为 `1.15.10`，推荐搭配 SMARK CLI `1.15.13-smark`；两者独立版本化，Marketplace 在人工发布完成前可能还显示 `1.15.5`。扩展在 VS Code 与 OpenCode CLI 之间建立本地鉴权 bridge；没装或没连上时，CLI 继续用内置 LSP，但 VS Code-backed 的语言能力和 Notebook 工具不可用。
 
-扩展启动后会在 `127.0.0.1:<random port>` 开本地 bridge，并把带心跳的 manifest 写到 `~/.local/state/opencode/ide/<uuid>.json`。OpenCode 会按 workspace 与 notebook 路径自动选择匹配的 VS Code bridge；远程 SSH、WSL 或容器场景下，CLI 需要运行在能访问该 bridge 的同一侧环境。
+扩展启动后会在 `127.0.0.1:<random port>` 开本地 bridge，并把带心跳的 manifest 写到 `~/.local/state/opencode/ide/<uuid>.json`。OpenCode 按 workspace 和 notebook 路径自动挑选匹配的 VS Code bridge；远程 SSH、WSL 或容器场景下，CLI 必须跑在能访问该 bridge 的同一侧。
 
-扩展不会捆绑 language server，而是复用当前 VS Code 窗口中语言扩展已经注册的 provider。Bridge 支持文件 touch、diagnostics、hover、definition、references、document symbols 和 workspace symbols；bridge 请求失败时回退内置 LSP，diagnostics 的无效结构也会回退。其他成功响应若缺少预期结果字段，当前可能被解释为空结果；合法空结果不会触发回退，也不能代替完整项目 typecheck。Implementation 和调用层级仍由内置 LSP 提供；强诊断刷新可能增加一个保持原焦点的 preview 标签页。
+扩展自己不捆绑 language server，而是复用当前 VS Code 窗口里语言扩展已注册的 provider。Bridge 支持文件 touch、diagnostics、hover、definition、references、document symbols 和 workspace symbols；bridge 请求失败会回退内置 LSP，diagnostics 的无效结构也会回退。其他成功响应若缺少预期结果字段，目前可能被当成空结果；合法的空结果不触发回退，也不代表完整项目 typecheck 已通过。Implementation 和调用层级仍由内置 LSP 提供；强诊断刷新可能多开一个保持原焦点的 preview 标签页。
 
 | 工具 | 用途 |
 | --- | --- |
@@ -268,7 +268,7 @@ submodule 只承载源码发现和 provenance，不参与 OpenCode 正常安装�
 | `vscode_notebook_output` | 读取文本、图片、HTML、JSON 等输出；大输出会写入 `.opencode/cache/notebook-outputs/` 并返回 artifact 路径 |
 | `vscode_notebook_env` | 查看 kernel/runtime，选择、重启或停止 kernel，并在用户明确要求时创建或保存 notebook |
 
-推荐流程：先用 `vscode_notebook_summary` 获取当前 cell ID，再用 `vscode_notebook_source` 读取目标 cell，修改后用 `vscode_notebook_run` 验证，最后用 `vscode_notebook_output` 查看结果。不要把显示序号 `cN` 当成长期稳定引用；插入、删除或类型切换后应使用工具返回的新 `#VSC-*` ID 或重新 summary。
+推荐的使用顺序：先 `vscode_notebook_summary` 拿到当前 cell ID，再 `vscode_notebook_source` 读目标 cell，改完用 `vscode_notebook_run` 验证，最后 `vscode_notebook_output` 看结果。注意别把显示序号 `cN` 当长期稳定引用——插入、删除或类型切换之后，用工具返回的新 `#VSC-*` ID，或者重新 summary 一次。
 
 ### 跨平台支持
 
@@ -284,7 +284,7 @@ submodule 只承载源码发现和 provenance，不参与 OpenCode 正常安装�
 
 ## Agents
 
-OpenCode 内置多种 primary agent，可用 `Tab` 快速切换。默认 agent 可通过 `default_agent` 配置覆盖；子 agent 主要通过任务派发或 `@agent` 方式调用。
+OpenCode 内置多种 primary agent，按 `Tab` 即可快速切换。默认 agent 可以用 `default_agent` 配置覆盖；子 agent 一般通过任务派发或 `@agent` 调用。
 
 | Agent | 类型 | 权限模型 | 适合场景 |
 | --- | --- | --- | --- |
@@ -297,7 +297,7 @@ OpenCode 内置多种 primary agent，可用 `Tab` 快速切换。默认 agent �
 | `explore` | subagent | 只允许搜索、读取、列表、web 查询等探索工具 | 快速定位文件、符号、调用链、配置和文档 |
 | `scout` | subagent，实验性 | 面向外部文档和依赖源码，允许 managed repo cache 读取 | 查询第三方库实现、克隆依赖源码、研究外部 API 行为 |
 
-`title`、`summary`、`compaction` 是隐藏的系统 agent，用于标题生成、摘要和压缩流程，不是日常手动切换对象。了解更多 [Agents](https://opencode.ai/docs/agents) 相关信息。
+`title`、`summary`、`compaction` 是隐藏的系统 agent，负责标题生成、摘要和压缩流程，日常不用手动切换。更多内容见 [Agents](https://opencode.ai/docs/agents)。
 
 ---
 
@@ -315,25 +315,25 @@ OpenCode 内置多种 primary agent，可用 `Tab` 快速切换。默认 agent �
 
 ### 这和 Claude Code 有什么不同？
 
-功能定位相近，但 OpenCode 的重点是开源、终端优先、provider 无关、客户端/服务器架构和可扩展工具系统。SMARK 分支在此基础上进一步强化 Windows/PowerShell、VSCode Notebook、Token 可见性、网络代理和安装体验。
+功能定位相近，但 OpenCode 的重心在开源、终端优先、provider 无关、客户端/服务器架构和可扩展工具系统。SMARK 分支在此基础上又强化了 Windows/PowerShell、VSCode Notebook、Token 可见性、网络代理和安装体验。
 
 ### 这个分支适合谁？
 
-如果你经常在终端里开发、需要可审计的 Agent 行为、需要在 Windows/PowerShell 或 VSCode Notebook 场景中使用 AI coding agent，这个分支会比上游默认体验更完整。
+如果你平时就在终端里开发，需要可审计的 Agent 行为，或者经常在 Windows/PowerShell、VSCode Notebook 场景里用 AI coding agent，这个分支会比上游默认体验更完整。
 
 ### 为什么安装脚本不默认使用 sudo？
 
-用户级安装更安全，也更容易管理。安装脚本默认写入用户目录，并拒绝隐式 sudo。只有你明确要安装到 `/usr/local/bin` 这类系统目录时，才需要 `sudo env ... --allow-sudo`，并建议同时使用 `--no-modify-path` 避免 root 修改用户 profile。
+用户级安装更安全，也更好管理。安装脚本默认写入用户目录，并拒绝隐式 sudo。只有明确要装到 `/usr/local/bin` 这类系统目录时，才需要 `sudo env ... --allow-sudo`，并建议同时加上 `--no-modify-path`，避免 root 改写用户 profile。
 
 ### 如果系统里已经有旧的 opencode，会怎样？
 
-安装脚本只以目标安装路径为准。即使 `/usr/local/bin/opencode` 已有同版本，只要你指定 `OPENCODE_INSTALL_DIR="$HOME/.local/bin"`，脚本仍会安装到 `~/.local/bin/opencode`，不会被 PATH 上的旧二进制拦截。
+安装脚本只认目标安装路径。即使 `/usr/local/bin/opencode` 已有同版本，只要指定 `OPENCODE_INSTALL_DIR="$HOME/.local/bin"`，脚本照样装到 `~/.local/bin/opencode`，不会被 PATH 上的旧二进制拦住。
 
 ---
 
 ## 参与贡献
 
-提交 PR 前请阅读 [贡献指南](./CONTRIBUTING.md)。如果你在自己的项目名中使用 `opencode`，请在 README 中说明该项目并非 OpenCode 团队官方项目，也不与 OpenCode 团队存在关联。
+提交 PR 前请先读 [贡献指南](./CONTRIBUTING.md)。如果你在自己的项目名里用了 `opencode`，请在 README 里说明该项目并非 OpenCode 团队官方项目，与 OpenCode 团队也没有关联。
 
 ---
 
