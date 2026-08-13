@@ -40,6 +40,37 @@ import { aggregateFailures } from "./aggregate-failures"
 import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
 import { DisposedReason } from "@/server/event"
 
+// 同一私有 viewer 信号收窄 Message 与 diff；默认 SDK/Web App 请求不带它，完整合同不变。
+// 该常量只属于 TUI transport，不进入 OpenAPI query 或 generated SDK，避免把内部投影固化成公共 API。
+const TUI_VIEWER_HEADER = "x-opencode-tui-message-projection"
+const TUI_VIEWER = "viewer"
+// 100 是所有 TUI Session 共用的结果上限，不根据 Session 大小、耗时或内存走不同生产路径。
+// Files 保持默认展开；上限直接约束网络对象、store 项和 Renderable 基数，而不是延迟同一份无界工作。
+const TUI_DIFF_LIMIT = 100
+// 总量放在私有 response headers，body 继续满足既有 FileDiff[] schema，不引入 sentinel 或 wrapper。
+// legacy Session 即使缺少 hot summary，也能从本次 authoritative diff 获得精确总量而无需第二数据源。
+const TUI_DIFF_TOTAL_FILES = "x-opencode-tui-total-files"
+const TUI_DIFF_TOTAL_ADDITIONS = "x-opencode-tui-total-additions"
+const TUI_DIFF_TOTAL_DELETIONS = "x-opencode-tui-total-deletions"
+
+function projectTuiDiff(diffs: readonly Snapshot.FileDiff[]) {
+  // SSE 仍携带共享完整事件；TUI reducer 是不破坏 share consumer 的首个可收窄 owner。
+  // HTTP body 已由 daemon 截断，但再次应用同一投影可保证测试 transport 和未来 caller 都不能灌回 patch。
+  // 与 plugin adapter 共用 file 可见性口径；必须在 totals/cap 前过滤，legacy 项不能占用100行预算。
+  const displayable = diffs.filter((item) => item.file !== undefined)
+  return {
+    items: displayable.slice(0, TUI_DIFF_LIMIT).map((item) => {
+      const { patch: _, ...stats } = item
+      return stats
+    }),
+    summary: {
+      files: displayable.length,
+      additions: displayable.reduce((total, item) => total + item.additions, 0),
+      deletions: displayable.reduce((total, item) => total + item.deletions, 0),
+    },
+  }
+}
+
 // [local-smark] goal 类型定义（SDK 未重新生成前使用内联类型）
 // 字段与 src/session/goal.ts 的 Goal schema 对齐
 type SessionGoalInfo = {
@@ -729,7 +760,16 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
 
         case "session.diff":
-          setStore("session_diff", event.properties.sessionID, event.properties.diff)
+          setStore(
+            produce((draft) => {
+              // diff rows 与 totals 必须在同一 Solid transaction 收敛，否则 Files 会短暂把旧总数解释成新列表截断。
+              // 本地 summary 只是 viewer projection；共享 Session 持久数据仍由 daemon 的 Summary/Revert owner 管理。
+              const projected = projectTuiDiff(event.properties.diff)
+              draft.session_diff[event.properties.sessionID] = projected.items
+              const result = Binary.search(draft.session, event.properties.sessionID, (session) => session.id)
+              if (result.found) draft.session[result.index].summary = projected.summary
+            }),
+          )
           break
 
         case "session.deleted": {
@@ -749,7 +789,19 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         case "session.updated": {
           const result = Binary.search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
-            setStore("session", result.index, reconcile(event.properties.info))
+            const summary = Object.hasOwn(store.session_diff, event.properties.info.id)
+              ? store.session[result.index]?.summary
+              : undefined
+            setStore(
+              "session",
+              result.index,
+              reconcile({
+                ...event.properties.info,
+                // 已有viewer diff时summary属于同一TUI投影；完整updated只更新其余Session metadata。
+                // Summary/Revert两种事件顺序最终都由下一次session.diff提交新的normalized totals。
+                summary: summary ?? event.properties.info.summary,
+              }),
+            )
             break
           }
           setStore(
@@ -1075,11 +1127,15 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         },
         async sync(sessionID: string, options?: { force?: boolean }) {
           if (!options?.force && fullSyncedSessions.has(sessionID)) return
-          const [session, messages, todo, diff, status] = await Promise.all([
+          const [session, messages, todo, status] = await Promise.all([
             sdk.client.session.get({ sessionID }, { throwOnError: true }),
-            sdk.client.session.messages({ sessionID, limit: 300 }),
+            // 仅 TUI viewer 请求省略每轮冷 summary；Web App/SDK 的默认完整合同不带此信号。
+            // limit=300 继续锁定现有分页语义；projection 只改变每条 Message 的数据深度，不改变范围或顺序。
+            sdk.client.session.messages(
+              { sessionID, limit: 300 },
+              { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
+            ),
             sdk.client.session.todo({ sessionID }),
-            sdk.client.session.diff({ sessionID }),
             sdk.client.session.status({ workspace: project.workspace.current() }),
           ])
           // [local-smark] goal fetch：非致命，失败不影响 session sync
@@ -1108,7 +1164,6 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
                 draft.part[message.info.id] = mergeLiveParts(draft.part[message.info.id], message.parts)
               }
               draft.message[sessionID] = infos
-              draft.session_diff[sessionID] = diff.data ?? []
             }),
           )
           setStore("session_status", reconcile(status.data ?? {}))
@@ -1120,6 +1175,34 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
               replayOrphanDeltas(part.id, message.info.id)
             }
           }
+          // 可见历史先发布；diff 的 decode/传输失败仍由同一个 sync 直接抛出，但不能再成为首屏屏障。
+          // diff 此时才创建 Promise，因此不存在“早期 rejection 等待其他请求”造成的 unhandled 窗口。
+          // force reconnect 仍 await 同一 authoritative 请求；这里不是 fire-and-forget，也不合成备用成功。
+          const diff = await sdk.client.session.diff(
+            { sessionID },
+            { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } },
+          )
+          const projected = projectTuiDiff(diff.data ?? [])
+          const files = diff.response?.headers.get(TUI_DIFF_TOTAL_FILES) ?? null
+          const additions = diff.response?.headers.get(TUI_DIFF_TOTAL_ADDITIONS) ?? null
+          const deletions = diff.response?.headers.get(TUI_DIFF_TOTAL_DELETIONS) ?? null
+          setStore(
+            produce((draft) => {
+              draft.session_diff[sessionID] = projected.items
+              const result = Binary.search(draft.session, sessionID, (item) => item.id)
+              // headers 成组存在时是同一viewer response的权威总量；否则采用当前data??[]投影，不能混入旧Session summary。
+              // resolved HTTP error因此原子提交空rows/zero totals；fetch exception仍由optional response access保持既有语义。
+              if (result.found)
+                draft.session[result.index].summary =
+                  files === null || additions === null || deletions === null
+                    ? projected.summary
+                    : {
+                        files: Number(files),
+                        additions: Number(additions),
+                        deletions: Number(deletions),
+                      }
+            }),
+          )
           fullSyncedSessions.add(sessionID)
         },
       },

@@ -1,9 +1,14 @@
 /** @jsxImportSource @opentui/solid */
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
+import { testRender } from "@opentui/solid"
 import { Global } from "@opencode-ai/core/global"
 import { tmpdir } from "../../../fixture/fixture"
+import { createTuiPluginApi } from "../../../fixture/tui-plugin"
 import { directory, json, mount, wait, worktree } from "./sync-fixture"
+import type { TuiSlotPlugin } from "@opencode-ai/plugin/tui"
 import type { AssistantMessage, GlobalEvent, Part, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
+import type { JSX } from "solid-js"
+import { internalTuiPlugins } from "@/cli/cmd/tui/plugin/internal"
 
 function branchEvent(branch: string, workspace?: string): GlobalEvent {
   return {
@@ -231,6 +236,303 @@ function textDeltaEvent(id: string, delta: string, partID = "part_text"): Global
 }
 
 describe("tui sync", () => {
+  test("projects bounded patch-free TUI data through HTTP and SSE", async () => {
+    // 同一 public sync 覆盖两个 transport producer；任一 header 漏传都会恢复完整 payload。
+    // HTTP fixture 故意返回 101 个带唯一 patch 的对象，证明 client-side cap 也守住测试/旧 daemon 边界。
+    // totals headers 使用完整 101 项 worked values，不能由截断后的 store 重新计算冒充。
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const messageProjections: string[] = []
+    const diffProjections: string[] = []
+    const message = assistantMessage()
+    const visibleDiffs = Array.from({ length: 101 }, (_, index) => ({
+      file: `http-${index}.ts`,
+      patch: `http-patch-${index}`,
+      additions: index + 1,
+      deletions: index,
+    }))
+    // missing-file legacy 项放在首位；HTTP transport 模拟旧 daemon，client reducer仍须在cap前归一化。
+    // server测试不能覆盖共享SSE和旧transport；此处故意让client直接接收raw source以锁定第二个producer。
+    // 900/800不能进入预先算好的5151/5050，避免测试用实现同样的reduce重新生成expected值。
+    const diffs = [{ patch: "legacy-patch", additions: 900, deletions: 800 }, ...visibleDiffs]
+    const { app, emit, sync } = await mount((url, request, init) => {
+      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
+      if (url.pathname === "/session/ses_1/messages" || url.pathname === "/session/ses_1/message") {
+        const projection = request?.headers.get("x-opencode-tui-message-projection") ?? new Headers(init?.headers).get("x-opencode-tui-message-projection")
+        if (projection) messageProjections.push(projection)
+        return json([{ info: message, parts: [] }])
+      }
+      if (url.pathname === "/session/ses_1/todo") return json([])
+      if (url.pathname === "/session/ses_1/diff") {
+        const projection = request?.headers.get("x-opencode-tui-message-projection") ?? new Headers(init?.headers).get("x-opencode-tui-message-projection")
+        if (projection) diffProjections.push(projection)
+        return json(diffs, {
+          headers: {
+            "x-opencode-tui-total-files": "101",
+            "x-opencode-tui-total-additions": "5151",
+            "x-opencode-tui-total-deletions": "5050",
+          },
+        })
+      }
+    })
+
+    try {
+      await sync.session.sync("ses_1", { force: true })
+      // 真实 SDK transport 同时锁定 Message 与 diff producer；只测 handler 无法捕获任一请求漏传。
+      expect(messageProjections).toEqual(["viewer"])
+      expect(diffProjections).toEqual(["viewer"])
+      expect(sync.data.session_diff.ses_1).toHaveLength(100)
+      expect(sync.data.session_diff.ses_1.every((item) => item.file !== undefined)).toBe(true)
+      expect(sync.data.session_diff.ses_1.some((item) => item.patch !== undefined)).toBe(false)
+      expect(sync.session.get("ses_1")?.summary).toEqual({ files: 101, additions: 5151, deletions: 5050 })
+
+      // SSE producer 仍是完整共享事件；这里验证 TUI reducer 不会在 HTTP 修复后把 patch 和第 101 项重新灌回。
+      // 每项固定 +2/-1，使 expected totals 202/101 与 HTTP totals 明确不同，防止断言误读旧状态。
+      // 等待首文件切到 event 前缀是公开 store readiness，不使用 sleep 或内部 callback 次数。
+      const eventDiffs = [
+        { patch: "event-legacy-patch", additions: 700, deletions: 600 },
+        ...visibleDiffs.map((item, index) => ({ ...item, file: `event-${index}.ts`, additions: 2, deletions: 1 })),
+      ]
+      emit({
+        directory,
+        project: "proj_test",
+        payload: { id: "evt_diff", type: "session.diff", properties: { sessionID: "ses_1", diff: eventDiffs } },
+      })
+      await wait(() => sync.data.session_diff.ses_1?.[0]?.file === "event-0.ts")
+      expect(sync.data.session_diff.ses_1).toHaveLength(100)
+      expect(sync.data.session_diff.ses_1.every((item) => item.file !== undefined)).toBe(true)
+      expect(sync.data.session_diff.ses_1.some((item) => item.patch !== undefined)).toBe(false)
+      expect(sync.session.get("ses_1")?.summary).toEqual({ files: 101, additions: 202, deletions: 101 })
+
+      // Revert的真实顺序是normalized session.diff后跟完整session.updated；后者只能更新普通Session metadata。
+      // raw summary刻意计入missing-file项，若reducer整对象替换就会重新制造false ellipsis。
+      // title必须更新而summary必须保留，这两个断言共同防止实现简单丢弃整个session.updated事件。
+      // 该顺序与Summary的updated后diff相反，故测试必须在同一公开event stream连续发出两类事件。
+      emit({
+        directory,
+        project: "proj_test",
+        payload: {
+          id: "evt_session_after_diff",
+          type: "session.updated",
+          properties: {
+            sessionID: "ses_1",
+            info: {
+              id: "ses_1",
+              slug: "reverted",
+              projectID: "proj_test",
+              title: "reverted",
+              version: "1.0.0",
+              time: { created: 1, updated: 2 },
+              directory,
+              summary: { files: 102, additions: 902, deletions: 701 },
+            },
+          },
+        },
+      })
+      await wait(() => sync.session.get("ses_1")?.title === "reverted")
+      expect(sync.session.get("ses_1")?.summary).toEqual({ files: 101, additions: 202, deletions: 101 })
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("renders bounded Files rows with a final ellipsis", async () => {
+    // 从 internal plugin registry 取得 production View，避免为了测试导出私有组件或复制 JSX。
+    // 100 visible rows + total 101 是最小真实 truncation；total=100 时同一 View 不应产生省略号。
+    const plugin = internalTuiPlugins({ experimentalEventSystem: false }).find(
+      (candidate) => candidate.id === "internal:sidebar-files",
+    )
+    if (!plugin) throw new Error("Files sidebar plugin was not registered")
+    const diffs = Array.from({ length: 100 }, (_, index) => ({
+      file: `file-${index}.ts`,
+      additions: index + 1,
+      deletions: index,
+    }))
+    let totalFiles = 101
+    let currentDiffs = diffs
+    const api = createTuiPluginApi({
+      state: {
+        session: {
+          get: () => ({
+            id: "ses_1",
+            slug: "files",
+            projectID: "proj_test",
+            directory,
+            title: "files",
+            version: "1.0.0",
+            summary: { files: totalFiles, additions: 5151, deletions: 5050 },
+            time: { created: 1, updated: 1 },
+          }),
+          diff: () => currentDiffs,
+        },
+      },
+    })
+    let view: (() => JSX.Element) | undefined
+    function capture(definition: TuiSlotPlugin): string
+    function capture<Slots extends Record<string, object>>(definition: TuiSlotPlugin<Slots>): string
+    function capture(definition: TuiSlotPlugin) {
+      // 只通过 plugin 的公开 slot registration seam 捕获 renderer，不断言注册次数或私有 id 分派。
+      const content = definition.slots.sidebar_content
+      if (content) view = () => content({ theme: api.theme }, { session_id: "ses_1" })
+      return "files-test"
+    }
+    const register = spyOn(api.slots, "register").mockImplementation(capture)
+    await plugin.tui(api, undefined, {
+      id: plugin.id,
+      source: "internal",
+      spec: plugin.id,
+      target: plugin.id,
+      first_time: 0,
+      last_time: 0,
+      time_changed: 0,
+      load_count: 1,
+      fingerprint: plugin.id,
+      state: "first",
+    })
+    register.mockRestore()
+    if (!view) throw new Error("Files sidebar plugin did not register its content slot")
+
+    const app = await testRender(view, { width: 60, height: 110, footerHeight: 0, useThread: false })
+    try {
+      await app.renderOnce()
+      const frame = app.captureCharFrame()
+      const lines = frame.split("\n").map((line) => line.trim())
+      // 默认展开语义必须保留；首尾文件共同证明列表不是 aggregate-only 或默认折叠。
+      // 省略号按独立 frame row 断言，禁止实现把它粘到第 100 个文件名或标题。
+      // forbidden phrase 直接来自用户要求，防止高信息量 title 被固定解释文案稀释。
+      expect(frame).toContain("Modified Files")
+      expect(frame).toContain("(101)")
+      expect(frame).toContain("+5151")
+      expect(frame).toContain("-5050")
+      expect(frame).toContain("file-0.ts")
+      expect(frame).toContain("file-99.ts")
+      expect(lines).toContain("...")
+      expect(frame).not.toContain("showing first 100")
+    } finally {
+      app.renderer.destroy()
+    }
+
+    // Session先到、diff尚未发布时不能把空列表误报成截断；恰好100项同样没有省略号。
+    currentDiffs = []
+    const pending = await testRender(view, { width: 60, height: 8, footerHeight: 0, useThread: false })
+    try {
+      await pending.renderOnce()
+      expect(pending.captureCharFrame().split("\n").map((line) => line.trim())).not.toContain("...")
+    } finally {
+      pending.renderer.destroy()
+    }
+    totalFiles = 100
+    currentDiffs = diffs
+    const exact = await testRender(view, { width: 60, height: 110, footerHeight: 0, useThread: false })
+    try {
+      await exact.renderOnce()
+      const frame = exact.captureCharFrame()
+      expect(frame).toContain("file-99.ts")
+      expect(frame.split("\n").map((line) => line.trim())).not.toContain("...")
+    } finally {
+      exact.renderer.destroy()
+    }
+  })
+
+  test("publishes session history before starting the TUI diff request", async () => {
+    // messages readiness 与 diff start 是两个明确 latch；旧 Promise.all 会在第一个 latch 释放前启动 diff。
+    // diff handler读取公开 sync store，证明 history 已提交，而不是仅证明 messages HTTP 已 resolve。
+    // delayed diff 保持 sync 未完成，确保测试观察的是中间首屏状态而非最终批量结果。
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const delayedMessages = Promise.withResolvers<Response>()
+    const delayedDiff = Promise.withResolvers<Response>()
+    let messagesStarted = false
+    let diffStarted = false
+    let historyVisibleWhenDiffStarted = false
+    const message = assistantMessage()
+    const mounted = await mount((url) => {
+      if (url.pathname === "/session/ses_1") return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
+      if (url.pathname === "/session/ses_1/messages" || url.pathname === "/session/ses_1/message") {
+        messagesStarted = true
+        return delayedMessages.promise
+      }
+      if (url.pathname === "/session/ses_1/todo") return json([])
+      if (url.pathname === "/session/ses_1/diff") {
+        diffStarted = true
+        historyVisibleWhenDiffStarted = mounted.sync.data.message.ses_1?.some((item) => item.id === message.id) === true
+        return delayedDiff.promise
+      }
+      if (url.pathname === "/session/status") return json({})
+    })
+
+    try {
+      const syncing = mounted.sync.session.sync("ses_1", { force: true })
+      await wait(() => messagesStarted)
+      expect(diffStarted).toBe(false)
+      delayedMessages.resolve(json([{ info: message, parts: [] }]))
+      await wait(() => diffStarted)
+      expect(historyVisibleWhenDiffStarted).toBe(true)
+      delayedDiff.resolve(json([]))
+      await syncing
+    } finally {
+      delayedMessages.resolve(json([{ info: message, parts: [] }]))
+      delayedDiff.resolve(json([]))
+      mounted.app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("preserves resolved and rejected diff error semantics after history publication", async () => {
+    // ses_1 锁定 generated SDK 的 resolved HTTP error 兼容：空 diff 是既有成功语义并允许 full-sync short circuit。
+    // ses_2 锁定 genuine JSON parse rejection；独立 Session 避免前一次成功的 full-sync 标记污染失败结论。
+    // 两种错误都在真实 SDK fetch/parse seam 产生，不注入假的 rejected client method。
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const message = assistantMessage()
+    const malformedMessage = { ...assistantMessage(), id: "msg_2", sessionID: "ses_2" }
+    let diffRequests = 0
+    const { app, sync } = await mount((url) => {
+      const id = url.pathname.match(/^\/session\/(ses_[12])(?:\/(?:messages|message|todo|diff))?$/)?.[1]
+      if (!id) return
+      if (url.pathname === `/session/${id}`)
+        return json({
+          id,
+          time: { created: 1, updated: 1 },
+          directory,
+          summary: id === "ses_1" ? { files: 101, additions: 5151, deletions: 5050 } : undefined,
+        })
+      if (url.pathname === `/session/${id}/messages` || url.pathname === `/session/${id}/message`)
+        return json([{ info: id === "ses_1" ? message : malformedMessage, parts: [] }])
+      if (url.pathname === `/session/${id}/todo`) return json([])
+      if (url.pathname === `/session/${id}/diff`) {
+        diffRequests += 1
+        if (id === "ses_1") return json({ error: "diff unavailable" }, { status: 500 })
+        return new Response("{", { status: 200, headers: { "content-type": "application/json" } })
+      }
+    })
+
+    try {
+      await sync.session.sync("ses_1", { force: true })
+      expect(sync.data.session_diff.ses_1).toEqual([])
+      // resolved error 的当前 source 是既有 `data ?? []`；rows与totals必须一起清空，不能保留旧summary制造假省略号。
+      expect(sync.session.get("ses_1")?.summary).toEqual({ files: 0, additions: 0, deletions: 0 })
+      await sync.session.sync("ses_1")
+      expect(diffRequests).toBe(1)
+
+      await expect(sync.session.sync("ses_2", { force: true })).rejects.toBeInstanceOf(SyntaxError)
+      // history 已在 parse failure 前可见，证明 barrier 修复没有通过吞错或 fire-and-forget 获得首屏。
+      expect(sync.data.message.ses_2?.some((item) => item.id === malformedMessage.id)).toBe(true)
+      await expect(sync.session.sync("ses_2")).rejects.toBeInstanceOf(SyntaxError)
+      expect(diffRequests).toBe(3)
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
   test("projects active Session Message and Part events across Projects", async () => {
     const previous = Global.Path.state
     await using tmp = await tmpdir()

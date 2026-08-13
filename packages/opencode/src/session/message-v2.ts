@@ -868,6 +868,16 @@ function hotInfo(row: typeof MessageTable.$inferSelect): HotInfo {
   }
 }
 
+function viewerInfo(row: typeof MessageTable.$inferSelect): Info {
+  const value = hotInfo(row)
+  // Assistant 没有被归档的 summary.diffs，直接保留 lifecycle/model/error 字段，避免 viewer 另造 assistant shape。
+  if (value.role === "assistant") return value
+  // TUI 没有 user summary 消费者；省略整个 optional 字段才能保持合法 Info，
+  // 同时阻止 cold diffs 在普通查看路径被解压、持久预热并进入 wire。
+  const { summary: _, ...info } = value
+  return info
+}
+
 // Goal Tool 只消费 current/previous；technical user 不应迫使普通 Provider step 扫描整段历史。
 export function goalChronology(sessionID: SessionID): ChronologyMessage[] {
   return Database.use((db) => {
@@ -987,12 +997,20 @@ const atOrNewer = (row: Cursor) =>
 
 // hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
 // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
-function hydrate(rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
-  // 任一 Message corruption 让整个范围失败，不能返回半完整、半 skeleton 的 transcript。
-  // Message refs 在单次批量 seam 中 thaw，避免逐 owner 重复打开共享 pack。
-  const restoredRows = ColdStorage.thawMessageRows(rows)
+function hydrate(
+  rows: (typeof MessageTable.$inferSelect)[],
+  includeHidden = true,
+  messageProjection?: "viewer",
+) {
+  // 默认业务读取仍批量 thaw 完整 Message；viewer 只使用热投影，完整消费者合同不被削弱。
+  // projection 在 thawMessageRows 之前决定，防止出现“response 删除字段但 cold owner 已解压并持久预热”的假优化。
+  // Parts 仍走唯一 cold-aware decoder；Tool/Text/Reasoning 内容不因 Message summary 收窄而缺失。
+  const infos =
+    messageProjection === "viewer"
+      ? rows.map(viewerInfo)
+      : ColdStorage.thawMessageRows(rows).map(infoFromRestored)
   // 只按选中 Message IDs 查询 children，范围外 archive 不进入 JS 或持久预热。
-  const ids = restoredRows.map((row) => row.id)
+  const ids = rows.map((row) => row.id)
   const partByMessage = new Map<string, Part[]>()
   if (ids.length > 0) {
     // Part query 的 persisted order 是最终 child order，Map 只做 message_id join。
@@ -1019,9 +1037,9 @@ function hydrate(rows: (typeof MessageTable.$inferSelect)[], includeHidden = tru
   // 持久 thaw 在返回前完成，前端不会收到临时 lazy proxy。
   // restoredRows 保持原 page 顺序，child Map 不改变 newest/oldest 语义。
   // 因此持久预热副作用与本次返回 transcript 的范围严格一致。
-  return restoredRows.map((row) => ({
-    info: infoFromRestored(row),
-    parts: partByMessage.get(row.id) ?? [],
+  return infos.map((info) => ({
+    info,
+    parts: partByMessage.get(info.id) ?? [],
   }))
 }
 
@@ -1404,7 +1422,9 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   before?: string
   includeHidden?: boolean
   fromMessageID?: MessageID
+  messageProjection?: "viewer"
 }) {
+  // page 继续拥有 SQL range/cursor；viewer 只是同一 page 的合法 Info 投影，不能另建分页或备用读取路径。
   if (input.limit === 0) {
     // 零范围只验证 Session existence，不读取一条 Message 作为多余探针，更不能触发任何 Part hydrate/thaw。
     const exists = Database.use((db) =>
@@ -1473,7 +1493,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
 
   const more = rows.length > input.limit
   const slice = more ? rows.slice(0, input.limit) : rows
-  const items = hydrate(slice, Boolean(input.includeHidden))
+  const items = hydrate(slice, Boolean(input.includeHidden), input.messageProjection)
   items.reverse()
   if (!input.includeHidden) {
     for (let i = items.length - 1; i >= 0; i--) {
