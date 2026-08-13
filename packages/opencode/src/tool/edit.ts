@@ -19,6 +19,8 @@ import { closestMatch } from "@opencode-ai/core/tool/edit-excerpt"
 import { EditApply } from "@opencode-ai/core/tool/edit-apply"
 // #518：共享 mutation coordinator（proposal 版本耦合 + Permission 后持锁 + 提交前 recheck）
 import * as Mutation from "./file-mutation-coordinator"
+// 0576：预算纪律消费 Truncate limits——与 wrapper 通用截断同源，确保末段 warning 不被外层截断丢弃。
+import { Truncate } from "./truncate"
 // #131：行尾逻辑收敛到 util/line-ending（含 CR-only）
 
 // 既有单条导出仍委托共享引擎，不保留第二套匹配实现。
@@ -63,6 +65,8 @@ export const EditTool = Tool.define(
     const afs = yield* FSUtil.Service
     const format = yield* Format.Service
     const events = yield* EventV2Bridge.Service
+    // 0576：edit 组装期预算需要 limits；注入一次避免执行期重复解析配置。
+    const truncate = yield* Truncate.Service
 
     return {
       description: DESCRIPTION,
@@ -92,11 +96,8 @@ export const EditTool = Tool.define(
             throw new Error("edits[].oldString must not be empty except for a single create/overwrite edit.")
           }
 
-          for (const edit of edits) {
-            if (edit.oldString === edit.newString && edit.oldString !== "") {
-              throw new Error("No changes to apply: oldString and newString are identical.")
-            }
-          }
+          // identical 条目须通过共享引擎定位/唯一性校验后跳写，不能提前否决混合批次。
+          // create+空 newString 仍拒绝，不随无操作容忍放宽已有创建边界。
           if (isCreate(edits) && edits[0].oldString === edits[0].newString) {
             throw new Error("No changes to apply: oldString and newString are identical.")
           }
@@ -282,16 +283,6 @@ export const EditTool = Tool.define(
                 file: filePath,
                 event: "change",
               })
-              // #518：成功后 diff 用锁内最终内容生成；与 write 一致，不展示 proposal 时的中间估计。
-              diff = trimDiff(
-                createTwoFilesPatch(
-                  filePath,
-                  filePath,
-                  normalizeLineEndings(contentOld),
-                  normalizeLineEndings(contentNew),
-                ),
-              )
-
               // #514 INV-16：成功后始终发完整参数面 { filePath, edits }，
               // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
               // actualOld 已在 applyEdits.syncEdits 中（历史 needle，非 preserve 整行块）；
@@ -306,6 +297,16 @@ export const EditTool = Tool.define(
               }
             }
 
+          // 两分支都已同步 formatter 后的最终内容，回执与 metadata 因此共用同一 diff。
+          // 权限请求仍使用各自 ask 前的预计算，不能拿成功后的真值替代审批预览。
+          diff = trimDiff(
+            createTwoFilesPatch(
+              filePath,
+              filePath,
+              normalizeLineEndings(contentOld),
+              normalizeLineEndings(contentNew),
+            ),
+          )
           const diffOld = normalizeLineEndings(contentOld)
           const diffNew = normalizeLineEndings(contentNew)
           // #131：统计增删行时忽略行尾风格
@@ -332,6 +333,47 @@ export const EditTool = Tool.define(
 
           // #514：多块编辑成功回执标注块数，与单块形态区分
           let output = `Edit applied successfully${edits.length > 1 ? ` (${edits.length} blocks)` : ""}.`
+          // [local-smark] 逐条 identical 统计在组装点从 edits 重算（与 applyEdits 收到的
+          // LF 归一化判断一致），行尾等值也算 no-op。
+          const unchangedEntries = edits.filter(
+            (edit) => normalizeLineEndings(edit.oldString) === normalizeLineEndings(edit.newString),
+          ).length
+
+          // Changed 使用最终 diff；与 wrapper 同源的限额为 warning 留出位置，避免 head 截断丢尾。
+          // 裁剪只陈述省略事实，不指向模型看不到的 metadata 通道。
+          const { maxLines: limitLines, maxBytes: limitBytes } = yield* truncate.limits()
+          const reserveBytes = 2048
+          const reserveLines = 10
+          const diffBudgetBytes = Math.max(0, limitBytes - reserveBytes)
+          // 预算下限钳 0：limits 配置小于保留额时差分段整体放弃而不是负数比较失效。
+          const diffBudgetLines = Math.max(0, limitLines - reserveLines)
+          let consumedBytes = Buffer.byteLength(output, "utf-8")
+          let consumedLines = output.split("\n").length
+          // 差分按行入账而非整体拼接：预算判定必须逐行，中途停止才可能保留 warning 空间。
+          if (diff) {
+            output += `\n\nChanged:`
+            consumedBytes += Buffer.byteLength("\n\nChanged:", "utf-8")
+            consumedLines += 3
+            const diffLinesArr = diff.split("\n")
+            let omitted = 0
+            for (const line of diffLinesArr) {
+              const size = Buffer.byteLength(line, "utf-8") + 1
+              if (consumedLines >= diffBudgetLines || consumedBytes + size > diffBudgetBytes) {
+                omitted++
+                continue
+              }
+              output += `\n${line}`
+              consumedBytes += size
+              consumedLines++
+            }
+            if (omitted > 0) {
+              const marker = `\n… (${omitted} more lines omitted)`
+              output += marker
+              consumedBytes += Buffer.byteLength(marker, "utf-8")
+              consumedLines++
+            }
+          }
+
           const normalizedFilePath = FSUtil.normalizePath(filePath)
           // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容
           const beforeIssues = (yield* lsp.diagnostics())[normalizedFilePath] ?? []
@@ -344,20 +386,37 @@ export const EditTool = Tool.define(
           const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
           // summary 只有在 LSP 可靠可用时才传给 TUI，避免 unavailable 时出现绿色 clean
           let diagnosticSummary: typeof delta | undefined = delta
+          // LSP 段先组装后预算检查：不再直接追加 output，超限时代之以纯事实降级标记。
+          let lspSection = ""
           if (block) {
-            output += `\n\nNew LSP errors introduced by this edit:\n${block}`
-            output += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
+            lspSection = `\n\nNew LSP errors introduced by this edit:\n${block}`
+            lspSection += `\n\nNote: If this is part of a multi-step edit, some errors may be expected until all changes are complete.`
           } else {
             // [local-smark] delta 空 ≠ LSP 验证通过：LSP 未运行时
             // baseline 和 current 都为空，delta 必然为空
             const clients = yield* lsp.status()
             if (clients.length === 0) {
               diagnosticSummary = undefined
-              output += `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
+              lspSection = `\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.`
             } else {
               // [local-smark] 只输出一行检查结果，不展开既有错误详情，保持反馈高信噪比
-              output += `\n\n${LSP.Diagnostic.checkedMessage(delta, "file")}`
+              lspSection = `\n\n${LSP.Diagnostic.checkedMessage(delta, "file")}`
             }
+          }
+          // LSP 段按剩余预算检查（预留 warning 与标记），宁断示标也不消费 warning 预算。
+          if (
+            Buffer.byteLength(lspSection, "utf-8") <= limitBytes - consumedBytes - 256 &&
+            lspSection.split("\n").length <= limitLines - consumedLines - 2
+          ) {
+            output += lspSection
+          } else if (block) {
+            output += `\n\n(Diagnostics omitted: output size limit)`
+          }
+
+          // [local-smark] 成功且存在 identical 条目时在最后追加 warning（恒保留，不参与裁剪）：
+          // 跳写保证该陈述构造性为真（全 no-op 批次已在批级门失败，到不了这里）。
+          if (unchangedEntries > 0) {
+            output += `\n\nWarning: ${unchangedEntries} of ${edits.length} edit(s) were no-ops (oldString equals newString) and did not change the file.`
           }
 
           return {

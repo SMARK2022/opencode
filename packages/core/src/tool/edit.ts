@@ -61,6 +61,8 @@ export const Output = Schema.Struct({
   files: Schema.Array(FileDiff.Info),
   replacements: Schema.Number,
   syncInput: Schema.optional(Input),
+  // 模型回执与结构化结果共用同一跳写事实，不从 formatter 后的 diff 猜测无操作数量。
+  warning: Schema.optional(Schema.String),
 })
 export type Output = typeof Output.Type
 
@@ -83,6 +85,8 @@ export const toModelOutput = (output: Output) =>
     "```",
     // 最终文件 diff 保持完整；LSP 固定停用，不能把成功当作诊断通过。
     "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
+    // 通用 owner 默认保留 head+tail，末尾 warning 不需要复制 V1 的 head 截断补偿。
+    ...(output.warning ? ["", output.warning] : []),
   ].join("\n")
 
 /** Deferred V2 edit behavior and UX integrations remain visible at the model-facing seam. */
@@ -155,11 +159,7 @@ const layer = Layer.effectDiscard(
                     message: "edits must contain at least one replacement.",
                   })
                 }
-                if (input.edits.some(edit => edit.oldString === edit.newString)) {
-                  return yield* new ToolFailure({
-                    message: "No changes to apply: oldString and newString are identical.",
-                  })
-                }
+                // 与 V1 一样先定位/校验，混批中的 identical 条目由共享引擎跳写。
                 if (input.edits.some(edit => edit.oldString === "")) {
                   return yield* new ToolFailure({
                     message: "oldString must not be empty. Use write to create or overwrite a file.",
@@ -235,7 +235,9 @@ const layer = Layer.effectDiscard(
                     })
                   },
                 })
-                const replacements = editsLF.reduce((count, edit) => count + (edit.replaceAll ? EditApply.countOccurrences(baseLF, edit.oldString) : 1), 0)
+                // 替换次数只统计真正写入项；跳写计数按 LF 提交形态，与引擎和历史一致。
+                const unchangedEntries = editsLF.filter(edit => edit.oldString === edit.newString).length
+                const replacements = editsLF.reduce((count, edit) => edit.oldString === edit.newString ? count : count + (edit.replaceAll ? EditApply.countOccurrences(baseLF, edit.oldString) : 1), 0)
                 const replaced = convertToLineEnding(applied.contentNew, ending)
                 const diffOld = normalizeLineEndings(source.text)
                 const diffNew = normalizeLineEndings(replaced)
@@ -272,6 +274,10 @@ const layer = Layer.effectDiscard(
                     },
                   ],
                   replacements,
+                  // 此处只能由整批有真实变化的成功路径抵达，warning 不会把全 no-op 伪装成成功。
+                  ...(unchangedEntries > 0 ? {
+                    warning: `Warning: ${unchangedEntries} of ${input.edits.length} edit(s) were no-ops (oldString equals newString) and did not change the file.`,
+                  } : {}),
                   // 仅保存实际旧 needle；非创建编辑不猜测 formatter 后的局部新 needle。
                   syncInput: { path: input.path, edits: applied.syncEdits.map(edit => ({
                     oldString: convertToLineEnding(edit.oldString, ending),
