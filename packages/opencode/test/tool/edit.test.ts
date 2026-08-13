@@ -67,6 +67,22 @@ const itFormatted = testEffect(
   ),
 )
 
+// [local-smark] 小 limits + pass-through 截断：隔离 wrapper 截断，迫使 edit 组装段自身
+// 遵守 limits 预算（真实 wrapper 会按同一 limits 做 head 截断，丢末尾 warning）。
+const itTruncated = testEffect(
+  Layer.mergeAll(
+    LSP.defaultLayer,
+    AppFileSystem.defaultLayer,
+    Format.defaultLayer,
+    Bus.layer,
+    Layer.mock(Truncate.Service, {
+      limits: () => Effect.succeed({ maxLines: 20, maxBytes: 1024 }),
+      output: (text: string) => Effect.succeed({ content: text, truncated: false }),
+    }),
+    Agent.defaultLayer,
+  ),
+)
+
 const init = Effect.fn("EditToolTest.init")(function* () {
   const info = yield* EditTool
   return yield* info.init()
@@ -347,11 +363,232 @@ describe("tool.edit", () => {
       Effect.gen(function* () {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "file.txt")
-        yield* put(filepath, "content")
+        // oldString 必须真实存在于文件中：命中后跳写，由批级内容等值门报 identical。
+        yield* put(filepath, "same")
 
         expect((yield* fail({ filePath: filepath, oldString: "same", newString: "same" })).message).toContain(
           "identical",
         )
+      }),
+    )
+
+    // [local-smark] 混入 identical 条目的多 edit batch 必须成功：只报 warning，不整批失败。
+    it.instance("succeeds with warning when one of multiple edits is identical", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "file.txt")
+        yield* put(filepath, "a\nb\nc")
+
+        const result = yield* run({
+          filePath: filepath,
+          edits: [
+            { oldString: "a", newString: "x" },
+            { oldString: "b", newString: "y" },
+            { oldString: "c", newString: "c" },
+          ],
+        })
+
+        expect(result.output).toContain("Edit applied successfully")
+        expect(result.output).toContain("Warning: 1 of 3 edit(s) were no-ops")
+        expect(yield* load(filepath)).toBe("x\ny\nc")
+      }),
+    )
+
+    // [local-smark] 归一化漂移角：identical 条目仅能经 Unicode 折叠命中时也必须零写入。
+    // 该 slice 在改动前也通过（逐条预检同样报 identical）；它锁定的是防止 R1 式实现
+    // （apply identical → preserve 重写擦洗 en-dash → 成功 + 虚假 warning）滚动回来。
+    it.instance("identical single edit matching only via normalization fails without writes", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "file.txt")
+        yield* put(filepath, "x\nfoo \u2013 bar\n")
+
+        const error = yield* fail({ filePath: filepath, oldString: "foo - bar", newString: "foo - bar" })
+
+        expect(error.message).toContain("identical")
+        expect(yield* loadRaw(filepath)).toBe("x\nfoo \u2013 bar\n")
+      }),
+    )
+
+    // [local-smark] 混合 batch：真实变化正常应用，归一化命中的 identical 条目所在行字节保持原样。
+    it.instance("mixed batch keeps drift line bytes untouched", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "file.txt")
+        yield* put(filepath, "x\nfoo \u2013 bar\n")
+
+        const result = yield* run({
+          filePath: filepath,
+          edits: [
+            { oldString: "x", newString: "y" },
+            { oldString: "foo - bar", newString: "foo - bar" },
+          ],
+        })
+
+        expect(result.output).toContain("Warning: 1 of 2 edit(s) were no-ops")
+        expect(yield* loadRaw(filepath)).toBe("y\nfoo \u2013 bar\n")
+      }),
+    )
+
+    // [local-smark] B-01：被跳写 identical 条目的持久化历史必须保持提交形态；
+    // 否则 resolveCompletedToolInput 覆写 state.input 后，模型看到的输入与
+    // output 的 "oldString equals newString" warning 自相矛盾。
+    it.instance("keeps identical form in synced input for skipped identical edits", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "file.txt")
+        yield* put(filepath, "x\nfoo \u2013 bar\n")
+
+        const result = yield* run({
+          filePath: filepath,
+          edits: [
+            { oldString: "x", newString: "y" },
+            { oldString: "foo - bar", newString: "foo - bar" },
+          ],
+        })
+
+        expect(result.metadata._syncInput).toEqual({
+          filePath: filepath,
+          edits: [
+            { oldString: "x", newString: "y" },
+            { oldString: "foo - bar", newString: "foo - bar" },
+          ],
+        })
+        // processor 消费面：公开回写契约直接验证，不重复 edit.ts 内部拼装逻辑。
+        const resolved = resolveCompletedToolInput(
+          { filePath: filepath, edits: [] as unknown[] },
+          { _syncInput: result.metadata._syncInput },
+        )
+        expect(resolved.edits).toEqual([
+          { oldString: "x", newString: "y" },
+          { oldString: "foo - bar", newString: "foo - bar" },
+        ])
+      }),
+    )
+
+    // [local-smark] R-01：成功 output 用最终 diff 形态逐条说明实际变化（-/+ 行），
+    // identical 条目无字节变化故不出现；模型可见通道只有 output。
+    it.instance("output lists actual changes as final diff lines", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "file.txt")
+        yield* put(filepath, "a\nb\nc")
+
+        const result = yield* run({
+          filePath: filepath,
+          edits: [
+            { oldString: "a", newString: "x" },
+            { oldString: "b", newString: "y" },
+            { oldString: "c", newString: "c" },
+          ],
+        })
+
+        expect(result.output).toContain("Changed:")
+        expect(result.output).toContain("-a")
+        expect(result.output).toContain("+x")
+        expect(result.output).toContain("-b")
+        expect(result.output).toContain("+y")
+        expect(result.output).not.toContain("-c")
+        expect(result.output).not.toContain("+c")
+        expect(result.output).toContain("Warning: 1 of 3 edit(s) were no-ops")
+      }),
+    )
+
+    // [local-smark] 归一化命中的真实编辑在 diff 行里展示文件实际 old 文本
+    // （归一化差异是模型重构文件状态时最缺的信息）。
+    it.instance("output lists actual matched text for normalized edits", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "file.txt")
+        yield* put(filepath, "x\nfoo \u2013 bar\n")
+
+        const result = yield* run({
+          filePath: filepath,
+          edits: [{ oldString: "foo - bar", newString: "foo - bat" }],
+        })
+
+        expect(result.output).toContain("-foo \u2013 bar")
+        expect(result.output).toContain("+foo - bat")
+      }),
+    )
+
+    // [local-smark] create/overwrite 也必须说明变化（R-01 无 create 例外），
+    // 且权限请求的 metadata.diff 预计算保持非空（审批预览不回归）。
+    it.instance("create output lists changes and keeps permission diff", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "new.txt")
+        const asked: Array<{ metadata?: Record<string, unknown> }> = []
+        const captureCtx: Tool.Context = {
+          ...ctx,
+          ask: (request) => {
+            asked.push(request)
+            return Effect.void
+          },
+        }
+
+        const result = yield* run({ filePath: filepath, oldString: "", newString: "line1\nline2\n" }, captureCtx)
+
+        expect(result.output).toContain("Changed:")
+        expect(result.output).toContain("+line1")
+        expect(asked[0]?.metadata?.diff).toContain("+line1")
+      }),
+    )
+
+    // [local-smark] formatter 后真值：Changed 段必须反映最终磁盘内容（mock 追加尾换行）。
+    itFormatted.instance("output reflects post-formatter content for non-create edits", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "fmt.txt")
+        yield* put(filepath, "a\nb")
+
+        const result = yield* run({ filePath: filepath, oldString: "a", newString: "d" })
+
+        expect(result.output).toContain("-a")
+        expect(result.output).toContain("+d")
+        expect(yield* loadRaw(filepath)).toBe("d\nb\n")
+      }),
+    )
+
+    // [local-smark] 预算保护：超长 diff 时 output 仍 ≤ limits 且末尾 warning 存在
+    // （真实 wrapper 对同一 limits 做 head 截断会丢尾部 warning，edit 必须自限）。
+    itTruncated.instance("keeps trailing warning within output size limit", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "big.txt")
+        const long = "x".repeat(2000)
+        yield* put(filepath, `${long}\nb\nc`)
+
+        const result = yield* run({
+          filePath: filepath,
+          edits: [
+            { oldString: long, newString: `${long}y` },
+            { oldString: "c", newString: "c" },
+          ],
+        })
+
+        expect(result.output).toContain("Warning: 1 of 2 edit(s) were no-ops")
+        expect(Buffer.byteLength(result.output, "utf-8")).toBeLessThanOrEqual(1024)
+      }),
+    )
+
+    // [local-smark] identical 条目仍须通过 locate 校验：垃圾 oldString 不得因"无操作"而静默通过。
+    it.instance("still validates oldString of identical edits", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "file.txt")
+        yield* put(filepath, "a\nb\nc")
+
+        const error = yield* fail({
+          filePath: filepath,
+          edits: [
+            { oldString: "a", newString: "x" },
+            { oldString: "not in file", newString: "not in file" },
+          ],
+        })
+
+        expect(error).toBeInstanceOf(Error)
+        expect(error.message).toContain("Could not find edits[1]")
       }),
     )
 

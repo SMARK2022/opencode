@@ -50,7 +50,9 @@ type LineSpan = { start: number; end: number }
 // 10. newString 禁止再走 normalizeForMatch，避免改写用户意图插入文本。
 // 11. hybrid 连字符：字面一次、归一化两次 → 无 replaceAll 必歧义失败。
 // 12. 重叠 range 在 reverse 前拒绝，避免部分写盘。
-// 13. no-op（content 不变）视为错误，逼迫模型检查输入。
+// 13. identical（oldString === newString）条目校验后跳写，不推入 allRanges；
+//     唯一 no-op 门是批级内容等值（505-511），逐条不再拒绝。
+//     其 syncEdits 历史为提交形态（零写入即无命中切片可记），真实条目沿用 actualOld。
 // 14. 兼容 replace() 仅允许 length-1 委托，禁止复制粘贴第二实现。
 
 
@@ -411,9 +413,6 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
           : `edits[${i}].oldString is empty after normalization in ${path}.`,
       )
     }
-    if (edits[i].oldString === edits[i].newString) {
-      throw new Error("No changes to apply: oldString and newString are identical.")
-    }
   }
 
   // 是否需要整批 elevation：任一条 exact 找不到、或归一化出现次数与字面次数分歧（hybrid dash 等）
@@ -468,17 +467,26 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
       )
     }
 
-    for (const range of ranges) {
-      allRanges.push({
-        matchIndex: range.matchIndex,
-        matchLength: range.matchLength,
-        newText: edit.newString,
-        editIndex: i,
-      })
+    // identical 条目已过 locate/唯一性校验，但跳写：归一化漂移下 preserve 重写会
+    // 擦洗触碰行字节，违背"逐条无操作"语义与 warning 真实性，故不推入 allRanges。
+    if (edit.oldString !== edit.newString) {
+      for (const range of ranges) {
+        allRanges.push({
+          matchIndex: range.matchIndex,
+          matchLength: range.matchLength,
+          newText: edit.newString,
+          editIndex: i,
+        })
+      }
     }
 
     syncEdits.push({
-      oldString: actualOldFromRanges(content, replacementBase, usedNormalized, ranges, edit.oldString),
+      // identical 条目零写入、无命中切片可回填历史：oldString 保持提交形态，
+      // 使 _syncInput/warning/模型输入三者一致；真实条目沿用 actualOld 真值。
+      oldString:
+        edit.oldString === edit.newString
+          ? edit.oldString
+          : actualOldFromRanges(content, replacementBase, usedNormalized, ranges, edit.oldString),
       newString: edit.newString,
       ...(edit.replaceAll === true ? { replaceAll: true } : {}),
     })
