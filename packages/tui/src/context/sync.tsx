@@ -111,10 +111,23 @@ function search<T>(items: T[], target: string, key: (item: T) => string) {
 }
 
 function compareMessage(a: Message, b: Message) {
-  return a.time.created - b.time.created || a.id.localeCompare(b.id)
+  // 与SQL分页同序；caller ID不局限于ASCII，不能以locale或UTF-16码元序代替UTF-8 BINARY。
+  return a.time.created - b.time.created || Buffer.compare(Buffer.from(a.id, "utf8"), Buffer.from(b.id, "utf8"))
 }
 
-const messageKey = (message: Message) => message.time.created + message.id
+// snapshot与事件二分共用比较器，时间必须按数字比较，不能拼成长度变化的字符串key。
+function searchMessage(items: Message[], target: Message) {
+  let left = 0
+  let right = items.length - 1
+  while (left <= right) {
+    const middle = Math.floor((left + right) / 2)
+    const order = compareMessage(items[middle], target)
+    if (order === 0) return { found: true, index: middle }
+    if (order < 0) left = middle + 1
+    else right = middle - 1
+  }
+  return { found: false, index: left }
+}
 
 export const {
   context: SyncContext,
@@ -863,7 +876,7 @@ export const {
             setStore("message", event.properties.info.sessionID, [event.properties.info])
             break
           }
-          const result = search(messages, messageKey(event.properties.info), messageKey)
+          const result = searchMessage(messages, event.properties.info)
           if (result.found) {
             setStore("message", event.properties.info.sessionID, result.index, reconcile(event.properties.info))
             break
