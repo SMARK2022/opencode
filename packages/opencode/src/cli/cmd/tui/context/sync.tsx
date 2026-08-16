@@ -53,6 +53,21 @@ const TUI_DIFF_TOTAL_FILES = "x-opencode-tui-total-files"
 const TUI_DIFF_TOTAL_ADDITIONS = "x-opencode-tui-total-additions"
 const TUI_DIFF_TOTAL_DELETIONS = "x-opencode-tui-total-deletions"
 
+function searchMessage(messages: readonly Message[], target: Message) {
+  let left = 0
+  let right = messages.length
+  // TUI snapshot 的权威顺序是持久创建时间；同毫秒 ID 必须复刻 SQLite BINARY 的 UTF-8 byte order。
+  // locale/UTF-16 顺序都无法覆盖合法 caller ID；lower-bound 仍让三个生命周期分支共享 O(log n) 语义。
+  while (left < right) {
+    const middle = Math.floor((left + right) / 2)
+    const current = messages[middle]
+    const order = current.time.created - target.time.created || Buffer.compare(Buffer.from(current.id), Buffer.from(target.id))
+    if (order < 0) left = middle + 1
+    else right = middle
+  }
+  return { found: messages[left]?.id === target.id, index: left }
+}
+
 function projectTuiDiff(diffs: readonly Snapshot.FileDiff[]) {
   // SSE 仍携带共享完整事件；TUI reducer 是不破坏 share consumer 的首个可收窄 owner。
   // HTTP body 已由 daemon 截断，但再次应用同一投影可保证测试 transport 和未来 caller 都不能灌回 patch。
@@ -176,6 +191,17 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     const route = useRoute()
 
     const fullSyncedSessions = new Set<string>()
+    // remove event 只有 ID，且公开 caller 可提供非单调 ID；索引保存已有 Message 的 chronology key。
+    // Map 只引用 bounded store 中的对象，不复制正文，也不引入 ID 排序或失败后的扫描路径。
+    const messageByID = new Map<string, Map<string, Message>>()
+    const indexMessage = (message: Message) => {
+      // update 只替换同 ID 的最新完整 Info；生产者保证 time.created 是不可变的持久创建时间。
+      // event-first 与 snapshot 两种入口共用此索引形状，remove 不需要判断 Message 来自哪条 transport。
+      const index = messageByID.get(message.sessionID)
+      if (index) return index.set(message.id, message)
+      messageByID.set(message.sessionID, new Map([[message.id, message]]))
+    }
+    const unindexMessage = (message: Message) => messageByID.get(message.sessionID)?.delete(message.id)
     // [local-smark] daemon multi-instance workspace tracking
     let syncedWorkspace = project.workspace.current()
     let connectedOnce = false
@@ -824,8 +850,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             const messages = store.message[info.sessionID]
             // 同Project事件可能属于未加载Session；本地没有可删除的投影时必须保持消费链继续。
             if (!messages) break
-            const result = Binary.search(messages, info.id, (m) => m.id)
+            // hidden event 仍携带原创建时间，必须与普通 update 共用 chronology locator，不能退回 ID 查找。
+            const result = searchMessage(messages, info)
             if (result.found) {
+              unindexMessage(info)
               setStore(
                 "message",
                 info.sessionID,
@@ -838,14 +866,19 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           }
           const messages = store.message[info.sessionID]
           if (!messages) {
+            // 首条 SSE 会直接建立数组；先登记索引才能保证紧随其后的 ID-only remove 使用同一投影事实。
+            indexMessage(info)
             setStore("message", info.sessionID, [info])
             break
           }
-          const result = Binary.search(messages, info.id, (m) => m.id)
+          const result = searchMessage(messages, info)
           if (result.found) {
+            // reconcile 与索引替换属于同一个同步事件边界，后续 remove 只能看到这次 update 的 chronology key。
+            indexMessage(info)
             setStore("message", info.sessionID, result.index, reconcile(info))
             break
           }
+          indexMessage(info)
           setStore(
             "message",
             info.sessionID,
@@ -856,6 +889,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           const updated = store.message[info.sessionID]
           if (updated.length > 300) {
             const oldest = updated[0]
+            // 300 条窗口删除 chronology 首项；索引必须在同一事件调用栈移除相同 Message。
+            unindexMessage(oldest)
             batch(() => {
               setStore(
                 "message",
@@ -878,8 +913,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           const messages = store.message[event.properties.sessionID]
           // daemon的删除事实仍有效，但未加载Session的TUI投影只能安全地no-op。
           if (!messages) break
-          const result = Binary.search(messages, event.properties.messageID, (m) => m.id)
+          // ID-only event 先从同一 bounded 投影取回 chronology key；caller ID 本身不承诺任何时间顺序。
+          // 索引 miss 保持既有 no-op，不能再用线性扫描或纯 ID 二分制造第二套成功路径。
+          const target = messageByID.get(event.properties.sessionID)?.get(event.properties.messageID)
+          if (!target) break
+          const result = searchMessage(messages, target)
           if (result.found) {
+            unindexMessage(target)
             setStore(
               "message",
               event.properties.sessionID,
@@ -1138,6 +1178,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             sdk.client.session.todo({ sessionID }),
             sdk.client.session.status({ workspace: project.workspace.current() }),
           ])
+          // 同一份 infos 同时提交 store 和索引，避免两次 projection 对 hidden/window 范围产生分歧。
+          const infos = (messages.data ?? []).map((message) => message.info)
           // [local-smark] goal fetch：非致命，失败不影响 session sync
           // SDK 未重新生成 goal 方法，直接用 fetch 调用 HTTP 端点
           // GET 请求由 sdk.fetch 的 rewrite 拦截器自动添加 directory query param
@@ -1156,9 +1198,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
               if (match.found) draft.session[match.index] = session.data!
               if (!match.found) draft.session.splice(match.index, 0, session.data!)
               draft.todo[sessionID] = todo.data ?? []
-              const infos: (typeof draft.message)[string] = []
               for (const message of messages.data ?? []) {
-                infos.push(message.info)
                 // HTTP 快照合并：DB 在 streaming 期间 text="" ，
                 // mergeLiveParts 保留本地已通过 delta 累积的长文本
                 draft.part[message.info.id] = mergeLiveParts(draft.part[message.info.id], message.parts)
@@ -1166,6 +1206,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
               draft.message[sessionID] = infos
             }),
           )
+          // force sync 是整页 authoritative replacement；重建而非增量合并可清除已不在窗口内的旧 key。
+          messageByID.set(sessionID, new Map(infos.map((message) => [message.id, message])))
           setStore("session_status", reconcile(status.data ?? {}))
           // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。
           // 这对子会话尤其关键：进入子会话前 delta 全部被缓冲（store 中没有 message），

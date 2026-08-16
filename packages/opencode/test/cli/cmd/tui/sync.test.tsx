@@ -6,7 +6,16 @@ import { tmpdir } from "../../../fixture/fixture"
 import { createTuiPluginApi } from "../../../fixture/tui-plugin"
 import { directory, json, mount, wait, worktree } from "./sync-fixture"
 import type { TuiSlotPlugin } from "@opencode-ai/plugin/tui"
-import type { AssistantMessage, GlobalEvent, Part, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
+import type {
+  AssistantMessage,
+  GlobalEvent,
+  Message,
+  Part,
+  PermissionRequest,
+  QuestionRequest,
+  ToolPart,
+  UserMessage,
+} from "@opencode-ai/sdk/v2"
 import type { JSX } from "solid-js"
 import { internalTuiPlugins } from "@/cli/cmd/tui/plugin/internal"
 
@@ -115,6 +124,17 @@ function assistantMessage(): AssistantMessage {
   }
 }
 
+function userMessage(id: string, created: number): UserMessage {
+  return {
+    id,
+    sessionID: "ses_1",
+    role: "user",
+    time: { created },
+    agent: "build",
+    model: { providerID: "provider", modelID: "model" },
+  }
+}
+
 function pendingToolPart(id = "part_1", callID = "call_1"): ToolPart {
   return {
     id,
@@ -127,11 +147,23 @@ function pendingToolPart(id = "part_1", callID = "call_1"): ToolPart {
   }
 }
 
-function messageEvent(info: AssistantMessage): GlobalEvent {
+function messageEvent(info: Message): GlobalEvent {
   return {
     directory,
     project: "proj_test",
     payload: { id: "evt_message", type: "message.updated", properties: { sessionID: info.sessionID, info } },
+  }
+}
+
+function messageRemovedEvent(messageID: string): GlobalEvent {
+  return {
+    directory,
+    project: "proj_test",
+    payload: {
+      id: `evt_removed_${messageID}`,
+      type: "message.removed",
+      properties: { sessionID: "ses_1", messageID },
+    },
   }
 }
 
@@ -1377,6 +1409,146 @@ describe("tui sync", () => {
       // 缓冲的 delta 被 replay，text 恢复为 "ASDFGHJKL"（而非 part.updated 的空文本）
       expect(sync.data.part.msg_1?.[0]?.type).toBe("text")
       if (sync.data.part.msg_1?.[0]?.type === "text") expect(sync.data.part.msg_1[0].text).toBe("ASDFGHJKL")
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("keeps Message lifecycle chronological across ID rollover", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    // 前180条仍在回绕前的 lexical-high 区间，后120条已进入 lexical-low；
+    // worked times 独立规定 chronology，测试不能借 ID 排序生成 expected。
+    const history = Array.from({ length: 300 }, (_, index) =>
+      userMessage(
+        index < 180 ? `msg_ffff${String(index).padStart(8, "0")}` : `msg_0000${String(index).padStart(8, "0")}`,
+        index + 1,
+      ),
+    )
+    // 与 snapshot 末条同毫秒，较大的 ID 是服务端合同规定的稳定 tie-break。
+    const target = userMessage("msg_000100000001", 300)
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === "/session/ses_1")
+        return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
+      if (url.pathname === "/session/ses_1/message" || url.pathname === "/session/ses_1/messages")
+        return json(history.map((info) => ({ info, parts: [] })))
+      if (url.pathname === "/session/ses_1/todo") return json([])
+      if (url.pathname === "/session/ses_1/diff") return json([])
+    })
+
+    try {
+      await sync.session.sync("ses_1", { force: true })
+      emit(messageEvent(target))
+      // 后续公开事件是 reducer 队列边界；它生效后即可断言前一条 Message 事件，避免时间等待竞态。
+      emit(branchEvent("rollover-inserted"))
+      await wait(() => sync.data.vcs?.branch === "rollover-inserted")
+
+      // 300 条边界的 worked result：旧首项必须离开，新项必须占据 chronology 末尾。
+      // 两端断言共同防止“只保留目标但裁错另一条 Message”的近似修复。
+      expect(sync.data.message.ses_1).toHaveLength(300)
+      expect(sync.data.message.ses_1?.[0]?.id).toBe("msg_ffff00000001")
+      expect(sync.data.message.ses_1?.at(-1)?.id).toBe(target.id)
+
+      emit(messageEvent({ ...target, agent: "updated" }))
+      emit(branchEvent("rollover-updated"))
+      await wait(() => sync.data.vcs?.branch === "rollover-updated")
+      // 同一 Message 必须原位 reconcile；错误 locator 会留下重复 ID 或更新旧位置。
+      expect(sync.data.message.ses_1?.filter((message) => message.id === target.id)).toEqual([
+        expect.objectContaining({ agent: "updated" }),
+      ])
+
+      emit(messageEvent({ ...target, hidden: { time: 301, reason: "undo" } }))
+      emit(branchEvent("rollover-hidden"))
+      await wait(() => sync.data.vcs?.branch === "rollover-hidden")
+      // hidden 紧跟同 ID update，能同时证明索引替换没有制造旧 key 或重复 Message。
+      expect(sync.data.message.ses_1?.some((message) => message.id === target.id)).toBe(false)
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("removes arbitrary Message IDs through chronology index", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const { app, emit, sync } = await mount()
+
+    try {
+      // 不走 HTTP snapshot：首条 event 必须同时创建 Message[] 与 ID 索引。
+      // 后续 ID 故意形成 m,z,a,y，证明公开 caller ID 既非全局升序也非单次旋转数组。
+      const messages = [
+        userMessage("msg_m", 1),
+        userMessage("msg_z", 2),
+        userMessage("msg_a", 3),
+        userMessage("msg_y", 4),
+      ]
+      for (const message of messages) emit(messageEvent(message))
+      emit(branchEvent("arbitrary-created"))
+      await wait(() => sync.data.vcs?.branch === "arbitrary-created")
+      // 此顺序只能由 time.created 得出；若实现悄悄恢复 ID sort，remove 测试会失去判别力。
+      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_m", "msg_z", "msg_a", "msg_y"])
+
+      emit(messageRemovedEvent("msg_y"))
+      emit(branchEvent("arbitrary-removed"))
+      await wait(() => sync.data.vcs?.branch === "arbitrary-removed")
+      // remove 只有 ID；正确路径必须从首条 create 建立的索引取回 time.created 后复用 chronology 二分。
+      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_m", "msg_z", "msg_a"])
+
+      emit(messageRemovedEvent("msg_missing"))
+      emit(branchEvent("arbitrary-missing"))
+      await wait(() => sync.data.vcs?.branch === "arbitrary-missing")
+      // missing ID 是 contracted no-op；它不能触发 scan、重排或删除邻近 chronology 项。
+      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_m", "msg_z", "msg_a"])
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("matches SQLite BINARY order for same-millisecond Message IDs", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    // SQLite BINARY 比较 UTF-8 bytes：大写 B(0x42) 必须排在小写 a(0x61) 之前。
+    // 两条 time.created 相同，确保测试只对 tie-break 敏感，不让时间主键掩盖 collation 分歧。
+    const upper = userMessage("msg_B", 100)
+    const lower = userMessage("msg_a", 100)
+    const { app, emit, sync } = await mount((url) => {
+      if (url.pathname === "/session/ses_1")
+        return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
+      if (url.pathname === "/session/ses_1/message" || url.pathname === "/session/ses_1/messages")
+        return json([upper, lower].map((info) => ({ info, parts: [] })))
+      if (url.pathname === "/session/ses_1/todo") return json([])
+      if (url.pathname === "/session/ses_1/diff") return json([])
+    })
+
+    try {
+      await sync.session.sync("ses_1", { force: true })
+      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_B", "msg_a"])
+
+      emit(messageEvent({ ...upper, agent: "binary-updated" }))
+      emit(branchEvent("binary-updated"))
+      await wait(() => sync.data.vcs?.branch === "binary-updated")
+      // update 必须命中 snapshot 原位；locale 顺序不一致会在末尾插入第二条 msg_B。
+      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_B", "msg_a"])
+      expect(sync.data.message.ses_1?.[0]).toMatchObject({ agent: "binary-updated" })
+
+      emit(messageEvent({ ...upper, hidden: { time: 101, reason: "undo" } }))
+      emit(branchEvent("binary-hidden"))
+      await wait(() => sync.data.vcs?.branch === "binary-hidden")
+      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_a"])
+
+      emit(messageRemovedEvent(lower.id))
+      emit(branchEvent("binary-removed"))
+      await wait(() => sync.data.vcs?.branch === "binary-removed")
+      // explicit remove 复用同一 locator，证明 ID index 没有绕过 BINARY chronology 前提。
+      expect(sync.data.message.ses_1).toEqual([])
     } finally {
       app.renderer.destroy()
       Global.Path.state = previous
