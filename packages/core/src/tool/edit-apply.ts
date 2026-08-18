@@ -1,4 +1,5 @@
 export * as EditApply from "./edit-apply"
+import { createHash } from "crypto"
 import { normalizeForMatch } from "../util/normalize-for-match"
 export { normalizeForMatch } from "../util/normalize-for-match"
 
@@ -30,6 +31,8 @@ export type ApplyEditsResult = {
   usedNormalized: boolean
   /** 历史真值：每条 oldString 为 pre-edit baseLF 上的连续 needle，不是 preserve 整行块。 */
   syncEdits: EditReplacement[]
+  /** 只有实际写入条目的 normalized disk slice 与模型 LF oldString 不同时才记录。 */
+  normalizedMismatchIndices: number[]
 }
 
 type TextReplacement = {
@@ -343,8 +346,8 @@ function actualOldFromRanges(
   usedNormalized: boolean,
   ranges: Array<{ matchIndex: number; matchLength: number }>,
   modelOld: string,
-): string {
-  if (ranges.length === 0) return modelOld
+): { oldString: string; mismatch: boolean } {
+  if (ranges.length === 0) return { oldString: modelOld, mismatch: false }
   const slices = ranges.map((range) => {
     if (!usedNormalized) {
       return baseLF.slice(range.matchIndex, range.matchIndex + range.matchLength)
@@ -354,9 +357,12 @@ function actualOldFromRanges(
     const end = map[range.matchIndex + range.matchLength] ?? baseLF.length
     return baseLF.slice(start, end)
   })
-  if (slices.every((s) => s === slices[0])) return slices[0]
+  // 同构 slices 可以回填一个 actual oldString；异构 slices 只能保留模型形态，但两者都要保留 mismatch。
+  const mismatch = slices.some((slice) => slice !== modelOld)
+  if (slices.every((slice) => slice === slices[0])) return { oldString: slices[0], mismatch }
   // replaceAll 下 en-dash/ASCII 等异构实际切片无法塞进单个 oldString 字段
-  return modelOld
+  // mismatch 必须在 representational fallback 前保留，否则历史字段回退会抹掉真实 normalized rewrite。
+  return { oldString: modelOld, mismatch }
 }
 
 /**
@@ -409,6 +415,8 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
   const replacementBase = usedNormalized ? normalizeForMatch(content) : content
   const allRanges: TextReplacement[] = []
   const syncEdits: EditReplacement[] = []
+  const normalizedMismatchIndices: number[] = []
+  // mismatch 索引与 syncEdits 同源生成，调用方无需重新执行 normalize matcher 或猜测 actual slice。
 
   // #521：整批共用一个 pre-edit replacementBase，保证失败 index 对应模型提交的原始顺序，而不是增量结果。
   // 诊断因此可以精确绑定单条 edit，同时维持原有 reverse apply 和原子失败边界。
@@ -467,13 +475,18 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
       }
     }
 
+    const actualOld =
+      edit.oldString === edit.newString
+        ? { oldString: edit.oldString, mismatch: false }
+        : actualOldFromRanges(content, replacementBase, usedNormalized, ranges, edit.oldString)
+    // identical 条目已被跳写，不能仅因 located slice 漂移就伪装成 history truth rewrite。
+    // 该判断放在 locate/唯一性之后，既保留输入校验，又只记录真正进入 replacement 的条目。
+    if (actualOld.mismatch) normalizedMismatchIndices.push(i)
+
     syncEdits.push({
       // identical 条目零写入、无命中切片可回填历史：oldString 保持提交形态，
       // 使 _syncInput/warning/模型输入三者一致；真实条目沿用 actualOld 真值。
-      oldString:
-        edit.oldString === edit.newString
-          ? edit.oldString
-          : actualOldFromRanges(content, replacementBase, usedNormalized, ranges, edit.oldString),
+      oldString: actualOld.oldString,
       newString: edit.newString,
       ...(edit.replaceAll === true ? { replaceAll: true } : {}),
     })
@@ -505,7 +518,59 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
     )
   }
 
-  return { contentNew, usedNormalized, syncEdits }
+  return { contentNew, usedNormalized, syncEdits, normalizedMismatchIndices }
+}
+
+// 只记录matcher确认的真实覆写；哈希对象是模型提交的LF needle，两代不能各自猜测命中内容。
+export function provenance(edits: EditReplacement[], indices: readonly number[]) {
+  return indices.flatMap(editIndex => {
+    const original = edits[editIndex]
+    if (!original) return []
+    return [{ editIndex, original: {
+      byteLength: Buffer.byteLength(original.oldString, "utf-8"),
+      sha256: createHash("sha256").update(original.oldString, "utf-8").digest("hex"),
+    } }]
+  })
+}
+
+export function warningTail(input: {
+  rewrites: ReadonlyArray<ReturnType<typeof provenance>[number]>
+  unchanged: number
+  total: number
+  maxBytes: number
+  maxLines: number
+  channel: "metadata" | "structured"
+}) {
+  const lines: string[] = []
+  // 两维预算检查同一完整串，任何SHA行都不能被切半；字段通道由真正持久化owner明确提供。
+  const fits = (value: string[]) => {
+    const text = `\n\n${value.join("\n")}`
+    return Buffer.byteLength(text, "utf-8") <= input.maxBytes && text.split("\n").length - 1 <= input.maxLines
+  }
+  const noOp = `Warning: ${input.unchanged} of ${input.total} edit(s) were no-ops (oldString equals newString) and did not change the file.`
+  if (input.unchanged > 0 && fits([noOp])) lines.push(noOp)
+  const header = "Warning: normalized oldString truth rewrites were recorded:"
+  if (input.rewrites.length > 0 && fits([...lines, header])) {
+    lines.push(header)
+    const shown: string[] = []
+    const marker = (count: number) => `- ... ${count} more rewrite fingerprint(s) stored in ${input.channel}.inputProvenance`
+    for (const rewrite of input.rewrites) {
+      const line = `- edits[${rewrite.editIndex}]: original=${rewrite.original.byteLength} UTF-8 bytes sha256=${rewrite.original.sha256}`
+      const remaining = input.rewrites.length - shown.length - 1
+      // 先为真实余量保留省略行，否则最后一条指纹可能挤掉全部省略事实。
+      if (!fits([...lines, ...shown, line, ...(remaining ? [marker(remaining)] : [])])) break
+      shown.push(line)
+    }
+    let omitted = input.rewrites.length - shown.length
+    while (shown.length > 0 && omitted > 0 && !fits([...lines, ...shown, marker(omitted)])) {
+      // 回收一整行必须同时增加省略计数；完整取证数组不受展示预算影响。
+      shown.pop()
+      omitted++
+    }
+    lines.push(...shown)
+    if (omitted > 0 && fits([...lines, marker(omitted)])) lines.push(marker(omitted))
+  }
+  return lines.length ? `\n\n${lines.join("\n")}` : ""
 }
 
 /**

@@ -19,6 +19,7 @@ import { Location } from "../location"
 import { SessionStore } from "../session/store"
 import { PermissionV2 } from "../permission"
 import { ToolRegistry } from "./registry"
+import { ToolOutputStore } from "../tool-output-store"
 import { closestMatch } from "./edit-excerpt"
 import { EditApply } from "./edit-apply"
 import { Tool } from "./tool"
@@ -63,6 +64,11 @@ export const Output = Schema.Struct({
   syncInput: Schema.optional(Input),
   // 模型回执与结构化结果共用同一跳写事实，不从 formatter 后的 diff 猜测无操作数量。
   warning: Schema.optional(Schema.String),
+  // 与V1 public metadata同义；完整取证随Native structured持久化，不只放在有限模型预览。
+  inputProvenance: Schema.optional(Schema.Struct({ rewrites: Schema.Array(Schema.Struct({
+    editIndex: Schema.Number,
+    original: Schema.Struct({ byteLength: Schema.Number, sha256: Schema.String }),
+  })) })),
 })
 export type Output = typeof Output.Type
 
@@ -105,6 +111,7 @@ const layer = Layer.effectDiscard(
     const format = yield* Format.Service
     const location = yield* Location.Service
     const sessions = yield* SessionStore.Service
+    const outputStore = yield* ToolOutputStore.Service
 
     yield* tools
       .register({
@@ -258,6 +265,11 @@ const layer = Layer.effectDiscard(
                     format: format.file,
                   }),
                 )
+                const rewrites = EditApply.provenance(editsLF, applied.normalizedMismatchIndices)
+                const limits = yield* outputStore.limits()
+                // 限制尾段在通用head+tail的保留范围内，默认仍为2KiB/10行；不改变通用owner。
+                const warning = EditApply.warningTail({ rewrites, unchanged: unchangedEntries, total: input.edits.length, maxBytes: Math.min(2048, Math.floor(limits.maxBytes / 4)), maxLines: Math.min(10, Math.floor(limits.maxLines / 4)), channel: "structured" }).slice(2)
+                // slice只移除共享尾段固定的两个分隔换行；每条SHA仍完整，历史参数统一为LF。
                 return {
                   files: [
                     {
@@ -274,14 +286,12 @@ const layer = Layer.effectDiscard(
                     },
                   ],
                   replacements,
-                  // 此处只能由整批有真实变化的成功路径抵达，warning 不会把全 no-op 伪装成成功。
-                  ...(unchangedEntries > 0 ? {
-                    warning: `Warning: ${unchangedEntries} of ${input.edits.length} edit(s) were no-ops (oldString equals newString) and did not change the file.`,
-                  } : {}),
-                  // 仅保存实际旧 needle；非创建编辑不猜测 formatter 后的局部新 needle。
+                  ...(rewrites.length > 0 ? { inputProvenance: { rewrites } } : {}),
+                  ...(warning ? { warning } : {}),
+                  // 真实旧needle与提交replacement保留逻辑LF，不把物理行尾或formatter整文件伪装成局部参数。
                   syncInput: { path: input.path, edits: applied.syncEdits.map(edit => ({
-                    oldString: convertToLineEnding(edit.oldString, ending),
-                    newString: convertToLineEnding(edit.newString, ending),
+                    oldString: edit.oldString,
+                    newString: edit.newString,
                     ...(edit.replaceAll === true ? { replaceAll: true } : {}),
                   })) },
                 } satisfies Output
@@ -298,5 +308,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/edit",
   layer,
-  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node, Location.node, SessionStore.node],
+  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node, Location.node, SessionStore.node, ToolOutputStore.node],
 })

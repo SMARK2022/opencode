@@ -274,7 +274,7 @@ describe("WriteTool", () => {
 
                 expect(yield* Effect.promise(() => fs.readFile(preserved, "utf8"))).toBe("\uFEFFafter")
                 expect(yield* Effect.promise(() => fs.readFile(deduplicated, "utf8"))).toBe("\uFEFFafter")
-                // 本补丁只归一 Write 展示；实际请求仍可把 CRLF/CR 覆写为 LF。
+                // Write展示保持LF，但本项起覆写须保留目标物理EOL与唯一BOM。
                 for (const ending of ["\n", "\r\n", "\r"]) {
                   yield* Effect.promise(() => fs.writeFile(preserved, `\uFEFFone${ending}two${ending}`))
                   const settled = yield* settleTool(registry, call({ path: "preserved.txt", content: "one\ntwo\n" }, `call-eol-${ending.charCodeAt(0)}-${ending.length}`))
@@ -285,7 +285,7 @@ describe("WriteTool", () => {
                   expect(output.diff).not.toContain("-two")
                   expect(output.diff).not.toContain("+two")
                   expect(output.diff).not.toContain("\uFEFF")
-                  expect(yield* Effect.promise(() => fs.readFile(preserved, "utf8"))).toBe("\uFEFFone\ntwo\n")
+                  expect(yield* Effect.promise(() => fs.readFile(preserved, "utf8"))).toBe(`\uFEFFone${ending}two${ending}`)
                 }
               }),
             ),

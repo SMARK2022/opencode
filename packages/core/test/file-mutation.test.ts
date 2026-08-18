@@ -89,6 +89,47 @@ describe("FileMutation", () => {
     ),
   )
 
+  it.live("preserves text endings through overwrite, conditional edit, and formatted move", () =>
+    withTmp(directory =>
+      Effect.gen(function* () {
+        const mutation = yield* LocationMutation.Service
+        const files = yield* FileMutation.Service
+        const format = (file: string) => Effect.promise(async () => {
+          const text = await fs.readFile(file, "utf8")
+          await fs.writeFile(file, text.replace("new", "formatted").replace(/\r\n?/g, "\n"))
+          return true
+        })
+        for (const ending of ["\r\n", "\r"]) {
+          const target = yield* mutation.resolve({ path: `eol-${ending.length}.txt` })
+          const before = `\uFEFFold${ending}line${ending}`
+          yield* Effect.promise(() => fs.writeFile(target.canonical, before))
+          // 无formatter的覆写也继承既有EOL/BOM；有formatter时语义变化与物理属性必须同时保留。
+          yield* files.writeTextPreservingBom({ target, content: "new\nline\n" })
+          expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(`\uFEFFnew${ending}line${ending}`)
+          const formatted = yield* files.writeTextPreservingBom({ target, content: "new\nline\n", format })
+          expect(formatted.text).toBe(`formatted${ending}line${ending}`)
+          expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(`\uFEFFformatted${ending}line${ending}`)
+          const expected = yield* Effect.promise(() => fs.readFile(target.canonical))
+          yield* files.writeIfUnchanged({ target, expected, content: "\uFEFFnew\nline\n", format })
+          expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(`\uFEFFformatted${ending}line${ending}`)
+          const destination = yield* mutation.resolve({ path: `dest-${ending.length}.txt` })
+          yield* Effect.promise(() => fs.writeFile(destination.canonical, "destination\n"))
+          const moved = yield* files.moveIfUnchanged({ target, destination, expected: yield* Effect.promise(() => fs.readFile(target.canonical)), content: "\uFEFFnew\nline\n", format })
+          // destination已有LF只负责真实diff前像，不得接管source的CRLF/CR内容属性。
+          expect(moved.text).toBe(`formatted${ending}line${ending}`)
+          expect(yield* Effect.promise(() => fs.readFile(destination.canonical, "utf8"))).toBe(`\uFEFFformatted${ending}line${ending}`)
+          expect(moved.diff).toContain("-destination")
+          expect(yield* Effect.promise(() => fs.access(target.canonical).then(() => true, () => false))).toBe(false)
+        }
+        const fresh = yield* mutation.resolve({ path: "new.txt" })
+        const missing = yield* files.create({ target: fresh, content: "new\r\nline\r\n", format })
+        // 缺失文件没有可继承属性，formatter选择LF仍是合法最终真值。
+        expect(missing.text).toBe("formatted\nline\n")
+        expect(yield* Effect.promise(() => fs.readFile(fresh.canonical, "utf8"))).toBe("formatted\nline\n")
+      }).pipe(provide(directory)),
+    ),
+  )
+
   it.live("rejects create when a prospective target appears after resolution", () =>
     withTmp((directory) =>
       Effect.gen(function* () {

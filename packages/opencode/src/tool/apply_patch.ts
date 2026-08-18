@@ -17,7 +17,7 @@ import DESCRIPTION from "./apply_patch.txt"
 import { FileSystem } from "@opencode-ai/core/filesystem"
 import { Format } from "../format"
 import * as Bom from "@/util/bom"
-import { normalizeLineEndings } from "@/util/line-ending"
+import { convertToLineEnding, detectLineEnding, normalizeLineEndings, type LineEnding } from "@/util/line-ending"
 // #518：apply_patch 加入共享 file-mutation coordinator（多文件一次性 commit + 提交前全量 recheck）
 import * as Mutation from "./file-mutation-coordinator"
 // #131：diff 展示归一行尾，隐藏纯换行变更
@@ -33,6 +33,8 @@ type FileChange = {
   additions: number
   deletions: number
   bom: boolean
+  // ending 是 existing proposal/source 的物理属性；缺失代表 new Add，不表示检测失败。
+  ending?: LineEnding
   expected: Mutation.MutationRead[]
 }
 
@@ -58,6 +60,10 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
       const snapshot = yield* Mutation.read(afs, group.filePath)
       // #518：add 的旧 diff 语义继续从空文本计算，但 expected 保留真实 existing/missing state。
       if (snapshot.version.state === "other") throw new Error(`Path is not a file: ${group.filePath}`)
+      // Add File 对 existing path 是完整 overwrite；snapshot 同时提供 conflict version 与物理行尾事实。
+      const ending =
+        snapshot.version.state === "file" ? detectLineEnding(Bom.split(Mutation.decode(snapshot)).text) : undefined
+      // 不读取 Project 配置或邻近文件推断 EOL，missing Add 因此继续严格服从 patch 内容。
       const oldContent = ""
       // 尾部换行补齐沿用既有 Add File 语义；proposal 不修正用户文本，只保证落盘可 diff。
       const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
@@ -67,7 +73,19 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
       const diff = trimDiff(createTwoFilesPatch(group.filePath, group.filePath, diffOld, diffNew))
       const { additions, deletions } = countDiff(diffOld, diffNew)
       // #518：add 保留既有空文本 diff 展示，同时用真实 snapshot 防止 missing/empty 混淆。
-      return { filePath: group.filePath, oldContent, newContent: next.text, type: "add" as const, diff, additions, deletions, bom: next.bom, expected: [snapshot] }
+      // diff 仍按 Add 的空旧文本语义展示；只有磁盘 payload 继承 existing proposal 属性。
+      return {
+        filePath: group.filePath,
+        oldContent,
+        newContent: ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text,
+        type: "add" as const,
+        diff,
+        additions,
+        deletions,
+        bom: next.bom,
+        ending,
+        expected: [snapshot],
+      }
     }
     case "update": {
       // #533：canonical source 只读取一个 snapshot，定位与最终 Mutation expected 因而观察同一版本。
@@ -115,7 +133,21 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
         if (destination.version.state === "other") throw new Error(`Path is not a file: ${movePath}`)
         expected.push(destination)
       }
-      return { filePath: group.filePath, oldContent, newContent: fileUpdate.content, type: movePath ? "move" as const : "update" as const, movePath, diff, additions, deletions, bom: fileUpdate.bom, expected }
+      // update 与 move 的完整内容都由 source proposal 派生；destination existing EOL 不参与内容所有权。
+      // move 覆写 destination 时仍延续 source 属性，否则同一内容会因目标是否存在而得到不同字节。
+      return {
+        filePath: group.filePath,
+        oldContent,
+        newContent: fileUpdate.content,
+        type: movePath ? ("move" as const) : ("update" as const),
+        movePath,
+        diff,
+        additions,
+        deletions,
+        bom: fileUpdate.bom,
+        ending: detectLineEnding(oldContent),
+        expected,
+      }
     }
     case "delete": {
       // #518：delete 与 add 同理不聚合；重复 Delete entry 无法像 update 那样链式消费。
@@ -362,7 +394,16 @@ export const ApplyPatchTool = Tool.define(
             if (edited) {
               // #518：formatter 与 BOM 回写留在 commit critical section 内，避免另一 mutation 在格式化中途读盘。
               if (yield* format.file(edited)) {
-                yield* Bom.syncFile(afs, edited, change.bom)
+                const formattedText = yield* Bom.syncFile(afs, edited, change.bom)
+                // FileChange.ending 来自同一 proposal/source；formatter 只拥有文本变化，不接管 existing EOL。
+                // edited 已折叠原路径与 movePath，恢复必须写实际 target，且继续位于 multi-file commit lock 内。
+                const restoredText = change.ending
+                  ? convertToLineEnding(normalizeLineEndings(formattedText), change.ending)
+                  : formattedText
+                // 仅在 separator 实际变化时二次写盘，formatter 已保真的文件不会产生额外 watcher 窗口。
+                if (restoredText !== formattedText) {
+                  yield* afs.writeWithDirs(edited, Bom.join(restoredText, change.bom))
+                }
               }
               editedFiles.push(edited)
             }

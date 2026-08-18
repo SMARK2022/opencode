@@ -134,6 +134,7 @@ describe("EditTool", () => {
         const batch = yield* run([{ oldString: "gamma", newString: "long-G" }, { oldString: "alpha", newString: "A" }])
         expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("A\nbeta\nlong-G\n")
         expect(batch.output?.structured).toMatchObject({ replacements: 2 })
+        expect(batch.output?.structured).not.toHaveProperty("inputProvenance")
         expect(writes).toHaveLength(1)
         for (const example of [
           { before: "foo", edits: [{ oldString: "foo", newString: "bar" }, { oldString: "bar", newString: "baz" }], reason: "Could not find" },
@@ -150,6 +151,12 @@ describe("EditTool", () => {
         const quoted = yield* run([{ oldString: '"hello"', newString: "$& $1" }])
         expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("pad  \nsay $& $1 end\n")
         expect(quoted.output?.structured).toMatchObject({ syncInput: { path: "batch.txt", edits: [{ oldString: "\u201Chello\u201D", newString: "$& $1" }] } })
+        // 使用source独立常量验证原ASCII提交指纹，而非实际弯引号slice或production自行生成的期望。
+        const original = { byteLength: 7, sha256: "5aa762ae383fbb727af3c7a36d4940a5b8c40a989452d2304fc958ff3f354e7a" }
+        expect(quoted.output?.structured).toMatchObject({ inputProvenance: { rewrites: [{ editIndex: 0, original }] } })
+        const quotedText = quoted.result.type === "text" ? quoted.result.value : ""
+        expect(quotedText).toContain(`original=7 UTF-8 bytes sha256=${original.sha256}`)
+        expect(quotedText).toContain("normalized oldString truth rewrites")
         // formatter 真正改写磁盘后，回执展示最终 diff，历史局部 newString 仍保留用户意图。
         const formatted = yield* withTool(tmp.path,
           registry => settleTool(registry, call({ path: "batch.txt", edits: [{ oldString: "end", newString: "done" }] })),
@@ -165,6 +172,7 @@ describe("EditTool", () => {
         const mixedEdits = [{ oldString: "x", newString: "y" }, { oldString: "foo - bar", newString: "foo - bar" }]
         yield* Effect.promise(() => fs.writeFile(target, "x\nfoo \u2013 bar\n"))
         const mixed = yield* run(mixedEdits)
+        expect(mixed.output?.structured).not.toHaveProperty("inputProvenance")
         expect(mixed.result).toMatchObject({ type: "text", value: expect.stringContaining("Warning: 1 of 2 edit(s) were no-ops") })
         expect(mixed.output?.structured).toMatchObject({ replacements: 1, syncInput: { edits: mixedEdits } })
         expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("y\nfoo \u2013 bar\n")
@@ -186,6 +194,24 @@ describe("EditTool", () => {
         const repeated = yield* run([{ oldString: "x", newString: "y" }, { oldString: "same", newString: "same", replaceAll: true }])
         expect(repeated.output?.structured).toMatchObject({ replacements: 1 })
         expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("y\nsame same")
+        yield* Effect.promise(() => fs.writeFile(target, "x-y and x\u2013y"))
+        const hybrid = yield* run([{ oldString: "x-y", newString: "z", replaceAll: true }])
+        // 异构replaceAll虽不能把所有actual塞入一个oldString，真实覆写事实仍须保留。
+        expect(hybrid.output?.structured).toMatchObject({ inputProvenance: { rewrites: [{ editIndex: 0, original: { byteLength: 3, sha256: "cc96fed8b030120e59a6a0372a92de2d6abebf40d83d57012d449419c6799b7f" } }] } })
+        yield* Effect.promise(() => fs.writeFile(target, "before\r\nline\r\n"))
+        const physical = yield* run([{ oldString: "before\r\nline", newString: "new\nline" }])
+        expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("new\r\nline\r\n")
+        expect(physical.output?.structured).toMatchObject({ syncInput: { edits: [{ oldString: "before\nline", newString: "new\nline" }] } })
+        const rewrites = Array.from({ length: 14 }, (_, index) => ({ oldString: `"v${index}"`, newString: `"n${index}"` }))
+        yield* Effect.promise(() => fs.writeFile(target, rewrites.map((_, index) => `say \u201Cv${index}\u201D`).join("\n") + "\nstable"))
+        const many = yield* run([...rewrites, { oldString: "stable", newString: "stable" }])
+        // 完整数组独立于有限模型尾段，SHA必须整行展示且省略数可见。
+        expect(many.output?.structured).toHaveProperty("inputProvenance.rewrites.length", 14)
+        const manyText = many.result.type === "text" ? many.result.value : ""
+        expect(manyText).toMatch(/- edits\[0\]: original=4 UTF-8 bytes sha256=[0-9a-f]{64}/)
+        expect(manyText).toMatch(/- \.\.\. \d+ more rewrite fingerprint\(s\) stored in structured\.inputProvenance/)
+        expect(manyText).toContain("Warning: 1 of 15 edit(s) were no-ops")
+        expect(Schema.decodeUnknownSync(EditTool.Output)(many.output?.structured).warning?.split("\n").length).toBeLessThanOrEqual(10)
         // 超过通用默认预算仍必须在实际模型结果尾部看到 warning，原文保留沿用既有 owner。
         const long = "z".repeat(20000)
         yield* Effect.promise(() => fs.writeFile(target, `${long}\nkeep`))

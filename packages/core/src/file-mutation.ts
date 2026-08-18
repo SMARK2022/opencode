@@ -6,7 +6,7 @@ import { createTwoFilesPatch } from "diff"
 import { dirname } from "path"
 import { KeyedMutex } from "./effect/keyed-mutex"
 import { FSUtil } from "./fs-util"
-import { normalizeLineEndings } from "./util/line-ending"
+import { convertToLineEnding, detectLineEnding, normalizeLineEndings, type LineEnding } from "./util/line-ending"
 
 export interface Target {
   readonly canonical: string
@@ -115,7 +115,7 @@ const layer = Layer.effect(
       existed,
     })
 
-    const finishText = Effect.fn("FileMutation.finishText")(function* (input: TextWriteInput, previous: string, bom: boolean, existed: boolean) {
+    const finishText = Effect.fn("FileMutation.finishText")(function* (input: TextWriteInput, previous: string, bom: boolean, existed: boolean, ending?: LineEnding) {
       // 外部格式化可中断；最终回读与 BOM 修复始终受目标锁和退出收尾保护。
       const readFinal = Effect.gen(function* () {
         const final = yield* fs.readFile(input.target.canonical)
@@ -134,7 +134,11 @@ const layer = Layer.effect(
         Effect.interruptible,
         Effect.onExit((exit) => Exit.isFailure(exit) ? readFinal.pipe(Effect.asVoid) : Effect.void),
       ) : false
-      const text = yield* readFinal
+      const formattedText = yield* readFinal
+      // 仅成功文本收尾恢复已继承的EOL；失败/取消仍走原始字节BOM修复，不重编码半写内容。
+      const restoredText = ending ? convertToLineEnding(normalizeLineEndings(formattedText), ending) : formattedText
+      if (restoredText !== formattedText) yield* fs.writeFileString(input.target.canonical, joinBom(restoredText, bom))
+      const text = restoredText !== formattedText ? yield* readFinal : formattedText
       const before = normalizeLineEndings(previous)
       const after = normalizeLineEndings(text)
       const submitted = normalizeLineEndings(splitBom(input.content).text)
@@ -173,12 +177,15 @@ const layer = Layer.effect(
           const current = yield* fs
             .readFile(input.target.canonical)
             .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
+          // Write和Add-overwrite共享前像属性；缺失文件不从邻近目录或提交内容猜默认行尾。
+          const ending = current === undefined ? undefined : detectLineEnding(new TextDecoder().decode(current))
+          const content = ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text
           yield* fs.writeWithDirs(
             input.target.canonical,
-            joinBom(next.text, Boolean(current && hasUtf8Bom(current)) || next.bom),
+            joinBom(content, Boolean(current && hasUtf8Bom(current)) || next.bom),
           )
           if (current === undefined && !input.format) return writeResult(input.target, false)
-          return yield* finishText(input, current ? splitBom(new TextDecoder().decode(current)).text : "", Boolean(current && hasUtf8Bom(current)) || next.bom, current !== undefined)
+          return yield* finishText(input, current ? splitBom(new TextDecoder().decode(current)).text : "", Boolean(current && hasUtf8Bom(current)) || next.bom, current !== undefined, ending)
         }),
     )
 
@@ -213,7 +220,7 @@ const layer = Layer.effect(
             ? fs.writeFileString(input.target.canonical, input.content)
             : fs.writeFile(input.target.canonical, input.content)
           if (input.format && typeof input.content === "string")
-            return yield* finishText({ ...input, content: input.content }, splitBom(new TextDecoder().decode(current)).text, splitBom(input.content).bom, true)
+            return yield* finishText({ ...input, content: input.content }, splitBom(new TextDecoder().decode(current)).text, splitBom(input.content).bom, true, detectLineEnding(new TextDecoder().decode(current)))
           return writeResult(input.target, true)
         }),
     )
@@ -226,7 +233,8 @@ const layer = Layer.effect(
           .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
         // 目的地继承源BOM，格式化与最终回读沿用唯一文本收尾路径。
         yield* fs.writeWithDirs(input.destination.canonical, input.content)
-        const result = yield* finishText({ ...input, target: input.destination }, previous ? splitBom(new TextDecoder().decode(previous)).text : "", splitBom(input.content).bom, previous !== undefined)
+        // Move的EOL来自source，不能用为了真实diff读取的destination前像覆盖内容属性。
+        const result = yield* finishText({ ...input, target: input.destination }, previous ? splitBom(new TextDecoder().decode(previous)).text : "", splitBom(input.content).bom, previous !== undefined, detectLineEnding(new TextDecoder().decode(source)))
         if (input.destination.canonical !== input.target.canonical) {
           yield* fs.remove(input.target.canonical).pipe(Effect.mapError(error => new MoveIncompleteError({
             path: input.target.canonical, destination: input.destination.canonical, reason: error.message,
