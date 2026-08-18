@@ -145,6 +145,11 @@ export const EditTool = Tool.define(
           let contentNew = ""
           // #514 INV-16：成功后的历史真值（整参数面 { filePath, edits }），由 processor 整表替换 state.input
           let syncInput: { filePath: string; edits: EditApply.EditReplacement[] } | undefined
+          const provenanceRewrites: Array<{
+            editIndex: number
+            original: { byteLength: number; sha256: string }
+          }> = []
+          // 该数组只承载本次 Tool 调用的异常覆写事实，不进入参数 Schema，也不改变 edit 成功语义。
 
           // #518：先取得与 edits[] proposal 同源的 raw bytes/version；Permission 期间不持有 mutation lock。
           // #518：锁不覆盖 ask：同文件第二个 proposal 仍可完成审批，冲突在 commit recheck 显式化。
@@ -195,9 +200,16 @@ export const EditTool = Tool.define(
             // #514 create+format：若落盘与写入不同，历史 newString 改为最终磁盘内容。
             const finalLF = normalizeLineEndings(contentNew)
             const wroteLF = normalizeLineEndings(next.text)
+            // create 分支 ending 恒 undefined（existing 覆写在上方被拒），历史只保留 LF 化差异。
             syncInput = {
               filePath,
-              edits: [{ oldString: "", newString: finalLF !== wroteLF ? contentNew : edits[0].newString }],
+              // Message history 使用逻辑 LF；物理 CRLF 已由文件 owner 保留，不能泄回模型参数面。
+              edits: [
+                {
+                  oldString: "",
+                  newString: finalLF !== wroteLF ? finalLF : normalizeLineEndings(edits[0].newString),
+                },
+              ],
             }
             // commit 成功后才发布 Edited/Updated；Permission reject 或 version conflict 不产生成功事件。
             yield* events.publish(FileSystem.Event.Edited, { file: filePath })
@@ -212,6 +224,7 @@ export const EditTool = Tool.define(
 
               // #514：匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
               const ending = detectLineEnding(contentOld)
+              // ending 只影响 proposal 的物理写回；下面的 editsLF 和 history sync 始终保持逻辑 LF。
               const baseLF = normalizeLineEndings(contentOld)
               const editsLF = edits.map((edit) => ({
                 oldString: normalizeLineEndings(edit.oldString),
@@ -244,6 +257,7 @@ export const EditTool = Tool.define(
               }
 
               contentNew = convertToLineEnding(applied.contentNew, ending)
+              // 该转换只服务磁盘写回；diff 与 history 随后再次归一化，避免物理 EOL 重复进入模型视图。
               const desiredBom = source.bom || Bom.split(contentNew).bom
               contentNew = Bom.split(contentNew).text
 
@@ -274,7 +288,16 @@ export const EditTool = Tool.define(
                 execute: Effect.gen(function* () {
                   // #518：写盘沿用既有顺序（内容→format→BOM 回写）；锁内完成才发布 change 事件。
                   yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
-                  if (yield* format.file(filePath)) contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+                  if (yield* format.file(filePath)) {
+                    const formattedText = yield* Bom.syncFile(afs, filePath, desiredBom)
+                    // formatter 的文本变化有效，但 existing edit 的物理行尾仍由 proposal ending 约束。
+                    // 恢复和最终读取都留在 commit lock 内，保证 diff、事件与后续 mutation 只见最终文件。
+                    const restoredText = convertToLineEnding(normalizeLineEndings(formattedText), ending)
+                    if (restoredText !== formattedText) {
+                      yield* afs.writeWithDirs(filePath, Bom.join(restoredText, desiredBom))
+                    }
+                    contentNew = (yield* Bom.readFile(afs, filePath)).text
+                  }
                 }),
               }).pipe(Effect.orDie)
               // commit 成功后才发布 Edited/Updated，Permission reject 或 version conflict 不产生成功事件。
@@ -283,15 +306,18 @@ export const EditTool = Tool.define(
                 file: filePath,
                 event: "change",
               })
+              // 两代共享matcher给出的覆写索引及原LF输入指纹，不能用actual oldString替代提交证据。
+              provenanceRewrites.push(...EditApply.provenance(editsLF, applied.normalizedMismatchIndices))
+
               // #514 INV-16：成功后始终发完整参数面 { filePath, edits }，
               // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
-              // actualOld 已在 applyEdits.syncEdits 中（历史 needle，非 preserve 整行块）；
-              // 此处只做行尾风格还原便于回放。
+              // actualOld 已在 applyEdits.syncEdits 中，history 继续保留模型可回放的 LF logical form。
               syncInput = {
                 filePath,
+                // normalize 已在 matcher 前完成，因此这里不再把物理 CRLF 写回 Message 参数。
                 edits: applied.syncEdits.map((edit) => ({
-                  oldString: convertToLineEnding(edit.oldString, ending),
-                  newString: convertToLineEnding(edit.newString, ending),
+                  oldString: edit.oldString,
+                  newString: edit.newString,
                   ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
                 })),
               }
@@ -374,6 +400,11 @@ export const EditTool = Tool.define(
             }
           }
 
+          // 两代复用完整行预算与精确省略数；仅展示预算内摘要，metadata仍保存全部原始取证。
+          const warningTail = EditApply.warningTail({ rewrites: provenanceRewrites, unchanged: unchangedEntries, total: edits.length, maxBytes: Math.min(reserveBytes, Math.max(0, limitBytes - consumedBytes)), maxLines: Math.min(reserveLines, Math.max(0, limitLines - consumedLines)), channel: "metadata" })
+          const warningBytes = Buffer.byteLength(warningTail, "utf-8")
+          const warningLinesCount = warningTail ? warningTail.split("\n").length - 1 : 0
+
           const normalizedFilePath = FSUtil.normalizePath(filePath)
           // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容
           const beforeIssues = (yield* lsp.diagnostics())[normalizedFilePath] ?? []
@@ -405,19 +436,25 @@ export const EditTool = Tool.define(
           }
           // LSP 段按剩余预算检查（预留 warning 与标记），宁断示标也不消费 warning 预算。
           if (
-            Buffer.byteLength(lspSection, "utf-8") <= limitBytes - consumedBytes - 256 &&
-            lspSection.split("\n").length <= limitLines - consumedLines - 2
+            Buffer.byteLength(lspSection, "utf-8") <= limitBytes - consumedBytes - warningBytes &&
+            lspSection.split("\n").length <= limitLines - consumedLines - warningLinesCount
           ) {
             output += lspSection
+            consumedBytes += Buffer.byteLength(lspSection, "utf-8")
+            consumedLines += lspSection.split("\n").length - 1
           } else if (block) {
-            output += `\n\n(Diagnostics omitted: output size limit)`
+            const omission = `\n\n(Diagnostics omitted: output size limit)`
+            if (
+              Buffer.byteLength(omission, "utf-8") <= limitBytes - consumedBytes - warningBytes &&
+              omission.split("\n").length - 1 <= limitLines - consumedLines - warningLinesCount
+            ) {
+              output += omission
+            }
           }
 
-          // [local-smark] 成功且存在 identical 条目时在最后追加 warning（恒保留，不参与裁剪）：
-          // 跳写保证该陈述构造性为真（全 no-op 批次已在批级门失败，到不了这里）。
-          if (unchangedEntries > 0) {
-            output += `\n\nWarning: ${unchangedEntries} of ${edits.length} edit(s) were no-ops (oldString equals newString) and did not change the file.`
-          }
+          // warning 是模型可见的取证摘要；完整 provenance 已在 metadata，尾段只写入预算内的完整行。
+          // 即使预算小到无法展示 header，Tool 成功结果也不伪造截断通道；DB metadata 仍是权威记录。
+          output += warningTail
 
           return {
             metadata: {
@@ -429,6 +466,8 @@ export const EditTool = Tool.define(
               filediff,
               // #514：processor 消费后 strip；覆盖 state.input 为 ground-truth edits
               ...(syncInput ? { _syncInput: syncInput } : {}),
+              // public metadata 在 processor strip 后保留；正常 exact/identical 路径不制造空 provenance。
+              ...(provenanceRewrites.length > 0 ? { inputProvenance: { rewrites: provenanceRewrites } } : {}),
             },
             title: `${path.relative(instance.worktree, filePath)}`,
             output,
@@ -442,37 +481,6 @@ export const EditTool = Tool.define(
 
 
 export function trimDiff(diff: string): string {
-  const lines = diff.split("\n")
-  const contentLines = lines.filter(
-    (line) =>
-      (line.startsWith("+") || line.startsWith("-") || line.startsWith(" ")) &&
-      !line.startsWith("---") &&
-      !line.startsWith("+++"),
-  )
-
-  if (contentLines.length === 0) return diff
-
-  let min = Infinity
-  for (const line of contentLines) {
-    const content = line.slice(1)
-    if (content.trim().length > 0) {
-      const match = content.match(/^(\s*)/)
-      if (match) min = Math.min(min, match[1].length)
-    }
-  }
-  if (min === Infinity || min === 0) return diff
-  const trimmedLines = lines.map((line) => {
-    if (
-      (line.startsWith("+") || line.startsWith("-") || line.startsWith(" ")) &&
-      !line.startsWith("---") &&
-      !line.startsWith("+++")
-    ) {
-      const prefix = line[0]
-      const content = line.slice(1)
-      return prefix + content.slice(min)
-    }
-    return line
-  })
-
-  return trimmedLines.join("\n")
+  // 保留 diff 原始前导空白；公共缩进属于模型需要理解的文件语义，不是可丢弃的装饰。
+  return diff
 }
