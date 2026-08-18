@@ -1,4 +1,5 @@
 import * as path from "path"
+import { createHash } from "crypto"
 import { Effect, Schema } from "effect"
 import * as Tool from "./tool"
 import { LSP } from "@/lsp/lsp"
@@ -172,6 +173,11 @@ export const EditTool = Tool.define(
           let contentOld = ""
           let contentNew = ""
           let syncInput: { filePath: string; edits: EditReplacement[] } | undefined
+          const provenanceRewrites: Array<{
+            editIndex: number
+            original: { byteLength: number; sha256: string }
+          }> = []
+          // 该数组只承载本次 Tool 调用的异常覆写事实，不进入参数 Schema，也不改变 edit 成功语义。
 
           // 先取得与 edits[] proposal 同源的 raw bytes/version；Permission 期间不持有 mutation lock。
           const proposal = yield* Mutation.read(afs, filePath)
@@ -188,7 +194,10 @@ export const EditTool = Tool.define(
             const existed = proposal.version.state === "file"
             // create/overwrite 继续允许覆盖 unchanged existing file；只有 Permission 后的变化产生 conflict。
             contentOld = source.text
-            contentNew = next.text
+            const ending = existed ? detectLineEnding(contentOld) : undefined
+            // oldString="" 仅在文件缺失时是纯 create；已有 proposal 上它仍是 overwrite，须继承磁盘行尾。
+            // 新文件没有 EOL 属性，继续保留模型提交字节，避免 create 被隐式规范化。
+            contentNew = ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text
             diff = trimDiff(
               createTwoFilesPatch(
                 filePath,
@@ -212,13 +221,30 @@ export const EditTool = Tool.define(
               expected: [proposal],
               execute: Effect.gen(function* () {
                 yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
-                if (yield* format.file(filePath)) contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+                if (yield* format.file(filePath)) {
+                  const formattedText = yield* Bom.syncFile(afs, filePath, desiredBom)
+                  // missing create 允许 formatter 决定行尾；只有 existing overwrite 才有 proposal 属性可恢复。
+                  const restoredText = ending
+                    ? convertToLineEnding(normalizeLineEndings(formattedText), ending)
+                    : formattedText
+                  if (restoredText !== formattedText) {
+                    yield* afs.writeWithDirs(filePath, Bom.join(restoredText, desiredBom))
+                  }
+                  // 回读统一 create/overwrite 的 post-formatter truth，供 diff 与临时 history sync 共用。
+                  contentNew = (yield* Bom.readFile(afs, filePath)).text
+                }
                 // create+format：若落盘与写入不同，历史 newString 改为最终磁盘内容。
                 const finalLF = normalizeLineEndings(contentNew)
                 const wroteLF = normalizeLineEndings(next.text)
                 syncInput = {
                   filePath,
-                  edits: [{ oldString: "", newString: finalLF !== wroteLF ? contentNew : edits[0].newString }],
+                  // Message history 使用逻辑 LF；物理 CRLF 已由文件 owner 保留，不能泄回模型参数面。
+                  edits: [
+                    {
+                      oldString: "",
+                      newString: finalLF !== wroteLF ? finalLF : normalizeLineEndings(edits[0].newString),
+                    },
+                  ],
                 }
               }),
             }).pipe(Effect.orDie)
@@ -234,6 +260,7 @@ export const EditTool = Tool.define(
 
             // 匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
             const ending = detectLineEnding(contentOld)
+            // ending 只影响 proposal 的物理写回；下面的 editsLF 和 history sync 始终保持逻辑 LF。
             const baseLF = normalizeLineEndings(contentOld)
             // normalize 只属于 edit-apply owner 的 proposal 阶段，commit 不会重新解释模型输入。
             const editsLF = edits.map((edit) => ({
@@ -268,6 +295,7 @@ export const EditTool = Tool.define(
             }
 
             contentNew = convertToLineEnding(applied.contentNew, ending)
+            // 该转换只服务磁盘写回；diff 与 history 随后再次归一化，避免物理 EOL重复进入模型视图。
             const desiredBom = source.bom || Bom.split(contentNew).bom
             contentNew = Bom.split(contentNew).text
 
@@ -295,7 +323,16 @@ export const EditTool = Tool.define(
               expected: [proposal],
               execute: Effect.gen(function* () {
                 yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
-                if (yield* format.file(filePath)) contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+                if (yield* format.file(filePath)) {
+                  const formattedText = yield* Bom.syncFile(afs, filePath, desiredBom)
+                  // formatter 的文本变化有效，但 existing edit 的物理行尾仍由 proposal ending 约束。
+                  // 恢复和最终读取都留在 commit lock 内，保证 diff、事件与后续 mutation 只见最终文件。
+                  const restoredText = convertToLineEnding(normalizeLineEndings(formattedText), ending)
+                  if (restoredText !== formattedText) {
+                    yield* afs.writeWithDirs(filePath, Bom.join(restoredText, desiredBom))
+                  }
+                  contentNew = (yield* Bom.readFile(afs, filePath)).text
+                }
               }),
             }).pipe(Effect.orDie)
             // diagnostics 在 commit 后执行，LSP 观察到的是已经完成 formatter 的磁盘内容。
@@ -305,14 +342,33 @@ export const EditTool = Tool.define(
               event: "change",
             })
 
+            provenanceRewrites.push(
+              ...applied.normalizedMismatchIndices.flatMap((editIndex) => {
+                const original = editsLF[editIndex]
+                if (!original) return []
+                // 只披露模型提交 LF oldString 的 UTF-8 fingerprint，不把磁盘实际切片复制进上下文。
+                // editIndex 保留原始参数顺序，避免多 edit 场景把 fingerprint 错归给相邻条目。
+                return [
+                  {
+                    editIndex,
+                    original: {
+                      byteLength: Buffer.byteLength(original.oldString, "utf-8"),
+                      sha256: createHash("sha256").update(original.oldString, "utf-8").digest("hex"),
+                    },
+                  },
+                ]
+              }),
+            )
+
             // INV-16：成功后始终发完整参数面 { filePath, edits }，
             // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
-            // actualOld 已在 applyEdits.syncEdits 中；此处只做行尾风格还原便于回放。
+            // actualOld 已在 applyEdits.syncEdits 中，history 继续保留模型可回放的 LF logical form。
             syncInput = {
               filePath,
+              // normalize 已在 matcher 前完成，因此这里不再把物理 CRLF 写回 Message 参数。
               edits: applied.syncEdits.map((edit) => ({
-                oldString: convertToLineEnding(edit.oldString, ending),
-                newString: convertToLineEnding(edit.newString, ending),
+                oldString: edit.oldString,
+                newString: edit.newString,
                 ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
               })),
             }
@@ -394,6 +450,60 @@ export const EditTool = Tool.define(
             }
           }
 
+          const warningBudgetBytes = Math.min(reserveBytes, Math.max(0, limitBytes - consumedBytes))
+          const warningBudgetLines = Math.min(reserveLines, Math.max(0, limitLines - consumedLines))
+          const warningLines: string[] = []
+          // bytes 与 lines 必须由同一候选串计算；分别裁剪会让 UTF-8 长行或空行绕过另一维上限。
+          const fitsWarning = (lines: string[]) => {
+            if (lines.length === 0) return true
+            const candidate = `\n\n${lines.join("\n")}`
+            return (
+              Buffer.byteLength(candidate, "utf-8") <= warningBudgetBytes &&
+              candidate.split("\n").length - 1 <= warningBudgetLines
+            )
+          }
+          const noOpWarning =
+            unchangedEntries > 0
+              ? `Warning: ${unchangedEntries} of ${edits.length} edit(s) were no-ops (oldString equals newString) and did not change the file.`
+              : ""
+          if (noOpWarning && fitsWarning([noOpWarning])) warningLines.push(noOpWarning)
+          if (provenanceRewrites.length > 0) {
+            const header = "Warning: normalized oldString truth rewrites were recorded:"
+            const showsProvenance = fitsWarning([...warningLines, header])
+            if (showsProvenance) warningLines.push(header)
+            const fingerprintLines: string[] = []
+            let omittedRewrites = 0
+            // header 放不下时不孤立展示 fingerprint；完整记录仍在 metadata，不会丢失取证事实。
+            for (const [index, rewrite] of showsProvenance ? provenanceRewrites.entries() : []) {
+              const line = `- edits[${rewrite.editIndex}]: original=${rewrite.original.byteLength} UTF-8 bytes sha256=${rewrite.original.sha256}`
+              const remaining = provenanceRewrites.length - index - 1
+              const marker = remaining
+                ? `- ... ${remaining} more rewrite fingerprint(s) stored in metadata.inputProvenance`
+                : ""
+              if (fitsWarning([...warningLines, ...fingerprintLines, line, ...(marker ? [marker] : [])])) {
+                fingerprintLines.push(line)
+                continue
+              }
+              // 从当前条目起全部省略，marker 必须在回收已选行后重新计算真实数量。
+              omittedRewrites = provenanceRewrites.length - index
+              break
+            }
+            if (omittedRewrites > 0) {
+              let marker = `- ... ${omittedRewrites} more rewrite fingerprint(s) stored in metadata.inputProvenance`
+              while (fingerprintLines.length > 0 && !fitsWarning([...warningLines, ...fingerprintLines, marker])) {
+                // 每弹出一条完整 fingerprint，就把它并入 marker 的省略计数，避免模型低估隐藏记录。
+                fingerprintLines.pop()
+                omittedRewrites++
+                marker = `- ... ${omittedRewrites} more rewrite fingerprint(s) stored in metadata.inputProvenance`
+              }
+              if (fitsWarning([...warningLines, ...fingerprintLines, marker])) fingerprintLines.push(marker)
+            }
+            warningLines.push(...fingerprintLines)
+          }
+          const warningTail = warningLines.length > 0 ? `\n\n${warningLines.join("\n")}` : ""
+          const warningBytes = Buffer.byteLength(warningTail, "utf-8")
+          const warningLinesCount = warningTail ? warningTail.split("\n").length - 1 : 0
+
           const normalizedFilePath = AppFileSystem.normalizePath(filePath)
           const beforeIssues = (yield* lsp.diagnostics())[normalizedFilePath] ?? []
           yield* lsp.touchFile(filePath, "document")
@@ -418,19 +528,25 @@ export const EditTool = Tool.define(
           }
           // LSP 段按剩余预算检查（预留 warning 与标记），宁断示标也不消费 warning 预算。
           if (
-            Buffer.byteLength(lspSection, "utf-8") <= limitBytes - consumedBytes - 256 &&
-            lspSection.split("\n").length <= limitLines - consumedLines - 2
+            Buffer.byteLength(lspSection, "utf-8") <= limitBytes - consumedBytes - warningBytes &&
+            lspSection.split("\n").length <= limitLines - consumedLines - warningLinesCount
           ) {
             output += lspSection
+            consumedBytes += Buffer.byteLength(lspSection, "utf-8")
+            consumedLines += lspSection.split("\n").length - 1
           } else if (block) {
-            output += `\n\n(Diagnostics omitted: output size limit)`
+            const omission = `\n\n(Diagnostics omitted: output size limit)`
+            if (
+              Buffer.byteLength(omission, "utf-8") <= limitBytes - consumedBytes - warningBytes &&
+              omission.split("\n").length - 1 <= limitLines - consumedLines - warningLinesCount
+            ) {
+              output += omission
+            }
           }
 
-          // [local-smark] 成功且存在 identical 条目时在最后追加 warning（恒保留，不参与裁剪）：
-          // 跳写保证该陈述构造性为真（全 no-op 批次已在批级门失败，到不了这里）。
-          if (unchangedEntries > 0) {
-            output += `\n\nWarning: ${unchangedEntries} of ${edits.length} edit(s) were no-ops (oldString equals newString) and did not change the file.`
-          }
+          // warning 是模型可见的取证摘要；完整 provenance 已在 metadata，尾段只写入预算内的完整行。
+          // 即使预算小到无法展示 header，Tool 成功结果也不伪造截断通道；DB metadata 仍是权威记录。
+          output += warningTail
 
           return {
             metadata: {
@@ -440,6 +556,8 @@ export const EditTool = Tool.define(
               filediff,
               // processor 消费后 strip；覆盖 state.input 为 ground-truth edits
               ...(syncInput ? { _syncInput: syncInput } : {}),
+              // public metadata 在 processor strip 后保留；正常 exact/identical 路径不制造空 provenance。
+              ...(provenanceRewrites.length > 0 ? { inputProvenance: { rewrites: provenanceRewrites } } : {}),
             },
             title: `${path.relative(instance.worktree, filePath)}`,
             output,
@@ -450,37 +568,6 @@ export const EditTool = Tool.define(
 )
 
 export function trimDiff(diff: string): string {
-  const lines = diff.split("\n")
-  const contentLines = lines.filter(
-    (line) =>
-      (line.startsWith("+") || line.startsWith("-") || line.startsWith(" ")) &&
-      !line.startsWith("---") &&
-      !line.startsWith("+++"),
-  )
-
-  if (contentLines.length === 0) return diff
-
-  let min = Infinity
-  for (const line of contentLines) {
-    const content = line.slice(1)
-    if (content.trim().length > 0) {
-      const match = content.match(/^(\s*)/)
-      if (match) min = Math.min(min, match[1].length)
-    }
-  }
-  if (min === Infinity || min === 0) return diff
-  const trimmedLines = lines.map((line) => {
-    if (
-      (line.startsWith("+") || line.startsWith("-") || line.startsWith(" ")) &&
-      !line.startsWith("---") &&
-      !line.startsWith("+++")
-    ) {
-      const prefix = line[0]
-      const content = line.slice(1)
-      return prefix + content.slice(min)
-    }
-    return line
-  })
-
-  return trimmedLines.join("\n")
+  // 保留 diff 原始前导空白；公共缩进属于模型需要理解的文件语义，不是可丢弃的装饰。
+  return diff
 }

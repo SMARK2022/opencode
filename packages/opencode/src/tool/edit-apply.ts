@@ -26,6 +26,8 @@ export type ApplyEditsResult = {
   usedNormalized: boolean
   /** 历史真值：每条 oldString 为 pre-edit baseLF 上的连续 needle，不是 preserve 整行块。 */
   syncEdits: EditReplacement[]
+  /** 只有实际写入条目的 normalized disk slice 与模型 LF oldString 不同时才记录。 */
+  normalizedMismatchIndices: number[]
 }
 
 type TextReplacement = {
@@ -357,8 +359,8 @@ function actualOldFromRanges(
   usedNormalized: boolean,
   ranges: Array<{ matchIndex: number; matchLength: number }>,
   modelOld: string,
-): string {
-  if (ranges.length === 0) return modelOld
+): { oldString: string; mismatch: boolean } {
+  if (ranges.length === 0) return { oldString: modelOld, mismatch: false }
   const slices = ranges.map((range) => {
     if (!usedNormalized) {
       return baseLF.slice(range.matchIndex, range.matchIndex + range.matchLength)
@@ -368,9 +370,12 @@ function actualOldFromRanges(
     const end = map[range.matchIndex + range.matchLength] ?? baseLF.length
     return baseLF.slice(start, end)
   })
-  if (slices.every((s) => s === slices[0])) return slices[0]
+  // 同构 slices 可以回填一个 actual oldString；异构 slices 只能保留模型形态，但两者都要保留 mismatch。
+  const mismatch = slices.some((slice) => slice !== modelOld)
+  if (slices.every((slice) => slice === slices[0])) return { oldString: slices[0], mismatch }
   // replaceAll 下 en-dash/ASCII 等异构实际切片无法塞进单个 oldString 字段
-  return modelOld
+  // mismatch 必须在 representational fallback 前保留，否则历史字段回退会抹掉真实 normalized rewrite。
+  return { oldString: modelOld, mismatch }
 }
 
 /**
@@ -423,6 +428,8 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
   const replacementBase = usedNormalized ? normalizeForMatch(content) : content
   const allRanges: TextReplacement[] = []
   const syncEdits: EditReplacement[] = []
+  const normalizedMismatchIndices: number[] = []
+  // mismatch 索引与 syncEdits 同源生成，调用方无需重新执行 normalize matcher 或猜测 actual slice。
 
   // 整批共用一个 pre-edit replacementBase，保证失败 index 对应模型提交的原始顺序，而不是增量结果。
   // 诊断因此可以精确绑定单条 edit，同时维持原有 reverse apply 和原子失败边界。
@@ -480,13 +487,18 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
       }
     }
 
+    const actualOld =
+      edit.oldString === edit.newString
+        ? { oldString: edit.oldString, mismatch: false }
+        : actualOldFromRanges(content, replacementBase, usedNormalized, ranges, edit.oldString)
+    // identical 条目已被跳写，不能仅因 located slice 漂移就伪装成 history truth rewrite。
+    // 该判断放在 locate/唯一性之后，既保留输入校验，又只记录真正进入 replacement 的条目。
+    if (actualOld.mismatch) normalizedMismatchIndices.push(i)
+
     syncEdits.push({
       // identical 条目零写入、无命中切片可回填历史：oldString 保持提交形态，
       // 使 _syncInput/warning/模型输入三者一致；真实条目沿用 actualOld 真值。
-      oldString:
-        edit.oldString === edit.newString
-          ? edit.oldString
-          : actualOldFromRanges(content, replacementBase, usedNormalized, ranges, edit.oldString),
+      oldString: actualOld.oldString,
       newString: edit.newString,
       ...(edit.replaceAll === true ? { replaceAll: true } : {}),
     })
@@ -518,7 +530,7 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
     )
   }
 
-  return { contentNew, usedNormalized, syncEdits }
+  return { contentNew, usedNormalized, syncEdits, normalizedMismatchIndices }
 }
 
 /**

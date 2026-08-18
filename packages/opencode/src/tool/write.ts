@@ -14,7 +14,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { trimDiff } from "./edit"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import * as Bom from "@/util/bom"
-import { normalizeLineEndings } from "@/util/line-ending"
+import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
 import * as Mutation from "./file-mutation-coordinator"
 
 export const Parameters = Schema.Struct({
@@ -61,7 +61,12 @@ export const WriteTool = Tool.define(
           const next = Bom.split(params.content)
           const desiredBom = source.bom || next.bom
           const contentOld = source.text
-          const contentNew = next.text
+          const ending = exists ? detectLineEnding(contentOld) : undefined
+          // ending 取自 Permission 前同一 proposal，避免审批期间补读把版本事实与属性事实拆开。
+          // contentNew 只转换已有文件，防止“继承属性”误变成新文件的隐式默认格式。
+          // 模型提交的是逻辑行；已有文件的行尾属于 proposal 磁盘属性，不能被 overwrite 参数偶然翻转。
+          // 新文件没有可继承属性，继续逐字采用提交内容，避免 write 对创建行为施加全局 EOL 策略。
+          const contentNew = ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text
           // diff/metadata 仍基于 proposal 文本；formatter 后的最终内容只在 commit 内重新读取。
 
           const diff = trimDiff(
@@ -87,8 +92,22 @@ export const WriteTool = Tool.define(
               yield* fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
               // [local-smark] 捕获 format 是否运行，用于后续判断是否需要检测内容变化
               formatted = yield* format.file(filepath)
-              if (formatted) yield* Bom.syncFile(fs, filepath, desiredBom)
-              if (exists || formatted) finalSource = yield* Bom.readFile(fs, filepath)
+              if (formatted) {
+                const formattedText = yield* Bom.syncFile(fs, filepath, desiredBom)
+                // formatter 拥有文本格式化结果，但已有文件的行尾仍由 proposal 决定；两者在此合成唯一磁盘真值。
+                // 还原留在 commit lock 内，避免事件、diff 或另一个 mutation 观察到 formatter 的临时 LF 文件。
+                const restoredText = ending
+                  ? convertToLineEnding(normalizeLineEndings(formattedText), ending)
+                  : formattedText
+                // new file 没有 ending 时 formatter 输出直接成为最终文本，不引入仓库级默认策略。
+                if (restoredText !== formattedText) {
+                  yield* fs.writeWithDirs(filepath, Bom.join(restoredText, desiredBom))
+                }
+                // metadata 必须来自还原后的实际文件，不能沿用 formatter 读取或内存推导的中间视图。
+                finalSource = yield* Bom.readFile(fs, filepath)
+                return
+              }
+              if (exists) finalSource = yield* Bom.readFile(fs, filepath)
             }),
           }).pipe(Effect.orDie)
           // 覆写已有文件时，基于格式化后的最终落盘内容生成 diff，供 TUI 以 git diff 形式展示

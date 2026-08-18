@@ -24,6 +24,30 @@ const it = testEffect(
   ),
 )
 
+// 该 formatter 既改内容又强制 LF；三个写盘分支必须在各自实际 target 上恢复 source/proposal EOL。
+const lineEndingFormatLayer = Layer.succeed(Format.Service, {
+  init: () => Effect.void,
+  status: () => Effect.succeed([]),
+  file: (filepath: string) =>
+    Effect.promise(async () => {
+      // fixture 必须把 formatter 的默认 LF 行为显式化，否则 add/update/move 的恢复缺口不会变红。
+      const content = await fs.readFile(filepath, "utf-8")
+      await fs.writeFile(filepath, content.replace("new", "formatted").replace(/\r\n?/g, "\n"))
+      return true
+    }),
+})
+
+const itLineEndingFormatted = testEffect(
+  Layer.mergeAll(
+    LSP.defaultLayer,
+    AppFileSystem.defaultLayer,
+    lineEndingFormatLayer,
+    Bus.layer,
+    Truncate.defaultLayer,
+    Agent.defaultLayer,
+  ),
+)
+
 const baseCtx = {
   sessionID: SessionID.make("ses_test"),
   messageID: MessageID.make("msg_test"),
@@ -348,6 +372,24 @@ describe("tool.apply_patch freeform", () => {
 
       yield* execute({ patchText }, ctx)
       expect(yield* readText(target)).toBe("ALPHA\r\nBETA\r\nMIDDLE\r\nomega\r\n")
+    }),
+  )
+
+  itLineEndingFormatted.instance("restores source CRLF after formatting an update", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const target = path.join(test.directory, "formatted-update.txt")
+      yield* writeText(target, "before\r\ncontent\r\n")
+
+      yield* execute(
+        { patchText: "*** Begin Patch\n*** Update File: formatted-update.txt\n@@\n-before\n+new\n*** End Patch" },
+        ctx,
+      )
+
+      // update 的 ending 必须来自 source snapshot；formatter 文本变化不能把它降为 LF。
+      // update 没有 move target，因而该测试直接锁定 shared loop 的普通 edited 路径。
+      expect(yield* readText(target)).toBe("formatted\r\ncontent\r\n")
     }),
   )
 
@@ -741,17 +783,62 @@ describe("tool.apply_patch freeform", () => {
     }),
   )
 
+  itLineEndingFormatted.instance("restores source CRLF at the formatted move destination", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const source = path.join(test.directory, "move-source.txt")
+      const destination = path.join(test.directory, "move-destination.txt")
+      yield* writeText(source, "before\r\ncontent\r\n")
+      yield* writeText(destination, "destination\n")
+
+      yield* execute(
+        {
+          patchText:
+            "*** Begin Patch\n*** Update File: move-source.txt\n*** Move to: move-destination.txt\n@@\n-before\n+new\n*** End Patch",
+        },
+        ctx,
+      )
+
+      // move 的内容属性来自 source；恢复必须落在 destination，同时原 source 仍按既有语义删除。
+      // destination 预先存在但其 LF 不参与 ownership，测试锁定 source ending 的优先级。
+      // source 删除断言确保恢复逻辑没有通过复制而非 move 来绕开原有 mutation 语义。
+      expect(yield* readText(destination)).toBe("formatted\r\ncontent\r\n")
+      yield* expectReadFailure(source)
+    }),
+  )
+
   it.instance("adds file overwriting existing file", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
       const { ctx } = makeCtx()
       const target = path.join(test.directory, "duplicate.txt")
-      yield* writeText(target, "old content\n")
+      yield* writeText(target, "old\r\ncontent\r\n")
 
-      const patchText = "*** Begin Patch\n*** Add File: duplicate.txt\n+new content\n*** End Patch"
+      const patchText = "*** Begin Patch\n*** Add File: duplicate.txt\n+new\n+content\n*** End Patch"
 
       yield* execute({ patchText }, ctx)
-      expect(yield* readText(target)).toBe("new content\n")
+      // Add File 在 existing path 上是 overwrite；patch LF 表示逻辑行，不得清洗 proposal 的 CRLF 属性。
+      // 初次写盘断言与 formatter-sensitive Add 分开，分别定位 proposal 转换和后置恢复责任。
+      expect(yield* readText(target)).toBe("new\r\ncontent\r\n")
+    }),
+  )
+
+  itLineEndingFormatted.instance("restores existing CRLF after formatting an add-overwrite", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const { ctx } = makeCtx()
+      const target = path.join(test.directory, "formatted-add.txt")
+      yield* writeText(target, "old\r\ncontent\r\n")
+
+      yield* execute(
+        { patchText: "*** Begin Patch\n*** Add File: formatted-add.txt\n+new\n+content\n*** End Patch" },
+        ctx,
+      )
+
+      // add 的初次转换与 formatter 后恢复是两个边界；最终文本和原 CRLF 必须同时成立。
+      // Add File 覆写的目标仍是原路径，不能只用 update 测试覆盖 shared loop。
+      expect(yield* readText(target)).toBe("formatted\r\ncontent\r\n")
     }),
   )
 

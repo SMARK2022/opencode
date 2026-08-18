@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
-import { EditTool } from "../../src/tool/edit"
+import { EditTool, trimDiff } from "../../src/tool/edit"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { LSP } from "@/lsp/lsp"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
@@ -62,6 +62,30 @@ const itFormatted = testEffect(
     AppFileSystem.defaultLayer,
     Bus.layer,
     mockFormatLayer,
+    Truncate.defaultLayer,
+    Agent.defaultLayer,
+  ),
+)
+
+// 同时改文本并强制 LF，确保测试能区分 formatter authority 与 existing-file EOL authority。
+const lineEndingFormatLayer = Layer.succeed(Format.Service, {
+  init: () => Effect.void,
+  status: () => Effect.succeed([]),
+  file: (filepath: string) =>
+    Effect.promise(async () => {
+      // fixture 主动制造 formatter 的 LF 输出，才能验证 restore 位于 formatter 之后。
+      const content = await fs.readFile(filepath, "utf-8")
+      await fs.writeFile(filepath, content.replace("new", "formatted").replace(/\r\n?/g, "\n"))
+      return true
+    }),
+})
+
+const itLineEndingFormatted = testEffect(
+  Layer.mergeAll(
+    LSP.defaultLayer,
+    AppFileSystem.defaultLayer,
+    Bus.layer,
+    lineEndingFormatLayer,
     Truncate.defaultLayer,
     Agent.defaultLayer,
   ),
@@ -264,6 +288,13 @@ test("closestWindow agrees with an exhaustive scalar span oracle", () => {
 })
 
 describe("tool.edit", () => {
+  test("trimDiff preserves source indentation", () => {
+    const diff = "@@ -1 +1 @@\n-        return 1\n+        return 2"
+
+    // diff 是模型重构文件状态的字节证据；公共缩进不可为展示紧凑而被删除。
+    expect(trimDiff(diff)).toBe(diff)
+  })
+
   describe("creating new files", () => {
     it.instance("creates new file when oldString is empty", () =>
       Effect.gen(function* () {
@@ -291,6 +322,44 @@ describe("tool.edit", () => {
         const content = yield* loadRaw(filepath)
         expect(content.charCodeAt(0)).toBe(0xfeff)
         expect(content.slice(1)).toBe("using Up;\n")
+      }),
+    )
+
+    it.instance("preserves existing CRLF when oldString is empty", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "existing-crlf.txt")
+        yield* put(filepath, "old\r\ncontent\r\n")
+
+        yield* run({ filePath: filepath, oldString: "", newString: "new\ncontent\n" })
+
+        // oldString="" 兼有 create/overwrite 语义；proposal 已存在时仍须尊重磁盘 CRLF 属性。
+        expect(yield* loadRaw(filepath)).toBe("new\r\ncontent\r\n")
+      }),
+    )
+
+    itLineEndingFormatted.instance("restores existing CRLF after formatting a create-overwrite", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "formatted-create-overwrite.txt")
+        yield* put(filepath, "old\r\ncontent\r\n")
+
+        yield* run({ filePath: filepath, oldString: "", newString: "new\ncontent\n" })
+
+        // create 与 overwrite 共用参数形态但不是同一磁盘属性域；existing proposal 必须在 formatter 后还原。
+        expect(yield* loadRaw(filepath)).toBe("formatted\r\ncontent\r\n")
+      }),
+    )
+
+    it.instance("keeps submitted LF when creating a missing file", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "new-lf.txt")
+
+        yield* run({ filePath: filepath, oldString: "", newString: "new\ncontent\n" })
+
+        // 缺失文件没有可继承的物理属性；该断言防止 overwrite 修复侵入纯 create 语义。
+        expect(yield* loadRaw(filepath)).toBe("new\ncontent\n")
       }),
     )
 
@@ -454,6 +523,9 @@ describe("tool.edit", () => {
             { oldString: "foo - bar", newString: "foo - bar" },
           ],
         })
+        // located slice 是 en-dash 但该条目跳写且 history 不覆写；不能误报为 normalized truth rewrite。
+        expect(result.metadata.inputProvenance).toBeUndefined()
+        expect(result.output).not.toContain("normalized oldString truth rewrites")
         // processor 消费面：公开回写契约直接验证，不重复 edit.ts 内部拼装逻辑。
         const resolved = resolveCompletedToolInput(
           { filePath: filepath, edits: [] as unknown[] },
@@ -569,6 +641,32 @@ describe("tool.edit", () => {
 
         expect(result.output).toContain("Warning: 1 of 2 edit(s) were no-ops")
         expect(Buffer.byteLength(result.output, "utf-8")).toBeLessThanOrEqual(1024)
+      }),
+    )
+
+    itTruncated.instance("bounds many rewrite fingerprints while preserving full provenance metadata", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "many-rewrites.txt")
+        const rewrites = Array.from({ length: 14 }, (_, index) => ({
+          oldString: `"v${index}"`,
+          newString: `"n${index}"`,
+        }))
+        yield* put(filepath, `${rewrites.map((_, index) => `say “v${index}”`).join("\n")}\nstable\n`)
+
+        const result = yield* run({
+          filePath: filepath,
+          edits: [...rewrites, { oldString: "stable", newString: "stable" }],
+        })
+
+        // DB metadata 是完整取证面；模型 output 只在既有 tail budget 内放完整 fingerprint 与省略数。
+        expect(result.metadata.inputProvenance?.rewrites).toHaveLength(14)
+        expect(result.output).toContain("Warning: 1 of 15 edit(s) were no-ops")
+        expect(result.output).toContain("Warning: normalized oldString truth rewrites were recorded:")
+        expect(result.output).toMatch(/- edits\[0\]: original=4 UTF-8 bytes sha256=[0-9a-f]{64}/)
+        expect(result.output).toMatch(/- \.\.\. \d+ more rewrite fingerprint\(s\) stored in metadata\.inputProvenance/)
+        expect(Buffer.byteLength(result.output, "utf-8")).toBeLessThanOrEqual(1024)
+        expect(result.output.split("\n").length).toBeLessThanOrEqual(20)
       }),
     )
 
@@ -1160,6 +1258,19 @@ describe("tool.edit", () => {
       expect(counts.crlf).toBeGreaterThan(0)
     }
 
+    itLineEndingFormatted.instance("restores existing CRLF after formatting a normal edit", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filePath = path.join(test.directory, "formatted-update.txt")
+        yield* put(filePath, "before\r\ncontent\r\n")
+
+        yield* run({ filePath, oldString: "before", newString: "new" })
+
+        // 普通 edit 的 formatter 写回仍在同一 mutation 中，最终文件必须保留文本变化与 CRLF。
+        expect(yield* loadRaw(filePath)).toBe("formatted\r\ncontent\r\n")
+      }),
+    )
+
     type Input = {
       content: string
       oldString: string
@@ -1482,8 +1593,41 @@ describe("tool.edit", () => {
           edits: [{ oldString: '"hello"', newString: '"hi"' }],
         })
         expect(yield* load(filepath)).toBe('say "hi" end')
-        const sync = (result.metadata as { _syncInput?: { edits: Array<{ oldString: string }> } })._syncInput
-        expect(sync?.edits[0]?.oldString).toBe("\u201Chello\u201D")
+        const metadata = result.metadata as {
+          _syncInput?: { edits: Array<{ oldString: string }> }
+          inputProvenance?: { rewrites: Array<{ editIndex: number; original: { byteLength: number; sha256: string } }> }
+        }
+        expect(metadata._syncInput?.edits[0]?.oldString).toBe("\u201Chello\u201D")
+        // fingerprint 取模型提交的 ASCII oldString UTF-8 字节，不取命中的弯引号磁盘切片。
+        expect(metadata.inputProvenance).toEqual({
+          rewrites: [
+            {
+              editIndex: 0,
+              original: {
+                byteLength: 7,
+                sha256: "5aa762ae383fbb727af3c7a36d4940a5b8c40a989452d2304fc958ff3f354e7a",
+              },
+            },
+          ],
+        })
+        expect(result.output).toContain("Warning: normalized oldString truth rewrites were recorded:")
+        expect(result.output).toContain(
+          "- edits[0]: original=7 UTF-8 bytes sha256=5aa762ae383fbb727af3c7a36d4940a5b8c40a989452d2304fc958ff3f354e7a",
+        )
+      }),
+    )
+
+    it.instance("exact match does not emit rewrite provenance", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "exact-provenance.txt")
+        yield* put(filepath, "before")
+
+        const result = yield* run({ filePath: filepath, oldString: "before", newString: "after" })
+
+        // fingerprint 只解释 normalized truth rewrite；字面命中没有被覆写的原输入可披露。
+        expect(result.metadata.inputProvenance).toBeUndefined()
+        expect(result.output).not.toContain("normalized oldString truth rewrites")
       }),
     )
 
@@ -1549,11 +1693,23 @@ describe("tool.edit", () => {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "hybrid-all.txt")
         yield* put(filepath, "x-y and x\u2013y")
-        yield* run({
+        const result = yield* run({
           filePath: filepath,
           edits: [{ oldString: "x-y", newString: "z", replaceAll: true }],
         })
         expect(yield* load(filepath)).toBe("z and z")
+        // 两个实际 slice 异构时 sync oldString 只能回退模型形态，但 mismatch 事实不得随之丢失。
+        expect(result.metadata.inputProvenance).toEqual({
+          rewrites: [
+            {
+              editIndex: 0,
+              original: {
+                byteLength: 3,
+                sha256: "cc96fed8b030120e59a6a0372a92de2d6abebf40d83d57012d449419c6799b7f",
+              },
+            },
+          ],
+        })
       }),
     )
 
@@ -1636,12 +1792,17 @@ describe("tool input truth sync (processor contract)", () => {
   })
 
   test("strip removes temporary truth keys", () => {
+    const inputProvenance = {
+      rewrites: [{ editIndex: 0, original: { byteLength: 7, sha256: "a".repeat(64) } }],
+    }
     const stripped = stripToolTruthMetadata({
       diff: "d",
       _syncInput: { edits: [] },
       _formattedContent: "x",
+      inputProvenance,
     })
-    expect(stripped).toEqual({ diff: "d" })
+    // underscore keys 是短生命周期 truth transport；公开 provenance 是 completed Message 的取证记录。
+    expect(stripped).toEqual({ diff: "d", inputProvenance })
   })
 
   // INV-07：failToolCall non-abort 终态化的 metadata 合同。

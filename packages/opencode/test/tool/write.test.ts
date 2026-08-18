@@ -71,6 +71,30 @@ const itFormatted = testEffect(
   ),
 )
 
+// 该 formatter 同时改变语义内容并强制 LF，区分“保留格式化结果”与“恢复文件行尾属性”。
+const lineEndingFormatLayer = Layer.succeed(Format.Service, {
+  init: () => Effect.void,
+  status: () => Effect.succeed([]),
+  file: (filepath: string) =>
+    Effect.promise(async () => {
+      const content = await fs.readFile(filepath, "utf-8")
+      await fs.writeFile(filepath, content.replace("before", "formatted").replace(/\r\n?/g, "\n"))
+      return true
+    }),
+})
+
+const itLineEndingFormatted = testEffect(
+  Layer.mergeAll(
+    LSP.defaultLayer,
+    AppFileSystem.defaultLayer,
+    Bus.layer,
+    lineEndingFormatLayer,
+    CrossSpawnSpawner.defaultLayer,
+    Truncate.defaultLayer,
+    Agent.defaultLayer,
+  ),
+)
+
 const init = Effect.fn("WriteToolTest.init")(function* () {
   const info = yield* WriteTool
   return yield* info.init()
@@ -212,7 +236,8 @@ describe("tool.write", () => {
         expect(diff).not.toContain("+Line 1")
         expect(diff).not.toContain("-Line 2")
         expect(diff).not.toContain("+Line 2")
-        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(content)
+        // 覆写参数表示逻辑行，已有文件的 CRLF 是磁盘属性；断言磁盘字节而非归一化 diff。
+        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(content.replaceAll("\n", "\r\n"))
       }),
     )
 
@@ -231,6 +256,8 @@ describe("tool.write", () => {
         expect(diff).not.toContain("+Line 1")
         expect(diff).not.toContain("-Line 2")
         expect(diff).not.toContain("+Line 2")
+        // CR-only 也属于已有文件的物理属性，不能因模型统一提交 LF 而被静默清洗。
+        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(content.replaceAll("\n", "\r"))
       }),
     )
   })
@@ -368,6 +395,21 @@ describe("tool.write", () => {
   // _formattedContent 由 processor 的 completeToolCall 消费，用于覆盖 state.input.content，
   // 使 DB 中持久化的 input 与磁盘实际内容一致。
   describe("auto-format _formattedContent", () => {
+    itLineEndingFormatted.instance("restores existing CRLF after formatter while keeping formatted content", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "formatted-crlf.ts")
+        yield* Effect.promise(() => fs.writeFile(filepath, "old\r\ncontent\r\n"))
+
+        const result = yield* run({ filePath: filepath, content: "before\ncontent\n" })
+
+        // formatter 的文本变化必须存活，但它选择的 LF 不能覆盖 proposal 已有的 CRLF 属性。
+        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe("formatted\r\ncontent\r\n")
+        // Tool wrapper 的可见文本 sanitizer 仍输出 LF；物理行尾保真只属于磁盘 owner。
+        expect(result.metadata._formattedContent).toBe("formatted\ncontent\n")
+      }),
+    )
+
     // 格式化改变了内容（末尾追加换行）→ metadata 应包含 _formattedContent
     itFormatted.instance("sets _formattedContent when format changes content", () =>
       Effect.gen(function* () {
