@@ -270,8 +270,8 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       },
       "session.next.step.failed": (event) => {
         return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
-          // producer 已确认本 attempt 无实际 Tool，撤回前缀而不更改其他失败的 partial 保留。
-          if (event.data.discardIncompleteAttempt === true) draft.content = []
+          // 只撤回失败正文和推理；实际Tool及其副作用结算仍须保留，普通失败不改partial。
+          if (event.data.discardIncompleteAttempt === true) draft.content = draft.content.filter(part => part.type === "tool")
           draft.time.completed = event.data.timestamp
           draft.finish = "error"
           draft.error = event.data.error

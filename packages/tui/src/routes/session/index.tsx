@@ -97,6 +97,7 @@ import type {
 } from "@opencode-ai/sdk/v2"
 import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
+import { withinMarkdownBudget } from "../../util/text-budget"
 import { toolDisplayMetadata, webSearchProviderLabel } from "../../util/tool-display"
 import { Dynamic, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "../../context/sdk"
@@ -2057,19 +2058,33 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
   const { theme, syntax } = useTheme()
   // #135：assistant 未完成则流式渲染
   const streaming = createMemo(() => !props.message.time?.completed)
+  // [local-smark] 渲染熔断：超预算内容在构造 parser-backed Markdown 前降级纯文本；
+  // streaming 与完成态共用同一确定性判定，分类不依赖完成状态，避免同一内容在流式中改变投影。
+  const content = createMemo(() => props.part.text.trim())
+  // 超预算内容改走纯 text renderable：32KiB/1000 行由 text-budget 模块固定，
+  // per-Part 判定与完成态无关（streaming 与 settled 共用同一分类）。
+  const overBudget = createMemo(() => !withinMarkdownBudget(content()))
   return (
-    <Show when={props.part.text.trim()}>
+    <Show when={content()}>
       <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} marginTop={1} flexShrink={0}>
-        <markdown
-          syntaxStyle={syntax()}
-          streaming={streaming()}
-          internalBlockMode="top-level"
-          content={props.part.text.trim()}
-          tableOptions={{ style: "grid" }}
-          conceal={ctx.conceal()}
-          fg={theme.markdownText}
-          bg={theme.background}
-        />
+        <Show
+          when={overBudget()}
+          fallback={
+            <markdown
+              syntaxStyle={syntax()}
+              streaming={streaming()}
+              internalBlockMode="top-level"
+              content={content()}
+              tableOptions={{ style: "grid" }}
+              conceal={ctx.conceal()}
+              fg={theme.markdownText}
+              bg={theme.background}
+            />
+          }
+        >
+          {/* 超预算纯文本投影：构造前分类，非 parser 失败 fallback。 */}
+          <text fg={theme.markdownText}>{content()}</text>
+        </Show>
       </box>
     </Show>
   )

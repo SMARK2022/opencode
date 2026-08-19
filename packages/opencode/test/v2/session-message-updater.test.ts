@@ -267,3 +267,80 @@ test("compaction events reduce to compaction message only when completed", () =>
     time: { created: DateTime.makeUnsafe(4) },
   })
 })
+
+test("legacy retry without an owner stays no-op and the next step.started completes the stale assistant", () => {
+  // #582：memory adapter 是 SQLite projector 与 live store 的共同语义基准，此处锁定即两处共同合同。
+  const state: SessionMessageUpdater.MemoryState = { messages: [] }
+  const sessionID = SessionID.make("session")
+  const model = {
+    id: ModelV2.ID.make("model"),
+    providerID: ProviderV2.ID.make("provider"),
+    variant: ModelV2.VariantID.make("default"),
+  }
+
+  const stepStarted = (assistantMessageID: SessionMessage.ID, time: number) =>
+    ({
+      id: EventV2.ID.create(),
+      type: "session.next.step.started",
+      // 目标事件 schema 以 assistantMessageID 声明归属：与 source 的全局 current 隐式定位不同，
+      // 这使 stale 终结与追加可以独立定位而不依赖 adapter 内部顺序。
+      data: { sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(time), agent: "build", model },
+    }) satisfies SessionEvent.Event
+
+  const firstID = SessionMessage.ID.create()
+  const secondID = SessionMessage.ID.create()
+  // 两条 Assistant 各自持有显式 ID：验证不依赖 ID 大小或生成顺序。
+  Effect.runSync(SessionMessageUpdater.update(SessionMessageUpdater.memory(state), stepStarted(firstID, 1)))
+  Effect.runSync(
+    SessionMessageUpdater.update(SessionMessageUpdater.memory(state), {
+      id: EventV2.ID.create(),
+      type: "session.next.text.started",
+      data: { sessionID, assistantMessageID: firstID, textID: "txt-1", timestamp: DateTime.makeUnsafe(2) },
+    } satisfies SessionEvent.Event),
+  )
+  // Legacy无归属retry仍不猜测当前助手；Native带ID重试由runner回归独立覆盖。
+  // 下一次Step.Started继续承担旧dual-write残留助手的终结。
+  Effect.runSync(
+    SessionMessageUpdater.update(SessionMessageUpdater.memory(state), {
+      id: EventV2.ID.create(),
+      type: "session.next.retried",
+      data: {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(3),
+        attempt: 1,
+        // RetryError 合同：message+isRetryable 必填；与 processor 熔断发出的
+        // retryable APIError 形状保持一致，验证投影层不反序列化失败。
+        error: { message: "over limit", isRetryable: true },
+      },
+    } satisfies SessionEvent.Event),
+  )
+  Effect.runSync(SessionMessageUpdater.update(SessionMessageUpdater.memory(state), stepStarted(secondID, 4)))
+  // 此处故意不带assistantMessageID，只锁定Legacy兼容事件，不代表Native重试为空操作。
+  // 新Step使用显式ID，仍不能把旧助手的错误归到新助手之外。
+  Effect.runSync(
+    SessionMessageUpdater.update(SessionMessageUpdater.memory(state), {
+      id: EventV2.ID.create(),
+      type: "session.next.step.failed",
+      data: {
+        sessionID,
+        assistantMessageID: secondID,
+        timestamp: DateTime.makeUnsafe(5),
+        error: { type: "unknown", message: "terminal" },
+      },
+    } satisfies SessionEvent.Event),
+  )
+
+  expect(state.messages).toHaveLength(2)
+  const stale = state.messages[0]
+  if (stale?.type !== "assistant") return
+  // retried 不产生新投影；下一次 Step.Started 把残留 Assistant 置 completed。
+  // 该断言是长度断言的另一面：若 retried 曾投影，这里会指向错误的 Assistant。
+  expect(stale.time.completed).toEqual(DateTime.makeUnsafe(4))
+  const fresh = state.messages[1]
+  if (fresh?.type !== "assistant") return
+  // 终态 Step.Failed 只作用于当前 active Assistant：completed + finish=error；
+  // stale 虽已 completed 但不受本次 error 污染，两条 Assistant 生命周期独立。
+  expect(fresh.time.completed).toEqual(DateTime.makeUnsafe(5))
+  expect(fresh.finish).toBe("error")
+  expect(fresh.error).toEqual({ type: "unknown", message: "terminal" })
+})
