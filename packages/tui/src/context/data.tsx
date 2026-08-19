@@ -254,7 +254,8 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           message.update(event.data.sessionID, (draft) => {
             const currentAssistant = message.assistant(draft, event.data.assistantMessageID)
             if (!currentAssistant) return
-            if (event.data.discardIncompleteAttempt === true) currentAssistant.content = []
+            // 与durable updater同义：熔断撤回正文/推理，不擦除已发生的Tool结果。
+            if (event.data.discardIncompleteAttempt === true) currentAssistant.content = currentAssistant.content.filter(part => part.type === "tool")
             currentAssistant.time.completed = event.data.timestamp
             currentAssistant.finish = "error"
             currentAssistant.error = event.data.error

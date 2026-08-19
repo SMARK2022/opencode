@@ -1099,6 +1099,91 @@ describe("SessionRunnerLLM", () => {
     }),
     30000,
   )
+  it.live("limits Native text per attempt without replaying tools or retaining rejected prefixes", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const runner = yield* SessionRunner.Service
+      const usage = SessionRequestUsage.make((yield* Database.Service).db)
+      const events = yield* EventV2.Service
+      const retries = yield* Queue.unbounded<string>()
+      const off = yield* events.listen(event => Schema.is(SessionEvent.Retried)(event)
+        ? Queue.offer(retries, event.data.error.message).pipe(Effect.asVoid) : Effect.void)
+      yield* Effect.addFinalizer(() => off)
+      yield* Effect.addFinalizer(() => Effect.sync(() => { responses = undefined; requests.length = 0; executions.length = 0 }))
+      // 两个独立Part各32Ki字符，恰好用满预算；不能把预算误设为单Part或严格小于。
+      const exact: LLMEvent[] = [
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.textStart({ id: "limit-a" }), LLMEvent.textDelta({ id: "limit-a", text: "a".repeat(32 * 1024) }), LLMEvent.textEnd({ id: "limit-a" }),
+        LLMEvent.textStart({ id: "limit-b" }), LLMEvent.textDelta({ id: "limit-b", text: "b".repeat(32 * 1024) }), LLMEvent.textEnd({ id: "limit-b" }),
+      ]
+      const oversized: LLMEvent[] = [
+        ...exact,
+        LLMEvent.reasoningStart({ id: "limit-reasoning" }), LLMEvent.reasoningDelta({ id: "limit-reasoning", text: "rejected-reasoning" }),
+        LLMEvent.textStart({ id: "limit-crossing" }), LLMEvent.textDelta({ id: "limit-crossing", text: "x" }),
+      ]
+      const id = SessionV2.ID.make("ses_output_limit_exact")
+      yield* insertSession(id)
+      yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Use the exact budget" }), resume: false })
+      responses = [[...exact, LLMEvent.stepFinish({ index: 0, reason: "stop" }), LLMEvent.finish({ reason: "stop" })]]
+      requests.length = 0
+      yield* runner.run({ sessionID: id, force: true })
+      expect(requests).toHaveLength(1)
+      expect((yield* session.context(id)).flatMap(message => message.type === "assistant"
+        ? message.content.flatMap(part => part.type === "text" ? [part.text.length] : []) : [])).toEqual([32 * 1024, 32 * 1024])
+      for (const repeated of [false, true]) {
+        const id = SessionV2.ID.make(`ses_output_limit_retry_${repeated}`)
+        yield* insertSession(id)
+        yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Handle excessive output" }), resume: false })
+        responses = [oversized, repeated ? oversized : fragmentFixture("text", "limit-recovered", ["recovered"]).completeEvents]
+        requests.length = 0
+        const fiber = yield* runner.run({ sessionID: id, force: true }).pipe(Effect.exit, Effect.forkChild)
+        expect(yield* Queue.take(retries).pipe(Effect.timeout("5 seconds"))).toBe("Provider output exceeded the 64 KiB text limit")
+        // 观察真实重试通知；保留生产退避与同一助手，不靠推进虚拟时钟制造成功。
+        expect((yield* session.context(id)).filter(message => message.type === "assistant")).toMatchObject([{ content: [] }])
+        const result = yield* Fiber.join(fiber)
+        expect(Exit.isFailure(result)).toBe(repeated)
+        expect(requests).toHaveLength(2)
+        expect(requests[1]?.messages).toEqual(requests[0]?.messages)
+        const context = yield* session.context(id)
+        expect(context.filter(message => message.type === "assistant")).toMatchObject([
+          repeated ? { finish: "error", content: [] } : { finish: "stop", content: [{ type: "text", text: "recovered" }] },
+        ])
+        expect(JSON.stringify(context)).not.toContain("rejected-reasoning")
+        expect((yield* usage.list({ sessionID: id }))[0]).toMatchObject({ status: repeated ? "error" : "completed", assistantCount: 1 })
+        // 重放durable事件后同形，不能只清live显示而把失败正文留在历史。
+        yield* replaySessionProjection(id)
+        expect(yield* session.context(id)).toEqual(context)
+      }
+      for (const hosted of [false, true]) {
+        const id = SessionV2.ID.make(`ses_output_limit_tool_${hosted}`)
+        yield* insertSession(id)
+        yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Execute once before the limit" }), resume: false })
+        responses = [[
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.toolCall({ id: "limit-once", name: "echo", input: { text: "once" }, providerExecuted: hosted }),
+          ...(hosted ? [LLMEvent.toolResult({ id: "limit-once", name: "echo", result: { type: "text", value: "once" }, providerExecuted: true })] : []),
+          ...oversized.slice(1),
+        ]]
+        requests.length = 0
+        executions.length = 0
+        const result = yield* runner.run({ sessionID: id, force: true }).pipe(Effect.exit)
+        expect(Exit.isFailure(result)).toBe(true)
+        expect(requests).toHaveLength(1)
+        expect(executions).toHaveLength(hosted ? 0 : 1)
+        expect(yield* Queue.size(retries)).toBe(0)
+        const context = yield* session.context(id)
+        // 失败Text/Reasoning撤回，但已执行Tool仍结算为成功且不可被重试复演。
+        expect(context.filter(message => message.type === "assistant")).toMatchObject([
+          { finish: "error", content: [{ type: "tool", state: { status: "completed", input: { text: "once" } } }] },
+        ])
+        expect((yield* usage.list({ sessionID: id }))[0]).toMatchObject({ status: "error", assistantCount: 1 })
+        yield* replaySessionProjection(id)
+        expect(yield* session.context(id)).toEqual(context)
+      }
+    }),
+    30000,
+  )
   it.effect("records Native stream and tool milestones without logging payloads", () =>
     Effect.gen(function* () {
       yield* setup

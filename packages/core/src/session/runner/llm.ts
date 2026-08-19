@@ -480,11 +480,21 @@ const layer = Layer.effect(
         message: "Provider returned incomplete completion (finish_reason: unknown)",
       }) })
       const retryError = new SessionV1.APIError({ message: incomplete.reason.message, isRetryable: true, metadata: { finishReason: "unknown" } })
+      // 与V1共用65,536个UTF-16字符语义；只给无真实Tool的超限一次重试，不进入Goal错误续跑。
+      const outputLength = new LLMError({ module: "SessionRunner", method: "stream", reason: new InvalidProviderOutputReason({
+        message: "Provider output exceeded the 64 KiB text limit",
+      }) })
+      let outputLimitRetried = false
+      // policy的set不携带cause，在私有parse闭包交接准确错误，不修改公共重试接口。
+      let retryErrorForAttempt = retryError
       // 请求归属与工具读取门寿命不同：dispatch固定代际，终态后的同代最终消耗仍结算。
       const dispatchedGoal = yield* goals.get(session.id)
       const expectedUsage = Option.isSome(dispatchedGoal) && dispatchedGoal.value.status === "active" ? { goalID: dispatchedGoal.value.id, generation: dispatchedGoal.value.generation } : undefined
       // 每个获准 retry 才重新调用唯一 stream；不能反复消费同一个已构造响应。
-      const providerStream = Effect.suspend(() => llm.stream(request, (body) => Effect.gen(function* () {
+      const providerStream = Effect.suspend(() => {
+        // 每次订阅重置累计值，不能在text-start重置而放过多个独立正文块。
+        let attemptTextChars = 0
+        return llm.stream(request, (body) => Effect.gen(function* () {
         // 同一次 compile 已合并模型/路由默认值并完成协议 lowering，估算只读取该有效正文。
         inputEstimate = {
           ...Token.estimateRequest(body, samples, system.sections),
@@ -521,6 +531,14 @@ const layer = Layer.effect(
               terminalError = !isContextOverflowFailure(event)
             }
             if (event.type === "tool-call") hasToolCall = true
+            if (event.type === "text-delta") {
+              // 拒绝越界delta后撤回已接受前缀，flush和durable/live清理仍走同一发布owner。
+              if (attemptTextChars + event.text.length > 64 * 1024) {
+                yield* withPublication(publisher.failAssistant(outputLength.reason.message, false, false, true))
+                return yield* outputLength
+              }
+              attemptTextChars += event.text.length
+            }
             if (event.type === "step-finish" && event.reason === "unknown" && !hasToolCall && !publisher.stepSettlement()) {
               // 成功事件和用量确认前清理；tool-bearing attempt 从不重放。
               yield* withPublication(publisher.failAssistant(incomplete.reason.message, false, false, true))
@@ -576,13 +594,22 @@ const layer = Layer.effect(
         }),
         // 成功 EOF 保留默认残片通知；只有失败/中断 cleanup 使用退出安全模式。
         Effect.onExit(exit => withPublication(publisher.flush(exit._tag === "Failure"))),
-      )).pipe(Effect.retry({
-        while: error => error === incomplete,
+        )
+      }).pipe(Effect.retry({
         schedule: SessionRetry.policy({
-          provider: String(model.provider), parse: () => retryError.toObject(),
+          provider: String(model.provider), parse: error => {
+            // 必须在set发布Retried之前拒绝终态；Effect v4的while会先执行内层schedule副作用。
+            if (error !== incomplete && error !== outputLength) return { name: "UnknownError", data: {} }
+            if (error === outputLength && (hasToolCall || outputLimitRetried)) return { name: "MessageOutputLengthError", data: {} }
+            if (error === outputLength) outputLimitRetried = true
+            retryErrorForAttempt = error === outputLength
+              ? new SessionV1.APIError({ message: outputLength.reason.message, isRetryable: true, metadata: { reason: "output-length" } })
+              : retryError
+            return retryErrorForAttempt.toObject()
+          },
           set: ({ attempt }) => Effect.gen(function* () {
             hasToolCall = false
-            yield* withPublication(publisher.retry(attempt, retryError.data))
+            yield* withPublication(publisher.retry(attempt, retryErrorForAttempt.data))
           }),
         }),
       }))
@@ -611,6 +638,9 @@ const layer = Layer.effect(
           }
           if (stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)) yield* FiberSet.clear(toolFibers)
           const settled = yield* restore(awaitToolFibers(toolFibers)).pipe(Effect.exit)
+          // 熔断不能重放或提前结算本地副作用；原fiber完成后才收尾剩余输入/托管工具。
+          if (failure === outputLength)
+            yield* withPublication(publisher.failUnsettledTools(outputLength.reason.message, false, true))
           // 仅真正失败/中断退出隔离通知；普通工具错误仍沿用原 model-facing 路径。
           const finalizer = stream._tag === "Failure" ||
             (settled._tag === "Failure" && (Cause.hasInterrupts(settled.cause) || isUserDeclined(settled.cause)))

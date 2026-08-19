@@ -13,6 +13,7 @@ import { Snapshot } from "@/snapshot"
 import { Session } from "./session"
 import { LLM } from "./llm"
 import { MessageV2 } from "./message-v2"
+import { MessageError } from "./message-error"
 import { isOverflow } from "./overflow"
 import { PartID } from "./schema"
 import type { SessionID } from "./schema"
@@ -41,6 +42,9 @@ const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
 const DOOM_LOOP_THRESHOLD = 3
 // #216：工具中止错误文案常量——prompt.ts/tools.ts 共用同一字符串判断中止路径
 export const TOOL_ABORTED_ERROR = "Tool execution aborted"
+// attempt内全部Text Part共用65,536个UTF-16 code unit预算；不是UTF-8字节或token预算。
+// 按string.length直接累计，不为每个delta编码或分配第二份正文。
+const OUTPUT_TEXT_LIMIT = 64 * 1024
 
 /**
  * #514：工具完成时的 input 真值回写（INV-16 / write format 同构）。
@@ -183,6 +187,8 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
+  // 当前 attempt 内全部 Text Part 的累计正文字符数；retry 入口与 process 起点重置。
+  attemptTextChars: number
   // 本次尝试可撤回的非 Tool Part；工具副作用与已确认 step-finish 不进入集合。
   attemptPartIDs: Set<PartID>
   // 仅记录本次provider尝试的语义输出；重试不能借用上一轮的标志。
@@ -230,12 +236,15 @@ const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        attemptTextChars: 0,
         attemptPartIDs: new Set(),
         hasText: false,
         hasReasoning: false,
         hasToolCall: false,
       }
       let aborted = false
+      // 语义重试额度跨内部attempt保留，在下一次process重置，不改通用retry policy。
+      let outputLimitRetried = false
       // 三条终态写共享许可；只串行读写，不在其中等待工具完成信号。
       const toolPermit = Semaphore.makeUnsafe(1)
       // 并发副作用工具共享同一基线及失败；等待者取消不能让另一工具绕过捕获。
@@ -586,6 +595,22 @@ const layer = Layer.effect(
           })
         })
 
+      // 复用同一撤回owner，解除live引用后再失败，防止cleanup重建已拒绝正文。
+      const breachOutputLimit = Effect.fnUntraced(function* () {
+        yield* discardIncompleteAttempt()
+        if (!outputLimitRetried && !ctx.hasToolCall) {
+          outputLimitRetried = true
+          return yield* Effect.fail(
+            new SessionV1.APIError({
+              message: "Provider output exceeded the 64 KiB text limit",
+              isRetryable: true,
+              metadata: { reason: "output-length" },
+            }),
+          )
+        }
+        return yield* Effect.fail(new MessageError.OutputLengthError({}))
+      })
+
       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
         switch (value.type) {
           case "reasoning-start":
@@ -868,6 +893,13 @@ const layer = Layer.effect(
 
           case "text-delta":
             if (!ctx.currentText) return
+            // 在追加正文和发布Part delta之前检查累计值，不接纳越界delta。
+            // 等于预算仍合法；原始provider事件与用量结算继续由各自owner处理。
+            if (ctx.attemptTextChars + value.text.length > OUTPUT_TEXT_LIMIT) {
+              yield* breachOutputLimit()
+              return
+            }
+            ctx.attemptTextChars += value.text.length
             // 只建立文本块而没有正文，不应绕过空完成检测。
             if (value.text.length > 0) ctx.hasText = true
             ctx.currentText.text += value.text
@@ -882,10 +914,11 @@ const layer = Layer.effect(
             })
             return
 
-          case "text-end":
+          case "text-end": {
             if (!ctx.currentText) return
             // oxlint-disable-next-line no-self-assign -- reactivity trigger
             ctx.currentText.text = ctx.currentText.text
+            const beforePluginLength = ctx.currentText.text.length
             ctx.currentText.text = (yield* plugin.trigger(
               "experimental.text.complete",
               {
@@ -895,6 +928,14 @@ const layer = Layer.effect(
               },
               { text: ctx.currentText.text },
             )).text
+            // hook终值在持久写入前按长度差复检；收缩也同步下调，避免重复计数。
+            // 这里只调整本attempt正文额度，不触碰Tool、已确认step用量或原始事件。
+            const pluginGrowth = ctx.currentText.text.length - beforePluginLength
+            if (ctx.attemptTextChars + pluginGrowth > OUTPUT_TEXT_LIMIT) {
+              yield* breachOutputLimit()
+              return
+            }
+            ctx.attemptTextChars += pluginGrowth
             {
               const end = Date.now()
               ctx.currentText.time = { start: ctx.currentText.time?.start ?? end, end }
@@ -903,6 +944,7 @@ const layer = Layer.effect(
             yield* session.updatePart(ctx.currentText)
             ctx.currentText = undefined
             return
+          }
 
           case "finish":
             return
@@ -1040,11 +1082,14 @@ const layer = Layer.effect(
         // 仅本次准备请求触发的内部转移，不能吞掉真实失败或用户中断。
         const preflightCompaction = Symbol("preflight-compaction")
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
+        // 每个 process() 只允许一次语义重试；跨 process 的新回合重新获得额度。
+        outputLimitRetried = false
 
         const result = yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
+            ctx.attemptTextChars = 0
             ctx.attemptPartIDs.clear()
             // 每次重试都重新判断本轮输出，不能被旧标志误放行。
             ctx.hasText = false

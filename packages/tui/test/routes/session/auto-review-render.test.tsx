@@ -673,6 +673,35 @@ test.each(["pending", "completed"] as const)("auto review deep link keeps the ma
   }, { height: 14 }, { [childID]: () => child })
 })
 
+test("assistant text applies the Markdown budget in streaming and settled frames", async () => {
+  for (const body of ["within", "characters", "lines"] as const) {
+    for (const streaming of [true, false]) {
+      const marker = `BUDGET_${body.toUpperCase()}`
+      const text = body === "within" ? `**${marker}**`
+        : body === "characters" ? `${"x".repeat(32 * 1024)}\n**${marker}**`
+        : `${"x\n".repeat(1001)}**${marker}**`
+      const info: AssistantMessage = {
+        id: "msg_budget", sessionID, role: "assistant", parentID: "msg_request", agent: "build", mode: "build",
+        time: { created: 1, ...(streaming ? {} : { completed: 2 }) }, modelID: "model", providerID: "provider",
+        path: { cwd: directory, root: directory }, cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      }
+      const part: Part = { id: "part_budget", sessionID, messageID: info.id, type: "text", text }
+      await withRenderedReview([{ info, parts: [part] }], async (app) => {
+        // marker放在末尾，真实贴底视口才能观察超长正文，不能用函数返回值代替渲染分支。
+        await waitForReviewFrame(app, async (frame) => {
+          if (frame.includes(marker)) return true
+          await Bun.sleep(5)
+          return false
+        }, { maxPasses: 400 })
+        const frame = app.captureCharFrame()
+        // 预算内继续Markdown conceal；两种超限则保留字面星号，流式与完成态一致。
+        expect(frame.includes(`**${marker}**`)).toBe(body !== "within")
+      }, { width: 80, height: 16 })
+    }
+  }
+})
+
 async function withRenderedReview(
   messages: { info: AssistantMessage | UserMessage; parts: Part[] }[],
   run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"]) => Promise<void>,

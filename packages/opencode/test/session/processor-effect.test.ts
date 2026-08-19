@@ -29,6 +29,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { LLMEvent } from "@opencode-ai/llm"
+import { Plugin } from "../../src/plugin"
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -234,6 +235,85 @@ const providerErrorLLM = Layer.succeed(
 )
 const providerErrorEnv = LayerNode.compile(root, [...replacements, [LLM.node, providerErrorLLM]])
 const itProviderError = testEffect(providerErrorEnv)
+
+// [local-smark] 脚本化 LLM：同一响应内多个独立 ID 的 text blocks 无法经 OpenAI-compatible
+// 测试端点表达；在 LLM.Service 公开接口上重放固定事件序列，SessionProcessor.process 仍是真实被测单元。
+const scriptedLlmRunner = (events: LLMEvent[]) => {
+  let streamCalls = 0
+  return {
+    // calls 取差值而非绝对值：module 级 runner 会被同进程多次运行复用。
+    calls: () => streamCalls,
+    it: testEffect(
+      LayerNode.compile(
+        LayerNode.group([root, LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] })]),
+        [
+          ...replacements,
+          [
+            LLM.node,
+            Layer.succeed(
+              LLM.Service,
+              LLM.Service.of({
+                stream: () => {
+                  streamCalls++
+                  return Stream.fromIterable(events)
+                },
+              }),
+            ),
+          ] as const,
+        ],
+      ),
+    ),
+  }
+}
+
+// 两个独立 ID 的 text Part 各 40 KiB / 25 KiB+1，合计 66,561 > 64 KiB：
+// 任一 Part 单独都在旧逐 Part 语义下合法，只有 attempt 级累计预算能拦截。
+const cumulativeScript = scriptedLlmRunner([
+  LLMEvent.stepStart({ index: 0 }),
+  LLMEvent.textStart({ id: "txt-cum-a" }),
+  LLMEvent.textDelta({ id: "txt-cum-a", text: "a".repeat(40 * 1024) }),
+  LLMEvent.textEnd({ id: "txt-cum-a" }),
+  LLMEvent.textStart({ id: "txt-cum-b" }),
+  LLMEvent.textDelta({ id: "txt-cum-b", text: "b".repeat(25 * 1024 + 1) }),
+])
+
+// 真实tool-call及结算之后超限必须立即终态，不能把仅开始输入误当作已发生调用。
+// providerExecuted脚本只提供事件，不注册或执行本地bash工具。
+const toolBearingScript = scriptedLlmRunner([
+  LLMEvent.stepStart({ index: 0 }),
+  LLMEvent.toolInputStart({ id: "call-tb", name: "bash" }),
+  LLMEvent.toolCall({ id: "call-tb", name: "bash", input: {}, providerExecuted: true }),
+  LLMEvent.toolResult({ id: "call-tb", name: "bash", result: { type: "error", value: "tool settled before output limit" }, providerExecuted: true }),
+  LLMEvent.textStart({ id: "txt-tb" }),
+  LLMEvent.textDelta({ id: "txt-tb", text: "x".repeat(65_537) }),
+])
+
+// #582：experimental.text.complete 是 delta guard 之后仍可扩大正文的 reachable public hook；
+// 只扩张第一次完成，让 retry 后的 attempt 保留原文，同一用例内同时验证终值复检与恢复路径。
+let textCompleteExpanded = false
+const expandingTextPlugin = Layer.mock(Plugin.Service)({
+  trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
+    if (name !== "experimental.text.complete" || typeof output !== "object" || output === null) return Effect.succeed(output)
+    const text = Reflect.get(output, "text")
+    // module 级一次性扩张标记必须在用例内重置，否则重跑时第二次扩张缺失。
+    if (typeof text !== "string" || textCompleteExpanded) return Effect.succeed(output)
+    return Effect.sync(() => {
+      textCompleteExpanded = true
+      return { ...output, text: text + "y".repeat(65_537) }
+    })
+  },
+  list: () => Effect.succeed([]),
+  init: () => Effect.void,
+})
+// 走真实 TestLLMServer 响应（reply()），仅替换 Plugin 层注入终值扩张；
+// 不脚本化 LLM，保证 processor 到 provider 的完整链路与生产一致。
+const pluginIt = testEffect(
+  // Plugin.node 替换在 LayerNode.compile 层完成，与 registry.test.ts 同模式。
+  LayerNode.compile(
+    LayerNode.group([root, LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] })]),
+    [...replacements, [Plugin.node, expandingTextPlugin] as const],
+  ),
+)
 
 const fragmentFailureLLM = Layer.succeed(
   LLM.Service,
@@ -1742,6 +1822,239 @@ it.live("session.processor partial output with finish_reason=other retries and r
         // V1 无原生 Step.Ended；持久确认点只能留下恢复后的 stop，不能只看最终消息字段。
         expect(parts.filter((part) => part.type === "step-finish").map((part) => part.reason)).toEqual(["stop"])
         expect(handle.message.finish).toBe("stop")
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor over-limit output retries once and recovers", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        // 首次响应单 delta 超过 64 KiB 累计预算，应转为既有 retryable APIError；
+        // 65,537 = 64 KiB + 1，覆盖单 chunk 跨过边界的形态。第二次正常恢复。
+        yield* llm.push(reply().text("x".repeat(65_537)).stop(), reply().text("recovered").stop())
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "over-limit then recover")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "over-limit then recover" }],
+          tools: {},
+        })
+
+        const parts = yield* MessageV2.parts(msg.id)
+
+        // 首次超限进入既有 retry，第二次恢复后 continue。
+        expect(value).toBe("continue")
+        expect(yield* llm.calls).toBe(2)
+        expect(handle.message.error).toBeUndefined()
+        // 超限正文不得以任何前缀形式残留（crossing delta 必须在发布前被拒）。
+        expect(parts.some((part) => part.type === "text" && part.text.length > 64 * 1024)).toBe(false)
+        expect(parts.some((part) => part.type === "text" && part.text === "recovered")).toBe(true)
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor repeated over-limit output terminates with MessageOutputLengthError", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        // 两次响应都超限：首次进入既有 retry，第二次必须终态，
+        // 否则确定性 provider 失败会在无上限 retry policy 下无限循环。
+        yield* llm.push(
+          reply().text("x".repeat(65_537)).stop(),
+          reply().text("y".repeat(65_537)).stop(),
+        )
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "repeated over-limit")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "repeated over-limit" }],
+          tools: {},
+        })
+
+        const parts = yield* MessageV2.parts(msg.id)
+
+        // 两次调用后终态：不再发起第三次请求，错误为既有空 data 合同的命名错误。
+        expect(value).toBe("stop")
+        expect(yield* llm.calls).toBe(2)
+        expect(handle.message.error?.name).toBe("MessageOutputLengthError")
+        expect(parts.filter((part) => part.type === "text").length).toBe(0)
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+cumulativeScript.it.live("session.processor cumulative multi-part text budget breaches across parts", () =>
+  provideTmpdirServer(
+    ({ dir }) =>
+      Effect.gen(function* () {
+        const callsBefore = cumulativeScript.calls()
+        const { processors, session, provider } = yield* boot()
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "cumulative parts")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "cumulative parts" }],
+          tools: {},
+        })
+
+        const parts = yield* MessageV2.parts(msg.id)
+
+        // 首次累计超限 retry，重放同一脚本后再次超限 → 终态；两个 Part 都不得残留。
+        expect(value).toBe("stop")
+        expect(cumulativeScript.calls() - callsBefore).toBe(2)
+        expect(handle.message.error?.name).toBe("MessageOutputLengthError")
+        expect(parts.filter((part) => part.type === "text").length).toBe(0)
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+toolBearingScript.it.live("session.processor tool-bearing over-limit output terminates without replay", () =>
+  provideTmpdirServer(
+    ({ dir }) =>
+      Effect.gen(function* () {
+        const callsBefore = toolBearingScript.calls()
+        const { processors, session, provider } = yield* boot()
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "tool bearing over-limit")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "tool bearing over-limit" }],
+          tools: {},
+        })
+
+        const parts = yield* MessageV2.parts(msg.id)
+
+        // 一次真实调用后不再请求provider；已结算Tool保留，超限Text全部撤回。
+        expect(value).toBe("stop")
+        expect(toolBearingScript.calls() - callsBefore).toBe(1)
+        expect(handle.message.error?.name).toBe("MessageOutputLengthError")
+        expect(parts.some((part) => part.type === "text")).toBe(false)
+        expect(parts.some((part) => part.type === "tool" && part.state.status === "error")).toBe(true)
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
+pluginIt.live("session.processor plugin-expanded text.complete final value is re-checked against the limit", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        // module 级一次性扩张标记必须在用例内重置，否则重跑时第二次扩张缺失。
+        textCompleteExpanded = false
+        const { processors, session, provider } = yield* boot()
+
+        // 第一次响应本身在预算内，但 plugin 终值扩张后超限；第二次同一响应不再扩张，
+        // 应完成恢复。两个响应都显式排入，避免空队列自动 "ok" 干扰。
+        yield* llm.push(reply().text("small").stop(), reply().text("small").stop())
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "plugin expansion")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "plugin expansion" }],
+          tools: {},
+        })
+
+        const parts = yield* MessageV2.parts(msg.id)
+
+        // 断言终值复检而非首检：扩张后的文本必须被拒并回退到 retry，
+        // 验证的是 text-end 后 pluginGrowth 复检路径而非 delta 预算。
+        expect(value).toBe("continue")
+        expect(yield* llm.calls).toBe(2)
+        expect(handle.message.error).toBeUndefined()
+        expect(parts.some((part) => part.type === "text" && part.text.length > 64 * 1024)).toBe(false)
+        expect(parts.some((part) => part.type === "text" && part.text === "small")).toBe(true)
       }),
     { git: true, config: (url) => providerCfg(url) },
   ),
