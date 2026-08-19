@@ -196,6 +196,86 @@ test("v2 Session route collapses long bash output without an ellipsis sentinel r
   }
 })
 
+test("v2 Session route renders over-budget assistant text as plain text", async () => {
+  const plugin = internalTuiPlugins({ experimentalEventSystem: true }).find(
+    (candidate) => candidate.id === "internal:session-v2-debug",
+  )
+  if (!plugin) throw new Error("experimental Session v2 plugin was not registered")
+
+  const definitions: TuiRouteDefinition[] = []
+  const api = createTuiPluginApi()
+  // 与既有用例同一公开注册 seam：route definition 只用于调用公开 render 接口。
+  const register = spyOn(api.route, "register").mockImplementation((items) => {
+    definitions.push(...items)
+    return () => {}
+  })
+  await plugin.tui(api, undefined, {
+    id: plugin.id,
+    source: "internal",
+    spec: plugin.id,
+    target: plugin.id,
+    first_time: 0,
+    last_time: 0,
+    time_changed: 0,
+    load_count: 1,
+    fingerprint: plugin.id,
+    state: "first",
+  })
+  register.mockRestore()
+  const definition = definitions.find((candidate) => candidate.name === "session.v2.messages")
+  if (!definition) throw new Error("Session v2 plugin did not register its message route")
+
+  const previous = Global.Path.state
+  await using tmp = await tmpdir()
+  Global.Path.state = tmp.path
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+
+  // 与 v1 用例同一 conceal 判别器：预算内 markdown 隐藏 `![](...)` 标记，超预算纯文本
+  // 字面保留 marker。v2 视图同样 sticky-bottom，marker 置于超限内容末尾落入可视稳态。
+  const oversized = `${"x".repeat(32 * 1024)}\n\n![](v2-over-budget-marker)`
+  const message = {
+    id: "msg_v2_text_budget",
+    type: "assistant",
+    agent: "build",
+    model: { id: "test-model", providerID: "test", variant: "" },
+    content: [
+      { type: "text", text: oversized },
+      { type: "text", text: "![](v2-in-budget-marker)" },
+    ],
+    time: { created: 1, completed: 2 },
+  } satisfies SessionMessageAssistant
+  const calls = createFetch((url) => {
+    // fixture 只响应生产 v2 message endpoint，任何意外请求保持 undefined 暴露调用路径漂移。
+    if (url.pathname === `/api/session/${sessionID}/message`) return json({ items: [message], cursor: {} })
+    return undefined
+  })
+  const events = createEventSource()
+  const app = await testRender(
+    () => <Harness definition={definition} fetch={calls.fetch} events={events.source} />,
+    { width: 80, height: 24, footerHeight: 0, useThread: false },
+  )
+
+  try {
+    // v2 AssistantText 的 conceal=true 是硬编码合同，判别结果不依赖用户 KV 偏好。
+    const deadline = Date.now() + 5_000
+    let frame = ""
+    while (Date.now() < deadline) {
+      await app.renderOnce()
+      frame = app.captureCharFrame()
+      if (frame.includes("v2-over-budget-marker")) break
+      await Bun.sleep(10)
+    }
+    if (!frame.includes("v2-over-budget-marker")) throw new Error(`timed out waiting for plain-text marker:\n${frame}`)
+    // 预算内第二段必须保持 concealed markdown；若被误降级为纯文本会出现在 marker 下方。
+    // 分支选择是 per-Part 的，两个 Part 同帧同 assistant 才能区分消息级与 Part 级判定。
+    expect(frame).not.toContain("v2-in-budget-marker")
+  } finally {
+    events.dispose()
+    app.renderer.destroy()
+    Global.Path.state = previous
+  }
+})
+
 function Harness(props: {
   definition: TuiRouteDefinition
   fetch: typeof globalThis.fetch

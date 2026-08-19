@@ -99,6 +99,7 @@ import { formatTranscript } from "../../util/transcript"
 import { UI } from "@/cli/ui.ts"
 import { useTuiConfig } from "../../context/tui-config"
 import { getScrollAcceleration } from "../../util/scroll"
+import { withinMarkdownBudget } from "../../util/text-budget"
 import { TuiPluginRuntime } from "@/cli/cmd/tui/plugin/runtime"
 import { DialogRetryAction } from "../../component/dialog-retry-action"
 import { SessionRetry } from "@/session/retry"
@@ -2101,10 +2102,18 @@ function TextPart(props: { last: boolean; topMargin: boolean; part: TextPart; me
   const streaming = createMemo(() => !props.message.time.completed)
   const content = createMemo(() => props.part.text.trim())
   const completedKey = createMemo(() => `${ctx.width}\u0000${content()}`)
+  // [local-smark] 渲染熔断：超预算内容在构造 parser-backed Markdown/Code 前
+  // 降级纯文本；streaming 与完成态共用同一确定性判定（INV-06/07）。
+  // 判定先于 streaming 分支：分类不依赖完成状态，避免同一内容在流式中改变投影。
+  const overBudget = createMemo(() => !withinMarkdownBudget(content()))
   return (
     <Show when={content()}>
       <box id={"text-" + props.part.id} paddingLeft={3} marginTop={props.topMargin ? 1 : 0} flexShrink={0}>
         <Switch>
+          {/* [local-smark] 超预算纯文本投影：构造前分类，非 parser 失败 fallback。 */}
+          <Match when={overBudget()}>
+            <text fg={theme.text}>{content()}</text>
+          </Match>
           <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !streaming()}>
             <Show keyed when={completedKey()}>
               {(_key) => (

@@ -2,6 +2,7 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { InternalTuiPlugin } from "../../plugin/internal"
 import { useSyncV2 } from "@tui/context/sync-v2"
 import { shouldCullSessionViewport } from "@tui/util/session-pending"
+import { withinMarkdownBudget } from "@tui/util/text-budget"
 import { SplitBorder } from "@tui/component/border"
 import { Spinner } from "@tui/component/spinner"
 import { useTheme } from "@tui/context/theme"
@@ -400,10 +401,17 @@ function AssistantText(props: {
   const { theme } = useTheme()
   const content = createMemo(() => props.part.text.trim())
   const completedKey = createMemo(() => `${props.width}\u0000${content()}`)
+  // [local-smark] 渲染熔断：与 v1 TextPart 共用同一确定性预算，超预算内容在构造
+  // parser-backed Markdown/Code 前降级纯文本（INV-06/07）；非 parser 失败 fallback。
+  // 判定先于 streaming 分支：分类不依赖完成状态，避免同一内容在流式中改变投影。
+  const overBudget = createMemo(() => !withinMarkdownBudget(content()))
   return (
     <Show when={content()}>
       <box paddingLeft={3} marginTop={1} flexShrink={0} id="text">
         <Switch>
+          <Match when={overBudget()}>
+            <text fg={theme.text}>{content()}</text>
+          </Match>
           <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !props.streaming}>
             <Show keyed when={completedKey()}>
               {(_key) => (

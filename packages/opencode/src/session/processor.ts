@@ -9,6 +9,7 @@ import { Snapshot } from "@/snapshot"
 import * as Session from "./session"
 import { LLM } from "./llm"
 import { MessageV2 } from "./message-v2"
+import { MessageError } from "./message-error"
 import { Image } from "@/image/image"
 import { isOverflow } from "./overflow"
 import { PartID } from "./schema"
@@ -37,6 +38,9 @@ const DOOM_LOOP_THRESHOLD = 3
 // "unbounded"），不串行累加。
 const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
 export const TOOL_ABORTED_ERROR = "Tool execution aborted"
+// [local-smark] Assistant 正文 attempt 级累计预算：64 KiB 字符（非 token、非字节），
+// 覆盖单次输出的全部 Text Part 合计；单 Part 天然被同一累计值约束。
+const OUTPUT_TEXT_LIMIT = 64 * 1024
 const log = Log.create({ service: "session.processor" })
 
 // AI SDK 对解析失败的调用会在 invalid dynamic tool-call 上保留原始字符串 input；
@@ -161,6 +165,8 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: MessageV2.TextPart | undefined
   reasoningMap: Record<string, MessageV2.ReasoningPart>
+  // 当前 attempt 内全部 Text Part 的累计正文字符数；retry 入口与 process 起点重置。
+  attemptTextChars: number
   // 只记录本次 stream 已落库且可撤回的非 Tool Part；Tool Part 不进入集合，避免把外部副作用伪装成可安全重放。
   attemptPartIDs: Set<PartID>
   inputChars: number | undefined
@@ -213,6 +219,7 @@ export const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        attemptTextChars: 0,
         attemptPartIDs: new Set(),
         inputChars: undefined,
         inputBreakdown: undefined,
@@ -221,6 +228,9 @@ export const layer = Layer.effect(
         hasToolCall: false,
       }
       let aborted = false
+      // [local-smark] 语义级单次重试标记：仅在本 process() 内有效，跨 retry 保留，
+      // 新 process() 重置；不是通用 retry 计数器，不改变 SessionRetry policy。
+      let outputLimitRetried = false
       // [local-smark] Tool 终态写入许可：串行化 completeToolCall / failToolCall /
       // cleanup 的 read-check-write，确保 ToolPart terminal state 有唯一 winner。
       // 不在 permit 内 await Tool Deferred——settleToolCall 的 Deferred.succeed 是同步的。
@@ -449,6 +459,31 @@ export const layer = Layer.effect(
               return true
             }),
           )
+      })
+
+      // [local-smark] 超限统一撤回点：先移除本 attempt 已落库 Part 并清空 live 状态，
+      // 防止 cleanup() 把已拒绝的 currentText/reasoning 重新持久化（INV-01/03）。
+      const breachOutputLimit = Effect.fnUntraced(function* () {
+        yield* Effect.forEach([...ctx.attemptPartIDs], (partID) =>
+          session.removePart({ sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id, partID }),
+        )
+        ctx.attemptPartIDs.clear()
+        ctx.currentText = undefined
+        ctx.reasoningMap = {}
+        // Tool Part 刻意不在撤回集合内：其外部副作用不可逆，重试安全性由 terminal 分支保证。
+        // 首次无 Tool 超限走既有 retryable 合同；重复超限或已产生 Tool 副作用的
+        // attempt 直接终态，避免无限重试或重放真实副作用（INV-02/04/05）。
+        if (!outputLimitRetried && !ctx.hasToolCall) {
+          outputLimitRetried = true
+          return yield* Effect.fail(
+            new MessageV2.APIError({
+              message: "Provider output exceeded the 64 KiB text limit",
+              isRetryable: true,
+              metadata: { reason: "output-length" },
+            }),
+          )
+        }
+        return yield* Effect.fail(new MessageError.OutputLengthError({}))
       })
 
       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
@@ -909,6 +944,14 @@ export const layer = Layer.effect(
 
           case "text-delta":
             if (!ctx.currentText) return
+            // [local-smark] 累计预算在内存追加与 live bus 发布前判定，
+            // crossing delta 不会进入任何持久化或事件路径。
+            // 等于预算仍允许通过，只有严格大于才视为越界（与 INV-07 边界语义一致）。
+            if (ctx.attemptTextChars + value.text.length > OUTPUT_TEXT_LIMIT) {
+              yield* breachOutputLimit()
+              return
+            }
+            ctx.attemptTextChars += value.text.length
             ctx.currentText.text += value.text
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
             logFirstDelta("text", ctx.currentText.id, "text", value.text.length)
@@ -921,10 +964,11 @@ export const layer = Layer.effect(
             })
             return
 
-          case "text-end":
+          case "text-end": {
             if (!ctx.currentText) return
             // oxlint-disable-next-line no-self-assign -- reactivity trigger
             ctx.currentText.text = ctx.currentText.text
+            const beforePluginLength = ctx.currentText.text.length
             ctx.currentText.text = (yield* plugin.trigger(
               "experimental.text.complete",
               {
@@ -934,6 +978,16 @@ export const layer = Layer.effect(
               },
               { text: ctx.currentText.text },
             )).text
+            // [local-smark] 终值同样受累计预算约束：hook 扩张（或收缩）后的差值
+            // 在 durable updatePart 与 Text.Ended 发布前复检；计数器同步下调，
+            // 收缩不产生额外额度、扩张不得绕过上限。
+            // pluginGrowth 可为负（hook 收缩正文）；同步下调避免同一文本被二次计数。
+            const pluginGrowth = ctx.currentText.text.length - beforePluginLength
+            if (ctx.attemptTextChars + pluginGrowth > OUTPUT_TEXT_LIMIT) {
+              yield* breachOutputLimit()
+              return
+            }
+            ctx.attemptTextChars += pluginGrowth
             if (!ctx.assistantMessage.summary) {
               // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
               if (flags.experimentalEventSystem) {
@@ -952,6 +1006,7 @@ export const layer = Layer.effect(
             yield* session.updatePart(ctx.currentText)
             ctx.currentText = undefined
             return
+          }
 
           case "finish":
             return
@@ -1100,10 +1155,13 @@ export const layer = Layer.effect(
         })
         ctx.needsCompaction = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
+        // 每个 process() 只允许一次语义重试；跨 process 的新回合重新获得额度。
+        outputLimitRetried = false
         const result = yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
+            ctx.attemptTextChars = 0
             // 每次 retry 建立新的 attempt 集合；上一轮已撤回，其他错误路径保持原有持久化行为。
             ctx.attemptPartIDs.clear()
             // [local-smark] 重置语义输出追踪标志：retry 时上一轮的 hasText 等标志

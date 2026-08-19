@@ -104,6 +104,39 @@ test("completed assistant footer omits zero output and cost", async () => {
   )
 })
 
+test("over-budget assistant text renders as plain text while in-budget markdown stays concealed", async () => {
+  const user = userMessage("msg_text_budget_user", 1)
+  const assistant = {
+    ...assistantMessage("msg_text_budget_assistant", 2, user.id),
+    finish: "stop",
+  } satisfies AssistantMessage
+
+  // 判别器来自 conceal 语义：预算内 markdown 分支会隐藏 `![](...)` 标记（先例：
+  // reasoning conceal 用例）；超预算纯文本必须字面保留 marker。v1 视图 sticky-bottom，
+  // marker 放在超限内容末尾才会落入可视稳态；in-budget Part 在其后，
+  // 若被误判为纯文本会出现在 marker 下方。
+  const oversized = `${"x".repeat(32 * 1024)}\n\n![](over-budget-marker)`
+  await withRenderedSession(
+    [user, assistant],
+    {
+      [assistant.id]: [
+        textPart("part_text_budget_over", assistant.id, oversized),
+        textPart("part_text_budget_in", assistant.id, "![](in-budget-marker)"),
+      ],
+    },
+    async (app) => {
+      const frame = await waitForFrame(
+        app,
+        (lines) =>
+          lines.some((line) => line.includes("over-budget-marker")) &&
+          !lines.some((line) => line.includes("in-budget-marker")),
+      )
+      // 稳态本身即断言：marker 字面出现证明 parser-backed 构造被绕过。
+      expect(frame.some((line) => line.includes("over-budget-marker"))).toBe(true)
+    },
+  )
+})
+
 test("completed assistant footer accumulates a multi-step request", async () => {
   const user = userMessage("msg_multi_step_user", 1)
   const first = {
