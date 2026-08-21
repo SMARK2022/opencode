@@ -270,9 +270,9 @@ export function Session() {
   // Session 账本独立于分页；退出摘要复用已有 projection，不能仅累计窗口内的消息。
   // 此处只消费 session 汇总，不为退出文本另建 request 或 Message/Part owner。
   const sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? [], undefined, { session: session(), last: undefined, parts: [] }))
-  // #458：culling 改由 stuck-to-bottom 状态驱动——粘底流式仍裁剪，滚入历史时不裁
+  // 保留粘底信号供既有跟随逻辑使用，离底浏览不再关闭视口裁剪。
   const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
-  // 粘底时流式裁剪保持渲染热路径；离底浏览历史时暂停裁剪保留测量。
+  // 恒定裁剪限制屏外遍历；用户滚动和显式导航仍由 scrollbox 处理。
   const viewportCulling = createMemo(() =>
     shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
   )
@@ -1369,7 +1369,7 @@ export function Session() {
                 ref={(r) => (scroll = r)}
                 // #212：由原生 renderAfter 在布局后跟随增长，无需 part 长度信号。
                 renderAfter={syncSessionViewportStuckToBottom}
-                // #458：粘底流式仍裁剪；滚入历史时保留屏外块测量，renderAfter 同步粘底信号
+                // 裁剪与粘底跟随独立，布局后仍同步原有跟随信号。
                 viewportCulling={viewportCulling()}
                 viewportOptions={{
                   // #144：滚动条占位，避免消息贴到 scrollbar 轨道
