@@ -19,16 +19,12 @@ type SessionViewportState = {
 }
 
 export function shouldCullSessionViewport(
-  messages: readonly SessionViewportMessage[],
-  state: SessionViewportState = {},
+  _messages: readonly SessionViewportMessage[],
+  _state: SessionViewportState = {},
 ) {
-  // 保持 sticky-bottom 流式热路径裁剪，但用户滚入历史时让屏外流式代码块继续测量。
-  if (!messages.some(isStreamingViewportAssistant)) return true
-  return state.stuckToBottom ?? true
-}
-
-function isStreamingViewportAssistant(message: SessionViewportMessage) {
-  return (message.role ?? message.type) === "assistant" && !message.time.completed
+  // 裁剪前刷新直接 child 的布局，可见后代再完整遍历；恒裁剪保留该遍历上界。
+  // 保留调用签名；是否跟随底部仍由既有 sticky-scroll 路径决定。
+  return true
 }
 export function pendingAssistantIndex(messages: Message[], status: SessionStatus | undefined) {
   // 会话空闲时不查找待处理消息，避免不必要的重渲染

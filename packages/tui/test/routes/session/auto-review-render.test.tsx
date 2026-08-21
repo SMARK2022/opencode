@@ -702,6 +702,50 @@ test("assistant text applies the Markdown budget in streaming and settled frames
   }
 })
 
+test("session keeps latest streamed content reachable via session.last after scrolling away", async () => {
+  const message: AssistantMessage = {
+    id: "msg_cull_stream", sessionID, role: "assistant", parentID: "msg_user",
+    time: { created: 1, completed: 2 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
+    path: { cwd: directory, root: directory }, cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+  const part: Part = { id: "part_cull_stream", sessionID, messageID: message.id, type: "text", text: `${"wrapped content ".repeat(180)}OLD_CULL_TAIL` }
+  await withRenderedReview([{ info: message, parts: [part] }], async (app, _route, emit) => {
+    await waitForReviewFrame(app, async (frame) => {
+      if (frame.includes("OLD_CULL_TAIL")) return true
+      await Bun.sleep(10)
+      return false
+    }, { maxPasses: 300 })
+    // 首帧可见不代表既有 50ms 会话打开滚动已结束；先完成导航再模拟离底。
+    await Bun.sleep(60)
+    await app.renderOnce()
+    // 越过一行粘底容差，不能把自动跟随的行为当作离底浏览。
+    for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
+    await app.renderOnce()
+    await app.renderOnce()
+    expect(app.captureCharFrame()).not.toContain("OLD_CULL_TAIL")
+    emit({
+      directory, project: "proj_test",
+      payload: { id: "evt_cull_growth", type: "message.part.delta", properties: {
+        sessionID, messageID: message.id, partID: part.id, field: "text", delta: `${" grown tail ".repeat(40)}NEW_CULL_TAIL`,
+      } },
+    })
+    await app.renderOnce()
+    await Bun.sleep(20)
+    await app.renderOnce()
+    // 等待既有事件批次落地后，增量不能强制用户回贴底部。
+    expect(app.captureCharFrame()).not.toContain("NEW_CULL_TAIL")
+    // 公开 End 导航必须重新到达屏外增长后的正文，而非只更新路由状态。
+    app.mockInput.pressKey("END")
+    await waitForReviewFrame(app, async (frame) => {
+      if (frame.includes("NEW_CULL_TAIL")) return true
+      await Bun.sleep(10)
+      return false
+    }, { maxPasses: 300 })
+    expect(app.captureCharFrame()).toContain("NEW_CULL_TAIL")
+  }, { width: 100, height: 18 })
+})
+
 async function withRenderedReview(
   messages: { info: AssistantMessage | UserMessage; parts: Part[] }[],
   run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"]) => Promise<void>,

@@ -181,13 +181,13 @@ describe("activeTurnPair", () => {
     expect(activeTurnPair([])).toBeUndefined()
   })
 
-  // #458：视口裁剪三态——流式+默认粘底裁剪；流式+离底不裁；完成后恒裁
+  // 流式、离底及完成态都保留裁剪，不用关闭裁剪代替导航和底部跟随。
   test("keeps session viewport culling enabled while an assistant message streams", () => {
     expect(shouldCullSessionViewport([assistant("open")])).toBe(true)
   })
 
-  test("pauses session viewport culling while streaming away from sticky bottom", () => {
-    expect(shouldCullSessionViewport([assistant("open")], { stuckToBottom: false })).toBe(false)
+  test("keeps session viewport culling enabled while streaming away from sticky bottom", () => {
+    expect(shouldCullSessionViewport([assistant("open")], { stuckToBottom: false })).toBe(true)
   })
 
   test("keeps session viewport culling enabled after the assistant message completes", () => {
