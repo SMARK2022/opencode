@@ -1400,6 +1400,55 @@ test("session follows streaming growth when the viewport is visually at the bott
   )
 })
 
+test("session keeps latest streamed content reachable via session.last after scrolling away", async () => {
+  const user = userMessage("msg_user_cull", 1)
+  // 已完成消息 + delta 增长复用既有 bottom-growth fixture 形态（streaming code
+  // 分支在测试环境不出内容）；culling 分歧本身由 unit slice 锁定，本测只保护
+  // 恒定裁剪策略下的导航 liveness。内容保持常规尺寸：超大文本更新会触发
+  // core sticky 的高度塌缩重贴（新旧 policy 同样存在的既有行为，不在本测范围）。
+  const streamer = assistantMessage("msg_cull_stream", 2, user.id)
+
+  await withRenderedSession(
+    [user, streamer],
+    { msg_cull_stream: [textPart("part_cull_stream", "msg_cull_stream", `${"wrapped content ".repeat(180)}OLD_CULL_TAIL`)] },
+    async (app, emit) => {
+      await waitForFrame(app, (lines) => lines.some((line) => line.includes("OLD_CULL_TAIL")))
+
+      // 越过单行容忍带（4 次 ctrl+alt+y）：viewportStuckToBottom=false；
+      // 恒定 culling 下用户滚离后不得被系统强拉回底部（INV-04 前半）。
+      for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
+      await app.renderOnce()
+      const afterScroll = rows(app.captureCharFrame())
+      expect(afterScroll.some((line) => line.includes("OLD_CULL_TAIL"))).toBe(false)
+
+      emit(
+        partDeltaEvent(
+          "evt_cull_growth",
+          "msg_cull_stream",
+          "part_cull_stream",
+          `${" grown tail ".repeat(40)}NEW_CULL_TAIL`,
+          "text",
+        ),
+      )
+      await app.renderOnce()
+      await Bun.sleep(20)
+      await app.renderOnce()
+      // delta 到达后新尾部在视口下方保持不可见：离屏裁剪不是自动回贴的替代路径。
+      const afterDelta = rows(app.captureCharFrame())
+      expect(afterDelta.some((line) => line.includes("NEW_CULL_TAIL"))).toBe(false)
+
+      // 公开 session.last（End 键）导航后，最新流式内容必须在正常帧时限内可达
+      // （INV-04 后半）：这是恒定裁剪策略下离屏内容可达性的行为面验证。
+      app.mockInput.pressKey("END")
+      await app.renderOnce()
+      const frame = await waitForFrame(app, (lines) => lines.some((line) => line.includes("NEW_CULL_TAIL")))
+      expect(frame.some((line) => line.includes("NEW_CULL_TAIL"))).toBe(true)
+    },
+    {},
+    { width: 100, height: 18 },
+  )
+})
+
 test("narrow viewport keeps the user message cell from collapsing", async () => {
   await withRenderedSession(
     [userMessage("msg_user_narrow", 1), assistantMessage("msg_assistant_after_user", 2, "msg_user_narrow")],

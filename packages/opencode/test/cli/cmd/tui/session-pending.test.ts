@@ -59,8 +59,10 @@ describe("session pending helpers", () => {
     expect(shouldCullSessionViewport([assistant("open")])).toBe(true)
   })
 
-  test("pauses session viewport culling while streaming away from sticky bottom", () => {
-    expect(shouldCullSessionViewport([assistant("open")], { stuckToBottom: false })).toBe(false)
+  test("keeps session viewport culling enabled while streaming away from sticky bottom", () => {
+    // 契约对齐：OpenTUI fork 在裁剪过滤前已对全部子节点调用 updateFromLayout() 刷新坐标，
+    // 滚离历史的 streaming 内容不再需要关闭视口裁剪来保持测量（Renderable.ts:1443-1450）。
+    expect(shouldCullSessionViewport([assistant("open")], { stuckToBottom: false })).toBe(true)
   })
 
   test("keeps session viewport culling enabled after the assistant message completes", () => {

@@ -18,17 +18,13 @@ export function hasStreamingAssistant(messages: Message[]) {
 }
 
 export function shouldCullSessionViewport(
-  messages: readonly SessionViewportMessage[],
-  state: SessionViewportState = {},
+  _messages: readonly SessionViewportMessage[],
+  _state: SessionViewportState = {},
 ) {
-  // Keep the hot sticky-bottom streaming path culled, but let off-screen
-  // streaming code blocks continue measuring when the user scrolls into history.
-  if (!messages.some(isStreamingViewportAssistant)) return true
-  return state.stuckToBottom ?? true
-}
-
-function isStreamingViewportAssistant(message: SessionViewportMessage) {
-  return (message.role ?? message.type) === "assistant" && !message.time.completed
+  // 恒定启用视口裁剪：OpenTUI fork 在过滤前已对全部子节点调用 updateFromLayout()
+  // 刷新坐标，离屏 streaming 内容的测量不再依赖关闭裁剪；stuckToBottom 仍由
+  // sticky-scroll 消费，不再是第二套裁剪策略的输入（v1/v2 共享本 owner）。
+  return true
 }
 
 export function pendingAssistantID(messages: Message[], status: SessionStatus | undefined) {
