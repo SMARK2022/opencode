@@ -294,7 +294,8 @@ export function Session() {
     const messageID = session()?.revert?.messageID
     if (!messageID) return messages()
     const index = messages().findIndex((message) => message.id === messageID)
-    return index === -1 ? messages() : messages().slice(0, index)
+    // 窗口缺少回退边界时不猜可操作前缀，避免 undo/copy 消费已回退内容。
+    return index === -1 ? [] : messages().slice(0, index)
   }
   const foregroundTasks = createMemo(() =>
     sync.data.capabilities.experimentalBackgroundSubagents
@@ -830,7 +831,11 @@ export function Session() {
         dialog.clear()
         const messageID = session()?.revert?.messageID
         if (!messageID) return
-        const message = messages().find((x) => x.role === "user" && x.id > messageID)
+        // 0584：命令保持显式 fail closed：boundary 不在 bounded snapshot 时 no-op，
+        // 不猜测 raw 位置也不触发服务端写。
+        const boundary = messages().findIndex((message) => message.id === messageID)
+        if (boundary === -1) return
+        const message = messages().find((x, index) => x.role === "user" && index > boundary)
         if (!message) {
           void sdk.client.session.unrevert({
             sessionID: route.sessionID,
@@ -1321,9 +1326,9 @@ export function Session() {
     const messageID = revertMessageID()
     if (!messageID) return []
     const index = revertMessageIndex()
-    if (index === -1) return []
+    // 缺失边界时按本地保守展示合同隐藏窗口，不据此推断边界的真实时间位置。
     return messages()
-      .slice(index)
+      .slice(index === -1 ? 0 : index)
       .filter((message) => message.role === "user")
   })
 
@@ -1459,7 +1464,9 @@ export function Session() {
                         })()}
                       </Match>
                       <Match
-                        when={revert()?.messageID && revertMessageIndex() !== -1 && index() >= revertMessageIndex()}
+                        // 0584：boundary 不在窗口时 revertMessageIndex() 为 -1，
+                        // 全部 index >= -1 均隐藏（fail closed），不再用 !== -1 守卫误显示已回退消息。
+                        when={revert()?.messageID && index() >= revertMessageIndex()}
                       >
                         <></>
                       </Match>

@@ -5214,9 +5214,9 @@ it.instance(
         .pipe(Effect.forkChild)
       yield* llm.wait(1)
 
-      // 固定两个 MessageID 可独立证明 middle 早于 latest，不依赖 fiber 调度先后
-      const middleID = MessageID.ascending()
-      const latestID = MessageID.ascending()
+      // caller ID 故意让较早 middle 的字典序高于 latest；时间先后由后面的持久化屏障建立。
+      const middleID = MessageID.make("msg_z-middle")
+      const latestID = MessageID.make("msg_a-latest")
       const middle = yield* prompt
         .prompt({
           sessionID: chat.id,
@@ -5226,6 +5226,15 @@ it.instance(
           parts: [{ type: "text", text: "middle queued intent" }],
         })
         .pipe(Effect.forkChild)
+      const persistedMiddle = yield* pollWithTimeout(
+        sessions.messages({ sessionID: chat.id }).pipe(Effect.map((messages) => messages.find((message) => message.info.id === middleID))),
+        "middle prompt was not persisted",
+      )
+      // 观察真实写入及毫秒分辨率边界，再接纳 latest；不靠 ID 或 fiber 调度猜测先后。
+      yield* pollWithTimeout(
+        Effect.sync(() => Date.now() > persistedMiddle.info.time.created ? true : undefined),
+        "clock did not advance beyond the persisted middle prompt",
+      )
       const latest = yield* prompt
         .prompt({
           sessionID: chat.id,
@@ -5399,8 +5408,10 @@ it.instance(
 )
 
 
+// 保留 hidden 旧回归，另让两个同毫秒 eligible turn 同时可见，真正经过 Goal tie-break。
+for (const hidePrevious of [true, false]) {
 it.instance(
-  "late technical Message cannot rewind blocked continuity past a newer real user",
+  hidePrevious ? "late technical Message cannot rewind blocked continuity past a newer real user" : "same-time visible Unicode Goal turns follow persisted chronology",
   () =>
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 0 }))
@@ -5415,7 +5426,7 @@ it.instance(
 
       // B 的 caller-selected ID 故意大于后到的 C；Goal turn 顺序必须来自 persisted chronology。
       const b = yield* user(chat.id, "first Goal turn", {
-        id: MessageID.make(`msg_b${suffix}`),
+        id: MessageID.make(hidePrevious ? `msg_b${suffix}` : "msg_\uE000"),
         created: 1_000,
       })
       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
@@ -5426,13 +5437,14 @@ it.instance(
       yield* llm.text("pending recorded")
       yield* prompt.loop({ sessionID: chat.id })
       // #553：B 被 undo 隐藏——hidden user 不能回灌 chronology 参与 Goal 排序。
-      yield* sessions.updateMessage({ ...b, hidden: { time: Date.now(), reason: "undo" } })
+      if (hidePrevious) yield* sessions.updateMessage({ ...b, hidden: { time: Date.now(), reason: "undo" } })
 
       // C 刻意不调用 blocked：它必须打断 B 的 pending adjacency；
       // 后落盘的 S 虽指向 B，也只能传递 lineage，不能把 B 移回 current。
       yield* user(chat.id, "newer real user turn without a blocked attempt", {
-        id: MessageID.make(`msg_a${suffix}`),
-        created: 2_000,
+        // 可见分支固定同毫秒 Unicode 顺序，hidden 分支仍保持原始两个时间点。
+        id: MessageID.make(hidePrevious ? `msg_a${suffix}` : "msg_\u{10000}"),
+        created: hidePrevious ? 2_000 : 1_000,
       })
 
       yield* user(chat.id, "late technical summary for B", {
@@ -5462,6 +5474,7 @@ it.instance(
   { git: true },
   60_000,
 )
+}
 
 it.instance(
   "legacy compaction marker without lineage does not create a Goal turn",

@@ -302,7 +302,8 @@ const layer = Layer.effect(
         const info = yield* fs.stat(file).pipe(Effect.catch(() => Effect.void))
         const modified = info?.mtime.pipe(
           Option.map((date) => date.getTime()),
-          Option.getOrElse(() => 0),
+          // 未知mtime不是过期证据；与stat失败一样保留文件，不能伪装为epoch零。
+          Option.getOrUndefined,
         )
         if (modified !== undefined && modified < cutoff) yield* fs.remove(file).pipe(Effect.catch(() => Effect.void))
       }
